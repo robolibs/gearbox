@@ -1,0 +1,56 @@
+//! Per-wheel spec for a raycast-based vehicle.
+
+use datapod::Point;
+
+/// Declarative description of a single wheel.
+#[derive(Debug, Clone)]
+pub struct WheelSpec {
+    /// Connection point on the chassis in chassis-local coordinates (metres).
+    pub chassis_connection: Point,
+    /// Suspension direction in chassis-local coordinates. Typically
+    /// `(0, -1, 0)` — straight down.
+    pub suspension_dir: Point,
+    /// Wheel axle direction in chassis-local coordinates. Typically
+    /// `(±1, 0, 0)` — sideways across the chassis.
+    pub axle_dir: Point,
+    pub suspension_rest_length: f32,
+    pub suspension_stiffness: f32,
+    pub suspension_damping: f32,
+    /// Upper bound on the spring force per wheel. Rapier's default (6000 N)
+    /// is enough for ~100-kg arcade cars; heavy vehicles must raise this
+    /// or the suspension saturates and the chassis sinks onto its collider.
+    pub max_suspension_force: f32,
+    pub friction_slip: f32,
+    pub radius: f32,
+    pub width: f32,
+    /// Whether engine torque is applied to this wheel.
+    pub driven: bool,
+    /// Whether steering input rotates this wheel.
+    pub steered: bool,
+    pub max_engine_force: f32,
+    pub max_brake: f32,
+    /// Maximum steering angle in radians (applied at `steer = ±1.0`).
+    pub max_steer_rad: f32,
+}
+
+impl Default for WheelSpec {
+    fn default() -> Self {
+        Self {
+            chassis_connection: Point::default(),
+            suspension_dir: Point::new(0.0, -1.0, 0.0),
+            axle_dir: Point::new(1.0, 0.0, 0.0),
+            suspension_rest_length: 0.25,
+            suspension_stiffness: 30.0,
+            suspension_damping: 4.5,
+            max_suspension_force: 50_000.0,
+            friction_slip: 5.0,
+            radius: 0.34,
+            width: 0.22,
+            driven: true,
+            steered: false,
+            max_engine_force: 4000.0,
+            max_brake: 20.0,
+            max_steer_rad: 0.0,
+        }
+    }
+}

@@ -1,0 +1,74 @@
+[package]
+name = "gearbox"
+version = "0.0.1"
+edition = "2024"
+description = "Modular Rust robot / vehicle simulator built on Rapier3D, with an optional Bevy+egui editor binary"
+license = "MIT"
+readme = "README.md"
+publish = false
+include = [
+    "Cargo.toml",
+    "README.md",
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "tests/**/*.rs",
+]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "gearbox"
+path = "src/bin/gearbox/main.rs"
+required-features = ["editor"]
+
+[features]
+# `editor` pulls in Bevy + bevy_egui for the interactive binary. The library
+# itself never depends on Bevy — downstream consumers that just want the
+# headless sim should set `default-features = false`.
+default = ["editor"]
+editor = ["dep:bevy", "dep:bevy_egui", "dep:big_space"]
+
+[dependencies]
+rapier3d = "0.32"
+thiserror = "2.0"
+datapod = { path = "../datapod" }
+
+# Only compiled when the `editor` feature is enabled — i.e. for the binary.
+bevy = { version = "0.18", optional = true, default-features = false, features = [
+    "std",
+    "async_executor",
+    "multi_threaded",
+    "bevy_asset",
+    "bevy_state",
+    "bevy_log",
+    "bevy_window",
+    "bevy_winit",
+    "bevy_input_focus",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_light",
+    "bevy_mesh",
+    "bevy_camera",
+    "bevy_image",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
+    "bevy_scene",
+    "default_font",
+    "tonemapping_luts",
+    "smaa_luts",
+    "ktx2",
+    "zstd_rust",
+    "png",
+    "x11",
+    "reflect_auto_register",
+] }
+bevy_egui = { version = "0.39", optional = true, default-features = false, features = [
+    "default_fonts",
+    "render",
+] }
+# Floating-origin: keeps f32 precision near the camera even when the world
+# spans planet-sized distances.
+big_space = { version = "0.12", optional = true, features = ["i32"] }
