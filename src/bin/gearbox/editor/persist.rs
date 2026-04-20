@@ -28,9 +28,9 @@ impl Default for EditorUiState {
         Self {
             left: LeftTab::default(),
             right: RightTab::default(),
-            spawn_size: Vec2::new(220.0, 340.0),
-            workspace_size: Vec2::new(240.0, 380.0),
-            inspector_size: Vec2::new(290.0, 520.0),
+            spawn_size: Vec2::new(200.0, 300.0),
+            workspace_size: Vec2::new(210.0, 340.0),
+            inspector_size: Vec2::new(230.0, 440.0),
         }
     }
 }
@@ -46,6 +46,10 @@ fn state_path() -> Option<PathBuf> {
 
 impl EditorUiState {
     pub fn load() -> Self {
+        // Sizes are fixed at the struct defaults now — we only restore
+        // which tab was open last session. Legacy `*_w`/`*_h` keys are
+        // intentionally ignored so no old corrupted state can override
+        // the panel widths.
         let mut out = Self::default();
         let Some(path) = state_path() else { return out };
         let Ok(text) = fs::read_to_string(&path) else { return out };
@@ -54,12 +58,6 @@ impl EditorUiState {
             match k.trim() {
                 "left"  => out.left  = parse_left(v.trim()),
                 "right" => out.right = parse_right(v.trim()),
-                "spawn_w"       => out.spawn_size.x      = v.trim().parse().unwrap_or(out.spawn_size.x),
-                "spawn_h"       => out.spawn_size.y      = v.trim().parse().unwrap_or(out.spawn_size.y),
-                "workspace_w"   => out.workspace_size.x  = v.trim().parse().unwrap_or(out.workspace_size.x),
-                "workspace_h"   => out.workspace_size.y  = v.trim().parse().unwrap_or(out.workspace_size.y),
-                "inspector_w"   => out.inspector_size.x  = v.trim().parse().unwrap_or(out.inspector_size.x),
-                "inspector_h"   => out.inspector_size.y  = v.trim().parse().unwrap_or(out.inspector_size.y),
                 _ => {}
             }
         }
@@ -71,12 +69,6 @@ impl EditorUiState {
         let Ok(mut f) = fs::File::create(&path) else { return };
         let _ = writeln!(f, "left={}",  fmt_left(self.left));
         let _ = writeln!(f, "right={}", fmt_right(self.right));
-        let _ = writeln!(f, "spawn_w={}",     self.spawn_size.x);
-        let _ = writeln!(f, "spawn_h={}",     self.spawn_size.y);
-        let _ = writeln!(f, "workspace_w={}", self.workspace_size.x);
-        let _ = writeln!(f, "workspace_h={}", self.workspace_size.y);
-        let _ = writeln!(f, "inspector_w={}", self.inspector_size.x);
-        let _ = writeln!(f, "inspector_h={}", self.inspector_size.y);
     }
 }
 

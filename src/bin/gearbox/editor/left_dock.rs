@@ -23,7 +23,7 @@ pub enum LeftTab {
 pub fn left_dock_ui(
     mut contexts: EguiContexts,
     mut active: ResMut<LeftTab>,
-    mut ui_state: ResMut<EditorUiState>,
+    ui_state: Res<EditorUiState>,
     // spawn
     mut commands: Commands,
     mut sim: ResMut<GearboxSim>,
@@ -38,30 +38,33 @@ pub fn left_dock_ui(
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
-    // --- Letter rail (top-left) ---
-    float::icon_rail("left_rail", ctx, egui::Align2::LEFT_TOP, |ui| {
-        float::icon_button(ui, "W", "Workspace",
-            matches!(*active, LeftTab::Workspace),
-            || *active = if *active == LeftTab::Workspace { LeftTab::None } else { LeftTab::Workspace });
-        float::icon_button(ui, "S", "Spawn",
-            matches!(*active, LeftTab::Spawn),
-            || *active = if *active == LeftTab::Spawn { LeftTab::None } else { LeftTab::Spawn });
-    });
+    // --- Side buttons (separated, stacked vertically on the left edge) ---
+    float::side_button(
+        "left_btn_workspace", ctx, egui::Align2::LEFT_TOP, 0,
+        "W", "Workspace",
+        matches!(*active, LeftTab::Workspace),
+        || *active = if *active == LeftTab::Workspace { LeftTab::None } else { LeftTab::Workspace },
+    );
+    float::side_button(
+        "left_btn_spawn", ctx, egui::Align2::LEFT_TOP, 1,
+        "S", "Spawn",
+        matches!(*active, LeftTab::Spawn),
+        || *active = if *active == LeftTab::Spawn { LeftTab::None } else { LeftTab::Spawn },
+    );
 
     if *active == LeftTab::None { return; }
 
-    let (id, title, size_ref) = match *active {
-        LeftTab::Workspace => ("left_window_workspace", "Workspace", &mut ui_state.workspace_size),
-        LeftTab::Spawn     => ("left_window_spawn",     "Spawn",     &mut ui_state.spawn_size),
+    let (id, title, size) = match *active {
+        LeftTab::Workspace => ("left_window_workspace", "Workspace", ui_state.workspace_size),
+        LeftTab::Spawn     => ("left_window_spawn",     "Spawn",     ui_state.spawn_size),
         LeftTab::None      => unreachable!(),
     };
-    let size = egui::vec2(size_ref.x, size_ref.y);
 
     let mut open = true;
-    let new_size = float::floating_window(
+    float::floating_window(
         ctx, id, title,
         egui::Align2::LEFT_TOP,
-        size,
+        egui::vec2(size.x, size.y),
         &mut open,
         |ui| match *active {
             LeftTab::Workspace => tree::draw_content(
@@ -85,12 +88,4 @@ pub fn left_dock_ui(
             LeftTab::None => {}
         },
     );
-    if let Some(ns) = new_size {
-        let new = Vec2::new(ns.x, ns.y);
-        if (size_ref.x - new.x).abs() > 0.5 || (size_ref.y - new.y).abs() > 0.5 {
-            *size_ref = new;
-            ui_state.save();
-        }
-    }
-    if !open { *active = LeftTab::None; }
 }
