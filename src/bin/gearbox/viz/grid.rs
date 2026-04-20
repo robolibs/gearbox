@@ -200,13 +200,23 @@ fn chase_camera_focus_world(cam: &ChaseCamera) -> DVec3 {
     DVec3::new(cam.focus.x as f64, cam.focus.y as f64, cam.focus.z as f64)
 }
 
-/// Rebuild grid circles every frame, centred on the current camera
-/// eye. Heavy optimisations keep this cheap:
-///   1. Invisible levels (Gaussian fade near 0) are skipped entirely.
-///   2. A single cos/sin parameter table is computed once per rebuild
-///      and shared across every ring on both axes.
-///   3. The planet rotation is baked into three pre-scaled DVec3 column
-///      vectors so per-vertex math is just two scale-and-add ops.
+/// Per-level cache of the last quantised position. We also track the
+/// **finest level's** snap, because the vertex-sweep phase is shared
+/// across all levels — when that moves, every level's discretisation
+/// needs to be rebuilt to keep rings aligned across LODs.
+#[derive(Default, Clone, Copy)]
+pub struct LevelCache {
+    valid: bool,
+    lat_idx: i64,
+    lon_idx: i64,
+    finest_lat_idx: i64,
+    finest_lon_idx: i64,
+}
+
+/// Rebuild grid circles only when each level's quantised lat/lon cell
+/// actually changes. On a still/slow-moving camera this is 0 rebuilds
+/// per frame. On fast motion it's at most a few (fine levels tick over
+/// first; coarse ones almost never).
 pub fn build_grid_meshes(
     mut meshes: ResMut<Assets<Mesh>>,
     sim: Res<GearboxSim>,
@@ -220,6 +230,7 @@ pub fn build_grid_meshes(
         (Without<LatCircle>, Without<ChaseCamera>),
     >,
     mut trig_table: Local<Vec<(f64, f64)>>,
+    mut level_cache: Local<[LevelCache; 7]>,
 ) {
     let Ok(cam) = cameras.single() else { return };
     let cam_world = chase_camera_focus_world(cam);
@@ -235,7 +246,6 @@ pub fn build_grid_meshes(
     let unrotated = inv_rot * dir;
     let lat_rad = unrotated.y.clamp(-1.0, 1.0).asin();
     let lon_rad = unrotated.z.atan2(unrotated.x);
-    let cam_pos_f32 = cam_world.as_vec3();
     let inv_r = 1.0 / sim.0.planet.radius;
     let inv_r_cos_lat = 1.0 / (sim.0.planet.radius * lat_rad.cos().abs().max(1e-9));
 
@@ -245,60 +255,107 @@ pub fn build_grid_meshes(
     let col_y = planet_rot * DVec3::Y * r_circle;
     let col_z = planet_rot * DVec3::Z * r_circle;
 
-    // Per-rebuild constant offset: shifts everything into anchor-relative
-    // coordinates (f32 is fine near anchor, huge otherwise).
-    let delta = sphere_centre - cam_world;
+    // ------------------------------------------------------------------
+    // Shared discretisation phase: the finest level's snap. Every level
+    // uses THIS phase for vertex 0 so that rings at the same latitude
+    // line up exactly across LODs (chord sag would otherwise displace
+    // them from each other).
+    // ------------------------------------------------------------------
+    let step_lat_0 = GRID_STEPS_M[0] * inv_r;
+    let step_lon_0 = GRID_STEPS_M[0] * inv_r_cos_lat;
+    let finest_lat_idx = (lat_rad / step_lat_0).round() as i64;
+    let finest_lon_idx = (lon_rad / step_lon_0).round() as i64;
+    let finest_snap_lat = finest_lat_idx as f64 * step_lat_0;
+    let finest_snap_lon = finest_lon_idx as f64 * step_lon_0;
 
-    // (cos φ, sin φ) table. Use the phase offset `lon_rad` as a base for
-    // lat rings; lon meridians apply their own phase (theta0). For this
-    // reason we store `(cos(phase + step_i), sin(phase + step_i))` without
-    // a baked phase — phase is handled per-ring.
+    // ------------------------------------------------------------------
+    // Per-level "dirty" decision. A level rebuilds when either
+    //   (a) its own ring-position snap changed, or
+    //   (b) the shared discretisation phase changed.
+    // Invisible levels are skipped entirely (cache invalidated so their
+    // next-visible frame triggers a rebuild).
+    // ------------------------------------------------------------------
+    #[derive(Copy, Clone)]
+    struct LevelWork {
+        snapped_lat: f64,
+        snapped_lon: f64,
+        anchor_f32: Vec3,
+        delta: DVec3,
+    }
+    let mut work: [Option<LevelWork>; 7] = [None; 7];
+    for level in 0..GRID_STEPS_M.len() {
+        let step = GRID_STEPS_M[level];
+        if level_fade(cam_dist, step) < 0.005 {
+            level_cache[level].valid = false;
+            continue;
+        }
+        let step_lat = step * inv_r;
+        let step_lon = step * inv_r_cos_lat;
+        let lat_idx = (lat_rad / step_lat).round() as i64;
+        let lon_idx = (lon_rad / step_lon).round() as i64;
+        let cache = &mut level_cache[level];
+        if cache.valid
+            && cache.lat_idx == lat_idx
+            && cache.lon_idx == lon_idx
+            && cache.finest_lat_idx == finest_lat_idx
+            && cache.finest_lon_idx == finest_lon_idx
+        {
+            continue;
+        }
+        cache.valid = true;
+        cache.lat_idx = lat_idx;
+        cache.lon_idx = lon_idx;
+        cache.finest_lat_idx = finest_lat_idx;
+        cache.finest_lon_idx = finest_lon_idx;
+
+        let snapped_lat = lat_idx as f64 * step_lat;
+        let snapped_lon = lon_idx as f64 * step_lon;
+        let (sin_ql, cos_ql) = snapped_lat.sin_cos();
+        let (sin_qn, cos_qn) = snapped_lon.sin_cos();
+        let dir_unrot = DVec3::new(cos_ql * cos_qn, sin_ql, cos_ql * sin_qn);
+        let anchor = planet_rot * dir_unrot * r_circle + sphere_centre;
+        let delta = sphere_centre - anchor;
+        work[level] = Some(LevelWork {
+            snapped_lat,
+            snapped_lon,
+            anchor_f32: anchor.as_vec3(),
+            delta,
+        });
+    }
+
+    // Fast exit if nothing needs rebuilding.
+    if work.iter().all(|w| w.is_none()) {
+        return;
+    }
+
+    // Shared (sin t, cos t) table — computed once per rebuild-batch,
+    // reused across every ring of every level.
     let segs = SEGS as usize;
     trig_table.clear();
     trig_table.reserve(segs + 1);
     let inv_segs = 1.0 / segs as f64;
     for i in 0..=segs {
         let t = i as f64 * inv_segs * std::f64::consts::TAU;
-        trig_table.push(t.sin_cos()); // (sin t, cos t)
+        trig_table.push(t.sin_cos());
     }
-    // Borrow as slice so closures don't re-borrow the Local.
     let trig: &[(f64, f64)] = &trig_table[..];
-
-    // For phase ψ and ring angle t: cos(ψ+t) = cos ψ cos t − sin ψ sin t,
-    // sin(ψ+t) = sin ψ cos t + cos ψ sin t.  Do the phase mix here.
-    let (sin_lon, cos_lon) = lon_rad.sin_cos();
-    // Meridian sweep starts at theta0 = π/2 − lat so vertex 0 is on the
-    // machine's latitude; we fold that into a (sin, cos) phase too.
-    let theta0 = std::f64::consts::FRAC_PI_2 - lat_rad;
-    let (sin_t0, cos_t0) = theta0.sin_cos();
 
     const LAT_LIMIT: f64 = std::f64::consts::FRAC_PI_2 - 1e-4;
 
-    // Small helper: 10× faster than `build_line_strip` because it
-    // doesn't re-allocate — we reuse caller-owned buffers.
+    // Reusable buffers — `clear()` preserves allocation between rings.
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(segs + 1);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(segs + 1);
 
     // --- Latitude parallels ---
     for (lat_c, mesh_h, mut tr) in lat_q.iter_mut() {
-        tr.translation = cam_pos_f32;
+        let Some(w) = work[lat_c.level as usize] else { continue };
+        tr.translation = w.anchor_f32;
         tr.rotation = Quat::IDENTITY;
         tr.scale = Vec3::ONE;
 
         let step = GRID_STEPS_M[lat_c.level as usize];
-        // Skip levels that are essentially invisible at this zoom.
-        if level_fade(cam_dist, step) < 0.005 {
-            continue;
-        }
-
-        // World-fixed grid: snap the camera's lat to a multiple of the
-        // level's lat step, then stack rings outward from that snap.
-        // Between snaps the grid is stationary in world — which is
-        // what the robot and the globe are already doing, so nothing
-        // slides relative to anything else.
         let step_lat = step * inv_r;
-        let snapped_lat = (lat_rad / step_lat).round() * step_lat;
-        let this_lat = snapped_lat + lat_c.ring as f64 * step_lat;
+        let this_lat = w.snapped_lat + lat_c.ring as f64 * step_lat;
         if this_lat.abs() > LAT_LIMIT {
             if let Some(mesh) = meshes.get_mut(&mesh_h.0) {
                 *mesh = empty_line_mesh();
@@ -311,17 +368,17 @@ pub fn build_grid_meshes(
 
         positions.clear();
         colors.clear();
-        // vertex = cl * cos(lon_rad + t) * col_x
-        //        + sl * col_y
-        //        + cl * sin(lon_rad + t) * col_z
-        //        + delta
-        // Using the sum-angle identity with precomputed (sin_lon, cos_lon).
-        let y_term = col_y * sl + delta;
+        // Vertex-sweep phase: use the FINEST-level lon snap across all
+        // levels so rings at the same latitude (which can come from
+        // different LODs) share vertex positions → they overlay
+        // exactly instead of drifting apart by chord-sag.
+        let (sin_phase, cos_phase) = finest_snap_lon.sin_cos();
+        let y_term = col_y * sl + w.delta;
         let sx = col_x * cl;
         let sz = col_z * cl;
         for &(sin_t, cos_t) in trig {
-            let c_phi = cos_lon * cos_t - sin_lon * sin_t;
-            let s_phi = sin_lon * cos_t + cos_lon * sin_t;
+            let c_phi = cos_phase * cos_t - sin_phase * sin_t;
+            let s_phi = sin_phase * cos_t + cos_phase * sin_t;
             let v = sx * c_phi + sz * s_phi + y_term;
             positions.push([v.x as f32, v.y as f32, v.z as f32]);
             colors.push([1.0, 1.0, 1.0, alpha]);
@@ -333,30 +390,30 @@ pub fn build_grid_meshes(
 
     // --- Longitude meridians ---
     for (lon_c, mesh_h, mut tr) in lon_q.iter_mut() {
-        tr.translation = cam_pos_f32;
+        let Some(w) = work[lon_c.level as usize] else { continue };
+        tr.translation = w.anchor_f32;
         tr.rotation = Quat::IDENTITY;
         tr.scale = Vec3::ONE;
 
         let step = GRID_STEPS_M[lon_c.level as usize];
-        if level_fade(cam_dist, step) < 0.005 {
-            continue;
-        }
-
-        // Same world-fixed snap for meridians.
         let step_lon = step * inv_r_cos_lat;
-        let snapped_lon = (lon_rad / step_lon).round() * step_lon;
-        let this_lon = snapped_lon + lon_c.ring as f64 * step_lon;
+        let this_lon = w.snapped_lon + lon_c.ring as f64 * step_lon;
         let (sn, cn) = this_lon.sin_cos();
         let alpha = ring_spatial_alpha(lon_c.ring);
 
-        // vertex = sin(theta0+t) * (cn*col_x + sn*col_z) + cos(theta0+t) * col_y + delta
+        // Meridian sweep phase: common across levels (finest snap) so
+        // meridians at the same longitude line up exactly regardless of
+        // which LOD contributed them.
+        let theta0 = std::f64::consts::FRAC_PI_2 - finest_snap_lat;
+        let (sin_t0, cos_t0) = theta0.sin_cos();
+        // vertex = sin(θ0+t) * (cn*col_x + sn*col_z) + cos(θ0+t) * col_y + delta
         let axis = col_x * cn + col_z * sn;
         positions.clear();
         colors.clear();
         for &(sin_t, cos_t) in trig {
             let s_th = sin_t0 * cos_t + cos_t0 * sin_t;
             let c_th = cos_t0 * cos_t - sin_t0 * sin_t;
-            let v = axis * s_th + col_y * c_th + delta;
+            let v = axis * s_th + col_y * c_th + w.delta;
             positions.push([v.x as f32, v.y as f32, v.z as f32]);
             colors.push([1.0, 1.0, 1.0, alpha]);
         }
