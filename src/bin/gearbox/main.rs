@@ -76,7 +76,8 @@ fn setup_scene(
     // drop ~3 cm below y=0 just ~1 km out from the machine. With the
     // sphere alone the circles sit cleanly above the sphere's triangle
     // faces everywhere.)
-    let planet_green = Color::srgb(0.28, 0.52, 0.24);
+    // Warm, light brown ground — sandy/tan rather than grass.
+    let planet_green = Color::srgb(0.62, 0.48, 0.33);
 
     // --- Planet sphere ---
     // High-resolution UV sphere — 512 sectors × 256 stacks gives ~130k

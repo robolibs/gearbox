@@ -27,6 +27,8 @@ impl Plugin for EditorPlugin {
             .insert_resource(left)
             .insert_resource(right)
             .init_resource::<selection::Selection>()
+            .init_resource::<gizmos::GizmoMode>()
+            .add_systems(Startup, gizmos::configure_gizmos)
             .add_systems(
                 EguiPrimaryContextPass,
                 (
@@ -40,9 +42,12 @@ impl Plugin for EditorPlugin {
                 Update,
                 (
                     selection::pick_and_drag_system,
-                    gizmos::selection_gizmos_system,
+                    gizmos::gizmo_mode_input,
                     persist::save_state_on_change,
                 ),
-            );
+            )
+            // Gizmos run after transform propagation so they read the
+            // big_space-rebased `GlobalTransform`, not a stale one.
+            .add_systems(PostUpdate, gizmos::selection_gizmos_system);
     }
 }
