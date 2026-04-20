@@ -59,7 +59,7 @@ impl Plugin for GearboxVizPlugin {
                 )
                     .chain(),
             )
-            .add_systems(Update, grid::update_circle_meshes);
+            .add_systems(Update, (grid::build_grid_meshes, grid::update_grid_alpha));
     }
 }
 
