@@ -10,6 +10,7 @@ pub mod selection;
 pub mod spawn_panel;
 pub mod style;
 pub mod tree;
+pub mod ui_panel;
 
 use bevy::prelude::*;
 use bevy_egui::EguiPrimaryContextPass;

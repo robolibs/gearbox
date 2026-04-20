@@ -27,14 +27,19 @@ use super::GearboxSim;
 pub struct GroundGrid {
     pub lat_color: Color,
     pub lon_color: Color,
+    /// Global on/off — when `false`, every level's material alpha is
+    /// driven to 0 and the grid disappears without the per-frame mesh
+    /// cost.
+    pub visible: bool,
 }
 
 impl Default for GroundGrid {
     fn default() -> Self {
-        // Lower overall alpha — the grid reads as a subtle overlay
-        // rather than dominant foreground.
-        let blue = Color::srgba(0.10, 0.45, 1.00, 0.28);
-        Self { lat_color: blue, lon_color: blue }
+        // Default grid colour: soft muted grey-brown (RGB 80, 70, 70).
+        // Reads as a subtle overlay on sandy/tan ground without
+        // competing with the vehicle or gizmo colours.
+        let c = Color::srgba(80.0 / 255.0, 70.0 / 255.0, 70.0 / 255.0, 0.28);
+        Self { lat_color: c, lon_color: c, visible: true }
     }
 }
 
@@ -459,8 +464,11 @@ pub fn update_grid_alpha(
     let Ok(cam) = cameras.single() else { return };
     let cam_dist = cam.distance as f64;
 
-    let base_lat = cfg.lat_color.alpha();
-    let base_lon = cfg.lon_color.alpha();
+    // Global visibility gate: if the user has hidden the grid in the
+    // UI panel, force every level's alpha to zero.
+    let gate: f32 = if cfg.visible { 1.0 } else { 0.0 };
+    let base_lat = cfg.lat_color.alpha() * gate;
+    let base_lon = cfg.lon_color.alpha() * gate;
 
     for (level_idx, step) in GRID_STEPS_M.iter().enumerate() {
         let fade = level_fade(cam_dist, *step);

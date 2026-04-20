@@ -1,11 +1,11 @@
-//! Floating right dock — mirror of the left, currently just the Inspector.
+//! Floating right dock — Inspector (I) and UI settings (U).
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
-use crate::viz::GearboxSim;
+use crate::viz::{GearboxSim, GroundGrid};
 
-use super::{float, inspector};
+use super::{float, inspector, ui_panel};
 use super::persist::EditorUiState;
 use super::selection::Selection;
 
@@ -13,6 +13,7 @@ use super::selection::Selection;
 pub enum RightTab {
     #[default]
     Inspector,
+    Ui,
     None,
 }
 
@@ -22,6 +23,7 @@ pub fn right_dock_ui(
     ui_state: Res<EditorUiState>,
     sim: Res<GearboxSim>,
     selection: Res<Selection>,
+    mut grid: ResMut<GroundGrid>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -31,18 +33,40 @@ pub fn right_dock_ui(
         matches!(*active, RightTab::Inspector),
         || *active = if *active == RightTab::Inspector { RightTab::None } else { RightTab::Inspector },
     );
-
-    if *active == RightTab::None { return; }
-
-    let size = ui_state.inspector_size;
-    let mut open = true;
-    float::floating_window(
-        ctx,
-        "right_window_inspector",
-        "Inspector",
-        egui::Align2::RIGHT_TOP,
-        egui::vec2(size.x, size.y),
-        &mut open,
-        |ui| inspector::draw_content(ui, &sim, &selection),
+    float::side_button(
+        "right_btn_ui", ctx, egui::Align2::RIGHT_TOP, 1,
+        "U", "UI settings",
+        matches!(*active, RightTab::Ui),
+        || *active = if *active == RightTab::Ui { RightTab::None } else { RightTab::Ui },
     );
+
+    match *active {
+        RightTab::None => {}
+        RightTab::Inspector => {
+            let size = ui_state.inspector_size;
+            let mut open = true;
+            float::floating_window(
+                ctx,
+                "right_window_inspector",
+                "Inspector",
+                egui::Align2::RIGHT_TOP,
+                egui::vec2(size.x, size.y),
+                &mut open,
+                |ui| inspector::draw_content(ui, &sim, &selection),
+            );
+        }
+        RightTab::Ui => {
+            let size = ui_state.inspector_size; // reuse same default width
+            let mut open = true;
+            float::floating_window(
+                ctx,
+                "right_window_ui",
+                "UI",
+                egui::Align2::RIGHT_TOP,
+                egui::vec2(size.x, size.y),
+                &mut open,
+                |ui| ui_panel::draw_content(ui, &mut grid),
+            );
+        }
+    }
 }
