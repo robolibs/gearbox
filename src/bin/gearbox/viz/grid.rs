@@ -31,7 +31,9 @@ pub struct GroundGrid {
 
 impl Default for GroundGrid {
     fn default() -> Self {
-        let blue = Color::srgba(0.10, 0.45, 1.00, 0.5);
+        // Lower overall alpha — the grid reads as a subtle overlay
+        // rather than dominant foreground.
+        let blue = Color::srgba(0.10, 0.45, 1.00, 0.28);
         Self { lat_color: blue, lon_color: blue }
     }
 }
@@ -54,7 +56,9 @@ pub const GRID_INNER_RINGS: i32 = 25;
 /// visible. 0.85 gives ~25 % alpha one decade from peak — i.e. the two
 /// LOD neighbours are visible but clearly secondary.
 const GAUSSIAN_PEAK_LOG_R: f64 = 1.0;
-const GAUSSIAN_WIDTH: f64 = 0.85;
+/// Narrower bell → snappier LOD hand-offs. 0.55 puts neighbour levels
+/// at ~5 % alpha (vs ~25 % at 0.85) so the active level dominates.
+const GAUSSIAN_WIDTH: f64 = 0.55;
 
 /// Per-level material handles, so the fade system can tweak alpha in
 /// one place instead of iterating every circle entity.
