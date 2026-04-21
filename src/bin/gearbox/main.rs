@@ -6,6 +6,7 @@
 mod editor;
 mod viz;
 
+use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
@@ -29,6 +30,8 @@ pub struct BigSpaceRoot(pub Entity);
 
 fn main() {
     App::new()
+        // Sky-blue horizon fade so the DistanceFog blends into the clear colour.
+        .insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.86)))
         .add_plugins(
             DefaultPlugins
                 .build()
@@ -55,6 +58,7 @@ fn setup_scene(
     mut sim: ResMut<GearboxSim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<bevy::image::Image>>,
 ) {
     // Physics: flat ground plane. (A ball collider at Earth radius hits
     // f32-precision limits in rapier's distance checks — wheels go
@@ -128,6 +132,16 @@ fn setup_scene(
     spawn_circle_meshes(&mut commands, &mut meshes, &mut materials, root_id, &grid_cfg);
     let _ = (planet_rot, planet_cell, planet_offset);
 
+    // Cloud shell — translucent sphere at ~planet_radius + 4 km.
+    viz::clouds::spawn_cloud_shell(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        root_id,
+        radius_f64,
+    );
+
     // --- Sun ---
     commands
         .spawn((
@@ -150,6 +164,20 @@ fn setup_scene(
         far: radius * 2.5,
         ..default()
     });
+    // DistanceFog with atmospheric falloff: Rayleigh-ish blue scatters
+    // into the distance, with the extinction/inscattering tuned for
+    // kilometre-scale views. Blue channel extinguishes/inscatters more
+    // than red/green so the horizon gently shifts toward sky-blue —
+    // the same visual cue you see looking out over flat terrain IRL.
+    let fog = DistanceFog {
+        color: Color::srgb(0.55, 0.70, 0.86),
+        falloff: FogFalloff::Atmospheric {
+            extinction:   Vec3::new(0.00008, 0.00012, 0.00020),
+            inscattering: Vec3::new(0.00010, 0.00015, 0.00025),
+        },
+        ..default()
+    };
+
     commands
         .spawn((
             Name::new("Camera"),
@@ -160,6 +188,7 @@ fn setup_scene(
             Camera3d::default(),
             projection,
             FloatingOrigin,
+            fog,
             AmbientLight {
                 color: Color::WHITE,
                 brightness: 120.0,

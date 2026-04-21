@@ -3,6 +3,7 @@
 //! Lives in the binary, not the library, so the library stays Bevy-free.
 
 pub mod camera;
+pub mod clouds;
 pub mod grid;
 pub mod input;
 pub mod spawn;
