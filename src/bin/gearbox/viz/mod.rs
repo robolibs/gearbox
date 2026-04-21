@@ -65,6 +65,6 @@ impl Plugin for GearboxVizPlugin {
     }
 }
 
-pub use camera::{ChaseCamera, ChaseCameraTarget};
+pub use camera::ChaseCamera;
 pub use grid::GroundGrid;
 pub use spawn::{spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals, GhostTag};

@@ -10,6 +10,7 @@ use crate::viz::{GearboxSim, PlayerControlled, VehicleBody};
 use super::pending_spawn::PendingSpawn;
 use super::persist::EditorUiState;
 use super::selection::Selection;
+use super::style::AccentColor;
 use super::{float, spawn_panel, tree};
 
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -35,20 +36,24 @@ pub fn left_dock_ui(
     // tree
     bodies: Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
     mut pending: ResMut<PendingSpawn>,
+    accent: Res<AccentColor>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
+    let accent_col = accent.0;
 
     // --- Side buttons (separated, stacked vertically on the left edge) ---
     float::side_button(
         "left_btn_workspace", ctx, egui::Align2::LEFT_TOP, 0,
         "W", "Workspace",
         matches!(*active, LeftTab::Workspace),
+        accent_col,
         || *active = if *active == LeftTab::Workspace { LeftTab::None } else { LeftTab::Workspace },
     );
     float::side_button(
         "left_btn_spawn", ctx, egui::Align2::LEFT_TOP, 1,
         "S", "Spawn",
         matches!(*active, LeftTab::Spawn),
+        accent_col,
         || *active = if *active == LeftTab::Spawn { LeftTab::None } else { LeftTab::Spawn },
     );
 
@@ -66,6 +71,7 @@ pub fn left_dock_ui(
         egui::Align2::LEFT_TOP,
         egui::vec2(size.x, size.y),
         &mut open,
+        accent_col,
         |ui| match *active {
             LeftTab::Workspace => tree::draw_content(
                 ui,
@@ -73,6 +79,7 @@ pub fn left_dock_ui(
                 &sim,
                 &bodies,
                 &mut selection,
+                accent_col,
             ),
             LeftTab::Spawn => spawn_panel::draw_content(
                 ui,
@@ -83,6 +90,7 @@ pub fn left_dock_ui(
                 &mut meshes,
                 &mut materials,
                 &player_tagged,
+                accent_col,
             ),
             LeftTab::None => {}
         },

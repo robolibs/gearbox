@@ -15,7 +15,7 @@ use crate::viz::{GearboxSim, PlayerControlled, VehicleBody};
 
 use super::selection::Selection;
 use super::style::{
-    section_caps, ACCENT, BG_3_HOVER, SELECTION_ROW, TEXT_PRIMARY, TEXT_SECONDARY, WARNING,
+    section_caps, BG_2_RAISED, BG_3_HOVER, TEXT_PRIMARY, TEXT_SECONDARY, WARNING,
 };
 
 const ROW_H: f32 = 20.0;
@@ -26,56 +26,73 @@ pub fn draw_content(
     sim: &GearboxSim,
     bodies: &Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
     selection: &mut Selection,
+    accent: egui::Color32,
 ) {
-    // Section header so the panel reads as a categorised outliner,
-    // not a bare list.
-    ui.label(section_caps("Scene"));
-    ui.add_space(4.0);
-
-    if bodies.is_empty() {
-        ui.add_space(20.0);
-        ui.vertical_centered(|ui| {
-            ui.label(
-                egui::RichText::new("Empty scene")
-                    .strong()
-                    .color(TEXT_SECONDARY),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new("Open the Spawn tab to add something.")
-                    .small()
-                    .color(TEXT_SECONDARY),
-            );
-        });
-        return;
-    }
-
-    let mut rows: Vec<(Entity, VehicleId, String, bool)> = bodies
-        .iter()
-        .map(|(e, vb, name, is_player)| {
-            let label = match name {
-                Some(n) => n.as_str().to_string(),
-                None => format!("Vehicle #{}", vb.id.0),
-            };
-            (e, vb.id, label, is_player)
-        })
-        .collect();
-    rows.sort_by_key(|(_, id, _, _)| id.0);
-
     let mut give_drive_to: Option<(VehicleId, Entity)> = None;
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for (entity, id, label, is_player) in rows {
-            let selected = selection.vehicle == Some(id);
-            let resp = outliner_row(ui, &label, id, is_player, selected);
-            if resp.clicked() {
-                selection.vehicle = Some(id);
+    // ─── Scene outliner (first — default-open) ────────────────────
+    egui::CollapsingHeader::new(section_caps("Scene", accent))
+        .id_salt("tree_scene")
+        .default_open(true)
+        .show(ui, |ui| {
+            if bodies.is_empty() {
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Empty scene")
+                            .strong()
+                            .color(TEXT_SECONDARY),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new("Open the Spawn tab to add something.")
+                            .small()
+                            .color(TEXT_SECONDARY),
+                    );
+                });
+                return;
             }
-            if resp.double_clicked() && !is_player {
-                give_drive_to = Some((id, entity));
-            }
-        }
-    });
+
+            let mut rows: Vec<(Entity, VehicleId, String, bool)> = bodies
+                .iter()
+                .map(|(e, vb, name, is_player)| {
+                    let label = match name {
+                        Some(n) => n.as_str().to_string(),
+                        None => format!("Vehicle #{}", vb.id.0),
+                    };
+                    (e, vb.id, label, is_player)
+                })
+                .collect();
+            rows.sort_by_key(|(_, id, _, _)| id.0);
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (entity, id, label, is_player) in rows {
+                    let selected = selection.vehicle == Some(id);
+                    let resp = outliner_row(ui, &label, id, is_player, selected, accent);
+                    if resp.clicked() {
+                        selection.vehicle = Some(id);
+                    }
+                    if resp.double_clicked() && !is_player {
+                        give_drive_to = Some((id, entity));
+                    }
+                }
+            });
+        });
+
+    // ─── Stats (default-closed) ───────────────────────────────────
+    egui::CollapsingHeader::new(section_caps("Stats", accent))
+        .id_salt("tree_stats")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} total · double-click to drive",
+                    sim.0.vehicles().count()
+                ))
+                .small()
+                .color(TEXT_SECONDARY),
+            );
+        });
 
     if let Some((_new_id, new_entity)) = give_drive_to {
         let currently_player: Vec<Entity> = bodies
@@ -88,17 +105,6 @@ pub fn draw_content(
         }
         commands.entity(new_entity).insert(PlayerControlled);
     }
-
-    ui.add_space(6.0);
-    ui.separator();
-    ui.label(
-        egui::RichText::new(format!(
-            "{} total · double-click to drive",
-            sim.0.vehicles().count()
-        ))
-        .small()
-        .color(TEXT_SECONDARY),
-    );
 }
 
 /// Single outliner row painted manually so we get proper state fills,
@@ -110,6 +116,7 @@ fn outliner_row(
     id: VehicleId,
     is_player: bool,
     selected: bool,
+    accent: egui::Color32,
 ) -> egui::Response {
     let w = ui.available_width();
     let (rect, resp) =
@@ -118,7 +125,17 @@ fn outliner_row(
 
     // State fills.
     if selected {
-        painter.rect_filled(rect, egui::CornerRadius::same(3), SELECTION_ROW);
+        // 35 % accent blended over BG_2_RAISED — readable against the
+        // panel without drowning the label in the vehicle's own tint.
+        let blend = |a: u8, b: u8| {
+            ((a as f32) * 0.65 + (b as f32) * 0.35).round() as u8
+        };
+        let selection_tint = egui::Color32::from_rgb(
+            blend(BG_2_RAISED.r(), accent.r()),
+            blend(BG_2_RAISED.g(), accent.g()),
+            blend(BG_2_RAISED.b(), accent.b()),
+        );
+        painter.rect_filled(rect, egui::CornerRadius::same(3), selection_tint);
     } else if resp.hovered() {
         painter.rect_filled(rect, egui::CornerRadius::same(3), BG_3_HOVER);
     }
@@ -128,7 +145,7 @@ fn outliner_row(
             egui::pos2(rect.min.x, rect.min.y + 2.0),
             egui::vec2(2.0, rect.height() - 4.0),
         );
-        painter.rect_filled(bar, egui::CornerRadius::same(1), ACCENT);
+        painter.rect_filled(bar, egui::CornerRadius::same(1), accent);
     }
 
     // Player dot (small bold accent glyph) or inactive ring.

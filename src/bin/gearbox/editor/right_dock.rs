@@ -8,6 +8,7 @@ use crate::viz::{GearboxSim, GroundGrid};
 use super::{float, inspector, ui_panel};
 use super::persist::EditorUiState;
 use super::selection::Selection;
+use super::style::AccentColor;
 
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RightTab {
@@ -24,19 +25,23 @@ pub fn right_dock_ui(
     sim: Res<GearboxSim>,
     selection: Res<Selection>,
     mut grid: ResMut<GroundGrid>,
+    accent: Res<AccentColor>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
+    let accent_col = accent.0;
 
     float::side_button(
         "right_btn_inspector", ctx, egui::Align2::RIGHT_TOP, 0,
         "I", "Inspector",
         matches!(*active, RightTab::Inspector),
+        accent_col,
         || *active = if *active == RightTab::Inspector { RightTab::None } else { RightTab::Inspector },
     );
     float::side_button(
         "right_btn_ui", ctx, egui::Align2::RIGHT_TOP, 1,
         "U", "UI settings",
         matches!(*active, RightTab::Ui),
+        accent_col,
         || *active = if *active == RightTab::Ui { RightTab::None } else { RightTab::Ui },
     );
 
@@ -52,7 +57,8 @@ pub fn right_dock_ui(
                 egui::Align2::RIGHT_TOP,
                 egui::vec2(size.x, size.y),
                 &mut open,
-                |ui| inspector::draw_content(ui, &sim, &selection),
+                accent_col,
+                |ui| inspector::draw_content(ui, &sim, &selection, accent_col),
             );
         }
         RightTab::Ui => {
@@ -65,7 +71,8 @@ pub fn right_dock_ui(
                 egui::Align2::RIGHT_TOP,
                 egui::vec2(size.x, size.y),
                 &mut open,
-                |ui| ui_panel::draw_content(ui, &mut grid),
+                accent_col,
+                |ui| ui_panel::draw_content(ui, &mut grid, accent_col),
             );
         }
     }

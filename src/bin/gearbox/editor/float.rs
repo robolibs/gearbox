@@ -4,7 +4,7 @@
 use bevy_egui::egui;
 
 use super::style::{
-    ACCENT, ACCENT_TINT, BG_1_PANEL, BG_2_RAISED, BORDER_SUBTLE, TEXT_PRIMARY, TEXT_SECONDARY,
+    BG_1_PANEL, BG_2_RAISED, BORDER_SUBTLE, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 // --- layout constants ---------------------------------------------------
@@ -27,6 +27,7 @@ pub fn side_button(
     glyph: &str,
     tooltip: &str,
     is_active: bool,
+    accent: egui::Color32,
     on_click: impl FnOnce(),
 ) {
     let slot_y = slot as f32 * (SIDE_BTN_SIZE + SIDE_BTN_GAP);
@@ -48,14 +49,23 @@ pub fn side_button(
             );
 
             let bg = if is_active {
-                ACCENT_TINT
+                // 25 % of accent over BG_2_RAISED — matches the
+                // "tinted_surface" idea in style.rs.
+                let blend = |a: u8, b: u8| {
+                    ((a as f32) * 0.75 + (b as f32) * 0.25).round() as u8
+                };
+                egui::Color32::from_rgb(
+                    blend(BG_2_RAISED.r(), accent.r()),
+                    blend(BG_2_RAISED.g(), accent.g()),
+                    blend(BG_2_RAISED.b(), accent.b()),
+                )
             } else if resp.hovered() {
                 BG_2_RAISED
             } else {
                 BG_1_PANEL
             };
             let fg = if is_active { TEXT_PRIMARY } else { TEXT_SECONDARY };
-            let stroke = if is_active { ACCENT } else { BORDER_SUBTLE };
+            let stroke = if is_active { accent } else { BORDER_SUBTLE };
 
             let painter = ui.painter();
             painter.rect_filled(rect, egui::CornerRadius::same(6), bg);
@@ -92,6 +102,7 @@ pub fn floating_window(
     anchor: egui::Align2,
     size: egui::Vec2,
     _open: &mut bool,
+    accent: egui::Color32,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
     let side_inset = EDGE_GAP + SIDE_BTN_SIZE + RAIL_PANEL_GAP;
@@ -150,7 +161,7 @@ pub fn floating_window(
                 align,
                 title.to_uppercase(),
                 egui::FontId::new(title_size, egui::FontFamily::Proportional),
-                ACCENT,
+                accent,
             );
             ui.painter().hline(
                 rect.min.x..=rect.max.x,

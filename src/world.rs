@@ -24,10 +24,17 @@ pub fn chassis_groups() -> InteractionGroups {
     )
 }
 
-/// Wheel collider: ONLY wheel-vs-wheel. Not ground (raycast handles
-/// that), not chassis (mass would be weird on own-body wheels anyway).
+/// Wheel collider: inter-vehicle bumper. Collides with other wheels AND
+/// with other vehicles' chassis + body parts (so e.g. a harvester's
+/// cab can shove a tractor's wheel). NOT ground (raycast handles that).
+/// Same-body pairs are skipped automatically by rapier, so a wheel
+/// collider never pushes against its own chassis or part colliders.
 pub fn wheel_groups() -> InteractionGroups {
-    InteractionGroups::new(WHEEL, WHEEL, InteractionTestMode::And)
+    InteractionGroups::new(
+        WHEEL,
+        WHEEL.union(CHASSIS),
+        InteractionTestMode::And,
+    )
 }
 
 /// Static world geometry.

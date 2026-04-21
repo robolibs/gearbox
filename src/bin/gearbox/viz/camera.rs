@@ -57,9 +57,6 @@ impl Default for ChaseCamera {
     }
 }
 
-/// Back-compat alias.
-pub type ChaseCameraTarget = ChaseCamera;
-
 /// Handles pan (middle drag), orbit (L+R drag), and double-middle-click
 /// re-centring (ray-casts the cursor to the ground plane).
 pub fn chase_camera_control(

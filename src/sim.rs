@@ -16,7 +16,7 @@ use crate::convert::{
     vec3_to_velocity,
 };
 use crate::planet::Planet;
-use crate::vehicle::{VehicleId, VehicleSpec, VehicleState, WheelSpec};
+use crate::vehicle::{PartKind, VehicleId, VehicleSpec, VehicleState, WheelSpec};
 use crate::world;
 
 pub struct Sim {
@@ -156,6 +156,35 @@ impl Sim {
                 .build();
             self.colliders
                 .insert_with_parent(wheel_collider, body_handle, &mut self.bodies);
+        }
+
+        // Body-part colliders — karosserie (cab, hood, roof, bunker...)
+        // and tanks are solid bodywork and should stop other things.
+        // Hitches are visual markers, so skip them.
+        //
+        // All parts attach to the same rigid body as the chassis, so
+        // rapier automatically skips same-body self-collision — a hood
+        // sitting above the chassis won't push against it. They share
+        // the CHASSIS collision group, so they collide with ground,
+        // with other vehicles' chassis+parts, and with other vehicles'
+        // wheels (as inter-vehicle bumpers). mass=0 keeps them from
+        // perturbing the explicit chassis MassProperties above.
+        for part in &spec.parts {
+            if matches!(part.kind, PartKind::Hitch) {
+                continue;
+            }
+            let hx = (part.size.x * 0.5) as f32;
+            let hy = (part.size.y * 0.5) as f32;
+            let hz = (part.size.z * 0.5) as f32;
+            let part_collider = ColliderBuilder::cuboid(hx, hy, hz)
+                .translation(point_to_vec3(part.position))
+                .mass(0.0)
+                .friction(0.5)
+                .restitution(0.0)
+                .collision_groups(world::chassis_groups())
+                .build();
+            self.colliders
+                .insert_with_parent(part_collider, body_handle, &mut self.bodies);
         }
 
         let mut controller = DynamicRayCastVehicleController::new(body_handle);

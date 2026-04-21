@@ -10,10 +10,10 @@ use crate::viz::GroundGrid;
 
 use super::style::{fg_dim, section_caps};
 
-pub fn draw_content(ui: &mut egui::Ui, grid: &mut GroundGrid) {
-    egui::CollapsingHeader::new(section_caps("Grid"))
+pub fn draw_content(ui: &mut egui::Ui, grid: &mut GroundGrid, accent: egui::Color32) {
+    egui::CollapsingHeader::new(section_caps("Grid", accent))
         .id_salt("ui_grid")
-        .default_open(false)
+        .default_open(true)
         .show(ui, |ui| {
             // ─── visible toggle ─────────────────────────────────
             ui.horizontal(|ui| {

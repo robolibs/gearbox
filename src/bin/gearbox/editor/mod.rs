@@ -31,11 +31,13 @@ impl Plugin for EditorPlugin {
             .init_resource::<selection::Selection>()
             .init_resource::<gizmos::GizmoMode>()
             .init_resource::<pending_spawn::PendingSpawn>()
+            .init_resource::<style::AccentColor>()
             .add_systems(Startup, gizmos::configure_gizmos)
             .add_systems(
                 EguiPrimaryContextPass,
                 (
-                    style::apply_theme_once,
+                    style::update_accent_from_selection,
+                    style::apply_theme,
                     left_dock::left_dock_ui,
                     right_dock::right_dock_ui,
                 )

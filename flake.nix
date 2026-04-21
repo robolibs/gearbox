@@ -25,24 +25,14 @@
           };
         };
 
-        # .envrc snapshots /proc/driver/nvidia/version into this path before
-        # direnv loads the flake. nixGL's auto-detect derivation can't read
-        # /proc because the nix build sandbox doesn't mount it; reading a
-        # regular file side-steps that entirely. The flake only evaluates
-        # with --impure, wired into .envrc.
-        nvidiaVersion = let
-          firstLine = builtins.head (
-            builtins.filter builtins.isString
-              (builtins.split "\n" (builtins.readFile ./.direnv/nvidia-version))
-          );
-          # First line looks like:
-          #   NVRM version: NVIDIA UNIX ... Module for x86_64  580.126.09  Release Build ...
-          # Version sits between double spaces right before "Release" in the
-          # NVRM line, for both classic and "UNIX Open Kernel" driver strings.
-          # (nixGL's own "Module  X  " regex misses the newer format.)
-          m = builtins.match ".*  ([0-9.]+)  Release.*" firstLine;
-        in if m != null then builtins.head m
-           else throw "gearbox: couldn't parse .direnv/nvidia-version — is direnv loaded?";
+        # .envrc exports GEARBOX_NVIDIA_VERSION from /proc/driver/nvidia/version
+        # before direnv loads the flake. We read it via getEnv (works because
+        # --impure is wired into .envrc). Reading from a file under .direnv/
+        # doesn't work: flakes in a git repo only expose git-tracked files to
+        # the evaluator, and .direnv/ is globally gitignored.
+        nvidiaVersion = let v = builtins.getEnv "GEARBOX_NVIDIA_VERSION";
+        in if v != "" then v
+           else throw "gearbox: GEARBOX_NVIDIA_VERSION is unset — is direnv loaded and is the NVIDIA driver running?";
 
         # Build nixGL pinned to the detected version. `nvidiaHash = null`
         # makes it fetch the matching .run impurely (--impure is wired into

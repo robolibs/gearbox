@@ -246,7 +246,6 @@ pub fn spawn_vehicle_ghost(
     let alpha = 0.45;
     let [r, g, b] = spec.chassis.color;
     let chassis_color = Color::srgba(r, g, b, alpha);
-    let wheel_color   = Color::srgba(0.18, 0.18, 0.18, alpha);
     let tread_tex     = images.add(make_tyre_tread_texture());
 
     let chassis_mesh = meshes.add(Cuboid::new(

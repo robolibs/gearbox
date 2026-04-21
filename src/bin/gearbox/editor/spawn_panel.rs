@@ -14,7 +14,7 @@ use gearbox::presets;
 use crate::viz::{GearboxSim, PlayerControlled, VehicleBody};
 
 use super::pending_spawn::PendingSpawn;
-use super::style::{accent_color, fg_dim, section_caps, TEXT_PRIMARY};
+use super::style::{fg_dim, section_caps, TEXT_PRIMARY};
 
 pub fn draw_content(
     ui: &mut egui::Ui,
@@ -25,20 +25,21 @@ pub fn draw_content(
     _meshes: &mut Assets<Mesh>,
     _materials: &mut Assets<StandardMaterial>,
     _player_tagged: &Query<Entity, With<PlayerControlled>>,
+    accent: egui::Color32,
 ) {
-    egui::CollapsingHeader::new(section_caps("Vehicles"))
+    egui::CollapsingHeader::new(section_caps("Vehicles", accent))
         .id_salt("spawn_vehicles")
-        .default_open(false)
+        .default_open(true)
         .show(ui, |ui| {
-            if preset_button(ui, "+", "Tractor", "John Deere 8R · 4W RWD").clicked() {
+            if preset_button(ui, "+", "Tractor", "John Deere 8R · 4W RWD", accent).clicked() {
                 pending.request(presets::tractor(), commands);
             }
             ui.add_space(2.0);
-            if preset_button(ui, "+", "Car", "4-wheel sedan").clicked() {
+            if preset_button(ui, "+", "Car", "4-wheel sedan", accent).clicked() {
                 pending.request(presets::car(), commands);
             }
             ui.add_space(2.0);
-            if preset_button(ui, "+", "Oxbo 2475", "6W pea harvester · crab-steer").clicked() {
+            if preset_button(ui, "+", "Oxbo 2475", "6W pea harvester · crab-steer", accent).clicked() {
                 pending.request(presets::oxbo_harvester(), commands);
             }
 
@@ -53,7 +54,7 @@ pub fn draw_content(
             }
         });
 
-    egui::CollapsingHeader::new(section_caps("Stats"))
+    egui::CollapsingHeader::new(section_caps("Stats", accent))
         .id_salt("spawn_stats")
         .default_open(false)
         .show(ui, |ui| {
@@ -79,7 +80,7 @@ pub fn draw_content(
                 });
         });
 
-    egui::CollapsingHeader::new(section_caps("Keys"))
+    egui::CollapsingHeader::new(section_caps("Keys", accent))
         .id_salt("spawn_keys")
         .default_open(false)
         .show(ui, |ui| {
@@ -102,6 +103,7 @@ fn preset_button(
     glyph: &str,
     name: &str,
     subtitle: &str,
+    accent: egui::Color32,
 ) -> egui::Response {
     let row_h = 32.0;
     let w = ui.available_width();
@@ -120,7 +122,7 @@ fn preset_button(
         egui::Align2::LEFT_CENTER,
         glyph,
         egui::FontId::proportional(14.0),
-        accent_color(),
+        accent,
     );
     painter.text(
         egui::pos2(text_rect.min.x + 22.0, text_rect.center().y - 6.0),
