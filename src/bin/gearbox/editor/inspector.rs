@@ -64,10 +64,12 @@ pub fn draw_content(
 
     // ─── Geo ──────────────────────────────────────────────────────
     let geo = sim.0.vehicle_geo(id);
+    let heading = sim.0.vehicle_heading(id);
     section(ui, "insp_geo", "Geo", |ui| {
         axis_row(ui, "lat", AXIS_Z, &format!("{:+.10}°", geo.latitude));
         axis_row(ui, "lon", AXIS_X, &format!("{:+.10}°", geo.longitude));
         axis_row(ui, "alt", AXIS_Y, &format!("{:+.4} m",  geo.altitude));
+        plain_row(ui, "hdg", &format!("{:6.2}°  {}", heading, compass_letter(heading)));
     });
 
     // ─── Transform ────────────────────────────────────────────────
@@ -180,6 +182,16 @@ fn bar_row(ui: &mut egui::Ui, label: &str, v: f32, min: f32, max: f32) {
                 .corner_radius(egui::CornerRadius::same(3)),
         );
     });
+}
+
+/// Cardinal/intercardinal letter for a heading in degrees, e.g.
+/// 0 → "N", 45 → "NE", 90 → "E", 185 → "S", 260 → "W".
+fn compass_letter(h: f64) -> &'static str {
+    // 22.5° arcs, centered on each of the 16 points — but we only
+    // surface 8 (N/NE/E/SE/S/SW/W/NW) because that's what fits the
+    // "6.2°  XX" column cleanly.
+    let idx = ((h / 45.0).round() as i32).rem_euclid(8);
+    ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][idx as usize]
 }
 
 fn quat_to_euler(w: f32, x: f32, y: f32, z: f32) -> (f32, f32, f32) {

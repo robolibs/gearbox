@@ -10,6 +10,7 @@
 //!        LMB (not over UI) → commit: despawn ghost, spawn real vehicle
 //!        Esc / RMB          → cancel: despawn ghost, clear request
 
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
@@ -33,6 +34,9 @@ use super::selection::{cursor_ray_to_ground, Selection};
 pub struct PendingSpawn {
     pub spec: Option<VehicleSpec>,
     pub ghost_root: Option<Entity>,
+    /// Yaw (rad, around +Y) applied to the ghost and to the committed
+    /// vehicle. Adjusted with Ctrl + mouse-wheel while placing.
+    pub yaw: f32,
 }
 
 impl PendingSpawn {
@@ -44,8 +48,12 @@ impl PendingSpawn {
             commands.entity(old).despawn();
         }
         self.spec = Some(spec);
+        self.yaw = 0.0;
     }
 }
+
+/// Rotation rate per scroll-line when Ctrl is held.
+const ROTATE_PER_LINE: f32 = 0.20; // ≈11°/line — 32 clicks = full turn
 
 /// If a spec is requested but we haven't materialised a ghost yet,
 /// build it now.
@@ -88,11 +96,54 @@ pub fn update_ghost_position(
     };
     if let Ok(mut tr) = ghost_q.get_mut(ghost) {
         tr.translation = Vec3::new(hit.x, spawn_height_for(spec) as f32, hit.z);
+        tr.rotation = Quat::from_rotation_y(pending.yaw);
     }
 }
 
-/// Watch for the click that either commits (LMB in-viewport) or
-/// cancels (Esc / RMB / Middle).
+/// Ctrl + mouse-wheel rotates the ghost around its vertical axis.
+/// Also intercepts the wheel event so `chase_camera_zoom` doesn't
+/// also zoom at the same time (handled on that side — see
+/// `chase_camera_zoom`'s `wants_rotate_ghost` early-return).
+pub fn rotate_ghost_on_ctrl_wheel(
+    mut pending: ResMut<PendingSpawn>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut wheel: MessageReader<MouseWheel>,
+) {
+    if pending.spec.is_none() {
+        // Drain so we don't carry a stale event into the next placement.
+        wheel.read().for_each(drop);
+        return;
+    }
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if !ctrl {
+        return;
+    }
+    let mut delta = 0.0_f32;
+    for event in wheel.read() {
+        delta += match event.unit {
+            MouseScrollUnit::Line => event.y,
+            MouseScrollUnit::Pixel => event.y / 32.0,
+        };
+    }
+    if delta != 0.0 {
+        pending.yaw += delta * ROTATE_PER_LINE;
+    }
+}
+
+/// Tracked across frames while the user holds LMB. Used to tell a
+/// clean click ("place here") from a drag-to-orbit gesture ("don't
+/// you dare place it while I'm moving the camera").
+#[derive(Default)]
+pub struct ClickState {
+    press_cursor: Option<Vec2>,
+    saw_rmb_while_held: bool,
+    saw_drag: bool,
+}
+
+const CLICK_DRAG_THRESHOLD_PX: f32 = 5.0;
+
+/// Commit on a *clean* LMB click in the viewport; cancel ONLY on Esc.
+/// Middle-click panning and L+R orbiting both leave the ghost alone.
 pub fn commit_or_cancel_ghost(
     mut pending: ResMut<PendingSpawn>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -107,48 +158,83 @@ pub fn commit_or_cancel_ghost(
     player_tagged: Query<Entity, With<PlayerControlled>>,
     mut selection: ResMut<Selection>,
     big_space_root: Res<BigSpaceRoot>,
+    mut state: Local<ClickState>,
 ) {
-    let Some(spec) = pending.spec.clone() else { return };
+    let Some(spec) = pending.spec.clone() else {
+        // No pending placement → clear any stale click state.
+        *state = ClickState::default();
+        return;
+    };
 
-    // Cancel?
-    let cancel = keys.just_pressed(KeyCode::Escape)
-        || mouse.just_pressed(MouseButton::Right)
-        || mouse.just_pressed(MouseButton::Middle);
-    if cancel {
+    // Cancel: Esc only. MMB and RMB stay free for camera pan/orbit.
+    if keys.just_pressed(KeyCode::Escape) {
         if let Some(e) = pending.ghost_root.take() {
             commands.entity(e).despawn();
         }
         pending.spec = None;
+        *state = ClickState::default();
         return;
     }
 
-    // Don't commit when the pointer is over an egui panel.
+    let Ok(window) = windows.single() else { return };
+    let Some(cursor) = window.cursor_position() else { return };
+
+    // Don't start a click while the pointer is hovering a panel.
     let over_ui = contexts
         .ctx_mut()
         .map(|c| c.wants_pointer_input())
         .unwrap_or(false);
-    if over_ui {
+
+    // LMB pressed now → start tracking a potential click.
+    if mouse.just_pressed(MouseButton::Left) && !over_ui {
+        state.press_cursor = Some(cursor);
+        state.saw_rmb_while_held = mouse.pressed(MouseButton::Right);
+        state.saw_drag = false;
+    }
+
+    // LMB currently held → watch for RMB (orbit) or drag motion
+    // (camera manipulation), either of which invalidates "this was a
+    // click to place".
+    if mouse.pressed(MouseButton::Left) {
+        if mouse.pressed(MouseButton::Right) {
+            state.saw_rmb_while_held = true;
+        }
+        if let Some(press) = state.press_cursor {
+            if press.distance(cursor) > CLICK_DRAG_THRESHOLD_PX {
+                state.saw_drag = true;
+            }
+        }
+    }
+
+    // LMB just released → commit iff it looked like a clean click.
+    if !mouse.just_released(MouseButton::Left) {
+        return;
+    }
+    let was_clean_click =
+        state.press_cursor.is_some() && !state.saw_rmb_while_held && !state.saw_drag;
+    let press_started_in_viewport = state.press_cursor.is_some();
+    *state = ClickState::default();
+    if !was_clean_click || !press_started_in_viewport {
         return;
     }
 
-    if !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-
-    // Commit: project the cursor to the ground and spawn the real vehicle.
-    let Ok(window) = windows.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
+    // Commit at the release position.
     let Ok((camera, cam_tr)) = cameras.single() else { return };
     let Some(hit) = cursor_ray_to_ground(camera, cam_tr, cursor, 0.0) else { return };
 
     if let Some(e) = pending.ghost_root.take() {
         commands.entity(e).despawn();
     }
+    let yaw = pending.yaw as f64;
     pending.spec = None;
+
+    // Yaw around +Y → quaternion (cos(θ/2), 0, sin(θ/2), 0).
+    let half = yaw * 0.5;
+    let rotation = Quaternion::new(half.cos(), 0.0, half.sin(), 0.0);
 
     let pose = Pose {
         point: Point::new(hit.x as f64, spawn_height_for(&spec), hit.z as f64),
-        rotation: Quaternion::identity(),
+        rotation,
     };
     let id = sim.0.spawn_vehicle(spec.clone(), pose);
     let root = spawn_vehicle_visuals(

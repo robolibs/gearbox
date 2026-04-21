@@ -32,9 +32,9 @@ pub fn oxbo_harvester() -> VehicleSpec {
     let friction = 28.0;
     let max_force = 60_000.0;
 
-    // Wheels stick 0.3 m below the chassis bottom.
+    // Wheels stick 0.35 m below the chassis bottom.
     let chassis_bottom = -chassis_y as f32 * 0.5;
-    let target_bottom = chassis_bottom - 0.3;
+    let target_bottom = chassis_bottom - 0.35;
     let conn_y = target_bottom + rest + radius;
 
     let front_steer =  14.0_f32.to_radians();
@@ -61,7 +61,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
             driven,
             steered,
             max_engine_force: engine,
-            max_brake: 40.0,
+            max_brake: 2_500.0,
             max_steer_rad: max_steer,
         }
     };

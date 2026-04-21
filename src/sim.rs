@@ -96,6 +96,11 @@ impl Sim {
             .linear_damping(chassis.linear_damping)
             .angular_damping(chassis.angular_damping)
             .ccd_enabled(chassis.ccd)
+            // Rapier's vehicle controller only wakes the chassis on a
+            // *positive* engine_force — which means once the tractor
+            // sleeps, pressing S (negative force = reverse) would be
+            // silently ignored. Keep vehicles perma-awake.
+            .can_sleep(false)
             .build();
         let body_handle = self.bodies.insert(body);
 
@@ -114,9 +119,44 @@ impl Sim {
             .mass_properties(mass_props)
             .friction(0.5)
             .restitution(0.0)
+            .collision_groups(world::chassis_groups())
             .build();
         self.colliders
             .insert_with_parent(collider, body_handle, &mut self.bodies);
+
+        // Per-wheel cylinder colliders so wheel-to-wheel contact with
+        // OTHER vehicles works. They live in the `WHEEL` group and
+        // only interact with other `WHEEL` colliders — so they never
+        // push against ground (raycast suspension handles that) and
+        // the vehicle's own wheel raycasts filter them out via
+        // `wheel_raycast_groups` (see the wheel update below).
+        //
+        // Position them at the suspension's rest-length midpoint —
+        // they're rigid with the chassis body (don't bob with
+        // suspension compression), which is fine for inter-vehicle
+        // bumps. Mass is 0 so they don't perturb the chassis
+        // MassProperties we set explicitly above.
+        for w in &spec.wheels {
+            let wheel_y = w.chassis_connection.y - (w.suspension_rest_length as f64) * 0.5;
+            let wheel_pos = point_to_vec3(datapod::Point::new(
+                w.chassis_connection.x,
+                wheel_y,
+                w.chassis_connection.z,
+            ));
+            // Cylinder default axis is +Y; rotate −π/2 around +Z so
+            // the axle lies along +X.
+            let axle_rot = Vec3::new(0.0, 0.0, -std::f32::consts::FRAC_PI_2);
+            let wheel_collider = ColliderBuilder::cylinder(w.width * 0.5, w.radius)
+                .translation(wheel_pos)
+                .rotation(axle_rot)
+                .mass(0.0)
+                .friction(0.8)
+                .restitution(0.0)
+                .collision_groups(world::wheel_groups())
+                .build();
+            self.colliders
+                .insert_with_parent(wheel_collider, body_handle, &mut self.bodies);
+        }
 
         let mut controller = DynamicRayCastVehicleController::new(body_handle);
         controller.index_up_axis = 1;
@@ -189,6 +229,32 @@ impl Sim {
         self.planet.local_to_geo(self.vehicle_pose(id).point)
     }
 
+    /// True-north heading of the vehicle, degrees in `[0, 360)` —
+    /// 0 = facing north, 90 = east, 180 = south, 270 = west.
+    ///
+    /// Works by projecting the vehicle's local +Z (forward) onto the
+    /// ENU tangent plane at its position on the planet. Uses an ENU
+    /// basis computed from the datum + local ENU projection, so it's
+    /// valid everywhere except exactly at the poles (where longitude
+    /// is undefined).
+    pub fn vehicle_heading(&self, id: VehicleId) -> f64 {
+        let pose = self.vehicle_pose(id);
+
+        // Vehicle forward vector in world frame (rotate local +Z).
+        let (mut fx, mut fy, mut fz) = (0.0_f64, 0.0_f64, 1.0_f64);
+        pose.rotation.rotate_vector(&mut fx, &mut fy, &mut fz);
+        let _ = fy;
+
+        // The library uses the same ENU convention as
+        // `Planet::local_to_geo`: +X = east, +Y = up, +Z = north near
+        // the datum. Over a few-hundred-km tangent patch those
+        // basis vectors don't meaningfully bend, so "heading" reduces
+        // to atan2 of the horizontal components.
+        let rad = fx.atan2(fz);
+        let deg = rad.to_degrees();
+        if deg < 0.0 { deg + 360.0 } else { deg }
+    }
+
     pub fn vehicle_linvel(&self, id: VehicleId) -> Velocity {
         self.vehicles
             .get(&id)
@@ -250,7 +316,29 @@ impl Sim {
 
         // 1. Translate ControlInput → per-wheel engine/brake/steering.
         for v in self.vehicles.values_mut() {
-            apply_controls(v);
+            apply_controls(v, &self.bodies);
+        }
+
+        // 1b. Parking brake. Rapier's `wheel.brake` is applied as
+        // `engine_force = -brake * copysign(forward_impulse)` — the
+        // sign term flips every step once forward_impulse is near zero,
+        // which shows up in the viewport as the whole vehicle
+        // shimmying. Sidestep the whole mess: when the driver is
+        // pressing brake AND the vehicle is already slow, zero out
+        // the horizontal linvel + the angular velocity directly.
+        for v in self.vehicles.values() {
+            if v.control.brake < 0.5 {
+                continue;
+            }
+            let Some(rb) = self.bodies.get_mut(v.body) else { continue };
+            let lv = rb.linvel();
+            let horiz2 = lv.x * lv.x + lv.z * lv.z;
+            if horiz2 < 0.5 * 0.5 {
+                // < 0.5 m/s horizontal — pin it.
+                let ly = lv.y;
+                rb.set_linvel(Vec3::new(0.0, ly, 0.0), true);
+                rb.set_angvel(Vec3::ZERO, true);
+            }
         }
 
         // 2. Run each vehicle's ray-cast controller.
@@ -267,7 +355,12 @@ impl Sim {
             // Without this, rays starting inside the chassis collider hit
             // the chassis itself, rapier reports `suspension_length = 0`,
             // and the wheels get "stuck" against the chassis bottom.
-            let filter = QueryFilter::default().exclude_rigid_body(v.body);
+            // Exclude own body + restrict to GROUND|CHASSIS so our
+            // ray never treats another vehicle's wheel collider as
+            // ground (see `world::wheel_raycast_groups`).
+            let filter = QueryFilter::default()
+                .exclude_rigid_body(v.body)
+                .groups(world::wheel_raycast_groups());
             let qpm = broad_phase.as_query_pipeline_mut(
                 narrow_phase.query_dispatcher(),
                 bodies,
@@ -300,23 +393,136 @@ fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
     if n == Vec3::ZERO { fallback } else { n }
 }
 
-fn apply_controls(v: &mut VehicleState) {
+fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet) {
     let ctrl = v.control;
     let specs: &[WheelSpec] = &v.spec.wheels;
+
+    // Brake anti-shake. Rapier's copysign-based brake flips sign near
+    // zero velocity, causing oscillation. Taper the per-wheel brake
+    // down starting at 1.2 m/s and force it to 0 below 0.5 m/s — the
+    // parking-brake pass in `step()` takes over from there.
+    let speed_mag = bodies
+        .get(v.body)
+        .map(|rb| rb.linvel().length())
+        .unwrap_or(0.0);
+    let brake_gate = if speed_mag < 0.5 {
+        0.0
+    } else {
+        ((speed_mag - 0.5) / 0.7).clamp(0.0, 1.0)
+    };
+
+    // Ackermann wheelbase: longitudinal distance from the frontmost
+    // to the rearmost wheel attachment. Used to compute each steered
+    // wheel's angle such that all steered wheels point at a common
+    // turn centre (no tyre scrub).
+    let (mut z_min, mut z_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for wspec in specs {
+        z_min = z_min.min(wspec.chassis_connection.z);
+        z_max = z_max.max(wspec.chassis_connection.z);
+    }
+    let wheelbase = (z_max - z_min) as f32;
+
+    // Collect each wheel's current suspension (normal) force from
+    // rapier. These govern per-wheel grip, which in turn drives the
+    // differential's per-wheel torque split below.
+    let normal_forces: Vec<f32> = v
+        .controller
+        .wheels()
+        .iter()
+        .map(|w| w.wheel_suspension_force.max(0.0))
+        .collect();
+
+    // Group driven wheels by axle (bucketed by z to handle float
+    // fuzz). Within an axle, we apply a weight-transfer-aware open
+    // differential: each wheel's share of the axle's total engine
+    // force is proportional to its share of the axle's total normal
+    // force. Unloaded wheels get less torque (no more one-wheel spin);
+    // loaded wheels get more. On even ground this degenerates to 50/50.
+    use std::collections::BTreeMap;
+    let mut axles: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (idx, spec) in specs.iter().enumerate() {
+        if !spec.driven {
+            continue;
+        }
+        let z_key = (spec.chassis_connection.z * 100.0).round() as i32;
+        axles.entry(z_key).or_default().push(idx);
+    }
+
+    // engine_force_per_wheel[i] is what we'll actually write. Default
+    // is the legacy "each wheel gets full throttle × max_engine_force".
+    let mut engine_force_per_wheel: Vec<f32> = specs
+        .iter()
+        .map(|s| if s.driven { ctrl.throttle * s.max_engine_force } else { 0.0 })
+        .collect();
+
+    for (_z, wheel_indices) in &axles {
+        if wheel_indices.len() < 2 {
+            continue; // only one driven wheel on this axle — no split needed
+        }
+        let total_n: f32 = wheel_indices.iter().map(|&i| normal_forces[i]).sum();
+        if total_n < 1.0 {
+            continue; // axle airborne — keep legacy force
+        }
+        // Total axle torque = throttle × sum of wheel max forces
+        // (so an axle with two 10 kN wheels still delivers 20 kN
+        // combined, same as before — we're only changing the split).
+        let axle_total: f32 = wheel_indices
+            .iter()
+            .map(|&i| ctrl.throttle * specs[i].max_engine_force)
+            .sum();
+        for &idx in wheel_indices {
+            let share = normal_forces[idx] / total_n;
+            engine_force_per_wheel[idx] = axle_total * share;
+        }
+    }
+
     let wheels = v.controller.wheels_mut();
-    for (w, spec) in wheels.iter_mut().zip(specs) {
-        w.engine_force = if spec.driven {
-            ctrl.throttle * spec.max_engine_force
-        } else {
-            0.0
-        };
-        w.brake = ctrl.brake * spec.max_brake;
+    for ((w, spec), &engine_force) in
+        wheels.iter_mut().zip(specs).zip(engine_force_per_wheel.iter())
+    {
+        w.engine_force = engine_force;
+        w.brake = ctrl.brake * spec.max_brake * brake_gate;
         w.steering = if spec.steered {
-            ctrl.steer * spec.max_steer_rad
+            ackermann_steer(
+                ctrl.steer,
+                spec.max_steer_rad,
+                spec.chassis_connection.x as f32,
+                wheelbase,
+            )
         } else {
             0.0
         };
     }
+}
+
+/// Per-wheel Ackermann steering correction. Returns the *actual*
+/// steering angle (radians) for a wheel at lateral position `wheel_x`
+/// given the nominal max-steer input.
+///
+///   R_c    = wheelbase / tan(input × max_steer)    (turn radius at centre)
+///   R_w    = R_c + wheel_x                         (radius at this wheel)
+///   δ_w    = atan(wheelbase / R_w)
+///
+/// Inside wheel (same side as steer direction) → smaller R_w → larger δ_w.
+/// Outside wheel → larger R_w → smaller δ_w. `max_steer_rad` caps the
+/// result so the wheel never exceeds its mechanical limit — this
+/// matters most for low-radius turns where the inside wheel would
+/// otherwise demand an angle larger than the physical steering stop.
+fn ackermann_steer(input: f32, max_steer: f32, wheel_x: f32, wheelbase: f32) -> f32 {
+    if input.abs() < 1e-6 || max_steer.abs() < 1e-6 || wheelbase <= 1e-3 {
+        return input * max_steer;
+    }
+    let delta_c = input * max_steer;
+    let r_c = wheelbase / delta_c.tan(); // signed; same sign as delta_c
+    let r_w = r_c + wheel_x;
+    // If r_w flips through zero (very tight turn with wide track),
+    // atan2 keeps it sane.
+    let delta_w = wheelbase.atan2(r_w);
+    // atan2 returns [0, π); for a right turn we want a negative
+    // result, so inherit the sign of the nominal angle.
+    let delta_signed = delta_w.copysign(delta_c);
+    // Don't exceed the mechanical stop; preserves spec's own limit.
+    delta_signed.clamp(-max_steer.abs(), max_steer.abs())
 }
 
 fn principal_inertia(mass: f32, half_extents: Vec3) -> Vec3 {

@@ -30,7 +30,6 @@ pub fn tractor() -> VehicleSpec {
     let chassis = ChassisSpec {
         size: Size::new(chassis_x, chassis_y, chassis_z),
         mass: 8500.0,
-        // Lower COM — big top-heavy cab makes roll-overs easy without it.
         com_offset: Point::new(0.0, -0.35, 0.0),
         linear_damping: 0.2,
         angular_damping: 2.0,
@@ -38,10 +37,13 @@ pub fn tractor() -> VehicleSpec {
         color: [0.0, 1.0, 0.392], // John Deere green
     };
 
-    // Suspension tuning.
+    // Suspension tuning.  Keeping stiffness high enough that the
+    // heavy chassis doesn't bottom out, but dropping damping so the
+    // springs visibly bob on acceleration / braking / uneven ground
+    // — you asked to feel the suspensions, so here they are.
     let rest = 0.35;
     let stiffness = 180.0;
-    let damping = 16.0;
+    let damping = 8.0;
     let friction = 26.0;
     let max_force = 60_000.0;
 
@@ -51,10 +53,11 @@ pub fn tractor() -> VehicleSpec {
     let rear_radius  = 1.025; // 2.05 m / 2
     let rear_width   = 0.71;
 
-    // Wheels stick 0.30 m below the chassis bottom for the suspension
-    // raycast to have room.
+    // Wheels stick 0.35 m below the chassis bottom — a small bump
+    // over the baseline 0.30 for a slightly raised silhouette,
+    // without destabilising the tall-cab silhouette at speed.
     let chassis_bottom = -chassis_y as f32 * 0.5;
-    let target_bottom  = chassis_bottom - 0.30;
+    let target_bottom  = chassis_bottom - 0.35;
     let front_conn_y   = target_bottom + rest + front_radius;
     let rear_conn_y    = target_bottom + rest + rear_radius;
 
@@ -79,7 +82,7 @@ pub fn tractor() -> VehicleSpec {
         driven: false,
         steered: true,
         max_engine_force: 0.0,
-        max_brake: 15.0,
+        max_brake: 1_500.0,
         max_steer_rad: MAX_STEER_RAD,
     };
     let rear = |x: f64| WheelSpec {
@@ -96,7 +99,7 @@ pub fn tractor() -> VehicleSpec {
         driven: true,
         steered: false,
         max_engine_force: 10_000.0,
-        max_brake: 40.0,
+        max_brake: 3_500.0,
         max_steer_rad: 0.0,
     };
 

@@ -48,6 +48,7 @@ impl Plugin for EditorPlugin {
                     gizmos::gizmo_mode_input,
                     persist::save_state_on_change,
                     pending_spawn::spawn_ghost_if_needed,
+                    pending_spawn::rotate_ghost_on_ctrl_wheel,
                     pending_spawn::update_ghost_position,
                     pending_spawn::commit_or_cancel_ghost,
                 )

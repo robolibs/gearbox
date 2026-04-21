@@ -151,13 +151,21 @@ pub fn chase_camera_control(
 }
 
 /// Scroll-wheel zoom — logarithmic with exponential smoothing.
+/// Skips when Ctrl is held: that gesture is reserved for rotating
+/// the ghost during drag-to-place.
 pub fn chase_camera_zoom(
     time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut wheel: MessageReader<MouseWheel>,
     mut zoom_target: Local<Option<f64>>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut CellCoord)>,
     root_grid: Query<&Grid, With<BigSpace>>,
 ) {
+    if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+        // Drain so the event doesn't accumulate while Ctrl is held.
+        wheel.read().for_each(drop);
+        return;
+    }
     let mut scroll_delta = 0.0_f64;
     for event in wheel.read() {
         scroll_delta += match event.unit {

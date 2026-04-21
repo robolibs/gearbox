@@ -43,7 +43,7 @@ pub fn car() -> VehicleSpec {
         driven: false,
         steered: true,
         max_engine_force: 0.0,
-        max_brake: 15.0,
+        max_brake: 1_200.0,
         max_steer_rad: MAX_STEER_RAD,
     };
 
@@ -61,7 +61,7 @@ pub fn car() -> VehicleSpec {
         driven: true,
         steered: false,
         max_engine_force: 5000.0,
-        max_brake: 20.0,
+        max_brake: 1_800.0,
         max_steer_rad: 0.0,
     };
 

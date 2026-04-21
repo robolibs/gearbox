@@ -115,9 +115,10 @@ pub fn spawn_vehicle_visuals(
 /// ground (wheels hang down, settle on contact). Dynamic so we don't
 /// hard-code 1.4 for every preset regardless of size.
 pub fn spawn_height_for(spec: &VehicleSpec) -> f64 {
-    // 0.6 m clearance under the chassis bottom — enough for wheels to
-    // hang in air at rest regardless of radius / suspension tuning.
-    spec.chassis.size.y * 0.5 + 0.6
+    // ~0.8 m of clearance under the chassis bottom — enough for
+    // wheels (rear tractor wheel radius ~1 m and stroke ~0.35 m) to
+    // hang in air at rest, regardless of preset.
+    spec.chassis.size.y * 0.5 + 0.8
 }
 
 /// Non-physics translucent preview of a vehicle — same meshes/parts
