@@ -52,16 +52,23 @@ pub struct ChaseCamera {
 }
 
 /// Destination + scripted-animation state for the "double-click to
-/// focus" camera move. Three sub-phases run on overlapping sub-
-/// intervals of a single `duration`:
+/// focus" camera move. Parametric: every frame we derive
+/// `(focus, yaw, distance, elevation)` from four smoothstep tracks
+/// and let the rig place the camera from those. Because distance
+/// and yaw are independent tracks, the spin can start *while the
+/// camera is still rising* — it simultaneously pulls back and
+/// begins to arc, then curves back in as the distance track
+/// reverses.
 ///
-///   0-40 %   — pull back: camera zooms out (distance grows to
-///              `start_distance.max(target_distance) * 1.8`) while
-///              its focus eases onto the target so "eye on the
-///              machine" is locked in.
-///   40-50 %  — hold at the apex; camera now faces the target.
-///   50-100 % — orbit in: yaw arcs (shortest angle) to behind the
-///              vehicle while distance shrinks to `distance`.
+///   Focus pan  [0.10, 0.50]  — old focus → vehicle position.
+///   Distance   [0.00, 0.50]  — start → apex  (going up / out).
+///              [0.50, 1.00]  — apex  → final (coming down / in).
+///   Yaw        [0.375, 1.00] — start_yaw → behind-vehicle yaw.
+///                             Kicks in 1/4 of the pull-back window
+///                             *before* the pull-back finishes, so
+///                             the camera is spinning **and** still
+///                             rising through the overlap.
+///   Elevation: held at `start_elevation`.
 #[derive(Copy, Clone, Debug)]
 pub struct FlyTarget {
     pub vehicle: VehicleId,
@@ -71,12 +78,15 @@ pub struct FlyTarget {
     pub start_focus: Vec3,
     pub start_distance: f32,
     pub start_yaw: f32,
+    pub start_elevation: f32,
+    pub apex_distance: f32,
 }
 
 impl FlyTarget {
     /// Build a fresh target, snapshotting the camera's current pose
     /// as the animation's starting point.
     pub fn new(vehicle: VehicleId, distance: f32, duration: f32, cam: &ChaseCamera) -> Self {
+        let apex = cam.distance.max(distance) * 1.8;
         Self {
             vehicle,
             distance,
@@ -85,9 +95,12 @@ impl FlyTarget {
             start_focus: cam.focus,
             start_distance: cam.distance,
             start_yaw: cam.yaw,
+            start_elevation: cam.elevation,
+            apex_distance: apex,
         }
     }
 }
+
 
 impl Default for ChaseCamera {
     fn default() -> Self {
@@ -129,7 +142,6 @@ pub fn chase_camera_fly(
 ) {
     let cell_size = root_grid.single().map(|g| g.cell_edge_length()).unwrap_or(2000.0);
     let dt = time.delta_secs();
-    let tau = std::f32::consts::TAU;
 
     for (mut cam, mut tr, mut cell) in &mut cameras {
         let Some(mut target) = cam.fly_target else { continue };
@@ -141,7 +153,7 @@ pub fn chase_camera_fly(
         target.elapsed += dt;
         let t = (target.elapsed / target.duration).clamp(0.0, 1.0);
 
-        // Live target pose.
+        // Live target pose — the vehicle can move during the fly.
         let pose = sim.0.vehicle_pose(target.vehicle);
         let target_focus = Vec3::new(
             pose.point.x as f32,
@@ -156,41 +168,53 @@ pub fn chase_camera_fly(
         );
         let fwd = q * Vec3::Z;
         let vehicle_yaw = fwd.x.atan2(fwd.z);
-        let target_yaw = vehicle_yaw + std::f32::consts::PI;
+        let target_cam_yaw = vehicle_yaw + std::f32::consts::PI;
+        // ── Parametric tracks: everything is (focus, yaw, distance,
+        //   elevation) — no position lerping, no crossfades. Each
+        //   track runs on its own smoothstep window; their unions
+        //   overlap to give the blended motion. ──
 
-        // ── Focus: eye on the machine during the pull-back phase ──
-        let s_focus = smoothstep(sub_progress(t, 0.0, 0.4));
-        cam.focus = target.start_focus.lerp(target_focus, s_focus);
+        // Focus eases onto the target during the pull-back.
+        let s_focus = smoothstep(sub_progress(t, 0.1, 0.5));
+        let focus = target.start_focus.lerp(target_focus, s_focus);
 
-        // ── Distance: bell with a brief hold at the apex ──
-        let apex = target.start_distance.max(target.distance) * 1.8;
-        cam.distance = if t < 0.4 {
-            // Phase 1: zoom out, start → apex.
-            let s = smoothstep(sub_progress(t, 0.0, 0.4));
-            lerp_f32(target.start_distance, apex, s)
-        } else if t < 0.5 {
-            apex
+        // Distance: up for the first half, down for the second.
+        // Two smoothsteps meeting with zero derivative at t = 0.5
+        // → continuous velocity through the apex.
+        let distance = if t < 0.5 {
+            let s = smoothstep(sub_progress(t, 0.0, 0.5));
+            target.start_distance + (target.apex_distance - target.start_distance) * s
         } else {
-            // Phase 3: zoom in, apex → target distance.
             let s = smoothstep(sub_progress(t, 0.5, 1.0));
-            lerp_f32(apex, target.distance, s)
+            target.apex_distance + (target.distance - target.apex_distance) * s
         };
 
-        // ── Yaw: spin from 30 % onward (after the eye is settled) ──
-        let s_yaw = smoothstep(sub_progress(t, 0.3, 1.0));
-        let mut yaw_gap = (target_yaw - target.start_yaw) % tau;
+        // Yaw: starts at t = 0.375 (1/4 of the pull-back window
+        // before the pull-back finishes). The camera is still
+        // rising while the spin kicks off, so the motion reads as
+        // a sweeping arc upward, not a stop-then-spin.
+        let s_yaw = smoothstep(sub_progress(t, 0.375, 1.0));
+        let tau = std::f32::consts::TAU;
+        let mut yaw_gap = (target_cam_yaw - target.start_yaw) % tau;
         if yaw_gap > std::f32::consts::PI {
             yaw_gap -= tau;
         } else if yaw_gap < -std::f32::consts::PI {
             yaw_gap += tau;
         }
-        cam.yaw = target.start_yaw + yaw_gap * s_yaw;
+        let yaw = target.start_yaw + yaw_gap * s_yaw;
+
+        cam.focus = focus;
+        cam.yaw = yaw;
+        cam.distance = distance;
+        cam.elevation = target.start_elevation;
 
         if t >= 1.0 {
-            // Snap to final targets + clear.
+            // Snap to the settled "behind the vehicle" pose and
+            // restore the original elevation.
             cam.focus = target_focus;
+            cam.yaw = target_cam_yaw;
             cam.distance = target.distance;
-            cam.yaw = target_yaw;
+            cam.elevation = target.start_elevation;
             cam.fly_target = None;
         } else {
             cam.fly_target = Some(target);
@@ -208,9 +232,6 @@ fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
 
 /// Handles pan (middle drag), orbit (L+R drag), and double-middle-click
 /// re-centring (ray-casts the cursor to the ground plane).

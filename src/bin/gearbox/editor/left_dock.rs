@@ -117,7 +117,11 @@ pub fn left_dock_ui(
         if let Some(state) = sim.0.vehicle(id) {
             let size = state.spec.chassis.size;
             let max_dim = size.x.max(size.y).max(size.z) as f32;
-            let target_dist = (max_dim * 3.0).max(4.0);
+            // Final settled distance — 9× the longest chassis
+            // dimension. The previous 3× had the camera ending up
+            // very close to the machine; tripling it leaves a
+            // comfortable cinematic framing at the finish.
+            let target_dist = (max_dim * 9.0).max(12.0);
             if let Ok(mut cam) = cameras.single_mut() {
                 // ~3 s flight — pull back, eye the machine, spiral in.
                 let target = FlyTarget::new(id, target_dist, 3.0, &cam);
