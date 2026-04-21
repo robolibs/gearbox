@@ -4,6 +4,7 @@ pub mod float;
 pub mod gizmos;
 pub mod inspector;
 pub mod left_dock;
+pub mod pending_spawn;
 pub mod persist;
 pub mod right_dock;
 pub mod selection;
@@ -29,6 +30,7 @@ impl Plugin for EditorPlugin {
             .insert_resource(right)
             .init_resource::<selection::Selection>()
             .init_resource::<gizmos::GizmoMode>()
+            .init_resource::<pending_spawn::PendingSpawn>()
             .add_systems(Startup, gizmos::configure_gizmos)
             .add_systems(
                 EguiPrimaryContextPass,
@@ -45,7 +47,11 @@ impl Plugin for EditorPlugin {
                     selection::pick_and_drag_system,
                     gizmos::gizmo_mode_input,
                     persist::save_state_on_change,
-                ),
+                    pending_spawn::spawn_ghost_if_needed,
+                    pending_spawn::update_ghost_position,
+                    pending_spawn::commit_or_cancel_ghost,
+                )
+                    .chain(),
             )
             // Gizmos run after transform propagation so they read the
             // big_space-rebased `GlobalTransform`, not a stale one.

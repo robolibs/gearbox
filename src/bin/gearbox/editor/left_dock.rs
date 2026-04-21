@@ -6,8 +6,8 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::viz::{GearboxSim, PlayerControlled, VehicleBody};
-use crate::BigSpaceRoot;
 
+use super::pending_spawn::PendingSpawn;
 use super::persist::EditorUiState;
 use super::selection::Selection;
 use super::{float, spawn_panel, tree};
@@ -34,7 +34,7 @@ pub fn left_dock_ui(
     mut selection: ResMut<Selection>,
     // tree
     bodies: Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
-    big_space_root: Res<BigSpaceRoot>,
+    mut pending: ResMut<PendingSpawn>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
@@ -77,13 +77,12 @@ pub fn left_dock_ui(
             LeftTab::Spawn => spawn_panel::draw_content(
                 ui,
                 &mut commands,
+                &mut pending,
+                &existing_bodies,
                 &mut sim,
                 &mut meshes,
                 &mut materials,
-                &existing_bodies,
                 &player_tagged,
-                &mut selection,
-                big_space_root.0,
             ),
             LeftTab::None => {}
         },

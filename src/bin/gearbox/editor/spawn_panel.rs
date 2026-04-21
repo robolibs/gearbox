@@ -1,59 +1,54 @@
 //! Spawn-panel content. Rendered by `left_dock` when the Spawn tab is active.
 //!
-//! Layout:
-//!   - Collapsible "Vehicles" section with preset buttons
-//!   - Collapsible "Stats" with live entity counts
-//!   - Collapsible "Keybindings" cheat-sheet at the bottom
+//! Clicking a preset button doesn't drop the vehicle immediately — it
+//! starts a **ghost placement**: a translucent preview follows the
+//! cursor until the user clicks somewhere in the viewport to commit
+//! (or Esc / RMB to cancel). The heavy lifting for that flow lives in
+//! [`super::pending_spawn`]; this panel just queues the request.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
 
-use gearbox::{
-    datapod::{Point, Pose, Quaternion},
-    presets, VehicleSpec,
-};
+use gearbox::presets;
 
-use crate::viz::{
-    GearboxSim, PlayerControlled, VehicleBody, spawn_height_for, spawn_vehicle_visuals,
-};
-use crate::BigSpaceRoot;
+use crate::viz::{GearboxSim, PlayerControlled, VehicleBody};
 
-use super::selection::Selection;
+use super::pending_spawn::PendingSpawn;
 use super::style::{accent_color, fg_dim, section_caps, TEXT_PRIMARY};
 
 pub fn draw_content(
     ui: &mut egui::Ui,
     commands: &mut Commands,
-    sim: &mut GearboxSim,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    pending: &mut PendingSpawn,
     existing_bodies: &Query<Entity, With<VehicleBody>>,
-    player_tagged: &Query<Entity, With<PlayerControlled>>,
-    selection: &mut Selection,
-    big_space_root: Entity,
+    _sim: &mut GearboxSim,
+    _meshes: &mut Assets<Mesh>,
+    _materials: &mut Assets<StandardMaterial>,
+    _player_tagged: &Query<Entity, With<PlayerControlled>>,
 ) {
     egui::CollapsingHeader::new(section_caps("Vehicles"))
         .id_salt("spawn_vehicles")
         .default_open(false)
         .show(ui, |ui| {
             if preset_button(ui, "+", "Tractor", "John Deere 8R · 4W RWD").clicked() {
-                spawn_and_select(
-                    presets::tractor(),
-                    commands, sim, meshes, materials, player_tagged, selection, big_space_root,
-                );
+                pending.request(presets::tractor(), commands);
             }
             ui.add_space(2.0);
             if preset_button(ui, "+", "Car", "4-wheel sedan").clicked() {
-                spawn_and_select(
-                    presets::car(),
-                    commands, sim, meshes, materials, player_tagged, selection, big_space_root,
-                );
+                pending.request(presets::car(), commands);
             }
             ui.add_space(2.0);
             if preset_button(ui, "+", "Oxbo 2475", "6W pea harvester · crab-steer").clicked() {
-                spawn_and_select(
-                    presets::oxbo_harvester(),
-                    commands, sim, meshes, materials, player_tagged, selection, big_space_root,
+                pending.request(presets::oxbo_harvester(), commands);
+            }
+
+            if pending.spec.is_some() {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("Click in the viewport to place · Esc / RMB to cancel")
+                        .small()
+                        .italics()
+                        .color(fg_dim()),
                 );
             }
         });
@@ -92,10 +87,11 @@ pub fn draw_content(
             keybinding_row(ui, "A / D",    "steer");
             keybinding_row(ui, "Space",    "brake");
             ui.add_space(4.0);
-            keybinding_row(ui, "LMB",      "select / drag");
+            keybinding_row(ui, "LMB",      "select / drag / place");
             keybinding_row(ui, "LMB+RMB",  "orbit");
             keybinding_row(ui, "MMB",      "pan");
             keybinding_row(ui, "Wheel",    "zoom");
+            keybinding_row(ui, "Esc",      "cancel placement");
         });
 }
 
@@ -157,27 +153,4 @@ fn keybinding_row(ui: &mut egui::Ui, keys: &str, action: &str) {
         ui.add_space(6.0);
         ui.label(egui::RichText::new(action).small().color(fg_dim()));
     });
-}
-
-fn spawn_and_select(
-    spec: VehicleSpec,
-    commands: &mut Commands,
-    sim: &mut GearboxSim,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    player_tagged: &Query<Entity, With<PlayerControlled>>,
-    selection: &mut Selection,
-    big_space_root: Entity,
-) {
-    let pose = Pose {
-        point: Point::new(0.0, spawn_height_for(&spec), 0.0),
-        rotation: Quaternion::identity(),
-    };
-    let id = sim.0.spawn_vehicle(spec.clone(), pose);
-    let root = spawn_vehicle_visuals(commands, meshes, materials, id, &spec, big_space_root);
-    for e in player_tagged {
-        commands.entity(e).remove::<PlayerControlled>();
-    }
-    commands.entity(root).insert(PlayerControlled);
-    selection.vehicle = Some(id);
 }

@@ -147,7 +147,7 @@ fn cursor_pick_vehicle(
     best.map(|(id, _)| id)
 }
 
-fn cursor_ray_to_ground(
+pub fn cursor_ray_to_ground(
     camera: &Camera,
     cam_tr: &GlobalTransform,
     cursor: Vec2,
