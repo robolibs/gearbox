@@ -5,7 +5,9 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
-use crate::viz::{GearboxSim, PlayerControlled, VehicleBody};
+use gearbox::VehicleId;
+
+use crate::viz::{ChaseCamera, GearboxSim, PlayerControlled, VehicleBody};
 
 use super::pending_spawn::PendingSpawn;
 use super::persist::EditorUiState;
@@ -37,9 +39,14 @@ pub fn left_dock_ui(
     bodies: Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
     mut pending: ResMut<PendingSpawn>,
     accent: Res<AccentColor>,
+    mut cameras: Query<&mut ChaseCamera>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let accent_col = accent.0;
+
+    // Filled by `tree::draw_content` when the user double-clicks a
+    // row; applied below after the UI borrow ends.
+    let mut frame_to: Option<VehicleId> = None;
 
     // --- Side buttons (separated, stacked vertically on the left edge) ---
     float::side_button(
@@ -80,6 +87,7 @@ pub fn left_dock_ui(
                 &bodies,
                 &mut selection,
                 accent_col,
+                &mut frame_to,
             ),
             LeftTab::Spawn => spawn_panel::draw_content(
                 ui,
@@ -95,4 +103,29 @@ pub fn left_dock_ui(
             LeftTab::None => {}
         },
     );
+
+    // ─── Apply the "frame this vehicle" request ──────────────────
+    //
+    // Double-clicking a row in the workspace tree tells the chase
+    // camera to SMOOTHLY fly to that vehicle — no teleport. The
+    // camera's `chase_camera_fly` system reads `fly_target` and
+    // eases focus + distance toward it over a few tenths of a
+    // second. Distance is 3× the vehicle's longest dimension so you
+    // end up close enough to see it, not in orbit.
+    if let Some(id) = frame_to {
+        if let Some(state) = sim.0.vehicle(id) {
+            let pose = sim.0.vehicle_pose(id);
+            let size = state.spec.chassis.size;
+            let max_dim = size.x.max(size.y).max(size.z) as f32;
+            if let Ok(mut cam) = cameras.single_mut() {
+                let target_focus = Vec3::new(
+                    pose.point.x as f32,
+                    pose.point.y as f32,
+                    pose.point.z as f32,
+                );
+                let target_dist = (max_dim * 3.0).max(4.0);
+                cam.fly_target = Some((target_focus, target_dist));
+            }
+        }
+    }
 }

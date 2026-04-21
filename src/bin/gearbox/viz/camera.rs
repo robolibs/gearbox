@@ -37,6 +37,11 @@ pub struct ChaseCamera {
     pub zoom_smoothing: f64,
 
     pub last_middle_click_secs: f32,
+
+    /// When `Some((focus, distance))`, the camera smoothly flies to
+    /// that pose over the next few frames (exponential approach).
+    /// Cleared once the camera is close enough to the target.
+    pub fly_target: Option<(Vec3, f32)>,
 }
 
 impl Default for ChaseCamera {
@@ -53,7 +58,41 @@ impl Default for ChaseCamera {
             zoom_step: 0.05,
             zoom_smoothing: 6.0,
             last_middle_click_secs: -10.0,
+            fly_target: None,
         }
+    }
+}
+
+/// Smoothly move the chase camera toward its `fly_target` (if any).
+/// Uses an exponential approach: each frame closes the remaining
+/// gap by a fixed fraction, so the camera decelerates as it nears
+/// the target. Cleared when close enough to snap.
+pub fn chase_camera_fly(
+    time: Res<Time>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut CellCoord)>,
+    root_grid: Query<&Grid, With<BigSpace>>,
+) {
+    let cell_size = root_grid.single().map(|g| g.cell_edge_length()).unwrap_or(2000.0);
+    // ≈ 4 Hz exponential: closes ~63 % of the gap per 0.25 s.
+    const FLY_RATE: f32 = 6.0;
+    let dt = time.delta_secs();
+    let k = (FLY_RATE * dt).min(0.9);
+
+    for (mut cam, mut tr, mut cell) in &mut cameras {
+        let Some((target_focus, target_dist)) = cam.fly_target else { continue };
+        let focus_gap = target_focus - cam.focus;
+        let dist_gap = target_dist - cam.distance;
+
+        cam.focus += focus_gap * k;
+        cam.distance += dist_gap * k;
+
+        // Snap + clear once the remaining gap is imperceptible.
+        if focus_gap.length_squared() < 0.01 * 0.01 && dist_gap.abs() < 0.01 {
+            cam.focus = target_focus;
+            cam.distance = target_dist;
+            cam.fly_target = None;
+        }
+        apply_rig_big_space(&cam, cell_size, &mut tr, &mut cell);
     }
 }
 
@@ -131,6 +170,7 @@ pub fn chase_camera_control(
             let forward = Vec3::new(cam.yaw.sin(), 0.0, cam.yaw.cos());
             let right = Vec3::new(forward.z, 0.0, -forward.x);
             cam.focus += (-right * pan_delta.x - forward * pan_delta.y) * pan_speed;
+            cam.fly_target = None; // user took over → cancel auto-fly
         }
 
         // Orbit.
@@ -141,6 +181,7 @@ pub fn chase_camera_control(
                 5f32.to_radians(),
                 89f32.to_radians(),
             );
+            cam.fly_target = None;
         }
 
         apply_rig_big_space(&cam, cell_size, &mut tr, &mut cell);
@@ -182,6 +223,14 @@ pub fn chase_camera_zoom(
         let log_target = target.max(0.1).log10();
         let new_log = log_target - scroll_delta * cam.zoom_step;
         *target = 10f64.powf(new_log).clamp(min, max);
+        cam.fly_target = None; // scrolling cancels an auto-fly
+    }
+
+    // Keep the zoom target synced with the distance being written by
+    // the fly system; otherwise the first post-fly scroll would snap
+    // back to the pre-fly distance.
+    if cam.fly_target.is_some() {
+        *target = cam.distance as f64;
     }
 
     let dt = time.delta_secs_f64();

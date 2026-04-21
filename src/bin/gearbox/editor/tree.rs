@@ -27,6 +27,10 @@ pub fn draw_content(
     bodies: &Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
     selection: &mut Selection,
     accent: egui::Color32,
+    // Set by this function when the user double-clicks a vehicle
+    // row; caller (`left_dock`) reads it after the panel closes and
+    // reframes the chase camera on that vehicle.
+    frame_to: &mut Option<VehicleId>,
 ) {
     let mut give_drive_to: Option<(VehicleId, Entity)> = None;
 
@@ -72,8 +76,16 @@ pub fn draw_content(
                     if resp.clicked() {
                         selection.vehicle = Some(id);
                     }
-                    if resp.double_clicked() && !is_player {
-                        give_drive_to = Some((id, entity));
+                    if resp.double_clicked() {
+                        // Double-click always reframes the camera on
+                        // the clicked vehicle, so you can jump back
+                        // after zooming / panning away.
+                        *frame_to = Some(id);
+                        // Also take control of it if it isn't the
+                        // current player.
+                        if !is_player {
+                            give_drive_to = Some((id, entity));
+                        }
                     }
                 }
             });
@@ -86,7 +98,7 @@ pub fn draw_content(
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(format!(
-                    "{} total · double-click to drive",
+                    "{} total · double-click to focus + drive",
                     sim.0.vehicles().count()
                 ))
                 .small()

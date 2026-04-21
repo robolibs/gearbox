@@ -59,6 +59,7 @@ impl Plugin for GearboxVizPlugin {
                     sync::sync_vehicle_transforms_system,
                     camera::chase_camera_control,
                     camera::chase_camera_zoom,
+                    camera::chase_camera_fly,
                 )
                     .chain(),
             )

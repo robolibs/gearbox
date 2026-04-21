@@ -5,10 +5,10 @@
 //! will be dropped in here as a sibling module (or an outright
 //! replacement), keeping the rest of the codebase untouched.
 
-mod car;
+mod husky;
 mod oxbo_harvester;
 mod tractor;
 
-pub use car::car;
+pub use husky::husky;
 pub use oxbo_harvester::oxbo_harvester;
 pub use tractor::tractor;

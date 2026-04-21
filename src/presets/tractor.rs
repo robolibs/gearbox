@@ -1,20 +1,10 @@
-//! Tractor — dimensions ported from **John Deere 8R** real-world specs
-//! (Deere spec sheet + Nebraska OECD Test 2141 for 8R 370/410):
+//! Tractor — small utility tractor, sized to match the flatsim
+//! tractor URDF rather than the John-Deere-8R scale we used before.
+//! Flatsim body is 1.6 × 2.8 m with r=0.42 m wheels; we keep the same
+//! overall footprint but preserve the JD-style visual silhouette
+//! (small front / big rear wheels, cab + hood + weights).
 //!
-//!   overall length        5.99 m   (our chassis is 5.0 m — the real
-//!                                   "overall" includes front weights
-//!                                   and rear hitch linkage that
-//!                                   stick out past the frame)
-//!   overall width          2.55 m  (over fenders; chassis 2.00 m)
-//!   height to cab top      3.33 m
-//!   wheelbase              3.05 m  → front z = +1.525, rear z = -1.525
-//!   front tyre 600/70R30  Ø 1.69 m, tread 0.60 m
-//!   rear  tyre 710/70R42  Ø 2.05 m, tread 0.71 m
-//!   shipping mass         ~12 000 kg (we use 8500 — matches the
-//!                                     existing suspension tuning better)
-//!   cab (CommandView III)  1.80 m long × 1.75 m tall × 1.75 m wide,
-//!                          rear-aligned; ~30 % of overall length
-//!   hood (engine cover)    ~2.80 m long, ~0.85 m tall; ~47 % of length
+//! Reference: `/home/bresilla/data/code/ares/flatsim/machines/urdf/tractor.urdf`.
 
 use datapod::{Point, Size};
 
@@ -23,50 +13,55 @@ use crate::vehicle::{ChassisSpec, PartKind, PartSpec, VehicleBuilder, VehicleSpe
 const MAX_STEER_RAD: f32 = 0.6109; // 35°
 
 pub fn tractor() -> VehicleSpec {
-    let chassis_x = 2.00_f64;
-    let chassis_y = 1.30_f64;
-    let chassis_z = 5.00_f64;
+    let chassis_x = 1.40_f64;
+    // Chassis box (the "lower" section where the wheels attach) made
+    // 30 % taller — 0.80 m → 1.04 m — so the frame reads as a proper
+    // utility-tractor base instead of a low slab. The cab rides on
+    // top unchanged, so the whole silhouette lifts with it.
+    let chassis_y = 1.04_f64;
+    let chassis_z = 2.80_f64;
 
     let chassis = ChassisSpec {
         size: Size::new(chassis_x, chassis_y, chassis_z),
-        mass: 8500.0,
-        com_offset: Point::new(0.0, -0.35, 0.0),
+        mass: 2500.0,
+        com_offset: Point::new(0.0, -0.22, 0.0),
         linear_damping: 0.2,
         angular_damping: 2.0,
         ccd: true,
         color: [0.0, 1.0, 0.392], // John Deere green
     };
 
-    // Suspension tuning.  Keeping stiffness high enough that the
-    // heavy chassis doesn't bottom out, but dropping damping so the
-    // springs visibly bob on acceleration / braking / uneven ground
-    // — you asked to feel the suspensions, so here they are.
-    let rest = 0.35;
-    let stiffness = 180.0;
-    let damping = 8.0;
-    let friction = 26.0;
-    let max_force = 60_000.0;
+    // Suspension — stiffness/damping scaled down with the mass so the
+    // visibly-bouncy feel from the larger preset carries over.
+    let rest = 0.22;
+    let stiffness = 55.0;
+    let damping = 4.5;
+    let friction = 24.0;
+    let max_force = 18_000.0;
 
-    // Real tyre dimensions.
-    let front_radius = 0.845; // 1.69 m / 2
-    let front_width  = 0.60;
-    let rear_radius  = 1.025; // 2.05 m / 2
-    let rear_width   = 0.71;
+    // Tyre dimensions — JD-style front-small/rear-big distinction,
+    // trimmed back 10 % from the larger stance. Front tyre 40 %
+    // thinner than the rear so the nose reads as steered rather than
+    // matching the drive axle.
+    let front_radius = 0.378;
+    let front_width  = 0.227;
+    let rear_radius  = 0.594;
+    let rear_width   = 0.432;
 
-    // Wheels stick 0.35 m below the chassis bottom — a small bump
-    // over the baseline 0.30 for a slightly raised silhouette,
-    // without destabilising the tall-cab silhouette at speed.
+    // Wheels stick 30 cm below the chassis bottom — the previous
+    // 20 cm left the frame sitting very low; this raises the whole
+    // tractor a touch for a stance closer to the JD reference.
     let chassis_bottom = -chassis_y as f32 * 0.5;
-    let target_bottom  = chassis_bottom - 0.35;
+    let target_bottom  = chassis_bottom - 0.30;
     let front_conn_y   = target_bottom + rest + front_radius;
     let rear_conn_y    = target_bottom + rest + rear_radius;
 
-    // Wheelbase 3.05 m → front at +1.525, rear at -1.525.
-    // Lateral x = ±1.15 so the tyres poke slightly outboard of the
-    // chassis (chassis half-width is 1.00 m) — matches the real look.
-    let wheel_x = 1.15;
-    let front_z = 1.525;
-    let rear_z  = -1.525;
+    // Wheelbase 1.70 m → front at +0.85, rear at -0.85.
+    // Lateral x = ±0.75 so tyres poke slightly outboard of the
+    // chassis (chassis half-width is 0.70 m).
+    let wheel_x = 0.75;
+    let front_z = 0.85;
+    let rear_z  = -0.85;
 
     let front = |x: f64| WheelSpec {
         chassis_connection: Point::new(x, front_conn_y as f64, front_z),
@@ -82,7 +77,7 @@ pub fn tractor() -> VehicleSpec {
         driven: false,
         steered: true,
         max_engine_force: 0.0,
-        max_brake: 1_500.0,
+        max_brake: 600.0,
         max_steer_rad: MAX_STEER_RAD,
     };
     let rear = |x: f64| WheelSpec {
@@ -98,29 +93,29 @@ pub fn tractor() -> VehicleSpec {
         width: rear_width,
         driven: true,
         steered: false,
-        max_engine_force: 10_000.0,
-        max_brake: 3_500.0,
+        max_engine_force: 4_000.0,
+        max_brake: 1_500.0,
         max_steer_rad: 0.0,
     };
 
     // ─── Body parts ─────────────────────────────────────────────────
-    //   HOOD in front (lower, engine cover shape)
-    //   CAB in back (full chassis height again, rear-aligned)
+    //   CAB — the only superstructure; hood removed.
     //   ROOF dark cap on cab
     //   REAR HITCH marker
+    //   FRONT WEIGHTS small dark block at the nose
     let body_green = chassis.color;
     let yellow     = [0.95, 0.85, 0.15];
 
-    let chassis_top:  f64 = chassis_y * 0.5;
-    let chassis_back: f64 = -chassis_z * 0.5;
-    let chassis_front: f64 = chassis_z * 0.5;
+    let chassis_top:   f64 = chassis_y * 0.5;
+    let chassis_back:  f64 = -chassis_z * 0.5;
+    let chassis_front: f64 =  chassis_z * 0.5;
 
-    // CAB — 1.75 m tall, 3.04 m long (2.34 × 1.30, another 30 %
-    // forward extension on top of the previous 30 %). Rear still
-    // aligned to the chassis back, full chassis width.
-    let cab_h: f64       = 1.75;
-    let cab_depth: f64   = 3.04;
-    let cab_center_z: f64 = chassis_back + cab_depth * 0.5; // -0.98
+    // CAB — 0.88 m tall, 1.59 m long. Rear edge sits 7.5 cm forward
+    // of the chassis back (was 15 cm — halved for a smaller
+    // drawbar-notch).
+    let cab_h: f64       = 0.88;
+    let cab_depth: f64   = 1.59;
+    let cab_center_z: f64 = chassis_back + cab_depth * 0.5 + 0.075;
     let cab = PartSpec {
         name: "cab".into(),
         position: Point::new(0.0, chassis_top + cab_h * 0.5, cab_center_z),
@@ -131,39 +126,24 @@ pub fn tractor() -> VehicleSpec {
     // Thin dark roof, slight overhang.
     let roof = PartSpec {
         name: "roof".into(),
-        position: Point::new(0.0, chassis_top + cab_h + 0.08, cab_center_z),
-        size: Size::new(chassis_x + 0.12, 0.14, cab_depth + 0.12),
+        position: Point::new(0.0, chassis_top + cab_h + 0.05, cab_center_z),
+        size: Size::new(chassis_x + 0.08, 0.09, cab_depth + 0.08),
         color: [0.22, 0.22, 0.24],
-        kind: PartKind::Karosserie,
-    };
-    // HOOD — meets the cab flush (no gap). Runs from the cab's front
-    // face to the same forward position it occupied before.
-    let cab_front_z: f64 = cab_center_z + cab_depth * 0.5;     // -0.16
-    let hood_h: f64      = 0.85;
-    let hood_back_z: f64 = cab_front_z;                        // -0.16 — flush
-    let hood_front_z: f64 = chassis_front - 0.35;              // +2.15
-    let hood_depth: f64   = hood_front_z - hood_back_z;        //  2.31
-    let hood_center_z: f64 = (hood_back_z + hood_front_z) * 0.5;
-    let hood = PartSpec {
-        name: "hood".into(),
-        position: Point::new(0.0, chassis_top + hood_h * 0.5, hood_center_z),
-        size: Size::new(chassis_x, hood_h, hood_depth),
-        color: body_green,
         kind: PartKind::Karosserie,
     };
     // Rear hitch marker — small cube behind the cab.
     let rear_hitch = PartSpec {
         name: "rear_hitch".into(),
-        position: Point::new(0.0, -0.30, chassis_back - 0.10),
-        size: Size::new(0.20, 0.20, 0.20),
+        position: Point::new(0.0, -0.18, chassis_back - 0.06),
+        size: Size::new(0.12, 0.12, 0.12),
         color: yellow,
         kind: PartKind::Hitch,
     };
     // Front weights — small dark block at the nose.
     let weights = PartSpec {
         name: "front_weights".into(),
-        position: Point::new(0.0, -0.20, chassis_front + 0.15),
-        size: Size::new(1.20, 0.70, 0.30),
+        position: Point::new(0.0, -0.12, chassis_front + 0.09),
+        size: Size::new(0.70, 0.40, 0.18),
         color: [0.25, 0.25, 0.28],
         kind: PartKind::Karosserie,
     };
@@ -173,7 +153,6 @@ pub fn tractor() -> VehicleSpec {
         .wheel(front(-wheel_x))
         .wheel(rear(wheel_x))
         .wheel(rear(-wheel_x))
-        .part(hood)
         .part(cab)
         .part(roof)
         .part(weights)

@@ -5,8 +5,11 @@
 
 mod editor;
 mod viz;
+mod window_settings;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster};
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -29,8 +32,76 @@ use viz::grid::{rotation_from_latlon_to_top, spawn_circle_meshes, GroundGrid};
 #[derive(Resource, Copy, Clone)]
 pub struct BigSpaceRoot(pub Entity);
 
+/// Tag for the fine-tessellated spherical cap that follows the
+/// camera. Same material as the planet; curved to match the sphere
+/// exactly. Provides enough local triangle density for vehicle
+/// shadows to land cleanly on it (cheap to render, no visible seam
+/// because it's co-planar with the planet surface everywhere).
+#[derive(Component)]
+pub struct ShadowPatch;
+
+/// Build a spherical-cap mesh: a square grid `(n+1)²` vertices wide
+/// projected onto the surface of a sphere of radius `r` centred at
+/// `(0, -r, 0)`. The mesh's local origin sits on the sphere's tangent
+/// point at the "top" (y = 0); vertices curve downward by the exact
+/// amount the sphere does, so the patch is geometrically identical
+/// to the underlying planet where they overlap.
+fn spherical_cap_mesh(radius: f32, half_size: f32, n: u32) -> Mesh {
+    let n = n.max(1) as i32;
+    let step = (2.0 * half_size) / n as f32;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
+    let mut normals:   Vec<[f32; 3]> = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
+    let mut uvs:       Vec<[f32; 2]> = Vec::with_capacity(((n + 1) * (n + 1)) as usize);
+    let mut indices:   Vec<u32>      = Vec::with_capacity((n * n * 6) as usize);
+
+    for i in 0..=n {
+        for j in 0..=n {
+            let x = -half_size + i as f32 * step;
+            let z = -half_size + j as f32 * step;
+            // Sphere centred at (0, -r, 0). Surface above XZ plane:
+            //   x² + (y + r)² + z² = r²   →   y = √(r² − x² − z²) − r.
+            let dist2 = x * x + z * z;
+            let y = (radius * radius - dist2).sqrt() - radius;
+            positions.push([x, y, z]);
+            // Outward sphere normal = (x, y + r, z) / r.
+            normals.push([x / radius, (y + radius) / radius, z / radius]);
+            uvs.push([
+                (i as f32) / (n as f32),
+                (j as f32) / (n as f32),
+            ]);
+        }
+    }
+    let row = (n + 1) as u32;
+    for i in 0..n as u32 {
+        for j in 0..n as u32 {
+            let a = i * row + j;
+            let b = a + 1;
+            let c = a + row;
+            let d = c + 1;
+            // CCW winding viewed from above (+Y looking down), so
+            // Bevy's default back-face culling doesn't hide the
+            // patch. This is the bug that stopped shadows: if the
+            // patch is culled, there's no surface to receive them.
+            indices.extend_from_slice(&[a, b, c, b, d, c]);
+        }
+    }
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 
 fn main() {
+    // Restore the last-saved window geometry (size + position) so we
+    // don't boot into a default tiny pane at the top-left every run.
+    let window_geometry = window_settings::load_window_geometry();
+
     App::new()
         // Sky-blue horizon fade so the DistanceFog blends into the clear colour.
         .insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.86)))
@@ -44,11 +115,7 @@ fn main() {
                 .build()
                 .disable::<TransformPlugin>() // big_space supplies its own
                 .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "gearbox editor".into(),
-                        resolution: [1280u32, 800u32].into(),
-                        ..default()
-                    }),
+                    primary_window: Some(window_settings::geometry_to_window(window_geometry)),
                     ..default()
                 }),
         )
@@ -56,8 +123,27 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .add_plugins(GearboxVizPlugin)
         .add_plugins(editor::EditorPlugin)
+        // Persists the primary window's size + position to
+        // ~/.config/gearbox/window.txt on every resize / move.
+        .add_plugins(window_settings::WindowSettingsPlugin)
         .add_systems(Startup, setup_scene)
+        .add_systems(Update, follow_camera_shadow_patch)
         .run();
+}
+
+/// Re-centre the `ShadowPatch` under the chase-camera's focus every
+/// frame so vehicle shadows always land on it, no matter where in
+/// the world the user drives.
+fn follow_camera_shadow_patch(
+    cameras: Query<&ChaseCamera>,
+    mut patches: Query<&mut Transform, With<ShadowPatch>>,
+) {
+    let Ok(cam) = cameras.single() else { return };
+    for mut tr in patches.iter_mut() {
+        tr.translation.x = cam.focus.x;
+        tr.translation.y = 0.0;
+        tr.translation.z = cam.focus.z;
+    }
 }
 
 fn setup_scene(
@@ -93,13 +179,15 @@ fn setup_scene(
 
     // --- Planet sphere ---
     //
-    // 8192 × 4096 → 67 M triangles. Both sector and stack counts
-    // doubled so the tangent-triangle edges are now ~5 km in each
-    // direction. Chord sag below the arc drops to ~0.5 m for
-    // sectors and ~0.25 m for stacks — the shadow should land within
-    // a few cm of the wheels. Uses ~1 GB of VRAM for positions +
-    // normals; acceptable on modern GPUs.
-    let planet_mesh = meshes.add(Sphere::new(radius).mesh().uv(8192, 4096));
+    // Moderate UV resolution (1024 × 512 → ~500 k triangles) — this
+    // covers the whole 6 371 km ball, renders instantly, and is
+    // plenty for the distant horizon. Tangent-plane triangles are
+    // ~40 km wide at this density, too coarse for precise shadow
+    // reception near the vehicle; the `ShadowPatch` spawned below is
+    // a small, camera-following spherical cap that matches the
+    // sphere curvature exactly and provides the fine geometry the
+    // shadow needs.
+    let planet_mesh = meshes.add(Sphere::new(radius).mesh().uv(1024, 512));
     let planet_mat = materials.add(StandardMaterial {
         base_color: planet_green,
         perceptual_roughness: 0.95,
@@ -130,13 +218,30 @@ fn setup_scene(
                 ..default()
             },
             Mesh3d(planet_mesh),
+            MeshMaterial3d(planet_mat.clone()),
+            // Planet doesn't cast (sun is outside a 6 371 km ball).
+            // It also doesn't *receive* shadows here — its triangles
+            // are far too coarse for CSM to hit them precisely. The
+            // `ShadowPatch` below catches shadows instead.
+            NotShadowCaster,
+            bevy::light::NotShadowReceiver,
+        ))
+        .insert(ChildOf(root_id));
+
+    // Camera-following, finely-tessellated spherical cap. Sits on
+    // the planet surface, curved exactly to match the sphere, so it
+    // is visually indistinguishable from the planet (same material,
+    // zero gap at the edge). Tangent triangles are ~3 m wide → chord
+    // sag is ~μm, far below the shadow-bias threshold. The `follow`
+    // system re-positions it under the camera each frame.
+    let shadow_patch_mesh = meshes.add(spherical_cap_mesh(radius, 300.0, 200));
+    commands
+        .spawn((
+            Name::new("ShadowPatch"),
+            ShadowPatch,
+            BigSpatialBundle::default(),
+            Mesh3d(shadow_patch_mesh),
             MeshMaterial3d(planet_mat),
-            // Planet doesn't cast (sun is outside a 6 371 km ball,
-            // the back hemisphere would throw shadow across the
-            // world). It DOES receive — vehicle shadows land on the
-            // sphere. Large `shadow_normal_bias` on the sun keeps the
-            // tangent-plane triangles from self-shadowing despite
-            // being planet-scale huge.
             NotShadowCaster,
         ))
         .insert(ChildOf(root_id));

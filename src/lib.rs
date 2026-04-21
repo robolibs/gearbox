@@ -17,7 +17,9 @@ pub mod world;
 pub use control::ControlInput;
 pub use planet::{Planet, EARTH_RADIUS_M};
 pub use sim::Sim;
-pub use vehicle::{ChassisSpec, PartKind, PartSpec, VehicleId, VehicleSpec, VehicleState, WheelSpec};
+pub use vehicle::{
+    ChassisSpec, DriveMode, PartKind, PartSpec, VehicleId, VehicleSpec, VehicleState, WheelSpec,
+};
 
 /// Re-export rapier so downstream consumers don't need to pin the version.
 pub use rapier3d;

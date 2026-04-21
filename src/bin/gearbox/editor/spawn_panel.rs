@@ -35,8 +35,8 @@ pub fn draw_content(
                 pending.request(presets::tractor(), commands);
             }
             ui.add_space(2.0);
-            if preset_button(ui, "+", "Car", "4-wheel sedan", accent).clicked() {
-                pending.request(presets::car(), commands);
+            if preset_button(ui, "+", "Husky", "Clearpath robot · differential drive", accent).clicked() {
+                pending.request(presets::husky(), commands);
             }
             ui.add_space(2.0);
             if preset_button(ui, "+", "Oxbo 2475", "6W pea harvester · crab-steer", accent).clicked() {

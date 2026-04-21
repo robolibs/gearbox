@@ -33,7 +33,7 @@ pub fn draw_content(
             });
 
             // ─── opacity slider ─────────────────────────────────
-            let mut alpha = grid.lat_color.alpha();
+            let mut alpha = grid.color.alpha();
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("opacity").small().color(fg_dim()));
                 if ui
@@ -44,8 +44,7 @@ pub fn draw_content(
                     )
                     .changed()
                 {
-                    grid.lat_color = grid.lat_color.with_alpha(alpha);
-                    grid.lon_color = grid.lon_color.with_alpha(alpha);
+                    grid.color = grid.color.with_alpha(alpha);
                 }
             });
 
@@ -55,11 +54,9 @@ pub fn draw_content(
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
-                        let mut c32 = bevy_to_egui_rgb(grid.lat_color);
+                        let mut c32 = bevy_to_egui_rgb(grid.color);
                         if ui.color_edit_button_srgb(&mut c32).changed() {
-                            let rgba = egui_rgb_to_bevy(c32, alpha);
-                            grid.lat_color = rgba;
-                            grid.lon_color = rgba;
+                            grid.color = egui_rgb_to_bevy(c32, alpha);
                         }
                     },
                 );

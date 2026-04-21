@@ -16,7 +16,7 @@ use crate::convert::{
     vec3_to_velocity,
 };
 use crate::planet::Planet;
-use crate::vehicle::{PartKind, VehicleId, VehicleSpec, VehicleState, WheelSpec};
+use crate::vehicle::{DriveMode, PartKind, VehicleId, VehicleSpec, VehicleState, WheelSpec};
 use crate::world;
 
 pub struct Sim {
@@ -516,34 +516,63 @@ fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet) {
         .map(|s| if s.driven { ctrl.throttle * s.max_engine_force } else { 0.0 })
         .collect();
 
-    for (_z, wheel_indices) in &axles {
-        if wheel_indices.len() < 2 {
-            continue; // only one driven wheel on this axle — no split needed
+    match v.spec.drive_mode {
+        DriveMode::Ackermann => {
+            // Weight-transfer-aware open differential within each axle.
+            for (_z, wheel_indices) in &axles {
+                if wheel_indices.len() < 2 {
+                    continue;
+                }
+                let total_n: f32 = wheel_indices.iter().map(|&i| normal_forces[i]).sum();
+                if total_n < 1.0 {
+                    continue; // axle airborne
+                }
+                let axle_total: f32 = wheel_indices
+                    .iter()
+                    .map(|&i| ctrl.throttle * specs[i].max_engine_force)
+                    .sum();
+                for &idx in wheel_indices {
+                    let share = normal_forces[idx] / total_n;
+                    engine_force_per_wheel[idx] = axle_total * share;
+                }
+            }
         }
-        let total_n: f32 = wheel_indices.iter().map(|&i| normal_forces[i]).sum();
-        if total_n < 1.0 {
-            continue; // axle airborne — keep legacy force
-        }
-        // Total axle torque = throttle × sum of wheel max forces
-        // (so an axle with two 10 kN wheels still delivers 20 kN
-        // combined, same as before — we're only changing the split).
-        let axle_total: f32 = wheel_indices
-            .iter()
-            .map(|&i| ctrl.throttle * specs[i].max_engine_force)
-            .sum();
-        for &idx in wheel_indices {
-            let share = normal_forces[idx] / total_n;
-            engine_force_per_wheel[idx] = axle_total * share;
+        DriveMode::Differential => {
+            // Skid-steer: left vs right throttle instead of wheel
+            // angle. Positive `steer` should pivot the vehicle LEFT
+            // (matches Ackermann), which on skid-steer means right
+            // wheels faster than left. +x is the right side by our
+            // lateral convention (front/rear wheel lambdas use ±x).
+            let t = ctrl.throttle;
+            let s = ctrl.steer;
+            let left_cmd = (t + s).clamp(-1.0, 1.0);
+            let right_cmd = (t - s).clamp(-1.0, 1.0);
+            for (idx, spec) in specs.iter().enumerate() {
+                if !spec.driven {
+                    engine_force_per_wheel[idx] = 0.0;
+                    continue;
+                }
+                let cmd = if spec.chassis_connection.x < 0.0 {
+                    left_cmd
+                } else {
+                    right_cmd
+                };
+                engine_force_per_wheel[idx] = cmd * spec.max_engine_force;
+            }
         }
     }
 
+    let differential_mode = matches!(v.spec.drive_mode, DriveMode::Differential);
     let wheels = v.controller.wheels_mut();
     for ((w, spec), &engine_force) in
         wheels.iter_mut().zip(specs).zip(engine_force_per_wheel.iter())
     {
         w.engine_force = engine_force;
         w.brake = ctrl.brake * spec.max_brake * brake_gate;
-        w.steering = if spec.steered {
+        w.steering = if differential_mode {
+            // All wheels fixed forward on skid-steer.
+            0.0
+        } else if spec.steered {
             ackermann_steer(
                 ctrl.steer,
                 spec.max_steer_rad,

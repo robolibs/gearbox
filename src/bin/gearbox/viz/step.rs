@@ -32,7 +32,10 @@ pub struct SimClock {
 
 impl Default for SimClock {
     fn default() -> Self {
-        Self { paused: false, speed: SimSpeed::X1 }
+        // Boot paused so the user can orient themselves (adjust the
+        // camera, pick a machine, set up the scene) before physics
+        // starts ticking. Hit the top-centre play button to run.
+        Self { paused: true, speed: SimSpeed::X1 }
     }
 }
 

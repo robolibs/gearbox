@@ -30,8 +30,9 @@ pub fn wasd_input_system(
 }
 
 /// Rewrite the `PlayerControlled` tag so the selected vehicle is
-/// always the one WASD drives. Cheap: a handful of Entity lookups
-/// per selection change (no change → nothing runs).
+/// always the one WASD drives. Nothing selected → nothing tagged →
+/// WASD has no effect (remote-controlled vehicles will use a
+/// different tag and won't need to be selected).
 pub fn sync_player_to_selection_system(
     mut commands: Commands,
     selection: Res<Selection>,
@@ -40,22 +41,12 @@ pub fn sync_player_to_selection_system(
     if !selection.is_changed() {
         return;
     }
-    let Some(target_id) = selection.vehicle else {
-        // Nothing selected → leave the existing driver alone. If you'd
-        // rather lose driving on deselect, uncomment the block below.
-        // for (e, _, is_player) in &bodies {
-        //     if is_player {
-        //         commands.entity(e).remove::<PlayerControlled>();
-        //     }
-        // }
-        return;
-    };
+    let target_id = selection.vehicle;
     for (entity, body, is_player) in &bodies {
-        if body.id == target_id {
-            if !is_player {
-                commands.entity(entity).insert(PlayerControlled);
-            }
-        } else if is_player {
+        let should_drive = target_id == Some(body.id);
+        if should_drive && !is_player {
+            commands.entity(entity).insert(PlayerControlled);
+        } else if !should_drive && is_player {
             commands.entity(entity).remove::<PlayerControlled>();
         }
     }

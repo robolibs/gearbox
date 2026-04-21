@@ -16,6 +16,7 @@ use gearbox::{
 
 use crate::viz::GearboxSim;
 
+use super::pending_spawn::PendingSpawn;
 use super::transform_gizmos::{GizmoDrag, HoveredGizmo};
 
 /// What, if anything, is currently selected.
@@ -40,12 +41,22 @@ pub fn pick_and_drag_system(
     mut selection: ResMut<Selection>,
     mut sim: ResMut<GearboxSim>,
     buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mut contexts: EguiContexts,
     hovered_gizmo: Res<HoveredGizmo>,
     gizmo_drag: Res<GizmoDrag>,
+    pending: Res<PendingSpawn>,
 ) {
+    // Esc is the *only* way to unselect. Skip when a placement
+    // ghost is active — Esc cancels that instead (handled in
+    // `pending_spawn::commit_or_cancel_ghost`).
+    if keys.just_pressed(KeyCode::Escape) && pending.spec.is_none() {
+        selection.vehicle = None;
+        selection.drag = None;
+    }
+
     // Transform gizmos always win input: if the cursor's over a handle
     // or a drag is in flight, don't let the vehicle picker fire.
     if gizmo_drag.active.is_some() || hovered_gizmo.0.is_some() {
@@ -77,19 +88,17 @@ pub fn pick_and_drag_system(
         return;
     }
 
-    // Press: raycast and pick.
+    // Press: raycast and pick. Clicking empty space does NOT
+    // unselect — only Esc does.
     if buttons.just_pressed(MouseButton::Left) && !right_held {
-        let id = cursor_pick_vehicle(&sim, camera, cam_tr, cursor);
-        selection.vehicle = id;
-        if let Some(id) = id {
+        if let Some(id) = cursor_pick_vehicle(&sim, camera, cam_tr, cursor) {
+            selection.vehicle = Some(id);
             let drop_y = sim.0.vehicle_pose(id).point.y.max(0.8) as f32;
             selection.drag = Some(DragState {
                 press_cursor: cursor,
                 active: false,
                 drop_y,
             });
-        } else {
-            selection.drag = None;
         }
     }
 

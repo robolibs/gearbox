@@ -4,7 +4,7 @@
 //! want to define a vehicle inline can use it too. A future YAML/URDF loader
 //! will lower into the same spec.
 
-use super::{ChassisSpec, PartSpec, VehicleSpec, WheelSpec};
+use super::{ChassisSpec, DriveMode, PartSpec, VehicleSpec, WheelSpec};
 
 pub struct VehicleBuilder {
     spec: VehicleSpec,
@@ -18,6 +18,7 @@ impl VehicleBuilder {
                 chassis,
                 wheels: Vec::new(),
                 parts: Vec::new(),
+                drive_mode: DriveMode::default(),
             },
         }
     }
@@ -29,6 +30,12 @@ impl VehicleBuilder {
 
     pub fn part(mut self, part: PartSpec) -> Self {
         self.spec.parts.push(part);
+        self
+    }
+
+    /// Switch the vehicle's drive mode (default: Ackermann).
+    pub fn drive_mode(mut self, mode: DriveMode) -> Self {
+        self.spec.drive_mode = mode;
         self
     }
 
