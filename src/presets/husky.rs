@@ -73,12 +73,13 @@ pub fn husky() -> VehicleSpec {
         width,
         driven: true,  // all four wheels driven on a skid-steer
         steered: false, // no steering joints — `Differential` mode ignores this
-        // Real Husky tops out at ~1 m/s. Cut another 4× from the
-        // previous 50 N setting — 12.5 N × 4 wheels on a 50 kg body
-        // gives ~1 m/s² acceleration, which reads as a slow, careful
-        // robot instead of a rocket.
-        max_engine_force: 12.5,
-        max_brake: 10.0,
+        // Linear + angular both scale with `max_engine_force`, so
+        // cutting it by 4× again (12.5 → 3.125 N per wheel) slows
+        // both the straight-line dash and the spin-in-place together.
+        // Keeps the steer/throttle ratio set by `TURN_GAIN = 6.0`
+        // intact — motion just happens at a calmer pace.
+        max_engine_force: 3.125,
+        max_brake: 2.5,
         max_steer_rad: 0.0,
     };
 

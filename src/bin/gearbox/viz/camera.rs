@@ -14,6 +14,10 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
+use gearbox::VehicleId;
+
+use super::GearboxSim;
+
 /// Attach this to a `Camera3d` entity. Fully user-driven.
 #[derive(Component, Clone)]
 pub struct ChaseCamera {
@@ -38,10 +42,51 @@ pub struct ChaseCamera {
 
     pub last_middle_click_secs: f32,
 
-    /// When `Some((focus, distance))`, the camera smoothly flies to
-    /// that pose over the next few frames (exponential approach).
-    /// Cleared once the camera is close enough to the target.
-    pub fly_target: Option<(Vec3, f32)>,
+    /// When set, the camera cinematically flies to behind the given
+    /// vehicle at the given distance. Focus, yaw and distance are
+    /// all eased toward their targets every frame, so the camera
+    /// arcs around the machine instead of flying straight through
+    /// it. Cleared on arrival, on user gesture, or if the vehicle
+    /// disappears.
+    pub fly_target: Option<FlyTarget>,
+}
+
+/// Destination + scripted-animation state for the "double-click to
+/// focus" camera move. Three sub-phases run on overlapping sub-
+/// intervals of a single `duration`:
+///
+///   0-40 %   — pull back: camera zooms out (distance grows to
+///              `start_distance.max(target_distance) * 1.8`) while
+///              its focus eases onto the target so "eye on the
+///              machine" is locked in.
+///   40-50 %  — hold at the apex; camera now faces the target.
+///   50-100 % — orbit in: yaw arcs (shortest angle) to behind the
+///              vehicle while distance shrinks to `distance`.
+#[derive(Copy, Clone, Debug)]
+pub struct FlyTarget {
+    pub vehicle: VehicleId,
+    pub distance: f32,
+    pub duration: f32,
+    pub elapsed: f32,
+    pub start_focus: Vec3,
+    pub start_distance: f32,
+    pub start_yaw: f32,
+}
+
+impl FlyTarget {
+    /// Build a fresh target, snapshotting the camera's current pose
+    /// as the animation's starting point.
+    pub fn new(vehicle: VehicleId, distance: f32, duration: f32, cam: &ChaseCamera) -> Self {
+        Self {
+            vehicle,
+            distance,
+            duration: duration.max(0.01),
+            elapsed: 0.0,
+            start_focus: cam.focus,
+            start_distance: cam.distance,
+            start_yaw: cam.yaw,
+        }
+    }
 }
 
 impl Default for ChaseCamera {
@@ -63,37 +108,108 @@ impl Default for ChaseCamera {
     }
 }
 
-/// Smoothly move the chase camera toward its `fly_target` (if any).
-/// Uses an exponential approach: each frame closes the remaining
-/// gap by a fixed fraction, so the camera decelerates as it nears
-/// the target. Cleared when close enough to snap.
+/// Cinematic "fly to behind the selected vehicle". Runs a scripted
+/// animation over `FlyTarget::duration`:
+///
+///   1. 0–40 %  — pull back (distance → apex) while the focus
+///                eases onto the target, so the camera is "looking
+///                at the machine" well before it moves in.
+///   2. 40–50 % — hold at the apex, briefly.
+///   3. 50–100 %— orbit in: yaw arcs toward `vehicle_yaw + π` while
+///                distance shrinks to `FlyTarget::distance`.
+///
+/// Target focus/yaw are re-read from the vehicle's current pose every
+/// frame, so the camera stays locked on even if the machine moves
+/// during the flight.
 pub fn chase_camera_fly(
     time: Res<Time>,
+    sim: Res<GearboxSim>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut CellCoord)>,
     root_grid: Query<&Grid, With<BigSpace>>,
 ) {
     let cell_size = root_grid.single().map(|g| g.cell_edge_length()).unwrap_or(2000.0);
-    // ≈ 4 Hz exponential: closes ~63 % of the gap per 0.25 s.
-    const FLY_RATE: f32 = 6.0;
     let dt = time.delta_secs();
-    let k = (FLY_RATE * dt).min(0.9);
+    let tau = std::f32::consts::TAU;
 
     for (mut cam, mut tr, mut cell) in &mut cameras {
-        let Some((target_focus, target_dist)) = cam.fly_target else { continue };
-        let focus_gap = target_focus - cam.focus;
-        let dist_gap = target_dist - cam.distance;
-
-        cam.focus += focus_gap * k;
-        cam.distance += dist_gap * k;
-
-        // Snap + clear once the remaining gap is imperceptible.
-        if focus_gap.length_squared() < 0.01 * 0.01 && dist_gap.abs() < 0.01 {
-            cam.focus = target_focus;
-            cam.distance = target_dist;
+        let Some(mut target) = cam.fly_target else { continue };
+        if sim.0.vehicle(target.vehicle).is_none() {
             cam.fly_target = None;
+            continue;
         }
+
+        target.elapsed += dt;
+        let t = (target.elapsed / target.duration).clamp(0.0, 1.0);
+
+        // Live target pose.
+        let pose = sim.0.vehicle_pose(target.vehicle);
+        let target_focus = Vec3::new(
+            pose.point.x as f32,
+            pose.point.y as f32,
+            pose.point.z as f32,
+        );
+        let q = Quat::from_xyzw(
+            pose.rotation.x as f32,
+            pose.rotation.y as f32,
+            pose.rotation.z as f32,
+            pose.rotation.w as f32,
+        );
+        let fwd = q * Vec3::Z;
+        let vehicle_yaw = fwd.x.atan2(fwd.z);
+        let target_yaw = vehicle_yaw + std::f32::consts::PI;
+
+        // ── Focus: eye on the machine during the pull-back phase ──
+        let s_focus = smoothstep(sub_progress(t, 0.0, 0.4));
+        cam.focus = target.start_focus.lerp(target_focus, s_focus);
+
+        // ── Distance: bell with a brief hold at the apex ──
+        let apex = target.start_distance.max(target.distance) * 1.8;
+        cam.distance = if t < 0.4 {
+            // Phase 1: zoom out, start → apex.
+            let s = smoothstep(sub_progress(t, 0.0, 0.4));
+            lerp_f32(target.start_distance, apex, s)
+        } else if t < 0.5 {
+            apex
+        } else {
+            // Phase 3: zoom in, apex → target distance.
+            let s = smoothstep(sub_progress(t, 0.5, 1.0));
+            lerp_f32(apex, target.distance, s)
+        };
+
+        // ── Yaw: spin from 30 % onward (after the eye is settled) ──
+        let s_yaw = smoothstep(sub_progress(t, 0.3, 1.0));
+        let mut yaw_gap = (target_yaw - target.start_yaw) % tau;
+        if yaw_gap > std::f32::consts::PI {
+            yaw_gap -= tau;
+        } else if yaw_gap < -std::f32::consts::PI {
+            yaw_gap += tau;
+        }
+        cam.yaw = target.start_yaw + yaw_gap * s_yaw;
+
+        if t >= 1.0 {
+            // Snap to final targets + clear.
+            cam.focus = target_focus;
+            cam.distance = target.distance;
+            cam.yaw = target_yaw;
+            cam.fly_target = None;
+        } else {
+            cam.fly_target = Some(target);
+        }
+
         apply_rig_big_space(&cam, cell_size, &mut tr, &mut cell);
     }
+}
+
+fn sub_progress(t: f32, a: f32, b: f32) -> f32 {
+    ((t - a) / (b - a)).clamp(0.0, 1.0)
+}
+
+fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
 /// Handles pan (middle drag), orbit (L+R drag), and double-middle-click

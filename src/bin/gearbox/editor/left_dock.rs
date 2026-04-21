@@ -8,6 +8,7 @@ use bevy_egui::{egui, EguiContexts};
 use gearbox::VehicleId;
 
 use crate::viz::{ChaseCamera, GearboxSim, PlayerControlled, VehicleBody};
+use crate::viz::camera::FlyTarget;
 
 use super::pending_spawn::PendingSpawn;
 use super::persist::EditorUiState;
@@ -114,17 +115,13 @@ pub fn left_dock_ui(
     // end up close enough to see it, not in orbit.
     if let Some(id) = frame_to {
         if let Some(state) = sim.0.vehicle(id) {
-            let pose = sim.0.vehicle_pose(id);
             let size = state.spec.chassis.size;
             let max_dim = size.x.max(size.y).max(size.z) as f32;
+            let target_dist = (max_dim * 3.0).max(4.0);
             if let Ok(mut cam) = cameras.single_mut() {
-                let target_focus = Vec3::new(
-                    pose.point.x as f32,
-                    pose.point.y as f32,
-                    pose.point.z as f32,
-                );
-                let target_dist = (max_dim * 3.0).max(4.0);
-                cam.fly_target = Some((target_focus, target_dist));
+                // ~3 s flight — pull back, eye the machine, spiral in.
+                let target = FlyTarget::new(id, target_dist, 3.0, &cam);
+                cam.fly_target = Some(target);
             }
         }
     }

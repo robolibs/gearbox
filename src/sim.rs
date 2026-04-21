@@ -539,14 +539,25 @@ fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet) {
         }
         DriveMode::Differential => {
             // Skid-steer: left vs right throttle instead of wheel
-            // angle. Positive `steer` should pivot the vehicle LEFT
-            // (matches Ackermann), which on skid-steer means right
-            // wheels faster than left. +x is the right side by our
-            // lateral convention (front/rear wheel lambdas use ±x).
+            // angle. Positive `steer` pivots the vehicle LEFT
+            // (matches Ackermann) — right-side wheels have to run
+            // faster than left-side. `+x` is the right side by our
+            // lateral convention.
+            //
+            // `TURN_GAIN` amplifies the steer component's
+            // contribution so turns are crisp at the low
+            // `max_engine_force` values the Husky needs for a
+            // sensible straight-line top speed. Pure turn-in-place
+            // produces `TURN_GAIN × max_engine_force` per wheel,
+            // well above the straight-line force budget.
+            const TURN_GAIN: f32 = 6.0;
             let t = ctrl.throttle;
-            let s = ctrl.steer;
-            let left_cmd = (t + s).clamp(-1.0, 1.0);
-            let right_cmd = (t - s).clamp(-1.0, 1.0);
+            let s = ctrl.steer * TURN_GAIN;
+            // +X is the right side. Positive `steer` (A key) must
+            // pivot the vehicle LEFT, i.e. right-side wheels push
+            // backward while left-side wheels push forward.
+            let left_cmd = t + s;
+            let right_cmd = t - s;
             for (idx, spec) in specs.iter().enumerate() {
                 if !spec.driven {
                     engine_force_per_wheel[idx] = 0.0;
