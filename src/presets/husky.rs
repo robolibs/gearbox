@@ -29,7 +29,8 @@ pub fn husky() -> VehicleSpec {
         com_offset: Point::new(0.0, -0.05, 0.0),
         linear_damping: 0.2,
         angular_damping: 2.5,
-        ccd: true,
+        // CCD off — see tractor.rs for the parry underflow rationale.
+        ccd: false,
         // Brightened from flatsim's deep purple — more luminous /
         // saturated so the robot reads against the sandy ground.
         color: [0.68, 0.30, 1.00],

@@ -375,9 +375,14 @@ impl Sim {
     pub fn step(&mut self, dt: f32) {
         self.integration.dt = dt;
 
-        // 1. Translate ControlInput → per-wheel engine/brake/steering.
+        // 1. Translate ControlInput → per-wheel engine/brake/steering
+        //    for ground vehicles, or direct body forces/torques for
+        //    drones.
         for v in self.vehicles.values_mut() {
-            apply_controls(v, &self.bodies);
+            match v.spec.drive_mode {
+                DriveMode::Drone => apply_drone_controls(v, &mut self.bodies, self.gravity),
+                _ => apply_controls(v, &self.bodies),
+            }
         }
 
         // 1b. Parking brake. Rapier's `wheel.brake` is applied as
@@ -388,6 +393,9 @@ impl Sim {
         // pressing brake AND the vehicle is already slow, zero out
         // the horizontal linvel + the angular velocity directly.
         for v in self.vehicles.values() {
+            if matches!(v.spec.drive_mode, DriveMode::Drone) {
+                continue;
+            }
             if v.control.brake < 0.5 {
                 continue;
             }
@@ -402,7 +410,8 @@ impl Sim {
             }
         }
 
-        // 2. Run each vehicle's ray-cast controller.
+        // 2. Run each ground vehicle's ray-cast controller. Drones
+        //    skip this — they have no wheels.
         let Sim {
             vehicles,
             bodies,
@@ -412,13 +421,13 @@ impl Sim {
             ..
         } = self;
         for v in vehicles.values_mut() {
+            if matches!(v.spec.drive_mode, DriveMode::Drone) {
+                continue;
+            }
             // Exclude the vehicle's OWN chassis from its wheel raycasts.
             // Without this, rays starting inside the chassis collider hit
             // the chassis itself, rapier reports `suspension_length = 0`,
             // and the wheels get "stuck" against the chassis bottom.
-            // Exclude own body + restrict to GROUND|CHASSIS so our
-            // ray never treats another vehicle's wheel collider as
-            // ground (see `world::wheel_raycast_groups`).
             let filter = QueryFilter::default()
                 .exclude_rigid_body(v.body)
                 .groups(world::wheel_raycast_groups());
@@ -537,6 +546,11 @@ fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet) {
                 }
             }
         }
+        DriveMode::Drone => {
+            // Drones never get here — `step()` dispatches them to
+            // `apply_drone_controls`. Leave per-wheel forces at zero
+            // just in case a wheel is present on a Drone-mode spec.
+        }
         DriveMode::Differential => {
             // Skid-steer: left vs right throttle instead of wheel
             // angle. Positive `steer` pivots the vehicle LEFT
@@ -594,6 +608,119 @@ fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet) {
             0.0
         };
     }
+}
+
+/// Arcade drone controls with cosmetic tilt.
+///
+/// A real quadrotor is an inverted pendulum — differential rotor
+/// thrust tilts the body, gravity then pulls it horizontally. Doing
+/// that literally in rapier needs a PID attitude stabiliser to keep
+/// it from immediately flipping (no pendulum stays balanced by
+/// itself). Instead we cheat in the standard game-engine way:
+///
+///   - Horizontal translation is driven by direct **forces at the
+///     centre of mass** — always stable, arcade-easy to steer.
+///   - Tilt is produced by a **PD controller** that drives the
+///     drone's body toward a target pitch/roll angle proportional
+///     to the `throttle` / `steer` commands. Release the stick and
+///     it levels out again.
+///
+/// Control mapping:
+///   - `throttle` (W/S) → forward / backward force + nose-down/up
+///     visual tilt (drone "leans into" its motion).
+///   - `steer`    (A/D) → strafe force + bank-right/left tilt.
+///   - `lift`     (Z/X) → extra vertical force on top of the
+///     constant hover force that cancels gravity.
+///   - `yaw`      (Q/E) → yaw torque around world +Y. Positive
+///     `yaw` (Q) = turn LEFT.
+fn apply_drone_controls(v: &mut VehicleState, bodies: &mut RigidBodySet, gravity: Vector) {
+    let ctrl = v.control;
+    let Some(rb) = bodies.get_mut(v.body) else { return };
+    let mass = rb.mass();
+    let rot = *rb.rotation();
+
+    // World-frame basis vectors from the body's current rotation.
+    let fwd_world = rot * Vec3::Z;
+    let right_world = rot * Vec3::X;
+    let up_body_world = rot * Vec3::Y;
+
+    // Horizontal projections so the drone doesn't dive when tilted.
+    let fwd_h = Vec3::new(fwd_world.x, 0.0, fwd_world.z).normalize_or_zero();
+    let right_h = Vec3::new(right_world.x, 0.0, right_world.z).normalize_or_zero();
+
+    // Tunables (per-mass, so scaling the drone up keeps the feel).
+    const HORIZ_ACCEL: f32 = 6.0;   // m/s² at full stick
+    const LIFT_ACCEL:  f32 = 10.0;  // m/s² at full lift
+    const YAW_ACCEL:   f32 = 2.7;   // rad/s² at full yaw (3× the previous 0.9 — Q/E now spin briskly)
+    const MAX_TILT:    f32 = 0.30;  // rad (~17°) at full stick
+    // PD gains expressed in *angular-acceleration* space (rad/s² per
+    // rad of error, and rad/s² per rad/s of rate). Multiplying by
+    // the body's actual inertia tensor below converts them to Nm, so
+    // small drones don't get torques scaled for a refrigerator.
+    // Critical-ish damping at ~ω_n = 8 rad/s (stops in ~0.4 s).
+    const TILT_OMEGA:  f32 = 8.0;   // natural freq
+    const TILT_ZETA:   f32 = 0.9;   // damping ratio
+
+    // --- Linear forces ---------------------------------------------
+    // Hover force goes along the drone's LOCAL +Y (`up_body_world`),
+    // not world +Y. Consequences: level drone hovers normally; tilted
+    // drone has its "hover" thrust tilted with it (gravity wins on
+    // the vertical axis, drone starts to slide); **flipped** drone
+    // (upside-down) gets pushed toward the ground and crashes
+    // instead of magically floating.
+    let gravity_mag = -gravity.y * mass;
+    let hover = up_body_world * gravity_mag;
+    // Same for the lift command — altitude control is relative to
+    // the drone's own up axis.
+    let lift = up_body_world * ctrl.lift * mass * LIFT_ACCEL;
+    let fore = fwd_h * ctrl.throttle * mass * HORIZ_ACCEL;
+    let side = right_h * ctrl.steer * mass * HORIZ_ACCEL;
+
+    rb.reset_forces(true);
+    rb.reset_torques(true);
+    rb.add_force(hover + lift + fore + side, true);
+
+    // --- Tilt controller -------------------------------------------
+    // Measure current pitch / roll from how the body's local +Y
+    // projects into world. Small-angle OK; the PD gains compensate.
+    // Positive `pitch_angle` = nose tilted forward (toward +Z).
+    // Positive `roll_angle`  = tilted to the RIGHT (toward +X).
+    // (The earlier `-up_body_world.x` was the bug that made D tilt
+    // the drone the wrong way and eventually flip it.)
+    let pitch_angle = up_body_world.z.atan2(up_body_world.y);
+    let roll_angle  = up_body_world.x.atan2(up_body_world.y);
+
+    // Desired tilts (proportional to stick input).
+    let target_pitch = ctrl.throttle * MAX_TILT;
+    let target_roll  = ctrl.steer * MAX_TILT;
+
+    // Body-frame angular velocity components (pitch rate around body X,
+    // roll rate around body Z).
+    let angvel_world = rb.angvel();
+    let angvel_local = rot.inverse() * angvel_world;
+
+    // Desired angular acceleration in body frame (rad/s²).
+    // Second-order critically-ish-damped controller: α = ω²·err − 2ζω·rate.
+    let kp = TILT_OMEGA * TILT_OMEGA;
+    let kd = 2.0 * TILT_ZETA * TILT_OMEGA;
+    let pitch_alpha = kp * (target_pitch - pitch_angle) - kd * angvel_local.x;
+    let roll_alpha  = kp * (target_roll  - roll_angle)  - kd * (-angvel_local.z);
+
+    // Convert α → Nm by multiplying by the body's actual local
+    // principal inertia. Tiny drones get tiny torques, big drones
+    // get big torques — instead of the old fixed KP-in-Nm that
+    // explosion-integrated on small inertias.
+    let local_inertia = rb.mass_properties().local_mprops.principal_inertia();
+    let pitch_torque_local = pitch_alpha * local_inertia.x;
+    let roll_torque_local  = -roll_alpha * local_inertia.z;
+
+    // Yaw torque in Nm — also scaled by inertia so `YAW_ACCEL` is
+    // a true rad/s².
+    let yaw_torque_world_y = -ctrl.yaw * YAW_ACCEL * local_inertia.y;
+
+    let torque_local = Vec3::new(pitch_torque_local, 0.0, roll_torque_local);
+    let torque_world = rot * torque_local + Vec3::new(0.0, yaw_torque_world_y, 0.0);
+    rb.add_torque(torque_world, true);
 }
 
 /// Per-wheel Ackermann steering correction. Returns the *actual*

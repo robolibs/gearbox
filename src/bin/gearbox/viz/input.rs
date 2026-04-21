@@ -17,12 +17,18 @@ pub fn wasd_input_system(
     players: Query<&VehicleBody, With<PlayerControlled>>,
 ) {
     let throttle = axis(&keys, KeyCode::KeyW, KeyCode::KeyS);
-    // A steers left, D steers right. Rapier treats positive `wheel.steering`
-    // as a rotation around -suspension (i.e. +up), which pivots the wheels
-    // left — so A (turn left) maps to +steer.
+    // A steers left, D steers right. Rapier treats positive
+    // `wheel.steering` as a rotation around -suspension (i.e. +up),
+    // which pivots the wheels left — so A (turn left) maps to
+    // +steer. Drones reuse the same axis for strafe.
     let steer = axis(&keys, KeyCode::KeyA, KeyCode::KeyD);
     let brake = if keys.pressed(KeyCode::Space) { 1.0 } else { 0.0 };
-    let ctrl = ControlInput { throttle, brake, steer };
+    // Drone-only axes (zero for ground vehicles):
+    //   Q/E — yaw left/right
+    //   Z/X — ascend/descend
+    let yaw  = axis(&keys, KeyCode::KeyQ, KeyCode::KeyE);
+    let lift = axis(&keys, KeyCode::KeyZ, KeyCode::KeyX);
+    let ctrl = ControlInput { throttle, brake, steer, yaw, lift };
 
     for body in &players {
         sim.0.set_control(body.id, ctrl);

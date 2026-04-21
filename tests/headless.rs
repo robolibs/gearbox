@@ -36,7 +36,10 @@ fn tractor_settles_and_drives() {
         settled.y
     );
 
-    sim.set_control(id, ControlInput { throttle: 1.0, brake: 0.0, steer: 0.0 });
+    sim.set_control(
+        id,
+        ControlInput { throttle: 1.0, brake: 0.0, steer: 0.0, yaw: 0.0, lift: 0.0 },
+    );
     for _ in 0..180 {
         sim.step(dt);
     }

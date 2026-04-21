@@ -81,7 +81,20 @@ pub fn step_sim_system(
     time: Res<Time>,
     clock: Res<SimClock>,
     mut accumulator: Local<f32>,
+    mut warmed_up: Local<bool>,
 ) {
+    // One-shot warm-up: run a real `pipeline.step(0.0)` the very
+    // first time this system fires. Without it, if the sim boots
+    // paused we go straight into `refresh_kinematics`, which does
+    // wheel raycasts against a broad-phase BVH that `pipeline.step`
+    // has never populated — parry 0.26 hits a `ray_aabb.rs:60`
+    // underflow on degenerate BVH states. One zero-dt `pipeline.step`
+    // builds the BVH cleanly and the bug doesn't fire.
+    if !*warmed_up {
+        sim.0.step(0.0);
+        *warmed_up = true;
+    }
+
     // Paused → no stepping at all, and drop any carried time so we
     // don't fast-forward when play resumes. Still refresh wheel
     // raycasts so wheels track chassis edits made via the inspector

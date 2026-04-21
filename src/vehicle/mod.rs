@@ -23,7 +23,7 @@ pub use wheel::WheelSpec;
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct VehicleId(pub u32);
 
-/// How the vehicle steers under a `ControlInput::steer` command.
+/// How the vehicle is driven.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DriveMode {
     /// Ackermann steering — `steer` rotates the wheels flagged
@@ -36,6 +36,15 @@ pub enum DriveMode {
     /// flag is ignored; `driven` still applies to decide which
     /// wheels get engine force.
     Differential,
+    /// Arcade drone — no wheels. Forces and torques are applied
+    /// directly to the chassis rigid body:
+    ///   - `throttle` → force along the drone's local forward axis,
+    ///   - `steer`    → force along the drone's local right axis,
+    ///   - `lift`     → vertical force (in addition to a constant
+    ///                  `mass × g` hover force that cancels gravity),
+    ///   - `yaw`      → torque around world +Y.
+    /// Stabilising damping keeps the drone hover-steady.
+    Drone,
 }
 
 impl Default for DriveMode {

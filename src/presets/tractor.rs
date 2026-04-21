@@ -27,7 +27,12 @@ pub fn tractor() -> VehicleSpec {
         com_offset: Point::new(0.0, -0.22, 0.0),
         linear_damping: 0.2,
         angular_damping: 2.0,
-        ccd: true,
+        // CCD disabled — rapier/parry 0.26 has a broad-phase ray
+        // bug (`ray_aabb.rs:60` underflow when a zero-dir ray
+        // starts inside an AABB) that the CCD path reliably
+        // triggers on startup. Vehicle speeds here are way below
+        // the tunnelling threshold anyway.
+        ccd: false,
         color: [0.0, 1.0, 0.392], // John Deere green
     };
 

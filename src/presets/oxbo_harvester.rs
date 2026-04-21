@@ -19,7 +19,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
         com_offset: Point::new(0.0, -0.4, 0.0),
         linear_damping: 0.3,
         angular_damping: 2.5,
-        ccd: true,
+        ccd: false, // see tractor.rs — parry ray-AABB underflow on CCD
         color: [1.0, 0.784, 0.0], // flatsim (255, 200, 0)
     };
 
