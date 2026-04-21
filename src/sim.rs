@@ -343,6 +343,34 @@ impl Sim {
         self.vehicles.get(&id)
     }
 
+    /// Re-run each vehicle's wheel raycasts against the current world
+    /// without advancing physics. Useful when the editor edits a
+    /// chassis pose while the sim clock is paused — without this the
+    /// wheel positions would lag behind the dragged body and only
+    /// snap into place when the user pressed Play.
+    pub fn refresh_kinematics(&mut self) {
+        let Sim {
+            vehicles,
+            bodies,
+            colliders,
+            broad_phase,
+            narrow_phase,
+            ..
+        } = self;
+        for v in vehicles.values_mut() {
+            let filter = QueryFilter::default()
+                .exclude_rigid_body(v.body)
+                .groups(world::wheel_raycast_groups());
+            let qpm = broad_phase.as_query_pipeline_mut(
+                narrow_phase.query_dispatcher(),
+                bodies,
+                colliders,
+                filter,
+            );
+            v.controller.update_vehicle(0.0, qpm);
+        }
+    }
+
     /// Advance the simulation by `dt` seconds.
     pub fn step(&mut self, dt: f32) {
         self.integration.dt = dt;

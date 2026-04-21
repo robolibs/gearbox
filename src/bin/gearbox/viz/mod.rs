@@ -49,6 +49,7 @@ impl Plugin for GearboxVizPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GearboxSim>()
             .init_resource::<grid::GroundGrid>()
+            .init_resource::<step::SimClock>()
             .add_systems(
                 Update,
                 (
@@ -68,3 +69,4 @@ impl Plugin for GearboxVizPlugin {
 pub use camera::ChaseCamera;
 pub use grid::GroundGrid;
 pub use spawn::{spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals, GhostTag};
+pub use step::{SimClock, SimSpeed};

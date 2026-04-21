@@ -9,6 +9,7 @@ use super::{float, inspector, ui_panel};
 use super::persist::EditorUiState;
 use super::selection::Selection;
 use super::style::AccentColor;
+use super::transform_gizmos::GizmoScale;
 
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RightTab {
@@ -22,9 +23,10 @@ pub fn right_dock_ui(
     mut contexts: EguiContexts,
     mut active: ResMut<RightTab>,
     ui_state: Res<EditorUiState>,
-    sim: Res<GearboxSim>,
+    mut sim: ResMut<GearboxSim>,
     selection: Res<Selection>,
     mut grid: ResMut<GroundGrid>,
+    mut gizmo_scale: ResMut<GizmoScale>,
     accent: Res<AccentColor>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -58,7 +60,7 @@ pub fn right_dock_ui(
                 egui::vec2(size.x, size.y),
                 &mut open,
                 accent_col,
-                |ui| inspector::draw_content(ui, &sim, &selection, accent_col),
+                |ui| inspector::draw_content(ui, &mut sim, &selection, accent_col),
             );
         }
         RightTab::Ui => {
@@ -72,7 +74,7 @@ pub fn right_dock_ui(
                 egui::vec2(size.x, size.y),
                 &mut open,
                 accent_col,
-                |ui| ui_panel::draw_content(ui, &mut grid, accent_col),
+                |ui| ui_panel::draw_content(ui, &mut grid, &mut gizmo_scale, accent_col),
             );
         }
     }

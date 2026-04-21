@@ -15,6 +15,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::light::NotShadowCaster;
 use bevy::math::{DQuat, DVec3};
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
@@ -106,7 +107,16 @@ fn rotation_f64(lat_deg: f64, lon_deg: f64) -> DQuat {
     DQuat::from_rotation_arc(from, DVec3::Y)
 }
 
-const SEGS: u32 = 512;
+/// Segments per ring. Drives how closely the line-strip mesh hugs the
+/// true great / small circle on the sphere. Chord sag grows with
+/// ring radius — at the datum parallel (~3900 km on an Earth-radius
+/// sphere), 512 segments give ~70 m of sag which makes the grid dip
+/// well inside the sphere when zoomed out. 16 384 drops that to
+/// ~7 cm, below the 10 cm lift above the surface, so the grid stays
+/// above the planet everywhere. Only a handful of rings rebuild per
+/// frame (per-level dirty checks in `build_grid_meshes`), so the
+/// higher vertex count is paid once when the camera moves.
+const SEGS: u32 = 16_384;
 
 fn empty_line_mesh() -> Mesh {
     let mut mesh = Mesh::new(
@@ -180,6 +190,7 @@ pub fn spawn_circle_meshes(
                     Mesh3d(lat_mesh),
                     MeshMaterial3d(lat_mat.clone()),
                     NoFrustumCulling,
+                    NotShadowCaster,
                     LatCircle { level, ring },
                 ))
                 .insert(ChildOf(big_space_root));
@@ -192,6 +203,7 @@ pub fn spawn_circle_meshes(
                     Mesh3d(lon_mesh),
                     MeshMaterial3d(lon_mat.clone()),
                     NoFrustumCulling,
+                    NotShadowCaster,
                     LonCircle { level, ring },
                 ))
                 .insert(ChildOf(big_space_root));
@@ -250,7 +262,13 @@ pub fn build_grid_meshes(
     let inv_rot = planet_rot.inverse();
     let to_cam = cam_world - sphere_centre;
     let r_cam = to_cam.length().max(1.0);
-    let r_circle = sim.0.planet.radius + 0.01;
+    // Grid sits 10 cm above the sphere surface — just enough to stay
+    // clear of the flat ground patch at close range. At far zoom the
+    // real hiding problem is the *chord sag* of the line-strip mesh
+    // (a 512-segment circle at planet-scale radius dips tens of
+    // metres below its own arc). That's addressed by a much higher
+    // `SEGS` value below; the lift can stay small.
+    let r_circle = sim.0.planet.radius + 0.10;
     let dir = to_cam / r_cam;
     let unrotated = inv_rot * dir;
     let lat_rad = unrotated.y.clamp(-1.0, 1.0).asin();

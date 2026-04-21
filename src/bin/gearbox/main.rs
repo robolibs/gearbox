@@ -6,6 +6,7 @@
 mod editor;
 mod viz;
 
+use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -28,10 +29,16 @@ use viz::grid::{rotation_from_latlon_to_top, spawn_circle_meshes, GroundGrid};
 #[derive(Resource, Copy, Clone)]
 pub struct BigSpaceRoot(pub Entity);
 
+
 fn main() {
     App::new()
         // Sky-blue horizon fade so the DistanceFog blends into the clear colour.
         .insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.86)))
+        // 8 k shadow map (4× Bevy's 2048 default). Directional-light
+        // CSM packs all cascades into a single texture, so more texels
+        // = finer shadows per cascade — essential when the receiver
+        // is a 6 371 km sphere tangent to the vehicles.
+        .insert_resource(bevy::light::DirectionalLightShadowMap { size: 8192 })
         .add_plugins(
             DefaultPlugins
                 .build()
@@ -85,11 +92,14 @@ fn setup_scene(
     let planet_green = Color::srgb(0.62, 0.48, 0.33);
 
     // --- Planet sphere ---
-    // High-resolution UV sphere — 512 sectors × 256 stacks gives ~130k
-    // triangles and a visibly rounder horizon than `ico(79)` at any
-    // zoom level. The extra triangles are cheap; they're uniform small
-    // patches with no material cost.
-    let planet_mesh = meshes.add(Sphere::new(radius).mesh().uv(512, 256));
+    //
+    // 8192 × 4096 → 67 M triangles. Both sector and stack counts
+    // doubled so the tangent-triangle edges are now ~5 km in each
+    // direction. Chord sag below the arc drops to ~0.5 m for
+    // sectors and ~0.25 m for stacks — the shadow should land within
+    // a few cm of the wheels. Uses ~1 GB of VRAM for positions +
+    // normals; acceptable on modern GPUs.
+    let planet_mesh = meshes.add(Sphere::new(radius).mesh().uv(8192, 4096));
     let planet_mat = materials.add(StandardMaterial {
         base_color: planet_green,
         perceptual_roughness: 0.95,
@@ -121,6 +131,13 @@ fn setup_scene(
             },
             Mesh3d(planet_mesh),
             MeshMaterial3d(planet_mat),
+            // Planet doesn't cast (sun is outside a 6 371 km ball,
+            // the back hemisphere would throw shadow across the
+            // world). It DOES receive — vehicle shadows land on the
+            // sphere. Large `shadow_normal_bias` on the sun keeps the
+            // tangent-plane triangles from self-shadowing despite
+            // being planet-scale huge.
+            NotShadowCaster,
         ))
         .insert(ChildOf(root_id));
 
@@ -143,11 +160,23 @@ fn setup_scene(
     );
 
     // --- Sun ---
+    //
+    // Single cascade, 100 m max — all shadow-map texels land inside
+    // the ~100 m vehicle-neighbourhood. Sun angle steepened so the
+    // shadow has a clear direction near the horizon.
+    let sun_shadow = CascadeShadowConfigBuilder {
+        num_cascades: 1,
+        minimum_distance: 0.1,
+        maximum_distance: 100.0,
+        first_cascade_far_bound: 100.0,
+        overlap_proportion: 0.0,
+    }
+    .build();
     commands
         .spawn((
             Name::new("Sun"),
             BigSpatialBundle {
-                transform: Transform::from_xyz(10.0, 20.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+                transform: Transform::from_xyz(5.0, 50.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
                 ..default()
             },
             DirectionalLight {
@@ -155,6 +184,7 @@ fn setup_scene(
                 shadows_enabled: true,
                 ..default()
             },
+            sun_shadow,
         ))
         .insert(ChildOf(root_id));
 

@@ -52,14 +52,16 @@ pub const WARNING: egui::Color32 = egui::Color32::from_rgb(0xF5, 0xA5, 0x24);
 pub const DANGER:  egui::Color32 = egui::Color32::from_rgb(0xEF, 0x44, 0x44);
 
 /// Live accent colour — swapped in from the selected vehicle's chassis
-/// colour each frame. Starts at the default violet; reverts to violet
-/// when nothing is selected. Panels read this for section headers,
-/// progress bars, active button outlines, etc.
+/// colour each frame. Defaults to white when nothing's selected (neutral
+/// readout); becomes the vehicle's chassis colour on selection.
 #[derive(Resource, Copy, Clone, Debug, PartialEq, Eq)]
 pub struct AccentColor(pub egui::Color32);
 
+/// Neutral accent used when no vehicle is selected.
+pub const ACCENT_NEUTRAL: egui::Color32 = egui::Color32::from_rgb(0xE6, 0xE6, 0xE8);
+
 impl Default for AccentColor {
-    fn default() -> Self { Self(ACCENT) }
+    fn default() -> Self { Self(ACCENT_NEUTRAL) }
 }
 
 /// Re-apply the egui theme when the `AccentColor` resource changes.
@@ -144,7 +146,7 @@ pub fn update_accent_from_selection(
         .vehicle
         .and_then(|id| sim.0.vehicle(id))
         .map(|v| srgb_to_egui(v.spec.chassis.color))
-        .unwrap_or(ACCENT);
+        .unwrap_or(ACCENT_NEUTRAL);
     if accent.0 != new_color {
         accent.0 = new_color;
     }

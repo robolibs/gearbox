@@ -16,6 +16,8 @@ use gearbox::{
 
 use crate::viz::GearboxSim;
 
+use super::transform_gizmos::{GizmoDrag, HoveredGizmo};
+
 /// What, if anything, is currently selected.
 #[derive(Resource, Default)]
 pub struct Selection {
@@ -41,7 +43,16 @@ pub fn pick_and_drag_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mut contexts: EguiContexts,
+    hovered_gizmo: Res<HoveredGizmo>,
+    gizmo_drag: Res<GizmoDrag>,
 ) {
+    // Transform gizmos always win input: if the cursor's over a handle
+    // or a drag is in flight, don't let the vehicle picker fire.
+    if gizmo_drag.active.is_some() || hovered_gizmo.0.is_some() {
+        selection.drag = None;
+        return;
+    }
+
     // Don't grab input when the cursor is over an egui panel.
     let over_ui = contexts
         .ctx_mut()

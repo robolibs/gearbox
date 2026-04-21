@@ -93,6 +93,75 @@ pub fn side_button(
         });
 }
 
+/// Top-center button, same visual language as [`side_button`] but
+/// anchored to the top edge and laid out horizontally. `slot` is the
+/// index within a horizontal row of `count` buttons, 0-indexed from
+/// the left.
+pub fn top_button(
+    id: &'static str,
+    ctx: &egui::Context,
+    slot: u32,
+    count: u32,
+    glyph: &str,
+    tooltip: &str,
+    is_active: bool,
+    accent: egui::Color32,
+    on_click: impl FnOnce(),
+) {
+    // Row width with inter-button gaps, centred on 0.
+    let n = count.max(1) as f32;
+    let step = SIDE_BTN_SIZE + SIDE_BTN_GAP;
+    let row_w = n * SIDE_BTN_SIZE + (n - 1.0).max(0.0) * SIDE_BTN_GAP;
+    let offset_x = -(row_w - SIDE_BTN_SIZE) * 0.5 + slot as f32 * step;
+
+    egui::Area::new(egui::Id::new(id))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(offset_x, EDGE_GAP))
+        .interactable(true)
+        .show(ctx, |ui| {
+            let (rect, resp) = ui.allocate_exact_size(
+                egui::vec2(SIDE_BTN_SIZE, SIDE_BTN_SIZE),
+                egui::Sense::click(),
+            );
+
+            let bg = if is_active {
+                let blend = |a: u8, b: u8| {
+                    ((a as f32) * 0.75 + (b as f32) * 0.25).round() as u8
+                };
+                egui::Color32::from_rgb(
+                    blend(BG_2_RAISED.r(), accent.r()),
+                    blend(BG_2_RAISED.g(), accent.g()),
+                    blend(BG_2_RAISED.b(), accent.b()),
+                )
+            } else if resp.hovered() {
+                BG_2_RAISED
+            } else {
+                BG_1_PANEL
+            };
+            let fg = if is_active { TEXT_PRIMARY } else { TEXT_SECONDARY };
+            let stroke = if is_active { accent } else { BORDER_SUBTLE };
+
+            let painter = ui.painter();
+            painter.rect_filled(rect, egui::CornerRadius::same(6), bg);
+            painter.rect_stroke(
+                rect,
+                egui::CornerRadius::same(6),
+                egui::Stroke::new(1.0, stroke),
+                egui::StrokeKind::Outside,
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::new(14.0, egui::FontFamily::Monospace),
+                fg,
+            );
+
+            if resp.on_hover_text(tooltip).clicked() {
+                on_click();
+            }
+        });
+}
+
 /// Floating content panel anchored to a screen corner. Fixed size
 /// (does NOT auto-resize with content); no title bar / close button.
 pub fn floating_window(

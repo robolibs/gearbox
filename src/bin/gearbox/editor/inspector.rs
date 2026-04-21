@@ -6,7 +6,10 @@
 
 use bevy_egui::egui;
 
-use gearbox::VehicleSpec;
+use gearbox::{
+    datapod::{Point, Pose, Quaternion},
+    VehicleSpec,
+};
 
 use crate::viz::GearboxSim;
 
@@ -17,7 +20,7 @@ use super::style::{
 
 pub fn draw_content(
     ui: &mut egui::Ui,
-    sim: &GearboxSim,
+    sim: &mut GearboxSim,
     selection: &Selection,
     accent: egui::Color32,
 ) {
@@ -33,6 +36,7 @@ pub fn draw_content(
     let linvel = sim.0.vehicle_linvel(id);
     let ctrl = sim.0.control(id);
     let speed = (linvel.vx * linvel.vx + linvel.vy * linvel.vy + linvel.vz * linvel.vz).sqrt();
+    let size = state.spec.chassis.size;
 
     // Top-down footprint: chassis + every part, projected onto XZ and
     // unioned. Gives the "looking from above" bounding box.
@@ -73,21 +77,63 @@ pub fn draw_content(
         plain_row(ui, "hdg", &format!("{:6.2}°  {}", heading, compass_letter(heading)));
     });
 
-    // ─── Transform ────────────────────────────────────────────────
+    // ─── Transform (editable — the replacement for the old 3-D
+    //   translate / rotate / scale gizmos) ──────────────────────────
     section(ui, "insp_tr", "Transform", false, accent, |ui| {
-        sub_label(ui, "position");
-        axis_row(ui, "X", AXIS_X, &format!("{:+.3} m", pose.point.x as f32));
-        axis_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", pose.point.y as f32));
-        axis_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", pose.point.z as f32));
-        ui.add_space(2.0);
-        sub_label(ui, "rotation");
+        // --- position: drag/type XYZ in metres ---
+        let mut px = pose.point.x as f32;
+        let mut py = pose.point.y as f32;
+        let mut pz = pose.point.z as f32;
+        let mut pos_changed = false;
+
+        sub_label(ui, "position  (drag to move, double-click to type)");
+        pos_changed |= axis_drag_row(ui, "X", AXIS_X, &mut px, 0.05, " m");
+        pos_changed |= axis_drag_row(ui, "Y", AXIS_Y, &mut py, 0.05, " m");
+        pos_changed |= axis_drag_row(ui, "Z", AXIS_Z, &mut pz, 0.05, " m");
+
+        // --- rotation: drag/type Euler angles in degrees ---
         let q = pose.rotation;
-        let (roll, pitch, yaw) = quat_to_euler(
-            q.w as f32, q.x as f32, q.y as f32, q.z as f32,
-        );
-        axis_row(ui, "X", AXIS_X, &format!("{:+.2}°", roll.to_degrees()));
-        axis_row(ui, "Y", AXIS_Y, &format!("{:+.2}°", pitch.to_degrees()));
-        axis_row(ui, "Z", AXIS_Z, &format!("{:+.2}°", yaw.to_degrees()));
+        let (mut rx_deg, mut ry_deg, mut rz_deg) = {
+            let (x, y, z) = quat_to_euler_xyz(q.w as f32, q.x as f32, q.y as f32, q.z as f32);
+            (x.to_degrees(), y.to_degrees(), z.to_degrees())
+        };
+        let mut rot_changed = false;
+
+        ui.add_space(2.0);
+        sub_label(ui, "rotation  (Euler XYZ, degrees)");
+        rot_changed |= axis_drag_row(ui, "X", AXIS_X, &mut rx_deg, 1.0, "°");
+        rot_changed |= axis_drag_row(ui, "Y", AXIS_Y, &mut ry_deg, 1.0, "°");
+        rot_changed |= axis_drag_row(ui, "Z", AXIS_Z, &mut rz_deg, 1.0, "°");
+
+        if pos_changed || rot_changed {
+            let new_q = euler_xyz_to_quat(
+                rx_deg.to_radians(),
+                ry_deg.to_radians(),
+                rz_deg.to_radians(),
+            );
+            sim.0.set_vehicle_pose(
+                id,
+                Pose {
+                    point: Point::new(px as f64, py as f64, pz as f64),
+                    rotation: Quaternion::new(
+                        new_q.0 as f64,
+                        new_q.1 as f64,
+                        new_q.2 as f64,
+                        new_q.3 as f64,
+                    ),
+                },
+            );
+        }
+
+        // --- scale: chassis size is baked into the rapier collider at
+        //   spawn, so re-scaling a live vehicle isn't supported. Show
+        //   the dimensions as read-only so the "scale" slot in the old
+        //   gizmo still has a home in the inspector. ---
+        ui.add_space(2.0);
+        sub_label(ui, "scale  (chassis size — baked at spawn)");
+        axis_row(ui, "X", AXIS_X, &format!("{:.3} m", size.x));
+        axis_row(ui, "Y", AXIS_Y, &format!("{:.3} m", size.y));
+        axis_row(ui, "Z", AXIS_Z, &format!("{:.3} m", size.z));
     });
 
     // ─── Velocity ─────────────────────────────────────────────────
@@ -215,15 +261,76 @@ fn compass_letter(h: f64) -> &'static str {
     ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][idx as usize]
 }
 
-fn quat_to_euler(w: f32, x: f32, y: f32, z: f32) -> (f32, f32, f32) {
-    let sinp = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0);
-    let pitch = sinp.asin();
-    let roll = (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y));
-    let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
-    (roll, pitch, yaw)
+/// Quaternion → intrinsic XYZ Euler angles (radians). Inverse of
+/// `euler_xyz_to_quat` so round-tripping through the inspector keeps
+/// the rotation stable.
+fn quat_to_euler_xyz(w: f32, x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+    // Intrinsic rotations: Rz · Ry · Rx (applied R_x first when we
+    // build the quaternion below).
+    let sy = 2.0 * (w * y + x * z).clamp(-1.0, 1.0);
+    let ey = sy.asin();
+    let ex;
+    let ez;
+    if sy.abs() > 0.9999 {
+        // Gimbal lock — fold all roll into yaw.
+        ex = 0.0;
+        ez = (-2.0 * (x * y - w * z)).atan2(1.0 - 2.0 * (y * y + z * z));
+    } else {
+        ex = (-2.0 * (y * z - w * x)).atan2(1.0 - 2.0 * (x * x + y * y));
+        ez = (-2.0 * (x * y - w * z)).atan2(1.0 - 2.0 * (y * y + z * z));
+    }
+    (ex, ey, ez)
 }
 
-fn world_info(ui: &mut egui::Ui, sim: &GearboxSim, accent: egui::Color32) {
+/// Euler XYZ (radians) → quaternion `(w, x, y, z)`.
+fn euler_xyz_to_quat(ex: f32, ey: f32, ez: f32) -> (f32, f32, f32, f32) {
+    let (sx, cx) = ((ex * 0.5).sin(), (ex * 0.5).cos());
+    let (sy, cy) = ((ey * 0.5).sin(), (ey * 0.5).cos());
+    let (sz, cz) = ((ez * 0.5).sin(), (ez * 0.5).cos());
+    // q = qz * qy * qx (intrinsic XYZ).
+    let w = cx * cy * cz - sx * sy * sz;
+    let x = sx * cy * cz + cx * sy * sz;
+    let y = cx * sy * cz - sx * cy * sz;
+    let z = cx * cy * sz + sx * sy * cz;
+    (w, x, y, z)
+}
+
+/// Dragable numeric row — same visual language as `axis_row`, but the
+/// value cell is an `egui::DragValue` so the user can drag to scrub
+/// or double-click to type an exact value.
+fn axis_drag_row(
+    ui: &mut egui::Ui,
+    glyph: &str,
+    color: egui::Color32,
+    value: &mut f32,
+    speed: f64,
+    suffix: &str,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(glyph)
+                .strong()
+                .monospace()
+                .size(11.0)
+                .color(color),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let resp = ui.add(
+                egui::DragValue::new(value)
+                    .speed(speed)
+                    .suffix(suffix)
+                    .fixed_decimals(3),
+            );
+            if resp.changed() {
+                changed = true;
+            }
+        });
+    });
+    changed
+}
+
+fn world_info(ui: &mut egui::Ui, sim: &mut GearboxSim, accent: egui::Color32) {
     let planet = sim.0.planet;
     let gravity = sim.0.gravity;
     let vehicle_count = sim.0.vehicles().count();

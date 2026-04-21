@@ -9,8 +9,14 @@ use bevy_egui::egui;
 use crate::viz::GroundGrid;
 
 use super::style::{fg_dim, section_caps};
+use super::transform_gizmos::GizmoScale;
 
-pub fn draw_content(ui: &mut egui::Ui, grid: &mut GroundGrid, accent: egui::Color32) {
+pub fn draw_content(
+    ui: &mut egui::Ui,
+    grid: &mut GroundGrid,
+    gizmo_scale: &mut GizmoScale,
+    accent: egui::Color32,
+) {
     egui::CollapsingHeader::new(section_caps("Grid", accent))
         .id_salt("ui_grid")
         .default_open(true)
@@ -56,6 +62,24 @@ pub fn draw_content(ui: &mut egui::Ui, grid: &mut GroundGrid, accent: egui::Colo
                             grid.lon_color = rgba;
                         }
                     },
+                );
+            });
+        });
+
+    egui::CollapsingHeader::new(section_caps("Gizmos", accent))
+        .id_salt("ui_gizmos")
+        .default_open(false)
+        .show(ui, |ui| {
+            // One control — makes the transform gizmos uniformly
+            // thicker *and* bigger. The whole handle transform is
+            // scaled by this, so shafts, tips, rings and cubes all
+            // grow together.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("size").small().color(fg_dim()));
+                ui.add(
+                    egui::Slider::new(&mut gizmo_scale.0, 0.25..=4.0)
+                        .show_value(true)
+                        .fixed_decimals(2),
                 );
             });
         });

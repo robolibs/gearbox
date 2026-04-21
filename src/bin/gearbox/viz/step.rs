@@ -5,6 +5,9 @@
 //! `dt` every step regardless of rendering FPS. Variable dt was the
 //! cause of the high-frequency tractor shake at speed — the
 //! suspension solver is sensitive to step-size noise.
+//!
+//! A [`SimClock`] resource drives play/pause + speed multiplier,
+//! driven by the viewport transport bar.
 
 use bevy::prelude::*;
 
@@ -15,16 +18,82 @@ use super::GearboxSim;
 /// feeling like a go-kart). Still fixed so integration stays stable.
 const PHYSICS_HZ: f32 = 60.0;
 /// Cap on substeps per render frame so a stall / debugger pause can't
-/// send the accumulator spiralling.
-const MAX_SUBSTEPS: u32 = 8;
+/// send the accumulator spiralling. Raised enough to accommodate the
+/// 8× speed mode comfortably (8 steps/60 Hz frame in the normal case).
+const MAX_SUBSTEPS: u32 = 24;
+
+/// Sim-time controls: play/pause and speed multiplier. Resource is
+/// read by `step_sim_system` each frame.
+#[derive(Resource, Debug, Copy, Clone, PartialEq)]
+pub struct SimClock {
+    pub paused: bool,
+    pub speed: SimSpeed,
+}
+
+impl Default for SimClock {
+    fn default() -> Self {
+        Self { paused: false, speed: SimSpeed::X1 }
+    }
+}
+
+/// Discrete speed presets — click the transport bar's speed button to
+/// cycle 1× → 2× → 4× → 8× → 1×.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SimSpeed {
+    X1,
+    X2,
+    X4,
+    X8,
+}
+
+impl SimSpeed {
+    pub fn multiplier(self) -> f32 {
+        match self {
+            SimSpeed::X1 => 1.0,
+            SimSpeed::X2 => 2.0,
+            SimSpeed::X4 => 4.0,
+            SimSpeed::X8 => 8.0,
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            SimSpeed::X1 => SimSpeed::X2,
+            SimSpeed::X2 => SimSpeed::X4,
+            SimSpeed::X4 => SimSpeed::X8,
+            SimSpeed::X8 => SimSpeed::X1,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            SimSpeed::X1 => "1x",
+            SimSpeed::X2 => "2x",
+            SimSpeed::X4 => "4x",
+            SimSpeed::X8 => "8x",
+        }
+    }
+}
 
 pub fn step_sim_system(
     mut sim: ResMut<GearboxSim>,
     time: Res<Time>,
+    clock: Res<SimClock>,
     mut accumulator: Local<f32>,
 ) {
+    // Paused → no stepping at all, and drop any carried time so we
+    // don't fast-forward when play resumes. Still refresh wheel
+    // raycasts so wheels track chassis edits made via the inspector
+    // fields or the 3-D drag gizmos.
+    if clock.paused {
+        *accumulator = 0.0;
+        sim.0.refresh_kinematics();
+        return;
+    }
+
     let dt_fixed = 1.0 / PHYSICS_HZ;
-    *accumulator += time.delta_secs();
+    // Inflating the accumulator by the speed multiplier runs more
+    // substeps per render frame while keeping each step at the same
+    // fixed `dt`. Collider integration stays stable at any speed.
+    *accumulator += time.delta_secs() * clock.speed.multiplier();
 
     let mut steps = 0;
     while *accumulator >= dt_fixed && steps < MAX_SUBSTEPS {
