@@ -51,6 +51,7 @@ impl Plugin for GearboxVizPlugin {
             .add_systems(
                 Update,
                 (
+                    input::sync_player_to_selection_system,
                     input::wasd_input_system,
                     step::step_sim_system,
                     sync::sync_vehicle_transforms_system,
@@ -65,4 +66,4 @@ impl Plugin for GearboxVizPlugin {
 
 pub use camera::{ChaseCamera, ChaseCameraTarget};
 pub use grid::GroundGrid;
-pub use spawn::spawn_vehicle_visuals;
+pub use spawn::{spawn_height_for, spawn_vehicle_visuals};

@@ -15,6 +15,7 @@ pub fn car() -> VehicleSpec {
         linear_damping: 0.1,
         angular_damping: 0.7,
         ccd: true,
+        color: [0.82, 0.15, 0.15], // deep red
     };
 
     // Rapier's canonical tuning — see tractor.rs for the rationale.

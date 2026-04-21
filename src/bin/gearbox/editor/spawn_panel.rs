@@ -13,7 +13,9 @@ use gearbox::{
     presets, VehicleSpec,
 };
 
-use crate::viz::{GearboxSim, PlayerControlled, VehicleBody, spawn_vehicle_visuals};
+use crate::viz::{
+    GearboxSim, PlayerControlled, VehicleBody, spawn_height_for, spawn_vehicle_visuals,
+};
 use crate::BigSpaceRoot;
 
 use super::selection::Selection;
@@ -34,7 +36,7 @@ pub fn draw_content(
         .id_salt("spawn_vehicles")
         .default_open(false)
         .show(ui, |ui| {
-            if preset_button(ui, "+", "Tractor", "4-wheel RWD rig").clicked() {
+            if preset_button(ui, "+", "Tractor", "John Deere 8R · 4W RWD").clicked() {
                 spawn_and_select(
                     presets::tractor(),
                     commands, sim, meshes, materials, player_tagged, selection, big_space_root,
@@ -44,6 +46,13 @@ pub fn draw_content(
             if preset_button(ui, "+", "Car", "4-wheel sedan").clicked() {
                 spawn_and_select(
                     presets::car(),
+                    commands, sim, meshes, materials, player_tagged, selection, big_space_root,
+                );
+            }
+            ui.add_space(2.0);
+            if preset_button(ui, "+", "Oxbo 2475", "6W pea harvester · crab-steer").clicked() {
+                spawn_and_select(
+                    presets::oxbo_harvester(),
                     commands, sim, meshes, materials, player_tagged, selection, big_space_root,
                 );
             }
@@ -161,7 +170,7 @@ fn spawn_and_select(
     big_space_root: Entity,
 ) {
     let pose = Pose {
-        point: Point::new(0.0, 1.4, 0.0),
+        point: Point::new(0.0, spawn_height_for(&spec), 0.0),
         rotation: Quaternion::identity(),
     };
     let id = sim.0.spawn_vehicle(spec.clone(), pose);

@@ -4,7 +4,7 @@
 //! want to define a vehicle inline can use it too. A future YAML/URDF loader
 //! will lower into the same spec.
 
-use super::{ChassisSpec, VehicleSpec, WheelSpec};
+use super::{ChassisSpec, PartSpec, VehicleSpec, WheelSpec};
 
 pub struct VehicleBuilder {
     spec: VehicleSpec,
@@ -17,12 +17,18 @@ impl VehicleBuilder {
                 name: name.into(),
                 chassis,
                 wheels: Vec::new(),
+                parts: Vec::new(),
             },
         }
     }
 
     pub fn wheel(mut self, wheel: WheelSpec) -> Self {
         self.spec.wheels.push(wheel);
+        self
+    }
+
+    pub fn part(mut self, part: PartSpec) -> Self {
+        self.spec.parts.push(part);
         self
     }
 

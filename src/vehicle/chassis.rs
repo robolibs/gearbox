@@ -17,6 +17,9 @@ pub struct ChassisSpec {
     /// Enable continuous collision detection on the chassis — prevents
     /// tunneling through walls at high speed.
     pub ccd: bool,
+    /// Visual base colour (sRGB, 0..1). Used only by the viz layer; the
+    /// library core ignores it entirely.
+    pub color: [f32; 3],
 }
 
 impl Default for ChassisSpec {
@@ -28,6 +31,7 @@ impl Default for ChassisSpec {
             linear_damping: 0.1,
             angular_damping: 0.7,
             ccd: true,
+            color: [0.25, 0.55, 0.22],
         }
     }
 }

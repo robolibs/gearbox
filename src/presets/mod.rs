@@ -1,11 +1,14 @@
-//! Hand-rolled vehicle presets.
+//! Vehicle catalogue.
 //!
-//! These are small `fn () -> VehicleSpec` constructors — no inheritance,
-//! just data. A later phase can add YAML/URDF loaders that produce the
-//! same [`VehicleSpec`].
+//! Each file in this folder builds one [`crate::VehicleSpec`]. The folder
+//! is intentionally a stable boundary — a future OpenUSD-backed loader
+//! will be dropped in here as a sibling module (or an outright
+//! replacement), keeping the rest of the codebase untouched.
 
 mod car;
+mod oxbo_harvester;
 mod tractor;
 
 pub use car::car;
+pub use oxbo_harvester::oxbo_harvester;
 pub use tractor::tractor;

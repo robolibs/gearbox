@@ -6,6 +6,7 @@
 
 pub mod builder;
 pub mod chassis;
+pub mod part;
 pub mod wheel;
 
 use rapier3d::control::DynamicRayCastVehicleController;
@@ -15,18 +16,23 @@ use crate::control::ControlInput;
 
 pub use builder::VehicleBuilder;
 pub use chassis::ChassisSpec;
+pub use part::{PartKind, PartSpec};
 pub use wheel::WheelSpec;
 
 /// Opaque identifier handed back by [`crate::Sim::spawn_vehicle`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct VehicleId(pub u32);
 
-/// A declarative vehicle: chassis box + list of raycast wheels.
+/// A declarative vehicle: chassis box + list of raycast wheels + any
+/// attached body parts (hitches, karosseries, tanks).
 #[derive(Debug, Clone)]
 pub struct VehicleSpec {
     pub name: String,
     pub chassis: ChassisSpec,
     pub wheels: Vec<WheelSpec>,
+    /// Extra visual body parts. Parented to the chassis entity by the
+    /// viz layer, so they ride the chassis pose automatically.
+    pub parts: Vec<PartSpec>,
 }
 
 /// Live physics state for a spawned vehicle. Owned by [`crate::Sim`].

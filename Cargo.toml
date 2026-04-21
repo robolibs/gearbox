@@ -34,6 +34,10 @@ editor = ["dep:bevy", "dep:bevy_egui", "dep:big_space"]
 rapier3d = "0.32"
 thiserror = "2.0"
 datapod = { path = "../datapod" }
+# Read-only USD parser — used to import `.usda` / `.usdc` / `.usdz`
+# files that carry our `gearbox:*` tags. We hand-roll the writer
+# because openusd doesn't yet expose one (v0.3.0 is reader-only).
+openusd = "0.3"
 
 # Only compiled when the `editor` feature is enabled — i.e. for the binary.
 bevy = { version = "0.18", optional = true, default-features = false, features = [

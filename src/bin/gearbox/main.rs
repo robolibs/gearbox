@@ -17,7 +17,8 @@ use gearbox::{
 };
 
 use viz::{
-    ChaseCamera, GearboxSim, GearboxVizPlugin, PlayerControlled, spawn_vehicle_visuals,
+    ChaseCamera, GearboxSim, GearboxVizPlugin, PlayerControlled, spawn_height_for,
+    spawn_vehicle_visuals,
 };
 use viz::grid::{rotation_from_latlon_to_top, spawn_circle_meshes, GroundGrid};
 
@@ -177,7 +178,7 @@ fn setup_scene(
     // --- Starter tractor ---
     let spec = presets::tractor();
     let pose = Pose {
-        point: Point::new(0.0, 1.4, 0.0),
+        point: Point::new(0.0, spawn_height_for(&spec), 0.0),
         rotation: Quaternion::identity(),
     };
     let id = sim.0.spawn_vehicle(spec.clone(), pose);
