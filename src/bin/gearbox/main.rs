@@ -215,6 +215,7 @@ fn setup_scene(
         &mut commands,
         &mut meshes,
         &mut materials,
+        &mut images,
         id,
         &spec,
         root_id,

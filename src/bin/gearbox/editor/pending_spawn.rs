@@ -62,6 +62,7 @@ pub fn spawn_ghost_if_needed(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<bevy::image::Image>>,
     big_space_root: Res<BigSpaceRoot>,
 ) {
     if pending.ghost_root.is_some() || pending.spec.is_none() {
@@ -72,6 +73,7 @@ pub fn spawn_ghost_if_needed(
         &mut commands,
         &mut meshes,
         &mut materials,
+        &mut images,
         &spec,
         big_space_root.0,
     );
@@ -153,6 +155,7 @@ pub fn commit_or_cancel_ghost(
     mut sim: ResMut<GearboxSim>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<bevy::image::Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     player_tagged: Query<Entity, With<PlayerControlled>>,
@@ -241,6 +244,7 @@ pub fn commit_or_cancel_ghost(
         &mut commands,
         &mut meshes,
         &mut materials,
+        &mut images,
         id,
         &spec,
         big_space_root.0,

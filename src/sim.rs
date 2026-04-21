@@ -297,7 +297,11 @@ impl Sim {
         // Columns = images of local (+X, +Y, +Z). Determinant = +1.
         let basis = Mat3::from_cols(forward, axle, up);
         let basis_rot = Rot3::from_mat3(&basis);
-        let spin = Rot3::from_axis_angle(axle, wh.rotation);
+        // Rapier's `wheel.rotation` increases when moving forward.
+        // With our axle_dir convention (`-X`), applying that rotation
+        // directly around `axle` spins the cylinder the wrong way
+        // around — negate so the tread visually rolls with motion.
+        let spin = Rot3::from_axis_angle(axle, -wh.rotation);
 
         rpose_to_pose(Pose3::from_parts(center, spin * basis_rot))
     }
