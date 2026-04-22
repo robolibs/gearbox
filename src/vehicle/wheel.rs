@@ -31,6 +31,19 @@ pub struct WheelSpec {
     pub max_brake: f32,
     /// Maximum steering angle in radians (applied at `steer = ±1.0`).
     pub max_steer_rad: f32,
+    /// Optional offset (in chassis-local coordinates) from
+    /// `chassis_connection` to the STEERING PIVOT — i.e. the physical
+    /// kingpin axis, when that axis is offset from the wheel hub
+    /// (common on 4WIS gantry robots where the kingpin strut sits
+    /// outboard of the tyre). Default `(0, 0, 0)` → wheel pivots
+    /// around its own centre, which is standard car behaviour.
+    ///
+    /// Non-zero values are VISUAL ONLY: the wheel's raycast + engine
+    /// force still act at `chassis_connection`, but the rendered
+    /// wheel-centre is computed as if it were hanging off a kingpin
+    /// at `chassis_connection + steering_pivot_offset`, so the wheel
+    /// swings in an arc around that outboard kingpin when steering.
+    pub steering_pivot_offset: Point,
 }
 
 impl Default for WheelSpec {
@@ -51,6 +64,7 @@ impl Default for WheelSpec {
             max_engine_force: 4000.0,
             max_brake: 20.0,
             max_steer_rad: 0.0,
+            steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
         }
     }
 }

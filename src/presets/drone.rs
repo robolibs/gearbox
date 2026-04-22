@@ -14,7 +14,7 @@
 use datapod::{Point, Size};
 
 use crate::vehicle::{
-    ChassisSpec, DriveMode, PartKind, PartSpec, VehicleBuilder, VehicleSpec,
+    ChassisSpec, DriveMode, PartKind, PartShape, PartSpec, VehicleBuilder, VehicleSpec,
 };
 
 pub fn drone() -> VehicleSpec {
@@ -42,6 +42,8 @@ pub fn drone() -> VehicleSpec {
         // driven from this colour stays colourful instead of
         // collapsing to a grey tint that'd wash out the UI fonts.
         color: [1.0, 0.52, 0.08],
+        inertia_size: None,
+        render_chassis: true,
     };
 
     // --- Rotor arms & blades ---------------------------------------
@@ -83,6 +85,7 @@ pub fn drone() -> VehicleSpec {
         // the colliders side-steps the bug entirely without affecting
         // what the drone looks like.
         kind: PartKind::Hitch,
+        shape: PartShape::Box,
     };
     let make_rotor = |name: &str, dir_x: f32, dir_z: f32| PartSpec {
         name: name.into(),
@@ -94,6 +97,7 @@ pub fn drone() -> VehicleSpec {
         size: Size::new((rotor_r * 2.0) as f64, 0.01, (rotor_r * 2.0) as f64),
         color: rotor_color,
         kind: PartKind::Hitch, // visual-only (see note above)
+        shape: PartShape::Box,
     };
 
     VehicleBuilder::new("drone", chassis)

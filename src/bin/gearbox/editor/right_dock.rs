@@ -8,6 +8,7 @@ use crate::viz::{GearboxSim, GroundGrid};
 use super::{float, inspector, ui_panel};
 use super::persist::EditorUiState;
 use super::selection::Selection;
+use super::selection_ring::SelectionRingSettings;
 use super::style::AccentColor;
 use super::transform_gizmos::GizmoScale;
 
@@ -27,6 +28,7 @@ pub fn right_dock_ui(
     selection: Res<Selection>,
     mut grid: ResMut<GroundGrid>,
     mut gizmo_scale: ResMut<GizmoScale>,
+    mut ring_settings: ResMut<SelectionRingSettings>,
     accent: Res<AccentColor>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -74,7 +76,13 @@ pub fn right_dock_ui(
                 egui::vec2(size.x, size.y),
                 &mut open,
                 accent_col,
-                |ui| ui_panel::draw_content(ui, &mut grid, &mut gizmo_scale, accent_col),
+                |ui| ui_panel::draw_content(
+                    ui,
+                    &mut grid,
+                    &mut gizmo_scale,
+                    &mut ring_settings,
+                    accent_col,
+                ),
             );
         }
     }

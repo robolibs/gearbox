@@ -8,6 +8,7 @@ use bevy_egui::egui;
 
 use crate::viz::GroundGrid;
 
+use super::selection_ring::SelectionRingSettings;
 use super::style::{fg_dim, section_caps};
 use super::transform_gizmos::GizmoScale;
 
@@ -15,6 +16,7 @@ pub fn draw_content(
     ui: &mut egui::Ui,
     grid: &mut GroundGrid,
     gizmo_scale: &mut GizmoScale,
+    ring: &mut SelectionRingSettings,
     accent: egui::Color32,
 ) {
     egui::CollapsingHeader::new(section_caps("Grid", accent))
@@ -76,6 +78,25 @@ pub fn draw_content(
                 ui.add(
                     egui::Slider::new(&mut gizmo_scale.0, 0.25..=4.0)
                         .show_value(true)
+                        .fixed_decimals(2),
+                );
+            });
+        });
+
+    egui::CollapsingHeader::new(section_caps("Selection Ring", accent))
+        .id_salt("ui_selection_ring")
+        .default_open(false)
+        .show(ui, |ui| {
+            // World-space thickness in metres. The mesh rebuilds
+            // per-vehicle so the ring is exactly this wide on every
+            // machine (tractor, husky, oxbo, drone) regardless of
+            // outer radius.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("thickness").small().color(fg_dim()));
+                ui.add(
+                    egui::Slider::new(&mut ring.thickness, 0.02..=1.0)
+                        .show_value(true)
+                        .suffix(" m")
                         .fixed_decimals(2),
                 );
             });

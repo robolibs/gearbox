@@ -8,9 +8,11 @@
 mod drone;
 mod husky;
 mod oxbo_harvester;
+mod robotti;
 mod tractor;
 
 pub use drone::drone;
 pub use husky::husky;
 pub use oxbo_harvester::oxbo_harvester;
+pub use robotti::robotti;
 pub use tractor::tractor;

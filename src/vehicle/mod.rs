@@ -16,7 +16,7 @@ use crate::control::ControlInput;
 
 pub use builder::VehicleBuilder;
 pub use chassis::ChassisSpec;
-pub use part::{PartKind, PartSpec};
+pub use part::{PartKind, PartShape, PartSpec};
 pub use wheel::WheelSpec;
 
 /// Opaque identifier handed back by [`crate::Sim::spawn_vehicle`].
@@ -45,6 +45,14 @@ pub enum DriveMode {
     ///   - `yaw`      → torque around world +Y.
     /// Stabilising damping keeps the drone hover-steady.
     Drone,
+    /// 4-wheel independent steering (4WIS / omni). Every wheel's
+    /// steering angle is computed per-tick so the combined wheel
+    /// velocities match:
+    ///   - `throttle` → forward/back body velocity,
+    ///   - `steer`    → lateral (strafe) body velocity,
+    ///   - `yaw`      → rotational body rate around +Y.
+    /// Used for gantry-style field robots like AGROINTELLI Robotti.
+    Omni,
 }
 
 impl Default for DriveMode {

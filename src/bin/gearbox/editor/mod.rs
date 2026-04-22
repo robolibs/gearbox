@@ -27,7 +27,8 @@ impl Plugin for EditorPlugin {
         let left = state.left;
         let right = state.right;
 
-        app.insert_resource(state)
+        app.add_plugins(selection_ring::SelectionRingPlugin)
+            .insert_resource(state)
             .insert_resource(left)
             .insert_resource(right)
             .init_resource::<selection::Selection>()

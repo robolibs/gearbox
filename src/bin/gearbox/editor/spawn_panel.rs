@@ -39,11 +39,15 @@ pub fn draw_content(
                 pending.request(presets::husky(), commands);
             }
             ui.add_space(2.0);
+            if preset_button(ui, "+", "Robotti", "AGROINTELLI gantry · 4WIS omni", accent).clicked() {
+                pending.request(presets::robotti(), commands);
+            }
+            ui.add_space(2.0);
             if preset_button(ui, "+", "Drone", "Quadcopter · WASD + QE yaw + ZX lift", accent).clicked() {
                 pending.request(presets::drone(), commands);
             }
             ui.add_space(2.0);
-            if preset_button(ui, "+", "Oxbo 2475", "6W pea harvester · crab-steer", accent).clicked() {
+            if preset_button(ui, "+", "Oxbo", "6W pea harvester · crab-steer", accent).clicked() {
                 pending.request(presets::oxbo_harvester(), commands);
             }
 

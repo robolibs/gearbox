@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use big_space::prelude::BigSpatialBundle;
 
-use gearbox::{PartKind, VehicleId, VehicleSpec};
+use gearbox::{PartKind, PartShape, VehicleId, VehicleSpec};
 
 use super::{VehicleBody, VehicleWheel};
 
@@ -40,27 +40,30 @@ pub fn spawn_vehicle_visuals(
     let [r, g, b] = spec.chassis.color;
     let chassis_color = Color::srgb(r, g, b);
 
-    let chassis_mesh = meshes.add(Cuboid::new(
-        spec.chassis.size.x as f32,
-        spec.chassis.size.y as f32,
-        spec.chassis.size.z as f32,
+    // Root entity carries the physics body's pose. Only get a mesh
+    // when the preset wants the chassis box drawn — gantry-style
+    // vehicles (Robotti) suppress it since their silhouette is
+    // entirely carried by `parts`.
+    let mut root_cmd = commands.spawn((
+        Name::new(spec.name.clone()),
+        BigSpatialBundle::default(),
+        VehicleBody { id },
     ));
-    let chassis_mat = materials.add(StandardMaterial {
-        base_color: chassis_color,
-        perceptual_roughness: 0.6,
-        metallic: 0.1,
-        ..default()
-    });
-    let root = commands
-        .spawn((
-            Name::new(spec.name.clone()),
-            BigSpatialBundle::default(),
-            Mesh3d(chassis_mesh),
-            MeshMaterial3d(chassis_mat),
-            VehicleBody { id },
-        ))
-        .insert(ChildOf(big_space_root))
-        .id();
+    if spec.chassis.render_chassis {
+        let chassis_mesh = meshes.add(Cuboid::new(
+            spec.chassis.size.x as f32,
+            spec.chassis.size.y as f32,
+            spec.chassis.size.z as f32,
+        ));
+        let chassis_mat = materials.add(StandardMaterial {
+            base_color: chassis_color,
+            perceptual_roughness: 0.6,
+            metallic: 0.1,
+            ..default()
+        });
+        root_cmd.insert((Mesh3d(chassis_mesh), MeshMaterial3d(chassis_mat)));
+    }
+    let root = root_cmd.insert(ChildOf(big_space_root)).id();
 
     // Shared tread image — one repeat of the chevron block.  Each
     // wheel gets its own material below with a `uv_transform` that
@@ -143,11 +146,24 @@ pub fn spawn_vehicle_visuals(
     for part in &spec.parts {
         let [pr, pg, pb] = part.color;
         let p_color = Color::srgb(pr, pg, pb);
-        let mesh = meshes.add(Cuboid::new(
-            part.size.x as f32,
-            part.size.y as f32,
-            part.size.z as f32,
-        ));
+        let mesh = match part.shape {
+            PartShape::Box => meshes.add(Cuboid::new(
+                part.size.x as f32,
+                part.size.y as f32,
+                part.size.z as f32,
+            )),
+            // Cylinder axis runs along local +Y to match
+            // chassis-local convention.
+            PartShape::Cylinder => meshes.add(
+                Cylinder::new(
+                    (part.size.x as f32) * 0.5,
+                    part.size.y as f32,
+                )
+                .mesh()
+                .resolution(24)
+                .build(),
+            ),
+        };
         let mat = materials.add(StandardMaterial {
             base_color: p_color,
             perceptual_roughness: match part.kind {
@@ -181,10 +197,29 @@ pub fn spawn_vehicle_visuals(
 /// ground (wheels hang down, settle on contact). Dynamic so we don't
 /// hard-code 1.4 for every preset regardless of size.
 pub fn spawn_height_for(spec: &VehicleSpec) -> f64 {
-    // ~0.8 m of clearance under the chassis bottom — enough for
-    // wheels (rear tractor wheel radius ~1 m and stroke ~0.35 m) to
-    // hang in air at rest, regardless of preset.
-    spec.chassis.size.y * 0.5 + 0.8
+    // Lowest point of the vehicle in chassis-local coordinates —
+    // either the chassis bottom or the rest-length wheel bottom,
+    // whichever hangs lower. Gantry robots (Robotti) mount their
+    // wheels well below the chassis pod, so the plain chassis-half
+    // formula would spawn them partially buried.
+    let chassis_bottom = -spec.chassis.size.y * 0.5;
+    let mut lowest = chassis_bottom;
+    for w in &spec.wheels {
+        let wheel_bottom = w.chassis_connection.y
+            - w.suspension_rest_length as f64
+            - w.radius as f64;
+        if wheel_bottom < lowest {
+            lowest = wheel_bottom;
+        }
+    }
+    // Keep ~0.2 m of air under the lowest point so the suspension
+    // has room to settle under gravity without punching through.
+    // Also honour the legacy 0.8 m clearance under the chassis
+    // bottom used by every existing preset — so their spawn
+    // behaviour doesn't change.
+    let height_by_lowest = (-lowest) + 0.2;
+    let height_by_chassis = spec.chassis.size.y * 0.5 + 0.8;
+    height_by_lowest.max(height_by_chassis)
 }
 
 /// Procedural tyre-tread texture — **exactly one chevron period**, so
@@ -248,28 +283,27 @@ pub fn spawn_vehicle_ghost(
     let chassis_color = Color::srgba(r, g, b, alpha);
     let tread_tex     = images.add(make_tyre_tread_texture());
 
-    let chassis_mesh = meshes.add(Cuboid::new(
-        spec.chassis.size.x as f32,
-        spec.chassis.size.y as f32,
-        spec.chassis.size.z as f32,
+    let mut root_cmd = commands.spawn((
+        Name::new(format!("{}-ghost", spec.name)),
+        BigSpatialBundle::default(),
+        GhostTag,
     ));
-    let chassis_mat = materials.add(StandardMaterial {
-        base_color: chassis_color,
-        alpha_mode: AlphaMode::Blend,
-        perceptual_roughness: 0.7,
-        metallic: 0.1,
-        ..default()
-    });
-    let root = commands
-        .spawn((
-            Name::new(format!("{}-ghost", spec.name)),
-            BigSpatialBundle::default(),
-            Mesh3d(chassis_mesh),
-            MeshMaterial3d(chassis_mat),
-            GhostTag,
-        ))
-        .insert(ChildOf(big_space_root))
-        .id();
+    if spec.chassis.render_chassis {
+        let chassis_mesh = meshes.add(Cuboid::new(
+            spec.chassis.size.x as f32,
+            spec.chassis.size.y as f32,
+            spec.chassis.size.z as f32,
+        ));
+        let chassis_mat = materials.add(StandardMaterial {
+            base_color: chassis_color,
+            alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 0.7,
+            metallic: 0.1,
+            ..default()
+        });
+        root_cmd.insert((Mesh3d(chassis_mesh), MeshMaterial3d(chassis_mat)));
+    }
+    let root = root_cmd.insert(ChildOf(big_space_root)).id();
 
     // Wheels as children of the ghost root — at rest (suspension
     // fully extended) so the silhouette reads as a settled vehicle.
@@ -340,11 +374,22 @@ pub fn spawn_vehicle_ghost(
     for part in &spec.parts {
         let [pr, pg, pb] = part.color;
         let p_color = Color::srgba(pr, pg, pb, alpha);
-        let mesh = meshes.add(Cuboid::new(
-            part.size.x as f32,
-            part.size.y as f32,
-            part.size.z as f32,
-        ));
+        let mesh = match part.shape {
+            PartShape::Box => meshes.add(Cuboid::new(
+                part.size.x as f32,
+                part.size.y as f32,
+                part.size.z as f32,
+            )),
+            PartShape::Cylinder => meshes.add(
+                Cylinder::new(
+                    (part.size.x as f32) * 0.5,
+                    part.size.y as f32,
+                )
+                .mesh()
+                .resolution(24)
+                .build(),
+            ),
+        };
         let mat = materials.add(StandardMaterial {
             base_color: p_color,
             alpha_mode: AlphaMode::Blend,

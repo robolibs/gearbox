@@ -20,6 +20,20 @@ pub struct ChassisSpec {
     /// Visual base colour (sRGB, 0..1). Used only by the viz layer; the
     /// library core ignores it entirely.
     pub color: [f32; 3],
+    /// Override the box used for principal-inertia calculation. When
+    /// `None`, uses `size` — which is the physics collider's extent.
+    /// For gantry-style machines where the collider is a small central
+    /// pod but the actual mass distribution spans metres, set this to
+    /// the full outer bounding box so roll/pitch inertias aren't
+    /// ridiculously small (which makes the body jump on every
+    /// horizontal wheel force).
+    pub inertia_size: Option<Size>,
+    /// Whether the viz layer should render a mesh for the chassis box
+    /// itself. For gantry machines (Robotti) the chassis is just a
+    /// tiny hidden physics stub and the visible silhouette comes
+    /// entirely from parts — turning this off suppresses the
+    /// otherwise-visible "floating" chassis cuboid at the origin.
+    pub render_chassis: bool,
 }
 
 impl Default for ChassisSpec {
@@ -32,6 +46,8 @@ impl Default for ChassisSpec {
             angular_damping: 0.7,
             ccd: true,
             color: [0.25, 0.55, 0.22],
+            inertia_size: None,
+            render_chassis: true,
         }
     }
 }

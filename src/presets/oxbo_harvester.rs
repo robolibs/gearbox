@@ -7,7 +7,9 @@
 
 use datapod::{Point, Size};
 
-use crate::vehicle::{ChassisSpec, PartKind, PartSpec, VehicleBuilder, VehicleSpec, WheelSpec};
+use crate::vehicle::{
+    ChassisSpec, PartKind, PartShape, PartSpec, VehicleBuilder, VehicleSpec, WheelSpec,
+};
 
 pub fn oxbo_harvester() -> VehicleSpec {
     // "Lower part" (chassis frame where the wheels are). 1.5 × 1.15 =
@@ -21,6 +23,8 @@ pub fn oxbo_harvester() -> VehicleSpec {
         angular_damping: 2.5,
         ccd: false, // see tractor.rs — parry ray-AABB underflow on CCD
         color: [1.0, 0.784, 0.0], // flatsim (255, 200, 0)
+        inertia_size: None,
+        render_chassis: true,
     };
 
     let radius = 0.768;
@@ -63,6 +67,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
             max_engine_force: engine,
             max_brake: 2_500.0,
             max_steer_rad: max_steer,
+            steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
         }
     };
 
@@ -86,6 +91,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
         size: Size::new(3.53, 1.2, 1.77),
         color: yellow,
         kind: PartKind::Karosserie,
+        shape: PartShape::Box,
     };
 
     // Chassis front / rear edges (Z extent of the lower part).
@@ -105,6 +111,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
         size: Size::new(chassis_w, cab_h, cab_depth),
         color: yellow,
         kind: PartKind::Karosserie,
+        shape: PartShape::Box,
     };
     // Thin dark roof cap.
     let cab_roof = PartSpec {
@@ -113,6 +120,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
         size: Size::new(chassis_w + 0.10, 0.14, cab_depth + 0.10),
         color: dark,
         kind: PartKind::Karosserie,
+        shape: PartShape::Box,
     };
 
     // BUNKER — sticks out REARWARD of the chassis more than the cab
@@ -127,6 +135,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
         size: Size::new(chassis_w, bin_h, bin_depth),
         color: yellow,
         kind: PartKind::Tank,
+        shape: PartShape::Box,
     };
 
     VehicleBuilder::new("oxbo_harvester", chassis)

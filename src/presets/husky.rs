@@ -10,7 +10,7 @@
 use datapod::{Point, Size};
 
 use crate::vehicle::{
-    ChassisSpec, DriveMode, PartKind, PartSpec, VehicleBuilder, VehicleSpec, WheelSpec,
+    ChassisSpec, DriveMode, PartKind, PartShape, PartSpec, VehicleBuilder, VehicleSpec, WheelSpec,
 };
 
 pub fn husky() -> VehicleSpec {
@@ -31,9 +31,12 @@ pub fn husky() -> VehicleSpec {
         angular_damping: 2.5,
         // CCD off — see tractor.rs for the parry underflow rationale.
         ccd: false,
-        // Brightened from flatsim's deep purple — more luminous /
-        // saturated so the robot reads against the sandy ground.
-        color: [0.68, 0.30, 1.00],
+        // Light lavender — lifted further from the original deep
+        // purple so the body reads pastel / luminous against the
+        // sandy ground without looking washed-out.
+        color: [0.82, 0.55, 1.00],
+        inertia_size: None,
+        render_chassis: true,
     };
 
     // --- Suspension + wheels ---------------------------------------
@@ -82,6 +85,7 @@ pub fn husky() -> VehicleSpec {
         max_engine_force: 3.125,
         max_brake: 2.5,
         max_steer_rad: 0.0,
+        steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
     };
 
     // --- Sensor / battery marker parts ------------------------------
@@ -94,6 +98,7 @@ pub fn husky() -> VehicleSpec {
         size: Size::new(0.30, 0.15, 0.20),
         color: [0.10, 0.10, 0.12],
         kind: PartKind::Hitch, // visual-only
+        shape: PartShape::Box,
     };
     // A small raised "plate" on top for sensor mounts — purely
     // aesthetic; keeps the silhouette recognisable as a Husky.
@@ -103,6 +108,7 @@ pub fn husky() -> VehicleSpec {
         size: Size::new(chassis_x * 0.9, 0.04, chassis_z * 0.7),
         color: [0.30, 0.30, 0.34],
         kind: PartKind::Karosserie,
+        shape: PartShape::Box,
     };
 
     VehicleBuilder::new("husky", chassis)

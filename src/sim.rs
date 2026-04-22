@@ -110,10 +110,18 @@ impl Sim {
         // sticks. (Using `RigidBodyBuilder::additional_mass_properties` has
         // been unreliable in practice — the collider's default density
         // keeps winning.)
+        // Inertia uses `inertia_size` if provided, otherwise the
+        // collider half-extents. Gantry-style machines (Robotti) need
+        // the full outer bounding box here even though the collider
+        // is a small central pod.
+        let inertia_half_extents = chassis
+            .inertia_size
+            .map(size_to_half_extents)
+            .unwrap_or(half_extents);
         let mass_props = MassProperties::new(
             point_to_vec3(chassis.com_offset),
             chassis.mass,
-            principal_inertia(chassis.mass, half_extents),
+            principal_inertia(chassis.mass, inertia_half_extents),
         );
         let collider = ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
             .mass_properties(mass_props)
@@ -298,6 +306,7 @@ impl Sim {
     pub fn wheel_pose(&self, id: VehicleId, wheel: usize) -> Pose {
         let Some(v) = self.vehicles.get(&id) else { return Pose::default() };
         let Some(wh) = v.controller.wheels().get(wheel) else { return Pose::default() };
+        let spec = &v.spec.wheels[wheel];
 
         let axle = normalize_or(wh.axle(), Vec3::X);
         let down = normalize_or(wh.suspension(), Vec3::NEG_Y);
@@ -306,11 +315,42 @@ impl Sim {
         // its default (0), which makes `wheel.center()` return the chassis
         // attach point — wheels appear embedded in the chassis. Compute the
         // fully-extended (rest-length) position ourselves in that case.
-        let center = if wh.raycast_info().is_in_contact {
+        let mut center = if wh.raycast_info().is_in_contact {
             wh.center()
         } else {
             wh.raycast_info().hard_point_ws + down * wh.suspension_rest_length
         };
+
+        // Kingpin-offset swing: if the spec says the steering pivot is
+        // offset from `chassis_connection` (Robotti's cylinder struts
+        // are outboard of the wheel hubs), swing the wheel around that
+        // kingpin. Purely visual — physics forces are still applied at
+        // `chassis_connection`, this just relocates the rendered hub.
+        //
+        // Geometry: kingpin in chassis-local is K = C + D, where C is
+        // the chassis_connection and D = steering_pivot_offset. The
+        // wheel hangs off an arm from K; at steering θ the arm rotates
+        // by θ around the vertical axis at K. Rest-position offset is
+        // −D (from K back to C), so at angle θ the wheel centre is
+        //     W_local = K + R_y(θ) · (−D) = C + D − R_y(θ)·D.
+        // We apply the delta (W_local − C) in world space to shift
+        // the rapier-computed centre.
+        let d_local = point_to_vec3(spec.steering_pivot_offset);
+        if d_local.length_squared() > 1e-10 {
+            if let Some(rb) = self.bodies.get(v.body) {
+                let chassis_rot = rb.position().rotation;
+                let theta = wh.steering;
+                let (sin_t, cos_t) = theta.sin_cos();
+                // R_y(θ) · d_local (row vector form: only X and Z swap).
+                let rotated = Vec3::new(
+                    d_local.x * cos_t + d_local.z * sin_t,
+                    d_local.y,
+                    -d_local.x * sin_t + d_local.z * cos_t,
+                );
+                let local_delta = d_local - rotated;
+                center += chassis_rot * local_delta;
+            }
+        }
 
         // "Up-in-wheel" direction: world up, orthogonalized against the axle
         // so the basis stays orthonormal even when wheel has camber.
@@ -381,7 +421,7 @@ impl Sim {
         for v in self.vehicles.values_mut() {
             match v.spec.drive_mode {
                 DriveMode::Drone => apply_drone_controls(v, &mut self.bodies, self.gravity),
-                _ => apply_controls(v, &self.bodies),
+                _ => apply_controls(v, &self.bodies, dt),
             }
         }
 
@@ -463,7 +503,7 @@ fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
     if n == Vec3::ZERO { fallback } else { n }
 }
 
-fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet) {
+fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet, dt: f32) {
     let ctrl = v.control;
     let specs: &[WheelSpec] = &v.spec.wheels;
 
@@ -551,6 +591,10 @@ fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet) {
             // `apply_drone_controls`. Leave per-wheel forces at zero
             // just in case a wheel is present on a Drone-mode spec.
         }
+        DriveMode::Omni => {
+            // Handled below together with per-wheel steering; leave
+            // engine_force_per_wheel at its legacy default here.
+        }
         DriveMode::Differential => {
             // Skid-steer: left vs right throttle instead of wheel
             // angle. Positive `steer` pivots the vehicle LEFT
@@ -587,15 +631,153 @@ fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet) {
         }
     }
 
+    // ── Omni 4WIS control mapping ──
+    //   W/S (throttle) → drive force along each wheel's current facing.
+    //   A/D (steer)    → FRONT wheels only (Ackermann front-axle).
+    //   Z/X (lift)     → ALL wheels (same-angle crab/strafe).
+    //   Q/E (yaw)      → pivot in place — overrides steer+lift with a
+    //                   per-wheel tangential direction (ω × r).
+    //
+    // Steer + lift are additive at the wheel-angle level; yaw takes
+    // precedence when it's active because the target direction is a
+    // function of wheel position, not a single body-frame angle.
+    let mut omni_steer: Vec<f32> = vec![0.0; specs.len()];
+    if matches!(v.spec.drive_mode, DriveMode::Omni) {
+        // Classify front vs rear wheels by their chassis-Z sign,
+        // bucketed around the mean Z of all wheels so it works even
+        // for asymmetric layouts.
+        let mid_z = ((z_min + z_max) * 0.5) as f32;
+        let yaw_cmd = ctrl.yaw;
+        let use_yaw = yaw_cmd.abs() > 1e-3;
+
+        for (idx, spec) in specs.iter().enumerate() {
+            let x_i = spec.chassis_connection.x as f32;
+            let z_i = spec.chassis_connection.z as f32;
+            let is_front = z_i > mid_z;
+            let max_steer = spec.max_steer_rad;
+
+            if use_yaw {
+                // Pivot in place: each wheel points tangentially to a
+                // circle centred on the body, sign picked so positive
+                // `yaw` (Q) turns LEFT.
+                let omega_y = -yaw_cmd;
+                let vx = omega_y * z_i;
+                let vz = -omega_y * x_i;
+                let mag = (vx * vx + vz * vz).sqrt();
+                let raw = if mag > 1e-4 { vx.atan2(vz) } else { 0.0 };
+                let (folded, sign) = if raw > std::f32::consts::FRAC_PI_2 {
+                    (raw - std::f32::consts::PI, -1.0)
+                } else if raw < -std::f32::consts::FRAC_PI_2 {
+                    (raw + std::f32::consts::PI, -1.0)
+                } else {
+                    (raw, 1.0)
+                };
+                omni_steer[idx] = folded.clamp(-max_steer, max_steer);
+                engine_force_per_wheel[idx] = if spec.driven {
+                    mag.min(1.0) * spec.max_engine_force * sign
+                } else {
+                    0.0
+                };
+            } else {
+                // Proper Ackermann on A/D + crab on Z/X.
+                //
+                // Front wheels get the full per-wheel Ackermann angle
+                // (inner wheel steers more than outer so both track
+                // the same turn centre). Rear wheels get a gentle
+                // SAME-direction assist — real 4WS passenger cars do
+                // this too, it sharpens turn-in without shoving the
+                // tail out. Turn angle is capped at 40° so there's
+                // room for Z/X (crab) to combine additively up to the
+                // ±90° mechanical limit.
+                //
+                // The important half is the DRIVE-FORCE differential:
+                // each wheel's engine force is scaled by its radius
+                // from the Ackermann turn centre relative to the rear
+                // axle centre's radius. That makes outer wheels push
+                // proportionally to their larger arc while inner
+                // wheels ease off — no more rear-tyre scrub.
+                const TURN_LIMIT: f32 = 40.0_f32 * std::f32::consts::PI / 180.0;
+                const REAR_ASSIST: f32 = 0.18; // 18 % of front angle
+                let turn_cap = max_steer.min(TURN_LIMIT);
+                let front_angle_here = if is_front && spec.steered {
+                    ackermann_steer(ctrl.steer, turn_cap, x_i, wheelbase)
+                } else {
+                    0.0
+                };
+                // Rear assist angle — small, same sign as the front
+                // nominal angle. No per-wheel Ackermann correction:
+                // rear wheels share one small angle.
+                let rear_angle_here = if !is_front {
+                    ctrl.steer * turn_cap * REAR_ASSIST
+                } else {
+                    0.0
+                };
+                let turn_contrib = front_angle_here + rear_angle_here;
+                // Z (+lift) crabs — same sign on every wheel.
+                let crab_contrib = ctrl.lift * max_steer;
+                let angle = (turn_contrib + crab_contrib)
+                    .clamp(-max_steer, max_steer);
+                omni_steer[idx] = angle;
+
+                // Ackermann kinematic differential — each wheel's
+                // target ground-speed is proportional to its distance
+                // from the instantaneous turn centre, so the engine
+                // force gets scaled by the same ratio. Clamp +/-
+                // linearly-mixed so the inner wheel never drops to
+                // zero and the outer never spikes beyond 1.6×.
+                let steer_mag = ctrl.steer.abs();
+                let diff_scale = if steer_mag > 1e-3 && wheelbase > 1e-3 {
+                    // δ is the nominal front-axle Ackermann angle
+                    // (pre per-wheel correction), signed.
+                    let delta_nominal = ctrl.steer * turn_cap;
+                    // Turn centre on the rear axle extended: for
+                    // +steer (left turn) it sits at x < 0, so the
+                    // sign of `-wheelbase / tan(δ)` is correct.
+                    let x_o = -wheelbase / delta_nominal.tan();
+                    let rear_axle_z = z_min as f32;
+                    let dx = x_i - x_o;
+                    let dz = z_i - rear_axle_z;
+                    let r_i = (dx * dx + dz * dz).sqrt();
+                    let r_rear = x_o.abs().max(1e-3);
+                    let ratio = r_i / r_rear;
+                    // Blend 60 % kinematic with 40 % uniform so the
+                    // imbalance stays controllable at large steer.
+                    (1.0 + 0.6 * (ratio - 1.0)).clamp(0.4, 1.6)
+                } else {
+                    1.0
+                };
+                engine_force_per_wheel[idx] = if spec.driven {
+                    ctrl.throttle * spec.max_engine_force * diff_scale
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
+    let omni_mode = matches!(v.spec.drive_mode, DriveMode::Omni);
     let differential_mode = matches!(v.spec.drive_mode, DriveMode::Differential);
+    // Rate-limit 4WIS wheel steering so pressing a key doesn't snap
+    // every wheel from 0° to 90° in a single tick — which on sticky
+    // tires converts into a huge instantaneous body impulse and makes
+    // the whole chassis visibly jump. 3 rad/s ≈ half a second to
+    // full-lock, which is fast but smooth.
+    const OMNI_STEER_RATE: f32 = 3.0;
+    let max_steer_delta = OMNI_STEER_RATE * dt;
     let wheels = v.controller.wheels_mut();
-    for ((w, spec), &engine_force) in
-        wheels.iter_mut().zip(specs).zip(engine_force_per_wheel.iter())
+    for (idx, ((w, spec), &engine_force)) in wheels
+        .iter_mut()
+        .zip(specs)
+        .zip(engine_force_per_wheel.iter())
+        .enumerate()
     {
         w.engine_force = engine_force;
         w.brake = ctrl.brake * spec.max_brake * brake_gate;
-        w.steering = if differential_mode {
-            // All wheels fixed forward on skid-steer.
+        w.steering = if omni_mode {
+            let target = omni_steer[idx];
+            let delta = (target - w.steering).clamp(-max_steer_delta, max_steer_delta);
+            w.steering + delta
+        } else if differential_mode {
             0.0
         } else if spec.steered {
             ackermann_steer(
