@@ -16,7 +16,8 @@ use crate::convert::{
     vec3_to_velocity,
 };
 use crate::planet::Planet;
-use crate::vehicle::{DriveMode, PartKind, VehicleId, VehicleSpec, VehicleState, WheelSpec};
+use crate::vehicle::drive::{self, DriveContext};
+use crate::vehicle::{PartKind, VehicleId, VehicleSpec, VehicleState};
 use crate::world;
 
 pub struct Sim {
@@ -35,6 +36,12 @@ pub struct Sim {
 
     /// The "planet" this sim lives on — used for lat/lon readouts.
     pub planet: Planet,
+
+    /// Debug / sandbox toggle — when `true`, every vehicle's power
+    /// system skips the decrement step. Drain rate + "moving" flag
+    /// are still computed so the Inspector shows live diagnostics,
+    /// but reservoirs never fall. World-level, not per-vehicle.
+    pub unlimited_power: bool,
 
     // Sim-owned.
     vehicles: HashMap<VehicleId, VehicleState>,
@@ -62,6 +69,7 @@ impl Sim {
             integration: IntegrationParameters::default(),
             gravity: Vector::new(0.0, -9.81, 0.0),
             planet: Planet::default(),
+            unlimited_power: false,
             vehicles: HashMap::new(),
             next_id: 0,
         }
@@ -223,9 +231,11 @@ impl Sim {
             id,
             VehicleState {
                 spec,
-                body: body_handle,
-                controller,
                 control: ControlInput::default(),
+                handles: crate::vehicle::physics::PhysicsHandles {
+                    body: body_handle,
+                    controller,
+                },
             },
         );
         id
@@ -241,7 +251,7 @@ impl Sim {
     /// Used by the editor's drag-to-move gesture.
     pub fn set_vehicle_pose(&mut self, id: VehicleId, pose: Pose) {
         let Some(v) = self.vehicles.get(&id) else { return };
-        let handle = v.body;
+        let handle = v.handles.body;
         if let Some(rb) = self.bodies.get_mut(handle) {
             rb.set_position(pose_to_rpose(pose), true);
             rb.set_linvel(Vec3::ZERO, true);
@@ -256,7 +266,7 @@ impl Sim {
     pub fn vehicle_pose(&self, id: VehicleId) -> Pose {
         self.vehicles
             .get(&id)
-            .and_then(|v| self.bodies.get(v.body))
+            .and_then(|v| self.bodies.get(v.handles.body))
             .map(|rb| rpose_to_pose(*rb.position()))
             .unwrap_or_default()
     }
@@ -295,7 +305,7 @@ impl Sim {
     pub fn vehicle_linvel(&self, id: VehicleId) -> Velocity {
         self.vehicles
             .get(&id)
-            .and_then(|v| self.bodies.get(v.body))
+            .and_then(|v| self.bodies.get(v.handles.body))
             .map(|rb| vec3_to_velocity(rb.linvel()))
             .unwrap_or_default()
     }
@@ -305,7 +315,7 @@ impl Sim {
     /// extrudes along +Y).
     pub fn wheel_pose(&self, id: VehicleId, wheel: usize) -> Pose {
         let Some(v) = self.vehicles.get(&id) else { return Pose::default() };
-        let Some(wh) = v.controller.wheels().get(wheel) else { return Pose::default() };
+        let Some(wh) = v.handles.controller.wheels().get(wheel) else { return Pose::default() };
         let spec = &v.spec.wheels[wheel];
 
         let axle = normalize_or(wh.axle(), Vec3::X);
@@ -337,7 +347,7 @@ impl Sim {
         // the rapier-computed centre.
         let d_local = point_to_vec3(spec.steering_pivot_offset);
         if d_local.length_squared() > 1e-10 {
-            if let Some(rb) = self.bodies.get(v.body) {
+            if let Some(rb) = self.bodies.get(v.handles.body) {
                 let chassis_rot = rb.position().rotation;
                 let theta = wh.steering;
                 let (sin_t, cos_t) = theta.sin_cos();
@@ -383,6 +393,35 @@ impl Sim {
         self.vehicles.get(&id)
     }
 
+    /// Mutable access to a vehicle's state. Use with care — changing
+    /// collider extents at runtime won't reshape the rapier body, but
+    /// edits to spec fields read each tick (wheel engine force, mass
+    /// overrides, visual colour, etc.) take effect immediately.
+    pub fn vehicle_mut(&mut self, id: VehicleId) -> Option<&mut VehicleState> {
+        self.vehicles.get_mut(&id)
+    }
+
+    /// Set a vehicle's total mass, updating the rapier rigid body's
+    /// mass properties in-place so the physics reflects the change on
+    /// the next tick. Inertia is recomputed from the current inertia
+    /// box (either `chassis.inertia_size` override or the collider size).
+    pub fn set_vehicle_mass(&mut self, id: VehicleId, mass: f32) {
+        let Some(state) = self.vehicles.get_mut(&id) else { return };
+        state.spec.chassis.mass = mass.max(0.01);
+        let half_extents = state
+            .spec
+            .chassis
+            .inertia_size
+            .map(size_to_half_extents)
+            .unwrap_or_else(|| size_to_half_extents(state.spec.chassis.size));
+        let new_inertia = principal_inertia(state.spec.chassis.mass, half_extents);
+        let com = point_to_vec3(state.spec.chassis.com_offset);
+        if let Some(rb) = self.bodies.get_mut(state.handles.body) {
+            let props = MassProperties::new(com, state.spec.chassis.mass, new_inertia);
+            rb.set_additional_mass_properties(props, true);
+        }
+    }
+
     /// Re-run each vehicle's wheel raycasts against the current world
     /// without advancing physics. Useful when the editor edits a
     /// chassis pose while the sim clock is paused — without this the
@@ -399,7 +438,7 @@ impl Sim {
         } = self;
         for v in vehicles.values_mut() {
             let filter = QueryFilter::default()
-                .exclude_rigid_body(v.body)
+                .exclude_rigid_body(v.handles.body)
                 .groups(world::wheel_raycast_groups());
             let qpm = broad_phase.as_query_pipeline_mut(
                 narrow_phase.query_dispatcher(),
@@ -407,7 +446,7 @@ impl Sim {
                 colliders,
                 filter,
             );
-            v.controller.update_vehicle(0.0, qpm);
+            v.handles.controller.update_vehicle(0.0, qpm);
         }
     }
 
@@ -415,43 +454,98 @@ impl Sim {
     pub fn step(&mut self, dt: f32) {
         self.integration.dt = dt;
 
-        // 1. Translate ControlInput → per-wheel engine/brake/steering
-        //    for ground vehicles, or direct body forces/torques for
-        //    drones.
+        // 1a. Drain the power reservoir(s) + tick auto-fill on each
+        //     vehicle's containers.
+        //
+        //     Tiers (observable behaviour):
+        //       * parked              → tiny idle trickle, NO fill
+        //       * moving, work off    → travel drain,       NO fill
+        //       * moving, work on     → travel + work drain, auto-fill
+        //
+        //     The controllers themselves gate on `is_engine_live()`
+        //     so a depleted / powered-off vehicle can't move.
+        //
+        //     We feed the power/auto-fill tick **horizontal speed
+        //     only** — `linvel().length()` includes the Y component,
+        //     which is non-zero on any suspension-sprung vehicle even
+        //     when parked. Letting that count as "moving" is the
+        //     classic-rapier gotcha that makes a stationary tractor
+        //     burn fuel at full travel rate.
+        let drain_enabled = !self.unlimited_power;
         for v in self.vehicles.values_mut() {
-            match v.spec.drive_mode {
-                DriveMode::Drone => apply_drone_controls(v, &mut self.bodies, self.gravity),
-                _ => apply_controls(v, &self.bodies, dt),
+            let horiz_speed = self
+                .bodies
+                .get(v.handles.body)
+                .map(|rb| {
+                    let lv = rb.linvel();
+                    (lv.x * lv.x + lv.z * lv.z).sqrt()
+                })
+                .unwrap_or(0.0);
+            v.spec.power.tick(dt, horiz_speed, drain_enabled);
+            let moving = crate::vehicle::power::is_moving(horiz_speed);
+            let work_on = v.spec.power.work && v.spec.power.is_engine_live();
+            for c in &mut v.spec.containers {
+                c.tick_auto_fill(dt, work_on, moving);
             }
+        }
+
+        // 1b. Translate ControlInput → per-wheel engine/brake/steering
+        //     for ground vehicles, or direct body forces/torques for
+        //     drones. Dispatched through the DriveController trait so
+        //     new modes are just new files under `vehicle/drive/`.
+        //     Each controller sees the physics only through narrow
+        //     `BodyProxy` / `WheelsProxy` handles — constructed here
+        //     from the rapier body + wheel-controller under the hood.
+        for v in self.vehicles.values_mut() {
+            let controller = drive::controller_for(v.spec.drive_mode);
+            // Split-borrow the vehicle: `spec` + `control` are shared
+            // reads / copies; `handles.body` is a handle into a
+            // separately-held `bodies` map; `handles.controller` is
+            // borrowed mutably on a disjoint field. Rust's field
+            // splitting makes this OK.
+            let VehicleState {
+                spec,
+                control,
+                handles,
+            } = v;
+            let Some(rb) = self.bodies.get_mut(handles.body) else { continue };
+            let mut ctx = DriveContext {
+                dt,
+                gravity: self.gravity,
+                spec,
+                control: *control,
+                body: crate::vehicle::physics::BodyProxy::new(rb),
+                wheels: crate::vehicle::physics::WheelsProxy::new(&mut handles.controller),
+            };
+            controller.apply(&mut ctx);
         }
 
         // 1b. Parking brake. Rapier's `wheel.brake` is applied as
         // `engine_force = -brake * copysign(forward_impulse)` — the
         // sign term flips every step once forward_impulse is near zero,
         // which shows up in the viewport as the whole vehicle
-        // shimmying. Sidestep the whole mess: when the driver is
-        // pressing brake AND the vehicle is already slow, zero out
-        // the horizontal linvel + the angular velocity directly.
+        // shimmying. Sidestep: when the driver is pressing brake AND
+        // the vehicle is already slow, zero out horizontal linvel +
+        // angular velocity directly. Airborne vehicles skip this.
         for v in self.vehicles.values() {
-            if matches!(v.spec.drive_mode, DriveMode::Drone) {
+            if drive::controller_for(v.spec.drive_mode).is_airborne() {
                 continue;
             }
             if v.control.brake < 0.5 {
                 continue;
             }
-            let Some(rb) = self.bodies.get_mut(v.body) else { continue };
+            let Some(rb) = self.bodies.get_mut(v.handles.body) else { continue };
             let lv = rb.linvel();
             let horiz2 = lv.x * lv.x + lv.z * lv.z;
             if horiz2 < 0.5 * 0.5 {
-                // < 0.5 m/s horizontal — pin it.
                 let ly = lv.y;
                 rb.set_linvel(Vec3::new(0.0, ly, 0.0), true);
                 rb.set_angvel(Vec3::ZERO, true);
             }
         }
 
-        // 2. Run each ground vehicle's ray-cast controller. Drones
-        //    skip this — they have no wheels.
+        // 2. Run each ground vehicle's ray-cast controller. Airborne
+        //    vehicles skip this — they have no wheels.
         let Sim {
             vehicles,
             bodies,
@@ -461,7 +555,7 @@ impl Sim {
             ..
         } = self;
         for v in vehicles.values_mut() {
-            if matches!(v.spec.drive_mode, DriveMode::Drone) {
+            if drive::controller_for(v.spec.drive_mode).is_airborne() {
                 continue;
             }
             // Exclude the vehicle's OWN chassis from its wheel raycasts.
@@ -469,7 +563,7 @@ impl Sim {
             // the chassis itself, rapier reports `suspension_length = 0`,
             // and the wheels get "stuck" against the chassis bottom.
             let filter = QueryFilter::default()
-                .exclude_rigid_body(v.body)
+                .exclude_rigid_body(v.handles.body)
                 .groups(world::wheel_raycast_groups());
             let qpm = broad_phase.as_query_pipeline_mut(
                 narrow_phase.query_dispatcher(),
@@ -477,7 +571,7 @@ impl Sim {
                 colliders,
                 filter,
             );
-            v.controller.update_vehicle(dt, qpm);
+            v.handles.controller.update_vehicle(dt, qpm);
         }
 
         // 3. Step the physics world.
@@ -501,438 +595,6 @@ impl Sim {
 fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
     let n = v.normalize_or_zero();
     if n == Vec3::ZERO { fallback } else { n }
-}
-
-fn apply_controls(v: &mut VehicleState, bodies: &RigidBodySet, dt: f32) {
-    let ctrl = v.control;
-    let specs: &[WheelSpec] = &v.spec.wheels;
-
-    // Brake anti-shake. Rapier's copysign-based brake flips sign near
-    // zero velocity, causing oscillation. Taper the per-wheel brake
-    // down starting at 1.2 m/s and force it to 0 below 0.5 m/s — the
-    // parking-brake pass in `step()` takes over from there.
-    let speed_mag = bodies
-        .get(v.body)
-        .map(|rb| rb.linvel().length())
-        .unwrap_or(0.0);
-    let brake_gate = if speed_mag < 0.5 {
-        0.0
-    } else {
-        ((speed_mag - 0.5) / 0.7).clamp(0.0, 1.0)
-    };
-
-    // Ackermann wheelbase: longitudinal distance from the frontmost
-    // to the rearmost wheel attachment. Used to compute each steered
-    // wheel's angle such that all steered wheels point at a common
-    // turn centre (no tyre scrub).
-    let (mut z_min, mut z_max) = (f64::INFINITY, f64::NEG_INFINITY);
-    for wspec in specs {
-        z_min = z_min.min(wspec.chassis_connection.z);
-        z_max = z_max.max(wspec.chassis_connection.z);
-    }
-    let wheelbase = (z_max - z_min) as f32;
-
-    // Collect each wheel's current suspension (normal) force from
-    // rapier. These govern per-wheel grip, which in turn drives the
-    // differential's per-wheel torque split below.
-    let normal_forces: Vec<f32> = v
-        .controller
-        .wheels()
-        .iter()
-        .map(|w| w.wheel_suspension_force.max(0.0))
-        .collect();
-
-    // Group driven wheels by axle (bucketed by z to handle float
-    // fuzz). Within an axle, we apply a weight-transfer-aware open
-    // differential: each wheel's share of the axle's total engine
-    // force is proportional to its share of the axle's total normal
-    // force. Unloaded wheels get less torque (no more one-wheel spin);
-    // loaded wheels get more. On even ground this degenerates to 50/50.
-    use std::collections::BTreeMap;
-    let mut axles: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
-    for (idx, spec) in specs.iter().enumerate() {
-        if !spec.driven {
-            continue;
-        }
-        let z_key = (spec.chassis_connection.z * 100.0).round() as i32;
-        axles.entry(z_key).or_default().push(idx);
-    }
-
-    // engine_force_per_wheel[i] is what we'll actually write. Default
-    // is the legacy "each wheel gets full throttle × max_engine_force".
-    let mut engine_force_per_wheel: Vec<f32> = specs
-        .iter()
-        .map(|s| if s.driven { ctrl.throttle * s.max_engine_force } else { 0.0 })
-        .collect();
-
-    match v.spec.drive_mode {
-        DriveMode::Ackermann => {
-            // Weight-transfer-aware open differential within each axle.
-            for (_z, wheel_indices) in &axles {
-                if wheel_indices.len() < 2 {
-                    continue;
-                }
-                let total_n: f32 = wheel_indices.iter().map(|&i| normal_forces[i]).sum();
-                if total_n < 1.0 {
-                    continue; // axle airborne
-                }
-                let axle_total: f32 = wheel_indices
-                    .iter()
-                    .map(|&i| ctrl.throttle * specs[i].max_engine_force)
-                    .sum();
-                for &idx in wheel_indices {
-                    let share = normal_forces[idx] / total_n;
-                    engine_force_per_wheel[idx] = axle_total * share;
-                }
-            }
-        }
-        DriveMode::Drone => {
-            // Drones never get here — `step()` dispatches them to
-            // `apply_drone_controls`. Leave per-wheel forces at zero
-            // just in case a wheel is present on a Drone-mode spec.
-        }
-        DriveMode::Omni => {
-            // Handled below together with per-wheel steering; leave
-            // engine_force_per_wheel at its legacy default here.
-        }
-        DriveMode::Differential => {
-            // Skid-steer: left vs right throttle instead of wheel
-            // angle. Positive `steer` pivots the vehicle LEFT
-            // (matches Ackermann) — right-side wheels have to run
-            // faster than left-side. `+x` is the right side by our
-            // lateral convention.
-            //
-            // `TURN_GAIN` amplifies the steer component's
-            // contribution so turns are crisp at the low
-            // `max_engine_force` values the Husky needs for a
-            // sensible straight-line top speed. Pure turn-in-place
-            // produces `TURN_GAIN × max_engine_force` per wheel,
-            // well above the straight-line force budget.
-            const TURN_GAIN: f32 = 6.0;
-            let t = ctrl.throttle;
-            let s = ctrl.steer * TURN_GAIN;
-            // +X is the right side. Positive `steer` (A key) must
-            // pivot the vehicle LEFT, i.e. right-side wheels push
-            // backward while left-side wheels push forward.
-            let left_cmd = t + s;
-            let right_cmd = t - s;
-            for (idx, spec) in specs.iter().enumerate() {
-                if !spec.driven {
-                    engine_force_per_wheel[idx] = 0.0;
-                    continue;
-                }
-                let cmd = if spec.chassis_connection.x < 0.0 {
-                    left_cmd
-                } else {
-                    right_cmd
-                };
-                engine_force_per_wheel[idx] = cmd * spec.max_engine_force;
-            }
-        }
-    }
-
-    // ── Omni 4WIS control mapping ──
-    //   W/S (throttle) → drive force along each wheel's current facing.
-    //   A/D (steer)    → FRONT wheels only (Ackermann front-axle).
-    //   Z/X (lift)     → ALL wheels (same-angle crab/strafe).
-    //   Q/E (yaw)      → pivot in place — overrides steer+lift with a
-    //                   per-wheel tangential direction (ω × r).
-    //
-    // Steer + lift are additive at the wheel-angle level; yaw takes
-    // precedence when it's active because the target direction is a
-    // function of wheel position, not a single body-frame angle.
-    let mut omni_steer: Vec<f32> = vec![0.0; specs.len()];
-    if matches!(v.spec.drive_mode, DriveMode::Omni) {
-        // Classify front vs rear wheels by their chassis-Z sign,
-        // bucketed around the mean Z of all wheels so it works even
-        // for asymmetric layouts.
-        let mid_z = ((z_min + z_max) * 0.5) as f32;
-        let yaw_cmd = ctrl.yaw;
-        let use_yaw = yaw_cmd.abs() > 1e-3;
-
-        for (idx, spec) in specs.iter().enumerate() {
-            let x_i = spec.chassis_connection.x as f32;
-            let z_i = spec.chassis_connection.z as f32;
-            let is_front = z_i > mid_z;
-            let max_steer = spec.max_steer_rad;
-
-            if use_yaw {
-                // Pivot in place: each wheel points tangentially to a
-                // circle centred on the body, sign picked so positive
-                // `yaw` (Q) turns LEFT.
-                let omega_y = -yaw_cmd;
-                let vx = omega_y * z_i;
-                let vz = -omega_y * x_i;
-                let mag = (vx * vx + vz * vz).sqrt();
-                let raw = if mag > 1e-4 { vx.atan2(vz) } else { 0.0 };
-                let (folded, sign) = if raw > std::f32::consts::FRAC_PI_2 {
-                    (raw - std::f32::consts::PI, -1.0)
-                } else if raw < -std::f32::consts::FRAC_PI_2 {
-                    (raw + std::f32::consts::PI, -1.0)
-                } else {
-                    (raw, 1.0)
-                };
-                omni_steer[idx] = folded.clamp(-max_steer, max_steer);
-                engine_force_per_wheel[idx] = if spec.driven {
-                    mag.min(1.0) * spec.max_engine_force * sign
-                } else {
-                    0.0
-                };
-            } else {
-                // Proper Ackermann on A/D + crab on Z/X.
-                //
-                // Front wheels get the full per-wheel Ackermann angle
-                // (inner wheel steers more than outer so both track
-                // the same turn centre). Rear wheels get a gentle
-                // SAME-direction assist — real 4WS passenger cars do
-                // this too, it sharpens turn-in without shoving the
-                // tail out. Turn angle is capped at 40° so there's
-                // room for Z/X (crab) to combine additively up to the
-                // ±90° mechanical limit.
-                //
-                // The important half is the DRIVE-FORCE differential:
-                // each wheel's engine force is scaled by its radius
-                // from the Ackermann turn centre relative to the rear
-                // axle centre's radius. That makes outer wheels push
-                // proportionally to their larger arc while inner
-                // wheels ease off — no more rear-tyre scrub.
-                const TURN_LIMIT: f32 = 40.0_f32 * std::f32::consts::PI / 180.0;
-                const REAR_ASSIST: f32 = 0.18; // 18 % of front angle
-                let turn_cap = max_steer.min(TURN_LIMIT);
-                let front_angle_here = if is_front && spec.steered {
-                    ackermann_steer(ctrl.steer, turn_cap, x_i, wheelbase)
-                } else {
-                    0.0
-                };
-                // Rear assist angle — small, same sign as the front
-                // nominal angle. No per-wheel Ackermann correction:
-                // rear wheels share one small angle.
-                let rear_angle_here = if !is_front {
-                    ctrl.steer * turn_cap * REAR_ASSIST
-                } else {
-                    0.0
-                };
-                let turn_contrib = front_angle_here + rear_angle_here;
-                // Z (+lift) crabs — same sign on every wheel.
-                let crab_contrib = ctrl.lift * max_steer;
-                let angle = (turn_contrib + crab_contrib)
-                    .clamp(-max_steer, max_steer);
-                omni_steer[idx] = angle;
-
-                // Ackermann kinematic differential — each wheel's
-                // target ground-speed is proportional to its distance
-                // from the instantaneous turn centre, so the engine
-                // force gets scaled by the same ratio. Clamp +/-
-                // linearly-mixed so the inner wheel never drops to
-                // zero and the outer never spikes beyond 1.6×.
-                let steer_mag = ctrl.steer.abs();
-                let diff_scale = if steer_mag > 1e-3 && wheelbase > 1e-3 {
-                    // δ is the nominal front-axle Ackermann angle
-                    // (pre per-wheel correction), signed.
-                    let delta_nominal = ctrl.steer * turn_cap;
-                    // Turn centre on the rear axle extended: for
-                    // +steer (left turn) it sits at x < 0, so the
-                    // sign of `-wheelbase / tan(δ)` is correct.
-                    let x_o = -wheelbase / delta_nominal.tan();
-                    let rear_axle_z = z_min as f32;
-                    let dx = x_i - x_o;
-                    let dz = z_i - rear_axle_z;
-                    let r_i = (dx * dx + dz * dz).sqrt();
-                    let r_rear = x_o.abs().max(1e-3);
-                    let ratio = r_i / r_rear;
-                    // Blend 60 % kinematic with 40 % uniform so the
-                    // imbalance stays controllable at large steer.
-                    (1.0 + 0.6 * (ratio - 1.0)).clamp(0.4, 1.6)
-                } else {
-                    1.0
-                };
-                engine_force_per_wheel[idx] = if spec.driven {
-                    ctrl.throttle * spec.max_engine_force * diff_scale
-                } else {
-                    0.0
-                };
-            }
-        }
-    }
-
-    let omni_mode = matches!(v.spec.drive_mode, DriveMode::Omni);
-    let differential_mode = matches!(v.spec.drive_mode, DriveMode::Differential);
-    // Rate-limit 4WIS wheel steering so pressing a key doesn't snap
-    // every wheel from 0° to 90° in a single tick — which on sticky
-    // tires converts into a huge instantaneous body impulse and makes
-    // the whole chassis visibly jump. 3 rad/s ≈ half a second to
-    // full-lock, which is fast but smooth.
-    const OMNI_STEER_RATE: f32 = 3.0;
-    let max_steer_delta = OMNI_STEER_RATE * dt;
-    let wheels = v.controller.wheels_mut();
-    for (idx, ((w, spec), &engine_force)) in wheels
-        .iter_mut()
-        .zip(specs)
-        .zip(engine_force_per_wheel.iter())
-        .enumerate()
-    {
-        w.engine_force = engine_force;
-        w.brake = ctrl.brake * spec.max_brake * brake_gate;
-        w.steering = if omni_mode {
-            let target = omni_steer[idx];
-            let delta = (target - w.steering).clamp(-max_steer_delta, max_steer_delta);
-            w.steering + delta
-        } else if differential_mode {
-            0.0
-        } else if spec.steered {
-            ackermann_steer(
-                ctrl.steer,
-                spec.max_steer_rad,
-                spec.chassis_connection.x as f32,
-                wheelbase,
-            )
-        } else {
-            0.0
-        };
-    }
-}
-
-/// Arcade drone controls with cosmetic tilt.
-///
-/// A real quadrotor is an inverted pendulum — differential rotor
-/// thrust tilts the body, gravity then pulls it horizontally. Doing
-/// that literally in rapier needs a PID attitude stabiliser to keep
-/// it from immediately flipping (no pendulum stays balanced by
-/// itself). Instead we cheat in the standard game-engine way:
-///
-///   - Horizontal translation is driven by direct **forces at the
-///     centre of mass** — always stable, arcade-easy to steer.
-///   - Tilt is produced by a **PD controller** that drives the
-///     drone's body toward a target pitch/roll angle proportional
-///     to the `throttle` / `steer` commands. Release the stick and
-///     it levels out again.
-///
-/// Control mapping:
-///   - `throttle` (W/S) → forward / backward force + nose-down/up
-///     visual tilt (drone "leans into" its motion).
-///   - `steer`    (A/D) → strafe force + bank-right/left tilt.
-///   - `lift`     (Z/X) → extra vertical force on top of the
-///     constant hover force that cancels gravity.
-///   - `yaw`      (Q/E) → yaw torque around world +Y. Positive
-///     `yaw` (Q) = turn LEFT.
-fn apply_drone_controls(v: &mut VehicleState, bodies: &mut RigidBodySet, gravity: Vector) {
-    let ctrl = v.control;
-    let Some(rb) = bodies.get_mut(v.body) else { return };
-    let mass = rb.mass();
-    let rot = *rb.rotation();
-
-    // World-frame basis vectors from the body's current rotation.
-    let fwd_world = rot * Vec3::Z;
-    let right_world = rot * Vec3::X;
-    let up_body_world = rot * Vec3::Y;
-
-    // Horizontal projections so the drone doesn't dive when tilted.
-    let fwd_h = Vec3::new(fwd_world.x, 0.0, fwd_world.z).normalize_or_zero();
-    let right_h = Vec3::new(right_world.x, 0.0, right_world.z).normalize_or_zero();
-
-    // Tunables (per-mass, so scaling the drone up keeps the feel).
-    const HORIZ_ACCEL: f32 = 6.0;   // m/s² at full stick
-    const LIFT_ACCEL:  f32 = 10.0;  // m/s² at full lift
-    const YAW_ACCEL:   f32 = 2.7;   // rad/s² at full yaw (3× the previous 0.9 — Q/E now spin briskly)
-    const MAX_TILT:    f32 = 0.30;  // rad (~17°) at full stick
-    // PD gains expressed in *angular-acceleration* space (rad/s² per
-    // rad of error, and rad/s² per rad/s of rate). Multiplying by
-    // the body's actual inertia tensor below converts them to Nm, so
-    // small drones don't get torques scaled for a refrigerator.
-    // Critical-ish damping at ~ω_n = 8 rad/s (stops in ~0.4 s).
-    const TILT_OMEGA:  f32 = 8.0;   // natural freq
-    const TILT_ZETA:   f32 = 0.9;   // damping ratio
-
-    // --- Linear forces ---------------------------------------------
-    // Hover force goes along the drone's LOCAL +Y (`up_body_world`),
-    // not world +Y. Consequences: level drone hovers normally; tilted
-    // drone has its "hover" thrust tilted with it (gravity wins on
-    // the vertical axis, drone starts to slide); **flipped** drone
-    // (upside-down) gets pushed toward the ground and crashes
-    // instead of magically floating.
-    let gravity_mag = -gravity.y * mass;
-    let hover = up_body_world * gravity_mag;
-    // Same for the lift command — altitude control is relative to
-    // the drone's own up axis.
-    let lift = up_body_world * ctrl.lift * mass * LIFT_ACCEL;
-    let fore = fwd_h * ctrl.throttle * mass * HORIZ_ACCEL;
-    let side = right_h * ctrl.steer * mass * HORIZ_ACCEL;
-
-    rb.reset_forces(true);
-    rb.reset_torques(true);
-    rb.add_force(hover + lift + fore + side, true);
-
-    // --- Tilt controller -------------------------------------------
-    // Measure current pitch / roll from how the body's local +Y
-    // projects into world. Small-angle OK; the PD gains compensate.
-    // Positive `pitch_angle` = nose tilted forward (toward +Z).
-    // Positive `roll_angle`  = tilted to the RIGHT (toward +X).
-    // (The earlier `-up_body_world.x` was the bug that made D tilt
-    // the drone the wrong way and eventually flip it.)
-    let pitch_angle = up_body_world.z.atan2(up_body_world.y);
-    let roll_angle  = up_body_world.x.atan2(up_body_world.y);
-
-    // Desired tilts (proportional to stick input).
-    let target_pitch = ctrl.throttle * MAX_TILT;
-    let target_roll  = ctrl.steer * MAX_TILT;
-
-    // Body-frame angular velocity components (pitch rate around body X,
-    // roll rate around body Z).
-    let angvel_world = rb.angvel();
-    let angvel_local = rot.inverse() * angvel_world;
-
-    // Desired angular acceleration in body frame (rad/s²).
-    // Second-order critically-ish-damped controller: α = ω²·err − 2ζω·rate.
-    let kp = TILT_OMEGA * TILT_OMEGA;
-    let kd = 2.0 * TILT_ZETA * TILT_OMEGA;
-    let pitch_alpha = kp * (target_pitch - pitch_angle) - kd * angvel_local.x;
-    let roll_alpha  = kp * (target_roll  - roll_angle)  - kd * (-angvel_local.z);
-
-    // Convert α → Nm by multiplying by the body's actual local
-    // principal inertia. Tiny drones get tiny torques, big drones
-    // get big torques — instead of the old fixed KP-in-Nm that
-    // explosion-integrated on small inertias.
-    let local_inertia = rb.mass_properties().local_mprops.principal_inertia();
-    let pitch_torque_local = pitch_alpha * local_inertia.x;
-    let roll_torque_local  = -roll_alpha * local_inertia.z;
-
-    // Yaw torque in Nm — also scaled by inertia so `YAW_ACCEL` is
-    // a true rad/s².
-    let yaw_torque_world_y = -ctrl.yaw * YAW_ACCEL * local_inertia.y;
-
-    let torque_local = Vec3::new(pitch_torque_local, 0.0, roll_torque_local);
-    let torque_world = rot * torque_local + Vec3::new(0.0, yaw_torque_world_y, 0.0);
-    rb.add_torque(torque_world, true);
-}
-
-/// Per-wheel Ackermann steering correction. Returns the *actual*
-/// steering angle (radians) for a wheel at lateral position `wheel_x`
-/// given the nominal max-steer input.
-///
-///   R_c    = wheelbase / tan(input × max_steer)    (turn radius at centre)
-///   R_w    = R_c + wheel_x                         (radius at this wheel)
-///   δ_w    = atan(wheelbase / R_w)
-///
-/// Inside wheel (same side as steer direction) → smaller R_w → larger δ_w.
-/// Outside wheel → larger R_w → smaller δ_w. `max_steer_rad` caps the
-/// result so the wheel never exceeds its mechanical limit — this
-/// matters most for low-radius turns where the inside wheel would
-/// otherwise demand an angle larger than the physical steering stop.
-fn ackermann_steer(input: f32, max_steer: f32, wheel_x: f32, wheelbase: f32) -> f32 {
-    if input.abs() < 1e-6 || max_steer.abs() < 1e-6 || wheelbase <= 1e-3 {
-        return input * max_steer;
-    }
-    let delta_c = input * max_steer;
-    let r_c = wheelbase / delta_c.tan(); // signed; same sign as delta_c
-    let r_w = r_c + wheel_x;
-    // If r_w flips through zero (very tight turn with wide track),
-    // atan2 keeps it sane.
-    let delta_w = wheelbase.atan2(r_w);
-    // atan2 returns [0, π); for a right turn we want a negative
-    // result, so inherit the sign of the nominal angle.
-    let delta_signed = delta_w.copysign(delta_c);
-    // Don't exceed the mechanical stop; preserves spec's own limit.
-    delta_signed.clamp(-max_steer.abs(), max_steer.abs())
 }
 
 fn principal_inertia(mass: f32, half_extents: Vec3) -> Vec3 {

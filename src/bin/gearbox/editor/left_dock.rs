@@ -12,6 +12,7 @@ use crate::viz::camera::FlyTarget;
 
 use super::pending_spawn::PendingSpawn;
 use super::persist::EditorUiState;
+use super::preset_registry::PresetRegistry;
 use super::selection::Selection;
 use super::style::AccentColor;
 use super::{float, spawn_panel, tree};
@@ -39,6 +40,7 @@ pub fn left_dock_ui(
     // tree
     bodies: Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
     mut pending: ResMut<PendingSpawn>,
+    registry: Res<PresetRegistry>,
     accent: Res<AccentColor>,
     mut cameras: Query<&mut ChaseCamera>,
 ) {
@@ -95,6 +97,7 @@ pub fn left_dock_ui(
                 &mut commands,
                 &mut pending,
                 &existing_bodies,
+                &registry,
                 &mut sim,
                 &mut meshes,
                 &mut materials,
@@ -108,23 +111,20 @@ pub fn left_dock_ui(
     // ─── Apply the "frame this vehicle" request ──────────────────
     //
     // Double-clicking a row in the workspace tree tells the chase
-    // camera to SMOOTHLY fly to that vehicle — no teleport. The
-    // camera's `chase_camera_fly` system reads `fly_target` and
-    // eases focus + distance toward it over a few tenths of a
-    // second. Distance is 3× the vehicle's longest dimension so you
-    // end up close enough to see it, not in orbit.
+    // camera to SMOOTHLY fly to that vehicle. The cinematic arc is
+    // **size-independent**: every machine pulls back to the same
+    // apex and settles at the same final distance, so the "route"
+    // looks identical whether you frame a drone or a harvester.
+    // Final framing size difference is just the natural consequence
+    // of the machine being bigger in world-space.
     if let Some(id) = frame_to {
-        if let Some(state) = sim.0.vehicle(id) {
-            let size = state.spec.chassis.size;
-            let max_dim = size.x.max(size.y).max(size.z) as f32;
-            // Final settled distance — 9× the longest chassis
-            // dimension. The previous 3× had the camera ending up
-            // very close to the machine; tripling it leaves a
-            // comfortable cinematic framing at the finish.
-            let target_dist = (max_dim * 9.0).max(12.0);
+        if sim.0.vehicle(id).is_some() {
+            // Cinematic constants — tuned to read well from a drone
+            // up to an oxbo-sized machine at typical screen sizes.
+            const FINAL_DISTANCE: f32 = 18.0;
+            const FLY_DURATION:  f32 = 3.0;
             if let Ok(mut cam) = cameras.single_mut() {
-                // ~3 s flight — pull back, eye the machine, spiral in.
-                let target = FlyTarget::new(id, target_dist, 3.0, &cam);
+                let target = FlyTarget::new(id, FINAL_DISTANCE, FLY_DURATION, &cam);
                 cam.fly_target = Some(target);
             }
         }

@@ -13,9 +13,10 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use big_space::prelude::BigSpatialBundle;
 
-use gearbox::{PartKind, PartShape, VehicleId, VehicleSpec};
+use gearbox::datapod::Size;
+use gearbox::{MeshSource, PartKind, VehicleId, VehicleSpec};
 
-use super::{VehicleBody, VehicleWheel};
+use super::{ChassisTinted, VehicleBody, VehicleWheel};
 
 /// Target physical arc-length of one "^" stripe on the tyre (metres).
 /// Using a fixed arc length rather than a fixed count means every
@@ -27,6 +28,26 @@ const TYRE_STRIPE_ARC_M: f32 = 0.40;
 /// removes every child mesh as well.
 #[derive(Component)]
 pub struct GhostTag;
+
+/// Build a [`Mesh`] handle for a sized volume with a given
+/// [`MeshSource`]. This is the sole dispatch point — adding USD /
+/// glTF support later means adding a variant here, not touching
+/// anything that spawns parts or chassis.
+fn mesh_for(source: MeshSource, size: Size, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+    match source {
+        MeshSource::Box => meshes.add(Cuboid::new(
+            size.x as f32,
+            size.y as f32,
+            size.z as f32,
+        )),
+        MeshSource::Cylinder => meshes.add(
+            Cylinder::new((size.x as f32) * 0.5, size.y as f32)
+                .mesh()
+                .resolution(24)
+                .build(),
+        ),
+    }
+}
 
 pub fn spawn_vehicle_visuals(
     commands: &mut Commands,
@@ -50,18 +71,18 @@ pub fn spawn_vehicle_visuals(
         VehicleBody { id },
     ));
     if spec.chassis.render_chassis {
-        let chassis_mesh = meshes.add(Cuboid::new(
-            spec.chassis.size.x as f32,
-            spec.chassis.size.y as f32,
-            spec.chassis.size.z as f32,
-        ));
+        let chassis_mesh = mesh_for(spec.chassis.mesh, spec.chassis.size, meshes);
         let chassis_mat = materials.add(StandardMaterial {
             base_color: chassis_color,
             perceptual_roughness: 0.6,
             metallic: 0.1,
             ..default()
         });
-        root_cmd.insert((Mesh3d(chassis_mesh), MeshMaterial3d(chassis_mat)));
+        root_cmd.insert((
+            Mesh3d(chassis_mesh),
+            MeshMaterial3d(chassis_mat),
+            ChassisTinted { id },
+        ));
     }
     let root = root_cmd.insert(ChildOf(big_space_root)).id();
 
@@ -146,24 +167,16 @@ pub fn spawn_vehicle_visuals(
     for part in &spec.parts {
         let [pr, pg, pb] = part.color;
         let p_color = Color::srgb(pr, pg, pb);
-        let mesh = match part.shape {
-            PartShape::Box => meshes.add(Cuboid::new(
-                part.size.x as f32,
-                part.size.y as f32,
-                part.size.z as f32,
-            )),
-            // Cylinder axis runs along local +Y to match
-            // chassis-local convention.
-            PartShape::Cylinder => meshes.add(
-                Cylinder::new(
-                    (part.size.x as f32) * 0.5,
-                    part.size.y as f32,
-                )
-                .mesh()
-                .resolution(24)
-                .build(),
-            ),
-        };
+        // If this part's colour matches the chassis colour at spawn,
+        // it's "bodywork" (cab, beams, crossbars, bumper, …) and we
+        // tag it so the Properties colour picker re-tints it along
+        // with the chassis. Contrast parts (dark roofs, wheels,
+        // hitches with their own palette) stay untagged and retain
+        // their original colour.
+        let matches_chassis = (pr - spec.chassis.color[0]).abs() < 1e-4
+            && (pg - spec.chassis.color[1]).abs() < 1e-4
+            && (pb - spec.chassis.color[2]).abs() < 1e-4;
+        let mesh = mesh_for(part.mesh, part.size, meshes);
         let mat = materials.add(StandardMaterial {
             base_color: p_color,
             perceptual_roughness: match part.kind {
@@ -176,18 +189,20 @@ pub fn spawn_vehicle_visuals(
             },
             ..default()
         });
-        commands
-            .spawn((
-                Name::new(format!("{}::{}", spec.name, part.name)),
-                Transform::from_xyz(
-                    part.position.x as f32,
-                    part.position.y as f32,
-                    part.position.z as f32,
-                ),
-                Mesh3d(mesh),
-                MeshMaterial3d(mat),
-            ))
-            .insert(ChildOf(root));
+        let mut ec = commands.spawn((
+            Name::new(format!("{}::{}", spec.name, part.name)),
+            Transform::from_xyz(
+                part.position.x as f32,
+                part.position.y as f32,
+                part.position.z as f32,
+            ),
+            Mesh3d(mesh),
+            MeshMaterial3d(mat),
+        ));
+        if matches_chassis {
+            ec.insert(ChassisTinted { id });
+        }
+        ec.insert(ChildOf(root));
     }
 
     root
@@ -289,11 +304,7 @@ pub fn spawn_vehicle_ghost(
         GhostTag,
     ));
     if spec.chassis.render_chassis {
-        let chassis_mesh = meshes.add(Cuboid::new(
-            spec.chassis.size.x as f32,
-            spec.chassis.size.y as f32,
-            spec.chassis.size.z as f32,
-        ));
+        let chassis_mesh = mesh_for(spec.chassis.mesh, spec.chassis.size, meshes);
         let chassis_mat = materials.add(StandardMaterial {
             base_color: chassis_color,
             alpha_mode: AlphaMode::Blend,
@@ -374,22 +385,7 @@ pub fn spawn_vehicle_ghost(
     for part in &spec.parts {
         let [pr, pg, pb] = part.color;
         let p_color = Color::srgba(pr, pg, pb, alpha);
-        let mesh = match part.shape {
-            PartShape::Box => meshes.add(Cuboid::new(
-                part.size.x as f32,
-                part.size.y as f32,
-                part.size.z as f32,
-            )),
-            PartShape::Cylinder => meshes.add(
-                Cylinder::new(
-                    (part.size.x as f32) * 0.5,
-                    part.size.y as f32,
-                )
-                .mesh()
-                .resolution(24)
-                .build(),
-            ),
-        };
+        let mesh = mesh_for(part.mesh, part.size, meshes);
         let mat = materials.add(StandardMaterial {
             base_color: p_color,
             alpha_mode: AlphaMode::Blend,

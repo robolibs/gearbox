@@ -183,3 +183,20 @@ pub fn section_caps(label: &str, accent: egui::Color32) -> egui::RichText {
 }
 
 pub fn fg_dim() -> egui::Color32 { TEXT_SECONDARY }
+
+/// Text colour that stays readable on top of an arbitrary accent
+/// fill. Uses Rec. 709 luma of the fill — bright fills get near-black
+/// text, dim fills get white — so progress-bar readouts never
+/// disappear into the accent when the user drives a yellow harvester
+/// or a pastel-lavender husky.
+pub fn contrast_text_for(fill: egui::Color32) -> egui::Color32 {
+    let r = fill.r() as f32 / 255.0;
+    let g = fill.g() as f32 / 255.0;
+    let b = fill.b() as f32 / 255.0;
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if luma > 0.55 {
+        egui::Color32::from_rgb(0x18, 0x18, 0x1C)
+    } else {
+        TEXT_PRIMARY
+    }
+}

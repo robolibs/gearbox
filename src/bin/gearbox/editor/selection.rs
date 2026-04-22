@@ -11,7 +11,7 @@ use bevy_egui::EguiContexts;
 
 use gearbox::{
     datapod::{Point, Pose, Quaternion},
-    PartShape, VehicleId,
+    MeshSource, VehicleId,
 };
 
 use crate::viz::GearboxSim;
@@ -193,13 +193,13 @@ fn cursor_pick_vehicle(
             let part_centre = centre + rot * local;
             // Cylinders ignore size.z — use a square bounding box in
             // X/Z based on the diameter (size.x).
-            let half = match part.shape {
-                PartShape::Box => Vec3::new(
+            let half = match part.mesh {
+                MeshSource::Box => Vec3::new(
                     (part.size.x * 0.5) as f32,
                     (part.size.y * 0.5) as f32,
                     (part.size.z * 0.5) as f32,
                 ),
-                PartShape::Cylinder => Vec3::new(
+                MeshSource::Cylinder => Vec3::new(
                     (part.size.x * 0.5) as f32,
                     (part.size.y * 0.5) as f32,
                     (part.size.x * 0.5) as f32,

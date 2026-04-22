@@ -5,6 +5,8 @@ pub mod inspector;
 pub mod left_dock;
 pub mod pending_spawn;
 pub mod persist;
+pub mod preset_registry;
+pub mod properties;
 pub mod right_dock;
 pub mod selection;
 pub mod selection_ring;
@@ -14,6 +16,7 @@ pub mod transform_gizmos;
 pub mod transport;
 pub mod tree;
 pub mod ui_panel;
+pub mod widgets;
 
 use bevy::prelude::*;
 use bevy_egui::EguiPrimaryContextPass;
@@ -31,6 +34,8 @@ impl Plugin for EditorPlugin {
             .insert_resource(state)
             .insert_resource(left)
             .insert_resource(right)
+            .insert_resource(preset_registry::PresetRegistry::with_defaults())
+            .init_resource::<properties::PendingColorChange>()
             .init_resource::<selection::Selection>()
             .init_resource::<pending_spawn::PendingSpawn>()
             .init_resource::<style::AccentColor>()
@@ -81,6 +86,10 @@ impl Plugin for EditorPlugin {
                     transform_gizmos::update_transform_gizmos,
                 )
                     .chain(),
-            );
+            )
+            // Properties panel's colour picker queues a pending
+            // change; this consumer system writes it to the live
+            // material each frame.
+            .add_systems(Update, properties::apply_vehicle_color_changes);
     }
 }

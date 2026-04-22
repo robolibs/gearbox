@@ -4,6 +4,7 @@
 
 pub mod camera;
 pub mod clouds;
+pub mod gamepad;
 pub mod grid;
 pub mod input;
 pub mod spawn;
@@ -42,6 +43,17 @@ pub struct VehicleWheel {
     pub index: usize,
 }
 
+/// Marks an entity whose material should re-tint when the user
+/// changes a vehicle's chassis colour in the Properties panel.
+/// Attached at spawn to the chassis mesh AND to every part whose
+/// declared colour matches the chassis colour (i.e. cab, beams,
+/// crossbars — the "bodywork"). Black roofs, dark hitches, contrast
+/// stripes etc. carry their own colour and are NOT tagged.
+#[derive(Component, Copy, Clone)]
+pub struct ChassisTinted {
+    pub id: gearbox::VehicleId,
+}
+
 /// Insert on a Bevy `App` to wire gearbox → Bevy.
 pub struct GearboxVizPlugin;
 
@@ -50,6 +62,17 @@ impl Plugin for GearboxVizPlugin {
         app.init_resource::<GearboxSim>()
             .init_resource::<grid::GroundGrid>()
             .init_resource::<step::SimClock>()
+            // `GamepadCtx` owns the `gilrs::Gilrs` handle, which holds
+            // `std::sync::mpsc::Receiver` internally and is therefore
+            // `!Sync`. Bevy requires `Send + Sync` for regular
+            // resources, so install it as a non-send (main-thread)
+            // resource via `insert_non_send_resource`.
+            .insert_non_send_resource(gamepad::GamepadCtx::default())
+            .init_resource::<gamepad::GamepadState>()
+            .init_resource::<gamepad::GamepadSelection>()
+            // Gamepad polling runs first so the keyboard-merging input
+            // system below sees fresh stick values on the same frame.
+            .add_systems(Update, gamepad::poll_gamepad_system.before(input::wasd_input_system))
             .add_systems(
                 Update,
                 (

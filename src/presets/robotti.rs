@@ -25,7 +25,8 @@
 use datapod::{Point, Size};
 
 use crate::vehicle::{
-    ChassisSpec, DriveMode, PartKind, PartShape, PartSpec, VehicleBuilder, VehicleSpec, WheelSpec,
+    ChassisSpec, DriveMode, MeshSource, PartKind, PartSpec, PowerKind, PowerSource,
+    VehicleBuilder, VehicleSpec, WheelSpec,
 };
 
 pub fn robotti() -> VehicleSpec {
@@ -60,6 +61,7 @@ pub fn robotti() -> VehicleSpec {
         // silhouette, and the chassis would otherwise float in the
         // middle of the frame looking wrong.
         render_chassis: false,
+        mesh: MeshSource::Box,
     };
 
     // --- Wheels + suspension ----------------------------------------
@@ -134,7 +136,7 @@ pub fn robotti() -> VehicleSpec {
         size: Size::new(beam_w, beam_h, beam_len),
         color: robotti_red,
         kind: PartKind::Karosserie,
-        shape: PartShape::Box,
+        mesh: MeshSource::Box,
     };
     let side_beam_r = PartSpec {
         name: "side_beam_right".into(),
@@ -142,7 +144,7 @@ pub fn robotti() -> VehicleSpec {
         size: Size::new(beam_w, beam_h, beam_len),
         color: robotti_red,
         kind: PartKind::Karosserie,
-        shape: PartShape::Box,
+        mesh: MeshSource::Box,
     };
 
     // --- Front crossbar --------------------------------------------
@@ -170,7 +172,7 @@ pub fn robotti() -> VehicleSpec {
         size: Size::new(cross_len, cross_h, cross_thk),
         color: robotti_red,
         kind: PartKind::Karosserie,
-        shape: PartShape::Box,
+        mesh: MeshSource::Box,
     };
 
     // --- Central pole + sensor box --------------------------------
@@ -195,7 +197,7 @@ pub fn robotti() -> VehicleSpec {
         size: Size::new(pole_dia, pole_h, pole_dia),
         color: robotti_red,
         kind: PartKind::Karosserie,
-        shape: PartShape::Cylinder,
+        mesh: MeshSource::Cylinder,
     };
     // Box sensor housing sitting on top of the pole — even flatter and
     // wider this pass (30 % wider on X, 50 % thinner on Y).
@@ -208,7 +210,7 @@ pub fn robotti() -> VehicleSpec {
         size: Size::new(box_w, box_h, box_d),
         color: robotti_red,
         kind: PartKind::Karosserie,
-        shape: PartShape::Box,
+        mesh: MeshSource::Box,
     };
 
     // --- King-pin struts (cylinders) -------------------------------
@@ -234,7 +236,7 @@ pub fn robotti() -> VehicleSpec {
         size: Size::new(strut_dia, strut_h, strut_dia),
         color: [0.22, 0.22, 0.24],
         kind: PartKind::Hitch, // visual-only (avoid parry thin-AABB path)
-        shape: PartShape::Cylinder,
+        mesh: MeshSource::Cylinder,
     };
 
     VehicleBuilder::new("robotti", chassis)
@@ -252,5 +254,18 @@ pub fn robotti() -> VehicleSpec {
         .part(make_strut("strut_rl", -1.0, rear_z))
         .part(make_strut("strut_rr", 1.0, rear_z))
         .drive_mode(DriveMode::Omni)
+        // Hybrid power plant: battery for electrics / compute, fuel
+        // for the main drivetrain. Both are drained independently;
+        // EITHER running dry disables the vehicle.
+        .power_source(
+            PowerSource::new(PowerKind::Battery, "Battery", 150.0)
+                .with_travel_drain(0.6)
+                .with_work_drain(1.2),
+        )
+        .power_source(
+            PowerSource::new(PowerKind::Fuel, "Fuel", 250.0)
+                .with_travel_drain(1.0)
+                .with_work_drain(2.0),
+        )
         .build()
 }

@@ -14,7 +14,8 @@
 use datapod::{Point, Size};
 
 use crate::vehicle::{
-    ChassisSpec, DriveMode, PartKind, PartShape, PartSpec, VehicleBuilder, VehicleSpec,
+    ChassisSpec, DriveMode, MeshSource, PartKind, PartSpec, PowerKind, PowerSource,
+    VehicleBuilder, VehicleSpec,
 };
 
 pub fn drone() -> VehicleSpec {
@@ -44,6 +45,7 @@ pub fn drone() -> VehicleSpec {
         color: [1.0, 0.52, 0.08],
         inertia_size: None,
         render_chassis: true,
+        mesh: MeshSource::Box,
     };
 
     // --- Rotor arms & blades ---------------------------------------
@@ -85,7 +87,7 @@ pub fn drone() -> VehicleSpec {
         // the colliders side-steps the bug entirely without affecting
         // what the drone looks like.
         kind: PartKind::Hitch,
-        shape: PartShape::Box,
+        mesh: MeshSource::Box,
     };
     let make_rotor = |name: &str, dir_x: f32, dir_z: f32| PartSpec {
         name: name.into(),
@@ -97,7 +99,7 @@ pub fn drone() -> VehicleSpec {
         size: Size::new((rotor_r * 2.0) as f64, 0.01, (rotor_r * 2.0) as f64),
         color: rotor_color,
         kind: PartKind::Hitch, // visual-only (see note above)
-        shape: PartShape::Box,
+        mesh: MeshSource::Box,
     };
 
     VehicleBuilder::new("drone", chassis)
@@ -112,5 +114,10 @@ pub fn drone() -> VehicleSpec {
         .part(make_rotor("rotor_rr",  1.0, -1.0))
         .part(make_rotor("rotor_rl", -1.0, -1.0))
         .drive_mode(DriveMode::Drone)
+        .power_source(
+            PowerSource::new(PowerKind::Battery, "Battery", 100.0)
+                .with_travel_drain(1.0)
+                .with_work_drain(0.5),
+        )
         .build()
 }

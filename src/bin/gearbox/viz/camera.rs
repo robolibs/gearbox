@@ -83,10 +83,16 @@ pub struct FlyTarget {
 }
 
 impl FlyTarget {
+    /// Apex distance reached at the midpoint of the fly. **Fixed** —
+    /// not a function of machine size — so every machine's cinematic
+    /// arc has the same shape (pull back ~45 m, hover, spiral in to
+    /// `distance`). Small robots and big harvesters share the same
+    /// route; only the final focus point differs.
+    pub const APEX_DISTANCE: f32 = 45.0;
+
     /// Build a fresh target, snapshotting the camera's current pose
     /// as the animation's starting point.
     pub fn new(vehicle: VehicleId, distance: f32, duration: f32, cam: &ChaseCamera) -> Self {
-        let apex = cam.distance.max(distance) * 1.8;
         Self {
             vehicle,
             distance,
@@ -96,7 +102,7 @@ impl FlyTarget {
             start_distance: cam.distance,
             start_yaw: cam.yaw,
             start_elevation: cam.elevation,
-            apex_distance: apex,
+            apex_distance: Self::APEX_DISTANCE,
         }
     }
 }

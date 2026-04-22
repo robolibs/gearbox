@@ -1,12 +1,14 @@
-//! Floating right dock — Inspector (I) and UI settings (U).
+//! Floating right dock — Inspector (I, read-only) and Properties (P, editable).
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
+use crate::viz::gamepad::GamepadSelection;
 use crate::viz::{GearboxSim, GroundGrid};
 
-use super::{float, inspector, ui_panel};
+use super::{float, inspector, properties};
 use super::persist::EditorUiState;
+use super::properties::PendingColorChange;
 use super::selection::Selection;
 use super::selection_ring::SelectionRingSettings;
 use super::style::AccentColor;
@@ -16,7 +18,7 @@ use super::transform_gizmos::GizmoScale;
 pub enum RightTab {
     #[default]
     Inspector,
-    Ui,
+    Properties,
     None,
 }
 
@@ -29,6 +31,8 @@ pub fn right_dock_ui(
     mut grid: ResMut<GroundGrid>,
     mut gizmo_scale: ResMut<GizmoScale>,
     mut ring_settings: ResMut<SelectionRingSettings>,
+    mut pending_color: ResMut<PendingColorChange>,
+    mut gamepad_selection: ResMut<GamepadSelection>,
     accent: Res<AccentColor>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -42,11 +46,11 @@ pub fn right_dock_ui(
         || *active = if *active == RightTab::Inspector { RightTab::None } else { RightTab::Inspector },
     );
     float::side_button(
-        "right_btn_ui", ctx, egui::Align2::RIGHT_TOP, 1,
-        "U", "UI settings",
-        matches!(*active, RightTab::Ui),
+        "right_btn_properties", ctx, egui::Align2::RIGHT_TOP, 1,
+        "P", "Properties",
+        matches!(*active, RightTab::Properties),
         accent_col,
-        || *active = if *active == RightTab::Ui { RightTab::None } else { RightTab::Ui },
+        || *active = if *active == RightTab::Properties { RightTab::None } else { RightTab::Properties },
     );
 
     match *active {
@@ -65,22 +69,26 @@ pub fn right_dock_ui(
                 |ui| inspector::draw_content(ui, &mut sim, &selection, accent_col),
             );
         }
-        RightTab::Ui => {
-            let size = ui_state.inspector_size; // reuse same default width
+        RightTab::Properties => {
+            let size = ui_state.inspector_size; // reuse the same default
             let mut open = true;
             float::floating_window(
                 ctx,
-                "right_window_ui",
-                "UI",
+                "right_window_properties",
+                "Properties",
                 egui::Align2::RIGHT_TOP,
                 egui::vec2(size.x, size.y),
                 &mut open,
                 accent_col,
-                |ui| ui_panel::draw_content(
+                |ui| properties::draw_content(
                     ui,
+                    &mut sim,
+                    &selection,
                     &mut grid,
                     &mut gizmo_scale,
                     &mut ring_settings,
+                    &mut pending_color,
+                    &mut gamepad_selection,
                     accent_col,
                 ),
             );

@@ -9,8 +9,10 @@
 
 use datapod::{Point, Size};
 
+use crate::vehicle::parts_lib;
 use crate::vehicle::{
-    ChassisSpec, DriveMode, PartKind, PartShape, PartSpec, VehicleBuilder, VehicleSpec, WheelSpec,
+    ChassisSpec, DriveMode, MeshSource, PartKind, PowerKind, PowerSource, VehicleBuilder,
+    VehicleSpec, WheelSpec,
 };
 
 pub fn husky() -> VehicleSpec {
@@ -37,6 +39,7 @@ pub fn husky() -> VehicleSpec {
         color: [0.82, 0.55, 1.00],
         inertia_size: None,
         render_chassis: true,
+        mesh: MeshSource::Box,
     };
 
     // --- Suspension + wheels ---------------------------------------
@@ -91,25 +94,23 @@ pub fn husky() -> VehicleSpec {
     // --- Sensor / battery marker parts ------------------------------
     // Battery sits inside the base; keep it as a visual-only marker
     // (Hitch kind → no collider, just a small dark block).
-    let chassis_top: f64 = chassis_y * 0.5;
-    let battery = PartSpec {
-        name: "battery".into(),
-        position: Point::new(0.0, -0.02, 0.0),
-        size: Size::new(0.30, 0.15, 0.20),
-        color: [0.10, 0.10, 0.12],
-        kind: PartKind::Hitch, // visual-only
-        shape: PartShape::Box,
-    };
-    // A small raised "plate" on top for sensor mounts — purely
-    // aesthetic; keeps the silhouette recognisable as a Husky.
-    let top_plate = PartSpec {
-        name: "top_plate".into(),
-        position: Point::new(0.0, chassis_top + 0.02, 0.0),
-        size: Size::new(chassis_x * 0.9, 0.04, chassis_z * 0.7),
-        color: [0.30, 0.30, 0.34],
-        kind: PartKind::Karosserie,
-        shape: PartShape::Box,
-    };
+    let battery = parts_lib::cuboid(
+        "battery",
+        Point::new(0.0, -0.02, 0.0),
+        Size::new(0.30, 0.15, 0.20),
+        [0.10, 0.10, 0.12],
+        PartKind::Hitch,
+    );
+    // Sensor-mount top plate — half the chassis top, 4 cm thick.
+    let top_plate = parts_lib::top_plate(
+        chassis_x,
+        chassis_z,
+        chassis_y * 0.5,
+        0.9, // width_frac
+        0.7, // depth_frac
+        0.04,
+        [0.30, 0.30, 0.34],
+    );
 
     VehicleBuilder::new("husky", chassis)
         .wheel(make( wheel_x, front_z))
@@ -119,5 +120,10 @@ pub fn husky() -> VehicleSpec {
         .part(top_plate)
         .part(battery)
         .drive_mode(DriveMode::Differential)
+        .power_source(
+            PowerSource::new(PowerKind::Battery, "Battery", 200.0)
+                .with_travel_drain(0.8)
+                .with_work_drain(0.4),
+        )
         .build()
 }

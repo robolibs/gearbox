@@ -5,22 +5,27 @@
 //! cursor until the user clicks somewhere in the viewport to commit
 //! (or Esc / RMB to cancel). The heavy lifting for that flow lives in
 //! [`super::pending_spawn`]; this panel just queues the request.
+//!
+//! The list of available presets is driven by the [`PresetRegistry`]
+//! resource, so adding a new robot is one entry in
+//! `gearbox::presets::all_presets` — no edits here.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
 
-use gearbox::presets;
-
 use crate::viz::{GearboxSim, PlayerControlled, VehicleBody};
 
 use super::pending_spawn::PendingSpawn;
-use super::style::{fg_dim, section_caps, TEXT_PRIMARY};
+use super::preset_registry::PresetRegistry;
+use super::style::{fg_dim, section_caps};
+use super::widgets::{card_button, keybinding_row};
 
 pub fn draw_content(
     ui: &mut egui::Ui,
     commands: &mut Commands,
     pending: &mut PendingSpawn,
     existing_bodies: &Query<Entity, With<VehicleBody>>,
+    registry: &PresetRegistry,
     _sim: &mut GearboxSim,
     _meshes: &mut Assets<Mesh>,
     _materials: &mut Assets<StandardMaterial>,
@@ -31,24 +36,15 @@ pub fn draw_content(
         .id_salt("spawn_vehicles")
         .default_open(true)
         .show(ui, |ui| {
-            if preset_button(ui, "+", "Tractor", "John Deere 8R · 4W RWD", accent).clicked() {
-                pending.request(presets::tractor(), commands);
-            }
-            ui.add_space(2.0);
-            if preset_button(ui, "+", "Husky", "Clearpath robot · differential drive", accent).clicked() {
-                pending.request(presets::husky(), commands);
-            }
-            ui.add_space(2.0);
-            if preset_button(ui, "+", "Robotti", "AGROINTELLI gantry · 4WIS omni", accent).clicked() {
-                pending.request(presets::robotti(), commands);
-            }
-            ui.add_space(2.0);
-            if preset_button(ui, "+", "Drone", "Quadcopter · WASD + QE yaw + ZX lift", accent).clicked() {
-                pending.request(presets::drone(), commands);
-            }
-            ui.add_space(2.0);
-            if preset_button(ui, "+", "Oxbo", "6W pea harvester · crab-steer", accent).clicked() {
-                pending.request(presets::oxbo_harvester(), commands);
+            let mut first = true;
+            for entry in registry.iter() {
+                if !first {
+                    ui.add_space(2.0);
+                }
+                first = false;
+                if card_button(ui, "+", entry.display_name, entry.subtitle, accent).clicked() {
+                    pending.request((entry.factory)(), commands);
+                }
             }
 
             if pending.spec.is_some() {
@@ -102,65 +98,4 @@ pub fn draw_content(
             keybinding_row(ui, "Wheel",    "zoom");
             keybinding_row(ui, "Esc",      "cancel placement");
         });
-}
-
-/// A full-width preset card — accent glyph on the left, primary name +
-/// small subtitle on the right. Reads like UE5's "Create" entries.
-fn preset_button(
-    ui: &mut egui::Ui,
-    glyph: &str,
-    name: &str,
-    subtitle: &str,
-    accent: egui::Color32,
-) -> egui::Response {
-    let row_h = 32.0;
-    let w = ui.available_width();
-    let btn = egui::Button::new("")
-        .corner_radius(egui::CornerRadius::same(6))
-        .min_size(egui::vec2(w, row_h));
-    let resp = ui.add_sized([w, row_h], btn);
-
-    // Custom paint inside the button's rect.
-    let rect = resp.rect;
-    let painter = ui.painter_at(rect);
-    let text_rect = rect.shrink2(egui::vec2(8.0, 0.0));
-
-    painter.text(
-        egui::pos2(text_rect.min.x, text_rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        glyph,
-        egui::FontId::proportional(14.0),
-        accent,
-    );
-    painter.text(
-        egui::pos2(text_rect.min.x + 22.0, text_rect.center().y - 6.0),
-        egui::Align2::LEFT_CENTER,
-        name,
-        egui::FontId::proportional(12.0),
-        TEXT_PRIMARY,
-    );
-    painter.text(
-        egui::pos2(text_rect.min.x + 22.0, text_rect.center().y + 7.0),
-        egui::Align2::LEFT_CENTER,
-        subtitle,
-        egui::FontId::proportional(10.0),
-        fg_dim(),
-    );
-    resp
-}
-
-fn keybinding_row(ui: &mut egui::Ui, keys: &str, action: &str) {
-    ui.horizontal(|ui| {
-        let chip = egui::RichText::new(keys)
-            .monospace()
-            .small()
-            .color(ui.visuals().text_color());
-        let frame = egui::Frame::new()
-            .fill(ui.visuals().faint_bg_color)
-            .inner_margin(egui::Margin::symmetric(5, 1))
-            .corner_radius(egui::CornerRadius::same(3));
-        frame.show(ui, |ui| ui.label(chip));
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new(action).small().color(fg_dim()));
-    });
 }

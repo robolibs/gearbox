@@ -8,8 +8,10 @@
 
 use datapod::{Point, Size};
 
+use crate::vehicle::parts_lib;
 use crate::vehicle::{
-    ChassisSpec, PartKind, PartShape, PartSpec, VehicleBuilder, VehicleSpec, WheelSpec,
+    ChassisSpec, MeshSource, PartKind, PowerKind, PowerSource, VehicleBuilder, VehicleSpec,
+    WheelSpec,
 };
 
 const MAX_STEER_RAD: f32 = 0.6109; // 35°
@@ -47,6 +49,7 @@ pub fn tractor() -> VehicleSpec {
         color: [0.0, 1.0, 0.392], // John Deere green
         inertia_size: None,
         render_chassis: true,
+        mesh: MeshSource::Box,
     };
 
     // Suspension — stiffness/damping scaled down with the mass so the
@@ -136,41 +139,32 @@ pub fn tractor() -> VehicleSpec {
     let cab_h: f64       = 0.88 * SCALE;
     let cab_depth: f64   = 1.59 * SCALE;
     let cab_center_z: f64 = chassis_back + cab_depth * 0.5 + 0.075 * SCALE;
-    let cab = PartSpec {
-        name: "cab".into(),
-        position: Point::new(0.0, chassis_top + cab_h * 0.5, cab_center_z),
-        size: Size::new(chassis_x, cab_h, cab_depth),
-        color: body_green,
-        kind: PartKind::Karosserie,
-        shape: PartShape::Box,
-    };
+    let cab = parts_lib::cab(cab_center_z, chassis_x, cab_h, cab_depth, chassis_top, body_green);
     // Thin dark roof, slight overhang.
-    let roof = PartSpec {
-        name: "roof".into(),
-        position: Point::new(0.0, chassis_top + cab_h + 0.05 * SCALE, cab_center_z),
-        size: Size::new(chassis_x + 0.08 * SCALE, 0.09 * SCALE, cab_depth + 0.08 * SCALE),
-        color: [0.22, 0.22, 0.24],
-        kind: PartKind::Karosserie,
-        shape: PartShape::Box,
-    };
+    let roof = parts_lib::cab_roof(
+        cab_center_z,
+        chassis_x,
+        cab_depth,
+        chassis_top + cab_h,
+        0.09 * SCALE,
+        0.08 * SCALE,
+        [0.22, 0.22, 0.24],
+    );
     // Rear hitch marker — small cube behind the cab.
-    let rear_hitch = PartSpec {
-        name: "rear_hitch".into(),
-        position: Point::new(0.0, -0.18 * SCALE, chassis_back - 0.06 * SCALE),
-        size: Size::new(0.12 * SCALE, 0.12 * SCALE, 0.12 * SCALE),
-        color: yellow,
-        kind: PartKind::Hitch,
-        shape: PartShape::Box,
-    };
+    let rear_hitch = parts_lib::hitch_marker(
+        "rear_hitch",
+        Point::new(0.0, -0.18 * SCALE, chassis_back - 0.06 * SCALE),
+        0.12 * SCALE,
+        yellow,
+    );
     // Front weights — small dark block at the nose.
-    let weights = PartSpec {
-        name: "front_weights".into(),
-        position: Point::new(0.0, -0.12 * SCALE, chassis_front + 0.09 * SCALE),
-        size: Size::new(0.70 * SCALE, 0.40 * SCALE, 0.18 * SCALE),
-        color: [0.25, 0.25, 0.28],
-        kind: PartKind::Karosserie,
-        shape: PartShape::Box,
-    };
+    let weights = parts_lib::cuboid(
+        "front_weights",
+        Point::new(0.0, -0.12 * SCALE, chassis_front + 0.09 * SCALE),
+        Size::new(0.70 * SCALE, 0.40 * SCALE, 0.18 * SCALE),
+        [0.25, 0.25, 0.28],
+        PartKind::Karosserie,
+    );
 
     VehicleBuilder::new("tractor", chassis)
         .wheel(front(wheel_x))
@@ -181,5 +175,12 @@ pub fn tractor() -> VehicleSpec {
         .part(roof)
         .part(weights)
         .part(rear_hitch)
+        // Diesel tank — travel drain moderate, work (PTO, implement)
+        // is where the real consumption happens.
+        .power_source(
+            PowerSource::new(PowerKind::Fuel, "Fuel", 300.0)
+                .with_travel_drain(1.2)
+                .with_work_drain(2.5),
+        )
         .build()
 }

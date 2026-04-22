@@ -1,21 +1,17 @@
-//! Inspector panel (right dock).
+//! Inspector panel (right dock) — strictly **read-only**.
 //!
-//! Content layout matches the left panels (left-aligned) — only the
-//! panel title itself is right-aligned, which is handled in
-//! `float::floating_window`.
+//! Displays vehicle + world state; any setting that the user can edit
+//! lives in the [`super::properties`] panel instead.
 
 use bevy_egui::egui;
 
-use gearbox::{
-    datapod::{Point, Pose, Quaternion},
-    VehicleSpec,
-};
+use gearbox::VehicleSpec;
 
 use crate::viz::GearboxSim;
 
 use super::selection::Selection;
 use super::style::{
-    fg_dim, section_caps, AXIS_X, AXIS_Y, AXIS_Z, TEXT_PRIMARY, TEXT_SECONDARY,
+    contrast_text_for, fg_dim, section_caps, AXIS_X, AXIS_Y, AXIS_Z, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 pub fn draw_content(
@@ -65,6 +61,83 @@ pub fn draw_content(
             "footprint",
             &format!("{:.2} × {:.2} m", fp_x, fp_z),
         );
+
+        // Power reservoir(s). One bar per source so Robotti shows
+        // TWO bars stacked — no labels; the bar fill itself is the
+        // state indicator. The active source (the one currently
+        // draining) is drawn with a full-saturation accent; idle
+        // sources fade to 45 %.
+        let active = state.spec.power.active_source();
+        for (idx, src) in state.spec.power.sources.iter().enumerate() {
+            ui.add_space(2.0);
+            let frac = src.fraction();
+            let is_active = active == Some(idx);
+            let bar_col = if is_active {
+                accent
+            } else {
+                accent.linear_multiply(0.45)
+            };
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .text(
+                        egui::RichText::new(format!(
+                            "{:.0} / {:.0}",
+                            src.current, src.capacity
+                        ))
+                        .monospace()
+                        .small()
+                        .color(contrast_text_for(bar_col)),
+                    )
+                    .fill(bar_col)
+                    .corner_radius(egui::CornerRadius::same(3)),
+            );
+        }
+        if !state.spec.power.sources.is_empty() {
+            ui.add_space(2.0);
+            // Surface the tick's live belief — what speed it saw,
+            // whether it classified as "moving", and the drain rate
+            // applied. If this says PARKED while you're actually
+            // driving, the physics body's linvel is lower than the
+            // 0.35 m/s threshold; if it says MOVING while you're
+            // idle, something is perturbing the chassis.
+            let power = &state.spec.power;
+            let tag = if !power.turned_on {
+                "ENGINE OFF"
+            } else if power.last_moving {
+                "MOVING"
+            } else {
+                "PARKED"
+            };
+            plain_row(
+                ui,
+                tag,
+                &format!(
+                    "{:.2} m/s · {:.2} u/s",
+                    power.last_horiz_speed, power.last_drain_rate
+                ),
+            );
+        }
+
+        // Container(s) — stacked under the power bars. Same visual
+        // language: just a bar with the numeric readout inside.
+        for container in &state.spec.containers {
+            ui.add_space(2.0);
+            let frac = container.fraction();
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .text(
+                        egui::RichText::new(format!(
+                            "{:.0} / {:.0}",
+                            container.amount, container.capacity
+                        ))
+                        .monospace()
+                        .small()
+                        .color(contrast_text_for(accent)),
+                    )
+                    .fill(accent)
+                    .corner_radius(egui::CornerRadius::same(3)),
+            );
+        }
     });
 
     // ─── Geo ──────────────────────────────────────────────────────
@@ -77,58 +150,21 @@ pub fn draw_content(
         plain_row(ui, "hdg", &format!("{:6.2}°  {}", heading, compass_letter(heading)));
     });
 
-    // ─── Transform (editable — the replacement for the old 3-D
-    //   translate / rotate / scale gizmos) ──────────────────────────
+    // ─── Transform (read-only; edit in Properties) ──────────────────
     section(ui, "insp_tr", "Transform", false, accent, |ui| {
-        // --- position: drag/type XYZ in metres ---
-        let mut px = pose.point.x as f32;
-        let mut py = pose.point.y as f32;
-        let mut pz = pose.point.z as f32;
-        let mut pos_changed = false;
+        sub_label(ui, "position");
+        axis_row(ui, "X", AXIS_X, &format!("{:+.3} m", pose.point.x));
+        axis_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", pose.point.y));
+        axis_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", pose.point.z));
 
-        sub_label(ui, "position  (drag to move, double-click to type)");
-        pos_changed |= axis_drag_row(ui, "X", AXIS_X, &mut px, 0.05, " m");
-        pos_changed |= axis_drag_row(ui, "Y", AXIS_Y, &mut py, 0.05, " m");
-        pos_changed |= axis_drag_row(ui, "Z", AXIS_Z, &mut pz, 0.05, " m");
-
-        // --- rotation: drag/type Euler angles in degrees ---
         let q = pose.rotation;
-        let (mut rx_deg, mut ry_deg, mut rz_deg) = {
-            let (x, y, z) = quat_to_euler_xyz(q.w as f32, q.x as f32, q.y as f32, q.z as f32);
-            (x.to_degrees(), y.to_degrees(), z.to_degrees())
-        };
-        let mut rot_changed = false;
-
+        let (rx, ry, rz) = quat_to_euler_xyz(q.w as f32, q.x as f32, q.y as f32, q.z as f32);
         ui.add_space(2.0);
-        sub_label(ui, "rotation  (Euler XYZ, degrees)");
-        rot_changed |= axis_drag_row(ui, "X", AXIS_X, &mut rx_deg, 1.0, "°");
-        rot_changed |= axis_drag_row(ui, "Y", AXIS_Y, &mut ry_deg, 1.0, "°");
-        rot_changed |= axis_drag_row(ui, "Z", AXIS_Z, &mut rz_deg, 1.0, "°");
+        sub_label(ui, "rotation  (Euler XYZ)");
+        axis_row(ui, "X", AXIS_X, &format!("{:+.2}°", rx.to_degrees()));
+        axis_row(ui, "Y", AXIS_Y, &format!("{:+.2}°", ry.to_degrees()));
+        axis_row(ui, "Z", AXIS_Z, &format!("{:+.2}°", rz.to_degrees()));
 
-        if pos_changed || rot_changed {
-            let new_q = euler_xyz_to_quat(
-                rx_deg.to_radians(),
-                ry_deg.to_radians(),
-                rz_deg.to_radians(),
-            );
-            sim.0.set_vehicle_pose(
-                id,
-                Pose {
-                    point: Point::new(px as f64, py as f64, pz as f64),
-                    rotation: Quaternion::new(
-                        new_q.0 as f64,
-                        new_q.1 as f64,
-                        new_q.2 as f64,
-                        new_q.3 as f64,
-                    ),
-                },
-            );
-        }
-
-        // --- scale: chassis size is baked into the rapier collider at
-        //   spawn, so re-scaling a live vehicle isn't supported. Show
-        //   the dimensions as read-only so the "scale" slot in the old
-        //   gizmo still has a home in the inspector. ---
         ui.add_space(2.0);
         sub_label(ui, "scale  (chassis size — baked at spawn)");
         axis_row(ui, "X", AXIS_X, &format!("{:.3} m", size.x));
@@ -244,7 +280,12 @@ fn bar_row(ui: &mut egui::Ui, label: &str, v: f32, min: f32, max: f32, accent: e
         let frac = ((v - min) / (max - min)).clamp(0.0, 1.0);
         ui.add(
             egui::ProgressBar::new(frac)
-                .text(egui::RichText::new(format!("{:+.2}", v)).monospace().small())
+                .text(
+                    egui::RichText::new(format!("{:+.2}", v))
+                        .monospace()
+                        .small()
+                        .color(contrast_text_for(accent)),
+                )
                 .fill(accent)
                 .corner_radius(egui::CornerRadius::same(3)),
         );
@@ -282,53 +323,9 @@ fn quat_to_euler_xyz(w: f32, x: f32, y: f32, z: f32) -> (f32, f32, f32) {
     (ex, ey, ez)
 }
 
-/// Euler XYZ (radians) → quaternion `(w, x, y, z)`.
-fn euler_xyz_to_quat(ex: f32, ey: f32, ez: f32) -> (f32, f32, f32, f32) {
-    let (sx, cx) = ((ex * 0.5).sin(), (ex * 0.5).cos());
-    let (sy, cy) = ((ey * 0.5).sin(), (ey * 0.5).cos());
-    let (sz, cz) = ((ez * 0.5).sin(), (ez * 0.5).cos());
-    // q = qz * qy * qx (intrinsic XYZ).
-    let w = cx * cy * cz - sx * sy * sz;
-    let x = sx * cy * cz + cx * sy * sz;
-    let y = cx * sy * cz - sx * cy * sz;
-    let z = cx * cy * sz + sx * sy * cz;
-    (w, x, y, z)
-}
-
-/// Dragable numeric row — same visual language as `axis_row`, but the
-/// value cell is an `egui::DragValue` so the user can drag to scrub
-/// or double-click to type an exact value.
-fn axis_drag_row(
-    ui: &mut egui::Ui,
-    glyph: &str,
-    color: egui::Color32,
-    value: &mut f32,
-    speed: f64,
-    suffix: &str,
-) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(glyph)
-                .strong()
-                .monospace()
-                .size(11.0)
-                .color(color),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let resp = ui.add(
-                egui::DragValue::new(value)
-                    .speed(speed)
-                    .suffix(suffix)
-                    .fixed_decimals(3),
-            );
-            if resp.changed() {
-                changed = true;
-            }
-        });
-    });
-    changed
-}
+// Transform EDITING lives in `editor::properties`. The inspector
+// only shows read-only values, so the drag/euler helpers have moved
+// there.
 
 fn world_info(ui: &mut egui::Ui, sim: &mut GearboxSim, accent: egui::Color32) {
     let planet = sim.0.planet;

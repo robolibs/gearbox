@@ -7,8 +7,10 @@
 
 use datapod::{Point, Size};
 
+use crate::vehicle::parts_lib;
 use crate::vehicle::{
-    ChassisSpec, PartKind, PartShape, PartSpec, VehicleBuilder, VehicleSpec, WheelSpec,
+    ChassisSpec, Container, MeshSource, PartKind, PowerKind, PowerSource, VehicleBuilder,
+    VehicleSpec, WheelSpec,
 };
 
 pub fn oxbo_harvester() -> VehicleSpec {
@@ -25,6 +27,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
         color: [1.0, 0.784, 0.0], // flatsim (255, 200, 0)
         inertia_size: None,
         render_chassis: true,
+        mesh: MeshSource::Box,
     };
 
     let radius = 0.768;
@@ -85,14 +88,13 @@ pub fn oxbo_harvester() -> VehicleSpec {
     let chassis_w:   f64 = 2.8;
 
     // Harvester head — big working implement jutting out the front.
-    let head = PartSpec {
-        name: "harvest_head".into(),
-        position: Point::new(0.0, 0.0, 4.72),
-        size: Size::new(3.53, 1.2, 1.77),
-        color: yellow,
-        kind: PartKind::Karosserie,
-        shape: PartShape::Box,
-    };
+    let head = parts_lib::cuboid(
+        "harvest_head",
+        Point::new(0.0, 0.0, 4.72),
+        Size::new(3.53, 1.2, 1.77),
+        yellow,
+        PartKind::Karosserie,
+    );
 
     // Chassis front / rear edges (Z extent of the lower part).
     let chassis_front_z: f64 =  7.68 * 0.5; //  3.84
@@ -105,23 +107,17 @@ pub fn oxbo_harvester() -> VehicleSpec {
     let cab_front_z: f64 = chassis_front_z + 0.45;  // +4.29
     let cab_back_z:  f64 = cab_front_z - cab_depth; // +2.19
     let cab_center_z: f64 = (cab_front_z + cab_back_z) * 0.5;
-    let cab = PartSpec {
-        name: "cab".into(),
-        position: Point::new(0.0, chassis_top + cab_h * 0.5, cab_center_z),
-        size: Size::new(chassis_w, cab_h, cab_depth),
-        color: yellow,
-        kind: PartKind::Karosserie,
-        shape: PartShape::Box,
-    };
+    let cab = parts_lib::cab(cab_center_z, chassis_w, cab_h, cab_depth, chassis_top, yellow);
     // Thin dark roof cap.
-    let cab_roof = PartSpec {
-        name: "cab_roof".into(),
-        position: Point::new(0.0, chassis_top + cab_h + 0.07, cab_center_z),
-        size: Size::new(chassis_w + 0.10, 0.14, cab_depth + 0.10),
-        color: dark,
-        kind: PartKind::Karosserie,
-        shape: PartShape::Box,
-    };
+    let cab_roof = parts_lib::cab_roof(
+        cab_center_z,
+        chassis_w,
+        cab_depth,
+        chassis_top + cab_h,
+        0.14,
+        0.10,
+        dark,
+    );
 
     // BUNKER — sticks out REARWARD of the chassis more than the cab
     // sticks out forward (1.0 m vs 0.45 m). Same height as cab.
@@ -129,14 +125,13 @@ pub fn oxbo_harvester() -> VehicleSpec {
     let bin_depth: f64    = cab_back_z - bin_rear_z;
     let bin_center_z: f64 = (cab_back_z + bin_rear_z) * 0.5;
     let bin_h: f64        = cab_h;
-    let bunker = PartSpec {
-        name: "bunker".into(),
-        position: Point::new(0.0, chassis_top + bin_h * 0.5, bin_center_z),
-        size: Size::new(chassis_w, bin_h, bin_depth),
-        color: yellow,
-        kind: PartKind::Tank,
-        shape: PartShape::Box,
-    };
+    let bunker = parts_lib::cuboid(
+        "bunker",
+        Point::new(0.0, chassis_top + bin_h * 0.5, bin_center_z),
+        Size::new(chassis_w, bin_h, bin_depth),
+        yellow,
+        PartKind::Tank,
+    );
 
     VehicleBuilder::new("oxbo_harvester", chassis)
         .wheel(make( 1.4,  2.304, false, 0.0,    true,  front_steer))
@@ -149,5 +144,16 @@ pub fn oxbo_harvester() -> VehicleSpec {
         .part(cab)
         .part(cab_roof)
         .part(bunker)
+        // Harvester runs on diesel — big tank, heavy work drain when
+        // the header's picking peas.
+        .power_source(
+            PowerSource::new(PowerKind::Fuel, "Fuel", 800.0)
+                .with_travel_drain(2.0)
+                .with_work_drain(5.0),
+        )
+        // Bunker — fills up while the header is engaged in work
+        // mode and the vehicle is moving. Fill rate is expressed as a
+        // fraction of capacity per second (2 % = 50 s to fill).
+        .container(Container::new("Cont", 1500.0).with_fill_rate_frac(0.02))
         .build()
 }

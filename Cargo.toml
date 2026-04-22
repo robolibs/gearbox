@@ -28,7 +28,7 @@ required-features = ["editor"]
 # itself never depends on Bevy — downstream consumers that just want the
 # headless sim should set `default-features = false`.
 default = ["editor"]
-editor = ["dep:bevy", "dep:bevy_egui", "dep:big_space"]
+editor = ["dep:bevy", "dep:bevy_egui", "dep:big_space", "dep:gilrs"]
 
 [dependencies]
 rapier3d = "0.32"
@@ -76,3 +76,7 @@ bevy_egui = { version = "0.39", optional = true, default-features = false, featu
 # Floating-origin: keeps f32 precision near the camera even when the world
 # spans planet-sized distances.
 big_space = { version = "0.12", optional = true, features = ["i32"] }
+# Gamepad input — polled each frame, results merged with the keyboard
+# input in `viz/input.rs`. Optional, editor-only, since the core sim is
+# headless.
+gilrs = { version = "0.11", optional = true }

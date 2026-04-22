@@ -18,8 +18,8 @@ pub use control::ControlInput;
 pub use planet::{Planet, EARTH_RADIUS_M};
 pub use sim::Sim;
 pub use vehicle::{
-    ChassisSpec, DriveMode, PartKind, PartShape, PartSpec, VehicleId, VehicleSpec, VehicleState,
-    WheelSpec,
+    parts_lib, ChassisSpec, Container, DriveMode, MeshSource, PartKind, PartSpec, PowerKind,
+    PowerSource, PowerSystem, VehicleId, VehicleSpec, VehicleState, WheelSpec,
 };
 
 /// Re-export rapier so downstream consumers don't need to pin the version.

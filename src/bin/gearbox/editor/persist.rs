@@ -88,16 +88,17 @@ fn fmt_left(t: LeftTab) -> &'static str {
 }
 fn parse_right(s: &str) -> RightTab {
     match s {
-        "inspector" => RightTab::Inspector,
-        "ui"        => RightTab::Ui,
-        _           => RightTab::None,
+        "inspector"              => RightTab::Inspector,
+        // Back-compat: the old "ui" tab became "properties".
+        "properties" | "ui"      => RightTab::Properties,
+        _                        => RightTab::None,
     }
 }
 fn fmt_right(t: RightTab) -> &'static str {
     match t {
-        RightTab::Inspector => "inspector",
-        RightTab::Ui        => "ui",
-        RightTab::None      => "none",
+        RightTab::Inspector  => "inspector",
+        RightTab::Properties => "properties",
+        RightTab::None       => "none",
     }
 }
 

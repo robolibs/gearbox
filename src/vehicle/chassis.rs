@@ -2,6 +2,8 @@
 
 use datapod::{Point, Size};
 
+use super::mesh::MeshSource;
+
 /// Declarative description of a vehicle chassis.
 #[derive(Debug, Clone)]
 pub struct ChassisSpec {
@@ -34,6 +36,11 @@ pub struct ChassisSpec {
     /// entirely from parts — turning this off suppresses the
     /// otherwise-visible "floating" chassis cuboid at the origin.
     pub render_chassis: bool,
+    /// How the chassis itself should be rendered. `MeshSource::Box`
+    /// (the default) renders a cuboid sized by `size`. Switch to a
+    /// different variant to render a cylinder (or later, an external
+    /// asset) without touching viz code.
+    pub mesh: MeshSource,
 }
 
 impl Default for ChassisSpec {
@@ -48,6 +55,7 @@ impl Default for ChassisSpec {
             color: [0.25, 0.55, 0.22],
             inertia_size: None,
             render_chassis: true,
+            mesh: MeshSource::Box,
         }
     }
 }

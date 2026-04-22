@@ -6,17 +6,23 @@
 
 pub mod builder;
 pub mod chassis;
+pub mod container;
+pub mod drive;
+pub mod mesh;
 pub mod part;
+pub mod parts_lib;
+pub(crate) mod physics;
+pub mod power;
 pub mod wheel;
-
-use rapier3d::control::DynamicRayCastVehicleController;
-use rapier3d::prelude::RigidBodyHandle;
 
 use crate::control::ControlInput;
 
 pub use builder::VehicleBuilder;
 pub use chassis::ChassisSpec;
-pub use part::{PartKind, PartShape, PartSpec};
+pub use container::Container;
+pub use mesh::MeshSource;
+pub use part::{PartKind, PartSpec};
+pub use power::{PowerKind, PowerSource, PowerSystem};
 pub use wheel::WheelSpec;
 
 /// Opaque identifier handed back by [`crate::Sim::spawn_vehicle`].
@@ -71,12 +77,25 @@ pub struct VehicleSpec {
     pub parts: Vec<PartSpec>,
     /// How `ControlInput::steer` is interpreted.
     pub drive_mode: DriveMode,
+    /// Battery / fuel reservoir(s). Drive controllers zero out engine
+    /// forces when any source is depleted. Empty `sources` means the
+    /// vehicle has no power gate — every control always works.
+    pub power: PowerSystem,
+    /// Cargo / implement containers (grain bunker, bale trailer,
+    /// fertiliser hopper…). Empty `containers` hides the Container
+    /// section in the Properties panel.
+    pub containers: Vec<Container>,
 }
 
 /// Live physics state for a spawned vehicle. Owned by [`crate::Sim`].
+///
+/// The engine-specific handles (rigid body, wheel controller) live
+/// on [`physics::PhysicsHandles`] and are `pub(crate)` — external
+/// consumers see only `spec` and `control`. Drive controllers reach
+/// into the physics via [`physics::BodyProxy`] /
+/// [`physics::WheelsProxy`] constructed in [`crate::Sim::step`].
 pub struct VehicleState {
     pub spec: VehicleSpec,
-    pub body: RigidBodyHandle,
-    pub controller: DynamicRayCastVehicleController,
     pub control: ControlInput,
+    pub(crate) handles: physics::PhysicsHandles,
 }
