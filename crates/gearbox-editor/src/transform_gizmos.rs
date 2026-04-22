@@ -202,10 +202,10 @@ pub struct ActiveDrag {
 /// Shaft length in unit-space — final world length = `reach × this`.
 /// Shortened slightly (from 0.80) so the now-bigger arrowhead still
 /// fits inside the old total reach.
-const SHAFT_LEN: f32 = 0.72;
+pub const SHAFT_LEN: f32 = 0.72;
 /// Rotation-ring major radius fraction — final world major radius =
 /// `reach × this`.
-const RING_MAJOR: f32 = 0.90;
+pub const RING_MAJOR: f32 = 0.90;
 
 // Base *world-space* sizes at slider = 1.0. These are the things the
 // slider multiplies — they DO NOT scale with vehicle reach. Tuned to
@@ -234,37 +234,19 @@ const AXIS_HIT_RADIUS: f32 = 0.08;
 /// Ring hover tolerance (half-width of the annulus band).
 const RING_HIT_BAND: f32 = 0.07;
 
-/// Target overall gizmo size in screen pixels — the reach is solved
-/// each frame so the selected handle tips sit roughly this many
-/// pixels from the origin on-screen, regardless of how close or far
-/// the camera is to the vehicle. Matches transform-gizmo's default
-/// feel (~150–200 px).
-const GIZMO_TARGET_PIXELS: f32 = 200.0;
+/// Fraction of the vehicle's largest bounding-box dimension used as
+/// the gizmo's overall reach. Keeps the gizmo a constant size
+/// RELATIVE TO THE VEHICLE (not the camera) — camera zoom doesn't
+/// change it, and a drone gets a small gizmo while a harvester gets
+/// a big one proportionally.
+const GIZMO_SIZE_FRAC: f32 = 0.20;
 
-/// Solve for a world-space reach such that the gizmo renders at a
-/// roughly constant pixel size on-screen. For a perspective camera
-/// at distance `D` with vertical FOV `F` and viewport height `H px`,
-/// the world size of one pixel at that depth is
-/// `(2·D·tan(F/2)) / H` — multiply by `GIZMO_TARGET_PIXELS` to get
-/// the target reach in world units.
-///
-/// Falls back to a sane default for non-perspective projections
-/// (no editor camera path uses those today, but the fallback keeps
-/// the gizmo visible if someone adds an ortho view later).
-fn screen_space_reach(
-    camera_global: &GlobalTransform,
-    projection: &Projection,
-    window_height: f32,
-    vehicle_center: Vec3,
-) -> f32 {
-    let distance = (vehicle_center - camera_global.translation()).length().max(0.1);
-    let fov_y = match projection {
-        Projection::Perspective(p) => p.fov,
-        _ => std::f32::consts::FRAC_PI_4,
-    };
-    let world_per_pixel =
-        (distance * (fov_y * 0.5).tan() * 2.0) / window_height.max(1.0);
-    (GIZMO_TARGET_PIXELS * world_per_pixel).max(0.1)
+/// Gizmo reach in world units — `40%` of the vehicle's largest
+/// dimension. Same formula is used by both the hover/pick code and
+/// the visual draw system so their hit radii and stroke positions
+/// stay in sync.
+pub fn gizmo_reach(vehicle_size: Vec3) -> f32 {
+    (vehicle_size.max_element() * GIZMO_SIZE_FRAC).max(0.3)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -514,11 +496,9 @@ fn spawn_scale_stub(
 pub fn update_transform_gizmos(
     selection: Res<Selection>,
     sim: Res<GearboxSim>,
-    mode: Res<GizmoMode>,
+    _mode: Res<GizmoMode>,
     modes_enabled: Res<GizmoModesEnabled>,
     clock: Res<SimClock>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(&GlobalTransform, &Projection), With<Camera>>,
     mut q: Query<(&GizmoHandle, &mut Transform, &mut Visibility)>,
 ) {
     // Gizmos are an edit-mode affordance only: hidden while physics is
@@ -530,9 +510,7 @@ pub fn update_transform_gizmos(
         }
         return;
     };
-    // `state` lookup is an existence gate only (hides the gizmo if
-    // the selected vehicle was just despawned).
-    if sim.0.vehicle(id).is_none() {
+    let Some(state) = sim.0.vehicle(id) else {
         for (_, _, mut vis) in q.iter_mut() {
             *vis = Visibility::Hidden;
         }
@@ -558,32 +536,27 @@ pub fn update_transform_gizmos(
         pose.point.z as f32,
     );
 
-    // Screen-space reach: gizmo stays a roughly constant pixel size
-    // regardless of camera distance or vehicle size. Fallback to a
-    // fixed 1.5 m if the primary window or camera isn't available
-    // yet (rare but possible on the first frame).
-    let reach = match (windows.single(), cameras.single()) {
-        (Ok(window), Ok((cam_global, projection))) => screen_space_reach(
-            cam_global,
-            projection,
-            window.resolution.physical_height() as f32,
-            center,
-        ),
-        _ => 1.5,
-    };
+    // Vehicle-relative reach: 40 % of the largest bbox dimension.
+    // Camera zoom doesn't change this, so the gizmo stays the same
+    // world size as the user orbits / moves the camera.
+    let size = Vec3::new(
+        state.spec.chassis.size.x as f32,
+        state.spec.chassis.size.y as f32,
+        state.spec.chassis.size.z as f32,
+    );
+    let reach = gizmo_reach(size);
 
-    for (handle, mut tr, mut vis) in q.iter_mut() {
-        // Visible only if this handle matches the active mode AND
-        // that mode is enabled. The second check is a belt-and-braces
-        // guard: `cycle_gizmo_mode` already snaps the active mode
-        // away from a just-disabled one, but on the frame the user
-        // clicks the toggle we could otherwise flicker stale handles.
-        *vis = if handle.mode == *mode && modes_enabled.has(handle.mode) {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-
+    // The visible gizmo is painted by `super::gizmo::draw_gizmo_system`
+    // using Bevy's immediate-mode `Gizmos` API — matches the
+    // transform-gizmo visual style (thick lines, always on top, clean
+    // 2D-feeling shapes). The mesh entities created by
+    // `setup_transform_gizmos` still exist because the hover-pick
+    // system iterates over them for their `GizmoHandle` metadata
+    // (shape + local_axis), but their `Mesh3d`+`MeshMaterial3d`
+    // children are kept hidden so we don't double-draw.
+    let _ = modes_enabled; // read only by the draw system
+    for (_, mut tr, mut vis) in q.iter_mut() {
+        *vis = Visibility::Hidden;
         tr.translation = center;
         tr.rotation = rot;
         tr.scale = Vec3::splat(reach);
@@ -596,7 +569,7 @@ pub fn update_transform_gizmos(
 pub fn hover_transform_gizmos(
     selection: Res<Selection>,
     sim: Res<GearboxSim>,
-    mode: Res<GizmoMode>,
+    modes_enabled: Res<GizmoModesEnabled>,
     clock: Res<SimClock>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
@@ -639,38 +612,51 @@ pub fn hover_transform_gizmos(
             pose.point.z as f32,
         );
 
-        // Match the screen-space reach used by `update_transform_gizmos`
-        // so hit radii (AXIS_HIT_RADIUS * reach, etc.) line up with the
-        // actual on-screen handle geometry at every camera distance.
-        let reach = screen_space_reach(
-            cam_tr,
-            projection,
-            window.resolution.physical_height() as f32,
-            center,
+        // Match the vehicle-relative reach used by the draw system so
+        // hit radii line up with the visual geometry.
+        let size = Vec3::new(
+            state.spec.chassis.size.x as f32,
+            state.spec.chassis.size.y as f32,
+            state.spec.chassis.size.z as f32,
         );
-        // `state` is still queried above for the early-return; keep
-        // the binding alive to avoid an unused-variable warning now
-        // that we no longer read `state.spec.chassis.size` here.
-        let _ = state;
+        let reach = gizmo_reach(size);
+        let _ = (window, projection, cam_tr);
 
         let mut best: Option<(Entity, f32)> = None;
         for (entity, handle) in q.iter() {
-            if handle.mode != *mode { continue; }
+            // Gizmo shows every mode at once now (transform-gizmo
+            // style) — filter only by the user's per-mode enable
+            // toggles, not by a current-mode selector.
+            if !modes_enabled.has(handle.mode) { continue; }
 
             let world_axis = (vehicle_rot * handle.local_axis).normalize();
-            let t_hit = match handle.shape {
-                GizmoShape::Axis => {
-                    // Capsule / thick line from `center` along
-                    // `world_axis`, length = reach.
+            let t_hit = match (handle.mode, handle.shape) {
+                (GizmoMode::Translate, GizmoShape::Axis) => {
+                    // Capsule along the translate arrow (tail → tip).
                     ray_axis_hit(origin, dir, center, world_axis,
-                                 reach, AXIS_HIT_RADIUS * reach)
+                                 SHAFT_LEN * reach, AXIS_HIT_RADIUS * reach)
                 }
-                GizmoShape::Ring => {
-                    // Annulus in the plane with normal `world_axis`,
-                    // at radius RING_MAJOR * reach.
+                (GizmoMode::Scale, GizmoShape::Axis) => {
+                    // Tight sphere check at the scale cube position
+                    // so scale picks don't overlap with the translate
+                    // capsule region.
+                    const SCALE_POS_FRAC: f32 = 0.95;
+                    let cube_w = center + world_axis * (SCALE_POS_FRAC * reach);
+                    let d = cube_w - origin;
+                    let t = d.dot(dir);
+                    if t < 0.0 { None }
+                    else {
+                        let closest = origin + dir * t;
+                        if (closest - cube_w).length() < AXIS_HIT_RADIUS * reach * 1.4 {
+                            Some(t)
+                        } else { None }
+                    }
+                }
+                (GizmoMode::Rotate, GizmoShape::Ring) => {
                     ray_ring_hit(origin, dir, center, world_axis,
                                  RING_MAJOR * reach, RING_HIT_BAND * reach)
                 }
+                _ => None,
             };
             if let Some(t) = t_hit {
                 if best.map_or(true, |(_, bt)| t < bt) {

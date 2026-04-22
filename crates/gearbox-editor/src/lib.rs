@@ -1,6 +1,7 @@
 //! Egui editor — floating docks, selection, drag, persistence.
 
 pub mod float;
+pub mod gizmo;
 pub mod gizmo_material;
 pub mod inspector;
 pub mod left_dock;
@@ -33,13 +34,15 @@ impl Plugin for EditorPlugin {
         let right = state.right;
 
         app.add_plugins(selection_ring::SelectionRingPlugin)
-            // Custom gizmo material — `ExtendedMaterial<StandardMaterial, GizmoOnTop>`
-            // disables depth testing so the transform gizmo always
-            // renders on top of the world (matches transform-gizmo /
-            // Blender behaviour).
+            // Always-on-top mesh material for the (now hidden) legacy
+            // gizmo meshes that hold pick metadata.
             .add_plugins(
                 bevy::pbr::MaterialPlugin::<gizmo_material::GizmoMaterial>::default(),
             )
+            // 2D overlay gizmo — the actual visual UI, modelled after
+            // urholaukkarinen/transform-gizmo (flat filled shapes in
+            // screen space, depth-test off).
+            .add_plugins(gizmo::GizmoOverlayPlugin)
             .insert_resource(state)
             .insert_resource(left)
             .insert_resource(right)
@@ -60,6 +63,7 @@ impl Plugin for EditorPlugin {
                 (
                     selection_ring::setup_selection_ring,
                     transform_gizmos::setup_transform_gizmos,
+                    gizmo::setup_gizmo_overlay,
                 ),
             )
             .add_systems(
@@ -78,8 +82,11 @@ impl Plugin for EditorPlugin {
                 (
                     // Gizmo input runs BEFORE pick_and_drag so hover +
                     // active drag block the vehicle-picker cleanly in
-                    // the same frame as the click.
-                    transform_gizmos::cycle_gizmo_mode,
+                    // the same frame as the click. Tab cycling is gone
+                    // now: the gizmo shows translate + rotate + scale
+                    // simultaneously (transform-gizmo convention), and
+                    // the clicked handle's `GizmoMode` feeds the drag
+                    // system directly.
                     transform_gizmos::hover_transform_gizmos,
                     transform_gizmos::gizmo_drag_system,
                     selection::pick_and_drag_system,
@@ -95,6 +102,7 @@ impl Plugin for EditorPlugin {
                     // land on the same frame.
                     transform_gizmos::regenerate_gizmo_meshes,
                     transform_gizmos::update_transform_gizmos,
+                    gizmo::draw_gizmo_system,
                 )
                     .chain(),
             )
