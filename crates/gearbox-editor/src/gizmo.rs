@@ -32,7 +32,6 @@ use gearbox_physics::VehicleId;
 use gearbox_viz::{GearboxSim, SimClock};
 
 use super::selection::Selection;
-use super::style::{AXIS_X, AXIS_Y, AXIS_Z};
 use super::transform_gizmos::{
     gizmo_reach, GizmoHandle, GizmoMode, GizmoModesEnabled, GizmoShape, HoveredGizmo,
     RING_MAJOR, SHAFT_LEN,
@@ -63,10 +62,38 @@ const STROKE_SCALE_MIN:  f32 = 0.35;
 const STROKE_SCALE_MAX:  f32 = 2.5;
 /// Rotation ring polygon resolution.
 const RING_SEGMENTS:     u32 = 96;
-/// Hover brightens the axis colour by this factor.
-const HOVER_BRIGHTEN:    f32 = 1.5;
-/// Base gizmo alpha.
-const FILL_ALPHA:        f32 = 0.96;
+/// Hover multiplier applied to each channel. High enough that most
+/// channels saturate to 1.0 on hover — that's what reads as a glowy
+/// "just light up the whole axis" effect without a real bloom pass.
+const HOVER_BRIGHTEN:    f32 = 3.0;
+/// Base gizmo alpha. 1.0 so the punchy colours come through without
+/// any translucency sapping their intensity.
+const FILL_ALPHA:        f32 = 1.0;
+
+/// Gizmo-specific axis palette. Deliberately more saturated than the
+/// inspector's `style::AXIS_*` glyph colours — transform-gizmo-style
+/// "video-game bright" rather than data-viz subtle.
+const GIZMO_AXIS_X: [f32; 3] = [0.95, 0.15, 0.25];  // vivid red
+const GIZMO_AXIS_Y: [f32; 3] = [0.28, 0.85, 0.18];  // vivid green
+const GIZMO_AXIS_Z: [f32; 3] = [0.15, 0.50, 1.00];  // vivid blue
+
+/// Inner framing circle painted at the gizmo's centre. Stroked, not
+/// filled — matches the outer ring's look. Radius is in pixels at
+/// reference size (scaled with the rest).
+const CENTER_DOT_PX:     f32 = 16.0;
+/// Extra pixel gap between the inner circle's outer stroke edge and
+/// the tail of each translate / scale arrow shaft, so the arrow
+/// doesn't poke into the ring.
+const INNER_ARROW_GAP_PX: f32 = 2.0;
+/// Outer framing circle that encloses every handle. Radius is given
+/// in fractions of the projected gizmo reach — slightly under the
+/// scale-cube distance (0.95·reach) so it reads as an inner frame
+/// rather than spilling past the extreme handle.
+const OUTER_RING_FRAC:   f32 = 0.972;
+/// Pixel-space circle resolution (at reference size — scaled).
+const FLAT_CIRCLE_SEGS:  u32 = 72;
+/// Pre-multiplied-alpha white for the two framing circles.
+const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 0.96];
 
 // ═══ Plugin ═════════════════════════════════════════════════════════
 
@@ -231,6 +258,49 @@ impl DrawList {
         }
     }
 
+    /// Filled disk in screen space — always faces the camera.
+    /// Triangle-fan around `centre_ndc` with radius in pixels.
+    fn flat_disk(&mut self, centre_ndc: Vec2, radius_px: f32, color: [f32; 4], segments: u32) {
+        let seg = segments.max(3);
+        let step = TAU / seg as f32;
+        let r_ndc = radius_px * self.ndc_per_px;
+        let centre_idx = self.push_vertex(centre_ndc, color);
+        let mut prev = 0u32;
+        for i in 0..=seg {
+            let t = i as f32 * step;
+            let (s, c) = t.sin_cos();
+            let p = centre_ndc + Vec2::new(c, s) * r_ndc;
+            let curr = self.push_vertex(p, color);
+            if i > 0 {
+                self.push_tri(centre_idx, prev, curr);
+            }
+            prev = curr;
+        }
+    }
+
+    /// Stroked (outline-only) circle in screen space — always faces
+    /// the camera. Built as `segments` thick-line segments.
+    fn flat_ring_stroke(
+        &mut self,
+        centre_ndc: Vec2,
+        radius_px: f32,
+        width_px: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
+        let seg = segments.max(8);
+        let step = TAU / seg as f32;
+        let r_ndc = radius_px * self.ndc_per_px;
+        let mut prev = centre_ndc + Vec2::new(1.0, 0.0) * r_ndc;
+        for i in 1..=seg {
+            let t = i as f32 * step;
+            let (s, c) = t.sin_cos();
+            let curr = centre_ndc + Vec2::new(c, s) * r_ndc;
+            self.thick_line(prev, curr, width_px, color);
+            prev = curr;
+        }
+    }
+
     /// Ring: traces a circle in world space around `centre_world`
     /// with plane normal `axis_world`, projects each sampled point to
     /// NDC, joins them with thick-line segments.
@@ -324,18 +394,28 @@ pub fn draw_gizmo_system(
     );
     let reach = gizmo_reach(vehicle_size);
 
-    // Scale every pixel-space size (stroke, arrowhead, cube, ring)
-    // by the gizmo's on-screen size, so a far-away gizmo has
-    // proportionally thinner lines. We want stroke/head/cube to
-    // shrink together with the gizmo — otherwise a 50 px-wide
-    // rotation ring rendered with a 3 px stroke looks like a donut.
-    let stroke_scale = stroke_scale_factor(
+    // Gizmo's projected pixel size — drives BOTH the stroke-scale
+    // multiplier (so far-away gizmos have thinner lines) AND the
+    // outer framing circle radius (so it hugs the handles at any
+    // zoom).
+    let projected_reach_px = projected_reach_pixels(
         cam_global, projection, win_h, center, reach,
     );
+    let stroke_scale = (projected_reach_px / REFERENCE_REACH_PX)
+        .clamp(STROKE_SCALE_MIN, STROKE_SCALE_MAX);
     let stroke_px   = STROKE_PX        * stroke_scale;
     let head_w_px   = ARROW_HEAD_W_PX  * stroke_scale;
     let head_h_px   = ARROW_HEAD_H_PX  * stroke_scale;
     let cube_edge   = CUBE_EDGE_PX     * stroke_scale;
+    let dot_radius  = CENTER_DOT_PX    * stroke_scale;
+
+    // Distance — as a fraction of `reach` — from the gizmo origin to
+    // the outer stroke edge of the inner circle, plus a small gap.
+    // Arrow shafts start at this offset along their axis so they
+    // don't poke into the inner ring.
+    let inner_tail_frac = ((dot_radius + stroke_px * 0.5 + INNER_ARROW_GAP_PX)
+        / projected_reach_px.max(1.0))
+        .clamp(0.0, 0.95);
 
     // World → NDC projector.
     let proj = |world: Vec3| -> Option<Vec2> {
@@ -348,6 +428,25 @@ pub fn draw_gizmo_system(
     };
 
     let mut dl = DrawList::new(Vec2::new(win_w, win_h));
+
+    // Project the gizmo centre once — both the outer framing ring
+    // and the centre dot live at that screen position.
+    let centre_ndc = proj(center);
+
+    // ── Outer framing circle ──
+    // Painted FIRST so every axis handle renders on top of it. White
+    // stroke, slightly larger than the farthest handle (scale cube
+    // at 0.95·reach). Always a flat 2D circle — no 3D tilt — so it
+    // looks the same from any camera angle.
+    if let Some(c) = centre_ndc {
+        dl.flat_ring_stroke(
+            c,
+            projected_reach_px * OUTER_RING_FRAC,
+            stroke_px,
+            WHITE,
+            FLAT_CIRCLE_SEGS,
+        );
+    }
 
     // All three modes visible simultaneously (no mode filter — the
     // user clicks whichever handle they want).
@@ -363,7 +462,7 @@ pub fn draw_gizmo_system(
             (GizmoMode::Translate, GizmoShape::Axis) => {
                 build_arrow(
                     &mut dl, &proj, center, world_axis, reach, color,
-                    stroke_px, head_w_px, head_h_px,
+                    stroke_px, head_w_px, head_h_px, inner_tail_frac,
                 );
             }
             (GizmoMode::Rotate, GizmoShape::Ring) => {
@@ -387,6 +486,14 @@ pub fn draw_gizmo_system(
         }
     }
 
+    // ── Inner framing ring ──
+    // Same stroked-circle look as the outer frame, just smaller.
+    // Painted LAST so it sits on top of any stray pixel from the
+    // axis shapes near the origin.
+    if let Some(c) = centre_ndc {
+        dl.flat_ring_stroke(c, dot_radius, stroke_px, WHITE, FLAT_CIRCLE_SEGS);
+    }
+
     *mesh = empty_mesh();
     dl.write_into(mesh);
     *vis = Visibility::Visible;
@@ -404,8 +511,12 @@ fn build_arrow(
     shaft_px: f32,
     head_w_px: f32,
     head_h_px: f32,
+    // Axis-distance (as a fraction of `reach`) to offset the tail
+    // from the origin, so the shaft starts outside the inner framing
+    // ring rather than poking into it.
+    tail_offset_frac: f32,
 ) {
-    let tail_w = center;
+    let tail_w = center + world_axis * (tail_offset_frac * reach);
     let shaft_end_w = center + world_axis * (SHAFT_LEN * reach);
     let (Some(tail), Some(shaft_end)) = (proj(tail_w), proj(shaft_end_w)) else { return };
 
@@ -457,16 +568,11 @@ fn build_scale_stub(
 
 // ═══ Math + colour helpers ══════════════════════════════════════════
 
-/// Solve for the gizmo's projected size (in pixels) at the vehicle's
-/// current camera distance, then divide by `REFERENCE_REACH_PX` to
-/// get a 1.0-at-default scale factor the draw code applies to every
-/// pixel-space constant (stroke width, arrowhead, cube edge).
-///
-/// For a perspective camera at distance `D` with vertical FOV `F`
-/// and viewport height `H px`, 1 world unit at the vehicle projects
-/// to `H / (2·D·tan(F/2))` pixels — multiplying by `reach` gives the
-/// gizmo's screen pixel size.
-fn stroke_scale_factor(
+/// How many pixels of screen the gizmo's world-space `reach` spans
+/// at the camera's current distance. For a perspective camera at
+/// distance `D`, vertical FOV `F`, viewport height `H px`: one world
+/// unit at that depth projects to `H / (2·D·tan(F/2))` pixels.
+fn projected_reach_pixels(
     cam_global: &GlobalTransform,
     projection: &Projection,
     window_height_px: f32,
@@ -479,8 +585,7 @@ fn stroke_scale_factor(
         _ => std::f32::consts::FRAC_PI_4,
     };
     let pixels_per_world = window_height_px.max(1.0) / (2.0 * distance * (fov_y * 0.5).tan());
-    let projected_reach_px = reach * pixels_per_world;
-    (projected_reach_px / REFERENCE_REACH_PX).clamp(STROKE_SCALE_MIN, STROKE_SCALE_MAX)
+    reach * pixels_per_world
 }
 
 fn plane_basis(n: Vec3) -> (Vec3, Vec3) {
@@ -508,18 +613,13 @@ fn vehicle_xform(sim: &gearbox_physics::Sim, id: VehicleId) -> Option<(Vec3, Qua
 }
 
 fn axis_rgb(local_axis: Vec3) -> [f32; 3] {
-    let c = if local_axis.x.abs() > 0.5 {
-        AXIS_X
+    if local_axis.x.abs() > 0.5 {
+        GIZMO_AXIS_X
     } else if local_axis.y.abs() > 0.5 {
-        AXIS_Y
+        GIZMO_AXIS_Y
     } else {
-        AXIS_Z
-    };
-    [
-        c.r() as f32 / 255.0,
-        c.g() as f32 / 255.0,
-        c.b() as f32 / 255.0,
-    ]
+        GIZMO_AXIS_Z
+    }
 }
 
 fn colour_for(rgb: [f32; 3], hover: bool) -> [f32; 4] {

@@ -230,9 +230,12 @@ const EMISSIVE_HOVER: f32 = 5.0;
 
 /// Axis-handle hover tolerance (unit-space radius around the axis
 /// line). Much fatter than `SHAFT_RADIUS` so picks feel forgiving.
-const AXIS_HIT_RADIUS: f32 = 0.08;
+// Hit tolerances are fractions of the gizmo's world-space reach.
+// Bumped well above the visual stroke width so picks feel generous —
+// the user doesn't have to hit the 3 px visible line pixel-for-pixel.
+const AXIS_HIT_RADIUS: f32 = 0.22;
 /// Ring hover tolerance (half-width of the annulus band).
-const RING_HIT_BAND: f32 = 0.07;
+const RING_HIT_BAND: f32 = 0.20;
 
 /// Fraction of the vehicle's largest bounding-box dimension used as
 /// the gizmo's overall reach. Keeps the gizmo a constant size

@@ -14,7 +14,7 @@ use gearbox_physics::{
     MeshSource, VehicleId,
 };
 
-use gearbox_viz::GearboxSim;
+use gearbox_viz::{GearboxSim, SimClock};
 
 use super::pending_spawn::PendingSpawn;
 use super::transform_gizmos::{GizmoDrag, HoveredGizmo};
@@ -47,6 +47,7 @@ pub fn pick_and_drag_system(
     mut contexts: EguiContexts,
     hovered_gizmo: Res<HoveredGizmo>,
     gizmo_drag: Res<GizmoDrag>,
+    clock: Res<SimClock>,
     pending: Res<PendingSpawn>,
 ) {
     // Esc is the *only* way to unselect. Skip when a placement
@@ -90,15 +91,28 @@ pub fn pick_and_drag_system(
 
     // Press: raycast and pick. Clicking empty space does NOT
     // unselect — only Esc does.
+    //
+    // Drag-to-teleport the chassis is intentionally gated to
+    // "paused AND Shift held". Without the modifier, clicking the
+    // body only SELECTS — moving the machine has to go through the
+    // gizmo's translate arrow (the handle you can see). This stops
+    // stray clicks from whipping the vehicle across the scene.
+    let shift_held  = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let can_body_drag = clock.paused && shift_held;
+
     if buttons.just_pressed(MouseButton::Left) && !right_held {
         if let Some(id) = cursor_pick_vehicle(&sim, camera, cam_tr, cursor) {
             selection.vehicle = Some(id);
-            let drop_y = sim.0.vehicle_pose(id).point.y.max(0.8) as f32;
-            selection.drag = Some(DragState {
-                press_cursor: cursor,
-                active: false,
-                drop_y,
-            });
+            if can_body_drag {
+                let drop_y = sim.0.vehicle_pose(id).point.y.max(0.8) as f32;
+                selection.drag = Some(DragState {
+                    press_cursor: cursor,
+                    active: false,
+                    drop_y,
+                });
+            } else {
+                selection.drag = None;
+            }
         }
     }
 
