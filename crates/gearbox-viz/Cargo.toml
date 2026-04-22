@@ -1,0 +1,14 @@
+[package]
+name = "gearbox-viz"
+description = "Bevy + big_space rendering layer for gearbox — draws the sim, feeds input, owns the chase camera."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gearbox-core.workspace = true
+gearbox-physics.workspace = true
+datapod.workspace = true
+bevy.workspace = true
+big_space.workspace = true
+gilrs.workspace = true

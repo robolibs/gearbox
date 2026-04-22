@@ -1,0 +1,20 @@
+[package]
+name = "gearbox"
+description = "gearbox — modular Rust robot/vehicle simulator editor binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gearbox"
+path = "src/main.rs"
+
+[dependencies]
+gearbox-core.workspace = true
+gearbox-physics.workspace = true
+gearbox-viz.workspace = true
+gearbox-editor.workspace = true
+datapod.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
+big_space.workspace = true

@@ -39,10 +39,10 @@ run:
 r: run
 
 headless:
-	@$(CARGO) build --lib --no-default-features
+	@$(CARGO) build -p gearbox-core -p gearbox-physics
 
 test:
-	@$(CARGO) test --no-default-features --test headless
+	@$(CARGO) test -p gearbox-physics --test headless
 
 t: test
 
@@ -66,7 +66,7 @@ help:
 	@echo "  build        Build the gearbox editor binary"
 	@echo "  compile      Clean and rebuild"
 	@echo "  run          Run the editor: DISPLAY=$(DISPLAY) $(RUN_WITH) cargo run --bin gearbox"
-	@echo "  headless     Build the sim core without Bevy (no-default-features)"
+	@echo "  headless     Build the headless sim crates (gearbox-core + gearbox-physics)"
 	@echo "  test         Run the headless smoke test"
 	@echo "  check        Run cargo check on the binary"
 	@echo "  fmt          Format the workspace"

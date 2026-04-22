@@ -1,0 +1,9 @@
+[package]
+name = "gearbox-core"
+description = "Pure data types for gearbox (vehicle specs, presets, control input, drive math) — no physics backend."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+datapod.workspace = true

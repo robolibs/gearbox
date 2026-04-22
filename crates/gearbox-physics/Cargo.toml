@@ -1,0 +1,11 @@
+[package]
+name = "gearbox-physics"
+description = "rapier3d-backed physics layer for gearbox: the Sim, world, and pluggable drive controllers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gearbox-core.workspace = true
+datapod.workspace = true
+rapier3d.workspace = true

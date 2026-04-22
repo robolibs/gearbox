@@ -1,46 +1,30 @@
-[package]
-name = "gearbox"
-version = "0.0.1"
-edition = "2024"
-description = "Modular Rust robot / vehicle simulator built on Rapier3D, with an optional Bevy+egui editor binary"
-license = "MIT"
-readme = "README.md"
-publish = false
-include = [
-    "Cargo.toml",
-    "README.md",
-    "src/**/*.rs",
-    "examples/**/*.rs",
-    "tests/**/*.rs",
+[workspace]
+resolver = "2"
+members = [
+    "crates/gearbox-core",
+    "crates/gearbox-physics",
+    "crates/gearbox-viz",
+    "crates/gearbox-editor",
+    "bin/gearbox",
 ]
 
-[lib]
-path = "src/lib.rs"
-crate-type = ["rlib"]
+# Shared metadata. Each member inherits with `version.workspace = true`.
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
 
-[[bin]]
-name = "gearbox"
-path = "src/bin/gearbox/main.rs"
-required-features = ["editor"]
-
-[features]
-# `editor` pulls in Bevy + bevy_egui for the interactive binary. The library
-# itself never depends on Bevy — downstream consumers that just want the
-# headless sim should set `default-features = false`.
-default = ["editor"]
-editor = ["dep:bevy", "dep:bevy_egui", "dep:big_space", "dep:gilrs"]
-
-[dependencies]
-rapier3d = "0.32"
-thiserror = "2.0"
+[workspace.dependencies]
+# Local sibling crate — spatial types the whole gearbox stack speaks.
 datapod = { path = "../datapod" }
-# Read-only USD parser — used to import `.usda` / `.usdc` / `.usdz`
-# files that carry our `gearbox:*` tags. We hand-roll the writer
-# because openusd doesn't yet expose one (v0.3.0 is reader-only).
-openusd = "0.3"
 
-# Only compiled when the `editor` feature is enabled — i.e. for the binary.
-bevy = { version = "0.18", optional = true, default-features = false, features = [
+# Physics backend — only `gearbox-physics` (and downstream) depend on it.
+rapier3d = "0.32"
+
+# Bevy + ecosystem. Declared once here with their full feature sets so
+# every crate that needs Bevy pulls the SAME build (otherwise cargo
+# would see distinct feature unions and rebuild bevy twice).
+bevy = { version = "0.18", default-features = false, features = [
     "std",
     "async_executor",
     "multi_threaded",
@@ -69,14 +53,19 @@ bevy = { version = "0.18", optional = true, default-features = false, features =
     "x11",
     "reflect_auto_register",
 ] }
-bevy_egui = { version = "0.39", optional = true, default-features = false, features = [
+bevy_egui = { version = "0.39", default-features = false, features = [
     "default_fonts",
     "render",
 ] }
-# Floating-origin: keeps f32 precision near the camera even when the world
-# spans planet-sized distances.
-big_space = { version = "0.12", optional = true, features = ["i32"] }
-# Gamepad input — polled each frame, results merged with the keyboard
-# input in `viz/input.rs`. Optional, editor-only, since the core sim is
-# headless.
-gilrs = { version = "0.11", optional = true }
+# Floating-origin: keeps f32 precision usable even when the world spans
+# planet-sized distances.
+big_space = { version = "0.12", features = ["i32"] }
+# Gamepad input — polled each frame by `gearbox-viz::gamepad`.
+gilrs = "0.11"
+
+# Internal: crate-to-crate path deps expressed once so members can just
+# write `gearbox-core.workspace = true`.
+gearbox-core    = { path = "crates/gearbox-core" }
+gearbox-physics = { path = "crates/gearbox-physics" }
+gearbox-viz     = { path = "crates/gearbox-viz" }
+gearbox-editor  = { path = "crates/gearbox-editor" }

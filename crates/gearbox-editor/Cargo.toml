@@ -1,0 +1,15 @@
+[package]
+name = "gearbox-editor"
+description = "egui-based editor panels layered on top of gearbox-viz (docks, selection, gizmos, inspector, properties)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gearbox-core.workspace = true
+gearbox-physics.workspace = true
+gearbox-viz.workspace = true
+datapod.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
+big_space.workspace = true
