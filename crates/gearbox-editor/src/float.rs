@@ -4,8 +4,49 @@
 use bevy_egui::egui;
 
 use super::style::{
-    BG_1_PANEL, BG_2_RAISED, BORDER_SUBTLE, TEXT_PRIMARY, TEXT_SECONDARY,
+    glass_fill, BG_1_PANEL, BG_2_RAISED, BORDER_SUBTLE, GLASS_ALPHA_CARD, GLASS_ALPHA_WINDOW,
+    TEXT_PRIMARY, TEXT_SECONDARY,
 };
+
+/// Shared background / border recipe for every rail button (left side
+/// tabs, top transport glyphs). Same glass look as the main panels —
+/// [`BG_1_PANEL`] idle, lifts to [`BG_2_RAISED`] on hover, and 25 %
+/// accent blend + accent stroke when active.
+fn paint_rail_button(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    accent: egui::Color32,
+    is_active: bool,
+    hovered: bool,
+) {
+    // Idle / hover both use the window-level glass alpha so the
+    // buttons float on the background the same way the main panels
+    // do. The "active" state blends 25 % accent into the card-level
+    // base, then applies the card alpha — slightly denser than the
+    // idle buttons so it reads as the selected tab.
+    let bg = if is_active {
+        let blend = |a: u8, b: u8| ((a as f32) * 0.75 + (b as f32) * 0.25).round() as u8;
+        let tinted = egui::Color32::from_rgb(
+            blend(BG_2_RAISED.r(), accent.r()),
+            blend(BG_2_RAISED.g(), accent.g()),
+            blend(BG_2_RAISED.b(), accent.b()),
+        );
+        glass_fill(tinted, accent, GLASS_ALPHA_WINDOW)
+    } else if hovered {
+        glass_fill(BG_2_RAISED, accent, GLASS_ALPHA_WINDOW)
+    } else {
+        glass_fill(BG_1_PANEL, accent, GLASS_ALPHA_WINDOW)
+    };
+    let stroke = if is_active { accent } else { BORDER_SUBTLE };
+    painter.rect_filled(rect, egui::CornerRadius::same(6), bg);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(6),
+        egui::Stroke::new(1.0, stroke),
+        egui::StrokeKind::Outside,
+    );
+    let _ = GLASS_ALPHA_CARD; // kept so callers that tune the "active" density can switch
+}
 
 // --- layout constants ---------------------------------------------------
 /// Edge length of each square side button (VS Code / Fleet activity-bar).
@@ -48,38 +89,9 @@ pub fn side_button(
                 egui::Sense::click(),
             );
 
-            let bg = if is_active {
-                // 25 % of accent over BG_2_RAISED — matches the
-                // "tinted_surface" idea in style.rs.
-                let blend = |a: u8, b: u8| {
-                    ((a as f32) * 0.75 + (b as f32) * 0.25).round() as u8
-                };
-                egui::Color32::from_rgb(
-                    blend(BG_2_RAISED.r(), accent.r()),
-                    blend(BG_2_RAISED.g(), accent.g()),
-                    blend(BG_2_RAISED.b(), accent.b()),
-                )
-            } else if resp.hovered() {
-                BG_2_RAISED
-            } else {
-                BG_1_PANEL
-            };
+            paint_rail_button(ui.painter(), rect, accent, is_active, resp.hovered());
             let fg = if is_active { TEXT_PRIMARY } else { TEXT_SECONDARY };
-            let stroke = if is_active { accent } else { BORDER_SUBTLE };
-
-            let painter = ui.painter();
-            painter.rect_filled(rect, egui::CornerRadius::same(6), bg);
-            painter.rect_stroke(
-                rect,
-                egui::CornerRadius::same(6),
-                egui::Stroke::new(1.0, stroke),
-                egui::StrokeKind::Outside,
-            );
-
-            // No accent bar — the purple tint fill + accent stroke
-            // already read as "active" clearly enough.
-
-            painter.text(
+            ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 glyph,
@@ -123,32 +135,9 @@ pub fn top_button(
                 egui::Sense::click(),
             );
 
-            let bg = if is_active {
-                let blend = |a: u8, b: u8| {
-                    ((a as f32) * 0.75 + (b as f32) * 0.25).round() as u8
-                };
-                egui::Color32::from_rgb(
-                    blend(BG_2_RAISED.r(), accent.r()),
-                    blend(BG_2_RAISED.g(), accent.g()),
-                    blend(BG_2_RAISED.b(), accent.b()),
-                )
-            } else if resp.hovered() {
-                BG_2_RAISED
-            } else {
-                BG_1_PANEL
-            };
+            paint_rail_button(ui.painter(), rect, accent, is_active, resp.hovered());
             let fg = if is_active { TEXT_PRIMARY } else { TEXT_SECONDARY };
-            let stroke = if is_active { accent } else { BORDER_SUBTLE };
-
-            let painter = ui.painter();
-            painter.rect_filled(rect, egui::CornerRadius::same(6), bg);
-            painter.rect_stroke(
-                rect,
-                egui::CornerRadius::same(6),
-                egui::Stroke::new(1.0, stroke),
-                egui::StrokeKind::Outside,
-            );
-            painter.text(
+            ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 glyph,
@@ -186,7 +175,10 @@ pub fn floating_window(
     let frame = egui::Frame {
         inner_margin: egui::Margin { left: 6, right: 6, top: 6, bottom: 8 },
         outer_margin: egui::Margin::ZERO,
-        fill: BG_1_PANEL,
+        // Glassy panel: slightly transparent + faint accent tint,
+        // so selecting a vehicle shifts the entire UI's hue by a
+        // hair (purple → vehicle colour).
+        fill: glass_fill(BG_1_PANEL, accent, GLASS_ALPHA_WINDOW),
         stroke: egui::Stroke::new(1.0, BORDER_SUBTLE),
         corner_radius: egui::CornerRadius::same(8),
         shadow: egui::epaint::Shadow {

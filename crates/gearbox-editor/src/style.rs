@@ -24,6 +24,40 @@ pub const BG_2_RAISED: egui::Color32 = egui::Color32::from_rgb(0x2D, 0x2D, 0x32)
 pub const BG_3_HOVER:  egui::Color32 = egui::Color32::from_rgb(0x38, 0x38, 0x3F);
 pub const BG_4_INPUT:  egui::Color32 = egui::Color32::from_rgb(0x18, 0x18, 0x1A);
 
+// ─── Glassy variants ────────────────────────────────────────────────
+//
+// Panel / card / group surfaces get progressive transparency so the
+// 3D scene peeks through the stack, plus a very faint accent tint
+// that shifts hue with the selection.
+//
+// Alphas are DECREASING with depth on purpose: the outermost panel
+// holds almost all the opacity; each deeper layer only adds a small
+// extra veil so overlap doesn't compound into "effectively solid".
+// Opacity stacks as `1 − (1-a)·(1-b)·(1-c)`, so card+group ≈ 16 %
+// on top of the panel — just enough to read as "another surface".
+pub const GLASS_ALPHA_WINDOW: u8 = 240;  // ~94 %
+pub const GLASS_ALPHA_CARD:   u8 = 150;  // ~59 %
+pub const GLASS_ALPHA_GROUP:  u8 = 110;  // ~43 %
+/// How much of the accent colour to blend into each glass fill. Kept
+/// tiny on purpose — the tint should be felt, not seen.
+pub const GLASS_ACCENT_TINT:  f32 = 0.03;
+
+/// Produce a glass-style fill: base RGB lightly tinted toward
+/// `accent`, with the given alpha. Use with any `egui::Frame::fill`.
+/// Uses *unmultiplied* alpha so the painted surface blends at
+/// `alpha/255` opacity over the scene — predictable at any value,
+/// unlike the premultiplied form which over-brightens at low alphas.
+pub fn glass_fill(base: egui::Color32, accent: egui::Color32, alpha: u8) -> egui::Color32 {
+    let f = GLASS_ACCENT_TINT;
+    let blend = |a: u8, b: u8| ((a as f32) * (1.0 - f) + (b as f32) * f).round() as u8;
+    egui::Color32::from_rgba_unmultiplied(
+        blend(base.r(), accent.r()),
+        blend(base.g(), accent.g()),
+        blend(base.b(), accent.b()),
+        alpha,
+    )
+}
+
 pub const BORDER_SUBTLE: egui::Color32 = egui::Color32::from_rgb(0x0E, 0x0E, 0x10);
 pub const BORDER_INNER:  egui::Color32 = egui::Color32::from_rgb(0x3A, 0x3A, 0x42);
 
@@ -131,13 +165,24 @@ pub fn apply_theme(
     if *last_applied == Some(accent.0) { return }
     let accent_col = accent.0;
 
+    // Glass variants of every neutral bg, so EVERY egui widget that
+    // pulls from `Visuals` (buttons, inputs, sliders, text fields,
+    // combo boxes, progress bars, ...) inherits the frosted-glass
+    // look automatically. Alphas mirror the panel/card/group
+    // hierarchy — deeper UI layers stay denser than the surfaces
+    // above them.
+    let glass_panel  = glass_fill(BG_1_PANEL,  accent_col, GLASS_ALPHA_WINDOW);
+    let glass_card   = glass_fill(BG_2_RAISED, accent_col, GLASS_ALPHA_CARD);
+    let glass_hover  = glass_fill(BG_3_HOVER,  accent_col, GLASS_ALPHA_CARD);
+    let glass_input  = glass_fill(BG_4_INPUT,  accent_col, GLASS_ALPHA_GROUP);
+
     let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill          = BG_1_PANEL;
-    visuals.window_fill         = BG_1_PANEL;
+    visuals.panel_fill          = glass_panel;
+    visuals.window_fill         = glass_panel;
     visuals.window_stroke       = egui::Stroke::new(1.0, BORDER_SUBTLE);
-    visuals.extreme_bg_color    = BG_4_INPUT;
-    visuals.faint_bg_color      = BG_2_RAISED;
-    visuals.code_bg_color       = BG_4_INPUT;
+    visuals.extreme_bg_color    = glass_input;
+    visuals.faint_bg_color      = glass_card;
+    visuals.code_bg_color       = glass_input;
     visuals.override_text_color = Some(TEXT_PRIMARY);
     visuals.selection.bg_fill   = tinted_surface(accent_col);
     visuals.selection.stroke    = egui::Stroke::new(1.0, accent_col);
@@ -156,11 +201,11 @@ pub fn apply_theme(
             expansion: 0.0,
         }
     };
-    visuals.widgets.noninteractive = widget(BG_1_PANEL, TEXT_SECONDARY, BORDER_SUBTLE);
-    visuals.widgets.inactive       = widget(BG_2_RAISED, TEXT_PRIMARY,   BORDER_SUBTLE);
-    visuals.widgets.hovered        = widget(BG_3_HOVER,  TEXT_PRIMARY,   BORDER_INNER);
+    visuals.widgets.noninteractive = widget(glass_panel, TEXT_SECONDARY, BORDER_SUBTLE);
+    visuals.widgets.inactive       = widget(glass_card,  TEXT_PRIMARY,   BORDER_SUBTLE);
+    visuals.widgets.hovered        = widget(glass_hover, TEXT_PRIMARY,   BORDER_INNER);
     visuals.widgets.active         = widget(accent_col,  TEXT_PRIMARY,   accent_col);
-    visuals.widgets.open           = widget(BG_3_HOVER,  TEXT_PRIMARY,   BORDER_INNER);
+    visuals.widgets.open           = widget(glass_hover, TEXT_PRIMARY,   BORDER_INNER);
 
     let mut style = (*ctx.style()).clone();
     style.visuals = visuals;

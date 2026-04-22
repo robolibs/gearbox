@@ -384,7 +384,7 @@ fn power_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent:
             ui.add_space(space::BLOCK);
             sub_caption(ui, "primary (drains first)");
             ui.add_space(space::TIGHT);
-            group_frame(ui, |ui| {
+            group_frame(ui, accent, |ui| {
                 let mut primary = snap.primary.min(snap.entries.len() - 1);
                 for (idx, (label, _, _)) in snap.entries.iter().enumerate() {
                     ui.radio_value(&mut primary, idx, label);

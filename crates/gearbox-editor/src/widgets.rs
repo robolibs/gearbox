@@ -10,8 +10,8 @@
 use bevy_egui::egui;
 
 use super::style::{
-    body_label, caption, radius, section_caps, space, BG_2_RAISED, BORDER_SUBTLE, TEXT_PRIMARY,
-    TEXT_SECONDARY,
+    body_label, caption, glass_fill, radius, section_caps, space, BG_2_RAISED, BG_3_HOVER,
+    BORDER_SUBTLE, GLASS_ALPHA_CARD, GLASS_ALPHA_GROUP, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 // ─── Section ────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ pub fn section(
     let full_w = ui.available_width();
     let inner_w = (full_w - 18.0).max(0.0); // 8 px × 2 padding + 2 stroke
     egui::Frame::new()
-        .fill(BG_2_RAISED)
+        .fill(glass_fill(BG_2_RAISED, accent, GLASS_ALPHA_CARD))
         .corner_radius(egui::CornerRadius::same(radius::MD))
         .stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
         .inner_margin(egui::Margin::symmetric(8, 6))
@@ -325,7 +325,17 @@ fn paint_accent_bg(
     } else {
         0.08
     };
-    let bg = lerp_color(BG_2_RAISED, accent, tint);
+    // Preserve the glass alpha so card/wide buttons blend into the
+    // panel behind them the same way the card frames do. Unmultiplied
+    // so low alphas read as "mostly scene + tiny surface tint" rather
+    // than "gray block with partial transparency added on top".
+    let solid = lerp_color(BG_2_RAISED, accent, tint);
+    let bg = egui::Color32::from_rgba_unmultiplied(
+        solid.r(),
+        solid.g(),
+        solid.b(),
+        GLASS_ALPHA_CARD,
+    );
     let border_col = if resp.hovered() { accent } else { BORDER_SUBTLE };
     ui.painter_at(rect).rect(
         rect,
@@ -565,9 +575,17 @@ pub fn pretty_slider(
 // Much lighter than a new collapsible header — it just says "these
 // belong together" without another fold-level nesting.
 
-pub fn group_frame(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+pub fn group_frame(
+    ui: &mut egui::Ui,
+    accent: egui::Color32,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    // Same glass recipe as the section card but slightly denser so
+    // the nested group reads as "one more layer in" than the card
+    // around it. Uses `BG_3_HOVER` as the base so groups sit a
+    // touch brighter than cards, reinforcing the stacked-pane feel.
     egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
+        .fill(glass_fill(BG_3_HOVER, accent, GLASS_ALPHA_GROUP))
         .corner_radius(egui::CornerRadius::same(radius::SM))
         .stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
         .inner_margin(egui::Margin::symmetric(8, 6))
