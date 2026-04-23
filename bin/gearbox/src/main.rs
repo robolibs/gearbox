@@ -1,4 +1,20 @@
-//! gearbox editor — Bevy + egui front-end.
+//! gearbox — the one-and-only binary.
+//!
+//! Hosts three layers in-process:
+//!
+//!   * **Simulator** — `gearbox_physics::Sim` wrapped by `gearbox_viz`'s
+//!     `GearboxSim` resource. Rapier-f64 physics world, stepped at 60 Hz.
+//!   * **Renderer** — Bevy + egui, also from `gearbox_viz` + `gearbox_editor`.
+//!     Draws the simulator state and presents the editor UI.
+//!   * **Tool API** — `gearbox_api`'s `GearboxApiPlugin`. Opens a zenoh
+//!     session so external tools (robots, CLIs, scripting agents) can
+//!     observe / command the simulator across the network.
+//!
+//! The **simulator ↔ renderer** split is in-process only (shared Bevy
+//! resource). The **tool API** is the only *network* boundary this
+//! binary exposes. A future headless mode — simulator + tool API, no
+//! renderer — can be added as a `--headless` flag on this same binary
+//! (one-binary policy).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster};
@@ -10,6 +26,7 @@ use bevy_egui::EguiPlugin;
 use gearbox_core::presets;
 use datapod::{Point, Pose, Quaternion};
 
+use gearbox_api::GearboxApiPlugin;
 use gearbox_editor::EditorPlugin;
 use gearbox_viz::grid::{rotation_from_latlon_to_top, spawn_circle_meshes, GroundGrid};
 use gearbox_viz::window_settings;
@@ -107,6 +124,12 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .add_plugins(GearboxVizPlugin)
         .add_plugins(EditorPlugin)
+        // Robot / sim API — opens a zenoh session and bridges
+        // `GearboxSim` to the network. Plugin no-ops if zenoh fails
+        // to bring up (e.g. restricted ports), so the editor still
+        // runs offline. Add after the sim plugin so the resource is
+        // already there for our publisher system.
+        .add_plugins(GearboxApiPlugin)
         // Persists the primary window's size + position to
         // ~/.config/gearbox/window.txt on every resize / move.
         .add_plugins(window_settings::WindowSettingsPlugin)

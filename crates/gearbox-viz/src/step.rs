@@ -23,11 +23,23 @@ const PHYSICS_HZ: f32 = 60.0;
 const MAX_SUBSTEPS: u32 = 24;
 
 /// Sim-time controls: play/pause and speed multiplier. Resource is
-/// read by `step_sim_system` each frame.
+/// read by `step_sim_system` each frame. Also carries the monotonic
+/// sim-frame and accumulated sim-time counters so other systems
+/// (the `SceneState` mirror, the tool API clock publisher) don't
+/// have to re-derive them from `Time::elapsed_secs()` — that would
+/// drift under variable render rate or pause.
 #[derive(Resource, Debug, Copy, Clone, PartialEq)]
 pub struct SimClock {
     pub paused: bool,
     pub speed: SimSpeed,
+    /// Fixed-dt substeps run since startup. Incremented from
+    /// `step_sim_system` only.
+    pub sim_frame: u64,
+    /// Accumulated sim time in seconds. Exactly
+    /// `sim_frame * (1 / PHYSICS_HZ)` today; kept as an explicit
+    /// field so the integrator can change its accumulation strategy
+    /// without every consumer needing to follow.
+    pub sim_time_s: f64,
 }
 
 impl Default for SimClock {
@@ -35,7 +47,12 @@ impl Default for SimClock {
         // Boot paused so the user can orient themselves (adjust the
         // camera, pick a machine, set up the scene) before physics
         // starts ticking. Hit the top-centre play button to run.
-        Self { paused: true, speed: SimSpeed::X1 }
+        Self {
+            paused: true,
+            speed: SimSpeed::X1,
+            sim_frame: 0,
+            sim_time_s: 0.0,
+        }
     }
 }
 
@@ -79,7 +96,7 @@ impl SimSpeed {
 pub fn step_sim_system(
     mut sim: ResMut<GearboxSim>,
     time: Res<Time>,
-    clock: Res<SimClock>,
+    mut clock: ResMut<SimClock>,
     mut accumulator: Local<f32>,
     mut warmed_up: Local<bool>,
 ) {
@@ -116,6 +133,8 @@ pub fn step_sim_system(
         sim.0.step(dt_fixed as f64);
         *accumulator -= dt_fixed;
         steps += 1;
+        clock.sim_frame = clock.sim_frame.wrapping_add(1);
+        clock.sim_time_s += dt_fixed as f64;
     }
     // Drop the carried-over fraction if we couldn't keep up — better
     // than letting the accumulator grow unboundedly.

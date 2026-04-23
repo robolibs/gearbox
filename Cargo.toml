@@ -5,6 +5,8 @@ members = [
     "crates/gearbox-physics",
     "crates/gearbox-viz",
     "crates/gearbox-editor",
+    "crates/gearbox-api",
+    "crates/gearbox-link",
     "bin/gearbox",
 ]
 
@@ -59,11 +61,23 @@ bevy_egui = { version = "0.39", default-features = false, features = [
     "default_fonts",
     "render",
 ] }
-# Zenoh — pub/sub + query/reply transport. Will carry the future
-# robot-control API (the gamepad / teleop path comes in through here,
-# not through a native input lib). Declared workspace-wide so whichever
-# crate grows the API can pull it without restating the version.
+# Zenoh — pub/sub + query/reply transport for the **tool API**
+# (external robots / CLIs / scripting agents). Server-side only;
+# does not cross the simulator ↔ renderer boundary (zenoh doesn't
+# target wasm32).
 zenoh = "1"
+
+# aeronet — transport-agnostic Bevy networking, used for the
+# **simulator ↔ renderer** link when those two layers are split
+# across processes (e.g. headless sim + wasm browser renderer).
+# Pure Rust on both ends, wasm-friendly WebSocket IO layer.
+aeronet = "0.20"
+# WebTransport IO for aeronet — QUIC-based, no HOL blocking, unreliable
+# datagrams available. Declared with no default features so
+# `gearbox-link` can opt in to `client` / `server` / `dangerous-
+# configuration` independently; you want only one side per build
+# target (headless sim = server; wasm renderer = client).
+aeronet_webtransport = { version = "0.20", default-features = false }
 
 # Internal: crate-to-crate path deps expressed once so members can just
 # write `gearbox-core.workspace = true`.
@@ -71,3 +85,5 @@ gearbox-core    = { path = "crates/gearbox-core" }
 gearbox-physics = { path = "crates/gearbox-physics" }
 gearbox-viz     = { path = "crates/gearbox-viz" }
 gearbox-editor  = { path = "crates/gearbox-editor" }
+gearbox-api     = { path = "crates/gearbox-api" }
+gearbox-link    = { path = "crates/gearbox-link" }

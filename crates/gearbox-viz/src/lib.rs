@@ -1,20 +1,38 @@
-//! Bevy rendering layer for `gearbox_physics::Sim`.
+//! # Renderer — Bevy visualization of the simulator state.
 //!
-//! Wraps the headless sim in a Bevy resource, spawns PBR meshes that
-//! mirror each [`gearbox_core::VehicleSpec`], keeps their transforms
-//! in sync with the rapier world each frame, and owns the chase
-//! camera + ground-grid machinery. Takes keyboard input for dev
-//! teleop; external control (gamepad, joystick, scripted agents) is
-//! expected to ride the robot-API layer (zenoh) rather than touch
-//! this crate directly.
+//! This crate is the **renderer** half of the gearbox
+//! **simulator ↔ renderer** split. The **simulator** itself — a
+//! `gearbox_physics::Sim` — is wrapped here as the [`GearboxSim`]
+//! Bevy resource. Today both layers run in the same binary
+//! (`bin/gearbox`) and share that resource directly, no transport
+//! in between; the split only becomes a network split if/when we
+//! host a wasm renderer client.
 //!
-//! The editor (gearbox-editor) layers on top of this crate — viz has
-//! no awareness of selection, gizmos, panels, etc.
+//! When that day comes, the transport across the simulator ↔
+//! renderer boundary will be a dedicated crate (likely `aeronet`
+//! over WebSocket / WebTransport) — **not** zenoh. Zenoh lives
+//! exclusively on the simulator side of the boundary, as gearbox's
+//! *tool API* (see `gearbox_api`).
+//!
+//! Responsibilities:
+//!   * Own [`GearboxSim`], step it each frame. **Server side.**
+//!   * Mirror the authoritative server state into [`scene::SceneState`]
+//!     so the renderer has a rapier-free window to read from.
+//!   * Spawn PBR meshes mirroring each vehicle's spec and sync
+//!     their transforms to the live rapier pose. **Renderer side —
+//!     currently reads `Sim` directly; those reads will migrate
+//!     onto [`scene::SceneState`] when OpenUSD replaces the vehicle
+//!     model with prim-path-addressed scene data.**
+//!   * Chase camera, ground-grid, sky / clouds, dev WASD teleop.
+//!
+//! The editor (`gearbox_editor`) layers *on top of* this crate —
+//! viz has no awareness of selection, gizmos, panels, etc.
 
 pub mod camera;
 pub mod clouds;
 pub mod grid;
 pub mod input;
+pub mod scene;
 pub mod spawn;
 pub mod step;
 pub mod sync;
@@ -106,7 +124,12 @@ impl Plugin for GearboxVizPlugin {
         app.init_resource::<GearboxSim>()
             .init_resource::<grid::GroundGrid>()
             .init_resource::<step::SimClock>()
+            .init_resource::<scene::SceneState>()
             .init_resource::<FollowTarget>()
+            // Mirror server-owned state into `SceneState` every frame.
+            // Renderer code reads from `SceneState`; this system is the
+            // only place that may write to it.
+            .add_systems(PostUpdate, scene::mirror_scene_state_system)
             .add_systems(
                 Update,
                 (
@@ -166,5 +189,6 @@ pub fn follow_target_system(
 
 pub use camera::ChaseCamera;
 pub use grid::GroundGrid;
+pub use scene::{SceneClock, SceneState};
 pub use spawn::{spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals, GhostTag};
 pub use step::{SimClock, SimSpeed};

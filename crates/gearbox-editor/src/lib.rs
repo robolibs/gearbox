@@ -1,4 +1,12 @@
-//! Egui editor — floating docks, selection, drag, persistence.
+//! # Editor UI — egui panels sitting on top of the **renderer**.
+//!
+//! Layer in the gearbox stack: runs inside the same process as the
+//! **simulator** (owned by `gearbox_viz`) and the **tool API**
+//! (zenoh, owned by `gearbox_api`). This crate is purely the
+//! floating-dock UI: selection, gizmos, inspector, properties,
+//! persistence — no sim stepping, no network transport. It mutates
+//! the simulator through Bevy resources; any changes it needs to
+//! broadcast *outside* the process go through the tool-API crate.
 
 pub mod float;
 pub mod gizmo;

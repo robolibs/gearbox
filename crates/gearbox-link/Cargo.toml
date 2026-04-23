@@ -1,0 +1,33 @@
+[package]
+name = "gearbox-link"
+description = "Simulator ↔ renderer transport over aeronet / WebTransport. Pure-Rust, wasm-friendly. Not invoked when simulator and renderer live in one process."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Compile-in the server side — only a simulator host build needs it.
+# Pulls in the native wtransport stack via aeronet_webtransport's
+# `server` feature; not available on wasm targets.
+server = [
+    "aeronet_webtransport/server",
+    "aeronet_webtransport/self-signed",
+]
+# Compile-in the client side — the renderer build (native or wasm)
+# wants this. Kept separate so the server build stays lean.
+# `dangerous-configuration` lets the native client accept the
+# self-signed cert the dev server hands out. When we move to a
+# browser (wasm) client this feature is ignored; cert trust there
+# is done via `serverCertificateHashes` in the client config.
+client = [
+    "aeronet_webtransport/client",
+    "aeronet_webtransport/dangerous-configuration",
+]
+
+[dependencies]
+bevy.workspace = true
+aeronet.workspace = true
+aeronet_webtransport.workspace = true
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"

@@ -14,6 +14,7 @@ gearbox-core.workspace = true
 gearbox-physics.workspace = true
 gearbox-viz.workspace = true
 gearbox-editor.workspace = true
+gearbox-api.workspace = true
 datapod.workspace = true
 bevy.workspace = true
 bevy_egui.workspace = true
