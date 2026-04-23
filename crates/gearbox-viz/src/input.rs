@@ -34,12 +34,14 @@ pub fn wasd_input_system(
     let kb_yaw = axis(&keys, KeyCode::KeyQ, KeyCode::KeyE);
     let kb_lift = axis(&keys, KeyCode::KeyZ, KeyCode::KeyX);
 
+    // ControlInput is f64 (matches rapier-f64). Inputs come from
+    // keyboard + gamepad as f32, so upcast at the boundary.
     let ctrl = ControlInput {
-        throttle: merge_axis(kb_throttle, gamepad.throttle),
-        steer: merge_axis(kb_steer, gamepad.steer),
-        brake: merge_axis(kb_brake, gamepad.brake).max(0.0),
-        yaw: merge_axis(kb_yaw, gamepad.yaw),
-        lift: merge_axis(kb_lift, gamepad.lift),
+        throttle: merge_axis(kb_throttle, gamepad.throttle)              as f64,
+        steer:    merge_axis(kb_steer,    gamepad.steer)                 as f64,
+        brake:    merge_axis(kb_brake,    gamepad.brake).max(0.0)        as f64,
+        yaw:      merge_axis(kb_yaw,      gamepad.yaw)                   as f64,
+        lift:     merge_axis(kb_lift,     gamepad.lift)                  as f64,
     };
 
     for body in &players {

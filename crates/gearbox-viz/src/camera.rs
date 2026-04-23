@@ -12,7 +12,7 @@
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use big_space::prelude::{BigSpace, CellCoord, Grid};
+
 
 use gearbox_core::VehicleId;
 
@@ -143,13 +143,12 @@ impl Default for ChaseCamera {
 pub fn chase_camera_fly(
     time: Res<Time>,
     sim: Res<GearboxSim>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut CellCoord)>,
-    root_grid: Query<&Grid, With<BigSpace>>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    
 ) {
-    let cell_size = root_grid.single().map(|g| g.cell_edge_length()).unwrap_or(2000.0);
     let dt = time.delta_secs();
 
-    for (mut cam, mut tr, mut cell) in &mut cameras {
+    for (mut cam, mut tr) in &mut cameras {
         let Some(mut target) = cam.fly_target else { continue };
         if sim.0.vehicle(target.vehicle).is_none() {
             cam.fly_target = None;
@@ -226,7 +225,7 @@ pub fn chase_camera_fly(
             cam.fly_target = Some(target);
         }
 
-        apply_rig_big_space(&cam, cell_size, &mut tr, &mut cell);
+        apply_rig(&cam, &mut tr);
     }
 }
 
@@ -248,8 +247,8 @@ pub fn chase_camera_control(
     bevy_cameras: Query<(&Camera, &GlobalTransform)>,
     mut pan_anchor: Local<Option<Vec2>>,
     mut orbit_anchor: Local<Option<Vec2>>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut CellCoord)>,
-    root_grid: Query<&Grid, With<BigSpace>>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    
 ) {
     let middle_pressed = mouse_buttons.pressed(MouseButton::Middle);
     let left_pressed = mouse_buttons.pressed(MouseButton::Left);
@@ -291,9 +290,8 @@ pub fn chase_camera_control(
     }
 
     let now = time.elapsed_secs();
-    let cell_size = root_grid.single().map(|g| g.cell_edge_length()).unwrap_or(2000.0);
 
-    for (mut cam, mut tr, mut cell) in &mut cameras {
+    for (mut cam, mut tr) in &mut cameras {
         // Double-middle-click → re-centre focus on cursor-to-ground point.
         if mouse_buttons.just_pressed(MouseButton::Middle) {
             let is_double = now - cam.last_middle_click_secs < 0.35;
@@ -327,7 +325,7 @@ pub fn chase_camera_control(
             cam.fly_target = None;
         }
 
-        apply_rig_big_space(&cam, cell_size, &mut tr, &mut cell);
+        apply_rig(&cam, &mut tr);
     }
 }
 
@@ -339,8 +337,8 @@ pub fn chase_camera_zoom(
     keys: Res<ButtonInput<KeyCode>>,
     mut wheel: MessageReader<MouseWheel>,
     mut zoom_target: Local<Option<f64>>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut CellCoord)>,
-    root_grid: Query<&Grid, With<BigSpace>>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    
 ) {
     if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
         // Drain so the event doesn't accumulate while Ctrl is held.
@@ -355,8 +353,7 @@ pub fn chase_camera_zoom(
         };
     }
 
-    let Ok((mut cam, mut tr, mut cell)) = cameras.single_mut() else { return };
-    let cell_size = root_grid.single().map(|g| g.cell_edge_length()).unwrap_or(2000.0);
+    let Ok((mut cam, mut tr)) = cameras.single_mut() else { return };
 
     let target = zoom_target.get_or_insert(cam.distance as f64);
     let min = cam.min_distance as f64;
@@ -383,21 +380,16 @@ pub fn chase_camera_zoom(
     if log_diff.abs() > 1e-4 {
         let new_log = log_current + log_diff * (cam.zoom_smoothing * dt).min(0.9);
         cam.distance = new_log.exp() as f32;
-        apply_rig_big_space(&cam, cell_size, &mut tr, &mut cell);
+        apply_rig(&cam, &mut tr);
     } else if log_diff.abs() > 1e-5 {
         cam.distance = *target as f32;
-        apply_rig_big_space(&cam, cell_size, &mut tr, &mut cell);
+        apply_rig(&cam, &mut tr);
     }
 }
 
-/// Place the camera in world coords, split into `(CellCoord, Transform)`
-/// so f32 precision stays inside one grid cell regardless of zoom level.
-fn apply_rig_big_space(
-    cam: &ChaseCamera,
-    cell_size: f32,
-    tr: &mut Transform,
-    cell: &mut CellCoord,
-) {
+/// Set the camera's world-space pose from the rig state
+/// (focus + yaw + elevation + distance).
+fn apply_rig(cam: &ChaseCamera, tr: &mut Transform) {
     let horizontal = cam.distance * cam.elevation.cos();
     let vertical = cam.distance * cam.elevation.sin();
     let offset = Vec3::new(
@@ -406,27 +398,7 @@ fn apply_rig_big_space(
         horizontal * cam.yaw.cos(),
     );
     let cam_world = cam.focus + offset;
-
-    // Split the camera's world-space position into an integer cell index
-    // and a small local offset — this is what big_space's internal
-    // recentering would do, but we write it up-front so our own writes
-    // don't race with the recentre system.
-    let new_cell = CellCoord::new(
-        (cam_world.x / cell_size).round() as i32,
-        (cam_world.y / cell_size).round() as i32,
-        (cam_world.z / cell_size).round() as i32,
-    );
-    let cell_origin = Vec3::new(
-        new_cell.x as f32 * cell_size,
-        new_cell.y as f32 * cell_size,
-        new_cell.z as f32 * cell_size,
-    );
-
-    let cam_local = cam_world - cell_origin;
-    let focus_local = cam.focus - cell_origin;
-
-    *tr = Transform::from_translation(cam_local).looking_at(focus_local, Vec3::Y);
-    *cell = new_cell;
+    *tr = Transform::from_translation(cam_world).looking_at(cam.focus, Vec3::Y);
 }
 
 fn cursor_ray_to_ground(

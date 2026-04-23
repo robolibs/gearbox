@@ -60,11 +60,9 @@ fn fragment(
     // Use the annulus mesh's UV-v as the angle around the ring.
     // Bevy's annulus builder sets `uv.y` to go 0 → 1 around the
     // circumference, so this is intrinsically ring-local: it
-    // doesn't drift when the mesh moves around the world or when
-    // big_space rebases the floating origin. (The previous
-    // `atan2(world_position − center)` formulation broke in both
-    // of those cases, which is why you saw the pattern "crawl"
-    // when the machine translated.)
+    // doesn't drift when the mesh moves around the world.
+    // (A previous `atan2(world_position − center)` formulation
+    // caused the pattern to "crawl" during translation.)
     let norm_angle = in.uv.y;
 
     // Spinning on/off segments.

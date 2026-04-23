@@ -113,7 +113,7 @@ pub fn step_sim_system(
 
     let mut steps = 0;
     while *accumulator >= dt_fixed && steps < MAX_SUBSTEPS {
-        sim.0.step(dt_fixed);
+        sim.0.step(dt_fixed as f64);
         *accumulator -= dt_fixed;
         steps += 1;
     }

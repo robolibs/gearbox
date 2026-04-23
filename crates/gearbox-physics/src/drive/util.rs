@@ -15,7 +15,7 @@
 /// `max_steer` for BOTH wheels, so any right-stick input pegged the
 /// fronts to full lock instantly. The abs-then-signed form below has
 /// identical behaviour left vs right.)
-pub fn ackermann_steer(input: f32, max_steer: f32, wheel_x: f32, wheelbase: f32) -> f32 {
+pub fn ackermann_steer(input: f64, max_steer: f64, wheel_x: f64, wheelbase: f64) -> f64 {
     if input.abs() < 1e-6 || max_steer.abs() < 1e-6 || wheelbase <= 1e-3 {
         return input * max_steer;
     }

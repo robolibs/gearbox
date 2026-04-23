@@ -11,12 +11,10 @@ use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
-use big_space::prelude::BigSpatialBundle;
 
 use gearbox_physics::DriveMode;
 
 use gearbox_viz::{GearboxSim, SimClock};
-use gearbox_viz::BigSpaceRoot;
 
 use super::selection::Selection;
 use super::style::AccentColor;
@@ -162,7 +160,6 @@ pub fn setup_selection_ring(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SelectionRingMaterial>>,
-    big_space_root: Res<BigSpaceRoot>,
     settings: Res<SelectionRingSettings>,
 ) {
     // Annulus lies in its own XY plane; rotate -90° around X so the
@@ -182,28 +179,23 @@ pub fn setup_selection_ring(
         extension: SelectionRingExtension::default(),
     });
 
-    commands
-        .spawn((
-            Name::new("SelectionRing"),
-            SelectionRing {
-                material: mat.clone(),
-                mesh: mesh.clone(),
-                built_for: (initial_outer, initial_thickness),
-            },
-            BigSpatialBundle {
-                transform: Transform {
-                    translation: Vec3::new(0.0, RING_GROUND_OFFSET, 0.0),
-                    rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
-                    scale: Vec3::ONE,
-                },
-                ..default()
-            },
-            Mesh3d(mesh),
-            MeshMaterial3d(mat),
-            Visibility::Hidden,
-            NotShadowCaster,
-        ))
-        .insert(ChildOf(big_space_root.0));
+    commands.spawn((
+        Name::new("SelectionRing"),
+        SelectionRing {
+            material: mat.clone(),
+            mesh: mesh.clone(),
+            built_for: (initial_outer, initial_thickness),
+        },
+        Transform {
+            translation: Vec3::new(0.0, RING_GROUND_OFFSET, 0.0),
+            rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            scale: Vec3::ONE,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(mat),
+        Visibility::Hidden,
+        NotShadowCaster,
+    ));
 }
 
 pub fn update_selection_ring(

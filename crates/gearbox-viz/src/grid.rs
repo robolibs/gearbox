@@ -21,7 +21,6 @@ use bevy::asset::RenderAssetUsages;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
-use big_space::prelude::BigSpatialBundle;
 
 use super::camera::ChaseCamera;
 
@@ -96,7 +95,6 @@ pub fn spawn_circle_meshes(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    big_space_root: Entity,
     cfg: &GroundGrid,
 ) {
     for level in 0..LEVEL_STEPS.len() {
@@ -110,20 +108,15 @@ pub fn spawn_circle_meshes(
             cull_mode: None,
             ..default()
         });
-        commands
-            .spawn((
-                Name::new(format!("LocalGrid[L{level}]")),
-                LocalGrid { level: level as u8, material: mat.clone() },
-                BigSpatialBundle {
-                    transform: Transform::from_xyz(0.0, GRID_Y, 0.0),
-                    ..default()
-                },
-                Mesh3d(mesh),
-                MeshMaterial3d(mat),
-                NotShadowCaster,
-                Visibility::Visible,
-            ))
-            .insert(ChildOf(big_space_root));
+        commands.spawn((
+            Name::new(format!("LocalGrid[L{level}]")),
+            LocalGrid { level: level as u8, material: mat.clone() },
+            Transform::from_xyz(0.0, GRID_Y, 0.0),
+            Mesh3d(mesh),
+            MeshMaterial3d(mat),
+            NotShadowCaster,
+            Visibility::Visible,
+        ));
     }
 }
 

@@ -28,9 +28,11 @@ pub fn draw_content(
             toggle(ui, &mut grid.visible, accent);
         });
         labelled_row(ui, "opacity", |ui| {
-            let mut alpha = grid.color.alpha();
+            // `pretty_slider` works in f64; bridge through a local and
+            // cast back to the f32 Color channel on the way out.
+            let mut alpha = grid.color.alpha() as f64;
             if pretty_slider(ui, &mut alpha, 0.0..=1.0, 2, "", accent).changed() {
-                grid.color = grid.color.with_alpha(alpha);
+                grid.color = grid.color.with_alpha(alpha as f32);
             }
         });
         labelled_row(ui, "colour", |ui| {
@@ -46,7 +48,10 @@ pub fn draw_content(
 
     section(ui, "ui_gizmos", "Gizmos", accent, false, |ui| {
         labelled_row(ui, "size", |ui| {
-            pretty_slider(ui, &mut gizmo_scale.0, 0.25..=4.0, 2, "", accent);
+            let mut v = gizmo_scale.0 as f64;
+            if pretty_slider(ui, &mut v, 0.25..=4.0, 2, "", accent).changed() {
+                gizmo_scale.0 = v as f32;
+            }
         });
         // Per-mode enable toggles — Tab only cycles between the modes
         // with a checked toggle. Translate + Rotate stay available for
@@ -73,7 +78,10 @@ pub fn draw_content(
 
     section(ui, "ui_selection_ring", "Selection Ring", accent, false, |ui| {
         labelled_row(ui, "thickness", |ui| {
-            pretty_slider(ui, &mut ring.thickness, 0.02..=1.0, 2, "m", accent);
+            let mut t = ring.thickness as f64;
+            if pretty_slider(ui, &mut t, 0.02..=1.0, 2, "m", accent).changed() {
+                ring.thickness = t as f32;
+            }
         });
     });
 }

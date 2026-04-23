@@ -9,19 +9,19 @@
 #[derive(Debug, Default, Copy, Clone)]
 pub struct ControlInput {
     /// Longitudinal command. `-1.0`..=`1.0`. Positive means forward.
-    pub throttle: f32,
+    pub throttle: f64,
     /// Brake command. `0.0`..=`1.0`.
-    pub brake: f32,
+    pub brake: f64,
     /// Steering command. `-1.0`..=`1.0`. Positive steers right.
-    pub steer: f32,
+    pub steer: f64,
     /// Yaw command for drones. `-1.0`..=`1.0`. Positive = turn left.
-    pub yaw: f32,
+    pub yaw: f64,
     /// Altitude command for drones. `-1.0`..=`1.0`. Positive = up.
-    pub lift: f32,
+    pub lift: f64,
 }
 
 impl ControlInput {
-    pub fn throttle(t: f32) -> Self {
+    pub fn throttle(t: f64) -> Self {
         Self { throttle: t.clamp(-1.0, 1.0), ..Self::default() }
     }
 

@@ -1268,27 +1268,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "big_space"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d8b22d702722940f894101e0d2225439030093a173c069f2cdd35a06d886daf"
-dependencies = [
- "bevy_app",
- "bevy_color",
- "bevy_ecs",
- "bevy_input",
- "bevy_log",
- "bevy_math",
- "bevy_platform",
- "bevy_reflect",
- "bevy_tasks",
- "bevy_time",
- "bevy_transform",
- "bevy_utils",
- "smallvec",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2146,7 +2125,6 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_egui",
- "big_space",
  "datapod",
  "gearbox-core",
  "gearbox-editor",
@@ -2167,7 +2145,6 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_egui",
- "big_space",
  "datapod",
  "gearbox-core",
  "gearbox-physics",
@@ -2180,7 +2157,7 @@ version = "0.0.1"
 dependencies = [
  "datapod",
  "gearbox-core",
- "rapier3d",
+ "rapier3d-f64",
 ]
 
 [[package]]
@@ -2188,7 +2165,6 @@ name = "gearbox-viz"
 version = "0.0.1"
 dependencies = [
  "bevy",
- "big_space",
  "datapod",
  "gearbox-core",
  "gearbox-physics",
@@ -3466,10 +3442,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "parry3d"
+name = "parry3d-f64"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e04d21bda5249438b5695e7f08f1655524a6025bcdb186c324b7a66562f2d61"
+checksum = "38558e45fda09a243836f590b9890f7f21dd2078dd7aafc876a9e8998d378d42"
 dependencies = [
  "approx",
  "arrayvec",
@@ -3489,7 +3465,6 @@ dependencies = [
  "slab",
  "smallvec",
  "spade",
- "static_assertions",
  "thiserror 2.0.18",
 ]
 
@@ -3752,10 +3727,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
 
 [[package]]
-name = "rapier3d"
+name = "rapier3d-f64"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a576251c9dc2d6aff08470b7433096a04019c8b7bea9bbb7087f092c180feaea"
+checksum = "d27cfdde4915e866a008d520328b1236ad199990370965f944589d006140e6db"
 dependencies = [
  "approx",
  "arrayvec",
@@ -3768,14 +3743,13 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
- "parry3d",
+ "parry3d-f64",
  "profiling",
  "rustc-hash 2.1.2",
  "simba",
  "static_assertions",
  "thiserror 2.0.18",
  "vec_map",
- "wide",
 ]
 
 [[package]]

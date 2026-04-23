@@ -10,12 +10,12 @@ pub struct ChassisSpec {
     /// Full-size bounding box dimensions `(width, height, length)` in metres.
     pub size: Size,
     /// Total mass in kilograms.
-    pub mass: f32,
+    pub mass: f64,
     /// Local center-of-mass offset. A negative Y lowers the COM and reduces
     /// rollover; this matters a lot for a tall tractor on raycast wheels.
     pub com_offset: Point,
-    pub linear_damping: f32,
-    pub angular_damping: f32,
+    pub linear_damping: f64,
+    pub angular_damping: f64,
     /// Enable continuous collision detection on the chassis — prevents
     /// tunneling through walls at high speed.
     pub ccd: bool,

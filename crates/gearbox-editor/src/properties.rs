@@ -183,14 +183,14 @@ fn vehicle_section(
             driven
                 .iter()
                 .map(|&i| state.spec.wheels[i].max_engine_force)
-                .sum::<f32>()
-                / driven.len() as f32
+                .sum::<f64>()
+                / driven.len() as f64
         };
         let brake = if state.spec.wheels.is_empty() {
             0.0
         } else {
-            state.spec.wheels.iter().map(|w| w.max_brake).sum::<f32>()
-                / state.spec.wheels.len() as f32
+            state.spec.wheels.iter().map(|w| w.max_brake).sum::<f64>()
+                / state.spec.wheels.len() as f64
         };
         (
             name,
@@ -346,7 +346,7 @@ fn power_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent:
     struct Snap {
         turned_on: bool,
         primary: usize,
-        entries: Vec<(String, f32, f32)>,
+        entries: Vec<(String, f64, f64)>,
     }
     let snap: Snap = {
         let Some(state) = sim.0.vehicle(id) else { return };
@@ -434,9 +434,9 @@ fn power_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent:
 
 #[derive(Clone)]
 struct ContainerSnap {
-    amount: f32,
-    capacity: f32,
-    fill_rate_frac: f32,
+    amount: f64,
+    capacity: f64,
+    fill_rate_frac: f64,
 }
 
 fn container_section(
@@ -475,7 +475,7 @@ fn container_section(
                 0.0
             };
             ui.add(
-                egui::ProgressBar::new(frac)
+                egui::ProgressBar::new(frac as f32)
                     .text(
                         egui::RichText::new(format!("{:.0} / {:.0}", s.amount, s.capacity))
                             .monospace()
@@ -552,12 +552,12 @@ fn transform_section(
     ui.add_space(space::SECTION);
     section(ui, "prop_transform", "Transform", accent, false, |ui| {
         let pose = sim.0.vehicle_pose(id);
-        let mut px = pose.point.x as f32;
-        let mut py = pose.point.y as f32;
-        let mut pz = pose.point.z as f32;
+        let mut px = pose.point.x;
+        let mut py = pose.point.y;
+        let mut pz = pose.point.z;
         let q = pose.rotation;
         let (mut rx, mut ry, mut rz) = {
-            let (x, y, z) = quat_to_euler_xyz(q.w as f32, q.x as f32, q.y as f32, q.z as f32);
+            let (x, y, z) = quat_to_euler_xyz(q.w, q.x, q.y, q.z);
             (x.to_degrees(), y.to_degrees(), z.to_degrees())
         };
         let mut changed = false;
@@ -602,7 +602,7 @@ fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
     format!("{}…", kept)
 }
 
-fn quat_to_euler_xyz(w: f32, x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+fn quat_to_euler_xyz(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
     let sy = 2.0 * (w * y + x * z).clamp(-1.0, 1.0);
     let ey = sy.asin();
     let (ex, ez) = if sy.abs() > 0.9999 {
@@ -616,7 +616,7 @@ fn quat_to_euler_xyz(w: f32, x: f32, y: f32, z: f32) -> (f32, f32, f32) {
     (ex, ey, ez)
 }
 
-fn euler_xyz_to_quat(ex: f32, ey: f32, ez: f32) -> (f32, f32, f32, f32) {
+fn euler_xyz_to_quat(ex: f64, ey: f64, ez: f64) -> (f64, f64, f64, f64) {
     let (sx, cx) = ((ex * 0.5).sin(), (ex * 0.5).cos());
     let (sy, cy) = ((ey * 0.5).sin(), (ey * 0.5).cos());
     let (sz, cz) = ((ez * 0.5).sin(), (ez * 0.5).cos());
@@ -631,7 +631,7 @@ fn axis_drag_row(
     ui: &mut egui::Ui,
     glyph: &str,
     color: egui::Color32,
-    value: &mut f32,
+    value: &mut f64,
     speed: f64,
     suffix: &str,
 ) -> bool {

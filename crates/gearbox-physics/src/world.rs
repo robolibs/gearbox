@@ -53,7 +53,7 @@ pub fn wheel_raycast_groups() -> InteractionGroups {
 }
 
 /// Builds a large flat ground collider centered at the origin.
-pub(crate) fn build_ground_collider(half_size: f32) -> Collider {
+pub(crate) fn build_ground_collider(half_size: f64) -> Collider {
     ColliderBuilder::cuboid(half_size, 0.1, half_size)
         .translation(Vec3::new(0.0, -0.1, 0.0))
         .friction(1.0)
@@ -63,7 +63,7 @@ pub(crate) fn build_ground_collider(half_size: f32) -> Collider {
 
 /// Builds a ball collider representing the planet. `centre` is the centre
 /// of the sphere in world coordinates.
-pub(crate) fn build_planet_collider(centre: Vec3, radius: f32) -> Collider {
+pub(crate) fn build_planet_collider(centre: Vec3, radius: f64) -> Collider {
     ColliderBuilder::ball(radius)
         .translation(centre)
         .friction(1.0)

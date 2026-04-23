@@ -10,16 +10,14 @@
 //!   from below (inside the shell) AND from above (outside the shell).
 //! - Tagged `NotShadowCaster` so Bevy's cascaded shadow maps don't try
 //!   to fit a planet-sized caster and degenerate.
-//! - Lives under the same `BigSpace` root / cell as the planet so
-//!   big_space's floating-origin rebasing keeps it in the right spot.
+//! - Sits at the same world position as the planet so the two
+//!   surfaces share an origin.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::Image;
-use bevy::math::DVec3;
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use big_space::prelude::*;
 
 /// Altitude of the cloud deck above the planet surface, in metres.
 /// Real cumulus sits around 1–3 km; 4 km gives a touch of visible
@@ -31,13 +29,12 @@ const CLOUD_TEX_W: u32 = 1024;
 const CLOUD_TEX_H: u32 = 512;
 
 /// Spawn the cloud shell. Called from `setup_scene` after the planet
-/// is set up, with the same `big_space` root.
+/// is set up.
 pub fn spawn_cloud_shell(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
-    big_space_root: Entity,
     planet_radius: f64,
 ) {
     let shell_radius = planet_radius + CLOUD_ALTITUDE_M;
@@ -62,28 +59,14 @@ pub fn spawn_cloud_shell(
         ..default()
     });
 
-    // Same world position as the planet: centered at (0, -R, 0). Uses
-    // the same big_space cell so floating-origin rebasing handles the
-    // planet-scale translation without f32 precision damage.
-    let (cell, offset) =
-        Grid::default().translation_to_grid(DVec3::new(0.0, -planet_radius, 0.0));
-    commands
-        .spawn((
-            Name::new("CloudShell"),
-            BigSpatialBundle {
-                transform: Transform {
-                    translation: offset,
-                    rotation: Quat::IDENTITY,
-                    scale: Vec3::ONE,
-                },
-                cell,
-                ..default()
-            },
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            NotShadowCaster,
-        ))
-        .insert(ChildOf(big_space_root));
+    // Same world position as the planet: centered at (0, -R, 0).
+    commands.spawn((
+        Name::new("CloudShell"),
+        Transform::from_xyz(0.0, -planet_radius as f32, 0.0),
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        NotShadowCaster,
+    ));
 }
 
 /// Build a tileable cloud texture. RGB is white (cloud colour);

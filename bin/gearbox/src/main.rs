@@ -1,16 +1,11 @@
-//! gearbox editor — Bevy + egui + big_space front-end.
-//!
-//! big_space gives floating-origin rendering so f32 precision stays usable
-//! even when the planet mesh sits 6 371 km from the camera.
+//! gearbox editor — Bevy + egui front-end.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::light::{CascadeShadowConfigBuilder, NotShadowCaster};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{DistanceFog, FogFalloff};
-use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
-use big_space::prelude::*;
 
 use gearbox_core::presets;
 use datapod::{Point, Pose, Quaternion};
@@ -19,7 +14,7 @@ use gearbox_editor::EditorPlugin;
 use gearbox_viz::grid::{rotation_from_latlon_to_top, spawn_circle_meshes, GroundGrid};
 use gearbox_viz::window_settings;
 use gearbox_viz::{
-    spawn_height_for, spawn_vehicle_visuals, BigSpaceRoot, ChaseCamera, GearboxSim,
+    spawn_height_for, spawn_vehicle_visuals, ChaseCamera, GearboxSim,
     GearboxVizPlugin, PlayerControlled,
 };
 
@@ -104,13 +99,11 @@ fn main() {
         .add_plugins(
             DefaultPlugins
                 .build()
-                .disable::<TransformPlugin>() // big_space supplies its own
                 .set(WindowPlugin {
                     primary_window: Some(window_settings::geometry_to_window(window_geometry)),
                     ..default()
                 }),
         )
-        .add_plugins(BigSpaceDefaultPlugins)
         .add_plugins(EguiPlugin::default())
         .add_plugins(GearboxVizPlugin)
         .add_plugins(EditorPlugin)
@@ -149,13 +142,6 @@ fn setup_scene(
     // jittery at ~0.5 m noise. The sphere lives purely as visuals.)
     sim.0.add_ground_plane(2_000.0);
 
-    // BigSpace root — every renderable entity becomes a child of it so
-    // big_space's transform-propagation handles precision.
-    let root_id = commands
-        .spawn((Name::new("BigSpace"), BigSpaceRootBundle::default()))
-        .id();
-    commands.insert_resource(BigSpaceRoot(root_id));
-
     let radius = sim.0.planet.radius as f32;
     let radius_f64 = sim.0.planet.radius;
 
@@ -184,66 +170,41 @@ fn setup_scene(
         perceptual_roughness: 0.95,
         ..default()
     });
-    // Planet centre in world coords.
-    let (planet_cell, planet_offset) =
-        Grid::default().translation_to_grid(DVec3::new(0.0, -radius_f64, 0.0));
-
     // Rotation that aligns the sphere's mesh-local +Y ("Amsterdam") with
-    // the geographic datum point. This puts the tractor (at world origin
-    // = sphere top) on the planet at the datum's lat/lon, while leaving
-    // the geographic north pole OFF to one side.
+    // the geographic datum point.
     let planet_rot = rotation_from_latlon_to_top(
         sim.0.planet.datum.latitude,
         sim.0.planet.datum.longitude,
     );
-    commands
-        .spawn((
-            Name::new("Planet"),
-            BigSpatialBundle {
-                transform: Transform {
-                    translation: planet_offset,
-                    rotation: planet_rot,
-                    scale: Vec3::ONE,
-                },
-                cell: planet_cell,
-                ..default()
-            },
-            Mesh3d(planet_mesh),
-            MeshMaterial3d(planet_mat.clone()),
-            // Planet doesn't cast (sun is outside a 6 371 km ball).
-            // It also doesn't *receive* shadows here — its triangles
-            // are far too coarse for CSM to hit them precisely. The
-            // `ShadowPatch` below catches shadows instead.
-            NotShadowCaster,
-            bevy::light::NotShadowReceiver,
-        ))
-        .insert(ChildOf(root_id));
+    commands.spawn((
+        Name::new("Planet"),
+        Transform {
+            translation: Vec3::new(0.0, -radius, 0.0),
+            rotation: planet_rot,
+            scale: Vec3::ONE,
+        },
+        Mesh3d(planet_mesh),
+        MeshMaterial3d(planet_mat.clone()),
+        NotShadowCaster,
+        bevy::light::NotShadowReceiver,
+    ));
 
-    // Camera-following, finely-tessellated spherical cap. Sits on
-    // the planet surface, curved exactly to match the sphere, so it
-    // is visually indistinguishable from the planet (same material,
-    // zero gap at the edge). Tangent triangles are ~3 m wide → chord
-    // sag is ~μm, far below the shadow-bias threshold. The `follow`
-    // system re-positions it under the camera each frame.
+    // Camera-following, finely-tessellated spherical cap.
     let shadow_patch_mesh = meshes.add(spherical_cap_mesh(radius, 300.0, 200));
-    commands
-        .spawn((
-            Name::new("ShadowPatch"),
-            ShadowPatch,
-            BigSpatialBundle::default(),
-            Mesh3d(shadow_patch_mesh),
-            MeshMaterial3d(planet_mat),
-            NotShadowCaster,
-        ))
-        .insert(ChildOf(root_id));
+    commands.spawn((
+        Name::new("ShadowPatch"),
+        ShadowPatch,
+        Transform::default(),
+        Mesh3d(shadow_patch_mesh),
+        MeshMaterial3d(planet_mat),
+        NotShadowCaster,
+    ));
 
     // Two line-meshes that track the machine — one for its latitude
-    // circle, one for its meridian. Mesh data is rebuilt every frame in
-    // `viz::grid::update_circle_meshes`, but the entities are spawned
-    // once here and parented to the BigSpace root.
+    // circle, one for its meridian. Mesh data is rebuilt every frame
+    // in `viz::grid::update_circle_meshes`.
     let grid_cfg = GroundGrid::default();
-    spawn_circle_meshes(&mut commands, &mut meshes, &mut materials, root_id, &grid_cfg);
-    let _ = (planet_rot, planet_cell, planet_offset);
+    spawn_circle_meshes(&mut commands, &mut meshes, &mut materials, &grid_cfg);
 
     // Cloud shell — translucent sphere at ~planet_radius + 4 km.
     gearbox_viz::clouds::spawn_cloud_shell(
@@ -251,7 +212,6 @@ fn setup_scene(
         &mut meshes,
         &mut materials,
         &mut images,
-        root_id,
         radius_f64,
     );
 
@@ -268,23 +228,18 @@ fn setup_scene(
         overlap_proportion: 0.0,
     }
     .build();
-    commands
-        .spawn((
-            Name::new("Sun"),
-            BigSpatialBundle {
-                transform: Transform::from_xyz(5.0, 50.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-                ..default()
-            },
-            DirectionalLight {
-                illuminance: 10_000.0,
-                shadows_enabled: true,
-                ..default()
-            },
-            sun_shadow,
-        ))
-        .insert(ChildOf(root_id));
+    commands.spawn((
+        Name::new("Sun"),
+        Transform::from_xyz(5.0, 50.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        DirectionalLight {
+            illuminance: 10_000.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        sun_shadow,
+    ));
 
-    // --- Camera (FloatingOrigin) ---
+    // --- Camera ---
     let projection = Projection::Perspective(PerspectiveProjection {
         near: 0.1,
         far: radius * 2.5,
@@ -304,31 +259,25 @@ fn setup_scene(
         ..default()
     };
 
-    commands
-        .spawn((
-            Name::new("Camera"),
-            BigSpatialBundle {
-                transform: Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y),
-                ..default()
-            },
-            Camera3d::default(),
-            projection,
-            FloatingOrigin,
-            fog,
-            AmbientLight {
-                color: Color::WHITE,
-                brightness: 120.0,
-                ..default()
-            },
-            ChaseCamera {
-                focus: Vec3::new(0.0, 0.5, 0.0),
-                distance: 14.0,
-                elevation: 25f32.to_radians(),
-                max_distance: radius * 3.0,
-                ..default()
-            },
-        ))
-        .insert(ChildOf(root_id));
+    commands.spawn((
+        Name::new("Camera"),
+        Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Camera3d::default(),
+        projection,
+        fog,
+        AmbientLight {
+            color: Color::WHITE,
+            brightness: 120.0,
+            ..default()
+        },
+        ChaseCamera {
+            focus: Vec3::new(0.0, 0.5, 0.0),
+            distance: 14.0,
+            elevation: 25f32.to_radians(),
+            max_distance: radius * 3.0,
+            ..default()
+        },
+    ));
 
     // --- Starter tractor ---
     let spec = presets::tractor();
@@ -344,7 +293,6 @@ fn setup_scene(
         &mut images,
         id,
         &spec,
-        root_id,
     );
     commands.entity(chassis).insert(PlayerControlled);
 }

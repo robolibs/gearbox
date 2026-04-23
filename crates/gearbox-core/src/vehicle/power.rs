@@ -28,7 +28,7 @@
 /// `travel_drain` is charged each tick when not moving. Dropped to
 /// 1 % so the parked-vs-moving gap is glaringly obvious — 100× the
 /// drain rate once you actually start driving.
-pub const IDLE_FRACTION: f32 = 0.01;
+pub const IDLE_FRACTION: f64 = 0.01;
 
 /// Kind of stored energy. Used purely for presentation — the sim
 /// treats every source the same way mechanically.
@@ -49,21 +49,21 @@ pub struct PowerSource {
     /// Display name shown in the UI (`"Battery"`, `"Fuel"`, …).
     pub label: String,
     /// Maximum reservoir size. Clamps `current`.
-    pub capacity: f32,
+    pub capacity: f64,
     /// Currently available energy. Starts at `capacity` by convention;
     /// `refuel()` resets it.
-    pub current: f32,
+    pub current: f64,
     /// Per-second base travel drain for this source. Applied while
     /// the vehicle is moving faster than `MOVE_SPEED_THRESHOLD`.
-    pub travel_drain: f32,
+    pub travel_drain: f64,
     /// Per-second work drain for this source. Applied on top of the
     /// travel drain while the `work` toggle is on, multiplied by
     /// `work_resistance`.
-    pub work_drain: f32,
+    pub work_drain: f64,
 }
 
 impl PowerSource {
-    pub fn new(kind: PowerKind, label: impl Into<String>, capacity: f32) -> Self {
+    pub fn new(kind: PowerKind, label: impl Into<String>, capacity: f64) -> Self {
         Self {
             kind,
             label: label.into(),
@@ -74,18 +74,18 @@ impl PowerSource {
         }
     }
 
-    pub fn with_travel_drain(mut self, per_sec: f32) -> Self {
+    pub fn with_travel_drain(mut self, per_sec: f64) -> Self {
         self.travel_drain = per_sec;
         self
     }
 
-    pub fn with_work_drain(mut self, per_sec: f32) -> Self {
+    pub fn with_work_drain(mut self, per_sec: f64) -> Self {
         self.work_drain = per_sec;
         self
     }
 
     /// Fraction of remaining energy, 0..1. Useful for progress bars.
-    pub fn fraction(&self) -> f32 {
+    pub fn fraction(&self) -> f64 {
         if self.capacity > 0.0 {
             (self.current / self.capacity).clamp(0.0, 1.0)
         } else {
@@ -112,7 +112,7 @@ pub struct PowerSystem {
     pub work: bool,
     /// 0..1 multiplier on the work drain. Driven by a UI slider today,
     /// eventually from an environmental-resistance API.
-    pub work_resistance: f32,
+    pub work_resistance: f64,
     /// Index into `sources` of the reservoir that drains first. When
     /// the primary hits zero the next source in order takes over, and
     /// so on, until every source is empty.
@@ -120,11 +120,11 @@ pub struct PowerSystem {
     // --- diagnostics updated by `tick`; read by the Inspector so we
     // can actually SEE what the power system believes on every frame ---
     /// Horizontal speed (m/s) used for the last drain decision.
-    pub last_horiz_speed: f32,
+    pub last_horiz_speed: f64,
     /// Did `tick` classify the last frame as "moving"?
     pub last_moving: bool,
     /// Drain rate applied to the active source last tick (units/sec).
-    pub last_drain_rate: f32,
+    pub last_drain_rate: f64,
 }
 
 impl Default for PowerSystem {
@@ -201,7 +201,7 @@ impl PowerSystem {
     ///
     /// So the three observable tiers are (still < moving < working),
     /// which is what the ground feels like in real machines.
-    pub fn tick(&mut self, dt: f32, speed_mag: f32, drain_enabled: bool) {
+    pub fn tick(&mut self, dt: f64, speed_mag: f64, drain_enabled: bool) {
         self.last_horiz_speed = speed_mag;
         if !self.turned_on || self.sources.is_empty() {
             self.last_moving = false;
@@ -243,13 +243,13 @@ impl PowerSystem {
 /// vertical wobble crossed it and drained fuel at the full moving
 /// rate. 0.35 m/s (≈ 1.25 km/h) is slower than a casual walk and is
 /// never sustained by a genuinely-parked machine.
-pub const MOVE_SPEED_THRESHOLD: f32 = 0.35;
+pub const MOVE_SPEED_THRESHOLD: f64 = 0.35;
 
 /// Convenience predicate used by both power drain and auto-fill.
 ///
 /// The caller MUST pass **horizontal** speed (ignoring world-Y), not
 /// the raw `rb.linvel().length()` — suspension-compression bounce
 /// has Y components that shouldn't count as travel.
-pub fn is_moving(horizontal_speed: f32) -> bool {
+pub fn is_moving(horizontal_speed: f64) -> bool {
     horizontal_speed > MOVE_SPEED_THRESHOLD
 }

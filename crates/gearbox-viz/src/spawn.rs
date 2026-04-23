@@ -11,7 +11,6 @@ use bevy::image::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor}
 use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use big_space::prelude::BigSpatialBundle;
 
 use datapod::Size;
 use gearbox_core::{MeshSource, PartKind, VehicleId, VehicleSpec};
@@ -56,7 +55,6 @@ pub fn spawn_vehicle_visuals(
     images: &mut Assets<Image>,
     id: VehicleId,
     spec: &VehicleSpec,
-    big_space_root: Entity,
 ) -> Entity {
     let [r, g, b] = spec.chassis.color;
     let chassis_color = Color::srgb(r, g, b);
@@ -67,7 +65,7 @@ pub fn spawn_vehicle_visuals(
     // entirely carried by `parts`.
     let mut root_cmd = commands.spawn((
         Name::new(spec.name.clone()),
-        BigSpatialBundle::default(),
+        Transform::default(),
         VehicleBody { id },
     ));
     if spec.chassis.render_chassis {
@@ -84,7 +82,7 @@ pub fn spawn_vehicle_visuals(
             ChassisTinted { id },
         ));
     }
-    let root = root_cmd.insert(ChildOf(big_space_root)).id();
+    let root = root_cmd.id();
 
     // Shared tread image — one repeat of the chevron block.  Each
     // wheel gets its own material below with a `uv_transform` that
@@ -102,7 +100,7 @@ pub fn spawn_vehicle_visuals(
 
     // Wheels — tracked separately, not parented (pose from controller).
     for (idx, wheel) in spec.wheels.iter().enumerate() {
-        let circumference = std::f32::consts::TAU * wheel.radius;
+        let circumference = std::f32::consts::TAU * wheel.radius as f32;
         // Tiles-per-revolution = circumference / desired-stripe-arc.
         let uv_tile = (circumference / TYRE_STRIPE_ARC_M).max(1.0);
         let tread_mat = materials.add(StandardMaterial {
@@ -119,7 +117,7 @@ pub fn spawn_vehicle_visuals(
 
         // Side (tread) mesh — cylinder without caps.
         let side_mesh = meshes.add(
-            Cylinder::new(wheel.radius, wheel.width)
+            Cylinder::new(wheel.radius as f32, wheel.width as f32)
                 .mesh()
                 .resolution(32)
                 .without_caps()
@@ -129,24 +127,23 @@ pub fn spawn_vehicle_visuals(
         let wheel_entity = commands
             .spawn((
                 Name::new(format!("{}::wheel[{}]", spec.name, idx)),
-                BigSpatialBundle::default(),
+                Transform::default(),
                 Mesh3d(side_mesh),
                 MeshMaterial3d(tread_mat),
                 VehicleWheel { id, index: idx },
             ))
-            .insert(ChildOf(big_space_root))
             .id();
 
         // Two cap discs as children of the wheel entity. Circle is a
         // 2-D primitive in the XY plane (normal +Z); rotate ±90° around
         // X so the normal faces the axle direction (local +Y / -Y).
         let cap_mesh = meshes.add(
-            Circle::new(wheel.radius).mesh().resolution(32).build(),
+            Circle::new(wheel.radius as f32).mesh().resolution(32).build(),
         );
         commands
             .spawn((
                 Name::new(format!("{}::wheel[{}]::cap+", spec.name, idx)),
-                Transform::from_xyz(0.0, wheel.width * 0.5, 0.0)
+                Transform::from_xyz(0.0, (wheel.width * 0.5) as f32, 0.0)
                     .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
                 Mesh3d(cap_mesh.clone()),
                 MeshMaterial3d(cap_mat.clone()),
@@ -155,7 +152,7 @@ pub fn spawn_vehicle_visuals(
         commands
             .spawn((
                 Name::new(format!("{}::wheel[{}]::cap-", spec.name, idx)),
-                Transform::from_xyz(0.0, -wheel.width * 0.5, 0.0)
+                Transform::from_xyz(0.0, -(wheel.width * 0.5) as f32, 0.0)
                     .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
                 Mesh3d(cap_mesh),
                 MeshMaterial3d(cap_mat.clone()),
@@ -291,7 +288,6 @@ pub fn spawn_vehicle_ghost(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     spec: &VehicleSpec,
-    big_space_root: Entity,
 ) -> Entity {
     let alpha = 0.45;
     let [r, g, b] = spec.chassis.color;
@@ -300,7 +296,7 @@ pub fn spawn_vehicle_ghost(
 
     let mut root_cmd = commands.spawn((
         Name::new(format!("{}-ghost", spec.name)),
-        BigSpatialBundle::default(),
+        Transform::default(),
         GhostTag,
     ));
     if spec.chassis.render_chassis {
@@ -314,7 +310,7 @@ pub fn spawn_vehicle_ghost(
         });
         root_cmd.insert((Mesh3d(chassis_mesh), MeshMaterial3d(chassis_mat)));
     }
-    let root = root_cmd.insert(ChildOf(big_space_root)).id();
+    let root = root_cmd.id();
 
     // Wheels as children of the ghost root — at rest (suspension
     // fully extended) so the silhouette reads as a settled vehicle.
@@ -327,7 +323,7 @@ pub fn spawn_vehicle_ghost(
         ..default()
     });
     for wheel in &spec.wheels {
-        let circumference = std::f32::consts::TAU * wheel.radius;
+        let circumference = std::f32::consts::TAU * wheel.radius as f32;
         let uv_tile = (circumference / TYRE_STRIPE_ARC_M).max(1.0);
         let mat = materials.add(StandardMaterial {
             base_color: Color::srgba(1.0, 1.0, 1.0, alpha),
@@ -337,14 +333,14 @@ pub fn spawn_vehicle_ghost(
             ..default()
         });
         let side_mesh = meshes.add(
-            Cylinder::new(wheel.radius, wheel.width)
+            Cylinder::new(wheel.radius as f32, wheel.width as f32)
                 .mesh()
                 .resolution(32)
                 .without_caps()
                 .build(),
         );
         let cap_mesh = meshes.add(
-            Circle::new(wheel.radius).mesh().resolution(32).build(),
+            Circle::new(wheel.radius as f32).mesh().resolution(32).build(),
         );
         let wy = (wheel.chassis_connection.y - wheel.suspension_rest_length as f64) as f32;
         let wheel_parent = commands
@@ -363,7 +359,7 @@ pub fn spawn_vehicle_ghost(
             .id();
         commands
             .spawn((
-                Transform::from_xyz(0.0, wheel.width * 0.5, 0.0)
+                Transform::from_xyz(0.0, (wheel.width * 0.5) as f32, 0.0)
                     .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
                 Mesh3d(cap_mesh.clone()),
                 MeshMaterial3d(ghost_cap_mat.clone()),
@@ -372,7 +368,7 @@ pub fn spawn_vehicle_ghost(
             .insert(ChildOf(wheel_parent));
         commands
             .spawn((
-                Transform::from_xyz(0.0, -wheel.width * 0.5, 0.0)
+                Transform::from_xyz(0.0, -(wheel.width * 0.5) as f32, 0.0)
                     .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
                 Mesh3d(cap_mesh),
                 MeshMaterial3d(ghost_cap_mat.clone()),

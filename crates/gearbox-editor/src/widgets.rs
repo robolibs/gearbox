@@ -460,8 +460,8 @@ const SLIDER_KNOB_OVERHANG: f32 = 4.0;
 
 pub fn pretty_slider(
     ui: &mut egui::Ui,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
     decimals: usize,
     suffix: &str,
     accent: egui::Color32,
@@ -476,14 +476,14 @@ pub fn pretty_slider(
         );
 
         let (lo, hi) = (*range.start(), *range.end());
-        let denom = (hi - lo).max(f32::EPSILON);
+        let denom = (hi - lo).max(f64::EPSILON);
 
         // Interaction — click/drag on the track sets value.
         if let Some(pos) = resp.interact_pointer_pos() {
             if resp.dragged() || resp.clicked() {
-                let new_t = ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
+                let new_t = ((pos.x - rect.min.x) as f64 / rect.width() as f64).clamp(0.0, 1.0);
                 let new_val = lo + new_t * denom;
-                if (new_val - *value).abs() > f32::EPSILON {
+                if (new_val - *value).abs() > f64::EPSILON {
                     *value = new_val.clamp(lo, hi);
                     resp.mark_changed();
                 }
@@ -508,7 +508,7 @@ pub fn pretty_slider(
             );
 
             // Filled portion from start to current value
-            let t = ((*value - lo) / denom).clamp(0.0, 1.0);
+            let t = ((*value - lo) / denom).clamp(0.0, 1.0) as f32;
             let fill_w = track_w * t;
             if fill_w > 0.5 {
                 let fill = egui::Rect::from_min_size(

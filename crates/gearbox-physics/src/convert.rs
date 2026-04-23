@@ -1,9 +1,9 @@
-//! Conversions between [`datapod`] spatial types (f64) and rapier / glam
-//! (f32) types used by the physics engine.
+//! Conversions between [`datapod`] spatial types (f64) and rapier
+//! (f64 via rapier3d-f64).
 //!
-//! Gearbox speaks datapod at its public API surface and rapier internally;
-//! every boundary crossing goes through these helpers so precision and
-//! ordering rules live in one place.
+//! Gearbox speaks datapod at its public API surface and rapier
+//! internally; with rapier now in f64 most of these calls are pure
+//! type-shuffling without precision loss.
 
 use datapod::spatial::{Point, Pose, Quaternion, Size, Velocity};
 use rapier3d::prelude::{Pose as RPose, Rot3, Vec3};
@@ -12,27 +12,23 @@ use rapier3d::prelude::{Pose as RPose, Rot3, Vec3};
 
 #[inline]
 pub fn point_to_vec3(p: Point) -> Vec3 {
-    Vec3::new(p.x as f32, p.y as f32, p.z as f32)
+    Vec3::new(p.x, p.y, p.z)
 }
 
 #[inline]
 pub fn size_to_half_extents(s: Size) -> Vec3 {
-    Vec3::new(
-        (s.x * 0.5) as f32,
-        (s.y * 0.5) as f32,
-        (s.z * 0.5) as f32,
-    )
+    Vec3::new(s.x * 0.5, s.y * 0.5, s.z * 0.5)
 }
 
 #[inline]
 pub fn size_to_vec3(s: Size) -> Vec3 {
-    Vec3::new(s.x as f32, s.y as f32, s.z as f32)
+    Vec3::new(s.x, s.y, s.z)
 }
 
 #[inline]
 pub fn quat_to_rot(q: Quaternion) -> Rot3 {
-    // datapod: Quaternion(w, x, y, z). glam::Quat::from_xyzw(x, y, z, w).
-    Rot3::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize()
+    // datapod: Quaternion(w, x, y, z). glam::DQuat::from_xyzw(x, y, z, w).
+    Rot3::from_xyzw(q.x, q.y, q.z, q.w).normalize()
 }
 
 #[inline]
@@ -42,24 +38,24 @@ pub fn pose_to_rpose(p: Pose) -> RPose {
 
 #[inline]
 pub fn velocity_to_vec3(v: Velocity) -> Vec3 {
-    Vec3::new(v.vx as f32, v.vy as f32, v.vz as f32)
+    Vec3::new(v.vx, v.vy, v.vz)
 }
 
 // -------- rapier → datapod --------
 
 #[inline]
 pub fn vec3_to_point(v: Vec3) -> Point {
-    Point::new(v.x as f64, v.y as f64, v.z as f64)
+    Point::new(v.x, v.y, v.z)
 }
 
 #[inline]
 pub fn vec3_to_velocity(v: Vec3) -> Velocity {
-    Velocity { vx: v.x as f64, vy: v.y as f64, vz: v.z as f64 }
+    Velocity { vx: v.x, vy: v.y, vz: v.z }
 }
 
 #[inline]
 pub fn rot_to_quat(r: Rot3) -> Quaternion {
-    Quaternion::new(r.w as f64, r.x as f64, r.y as f64, r.z as f64)
+    Quaternion::new(r.w, r.x, r.y, r.z)
 }
 
 #[inline]

@@ -42,7 +42,7 @@ impl<'a> BodyProxy<'a> {
         Self { rb }
     }
 
-    pub fn mass(&self) -> f32 {
+    pub fn mass(&self) -> f64 {
         self.rb.mass()
     }
 
@@ -58,7 +58,7 @@ impl<'a> BodyProxy<'a> {
         self.rb.angvel()
     }
 
-    pub fn linvel_horizontal(&self) -> f32 {
+    pub fn linvel_horizontal(&self) -> f64 {
         let lv = self.rb.linvel();
         (lv.x * lv.x + lv.z * lv.z).sqrt()
     }
@@ -124,7 +124,7 @@ impl<'a> WheelsProxy<'a> {
     /// only used for collecting suspension normal forces. Exposed as
     /// a free-standing method so callers don't need to call `.get()`
     /// in a loop + allocate.
-    pub fn normal_forces(&self) -> Vec<f32> {
+    pub fn normal_forces(&self) -> Vec<f64> {
         self.controller
             .wheels()
             .iter()
@@ -140,11 +140,11 @@ pub struct WheelView<'a> {
 }
 
 impl<'a> WheelView<'a> {
-    pub fn steering(&self) -> f32 {
+    pub fn steering(&self) -> f64 {
         self.w.steering
     }
 
-    pub fn wheel_suspension_force(&self) -> f32 {
+    pub fn wheel_suspension_force(&self) -> f64 {
         self.w.wheel_suspension_force
     }
 }
@@ -157,19 +157,19 @@ pub struct WheelCtrl<'a> {
 }
 
 impl<'a> WheelCtrl<'a> {
-    pub fn steering(&self) -> f32 {
+    pub fn steering(&self) -> f64 {
         self.w.steering
     }
 
-    pub fn set_steering(&mut self, angle: f32) {
+    pub fn set_steering(&mut self, angle: f64) {
         self.w.steering = angle;
     }
 
-    pub fn set_engine_force(&mut self, force: f32) {
+    pub fn set_engine_force(&mut self, force: f64) {
         self.w.engine_force = force;
     }
 
-    pub fn set_brake(&mut self, brake: f32) {
+    pub fn set_brake(&mut self, brake: f64) {
         self.w.brake = brake;
     }
 }

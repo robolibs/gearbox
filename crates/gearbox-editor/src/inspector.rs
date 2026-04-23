@@ -76,7 +76,7 @@ pub fn draw_content(
                     accent.linear_multiply(0.45)
                 };
                 ui.add(
-                    egui::ProgressBar::new(src.fraction())
+                    egui::ProgressBar::new(src.fraction() as f32)
                         .text(
                             egui::RichText::new(format!(
                                 "{:.0} / {:.0}",
@@ -119,7 +119,7 @@ pub fn draw_content(
                     ui.add_space(space::TIGHT);
                 }
                 ui.add(
-                    egui::ProgressBar::new(container.fraction())
+                    egui::ProgressBar::new(container.fraction() as f32)
                         .text(
                             egui::RichText::new(format!(
                                 "{:.0} / {:.0}",
@@ -160,7 +160,7 @@ pub fn draw_content(
         axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", pose.point.z));
 
         let q = pose.rotation;
-        let (rx, ry, rz) = quat_to_euler_xyz(q.w as f32, q.x as f32, q.y as f32, q.z as f32);
+        let (rx, ry, rz) = quat_to_euler_xyz(q.w, q.x, q.y, q.z);
         ui.add_space(space::BLOCK);
         sub_caption(ui, "rotation  (Euler XYZ)");
         ui.add_space(space::TIGHT);
@@ -263,11 +263,11 @@ fn top_down_footprint(spec: &VehicleSpec) -> (f64, f64) {
 /// Signed-bar row: label left, bipolar progress bar right (filled
 /// proportional to `v` within `[min, max]`). Used for the Control
 /// section (throttle/steer/brake readouts).
-fn bar_row(ui: &mut egui::Ui, label: &str, v: f32, min: f32, max: f32, accent: egui::Color32) {
+fn bar_row(ui: &mut egui::Ui, label: &str, v: f64, min: f64, max: f64, accent: egui::Color32) {
     labelled_row(ui, label, |ui| {
         let frac = ((v - min) / (max - min)).clamp(0.0, 1.0);
         ui.add(
-            egui::ProgressBar::new(frac)
+            egui::ProgressBar::new(frac as f32)
                 .text(
                     egui::RichText::new(format!("{:+.2}", v))
                         .monospace()
@@ -287,7 +287,7 @@ fn compass_letter(h: f64) -> &'static str {
 }
 
 /// Quaternion → intrinsic XYZ Euler angles (radians).
-fn quat_to_euler_xyz(w: f32, x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+fn quat_to_euler_xyz(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
     let sy = 2.0 * (w * y + x * z).clamp(-1.0, 1.0);
     let ey = sy.asin();
     let (ex, ez) = if sy.abs() > 0.9999 {

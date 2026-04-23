@@ -3,7 +3,7 @@
 //! Flow:
 //!   1. Spawn-panel button sets `PendingSpawn::spec` to a VehicleSpec.
 //!   2. `spawn_ghost_if_needed` creates a translucent ghost of that
-//!      spec under the BigSpace root.
+//!      spec.
 //!   3. `update_ghost_position` moves the ghost to the cursor's
 //!      ground-plane projection every frame.
 //!   4. `commit_or_cancel_ghost` watches for:
@@ -20,7 +20,6 @@ use gearbox_physics::{
     VehicleSpec,
 };
 
-use gearbox_viz::BigSpaceRoot;
 use gearbox_viz::{
     spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals, GearboxSim, GhostTag,
     PlayerControlled,
@@ -63,7 +62,6 @@ pub fn spawn_ghost_if_needed(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<bevy::image::Image>>,
-    big_space_root: Res<BigSpaceRoot>,
 ) {
     if pending.ghost_root.is_some() || pending.spec.is_none() {
         return;
@@ -75,7 +73,6 @@ pub fn spawn_ghost_if_needed(
         &mut materials,
         &mut images,
         &spec,
-        big_space_root.0,
     );
     pending.ghost_root = Some(root);
 }
@@ -160,7 +157,6 @@ pub fn commit_or_cancel_ghost(
     cameras: Query<(&Camera, &GlobalTransform)>,
     player_tagged: Query<Entity, With<PlayerControlled>>,
     mut selection: ResMut<Selection>,
-    big_space_root: Res<BigSpaceRoot>,
     mut state: Local<ClickState>,
 ) {
     let Some(spec) = pending.spec.clone() else {
@@ -247,7 +243,6 @@ pub fn commit_or_cancel_ghost(
         &mut images,
         id,
         &spec,
-        big_space_root.0,
     );
     for e in player_tagged.iter() {
         commands.entity(e).remove::<PlayerControlled>();

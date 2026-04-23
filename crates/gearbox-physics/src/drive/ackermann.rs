@@ -45,7 +45,7 @@ impl DriveController for AckermannController {
         }
 
         // Default: every driven wheel gets full throttle × its max engine force.
-        let mut engine_force: Vec<f32> = specs
+        let mut engine_force: Vec<f64> = specs
             .iter()
             .map(|s| if s.driven { ctrl.throttle * s.max_engine_force } else { 0.0 })
             .collect();
@@ -55,14 +55,14 @@ impl DriveController for AckermannController {
             if wheel_indices.len() < 2 {
                 continue;
             }
-            let total_n: f32 = wheel_indices
+            let total_n: f64 = wheel_indices
                 .iter()
                 .map(|&i| frame.normal_forces[i])
                 .sum();
             if total_n < 1.0 {
                 continue;
             }
-            let axle_total: f32 = wheel_indices
+            let axle_total: f64 = wheel_indices
                 .iter()
                 .map(|&i| ctrl.throttle * specs[i].max_engine_force)
                 .sum();
@@ -81,7 +81,7 @@ impl DriveController for AckermannController {
                 ackermann_steer(
                     ctrl.steer,
                     spec.max_steer_rad,
-                    spec.chassis_connection.x as f32,
+                    spec.chassis_connection.x,
                     frame.wheelbase,
                 )
             } else {

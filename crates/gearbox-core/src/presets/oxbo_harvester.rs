@@ -40,19 +40,19 @@ pub fn oxbo_harvester() -> VehicleSpec {
     let max_force = 60_000.0;
 
     // Wheels stick 0.35 m below the chassis bottom.
-    let chassis_bottom = -chassis_y as f32 * 0.5;
+    let chassis_bottom = -chassis_y * 0.5;
     let target_bottom = chassis_bottom - 0.35;
     let conn_y = target_bottom + rest + radius;
 
-    let front_steer =  14.0_f32.to_radians();
-    let rear_steer  = -25.0_f32.to_radians(); // opposite-sign → crab turns
+    let front_steer =  14.0_f64.to_radians();
+    let rear_steer  = -25.0_f64.to_radians(); // opposite-sign → crab turns
 
     let make = |x: f64,
                 z: f64,
                 driven: bool,
-                engine: f32,
+                engine: f64,
                 steered: bool,
-                max_steer: f32|
+                max_steer: f64|
      -> WheelSpec {
         WheelSpec {
             chassis_connection: Point::new(x, conn_y as f64, z),

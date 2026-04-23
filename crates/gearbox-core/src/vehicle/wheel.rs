@@ -13,24 +13,24 @@ pub struct WheelSpec {
     /// Wheel axle direction in chassis-local coordinates. Typically
     /// `(±1, 0, 0)` — sideways across the chassis.
     pub axle_dir: Point,
-    pub suspension_rest_length: f32,
-    pub suspension_stiffness: f32,
-    pub suspension_damping: f32,
+    pub suspension_rest_length: f64,
+    pub suspension_stiffness: f64,
+    pub suspension_damping: f64,
     /// Upper bound on the spring force per wheel. Rapier's default (6000 N)
     /// is enough for ~100-kg arcade cars; heavy vehicles must raise this
     /// or the suspension saturates and the chassis sinks onto its collider.
-    pub max_suspension_force: f32,
-    pub friction_slip: f32,
-    pub radius: f32,
-    pub width: f32,
+    pub max_suspension_force: f64,
+    pub friction_slip: f64,
+    pub radius: f64,
+    pub width: f64,
     /// Whether engine torque is applied to this wheel.
     pub driven: bool,
     /// Whether steering input rotates this wheel.
     pub steered: bool,
-    pub max_engine_force: f32,
-    pub max_brake: f32,
+    pub max_engine_force: f64,
+    pub max_brake: f64,
     /// Maximum steering angle in radians (applied at `steer = ±1.0`).
-    pub max_steer_rad: f32,
+    pub max_steer_rad: f64,
     /// Optional offset (in chassis-local coordinates) from
     /// `chassis_connection` to the STEERING PIVOT — i.e. the physical
     /// kingpin axis, when that axis is offset from the wheel hub

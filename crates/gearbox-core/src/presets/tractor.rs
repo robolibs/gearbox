@@ -14,7 +14,7 @@ use crate::vehicle::{
     WheelSpec,
 };
 
-const MAX_STEER_RAD: f32 = 0.6109; // 35°
+const MAX_STEER_RAD: f64 = 0.6109; // 35°
 
 /// Uniform scale applied to every length, mass, force and torque in
 /// this preset. Keeping lengths × `SCALE`, mass × `SCALE³` and forces
@@ -23,7 +23,7 @@ const MAX_STEER_RAD: f32 = 0.6109; // 35°
 const SCALE: f64 = 1.15;
 
 pub fn tractor() -> VehicleSpec {
-    let s = SCALE as f32;
+    let s = SCALE;
     let s3 = s * s * s;
 
     let chassis_x = 1.40_f64 * SCALE;
@@ -72,7 +72,7 @@ pub fn tractor() -> VehicleSpec {
     // Wheels stick 30 cm below the chassis bottom — the previous
     // 20 cm left the frame sitting very low; this raises the whole
     // tractor a touch for a stance closer to the JD reference.
-    let chassis_bottom = -chassis_y as f32 * 0.5;
+    let chassis_bottom = -chassis_y * 0.5;
     let target_bottom  = chassis_bottom - 0.30 * s;
     let front_conn_y   = target_bottom + rest + front_radius;
     let rear_conn_y    = target_bottom + rest + rear_radius;

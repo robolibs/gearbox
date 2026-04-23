@@ -80,7 +80,7 @@ pub fn robotti() -> VehicleSpec {
     let front_z = 0.75;
     let rear_z = -0.75;
 
-    let target_bottom: f32 = -1.00;
+    let target_bottom: f64 = -1.00;
     let conn_y = target_bottom + rest + radius;
 
     // Kingpin offset: the cylinder strut sits outboard of the tyre's
@@ -104,7 +104,7 @@ pub fn robotti() -> VehicleSpec {
         steered: true,
         max_engine_force: 240.0,
         max_brake: 500.0,
-        max_steer_rad: std::f32::consts::FRAC_PI_2,
+        max_steer_rad: std::f64::consts::FRAC_PI_2,
         // Outboard kingpin: sign(x) times the offset magnitude.
         steering_pivot_offset: Point::new(x.signum() * kingpin_mag, 0.0, 0.0),
     };

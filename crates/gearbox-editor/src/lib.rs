@@ -56,8 +56,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<transform_gizmos::GizmoDrag>()
             .init_resource::<transform_gizmos::GizmoScale>()
             .init_resource::<transform_gizmos::GizmoModesEnabled>()
-            // `PostStartup` so `main::setup_scene` has already inserted
-            // the `BigSpaceRoot` resource that these entities parent under.
+            // `PostStartup` so `main::setup_scene` has already run.
             .add_systems(
                 PostStartup,
                 (

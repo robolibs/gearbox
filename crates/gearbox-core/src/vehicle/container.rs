@@ -8,7 +8,7 @@
 //! per second; `0` disables auto-fill entirely).
 
 /// The `+`/`-` buttons bump by this fraction of capacity.
-pub const BUMP_FRACTION: f32 = 0.05;
+pub const BUMP_FRACTION: f64 = 0.05;
 
 /// A single container on a vehicle.
 #[derive(Debug, Clone)]
@@ -17,16 +17,16 @@ pub struct Container {
     /// but presets can still give it a semantic name for debugging /
     /// logs.
     pub label: String,
-    pub amount: f32,
-    pub capacity: f32,
+    pub amount: f64,
+    pub capacity: f64,
     /// Auto-fill rate as a **fraction of capacity per second**.
     /// `0.0` disables auto-fill. Valid range `[0, 0.05]`, i.e. up to
     /// 5 %/s — a full bunker in 20 s at max setting.
-    pub fill_rate_frac: f32,
+    pub fill_rate_frac: f64,
 }
 
 impl Container {
-    pub fn new(label: impl Into<String>, capacity: f32) -> Self {
+    pub fn new(label: impl Into<String>, capacity: f64) -> Self {
         Self {
             label: label.into(),
             amount: 0.0,
@@ -37,12 +37,12 @@ impl Container {
 
     /// Fractional auto-fill rate (0..0.05) — hooked into the slider
     /// on the Properties panel. `0.0` means no auto-fill.
-    pub fn with_fill_rate_frac(mut self, frac: f32) -> Self {
+    pub fn with_fill_rate_frac(mut self, frac: f64) -> Self {
         self.fill_rate_frac = frac.clamp(0.0, 0.05);
         self
     }
 
-    pub fn fraction(&self) -> f32 {
+    pub fn fraction(&self) -> f64 {
         if self.capacity > 0.0 {
             (self.amount / self.capacity).clamp(0.0, 1.0)
         } else {
@@ -52,12 +52,12 @@ impl Container {
 
     /// Step size for the `+` / `-` buttons — 5 % of capacity, floored
     /// at 1 so tiny-capacity containers still bump by whole units.
-    pub fn bump_step(&self) -> f32 {
+    pub fn bump_step(&self) -> f64 {
         (self.capacity * BUMP_FRACTION).max(1.0)
     }
 
     /// Adjust the fill by `sign × bump_step()`. Clamped to `[0, capacity]`.
-    pub fn bump(&mut self, sign: f32) {
+    pub fn bump(&mut self, sign: f64) {
         let step = self.bump_step() * sign.signum();
         self.amount = (self.amount + step).clamp(0.0, self.capacity);
     }
@@ -67,7 +67,7 @@ impl Container {
     }
 
     /// Set a new capacity; clamps `amount` down if necessary.
-    pub fn set_capacity(&mut self, new_capacity: f32) {
+    pub fn set_capacity(&mut self, new_capacity: f64) {
         self.capacity = new_capacity.max(0.0);
         if self.amount > self.capacity {
             self.amount = self.capacity;
@@ -77,7 +77,7 @@ impl Container {
     /// Auto-fill tick. Only accrues when the slider is above zero,
     /// the work toggle is on, AND the vehicle is actually moving —
     /// three independent gates.
-    pub fn tick_auto_fill(&mut self, dt: f32, work_on: bool, moving: bool) {
+    pub fn tick_auto_fill(&mut self, dt: f64, work_on: bool, moving: bool) {
         if self.fill_rate_frac <= 0.0 || !work_on || !moving {
             return;
         }

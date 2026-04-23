@@ -12,4 +12,3 @@ gearbox-viz.workspace = true
 datapod.workspace = true
 bevy.workspace = true
 bevy_egui.workspace = true
-big_space.workspace = true

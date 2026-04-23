@@ -9,7 +9,7 @@ use super::{DriveContext, DriveController, GroundFrame};
 
 /// Throttle multiplier applied to the steer contribution. Higher =
 /// snappier turns without boosting straight-line top speed.
-const TURN_GAIN: f32 = 6.0;
+const TURN_GAIN: f64 = 6.0;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DifferentialController;

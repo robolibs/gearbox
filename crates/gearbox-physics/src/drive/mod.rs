@@ -43,7 +43,7 @@ pub use omni::OmniController;
 /// split-borrow the physics handles on [`VehicleState`] without
 /// conflicting with the shared read of `spec`.
 pub struct DriveContext<'a> {
-    pub dt: f32,
+    pub dt: f64,
     pub gravity: Vec3,
     pub spec: &'a VehicleSpec,
     pub control: ControlInput,
@@ -87,11 +87,11 @@ pub fn controller_for(mode: DriveMode) -> &'static dyn DriveController {
 /// Computed once per tick by ground controllers (`Ackermann`,
 /// `Differential`, `Omni`). Drone doesn't use it.
 pub struct GroundFrame {
-    pub brake_gate: f32,
-    pub wheelbase: f32,
-    pub z_min: f32,
-    pub z_max: f32,
-    pub normal_forces: Vec<f32>,
+    pub brake_gate: f64,
+    pub wheelbase: f64,
+    pub z_min: f64,
+    pub z_max: f64,
+    pub normal_forces: Vec<f64>,
 }
 
 impl GroundFrame {
@@ -114,15 +114,15 @@ impl GroundFrame {
             z_min = z_min.min(w.chassis_connection.z);
             z_max = z_max.max(w.chassis_connection.z);
         }
-        let wheelbase = (z_max - z_min) as f32;
+        let wheelbase = z_max - z_min;
 
         let normal_forces = ctx.wheels.normal_forces();
 
         Self {
             brake_gate,
             wheelbase,
-            z_min: z_min as f32,
-            z_max: z_max as f32,
+            z_min,
+            z_max,
             normal_forces,
         }
     }

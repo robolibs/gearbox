@@ -239,7 +239,7 @@ fn cursor_pick_vehicle(
                 direction,
                 wc,
                 wr,
-                Vec3::new(wheel.radius, wheel.width * 0.5, wheel.radius),
+                Vec3::new(wheel.radius as f32, (wheel.width * 0.5) as f32, wheel.radius as f32),
             ));
         }
 

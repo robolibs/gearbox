@@ -159,9 +159,9 @@ pub fn setup_gizmo_overlay(
     let mesh = meshes.add(empty_mesh());
     let material = materials.add(GizmoOverlayMaterial::default());
 
-    // NOT parented under BigSpace — the shader ignores world/view/proj
-    // so floating-origin propagation does nothing useful here, and
-    // big_space's root-child archetype check would complain.
+    // The shader ignores world/view/proj — every vertex comes in
+    // already in NDC — so this entity's `Transform` is purely a
+    // placeholder.
     commands.spawn((
         Name::new("GizmoOverlay"),
         GizmoOverlay {

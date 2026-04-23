@@ -20,11 +20,11 @@ use super::util::ackermann_steer;
 use super::{DriveContext, DriveController, GroundFrame};
 
 /// Max A/D steering angle (leaves headroom for crab to combine).
-const TURN_LIMIT: f32 = 40.0 * core::f32::consts::PI / 180.0;
+const TURN_LIMIT: f64 = 40.0 * core::f64::consts::PI / 180.0;
 /// Rear-wheel same-direction assist, as a fraction of the front nominal angle.
-const REAR_ASSIST: f32 = 0.18;
+const REAR_ASSIST: f64 = 0.18;
 /// How fast a wheel is allowed to reach its target steering angle.
-const STEER_RATE: f32 = 3.0; // rad/s
+const STEER_RATE: f64 = 3.0; // rad/s
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OmniController;
@@ -54,12 +54,12 @@ impl DriveController for OmniController {
         let mid_z = (frame.z_min + frame.z_max) * 0.5;
         let use_yaw = ctrl.yaw.abs() > 1e-3;
 
-        let mut target_steer = vec![0.0_f32; specs.len()];
-        let mut engine_force = vec![0.0_f32; specs.len()];
+        let mut target_steer = vec![0.0_f64; specs.len()];
+        let mut engine_force = vec![0.0_f64; specs.len()];
 
         for (idx, spec) in specs.iter().enumerate() {
-            let x_i = spec.chassis_connection.x as f32;
-            let z_i = spec.chassis_connection.z as f32;
+            let x_i = spec.chassis_connection.x;
+            let z_i = spec.chassis_connection.z;
             let is_front = z_i > mid_z;
             let max_steer = spec.max_steer_rad;
 
@@ -71,10 +71,10 @@ impl DriveController for OmniController {
                 let vz = -omega_y * x_i;
                 let mag = (vx * vx + vz * vz).sqrt();
                 let raw = if mag > 1e-4 { vx.atan2(vz) } else { 0.0 };
-                let (folded, sign) = if raw > core::f32::consts::FRAC_PI_2 {
-                    (raw - core::f32::consts::PI, -1.0)
-                } else if raw < -core::f32::consts::FRAC_PI_2 {
-                    (raw + core::f32::consts::PI, -1.0)
+                let (folded, sign) = if raw > core::f64::consts::FRAC_PI_2 {
+                    (raw - core::f64::consts::PI, -1.0)
+                } else if raw < -core::f64::consts::FRAC_PI_2 {
+                    (raw + core::f64::consts::PI, -1.0)
                 } else {
                     (raw, 1.0)
                 };

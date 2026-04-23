@@ -29,7 +29,6 @@ use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
-use big_space::prelude::BigSpatialBundle;
 
 use gearbox_physics::{
     datapod::{Point, Pose, Quaternion},
@@ -37,7 +36,6 @@ use gearbox_physics::{
 };
 
 use gearbox_viz::{GearboxSim, SimClock};
-use gearbox_viz::BigSpaceRoot;
 
 use super::gizmo_material::{GizmoMaterial, GizmoOnTop};
 use super::selection::Selection;
@@ -286,7 +284,6 @@ pub fn setup_transform_gizmos(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GizmoMaterial>>,
-    big_space_root: Res<BigSpaceRoot>,
 ) {
     // Placeholder meshes — real dimensions are written by
     // `regenerate_gizmo_meshes` on the first frame a vehicle is
@@ -321,20 +318,20 @@ pub fn setup_transform_gizmos(
         (AXIS_Y, Vec3::Y, Quat::IDENTITY),
         (AXIS_Z, Vec3::Z, Quat::from_rotation_x( FRAC_PI_2)),
     ];
-    let root = big_space_root.0;
+
 
     for (egui_color, local_axis, axis_rot) in axes {
         let rgb = egui_to_rgb(egui_color);
         spawn_arrow(
-            &mut commands, &mut materials, root, local_axis, axis_rot,
+            &mut commands, &mut materials, local_axis, axis_rot,
             shaft_mesh.clone(), tip_mesh.clone(), rgb,
         );
         spawn_ring(
-            &mut commands, &mut materials, root, local_axis, axis_rot,
+            &mut commands, &mut materials, local_axis, axis_rot,
             ring_mesh.clone(), rgb,
         );
         spawn_scale_stub(
-            &mut commands, &mut materials, root, local_axis, axis_rot,
+            &mut commands, &mut materials, local_axis, axis_rot,
             shaft_mesh.clone(), cube_mesh.clone(), rgb,
         );
     }
@@ -364,7 +361,7 @@ fn make_axis_material(
 
 fn spawn_handle_parent(
     commands: &mut Commands,
-    root: Entity,
+
     mode: GizmoMode,
     local_axis: Vec3,
     shape: GizmoShape,
@@ -375,7 +372,7 @@ fn spawn_handle_parent(
     commands
         .spawn((
             Name::new(name.to_string()),
-            BigSpatialBundle::default(),
+            Transform::default(),
             GizmoHandle {
                 mode,
                 local_axis,
@@ -385,14 +382,13 @@ fn spawn_handle_parent(
             },
             Visibility::Hidden,
         ))
-        .insert(ChildOf(root))
         .id()
 }
 
 fn spawn_arrow(
     commands: &mut Commands,
     materials: &mut Assets<GizmoMaterial>,
-    root: Entity,
+
     local_axis: Vec3,
     axis_rot: Quat,
     shaft: Handle<Mesh>,
@@ -401,7 +397,7 @@ fn spawn_arrow(
 ) {
     let mat = make_axis_material(materials, rgb);
     let handle = spawn_handle_parent(
-        commands, root, GizmoMode::Translate, local_axis, GizmoShape::Axis,
+        commands, GizmoMode::Translate, local_axis, GizmoShape::Axis,
         mat.clone(), rgb, "GizmoArrow",
     );
     let axis = commands
@@ -432,7 +428,7 @@ fn spawn_arrow(
 fn spawn_ring(
     commands: &mut Commands,
     materials: &mut Assets<GizmoMaterial>,
-    root: Entity,
+
     local_axis: Vec3,
     axis_rot: Quat,
     mesh: Handle<Mesh>,
@@ -440,7 +436,7 @@ fn spawn_ring(
 ) {
     let mat = make_axis_material(materials, rgb);
     let handle = spawn_handle_parent(
-        commands, root, GizmoMode::Rotate, local_axis, GizmoShape::Ring,
+        commands, GizmoMode::Rotate, local_axis, GizmoShape::Ring,
         mat.clone(), rgb, "GizmoRing",
     );
     commands
@@ -457,7 +453,7 @@ fn spawn_ring(
 fn spawn_scale_stub(
     commands: &mut Commands,
     materials: &mut Assets<GizmoMaterial>,
-    root: Entity,
+
     local_axis: Vec3,
     axis_rot: Quat,
     shaft: Handle<Mesh>,
@@ -466,7 +462,7 @@ fn spawn_scale_stub(
 ) {
     let mat = make_axis_material(materials, rgb);
     let handle = spawn_handle_parent(
-        commands, root, GizmoMode::Scale, local_axis, GizmoShape::Axis,
+        commands, GizmoMode::Scale, local_axis, GizmoShape::Axis,
         mat.clone(), rgb, "GizmoScaleStub",
     );
     let axis = commands

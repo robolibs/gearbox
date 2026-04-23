@@ -77,14 +77,14 @@ impl Sim {
     }
 
     /// Add a large flat ground collider centered at the origin.
-    pub fn add_ground_plane(&mut self, half_size: f32) {
+    pub fn add_ground_plane(&mut self, half_size: f64) {
         self.colliders.insert(world::build_ground_collider(half_size));
     }
 
     /// Add a sphere collider representing the planet. The sphere is placed
     /// so its tangent (top) touches `y = 0`, matching the coordinate
     /// convention used by the visual planet mesh.
-    pub fn add_planet_collider(&mut self, radius: f32) {
+    pub fn add_planet_collider(&mut self, radius: f64) {
         let centre = Vec3::new(0.0, -radius, 0.0);
         self.colliders.insert(world::build_planet_collider(centre, radius));
     }
@@ -162,7 +162,7 @@ impl Sim {
             ));
             // Cylinder default axis is +Y; rotate −π/2 around +Z so
             // the axle lies along +X.
-            let axle_rot = Vec3::new(0.0, 0.0, -std::f32::consts::FRAC_PI_2);
+            let axle_rot = Vec3::new(0.0, 0.0, -std::f64::consts::FRAC_PI_2);
             let wheel_collider = ColliderBuilder::cylinder(w.width * 0.5, w.radius)
                 .translation(wheel_pos)
                 .rotation(axle_rot)
@@ -190,9 +190,9 @@ impl Sim {
             if matches!(part.kind, PartKind::Hitch) {
                 continue;
             }
-            let hx = (part.size.x * 0.5) as f32;
-            let hy = (part.size.y * 0.5) as f32;
-            let hz = (part.size.z * 0.5) as f32;
+            let hx = (part.size.x * 0.5) as f64;
+            let hy = (part.size.y * 0.5) as f64;
+            let hz = (part.size.z * 0.5) as f64;
             let part_collider = ColliderBuilder::cuboid(hx, hy, hz)
                 .translation(point_to_vec3(part.position))
                 .mass(0.0)
@@ -406,7 +406,7 @@ impl Sim {
     /// mass properties in-place so the physics reflects the change on
     /// the next tick. Inertia is recomputed from the current inertia
     /// box (either `chassis.inertia_size` override or the collider size).
-    pub fn set_vehicle_mass(&mut self, id: VehicleId, mass: f32) {
+    pub fn set_vehicle_mass(&mut self, id: VehicleId, mass: f64) {
         let Some(state) = self.vehicles.get_mut(&id) else { return };
         state.spec.chassis.mass = mass.max(0.01);
         let half_extents = state
@@ -452,7 +452,7 @@ impl Sim {
     }
 
     /// Advance the simulation by `dt` seconds.
-    pub fn step(&mut self, dt: f32) {
+    pub fn step(&mut self, dt: f64) {
         self.integration.dt = dt;
 
         // 1a. Drain the power reservoir(s) + tick auto-fill on each
@@ -598,7 +598,7 @@ fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
     if n == Vec3::ZERO { fallback } else { n }
 }
 
-fn principal_inertia(mass: f32, half_extents: Vec3) -> Vec3 {
+fn principal_inertia(mass: f64, half_extents: Vec3) -> Vec3 {
     let (x, y, z) = (
         half_extents.x * 2.0,
         half_extents.y * 2.0,

@@ -56,7 +56,7 @@ pub fn husky() -> VehicleSpec {
     // wheel radius sticks out under the body, so ground clearance
     // ends up near the top of the wheel circumference. Keeps the
     // underside well clear of the terrain.
-    let chassis_bottom = -chassis_y as f32 * 0.5;
+    let chassis_bottom = -chassis_y * 0.5;
     let target_bottom  = chassis_bottom - 0.22;
     let conn_y = target_bottom + rest + radius;
 

@@ -18,8 +18,10 @@ license = "MIT"
 # Local sibling crate — spatial types the whole gearbox stack speaks.
 datapod = { path = "../datapod" }
 
-# Physics backend — only `gearbox-physics` (and downstream) depend on it.
-rapier3d = "0.32"
+# Physics backend — f64 variant of rapier3d. Matches datapod's f64
+# spatial types, so every boundary crossing stops needing a lossy
+# precision downcast.
+rapier3d = { version = "0.32", package = "rapier3d-f64" }
 
 # Bevy + ecosystem. Declared once here with their full feature sets so
 # every crate that needs Bevy pulls the SAME build (otherwise cargo
@@ -57,9 +59,6 @@ bevy_egui = { version = "0.39", default-features = false, features = [
     "default_fonts",
     "render",
 ] }
-# Floating-origin: keeps f32 precision usable even when the world spans
-# planet-sized distances.
-big_space = { version = "0.12", features = ["i32"] }
 # Gamepad input — polled each frame by `gearbox-viz::gamepad`.
 gilrs = "0.11"
 

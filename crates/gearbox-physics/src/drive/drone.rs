@@ -26,16 +26,16 @@ use rapier3d::prelude::Vec3;
 use super::{DriveContext, DriveController};
 
 // Tunables — per-mass, so scaling the drone up keeps the feel.
-const HORIZ_ACCEL: f32 = 6.0; // m/s² at full stick
-const LIFT_ACCEL: f32 = 10.0; // m/s² at full lift
-const YAW_ACCEL: f32 = 2.7; // rad/s² at full yaw
-const MAX_TILT: f32 = 0.30; // rad (~17°) at full stick
+const HORIZ_ACCEL: f64 = 6.0; // m/s² at full stick
+const LIFT_ACCEL: f64 = 10.0; // m/s² at full lift
+const YAW_ACCEL: f64 = 2.7; // rad/s² at full yaw
+const MAX_TILT: f64 = 0.30; // rad (~17°) at full stick
 /// PD gains in angular-acceleration space (rad/s² per rad of error,
 /// and per rad/s of rate). Scaled by the body's actual principal
 /// inertia at apply-time so small drones don't get torques sized for
 /// a refrigerator. ω_n ≈ 8 rad/s, ζ ≈ 0.9 → near-critical damping.
-const TILT_OMEGA: f32 = 8.0;
-const TILT_ZETA: f32 = 0.9;
+const TILT_OMEGA: f64 = 8.0;
+const TILT_ZETA: f64 = 0.9;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DroneController;

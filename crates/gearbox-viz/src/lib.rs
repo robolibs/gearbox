@@ -63,14 +63,6 @@ pub struct ChassisTinted {
     pub id: VehicleId,
 }
 
-/// Handle to the BigSpace root entity. Every renderable entity
-/// becomes a child of this so `big_space`'s transform-propagation
-/// handles f32-precision for planet-scale worlds. Published as a
-/// `Resource` so later spawns (editor, UI-initiated spawns) can look
-/// it up without walking the scene graph.
-#[derive(Resource, Copy, Clone)]
-pub struct BigSpaceRoot(pub Entity);
-
 /// Insert on a Bevy `App` to wire gearbox → Bevy.
 pub struct GearboxVizPlugin;
 
