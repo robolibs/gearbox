@@ -3,6 +3,7 @@
 pub mod float;
 pub mod gizmo;
 pub mod gizmo_material;
+pub mod heading_arrows;
 pub mod inspector;
 pub mod left_dock;
 pub mod pending_spawn;
@@ -34,6 +35,7 @@ impl Plugin for EditorPlugin {
         let right = state.right;
 
         app.add_plugins(selection_ring::SelectionRingPlugin)
+            .add_plugins(heading_arrows::HeadingArrowsPlugin)
             // Always-on-top mesh material for the (now hidden) legacy
             // gizmo meshes that hold pick metadata.
             .add_plugins(
@@ -68,6 +70,7 @@ impl Plugin for EditorPlugin {
                 PostStartup,
                 (
                     selection_ring::setup_selection_ring,
+                    heading_arrows::setup_heading_arrows,
                     transform_gizmos::setup_transform_gizmos,
                     gizmo::setup_gizmo_overlay,
                 ),
@@ -103,6 +106,7 @@ impl Plugin for EditorPlugin {
                     pending_spawn::update_ghost_position,
                     pending_spawn::commit_or_cancel_ghost,
                     selection_ring::update_selection_ring,
+                    heading_arrows::update_heading_arrows,
                     // Regen gizmo meshes before the visuals are
                     // re-synced so the new mesh data and positions
                     // land on the same frame.

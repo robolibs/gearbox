@@ -86,4 +86,12 @@ pub struct VehicleSpec {
     /// fertiliser hopper…). Empty `containers` hides the Container
     /// section in the Properties panel.
     pub containers: Vec<Container>,
+    /// Nominal top speed in m/s for this vehicle. Not a physics cap —
+    /// the physics sim has no explicit speed limiter. Exists purely
+    /// as a *display* value: speed-dependent UI effects (heading-
+    /// arrow intensity, debug overlays) normalize the current speed
+    /// against this so a slow field robot at its own top speed reads
+    /// as "flat-out" the same way a road car does. Presets tune it
+    /// to match the vehicle's realistic performance.
+    pub max_speed: f64,
 }

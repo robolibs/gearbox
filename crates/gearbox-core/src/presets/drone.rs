@@ -103,6 +103,7 @@ pub fn drone() -> VehicleSpec {
     };
 
     VehicleBuilder::new("drone", chassis)
+        .max_speed(15.0)
         // Four diagonal arms.
         .part(make_arm("arm_fr",  1.0,  1.0))
         .part(make_arm("arm_fl", -1.0,  1.0))

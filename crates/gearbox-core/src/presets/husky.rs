@@ -113,6 +113,7 @@ pub fn husky() -> VehicleSpec {
     );
 
     VehicleBuilder::new("husky", chassis)
+        .max_speed(1.5)
         .wheel(make( wheel_x, front_z))
         .wheel(make(-wheel_x, front_z))
         .wheel(make( wheel_x, rear_z))

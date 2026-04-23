@@ -311,6 +311,17 @@ impl Sim {
             .unwrap_or_default()
     }
 
+    /// Angular velocity (rad/s) of the vehicle's chassis body. The
+    /// returned struct reuses `Velocity` as an xyz triple: `vy` is the
+    /// yaw rate (rotation around world +Y).
+    pub fn vehicle_angvel(&self, id: VehicleId) -> Velocity {
+        self.vehicles
+            .get(&id)
+            .and_then(|v| self.bodies.get(v.handles.body))
+            .map(|rb| vec3_to_velocity(rb.angvel()))
+            .unwrap_or_default()
+    }
+
     /// World-space pose of a wheel, oriented so the wheel's local Y axis
     /// aligns with the axle (matches Bevy's `Cylinder` primitive, which
     /// extrudes along +Y).

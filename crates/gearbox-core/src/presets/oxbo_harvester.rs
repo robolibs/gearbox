@@ -134,6 +134,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
     );
 
     VehicleBuilder::new("oxbo_harvester", chassis)
+        .max_speed(5.0)
         .wheel(make( 1.4,  2.304, false, 0.0,    true,  front_steer))
         .wheel(make(-1.4,  2.304, false, 0.0,    true,  front_steer))
         .wheel(make( 1.4,  0.100, false, 0.0,    false, 0.0))

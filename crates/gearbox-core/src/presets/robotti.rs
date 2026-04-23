@@ -240,6 +240,7 @@ pub fn robotti() -> VehicleSpec {
     };
 
     VehicleBuilder::new("robotti", chassis)
+        .max_speed(2.5)
         .wheel(make(wheel_x, front_z))
         .wheel(make(-wheel_x, front_z))
         .wheel(make(wheel_x, rear_z))

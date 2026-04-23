@@ -39,6 +39,40 @@ impl Default for GearboxSim {
 #[derive(Component, Default)]
 pub struct PlayerControlled;
 
+/// Which vehicle the chase camera should translate with. `None` means
+/// no follow — the camera sits where the user left it. When set, a
+/// per-frame system translates the camera focus (and world transform)
+/// by the delta in the vehicle's XYZ position. No re-aim, no yaw
+/// correction — if the user is pointing away from the machine, the
+/// follow still works, they just won't see it.
+#[derive(Resource, Default, Debug)]
+pub struct FollowTarget {
+    pub vehicle: Option<VehicleId>,
+    /// Last observed world-position for the followed vehicle. `None`
+    /// on a fresh follow (no previous frame to diff against) so the
+    /// first tick contributes no delta.
+    last_pos: Option<Vec3>,
+}
+
+impl FollowTarget {
+    /// Set the follow target. Clears `last_pos` so the first tick
+    /// after switching vehicles doesn't produce a big jump delta.
+    pub fn set(&mut self, id: Option<VehicleId>) {
+        self.vehicle = id;
+        self.last_pos = None;
+    }
+
+    /// Call `set(None)` if `id` is already the target, otherwise
+    /// `set(Some(id))`. Used by the outliner radio toggle.
+    pub fn toggle(&mut self, id: VehicleId) {
+        if self.vehicle == Some(id) {
+            self.set(None);
+        } else {
+            self.set(Some(id));
+        }
+    }
+}
+
 /// Tag applied to the Bevy entity representing a vehicle's chassis.
 #[derive(Component, Copy, Clone)]
 pub struct VehicleBody {
@@ -71,6 +105,7 @@ impl Plugin for GearboxVizPlugin {
         app.init_resource::<GearboxSim>()
             .init_resource::<grid::GroundGrid>()
             .init_resource::<step::SimClock>()
+            .init_resource::<FollowTarget>()
             // `GamepadCtx` owns the `gilrs::Gilrs` handle, which holds
             // `std::sync::mpsc::Receiver` internally and is therefore
             // `!Sync`. Bevy requires `Send + Sync` for regular
@@ -88,6 +123,7 @@ impl Plugin for GearboxVizPlugin {
                     input::wasd_input_system,
                     step::step_sim_system,
                     sync::sync_vehicle_transforms_system,
+                    follow_target_system,
                     camera::chase_camera_control,
                     camera::chase_camera_zoom,
                     camera::chase_camera_fly,
@@ -96,6 +132,46 @@ impl Plugin for GearboxVizPlugin {
             )
             .add_systems(Update, (grid::build_grid_meshes, grid::update_grid_alpha));
     }
+}
+
+/// Translates the chase camera with the followed vehicle — just
+/// position, no yaw or look-at. If no follow target, or the target
+/// has vanished, it no-ops. Runs after `sync_vehicle_transforms_system`
+/// so poses are current for this frame.
+pub fn follow_target_system(
+    sim: Res<GearboxSim>,
+    mut target: ResMut<FollowTarget>,
+    mut cameras: Query<(&mut camera::ChaseCamera, &mut Transform)>,
+) {
+    let Some(id) = target.vehicle else {
+        target.last_pos = None;
+        return;
+    };
+    if sim.0.vehicle(id).is_none() {
+        target.set(None);
+        return;
+    }
+    let pose = sim.0.vehicle_pose(id);
+    let current = Vec3::new(
+        pose.point.x as f32,
+        pose.point.y as f32,
+        pose.point.z as f32,
+    );
+    if let Some(last) = target.last_pos {
+        let delta = current - last;
+        if delta.length_squared() > 0.0 {
+            for (mut cam, mut tr) in &mut cameras {
+                // Skip while a cinematic fly is still running — its
+                // own system owns focus/yaw/distance that frame.
+                if cam.fly_target.is_some() {
+                    continue;
+                }
+                cam.focus += delta;
+                tr.translation += delta;
+            }
+        }
+    }
+    target.last_pos = Some(current);
 }
 
 pub use camera::ChaseCamera;

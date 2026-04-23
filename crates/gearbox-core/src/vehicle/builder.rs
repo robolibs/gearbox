@@ -23,8 +23,18 @@ impl VehicleBuilder {
                 drive_mode: DriveMode::default(),
                 power: PowerSystem::default(),
                 containers: Vec::new(),
+                // Neutral default — each preset overrides with a value
+                // calibrated to how fast it actually moves in the sim.
+                max_speed: 8.0,
             },
         }
+    }
+
+    /// Nominal top speed in m/s, used for normalizing display effects
+    /// (heading arrows, speedometer bars). Has no effect on physics.
+    pub fn max_speed(mut self, max_speed: f64) -> Self {
+        self.spec.max_speed = max_speed;
+        self
     }
 
     pub fn wheel(mut self, wheel: WheelSpec) -> Self {

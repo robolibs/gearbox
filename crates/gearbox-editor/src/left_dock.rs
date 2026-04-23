@@ -7,7 +7,7 @@ use bevy_egui::{egui, EguiContexts};
 
 use gearbox_physics::VehicleId;
 
-use gearbox_viz::{ChaseCamera, GearboxSim, PlayerControlled, VehicleBody};
+use gearbox_viz::{ChaseCamera, FollowTarget, GearboxSim, PlayerControlled, VehicleBody};
 use gearbox_viz::camera::FlyTarget;
 
 use super::pending_spawn::PendingSpawn;
@@ -43,6 +43,7 @@ pub fn left_dock_ui(
     registry: Res<PresetRegistry>,
     accent: Res<AccentColor>,
     mut cameras: Query<&mut ChaseCamera>,
+    mut follow: ResMut<FollowTarget>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let accent_col = accent.0;
@@ -89,6 +90,7 @@ pub fn left_dock_ui(
                 &sim,
                 &bodies,
                 &mut selection,
+                &mut follow,
                 accent_col,
                 &mut frame_to,
             ),

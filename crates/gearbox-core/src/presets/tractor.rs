@@ -167,6 +167,7 @@ pub fn tractor() -> VehicleSpec {
     );
 
     VehicleBuilder::new("tractor", chassis)
+        .max_speed(6.0)
         .wheel(front(wheel_x))
         .wheel(front(-wheel_x))
         .wheel(rear(wheel_x))
