@@ -3,7 +3,6 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
-use gearbox_viz::gamepad::GamepadSelection;
 use gearbox_viz::{GearboxSim, GroundGrid};
 
 use super::{float, inspector, properties};
@@ -34,7 +33,6 @@ pub fn right_dock_ui(
     mut ring_settings: ResMut<SelectionRingSettings>,
     mut glass_opacity: ResMut<super::style::GlassOpacity>,
     mut pending_color: ResMut<PendingColorChange>,
-    mut gamepad_selection: ResMut<GamepadSelection>,
     accent: Res<AccentColor>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -92,7 +90,6 @@ pub fn right_dock_ui(
                     &mut ring_settings,
                     &mut glass_opacity,
                     &mut pending_color,
-                    &mut gamepad_selection,
                     accent_col,
                 ),
             );

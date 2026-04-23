@@ -3,15 +3,16 @@
 //! Wraps the headless sim in a Bevy resource, spawns PBR meshes that
 //! mirror each [`gearbox_core::VehicleSpec`], keeps their transforms
 //! in sync with the rapier world each frame, and owns the chase
-//! camera + ground-grid machinery. Takes input from keyboard + gamepad
-//! (see [`input`] / [`gamepad`]).
+//! camera + ground-grid machinery. Takes keyboard input for dev
+//! teleop; external control (gamepad, joystick, scripted agents) is
+//! expected to ride the robot-API layer (zenoh) rather than touch
+//! this crate directly.
 //!
 //! The editor (gearbox-editor) layers on top of this crate — viz has
 //! no awareness of selection, gizmos, panels, etc.
 
 pub mod camera;
 pub mod clouds;
-pub mod gamepad;
 pub mod grid;
 pub mod input;
 pub mod spawn;
@@ -106,17 +107,6 @@ impl Plugin for GearboxVizPlugin {
             .init_resource::<grid::GroundGrid>()
             .init_resource::<step::SimClock>()
             .init_resource::<FollowTarget>()
-            // `GamepadCtx` owns the `gilrs::Gilrs` handle, which holds
-            // `std::sync::mpsc::Receiver` internally and is therefore
-            // `!Sync`. Bevy requires `Send + Sync` for regular
-            // resources, so install it as a non-send (main-thread)
-            // resource via `insert_non_send_resource`.
-            .insert_non_send_resource(gamepad::GamepadCtx::default())
-            .init_resource::<gamepad::GamepadState>()
-            .init_resource::<gamepad::GamepadSelection>()
-            // Gamepad polling runs first so the keyboard-merging input
-            // system below sees fresh stick values on the same frame.
-            .add_systems(Update, gamepad::poll_gamepad_system.before(input::wasd_input_system))
             .add_systems(
                 Update,
                 (

@@ -14,13 +14,12 @@ use gearbox_physics::{
     VehicleId,
 };
 
-use gearbox_viz::gamepad::GamepadSelection;
 use gearbox_viz::{ChassisTinted, GearboxSim, GroundGrid};
 
 use super::selection::Selection;
 use super::selection_ring::SelectionRingSettings;
 use super::style::{
-    contrast_text_for, font, space, AXIS_X, AXIS_Y, AXIS_Z, TEXT_PRIMARY,
+    contrast_text_for, font, space, AXIS_X, AXIS_Y, AXIS_Z,
 };
 use super::transform_gizmos::{GizmoModesEnabled, GizmoScale};
 use super::ui_panel;
@@ -46,15 +45,13 @@ pub fn draw_content(
     ring_settings: &mut SelectionRingSettings,
     glass_opacity: &mut super::style::GlassOpacity,
     pending_color: &mut PendingColorChange,
-    gamepad_selection: &mut GamepadSelection,
     accent: egui::Color32,
 ) {
     if let Some(id) = selection.vehicle {
         vehicle_section(ui, sim, id, pending_color, accent);
     } else {
         world_section(
-            ui, sim, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity,
-            gamepad_selection, accent,
+            ui, sim, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
         );
     }
 }
@@ -69,7 +66,6 @@ fn world_section(
     gizmo_modes: &mut GizmoModesEnabled,
     ring_settings: &mut SelectionRingSettings,
     glass_opacity: &mut super::style::GlassOpacity,
-    gamepad_selection: &mut GamepadSelection,
     accent: egui::Color32,
 ) {
     section(ui, "world_sandbox", "Sandbox", accent, true, |ui| {
@@ -82,68 +78,11 @@ fn world_section(
 
     ui.add_space(space::SECTION);
 
-    gamepad_section(ui, gamepad_selection, accent);
-
-    ui.add_space(space::SECTION);
-
     // Grid / gizmo / ring still live in `ui_panel::draw_content`
     // (refactored itself when Inspector gets done).
     ui_panel::draw_content(
         ui, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
     );
-}
-
-fn gamepad_section(
-    ui: &mut egui::Ui,
-    selection: &mut GamepadSelection,
-    accent: egui::Color32,
-) {
-    section(ui, "world_gamepad", "Gamepad", accent, true, |ui| {
-        if let Some(err) = &selection.init_error {
-            sub_caption(ui, "Gamepad backend failed to init");
-            ui.label(
-                egui::RichText::new(err)
-                    .monospace()
-                    .size(font::CAPTION)
-                    .color(TEXT_PRIMARY),
-            );
-            ui.add_space(space::ROW);
-            sub_caption(
-                ui,
-                "Linux fix: sudo usermod -aG input $USER  (log out + back in)",
-            );
-            return;
-        }
-        if selection.detected.is_empty() {
-            sub_caption(ui, "No controllers detected.");
-            return;
-        }
-
-        let active_id = selection
-            .selected
-            .filter(|id| selection.detected.iter().any(|gi| gi.id == *id))
-            .or_else(|| selection.detected.first().map(|gi| gi.id));
-        let active_label = match active_id {
-            Some(id) => selection
-                .detected
-                .iter()
-                .find(|gi| gi.id == id)
-                .map(|gi| truncate_ellipsis(&gi.name, 18))
-                .unwrap_or_else(|| "—".into()),
-            None => "—".into(),
-        };
-        labelled_row(ui, "device", |ui| {
-            egui::ComboBox::from_id_salt("gamepad_pick")
-                .width(150.0)
-                .selected_text(active_label)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut selection.selected, None, "(auto)");
-                    for info in &selection.detected {
-                        ui.selectable_value(&mut selection.selected, Some(info.id), &info.name);
-                    }
-                });
-        });
-    });
 }
 
 // ═══ Vehicle panel ══════════════════════════════════════════════════
@@ -593,18 +532,6 @@ fn transform_section(
 }
 
 // ═══ Helpers ════════════════════════════════════════════════════════
-
-/// Shorten a string to at most `max_chars` Unicode scalar values,
-/// appending an ellipsis when truncated. Used so a 40-character
-/// gamepad name doesn't overflow the combo's selected-text cell.
-fn truncate_ellipsis(s: &str, max_chars: usize) -> String {
-    let count = s.chars().count();
-    if count <= max_chars {
-        return s.to_string();
-    }
-    let kept: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-    format!("{}…", kept)
-}
 
 fn quat_to_euler_xyz(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
     let sy = 2.0 * (w * y + x * z).clamp(-1.0, 1.0);
