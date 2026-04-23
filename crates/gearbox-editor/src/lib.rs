@@ -51,6 +51,13 @@ impl Plugin for EditorPlugin {
             .init_resource::<selection::Selection>()
             .init_resource::<pending_spawn::PendingSpawn>()
             .init_resource::<style::AccentColor>()
+            .init_resource::<style::GlassOpacity>()
+            // Mirror the slider's value into the `GLASS_OPACITY`
+            // atomic every frame so `section`, `floating_window` and
+            // friends (plain helpers, not Bevy systems) pick up the
+            // current alpha without plumbing a resource reference
+            // through every UI call.
+            .add_systems(PreUpdate, style::sync_glass_opacity_system)
             .init_resource::<transform_gizmos::GizmoMode>()
             .init_resource::<transform_gizmos::HoveredGizmo>()
             .init_resource::<transform_gizmos::GizmoDrag>()

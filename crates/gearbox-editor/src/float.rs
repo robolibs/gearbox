@@ -4,7 +4,7 @@
 use bevy_egui::egui;
 
 use super::style::{
-    glass_fill, BG_1_PANEL, BG_2_RAISED, BORDER_SUBTLE, GLASS_ALPHA_CARD, GLASS_ALPHA_WINDOW,
+    glass_alpha_card, glass_alpha_window, glass_fill, BG_1_PANEL, BG_2_RAISED, BORDER_SUBTLE,
     TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
@@ -31,21 +31,31 @@ fn paint_rail_button(
             blend(BG_2_RAISED.g(), accent.g()),
             blend(BG_2_RAISED.b(), accent.b()),
         );
-        glass_fill(tinted, accent, GLASS_ALPHA_WINDOW)
+        glass_fill(tinted, accent, glass_alpha_window())
     } else if hovered {
-        glass_fill(BG_2_RAISED, accent, GLASS_ALPHA_WINDOW)
+        glass_fill(BG_2_RAISED, accent, glass_alpha_window())
     } else {
-        glass_fill(BG_1_PANEL, accent, GLASS_ALPHA_WINDOW)
+        glass_fill(BG_1_PANEL, accent, glass_alpha_window())
     };
     let stroke = if is_active { accent } else { BORDER_SUBTLE };
-    painter.rect_filled(rect, egui::CornerRadius::same(6), bg);
-    painter.rect_stroke(
+    // ONE `rect` call — fill + stroke tessellate together so the
+    // rounded corner arcs of the stroke and fill share vertices and
+    // line up pixel-perfectly. Two separate `rect_filled` + `rect_stroke`
+    // calls (which is what this used to be) round each arc
+    // independently, and any sub-pixel mismatch reads as a jagged step
+    // at the corner.
+    //
+    // `StrokeKind::Inside` keeps the border flush with the rect edge
+    // — no outward overhang, no rounded-corner mismatch where the
+    // stroke's outer arc meets the fill's outer arc.
+    painter.rect(
         rect,
         egui::CornerRadius::same(6),
+        bg,
         egui::Stroke::new(1.0, stroke),
-        egui::StrokeKind::Outside,
+        egui::StrokeKind::Inside,
     );
-    let _ = GLASS_ALPHA_CARD; // kept so callers that tune the "active" density can switch
+    let _ = glass_alpha_card();
 }
 
 // --- layout constants ---------------------------------------------------
@@ -178,7 +188,7 @@ pub fn floating_window(
         // Glassy panel: slightly transparent + faint accent tint,
         // so selecting a vehicle shifts the entire UI's hue by a
         // hair (purple → vehicle colour).
-        fill: glass_fill(BG_1_PANEL, accent, GLASS_ALPHA_WINDOW),
+        fill: glass_fill(BG_1_PANEL, accent, glass_alpha_window()),
         stroke: egui::Stroke::new(1.0, BORDER_SUBTLE),
         corner_radius: egui::CornerRadius::same(8),
         shadow: egui::epaint::Shadow {

@@ -11,7 +11,7 @@ use bevy_egui::egui;
 use gearbox_viz::GroundGrid;
 
 use super::selection_ring::SelectionRingSettings;
-use super::style::space;
+use super::style::{space, GlassOpacity};
 use super::transform_gizmos::{GizmoModesEnabled, GizmoScale};
 use super::widgets::{labelled_row, pretty_slider, section, toggle};
 
@@ -21,8 +21,23 @@ pub fn draw_content(
     gizmo_scale: &mut GizmoScale,
     gizmo_modes: &mut GizmoModesEnabled,
     ring: &mut SelectionRingSettings,
+    glass_opacity: &mut GlassOpacity,
     accent: egui::Color32,
 ) {
+    section(ui, "ui_theme", "Theme", accent, false, |ui| {
+        labelled_row(ui, "opacity", |ui| {
+            // Slider range is user-visible 1..=100. Internally the
+            // value is mapped to 80..=100 % opacity — see
+            // `style::opacity_frac`. One knob, proportionally
+            // scales panel / card / group alphas.
+            let mut v = glass_opacity.0 as f64;
+            if pretty_slider(ui, &mut v, 1.0..=100.0, 0, "%", accent).changed() {
+                glass_opacity.0 = v.round().clamp(1.0, 100.0) as u8;
+            }
+        });
+    });
+    ui.add_space(space::SECTION);
+
     section(ui, "ui_grid", "Grid", accent, true, |ui| {
         labelled_row(ui, "visible", |ui| {
             toggle(ui, &mut grid.visible, accent);

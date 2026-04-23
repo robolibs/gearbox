@@ -44,17 +44,18 @@ pub fn draw_content(
     gizmo_scale: &mut GizmoScale,
     gizmo_modes: &mut GizmoModesEnabled,
     ring_settings: &mut SelectionRingSettings,
+    glass_opacity: &mut super::style::GlassOpacity,
     pending_color: &mut PendingColorChange,
     gamepad_selection: &mut GamepadSelection,
     accent: egui::Color32,
 ) {
-    // Per-object vs world properties are mutually exclusive: a
-    // selected vehicle gets its own panel; empty selection falls
-    // back to the editor/world tools.
     if let Some(id) = selection.vehicle {
         vehicle_section(ui, sim, id, pending_color, accent);
     } else {
-        world_section(ui, sim, grid, gizmo_scale, gizmo_modes, ring_settings, gamepad_selection, accent);
+        world_section(
+            ui, sim, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity,
+            gamepad_selection, accent,
+        );
     }
 }
 
@@ -67,6 +68,7 @@ fn world_section(
     gizmo_scale: &mut GizmoScale,
     gizmo_modes: &mut GizmoModesEnabled,
     ring_settings: &mut SelectionRingSettings,
+    glass_opacity: &mut super::style::GlassOpacity,
     gamepad_selection: &mut GamepadSelection,
     accent: egui::Color32,
 ) {
@@ -86,7 +88,9 @@ fn world_section(
 
     // Grid / gizmo / ring still live in `ui_panel::draw_content`
     // (refactored itself when Inspector gets done).
-    ui_panel::draw_content(ui, grid, gizmo_scale, gizmo_modes, ring_settings, accent);
+    ui_panel::draw_content(
+        ui, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
+    );
 }
 
 fn gamepad_section(

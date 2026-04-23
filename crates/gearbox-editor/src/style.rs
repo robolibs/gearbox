@@ -24,6 +24,51 @@ pub const BG_2_RAISED: egui::Color32 = egui::Color32::from_rgb(0x2D, 0x2D, 0x32)
 pub const BG_3_HOVER:  egui::Color32 = egui::Color32::from_rgb(0x38, 0x38, 0x3F);
 pub const BG_4_INPUT:  egui::Color32 = egui::Color32::from_rgb(0x18, 0x18, 0x1A);
 
+// ─── Glass opacity (slider-driven) ──────────────────────────────────
+//
+// One user-facing opacity knob, range 1..=100. Internally mapped to
+// window opacity 80..=100 % so the UI never becomes so transparent
+// it stops being readable. Card + group alphas scale proportionally
+// via `CARD_FACTOR` / `GROUP_FACTOR` below.
+
+use core::sync::atomic::{AtomicU8, Ordering};
+
+/// Shadow copy of [`GlassOpacity`]'s value. Updated every frame by
+/// [`sync_glass_opacity_system`] so plain helper functions (`section`,
+/// `floating_window`, etc. — not Bevy systems) can read the current
+/// opacity without plumbing `Res<GlassOpacity>` through every UI call.
+static GLASS_OPACITY: AtomicU8 = AtomicU8::new(100);
+
+/// Bevy resource — the authoritative slider value (range 1..=100).
+#[derive(Resource, Copy, Clone, Debug, PartialEq, Eq)]
+pub struct GlassOpacity(pub u8);
+
+impl Default for GlassOpacity {
+    fn default() -> Self { Self(100) }
+}
+
+/// Mirror the resource into `GLASS_OPACITY` every frame.
+pub fn sync_glass_opacity_system(opacity: Res<GlassOpacity>) {
+    GLASS_OPACITY.store(opacity.0.clamp(1, 100), Ordering::Relaxed);
+}
+
+/// Map the slider's `1..=100` onto a window opacity fraction in
+/// `0.80..=1.00`. `1 → 0.80`, `100 → 1.00`, linear in between.
+fn opacity_frac() -> f32 {
+    let t = (GLASS_OPACITY.load(Ordering::Relaxed).max(1) as f32 - 1.0) / 99.0;
+    0.80 + 0.20 * t
+}
+
+pub fn glass_alpha_window() -> u8 {
+    (opacity_frac() * 255.0).round().clamp(0.0, 255.0) as u8
+}
+pub fn glass_alpha_card() -> u8 {
+    (opacity_frac() * CARD_FACTOR * 255.0).round().clamp(0.0, 255.0) as u8
+}
+pub fn glass_alpha_group() -> u8 {
+    (opacity_frac() * GROUP_FACTOR * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
 // ─── Glassy variants ────────────────────────────────────────────────
 //
 // Panel / card / group surfaces get progressive transparency so the
@@ -35,9 +80,15 @@ pub const BG_4_INPUT:  egui::Color32 = egui::Color32::from_rgb(0x18, 0x18, 0x1A)
 // extra veil so overlap doesn't compound into "effectively solid".
 // Opacity stacks as `1 − (1-a)·(1-b)·(1-c)`, so card+group ≈ 16 %
 // on top of the panel — just enough to read as "another surface".
-pub const GLASS_ALPHA_WINDOW: u8 = 240;  // ~94 %
-pub const GLASS_ALPHA_CARD:   u8 = 150;  // ~59 %
-pub const GLASS_ALPHA_GROUP:  u8 = 110;  // ~43 %
+// Alphas are computed each frame from `GLASS_OPACITY` so the
+// single UI slider (General Properties → Theme → opacity) drives
+// every glass surface proportionally. See `glass_alpha_*()` below.
+//
+// The factors that follow are the `card_α / window_α` and
+// `group_α / window_α` ratios picked to match the old static
+// values (230 / 175 / 130) when the slider lands at 50.
+const CARD_FACTOR:  f32 = 0.76;  // card α is ~76 % of window α
+const GROUP_FACTOR: f32 = 0.57;  // group α is ~57 % of window α
 /// How much of the accent colour to blend into each glass fill. Kept
 /// tiny on purpose — the tint should be felt, not seen.
 pub const GLASS_ACCENT_TINT:  f32 = 0.03;
@@ -156,13 +207,18 @@ fn install_fonts_once(ctx: &egui::Context, installed: &mut bool) {
 pub fn apply_theme(
     mut contexts: EguiContexts,
     accent: Res<AccentColor>,
-    mut last_applied: Local<Option<egui::Color32>>,
+    opacity: Res<GlassOpacity>,
+    mut last_applied: Local<Option<(egui::Color32, u8)>>,
     mut fonts_installed: Local<bool>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     install_fonts_once(ctx, &mut fonts_installed);
 
-    if *last_applied == Some(accent.0) { return }
+    // Re-apply when EITHER the accent colour OR the glass-opacity
+    // slider changes — the latter reaches into every
+    // `visuals.widgets.*.bg_fill`, so stale values would keep egui's
+    // built-in widgets at the old alpha.
+    if *last_applied == Some((accent.0, opacity.0)) { return }
     let accent_col = accent.0;
 
     // Glass variants of every neutral bg, so EVERY egui widget that
@@ -171,10 +227,10 @@ pub fn apply_theme(
     // look automatically. Alphas mirror the panel/card/group
     // hierarchy — deeper UI layers stay denser than the surfaces
     // above them.
-    let glass_panel  = glass_fill(BG_1_PANEL,  accent_col, GLASS_ALPHA_WINDOW);
-    let glass_card   = glass_fill(BG_2_RAISED, accent_col, GLASS_ALPHA_CARD);
-    let glass_hover  = glass_fill(BG_3_HOVER,  accent_col, GLASS_ALPHA_CARD);
-    let glass_input  = glass_fill(BG_4_INPUT,  accent_col, GLASS_ALPHA_GROUP);
+    let glass_panel  = glass_fill(BG_1_PANEL,  accent_col, glass_alpha_window());
+    let glass_card   = glass_fill(BG_2_RAISED, accent_col, glass_alpha_card());
+    let glass_hover  = glass_fill(BG_3_HOVER,  accent_col, glass_alpha_card());
+    let glass_input  = glass_fill(BG_4_INPUT,  accent_col, glass_alpha_group());
 
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill          = glass_panel;
@@ -235,7 +291,7 @@ pub fn apply_theme(
     .into();
 
     ctx.set_style(style);
-    *last_applied = Some(accent_col);
+    *last_applied = Some((accent_col, opacity.0));
 }
 
 /// Update the accent colour from the currently selected vehicle's

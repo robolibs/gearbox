@@ -10,8 +10,8 @@
 use bevy_egui::egui;
 
 use super::style::{
-    body_label, caption, glass_fill, radius, section_caps, space, BG_2_RAISED, BG_3_HOVER,
-    BORDER_SUBTLE, GLASS_ALPHA_CARD, GLASS_ALPHA_GROUP, TEXT_PRIMARY, TEXT_SECONDARY,
+    body_label, caption, glass_alpha_card, glass_alpha_group, glass_fill, radius, section_caps,
+    space, BG_2_RAISED, BG_3_HOVER, BORDER_SUBTLE, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 // ─── Section ────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ pub fn section(
     let full_w = ui.available_width();
     let inner_w = (full_w - 18.0).max(0.0); // 8 px × 2 padding + 2 stroke
     egui::Frame::new()
-        .fill(glass_fill(BG_2_RAISED, accent, GLASS_ALPHA_CARD))
+        .fill(glass_fill(BG_2_RAISED, accent, glass_alpha_card()))
         .corner_radius(egui::CornerRadius::same(radius::MD))
         .stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
         .inner_margin(egui::Margin::symmetric(8, 6))
@@ -334,7 +334,7 @@ fn paint_accent_bg(
         solid.r(),
         solid.g(),
         solid.b(),
-        GLASS_ALPHA_CARD,
+        glass_alpha_card(),
     );
     let border_col = if resp.hovered() { accent } else { BORDER_SUBTLE };
     ui.painter_at(rect).rect(
@@ -585,7 +585,7 @@ pub fn group_frame(
     // around it. Uses `BG_3_HOVER` as the base so groups sit a
     // touch brighter than cards, reinforcing the stacked-pane feel.
     egui::Frame::new()
-        .fill(glass_fill(BG_3_HOVER, accent, GLASS_ALPHA_GROUP))
+        .fill(glass_fill(BG_3_HOVER, accent, glass_alpha_group()))
         .corner_radius(egui::CornerRadius::same(radius::SM))
         .stroke(egui::Stroke::new(1.0, BORDER_SUBTLE))
         .inner_margin(egui::Margin::symmetric(8, 6))
