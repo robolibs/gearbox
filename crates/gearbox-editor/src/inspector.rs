@@ -13,10 +13,11 @@ use gearbox_viz::GearboxSim;
 
 use super::selection::Selection;
 use super::style::{
-    caption, contrast_text_for, font, radius, space, title_text, AXIS_X, AXIS_Y, AXIS_Z,
-    TEXT_SECONDARY,
+    caption, font, space, title_text, AXIS_X, AXIS_Y, AXIS_Z, TEXT_SECONDARY,
 };
-use super::widgets::{axis_readout_row, labelled_row, readout_row, section, sub_caption};
+use super::widgets::{
+    axis_readout_row, pretty_progressbar_text, readout_row, section, sub_caption, subsection,
+};
 
 pub fn draw_content(
     ui: &mut egui::Ui,
@@ -58,39 +59,26 @@ pub fn draw_content(
         readout_row(ui, "parts",     &state.spec.parts.len().to_string());
         readout_row(ui, "footprint", &format!("{:.2} × {:.2} m", fp_x, fp_z));
 
-        // Power reservoirs — full-width bar per source, active fully
-        // saturated, inactive faded.
+        // Power reservoirs — one labelled progress bar per source,
+        // active fully saturated, inactive faded.
         if !state.spec.power.sources.is_empty() {
-            ui.add_space(space::BLOCK);
-            sub_caption(ui, "power");
-            ui.add_space(space::TIGHT);
             let active = state.spec.power.active_source();
             for (idx, src) in state.spec.power.sources.iter().enumerate() {
-                if idx > 0 {
-                    ui.add_space(space::TIGHT);
-                }
                 let is_active = active == Some(idx);
                 let bar_col = if is_active {
                     accent
                 } else {
                     accent.linear_multiply(0.45)
                 };
-                ui.add(
-                    egui::ProgressBar::new(src.fraction() as f32)
-                        .text(
-                            egui::RichText::new(format!(
-                                "{:.0} / {:.0}",
-                                src.current, src.capacity
-                            ))
-                            .monospace()
-                            .size(font::NUMERIC)
-                            .color(contrast_text_for(bar_col)),
-                        )
-                        .fill(bar_col)
-                        .corner_radius(egui::CornerRadius::same(radius::SM)),
+                let text = format!("{:.0} / {:.0}", src.current, src.capacity);
+                pretty_progressbar_text(
+                    ui,
+                    &src.label,
+                    src.fraction() as f32,
+                    &text,
+                    bar_col,
                 );
             }
-            ui.add_space(space::ROW);
             let power = &state.spec.power;
             let tag = if !power.turned_on {
                 "engine off"
@@ -109,28 +97,17 @@ pub fn draw_content(
             );
         }
 
-        // Containers — same bar language.
+        // Containers — same labelled bar language.
         if !state.spec.containers.is_empty() {
-            ui.add_space(space::BLOCK);
-            sub_caption(ui, "container");
-            ui.add_space(space::TIGHT);
             for (idx, container) in state.spec.containers.iter().enumerate() {
-                if idx > 0 {
-                    ui.add_space(space::TIGHT);
-                }
-                ui.add(
-                    egui::ProgressBar::new(container.fraction() as f32)
-                        .text(
-                            egui::RichText::new(format!(
-                                "{:.0} / {:.0}",
-                                container.amount, container.capacity
-                            ))
-                            .monospace()
-                            .size(font::NUMERIC)
-                            .color(contrast_text_for(accent)),
-                        )
-                        .fill(accent)
-                        .corner_radius(egui::CornerRadius::same(radius::SM)),
+                let name = format!("container #{}", idx + 1);
+                let text = format!("{:.0} / {:.0}", container.amount, container.capacity);
+                pretty_progressbar_text(
+                    ui,
+                    &name,
+                    container.fraction() as f32,
+                    &text,
+                    accent,
                 );
             }
         }
@@ -145,35 +122,48 @@ pub fn draw_content(
         axis_readout_row(ui, "lat", AXIS_Z, &format!("{:+.10}°", geo.latitude));
         axis_readout_row(ui, "lon", AXIS_X, &format!("{:+.10}°", geo.longitude));
         axis_readout_row(ui, "alt", AXIS_Y, &format!("{:+.4} m", geo.altitude));
-        ui.add_space(space::ROW);
         readout_row(ui, "heading", &format!("{:6.2}°  {}", heading, compass_letter(heading)));
     });
 
     ui.add_space(space::SECTION);
 
     // ═══ Transform (read-only; edit in Properties) ═════════════════
+    let q = pose.rotation;
+    let (rx, ry, rz) = quat_to_euler_xyz(q.w, q.x, q.y, q.z);
     section(ui, "insp_tr", "Transform", accent, false, |ui| {
-        sub_caption(ui, "position");
-        ui.add_space(space::TIGHT);
-        axis_readout_row(ui, "X", AXIS_X, &format!("{:+.3} m", pose.point.x));
-        axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", pose.point.y));
-        axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", pose.point.z));
+        subsection(ui, "insp_tr_position", "Position", None, accent, true, |ui| {
+            axis_readout_row(ui, "X", AXIS_X, &format!("{:+.3} m", pose.point.x));
+            axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", pose.point.y));
+            axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", pose.point.z));
+        });
 
-        let q = pose.rotation;
-        let (rx, ry, rz) = quat_to_euler_xyz(q.w, q.x, q.y, q.z);
-        ui.add_space(space::BLOCK);
-        sub_caption(ui, "rotation  (Euler XYZ)");
-        ui.add_space(space::TIGHT);
-        axis_readout_row(ui, "X", AXIS_X, &format!("{:+.2}°", rx.to_degrees()));
-        axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.2}°", ry.to_degrees()));
-        axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.2}°", rz.to_degrees()));
+        subsection(
+            ui,
+            "insp_tr_rotation",
+            "Rotation",
+            Some("Euler XYZ"),
+            accent,
+            true,
+            |ui| {
+                axis_readout_row(ui, "X", AXIS_X, &format!("{:+.2}°", rx.to_degrees()));
+                axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.2}°", ry.to_degrees()));
+                axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.2}°", rz.to_degrees()));
+            },
+        );
 
-        ui.add_space(space::BLOCK);
-        sub_caption(ui, "scale  (chassis size — baked at spawn)");
-        ui.add_space(space::TIGHT);
-        axis_readout_row(ui, "X", AXIS_X, &format!("{:.3} m", size.x));
-        axis_readout_row(ui, "Y", AXIS_Y, &format!("{:.3} m", size.y));
-        axis_readout_row(ui, "Z", AXIS_Z, &format!("{:.3} m", size.z));
+        subsection(
+            ui,
+            "insp_tr_scale",
+            "Scale",
+            Some("chassis size — baked at spawn"),
+            accent,
+            true,
+            |ui| {
+                axis_readout_row(ui, "X", AXIS_X, &format!("{:.3} m", size.x));
+                axis_readout_row(ui, "Y", AXIS_Y, &format!("{:.3} m", size.y));
+                axis_readout_row(ui, "Z", AXIS_Z, &format!("{:.3} m", size.z));
+            },
+        );
     });
 
     ui.add_space(space::SECTION);
@@ -183,7 +173,6 @@ pub fn draw_content(
         axis_readout_row(ui, "X", AXIS_X, &format!("{:+.2} m/s", linvel.vx as f32));
         axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.2} m/s", linvel.vy as f32));
         axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.2} m/s", linvel.vz as f32));
-        ui.add_space(space::ROW);
         readout_row(ui, "|v|", &format!("{:.2} m/s", speed));
     });
 
@@ -192,9 +181,7 @@ pub fn draw_content(
     // ═══ Control ════════════════════════════════════════════════════
     section(ui, "insp_ctl", "Control", accent, false, |ui| {
         bar_row(ui, "throttle", ctrl.throttle, -1.0, 1.0, accent);
-        ui.add_space(space::TIGHT);
         bar_row(ui, "steer",    ctrl.steer,    -1.0, 1.0, accent);
-        ui.add_space(space::TIGHT);
         bar_row(ui, "brake",    ctrl.brake,     0.0, 1.0, accent);
     });
 }
@@ -223,12 +210,11 @@ fn world_info(ui: &mut egui::Ui, sim: &mut GearboxSim, accent: egui::Color32) {
             "circumference",
             &format!("{:.0} km", planet.radius * std::f64::consts::TAU / 1_000.0),
         );
-        ui.add_space(space::BLOCK);
-        sub_caption(ui, "datum");
-        ui.add_space(space::TIGHT);
-        axis_readout_row(ui, "lat", AXIS_Z, &format!("{:+.6}°",  planet.datum.latitude));
-        axis_readout_row(ui, "lon", AXIS_X, &format!("{:+.6}°",  planet.datum.longitude));
-        axis_readout_row(ui, "alt", AXIS_Y, &format!("{:+.2} m", planet.datum.altitude));
+        subsection(ui, "insp_world_datum", "Datum", None, accent, true, |ui| {
+            axis_readout_row(ui, "lat", AXIS_Z, &format!("{:+.6}°",  planet.datum.latitude));
+            axis_readout_row(ui, "lon", AXIS_X, &format!("{:+.6}°",  planet.datum.longitude));
+            axis_readout_row(ui, "alt", AXIS_Y, &format!("{:+.2} m", planet.datum.altitude));
+        });
     });
 
     ui.add_space(space::SECTION);
@@ -260,24 +246,13 @@ fn top_down_footprint(spec: &VehicleSpec) -> (f64, f64) {
     (x_max - x_min, z_max - z_min)
 }
 
-/// Signed-bar row: label left, bipolar progress bar right (filled
-/// proportional to `v` within `[min, max]`). Used for the Control
+/// Signed-bar row: two-line progressbar module (label above, bar below)
+/// filled proportional to `v` within `[min, max]`. Used for the Control
 /// section (throttle/steer/brake readouts).
 fn bar_row(ui: &mut egui::Ui, label: &str, v: f64, min: f64, max: f64, accent: egui::Color32) {
-    labelled_row(ui, label, |ui| {
-        let frac = ((v - min) / (max - min)).clamp(0.0, 1.0);
-        ui.add(
-            egui::ProgressBar::new(frac as f32)
-                .text(
-                    egui::RichText::new(format!("{:+.2}", v))
-                        .monospace()
-                        .size(font::NUMERIC)
-                        .color(contrast_text_for(accent)),
-                )
-                .fill(accent)
-                .corner_radius(egui::CornerRadius::same(radius::SM)),
-        );
-    });
+    let frac = ((v - min) / (max - min)).clamp(0.0, 1.0) as f32;
+    let text = format!("{:+.2}", v);
+    pretty_progressbar_text(ui, label, frac, &text, accent);
 }
 
 /// Cardinal/intercardinal letter for a heading in degrees.

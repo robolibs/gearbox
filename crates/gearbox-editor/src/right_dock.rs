@@ -1,29 +1,26 @@
-//! Floating right dock — Inspector (I, read-only) and Properties (P, editable).
+//! Inspector + Properties panel bodies. Ribbon buttons are declared
+//! in `super::dock_ribbons` and drawn in a separate system; this
+//! file only renders the two panels.
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
+use bevy_frost::{floating_window_for_item, RibbonOpen, RibbonPlacement};
 use gearbox_viz::{GearboxSim, GroundGrid};
 
-use super::{float, inspector, properties};
+use super::dock_ribbons::{is_menu_open, ID_INSPECTOR, ID_PROPERTIES, RIBBONS, RIBBON_ITEMS};
 use super::persist::EditorUiState;
 use super::properties::PendingColorChange;
 use super::selection::Selection;
 use super::selection_ring::SelectionRingSettings;
 use super::style::AccentColor;
 use super::transform_gizmos::{GizmoModesEnabled, GizmoScale};
-
-#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RightTab {
-    #[default]
-    Inspector,
-    Properties,
-    None,
-}
+use super::{inspector, properties};
 
 pub fn right_dock_ui(
     mut contexts: EguiContexts,
-    mut active: ResMut<RightTab>,
+    open: Res<RibbonOpen>,
+    placement: Res<RibbonPlacement>,
     ui_state: Res<EditorUiState>,
     mut sim: ResMut<GearboxSim>,
     selection: Res<Selection>,
@@ -38,49 +35,37 @@ pub fn right_dock_ui(
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let accent_col = accent.0;
 
-    float::side_button(
-        "right_btn_inspector", ctx, egui::Align2::RIGHT_TOP, 0,
-        "I", "Inspector",
-        matches!(*active, RightTab::Inspector),
-        accent_col,
-        || *active = if *active == RightTab::Inspector { RightTab::None } else { RightTab::Inspector },
-    );
-    float::side_button(
-        "right_btn_properties", ctx, egui::Align2::RIGHT_TOP, 1,
-        "P", "Properties",
-        matches!(*active, RightTab::Properties),
-        accent_col,
-        || *active = if *active == RightTab::Properties { RightTab::None } else { RightTab::Properties },
-    );
-
-    match *active {
-        RightTab::None => {}
-        RightTab::Inspector => {
-            let size = ui_state.inspector_size;
-            let mut open = true;
-            float::floating_window(
-                ctx,
-                "right_window_inspector",
-                "Inspector",
-                egui::Align2::RIGHT_TOP,
-                egui::vec2(size.x, size.y),
-                &mut open,
-                accent_col,
-                |ui| inspector::draw_content(ui, &mut sim, &selection, accent_col),
-            );
-        }
-        RightTab::Properties => {
-            let size = ui_state.inspector_size; // reuse the same default
-            let mut open = true;
-            float::floating_window(
-                ctx,
-                "right_window_properties",
-                "Properties",
-                egui::Align2::RIGHT_TOP,
-                egui::vec2(size.x, size.y),
-                &mut open,
-                accent_col,
-                |ui| properties::draw_content(
+    if is_menu_open(&open, &placement, ID_INSPECTOR) {
+        let size = ui_state.inspector_size;
+        let mut keep_open = true;
+        floating_window_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            ID_INSPECTOR,
+            "Inspector",
+            egui::vec2(size.x, size.y),
+            &mut keep_open,
+            accent_col,
+            |ui| inspector::draw_content(ui, &mut sim, &selection, accent_col),
+        );
+    }
+    if is_menu_open(&open, &placement, ID_PROPERTIES) {
+        let size = ui_state.inspector_size; // reuse default
+        let mut keep_open = true;
+        floating_window_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            ID_PROPERTIES,
+            "Properties",
+            egui::vec2(size.x, size.y),
+            &mut keep_open,
+            accent_col,
+            |ui| {
+                properties::draw_content(
                     ui,
                     &mut sim,
                     &selection,
@@ -91,8 +76,8 @@ pub fn right_dock_ui(
                     &mut glass_opacity,
                     &mut pending_color,
                     accent_col,
-                ),
-            );
-        }
+                )
+            },
+        );
     }
 }

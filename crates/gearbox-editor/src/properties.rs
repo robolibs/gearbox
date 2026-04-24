@@ -18,13 +18,12 @@ use gearbox_viz::{ChassisTinted, GearboxSim, GroundGrid};
 
 use super::selection::Selection;
 use super::selection_ring::SelectionRingSettings;
-use super::style::{
-    contrast_text_for, font, space, AXIS_X, AXIS_Y, AXIS_Z,
-};
+use super::style::{space, AXIS_X, AXIS_Y, AXIS_Z};
 use super::transform_gizmos::{GizmoModesEnabled, GizmoScale};
 use super::ui_panel;
 use super::widgets::{
-    group_frame, labelled_row, pretty_slider, section, sub_caption, toggle, wide_button,
+    axis_drag, color_rgb, drag_value, group_frame, pretty_progressbar_text, pretty_slider,
+    row_separator, section, sub_caption, subsection, toggle, wide_button,
 };
 
 /// Bevy `Resource` the UI writes to request a live colour change on
@@ -69,9 +68,7 @@ fn world_section(
     accent: egui::Color32,
 ) {
     section(ui, "world_sandbox", "Sandbox", accent, true, |ui| {
-        labelled_row(ui, "unlimited power", |ui| {
-            toggle(ui, &mut sim.0.unlimited_power, accent);
-        });
+        toggle(ui, "unlimited power", &mut sim.0.unlimited_power, accent);
         ui.add_space(space::TIGHT);
         sub_caption(ui, "Power drain is suspended on every vehicle.");
     });
@@ -157,92 +154,80 @@ fn vehicle_section(
         |ui| {
             // --- Colour ---
             let mut rgb = current_color;
-            labelled_row(ui, "colour", |ui| {
-                if ui.color_edit_button_rgb(&mut rgb).changed() {
-                    if let Some(v) = sim.0.vehicle_mut(id) {
-                        v.spec.chassis.color = rgb;
-                    }
-                    pending_color.pending = Some((id, rgb));
+            if color_rgb(ui, "colour", &mut rgb, accent).changed() {
+                if let Some(v) = sim.0.vehicle_mut(id) {
+                    v.spec.chassis.color = rgb;
                 }
-            });
+                pending_color.pending = Some((id, rgb));
+            }
 
             // --- Mass ---
             let mut mass = current_mass;
-            labelled_row(ui, "mass (kg)", |ui| {
-                let resp = ui.add(
-                    egui::DragValue::new(&mut mass)
-                        .speed(1.0)
-                        .range(0.1..=100_000.0)
-                        .fixed_decimals(1),
-                );
-                if resp.changed() {
-                    sim.0.set_vehicle_mass(id, mass);
-                }
-            });
+            if drag_value(ui, "mass (kg)", &mut mass, 1.0, 0.1..=100_000.0, 1, "").changed() {
+                sim.0.set_vehicle_mass(id, mass);
+            }
 
             // --- Engine force (mean across driven wheels) ---
             if !driven_wheels.is_empty() {
                 let mut ef = mean_engine_force;
-                labelled_row(ui, "max engine (N/wheel)", |ui| {
-                    let resp = ui.add(
-                        egui::DragValue::new(&mut ef)
-                            .speed(1.0)
-                            .range(0.0..=1_000_000.0)
-                            .fixed_decimals(1),
-                    );
-                    if resp.changed() {
-                        if let Some(v) = sim.0.vehicle_mut(id) {
-                            for idx in &driven_wheels {
-                                v.spec.wheels[*idx].max_engine_force = ef;
-                            }
+                if drag_value(
+                    ui,
+                    "max engine (N/wheel)",
+                    &mut ef,
+                    1.0,
+                    0.0..=1_000_000.0,
+                    1,
+                    "",
+                )
+                .changed()
+                {
+                    if let Some(v) = sim.0.vehicle_mut(id) {
+                        for idx in &driven_wheels {
+                            v.spec.wheels[*idx].max_engine_force = ef;
                         }
                     }
-                });
+                }
             }
 
             // --- Brake (mean across all wheels) ---
             if wheels_count > 0 {
                 let mut br = mean_brake;
-                labelled_row(ui, "max brake (N·m/wheel)", |ui| {
-                    let resp = ui.add(
-                        egui::DragValue::new(&mut br)
-                            .speed(1.0)
-                            .range(0.0..=1_000_000.0)
-                            .fixed_decimals(1),
-                    );
-                    if resp.changed() {
-                        if let Some(v) = sim.0.vehicle_mut(id) {
-                            for w in v.spec.wheels.iter_mut() {
-                                w.max_brake = br;
-                            }
+                if drag_value(
+                    ui,
+                    "max brake (N·m/wheel)",
+                    &mut br,
+                    1.0,
+                    0.0..=1_000_000.0,
+                    1,
+                    "",
+                )
+                .changed()
+                {
+                    if let Some(v) = sim.0.vehicle_mut(id) {
+                        for w in v.spec.wheels.iter_mut() {
+                            w.max_brake = br;
                         }
                     }
-                });
+                }
             }
 
-            // --- Damping (linear / angular) ---
+            // --- Damping (linear / angular) — one module per value so
+            // each carries its own separator like every other field.
             let mut lin = current_linear_damping;
             let mut ang = current_angular_damping;
-            labelled_row(ui, "damping (lin / ang)", |ui| {
-                let r_ang = ui.add(
-                    egui::DragValue::new(&mut ang)
-                        .speed(0.05)
-                        .range(0.0..=50.0)
-                        .fixed_decimals(2),
-                );
-                let r_lin = ui.add(
-                    egui::DragValue::new(&mut lin)
-                        .speed(0.05)
-                        .range(0.0..=50.0)
-                        .fixed_decimals(2),
-                );
-                if r_lin.changed() || r_ang.changed() {
-                    if let Some(v) = sim.0.vehicle_mut(id) {
-                        v.spec.chassis.linear_damping = lin;
-                        v.spec.chassis.angular_damping = ang;
-                    }
+            let mut damping_changed = false;
+            if drag_value(ui, "linear damping", &mut lin, 0.05, 0.0..=50.0, 2, "").changed() {
+                damping_changed = true;
+            }
+            if drag_value(ui, "angular damping", &mut ang, 0.05, 0.0..=50.0, 2, "").changed() {
+                damping_changed = true;
+            }
+            if damping_changed {
+                if let Some(v) = sim.0.vehicle_mut(id) {
+                    v.spec.chassis.linear_damping = lin;
+                    v.spec.chassis.angular_damping = ang;
                 }
-            });
+            }
         },
     );
 
@@ -268,20 +253,16 @@ fn work_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent: 
 
     ui.add_space(space::SECTION);
     section(ui, "prop_work", "Work", accent, false, |ui| {
-        labelled_row(ui, "work", |ui| {
-            if toggle(ui, &mut work, accent).changed() {
-                if let Some(v) = sim.0.vehicle_mut(id) {
-                    v.spec.power.work = work;
-                }
+        if toggle(ui, "work", &mut work, accent).changed() {
+            if let Some(v) = sim.0.vehicle_mut(id) {
+                v.spec.power.work = work;
             }
-        });
-        labelled_row(ui, "resistance", |ui| {
-            if pretty_slider(ui, &mut resistance, 0.0..=1.0, 2, "", accent).changed() {
-                if let Some(v) = sim.0.vehicle_mut(id) {
-                    v.spec.power.work_resistance = resistance;
-                }
+        }
+        if pretty_slider(ui, "resistance", &mut resistance, 0.0..=1.0, 2, "", accent).changed() {
+            if let Some(v) = sim.0.vehicle_mut(id) {
+                v.spec.power.work_resistance = resistance;
             }
-        });
+        }
     });
 }
 
@@ -313,13 +294,11 @@ fn power_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent:
     section(ui, "prop_power", "Power", accent, false, |ui| {
         // TURN ON
         let mut turned_on = snap.turned_on;
-        labelled_row(ui, "turn on", |ui| {
-            if toggle(ui, &mut turned_on, accent).changed() {
-                if let Some(v) = sim.0.vehicle_mut(id) {
-                    v.spec.power.turned_on = turned_on;
-                }
+        if toggle(ui, "turn on", &mut turned_on, accent).changed() {
+            if let Some(v) = sim.0.vehicle_mut(id) {
+                v.spec.power.turned_on = turned_on;
             }
-        });
+        }
 
         // Primary selector (only 2+ sources) — grouped in a subtle
         // frame so it reads as one decision, not three loose radios.
@@ -352,18 +331,16 @@ fn power_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent:
             );
             ui.add_space(space::TIGHT);
             let mut capacity = *capacity_snapshot;
-            labelled_row(ui, "capacity", |ui| {
-                if pretty_slider(ui, &mut capacity, 10.0..=5000.0, 0, "", accent).changed() {
-                    if let Some(v) = sim.0.vehicle_mut(id) {
-                        if let Some(src) = v.spec.power.sources.get_mut(idx) {
-                            src.capacity = capacity;
-                            if src.current > src.capacity {
-                                src.current = src.capacity;
-                            }
+            if pretty_slider(ui, "capacity", &mut capacity, 10.0..=5000.0, 0, "", accent).changed() {
+                if let Some(v) = sim.0.vehicle_mut(id) {
+                    if let Some(src) = v.spec.power.sources.get_mut(idx) {
+                        src.capacity = capacity;
+                        if src.current > src.capacity {
+                            src.current = src.capacity;
                         }
                     }
                 }
-            });
+            }
         }
 
         ui.add_space(space::BLOCK);
@@ -411,40 +388,35 @@ fn container_section(
             if idx > 0 {
                 ui.add_space(space::BLOCK);
             }
-            // FILL bar
+            // FILL bar — stacked-pane progressbar module, same language
+            // as the Inspector.
             let frac = if s.capacity > 0.0 {
-                (s.amount / s.capacity).clamp(0.0, 1.0)
+                (s.amount / s.capacity).clamp(0.0, 1.0) as f32
             } else {
                 0.0
             };
-            ui.add(
-                egui::ProgressBar::new(frac as f32)
-                    .text(
-                        egui::RichText::new(format!("{:.0} / {:.0}", s.amount, s.capacity))
-                            .monospace()
-                            .size(font::NUMERIC)
-                            .color(contrast_text_for(accent)),
-                    )
-                    .fill(accent)
-                    .corner_radius(egui::CornerRadius::same(super::style::radius::SM)),
+            let fill_text = format!("{:.0} / {:.0}", s.amount, s.capacity);
+            pretty_progressbar_text(
+                ui,
+                &format!("fill · {}", idx + 1),
+                frac,
+                &fill_text,
+                accent,
             );
 
-            // CAPACITY slider — labelled so its purpose is clear
-            // without eating width with an inline `.text(...)`.
-            ui.add_space(space::TIGHT);
+            // CAPACITY slider — purpose visible without an inline
+            // `.text(...)` eating the width.
             let mut capacity = s.capacity;
-            labelled_row(ui, "capacity", |ui| {
-                if pretty_slider(ui, &mut capacity, 1.0..=5000.0, 0, "", accent).changed() {
-                    if let Some(v) = sim.0.vehicle_mut(id) {
-                        if let Some(c) = v.spec.containers.get_mut(idx) {
-                            c.set_capacity(capacity);
-                        }
+            if pretty_slider(ui, "capacity", &mut capacity, 1.0..=5000.0, 0, "", accent).changed() {
+                if let Some(v) = sim.0.vehicle_mut(id) {
+                    if let Some(c) = v.spec.containers.get_mut(idx) {
+                        c.set_capacity(capacity);
                     }
                 }
-            });
+            }
 
-            // +/- / empty
-            ui.add_space(space::TIGHT);
+            // +/- / empty — inline cluster, with a shared trailing
+            // separator so the row still reads as a module.
             let step = (s.capacity * 0.05).max(1.0);
             ui.horizontal(|ui| {
                 if ui.button(format!("− {:.0}", step)).clicked() {
@@ -469,19 +441,17 @@ fn container_section(
                     }
                 }
             });
+            row_separator(ui);
 
             // RATE slider — auto-fill rate as % of capacity per sec.
-            ui.add_space(space::TIGHT);
             let mut rate_pct = s.fill_rate_frac * 100.0;
-            labelled_row(ui, "rate (%/s)", |ui| {
-                if pretty_slider(ui, &mut rate_pct, 0.0..=5.0, 1, "", accent).changed() {
-                    if let Some(v) = sim.0.vehicle_mut(id) {
-                        if let Some(c) = v.spec.containers.get_mut(idx) {
-                            c.fill_rate_frac = (rate_pct / 100.0).clamp(0.0, 0.05);
-                        }
+            if pretty_slider(ui, "rate (%/s)", &mut rate_pct, 0.0..=5.0, 1, "", accent).changed() {
+                if let Some(v) = sim.0.vehicle_mut(id) {
+                    if let Some(c) = v.spec.containers.get_mut(idx) {
+                        c.fill_rate_frac = (rate_pct / 100.0).clamp(0.0, 0.05);
                     }
                 }
-            });
+            }
         }
     });
 }
@@ -505,18 +475,33 @@ fn transform_section(
         };
         let mut changed = false;
 
-        sub_caption(ui, "position  (drag, double-click to type)");
-        ui.add_space(space::TIGHT);
-        changed |= axis_drag_row(ui, "X", AXIS_X, &mut px, 0.05, " m");
-        changed |= axis_drag_row(ui, "Y", AXIS_Y, &mut py, 0.05, " m");
-        changed |= axis_drag_row(ui, "Z", AXIS_Z, &mut pz, 0.05, " m");
+        subsection(
+            ui,
+            "prop_tr_position",
+            "Position",
+            Some("drag, double-click to type"),
+            accent,
+            true,
+            |ui| {
+                changed |= axis_drag(ui, "X", AXIS_X, &mut px, 0.05, " m", 3).changed();
+                changed |= axis_drag(ui, "Y", AXIS_Y, &mut py, 0.05, " m", 3).changed();
+                changed |= axis_drag(ui, "Z", AXIS_Z, &mut pz, 0.05, " m", 3).changed();
+            },
+        );
 
-        ui.add_space(space::BLOCK);
-        sub_caption(ui, "rotation  (Euler XYZ, degrees)");
-        ui.add_space(space::TIGHT);
-        changed |= axis_drag_row(ui, "X", AXIS_X, &mut rx, 1.0, "°");
-        changed |= axis_drag_row(ui, "Y", AXIS_Y, &mut ry, 1.0, "°");
-        changed |= axis_drag_row(ui, "Z", AXIS_Z, &mut rz, 1.0, "°");
+        subsection(
+            ui,
+            "prop_tr_rotation",
+            "Rotation",
+            Some("Euler XYZ, degrees"),
+            accent,
+            true,
+            |ui| {
+                changed |= axis_drag(ui, "X", AXIS_X, &mut rx, 1.0, "°", 3).changed();
+                changed |= axis_drag(ui, "Y", AXIS_Y, &mut ry, 1.0, "°", 3).changed();
+                changed |= axis_drag(ui, "Z", AXIS_Z, &mut rz, 1.0, "°", 3).changed();
+            },
+        );
 
         if changed {
             let nq = euler_xyz_to_quat(rx.to_radians(), ry.to_radians(), rz.to_radians());
@@ -556,46 +541,6 @@ fn euler_xyz_to_quat(ex: f64, ey: f64, ez: f64) -> (f64, f64, f64, f64) {
     let y = cx * sy * cz - sx * cy * sz;
     let z = cx * cy * sz + sx * sy * cz;
     (w, x, y, z)
-}
-
-fn axis_drag_row(
-    ui: &mut egui::Ui,
-    glyph: &str,
-    color: egui::Color32,
-    value: &mut f64,
-    speed: f64,
-    suffix: &str,
-) -> bool {
-    // Use the same labelled-row skeleton as every other Properties row:
-    // a fixed-width label cell on the left (so the column of controls
-    // stays aligned) with the coloured axis glyph inside it, and the
-    // DragValue in the right cell — which `labelled_row` explicitly
-    // right-aligns against the card edge.
-    let mut changed = false;
-    super::widgets::labelled_row_custom_left(
-        ui,
-        |ui| {
-            ui.label(
-                egui::RichText::new(glyph)
-                    .strong()
-                    .monospace()
-                    .size(font::NUMERIC)
-                    .color(color),
-            );
-        },
-        |ui| {
-            let resp = ui.add(
-                egui::DragValue::new(value)
-                    .speed(speed)
-                    .suffix(suffix)
-                    .fixed_decimals(3),
-            );
-            if resp.changed() {
-                changed = true;
-            }
-        },
-    );
-    changed
 }
 
 /// Bevy system that applies a queued colour change to EVERY tinted

@@ -804,6 +804,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_frost"
+version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_frost#bec4add8f348b2b8a16fbd3df06133b524cb481a"
+dependencies = [
+ "bevy",
+ "bevy_egui",
+]
+
+[[package]]
 name = "bevy_gizmos"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2674,6 +2683,7 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "bevy_frost",
  "datapod",
  "gearbox-core",
  "gearbox-physics",

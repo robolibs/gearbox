@@ -87,3 +87,4 @@ gearbox-viz     = { path = "crates/gearbox-viz" }
 gearbox-editor  = { path = "crates/gearbox-editor" }
 gearbox-api     = { path = "crates/gearbox-api" }
 gearbox-link    = { path = "crates/gearbox-link" }
+bevy_frost      = { git = "https://github.com/bresilla/bevy_frost", package = "bevy_frost" }

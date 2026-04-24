@@ -8,9 +8,17 @@
 //! the simulator through Bevy resources; any changes it needs to
 //! broadcast *outside* the process go through the tool-API crate.
 
-pub mod float;
+// Re-export the generic UI kit under the module names the editor
+// source already uses (`super::float`, `super::widgets`,
+// `super::gizmo_material`) so the in-crate modules didn't need their
+// import paths rewritten during extraction. `float` is an alias for
+// `bevy_frost::floating` after the upstream rename.
+pub use bevy_frost::floating as float;
+pub use bevy_frost::gizmo_material;
+pub use bevy_frost::widgets;
+
+pub mod dock_ribbons;
 pub mod gizmo;
-pub mod gizmo_material;
 pub mod heading_arrows;
 pub mod inspector;
 pub mod left_dock;
@@ -28,21 +36,38 @@ pub mod transform_gizmos;
 pub mod transport;
 pub mod tree;
 pub mod ui_panel;
-pub mod widgets;
 
 use bevy::prelude::*;
 use bevy_egui::EguiPrimaryContextPass;
+use bevy_frost::FrostPlugin;
+
+/// Ordering hooks for the editor's egui-pass systems. Uses a
+/// `SystemSet` enum rather than chaining the fn items directly
+/// because the system function types carry enough lifetime and
+/// `ResMut` params that Bevy 0.18's `.chain()` method resolution
+/// mis-dispatches to the `Curve` trait on a tuple of them.
+#[derive(SystemSet, Debug, Clone, Copy, Eq, PartialEq, Hash)]
+enum EditorUiSet {
+    AccentUpdate,
+    Transport,
+    DockRibbons,
+    LeftDock,
+    RightDock,
+}
 
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        // Load persisted state up-front so the initial tabs match last run.
+        // Load persisted state up-front so the initial active menus
+        // match last run. `SideActive` itself is initialised by
+        // `FrostPlugin`; we seed it with the persisted values here.
         let state = persist::EditorUiState::load();
-        let left = state.left;
-        let right = state.right;
+        let mut seeded_side_active = bevy_frost::SideActive::default();
+        state.seed_side_active(&mut seeded_side_active);
 
-        app.add_plugins(selection_ring::SelectionRingPlugin)
+        app.add_plugins(FrostPlugin)
+            .add_plugins(selection_ring::SelectionRingPlugin)
             .add_plugins(heading_arrows::HeadingArrowsPlugin)
             // Always-on-top mesh material for the (now hidden) legacy
             // gizmo meshes that hold pick metadata.
@@ -54,20 +79,11 @@ impl Plugin for EditorPlugin {
             // screen space, depth-test off).
             .add_plugins(gizmo::GizmoOverlayPlugin)
             .insert_resource(state)
-            .insert_resource(left)
-            .insert_resource(right)
+            .insert_resource(seeded_side_active)
             .insert_resource(preset_registry::PresetRegistry::with_defaults())
             .init_resource::<properties::PendingColorChange>()
             .init_resource::<selection::Selection>()
             .init_resource::<pending_spawn::PendingSpawn>()
-            .init_resource::<style::AccentColor>()
-            .init_resource::<style::GlassOpacity>()
-            // Mirror the slider's value into the `GLASS_OPACITY`
-            // atomic every frame so `section`, `floating_window` and
-            // friends (plain helpers, not Bevy systems) pick up the
-            // current alpha without plumbing a resource reference
-            // through every UI call.
-            .add_systems(PreUpdate, style::sync_glass_opacity_system)
             .init_resource::<transform_gizmos::GizmoMode>()
             .init_resource::<transform_gizmos::HoveredGizmo>()
             .init_resource::<transform_gizmos::GizmoDrag>()
@@ -83,16 +99,47 @@ impl Plugin for EditorPlugin {
                     gizmo::setup_gizmo_overlay,
                 ),
             )
-            .add_systems(
+            // Accent picks up the selected vehicle's colour BEFORE
+            // FrostPlugin's `apply_theme` re-evaluates the palette;
+            // panels draw AFTER so they see the up-to-date style.
+            // `AccentUpdate` and the panel sets live on opposite
+            // sides of `apply_theme` — keep them in separate
+            // `configure_sets` calls so the scheduler doesn't see
+            // one set with contradictory before/after edges.
+            .configure_sets(
+                EguiPrimaryContextPass,
+                EditorUiSet::AccentUpdate.before(bevy_frost::style::apply_theme),
+            )
+            .configure_sets(
                 EguiPrimaryContextPass,
                 (
-                    style::update_accent_from_selection,
-                    style::apply_theme,
-                    transport::transport_bar,
-                    left_dock::left_dock_ui,
-                    right_dock::right_dock_ui,
+                    EditorUiSet::Transport,
+                    EditorUiSet::DockRibbons,
+                    EditorUiSet::LeftDock,
+                    EditorUiSet::RightDock,
                 )
-                    .chain(),
+                    .chain()
+                    .after(bevy_frost::style::apply_theme),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                style::update_accent_from_selection.in_set(EditorUiSet::AccentUpdate),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                transport::transport_bar.in_set(EditorUiSet::Transport),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                dock_ribbons::draw_dock_ribbons_ui.in_set(EditorUiSet::DockRibbons),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                left_dock::left_dock_ui.in_set(EditorUiSet::LeftDock),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                right_dock::right_dock_ui.in_set(EditorUiSet::RightDock),
             )
             .add_systems(
                 Update,

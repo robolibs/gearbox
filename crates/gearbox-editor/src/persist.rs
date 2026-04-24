@@ -1,5 +1,5 @@
-//! Tiny persistence for editor UI state: which tabs were open last session
-//! and the size of each floating window.
+//! Tiny persistence for editor UI state: which menu was open on
+//! each side last session and the size of each floating window.
 //!
 //! Written to `$HOME/.config/gearbox/editor-state.txt` as a simple
 //! `key=value` list. No extra crate deps — just `std::fs` + `std::env`.
@@ -10,14 +10,17 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
-use super::left_dock::LeftTab;
-use super::right_dock::RightTab;
+use bevy_frost::SideActive;
 
 /// UI state snapshot written to disk on change.
-#[derive(Resource, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Debug)]
 pub struct EditorUiState {
-    pub left: LeftTab,
-    pub right: RightTab,
+    /// Menu ids to restore open on each rail. `None` = closed.
+    /// Stored as strings so the save format is agnostic of which
+    /// menus exist — adding a new menu doesn't need a persist-
+    /// format migration.
+    pub left_active: Option<String>,
+    pub right_active: Option<String>,
     pub spawn_size: Vec2,
     pub workspace_size: Vec2,
     pub inspector_size: Vec2,
@@ -26,8 +29,8 @@ pub struct EditorUiState {
 impl Default for EditorUiState {
     fn default() -> Self {
         Self {
-            left: LeftTab::default(),
-            right: RightTab::default(),
+            left_active: None,
+            right_active: None,
             // Every left-rail panel uses the SAME width so toggling
             // between Spawn ↔ Workspace doesn't make the pane visibly
             // resize. Heights can differ because the content heights
@@ -50,18 +53,15 @@ fn state_path() -> Option<PathBuf> {
 
 impl EditorUiState {
     pub fn load() -> Self {
-        // Sizes are fixed at the struct defaults now — we only restore
-        // which tab was open last session. Legacy `*_w`/`*_h` keys are
-        // intentionally ignored so no old corrupted state can override
-        // the panel widths.
         let mut out = Self::default();
         let Some(path) = state_path() else { return out };
         let Ok(text) = fs::read_to_string(&path) else { return out };
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else { continue };
             match k.trim() {
-                "left"  => out.left  = parse_left(v.trim()),
-                "right" => out.right = parse_right(v.trim()),
+                // Back-compat: old "left=workspace", "right=inspector".
+                "left" | "left_active" => out.left_active = parse_menu(v.trim()),
+                "right" | "right_active" => out.right_active = parse_menu(v.trim()),
                 _ => {}
             }
         }
@@ -71,52 +71,51 @@ impl EditorUiState {
     pub fn save(&self) {
         let Some(path) = state_path() else { return };
         let Ok(mut f) = fs::File::create(&path) else { return };
-        let _ = writeln!(f, "left={}",  fmt_left(self.left));
-        let _ = writeln!(f, "right={}", fmt_right(self.right));
+        let _ = writeln!(f, "left_active={}", fmt_menu(&self.left_active));
+        let _ = writeln!(f, "right_active={}", fmt_menu(&self.right_active));
+    }
+
+    /// Seed the provided `SideActive` with the persisted menu ids.
+    /// Intended for one-shot use at app startup, *before* any dock
+    /// system runs — otherwise `invalidate_stale` might clear these
+    /// before the buttons they refer to have registered into the
+    /// layout.
+    pub fn seed_side_active(&self, active: &mut SideActive) {
+        active.left = self.left_active.clone();
+        active.right = self.right_active.clone();
     }
 }
 
-fn parse_left(s: &str) -> LeftTab {
+fn parse_menu(s: &str) -> Option<String> {
     match s {
-        // Accept "spawn" for back-compat with pre-rename state files.
-        "library" | "spawn" => LeftTab::Library,
-        "workspace"         => LeftTab::Workspace,
-        _                   => LeftTab::None,
-    }
-}
-fn fmt_left(t: LeftTab) -> &'static str {
-    match t {
-        LeftTab::Library   => "library",
-        LeftTab::Workspace => "workspace",
-        LeftTab::None      => "none",
-    }
-}
-fn parse_right(s: &str) -> RightTab {
-    match s {
-        "inspector"              => RightTab::Inspector,
-        // Back-compat: the old "ui" tab became "properties".
-        "properties" | "ui"      => RightTab::Properties,
-        _                        => RightTab::None,
-    }
-}
-fn fmt_right(t: RightTab) -> &'static str {
-    match t {
-        RightTab::Inspector  => "inspector",
-        RightTab::Properties => "properties",
-        RightTab::None       => "none",
+        "" | "none" => None,
+        // Back-compat: the old "spawn" label was renamed to "library"
+        // and "ui" was renamed to "properties".
+        "spawn" => Some("library".into()),
+        "ui" => Some("properties".into()),
+        other => Some(other.into()),
     }
 }
 
-/// Periodically flush state to disk whenever it changes. Simple & robust —
-/// no app-exit hook needed.
+fn fmt_menu(m: &Option<String>) -> &str {
+    m.as_deref().unwrap_or("none")
+}
+
+/// Flush state to disk whenever `SideActive` changes. Simple &
+/// robust — no app-exit hook needed.
 pub fn save_state_on_change(
-    left: Res<LeftTab>,
-    right: Res<RightTab>,
+    active: Res<SideActive>,
     mut state: ResMut<EditorUiState>,
 ) {
     let mut changed = false;
-    if *left != state.left   { state.left  = *left;  changed = true; }
-    if *right != state.right { state.right = *right; changed = true; }
+    if active.left != state.left_active {
+        state.left_active = active.left.clone();
+        changed = true;
+    }
+    if active.right != state.right_active {
+        state.right_active = active.right.clone();
+        changed = true;
+    }
     if changed {
         state.save();
     }

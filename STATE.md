@@ -55,13 +55,23 @@ renderer.
 | `gearbox-core` | Shared spec / data types (no physics, no Bevy) | `VehicleSpec`, `ControlInput`, `DriveMode`, `PartSpec` | no |
 | `gearbox-physics` | Rapier-f64 wrapper + drive controllers | `Sim` | no |
 | `gearbox-viz` | Bevy visualization layer; owns `GearboxSim` + `SceneState` | `GearboxSim`, `SceneState`, `ChaseCamera`, `SimClock`, `FollowTarget` | yes |
-| `gearbox-editor` | Egui panels on top of the renderer | `Selection`, `HeadingArrows`, `EditorPlugin` | yes |
+| `gearbox-editor` | Gearbox-specific egui panels (inspector, properties, spawn library, etc.) | `Selection`, `HeadingArrows`, `EditorPlugin` | yes |
+| `bevy_frost` | **Project-agnostic** glass-themed editor UI kit | `FrostPlugin`, `AccentColor`, `GlassOpacity`, `style::*`, `widgets::*`, `float::*`, `gizmo_material::*` | yes |
 | `gearbox-api` | **Tool API** over zenoh | `ApiBroker`, `ClockWire`, `ClockCommand` | optional feature |
 | `gearbox-link` | **Simulator ↔ Renderer** transport via aeronet / WebTransport | `SimToRenderer`, `RendererToSim`, plugins | yes |
 | `bin/gearbox` | The one binary | — | yes |
 
-Dependency direction is one-way: `core → physics → viz → editor → bin`.
-`gearbox-api` and `gearbox-link` sit aside and are pulled by the bin.
+Dependency direction is one-way:
+`core → physics → viz → (bevy_frost) → editor → bin`.
+`gearbox-api`, `gearbox-link` and `bevy_frost` sit aside; the first
+two are pulled by the bin, `bevy_frost` is pulled by the editor.
+
+**`bevy_frost`** exists specifically so the UI kit can be dropped
+into unrelated projects. It has zero gearbox types — only egui
+primitives, design-system tokens, floating-dock helpers, and the
+transform-gizmo always-on-top material. Anything gearbox-specific
+(vehicle inspector, properties panel, spawn library, preset
+registry) stays in `gearbox-editor`.
 
 ## The two network boundaries
 
@@ -204,6 +214,11 @@ server", the Tool API axis has leaked into the wrong conversation.
 - **`SceneState` abstraction**: declared, registered, mirrored
   from `SimClock` every `PostUpdate`. Renderer has an explicit
   rapier-free reading surface.
+- **`bevy_frost`** extracted: `FrostPlugin`, `AccentColor` /
+  `GlassOpacity` resources, widgets, floating docks, gizmo
+  material — all moved out of `gearbox-editor` into a
+  project-agnostic UI kit. Editor re-exports the kit under its old
+  module paths so in-crate imports didn't need mass rewrites.
 - **`gearbox-link` crate**: aeronet WebTransport client + server
   plugins compile (both features). Wire types (`SimToRenderer` /
   `RendererToSim`) live. Session open, accept, CBOR
@@ -263,6 +278,34 @@ All of the split-process work above, **plus**:
   against this workspace yet (the current dev env can't materialise
   the wasm std). Expect surprise breakage from one or more
   transitive deps; plan for a short debug loop.
+
+## ⏳ Further UI generification (optional track)
+
+Candidates to migrate next from `gearbox-editor` into `bevy_frost`
+(each needs a small refactor first to shed gearbox coupling):
+
+- **Selection resource** — currently `Selection { vehicle: Option<VehicleId> }`.
+  Generify to `Selection<T>` or `SelectionEntity(Option<Entity>)`.
+- **Transform gizmos** — reads vehicle/wheel poses. Abstract the
+  "what to move" source behind a trait so it works on any
+  Bevy `Transform` entity.
+- **Selection ring shader** — reads vehicle sim state for the ring
+  size. Swap the data source for a generic `{ centre, radius }`
+  pair fed by the calling project.
+- **Scene outliner / tree rows** — the row painting (hover,
+  selection tint, radio, label + id) is generic; the row *content*
+  (vehicles) is gearbox-specific. Split row painter from content
+  provider.
+- **Transport bar** — generic play/pause/speed pattern. Currently
+  tied to `gearbox_viz::SimClock` / `SimSpeed`. Take a clock trait
+  or a pair of closures.
+- **Persistence** — `persist.rs` is already mostly generic;
+  migrating means taking the exact resource-shape to
+  save/restore as a type parameter.
+
+None of these are *needed* — the editor works. They unlock
+reusing more of the UI in other Bevy projects you might build on
+top of `bevy_frost`.
 
 ## ⏳ OpenUSD integration (separate track)
 
