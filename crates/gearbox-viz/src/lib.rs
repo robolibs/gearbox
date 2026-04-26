@@ -30,13 +30,17 @@
 
 pub mod camera;
 pub mod clouds;
-pub mod grid;
 pub mod input;
 pub mod scene;
 pub mod spawn;
 pub mod step;
 pub mod sync;
 pub mod window_settings;
+
+// Reusable LOD ground grid lives in `bevy_glacial`. Surfaced under
+// the `gearbox_viz::grid` path so existing call sites continue to
+// compile against the familiar import.
+pub use bevy_glacial::grid;
 
 use bevy::prelude::*;
 
@@ -126,6 +130,7 @@ impl Plugin for GearboxVizPlugin {
             .init_resource::<step::SimClock>()
             .init_resource::<scene::SceneState>()
             .init_resource::<FollowTarget>()
+            .init_resource::<camera::ChaseCameraFly>()
             // Mirror server-owned state into `SceneState` every frame.
             // Renderer code reads from `SceneState`; this system is the
             // only place that may write to it.
@@ -137,9 +142,13 @@ impl Plugin for GearboxVizPlugin {
                     step::step_sim_system,
                     sync::sync_vehicle_transforms_system,
                     follow_target_system,
-                    camera::chase_camera_control,
-                    camera::chase_camera_zoom,
+                    // Cinematic fly runs FIRST so user input via the
+                    // `bevy_glacial` control / zoom systems below
+                    // overrides it (and cancels it via the in-fly
+                    // input check inside `chase_camera_fly` itself).
                     camera::chase_camera_fly,
+                    bevy_glacial::chase_camera_control,
+                    bevy_glacial::chase_camera_zoom,
                 )
                     .chain(),
             )
@@ -153,6 +162,7 @@ impl Plugin for GearboxVizPlugin {
 /// so poses are current for this frame.
 pub fn follow_target_system(
     sim: Res<GearboxSim>,
+    fly: Res<camera::ChaseCameraFly>,
     mut target: ResMut<FollowTarget>,
     mut cameras: Query<(&mut camera::ChaseCamera, &mut Transform)>,
 ) {
@@ -162,6 +172,12 @@ pub fn follow_target_system(
     };
     if sim.0.vehicle(id).is_none() {
         target.set(None);
+        return;
+    }
+    // Skip while a cinematic fly is still running — its own system
+    // owns focus/yaw/distance that frame.
+    if fly.target.is_some() {
+        target.last_pos = None;
         return;
     }
     let pose = sim.0.vehicle_pose(id);
@@ -174,11 +190,6 @@ pub fn follow_target_system(
         let delta = current - last;
         if delta.length_squared() > 0.0 {
             for (mut cam, mut tr) in &mut cameras {
-                // Skip while a cinematic fly is still running — its
-                // own system owns focus/yaw/distance that frame.
-                if cam.fly_target.is_some() {
-                    continue;
-                }
                 cam.focus += delta;
                 tr.translation += delta;
             }

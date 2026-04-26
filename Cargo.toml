@@ -47,6 +47,7 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_image",
     "bevy_gizmos",
     "bevy_gizmos_render",
+    "bevy_picking",
     "bevy_scene",
     "default_font",
     "tonemapping_luts",
@@ -88,3 +89,4 @@ gearbox-editor  = { path = "crates/gearbox-editor" }
 gearbox-api     = { path = "crates/gearbox-api" }
 gearbox-link    = { path = "crates/gearbox-link" }
 bevy_frost      = { git = "https://github.com/bresilla/bevy_frost", package = "bevy_frost" }
+bevy_glacial    = { path = "../bevy_glacial" }

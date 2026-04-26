@@ -16,8 +16,9 @@ use gearbox_physics::{
 
 use gearbox_viz::{GearboxSim, SimClock};
 
+use bevy_glacial::GizmoTarget;
+
 use super::pending_spawn::PendingSpawn;
-use super::transform_gizmos::{GizmoDrag, HoveredGizmo};
 
 /// What, if anything, is currently selected.
 #[derive(Resource, Default)]
@@ -45,8 +46,7 @@ pub fn pick_and_drag_system(
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mut contexts: EguiContexts,
-    hovered_gizmo: Res<HoveredGizmo>,
-    gizmo_drag: Res<GizmoDrag>,
+    gizmo_targets: Query<&GizmoTarget>,
     clock: Res<SimClock>,
     pending: Res<PendingSpawn>,
 ) {
@@ -60,7 +60,10 @@ pub fn pick_and_drag_system(
 
     // Transform gizmos always win input: if the cursor's over a handle
     // or a drag is in flight, don't let the vehicle picker fire.
-    if gizmo_drag.active.is_some() || hovered_gizmo.0.is_some() {
+    let gizmo_capturing = gizmo_targets
+        .iter()
+        .any(|t| t.is_focused() || t.is_active());
+    if gizmo_capturing {
         selection.drag = None;
         return;
     }

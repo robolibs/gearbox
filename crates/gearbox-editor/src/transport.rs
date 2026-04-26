@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
 use bevy_frost::{
-    draw_assembly, RibbonCluster, RibbonDrag, RibbonItem, RibbonOpen, RibbonPlacement,
+    draw_assembly, RibbonCluster, RibbonDrag, RibbonGlyph, RibbonItem, RibbonOpen, RibbonPlacement,
 };
 use gearbox_viz::{SimClock, SimSpeed};
 
@@ -61,7 +61,7 @@ pub fn transport_bar(
             ribbon: RIBBON_TRANSPORT,
             cluster: RibbonCluster::Middle,
             slot: 0,
-            glyph: play_glyph,
+            glyph: RibbonGlyph::Text(play_glyph),
             tooltip: play_tooltip,
             child_ribbon: None,
         },
@@ -70,7 +70,7 @@ pub fn transport_bar(
             ribbon: RIBBON_TRANSPORT,
             cluster: RibbonCluster::Middle,
             slot: 1,
-            glyph: speed_glyph,
+            glyph: RibbonGlyph::Text(speed_glyph),
             tooltip: "Speed  —  click to cycle 1× / 2× / 4× / 8×",
             child_ribbon: None,
         },

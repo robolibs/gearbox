@@ -9,6 +9,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+use bevy_frost::PaneBuilder;
 
 use gearbox_physics::VehicleId;
 
@@ -16,10 +17,10 @@ use gearbox_viz::{FollowTarget, GearboxSim, PlayerControlled, VehicleBody};
 
 use super::selection::Selection;
 use super::style::{space, TEXT_SECONDARY};
-use super::widgets::{hybrid_select_row, section};
+use super::widgets::hybrid_select_row;
 
 pub fn draw_content(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     commands: &mut Commands,
     sim: &GearboxSim,
     bodies: &Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
@@ -34,7 +35,7 @@ pub fn draw_content(
     let mut give_drive_to: Option<(VehicleId, Entity)> = None;
 
     // ─── Scene outliner (first — default-open) ────────────────────
-    section(ui, "tree_scene", "Scene", accent, true, |ui| {
+    pane.section("tree_scene", "Scene", true, |ui| {
         if bodies.is_empty() {
             ui.add_space(space::BLOCK);
             ui.vertical_centered(|ui| {
@@ -95,10 +96,8 @@ pub fn draw_content(
         });
     });
 
-    ui.add_space(space::SECTION);
-
     // ─── Stats (default-closed) ───────────────────────────────────
-    section(ui, "tree_stats", "Stats", accent, false, |ui| {
+    pane.section("tree_stats", "Stats", false, |ui| {
         ui.label(
             egui::RichText::new(format!(
                 "{} total · double-click to focus + drive",

@@ -5,7 +5,7 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
-use bevy_frost::{floating_window_for_item, RibbonOpen, RibbonPlacement};
+use bevy_frost::{floating_window_for_item, PaneBuilder, RibbonOpen, RibbonPlacement};
 use gearbox_viz::{GearboxSim, GroundGrid};
 
 use super::dock_ribbons::{is_menu_open, ID_INSPECTOR, ID_PROPERTIES, RIBBONS, RIBBON_ITEMS};
@@ -48,7 +48,7 @@ pub fn right_dock_ui(
             egui::vec2(size.x, size.y),
             &mut keep_open,
             accent_col,
-            |ui| inspector::draw_content(ui, &mut sim, &selection, accent_col),
+            |pane: &mut PaneBuilder| inspector::draw_content(pane, &mut sim, &selection, accent_col),
         );
     }
     if is_menu_open(&open, &placement, ID_PROPERTIES) {
@@ -64,9 +64,9 @@ pub fn right_dock_ui(
             egui::vec2(size.x, size.y),
             &mut keep_open,
             accent_col,
-            |ui| {
+            |pane: &mut PaneBuilder| {
                 properties::draw_content(
-                    ui,
+                    pane,
                     &mut sim,
                     &selection,
                     &mut grid,

@@ -14,8 +14,8 @@
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 use bevy_frost::{
-    draw_assembly, find_item, RibbonCluster, RibbonDef, RibbonDrag, RibbonEdge, RibbonItem,
-    RibbonMode, RibbonOpen, RibbonPlacement, RibbonRole,
+    draw_assembly, find_item, RibbonCluster, RibbonDef, RibbonDrag, RibbonEdge, RibbonGlyph,
+    RibbonItem, RibbonMode, RibbonOpen, RibbonPlacement, RibbonRole,
 };
 
 use super::style::AccentColor;
@@ -71,7 +71,7 @@ pub const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 0,
-        glyph: "W",
+        glyph: RibbonGlyph::Text("W"),
         tooltip: "Workspace",
         child_ribbon: None,
     },
@@ -80,7 +80,7 @@ pub const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 1,
-        glyph: "L",
+        glyph: RibbonGlyph::Text("L"),
         tooltip: "Library",
         child_ribbon: None,
     },
@@ -89,7 +89,7 @@ pub const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_RIGHT,
         cluster: RibbonCluster::Start,
         slot: 0,
-        glyph: "I",
+        glyph: RibbonGlyph::Text("I"),
         tooltip: "Inspector",
         child_ribbon: None,
     },
@@ -98,7 +98,7 @@ pub const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_RIGHT,
         cluster: RibbonCluster::Start,
         slot: 1,
-        glyph: "P",
+        glyph: RibbonGlyph::Text("P"),
         tooltip: "Properties",
         child_ribbon: None,
     },

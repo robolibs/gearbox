@@ -12,16 +12,17 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+use bevy_frost::PaneBuilder;
 
 use gearbox_viz::{GearboxSim, PlayerControlled, VehicleBody};
 
 use super::pending_spawn::PendingSpawn;
 use super::preset_registry::PresetRegistry;
 use super::style::{caption, space};
-use super::widgets::{card_button, section};
+use super::widgets::card_button;
 
 pub fn draw_content(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     commands: &mut Commands,
     pending: &mut PendingSpawn,
     _existing_bodies: &Query<Entity, With<VehicleBody>>,
@@ -32,7 +33,7 @@ pub fn draw_content(
     _player_tagged: &Query<Entity, With<PlayerControlled>>,
     accent: egui::Color32,
 ) {
-    section(ui, "library_vehicles", "Vehicles", accent, true, |ui| {
+    pane.section("library_vehicles", "Vehicles", true, |ui| {
         for (i, entry) in registry.iter().enumerate() {
             if i > 0 {
                 ui.add_space(space::TIGHT);

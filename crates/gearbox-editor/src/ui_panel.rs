@@ -7,16 +7,17 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+use bevy_frost::PaneBuilder;
 
 use gearbox_viz::GroundGrid;
 
 use super::selection_ring::SelectionRingSettings;
-use super::style::{space, GlassOpacity};
+use super::style::GlassOpacity;
 use super::transform_gizmos::{GizmoModesEnabled, GizmoScale};
-use super::widgets::{dual_pane_labelled, pretty_slider, section, toggle};
+use super::widgets::{dual_pane_labelled, pretty_slider, toggle};
 
 pub fn draw_content(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     grid: &mut GroundGrid,
     gizmo_scale: &mut GizmoScale,
     gizmo_modes: &mut GizmoModesEnabled,
@@ -24,15 +25,14 @@ pub fn draw_content(
     glass_opacity: &mut GlassOpacity,
     accent: egui::Color32,
 ) {
-    section(ui, "ui_theme", "Theme", accent, false, |ui| {
+    pane.section("ui_theme", "Theme", false, |ui| {
         let mut v = glass_opacity.0 as f64;
         if pretty_slider(ui, "opacity", &mut v, 1.0..=100.0, 0, "%", accent).changed() {
             glass_opacity.0 = v.round().clamp(1.0, 100.0) as u8;
         }
     });
-    ui.add_space(space::SECTION);
 
-    section(ui, "ui_grid", "Grid", accent, true, |ui| {
+    pane.section("ui_grid", "Grid", true, |ui| {
         toggle(ui, "visible", &mut grid.visible, accent);
 
         let mut alpha = grid.color.alpha() as f64;
@@ -49,9 +49,7 @@ pub fn draw_content(
         });
     });
 
-    ui.add_space(space::SECTION);
-
-    section(ui, "ui_gizmos", "Gizmos", accent, false, |ui| {
+    pane.section("ui_gizmos", "Gizmos", false, |ui| {
         let mut v = gizmo_scale.0 as f64;
         if pretty_slider(ui, "size", &mut v, 0.25..=4.0, 2, "", accent).changed() {
             gizmo_scale.0 = v as f32;
@@ -64,9 +62,7 @@ pub fn draw_content(
         }
     });
 
-    ui.add_space(space::SECTION);
-
-    section(ui, "ui_selection_ring", "Selection Ring", accent, false, |ui| {
+    pane.section("ui_selection_ring", "Selection Ring", false, |ui| {
         let mut t = ring.thickness as f64;
         if pretty_slider(ui, "thickness", &mut t, 0.02..=1.0, 2, "m", accent).changed() {
             ring.thickness = t as f32;

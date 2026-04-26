@@ -6,6 +6,7 @@
 //! shares the same spacing + typography.
 
 use bevy_egui::egui;
+use bevy_frost::PaneBuilder;
 
 use gearbox_physics::VehicleSpec;
 
@@ -16,21 +17,23 @@ use super::style::{
     caption, font, space, title_text, AXIS_X, AXIS_Y, AXIS_Z, TEXT_SECONDARY,
 };
 use super::widgets::{
-    axis_readout_row, pretty_progressbar_text, readout_row, section, sub_caption, subsection,
+    axis_readout_row, pretty_progressbar_text, readout_row, sub_caption, subsection,
 };
 
 pub fn draw_content(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     sim: &mut GearboxSim,
     selection: &Selection,
     accent: egui::Color32,
 ) {
     let Some(id) = selection.vehicle else {
-        world_info(ui, sim, accent);
+        world_info(pane, sim, accent);
         return;
     };
-    let Some(state) = sim.0.vehicle(id) else {
-        sub_caption(ui, "Selected vehicle no longer exists.");
+    let Some(_state) = sim.0.vehicle(id) else {
+        pane.section("insp_missing", "Selection", true, |ui| {
+            sub_caption(ui, "Selected vehicle no longer exists.");
+        });
         return;
     };
 
@@ -38,11 +41,12 @@ pub fn draw_content(
     let linvel = sim.0.vehicle_linvel(id);
     let ctrl = sim.0.control(id);
     let speed = (linvel.vx * linvel.vx + linvel.vy * linvel.vy + linvel.vz * linvel.vz).sqrt();
+    let state = sim.0.vehicle(id).unwrap();
     let size = state.spec.chassis.size;
     let (fp_x, fp_z) = top_down_footprint(&state.spec);
 
     // ═══ Info ═══════════════════════════════════════════════════════
-    section(ui, "insp_info", "Info", accent, true, |ui| {
+    pane.section("insp_info", "Info", true, |ui| {
         // Name + #id header.
         ui.horizontal(|ui| {
             ui.label(title_text(&state.spec.name));
@@ -113,24 +117,20 @@ pub fn draw_content(
         }
     });
 
-    ui.add_space(space::SECTION);
-
     // ═══ Geo ════════════════════════════════════════════════════════
     let geo = sim.0.vehicle_geo(id);
     let heading = sim.0.vehicle_heading(id);
-    section(ui, "insp_geo", "Geo", accent, false, |ui| {
+    pane.section("insp_geo", "Geo", false, |ui| {
         axis_readout_row(ui, "lat", AXIS_Z, &format!("{:+.10}°", geo.latitude));
         axis_readout_row(ui, "lon", AXIS_X, &format!("{:+.10}°", geo.longitude));
         axis_readout_row(ui, "alt", AXIS_Y, &format!("{:+.4} m", geo.altitude));
         readout_row(ui, "heading", &format!("{:6.2}°  {}", heading, compass_letter(heading)));
     });
 
-    ui.add_space(space::SECTION);
-
     // ═══ Transform (read-only; edit in Properties) ═════════════════
     let q = pose.rotation;
     let (rx, ry, rz) = quat_to_euler_xyz(q.w, q.x, q.y, q.z);
-    section(ui, "insp_tr", "Transform", accent, false, |ui| {
+    pane.section("insp_tr", "Transform", false, |ui| {
         subsection(ui, "insp_tr_position", "Position", None, accent, true, |ui| {
             axis_readout_row(ui, "X", AXIS_X, &format!("{:+.3} m", pose.point.x));
             axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", pose.point.y));
@@ -166,20 +166,16 @@ pub fn draw_content(
         );
     });
 
-    ui.add_space(space::SECTION);
-
     // ═══ Velocity ═══════════════════════════════════════════════════
-    section(ui, "insp_vel", "Velocity", accent, false, |ui| {
+    pane.section("insp_vel", "Velocity", false, |ui| {
         axis_readout_row(ui, "X", AXIS_X, &format!("{:+.2} m/s", linvel.vx as f32));
         axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.2} m/s", linvel.vy as f32));
         axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.2} m/s", linvel.vz as f32));
         readout_row(ui, "|v|", &format!("{:.2} m/s", speed));
     });
 
-    ui.add_space(space::SECTION);
-
     // ═══ Control ════════════════════════════════════════════════════
-    section(ui, "insp_ctl", "Control", accent, false, |ui| {
+    pane.section("insp_ctl", "Control", false, |ui| {
         bar_row(ui, "throttle", ctrl.throttle, -1.0, 1.0, accent);
         bar_row(ui, "steer",    ctrl.steer,    -1.0, 1.0, accent);
         bar_row(ui, "brake",    ctrl.brake,     0.0, 1.0, accent);
@@ -188,12 +184,12 @@ pub fn draw_content(
 
 // ─── World (nothing-selected) view ──────────────────────────────────
 
-fn world_info(ui: &mut egui::Ui, sim: &mut GearboxSim, accent: egui::Color32) {
+fn world_info(pane: &mut PaneBuilder, sim: &mut GearboxSim, accent: egui::Color32) {
     let planet = sim.0.planet;
     let gravity = sim.0.gravity;
     let vehicle_count = sim.0.vehicles().count();
 
-    section(ui, "world_summary", "World", accent, true, |ui| {
+    pane.section("world_summary", "World", true, |ui| {
         ui.label(title_text("No selection"));
         ui.add_space(space::ROW);
         readout_row(ui, "vehicles", &vehicle_count.to_string());
@@ -201,9 +197,7 @@ fn world_info(ui: &mut egui::Ui, sim: &mut GearboxSim, accent: egui::Color32) {
         ui.label(caption("Click a vehicle in the viewport, or pick one from Scene."));
     });
 
-    ui.add_space(space::SECTION);
-
-    section(ui, "world_planet", "Planet", accent, false, |ui| {
+    pane.section("world_planet", "Planet", false, |ui| {
         readout_row(ui, "radius",        &format!("{:.0} m",  planet.radius));
         readout_row(
             ui,
@@ -217,9 +211,7 @@ fn world_info(ui: &mut egui::Ui, sim: &mut GearboxSim, accent: egui::Color32) {
         });
     });
 
-    ui.add_space(space::SECTION);
-
-    section(ui, "world_physics", "Physics", accent, false, |ui| {
+    pane.section("world_physics", "Physics", false, |ui| {
         axis_readout_row(ui, "gx", AXIS_X, &format!("{:+.2} m/s²", gravity.x));
         axis_readout_row(ui, "gy", AXIS_Y, &format!("{:+.2} m/s²", gravity.y));
         axis_readout_row(ui, "gz", AXIS_Z, &format!("{:+.2} m/s²", gravity.z));

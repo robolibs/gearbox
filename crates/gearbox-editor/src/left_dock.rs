@@ -9,9 +9,9 @@ use bevy_egui::{egui, EguiContexts};
 
 use gearbox_physics::VehicleId;
 
-use bevy_frost::{floating_window_for_item, RibbonOpen, RibbonPlacement};
+use bevy_frost::{floating_window_for_item, PaneBuilder, RibbonOpen, RibbonPlacement};
 use gearbox_viz::{ChaseCamera, FollowTarget, GearboxSim, PlayerControlled, VehicleBody};
-use gearbox_viz::camera::FlyTarget;
+use gearbox_viz::camera::{ChaseCameraFly, FlyTarget};
 
 use super::dock_ribbons::{is_menu_open, ID_LIBRARY, ID_WORKSPACE, RIBBONS, RIBBON_ITEMS};
 use super::pending_spawn::PendingSpawn;
@@ -46,7 +46,8 @@ pub fn left_dock_ui(
     mut pending: ResMut<PendingSpawn>,
     registry: Res<PresetRegistry>,
     accent: Res<AccentColor>,
-    mut cameras: Query<&mut ChaseCamera>,
+    cameras: Query<&ChaseCamera>,
+    mut chase_fly: ResMut<ChaseCameraFly>,
     mut follow: ResMut<FollowTarget>,
 ) {
     let LeftDockAssets {
@@ -73,9 +74,9 @@ pub fn left_dock_ui(
             egui::vec2(size.x, size.y),
             &mut keep_open,
             accent_col,
-            |ui| {
+            |pane: &mut PaneBuilder| {
                 tree::draw_content(
-                    ui,
+                    pane,
                     &mut commands,
                     &sim,
                     &bodies,
@@ -100,9 +101,9 @@ pub fn left_dock_ui(
             egui::vec2(size.x, size.y),
             &mut keep_open,
             accent_col,
-            |ui| {
+            |pane: &mut PaneBuilder| {
                 spawn_panel::draw_content(
-                    ui,
+                    pane,
                     &mut commands,
                     &mut pending,
                     &existing_bodies,
@@ -122,9 +123,9 @@ pub fn left_dock_ui(
         if sim.0.vehicle(id).is_some() {
             const FINAL_DISTANCE: f32 = 18.0;
             const FLY_DURATION: f32 = 3.0;
-            if let Ok(mut cam) = cameras.single_mut() {
-                let target = FlyTarget::new(id, FINAL_DISTANCE, FLY_DURATION, &cam);
-                cam.fly_target = Some(target);
+            if let Ok(cam) = cameras.single() {
+                chase_fly.target =
+                    Some(FlyTarget::new(id, FINAL_DISTANCE, FLY_DURATION, cam));
             }
         }
     }

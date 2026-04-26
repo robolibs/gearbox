@@ -28,7 +28,7 @@ use datapod::{Point, Pose, Quaternion};
 
 use gearbox_api::GearboxApiPlugin;
 use gearbox_editor::EditorPlugin;
-use gearbox_viz::grid::{rotation_from_latlon_to_top, spawn_circle_meshes, GroundGrid};
+use gearbox_viz::grid::{spawn_circle_meshes, GroundGrid};
 use gearbox_viz::window_settings;
 use gearbox_viz::{
     spawn_height_for, spawn_vehicle_visuals, ChaseCamera, GearboxSim,
@@ -226,7 +226,18 @@ fn setup_scene(
     // Two line-meshes that track the machine — one for its latitude
     // circle, one for its meridian. Mesh data is rebuilt every frame
     // in `viz::grid::update_circle_meshes`.
-    let grid_cfg = GroundGrid::default();
+    // Subtler than `GroundGrid::default()` (which is tuned for the
+    // bevy_glacial demo's plain ground): on top of the planet sphere
+    // a high-alpha grid feels like ink stains. Drop the alpha so the
+    // grid is a soft hint and the world reads first. Inserting the
+    // resource overrides whatever `GlacialPlugin` initialised, and
+    // the per-frame `build_grid_meshes` system reads from this
+    // resource so the alpha sticks across the whole session.
+    let grid_cfg = GroundGrid {
+        color: Color::srgba(80.0 / 255.0, 70.0 / 255.0, 70.0 / 255.0, 0.26),
+        ..GroundGrid::default()
+    };
+    commands.insert_resource(grid_cfg);
     spawn_circle_meshes(&mut commands, &mut meshes, &mut materials, &grid_cfg);
 
     // Cloud shell — translucent sphere at ~planet_radius + 4 km.
@@ -236,6 +247,7 @@ fn setup_scene(
         &mut materials,
         &mut images,
         radius_f64,
+        gearbox_viz::clouds::DEFAULT_CLOUD_ALTITUDE_M,
     );
 
     // --- Sun ---
@@ -300,6 +312,7 @@ fn setup_scene(
             max_distance: radius * 3.0,
             ..default()
         },
+        bevy_glacial::GizmoCamera,
     ));
 
     // --- Starter tractor ---
@@ -318,4 +331,21 @@ fn setup_scene(
         &spec,
     );
     commands.entity(chassis).insert(PlayerControlled);
+}
+
+/// Rotate a unit-Y up vector so the Earth's surface direction at
+/// `(lat, lon)` ends up pointing along world +Y. Lets the planet
+/// sphere mesh sit "right side up" relative to the configured
+/// datum point. Lives here (not in the reusable scene crate) since
+/// it's a planet/world-specific concept.
+fn rotation_from_latlon_to_top(lat_deg: f64, lon_deg: f64) -> Quat {
+    let lat = (lat_deg as f32).to_radians();
+    let lon = (lon_deg as f32).to_radians();
+    let dir = Vec3::new(
+        lat.cos() * lon.cos(),
+        lat.sin(),
+        lat.cos() * lon.sin(),
+    )
+    .normalize();
+    Quat::from_rotation_arc(dir, Vec3::Y)
 }

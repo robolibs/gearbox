@@ -19,25 +19,29 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-/// Altitude of the cloud deck above the planet surface, in metres.
-/// Real cumulus sits around 1–3 km; 4 km gives a touch of visible
-/// separation from the terrain when viewed from orbit.
-const CLOUD_ALTITUDE_M: f64 = 4_000.0;
+/// Default altitude of the cloud deck above the planet surface,
+/// in metres. Real cumulus sits around 1–3 km; 4 km gives a touch
+/// of visible separation from the terrain when viewed from orbit.
+/// Use this when calling [`spawn_cloud_shell`] if you don't need
+/// to override the altitude.
+pub const DEFAULT_CLOUD_ALTITUDE_M: f64 = 4_000.0;
 
 /// Procedural cloud texture resolution (longitude × latitude).
 const CLOUD_TEX_W: u32 = 1024;
 const CLOUD_TEX_H: u32 = 512;
 
-/// Spawn the cloud shell. Called from `setup_scene` after the planet
-/// is set up.
+/// Spawn the cloud shell. `cloud_altitude_m` is the height of the
+/// shell above the planet surface — pass [`DEFAULT_CLOUD_ALTITUDE_M`]
+/// for a stock 4 km cumulus deck.
 pub fn spawn_cloud_shell(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     planet_radius: f64,
+    cloud_altitude_m: f64,
 ) {
-    let shell_radius = planet_radius + CLOUD_ALTITUDE_M;
+    let shell_radius = planet_radius + cloud_altitude_m;
 
     // Mesh: same UV-sphere layout as the planet so texture wrapping
     // is identical. A bit coarser (256×128) is plenty because the

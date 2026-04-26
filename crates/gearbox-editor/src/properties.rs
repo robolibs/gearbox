@@ -8,6 +8,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+use bevy_frost::PaneBuilder;
 
 use gearbox_physics::{
     datapod::{Point, Pose, Quaternion},
@@ -23,7 +24,7 @@ use super::transform_gizmos::{GizmoModesEnabled, GizmoScale};
 use super::ui_panel;
 use super::widgets::{
     axis_drag, color_rgb, drag_value, group_frame, pretty_progressbar_text, pretty_slider,
-    row_separator, section, sub_caption, subsection, toggle, wide_button,
+    row_separator, sub_caption, subsection, toggle, wide_button,
 };
 
 /// Bevy `Resource` the UI writes to request a live colour change on
@@ -35,7 +36,7 @@ pub struct PendingColorChange {
 }
 
 pub fn draw_content(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     sim: &mut GearboxSim,
     selection: &Selection,
     grid: &mut GroundGrid,
@@ -47,10 +48,10 @@ pub fn draw_content(
     accent: egui::Color32,
 ) {
     if let Some(id) = selection.vehicle {
-        vehicle_section(ui, sim, id, pending_color, accent);
+        vehicle_section(pane, sim, id, pending_color, accent);
     } else {
         world_section(
-            ui, sim, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
+            pane, sim, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
         );
     }
 }
@@ -58,7 +59,7 @@ pub fn draw_content(
 // ═══ World panel ════════════════════════════════════════════════════
 
 fn world_section(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     sim: &mut GearboxSim,
     grid: &mut GroundGrid,
     gizmo_scale: &mut GizmoScale,
@@ -67,25 +68,22 @@ fn world_section(
     glass_opacity: &mut super::style::GlassOpacity,
     accent: egui::Color32,
 ) {
-    section(ui, "world_sandbox", "Sandbox", accent, true, |ui| {
+    pane.section("world_sandbox", "Sandbox", true, |ui| {
         toggle(ui, "unlimited power", &mut sim.0.unlimited_power, accent);
         ui.add_space(space::TIGHT);
         sub_caption(ui, "Power drain is suspended on every vehicle.");
     });
 
-    ui.add_space(space::SECTION);
-
-    // Grid / gizmo / ring still live in `ui_panel::draw_content`
-    // (refactored itself when Inspector gets done).
+    // Grid / gizmo / ring still live in `ui_panel::draw_content`.
     ui_panel::draw_content(
-        ui, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
+        pane, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
     );
 }
 
 // ═══ Vehicle panel ══════════════════════════════════════════════════
 
 fn vehicle_section(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     sim: &mut GearboxSim,
     id: VehicleId,
     pending_color: &mut PendingColorChange,
@@ -105,7 +103,9 @@ fn vehicle_section(
         wheels_count,
     ) = {
         let Some(state) = sim.0.vehicle(id) else {
-            sub_caption(ui, "Selected vehicle no longer exists.");
+            pane.section("prop_missing", "Vehicle", true, |ui| {
+                sub_caption(ui, "Selected vehicle no longer exists.");
+            });
             return;
         };
         let name = state.spec.name.clone();
@@ -145,11 +145,9 @@ fn vehicle_section(
         )
     };
 
-    section(
-        ui,
+    pane.section(
         "prop_vehicle",
         &format!("Vehicle · {}", name),
-        accent,
         true,
         |ui| {
             // --- Colour ---
@@ -233,17 +231,15 @@ fn vehicle_section(
 
     // Each helper decides whether it renders at all (Work / Power /
     // Container sections early-return when the selected vehicle has
-    // nothing of that kind). The inter-section gap is their own
-    // responsibility — they insert `space::SECTION` right before they
-    // draw, so a section that doesn't render leaves no orphan gap
-    // above it. Transform is always rendered and emits its own gap.
-    work_section(ui, sim, id, accent);
-    power_section(ui, sim, id, accent);
-    container_section(ui, sim, id, accent);
-    transform_section(ui, sim, id, accent);
+    // nothing of that kind). PaneBuilder handles the inter-section
+    // gap so an unrendered section leaves no orphan space above it.
+    work_section(pane, sim, id, accent);
+    power_section(pane, sim, id, accent);
+    container_section(pane, sim, id, accent);
+    transform_section(pane, sim, id, accent);
 }
 
-fn work_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent: egui::Color32) {
+fn work_section(pane: &mut PaneBuilder, sim: &mut GearboxSim, id: VehicleId, accent: egui::Color32) {
     let Some(state) = sim.0.vehicle(id) else { return };
     if state.spec.power.sources.is_empty() {
         return;
@@ -251,8 +247,7 @@ fn work_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent: 
     let mut work = state.spec.power.work;
     let mut resistance = state.spec.power.work_resistance;
 
-    ui.add_space(space::SECTION);
-    section(ui, "prop_work", "Work", accent, false, |ui| {
+    pane.section("prop_work", "Work", false, |ui| {
         if toggle(ui, "work", &mut work, accent).changed() {
             if let Some(v) = sim.0.vehicle_mut(id) {
                 v.spec.power.work = work;
@@ -266,7 +261,7 @@ fn work_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent: 
     });
 }
 
-fn power_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent: egui::Color32) {
+fn power_section(pane: &mut PaneBuilder, sim: &mut GearboxSim, id: VehicleId, accent: egui::Color32) {
     struct Snap {
         turned_on: bool,
         primary: usize,
@@ -290,8 +285,7 @@ fn power_section(ui: &mut egui::Ui, sim: &mut GearboxSim, id: VehicleId, accent:
         }
     };
 
-    ui.add_space(space::SECTION);
-    section(ui, "prop_power", "Power", accent, false, |ui| {
+    pane.section("prop_power", "Power", false, |ui| {
         // TURN ON
         let mut turned_on = snap.turned_on;
         if toggle(ui, "turn on", &mut turned_on, accent).changed() {
@@ -360,7 +354,7 @@ struct ContainerSnap {
 }
 
 fn container_section(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     sim: &mut GearboxSim,
     id: VehicleId,
     accent: egui::Color32,
@@ -382,8 +376,7 @@ fn container_section(
             .collect()
     };
 
-    ui.add_space(space::SECTION);
-    section(ui, "prop_container", "Container", accent, false, |ui| {
+    pane.section("prop_container", "Container", false, |ui| {
         for (idx, s) in snaps.iter().enumerate() {
             if idx > 0 {
                 ui.add_space(space::BLOCK);
@@ -457,13 +450,12 @@ fn container_section(
 }
 
 fn transform_section(
-    ui: &mut egui::Ui,
+    pane: &mut PaneBuilder,
     sim: &mut GearboxSim,
     id: VehicleId,
     accent: egui::Color32,
 ) {
-    ui.add_space(space::SECTION);
-    section(ui, "prop_transform", "Transform", accent, false, |ui| {
+    pane.section("prop_transform", "Transform", false, |ui| {
         let pose = sim.0.vehicle_pose(id);
         let mut px = pose.point.x;
         let mut py = pose.point.y;

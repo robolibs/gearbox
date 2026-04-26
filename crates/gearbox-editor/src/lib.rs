@@ -18,7 +18,6 @@ pub use bevy_frost::gizmo_material;
 pub use bevy_frost::widgets;
 
 pub mod dock_ribbons;
-pub mod gizmo;
 pub mod heading_arrows;
 pub mod inspector;
 pub mod left_dock;
@@ -69,47 +68,29 @@ impl Plugin for EditorPlugin {
         app.add_plugins(FrostPlugin)
             .add_plugins(selection_ring::SelectionRingPlugin)
             .add_plugins(heading_arrows::HeadingArrowsPlugin)
-            // Always-on-top mesh material for the (now hidden) legacy
-            // gizmo meshes that hold pick metadata.
-            .add_plugins(
-                bevy::pbr::MaterialPlugin::<gizmo_material::GizmoMaterial>::default(),
-            )
-            // 2D overlay gizmo — the actual visual UI, modelled after
-            // urholaukkarinen/transform-gizmo (flat filled shapes in
-            // screen space, depth-test off).
-            .add_plugins(gizmo::GizmoOverlayPlugin)
+            // Transform gizmos: upstream `transform_gizmo_bevy` plugin
+            // plus the editor's bridge that ties it to the
+            // selection / sim.
+            .add_plugins(transform_gizmos::EditorGizmoBridgePlugin)
             .insert_resource(state)
             .insert_resource(seeded_side_active)
             .insert_resource(preset_registry::PresetRegistry::with_defaults())
             .init_resource::<properties::PendingColorChange>()
             .init_resource::<selection::Selection>()
             .init_resource::<pending_spawn::PendingSpawn>()
-            .init_resource::<transform_gizmos::GizmoMode>()
-            .init_resource::<transform_gizmos::HoveredGizmo>()
-            .init_resource::<transform_gizmos::GizmoDrag>()
-            .init_resource::<transform_gizmos::GizmoScale>()
-            .init_resource::<transform_gizmos::GizmoModesEnabled>()
             // `PostStartup` so `main::setup_scene` has already run.
             .add_systems(
                 PostStartup,
                 (
-                    selection_ring::setup_selection_ring,
                     heading_arrows::setup_heading_arrows,
-                    transform_gizmos::setup_transform_gizmos,
-                    gizmo::setup_gizmo_overlay,
                 ),
             )
-            // Accent picks up the selected vehicle's colour BEFORE
-            // FrostPlugin's `apply_theme` re-evaluates the palette;
-            // panels draw AFTER so they see the up-to-date style.
-            // `AccentUpdate` and the panel sets live on opposite
-            // sides of `apply_theme` — keep them in separate
-            // `configure_sets` calls so the scheduler doesn't see
-            // one set with contradictory before/after edges.
-            .configure_sets(
-                EguiPrimaryContextPass,
-                EditorUiSet::AccentUpdate.before(bevy_frost::style::apply_theme),
-            )
+            // The new bevy_frost runs `apply_theme` from inside its
+            // own `ThemePlugin` system in `EguiPrimaryContextPass`
+            // (the system fn is private — no `.before()` hook), so
+            // we update accent in `Update` instead. `Update` runs
+            // before any egui pass each frame, so the theme picks up
+            // the fresh accent value the same frame.
             .configure_sets(
                 EguiPrimaryContextPass,
                 (
@@ -118,11 +99,10 @@ impl Plugin for EditorPlugin {
                     EditorUiSet::LeftDock,
                     EditorUiSet::RightDock,
                 )
-                    .chain()
-                    .after(bevy_frost::style::apply_theme),
+                    .chain(),
             )
             .add_systems(
-                EguiPrimaryContextPass,
+                Update,
                 style::update_accent_from_selection.in_set(EditorUiSet::AccentUpdate),
             )
             .add_systems(
@@ -141,18 +121,13 @@ impl Plugin for EditorPlugin {
                 EguiPrimaryContextPass,
                 right_dock::right_dock_ui.in_set(EditorUiSet::RightDock),
             )
+            // Editor systems. The transform-gizmo plugin owns its
+            // own draw / picking / drag pipeline (registered in
+            // `EditorGizmoBridgePlugin`), so this chain only
+            // contains gearbox-side logic.
             .add_systems(
                 Update,
                 (
-                    // Gizmo input runs BEFORE pick_and_drag so hover +
-                    // active drag block the vehicle-picker cleanly in
-                    // the same frame as the click. Tab cycling is gone
-                    // now: the gizmo shows translate + rotate + scale
-                    // simultaneously (transform-gizmo convention), and
-                    // the clicked handle's `GizmoMode` feeds the drag
-                    // system directly.
-                    transform_gizmos::hover_transform_gizmos,
-                    transform_gizmos::gizmo_drag_system,
                     selection::pick_and_drag_system,
                     player_sync::sync_player_to_selection_system,
                     persist::save_state_on_change,
@@ -162,12 +137,6 @@ impl Plugin for EditorPlugin {
                     pending_spawn::commit_or_cancel_ghost,
                     selection_ring::update_selection_ring,
                     heading_arrows::update_heading_arrows,
-                    // Regen gizmo meshes before the visuals are
-                    // re-synced so the new mesh data and positions
-                    // land on the same frame.
-                    transform_gizmos::regenerate_gizmo_meshes,
-                    transform_gizmos::update_transform_gizmos,
-                    gizmo::draw_gizmo_system,
                 )
                     .chain(),
             )
