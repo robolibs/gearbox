@@ -122,6 +122,11 @@ fn main() {
                 }),
         )
         .add_plugins(EguiPlugin::default())
+        // OpenUSD asset pipeline — registers `UsdAsset` + the
+        // `.usda` / `.usdc` / `.usdz` loader so any code in the
+        // app can `asset_server.load("…/foo.usda")` and get a
+        // composed Bevy `Scene`.
+        .add_plugins(bevy_openusd::UsdPlugin)
         .add_plugins(GearboxVizPlugin)
         .add_plugins(EditorPlugin)
         // Robot / sim API — opens a zenoh session and bridges
@@ -130,6 +135,19 @@ fn main() {
         // runs offline. Add after the sim plugin so the resource is
         // already there for our publisher system.
         .add_plugins(GearboxApiPlugin)
+        // Pluggable per-vehicle topics (cmd_vel / odom / fix). Drop
+        // this line + `crates/gearbox-api/src/vehicle_api.rs` to
+        // remove cleanly.
+        .add_plugins(gearbox_api::VehicleApiPlugin)
+        // Pluggable "go to point" — uses the `ondrive` crate to
+        // drive vehicles to a target pose. Drop this line +
+        // `crates/gearbox-api/src/goto_api.rs` + the `ondrive` dep
+        // in `crates/gearbox-api/Cargo.toml` to remove.
+        .add_plugins(gearbox_api::GotoApiPlugin)
+        // Pluggable world markers (cones / boxes / spheres) over
+        // `gearbox/markers/<id>`. Drop this line +
+        // `crates/gearbox-api/src/markers_api.rs` to remove.
+        .add_plugins(gearbox_api::MarkersApiPlugin)
         // Persists the primary window's size + position to
         // ~/.config/gearbox/window.txt on every resize / move.
         .add_plugins(window_settings::WindowSettingsPlugin)

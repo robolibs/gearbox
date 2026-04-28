@@ -67,6 +67,12 @@
           libxi
           libxrandr
         ];
+
+        # Python + the two libs the `scripts/` zenoh helpers need.
+        pythonForScripts = pkgs.python3.withPackages (ps: with ps; [
+          zenoh
+          cbor2
+        ]);
       in
       {
         devShells.default = pkgs.mkShell {
@@ -85,6 +91,9 @@
             nixglPkgs.nixVulkanNvidia
             nixglPkgs.nixGLIntel      # Mesa fallback (AMD / Intel iGPU)
             nixglPkgs.nixVulkanIntel
+
+            # Python + zenoh client for `scripts/*.py`.
+            pythonForScripts
           ] ++ bevyLibs;
 
           RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";

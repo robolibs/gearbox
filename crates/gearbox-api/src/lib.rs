@@ -55,11 +55,37 @@
 pub mod broker;
 pub mod wire;
 
+// Pluggable per-vehicle topics (cmd_vel / odom / fix). Marked
+// `pub` so `bin/gearbox` can include it; deletion is one file +
+// the `vehicle_api::*` re-exports below + the `add_plugins` line
+// in `bin/gearbox/src/main.rs`.
+pub mod vehicle_api;
+
+// Pluggable "go to point" navigation built on top of `ondrive`.
+// Same single-file delete pattern as `vehicle_api`.
+pub mod goto_api;
+
+// Pluggable world markers — drop / move / despawn cones / boxes /
+// spheres in the scene over zenoh.
+pub mod markers_api;
+
 #[cfg(feature = "bevy")]
 mod plugin;
 
 pub use broker::ApiBroker;
 pub use wire::{ClockCommand, ClockWire};
+
+pub use vehicle_api::{FixWire, OdomWire, TwistWire, VehicleBroker};
+#[cfg(feature = "bevy")]
+pub use vehicle_api::{VehicleApiPlugin, VehicleApiSession};
+
+pub use goto_api::{GotoBroker, GotoCommand, GotoStatusWire};
+#[cfg(feature = "bevy")]
+pub use goto_api::{GotoApiPlugin, GotoApiSession};
+
+pub use markers_api::{MarkerWire, MarkersBroker};
+#[cfg(feature = "bevy")]
+pub use markers_api::{MarkersApiPlugin, MarkersApiSession};
 
 #[cfg(feature = "bevy")]
 pub use plugin::{ApiSession, GearboxApiPlugin};
