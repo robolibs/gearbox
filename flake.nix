@@ -68,10 +68,18 @@
           libxrandr
         ];
 
-        # Python + the two libs the `scripts/` zenoh helpers need.
+        # Python + the libs the `scripts/` zenoh helpers and the
+        # `xtra/MultiBaleCollection/` LLM-coordination experiments need.
         pythonForScripts = pkgs.python3.withPackages (ps: with ps; [
+          # zenoh helpers in scripts/
           zenoh
           cbor2
+          # xtra/MultiBaleCollection/ — numerical + plotting + LLM
+          numpy
+          scipy
+          matplotlib
+          openai
+          python-dotenv
         ]);
       in
       {
@@ -92,8 +100,12 @@
             nixglPkgs.nixGLIntel      # Mesa fallback (AMD / Intel iGPU)
             nixglPkgs.nixVulkanIntel
 
-            # Python + zenoh client for `scripts/*.py`.
+            # Python + zenoh client for `scripts/*.py` and the
+            # `xtra/MultiBaleCollection/` experiments.
             pythonForScripts
+            # ffmpeg — matplotlib.animation calls it to encode the
+            # `.mp4` simulation recordings the experiments produce.
+            pkgs.ffmpeg
           ] ++ bevyLibs;
 
           RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";

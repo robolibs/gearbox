@@ -138,7 +138,7 @@ pub fn tractor_articulated() -> VehicleSpec {
         width: rear_width,
         driven: true,
         steered: false,
-        max_engine_force: 5000.0,
+        max_engine_force: 2500.0,
         max_brake: 1800.0,
         max_steer_rad: 0.0,
         steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
@@ -155,7 +155,7 @@ pub fn tractor_articulated() -> VehicleSpec {
     // zenoh topic prefix `{name}_{id}` stays as `tractor_0`,
     // matching scripts authored against the old preset.
     VehicleBuilder::new("tractor", chassis)
-        .max_speed(6.0)
+        .max_speed(3.0)
         .wheel(front( front_wheel_x, "/robot/steer_front_left/wheel"))
         .wheel(front(-front_wheel_x, "/robot/steer_front_right/wheel"))
         .wheel(rear ( rear_wheel_x,  "/robot/wheel_back_left"))

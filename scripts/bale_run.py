@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
-"""Scatter N "bales" (yellow cones) randomly across a square field
-and have the tractor visit them one by one in nearest-neighbour
-order, removing each cone as it's reached.
+"""Spawn a tractor (or drive an already-spawned one), scatter N
+"bales" (USD cylinders) randomly across a square field, and have the
+vehicle visit them one by one in nearest-neighbour order, removing
+each cone as it's reached.
+
+Arg #1 is dual-purpose:
+
+  * a known preset id (`tractor` | `husky` | `robotti` | `drone` |
+    `oxbo`)  → script publishes `gearbox/sim/spawn` and drives the
+    freshly-spawned vehicle.
+  * any other string                                   → treated as
+    an existing topic prefix (e.g. `tractor_0`); no spawn issued.
 
 The user reference is BaleUAVision (georkara/BaleUAVision on GitHub)
 — their dataset is for aerial detection of bales, no ground-truth
@@ -9,9 +18,9 @@ coordinate dump we can grab, so we just generate a random spread
 that has the same overall flavour.
 
 Usage:
-    python bale_run.py [vehicle] [n_bales] [field_size] [seed]
+    python bale_run.py [preset|prefix] [n_bales] [field_size] [seed]
 
-Defaults: vehicle=tractor_0, n_bales=50, field_size=200 (so points
+Defaults: preset=tractor, n_bales=50, field_size=200 (so points
 fall in [-100, +100]² metres around the origin), seed=42."""
 
 from __future__ import annotations
@@ -25,11 +34,49 @@ import zenoh
 import cbor2
 
 
+# Known preset ids the simulator's `gearbox/sim/spawn` recognises.
+# Mirrors `gearbox_core::presets::registry::all_presets()`. If a new
+# preset is added there, mirror it here too — anything not in this
+# set is interpreted as an existing-vehicle topic prefix.
+KNOWN_PRESETS = {"tractor", "husky", "robotti", "drone", "oxbo"}
+
+
+def spawn_vehicle(
+    session: zenoh.Session,
+    preset: str,
+    spawned_state: dict,
+) -> str | None:
+    """Publish a spawn request and wait up to 5 s for the
+    confirmation. Returns the topic prefix
+    (e.g. `tractor_0`) of the freshly-spawned vehicle, or None on
+    timeout. The caller owns the `gearbox/sim/spawned` subscriber
+    (declared early so peer-advertisement has time to propagate
+    before we start publishing) and just hands us its latched dict."""
+    spawned_state.clear()
+    # Tag the vehicle as `player` so the user can grab WASD if needed
+    # — the goto controller still drives it when `cmd_vel` is silent.
+    session.put(
+        "gearbox/sim/spawn",
+        cbor2.dumps({
+            "preset": preset,
+            "x": 0.0, "y": 0.0, "z": 0.0,
+            "yaw_deg": 0.0,
+            "player": True,
+        }),
+    )
+    t0 = time.time()
+    while not spawned_state and time.time() - t0 < 5.0:
+        time.sleep(0.05)
+    if not spawned_state:
+        return None
+    return f"{spawned_state['name']}_{spawned_state['id']}"
+
+
 def main() -> None:
-    vehicle = sys.argv[1] if len(sys.argv) > 1 else "tractor_0"
-    n_bales = int(sys.argv[2]) if len(sys.argv) > 2 else 50
-    field = float(sys.argv[3]) if len(sys.argv) > 3 else 200.0
-    seed = int(sys.argv[4]) if len(sys.argv) > 4 else 42
+    arg1    = sys.argv[1]        if len(sys.argv) > 1 else "tractor"
+    n_bales = int(sys.argv[2])   if len(sys.argv) > 2 else 50
+    field   = float(sys.argv[3]) if len(sys.argv) > 3 else 200.0
+    seed    = int(sys.argv[4])   if len(sys.argv) > 4 else 42
 
     rng = random.Random(seed)
     half = field / 2.0
@@ -40,9 +87,57 @@ def main() -> None:
 
     session = zenoh.open(zenoh.Config())
 
-    # Unpause first so the tractor can move.
+    # Declare the spawn-confirmation subscriber up-front and let zenoh
+    # advertise it to peers BEFORE we start publishing. Otherwise the
+    # simulator's reply (single Update frame after the spawn lands,
+    # ~16 ms later) races our subscriber registration and gets
+    # dropped before propagation completes.
+    spawned_state: dict = {}
+
+    def on_spawned(sample: zenoh.Sample) -> None:
+        try:
+            spawned_state.update(cbor2.loads(bytes(sample.payload)))
+        except Exception:  # noqa: BLE001
+            pass
+
+    spawn_sub = session.declare_subscriber("gearbox/sim/spawned", on_spawned)
+
+    # Unpause first so the vehicle can move.
     session.put("gearbox/sim/clock/command", cbor2.dumps({"SetPaused": False}))
-    time.sleep(0.05)
+    # Combined: clock-pause settle + subscriber propagation budget.
+    time.sleep(0.5)
+
+    # Decide: spawn vs attach to an already-running vehicle.
+    #
+    #   `tractor`   → known preset id            → spawn a fresh one.
+    #   `tractor_0` → preset id with `_<digits>` → spawn a fresh one
+    #                  (suffix is just a numeric id the user didn't
+    #                  need to type — assume they want to spawn).
+    #   anything else → treat as literal topic prefix; no spawn.
+    preset_to_spawn: str | None = None
+    if arg1 in KNOWN_PRESETS:
+        preset_to_spawn = arg1
+    else:
+        head, _, tail = arg1.rpartition("_")
+        if head in KNOWN_PRESETS and tail.isdigit():
+            preset_to_spawn = head
+
+    if preset_to_spawn is not None:
+        vehicle = spawn_vehicle(session, preset_to_spawn, spawned_state)
+        if vehicle is None:
+            print(f"spawn confirmation for preset `{preset_to_spawn}` timed out — "
+                  f"is the simulator running and is `SpawnApiPlugin` active?")
+            del spawn_sub
+            session.close()
+            sys.exit(1)
+        print(f"spawned `{preset_to_spawn}` — driving via topic prefix `{vehicle}`")
+        # Give Bevy a beat to wire up the per-vehicle cmd_vel / odom /
+        # goto subscribers before we start publishing to them.
+        time.sleep(0.3)
+    else:
+        vehicle = arg1
+        print(f"using existing vehicle topic prefix `{vehicle}` (no spawn)")
+        del spawn_sub
 
     # Spawn every bale as a USD-loaded cylinder ("bale" asset).
     # `usd_path` is relative to `bin/gearbox/assets/`, so the file

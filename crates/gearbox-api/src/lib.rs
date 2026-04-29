@@ -69,6 +69,10 @@ pub mod goto_api;
 // spheres in the scene over zenoh.
 pub mod markers_api;
 
+// Pluggable vehicle spawner — drop a tractor / husky / robotti /
+// drone / oxbo into the scene at any (x,z) + yaw over zenoh.
+pub mod spawn_api;
+
 #[cfg(feature = "bevy")]
 mod plugin;
 
@@ -86,6 +90,10 @@ pub use goto_api::{GotoApiPlugin, GotoApiSession};
 pub use markers_api::{MarkerWire, MarkersBroker};
 #[cfg(feature = "bevy")]
 pub use markers_api::{MarkersApiPlugin, MarkersApiSession};
+
+pub use spawn_api::{SpawnBroker, SpawnVehicleWire, SpawnedVehicleWire};
+#[cfg(feature = "bevy")]
+pub use spawn_api::{SpawnApiPlugin, SpawnApiSession};
 
 #[cfg(feature = "bevy")]
 pub use plugin::{ApiSession, GearboxApiPlugin};

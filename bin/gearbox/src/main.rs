@@ -23,17 +23,11 @@ use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 
-use gearbox_core::presets;
-use datapod::{Point, Pose, Quaternion};
-
 use gearbox_api::GearboxApiPlugin;
 use gearbox_editor::EditorPlugin;
 use gearbox_viz::grid::{spawn_circle_meshes, GroundGrid};
 use gearbox_viz::window_settings;
-use gearbox_viz::{
-    spawn_height_for, spawn_vehicle_visuals, ChaseCamera, GearboxSim,
-    GearboxVizPlugin, PlayerControlled, UsdAssetRoot,
-};
+use gearbox_viz::{ChaseCamera, GearboxSim, GearboxVizPlugin, UsdAssetRoot};
 
 /// Tag for the fine-tessellated spherical cap that follows the
 /// camera. Same material as the planet; curved to match the sphere
@@ -166,6 +160,10 @@ fn main() {
         // `gearbox/markers/<id>`. Drop this line +
         // `crates/gearbox-api/src/markers_api.rs` to remove.
         .add_plugins(gearbox_api::MarkersApiPlugin)
+        // Pluggable vehicle spawner — drop a tractor / husky / etc.
+        // anywhere in the scene over `gearbox/sim/spawn`. Drop this
+        // line + `crates/gearbox-api/src/spawn_api.rs` to remove.
+        .add_plugins(gearbox_api::SpawnApiPlugin)
         // Persists the primary window's size + position to
         // ~/.config/gearbox/window.txt on every resize / move.
         .add_plugins(window_settings::WindowSettingsPlugin)
@@ -195,7 +193,7 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<bevy::image::Image>>,
-    asset_server: Res<bevy::asset::AssetServer>,
+    _asset_server: Res<bevy::asset::AssetServer>,
 ) {
     // Physics: flat ground plane. (A ball collider at Earth radius hits
     // f32-precision limits in rapier's distance checks — wheels go
@@ -352,23 +350,9 @@ fn setup_scene(
         bevy_glacial::GizmoCamera,
     ));
 
-    // --- Starter tractor ---
-    let spec = presets::tractor_articulated();
-    let pose = Pose {
-        point: Point::new(0.0, spawn_height_for(&spec), 0.0),
-        rotation: Quaternion::identity(),
-    };
-    let id = sim.0.spawn_vehicle(spec.clone(), pose);
-    let chassis = spawn_vehicle_visuals(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &mut images,
-        &asset_server,
-        id,
-        &spec,
-    );
-    commands.entity(chassis).insert(PlayerControlled);
+    // No starter vehicle — the scene boots empty. External tools
+    // (or the editor's spawn panel) drop vehicles in via the
+    // `gearbox/sim/spawn` zenoh topic served by `SpawnApiPlugin`.
 }
 
 /// Rotate a unit-Y up vector so the Earth's surface direction at
