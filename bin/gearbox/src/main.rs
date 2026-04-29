@@ -32,7 +32,7 @@ use gearbox_viz::grid::{spawn_circle_meshes, GroundGrid};
 use gearbox_viz::window_settings;
 use gearbox_viz::{
     spawn_height_for, spawn_vehicle_visuals, ChaseCamera, GearboxSim,
-    GearboxVizPlugin, PlayerControlled,
+    GearboxVizPlugin, PlayerControlled, UsdAssetRoot,
 };
 
 /// Tag for the fine-tessellated spherical cap that follows the
@@ -119,8 +119,26 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(window_settings::geometry_to_window(window_geometry)),
                     ..default()
+                })
+                // Asset path: anchor at the package root via the
+                // compile-time `CARGO_MANIFEST_DIR`. cargo's launched-
+                // binary cwd is unstable across `make run` / direct
+                // `cargo run` / IDE launches; an absolute path is the
+                // only setup that resolves the same regardless of
+                // who invoked us. Resolves to
+                // `<repo>/bin/gearbox/assets/`.
+                .set(bevy::asset::AssetPlugin {
+                    file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").to_string(),
+                    ..default()
                 }),
         )
+        // Tell `gearbox-viz` where the asset root lives so it can
+        // forward sibling-reference search paths to bevy_openusd's
+        // loader. Must be the same dir as `AssetPlugin.file_path`
+        // above.
+        .insert_resource(UsdAssetRoot(
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets")),
+        ))
         .add_plugins(EguiPlugin::default())
         // OpenUSD asset pipeline — registers `UsdAsset` + the
         // `.usda` / `.usdc` / `.usdz` loader so any code in the
@@ -177,6 +195,7 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<bevy::image::Image>>,
+    asset_server: Res<bevy::asset::AssetServer>,
 ) {
     // Physics: flat ground plane. (A ball collider at Earth radius hits
     // f32-precision limits in rapier's distance checks — wheels go
@@ -334,7 +353,7 @@ fn setup_scene(
     ));
 
     // --- Starter tractor ---
-    let spec = presets::tractor();
+    let spec = presets::tractor_articulated();
     let pose = Pose {
         point: Point::new(0.0, spawn_height_for(&spec), 0.0),
         rotation: Quaternion::identity(),
@@ -345,6 +364,7 @@ fn setup_scene(
         &mut meshes,
         &mut materials,
         &mut images,
+        &asset_server,
         id,
         &spec,
     );

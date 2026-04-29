@@ -152,7 +152,23 @@ impl Plugin for GearboxVizPlugin {
                 )
                     .chain(),
             )
-            .add_systems(Update, (grid::build_grid_meshes, grid::update_grid_alpha));
+            .add_systems(Update, (grid::build_grid_meshes, grid::update_grid_alpha))
+            // Promote `PendingUsdScene` markers to `SceneRoot` once
+            // the underlying `UsdAsset` finishes loading.
+            .add_systems(Update, spawn::instantiate_pending_usd_scenes)
+            // Once the projected USD prims appear in the world, find
+            // the wheel prims listed on `PendingUsdWheelTags`,
+            // snapshot their authored rest pose, and tag them with
+            // `UsdWheelDriver`. The companion `drive_usd_wheels`
+            // system then writes `rest * R_steer * R_spin` into each
+            // wheel-prim's *local* Transform every frame — chassis
+            // pose still propagates via Bevy's hierarchy.
+            .add_systems(Update, spawn::tag_usd_wheels_when_ready)
+            .add_systems(Update, spawn::drive_usd_wheels)
+            // One-shot per-prim orientation dump so we can see exactly
+            // where each USD-projected entity ends up in world space.
+            // Read by the dev to diagnose mis-rotated assets.
+            .add_systems(Update, spawn::debug_log_new_usd_prims);
     }
 }
 
@@ -201,5 +217,5 @@ pub fn follow_target_system(
 pub use camera::ChaseCamera;
 pub use grid::GroundGrid;
 pub use scene::{SceneClock, SceneState};
-pub use spawn::{spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals, GhostTag};
+pub use spawn::{spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals, GhostTag, UsdAssetRoot};
 pub use step::{SimClock, SimSpeed};

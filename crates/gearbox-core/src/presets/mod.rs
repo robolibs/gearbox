@@ -10,11 +10,11 @@ mod husky;
 mod oxbo_harvester;
 pub mod registry;
 mod robotti;
-mod tractor;
+mod tractor_articulated;
 
 pub use drone::drone;
 pub use husky::husky;
 pub use oxbo_harvester::oxbo_harvester;
 pub use registry::{all_presets, PresetEntry};
 pub use robotti::robotti;
-pub use tractor::tractor;
+pub use tractor_articulated::tractor_articulated;

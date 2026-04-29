@@ -8,6 +8,7 @@ members = [
     "crates/gearbox-api",
     "crates/gearbox-link",
     "bin/gearbox",
+    "bin/probe_usd",
 ]
 
 # Shared metadata. Each member inherits with `version.workspace = true`.
@@ -94,7 +95,12 @@ ondrive         = { git = "https://codeberg.org/robolibs/ondrive.git" }
 # Pinned to a specific commit so a transitive update upstream
 # can't silently change scene-projection behaviour. Bump by
 # editing this `rev`.
-bevy_openusd    = { git = "https://github.com/bresilla/bevy_openusd", rev = "051da7cae048ee7aa46c03dca3f7c714326a616f" }
+# Pinned commit carrying the variant-label cache discriminator
+# (`asset_path#variants:...`) — without it, `load_with_settings`
+# collapses every variant request onto a single handle and the
+# last load wins for every consumer.
+bevy_openusd    = { git = "https://github.com/bresilla/bevy_openusd", rev = "578dd430cd8f5c287cce1ef7ee54d81f52a583d9" }
+openusd         = { git = "https://github.com/mxpv/openusd", branch = "main" }
 
 # Force every transitive `datapod` (notably the one ondrive pulls
 # in via its own git ref) to resolve to the same local copy gearbox

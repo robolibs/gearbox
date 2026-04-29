@@ -32,8 +32,8 @@ pub fn all_presets() -> Vec<PresetEntry> {
         PresetEntry {
             id: "tractor",
             display_name: "Tractor",
-            subtitle: "John Deere 8R · 4W RWD",
-            factory: super::tractor,
+            subtitle: "USD-mesh body · raycast wheels · 4W RWD",
+            factory: super::tractor_articulated,
         },
         PresetEntry {
             id: "husky",

@@ -16,7 +16,7 @@ fn tractor_settles_and_drives() {
     let mut sim = Sim::new();
     sim.add_ground_plane(100.0);
 
-    let spec = presets::tractor();
+    let spec = presets::tractor_articulated();
     // Spawn just above the rest height so settling has minimal impact
     // energy and the chassis doesn't bounce-pitch off the ground.
     let start_y = 1.4;

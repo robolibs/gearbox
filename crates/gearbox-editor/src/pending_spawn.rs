@@ -153,6 +153,7 @@ pub fn commit_or_cancel_ghost(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<bevy::image::Image>>,
+    asset_server: Res<bevy::asset::AssetServer>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     player_tagged: Query<Entity, With<PlayerControlled>>,
@@ -241,6 +242,7 @@ pub fn commit_or_cancel_ghost(
         &mut meshes,
         &mut materials,
         &mut images,
+        &asset_server,
         id,
         &spec,
     );

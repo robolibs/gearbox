@@ -7,12 +7,11 @@
 //! w = 0.15 m, mounted at (±0.335, -, ±0.30). No steering joints —
 //! turning is pure skid-steer via [`DriveMode::Differential`].
 
-use datapod::{Point, Size};
+use datapod::{Point, Quaternion, Size};
 
-use crate::vehicle::parts_lib;
 use crate::vehicle::{
-    ChassisSpec, DriveMode, MeshSource, PartKind, PowerKind, PowerSource, VehicleBuilder,
-    VehicleSpec, WheelSpec,
+    ChassisSpec, DriveMode, MeshSource, PowerKind, PowerSource, VehicleBuilder, VehicleSpec,
+    WheelSpec,
 };
 
 pub fn husky() -> VehicleSpec {
@@ -38,12 +37,36 @@ pub fn husky() -> VehicleSpec {
         // sandy ground without looking washed-out.
         color: [0.82, 0.55, 1.00],
         inertia_size: None,
-        render_chassis: true,
+        render_chassis: false,
         mesh: MeshSource::Box,
+        usd_asset: Some("machines/husky.usdc"),
+        // Husky URDF→USD: X = forward, Y = lateral (left), Z = up.
+        // bevy_openusd's `rot_x(-π/2)` flip alone leaves USD-X mapped
+        // to bevy-X (= gearbox lateral), which puts the husky's
+        // forward axis sideways. Compose `rot_y(-π/2)` on top so the
+        // net (`rot_y(-π/2) * rot_x(-π/2)`) maps USD-X → bevy-Z
+        // (forward), USD-Y → bevy-X (lateral), USD-Z → bevy-Y (up).
+        //
+        // Lower the SceneRoot until the USD wheel-bottoms (= USD-Z
+        // -0.132 + offset) touch the rapier raycast wheel-bottom
+        // plane. With raycast wheels carrying the chassis, the
+        // settled chassis Y ≈ wheel_radius + chassis_y/2 + clearance,
+        // and we want USD origin → settled chassis Y - 0.132.
+        usd_scene_offset: Point::new(0.0, -0.10, 0.0),
+        usd_scene_rotation: Quaternion::new(
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+            -std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+        ),
     };
 
     // --- Suspension + wheels ---------------------------------------
-    let radius = 0.125;
+    // Radius bumped from 0.125 → 0.165 to match the husky USD's
+    // authored wheel mesh (USDC encodes wheel-centre 0.165 m above
+    // wheel-bottom). With the matching radius the rapier raycast
+    // and USD wheel meshes overlap exactly when settled.
+    let radius = 0.165;
     let width  = 0.15;
 
     let rest = 0.06;
@@ -60,14 +83,15 @@ pub fn husky() -> VehicleSpec {
     let target_bottom  = chassis_bottom - 0.22;
     let conn_y = target_bottom + rest + radius;
 
-    // Flatsim husky wheel positions: (±0.335, ±0.30) in the
-    // x-lateral / y-longitudinal convention of the URDF; swap to
-    // gearbox (x-lateral / z-longitudinal).
-    let wheel_x = 0.335;
-    let front_z =  0.30;
-    let rear_z  = -0.30;
+    // Wheel positions taken straight from the husky USD prim
+    // hierarchy after the `rot_y(-π/2) * rot_x(-π/2)` orientation
+    // fix: USD-Y (lateral) → gearbox `+X`, USD-X (forward) → gearbox
+    // `+Z`. So wheel-x = ±0.285 and front-z = ±0.256.
+    let wheel_x = 0.285;
+    let front_z =  0.256;
+    let rear_z  = -0.256;
 
-    let make = |x: f64, z: f64| WheelSpec {
+    let make = |x: f64, z: f64, prim: &'static str| WheelSpec {
         chassis_connection: Point::new(x, conn_y as f64, z),
         suspension_dir: Point::new(0.0, -1.0, 0.0),
         axle_dir: Point::new(-1.0, 0.0, 0.0),
@@ -89,37 +113,17 @@ pub fn husky() -> VehicleSpec {
         max_brake: 2.5,
         max_steer_rad: 0.0,
         steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
+        usd_prim_path: Some(prim),
+        usd_steer_prim_path: None,
     };
-
-    // --- Sensor / battery marker parts ------------------------------
-    // Battery sits inside the base; keep it as a visual-only marker
-    // (Hitch kind → no collider, just a small dark block).
-    let battery = parts_lib::cuboid(
-        "battery",
-        Point::new(0.0, -0.02, 0.0),
-        Size::new(0.30, 0.15, 0.20),
-        [0.10, 0.10, 0.12],
-        PartKind::Hitch,
-    );
-    // Sensor-mount top plate — half the chassis top, 4 cm thick.
-    let top_plate = parts_lib::top_plate(
-        chassis_x,
-        chassis_z,
-        chassis_y * 0.5,
-        0.9, // width_frac
-        0.7, // depth_frac
-        0.04,
-        [0.30, 0.30, 0.34],
-    );
 
     VehicleBuilder::new("husky", chassis)
         .max_speed(1.5)
-        .wheel(make( wheel_x, front_z))
-        .wheel(make(-wheel_x, front_z))
-        .wheel(make( wheel_x, rear_z))
-        .wheel(make(-wheel_x, rear_z))
-        .part(top_plate)
-        .part(battery)
+        .wheel(make( wheel_x, front_z, "/husky/base_link/front_left_wheel_link"))
+        .wheel(make(-wheel_x, front_z, "/husky/base_link/front_right_wheel_link"))
+        .wheel(make( wheel_x, rear_z,  "/husky/base_link/rear_left_wheel_link"))
+        .wheel(make(-wheel_x, rear_z,  "/husky/base_link/rear_right_wheel_link"))
+        // No `.part(...)` — the USD scene supplies the visible body.
         .drive_mode(DriveMode::Differential)
         .power_source(
             PowerSource::new(PowerKind::Battery, "Battery", 200.0)

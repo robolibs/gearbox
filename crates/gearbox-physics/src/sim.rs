@@ -397,6 +397,30 @@ impl Sim {
         rpose_to_pose(Pose3::from_parts(center, spin * basis_rot))
     }
 
+    /// Cumulative spin angle of a wheel (radians, increasing in the
+    /// direction the wheel rolls when the vehicle moves "forward").
+    /// Used by visualisers that drive the wheel's *local* rotation
+    /// around the axle — e.g. when the wheel mesh is parented to the
+    /// chassis (USD scenes), so its world pose is `chassis * local`
+    /// and we only want to add steer + spin locally.
+    pub fn wheel_spin_angle(&self, id: VehicleId, wheel: usize) -> f64 {
+        self.vehicles
+            .get(&id)
+            .and_then(|v| v.handles.controller.wheels().get(wheel))
+            .map(|w| w.rotation)
+            .unwrap_or(0.0)
+    }
+
+    /// Steering angle of a wheel (radians, around the suspension /
+    /// kingpin axis). Companion to [`wheel_spin_angle`] — same use case.
+    pub fn wheel_steering_angle(&self, id: VehicleId, wheel: usize) -> f64 {
+        self.vehicles
+            .get(&id)
+            .and_then(|v| v.handles.controller.wheels().get(wheel))
+            .map(|w| w.steering)
+            .unwrap_or(0.0)
+    }
+
     pub fn vehicles(&self) -> impl Iterator<Item = (VehicleId, &VehicleState)> {
         self.vehicles.iter().map(|(id, v)| (*id, v))
     }

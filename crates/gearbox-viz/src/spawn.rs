@@ -28,6 +28,316 @@ const TYRE_STRIPE_ARC_M: f32 = 0.40;
 #[derive(Component)]
 pub struct GhostTag;
 
+/// Filesystem root that the Bevy `AssetServer` resolves asset paths
+/// against — i.e. the `AssetPlugin.file_path`. Set from the binary's
+/// `main.rs` so `gearbox-viz` doesn't have to guess.
+///
+/// Used by [`instantiate_pending_usd_scenes`] to compute the asset's
+/// real filesystem parent for `bevy_openusd`'s `search_paths` so that
+/// sibling references (`./tractor.usdc`) resolve.
+#[derive(bevy::ecs::resource::Resource, Clone)]
+pub struct UsdAssetRoot(pub std::path::PathBuf);
+
+/// Tag carried by an entity that wants to load + instantiate a USD
+/// asset. The deferred system [`instantiate_pending_usd_scenes`]
+/// drives it through three states using a single `Option` field:
+///
+///   1. `handle: None` — load not yet started; on next frame the
+///      system calls `asset_server.load_with_settings(...)` with
+///      `search_paths` derived from [`UsdAssetRoot`] + the asset's
+///      filesystem parent so sibling refs resolve.
+///   2. `handle: Some(h)` and `LoadState::Loading` — asset still
+///      streaming; system polls.
+///   3. `handle: Some(h)` and `LoadState::Loaded` — system reads
+///      `UsdAsset.scene`, attaches `SceneRoot` to the entity, and
+///      removes the marker.
+#[derive(Component)]
+pub struct PendingUsdScene {
+    pub asset_path: String,
+    pub name: String,
+    pub handle: Option<Handle<bevy_openusd::UsdAsset>>,
+}
+
+/// One pending USD-wheel installation. We can't act on it until the
+/// scene is projected (the prim entity exists with a `UsdPrimRef`).
+/// Once we find it, we *don't* detach the wheel from the chassis —
+/// instead we leave the USD scene's hierarchy intact and just drive
+/// the wheel-prim's *local* rotation each frame, mirroring the
+/// `urdf2usd` viewer's pattern. That way:
+///   * The chassis pose propagates to the wheels via Bevy's transform
+///     hierarchy automatically — no scrambling of authored offsets.
+///   * The wheel's authored translate stays correct (the wheel hub
+///     position is whatever the USDA placed it at).
+///   * Spin and steer are added as small local rotations around the
+///     wheel-prim's *local* axle / vertical axes — and those local
+///     axes vary per preset depending on the asset's authored frame.
+#[derive(Clone, Debug)]
+pub struct PendingUsdWheelTag {
+    pub vehicle_id: gearbox_core::VehicleId,
+    pub wheel_index: usize,
+    pub prim_path: String,
+    /// Wheel-prim local axis that becomes the *axle* (gearbox-X
+    /// lateral) once the chassis identity-rotates. Computed from
+    /// `ChassisSpec.usd_scene_rotation` × `bevy_openusd`'s internal
+    /// Z↔Y flip.
+    pub spin_axis: Vec3,
+    /// Wheel-prim local axis that becomes the *vertical* (gearbox-Y
+    /// up) once the chassis identity-rotates. Used for steering.
+    pub steer_axis: Vec3,
+    /// Apply rapier spin angle to this prim's rotation each frame.
+    pub apply_spin: bool,
+    /// Apply rapier steer angle to this prim's rotation each frame.
+    pub apply_steer: bool,
+}
+
+/// Component on the chassis entity that lists which USD-projected
+/// prims still need to be promoted into driven wheels. Entries are
+/// removed as they're satisfied; the component is removed when the
+/// list empties.
+#[derive(Component)]
+pub struct PendingUsdWheelTags(pub Vec<PendingUsdWheelTag>);
+
+/// Marker + state on a USD-projected wheel prim entity. Driven each
+/// frame by [`drive_usd_wheels`].
+#[derive(Component)]
+pub struct UsdWheelDriver {
+    pub vehicle_id: gearbox_core::VehicleId,
+    pub wheel_index: usize,
+    /// Snapshotted local Transform at install time (the authored rest
+    /// pose: chassis-local hub position + identity rotation, scaled if
+    /// applicable). We re-derive `Transform` each frame as
+    /// `rest * R_steer * R_spin` so the rest pose is exactly
+    /// preserved when both angles are zero.
+    pub rest_local: Transform,
+    /// Per-wheel local-frame axle direction — depends on the asset's
+    /// authored conventions plus `ChassisSpec.usd_scene_rotation`.
+    pub spin_axis: Vec3,
+    /// Per-wheel local-frame vertical direction (steering pivot).
+    pub steer_axis: Vec3,
+    /// Whether to apply the wheel's *spin* angle (rolling) on this
+    /// entity. False on the steering knuckle of a split layout (the
+    /// knuckle only steers; the spin lives on the inner wheel prim).
+    pub apply_spin: bool,
+    /// Whether to apply the wheel's *steer* angle (kingpin rotation)
+    /// on this entity. False on the inner wheel of a split layout
+    /// (the wheel only spins).
+    pub apply_steer: bool,
+}
+
+/// One-shot debug system: when *new* `UsdPrimRef` entities appear,
+/// log their world position + world rotation. Helps diagnose
+/// orientation bugs (e.g. "is this husky actually upside down?")
+/// by giving the actual rendered axes for the asset's named parts.
+///
+/// Tracks which paths have already been logged in a `Local<HashSet>`
+/// so each entity only fires once.
+pub fn debug_log_new_usd_prims(
+    prims: Query<(&bevy_openusd::UsdPrimRef, &GlobalTransform), Added<bevy_openusd::UsdPrimRef>>,
+    mut seen: Local<std::collections::HashSet<String>>,
+) {
+    // Names that signal "vertical" or "front" so we can sanity-check
+    // axis orientation at a glance. Limit logging to those plus the
+    // root prims to keep the noise manageable.
+    let interesting = [
+        "base_link",
+        "wheel_link",
+        "top_chassis",
+        "top_plate",
+        "front_bumper",
+        "rear_bumper",
+        "imu_link",
+        "user_rail",
+        "robotti",
+        "husky",
+        "tractor",
+    ];
+    for (pr, gt) in prims.iter() {
+        if seen.contains(&pr.path) {
+            continue;
+        }
+        let interesting_match = interesting.iter().any(|kw| pr.path.contains(kw));
+        if !interesting_match {
+            continue;
+        }
+        seen.insert(pr.path.clone());
+        let (s, r, t) = gt.to_scale_rotation_translation();
+        let (axis, angle) = r.to_axis_angle();
+        bevy::log::info!(
+            "USD-PRIM `{}` world: t=({:+.3}, {:+.3}, {:+.3}) rot=axis({:.3},{:.3},{:.3})·angle={:+.1}° scale=({:.3},{:.3},{:.3})",
+            pr.path,
+            t.x, t.y, t.z,
+            axis.x, axis.y, axis.z, angle.to_degrees(),
+            s.x, s.y, s.z,
+        );
+    }
+}
+
+/// Per-frame system: walks every `UsdPrimRef` entity, resolves any
+/// outstanding wheel-tagging requests, snapshots each matched entity's
+/// current local Transform as its rest pose, and inserts
+/// [`UsdWheelDriver`]. After this runs, [`drive_usd_wheels`] takes
+/// over for that entity.
+pub fn tag_usd_wheels_when_ready(
+    mut commands: Commands,
+    mut chassis_q: Query<(Entity, &mut PendingUsdWheelTags)>,
+    prims: Query<(Entity, &bevy_openusd::UsdPrimRef, &Transform)>,
+) {
+    for (chassis_entity, mut pending) in chassis_q.iter_mut() {
+        pending.0.retain(|tag| {
+            let Some((wheel_entity, _, current)) = prims
+                .iter()
+                .find(|(_, pr, _)| pr.path == tag.prim_path)
+            else {
+                return true; // not yet projected — try again next frame
+            };
+            bevy::log::info!(
+                "gearbox-viz: USD wheel `{}` → UsdWheelDriver {{ id: {:?}, index: {} }} (rest={:?})",
+                tag.prim_path, tag.vehicle_id, tag.wheel_index, current.translation,
+            );
+            commands.entity(wheel_entity).insert(UsdWheelDriver {
+                vehicle_id: tag.vehicle_id,
+                wheel_index: tag.wheel_index,
+                rest_local: *current,
+                spin_axis: tag.spin_axis,
+                steer_axis: tag.steer_axis,
+                apply_spin: tag.apply_spin,
+                apply_steer: tag.apply_steer,
+            });
+            false // drop — done
+        });
+        if pending.0.is_empty() {
+            commands.entity(chassis_entity).remove::<PendingUsdWheelTags>();
+        }
+    }
+}
+
+/// Per-frame system: for every `UsdWheelDriver`, build the wheel
+/// prim's local Transform as `rest * R_steer(Z) * R_spin(X)`.
+///
+/// Axis mapping notes — the wheel-prim is a child of the SceneRoot,
+/// which `bevy_openusd` rotated by `rot_x(-π/2)` to flip USD's Z-up
+/// to bevy's Y-up. So the wheel-prim's *local* axes (as seen by
+/// `Transform`) map to world directions like this when the chassis
+/// is unrotated:
+///   * local-X → world-X (lateral / axle)
+///   * local-Y → world-Z (USD's "back" axis)
+///   * local-Z → world-Y (USD's up axis = vertical)
+///
+/// Therefore:
+///   * **Steer** (around the suspension/kingpin axis = vertical)
+///     ⇒ rotation around **local-Z**.
+///   * **Spin** (around the axle = lateral)
+///     ⇒ rotation around **local-X**.
+///
+/// `R_spin` is negated to match the procedural path's convention
+/// (`-wh.rotation` in `Sim::wheel_pose`) so the tread rolls with
+/// motion rather than against it.
+pub fn drive_usd_wheels(
+    sim: Res<crate::GearboxSim>,
+    mut q: Query<(&UsdWheelDriver, &mut Transform)>,
+    mut frame: Local<u32>,
+) {
+    *frame = frame.wrapping_add(1);
+    let log_now = *frame % 60 == 0; // ~once per second at 60Hz
+    for (drv, mut tr) in q.iter_mut() {
+        let spin = if drv.apply_spin {
+            sim.0.wheel_spin_angle(drv.vehicle_id, drv.wheel_index) as f32
+        } else {
+            0.0
+        };
+        let steer = if drv.apply_steer {
+            sim.0.wheel_steering_angle(drv.vehicle_id, drv.wheel_index) as f32
+        } else {
+            0.0
+        };
+        if log_now && drv.wheel_index == 2 {
+            // Once per second, log the rear-left wheel of every vehicle
+            // so we can confirm rapier's wheel.rotation accumulates.
+            bevy::log::info!(
+                "DRIVE veh={:?} wheel={} apply_spin={} apply_steer={} spin={:.3} steer={:.3} spin_axis={:?}",
+                drv.vehicle_id, drv.wheel_index, drv.apply_spin, drv.apply_steer,
+                spin, steer, drv.spin_axis,
+            );
+        }
+        let r_steer = Quat::from_axis_angle(drv.steer_axis, steer);
+        let r_spin = Quat::from_axis_angle(drv.spin_axis, spin);
+        tr.translation = drv.rest_local.translation;
+        tr.rotation = drv.rest_local.rotation * r_steer * r_spin;
+        tr.scale = drv.rest_local.scale;
+    }
+}
+
+/// Per-frame state machine for `PendingUsdScene` markers. See the
+/// component doc-comment for the three states.
+pub fn instantiate_pending_usd_scenes(
+    mut commands: Commands,
+    asset_server: Res<bevy::asset::AssetServer>,
+    usd_assets: Res<bevy::asset::Assets<bevy_openusd::UsdAsset>>,
+    asset_root: Option<Res<UsdAssetRoot>>,
+    mut pending: Query<(Entity, &mut PendingUsdScene)>,
+) {
+    use bevy::asset::LoadState;
+    for (entity, mut pend) in pending.iter_mut() {
+        if pend.handle.is_none() {
+            // Kick off the load. Compute the real filesystem parent of
+            // the asset (asset_root + asset's relative subdir) and pass
+            // it as the loader's first search path so bevy_openusd's
+            // tempfile lands next to the original — sibling references
+            // resolve correctly.
+            let Some(root) = asset_root.as_deref() else {
+                bevy::log::warn!(
+                    "gearbox-viz: UsdAssetRoot resource missing — cannot load `{}`",
+                    pend.asset_path
+                );
+                continue;
+            };
+            let asset_parent = std::path::Path::new(&pend.asset_path)
+                .parent()
+                .map(|p| root.0.join(p))
+                .unwrap_or_else(|| root.0.clone());
+            bevy::log::info!(
+                "gearbox-viz: kicking off USD load `{}` for `{}` (search_paths=[{}])",
+                pend.asset_path, pend.name, asset_parent.display()
+            );
+            let parent_clone = asset_parent.clone();
+            let handle: Handle<bevy_openusd::UsdAsset> = asset_server
+                .load_with_settings(
+                    pend.asset_path.clone(),
+                    move |s: &mut bevy_openusd::UsdLoaderSettings| {
+                        s.search_paths = vec![parent_clone.clone()];
+                    },
+                );
+            pend.handle = Some(handle);
+            continue;
+        }
+        let handle = pend.handle.as_ref().unwrap();
+        match asset_server.get_load_state(handle) {
+            Some(LoadState::Loaded) => {
+                let Some(asset) = usd_assets.get(handle) else {
+                    continue; // race: try again next frame
+                };
+                let scene_handle = asset.scene.clone();
+                bevy::log::info!(
+                    "gearbox-viz: USD scene for `{}` loaded — attaching SceneRoot (default_prim={:?}, layers={})",
+                    pend.name, asset.default_prim, asset.layer_count,
+                );
+                commands
+                    .entity(entity)
+                    .insert(bevy::scene::SceneRoot(scene_handle))
+                    .remove::<PendingUsdScene>();
+            }
+            Some(LoadState::Failed(err)) => {
+                bevy::log::error!(
+                    "gearbox-viz: USD asset load FAILED for `{}`: {}",
+                    pend.name, err
+                );
+                commands.entity(entity).remove::<PendingUsdScene>();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Build a [`Mesh`] handle for a sized volume with a given
 /// [`MeshSource`]. This is the sole dispatch point — adding USD /
 /// glTF support later means adding a variant here, not touching
@@ -53,6 +363,7 @@ pub fn spawn_vehicle_visuals(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
+    asset_server: &bevy::asset::AssetServer,
     id: VehicleId,
     spec: &VehicleSpec,
 ) -> Entity {
@@ -84,6 +395,109 @@ pub fn spawn_vehicle_visuals(
     }
     let root = root_cmd.id();
 
+    // Optional USD scene. We follow the proven pattern from
+    // bevy_openusd's own integration tests:
+    //
+    //   1. `asset_server.load::<UsdAsset>(path)` — the loader's
+    //      *primary* asset type. (Loading `Handle<Scene>` directly
+    //      via the `#Scene` label silently fails because the asset
+    //      server resolves loaders by primary type, not label.)
+    //   2. Stash the handle in a `PendingUsdScene` marker on a
+    //      child entity.
+    //   3. `instantiate_pending_usd_scenes` polls each frame and,
+    //      once the `UsdAsset` is `Loaded`, copies its `.scene`
+    //      handle into a `SceneRoot` and clears the marker.
+    if let Some(path) = spec.chassis.usd_asset {
+        // Strip a `#Scene` suffix if a preset still has one — the
+        // bevy_openusd loader takes the bare path; the suffix is
+        // only used at the labeled-asset layer (which we skip).
+        let bare = path.split('#').next().unwrap_or(path).to_string();
+        let offset = spec.chassis.usd_scene_offset;
+        let rot = spec.chassis.usd_scene_rotation;
+        let scene_transform = Transform {
+            translation: Vec3::new(offset.x as f32, offset.y as f32, offset.z as f32),
+            rotation: Quat::from_xyzw(rot.x as f32, rot.y as f32, rot.z as f32, rot.w as f32),
+            scale: Vec3::ONE,
+        };
+        bevy::log::info!(
+            "gearbox-viz: queuing USD asset `{}` for `{}` (scene_offset=({:.3}, {:.3}, {:.3}), scene_rotation=(w={:.3}, x={:.3}, y={:.3}, z={:.3}))",
+            bare, spec.name, offset.x, offset.y, offset.z, rot.w, rot.x, rot.y, rot.z,
+        );
+        commands
+            .spawn((
+                Name::new(format!("{}::usd_scene", spec.name)),
+                scene_transform,
+                Visibility::default(),
+                PendingUsdScene {
+                    asset_path: bare,
+                    name: spec.name.clone(),
+                    handle: None,
+                },
+            ))
+            .insert(ChildOf(root));
+
+        // Queue any per-wheel USD-prim → VehicleWheel tagging. The
+        // tagging system polls each frame for the projected prim
+        // entities and finishes the job once the SceneRoot has had a
+        // chance to instantiate.
+        //
+        // Pre-compute the wheel-local axle / vertical axes from the
+        // composite scene rotation: `composite = scene_rot *
+        // bevy_openusd_internal_flip`. The wheel-prim's local axes
+        // for "lateral" and "up" are `composite.inverse() * world_X`
+        // and `composite.inverse() * world_Y` respectively. These
+        // become `spin_axis` (axle) and `steer_axis` (kingpin) in
+        // [`UsdWheelDriver`].
+        let bevy_flip = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        let scene_rot_q = Quat::from_xyzw(
+            rot.x as f32, rot.y as f32, rot.z as f32, rot.w as f32,
+        );
+        let composite_inv = (scene_rot_q * bevy_flip).inverse();
+        let spin_axis = (composite_inv * Vec3::X).normalize();
+        let steer_axis = (composite_inv * Vec3::Y).normalize();
+        bevy::log::info!(
+            "gearbox-viz: USD wheel axes for `{}`: spin={:?} steer={:?}",
+            spec.name, spin_axis, steer_axis,
+        );
+        let mut wheel_tags: Vec<PendingUsdWheelTag> = Vec::new();
+        for (idx, w) in spec.wheels.iter().enumerate() {
+            let Some(spin_path) = w.usd_prim_path else {
+                continue;
+            };
+            // When the preset declares a separate steering knuckle
+            // (`usd_steer_prim_path`), the inner wheel-prim only
+            // spins and the knuckle gets the steer rotation. When
+            // it's not set (tractor layout) both rotations land on
+            // the wheel-prim itself.
+            let split_steer = w.usd_steer_prim_path.is_some();
+            wheel_tags.push(PendingUsdWheelTag {
+                vehicle_id: id,
+                wheel_index: idx,
+                prim_path: spin_path.to_string(),
+                spin_axis,
+                steer_axis,
+                apply_spin: true,
+                apply_steer: !split_steer,
+            });
+            if let Some(steer_path) = w.usd_steer_prim_path {
+                wheel_tags.push(PendingUsdWheelTag {
+                    vehicle_id: id,
+                    wheel_index: idx,
+                    prim_path: steer_path.to_string(),
+                    spin_axis,
+                    steer_axis,
+                    apply_spin: false,
+                    apply_steer: true,
+                });
+            }
+        }
+        if !wheel_tags.is_empty() {
+            commands.entity(root).insert(PendingUsdWheelTags(wheel_tags));
+        }
+    } else {
+        bevy::log::info!("gearbox-viz: spawning `{}` without USD asset", spec.name);
+    }
+
     // Shared tread image — one repeat of the chevron block.  Each
     // wheel gets its own material below with a `uv_transform` that
     // tiles this image based on circumference, so the stripe size on
@@ -99,7 +513,14 @@ pub fn spawn_vehicle_visuals(
     });
 
     // Wheels — tracked separately, not parented (pose from controller).
+    // For wheels with `usd_prim_path`, skip the procedural cylinder
+    // entirely; the USD-tagging system below detaches the asset's
+    // wheel prim and tags it as `VehicleWheel` instead, so the asset
+    // mesh becomes the live raycast wheel.
     for (idx, wheel) in spec.wheels.iter().enumerate() {
+        if wheel.usd_prim_path.is_some() {
+            continue;
+        }
         let circumference = std::f32::consts::TAU * wheel.radius as f32;
         // Tiles-per-revolution = circumference / desired-stripe-arc.
         let uv_tile = (circumference / TYRE_STRIPE_ARC_M).max(1.0);

@@ -11,7 +11,7 @@
 //!   Q / E   — yaw left / right
 //!   Z / X   — ascend / descend
 
-use datapod::{Point, Size};
+use datapod::{Point, Quaternion, Size};
 
 use crate::vehicle::{
     ChassisSpec, DriveMode, MeshSource, PartKind, PartSpec, PowerKind, PowerSource,
@@ -46,6 +46,9 @@ pub fn drone() -> VehicleSpec {
         inertia_size: None,
         render_chassis: true,
         mesh: MeshSource::Box,
+        usd_asset: None,
+        usd_scene_offset: Point::new(0.0, 0.0, 0.0),
+        usd_scene_rotation: Quaternion::identity(),
     };
 
     // --- Rotor arms & blades ---------------------------------------

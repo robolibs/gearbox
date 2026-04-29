@@ -49,6 +49,21 @@ pub struct MarkerWire {
     /// Drop the marker with this id.
     #[serde(default)]
     pub remove: bool,
+    /// Optional USD asset path (relative to the binary's `assets/`
+    /// directory). When set, the marker renders the loaded USD scene
+    /// at `(x, ground, z)` instead of a procedural cone/box/sphere
+    /// — `kind`, `radius`, and `height` are ignored. `color` is
+    /// also ignored (the asset's own materials apply).
+    #[serde(default)]
+    pub usd_path: Option<String>,
+    /// Optional USD variant selections: each tuple is
+    /// `(prim_path, variant_set_name, option_name)`. Re-publishing
+    /// the same marker id with a different selection swaps which
+    /// authored variant is composed into the scene — the standard
+    /// way to switch between e.g. a "default" and a "red" colour
+    /// on the same asset without authoring two separate files.
+    #[serde(default)]
+    pub usd_variants: Vec<(String, String, String)>,
 }
 
 // ─── Broker ────────────────────────────────────────────────────────
@@ -127,6 +142,7 @@ impl Plugin for MarkersApiPlugin {
                             entities: Mutex::new(HashMap::new()),
                         });
                         app.add_systems(Update, apply_markers_system);
+                        app.add_systems(Update, instantiate_pending_marker_usd);
                         info!("gearbox-api: markers API ready (gearbox/markers/<id>)");
                     }
                     Err(e) => {
@@ -141,12 +157,27 @@ impl Plugin for MarkersApiPlugin {
     }
 }
 
+/// Marker-side counterpart to `gearbox_viz`'s `PendingUsdScene`.
+/// Carries an in-flight `Handle<UsdAsset>` for a marker entity that
+/// asked to render a USD asset; promoted to a `SceneRoot` once the
+/// asset finishes loading.
+#[cfg(feature = "bevy")]
+#[derive(Component)]
+pub struct PendingMarkerUsd {
+    pub handle: Handle<bevy_openusd::UsdAsset>,
+    /// Marker id — used purely for log lines so a stuck load can be
+    /// traced back to the user that published it.
+    pub marker_id: String,
+}
+
 #[cfg(feature = "bevy")]
 fn apply_markers_system(
     mut commands: Commands,
     api: Option<Res<MarkersApiSession>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<bevy::asset::AssetServer>,
+    asset_root: Option<Res<gearbox_viz::UsdAssetRoot>>,
 ) {
     let Some(api) = api else { return };
     let Ok(broker) = api.broker.lock() else { return };
@@ -159,6 +190,85 @@ fn apply_markers_system(
         if m.remove {
             continue;
         }
+
+        // ── USD-asset markers ─────────────────────────────────────
+        if let Some(usd_rel) = m.usd_path.as_deref() {
+            let Some(root) = asset_root.as_deref() else {
+                bevy::log::warn!(
+                    "gearbox-api: marker `{id}` requested USD `{usd_rel}` but \
+                     no `UsdAssetRoot` resource is registered; skipping"
+                );
+                continue;
+            };
+            bevy::log::info!(
+                "gearbox-api: marker `{id}` USD `{}` variants={:?}",
+                usd_rel, m.usd_variants,
+            );
+            let asset_parent = std::path::Path::new(usd_rel)
+                .parent()
+                .map(|p| root.0.join(p))
+                .unwrap_or_else(|| root.0.clone());
+            let parent_clone = asset_parent.clone();
+            // Convert wire variant selections into bevy_openusd's
+            // shape, and encode them into the asset path's *label*.
+            // Bevy's `AssetServer` keys cached `Handle<UsdAsset>` by
+            // full asset path (including label) but **ignores** the
+            // settings closure when forming the cache key. Two
+            // `load_with_settings` calls on the same path therefore
+            // collapse to one handle and the second load overwrites
+            // the first asset's content — which means flipping ONE
+            // bale to "red" turns every bale red, since they all
+            // share the same handle. Encoding the variant in the
+            // label gives us per-variant handle isolation: the local
+            // bevy_openusd fork parses the label on the way in and
+            // applies the same selections, so this is enough to
+            // produce the right scene without also stuffing them
+            // into `settings.variant_selections`.
+            let variants: Vec<bevy_openusd::VariantSelection> = m
+                .usd_variants
+                .iter()
+                .map(|(prim_path, set_name, option)| {
+                    bevy_openusd::VariantSelection {
+                        prim_path: prim_path.clone(),
+                        set_name: set_name.clone(),
+                        option: option.clone(),
+                    }
+                })
+                .collect();
+            let asset_path: bevy::asset::AssetPath<'static> = if variants.is_empty() {
+                usd_rel.to_string().into()
+            } else {
+                let label = bevy_openusd::variant_label(&variants);
+                bevy::asset::AssetPath::from(usd_rel.to_string()).with_label(label)
+            };
+            let handle: Handle<bevy_openusd::UsdAsset> = asset_server
+                .load_with_settings(
+                    asset_path,
+                    move |s: &mut bevy_openusd::UsdLoaderSettings| {
+                        s.search_paths = vec![parent_clone.clone()];
+                        // Variants come in via the path label too;
+                        // we set them in settings as well so a
+                        // headless build that bypasses the label
+                        // path still gets the correct composition.
+                        s.variant_selections = variants.clone();
+                    },
+                );
+            let entity = commands
+                .spawn((
+                    Name::new(format!("Marker[{}]::usd_pending", id)),
+                    Transform::from_xyz(m.x as f32, 0.0, m.z as f32),
+                    Visibility::default(),
+                    PendingMarkerUsd {
+                        handle,
+                        marker_id: id.clone(),
+                    },
+                ))
+                .id();
+            entities.insert(id, entity);
+            continue;
+        }
+
+        // ── Procedural primitive markers ─────────────────────────
         let height = if m.height > 0.0 { m.height as f32 } else { 1.0 };
         let radius = if m.radius > 0.0 { m.radius as f32 } else { 0.4 };
         let color = if m.color == [0.0, 0.0, 0.0] {
@@ -193,5 +303,39 @@ fn apply_markers_system(
             ))
             .id();
         entities.insert(id, entity);
+    }
+}
+
+/// Promote `PendingMarkerUsd` markers to a `SceneRoot` once the
+/// underlying `UsdAsset` finishes loading. Mirrors the pattern used
+/// in `gearbox_viz::spawn::instantiate_pending_usd_scenes`.
+#[cfg(feature = "bevy")]
+fn instantiate_pending_marker_usd(
+    mut commands: Commands,
+    asset_server: Res<bevy::asset::AssetServer>,
+    usd_assets: Res<bevy::asset::Assets<bevy_openusd::UsdAsset>>,
+    pending: Query<(Entity, &PendingMarkerUsd)>,
+) {
+    use bevy::asset::LoadState;
+    for (entity, pend) in pending.iter() {
+        match asset_server.get_load_state(&pend.handle) {
+            Some(LoadState::Loaded) => {
+                let Some(asset) = usd_assets.get(&pend.handle) else {
+                    continue;
+                };
+                commands
+                    .entity(entity)
+                    .insert(bevy::scene::SceneRoot(asset.scene.clone()))
+                    .remove::<PendingMarkerUsd>();
+            }
+            Some(LoadState::Failed(err)) => {
+                bevy::log::error!(
+                    "gearbox-api: USD load FAILED for marker `{}`: {}",
+                    pend.marker_id, err
+                );
+                commands.entity(entity).remove::<PendingMarkerUsd>();
+            }
+            _ => {}
+        }
     }
 }

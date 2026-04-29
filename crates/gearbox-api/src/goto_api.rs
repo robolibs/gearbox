@@ -208,11 +208,11 @@ impl Plugin for GotoApiPlugin {
                         .after(gearbox_viz::input::wasd_input_system)
                         .before(gearbox_viz::step::step_sim_system),
                 );
-                // Status pubs after the step + visual goal marker.
-                app.add_systems(
-                    PostUpdate,
-                    (publish_goto_status_system, update_goal_markers_system),
-                );
+                // Status pubs after the step. (The old red-cuboid
+                // visual goal marker has been removed — UIs that
+                // want a target indicator should publish their own
+                // marker via the markers API.)
+                app.add_systems(PostUpdate, publish_goto_status_system);
                 info!("gearbox-api: goto API ready (goto / goto_status)");
             }
             Err(e) => {

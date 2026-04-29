@@ -5,7 +5,7 @@
 //! wheels are fixed, rear wheels steer **opposite** direction (±25°)
 //! for crab-style turning. Rear-driven.
 
-use datapod::{Point, Size};
+use datapod::{Point, Quaternion, Size};
 
 use crate::vehicle::parts_lib;
 use crate::vehicle::{
@@ -28,6 +28,9 @@ pub fn oxbo_harvester() -> VehicleSpec {
         inertia_size: None,
         render_chassis: true,
         mesh: MeshSource::Box,
+        usd_asset: None,
+        usd_scene_offset: Point::new(0.0, 0.0, 0.0),
+        usd_scene_rotation: Quaternion::identity(),
     };
 
     let radius = 0.768;
@@ -71,6 +74,8 @@ pub fn oxbo_harvester() -> VehicleSpec {
             max_brake: 2_500.0,
             max_steer_rad: max_steer,
             steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
+        usd_prim_path: None,
+        usd_steer_prim_path: None,
         }
     };
 

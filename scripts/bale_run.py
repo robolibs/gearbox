@@ -44,17 +44,19 @@ def main() -> None:
     session.put("gearbox/sim/clock/command", cbor2.dumps({"SetPaused": False}))
     time.sleep(0.05)
 
-    # Spawn every bale as a yellow cone before we start visiting,
-    # so the user sees the whole field upfront.
+    # Spawn every bale as a USD-loaded cylinder ("bale" asset).
+    # `usd_path` is relative to `bin/gearbox/assets/`, so the file
+    # lives at `bin/gearbox/assets/markers/bale.usda`. The asset
+    # exposes a `color` variant on `/bale` with `default` (cream)
+    # and `red` options — we publish `default` for every bale at
+    # spawn time and switch to `red` later when targeting one.
     print(f"scattering {n_bales} bales across {field:.0f} × {field:.0f} m field")
     for i, (bx, bz) in enumerate(bales):
         marker = {
             "x": float(bx),
             "z": float(bz),
-            "height": 1.4,
-            "radius": 0.45,
-            "kind": "cone",
-            "color": [0.95, 0.85, 0.15],
+            "usd_path": "markers/bale.usda",
+            "usd_variants": [["/bale", "color", "default"]],
             "remove": False,
         }
         session.put(f"gearbox/markers/bale_{i}", cbor2.dumps(marker))
@@ -122,6 +124,22 @@ def main() -> None:
                 f"\n[{step + 1:>3}/{n_bales}]  visiting bale_{best_idx}  "
                 f"target=({tx:+7.2f},{tz:+7.2f})  "
                 f"from=({cx:+7.2f},{cz:+7.2f})  d={best_d:6.2f} m"
+            )
+            # Switch the target bale's `color` variant to `red`.
+            # Variants are encoded into the asset-path label so each
+            # variant combination gets its own cached handle (Bevy
+            # keys handles by full path including label). Swapping
+            # one bale to red therefore doesn't turn every bale red
+            # via shared-handle aliasing.
+            session.put(
+                f"gearbox/markers/bale_{best_idx}",
+                cbor2.dumps({
+                    "x": float(tx),
+                    "z": float(tz),
+                    "usd_path": "markers/bale.usda",
+                    "usd_variants": [["/bale", "color", "red"]],
+                    "remove": False,
+                }),
             )
             cmd = {
                 "x": float(tx),

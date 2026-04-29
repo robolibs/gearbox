@@ -44,6 +44,28 @@ pub struct WheelSpec {
     /// at `chassis_connection + steering_pivot_offset`, so the wheel
     /// swings in an arc around that outboard kingpin when steering.
     pub steering_pivot_offset: Point,
+    /// USD prim path that should *be* this wheel's visual. When set,
+    /// `gearbox-viz` skips spawning the procedural tyre cylinder and
+    /// instead detaches the prim entity from the USD scene hierarchy
+    /// after instantiation, then drives its world `Transform` from
+    /// `wheel_pose()` like a regular `VehicleWheel`. Use this on USD-
+    /// backed presets where the asset already authors a wheel mesh
+    /// (so the rendered wheel matches the asset, not a Cylinder).
+    /// `None` (default) → fall back to the procedural cylinder.
+    pub usd_prim_path: Option<&'static str>,
+    /// Optional USD prim path of the *steering knuckle* — the parent
+    /// link that rotates around the kingpin axis when steering is
+    /// applied. Use on assets where the wheel and knuckle are
+    /// authored as separate links (e.g. AGROINTELLI Robotti has
+    /// `<knuckle>/<wheel>`: the wheel only spins, the knuckle steers).
+    /// When `Some(path)`:
+    ///   * the spin prim (`usd_prim_path`) only receives the rolling
+    ///     rotation (around axle).
+    ///   * the steer prim receives the steering rotation (around
+    ///     kingpin).
+    /// `None` (default) → steer + spin both applied to `usd_prim_path`,
+    /// matching the simpler tractor layout.
+    pub usd_steer_prim_path: Option<&'static str>,
 }
 
 impl Default for WheelSpec {
@@ -65,6 +87,8 @@ impl Default for WheelSpec {
             max_brake: 20.0,
             max_steer_rad: 0.0,
             steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
+            usd_prim_path: None,
+            usd_steer_prim_path: None,
         }
     }
 }

@@ -1229,7 +1229,7 @@ checksum = "7ef8e4b7e61dfe7719bb03c884dc270cd46a82efb40f93e9933b990c5c190c59"
 [[package]]
 name = "bevy_openusd"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/bevy_openusd?rev=051da7cae048ee7aa46c03dca3f7c714326a616f#051da7cae048ee7aa46c03dca3f7c714326a616f"
+source = "git+https://github.com/bresilla/bevy_openusd?rev=578dd430cd8f5c287cce1ef7ee54d81f52a583d9#578dd430cd8f5c287cce1ef7ee54d81f52a583d9"
 dependencies = [
  "anyhow",
  "bevy",
@@ -3134,6 +3134,7 @@ name = "gearbox-api"
 version = "0.0.1"
 dependencies = [
  "bevy",
+ "bevy_openusd",
  "ciborium",
  "datapod",
  "gearbox-core",
@@ -3192,6 +3193,7 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_glacial",
+ "bevy_openusd",
  "datapod",
  "gearbox-core",
  "gearbox-physics",
@@ -5488,6 +5490,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-usd"
+version = "0.0.1"
+dependencies = [
+ "bevy",
+ "bevy_openusd",
+ "openusd",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7460,7 +7471,7 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 [[package]]
 name = "usd_schemas"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/bevy_openusd?rev=051da7cae048ee7aa46c03dca3f7c714326a616f#051da7cae048ee7aa46c03dca3f7c714326a616f"
+source = "git+https://github.com/bresilla/bevy_openusd?rev=578dd430cd8f5c287cce1ef7ee54d81f52a583d9#578dd430cd8f5c287cce1ef7ee54d81f52a583d9"
 dependencies = [
  "anyhow",
  "glam 0.30.10",
