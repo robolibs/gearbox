@@ -120,6 +120,19 @@ pub struct ChassisTinted {
     pub id: VehicleId,
 }
 
+/// Reset message — fired by the editor's Reload button or the zenoh
+/// `gearbox/sim/reset` API. Listeners despawn every vehicle (Bevy
+/// entity + rapier body) and every world marker, leaving the static
+/// world (ground / planet) untouched. Optionally also re-pauses the
+/// clock.
+#[derive(Message, Default, Debug, Clone, Copy)]
+pub struct SimResetRequest {
+    /// Re-pause the sim clock after the reset. Off by default — the
+    /// caller usually wants to drive a freshly-spawned vehicle right
+    /// away.
+    pub pause_clock: bool,
+}
+
 /// Insert on a Bevy `App` to wire gearbox → Bevy.
 pub struct GearboxVizPlugin;
 
@@ -131,6 +144,8 @@ impl Plugin for GearboxVizPlugin {
             .init_resource::<scene::SceneState>()
             .init_resource::<FollowTarget>()
             .init_resource::<camera::ChaseCameraFly>()
+            .add_message::<SimResetRequest>()
+            .add_systems(Update, handle_sim_reset_vehicles_system)
             // Mirror server-owned state into `SceneState` every frame.
             // Renderer code reads from `SceneState`; this system is the
             // only place that may write to it.
@@ -212,6 +227,40 @@ pub fn follow_target_system(
         }
     }
     target.last_pos = Some(current);
+}
+
+/// Drains [`SimResetRequest`] events: rips out every vehicle Bevy
+/// entity (the recursive `despawn` cascades to wheels / parts / USD
+/// scene roots that hang under the chassis), tears down the rapier
+/// state via [`gearbox_physics::Sim::despawn_all_vehicles`], and
+/// optionally re-pauses the clock.
+fn handle_sim_reset_vehicles_system(
+    mut messages: MessageReader<SimResetRequest>,
+    mut commands: Commands,
+    mut sim: ResMut<GearboxSim>,
+    mut clock: ResMut<step::SimClock>,
+    mut follow: ResMut<FollowTarget>,
+    bodies: Query<Entity, With<VehicleBody>>,
+) {
+    let mut last: Option<SimResetRequest> = None;
+    for ev in messages.read() {
+        last = Some(*ev);
+    }
+    let Some(req) = last else { return };
+
+    for entity in bodies.iter() {
+        commands.entity(entity).despawn();
+    }
+    sim.0.despawn_all_vehicles();
+    follow.set(None);
+
+    if req.pause_clock {
+        clock.paused = true;
+    }
+    info!(
+        "gearbox-viz: sim reset — vehicles cleared (pause_clock={})",
+        req.pause_clock,
+    );
 }
 
 pub use camera::ChaseCamera;

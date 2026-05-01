@@ -143,6 +143,7 @@ impl Plugin for MarkersApiPlugin {
                         });
                         app.add_systems(Update, apply_markers_system);
                         app.add_systems(Update, instantiate_pending_marker_usd);
+                        app.add_systems(Update, clear_markers_on_reset_system);
                         info!("gearbox-api: markers API ready (gearbox/markers/<id>)");
                     }
                     Err(e) => {
@@ -337,5 +338,24 @@ fn instantiate_pending_marker_usd(
             }
             _ => {}
         }
+    }
+}
+
+/// On a [`gearbox_viz::SimResetRequest`] event, despawn every marker
+/// entity and forget the id→entity map so the `gearbox/sim/reset`
+/// scene-clear path leaves no stale markers behind.
+#[cfg(feature = "bevy")]
+fn clear_markers_on_reset_system(
+    mut messages: MessageReader<gearbox_viz::SimResetRequest>,
+    mut commands: Commands,
+    api: Option<Res<MarkersApiSession>>,
+) {
+    if messages.read().count() == 0 {
+        return;
+    }
+    let Some(api) = api else { return };
+    let Ok(mut entities) = api.entities.lock() else { return };
+    for (_id, entity) in entities.drain() {
+        commands.entity(entity).despawn();
     }
 }

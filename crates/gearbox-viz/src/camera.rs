@@ -28,23 +28,25 @@ use gearbox_core::VehicleId;
 use super::GearboxSim;
 
 /// Destination + scripted-animation state for the "double-click to
-/// focus" camera move. Parametric: every frame we derive
-/// `(focus, yaw, distance, elevation)` from four smoothstep tracks
-/// and let the rig place the camera from those. Because distance
-/// and yaw are independent tracks, the spin can start *while the
-/// camera is still rising* — it simultaneously pulls back and
-/// begins to arc, then curves back in as the distance track
-/// reverses.
+/// focus" camera move. Two-phase animation:
 ///
-///   Focus pan  [0.10, 0.50]  — old focus → vehicle position.
-///   Distance   [0.00, 0.50]  — start → apex  (going up / out).
-///              [0.50, 1.00]  — apex  → final (coming down / in).
-///   Yaw        [0.375, 1.00] — start_yaw → behind-vehicle yaw.
-///                             Kicks in 1/4 of the pull-back window
-///                             *before* the pull-back finishes, so
-///                             the camera is spinning **and** still
-///                             rising through the overlap.
-///   Elevation: held at `start_elevation`.
+///   **Phase A — pure rotation** (`t ∈ [0, PHASE_A_END]`)
+///   The camera's *world position* is pinned to `start_cam_world`
+///   while the focus point lerps from `start_focus` → `target_focus`.
+///   `(yaw, distance, elevation)` are *derived* each frame from
+///   `(start_cam_world − focus)` so `apply_rig` rotates around the
+///   pinned camera position. Net effect: the camera turns its head
+///   to look at the machine without translating. Front-loaded so the
+///   "I want to see the thing" motion is the first thing the eye
+///   notices.
+///
+///   **Phase B — orbit-in arc** (`t ∈ [PHASE_A_END, 1]`)
+///   Standard rig animation. Focus is locked on the live vehicle
+///   position; distance pulls back to apex then in to final; yaw
+///   arcs to behind-vehicle. The Phase-A end-state is the starting
+///   point for these tracks (derived per-frame from the pinned
+///   `start_cam_world` and the live `target_focus`, so a moving
+///   vehicle stays consistent).
 #[derive(Copy, Clone, Debug)]
 pub struct FlyTarget {
     pub vehicle: VehicleId,
@@ -52,10 +54,20 @@ pub struct FlyTarget {
     pub duration: f32,
     pub elapsed: f32,
     pub start_focus: Vec3,
+    /// Camera's world position at fly-start. Phase A keeps the
+    /// camera pinned here while the focus rotates; Phase B uses it
+    /// to derive the rig start-state.
+    pub start_cam_world: Vec3,
     pub start_distance: f32,
     pub start_yaw: f32,
     pub start_elevation: f32,
     pub apex_distance: f32,
+    /// Previous-frame world position of the followed vehicle. Used
+    /// to slide `start_focus` and `start_cam_world` by the per-frame
+    /// target delta so the lerp / pin reference frame stays anchored
+    /// to a moving vehicle (otherwise the camera judders because the
+    /// gap geometry shifts under the interpolation).
+    pub last_target_pos: Option<Vec3>,
 }
 
 impl FlyTarget {
@@ -66,19 +78,36 @@ impl FlyTarget {
     /// route; only the final focus point differs.
     pub const APEX_DISTANCE: f32 = 45.0;
 
+    /// Fraction of the duration spent on the rotate-only phase.
+    /// Snappy enough to feel like the priority motion, smooth enough
+    /// not to whip-pan.
+    pub const PHASE_A_END: f32 = 0.30;
+
     /// Build a fresh target, snapshotting the camera's current pose
-    /// as the animation's starting point.
+    /// as the animation's starting point. `start_cam_world` is
+    /// derived from the rig (focus + offset(yaw, distance,
+    /// elevation)) so we know exactly where the camera is in world
+    /// space without needing the Transform at the call site.
     pub fn new(vehicle: VehicleId, distance: f32, duration: f32, cam: &ChaseCamera) -> Self {
+        let horizontal = cam.distance * cam.elevation.cos();
+        let vertical = cam.distance * cam.elevation.sin();
+        let offset = Vec3::new(
+            horizontal * cam.yaw.sin(),
+            vertical,
+            horizontal * cam.yaw.cos(),
+        );
         Self {
             vehicle,
             distance,
             duration: duration.max(0.01),
             elapsed: 0.0,
             start_focus: cam.focus,
+            start_cam_world: cam.focus + offset,
             start_distance: cam.distance,
             start_yaw: cam.yaw,
             start_elevation: cam.elevation,
             apex_distance: Self::APEX_DISTANCE,
+            last_target_pos: None,
         }
     }
 }
@@ -159,35 +188,88 @@ pub fn chase_camera_fly(
         let vehicle_yaw = fwd.x.atan2(fwd.z);
         let target_cam_yaw = vehicle_yaw + std::f32::consts::PI;
 
-        // Focus eases onto the target during the pull-back.
-        let s_focus = smoothstep(sub_progress(t, 0.1, 0.5));
-        let focus = target.start_focus.lerp(target_focus, s_focus);
-
-        // Distance: up for the first half, down for the second.
-        let distance = if t < 0.5 {
-            let s = smoothstep(sub_progress(t, 0.0, 0.5));
-            target.start_distance + (target.apex_distance - target.start_distance) * s
-        } else {
-            let s = smoothstep(sub_progress(t, 0.5, 1.0));
-            target.apex_distance + (target.distance - target.apex_distance) * s
-        };
-
-        // Yaw: starts at t = 0.375 (1/4 of the pull-back window
-        // before the pull-back finishes).
-        let s_yaw = smoothstep(sub_progress(t, 0.375, 1.0));
-        let tau = std::f32::consts::TAU;
-        let mut yaw_gap = (target_cam_yaw - target.start_yaw) % tau;
-        if yaw_gap > std::f32::consts::PI {
-            yaw_gap -= tau;
-        } else if yaw_gap < -std::f32::consts::PI {
-            yaw_gap += tau;
+        // Slide `start_focus` AND `start_cam_world` by the vehicle's
+        // per-frame motion so both reference points stay anchored
+        // relative to the moving vehicle. Without this, on a moving
+        // target the lerp endpoints (Phase A) and the rig-start
+        // derivation (Phase B) drift out from under the interpolation
+        // and the camera judders. With it, the animation behaves on
+        // a driving vehicle the same way it does on a parked one.
+        if let Some(last) = target.last_target_pos {
+            let delta = target_focus - last;
+            target.start_focus += delta;
+            target.start_cam_world += delta;
         }
-        let yaw = target.start_yaw + yaw_gap * s_yaw;
+        target.last_target_pos = Some(target_focus);
 
-        cam.focus = focus;
-        cam.yaw = yaw;
-        cam.distance = distance;
-        cam.elevation = target.start_elevation;
+        let phase_a_end = FlyTarget::PHASE_A_END;
+
+        if t < phase_a_end {
+            // ── Phase A: pure rotation ───────────────────────────
+            // Camera world position pinned to `start_cam_world`.
+            // Focus lerps from `start_focus` to `target_focus`. We
+            // *derive* yaw/distance/elevation from the geometry
+            // `(start_cam_world - focus)` so `apply_rig` produces
+            // a Transform whose translation equals start_cam_world
+            // and whose rotation looks at the lerped focus — i.e.
+            // the camera turns its head without translating.
+            let s = smoothstep((t / phase_a_end).clamp(0.0, 1.0));
+            let focus = target.start_focus.lerp(target_focus, s);
+            let off = target.start_cam_world - focus;
+            let dist = off.length().max(0.1);
+            cam.focus = focus;
+            cam.distance = dist;
+            cam.yaw = off.x.atan2(off.z);
+            cam.elevation = (off.y / dist).clamp(-1.0, 1.0).asin();
+        } else {
+            // ── Phase B: orbit-in arc ────────────────────────────
+            // Focus locked on the live vehicle position. Derive the
+            // Phase-B start state per-frame from `start_cam_world`
+            // (vehicle-anchored) and `target_focus` (live), so the
+            // rig params at tb=0 reproduce the Phase-A end pose
+            // even after vehicle motion. Then lerp to (apex →
+            // final, behind-vehicle yaw, original elevation).
+            let tb = ((t - phase_a_end) / (1.0 - phase_a_end)).clamp(0.0, 1.0);
+
+            let off = target.start_cam_world - target_focus;
+            let dist_b_start = off.length().max(0.1);
+            let yaw_b_start = off.x.atan2(off.z);
+            let elev_b_start = (off.y / dist_b_start).clamp(-1.0, 1.0).asin();
+
+            // Distance: rise to apex by tb=0.5, fall to final by 1.0.
+            let distance = if tb < 0.5 {
+                let s = smoothstep(sub_progress(tb, 0.0, 0.5));
+                dist_b_start + (target.apex_distance - dist_b_start) * s
+            } else {
+                let s = smoothstep(sub_progress(tb, 0.5, 1.0));
+                target.apex_distance + (target.distance - target.apex_distance) * s
+            };
+
+            // Yaw: shortest-arc lerp from derived start to behind-
+            // vehicle, spread across most of Phase B so the orbit
+            // happens *concurrently* with the pull-back-then-pull-in
+            // rather than as a late tack-on. Finishes at tb=0.85 so
+            // the last 15% is a clean settle with no more rotation.
+            let s_yaw = smoothstep(sub_progress(tb, 0.0, 0.85));
+            let tau = std::f32::consts::TAU;
+            let mut yaw_gap = (target_cam_yaw - yaw_b_start) % tau;
+            if yaw_gap > std::f32::consts::PI {
+                yaw_gap -= tau;
+            } else if yaw_gap < -std::f32::consts::PI {
+                yaw_gap += tau;
+            }
+            let yaw = yaw_b_start + yaw_gap * s_yaw;
+
+            // Elevation: ease from derived back to the user's
+            // original elevation across the full Phase-B duration.
+            let s_elev = smoothstep(tb);
+            let elevation = elev_b_start + (target.start_elevation - elev_b_start) * s_elev;
+
+            cam.focus = target_focus;
+            cam.yaw = yaw;
+            cam.distance = distance;
+            cam.elevation = elevation;
+        }
 
         if t >= 1.0 {
             cam.focus = target_focus;

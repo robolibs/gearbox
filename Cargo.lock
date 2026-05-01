@@ -1001,6 +1001,7 @@ dependencies = [
 [[package]]
 name = "bevy_glacial"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_glacial?rev=eb67675#eb67675c09eb73d3fbef0c33049469f36b35e60c"
 dependencies = [
  "ahash",
  "bevy",

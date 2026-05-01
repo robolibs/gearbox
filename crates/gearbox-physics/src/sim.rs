@@ -248,6 +248,32 @@ impl Sim {
         }
     }
 
+    /// Remove a vehicle from the sim. Drops the rapier rigid body
+    /// (which cascades to its child colliders) and the
+    /// `DynamicRayCastVehicleController`. The Bevy entity carrying
+    /// the visuals is despawned separately by the caller.
+    pub fn despawn_vehicle(&mut self, id: VehicleId) {
+        let Some(state) = self.vehicles.remove(&id) else { return };
+        self.bodies.remove(
+            state.handles.body,
+            &mut self.islands,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            true,
+        );
+    }
+
+    /// Despawn every vehicle currently registered. Convenience for
+    /// "scene reset" — leaves the static world (ground / planet /
+    /// box obstacles) intact.
+    pub fn despawn_all_vehicles(&mut self) {
+        let ids: Vec<VehicleId> = self.vehicles.keys().copied().collect();
+        for id in ids {
+            self.despawn_vehicle(id);
+        }
+    }
+
     /// Teleport a vehicle to the given pose, zeroing its velocities.
     /// Used by the editor's drag-to-move gesture.
     pub fn set_vehicle_pose(&mut self, id: VehicleId, pose: Pose) {

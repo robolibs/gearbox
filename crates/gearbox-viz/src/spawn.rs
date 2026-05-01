@@ -177,16 +177,48 @@ pub fn debug_log_new_usd_prims(
 /// current local Transform as its rest pose, and inserts
 /// [`UsdWheelDriver`]. After this runs, [`drive_usd_wheels`] takes
 /// over for that entity.
+/// True if `entity` is a descendant of `target` (inclusive — `entity
+/// == target` returns true). Walks the `ChildOf` chain up to a small
+/// depth limit so a malformed cycle can't hang the system.
+fn is_descendant_of(
+    mut entity: Entity,
+    target: Entity,
+    parents: &Query<&ChildOf>,
+) -> bool {
+    for _ in 0..64 {
+        if entity == target {
+            return true;
+        }
+        let Ok(parent) = parents.get(entity) else {
+            return false;
+        };
+        entity = parent.parent();
+    }
+    false
+}
+
 pub fn tag_usd_wheels_when_ready(
     mut commands: Commands,
     mut chassis_q: Query<(Entity, &mut PendingUsdWheelTags)>,
     prims: Query<(Entity, &bevy_openusd::UsdPrimRef, &Transform)>,
+    parents: Query<&ChildOf>,
 ) {
     for (chassis_entity, mut pending) in chassis_q.iter_mut() {
         pending.0.retain(|tag| {
-            let Some((wheel_entity, _, current)) = prims
-                .iter()
-                .find(|(_, pr, _)| pr.path == tag.prim_path)
+            // `UsdPrimRef.path` is the asset's authored prim path
+            // (e.g. `/robot/wheel_back_left`), which is identical for
+            // every instance of the same preset. Filtering by path
+            // alone — as we used to — picks an arbitrary prim from
+            // some OTHER vehicle in the scene, so the wheel-driver
+            // installed under chassis B ends up reading rapier wheel
+            // state for chassis A. Scoping by descendants of THIS
+            // chassis entity is what guarantees we tag the wheel
+            // belonging to the vehicle we're currently processing.
+            let Some((wheel_entity, _, current)) =
+                prims.iter().find(|(prim_entity, pr, _)| {
+                    pr.path == tag.prim_path
+                        && is_descendant_of(*prim_entity, chassis_entity, &parents)
+                })
             else {
                 return true; // not yet projected — try again next frame
             };

@@ -17,13 +17,14 @@ use bevy_egui::EguiContexts;
 use bevy_frost::{
     draw_assembly, RibbonCluster, RibbonDrag, RibbonGlyph, RibbonItem, RibbonOpen, RibbonPlacement,
 };
-use gearbox_viz::{SimClock, SimSpeed};
+use gearbox_viz::{SimClock, SimResetRequest, SimSpeed};
 
 use super::dock_ribbons::{RIBBONS, RIBBON_TRANSPORT};
 use super::style::AccentColor;
 
 const ID_PLAY: &str = "transport_play";
 const ID_SPEED: &str = "transport_speed";
+const ID_RESET: &str = "transport_reset";
 
 pub fn transport_bar(
     mut contexts: EguiContexts,
@@ -32,6 +33,7 @@ pub fn transport_bar(
     mut open: ResMut<RibbonOpen>,
     mut placement: ResMut<RibbonPlacement>,
     mut drag: ResMut<RibbonDrag>,
+    mut reset_writer: MessageWriter<SimResetRequest>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
     let accent_col = accent.0;
@@ -74,10 +76,19 @@ pub fn transport_bar(
             tooltip: "Speed  —  click to cycle 1× / 2× / 4× / 8×",
             child_ribbon: None,
         },
+        RibbonItem {
+            id: ID_RESET,
+            ribbon: RIBBON_TRANSPORT,
+            cluster: RibbonCluster::Middle,
+            slot: 2,
+            glyph: RibbonGlyph::Text("⟳"),
+            tooltip: "Reset  —  despawn every vehicle and every marker",
+            child_ribbon: None,
+        },
     ];
 
     // Active state is per-item: Play active when NOT paused,
-    // Speed active when multiplier ≠ 1×.
+    // Speed active when multiplier ≠ 1×, Reset never sticks active.
     let speed_active = speed != SimSpeed::X1;
     let active = move |id: &'static str| -> bool {
         match id {
@@ -104,6 +115,9 @@ pub fn transport_bar(
         match c.item {
             ID_PLAY => clock.paused = !clock.paused,
             ID_SPEED => clock.speed = clock.speed.next(),
+            ID_RESET => {
+                reset_writer.write(SimResetRequest::default());
+            }
             _ => {}
         }
     }

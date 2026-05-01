@@ -164,6 +164,10 @@ fn main() {
         // anywhere in the scene over `gearbox/sim/spawn`. Drop this
         // line + `crates/gearbox-api/src/spawn_api.rs` to remove.
         .add_plugins(gearbox_api::SpawnApiPlugin)
+        // Pluggable scene reset — wipe every vehicle and every marker
+        // over `gearbox/sim/reset`. Drop this line +
+        // `crates/gearbox-api/src/reset_api.rs` to remove.
+        .add_plugins(gearbox_api::ResetApiPlugin)
         // Persists the primary window's size + position to
         // ~/.config/gearbox/window.txt on every resize / move.
         .add_plugins(window_settings::WindowSettingsPlugin)

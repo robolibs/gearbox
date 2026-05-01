@@ -73,6 +73,10 @@ pub mod markers_api;
 // drone / oxbo into the scene at any (x,z) + yaw over zenoh.
 pub mod spawn_api;
 
+// Pluggable scene reset — wipe every vehicle and every marker
+// without restarting the simulator.
+pub mod reset_api;
+
 #[cfg(feature = "bevy")]
 mod plugin;
 
@@ -94,6 +98,10 @@ pub use markers_api::{MarkersApiPlugin, MarkersApiSession};
 pub use spawn_api::{SpawnBroker, SpawnVehicleWire, SpawnedVehicleWire};
 #[cfg(feature = "bevy")]
 pub use spawn_api::{SpawnApiPlugin, SpawnApiSession};
+
+pub use reset_api::{ResetBroker, ResetWire};
+#[cfg(feature = "bevy")]
+pub use reset_api::{ResetApiPlugin, ResetApiSession};
 
 #[cfg(feature = "bevy")]
 pub use plugin::{ApiSession, GearboxApiPlugin};

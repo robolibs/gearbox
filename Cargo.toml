@@ -90,7 +90,7 @@ gearbox-editor  = { path = "crates/gearbox-editor" }
 gearbox-api     = { path = "crates/gearbox-api" }
 gearbox-link    = { path = "crates/gearbox-link" }
 bevy_frost      = { git = "https://github.com/bresilla/bevy_frost", package = "bevy_frost" }
-bevy_glacial    = { path = "../bevy_glacial" }
+bevy_glacial    = { git = "https://github.com/bresilla/bevy_glacial", rev = "eb67675" }
 ondrive         = { git = "https://codeberg.org/robolibs/ondrive.git" }
 # Pinned to a specific commit so a transitive update upstream
 # can't silently change scene-projection behaviour. Bump by

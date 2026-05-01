@@ -102,7 +102,9 @@ def main() -> None:
 
     spawn_sub = session.declare_subscriber("gearbox/sim/spawned", on_spawned)
 
-    # Unpause first so the vehicle can move.
+    # Wipe whatever's already in the scene from a previous run.
+    session.put("gearbox/sim/reset", cbor2.dumps({"pause_clock": False}))
+    # Unpause so the vehicle can move once spawned.
     session.put("gearbox/sim/clock/command", cbor2.dumps({"SetPaused": False}))
     # Combined: clock-pause settle + subscriber propagation budget.
     time.sleep(0.5)
