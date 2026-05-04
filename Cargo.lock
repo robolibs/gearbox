@@ -1237,7 +1237,7 @@ dependencies = [
  "bevy_egui",
  "bevy_frost",
  "image",
- "openusd",
+ "openusd 0.3.0 (git+https://github.com/mxpv/openusd?branch=main)",
  "rfd",
  "serde",
  "thiserror 2.0.18",
@@ -3000,6 +3000,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "franka-demo"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "gearbox-physics",
+ "gearbox-usd",
+ "rapier3d-f64",
+ "usd_bevy",
+]
+
+[[package]]
 name = "frostcore"
 version = "0.0.1"
 source = "git+https://github.com/bresilla/bevy_frost#67dc48c1f636e1bfb372bbed52d8b66bc13fb1a9"
@@ -3186,6 +3198,20 @@ dependencies = [
  "datapod",
  "gearbox-core",
  "rapier3d-f64",
+]
+
+[[package]]
+name = "gearbox-usd"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "gearbox-physics",
+ "glam 0.30.10",
+ "log",
+ "openusd 0.3.0 (git+https://github.com/mxpv/openusd?rev=fe92b73224c611831be244afac9cf7654b5ef51e)",
+ "rapier3d-f64",
+ "usd_rapier",
+ "usd_schema",
 ]
 
 [[package]]
@@ -5005,7 +5031,23 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 [[package]]
 name = "openusd"
 version = "0.3.0"
-source = "git+https://github.com/mxpv/openusd?branch=main#b5640103743cd49789c4f0d6741a4c8ba5c7ae70"
+source = "git+https://github.com/mxpv/openusd?branch=main#fe92b73224c611831be244afac9cf7654b5ef51e"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "half",
+ "logos",
+ "lz4_flex 0.13.0",
+ "num-traits",
+ "strum",
+ "thiserror 2.0.18",
+ "zip",
+]
+
+[[package]]
+name = "openusd"
+version = "0.3.0"
+source = "git+https://github.com/mxpv/openusd?rev=fe92b73224c611831be244afac9cf7654b5ef51e#fe92b73224c611831be244afac9cf7654b5ef51e"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -5496,7 +5538,17 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_openusd",
- "openusd",
+ "openusd 0.3.0 (git+https://github.com/mxpv/openusd?rev=fe92b73224c611831be244afac9cf7654b5ef51e)",
+]
+
+[[package]]
+name = "probe-usd-sim"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "gearbox-physics",
+ "gearbox-usd",
+ "rapier3d-f64",
 ]
 
 [[package]]
@@ -7470,13 +7522,52 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
+name = "usd_bevy"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "bevy",
+ "glam 0.30.10",
+ "image",
+ "log",
+ "openusd 0.3.0 (git+https://github.com/mxpv/openusd?rev=fe92b73224c611831be244afac9cf7654b5ef51e)",
+ "rapier3d-f64",
+ "serde",
+ "thiserror 2.0.18",
+ "usd_rapier",
+ "usd_schema",
+ "zip",
+]
+
+[[package]]
+name = "usd_rapier"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "glam 0.30.10",
+ "log",
+ "openusd 0.3.0 (git+https://github.com/mxpv/openusd?rev=fe92b73224c611831be244afac9cf7654b5ef51e)",
+ "rapier3d-f64",
+ "usd_schema",
+]
+
+[[package]]
+name = "usd_schema"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "glam 0.30.10",
+ "openusd 0.3.0 (git+https://github.com/mxpv/openusd?rev=fe92b73224c611831be244afac9cf7654b5ef51e)",
+]
+
+[[package]]
 name = "usd_schemas"
 version = "0.0.1"
 source = "git+https://github.com/bresilla/bevy_openusd?rev=578dd430cd8f5c287cce1ef7ee54d81f52a583d9#578dd430cd8f5c287cce1ef7ee54d81f52a583d9"
 dependencies = [
  "anyhow",
  "glam 0.30.10",
- "openusd",
+ "openusd 0.3.0 (git+https://github.com/mxpv/openusd?branch=main)",
 ]
 
 [[package]]

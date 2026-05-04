@@ -7,8 +7,11 @@ members = [
     "crates/gearbox-editor",
     "crates/gearbox-api",
     "crates/gearbox-link",
+    "crates/gearbox-usd",
     "bin/gearbox",
     "bin/probe_usd",
+    "bin/probe_usd_sim",
+    "bin/franka_demo",
 ]
 
 # Shared metadata. Each member inherits with `version.workspace = true`.
@@ -100,7 +103,7 @@ ondrive         = { git = "https://codeberg.org/robolibs/ondrive.git" }
 # collapses every variant request onto a single handle and the
 # last load wins for every consumer.
 bevy_openusd    = { git = "https://github.com/bresilla/bevy_openusd", rev = "578dd430cd8f5c287cce1ef7ee54d81f52a583d9" }
-openusd         = { git = "https://github.com/mxpv/openusd", branch = "main" }
+openusd         = { git = "https://github.com/mxpv/openusd", rev = "fe92b73224c611831be244afac9cf7654b5ef51e" }
 
 # Force every transitive `datapod` (notably the one ondrive pulls
 # in via its own git ref) to resolve to the same local copy gearbox
