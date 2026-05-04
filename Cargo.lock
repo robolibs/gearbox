@@ -3000,15 +3000,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "franka-demo"
-version = "0.0.1"
-dependencies = [
- "bevy",
- "rapier3d-f64",
- "usd_bevy",
-]
-
-[[package]]
 name = "frostcore"
 version = "0.0.1"
 source = "git+https://github.com/bresilla/bevy_frost#67dc48c1f636e1bfb372bbed52d8b66bc13fb1a9"
@@ -3207,6 +3198,16 @@ dependencies = [
  "datapod",
  "gearbox-core",
  "gearbox-physics",
+]
+
+[[package]]
+name = "gearbox-world"
+version = "0.0.1"
+dependencies = [
+ "bevy",
+ "bevy_glacial",
+ "rapier3d-f64",
+ "usd_bevy",
 ]
 
 [[package]]
@@ -7493,6 +7494,15 @@ name = "urlencoding"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
+name = "usd-world-demo"
+version = "0.0.1"
+dependencies = [
+ "bevy",
+ "gearbox-world",
+ "usd_bevy",
+]
 
 [[package]]
 name = "usd_bevy"

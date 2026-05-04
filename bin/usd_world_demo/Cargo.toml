@@ -1,17 +1,17 @@
 [package]
-name = "franka-demo"
-description = "Load a USD into a Bevy app with usd_bevy + its RapierAdapterPlugin. Gearbox provides the world layer (ground, sky); usd_bevy handles USD physics + visuals."
+name = "usd-world-demo"
+description = "Load one or more USD assets into a gearbox-shaped Bevy app. World comes from gearbox-world; USD physics + visuals from usd_bevy."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "franka-demo"
+name = "usd-world-demo"
 path = "src/main.rs"
 
 [dependencies]
-rapier3d.workspace = true
 bevy.workspace = true
+gearbox-world = { path = "../../crates/gearbox-world" }
 # Both UsdPlugin (loader + scene projection) and the RapierAdapterPlugin
 # (USD physics → its own PhysicsWorld) come from this single crate.
 usd_bevy = { path = "../../../../other/OUSD/bevy_openusd/crates/usd_bevy" }

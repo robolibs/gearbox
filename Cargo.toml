@@ -7,9 +7,10 @@ members = [
     "crates/gearbox-editor",
     "crates/gearbox-api",
     "crates/gearbox-link",
+    "crates/gearbox-world",
     "bin/gearbox",
     "bin/probe_usd",
-    "bin/franka_demo",
+    "bin/usd_world_demo",
 ]
 
 # Shared metadata. Each member inherits with `version.workspace = true`.
