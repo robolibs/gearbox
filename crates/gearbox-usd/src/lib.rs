@@ -19,7 +19,7 @@ use rapier3d::prelude::RigidBodyHandle;
 
 mod load;
 
-pub use load::load_usd_into_sim;
+pub use load::{load_usd_into_sim, StageBasis};
 
 /// What `load_usd_into_sim` produces: enough to find the rapier
 /// handles for any prim that ended up in the sim, so callers can
@@ -28,6 +28,11 @@ pub use load::load_usd_into_sim;
 pub struct SceneDescriptor {
     /// USD prim path → rapier rigid body handle.
     pub bodies: HashMap<String, RigidBodyHandle>,
+    /// USD-authored frame → gearbox sim frame conversion. Identity
+    /// when the stage is already Y-up + metres. The visual side
+    /// needs the inverse to undo `usd_bevy`'s root-basis transform
+    /// when reading sim poses back to Bevy `Transform`s.
+    pub basis: StageBasis,
 }
 
 impl SceneDescriptor {

@@ -119,14 +119,7 @@ fn main() {
             spawn_scene_when_loaded,
             toggle_sim_pause,
             step_gearbox_sim,
-            // `reconcile_visuals_to_sim` is intentionally OFF until we
-            // teach it about the USD parent chain. usd_bevy spawns
-            // every prim under a root-basis transform (Z→Y rotation +
-            // metersPerUnit scale) and a hierarchy of intermediate
-            // Xforms; naively overwriting a leaf's local Transform
-            // with the body's world pose ignores all of that and
-            // visually scrambles the arm. Step 4 of the gearbox
-            // integration adds the proper write-back.
+            reconcile_visuals_to_sim.after(step_gearbox_sim),
         ),
     );
 
@@ -244,16 +237,35 @@ fn toggle_sim_pause(keys: Res<ButtonInput<KeyCode>>, mut paused: ResMut<SimPause
     }
 }
 
-/// For every entity carrying a `UsdPrimRef`, look up the matching
-/// rapier body in the descriptor and copy its pose into `Transform`.
-/// USD authors `Z up` for franka but Bevy is `Y up`; we deal with
-/// that by reading `metersPerUnit` / `upAxis` later — for now we just
-/// trust the loaded transforms to put us roughly in the right place.
+/// Copy each rapier body's world pose into the matching Bevy entity's
+/// local `Transform`, accounting for the basis transforms on both
+/// sides.
+///
+/// **Frames in play:**
+/// - **Sim frame:** Y-up, metres. `gearbox-usd` baked the basis on
+///   load so gravity = -Y matches "down".
+/// - **Visual frame:** Bevy world, Y-up, metres.
+/// - **Visual parent chain:** `usd_bevy` puts every projected prim
+///   under an `inner_root` that carries `S = X(-90°) × scale(mpu)`
+///   (the USD→Bevy basis). For URDF-style assets like franka where
+///   the robot sits flat under `/<robot>`, that's the only non-identity
+///   ancestor.
+///
+/// We want `leaf.GlobalTransform == sim_pose`. With `parent.G = S`,
+/// that means `leaf.L = S⁻¹ × sim_pose` — written here as the inverse
+/// of the descriptor's basis applied to the sim pose. If we skipped
+/// this and wrote raw sim values, `S` would re-apply during
+/// transform propagation and the franka would launch in +Z when
+/// physics started ("flies away" bug).
 fn reconcile_visuals_to_sim(
     sim: Res<PhysicsSim>,
     desc: Res<UsdSceneDesc>,
     mut prims: Query<(&UsdPrimRef, &mut Transform)>,
 ) {
+    let basis = desc.0.basis;
+    let inv_rot = basis.rotation.inverse();
+    let inv_scale = 1.0 / basis.uniform_scale;
+
     for (prim, mut tr) in &mut prims {
         let Some(handle) = desc.0.body(&prim.path) else {
             continue;
@@ -261,9 +273,22 @@ fn reconcile_visuals_to_sim(
         let Some(body) = sim.0.bodies.get(handle) else {
             continue;
         };
-        let t = body.translation();
-        let r = body.rotation();
-        tr.translation = Vec3::new(t.x as f32, t.y as f32, t.z as f32);
-        tr.rotation = Quat::from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32);
+
+        let st = body.translation();
+        let sr = body.rotation();
+
+        let sim_t = bevy::math::DVec3::new(st.x, st.y, st.z);
+        let leaf_t = (inv_rot * sim_t) * inv_scale;
+
+        let sim_r = bevy::math::DQuat::from_xyzw(sr.x, sr.y, sr.z, sr.w);
+        let leaf_r = inv_rot * sim_r;
+
+        tr.translation = Vec3::new(leaf_t.x as f32, leaf_t.y as f32, leaf_t.z as f32);
+        tr.rotation = Quat::from_xyzw(
+            leaf_r.x as f32,
+            leaf_r.y as f32,
+            leaf_r.z as f32,
+            leaf_r.w as f32,
+        );
     }
 }
