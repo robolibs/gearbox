@@ -7500,6 +7500,8 @@ name = "usd-world-demo"
 version = "0.0.1"
 dependencies = [
  "bevy",
+ "bevy_egui",
+ "bevy_frost",
  "gearbox-world",
  "usd_bevy",
 ]
