@@ -1,20 +1,47 @@
 //! `usd-world-demo <path1.usd> [path2.usd ...]` — load one or more
 //! USD assets into a gearbox-shaped Bevy app.
 //!
-//! Multiple paths are mounted side by side along +X, spacing 2 m
-//! between centres. The world layer (sky, sun, grid, axes, ground
-//! collider) comes from `gearbox-world`; USD loading + physics come
-//! from `usd_bevy`.
+//! Layout: assets are arranged in a roughly-square grid on the XZ
+//! plane around the origin, `MOUNT_SPACING` metres between cells.
+//! The world layer (sky, sun, grid, axes, ground collider) comes
+//! from `gearbox-world`; USD loading + physics come from `usd_bevy`.
 
 use std::path::PathBuf;
 
 use bevy::prelude::*;
 use bevy::scene::SceneRoot;
-use gearbox_world::WorldPlugin;
+use gearbox_world::{WorldConfig, WorldPlugin};
+use usd_bevy::anim::AnimPlugin;
 use usd_bevy::physics::{PhysicsActive, RapierAdapterPlugin};
 use usd_bevy::{UsdAsset, UsdLoaderSettings, UsdPlugin};
 
-const MOUNT_SPACING: f32 = 2.0;
+/// Distance between grid cells in metres. Tuned to keep typical
+/// robot-scale assets (franka ~ 1.5 m, tractor ~ 4 m) clearly
+/// separated without scattering them across the visible area.
+const MOUNT_SPACING: f32 = 4.0;
+
+/// Lay N points out on a roughly-square grid on the XZ plane,
+/// centred on the origin. Returns one position per index `0..n`.
+fn grid_positions(n: usize) -> Vec<Vec3> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let cols = (n as f32).sqrt().ceil() as usize;
+    let rows = (n + cols - 1) / cols;
+    let half_w = (cols as f32 - 1.0) * 0.5;
+    let half_h = (rows as f32 - 1.0) * 0.5;
+    (0..n)
+        .map(|i| {
+            let r = i / cols;
+            let c = i % cols;
+            Vec3::new(
+                (c as f32 - half_w) * MOUNT_SPACING,
+                0.0,
+                (r as f32 - half_h) * MOUNT_SPACING,
+            )
+        })
+        .collect()
+}
 
 #[derive(Resource, Clone)]
 struct PendingLoads(Vec<PendingAsset>);
@@ -43,10 +70,11 @@ fn main() {
         std::process::exit(2);
     }
 
+    let positions = grid_positions(raw_paths.len());
     let pending: Vec<PendingAsset> = raw_paths
         .iter()
-        .enumerate()
-        .map(|(i, raw)| {
+        .zip(positions.into_iter())
+        .map(|(raw, pos)| {
             let path = PathBuf::from(raw);
             let abs = if path.is_absolute() {
                 path
@@ -56,7 +84,7 @@ fn main() {
             let parent = abs.parent().expect("asset has parent dir").to_path_buf();
             PendingAsset {
                 abs_path: abs,
-                mount_point: Vec3::new(i as f32 * MOUNT_SPACING, 0.0, 0.0),
+                mount_point: pos,
                 search_path: parent,
             }
         })
@@ -92,8 +120,17 @@ fn main() {
                 ..default()
             }),
     )
-    .add_plugins(WorldPlugin::default())
+    // Pull the camera back enough to fit the whole grid; +4 m floor
+    // so a single-asset run still looks normal.
+    .add_plugins(WorldPlugin {
+        config: WorldConfig {
+            camera_distance: 4.0
+                + (raw_paths.len() as f32).sqrt().ceil() * MOUNT_SPACING * 0.7,
+            ..default()
+        },
+    })
     .add_plugins(UsdPlugin)
+    .add_plugins(AnimPlugin)
     .add_plugins(RapierAdapterPlugin)
     .insert_resource(PhysicsActive(true))
     .insert_resource(PendingLoads(pending))
