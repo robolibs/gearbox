@@ -55,7 +55,7 @@ pub struct UsdAssetRoot(pub std::path::PathBuf);
 pub struct PendingUsdScene {
     pub asset_path: String,
     pub name: String,
-    pub handle: Option<Handle<bevy_openusd::UsdAsset>>,
+    pub handle: Option<Handle<usd_bevy::UsdAsset>>,
 }
 
 /// One pending USD-wheel installation. We can't act on it until the
@@ -132,7 +132,7 @@ pub struct UsdWheelDriver {
 /// Tracks which paths have already been logged in a `Local<HashSet>`
 /// so each entity only fires once.
 pub fn debug_log_new_usd_prims(
-    prims: Query<(&bevy_openusd::UsdPrimRef, &GlobalTransform), Added<bevy_openusd::UsdPrimRef>>,
+    prims: Query<(&usd_bevy::UsdPrimRef, &GlobalTransform), Added<usd_bevy::UsdPrimRef>>,
     mut seen: Local<std::collections::HashSet<String>>,
 ) {
     // Names that signal "vertical" or "front" so we can sanity-check
@@ -200,7 +200,7 @@ fn is_descendant_of(
 pub fn tag_usd_wheels_when_ready(
     mut commands: Commands,
     mut chassis_q: Query<(Entity, &mut PendingUsdWheelTags)>,
-    prims: Query<(Entity, &bevy_openusd::UsdPrimRef, &Transform)>,
+    prims: Query<(Entity, &usd_bevy::UsdPrimRef, &Transform)>,
     parents: Query<&ChildOf>,
 ) {
     for (chassis_entity, mut pending) in chassis_q.iter_mut() {
@@ -304,7 +304,7 @@ pub fn drive_usd_wheels(
 pub fn instantiate_pending_usd_scenes(
     mut commands: Commands,
     asset_server: Res<bevy::asset::AssetServer>,
-    usd_assets: Res<bevy::asset::Assets<bevy_openusd::UsdAsset>>,
+    usd_assets: Res<bevy::asset::Assets<usd_bevy::UsdAsset>>,
     asset_root: Option<Res<UsdAssetRoot>>,
     mut pending: Query<(Entity, &mut PendingUsdScene)>,
 ) {
@@ -332,10 +332,10 @@ pub fn instantiate_pending_usd_scenes(
                 pend.asset_path, pend.name, asset_parent.display()
             );
             let parent_clone = asset_parent.clone();
-            let handle: Handle<bevy_openusd::UsdAsset> = asset_server
+            let handle: Handle<usd_bevy::UsdAsset> = asset_server
                 .load_with_settings(
                     pend.asset_path.clone(),
-                    move |s: &mut bevy_openusd::UsdLoaderSettings| {
+                    move |s: &mut usd_bevy::UsdLoaderSettings| {
                         s.search_paths = vec![parent_clone.clone()];
                     },
                 );

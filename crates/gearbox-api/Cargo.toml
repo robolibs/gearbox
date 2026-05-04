@@ -9,7 +9,7 @@ license.workspace = true
 default = ["bevy"]
 # Bevy plugin layer — off for headless servers that don't need the
 # viz stack transitively pulled in.
-bevy = ["dep:bevy", "dep:bevy_openusd", "dep:gearbox-viz"]
+bevy = ["dep:bevy", "dep:usd_bevy", "dep:gearbox-viz"]
 
 [dependencies]
 gearbox-core.workspace = true
@@ -24,5 +24,5 @@ ciborium = "0.2"
 ondrive.workspace = true
 
 bevy = { workspace = true, optional = true }
-bevy_openusd = { workspace = true, optional = true }
+usd_bevy = { workspace = true, optional = true }
 gearbox-viz = { workspace = true, optional = true }

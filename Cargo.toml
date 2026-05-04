@@ -101,7 +101,7 @@ ondrive         = { git = "https://codeberg.org/robolibs/ondrive.git" }
 # (`asset_path#variants:...`) — without it, `load_with_settings`
 # collapses every variant request onto a single handle and the
 # last load wins for every consumer.
-bevy_openusd    = { git = "https://github.com/bresilla/bevy_openusd", rev = "578dd430cd8f5c287cce1ef7ee54d81f52a583d9" }
+usd_bevy        = { path = "../../other/OUSD/bevy_openusd/crates/usd_bevy" }
 openusd         = { git = "https://github.com/mxpv/openusd", rev = "fe92b73224c611831be244afac9cf7654b5ef51e" }
 
 # Force every transitive `datapod` (notably the one ondrive pulls

@@ -10,7 +10,7 @@ use bevy::asset::{AssetPlugin, AssetServer, Assets, LoadState};
 use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
 use bevy::scene::{ScenePlugin, SceneRoot};
-use bevy_openusd::{UsdAsset, UsdLoaderSettings, UsdPlugin, UsdPrimRef};
+use usd_bevy::{UsdAsset, UsdLoaderSettings, UsdPlugin, UsdPrimRef};
 
 #[derive(Resource)]
 struct UsdHandle(Handle<UsdAsset>);

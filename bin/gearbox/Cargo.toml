@@ -19,4 +19,4 @@ datapod.workspace = true
 bevy.workspace = true
 bevy_egui.workspace = true
 bevy_glacial.workspace = true
-bevy_openusd.workspace = true
+usd_bevy.workspace = true

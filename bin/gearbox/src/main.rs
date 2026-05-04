@@ -94,10 +94,36 @@ fn spherical_cap_mesh(radius: f32, half_size: f32, n: u32) -> Mesh {
 }
 
 
+/// Each `--usd <path>` CLI flag → one entry. Loaded at startup,
+/// mounted as a `SceneRoot` 2 m apart along +X starting from the
+/// origin. Path can be relative (resolved against the cwd) or absolute.
+#[derive(bevy::prelude::Resource, Default, Clone)]
+pub struct CliUsdLoads(pub Vec<std::path::PathBuf>);
+
+fn parse_cli_usd_loads() -> CliUsdLoads {
+    let mut out = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--usd" {
+            if let Some(p) = args.next() {
+                let pb = std::path::PathBuf::from(p);
+                let abs = if pb.is_absolute() {
+                    pb
+                } else {
+                    std::env::current_dir().unwrap_or_default().join(pb)
+                };
+                out.push(abs);
+            }
+        }
+    }
+    CliUsdLoads(out)
+}
+
 fn main() {
     // Restore the last-saved window geometry (size + position) so we
     // don't boot into a default tiny pane at the top-left every run.
     let window_geometry = window_settings::load_window_geometry();
+    let cli_usd = parse_cli_usd_loads();
 
     App::new()
         // Sky-blue horizon fade so the DistanceFog blends into the clear colour.
@@ -123,6 +149,10 @@ fn main() {
                 // `<repo>/bin/gearbox/assets/`.
                 .set(bevy::asset::AssetPlugin {
                     file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").to_string(),
+                    // Allow `--usd <abs_path>` to load USDs from
+                    // anywhere on disk; Bevy 0.18's default forbids
+                    // paths outside `file_path`.
+                    unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
                     ..default()
                 }),
         )
@@ -138,7 +168,18 @@ fn main() {
         // `.usda` / `.usdc` / `.usdz` loader so any code in the
         // app can `asset_server.load("…/foo.usda")` and get a
         // composed Bevy `Scene`.
-        .add_plugins(bevy_openusd::UsdPlugin)
+        .add_plugins(usd_bevy::UsdPlugin)
+        // USD content loaded via "Load USD…" gets its own rapier
+        // world (gravity, joints, drives) — separate from
+        // `gearbox_physics::Sim` for now. `PhysicsActive` starts
+        // OFF; flipped by an editor toggle later.
+        .add_plugins(usd_bevy::physics::RapierAdapterPlugin)
+        .insert_resource(usd_bevy::physics::PhysicsActive(false))
+        // Stage-time animation: hummingbird wings flap, authored
+        // xformOp tracks evaluate. Independent of rapier physics —
+        // good enough for purely-visual animated USDs alongside
+        // the simulator.
+        .add_plugins(usd_bevy::anim::AnimPlugin)
         .add_plugins(GearboxVizPlugin)
         .add_plugins(EditorPlugin)
         // Robot / sim API — opens a zenoh session and bridges
@@ -171,9 +212,129 @@ fn main() {
         // Persists the primary window's size + position to
         // ~/.config/gearbox/window.txt on every resize / move.
         .add_plugins(window_settings::WindowSettingsPlugin)
-        .add_systems(Startup, setup_scene)
-        .add_systems(Update, follow_camera_shadow_patch)
+        .insert_resource(cli_usd)
+        .insert_resource(CliUsdSpawned::default())
+        .add_systems(
+            Startup,
+            (setup_scene, request_cli_usd_loads, spawn_usd_physics_ground),
+        )
+        .add_systems(
+            Update,
+            (
+                follow_camera_shadow_patch,
+                spawn_cli_usd_when_loaded,
+                mirror_sim_clock_to_usd_physics,
+            ),
+        )
         .run();
+}
+
+/// Mirror the editor's transport-bar play/pause (which toggles
+/// `gearbox_viz::SimClock.paused`) into `usd_bevy`'s `PhysicsActive`
+/// flag, so a single ▶/⏸ button in the editor pauses BOTH physics
+/// worlds — the gearbox `Sim` and the USD-content rapier world —
+/// at the same time.
+fn mirror_sim_clock_to_usd_physics(
+    clock: Res<gearbox_viz::SimClock>,
+    mut active: ResMut<usd_bevy::physics::PhysicsActive>,
+) {
+    let want = !clock.paused;
+    if active.0 != want {
+        active.0 = want;
+    }
+}
+
+/// Static ground in `usd_bevy::physics::PhysicsWorld`. Gearbox's
+/// own `Sim` already owns a 2km ground plane (its planet), but
+/// USD-loaded content lives in a SEPARATE rapier world — without
+/// this collider every loaded USD falls through the floor forever.
+/// Top surface flush with `y = 0` so visually it lines up with the
+/// editor's ground patch.
+fn spawn_usd_physics_ground(mut world: ResMut<usd_bevy::physics::PhysicsWorld>) {
+    use bevy::math::DVec3;
+    use gearbox_physics::rapier3d::prelude::*;
+    let ground = ColliderBuilder::cuboid(2_000.0, 0.5, 2_000.0)
+        .translation(DVec3::new(0.0, -0.5, 0.0))
+        .friction(1.0)
+        .build();
+    let h = world.colliders.insert(ground);
+    info!(
+        "USD physics ground inserted into PhysicsWorld: handle={:?}, y_top=0.0, half_extent=(2000,0.5,2000)",
+        h
+    );
+}
+
+/// Tracks which CLI-requested USDs have already been spawned as
+/// `SceneRoot`s — system polls each frame until the asset's inner
+/// scene is ready, then spawns once.
+#[derive(bevy::prelude::Resource, Default)]
+pub struct CliUsdSpawned {
+    pub loaded: Vec<CliUsdHandle>,
+}
+
+pub struct CliUsdHandle {
+    handle: Handle<usd_bevy::UsdAsset>,
+    mount: Vec3,
+    spawned: bool,
+    label: String,
+}
+
+fn request_cli_usd_loads(
+    asset_server: Res<bevy::asset::AssetServer>,
+    cli: Res<CliUsdLoads>,
+    mut spawned: ResMut<CliUsdSpawned>,
+) {
+    for (i, path) in cli.0.iter().enumerate() {
+        let parent = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let search = vec![parent];
+        let load_path = path.to_string_lossy().into_owned();
+        let handle: Handle<usd_bevy::UsdAsset> = asset_server
+            .load_with_settings::<usd_bevy::UsdAsset, _>(
+                load_path.clone(),
+                move |s: &mut usd_bevy::UsdLoaderSettings| {
+                    s.search_paths = search.clone();
+                },
+            );
+        let label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(load_path);
+        let mount = Vec3::new(i as f32 * 2.0, 0.0, 0.0);
+        info!("CLI USD load: {label} → mount={mount:?}");
+        spawned.loaded.push(CliUsdHandle {
+            handle,
+            mount,
+            spawned: false,
+            label,
+        });
+    }
+}
+
+fn spawn_cli_usd_when_loaded(
+    mut commands: Commands,
+    mut spawned: ResMut<CliUsdSpawned>,
+    usd_assets: Res<bevy::asset::Assets<usd_bevy::UsdAsset>>,
+) {
+    for entry in spawned.loaded.iter_mut() {
+        if entry.spawned {
+            continue;
+        }
+        let Some(asset) = usd_assets.get(&entry.handle) else {
+            continue;
+        };
+        commands.spawn((
+            bevy::scene::SceneRoot(asset.scene.clone()),
+            Transform::from_translation(entry.mount),
+        ));
+        entry.spawned = true;
+        info!(
+            "CLI USD spawned: {} default_prim={:?} layer_count={}",
+            entry.label, asset.default_prim, asset.layer_count
+        );
+    }
 }
 
 /// Re-centre the `ShadowPatch` under the chase-camera's focus every

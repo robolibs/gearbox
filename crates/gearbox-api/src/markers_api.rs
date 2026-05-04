@@ -165,7 +165,7 @@ impl Plugin for MarkersApiPlugin {
 #[cfg(feature = "bevy")]
 #[derive(Component)]
 pub struct PendingMarkerUsd {
-    pub handle: Handle<bevy_openusd::UsdAsset>,
+    pub handle: Handle<usd_bevy::UsdAsset>,
     /// Marker id — used purely for log lines so a stuck load can be
     /// traced back to the user that published it.
     pub marker_id: String,
@@ -225,11 +225,11 @@ fn apply_markers_system(
             // applies the same selections, so this is enough to
             // produce the right scene without also stuffing them
             // into `settings.variant_selections`.
-            let variants: Vec<bevy_openusd::VariantSelection> = m
+            let variants: Vec<usd_bevy::VariantSelection> = m
                 .usd_variants
                 .iter()
                 .map(|(prim_path, set_name, option)| {
-                    bevy_openusd::VariantSelection {
+                    usd_bevy::VariantSelection {
                         prim_path: prim_path.clone(),
                         set_name: set_name.clone(),
                         option: option.clone(),
@@ -239,13 +239,13 @@ fn apply_markers_system(
             let asset_path: bevy::asset::AssetPath<'static> = if variants.is_empty() {
                 usd_rel.to_string().into()
             } else {
-                let label = bevy_openusd::variant_label(&variants);
+                let label = usd_bevy::variant_label(&variants);
                 bevy::asset::AssetPath::from(usd_rel.to_string()).with_label(label)
             };
-            let handle: Handle<bevy_openusd::UsdAsset> = asset_server
+            let handle: Handle<usd_bevy::UsdAsset> = asset_server
                 .load_with_settings(
                     asset_path,
-                    move |s: &mut bevy_openusd::UsdLoaderSettings| {
+                    move |s: &mut usd_bevy::UsdLoaderSettings| {
                         s.search_paths = vec![parent_clone.clone()];
                         // Variants come in via the path label too;
                         // we set them in settings as well so a
@@ -314,7 +314,7 @@ fn apply_markers_system(
 fn instantiate_pending_marker_usd(
     mut commands: Commands,
     asset_server: Res<bevy::asset::AssetServer>,
-    usd_assets: Res<bevy::asset::Assets<bevy_openusd::UsdAsset>>,
+    usd_assets: Res<bevy::asset::Assets<usd_bevy::UsdAsset>>,
     pending: Query<(Entity, &PendingMarkerUsd)>,
 ) {
     use bevy::asset::LoadState;
