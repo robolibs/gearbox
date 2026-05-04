@@ -3003,10 +3003,7 @@ dependencies = [
 name = "franka-demo"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "bevy",
- "gearbox-physics",
- "gearbox-usd",
  "rapier3d-f64",
  "usd_bevy",
 ]
@@ -3198,20 +3195,6 @@ dependencies = [
  "datapod",
  "gearbox-core",
  "rapier3d-f64",
-]
-
-[[package]]
-name = "gearbox-usd"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "gearbox-physics",
- "glam 0.30.10",
- "log",
- "openusd 0.3.0 (git+https://github.com/mxpv/openusd?rev=fe92b73224c611831be244afac9cf7654b5ef51e)",
- "rapier3d-f64",
- "usd_rapier",
- "usd_schema",
 ]
 
 [[package]]
@@ -5539,16 +5522,6 @@ dependencies = [
  "bevy",
  "bevy_openusd",
  "openusd 0.3.0 (git+https://github.com/mxpv/openusd?rev=fe92b73224c611831be244afac9cf7654b5ef51e)",
-]
-
-[[package]]
-name = "probe-usd-sim"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "gearbox-physics",
- "gearbox-usd",
- "rapier3d-f64",
 ]
 
 [[package]]

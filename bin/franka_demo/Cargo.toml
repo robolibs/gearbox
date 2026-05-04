@@ -1,6 +1,6 @@
 [package]
 name = "franka-demo"
-description = "Minimum viable Isaac-Sim-style demo: load franka.usd into a gearbox-physics Sim, render via Bevy + usd_bevy, reconcile poses each frame."
+description = "Load a USD into a Bevy app with usd_bevy + its RapierAdapterPlugin. Gearbox provides the world layer (ground, sky); usd_bevy handles USD physics + visuals."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,13 +10,8 @@ name = "franka-demo"
 path = "src/main.rs"
 
 [dependencies]
-gearbox-physics.workspace = true
-gearbox-usd = { path = "../../crates/gearbox-usd" }
 rapier3d.workspace = true
-
 bevy.workspace = true
-# Visual side from the new bevy_openusd workspace (3-crate split).
-# Path-dep into the sibling repo while we're co-developing.
+# Both UsdPlugin (loader + scene projection) and the RapierAdapterPlugin
+# (USD physics → its own PhysicsWorld) come from this single crate.
 usd_bevy = { path = "../../../../other/OUSD/bevy_openusd/crates/usd_bevy" }
-
-anyhow = "1"

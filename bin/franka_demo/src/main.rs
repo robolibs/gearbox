@@ -1,55 +1,23 @@
-//! `franka-demo <path/to/franka.usd>` — minimum viable Isaac-Sim-style
-//! loop:
+//! `franka-demo <path/to/file.usd>` — load a USD into a Bevy app via
+//! `usd_bevy`, with `usd_bevy`'s own `RapierAdapterPlugin` driving the
+//! physics. Gearbox owns the *world* (ground plane, sky, lights)
+//! around the loaded asset.
 //!
-//! 1. **Gearbox owns the world.** A `gearbox_physics::Sim` resource
-//!    sits in the Bevy `World` with gravity, a ground plane, and the
-//!    franka rigid bodies loaded via `gearbox_usd::load_usd_into_sim`.
-//! 2. **`usd_bevy` renders visuals only.** `UsdPlugin` projects the
-//!    USD scene into Bevy entities (meshes, materials, transforms).
-//!    The Rapier adapter from `usd_bevy` is **not** registered — we
-//!    don't want a second physics world.
-//! 3. **Reconciliation.** Each frame we step the gearbox sim, then
-//!    walk every entity carrying a `UsdPrimRef` and copy the matching
-//!    rapier body's pose into its `Transform`. The visual entity
-//!    becomes a "view" of the gearbox-owned body.
-//!
-//! This binary is the proof that the boundary works: USD is the asset
-//! format, gearbox owns the simulation, Bevy renders. No coupling
-//! between the rendering and physics besides the prim-path map.
+//! No bespoke USD→rapier translator, no reconciliation system — the
+//! `usd_bevy` plugin already does all of that correctly (basis
+//! conversion, hierarchy-aware writeback, joint drives, real
+//! collider shapes). This binary's only job is to wire it up
+//! alongside the world-layer entities that gearbox would normally
+//! provide.
 
 use std::path::PathBuf;
 
 use bevy::prelude::*;
 use bevy::scene::SceneRoot;
-use gearbox_physics::Sim;
-use gearbox_usd::SceneDescriptor;
-use usd_bevy::{UsdAsset, UsdLoaderSettings, UsdPlugin, UsdPrimRef};
+use rapier3d::prelude::*;
+use usd_bevy::physics::{PhysicsActive, PhysicsWorld, RapierAdapterPlugin};
+use usd_bevy::{UsdAsset, UsdLoaderSettings, UsdPlugin};
 
-#[derive(Resource)]
-struct PhysicsSim(Sim);
-
-/// Whether `step_gearbox_sim` advances the sim. Starts paused so the
-/// franka stays in its authored rest pose — without joints every
-/// link is an independent free body and gravity scatters them
-/// instantly. Press Space to toggle.
-#[derive(Resource)]
-struct SimPaused(bool);
-
-impl Default for SimPaused {
-    fn default() -> Self {
-        Self(true)
-    }
-}
-
-#[derive(Resource, Default)]
-struct UsdSceneDesc(SceneDescriptor);
-
-#[derive(Resource)]
-struct AssetPath(PathBuf);
-
-/// Filesystem dir openusd searches when resolving relative references
-/// authored inside the stage (Props/, Materials/, etc.). Without this
-/// the loader sees `layer_count = 1` and the visual is empty.
 #[derive(Resource, Clone)]
 struct UsdSearchPaths(Vec<PathBuf>);
 
@@ -65,8 +33,6 @@ fn main() {
         .map(PathBuf::from)
         .expect("usage: franka-demo <path/to/file.usd>");
 
-    // Bevy's AssetServer wants assets relative to a root; we use the
-    // file's parent dir and pass just the filename.
     let asset_root = asset_path
         .parent()
         .expect("asset has parent dir")
@@ -77,25 +43,12 @@ fn main() {
         .to_string_lossy()
         .into_owned();
 
-    // Build the gearbox sim FIRST so it lands as a Bevy resource at
-    // startup. Ground plane + franka bodies → a world that's already
-    // primed before the first frame.
-    let mut sim = Sim::new();
-    sim.add_ground_plane(50.0);
-    let descriptor = gearbox_usd::load_usd_into_sim(&asset_path, &mut sim)
-        .expect("loading USD into gearbox sim");
-    info!(
-        "gearbox sim primed: {} body(ies) from {}",
-        descriptor.bodies.len(),
-        asset_path.display()
-    );
-
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: format!("franka-demo (gearbox sim) — {}", asset_path.display()),
+                    title: format!("franka-demo (gearbox world + usd_bevy physics) — {}", asset_path.display()),
                     resolution: (1400u32, 900u32).into(),
                     ..default()
                 }),
@@ -106,35 +59,41 @@ fn main() {
                 ..default()
             }),
     )
+    // The two pieces of the USD stack:
+    // - `UsdPlugin`: file → `UsdAsset` → projected Bevy entity tree
+    //   (meshes, materials, lights, marker components like
+    //   `UsdRigidBody`, `UsdCollider`, `UsdPhysicsJoint`).
+    // - `RapierAdapterPlugin`: marker components → its own `PhysicsWorld`
+    //   resource (rapier sets), steps physics, writes poses back to
+    //   Bevy `Transform` in `PostUpdate` with full hierarchy awareness.
     .add_plugins(UsdPlugin)
-    .insert_resource(PhysicsSim(sim))
-    .insert_resource(SimPaused::default())
-    .insert_resource(UsdSceneDesc(descriptor))
-    .insert_resource(AssetPath(asset_path.clone()))
+    .add_plugins(RapierAdapterPlugin)
+    // `RapierAdapterPlugin` defaults to PAUSED — usdview wires a UI
+    // toggle for that. The demo wants physics live from frame 0 so
+    // gravity pulls on the franka right away; override here.
+    .insert_resource(PhysicsActive(true))
     .insert_resource(UsdSearchPaths(vec![asset_root.clone()]))
-    .add_systems(Startup, (spawn_camera_and_light, request_usd_load(asset_filename)))
     .add_systems(
-        Update,
+        Startup,
         (
-            spawn_scene_when_loaded,
-            toggle_sim_pause,
-            step_gearbox_sim,
-            reconcile_visuals_to_sim.after(step_gearbox_sim),
+            spawn_world,
+            spawn_physics_ground,
+            request_usd_load(asset_filename),
         ),
-    );
+    )
+    .add_systems(Update, spawn_scene_when_loaded);
 
     app.run();
 }
 
-fn spawn_camera_and_light(
+/// Gearbox-owned world layer: camera, sky, ambient + directional
+/// light, visual ground plane. The "permanent stuff that's there
+/// regardless of which USD is loaded" — Isaac-Sim-style.
+fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // The franka authors `upAxis = Z`, but `usd_bevy` projects it
-    // into Bevy's native Y-up via the root-basis transform. So once
-    // the visual is on screen, "up" really is +Y. Camera + ground
-    // accordingly assume Y-up — matches every other Bevy 3D scene.
     commands.spawn((
         Camera3d::default(),
         Camera {
@@ -157,9 +116,6 @@ fn spawn_camera_and_light(
         ..default()
     });
 
-    // Gearbox-owned world surface. Bevy's `Plane3d::default()` is the
-    // XZ plane (Y-up native), which is exactly what we want — no
-    // rotation required.
     let ground_mesh = meshes.add(Plane3d::default().mesh().size(50.0, 50.0));
     let ground_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.45, 0.5, 0.4),
@@ -173,11 +129,18 @@ fn spawn_camera_and_light(
     ));
 }
 
-/// `Startup` system: kicks off the async USD load through Bevy's
-/// `AssetServer`. The actual `SceneRoot` spawn happens later in
-/// `spawn_scene_when_loaded` once the `UsdAsset` is resident — we
-/// need its inner `Handle<Scene>`, which doesn't exist until the
-/// loader finishes.
+/// Static ground collider in `usd_bevy::physics::PhysicsWorld` so
+/// dynamic USD bodies actually rest on the visual floor instead of
+/// falling forever. 50 m × 50 m cuboid, top surface flush with Y=0.
+fn spawn_physics_ground(mut world: ResMut<PhysicsWorld>) {
+    use bevy::math::DVec3;
+    let ground = ColliderBuilder::cuboid(50.0, 0.5, 50.0)
+        .translation(DVec3::new(0.0, -0.5, 0.0))
+        .friction(1.0)
+        .build();
+    world.colliders.insert(ground);
+}
+
 fn request_usd_load(
     filename: String,
 ) -> impl Fn(Commands, Res<AssetServer>, Res<UsdSearchPaths>) {
@@ -191,14 +154,10 @@ fn request_usd_load(
             handle,
             scene_spawned: false,
         });
-        info!("requested visual load: {filename} (search: {:?})", search.0);
+        info!("requested visual load: {filename}");
     }
 }
 
-/// Once the `UsdAsset` has materialised, grab its inner `Handle<Scene>`
-/// and spawn it as a `SceneRoot`. Bevy clones the scene under the
-/// root entity, attaching every projected prim (mesh, material,
-/// `UsdPrimRef`, …).
 fn spawn_scene_when_loaded(
     mut commands: Commands,
     mut root: ResMut<UsdRoot>,
@@ -216,79 +175,4 @@ fn spawn_scene_when_loaded(
         "scene spawned: default_prim={:?}, layer_count={}",
         asset.default_prim, asset.layer_count
     );
-}
-
-fn step_gearbox_sim(mut sim: ResMut<PhysicsSim>, paused: Res<SimPaused>, time: Res<Time>) {
-    if paused.0 {
-        return;
-    }
-    // Cap dt to avoid the spiral-of-death after a long pause.
-    let dt = time.delta_secs_f64().min(1.0 / 30.0);
-    sim.0.step(dt);
-}
-
-fn toggle_sim_pause(keys: Res<ButtonInput<KeyCode>>, mut paused: ResMut<SimPaused>) {
-    if keys.just_pressed(KeyCode::Space) {
-        paused.0 = !paused.0;
-        info!(
-            "sim {}",
-            if paused.0 { "PAUSED" } else { "RUNNING" }
-        );
-    }
-}
-
-/// Copy each rapier body's world pose into the matching Bevy entity's
-/// local `Transform`, accounting for the basis transforms on both
-/// sides.
-///
-/// **Frames in play:**
-/// - **Sim frame:** Y-up, metres. `gearbox-usd` baked the basis on
-///   load so gravity = -Y matches "down".
-/// - **Visual frame:** Bevy world, Y-up, metres.
-/// - **Visual parent chain:** `usd_bevy` puts every projected prim
-///   under an `inner_root` that carries `S = X(-90°) × scale(mpu)`
-///   (the USD→Bevy basis). For URDF-style assets like franka where
-///   the robot sits flat under `/<robot>`, that's the only non-identity
-///   ancestor.
-///
-/// We want `leaf.GlobalTransform == sim_pose`. With `parent.G = S`,
-/// that means `leaf.L = S⁻¹ × sim_pose` — written here as the inverse
-/// of the descriptor's basis applied to the sim pose. If we skipped
-/// this and wrote raw sim values, `S` would re-apply during
-/// transform propagation and the franka would launch in +Z when
-/// physics started ("flies away" bug).
-fn reconcile_visuals_to_sim(
-    sim: Res<PhysicsSim>,
-    desc: Res<UsdSceneDesc>,
-    mut prims: Query<(&UsdPrimRef, &mut Transform)>,
-) {
-    let basis = desc.0.basis;
-    let inv_rot = basis.rotation.inverse();
-    let inv_scale = 1.0 / basis.uniform_scale;
-
-    for (prim, mut tr) in &mut prims {
-        let Some(handle) = desc.0.body(&prim.path) else {
-            continue;
-        };
-        let Some(body) = sim.0.bodies.get(handle) else {
-            continue;
-        };
-
-        let st = body.translation();
-        let sr = body.rotation();
-
-        let sim_t = bevy::math::DVec3::new(st.x, st.y, st.z);
-        let leaf_t = (inv_rot * sim_t) * inv_scale;
-
-        let sim_r = bevy::math::DQuat::from_xyzw(sr.x, sr.y, sr.z, sr.w);
-        let leaf_r = inv_rot * sim_r;
-
-        tr.translation = Vec3::new(leaf_t.x as f32, leaf_t.y as f32, leaf_t.z as f32);
-        tr.rotation = Quat::from_xyzw(
-            leaf_r.x as f32,
-            leaf_r.y as f32,
-            leaf_r.z as f32,
-            leaf_r.w as f32,
-        );
-    }
 }

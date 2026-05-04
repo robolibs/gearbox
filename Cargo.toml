@@ -7,10 +7,8 @@ members = [
     "crates/gearbox-editor",
     "crates/gearbox-api",
     "crates/gearbox-link",
-    "crates/gearbox-usd",
     "bin/gearbox",
     "bin/probe_usd",
-    "bin/probe_usd_sim",
     "bin/franka_demo",
 ]
 
