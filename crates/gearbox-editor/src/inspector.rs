@@ -5,6 +5,7 @@
 //! widget primitives in `super::widgets` so every row / bar / section
 //! shares the same spacing + typography.
 
+use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_frost::PaneBuilder;
 
@@ -20,12 +21,35 @@ use super::widgets::{
     axis_readout_row, pretty_progressbar_text, readout_row, sub_caption, subsection,
 };
 
+/// What the inspector needs to show for a `Load USD…`-spawned asset.
+/// Built in `right_dock_ui` from the selected entity's components and
+/// passed in so the inspector stays a pure rendering function.
+pub struct UsdInspect {
+    pub name: String,
+    /// World-space pose. For top-level `SceneRoot`s (no parent) this
+    /// is the same as the entity's local `Transform`; for nested
+    /// loads it'd come from `GlobalTransform.compute_transform()`.
+    pub world_translation: Vec3,
+    pub world_rotation: Quat,
+    pub world_scale: Vec3,
+    /// Lat / lon / alt under the editor's planet datum, computed
+    /// from `world_translation`.
+    pub geo_latitude: f64,
+    pub geo_longitude: f64,
+    pub geo_altitude: f64,
+}
+
 pub fn draw_content(
     pane: &mut PaneBuilder,
     sim: &mut GearboxSim,
     selection: &Selection,
+    usd_inspect: Option<UsdInspect>,
     accent: egui::Color32,
 ) {
+    if let Some(info) = usd_inspect {
+        usd_info(pane, &info, accent);
+        return;
+    }
     let Some(id) = selection.vehicle else {
         world_info(pane, sim, accent);
         return;
@@ -179,6 +203,51 @@ pub fn draw_content(
         bar_row(ui, "throttle", ctrl.throttle, -1.0, 1.0, accent);
         bar_row(ui, "steer",    ctrl.steer,    -1.0, 1.0, accent);
         bar_row(ui, "brake",    ctrl.brake,     0.0, 1.0, accent);
+    });
+}
+
+// ─── USD (Load-USD-spawned asset) view ─────────────────────────────
+
+fn usd_info(pane: &mut PaneBuilder, info: &UsdInspect, accent: egui::Color32) {
+    let q = info.world_rotation;
+    let (rx, ry, rz) = quat_to_euler_xyz(q.w as f64, q.x as f64, q.y as f64, q.z as f64);
+
+    pane.section("usd_info", "USD Asset", true, |ui| {
+        ui.label(title_text(&info.name));
+        ui.add_space(space::ROW);
+        sub_caption(ui, "Loaded via 📂 Load USD…");
+    });
+
+    pane.section("usd_geo", "Geo", true, |ui| {
+        axis_readout_row(ui, "lat", AXIS_Z, &format!("{:+.10}°", info.geo_latitude));
+        axis_readout_row(ui, "lon", AXIS_X, &format!("{:+.10}°", info.geo_longitude));
+        axis_readout_row(ui, "alt", AXIS_Y, &format!("{:+.4} m", info.geo_altitude));
+    });
+
+    pane.section("usd_tr", "Transform (world)", true, |ui| {
+        subsection(ui, "usd_tr_pos", "Position", None, accent, true, |ui| {
+            axis_readout_row(ui, "X", AXIS_X, &format!("{:+.3} m", info.world_translation.x));
+            axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", info.world_translation.y));
+            axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", info.world_translation.z));
+        });
+        subsection(
+            ui,
+            "usd_tr_rot",
+            "Rotation",
+            Some("Euler XYZ"),
+            accent,
+            true,
+            |ui| {
+                axis_readout_row(ui, "X", AXIS_X, &format!("{:+.2}°", rx.to_degrees()));
+                axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.2}°", ry.to_degrees()));
+                axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.2}°", rz.to_degrees()));
+            },
+        );
+        subsection(ui, "usd_tr_scale", "Scale", None, accent, true, |ui| {
+            axis_readout_row(ui, "X", AXIS_X, &format!("{:.3}", info.world_scale.x));
+            axis_readout_row(ui, "Y", AXIS_Y, &format!("{:.3}", info.world_scale.y));
+            axis_readout_row(ui, "Z", AXIS_Z, &format!("{:.3}", info.world_scale.z));
+        });
     });
 }
 
