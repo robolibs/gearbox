@@ -19,6 +19,7 @@ use super::persist::EditorUiState;
 use super::preset_registry::PresetRegistry;
 use super::selection::Selection;
 use super::style::AccentColor;
+use super::usd_load::UsdSelectable;
 use super::{spawn_panel, tree};
 
 /// Asset + tag-query bundle — collapses four system params into one
@@ -43,6 +44,7 @@ pub fn left_dock_ui(
     mut selection: ResMut<Selection>,
     // tree
     bodies: Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
+    usd_assets: Query<(Entity, Option<&Name>), With<UsdSelectable>>,
     mut pending: ResMut<PendingSpawn>,
     registry: Res<PresetRegistry>,
     accent: Res<AccentColor>,
@@ -80,6 +82,7 @@ pub fn left_dock_ui(
                     &mut commands,
                     &sim,
                     &bodies,
+                    &usd_assets,
                     &mut selection,
                     &mut follow,
                     accent_col,

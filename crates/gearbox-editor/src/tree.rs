@@ -17,6 +17,7 @@ use gearbox_viz::{FollowTarget, GearboxSim, PlayerControlled, VehicleBody};
 
 use super::selection::Selection;
 use super::style::{space, TEXT_SECONDARY};
+use super::usd_load::UsdSelectable;
 use super::widgets::hybrid_select_row;
 
 pub fn draw_content(
@@ -24,6 +25,7 @@ pub fn draw_content(
     commands: &mut Commands,
     sim: &GearboxSim,
     bodies: &Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
+    usd_assets: &Query<(Entity, Option<&Name>), With<UsdSelectable>>,
     selection: &mut Selection,
     follow: &mut FollowTarget,
     accent: egui::Color32,
@@ -95,6 +97,50 @@ pub fn draw_content(
             }
         });
     });
+
+    // ─── USDs (default-open when any are loaded) ──────────────────
+    {
+        let usd_count = usd_assets.iter().count();
+        let mut usd_rows: Vec<(Entity, String)> = usd_assets
+            .iter()
+            .map(|(e, name)| {
+                let label = name
+                    .map(|n| n.as_str().to_string())
+                    .unwrap_or_else(|| format!("USD {:?}", e));
+                (e, label)
+            })
+            .collect();
+        usd_rows.sort_by(|a, b| a.1.cmp(&b.1));
+        pane.section("tree_usd", "USDs", usd_count > 0, |ui| {
+            if usd_count == 0 {
+                ui.add_space(space::TIGHT);
+                ui.label(
+                    egui::RichText::new("No USDs loaded yet — click 📂 in the left rail.")
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
+                return;
+            }
+            for (entity, label) in usd_rows {
+                let selected = selection.usd_entity == Some(entity);
+                // No "follow" semantics for USDs (yet) — pass false
+                // for the radio so it renders inactive.
+                let resp = hybrid_select_row(
+                    ui,
+                    entity.to_bits() as u32,
+                    &label,
+                    None,
+                    selected,
+                    false,
+                    accent,
+                );
+                if resp.body.clicked() {
+                    selection.usd_entity = Some(entity);
+                    selection.vehicle = None;
+                }
+            }
+        });
+    }
 
     // ─── Stats (default-closed) ───────────────────────────────────
     pane.section("tree_stats", "Stats", false, |ui| {
