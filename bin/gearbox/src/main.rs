@@ -225,9 +225,54 @@ fn main() {
                 spawn_cli_usd_when_loaded,
                 mirror_sim_clock_to_usd_physics,
                 drain_load_usd_queue,
+                pull_usd_bodies_from_visuals,
             ),
         )
         .run();
+}
+
+/// Inverse-writeback while paused: copy each USD body entity's
+/// current `GlobalTransform` into its matching rapier body's world
+/// pose. Without this, dragging the gizmo on a USD moves only the
+/// visual `SceneRoot.Transform`; on unpause, the rapier writeback
+/// snaps the visuals back to the rapier bodies' (unchanged) poses.
+///
+/// Runs only when the editor's transport bar is paused, so live
+/// simulation isn't disturbed. When the user resumes, bodies hold
+/// the latest dragged position and physics steps from there.
+fn pull_usd_bodies_from_visuals(
+    clock: Res<gearbox_viz::SimClock>,
+    mut world: ResMut<usd_bevy::physics::PhysicsWorld>,
+    bodies: Query<(Entity, &GlobalTransform), With<usd_bevy::markers::UsdRigidBody>>,
+) {
+    if !clock.paused {
+        return;
+    }
+    for (entity, gt) in &bodies {
+        let Some(handle) = world.entity_to_body.get(&entity).copied() else {
+            continue;
+        };
+        let Some(body) = world.bodies.get_mut(handle) else {
+            continue;
+        };
+        let t = gt.compute_transform();
+        let iso = gearbox_physics::rapier3d::math::Pose {
+            translation: bevy::math::DVec3::new(
+                t.translation.x as f64,
+                t.translation.y as f64,
+                t.translation.z as f64,
+            ),
+            rotation: bevy::math::DQuat::from_xyzw(
+                t.rotation.x as f64,
+                t.rotation.y as f64,
+                t.rotation.z as f64,
+                t.rotation.w as f64,
+            ),
+        };
+        // `wake_up = true` so the body re-evaluates collisions when
+        // unpause runs the next solver step.
+        body.set_position(iso, true);
+    }
 }
 
 /// Forwards files picked via the editor's `📂 Load USD…` ribbon
