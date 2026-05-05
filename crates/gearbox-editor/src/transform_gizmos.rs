@@ -171,7 +171,8 @@ fn manage_proxy_target(
     let Ok((entity, has_target)) = proxies.single() else {
         return;
     };
-    let want_target = selection.vehicle.is_some() && !options.gizmo_modes.is_empty();
+    let any_selection = selection.vehicle.is_some() || selection.usd_entity.is_some();
+    let want_target = any_selection && !options.gizmo_modes.is_empty();
     match (want_target, has_target.is_some()) {
         (true, false) => {
             commands.entity(entity).insert(GizmoTarget::default());
@@ -209,14 +210,16 @@ fn sync_proxy_aabb(
     });
 }
 
-/// Copy the sim's selected-vehicle pose into the proxy's `Transform`
-/// whenever the gizmo isn't being actively dragged. While the gizmo
-/// is active, the upstream plugin owns the `Transform` and we must
-/// not stomp on its in-progress edit.
+/// Copy the selected source's pose into the proxy's `Transform`
+/// whenever the gizmo isn't being actively dragged. Source can be:
+///   - a vehicle in `GearboxSim` (existing path), or
+///   - a `Load USD…`-spawned `SceneRoot` entity (just read its
+///     `Transform` directly).
 fn pull_proxy_from_sim(
     selection: Res<Selection>,
     sim: Res<GearboxSim>,
     mut proxies: Query<(&mut Transform, Option<&GizmoTarget>), With<GizmoProxy>>,
+    usd_xforms: Query<&Transform, Without<GizmoProxy>>,
 ) {
     let Ok((mut transform, target)) = proxies.single_mut() else {
         return;
@@ -224,31 +227,38 @@ fn pull_proxy_from_sim(
     if target.map(|t| t.is_active()).unwrap_or(false) {
         return;
     }
-    let Some(id) = selection.vehicle else { return };
-    if sim.0.vehicle(id).is_none() {
-        return;
+    if let Some(id) = selection.vehicle {
+        if sim.0.vehicle(id).is_none() {
+            return;
+        }
+        let pose = sim.0.vehicle_pose(id);
+        transform.translation = Vec3::new(
+            pose.point.x as f32,
+            pose.point.y as f32,
+            pose.point.z as f32,
+        );
+        transform.rotation = Quat::from_xyzw(
+            pose.rotation.x as f32,
+            pose.rotation.y as f32,
+            pose.rotation.z as f32,
+            pose.rotation.w as f32,
+        );
+        transform.scale = Vec3::ONE;
+    } else if let Some(usd_entity) = selection.usd_entity {
+        if let Ok(src) = usd_xforms.get(usd_entity) {
+            *transform = *src;
+        }
     }
-    let pose = sim.0.vehicle_pose(id);
-    transform.translation = Vec3::new(
-        pose.point.x as f32,
-        pose.point.y as f32,
-        pose.point.z as f32,
-    );
-    transform.rotation = Quat::from_xyzw(
-        pose.rotation.x as f32,
-        pose.rotation.y as f32,
-        pose.rotation.z as f32,
-        pose.rotation.w as f32,
-    );
-    transform.scale = Vec3::ONE;
 }
 
 /// While the gizmo is active, write the proxy's edited `Transform`
-/// back to the sim's vehicle pose.
+/// back to the selected source — either the vehicle's pose in
+/// `GearboxSim` or the USD entity's `Transform` directly.
 fn push_proxy_to_sim(
     selection: Res<Selection>,
     mut sim: ResMut<GearboxSim>,
     proxies: Query<(&Transform, &GizmoTarget), With<GizmoProxy>>,
+    mut usd_xforms: Query<&mut Transform, Without<GizmoProxy>>,
 ) {
     let Ok((transform, target)) = proxies.single() else {
         return;
@@ -256,20 +266,25 @@ fn push_proxy_to_sim(
     if !target.is_active() {
         return;
     }
-    let Some(id) = selection.vehicle else { return };
-    let pose = Pose {
-        point: Point::new(
-            transform.translation.x as f64,
-            transform.translation.y as f64,
-            transform.translation.z as f64,
-        ),
-        rotation: Quaternion::new(
-            transform.rotation.w as f64,
-            transform.rotation.x as f64,
-            transform.rotation.y as f64,
-            transform.rotation.z as f64,
-        ),
-    };
-    sim.0.set_vehicle_pose(id, pose);
+    if let Some(id) = selection.vehicle {
+        let pose = Pose {
+            point: Point::new(
+                transform.translation.x as f64,
+                transform.translation.y as f64,
+                transform.translation.z as f64,
+            ),
+            rotation: Quaternion::new(
+                transform.rotation.w as f64,
+                transform.rotation.x as f64,
+                transform.rotation.y as f64,
+                transform.rotation.z as f64,
+            ),
+        };
+        sim.0.set_vehicle_pose(id, pose);
+    } else if let Some(usd_entity) = selection.usd_entity {
+        if let Ok(mut dst) = usd_xforms.get_mut(usd_entity) {
+            *dst = *transform;
+        }
+    }
 }
 

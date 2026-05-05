@@ -19,6 +19,7 @@ use bevy_frost::{
 };
 
 use super::style::AccentColor;
+use super::usd_load::LoadUsdQueue;
 
 pub const RIBBON_LEFT: &str = "editor_ribbon_left";
 pub const RIBBON_RIGHT: &str = "editor_ribbon_right";
@@ -26,6 +27,7 @@ pub const RIBBON_TRANSPORT: &str = "editor_ribbon_transport";
 
 pub const ID_WORKSPACE: &str = "workspace";
 pub const ID_LIBRARY: &str = "library";
+pub const ID_LOAD_USD: &str = "load_usd";
 pub const ID_INSPECTOR: &str = "inspector";
 pub const ID_PROPERTIES: &str = "properties";
 
@@ -85,6 +87,16 @@ pub const RIBBON_ITEMS: &[RibbonItem] = &[
         child_ribbon: None,
     },
     RibbonItem {
+        id: ID_LOAD_USD,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::Start,
+        slot: 2,
+        // Folder glyph reads as "open file" without a panel body.
+        glyph: RibbonGlyph::Text("📂"),
+        tooltip: "Load USD…  —  pick a .usd / .usda / .usdc / .usdz",
+        child_ribbon: None,
+    },
+    RibbonItem {
         id: ID_INSPECTOR,
         ribbon: RIBBON_RIGHT,
         cluster: RibbonCluster::Start,
@@ -127,9 +139,10 @@ pub fn draw_dock_ribbons_ui(
     mut open: ResMut<RibbonOpen>,
     mut placement: ResMut<RibbonPlacement>,
     mut drag: ResMut<RibbonDrag>,
+    mut load_usd: ResMut<LoadUsdQueue>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
-    let _ = draw_assembly(
+    let clicks = draw_assembly(
         ctx,
         accent.0,
         RIBBONS,
@@ -139,4 +152,25 @@ pub fn draw_dock_ribbons_ui(
         &mut drag,
         |_| false,
     );
+    // Action buttons (no panel) — handle the click and immediately
+    // un-toggle the auto-opened state so the button doesn't visually
+    // stick on with no panel body to fill the slot.
+    for c in clicks {
+        if c.item == ID_LOAD_USD {
+            if let Some(item) = find_item(RIBBON_ITEMS, ID_LOAD_USD) {
+                let (rid, _, _) = placement.resolve(item);
+                // `draw_assembly` has already toggled this OPEN; we
+                // toggle once more to flip it back to closed.
+                open.toggle(rid, ID_LOAD_USD);
+            }
+            if let Some(files) = rfd::FileDialog::new()
+                .add_filter("USD", &["usd", "usda", "usdc", "usdz"])
+                .pick_files()
+            {
+                for f in files {
+                    load_usd.0.push(f);
+                }
+            }
+        }
+    }
 }

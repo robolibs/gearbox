@@ -1,0 +1,22 @@
+[package]
+name = "gearbox_old"
+description = "gearbox (legacy) — programmatic vehicle presets + their gearbox-physics::Sim world. Preserved as reference; the new `gearbox` binary uses USD-driven content via usd_bevy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gearbox_old"
+path = "src/main.rs"
+
+[dependencies]
+gearbox-core.workspace = true
+gearbox-physics.workspace = true
+gearbox-viz.workspace = true
+gearbox-editor.workspace = true
+gearbox-api.workspace = true
+datapod.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
+bevy_glacial.workspace = true
+usd_bevy.workspace = true

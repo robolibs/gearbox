@@ -40,7 +40,8 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy_glacial::{
-    AxisGizmo, AxisGizmoPlugin, ChaseCamera, ChaseCameraPlugin, GroundGrid, GroundGridPlugin,
+    AxisGizmo, AxisGizmoPlugin, ChaseCamera, ChaseCameraPlugin, GizmoCamera, GroundGrid,
+    GroundGridPlugin,
 };
 use rapier3d::prelude::ColliderBuilder;
 use usd_bevy::physics::PhysicsWorld;
@@ -127,6 +128,11 @@ fn spawn_visuals(mut commands: Commands, config: Res<WorldConfig>) {
         Camera3d::default(),
         chase,
         AxisGizmo::default(),
+        // `GizmoCamera` tells `TransformGizmoPlugin` (the
+        // upstream `transform-gizmo-bevy`) which view to draw the
+        // translate / rotate / scale handles against — required
+        // for any app that registers `TransformGizmoPlugin`.
+        GizmoCamera,
         Transform::from_xyz(config.camera_distance, config.camera_distance * 0.5, 0.0)
             .looking_at(config.camera_focus, Vec3::Y),
     ));

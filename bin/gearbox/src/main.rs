@@ -224,9 +224,52 @@ fn main() {
                 follow_camera_shadow_patch,
                 spawn_cli_usd_when_loaded,
                 mirror_sim_clock_to_usd_physics,
+                drain_load_usd_queue,
             ),
         )
         .run();
+}
+
+/// Forwards files picked via the editor's `📂 Load USD…` ribbon
+/// button into the existing CLI-load pipeline. The editor crate is
+/// USD-agnostic — it only fills `LoadUsdQueue` with paths; this
+/// system on the binary side knows how to ask the asset server.
+fn drain_load_usd_queue(
+    asset_server: Res<bevy::asset::AssetServer>,
+    mut queue: ResMut<gearbox_editor::LoadUsdQueue>,
+    mut spawned: ResMut<CliUsdSpawned>,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    let already = spawned.loaded.len();
+    for (i, abs) in queue.0.drain(..).enumerate() {
+        let parent = abs
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let search = vec![parent];
+        let load_path = abs.to_string_lossy().into_owned();
+        let handle: Handle<usd_bevy::UsdAsset> = asset_server
+            .load_with_settings::<usd_bevy::UsdAsset, _>(
+                load_path.clone(),
+                move |s: &mut usd_bevy::UsdLoaderSettings| {
+                    s.search_paths = search.clone();
+                },
+            );
+        let label = abs
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or(load_path);
+        let mount = Vec3::new((already + i) as f32 * 2.0, 0.0, 0.0);
+        info!("Editor → Load USD: {label} → mount={mount:?}");
+        spawned.loaded.push(CliUsdHandle {
+            handle,
+            mount,
+            spawned: false,
+            label,
+        });
+    }
 }
 
 /// Mirror the editor's transport-bar play/pause (which toggles
@@ -326,8 +369,13 @@ fn spawn_cli_usd_when_loaded(
             continue;
         };
         commands.spawn((
+            Name::new(entry.label.clone()),
             bevy::scene::SceneRoot(asset.scene.clone()),
             Transform::from_translation(entry.mount),
+            // Tag for the editor's picker + gizmo bridge. Click on
+            // the asset → selection.usd_entity = this entity →
+            // gizmo proxy mirrors and writes back this Transform.
+            gearbox_editor::UsdSelectable::default(),
         ));
         entry.spawned = true;
         info!(

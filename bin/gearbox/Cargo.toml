@@ -1,6 +1,6 @@
 [package]
 name = "gearbox"
-description = "gearbox — modular Rust robot/vehicle simulator editor binary."
+description = "gearbox — USD-driven robot/scene editor. Same world / camera / UI as `gearbox_old` but with `Load USD…` + transform gizmos instead of programmatic vehicle presets."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,3 +20,5 @@ bevy.workspace = true
 bevy_egui.workspace = true
 bevy_glacial.workspace = true
 usd_bevy.workspace = true
+# Native file dialog for the "Load USD…" button.
+rfd = "0.15"

@@ -14,3 +14,5 @@ bevy.workspace = true
 bevy_egui.workspace = true
 bevy_frost.workspace = true
 bevy_glacial.workspace = true
+# Native file dialog for the Load-USD ribbon button.
+rfd = "0.15"

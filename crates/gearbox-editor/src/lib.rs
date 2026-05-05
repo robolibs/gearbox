@@ -18,6 +18,8 @@ pub use bevy_frost::gizmo_material;
 pub use bevy_frost::widgets;
 
 pub mod dock_ribbons;
+pub mod usd_load;
+pub use usd_load::{LoadUsdQueue, UsdSelectable};
 pub mod heading_arrows;
 pub mod inspector;
 pub mod left_dock;
@@ -78,6 +80,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<properties::PendingColorChange>()
             .init_resource::<selection::Selection>()
             .init_resource::<pending_spawn::PendingSpawn>()
+            .init_resource::<LoadUsdQueue>()
             // `PostStartup` so `main::setup_scene` has already run.
             .add_systems(
                 PostStartup,

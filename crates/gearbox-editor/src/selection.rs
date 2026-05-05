@@ -19,11 +19,16 @@ use gearbox_viz::{GearboxSim, SimClock};
 use bevy_glacial::GizmoTarget;
 
 use super::pending_spawn::PendingSpawn;
+use super::usd_load::UsdSelectable;
 
-/// What, if anything, is currently selected.
+/// What, if anything, is currently selected. At most one of
+/// `vehicle` / `usd_entity` is `Some` at a time — the picker
+/// clears the other when a new selection lands.
 #[derive(Resource, Default)]
 pub struct Selection {
     pub vehicle: Option<VehicleId>,
+    /// SceneRoot of a `Load USD…`-spawned asset.
+    pub usd_entity: Option<Entity>,
     drag: Option<DragState>,
 }
 
@@ -49,12 +54,14 @@ pub fn pick_and_drag_system(
     gizmo_targets: Query<&GizmoTarget>,
     clock: Res<SimClock>,
     pending: Res<PendingSpawn>,
+    usd_pickables: Query<(Entity, &GlobalTransform, &UsdSelectable)>,
 ) {
     // Esc is the *only* way to unselect. Skip when a placement
     // ghost is active — Esc cancels that instead (handled in
     // `pending_spawn::commit_or_cancel_ghost`).
     if keys.just_pressed(KeyCode::Escape) && pending.spec.is_none() {
         selection.vehicle = None;
+        selection.usd_entity = None;
         selection.drag = None;
     }
 
@@ -104,8 +111,12 @@ pub fn pick_and_drag_system(
     let can_body_drag = clock.paused && shift_held;
 
     if buttons.just_pressed(MouseButton::Left) && !right_held {
+        // Try vehicle first, then USD root. Whichever comes back
+        // closer wins — but for now, vehicles take priority since
+        // they have proper OBB tests.
         if let Some(id) = cursor_pick_vehicle(&sim, camera, cam_tr, cursor) {
             selection.vehicle = Some(id);
+            selection.usd_entity = None;
             if can_body_drag {
                 let drop_y = sim.0.vehicle_pose(id).point.y.max(0.8) as f32;
                 selection.drag = Some(DragState {
@@ -116,6 +127,10 @@ pub fn pick_and_drag_system(
             } else {
                 selection.drag = None;
             }
+        } else if let Some(entity) = cursor_pick_usd(&usd_pickables, camera, cam_tr, cursor) {
+            selection.usd_entity = Some(entity);
+            selection.vehicle = None;
+            selection.drag = None;
         }
     }
 
@@ -253,6 +268,44 @@ fn cursor_pick_vehicle(
         }
     }
     best.map(|(id, _)| id)
+}
+
+/// Coarse sphere-test pick across every entity tagged
+/// `UsdSelectable`. Returns the entity whose pick-sphere intersects
+/// the ray at the smallest positive `t`. Sufficient for "click the
+/// asset" UX; per-prim AABB picking is a follow-up.
+fn cursor_pick_usd(
+    pickables: &Query<(Entity, &GlobalTransform, &UsdSelectable)>,
+    camera: &Camera,
+    cam_tr: &GlobalTransform,
+    cursor: Vec2,
+) -> Option<Entity> {
+    let ray = camera.viewport_to_world(cam_tr, cursor).ok()?;
+    let origin = ray.origin;
+    let direction = *ray.direction;
+    let mut best: Option<(Entity, f32)> = None;
+    for (e, gt, sel) in pickables.iter() {
+        let centre = gt.translation();
+        if let Some(t) = ray_sphere_intersect(origin, direction, centre, sel.pick_radius) {
+            if best.map_or(true, |(_, bt)| t < bt) {
+                best = Some((e, t));
+            }
+        }
+    }
+    best.map(|(e, _)| e)
+}
+
+fn ray_sphere_intersect(origin: Vec3, dir: Vec3, centre: Vec3, radius: f32) -> Option<f32> {
+    let oc = origin - centre;
+    let b = oc.dot(dir);
+    let c = oc.dot(oc) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let sd = disc.sqrt();
+    let t = (-b - sd).max(0.0);
+    if t < 0.0 { None } else { Some(t) }
 }
 
 pub fn cursor_ray_to_ground(
