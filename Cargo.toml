@@ -9,8 +9,6 @@ members = [
     "crates/gearbox-link",
     "crates/gearbox-world",
     "bin/gearbox",
-    "bin/gearbox_old",
-    "bin/probe_usd",
 ]
 
 # Shared metadata. Each member inherits with `version.workspace = true`.
@@ -58,6 +56,14 @@ bevy = { version = "0.18", default-features = false, features = [
     "ktx2",
     "zstd_rust",
     "png",
+    "jpeg",
+    "bmp",
+    "tga",
+    "hdr",
+    "webp",
+    "tiff",
+    "bevy_post_process",
+    "morph",
     "x11",
     "reflect_auto_register",
 ] }

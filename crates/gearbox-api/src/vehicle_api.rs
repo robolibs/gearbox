@@ -124,10 +124,7 @@ impl VehicleBroker {
                         }
                     }
                     Err(e) => {
-                        eprintln!(
-                            "gearbox-api: bad cmd_vel for vehicle {}: {}",
-                            vehicle_id, e
-                        );
+                        eprintln!("gearbox-api: bad cmd_vel for vehicle {}: {}", vehicle_id, e);
                     }
                 }
             })
@@ -212,10 +209,7 @@ impl Plugin for VehicleApiPlugin {
                 // physics step sees it, and the vehicle never moves.
                 app.add_systems(
                     Update,
-                    (
-                        sync_vehicle_topics_system,
-                        apply_cmd_vel_system,
-                    )
+                    (sync_vehicle_topics_system, apply_cmd_vel_system)
                         .chain()
                         .after(gearbox_viz::input::wasd_input_system)
                         .before(gearbox_viz::step::step_sim_system),
@@ -235,12 +229,11 @@ impl Plugin for VehicleApiPlugin {
 /// Discover newly-spawned / despawned vehicles each frame and keep
 /// the per-vehicle subscriber set in sync.
 #[cfg(feature = "bevy")]
-fn sync_vehicle_topics_system(
-    sim: Res<GearboxSim>,
-    api: Option<Res<VehicleApiSession>>,
-) {
+fn sync_vehicle_topics_system(sim: Res<GearboxSim>, api: Option<Res<VehicleApiSession>>) {
     let Some(api) = api else { return };
-    let Ok(mut broker) = api.broker.lock() else { return };
+    let Ok(mut broker) = api.broker.lock() else {
+        return;
+    };
 
     let mut alive: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for (id, state) in sim.0.vehicles() {
@@ -259,12 +252,11 @@ fn sync_vehicle_topics_system(
 }
 
 #[cfg(feature = "bevy")]
-fn apply_cmd_vel_system(
-    mut sim: ResMut<GearboxSim>,
-    api: Option<Res<VehicleApiSession>>,
-) {
+fn apply_cmd_vel_system(mut sim: ResMut<GearboxSim>, api: Option<Res<VehicleApiSession>>) {
     let Some(api) = api else { return };
-    let Ok(broker) = api.broker.lock() else { return };
+    let Ok(broker) = api.broker.lock() else {
+        return;
+    };
     let cmds = broker.snapshot_cmd_vel();
     for (vehicle_id, twist) in cmds {
         let id = gearbox_physics::VehicleId(vehicle_id);
@@ -274,12 +266,11 @@ fn apply_cmd_vel_system(
 }
 
 #[cfg(feature = "bevy")]
-fn publish_odom_fix_system(
-    sim: Res<GearboxSim>,
-    api: Option<Res<VehicleApiSession>>,
-) {
+fn publish_odom_fix_system(sim: Res<GearboxSim>, api: Option<Res<VehicleApiSession>>) {
     let Some(api) = api else { return };
-    let Ok(broker) = api.broker.lock() else { return };
+    let Ok(broker) = api.broker.lock() else {
+        return;
+    };
     for (id, state) in sim.0.vehicles() {
         let name = &state.spec.name;
         let pose = sim.0.vehicle_pose(id);

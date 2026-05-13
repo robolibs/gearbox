@@ -274,7 +274,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -285,7 +285,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -936,11 +936,24 @@ dependencies = [
 [[package]]
 name = "bevy_frost"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/bevy_frost#67dc48c1f636e1bfb372bbed52d8b66bc13fb1a9"
+source = "git+https://github.com/bresilla/bevy_frost?branch=develop#001fc84aedcad2d9eebf4f4c1b093d7aa8acb9f1"
+dependencies = [
+ "bevy",
+ "bevy_egui",
+ "corekit",
+ "egui",
+ "mimalloc",
+]
+
+[[package]]
+name = "bevy_frost"
+version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_frost#833e4d866ca83286bef8beeb921af607ec3e8c44"
 dependencies = [
  "bevy",
  "bevy_egui",
  "frostcore",
+ "mimalloc",
 ]
 
 [[package]]
@@ -996,6 +1009,25 @@ dependencies = [
  "bevy_utils",
  "bytemuck",
  "tracing",
+]
+
+[[package]]
+name = "bevy_glacial"
+version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_glacial?branch=main#3db71a9c39f974d673ca10c99bf8eb0885a2cb4e"
+dependencies = [
+ "ahash",
+ "bevy",
+ "bevy_math",
+ "bytemuck",
+ "ecolor 0.34.1",
+ "emath 0.34.1",
+ "enum_dispatch",
+ "enumset",
+ "epaint 0.34.1",
+ "glam 0.32.1",
+ "mint",
+ "uuid",
 ]
 
 [[package]]
@@ -2125,6 +2157,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "corekit"
+version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_frost?branch=develop#001fc84aedcad2d9eebf4f4c1b093d7aa8acb9f1"
+dependencies = [
+ "bevy",
+ "egui",
+ "egui-scale",
+ "iconflow",
+ "pastel",
+ "slab",
+ "smallvec",
+]
+
+[[package]]
 name = "cosmic-text"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2449,7 +2495,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2770,7 +2816,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2984,7 +3030,7 @@ dependencies = [
 [[package]]
 name = "frostcore"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/bevy_frost#67dc48c1f636e1bfb372bbed52d8b66bc13fb1a9"
+source = "git+https://github.com/bresilla/bevy_frost#833e4d866ca83286bef8beeb921af607ec3e8c44"
 dependencies = [
  "bevy",
  "egui",
@@ -3102,15 +3148,16 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_egui",
- "bevy_glacial",
- "datapod",
- "gearbox-api",
- "gearbox-core",
- "gearbox-editor",
- "gearbox-physics",
- "gearbox-viz",
+ "bevy_frost 0.0.1 (git+https://github.com/bresilla/bevy_frost?branch=develop)",
+ "bevy_glacial 0.0.1 (git+https://github.com/bresilla/bevy_glacial?branch=main)",
+ "ciborium",
+ "openusd",
+ "rapier3d-f64",
  "rfd",
+ "serde",
  "usd_bevy",
+ "usd_schema",
+ "zenoh",
 ]
 
 [[package]]
@@ -3142,13 +3189,14 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_egui",
- "bevy_frost",
- "bevy_glacial",
+ "bevy_frost 0.0.1 (git+https://github.com/bresilla/bevy_frost)",
+ "bevy_glacial 0.0.1 (git+https://github.com/bresilla/bevy_glacial?rev=eb67675)",
  "datapod",
  "gearbox-core",
  "gearbox-physics",
  "gearbox-viz",
  "rfd",
+ "usd_bevy",
 ]
 
 [[package]]
@@ -3177,7 +3225,7 @@ name = "gearbox-viz"
 version = "0.0.1"
 dependencies = [
  "bevy",
- "bevy_glacial",
+ "bevy_glacial 0.0.1 (git+https://github.com/bresilla/bevy_glacial?rev=eb67675)",
  "datapod",
  "gearbox-core",
  "gearbox-physics",
@@ -3189,24 +3237,8 @@ name = "gearbox-world"
 version = "0.0.1"
 dependencies = [
  "bevy",
- "bevy_glacial",
+ "bevy_glacial 0.0.1 (git+https://github.com/bresilla/bevy_glacial?rev=eb67675)",
  "rapier3d-f64",
- "usd_bevy",
-]
-
-[[package]]
-name = "gearbox_old"
-version = "0.0.1"
-dependencies = [
- "bevy",
- "bevy_egui",
- "bevy_glacial",
- "datapod",
- "gearbox-api",
- "gearbox-core",
- "gearbox-editor",
- "gearbox-physics",
- "gearbox-viz",
  "usd_bevy",
 ]
 
@@ -4118,6 +4150,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d1eacfa31c33ec25e873c136ba5669f00f9866d0688bea7be4d3f7e43067df6"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4295,6 +4336,15 @@ dependencies = [
  "log",
  "objc",
  "paste",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.50"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3627c4272df786b9260cabaa46aec1d59c93ede723d4c3ef646c503816b0640"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -4562,7 +4612,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5501,15 +5551,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "probe-usd"
-version = "0.0.1"
-dependencies = [
- "bevy",
- "openusd",
- "usd_bevy",
-]
-
-[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6122,7 +6163,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6189,7 +6230,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6657,7 +6698,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6880,7 +6921,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6899,7 +6940,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7378,7 +7419,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8054,7 +8095,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

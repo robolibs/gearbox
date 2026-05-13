@@ -34,10 +34,7 @@ impl Plugin for GearboxApiPlugin {
     }
 }
 
-fn apply_clock_commands_system(
-    api: Option<Res<ApiSession>>,
-    mut clock: ResMut<SimClock>,
-) {
+fn apply_clock_commands_system(api: Option<Res<ApiSession>>, mut clock: ResMut<SimClock>) {
     let Some(api) = api else { return };
     for cmd in api.broker.drain_clock_commands() {
         match cmd {

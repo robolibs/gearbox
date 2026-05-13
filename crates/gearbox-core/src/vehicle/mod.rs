@@ -63,7 +63,9 @@ pub enum DriveMode {
 }
 
 impl Default for DriveMode {
-    fn default() -> Self { DriveMode::Ackermann }
+    fn default() -> Self {
+        DriveMode::Ackermann
+    }
 }
 
 /// A declarative vehicle: chassis box + list of raycast wheels + any

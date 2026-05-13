@@ -15,10 +15,10 @@ pub mod presets;
 pub mod vehicle;
 
 pub use control::ControlInput;
-pub use planet::{Planet, EARTH_RADIUS_M};
+pub use planet::{EARTH_RADIUS_M, Planet};
 pub use vehicle::{
-    parts_lib, ChassisSpec, Container, DriveMode, MeshSource, PartKind, PartSpec, PowerKind,
-    PowerSource, PowerSystem, VehicleBuilder, VehicleId, VehicleSpec, WheelSpec,
+    ChassisSpec, Container, DriveMode, MeshSource, PartKind, PartSpec, PowerKind, PowerSource,
+    PowerSystem, VehicleBuilder, VehicleId, VehicleSpec, WheelSpec, parts_lib,
 };
 
 /// Re-export `datapod` so downstream consumers share the same spatial

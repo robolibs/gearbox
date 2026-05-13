@@ -14,9 +14,7 @@ use gearbox_physics::VehicleSpec;
 use gearbox_viz::GearboxSim;
 
 use super::selection::Selection;
-use super::style::{
-    caption, font, space, title_text, AXIS_X, AXIS_Y, AXIS_Z, TEXT_SECONDARY,
-};
+use super::style::{AXIS_X, AXIS_Y, AXIS_Z, TEXT_SECONDARY, caption, font, space, title_text};
 use super::widgets::{
     axis_readout_row, pretty_progressbar_text, readout_row, sub_caption, subsection,
 };
@@ -82,9 +80,9 @@ pub fn draw_content(
         });
         ui.add_space(space::ROW);
 
-        readout_row(ui, "mass",      &format!("{:.0} kg", state.spec.chassis.mass));
-        readout_row(ui, "wheels",    &state.spec.wheels.len().to_string());
-        readout_row(ui, "parts",     &state.spec.parts.len().to_string());
+        readout_row(ui, "mass", &format!("{:.0} kg", state.spec.chassis.mass));
+        readout_row(ui, "wheels", &state.spec.wheels.len().to_string());
+        readout_row(ui, "parts", &state.spec.parts.len().to_string());
         readout_row(ui, "footprint", &format!("{:.2} × {:.2} m", fp_x, fp_z));
 
         // Power reservoirs — one labelled progress bar per source,
@@ -99,13 +97,7 @@ pub fn draw_content(
                     accent.linear_multiply(0.45)
                 };
                 let text = format!("{:.0} / {:.0}", src.current, src.capacity);
-                pretty_progressbar_text(
-                    ui,
-                    &src.label,
-                    src.fraction() as f32,
-                    &text,
-                    bar_col,
-                );
+                pretty_progressbar_text(ui, &src.label, src.fraction() as f32, &text, bar_col);
             }
             let power = &state.spec.power;
             let tag = if !power.turned_on {
@@ -130,13 +122,7 @@ pub fn draw_content(
             for (idx, container) in state.spec.containers.iter().enumerate() {
                 let name = format!("container #{}", idx + 1);
                 let text = format!("{:.0} / {:.0}", container.amount, container.capacity);
-                pretty_progressbar_text(
-                    ui,
-                    &name,
-                    container.fraction() as f32,
-                    &text,
-                    accent,
-                );
+                pretty_progressbar_text(ui, &name, container.fraction() as f32, &text, accent);
             }
         }
     });
@@ -148,18 +134,30 @@ pub fn draw_content(
         axis_readout_row(ui, "lat", AXIS_Z, &format!("{:+.10}°", geo.latitude));
         axis_readout_row(ui, "lon", AXIS_X, &format!("{:+.10}°", geo.longitude));
         axis_readout_row(ui, "alt", AXIS_Y, &format!("{:+.4} m", geo.altitude));
-        readout_row(ui, "heading", &format!("{:6.2}°  {}", heading, compass_letter(heading)));
+        readout_row(
+            ui,
+            "heading",
+            &format!("{:6.2}°  {}", heading, compass_letter(heading)),
+        );
     });
 
     // ═══ Transform (read-only; edit in Properties) ═════════════════
     let q = pose.rotation;
     let (rx, ry, rz) = quat_to_euler_xyz(q.w, q.x, q.y, q.z);
     pane.section("insp_tr", "Transform", false, |ui| {
-        subsection(ui, "insp_tr_position", "Position", None, accent, true, |ui| {
-            axis_readout_row(ui, "X", AXIS_X, &format!("{:+.3} m", pose.point.x));
-            axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", pose.point.y));
-            axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", pose.point.z));
-        });
+        subsection(
+            ui,
+            "insp_tr_position",
+            "Position",
+            None,
+            accent,
+            true,
+            |ui| {
+                axis_readout_row(ui, "X", AXIS_X, &format!("{:+.3} m", pose.point.x));
+                axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", pose.point.y));
+                axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", pose.point.z));
+            },
+        );
 
         subsection(
             ui,
@@ -201,8 +199,8 @@ pub fn draw_content(
     // ═══ Control ════════════════════════════════════════════════════
     pane.section("insp_ctl", "Control", false, |ui| {
         bar_row(ui, "throttle", ctrl.throttle, -1.0, 1.0, accent);
-        bar_row(ui, "steer",    ctrl.steer,    -1.0, 1.0, accent);
-        bar_row(ui, "brake",    ctrl.brake,     0.0, 1.0, accent);
+        bar_row(ui, "steer", ctrl.steer, -1.0, 1.0, accent);
+        bar_row(ui, "brake", ctrl.brake, 0.0, 1.0, accent);
     });
 }
 
@@ -226,9 +224,24 @@ fn usd_info(pane: &mut PaneBuilder, info: &UsdInspect, accent: egui::Color32) {
 
     pane.section("usd_tr", "Transform (world)", true, |ui| {
         subsection(ui, "usd_tr_pos", "Position", None, accent, true, |ui| {
-            axis_readout_row(ui, "X", AXIS_X, &format!("{:+.3} m", info.world_translation.x));
-            axis_readout_row(ui, "Y", AXIS_Y, &format!("{:+.3} m", info.world_translation.y));
-            axis_readout_row(ui, "Z", AXIS_Z, &format!("{:+.3} m", info.world_translation.z));
+            axis_readout_row(
+                ui,
+                "X",
+                AXIS_X,
+                &format!("{:+.3} m", info.world_translation.x),
+            );
+            axis_readout_row(
+                ui,
+                "Y",
+                AXIS_Y,
+                &format!("{:+.3} m", info.world_translation.y),
+            );
+            axis_readout_row(
+                ui,
+                "Z",
+                AXIS_Z,
+                &format!("{:+.3} m", info.world_translation.z),
+            );
         });
         subsection(
             ui,
@@ -263,20 +276,37 @@ fn world_info(pane: &mut PaneBuilder, sim: &mut GearboxSim, accent: egui::Color3
         ui.add_space(space::ROW);
         readout_row(ui, "vehicles", &vehicle_count.to_string());
         ui.add_space(space::BLOCK);
-        ui.label(caption("Click a vehicle in the viewport, or pick one from Scene."));
+        ui.label(caption(
+            "Click a vehicle in the viewport, or pick one from Scene.",
+        ));
     });
 
     pane.section("world_planet", "Planet", false, |ui| {
-        readout_row(ui, "radius",        &format!("{:.0} m",  planet.radius));
+        readout_row(ui, "radius", &format!("{:.0} m", planet.radius));
         readout_row(
             ui,
             "circumference",
             &format!("{:.0} km", planet.radius * std::f64::consts::TAU / 1_000.0),
         );
         subsection(ui, "insp_world_datum", "Datum", None, accent, true, |ui| {
-            axis_readout_row(ui, "lat", AXIS_Z, &format!("{:+.6}°",  planet.datum.latitude));
-            axis_readout_row(ui, "lon", AXIS_X, &format!("{:+.6}°",  planet.datum.longitude));
-            axis_readout_row(ui, "alt", AXIS_Y, &format!("{:+.2} m", planet.datum.altitude));
+            axis_readout_row(
+                ui,
+                "lat",
+                AXIS_Z,
+                &format!("{:+.6}°", planet.datum.latitude),
+            );
+            axis_readout_row(
+                ui,
+                "lon",
+                AXIS_X,
+                &format!("{:+.6}°", planet.datum.longitude),
+            );
+            axis_readout_row(
+                ui,
+                "alt",
+                AXIS_Y,
+                &format!("{:+.2} m", planet.datum.altitude),
+            );
         });
     });
 
@@ -327,7 +357,10 @@ fn quat_to_euler_xyz(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
     let sy = 2.0 * (w * y + x * z).clamp(-1.0, 1.0);
     let ey = sy.asin();
     let (ex, ez) = if sy.abs() > 0.9999 {
-        (0.0, (-2.0 * (x * y - w * z)).atan2(1.0 - 2.0 * (y * y + z * z)))
+        (
+            0.0,
+            (-2.0 * (x * y - w * z)).atan2(1.0 - 2.0 * (y * y + z * z)),
+        )
     } else {
         (
             (-2.0 * (y * z - w * x)).atan2(1.0 - 2.0 * (x * x + y * y)),

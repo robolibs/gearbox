@@ -1,0 +1,2533 @@
+//! USD-authored machine/controller discovery.
+//!
+//! This is the first runtime slice of `PLAN.md`: after a USD file is loaded,
+//! reopen the composed stage, find prims annotated with the prototype
+//! `GearboxMachineAPI` / `GearboxControllerAPI:<name>` vocabulary, resolve the
+//! authored relationships, and store/log a typed discovery snapshot. The first
+//! builtin controller path is intentionally conservative: it binds authored
+//! wheel/steer joint relationships when Rapier exposes those joints as impulse
+//! joints, and keeps a body-force fallback while the upstream adapter grows a
+//! stable USD-joint-to-Rapier-handle index.
+
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::path::Path;
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
+
+use bevy::prelude::*;
+use openusd::sdf::{Path as SdfPath, Value};
+use rapier3d::prelude::{JointAxis, MultibodyJointHandle, RigidBodyHandle, Vector};
+use serde::{Deserialize, Serialize};
+use usd_bevy::UsdPrimRef;
+use zenoh::Wait;
+
+/// All USD-authored machine/controller specs discovered from loaded assets.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct ControllerInventory {
+    pub machines: Vec<MachineInstanceSpec>,
+}
+
+impl ControllerInventory {
+    pub fn push_loaded_asset(
+        &mut self,
+        scene_root: Entity,
+        asset_label: impl Into<String>,
+        source_path: impl Into<String>,
+        mut machines: Vec<MachineInstanceSpec>,
+    ) {
+        let asset_label = asset_label.into();
+        let source_path = source_path.into();
+        for machine in &mut machines {
+            machine.scene_root = Some(scene_root);
+            machine.asset_label = asset_label.clone();
+            machine.source_path = source_path.clone();
+        }
+        self.machines.extend(machines);
+    }
+}
+
+/// Internal command buffer keyed by discovered controller instance.
+/// UI/keyboard/zenoh bridges write here; builtin controllers consume it.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct ControllerCommands {
+    pub cmd_vel: HashMap<ControllerKey, CmdVel>,
+}
+
+/// Runtime policy for USD-authored `external:process` controllers.
+///
+/// Deny-by-default: set `GEARBOX_ALLOW_USD_CONTROLLER_PROCESS=1` and
+/// `GEARBOX_CONTROLLER_ALLOWLIST=/abs/dir[:/abs/other]` before launching
+/// gearbox. The executable must canonicalize under one of those directories.
+#[derive(Resource, Debug, Clone)]
+pub struct ExternalControllerPolicy {
+    pub allow_processes: bool,
+    pub allowlist_dirs: Vec<std::path::PathBuf>,
+}
+
+impl Default for ExternalControllerPolicy {
+    fn default() -> Self {
+        let allow_processes = matches!(
+            std::env::var("GEARBOX_ALLOW_USD_CONTROLLER_PROCESS").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        );
+        let allowlist_dirs = std::env::var_os("GEARBOX_CONTROLLER_ALLOWLIST")
+            .map(|v| std::env::split_paths(&v).collect())
+            .unwrap_or_default();
+        Self {
+            allow_processes,
+            allowlist_dirs,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct ExternalControllerProcesses {
+    pub children: HashMap<ControllerKey, Child>,
+    pub status: HashMap<ControllerKey, String>,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct ControllerStates {
+    pub states: HashMap<ControllerKey, ControllerState>,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+struct ControllerRuntimeState {
+    applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ControllerState {
+    pub position_m: [f64; 3],
+    pub linear_speed_mps: f64,
+    pub yaw_rate_rps: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ControllerKey {
+    pub scene_root: Entity,
+    pub machine_id: String,
+    pub controller_instance: String,
+}
+
+impl ControllerKey {
+    pub fn new(
+        scene_root: Entity,
+        machine_id: impl Into<String>,
+        controller_instance: impl Into<String>,
+    ) -> Self {
+        Self {
+            scene_root,
+            machine_id: machine_id.into(),
+            controller_instance: controller_instance.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CmdVel {
+    /// Desired forward speed in m/s.
+    pub linear_mps: f32,
+    /// Desired yaw rate in rad/s.
+    pub angular_rps: f32,
+}
+
+impl Default for CmdVel {
+    fn default() -> Self {
+        Self {
+            linear_mps: 0.0,
+            angular_rps: 0.0,
+        }
+    }
+}
+
+/// Prototype plugin that owns the discovery inventory resource.
+pub struct ControllerDiscoveryPlugin;
+
+impl Plugin for ControllerDiscoveryPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ControllerInventory>()
+            .init_resource::<ControllerCommands>()
+            .init_resource::<ExternalControllerPolicy>()
+            .init_resource::<ExternalControllerProcesses>()
+            .init_resource::<ControllerStates>()
+            .init_resource::<ControllerRuntimeState>()
+            .add_systems(
+                Update,
+                (
+                    sync_machine_controller_api_topics,
+                    reconcile_external_process_controllers,
+                    apply_machine_controller_api_commands,
+                    apply_builtin_ackermann_cmd_vel,
+                )
+                    .chain(),
+            )
+            .add_systems(PostUpdate, publish_machine_controller_states);
+
+        match MachineControllerApi::open() {
+            Ok(api) => {
+                app.insert_resource(api);
+                info!("gearbox-control: machine controller zenoh API ready");
+            }
+            Err(err) => {
+                warn!("gearbox-control: machine controller zenoh API disabled: {err}");
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MachineCmdVelWire {
+    pub linear: [f64; 3],
+    pub angular: [f64; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineStateWire {
+    pub machine_id: String,
+    pub controller: String,
+    pub position: [f64; 3],
+    pub linear_speed_mps: f64,
+    pub yaw_rate_rps: f64,
+}
+
+#[derive(Resource)]
+pub struct MachineControllerApi {
+    session: Arc<zenoh::Session>,
+    subscribers: Mutex<HashMap<ControllerKey, zenoh::pubsub::Subscriber<()>>>,
+    pending_cmd_vel: Arc<Mutex<HashMap<ControllerKey, MachineCmdVelWire>>>,
+}
+
+impl MachineControllerApi {
+    fn open() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let session = Arc::new(zenoh::open(zenoh::Config::default()).wait()?);
+        Ok(Self {
+            session,
+            subscribers: Mutex::new(HashMap::new()),
+            pending_cmd_vel: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    fn register_cmd_vel(&self, key: ControllerKey, namespace: &str) {
+        let Ok(mut subscribers) = self.subscribers.lock() else {
+            return;
+        };
+        if subscribers.contains_key(&key) {
+            return;
+        }
+        let topic = format!("gearbox/machines/{namespace}/cmd_vel");
+        let topic_for_cb = topic.clone();
+        let pending = Arc::clone(&self.pending_cmd_vel);
+        let key_for_cb = key.clone();
+        let result = self
+            .session
+            .declare_subscriber(topic.clone())
+            .callback(move |sample| {
+                let bytes = sample.payload().to_bytes();
+                match decode::<MachineCmdVelWire>(bytes.as_ref()) {
+                    Ok(cmd) => {
+                        if let Ok(mut q) = pending.lock() {
+                            q.insert(key_for_cb.clone(), cmd);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("gearbox-control: bad cmd_vel payload on {topic_for_cb}: {err}");
+                    }
+                }
+            })
+            .wait();
+        match result {
+            Ok(sub) => {
+                subscribers.insert(key, sub);
+            }
+            Err(err) => {
+                warn!("gearbox-control: failed to subscribe {topic}: {err}");
+            }
+        }
+    }
+
+    fn snapshot_cmd_vel(&self) -> HashMap<ControllerKey, MachineCmdVelWire> {
+        self.pending_cmd_vel
+            .lock()
+            .map(|q| q.clone())
+            .unwrap_or_default()
+    }
+
+    fn publish_state(&self, namespace: &str, state: &MachineStateWire) {
+        let Ok(bytes) = encode(state) else {
+            return;
+        };
+        let topic = format!("gearbox/machines/{namespace}/state");
+        if let Err(err) = self.session.put(topic.clone(), bytes).wait() {
+            warn!("gearbox-control: failed to publish {topic}: {err}");
+        }
+    }
+}
+
+fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(value, &mut buf)?;
+    Ok(buf)
+}
+
+fn decode<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, ciborium::de::Error<std::io::Error>> {
+    ciborium::from_reader(bytes)
+}
+
+/// A single composed machine prim plus all controller instances authored on it.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct MachineInstanceSpec {
+    /// Filled by the Bevy loader: entity that owns the `SceneRoot`.
+    pub scene_root: Option<Entity>,
+    /// Human label of the loaded USD asset that produced this discovery.
+    pub asset_label: String,
+    /// Filesystem path of the loaded USD asset.
+    pub source_path: String,
+    /// Composed USD prim path of the machine root.
+    pub prim_path: String,
+    /// Stable runtime id after applying `gearbox:machine:id` /
+    /// `gearbox:machine:idPolicy`.
+    pub id: String,
+    pub kind: Option<String>,
+    pub interface_version: Option<String>,
+    pub id_policy: String,
+    pub up_axis: Option<String>,
+    pub body: Option<String>,
+    pub wheels: Vec<String>,
+    pub drive_wheels: Vec<String>,
+    pub steer_bodies: Vec<String>,
+    pub steer_joints: Vec<String>,
+    pub wheel_joints: Vec<String>,
+    pub visuals: Vec<String>,
+    pub colliders: Vec<String>,
+    pub sensors: Vec<String>,
+    pub powered_wheel_joints: Vec<String>,
+    pub passive_wheel_joints: Vec<String>,
+    pub steering_joints: Vec<String>,
+    pub brake_joints: Vec<String>,
+    pub tool_joints: Vec<String>,
+    pub controllers: Vec<ControllerSpec>,
+}
+
+/// One `GearboxControllerAPI:<instance>` application.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ControllerSpec {
+    pub instance: String,
+    pub enabled: bool,
+    pub controller_type: String,
+    pub namespace: String,
+    pub namespace_policy: String,
+    pub update_rate_hz: f32,
+    pub command_interface: Option<String>,
+    pub state_interfaces: Vec<String>,
+    pub frame_convention: Option<String>,
+    pub target: Option<String>,
+    pub body: Option<String>,
+    pub drive_wheels: Vec<String>,
+    pub steer_joints: Vec<String>,
+    pub steer_left_joint: Option<String>,
+    pub steer_right_joint: Option<String>,
+    pub wheel_joints: Vec<String>,
+    pub drive_wheel_joints: Vec<String>,
+    pub passive_wheel_joints: Vec<String>,
+    pub front_left_wheel_joint: Option<String>,
+    pub front_right_wheel_joint: Option<String>,
+    pub rear_left_wheel_joint: Option<String>,
+    pub rear_right_wheel_joint: Option<String>,
+    pub wheel_base: Option<f32>,
+    pub track_width: Option<f32>,
+    pub front_track_width: Option<f32>,
+    pub rear_track_width: Option<f32>,
+    pub max_steer_deg: Option<f32>,
+    pub steering_geometry: Option<String>,
+    pub uses_roles: Vec<String>,
+    pub executable: Option<String>,
+    pub args: Vec<String>,
+    pub transport: Option<String>,
+}
+
+/// Reopen `usd_path` and discover gearbox machine/controller metadata.
+pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstanceSpec>, String> {
+    let stage = open_stage_for_discovery(usd_path)?;
+    let mut prims = Vec::new();
+    let scan_root = stage
+        .default_prim()
+        .and_then(|name| openusd::sdf::path(&format!("/{name}")).ok())
+        .unwrap_or_else(SdfPath::abs_root);
+    walk_stage(&stage, scan_root, &mut prims);
+
+    let mut machines = Vec::new();
+    for prim in &prims {
+        let api_schemas = stage.api_schemas(&prim).unwrap_or_default();
+        let is_machine = api_schemas.iter().any(|api| api == "GearboxMachineAPI")
+            || read_token(&stage, &prim, "gearbox:machine:kind").is_some()
+            || read_token(&stage, &prim, "gearbox:machine:idPolicy").is_some()
+            || read_rel_first(&stage, &prim, "gearbox:machine:body").is_some();
+        if !is_machine {
+            continue;
+        }
+
+        let prim_path = prim.as_str().to_string();
+        let id_policy = read_token(&stage, &prim, "gearbox:machine:idPolicy")
+            .unwrap_or_else(|| "prim_path".to_string());
+        let id = read_token(&stage, &prim, "gearbox:machine:id")
+            .unwrap_or_else(|| derive_machine_id(&prim_path));
+        let namespace_default = id.clone();
+
+        let machine_prim = prim.as_str();
+        let controllers = discover_controllers(
+            &stage,
+            &prim,
+            &api_schemas,
+            &namespace_default,
+            machine_prim,
+        );
+        machines.push(MachineInstanceSpec {
+            scene_root: None,
+            asset_label: String::new(),
+            source_path: String::new(),
+            prim_path,
+            id,
+            kind: read_token(&stage, &prim, "gearbox:machine:kind"),
+            interface_version: read_token(&stage, &prim, "gearbox:machine:interfaceVersion"),
+            id_policy,
+            up_axis: read_token(&stage, &prim, "gearbox:machine:upAxis"),
+            body: read_rel_first(&stage, &prim, "gearbox:machine:body")
+                .map(|p| rebase_asset_root_target(machine_prim, &p)),
+            wheels: read_rel_targets_rebased(&stage, &prim, "gearbox:machine:wheels", machine_prim),
+            drive_wheels: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:driveWheels",
+                machine_prim,
+            ),
+            steer_bodies: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:steerBodies",
+                machine_prim,
+            ),
+            steer_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:steerJoints",
+                machine_prim,
+            ),
+            wheel_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:wheelJoints",
+                machine_prim,
+            ),
+            visuals: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:visuals",
+                machine_prim,
+            ),
+            colliders: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:colliders",
+                machine_prim,
+            ),
+            sensors: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:sensors",
+                machine_prim,
+            ),
+            powered_wheel_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:role:poweredWheelJoints",
+                machine_prim,
+            ),
+            passive_wheel_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:role:passiveWheelJoints",
+                machine_prim,
+            ),
+            steering_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:role:steeringJoints",
+                machine_prim,
+            ),
+            brake_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:role:brakeJoints",
+                machine_prim,
+            ),
+            tool_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:role:toolJoints",
+                machine_prim,
+            ),
+            controllers,
+        });
+    }
+
+    append_isaac_compat_machines(&stage, &prims, &mut machines);
+
+    Ok(machines)
+}
+
+fn open_stage_for_discovery(usd_path: &Path) -> Result<openusd::Stage, String> {
+    let bytes = std::fs::read(usd_path).map_err(|e| e.to_string())?;
+    let ext = usd_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("usd");
+    let is_text_usd = ext.eq_ignore_ascii_case("usda")
+        || (ext.eq_ignore_ascii_case("usd") && is_text_usd(&bytes));
+
+    // Match usd_bevy's tolerance for USDA files that contain metadata tokens
+    // openusd-rs cannot parse directly yet. We only need authored gearbox
+    // control metadata from the root layer, so a stripped temp layer is enough.
+    let open_path = if is_text_usd {
+        let final_bytes =
+            usd_schema::third_party::strip_metadata::strip_unsupported_prim_metadata(&bytes);
+        let tmp = discovery_temp_path(usd_path, ext);
+        std::fs::write(&tmp, final_bytes).map_err(|e| e.to_string())?;
+        tmp
+    } else {
+        usd_path.to_path_buf()
+    };
+
+    let mut search = Vec::new();
+    if let Some(parent) = usd_path.parent() {
+        search.push(parent.to_path_buf());
+    }
+    if let Some(parent) = open_path.parent() {
+        search.push(parent.to_path_buf());
+    }
+
+    let open_str = open_path
+        .to_str()
+        .ok_or_else(|| "non-UTF-8 USD discovery path".to_string())?;
+    openusd::Stage::builder()
+        .resolver(
+            usd_schema::third_party::resolver::StripMetadataResolver::with_search_paths(search),
+        )
+        .on_error(|err| {
+            bevy::log::warn!("gearbox-control USD composition: {err}");
+            Ok(())
+        })
+        .open(open_str)
+        .map_err(|e| e.to_string())
+}
+
+fn discovery_temp_path(usd_path: &Path, ext: &str) -> std::path::PathBuf {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    usd_path.hash(&mut hasher);
+    std::env::temp_dir().join(format!(
+        ".gearbox_control_scan_{:016x}.{}",
+        hasher.finish(),
+        ext
+    ))
+}
+
+fn is_text_usd(bytes: &[u8]) -> bool {
+    let start = bytes
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0xEF | 0xBB | 0xBF))
+        .unwrap_or(bytes.len());
+    bytes[start..].starts_with(b"#usda")
+}
+
+fn append_isaac_compat_machines(
+    stage: &openusd::Stage,
+    prims: &[SdfPath],
+    machines: &mut Vec<MachineInstanceSpec>,
+) {
+    let gearbox_roots = machines
+        .iter()
+        .map(|machine| machine.prim_path.clone())
+        .collect::<HashSet<_>>();
+    let isaac_joint_groups = discover_isaac_joint_groups(stage, prims);
+
+    for prim in prims {
+        let prim_path = prim.as_str();
+        if gearbox_roots.contains(prim_path) {
+            continue;
+        }
+        let api_schemas = stage.api_schemas(prim).unwrap_or_default();
+        if !api_schemas
+            .iter()
+            .any(|api| api == "PhysicsArticulationRootAPI")
+        {
+            continue;
+        }
+
+        let joint_paths = physics_joint_paths_under(stage, prims, prim_path);
+        if joint_paths.is_empty() {
+            continue;
+        }
+        let wheel_joints = joint_paths
+            .iter()
+            .filter(|path| looks_like_wheel_joint(path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let fallback_steer_joints = joint_paths
+            .iter()
+            .filter(|path| looks_like_steer_joint(path))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut steer_joints =
+            resolve_isaac_joint_names(prim_path, &joint_paths, &isaac_joint_groups.steer);
+        if steer_joints.is_empty() {
+            steer_joints = fallback_steer_joints;
+        }
+        let mut drive_wheel_joints =
+            resolve_isaac_joint_names(prim_path, &joint_paths, &isaac_joint_groups.drive);
+        if drive_wheel_joints.is_empty() {
+            drive_wheel_joints = wheel_joints.clone();
+        }
+
+        if wheel_joints.is_empty() && steer_joints.is_empty() && drive_wheel_joints.is_empty() {
+            continue;
+        }
+
+        let drive_set = drive_wheel_joints.iter().cloned().collect::<HashSet<_>>();
+        let passive_wheel_joints = wheel_joints
+            .iter()
+            .filter(|path| !drive_set.contains(*path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let (steer_left_joint, steer_right_joint) = steering_side_targets(&steer_joints);
+        let body = first_rigid_body_under(stage, prims, prim_path);
+        let id = derive_machine_id(prim_path);
+
+        machines.push(MachineInstanceSpec {
+            scene_root: None,
+            asset_label: String::new(),
+            source_path: String::new(),
+            prim_path: prim_path.to_string(),
+            id: id.clone(),
+            kind: Some("isaac_articulation".to_string()),
+            interface_version: Some("isaac_compat:v0".to_string()),
+            id_policy: "prim_path".to_string(),
+            up_axis: None,
+            body: body.clone(),
+            wheels: Vec::new(),
+            drive_wheels: Vec::new(),
+            steer_bodies: Vec::new(),
+            steer_joints: steer_joints.clone(),
+            wheel_joints: wheel_joints.clone(),
+            visuals: Vec::new(),
+            colliders: Vec::new(),
+            sensors: Vec::new(),
+            powered_wheel_joints: drive_wheel_joints.clone(),
+            passive_wheel_joints: passive_wheel_joints.clone(),
+            steering_joints: steer_joints.clone(),
+            brake_joints: Vec::new(),
+            tool_joints: Vec::new(),
+            controllers: vec![ControllerSpec {
+                instance: "drive".to_string(),
+                enabled: true,
+                controller_type: "builtin:ackermann_cmd_vel".to_string(),
+                namespace: id,
+                namespace_policy: "machine_id".to_string(),
+                update_rate_hz: 60.0,
+                command_interface: Some("cmd_vel".to_string()),
+                state_interfaces: vec![
+                    "pose".to_string(),
+                    "velocity".to_string(),
+                    "joint_state".to_string(),
+                ],
+                frame_convention: Some("usd_z_up".to_string()),
+                target: Some(prim_path.to_string()),
+                body,
+                drive_wheels: Vec::new(),
+                steer_joints,
+                steer_left_joint,
+                steer_right_joint,
+                wheel_joints,
+                drive_wheel_joints,
+                passive_wheel_joints,
+                front_left_wheel_joint: None,
+                front_right_wheel_joint: None,
+                rear_left_wheel_joint: None,
+                rear_right_wheel_joint: None,
+                wheel_base: None,
+                track_width: None,
+                front_track_width: None,
+                rear_track_width: None,
+                max_steer_deg: Some(45.0),
+                steering_geometry: Some("ackermann".to_string()),
+                uses_roles: vec![
+                    "poweredWheelJoints".to_string(),
+                    "steeringJoints".to_string(),
+                ],
+                executable: None,
+                args: Vec::new(),
+                transport: None,
+            }],
+        });
+    }
+}
+
+#[derive(Default)]
+struct IsaacJointGroups {
+    steer: Vec<String>,
+    drive: Vec<String>,
+}
+
+fn discover_isaac_joint_groups(stage: &openusd::Stage, prims: &[SdfPath]) -> IsaacJointGroups {
+    let mut groups = IsaacJointGroups::default();
+    for prim in prims {
+        let prop_names = stage.prim_properties(prim.clone()).unwrap_or_default();
+        if prop_names.is_empty() {
+            continue;
+        }
+
+        let type_name = type_name(stage, prim).unwrap_or_default();
+        let mut context = format!("{} {}", prim.as_str(), type_name).to_ascii_lowercase();
+        let mut joint_names = Vec::new();
+        for prop in prop_names {
+            context.push(' ');
+            context.push_str(&prop.to_ascii_lowercase());
+            if let Some(value) = read_attr(stage, prim, &prop) {
+                append_value_context(&mut context, &value);
+            }
+            if looks_like_joint_names_attr(&prop) {
+                joint_names.extend(read_name_array(stage, prim, &prop));
+            }
+        }
+        if joint_names.is_empty() {
+            continue;
+        }
+
+        // Isaac/OmniGraph action graphs usually contain ArticulationController
+        // nodes with a `jointNames` input. The node/prim/property names tell us
+        // whether those names receive position targets (steering) or velocity
+        // targets (powered wheels). Keep this intentionally permissive so USDs
+        // exported by different Isaac versions still normalize into Gearbox.
+        if context.contains("steer") || context.contains("position") {
+            groups.steer.extend(joint_names.clone());
+        }
+        if context.contains("wheel") || context.contains("velocity") || context.contains("drive") {
+            groups.drive.extend(joint_names);
+        }
+    }
+    dedup_strings(&mut groups.steer);
+    dedup_strings(&mut groups.drive);
+    groups
+}
+
+fn physics_joint_paths_under(stage: &openusd::Stage, prims: &[SdfPath], root: &str) -> Vec<String> {
+    prims
+        .iter()
+        .filter(|prim| path_is_under(prim.as_str(), root))
+        .filter(|prim| {
+            type_name(stage, prim)
+                .map(|ty| ty.contains("Joint"))
+                .unwrap_or(false)
+                && !read_rel_targets(stage, prim, "physics:body0").is_empty()
+                && !read_rel_targets(stage, prim, "physics:body1").is_empty()
+        })
+        .map(|prim| prim.as_str().to_string())
+        .collect()
+}
+
+fn first_rigid_body_under(stage: &openusd::Stage, prims: &[SdfPath], root: &str) -> Option<String> {
+    prims
+        .iter()
+        .filter(|prim| path_is_under(prim.as_str(), root))
+        .filter(|prim| {
+            stage
+                .api_schemas(prim)
+                .unwrap_or_default()
+                .iter()
+                .any(|api| api == "PhysicsRigidBodyAPI")
+        })
+        .min_by_key(|prim| {
+            let path = prim.as_str();
+            let wheel_or_steer_penalty =
+                if looks_like_wheel_joint(path) || looks_like_steer_joint(path) {
+                    1000
+                } else {
+                    0
+                };
+            path.matches('/').count() + wheel_or_steer_penalty
+        })
+        .map(|prim| prim.as_str().to_string())
+}
+
+fn resolve_isaac_joint_names(_root: &str, joint_paths: &[String], names: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in names {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('/') {
+            if joint_paths.iter().any(|path| path == trimmed) {
+                out.push(trimmed.to_string());
+            }
+            continue;
+        }
+        if let Some(path) = joint_paths
+            .iter()
+            .find(|path| prim_leaf_name(path) == trimmed)
+            .or_else(|| {
+                joint_paths.iter().find(|path| {
+                    path.to_ascii_lowercase()
+                        .ends_with(&trimmed.to_ascii_lowercase())
+                })
+            })
+        {
+            out.push(path.clone());
+        }
+    }
+    dedup_strings(&mut out);
+    out
+}
+
+fn steering_side_targets(steer_joints: &[String]) -> (Option<String>, Option<String>) {
+    let left = steer_joints
+        .iter()
+        .find(|path| path.to_ascii_lowercase().contains("left"))
+        .cloned();
+    let right = steer_joints
+        .iter()
+        .find(|path| path.to_ascii_lowercase().contains("right"))
+        .cloned();
+    (left, right)
+}
+
+fn read_name_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+    match read_attr(stage, prim, name) {
+        Some(Value::TokenVec(v)) | Some(Value::StringVec(v)) => v,
+        Some(Value::Token(v)) | Some(Value::String(v)) => v
+            .split([',', ' '])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn looks_like_joint_names_attr(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("jointnames")
+        || lower.contains("joint_names")
+        || lower.contains("dofnames")
+        || lower.contains("dof_names")
+}
+
+fn looks_like_wheel_joint(path: &str) -> bool {
+    path.to_ascii_lowercase().contains("wheel")
+}
+
+fn looks_like_steer_joint(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("steer") || lower.contains("knuckle") || lower.contains("upright")
+}
+
+fn path_is_under(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn prim_leaf_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn type_name(stage: &openusd::Stage, prim: &SdfPath) -> Option<String> {
+    stage
+        .field::<String>(prim.clone(), "typeName")
+        .ok()
+        .flatten()
+}
+
+fn append_value_context(context: &mut String, value: &Value) {
+    match value {
+        Value::String(v) | Value::Token(v) | Value::AssetPath(v) => {
+            context.push(' ');
+            context.push_str(&v.to_ascii_lowercase());
+        }
+        Value::StringVec(v) | Value::TokenVec(v) => {
+            for item in v {
+                context.push(' ');
+                context.push_str(&item.to_ascii_lowercase());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn dedup_strings(values: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
+}
+
+pub fn log_discovered_machines(label: &str, machines: &[MachineInstanceSpec]) {
+    if machines.is_empty() {
+        info!("gearbox-control: no USD-authored machines discovered in {label}");
+        return;
+    }
+    for machine in machines {
+        info!(
+            "gearbox-control: machine id={} kind={:?} prim={} controllers={} source={}",
+            machine.id,
+            machine.kind,
+            machine.prim_path,
+            machine.controllers.len(),
+            label,
+        );
+        for controller in &machine.controllers {
+            info!(
+                "gearbox-control:   controller:{} type={} enabled={} ns={} target={:?} drive_wheels={} steer_joints={} wheel_joints={} drive_wheel_joints={}",
+                controller.instance,
+                controller.controller_type,
+                controller.enabled,
+                controller.namespace,
+                controller.target,
+                controller.drive_wheels.len(),
+                controller.steer_joints.len(),
+                controller.wheel_joints.len(),
+                controller.drive_wheel_joints.len(),
+            );
+        }
+    }
+}
+
+fn sync_machine_controller_api_topics(
+    inventory: Res<ControllerInventory>,
+    api: Option<Res<MachineControllerApi>>,
+) {
+    let Some(api) = api else {
+        return;
+    };
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        for controller in &machine.controllers {
+            if !controller.enabled || controller.command_interface.as_deref() != Some("cmd_vel") {
+                continue;
+            }
+            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            api.register_cmd_vel(key, &controller.namespace);
+        }
+    }
+}
+
+fn apply_machine_controller_api_commands(
+    api: Option<Res<MachineControllerApi>>,
+    mut commands: ResMut<ControllerCommands>,
+) {
+    let Some(api) = api else {
+        return;
+    };
+    for (key, wire) in api.snapshot_cmd_vel() {
+        commands.cmd_vel.insert(
+            key,
+            CmdVel {
+                linear_mps: wire.linear[0] as f32,
+                angular_rps: wire.angular[2] as f32,
+            },
+        );
+    }
+}
+
+fn publish_machine_controller_states(
+    inventory: Res<ControllerInventory>,
+    states: Res<ControllerStates>,
+    api: Option<Res<MachineControllerApi>>,
+) {
+    let Some(api) = api else {
+        return;
+    };
+    if states.states.is_empty() {
+        return;
+    }
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        for controller in &machine.controllers {
+            if !controller
+                .state_interfaces
+                .iter()
+                .any(|iface| iface == "pose" || iface == "velocity")
+            {
+                continue;
+            }
+            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            let Some(state) = states.states.get(&key) else {
+                continue;
+            };
+            api.publish_state(
+                &controller.namespace,
+                &MachineStateWire {
+                    machine_id: machine.id.clone(),
+                    controller: controller.instance.clone(),
+                    position: state.position_m,
+                    linear_speed_mps: state.linear_speed_mps,
+                    yaw_rate_rps: state.yaw_rate_rps,
+                },
+            );
+        }
+    }
+}
+
+fn reconcile_external_process_controllers(
+    inventory: Res<ControllerInventory>,
+    policy: Res<ExternalControllerPolicy>,
+    mut processes: ResMut<ExternalControllerProcesses>,
+) {
+    let mut desired = HashSet::new();
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        for controller in &machine.controllers {
+            if !controller.enabled || controller.controller_type != "external:process" {
+                continue;
+            }
+            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            desired.insert(key.clone());
+
+            if let Some(child) = processes.children.get_mut(&key) {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        processes.children.remove(&key);
+                        processes
+                            .status
+                            .insert(key.clone(), format!("exited: {status}"));
+                    }
+                    Ok(None) => {
+                        processes.status.insert(key.clone(), "running".to_string());
+                    }
+                    Err(err) => {
+                        processes
+                            .status
+                            .insert(key.clone(), format!("status error: {err}"));
+                    }
+                }
+                continue;
+            }
+
+            if !policy.allow_processes {
+                processes.status.insert(
+                    key,
+                    "blocked: set GEARBOX_ALLOW_USD_CONTROLLER_PROCESS=1".into(),
+                );
+                continue;
+            }
+            let Some(executable) = controller.executable.as_deref() else {
+                processes
+                    .status
+                    .insert(key, "blocked: no executable authored".into());
+                continue;
+            };
+            let executable_path = Path::new(executable);
+            let Ok(canonical) = executable_path.canonicalize() else {
+                processes
+                    .status
+                    .insert(key, format!("blocked: executable not found: {executable}"));
+                continue;
+            };
+            if !is_allowlisted(&canonical, &policy.allowlist_dirs) {
+                processes.status.insert(
+                    key,
+                    format!(
+                        "blocked: executable outside GEARBOX_CONTROLLER_ALLOWLIST: {executable}"
+                    ),
+                );
+                continue;
+            }
+
+            let mut cmd = Command::new(&canonical);
+            cmd.args(&controller.args)
+                .env("GEARBOX_MACHINE_ID", &machine.id)
+                .env("GEARBOX_CONTROLLER", &controller.instance)
+                .env("GEARBOX_NAMESPACE", &controller.namespace)
+                .env(
+                    "GEARBOX_TRANSPORT",
+                    controller.transport.as_deref().unwrap_or("zenoh"),
+                );
+            match cmd.spawn() {
+                Ok(child) => {
+                    processes.children.insert(key.clone(), child);
+                    processes.status.insert(key, "running".to_string());
+                }
+                Err(err) => {
+                    processes.status.insert(key, format!("spawn failed: {err}"));
+                }
+            }
+        }
+    }
+
+    // Stop children whose controller disappeared or was disabled. This is a
+    // controlled cleanup path, not user-requested destructive filesystem work.
+    let stale = processes
+        .children
+        .keys()
+        .filter(|key| !desired.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in stale {
+        if let Some(mut child) = processes.children.remove(&key) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        processes
+            .status
+            .insert(key, "stopped: controller removed".into());
+    }
+}
+
+fn is_allowlisted(executable: &Path, allowlist_dirs: &[std::path::PathBuf]) -> bool {
+    if allowlist_dirs.is_empty() {
+        return false;
+    }
+    allowlist_dirs.iter().any(|dir| {
+        dir.canonicalize()
+            .map(|allowed| executable.starts_with(allowed))
+            .unwrap_or(false)
+    })
+}
+
+/// First builtin controller: consume `cmd_vel`, bind authored wheel/steer joint
+/// relationships to Rapier impulse-joint motors where possible, publish
+/// chassis pose/velocity state, and keep a conservative body-force fallback for
+/// joint shapes that are not externally addressable yet.
+fn apply_builtin_ackermann_cmd_vel(
+    inventory: Res<ControllerInventory>,
+    commands: Res<ControllerCommands>,
+    time: Res<Time>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    mut states: ResMut<ControllerStates>,
+    active: Res<usd_bevy::physics::PhysicsActive>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    joints: Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: Query<&ChildOf>,
+    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+) {
+    if !active.0 || inventory.machines.is_empty() {
+        return;
+    }
+    let dt = time.delta_secs().clamp(1.0 / 240.0, 1.0 / 20.0);
+
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        for controller in &machine.controllers {
+            if !controller.enabled || controller.controller_type != "builtin:ackermann_cmd_vel" {
+                continue;
+            }
+            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            let requested = commands.cmd_vel.get(&key).copied().unwrap_or_default();
+            let cmd = stable_cmd_vel(&key, requested, dt, &mut runtime);
+            let Some(body_path) = controller.body.as_ref().or(machine.body.as_ref()) else {
+                continue;
+            };
+            let Some(body_entity) = find_prim_entity(scene_root, body_path, &prims, &parents)
+            else {
+                continue;
+            };
+            let Some(body_handle) = physics.entity_to_body.get(&body_entity).copied() else {
+                continue;
+            };
+
+            {
+                let Some(body) = physics.bodies.get_mut(body_handle) else {
+                    continue;
+                };
+
+                // Always publish state for discovered active controllers,
+                // including when the command is zero. This lets the UI/API show
+                // that the controller is alive without needing movement.
+                let pos = body.translation();
+                states.states.insert(
+                    key.clone(),
+                    ControllerState {
+                        position_m: [pos.x, pos.y, pos.z],
+                        linear_speed_mps: body.linvel().length(),
+                        yaw_rate_rps: body.angvel().z,
+                    },
+                );
+            }
+
+            let wheel_radius_m = 0.45_f64;
+            let wheel_base_m = controller.wheel_base.unwrap_or(2.37);
+            let track_width_m = controller
+                .front_track_width
+                .or(controller.track_width)
+                .unwrap_or(1.5675);
+            let max_steer_deg = controller.max_steer_deg.unwrap_or(45.0);
+            let steer_target_rad = steering_target_radians(
+                cmd.linear_mps,
+                cmd.angular_rps,
+                wheel_base_m,
+                max_steer_deg,
+            );
+            let geometry = controller
+                .steering_geometry
+                .as_deref()
+                .unwrap_or("ackermann");
+            let steer_targets = steering_joint_targets(
+                scene_root,
+                controller,
+                machine,
+                &joints,
+                &parents,
+                &physics,
+                geometry,
+                steer_target_rad,
+                wheel_base_m,
+                track_width_m,
+                max_steer_deg,
+            );
+            let wheel_targets = wheel_joint_targets(
+                scene_root,
+                controller,
+                machine,
+                &joints,
+                &parents,
+                &physics,
+                geometry,
+                cmd.linear_mps as f64,
+                steer_target_rad,
+                wheel_base_m,
+                track_width_m,
+                wheel_radius_m,
+            );
+            let motor_application = apply_articulation_or_impulse_joint_motors(
+                &mut physics,
+                &wheel_targets,
+                &steer_targets,
+            );
+            if motor_application.drive {
+                assist_articulated_base_motion(
+                    &mut physics,
+                    body_handle,
+                    cmd.linear_mps as f64,
+                    steer_target_rad,
+                    wheel_base_m as f64,
+                    dt as f64,
+                );
+            }
+        }
+    }
+}
+
+fn stable_cmd_vel(
+    key: &ControllerKey,
+    requested: CmdVel,
+    dt: f32,
+    runtime: &mut ControllerRuntimeState,
+) -> CmdVel {
+    let requested = sanitize_cmd_vel(requested);
+    let previous = runtime
+        .applied_cmd_vel
+        .get(key)
+        .copied()
+        .unwrap_or_default();
+    let next = CmdVel {
+        linear_mps: slew(previous.linear_mps, requested.linear_mps, 2.5 * dt),
+        angular_rps: slew(previous.angular_rps, requested.angular_rps, 1.5 * dt),
+    };
+    runtime.applied_cmd_vel.insert(key.clone(), next);
+    next
+}
+
+fn sanitize_cmd_vel(cmd: CmdVel) -> CmdVel {
+    CmdVel {
+        linear_mps: deadband(cmd.linear_mps, 0.03).clamp(-4.0, 4.0),
+        angular_rps: deadband(cmd.angular_rps, 0.02).clamp(-1.2, 1.2),
+    }
+}
+
+fn deadband(value: f32, threshold: f32) -> f32 {
+    if value.abs() < threshold { 0.0 } else { value }
+}
+
+fn slew(current: f32, target: f32, max_delta: f32) -> f32 {
+    let delta = (target - current).clamp(-max_delta, max_delta);
+    current + delta
+}
+
+fn steering_target_radians(
+    linear_mps: f32,
+    angular_rps: f32,
+    wheel_base_m: f32,
+    max_steer_deg: f32,
+) -> f64 {
+    // Isaac's Ackermann controller takes steeringAngle and speed as separate
+    // inputs. When we adapt cmd_vel, steering is defined relative to the
+    // vehicle's forward frame, so reverse must not flip the visual steering
+    // direction. Only wheel/base speed changes sign. Also: steering angle is
+    // allowed to move while stopped; at zero speed cmd_vel's yaw-rate field is
+    // treated as a steering request against a nominal walking-speed reference
+    // instead of forcing the wheels straight.
+    const STOPPED_STEERING_REFERENCE_SPEED_MPS: f32 = 2.4;
+
+    if angular_rps.abs() < 1e-3 {
+        return 0.0;
+    }
+    let speed_for_steering = linear_mps.abs().max(STOPPED_STEERING_REFERENCE_SPEED_MPS);
+    let max = max_steer_deg.to_radians() as f64;
+    ((wheel_base_m as f64 * angular_rps as f64) / speed_for_steering as f64)
+        .atan()
+        .clamp(-max, max)
+}
+
+fn ackermann_steering_angles(
+    center_steer_rad: f64,
+    wheel_base_m: f32,
+    track_width_m: f32,
+    max_steer_deg: f32,
+) -> (f64, f64) {
+    if center_steer_rad.abs() < 1e-6 {
+        return (0.0, 0.0);
+    }
+    let wheel_base = wheel_base_m as f64;
+    let track = track_width_m as f64;
+    let turn_radius = wheel_base / center_steer_rad.tan();
+    let max = max_steer_deg.to_radians() as f64;
+    let left = (wheel_base / (turn_radius - 0.5 * track))
+        .atan()
+        .clamp(-max, max);
+    let right = (wheel_base / (turn_radius + 0.5 * track))
+        .atan()
+        .clamp(-max, max);
+    (left, right)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AckermannWheelSpeeds {
+    front_left: f64,
+    front_right: f64,
+    rear_left: f64,
+    rear_right: f64,
+}
+
+fn ackermann_wheel_speeds(
+    linear_mps: f64,
+    _center_steer_rad: f64,
+    _wheel_base_m: f32,
+    _track_width_m: f32,
+    wheel_radius_m: f64,
+) -> AckermannWheelSpeeds {
+    // We do not currently model a mechanical differential or per-wheel tire
+    // slip. So keep every wheel on the commanded axle speed instead of trying
+    // to synthesize inner/outer wheel speeds. Otherwise a sudden forward ↔
+    // reverse transition can look like individual wheels are fighting each
+    // other even though there is no differential in the authored machine.
+    let velocity = linear_mps / wheel_radius_m;
+    AckermannWheelSpeeds {
+        front_left: velocity,
+        front_right: velocity,
+        rear_left: velocity,
+        rear_right: velocity,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JointPositionTarget {
+    pair: (RigidBodyHandle, RigidBodyHandle),
+    position: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JointVelocityTarget {
+    pair: (RigidBodyHandle, RigidBodyHandle),
+    velocity: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn steering_joint_targets(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+    geometry: &str,
+    center_steer_rad: f64,
+    wheel_base_m: f32,
+    track_width_m: f32,
+    max_steer_deg: f32,
+) -> Vec<JointPositionTarget> {
+    if geometry == "ackermann" {
+        let (left, right) =
+            ackermann_steering_angles(center_steer_rad, wheel_base_m, track_width_m, max_steer_deg);
+        let targets = explicit_steering_targets(
+            scene_root, controller, joints, parents, physics, left, right,
+        );
+        if !targets.is_empty() {
+            return targets;
+        }
+        let targets =
+            role_steering_targets(scene_root, machine, joints, parents, physics, left, right);
+        if !targets.is_empty() {
+            return targets;
+        }
+    }
+
+    let targets = explicit_steering_targets(
+        scene_root,
+        controller,
+        joints,
+        parents,
+        physics,
+        center_steer_rad,
+        center_steer_rad,
+    );
+    if !targets.is_empty() {
+        return targets;
+    }
+
+    let targets = role_steering_targets(
+        scene_root,
+        machine,
+        joints,
+        parents,
+        physics,
+        center_steer_rad,
+        center_steer_rad,
+    );
+    if !targets.is_empty() {
+        return targets;
+    }
+
+    controller
+        .steer_joints
+        .iter()
+        .chain(machine.steer_joints.iter())
+        .chain(machine.steering_joints.iter())
+        .filter_map(|path| joint_pair(scene_root, path, joints, parents, physics))
+        .map(|pair| JointPositionTarget {
+            pair,
+            position: center_steer_rad,
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn explicit_steering_targets(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+    left_position: f64,
+    right_position: f64,
+) -> Vec<JointPositionTarget> {
+    let mut targets = Vec::new();
+    if let Some(pair) = controller
+        .steer_left_joint
+        .as_deref()
+        .and_then(|path| joint_pair(scene_root, path, joints, parents, physics))
+    {
+        targets.push(JointPositionTarget {
+            pair,
+            position: left_position,
+        });
+    }
+    if let Some(pair) = controller
+        .steer_right_joint
+        .as_deref()
+        .and_then(|path| joint_pair(scene_root, path, joints, parents, physics))
+    {
+        targets.push(JointPositionTarget {
+            pair,
+            position: right_position,
+        });
+    }
+    targets
+}
+
+#[allow(clippy::too_many_arguments)]
+fn role_steering_targets(
+    scene_root: Entity,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+    left_position: f64,
+    right_position: f64,
+) -> Vec<JointPositionTarget> {
+    let (left_path, right_path) = steering_role_sides(&machine.steering_joints);
+    let mut targets = Vec::new();
+    if let Some(pair) =
+        left_path.and_then(|path| joint_pair(scene_root, path, joints, parents, physics))
+    {
+        targets.push(JointPositionTarget {
+            pair,
+            position: left_position,
+        });
+    }
+    if let Some(pair) =
+        right_path.and_then(|path| joint_pair(scene_root, path, joints, parents, physics))
+    {
+        targets.push(JointPositionTarget {
+            pair,
+            position: right_position,
+        });
+    }
+    targets
+}
+
+fn steering_role_sides(paths: &[String]) -> (Option<&str>, Option<&str>) {
+    let left = paths
+        .iter()
+        .find(|path| path.to_ascii_lowercase().contains("left"))
+        .map(String::as_str);
+    let right = paths
+        .iter()
+        .find(|path| path.to_ascii_lowercase().contains("right"))
+        .map(String::as_str);
+    (left, right)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wheel_joint_targets(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+    geometry: &str,
+    linear_mps: f64,
+    center_steer_rad: f64,
+    wheel_base_m: f32,
+    track_width_m: f32,
+    wheel_radius_m: f64,
+) -> Vec<JointVelocityTarget> {
+    if !controller.drive_wheel_joints.is_empty() {
+        let velocity = linear_mps / wheel_radius_m;
+        return controller
+            .drive_wheel_joints
+            .iter()
+            .filter_map(|path| joint_pair(scene_root, path, joints, parents, physics))
+            .map(|pair| JointVelocityTarget { pair, velocity })
+            .collect();
+    }
+    if !machine.powered_wheel_joints.is_empty() {
+        let velocity = linear_mps / wheel_radius_m;
+        return machine
+            .powered_wheel_joints
+            .iter()
+            .filter_map(|path| joint_pair(scene_root, path, joints, parents, physics))
+            .map(|pair| JointVelocityTarget { pair, velocity })
+            .collect();
+    }
+
+    if geometry == "ackermann" {
+        let speeds = ackermann_wheel_speeds(
+            linear_mps,
+            center_steer_rad,
+            wheel_base_m,
+            track_width_m,
+            wheel_radius_m,
+        );
+        let authored = [
+            (
+                controller.front_left_wheel_joint.as_deref(),
+                speeds.front_left,
+            ),
+            (
+                controller.front_right_wheel_joint.as_deref(),
+                speeds.front_right,
+            ),
+            (
+                controller.rear_left_wheel_joint.as_deref(),
+                speeds.rear_left,
+            ),
+            (
+                controller.rear_right_wheel_joint.as_deref(),
+                speeds.rear_right,
+            ),
+        ];
+        let targets = authored
+            .into_iter()
+            .filter_map(|(path, velocity)| {
+                let pair = joint_pair(scene_root, path?, joints, parents, physics)?;
+                Some(JointVelocityTarget { pair, velocity })
+            })
+            .collect::<Vec<_>>();
+        if !targets.is_empty() {
+            return targets;
+        }
+    }
+
+    let velocity = linear_mps / wheel_radius_m;
+    controller
+        .wheel_joints
+        .iter()
+        .chain(machine.wheel_joints.iter())
+        .chain(machine.powered_wheel_joints.iter())
+        .filter_map(|path| joint_pair(scene_root, path, joints, parents, physics))
+        .map(|pair| JointVelocityTarget { pair, velocity })
+        .collect()
+}
+
+fn joint_pair(
+    scene_root: Entity,
+    path: &str,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+) -> Option<(RigidBodyHandle, RigidBodyHandle)> {
+    let (_, _, body0, body1) = find_joint_body_pair(scene_root, path, joints, parents, physics)?;
+    Some((body0, body1))
+}
+
+fn assist_articulated_base_motion(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    body_handle: RigidBodyHandle,
+    linear_mps: f64,
+    steer_rad: f64,
+    wheel_base_m: f64,
+    dt: f64,
+) {
+    let Some(body) = physics.bodies.get_mut(body_handle) else {
+        return;
+    };
+    if linear_mps.abs() < 1e-4 {
+        return;
+    }
+
+    // Keep this as a base velocity actuator, not a pose teleport. The wheel
+    // and steering joints are still driven as a full articulation; this only
+    // compensates for the current Rapier/USD tire-contact gap where spinning
+    // wheel joints do not reliably create vehicle traction.
+    let mut forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
+    forward.z = 0.0;
+    let norm = forward.length();
+    if norm <= 1e-6 {
+        return;
+    }
+    forward /= norm;
+
+    let current = body.linvel();
+    let current_forward = current.dot(forward);
+    let max_step = 2.5 * dt;
+    let next_forward = current_forward + (linear_mps - current_forward).clamp(-max_step, max_step);
+    let next_linvel = current + forward * (next_forward - current_forward);
+    body.set_linvel(next_linvel, true);
+
+    let target_yaw_rate = if steer_rad.abs() < 1e-4 || wheel_base_m <= 1e-6 {
+        0.0
+    } else {
+        linear_mps * steer_rad.tan() / wheel_base_m
+    };
+    let mut angvel = body.angvel();
+    let max_yaw_step = 2.5 * dt;
+    angvel.z += (target_yaw_rate - angvel.z).clamp(-max_yaw_step, max_yaw_step);
+    angvel.x *= 0.85;
+    angvel.y *= 0.85;
+    body.set_angvel(angvel, true);
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MotorApplication {
+    drive: bool,
+    steer: bool,
+}
+
+fn apply_articulation_or_impulse_joint_motors(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    wheel_targets: &[JointVelocityTarget],
+    steer_targets: &[JointPositionTarget],
+) -> MotorApplication {
+    let mut applied = MotorApplication::default();
+    if wheel_targets.is_empty() && steer_targets.is_empty() {
+        return applied;
+    }
+
+    for target in wheel_targets {
+        if let Some(handle) = multibody_joint_handle(physics, target.pair) {
+            if let Some((multibody, link_id)) = physics.multibody_joints.get_mut(handle) {
+                if let Some(link) = multibody.link_mut(link_id) {
+                    link.joint
+                        .data
+                        .set_motor_velocity(JointAxis::AngX, target.velocity, 25.0)
+                        .set_motor_max_force(JointAxis::AngX, 800.0);
+                    applied.drive = true;
+                }
+            }
+        }
+    }
+
+    for target in steer_targets {
+        if let Some(handle) = multibody_joint_handle(physics, target.pair) {
+            if let Some((multibody, link_id)) = physics.multibody_joints.get_mut(handle) {
+                if let Some(link) = multibody.link_mut(link_id) {
+                    link.joint
+                        .data
+                        .set_motor_position(JointAxis::AngX, target.position, 60.0, 12.0)
+                        .set_motor_max_force(JointAxis::AngX, 500.0);
+                    applied.steer = true;
+                }
+            }
+        }
+    }
+
+    for (_, joint) in physics.impulse_joints.iter_mut() {
+        if let Some(target) = wheel_targets
+            .iter()
+            .find(|target| rigid_body_pair_matches(target.pair, joint.body1, joint.body2))
+        {
+            joint
+                .data
+                .set_motor_velocity(JointAxis::AngX, target.velocity, 25.0)
+                .set_motor_max_force(JointAxis::AngX, 800.0);
+            applied.drive = true;
+        }
+        if let Some(target) = steer_targets
+            .iter()
+            .find(|target| rigid_body_pair_matches(target.pair, joint.body1, joint.body2))
+        {
+            // Rapier's RevoluteJoint motor is always exposed as AngX: the
+            // authored USD axis ("Z" for the tractor steering joints) is
+            // baked into the joint local axis when usd_rapier builds the
+            // revolute joint. Driving AngZ fights a locked axis and can
+            // explode/flip the vehicle.
+            joint
+                .data
+                .set_motor_position(JointAxis::AngX, target.position, 60.0, 12.0)
+                .set_motor_max_force(JointAxis::AngX, 500.0);
+            applied.steer = true;
+        }
+    }
+    applied
+}
+
+fn multibody_joint_handle(
+    physics: &usd_bevy::physics::PhysicsWorld,
+    pair: (RigidBodyHandle, RigidBodyHandle),
+) -> Option<MultibodyJointHandle> {
+    physics
+        .multibody_joints
+        .joint_between(pair.0, pair.1)
+        .map(|(handle, _, _)| handle)
+}
+
+fn rigid_body_pair_matches(
+    authored: (RigidBodyHandle, RigidBodyHandle),
+    actual_a: RigidBodyHandle,
+    actual_b: RigidBodyHandle,
+) -> bool {
+    (authored.0 == actual_a && authored.1 == actual_b)
+        || (authored.0 == actual_b && authored.1 == actual_a)
+}
+
+fn find_joint_body_pair(
+    scene_root: Entity,
+    prim_path: &str,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+) -> Option<(Entity, Entity, RigidBodyHandle, RigidBodyHandle)> {
+    let (_, _, joint) = joints.iter().find(|(entity, prim, _)| {
+        prim.path == prim_path && is_descendant_of(*entity, scene_root, parents)
+    })?;
+    let body0_entity = joint.body0?;
+    let body1_entity = joint.body1?;
+    let body0 = physics.entity_to_body.get(&body0_entity).copied()?;
+    let body1 = physics.entity_to_body.get(&body1_entity).copied()?;
+    Some((body0_entity, body1_entity, body0, body1))
+}
+
+fn find_prim_entity(
+    scene_root: Entity,
+    prim_path: &str,
+    prims: &Query<(Entity, &UsdPrimRef)>,
+    parents: &Query<&ChildOf>,
+) -> Option<Entity> {
+    prims
+        .iter()
+        .find(|(entity, prim)| {
+            prim.path == prim_path && is_descendant_of(*entity, scene_root, parents)
+        })
+        .map(|(entity, _)| entity)
+}
+
+fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&ChildOf>) -> bool {
+    let mut current = entity;
+    for _ in 0..64 {
+        if current == root {
+            return true;
+        }
+        let Ok(parent) = parents.get(current) else {
+            return false;
+        };
+        current = parent.parent();
+    }
+    false
+}
+
+fn discover_controllers(
+    stage: &openusd::Stage,
+    prim: &SdfPath,
+    api_schemas: &[String],
+    namespace_default: &str,
+    machine_prim: &str,
+) -> Vec<ControllerSpec> {
+    let mut instances = HashSet::new();
+    for api in api_schemas {
+        if let Some(instance) = api.strip_prefix("GearboxControllerAPI:") {
+            if !instance.is_empty() {
+                instances.insert(instance.to_string());
+            }
+        }
+    }
+
+    // Fallback for prototype assets where apiSchemas were stripped but attrs
+    // remain. Keep this narrow until we have a full property iterator.
+    for known in ["drive", "arm", "implement"] {
+        if read_token(stage, prim, &format!("gearbox:controller:{known}:type")).is_some() {
+            instances.insert(known.to_string());
+        }
+    }
+
+    let mut out: Vec<_> = instances
+        .into_iter()
+        .map(|instance| {
+            let prefix = format!("gearbox:controller:{instance}:");
+            let namespace_policy = read_token(stage, prim, &(prefix.clone() + "namespacePolicy"))
+                .unwrap_or_else(|| "machine_id".to_string());
+            let namespace = read_string(stage, prim, &(prefix.clone() + "namespace"))
+                .unwrap_or_else(|| namespace_default.to_string());
+            ControllerSpec {
+                instance,
+                enabled: read_bool(stage, prim, &(prefix.clone() + "enabled")).unwrap_or(true),
+                controller_type: read_token(stage, prim, &(prefix.clone() + "type"))
+                    .unwrap_or_else(|| "builtin:unknown".to_string()),
+                namespace,
+                namespace_policy,
+                update_rate_hz: read_float(stage, prim, &(prefix.clone() + "updateRateHz"))
+                    .unwrap_or(60.0),
+                command_interface: read_token(stage, prim, &(prefix.clone() + "commandInterface")),
+                state_interfaces: read_token_array(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "stateInterfaces"),
+                ),
+                frame_convention: read_token(stage, prim, &(prefix.clone() + "frameConvention")),
+                target: read_rel_first(stage, prim, &(prefix.clone() + "target"))
+                    .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                body: read_rel_first(stage, prim, &(prefix.clone() + "body"))
+                    .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                drive_wheels: read_rel_targets_rebased(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "driveWheels"),
+                    machine_prim,
+                ),
+                steer_joints: read_rel_targets_rebased(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "steerJoints"),
+                    machine_prim,
+                ),
+                steer_left_joint: read_rel_first(stage, prim, &(prefix.clone() + "steerLeftJoint"))
+                    .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                steer_right_joint: read_rel_first(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "steerRightJoint"),
+                )
+                .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                wheel_joints: read_rel_targets_rebased(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "wheelJoints"),
+                    machine_prim,
+                ),
+                drive_wheel_joints: read_rel_targets_rebased(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "driveWheelJoints"),
+                    machine_prim,
+                ),
+                passive_wheel_joints: read_rel_targets_rebased(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "passiveWheelJoints"),
+                    machine_prim,
+                ),
+                front_left_wheel_joint: read_rel_first(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "frontLeftWheelJoint"),
+                )
+                .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                front_right_wheel_joint: read_rel_first(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "frontRightWheelJoint"),
+                )
+                .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                rear_left_wheel_joint: read_rel_first(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "rearLeftWheelJoint"),
+                )
+                .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                rear_right_wheel_joint: read_rel_first(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "rearRightWheelJoint"),
+                )
+                .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                wheel_base: read_float(stage, prim, &(prefix.clone() + "wheelBase")),
+                track_width: read_float(stage, prim, &(prefix.clone() + "trackWidth")),
+                front_track_width: read_float(stage, prim, &(prefix.clone() + "frontTrackWidth")),
+                rear_track_width: read_float(stage, prim, &(prefix.clone() + "rearTrackWidth")),
+                max_steer_deg: read_float(stage, prim, &(prefix.clone() + "maxSteerDeg")),
+                steering_geometry: read_token(stage, prim, &(prefix.clone() + "steeringGeometry")),
+                uses_roles: read_token_array(stage, prim, &(prefix.clone() + "usesRoles")),
+                executable: read_string(stage, prim, &(prefix.clone() + "executable")),
+                args: read_string_array(stage, prim, &(prefix.clone() + "args")),
+                transport: read_token(stage, prim, &(prefix.clone() + "transport")),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| a.instance.cmp(&b.instance));
+    out
+}
+
+fn walk_stage(stage: &openusd::Stage, path: SdfPath, out: &mut Vec<SdfPath>) {
+    if path.as_str() != "/" {
+        out.push(path.clone());
+    }
+    for child_name in stage.prim_children(path.clone()).unwrap_or_default() {
+        let Ok(child_path) = path.append_path(child_name.as_str()) else {
+            continue;
+        };
+        walk_stage(stage, child_path, out);
+    }
+}
+
+fn derive_machine_id(prim_path: &str) -> String {
+    let mut out = String::new();
+    for ch in prim_path.trim_matches('/').chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches('_').to_string();
+    if out.is_empty() {
+        "machine".to_string()
+    } else {
+        out
+    }
+}
+
+fn read_attr(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<Value> {
+    let attr = prim.append_property(name).ok()?;
+    stage.field::<Value>(attr, "default").ok().flatten()
+}
+
+fn read_bool(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<bool> {
+    match read_attr(stage, prim, name)? {
+        Value::Bool(v) => Some(v),
+        _ => None,
+    }
+}
+
+fn read_float(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<f32> {
+    match read_attr(stage, prim, name)? {
+        Value::Float(v) => Some(v),
+        Value::Double(v) => Some(v as f32),
+        Value::Int(v) => Some(v as f32),
+        Value::Uint(v) => Some(v as f32),
+        _ => None,
+    }
+}
+
+fn read_string(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
+    match read_attr(stage, prim, name)? {
+        Value::String(v) | Value::Token(v) | Value::AssetPath(v) => Some(v),
+        _ => None,
+    }
+}
+
+fn read_token(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
+    read_string(stage, prim, name)
+}
+
+fn read_token_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+    match read_attr(stage, prim, name) {
+        Some(Value::TokenVec(v)) | Some(Value::StringVec(v)) => v,
+        _ => Vec::new(),
+    }
+}
+
+fn read_string_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+    read_token_array(stage, prim, name)
+}
+
+fn read_rel_targets(stage: &openusd::Stage, prim: &SdfPath, rel_name: &str) -> Vec<String> {
+    let Some(raw) = prim
+        .append_property(rel_name)
+        .ok()
+        .and_then(|rel| stage.field::<Value>(rel, "targetPaths").ok().flatten())
+    else {
+        return Vec::new();
+    };
+    let paths = match raw {
+        Value::PathListOp(op) => op.flatten(),
+        Value::PathVec(v) => v,
+        _ => return Vec::new(),
+    };
+    paths.into_iter().map(|p| p.as_str().to_string()).collect()
+}
+
+fn read_rel_targets_rebased(
+    stage: &openusd::Stage,
+    prim: &SdfPath,
+    rel_name: &str,
+    machine_prim: &str,
+) -> Vec<String> {
+    read_rel_targets(stage, prim, rel_name)
+        .into_iter()
+        .map(|target| rebase_asset_root_target(machine_prim, &target))
+        .collect()
+}
+
+fn read_rel_first(stage: &openusd::Stage, prim: &SdfPath, rel_name: &str) -> Option<String> {
+    read_rel_targets(stage, prim, rel_name).into_iter().next()
+}
+
+fn rebase_asset_root_target(machine_prim: &str, target: &str) -> String {
+    const ASSET_ROOT: &str = "/robot";
+    if machine_prim == ASSET_ROOT {
+        return target.to_string();
+    }
+    if target == ASSET_ROOT {
+        return machine_prim.to_string();
+    }
+    if let Some(suffix) = target.strip_prefix("/robot/") {
+        return format!("{machine_prim}/{suffix}");
+    }
+    target.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discovers_tractor_drive_controller_metadata() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tractor.usd");
+        let machines = discover_machines_from_usd(&path).expect("tractor.usd should scan");
+        let machine = machines
+            .iter()
+            .find(|m| m.prim_path == "/robot")
+            .expect("tractor root should be a Gearbox machine");
+        assert_eq!(machine.id, "robot");
+        assert_eq!(machine.kind.as_deref(), Some("tractor"));
+        assert_eq!(machine.drive_wheels.len(), 2);
+        assert_eq!(machine.steer_joints.len(), 2);
+        assert_eq!(machine.wheel_joints.len(), 4);
+        assert_eq!(
+            machine.powered_wheel_joints,
+            vec![
+                "/robot/Joints/rev_back_left".to_string(),
+                "/robot/Joints/rev_back_right".to_string(),
+            ]
+        );
+        assert_eq!(
+            machine.passive_wheel_joints,
+            vec![
+                "/robot/Joints/rev_front_left".to_string(),
+                "/robot/Joints/rev_front_right".to_string(),
+            ]
+        );
+        assert_eq!(
+            machine.steering_joints,
+            vec![
+                "/robot/Joints/steer_front_left".to_string(),
+                "/robot/Joints/steer_front_right".to_string(),
+            ]
+        );
+
+        let drive = machine
+            .controllers
+            .iter()
+            .find(|c| c.instance == "drive")
+            .expect("tractor should author a drive controller");
+        assert!(drive.enabled);
+        assert_eq!(drive.controller_type, "builtin:ackermann_cmd_vel");
+        assert_eq!(drive.namespace, "robot");
+        assert_eq!(drive.command_interface.as_deref(), Some("cmd_vel"));
+        assert_eq!(drive.steering_geometry.as_deref(), Some("ackermann"));
+        assert_eq!(
+            drive.uses_roles,
+            vec![
+                "poweredWheelJoints".to_string(),
+                "steeringJoints".to_string(),
+            ]
+        );
+        assert!(drive.steer_left_joint.is_none());
+        assert!(drive.steer_right_joint.is_none());
+        assert!(drive.front_left_wheel_joint.is_none());
+        assert!(drive.rear_right_wheel_joint.is_none());
+        assert!(drive.drive_wheel_joints.is_empty());
+        assert!(drive.passive_wheel_joints.is_empty());
+        assert!(drive.steer_joints.is_empty());
+        assert!(drive.wheel_joints.is_empty());
+    }
+
+    #[test]
+    fn discovers_isaac_action_graph_joint_roles_without_gearbox_metadata() {
+        let usd = r#"#usda 1.0
+(
+    defaultPrim = "Leatherback"
+)
+
+def Xform "Leatherback" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+)
+{
+    def Xform "base_link" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+    }
+
+    def Xform "front_left_wheel" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+    }
+
+    def Xform "front_right_wheel" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+    }
+
+    def Xform "rear_left_wheel" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+    }
+
+    def Xform "rear_right_wheel" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "Knuckle__Upright__Front_Left"
+        {
+            rel physics:body0 = </Leatherback/base_link>
+            rel physics:body1 = </Leatherback/front_left_wheel>
+        }
+        def PhysicsRevoluteJoint "Knuckle__Upright__Front_Right"
+        {
+            rel physics:body0 = </Leatherback/base_link>
+            rel physics:body1 = </Leatherback/front_right_wheel>
+        }
+        def PhysicsRevoluteJoint "Wheel__Knuckle__Front_Left"
+        {
+            rel physics:body0 = </Leatherback/base_link>
+            rel physics:body1 = </Leatherback/front_left_wheel>
+        }
+        def PhysicsRevoluteJoint "Wheel__Knuckle__Front_Right"
+        {
+            rel physics:body0 = </Leatherback/base_link>
+            rel physics:body1 = </Leatherback/front_right_wheel>
+        }
+        def PhysicsRevoluteJoint "Wheel__Upright__Rear_Left"
+        {
+            rel physics:body0 = </Leatherback/base_link>
+            rel physics:body1 = </Leatherback/rear_left_wheel>
+        }
+        def PhysicsRevoluteJoint "Wheel__Upright__Rear_Right"
+        {
+            rel physics:body0 = </Leatherback/base_link>
+            rel physics:body1 = </Leatherback/rear_right_wheel>
+        }
+    }
+
+    def Scope "ActionGraph"
+    {
+        def "SteeringArticulationController"
+        {
+            custom string inputs:nodeType = "isaacsim.core.nodes.IsaacArticulationController"
+            custom token inputs:commandType = "position"
+            custom token[] inputs:jointNames = [
+                "Knuckle__Upright__Front_Left",
+                "Knuckle__Upright__Front_Right"
+            ]
+        }
+        def "WheelArticulationController"
+        {
+            custom string inputs:nodeType = "isaacsim.core.nodes.IsaacArticulationController"
+            custom token inputs:commandType = "velocity"
+            custom token[] inputs:jointNames = [
+                "Wheel__Upright__Rear_Left",
+                "Wheel__Upright__Rear_Right"
+            ]
+        }
+    }
+}
+"#;
+        let path = std::env::temp_dir().join(format!(
+            "gearbox_isaac_compat_{}_{}.usda",
+            std::process::id(),
+            "leatherback"
+        ));
+        std::fs::write(&path, usd).expect("write synthetic Isaac USD");
+
+        let machines = discover_machines_from_usd(&path).expect("synthetic Isaac USD should scan");
+        let _ = std::fs::remove_file(&path);
+
+        let machine = machines
+            .iter()
+            .find(|machine| machine.prim_path == "/Leatherback")
+            .expect("Isaac articulation should become a Gearbox machine");
+        assert_eq!(machine.kind.as_deref(), Some("isaac_articulation"));
+        assert_eq!(machine.body.as_deref(), Some("/Leatherback/base_link"));
+        let drive = machine
+            .controllers
+            .iter()
+            .find(|controller| controller.instance == "drive")
+            .expect("compat drive controller");
+        assert_eq!(drive.controller_type, "builtin:ackermann_cmd_vel");
+        assert_eq!(
+            drive.steer_joints,
+            vec![
+                "/Leatherback/Joints/Knuckle__Upright__Front_Left".to_string(),
+                "/Leatherback/Joints/Knuckle__Upright__Front_Right".to_string(),
+            ]
+        );
+        assert_eq!(
+            drive.drive_wheel_joints,
+            vec![
+                "/Leatherback/Joints/Wheel__Upright__Rear_Left".to_string(),
+                "/Leatherback/Joints/Wheel__Upright__Rear_Right".to_string(),
+            ]
+        );
+        assert!(
+            drive
+                .passive_wheel_joints
+                .contains(&"/Leatherback/Joints/Wheel__Knuckle__Front_Left".to_string())
+        );
+        assert!(
+            drive
+                .passive_wheel_joints
+                .contains(&"/Leatherback/Joints/Wheel__Knuckle__Front_Right".to_string())
+        );
+    }
+
+    #[test]
+    fn derives_stable_machine_id_from_prim_path() {
+        assert_eq!(derive_machine_id("/World/Tractor_01"), "world_tractor_01");
+        assert_eq!(derive_machine_id("/World/Farm/RobotA"), "world_farm_robota");
+    }
+
+    #[test]
+    fn steering_target_clamps_and_zeros() {
+        assert_eq!(steering_target_radians(1.0, 0.0, 2.4, 45.0), 0.0);
+        assert!(steering_target_radians(0.0, 1.0, 2.4, 45.0) > 0.0);
+        let target = steering_target_radians(2.0, 10.0, 2.4, 30.0);
+        assert!((target - 30_f64.to_radians()).abs() < 1e-6);
+        let reverse = steering_target_radians(-2.0, 1.0, 2.4, 45.0);
+        assert!(reverse > 0.0);
+        assert_eq!(reverse, steering_target_radians(2.0, 1.0, 2.4, 45.0));
+        assert_eq!(reverse, steering_target_radians(0.0, 1.0, 2.4, 45.0));
+    }
+
+    #[test]
+    fn ackermann_outputs_inner_outer_steering_and_wheel_speeds() {
+        let center = 0.25;
+        let (left, right) = ackermann_steering_angles(center, 2.37, 1.5675, 45.0);
+        assert!(left > center);
+        assert!(right < center);
+        assert!(left > right);
+
+        let speeds = ackermann_wheel_speeds(2.0, center, 2.37, 1.5675, 0.45);
+        assert_eq!(speeds.front_left, speeds.front_right);
+        assert_eq!(speeds.rear_left, speeds.rear_right);
+        assert_eq!(speeds.front_left, speeds.rear_left);
+
+        let reverse = ackermann_wheel_speeds(-2.0, -center, 2.37, 1.5675, 0.45);
+        assert!(reverse.front_left < 0.0);
+        assert!(reverse.front_right < 0.0);
+        assert_eq!(reverse.front_left, reverse.front_right);
+        assert_eq!(reverse.rear_left, reverse.rear_right);
+    }
+
+    #[test]
+    fn articulated_base_assist_moves_chassis_forward_without_flipping() {
+        use rapier3d::prelude::RigidBodyBuilder;
+
+        let mut physics = usd_bevy::physics::PhysicsWorld::default();
+        let chassis = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+
+        assist_articulated_base_motion(&mut physics, chassis, 2.0, 0.2, 2.37, 1.0 / 60.0);
+
+        let body = physics.bodies.get(chassis).expect("chassis body");
+        assert!(body.linvel().y < 0.0);
+        assert!(body.angvel().z > 0.0);
+        assert!(body.angvel().x.abs() < 1e-9);
+        assert!(body.angvel().y.abs() < 1e-9);
+    }
+
+    #[test]
+    fn command_sanitize_and_slew_are_responsive_but_stable() {
+        assert_eq!(
+            sanitize_cmd_vel(CmdVel {
+                linear_mps: 0.01,
+                angular_rps: 0.01
+            })
+            .linear_mps,
+            0.0
+        );
+        assert_eq!(
+            sanitize_cmd_vel(CmdVel {
+                linear_mps: 0.01,
+                angular_rps: 0.01
+            })
+            .angular_rps,
+            0.0
+        );
+        assert_eq!(
+            sanitize_cmd_vel(CmdVel {
+                linear_mps: 10.0,
+                angular_rps: 5.0
+            })
+            .linear_mps,
+            4.0
+        );
+        assert_eq!(
+            sanitize_cmd_vel(CmdVel {
+                linear_mps: 10.0,
+                angular_rps: 5.0
+            })
+            .angular_rps,
+            1.2
+        );
+        assert!((slew(0.0, 4.0, 0.25) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn impulse_joint_motors_bind_authored_body_pairs() {
+        use rapier3d::prelude::{RevoluteJointBuilder, RigidBodyBuilder, Vector};
+
+        let mut physics = usd_bevy::physics::PhysicsWorld::default();
+        let chassis = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+        let wheel = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+        let steer = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+        let steer_link = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+
+        physics.impulse_joints.insert(
+            chassis,
+            wheel,
+            RevoluteJointBuilder::new(Vector::new(1.0, 0.0, 0.0)),
+            true,
+        );
+        physics.impulse_joints.insert(
+            steer,
+            steer_link,
+            RevoluteJointBuilder::new(Vector::new(0.0, 0.0, 1.0)),
+            true,
+        );
+
+        let applied = apply_articulation_or_impulse_joint_motors(
+            &mut physics,
+            &[JointVelocityTarget {
+                pair: (wheel, chassis),
+                velocity: 7.5,
+            }],
+            &[JointPositionTarget {
+                pair: (steer, steer_link),
+                position: 0.25,
+            }],
+        );
+        assert!(applied.drive);
+        assert!(applied.steer);
+
+        let mut saw_drive = false;
+        let mut saw_steer = false;
+        for (_, joint) in physics.impulse_joints.iter() {
+            if rigid_body_pair_matches((chassis, wheel), joint.body1, joint.body2) {
+                let motor = joint.data.motor(JointAxis::AngX).expect("drive motor");
+                assert!((motor.target_vel - 7.5).abs() < 1e-9);
+                assert_eq!(motor.max_force, 800.0);
+                saw_drive = true;
+            }
+            if rigid_body_pair_matches((steer, steer_link), joint.body1, joint.body2) {
+                let motor = joint.data.motor(JointAxis::AngX).expect("steer motor");
+                assert!((motor.target_pos - 0.25).abs() < 1e-9);
+                assert_eq!(motor.stiffness, 60.0);
+                saw_steer = true;
+            }
+        }
+        assert!(saw_drive);
+        assert!(saw_steer);
+    }
+
+    #[test]
+    fn multibody_joint_motors_bind_authored_body_pairs() {
+        use rapier3d::prelude::{RevoluteJointBuilder, RigidBodyBuilder, Vector};
+
+        let mut physics = usd_bevy::physics::PhysicsWorld::default();
+        let chassis = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+        let wheel = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+        let steer = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+        let steer_link = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+
+        physics.multibody_joints.insert(
+            chassis,
+            wheel,
+            RevoluteJointBuilder::new(Vector::new(1.0, 0.0, 0.0)),
+            true,
+        );
+        physics.multibody_joints.insert(
+            steer,
+            steer_link,
+            RevoluteJointBuilder::new(Vector::new(0.0, 0.0, 1.0)),
+            true,
+        );
+
+        let applied = apply_articulation_or_impulse_joint_motors(
+            &mut physics,
+            &[JointVelocityTarget {
+                pair: (wheel, chassis),
+                velocity: 3.5,
+            }],
+            &[JointPositionTarget {
+                pair: (steer, steer_link),
+                position: 0.15,
+            }],
+        );
+        assert!(applied.drive);
+        assert!(applied.steer);
+
+        let (drive_handle, _, _) = physics
+            .multibody_joints
+            .joint_between(chassis, wheel)
+            .expect("drive multibody joint");
+        let (multibody, link_id) = physics
+            .multibody_joints
+            .get(drive_handle)
+            .expect("drive multibody link");
+        let motor = multibody
+            .link(link_id)
+            .expect("drive link")
+            .joint
+            .data
+            .motor(JointAxis::AngX)
+            .expect("drive motor");
+        assert!((motor.target_vel - 3.5).abs() < 1e-9);
+
+        let (steer_handle, _, _) = physics
+            .multibody_joints
+            .joint_between(steer, steer_link)
+            .expect("steer multibody joint");
+        let (multibody, link_id) = physics
+            .multibody_joints
+            .get(steer_handle)
+            .expect("steer multibody link");
+        let motor = multibody
+            .link(link_id)
+            .expect("steer link")
+            .joint
+            .data
+            .motor(JointAxis::AngX)
+            .expect("steer motor");
+        assert!((motor.target_pos - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn five_referenced_tractor_instances_get_separate_ids_and_targets() {
+        let tractor = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/tractor.usd")
+            .canonicalize()
+            .expect("tractor asset path");
+        let world_path = std::env::temp_dir().join(format!(
+            "gearbox_controller_instances_{}.usda",
+            std::process::id()
+        ));
+        let tractor_ref = tractor.to_string_lossy();
+        let mut defs = String::new();
+        for idx in 1..=5 {
+            let name = format!("Tractor_{idx:02}");
+            let id = format!("tractor_{idx:02}");
+            defs.push_str(&format!(
+                r#"
+    def Xform "{name}" (
+        prepend references = @{tractor_ref}@</robot>
+    )
+    {{
+        token gearbox:machine:id = "{id}"
+    }}
+"#
+            ));
+        }
+        std::fs::write(
+            &world_path,
+            format!(
+                r#"#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+)
+
+def Xform "World"
+{{
+{defs}
+}}
+"#
+            ),
+        )
+        .expect("write temp world");
+
+        let mut machines = discover_machines_from_usd(&world_path).expect("world should scan");
+        machines.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(machines.len(), 5);
+        for idx in 1..=5 {
+            let machine = &machines[idx - 1];
+            let id = format!("tractor_{idx:02}");
+            let root = format!("/World/Tractor_{idx:02}");
+            assert_eq!(machine.id, id);
+            assert_eq!(machine.controllers[0].namespace, id);
+            assert_eq!(machine.controllers[0].instance, "drive");
+            assert!(
+                machine
+                    .drive_wheels
+                    .iter()
+                    .any(|p| p == &format!("{root}/wheel_back_left"))
+            );
+            assert!(
+                machine
+                    .wheel_joints
+                    .iter()
+                    .any(|p| p == &format!("{root}/Joints/rev_back_left"))
+            );
+        }
+
+        let _ = std::fs::remove_file(world_path);
+    }
+}

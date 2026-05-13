@@ -47,7 +47,13 @@ impl DriveController for AckermannController {
         // Default: every driven wheel gets full throttle × its max engine force.
         let mut engine_force: Vec<f64> = specs
             .iter()
-            .map(|s| if s.driven { ctrl.throttle * s.max_engine_force } else { 0.0 })
+            .map(|s| {
+                if s.driven {
+                    ctrl.throttle * s.max_engine_force
+                } else {
+                    0.0
+                }
+            })
             .collect();
 
         // Weight-transfer-aware open diff within each axle.
@@ -55,10 +61,7 @@ impl DriveController for AckermannController {
             if wheel_indices.len() < 2 {
                 continue;
             }
-            let total_n: f64 = wheel_indices
-                .iter()
-                .map(|&i| frame.normal_forces[i])
-                .sum();
+            let total_n: f64 = wheel_indices.iter().map(|&i| frame.normal_forces[i]).sum();
             if total_n < 1.0 {
                 continue;
             }
@@ -74,7 +77,9 @@ impl DriveController for AckermannController {
 
         for idx in 0..ctx.wheels.len() {
             let spec = &specs[idx];
-            let Some(mut w) = ctx.wheels.get_mut(idx) else { continue };
+            let Some(mut w) = ctx.wheels.get_mut(idx) else {
+                continue;
+            };
             w.set_engine_force(engine_force[idx]);
             w.set_brake(ctrl.brake * spec.max_brake * frame.brake_gate);
             w.set_steering(if spec.steered {

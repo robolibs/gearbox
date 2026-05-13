@@ -78,7 +78,8 @@ impl Sim {
 
     /// Add a large flat ground collider centered at the origin.
     pub fn add_ground_plane(&mut self, half_size: f64) {
-        self.colliders.insert(world::build_ground_collider(half_size));
+        self.colliders
+            .insert(world::build_ground_collider(half_size));
     }
 
     /// Add a sphere collider representing the planet. The sphere is placed
@@ -86,13 +87,16 @@ impl Sim {
     /// convention used by the visual planet mesh.
     pub fn add_planet_collider(&mut self, radius: f64) {
         let centre = Vec3::new(0.0, -radius, 0.0);
-        self.colliders.insert(world::build_planet_collider(centre, radius));
+        self.colliders
+            .insert(world::build_planet_collider(centre, radius));
     }
 
     /// Add a static box obstacle at the given pose.
     pub fn add_box_obstacle(&mut self, pose: Pose, size: Size) {
-        self.colliders
-            .insert(world::build_box_collider(size_to_vec3(size), pose_to_rpose(pose)));
+        self.colliders.insert(world::build_box_collider(
+            size_to_vec3(size),
+            pose_to_rpose(pose),
+        ));
     }
 
     /// Spawn a vehicle from its declarative spec at the given pose.
@@ -253,7 +257,9 @@ impl Sim {
     /// `DynamicRayCastVehicleController`. The Bevy entity carrying
     /// the visuals is despawned separately by the caller.
     pub fn despawn_vehicle(&mut self, id: VehicleId) {
-        let Some(state) = self.vehicles.remove(&id) else { return };
+        let Some(state) = self.vehicles.remove(&id) else {
+            return;
+        };
         self.bodies.remove(
             state.handles.body,
             &mut self.islands,
@@ -277,7 +283,9 @@ impl Sim {
     /// Teleport a vehicle to the given pose, zeroing its velocities.
     /// Used by the editor's drag-to-move gesture.
     pub fn set_vehicle_pose(&mut self, id: VehicleId, pose: Pose) {
-        let Some(v) = self.vehicles.get(&id) else { return };
+        let Some(v) = self.vehicles.get(&id) else {
+            return;
+        };
         let handle = v.handles.body;
         if let Some(rb) = self.bodies.get_mut(handle) {
             rb.set_position(pose_to_rpose(pose), true);
@@ -287,7 +295,10 @@ impl Sim {
     }
 
     pub fn control(&self, id: VehicleId) -> ControlInput {
-        self.vehicles.get(&id).map(|v| v.control).unwrap_or_default()
+        self.vehicles
+            .get(&id)
+            .map(|v| v.control)
+            .unwrap_or_default()
     }
 
     pub fn vehicle_pose(&self, id: VehicleId) -> Pose {
@@ -352,8 +363,12 @@ impl Sim {
     /// aligns with the axle (matches Bevy's `Cylinder` primitive, which
     /// extrudes along +Y).
     pub fn wheel_pose(&self, id: VehicleId, wheel: usize) -> Pose {
-        let Some(v) = self.vehicles.get(&id) else { return Pose::default() };
-        let Some(wh) = v.handles.controller.wheels().get(wheel) else { return Pose::default() };
+        let Some(v) = self.vehicles.get(&id) else {
+            return Pose::default();
+        };
+        let Some(wh) = v.handles.controller.wheels().get(wheel) else {
+            return Pose::default();
+        };
         let spec = &v.spec.wheels[wheel];
 
         let axle = normalize_or(wh.axle(), Vec3::X);
@@ -468,7 +483,9 @@ impl Sim {
     /// the next tick. Inertia is recomputed from the current inertia
     /// box (either `chassis.inertia_size` override or the collider size).
     pub fn set_vehicle_mass(&mut self, id: VehicleId, mass: f64) {
-        let Some(state) = self.vehicles.get_mut(&id) else { return };
+        let Some(state) = self.vehicles.get_mut(&id) else {
+            return;
+        };
         state.spec.chassis.mass = mass.max(0.01);
         let half_extents = state
             .spec
@@ -570,7 +587,9 @@ impl Sim {
                 control,
                 handles,
             } = v;
-            let Some(rb) = self.bodies.get_mut(handles.body) else { continue };
+            let Some(rb) = self.bodies.get_mut(handles.body) else {
+                continue;
+            };
             let mut ctx = DriveContext {
                 dt,
                 gravity: self.gravity,
@@ -596,7 +615,9 @@ impl Sim {
             if v.control.brake < 0.5 {
                 continue;
             }
-            let Some(rb) = self.bodies.get_mut(v.handles.body) else { continue };
+            let Some(rb) = self.bodies.get_mut(v.handles.body) else {
+                continue;
+            };
             let lv = rb.linvel();
             let horiz2 = lv.x * lv.x + lv.z * lv.z;
             if horiz2 < 0.5 * 0.5 {

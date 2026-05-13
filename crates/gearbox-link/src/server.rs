@@ -8,16 +8,16 @@
 //! every client that tries to connect. Production will want real
 //! WebPKI certs plus an auth hook on `SessionRequest`.
 
+use aeronet::io::Session;
 use aeronet_webtransport::server::{
     ServerConfig, SessionRequest, SessionResponse, WebTransportServer, WebTransportServerPlugin,
 };
-use aeronet_webtransport::wtransport::Identity;
 use aeronet_webtransport::session::WebTransportIo;
-use aeronet::io::Session;
+use aeronet_webtransport::wtransport::Identity;
 use bevy::prelude::*;
 use bytes::Bytes;
 
-use crate::wire::{decode, encode, RendererToSim, SimToRenderer};
+use crate::wire::{RendererToSim, SimToRenderer, decode, encode};
 
 /// Bind config for the QUIC listener.
 #[derive(Resource, Debug, Clone)]

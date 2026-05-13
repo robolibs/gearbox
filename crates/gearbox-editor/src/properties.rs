@@ -11,17 +11,18 @@ use bevy_egui::egui;
 use bevy_frost::PaneBuilder;
 
 use gearbox_physics::{
-    datapod::{Point, Pose, Quaternion},
     VehicleId,
+    datapod::{Point, Pose, Quaternion},
 };
 
 use gearbox_viz::{ChassisTinted, GearboxSim, GroundGrid};
 
 use super::selection::Selection;
 use super::selection_ring::SelectionRingSettings;
-use super::style::{space, AXIS_X, AXIS_Y, AXIS_Z};
+use super::style::{AXIS_X, AXIS_Y, AXIS_Z, space};
 use super::transform_gizmos::{GizmoModesEnabled, GizmoScale};
 use super::ui_panel;
+use super::usd_load::PendingUsdRemoval;
 use super::widgets::{
     axis_drag, color_rgb, drag_value, group_frame, pretty_progressbar_text, pretty_slider,
     row_separator, sub_caption, subsection, toggle, wide_button,
@@ -38,22 +39,53 @@ pub struct PendingColorChange {
 pub fn draw_content(
     pane: &mut PaneBuilder,
     sim: &mut GearboxSim,
-    selection: &Selection,
+    selection: &mut Selection,
     grid: &mut GroundGrid,
     gizmo_scale: &mut GizmoScale,
     gizmo_modes: &mut GizmoModesEnabled,
     ring_settings: &mut SelectionRingSettings,
     glass_opacity: &mut super::style::GlassOpacity,
     pending_color: &mut PendingColorChange,
+    pending_usd_removal: &mut PendingUsdRemoval,
     accent: egui::Color32,
 ) {
     if let Some(id) = selection.vehicle {
         vehicle_section(pane, sim, id, pending_color, accent);
+    } else if let Some(usd_entity) = selection.usd_entity {
+        usd_section(pane, selection, usd_entity, pending_usd_removal, accent);
     } else {
         world_section(
-            pane, sim, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
+            pane,
+            sim,
+            grid,
+            gizmo_scale,
+            gizmo_modes,
+            ring_settings,
+            glass_opacity,
+            accent,
         );
     }
+}
+
+// ═══ USD asset panel ════════════════════════════════════════════════
+
+fn usd_section(
+    pane: &mut PaneBuilder,
+    selection: &mut Selection,
+    usd_entity: Entity,
+    pending_removal: &mut PendingUsdRemoval,
+    accent: egui::Color32,
+) {
+    pane.section("usd_actions", "Asset Actions", true, |ui| {
+        sub_caption(ui, "USD-loaded asset.");
+        ui.add_space(space::BLOCK);
+        if wide_button(ui, "🗑  Remove from scene", accent).clicked() {
+            pending_removal.0.push(usd_entity);
+            // Clear selection — the gizmo / inspector / ring all
+            // gracefully fall back to nothing-selected next frame.
+            selection.usd_entity = None;
+        }
+    });
 }
 
 // ═══ World panel ════════════════════════════════════════════════════
@@ -76,7 +108,13 @@ fn world_section(
 
     // Grid / gizmo / ring still live in `ui_panel::draw_content`.
     ui_panel::draw_content(
-        pane, grid, gizmo_scale, gizmo_modes, ring_settings, glass_opacity, accent,
+        pane,
+        grid,
+        gizmo_scale,
+        gizmo_modes,
+        ring_settings,
+        glass_opacity,
+        accent,
     );
 }
 
@@ -145,89 +183,84 @@ fn vehicle_section(
         )
     };
 
-    pane.section(
-        "prop_vehicle",
-        &format!("Vehicle · {}", name),
-        true,
-        |ui| {
-            // --- Colour ---
-            let mut rgb = current_color;
-            if color_rgb(ui, "colour", &mut rgb, accent).changed() {
+    pane.section("prop_vehicle", &format!("Vehicle · {}", name), true, |ui| {
+        // --- Colour ---
+        let mut rgb = current_color;
+        if color_rgb(ui, "colour", &mut rgb, accent).changed() {
+            if let Some(v) = sim.0.vehicle_mut(id) {
+                v.spec.chassis.color = rgb;
+            }
+            pending_color.pending = Some((id, rgb));
+        }
+
+        // --- Mass ---
+        let mut mass = current_mass;
+        if drag_value(ui, "mass (kg)", &mut mass, 1.0, 0.1..=100_000.0, 1, "").changed() {
+            sim.0.set_vehicle_mass(id, mass);
+        }
+
+        // --- Engine force (mean across driven wheels) ---
+        if !driven_wheels.is_empty() {
+            let mut ef = mean_engine_force;
+            if drag_value(
+                ui,
+                "max engine (N/wheel)",
+                &mut ef,
+                1.0,
+                0.0..=1_000_000.0,
+                1,
+                "",
+            )
+            .changed()
+            {
                 if let Some(v) = sim.0.vehicle_mut(id) {
-                    v.spec.chassis.color = rgb;
-                }
-                pending_color.pending = Some((id, rgb));
-            }
-
-            // --- Mass ---
-            let mut mass = current_mass;
-            if drag_value(ui, "mass (kg)", &mut mass, 1.0, 0.1..=100_000.0, 1, "").changed() {
-                sim.0.set_vehicle_mass(id, mass);
-            }
-
-            // --- Engine force (mean across driven wheels) ---
-            if !driven_wheels.is_empty() {
-                let mut ef = mean_engine_force;
-                if drag_value(
-                    ui,
-                    "max engine (N/wheel)",
-                    &mut ef,
-                    1.0,
-                    0.0..=1_000_000.0,
-                    1,
-                    "",
-                )
-                .changed()
-                {
-                    if let Some(v) = sim.0.vehicle_mut(id) {
-                        for idx in &driven_wheels {
-                            v.spec.wheels[*idx].max_engine_force = ef;
-                        }
+                    for idx in &driven_wheels {
+                        v.spec.wheels[*idx].max_engine_force = ef;
                     }
                 }
             }
+        }
 
-            // --- Brake (mean across all wheels) ---
-            if wheels_count > 0 {
-                let mut br = mean_brake;
-                if drag_value(
-                    ui,
-                    "max brake (N·m/wheel)",
-                    &mut br,
-                    1.0,
-                    0.0..=1_000_000.0,
-                    1,
-                    "",
-                )
-                .changed()
-                {
-                    if let Some(v) = sim.0.vehicle_mut(id) {
-                        for w in v.spec.wheels.iter_mut() {
-                            w.max_brake = br;
-                        }
+        // --- Brake (mean across all wheels) ---
+        if wheels_count > 0 {
+            let mut br = mean_brake;
+            if drag_value(
+                ui,
+                "max brake (N·m/wheel)",
+                &mut br,
+                1.0,
+                0.0..=1_000_000.0,
+                1,
+                "",
+            )
+            .changed()
+            {
+                if let Some(v) = sim.0.vehicle_mut(id) {
+                    for w in v.spec.wheels.iter_mut() {
+                        w.max_brake = br;
                     }
                 }
             }
+        }
 
-            // --- Damping (linear / angular) — one module per value so
-            // each carries its own separator like every other field.
-            let mut lin = current_linear_damping;
-            let mut ang = current_angular_damping;
-            let mut damping_changed = false;
-            if drag_value(ui, "linear damping", &mut lin, 0.05, 0.0..=50.0, 2, "").changed() {
-                damping_changed = true;
+        // --- Damping (linear / angular) — one module per value so
+        // each carries its own separator like every other field.
+        let mut lin = current_linear_damping;
+        let mut ang = current_angular_damping;
+        let mut damping_changed = false;
+        if drag_value(ui, "linear damping", &mut lin, 0.05, 0.0..=50.0, 2, "").changed() {
+            damping_changed = true;
+        }
+        if drag_value(ui, "angular damping", &mut ang, 0.05, 0.0..=50.0, 2, "").changed() {
+            damping_changed = true;
+        }
+        if damping_changed {
+            if let Some(v) = sim.0.vehicle_mut(id) {
+                v.spec.chassis.linear_damping = lin;
+                v.spec.chassis.angular_damping = ang;
             }
-            if drag_value(ui, "angular damping", &mut ang, 0.05, 0.0..=50.0, 2, "").changed() {
-                damping_changed = true;
-            }
-            if damping_changed {
-                if let Some(v) = sim.0.vehicle_mut(id) {
-                    v.spec.chassis.linear_damping = lin;
-                    v.spec.chassis.angular_damping = ang;
-                }
-            }
-        },
-    );
+        }
+    });
 
     // Each helper decides whether it renders at all (Work / Power /
     // Container sections early-return when the selected vehicle has
@@ -239,8 +272,15 @@ fn vehicle_section(
     transform_section(pane, sim, id, accent);
 }
 
-fn work_section(pane: &mut PaneBuilder, sim: &mut GearboxSim, id: VehicleId, accent: egui::Color32) {
-    let Some(state) = sim.0.vehicle(id) else { return };
+fn work_section(
+    pane: &mut PaneBuilder,
+    sim: &mut GearboxSim,
+    id: VehicleId,
+    accent: egui::Color32,
+) {
+    let Some(state) = sim.0.vehicle(id) else {
+        return;
+    };
     if state.spec.power.sources.is_empty() {
         return;
     }
@@ -261,14 +301,21 @@ fn work_section(pane: &mut PaneBuilder, sim: &mut GearboxSim, id: VehicleId, acc
     });
 }
 
-fn power_section(pane: &mut PaneBuilder, sim: &mut GearboxSim, id: VehicleId, accent: egui::Color32) {
+fn power_section(
+    pane: &mut PaneBuilder,
+    sim: &mut GearboxSim,
+    id: VehicleId,
+    accent: egui::Color32,
+) {
     struct Snap {
         turned_on: bool,
         primary: usize,
         entries: Vec<(String, f64, f64)>,
     }
     let snap: Snap = {
-        let Some(state) = sim.0.vehicle(id) else { return };
+        let Some(state) = sim.0.vehicle(id) else {
+            return;
+        };
         if state.spec.power.sources.is_empty() {
             return;
         }
@@ -321,11 +368,15 @@ fn power_section(pane: &mut PaneBuilder, sim: &mut GearboxSim, id: VehicleId, ac
             ui.add_space(space::BLOCK);
             sub_caption(
                 ui,
-                &format!("{} · {:.0} / {:.0}", label, current_snapshot, capacity_snapshot),
+                &format!(
+                    "{} · {:.0} / {:.0}",
+                    label, current_snapshot, capacity_snapshot
+                ),
             );
             ui.add_space(space::TIGHT);
             let mut capacity = *capacity_snapshot;
-            if pretty_slider(ui, "capacity", &mut capacity, 10.0..=5000.0, 0, "", accent).changed() {
+            if pretty_slider(ui, "capacity", &mut capacity, 10.0..=5000.0, 0, "", accent).changed()
+            {
                 if let Some(v) = sim.0.vehicle_mut(id) {
                     if let Some(src) = v.spec.power.sources.get_mut(idx) {
                         src.capacity = capacity;
@@ -360,7 +411,9 @@ fn container_section(
     accent: egui::Color32,
 ) {
     let snaps: Vec<ContainerSnap> = {
-        let Some(state) = sim.0.vehicle(id) else { return };
+        let Some(state) = sim.0.vehicle(id) else {
+            return;
+        };
         if state.spec.containers.is_empty() {
             return;
         }
@@ -389,13 +442,7 @@ fn container_section(
                 0.0
             };
             let fill_text = format!("{:.0} / {:.0}", s.amount, s.capacity);
-            pretty_progressbar_text(
-                ui,
-                &format!("fill · {}", idx + 1),
-                frac,
-                &fill_text,
-                accent,
-            );
+            pretty_progressbar_text(ui, &format!("fill · {}", idx + 1), frac, &fill_text, accent);
 
             // CAPACITY slider — purpose visible without an inline
             // `.text(...)` eating the width.
@@ -514,7 +561,10 @@ fn quat_to_euler_xyz(w: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
     let sy = 2.0 * (w * y + x * z).clamp(-1.0, 1.0);
     let ey = sy.asin();
     let (ex, ez) = if sy.abs() > 0.9999 {
-        (0.0, (-2.0 * (x * y - w * z)).atan2(1.0 - 2.0 * (y * y + z * z)))
+        (
+            0.0,
+            (-2.0 * (x * y - w * z)).atan2(1.0 - 2.0 * (y * y + z * z)),
+        )
     } else {
         (
             (-2.0 * (y * z - w * x)).atan2(1.0 - 2.0 * (x * x + y * y)),

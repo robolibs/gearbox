@@ -11,9 +11,9 @@
 
 use rapier3d::prelude::*;
 
-pub const GROUND: Group  = Group::GROUP_1;
+pub const GROUND: Group = Group::GROUP_1;
 pub const CHASSIS: Group = Group::GROUP_2;
-pub const WHEEL: Group   = Group::GROUP_3;
+pub const WHEEL: Group = Group::GROUP_3;
 
 /// Chassis: collides with ground, other chassis, and wheels.
 pub fn chassis_groups() -> InteractionGroups {
@@ -30,11 +30,7 @@ pub fn chassis_groups() -> InteractionGroups {
 /// Same-body pairs are skipped automatically by rapier, so a wheel
 /// collider never pushes against its own chassis or part colliders.
 pub fn wheel_groups() -> InteractionGroups {
-    InteractionGroups::new(
-        WHEEL,
-        WHEEL.union(CHASSIS),
-        InteractionTestMode::And,
-    )
+    InteractionGroups::new(WHEEL, WHEEL.union(CHASSIS), InteractionTestMode::And)
 }
 
 /// Static world geometry.
@@ -45,11 +41,7 @@ pub fn ground_groups() -> InteractionGroups {
 /// Raycast-ground filter for the vehicle wheels — hits ground and
 /// chassis, **skips** wheel colliders.
 pub fn wheel_raycast_groups() -> InteractionGroups {
-    InteractionGroups::new(
-        Group::ALL,
-        GROUND.union(CHASSIS),
-        InteractionTestMode::And,
-    )
+    InteractionGroups::new(Group::ALL, GROUND.union(CHASSIS), InteractionTestMode::And)
 }
 
 /// Builds a large flat ground collider centered at the origin.

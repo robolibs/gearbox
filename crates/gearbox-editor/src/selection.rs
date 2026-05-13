@@ -10,8 +10,8 @@ use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
 
 use gearbox_physics::{
-    datapod::{Point, Pose, Quaternion},
     MeshSource, VehicleId,
+    datapod::{Point, Pose, Quaternion},
 };
 
 use gearbox_viz::{GearboxSim, SimClock};
@@ -87,7 +87,9 @@ pub fn pick_and_drag_system(
         selection.drag = None;
         return;
     };
-    let Ok((camera, cam_tr)) = cameras.single() else { return };
+    let Ok((camera, cam_tr)) = cameras.single() else {
+        return;
+    };
 
     // Release → clear drag.
     if buttons.just_released(MouseButton::Left) {
@@ -107,7 +109,7 @@ pub fn pick_and_drag_system(
     // body only SELECTS — moving the machine has to go through the
     // gizmo's translate arrow (the handle you can see). This stops
     // stray clicks from whipping the vehicle across the scene.
-    let shift_held  = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let shift_held = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let can_body_drag = clock.paused && shift_held;
 
     if buttons.just_pressed(MouseButton::Left) && !right_held {
@@ -257,7 +259,11 @@ fn cursor_pick_vehicle(
                 direction,
                 wc,
                 wr,
-                Vec3::new(wheel.radius as f32, (wheel.width * 0.5) as f32, wheel.radius as f32),
+                Vec3::new(
+                    wheel.radius as f32,
+                    (wheel.width * 0.5) as f32,
+                    wheel.radius as f32,
+                ),
             ));
         }
 
@@ -329,13 +335,7 @@ pub fn cursor_ray_to_ground(
 
 /// Slab-test ray vs oriented box. Returns the near-hit `t` if the ray
 /// enters the box, ignoring hits strictly behind the origin.
-fn ray_obb_intersect(
-    origin: Vec3,
-    dir: Vec3,
-    centre: Vec3,
-    rot: Quat,
-    half: Vec3,
-) -> Option<f32> {
+fn ray_obb_intersect(origin: Vec3, dir: Vec3, centre: Vec3, rot: Quat, half: Vec3) -> Option<f32> {
     let inv = rot.inverse();
     let local_origin = inv * (origin - centre);
     let local_dir = inv * dir;

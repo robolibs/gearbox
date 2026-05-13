@@ -44,8 +44,8 @@ pub use bevy_glacial::grid;
 
 use bevy::prelude::*;
 
-use gearbox_physics::Sim as CoreSim;
 use gearbox_core::VehicleId;
+use gearbox_physics::Sim as CoreSim;
 
 /// Bevy resource wrapping a headless `gearbox_physics::Sim`. Renamed
 /// from `Sim` so it doesn't shadow the library type.
@@ -266,5 +266,7 @@ fn handle_sim_reset_vehicles_system(
 pub use camera::ChaseCamera;
 pub use grid::GroundGrid;
 pub use scene::{SceneClock, SceneState};
-pub use spawn::{spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals, GhostTag, UsdAssetRoot};
+pub use spawn::{
+    GhostTag, UsdAssetRoot, spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals,
+};
 pub use step::{SimClock, SimSpeed};

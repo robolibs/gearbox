@@ -5,7 +5,7 @@
 //! protocol. When scene data lands (OpenUSD) the message enum grows
 //! new variants rather than a second topic surface.
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 // ─── Simulator → Renderer ──────────────────────────────────────────
 

@@ -45,12 +45,12 @@ use bevy::prelude::*;
 use gearbox_viz::GearboxSim;
 
 #[cfg(feature = "bevy")]
-use datapod::{spatial::Euler, Point, Pose, Quaternion};
+use datapod::{Point, Pose, Quaternion, spatial::Euler};
 
 #[cfg(feature = "bevy")]
 use ondrive::{
-    point::CarrotFollower, types::SteeringType, Controller, ControllerConfig, Goal,
-    RobotConstraints, RobotState, VelocityCommand,
+    Controller, ControllerConfig, Goal, RobotConstraints, RobotState, VelocityCommand,
+    point::CarrotFollower, types::SteeringType,
 };
 
 // ─── Wire types ────────────────────────────────────────────────────
@@ -166,9 +166,7 @@ impl GotoBroker {
         let Ok(bytes) = encode(status) else { return };
         let key = format!("{}_{}/goto_status", robot_name, vehicle_id);
         if let Err(e) = self.session.put(key, bytes).wait() {
-            eprintln!(
-                "gearbox-api: goto_status publish failed for {robot_name}_{vehicle_id}: {e}"
-            );
+            eprintln!("gearbox-api: goto_status publish failed for {robot_name}_{vehicle_id}: {e}");
         }
     }
 }
@@ -225,7 +223,9 @@ impl Plugin for GotoApiPlugin {
 #[cfg(feature = "bevy")]
 fn sync_goto_topics_system(sim: Res<GearboxSim>, api: Option<Res<GotoApiSession>>) {
     let Some(api) = api else { return };
-    let Ok(mut broker) = api.broker.lock() else { return };
+    let Ok(mut broker) = api.broker.lock() else {
+        return;
+    };
     let mut alive: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for (id, state) in sim.0.vehicles() {
         alive.insert(id.0);
@@ -249,8 +249,12 @@ fn drive_goto_system(
     time: Res<Time>,
 ) {
     let Some(api) = api else { return };
-    let Ok(broker) = api.broker.lock() else { return };
-    let Ok(mut active) = api.active.lock() else { return };
+    let Ok(broker) = api.broker.lock() else {
+        return;
+    };
+    let Ok(mut active) = api.active.lock() else {
+        return;
+    };
 
     // 1. Ingest new commands. `cancel: true` removes the goal;
     //    everything else replaces / installs one.
@@ -288,7 +292,8 @@ fn drive_goto_system(
 
         if goal_state.follower.get_status().goal_reached {
             // Hand off a stop the next frame and drop the goal.
-            sim.0.set_control(id, gearbox_physics::ControlInput::default());
+            sim.0
+                .set_control(id, gearbox_physics::ControlInput::default());
             completed.push(*vehicle_id);
         }
     }
@@ -299,13 +304,14 @@ fn drive_goto_system(
 }
 
 #[cfg(feature = "bevy")]
-fn publish_goto_status_system(
-    sim: Res<GearboxSim>,
-    api: Option<Res<GotoApiSession>>,
-) {
+fn publish_goto_status_system(sim: Res<GearboxSim>, api: Option<Res<GotoApiSession>>) {
     let Some(api) = api else { return };
-    let Ok(broker) = api.broker.lock() else { return };
-    let Ok(active) = api.active.lock() else { return };
+    let Ok(broker) = api.broker.lock() else {
+        return;
+    };
+    let Ok(active) = api.active.lock() else {
+        return;
+    };
 
     for (id, state) in sim.0.vehicles() {
         let name = &state.spec.name;
@@ -329,7 +335,11 @@ fn publish_goto_status_system(
 
 #[cfg(feature = "bevy")]
 fn controller_config_for(cmd: &GotoCommand) -> ControllerConfig {
-    let tol = if cmd.tolerance > 0.0 { cmd.tolerance } else { 1.5 };
+    let tol = if cmd.tolerance > 0.0 {
+        cmd.tolerance
+    } else {
+        1.5
+    };
     // Default yaw tolerance is `2π` — i.e. don't require any
     // specific final orientation, just position. Without this an
     // Ackermann tractor that "hits" the point at the wrong heading
@@ -402,11 +412,7 @@ fn wheelbase_of(state: &gearbox_physics::vehicle::VehicleState) -> f64 {
         z_min = z_min.min(w.chassis_connection.z);
         z_max = z_max.max(w.chassis_connection.z);
     }
-    if z_max <= z_min {
-        1.0
-    } else {
-        z_max - z_min
-    }
+    if z_max <= z_min { 1.0 } else { z_max - z_min }
 }
 
 // ─── Coord shim — gearbox (Y-up) ↔ ondrive (Z-up planar) ──────────
@@ -452,7 +458,11 @@ fn goal_from_cmd(cmd: &GotoCommand) -> Goal {
             rotation: Quaternion::from_euler(Euler::new(0.0, 0.0, yaw_rad)),
         },
         target_velocity: None,
-        tolerance_position: if cmd.tolerance > 0.0 { cmd.tolerance } else { 0.4 },
+        tolerance_position: if cmd.tolerance > 0.0 {
+            cmd.tolerance
+        } else {
+            0.4
+        },
         tolerance_orientation: if cmd.yaw_tolerance_deg > 0.0 {
             cmd.yaw_tolerance_deg.to_radians()
         } else {
@@ -483,17 +493,15 @@ fn update_goal_markers_system(
     mut existing: Query<(Entity, &GoalMarker, &mut Transform)>,
 ) {
     let Some(api) = api else { return };
-    let Ok(active) = api.active.lock() else { return };
+    let Ok(active) = api.active.lock() else {
+        return;
+    };
 
     let mut needs_marker: std::collections::HashSet<u32> = active.keys().copied().collect();
 
     for (entity, marker, mut tr) in &mut existing {
         if let Some(goal) = active.get(&marker.vehicle_id) {
-            tr.translation = bevy::math::Vec3::new(
-                goal.cmd.x as f32,
-                0.8,
-                goal.cmd.z as f32,
-            );
+            tr.translation = bevy::math::Vec3::new(goal.cmd.x as f32, 0.8, goal.cmd.z as f32);
             needs_marker.remove(&marker.vehicle_id);
         } else {
             commands.entity(entity).despawn();
@@ -501,7 +509,9 @@ fn update_goal_markers_system(
     }
 
     for vehicle_id in needs_marker {
-        let Some(goal) = active.get(&vehicle_id) else { continue };
+        let Some(goal) = active.get(&vehicle_id) else {
+            continue;
+        };
         let mesh = meshes.add(bevy::prelude::Cuboid::new(0.8, 1.6, 0.8));
         let mat = materials.add(bevy::prelude::StandardMaterial {
             base_color: bevy::prelude::Color::srgb(1.0, 0.12, 0.12),
@@ -513,11 +523,7 @@ fn update_goal_markers_system(
         commands.spawn((
             Name::new(format!("GotoMarker[{}]", vehicle_id)),
             GoalMarker { vehicle_id },
-            bevy::prelude::Transform::from_xyz(
-                goal.cmd.x as f32,
-                0.8,
-                goal.cmd.z as f32,
-            ),
+            bevy::prelude::Transform::from_xyz(goal.cmd.x as f32, 0.8, goal.cmd.z as f32),
             bevy::prelude::Mesh3d(mesh),
             bevy::prelude::MeshMaterial3d(mat),
         ));

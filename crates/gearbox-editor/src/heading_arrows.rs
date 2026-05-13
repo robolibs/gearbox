@@ -161,7 +161,10 @@ fn selection_ring_outer(state: &gearbox_physics::VehicleState) -> f32 {
 }
 
 fn make_disc_mesh(radius: f32) -> Mesh {
-    Circle::new(radius).mesh().resolution(DISC_RESOLUTION).build()
+    Circle::new(radius)
+        .mesh()
+        .resolution(DISC_RESOLUTION)
+        .build()
 }
 
 pub fn setup_heading_arrows(
@@ -215,7 +218,9 @@ pub fn update_heading_arrows(
     mut materials: ResMut<Assets<HeadingArrowsMaterial>>,
     mut q: Query<(&mut HeadingArrows, &mut Transform, &mut Visibility)>,
 ) {
-    let Ok((mut arrows, mut tr, mut vis)) = q.single_mut() else { return };
+    let Ok((mut arrows, mut tr, mut vis)) = q.single_mut() else {
+        return;
+    };
 
     let hard_reset = |arrows: &mut HeadingArrows, vis: &mut Visibility| {
         *vis = Visibility::Hidden;
@@ -273,7 +278,11 @@ pub fn update_heading_arrows(
         0.0
     };
     let rising = target_speed_fade > arrows.displayed_speed_fade;
-    let rate = if rising { SPEED_FADE_RISE_HZ } else { SPEED_FADE_FALL_HZ };
+    let rate = if rising {
+        SPEED_FADE_RISE_HZ
+    } else {
+        SPEED_FADE_FALL_HZ
+    };
     let fade_alpha = 1.0 - (-dt * rate).exp();
     arrows.displayed_speed_fade += (target_speed_fade - arrows.displayed_speed_fade) * fade_alpha;
 

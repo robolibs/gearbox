@@ -135,14 +135,30 @@ pub fn robotti() -> VehicleSpec {
 
     VehicleBuilder::new("robotti", chassis)
         .max_speed(2.5)
-        .wheel(make( wheel_x, front_z,
-            "/robotti/base_link/link_37/link_40", "/robotti/base_link/link_37")) // left front
-        .wheel(make(-wheel_x, front_z,
-            "/robotti/base_link/link_27/link_30", "/robotti/base_link/link_27")) // right front
-        .wheel(make( wheel_x, rear_z,
-            "/robotti/base_link/link_41/link_44", "/robotti/base_link/link_41")) // left rear
-        .wheel(make(-wheel_x, rear_z,
-            "/robotti/base_link/link_31/link_34", "/robotti/base_link/link_31")) // right rear
+        .wheel(make(
+            wheel_x,
+            front_z,
+            "/robotti/base_link/link_37/link_40",
+            "/robotti/base_link/link_37",
+        )) // left front
+        .wheel(make(
+            -wheel_x,
+            front_z,
+            "/robotti/base_link/link_27/link_30",
+            "/robotti/base_link/link_27",
+        )) // right front
+        .wheel(make(
+            wheel_x,
+            rear_z,
+            "/robotti/base_link/link_41/link_44",
+            "/robotti/base_link/link_41",
+        )) // left rear
+        .wheel(make(
+            -wheel_x,
+            rear_z,
+            "/robotti/base_link/link_31/link_34",
+            "/robotti/base_link/link_31",
+        )) // right rear
         // No `.part(...)` calls — the USD scene supplies the visible
         // gantry frame, struts, sensor box, etc.
         .drive_mode(DriveMode::Omni)

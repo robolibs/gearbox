@@ -67,7 +67,7 @@ pub fn husky() -> VehicleSpec {
     // wheel-bottom). With the matching radius the rapier raycast
     // and USD wheel meshes overlap exactly when settled.
     let radius = 0.165;
-    let width  = 0.15;
+    let width = 0.15;
 
     let rest = 0.06;
     let stiffness = 20.0;
@@ -80,7 +80,7 @@ pub fn husky() -> VehicleSpec {
     // ends up near the top of the wheel circumference. Keeps the
     // underside well clear of the terrain.
     let chassis_bottom = -chassis_y * 0.5;
-    let target_bottom  = chassis_bottom - 0.22;
+    let target_bottom = chassis_bottom - 0.22;
     let conn_y = target_bottom + rest + radius;
 
     // Wheel positions taken straight from the husky USD prim
@@ -88,8 +88,8 @@ pub fn husky() -> VehicleSpec {
     // fix: USD-Y (lateral) → gearbox `+X`, USD-X (forward) → gearbox
     // `+Z`. So wheel-x = ±0.285 and front-z = ±0.256.
     let wheel_x = 0.285;
-    let front_z =  0.256;
-    let rear_z  = -0.256;
+    let front_z = 0.256;
+    let rear_z = -0.256;
 
     let make = |x: f64, z: f64, prim: &'static str| WheelSpec {
         chassis_connection: Point::new(x, conn_y as f64, z),
@@ -102,7 +102,7 @@ pub fn husky() -> VehicleSpec {
         friction_slip: friction,
         radius,
         width,
-        driven: true,  // all four wheels driven on a skid-steer
+        driven: true,   // all four wheels driven on a skid-steer
         steered: false, // no steering joints — `Differential` mode ignores this
         // Linear + angular both scale with `max_engine_force`, so
         // cutting it by 4× again (12.5 → 3.125 N per wheel) slows
@@ -119,10 +119,26 @@ pub fn husky() -> VehicleSpec {
 
     VehicleBuilder::new("husky", chassis)
         .max_speed(1.5)
-        .wheel(make( wheel_x, front_z, "/husky/base_link/front_left_wheel_link"))
-        .wheel(make(-wheel_x, front_z, "/husky/base_link/front_right_wheel_link"))
-        .wheel(make( wheel_x, rear_z,  "/husky/base_link/rear_left_wheel_link"))
-        .wheel(make(-wheel_x, rear_z,  "/husky/base_link/rear_right_wheel_link"))
+        .wheel(make(
+            wheel_x,
+            front_z,
+            "/husky/base_link/front_left_wheel_link",
+        ))
+        .wheel(make(
+            -wheel_x,
+            front_z,
+            "/husky/base_link/front_right_wheel_link",
+        ))
+        .wheel(make(
+            wheel_x,
+            rear_z,
+            "/husky/base_link/rear_left_wheel_link",
+        ))
+        .wheel(make(
+            -wheel_x,
+            rear_z,
+            "/husky/base_link/rear_right_wheel_link",
+        ))
         // No `.part(...)` — the USD scene supplies the visible body.
         .drive_mode(DriveMode::Differential)
         .power_source(

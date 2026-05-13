@@ -34,7 +34,11 @@ compile:
 c: compile
 
 run:
-	@DISPLAY=$(DISPLAY) $(RUN_WITH) $(CARGO) run --bin gearbox
+	@if pkg-config --exists wayland-client 2>/dev/null; then \
+		DISPLAY=$(DISPLAY) $(RUN_WITH) $(CARGO) run --bin gearbox; \
+	else \
+		nix develop --impure -c $(MAKE) run DISPLAY=$(DISPLAY) RUN_WITH="$(RUN_WITH)" CARGO="$(CARGO)"; \
+	fi
 
 r: run
 

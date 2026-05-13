@@ -41,7 +41,7 @@ pub mod server;
 #[cfg(feature = "client")]
 pub mod client;
 
-pub use wire::{decode, encode, CodecError, RendererToSim, SimToRenderer};
+pub use wire::{CodecError, RendererToSim, SimToRenderer, decode, encode};
 
 #[cfg(feature = "server")]
 pub use server::LinkServerPlugin;

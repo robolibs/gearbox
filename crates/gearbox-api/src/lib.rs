@@ -87,21 +87,21 @@ pub use vehicle_api::{FixWire, OdomWire, TwistWire, VehicleBroker};
 #[cfg(feature = "bevy")]
 pub use vehicle_api::{VehicleApiPlugin, VehicleApiSession};
 
-pub use goto_api::{GotoBroker, GotoCommand, GotoStatusWire};
 #[cfg(feature = "bevy")]
 pub use goto_api::{GotoApiPlugin, GotoApiSession};
+pub use goto_api::{GotoBroker, GotoCommand, GotoStatusWire};
 
 pub use markers_api::{MarkerWire, MarkersBroker};
 #[cfg(feature = "bevy")]
 pub use markers_api::{MarkersApiPlugin, MarkersApiSession};
 
-pub use spawn_api::{SpawnBroker, SpawnVehicleWire, SpawnedVehicleWire};
 #[cfg(feature = "bevy")]
 pub use spawn_api::{SpawnApiPlugin, SpawnApiSession};
+pub use spawn_api::{SpawnBroker, SpawnVehicleWire, SpawnedVehicleWire};
 
-pub use reset_api::{ResetBroker, ResetWire};
 #[cfg(feature = "bevy")]
 pub use reset_api::{ResetApiPlugin, ResetApiSession};
+pub use reset_api::{ResetBroker, ResetWire};
 
 #[cfg(feature = "bevy")]
 pub use plugin::{ApiSession, GearboxApiPlugin};

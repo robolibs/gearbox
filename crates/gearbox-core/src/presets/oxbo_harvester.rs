@@ -23,7 +23,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
         com_offset: Point::new(0.0, -0.4, 0.0),
         linear_damping: 0.3,
         angular_damping: 2.5,
-        ccd: false, // see tractor.rs — parry ray-AABB underflow on CCD
+        ccd: false,               // see tractor.rs — parry ray-AABB underflow on CCD
         color: [1.0, 0.784, 0.0], // flatsim (255, 200, 0)
         inertia_size: None,
         render_chassis: true,
@@ -47,37 +47,32 @@ pub fn oxbo_harvester() -> VehicleSpec {
     let target_bottom = chassis_bottom - 0.35;
     let conn_y = target_bottom + rest + radius;
 
-    let front_steer =  14.0_f64.to_radians();
-    let rear_steer  = -25.0_f64.to_radians(); // opposite-sign → crab turns
+    let front_steer = 14.0_f64.to_radians();
+    let rear_steer = -25.0_f64.to_radians(); // opposite-sign → crab turns
 
-    let make = |x: f64,
-                z: f64,
-                driven: bool,
-                engine: f64,
-                steered: bool,
-                max_steer: f64|
-     -> WheelSpec {
-        WheelSpec {
-            chassis_connection: Point::new(x, conn_y as f64, z),
-            suspension_dir: Point::new(0.0, -1.0, 0.0),
-            axle_dir: Point::new(-1.0, 0.0, 0.0),
-            suspension_rest_length: rest,
-            suspension_stiffness: stiffness,
-            suspension_damping: damping,
-            max_suspension_force: max_force,
-            friction_slip: friction,
-            radius,
-            width,
-            driven,
-            steered,
-            max_engine_force: engine,
-            max_brake: 2_500.0,
-            max_steer_rad: max_steer,
-            steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
-        usd_prim_path: None,
-        usd_steer_prim_path: None,
-        }
-    };
+    let make =
+        |x: f64, z: f64, driven: bool, engine: f64, steered: bool, max_steer: f64| -> WheelSpec {
+            WheelSpec {
+                chassis_connection: Point::new(x, conn_y as f64, z),
+                suspension_dir: Point::new(0.0, -1.0, 0.0),
+                axle_dir: Point::new(-1.0, 0.0, 0.0),
+                suspension_rest_length: rest,
+                suspension_stiffness: stiffness,
+                suspension_damping: damping,
+                max_suspension_force: max_force,
+                friction_slip: friction,
+                radius,
+                width,
+                driven,
+                steered,
+                max_engine_force: engine,
+                max_brake: 2_500.0,
+                max_steer_rad: max_steer,
+                steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
+                usd_prim_path: None,
+                usd_steer_prim_path: None,
+            }
+        };
 
     // Body parts — all in chassis yellow, matching the vehicle.
     //   HEAD big & wide, way out in front
@@ -87,10 +82,10 @@ pub fn oxbo_harvester() -> VehicleSpec {
     //        behind the cab all the way back. TOP Y = CAB TOP Y.
     //   Small rear engine panel.
     let yellow = chassis.color;
-    let dark   = [0.22, 0.22, 0.24];
+    let dark = [0.22, 0.22, 0.24];
 
     let chassis_top: f64 = chassis_y * 0.5;
-    let chassis_w:   f64 = 2.8;
+    let chassis_w: f64 = 2.8;
 
     // Harvester head — big working implement jutting out the front.
     let head = parts_lib::cuboid(
@@ -102,17 +97,24 @@ pub fn oxbo_harvester() -> VehicleSpec {
     );
 
     // Chassis front / rear edges (Z extent of the lower part).
-    let chassis_front_z: f64 =  7.68 * 0.5; //  3.84
-    let chassis_rear_z:  f64 = -7.68 * 0.5; // -3.84
+    let chassis_front_z: f64 = 7.68 * 0.5; //  3.84
+    let chassis_rear_z: f64 = -7.68 * 0.5; // -3.84
 
     // CAB — pokes forward of the chassis by a visible amount (0.45 m)
     // to make a clear front step. Full chassis width, 1.4 m tall.
-    let cab_depth: f64  = 1.8;
-    let cab_h: f64      = 1.40;
-    let cab_front_z: f64 = chassis_front_z + 0.45;  // +4.29
-    let cab_back_z:  f64 = cab_front_z - cab_depth; // +2.19
+    let cab_depth: f64 = 1.8;
+    let cab_h: f64 = 1.40;
+    let cab_front_z: f64 = chassis_front_z + 0.45; // +4.29
+    let cab_back_z: f64 = cab_front_z - cab_depth; // +2.19
     let cab_center_z: f64 = (cab_front_z + cab_back_z) * 0.5;
-    let cab = parts_lib::cab(cab_center_z, chassis_w, cab_h, cab_depth, chassis_top, yellow);
+    let cab = parts_lib::cab(
+        cab_center_z,
+        chassis_w,
+        cab_h,
+        cab_depth,
+        chassis_top,
+        yellow,
+    );
     // Thin dark roof cap.
     let cab_roof = parts_lib::cab_roof(
         cab_center_z,
@@ -126,10 +128,10 @@ pub fn oxbo_harvester() -> VehicleSpec {
 
     // BUNKER — sticks out REARWARD of the chassis more than the cab
     // sticks out forward (1.0 m vs 0.45 m). Same height as cab.
-    let bin_rear_z: f64   = chassis_rear_z - 1.00; // -4.84
-    let bin_depth: f64    = cab_back_z - bin_rear_z;
+    let bin_rear_z: f64 = chassis_rear_z - 1.00; // -4.84
+    let bin_depth: f64 = cab_back_z - bin_rear_z;
     let bin_center_z: f64 = (cab_back_z + bin_rear_z) * 0.5;
-    let bin_h: f64        = cab_h;
+    let bin_h: f64 = cab_h;
     let bunker = parts_lib::cuboid(
         "bunker",
         Point::new(0.0, chassis_top + bin_h * 0.5, bin_center_z),
@@ -140,12 +142,12 @@ pub fn oxbo_harvester() -> VehicleSpec {
 
     VehicleBuilder::new("oxbo_harvester", chassis)
         .max_speed(5.0)
-        .wheel(make( 1.4,  2.304, false, 0.0,    true,  front_steer))
-        .wheel(make(-1.4,  2.304, false, 0.0,    true,  front_steer))
-        .wheel(make( 1.4,  0.100, false, 0.0,    false, 0.0))
-        .wheel(make(-1.4,  0.100, false, 0.0,    false, 0.0))
-        .wheel(make( 1.4, -2.688, true,  8000.0, true,  rear_steer))
-        .wheel(make(-1.4, -2.688, true,  8000.0, true,  rear_steer))
+        .wheel(make(1.4, 2.304, false, 0.0, true, front_steer))
+        .wheel(make(-1.4, 2.304, false, 0.0, true, front_steer))
+        .wheel(make(1.4, 0.100, false, 0.0, false, 0.0))
+        .wheel(make(-1.4, 0.100, false, 0.0, false, 0.0))
+        .wheel(make(1.4, -2.688, true, 8000.0, true, rear_steer))
+        .wheel(make(-1.4, -2.688, true, 8000.0, true, rear_steer))
         .part(head)
         .part(cab)
         .part(cab_roof)

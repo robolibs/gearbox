@@ -33,8 +33,8 @@ use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
 use bevy_glacial::{
-    auto_scale_gizmo_to_target, EnumSet, GizmoAutoScale, GizmoMode, GizmoOptions, GizmoTarget,
-    TransformGizmoPlugin,
+    EnumSet, GizmoAutoScale, GizmoMode, GizmoOptions, GizmoTarget, TransformGizmoPlugin,
+    auto_scale_gizmo_to_target,
 };
 
 use gearbox_physics::datapod::{Point, Pose, Quaternion};
@@ -199,11 +199,7 @@ fn sync_proxy_aabb(
         return;
     };
     let s = state.spec.chassis.size;
-    let half = bevy::math::Vec3A::new(
-        (s.x as f32) * 0.5,
-        (s.y as f32) * 0.5,
-        (s.z as f32) * 0.5,
-    );
+    let half = bevy::math::Vec3A::new((s.x as f32) * 0.5, (s.y as f32) * 0.5, (s.z as f32) * 0.5);
     commands.entity(entity).insert(Aabb {
         center: bevy::math::Vec3A::ZERO,
         half_extents: half,
@@ -287,4 +283,3 @@ fn push_proxy_to_sim(
         }
     }
 }
-

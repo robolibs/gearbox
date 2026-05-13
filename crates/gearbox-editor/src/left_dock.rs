@@ -5,15 +5,15 @@
 //! into at the moment).
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 
 use gearbox_physics::VehicleId;
 
-use bevy_frost::{floating_window_for_item, PaneBuilder, RibbonOpen, RibbonPlacement};
-use gearbox_viz::{ChaseCamera, FollowTarget, GearboxSim, PlayerControlled, VehicleBody};
+use bevy_frost::{PaneBuilder, RibbonOpen, RibbonPlacement, floating_window_for_item};
 use gearbox_viz::camera::{ChaseCameraFly, FlyTarget};
+use gearbox_viz::{ChaseCamera, FollowTarget, GearboxSim, PlayerControlled, VehicleBody};
 
-use super::dock_ribbons::{is_menu_open, ID_LIBRARY, ID_WORKSPACE, RIBBONS, RIBBON_ITEMS};
+use super::dock_ribbons::{ID_LIBRARY, ID_WORKSPACE, RIBBON_ITEMS, RIBBONS, is_menu_open};
 use super::pending_spawn::PendingSpawn;
 use super::persist::EditorUiState;
 use super::preset_registry::PresetRegistry;
@@ -22,14 +22,19 @@ use super::style::AccentColor;
 use super::usd_load::UsdSelectable;
 use super::{spawn_panel, tree};
 
-/// Asset + tag-query bundle — collapses four system params into one
-/// so `left_dock_ui` stays under Bevy's 16-param tuple cap.
+/// Asset + tag-query bundle — collapses param into one so
+/// `left_dock_ui` stays under Bevy's 16-param tuple cap.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct LeftDockAssets<'w, 's> {
     pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub existing_bodies: Query<'w, 's, Entity, With<VehicleBody>>,
     pub player_tagged: Query<'w, 's, Entity, With<PlayerControlled>>,
+    pub pending_usd_removal: ResMut<'w, super::usd_load::PendingUsdRemoval>,
+    pub usd_tree_expanded: ResMut<'w, super::usd_load::UsdTreeExpanded>,
+    pub usd_assets: Query<'w, 's, (Entity, Option<&'static Name>), With<UsdSelectable>>,
+    pub usd_prims: Query<'w, 's, (Option<&'static Name>, &'static usd_bevy::UsdPrimRef)>,
+    pub usd_children: Query<'w, 's, &'static Children>,
 }
 
 pub fn left_dock_ui(
@@ -40,11 +45,10 @@ pub fn left_dock_ui(
     // spawn
     mut commands: Commands,
     mut sim: ResMut<GearboxSim>,
-    assets: LeftDockAssets,
+    mut assets: LeftDockAssets,
     mut selection: ResMut<Selection>,
     // tree
     bodies: Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,
-    usd_assets: Query<(Entity, Option<&Name>), With<UsdSelectable>>,
     mut pending: ResMut<PendingSpawn>,
     registry: Res<PresetRegistry>,
     accent: Res<AccentColor>,
@@ -56,6 +60,11 @@ pub fn left_dock_ui(
         mut meshes,
         mut materials,
         existing_bodies,
+        usd_assets,
+        usd_prims,
+        usd_children,
+        pending_usd_removal: mut pending_usd_removal_inner,
+        usd_tree_expanded: mut usd_tree_expanded_inner,
         player_tagged,
     } = assets;
     let Ok(ctx) = contexts.ctx_mut() else { return };
@@ -83,8 +92,12 @@ pub fn left_dock_ui(
                     &sim,
                     &bodies,
                     &usd_assets,
+                    &usd_prims,
+                    &usd_children,
                     &mut selection,
                     &mut follow,
+                    &mut pending_usd_removal_inner,
+                    &mut usd_tree_expanded_inner,
                     accent_col,
                     &mut frame_to,
                 );
@@ -127,8 +140,7 @@ pub fn left_dock_ui(
             const FINAL_DISTANCE: f32 = 18.0;
             const FLY_DURATION: f32 = 3.0;
             if let Ok(cam) = cameras.single() {
-                chase_fly.target =
-                    Some(FlyTarget::new(id, FINAL_DISTANCE, FLY_DURATION, cam));
+                chase_fly.target = Some(FlyTarget::new(id, FINAL_DISTANCE, FLY_DURATION, cam));
             }
         }
     }

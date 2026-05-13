@@ -36,7 +36,7 @@ use crate::wire::{decode, encode};
 use bevy::prelude::*;
 
 #[cfg(feature = "bevy")]
-use gearbox_viz::{spawn_height_for, spawn_vehicle_visuals, GearboxSim, PlayerControlled};
+use gearbox_viz::{GearboxSim, PlayerControlled, spawn_height_for, spawn_vehicle_visuals};
 
 #[cfg(feature = "bevy")]
 use datapod::{Point, Pose, Quaternion};
@@ -98,8 +98,7 @@ impl SpawnBroker {
     pub fn open(
         session: Arc<zenoh::Session>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let inbox: Arc<Mutex<VecDeque<SpawnVehicleWire>>> =
-            Arc::new(Mutex::new(VecDeque::new()));
+        let inbox: Arc<Mutex<VecDeque<SpawnVehicleWire>>> = Arc::new(Mutex::new(VecDeque::new()));
         let inbox_cb = Arc::clone(&inbox);
         let subscriber = session
             .declare_subscriber("gearbox/sim/spawn")
@@ -162,14 +161,12 @@ impl Plugin for SpawnApiPlugin {
                         app.add_systems(Update, apply_spawn_requests_system);
                         info!("gearbox-api: spawn API ready (gearbox/sim/spawn)");
                     }
-                    Err(e) => warn!(
-                        "gearbox-api: spawn subscriber open failed ({e}); spawn API disabled"
-                    ),
+                    Err(e) => {
+                        warn!("gearbox-api: spawn subscriber open failed ({e}); spawn API disabled")
+                    }
                 }
             }
-            Err(e) => warn!(
-                "gearbox-api: spawn session open failed ({e}); spawn API disabled"
-            ),
+            Err(e) => warn!("gearbox-api: spawn session open failed ({e}); spawn API disabled"),
         }
     }
 }
@@ -185,7 +182,9 @@ fn apply_spawn_requests_system(
     asset_server: Res<bevy::asset::AssetServer>,
 ) {
     let Some(api) = api else { return };
-    let Ok(broker) = api.broker.lock() else { return };
+    let Ok(broker) = api.broker.lock() else {
+        return;
+    };
     let requests = broker.drain_inbox();
     for req in requests {
         let Some(spec_factory) = lookup_preset(&req.preset) else {

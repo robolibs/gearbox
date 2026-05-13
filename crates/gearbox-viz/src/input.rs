@@ -27,7 +27,11 @@ pub fn wasd_input_system(
     // which pivots the wheels left — so A (turn left) maps to
     // +steer. Drones reuse the same axis for strafe.
     let steer = axis(&keys, KeyCode::KeyA, KeyCode::KeyD);
-    let brake = if keys.pressed(KeyCode::Space) { 1.0 } else { 0.0 };
+    let brake = if keys.pressed(KeyCode::Space) {
+        1.0
+    } else {
+        0.0
+    };
     // Drone-only axes (zero for ground vehicles):
     //   Q/E — yaw left/right
     //   Z/X — ascend/descend

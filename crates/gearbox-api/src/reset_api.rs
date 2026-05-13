@@ -63,8 +63,8 @@ impl ResetBroker {
                 // should "just work" without forcing the caller to
                 // CBOR-encode a struct.
                 let bytes = sample.payload().to_bytes();
-                let req = decode::<ResetWire>(bytes.as_ref())
-                    .unwrap_or_else(|_| ResetWire::default());
+                let req =
+                    decode::<ResetWire>(bytes.as_ref()).unwrap_or_else(|_| ResetWire::default());
                 if let Ok(mut q) = pending_cb.lock() {
                     *q = Some(req);
                 }
@@ -107,14 +107,12 @@ impl Plugin for ResetApiPlugin {
                         app.add_systems(Update, drain_reset_inbox_system);
                         info!("gearbox-api: reset API ready (gearbox/sim/reset)");
                     }
-                    Err(e) => warn!(
-                        "gearbox-api: reset subscriber open failed ({e}); reset API disabled"
-                    ),
+                    Err(e) => {
+                        warn!("gearbox-api: reset subscriber open failed ({e}); reset API disabled")
+                    }
                 }
             }
-            Err(e) => warn!(
-                "gearbox-api: reset session open failed ({e}); reset API disabled"
-            ),
+            Err(e) => warn!("gearbox-api: reset session open failed ({e}); reset API disabled"),
         }
     }
 }
@@ -125,7 +123,9 @@ fn drain_reset_inbox_system(
     mut writer: MessageWriter<SimResetRequest>,
 ) {
     let Some(api) = api else { return };
-    let Ok(broker) = api.broker.lock() else { return };
+    let Ok(broker) = api.broker.lock() else {
+        return;
+    };
     if let Some(req) = broker.take() {
         writer.write(SimResetRequest {
             pause_clock: req.pause_clock,

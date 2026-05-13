@@ -43,7 +43,9 @@ impl DriveController for DifferentialController {
 
         for idx in 0..ctx.wheels.len() {
             let spec = &specs[idx];
-            let Some(mut w) = ctx.wheels.get_mut(idx) else { continue };
+            let Some(mut w) = ctx.wheels.get_mut(idx) else {
+                continue;
+            };
             w.set_engine_force(if spec.driven {
                 let cmd = if spec.chassis_connection.x < 0.0 {
                     left_cmd

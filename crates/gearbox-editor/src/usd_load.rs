@@ -35,3 +35,16 @@ impl Default for UsdSelectable {
         Self { pick_radius: 1.5 }
     }
 }
+
+/// Queue of `UsdSelectable` entities to despawn this frame. The
+/// Properties panel pushes when the user clicks "Remove from
+/// scene"; the host binary drains and despawns recursively (also
+/// purges any matching rapier bodies from `usd_bevy::PhysicsWorld`).
+#[derive(Resource, Default)]
+pub struct PendingUsdRemoval(pub Vec<bevy::prelude::Entity>);
+
+/// Per-entity expand/collapse state for the workspace USD tree.
+/// Default = collapsed (not present in the map). Tree rows toggle
+/// the entry on chevron click.
+#[derive(Resource, Default)]
+pub struct UsdTreeExpanded(pub std::collections::HashMap<bevy::prelude::Entity, bool>);

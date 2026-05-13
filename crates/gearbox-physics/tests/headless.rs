@@ -7,8 +7,9 @@
 //!     cargo test -p gearbox-physics --test headless
 
 use gearbox_physics::{
+    ControlInput, Sim,
     datapod::{Point, Pose, Quaternion},
-    presets, ControlInput, Sim,
+    presets,
 };
 
 #[test]
@@ -22,7 +23,10 @@ fn tractor_settles_and_drives() {
     let start_y = 1.4;
     let id = sim.spawn_vehicle(
         spec,
-        Pose { point: Point::new(0.0, start_y, 0.0), rotation: Quaternion::identity() },
+        Pose {
+            point: Point::new(0.0, start_y, 0.0),
+            rotation: Quaternion::identity(),
+        },
     );
 
     let dt = 1.0 / 60.0;
@@ -38,7 +42,13 @@ fn tractor_settles_and_drives() {
 
     sim.set_control(
         id,
-        ControlInput { throttle: 1.0, brake: 0.0, steer: 0.0, yaw: 0.0, lift: 0.0 },
+        ControlInput {
+            throttle: 1.0,
+            brake: 0.0,
+            steer: 0.0,
+            yaw: 0.0,
+            lift: 0.0,
+        },
     );
     for _ in 0..180 {
         sim.step(dt);

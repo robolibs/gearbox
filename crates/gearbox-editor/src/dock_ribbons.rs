@@ -14,8 +14,8 @@
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 use bevy_frost::{
-    draw_assembly, find_item, RibbonCluster, RibbonDef, RibbonDrag, RibbonEdge, RibbonGlyph,
-    RibbonItem, RibbonMode, RibbonOpen, RibbonPlacement, RibbonRole,
+    RibbonCluster, RibbonDef, RibbonDrag, RibbonEdge, RibbonGlyph, RibbonItem, RibbonMode,
+    RibbonOpen, RibbonPlacement, RibbonRole, draw_assembly, find_item,
 };
 
 use super::style::AccentColor;
@@ -28,8 +28,22 @@ pub const RIBBON_TRANSPORT: &str = "editor_ribbon_transport";
 pub const ID_WORKSPACE: &str = "workspace";
 pub const ID_LIBRARY: &str = "library";
 pub const ID_LOAD_USD: &str = "load_usd";
+pub const ID_USD_TREE: &str = "usd_tree";
 pub const ID_INSPECTOR: &str = "inspector";
 pub const ID_PROPERTIES: &str = "properties";
+
+// Viewer-style panel buttons added on the LEFT rail's End cluster
+// (bottom of the rail). The host binary owns each panel's draw fn;
+// the editor only declares the buttons + exposes the IDs so
+// `is_menu_open(...)` works cross-crate.
+pub const ID_OVERLAYS: &str = "overlays";
+pub const ID_TIMELINE: &str = "timeline";
+pub const ID_INFO: &str = "stage_info";
+pub const ID_LOG: &str = "log";
+pub const ID_KEYS: &str = "keys";
+pub const ID_VARIANTS: &str = "variants";
+pub const ID_CAMERAS: &str = "cameras";
+pub const ID_MATERIALS: &str = "materials";
 
 /// All ribbons the editor declares — two vertical Panel rails
 /// (draggable, cross-accepting) plus a horizontal Icon transport
@@ -97,6 +111,15 @@ pub const RIBBON_ITEMS: &[RibbonItem] = &[
         child_ribbon: None,
     },
     RibbonItem {
+        id: ID_USD_TREE,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::Start,
+        slot: 3,
+        glyph: RibbonGlyph::Text("🌳"),
+        tooltip: "USD prim tree — full hierarchy of every loaded asset",
+        child_ribbon: None,
+    },
+    RibbonItem {
         id: ID_INSPECTOR,
         ribbon: RIBBON_RIGHT,
         cluster: RibbonCluster::Start,
@@ -114,15 +137,84 @@ pub const RIBBON_ITEMS: &[RibbonItem] = &[
         tooltip: "Properties",
         child_ribbon: None,
     },
+    // ─── End-cluster (bottom of LEFT rail) ────────────────────────
+    RibbonItem {
+        id: ID_OVERLAYS,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::End,
+        slot: 0,
+        glyph: RibbonGlyph::Text("O"),
+        tooltip: "Overlays — toggles for grid / axes / wireframe / physics gizmos / colliders",
+        child_ribbon: None,
+    },
+    RibbonItem {
+        id: ID_TIMELINE,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::End,
+        slot: 1,
+        glyph: RibbonGlyph::Text("⏱"),
+        tooltip: "Timeline — stage-time playback (▶ / ⏮ / scrub)",
+        child_ribbon: None,
+    },
+    RibbonItem {
+        id: ID_INFO,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::End,
+        slot: 2,
+        glyph: RibbonGlyph::Text("i"),
+        tooltip: "Stage info — counts of prims / lights / physics / variants",
+        child_ribbon: None,
+    },
+    RibbonItem {
+        id: ID_LOG,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::End,
+        slot: 3,
+        glyph: RibbonGlyph::Text("📜"),
+        tooltip: "Loader log — recent USD / physics / animation messages",
+        child_ribbon: None,
+    },
+    RibbonItem {
+        id: ID_KEYS,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::End,
+        slot: 4,
+        glyph: RibbonGlyph::Text("?"),
+        tooltip: "Keyboard shortcuts",
+        child_ribbon: None,
+    },
+    RibbonItem {
+        id: ID_VARIANTS,
+        ribbon: RIBBON_RIGHT,
+        cluster: RibbonCluster::End,
+        slot: 0,
+        glyph: RibbonGlyph::Text("V"),
+        tooltip: "Variants — author-time selection sets per prim",
+        child_ribbon: None,
+    },
+    RibbonItem {
+        id: ID_CAMERAS,
+        ribbon: RIBBON_RIGHT,
+        cluster: RibbonCluster::End,
+        slot: 1,
+        glyph: RibbonGlyph::Text("C"),
+        tooltip: "Cameras — view bookmarks + USD-authored camera mounts",
+        child_ribbon: None,
+    },
+    RibbonItem {
+        id: ID_MATERIALS,
+        ribbon: RIBBON_RIGHT,
+        cluster: RibbonCluster::End,
+        slot: 2,
+        glyph: RibbonGlyph::Text("M"),
+        tooltip: "Materials — live colour / roughness / metallic per material",
+        child_ribbon: None,
+    },
 ];
 
 /// Is the button identified by `id` the currently-open menu on
 /// whichever ribbon + cluster it lives on (after any user drag)?
-pub fn is_menu_open(
-    open: &RibbonOpen,
-    placement: &RibbonPlacement,
-    id: &'static str,
-) -> bool {
+pub fn is_menu_open(open: &RibbonOpen, placement: &RibbonPlacement, id: &'static str) -> bool {
     let Some(item) = find_item(RIBBON_ITEMS, id) else {
         return false;
     };

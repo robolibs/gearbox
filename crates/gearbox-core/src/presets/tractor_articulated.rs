@@ -156,10 +156,10 @@ pub fn tractor_articulated() -> VehicleSpec {
     // matching scripts authored against the old preset.
     VehicleBuilder::new("tractor", chassis)
         .max_speed(3.0)
-        .wheel(front( front_wheel_x, "/robot/steer_front_left/wheel"))
+        .wheel(front(front_wheel_x, "/robot/steer_front_left/wheel"))
         .wheel(front(-front_wheel_x, "/robot/steer_front_right/wheel"))
-        .wheel(rear ( rear_wheel_x,  "/robot/wheel_back_left"))
-        .wheel(rear (-rear_wheel_x,  "/robot/wheel_back_right"))
+        .wheel(rear(rear_wheel_x, "/robot/wheel_back_left"))
+        .wheel(rear(-rear_wheel_x, "/robot/wheel_back_right"))
         // No `.part(...)` calls — the USD scene supplies all the
         // visible body geometry. Power source kept similar to the
         // procedural tractor.

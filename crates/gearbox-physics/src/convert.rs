@@ -50,7 +50,11 @@ pub fn vec3_to_point(v: Vec3) -> Point {
 
 #[inline]
 pub fn vec3_to_velocity(v: Vec3) -> Velocity {
-    Velocity { vx: v.x, vy: v.y, vz: v.z }
+    Velocity {
+        vx: v.x,
+        vy: v.y,
+        vz: v.z,
+    }
 }
 
 #[inline]

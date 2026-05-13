@@ -77,9 +77,10 @@ pub struct MarkersBroker {
 }
 
 impl MarkersBroker {
-    pub fn open(session: Arc<zenoh::Session>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let inbox: Arc<Mutex<HashMap<String, MarkerWire>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+    pub fn open(
+        session: Arc<zenoh::Session>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let inbox: Arc<Mutex<HashMap<String, MarkerWire>>> = Arc::new(Mutex::new(HashMap::new()));
         let inbox_cb = Arc::clone(&inbox);
         let subscriber = session
             .declare_subscriber("gearbox/markers/**")
@@ -147,7 +148,9 @@ impl Plugin for MarkersApiPlugin {
                         info!("gearbox-api: markers API ready (gearbox/markers/<id>)");
                     }
                     Err(e) => {
-                        warn!("gearbox-api: markers subscriber open failed ({e}); markers API disabled");
+                        warn!(
+                            "gearbox-api: markers subscriber open failed ({e}); markers API disabled"
+                        );
                     }
                 }
             }
@@ -181,8 +184,12 @@ fn apply_markers_system(
     asset_root: Option<Res<gearbox_viz::UsdAssetRoot>>,
 ) {
     let Some(api) = api else { return };
-    let Ok(broker) = api.broker.lock() else { return };
-    let Ok(mut entities) = api.entities.lock() else { return };
+    let Ok(broker) = api.broker.lock() else {
+        return;
+    };
+    let Ok(mut entities) = api.entities.lock() else {
+        return;
+    };
     let inbox = broker.drain_inbox();
     for (id, m) in inbox {
         if let Some(entity) = entities.remove(&id) {
@@ -203,7 +210,8 @@ fn apply_markers_system(
             };
             bevy::log::info!(
                 "gearbox-api: marker `{id}` USD `{}` variants={:?}",
-                usd_rel, m.usd_variants,
+                usd_rel,
+                m.usd_variants,
             );
             let asset_parent = std::path::Path::new(usd_rel)
                 .parent()
@@ -228,12 +236,10 @@ fn apply_markers_system(
             let variants: Vec<usd_bevy::VariantSelection> = m
                 .usd_variants
                 .iter()
-                .map(|(prim_path, set_name, option)| {
-                    usd_bevy::VariantSelection {
-                        prim_path: prim_path.clone(),
-                        set_name: set_name.clone(),
-                        option: option.clone(),
-                    }
+                .map(|(prim_path, set_name, option)| usd_bevy::VariantSelection {
+                    prim_path: prim_path.clone(),
+                    set_name: set_name.clone(),
+                    option: option.clone(),
                 })
                 .collect();
             let asset_path: bevy::asset::AssetPath<'static> = if variants.is_empty() {
@@ -242,18 +248,17 @@ fn apply_markers_system(
                 let label = usd_bevy::variant_label(&variants);
                 bevy::asset::AssetPath::from(usd_rel.to_string()).with_label(label)
             };
-            let handle: Handle<usd_bevy::UsdAsset> = asset_server
-                .load_with_settings(
-                    asset_path,
-                    move |s: &mut usd_bevy::UsdLoaderSettings| {
-                        s.search_paths = vec![parent_clone.clone()];
-                        // Variants come in via the path label too;
-                        // we set them in settings as well so a
-                        // headless build that bypasses the label
-                        // path still gets the correct composition.
-                        s.variant_selections = variants.clone();
-                    },
-                );
+            let handle: Handle<usd_bevy::UsdAsset> = asset_server.load_with_settings(
+                asset_path,
+                move |s: &mut usd_bevy::UsdLoaderSettings| {
+                    s.search_paths = vec![parent_clone.clone()];
+                    // Variants come in via the path label too;
+                    // we set them in settings as well so a
+                    // headless build that bypasses the label
+                    // path still gets the correct composition.
+                    s.variant_selections = variants.clone();
+                },
+            );
             let entity = commands
                 .spawn((
                     Name::new(format!("Marker[{}]::usd_pending", id)),
@@ -281,10 +286,7 @@ fn apply_markers_system(
         let mesh = match m.kind.as_str() {
             "box" | "cube" => meshes.add(Cuboid::new(radius * 2.0, height, radius * 2.0)),
             "sphere" | "ball" => meshes.add(Sphere::new(radius)),
-            _ => meshes.add(Cone {
-                radius,
-                height,
-            }),
+            _ => meshes.add(Cone { radius, height }),
         };
         let mat = materials.add(StandardMaterial {
             base_color: Color::srgb(color[0], color[1], color[2]),
@@ -332,7 +334,8 @@ fn instantiate_pending_marker_usd(
             Some(LoadState::Failed(err)) => {
                 bevy::log::error!(
                     "gearbox-api: USD load FAILED for marker `{}`: {}",
-                    pend.marker_id, err
+                    pend.marker_id,
+                    err
                 );
                 commands.entity(entity).remove::<PendingMarkerUsd>();
             }
@@ -354,7 +357,9 @@ fn clear_markers_on_reset_system(
         return;
     }
     let Some(api) = api else { return };
-    let Ok(mut entities) = api.entities.lock() else { return };
+    let Ok(mut entities) = api.entities.lock() else {
+        return;
+    };
     for (_id, entity) in entities.drain() {
         commands.entity(entity).despawn();
     }
