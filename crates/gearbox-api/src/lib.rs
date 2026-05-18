@@ -65,9 +65,8 @@ pub mod vehicle_api;
 // Same single-file delete pattern as `vehicle_api`.
 pub mod goto_api;
 
-// Pluggable world markers — drop / move / despawn cones / boxes /
-// spheres in the scene over zenoh.
-pub mod markers_api;
+// Generic USD loader — load / move / unload USD assets over zenoh.
+pub mod loader_api;
 
 // Pluggable vehicle spawner — drop a tractor / husky / robotti /
 // drone / oxbo into the scene at any (x,z) + yaw over zenoh.
@@ -91,9 +90,9 @@ pub use vehicle_api::{VehicleApiPlugin, VehicleApiSession};
 pub use goto_api::{GotoApiPlugin, GotoApiSession};
 pub use goto_api::{GotoBroker, GotoCommand, GotoStatusWire};
 
-pub use markers_api::{MarkerWire, MarkersBroker};
+pub use loader_api::{UsdLoadWire, UsdLoaderBroker};
 #[cfg(feature = "bevy")]
-pub use markers_api::{MarkersApiPlugin, MarkersApiSession};
+pub use loader_api::{UsdLoaderApiPlugin, UsdLoaderApiSession};
 
 #[cfg(feature = "bevy")]
 pub use spawn_api::{SpawnApiPlugin, SpawnApiSession};

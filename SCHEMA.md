@@ -10,6 +10,67 @@ The intent is simple:
 
 No TOML/YAML sidecar is required.
 
+## Runtime USD loader categories
+
+Gearbox's external loader topic is intentionally USD-first, not
+marker-specific:
+
+```text
+gearbox/usd/load/<runtime_id>
+```
+
+The payload contains a `usd_path`, a placement transform, and a lightweight
+`category` string. Current base categories are:
+
+- `machine` / `robot` — load a USD that may contain Gearbox machine/controller
+  metadata and expose per-instance controller topics.
+- `variant_usd` — load a normal USD while applying authored USD variant
+  selections, e.g. bale color variants.
+- `static_usd` — load a normal static USD with no special runtime semantics.
+
+This is deliberately open-ended. Later categories can cover animated USDs,
+sensors, implements, tools, or other runtime behaviours without renaming the
+topic or creating a marker-specific API.
+
+Example static load:
+
+```json
+{
+  "category": "static_usd",
+  "usd_path": "markers/bale.usdz",
+  "x": 10.0,
+  "z": 20.0
+}
+```
+
+Example variant load:
+
+```json
+{
+  "category": "variant_usd",
+  "usd_path": "some_asset_with_variants.usda",
+  "x": 10.0,
+  "z": 20.0,
+  "usd_variants": [["/bale", "color", "red"]]
+}
+```
+
+Example machine load:
+
+```json
+{
+  "category": "machine",
+  "usd_path": "machines/tractor.usd",
+  "namespace": "tractor_01",
+  "x": 0.0,
+  "z": 0.0
+}
+```
+
+The loader does not need to know whether a USD "is a bale" or "is a tractor"
+up front. Category only selects which runtime binding path to use; actual
+geometry, variants, and machine/controller metadata stay in USD.
+
 ## Design direction: Gearbox Robot Description API
 
 The current metadata is intentionally small, but the long-term API should be
@@ -346,10 +407,12 @@ discovery pass:
 1. Find prims with `PhysicsArticulationRootAPI`.
 2. Scan Isaac/OmniGraph-style controller nodes for authored `jointNames` /
    `dofNames` arrays.
-3. Treat position/steering joint-name groups as Gearbox `steerJoints`.
+3. Treat position/steering joint-name groups as Gearbox
+   `gearbox:machine:role:steeringJoints`.
 4. Treat velocity/wheel/drive joint-name groups as Gearbox
-   `driveWheelJoints`.
-5. Treat rolling wheel joints that are not powered as `passiveWheelJoints`.
+   `gearbox:machine:role:poweredWheelJoints`.
+5. Treat rolling wheel joints that are not powered as
+   `gearbox:machine:role:passiveWheelJoints`.
 
 This mirrors Isaac Sim's controller wiring:
 
@@ -368,9 +431,9 @@ Gearbox's normalized internal mapping is:
 | Isaac Sim concept | Gearbox normalized field |
 | --- | --- |
 | articulation root | machine root |
-| steering `jointNames` receiving position targets | `steerJoints` |
-| wheel `jointNames` receiving velocity targets | `driveWheelJoints` |
-| rolling wheel joints not receiving velocity targets | `passiveWheelJoints` |
+| steering `jointNames` receiving position targets | `role:steeringJoints` |
+| wheel `jointNames` receiving velocity targets | `role:poweredWheelJoints` |
+| rolling wheel joints not receiving velocity targets | `role:passiveWheelJoints` |
 
 If an Isaac USD has only physics joints and no readable action graph/controller
 joint-name lists, Gearbox falls back to name-based inference from the physics

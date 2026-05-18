@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use openusd::sdf::{Path as SdfPath, Value};
-use rapier3d::prelude::{JointAxis, MultibodyJointHandle, RigidBodyHandle, Vector};
+use rapier3d::prelude::{
+    CoefficientCombineRule, JointAxis, MultibodyJointHandle, RigidBodyHandle, Vector,
+};
 use serde::{Deserialize, Serialize};
 use usd_bevy::UsdPrimRef;
 use zenoh::Wait;
@@ -100,6 +102,7 @@ struct ControllerRuntimeState {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ControllerState {
     pub position_m: [f64; 3],
+    pub heading_rad: f64,
     pub linear_speed_mps: f64,
     pub yaw_rate_rps: f64,
 }
@@ -188,6 +191,7 @@ pub struct MachineStateWire {
     pub machine_id: String,
     pub controller: String,
     pub position: [f64; 3],
+    pub heading_rad: f64,
     pub linear_speed_mps: f64,
     pub yaw_rate_rps: f64,
 }
@@ -297,11 +301,6 @@ pub struct MachineInstanceSpec {
     pub id_policy: String,
     pub up_axis: Option<String>,
     pub body: Option<String>,
-    pub wheels: Vec<String>,
-    pub drive_wheels: Vec<String>,
-    pub steer_bodies: Vec<String>,
-    pub steer_joints: Vec<String>,
-    pub wheel_joints: Vec<String>,
     pub visuals: Vec<String>,
     pub colliders: Vec<String>,
     pub sensors: Vec<String>,
@@ -340,6 +339,7 @@ pub struct ControllerSpec {
     pub rear_left_wheel_joint: Option<String>,
     pub rear_right_wheel_joint: Option<String>,
     pub wheel_base: Option<f32>,
+    pub wheel_radius: Option<f32>,
     pub track_width: Option<f32>,
     pub front_track_width: Option<f32>,
     pub rear_track_width: Option<f32>,
@@ -399,31 +399,6 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
             up_axis: read_token(&stage, &prim, "gearbox:machine:upAxis"),
             body: read_rel_first(&stage, &prim, "gearbox:machine:body")
                 .map(|p| rebase_asset_root_target(machine_prim, &p)),
-            wheels: read_rel_targets_rebased(&stage, &prim, "gearbox:machine:wheels", machine_prim),
-            drive_wheels: read_rel_targets_rebased(
-                &stage,
-                &prim,
-                "gearbox:machine:driveWheels",
-                machine_prim,
-            ),
-            steer_bodies: read_rel_targets_rebased(
-                &stage,
-                &prim,
-                "gearbox:machine:steerBodies",
-                machine_prim,
-            ),
-            steer_joints: read_rel_targets_rebased(
-                &stage,
-                &prim,
-                "gearbox:machine:steerJoints",
-                machine_prim,
-            ),
-            wheel_joints: read_rel_targets_rebased(
-                &stage,
-                &prim,
-                "gearbox:machine:wheelJoints",
-                machine_prim,
-            ),
             visuals: read_rel_targets_rebased(
                 &stage,
                 &prim,
@@ -619,11 +594,6 @@ fn append_isaac_compat_machines(
             id_policy: "prim_path".to_string(),
             up_axis: None,
             body: body.clone(),
-            wheels: Vec::new(),
-            drive_wheels: Vec::new(),
-            steer_bodies: Vec::new(),
-            steer_joints: steer_joints.clone(),
-            wheel_joints: wheel_joints.clone(),
             visuals: Vec::new(),
             colliders: Vec::new(),
             sensors: Vec::new(),
@@ -660,6 +630,7 @@ fn append_isaac_compat_machines(
                 rear_left_wheel_joint: None,
                 rear_right_wheel_joint: None,
                 wheel_base: None,
+                wheel_radius: None,
                 track_width: None,
                 front_track_width: None,
                 rear_track_width: None,
@@ -891,15 +862,14 @@ pub fn log_discovered_machines(label: &str, machines: &[MachineInstanceSpec]) {
         );
         for controller in &machine.controllers {
             info!(
-                "gearbox-control:   controller:{} type={} enabled={} ns={} target={:?} drive_wheels={} steer_joints={} wheel_joints={} drive_wheel_joints={}",
+                "gearbox-control:   controller:{} type={} enabled={} ns={} target={:?} powered_wheel_joints={} steering_joints={} drive_wheel_overrides={}",
                 controller.instance,
                 controller.controller_type,
                 controller.enabled,
                 controller.namespace,
                 controller.target,
-                controller.drive_wheels.len(),
-                controller.steer_joints.len(),
-                controller.wheel_joints.len(),
+                machine.powered_wheel_joints.len(),
+                machine.steering_joints.len(),
                 controller.drive_wheel_joints.len(),
             );
         }
@@ -978,6 +948,7 @@ fn publish_machine_controller_states(
                     machine_id: machine.id.clone(),
                     controller: controller.instance.clone(),
                     position: state.position_m,
+                    heading_rad: state.heading_rad,
                     linear_speed_mps: state.linear_speed_mps,
                     yaw_rate_rps: state.yaw_rate_rps,
                 },
@@ -1160,13 +1131,14 @@ fn apply_builtin_ackermann_cmd_vel(
                     key.clone(),
                     ControllerState {
                         position_m: [pos.x, pos.y, pos.z],
+                        heading_rad: machine_heading_rad(body),
                         linear_speed_mps: body.linvel().length(),
-                        yaw_rate_rps: body.angvel().z,
+                        yaw_rate_rps: body.angvel().y,
                     },
                 );
             }
 
-            let wheel_radius_m = 0.45_f64;
+            let wheel_radius_m = controller.wheel_radius.unwrap_or(0.45) as f64;
             let wheel_base_m = controller.wheel_base.unwrap_or(2.37);
             let track_width_m = controller
                 .front_track_width
@@ -1196,6 +1168,10 @@ fn apply_builtin_ackermann_cmd_vel(
                 track_width_m,
                 max_steer_deg,
             );
+            let traction_track_width_m = controller
+                .rear_track_width
+                .or(controller.track_width)
+                .unwrap_or(track_width_m);
             let wheel_targets = wheel_joint_targets(
                 scene_root,
                 controller,
@@ -1207,24 +1183,17 @@ fn apply_builtin_ackermann_cmd_vel(
                 cmd.linear_mps as f64,
                 steer_target_rad,
                 wheel_base_m,
-                track_width_m,
+                traction_track_width_m,
                 wheel_radius_m,
             );
-            let motor_application = apply_articulation_or_impulse_joint_motors(
+            let tire_pairs =
+                tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics);
+            ensure_tire_grip(&mut physics, body_handle, &tire_pairs);
+            apply_articulation_or_impulse_joint_motors(
                 &mut physics,
                 &wheel_targets,
                 &steer_targets,
             );
-            if motor_application.drive {
-                assist_articulated_base_motion(
-                    &mut physics,
-                    body_handle,
-                    cmd.linear_mps as f64,
-                    steer_target_rad,
-                    wheel_base_m as f64,
-                    dt as f64,
-                );
-            }
         }
     }
 }
@@ -1242,11 +1211,24 @@ fn stable_cmd_vel(
         .copied()
         .unwrap_or_default();
     let next = CmdVel {
-        linear_mps: slew(previous.linear_mps, requested.linear_mps, 2.5 * dt),
+        linear_mps: slew(previous.linear_mps, requested.linear_mps, 20.0 * dt),
         angular_rps: slew(previous.angular_rps, requested.angular_rps, 1.5 * dt),
     };
     runtime.applied_cmd_vel.insert(key.clone(), next);
     next
+}
+
+fn machine_heading_rad(body: &rapier3d::prelude::RigidBody) -> f64 {
+    // Rapier/Bevy runs Y-up, so the drive plane is X/Z and yaw is around +Y.
+    // After the USD Z-up → Bevy Y-up projection, the tractor's authored front
+    // points along local -Z. Publish heading in the same convention that
+    // bale_run.py uses for field navigation: 0 rad = +Z, +pi/2 = +X.
+    let mut forward = body.rotation() * Vector::new(0.0, 0.0, -1.0);
+    forward.y = 0.0;
+    if forward.length() <= 1e-6 {
+        return 0.0;
+    }
+    forward.x.atan2(forward.z)
 }
 
 fn sanitize_cmd_vel(cmd: CmdVel) -> CmdVel {
@@ -1312,32 +1294,154 @@ fn ackermann_steering_angles(
     (left, right)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct AckermannWheelSpeeds {
-    front_left: f64,
-    front_right: f64,
-    rear_left: f64,
-    rear_right: f64,
+/// Drive-motor damping for the wheel velocity motor.
+const WHEEL_DRIVE_DAMPING: f64 = 90.0;
+/// Torque cap (N·m) on the wheel drive motor. Kept deliberately *below*
+/// the tyre's grip limit (`friction × normal_load × radius`) so the
+/// motor can never out-torque the contact patch — the wheel rolls
+/// instead of spinning out. A wheel torque cap above the grip limit is
+/// exactly what makes a driven wheel "run on ice". Lower = grippier
+/// (and gentler acceleration); raise only if the tractor feels weak.
+const WHEEL_DRIVE_MAX_TORQUE: f64 = 3000.0;
+/// Steering position-motor gains + torque cap (N·m). Stiffer than the
+/// old values so the steered wheels hold their angle against the tyre
+/// scrub forces that now actually turn the vehicle.
+const STEER_STIFFNESS: f64 = 300.0;
+const STEER_DAMPING: f64 = 90.0;
+const STEER_MAX_TORQUE: f64 = 1200.0;
+/// Friction coefficient forced onto wheel colliders. Imported USD
+/// colliders default to 0.5 when the asset authors no physics material
+/// — far too slippery for a driven tyre. Applied with a `Max` combine
+/// rule so the *grippier* of (tyre, ground) wins, guaranteeing a high
+/// effective friction whatever the ground collider is authored at.
+const TIRE_FRICTION: f64 = 1.8;
+
+/// Largest collider half-extent of a body — a wheel's tyre radius, a
+/// chassis's bounding half-size. `None` if the body has no collider.
+fn body_max_collider_radius(
+    physics: &usd_bevy::physics::PhysicsWorld,
+    body: RigidBodyHandle,
+) -> Option<f64> {
+    let body = physics.bodies.get(body)?;
+    body.colliders()
+        .iter()
+        .filter_map(|ch| physics.colliders.get(*ch))
+        .map(|c| c.compute_aabb().half_extents().max_element())
+        .fold(None, |acc: Option<f64>, r| {
+            Some(acc.map_or(r, |a| a.max(r)))
+        })
 }
 
-fn ackermann_wheel_speeds(
-    linear_mps: f64,
-    _center_steer_rad: f64,
-    _wheel_base_m: f32,
-    _track_width_m: f32,
-    wheel_radius_m: f64,
-) -> AckermannWheelSpeeds {
-    // We do not currently model a mechanical differential or per-wheel tire
-    // slip. So keep every wheel on the commanded axle speed instead of trying
-    // to synthesize inner/outer wheel speeds. Otherwise a sudden forward ↔
-    // reverse transition can look like individual wheels are fighting each
-    // other even though there is no differential in the authored machine.
-    let velocity = linear_mps / wheel_radius_m;
-    AckermannWheelSpeeds {
-        front_left: velocity,
-        front_right: velocity,
-        rear_left: velocity,
-        rear_right: velocity,
+/// The wheel rigid body of a wheel joint's body pair: whichever body
+/// isn't the chassis, or — for a knuckle↔wheel joint where neither is
+/// the chassis — the larger-collider body (the tyre, not the knuckle).
+fn wheel_body_of(
+    physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    pair: (RigidBodyHandle, RigidBodyHandle),
+) -> Option<RigidBodyHandle> {
+    let (a, b) = pair;
+    if a == chassis {
+        return Some(b);
+    }
+    if b == chassis {
+        return Some(a);
+    }
+    match (
+        body_max_collider_radius(physics, a),
+        body_max_collider_radius(physics, b),
+    ) {
+        (Some(ra), Some(rb)) => Some(if ra >= rb { a } else { b }),
+        (Some(_), None) => Some(a),
+        (None, Some(_)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+/// Measure a wheel's rolling radius from its collider. Returns `None`
+/// when no usable collider is found, so callers can fall back.
+///
+/// The wheel-speed command is `linear_speed / radius`: a wrong radius
+/// makes the tyres spin at the wrong rate and slip against the ground.
+/// Condition every wheel collider so the tyres can actually hold the
+/// ground: grippy friction, and zero restitution so a hard contact load
+/// doesn't bounce the wheel (and hop the whole tractor). This applies to
+/// powered and passive tyres; passive front tyres still need grip to
+/// steer instead of sliding sideways. Idempotent.
+fn ensure_tire_grip(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+) {
+    for pair in tire_pairs {
+        let Some(wheel) = wheel_body_of(physics, chassis, *pair) else {
+            continue;
+        };
+        let handles = physics
+            .bodies
+            .get(wheel)
+            .map(|b| b.colliders().to_vec())
+            .unwrap_or_default();
+        for ch in handles {
+            if let Some(col) = physics.colliders.get_mut(ch) {
+                if col.friction() < TIRE_FRICTION {
+                    col.set_friction(TIRE_FRICTION);
+                }
+                // "Stickiest wins" — the tyre's high friction holds
+                // regardless of what the ground collider is authored at.
+                col.set_friction_combine_rule(CoefficientCombineRule::Max);
+                col.set_restitution(0.0);
+            }
+        }
+    }
+}
+
+fn tire_joint_pairs(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+) -> Vec<(RigidBodyHandle, RigidBodyHandle)> {
+    let mut pairs = Vec::new();
+    for path in machine
+        .powered_wheel_joints
+        .iter()
+        .chain(machine.passive_wheel_joints.iter())
+        .chain(controller.drive_wheel_joints.iter())
+        .chain(controller.passive_wheel_joints.iter())
+        .chain(controller.wheel_joints.iter())
+    {
+        if let Some(pair) = joint_pair(scene_root, path, joints, parents, physics) {
+            push_unique_pair(&mut pairs, pair);
+        }
+    }
+    for path in [
+        controller.front_left_wheel_joint.as_deref(),
+        controller.front_right_wheel_joint.as_deref(),
+        controller.rear_left_wheel_joint.as_deref(),
+        controller.rear_right_wheel_joint.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(pair) = joint_pair(scene_root, path, joints, parents, physics) {
+            push_unique_pair(&mut pairs, pair);
+        }
+    }
+    pairs
+}
+
+fn push_unique_pair(
+    pairs: &mut Vec<(RigidBodyHandle, RigidBodyHandle)>,
+    pair: (RigidBodyHandle, RigidBodyHandle),
+) {
+    if !pairs
+        .iter()
+        .any(|existing| rigid_body_pair_matches(*existing, pair.0, pair.1))
+    {
+        pairs.push(pair);
     }
 }
 
@@ -1412,7 +1516,6 @@ fn steering_joint_targets(
     controller
         .steer_joints
         .iter()
-        .chain(machine.steer_joints.iter())
         .chain(machine.steering_joints.iter())
         .filter_map(|path| joint_pair(scene_root, path, joints, parents, physics))
         .map(|pair| JointPositionTarget {
@@ -1511,59 +1614,67 @@ fn wheel_joint_targets(
     linear_mps: f64,
     center_steer_rad: f64,
     wheel_base_m: f32,
-    track_width_m: f32,
-    wheel_radius_m: f64,
+    traction_track_width_m: f32,
+    wheel_radius_fallback_m: f64,
 ) -> Vec<JointVelocityTarget> {
+    // Wheel angular-velocity target for one joint pair. The spin rate is
+    // `ground_speed / wheel_radius`, using the wheel's *actual* collider
+    // radius — a wrong radius makes the tyre over- or under-spin and slip.
+    //
+    // For Ackermann, follow Gazebo's simple-differential trick: left and right
+    // traction wheels do not get the same angular speed while turning. The
+    // inner rear tyre travels a shorter arc and must spin slower, otherwise it
+    // scrubs sideways and looks like "slip" even with high friction.
+    let target = |path: &str, pair: (RigidBodyHandle, RigidBodyHandle)| {
+        let radius = wheel_radius_fallback_m;
+        let ground_speed = linear_mps
+            * ackermann_drive_speed_scale(
+                path,
+                geometry,
+                center_steer_rad,
+                wheel_base_m,
+                traction_track_width_m,
+            );
+        JointVelocityTarget {
+            pair,
+            velocity: ground_speed / radius,
+        }
+    };
+
     if !controller.drive_wheel_joints.is_empty() {
-        let velocity = linear_mps / wheel_radius_m;
         return controller
             .drive_wheel_joints
             .iter()
-            .filter_map(|path| joint_pair(scene_root, path, joints, parents, physics))
-            .map(|pair| JointVelocityTarget { pair, velocity })
+            .filter_map(|path| {
+                let pair = joint_pair(scene_root, path, joints, parents, physics)?;
+                Some(target(path, pair))
+            })
             .collect();
     }
     if !machine.powered_wheel_joints.is_empty() {
-        let velocity = linear_mps / wheel_radius_m;
         return machine
             .powered_wheel_joints
             .iter()
-            .filter_map(|path| joint_pair(scene_root, path, joints, parents, physics))
-            .map(|pair| JointVelocityTarget { pair, velocity })
+            .filter_map(|path| {
+                let pair = joint_pair(scene_root, path, joints, parents, physics)?;
+                Some(target(path, pair))
+            })
             .collect();
     }
 
     if geometry == "ackermann" {
-        let speeds = ackermann_wheel_speeds(
-            linear_mps,
-            center_steer_rad,
-            wheel_base_m,
-            track_width_m,
-            wheel_radius_m,
-        );
         let authored = [
-            (
-                controller.front_left_wheel_joint.as_deref(),
-                speeds.front_left,
-            ),
-            (
-                controller.front_right_wheel_joint.as_deref(),
-                speeds.front_right,
-            ),
-            (
-                controller.rear_left_wheel_joint.as_deref(),
-                speeds.rear_left,
-            ),
-            (
-                controller.rear_right_wheel_joint.as_deref(),
-                speeds.rear_right,
-            ),
+            controller.front_left_wheel_joint.as_deref(),
+            controller.front_right_wheel_joint.as_deref(),
+            controller.rear_left_wheel_joint.as_deref(),
+            controller.rear_right_wheel_joint.as_deref(),
         ];
         let targets = authored
             .into_iter()
-            .filter_map(|(path, velocity)| {
-                let pair = joint_pair(scene_root, path?, joints, parents, physics)?;
-                Some(JointVelocityTarget { pair, velocity })
+            .filter_map(|path| {
+                let path = path?;
+                let pair = joint_pair(scene_root, path, joints, parents, physics)?;
+                Some(target(path, pair))
             })
             .collect::<Vec<_>>();
         if !targets.is_empty() {
@@ -1571,15 +1682,43 @@ fn wheel_joint_targets(
         }
     }
 
-    let velocity = linear_mps / wheel_radius_m;
     controller
         .wheel_joints
         .iter()
-        .chain(machine.wheel_joints.iter())
         .chain(machine.powered_wheel_joints.iter())
-        .filter_map(|path| joint_pair(scene_root, path, joints, parents, physics))
-        .map(|pair| JointVelocityTarget { pair, velocity })
+        .filter_map(|path| {
+            let pair = joint_pair(scene_root, path, joints, parents, physics)?;
+            Some(target(path, pair))
+        })
         .collect()
+}
+
+fn ackermann_drive_speed_scale(
+    joint_path: &str,
+    geometry: &str,
+    center_steer_rad: f64,
+    wheel_base_m: f32,
+    traction_track_width_m: f32,
+) -> f64 {
+    if geometry != "ackermann" || center_steer_rad.abs() < 1e-6 {
+        return 1.0;
+    }
+
+    let wheel_base = wheel_base_m as f64;
+    if wheel_base <= 1e-6 {
+        return 1.0;
+    }
+
+    let track = traction_track_width_m as f64;
+    let ratio = (track * center_steer_rad.tan() / (2.0 * wheel_base)).clamp(-0.95, 0.95);
+    let lower = joint_path.to_ascii_lowercase();
+    if lower.contains("left") {
+        1.0 - ratio
+    } else if lower.contains("right") {
+        1.0 + ratio
+    } else {
+        1.0
+    }
 }
 
 fn joint_pair(
@@ -1591,53 +1730,6 @@ fn joint_pair(
 ) -> Option<(RigidBodyHandle, RigidBodyHandle)> {
     let (_, _, body0, body1) = find_joint_body_pair(scene_root, path, joints, parents, physics)?;
     Some((body0, body1))
-}
-
-fn assist_articulated_base_motion(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
-    body_handle: RigidBodyHandle,
-    linear_mps: f64,
-    steer_rad: f64,
-    wheel_base_m: f64,
-    dt: f64,
-) {
-    let Some(body) = physics.bodies.get_mut(body_handle) else {
-        return;
-    };
-    if linear_mps.abs() < 1e-4 {
-        return;
-    }
-
-    // Keep this as a base velocity actuator, not a pose teleport. The wheel
-    // and steering joints are still driven as a full articulation; this only
-    // compensates for the current Rapier/USD tire-contact gap where spinning
-    // wheel joints do not reliably create vehicle traction.
-    let mut forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
-    forward.z = 0.0;
-    let norm = forward.length();
-    if norm <= 1e-6 {
-        return;
-    }
-    forward /= norm;
-
-    let current = body.linvel();
-    let current_forward = current.dot(forward);
-    let max_step = 2.5 * dt;
-    let next_forward = current_forward + (linear_mps - current_forward).clamp(-max_step, max_step);
-    let next_linvel = current + forward * (next_forward - current_forward);
-    body.set_linvel(next_linvel, true);
-
-    let target_yaw_rate = if steer_rad.abs() < 1e-4 || wheel_base_m <= 1e-6 {
-        0.0
-    } else {
-        linear_mps * steer_rad.tan() / wheel_base_m
-    };
-    let mut angvel = body.angvel();
-    let max_yaw_step = 2.5 * dt;
-    angvel.z += (target_yaw_rate - angvel.z).clamp(-max_yaw_step, max_yaw_step);
-    angvel.x *= 0.85;
-    angvel.y *= 0.85;
-    body.set_angvel(angvel, true);
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1662,8 +1754,8 @@ fn apply_articulation_or_impulse_joint_motors(
                 if let Some(link) = multibody.link_mut(link_id) {
                     link.joint
                         .data
-                        .set_motor_velocity(JointAxis::AngX, target.velocity, 25.0)
-                        .set_motor_max_force(JointAxis::AngX, 800.0);
+                        .set_motor_velocity(JointAxis::AngX, target.velocity, WHEEL_DRIVE_DAMPING)
+                        .set_motor_max_force(JointAxis::AngX, WHEEL_DRIVE_MAX_TORQUE);
                     applied.drive = true;
                 }
             }
@@ -1676,8 +1768,13 @@ fn apply_articulation_or_impulse_joint_motors(
                 if let Some(link) = multibody.link_mut(link_id) {
                     link.joint
                         .data
-                        .set_motor_position(JointAxis::AngX, target.position, 60.0, 12.0)
-                        .set_motor_max_force(JointAxis::AngX, 500.0);
+                        .set_motor_position(
+                            JointAxis::AngX,
+                            target.position,
+                            STEER_STIFFNESS,
+                            STEER_DAMPING,
+                        )
+                        .set_motor_max_force(JointAxis::AngX, STEER_MAX_TORQUE);
                     applied.steer = true;
                 }
             }
@@ -1691,8 +1788,8 @@ fn apply_articulation_or_impulse_joint_motors(
         {
             joint
                 .data
-                .set_motor_velocity(JointAxis::AngX, target.velocity, 25.0)
-                .set_motor_max_force(JointAxis::AngX, 800.0);
+                .set_motor_velocity(JointAxis::AngX, target.velocity, WHEEL_DRIVE_DAMPING)
+                .set_motor_max_force(JointAxis::AngX, WHEEL_DRIVE_MAX_TORQUE);
             applied.drive = true;
         }
         if let Some(target) = steer_targets
@@ -1706,8 +1803,13 @@ fn apply_articulation_or_impulse_joint_motors(
             // explode/flip the vehicle.
             joint
                 .data
-                .set_motor_position(JointAxis::AngX, target.position, 60.0, 12.0)
-                .set_motor_max_force(JointAxis::AngX, 500.0);
+                .set_motor_position(
+                    JointAxis::AngX,
+                    target.position,
+                    STEER_STIFFNESS,
+                    STEER_DAMPING,
+                )
+                .set_motor_max_force(JointAxis::AngX, STEER_MAX_TORQUE);
             applied.steer = true;
         }
     }
@@ -1896,6 +1998,7 @@ fn discover_controllers(
                 track_width: read_float(stage, prim, &(prefix.clone() + "trackWidth")),
                 front_track_width: read_float(stage, prim, &(prefix.clone() + "frontTrackWidth")),
                 rear_track_width: read_float(stage, prim, &(prefix.clone() + "rearTrackWidth")),
+                wheel_radius: read_float(stage, prim, &(prefix.clone() + "wheelRadius")),
                 max_steer_deg: read_float(stage, prim, &(prefix.clone() + "maxSteerDeg")),
                 steering_geometry: read_token(stage, prim, &(prefix.clone() + "steeringGeometry")),
                 uses_roles: read_token_array(stage, prim, &(prefix.clone() + "usesRoles")),
@@ -2042,9 +2145,6 @@ mod tests {
             .expect("tractor root should be a Gearbox machine");
         assert_eq!(machine.id, "robot");
         assert_eq!(machine.kind.as_deref(), Some("tractor"));
-        assert_eq!(machine.drive_wheels.len(), 2);
-        assert_eq!(machine.steer_joints.len(), 2);
-        assert_eq!(machine.wheel_joints.len(), 4);
         assert_eq!(
             machine.powered_wheel_joints,
             vec![
@@ -2259,39 +2359,12 @@ def Xform "Leatherback" (
     }
 
     #[test]
-    fn ackermann_outputs_inner_outer_steering_and_wheel_speeds() {
+    fn ackermann_outputs_inner_outer_steering_angles() {
         let center = 0.25;
         let (left, right) = ackermann_steering_angles(center, 2.37, 1.5675, 45.0);
         assert!(left > center);
         assert!(right < center);
         assert!(left > right);
-
-        let speeds = ackermann_wheel_speeds(2.0, center, 2.37, 1.5675, 0.45);
-        assert_eq!(speeds.front_left, speeds.front_right);
-        assert_eq!(speeds.rear_left, speeds.rear_right);
-        assert_eq!(speeds.front_left, speeds.rear_left);
-
-        let reverse = ackermann_wheel_speeds(-2.0, -center, 2.37, 1.5675, 0.45);
-        assert!(reverse.front_left < 0.0);
-        assert!(reverse.front_right < 0.0);
-        assert_eq!(reverse.front_left, reverse.front_right);
-        assert_eq!(reverse.rear_left, reverse.rear_right);
-    }
-
-    #[test]
-    fn articulated_base_assist_moves_chassis_forward_without_flipping() {
-        use rapier3d::prelude::RigidBodyBuilder;
-
-        let mut physics = usd_bevy::physics::PhysicsWorld::default();
-        let chassis = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-
-        assist_articulated_base_motion(&mut physics, chassis, 2.0, 0.2, 2.37, 1.0 / 60.0);
-
-        let body = physics.bodies.get(chassis).expect("chassis body");
-        assert!(body.linvel().y < 0.0);
-        assert!(body.angvel().z > 0.0);
-        assert!(body.angvel().x.abs() < 1e-9);
-        assert!(body.angvel().y.abs() < 1e-9);
     }
 
     #[test]
@@ -2329,6 +2402,41 @@ def Xform "Leatherback" (
             1.2
         );
         assert!((slew(0.0, 4.0, 0.25) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ackermann_drive_speed_scale_simulates_rear_differential() {
+        let left = ackermann_drive_speed_scale(
+            "/robot/Joints/rev_back_left",
+            "ackermann",
+            0.35,
+            2.37,
+            1.685,
+        );
+        let right = ackermann_drive_speed_scale(
+            "/robot/Joints/rev_back_right",
+            "ackermann",
+            0.35,
+            2.37,
+            1.685,
+        );
+        assert!(left < 1.0);
+        assert!(right > 1.0);
+        assert!(right > left);
+        assert_eq!(
+            ackermann_drive_speed_scale(
+                "/robot/Joints/rev_back_left",
+                "ackermann",
+                0.0,
+                2.37,
+                1.685
+            ),
+            1.0
+        );
+        assert_eq!(
+            ackermann_drive_speed_scale("/robot/Joints/rev_back_left", "skid", 0.35, 2.37, 1.685),
+            1.0
+        );
     }
 
     #[test]
@@ -2374,13 +2482,13 @@ def Xform "Leatherback" (
             if rigid_body_pair_matches((chassis, wheel), joint.body1, joint.body2) {
                 let motor = joint.data.motor(JointAxis::AngX).expect("drive motor");
                 assert!((motor.target_vel - 7.5).abs() < 1e-9);
-                assert_eq!(motor.max_force, 800.0);
+                assert_eq!(motor.max_force, WHEEL_DRIVE_MAX_TORQUE);
                 saw_drive = true;
             }
             if rigid_body_pair_matches((steer, steer_link), joint.body1, joint.body2) {
                 let motor = joint.data.motor(JointAxis::AngX).expect("steer motor");
                 assert!((motor.target_pos - 0.25).abs() < 1e-9);
-                assert_eq!(motor.stiffness, 60.0);
+                assert_eq!(motor.stiffness, STEER_STIFFNESS);
                 saw_steer = true;
             }
         }
@@ -2516,15 +2624,15 @@ def Xform "World"
             assert_eq!(machine.controllers[0].instance, "drive");
             assert!(
                 machine
-                    .drive_wheels
+                    .powered_wheel_joints
                     .iter()
-                    .any(|p| p == &format!("{root}/wheel_back_left"))
+                    .any(|p| p == &format!("{root}/Joints/rev_back_left"))
             );
             assert!(
                 machine
-                    .wheel_joints
+                    .steering_joints
                     .iter()
-                    .any(|p| p == &format!("{root}/Joints/rev_back_left"))
+                    .any(|p| p == &format!("{root}/Joints/steer_front_left"))
             );
         }
 

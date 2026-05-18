@@ -65,6 +65,7 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_post_process",
     "morph",
     "x11",
+    "wayland",
     "reflect_auto_register",
 ] }
 bevy_egui = { version = "0.39", default-features = false, features = [

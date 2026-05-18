@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
-"""Spawn a tractor (or drive an already-spawned one), scatter N
-"bales" (USD cylinders) randomly across a square field, and have the
-vehicle visit them one by one in nearest-neighbour order, removing
-each cone as it's reached.
+"""Scatter bales and drive the current USD tractor/machine to them.
 
-Arg #1 is dual-purpose:
+Default mode asks Gearbox to spawn ``bin/gearbox/assets/tractor.usd`` and then
+targets the USD machine-controller API discovered from that asset:
 
-  * a known preset id (`tractor` | `husky` | `robotti` | `drone` |
-    `oxbo`)  → script publishes `gearbox/sim/spawn` and drives the
-    freshly-spawned vehicle.
-  * any other string                                   → treated as
-    an existing topic prefix (e.g. `tractor_0`); no spawn issued.
+    python scripts/bale_run.py [machine_namespace] [n_bales] [field_size] [seed]
 
-The user reference is BaleUAVision (georkara/BaleUAVision on GitHub)
-— their dataset is for aerial detection of bales, no ground-truth
-coordinate dump we can grab, so we just generate a random spread
-that has the same overall flavour.
+Defaults: namespace=robot, n_bales=50, field_size=300, seed=42.
 
-Usage:
-    python bale_run.py [preset|prefix] [n_bales] [field_size] [seed]
+The script publishes USD bale assets via ``gearbox/usd/load/<id>`` and drives with:
 
-Defaults: preset=tractor, n_bales=50, field_size=200 (so points
-fall in [-100, +100]² metres around the origin), seed=42."""
+    gearbox/machines/<namespace>/cmd_vel
+    gearbox/machines/<namespace>/state
+
+For the old procedural simulator API, use ``spawn:<preset>`` as arg #1,
+e.g. ``python scripts/bale_run.py spawn:tractor``. Existing legacy prefixes
+like ``tractor_0`` are also still supported.
+"""
 
 from __future__ import annotations
 
@@ -29,40 +24,170 @@ import math
 import random
 import sys
 import time
+from dataclasses import dataclass
 
-import zenoh
 import cbor2
+import zenoh
 
 
-# Known preset ids the simulator's `gearbox/sim/spawn` recognises.
-# Mirrors `gearbox_core::presets::registry::all_presets()`. If a new
-# preset is added there, mirror it here too — anything not in this
-# set is interpreted as an existing-vehicle topic prefix.
 KNOWN_PRESETS = {"tractor", "husky", "robotti", "drone", "oxbo"}
+TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
+BALE_USD_PATH = "markers/bale.usdz"
+TARGET_INDICATOR_ID = "bale_target_indicator"
 
 
-def spawn_vehicle(
+def wrap_pi(angle: float) -> float:
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def put_cbor(session: zenoh.Session, key: str, payload: dict) -> None:
+    session.put(key, cbor2.dumps(payload))
+
+
+@dataclass
+class MachinePose:
+    x: float = 0.0
+    z: float = 0.0
+    heading_rad: float | None = None
+    stamp: float = 0.0
+    seen: bool = False
+
+
+def scatter_bales(
     session: zenoh.Session,
-    preset: str,
-    spawned_state: dict,
-) -> str | None:
-    """Publish a spawn request and wait up to 5 s for the
-    confirmation. Returns the topic prefix
-    (e.g. `tractor_0`) of the freshly-spawned vehicle, or None on
-    timeout. The caller owns the `gearbox/sim/spawned` subscriber
-    (declared early so peer-advertisement has time to propagate
-    before we start publishing) and just hands us its latched dict."""
-    spawned_state.clear()
-    # Tag the vehicle as `player` so the user can grab WASD if needed
-    # — the goto controller still drives it when `cmd_vel` is silent.
-    session.put(
-        "gearbox/sim/spawn",
-        cbor2.dumps({
-            "preset": preset,
-            "x": 0.0, "y": 0.0, "z": 0.0,
+    bales: list[tuple[float, float]],
+    active: int | None = None,
+    hidden: set[int] | None = None,
+) -> None:
+    """Publish visible USD bales.
+
+    Gearbox does not know these are "bales" or cylinders. It only receives a
+    USD asset path plus optional variant selections; the USD asset owns the
+    shape/materials.
+    """
+    hidden = hidden or set()
+    for i, (bx, bz) in enumerate(bales):
+        if i in hidden:
+            remove_bale(session, i)
+            continue
+        put_cbor(
+            session,
+            f"gearbox/usd/load/bale_{i}",
+            {
+                "category": "static_usd",
+                "x": float(bx),
+                "z": float(bz),
+                "usd_path": BALE_USD_PATH,
+                "remove": False,
+            },
+        )
+
+
+def remove_bale(session: zenoh.Session, bale_id: int) -> None:
+    put_cbor(
+        session,
+        f"gearbox/usd/load/bale_{bale_id}",
+        {"x": 0.0, "z": 0.0, "remove": True},
+    )
+
+
+def show_target_indicator(
+    session: zenoh.Session,
+    active: int | None,
+    bales: list[tuple[float, float]],
+) -> None:
+    if active is None:
+        put_cbor(
+            session,
+            f"gearbox/usd/load/{TARGET_INDICATOR_ID}",
+            {"x": 0.0, "z": 0.0, "remove": True},
+        )
+        return
+    bx, bz = bales[active]
+    put_cbor(
+        session,
+        f"gearbox/usd/load/{TARGET_INDICATOR_ID}",
+        {
+            "category": "static_usd",
+            "x": float(bx),
+            "y": 2.2,
+            "z": float(bz),
+            "kind": "box",
+            "height": 0.8,
+            "radius": 0.35,
+            "color": [1.0, 0.0, 0.0],
+            "remove": False,
+        },
+    )
+
+
+def clear_old_bales(session: zenoh.Session, count: int = 500) -> None:
+    show_target_indicator(session, None, [])
+    for i in range(count):
+        remove_bale(session, i)
+
+
+def wait_for_pose(pose: MachinePose, timeout_s: float) -> bool:
+    t0 = time.time()
+    while not pose.seen and time.time() - t0 < timeout_s:
+        time.sleep(0.05)
+    return pose.seen
+
+
+def spawn_usd_machine(session: zenoh.Session, usd_path: str = TRACTOR_USD_PATH) -> None:
+    """Ask the running Gearbox app to load/spawn a USD asset.
+
+    This is intentionally generic: the request says only "spawn this USD".
+    Gearbox discovers by reading the USD whether it contains a machine and
+    which namespace/controller topics it should expose.
+    """
+    spawned: dict = {}
+
+    def on_spawned(sample: zenoh.Sample) -> None:
+        try:
+            d = cbor2.loads(bytes(sample.payload))
+        except Exception:  # noqa: BLE001
+            return
+        if str(d.get("usd_path", "")).endswith(usd_path) or d.get("label") == "tractor.usd":
+            spawned.update(d)
+
+    sub = session.declare_subscriber("gearbox/usd/loaded", on_spawned)
+    # Same zenoh race as the older spawn API: let the subscriber propagate
+    # before publishing the request.
+    time.sleep(0.2)
+    put_cbor(
+        session,
+        "gearbox/usd/load/robot",
+        {
+            "category": "machine",
+            "usd_path": usd_path,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
             "yaw_deg": 0.0,
-            "player": True,
-        }),
+            "label": "tractor.usd",
+        },
+    )
+    t0 = time.time()
+    while not spawned and time.time() - t0 < 3.0:
+        time.sleep(0.05)
+    del sub
+    if spawned:
+        print(f"spawn requested: {spawned.get('label', usd_path)}")
+    else:
+        print("spawn request sent; no gearbox/usd/loaded ack yet")
+
+
+def spawn_vehicle(session: zenoh.Session, preset: str, spawned_state: dict) -> str | None:
+    spawned_state.clear()
+    put_cbor(
+        session,
+        "gearbox/sim/spawn",
+        {"preset": preset, "x": 0.0, "y": 0.0, "z": 0.0, "yaw_deg": 0.0, "player": True},
     )
     t0 = time.time()
     while not spawned_state and time.time() - t0 < 5.0:
@@ -72,26 +197,158 @@ def spawn_vehicle(
     return f"{spawned_state['name']}_{spawned_state['id']}"
 
 
-def main() -> None:
-    arg1    = sys.argv[1]        if len(sys.argv) > 1 else "tractor"
-    n_bales = int(sys.argv[2])   if len(sys.argv) > 2 else 50
-    field   = float(sys.argv[3]) if len(sys.argv) > 3 else 200.0
-    seed    = int(sys.argv[4])   if len(sys.argv) > 4 else 42
+def nearest_unvisited(
+    pose_x: float,
+    pose_z: float,
+    bales: list[tuple[float, float]],
+    visited: set[int],
+) -> tuple[int, float]:
+    best_idx = -1
+    best_d = math.inf
+    for i, (bx, bz) in enumerate(bales):
+        if i in visited:
+            continue
+        d = math.hypot(bx - pose_x, bz - pose_z)
+        if d < best_d:
+            best_idx = i
+            best_d = d
+    return best_idx, best_d
 
-    rng = random.Random(seed)
-    half = field / 2.0
-    bales = [
-        (rng.uniform(-half, half), rng.uniform(-half, half))
-        for _ in range(n_bales)
-    ]
 
-    session = zenoh.open(zenoh.Config())
+def run_machine_mode(
+    session: zenoh.Session,
+    namespace: str,
+    bales: list[tuple[float, float]],
+    field: float,
+) -> None:
+    pose = MachinePose()
+    last_pose: MachinePose | None = None
 
-    # Declare the spawn-confirmation subscriber up-front and let zenoh
-    # advertise it to peers BEFORE we start publishing. Otherwise the
-    # simulator's reply (single Update frame after the spawn lands,
-    # ~16 ms later) races our subscriber registration and gets
-    # dropped before propagation completes.
+    def on_state(sample: zenoh.Sample) -> None:
+        nonlocal last_pose
+        try:
+            d = cbor2.loads(bytes(sample.payload))
+        except Exception:  # noqa: BLE001
+            return
+        p = d.get("position", [0.0, 0.0, 0.0])
+        last_pose = MachinePose(pose.x, pose.z, pose.heading_rad, pose.stamp, pose.seen)
+        # Gearbox/Rapier state is Bevy-style Y-up: drive plane=(X,Z),
+        # height=Y. Marker API uses the same (x,z) field plane.
+        pose.x = float(p[0])
+        pose.z = float(p[2])
+        heading = d.get("heading_rad", None)
+        pose.heading_rad = float(heading) if heading is not None else pose.heading_rad
+        pose.stamp = time.time()
+        pose.seen = True
+
+    state_sub = session.declare_subscriber(f"gearbox/machines/{namespace}/state", on_state)
+    print(f"waiting for gearbox/machines/{namespace}/state ...")
+    wait_for_pose(pose, 1.0)
+    if not pose.seen:
+        print(f"no `{namespace}` state yet — spawning {TRACTOR_USD_PATH}")
+        spawn_usd_machine(session)
+        wait_for_pose(pose, 12.0)
+        if not pose.seen:
+            del state_sub
+            raise RuntimeError(
+                f"no state from machine namespace `{namespace}` after spawning "
+                f"{TRACTOR_USD_PATH}. Is the Gearbox app running and built with "
+                "the USD spawn API?"
+            )
+
+    print(f"using USD machine namespace `{namespace}`")
+    print(f"scattering {len(bales)} bales across {field:.0f} × {field:.0f} m field")
+    clear_old_bales(session, max(500, len(bales) + 50))
+    visited: set[int] = set()
+    scatter_bales(session, bales, hidden=visited)
+    show_target_indicator(session, None, bales)
+    time.sleep(0.2)
+
+    visit_order: list[int] = []
+    cmd_topic = f"gearbox/machines/{namespace}/cmd_vel"
+
+    def publish_cmd(speed: float, yaw_rate: float) -> None:
+        put_cbor(
+            session,
+            cmd_topic,
+            {"linear": [float(speed), 0.0, 0.0], "angular": [0.0, 0.0, float(yaw_rate)]},
+        )
+
+    try:
+        for step in range(len(bales)):
+            best_idx, best_d = nearest_unvisited(pose.x, pose.z, bales, visited)
+            if best_idx < 0:
+                break
+            tx, tz = bales[best_idx]
+            scatter_bales(session, bales, active=best_idx, hidden=visited)
+            show_target_indicator(session, best_idx, bales)
+            print(
+                f"\n[{step + 1:>3}/{len(bales)}]  visiting bale_{best_idx}  "
+                f"target=({tx:+7.2f},{tz:+7.2f})  "
+                f"from=({pose.x:+7.2f},{pose.z:+7.2f})  d={best_d:6.2f} m"
+            )
+
+            t_goal = time.time()
+            while True:
+                dx = tx - pose.x
+                dz = tz - pose.z
+                d_now = math.hypot(dx, dz)
+                if d_now < 2.2:
+                    break
+                if time.time() - t_goal > 120.0:
+                    print("  TIMEOUT — skipping this bale")
+                    break
+
+                target_heading = math.atan2(dx, dz)
+                heading = pose.heading_rad
+                if heading is None and last_pose is not None:
+                    vx = pose.x - last_pose.x
+                    vz = pose.z - last_pose.z
+                    if math.hypot(vx, vz) > 0.05:
+                        heading = math.atan2(vx, vz)
+                if heading is None:
+                    heading = target_heading
+
+                err = wrap_pi(target_heading - heading)
+                # Fast when lined up, crawl while turning hard. The tractor's
+                # Ackermann controller can steer while almost stopped, so this
+                # avoids ploughing sideways into the target.
+                turn_slowdown = max(0.20, math.cos(abs(err)))
+                speed = min(3.5, 0.45 + 0.35 * d_now) * turn_slowdown
+                if abs(err) > 1.7:
+                    speed = 0.35
+                yaw_rate = clamp(1.8 * err, -1.2, 1.2)
+                publish_cmd(speed, yaw_rate)
+
+                if int(time.time() - t_goal) % 5 == 0:
+                    print(
+                        f"    ... pos=({pose.x:+7.2f},{pose.z:+7.2f}) "
+                        f"d={d_now:6.2f} heading_err={math.degrees(err):+6.1f}°",
+                        end="\r",
+                    )
+                time.sleep(0.10)
+
+            publish_cmd(0.0, 0.0)
+            visited.add(best_idx)
+            visit_order.append(best_idx)
+            remove_bale(session, best_idx)
+            show_target_indicator(session, None, bales)
+            print("    reached")
+    except KeyboardInterrupt:
+        print("\ninterrupted — stopping machine.")
+        publish_cmd(0.0, 0.0)
+        show_target_indicator(session, None, bales)
+    finally:
+        print(f"\nvisited {len(visited)}/{len(bales)} bales — order: {visit_order}")
+        del state_sub
+
+
+def run_legacy_mode(
+    session: zenoh.Session,
+    arg1: str,
+    bales: list[tuple[float, float]],
+    field: float,
+) -> None:
     spawned_state: dict = {}
 
     def on_spawned(sample: zenoh.Sample) -> None:
@@ -101,66 +358,29 @@ def main() -> None:
             pass
 
     spawn_sub = session.declare_subscriber("gearbox/sim/spawned", on_spawned)
-
-    # Wipe whatever's already in the scene from a previous run.
-    session.put("gearbox/sim/reset", cbor2.dumps({"pause_clock": False}))
-    # Unpause so the vehicle can move once spawned.
-    session.put("gearbox/sim/clock/command", cbor2.dumps({"SetPaused": False}))
-    # Combined: clock-pause settle + subscriber propagation budget.
+    put_cbor(session, "gearbox/sim/reset", {"pause_clock": False})
+    put_cbor(session, "gearbox/sim/clock/command", {"SetPaused": False})
     time.sleep(0.5)
 
-    # Decide: spawn vs attach to an already-running vehicle.
-    #
-    #   `tractor`   → known preset id            → spawn a fresh one.
-    #   `tractor_0` → preset id with `_<digits>` → spawn a fresh one
-    #                  (suffix is just a numeric id the user didn't
-    #                  need to type — assume they want to spawn).
-    #   anything else → treat as literal topic prefix; no spawn.
-    preset_to_spawn: str | None = None
-    if arg1 in KNOWN_PRESETS:
-        preset_to_spawn = arg1
-    else:
-        head, _, tail = arg1.rpartition("_")
-        if head in KNOWN_PRESETS and tail.isdigit():
-            preset_to_spawn = head
-
-    if preset_to_spawn is not None:
-        vehicle = spawn_vehicle(session, preset_to_spawn, spawned_state)
+    preset = arg1.removeprefix("spawn:")
+    if preset in KNOWN_PRESETS:
+        vehicle = spawn_vehicle(session, preset, spawned_state)
         if vehicle is None:
-            print(f"spawn confirmation for preset `{preset_to_spawn}` timed out — "
-                  f"is the simulator running and is `SpawnApiPlugin` active?")
-            del spawn_sub
-            session.close()
-            sys.exit(1)
-        print(f"spawned `{preset_to_spawn}` — driving via topic prefix `{vehicle}`")
-        # Give Bevy a beat to wire up the per-vehicle cmd_vel / odom /
-        # goto subscribers before we start publishing to them.
+            raise RuntimeError(f"spawn confirmation for preset `{preset}` timed out")
+        print(f"spawned `{preset}` — driving via topic prefix `{vehicle}`")
         time.sleep(0.3)
     else:
         vehicle = arg1
-        print(f"using existing vehicle topic prefix `{vehicle}` (no spawn)")
-        del spawn_sub
+        print(f"using existing legacy vehicle topic prefix `{vehicle}`")
+    del spawn_sub
 
-    # Spawn every bale as a USD-loaded cylinder ("bale" asset).
-    # `usd_path` is relative to `bin/gearbox/assets/`, so the file
-    # lives at `bin/gearbox/assets/markers/bale.usda`. The asset
-    # exposes a `color` variant on `/bale` with `default` (cream)
-    # and `red` options — we publish `default` for every bale at
-    # spawn time and switch to `red` later when targeting one.
-    print(f"scattering {n_bales} bales across {field:.0f} × {field:.0f} m field")
-    for i, (bx, bz) in enumerate(bales):
-        marker = {
-            "x": float(bx),
-            "z": float(bz),
-            "usd_path": "markers/bale.usda",
-            "usd_variants": [["/bale", "color", "default"]],
-            "remove": False,
-        }
-        session.put(f"gearbox/markers/bale_{i}", cbor2.dumps(marker))
-    time.sleep(0.5)  # let Bevy spawn them all
+    print(f"scattering {len(bales)} bales across {field:.0f} × {field:.0f} m field")
+    clear_old_bales(session, max(500, len(bales) + 50))
+    visited: set[int] = set()
+    scatter_bales(session, bales, hidden=visited)
+    show_target_indicator(session, None, bales)
+    time.sleep(0.5)
 
-    # Subscribe to vehicle pose so we know when each goal is reached
-    # (and so we can pick the nearest unvisited bale at each step).
     pose_state: dict = {"x": 0.0, "z": 0.0}
 
     def on_odom(sample: zenoh.Sample) -> None:
@@ -174,11 +394,6 @@ def main() -> None:
 
     session.declare_subscriber(f"{vehicle}/odom", on_odom)
 
-    # We can't rely on `reached: true` from the broker — it's only
-    # set for the single frame before the goal is cleared, and the
-    # next published status has `active: false, reached: false`.
-    # Track `was_active` and treat the active→inactive transition
-    # as an arrival.
     status_state: dict = {"active": False, "was_active": False, "reached_pulse": False}
 
     def on_status(sample: zenoh.Sample) -> None:
@@ -195,109 +410,83 @@ def main() -> None:
             status_state["reached_pulse"] = True
 
     session.declare_subscriber(f"{vehicle}/goto_status", on_status)
+    time.sleep(0.3)
 
-    time.sleep(0.3)  # let first odom arrive
-
-    visited: set[int] = set()
     visit_order: list[int] = []
 
     try:
-        for step in range(n_bales):
-            # Nearest-neighbour pick — keeps the path short.
-            cx, cz = pose_state["x"], pose_state["z"]
-            best_idx = -1
-            best_d = math.inf
-            for i, (bx, bz) in enumerate(bales):
-                if i in visited:
-                    continue
-                d = math.hypot(bx - cx, bz - cz)
-                if d < best_d:
-                    best_d = d
-                    best_idx = i
+        for step in range(len(bales)):
+            best_idx, best_d = nearest_unvisited(pose_state["x"], pose_state["z"], bales, visited)
             if best_idx < 0:
                 break
             tx, tz = bales[best_idx]
+            scatter_bales(session, bales, active=best_idx, hidden=visited)
+            show_target_indicator(session, best_idx, bales)
             print(
-                f"\n[{step + 1:>3}/{n_bales}]  visiting bale_{best_idx}  "
+                f"\n[{step + 1:>3}/{len(bales)}]  visiting bale_{best_idx}  "
                 f"target=({tx:+7.2f},{tz:+7.2f})  "
-                f"from=({cx:+7.2f},{cz:+7.2f})  d={best_d:6.2f} m"
-            )
-            # Switch the target bale's `color` variant to `red`.
-            # Variants are encoded into the asset-path label so each
-            # variant combination gets its own cached handle (Bevy
-            # keys handles by full path including label). Swapping
-            # one bale to red therefore doesn't turn every bale red
-            # via shared-handle aliasing.
-            session.put(
-                f"gearbox/markers/bale_{best_idx}",
-                cbor2.dumps({
-                    "x": float(tx),
-                    "z": float(tz),
-                    "usd_path": "markers/bale.usda",
-                    "usd_variants": [["/bale", "color", "red"]],
-                    "remove": False,
-                }),
+                f"from=({pose_state['x']:+7.2f},{pose_state['z']:+7.2f})  d={best_d:6.2f} m"
             )
             cmd = {
                 "x": float(tx),
                 "z": float(tz),
                 "yaw_deg": 0.0,
-                "tolerance": 2.0,           # generous radius — the tractor is big
-                "yaw_tolerance_deg": 0.0,   # 0 ⇒ broker uses 2π default
+                "tolerance": 2.0,
+                "yaw_tolerance_deg": 0.0,
                 "max_speed": 0.0,
                 "cancel": False,
             }
-            session.put(f"{vehicle}/goto", cbor2.dumps(cmd))
+            put_cbor(session, f"{vehicle}/goto", cmd)
             status_state["reached_pulse"] = False
             status_state["was_active"] = False
             status_state["active"] = False
             local_reached = False
-
-            # Three independent ways to detect arrival — whichever
-            # fires first wins. The status pulse is fragile (single
-            # frame) so we also derive arrival from odom directly.
             t0 = time.time()
             while True:
                 if status_state["reached_pulse"]:
                     break
-                cx, cz = pose_state["x"], pose_state["z"]
-                d_now = math.hypot(tx - cx, tz - cz)
+                d_now = math.hypot(tx - pose_state["x"], tz - pose_state["z"])
                 if d_now < float(cmd["tolerance"]):
                     local_reached = True
                     break
                 if time.time() - t0 > 120.0:
                     print("  TIMEOUT — skipping this bale")
                     break
-                if int(time.time() - t0) % 5 == 0:
-                    print(
-                        f"    ...  pos=({cx:+7.2f},{cz:+7.2f})  d_remaining={d_now:6.2f} m",
-                        end="\r",
-                    )
                 time.sleep(0.2)
             print(f"    reached: {'local' if local_reached else 'status_pulse'}")
-
             visited.add(best_idx)
             visit_order.append(best_idx)
-            # Remove the bale's marker now that it's been visited.
-            session.put(
-                f"gearbox/markers/bale_{best_idx}",
-                cbor2.dumps({
-                    "x": 0.0, "z": 0.0, "height": 0.0, "radius": 0.0,
-                    "kind": "", "color": [0.0, 0.0, 0.0], "remove": True,
-                }),
-            )
+            remove_bale(session, best_idx)
+            show_target_indicator(session, None, bales)
     except KeyboardInterrupt:
         print("\ninterrupted — cancelling current goto.")
-        session.put(
+        show_target_indicator(session, None, bales)
+        put_cbor(
+            session,
             f"{vehicle}/goto",
-            cbor2.dumps({
-                "x": 0.0, "z": 0.0, "yaw_deg": 0.0,
-                "tolerance": 0.0, "yaw_tolerance_deg": 0.0,
-                "max_speed": 0.0, "cancel": True,
-            }),
+            {"x": 0.0, "z": 0.0, "yaw_deg": 0.0, "tolerance": 0.0, "yaw_tolerance_deg": 0.0, "max_speed": 0.0, "cancel": True},
         )
     finally:
-        print(f"\nvisited {len(visited)}/{n_bales} bales — order: {visit_order}")
+        print(f"\nvisited {len(visited)}/{len(bales)} bales — order: {visit_order}")
+
+
+def main() -> None:
+    arg1 = sys.argv[1] if len(sys.argv) > 1 else "robot"
+    n_bales = int(sys.argv[2]) if len(sys.argv) > 2 else 50
+    field = float(sys.argv[3]) if len(sys.argv) > 3 else 300.0
+    seed = int(sys.argv[4]) if len(sys.argv) > 4 else 42
+
+    rng = random.Random(seed)
+    half = field / 2.0
+    bales = [(rng.uniform(-half, half), rng.uniform(-half, half)) for _ in range(n_bales)]
+
+    session = zenoh.open(zenoh.Config())
+    try:
+        if arg1.startswith("spawn:") or "_" in arg1:
+            run_legacy_mode(session, arg1, bales, field)
+        else:
+            run_machine_mode(session, arg1, bales, field)
+    finally:
         session.close()
 
 

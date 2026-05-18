@@ -89,7 +89,13 @@ fn main() {
         // USD `LoadQueue`-driven loader.
         .add_plugins(world::WorldPlugin)
         .add_plugins(controller::ControllerDiscoveryPlugin)
+        .insert_resource(gearbox_viz::UsdAssetRoot(load::default_asset_root()))
         .add_plugins(load::LoadPlugin { cli_paths })
+        // Generic external USD loader API. Loaded USDs may be static assets,
+        // variant-authored assets, or later other categories. Machine/robot
+        // USDs are handled by `load::LoadPlugin` because it also registers
+        // controller namespaces.
+        .add_plugins(gearbox_api::UsdLoaderApiPlugin)
         // ── Viewer surface: full ribbon + panel set, overlays, prim
         // tree, prim-level selection, fly-to camera, log capture,
         // variants, cameras, materials.

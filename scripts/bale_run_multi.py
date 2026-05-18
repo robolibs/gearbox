@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Like `bale_run.py`, but with N tractors. Each tractor picks the
-nearest unclaimed bale in greedy nearest-neighbour fashion, drives to
-it, then picks the next one. Pure greedy; no Hungarian, no LLM, no
-external coordinator — just multiple of the same loop running in
-parallel.
+"""Spawn several USD tractors, scatter USD bales, and collect them greedily.
 
 Usage:
-    python bale_run_multi.py [n_tractors] [n_bales] [field_size] [seed]
+    python scripts/bale_run_multi.py [n_tractors] [n_bales] [field_size] [seed]
 
-Defaults: n_tractors=3, n_bales=50, field_size=200, seed=42."""
+Defaults: n_tractors=3, n_bales=50, field_size=300, seed=42.
+
+This uses the same Gearbox USD-machine API as ``bale_run.py``. Each tractor is
+the same USD asset, but it is spawned with a unique runtime namespace so the
+controllers are independent:
+
+    gearbox/machines/<namespace>/state
+    gearbox/machines/<namespace>/cmd_vel
+"""
 
 from __future__ import annotations
 
@@ -17,276 +21,328 @@ import random
 import sys
 import time
 
-import zenoh
 import cbor2
+import zenoh
 
 
-PRESET = "tractor"
-RING_RADIUS    = 10.0   # m — spawn ring around (0, 0)
-GOTO_TOLERANCE = 2.0    # m arrival radius
-GOTO_TIMEOUT   = 120.0  # s before we give up on a single goto
-TICK_DT        = 0.2    # s per main-loop iteration
+TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
+BALE_USD_PATH = "markers/bale.usdz"
+RING_RADIUS = 15.0
+ARRIVAL_RADIUS = 2.2
+GOAL_TIMEOUT = 120.0
+TICK_DT = 0.10
 
 
-# ── Spawn helpers ───────────────────────────────────────────────────
-def spawn_n_tractors(session: zenoh.Session, n: int) -> list[str]:
-    """Spawn `n` tractors in a ring around (0, 0), facing inward.
-    Returns the list of topic prefixes the simulator confirmed."""
-    landed: list[dict] = []
-
-    def on_spawned(sample: zenoh.Sample) -> None:
-        try:
-            landed.append(cbor2.loads(bytes(sample.payload)))
-        except Exception:  # noqa: BLE001
-            pass
-
-    sub = session.declare_subscriber("gearbox/sim/spawned", on_spawned)
-    # Subscriber-advertisement settle — the simulator's reply lands on
-    # the very next Update frame after the spawn (~16 ms) and would
-    # otherwise race our subscriber registration.
-    time.sleep(0.5)
-
-    for i in range(n):
-        angle = (2.0 * math.pi * i) / n
-        x = RING_RADIUS * math.cos(angle)
-        z = RING_RADIUS * math.sin(angle)
-        # gearbox forward = -Z; yaw = atan2(-x, -z) points the
-        # vehicle's forward axis toward the origin.
-        yaw_deg = math.degrees(math.atan2(-x, -z))
-        session.put("gearbox/sim/spawn", cbor2.dumps({
-            "preset": PRESET,
-            "x": float(x), "y": 0.0, "z": float(z),
-            "yaw_deg": float(yaw_deg),
-            "player": False,
-        }))
-        time.sleep(0.1)  # let the sim allocate ids monotonically
-
-    t0 = time.time()
-    while len(landed) < n and time.time() - t0 < 5.0:
-        time.sleep(0.05)
-    del sub
-    return [f"{ev['name']}_{ev['id']}" for ev in landed]
+def wrap_pi(angle: float) -> float:
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
-# ── Per-robot state ─────────────────────────────────────────────────
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def put_cbor(session: zenoh.Session, key: str, payload: dict) -> None:
+    session.put(key, cbor2.dumps(payload))
+
+
 class RobotProxy:
-    """Mirror of one gearbox vehicle on the python side. Holds the
-    last odom pose, the goto-active edge tracker, and the bale we
-    last asked it to visit (None when free)."""
-
-    def __init__(self, idx: int, prefix: str):
+    def __init__(self, idx: int, namespace: str):
         self.idx = idx
-        self.prefix = prefix
+        self.namespace = namespace
         self.pose = (0.0, 0.0)
-        self.goto_active = False
-        self.goto_was_active = False
+        self.last_pose = (0.0, 0.0)
+        self.heading_rad: float | None = None
+        self.seen = False
         self.target_bale: int | None = None
-        self.goto_t0 = 0.0
+        self.target_since = 0.0
         self.collected: list[int] = []
 
+    @property
+    def is_idle(self) -> bool:
+        return self.target_bale is None
+
     def declare(self, session: zenoh.Session) -> None:
-        def on_odom(sample: zenoh.Sample) -> None:
+        def on_state(sample: zenoh.Sample) -> None:
             try:
                 d = cbor2.loads(bytes(sample.payload))
             except Exception:  # noqa: BLE001
                 return
             p = d.get("position", [0.0, 0.0, 0.0])
+            self.last_pose = self.pose
+            # Gearbox/Rapier state is Y-up: field plane is X/Z.
             self.pose = (float(p[0]), float(p[2]))
+            heading = d.get("heading_rad", None)
+            if heading is not None:
+                self.heading_rad = float(heading)
+            self.seen = True
 
-        def on_status(sample: zenoh.Sample) -> None:
-            try:
-                d = cbor2.loads(bytes(sample.payload))
-            except Exception:  # noqa: BLE001
-                return
-            self.goto_active = bool(d.get("active", False))
-
-        # Bind the subscriber objects to `self` so the GC doesn't drop
-        # them; zenoh stops delivering once the handle is collected.
-        self._sub_odom = session.declare_subscriber(
-            f"{self.prefix}/odom", on_odom
-        )
-        self._sub_status = session.declare_subscriber(
-            f"{self.prefix}/goto_status", on_status
+        self._sub_state = session.declare_subscriber(
+            f"gearbox/machines/{self.namespace}/state",
+            on_state,
         )
 
-    @property
-    def is_idle(self) -> bool:
-        return self.target_bale is None and not self.goto_active
+    def publish_cmd(self, session: zenoh.Session, speed: float, yaw_rate: float) -> None:
+        put_cbor(
+            session,
+            f"gearbox/machines/{self.namespace}/cmd_vel",
+            {
+                "linear": [float(speed), 0.0, 0.0],
+                "angular": [0.0, 0.0, float(yaw_rate)],
+            },
+        )
+
+    def stop(self, session: zenoh.Session) -> None:
+        self.publish_cmd(session, 0.0, 0.0)
+
+    def heading_or_motion(self, target_heading: float) -> float:
+        if self.heading_rad is not None:
+            return self.heading_rad
+        vx = self.pose[0] - self.last_pose[0]
+        vz = self.pose[1] - self.last_pose[1]
+        if math.hypot(vx, vz) > 0.05:
+            return math.atan2(vx, vz)
+        return target_heading
 
 
-# ── Bale helpers ────────────────────────────────────────────────────
-def recolor_bale(
-    session: zenoh.Session, bale_id: int, x: float, z: float, variant: str
-) -> None:
-    session.put(
-        f"gearbox/markers/bale_{bale_id}",
-        cbor2.dumps({
-            "x": float(x), "z": float(z),
-            "usd_path": "markers/bale.usda",
-            "usd_variants": [["/bale", "color", variant]],
+def spawn_usd_tractors(session: zenoh.Session, robots: list[RobotProxy]) -> None:
+    landed: dict[str, dict] = {}
+
+    def on_spawned(sample: zenoh.Sample) -> None:
+        try:
+            d = cbor2.loads(bytes(sample.payload))
+        except Exception:  # noqa: BLE001
+            return
+        namespace = d.get("namespace")
+        if namespace:
+            landed[str(namespace)] = d
+
+    sub = session.declare_subscriber("gearbox/usd/loaded", on_spawned)
+    time.sleep(0.3)
+
+    n = len(robots)
+    for robot in robots:
+        angle = (2.0 * math.pi * robot.idx) / max(1, n)
+        x = RING_RADIUS * math.cos(angle)
+        z = RING_RADIUS * math.sin(angle)
+        desired_heading = math.atan2(-x, -z)
+        # The tractor's local forward is -Z at yaw=0, so add pi to aim that
+        # front vector at the desired field heading.
+        yaw_deg = math.degrees(desired_heading + math.pi)
+        put_cbor(
+            session,
+            f"gearbox/usd/load/{robot.namespace}",
+            {
+                "category": "machine",
+                "usd_path": TRACTOR_USD_PATH,
+                "x": float(x),
+                "y": 0.0,
+                "z": float(z),
+                "yaw_deg": float(yaw_deg),
+                "label": f"tractor_{robot.idx}.usd",
+                "namespace": robot.namespace,
+            },
+        )
+        time.sleep(0.1)
+
+    t0 = time.time()
+    while time.time() - t0 < 12.0:
+        if all(robot.seen for robot in robots):
+            break
+        time.sleep(0.05)
+    del sub
+
+    missing = [r.namespace for r in robots if not r.seen]
+    if missing:
+        raise RuntimeError(
+            "no state for spawned USD tractor namespaces: "
+            + ", ".join(missing)
+            + ". Restart make run so it includes the USD spawn API."
+        )
+    print(
+        "spawned USD tractors: "
+        + ", ".join(f"R{r.idx}={r.namespace}" for r in robots)
+    )
+
+
+def recolor_bale(session: zenoh.Session, bale_id: int, x: float, z: float, variant: str) -> None:
+    put_cbor(
+        session,
+        f"gearbox/usd/load/bale_{bale_id}",
+        {
+            "category": "static_usd",
+            "x": float(x),
+            "z": float(z),
+            "usd_path": BALE_USD_PATH,
             "remove": False,
-        }),
+        },
     )
 
 
 def remove_bale(session: zenoh.Session, bale_id: int) -> None:
-    session.put(
-        f"gearbox/markers/bale_{bale_id}",
-        cbor2.dumps({
-            "x": 0.0, "z": 0.0, "height": 0.0, "radius": 0.0,
-            "kind": "", "color": [0.0, 0.0, 0.0], "remove": True,
-        }),
+    put_cbor(session, f"gearbox/usd/load/bale_{bale_id}", {"x": 0.0, "z": 0.0, "remove": True})
+
+
+def show_target_indicator(
+    session: zenoh.Session,
+    robot_idx: int,
+    target: tuple[float, float] | None,
+) -> None:
+    load_id = f"target_indicator_{robot_idx}"
+    if target is None:
+        put_cbor(session, f"gearbox/usd/load/{load_id}", {"x": 0.0, "z": 0.0, "remove": True})
+        return
+    bx, bz = target
+    put_cbor(
+        session,
+        f"gearbox/usd/load/{load_id}",
+        {
+            "category": "static_usd",
+            "x": float(bx),
+            "y": 2.2,
+            "z": float(bz),
+            "kind": "box",
+            "height": 0.8,
+            "radius": 0.35,
+            "color": [1.0, 0.0, 0.0],
+            "remove": False,
+        },
     )
 
 
-# ── Greedy assignment ───────────────────────────────────────────────
+def clear_old_bales(session: zenoh.Session, count: int = 500) -> None:
+    for i in range(32):
+        show_target_indicator(session, i, None)
+    for i in range(count):
+        remove_bale(session, i)
+
+
 def pick_nearest_bale(
     robot: RobotProxy,
     bales: list[tuple[float, float]],
     visited: set[int],
     claimed: set[int],
 ) -> int | None:
-    """Closest bale to `robot` that no other robot owns and that
-    hasn't already been collected. Returns the bale id, or None if
-    nothing's available."""
     cx, cz = robot.pose
-    best_idx, best_d = -1, math.inf
+    best_idx = -1
+    best_d = math.inf
     for i, (bx, bz) in enumerate(bales):
         if i in visited or i in claimed:
             continue
         d = math.hypot(bx - cx, bz - cz)
         if d < best_d:
-            best_d = d
             best_idx = i
+            best_d = d
     return best_idx if best_idx >= 0 else None
 
 
-def send_goto(
-    session: zenoh.Session, prefix: str, x: float, z: float
-) -> None:
-    session.put(
-        f"{prefix}/goto",
-        cbor2.dumps({
-            "x": float(x), "z": float(z),
-            "yaw_deg": 0.0,
-            "tolerance": GOTO_TOLERANCE,
-            "yaw_tolerance_deg": 0.0,
-            "max_speed": 0.0,
-            "cancel": False,
-        }),
-    )
+def drive_toward(session: zenoh.Session, robot: RobotProxy, target: tuple[float, float]) -> float:
+    tx, tz = target
+    cx, cz = robot.pose
+    dx = tx - cx
+    dz = tz - cz
+    d_now = math.hypot(dx, dz)
+    target_heading = math.atan2(dx, dz)
+    heading = robot.heading_or_motion(target_heading)
+    err = wrap_pi(target_heading - heading)
+
+    turn_slowdown = max(0.20, math.cos(abs(err)))
+    speed = min(3.5, 0.45 + 0.35 * d_now) * turn_slowdown
+    if abs(err) > 1.7:
+        speed = 0.35
+    yaw_rate = clamp(1.8 * err, -1.2, 1.2)
+    robot.publish_cmd(session, speed, yaw_rate)
+    return d_now
 
 
-def cancel_goto(session: zenoh.Session, prefix: str) -> None:
-    session.put(
-        f"{prefix}/goto",
-        cbor2.dumps({
-            "x": 0.0, "z": 0.0, "yaw_deg": 0.0,
-            "tolerance": 0.0, "yaw_tolerance_deg": 0.0,
-            "max_speed": 0.0, "cancel": True,
-        }),
-    )
-
-
-# ── Main ────────────────────────────────────────────────────────────
 def main() -> None:
-    n_tractors = int(sys.argv[1])   if len(sys.argv) > 1 else 3
-    n_bales    = int(sys.argv[2])   if len(sys.argv) > 2 else 50
-    field      = float(sys.argv[3]) if len(sys.argv) > 3 else 200.0
-    seed       = int(sys.argv[4])   if len(sys.argv) > 4 else 42
+    n_tractors = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+    n_bales = int(sys.argv[2]) if len(sys.argv) > 2 else 50
+    field = float(sys.argv[3]) if len(sys.argv) > 3 else 300.0
+    seed = int(sys.argv[4]) if len(sys.argv) > 4 else 42
 
     rng = random.Random(seed)
     half = field / 2.0
-    bales: list[tuple[float, float]] = [
-        (rng.uniform(-half, half), rng.uniform(-half, half))
-        for _ in range(n_bales)
-    ]
+    bales = [(rng.uniform(-half, half), rng.uniform(-half, half)) for _ in range(n_bales)]
+
+    run_id = int(time.time())
+    robots = [RobotProxy(i, f"robot_{run_id}_{i}") for i in range(n_tractors)]
 
     session = zenoh.open(zenoh.Config())
-
-    # Wipe whatever's left from a previous run (vehicles + markers).
-    session.put("gearbox/sim/reset", cbor2.dumps({"pause_clock": False}))
-    # Unpause so the freshly-spawned tractors can drive.
-    session.put("gearbox/sim/clock/command", cbor2.dumps({"SetPaused": False}))
-    time.sleep(0.2)
-
-    print(f"spawning {n_tractors} tractors")
-    prefixes = spawn_n_tractors(session, n_tractors)
-    if len(prefixes) < n_tractors:
-        print(f"only got {len(prefixes)}/{n_tractors} confirmations — "
-              f"is the simulator running?")
-        session.close()
-        sys.exit(1)
-
-    robots = [RobotProxy(i, p) for i, p in enumerate(prefixes)]
-    for r in robots:
-        r.declare(session)
-    time.sleep(0.3)  # let per-vehicle subscribers wire up
-
-    print(f"scattering {n_bales} bales across {field:.0f} × {field:.0f} m field")
-    for i, (bx, bz) in enumerate(bales):
-        recolor_bale(session, i, bx, bz, "default")
-    time.sleep(0.5)
-
-    visited: set[int] = set()
-    print(f"\n── DRIVING  R={n_tractors}  B={n_bales}  field={field:.0f} m ──\n")
-
     try:
+        for robot in robots:
+            robot.declare(session)
+
+        print(f"spawning {n_tractors} USD tractors")
+        spawn_usd_tractors(session, robots)
+
+        print(f"scattering {n_bales} bales across {field:.0f} × {field:.0f} m field")
+        clear_old_bales(session, max(500, n_bales + 50))
+        for i, (bx, bz) in enumerate(bales):
+            recolor_bale(session, i, bx, bz, "default")
+        time.sleep(0.3)
+
+        visited: set[int] = set()
+        print(f"\n── DRIVING  R={n_tractors}  B={n_bales}  field={field:.0f} m ──\n")
+
         while len(visited) < n_bales:
             now = time.time()
-            claimed = {
-                r.target_bale for r in robots if r.target_bale is not None
-            }
+            claimed = {r.target_bale for r in robots if r.target_bale is not None}
 
-            for r in robots:
-                # ── Edge: goto active → inactive  ⇒  arrival ──
-                if r.goto_was_active and not r.goto_active:
-                    if r.target_bale is not None:
-                        bid = r.target_bale
+            for robot in robots:
+                if robot.target_bale is not None:
+                    bid = robot.target_bale
+                    distance = drive_toward(session, robot, bales[bid])
+                    if distance < ARRIVAL_RADIUS:
+                        robot.stop(session)
                         if bid not in visited:
                             visited.add(bid)
-                            r.collected.append(bid)
+                            robot.collected.append(bid)
                             remove_bale(session, bid)
-                            print(f"  R{r.idx} reached bale_{bid}  "
-                                  f"  collected={len(r.collected)}  "
-                                  f"  total={len(visited)}/{n_bales}")
-                        r.target_bale = None
-                r.goto_was_active = r.goto_active
+                            show_target_indicator(session, robot.idx, None)
+                            print(
+                                f"  R{robot.idx} reached bale_{bid}"
+                                f"  collected={len(robot.collected)}"
+                                f"  total={len(visited)}/{n_bales}"
+                            )
+                        robot.target_bale = None
+                    elif now - robot.target_since > GOAL_TIMEOUT:
+                        robot.stop(session)
+                        print(f"  R{robot.idx} TIMEOUT on bale_{bid} — releasing")
+                        show_target_indicator(session, robot.idx, None)
+                        robot.target_bale = None
 
-                # ── Timeout — drop the goal so this robot can pick again ──
-                if (r.target_bale is not None
-                        and now - r.goto_t0 > GOTO_TIMEOUT):
-                    print(f"  R{r.idx} TIMEOUT on bale_{r.target_bale} — releasing")
-                    cancel_goto(session, r.prefix)
-                    r.target_bale = None
-
-                # ── If idle, pick the nearest unclaimed bale ──
-                if r.is_idle:
-                    pick = pick_nearest_bale(r, bales, visited, claimed)
+                if robot.is_idle:
+                    pick = pick_nearest_bale(robot, bales, visited, claimed)
                     if pick is None:
                         continue
                     bx, bz = bales[pick]
-                    r.target_bale = pick
-                    r.goto_t0 = now
+                    robot.target_bale = pick
+                    robot.target_since = now
                     claimed.add(pick)
-                    cx, cz = r.pose
+                    cx, cz = robot.pose
                     d = math.hypot(bx - cx, bz - cz)
-                    print(f"  R{r.idx} → bale_{pick}  "
-                          f"target=({bx:+7.2f},{bz:+7.2f})  "
-                          f"d={d:6.2f} m")
                     recolor_bale(session, pick, bx, bz, "red")
-                    send_goto(session, r.prefix, bx, bz)
+                    show_target_indicator(session, robot.idx, (bx, bz))
+                    print(
+                        f"  R{robot.idx} → bale_{pick}"
+                        f"  target=({bx:+7.2f},{bz:+7.2f})"
+                        f"  d={d:6.2f} m"
+                    )
 
             time.sleep(TICK_DT)
 
     except KeyboardInterrupt:
-        print("\ninterrupted — cancelling all gotos")
-        for r in robots:
-            cancel_goto(session, r.prefix)
+        print("\ninterrupted — stopping all tractors")
+        for robot in robots:
+            robot.stop(session)
+            show_target_indicator(session, robot.idx, None)
     finally:
-        print(f"\nfinal: collected {len(visited)}/{n_bales} bales")
-        for r in robots:
-            print(f"  R{r.idx} ({r.prefix}): {len(r.collected)} bales")
+        for robot in robots:
+            robot.stop(session)
+            show_target_indicator(session, robot.idx, None)
+        print(f"\nfinal: collected {len({b for r in robots for b in r.collected})}/{n_bales} bales")
+        for robot in robots:
+            print(f"  R{robot.idx} ({robot.namespace}): {len(robot.collected)} bales")
         session.close()
 
 

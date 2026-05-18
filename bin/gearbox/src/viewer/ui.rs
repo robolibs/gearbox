@@ -2293,10 +2293,10 @@ fn draw_controllers_panel(
                         ui,
                         "control",
                         &format!(
-                            "{} drive wheel(s), {} steer joint(s), {} wheel joint(s)",
-                            machine.drive_wheels.len(),
-                            machine.steer_joints.len(),
-                            machine.wheel_joints.len()
+                            "{} powered wheel joint(s), {} steering joint(s), {} passive wheel joint(s)",
+                            machine.powered_wheel_joints.len(),
+                            machine.steering_joints.len(),
+                            machine.passive_wheel_joints.len()
                         ),
                     );
 

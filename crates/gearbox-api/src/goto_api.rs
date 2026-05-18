@@ -209,7 +209,7 @@ impl Plugin for GotoApiPlugin {
                 // Status pubs after the step. (The old red-cuboid
                 // visual goal marker has been removed — UIs that
                 // want a target indicator should publish their own
-                // marker via the markers API.)
+                // target visualization via the generic USD loader API.)
                 app.add_systems(PostUpdate, publish_goto_status_system);
                 info!("gearbox-api: goto API ready (goto / goto_status)");
             }

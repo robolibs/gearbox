@@ -69,11 +69,9 @@ pub fn husky() -> VehicleSpec {
     let radius = 0.165;
     let width = 0.15;
 
+    // Suspension rest length only — spring stiffness/damping are
+    // auto-derived from chassis mass in `gearbox-physics`.
     let rest = 0.06;
-    let stiffness = 20.0;
-    let damping = 2.5;
-    let friction = 22.0;
-    let max_force = 4_000.0;
 
     // Wheels hang 22 cm below the chassis bottom — about half the
     // wheel radius sticks out under the body, so ground clearance
@@ -96,21 +94,17 @@ pub fn husky() -> VehicleSpec {
         suspension_dir: Point::new(0.0, -1.0, 0.0),
         axle_dir: Point::new(-1.0, 0.0, 0.0),
         suspension_rest_length: rest,
-        suspension_stiffness: stiffness,
-        suspension_damping: damping,
-        max_suspension_force: max_force,
-        friction_slip: friction,
+        mass: 6.0,
+        hub_mass: 1.5,
+        tire_friction: 1.0,
         radius,
         width,
         driven: true,   // all four wheels driven on a skid-steer
         steered: false, // no steering joints — `Differential` mode ignores this
-        // Linear + angular both scale with `max_engine_force`, so
-        // cutting it by 4× again (12.5 → 3.125 N per wheel) slows
-        // both the straight-line dash and the spin-in-place together.
-        // Keeps the steer/throttle ratio set by `TURN_GAIN = 6.0`
-        // intact — motion just happens at a calmer pace.
-        max_engine_force: 3.125,
-        max_brake: 2.5,
+        // Tractive force at the contact patch; `Differential` mode
+        // amplifies the steer component via `TURN_GAIN`.
+        max_engine_force: 60.0,
+        max_brake: 40.0,
         max_steer_rad: 0.0,
         steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
         usd_prim_path: Some(prim),

@@ -1,37 +1,64 @@
 //! Narrow view of the physics engine that the rest of the library
 //! can touch.
 //!
-//! The only place that actually imports `rapier3d` types for a body /
-//! controller is [`PhysicsHandles`] — every other consumer (drive
-//! controllers, eventually trailers, sensors) goes through
-//! [`BodyProxy`] and [`WheelsProxy`]. That's what keeps the future
-//! "swap rapier for something else" refactor a contained job: swap
-//! the contents of this file + `sim.rs` construction code, leave the
-//! rest of the crate alone.
+//! The only place that imports `rapier3d` body / joint handles is
+//! [`PhysicsHandles`] — every other consumer (drive controllers,
+//! trailers, sensors) goes through [`BodyProxy`] and [`WheelsProxy`].
 //!
-//! The proxies intentionally only expose operations the simulator
-//! **currently uses**. Extend sparingly — every new method here is a
-//! method any future backend will have to implement.
+//! Each vehicle is a chassis body plus, per wheel, a light **hub** body
+//! and a **wheel** body:
+//!
+//! ```text
+//! chassis ──[joint A: prismatic suspension (+ revolute steer)]── hub
+//!                                  └──[joint B: revolute spin]── wheel
+//! ```
+//!
+//! Drive controllers don't touch any of that — they read wheel
+//! snapshots and write per-wheel commands ([`WheelCommand`]) through
+//! [`WheelsProxy`]; `Sim::step` applies the commands to the joints and
+//! wheel bodies after the controller has run (which sidesteps the
+//! borrow conflict between the chassis `BodyProxy` and the wheel
+//! bodies).
 
-use rapier3d::control::{DynamicRayCastVehicleController, Wheel};
 use rapier3d::prelude::*;
 
 /// The engine-specific handles for one vehicle. `pub(crate)` — a
 /// preset / UI consumer cannot construct or inspect this directly.
 pub(crate) struct PhysicsHandles {
+    /// Chassis rigid body.
     pub body: RigidBodyHandle,
-    pub controller: DynamicRayCastVehicleController,
+    /// Per-wheel hub + wheel bodies and their joints.
+    pub wheels: Vec<WheelHandles>,
+}
+
+/// Bodies + joints making up one physically-simulated wheel.
+pub(crate) struct WheelHandles {
+    /// Suspension/steering hub body.
+    pub hub: RigidBodyHandle,
+    /// Spinning wheel body (carries the tyre collider).
+    pub wheel: RigidBodyHandle,
+    /// chassis ↔ hub joint: prismatic suspension, plus a motorised
+    /// `AngX` steer DOF when `steered`.
+    pub joint_a: ImpulseJointHandle,
+    /// hub ↔ wheel joint: revolute spin axis (carries drive/brake).
+    pub joint_b: ImpulseJointHandle,
+    pub steered: bool,
+    pub radius: f64,
+    /// Axle direction in the wheel body's local frame (normalised).
+    pub axle_local: Vec3,
+    /// Wheel-centre offset from the chassis body origin, chassis-local.
+    /// Used to snap wheels back under a teleported / dragged chassis.
+    pub center_local: Vec3,
+    /// Last commanded steering angle (rad) — reported back to controllers.
+    pub last_steering: f64,
+    /// Accumulated rolling angle (rad) for visualisers.
+    pub spin_angle: f64,
 }
 
 // ─── Body proxy ─────────────────────────────────────────────────────
 //
 // Thin wrapper around `&mut RigidBody` that hands out the handful of
-// getters / setters drive controllers actually need. All the math
-// types crossing the boundary (`Vec3`, `Rot3`) are re-exports from
-// `rapier3d::prelude`, which are really `nalgebra::{Vector3,
-// UnitQuaternion}<f32>`. Future backends likely share the same math
-// crate; the ONLY thing that changes is the `rb: &mut RigidBody` on
-// the inside.
+// getters / setters drive controllers actually need.
 
 pub struct BodyProxy<'a> {
     rb: &'a mut RigidBody,
@@ -88,88 +115,110 @@ impl<'a> BodyProxy<'a> {
 
 // ─── Wheels proxy ───────────────────────────────────────────────────
 //
-// The rapier ray-cast vehicle controller keeps its wheels in an
-// `&[Wheel] / &mut [Wheel]` slice. Ground drive controllers read
-// normal forces + the previous-tick steering angle, and write
-// engine_force / brake / steering each tick. We expose exactly those
-// operations.
+// A drive controller sees each wheel as a read-only snapshot (the
+// previous tick's steering + the live suspension load) and writes a
+// command (engine force / brake / steering). The proxy is a pair of
+// plain buffers — no physics borrow — so `Sim::step` can split the
+// chassis `BodyProxy` from the wheel-body access cleanly.
+
+/// What a controller can observe about a wheel this tick.
+#[derive(Clone, Copy, Default)]
+pub struct WheelSnapshot {
+    /// Current steering angle (rad) — the previous tick's command.
+    pub steering: f64,
+    /// Suspension-spring load (N) — a proxy for the wheel's normal force.
+    pub normal_force: f64,
+}
+
+/// What a controller asks of a wheel this tick.
+#[derive(Clone, Copy, Default)]
+pub struct WheelCommand {
+    /// Tractive force at the contact patch (N). Converted to wheel
+    /// torque (`force × radius`) when applied.
+    pub engine_force: f64,
+    /// Brake torque cap (N·m).
+    pub brake: f64,
+    /// Target steering angle (rad). Ignored on non-steered wheels.
+    pub steering: f64,
+}
 
 pub struct WheelsProxy<'a> {
-    controller: &'a mut DynamicRayCastVehicleController,
+    snap: &'a [WheelSnapshot],
+    cmd: &'a mut [WheelCommand],
 }
 
 impl<'a> WheelsProxy<'a> {
-    pub(crate) fn new(controller: &'a mut DynamicRayCastVehicleController) -> Self {
-        Self { controller }
+    pub(crate) fn new(snap: &'a [WheelSnapshot], cmd: &'a mut [WheelCommand]) -> Self {
+        Self { snap, cmd }
     }
 
     pub fn len(&self) -> usize {
-        self.controller.wheels().len()
+        self.snap.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.snap.is_empty()
     }
 
     /// Immutable view of one wheel's drive-relevant fields.
-    pub fn get(&self, idx: usize) -> Option<WheelView<'_>> {
-        self.controller.wheels().get(idx).map(|w| WheelView { w })
+    pub fn get(&self, idx: usize) -> Option<WheelView> {
+        self.snap.get(idx).map(|s| WheelView {
+            steering: s.steering,
+            normal_force: s.normal_force,
+        })
     }
 
-    /// Mutable view of one wheel's drive-relevant fields.
+    /// Mutable command handle for one wheel.
     pub fn get_mut(&mut self, idx: usize) -> Option<WheelCtrl<'_>> {
-        self.controller
-            .wheels_mut()
-            .get_mut(idx)
-            .map(|w| WheelCtrl { w })
+        let steering_now = self.snap.get(idx)?.steering;
+        let cmd = self.cmd.get_mut(idx)?;
+        Some(WheelCtrl { steering_now, cmd })
     }
 
-    /// Iterate a specific fixed field across all wheels — currently
-    /// only used for collecting suspension normal forces. Exposed as
-    /// a free-standing method so callers don't need to call `.get()`
-    /// in a loop + allocate.
+    /// Per-wheel suspension loads — used by the weight-transfer open
+    /// differential. Order matches the spec's wheel order.
     pub fn normal_forces(&self) -> Vec<f64> {
-        self.controller
-            .wheels()
-            .iter()
-            .map(|w| w.wheel_suspension_force.max(0.0))
-            .collect()
+        self.snap.iter().map(|s| s.normal_force).collect()
     }
 }
 
-/// Read-only view of a wheel — what the drive controllers need to
-/// inspect (current angle, suspension normal force).
-pub struct WheelView<'a> {
-    w: &'a Wheel,
+/// Read-only view of a wheel — current steering angle + suspension load.
+#[derive(Clone, Copy)]
+pub struct WheelView {
+    steering: f64,
+    normal_force: f64,
 }
 
-impl<'a> WheelView<'a> {
+impl WheelView {
     pub fn steering(&self) -> f64 {
-        self.w.steering
+        self.steering
     }
 
     pub fn wheel_suspension_force(&self) -> f64 {
-        self.w.wheel_suspension_force
+        self.normal_force
     }
 }
 
-/// Mutable view of a wheel — engine force, brake, steering angle.
-/// The raycast state on the Wheel is read-only from here; the
-/// controller itself updates it during `update_vehicle`.
+/// Mutable command handle for a wheel — engine force, brake, steering.
 pub struct WheelCtrl<'a> {
-    w: &'a mut Wheel,
+    steering_now: f64,
+    cmd: &'a mut WheelCommand,
 }
 
-impl<'a> WheelCtrl<'a> {
+impl WheelCtrl<'_> {
     pub fn steering(&self) -> f64 {
-        self.w.steering
+        self.steering_now
     }
 
     pub fn set_steering(&mut self, angle: f64) {
-        self.w.steering = angle;
+        self.cmd.steering = angle;
     }
 
     pub fn set_engine_force(&mut self, force: f64) {
-        self.w.engine_force = force;
+        self.cmd.engine_force = force;
     }
 
     pub fn set_brake(&mut self, brake: f64) {
-        self.w.brake = brake;
+        self.cmd.brake = brake;
     }
 }

@@ -8,19 +8,16 @@ endif
 
 TOP_DIR := $(CURDIR)
 CARGO := cargo
-# DISPLAY pins which X server receives the window (matches the Nvidia GL
-# display when running inside WSL / multi-X setups). Override if you need
-# `:0` or similar: `make run DISPLAY=:0`.
+BACKEND ?= x11
 DISPLAY ?= :1
-# Wrapper that forwards GPU/display access. `nixVulkan` = Bevy/wgpu path.
-# Override with `make run RUN_WITH=nixGL` or `RUN_WITH=` for native.
 RUN_WITH ?= nixVulkan
 
 $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
+$(info Display: $(BACKEND) backend)
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r test t check fmt bench clean help h headless
+.PHONY: build b compile c run r headless test t check fmt bench clean help h
 
 build:
 	@$(CARGO) build --bin gearbox
@@ -34,11 +31,7 @@ compile:
 c: compile
 
 run:
-	@if pkg-config --exists wayland-client 2>/dev/null; then \
-		DISPLAY=$(DISPLAY) $(RUN_WITH) $(CARGO) run --bin gearbox; \
-	else \
-		nix develop --impure -c $(MAKE) run DISPLAY=$(DISPLAY) RUN_WITH="$(RUN_WITH)" CARGO="$(CARGO)"; \
-	fi
+	@$(RUN_WITH) $(CARGO) run --bin gearbox
 
 r: run
 
@@ -69,7 +62,7 @@ help:
 	@echo "Available targets:"
 	@echo "  build        Build the gearbox editor binary"
 	@echo "  compile      Clean and rebuild"
-	@echo "  run          Run the editor: DISPLAY=$(DISPLAY) $(RUN_WITH) cargo run --bin gearbox"
+	@echo "  run          Run the editor ($(BACKEND) backend, $(RUN_WITH) wrapper)"
 	@echo "  headless     Build the headless sim crates (gearbox-core + gearbox-physics)"
 	@echo "  test         Run the headless smoke test"
 	@echo "  check        Run cargo check on the binary"
@@ -79,7 +72,9 @@ help:
 	@echo
 	@echo "Examples:"
 	@echo "  make run"
-	@echo "  make run DISPLAY=:0           # target a different X server"
+	@echo "  make run BACKEND=x11          # force X11 / XWayland (.envrc auto-detects)"
+	@echo "  make run BACKEND=wayland      # force native Wayland"
+	@echo "  make run DISPLAY=:0           # target a different X server (BACKEND=x11)"
 	@echo "  make run RUN_WITH=nixGL       # OpenGL wrapper instead of Vulkan"
 	@echo "  make run RUN_WITH=            # no wrapper (native run)"
 	@echo

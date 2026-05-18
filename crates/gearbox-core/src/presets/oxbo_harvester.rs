@@ -36,11 +36,9 @@ pub fn oxbo_harvester() -> VehicleSpec {
     let radius = 0.768;
     let width = 0.7;
 
+    // Suspension rest length only — spring stiffness/damping are
+    // auto-derived from chassis mass in `gearbox-physics`.
     let rest = 0.3;
-    let stiffness = 160.0;
-    let damping = 14.0;
-    let friction = 28.0;
-    let max_force = 60_000.0;
 
     // Wheels stick 0.35 m below the chassis bottom.
     let chassis_bottom = -chassis_y * 0.5;
@@ -57,10 +55,9 @@ pub fn oxbo_harvester() -> VehicleSpec {
                 suspension_dir: Point::new(0.0, -1.0, 0.0),
                 axle_dir: Point::new(-1.0, 0.0, 0.0),
                 suspension_rest_length: rest,
-                suspension_stiffness: stiffness,
-                suspension_damping: damping,
-                max_suspension_force: max_force,
-                friction_slip: friction,
+                mass: 260.0,
+                hub_mass: 12.0,
+                tire_friction: 1.2,
                 radius,
                 width,
                 driven,

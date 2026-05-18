@@ -32,6 +32,8 @@ openusd.workspace = true
 zenoh.workspace = true
 serde = { version = "1", features = ["derive"] }
 ciborium = "0.2"
+gearbox-api = { workspace = true, features = ["bevy"] }
+gearbox-viz.workspace = true
 
 # rapier3d-f64 — needed to spawn the static ground collider directly
 # into `usd_bevy::physics::PhysicsWorld`.

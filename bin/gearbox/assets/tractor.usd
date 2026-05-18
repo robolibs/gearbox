@@ -16,12 +16,10 @@
 #   FR:  (-0.7775, -1.23, +0.525)
 #
 # Collision strategy:
-#   - Wheels carry convex-hull colliders on the tyre — they're the only
-#     things that need to interact with the ground and with obstacles.
-#   - Chassis is COLLIDER-LESS: it floats on its wheels via joints, same
-#     way a real vehicle works. Adding hulls on every m* fragment causes
-#     them to bulge past the visual silhouette, overlap with the wheel
-#     hulls at spawn, and the contact solver scatters everything.
+#   - Wheels carry clean primitive tyre colliders for ground contact.
+#   - Chassis visual fragments also carry convex-hull colliders so the
+#     body silhouette collides with other machines/obstacles. Own-wheel
+#     collisions are filtered by the articulation collision groups.
 #   - Front wheel rigid bodies are SIBLINGS of the steer link (not nested
 #     inside) — nested rigid bodies hit transform writeback ordering
 #     issues that drift them away from their parent each frame.
@@ -44,30 +42,6 @@ def Xform "robot" (
     token gearbox:machine:idPolicy = "prim_path"
     token gearbox:machine:upAxis = "Z"
     rel gearbox:machine:body = </robot/chassis>
-    rel gearbox:machine:wheels = [
-        </robot/wheel_back_left>,
-        </robot/wheel_back_right>,
-        </robot/wheel_front_left>,
-        </robot/wheel_front_right>
-    ]
-    rel gearbox:machine:driveWheels = [
-        </robot/wheel_back_left>,
-        </robot/wheel_back_right>
-    ]
-    rel gearbox:machine:steerBodies = [
-        </robot/steer_front_left>,
-        </robot/steer_front_right>
-    ]
-    rel gearbox:machine:steerJoints = [
-        </robot/Joints/steer_front_left>,
-        </robot/Joints/steer_front_right>
-    ]
-    rel gearbox:machine:wheelJoints = [
-        </robot/Joints/rev_back_left>,
-        </robot/Joints/rev_back_right>,
-        </robot/Joints/rev_front_left>,
-        </robot/Joints/rev_front_right>
-    ]
     rel gearbox:machine:role:poweredWheelJoints = [
         </robot/Joints/rev_back_left>,
         </robot/Joints/rev_back_right>
@@ -89,6 +63,7 @@ def Xform "robot" (
     token[] gearbox:controller:drive:stateInterfaces = ["pose", "velocity", "joint_state"]
     token gearbox:controller:drive:frameConvention = "usd_z_up"
     float gearbox:controller:drive:wheelBase = 2.37
+    float gearbox:controller:drive:wheelRadius = 0.45
     float gearbox:controller:drive:trackWidth = 1.685
     float gearbox:controller:drive:frontTrackWidth = 1.5675
     float gearbox:controller:drive:rearTrackWidth = 1.685
@@ -133,12 +108,16 @@ def Xform "robot" (
         }
     }
 
-    # =================== CHASSIS (no colliders, see header note) ===================
+    # =================== CHASSIS ===================
+    # Visual mesh children carry convex-hull colliders for external
+    # machine/obstacle contact. Own-wheel collisions are filtered by the
+    # articulation collision groups, so these hulls should not fight the tyres.
     def Xform "chassis" (
         prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
     )
     {
         float physics:mass = 2000.0
+        vector3f physics:diagonalInertia = (1300, 850, 1450)
 
         def Xform "m0"  (prepend references = @./tractor.usdc@</root/mesh0_dat_>)
         {
@@ -374,13 +353,16 @@ def Xform "robot" (
     }
 
     # =================== REAR WHEELS ===================
-    # Tyre carries a convex-hull collider; rim is visual-only.
+    # Visual tyre/rim meshes are visual-only. Each wheel body carries a clean
+    # primitive cylinder collider below the body origin. This avoids bumpy mesh
+    # hull contacts and gives Rapier a stable, wider tyre contact patch.
 
     def Xform "wheel_back_left" (
         prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
     )
     {
         float physics:mass = 200.0
+        vector3f physics:diagonalInertia = (30, 18, 18)
         double3 xformOp:translate = (0.8475, 1.14, 0.755)
         uniform token[] xformOpOrder = ["xformOp:translate"]
 
@@ -389,14 +371,23 @@ def Xform "robot" (
             double3 xformOp:translate = (0.8375, -1.14, -0.755)
             float3 xformOp:scale = (0.25, 0.25, 0.25)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-            over "sub01_005" (prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "MaterialBindingAPI"])
+            over "sub01_005" (prepend apiSchemas = ["MaterialBindingAPI"])
 
             {
-                uniform token physics:approximation = "convexHull"
-
                 rel material:binding = </robot/_materials/Material_004>
 
             }
+        }
+        def Cylinder "tire_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            double3 xformOp:translate = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            uniform token axis = "X"
+            double radius = 0.68
+            double height = 0.44
         }
         def Xform "rim" (prepend references = @./tractor.usdc@</root/wheel_back_left_rim>)
         {
@@ -415,6 +406,7 @@ def Xform "robot" (
     )
     {
         float physics:mass = 200.0
+        vector3f physics:diagonalInertia = (30, 18, 18)
         double3 xformOp:translate = (-0.8375, 1.14, 0.755)
         uniform token[] xformOpOrder = ["xformOp:translate"]
 
@@ -423,14 +415,23 @@ def Xform "robot" (
             double3 xformOp:translate = (0.8375, -1.14, -0.755)
             float3 xformOp:scale = (0.25, 0.25, 0.25)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-            over "sub01_006" (prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "MaterialBindingAPI"])
+            over "sub01_006" (prepend apiSchemas = ["MaterialBindingAPI"])
 
             {
-                uniform token physics:approximation = "convexHull"
-
                 rel material:binding = </robot/_materials/Material_004>
 
             }
+        }
+        def Cylinder "tire_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            double3 xformOp:translate = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            uniform token axis = "X"
+            double radius = 0.68
+            double height = 0.44
         }
         def Xform "rim" (prepend references = @./tractor.usdc@</root/wheel_back_right_rim>)
         {
@@ -453,6 +454,7 @@ def Xform "robot" (
     )
     {
         float physics:mass = 50.0
+        vector3f physics:diagonalInertia = (3, 3, 3)
         double3 xformOp:translate = (0.79, -1.23, 0.525)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -462,6 +464,7 @@ def Xform "robot" (
     )
     {
         float physics:mass = 50.0
+        vector3f physics:diagonalInertia = (3, 3, 3)
         double3 xformOp:translate = (-0.7775, -1.23, 0.525)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -473,6 +476,7 @@ def Xform "robot" (
     )
     {
         float physics:mass = 110.0
+        vector3f physics:diagonalInertia = (12, 7, 7)
         double3 xformOp:translate = (0.79, -1.23, 0.525)
         uniform token[] xformOpOrder = ["xformOp:translate"]
 
@@ -481,14 +485,21 @@ def Xform "robot" (
             double3 xformOp:translate = (-0.79, 1.23, -0.525)
             float3 xformOp:scale = (0.25, 0.25, 0.25)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-            over "sub01_004" (prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "MaterialBindingAPI"])
+            over "sub01_004" (prepend apiSchemas = ["MaterialBindingAPI"])
 
             {
-                uniform token physics:approximation = "convexHull"
-
                 rel material:binding = </robot/_materials/Material_004>
 
             }
+        }
+        def Cylinder "tire_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.4725
+            double height = 0.378
         }
         def Xform "rim" (prepend references = @./tractor.usdc@</root/wheel_front_left_rim>)
         {
@@ -507,6 +518,7 @@ def Xform "robot" (
     )
     {
         float physics:mass = 110.0
+        vector3f physics:diagonalInertia = (12, 7, 7)
         double3 xformOp:translate = (-0.7775, -1.23, 0.525)
         uniform token[] xformOpOrder = ["xformOp:translate"]
 
@@ -515,14 +527,21 @@ def Xform "robot" (
             double3 xformOp:translate = (0.7775, 1.23, -0.525)
             float3 xformOp:scale = (0.25, 0.25, 0.25)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
-            over "sub01_003" (prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "MaterialBindingAPI"])
+            over "sub01_003" (prepend apiSchemas = ["MaterialBindingAPI"])
 
             {
-                uniform token physics:approximation = "convexHull"
-
                 rel material:binding = </robot/_materials/Material_004>
 
             }
+        }
+        def Cylinder "tire_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.4725
+            double height = 0.378
         }
         def Xform "rim" (prepend references = @./tractor.usdc@</root/wheel_front_right_rim>)
         {

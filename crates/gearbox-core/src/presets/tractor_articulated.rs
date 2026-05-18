@@ -68,18 +68,11 @@ pub fn tractor_articulated() -> VehicleSpec {
         usd_scene_rotation: Quaternion::identity(),
     };
 
-    // Suspension. Tuned identically to the regular `tractor` preset
-    // (which is proven to settle and drive correctly under load).
-    // Earlier values (`stiffness = 80`, `rest = 0.05`) under-extended
-    // the spring at this mass — the chassis bottomed out, dragging
-    // its collider on the ground and starving the wheels of contact
-    // force, which in turn killed traction (the visible "wheels spin
-    // slow / vehicle doesn't move" symptom).
+    // Suspension rest length — distance from the chassis hardpoint to
+    // the wheel centre when the spring is fully extended. Spring
+    // stiffness/damping are auto-derived from the chassis mass inside
+    // `gearbox-physics`, so only the geometry lives here.
     let rest = 0.22;
-    let stiffness = 90.0;
-    let damping = 7.0;
-    let friction = 24.0;
-    let max_force = 30_000.0;
 
     // Wheel radii read from the USDA's wheel-centre heights
     // (the wheels sit on the ground in the source mesh, so
@@ -110,10 +103,9 @@ pub fn tractor_articulated() -> VehicleSpec {
         suspension_dir: Point::new(0.0, -1.0, 0.0),
         axle_dir: Point::new(-1.0, 0.0, 0.0),
         suspension_rest_length: rest,
-        suspension_stiffness: stiffness,
-        suspension_damping: damping,
-        max_suspension_force: max_force,
-        friction_slip: friction,
+        mass: 95.0,
+        hub_mass: 8.0,
+        tire_friction: 1.1,
         radius: front_radius,
         width: front_width,
         driven: false,
@@ -130,10 +122,9 @@ pub fn tractor_articulated() -> VehicleSpec {
         suspension_dir: Point::new(0.0, -1.0, 0.0),
         axle_dir: Point::new(-1.0, 0.0, 0.0),
         suspension_rest_length: rest,
-        suspension_stiffness: stiffness,
-        suspension_damping: damping,
-        max_suspension_force: max_force,
-        friction_slip: friction,
+        mass: 180.0,
+        hub_mass: 8.0,
+        tire_friction: 1.1,
         radius: rear_radius,
         width: rear_width,
         driven: true,

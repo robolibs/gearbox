@@ -82,13 +82,9 @@ pub fn robotti() -> VehicleSpec {
     let radius = 0.40;
     let width = 0.20 * 1.30; // 30% thicker tyres
 
+    // Suspension rest length only — spring stiffness/damping are
+    // auto-derived from chassis mass in `gearbox-physics`.
     let rest = 0.08;
-    // Scaled for 428 kg / 4 wheels ≈ 107 kg per wheel. Slightly stiff
-    // + well-damped so the body doesn't pogo when you press a key.
-    let stiffness = 140.0;
-    let damping = 14.0;
-    let friction = 18.0;
-    let max_force = 15_000.0;
 
     // Wheel positions taken from the robotti USD prim hierarchy
     // after the `rot_y(-π/2) * rot_x(-π/2)` orientation fix:
@@ -111,10 +107,9 @@ pub fn robotti() -> VehicleSpec {
         suspension_dir: Point::new(0.0, -1.0, 0.0),
         axle_dir: Point::new(-1.0, 0.0, 0.0),
         suspension_rest_length: rest,
-        suspension_stiffness: stiffness,
-        suspension_damping: damping,
-        max_suspension_force: max_force,
-        friction_slip: friction,
+        mass: 35.0,
+        hub_mass: 4.0,
+        tire_friction: 1.0,
         radius,
         width,
         driven: true,

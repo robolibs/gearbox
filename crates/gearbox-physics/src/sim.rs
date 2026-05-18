@@ -1,13 +1,16 @@
 //! The core sim — owns the rapier physics world and all vehicles.
 //!
+//! Vehicles are physically simulated: each wheel is a real rigid body
+//! (a light hub carries suspension + steering, the wheel body spins on
+//! the hub) and traction comes from the tyre collider's actual contact
+//! with the ground. See [`crate::vehicle_physics`] for the rig layout.
+//!
 //! The public API speaks [`datapod`] spatial types (f64). The rapier
-//! glam/f32 layer is an implementation detail, bridged through
-//! [`crate::convert`].
+//! layer is an implementation detail, bridged through [`crate::convert`].
 
 use std::collections::HashMap;
 
 use datapod::{Geo, Pose, Size, Velocity};
-use rapier3d::control::{DynamicRayCastVehicleController, WheelTuning};
 use rapier3d::prelude::*;
 
 use gearbox_core::planet::Planet;
@@ -19,7 +22,21 @@ use crate::convert::{
 };
 use crate::drive::{self, DriveContext};
 use crate::vehicle::VehicleState;
+use crate::vehicle_physics::{
+    BodyProxy, PhysicsHandles, WheelCommand, WheelHandles, WheelSnapshot, WheelsProxy,
+};
 use crate::world;
+
+/// Stiffness of the steering position-motor (force-based).
+const STEER_STIFFNESS: f64 = 1.0e6;
+/// Damping of the steering position-motor.
+const STEER_DAMPING: f64 = 3.0e4;
+/// Force cap on the steering motor.
+const STEER_MAX_FORCE: f64 = 1.0e7;
+/// Damping of the per-wheel brake (velocity-0) motor.
+const BRAKE_DAMPING: f64 = 1.0e5;
+/// Gravity magnitude used for suspension-spring auto-tuning.
+const GRAVITY: f64 = 9.81;
 
 pub struct Sim {
     // Rapier state.
@@ -57,6 +74,13 @@ impl Default for Sim {
 
 impl Sim {
     pub fn new() -> Self {
+        // A few extra solver iterations keep the wheel/suspension joint
+        // chains stable under heavy load at a 60 Hz step.
+        let integration = IntegrationParameters {
+            num_solver_iterations: 8,
+            ..IntegrationParameters::default()
+        };
+
         Self {
             bodies: RigidBodySet::new(),
             colliders: ColliderSet::new(),
@@ -67,8 +91,8 @@ impl Sim {
             narrow_phase: NarrowPhase::new(),
             ccd_solver: CCDSolver::new(),
             pipeline: PhysicsPipeline::new(),
-            integration: IntegrationParameters::default(),
-            gravity: Vector::new(0.0, -9.81, 0.0),
+            integration,
+            gravity: Vector::new(0.0, -GRAVITY, 0.0),
             planet: Planet::default(),
             unlimited_power: false,
             vehicles: HashMap::new(),
@@ -101,32 +125,31 @@ impl Sim {
 
     /// Spawn a vehicle from its declarative spec at the given pose.
     pub fn spawn_vehicle(&mut self, spec: VehicleSpec, pose: Pose) -> VehicleId {
+        let id = VehicleId(self.next_id);
+        self.next_id += 1;
+        // Non-zero per-vehicle tag stamped onto every vehicle collider's
+        // `user_data`, so `SameVehicleFilter` can reject same-vehicle
+        // contacts (wheels are separate bodies now).
+        let tag = world::vehicle_tag(id);
+
         let chassis = &spec.chassis;
         let half_extents = size_to_half_extents(chassis.size);
+        let chassis_pose = pose_to_rpose(pose);
 
+        // --- Chassis body + collider ------------------------------------
         let body = RigidBodyBuilder::dynamic()
-            .pose(pose_to_rpose(pose))
+            .pose(chassis_pose)
             .linear_damping(chassis.linear_damping)
             .angular_damping(chassis.angular_damping)
             .ccd_enabled(chassis.ccd)
-            // Rapier's vehicle controller only wakes the chassis on a
-            // *positive* engine_force — which means once the tractor
-            // sleeps, pressing S (negative force = reverse) would be
-            // silently ignored. Keep vehicles perma-awake.
+            // Keep vehicles perma-awake — see the power/control loops.
             .can_sleep(false)
             .build();
         let body_handle = self.bodies.insert(body);
 
-        // Drive mass + COM offset + inertia from the collider's
-        // MassProperties — `insert_with_parent` recomputes the body's
-        // mprops from its colliders, so setting them here is what actually
-        // sticks. (Using `RigidBodyBuilder::additional_mass_properties` has
-        // been unreliable in practice — the collider's default density
-        // keeps winning.)
-        // Inertia uses `inertia_size` if provided, otherwise the
-        // collider half-extents. Gantry-style machines (Robotti) need
-        // the full outer bounding box here even though the collider
-        // is a small central pod.
+        // Drive mass + COM offset + inertia from explicit MassProperties.
+        // `insert_with_parent` recomputes the body's mprops from its
+        // colliders, so setting them on the collider is what sticks.
         let inertia_half_extents = chassis
             .inertia_size
             .map(size_to_half_extents)
@@ -140,56 +163,16 @@ impl Sim {
             .mass_properties(mass_props)
             .friction(0.5)
             .restitution(0.0)
-            .collision_groups(world::chassis_groups())
+            .collision_groups(world::vehicle_groups())
+            .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
+            .user_data(tag)
             .build();
         self.colliders
             .insert_with_parent(collider, body_handle, &mut self.bodies);
 
-        // Per-wheel cylinder colliders so wheel-to-wheel contact with
-        // OTHER vehicles works. They live in the `WHEEL` group and
-        // only interact with other `WHEEL` colliders — so they never
-        // push against ground (raycast suspension handles that) and
-        // the vehicle's own wheel raycasts filter them out via
-        // `wheel_raycast_groups` (see the wheel update below).
-        //
-        // Position them at the suspension's rest-length midpoint —
-        // they're rigid with the chassis body (don't bob with
-        // suspension compression), which is fine for inter-vehicle
-        // bumps. Mass is 0 so they don't perturb the chassis
-        // MassProperties we set explicitly above.
-        for w in &spec.wheels {
-            let wheel_y = w.chassis_connection.y - (w.suspension_rest_length as f64) * 0.5;
-            let wheel_pos = point_to_vec3(datapod::Point::new(
-                w.chassis_connection.x,
-                wheel_y,
-                w.chassis_connection.z,
-            ));
-            // Cylinder default axis is +Y; rotate −π/2 around +Z so
-            // the axle lies along +X.
-            let axle_rot = Vec3::new(0.0, 0.0, -std::f64::consts::FRAC_PI_2);
-            let wheel_collider = ColliderBuilder::cylinder(w.width * 0.5, w.radius)
-                .translation(wheel_pos)
-                .rotation(axle_rot)
-                .mass(0.0)
-                .friction(0.8)
-                .restitution(0.0)
-                .collision_groups(world::wheel_groups())
-                .build();
-            self.colliders
-                .insert_with_parent(wheel_collider, body_handle, &mut self.bodies);
-        }
-
-        // Body-part colliders — karosserie (cab, hood, roof, bunker...)
-        // and tanks are solid bodywork and should stop other things.
-        // Hitches are visual markers, so skip them.
-        //
-        // All parts attach to the same rigid body as the chassis, so
-        // rapier automatically skips same-body self-collision — a hood
-        // sitting above the chassis won't push against it. They share
-        // the CHASSIS collision group, so they collide with ground,
-        // with other vehicles' chassis+parts, and with other vehicles'
-        // wheels (as inter-vehicle bumpers). mass=0 keeps them from
-        // perturbing the explicit chassis MassProperties above.
+        // --- Body-part colliders ----------------------------------------
+        // Karosserie + tanks are solid bodywork; hitches are visual only.
+        // mass = 0 so they don't perturb the explicit chassis mprops.
         for part in &spec.parts {
             if matches!(part.kind, PartKind::Hitch) {
                 continue;
@@ -202,44 +185,155 @@ impl Sim {
                 .mass(0.0)
                 .friction(0.5)
                 .restitution(0.0)
-                .collision_groups(world::chassis_groups())
+                .collision_groups(world::vehicle_groups())
+                .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
+                .user_data(tag)
                 .build();
             self.colliders
                 .insert_with_parent(part_collider, body_handle, &mut self.bodies);
         }
 
-        let mut controller = DynamicRayCastVehicleController::new(body_handle);
-        controller.index_up_axis = 1;
-        controller.index_forward_axis = 2;
+        // --- Suspension auto-tuning -------------------------------------
+        // The chassis is the sprung mass; share it across the wheels and
+        // size each spring to carry its share at ~25 % static compression.
+        let n_wheels = spec.wheels.len().max(1) as f64;
+        let sprung_share = chassis.mass / n_wheels;
+        let static_load = sprung_share * GRAVITY;
 
+        // --- Wheels: hub + wheel bodies, suspension + spin joints -------
+        let mut wheels = Vec::with_capacity(spec.wheels.len());
         for w in &spec.wheels {
-            let tuning = WheelTuning {
-                suspension_stiffness: w.suspension_stiffness,
-                suspension_damping: w.suspension_damping,
-                friction_slip: w.friction_slip,
-                max_suspension_force: w.max_suspension_force,
-                ..WheelTuning::default()
+            let c = point_to_vec3(w.chassis_connection);
+            let d = point_to_vec3(w.suspension_dir).normalize(); // suspension / kingpin
+            let a = point_to_vec3(w.axle_dir).normalize(); // axle / spin axis
+            let l = w.suspension_rest_length;
+            // Wheel centre at full suspension extension, chassis-local.
+            let center_local = c + d * l;
+            let center_world = chassis_pose.translation + chassis_pose.rotation * center_local;
+            // Hub + wheel start chassis-aligned and co-located at the
+            // wheel centre, so joint B (the spin revolute) is untwisted.
+            let start_pose = Pose3::from_parts(center_world, chassis_pose.rotation);
+
+            // Hub: no collider, small explicit mass properties so it has
+            // a defined (tiny) rotational inertia for the steering DOF.
+            let hub_inertia = (0.4 * w.hub_mass * 0.01).max(1.0e-3);
+            let hub = RigidBodyBuilder::dynamic()
+                .pose(start_pose)
+                .can_sleep(false)
+                .additional_mass_properties(MassProperties::new(
+                    Vec3::ZERO,
+                    w.hub_mass,
+                    Vec3::splat(hub_inertia),
+                ))
+                .build();
+            let hub_handle = self.bodies.insert(hub);
+
+            // Wheel body — carries the tyre collider.
+            let wheel_rb = RigidBodyBuilder::dynamic()
+                .pose(start_pose)
+                .can_sleep(false)
+                .build();
+            let wheel_handle = self.bodies.insert(wheel_rb);
+
+            // Round cylinder — far steadier on a flat plane than a bare
+            // cylinder edge. Sized so the rolling radius stays `w.radius`.
+            let q_axle = Rot3::from_rotation_arc(Vec3::Y, a);
+            let border = (w.radius * 0.2).min(w.width * 0.45).max(0.01);
+            let tyre = ColliderBuilder::round_cylinder(
+                (w.width * 0.5 - border).max(0.01),
+                (w.radius - border).max(0.01),
+                border,
+            )
+            .position(Pose3::from_parts(Vec3::ZERO, q_axle))
+            .mass(w.mass)
+            .friction(w.tire_friction)
+            .restitution(0.0)
+            .collision_groups(world::vehicle_groups())
+            .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS)
+            .user_data(tag)
+            .build();
+            self.colliders
+                .insert_with_parent(tyre, wheel_handle, &mut self.bodies);
+
+            // Suspension spring sized for this wheel's rest length.
+            let static_comp = (l * 0.25).max(0.02);
+            let susp_k = static_load / static_comp;
+            let susp_c = 2.0 * 0.7 * (susp_k * sprung_share).sqrt();
+            let susp_cap = (static_load * 8.0).max(1.0);
+            let lin_lo = l * 0.15;
+            let lin_hi = l * 1.9;
+
+            // Joint A: chassis ↔ hub. Prismatic suspension along `d`;
+            // steered wheels additionally free the `d`-twist (kingpin)
+            // and drive it with a stiff position motor.
+            let joint_a: GenericJoint = if w.steered {
+                let locked = JointAxesMask::LIN_Y
+                    | JointAxesMask::LIN_Z
+                    | JointAxesMask::ANG_Y
+                    | JointAxesMask::ANG_Z;
+                GenericJointBuilder::new(locked)
+                    .local_axis1(d)
+                    .local_axis2(d)
+                    .local_anchor1(c)
+                    .local_anchor2(Vec3::ZERO)
+                    .limits(JointAxis::LinX, [lin_lo, lin_hi])
+                    .motor_model(JointAxis::LinX, MotorModel::ForceBased)
+                    .motor_position(JointAxis::LinX, l, susp_k, susp_c)
+                    .motor_max_force(JointAxis::LinX, susp_cap)
+                    .motor_model(JointAxis::AngX, MotorModel::ForceBased)
+                    .motor_position(JointAxis::AngX, 0.0, STEER_STIFFNESS, STEER_DAMPING)
+                    .motor_max_force(JointAxis::AngX, STEER_MAX_FORCE)
+                    .build()
+            } else {
+                PrismaticJointBuilder::new(d)
+                    .local_anchor1(c)
+                    .local_anchor2(Vec3::ZERO)
+                    .limits([lin_lo, lin_hi])
+                    .motor_model(MotorModel::ForceBased)
+                    .motor_position(l, susp_k, susp_c)
+                    .motor_max_force(susp_cap)
+                    .build()
+                    .into()
             };
-            controller.add_wheel(
-                point_to_vec3(w.chassis_connection),
-                point_to_vec3(w.suspension_dir).normalize(),
-                point_to_vec3(w.axle_dir).normalize(),
-                w.suspension_rest_length,
-                w.radius,
-                &tuning,
-            );
+            let joint_a_handle = self
+                .impulse_joints
+                .insert(body_handle, hub_handle, joint_a, true);
+
+            // Joint B: hub ↔ wheel. Revolute spin axis; the motor is
+            // used only for braking (velocity-0, capped per tick).
+            let joint_b = RevoluteJointBuilder::new(a)
+                .local_anchor1(Vec3::ZERO)
+                .local_anchor2(Vec3::ZERO)
+                .motor_model(MotorModel::ForceBased)
+                .motor_velocity(0.0, 0.0)
+                .motor_max_force(0.0)
+                .build();
+            let joint_b_handle =
+                self.impulse_joints
+                    .insert(hub_handle, wheel_handle, joint_b, true);
+
+            wheels.push(WheelHandles {
+                hub: hub_handle,
+                wheel: wheel_handle,
+                joint_a: joint_a_handle,
+                joint_b: joint_b_handle,
+                steered: w.steered,
+                radius: w.radius,
+                axle_local: a,
+                center_local,
+                last_steering: 0.0,
+                spin_angle: 0.0,
+            });
         }
 
-        let id = VehicleId(self.next_id);
-        self.next_id += 1;
         self.vehicles.insert(
             id,
             VehicleState {
                 spec,
                 control: ControlInput::default(),
-                handles: crate::vehicle_physics::PhysicsHandles {
+                handles: PhysicsHandles {
                     body: body_handle,
-                    controller,
+                    wheels,
                 },
             },
         );
@@ -252,14 +346,25 @@ impl Sim {
         }
     }
 
-    /// Remove a vehicle from the sim. Drops the rapier rigid body
-    /// (which cascades to its child colliders) and the
-    /// `DynamicRayCastVehicleController`. The Bevy entity carrying
-    /// the visuals is despawned separately by the caller.
+    /// Remove a vehicle from the sim. Drops the chassis, every hub +
+    /// wheel body, and their joints + colliders. The Bevy entity
+    /// carrying the visuals is despawned separately by the caller.
     pub fn despawn_vehicle(&mut self, id: VehicleId) {
         let Some(state) = self.vehicles.remove(&id) else {
             return;
         };
+        for wh in &state.handles.wheels {
+            for h in [wh.wheel, wh.hub] {
+                self.bodies.remove(
+                    h,
+                    &mut self.islands,
+                    &mut self.colliders,
+                    &mut self.impulse_joints,
+                    &mut self.multibody_joints,
+                    true,
+                );
+            }
+        }
         self.bodies.remove(
             state.handles.body,
             &mut self.islands,
@@ -281,7 +386,8 @@ impl Sim {
     }
 
     /// Teleport a vehicle to the given pose, zeroing its velocities.
-    /// Used by the editor's drag-to-move gesture.
+    /// The hub + wheel bodies are snapped back to their rest position
+    /// under the chassis so the suspension joints don't explode.
     pub fn set_vehicle_pose(&mut self, id: VehicleId, pose: Pose) {
         let Some(v) = self.vehicles.get(&id) else {
             return;
@@ -291,6 +397,37 @@ impl Sim {
             rb.set_position(pose_to_rpose(pose), true);
             rb.set_linvel(Vec3::ZERO, true);
             rb.set_angvel(Vec3::ZERO, true);
+        }
+        self.snap_wheels_to_chassis(id);
+    }
+
+    /// Snap a vehicle's hub + wheel bodies back to their rest pose
+    /// relative to the current chassis pose, zeroing their velocities.
+    fn snap_wheels_to_chassis(&mut self, id: VehicleId) {
+        let Some(v) = self.vehicles.get(&id) else {
+            return;
+        };
+        let Some(chassis) = self.bodies.get(v.handles.body) else {
+            return;
+        };
+        let cpos = *chassis.position();
+        let targets: Vec<(RigidBodyHandle, RigidBodyHandle, Pose3)> = v
+            .handles
+            .wheels
+            .iter()
+            .map(|wh| {
+                let centre = cpos.translation + cpos.rotation * wh.center_local;
+                (wh.hub, wh.wheel, Pose3::from_parts(centre, cpos.rotation))
+            })
+            .collect();
+        for (hub, wheel, pose) in targets {
+            for h in [hub, wheel] {
+                if let Some(rb) = self.bodies.get_mut(h) {
+                    rb.set_position(pose, true);
+                    rb.set_linvel(Vec3::ZERO, true);
+                    rb.set_angvel(Vec3::ZERO, true);
+                }
+            }
         }
     }
 
@@ -316,12 +453,6 @@ impl Sim {
 
     /// True-north heading of the vehicle, degrees in `[0, 360)` —
     /// 0 = facing north, 90 = east, 180 = south, 270 = west.
-    ///
-    /// Works by projecting the vehicle's local +Z (forward) onto the
-    /// ENU tangent plane at its position on the planet. Uses an ENU
-    /// basis computed from the datum + local ENU projection, so it's
-    /// valid everywhere except exactly at the poles (where longitude
-    /// is undefined).
     pub fn vehicle_heading(&self, id: VehicleId) -> f64 {
         let pose = self.vehicle_pose(id);
 
@@ -330,11 +461,6 @@ impl Sim {
         pose.rotation.rotate_vector(&mut fx, &mut fy, &mut fz);
         let _ = fy;
 
-        // The library uses the same ENU convention as
-        // `Planet::local_to_geo`: +X = east, +Y = up, +Z = north near
-        // the datum. Over a few-hundred-km tangent patch those
-        // basis vectors don't meaningfully bend, so "heading" reduces
-        // to atan2 of the horizontal components.
         let rad = fx.atan2(fz);
         let deg = rad.to_degrees();
         if deg < 0.0 { deg + 360.0 } else { deg }
@@ -348,9 +474,7 @@ impl Sim {
             .unwrap_or_default()
     }
 
-    /// Angular velocity (rad/s) of the vehicle's chassis body. The
-    /// returned struct reuses `Velocity` as an xyz triple: `vy` is the
-    /// yaw rate (rotation around world +Y).
+    /// Angular velocity (rad/s) of the vehicle's chassis body.
     pub fn vehicle_angvel(&self, id: VehicleId) -> Velocity {
         self.vehicles
             .get(&id)
@@ -361,104 +485,42 @@ impl Sim {
 
     /// World-space pose of a wheel, oriented so the wheel's local Y axis
     /// aligns with the axle (matches Bevy's `Cylinder` primitive, which
-    /// extrudes along +Y).
+    /// extrudes along +Y). With physical wheels this is simply the wheel
+    /// body's pose plus the constant axle-alignment rotation.
     pub fn wheel_pose(&self, id: VehicleId, wheel: usize) -> Pose {
         let Some(v) = self.vehicles.get(&id) else {
             return Pose::default();
         };
-        let Some(wh) = v.handles.controller.wheels().get(wheel) else {
+        let Some(wh) = v.handles.wheels.get(wheel) else {
             return Pose::default();
         };
-        let spec = &v.spec.wheels[wheel];
-
-        let axle = normalize_or(wh.axle(), Vec3::X);
-        let down = normalize_or(wh.suspension(), Vec3::NEG_Y);
-
-        // When the wheel is airborne, rapier leaves `suspension_length` at
-        // its default (0), which makes `wheel.center()` return the chassis
-        // attach point — wheels appear embedded in the chassis. Compute the
-        // fully-extended (rest-length) position ourselves in that case.
-        let mut center = if wh.raycast_info().is_in_contact {
-            wh.center()
-        } else {
-            wh.raycast_info().hard_point_ws + down * wh.suspension_rest_length
+        let Some(wrb) = self.bodies.get(wh.wheel) else {
+            return Pose::default();
         };
-
-        // Kingpin-offset swing: if the spec says the steering pivot is
-        // offset from `chassis_connection` (Robotti's cylinder struts
-        // are outboard of the wheel hubs), swing the wheel around that
-        // kingpin. Purely visual — physics forces are still applied at
-        // `chassis_connection`, this just relocates the rendered hub.
-        //
-        // Geometry: kingpin in chassis-local is K = C + D, where C is
-        // the chassis_connection and D = steering_pivot_offset. The
-        // wheel hangs off an arm from K; at steering θ the arm rotates
-        // by θ around the vertical axis at K. Rest-position offset is
-        // −D (from K back to C), so at angle θ the wheel centre is
-        //     W_local = K + R_y(θ) · (−D) = C + D − R_y(θ)·D.
-        // We apply the delta (W_local − C) in world space to shift
-        // the rapier-computed centre.
-        let d_local = point_to_vec3(spec.steering_pivot_offset);
-        if d_local.length_squared() > 1e-10 {
-            if let Some(rb) = self.bodies.get(v.handles.body) {
-                let chassis_rot = rb.position().rotation;
-                let theta = wh.steering;
-                let (sin_t, cos_t) = theta.sin_cos();
-                // R_y(θ) · d_local (row vector form: only X and Z swap).
-                let rotated = Vec3::new(
-                    d_local.x * cos_t + d_local.z * sin_t,
-                    d_local.y,
-                    -d_local.x * sin_t + d_local.z * cos_t,
-                );
-                let local_delta = d_local - rotated;
-                center += chassis_rot * local_delta;
-            }
-        }
-
-        // "Up-in-wheel" direction: world up, orthogonalized against the axle
-        // so the basis stays orthonormal even when wheel has camber.
-        let up_raw = -down - axle * (-down).dot(axle);
-        let up = if up_raw.length_squared() > 1e-8 {
-            up_raw.normalize()
-        } else {
-            Vec3::Y
-        };
-        // Right-handed basis: X = Y × Z = axle × up.
-        let forward = axle.cross(up);
-
-        // Columns = images of local (+X, +Y, +Z). Determinant = +1.
-        let basis = Mat3::from_cols(forward, axle, up);
-        let basis_rot = Rot3::from_mat3(&basis);
-        // Rapier's `wheel.rotation` increases when moving forward.
-        // With our axle_dir convention (`-X`), applying that rotation
-        // directly around `axle` spins the cylinder the wrong way
-        // around — negate so the tread visually rolls with motion.
-        let spin = Rot3::from_axis_angle(axle, -wh.rotation);
-
-        rpose_to_pose(Pose3::from_parts(center, spin * basis_rot))
+        let q_axle = Rot3::from_rotation_arc(Vec3::Y, wh.axle_local);
+        rpose_to_pose(Pose3::from_parts(
+            wrb.translation(),
+            *wrb.rotation() * q_axle,
+        ))
     }
 
-    /// Cumulative spin angle of a wheel (radians, increasing in the
-    /// direction the wheel rolls when the vehicle moves "forward").
-    /// Used by visualisers that drive the wheel's *local* rotation
-    /// around the axle — e.g. when the wheel mesh is parented to the
-    /// chassis (USD scenes), so its world pose is `chassis * local`
-    /// and we only want to add steer + spin locally.
+    /// Cumulative spin angle of a wheel (radians, increasing as the
+    /// wheel rolls forward). Used by visualisers that drive a wheel
+    /// mesh's local rotation around the axle (USD scenes).
     pub fn wheel_spin_angle(&self, id: VehicleId, wheel: usize) -> f64 {
         self.vehicles
             .get(&id)
-            .and_then(|v| v.handles.controller.wheels().get(wheel))
-            .map(|w| w.rotation)
+            .and_then(|v| v.handles.wheels.get(wheel))
+            .map(|wh| wh.spin_angle)
             .unwrap_or(0.0)
     }
 
-    /// Steering angle of a wheel (radians, around the suspension /
-    /// kingpin axis). Companion to [`wheel_spin_angle`] — same use case.
+    /// Steering angle of a wheel (radians, around the kingpin axis).
     pub fn wheel_steering_angle(&self, id: VehicleId, wheel: usize) -> f64 {
         self.vehicles
             .get(&id)
-            .and_then(|v| v.handles.controller.wheels().get(wheel))
-            .map(|w| w.steering)
+            .and_then(|v| v.handles.wheels.get(wheel))
+            .map(|wh| wh.last_steering)
             .unwrap_or(0.0)
     }
 
@@ -470,18 +532,14 @@ impl Sim {
         self.vehicles.get(&id)
     }
 
-    /// Mutable access to a vehicle's state. Use with care — changing
-    /// collider extents at runtime won't reshape the rapier body, but
-    /// edits to spec fields read each tick (wheel engine force, mass
-    /// overrides, visual colour, etc.) take effect immediately.
+    /// Mutable access to a vehicle's state.
     pub fn vehicle_mut(&mut self, id: VehicleId) -> Option<&mut VehicleState> {
         self.vehicles.get_mut(&id)
     }
 
     /// Set a vehicle's total mass, updating the rapier rigid body's
     /// mass properties in-place so the physics reflects the change on
-    /// the next tick. Inertia is recomputed from the current inertia
-    /// box (either `chassis.inertia_size` override or the collider size).
+    /// the next tick.
     pub fn set_vehicle_mass(&mut self, id: VehicleId, mass: f64) {
         let Some(state) = self.vehicles.get_mut(&id) else {
             return;
@@ -501,31 +559,13 @@ impl Sim {
         }
     }
 
-    /// Re-run each vehicle's wheel raycasts against the current world
-    /// without advancing physics. Useful when the editor edits a
-    /// chassis pose while the sim clock is paused — without this the
-    /// wheel positions would lag behind the dragged body and only
-    /// snap into place when the user pressed Play.
+    /// Re-seat each vehicle's wheels under its chassis without advancing
+    /// physics. Used when the editor drags a chassis while the sim clock
+    /// is paused — without this the wheels would lag the dragged body.
     pub fn refresh_kinematics(&mut self) {
-        let Sim {
-            vehicles,
-            bodies,
-            colliders,
-            broad_phase,
-            narrow_phase,
-            ..
-        } = self;
-        for v in vehicles.values_mut() {
-            let filter = QueryFilter::default()
-                .exclude_rigid_body(v.handles.body)
-                .groups(world::wheel_raycast_groups());
-            let qpm = broad_phase.as_query_pipeline_mut(
-                narrow_phase.query_dispatcher(),
-                bodies,
-                colliders,
-                filter,
-            );
-            v.handles.controller.update_vehicle(0.0, qpm);
+        let ids: Vec<VehicleId> = self.vehicles.keys().copied().collect();
+        for id in ids {
+            self.snap_wheels_to_chassis(id);
         }
     }
 
@@ -533,23 +573,9 @@ impl Sim {
     pub fn step(&mut self, dt: f64) {
         self.integration.dt = dt;
 
-        // 1a. Drain the power reservoir(s) + tick auto-fill on each
-        //     vehicle's containers.
-        //
-        //     Tiers (observable behaviour):
-        //       * parked              → tiny idle trickle, NO fill
-        //       * moving, work off    → travel drain,       NO fill
-        //       * moving, work on     → travel + work drain, auto-fill
-        //
-        //     The controllers themselves gate on `is_engine_live()`
-        //     so a depleted / powered-off vehicle can't move.
-        //
-        //     We feed the power/auto-fill tick **horizontal speed
-        //     only** — `linvel().length()` includes the Y component,
-        //     which is non-zero on any suspension-sprung vehicle even
-        //     when parked. Letting that count as "moving" is the
-        //     classic-rapier gotcha that makes a stationary tractor
-        //     burn fuel at full travel rate.
+        // 1. Power reservoir drain + container auto-fill. Horizontal
+        //    speed only — the vertical (suspension) component would
+        //    otherwise count a parked vehicle as "moving".
         let drain_enabled = !self.unlimited_power;
         for v in self.vehicles.values_mut() {
             let horiz_speed = self
@@ -568,96 +594,94 @@ impl Sim {
             }
         }
 
-        // 1b. Translate ControlInput → per-wheel engine/brake/steering
-        //     for ground vehicles, or direct body forces/torques for
-        //     drones. Dispatched through the DriveController trait so
-        //     new modes are just new files under `vehicle/drive/`.
-        //     Each controller sees the physics only through narrow
-        //     `BodyProxy` / `WheelsProxy` handles — constructed here
-        //     from the rapier body + wheel-controller under the hood.
+        // 2. Drive controllers → per-wheel commands → joints + wheels.
+        //    Each controller sees the physics only through the narrow
+        //    `BodyProxy` (chassis) + `WheelsProxy` (wheel snapshots +
+        //    commands). The commands are applied to the joints / wheel
+        //    bodies afterwards, which keeps the chassis borrow disjoint
+        //    from the wheel-body borrow.
         for v in self.vehicles.values_mut() {
             let controller = drive::controller_for(v.spec.drive_mode);
-            // Split-borrow the vehicle: `spec` + `control` are shared
-            // reads / copies; `handles.body` is a handle into a
-            // separately-held `bodies` map; `handles.controller` is
-            // borrowed mutably on a disjoint field. Rust's field
-            // splitting makes this OK.
-            let VehicleState {
-                spec,
-                control,
-                handles,
-            } = v;
-            let Some(rb) = self.bodies.get_mut(handles.body) else {
-                continue;
-            };
-            let mut ctx = DriveContext {
-                dt,
-                gravity: self.gravity,
-                spec,
-                control: *control,
-                body: crate::vehicle_physics::BodyProxy::new(rb),
-                wheels: crate::vehicle_physics::WheelsProxy::new(&mut handles.controller),
-            };
-            controller.apply(&mut ctx);
+
+            // Snapshot each wheel: last-commanded steering + the
+            // suspension spring load (a proxy for the normal force,
+            // read off the prismatic motor's last impulse).
+            let mut snap: Vec<WheelSnapshot> = Vec::with_capacity(v.handles.wheels.len());
+            for wh in &v.handles.wheels {
+                let normal_force = self
+                    .impulse_joints
+                    .get(wh.joint_a)
+                    .map(|j| j.data.motors[JointAxis::LinX as usize].impulse.abs() / dt)
+                    .unwrap_or(0.0);
+                snap.push(WheelSnapshot {
+                    steering: wh.last_steering,
+                    normal_force,
+                });
+            }
+            let mut cmd = vec![WheelCommand::default(); v.handles.wheels.len()];
+
+            // Run the controller.
+            {
+                let VehicleState {
+                    spec,
+                    control,
+                    handles,
+                } = v;
+                let Some(rb) = self.bodies.get_mut(handles.body) else {
+                    continue;
+                };
+                let mut ctx = DriveContext {
+                    dt,
+                    gravity: self.gravity,
+                    spec,
+                    control: *control,
+                    body: BodyProxy::new(rb),
+                    wheels: WheelsProxy::new(&snap, &mut cmd),
+                };
+                controller.apply(&mut ctx);
+            }
+
+            // Apply the commands.
+            for (i, wh) in v.handles.wheels.iter_mut().enumerate() {
+                let c = cmd[i];
+
+                // Steering — stiff position motor on joint A's kingpin DOF.
+                if wh.steered {
+                    if let Some(j) = self.impulse_joints.get_mut(wh.joint_a, true) {
+                        j.data.set_motor_position(
+                            JointAxis::AngX,
+                            c.steering,
+                            STEER_STIFFNESS,
+                            STEER_DAMPING,
+                        );
+                    }
+                    wh.last_steering = c.steering;
+                }
+
+                // Brake — velocity-0 motor on joint B, capped at the
+                // commanded brake torque (0 ⇒ motor inert).
+                if let Some(j) = self.impulse_joints.get_mut(wh.joint_b, true) {
+                    j.data
+                        .set_motor_velocity(JointAxis::AngX, 0.0, BRAKE_DAMPING);
+                    j.data
+                        .set_motor_max_force(JointAxis::AngX, c.brake.max(0.0));
+                }
+
+                // Drive — engine torque about the axle on the wheel
+                // body. Real contact friction decides grip vs slip.
+                if let Some(wrb) = self.bodies.get_mut(wh.wheel) {
+                    let world_axle = (*wrb.rotation()) * wh.axle_local;
+                    if c.engine_force.abs() > 1.0e-9 {
+                        wrb.add_torque(world_axle * (c.engine_force * wh.radius), true);
+                    }
+                    // Accumulate the rolling angle for visualisers.
+                    wh.spin_angle += wrb.angvel().dot(world_axle) * dt;
+                }
+            }
         }
 
-        // 1b. Parking brake. Rapier's `wheel.brake` is applied as
-        // `engine_force = -brake * copysign(forward_impulse)` — the
-        // sign term flips every step once forward_impulse is near zero,
-        // which shows up in the viewport as the whole vehicle
-        // shimmying. Sidestep: when the driver is pressing brake AND
-        // the vehicle is already slow, zero out horizontal linvel +
-        // angular velocity directly. Airborne vehicles skip this.
-        for v in self.vehicles.values() {
-            if drive::controller_for(v.spec.drive_mode).is_airborne() {
-                continue;
-            }
-            if v.control.brake < 0.5 {
-                continue;
-            }
-            let Some(rb) = self.bodies.get_mut(v.handles.body) else {
-                continue;
-            };
-            let lv = rb.linvel();
-            let horiz2 = lv.x * lv.x + lv.z * lv.z;
-            if horiz2 < 0.5 * 0.5 {
-                let ly = lv.y;
-                rb.set_linvel(Vec3::new(0.0, ly, 0.0), true);
-                rb.set_angvel(Vec3::ZERO, true);
-            }
-        }
-
-        // 2. Run each ground vehicle's ray-cast controller. Airborne
-        //    vehicles skip this — they have no wheels.
-        let Sim {
-            vehicles,
-            bodies,
-            colliders,
-            broad_phase,
-            narrow_phase,
-            ..
-        } = self;
-        for v in vehicles.values_mut() {
-            if drive::controller_for(v.spec.drive_mode).is_airborne() {
-                continue;
-            }
-            // Exclude the vehicle's OWN chassis from its wheel raycasts.
-            // Without this, rays starting inside the chassis collider hit
-            // the chassis itself, rapier reports `suspension_length = 0`,
-            // and the wheels get "stuck" against the chassis bottom.
-            let filter = QueryFilter::default()
-                .exclude_rigid_body(v.handles.body)
-                .groups(world::wheel_raycast_groups());
-            let qpm = broad_phase.as_query_pipeline_mut(
-                narrow_phase.query_dispatcher(),
-                bodies,
-                colliders,
-                filter,
-            );
-            v.handles.controller.update_vehicle(dt, qpm);
-        }
-
-        // 3. Step the physics world.
+        // 3. Step the physics world. `SameVehicleFilter` rejects
+        //    contacts between two colliders of the same vehicle.
         self.pipeline.step(
             self.gravity,
             &self.integration,
@@ -669,15 +693,10 @@ impl Sim {
             &mut self.impulse_joints,
             &mut self.multibody_joints,
             &mut self.ccd_solver,
-            &(),
+            &world::SameVehicleFilter,
             &(),
         );
     }
-}
-
-fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
-    let n = v.normalize_or_zero();
-    if n == Vec3::ZERO { fallback } else { n }
 }
 
 fn principal_inertia(mass: f64, half_extents: Vec3) -> Vec3 {
