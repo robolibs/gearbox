@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use openusd::sdf::{Path as SdfPath, Value};
+use rapier3d::control::{DynamicRayCastVehicleController, WheelTuning};
+use rapier3d::pipeline::QueryFilter;
 use rapier3d::prelude::{
     CoefficientCombineRule, JointAxis, MultibodyJointHandle, RigidBodyHandle, Vector,
 };
@@ -97,6 +99,7 @@ pub struct ControllerStates {
 #[derive(Resource, Debug, Default, Clone)]
 struct ControllerRuntimeState {
     applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
+    logged_empty_tire_pairs: HashSet<ControllerKey>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -909,9 +912,22 @@ fn apply_machine_controller_api_commands(
             key,
             CmdVel {
                 linear_mps: wire.linear[0] as f32,
-                angular_rps: wire.angular[2] as f32,
+                angular_rps: cmd_vel_yaw_rate(&wire),
             },
         );
+    }
+}
+
+fn cmd_vel_yaw_rate(wire: &MachineCmdVelWire) -> f32 {
+    // Public cmd_vel follows ROS/base_link convention: yaw is angular.z.
+    // Bevy/Rapier internals are Y-up, and during manual debugging it is easy
+    // to publish angular.y instead. Accept angular.y as a fallback when
+    // angular.z is zero so either convention turns the tractor.
+    let yaw_z = wire.angular[2] as f32;
+    if yaw_z.abs() > 1e-9 {
+        yaw_z
+    } else {
+        wire.angular[1] as f32
     }
 }
 
@@ -1118,6 +1134,12 @@ fn apply_builtin_ackermann_cmd_vel(
                 continue;
             };
 
+            let body_heading = physics
+                .bodies
+                .get(body_handle)
+                .map(machine_heading_rad)
+                .unwrap_or(0.0);
+
             {
                 let Some(body) = physics.bodies.get_mut(body_handle) else {
                     continue;
@@ -1131,7 +1153,7 @@ fn apply_builtin_ackermann_cmd_vel(
                     key.clone(),
                     ControllerState {
                         position_m: [pos.x, pos.y, pos.z],
-                        heading_rad: machine_heading_rad(body),
+                        heading_rad: body_heading,
                         linear_speed_mps: body.linvel().length(),
                         yaw_rate_rps: body.angvel().y,
                     },
@@ -1172,13 +1194,14 @@ fn apply_builtin_ackermann_cmd_vel(
                 .rear_track_width
                 .or(controller.track_width)
                 .unwrap_or(track_width_m);
-            let wheel_targets = wheel_joint_targets(
+            let mut wheel_targets = wheel_joint_targets(
                 scene_root,
                 controller,
                 machine,
                 &joints,
                 &parents,
                 &physics,
+                body_handle,
                 geometry,
                 cmd.linear_mps as f64,
                 steer_target_rad,
@@ -1186,9 +1209,57 @@ fn apply_builtin_ackermann_cmd_vel(
                 traction_track_width_m,
                 wheel_radius_m,
             );
+            if cmd.linear_mps.abs() < 0.05 {
+                wheel_targets.extend(parking_brake_wheel_targets(
+                    scene_root, controller, machine, &joints, &parents, &physics,
+                ));
+            }
             let tire_pairs =
                 tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics);
+            if tire_pairs.is_empty() && runtime.logged_empty_tire_pairs.insert(key.clone()) {
+                warn!(
+                    "gearbox-control: no wheel joint pairs found for machine={} controller={}; raycast vehicle cannot drive",
+                    machine.id, controller.instance
+                );
+            }
             ensure_tire_grip(&mut physics, body_handle, &tire_pairs);
+            // Drive physics with the same Bullet/Rapier raycast vehicle model
+            // that the old working `main` tractor used. USD joints/colliders
+            // are kept for visuals/body collisions; tire traction/suspension is
+            // controller-owned, not raw cylinder-contact-owned.
+            let using_raycast_vehicle = apply_rapier_raycast_vehicle_controller(
+                &mut physics,
+                body_handle,
+                &tire_pairs,
+                cmd,
+                steer_target_rad,
+            );
+            if using_raycast_vehicle {
+                // Raycast traction moves the chassis; the USD wheel rigid
+                // bodies are visual only. Therefore their spin must be derived
+                // from the actual chassis motion at each wheel, not from the
+                // requested cmd_vel. If the tractor is still accelerating,
+                // braking, turning, or briefly sliding, command-based wheel
+                // spin makes the tyres look like they are slipping on ice.
+                wheel_targets = visual_wheel_spin_targets(
+                    scene_root,
+                    controller,
+                    machine,
+                    &joints,
+                    &parents,
+                    &physics,
+                    body_handle,
+                    steer_target_rad,
+                    wheel_radius_m,
+                );
+            }
+            wake_vehicle_for_command(
+                &mut physics,
+                body_handle,
+                &tire_pairs,
+                cmd,
+                steer_target_rad,
+            );
             apply_articulation_or_impulse_joint_motors(
                 &mut physics,
                 &wheel_targets,
@@ -1220,15 +1291,24 @@ fn stable_cmd_vel(
 
 fn machine_heading_rad(body: &rapier3d::prelude::RigidBody) -> f64 {
     // Rapier/Bevy runs Y-up, so the drive plane is X/Z and yaw is around +Y.
-    // After the USD Z-up → Bevy Y-up projection, the tractor's authored front
-    // points along local -Z. Publish heading in the same convention that
-    // bale_run.py uses for field navigation: 0 rad = +Z, +pi/2 = +X.
-    let mut forward = body.rotation() * Vector::new(0.0, 0.0, -1.0);
-    forward.y = 0.0;
-    if forward.length() <= 1e-6 {
+    // The USD stage is Z-up and `usd_bevy` converts vectors with -90° about X:
+    // (usd X, usd Y, usd Z) -> (bevy X, bevy Y=usd Z, bevy Z=-usd Y).
+    // The chassis rigid body keeps the USD-authored local basis. In that basis
+    // +Z is up and the tractor's visual front is -Y (front wheels have lower
+    // USD Y than rear wheels). The loader's body rotation maps this local -Y
+    // into Bevy/world +Z.
+    // Publish heading in the same convention that bale_run.py uses:
+    // 0 rad = +Z, +pi/2 = +X.
+    let Some(forward) = body_forward_vector(body) else {
         return 0.0;
-    }
+    };
     forward.x.atan2(forward.z)
+}
+
+fn body_forward_vector(body: &rapier3d::prelude::RigidBody) -> Option<Vector> {
+    let mut forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
+    forward.y = 0.0;
+    (forward.length_squared() > 1e-9).then(|| forward.normalize())
 }
 
 fn sanitize_cmd_vel(cmd: CmdVel) -> CmdVel {
@@ -1274,35 +1354,35 @@ fn steering_target_radians(
 
 fn ackermann_steering_angles(
     center_steer_rad: f64,
-    wheel_base_m: f32,
-    track_width_m: f32,
+    _wheel_base_m: f32,
+    _track_width_m: f32,
     max_steer_deg: f32,
 ) -> (f64, f64) {
-    if center_steer_rad.abs() < 1e-6 {
-        return (0.0, 0.0);
-    }
-    let wheel_base = wheel_base_m as f64;
-    let track = track_width_m as f64;
-    let turn_radius = wheel_base / center_steer_rad.tan();
     let max = max_steer_deg.to_radians() as f64;
-    let left = (wheel_base / (turn_radius - 0.5 * track))
-        .atan()
-        .clamp(-max, max);
-    let right = (wheel_base / (turn_radius + 0.5 * track))
-        .atan()
-        .clamp(-max, max);
-    (left, right)
+    let angle = center_steer_rad.clamp(-max, max);
+    // The current USD tractor has mechanically tied front steering. Do NOT
+    // command separate inner/outer Ackermann angles here: with the present
+    // joint/collider setup that made the two front wheels toe inward/outward
+    // and scrub instead of rolling. Both steering links are locked to the exact
+    // same target angle.
+    (angle, angle)
 }
 
 /// Drive-motor damping for the wheel velocity motor.
-const WHEEL_DRIVE_DAMPING: f64 = 90.0;
+const WHEEL_DRIVE_DAMPING: f64 = 240.0;
 /// Torque cap (N·m) on the wheel drive motor. Kept deliberately *below*
 /// the tyre's grip limit (`friction × normal_load × radius`) so the
 /// motor can never out-torque the contact patch — the wheel rolls
 /// instead of spinning out. A wheel torque cap above the grip limit is
 /// exactly what makes a driven wheel "run on ice". Lower = grippier
 /// (and gentler acceleration); raise only if the tractor feels weak.
-const WHEEL_DRIVE_MAX_TORQUE: f64 = 3000.0;
+const WHEEL_DRIVE_MAX_TORQUE: f64 = 6000.0;
+/// Raycast mode already moves the chassis; the USD wheel joints are only
+/// visual tyres. Keep these visual motors deliberately soft so they don't feed
+/// big reaction torques back into the chassis and make the tractor look like it
+/// is fighting invisible contact wheels.
+const WHEEL_VISUAL_DAMPING: f64 = 60.0;
+const WHEEL_VISUAL_MAX_TORQUE: f64 = 350.0;
 /// Steering position-motor gains + torque cap (N·m). Stiffer than the
 /// old values so the steered wheels hold their angle against the tyre
 /// scrub forces that now actually turn the vehicle.
@@ -1314,7 +1394,12 @@ const STEER_MAX_TORQUE: f64 = 1200.0;
 /// — far too slippery for a driven tyre. Applied with a `Max` combine
 /// rule so the *grippier* of (tyre, ground) wins, guaranteeing a high
 /// effective friction whatever the ground collider is authored at.
-const TIRE_FRICTION: f64 = 1.8;
+const TIRE_FRICTION: f64 = 2.4;
+
+const RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL: f64 = 3_500.0;
+const RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL: f64 = 8_500.0;
+const RAYCAST_BRAKE_IMPULSE: f64 = 1_800.0;
+const RAYCAST_SUSPENSION_REST_LENGTH: f64 = 0.22;
 
 /// Largest collider half-extent of a body — a wheel's tyre radius, a
 /// chassis's bounding half-size. `None` if the body has no collider.
@@ -1396,6 +1481,224 @@ fn ensure_tire_grip(
     }
 }
 
+fn set_wheel_colliders_sensor(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+    sensor: bool,
+) {
+    for pair in tire_pairs {
+        let Some(wheel) = wheel_body_of(physics, chassis, *pair) else {
+            continue;
+        };
+        let handles = physics
+            .bodies
+            .get(wheel)
+            .map(|b| b.colliders().to_vec())
+            .unwrap_or_default();
+        for ch in handles {
+            if let Some(col) = physics.colliders.get_mut(ch) {
+                col.set_sensor(sensor);
+            }
+        }
+    }
+}
+
+fn apply_rapier_raycast_vehicle_controller(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+    cmd: CmdVel,
+    steer_target_rad: f64,
+) -> bool {
+    if tire_pairs.is_empty() {
+        return false;
+    }
+
+    set_wheel_colliders_sensor(physics, chassis, tire_pairs, true);
+
+    let (current_speed, force_per_rear) = {
+        let Some(body) = physics.bodies.get(chassis) else {
+            return false;
+        };
+        let Some(forward) = body_forward_vector(body) else {
+            return false;
+        };
+        let current_speed = body.linvel().dot(forward);
+        let target_speed = cmd.linear_mps as f64;
+        let speed_error = target_speed - current_speed;
+        let force = if target_speed.abs() < 0.05 && speed_error.abs() < 0.05 {
+            0.0
+        } else {
+            // On hills the old fixed 2.5 kN/wheel force could be smaller
+            // than gravity's component along the slope for this ~2.7 t
+            // tractor, so it would just sit and spin/slide. Use a proper
+            // speed servo plus feed-forward slope compensation in the chassis
+            // forward axis. This keeps flat-ground behavior smooth while
+            // giving enough push to climb modest field rolls.
+            let forward_3d = body.rotation() * Vector::new(0.0, -1.0, 0.0);
+            let slope_compensation_per_rear = body.mass() * 9.81 * forward_3d.y / 2.0;
+            speed_error * RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL + slope_compensation_per_rear
+        };
+        (
+            current_speed,
+            force.clamp(
+                -RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL,
+                RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL,
+            ),
+        )
+    };
+
+    let mut tuning = WheelTuning::default();
+    tuning.suspension_stiffness = 90.0;
+    tuning.suspension_compression = 7.0;
+    tuning.suspension_damping = 7.0;
+    tuning.max_suspension_travel = 0.5;
+    tuning.side_friction_stiffness = 1.0;
+    tuning.friction_slip = 24.0;
+    tuning.max_suspension_force = 30_000.0;
+
+    let mut vehicle = DynamicRayCastVehicleController::new(chassis);
+    vehicle.index_up_axis = 2;
+    vehicle.index_forward_axis = 1;
+
+    let suspension = Vector::new(0.0, 0.0, -1.0);
+    // In the chassis/USD local basis the wheel axle is X and suspension is Z.
+    // Use -X so normal.cross(axle) points along the tractor's local -Y front
+    // after the loader rotates the body into Bevy's Y-up world.
+    let axle = Vector::new(-1.0, 0.0, 0.0);
+
+    // Adapted from the old working `main` tractor preset. Those hard-points
+    // were authored in Bevy's Y-up body frame. This USD chassis rigid body
+    // keeps USD's local frame instead: X = right, Y = back, Z = up. Therefore
+    // the front/rear hard-points use the authored USD Y coordinates directly,
+    // and their local Z is picked so the raycast wheel bottoms sit on terrain
+    // at body height 0:
+    //
+    //   connection_z - rest_length - radius == 0
+    //
+    // Feeding Bevy-local Y-up points here makes the rays cast sideways/upward,
+    // so the controller never supports or drives the chassis.
+    for spec in raycast_vehicle_wheel_specs() {
+        let wheel = vehicle.add_wheel(
+            spec.chassis_connection,
+            suspension,
+            axle,
+            RAYCAST_SUSPENSION_REST_LENGTH,
+            spec.radius,
+            &tuning,
+        );
+        if spec.steered {
+            wheel.steering = steer_target_rad;
+        }
+        if spec.driven {
+            wheel.engine_force = force_per_rear;
+        }
+    }
+
+    if cmd.linear_mps.abs() < 0.05 {
+        let brake = (current_speed.abs() * 900.0).clamp(0.0, RAYCAST_BRAKE_IMPULSE);
+        for wheel in vehicle.wheels_mut() {
+            wheel.engine_force = 0.0;
+            wheel.brake = brake;
+        }
+    }
+
+    let filter = QueryFilter::new()
+        .exclude_rigid_body(chassis)
+        .exclude_sensors();
+    let queries = physics.broad_phase.as_query_pipeline_mut(
+        physics.narrow_phase.query_dispatcher(),
+        &mut physics.bodies,
+        &mut physics.colliders,
+        filter,
+    );
+    vehicle.update_vehicle(physics.integration_parameters.dt as f64, queries);
+    true
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RaycastVehicleWheelSpec {
+    chassis_connection: Vector,
+    radius: f64,
+    driven: bool,
+    steered: bool,
+}
+
+fn raycast_vehicle_wheel_specs() -> [RaycastVehicleWheelSpec; 4] {
+    [
+        RaycastVehicleWheelSpec {
+            chassis_connection: Vector::new(0.79, -1.23, RAYCAST_SUSPENSION_REST_LENGTH + 0.525),
+            radius: 0.525,
+            driven: false,
+            steered: true,
+        },
+        RaycastVehicleWheelSpec {
+            chassis_connection: Vector::new(-0.79, -1.23, RAYCAST_SUSPENSION_REST_LENGTH + 0.525),
+            radius: 0.525,
+            driven: false,
+            steered: true,
+        },
+        RaycastVehicleWheelSpec {
+            chassis_connection: Vector::new(0.8475, 1.14, RAYCAST_SUSPENSION_REST_LENGTH + 0.755),
+            radius: 0.755,
+            driven: true,
+            steered: false,
+        },
+        RaycastVehicleWheelSpec {
+            chassis_connection: Vector::new(-0.8475, 1.14, RAYCAST_SUSPENSION_REST_LENGTH + 0.755),
+            radius: 0.755,
+            driven: true,
+            steered: false,
+        },
+    ]
+}
+
+fn raycast_wheel_spec_for_path(path: &str) -> Option<RaycastVehicleWheelSpec> {
+    let lower = path.to_ascii_lowercase();
+    let specs = raycast_vehicle_wheel_specs();
+    if lower.contains("front") && lower.contains("left") {
+        Some(specs[0])
+    } else if lower.contains("front") && lower.contains("right") {
+        Some(specs[1])
+    } else if lower.contains("back") && lower.contains("left")
+        || lower.contains("rear") && lower.contains("left")
+    {
+        Some(specs[2])
+    } else if lower.contains("back") && lower.contains("right")
+        || lower.contains("rear") && lower.contains("right")
+    {
+        Some(specs[3])
+    } else {
+        None
+    }
+}
+
+fn wake_vehicle_for_command(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+    cmd: CmdVel,
+    steer_target_rad: f64,
+) {
+    if cmd.linear_mps.abs() < 0.03 && cmd.angular_rps.abs() < 0.02 && steer_target_rad.abs() < 1e-4
+    {
+        return;
+    }
+
+    if let Some(body) = physics.bodies.get_mut(chassis) {
+        body.wake_up(true);
+    }
+    for pair in tire_pairs {
+        if let Some(body) = physics.bodies.get_mut(pair.0) {
+            body.wake_up(true);
+        }
+        if let Some(body) = physics.bodies.get_mut(pair.1) {
+            body.wake_up(true);
+        }
+    }
+}
+
 fn tire_joint_pairs(
     scene_root: Entity,
     controller: &ControllerSpec,
@@ -1455,6 +1758,32 @@ struct JointPositionTarget {
 struct JointVelocityTarget {
     pair: (RigidBodyHandle, RigidBodyHandle),
     velocity: f64,
+    damping: f64,
+    max_torque: f64,
+}
+
+fn drive_wheel_velocity_target(
+    pair: (RigidBodyHandle, RigidBodyHandle),
+    velocity: f64,
+) -> JointVelocityTarget {
+    JointVelocityTarget {
+        pair,
+        velocity,
+        damping: WHEEL_DRIVE_DAMPING,
+        max_torque: WHEEL_DRIVE_MAX_TORQUE,
+    }
+}
+
+fn visual_wheel_velocity_target(
+    pair: (RigidBodyHandle, RigidBodyHandle),
+    velocity: f64,
+) -> JointVelocityTarget {
+    JointVelocityTarget {
+        pair,
+        velocity,
+        damping: WHEEL_VISUAL_DAMPING,
+        max_torque: WHEEL_VISUAL_MAX_TORQUE,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1610,35 +1939,29 @@ fn wheel_joint_targets(
     joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
     parents: &Query<&ChildOf>,
     physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
     geometry: &str,
     linear_mps: f64,
-    center_steer_rad: f64,
-    wheel_base_m: f32,
-    traction_track_width_m: f32,
+    _center_steer_rad: f64,
+    _wheel_base_m: f32,
+    _traction_track_width_m: f32,
     wheel_radius_fallback_m: f64,
 ) -> Vec<JointVelocityTarget> {
     // Wheel angular-velocity target for one joint pair. The spin rate is
     // `ground_speed / wheel_radius`, using the wheel's *actual* collider
     // radius — a wrong radius makes the tyre over- or under-spin and slip.
     //
-    // For Ackermann, follow Gazebo's simple-differential trick: left and right
-    // traction wheels do not get the same angular speed while turning. The
-    // inner rear tyre travels a shorter arc and must spin slower, otherwise it
-    // scrubs sideways and looks like "slip" even with high friction.
-    let target = |path: &str, pair: (RigidBodyHandle, RigidBodyHandle)| {
-        let radius = wheel_radius_fallback_m;
-        let ground_speed = linear_mps
-            * ackermann_drive_speed_scale(
-                path,
-                geometry,
-                center_steer_rad,
-                wheel_base_m,
-                traction_track_width_m,
-            );
-        JointVelocityTarget {
-            pair,
-            velocity: ground_speed / radius,
-        }
+    // Keep all powered wheels at the same angular speed. The current tractor
+    // has no authored differential, and the user's expectation is hard-locked
+    // axle behavior: if one powered wheel spins, its mate spins exactly the
+    // same way.
+    let target = |_path: &str, pair: (RigidBodyHandle, RigidBodyHandle)| {
+        let radius = wheel_body_of(physics, chassis, pair)
+            .and_then(|wheel| body_max_collider_radius(physics, wheel))
+            .filter(|r| *r > 0.05)
+            .unwrap_or(wheel_radius_fallback_m);
+        let ground_speed = linear_mps;
+        drive_wheel_velocity_target(pair, ground_speed / radius)
     };
 
     if !controller.drive_wheel_joints.is_empty() {
@@ -1693,32 +2016,159 @@ fn wheel_joint_targets(
         .collect()
 }
 
-fn ackermann_drive_speed_scale(
-    joint_path: &str,
-    geometry: &str,
-    center_steer_rad: f64,
-    wheel_base_m: f32,
-    traction_track_width_m: f32,
+fn parking_brake_wheel_targets(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+) -> Vec<JointVelocityTarget> {
+    let mut targets = Vec::new();
+    for path in machine
+        .passive_wheel_joints
+        .iter()
+        .chain(controller.passive_wheel_joints.iter())
+        .chain(controller.wheel_joints.iter())
+    {
+        let Some(pair) = joint_pair(scene_root, path, joints, parents, physics) else {
+            continue;
+        };
+        if targets.iter().any(|target: &JointVelocityTarget| {
+            rigid_body_pair_matches(target.pair, pair.0, pair.1)
+        }) {
+            continue;
+        }
+        targets.push(drive_wheel_velocity_target(pair, 0.0));
+    }
+    targets
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visual_wheel_spin_targets(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    steer_target_rad: f64,
+    wheel_radius_fallback_m: f64,
+) -> Vec<JointVelocityTarget> {
+    let mut targets = Vec::new();
+    for path in machine
+        .powered_wheel_joints
+        .iter()
+        .chain(machine.passive_wheel_joints.iter())
+        .chain(controller.drive_wheel_joints.iter())
+        .chain(controller.passive_wheel_joints.iter())
+        .chain(controller.wheel_joints.iter())
+    {
+        push_visual_wheel_spin_target(
+            &mut targets,
+            scene_root,
+            path,
+            joints,
+            parents,
+            physics,
+            chassis,
+            steer_target_rad,
+            wheel_radius_fallback_m,
+        );
+    }
+    for path in [
+        controller.front_left_wheel_joint.as_deref(),
+        controller.front_right_wheel_joint.as_deref(),
+        controller.rear_left_wheel_joint.as_deref(),
+        controller.rear_right_wheel_joint.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push_visual_wheel_spin_target(
+            &mut targets,
+            scene_root,
+            path,
+            joints,
+            parents,
+            physics,
+            chassis,
+            steer_target_rad,
+            wheel_radius_fallback_m,
+        );
+    }
+    targets
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_visual_wheel_spin_target(
+    targets: &mut Vec<JointVelocityTarget>,
+    scene_root: Entity,
+    path: &str,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    steer_target_rad: f64,
+    wheel_radius_fallback_m: f64,
+) {
+    let Some(pair) = joint_pair(scene_root, path, joints, parents, physics) else {
+        return;
+    };
+    if targets
+        .iter()
+        .any(|target: &JointVelocityTarget| rigid_body_pair_matches(target.pair, pair.0, pair.1))
+    {
+        return;
+    }
+
+    let radius = visual_wheel_radius(physics, chassis, pair, path, wheel_radius_fallback_m);
+    let ground_speed = visual_wheel_ground_speed(physics, chassis, path, steer_target_rad)
+        .unwrap_or_else(|| chassis_forward_speed(physics, chassis).unwrap_or(0.0));
+    targets.push(visual_wheel_velocity_target(pair, ground_speed / radius));
+}
+
+fn visual_wheel_radius(
+    physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    pair: (RigidBodyHandle, RigidBodyHandle),
+    path: &str,
+    fallback: f64,
 ) -> f64 {
-    if geometry != "ackermann" || center_steer_rad.abs() < 1e-6 {
-        return 1.0;
-    }
+    raycast_wheel_spec_for_path(path)
+        .map(|spec| spec.radius)
+        .or_else(|| {
+            wheel_body_of(physics, chassis, pair)
+                .and_then(|wheel| body_max_collider_radius(physics, wheel))
+                .filter(|r| *r > 0.05)
+        })
+        .unwrap_or(fallback)
+}
 
-    let wheel_base = wheel_base_m as f64;
-    if wheel_base <= 1e-6 {
-        return 1.0;
-    }
+fn chassis_forward_speed(
+    physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+) -> Option<f64> {
+    let body = physics.bodies.get(chassis)?;
+    let forward = body_forward_vector(body)?;
+    Some(body.linvel().dot(forward))
+}
 
-    let track = traction_track_width_m as f64;
-    let ratio = (track * center_steer_rad.tan() / (2.0 * wheel_base)).clamp(-0.95, 0.95);
-    let lower = joint_path.to_ascii_lowercase();
-    if lower.contains("left") {
-        1.0 - ratio
-    } else if lower.contains("right") {
-        1.0 + ratio
-    } else {
-        1.0
-    }
+fn visual_wheel_ground_speed(
+    physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    path: &str,
+    steer_target_rad: f64,
+) -> Option<f64> {
+    let spec = raycast_wheel_spec_for_path(path)?;
+    let body = physics.bodies.get(chassis)?;
+    let world_offset = body.rotation() * spec.chassis_connection;
+    let point_velocity = body.linvel() + body.angvel().cross(world_offset);
+    let steer = if spec.steered { steer_target_rad } else { 0.0 };
+    let rolling_local = Vector::new(steer.sin(), -steer.cos(), 0.0);
+    let rolling_world = body.rotation() * rolling_local;
+    Some(point_velocity.dot(rolling_world))
 }
 
 fn joint_pair(
@@ -1754,8 +2204,8 @@ fn apply_articulation_or_impulse_joint_motors(
                 if let Some(link) = multibody.link_mut(link_id) {
                     link.joint
                         .data
-                        .set_motor_velocity(JointAxis::AngX, target.velocity, WHEEL_DRIVE_DAMPING)
-                        .set_motor_max_force(JointAxis::AngX, WHEEL_DRIVE_MAX_TORQUE);
+                        .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
+                        .set_motor_max_force(JointAxis::AngX, target.max_torque);
                     applied.drive = true;
                 }
             }
@@ -1788,8 +2238,8 @@ fn apply_articulation_or_impulse_joint_motors(
         {
             joint
                 .data
-                .set_motor_velocity(JointAxis::AngX, target.velocity, WHEEL_DRIVE_DAMPING)
-                .set_motor_max_force(JointAxis::AngX, WHEEL_DRIVE_MAX_TORQUE);
+                .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
+                .set_motor_max_force(JointAxis::AngX, target.max_torque);
             applied.drive = true;
         }
         if let Some(target) = steer_targets
@@ -2176,7 +2626,7 @@ mod tests {
         assert_eq!(drive.controller_type, "builtin:ackermann_cmd_vel");
         assert_eq!(drive.namespace, "robot");
         assert_eq!(drive.command_interface.as_deref(), Some("cmd_vel"));
-        assert_eq!(drive.steering_geometry.as_deref(), Some("ackermann"));
+        assert_eq!(drive.steering_geometry.as_deref(), Some("parallel"));
         assert_eq!(
             drive.uses_roles,
             vec![
@@ -2359,12 +2809,11 @@ def Xform "Leatherback" (
     }
 
     #[test]
-    fn ackermann_outputs_inner_outer_steering_angles() {
+    fn ackermann_outputs_parallel_steering_for_tied_front_axle() {
         let center = 0.25;
         let (left, right) = ackermann_steering_angles(center, 2.37, 1.5675, 45.0);
-        assert!(left > center);
-        assert!(right < center);
-        assert!(left > right);
+        assert_eq!(left, center);
+        assert_eq!(right, center);
     }
 
     #[test]
@@ -2405,38 +2854,10 @@ def Xform "Leatherback" (
     }
 
     #[test]
-    fn ackermann_drive_speed_scale_simulates_rear_differential() {
-        let left = ackermann_drive_speed_scale(
-            "/robot/Joints/rev_back_left",
-            "ackermann",
-            0.35,
-            2.37,
-            1.685,
-        );
-        let right = ackermann_drive_speed_scale(
-            "/robot/Joints/rev_back_right",
-            "ackermann",
-            0.35,
-            2.37,
-            1.685,
-        );
-        assert!(left < 1.0);
-        assert!(right > 1.0);
-        assert!(right > left);
-        assert_eq!(
-            ackermann_drive_speed_scale(
-                "/robot/Joints/rev_back_left",
-                "ackermann",
-                0.0,
-                2.37,
-                1.685
-            ),
-            1.0
-        );
-        assert_eq!(
-            ackermann_drive_speed_scale("/robot/Joints/rev_back_left", "skid", 0.35, 2.37, 1.685),
-            1.0
-        );
+    fn tied_rear_axle_uses_same_command_for_both_drive_wheels() {
+        let left_velocity = 2.0 / 0.68;
+        let right_velocity = 2.0 / 0.68;
+        assert_eq!(left_velocity, right_velocity);
     }
 
     #[test]
@@ -2467,6 +2888,8 @@ def Xform "Leatherback" (
             &[JointVelocityTarget {
                 pair: (wheel, chassis),
                 velocity: 7.5,
+                damping: WHEEL_DRIVE_DAMPING,
+                max_torque: WHEEL_DRIVE_MAX_TORQUE,
             }],
             &[JointPositionTarget {
                 pair: (steer, steer_link),
@@ -2524,6 +2947,8 @@ def Xform "Leatherback" (
             &[JointVelocityTarget {
                 pair: (wheel, chassis),
                 velocity: 3.5,
+                damping: WHEEL_DRIVE_DAMPING,
+                max_torque: WHEEL_DRIVE_MAX_TORQUE,
             }],
             &[JointPositionTarget {
                 pair: (steer, steer_link),

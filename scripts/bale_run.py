@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import random
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -55,6 +56,42 @@ class MachinePose:
     heading_rad: float | None = None
     stamp: float = 0.0
     seen: bool = False
+
+
+class HarvestTracker:
+    """Receives Gearbox contact-delete events so scripts never respawn bales."""
+
+    def __init__(self, session: zenoh.Session):
+        self._lock = threading.Lock()
+        self._harvested: set[int] = set()
+        self._sub = session.declare_subscriber("gearbox/usd/harvested/**", self._on_event)
+
+    def _on_event(self, sample: zenoh.Sample) -> None:
+        try:
+            d = cbor2.loads(bytes(sample.payload))
+        except Exception:  # noqa: BLE001
+            return
+        bale_id = d.get("bale_id")
+        if not isinstance(bale_id, int):
+            text = str(d.get("id", ""))
+            if text.startswith("bale_"):
+                try:
+                    bale_id = int(text.removeprefix("bale_"))
+                except ValueError:
+                    return
+            else:
+                return
+        with self._lock:
+            self._harvested.add(int(bale_id))
+
+    def drain(self) -> set[int]:
+        with self._lock:
+            out = set(self._harvested)
+            self._harvested.clear()
+            return out
+
+    def close(self) -> None:
+        del self._sub
 
 
 def scatter_bales(
@@ -114,11 +151,11 @@ def show_target_indicator(
         {
             "category": "static_usd",
             "x": float(bx),
-            "y": 2.2,
+            "y": 0.0,
             "z": float(bz),
             "kind": "box",
-            "height": 0.8,
-            "radius": 0.35,
+            "height": 0.45,
+            "radius": 0.32,
             "color": [1.0, 0.0, 0.0],
             "remove": False,
         },
@@ -138,7 +175,11 @@ def wait_for_pose(pose: MachinePose, timeout_s: float) -> bool:
     return pose.seen
 
 
-def spawn_usd_machine(session: zenoh.Session, usd_path: str = TRACTOR_USD_PATH) -> None:
+def spawn_usd_machine(
+    session: zenoh.Session,
+    namespace: str,
+    usd_path: str = TRACTOR_USD_PATH,
+) -> None:
     """Ask the running Gearbox app to load/spawn a USD asset.
 
     This is intentionally generic: the request says only "spawn this USD".
@@ -161,10 +202,11 @@ def spawn_usd_machine(session: zenoh.Session, usd_path: str = TRACTOR_USD_PATH) 
     time.sleep(0.2)
     put_cbor(
         session,
-        "gearbox/usd/load/robot",
+        f"gearbox/usd/load/{namespace}",
         {
             "category": "machine",
             "usd_path": usd_path,
+            "namespace": namespace,
             "x": 0.0,
             "y": 0.0,
             "z": 0.0,
@@ -246,7 +288,7 @@ def run_machine_mode(
     wait_for_pose(pose, 1.0)
     if not pose.seen:
         print(f"no `{namespace}` state yet — spawning {TRACTOR_USD_PATH}")
-        spawn_usd_machine(session)
+        spawn_usd_machine(session, namespace)
         wait_for_pose(pose, 12.0)
         if not pose.seen:
             del state_sub
@@ -260,9 +302,13 @@ def run_machine_mode(
     print(f"scattering {len(bales)} bales across {field:.0f} × {field:.0f} m field")
     clear_old_bales(session, max(500, len(bales) + 50))
     visited: set[int] = set()
+    harvests = HarvestTracker(session)
     scatter_bales(session, bales, hidden=visited)
     show_target_indicator(session, None, bales)
-    time.sleep(0.2)
+    # Let startup cleanup/removal messages drain before assigning the target
+    # indicator. The loader replaces entities per message, so target markers
+    # must be published only on target changes, not every tick.
+    time.sleep(0.8)
 
     visit_order: list[int] = []
     cmd_topic = f"gearbox/machines/{namespace}/cmd_vel"
@@ -274,13 +320,23 @@ def run_machine_mode(
             {"linear": [float(speed), 0.0, 0.0], "angular": [0.0, 0.0, float(yaw_rate)]},
         )
 
+    def mark_harvested(bale_id: int, reason: str) -> None:
+        if 0 <= bale_id < len(bales) and bale_id not in visited:
+            visited.add(bale_id)
+            visit_order.append(bale_id)
+            remove_bale(session, bale_id)
+            print(f"    harvested bale_{bale_id} ({reason})")
+
     try:
         for step in range(len(bales)):
+            for bale_id in harvests.drain():
+                mark_harvested(bale_id, "contact")
+            for bale_id in visited:
+                remove_bale(session, bale_id)
             best_idx, best_d = nearest_unvisited(pose.x, pose.z, bales, visited)
             if best_idx < 0:
                 break
             tx, tz = bales[best_idx]
-            scatter_bales(session, bales, active=best_idx, hidden=visited)
             show_target_indicator(session, best_idx, bales)
             print(
                 f"\n[{step + 1:>3}/{len(bales)}]  visiting bale_{best_idx}  "
@@ -290,14 +346,15 @@ def run_machine_mode(
 
             t_goal = time.time()
             while True:
+                for bale_id in harvests.drain():
+                    mark_harvested(bale_id, "contact")
+                for bale_id in visited:
+                    remove_bale(session, bale_id)
+                if best_idx in visited:
+                    break
                 dx = tx - pose.x
                 dz = tz - pose.z
                 d_now = math.hypot(dx, dz)
-                if d_now < 2.2:
-                    break
-                if time.time() - t_goal > 120.0:
-                    print("  TIMEOUT — skipping this bale")
-                    break
 
                 target_heading = math.atan2(dx, dz)
                 heading = pose.heading_rad
@@ -316,7 +373,9 @@ def run_machine_mode(
                 turn_slowdown = max(0.20, math.cos(abs(err)))
                 speed = min(3.5, 0.45 + 0.35 * d_now) * turn_slowdown
                 if abs(err) > 1.7:
-                    speed = 0.35
+                    # Ackermann steering changes heading by rolling an arc;
+                    # too little speed here makes the tractor look parked.
+                    speed = 1.2
                 yaw_rate = clamp(1.8 * err, -1.2, 1.2)
                 publish_cmd(speed, yaw_rate)
 
@@ -329,17 +388,15 @@ def run_machine_mode(
                 time.sleep(0.10)
 
             publish_cmd(0.0, 0.0)
-            visited.add(best_idx)
-            visit_order.append(best_idx)
-            remove_bale(session, best_idx)
             show_target_indicator(session, None, bales)
-            print("    reached")
+            print("    harvested by contact")
     except KeyboardInterrupt:
         print("\ninterrupted — stopping machine.")
         publish_cmd(0.0, 0.0)
         show_target_indicator(session, None, bales)
     finally:
         print(f"\nvisited {len(visited)}/{len(bales)} bales — order: {visit_order}")
+        harvests.close()
         del state_sub
 
 
@@ -377,9 +434,13 @@ def run_legacy_mode(
     print(f"scattering {len(bales)} bales across {field:.0f} × {field:.0f} m field")
     clear_old_bales(session, max(500, len(bales) + 50))
     visited: set[int] = set()
+    harvests = HarvestTracker(session)
     scatter_bales(session, bales, hidden=visited)
     show_target_indicator(session, None, bales)
-    time.sleep(0.5)
+    # Let startup cleanup/removal messages drain before assigning the target
+    # indicator. The loader replaces entities per message, so target markers
+    # must be published only on target changes, not every tick.
+    time.sleep(0.8)
 
     pose_state: dict = {"x": 0.0, "z": 0.0}
 
@@ -414,13 +475,23 @@ def run_legacy_mode(
 
     visit_order: list[int] = []
 
+    def mark_harvested(bale_id: int, reason: str) -> None:
+        if 0 <= bale_id < len(bales) and bale_id not in visited:
+            visited.add(bale_id)
+            visit_order.append(bale_id)
+            remove_bale(session, bale_id)
+            print(f"    harvested bale_{bale_id} ({reason})")
+
     try:
         for step in range(len(bales)):
+            for bale_id in harvests.drain():
+                mark_harvested(bale_id, "contact")
+            for bale_id in visited:
+                remove_bale(session, bale_id)
             best_idx, best_d = nearest_unvisited(pose_state["x"], pose_state["z"], bales, visited)
             if best_idx < 0:
                 break
             tx, tz = bales[best_idx]
-            scatter_bales(session, bales, active=best_idx, hidden=visited)
             show_target_indicator(session, best_idx, bales)
             print(
                 f"\n[{step + 1:>3}/{len(bales)}]  visiting bale_{best_idx}  "
@@ -443,20 +514,15 @@ def run_legacy_mode(
             local_reached = False
             t0 = time.time()
             while True:
-                if status_state["reached_pulse"]:
+                for bale_id in harvests.drain():
+                    mark_harvested(bale_id, "contact")
+                for bale_id in visited:
+                    remove_bale(session, bale_id)
+                if best_idx in visited:
                     break
                 d_now = math.hypot(tx - pose_state["x"], tz - pose_state["z"])
-                if d_now < float(cmd["tolerance"]):
-                    local_reached = True
-                    break
-                if time.time() - t0 > 120.0:
-                    print("  TIMEOUT — skipping this bale")
-                    break
                 time.sleep(0.2)
-            print(f"    reached: {'local' if local_reached else 'status_pulse'}")
-            visited.add(best_idx)
-            visit_order.append(best_idx)
-            remove_bale(session, best_idx)
+            print("    harvested by contact")
             show_target_indicator(session, None, bales)
     except KeyboardInterrupt:
         print("\ninterrupted — cancelling current goto.")
@@ -468,6 +534,7 @@ def run_legacy_mode(
         )
     finally:
         print(f"\nvisited {len(visited)}/{len(bales)} bales — order: {visit_order}")
+        harvests.close()
 
 
 def main() -> None:

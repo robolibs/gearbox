@@ -114,7 +114,7 @@ pub struct DisplayToggles {
 impl Default for DisplayToggles {
     fn default() -> Self {
         Self {
-            show_world_grid: true,
+            show_world_grid: false,
             show_world_axes: false,
             show_prim_markers: false,
             prim_marker_bias: 1.0,

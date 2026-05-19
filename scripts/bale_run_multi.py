@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import random
 import sys
+import threading
 import time
 
 import cbor2
@@ -28,8 +29,6 @@ import zenoh
 TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
 BALE_USD_PATH = "markers/bale.usdz"
 RING_RADIUS = 15.0
-ARRIVAL_RADIUS = 2.2
-GOAL_TIMEOUT = 120.0
 TICK_DT = 0.10
 
 
@@ -104,6 +103,42 @@ class RobotProxy:
         return target_heading
 
 
+class HarvestTracker:
+    """Receives Gearbox contact-delete events so scripts never respawn bales."""
+
+    def __init__(self, session: zenoh.Session):
+        self._lock = threading.Lock()
+        self._harvested: set[int] = set()
+        self._sub = session.declare_subscriber("gearbox/usd/harvested/**", self._on_event)
+
+    def _on_event(self, sample: zenoh.Sample) -> None:
+        try:
+            d = cbor2.loads(bytes(sample.payload))
+        except Exception:  # noqa: BLE001
+            return
+        bale_id = d.get("bale_id")
+        if not isinstance(bale_id, int):
+            text = str(d.get("id", ""))
+            if text.startswith("bale_"):
+                try:
+                    bale_id = int(text.removeprefix("bale_"))
+                except ValueError:
+                    return
+            else:
+                return
+        with self._lock:
+            self._harvested.add(int(bale_id))
+
+    def drain(self) -> set[int]:
+        with self._lock:
+            out = set(self._harvested)
+            self._harvested.clear()
+            return out
+
+    def close(self) -> None:
+        del self._sub
+
+
 def spawn_usd_tractors(session: zenoh.Session, robots: list[RobotProxy]) -> None:
     landed: dict[str, dict] = {}
 
@@ -125,9 +160,9 @@ def spawn_usd_tractors(session: zenoh.Session, robots: list[RobotProxy]) -> None
         x = RING_RADIUS * math.cos(angle)
         z = RING_RADIUS * math.sin(angle)
         desired_heading = math.atan2(-x, -z)
-        # The tractor's local forward is -Z at yaw=0, so add pi to aim that
-        # front vector at the desired field heading.
-        yaw_deg = math.degrees(desired_heading + math.pi)
+        # Runtime yaw follows the same field heading convention as state:
+        # 0° drives +Z, 90° drives +X. Aim each tractor at the field center.
+        yaw_deg = math.degrees(desired_heading)
         put_cbor(
             session,
             f"gearbox/usd/load/{robot.namespace}",
@@ -198,11 +233,11 @@ def show_target_indicator(
         {
             "category": "static_usd",
             "x": float(bx),
-            "y": 2.2,
+            "y": 0.0,
             "z": float(bz),
             "kind": "box",
-            "height": 0.8,
-            "radius": 0.35,
+            "height": 0.45,
+            "radius": 0.32,
             "color": [1.0, 0.0, 0.0],
             "remove": False,
         },
@@ -248,7 +283,9 @@ def drive_toward(session: zenoh.Session, robot: RobotProxy, target: tuple[float,
     turn_slowdown = max(0.20, math.cos(abs(err)))
     speed = min(3.5, 0.45 + 0.35 * d_now) * turn_slowdown
     if abs(err) > 1.7:
-        speed = 0.35
+        # Ackermann steering changes heading by rolling an arc; crawling at
+        # 0.35 m/s looked like "stopping" and never lined up in practice.
+        speed = 1.2
     yaw_rate = clamp(1.8 * err, -1.2, 1.2)
     robot.publish_cmd(session, speed, yaw_rate)
     return d_now
@@ -277,39 +314,56 @@ def main() -> None:
 
         print(f"scattering {n_bales} bales across {field:.0f} × {field:.0f} m field")
         clear_old_bales(session, max(500, n_bales + 50))
+        harvests = HarvestTracker(session)
         for i, (bx, bz) in enumerate(bales):
             recolor_bale(session, i, bx, bz, "default")
-        time.sleep(0.3)
+        # Let startup cleanup/removal messages drain before assigning target
+        # indicators. The loader replaces entities per message, so target
+        # markers must be published only on target changes, not every tick.
+        time.sleep(0.8)
 
         visited: set[int] = set()
         print(f"\n── DRIVING  R={n_tractors}  B={n_bales}  field={field:.0f} m ──\n")
 
+        def mark_harvested(bale_id: int) -> None:
+            if not (0 <= bale_id < n_bales) or bale_id in visited:
+                return
+            visited.add(bale_id)
+            remove_bale(session, bale_id)
+            for robot in robots:
+                if robot.target_bale == bale_id:
+                    robot.stop(session)
+                    robot.collected.append(bale_id)
+                    show_target_indicator(session, robot.idx, None)
+                    robot.target_bale = None
+                    print(
+                        f"  R{robot.idx} touched bale_{bale_id}"
+                        f"  collected={len(robot.collected)}"
+                        f"  total={len(visited)}/{n_bales}"
+                    )
+                    return
+            print(f"  contact harvested bale_{bale_id}  total={len(visited)}/{n_bales}")
+
         while len(visited) < n_bales:
             now = time.time()
+            for bid in harvests.drain():
+                mark_harvested(bid)
+            for bid in visited:
+                remove_bale(session, bid)
             claimed = {r.target_bale for r in robots if r.target_bale is not None}
 
             for robot in robots:
+                if robot.target_bale in visited:
+                    robot.stop(session)
+                    show_target_indicator(session, robot.idx, None)
+                    robot.target_bale = None
+
                 if robot.target_bale is not None:
                     bid = robot.target_bale
-                    distance = drive_toward(session, robot, bales[bid])
-                    if distance < ARRIVAL_RADIUS:
-                        robot.stop(session)
-                        if bid not in visited:
-                            visited.add(bid)
-                            robot.collected.append(bid)
-                            remove_bale(session, bid)
-                            show_target_indicator(session, robot.idx, None)
-                            print(
-                                f"  R{robot.idx} reached bale_{bid}"
-                                f"  collected={len(robot.collected)}"
-                                f"  total={len(visited)}/{n_bales}"
-                            )
-                        robot.target_bale = None
-                    elif now - robot.target_since > GOAL_TIMEOUT:
-                        robot.stop(session)
-                        print(f"  R{robot.idx} TIMEOUT on bale_{bid} — releasing")
-                        show_target_indicator(session, robot.idx, None)
-                        robot.target_bale = None
+                    # Keep the target locked. Do not switch on distance or
+                    # timeout: only the Gearbox contact-harvest event may clear
+                    # this target and move the red marker to a new bale.
+                    drive_toward(session, robot, bales[bid])
 
                 if robot.is_idle:
                     pick = pick_nearest_bale(robot, bales, visited, claimed)
@@ -321,7 +375,6 @@ def main() -> None:
                     claimed.add(pick)
                     cx, cz = robot.pose
                     d = math.hypot(bx - cx, bz - cz)
-                    recolor_bale(session, pick, bx, bz, "red")
                     show_target_indicator(session, robot.idx, (bx, bz))
                     print(
                         f"  R{robot.idx} → bale_{pick}"
@@ -340,6 +393,8 @@ def main() -> None:
         for robot in robots:
             robot.stop(session)
             show_target_indicator(session, robot.idx, None)
+        if "harvests" in locals():
+            harvests.close()
         print(f"\nfinal: collected {len({b for r in robots for b in r.collected})}/{n_bales} bales")
         for robot in robots:
             print(f"  R{robot.idx} ({robot.namespace}): {len(robot.collected)} bales")

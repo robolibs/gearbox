@@ -26,7 +26,6 @@
 
 def Xform "robot" (
     prepend apiSchemas = [
-        "PhysicsArticulationRootAPI",
         "GearboxMachineAPI",
         "GearboxControllerAPI:drive"
     ]
@@ -68,7 +67,7 @@ def Xform "robot" (
     float gearbox:controller:drive:frontTrackWidth = 1.5675
     float gearbox:controller:drive:rearTrackWidth = 1.685
     float gearbox:controller:drive:maxSteerDeg = 45
-    token gearbox:controller:drive:steeringGeometry = "ackermann"
+    token gearbox:controller:drive:steeringGeometry = "parallel"
     token[] gearbox:controller:drive:usesRoles = [
         "poweredWheelJoints",
         "steeringJoints"
@@ -590,10 +589,9 @@ def Xform "robot" (
     }
 
     # ---- FRONT-LEFT: chassis ↔ steer (Z, ±45°) ; steer ↔ wheel (X, free) ----
-    # Full-articulation path: these joints are intentionally NOT excluded from
-    # articulation. That matches Isaac Sim's robot pattern: one articulation
-    # rooted at the chassis, with steering joints driven by position targets
-    # and wheel joints driven by velocity targets.
+    # Keep these as ordinary USD revolute joints. Rapier's multibody path made
+    # the wheels spin without reliably pushing the chassis on the heightfield;
+    # impulse joints let tyre contacts actually move the tractor body.
     def PhysicsRevoluteJoint "steer_front_left"
     {
         rel physics:body0 = </robot/chassis>
