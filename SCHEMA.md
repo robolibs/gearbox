@@ -71,6 +71,36 @@ The loader does not need to know whether a USD "is a bale" or "is a tractor"
 up front. Category only selects which runtime binding path to use; actual
 geometry, variants, and machine/controller metadata stay in USD.
 
+Re-publishing the same `id` with the same `usd_path` *moves* the loaded USD in
+place (no despawn/respawn); a different asset replaces it.
+
+## Object pose feedback
+
+```text
+gearbox/usd/pose/<runtime_id>
+```
+
+Gearbox is the source of truth for *where loaded things actually are*: a static
+USD's resting place is decided by the terrain and the physics settle, not by
+the loader request. Once a loaded static USD's physics body comes to rest,
+Gearbox publishes its settled pose once:
+
+```python
+{
+  "id": "bale_12",
+  "x": ...,   # settled world X
+  "y": ...,   # settled world Y (height)
+  "z": ...,   # settled world Z
+  "top_y": ...,  # world Y of the asset's visual top
+}
+```
+
+Tools subscribe to `gearbox/usd/pose/**` and drive off these authoritative
+positions instead of assuming a load request landed where it was asked to.
+`top_y` lets a caller place a marker directly above an object with no terrain
+math. A contact-harvested object is reported once more on
+`gearbox/usd/harvested/<id>` and then stops appearing.
+
 ## Design direction: Gearbox Robot Description API
 
 The current metadata is intentionally small, but the long-term API should be

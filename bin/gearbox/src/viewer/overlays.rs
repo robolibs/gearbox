@@ -1,7 +1,7 @@
 //! Overlay state + scene-extent recompute. Ported from bevy_openusd.
-//! The hand-rolled grid / axis triad has long been replaced by
-//! `bevy_glacial`'s `GroundGridPlugin` + `AxisGizmoPlugin` (which the
-//! gearbox `WorldPlugin` already wires); this module just owns the
+//! The hand-rolled grid has long been replaced by `bevy_glacial`'s
+//! `GroundGridPlugin` (which the gearbox `WorldPlugin` already wires);
+//! this module just owns the
 //! `DisplayToggles` resource that the Overlays panel mutates and the
 //! light-intensity / wireframe glue.
 

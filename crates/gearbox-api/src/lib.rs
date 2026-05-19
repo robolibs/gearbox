@@ -68,6 +68,9 @@ pub mod goto_api;
 // Generic USD loader — load / move / unload USD assets over zenoh.
 pub mod loader_api;
 
+// Lightweight marker meshes — update by UUID without going through USD load.
+pub mod mark_api;
+
 // Pluggable vehicle spawner — drop a tractor / husky / robotti /
 // drone / oxbo into the scene at any (x,z) + yaw over zenoh.
 pub mod spawn_api;
@@ -93,6 +96,10 @@ pub use goto_api::{GotoBroker, GotoCommand, GotoStatusWire};
 pub use loader_api::{UsdLoadWire, UsdLoaderBroker};
 #[cfg(feature = "bevy")]
 pub use loader_api::{UsdLoaderApiPlugin, UsdLoaderApiSession};
+
+pub use mark_api::MarkerBroker;
+#[cfg(feature = "bevy")]
+pub use mark_api::{MarkerApiSession, UsdMarkerApiPlugin};
 
 #[cfg(feature = "bevy")]
 pub use spawn_api::{SpawnApiPlugin, SpawnApiSession};

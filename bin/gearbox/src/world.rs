@@ -97,12 +97,13 @@ impl Plugin for WorldPlugin {
             // extra texels go directly into shadow sharpness.
             .insert_resource(DirectionalLightShadowMap { size: 8192 })
             .init_resource::<StaticUsdPropBodies>()
+            .init_resource::<PublishedUsdPoses>()
             .add_plugins(MaterialPlugin::<TerrainMaterial>::default())
-            .add_systems(Startup, open_harvest_event_publisher)
+            .add_systems(Startup, open_world_event_publisher)
             .add_systems(Startup, (spawn_world, spawn_physics_ground))
             .add_systems(Update, snap_new_usd_roots_to_terrain)
             .add_systems(Update, freeze_settled_static_usd_prop_bodies)
-            .add_systems(Update, place_target_indicators_above_bales)
+            .add_systems(Update, publish_loaded_usd_poses)
             .add_systems(Update, harvest_bales_on_machine_contact)
             .add_systems(Update, cleanup_static_usd_prop_bodies)
             .add_systems(
@@ -130,7 +131,7 @@ struct StaticUsdPropBodies {
 }
 
 #[derive(Resource, Clone)]
-struct HarvestEventPublisher {
+struct WorldEventPublisher {
     session: Arc<zenoh::Session>,
 }
 
@@ -143,6 +144,27 @@ struct UsdHarvestedWire {
     z: f32,
 }
 
+/// Settled world pose of a loader-spawned static USD. Published once the prop
+/// body freezes, so scripts read the *real* terrain-snapped + physics-settled
+/// position instead of guessing. `top_y` is the world Y of the asset's visual
+/// top — a caller can drop a marker right above it with no terrain math.
+#[derive(Debug, Serialize)]
+struct UsdPoseWire {
+    id: String,
+    x: f32,
+    y: f32,
+    z: f32,
+    top_y: f32,
+}
+
+/// Prop entities whose settled pose has already been published. Keyed by
+/// `Entity` (not runtime id) so that re-loading an id — a fresh entity — is
+/// reported anew instead of being silently suppressed across script runs.
+#[derive(Resource, Default)]
+struct PublishedUsdPoses {
+    published: std::collections::HashSet<Entity>,
+}
+
 const TERRAIN_BOUNDS_SNAP_SETTLE_FRAMES: u32 = 5;
 const TERRAIN_PROP_CONTACT_CLEARANCE_M: f32 = 0.015;
 const STATIC_PROP_MIN_DYNAMIC_FRAMES: u32 = 12;
@@ -150,16 +172,19 @@ const STATIC_PROP_FORCE_FREEZE_FRAMES: u32 = 45;
 const STATIC_PROP_SETTLED_LINEAR_SPEED_MPS: f64 = 0.12;
 const STATIC_PROP_SETTLED_ANGULAR_SPEED_RPS: f64 = 0.25;
 
-fn open_harvest_event_publisher(mut commands: Commands) {
+fn open_world_event_publisher(mut commands: Commands) {
     match zenoh::open(zenoh::Config::default()).wait() {
         Ok(session) => {
-            commands.insert_resource(HarvestEventPublisher {
+            commands.insert_resource(WorldEventPublisher {
                 session: Arc::new(session),
             });
-            info!("world: USD harvest events ready (gearbox/usd/harvested/<id>)");
+            info!(
+                "world: USD world events ready \
+                 (gearbox/usd/harvested/<id>, gearbox/usd/pose/<id>)"
+            );
         }
         Err(err) => {
-            warn!("world: USD harvest events disabled: {err}");
+            warn!("world: USD world events disabled: {err}");
         }
     }
 }
@@ -297,7 +322,6 @@ fn spawn_world(
             max_distance: radius * 3.0,
             ..default()
         },
-        bevy_glacial::AxisGizmo::default(),
         bevy_glacial::GizmoCamera,
     ));
 }
@@ -581,51 +605,48 @@ fn attach_static_usd_prop_body(
     (body_handle, collider_handle)
 }
 
-fn place_target_indicators_above_bales(
-    mut sets: ParamSet<(
-        Query<(&Name, &Transform, &StaticUsdPhysicsProp)>,
-        Query<(Entity, &Name, &mut Transform), Without<StaticUsdPhysicsProp>>,
-    )>,
+/// Publish the settled world pose of every loader-spawned static USD prop —
+/// once, when its physics body freezes. Scripts subscribe to
+/// `gearbox/usd/pose/**` and drive off these authoritative positions instead
+/// of guessing where a terrain-snapped, physics-settled asset ended up. This
+/// replaces the old proximity-matching marker system: the world reports where
+/// things *are*; it never decides what anything targets.
+fn publish_loaded_usd_poses(
+    physics: Res<PhysicsWorld>,
+    publisher: Option<Res<WorldEventPublisher>>,
+    mut published: ResMut<PublishedUsdPoses>,
+    props: Query<(Entity, &Name, &Transform, &StaticUsdPhysicsProp)>,
 ) {
-    let bales = sets
-        .p0()
-        .iter()
-        .filter_map(|(name, tr, prop)| {
-            let id = parse_loaded_bale_id(name.as_str())?;
-            Some((
-                id,
-                tr.translation.x,
-                tr.translation.z,
-                tr.translation.y + prop.visual_top_offset_y,
-            ))
-        })
-        .collect::<Vec<_>>();
-    if bales.is_empty() {
+    let Some(publisher) = publisher.as_deref() else {
         return;
-    }
+    };
+    // Forget props that no longer exist (harvested / unloaded). A later load
+    // that reuses the same runtime id is a fresh entity, so its pose is then
+    // published anew rather than suppressed.
+    let live: std::collections::HashSet<Entity> = props.iter().map(|(e, ..)| e).collect();
+    published.published.retain(|entity| live.contains(entity));
 
-    for (_indicator_entity, name, mut indicator) in sets.p1().iter_mut() {
-        let is_indicator = name.as_str().starts_with("UsdLoad[target_indicator_")
-            || name.as_str().starts_with("UsdLoad[bale_target_indicator");
-        if !is_indicator {
+    for (entity, name, tr, prop) in props.iter() {
+        if published.published.contains(&entity) {
             continue;
         }
-
-        // Do not infer/reassign targets here. The scripts own the actual
-        // target id and X/Z. This system only lifts the red marker above the
-        // bale sitting at that same X/Z (or above terrain if the bale is gone).
-        let x = indicator.translation.x;
-        let z = indicator.translation.z;
-        let matched_bale = bales
-            .iter()
-            .filter_map(|(_, bx, bz, top_y)| {
-                let d2 = (*bx - x).mul_add(*bx - x, (*bz - z) * (*bz - z));
-                (d2 < 4.0).then_some((d2, *top_y))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0));
-        indicator.translation.y = matched_bale
-            .map(|(_, top_y)| top_y + 0.45)
-            .unwrap_or_else(|| terrain_height_m(x, z) + 1.0);
+        let Some(id) = parse_loaded_usd_id(name.as_str()) else {
+            continue;
+        };
+        // Wait for the prop to come to rest. `freeze_settled_static_usd_prop_bodies`
+        // flips a settled body to `Fixed`, so a non-dynamic body means the
+        // pose reported here is the final resting pose.
+        let settled = physics
+            .bodies
+            .get(prop.body)
+            .is_some_and(|body| !body.is_dynamic());
+        if !settled {
+            continue;
+        }
+        let pos = tr.translation;
+        let top_y = pos.y + prop.visual_top_offset_y;
+        publisher.publish_loaded_usd_pose(id, pos, top_y);
+        published.published.insert(entity);
     }
 }
 
@@ -633,7 +654,7 @@ fn harvest_bales_on_machine_contact(
     mut commands: Commands,
     mut physics: ResMut<PhysicsWorld>,
     mut prop_bodies: ResMut<StaticUsdPropBodies>,
-    publisher: Option<Res<HarvestEventPublisher>>,
+    publisher: Option<Res<WorldEventPublisher>>,
     bales: Query<(Entity, &Name, &Transform, &StaticUsdPhysicsProp)>,
 ) {
     let prop_body_handles = prop_bodies
@@ -692,7 +713,14 @@ fn parse_loaded_bale_id(name: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-impl HarvestEventPublisher {
+/// Extract the loader runtime id from a `UsdLoad[<id>]::…` entity name.
+fn parse_loaded_usd_id(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("UsdLoad[")?;
+    let end = rest.find(']')?;
+    Some(&rest[..end])
+}
+
+impl WorldEventPublisher {
     fn publish_bale_harvested(&self, bale_id: &str, pos: Vec3) {
         let id = format!("bale_{bale_id}");
         let event = UsdHarvestedWire {
@@ -706,7 +734,41 @@ impl HarvestEventPublisher {
             return;
         };
         let topic = format!("gearbox/usd/harvested/{id}");
-        if let Err(err) = self.session.put(topic.clone(), bytes).wait() {
+        // BLOCK congestion control: a dropped harvest event would leave the
+        // controlling script unaware that a bale was collected, so its tractor
+        // would keep targeting a bale that no longer exists. Harvest events
+        // are infrequent, so blocking briefly here costs nothing.
+        if let Err(err) = self
+            .session
+            .put(topic.clone(), bytes)
+            .congestion_control(zenoh::qos::CongestionControl::Block)
+            .wait()
+        {
+            warn!("world: failed to publish {topic}: {err}");
+        }
+    }
+
+    fn publish_loaded_usd_pose(&self, id: &str, pos: Vec3, top_y: f32) {
+        let event = UsdPoseWire {
+            id: id.to_string(),
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            top_y,
+        };
+        let Ok(bytes) = encode(&event) else {
+            return;
+        };
+        let topic = format!("gearbox/usd/pose/{id}");
+        // BLOCK congestion control: a dropped pose would leave a script with
+        // no position for that object — it could never be targeted. Each prop
+        // publishes its pose exactly once, so blocking briefly is free.
+        if let Err(err) = self
+            .session
+            .put(topic.clone(), bytes)
+            .congestion_control(zenoh::qos::CongestionControl::Block)
+            .wait()
+        {
             warn!("world: failed to publish {topic}: {err}");
         }
     }

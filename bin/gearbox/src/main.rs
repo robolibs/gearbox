@@ -19,8 +19,8 @@ use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 use bevy_frost::FrostPlugin;
 use bevy_glacial::{
-    AxisGizmoPlugin, ChaseCameraPlugin, GizmoAutoScale, GizmoHotkeys, GizmoOptions,
-    GroundGridPlugin, SelectionRingPlugin, TransformGizmoPlugin, auto_scale_gizmo_to_target,
+    ChaseCameraPlugin, GizmoAutoScale, GizmoHotkeys, GizmoOptions, GroundGridPlugin,
+    SelectionRingPlugin, TransformGizmoPlugin, auto_scale_gizmo_to_target,
 };
 
 fn main() {
@@ -64,10 +64,9 @@ fn main() {
         // ── UI stack: egui + frost (glass theme + ribbons + widgets).
         .add_plugins(EguiPlugin::default())
         .add_plugins(FrostPlugin)
-        // ── Camera + grid + axis triad. ChaseCamera = orbit/pan/zoom.
+        // ── Camera + ground grid. ChaseCamera = orbit/pan/zoom.
         .add_plugins(ChaseCameraPlugin)
         .add_plugins(GroundGridPlugin)
-        .add_plugins(AxisGizmoPlugin)
         // ── Transform gizmo for placement.
         .add_plugins(TransformGizmoPlugin)
         // Halo ring around the selected asset while physics is playing
@@ -96,6 +95,9 @@ fn main() {
         // USDs are handled by `load::LoadPlugin` because it also registers
         // controller namespaces.
         .add_plugins(gearbox_api::UsdLoaderApiPlugin)
+        // Lightweight marker entities keyed by caller UUID. These are not USD
+        // assets, so they move/delete in place without loader races.
+        .add_plugins(gearbox_api::UsdMarkerApiPlugin)
         // ── Viewer surface: full ribbon + panel set, overlays, prim
         // tree, prim-level selection, fly-to camera, log capture,
         // variants, cameras, materials.

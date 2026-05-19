@@ -13,6 +13,11 @@ The script publishes USD bale assets via ``gearbox/usd/load/<id>`` and drives wi
     gearbox/machines/<namespace>/cmd_vel
     gearbox/machines/<namespace>/state
 
+A bale's real resting place is decided by the terrain + physics inside Gearbox,
+not by this script. Gearbox publishes each bale's settled pose on
+``gearbox/usd/pose/**``; the script drives off those authoritative positions so
+the red target marker sits exactly on its bale.
+
 For the old procedural simulator API, use ``spawn:<preset>`` as arg #1,
 e.g. ``python scripts/bale_run.py spawn:tractor``. Existing legacy prefixes
 like ``tractor_0`` are also still supported.
@@ -34,7 +39,9 @@ import zenoh
 KNOWN_PRESETS = {"tractor", "husky", "robotti", "drone", "oxbo"}
 TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
 BALE_USD_PATH = "markers/bale.usdz"
-TARGET_INDICATOR_ID = "bale_target_indicator"
+TARGET_MARK_ID = "bale_target_marker"
+# Red cube floats this far above a bale's reported top.
+MARKER_GAP_M = 0.6
 
 
 def wrap_pi(angle: float) -> float:
@@ -46,7 +53,33 @@ def clamp(value: float, lo: float, hi: float) -> float:
 
 
 def put_cbor(session: zenoh.Session, key: str, payload: dict) -> None:
-    session.put(key, cbor2.dumps(payload))
+    # BLOCK congestion control: bale scatter + target updates publish in
+    # bursts, and zenoh's default would silently DROP messages under load —
+    # which leaves the red target marker out of sync with the tractor. BLOCK
+    # makes the publisher wait for queue space, so every load/remove arrives.
+    session.put(
+        key,
+        cbor2.dumps(payload),
+        congestion_control=zenoh.CongestionControl.BLOCK,
+    )
+
+
+def bale_id_from(text: object) -> int | None:
+    """Parse the integer bale index out of ``bale_<n>...`` runtime ids."""
+    text = str(text or "")
+    if not text.startswith("bale_"):
+        return None
+    digits = []
+    for ch in text.removeprefix("bale_"):
+        if not ch.isdigit():
+            break
+        digits.append(ch)
+    if not digits:
+        return None
+    try:
+        return int("".join(digits))
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -73,13 +106,8 @@ class HarvestTracker:
             return
         bale_id = d.get("bale_id")
         if not isinstance(bale_id, int):
-            text = str(d.get("id", ""))
-            if text.startswith("bale_"):
-                try:
-                    bale_id = int(text.removeprefix("bale_"))
-                except ValueError:
-                    return
-            else:
+            bale_id = bale_id_from(d.get("id"))
+            if bale_id is None:
                 return
         with self._lock:
             self._harvested.add(int(bale_id))
@@ -94,78 +122,107 @@ class HarvestTracker:
         del self._sub
 
 
+class BalePoseTracker:
+    """Receives Gearbox's authoritative settled poses for loaded USD bales.
+
+    Gearbox publishes ``gearbox/usd/pose/bale_<id>`` once a bale has come to
+    rest on the terrain. The script drives off these real positions instead of
+    its own flat-ground scatter guesses, so the red marker lands exactly on
+    its bale with no terrain/height correction.
+    """
+
+    def __init__(self, session: zenoh.Session):
+        self._lock = threading.Lock()
+        # bale_id -> (x, y, z, top_y)
+        self._poses: dict[int, tuple[float, float, float, float]] = {}
+        self._sub = session.declare_subscriber("gearbox/usd/pose/**", self._on_event)
+
+    def _on_event(self, sample: zenoh.Sample) -> None:
+        try:
+            d = cbor2.loads(bytes(sample.payload))
+        except Exception:  # noqa: BLE001
+            return
+        bale_id = bale_id_from(d.get("id"))
+        if bale_id is None:
+            return
+        with self._lock:
+            self._poses[bale_id] = (
+                float(d.get("x", 0.0)),
+                float(d.get("y", 0.0)),
+                float(d.get("z", 0.0)),
+                float(d.get("top_y", 0.0)),
+            )
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._poses)
+
+    def snapshot(self) -> dict[int, tuple[float, float, float, float]]:
+        with self._lock:
+            return dict(self._poses)
+
+    def close(self) -> None:
+        del self._sub
+
+
 def scatter_bales(
     session: zenoh.Session,
     bales: list[tuple[float, float]],
-    active: int | None = None,
-    hidden: set[int] | None = None,
+    bale_runtime_ids: dict[int, str],
+    nonce: str,
 ) -> None:
-    """Publish visible USD bales.
+    """Publish the USD bales at the scattered X/Z.
 
-    Gearbox does not know these are "bales" or cylinders. It only receives a
-    USD asset path plus optional variant selections; the USD asset owns the
-    shape/materials.
+    Gearbox does not know these are "bales". It receives a USD asset path and
+    drops the asset onto the terrain, then reports the settled pose back.
     """
-    hidden = hidden or set()
     for i, (bx, bz) in enumerate(bales):
-        if i in hidden:
-            remove_bale(session, i)
-            continue
         put_cbor(
             session,
-            f"gearbox/usd/load/bale_{i}",
+            f"gearbox/usd/load/{bale_runtime_ids[i]}",
             {
                 "category": "static_usd",
                 "x": float(bx),
                 "z": float(bz),
                 "usd_path": BALE_USD_PATH,
+                "nonce": nonce,
                 "remove": False,
             },
         )
 
 
-def remove_bale(session: zenoh.Session, bale_id: int) -> None:
-    put_cbor(
-        session,
-        f"gearbox/usd/load/bale_{bale_id}",
-        {"x": 0.0, "z": 0.0, "remove": True},
-    )
+def remove_bale(session: zenoh.Session, runtime_id: str, nonce: str | None = None) -> None:
+    payload = {"remove": True, "delete": True}
+    if nonce is not None:
+        payload["nonce"] = nonce
+    put_cbor(session, f"gearbox/usd/delete/{runtime_id}", payload)
 
 
-def show_target_indicator(
+def set_target_marker(
     session: zenoh.Session,
-    active: int | None,
-    bales: list[tuple[float, float]],
+    pose: tuple[float, float, float, float] | None,
 ) -> None:
-    if active is None:
-        put_cbor(
-            session,
-            f"gearbox/usd/load/{TARGET_INDICATOR_ID}",
-            {"x": 0.0, "z": 0.0, "remove": True},
-        )
+    """Place the red target marker through the marker API, or remove it."""
+    if pose is None:
+        put_cbor(session, f"gearbox/usd/mark/{TARGET_MARK_ID}/delete", {})
         return
-    bx, bz = bales[active]
+    bx, _by, bz, top_y = pose
     put_cbor(
         session,
-        f"gearbox/usd/load/{TARGET_INDICATOR_ID}",
-        {
-            "category": "static_usd",
-            "x": float(bx),
-            "y": 0.0,
-            "z": float(bz),
-            "kind": "box",
-            "height": 0.45,
-            "radius": 0.32,
-            "color": [1.0, 0.0, 0.0],
-            "remove": False,
-        },
+        f"gearbox/usd/mark/{TARGET_MARK_ID}/delete",
+        {},
+    )
+    put_cbor(
+        session,
+        f"gearbox/usd/mark/{TARGET_MARK_ID}/{bx}/{top_y + MARKER_GAP_M}/{bz}",
+        {},
     )
 
 
 def clear_old_bales(session: zenoh.Session, count: int = 500) -> None:
-    show_target_indicator(session, None, [])
+    set_target_marker(session, None)
     for i in range(count):
-        remove_bale(session, i)
+        remove_bale(session, f"bale_{i}")
 
 
 def wait_for_pose(pose: MachinePose, timeout_s: float) -> bool:
@@ -173,6 +230,20 @@ def wait_for_pose(pose: MachinePose, timeout_s: float) -> bool:
     while not pose.seen and time.time() - t0 < timeout_s:
         time.sleep(0.05)
     return pose.seen
+
+
+def wait_for_bale_poses(poses: BalePoseTracker, expected: int, timeout_s: float = 20.0) -> dict:
+    """Block until Gearbox has reported every settled bale pose (or timeout)."""
+    print("waiting for Gearbox to report settled bale poses ...")
+    t0 = time.time()
+    while poses.count() < expected and time.time() - t0 < timeout_s:
+        time.sleep(0.1)
+    bale_pos = poses.snapshot()
+    if len(bale_pos) < expected:
+        print(f"  only {len(bale_pos)}/{expected} bale poses arrived; running with those")
+    else:
+        print(f"  got all {len(bale_pos)} bale poses")
+    return bale_pos
 
 
 def spawn_usd_machine(
@@ -242,17 +313,17 @@ def spawn_vehicle(session: zenoh.Session, preset: str, spawned_state: dict) -> s
 def nearest_unvisited(
     pose_x: float,
     pose_z: float,
-    bales: list[tuple[float, float]],
+    bale_pos: dict[int, tuple[float, float, float, float]],
     visited: set[int],
 ) -> tuple[int, float]:
     best_idx = -1
     best_d = math.inf
-    for i, (bx, bz) in enumerate(bales):
-        if i in visited:
+    for bid, (bx, _by, bz, _top) in bale_pos.items():
+        if bid in visited:
             continue
         d = math.hypot(bx - pose_x, bz - pose_z)
         if d < best_d:
-            best_idx = i
+            best_idx = bid
             best_d = d
     return best_idx, best_d
 
@@ -301,14 +372,13 @@ def run_machine_mode(
     print(f"using USD machine namespace `{namespace}`")
     print(f"scattering {len(bales)} bales across {field:.0f} × {field:.0f} m field")
     clear_old_bales(session, max(500, len(bales) + 50))
+    run_nonce = f"bale_run_{namespace}_{int(time.time())}"
+    bale_runtime_ids = {i: f"bale_{i}_{run_nonce}" for i in range(len(bales))}
     visited: set[int] = set()
     harvests = HarvestTracker(session)
-    scatter_bales(session, bales, hidden=visited)
-    show_target_indicator(session, None, bales)
-    # Let startup cleanup/removal messages drain before assigning the target
-    # indicator. The loader replaces entities per message, so target markers
-    # must be published only on target changes, not every tick.
-    time.sleep(0.8)
+    poses = BalePoseTracker(session)
+    scatter_bales(session, bales, bale_runtime_ids, run_nonce)
+    bale_pos = wait_for_bale_poses(poses, len(bales))
 
     visit_order: list[int] = []
     cmd_topic = f"gearbox/machines/{namespace}/cmd_vel"
@@ -321,25 +391,25 @@ def run_machine_mode(
         )
 
     def mark_harvested(bale_id: int, reason: str) -> None:
-        if 0 <= bale_id < len(bales) and bale_id not in visited:
+        if bale_id in bale_pos and bale_id not in visited:
             visited.add(bale_id)
             visit_order.append(bale_id)
-            remove_bale(session, bale_id)
+            remove_bale(session, bale_runtime_ids[bale_id], run_nonce)
             print(f"    harvested bale_{bale_id} ({reason})")
 
     try:
-        for step in range(len(bales)):
+        for step in range(len(bale_pos)):
             for bale_id in harvests.drain():
                 mark_harvested(bale_id, "contact")
-            for bale_id in visited:
-                remove_bale(session, bale_id)
-            best_idx, best_d = nearest_unvisited(pose.x, pose.z, bales, visited)
+            best_idx, best_d = nearest_unvisited(pose.x, pose.z, bale_pos, visited)
             if best_idx < 0:
                 break
-            tx, tz = bales[best_idx]
-            show_target_indicator(session, best_idx, bales)
+            tx, _ty, tz, _top = bale_pos[best_idx]
+            # Publish the marker once for this bale; only the contact-harvest
+            # event below ends the visit and moves the marker to the next bale.
+            set_target_marker(session, bale_pos[best_idx])
             print(
-                f"\n[{step + 1:>3}/{len(bales)}]  visiting bale_{best_idx}  "
+                f"\n[{step + 1:>3}/{len(bale_pos)}]  visiting bale_{best_idx}  "
                 f"target=({tx:+7.2f},{tz:+7.2f})  "
                 f"from=({pose.x:+7.2f},{pose.z:+7.2f})  d={best_d:6.2f} m"
             )
@@ -348,8 +418,6 @@ def run_machine_mode(
             while True:
                 for bale_id in harvests.drain():
                     mark_harvested(bale_id, "contact")
-                for bale_id in visited:
-                    remove_bale(session, bale_id)
                 if best_idx in visited:
                     break
                 dx = tx - pose.x
@@ -388,15 +456,15 @@ def run_machine_mode(
                 time.sleep(0.10)
 
             publish_cmd(0.0, 0.0)
-            show_target_indicator(session, None, bales)
             print("    harvested by contact")
     except KeyboardInterrupt:
         print("\ninterrupted — stopping machine.")
         publish_cmd(0.0, 0.0)
-        show_target_indicator(session, None, bales)
     finally:
-        print(f"\nvisited {len(visited)}/{len(bales)} bales — order: {visit_order}")
+        set_target_marker(session, None)
+        print(f"\nvisited {len(visited)}/{len(bale_pos)} bales — order: {visit_order}")
         harvests.close()
+        poses.close()
         del state_sub
 
 
@@ -433,14 +501,13 @@ def run_legacy_mode(
 
     print(f"scattering {len(bales)} bales across {field:.0f} × {field:.0f} m field")
     clear_old_bales(session, max(500, len(bales) + 50))
+    run_nonce = f"bale_run_legacy_{vehicle}_{int(time.time())}"
+    bale_runtime_ids = {i: f"bale_{i}_{run_nonce}" for i in range(len(bales))}
     visited: set[int] = set()
     harvests = HarvestTracker(session)
-    scatter_bales(session, bales, hidden=visited)
-    show_target_indicator(session, None, bales)
-    # Let startup cleanup/removal messages drain before assigning the target
-    # indicator. The loader replaces entities per message, so target markers
-    # must be published only on target changes, not every tick.
-    time.sleep(0.8)
+    poses = BalePoseTracker(session)
+    scatter_bales(session, bales, bale_runtime_ids, run_nonce)
+    bale_pos = wait_for_bale_poses(poses, len(bales))
 
     pose_state: dict = {"x": 0.0, "z": 0.0}
 
@@ -454,47 +521,30 @@ def run_legacy_mode(
         pose_state["z"] = p[2]
 
     session.declare_subscriber(f"{vehicle}/odom", on_odom)
-
-    status_state: dict = {"active": False, "was_active": False, "reached_pulse": False}
-
-    def on_status(sample: zenoh.Sample) -> None:
-        try:
-            d = cbor2.loads(bytes(sample.payload))
-        except Exception:  # noqa: BLE001
-            return
-        active = bool(d.get("active", False))
-        if status_state["was_active"] and not active:
-            status_state["reached_pulse"] = True
-        status_state["was_active"] = active
-        status_state["active"] = active
-        if d.get("reached"):
-            status_state["reached_pulse"] = True
-
-    session.declare_subscriber(f"{vehicle}/goto_status", on_status)
     time.sleep(0.3)
 
     visit_order: list[int] = []
 
     def mark_harvested(bale_id: int, reason: str) -> None:
-        if 0 <= bale_id < len(bales) and bale_id not in visited:
+        if bale_id in bale_pos and bale_id not in visited:
             visited.add(bale_id)
             visit_order.append(bale_id)
-            remove_bale(session, bale_id)
+            remove_bale(session, bale_runtime_ids[bale_id], run_nonce)
             print(f"    harvested bale_{bale_id} ({reason})")
 
     try:
-        for step in range(len(bales)):
+        for step in range(len(bale_pos)):
             for bale_id in harvests.drain():
                 mark_harvested(bale_id, "contact")
-            for bale_id in visited:
-                remove_bale(session, bale_id)
-            best_idx, best_d = nearest_unvisited(pose_state["x"], pose_state["z"], bales, visited)
+            best_idx, best_d = nearest_unvisited(
+                pose_state["x"], pose_state["z"], bale_pos, visited
+            )
             if best_idx < 0:
                 break
-            tx, tz = bales[best_idx]
-            show_target_indicator(session, best_idx, bales)
+            tx, _ty, tz, _top = bale_pos[best_idx]
+            set_target_marker(session, bale_pos[best_idx])
             print(
-                f"\n[{step + 1:>3}/{len(bales)}]  visiting bale_{best_idx}  "
+                f"\n[{step + 1:>3}/{len(bale_pos)}]  visiting bale_{best_idx}  "
                 f"target=({tx:+7.2f},{tz:+7.2f})  "
                 f"from=({pose_state['x']:+7.2f},{pose_state['z']:+7.2f})  d={best_d:6.2f} m"
             )
@@ -508,33 +558,33 @@ def run_legacy_mode(
                 "cancel": False,
             }
             put_cbor(session, f"{vehicle}/goto", cmd)
-            status_state["reached_pulse"] = False
-            status_state["was_active"] = False
-            status_state["active"] = False
-            local_reached = False
-            t0 = time.time()
             while True:
                 for bale_id in harvests.drain():
                     mark_harvested(bale_id, "contact")
-                for bale_id in visited:
-                    remove_bale(session, bale_id)
                 if best_idx in visited:
                     break
-                d_now = math.hypot(tx - pose_state["x"], tz - pose_state["z"])
                 time.sleep(0.2)
             print("    harvested by contact")
-            show_target_indicator(session, None, bales)
     except KeyboardInterrupt:
         print("\ninterrupted — cancelling current goto.")
-        show_target_indicator(session, None, bales)
         put_cbor(
             session,
             f"{vehicle}/goto",
-            {"x": 0.0, "z": 0.0, "yaw_deg": 0.0, "tolerance": 0.0, "yaw_tolerance_deg": 0.0, "max_speed": 0.0, "cancel": True},
+            {
+                "x": 0.0,
+                "z": 0.0,
+                "yaw_deg": 0.0,
+                "tolerance": 0.0,
+                "yaw_tolerance_deg": 0.0,
+                "max_speed": 0.0,
+                "cancel": True,
+            },
         )
     finally:
-        print(f"\nvisited {len(visited)}/{len(bales)} bales — order: {visit_order}")
+        set_target_marker(session, None)
+        print(f"\nvisited {len(visited)}/{len(bale_pos)} bales — order: {visit_order}")
         harvests.close()
+        poses.close()
 
 
 def main() -> None:

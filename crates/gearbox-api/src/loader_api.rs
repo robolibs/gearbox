@@ -11,9 +11,13 @@
 //! | direction | key                         | payload         |
 //! |-----------|-----------------------------|-----------------|
 //! | sub       | `gearbox/usd/load/<id>`     | [`UsdLoadWire`] |
+//! | sub       | `gearbox/usd/delete/<id>`   | [`UsdLoadWire`] |
 //!
 //! `id` is a caller-chosen runtime instance id. Re-publishing the same id
-//! replaces/moves that loaded USD; publishing `remove: true` unloads it.
+//! moves that loaded USD in place when the asset is unchanged, or replaces it
+//! when the asset differs. Publishing `remove: true` unloads it. Publishing to
+//! `gearbox/usd/delete/<id>` permanently tombstones that exact runtime id, so
+//! late async load messages for that id cannot resurrect it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,6 +27,8 @@ use zenoh::Wait;
 
 use crate::wire::decode;
 
+#[cfg(feature = "bevy")]
+use bevy::ecs::entity::Entities;
 #[cfg(feature = "bevy")]
 use bevy::prelude::*;
 
@@ -59,6 +65,16 @@ pub struct UsdLoadWire {
     /// Drop/unload the USD instance with this id.
     #[serde(default)]
     pub remove: bool,
+    /// Permanent delete for this exact runtime id. Normally set by the
+    /// `gearbox/usd/delete/<id>` topic. Deleted ids are tombstoned and later
+    /// same-id load messages are ignored.
+    #[serde(default)]
+    pub delete: bool,
+    /// Optional caller/run token. If a remove with token `T` is received for
+    /// an id, later stale load messages for that same id+token are ignored.
+    /// A new run can use a different token and load the id again.
+    #[serde(default)]
+    pub nonce: String,
     /// USD asset path, usually relative to the binary's `assets/` directory.
     #[serde(default)]
     pub usd_path: Option<String>,
@@ -104,7 +120,8 @@ pub struct UsdLoaderBroker {
     /// Newly-arrived USD load/update messages keyed by runtime id. Drained
     /// each frame by the Bevy apply system.
     inbox: Arc<Mutex<HashMap<String, UsdLoadWire>>>,
-    _subscriber: zenoh::pubsub::Subscriber<()>,
+    _load_subscriber: zenoh::pubsub::Subscriber<()>,
+    _delete_subscriber: zenoh::pubsub::Subscriber<()>,
 }
 
 impl UsdLoaderBroker {
@@ -113,7 +130,7 @@ impl UsdLoaderBroker {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let inbox: Arc<Mutex<HashMap<String, UsdLoadWire>>> = Arc::new(Mutex::new(HashMap::new()));
         let inbox_cb = Arc::clone(&inbox);
-        let subscriber = session
+        let load_subscriber = session
             .declare_subscriber("gearbox/usd/load/**")
             .callback(move |sample| {
                 let key = sample.key_expr().as_str().to_string();
@@ -132,10 +149,29 @@ impl UsdLoaderBroker {
                 }
             })
             .wait()?;
+        let delete_inbox_cb = Arc::clone(&inbox);
+        let delete_subscriber = session
+            .declare_subscriber("gearbox/usd/delete/**")
+            .callback(move |sample| {
+                let key = sample.key_expr().as_str().to_string();
+                let id = key
+                    .strip_prefix("gearbox/usd/delete/")
+                    .unwrap_or(&key)
+                    .to_string();
+                let bytes = sample.payload().to_bytes();
+                let mut req = decode::<UsdLoadWire>(bytes.as_ref()).unwrap_or_default();
+                req.remove = true;
+                req.delete = true;
+                if let Ok(mut q) = delete_inbox_cb.lock() {
+                    q.insert(id, req);
+                }
+            })
+            .wait()?;
         Ok(Self {
             _session: session,
             inbox,
-            _subscriber: subscriber,
+            _load_subscriber: load_subscriber,
+            _delete_subscriber: delete_subscriber,
         })
     }
 
@@ -153,8 +189,55 @@ impl UsdLoaderBroker {
 #[derive(Resource)]
 pub struct UsdLoaderApiSession {
     pub broker: Mutex<UsdLoaderBroker>,
-    /// Map runtime id → entity, so callers can move/despawn in place.
-    entities: Mutex<HashMap<String, Entity>>,
+    /// Map runtime id → the entity loaded for it plus the asset it is
+    /// currently showing. Re-publishing an id with the same asset moves that
+    /// entity in place; a different asset replaces it.
+    entities: Mutex<HashMap<String, LoadedUsdEntry>>,
+    /// id -> nonce for recently/authoritatively removed ids. This prevents an
+    /// async/stale `load` from the same run resurrecting a harvested bale.
+    tombstones: Mutex<HashMap<String, String>>,
+}
+
+/// A live loaded-USD instance owned by the loader API.
+#[cfg(feature = "bevy")]
+struct LoadedUsdEntry {
+    entity: Entity,
+    signature: LoadSignature,
+}
+
+/// Identifies *what asset* an id is showing. A re-publish that keeps the same
+/// signature is an in-place move; a different signature forces a fresh spawn.
+#[cfg(feature = "bevy")]
+#[derive(Clone, PartialEq)]
+enum LoadSignature {
+    /// A USD asset, identified by path + variant selection.
+    Usd {
+        path: String,
+        variants: Vec<(String, String, String)>,
+    },
+    /// A legacy procedural primitive, identified by shape + colour.
+    Primitive {
+        kind: String,
+        height: f64,
+        radius: f64,
+        color: [f32; 3],
+    },
+}
+
+#[cfg(feature = "bevy")]
+fn load_signature(req: &UsdLoadWire) -> LoadSignature {
+    match req.usd_path.as_deref() {
+        Some(path) => LoadSignature::Usd {
+            path: path.to_string(),
+            variants: req.usd_variants.clone(),
+        },
+        None => LoadSignature::Primitive {
+            kind: req.kind.clone(),
+            height: req.height,
+            radius: req.radius,
+            color: req.color,
+        },
+    }
 }
 
 #[cfg(feature = "bevy")]
@@ -171,6 +254,7 @@ impl Plugin for UsdLoaderApiPlugin {
                         app.insert_resource(UsdLoaderApiSession {
                             broker: Mutex::new(broker),
                             entities: Mutex::new(HashMap::new()),
+                            tombstones: Mutex::new(HashMap::new()),
                         });
                         app.add_systems(Update, apply_usd_loads_system);
                         app.add_systems(Update, instantiate_pending_loaded_usd);
@@ -208,12 +292,17 @@ fn apply_usd_loads_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<bevy::asset::AssetServer>,
     asset_root: Option<Res<gearbox_viz::UsdAssetRoot>>,
+    live_entities: &Entities,
+    mut transforms: Query<&mut Transform>,
 ) {
     let Some(api) = api else { return };
     let Ok(broker) = api.broker.lock() else {
         return;
     };
     let Ok(mut entities) = api.entities.lock() else {
+        return;
+    };
+    let Ok(mut tombstones) = api.tombstones.lock() else {
         return;
     };
     let inbox = broker.drain_inbox();
@@ -223,14 +312,82 @@ fn apply_usd_loads_system(
             // loader because it also has to register controller metadata.
             continue;
         }
-        if let Some(entity) = entities.remove(&id) {
-            commands.entity(entity).despawn();
+
+        // The entity for an id can be despawned by other systems — most
+        // importantly the world's contact-harvest, which deletes bales
+        // directly. Forget any entry whose entity is already gone so the id
+        // behaves like a fresh one on its next publish.
+        if entities
+            .get(&id)
+            .is_some_and(|entry| !live_entities.contains(entry.entity))
+        {
+            entities.remove(&id);
         }
-        if req.remove {
+
+        if req.remove || req.delete {
+            if let Some(entry) = entities.remove(&id) {
+                commands.entity(entry.entity).despawn();
+            }
+            if req.delete {
+                // Permanent exact-id delete. This is for UUID-style runtime
+                // ids: once deleted, late async load messages for the same id
+                // must never bring that exact USD instance back.
+                tombstones.insert(id.clone(), String::new());
+            } else if !req.nonce.is_empty() {
+                tombstones.insert(id.clone(), req.nonce.clone());
+            }
             continue;
         }
 
-        if let Some(usd_rel) = req.usd_path.as_deref() {
+        if tombstones
+            .get(&id)
+            .is_some_and(|removed_nonce| removed_nonce.is_empty())
+        {
+            bevy::log::debug!("gearbox-api: ignoring load for deleted USD id `{id}`");
+            continue;
+        }
+
+        if !req.nonce.is_empty() {
+            if tombstones
+                .get(&id)
+                .is_some_and(|removed_nonce| removed_nonce == &req.nonce)
+            {
+                bevy::log::debug!(
+                    "gearbox-api: ignoring stale USD load `{id}` for removed nonce `{}`",
+                    req.nonce
+                );
+                continue;
+            }
+            tombstones.remove(&id);
+        }
+
+        let signature = load_signature(&req);
+
+        // Re-publishing an id with the *same asset* is a move, not a replace.
+        // Keeping the same entity (and its `Name`) means the loaded USD never
+        // blinks and `Added`-gated terrain snapping does not re-run. This is
+        // what lets a script hold a stable target marker on a bale, or slide
+        // it to a new bale, with no spawn/despawn churn or vertical flashing.
+        if entities
+            .get(&id)
+            .is_some_and(|entry| entry.signature == signature)
+        {
+            let entity = entities[&id].entity;
+            if let Ok(mut transform) = transforms.get_mut(entity) {
+                transform.translation.x = req.x as f32;
+                transform.translation.z = req.z as f32;
+                transform.rotation = Quat::from_rotation_y((req.yaw_deg as f32).to_radians());
+            }
+            continue;
+        }
+
+        // New id, or the asset itself changed: drop the previous entity (if
+        // any) and spawn a fresh one.
+        if let Some(entry) = entities.remove(&id) {
+            commands.entity(entry.entity).despawn();
+        }
+
+        let spawned = if let Some(usd_rel) = req.usd_path.as_deref() {
             let Some(root) = asset_root.as_deref() else {
                 bevy::log::warn!(
                     "gearbox-api: USD load `{id}` requested `{usd_rel}` but no `UsdAssetRoot` is registered"
@@ -272,7 +429,7 @@ fn apply_usd_loads_system(
                     s.variant_selections = variants.clone();
                 },
             );
-            let entity = commands
+            commands
                 .spawn((
                     Name::new(format!("UsdLoad[{}]::pending", id)),
                     Transform {
@@ -286,49 +443,53 @@ fn apply_usd_loads_system(
                         load_id: id.clone(),
                     },
                 ))
-                .id();
-            entities.insert(id, entity);
-            continue;
-        }
-
-        // Legacy procedural fallback. New callers should send `usd_path`.
-        let height = if req.height > 0.0 {
-            req.height as f32
+                .id()
         } else {
-            1.0
-        };
-        let radius = if req.radius > 0.0 {
-            req.radius as f32
-        } else {
-            0.4
-        };
-        let color = if req.color == [0.0, 0.0, 0.0] {
-            [0.95, 0.85, 0.15]
-        } else {
-            req.color
-        };
+            // Legacy procedural fallback. New callers should send `usd_path`.
+            let height = if req.height > 0.0 {
+                req.height as f32
+            } else {
+                1.0
+            };
+            let radius = if req.radius > 0.0 {
+                req.radius as f32
+            } else {
+                0.4
+            };
+            let color = if req.color == [0.0, 0.0, 0.0] {
+                [0.95, 0.85, 0.15]
+            } else {
+                req.color
+            };
 
-        let mesh = match req.kind.as_str() {
-            "box" | "cube" => meshes.add(Cuboid::new(radius * 2.0, height, radius * 2.0)),
-            "sphere" | "ball" => meshes.add(Sphere::new(radius)),
-            _ => meshes.add(Cone { radius, height }),
-        };
-        let mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(color[0], color[1], color[2]),
-            perceptual_roughness: 0.6,
-            metallic: 0.0,
-            ..default()
-        });
+            let mesh = match req.kind.as_str() {
+                "box" | "cube" => meshes.add(Cuboid::new(radius * 2.0, height, radius * 2.0)),
+                "sphere" | "ball" => meshes.add(Sphere::new(radius)),
+                _ => meshes.add(Cone { radius, height }),
+            };
+            let mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(color[0], color[1], color[2]),
+                perceptual_roughness: 0.6,
+                metallic: 0.0,
+                ..default()
+            });
 
-        let entity = commands
-            .spawn((
-                Name::new(format!("UsdLoad[{}]::legacy_primitive", id)),
-                Transform::from_xyz(req.x as f32, req.y as f32 + height * 0.5, req.z as f32),
-                Mesh3d(mesh),
-                MeshMaterial3d(mat),
-            ))
-            .id();
-        entities.insert(id, entity);
+            commands
+                .spawn((
+                    Name::new(format!("UsdLoad[{}]::legacy_primitive", id)),
+                    Transform::from_xyz(req.x as f32, req.y as f32 + height * 0.5, req.z as f32),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(mat),
+                ))
+                .id()
+        };
+        entities.insert(
+            id,
+            LoadedUsdEntry {
+                entity: spawned,
+                signature,
+            },
+        );
     }
 }
 
@@ -378,7 +539,11 @@ fn clear_loaded_usds_on_reset_system(
     let Ok(mut entities) = api.entities.lock() else {
         return;
     };
-    for (_id, entity) in entities.drain() {
-        commands.entity(entity).despawn();
+    if let Ok(mut tombstones) = api.tombstones.lock() {
+        tombstones.clear();
+    }
+    for (_id, entry) in entities.drain() {
+        // `try_despawn`: a contact-harvested bale may already be gone.
+        commands.entity(entry.entity).try_despawn();
     }
 }
