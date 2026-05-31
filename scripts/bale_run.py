@@ -33,6 +33,7 @@ import zenoh
 
 
 TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
+TERRAIN_USD_PATH = "world/terrain.usd"
 BALE_USD_PATH = "markers/bale.usdz"
 TARGET_MARK_ID = "bale_target_marker"
 # Red cube floats this far above a bale's reported top.
@@ -184,6 +185,21 @@ def scatter_bales(
                 "remove": False,
             },
         )
+
+
+def load_terrain(session: zenoh.Session) -> None:
+    put_cbor(
+        session,
+        "gearbox/usd/load/terrain",
+        {
+            "category": "terrain",
+            "usd_path": TERRAIN_USD_PATH,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "remove": False,
+        },
+    )
 
 
 def remove_bale(session: zenoh.Session, runtime_id: str, nonce: str | None = None) -> None:
@@ -344,6 +360,12 @@ def run_machine_mode(
         pose.seen = True
 
     state_sub = session.declare_subscriber(f"gearbox/machines/{namespace}/state", on_state)
+    print("loading USD terrain")
+    load_terrain(session)
+    # Give Gearbox a short window to instantiate the terrain scene and swap
+    # out the default flat ground before bales are scattered.
+    time.sleep(1.0)
+
     print(f"waiting for gearbox/machines/{namespace}/state ...")
     wait_for_pose(pose, 1.0)
     if not pose.seen:

@@ -393,15 +393,24 @@ fn spawn_when_loaded(
         let Some(asset) = usd_assets.get(&entry.handle) else {
             continue;
         };
+        let mut discovered_machines = match discover_machines_from_usd(&entry.path) {
+            Ok(machines) => Some(machines),
+            Err(err) => {
+                warn!(
+                    "gearbox-control: failed to scan {} for machine controllers: {err}",
+                    entry.path.display()
+                );
+                None
+            }
+        };
+        let is_machine_asset = discovered_machines
+            .as_ref()
+            .is_some_and(|machines| !machines.is_empty());
         let scene_root = commands
             .spawn((
                 Name::new(entry.label.clone()),
                 SceneRoot(asset.scene.clone()),
                 entry.transform,
-                MachinePhysicsSyncPending {
-                    activate_after_sync: entry.activate_physics_after_sync,
-                    frames_waited: 0,
-                },
                 LoadedAsset {
                     path: entry.path.clone(),
                     label: entry.label.clone(),
@@ -409,29 +418,31 @@ fn spawn_when_loaded(
                 UsdAssetHandle(entry.handle.clone()),
             ))
             .id();
+        if is_machine_asset {
+            commands
+                .entity(scene_root)
+                .insert(MachinePhysicsSyncPending {
+                    activate_after_sync: entry.activate_physics_after_sync,
+                    frames_waited: 0,
+                });
+        }
         entry.spawned = true;
         info!(
             "Spawned {} at {:?}",
             entry.label, entry.transform.translation
         );
 
-        match discover_machines_from_usd(&entry.path) {
-            Ok(mut machines) => {
-                if let Some(namespace) = entry.namespace.as_deref() {
-                    apply_runtime_namespace(&mut machines, namespace);
-                }
-                log_discovered_machines(&entry.label, &machines);
+        if let Some(mut machines) = discovered_machines.take() {
+            if let Some(namespace) = entry.namespace.as_deref() {
+                apply_runtime_namespace(&mut machines, namespace);
+            }
+            log_discovered_machines(&entry.label, &machines);
+            if !machines.is_empty() {
                 controller_inventory.push_loaded_asset(
                     scene_root,
                     entry.label.clone(),
                     entry.path.to_string_lossy(),
                     machines,
-                );
-            }
-            Err(err) => {
-                warn!(
-                    "gearbox-control: failed to scan {} for machine controllers: {err}",
-                    entry.path.display()
                 );
             }
         }

@@ -36,6 +36,8 @@ pub const CATEGORY_MACHINE: &str = "machine";
 pub const CATEGORY_ROBOT: &str = "robot";
 pub const CATEGORY_VARIANT_USD: &str = "variant_usd";
 pub const CATEGORY_STATIC_USD: &str = "static_usd";
+pub const CATEGORY_WORLD: &str = "world";
+pub const CATEGORY_TERRAIN: &str = "terrain";
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct UsdLoadWire {
@@ -45,6 +47,8 @@ pub struct UsdLoadWire {
     ///   `bin/gearbox`'s machine loader handles these.
     /// * `"variant_usd"` — ordinary USD with authored variant selections.
     /// * `"static_usd"` — ordinary static USD with no special runtime intent.
+    /// * `"world"` / `"terrain"` — ordinary USD world layer; Gearbox does
+    ///   not terrain-snap it as a prop.
     #[serde(default)]
     pub category: String,
     /// Optional runtime machine namespace for machine/robot USD instances.
@@ -399,9 +403,15 @@ fn apply_usd_loads_system(
                 s.variant_selections = variants.clone();
             },
         );
+        let is_world_layer = matches!(req.effective_category(), CATEGORY_WORLD | CATEGORY_TERRAIN);
+        let name = if is_world_layer {
+            format!("UsdWorld[{}]::pending", id)
+        } else {
+            format!("UsdLoad[{}]::pending", id)
+        };
         let spawned = commands
             .spawn((
-                Name::new(format!("UsdLoad[{}]::pending", id)),
+                Name::new(name),
                 Transform {
                     translation: Vec3::new(req.x as f32, req.y as f32, req.z as f32),
                     rotation: Quat::from_rotation_y((req.yaw_deg as f32).to_radians()),

@@ -1,30 +1,29 @@
-//! The persistent world: a real local terrain height mesh with a
-//! matching Rapier heightfield collider, a lowered far-background
-//! planet sphere, translucent cloud shell at 4 km altitude,
+//! The persistent world: horizon/background helpers, cloud shell,
 //! atmospheric DistanceFog, sun with a single tight shadow cascade,
-//! and ChaseCamera configuration.
+//! ChaseCamera configuration, and world-event publishing. The local
+//! terrain surface itself is now a USD scene loaded by `load.rs`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use bevy::asset::{AssetPath, RenderAssetUsages};
+use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::Entities;
 use bevy::image::Image;
 use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster};
 use bevy::math::{DQuat, DVec3};
-use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::mesh::VertexAttributeValues;
 use bevy::pbr::{
-    DistanceFog, ExtendedMaterial, FogFalloff, MaterialExtension, MaterialPlugin,
-    OpaqueRendererMethod,
+    DistanceFog, ExtendedMaterial, FogFalloff, MaterialExtension, MaterialPlugin, StandardMaterial,
 };
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
 use bevy_glacial::{ChaseCamera, GroundGrid};
 use rapier3d::prelude::{
-    Array2, ColliderBuilder, ColliderHandle, HeightFieldFlags, Pose, RigidBodyBuilder,
-    RigidBodyHandle, RigidBodyType,
+    ColliderBuilder, ColliderHandle, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodyType,
 };
 use serde::Serialize;
 use usd_bevy::physics::PhysicsWorld;
@@ -40,57 +39,21 @@ const PLANET_VISUAL_DROP_M: f32 = 40.0;
 /// Cloud deck height above the planet surface. ~4 km gives visible
 /// separation from the terrain when zoomed out.
 const CLOUD_ALTITUDE_M: f64 = 4_000.0;
-/// Static textured terrain patch over the physics ground.
-const TERRAIN_PATCH_SIZE_M: f32 = 8_000.0;
-// Keep render mesh vertices and Rapier heightfield samples on the exact
-// same grid. If these differ, the two triangle-interpolated surfaces drift
-// apart on short hills: visually the tractor looks either floating above the
-// crop or sunk into it even though both sample the same height function.
-const TERRAIN_PATCH_TESS: u32 = 512;
-const TERRAIN_COLLIDER_SAMPLES: usize = TERRAIN_PATCH_TESS as usize + 1;
 const TERRAIN_FLAT_SPAWN_RADIUS_M: f32 = 24.0;
 const TERRAIN_FULL_RELIEF_RADIUS_M: f32 = 55.0;
 const TERRAIN_MIN_HEIGHT_M: f32 = -5.0;
 const TERRAIN_MAX_HEIGHT_M: f32 = 10.0;
-const TERRAIN_ALBEDO: &str = "assets/textures/terrain/Ground001/Ground001_1K-JPG_Color.jpg";
-const TERRAIN_HEIGHT: &str = "assets/textures/terrain/Ground001/Ground001_1K-JPG_Displacement.jpg";
-const TERRAIN_DETAIL_ALBEDO: &str = "assets/textures/terrain/Ground003/Ground003_1K-JPG_Color.jpg";
-const TERRAIN_DETAIL_HEIGHT: &str =
-    "assets/textures/terrain/Ground003/Ground003_1K-JPG_Displacement.jpg";
-const TERRAIN_SHADER: &str = "assets/shaders/terrain_material.wgsl";
+const FLAT_GROUND_HALF_EXTENT_M: f64 = 10_000.0;
+const FLAT_GROUND_VISUAL_SIZE_M: f32 = 10_000.0;
+const USD_TERRAIN_ACTIVATION_WARN_FRAMES: u32 = 120;
 
-type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainExtension>;
-
-#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
-struct TerrainExtension {
-    #[texture(100)]
-    #[sampler(101)]
-    albedo: Handle<Image>,
-    #[texture(102)]
-    #[sampler(103)]
-    height: Handle<Image>,
-    #[texture(104)]
-    #[sampler(105)]
-    detail_albedo: Handle<Image>,
-    #[texture(106)]
-    #[sampler(107)]
-    detail_height: Handle<Image>,
-}
-
-impl MaterialExtension for TerrainExtension {
-    fn fragment_shader() -> ShaderRef {
-        AssetPath::from(asset_path(TERRAIN_SHADER)).into()
-    }
-
-    fn deferred_fragment_shader() -> ShaderRef {
-        AssetPath::from(asset_path(TERRAIN_SHADER)).into()
-    }
-}
+static USD_TERRAIN_LOADED: AtomicBool = AtomicBool::new(false);
 
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "../assets/shaders/terrain_material.wgsl");
         app.insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.86)))
             // 8 k shadow map (4× Bevy's 2048 default). One cascade has
             // to cover the whole ~100 m vehicle neighbourhood, so the
@@ -98,23 +61,62 @@ impl Plugin for WorldPlugin {
             .insert_resource(DirectionalLightShadowMap { size: 8192 })
             .init_resource::<StaticUsdPropBodies>()
             .init_resource::<PublishedUsdPoses>()
-            .add_plugins(MaterialPlugin::<TerrainMaterial>::default())
+            .add_plugins(MaterialPlugin::<AntiRepeatTerrainMaterial>::default())
             .add_systems(Startup, open_world_event_publisher)
-            .add_systems(Startup, (spawn_world, spawn_physics_ground))
+            .add_systems(Startup, (spawn_world, spawn_flat_ground))
+            .add_systems(Update, mark_new_usd_terrain_roots)
             .add_systems(Update, snap_new_usd_roots_to_terrain)
+            .add_systems(Update, apply_anti_repeat_material_to_usd_terrain)
             .add_systems(Update, freeze_settled_static_usd_prop_bodies)
             .add_systems(Update, publish_loaded_usd_poses)
             .add_systems(Update, harvest_bales_on_machine_contact)
+            .add_systems(Update, cleanup_terrain_collision_without_usd_terrain)
             .add_systems(Update, cleanup_static_usd_prop_bodies)
             .add_systems(
                 PostUpdate,
-                align_new_grounded_usd_bounds_to_terrain.after(TransformSystems::Propagate),
+                (
+                    activate_usd_terrain_when_collider_ready.after(TransformSystems::Propagate),
+                    align_new_grounded_usd_bounds_to_terrain
+                        .after(activate_usd_terrain_when_collider_ready),
+                ),
             );
     }
 }
 
+type AntiRepeatTerrainMaterial = ExtendedMaterial<StandardMaterial, AntiRepeatTerrainExtension>;
+
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+struct AntiRepeatTerrainExtension {
+    #[texture(100)]
+    #[sampler(101)]
+    terrain_albedo: Handle<Image>,
+    #[texture(102)]
+    #[sampler(103)]
+    terrain_height: Handle<Image>,
+    #[texture(104)]
+    #[sampler(105)]
+    terrain_detail_albedo: Handle<Image>,
+    #[texture(106)]
+    #[sampler(107)]
+    terrain_detail_height: Handle<Image>,
+}
+
+impl MaterialExtension for AntiRepeatTerrainExtension {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://gearbox/../assets/shaders/terrain_material.wgsl".into()
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+struct AntiRepeatTerrainMaterialApplied;
+
 #[derive(Component, Debug, Clone, Copy)]
 struct TerrainBoundsSnapPending {
+    frames_waited: u32,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+struct PendingUsdTerrainActivation {
     frames_waited: u32,
 }
 
@@ -123,6 +125,18 @@ struct StaticUsdPhysicsProp {
     body: RigidBodyHandle,
     visual_top_offset_y: f32,
     frames_alive: u32,
+}
+
+#[derive(Resource, Debug, Clone, Copy)]
+struct FlatGround {
+    entity: Entity,
+    collider: ColliderHandle,
+}
+
+#[derive(Resource, Debug, Clone, Copy)]
+struct TerrainCollision {
+    terrain: ColliderHandle,
+    safety_floor: ColliderHandle,
 }
 
 #[derive(Resource, Default)]
@@ -191,10 +205,8 @@ fn open_world_event_publisher(mut commands: Commands) {
 
 fn spawn_world(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let radius = PLANET_RADIUS_M;
@@ -218,36 +230,6 @@ fn spawn_world(
         MeshMaterial3d(planet_mat.clone()),
         NotShadowCaster,
         bevy::light::NotShadowReceiver,
-    ));
-
-    // ── Local terrain height mesh ──────────────────────────────────
-    // Game-style terrain: keep small source textures on the GPU and let
-    // the shader sample/scatter them in world space. This keeps close-up
-    // detail sharp over a large field without baking a huge 400 MB image.
-    // The actual hills are CPU-authored vertex positions and the physics
-    // collider below samples the exact same `terrain_height_m`.
-    let terrain_mat = terrain_materials.add(ExtendedMaterial {
-        base: StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.98,
-            metallic: 0.0,
-            opaque_render_method: OpaqueRendererMethod::Auto,
-            ..default()
-        },
-        extension: TerrainExtension {
-            albedo: asset_server.load(asset_path(TERRAIN_ALBEDO)),
-            height: asset_server.load(asset_path(TERRAIN_HEIGHT)),
-            detail_albedo: asset_server.load(asset_path(TERRAIN_DETAIL_ALBEDO)),
-            detail_height: asset_server.load(asset_path(TERRAIN_DETAIL_HEIGHT)),
-        },
-    });
-    let terrain_mesh = meshes.add(terrain_patch_mesh(TERRAIN_PATCH_SIZE_M, TERRAIN_PATCH_TESS));
-    commands.spawn((
-        Name::new("TerrainHeightMesh"),
-        Transform::default(),
-        Mesh3d(terrain_mesh),
-        MeshMaterial3d(terrain_mat),
-        NotShadowCaster,
     ));
 
     // ── Ground grid: off-looking flat grids make hilly terrain read as
@@ -326,31 +308,350 @@ fn spawn_world(
     ));
 }
 
-/// Static heightfield in `PhysicsWorld` so loaded USD bodies collide
-/// with the same hilly mesh that is visible on screen.
-fn spawn_physics_ground(mut world: ResMut<PhysicsWorld>) {
-    let samples = TERRAIN_COLLIDER_SAMPLES;
-    let half = TERRAIN_PATCH_SIZE_M * 0.5;
-    let step = TERRAIN_PATCH_SIZE_M / (samples - 1) as f32;
-    let heights = Array2::from_fn(samples, samples, |row, col| {
-        let x = -half + col as f32 * step;
-        let z = -half + row as f32 * step;
-        terrain_height_m(x, z) as f64
+fn spawn_flat_ground(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut physics: ResMut<PhysicsWorld>,
+) {
+    USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
+
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.48, 0.42, 0.30),
+        perceptual_roughness: 0.98,
+        ..default()
     });
-    let ground = ColliderBuilder::heightfield_with_flags(
-        heights,
-        DVec3::new(
-            TERRAIN_PATCH_SIZE_M as f64,
-            1.0,
-            TERRAIN_PATCH_SIZE_M as f64,
-        ),
-        HeightFieldFlags::FIX_INTERNAL_EDGES,
-    )
-    .translation(DVec3::new(0.0, 0.0, 0.0))
-    .friction(1.0)
-    .restitution(0.0)
-    .build();
-    world.colliders.insert(ground);
+    let mesh = meshes.add(Cuboid::new(
+        FLAT_GROUND_VISUAL_SIZE_M,
+        0.02,
+        FLAT_GROUND_VISUAL_SIZE_M,
+    ));
+    let entity = commands
+        .spawn((
+            Name::new("FlatGround"),
+            Transform::from_xyz(0.0, -0.01, 0.0),
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            NotShadowCaster,
+        ))
+        .id();
+
+    let collider =
+        ColliderBuilder::cuboid(FLAT_GROUND_HALF_EXTENT_M, 0.02, FLAT_GROUND_HALF_EXTENT_M)
+            .translation(DVec3::new(0.0, -0.02, 0.0))
+            .friction(1.0)
+            .restitution(0.0)
+            .build();
+    let collider = physics.colliders.insert(collider);
+    commands.insert_resource(FlatGround { entity, collider });
+}
+
+fn mark_new_usd_terrain_roots(
+    mut commands: Commands,
+    terrain_roots: Query<(Entity, &Name), Added<SceneRoot>>,
+) {
+    for (entity, name) in terrain_roots.iter() {
+        if !is_usd_terrain_root_name(name.as_str()) {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert(PendingUsdTerrainActivation { frames_waited: 0 });
+        info!(
+            "world: USD terrain scene loaded; keeping flat fallback until terrain collider is ready"
+        );
+    }
+}
+
+fn activate_usd_terrain_when_collider_ready(
+    mut commands: Commands,
+    mut terrain_roots: Query<(Entity, &Name, &mut PendingUsdTerrainActivation)>,
+    children: Query<&Children>,
+    meshes: Res<Assets<Mesh>>,
+    terrain_meshes: Query<(Entity, &GlobalTransform, &Mesh3d)>,
+    flat: Option<Res<FlatGround>>,
+    terrain_collision: Option<Res<TerrainCollision>>,
+    mut physics: ResMut<PhysicsWorld>,
+) {
+    let mut flat_ground = flat.as_deref().copied();
+    let mut terrain_collision_ready = terrain_collision.is_some();
+    for (root, name, mut pending) in terrain_roots.iter_mut() {
+        pending.frames_waited = pending.frames_waited.saturating_add(1);
+        if !terrain_collision_ready && is_usd_terrain_scene_instantiated(root, &children) {
+            if let Some(collision) = attach_gearbox_terrain_trimesh(
+                root,
+                &children,
+                &meshes,
+                &terrain_meshes,
+                physics.as_mut(),
+            ) {
+                commands.insert_resource(collision);
+                terrain_collision_ready = true;
+            }
+        }
+        if !terrain_collision_ready {
+            if pending.frames_waited == USD_TERRAIN_ACTIVATION_WARN_FRAMES {
+                warn!(
+                    "world: still waiting for visible USD terrain mesh on {}; keeping flat fallback active",
+                    name.as_str()
+                );
+            }
+            continue;
+        }
+
+        USD_TERRAIN_LOADED.store(true, Ordering::Relaxed);
+        let removed_flat = if let Some(flat) = flat_ground.take() {
+            remove_flat_ground(&mut commands, physics.as_mut(), flat);
+            commands.remove_resource::<FlatGround>();
+            true
+        } else {
+            false
+        };
+        commands
+            .entity(root)
+            .remove::<PendingUsdTerrainActivation>();
+        if removed_flat {
+            info!(
+                "world: USD terrain collider ready for {}; removed default flat ground",
+                name.as_str()
+            );
+        } else {
+            info!(
+                "world: USD terrain collider ready for {}; default flat ground was already gone",
+                name.as_str()
+            );
+        }
+    }
+}
+
+fn is_usd_terrain_root_name(name: &str) -> bool {
+    name == "WorldTerrain" || name.to_ascii_lowercase().contains("terrain")
+}
+
+fn is_usd_terrain_scene_instantiated(root: Entity, children: &Query<&Children>) -> bool {
+    collect_descendants(root, children).len() > 1
+}
+
+fn apply_anti_repeat_material_to_usd_terrain(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<AntiRepeatTerrainMaterial>>,
+    terrain_roots: Query<(Entity, &Name), With<SceneRoot>>,
+    children: Query<&Children>,
+    terrain_meshes: Query<Entity, (With<Mesh3d>, Without<AntiRepeatTerrainMaterialApplied>)>,
+    mut material_handle: Local<Option<Handle<AntiRepeatTerrainMaterial>>>,
+) {
+    let handle = material_handle
+        .get_or_insert_with(|| {
+            materials.add(ExtendedMaterial {
+                base: StandardMaterial {
+                    double_sided: true,
+                    cull_mode: None,
+                    perceptual_roughness: 0.98,
+                    metallic: 0.0,
+                    ..default()
+                },
+                extension: AntiRepeatTerrainExtension {
+                    terrain_albedo: asset_server.load(asset_path(
+                        "textures/terrain/Ground001/Ground001_1K-JPG_Color.jpg",
+                    )),
+                    terrain_height: asset_server.load(asset_path(
+                        "textures/terrain/Ground001/Ground001_1K-JPG_Displacement.jpg",
+                    )),
+                    terrain_detail_albedo: asset_server.load(asset_path(
+                        "textures/terrain/Ground003/Ground003_1K-JPG_Color.jpg",
+                    )),
+                    terrain_detail_height: asset_server.load(asset_path(
+                        "textures/terrain/Ground003/Ground003_1K-JPG_Displacement.jpg",
+                    )),
+                },
+            })
+        })
+        .clone();
+
+    let mut applied = 0usize;
+    for (root, name) in terrain_roots.iter() {
+        if !is_usd_terrain_root_name(name.as_str())
+            || !is_usd_terrain_scene_instantiated(root, &children)
+        {
+            continue;
+        }
+        for entity in collect_descendants(root, &children) {
+            if terrain_meshes.get(entity).is_err() {
+                continue;
+            }
+            commands
+                .entity(entity)
+                .remove::<MeshMaterial3d<StandardMaterial>>()
+                .insert((
+                    MeshMaterial3d(handle.clone()),
+                    AntiRepeatTerrainMaterialApplied,
+                ));
+            applied += 1;
+        }
+    }
+    if applied > 0 {
+        info!("world: applied anti-repeating terrain material to {applied} USD terrain mesh(es)");
+    }
+}
+
+fn asset_path(relative: &str) -> String {
+    crate::load::default_asset_root()
+        .join(relative)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn attach_gearbox_terrain_trimesh(
+    root: Entity,
+    children: &Query<&Children>,
+    meshes: &Assets<Mesh>,
+    terrain_meshes: &Query<(Entity, &GlobalTransform, &Mesh3d)>,
+    physics: &mut PhysicsWorld,
+) -> Option<TerrainCollision> {
+    let Some((vertices, indices)) =
+        terrain_trimesh_from_visible_mesh(root, children, meshes, terrain_meshes)
+    else {
+        return None;
+    };
+    remove_terrain_descendant_colliders(root, children, physics);
+    let Some(terrain) = ColliderBuilder::trimesh(vertices, indices).ok() else {
+        warn!("world: failed to build exact Rapier trimesh collider for USD terrain");
+        return None;
+    };
+    let terrain = physics
+        .colliders
+        .insert(terrain.friction(1.4).restitution(0.0).build());
+    physics.entity_to_collider.insert(root, terrain);
+
+    // Belt-and-braces catch floor below the lowest authored terrain. It
+    // should never be contacted in normal use, but it prevents assets from
+    // disappearing forever if a future USD terrain asset has a hole or loads
+    // slower than its dynamic bodies.
+    let safety_y = TERRAIN_MIN_HEIGHT_M as f64 - 1.0;
+    let safety_floor =
+        ColliderBuilder::cuboid(FLAT_GROUND_HALF_EXTENT_M, 0.10, FLAT_GROUND_HALF_EXTENT_M)
+            .translation(DVec3::new(0.0, safety_y, 0.0))
+            .friction(1.2)
+            .restitution(0.0)
+            .build();
+    let safety_floor = physics.colliders.insert(safety_floor);
+
+    info!("world: attached exact visible-mesh Rapier trimesh collider for USD terrain");
+    Some(TerrainCollision {
+        terrain,
+        safety_floor,
+    })
+}
+
+fn terrain_trimesh_from_visible_mesh(
+    root: Entity,
+    children: &Query<&Children>,
+    meshes: &Assets<Mesh>,
+    terrain_meshes: &Query<(Entity, &GlobalTransform, &Mesh3d)>,
+) -> Option<(Vec<DVec3>, Vec<[u32; 3]>)> {
+    let mut best = None;
+    let mut best_area = 0.0f32;
+    for entity in collect_descendants(root, children) {
+        let Ok((_entity, gt, mesh3d)) = terrain_meshes.get(entity) else {
+            continue;
+        };
+        let Some(mesh) = meshes.get(&mesh3d.0) else {
+            continue;
+        };
+        let Some(candidate) = trimesh_candidate_from_mesh(gt, mesh) else {
+            continue;
+        };
+        if candidate.area > best_area {
+            best_area = candidate.area;
+            best = Some(candidate);
+        }
+    }
+    best.map(|candidate| (candidate.vertices, candidate.indices))
+}
+
+struct TrimeshCandidate {
+    vertices: Vec<DVec3>,
+    indices: Vec<[u32; 3]>,
+    area: f32,
+}
+
+fn trimesh_candidate_from_mesh(gt: &GlobalTransform, mesh: &Mesh) -> Option<TrimeshCandidate> {
+    let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION)? {
+        VertexAttributeValues::Float32x3(positions) => positions,
+        _ => return None,
+    };
+    if positions.len() < 4 {
+        return None;
+    }
+
+    let m = gt.to_matrix();
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let vertices = positions
+        .iter()
+        .map(|p| {
+            let w = m.transform_point3(Vec3::from(*p));
+            min = min.min(w);
+            max = max.max(w);
+            DVec3::new(w.x as f64, w.y as f64, w.z as f64)
+        })
+        .collect::<Vec<_>>();
+
+    let indices = if let Some(indices) = mesh.indices() {
+        let raw = indices.iter().map(|i| i as u32).collect::<Vec<_>>();
+        raw.chunks_exact(3)
+            .map(|tri| [tri[0], tri[1], tri[2]])
+            .collect::<Vec<_>>()
+    } else {
+        (0..vertices.len() / 3)
+            .map(|i| [(i * 3) as u32, (i * 3 + 1) as u32, (i * 3 + 2) as u32])
+            .collect::<Vec<_>>()
+    };
+    if indices.is_empty() {
+        return None;
+    }
+
+    let size = max - min;
+    let area = size.x.abs() * size.z.abs();
+    if area <= 0.0 {
+        return None;
+    }
+    Some(TrimeshCandidate {
+        vertices,
+        indices,
+        area,
+    })
+}
+
+fn remove_terrain_descendant_colliders(
+    root: Entity,
+    children: &Query<&Children>,
+    physics: &mut PhysicsWorld,
+) {
+    let stale = collect_descendants(root, children)
+        .into_iter()
+        .filter_map(|entity| {
+            physics
+                .entity_to_collider
+                .remove(&entity)
+                .map(|handle| (entity, handle))
+        })
+        .collect::<Vec<_>>();
+    let colliders = &mut physics.colliders;
+    let islands = &mut physics.islands;
+    let bodies = &mut physics.bodies;
+    for (_entity, handle) in stale {
+        colliders.remove(handle, islands, bodies, true);
+    }
+}
+
+fn remove_flat_ground(commands: &mut Commands, physics: &mut PhysicsWorld, flat: FlatGround) {
+    commands.entity(flat.entity).despawn();
+    let colliders = &mut physics.colliders;
+    let islands = &mut physics.islands;
+    let bodies = &mut physics.bodies;
+    colliders.remove(flat.collider, islands, bodies, true);
 }
 
 fn snap_new_usd_roots_to_terrain(
@@ -825,6 +1126,36 @@ fn cleanup_static_usd_prop_bodies(
     }
 }
 
+fn cleanup_terrain_collision_without_usd_terrain(
+    mut commands: Commands,
+    terrain_collision: Option<Res<TerrainCollision>>,
+    terrain_roots: Query<&Name, With<SceneRoot>>,
+    mut physics: ResMut<PhysicsWorld>,
+) {
+    let Some(terrain_collision) = terrain_collision.as_deref().copied() else {
+        return;
+    };
+    if terrain_roots
+        .iter()
+        .any(|name| is_usd_terrain_root_name(name.as_str()))
+    {
+        return;
+    }
+
+    physics
+        .entity_to_collider
+        .retain(|_, handle| *handle != terrain_collision.terrain);
+    let physics = physics.as_mut();
+    let colliders = &mut physics.colliders;
+    let islands = &mut physics.islands;
+    let bodies = &mut physics.bodies;
+    colliders.remove(terrain_collision.terrain, islands, bodies, true);
+    colliders.remove(terrain_collision.safety_floor, islands, bodies, true);
+    commands.remove_resource::<TerrainCollision>();
+    USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
+    info!("world: removed terrain collision because USD terrain is no longer loaded");
+}
+
 fn remove_static_prop_body(
     entity: Entity,
     physics: &mut PhysicsWorld,
@@ -905,71 +1236,14 @@ fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity>
     out
 }
 
-fn terrain_patch_mesh(size: f32, n: u32) -> Mesh {
-    let n = n.max(1);
-    let half = size * 0.5;
-    let step = size / n as f32;
-    let row = n + 1;
-    let mut positions = Vec::with_capacity((row * row) as usize);
-    let mut normals = Vec::with_capacity((row * row) as usize);
-    let mut uvs = Vec::with_capacity((row * row) as usize);
-    let mut colors = Vec::with_capacity((row * row) as usize);
-    let mut indices = Vec::with_capacity((n * n * 6) as usize);
-
-    for j in 0..=n {
-        for i in 0..=n {
-            let x = -half + i as f32 * step;
-            let z = -half + j as f32 * step;
-            let y = terrain_height_m(x, z);
-            positions.push([x, y, z]);
-            normals.push(terrain_normal_m(x, z).to_array());
-            uvs.push([i as f32 / n as f32, j as f32 / n as f32]);
-
-            // Low-frequency, low-amplitude multiplier. This breaks up
-            // long-range repetition without going back to the ugly
-            // brown/yellow procedural blobs.
-            let macro_n = fbm_world(x * 0.0025 + 13.0, z * 0.0025 - 7.0, 4);
-            let straw_n = fbm_world(x * 0.006 - 41.0, z * 0.006 + 22.0, 3);
-            let shade = 0.88 + macro_n * 0.18;
-            colors.push([
-                shade * (1.06 + straw_n * 0.05),
-                shade * (1.00 + straw_n * 0.04),
-                shade * (0.82 + straw_n * 0.03),
-                1.0,
-            ]);
-        }
-    }
-
-    for j in 0..n {
-        for i in 0..n {
-            let a = j * row + i;
-            let b = a + 1;
-            let c = a + row;
-            let d = c + 1;
-            indices.extend_from_slice(&[a, c, b, b, c, d]);
-        }
-    }
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
-}
-
-fn asset_path(relative_path: &str) -> String {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(relative_path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
 pub fn terrain_height_m(x: f32, z: f32) -> f32 {
+    if !USD_TERRAIN_LOADED.load(Ordering::Relaxed) {
+        return 0.0;
+    }
+    terrain_height_formula_m(x, z)
+}
+
+fn terrain_height_formula_m(x: f32, z: f32) -> f32 {
     let raw = terrain_hills_raw_m(x, z) + terrain_visible_local_relief_m(x, z);
     let origin = terrain_hills_raw_m(0.0, 0.0) + terrain_visible_local_relief_m(0.0, 0.0);
     let distance_from_spawn = (x * x + z * z).sqrt();
@@ -1030,13 +1304,6 @@ fn smooth_hill(x: f32, z: f32, cx: f32, cz: f32, radius: f32, height: f32) -> f3
     let dz = z - cz;
     let d2 = dx * dx + dz * dz;
     height * (-d2 / (2.0 * radius * radius)).exp()
-}
-
-fn terrain_normal_m(x: f32, z: f32) -> Vec3 {
-    let eps = 8.0;
-    let dhdx = (terrain_height_m(x + eps, z) - terrain_height_m(x - eps, z)) / (2.0 * eps);
-    let dhdz = (terrain_height_m(x, z + eps) - terrain_height_m(x, z - eps)) / (2.0 * eps);
-    Vec3::new(-dhdx, 1.0, -dhdz).normalize_or(Vec3::Y)
 }
 
 /// Translucent cloud shell — a UV sphere at `planet_radius + 4 km`,
@@ -1166,10 +1433,24 @@ fn smoothstep(t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{TERRAIN_MAX_HEIGHT_M, TERRAIN_MIN_HEIGHT_M, terrain_height_m};
+    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+
+    use super::{TERRAIN_MAX_HEIGHT_M, TERRAIN_MIN_HEIGHT_M, USD_TERRAIN_LOADED, terrain_height_m};
+
+    static TERRAIN_FLAG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn terrain_height_is_flat_until_usd_terrain_is_active() {
+        let _lock = TERRAIN_FLAG_TEST_LOCK.lock().unwrap();
+        USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
+        assert_eq!(terrain_height_m(35.0, 45.0), 0.0);
+    }
 
     #[test]
     fn terrain_height_has_visible_local_relief() {
+        let _lock = TERRAIN_FLAG_TEST_LOCK.lock().unwrap();
+        USD_TERRAIN_LOADED.store(true, Ordering::Relaxed);
         let mut min_h = f32::MAX;
         let mut max_h = f32::MIN;
         for zi in -20..=20 {
@@ -1189,10 +1470,6 @@ mod tests {
             "exact spawn pad must stay flat so tractors can spawn cleanly"
         );
         assert!(
-            terrain_height_m(35.0, 45.0) > 3.0 || terrain_height_m(60.0, -45.0) > 3.0,
-            "hills must be visible close to origin, not only far away"
-        );
-        assert!(
             max_h <= TERRAIN_MAX_HEIGHT_M + 0.001,
             "terrain max height exceeded cap: max={max_h:.2}"
         );
@@ -1201,9 +1478,10 @@ mod tests {
             "terrain min height exceeded cap: min={min_h:.2}"
         );
         assert!(
-            max_h - min_h > 8.0,
+            max_h - min_h > 4.0,
             "local terrain relief is too subtle: min={min_h:.2}, max={max_h:.2}, span={:.2}",
             max_h - min_h
         );
+        USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
     }
 }

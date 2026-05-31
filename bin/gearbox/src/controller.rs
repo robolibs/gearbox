@@ -2924,6 +2924,16 @@ mod tests {
     }
 
     #[test]
+    fn world_terrain_usd_composes_without_machine_metadata() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/world/terrain.usd");
+        let machines = discover_machines_from_usd(&path).expect("terrain.usd should scan");
+        assert!(
+            machines.is_empty(),
+            "terrain scene should not register as a driveable machine"
+        );
+    }
+
+    #[test]
     fn discovers_isaac_action_graph_joint_roles_without_gearbox_metadata() {
         let usd = r#"#usda 1.0
 (

@@ -42,6 +42,7 @@ except ModuleNotFoundError:
 
 
 TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
+TERRAIN_USD_PATH = "world/terrain.usd"
 BALE_USD_PATH = "markers/bale.usdz"
 RING_RADIUS = 15.0
 TICK_DT = 0.10
@@ -380,6 +381,21 @@ def spawn_usd_tractors(session: zenoh.Session, robots: list[RobotProxy]) -> None
     )
 
 
+def load_terrain(session: zenoh.Session) -> None:
+    put_cbor(
+        session,
+        "gearbox/usd/load/terrain",
+        {
+            "category": "terrain",
+            "usd_path": TERRAIN_USD_PATH,
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "remove": False,
+        },
+    )
+
+
 def load_bale(session: zenoh.Session, runtime_id: str, x: float, z: float, nonce: str) -> None:
     # The bale is dropped onto the terrain by Gearbox, which then reports the
     # settled pose back on gearbox/usd/pose/**.
@@ -550,6 +566,12 @@ def main() -> None:
     try:
         for robot in robots:
             robot.declare(session)
+
+        print("loading USD terrain")
+        load_terrain(session)
+        # Give Gearbox one frame window to instantiate the terrain scene and
+        # swap out the default flat ground before machines/bales are placed.
+        time.sleep(1.0)
 
         print(f"spawning {n_tractors} USD tractors")
         spawn_usd_tractors(session, robots)
