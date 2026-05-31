@@ -1216,6 +1216,16 @@ fn apply_builtin_ackermann_cmd_vel(
             }
             let tire_pairs =
                 tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics);
+            let raycast_specs = raycast_vehicle_wheel_specs_for_controller(
+                scene_root,
+                controller,
+                machine,
+                &joints,
+                &parents,
+                &physics,
+                body_handle,
+                wheel_radius_m,
+            );
             if tire_pairs.is_empty() && runtime.logged_empty_tire_pairs.insert(key.clone()) {
                 warn!(
                     "gearbox-control: no wheel joint pairs found for machine={} controller={}; raycast vehicle cannot drive",
@@ -1231,6 +1241,7 @@ fn apply_builtin_ackermann_cmd_vel(
                 &mut physics,
                 body_handle,
                 &tire_pairs,
+                &raycast_specs,
                 cmd,
                 steer_target_rad,
             );
@@ -1508,10 +1519,11 @@ fn apply_rapier_raycast_vehicle_controller(
     physics: &mut usd_bevy::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+    wheel_specs: &[RaycastVehicleWheelSpec],
     cmd: CmdVel,
     steer_target_rad: f64,
 ) -> bool {
-    if tire_pairs.is_empty() {
+    if tire_pairs.is_empty() || wheel_specs.is_empty() {
         return false;
     }
 
@@ -1579,7 +1591,7 @@ fn apply_rapier_raycast_vehicle_controller(
     //
     // Feeding Bevy-local Y-up points here makes the rays cast sideways/upward,
     // so the controller never supports or drives the chassis.
-    for spec in raycast_vehicle_wheel_specs() {
+    for spec in wheel_specs {
         let wheel = vehicle.add_wheel(
             spec.chassis_connection,
             suspension,
@@ -1588,8 +1600,8 @@ fn apply_rapier_raycast_vehicle_controller(
             spec.radius,
             &tuning,
         );
-        if spec.steered {
-            wheel.steering = steer_target_rad;
+        if spec.steering_multiplier.abs() > f64::EPSILON {
+            wheel.steering = steer_target_rad * spec.steering_multiplier;
         }
         if spec.driven {
             wheel.engine_force = force_per_rear;
@@ -1623,6 +1635,7 @@ struct RaycastVehicleWheelSpec {
     radius: f64,
     driven: bool,
     steered: bool,
+    steering_multiplier: f64,
 }
 
 fn raycast_vehicle_wheel_specs() -> [RaycastVehicleWheelSpec; 4] {
@@ -1632,26 +1645,202 @@ fn raycast_vehicle_wheel_specs() -> [RaycastVehicleWheelSpec; 4] {
             radius: 0.525,
             driven: false,
             steered: true,
+            steering_multiplier: 1.0,
         },
         RaycastVehicleWheelSpec {
             chassis_connection: Vector::new(-0.79, -1.23, RAYCAST_SUSPENSION_REST_LENGTH + 0.525),
             radius: 0.525,
             driven: false,
             steered: true,
+            steering_multiplier: 1.0,
         },
         RaycastVehicleWheelSpec {
             chassis_connection: Vector::new(0.8475, 1.14, RAYCAST_SUSPENSION_REST_LENGTH + 0.755),
             radius: 0.755,
             driven: true,
             steered: false,
+            steering_multiplier: 0.0,
         },
         RaycastVehicleWheelSpec {
             chassis_connection: Vector::new(-0.8475, 1.14, RAYCAST_SUSPENSION_REST_LENGTH + 0.755),
             radius: 0.755,
             driven: true,
             steered: false,
+            steering_multiplier: 0.0,
         },
     ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn raycast_vehicle_wheel_specs_for_controller(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    wheel_radius_fallback_m: f64,
+) -> Vec<RaycastVehicleWheelSpec> {
+    let Some(chassis_body) = physics.bodies.get(chassis) else {
+        return Vec::new();
+    };
+
+    let powered_paths = powered_wheel_joint_paths(machine, controller);
+    let geometry = controller
+        .steering_geometry
+        .as_deref()
+        .unwrap_or("ackermann");
+    let mut specs = Vec::new();
+    for path in all_wheel_joint_paths(machine, controller) {
+        let Some(pair) = joint_pair(scene_root, &path, joints, parents, physics) else {
+            continue;
+        };
+        let Some(wheel) = wheel_body_of(physics, chassis, pair) else {
+            continue;
+        };
+        let Some(wheel_body) = physics.bodies.get(wheel) else {
+            continue;
+        };
+        let radius = body_max_collider_radius(physics, wheel)
+            .filter(|r| *r > 0.05)
+            .unwrap_or(wheel_radius_fallback_m);
+        let world_offset = wheel_body.translation() - chassis_body.translation();
+        let local_center = chassis_body.rotation().inverse() * world_offset;
+        let steering_multiplier = steering_multiplier_for_wheel_path(&path, machine, geometry);
+        specs.push(RaycastVehicleWheelSpec {
+            chassis_connection: Vector::new(
+                local_center.x,
+                local_center.y,
+                local_center.z + RAYCAST_SUSPENSION_REST_LENGTH,
+            ),
+            radius,
+            driven: powered_paths.contains(&path),
+            steered: steering_multiplier.abs() > f64::EPSILON,
+            steering_multiplier,
+        });
+    }
+    specs
+}
+
+fn all_wheel_joint_paths(
+    machine: &MachineInstanceSpec,
+    controller: &ControllerSpec,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for path in machine
+        .powered_wheel_joints
+        .iter()
+        .chain(machine.passive_wheel_joints.iter())
+        .chain(controller.drive_wheel_joints.iter())
+        .chain(controller.passive_wheel_joints.iter())
+        .chain(controller.wheel_joints.iter())
+    {
+        push_unique_string(&mut out, path);
+    }
+    for path in [
+        controller.front_left_wheel_joint.as_ref(),
+        controller.front_right_wheel_joint.as_ref(),
+        controller.rear_left_wheel_joint.as_ref(),
+        controller.rear_right_wheel_joint.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push_unique_string(&mut out, path);
+    }
+    out
+}
+
+fn powered_wheel_joint_paths(
+    machine: &MachineInstanceSpec,
+    controller: &ControllerSpec,
+) -> HashSet<String> {
+    machine
+        .powered_wheel_joints
+        .iter()
+        .chain(controller.drive_wheel_joints.iter())
+        .chain(controller.rear_left_wheel_joint.iter())
+        .chain(controller.rear_right_wheel_joint.iter())
+        .cloned()
+        .collect()
+}
+
+fn push_unique_string(out: &mut Vec<String>, value: &str) {
+    if !out.iter().any(|existing| existing == value) {
+        out.push(value.to_string());
+    }
+}
+
+fn steering_multiplier_for_wheel_path(
+    wheel_path: &str,
+    machine: &MachineInstanceSpec,
+    geometry: &str,
+) -> f64 {
+    let steered = machine
+        .steering_joints
+        .iter()
+        .any(|steer_path| wheel_path_matches_steer_path(wheel_path, steer_path));
+    if !steered {
+        return 0.0;
+    }
+    if geometry == "crab" && is_rear_path(wheel_path) {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+fn wheel_path_matches_steer_path(wheel_path: &str, steer_path: &str) -> bool {
+    let wheel_side = side_hint(wheel_path);
+    let steer_side = side_hint(steer_path);
+    if wheel_side.is_some() && steer_side.is_some() && wheel_side != steer_side {
+        return false;
+    }
+    let wheel_axle = axle_hint(wheel_path);
+    let steer_axle = axle_hint(steer_path);
+    wheel_axle.is_some() && steer_axle.is_some() && wheel_axle == steer_axle
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SideHint {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AxleHint {
+    Front,
+    Middle,
+    Rear,
+}
+
+fn side_hint(path: &str) -> Option<SideHint> {
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("left") || lower.contains("_l") {
+        Some(SideHint::Left)
+    } else if lower.contains("right") || lower.contains("_r") {
+        Some(SideHint::Right)
+    } else {
+        None
+    }
+}
+
+fn axle_hint(path: &str) -> Option<AxleHint> {
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("front") || lower.contains("fwd") {
+        Some(AxleHint::Front)
+    } else if lower.contains("middle") || lower.contains("mid") {
+        Some(AxleHint::Middle)
+    } else if lower.contains("rear") || lower.contains("back") {
+        Some(AxleHint::Rear)
+    } else {
+        None
+    }
+}
+
+fn is_rear_path(path: &str) -> bool {
+    axle_hint(path) == Some(AxleHint::Rear)
 }
 
 fn raycast_wheel_spec_for_path(path: &str) -> Option<RaycastVehicleWheelSpec> {
@@ -1829,6 +2018,21 @@ fn steering_joint_targets(
         return targets;
     }
 
+    if geometry == "crab" || geometry == "parallel" {
+        let targets = all_role_steering_targets(
+            scene_root,
+            machine,
+            joints,
+            parents,
+            physics,
+            center_steer_rad,
+            geometry,
+        );
+        if !targets.is_empty() {
+            return targets;
+        }
+    }
+
     let targets = role_steering_targets(
         scene_root,
         machine,
@@ -1886,6 +2090,34 @@ fn explicit_steering_targets(
         });
     }
     targets
+}
+
+#[allow(clippy::too_many_arguments)]
+fn all_role_steering_targets(
+    scene_root: Entity,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &usd_bevy::physics::PhysicsWorld,
+    center_position: f64,
+    geometry: &str,
+) -> Vec<JointPositionTarget> {
+    machine
+        .steering_joints
+        .iter()
+        .filter_map(|path| {
+            let pair = joint_pair(scene_root, path, joints, parents, physics)?;
+            let multiplier = if geometry == "crab" && is_rear_path(path) {
+                -1.0
+            } else {
+                1.0
+            };
+            Some(JointPositionTarget {
+                pair,
+                position: center_position * multiplier,
+            })
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2642,6 +2874,53 @@ mod tests {
         assert!(drive.passive_wheel_joints.is_empty());
         assert!(drive.steer_joints.is_empty());
         assert!(drive.wheel_joints.is_empty());
+    }
+
+    #[test]
+    fn discovers_oxbo_drive_controller_metadata() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/oxbo.usd");
+        let machines = discover_machines_from_usd(&path).expect("oxbo.usd should scan");
+        let machine = machines
+            .iter()
+            .find(|m| m.prim_path == "/robot")
+            .expect("oxbo root should be a Gearbox machine");
+        assert_eq!(machine.id, "robot");
+        assert_eq!(machine.kind.as_deref(), Some("oxbo"));
+        assert_eq!(
+            machine.powered_wheel_joints,
+            vec![
+                "/robot/Joints/rev_rear_left".to_string(),
+                "/robot/Joints/rev_rear_right".to_string(),
+            ]
+        );
+        assert_eq!(machine.passive_wheel_joints.len(), 4);
+        assert_eq!(
+            machine.steering_joints,
+            vec![
+                "/robot/Joints/steer_front_left".to_string(),
+                "/robot/Joints/steer_front_right".to_string(),
+                "/robot/Joints/steer_rear_left".to_string(),
+                "/robot/Joints/steer_rear_right".to_string(),
+            ]
+        );
+
+        let drive = machine
+            .controllers
+            .iter()
+            .find(|c| c.instance == "drive")
+            .expect("oxbo should author a drive controller");
+        assert!(drive.enabled);
+        assert_eq!(drive.controller_type, "builtin:ackermann_cmd_vel");
+        assert_eq!(drive.command_interface.as_deref(), Some("cmd_vel"));
+        assert_eq!(drive.steering_geometry.as_deref(), Some("crab"));
+        assert_eq!(
+            drive.uses_roles,
+            vec![
+                "poweredWheelJoints".to_string(),
+                "passiveWheelJoints".to_string(),
+                "steeringJoints".to_string(),
+            ]
+        );
     }
 
     #[test]

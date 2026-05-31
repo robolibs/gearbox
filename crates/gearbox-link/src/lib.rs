@@ -21,13 +21,13 @@
 //! ## Shape
 //!
 //! * [`wire`]   — CBOR-encoded [`SimToRenderer`] / [`RendererToSim`]
-//!                messages. The only thing both sides must agree on.
+//!   messages. The only thing both sides must agree on.
 //! * [`server`] (feature `server`) — Bevy plugin that opens an
-//!                aeronet WebSocket listener on the simulator host
-//!                and bridges it to in-process sim state.
+//!   aeronet WebSocket listener on the simulator host
+//!   and bridges it to in-process sim state.
 //! * [`client`] (feature `client`) — Bevy plugin that opens an
-//!                aeronet WebSocket client on the renderer side and
-//!                bridges it to the renderer's resources.
+//!   aeronet WebSocket client on the renderer side and
+//!   bridges it to the renderer's resources.
 //!
 //! The two features are mutually independent so you can build
 //! server-only (native, linux/mac) or client-only (wasm) without

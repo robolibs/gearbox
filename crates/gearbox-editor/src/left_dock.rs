@@ -45,7 +45,7 @@ pub fn left_dock_ui(
     // spawn
     mut commands: Commands,
     mut sim: ResMut<GearboxSim>,
-    mut assets: LeftDockAssets,
+    assets: LeftDockAssets,
     mut selection: ResMut<Selection>,
     // tree
     bodies: Query<(Entity, &VehicleBody, Option<&Name>, Has<PlayerControlled>)>,

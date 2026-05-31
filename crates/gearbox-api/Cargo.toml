@@ -18,10 +18,6 @@ datapod.workspace = true
 zenoh.workspace = true
 serde = { version = "1", features = ["derive"] }
 ciborium = "0.2"
-# Path-tracking / motion-control library — used by `goto_api` to
-# drive vehicles to a target pose. Pluggable: only this crate (and
-# `bin/gearbox/src/main.rs` for the plugin install) reference it.
-ondrive.workspace = true
 
 bevy = { workspace = true, optional = true }
 usd_bevy = { workspace = true, optional = true }

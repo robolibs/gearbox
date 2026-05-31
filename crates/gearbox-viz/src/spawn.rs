@@ -275,7 +275,7 @@ pub fn drive_usd_wheels(
     mut frame: Local<u32>,
 ) {
     *frame = frame.wrapping_add(1);
-    let log_now = *frame % 60 == 0; // ~once per second at 60Hz
+    let log_now = (*frame).is_multiple_of(60); // ~once per second at 60Hz
     for (drv, mut tr) in q.iter_mut() {
         let spin = if drv.apply_spin {
             sim.0.wheel_spin_angle(drv.vehicle_id, drv.wheel_index) as f32
@@ -405,7 +405,7 @@ pub fn spawn_vehicle_visuals(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
-    asset_server: &bevy::asset::AssetServer,
+    _asset_server: &bevy::asset::AssetServer,
     id: VehicleId,
     spec: &VehicleSpec,
 ) -> Entity {
@@ -693,8 +693,7 @@ pub fn spawn_height_for(spec: &VehicleSpec) -> f64 {
     let chassis_bottom = -spec.chassis.size.y * 0.5;
     let mut lowest = chassis_bottom;
     for w in &spec.wheels {
-        let wheel_bottom =
-            w.chassis_connection.y - w.suspension_rest_length as f64 - w.radius as f64;
+        let wheel_bottom = w.chassis_connection.y - w.suspension_rest_length - w.radius;
         if wheel_bottom < lowest {
             lowest = wheel_bottom;
         }
@@ -828,7 +827,7 @@ pub fn spawn_vehicle_ghost(
                 .resolution(32)
                 .build(),
         );
-        let wy = (wheel.chassis_connection.y - wheel.suspension_rest_length as f64) as f32;
+        let wy = (wheel.chassis_connection.y - wheel.suspension_rest_length) as f32;
         let wheel_parent = commands
             .spawn((
                 Transform::from_xyz(

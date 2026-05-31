@@ -23,8 +23,7 @@ impl DriveController for AckermannController {
         // coast. Zero every wheel's engine force AND steering angle;
         // keep the (passive) brake so the operator can still stop.
         if !ctx.spec.power.is_engine_live() {
-            for idx in 0..ctx.wheels.len() {
-                let spec = &specs[idx];
+            for (idx, spec) in specs.iter().enumerate().take(ctx.wheels.len()) {
                 if let Some(mut w) = ctx.wheels.get_mut(idx) {
                     w.set_engine_force(0.0);
                     w.set_brake(ctrl.brake * spec.max_brake * frame.brake_gate);

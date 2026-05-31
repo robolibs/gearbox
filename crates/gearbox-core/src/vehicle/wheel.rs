@@ -66,8 +66,8 @@ pub struct WheelSpec {
     ///     rotation (around axle).
     ///   * the steer prim receives the steering rotation (around
     ///     kingpin).
-    /// `None` (default) → steer + spin both applied to `usd_prim_path`,
-    /// matching the simpler tractor layout.
+    ///     `None` (default) → steer + spin both applied to `usd_prim_path`,
+    ///     matching the simpler tractor layout.
     pub usd_steer_prim_path: Option<&'static str>,
 }
 

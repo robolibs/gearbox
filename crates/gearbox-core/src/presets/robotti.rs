@@ -100,10 +100,10 @@ pub fn robotti() -> VehicleSpec {
     // outer face (+X for right-side wheels, −X for left). Magnitude =
     // half-tyre-width + small visual gap. The wheel's visual hub
     // swings around this offset when steering.
-    let kingpin_mag = width as f64 * 0.5 + 0.02;
+    let kingpin_mag = width * 0.5 + 0.02;
 
     let make = |x: f64, z: f64, wheel_prim: &'static str, knuckle_prim: &'static str| WheelSpec {
-        chassis_connection: Point::new(x, conn_y as f64, z),
+        chassis_connection: Point::new(x, conn_y, z),
         suspension_dir: Point::new(0.0, -1.0, 0.0),
         axle_dir: Point::new(-1.0, 0.0, 0.0),
         suspension_rest_length: rest,

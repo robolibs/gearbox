@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Scatter bales and drive the current USD tractor/machine to them.
 
-Default mode asks Gearbox to spawn ``bin/gearbox/assets/tractor.usd`` and then
-targets the USD machine-controller API discovered from that asset:
+Asks Gearbox to spawn ``bin/gearbox/assets/tractor.usd`` and then targets the
+USD machine-controller API discovered from that asset:
 
     python scripts/bale_run.py [machine_namespace] [n_bales] [field_size] [seed]
 
@@ -17,10 +17,6 @@ A bale's real resting place is decided by the terrain + physics inside Gearbox,
 not by this script. Gearbox publishes each bale's settled pose on
 ``gearbox/usd/pose/**``; the script drives off those authoritative positions so
 the red target marker sits exactly on its bale.
-
-For the old procedural simulator API, use ``spawn:<preset>`` as arg #1,
-e.g. ``python scripts/bale_run.py spawn:tractor``. Existing legacy prefixes
-like ``tractor_0`` are also still supported.
 """
 
 from __future__ import annotations
@@ -36,7 +32,6 @@ import cbor2
 import zenoh
 
 
-KNOWN_PRESETS = {"tractor", "husky", "robotti", "drone", "oxbo"}
 TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
 BALE_USD_PATH = "markers/bale.usdz"
 TARGET_MARK_ID = "bale_target_marker"
@@ -295,21 +290,6 @@ def spawn_usd_machine(
         print("spawn request sent; no gearbox/usd/loaded ack yet")
 
 
-def spawn_vehicle(session: zenoh.Session, preset: str, spawned_state: dict) -> str | None:
-    spawned_state.clear()
-    put_cbor(
-        session,
-        "gearbox/sim/spawn",
-        {"preset": preset, "x": 0.0, "y": 0.0, "z": 0.0, "yaw_deg": 0.0, "player": True},
-    )
-    t0 = time.time()
-    while not spawned_state and time.time() - t0 < 5.0:
-        time.sleep(0.05)
-    if not spawned_state:
-        return None
-    return f"{spawned_state['name']}_{spawned_state['id']}"
-
-
 def nearest_unvisited(
     pose_x: float,
     pose_z: float,
@@ -334,6 +314,15 @@ def run_machine_mode(
     bales: list[tuple[float, float]],
     field: float,
 ) -> None:
+    try:
+        import ondrive  # noqa: PLC0415  (lazy: only needed when actually driving)
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "ondrive Python bindings not found. Install with:\n"
+            "  cd ../ondrive && maturin develop --release\n"
+            "(adjust the path to wherever the ondrive checkout lives)."
+        ) from exc
+
     pose = MachinePose()
     last_pose: MachinePose | None = None
 
@@ -397,6 +386,59 @@ def run_machine_mode(
             remove_bale(session, bale_runtime_ids[bale_id], run_nonce)
             print(f"    harvested bale_{bale_id} ({reason})")
 
+    # ─── ondrive tracker setup ───────────────────────────────────────
+    # Pure pursuit (not Stanley) for forward driving. Stanley adds a
+    # `k_cte = 1.0` cross-track-error term to the steer command that
+    # competes with the heading term — on a straight-line path the two
+    # fight each other and a heavy Ackermann tractor wobbles visibly.
+    # Pure pursuit aims at a single lookahead point on the path with
+    # no competing term; the back-and-turn maneuver when the bale is
+    # behind is handled by the state machine below.
+    tracker = ondrive.Tracker("pure_pursuit")
+    cfg = ondrive.ControllerConfig.default_()
+    cfg.goal_tolerance = 2.0
+    cfg.angular_tolerance = math.pi  # accept any final yaw
+    cfg.lookahead_distance = 5.0
+    cfg.output_units = "physical"
+    tracker.set_config(cfg)
+
+    cons = ondrive.RobotConstraints.default_()
+    cons.steering_type = "ackermann"
+    cons.wheelbase = 2.37  # matches the USD tractor's wheel_base
+    cons.max_linear_velocity = 3.0
+    cons.min_linear_velocity = 0.0  # tracker never commands reverse here
+    cons.max_angular_velocity = 1.0  # gentler than Stanley's 1.4
+    cons.max_steering_angle = math.radians(40.0)
+    tracker.init(cons)
+
+    # ─── Reverse-maneuver state machine ──────────────────────────────
+    # When the bale is behind the tractor (`|heading_err| > 90°`), this
+    # state machine bypasses Stanley for one or two seconds: it commands
+    # a steady reverse with the wheels cranked the OPPOSITE way. Why
+    # opposite: `controller.rs::steering_target_radians` derives the
+    # wheel steer angle from `angular / |linear|` and does NOT flip
+    # the sign when reversing (by design — its comment explains the
+    # rationale). So to swing the nose toward a `+heading_err` goal
+    # while reversing, we publish NEGATIVE `angular`; the wheels go
+    # right and the reverse-motion rotates the body left as we want.
+    # Hysteresis (enter 90°, exit 70°) prevents thrash; the 6 s cap is
+    # a safety net against pathological geometry.
+    REVERSE_ENTER_RAD = math.pi / 2.0
+    REVERSE_EXIT_RAD = math.radians(70.0)
+    REVERSE_SPEED_MPS = 1.2
+    REVERSE_YAW_RPS = 1.2
+    MAX_REVERSE_SECS = 6.0
+    maneuver = "forward"
+    turn_sign = 0.0
+    maneuver_t0 = 0.0
+
+    # Gearbox is Y-up: drive plane = (X, Z), height = Y. Ondrive is
+    # Z-up planar (x, y). Map planar_x = gearbox_z, planar_y = gearbox_x
+    # so a gearbox heading of 0 (facing +Z) becomes ondrive yaw 0
+    # (facing +planar_x). Rotation sign is preserved.
+    def to_planar(gx: float, gz: float) -> tuple[float, float]:
+        return gz, gx
+
     try:
         for step in range(len(bale_pos)):
             for bale_id in harvests.drain():
@@ -414,17 +456,36 @@ def run_machine_mode(
                 f"from=({pose.x:+7.2f},{pose.z:+7.2f})  d={best_d:6.2f} m"
             )
 
+            # Fresh straight-line path from current pose to the bale,
+            # densified so Stanley's path-index advancement is smooth
+            # over a long approach. Reset the maneuver state — the old
+            # `turn_sign` was latched for the previous bale.
+            start_px, start_py = to_planar(pose.x, pose.z)
+            goal_px, goal_py = to_planar(tx, tz)
+            path_yaw = math.atan2(goal_py - start_py, goal_px - start_px)
+            path = ondrive.Path()
+            path.add_waypoint_xy(start_px, start_py, yaw=path_yaw)
+            path.add_waypoint_xy(goal_px, goal_py, yaw=path_yaw)
+            path.smoothen(2.0)  # ≤ 2 m segments
+            tracker.set_path(path)
+            tracker.set_goal(
+                ondrive.Goal(
+                    target_pose=((goal_px, goal_py, 0.0), path_yaw),
+                    tolerance_position=2.0,
+                    tolerance_orientation=math.pi,
+                )
+            )
+            maneuver = "forward"
+            turn_sign = 0.0
+
             t_goal = time.time()
+            t_last = time.time()
             while True:
                 for bale_id in harvests.drain():
                     mark_harvested(bale_id, "contact")
                 if best_idx in visited:
                     break
-                dx = tx - pose.x
-                dz = tz - pose.z
-                d_now = math.hypot(dx, dz)
 
-                target_heading = math.atan2(dx, dz)
                 heading = pose.heading_rad
                 if heading is None and last_pose is not None:
                     vx = pose.x - last_pose.x
@@ -432,28 +493,53 @@ def run_machine_mode(
                     if math.hypot(vx, vz) > 0.05:
                         heading = math.atan2(vx, vz)
                 if heading is None:
-                    heading = target_heading
+                    heading = path_yaw
 
-                err = wrap_pi(target_heading - heading)
-                # Fast when lined up, crawl while turning hard. The tractor's
-                # Ackermann controller can steer while almost stopped, so this
-                # avoids ploughing sideways into the target.
-                turn_slowdown = max(0.20, math.cos(abs(err)))
-                speed = min(3.5, 0.45 + 0.35 * d_now) * turn_slowdown
-                if abs(err) > 1.7:
-                    # Ackermann steering changes heading by rolling an arc;
-                    # too little speed here makes the tractor look parked.
-                    speed = 1.2
-                yaw_rate = clamp(1.8 * err, -1.2, 1.2)
-                publish_cmd(speed, yaw_rate)
+                # Bearing-to-goal vs current heading, in the gearbox
+                # plane (matches `pose.heading_rad` directly — no
+                # ondrive-frame round-trip needed for this).
+                dx_g = tx - pose.x
+                dz_g = tz - pose.z
+                d_now = math.hypot(dx_g, dz_g)
+                heading_err = wrap_pi(math.atan2(dx_g, dz_g) - heading)
 
-                if int(time.time() - t_goal) % 5 == 0:
+                # State machine transitions (hysteresis 90° / 70°).
+                now = time.time()
+                if maneuver == "forward":
+                    if abs(heading_err) > REVERSE_ENTER_RAD and d_now > 2.0:
+                        maneuver = "reverse"
+                        turn_sign = 1.0 if heading_err > 0.0 else -1.0
+                        maneuver_t0 = now
+                else:
+                    if abs(heading_err) < REVERSE_EXIT_RAD or now - maneuver_t0 > MAX_REVERSE_SECS:
+                        maneuver = "forward"
+
+                if maneuver == "reverse":
+                    publish_cmd(-REVERSE_SPEED_MPS, -turn_sign * REVERSE_YAW_RPS)
+                    mode_label = "reverse"
+                else:
+                    px, py = to_planar(pose.x, pose.z)
+                    state = ondrive.RobotState(
+                        pose=((px, py, 0.0), heading),
+                        allow_move=True,
+                        allow_reverse=False,
+                    )
+                    dt = max(1e-3, now - t_last)
+                    t_last = now
+                    cmd = tracker.tick(state, dt)
+                    if not cmd.valid:
+                        publish_cmd(0.0, 0.0)
+                    else:
+                        publish_cmd(float(cmd.linear_velocity), float(cmd.angular_velocity))
+                    mode_label = tracker.get_status().mode
+
+                if int(now - t_goal) % 5 == 0:
                     print(
                         f"    ... pos=({pose.x:+7.2f},{pose.z:+7.2f}) "
-                        f"d={d_now:6.2f} heading_err={math.degrees(err):+6.1f}°",
+                        f"d={d_now:6.2f} mode={mode_label}",
                         end="\r",
                     )
-                time.sleep(0.10)
+                time.sleep(0.05)
 
             publish_cmd(0.0, 0.0)
             print("    harvested by contact")
@@ -468,127 +554,8 @@ def run_machine_mode(
         del state_sub
 
 
-def run_legacy_mode(
-    session: zenoh.Session,
-    arg1: str,
-    bales: list[tuple[float, float]],
-    field: float,
-) -> None:
-    spawned_state: dict = {}
-
-    def on_spawned(sample: zenoh.Sample) -> None:
-        try:
-            spawned_state.update(cbor2.loads(bytes(sample.payload)))
-        except Exception:  # noqa: BLE001
-            pass
-
-    spawn_sub = session.declare_subscriber("gearbox/sim/spawned", on_spawned)
-    put_cbor(session, "gearbox/sim/reset", {"pause_clock": False})
-    put_cbor(session, "gearbox/sim/clock/command", {"SetPaused": False})
-    time.sleep(0.5)
-
-    preset = arg1.removeprefix("spawn:")
-    if preset in KNOWN_PRESETS:
-        vehicle = spawn_vehicle(session, preset, spawned_state)
-        if vehicle is None:
-            raise RuntimeError(f"spawn confirmation for preset `{preset}` timed out")
-        print(f"spawned `{preset}` — driving via topic prefix `{vehicle}`")
-        time.sleep(0.3)
-    else:
-        vehicle = arg1
-        print(f"using existing legacy vehicle topic prefix `{vehicle}`")
-    del spawn_sub
-
-    print(f"scattering {len(bales)} bales across {field:.0f} × {field:.0f} m field")
-    clear_old_bales(session, max(500, len(bales) + 50))
-    run_nonce = f"bale_run_legacy_{vehicle}_{int(time.time())}"
-    bale_runtime_ids = {i: f"bale_{i}_{run_nonce}" for i in range(len(bales))}
-    visited: set[int] = set()
-    harvests = HarvestTracker(session)
-    poses = BalePoseTracker(session)
-    scatter_bales(session, bales, bale_runtime_ids, run_nonce)
-    bale_pos = wait_for_bale_poses(poses, len(bales))
-
-    pose_state: dict = {"x": 0.0, "z": 0.0}
-
-    def on_odom(sample: zenoh.Sample) -> None:
-        try:
-            d = cbor2.loads(bytes(sample.payload))
-        except Exception:  # noqa: BLE001
-            return
-        p = d.get("position", [0, 0, 0])
-        pose_state["x"] = p[0]
-        pose_state["z"] = p[2]
-
-    session.declare_subscriber(f"{vehicle}/odom", on_odom)
-    time.sleep(0.3)
-
-    visit_order: list[int] = []
-
-    def mark_harvested(bale_id: int, reason: str) -> None:
-        if bale_id in bale_pos and bale_id not in visited:
-            visited.add(bale_id)
-            visit_order.append(bale_id)
-            remove_bale(session, bale_runtime_ids[bale_id], run_nonce)
-            print(f"    harvested bale_{bale_id} ({reason})")
-
-    try:
-        for step in range(len(bale_pos)):
-            for bale_id in harvests.drain():
-                mark_harvested(bale_id, "contact")
-            best_idx, best_d = nearest_unvisited(
-                pose_state["x"], pose_state["z"], bale_pos, visited
-            )
-            if best_idx < 0:
-                break
-            tx, _ty, tz, _top = bale_pos[best_idx]
-            set_target_marker(session, bale_pos[best_idx])
-            print(
-                f"\n[{step + 1:>3}/{len(bale_pos)}]  visiting bale_{best_idx}  "
-                f"target=({tx:+7.2f},{tz:+7.2f})  "
-                f"from=({pose_state['x']:+7.2f},{pose_state['z']:+7.2f})  d={best_d:6.2f} m"
-            )
-            cmd = {
-                "x": float(tx),
-                "z": float(tz),
-                "yaw_deg": 0.0,
-                "tolerance": 2.0,
-                "yaw_tolerance_deg": 0.0,
-                "max_speed": 0.0,
-                "cancel": False,
-            }
-            put_cbor(session, f"{vehicle}/goto", cmd)
-            while True:
-                for bale_id in harvests.drain():
-                    mark_harvested(bale_id, "contact")
-                if best_idx in visited:
-                    break
-                time.sleep(0.2)
-            print("    harvested by contact")
-    except KeyboardInterrupt:
-        print("\ninterrupted — cancelling current goto.")
-        put_cbor(
-            session,
-            f"{vehicle}/goto",
-            {
-                "x": 0.0,
-                "z": 0.0,
-                "yaw_deg": 0.0,
-                "tolerance": 0.0,
-                "yaw_tolerance_deg": 0.0,
-                "max_speed": 0.0,
-                "cancel": True,
-            },
-        )
-    finally:
-        set_target_marker(session, None)
-        print(f"\nvisited {len(visited)}/{len(bale_pos)} bales — order: {visit_order}")
-        harvests.close()
-        poses.close()
-
-
 def main() -> None:
-    arg1 = sys.argv[1] if len(sys.argv) > 1 else "robot"
+    namespace = sys.argv[1] if len(sys.argv) > 1 else "robot"
     n_bales = int(sys.argv[2]) if len(sys.argv) > 2 else 50
     field = float(sys.argv[3]) if len(sys.argv) > 3 else 300.0
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 42
@@ -599,10 +566,7 @@ def main() -> None:
 
     session = zenoh.open(zenoh.Config())
     try:
-        if arg1.startswith("spawn:") or "_" in arg1:
-            run_legacy_mode(session, arg1, bales, field)
-        else:
-            run_machine_mode(session, arg1, bales, field)
+        run_machine_mode(session, namespace, bales, field)
     finally:
         session.close()
 

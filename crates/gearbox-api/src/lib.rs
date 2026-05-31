@@ -61,10 +61,6 @@ pub mod wire;
 // in `bin/gearbox/src/main.rs`.
 pub mod vehicle_api;
 
-// Pluggable "go to point" navigation built on top of `ondrive`.
-// Same single-file delete pattern as `vehicle_api`.
-pub mod goto_api;
-
 // Generic USD loader — load / move / unload USD assets over zenoh.
 pub mod loader_api;
 
@@ -88,10 +84,6 @@ pub use wire::{ClockCommand, ClockWire};
 pub use vehicle_api::{FixWire, OdomWire, TwistWire, VehicleBroker};
 #[cfg(feature = "bevy")]
 pub use vehicle_api::{VehicleApiPlugin, VehicleApiSession};
-
-#[cfg(feature = "bevy")]
-pub use goto_api::{GotoApiPlugin, GotoApiSession};
-pub use goto_api::{GotoBroker, GotoCommand, GotoStatusWire};
 
 pub use loader_api::{UsdLoadWire, UsdLoaderBroker};
 #[cfg(feature = "bevy")]

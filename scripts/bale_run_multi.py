@@ -31,6 +31,15 @@ import time
 import cbor2
 import zenoh
 
+# The per-robot control loop uses ondrive's Stanley tracker for the
+# back-and-turn maneuver when the next bale is behind the tractor. Imported
+# softly so the rest of the script (USD loading, marker logic, harvest
+# tracking) stays importable on a host where ondrive isn't on `sys.path`.
+try:
+    import ondrive  # type: ignore
+except ModuleNotFoundError:
+    ondrive = None  # type: ignore[assignment]
+
 
 TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
 BALE_USD_PATH = "markers/bale.usdz"
@@ -39,6 +48,84 @@ TICK_DT = 0.10
 # Red cube floats this far above a bale's reported top so it reads as a
 # "target above the bale", not a decal on it.
 MARKER_GAP_M = 0.6
+
+
+def _planar(gx: float, gz: float) -> tuple[float, float]:
+    """Gearbox (X, Z) → ondrive planar (x, y).
+
+    Gearbox is Y-up: drive plane = (X, Z). Ondrive is Z-up planar (x, y) with
+    yaw 0 = +x. Mapping planar_x = gearbox_z, planar_y = gearbox_x means a
+    gearbox heading of 0 (facing +Z) is ondrive yaw 0 (facing +planar_x); the
+    rotation sign is preserved.
+    """
+    return gz, gx
+
+
+def _build_tracker():
+    """Per-robot ondrive Pure-Pursuit tracker for forward driving only.
+
+    We use pure pursuit instead of Stanley because Stanley's steering
+    sums a heading-error term and a cross-track-error term (`k_cte = 1.0`
+    hardcoded inside the controller). The two compete on a straight-line
+    path: a tiny drift off the line yields a large CTE kick, the heading
+    overshoots, CTE flips, and a heavy Ackermann tractor wobbles
+    visibly. Pure pursuit aims at a single lookahead point on the path —
+    no competing term, much smoother. The actual back-and-turn maneuver
+    when the bale is behind lives in `_reverse_maneuver_cmd`; this
+    tracker owns the forward-driving half only.
+    """
+    tracker = ondrive.Tracker("pure_pursuit")
+    cfg = ondrive.ControllerConfig.default_()
+    cfg.goal_tolerance = 2.0
+    cfg.angular_tolerance = math.pi
+    # Lookahead big enough to swallow the natural pose-update jitter; a
+    # 2 m densified path means this looks ~2 waypoints ahead.
+    cfg.lookahead_distance = 5.0
+    cfg.output_units = "physical"
+    tracker.set_config(cfg)
+    cons = ondrive.RobotConstraints.default_()
+    cons.steering_type = "ackermann"
+    cons.wheelbase = 2.37
+    cons.max_linear_velocity = 3.0
+    cons.min_linear_velocity = 0.0  # tracker never commands reverse
+    cons.max_angular_velocity = 1.0  # gentler than Stanley's 1.4
+    cons.max_steering_angle = math.radians(40.0)
+    tracker.init(cons)
+    return tracker
+
+
+# ─── Reverse-maneuver state machine ────────────────────────────────────
+#
+# Stanley drives the tractor when the goal is in front. When the goal is
+# behind (`|heading_err| > 90°`), this state machine takes over: it
+# commands a steady reverse with the wheels cranked the OPPOSITE way of
+# where they'd point for a forward turn — because gearbox's cmd_vel
+# handler (`controller.rs::steering_target_radians`) derives the wheel
+# steer angle from `angular / |linear|` and does NOT flip the sign when
+# reversing (deliberately, per its comment). So to swing the nose toward
+# a `+heading_err` goal while reversing, we publish a NEGATIVE
+# `angular.z`; the wheels crank right and reverse-motion rotates the
+# body left as we want.
+#
+# Hysteresis (enter 90°, exit 70°) means the forward arc from 70° won't
+# climb back past 90° and re-trigger reverse. The hard time cap is just
+# a safety against geometry going pathological (stuck wheel, pinned
+# chassis) — the maneuver is geometrically convergent.
+REVERSE_ENTER_RAD = math.pi / 2.0          # 90°
+REVERSE_EXIT_RAD = math.radians(70.0)      # 70°
+REVERSE_SPEED_MPS = 1.2                    # back up at this magnitude
+REVERSE_YAW_RPS = 1.2                      # full-lock-equivalent yaw cmd
+MAX_REVERSE_SECS = 6.0
+
+
+def _reverse_maneuver_cmd(turn_sign: float) -> tuple[float, float]:
+    """`(linear, angular)` cmd_vel for one tick of the reverse maneuver.
+
+    `turn_sign` is `sign(heading_err)` latched at maneuver entry — we
+    negate it before publishing for the cmd_vel sign-quirk reason
+    described in the module-level comment above.
+    """
+    return -REVERSE_SPEED_MPS, -turn_sign * REVERSE_YAW_RPS
 
 
 def wrap_pi(angle: float) -> float:
@@ -95,6 +182,22 @@ class RobotProxy:
         # target actually changes — never every tick.
         self.marker_bale: int | None = None
         self.collected: list[int] = []
+        # ondrive Stanley tracker state, lazily allocated in `drive_toward`
+        # so a host without the `ondrive` Python module can still load this
+        # script for static checks. `_tracker_target` doubles as the cache
+        # key: a new (x, z) means rebuild path + goal.
+        self._tracker = None
+        self._tracker_target: tuple[float, float] | None = None
+        self._tracker_path_yaw: float = 0.0
+        self._tracker_last_tick: float | None = None
+        # Reverse-maneuver state machine on top of Stanley (see
+        # `_reverse_maneuver_cmd` / `REVERSE_*` constants). `_maneuver` is
+        # "forward" or "reverse"; `_turn_sign` (±1) is latched at the
+        # moment we enter reverse so jitter near `err ≈ ±π` can't flip
+        # the steer mid-maneuver.
+        self._maneuver: str = "forward"
+        self._turn_sign: float = 0.0
+        self._maneuver_t0: float = 0.0
 
     @property
     def is_idle(self) -> bool:
@@ -343,23 +446,84 @@ def pick_nearest_bale(
 
 
 def drive_toward(session: zenoh.Session, robot: RobotProxy, target: tuple[float, float]) -> float:
+    if ondrive is None:
+        raise RuntimeError(
+            "ondrive Python bindings not found. Install with:\n"
+            "  cd ../ondrive && maturin develop --release\n"
+            "(adjust the path to wherever the ondrive checkout lives)."
+        )
+
     tx, tz = target
     cx, cz = robot.pose
-    dx = tx - cx
-    dz = tz - cz
-    d_now = math.hypot(dx, dz)
-    target_heading = math.atan2(dx, dz)
-    heading = robot.heading_or_motion(target_heading)
-    err = wrap_pi(target_heading - heading)
+    d_now = math.hypot(tx - cx, tz - cz)
 
-    turn_slowdown = max(0.20, math.cos(abs(err)))
-    speed = min(3.5, 0.45 + 0.35 * d_now) * turn_slowdown
-    if abs(err) > 1.7:
-        # Ackermann steering changes heading by rolling an arc; crawling at
-        # 0.35 m/s looked like "stopping" and never lined up in practice.
-        speed = 1.2
-    yaw_rate = clamp(1.8 * err, -1.2, 1.2)
-    robot.publish_cmd(session, speed, yaw_rate)
+    # First time, or target changed → fresh straight-line path + goal,
+    # and reset the maneuver state machine (the old turn_sign was
+    # latched for the previous bale).
+    target_changed = robot._tracker is None or robot._tracker_target != target
+    if target_changed:
+        robot._tracker = _build_tracker()
+        start_px, start_py = _planar(cx, cz)
+        goal_px, goal_py = _planar(tx, tz)
+        path_yaw = math.atan2(goal_py - start_py, goal_px - start_px)
+        path = ondrive.Path()
+        path.add_waypoint_xy(start_px, start_py, yaw=path_yaw)
+        path.add_waypoint_xy(goal_px, goal_py, yaw=path_yaw)
+        path.smoothen(2.0)  # ≤ 2 m segments
+        robot._tracker.set_path(path)
+        robot._tracker.set_goal(
+            ondrive.Goal(
+                target_pose=((goal_px, goal_py, 0.0), path_yaw),
+                tolerance_position=2.0,
+                tolerance_orientation=math.pi,
+            )
+        )
+        robot._tracker_target = target
+        robot._tracker_path_yaw = path_yaw
+        robot._tracker_last_tick = None
+        robot._maneuver = "forward"
+        robot._turn_sign = 0.0
+
+    # Bearing-to-goal vs current heading in the gearbox plane. We do
+    # this in the gearbox (X, Z) frame so the sign convention matches
+    # `pose.heading_rad` directly — no ondrive-frame round-trip.
+    heading = robot.heading_or_motion(robot._tracker_path_yaw)
+    heading_err = wrap_pi(math.atan2(tx - cx, tz - cz) - heading)
+
+    # State machine transitions (hysteresis: 90° enter / 70° exit).
+    now = time.time()
+    if robot._maneuver == "forward":
+        if abs(heading_err) > REVERSE_ENTER_RAD and d_now > 2.0:
+            robot._maneuver = "reverse"
+            robot._turn_sign = 1.0 if heading_err > 0.0 else -1.0
+            robot._maneuver_t0 = now
+    else:  # reverse
+        timed_out = now - robot._maneuver_t0 > MAX_REVERSE_SECS
+        if abs(heading_err) < REVERSE_EXIT_RAD or timed_out:
+            robot._maneuver = "forward"
+
+    # Reverse branch: hand-rolled cmd, bypasses Stanley entirely.
+    if robot._maneuver == "reverse":
+        lin, ang = _reverse_maneuver_cmd(robot._turn_sign)
+        robot.publish_cmd(session, lin, ang)
+        return d_now
+
+    # Forward branch: Stanley tick. With `allow_reverse=False` it can
+    # only ever command non-negative `linear_velocity`, so the
+    # cmd_vel-handler sign-flip we used to do here isn't needed.
+    px, py = _planar(cx, cz)
+    state = ondrive.RobotState(
+        pose=((px, py, 0.0), heading),
+        allow_move=True,
+        allow_reverse=False,
+    )
+    dt = max(1e-3, now - robot._tracker_last_tick) if robot._tracker_last_tick else TICK_DT
+    robot._tracker_last_tick = now
+    cmd = robot._tracker.tick(state, dt)
+    if not cmd.valid:
+        robot.publish_cmd(session, 0.0, 0.0)
+        return d_now
+    robot.publish_cmd(session, float(cmd.linear_velocity), float(cmd.angular_velocity))
     return d_now
 
 

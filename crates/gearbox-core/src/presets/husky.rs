@@ -90,7 +90,7 @@ pub fn husky() -> VehicleSpec {
     let rear_z = -0.256;
 
     let make = |x: f64, z: f64, prim: &'static str| WheelSpec {
-        chassis_connection: Point::new(x, conn_y as f64, z),
+        chassis_connection: Point::new(x, conn_y, z),
         suspension_dir: Point::new(0.0, -1.0, 0.0),
         axle_dir: Point::new(-1.0, 0.0, 0.0),
         suspension_rest_length: rest,

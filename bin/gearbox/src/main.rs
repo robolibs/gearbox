@@ -9,6 +9,19 @@
 //! / cameras / materials live in the `viewer` submodule, ported from
 //! `bevy_openusd::*`.
 
+#![allow(
+    dead_code,
+    clippy::collapsible_if,
+    clippy::field_reassign_with_default,
+    clippy::needless_borrow,
+    clippy::needless_borrows_for_generic_args,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_map_or,
+    clippy::useless_conversion
+)]
+
 mod controller;
 mod load;
 mod viewer;

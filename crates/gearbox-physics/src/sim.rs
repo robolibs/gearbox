@@ -177,9 +177,9 @@ impl Sim {
             if matches!(part.kind, PartKind::Hitch) {
                 continue;
             }
-            let hx = (part.size.x * 0.5) as f64;
-            let hy = (part.size.y * 0.5) as f64;
-            let hz = (part.size.z * 0.5) as f64;
+            let hx = part.size.x * 0.5;
+            let hy = part.size.y * 0.5;
+            let hz = part.size.z * 0.5;
             let part_collider = ColliderBuilder::cuboid(hx, hy, hz)
                 .translation(point_to_vec3(part.position))
                 .mass(0.0)

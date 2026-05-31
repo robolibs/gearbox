@@ -51,7 +51,7 @@ pub fn oxbo_harvester() -> VehicleSpec {
     let make =
         |x: f64, z: f64, driven: bool, engine: f64, steered: bool, max_steer: f64| -> WheelSpec {
             WheelSpec {
-                chassis_connection: Point::new(x, conn_y as f64, z),
+                chassis_connection: Point::new(x, conn_y, z),
                 suspension_dir: Point::new(0.0, -1.0, 0.0),
                 axle_dir: Point::new(-1.0, 0.0, 0.0),
                 suspension_rest_length: rest,

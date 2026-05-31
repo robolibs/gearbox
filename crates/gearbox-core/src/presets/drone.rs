@@ -78,7 +78,7 @@ pub fn drone() -> VehicleSpec {
             0.0,
             (body_half_z * dir_z.signum() + diag_off * dir_z * 0.5) as f64,
         ),
-        size: Size::new(arm_w as f64, arm_h as f64, arm_len as f64),
+        size: Size::new(arm_w, arm_h, arm_len as f64),
         color: arm_color,
         // `Hitch` → visual-only: no rapier collider is built for this
         // part, only its Bevy mesh. Necessary for the drone because:
@@ -99,7 +99,7 @@ pub fn drone() -> VehicleSpec {
             rotor_y as f64,
             (dir_z * (body_half_z + diag_off)) as f64,
         ),
-        size: Size::new((rotor_r * 2.0) as f64, 0.01, (rotor_r * 2.0) as f64),
+        size: Size::new(rotor_r * 2.0, 0.01, rotor_r * 2.0),
         color: rotor_color,
         kind: PartKind::Hitch, // visual-only (see note above)
         mesh: MeshSource::Box,

@@ -8,6 +8,16 @@
 //! the simulator through Bevy resources; any changes it needs to
 //! broadcast *outside* the process go through the tool-API crate.
 
+#![allow(
+    deprecated,
+    dead_code,
+    clippy::collapsible_if,
+    clippy::doc_overindented_list_items,
+    clippy::too_many_arguments,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_map_or
+)]
+
 // Re-export the generic UI kit under the module names the editor
 // source already uses (`super::float`, `super::widgets`,
 // `super::gizmo_material`) so the in-crate modules didn't need their

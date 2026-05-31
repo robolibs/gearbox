@@ -82,17 +82,6 @@ pub struct UsdLoadWire {
     /// `(prim_path, variant_set_name, option_name)`.
     #[serde(default)]
     pub usd_variants: Vec<(String, String, String)>,
-
-    // Legacy procedural fallback. Kept so old scripts do not explode, but new
-    // code should prefer `usd_path` and one of the USD categories above.
-    #[serde(default)]
-    pub height: f64,
-    #[serde(default)]
-    pub radius: f64,
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub color: [f32; 3],
 }
 
 impl UsdLoadWire {
@@ -215,29 +204,6 @@ enum LoadSignature {
         path: String,
         variants: Vec<(String, String, String)>,
     },
-    /// A legacy procedural primitive, identified by shape + colour.
-    Primitive {
-        kind: String,
-        height: f64,
-        radius: f64,
-        color: [f32; 3],
-    },
-}
-
-#[cfg(feature = "bevy")]
-fn load_signature(req: &UsdLoadWire) -> LoadSignature {
-    match req.usd_path.as_deref() {
-        Some(path) => LoadSignature::Usd {
-            path: path.to_string(),
-            variants: req.usd_variants.clone(),
-        },
-        None => LoadSignature::Primitive {
-            kind: req.kind.clone(),
-            height: req.height,
-            radius: req.radius,
-            color: req.color,
-        },
-    }
 }
 
 #[cfg(feature = "bevy")]
@@ -288,8 +254,6 @@ pub struct PendingLoadedUsd {
 fn apply_usd_loads_system(
     mut commands: Commands,
     api: Option<Res<UsdLoaderApiSession>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<bevy::asset::AssetServer>,
     asset_root: Option<Res<gearbox_viz::UsdAssetRoot>>,
     live_entities: &Entities,
@@ -361,7 +325,14 @@ fn apply_usd_loads_system(
             tombstones.remove(&id);
         }
 
-        let signature = load_signature(&req);
+        let Some(usd_rel) = req.usd_path.as_deref() else {
+            bevy::log::warn!("gearbox-api: ignoring USD load `{id}` with no `usd_path`");
+            continue;
+        };
+        let signature = LoadSignature::Usd {
+            path: usd_rel.to_string(),
+            variants: req.usd_variants.clone(),
+        };
 
         // Re-publishing an id with the *same asset* is a move, not a replace.
         // Keeping the same entity (and its `Name`) means the loaded USD never
@@ -387,102 +358,62 @@ fn apply_usd_loads_system(
             commands.entity(entry.entity).despawn();
         }
 
-        let spawned = if let Some(usd_rel) = req.usd_path.as_deref() {
-            let Some(root) = asset_root.as_deref() else {
-                bevy::log::warn!(
-                    "gearbox-api: USD load `{id}` requested `{usd_rel}` but no `UsdAssetRoot` is registered"
-                );
-                continue;
-            };
-            bevy::log::info!(
-                "gearbox-api: load `{id}` category={} USD `{}` variants={:?}",
-                req.effective_category(),
-                usd_rel,
-                req.usd_variants,
+        let Some(root) = asset_root.as_deref() else {
+            bevy::log::warn!(
+                "gearbox-api: USD load `{id}` requested `{usd_rel}` but no `UsdAssetRoot` is registered"
             );
-            let asset_file = root.0.join(usd_rel);
-            let asset_path_string = asset_file.to_string_lossy().into_owned();
-            let asset_parent = asset_file
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| root.0.clone());
-            let parent_clone = asset_parent.clone();
-            let variants: Vec<usd_bevy::VariantSelection> = req
-                .usd_variants
-                .iter()
-                .map(|(prim_path, set_name, option)| usd_bevy::VariantSelection {
-                    prim_path: prim_path.clone(),
-                    set_name: set_name.clone(),
-                    option: option.clone(),
-                })
-                .collect();
-            let asset_path: bevy::asset::AssetPath<'static> = if variants.is_empty() {
-                asset_path_string.into()
-            } else {
-                let label = usd_bevy::variant_label(&variants);
-                bevy::asset::AssetPath::from(asset_path_string).with_label(label)
-            };
-            let handle: Handle<usd_bevy::UsdAsset> = asset_server.load_with_settings(
-                asset_path,
-                move |s: &mut usd_bevy::UsdLoaderSettings| {
-                    s.search_paths = vec![parent_clone.clone()];
-                    s.variant_selections = variants.clone();
-                },
-            );
-            commands
-                .spawn((
-                    Name::new(format!("UsdLoad[{}]::pending", id)),
-                    Transform {
-                        translation: Vec3::new(req.x as f32, req.y as f32, req.z as f32),
-                        rotation: Quat::from_rotation_y((req.yaw_deg as f32).to_radians()),
-                        ..default()
-                    },
-                    Visibility::default(),
-                    PendingLoadedUsd {
-                        handle,
-                        load_id: id.clone(),
-                    },
-                ))
-                .id()
-        } else {
-            // Legacy procedural fallback. New callers should send `usd_path`.
-            let height = if req.height > 0.0 {
-                req.height as f32
-            } else {
-                1.0
-            };
-            let radius = if req.radius > 0.0 {
-                req.radius as f32
-            } else {
-                0.4
-            };
-            let color = if req.color == [0.0, 0.0, 0.0] {
-                [0.95, 0.85, 0.15]
-            } else {
-                req.color
-            };
-
-            let mesh = match req.kind.as_str() {
-                "box" | "cube" => meshes.add(Cuboid::new(radius * 2.0, height, radius * 2.0)),
-                "sphere" | "ball" => meshes.add(Sphere::new(radius)),
-                _ => meshes.add(Cone { radius, height }),
-            };
-            let mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(color[0], color[1], color[2]),
-                perceptual_roughness: 0.6,
-                metallic: 0.0,
-                ..default()
-            });
-
-            commands
-                .spawn((
-                    Name::new(format!("UsdLoad[{}]::legacy_primitive", id)),
-                    Transform::from_xyz(req.x as f32, req.y as f32 + height * 0.5, req.z as f32),
-                    Mesh3d(mesh),
-                    MeshMaterial3d(mat),
-                ))
-                .id()
+            continue;
         };
+        bevy::log::info!(
+            "gearbox-api: load `{id}` category={} USD `{}` variants={:?}",
+            req.effective_category(),
+            usd_rel,
+            req.usd_variants,
+        );
+        let asset_file = root.0.join(usd_rel);
+        let asset_path_string = asset_file.to_string_lossy().into_owned();
+        let asset_parent = asset_file
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| root.0.clone());
+        let parent_clone = asset_parent.clone();
+        let variants: Vec<usd_bevy::VariantSelection> = req
+            .usd_variants
+            .iter()
+            .map(|(prim_path, set_name, option)| usd_bevy::VariantSelection {
+                prim_path: prim_path.clone(),
+                set_name: set_name.clone(),
+                option: option.clone(),
+            })
+            .collect();
+        let asset_path: bevy::asset::AssetPath<'static> = if variants.is_empty() {
+            asset_path_string.into()
+        } else {
+            let label = usd_bevy::variant_label(&variants);
+            bevy::asset::AssetPath::from(asset_path_string).with_label(label)
+        };
+        let handle: Handle<usd_bevy::UsdAsset> = asset_server.load_with_settings(
+            asset_path,
+            move |s: &mut usd_bevy::UsdLoaderSettings| {
+                s.search_paths = vec![parent_clone.clone()];
+                s.variant_selections = variants.clone();
+            },
+        );
+        let spawned = commands
+            .spawn((
+                Name::new(format!("UsdLoad[{}]::pending", id)),
+                Transform {
+                    translation: Vec3::new(req.x as f32, req.y as f32, req.z as f32),
+                    rotation: Quat::from_rotation_y((req.yaw_deg as f32).to_radians()),
+                    ..default()
+                },
+                Visibility::default(),
+                PendingLoadedUsd {
+                    handle,
+                    load_id: id.clone(),
+                },
+            ))
+            .id();
         entities.insert(
             id,
             LoadedUsdEntry {

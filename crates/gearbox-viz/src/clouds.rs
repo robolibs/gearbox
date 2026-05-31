@@ -137,6 +137,5 @@ fn fbm_tileable(u: f32, v: f32) -> f32 {
     // Map roughly [-1, 1] → [0, 1], a shade biased so there's less
     // cloud near the equator and more at mid-latitudes (matches how
     // real trade-wind cumulus concentrates).
-    let raw = (sum * 0.5 + 0.5).clamp(0.0, 1.0);
-    raw
+    (sum * 0.5 + 0.5).clamp(0.0, 1.0)
 }

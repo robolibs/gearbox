@@ -122,11 +122,11 @@ pub struct ChaseCameraFly {
 /// animation over `FlyTarget::duration`:
 ///
 ///   1. 0–40 %  — pull back (distance → apex) while the focus
-///                eases onto the target, so the camera is "looking
-///                at the machine" well before it moves in.
+///      eases onto the target, so the camera is "looking
+///      at the machine" well before it moves in.
 ///   2. 40–50 % — hold at the apex, briefly.
 ///   3. 50–100 %— orbit in: yaw arcs toward `vehicle_yaw + π` while
-///                distance shrinks to `FlyTarget::distance`.
+///      distance shrinks to `FlyTarget::distance`.
 ///
 /// Cancels when the user gives any camera input (middle-drag,
 /// left+right-drag, or scroll-wheel zoom).
