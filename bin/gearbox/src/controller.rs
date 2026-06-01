@@ -371,6 +371,10 @@ pub struct ControllerSpec {
     pub front_steer_multiplier: Option<f32>,
     pub middle_steer_multiplier: Option<f32>,
     pub rear_steer_multiplier: Option<f32>,
+    pub front_left_steer_differential_deg: Option<f32>,
+    pub front_right_steer_differential_deg: Option<f32>,
+    pub rear_left_steer_differential_deg: Option<f32>,
+    pub rear_right_steer_differential_deg: Option<f32>,
     pub uses_roles: Vec<String>,
     pub executable: Option<String>,
     pub args: Vec<String>,
@@ -665,6 +669,10 @@ fn append_isaac_compat_machines(
                 front_steer_multiplier: None,
                 middle_steer_multiplier: None,
                 rear_steer_multiplier: None,
+                front_left_steer_differential_deg: None,
+                front_right_steer_differential_deg: None,
+                rear_left_steer_differential_deg: None,
+                rear_right_steer_differential_deg: None,
                 uses_roles: vec![
                     "poweredWheelJoints".to_string(),
                     "steeringJoints".to_string(),
@@ -1287,6 +1295,7 @@ fn apply_builtin_ackermann_cmd_vel(
                     &physics,
                     body_handle,
                     steer_target_rad,
+                    max_steer_deg,
                     wheel_radius_m,
                 );
             }
@@ -1630,7 +1639,12 @@ fn apply_rapier_raycast_vehicle_controller(
             wheel.steering = steer_target_rad * spec.steering_multiplier;
         }
         if spec.driven {
-            wheel.engine_force = force_per_rear;
+            wheel.engine_force = force_per_rear
+                * turn_speed_ratio(
+                    cmd.linear_mps as f64,
+                    cmd.angular_rps as f64,
+                    spec.chassis_connection.x,
+                );
         }
     }
 
@@ -2089,6 +2103,7 @@ fn steering_joint_targets(
             parents,
             physics,
             center_steer_rad,
+            max_steer_deg,
         );
         if !targets.is_empty() {
             return targets;
@@ -2163,19 +2178,90 @@ fn all_role_steering_targets(
     parents: &Query<&ChildOf>,
     physics: &usd_bevy::physics::PhysicsWorld,
     center_position: f64,
+    max_steer_deg: f32,
 ) -> Vec<JointPositionTarget> {
+    let max_center = (max_steer_deg as f64).to_radians().max(1e-6);
+    let differential_scale = (center_position.abs() / max_center).clamp(0.0, 1.0);
     machine
         .steering_joints
         .iter()
         .filter_map(|path| {
             let pair = joint_pair(scene_root, path, joints, parents, physics)?;
-            let multiplier = steering_multiplier_for_controller(controller, path);
             Some(JointPositionTarget {
                 pair,
-                position: center_position * multiplier,
+                position: steering_position_for_path(
+                    controller,
+                    path,
+                    center_position,
+                    differential_scale,
+                ),
             })
         })
         .collect()
+}
+
+fn steering_position_for_path(
+    controller: &ControllerSpec,
+    path: &str,
+    center_position: f64,
+    differential_scale: f64,
+) -> f64 {
+    let multiplier = steering_multiplier_for_controller(controller, path);
+    let differential_rad = steering_differential_for_controller(controller, path).to_radians();
+    center_position * multiplier + differential_rad * differential_scale
+}
+
+fn steering_differential_for_controller(controller: &ControllerSpec, path: &str) -> f64 {
+    match (axle_hint(path), side_hint(path)) {
+        (Some(AxleHint::Front), Some(SideHint::Left)) => controller
+            .front_left_steer_differential_deg
+            .map(f64::from)
+            .unwrap_or(0.0),
+        (Some(AxleHint::Front), Some(SideHint::Right)) => controller
+            .front_right_steer_differential_deg
+            .map(f64::from)
+            .unwrap_or(0.0),
+        (Some(AxleHint::Rear), Some(SideHint::Left)) => controller
+            .rear_left_steer_differential_deg
+            .map(f64::from)
+            .unwrap_or(0.0),
+        (Some(AxleHint::Rear), Some(SideHint::Right)) => controller
+            .rear_right_steer_differential_deg
+            .map(f64::from)
+            .unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+fn steering_yaw_rate_for_differential(
+    linear_mps: f64,
+    center_steer_rad: f64,
+    wheel_base_m: f32,
+) -> f64 {
+    if wheel_base_m.abs() < 1e-6 {
+        return 0.0;
+    }
+    linear_mps * center_steer_rad.tan() / wheel_base_m as f64
+}
+
+fn turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64) -> f64 {
+    if linear_mps.abs() < 0.05 || yaw_rate_rps.abs() < 1e-5 {
+        return 1.0;
+    }
+    ((linear_mps - yaw_rate_rps * lateral_x_m) / linear_mps).clamp(0.25, 1.75)
+}
+
+fn wheel_lateral_offset(
+    physics: &usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    pair: (RigidBodyHandle, RigidBodyHandle),
+) -> Option<f64> {
+    let chassis_body = physics.bodies.get(chassis)?;
+    let wheel = wheel_body_of(physics, chassis, pair)?;
+    let wheel_body = physics.bodies.get(wheel)?;
+    let world_offset = wheel_body.translation() - chassis_body.translation();
+    let local_center = chassis_body.rotation().inverse() * world_offset;
+    Some(local_center.x)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2232,25 +2318,35 @@ fn wheel_joint_targets(
     chassis: RigidBodyHandle,
     geometry: &str,
     linear_mps: f64,
-    _center_steer_rad: f64,
-    _wheel_base_m: f32,
-    _traction_track_width_m: f32,
+    center_steer_rad: f64,
+    wheel_base_m: f32,
+    traction_track_width_m: f32,
     wheel_radius_fallback_m: f64,
 ) -> Vec<JointVelocityTarget> {
     // Wheel angular-velocity target for one joint pair. The spin rate is
     // `ground_speed / wheel_radius`, using the wheel's *actual* collider
     // radius — a wrong radius makes the tyre over- or under-spin and slip.
     //
-    // Keep all powered wheels at the same angular speed. The current tractor
-    // has no authored differential, and the user's expectation is hard-locked
-    // axle behavior: if one powered wheel spins, its mate spins exactly the
-    // same way.
-    let target = |_path: &str, pair: (RigidBodyHandle, RigidBodyHandle)| {
+    // Apply a simple differential: while turning, each wheel target uses the
+    // forward speed at its lateral offset from the chassis center. The outside
+    // side therefore spins faster and the inside side slower.
+    let target = |path: &str, pair: (RigidBodyHandle, RigidBodyHandle)| {
         let radius = wheel_body_of(physics, chassis, pair)
             .and_then(|wheel| body_max_collider_radius(physics, wheel))
             .filter(|r| *r > 0.05)
             .unwrap_or(wheel_radius_fallback_m);
-        let ground_speed = linear_mps;
+        let lateral_x =
+            wheel_lateral_offset(physics, chassis, pair).unwrap_or_else(|| match side_hint(path) {
+                Some(SideHint::Left) => traction_track_width_m as f64 * 0.5,
+                Some(SideHint::Right) => -traction_track_width_m as f64 * 0.5,
+                None => 0.0,
+            });
+        let ground_speed = linear_mps
+            * turn_speed_ratio(
+                linear_mps,
+                steering_yaw_rate_for_differential(linear_mps, center_steer_rad, wheel_base_m),
+                lateral_x,
+            );
         drive_wheel_velocity_target(pair, ground_speed / radius)
     };
 
@@ -2344,6 +2440,7 @@ fn visual_wheel_spin_targets(
     physics: &usd_bevy::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     steer_target_rad: f64,
+    max_steer_deg: f32,
     wheel_radius_fallback_m: f64,
 ) -> Vec<JointVelocityTarget> {
     let mut targets = Vec::new();
@@ -2363,7 +2460,9 @@ fn visual_wheel_spin_targets(
             parents,
             physics,
             chassis,
+            controller,
             steer_target_rad,
+            max_steer_deg,
             wheel_radius_fallback_m,
         );
     }
@@ -2384,7 +2483,9 @@ fn visual_wheel_spin_targets(
             parents,
             physics,
             chassis,
+            controller,
             steer_target_rad,
+            max_steer_deg,
             wheel_radius_fallback_m,
         );
     }
@@ -2400,7 +2501,9 @@ fn push_visual_wheel_spin_target(
     parents: &Query<&ChildOf>,
     physics: &usd_bevy::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
+    controller: &ControllerSpec,
     steer_target_rad: f64,
+    max_steer_deg: f32,
     wheel_radius_fallback_m: f64,
 ) {
     let Some(pair) = joint_pair(scene_root, path, joints, parents, physics) else {
@@ -2414,7 +2517,11 @@ fn push_visual_wheel_spin_target(
     }
 
     let radius = visual_wheel_radius(physics, chassis, pair, path, wheel_radius_fallback_m);
-    let ground_speed = visual_wheel_ground_speed(physics, chassis, path, steer_target_rad)
+    let differential_scale =
+        (steer_target_rad.abs() / (max_steer_deg as f64).to_radians().max(1e-6)).clamp(0.0, 1.0);
+    let wheel_steer_rad =
+        steering_position_for_path(controller, path, steer_target_rad, differential_scale);
+    let ground_speed = visual_wheel_ground_speed(physics, chassis, pair, wheel_steer_rad)
         .unwrap_or_else(|| chassis_forward_speed(physics, chassis).unwrap_or(0.0));
     targets.push(visual_wheel_velocity_target(pair, ground_speed / radius));
 }
@@ -2448,15 +2555,15 @@ fn chassis_forward_speed(
 fn visual_wheel_ground_speed(
     physics: &usd_bevy::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
-    path: &str,
-    steer_target_rad: f64,
+    pair: (RigidBodyHandle, RigidBodyHandle),
+    wheel_steer_rad: f64,
 ) -> Option<f64> {
-    let spec = raycast_wheel_spec_for_path(path)?;
     let body = physics.bodies.get(chassis)?;
-    let world_offset = body.rotation() * spec.chassis_connection;
+    let wheel = wheel_body_of(physics, chassis, pair)?;
+    let wheel_body = physics.bodies.get(wheel)?;
+    let world_offset = wheel_body.translation() - body.translation();
     let point_velocity = body.linvel() + body.angvel().cross(world_offset);
-    let steer = if spec.steered { steer_target_rad } else { 0.0 };
-    let rolling_local = Vector::new(steer.sin(), -steer.cos(), 0.0);
+    let rolling_local = Vector::new(wheel_steer_rad.sin(), -wheel_steer_rad.cos(), 0.0);
     let rolling_world = body.rotation() * rolling_local;
     Some(point_velocity.dot(rolling_world))
 }
@@ -2756,6 +2863,26 @@ fn discover_controllers(
                     prim,
                     &(prefix.clone() + "rearSteerMultiplier"),
                 ),
+                front_left_steer_differential_deg: read_float(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "frontLeftSteerDifferentialDeg"),
+                ),
+                front_right_steer_differential_deg: read_float(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "frontRightSteerDifferentialDeg"),
+                ),
+                rear_left_steer_differential_deg: read_float(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "rearLeftSteerDifferentialDeg"),
+                ),
+                rear_right_steer_differential_deg: read_float(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "rearRightSteerDifferentialDeg"),
+                ),
                 uses_roles: read_token_array(stage, prim, &(prefix.clone() + "usesRoles")),
                 executable: read_string(stage, prim, &(prefix.clone() + "executable")),
                 args: read_string_array(stage, prim, &(prefix.clone() + "args")),
@@ -2992,6 +3119,10 @@ mod tests {
         assert_eq!(drive.front_steer_multiplier, Some(0.56));
         assert_eq!(drive.middle_steer_multiplier, Some(0.0));
         assert_eq!(drive.rear_steer_multiplier, Some(-1.0));
+        assert_eq!(drive.front_left_steer_differential_deg, Some(2.0));
+        assert_eq!(drive.front_right_steer_differential_deg, Some(-2.0));
+        assert_eq!(drive.rear_left_steer_differential_deg, Some(-4.0));
+        assert_eq!(drive.rear_right_steer_differential_deg, Some(4.0));
         assert_eq!(
             drive.uses_roles,
             vec![

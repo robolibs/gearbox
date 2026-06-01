@@ -63,6 +63,10 @@ def Xform "robot" (
     float gearbox:controller:drive:frontSteerMultiplier = 0.56
     float gearbox:controller:drive:middleSteerMultiplier = 0
     float gearbox:controller:drive:rearSteerMultiplier = -1
+    float gearbox:controller:drive:frontLeftSteerDifferentialDeg = 2
+    float gearbox:controller:drive:frontRightSteerDifferentialDeg = -2
+    float gearbox:controller:drive:rearLeftSteerDifferentialDeg = -4
+    float gearbox:controller:drive:rearRightSteerDifferentialDeg = 4
     token[] gearbox:controller:drive:usesRoles = [
         "poweredWheelJoints",
         "passiveWheelJoints",
@@ -340,8 +344,8 @@ def Xform "robot" (
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
             uniform token physics:axis = "Z"
-            float physics:lowerLimit = -14
-            float physics:upperLimit = 14
+            float physics:lowerLimit = -16
+            float physics:upperLimit = 16
         }
         def PhysicsRevoluteJoint "rev_front_left"
         {
@@ -363,8 +367,8 @@ def Xform "robot" (
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
             uniform token physics:axis = "Z"
-            float physics:lowerLimit = -14
-            float physics:upperLimit = 14
+            float physics:lowerLimit = -16
+            float physics:upperLimit = 16
         }
         def PhysicsRevoluteJoint "rev_front_right"
         {
@@ -407,8 +411,8 @@ def Xform "robot" (
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
             uniform token physics:axis = "Z"
-            float physics:lowerLimit = -25
-            float physics:upperLimit = 25
+            float physics:lowerLimit = -29
+            float physics:upperLimit = 29
         }
         def PhysicsRevoluteJoint "rev_rear_left"
         {
@@ -430,8 +434,8 @@ def Xform "robot" (
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
             uniform token physics:axis = "Z"
-            float physics:lowerLimit = -25
-            float physics:upperLimit = 25
+            float physics:lowerLimit = -29
+            float physics:upperLimit = 29
         }
         def PhysicsRevoluteJoint "rev_rear_right"
         {
