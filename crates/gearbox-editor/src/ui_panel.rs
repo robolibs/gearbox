@@ -55,8 +55,8 @@ pub fn draw_content(
             gizmo_scale.0 = v as f32;
         }
         toggle(ui, "translate", &mut gizmo_modes.translate, accent);
-        toggle(ui, "rotate",    &mut gizmo_modes.rotate,    accent);
-        toggle(ui, "scale",     &mut gizmo_modes.scale,     accent);
+        toggle(ui, "rotate", &mut gizmo_modes.rotate, accent);
+        toggle(ui, "scale", &mut gizmo_modes.scale, accent);
         if !gizmo_modes.translate && !gizmo_modes.rotate && !gizmo_modes.scale {
             gizmo_modes.translate = true;
         }
@@ -75,9 +75,9 @@ pub fn draw_content(
 fn bevy_to_egui_rgb(c: Color) -> [u8; 3] {
     let s = c.to_srgba();
     [
-        (s.red   * 255.0).round().clamp(0.0, 255.0) as u8,
+        (s.red * 255.0).round().clamp(0.0, 255.0) as u8,
         (s.green * 255.0).round().clamp(0.0, 255.0) as u8,
-        (s.blue  * 255.0).round().clamp(0.0, 255.0) as u8,
+        (s.blue * 255.0).round().clamp(0.0, 255.0) as u8,
     ]
 }
 

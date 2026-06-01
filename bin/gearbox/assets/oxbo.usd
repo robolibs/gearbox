@@ -1,0 +1,529 @@
+#usda 1.0
+(
+    defaultPrim = "robot"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+    customLayerData = {
+        string creator = "gearbox procedural Oxbo 2475 harvester migrated to USD"
+    }
+)
+
+# Oxbo 2475 pea harvester, migrated from the old hardcoded
+# `oxbo_harvester` VehicleSpec into a USD-authored machine.
+#
+# Frame convention matches tractor.usd's controller assumptions:
+#   X = lateral, Y = rear/back, -Y = forward, Z = up.
+# Six wheel centers are authored as rigid body siblings. Front and rear
+# wheels use steering-link siblings, while middle wheels are fixed.
+
+def Xform "robot" (
+    prepend apiSchemas = [
+        "GearboxMachineAPI",
+        "GearboxControllerAPI:drive"
+    ]
+)
+{
+    token gearbox:machine:interfaceVersion = "0.1"
+    token gearbox:machine:kind = "oxbo"
+    token gearbox:machine:idPolicy = "prim_path"
+    token gearbox:machine:upAxis = "Z"
+    rel gearbox:machine:body = </robot/chassis>
+    rel gearbox:machine:role:poweredWheelJoints = [
+        </robot/Joints/rev_rear_left>,
+        </robot/Joints/rev_rear_right>
+    ]
+    rel gearbox:machine:role:passiveWheelJoints = [
+        </robot/Joints/rev_front_left>,
+        </robot/Joints/rev_front_right>,
+        </robot/Joints/rev_middle_left>,
+        </robot/Joints/rev_middle_right>
+    ]
+    rel gearbox:machine:role:steeringJoints = [
+        </robot/Joints/steer_front_left>,
+        </robot/Joints/steer_front_right>,
+        </robot/Joints/steer_rear_left>,
+        </robot/Joints/steer_rear_right>
+    ]
+
+    bool gearbox:controller:drive:enabled = true
+    token gearbox:controller:drive:type = "builtin:ackermann_cmd_vel"
+    float gearbox:controller:drive:updateRateHz = 60
+    token gearbox:controller:drive:namespacePolicy = "machine_id"
+    token gearbox:controller:drive:commandInterface = "cmd_vel"
+    token[] gearbox:controller:drive:stateInterfaces = ["pose", "velocity", "joint_state"]
+    token gearbox:controller:drive:frameConvention = "usd_z_up"
+    float gearbox:controller:drive:wheelBase = 4.992
+    float gearbox:controller:drive:wheelRadius = 0.768
+    float gearbox:controller:drive:trackWidth = 2.8
+    float gearbox:controller:drive:frontTrackWidth = 2.8
+    float gearbox:controller:drive:rearTrackWidth = 2.8
+    float gearbox:controller:drive:maxSteerDeg = 25
+    token gearbox:controller:drive:steeringGeometry = "six_wheel_ackermann"
+    float gearbox:controller:drive:frontSteerMultiplier = 0.56
+    float gearbox:controller:drive:middleSteerMultiplier = 0
+    float gearbox:controller:drive:rearSteerMultiplier = -1
+    float gearbox:controller:drive:frontLeftSteerDifferentialDeg = 2
+    float gearbox:controller:drive:frontRightSteerDifferentialDeg = -2
+    float gearbox:controller:drive:rearLeftSteerDifferentialDeg = -4
+    float gearbox:controller:drive:rearRightSteerDifferentialDeg = 4
+    token[] gearbox:controller:drive:usesRoles = [
+        "poweredWheelJoints",
+        "passiveWheelJoints",
+        "steeringJoints"
+    ]
+    rel gearbox:controller:drive:target = </robot>
+    rel gearbox:controller:drive:body = </robot/chassis>
+
+    def Scope "Materials"
+    {
+        def Material "oxbo_yellow"
+        {
+            color3f inputs:diffuseColor = (1.0, 0.784, 0.0)
+            float inputs:opacity = 1.0
+            float inputs:roughness = 0.55
+            token outputs:surface.connect = </robot/Materials/oxbo_yellow/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </robot/Materials/oxbo_yellow.inputs:diffuseColor>
+                float inputs:opacity.connect = </robot/Materials/oxbo_yellow.inputs:opacity>
+                float inputs:roughness.connect = </robot/Materials/oxbo_yellow.inputs:roughness>
+                token outputs:surface
+            }
+        }
+
+        def Material "dark_rubber"
+        {
+            color3f inputs:diffuseColor = (0.025, 0.024, 0.022)
+            float inputs:opacity = 1.0
+            float inputs:roughness = 0.8
+            token outputs:surface.connect = </robot/Materials/dark_rubber/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </robot/Materials/dark_rubber.inputs:diffuseColor>
+                float inputs:opacity.connect = </robot/Materials/dark_rubber.inputs:opacity>
+                float inputs:roughness.connect = </robot/Materials/dark_rubber.inputs:roughness>
+                token outputs:surface
+            }
+        }
+
+        def Material "cab_glass"
+        {
+            color3f inputs:diffuseColor = (0.08, 0.13, 0.16)
+            float inputs:opacity = 0.82
+            float inputs:roughness = 0.25
+            token outputs:surface.connect = </robot/Materials/cab_glass/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </robot/Materials/cab_glass.inputs:diffuseColor>
+                float inputs:opacity.connect = </robot/Materials/cab_glass.inputs:opacity>
+                float inputs:roughness.connect = </robot/Materials/cab_glass.inputs:roughness>
+                token outputs:surface
+            }
+        }
+    }
+
+    def Xform "chassis" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 15000.0
+        vector3f physics:diagonalInertia = (22000, 72000, 76000)
+        double3 xformOp:translate = (0, 0, 0.9125)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "lower_frame" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0, 0.359)
+            double3 xformOp:scale = (2.8, 7.68, 1.007)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Materials/oxbo_yellow>
+        }
+
+        def Cube "harvest_head" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, -4.72, 0)
+            double3 xformOp:scale = (3.53, 1.77, 1.2)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Materials/oxbo_yellow>
+        }
+
+        def Cube "cab" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, -3.24, 1.5625)
+            double3 xformOp:scale = (2.8, 1.8, 1.4)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Materials/cab_glass>
+        }
+
+        def Cube "cab_roof" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, -3.24, 2.3325)
+            double3 xformOp:scale = (2.9, 1.9, 0.14)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Materials/dark_rubber>
+        }
+
+        def Cube "bunker" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 1.325, 1.5625)
+            double3 xformOp:scale = (2.8, 7.03, 1.4)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Materials/oxbo_yellow>
+        }
+    }
+
+    def Xform "steer_front_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 60.0
+        vector3f physics:diagonalInertia = (4, 4, 4)
+        double3 xformOp:translate = (1.4, -2.304, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "steer_front_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 60.0
+        vector3f physics:diagonalInertia = (4, 4, 4)
+        double3 xformOp:translate = (-1.4, -2.304, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "steer_rear_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 60.0
+        vector3f physics:diagonalInertia = (4, 4, 4)
+        double3 xformOp:translate = (1.4, 2.688, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "steer_rear_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 60.0
+        vector3f physics:diagonalInertia = (4, 4, 4)
+        double3 xformOp:translate = (-1.4, 2.688, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "wheel_front_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 260.0
+        vector3f physics:diagonalInertia = (68, 38, 38)
+        double3 xformOp:translate = (1.4, -2.304, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_left_tyre>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_left_rim>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.768
+            double height = 0.7
+        }
+    }
+
+    def Xform "wheel_front_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 260.0
+        vector3f physics:diagonalInertia = (68, 38, 38)
+        double3 xformOp:translate = (-1.4, -2.304, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_right_tyre>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_right_rim>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.768
+            double height = 0.7
+        }
+    }
+
+    def Xform "wheel_middle_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 260.0
+        vector3f physics:diagonalInertia = (68, 38, 38)
+        double3 xformOp:translate = (1.4, -0.100, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_left_tyre>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_left_rim>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.768
+            double height = 0.7
+        }
+    }
+
+    def Xform "wheel_middle_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 260.0
+        vector3f physics:diagonalInertia = (68, 38, 38)
+        double3 xformOp:translate = (-1.4, -0.100, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_right_tyre>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_right_rim>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.768
+            double height = 0.7
+        }
+    }
+
+    def Xform "wheel_rear_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 260.0
+        vector3f physics:diagonalInertia = (68, 38, 38)
+        double3 xformOp:translate = (1.4, 2.688, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_left_tyre>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_left_rim>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.768
+            double height = 0.7
+        }
+    }
+
+    def Xform "wheel_rear_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 260.0
+        vector3f physics:diagonalInertia = (68, 38, 38)
+        double3 xformOp:translate = (-1.4, 2.688, 0.768)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_right_tyre>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_right_rim>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.768
+            double height = 0.7
+        }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "steer_front_left"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/steer_front_left>
+            point3f physics:localPos0 = (1.4, -2.304, -0.1445)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -16
+            float physics:upperLimit = 16
+        }
+        def PhysicsRevoluteJoint "rev_front_left"
+        {
+            rel physics:body0 = </robot/steer_front_left>
+            rel physics:body1 = </robot/wheel_front_left>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+
+        def PhysicsRevoluteJoint "steer_front_right"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/steer_front_right>
+            point3f physics:localPos0 = (-1.4, -2.304, -0.1445)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -16
+            float physics:upperLimit = 16
+        }
+        def PhysicsRevoluteJoint "rev_front_right"
+        {
+            rel physics:body0 = </robot/steer_front_right>
+            rel physics:body1 = </robot/wheel_front_right>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+
+        def PhysicsRevoluteJoint "rev_middle_left"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/wheel_middle_left>
+            point3f physics:localPos0 = (1.4, -0.100, -0.1445)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+        def PhysicsRevoluteJoint "rev_middle_right"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/wheel_middle_right>
+            point3f physics:localPos0 = (-1.4, -0.100, -0.1445)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+
+        def PhysicsRevoluteJoint "steer_rear_left"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/steer_rear_left>
+            point3f physics:localPos0 = (1.4, 2.688, -0.1445)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -29
+            float physics:upperLimit = 29
+        }
+        def PhysicsRevoluteJoint "rev_rear_left"
+        {
+            rel physics:body0 = </robot/steer_rear_left>
+            rel physics:body1 = </robot/wheel_rear_left>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+
+        def PhysicsRevoluteJoint "steer_rear_right"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/steer_rear_right>
+            point3f physics:localPos0 = (-1.4, 2.688, -0.1445)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -29
+            float physics:upperLimit = 29
+        }
+        def PhysicsRevoluteJoint "rev_rear_right"
+        {
+            rel physics:body0 = </robot/steer_rear_right>
+            rel physics:body1 = </robot/wheel_rear_right>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+    }
+}
+
+def PhysicsScene "PhysicsScene"
+{
+    vector3f physics:gravityDirection = (0, 0, -1)
+    float physics:gravityMagnitude = 9.81
+}

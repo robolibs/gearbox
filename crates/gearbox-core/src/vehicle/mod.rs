@@ -31,11 +31,12 @@ pub use wheel::WheelSpec;
 pub struct VehicleId(pub u32);
 
 /// How the vehicle is driven.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DriveMode {
     /// Ackermann steering — `steer` rotates the wheels flagged
     /// `steered: true` to a common turn-centre angle. Standard car /
     /// tractor behaviour.
+    #[default]
     Ackermann,
     /// Differential drive — `steer` biases left-side vs right-side
     /// wheel *throttle* instead of a steering angle. Used for
@@ -48,9 +49,9 @@ pub enum DriveMode {
     ///   - `throttle` → force along the drone's local forward axis,
     ///   - `steer`    → force along the drone's local right axis,
     ///   - `lift`     → vertical force (in addition to a constant
-    ///                  `mass × g` hover force that cancels gravity),
+    ///     `mass × g` hover force that cancels gravity),
     ///   - `yaw`      → torque around world +Y.
-    /// Stabilising damping keeps the drone hover-steady.
+    ///     Stabilising damping keeps the drone hover-steady.
     Drone,
     /// 4-wheel independent steering (4WIS / omni). Every wheel's
     /// steering angle is computed per-tick so the combined wheel
@@ -58,12 +59,8 @@ pub enum DriveMode {
     ///   - `throttle` → forward/back body velocity,
     ///   - `steer`    → lateral (strafe) body velocity,
     ///   - `yaw`      → rotational body rate around +Y.
-    /// Used for gantry-style field robots like AGROINTELLI Robotti.
+    ///     Used for gantry-style field robots like AGROINTELLI Robotti.
     Omni,
-}
-
-impl Default for DriveMode {
-    fn default() -> Self { DriveMode::Ackermann }
 }
 
 /// A declarative vehicle: chassis box + list of raycast wheels + any

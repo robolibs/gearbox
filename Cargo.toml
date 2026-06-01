@@ -1,14 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/gearbox-core",
-    "crates/gearbox-physics",
-    "crates/gearbox-viz",
-    "crates/gearbox-editor",
     "crates/gearbox-api",
     "crates/gearbox-link",
+    "crates/gearbox-world",
     "bin/gearbox",
-    "bin/probe_usd",
 ]
 
 # Shared metadata. Each member inherits with `version.workspace = true`.
@@ -56,7 +52,16 @@ bevy = { version = "0.18", default-features = false, features = [
     "ktx2",
     "zstd_rust",
     "png",
+    "jpeg",
+    "bmp",
+    "tga",
+    "hdr",
+    "webp",
+    "tiff",
+    "bevy_post_process",
+    "morph",
     "x11",
+    "wayland",
     "reflect_auto_register",
 ] }
 bevy_egui = { version = "0.39", default-features = false, features = [
@@ -81,17 +86,10 @@ aeronet = "0.20"
 # target (headless sim = server; wasm renderer = client).
 aeronet_webtransport = { version = "0.20", default-features = false }
 
-# Internal: crate-to-crate path deps expressed once so members can just
-# write `gearbox-core.workspace = true`.
-gearbox-core    = { path = "crates/gearbox-core" }
-gearbox-physics = { path = "crates/gearbox-physics" }
-gearbox-viz     = { path = "crates/gearbox-viz" }
-gearbox-editor  = { path = "crates/gearbox-editor" }
 gearbox-api     = { path = "crates/gearbox-api" }
 gearbox-link    = { path = "crates/gearbox-link" }
 bevy_frost      = { git = "https://github.com/bresilla/bevy_frost", package = "bevy_frost" }
 bevy_glacial    = { git = "https://github.com/bresilla/bevy_glacial", rev = "eb67675" }
-ondrive         = { git = "https://codeberg.org/robolibs/ondrive.git" }
 # Pinned to a specific commit so a transitive update upstream
 # can't silently change scene-projection behaviour. Bump by
 # editing this `rev`.
@@ -99,12 +97,5 @@ ondrive         = { git = "https://codeberg.org/robolibs/ondrive.git" }
 # (`asset_path#variants:...`) — without it, `load_with_settings`
 # collapses every variant request onto a single handle and the
 # last load wins for every consumer.
-bevy_openusd    = { git = "https://github.com/bresilla/bevy_openusd", rev = "578dd430cd8f5c287cce1ef7ee54d81f52a583d9" }
-openusd         = { git = "https://github.com/mxpv/openusd", branch = "main" }
-
-# Force every transitive `datapod` (notably the one ondrive pulls
-# in via its own git ref) to resolve to the same local copy gearbox
-# uses. Without this cargo sees two different datapods and types
-# don't unify across the boundary.
-[patch."https://codeberg.org/robolibs/datapod.git"]
-datapod = { path = "../datapod" }
+usd_bevy        = { path = "../../other/OUSD/bevy_openusd/crates/usd_bevy" }
+openusd         = { git = "https://github.com/mxpv/openusd", rev = "fe92b73224c611831be244afac9cf7654b5ef51e" }

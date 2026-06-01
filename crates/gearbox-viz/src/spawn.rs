@@ -55,7 +55,7 @@ pub struct UsdAssetRoot(pub std::path::PathBuf);
 pub struct PendingUsdScene {
     pub asset_path: String,
     pub name: String,
-    pub handle: Option<Handle<bevy_openusd::UsdAsset>>,
+    pub handle: Option<Handle<usd_bevy::UsdAsset>>,
 }
 
 /// One pending USD-wheel installation. We can't act on it until the
@@ -132,7 +132,7 @@ pub struct UsdWheelDriver {
 /// Tracks which paths have already been logged in a `Local<HashSet>`
 /// so each entity only fires once.
 pub fn debug_log_new_usd_prims(
-    prims: Query<(&bevy_openusd::UsdPrimRef, &GlobalTransform), Added<bevy_openusd::UsdPrimRef>>,
+    prims: Query<(&usd_bevy::UsdPrimRef, &GlobalTransform), Added<usd_bevy::UsdPrimRef>>,
     mut seen: Local<std::collections::HashSet<String>>,
 ) {
     // Names that signal "vertical" or "front" so we can sanity-check
@@ -165,9 +165,16 @@ pub fn debug_log_new_usd_prims(
         bevy::log::info!(
             "USD-PRIM `{}` world: t=({:+.3}, {:+.3}, {:+.3}) rot=axis({:.3},{:.3},{:.3})·angle={:+.1}° scale=({:.3},{:.3},{:.3})",
             pr.path,
-            t.x, t.y, t.z,
-            axis.x, axis.y, axis.z, angle.to_degrees(),
-            s.x, s.y, s.z,
+            t.x,
+            t.y,
+            t.z,
+            axis.x,
+            axis.y,
+            axis.z,
+            angle.to_degrees(),
+            s.x,
+            s.y,
+            s.z,
         );
     }
 }
@@ -180,11 +187,7 @@ pub fn debug_log_new_usd_prims(
 /// True if `entity` is a descendant of `target` (inclusive — `entity
 /// == target` returns true). Walks the `ChildOf` chain up to a small
 /// depth limit so a malformed cycle can't hang the system.
-fn is_descendant_of(
-    mut entity: Entity,
-    target: Entity,
-    parents: &Query<&ChildOf>,
-) -> bool {
+fn is_descendant_of(mut entity: Entity, target: Entity, parents: &Query<&ChildOf>) -> bool {
     for _ in 0..64 {
         if entity == target {
             return true;
@@ -200,7 +203,7 @@ fn is_descendant_of(
 pub fn tag_usd_wheels_when_ready(
     mut commands: Commands,
     mut chassis_q: Query<(Entity, &mut PendingUsdWheelTags)>,
-    prims: Query<(Entity, &bevy_openusd::UsdPrimRef, &Transform)>,
+    prims: Query<(Entity, &usd_bevy::UsdPrimRef, &Transform)>,
     parents: Query<&ChildOf>,
 ) {
     for (chassis_entity, mut pending) in chassis_q.iter_mut() {
@@ -238,7 +241,9 @@ pub fn tag_usd_wheels_when_ready(
             false // drop — done
         });
         if pending.0.is_empty() {
-            commands.entity(chassis_entity).remove::<PendingUsdWheelTags>();
+            commands
+                .entity(chassis_entity)
+                .remove::<PendingUsdWheelTags>();
         }
     }
 }
@@ -270,7 +275,7 @@ pub fn drive_usd_wheels(
     mut frame: Local<u32>,
 ) {
     *frame = frame.wrapping_add(1);
-    let log_now = *frame % 60 == 0; // ~once per second at 60Hz
+    let log_now = (*frame).is_multiple_of(60); // ~once per second at 60Hz
     for (drv, mut tr) in q.iter_mut() {
         let spin = if drv.apply_spin {
             sim.0.wheel_spin_angle(drv.vehicle_id, drv.wheel_index) as f32
@@ -287,8 +292,13 @@ pub fn drive_usd_wheels(
             // so we can confirm rapier's wheel.rotation accumulates.
             bevy::log::info!(
                 "DRIVE veh={:?} wheel={} apply_spin={} apply_steer={} spin={:.3} steer={:.3} spin_axis={:?}",
-                drv.vehicle_id, drv.wheel_index, drv.apply_spin, drv.apply_steer,
-                spin, steer, drv.spin_axis,
+                drv.vehicle_id,
+                drv.wheel_index,
+                drv.apply_spin,
+                drv.apply_steer,
+                spin,
+                steer,
+                drv.spin_axis,
             );
         }
         let r_steer = Quat::from_axis_angle(drv.steer_axis, steer);
@@ -304,7 +314,7 @@ pub fn drive_usd_wheels(
 pub fn instantiate_pending_usd_scenes(
     mut commands: Commands,
     asset_server: Res<bevy::asset::AssetServer>,
-    usd_assets: Res<bevy::asset::Assets<bevy_openusd::UsdAsset>>,
+    usd_assets: Res<bevy::asset::Assets<usd_bevy::UsdAsset>>,
     asset_root: Option<Res<UsdAssetRoot>>,
     mut pending: Query<(Entity, &mut PendingUsdScene)>,
 ) {
@@ -329,16 +339,17 @@ pub fn instantiate_pending_usd_scenes(
                 .unwrap_or_else(|| root.0.clone());
             bevy::log::info!(
                 "gearbox-viz: kicking off USD load `{}` for `{}` (search_paths=[{}])",
-                pend.asset_path, pend.name, asset_parent.display()
+                pend.asset_path,
+                pend.name,
+                asset_parent.display()
             );
             let parent_clone = asset_parent.clone();
-            let handle: Handle<bevy_openusd::UsdAsset> = asset_server
-                .load_with_settings(
-                    pend.asset_path.clone(),
-                    move |s: &mut bevy_openusd::UsdLoaderSettings| {
-                        s.search_paths = vec![parent_clone.clone()];
-                    },
-                );
+            let handle: Handle<usd_bevy::UsdAsset> = asset_server.load_with_settings(
+                pend.asset_path.clone(),
+                move |s: &mut usd_bevy::UsdLoaderSettings| {
+                    s.search_paths = vec![parent_clone.clone()];
+                },
+            );
             pend.handle = Some(handle);
             continue;
         }
@@ -351,7 +362,9 @@ pub fn instantiate_pending_usd_scenes(
                 let scene_handle = asset.scene.clone();
                 bevy::log::info!(
                     "gearbox-viz: USD scene for `{}` loaded — attaching SceneRoot (default_prim={:?}, layers={})",
-                    pend.name, asset.default_prim, asset.layer_count,
+                    pend.name,
+                    asset.default_prim,
+                    asset.layer_count,
                 );
                 commands
                     .entity(entity)
@@ -361,7 +374,8 @@ pub fn instantiate_pending_usd_scenes(
             Some(LoadState::Failed(err)) => {
                 bevy::log::error!(
                     "gearbox-viz: USD asset load FAILED for `{}`: {}",
-                    pend.name, err
+                    pend.name,
+                    err
                 );
                 commands.entity(entity).remove::<PendingUsdScene>();
             }
@@ -376,11 +390,7 @@ pub fn instantiate_pending_usd_scenes(
 /// anything that spawns parts or chassis.
 fn mesh_for(source: MeshSource, size: Size, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
     match source {
-        MeshSource::Box => meshes.add(Cuboid::new(
-            size.x as f32,
-            size.y as f32,
-            size.z as f32,
-        )),
+        MeshSource::Box => meshes.add(Cuboid::new(size.x as f32, size.y as f32, size.z as f32)),
         MeshSource::Cylinder => meshes.add(
             Cylinder::new((size.x as f32) * 0.5, size.y as f32)
                 .mesh()
@@ -395,7 +405,7 @@ pub fn spawn_vehicle_visuals(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
-    asset_server: &bevy::asset::AssetServer,
+    _asset_server: &bevy::asset::AssetServer,
     id: VehicleId,
     spec: &VehicleSpec,
 ) -> Entity {
@@ -453,7 +463,15 @@ pub fn spawn_vehicle_visuals(
         };
         bevy::log::info!(
             "gearbox-viz: queuing USD asset `{}` for `{}` (scene_offset=({:.3}, {:.3}, {:.3}), scene_rotation=(w={:.3}, x={:.3}, y={:.3}, z={:.3}))",
-            bare, spec.name, offset.x, offset.y, offset.z, rot.w, rot.x, rot.y, rot.z,
+            bare,
+            spec.name,
+            offset.x,
+            offset.y,
+            offset.z,
+            rot.w,
+            rot.x,
+            rot.y,
+            rot.z,
         );
         commands
             .spawn((
@@ -481,15 +499,15 @@ pub fn spawn_vehicle_visuals(
         // become `spin_axis` (axle) and `steer_axis` (kingpin) in
         // [`UsdWheelDriver`].
         let bevy_flip = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-        let scene_rot_q = Quat::from_xyzw(
-            rot.x as f32, rot.y as f32, rot.z as f32, rot.w as f32,
-        );
+        let scene_rot_q = Quat::from_xyzw(rot.x as f32, rot.y as f32, rot.z as f32, rot.w as f32);
         let composite_inv = (scene_rot_q * bevy_flip).inverse();
         let spin_axis = (composite_inv * Vec3::X).normalize();
         let steer_axis = (composite_inv * Vec3::Y).normalize();
         bevy::log::info!(
             "gearbox-viz: USD wheel axes for `{}`: spin={:?} steer={:?}",
-            spec.name, spin_axis, steer_axis,
+            spec.name,
+            spin_axis,
+            steer_axis,
         );
         let mut wheel_tags: Vec<PendingUsdWheelTag> = Vec::new();
         for (idx, w) in spec.wheels.iter().enumerate() {
@@ -524,7 +542,9 @@ pub fn spawn_vehicle_visuals(
             }
         }
         if !wheel_tags.is_empty() {
-            commands.entity(root).insert(PendingUsdWheelTags(wheel_tags));
+            commands
+                .entity(root)
+                .insert(PendingUsdWheelTags(wheel_tags));
         }
     } else {
         bevy::log::info!("gearbox-viz: spawning `{}` without USD asset", spec.name);
@@ -591,7 +611,10 @@ pub fn spawn_vehicle_visuals(
         // 2-D primitive in the XY plane (normal +Z); rotate ±90° around
         // X so the normal faces the axle direction (local +Y / -Y).
         let cap_mesh = meshes.add(
-            Circle::new(wheel.radius as f32).mesh().resolution(32).build(),
+            Circle::new(wheel.radius as f32)
+                .mesh()
+                .resolution(32)
+                .build(),
         );
         commands
             .spawn((
@@ -670,9 +693,7 @@ pub fn spawn_height_for(spec: &VehicleSpec) -> f64 {
     let chassis_bottom = -spec.chassis.size.y * 0.5;
     let mut lowest = chassis_bottom;
     for w in &spec.wheels {
-        let wheel_bottom = w.chassis_connection.y
-            - w.suspension_rest_length as f64
-            - w.radius as f64;
+        let wheel_bottom = w.chassis_connection.y - w.suspension_rest_length - w.radius;
         if wheel_bottom < lowest {
             lowest = wheel_bottom;
         }
@@ -697,10 +718,10 @@ pub fn spawn_height_for(spec: &VehicleSpec) -> f64 {
 fn make_tyre_tread_texture() -> Image {
     const W: u32 = 64;
     const H: u32 = 64;
-    const CHEVRON_SLOPE: f32 = 0.55;   // sharper V — visible bend from apex to edges
+    const CHEVRON_SLOPE: f32 = 0.55; // sharper V — visible bend from apex to edges
     const STRIPE_FRACTION: f32 = 0.40; // chunky tread block
 
-    let base:  [u8; 4] = [18, 18, 20, 255];
+    let base: [u8; 4] = [18, 18, 20, 255];
     let tread: [u8; 4] = [70, 70, 72, 255];
 
     let mut data = Vec::with_capacity((W * H * 4) as usize);
@@ -710,12 +731,20 @@ fn make_tyre_tread_texture() -> Image {
         for up in 0..W {
             let fu = up as f32 / W as f32;
             let u_shifted = (fu + dv * CHEVRON_SLOPE).rem_euclid(1.0);
-            let c = if u_shifted < STRIPE_FRACTION { tread } else { base };
+            let c = if u_shifted < STRIPE_FRACTION {
+                tread
+            } else {
+                base
+            };
             data.extend_from_slice(&c);
         }
     }
     let mut img = Image::new(
-        Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+        Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8Unorm,
@@ -745,7 +774,7 @@ pub fn spawn_vehicle_ghost(
     let alpha = 0.45;
     let [r, g, b] = spec.chassis.color;
     let chassis_color = Color::srgba(r, g, b, alpha);
-    let tread_tex     = images.add(make_tyre_tread_texture());
+    let tread_tex = images.add(make_tyre_tread_texture());
 
     let mut root_cmd = commands.spawn((
         Name::new(format!("{}-ghost", spec.name)),
@@ -793,9 +822,12 @@ pub fn spawn_vehicle_ghost(
                 .build(),
         );
         let cap_mesh = meshes.add(
-            Circle::new(wheel.radius as f32).mesh().resolution(32).build(),
+            Circle::new(wheel.radius as f32)
+                .mesh()
+                .resolution(32)
+                .build(),
         );
-        let wy = (wheel.chassis_connection.y - wheel.suspension_rest_length as f64) as f32;
+        let wy = (wheel.chassis_connection.y - wheel.suspension_rest_length) as f32;
         let wheel_parent = commands
             .spawn((
                 Transform::from_xyz(

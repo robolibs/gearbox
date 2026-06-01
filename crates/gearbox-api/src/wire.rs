@@ -7,7 +7,7 @@
 //! scene-agnostic and useful regardless of how the scene graph is
 //! authored — currently just the sim clock.
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Sim clock state. Published periodically from whichever process
 /// owns the `Sim`.

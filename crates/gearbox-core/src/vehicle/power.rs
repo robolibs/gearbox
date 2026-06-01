@@ -171,12 +171,7 @@ impl PowerSystem {
             return Some(primary);
         }
         // Spill over to the remaining sources in their natural order.
-        for i in 0..self.sources.len() {
-            if i != primary && !self.sources[i].is_depleted() {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.sources.len()).find(|&i| i != primary && !self.sources[i].is_depleted())
     }
 
     /// Refill every source back to its capacity — "refuel/repower".

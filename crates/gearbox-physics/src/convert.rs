@@ -5,7 +5,7 @@
 //! internally; with rapier now in f64 most of these calls are pure
 //! type-shuffling without precision loss.
 
-use datapod::spatial::{Point, Pose, Quaternion, Size, Velocity};
+use datapod::{Point, Pose, Quaternion, Size, Velocity};
 use rapier3d::prelude::{Pose as RPose, Rot3, Vec3};
 
 // -------- datapod → rapier --------
@@ -50,7 +50,11 @@ pub fn vec3_to_point(v: Vec3) -> Point {
 
 #[inline]
 pub fn vec3_to_velocity(v: Vec3) -> Velocity {
-    Velocity { vx: v.x, vy: v.y, vz: v.z }
+    Velocity {
+        vx: v.x,
+        vy: v.y,
+        vz: v.z,
+    }
 }
 
 #[inline]

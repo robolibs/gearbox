@@ -25,9 +25,9 @@ pub use vehicle::VehicleState;
 // `gearbox::*` — downstream code can continue to speak one name for
 // "the simulator" without juggling both crates.
 pub use gearbox_core::{
-    control, parts_lib, planet, presets, vehicle as vehicle_core, ChassisSpec, Container,
-    ControlInput, DriveMode, MeshSource, PartKind, PartSpec, PowerKind, PowerSource, PowerSystem,
-    VehicleBuilder, VehicleId, VehicleSpec, WheelSpec,
+    ChassisSpec, Container, ControlInput, DriveMode, MeshSource, PartKind, PartSpec, PowerKind,
+    PowerSource, PowerSystem, VehicleBuilder, VehicleId, VehicleSpec, WheelSpec, control,
+    parts_lib, planet, presets, vehicle as vehicle_core,
 };
 
 pub use datapod;

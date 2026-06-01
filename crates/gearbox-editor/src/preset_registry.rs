@@ -10,7 +10,7 @@
 
 use bevy::prelude::*;
 
-use gearbox_physics::presets::{all_presets, PresetEntry};
+use gearbox_physics::presets::{PresetEntry, all_presets};
 
 /// Editor-visible list of spawnable presets.
 #[derive(Resource, Default, Clone)]

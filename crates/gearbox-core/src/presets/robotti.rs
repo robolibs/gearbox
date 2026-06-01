@@ -82,13 +82,9 @@ pub fn robotti() -> VehicleSpec {
     let radius = 0.40;
     let width = 0.20 * 1.30; // 30% thicker tyres
 
+    // Suspension rest length only — spring stiffness/damping are
+    // auto-derived from chassis mass in `gearbox-physics`.
     let rest = 0.08;
-    // Scaled for 428 kg / 4 wheels ≈ 107 kg per wheel. Slightly stiff
-    // + well-damped so the body doesn't pogo when you press a key.
-    let stiffness = 140.0;
-    let damping = 14.0;
-    let friction = 18.0;
-    let max_force = 15_000.0;
 
     // Wheel positions taken from the robotti USD prim hierarchy
     // after the `rot_y(-π/2) * rot_x(-π/2)` orientation fix:
@@ -104,17 +100,16 @@ pub fn robotti() -> VehicleSpec {
     // outer face (+X for right-side wheels, −X for left). Magnitude =
     // half-tyre-width + small visual gap. The wheel's visual hub
     // swings around this offset when steering.
-    let kingpin_mag = width as f64 * 0.5 + 0.02;
+    let kingpin_mag = width * 0.5 + 0.02;
 
     let make = |x: f64, z: f64, wheel_prim: &'static str, knuckle_prim: &'static str| WheelSpec {
-        chassis_connection: Point::new(x, conn_y as f64, z),
+        chassis_connection: Point::new(x, conn_y, z),
         suspension_dir: Point::new(0.0, -1.0, 0.0),
         axle_dir: Point::new(-1.0, 0.0, 0.0),
         suspension_rest_length: rest,
-        suspension_stiffness: stiffness,
-        suspension_damping: damping,
-        max_suspension_force: max_force,
-        friction_slip: friction,
+        mass: 35.0,
+        hub_mass: 4.0,
+        tire_friction: 1.0,
         radius,
         width,
         driven: true,
@@ -135,14 +130,30 @@ pub fn robotti() -> VehicleSpec {
 
     VehicleBuilder::new("robotti", chassis)
         .max_speed(2.5)
-        .wheel(make( wheel_x, front_z,
-            "/robotti/base_link/link_37/link_40", "/robotti/base_link/link_37")) // left front
-        .wheel(make(-wheel_x, front_z,
-            "/robotti/base_link/link_27/link_30", "/robotti/base_link/link_27")) // right front
-        .wheel(make( wheel_x, rear_z,
-            "/robotti/base_link/link_41/link_44", "/robotti/base_link/link_41")) // left rear
-        .wheel(make(-wheel_x, rear_z,
-            "/robotti/base_link/link_31/link_34", "/robotti/base_link/link_31")) // right rear
+        .wheel(make(
+            wheel_x,
+            front_z,
+            "/robotti/base_link/link_37/link_40",
+            "/robotti/base_link/link_37",
+        )) // left front
+        .wheel(make(
+            -wheel_x,
+            front_z,
+            "/robotti/base_link/link_27/link_30",
+            "/robotti/base_link/link_27",
+        )) // right front
+        .wheel(make(
+            wheel_x,
+            rear_z,
+            "/robotti/base_link/link_41/link_44",
+            "/robotti/base_link/link_41",
+        )) // left rear
+        .wheel(make(
+            -wheel_x,
+            rear_z,
+            "/robotti/base_link/link_31/link_34",
+            "/robotti/base_link/link_31",
+        )) // right rear
         // No `.part(...)` calls — the USD scene supplies the visible
         // gantry frame, struts, sensor box, etc.
         .drive_mode(DriveMode::Omni)

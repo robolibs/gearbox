@@ -15,11 +15,11 @@ use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
 use bevy_frost::{
-    draw_assembly, RibbonCluster, RibbonDrag, RibbonGlyph, RibbonItem, RibbonOpen, RibbonPlacement,
+    RibbonCluster, RibbonDrag, RibbonGlyph, RibbonItem, RibbonOpen, RibbonPlacement, draw_assembly,
 };
 use gearbox_viz::{SimClock, SimResetRequest, SimSpeed};
 
-use super::dock_ribbons::{RIBBONS, RIBBON_TRANSPORT};
+use super::dock_ribbons::{RIBBON_TRANSPORT, RIBBONS};
 use super::style::AccentColor;
 
 const ID_PLAY: &str = "transport_play";

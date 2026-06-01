@@ -1,6 +1,6 @@
 [package]
 name = "gearbox"
-description = "gearbox — modular Rust robot/vehicle simulator editor binary."
+description = "gearbox — clean-slate USD simulator. Multi-USD loading, click-to-select, transform-gizmo placement, planet world, frost UI. No legacy editor / viz / api crates."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,14 +9,44 @@ license.workspace = true
 name = "gearbox"
 path = "src/main.rs"
 
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+python = ["dep:pyo3"]
+
 [dependencies]
-gearbox-core.workspace = true
-gearbox-physics.workspace = true
-gearbox-viz.workspace = true
-gearbox-editor.workspace = true
-gearbox-api.workspace = true
-datapod.workspace = true
 bevy.workspace = true
 bevy_egui.workspace = true
-bevy_glacial.workspace = true
-bevy_openusd.workspace = true
+
+# UI/control helpers pinned directly for this USD-only binary.
+bevy_frost = { git = "https://github.com/bresilla/bevy_frost", branch = "develop", package = "bevy_frost" }
+bevy_glacial = { git = "https://github.com/bresilla/bevy_glacial", branch = "main" }
+
+# USD asset pipeline + rapier physics + animation playback. These
+# are the bevy_openusd workspace's plugins; the gearbox binary just
+# wires them together with a minimal world / UI on top.
+usd_bevy.workspace = true
+
+# Schema crate — the viewer's Cameras panel matches against
+# `usd_schema::camera::Projection` to label authored cameras with
+# `persp` / `ortho`. usd_bevy does not re-export this enum, so the
+# binary depends on the schema crate directly.
+usd_schema = { path = "../../../../other/OUSD/bevy_openusd/crates/usd_schema" }
+openusd.workspace = true
+zenoh.workspace = true
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
+gearbox-api = { workspace = true, features = ["bevy"] }
+
+# rapier3d-f64 — needed to spawn the static ground collider directly
+# into `usd_bevy::physics::PhysicsWorld`.
+rapier3d.workspace = true
+
+# Native file picker for the "📂 Load USD…" button.
+rfd = "0.15"
+pyo3 = { version = "0.23", optional = true, features = [
+    "abi3-py39",
+    "extension-module",
+] }

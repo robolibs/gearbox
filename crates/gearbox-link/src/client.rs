@@ -10,13 +10,13 @@
 //! which we don't populate yet. That's a follow-up for the wasm
 //! renderer build; the message-layer plumbing here doesn't care.
 
+use aeronet::io::Session;
 use aeronet_webtransport::client::{ClientConfig, WebTransportClient, WebTransportClientPlugin};
 use aeronet_webtransport::session::WebTransportIo;
-use aeronet::io::Session;
 use bevy::prelude::*;
 use bytes::Bytes;
 
-use crate::wire::{decode, encode, RendererToSim, SimToRenderer};
+use crate::wire::{RendererToSim, SimToRenderer, decode, encode};
 
 /// URL of the simulator's WebTransport endpoint.
 #[derive(Resource, Debug, Clone)]
@@ -27,7 +27,9 @@ pub struct LinkClientConfig {
 impl Default for LinkClientConfig {
     fn default() -> Self {
         // Matches `LinkServerConfig`'s default bind port.
-        Self { server_url: "https://127.0.0.1:7824".into() }
+        Self {
+            server_url: "https://127.0.0.1:7824".into(),
+        }
     }
 }
 
@@ -64,7 +66,10 @@ fn connect_to_server(mut commands: Commands, cfg: Res<LinkClientConfig>) {
     let client_config = build_client_config();
     commands
         .spawn((Name::new("LinkClient"),))
-        .queue(WebTransportClient::connect(client_config, cfg.server_url.clone()));
+        .queue(WebTransportClient::connect(
+            client_config,
+            cfg.server_url.clone(),
+        ));
     info!("link-client: dialing {}", cfg.server_url);
 }
 

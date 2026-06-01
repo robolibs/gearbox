@@ -55,9 +55,13 @@ impl EditorUiState {
     pub fn load() -> Self {
         let mut out = Self::default();
         let Some(path) = state_path() else { return out };
-        let Ok(text) = fs::read_to_string(&path) else { return out };
+        let Ok(text) = fs::read_to_string(&path) else {
+            return out;
+        };
         for line in text.lines() {
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             match k.trim() {
                 // Back-compat: old "left=workspace", "right=inspector".
                 "left" | "left_active" => out.left_active = parse_menu(v.trim()),
@@ -70,7 +74,9 @@ impl EditorUiState {
 
     pub fn save(&self) {
         let Some(path) = state_path() else { return };
-        let Ok(mut f) = fs::File::create(&path) else { return };
+        let Ok(mut f) = fs::File::create(&path) else {
+            return;
+        };
         let _ = writeln!(f, "left_active={}", fmt_menu(&self.left_active));
         let _ = writeln!(f, "right_active={}", fmt_menu(&self.right_active));
     }
@@ -103,10 +109,7 @@ fn fmt_menu(m: &Option<String>) -> &str {
 
 /// Flush state to disk whenever `SideActive` changes. Simple &
 /// robust — no app-exit hook needed.
-pub fn save_state_on_change(
-    active: Res<SideActive>,
-    mut state: ResMut<EditorUiState>,
-) {
+pub fn save_state_on_change(active: Res<SideActive>, mut state: ResMut<EditorUiState>) {
     let mut changed = false;
     if active.left != state.left_active {
         state.left_active = active.left.clone();

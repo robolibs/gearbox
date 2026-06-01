@@ -22,8 +22,7 @@ impl DriveController for DifferentialController {
 
         // Power gate: zero drive when out of battery.
         if !ctx.spec.power.is_engine_live() {
-            for idx in 0..ctx.wheels.len() {
-                let spec = &specs[idx];
+            for (idx, spec) in specs.iter().enumerate().take(ctx.wheels.len()) {
                 if let Some(mut w) = ctx.wheels.get_mut(idx) {
                     w.set_engine_force(0.0);
                     w.set_brake(ctrl.brake * spec.max_brake * frame.brake_gate);
@@ -41,9 +40,10 @@ impl DriveController for DifferentialController {
         let left_cmd = t + s;
         let right_cmd = t - s;
 
-        for idx in 0..ctx.wheels.len() {
-            let spec = &specs[idx];
-            let Some(mut w) = ctx.wheels.get_mut(idx) else { continue };
+        for (idx, spec) in specs.iter().enumerate().take(ctx.wheels.len()) {
+            let Some(mut w) = ctx.wheels.get_mut(idx) else {
+                continue;
+            };
             w.set_engine_force(if spec.driven {
                 let cmd = if spec.chassis_connection.x < 0.0 {
                     left_cmd

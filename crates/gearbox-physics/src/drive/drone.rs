@@ -17,9 +17,9 @@
 //!     visual tilt.
 //!   - `steer`    (A/D) → strafe force + bank-right/left tilt.
 //!   - `lift`     (Z/X) → extra vertical force on top of a constant
-//!                        hover force that cancels gravity.
+//!     hover force that cancels gravity.
 //!   - `yaw`      (Q/E) → yaw torque around world +Y. Positive `yaw`
-//!                        (Q) = turn LEFT.
+//!     (Q) = turn LEFT.
 
 use rapier3d::prelude::Vec3;
 
