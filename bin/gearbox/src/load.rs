@@ -305,6 +305,8 @@ fn drain_load_queue(
             label,
             Transform::from_translation(mount),
             None,
+            None,
+            Vec::new(),
             false,
         );
     }
@@ -334,6 +336,7 @@ fn drain_runtime_usd_loader(
             info!("gearbox-load: pausing physics until new machine USD is aligned to terrain");
         }
         let path = resolve_spawn_path(&req.usd_path);
+        let (load_path, source_path, extra_search_paths) = hotload_runtime_usd_path(&path);
         let label = req.label.clone().unwrap_or_else(|| {
             path.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -348,10 +351,12 @@ fn drain_runtime_usd_loader(
         queue_usd_load(
             &asset_server,
             &mut inflight,
-            path.clone(),
+            load_path,
             label.clone(),
             transform,
             req.namespace.clone(),
+            Some(source_path.clone()),
+            extra_search_paths,
             true,
         );
         api.publish_loaded(&RuntimeUsdLoadedWire {
@@ -373,13 +378,21 @@ fn queue_usd_load(
     label: String,
     transform: Transform,
     namespace: Option<String>,
+    source_path: Option<PathBuf>,
+    extra_search_paths: Vec<PathBuf>,
     activate_physics_after_sync: bool,
 ) {
     let parent = path
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let search = vec![parent];
+    let mut search = vec![parent];
+    for extra in extra_search_paths {
+        if !search.iter().any(|existing| existing == &extra) {
+            search.push(extra);
+        }
+    }
+    let source_path = source_path.unwrap_or_else(|| path.clone());
     let load_path = path.to_string_lossy().into_owned();
     let handle: Handle<UsdAsset> = asset_server.load_with_settings::<UsdAsset, _>(
         load_path,
@@ -394,13 +407,74 @@ fn queue_usd_load(
     );
     inflight.0.push(InflightLoad {
         handle,
-        path,
+        path: source_path,
         label,
         transform,
         namespace,
         activate_physics_after_sync,
         spawned: false,
     });
+}
+
+fn hotload_runtime_usd_path(path: &Path) -> (PathBuf, PathBuf, Vec<PathBuf>) {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return (
+            path.to_path_buf(),
+            path.to_path_buf(),
+            default_search_paths(path),
+        );
+    };
+    if !matches!(ext.to_ascii_lowercase().as_str(), "usd" | "usda" | "usdc") {
+        return (
+            path.to_path_buf(),
+            path.to_path_buf(),
+            default_search_paths(path),
+        );
+    }
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("runtime"));
+    let hotload_dir = std::env::temp_dir().join("gearbox_usd_hotload");
+    let hotload_path = hotload_dir.join(format!("{stem}_{}_{}.{}", std::process::id(), stamp, ext));
+
+    if let Err(err) = std::fs::create_dir_all(&hotload_dir) {
+        warn!(
+            "gearbox-load: failed to create hotload dir {}; using cached USD path: {err}",
+            hotload_dir.display()
+        );
+        return (
+            path.to_path_buf(),
+            path.to_path_buf(),
+            default_search_paths(path),
+        );
+    }
+    if let Err(err) = std::fs::copy(path, &hotload_path) {
+        warn!(
+            "gearbox-load: failed to hotload-copy {}; using cached USD path: {err}",
+            path.display()
+        );
+        return (
+            path.to_path_buf(),
+            path.to_path_buf(),
+            default_search_paths(path),
+        );
+    }
+
+    let mut search = default_search_paths(path);
+    search.push(hotload_dir);
+    (hotload_path, path.to_path_buf(), search)
+}
+
+fn default_search_paths(path: &Path) -> Vec<PathBuf> {
+    path.parent()
+        .map(|p| vec![p.to_path_buf()])
+        .unwrap_or_default()
 }
 
 fn snap_grounded_machine_to_terrain(transform: &mut Transform) {

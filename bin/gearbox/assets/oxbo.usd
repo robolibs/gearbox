@@ -60,6 +60,9 @@ def Xform "robot" (
     float gearbox:controller:drive:rearTrackWidth = 2.8
     float gearbox:controller:drive:maxSteerDeg = 25
     token gearbox:controller:drive:steeringGeometry = "six_wheel_ackermann"
+    float gearbox:controller:drive:frontSteerMultiplier = 0.56
+    float gearbox:controller:drive:middleSteerMultiplier = 0
+    float gearbox:controller:drive:rearSteerMultiplier = -1
     token[] gearbox:controller:drive:usesRoles = [
         "poweredWheelJoints",
         "passiveWheelJoints",

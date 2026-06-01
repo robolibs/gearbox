@@ -31,6 +31,8 @@ OXBO_USD_PATH = "bin/gearbox/assets/oxbo.usd"
 NAMESPACE = "oxbo"
 TICK_DT = 0.10
 GOAL_TOLERANCE_M = 3.0
+WAYPOINT_MARKER_Y = 0.35
+WAYPOINT_MARKER_CLEAR_COUNT = 64
 
 DEFAULT_POINTS: list[tuple[float, float]] = [
     (0.0, 42.0),
@@ -65,6 +67,24 @@ def put_cbor(session: zenoh.Session, key: str, payload: dict) -> None:
 
 def clear_sim(session: zenoh.Session) -> None:
     put_cbor(session, "gearbox/sim/clear", {"pause_clock": False})
+
+
+def delete_waypoint_markers(session: zenoh.Session) -> None:
+    for i in range(WAYPOINT_MARKER_CLEAR_COUNT):
+        put_cbor(session, f"gearbox/usd/mark/oxbo_waypoint_{i}/delete", {})
+
+
+def publish_waypoint_markers(
+    session: zenoh.Session,
+    points: list[tuple[float, float]],
+) -> None:
+    delete_waypoint_markers(session)
+    for i, (x, z) in enumerate(points[:WAYPOINT_MARKER_CLEAR_COUNT]):
+        put_cbor(
+            session,
+            f"gearbox/usd/mark/oxbo_waypoint_{i}/{x:.3f}/{WAYPOINT_MARKER_Y:.3f}/{z:.3f}",
+            {},
+        )
 
 
 @dataclass
@@ -105,6 +125,10 @@ class PoseTracker:
                 heading_rad=self.pose.heading_rad,
                 seen=self.pose.seen,
             )
+
+    def clear_seen(self) -> None:
+        with self._lock:
+            self.pose.seen = False
 
     def close(self) -> None:
         del self._sub
@@ -203,14 +227,13 @@ def follow_points(session: zenoh.Session, tracker: PoseTracker, points: list[tup
             heading_err = wrap_pi(target_heading - pose.heading_rad)
             abs_err = abs(heading_err)
 
-            # Keep this boring and robust: slow down hard for big heading
-            # errors, but keep rolling so Ackermann steering has forward
-            # motion to work with.
-            speed = clamp(dist * 0.18, 0.45, 2.4)
+            # Keep rolling while turning. Ackermann/raycast vehicles need
+            # forward motion; crawling at 0.45 m/s makes point turns look stuck.
+            speed = clamp(dist * 0.18, 0.9, 2.4)
             if abs_err > math.radians(75.0):
-                speed = 0.45
+                speed = 1.0
             elif abs_err > math.radians(35.0):
-                speed = min(speed, 1.0)
+                speed = min(speed, 1.35)
 
             yaw_rate = clamp(1.15 * heading_err, -0.85, 0.85)
             publish_cmd(session, speed, yaw_rate)
@@ -229,11 +252,13 @@ def main() -> None:
     time.sleep(0.2)
 
     clear_sim(session)
+    tracker.clear_seen()
     time.sleep(0.3)
     load_flatland(session)
-    if not wait_for_pose(tracker, 1.0):
-        print(f"no `{NAMESPACE}` state yet — spawning {OXBO_USD_PATH}")
-        load_oxbo(session)
+    publish_waypoint_markers(session, points)
+    print(f"spawning fresh {OXBO_USD_PATH}")
+    load_oxbo(session)
+    tracker.clear_seen()
     if not wait_for_pose(tracker, 8.0):
         raise SystemExit(
             f"no state from machine namespace `{NAMESPACE}`. Is Gearbox running?"

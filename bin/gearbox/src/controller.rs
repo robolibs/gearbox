@@ -368,6 +368,9 @@ pub struct ControllerSpec {
     pub rear_track_width: Option<f32>,
     pub max_steer_deg: Option<f32>,
     pub steering_geometry: Option<String>,
+    pub front_steer_multiplier: Option<f32>,
+    pub middle_steer_multiplier: Option<f32>,
+    pub rear_steer_multiplier: Option<f32>,
     pub uses_roles: Vec<String>,
     pub executable: Option<String>,
     pub args: Vec<String>,
@@ -659,6 +662,9 @@ fn append_isaac_compat_machines(
                 rear_track_width: None,
                 max_steer_deg: Some(45.0),
                 steering_geometry: Some("ackermann".to_string()),
+                front_steer_multiplier: None,
+                middle_steer_multiplier: None,
+                rear_steer_multiplier: None,
                 uses_roles: vec![
                     "poweredWheelJoints".to_string(),
                     "steeringJoints".to_string(),
@@ -1707,10 +1713,6 @@ fn raycast_vehicle_wheel_specs_for_controller(
     };
 
     let powered_paths = powered_wheel_joint_paths(machine, controller);
-    let geometry = controller
-        .steering_geometry
-        .as_deref()
-        .unwrap_or("ackermann");
     let mut specs = Vec::new();
     for path in all_wheel_joint_paths(machine, controller) {
         let Some(pair) = joint_pair(scene_root, &path, joints, parents, physics) else {
@@ -1727,7 +1729,7 @@ fn raycast_vehicle_wheel_specs_for_controller(
             .unwrap_or(wheel_radius_fallback_m);
         let world_offset = wheel_body.translation() - chassis_body.translation();
         let local_center = chassis_body.rotation().inverse() * world_offset;
-        let steering_multiplier = steering_multiplier_for_wheel_path(&path, machine, geometry);
+        let steering_multiplier = steering_multiplier_for_wheel_path(&path, machine, controller);
         specs.push(RaycastVehicleWheelSpec {
             chassis_connection: Vector::new(
                 local_center.x,
@@ -1795,7 +1797,7 @@ fn push_unique_string(out: &mut Vec<String>, value: &str) {
 fn steering_multiplier_for_wheel_path(
     wheel_path: &str,
     machine: &MachineInstanceSpec,
-    geometry: &str,
+    controller: &ControllerSpec,
 ) -> f64 {
     let steered = machine
         .steering_joints
@@ -1804,7 +1806,30 @@ fn steering_multiplier_for_wheel_path(
     if !steered {
         return 0.0;
     }
-    steering_multiplier_for_geometry(geometry, wheel_path)
+    steering_multiplier_for_controller(controller, wheel_path)
+}
+
+fn steering_multiplier_for_controller(controller: &ControllerSpec, path: &str) -> f64 {
+    let geometry = controller
+        .steering_geometry
+        .as_deref()
+        .unwrap_or("ackermann");
+    let default = steering_multiplier_for_geometry(geometry, path);
+    match axle_hint(path) {
+        Some(AxleHint::Front) => controller
+            .front_steer_multiplier
+            .map(f64::from)
+            .unwrap_or(default),
+        Some(AxleHint::Middle) => controller
+            .middle_steer_multiplier
+            .map(f64::from)
+            .unwrap_or(default),
+        Some(AxleHint::Rear) => controller
+            .rear_steer_multiplier
+            .map(f64::from)
+            .unwrap_or(default),
+        None => default,
+    }
 }
 
 fn steering_multiplier_for_geometry(geometry: &str, path: &str) -> f64 {
@@ -2059,11 +2084,11 @@ fn steering_joint_targets(
         let targets = all_role_steering_targets(
             scene_root,
             machine,
+            controller,
             joints,
             parents,
             physics,
             center_steer_rad,
-            geometry,
         );
         if !targets.is_empty() {
             return targets;
@@ -2133,18 +2158,18 @@ fn explicit_steering_targets(
 fn all_role_steering_targets(
     scene_root: Entity,
     machine: &MachineInstanceSpec,
+    controller: &ControllerSpec,
     joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
     parents: &Query<&ChildOf>,
     physics: &usd_bevy::physics::PhysicsWorld,
     center_position: f64,
-    geometry: &str,
 ) -> Vec<JointPositionTarget> {
     machine
         .steering_joints
         .iter()
         .filter_map(|path| {
             let pair = joint_pair(scene_root, path, joints, parents, physics)?;
-            let multiplier = steering_multiplier_for_geometry(geometry, path);
+            let multiplier = steering_multiplier_for_controller(controller, path);
             Some(JointPositionTarget {
                 pair,
                 position: center_position * multiplier,
@@ -2716,6 +2741,21 @@ fn discover_controllers(
                 wheel_radius: read_float(stage, prim, &(prefix.clone() + "wheelRadius")),
                 max_steer_deg: read_float(stage, prim, &(prefix.clone() + "maxSteerDeg")),
                 steering_geometry: read_token(stage, prim, &(prefix.clone() + "steeringGeometry")),
+                front_steer_multiplier: read_float(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "frontSteerMultiplier"),
+                ),
+                middle_steer_multiplier: read_float(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "middleSteerMultiplier"),
+                ),
+                rear_steer_multiplier: read_float(
+                    stage,
+                    prim,
+                    &(prefix.clone() + "rearSteerMultiplier"),
+                ),
                 uses_roles: read_token_array(stage, prim, &(prefix.clone() + "usesRoles")),
                 executable: read_string(stage, prim, &(prefix.clone() + "executable")),
                 args: read_string_array(stage, prim, &(prefix.clone() + "args")),
@@ -2949,6 +2989,9 @@ mod tests {
             drive.steering_geometry.as_deref(),
             Some("six_wheel_ackermann")
         );
+        assert_eq!(drive.front_steer_multiplier, Some(0.56));
+        assert_eq!(drive.middle_steer_multiplier, Some(0.0));
+        assert_eq!(drive.rear_steer_multiplier, Some(-1.0));
         assert_eq!(
             drive.uses_roles,
             vec![
@@ -3142,7 +3185,7 @@ def Xform "Leatherback" (
     }
 
     #[test]
-    fn six_wheel_ackermann_counter_steers_rear_at_half_angle() {
+    fn six_wheel_ackermann_defaults_counter_steer_rear_at_half_angle() {
         assert_eq!(
             steering_multiplier_for_geometry(
                 "six_wheel_ackermann",
