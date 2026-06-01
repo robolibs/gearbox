@@ -64,6 +64,14 @@ def clear_sim(session: zenoh.Session) -> None:
     put_cbor(session, "gearbox/sim/clear", {"pause_clock": False})
 
 
+def claim_machine_session(session: zenoh.Session, namespace: str, session_id: str) -> None:
+    put_cbor(
+        session,
+        f"gearbox/machines/{namespace}/session",
+        {"session_id": session_id},
+    )
+
+
 def bale_id_from(text: object) -> int | None:
     """Parse the integer bale index out of ``bale_<n>...`` runtime ids."""
     text = str(text or "")
@@ -334,6 +342,7 @@ def run_machine_mode(
     bales: list[tuple[float, float]],
     field: float,
 ) -> None:
+    session_id = f"bale_run_{namespace}_{int(time.time() * 1000)}"
     try:
         import ondrive  # noqa: PLC0415  (lazy: only needed when actually driving)
     except ModuleNotFoundError as exc:
@@ -364,6 +373,7 @@ def run_machine_mode(
         pose.seen = True
 
     state_sub = session.declare_subscriber(f"gearbox/machines/{namespace}/state", on_state)
+    claim_machine_session(session, namespace, session_id)
     print("clearing simulator")
     clear_sim(session)
     time.sleep(0.3)
@@ -386,6 +396,7 @@ def run_machine_mode(
                 f"{TRACTOR_USD_PATH}. Is the Gearbox app running and built with "
                 "the USD spawn API?"
             )
+    claim_machine_session(session, namespace, session_id)
 
     print(f"using USD machine namespace `{namespace}`")
     print(f"scattering {len(bales)} bales across {field:.0f} × {field:.0f} m field")
@@ -405,7 +416,11 @@ def run_machine_mode(
         put_cbor(
             session,
             cmd_topic,
-            {"linear": [float(speed), 0.0, 0.0], "angular": [0.0, 0.0, float(yaw_rate)]},
+            {
+                "linear": [float(speed), 0.0, 0.0],
+                "angular": [0.0, 0.0, float(yaw_rate)],
+                "session_id": session_id,
+            },
         )
 
     def mark_harvested(bale_id: int, reason: str) -> None:

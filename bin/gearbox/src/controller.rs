@@ -190,6 +190,7 @@ fn clear_controller_state_on_reset(
     mut commands: ResMut<ControllerCommands>,
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
+    api: Option<Res<MachineControllerApi>>,
 ) {
     let Some(mut messages) = messages else { return };
     if messages.read().count() == 0 {
@@ -200,13 +201,23 @@ fn clear_controller_state_on_reset(
     runtime.applied_cmd_vel.clear();
     runtime.logged_empty_tire_pairs.clear();
     states.states.clear();
+    if let Some(api) = api {
+        api.clear_pending_cmd_vel();
+    }
     info!("gearbox-control: cleared controller inventory/state");
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MachineCmdVelWire {
     pub linear: [f64; 3],
     pub angular: [f64; 3],
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineSessionWire {
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -223,7 +234,9 @@ pub struct MachineStateWire {
 pub struct MachineControllerApi {
     session: Arc<zenoh::Session>,
     subscribers: Mutex<HashMap<ControllerKey, zenoh::pubsub::Subscriber<()>>>,
+    session_subscribers: Mutex<HashMap<ControllerKey, zenoh::pubsub::Subscriber<()>>>,
     pending_cmd_vel: Arc<Mutex<HashMap<ControllerKey, MachineCmdVelWire>>>,
+    active_sessions: Arc<Mutex<HashMap<ControllerKey, String>>>,
 }
 
 impl MachineControllerApi {
@@ -232,11 +245,15 @@ impl MachineControllerApi {
         Ok(Self {
             session,
             subscribers: Mutex::new(HashMap::new()),
+            session_subscribers: Mutex::new(HashMap::new()),
             pending_cmd_vel: Arc::new(Mutex::new(HashMap::new())),
+            active_sessions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     fn register_cmd_vel(&self, key: ControllerKey, namespace: &str) {
+        self.register_session_claim(key.clone(), namespace);
+
         let Ok(mut subscribers) = self.subscribers.lock() else {
             return;
         };
@@ -246,6 +263,7 @@ impl MachineControllerApi {
         let topic = format!("gearbox/machines/{namespace}/cmd_vel");
         let topic_for_cb = topic.clone();
         let pending = Arc::clone(&self.pending_cmd_vel);
+        let active_sessions = Arc::clone(&self.active_sessions);
         let key_for_cb = key.clone();
         let result = self
             .session
@@ -254,12 +272,69 @@ impl MachineControllerApi {
                 let bytes = sample.payload().to_bytes();
                 match decode::<MachineCmdVelWire>(bytes.as_ref()) {
                     Ok(cmd) => {
+                        if !command_session_is_active(&active_sessions, &key_for_cb, &cmd) {
+                            return;
+                        }
                         if let Ok(mut q) = pending.lock() {
                             q.insert(key_for_cb.clone(), cmd);
                         }
                     }
                     Err(err) => {
                         eprintln!("gearbox-control: bad cmd_vel payload on {topic_for_cb}: {err}");
+                    }
+                }
+            })
+            .wait();
+        match result {
+            Ok(sub) => {
+                subscribers.insert(key, sub);
+            }
+            Err(err) => {
+                warn!("gearbox-control: failed to subscribe {topic}: {err}");
+            }
+        }
+    }
+
+    fn register_session_claim(&self, key: ControllerKey, namespace: &str) {
+        let Ok(mut subscribers) = self.session_subscribers.lock() else {
+            return;
+        };
+        if subscribers.contains_key(&key) {
+            return;
+        }
+        let topic = format!("gearbox/machines/{namespace}/session");
+        let topic_for_cb = topic.clone();
+        let pending = Arc::clone(&self.pending_cmd_vel);
+        let active_sessions = Arc::clone(&self.active_sessions);
+        let key_for_cb = key.clone();
+        let result = self
+            .session
+            .declare_subscriber(topic.clone())
+            .callback(move |sample| {
+                let bytes = sample.payload().to_bytes();
+                match decode::<MachineSessionWire>(bytes.as_ref()) {
+                    Ok(claim) if !claim.session_id.is_empty() => {
+                        if let Ok(mut sessions) = active_sessions.lock() {
+                            sessions.insert(key_for_cb.clone(), claim.session_id.clone());
+                        }
+                        if let Ok(mut q) = pending.lock() {
+                            q.insert(
+                                key_for_cb.clone(),
+                                MachineCmdVelWire {
+                                    linear: [0.0, 0.0, 0.0],
+                                    angular: [0.0, 0.0, 0.0],
+                                    session_id: Some(claim.session_id),
+                                },
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        eprintln!("gearbox-control: empty session_id payload on {topic_for_cb}");
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "gearbox-control: bad session claim payload on {topic_for_cb}: {err}"
+                        );
                     }
                 }
             })
@@ -281,6 +356,12 @@ impl MachineControllerApi {
             .unwrap_or_default()
     }
 
+    fn clear_pending_cmd_vel(&self) {
+        if let Ok(mut q) = self.pending_cmd_vel.lock() {
+            q.clear();
+        }
+    }
+
     fn publish_state(&self, namespace: &str, state: &MachineStateWire) {
         let Ok(bytes) = encode(state) else {
             return;
@@ -289,6 +370,27 @@ impl MachineControllerApi {
         if let Err(err) = self.session.put(topic.clone(), bytes).wait() {
             warn!("gearbox-control: failed to publish {topic}: {err}");
         }
+    }
+}
+
+fn command_session_is_active(
+    active_sessions: &Mutex<HashMap<ControllerKey, String>>,
+    key: &ControllerKey,
+    cmd: &MachineCmdVelWire,
+) -> bool {
+    let Ok(mut sessions) = active_sessions.lock() else {
+        return false;
+    };
+    match cmd.session_id.as_deref() {
+        Some(session_id) if session_id.is_empty() => false,
+        Some(session_id) => match sessions.get(key) {
+            Some(active_session) => active_session == session_id,
+            None => {
+                sessions.insert(key.clone(), session_id.to_string());
+                true
+            }
+        },
+        None => !sessions.contains_key(key),
     }
 }
 
@@ -2562,7 +2664,9 @@ fn visual_wheel_side_ground_speed(
     let body = physics.bodies.get(chassis)?;
     let forward = body_forward_vector(body)?;
     let forward_speed = body.linvel().dot(forward);
-    let yaw_rate = body.angvel().dot(body.rotation() * Vector::new(0.0, 0.0, 1.0));
+    let yaw_rate = body
+        .angvel()
+        .dot(body.rotation() * Vector::new(0.0, 0.0, 1.0));
     let measured_lateral_x = wheel_lateral_offset(physics, chassis, pair).unwrap_or(0.0);
     let lateral_x = visual_spin_lateral_x(side_hint(path), measured_lateral_x);
     Some(forward_speed * visual_side_turn_speed_ratio(forward_speed, yaw_rate, lateral_x))

@@ -155,6 +155,14 @@ def clear_sim(session: zenoh.Session) -> None:
     put_cbor(session, "gearbox/sim/clear", {"pause_clock": False})
 
 
+def claim_machine_session(session: zenoh.Session, namespace: str, session_id: str) -> None:
+    put_cbor(
+        session,
+        f"gearbox/machines/{namespace}/session",
+        {"session_id": session_id},
+    )
+
+
 def bale_id_from(text: object) -> int | None:
     """Parse the integer bale index out of ``bale_<n>...`` runtime ids."""
     text = str(text or "")
@@ -177,6 +185,7 @@ class RobotProxy:
     def __init__(self, idx: int, namespace: str):
         self.idx = idx
         self.namespace = namespace
+        self.session_id = f"{namespace}_{int(time.time() * 1000)}"
         self.pose = (0.0, 0.0)
         self.last_pose = (0.0, 0.0)
         self.heading_rad: float | None = None
@@ -209,6 +218,8 @@ class RobotProxy:
         return self.target_bale is None
 
     def declare(self, session: zenoh.Session) -> None:
+        claim_machine_session(session, self.namespace, self.session_id)
+
         def on_state(sample: zenoh.Sample) -> None:
             try:
                 d = cbor2.loads(bytes(sample.payload))
@@ -235,6 +246,7 @@ class RobotProxy:
             {
                 "linear": [float(speed), 0.0, 0.0],
                 "angular": [0.0, 0.0, float(yaw_rate)],
+                "session_id": self.session_id,
             },
         )
 
@@ -582,6 +594,8 @@ def main() -> None:
 
         print(f"spawning {n_tractors} USD tractors")
         spawn_usd_tractors(session, robots)
+        for robot in robots:
+            claim_machine_session(session, robot.namespace, robot.session_id)
 
         print(f"scattering {n_bales} bales across {field:.0f} × {field:.0f} m field")
         clear_old_bales(session, max(500, n_bales + 50))

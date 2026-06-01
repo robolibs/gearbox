@@ -22,6 +22,7 @@ pip install eclipse-zenoh cbor2
 | `drive.py <vehicle> [linear] [angular]` | Spams a constant `cmd_vel` (m/s, rad/s) at 10 Hz until Ctrl-C. |
 | `stop.py <vehicle>` | One-shot zero `cmd_vel`. |
 | `square.py <vehicle>` | Drives in a 4-second square. |
+| `oxbo_joystick.py` | Clears/loads flatland + `oxbo.usd`, claims the `oxbo` machine session, then drives it from `/dev/input/warpout0`. |
 
 `<vehicle>` is `<robot_name>_<instance>` — e.g. `tractor_0`, `husky_2`.
 The starter tractor is always `tractor_0`. Spawn more from the

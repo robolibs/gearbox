@@ -29,6 +29,7 @@ import zenoh
 FLATLAND_USD_PATH = "world/flatland.usd"
 OXBO_USD_PATH = "bin/gearbox/assets/oxbo.usd"
 NAMESPACE = "oxbo"
+SESSION_ID = f"oxbo_follow_points_{int(time.time() * 1000)}"
 TICK_DT = 0.10
 GOAL_TOLERANCE_M = 3.0
 WAYPOINT_MARKER_Y = 0.35
@@ -67,6 +68,14 @@ def put_cbor(session: zenoh.Session, key: str, payload: dict) -> None:
 
 def clear_sim(session: zenoh.Session) -> None:
     put_cbor(session, "gearbox/sim/clear", {"pause_clock": False})
+
+
+def claim_machine_session(session: zenoh.Session) -> None:
+    put_cbor(
+        session,
+        f"gearbox/machines/{NAMESPACE}/session",
+        {"session_id": SESSION_ID},
+    )
 
 
 def delete_waypoint_markers(session: zenoh.Session) -> None:
@@ -174,6 +183,7 @@ def publish_cmd(session: zenoh.Session, speed: float, yaw_rate: float) -> None:
         {
             "linear": [float(speed), 0.0, 0.0],
             "angular": [0.0, 0.0, float(yaw_rate)],
+            "session_id": SESSION_ID,
         },
     )
 
@@ -251,6 +261,7 @@ def main() -> None:
     tracker = PoseTracker(session, NAMESPACE)
     time.sleep(0.2)
 
+    claim_machine_session(session)
     clear_sim(session)
     tracker.clear_seen()
     time.sleep(0.3)
@@ -263,6 +274,7 @@ def main() -> None:
         raise SystemExit(
             f"no state from machine namespace `{NAMESPACE}`. Is Gearbox running?"
         )
+    claim_machine_session(session)
 
     follow_points(session, tracker, points)
     tracker.close()
