@@ -59,7 +59,7 @@ def Xform "robot" (
     float gearbox:controller:drive:frontTrackWidth = 2.8
     float gearbox:controller:drive:rearTrackWidth = 2.8
     float gearbox:controller:drive:maxSteerDeg = 25
-    token gearbox:controller:drive:steeringGeometry = "crab"
+    token gearbox:controller:drive:steeringGeometry = "six_wheel_ackermann"
     token[] gearbox:controller:drive:usesRoles = [
         "poweredWheelJoints",
         "passiveWheelJoints",
@@ -133,8 +133,9 @@ def Xform "robot" (
         )
         {
             double size = 1
-            double3 xformOp:scale = (2.8, 7.68, 1.725)
-            uniform token[] xformOpOrder = ["xformOp:scale"]
+            double3 xformOp:translate = (0, 0, 0.359)
+            double3 xformOp:scale = (2.8, 7.68, 1.007)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
             rel material:binding = </robot/Materials/oxbo_yellow>
         }
 

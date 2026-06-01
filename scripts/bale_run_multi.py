@@ -151,6 +151,10 @@ def put_cbor(session: zenoh.Session, key: str, payload: dict) -> None:
     )
 
 
+def clear_sim(session: zenoh.Session) -> None:
+    put_cbor(session, "gearbox/sim/clear", {"pause_clock": False})
+
+
 def bale_id_from(text: object) -> int | None:
     """Parse the integer bale index out of ``bale_<n>...`` runtime ids."""
     text = str(text or "")
@@ -567,6 +571,9 @@ def main() -> None:
         for robot in robots:
             robot.declare(session)
 
+        print("clearing simulator")
+        clear_sim(session)
+        time.sleep(0.3)
         print("loading USD terrain")
         load_terrain(session)
         # Give Gearbox one frame window to instantiate the terrain scene and

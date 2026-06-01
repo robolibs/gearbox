@@ -14,6 +14,7 @@
 //! | direction | key                  | payload         |
 //! |-----------|----------------------|-----------------|
 //! | sub       | `gearbox/sim/reset`  | [`ResetWire`]   |
+//! | sub       | `gearbox/sim/clear`  | [`ResetWire`]   |
 //!
 //! Publishing an empty payload (or any malformed one) is treated as
 //! a default reset (`pause_clock = false`).
@@ -46,7 +47,8 @@ pub struct ResetBroker {
     /// Latched reset request (most recent wins; bursts collapse to a
     /// single reset). The Bevy system drains by `take()`-ing.
     pending: Arc<Mutex<Option<ResetWire>>>,
-    _subscriber: zenoh::pubsub::Subscriber<()>,
+    _reset_subscriber: zenoh::pubsub::Subscriber<()>,
+    _clear_subscriber: zenoh::pubsub::Subscriber<()>,
 }
 
 impl ResetBroker {
@@ -55,13 +57,25 @@ impl ResetBroker {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let pending: Arc<Mutex<Option<ResetWire>>> = Arc::new(Mutex::new(None));
         let pending_cb = Arc::clone(&pending);
-        let subscriber = session
+        let reset_pending_cb = Arc::clone(&pending);
+        let reset_subscriber = session
             .declare_subscriber("gearbox/sim/reset")
             .callback(move |sample| {
                 // Empty / malformed payloads are normalized to a
                 // default reset — `python … session.put("gearbox/sim/reset", b"")`
                 // should "just work" without forcing the caller to
                 // CBOR-encode a struct.
+                let bytes = sample.payload().to_bytes();
+                let req =
+                    decode::<ResetWire>(bytes.as_ref()).unwrap_or_else(|_| ResetWire::default());
+                if let Ok(mut q) = reset_pending_cb.lock() {
+                    *q = Some(req);
+                }
+            })
+            .wait()?;
+        let clear_subscriber = session
+            .declare_subscriber("gearbox/sim/clear")
+            .callback(move |sample| {
                 let bytes = sample.payload().to_bytes();
                 let req =
                     decode::<ResetWire>(bytes.as_ref()).unwrap_or_else(|_| ResetWire::default());
@@ -73,7 +87,8 @@ impl ResetBroker {
         Ok(Self {
             _session: session,
             pending,
-            _subscriber: subscriber,
+            _reset_subscriber: reset_subscriber,
+            _clear_subscriber: clear_subscriber,
         })
     }
 
@@ -96,6 +111,7 @@ pub struct ResetApiPlugin;
 #[cfg(feature = "bevy")]
 impl Plugin for ResetApiPlugin {
     fn build(&self, app: &mut App) {
+        app.add_message::<SimResetRequest>();
         match zenoh::open(zenoh::Config::default()).wait() {
             Ok(session) => {
                 let session = Arc::new(session);
@@ -105,7 +121,9 @@ impl Plugin for ResetApiPlugin {
                             broker: Mutex::new(broker),
                         });
                         app.add_systems(Update, drain_reset_inbox_system);
-                        info!("gearbox-api: reset API ready (gearbox/sim/reset)");
+                        info!(
+                            "gearbox-api: reset API ready (gearbox/sim/reset, gearbox/sim/clear)"
+                        );
                     }
                     Err(e) => {
                         warn!("gearbox-api: reset subscriber open failed ({e}); reset API disabled")

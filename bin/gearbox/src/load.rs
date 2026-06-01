@@ -194,6 +194,7 @@ impl Plugin for LoadPlugin {
             .add_systems(
                 Update,
                 (
+                    clear_runtime_usd_loads_on_reset_system,
                     drain_load_queue,
                     drain_runtime_usd_loader,
                     spawn_when_loaded,
@@ -203,6 +204,63 @@ impl Plugin for LoadPlugin {
                 PostUpdate,
                 sync_pending_machine_physics_to_scene_transforms.after(TransformSystems::Propagate),
             );
+    }
+}
+
+fn clear_runtime_usd_loads_on_reset_system(
+    messages: Option<MessageReader<gearbox_viz::SimResetRequest>>,
+    mut commands: Commands,
+    mut inflight: ResMut<Inflight>,
+    mut controller_inventory: ResMut<ControllerInventory>,
+    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    loaded_roots: Query<Entity, With<LoadedAsset>>,
+    children_q: Query<&Children>,
+) {
+    let Some(mut messages) = messages else { return };
+    if messages.read().count() == 0 {
+        return;
+    }
+
+    inflight.0.clear();
+    controller_inventory.machines.clear();
+
+    let physics = physics.as_mut();
+    let mut cleared = 0usize;
+    for root in loaded_roots.iter() {
+        remove_loaded_usd_physics(root, physics, &children_q);
+        commands.entity(root).despawn();
+        cleared += 1;
+    }
+    if cleared > 0 {
+        info!("gearbox-load: cleared {cleared} runtime USD load(s)");
+    }
+}
+
+fn remove_loaded_usd_physics(
+    root: Entity,
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    children_q: &Query<&Children>,
+) {
+    let mut stack = vec![root];
+    while let Some(entity) = stack.pop() {
+        if let Some(handle) = physics.entity_to_body.remove(&entity) {
+            let _ = physics.bodies.remove(
+                handle,
+                &mut physics.islands,
+                &mut physics.colliders,
+                &mut physics.impulse_joints,
+                &mut physics.multibody_joints,
+                true,
+            );
+        }
+        if let Some(collider) = physics.entity_to_collider.remove(&entity) {
+            physics
+                .colliders
+                .remove(collider, &mut physics.islands, &mut physics.bodies, false);
+        }
+        if let Ok(children) = children_q.get(entity) {
+            stack.extend(children.iter());
+        }
     }
 }
 

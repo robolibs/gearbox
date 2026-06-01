@@ -108,6 +108,9 @@ fn main() {
         // USDs are handled by `load::LoadPlugin` because it also registers
         // controller namespaces.
         .add_plugins(gearbox_api::UsdLoaderApiPlugin)
+        // Global clear/reset API for scripts:
+        // `gearbox/sim/clear` or `gearbox/sim/reset`.
+        .add_plugins(gearbox_api::ResetApiPlugin)
         // Lightweight marker entities keyed by caller UUID. These are not USD
         // assets, so they move/delete in place without loader races.
         .add_plugins(gearbox_api::UsdMarkerApiPlugin)

@@ -162,6 +162,7 @@ impl Plugin for ControllerDiscoveryPlugin {
             .add_systems(
                 Update,
                 (
+                    clear_controller_state_on_reset,
                     sync_machine_controller_api_topics,
                     reconcile_external_process_controllers,
                     apply_machine_controller_api_commands,
@@ -181,6 +182,25 @@ impl Plugin for ControllerDiscoveryPlugin {
             }
         }
     }
+}
+
+fn clear_controller_state_on_reset(
+    messages: Option<MessageReader<gearbox_viz::SimResetRequest>>,
+    mut inventory: ResMut<ControllerInventory>,
+    mut commands: ResMut<ControllerCommands>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    mut states: ResMut<ControllerStates>,
+) {
+    let Some(mut messages) = messages else { return };
+    if messages.read().count() == 0 {
+        return;
+    }
+    inventory.machines.clear();
+    commands.cmd_vel.clear();
+    runtime.applied_cmd_vel.clear();
+    runtime.logged_empty_tire_pairs.clear();
+    states.states.clear();
+    info!("gearbox-control: cleared controller inventory/state");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1784,10 +1804,21 @@ fn steering_multiplier_for_wheel_path(
     if !steered {
         return 0.0;
     }
-    if geometry == "crab" && is_rear_path(wheel_path) {
-        -1.0
-    } else {
-        1.0
+    steering_multiplier_for_geometry(geometry, wheel_path)
+}
+
+fn steering_multiplier_for_geometry(geometry: &str, path: &str) -> f64 {
+    match geometry {
+        "crab" if is_rear_path(path) => -1.0,
+        "six_wheel_ackermann" | "rear_counter_half" | "counter_steer_half" | "oxbo" => {
+            match axle_hint(path) {
+                Some(AxleHint::Front) => 1.0,
+                Some(AxleHint::Middle) => 0.0,
+                Some(AxleHint::Rear) => -0.5,
+                None => 1.0,
+            }
+        }
+        _ => 1.0,
     }
 }
 
@@ -2018,7 +2049,13 @@ fn steering_joint_targets(
         return targets;
     }
 
-    if geometry == "crab" || geometry == "parallel" {
+    if geometry == "crab"
+        || geometry == "parallel"
+        || matches!(
+            geometry,
+            "six_wheel_ackermann" | "rear_counter_half" | "counter_steer_half" | "oxbo"
+        )
+    {
         let targets = all_role_steering_targets(
             scene_root,
             machine,
@@ -2107,11 +2144,7 @@ fn all_role_steering_targets(
         .iter()
         .filter_map(|path| {
             let pair = joint_pair(scene_root, path, joints, parents, physics)?;
-            let multiplier = if geometry == "crab" && is_rear_path(path) {
-                -1.0
-            } else {
-                1.0
-            };
+            let multiplier = steering_multiplier_for_geometry(geometry, path);
             Some(JointPositionTarget {
                 pair,
                 position: center_position * multiplier,
@@ -2912,7 +2945,10 @@ mod tests {
         assert!(drive.enabled);
         assert_eq!(drive.controller_type, "builtin:ackermann_cmd_vel");
         assert_eq!(drive.command_interface.as_deref(), Some("cmd_vel"));
-        assert_eq!(drive.steering_geometry.as_deref(), Some("crab"));
+        assert_eq!(
+            drive.steering_geometry.as_deref(),
+            Some("six_wheel_ackermann")
+        );
         assert_eq!(
             drive.uses_roles,
             vec![
@@ -3103,6 +3139,31 @@ def Xform "Leatherback" (
         let (left, right) = ackermann_steering_angles(center, 2.37, 1.5675, 45.0);
         assert_eq!(left, center);
         assert_eq!(right, center);
+    }
+
+    #[test]
+    fn six_wheel_ackermann_counter_steers_rear_at_half_angle() {
+        assert_eq!(
+            steering_multiplier_for_geometry(
+                "six_wheel_ackermann",
+                "/robot/Joints/steer_front_left"
+            ),
+            1.0
+        );
+        assert_eq!(
+            steering_multiplier_for_geometry(
+                "six_wheel_ackermann",
+                "/robot/Joints/steer_middle_left"
+            ),
+            0.0
+        );
+        assert_eq!(
+            steering_multiplier_for_geometry(
+                "six_wheel_ackermann",
+                "/robot/Joints/steer_rear_left"
+            ),
+            -0.5
+        );
     }
 
     #[test]
