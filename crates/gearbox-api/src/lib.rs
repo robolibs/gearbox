@@ -49,17 +49,11 @@
 //! * [`broker`] — pure-Rust [`ApiBroker`] that owns the zenoh
 //!   session. No Bevy.
 //! * [`wire`] — CBOR-encoded message types.
-//! * `plugin` — Bevy `GearboxApiPlugin` (feature-gated), wiring the
-//!   broker into the editor's `SimClock` resource.
+//! * `loader_api` / `mark_api` / `reset_api` — Bevy plugins for the
+//!   USD-only runtime tool surface.
 
 pub mod broker;
 pub mod wire;
-
-// Pluggable per-vehicle topics (cmd_vel / odom / fix). Marked
-// `pub` so `bin/gearbox` can include it; deletion is one file +
-// the `vehicle_api::*` re-exports below + the `add_plugins` line
-// in `bin/gearbox/src/main.rs`.
-pub mod vehicle_api;
 
 // Generic USD loader — load / move / unload USD assets over zenoh.
 pub mod loader_api;
@@ -67,23 +61,27 @@ pub mod loader_api;
 // Lightweight marker meshes — update by UUID without going through USD load.
 pub mod mark_api;
 
-// Pluggable vehicle spawner — drop a tractor / husky / robotti /
-// drone / oxbo into the scene at any (x,z) + yaw over zenoh.
-pub mod spawn_api;
-
 // Pluggable scene reset — wipe every vehicle and every marker
 // without restarting the simulator.
 pub mod reset_api;
 
-#[cfg(feature = "bevy")]
-mod plugin;
-
 pub use broker::ApiBroker;
 pub use wire::{ClockCommand, ClockWire};
 
-pub use vehicle_api::{FixWire, OdomWire, TwistWire, VehicleBroker};
 #[cfg(feature = "bevy")]
-pub use vehicle_api::{VehicleApiPlugin, VehicleApiSession};
+use bevy::prelude::*;
+
+#[cfg(feature = "bevy")]
+#[derive(Message, Default, Debug, Clone, Copy)]
+pub struct SimResetRequest {
+    /// Re-pause the sim clock after reset. Off by default — examples usually
+    /// reload USDs and drive immediately.
+    pub pause_clock: bool,
+}
+
+#[cfg(feature = "bevy")]
+#[derive(Resource, Debug, Clone)]
+pub struct UsdAssetRoot(pub std::path::PathBuf);
 
 pub use loader_api::{UsdLoadWire, UsdLoaderBroker};
 #[cfg(feature = "bevy")]
@@ -94,12 +92,5 @@ pub use mark_api::MarkerBroker;
 pub use mark_api::{MarkerApiSession, UsdMarkerApiPlugin};
 
 #[cfg(feature = "bevy")]
-pub use spawn_api::{SpawnApiPlugin, SpawnApiSession};
-pub use spawn_api::{SpawnBroker, SpawnVehicleWire, SpawnedVehicleWire};
-
-#[cfg(feature = "bevy")]
 pub use reset_api::{ResetApiPlugin, ResetApiSession};
 pub use reset_api::{ResetBroker, ResetWire};
-
-#[cfg(feature = "bevy")]
-pub use plugin::{ApiSession, GearboxApiPlugin};

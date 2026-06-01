@@ -946,17 +946,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_frost"
-version = "0.0.1"
-source = "git+https://github.com/bresilla/bevy_frost#833e4d866ca83286bef8beeb921af607ec3e8c44"
-dependencies = [
- "bevy",
- "bevy_egui",
- "frostcore",
- "mimalloc",
-]
-
-[[package]]
 name = "bevy_gizmos"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3053,20 +3042,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frostcore"
-version = "0.0.1"
-source = "git+https://github.com/bresilla/bevy_frost#833e4d866ca83286bef8beeb921af607ec3e8c44"
-dependencies = [
- "bevy",
- "egui",
- "egui-scale",
- "iconflow",
- "pastel",
- "slab",
- "smallvec",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3173,11 +3148,10 @@ version = "0.0.1"
 dependencies = [
  "bevy",
  "bevy_egui",
- "bevy_frost 0.0.1 (git+https://github.com/bresilla/bevy_frost?branch=develop)",
+ "bevy_frost",
  "bevy_glacial 0.0.1 (git+https://github.com/bresilla/bevy_glacial?branch=main)",
  "ciborium",
  "gearbox-api",
- "gearbox-viz",
  "openusd",
  "pyo3",
  "rapier3d-f64",
@@ -3195,35 +3169,9 @@ dependencies = [
  "bevy",
  "ciborium",
  "datapod",
- "gearbox-core",
- "gearbox-physics",
- "gearbox-viz",
  "serde",
  "usd_bevy",
  "zenoh",
-]
-
-[[package]]
-name = "gearbox-core"
-version = "0.0.1"
-dependencies = [
- "datapod",
-]
-
-[[package]]
-name = "gearbox-editor"
-version = "0.0.1"
-dependencies = [
- "bevy",
- "bevy_egui",
- "bevy_frost 0.0.1 (git+https://github.com/bresilla/bevy_frost)",
- "bevy_glacial 0.0.1 (git+https://github.com/bresilla/bevy_glacial?rev=eb67675)",
- "datapod",
- "gearbox-core",
- "gearbox-physics",
- "gearbox-viz",
- "rfd",
- "usd_bevy",
 ]
 
 [[package]]
@@ -3236,27 +3184,6 @@ dependencies = [
  "bytes",
  "ciborium",
  "serde",
-]
-
-[[package]]
-name = "gearbox-physics"
-version = "0.0.1"
-dependencies = [
- "datapod",
- "gearbox-core",
- "rapier3d-f64",
-]
-
-[[package]]
-name = "gearbox-viz"
-version = "0.0.1"
-dependencies = [
- "bevy",
- "bevy_glacial 0.0.1 (git+https://github.com/bresilla/bevy_glacial?rev=eb67675)",
- "datapod",
- "gearbox-core",
- "gearbox-physics",
- "usd_bevy",
 ]
 
 [[package]]

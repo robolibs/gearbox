@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use zenoh::Wait;
 
 use crate::wire::decode;
+#[cfg(feature = "bevy")]
+use crate::{SimResetRequest, UsdAssetRoot};
 
 #[cfg(feature = "bevy")]
 use bevy::ecs::entity::Entities;
@@ -259,7 +261,7 @@ fn apply_usd_loads_system(
     mut commands: Commands,
     api: Option<Res<UsdLoaderApiSession>>,
     asset_server: Res<bevy::asset::AssetServer>,
-    asset_root: Option<Res<gearbox_viz::UsdAssetRoot>>,
+    asset_root: Option<Res<UsdAssetRoot>>,
     live_entities: &Entities,
     mut transforms: Query<&mut Transform>,
 ) {
@@ -468,7 +470,7 @@ fn instantiate_pending_loaded_usd(
 
 #[cfg(feature = "bevy")]
 fn clear_loaded_usds_on_reset_system(
-    messages: Option<MessageReader<gearbox_viz::SimResetRequest>>,
+    messages: Option<MessageReader<SimResetRequest>>,
     mut commands: Commands,
     api: Option<Res<UsdLoaderApiSession>>,
 ) {

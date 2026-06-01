@@ -1,13 +1,4 @@
-//! **Pluggable** scene-reset API — wipe every vehicle and every
-//! marker without restarting the simulator. Lets a python driver
-//! reset the world to a clean slate before each run.
-//!
-//! Same delete-it-later pattern as the rest of `gearbox-api`:
-//!
-//!   1. delete this file,
-//!   2. drop `pub mod reset_api;` + the `reset_api::*` re-exports
-//!      in `lib.rs`,
-//!   3. drop `app.add_plugins(ResetApiPlugin)` in `main.rs`.
+//! Scene reset/clear API for USD examples.
 //!
 //! ## Topic
 //!
@@ -30,7 +21,7 @@ use crate::wire::decode;
 use bevy::prelude::*;
 
 #[cfg(feature = "bevy")]
-use gearbox_viz::SimResetRequest;
+use crate::SimResetRequest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct ResetWire {

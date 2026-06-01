@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 use zenoh::Wait;
 
 #[cfg(feature = "bevy")]
+use crate::SimResetRequest;
+#[cfg(feature = "bevy")]
 use bevy::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -199,7 +201,7 @@ fn apply_marker_commands_system(
 
 #[cfg(feature = "bevy")]
 fn clear_markers_on_reset_system(
-    messages: Option<MessageReader<gearbox_viz::SimResetRequest>>,
+    messages: Option<MessageReader<SimResetRequest>>,
     mut commands: Commands,
     api: Option<Res<MarkerApiSession>>,
 ) {

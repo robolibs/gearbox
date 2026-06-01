@@ -185,7 +185,7 @@ impl Plugin for ControllerDiscoveryPlugin {
 }
 
 fn clear_controller_state_on_reset(
-    messages: Option<MessageReader<gearbox_viz::SimResetRequest>>,
+    messages: Option<MessageReader<gearbox_api::SimResetRequest>>,
     mut inventory: ResMut<ControllerInventory>,
     mut commands: ResMut<ControllerCommands>,
     mut runtime: ResMut<ControllerRuntimeState>,

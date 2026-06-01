@@ -1,10 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/gearbox-core",
-    "crates/gearbox-physics",
-    "crates/gearbox-viz",
-    "crates/gearbox-editor",
     "crates/gearbox-api",
     "crates/gearbox-link",
     "crates/gearbox-world",
@@ -90,12 +86,6 @@ aeronet = "0.20"
 # target (headless sim = server; wasm renderer = client).
 aeronet_webtransport = { version = "0.20", default-features = false }
 
-# Internal: crate-to-crate path deps expressed once so members can just
-# write `gearbox-core.workspace = true`.
-gearbox-core    = { path = "crates/gearbox-core" }
-gearbox-physics = { path = "crates/gearbox-physics" }
-gearbox-viz     = { path = "crates/gearbox-viz" }
-gearbox-editor  = { path = "crates/gearbox-editor" }
 gearbox-api     = { path = "crates/gearbox-api" }
 gearbox-link    = { path = "crates/gearbox-link" }
 bevy_frost      = { git = "https://github.com/bresilla/bevy_frost", package = "bevy_frost" }

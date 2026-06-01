@@ -103,7 +103,6 @@ pub struct RuntimeUsdLoadedWire {
 struct RuntimeUsdLoader {
     session: Arc<zenoh::Session>,
     inbox: Arc<Mutex<VecDeque<RuntimeUsdLoadWire>>>,
-    _legacy_spawn_subscriber: zenoh::pubsub::Subscriber<()>,
     _load_subscriber: zenoh::pubsub::Subscriber<()>,
 }
 
@@ -111,23 +110,6 @@ impl RuntimeUsdLoader {
     fn open() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let session = Arc::new(zenoh::open(zenoh::Config::default()).wait()?);
         let inbox: Arc<Mutex<VecDeque<RuntimeUsdLoadWire>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let legacy_spawn_inbox_cb = Arc::clone(&inbox);
-        let legacy_spawn_subscriber = session
-            .declare_subscriber("gearbox/usd/spawn")
-            .callback(move |sample| {
-                let bytes = sample.payload().to_bytes();
-                match decode::<RuntimeUsdLoadWire>(bytes.as_ref()) {
-                    Ok(req) => {
-                        if let Ok(mut q) = legacy_spawn_inbox_cb.lock() {
-                            q.push_back(req);
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("gearbox-load: bad legacy USD spawn payload: {err}");
-                    }
-                }
-            })
-            .wait()?;
         let load_inbox_cb = Arc::clone(&inbox);
         let load_subscriber = session
             .declare_subscriber("gearbox/usd/load/**")
@@ -151,7 +133,6 @@ impl RuntimeUsdLoader {
         Ok(Self {
             session,
             inbox,
-            _legacy_spawn_subscriber: legacy_spawn_subscriber,
             _load_subscriber: load_subscriber,
         })
     }
@@ -165,13 +146,6 @@ impl RuntimeUsdLoader {
 
     fn publish_loaded(&self, ev: &RuntimeUsdLoadedWire) {
         let Ok(bytes) = encode(ev) else { return };
-        if let Err(err) = self
-            .session
-            .put("gearbox/usd/spawned", bytes.clone())
-            .wait()
-        {
-            warn!("gearbox-load: failed to publish legacy gearbox/usd/spawned: {err}");
-        }
         if let Err(err) = self.session.put("gearbox/usd/loaded", bytes).wait() {
             warn!("gearbox-load: failed to publish gearbox/usd/loaded: {err}");
         }
@@ -208,7 +182,7 @@ impl Plugin for LoadPlugin {
 }
 
 fn clear_runtime_usd_loads_on_reset_system(
-    messages: Option<MessageReader<gearbox_viz::SimResetRequest>>,
+    messages: Option<MessageReader<gearbox_api::SimResetRequest>>,
     mut commands: Commands,
     mut inflight: ResMut<Inflight>,
     mut controller_inventory: ResMut<ControllerInventory>,

@@ -1,19 +1,16 @@
 [package]
 name = "gearbox-api"
-description = "Zenoh-based API layer for gearbox — pure-Rust broker + optional Bevy plugin. Vehicle-specific topics will live in a separate crate once the OpenUSD scene layer lands; this crate currently exposes only the sim clock so UI clients and the sim can talk across the network."
+description = "Zenoh-based USD tool API for gearbox."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [features]
 default = ["bevy"]
-# Bevy plugin layer — off for headless servers that don't need the
-# viz stack transitively pulled in.
-bevy = ["dep:bevy", "dep:usd_bevy", "dep:gearbox-viz"]
+# Bevy plugin layer — USD load / marker / reset systems.
+bevy = ["dep:bevy", "dep:usd_bevy"]
 
 [dependencies]
-gearbox-core.workspace = true
-gearbox-physics.workspace = true
 datapod.workspace = true
 zenoh.workspace = true
 serde = { version = "1", features = ["derive"] }
@@ -21,4 +18,3 @@ ciborium = "0.2"
 
 bevy = { workspace = true, optional = true }
 usd_bevy = { workspace = true, optional = true }
-gearbox-viz = { workspace = true, optional = true }

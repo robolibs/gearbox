@@ -8,9 +8,7 @@ license.workspace = true
 [dependencies]
 bevy.workspace = true
 rapier3d.workspace = true
-# `ChaseCamera` rig (orbit / pan / zoom) — same component the
-# gearbox-viz editor uses, so apps that consume `WorldPlugin` get the
-# same camera UX as the main editor.
+# `ChaseCamera` rig (orbit / pan / zoom) for USD scene navigation.
 bevy_glacial.workspace = true
 # We insert a ground collider directly into `usd_bevy`'s `PhysicsWorld`
 # resource so USD-loaded bodies actually rest on the ground rather than

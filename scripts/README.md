@@ -1,29 +1,34 @@
-# gearbox zenoh control scripts
+# gearbox USD control scripts
 
-Python helpers for poking at the running gearbox simulator's
-`<robot_name>_<instance>/cmd_vel` / `odom` / `fix` topics.
+Python helpers for the USD-only simulator path.
 
-## Setup (once)
+The command surface is:
+
+- load USDs: `gearbox/usd/load/<id>`
+- machine state: `gearbox/machines/<namespace>/state`
+- machine commands: `gearbox/machines/<namespace>/cmd_vel`
+- command ownership: `gearbox/machines/<namespace>/session`
+
+## Setup
+
+Use the repo dev shell:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install eclipse-zenoh cbor2
+nix develop --impure
 ```
-
-(Or install globally — `pip install --user eclipse-zenoh cbor2`.)
 
 ## Scripts
 
 | script | what it does |
 |--------|-------------|
-| `discover.py` | Wildcard-subscribes to `**/odom` and prints every key it sees — fastest way to confirm what's alive. |
-| `watch.py <vehicle>` | Tails one vehicle's `odom` + `fix` topics. Default vehicle: `tractor_0`. |
-| `drive.py <vehicle> [linear] [angular]` | Spams a constant `cmd_vel` (m/s, rad/s) at 10 Hz until Ctrl-C. |
-| `stop.py <vehicle>` | One-shot zero `cmd_vel`. |
-| `square.py <vehicle>` | Drives in a 4-second square. |
-| `oxbo_joystick.py` | Clears/loads flatland + `oxbo.usd`, claims the `oxbo` machine session, then drives it from `/dev/input/warpout0`. |
+| `oxbo_flatland.py` | Load flatland + one Oxbo USD machine. |
+| `oxbo_follow_points.py` | Load flatland + Oxbo, then drive it around waypoint points with the USD controller. |
+| `oxbo_joystick.py` | Load flatland + Oxbo, claim the `oxbo` session, then drive it from `/dev/input/warpout0`. |
+| `bale_run.py` | Load USD terrain + USD tractor + USD bales, then collect bales with the USD controller. |
+| `bale_run_multi.py` | Same as `bale_run.py`, but with multiple USD tractor instances. |
+| `stop.py <namespace>` | Claim a USD machine session and send zero `cmd_vel`. Default namespace: `oxbo`. |
 
-`<vehicle>` is `<robot_name>_<instance>` — e.g. `tractor_0`, `husky_2`.
-The starter tractor is always `tractor_0`. Spawn more from the
-Library panel and ids increment.
+The old preset/device scripts using `<robot_name>_<id>/cmd_vel`,
+`gearbox/sim/spawn`, `odom`, and `fix` have been removed. New examples should
+load USD assets and command the controller namespace authored/discovered from
+the USD machine.
