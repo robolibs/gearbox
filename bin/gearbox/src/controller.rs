@@ -1294,8 +1294,6 @@ fn apply_builtin_ackermann_cmd_vel(
                     &parents,
                     &physics,
                     body_handle,
-                    steer_target_rad,
-                    max_steer_deg,
                     wheel_radius_m,
                 );
             }
@@ -2248,7 +2246,19 @@ fn turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64) -> f64
     if linear_mps.abs() < 0.05 || yaw_rate_rps.abs() < 1e-5 {
         return 1.0;
     }
-    ((linear_mps - yaw_rate_rps * lateral_x_m) / linear_mps).clamp(0.25, 1.75)
+    ((linear_mps + yaw_rate_rps * lateral_x_m) / linear_mps).clamp(0.25, 1.75)
+}
+
+const VISUAL_TURN_SPEED_BOOST: f64 = 1.45;
+
+fn visual_turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64) -> f64 {
+    let ratio = turn_speed_ratio(linear_mps, yaw_rate_rps, lateral_x_m);
+    if ratio >= 1.0 {
+        1.0 + (ratio - 1.0) * VISUAL_TURN_SPEED_BOOST
+    } else {
+        1.0 - (1.0 - ratio) * VISUAL_TURN_SPEED_BOOST
+    }
+    .clamp(0.15, 2.25)
 }
 
 fn wheel_lateral_offset(
@@ -2439,8 +2449,6 @@ fn visual_wheel_spin_targets(
     parents: &Query<&ChildOf>,
     physics: &usd_bevy::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
-    steer_target_rad: f64,
-    max_steer_deg: f32,
     wheel_radius_fallback_m: f64,
 ) -> Vec<JointVelocityTarget> {
     let mut targets = Vec::new();
@@ -2460,9 +2468,6 @@ fn visual_wheel_spin_targets(
             parents,
             physics,
             chassis,
-            controller,
-            steer_target_rad,
-            max_steer_deg,
             wheel_radius_fallback_m,
         );
     }
@@ -2483,9 +2488,6 @@ fn visual_wheel_spin_targets(
             parents,
             physics,
             chassis,
-            controller,
-            steer_target_rad,
-            max_steer_deg,
             wheel_radius_fallback_m,
         );
     }
@@ -2501,9 +2503,6 @@ fn push_visual_wheel_spin_target(
     parents: &Query<&ChildOf>,
     physics: &usd_bevy::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
-    controller: &ControllerSpec,
-    steer_target_rad: f64,
-    max_steer_deg: f32,
     wheel_radius_fallback_m: f64,
 ) {
     let Some(pair) = joint_pair(scene_root, path, joints, parents, physics) else {
@@ -2517,11 +2516,13 @@ fn push_visual_wheel_spin_target(
     }
 
     let radius = visual_wheel_radius(physics, chassis, pair, path, wheel_radius_fallback_m);
-    let differential_scale =
-        (steer_target_rad.abs() / (max_steer_deg as f64).to_radians().max(1e-6)).clamp(0.0, 1.0);
-    let wheel_steer_rad =
-        steering_position_for_path(controller, path, steer_target_rad, differential_scale);
-    let ground_speed = visual_wheel_ground_speed(physics, chassis, pair, wheel_steer_rad)
+    // The raycast vehicle moves the chassis, while the USD wheel bodies are
+    // visual-only. Do not use each wheel body's full point velocity projected
+    // through its own steering angle here: on a three-axle Oxbo that makes
+    // front/middle/rear wheels on the same side spin at very different rates
+    // and look like they are slipping. Use one side-speed instead: chassis
+    // forward speed plus the left/right Ackermann differential.
+    let ground_speed = visual_wheel_side_ground_speed(physics, chassis, pair, path)
         .unwrap_or_else(|| chassis_forward_speed(physics, chassis).unwrap_or(0.0));
     targets.push(visual_wheel_velocity_target(pair, ground_speed / radius));
 }
@@ -2552,20 +2553,35 @@ fn chassis_forward_speed(
     Some(body.linvel().dot(forward))
 }
 
-fn visual_wheel_ground_speed(
+fn visual_wheel_side_ground_speed(
     physics: &usd_bevy::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     pair: (RigidBodyHandle, RigidBodyHandle),
-    wheel_steer_rad: f64,
+    path: &str,
 ) -> Option<f64> {
     let body = physics.bodies.get(chassis)?;
-    let wheel = wheel_body_of(physics, chassis, pair)?;
-    let wheel_body = physics.bodies.get(wheel)?;
-    let world_offset = wheel_body.translation() - body.translation();
-    let point_velocity = body.linvel() + body.angvel().cross(world_offset);
-    let rolling_local = Vector::new(wheel_steer_rad.sin(), -wheel_steer_rad.cos(), 0.0);
-    let rolling_world = body.rotation() * rolling_local;
-    Some(point_velocity.dot(rolling_world))
+    let forward = body_forward_vector(body)?;
+    let forward_speed = body.linvel().dot(forward);
+    let yaw_rate = body.angvel().dot(body.rotation() * Vector::new(0.0, 0.0, 1.0));
+    let measured_lateral_x = wheel_lateral_offset(physics, chassis, pair).unwrap_or(0.0);
+    let lateral_x = visual_spin_lateral_x(side_hint(path), measured_lateral_x);
+    Some(forward_speed * visual_side_turn_speed_ratio(forward_speed, yaw_rate, lateral_x))
+}
+
+fn visual_side_turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64) -> f64 {
+    // Rapier's chassis angular velocity sign is opposite the USD/Gearbox
+    // visual side convention used for named left/right wheels. The physics
+    // drive path keeps the controller convention, but visual spin needs this
+    // sign flip so the outside wheels, not the inside wheels, read faster.
+    visual_turn_speed_ratio(linear_mps, -yaw_rate_rps, lateral_x_m)
+}
+
+fn visual_spin_lateral_x(side: Option<SideHint>, measured_lateral_x: f64) -> f64 {
+    match side {
+        Some(SideHint::Left) => measured_lateral_x.abs(),
+        Some(SideHint::Right) => -measured_lateral_x.abs(),
+        None => measured_lateral_x,
+    }
 }
 
 fn joint_pair(
@@ -3382,6 +3398,41 @@ def Xform "Leatherback" (
         let left_velocity = 2.0 / 0.68;
         let right_velocity = 2.0 / 0.68;
         assert_eq!(left_velocity, right_velocity);
+    }
+
+    #[test]
+    fn ackermann_differential_speeds_outside_wheels_up() {
+        // Gearbox heading convention: positive yaw turns toward +X. In the
+        // authored machines, named left wheels sit at positive local X and
+        // named right wheels at negative local X.
+        assert!(turn_speed_ratio(2.0, 0.5, 1.4) > 1.0);
+        assert!(turn_speed_ratio(2.0, 0.5, -1.4) < 1.0);
+
+        assert!(turn_speed_ratio(2.0, -0.5, -1.4) > 1.0);
+        assert!(turn_speed_ratio(2.0, -0.5, 1.4) < 1.0);
+    }
+
+    #[test]
+    fn visual_spin_lateral_x_keeps_same_side_consistent() {
+        assert_eq!(visual_spin_lateral_x(Some(SideHint::Left), 1.4), 1.4);
+        assert_eq!(visual_spin_lateral_x(Some(SideHint::Left), -1.4), 1.4);
+        assert_eq!(visual_spin_lateral_x(Some(SideHint::Right), 1.4), -1.4);
+        assert_eq!(visual_spin_lateral_x(Some(SideHint::Right), -1.4), -1.4);
+    }
+
+    #[test]
+    fn visual_turn_ratio_makes_outside_wheels_read_faster() {
+        assert!(visual_turn_speed_ratio(2.0, 0.5, 1.4) > turn_speed_ratio(2.0, 0.5, 1.4));
+        assert!(visual_turn_speed_ratio(2.0, 0.5, -1.4) < turn_speed_ratio(2.0, 0.5, -1.4));
+    }
+
+    #[test]
+    fn visual_side_turn_ratio_uses_observed_yaw_sign() {
+        assert!(visual_side_turn_speed_ratio(2.0, 0.5, -1.4) > 1.0);
+        assert!(visual_side_turn_speed_ratio(2.0, 0.5, 1.4) < 1.0);
+
+        assert!(visual_side_turn_speed_ratio(2.0, -0.5, 1.4) > 1.0);
+        assert!(visual_side_turn_speed_ratio(2.0, -0.5, -1.4) < 1.0);
     }
 
     #[test]

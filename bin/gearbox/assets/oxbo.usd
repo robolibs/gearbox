@@ -239,12 +239,24 @@ def Xform "robot" (
         vector3f physics:diagonalInertia = (68, 38, 38)
         double3 xformOp:translate = (1.4, -2.304, 0.768)
         uniform token[] xformOpOrder = ["xformOp:translate"]
-        def Cylinder "tire" (prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"])
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_left_tyre>)
         {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_left_rim>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
             uniform token axis = "X"
             double radius = 0.768
             double height = 0.7
-            rel material:binding = </robot/Materials/dark_rubber>
         }
     }
 
@@ -256,12 +268,24 @@ def Xform "robot" (
         vector3f physics:diagonalInertia = (68, 38, 38)
         double3 xformOp:translate = (-1.4, -2.304, 0.768)
         uniform token[] xformOpOrder = ["xformOp:translate"]
-        def Cylinder "tire" (prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"])
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_right_tyre>)
         {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_right_rim>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
             uniform token axis = "X"
             double radius = 0.768
             double height = 0.7
-            rel material:binding = </robot/Materials/dark_rubber>
         }
     }
 
@@ -273,12 +297,24 @@ def Xform "robot" (
         vector3f physics:diagonalInertia = (68, 38, 38)
         double3 xformOp:translate = (1.4, -0.100, 0.768)
         uniform token[] xformOpOrder = ["xformOp:translate"]
-        def Cylinder "tire" (prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"])
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_left_tyre>)
         {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_left_rim>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
             uniform token axis = "X"
             double radius = 0.768
             double height = 0.7
-            rel material:binding = </robot/Materials/dark_rubber>
         }
     }
 
@@ -290,12 +326,24 @@ def Xform "robot" (
         vector3f physics:diagonalInertia = (68, 38, 38)
         double3 xformOp:translate = (-1.4, -0.100, 0.768)
         uniform token[] xformOpOrder = ["xformOp:translate"]
-        def Cylinder "tire" (prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"])
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_right_tyre>)
         {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_right_rim>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
             uniform token axis = "X"
             double radius = 0.768
             double height = 0.7
-            rel material:binding = </robot/Materials/dark_rubber>
         }
     }
 
@@ -307,12 +355,24 @@ def Xform "robot" (
         vector3f physics:diagonalInertia = (68, 38, 38)
         double3 xformOp:translate = (1.4, 2.688, 0.768)
         uniform token[] xformOpOrder = ["xformOp:translate"]
-        def Cylinder "tire" (prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"])
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_left_tyre>)
         {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_left_rim>)
+        {
+            double3 xformOp:translate = (-1.463, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
             uniform token axis = "X"
             double radius = 0.768
             double height = 0.7
-            rel material:binding = </robot/Materials/dark_rubber>
         }
     }
 
@@ -324,12 +384,24 @@ def Xform "robot" (
         vector3f physics:diagonalInertia = (68, 38, 38)
         double3 xformOp:translate = (-1.4, 2.688, 0.768)
         uniform token[] xformOpOrder = ["xformOp:translate"]
-        def Cylinder "tire" (prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"])
+        def Xform "tyre" (prepend references = @./tractor.usdc@</root/wheel_front_right_tyre>)
         {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Xform "tractor_rim" (prepend references = @./tractor.usdc@</root/wheel_front_right_rim>)
+        {
+            double3 xformOp:translate = (1.439, 1.998, -0.853)
+            float3 xformOp:scale = (0.463, 0.406, 0.406)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+        def Cylinder "tire_collider" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            token visibility = "invisible"
             uniform token axis = "X"
             double radius = 0.768
             double height = 0.7
-            rel material:binding = </robot/Materials/dark_rubber>
         }
     }
 
