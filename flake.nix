@@ -1,21 +1,32 @@
 {
-  description = "gearbox Rust vehicle/robot simulator development shell";
+  description = "robolibs crate development shell";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    # Pinned to a rev that still accepts the `kernel` arg in
+    # nvidia-x11/generic.nix. Newer nixpkgs (post 2026-04) dropped
+    # that arg, which breaks nixGL until upstream catches up. Bump
+    # together with nixgl when its corresponding fix lands.
+    nixpkgs.url = "github:NixOS/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa";
+    rust-overlay.url = "github:oxalica/rust-overlay?rev=3c27f4c92a7d977556dd2c10bb564d9c61b375e9";
     flake-utils.url = "github:numtide/flake-utils";
-    # nixGL wraps a command with the host's GPU drivers so OpenGL / Vulkan
-    # apps (e.g. Bevy via wgpu) work inside a nix devShell on non-NixOS hosts.
     nixgl.url = "github:nix-community/nixGL";
   };
 
   outputs =
-    { self, nixpkgs, rust-overlay, flake-utils, nixgl, ... }:
+    { nixpkgs, rust-overlay, flake-utils, nixgl, ... }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        overlays = [ (import rust-overlay) ];
+        overlays = [
+          (final: prev: {
+            xorg = prev.xorg // {
+              libX11 = final.libx11;
+              libxcb = final.libxcb;
+              libxshmfence = final.libxshmfence;
+            };
+          })
+          (import rust-overlay)
+        ];
 
         pkgs = import nixpkgs {
           inherit system overlays;
@@ -25,38 +36,35 @@
           };
         };
 
-        # .envrc exports GEARBOX_NVIDIA_VERSION from /proc/driver/nvidia/version
-        # before direnv loads the flake. We read it via getEnv (works because
-        # --impure is wired into .envrc). Reading from a file under .direnv/
-        # doesn't work: flakes in a git repo only expose git-tracked files to
-        # the evaluator, and .direnv/ is globally gitignored.
-        nvidiaVersion = let v = builtins.getEnv "GEARBOX_NVIDIA_VERSION";
-        in if v != "" then v
-           else throw "gearbox: GEARBOX_NVIDIA_VERSION is unset — is direnv loaded and is the NVIDIA driver running?";
+        nvidiaVersion = builtins.getEnv "NVIDIA_VERSION";
+        hasNvidia = nvidiaVersion != "";
 
-        # Build nixGL pinned to the detected version. `nvidiaHash = null`
-        # makes it fetch the matching .run impurely (--impure is wired into
-        # .envrc), so this stays automatic as the host driver changes.
-        # Note: nixGL still refs xorg.libX11/libxcb/libxshmfence internally,
-        # which prints deprecation warnings during eval — upstream bug.
-        nixglPkgs = import "${nixgl}/default.nix" {
-          inherit pkgs nvidiaVersion;
+        nixglPkgs = import "${nixgl}/default.nix" ({
+          inherit pkgs;
+        } // pkgs.lib.optionalAttrs hasNvidia {
+          inherit nvidiaVersion;
           nvidiaHash = null;
-        };
+        });
 
-        # Stable, unversioned `nixGL` / `nixVulkan` aliases — the underlying
-        # binaries have the detected driver version baked into their names.
+        nixGLTarget =
+          if hasNvidia
+          then "${nixglPkgs.nixGLNvidia}/bin/nixGLNvidia-${nvidiaVersion}"
+          else "${nixglPkgs.nixGLIntel}/bin/nixGLIntel";
+        nixVulkanTarget =
+          if hasNvidia
+          then "${nixglPkgs.nixVulkanNvidia}/bin/nixVulkanNvidia-${nvidiaVersion}"
+          else "${nixglPkgs.nixVulkanIntel}/bin/nixVulkanIntel";
+
         nixGLAlias = pkgs.runCommand "nixGL" { } ''
           mkdir -p $out/bin
-          ln -s ${nixglPkgs.nixGLNvidia}/bin/nixGLNvidia-${nvidiaVersion} $out/bin/nixGL
+          ln -s ${nixGLTarget} $out/bin/nixGL
         '';
         nixVulkanAlias = pkgs.runCommand "nixVulkan" { } ''
           mkdir -p $out/bin
-          ln -s ${nixglPkgs.nixVulkanNvidia}/bin/nixVulkanNvidia-${nvidiaVersion} $out/bin/nixVulkan
+          ln -s ${nixVulkanTarget} $out/bin/nixVulkan
         '';
 
-        # Runtime libs Bevy needs on Linux (audio, input, windowing, GPU).
-        bevyLibs = with pkgs; [
+        guiLibs = with pkgs; [
           alsa-lib
           udev
           vulkan-loader
@@ -67,54 +75,45 @@
           libxi
           libxrandr
         ];
-
-        # Python + the libs the `scripts/` zenoh helpers and the
-        # `xtra/MultiBaleCollection/` LLM-coordination experiments need.
-        pythonForScripts = pkgs.python3.withPackages (ps: with ps; [
-          # zenoh helpers in scripts/
-          zenoh
-          cbor2
-          # xtra/MultiBaleCollection/ — numerical + plotting + LLM
-          numpy
-          scipy
-          matplotlib
-          openai
-          python-dotenv
-        ]);
       in
       {
         devShells.default = pkgs.mkShell {
           packages = [
             (pkgs.rust-bin.stable.latest.default.override {
               extensions = [ "rust-src" "rustfmt" "clippy" ];
+              targets = [ "wasm32-unknown-unknown" ];
             })
             pkgs.clang
             pkgs.mold
             pkgs.pkg-config
+            pkgs.rust-cbindgen
+            pkgs.trunk
+            pkgs.maturin
+            (pkgs.python3.withPackages (ps: with ps; [
+              fonttools
+              brotli
+              pip
+              cbor2
+              zenoh
+            ]))
 
-            # GPU wrappers.
             nixGLAlias
             nixVulkanAlias
+            nixglPkgs.nixGLIntel
+            nixglPkgs.nixVulkanIntel
+          ] ++ pkgs.lib.optionals hasNvidia [
             nixglPkgs.nixGLNvidia
             nixglPkgs.nixVulkanNvidia
-            nixglPkgs.nixGLIntel      # Mesa fallback (AMD / Intel iGPU)
-            nixglPkgs.nixVulkanIntel
-
-            # Python + zenoh client for `scripts/*.py` and the
-            # `xtra/MultiBaleCollection/` experiments.
-            pythonForScripts
-            # ffmpeg — matplotlib.animation calls it to encode the
-            # `.mp4` simulation recordings the experiments produce.
-            pkgs.ffmpeg
-          ] ++ bevyLibs;
+          ] ++ guiLibs;
 
           RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath bevyLibs;
-          # Silence wgpu's validation-layer spam. wgpu's generated SPIR-V
-          # uses relaxed atomic ordering that Vulkan 1.3 validation
-          # rejects — naga/wgpu upstream bug, harmless at runtime.
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath guiLibs;
           WGPU_VALIDATION = "0";
           WGPU_DEBUG = "0";
+
+          shellHook = ''
+            export PYTHONPATH="$PWD/.python-packages''${PYTHONPATH:+:$PYTHONPATH}"
+          '';
         };
       }
     );

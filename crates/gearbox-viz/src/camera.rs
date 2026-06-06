@@ -20,7 +20,7 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
 pub use bevy_glacial::{
-    apply_rig, chase_camera_control, chase_camera_zoom, cursor_ray_to_ground, ChaseCamera,
+    ChaseCamera, apply_rig, chase_camera_control, chase_camera_zoom, cursor_ray_to_ground,
 };
 
 use gearbox_core::VehicleId;
@@ -122,11 +122,11 @@ pub struct ChaseCameraFly {
 /// animation over `FlyTarget::duration`:
 ///
 ///   1. 0–40 %  — pull back (distance → apex) while the focus
-///                eases onto the target, so the camera is "looking
-///                at the machine" well before it moves in.
+///      eases onto the target, so the camera is "looking
+///      at the machine" well before it moves in.
 ///   2. 40–50 % — hold at the apex, briefly.
 ///   3. 50–100 %— orbit in: yaw arcs toward `vehicle_yaw + π` while
-///                distance shrinks to `FlyTarget::distance`.
+///      distance shrinks to `FlyTarget::distance`.
 ///
 /// Cancels when the user gives any camera input (middle-drag,
 /// left+right-drag, or scroll-wheel zoom).
@@ -147,13 +147,11 @@ pub fn chase_camera_fly(
 
     // Cancel on any user camera input this frame.
     let middle = mouse_buttons.pressed(MouseButton::Middle);
-    let both_lr = mouse_buttons.pressed(MouseButton::Left)
-        && mouse_buttons.pressed(MouseButton::Right);
-    let scrolled = wheel
-        .read()
-        .any(|e| match e.unit {
-            MouseScrollUnit::Line | MouseScrollUnit::Pixel => e.y.abs() > f32::EPSILON,
-        });
+    let both_lr =
+        mouse_buttons.pressed(MouseButton::Left) && mouse_buttons.pressed(MouseButton::Right);
+    let scrolled = wheel.read().any(|e| match e.unit {
+        MouseScrollUnit::Line | MouseScrollUnit::Pixel => e.y.abs() > f32::EPSILON,
+    });
     if middle || both_lr || scrolled {
         fly.target = None;
         return;
@@ -162,7 +160,9 @@ pub fn chase_camera_fly(
     let dt = time.delta_secs();
 
     for (mut cam, mut tr) in &mut cameras {
-        let Some(mut target) = fly.target else { continue };
+        let Some(mut target) = fly.target else {
+            continue;
+        };
         if sim.0.vehicle(target.vehicle).is_none() {
             fly.target = None;
             continue;

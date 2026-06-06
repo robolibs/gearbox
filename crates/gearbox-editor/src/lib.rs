@@ -8,6 +8,16 @@
 //! the simulator through Bevy resources; any changes it needs to
 //! broadcast *outside* the process go through the tool-API crate.
 
+#![allow(
+    deprecated,
+    dead_code,
+    clippy::collapsible_if,
+    clippy::doc_overindented_list_items,
+    clippy::too_many_arguments,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_map_or
+)]
+
 // Re-export the generic UI kit under the module names the editor
 // source already uses (`super::float`, `super::widgets`,
 // `super::gizmo_material`) so the in-crate modules didn't need their
@@ -18,6 +28,10 @@ pub use bevy_frost::gizmo_material;
 pub use bevy_frost::widgets;
 
 pub mod dock_ribbons;
+pub mod usd_load;
+pub mod usd_tree;
+pub use usd_load::{LoadUsdQueue, PendingUsdRemoval, UsdSelectable, UsdTreeExpanded};
+pub use usd_tree::UsdTreeFilter;
 pub mod heading_arrows;
 pub mod inspector;
 pub mod left_dock;
@@ -78,13 +92,12 @@ impl Plugin for EditorPlugin {
             .init_resource::<properties::PendingColorChange>()
             .init_resource::<selection::Selection>()
             .init_resource::<pending_spawn::PendingSpawn>()
+            .init_resource::<LoadUsdQueue>()
+            .init_resource::<PendingUsdRemoval>()
+            .init_resource::<UsdTreeExpanded>()
+            .init_resource::<UsdTreeFilter>()
             // `PostStartup` so `main::setup_scene` has already run.
-            .add_systems(
-                PostStartup,
-                (
-                    heading_arrows::setup_heading_arrows,
-                ),
-            )
+            .add_systems(PostStartup, (heading_arrows::setup_heading_arrows,))
             // The new bevy_frost runs `apply_theme` from inside its
             // own `ThemePlugin` system in `EguiPrimaryContextPass`
             // (the system fn is private — no `.before()` hook), so
@@ -116,6 +129,10 @@ impl Plugin for EditorPlugin {
             .add_systems(
                 EguiPrimaryContextPass,
                 left_dock::left_dock_ui.in_set(EditorUiSet::LeftDock),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                usd_tree::draw_usd_tree_panel.in_set(EditorUiSet::LeftDock),
             )
             .add_systems(
                 EguiPrimaryContextPass,

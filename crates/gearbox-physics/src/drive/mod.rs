@@ -98,16 +98,11 @@ impl GroundFrame {
     pub fn compute(ctx: &DriveContext<'_>) -> Self {
         let specs = &ctx.spec.wheels;
 
-        // Brake anti-shake: rapier's copysign brake flips sign near
-        // zero velocity and oscillates. Taper the brake off below
-        // 1.2 m/s and force it to zero below 0.5 m/s — the parking
-        // brake in `Sim::step` takes over from there.
-        let speed_mag = ctx.body.linvel().length();
-        let brake_gate = if speed_mag < 0.5 {
-            0.0
-        } else {
-            ((speed_mag - 0.5) / 0.7).clamp(0.0, 1.0)
-        };
+        // Physical wheels brake through a real velocity-0 joint motor
+        // (see `Sim::step`), which holds the wheel at standstill
+        // without the copysign oscillation the raycast model had — so
+        // the brake is applied at full strength at every speed.
+        let brake_gate = 1.0;
 
         let (mut z_min, mut z_max) = (f64::INFINITY, f64::NEG_INFINITY);
         for w in specs {

@@ -22,7 +22,10 @@ pub struct ControlInput {
 
 impl ControlInput {
     pub fn throttle(t: f64) -> Self {
-        Self { throttle: t.clamp(-1.0, 1.0), ..Self::default() }
+        Self {
+            throttle: t.clamp(-1.0, 1.0),
+            ..Self::default()
+        }
     }
 
     pub fn clamp(self) -> Self {

@@ -14,3 +14,10 @@ bevy.workspace = true
 bevy_egui.workspace = true
 bevy_frost.workspace = true
 bevy_glacial.workspace = true
+# `UsdPrimRef` is what the workspace's USD-tree section walks to
+# render the loaded prim hierarchy. The editor depends on this for
+# typing only (no plugins / systems from `usd_bevy` are added here —
+# the host binary owns the asset loader / physics adapter).
+usd_bevy.workspace = true
+# Native file dialog for the Load-USD ribbon button.
+rfd = "0.15"

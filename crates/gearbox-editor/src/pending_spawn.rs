@@ -16,16 +16,16 @@ use bevy::window::PrimaryWindow;
 use bevy_egui::EguiContexts;
 
 use gearbox_physics::{
-    datapod::{Point, Pose, Quaternion},
     VehicleSpec,
+    datapod::{Point, Pose, Quaternion},
 };
 
 use gearbox_viz::{
-    spawn_height_for, spawn_vehicle_ghost, spawn_vehicle_visuals, GearboxSim, GhostTag,
-    PlayerControlled,
+    GearboxSim, GhostTag, PlayerControlled, spawn_height_for, spawn_vehicle_ghost,
+    spawn_vehicle_visuals,
 };
 
-use super::selection::{cursor_ray_to_ground, Selection};
+use super::selection::{Selection, cursor_ray_to_ground};
 
 /// Pending vehicle-placement request. A `Some(spec)` means "the user
 /// has picked a preset and is currently dragging it in the viewport".
@@ -66,7 +66,9 @@ pub fn spawn_ghost_if_needed(
     if pending.ghost_root.is_some() || pending.spec.is_none() {
         return;
     }
-    let Some(spec) = pending.spec.clone() else { return };
+    let Some(spec) = pending.spec.clone() else {
+        return;
+    };
     let root = spawn_vehicle_ghost(
         &mut commands,
         &mut meshes,
@@ -85,11 +87,19 @@ pub fn update_ghost_position(
     cameras: Query<(&Camera, &GlobalTransform)>,
     mut ghost_q: Query<&mut Transform, With<GhostTag>>,
 ) {
-    let Some(spec) = pending.spec.as_ref() else { return };
-    let Some(ghost) = pending.ghost_root else { return };
+    let Some(spec) = pending.spec.as_ref() else {
+        return;
+    };
+    let Some(ghost) = pending.ghost_root else {
+        return;
+    };
     let Ok(window) = windows.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
-    let Ok((camera, cam_tr)) = cameras.single() else { return };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, cam_tr)) = cameras.single() else {
+        return;
+    };
     let Some(hit) = cursor_ray_to_ground(camera, cam_tr, cursor, 0.0) else {
         return;
     };
@@ -177,7 +187,9 @@ pub fn commit_or_cancel_ghost(
     }
 
     let Ok(window) = windows.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
 
     // Don't start a click while the pointer is hovering a panel.
     let over_ui = contexts
@@ -219,8 +231,12 @@ pub fn commit_or_cancel_ghost(
     }
 
     // Commit at the release position.
-    let Ok((camera, cam_tr)) = cameras.single() else { return };
-    let Some(hit) = cursor_ray_to_ground(camera, cam_tr, cursor, 0.0) else { return };
+    let Ok((camera, cam_tr)) = cameras.single() else {
+        return;
+    };
+    let Some(hit) = cursor_ray_to_ground(camera, cam_tr, cursor, 0.0) else {
+        return;
+    };
 
     if let Some(e) = pending.ghost_root.take() {
         commands.entity(e).despawn();

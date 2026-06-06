@@ -1,0 +1,83 @@
+#usda 1.0
+(
+    defaultPrim = "FlatTerrain"
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+
+def Xform "FlatTerrain"
+{
+    def Scope "Materials"
+    {
+        def Material "field_soil"
+        {
+            color3f inputs:diffuseColor.connect = </FlatTerrain/Materials/field_soil/DiffuseTex.outputs:rgb>
+            float inputs:roughness.connect = </FlatTerrain/Materials/field_soil/RoughnessTex.outputs:r>
+            float inputs:metallic = 0
+            token outputs:surface.connect = </FlatTerrain/Materials/field_soil/Surface.outputs:surface>
+
+            def Shader "PrimvarSt"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "DiffuseTex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../textures/terrain/Ground001/Ground001_1K-JPG_Color.jpg@
+                token inputs:sourceColorSpace = "sRGB"
+                token inputs:wrapS = "repeat"
+                token inputs:wrapT = "repeat"
+                float2 inputs:st.connect = </FlatTerrain/Materials/field_soil/PrimvarSt.outputs:result>
+                float3 outputs:rgb
+            }
+
+            def Shader "RoughnessTex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../textures/terrain/Ground001/Ground001_1K-JPG_Roughness.jpg@
+                token inputs:sourceColorSpace = "raw"
+                token inputs:wrapS = "repeat"
+                token inputs:wrapT = "repeat"
+                float2 inputs:st.connect = </FlatTerrain/Materials/field_soil/PrimvarSt.outputs:result>
+                float outputs:r
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </FlatTerrain/Materials/field_soil.inputs:diffuseColor>
+                float inputs:roughness.connect = </FlatTerrain/Materials/field_soil.inputs:roughness>
+                float inputs:metallic.connect = </FlatTerrain/Materials/field_soil.inputs:metallic>
+                token outputs:surface
+            }
+        }
+    }
+
+    def Mesh "terrain" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "MaterialBindingAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        uniform token physics:approximation = "none"
+        bool doubleSided = 1
+        rel material:binding = </FlatTerrain/Materials/field_soil>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 2, 3, 1]
+        point3f[] points = [
+            (-400, 400, 0),
+            (400, 400, 0),
+            (-400, -400, 0),
+            (400, -400, 0)
+        ]
+        texCoord2f[] primvars:st = [
+            (0, 0),
+            (100, 0),
+            (0, 100),
+            (100, 100)
+        ]
+        uniform token primvars:st:interpolation = "vertex"
+    }
+}

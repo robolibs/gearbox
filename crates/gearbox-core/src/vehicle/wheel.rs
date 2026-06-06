@@ -1,4 +1,9 @@
-//! Per-wheel spec for a raycast-based vehicle.
+//! Per-wheel spec for a physically-simulated vehicle.
+//!
+//! Each wheel becomes a real rigid body in `gearbox-physics`: a light
+//! hub carries the suspension (and steering, if steered) and the wheel
+//! body spins on the hub via a revolute joint. Traction comes from the
+//! tyre collider's actual contact with the ground.
 
 use datapod::Point;
 
@@ -8,41 +13,39 @@ pub struct WheelSpec {
     /// Connection point on the chassis in chassis-local coordinates (metres).
     pub chassis_connection: Point,
     /// Suspension direction in chassis-local coordinates. Typically
-    /// `(0, -1, 0)` — straight down.
+    /// `(0, -1, 0)` — straight down. Also the kingpin (steering) axis.
     pub suspension_dir: Point,
     /// Wheel axle direction in chassis-local coordinates. Typically
     /// `(±1, 0, 0)` — sideways across the chassis.
     pub axle_dir: Point,
+    /// Suspension rest length (metres): distance from `chassis_connection`
+    /// to the wheel centre when the spring is fully extended.
     pub suspension_rest_length: f64,
-    pub suspension_stiffness: f64,
-    pub suspension_damping: f64,
-    /// Upper bound on the spring force per wheel. Rapier's default (6000 N)
-    /// is enough for ~100-kg arcade cars; heavy vehicles must raise this
-    /// or the suspension saturates and the chassis sinks onto its collider.
-    pub max_suspension_force: f64,
-    pub friction_slip: f64,
+    /// Wheel rigid-body mass (kg). Drives the tyre's inertia and the
+    /// vehicle's unsprung mass.
+    pub mass: f64,
+    /// Suspension/steering hub body mass (kg). Small — the hub is an
+    /// internal massless-ish carrier.
+    pub hub_mass: f64,
+    /// Coulomb friction coefficient of the tyre collider against the
+    /// ground. ~1.0–1.4 for agricultural tyres.
+    pub tire_friction: f64,
     pub radius: f64,
     pub width: f64,
     /// Whether engine torque is applied to this wheel.
     pub driven: bool,
     /// Whether steering input rotates this wheel.
     pub steered: bool,
+    /// Maximum tractive force at the contact patch (N) at full throttle.
+    /// Converted to wheel torque internally (`force × radius`).
     pub max_engine_force: f64,
+    /// Maximum brake torque (N·m) at full brake.
     pub max_brake: f64,
     /// Maximum steering angle in radians (applied at `steer = ±1.0`).
     pub max_steer_rad: f64,
-    /// Optional offset (in chassis-local coordinates) from
-    /// `chassis_connection` to the STEERING PIVOT — i.e. the physical
-    /// kingpin axis, when that axis is offset from the wheel hub
-    /// (common on 4WIS gantry robots where the kingpin strut sits
-    /// outboard of the tyre). Default `(0, 0, 0)` → wheel pivots
-    /// around its own centre, which is standard car behaviour.
-    ///
-    /// Non-zero values are VISUAL ONLY: the wheel's raycast + engine
-    /// force still act at `chassis_connection`, but the rendered
-    /// wheel-centre is computed as if it were hanging off a kingpin
-    /// at `chassis_connection + steering_pivot_offset`, so the wheel
-    /// swings in an arc around that outboard kingpin when steering.
+    /// Optional offset (chassis-local) from `chassis_connection` to the
+    /// physical kingpin axis. Retained for asset/visual bookkeeping;
+    /// the physical model currently steers about the wheel centre.
     pub steering_pivot_offset: Point,
     /// USD prim path that should *be* this wheel's visual. When set,
     /// `gearbox-viz` skips spawning the procedural tyre cylinder and
@@ -63,8 +66,8 @@ pub struct WheelSpec {
     ///     rotation (around axle).
     ///   * the steer prim receives the steering rotation (around
     ///     kingpin).
-    /// `None` (default) → steer + spin both applied to `usd_prim_path`,
-    /// matching the simpler tractor layout.
+    ///     `None` (default) → steer + spin both applied to `usd_prim_path`,
+    ///     matching the simpler tractor layout.
     pub usd_steer_prim_path: Option<&'static str>,
 }
 
@@ -75,16 +78,15 @@ impl Default for WheelSpec {
             suspension_dir: Point::new(0.0, -1.0, 0.0),
             axle_dir: Point::new(1.0, 0.0, 0.0),
             suspension_rest_length: 0.25,
-            suspension_stiffness: 30.0,
-            suspension_damping: 4.5,
-            max_suspension_force: 50_000.0,
-            friction_slip: 5.0,
+            mass: 30.0,
+            hub_mass: 5.0,
+            tire_friction: 1.1,
             radius: 0.34,
             width: 0.22,
             driven: true,
             steered: false,
             max_engine_force: 4000.0,
-            max_brake: 20.0,
+            max_brake: 800.0,
             max_steer_rad: 0.0,
             steering_pivot_offset: Point::new(0.0, 0.0, 0.0),
             usd_prim_path: None,

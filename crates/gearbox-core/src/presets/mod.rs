@@ -15,6 +15,6 @@ mod tractor_articulated;
 pub use drone::drone;
 pub use husky::husky;
 pub use oxbo_harvester::oxbo_harvester;
-pub use registry::{all_presets, PresetEntry};
+pub use registry::{PresetEntry, all_presets};
 pub use robotti::robotti;
 pub use tractor_articulated::tractor_articulated;

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use zenoh::Wait;
 
-use crate::wire::{decode, encode, ClockCommand, ClockWire};
+use crate::wire::{ClockCommand, ClockWire, decode, encode};
 
 // ─── Topic keys ─────────────────────────────────────────────────────
 //

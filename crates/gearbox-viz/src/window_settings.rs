@@ -89,10 +89,7 @@ fn save_geometry(geometry: WindowGeometry) -> std::io::Result<()> {
         path,
         format!(
             "width={}\nheight={}\nx={}\ny={}\n",
-            geometry.width,
-            geometry.height,
-            geometry.position.x,
-            geometry.position.y
+            geometry.width, geometry.height, geometry.position.x, geometry.position.y
         ),
     )
 }
@@ -106,10 +103,10 @@ fn parse_geometry(contents: &str) -> Option<WindowGeometry> {
     for line in contents.lines() {
         let (key, value) = line.split_once('=')?;
         match key.trim() {
-            "width"  => width  = value.trim().parse::<f32>().ok(),
+            "width" => width = value.trim().parse::<f32>().ok(),
             "height" => height = value.trim().parse::<f32>().ok(),
-            "x"      => x      = value.trim().parse::<i32>().ok(),
-            "y"      => y      = value.trim().parse::<i32>().ok(),
+            "x" => x = value.trim().parse::<i32>().ok(),
+            "y" => y = value.trim().parse::<i32>().ok(),
             _ => {}
         }
     }

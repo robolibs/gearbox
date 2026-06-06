@@ -27,19 +27,23 @@ pub fn wasd_input_system(
     // which pivots the wheels left — so A (turn left) maps to
     // +steer. Drones reuse the same axis for strafe.
     let steer = axis(&keys, KeyCode::KeyA, KeyCode::KeyD);
-    let brake = if keys.pressed(KeyCode::Space) { 1.0 } else { 0.0 };
+    let brake = if keys.pressed(KeyCode::Space) {
+        1.0
+    } else {
+        0.0
+    };
     // Drone-only axes (zero for ground vehicles):
     //   Q/E — yaw left/right
     //   Z/X — ascend/descend
     let yaw = axis(&keys, KeyCode::KeyQ, KeyCode::KeyE);
     let lift = axis(&keys, KeyCode::KeyZ, KeyCode::KeyX);
 
-    // ControlInput is f64 (matches rapier-f64). Inputs are f32, so
-    // upcast at the boundary.
+    // ControlInput is f64 (matches rapier-f64). Axis inputs are f32,
+    // so upcast at the boundary.
     let ctrl = ControlInput {
         throttle: throttle as f64,
         steer: steer as f64,
-        brake: brake as f64,
+        brake,
         yaw: yaw as f64,
         lift: lift as f64,
     };

@@ -37,8 +37,7 @@ impl DriveController for OmniController {
         // Power gate: zero all drive + hold steering if any battery/
         // fuel source is empty. The wheels coast; body can still drift.
         if !ctx.spec.power.is_engine_live() {
-            for idx in 0..ctx.wheels.len() {
-                let spec = &specs[idx];
+            for (idx, spec) in specs.iter().enumerate().take(ctx.wheels.len()) {
                 if let Some(mut w) = ctx.wheels.get_mut(idx) {
                     w.set_engine_force(0.0);
                     w.set_brake(ctrl.brake * spec.max_brake * frame.brake_gate);
@@ -98,8 +97,7 @@ impl DriveController for OmniController {
                     0.0
                 };
                 let crab = ctrl.lift * max_steer;
-                target_steer[idx] =
-                    (front_angle + rear_angle + crab).clamp(-max_steer, max_steer);
+                target_steer[idx] = (front_angle + rear_angle + crab).clamp(-max_steer, max_steer);
 
                 // Kinematic diff — each wheel's engine force scaled
                 // by its radius from the Ackermann turn centre vs the
@@ -131,7 +129,9 @@ impl DriveController for OmniController {
         let max_delta = STEER_RATE * ctx.dt;
         for idx in 0..ctx.wheels.len() {
             let spec = &specs[idx];
-            let Some(mut w) = ctx.wheels.get_mut(idx) else { continue };
+            let Some(mut w) = ctx.wheels.get_mut(idx) else {
+                continue;
+            };
             w.set_engine_force(engine_force[idx]);
             w.set_brake(ctrl.brake * spec.max_brake * frame.brake_gate);
             // Rate-limit so an instant 0°→90° doesn't shove the body.

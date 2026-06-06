@@ -14,6 +14,7 @@ use gearbox_viz::{GearboxSim, SimClock};
 
 use super::selection::Selection;
 use super::style::AccentColor;
+use super::usd_load::UsdSelectable;
 
 // Re-export so callers that still import from
 // `super::selection_ring::{SelectionRingPlugin, SelectionRingSettings}`
@@ -41,11 +42,23 @@ pub fn update_selection_ring(
     clock: Res<SimClock>,
     accent: Res<AccentColor>,
     mut target: ResMut<SelectionRing>,
+    usd_selected: Query<(&GlobalTransform, &UsdSelectable)>,
 ) {
     // Drive-mode marker only — edit-mode (paused) uses transform
     // gizmos instead.
     if clock.paused {
         target.anchor = None;
+        return;
+    }
+    // USD-loaded asset selected: ring sits at its world position
+    // sized to its `pick_radius`. Same colour / fade as vehicles.
+    if let Some(usd_entity) = selection.usd_entity
+        && let Ok((gt, sel)) = usd_selected.get(usd_entity)
+    {
+        let pos = gt.translation();
+        target.anchor = Some(Vec3::new(pos.x, RING_GROUND_OFFSET, pos.z));
+        target.outer_radius = sel.pick_radius.max(MIN_OUTER_RADIUS_GROUND);
+        target.color = egui_to_color(accent.0);
         return;
     }
     let Some(id) = selection.vehicle else {
