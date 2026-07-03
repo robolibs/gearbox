@@ -71,7 +71,7 @@ jobs:
           shared-key: release-${{ matrix.target }}
 
       - name: Build gearbox binary
-        run: make build-release-bin CARGO_ENV=cargo TARGET=${{ matrix.target }}
+        run: make build-release-bin CARGO_ENV=cargo LOCKED= TARGET=${{ matrix.target }}
 
       - name: Package archive
         shell: bash

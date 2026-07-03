@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
-PROJECT_NAME := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | head -1 | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
-PROJECT_VERSION := $(shell if [ -f PROJECT ]; then sed -n '/^[[:space:]]*[^#\[[:space:]]/p' PROJECT | sed -n '2p' | tr -d '[:space:]'; else sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1; fi)
+PROJECT_NAME := $(shell awk 'NF && $$1 !~ /^#/ { print $$1; exit }' PROJECT 2>/dev/null)
+PROJECT_VERSION := $(shell awk -F'"' '/^[[:space:]]*version[[:space:]]*=/ { print $$2; exit }' Cargo.toml)
 ifeq ($(PROJECT_NAME),)
     $(error Error: PROJECT file not found or invalid)
 endif
@@ -12,7 +12,7 @@ NIX := nix develop --impure -c
 CARGO_ENV := $(NIX) $(CARGO)
 TARGET ?=
 TARGET_ARG := $(if $(TARGET),--target $(TARGET),)
-LOCKED ?= --locked
+LOCKED ?=
 RUN_WITH ?= nixVulkan
 RUN_ARGS ?=
 BACKEND ?= wayland

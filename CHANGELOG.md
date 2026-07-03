@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.4] - 2026-07-03
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Refactor project metadata extraction
+
 ## [0.0.3] - 2026-07-03
 
 ### <!-- 0 -->⛰️  Features
