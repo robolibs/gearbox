@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.3] - 2026-07-03
+
+### <!-- 0 -->⛰️  Features
+
+- Add GitHub Actions for release automation
+- Update dependency references to git
+
 ## [0.0.2] - 2026-06-06
 
 ### <!-- 0 -->⛰️  Features
