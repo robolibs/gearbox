@@ -9,6 +9,7 @@ endif
 TOP_DIR := $(CURDIR)
 CARGO := cargo
 NIX := nix develop --impure -c
+CARGO_ENV := $(NIX) $(CARGO)
 RUN_WITH ?= nixVulkan
 RUN_ARGS ?=
 BACKEND ?= wayland
@@ -23,7 +24,7 @@ $(info ------------------------------------------)
 .PHONY: build b compile c run r test t check fmt bench clean bind bind-c bind-py help h
 
 build:
-	@$(CARGO) build --lib
+	@$(CARGO_ENV) build --lib
 
 b: build
 
@@ -39,15 +40,15 @@ run:
 r: run
 
 test:
-	@$(CARGO) test --all-targets
+	@$(CARGO_ENV) test --all-targets
 
 t: test
 
 check:
-	@$(CARGO) check --all-targets
+	@$(CARGO_ENV) check --all-targets
 
 fmt:
-	@$(CARGO) fmt --all
+	@$(CARGO_ENV) fmt --all
 
 clean:
 	@$(CARGO) clean
@@ -55,7 +56,7 @@ clean:
 bind: bind-c bind-py
 
 bind-c:
-	@$(CARGO) build --lib
+	@$(CARGO_ENV) build --lib
 	@cbindgen --config cbindgen.toml --crate $(PROJECT_NAME) \
 		--output include/$(PROJECT_NAME).h
 

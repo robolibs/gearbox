@@ -2394,6 +2394,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 [[package]]
 name = "datapod"
 version = "0.4.0"
+source = "git+https://codeberg.org/robolibs/datapod#9a67f9d56ff32173a44d5014ec7d98a445957337"
 dependencies = [
  "bytemuck",
  "datapod-macros",
@@ -2402,6 +2403,7 @@ dependencies = [
 [[package]]
 name = "datapod-macros"
 version = "0.0.1"
+source = "git+https://codeberg.org/robolibs/datapod#9a67f9d56ff32173a44d5014ec7d98a445957337"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3144,7 +3146,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -3164,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-api"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bevy",
  "ciborium",
@@ -3176,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-link"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "aeronet",
  "aeronet_webtransport",
@@ -3188,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-world"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bevy",
  "bevy_glacial 0.0.1 (git+https://github.com/bresilla/bevy_glacial?rev=eb67675)",
@@ -7546,6 +7548,7 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 [[package]]
 name = "usd_bevy"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_openusd#1d1085031ad12da6ba126382cbede9fdba5fb391"
 dependencies = [
  "anyhow",
  "bevy",
@@ -7564,6 +7567,7 @@ dependencies = [
 [[package]]
 name = "usd_rapier"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_openusd#1d1085031ad12da6ba126382cbede9fdba5fb391"
 dependencies = [
  "anyhow",
  "glam 0.30.10",
@@ -7576,6 +7580,7 @@ dependencies = [
 [[package]]
 name = "usd_schema"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_openusd#1d1085031ad12da6ba126382cbede9fdba5fb391"
 dependencies = [
  "anyhow",
  "glam 0.30.10",
