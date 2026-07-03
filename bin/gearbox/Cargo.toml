@@ -29,11 +29,7 @@ bevy_glacial = { git = "https://github.com/bresilla/bevy_glacial", branch = "mai
 # wires them together with a minimal world / UI on top.
 usd_bevy.workspace = true
 
-# Schema crate — the viewer's Cameras panel matches against
-# `usd_schema::camera::Projection` to label authored cameras with
-# `persp` / `ortho`. usd_bevy does not re-export this enum, so the
-# binary depends on the schema crate directly.
-usd_schema = { path = "../../../../other/OUSD/bevy_openusd/crates/usd_schema" }
+usd_schema.workspace = true
 openusd.workspace = true
 zenoh.workspace = true
 serde = { version = "1", features = ["derive"] }

@@ -9,13 +9,13 @@ members = [
 
 # Shared metadata. Each member inherits with `version.workspace = true`.
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
 # Local sibling crate — spatial types the whole gearbox stack speaks.
-datapod = { path = "../datapod" }
+datapod = { git = "https://codeberg.org/robolibs/datapod" }
 
 # Physics backend — f64 variant of rapier3d. Matches datapod's f64
 # spatial types, so every boundary crossing stops needing a lossy
@@ -97,5 +97,7 @@ bevy_glacial    = { git = "https://github.com/bresilla/bevy_glacial", rev = "eb6
 # (`asset_path#variants:...`) — without it, `load_with_settings`
 # collapses every variant request onto a single handle and the
 # last load wins for every consumer.
-usd_bevy        = { path = "../../other/OUSD/bevy_openusd/crates/usd_bevy" }
+# usd_bevy        = { path = "../../other/OUSD/bevy_openusd/crates/usd_bevy" }
+usd_bevy        = { git = "https://github.com/bresilla/bevy_openusd", package = "usd_bevy" }
+usd_schema      = { git = "https://github.com/bresilla/bevy_openusd", package = "usd_schema" }
 openusd         = { git = "https://github.com/mxpv/openusd", rev = "fe92b73224c611831be244afac9cf7654b5ef51e" }

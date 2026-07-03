@@ -9,6 +9,10 @@ endif
 TOP_DIR := $(CURDIR)
 CARGO := cargo
 NIX := nix develop --impure -c
+CARGO_ENV := $(NIX) $(CARGO)
+TARGET ?=
+TARGET_ARG := $(if $(TARGET),--target $(TARGET),)
+LOCKED ?= --locked
 RUN_WITH ?= nixVulkan
 RUN_ARGS ?=
 BACKEND ?= wayland
@@ -20,12 +24,15 @@ $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info Display: $(BACKEND) backend)
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r test t check fmt bench clean bind bind-c bind-py help h
+.PHONY: build b build-release-bin compile c run r test t check fmt bench clean bind bind-c bind-py help h
 
 build:
-	@$(CARGO) build --lib
+	@$(CARGO_ENV) build --lib
 
 b: build
+
+build-release-bin:
+	@$(CARGO_ENV) build --release $(LOCKED) -p gearbox --bin gearbox $(TARGET_ARG)
 
 compile:
 	@$(CARGO) clean
@@ -39,15 +46,15 @@ run:
 r: run
 
 test:
-	@$(CARGO) test --all-targets
+	@$(CARGO_ENV) test --all-targets
 
 t: test
 
 check:
-	@$(CARGO) check --all-targets
+	@$(CARGO_ENV) check --all-targets
 
 fmt:
-	@$(CARGO) fmt --all
+	@$(CARGO_ENV) fmt --all
 
 clean:
 	@$(CARGO) clean
@@ -55,7 +62,7 @@ clean:
 bind: bind-c bind-py
 
 bind-c:
-	@$(CARGO) build --lib
+	@$(CARGO_ENV) build --lib
 	@cbindgen --config cbindgen.toml --crate $(PROJECT_NAME) \
 		--output include/$(PROJECT_NAME).h
 
@@ -84,6 +91,8 @@ help:
 	@echo
 	@echo "Available targets:"
 	@echo "  build        Build the library"
+	@echo "  build-release-bin"
+	@echo "               Build the release gearbox binary"
 	@echo "  compile      Clean and rebuild"
 	@echo "  run          Run the gearbox binary ($(BACKEND) backend, $(RUN_WITH) wrapper)"
 	@echo "  test         Run all tests"

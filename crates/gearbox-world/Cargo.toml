@@ -14,4 +14,4 @@ bevy_glacial.workspace = true
 # resource so USD-loaded bodies actually rest on the ground rather than
 # falling through it. This is the only point of contact between the
 # gearbox world layer and the USD physics adapter.
-usd_bevy = { path = "../../../../other/OUSD/bevy_openusd/crates/usd_bevy" }
+usd_bevy.workspace = true
