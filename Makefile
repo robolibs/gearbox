@@ -1,9 +1,9 @@
 SHELL := /bin/bash
 
-PROJECT_NAME := $(shell awk 'NF && $$1 !~ /^#/ { print $$1; exit }' PROJECT 2>/dev/null)
-PROJECT_VERSION := $(shell awk -F'"' '/^[[:space:]]*version[[:space:]]*=/ { print $$2; exit }' Cargo.toml)
+PROJECT_NAME := $(shell grep '^name =' bin/gearbox/Cargo.toml | head -n 1 | cut -d '"' -f 2)
+PROJECT_VERSION := $(shell grep '^version =' Cargo.toml | head -n 1 | cut -d '"' -f 2)
 ifeq ($(PROJECT_NAME),)
-    $(error Error: PROJECT file not found or invalid)
+    $(error Error: package name not found in bin/gearbox/Cargo.toml)
 endif
 
 TOP_DIR := $(CURDIR)
