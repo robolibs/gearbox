@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.5] - 2026-07-03
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Refactor project metadata and remove macos-x86_64
+
 ## [0.0.4] - 2026-07-03
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
