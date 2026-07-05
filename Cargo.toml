@@ -88,6 +88,7 @@ aeronet_webtransport = { version = "0.21", default-features = false }
 
 gearbox-api     = { path = "crates/gearbox-api" }
 gearbox-link    = { path = "crates/gearbox-link" }
+mara            = { git = "https://github.com/bresilla/mara", branch = "develop", package = "mara", default-features = false }
 bevy_mara       = { git = "https://github.com/bresilla/mara", branch = "develop", package = "bevy_mara", default-features = false }
 # Vendored from bevy_openusd because upstream still pins older Bevy
 # APIs. Keep the local copy on the same Bevy major as gearbox.

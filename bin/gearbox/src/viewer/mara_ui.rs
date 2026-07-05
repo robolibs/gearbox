@@ -1,18 +1,23 @@
-//! Thin Gearbox-side compatibility layer over Mara.
+//! Gearbox viewer UI helpers backed by Mara.
 //!
-//! Gearbox's viewer UI still uses the early panel/ribbon helper shape.
-//! Mara is the replacement crate, but its public API moved to
-//! slot ribbons and typed UI surfaces. Keeping this shim local lets the
-//! app drop the old UI crate while we migrate the panel code incrementally.
+//! The ribbon rail and command palette below go through Mara's real
+//! renderers. The panel bodies still accept raw `egui::Ui` closures
+//! because the legacy Gearbox panels have not yet been converted to
+//! typed Mara `PaneBody`/`Pod` content.
 
 use std::hash::Hash;
 use std::ops::RangeInclusive;
 
 use bevy_egui::egui;
+use mara::prelude::MaraHostCtx;
 
+pub use bevy_mara::pane::{Pane, PaneAnchor, PaneBody, PaneResize, RailZone};
+pub use bevy_mara::pod::{Pod, PodResponse};
+pub use bevy_mara::vocab::Id as MaraId;
 pub use bevy_mara::{
-    AccentColor, CommandPaletteState, GlassOpacity, PaletteItem, RibbonCluster, RibbonDrag,
-    RibbonEdge, RibbonGlyph, RibbonMode, RibbonOpen, RibbonPlacement, RibbonRole, RibbonWidth,
+    AccentColor, CommandPaletteState, GlassOpacity, PaletteItem, ResolvedSlotRibbon, RibbonAction,
+    RibbonCluster, RibbonDrag, RibbonEdge, RibbonGlyph, RibbonMode, RibbonOpen, RibbonPlacement,
+    RibbonRole, RibbonScope, RibbonSlotItem, RibbonWidth,
 };
 
 pub mod style {
@@ -74,87 +79,189 @@ pub fn draw_assembly(
     ribbons: &[RibbonDef],
     items: &[RibbonItem],
     open: &mut RibbonOpen,
-    _placement: &mut RibbonPlacement,
-    _drag: &mut RibbonDrag,
+    placement: &mut RibbonPlacement,
+    drag: &mut RibbonDrag,
     is_active: impl Fn(&'static str) -> bool,
 ) -> Vec<RibbonClick> {
-    let accent = accent.into();
-    let mut clicks = Vec::new();
+    let accent: egui::Color32 = accent.into();
+    let host = MaraHostCtx::ui_only(ctx, None);
+    host.publish_ribbon_pane_ids(
+        items
+            .iter()
+            .filter(|item| item.role.unwrap_or(RibbonRole::Panel) == RibbonRole::Panel)
+            .map(|item| bevy_mara::vocab::Id::new(item.id)),
+    );
+
+    let mut resolved = Vec::new();
     for ribbon in ribbons {
-        let anchor = match ribbon.edge {
-            RibbonEdge::Left => egui::Align2::LEFT_TOP,
-            RibbonEdge::Right => egui::Align2::RIGHT_TOP,
-            RibbonEdge::Top => egui::Align2::LEFT_TOP,
-            RibbonEdge::Bottom => egui::Align2::LEFT_BOTTOM,
-        };
-        let offset = match ribbon.edge {
-            RibbonEdge::Left => egui::vec2(6.0, 48.0),
-            RibbonEdge::Right => egui::vec2(-6.0, 48.0),
-            RibbonEdge::Top => egui::vec2(48.0, 6.0),
-            RibbonEdge::Bottom => egui::vec2(48.0, -6.0),
-        };
-        egui::Area::new(egui::Id::new(("gearbox_mara_ribbon", ribbon.id)))
-            .anchor(anchor, offset)
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                let vertical = matches!(ribbon.edge, RibbonEdge::Left | RibbonEdge::Right);
-                let mut ribbon_items: Vec<&RibbonItem> = items
-                    .iter()
-                    .filter(|item| item.ribbon == ribbon.id)
-                    .collect();
-                ribbon_items.sort_by_key(|item| (cluster_order(item.cluster), item.slot));
-                let mut add_items = |ui: &mut egui::Ui, clicks: &mut Vec<RibbonClick>| {
-                    for item in &ribbon_items {
-                        let active = open.is_open(item.ribbon, item.id) || is_active(item.id);
-                        let fill = if active {
-                            accent
-                        } else {
-                            egui::Color32::from_rgba_unmultiplied(24, 28, 34, 210)
-                        };
-                        let stroke = if active {
-                            egui::Stroke::new(1.0, accent)
-                        } else {
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(56))
-                        };
-                        let button = egui::Button::new(glyph_label(item.glyph))
-                            .min_size(egui::Vec2::splat(34.0))
-                            .fill(fill)
-                            .stroke(stroke);
-                        let mut response = ui.add(button);
-                        if !item.tooltip.is_empty() {
-                            response = response.on_hover_text(item.tooltip);
-                        }
-                        if response.clicked() {
-                            let role = item.role.unwrap_or(ribbon.role);
-                            if role != RibbonRole::Icon {
-                                open.toggle(item.ribbon, item.id);
-                            }
-                            clicks.push(RibbonClick { item: item.id });
-                        }
+        for cluster in [
+            RibbonCluster::Start,
+            RibbonCluster::Middle,
+            RibbonCluster::End,
+        ] {
+            let mut ribbon_items: Vec<&RibbonItem> = items
+                .iter()
+                .filter(|item| item.ribbon == ribbon.id && item.cluster == cluster)
+                .collect();
+            ribbon_items.sort_by_key(|item| item.slot);
+            let mut slot_items: Vec<RibbonSlotItem> = ribbon_items
+                .into_iter()
+                .map(|item| {
+                    let mut slot_item = RibbonSlotItem::featureful(
+                        item.id,
+                        glyph_icon_payload(item.glyph),
+                        item.id,
+                        item.tooltip,
+                        RibbonAction::Command(bevy_mara::vocab::Id::new(item.id)),
+                    )
+                    .with_role(item.role.unwrap_or(ribbon.role))
+                    .draggable(ribbon.draggable);
+                    if let Some(child) = item.child_ribbon {
+                        slot_item = slot_item.with_child_ribbon(child);
                     }
-                };
-                if vertical {
-                    ui.vertical(|ui| add_items(ui, &mut clicks));
-                } else {
-                    ui.horizontal(|ui| add_items(ui, &mut clicks));
-                }
+                    slot_item.active = is_active(item.id);
+                    slot_item
+                })
+                .collect();
+            if slot_items.is_empty() {
+                continue;
+            }
+            resolved.push(ResolvedSlotRibbon {
+                id: bevy_mara::vocab::Id::new((ribbon.id, cluster)),
+                chrome_id: Some(ribbon.id),
+                scope: ribbon_scope(ribbon.id),
+                edge: ribbon.edge,
+                role: ribbon.role,
+                mode: ribbon.mode,
+                cluster,
+                accepts: ribbon.accepts,
+                items: std::mem::take(&mut slot_items),
             });
+        }
     }
-    clicks
+
+    host.draw_slot_ribbons_featureful(accent, &resolved, open, placement, drag)
+        .into_iter()
+        .filter_map(|click| {
+            items
+                .iter()
+                .find(|item| click.item == bevy_mara::vocab::Id::new(item.id))
+                .map(|item| RibbonClick { item: item.id })
+        })
+        .collect()
 }
 
-fn cluster_order(cluster: RibbonCluster) -> u8 {
-    match cluster {
-        RibbonCluster::Start => 0,
-        RibbonCluster::Middle => 1,
-        RibbonCluster::End => 2,
+fn ribbon_scope(_ribbon_id: &'static str) -> RibbonScope {
+    RibbonScope::View(bevy_mara::ViewId::new("gearbox.viewer"))
+}
+
+fn glyph_icon_payload(glyph: RibbonGlyph) -> &'static str {
+    let payload = match glyph {
+        RibbonGlyph::Text(s) | RibbonGlyph::Icon(s) | RibbonGlyph::Svg(s) => s,
+    };
+    if bevy_mara::icons::is_icon_payload(payload) {
+        payload
+    } else {
+        "apps"
     }
 }
 
-fn glyph_label(glyph: RibbonGlyph) -> &'static str {
-    match glyph {
-        RibbonGlyph::Text(s) | RibbonGlyph::Icon(s) => s,
-        RibbonGlyph::Svg(_) => "◇",
+fn item_parts<'a>(
+    ribbons: &'a [RibbonDef],
+    items: &'a [RibbonItem],
+    placement: &RibbonPlacement,
+    item: &'static str,
+) -> Option<(&'a RibbonDef, RibbonCluster)> {
+    let item = items.iter().find(|candidate| candidate.id == item)?;
+    let (ribbon_id, cluster, _) =
+        placement.resolve_parts(item.id, item.ribbon, item.cluster, item.slot);
+    let ribbon = ribbons.iter().find(|candidate| candidate.id == ribbon_id)?;
+    Some((ribbon, cluster))
+}
+
+fn live_panel_anchor(
+    ribbons: &[RibbonDef],
+    items: &[RibbonItem],
+    placement: &RibbonPlacement,
+    item: &'static str,
+) -> Option<bevy_mara::pane::PaneAnchor> {
+    let (ribbon, cluster) = item_parts(ribbons, items, placement, item)?;
+    let zone = match cluster {
+        RibbonCluster::Start => bevy_mara::pane::RailZone::Start,
+        RibbonCluster::Middle => bevy_mara::pane::RailZone::Middle,
+        RibbonCluster::End => bevy_mara::pane::RailZone::End,
+    };
+    let edge = bevy_mara::phone_remapped_ribbon_edge(ribbon.edge, cluster, ribbon_scope(ribbon.id));
+    Some(match edge {
+        RibbonEdge::Left => bevy_mara::pane::PaneAnchor::LeftRail(zone),
+        RibbonEdge::Right => bevy_mara::pane::PaneAnchor::RightRail(zone),
+        RibbonEdge::Top => bevy_mara::pane::PaneAnchor::TopRail(zone),
+        RibbonEdge::Bottom => bevy_mara::pane::PaneAnchor::BottomRail(zone),
+    })
+}
+
+pub fn show_mara_pane_for_item<'spec>(
+    ctx: &egui::Context,
+    ribbons: &[RibbonDef],
+    items: &[RibbonItem],
+    placement: &RibbonPlacement,
+    item: &'static str,
+    title: &'static str,
+    accent: impl Into<egui::Color32>,
+    add: impl FnOnce(&mut PaneBody<'_, 'spec>),
+) {
+    let accent: egui::Color32 = accent.into();
+    let anchor = live_panel_anchor(ribbons, items, placement, item)
+        .unwrap_or(PaneAnchor::LeftRail(RailZone::Start));
+    let host = MaraHostCtx::ui_only(ctx, None);
+    host.publish_ribbon_pane_ids(
+        items
+            .iter()
+            .filter(|item| item.role.unwrap_or(RibbonRole::Panel) == RibbonRole::Panel)
+            .map(|item| MaraId::new(item.id)),
+    );
+    host.show_pane(
+        Pane::new(item, title, anchor, accent).resize(PaneResize::SPAN),
+        add,
+    );
+}
+
+fn panel_pos(
+    ctx: &egui::Context,
+    ribbons: &[RibbonDef],
+    items: &[RibbonItem],
+    placement: &RibbonPlacement,
+    item: &'static str,
+    size: egui::Vec2,
+) -> egui::Pos2 {
+    let rect = ctx.content_rect();
+    let gap = bevy_mara::ribbon_clearance() + 10.0;
+    let Some(anchor) = live_panel_anchor(ribbons, items, placement, item) else {
+        return rect.left_top() + egui::vec2(gap, 48.0);
+    };
+    let y_for_zone = |zone| match zone {
+        bevy_mara::pane::RailZone::Start => rect.top() + 48.0,
+        bevy_mara::pane::RailZone::Middle => rect.center().y - size.y * 0.5,
+        bevy_mara::pane::RailZone::End => rect.bottom() - size.y - 48.0,
+    };
+    let x_for_zone = |zone| match zone {
+        bevy_mara::pane::RailZone::Start => rect.left() + 48.0,
+        bevy_mara::pane::RailZone::Middle => rect.center().x - size.x * 0.5,
+        bevy_mara::pane::RailZone::End => rect.right() - size.x - 48.0,
+    };
+    match anchor {
+        bevy_mara::pane::PaneAnchor::LeftRail(zone) => {
+            egui::pos2(rect.left() + gap, y_for_zone(zone))
+        }
+        bevy_mara::pane::PaneAnchor::RightRail(zone) => {
+            egui::pos2(rect.right() - size.x - gap, y_for_zone(zone))
+        }
+        bevy_mara::pane::PaneAnchor::TopRail(zone) => {
+            egui::pos2(x_for_zone(zone), rect.top() + gap)
+        }
+        bevy_mara::pane::PaneAnchor::BottomRail(zone) => {
+            egui::pos2(x_for_zone(zone), rect.bottom() - size.y - gap)
+        }
     }
 }
 
@@ -190,9 +297,9 @@ impl PaneBuilder<'_> {
 
 pub fn floating_window_for_item(
     ctx: &egui::Context,
-    _ribbons: &[RibbonDef],
-    _items: &[RibbonItem],
-    _placement: &RibbonPlacement,
+    ribbons: &[RibbonDef],
+    items: &[RibbonItem],
+    placement: &RibbonPlacement,
     item: &'static str,
     title: &'static str,
     size: egui::Vec2,
@@ -203,10 +310,36 @@ pub fn floating_window_for_item(
     let accent = accent.into();
     egui::Window::new(title)
         .id(egui::Id::new(("gearbox_mara_panel", item)))
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(true)
+        .fixed_pos(panel_pos(ctx, ribbons, items, placement, item, size))
+        .frame(
+            egui::Frame::window(&ctx.global_style())
+                .fill(egui::Color32::from_rgba_unmultiplied(12, 15, 22, 232))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 145),
+                ))
+                .inner_margin(egui::Margin::same(10)),
+        )
         .default_size(size)
         .min_width(size.x.min(220.0))
         .open(keep)
         .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(title)
+                        .strong()
+                        .color(style::TEXT_PRIMARY),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new("Mara").small().color(accent));
+                });
+            });
+            ui.add_space(style::space::TIGHT);
+            ui.separator();
+            ui.add_space(style::space::BLOCK);
             let mut pane = PaneBuilder { ui, accent };
             add(&mut pane);
         });
@@ -540,55 +673,7 @@ pub fn command_palette(
     items: &[PaletteItem],
     accent: impl Into<egui::Color32>,
 ) -> Option<&'static str> {
-    if !state.open {
-        return None;
-    }
-    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-        state.open = false;
-        return None;
-    }
-
     let accent = accent.into();
-    let query = state.query.to_lowercase();
-    let mut picked = None;
-    egui::Window::new("Command palette")
-        .id(egui::Id::new("gearbox_mara_command_palette"))
-        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
-        .collapsible(false)
-        .resizable(false)
-        .default_width(520.0)
-        .show(ctx, |ui| {
-            ui.add_sized(
-                [ui.available_width(), 26.0],
-                egui::TextEdit::singleline(&mut state.query).hint_text("Search commands…"),
-            );
-            ui.add_space(style::space::BLOCK);
-            for item in items
-                .iter()
-                .filter(|item| query.is_empty() || item.label.to_lowercase().contains(&query))
-            {
-                let label = match item.hint {
-                    Some(hint) => format!("{}    {}", item.label, hint),
-                    None => item.label.to_owned(),
-                };
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 24.0],
-                        egui::Button::new(label).fill(egui::Color32::from_rgba_unmultiplied(
-                            accent.r(),
-                            accent.g(),
-                            accent.b(),
-                            24,
-                        )),
-                    )
-                    .clicked()
-                {
-                    picked = Some(item.id);
-                }
-            }
-        });
-    if picked.is_some() {
-        state.open = false;
-    }
-    picked
+    let host = MaraHostCtx::ui_only(ctx, None);
+    host.command_palette(state, items, accent)
 }

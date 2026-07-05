@@ -3098,6 +3098,7 @@ dependencies = [
  "bevy_mara",
  "ciborium",
  "gearbox-api",
+ "mara",
  "openusd",
  "pyo3",
  "rapier3d-f64",
@@ -4170,6 +4171,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
 dependencies = [
  "twox-hash 2.1.2",
+]
+
+[[package]]
+name = "mara"
+version = "0.3.3"
+source = "git+https://github.com/bresilla/mara?branch=develop#429f239a21a50c6497ba82a11e117080a5e868bb"
+dependencies = [
+ "egui",
+ "egui-wgpu",
+ "mara_core",
+ "wgpu",
 ]
 
 [[package]]

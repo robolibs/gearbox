@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 use bevy_egui::input::egui_wants_any_keyboard_input;
 
-use crate::viewer::mara_compat::RibbonOpen;
+use crate::viewer::mara_ui::RibbonOpen;
 use crate::viewer::overlays::DisplayToggles;
 use crate::viewer::state::ReloadRequest;
 use crate::viewer::ui::{

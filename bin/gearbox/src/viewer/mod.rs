@@ -5,7 +5,7 @@
 
 pub mod keyboard;
 pub mod log_panel;
-pub mod mara_compat;
+pub mod mara_ui;
 pub mod overlays;
 pub mod physics_overlay;
 pub mod state;

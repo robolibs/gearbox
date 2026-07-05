@@ -21,6 +21,7 @@ bevy.workspace = true
 bevy_egui.workspace = true
 
 # UI/scene helpers for this USD-only binary.
+mara.workspace = true
 bevy_mara.workspace = true
 
 # USD asset pipeline + rapier physics + animation playback. These
