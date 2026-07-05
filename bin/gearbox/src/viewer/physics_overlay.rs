@@ -19,16 +19,13 @@
 //!   line over every joint in the articulation.
 //!
 //! Independent from any physics engine — pure ECS-data visualisation.
-//! Joint shape primitives live in `bevy_glacial::joint_gizmos`.
+//! Joint shape primitives are local debug-gizmo helpers.
 
 use bevy::color::palettes::tailwind;
 use bevy::gizmos::config::{GizmoConfigGroup, GizmoConfigStore};
 use bevy::prelude::*;
 use bevy::reflect::Reflect;
-use bevy_glacial::joint_gizmos::{
-    draw_cone_wireframe, draw_distance_envelope, draw_prismatic_limit_segment,
-    draw_revolute_limit_arc,
-};
+use core::f32::consts::TAU;
 use usd_bevy::{
     UsdArticulationRoot, UsdDof, UsdJointKind, UsdMass, UsdPhysicsJoint, UsdPhysicsScene,
     UsdRigidBody,
@@ -273,6 +270,140 @@ fn draw_kind_limits(
     }
 }
 
+fn draw_revolute_limit_arc<C: GizmoConfigGroup>(
+    gizmos: &mut Gizmos<'_, '_, C>,
+    anchor: Vec3,
+    axis: Vec3,
+    lower_rad: f32,
+    upper_rad: f32,
+    radius: f32,
+    color: impl Into<Color>,
+    resolution: Option<u32>,
+) {
+    if lower_rad >= upper_rad || radius <= 0.0 {
+        return;
+    }
+    let z = axis.normalize_or_zero();
+    if z.length_squared() < 1e-6 {
+        return;
+    }
+    let seed = if z.abs().dot(Vec3::Y) < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let x0 = (seed - z * seed.dot(z)).normalize();
+    let y0 = z.cross(x0).normalize();
+    let segments = resolution.unwrap_or(32).max(4);
+    let color = color.into();
+    let mut prev = None;
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let a = lower_rad + (upper_rad - lower_rad) * t;
+        let p = anchor + (x0 * a.cos() + y0 * a.sin()) * radius;
+        if let Some(prev) = prev {
+            gizmos.line(prev, p, color);
+        }
+        prev = Some(p);
+    }
+}
+
+fn draw_prismatic_limit_segment<C: GizmoConfigGroup>(
+    gizmos: &mut Gizmos<'_, '_, C>,
+    anchor: Vec3,
+    axis: Vec3,
+    low_m: f32,
+    high_m: f32,
+    color: impl Into<Color>,
+) {
+    if low_m >= high_m {
+        return;
+    }
+    let dir = axis.normalize_or_zero();
+    if dir.length_squared() < 1e-6 {
+        return;
+    }
+    let color = color.into();
+    let p_low = anchor + dir * low_m;
+    let p_high = anchor + dir * high_m;
+    gizmos.line(p_low, p_high, color);
+
+    let seed = if dir.abs().dot(Vec3::Y) < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let perp = (seed - dir * seed.dot(dir)).normalize();
+    let perp2 = dir.cross(perp).normalize();
+    let tick = (high_m - low_m).abs() * 0.08;
+    for p in [p_low, p_high] {
+        gizmos.line(p - perp * tick, p + perp * tick, color);
+        gizmos.line(p - perp2 * tick, p + perp2 * tick, color);
+    }
+}
+
+fn draw_cone_wireframe<C: GizmoConfigGroup>(
+    gizmos: &mut Gizmos<'_, '_, C>,
+    apex: Vec3,
+    axis: Vec3,
+    half_angle_rad: f32,
+    height: f32,
+    segments: usize,
+    color: impl Into<Color>,
+) {
+    if half_angle_rad <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let dir = axis.normalize_or_zero();
+    if dir.length_squared() < 1e-6 {
+        return;
+    }
+    let color = color.into();
+    let n = segments.max(4);
+    let base_center = apex + dir * height;
+    let base_radius = height * half_angle_rad.tan();
+    let seed = if dir.abs().dot(Vec3::Y) < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let x = (seed - dir * seed.dot(dir)).normalize();
+    let y = dir.cross(x).normalize();
+    let mut verts = Vec::with_capacity(n);
+    for i in 0..n {
+        let theta = i as f32 / n as f32 * TAU;
+        verts.push(base_center + (x * theta.cos() + y * theta.sin()) * base_radius);
+    }
+    for i in 0..n {
+        gizmos.line(verts[i], verts[(i + 1) % n], color);
+        gizmos.line(apex, verts[i], color);
+    }
+}
+
+fn draw_distance_envelope<C: GizmoConfigGroup>(
+    gizmos: &mut Gizmos<'_, '_, C>,
+    centre: Vec3,
+    min_m: f32,
+    max_m: f32,
+    color_min: impl Into<Color>,
+    color_max: impl Into<Color>,
+) {
+    if min_m > 0.0 {
+        gizmos.sphere(
+            Isometry3d::from_translation(centre),
+            min_m,
+            color_min.into(),
+        );
+    }
+    if max_m > 0.0 {
+        gizmos.sphere(
+            Isometry3d::from_translation(centre),
+            max_m,
+            color_max.into(),
+        );
+    }
+}
+
 // ── Articulation chains ────────────────────────────────────────────────
 
 fn draw_articulation_chains(
@@ -386,7 +517,7 @@ fn anchor_world(body_gt: &GlobalTransform, local_pos: Vec3, local_rot: Quat) -> 
 }
 
 /// R/G/B triad at a world position + rotation. Inlined here (instead
-/// of using `bevy_glacial::draw_axis_triad_with_colors`) so we draw
+/// of using an external axis-triad helper) so we draw
 /// into our own gizmo group with the depth-bias in front.
 fn draw_triad(gizmos: &mut Gizmos<PhysicsGizmos>, origin: Vec3, rotation: Quat, length: f32) {
     let tip_x = origin + rotation * Vec3::X * length;

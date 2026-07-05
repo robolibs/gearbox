@@ -8,8 +8,8 @@ license.workspace = true
 [dependencies]
 bevy.workspace = true
 rapier3d.workspace = true
-# `ChaseCamera` rig (orbit / pan / zoom) for USD scene navigation.
-bevy_glacial.workspace = true
+# Mara Bevy scene helpers: `ChaseCamera` rig + ground grid.
+bevy_mara.workspace = true
 # We insert a ground collider directly into `usd_bevy`'s `PhysicsWorld`
 # resource so USD-loaded bodies actually rest on the ground rather than
 # falling through it. This is the only point of contact between the

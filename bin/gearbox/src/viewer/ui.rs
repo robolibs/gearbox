@@ -1,4 +1,4 @@
-//! Viewer UI for the gearbox simulator: bevy_frost ribbons + floating
+//! Viewer UI for the gearbox simulator: Mara ribbons + floating
 //! panels + widgets. Adapted from `bevy_openusd::ui` for multi-USD
 //! loading: the "stage" is whichever LoadedAsset entity is currently
 //! `ActiveStage`, and the prim tree is a two-level hierarchy (top:
@@ -11,9 +11,7 @@ use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
-use bevy_frost::prelude::*;
-use bevy_frost::style;
-use bevy_glacial::{ChaseCamera, EnumSet, GizmoMode, GizmoOptions, GizmoTarget, SelectionRing};
+use bevy_mara::{ChaseCamera, apply_rig};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use usd_bevy::{UsdAsset, UsdDisplayName, UsdKind, UsdPrimRef, UsdProcedural, UsdSpatialAudio};
@@ -23,6 +21,8 @@ use crate::controller::{
     ExternalControllerPolicy, ExternalControllerProcesses,
 };
 use crate::load::{LoadQueue, LoadedAsset, UsdAssetHandle};
+use crate::viewer::mara_compat::style;
+use crate::viewer::mara_compat::*;
 use crate::viewer::overlays::DisplayToggles;
 use crate::viewer::state::{
     ActiveStage, CameraBookmark, CameraBookmarks, CameraMount, FlyTo, LoadRequest, LoaderTuning,
@@ -59,7 +59,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("F"),
+        glyph: RibbonGlyph::Text("F"),
         tooltip: "File / selection",
         child_ribbon: None,
         role: None,
@@ -69,7 +69,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 1,
-        glyph: bevy_frost::RibbonGlyph::Text("T"),
+        glyph: RibbonGlyph::Text("T"),
         tooltip: "Prim tree (T)",
         child_ribbon: None,
         role: None,
@@ -79,7 +79,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 2,
-        glyph: bevy_frost::RibbonGlyph::Text("i"),
+        glyph: RibbonGlyph::Text("i"),
         tooltip: "Stage info (I)",
         child_ribbon: None,
         role: None,
@@ -89,7 +89,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 3,
-        glyph: bevy_frost::RibbonGlyph::Text("C"),
+        glyph: RibbonGlyph::Text("C"),
         tooltip: "Cameras",
         child_ribbon: None,
         role: None,
@@ -99,7 +99,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Middle,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("⚙"),
+        glyph: RibbonGlyph::Text("⚙"),
         tooltip: "Machine controllers",
         child_ribbon: None,
         role: None,
@@ -109,17 +109,17 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Middle,
         slot: 1,
-        glyph: bevy_frost::RibbonGlyph::Text("▶"),
+        glyph: RibbonGlyph::Text("▶"),
         tooltip: "Play / pause physics",
         child_ribbon: None,
-        role: Some(bevy_frost::RibbonRole::Icon),
+        role: Some(RibbonRole::Icon),
     },
     RibbonItem {
         id: RIB_OVERLAYS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("O"),
+        glyph: RibbonGlyph::Text("O"),
         tooltip: "Overlays (O)",
         child_ribbon: None,
         role: None,
@@ -129,7 +129,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 1,
-        glyph: bevy_frost::RibbonGlyph::Text("⏱"),
+        glyph: RibbonGlyph::Text("⏱"),
         tooltip: "Timeline",
         child_ribbon: None,
         role: None,
@@ -139,7 +139,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 2,
-        glyph: bevy_frost::RibbonGlyph::Text("?"),
+        glyph: RibbonGlyph::Text("?"),
         tooltip: "Controls (?)",
         child_ribbon: None,
         role: None,
@@ -149,7 +149,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 3,
-        glyph: bevy_frost::RibbonGlyph::Text("📜"),
+        glyph: RibbonGlyph::Text("📜"),
         tooltip: "Log",
         child_ribbon: None,
         role: None,
@@ -174,6 +174,23 @@ pub struct ViewerCommandPalette(pub CommandPaletteState);
 /// inside the active stage.
 #[derive(Resource, Default)]
 pub struct Selection(pub Option<Entity>);
+
+#[derive(Resource, Debug, Clone)]
+pub struct SelectionRing {
+    pub anchor: Option<Vec3>,
+    pub outer_radius: f32,
+    pub color: Color,
+}
+
+impl Default for SelectionRing {
+    fn default() -> Self {
+        Self {
+            anchor: None,
+            outer_radius: 1.0,
+            color: Color::srgb(0.9, 0.9, 0.95),
+        }
+    }
+}
 
 /// Queue of LoadedAsset entities to despawn (with rapier-body
 /// cleanup). Drained each frame.
@@ -264,13 +281,17 @@ pub struct ViewerUiPlugin;
 
 impl Plugin for ViewerUiPlugin {
     fn build(&self, app: &mut App) {
-        if !app.is_plugin_added::<bevy_frost::FrostPlugin>() {
-            app.add_plugins(bevy_frost::FrostPlugin);
-        }
-        app.init_resource::<TreeExpanded>()
+        app.init_resource::<AccentColor>()
+            .init_resource::<GlassOpacity>()
+            .init_resource::<RibbonOpen>()
+            .init_resource::<RibbonWidth>()
+            .init_resource::<RibbonPlacement>()
+            .init_resource::<RibbonDrag>()
+            .init_resource::<TreeExpanded>()
             .init_resource::<TreeFilter>()
             .init_resource::<ViewerCommandPalette>()
             .init_resource::<Selection>()
+            .init_resource::<SelectionRing>()
             .init_resource::<PendingDespawn>()
             .init_resource::<ActiveStage>()
             .init_resource::<StageInfo>()
@@ -291,6 +312,7 @@ impl Plugin for ViewerUiPlugin {
                     gate_gizmo_on_play,
                     sync_gizmo_target,
                     drive_selection_ring,
+                    draw_selection_ring,
                     drain_despawn,
                     auto_set_active_stage,
                     capture_active_stage_info,
@@ -305,6 +327,7 @@ impl Plugin for ViewerUiPlugin {
             .add_systems(
                 EguiPrimaryContextPass,
                 (
+                    apply_mara_theme,
                     draw_ribbons,
                     draw_selection_panel,
                     draw_tree_panel,
@@ -325,8 +348,19 @@ impl Plugin for ViewerUiPlugin {
 const PANEL_W: f32 = 340.0;
 const PANEL_H: f32 = 560.0;
 
-fn open_default_panel(mut ribbon: ResMut<bevy_frost::RibbonOpen>) {
+fn open_default_panel(mut ribbon: ResMut<RibbonOpen>) {
     ribbon.toggle(RIBBON_LEFT, RIB_TREE);
+}
+
+fn apply_mara_theme(
+    mut contexts: EguiContexts,
+    accent: Res<AccentColor>,
+    opacity: Res<GlassOpacity>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    bevy_mara::style::__internal_apply_theme(ctx, *accent, *opacity);
 }
 
 // ─── Selection ↔ ActiveStage helpers ──────────────────────────────
@@ -584,40 +618,11 @@ fn ray_aabb_world(
     }
 }
 
-fn sync_gizmo_target(
-    selection: Res<Selection>,
-    physics: Res<usd_bevy::physics::PhysicsActive>,
-    mut commands: Commands,
-    targets: Query<Entity, With<GizmoTarget>>,
-    loaded: Query<(), With<LoadedAsset>>,
-) {
-    // While physics is playing, the gizmo is hidden and the user
-    // shouldn't be moving things by hand. Detach any live targets and
-    // bail before re-attaching.
-    if physics.0 {
-        for e in targets.iter() {
-            commands.entity(e).remove::<GizmoTarget>();
-        }
-        return;
-    }
-    if !selection.is_changed() && targets.iter().count() == (selection.0.is_some() as usize) {
-        return;
-    }
-    let want = selection.0;
-    let mut already_correct = false;
-    for e in targets.iter() {
-        if Some(e) == want {
-            already_correct = true;
-        } else {
-            commands.entity(e).remove::<GizmoTarget>();
-        }
-    }
-    if let Some(e) = want
-        && !already_correct
-        && loaded.get(e).is_ok()
-    {
-        commands.entity(e).insert(GizmoTarget::default());
-    }
+fn sync_gizmo_target(_selection: Res<Selection>, _physics: Res<usd_bevy::physics::PhysicsActive>) {
+    // Mara replaces the old transform gizmo stack. The
+    // selection state is still kept for panels, active-stage picking,
+    // and the play-mode ring, but there is no external transform target
+    // component to synchronize anymore.
 }
 
 /// During play, the gizmo is hidden — so the selection ring is the
@@ -629,7 +634,7 @@ fn sync_gizmo_target(
 fn drive_selection_ring(
     selection: Res<Selection>,
     physics: Res<usd_bevy::physics::PhysicsActive>,
-    accent: Res<bevy_frost::prelude::AccentColor>,
+    accent: Res<AccentColor>,
     parents: Query<&ChildOf>,
     loaded: Query<Entity, With<LoadedAsset>>,
     aabbs: Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb)>,
@@ -684,6 +689,16 @@ fn drive_selection_ring(
         c.b() as f32 / 255.0,
         c.a() as f32 / 255.0,
     );
+}
+
+fn draw_selection_ring(ring: Res<SelectionRing>, mut gizmos: Gizmos) {
+    let Some(anchor) = ring.anchor else {
+        return;
+    };
+    let iso = Isometry3d::new(anchor, Quat::from_rotation_x(core::f32::consts::FRAC_PI_2));
+    gizmos
+        .circle(iso, ring.outer_radius.max(0.05), ring.color)
+        .resolution(96);
 }
 
 /// On the ON→OFF edge of `PhysicsActive`, rebase each LoadedAsset's
@@ -762,23 +777,10 @@ fn rebase_loaded_assets_on_pause(
     }
 }
 
-/// While physics is active, clear `GizmoOptions.gizmo_modes` so the
-/// transform-gizmo-bevy crate draws nothing and accepts no drags. On
-/// pause, restore the full mode set so handles reappear. Mirrors the
-/// old `gearbox-editor::transform_gizmos::apply_gizmo_options` rule.
-fn gate_gizmo_on_play(
-    physics: Res<usd_bevy::physics::PhysicsActive>,
-    mut options: ResMut<GizmoOptions>,
-) {
-    let want: EnumSet<GizmoMode> = if physics.0 {
-        EnumSet::empty()
-    } else {
-        GizmoMode::all()
-    };
-    if options.gizmo_modes != want {
-        options.gizmo_modes = want;
-    }
-}
+/// Legacy hook kept in the chain where the old transform gizmo was
+/// gated. Mara does not ship that gizmo, so play mode only affects the
+/// local selection ring now.
+fn gate_gizmo_on_play(_physics: Res<usd_bevy::physics::PhysicsActive>) {}
 
 fn drain_despawn(
     mut commands: Commands,
@@ -860,11 +862,15 @@ fn apply_reload_request(
 
 // ─── FlyTo tween (against ChaseCamera) ─────────────────────────────
 
-fn apply_fly_to(time: Res<Time>, mut fly: ResMut<FlyTo>, mut cameras: Query<&mut ChaseCamera>) {
+fn apply_fly_to(
+    time: Res<Time>,
+    mut fly: ResMut<FlyTo>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
     if fly.remaining <= 0.0 {
         return;
     }
-    let Ok(mut cam) = cameras.single_mut() else {
+    let Ok((mut cam, mut transform)) = cameras.single_mut() else {
         return;
     };
     let dt = time.delta_secs().min(1.0 / 30.0);
@@ -888,6 +894,7 @@ fn apply_fly_to(time: Res<Time>, mut fly: ResMut<FlyTo>, mut cameras: Query<&mut
     if let (Some(se), Some(te)) = (fly.start_elevation, fly.target_elevation) {
         cam.elevation = se + (te - se) * eased;
     }
+    apply_rig(&cam, &mut transform);
 }
 
 fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
@@ -1009,7 +1016,7 @@ fn draw_ribbons(
     let physics_on = physics.0;
     let clicks = draw_assembly(
         ctx,
-        accent.0,
+        Into::<egui::Color32>::into(accent.0),
         RIBBONS,
         RIBBON_ITEMS,
         &mut open,
@@ -1055,7 +1062,7 @@ fn draw_selection_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -1196,7 +1203,7 @@ fn draw_tree_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -1430,7 +1437,7 @@ fn draw_tree_panel(
                                                 egui::Layout::left_to_right(egui::Align::Center),
                                                 |ui| {
                                                     ui.add_space(depth as f32 * TREE_INDENT);
-                                                    let Some(mat) =
+                                                    let Some(mut mat) =
                                                         params.materials_assets.get_mut(*id)
                                                     else {
                                                         ui.label(
@@ -1961,7 +1968,7 @@ fn draw_tree_row(
         outcome.clicked = Some(entity);
     }
 
-    context_menu_frost(&resp.body, accent, |ui| {
+    context_menu_mara(&resp.body, accent, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         if wide_button(ui, "Fly to", accent).clicked() {
             outcome.ctx_action = Some(CtxAction::FlyTo(entity));
@@ -2084,7 +2091,7 @@ fn draw_info_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2225,7 +2232,7 @@ fn draw_controllers_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2461,7 +2468,7 @@ fn draw_cameras_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2612,7 +2619,7 @@ fn draw_overlays_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2731,7 +2738,7 @@ fn draw_timeline_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2807,7 +2814,7 @@ fn draw_keys_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2864,7 +2871,7 @@ fn draw_log_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2965,7 +2972,8 @@ fn draw_palette_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let Some(id) = command_palette(ctx, &mut palette.0, PALETTE_ITEMS, accent.0) else {
+    let accent_col: egui::Color32 = accent.0.into();
+    let Some(id) = command_palette(ctx, &mut palette.0, PALETTE_ITEMS, accent_col) else {
         return;
     };
     match id {

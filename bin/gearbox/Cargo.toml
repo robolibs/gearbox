@@ -1,6 +1,6 @@
 [package]
 name = "gearbox"
-description = "gearbox — clean-slate USD simulator. Multi-USD loading, click-to-select, transform-gizmo placement, planet world, frost UI. No legacy editor / viz / api crates."
+description = "gearbox — clean-slate USD simulator. Multi-USD loading, click-to-select, planet world, Mara UI. No legacy editor / viz / api crates."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,9 +20,8 @@ python = ["dep:pyo3"]
 bevy.workspace = true
 bevy_egui.workspace = true
 
-# UI/control helpers pinned directly for this USD-only binary.
-bevy_frost = { git = "https://github.com/bresilla/bevy_frost", branch = "develop", package = "bevy_frost" }
-bevy_glacial = { git = "https://github.com/bresilla/bevy_glacial", branch = "main" }
+# UI/scene helpers for this USD-only binary.
+bevy_mara.workspace = true
 
 # USD asset pipeline + rapier physics + animation playback. These
 # are the bevy_openusd workspace's plugins; the gearbox binary just

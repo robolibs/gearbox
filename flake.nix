@@ -7,7 +7,7 @@
     # that arg, which breaks nixGL until upstream catches up. Bump
     # together with nixgl when its corresponding fix lands.
     nixpkgs.url = "github:NixOS/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa";
-    rust-overlay.url = "github:oxalica/rust-overlay?rev=3c27f4c92a7d977556dd2c10bb564d9c61b375e9";
+    rust-overlay.url = "github:oxalica/rust-overlay?rev=cb368fd55ced25a1fa12414b9e984cdfb1681d18";
     flake-utils.url = "github:numtide/flake-utils";
     nixgl.url = "github:nix-community/nixGL";
   };

@@ -450,10 +450,13 @@ fn instantiate_pending_loaded_usd(
                 let Some(asset) = usd_assets.get(&pend.handle) else {
                     continue;
                 };
-                commands
-                    .entity(entity)
-                    .insert(bevy::scene::SceneRoot(asset.scene.clone()))
-                    .remove::<PendingLoadedUsd>();
+                let spawned = asset.scene.spawn_under(&mut commands, entity);
+                bevy::log::info!(
+                    "gearbox-api: instantiated USD load `{}` ({} projected entities)",
+                    pend.load_id,
+                    spawned.len()
+                );
+                commands.entity(entity).remove::<PendingLoadedUsd>();
             }
             Some(LoadState::Failed(err)) => {
                 bevy::log::error!(
