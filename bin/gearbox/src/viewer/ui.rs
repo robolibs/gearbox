@@ -1,4 +1,4 @@
-//! Viewer UI for the gearbox simulator: bevy_frost ribbons + floating
+//! Viewer UI for the gearbox simulator: Mara ribbons + floating
 //! panels + widgets. Adapted from `bevy_openusd::ui` for multi-USD
 //! loading: the "stage" is whichever LoadedAsset entity is currently
 //! `ActiveStage`, and the prim tree is a two-level hierarchy (top:
@@ -11,9 +11,7 @@ use bevy::pbr::{MeshMaterial3d, StandardMaterial};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
-use bevy_frost::prelude::*;
-use bevy_frost::style;
-use bevy_glacial::{ChaseCamera, EnumSet, GizmoMode, GizmoOptions, GizmoTarget, SelectionRing};
+use bevy_mara::{ChaseCamera, apply_rig};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use usd_bevy::{UsdAsset, UsdDisplayName, UsdKind, UsdPrimRef, UsdProcedural, UsdSpatialAudio};
@@ -23,6 +21,9 @@ use crate::controller::{
     ExternalControllerPolicy, ExternalControllerProcesses,
 };
 use crate::load::{LoadQueue, LoadedAsset, UsdAssetHandle};
+use crate::viewer::log_panel::LoaderLog;
+use crate::viewer::mara_ui::style;
+use crate::viewer::mara_ui::*;
 use crate::viewer::overlays::DisplayToggles;
 use crate::viewer::state::{
     ActiveStage, CameraBookmark, CameraBookmarks, CameraMount, FlyTo, LoadRequest, LoaderTuning,
@@ -59,7 +60,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("F"),
+        glyph: RibbonGlyph::Icon("folder"),
         tooltip: "File / selection",
         child_ribbon: None,
         role: None,
@@ -69,7 +70,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 1,
-        glyph: bevy_frost::RibbonGlyph::Text("T"),
+        glyph: RibbonGlyph::Icon("list"),
         tooltip: "Prim tree (T)",
         child_ribbon: None,
         role: None,
@@ -79,7 +80,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 2,
-        glyph: bevy_frost::RibbonGlyph::Text("i"),
+        glyph: RibbonGlyph::Icon("document"),
         tooltip: "Stage info (I)",
         child_ribbon: None,
         role: None,
@@ -89,7 +90,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 3,
-        glyph: bevy_frost::RibbonGlyph::Text("C"),
+        glyph: RibbonGlyph::Icon("cube"),
         tooltip: "Cameras",
         child_ribbon: None,
         role: None,
@@ -99,7 +100,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Middle,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("⚙"),
+        glyph: RibbonGlyph::Icon("options"),
         tooltip: "Machine controllers",
         child_ribbon: None,
         role: None,
@@ -109,17 +110,17 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Middle,
         slot: 1,
-        glyph: bevy_frost::RibbonGlyph::Text("▶"),
+        glyph: RibbonGlyph::Icon("play"),
         tooltip: "Play / pause physics",
         child_ribbon: None,
-        role: Some(bevy_frost::RibbonRole::Icon),
+        role: Some(RibbonRole::Icon),
     },
     RibbonItem {
         id: RIB_OVERLAYS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 0,
-        glyph: bevy_frost::RibbonGlyph::Text("O"),
+        glyph: RibbonGlyph::Icon("color"),
         tooltip: "Overlays (O)",
         child_ribbon: None,
         role: None,
@@ -129,7 +130,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 1,
-        glyph: bevy_frost::RibbonGlyph::Text("⏱"),
+        glyph: RibbonGlyph::Icon("clock"),
         tooltip: "Timeline",
         child_ribbon: None,
         role: None,
@@ -139,7 +140,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 2,
-        glyph: bevy_frost::RibbonGlyph::Text("?"),
+        glyph: RibbonGlyph::Icon("keyboard"),
         tooltip: "Controls (?)",
         child_ribbon: None,
         role: None,
@@ -149,7 +150,7 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::End,
         slot: 3,
-        glyph: bevy_frost::RibbonGlyph::Text("📜"),
+        glyph: RibbonGlyph::Icon("document"),
         tooltip: "Log",
         child_ribbon: None,
         role: None,
@@ -174,6 +175,23 @@ pub struct ViewerCommandPalette(pub CommandPaletteState);
 /// inside the active stage.
 #[derive(Resource, Default)]
 pub struct Selection(pub Option<Entity>);
+
+#[derive(Resource, Debug, Clone)]
+pub struct SelectionRing {
+    pub anchor: Option<Vec3>,
+    pub outer_radius: f32,
+    pub color: Color,
+}
+
+impl Default for SelectionRing {
+    fn default() -> Self {
+        Self {
+            anchor: None,
+            outer_radius: 1.0,
+            color: Color::srgb(0.9, 0.9, 0.95),
+        }
+    }
+}
 
 /// Queue of LoadedAsset entities to despawn (with rapier-body
 /// cleanup). Drained each frame.
@@ -264,13 +282,17 @@ pub struct ViewerUiPlugin;
 
 impl Plugin for ViewerUiPlugin {
     fn build(&self, app: &mut App) {
-        if !app.is_plugin_added::<bevy_frost::FrostPlugin>() {
-            app.add_plugins(bevy_frost::FrostPlugin);
-        }
-        app.init_resource::<TreeExpanded>()
+        app.init_resource::<AccentColor>()
+            .init_resource::<GlassOpacity>()
+            .init_resource::<RibbonOpen>()
+            .init_resource::<RibbonWidth>()
+            .init_resource::<RibbonPlacement>()
+            .init_resource::<RibbonDrag>()
+            .init_resource::<TreeExpanded>()
             .init_resource::<TreeFilter>()
             .init_resource::<ViewerCommandPalette>()
             .init_resource::<Selection>()
+            .init_resource::<SelectionRing>()
             .init_resource::<PendingDespawn>()
             .init_resource::<ActiveStage>()
             .init_resource::<StageInfo>()
@@ -291,6 +313,7 @@ impl Plugin for ViewerUiPlugin {
                     gate_gizmo_on_play,
                     sync_gizmo_target,
                     drive_selection_ring,
+                    draw_selection_ring,
                     drain_despawn,
                     auto_set_active_stage,
                     capture_active_stage_info,
@@ -302,31 +325,28 @@ impl Plugin for ViewerUiPlugin {
                 )
                     .chain(),
             )
-            .add_systems(
-                EguiPrimaryContextPass,
-                (
-                    draw_ribbons,
-                    draw_selection_panel,
-                    draw_tree_panel,
-                    draw_info_panel,
-                    draw_controllers_panel,
-                    draw_cameras_panel,
-                    draw_overlays_panel,
-                    draw_timeline_panel,
-                    draw_keys_panel,
-                    draw_log_panel,
-                    draw_palette_panel,
-                )
-                    .chain(),
-            );
+            .add_systems(EguiPrimaryContextPass, apply_mara_theme)
+            .add_systems(EguiPrimaryContextPass, draw_mara_example_shell)
+            .add_systems(EguiPrimaryContextPass, draw_palette_panel);
     }
 }
 
 const PANEL_W: f32 = 340.0;
 const PANEL_H: f32 = 560.0;
 
-fn open_default_panel(mut ribbon: ResMut<bevy_frost::RibbonOpen>) {
+fn open_default_panel(mut ribbon: ResMut<RibbonOpen>) {
     ribbon.toggle(RIBBON_LEFT, RIB_TREE);
+}
+
+fn apply_mara_theme(
+    mut contexts: EguiContexts,
+    accent: Res<AccentColor>,
+    opacity: Res<GlassOpacity>,
+) {
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    bevy_mara::style::__internal_apply_theme(ctx, *accent, *opacity);
 }
 
 // ─── Selection ↔ ActiveStage helpers ──────────────────────────────
@@ -584,40 +604,11 @@ fn ray_aabb_world(
     }
 }
 
-fn sync_gizmo_target(
-    selection: Res<Selection>,
-    physics: Res<usd_bevy::physics::PhysicsActive>,
-    mut commands: Commands,
-    targets: Query<Entity, With<GizmoTarget>>,
-    loaded: Query<(), With<LoadedAsset>>,
-) {
-    // While physics is playing, the gizmo is hidden and the user
-    // shouldn't be moving things by hand. Detach any live targets and
-    // bail before re-attaching.
-    if physics.0 {
-        for e in targets.iter() {
-            commands.entity(e).remove::<GizmoTarget>();
-        }
-        return;
-    }
-    if !selection.is_changed() && targets.iter().count() == (selection.0.is_some() as usize) {
-        return;
-    }
-    let want = selection.0;
-    let mut already_correct = false;
-    for e in targets.iter() {
-        if Some(e) == want {
-            already_correct = true;
-        } else {
-            commands.entity(e).remove::<GizmoTarget>();
-        }
-    }
-    if let Some(e) = want
-        && !already_correct
-        && loaded.get(e).is_ok()
-    {
-        commands.entity(e).insert(GizmoTarget::default());
-    }
+fn sync_gizmo_target(_selection: Res<Selection>, _physics: Res<usd_bevy::physics::PhysicsActive>) {
+    // Mara replaces the old transform gizmo stack. The
+    // selection state is still kept for panels, active-stage picking,
+    // and the play-mode ring, but there is no external transform target
+    // component to synchronize anymore.
 }
 
 /// During play, the gizmo is hidden — so the selection ring is the
@@ -629,7 +620,7 @@ fn sync_gizmo_target(
 fn drive_selection_ring(
     selection: Res<Selection>,
     physics: Res<usd_bevy::physics::PhysicsActive>,
-    accent: Res<bevy_frost::prelude::AccentColor>,
+    accent: Res<AccentColor>,
     parents: Query<&ChildOf>,
     loaded: Query<Entity, With<LoadedAsset>>,
     aabbs: Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb)>,
@@ -684,6 +675,16 @@ fn drive_selection_ring(
         c.b() as f32 / 255.0,
         c.a() as f32 / 255.0,
     );
+}
+
+fn draw_selection_ring(ring: Res<SelectionRing>, mut gizmos: Gizmos) {
+    let Some(anchor) = ring.anchor else {
+        return;
+    };
+    let iso = Isometry3d::new(anchor, Quat::from_rotation_x(core::f32::consts::FRAC_PI_2));
+    gizmos
+        .circle(iso, ring.outer_radius.max(0.05), ring.color)
+        .resolution(96);
 }
 
 /// On the ON→OFF edge of `PhysicsActive`, rebase each LoadedAsset's
@@ -762,23 +763,10 @@ fn rebase_loaded_assets_on_pause(
     }
 }
 
-/// While physics is active, clear `GizmoOptions.gizmo_modes` so the
-/// transform-gizmo-bevy crate draws nothing and accepts no drags. On
-/// pause, restore the full mode set so handles reappear. Mirrors the
-/// old `gearbox-editor::transform_gizmos::apply_gizmo_options` rule.
-fn gate_gizmo_on_play(
-    physics: Res<usd_bevy::physics::PhysicsActive>,
-    mut options: ResMut<GizmoOptions>,
-) {
-    let want: EnumSet<GizmoMode> = if physics.0 {
-        EnumSet::empty()
-    } else {
-        GizmoMode::all()
-    };
-    if options.gizmo_modes != want {
-        options.gizmo_modes = want;
-    }
-}
+/// Legacy hook kept in the chain where the old transform gizmo was
+/// gated. Mara does not ship that gizmo, so play mode only affects the
+/// local selection ring now.
+fn gate_gizmo_on_play(_physics: Res<usd_bevy::physics::PhysicsActive>) {}
 
 fn drain_despawn(
     mut commands: Commands,
@@ -860,11 +848,15 @@ fn apply_reload_request(
 
 // ─── FlyTo tween (against ChaseCamera) ─────────────────────────────
 
-fn apply_fly_to(time: Res<Time>, mut fly: ResMut<FlyTo>, mut cameras: Query<&mut ChaseCamera>) {
+fn apply_fly_to(
+    time: Res<Time>,
+    mut fly: ResMut<FlyTo>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
     if fly.remaining <= 0.0 {
         return;
     }
-    let Ok(mut cam) = cameras.single_mut() else {
+    let Ok((mut cam, mut transform)) = cameras.single_mut() else {
         return;
     };
     let dt = time.delta_secs().min(1.0 / 30.0);
@@ -888,6 +880,7 @@ fn apply_fly_to(time: Res<Time>, mut fly: ResMut<FlyTo>, mut cameras: Query<&mut
     if let (Some(se), Some(te)) = (fly.start_elevation, fly.target_elevation) {
         cam.elevation = se + (te - se) * eased;
     }
+    apply_rig(&cam, &mut transform);
 }
 
 fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
@@ -1009,7 +1002,7 @@ fn draw_ribbons(
     let physics_on = physics.0;
     let clicks = draw_assembly(
         ctx,
-        accent.0,
+        Into::<egui::Color32>::into(accent.0),
         RIBBONS,
         RIBBON_ITEMS,
         &mut open,
@@ -1026,6 +1019,687 @@ fn draw_ribbons(
 
 fn is_panel_open(open: &RibbonOpen, item: &'static str) -> bool {
     open.is_open(RIBBON_LEFT, item)
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct MaraShellParams<'w, 's> {
+    accent: Res<'w, AccentColor>,
+    open: ResMut<'w, RibbonOpen>,
+    placement: ResMut<'w, RibbonPlacement>,
+    drag: ResMut<'w, RibbonDrag>,
+    physics: ResMut<'w, usd_bevy::physics::PhysicsActive>,
+    info: Res<'w, StageInfo>,
+    load_req: ResMut<'w, LoadRequest>,
+    reload: ResMut<'w, ReloadRequest>,
+    active: ResMut<'w, ActiveStage>,
+    selected: ResMut<'w, SelectedPrim>,
+    selection: Res<'w, Selection>,
+    loaded: Query<'w, 's, (Entity, &'static LoadedAsset, &'static GlobalTransform)>,
+    prims: Query<'w, 's, (Entity, &'static Name, &'static UsdPrimRef)>,
+    inventory: Res<'w, ControllerInventory>,
+    states: Res<'w, ControllerStates>,
+    toggles: ResMut<'w, DisplayToggles>,
+    tuning: ResMut<'w, LoaderTuning>,
+    clock: ResMut<'w, UsdStageTime>,
+    bookmarks: ResMut<'w, CameraBookmarks>,
+    cameras: Query<'w, 's, &'static ChaseCamera>,
+    log: Option<Res<'w, LoaderLog>>,
+}
+
+fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShellParams) {
+    let MaraShellParams {
+        accent,
+        mut open,
+        mut placement,
+        mut drag,
+        mut physics,
+        info,
+        mut load_req,
+        mut reload,
+        mut active,
+        mut selected,
+        selection,
+        loaded,
+        prims,
+        inventory,
+        states,
+        mut toggles,
+        mut tuning,
+        mut clock,
+        mut bookmarks,
+        cameras,
+        log,
+    } = shell;
+
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    let accent_col: egui::Color32 = accent.0.into();
+
+    let physics_on = physics.0;
+    let clicks = draw_assembly(
+        ctx,
+        accent_col,
+        RIBBONS,
+        RIBBON_ITEMS,
+        &mut open,
+        &mut placement,
+        &mut drag,
+        |id| id == RIB_PLAY && physics_on,
+    );
+    for click in clicks {
+        if click.item == RIB_PLAY {
+            physics.0 = !physics.0;
+        }
+    }
+
+    if is_panel_open(&open, RIB_SELECTION) {
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_SELECTION,
+            "Selection",
+            accent_col,
+            |body| {
+                let stage_id = cid(RIB_SELECTION, "stage");
+                let actions_id = cid(RIB_SELECTION, "actions");
+                let selected_id = cid(RIB_SELECTION, "selected");
+
+                body.add_normal(
+                    stage_id,
+                    "Active stage",
+                    "folder",
+                    vec![
+                        Pod::new(pid(RIB_SELECTION, "stage", 0))
+                            .with_readout("file", nonempty_or(&info.path, "No active stage"))
+                            .with_readout(
+                                "default prim",
+                                info.default_prim.as_deref().unwrap_or("None"),
+                            )
+                            .with_readout("layers", info.layer_count.to_string())
+                            .with_readout("variants", info.variant_count.to_string()),
+                    ],
+                );
+                body.add_normal(
+                    actions_id,
+                    "Stage actions",
+                    "play",
+                    vec![
+                        Pod::new(pid(RIB_SELECTION, "actions", 0))
+                            .with_button("Add USD…", accent_col)
+                            .with_button("Reveal active file", accent_col)
+                            .with_button("Reload active stage", accent_col)
+                            .with_button("Clear selected prim", accent_col),
+                    ],
+                );
+
+                let selected_pod = match selection.0.and_then(|entity| loaded.get(entity).ok()) {
+                    Some((_, asset, gt)) => {
+                        let t = gt.compute_transform();
+                        Pod::new(pid(RIB_SELECTION, "selected", 0))
+                            .with_readout("asset", asset.label.clone())
+                            .with_readout("path", asset.path.display().to_string())
+                            .with_readout(
+                                "position",
+                                format!(
+                                    "{:+.2}, {:+.2}, {:+.2}",
+                                    t.translation.x, t.translation.y, t.translation.z
+                                ),
+                            )
+                    }
+                    None => Pod::new(pid(RIB_SELECTION, "selected", 0))
+                        .with_readout("asset", "None")
+                        .with_readout("hint", "Click a loaded asset or pick one in Tree"),
+                };
+                body.add_normal(selected_id, "Selected asset", "cube", vec![selected_pod]);
+
+                let responses = body.render();
+                if button_clicked(&responses, actions_id, 0, 0)
+                    && let Some(picked) = rfd::FileDialog::new()
+                        .add_filter("USD stages", &["usda", "usdc", "usd", "usdz"])
+                        .pick_file()
+                {
+                    load_req.path = Some(PathBuf::from(picked));
+                }
+                if button_clicked(&responses, actions_id, 0, 1) && !info.path.is_empty() {
+                    let p = std::path::Path::new(&info.path);
+                    let target = p.parent().unwrap_or(p);
+                    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+                }
+                if button_clicked(&responses, actions_id, 0, 2) {
+                    reload.requested = true;
+                }
+                if button_clicked(&responses, actions_id, 0, 3) {
+                    selected.0 = None;
+                }
+            },
+        );
+    }
+
+    if is_panel_open(&open, RIB_TREE) {
+        let mut roots: Vec<(Entity, String, String)> = loaded
+            .iter()
+            .map(|(entity, asset, _)| {
+                (
+                    entity,
+                    asset.label.clone(),
+                    asset
+                        .path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_owned(),
+                )
+            })
+            .collect();
+        roots.sort_by(|a, b| a.1.cmp(&b.1));
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_TREE,
+            "Prim tree",
+            accent_col,
+            |body| {
+                let overview_id = cid(RIB_TREE, "overview");
+                body.add_normal(
+                    overview_id,
+                    "Scene",
+                    "list",
+                    vec![
+                        Pod::new(pid(RIB_TREE, "overview", 0))
+                            .with_readout("loaded assets", roots.len().to_string())
+                            .with_readout("projected prims", prims.iter().count().to_string())
+                            .with_readout(
+                                "active",
+                                active
+                                    .0
+                                    .and_then(|entity| {
+                                        roots
+                                            .iter()
+                                            .find(|(candidate, _, _)| *candidate == entity)
+                                            .map(|(_, label, _)| label.as_str())
+                                    })
+                                    .unwrap_or("None"),
+                            ),
+                    ],
+                );
+
+                let roots_id = cid(RIB_TREE, "assets");
+                if roots.is_empty() {
+                    body.add_normal(
+                        roots_id,
+                        "Loaded assets",
+                        "folder",
+                        vec![
+                            Pod::new(pid(RIB_TREE, "assets", 0))
+                                .with_readout("status", "No USD loaded yet"),
+                        ],
+                    );
+                } else {
+                    let labels: Vec<String> =
+                        roots.iter().map(|(_, label, _)| label.clone()).collect();
+                    let trailing: Vec<String> =
+                        roots.iter().map(|(_, _, file)| file.clone()).collect();
+                    body.add_normal(
+                        roots_id,
+                        "Loaded assets",
+                        "folder",
+                        vec![Pod::new(pid(RIB_TREE, "assets", 0)).with_select_list(
+                            labels,
+                            Some(trailing),
+                            accent_col,
+                        )],
+                    );
+                }
+                let responses = body.render();
+                if let Some(index) = select_list_clicked(&responses, roots_id, 0)
+                    && let Some((entity, _, _)) = roots.get(index)
+                {
+                    active.0 = Some(*entity);
+                }
+            },
+        );
+    }
+
+    if is_panel_open(&open, RIB_INFO) {
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_INFO,
+            "Stage info",
+            accent_col,
+            |body| {
+                body.add_normal(
+                    cid(RIB_INFO, "stage"),
+                    "Composition",
+                    "document",
+                    vec![
+                        Pod::new(pid(RIB_INFO, "stage", 0))
+                            .with_readout("path", nonempty_or(&info.path, "No active stage"))
+                            .with_readout("layers", info.layer_count.to_string())
+                            .with_readout("variants", info.variant_count.to_string())
+                            .with_readout("custom attrs", info.custom_attr_prim_count.to_string()),
+                    ],
+                );
+                body.add_normal(
+                    cid(RIB_INFO, "render"),
+                    "Render / lights",
+                    "color",
+                    vec![
+                        Pod::new(pid(RIB_INFO, "render", 0))
+                            .with_badge_row(
+                                "lights",
+                                vec![
+                                    format!("dir {}", info.lights_directional),
+                                    format!("point {}", info.lights_point),
+                                    format!("spot {}", info.lights_spot),
+                                    format!("dome {}", info.lights_dome),
+                                ],
+                                accent_col,
+                            )
+                            .with_badge_row(
+                                "render",
+                                vec![
+                                    format!("settings {}", info.render_settings_count),
+                                    format!("products {}", info.render_product_count),
+                                    format!("vars {}", info.render_var_count),
+                                ],
+                                accent_col,
+                            ),
+                    ],
+                );
+                body.add_normal(
+                    cid(RIB_INFO, "physics"),
+                    "Physics",
+                    "box",
+                    vec![
+                        Pod::new(pid(RIB_INFO, "physics", 0))
+                            .with_readout("rigid bodies", info.rigid_body_count.to_string())
+                            .with_readout("physics scenes", info.physics_scene_count.to_string())
+                            .with_readout("joints", info.joint_count.to_string()),
+                    ],
+                );
+            },
+        );
+    }
+
+    if is_panel_open(&open, RIB_CONTROLLERS) {
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_CONTROLLERS,
+            "Machine controllers",
+            accent_col,
+            |body| {
+                let controller_count: usize = inventory
+                    .machines
+                    .iter()
+                    .map(|machine| machine.controllers.len())
+                    .sum();
+                body.add_normal(
+                    cid(RIB_CONTROLLERS, "summary"),
+                    "Discovered",
+                    "options",
+                    vec![
+                        Pod::new(pid(RIB_CONTROLLERS, "summary", 0))
+                            .with_readout("machines", inventory.machines.len().to_string())
+                            .with_readout("controllers", controller_count.to_string())
+                            .with_readout("live states", states.states.len().to_string()),
+                    ],
+                );
+                if !inventory.machines.is_empty() {
+                    let rows: Vec<String> = inventory
+                        .machines
+                        .iter()
+                        .map(|machine| {
+                            format!(
+                                "{} · {} controller(s)",
+                                machine.id,
+                                machine.controllers.len()
+                            )
+                        })
+                        .collect();
+                    body.add_normal(
+                        cid(RIB_CONTROLLERS, "machines"),
+                        "Machines",
+                        "cube",
+                        vec![
+                            Pod::new(pid(RIB_CONTROLLERS, "machines", 0)).with_select_list(
+                                rows,
+                                None::<Vec<String>>,
+                                accent_col,
+                            ),
+                        ],
+                    );
+                }
+            },
+        );
+    }
+
+    if is_panel_open(&open, RIB_CAMERAS) {
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_CAMERAS,
+            "Cameras",
+            accent_col,
+            |body| {
+                let actions_id = cid(RIB_CAMERAS, "actions");
+                body.add_normal(
+                    actions_id,
+                    "Bookmarks",
+                    "cube",
+                    vec![
+                        Pod::new(pid(RIB_CAMERAS, "actions", 0))
+                            .with_readout("saved", bookmarks.items.len().to_string())
+                            .with_button("Save current camera", accent_col)
+                            .with_button("Clear bookmarks", accent_col),
+                    ],
+                );
+                if !bookmarks.items.is_empty() {
+                    let rows: Vec<String> =
+                        bookmarks.items.iter().map(|b| b.name.clone()).collect();
+                    body.add_normal(
+                        cid(RIB_CAMERAS, "saved"),
+                        "Saved views",
+                        "list",
+                        vec![Pod::new(pid(RIB_CAMERAS, "saved", 0)).with_select_list(
+                            rows,
+                            None::<Vec<String>>,
+                            accent_col,
+                        )],
+                    );
+                }
+                let responses = body.render();
+                if button_clicked(&responses, actions_id, 0, 0)
+                    && let Some(camera) = cameras.iter().next()
+                {
+                    bookmarks.next_seq += 1;
+                    let name = format!("View {}", bookmarks.next_seq);
+                    bookmarks.items.push(CameraBookmark {
+                        name,
+                        focus: camera.focus,
+                        distance: camera.distance,
+                        yaw: camera.yaw,
+                        elevation: camera.elevation,
+                    });
+                }
+                if button_clicked(&responses, actions_id, 0, 1) {
+                    bookmarks.items.clear();
+                }
+            },
+        );
+    }
+
+    if is_panel_open(&open, RIB_OVERLAYS) {
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_OVERLAYS,
+            "Overlays",
+            accent_col,
+            |body| {
+                let toggles_id = cid(RIB_OVERLAYS, "toggles");
+                let render_id = cid(RIB_OVERLAYS, "render");
+                body.add_normal(
+                    toggles_id,
+                    "World overlays",
+                    "color",
+                    vec![
+                        Pod::new(pid(RIB_OVERLAYS, "toggles", 0))
+                            .with_toggle_initial("World grid", accent_col, toggles.show_world_grid)
+                            .with_toggle_initial("World axes", accent_col, toggles.show_world_axes)
+                            .with_toggle_initial(
+                                "Prim markers",
+                                accent_col,
+                                toggles.show_prim_markers,
+                            )
+                            .with_toggle_initial("Skeleton", accent_col, toggles.show_skeleton)
+                            .with_toggle_initial(
+                                "Physics overlay",
+                                accent_col,
+                                toggles.show_physics,
+                            )
+                            .with_toggle_initial("Colliders", accent_col, toggles.show_colliders),
+                    ],
+                );
+                body.add_normal(
+                    render_id,
+                    "Render",
+                    "options",
+                    vec![
+                        Pod::new(pid(RIB_OVERLAYS, "render", 0))
+                            .with_toggle_initial("Wireframe", accent_col, toggles.wireframe)
+                            .with_slider(
+                                "Light intensity",
+                                toggles.light_intensity_scale as f64,
+                                0.0..=4.0,
+                                2,
+                                "x",
+                                accent_col,
+                            )
+                            .with_slider(
+                                "Curve radius",
+                                tuning.curves.default_radius as f64,
+                                0.001..=0.25,
+                                3,
+                                " m",
+                                accent_col,
+                            ),
+                    ],
+                );
+                let responses = body.render();
+                if let Some(resp) = pod_response(&responses, toggles_id, 0) {
+                    set_toggle(&mut toggles.show_world_grid, resp, 0);
+                    set_toggle(&mut toggles.show_world_axes, resp, 1);
+                    set_toggle(&mut toggles.show_prim_markers, resp, 2);
+                    set_toggle(&mut toggles.show_skeleton, resp, 3);
+                    set_toggle(&mut toggles.show_physics, resp, 4);
+                    set_toggle(&mut toggles.show_colliders, resp, 5);
+                }
+                if let Some(resp) = pod_response(&responses, render_id, 0) {
+                    set_toggle(&mut toggles.wireframe, resp, 0);
+                    if let Some(slider) = resp.sliders.first()
+                        && slider.changed
+                    {
+                        toggles.light_intensity_scale = slider.value as f32;
+                    }
+                    if let Some(slider) = resp.sliders.get(1)
+                        && slider.changed
+                    {
+                        tuning.curves.default_radius = slider.value as f32;
+                    }
+                }
+            },
+        );
+    }
+
+    if is_panel_open(&open, RIB_TIMELINE) {
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_TIMELINE,
+            "Timeline",
+            accent_col,
+            |body| {
+                let playback_id = cid(RIB_TIMELINE, "playback");
+                body.add_normal(
+                    playback_id,
+                    "Playback",
+                    "play",
+                    vec![
+                        Pod::new(pid(RIB_TIMELINE, "playback", 0))
+                            .with_readout("time code", format!("{:.2}", clock.current_time_code()))
+                            .with_readout("duration", format!("{:.2} s", clock.duration_seconds()))
+                            .with_button(if clock.playing { "Pause" } else { "Play" }, accent_col)
+                            .with_slider(
+                                "seconds",
+                                clock.seconds,
+                                0.0..=clock.duration_seconds().max(0.01),
+                                2,
+                                " s",
+                                accent_col,
+                            ),
+                    ],
+                );
+                let responses = body.render();
+                if button_clicked(&responses, playback_id, 0, 0) {
+                    clock.playing = !clock.playing;
+                }
+                if let Some(resp) = pod_response(&responses, playback_id, 0)
+                    && let Some(slider) = resp.sliders.first()
+                    && slider.changed
+                {
+                    clock.seconds = slider.value;
+                }
+            },
+        );
+    }
+
+    if is_panel_open(&open, RIB_KEYS) {
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_KEYS,
+            "Controls",
+            accent_col,
+            |body| {
+                body.add_normal(
+                    cid(RIB_KEYS, "keys"),
+                    "Keyboard",
+                    "keyboard",
+                    vec![Pod::new(pid(RIB_KEYS, "keys", 0)).with_keybindings(vec![
+                        ("T", "Open tree"),
+                        ("I", "Open info"),
+                        ("O", "Open overlays"),
+                        ("?", "Open controls"),
+                        ("R", "Reload active stage"),
+                        ("Ctrl+P", "Command palette"),
+                    ])],
+                );
+            },
+        );
+    }
+
+    if is_panel_open(&open, RIB_LOG) {
+        show_mara_pane_for_item(
+            ctx,
+            RIBBONS,
+            RIBBON_ITEMS,
+            &placement,
+            RIB_LOG,
+            "Loader log",
+            accent_col,
+            |body| {
+                let lines: Vec<String> = log
+                    .as_ref()
+                    .and_then(|log| log.buffer.lock().ok())
+                    .map(|buffer| {
+                        buffer
+                            .iter()
+                            .rev()
+                            .take(24)
+                            .rev()
+                            .map(|line| {
+                                format!("{:?} {} · {}", line.level, line.target, line.message)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if lines.is_empty() {
+                    body.add_normal(
+                        cid(RIB_LOG, "lines"),
+                        "Recent events",
+                        "document",
+                        vec![
+                            Pod::new(pid(RIB_LOG, "lines", 0))
+                                .with_readout("status", "No Gearbox/USD log events captured yet"),
+                        ],
+                    );
+                } else {
+                    body.add_normal(
+                        cid(RIB_LOG, "lines"),
+                        "Recent events",
+                        "document",
+                        vec![Pod::new(pid(RIB_LOG, "lines", 0)).with_select_list(
+                            lines,
+                            None::<Vec<String>>,
+                            accent_col,
+                        )],
+                    );
+                }
+            },
+        );
+    }
+}
+
+fn cid(panel: &'static str, section: &'static str) -> MaraId {
+    MaraId::new(("gearbox", panel, section))
+}
+
+fn pid(panel: &'static str, section: &'static str, idx: usize) -> MaraId {
+    MaraId::new(("gearbox", panel, section, idx))
+}
+
+fn nonempty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn pod_response(
+    responses: &HashMap<MaraId, Vec<PodResponse>>,
+    container: MaraId,
+    pod: usize,
+) -> Option<&PodResponse> {
+    responses.get(&container).and_then(|pods| pods.get(pod))
+}
+
+fn button_clicked(
+    responses: &HashMap<MaraId, Vec<PodResponse>>,
+    container: MaraId,
+    pod: usize,
+    button: usize,
+) -> bool {
+    pod_response(responses, container, pod)
+        .and_then(|resp| resp.buttons.get(button))
+        .is_some_and(|button| button.clicked)
+}
+
+fn select_list_clicked(
+    responses: &HashMap<MaraId, Vec<PodResponse>>,
+    container: MaraId,
+    pod: usize,
+) -> Option<usize> {
+    pod_response(responses, container, pod)
+        .and_then(|resp| resp.select_lists.first())
+        .and_then(|select| select.clicked)
+}
+
+fn set_toggle(target: &mut bool, response: &PodResponse, index: usize) {
+    if let Some(toggle) = response.toggles.get(index)
+        && toggle.changed
+    {
+        *target = toggle.on;
+    }
 }
 
 // ─── Selection panel ────────────────────────────────────────────────
@@ -1055,7 +1729,7 @@ fn draw_selection_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -1196,7 +1870,7 @@ fn draw_tree_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -1430,7 +2104,7 @@ fn draw_tree_panel(
                                                 egui::Layout::left_to_right(egui::Align::Center),
                                                 |ui| {
                                                     ui.add_space(depth as f32 * TREE_INDENT);
-                                                    let Some(mat) =
+                                                    let Some(mut mat) =
                                                         params.materials_assets.get_mut(*id)
                                                     else {
                                                         ui.label(
@@ -1961,7 +2635,7 @@ fn draw_tree_row(
         outcome.clicked = Some(entity);
     }
 
-    context_menu_frost(&resp.body, accent, |ui| {
+    context_menu_mara(&resp.body, accent, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         if wide_button(ui, "Fly to", accent).clicked() {
             outcome.ctx_action = Some(CtxAction::FlyTo(entity));
@@ -2084,7 +2758,7 @@ fn draw_info_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2225,7 +2899,7 @@ fn draw_controllers_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2461,7 +3135,7 @@ fn draw_cameras_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2612,7 +3286,7 @@ fn draw_overlays_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2731,7 +3405,7 @@ fn draw_timeline_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2807,7 +3481,7 @@ fn draw_keys_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2864,7 +3538,7 @@ fn draw_log_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col = accent.0;
+    let accent_col: egui::Color32 = accent.0.into();
     let mut keep = true;
     floating_window_for_item(
         ctx,
@@ -2965,7 +3639,8 @@ fn draw_palette_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let Some(id) = command_palette(ctx, &mut palette.0, PALETTE_ITEMS, accent.0) else {
+    let accent_col: egui::Color32 = accent.0.into();
+    let Some(id) = command_palette(ctx, &mut palette.0, PALETTE_ITEMS, accent_col) else {
         return;
     };
     match id {

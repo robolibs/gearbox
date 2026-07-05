@@ -1,12 +1,12 @@
 //! Overlay state + scene-extent recompute. Ported from bevy_openusd.
-//! The hand-rolled grid has long been replaced by `bevy_glacial`'s
+//! The hand-rolled grid has long been replaced by Mara's
 //! `GroundGridPlugin` (which the gearbox `WorldPlugin` already wires);
 //! this module just owns the
 //! `DisplayToggles` resource that the Overlays panel mutates and the
 //! light-intensity / wireframe glue.
 
 use bevy::prelude::*;
-use bevy_glacial::GroundGrid;
+use bevy_mara::GroundGrid;
 use usd_bevy::UsdPrimRef;
 
 pub struct OverlaysPlugin;

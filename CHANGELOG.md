@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.6] - 2026-07-05
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Bevy 0.19
+- Bevy 0.19
+
 ## [0.0.5] - 2026-07-03
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks

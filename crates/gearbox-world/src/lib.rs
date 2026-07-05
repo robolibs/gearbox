@@ -3,15 +3,14 @@
 //! What lives here is the "permanent stuff" any gearbox app wants
 //! around the content it loads:
 //!
-//! - LOD ground grid (`bevy_glacial::GroundGrid`) — the visual floor.
-//! - RGB axis triad (`bevy_glacial::AxisGizmo`) — world-origin reference.
+//! - Ground grid (`bevy_mara::GroundGrid`) — the visual floor.
 //! - Sun + ambient light.
 //! - Sky clear colour.
-//! - Orbit / pan / zoom camera (`bevy_glacial::ChaseCamera`).
+//! - Camera rig (`bevy_mara::ChaseCamera`).
 //! - A static ground collider in `usd_bevy::physics::PhysicsWorld`
 //!   so dynamic USD bodies actually rest on the floor.
 //!
-//! Everything visual comes from `bevy_glacial`; this crate just
+//! The shared camera/grid pieces come from Mara; this crate just
 //! configures, wires, and adds the physics-side ground collider.
 //!
 //! Mental model:
@@ -37,12 +36,9 @@
 //!     .run();
 //! ```
 
-use bevy::math::DVec3;
 use bevy::prelude::*;
-use bevy_glacial::{
-    AxisGizmo, AxisGizmoPlugin, ChaseCamera, ChaseCameraPlugin, GizmoCamera, GroundGrid,
-    GroundGridPlugin,
-};
+use bevy_mara::{ChaseCamera, GroundGrid, MaraPlugin, apply_rig};
+use rapier3d::math::Vector as DVec3;
 use rapier3d::prelude::ColliderBuilder;
 use usd_bevy::physics::PhysicsWorld;
 
@@ -54,7 +50,7 @@ pub struct WorldConfig {
     pub camera_distance: f32,
 
     /// Sky background colour (`ClearColor`). Default is the
-    /// dark-navy editor look used by usdview / bevy_frost demos —
+    /// dark-navy editor look used by usdview / Mara demos —
     /// reads well with the cool-blue grid.
     pub sky_color: Color,
     /// Grid line colour (RGBA, alpha controls fade).
@@ -70,7 +66,7 @@ pub struct WorldConfig {
     pub ambient_brightness: f32,
 
     /// Half-extent of the static ground collider (metres). The
-    /// visual is bevy_glacial's infinite-fade grid, so this just
+    /// visual is Mara's grid, so this just
     /// gates where dynamic bodies actually find a floor.
     pub ground_half_size: f32,
     pub ground_friction: f32,
@@ -93,8 +89,7 @@ impl Default for WorldConfig {
     }
 }
 
-/// Wires `bevy_glacial`'s grid / axis-triad / chase-camera plugins
-/// and spawns the lights + collider at startup.
+/// Wires Mara's grid helper and spawns the lights + collider at startup.
 #[derive(Default)]
 pub struct WorldPlugin {
     pub config: WorldConfig,
@@ -108,9 +103,7 @@ impl Plugin for WorldPlugin {
                 visible: true,
                 color: self.config.grid_color,
             })
-            .add_plugins(ChaseCameraPlugin)
-            .add_plugins(GroundGridPlugin)
-            .add_plugins(AxisGizmoPlugin)
+            .add_plugins(MaraPlugin)
             .add_systems(Startup, (spawn_visuals, spawn_physics_ground));
     }
 }
@@ -121,26 +114,20 @@ fn spawn_visuals(mut commands: Commands, config: Res<WorldConfig>) {
         distance: config.camera_distance,
         ..default()
     };
-    // `GroundGridPlugin` queries `&ChaseCamera` to size grid LOD; the
-    // axis triad rides on the same entity. `Camera::clear_color` is
-    // not set here — `ClearColor` resource handles it globally.
-    commands.spawn((
-        Camera3d::default(),
-        chase,
-        AxisGizmo::default(),
-        // `GizmoCamera` tells `TransformGizmoPlugin` (the
-        // upstream `transform-gizmo-bevy`) which view to draw the
-        // translate / rotate / scale handles against — required
-        // for any app that registers `TransformGizmoPlugin`.
-        GizmoCamera,
+    let mut transform =
         Transform::from_xyz(config.camera_distance, config.camera_distance * 0.5, 0.0)
-            .looking_at(config.camera_focus, Vec3::Y),
-    ));
+            .looking_at(config.camera_focus, Vec3::Y);
+    apply_rig(&chase, &mut transform);
+
+    // `GroundGridPlugin` queries `&ChaseCamera` to size grid LOD.
+    // `Camera::clear_color` is not set here — `ClearColor` resource
+    // handles it globally.
+    commands.spawn((Camera3d::default(), chase, transform));
 
     commands.spawn((
         DirectionalLight {
             illuminance: config.sun_illuminance,
-            shadows_enabled: config.sun_shadows,
+            shadow_maps_enabled: config.sun_shadows,
             ..default()
         },
         Transform::from_translation(config.sun_translation).looking_at(Vec3::ZERO, Vec3::Y),

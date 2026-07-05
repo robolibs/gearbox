@@ -1,10 +1,10 @@
 //! gearbox — USD simulator with the full bevy_openusd viewer panel
 //! set folded in on top of the planet world / multi-USD loader /
-//! transform-gizmo / play button.
+//! play button.
 //!
 //! The simulator-specific surface (planet sphere, ChaseCamera +
-//! GroundGrid wiring, multi-USD `LoadQueue`, click-to-select +
-//! transform gizmo) lives in `world` + `load`. The viewer-side panel
+//! GroundGrid wiring, multi-USD `LoadQueue`, click-to-select) lives in
+//! `world` + `load`. The viewer-side panel
 //! set + selection-prim / fly-to / overlays / log capture / variants
 //! / cameras / materials live in the `viewer` submodule, ported from
 //! `bevy_openusd::*`.
@@ -30,11 +30,7 @@ mod world;
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
-use bevy_frost::FrostPlugin;
-use bevy_glacial::{
-    ChaseCameraPlugin, GizmoAutoScale, GizmoHotkeys, GizmoOptions, GroundGridPlugin,
-    SelectionRingPlugin, TransformGizmoPlugin, auto_scale_gizmo_to_target,
-};
+use bevy_mara::MaraPlugin;
 
 fn main() {
     let cli_paths: Vec<std::path::PathBuf> = std::env::args()
@@ -74,24 +70,9 @@ fn main() {
         // this, `WireframeConfig` doesn't exist as a resource and
         // the overlays sync system would panic on first frame.
         .add_plugins(bevy::pbr::wireframe::WireframePlugin::default())
-        // ── UI stack: egui + frost (glass theme + ribbons + widgets).
+        // ── UI stack: egui + Mara (glass theme + ribbons + widgets).
         .add_plugins(EguiPlugin::default())
-        .add_plugins(FrostPlugin)
-        // ── Camera + ground grid. ChaseCamera = orbit/pan/zoom.
-        .add_plugins(ChaseCameraPlugin)
-        .add_plugins(GroundGridPlugin)
-        // ── Transform gizmo for placement.
-        .add_plugins(TransformGizmoPlugin)
-        // Halo ring around the selected asset while physics is playing
-        // — the gizmo handles disappear in play mode, so the ring is
-        // the only "this is selected" cue left.
-        .add_plugins(SelectionRingPlugin)
-        .insert_resource(GizmoOptions {
-            hotkeys: Some(GizmoHotkeys::default()),
-            ..default()
-        })
-        .init_resource::<GizmoAutoScale>()
-        .add_systems(Update, auto_scale_gizmo_to_target)
+        .add_plugins(MaraPlugin)
         // ── USD pipeline + rapier physics + animation playback.
         .add_plugins(usd_bevy::UsdPlugin)
         .add_plugins(usd_bevy::physics::RapierAdapterPlugin)

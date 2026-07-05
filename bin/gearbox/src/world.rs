@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::Entities;
 use bevy::image::Image;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster};
-use bevy::math::{DQuat, DVec3};
 use bevy::mesh::VertexAttributeValues;
 use bevy::pbr::{
     DistanceFog, ExtendedMaterial, FogFalloff, MaterialExtension, MaterialPlugin, StandardMaterial,
@@ -21,7 +21,9 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
-use bevy_glacial::{ChaseCamera, GroundGrid};
+use bevy::window::PrimaryWindow;
+use bevy_mara::{ChaseCamera, GroundGrid, apply_rig};
+use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::{
     ColliderBuilder, ColliderHandle, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodyType,
 };
@@ -65,6 +67,7 @@ impl Plugin for WorldPlugin {
             .add_systems(Startup, open_world_event_publisher)
             .add_systems(Startup, (spawn_world, spawn_flat_ground))
             .add_systems(Update, mark_new_usd_terrain_roots)
+            .add_systems(Update, (chase_camera_control, chase_camera_zoom))
             .add_systems(Update, snap_new_usd_roots_to_terrain)
             .add_systems(Update, apply_anti_repeat_material_to_usd_terrain)
             .add_systems(Update, freeze_settled_static_usd_prop_bodies)
@@ -265,7 +268,7 @@ fn spawn_world(
         Transform::from_xyz(5.0, 50.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
         DirectionalLight {
             illuminance: 10_000.0,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         sun_shadow,
@@ -282,10 +285,20 @@ fn spawn_world(
     };
 
     // ── Camera ──────────────────────────────────────────────────────
+    let chase = ChaseCamera {
+        focus: Vec3::new(0.0, 0.5, 0.0),
+        distance: 14.0,
+        elevation: 25_f32.to_radians(),
+        max_distance: radius * 3.0,
+        ..default()
+    };
+    let mut camera_transform = Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y);
+    apply_rig(&chase, &mut camera_transform);
+
     commands.spawn((
         Name::new("Camera"),
         Camera3d::default(),
-        Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        camera_transform,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
             far: radius * 2.5,
@@ -297,15 +310,130 @@ fn spawn_world(
             brightness: 120.0,
             ..default()
         },
-        ChaseCamera {
-            focus: Vec3::new(0.0, 0.5, 0.0),
-            distance: 14.0,
-            elevation: 25_f32.to_radians(),
-            max_distance: radius * 3.0,
-            ..default()
-        },
-        bevy_glacial::GizmoCamera,
+        chase,
     ));
+}
+
+fn chase_camera_control(
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    primary_window: Query<&Window, With<PrimaryWindow>>,
+    mut pan_anchor: Local<Option<Vec2>>,
+    mut lift_anchor: Local<Option<Vec2>>,
+    mut orbit_anchor: Local<Option<Vec2>>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
+    let middle_pressed = mouse_buttons.pressed(MouseButton::Middle);
+    let left_pressed = mouse_buttons.pressed(MouseButton::Left);
+    let right_pressed = mouse_buttons.pressed(MouseButton::Right);
+
+    let lift_active = middle_pressed && (left_pressed || right_pressed);
+    let pan_active = middle_pressed && !lift_active;
+    let orbit_active = left_pressed && right_pressed && !middle_pressed;
+
+    if !pan_active {
+        *pan_anchor = None;
+    }
+    if !lift_active {
+        *lift_anchor = None;
+    }
+    if !orbit_active {
+        *orbit_anchor = None;
+    }
+
+    let cursor_position = primary_window
+        .single()
+        .ok()
+        .and_then(|w| w.cursor_position());
+    let mut pan_delta = Vec2::ZERO;
+    if pan_active && let Some(pos) = cursor_position {
+        if let Some(anchor) = *pan_anchor {
+            pan_delta = pos - anchor;
+        }
+        *pan_anchor = Some(pos);
+    }
+
+    let mut lift_delta = 0.0_f32;
+    if lift_active && let Some(pos) = cursor_position {
+        if let Some(anchor) = *lift_anchor {
+            lift_delta = (pos - anchor).y;
+        }
+        *lift_anchor = Some(pos);
+    }
+
+    let mut orbit_delta = Vec2::ZERO;
+    if orbit_active && let Some(pos) = cursor_position {
+        if let Some(anchor) = *orbit_anchor {
+            orbit_delta = pos - anchor;
+        }
+        *orbit_anchor = Some(pos);
+    }
+
+    if pan_delta == Vec2::ZERO && lift_delta == 0.0 && orbit_delta == Vec2::ZERO {
+        return;
+    }
+
+    for (mut cam, mut transform) in &mut cameras {
+        if pan_delta != Vec2::ZERO {
+            let pan_speed = cam.distance * cam.pan_sensitivity;
+            let forward = Vec3::new(cam.yaw.sin(), 0.0, cam.yaw.cos());
+            let right = Vec3::new(forward.z, 0.0, -forward.x);
+            cam.focus += (-right * pan_delta.x - forward * pan_delta.y) * pan_speed;
+        }
+        if lift_delta != 0.0 {
+            cam.focus.y += lift_delta * cam.distance * cam.pan_sensitivity;
+        }
+        if orbit_delta != Vec2::ZERO {
+            cam.yaw -= orbit_delta.x * cam.orbit_speed;
+            cam.elevation += orbit_delta.y * cam.orbit_speed;
+            cam.elevation = cam.elevation.clamp(cam.min_elevation, cam.max_elevation);
+        }
+        apply_rig(&cam, &mut transform);
+    }
+}
+
+fn chase_camera_zoom(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut zoom_target: Local<Option<f64>>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
+    if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+        wheel.read().for_each(drop);
+        return;
+    }
+    let mut scroll_delta = 0.0_f64;
+    for event in wheel.read() {
+        scroll_delta += match event.unit {
+            MouseScrollUnit::Line => event.y as f64,
+            MouseScrollUnit::Pixel => event.y as f64 / 32.0,
+        };
+    }
+
+    let Ok((mut cam, mut transform)) = cameras.single_mut() else {
+        return;
+    };
+    let target = zoom_target.get_or_insert(cam.distance as f64);
+    if scroll_delta != 0.0 {
+        let log_target = target.max(0.1).log10();
+        let new_log = log_target - scroll_delta * cam.zoom_step;
+        *target = 10f64
+            .powf(new_log)
+            .clamp(cam.min_distance as f64, cam.max_distance as f64);
+    }
+
+    let dt = time.delta_secs_f64();
+    let log_current = (cam.distance as f64).max(0.1).ln();
+    let log_target = target.max(0.1).ln();
+    let log_diff = log_target - log_current;
+    if log_diff.abs() > 1e-4 {
+        let new_log = log_current + log_diff * (6.0 * dt).min(0.9);
+        cam.distance = new_log.exp() as f32;
+        apply_rig(&cam, &mut transform);
+    } else if log_diff.abs() > 1e-5 {
+        cam.distance = *target as f32;
+        apply_rig(&cam, &mut transform);
+    }
 }
 
 fn spawn_flat_ground(
@@ -348,7 +476,7 @@ fn spawn_flat_ground(
 
 fn mark_new_usd_terrain_roots(
     mut commands: Commands,
-    terrain_roots: Query<(Entity, &Name), Added<SceneRoot>>,
+    terrain_roots: Query<(Entity, &Name), Added<usd_bevy::UsdSceneRoot>>,
 ) {
     for (entity, name) in terrain_roots.iter() {
         if !is_usd_terrain_root_name(name.as_str()) {
@@ -436,7 +564,7 @@ fn apply_anti_repeat_material_to_usd_terrain(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<AntiRepeatTerrainMaterial>>,
-    terrain_roots: Query<(Entity, &Name), With<SceneRoot>>,
+    terrain_roots: Query<(Entity, &Name), With<usd_bevy::UsdSceneRoot>>,
     children: Query<&Children>,
     terrain_meshes: Query<Entity, (With<Mesh3d>, Without<AntiRepeatTerrainMaterialApplied>)>,
     mut material_handle: Local<Option<Handle<AntiRepeatTerrainMaterial>>>,
@@ -691,7 +819,7 @@ fn align_new_grounded_usd_bounds_to_terrain(
     mut prop_bodies: ResMut<StaticUsdPropBodies>,
     bounds: Query<(
         &GlobalTransform,
-        Option<&SceneRoot>,
+        Option<&usd_bevy::UsdSceneRoot>,
         Option<&StaticUsdPhysicsProp>,
         Option<&Mesh3d>,
         Option<&usd_bevy::UsdLocalExtent>,
@@ -766,7 +894,7 @@ fn loaded_usd_world_extent(
     meshes: &Assets<Mesh>,
     bounds: &Query<(
         &GlobalTransform,
-        Option<&SceneRoot>,
+        Option<&usd_bevy::UsdSceneRoot>,
         Option<&StaticUsdPhysicsProp>,
         Option<&Mesh3d>,
         Option<&usd_bevy::UsdLocalExtent>,
@@ -1129,7 +1257,7 @@ fn cleanup_static_usd_prop_bodies(
 fn cleanup_terrain_collision_without_usd_terrain(
     mut commands: Commands,
     terrain_collision: Option<Res<TerrainCollision>>,
-    terrain_roots: Query<&Name, With<SceneRoot>>,
+    terrain_roots: Query<&Name, With<usd_bevy::UsdSceneRoot>>,
     mut physics: ResMut<PhysicsWorld>,
 ) {
     let Some(terrain_collision) = terrain_collision.as_deref().copied() else {

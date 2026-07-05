@@ -15,7 +15,10 @@ TARGET_ARG := $(if $(TARGET),--target $(TARGET),)
 LOCKED ?=
 RUN_WITH ?= nixVulkan
 RUN_ARGS ?=
-BACKEND ?= wayland
+# Bevy/wgpu can panic on NVIDIA + Wayland when acquiring the swapchain
+# texture (`SurfaceError::Timeout`). X11/Xwayland is the stable default here;
+# override with `BACKEND=wayland` if you explicitly want native Wayland.
+BACKEND ?= x11
 
 HAS_REL := $(shell command -v git-rel 2>/dev/null)
 

@@ -1,15 +1,14 @@
 //! Multi-USD loading: CLI args + 📂 ribbon button → asset_server →
-//! `SceneRoot` with `LoadedAsset` marker. The marker also tags the
+//! mounted USD scene with `LoadedAsset` marker. The marker also tags the
 //! root for the UI's pick-and-gizmo wiring.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
-use bevy::scene::SceneRoot;
 use bevy::transform::TransformSystems;
+use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::Pose;
 use serde::{Deserialize, Serialize};
 use usd_bevy::{UsdAsset, UsdLoaderSettings};
@@ -57,6 +56,9 @@ struct MachinePhysicsSyncPending {
     activate_after_sync: bool,
     frames_waited: u32,
 }
+
+#[derive(Resource, Debug, Clone, Copy)]
+struct PhysicsActivationPending;
 
 /// Generic runtime USD load request.
 ///
@@ -176,9 +178,31 @@ impl Plugin for LoadPlugin {
             )
             .add_systems(
                 PostUpdate,
-                sync_pending_machine_physics_to_scene_transforms.after(TransformSystems::Propagate),
+                (
+                    activate_physics_after_machine_transforms_propagate
+                        .after(TransformSystems::Propagate),
+                    sync_pending_machine_physics_to_scene_transforms
+                        .after(TransformSystems::Propagate)
+                        .after(activate_physics_after_machine_transforms_propagate),
+                ),
             );
     }
+}
+
+fn activate_physics_after_machine_transforms_propagate(
+    mut commands: Commands,
+    pending_activation: Option<Res<PhysicsActivationPending>>,
+    pending_machines: Query<Entity, With<MachinePhysicsSyncPending>>,
+    mut physics_active: ResMut<usd_bevy::physics::PhysicsActive>,
+) {
+    if pending_activation.is_none() || !pending_machines.is_empty() {
+        return;
+    }
+    if !physics_active.0 {
+        physics_active.0 = true;
+        info!("gearbox-load: enabling physics after aligned machine transforms propagated");
+    }
+    commands.remove_resource::<PhysicsActivationPending>();
 }
 
 fn clear_runtime_usd_loads_on_reset_system(
@@ -515,7 +539,6 @@ fn spawn_when_loaded(
         let scene_root = commands
             .spawn((
                 Name::new(entry.label.clone()),
-                SceneRoot(asset.scene.clone()),
                 entry.transform,
                 LoadedAsset {
                     path: entry.path.clone(),
@@ -524,6 +547,7 @@ fn spawn_when_loaded(
                 UsdAssetHandle(entry.handle.clone()),
             ))
             .id();
+        let spawned = asset.scene.spawn_under(&mut commands, scene_root);
         if is_machine_asset {
             commands
                 .entity(scene_root)
@@ -534,8 +558,10 @@ fn spawn_when_loaded(
         }
         entry.spawned = true;
         info!(
-            "Spawned {} at {:?}",
-            entry.label, entry.transform.translation
+            "Spawned {} at {:?} ({} projected entities)",
+            entry.label,
+            entry.transform.translation,
+            spawned.len()
         );
 
         if let Some(mut machines) = discovered_machines.take() {
@@ -567,7 +593,6 @@ fn sync_pending_machine_physics_to_scene_transforms(
     globals: Query<&GlobalTransform>,
     names: Query<&Name>,
     mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
-    mut physics_active: ResMut<usd_bevy::physics::PhysicsActive>,
 ) {
     for (root, mut root_transform, mut pending, name) in pending.iter_mut() {
         let descendants = collect_descendants(root, &children);
@@ -639,6 +664,16 @@ fn sync_pending_machine_physics_to_scene_transforms(
                     .map(|handle| (entity, handle))
             })
             .collect::<Vec<_>>();
+        if collider_entities.is_empty() {
+            pending.frames_waited += 1;
+            if pending.frames_waited == 120 {
+                warn!(
+                    "gearbox-load: waiting for physics colliders before terrain-aligning {}",
+                    name.map(|n| n.as_str()).unwrap_or("<unnamed machine>")
+                );
+            }
+            continue;
+        }
         if let Some(delta_y) = terrain_contact_alignment_delta(&physics, &collider_entities, &names)
         {
             root_transform.translation.y += delta_y as f32;
@@ -666,9 +701,9 @@ fn sync_pending_machine_physics_to_scene_transforms(
 
         commands.entity(root).remove::<MachinePhysicsSyncPending>();
         if pending.activate_after_sync {
-            physics_active.0 = true;
+            commands.insert_resource(PhysicsActivationPending);
             info!(
-                "gearbox-load: terrain-aligned {} physics bodies for {}; enabling physics",
+                "gearbox-load: terrain-aligned {} physics bodies for {}; enabling physics after transform propagation",
                 synced,
                 name.map(|n| n.as_str()).unwrap_or("<unnamed machine>")
             );
