@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "bevy",
  "bevy_egui",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-api"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "bevy",
  "ciborium",
@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-link"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aeronet",
  "aeronet_webtransport",
@@ -3135,7 +3135,7 @@ dependencies = [
 
 [[package]]
 name = "gearbox-world"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "bevy",
  "bevy_mara",

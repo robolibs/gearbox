@@ -112,6 +112,10 @@
           WGPU_DEBUG = "0";
 
           shellHook = ''
+            if [ -n "''${CARGO_HOME:-}" ] && [ ! -w "$CARGO_HOME" ]; then
+              export CARGO_HOME="''${XDG_CACHE_HOME:-$HOME/.cache}/cargo"
+              mkdir -p "$CARGO_HOME"
+            fi
             export PYTHONPATH="$PWD/.python-packages''${PYTHONPATH:+:$PYTHONPATH}"
           '';
         };
