@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
 use datapod::robot::Twist;
-use peerbus::{EndpointId, Publisher, ReqServer};
+use peerbus::{AnsServer, EndpointId, Publisher, ReqServer};
 
-use crate::host::serve_req;
+use crate::host::{serve_que, serve_req};
 use crate::topics::{self, machine_topic};
 use crate::wire::*;
 
@@ -26,10 +26,43 @@ pub struct MachineConfig {
     pub machine_id: String,
     pub kind: String,
     pub controllers: Vec<ControllerDesc>,
+    /// The link tree, base_link first; `derived` when the asset marked none.
+    pub links: Vec<LinkDesc>,
+    pub links_derived: bool,
     pub ephemeral: bool,
     pub allow: Vec<String>,
     pub allow_any: bool,
     pub relay: bool,
+}
+
+/// One link as the agent answers it on `/links`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkDesc {
+    pub name: String,
+    pub parent: Option<String>,
+    pub role: String,
+    pub prim: String,
+    pub joint: Option<String>,
+    pub body: Option<String>,
+    /// Static offset to the parent: translation then quaternion (w, x, y, z).
+    pub offset: [f64; 7],
+    /// `side|type|name` of a coupling on this link, when it carries one.
+    pub coupling: Option<String>,
+}
+
+impl LinkDesc {
+    pub fn new(name: &str, parent: Option<&str>, role: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            parent: parent.map(str::to_string),
+            role: role.to_string(),
+            prim: String::new(),
+            joint: None,
+            body: None,
+            offset: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            coupling: None,
+        }
+    }
 }
 
 impl MachineConfig {
@@ -40,11 +73,72 @@ impl MachineConfig {
             machine_id: namespace.to_string(),
             kind: String::new(),
             controllers: Vec::new(),
+            links: Vec::new(),
+            links_derived: false,
             ephemeral: false,
             allow: Vec::new(),
             allow_any: false,
             relay: false,
         }
+    }
+
+    /// The smallest valid tree: a base and one wheel, for fakes and tests.
+    pub fn with_minimal_links(mut self) -> Self {
+        self.links = vec![
+            LinkDesc::new("base_link", None, "base"),
+            LinkDesc::new("wheel_left", Some("base_link"), "wheel"),
+        ];
+        self.links_derived = true;
+        self
+    }
+
+    pub fn link_records(&self) -> Vec<LinkRecord> {
+        let index_of = |name: &str| {
+            self.links
+                .iter()
+                .position(|l| l.name == name)
+                .map(|i| i as u32)
+                .unwrap_or(LinkRecord::NO_PARENT)
+        };
+        self.links
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let mut props = Props::from_pairs(&[
+                    ("name", l.name.as_str()),
+                    ("role", l.role.as_str()),
+                    ("prim", l.prim.as_str()),
+                ]);
+                if let Some(p) = &l.parent {
+                    props.set("parent", p);
+                }
+                if let Some(j) = &l.joint {
+                    props.set("joint", j);
+                }
+                if let Some(b) = &l.body {
+                    props.set("body", b);
+                }
+                if let Some(c) = &l.coupling {
+                    props.set("coupling", c);
+                }
+                LinkRecord {
+                    x: l.offset[0],
+                    y: l.offset[1],
+                    z: l.offset[2],
+                    qw: l.offset[3],
+                    qx: l.offset[4],
+                    qy: l.offset[5],
+                    qz: l.offset[6],
+                    index: i as u32,
+                    parent_index: l
+                        .parent
+                        .as_deref()
+                        .map(index_of)
+                        .unwrap_or(LinkRecord::NO_PARENT),
+                    props: props.into_bytes(),
+                }
+            })
+            .collect()
     }
 
     pub fn with_cmd_vel(mut self, instance: &str, controller_type: &str) -> Self {
@@ -84,6 +178,7 @@ pub struct MachineAgent {
     cmd: Registered<ReqServer<Env, Env>>,
     state_pub: Registered<Publisher<Env>>,
     odom_pub: Registered<Publisher<Env>>,
+    links: Registered<AnsServer<Env, Env>>,
     session: Option<Session>,
     next_session: u64,
     twist: Twist,
@@ -123,6 +218,7 @@ impl MachineAgent {
             cmd: agent.req_server(&t(topics::MACHINE_CMD))?,
             state_pub: agent.publish(&t(topics::MACHINE_STATE))?,
             odom_pub: agent.publish(&t(topics::MACHINE_ODOM))?,
+            links: agent.que_server(&t(topics::MACHINE_LINKS))?,
             agent,
             config,
             session: None,
@@ -164,6 +260,17 @@ impl MachineAgent {
             ("kind", self.config.kind.as_str()),
             ("did", &self.did()),
             ("addr", &self.addr_hex()),
+            ("link_count", &self.config.links.len().to_string()),
+            ("links_derived", &self.config.links_derived.to_string()),
+            (
+                "base_link",
+                self.config
+                    .links
+                    .iter()
+                    .find(|l| l.role == "base")
+                    .map(|l| l.prim.as_str())
+                    .unwrap_or(""),
+            ),
         ]);
         for (n, c) in self.config.controllers.iter().enumerate() {
             props.set(&format!("controller.{n}.instance"), &c.instance);
@@ -201,6 +308,8 @@ impl MachineAgent {
     pub fn poll(&mut self) {
         let info = self.info();
         serve_req(&mut self.info, |_: Ping| info.clone_for_response());
+        let config = &self.config;
+        serve_que(&mut self.links, |_: Ping| config.link_records());
 
         let now = Instant::now();
         let mut session = self.session.take();

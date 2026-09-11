@@ -42,7 +42,9 @@ impl FakeHost {
         let mut agents = Vec::new();
         for ns in machines {
             let cfg = MachineConfig::new(instance, ns);
-            let mut cfg = cfg.with_cmd_vel("drive", "builtin:ackermann_cmd_vel");
+            let mut cfg = cfg
+                .with_cmd_vel("drive", "builtin:ackermann_cmd_vel")
+                .with_minimal_links();
             cfg.ephemeral = true;
             cfg.kind = "fake".to_string();
             agents.push(FakeMachine {
@@ -68,7 +70,8 @@ impl FakeHost {
                             continue;
                         }
                         let mut cfg = MachineConfig::new(&instance, &ns)
-                            .with_cmd_vel("drive", "builtin:ackermann_cmd_vel");
+                            .with_cmd_vel("drive", "builtin:ackermann_cmd_vel")
+                            .with_minimal_links();
                         cfg.ephemeral = true;
                         cfg.kind = "fake".to_string();
                         if let Ok(agent) = MachineAgent::new(cfg, endpoint_id) {

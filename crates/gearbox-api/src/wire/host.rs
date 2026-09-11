@@ -125,6 +125,10 @@ pub mod event_kind {
     pub const HARVESTED: u32 = 2;
     pub const REMOVED: u32 = 3;
     pub const MACHINE_READY: u32 = 4;
+    pub const ATTACHED: u32 = 5;
+    pub const DETACHED: u32 = 6;
+    /// A machine whose link tree failed validation; `reason` props say why.
+    pub const MACHINE_REJECTED: u32 = 7;
 
     pub fn name(value: u32) -> &'static str {
         match value {
@@ -133,6 +137,9 @@ pub mod event_kind {
             HARVESTED => "harvested",
             REMOVED => "removed",
             MACHINE_READY => "machine_ready",
+            ATTACHED => "attached",
+            DETACHED => "detached",
+            MACHINE_REJECTED => "machine_rejected",
             _ => "unknown",
         }
     }

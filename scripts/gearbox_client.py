@@ -338,6 +338,20 @@ class MachineState:
 
 CATEGORY = {"static": 0, "machine": 1, "robot": 1, "variant": 2, "world": 3, "terrain": 4}
 CLOCK_OP = {"get": 0, "pause": 1, "play": 2, "toggle": 3, "shutdown": 4}
+@_pod("gearbox.link_record.v1", "<" + "d" * 7 + "II", ("x", "y", "z", "qw", "qx", "qy", "qz", "index", "parent_index"), payload="props")
+class LinkRecord:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    qw: float = 1.0
+    qx: float = 0.0
+    qy: float = 0.0
+    qz: float = 0.0
+    index: int = 0
+    parent_index: int = 0xFFFFFFFF
+    props: bytes = b""
+
+
 CLEAR_SCOPE = {"all": 0, "machines": 1, "props": 2, "markers": 3}
 OBJECT_KIND = {"any": 0, "machine": 1, "prop": 2, "marker": 3, "terrain": 4}
 EVENT_KIND = {0: "loaded", 1: "pose", 2: "harvested", 3: "removed", 4: "machine_ready"}
@@ -616,6 +630,19 @@ class Machine:
 
     def stop(self) -> Status:
         return self.cmd_vel(0.0, 0.0)
+
+    def links(self) -> list[dict]:
+        """The link tree, base_link first: name, parent, role, prim, offset."""
+        out = []
+        for r in self.gb.query(self.addr, self._topic("links"), Ping(), LinkRecord):
+            d = unpack_map(r.props)
+            d.update({
+                "index": r.index,
+                "parent_index": None if r.parent_index == 0xFFFFFFFF else r.parent_index,
+                "offset": {"x": r.x, "y": r.y, "z": r.z, "qw": r.qw, "qx": r.qx, "qy": r.qy, "qz": r.qz},
+            })
+            out.append(d)
+        return out
 
     def state(self, wait: float = 0.0) -> MachineState | None:
         """Latest state sample, or the last one seen when none is pending."""

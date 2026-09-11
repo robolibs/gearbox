@@ -91,8 +91,13 @@ enum Cmd {
     },
     /// Controller table with types and interfaces
     Controllers { ns: Option<String> },
-    /// The link tree (not implemented by the sim yet)
-    Links { ns: Option<String> },
+    /// The link tree: names, roles, parents, static offsets
+    Links {
+        ns: Option<String>,
+        /// One row per link instead of an indented tree
+        #[arg(long)]
+        flat: bool,
+    },
     /// Attachments (reserved for TOOLS_SPEC)
     Tools {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -127,12 +132,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             take,
         } => command(ctx, ns, &controller, &pairs, take),
         Cmd::Controllers { ns } => controllers(ctx, ns),
-        Cmd::Links { ns } => {
-            let ns = ctx.machine_ns(ns)?;
-            Err(CliError::unsupported(format!(
-                "machine `{ns}` publishes no link tree yet (CONTROLLER_SPEC §7 is not implemented)"
-            )))
-        }
+        Cmd::Links { ns, flat } => links(ctx, ns, flat),
         Cmd::Tools { .. } => Err(CliError::unsupported(
             "attachments are not implemented yet (see specs/TOOLS_SPEC.md)",
         )),
@@ -249,6 +249,18 @@ fn info(ctx: &Ctx, ns: Option<String>) -> Result<()> {
                 ("machine id", p.get("machine_id").unwrap_or_default()),
                 ("did", p.get("did").unwrap_or_default()),
                 ("controllers", info.controller_count.to_string()),
+                (
+                    "links",
+                    format!(
+                        "{}{}",
+                        p.get("link_count").unwrap_or_default(),
+                        if p.get("links_derived").as_deref() == Some("true") {
+                            " (derived)"
+                        } else {
+                            ""
+                        }
+                    ),
+                ),
                 (
                     "held by",
                     if session.held != 0 {
@@ -670,4 +682,105 @@ impl Drop for RawTerminal {
         }
         let _ = std::io::stderr().flush();
     }
+}
+
+fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&ns);
+    let records = mc.links()?;
+    if records.is_empty() {
+        return Err(CliError::unsupported(format!(
+            "machine `{ns}` reports no links"
+        )));
+    }
+    let info = mc.info().ok();
+    let derived = info
+        .as_ref()
+        .map(|i| i.props().get("links_derived").unwrap_or_default() == "true")
+        .unwrap_or(false);
+    ctx.emit(
+        || {
+            json!({
+                "namespace": ns,
+                "derived": derived,
+                "links": records
+                    .iter()
+                    .filter_map(|r| wire_json::env_to_json(&pack(r)).ok())
+                    .collect::<Vec<_>>(),
+            })
+        },
+        || {
+            if derived {
+                println!("{ns}: link tree derived from rigid bodies; author GearboxLinkAPI to make it explicit");
+            }
+            let offset = |r: &gearbox_api::LinkRecord| {
+                if r.x == 0.0 && r.y == 0.0 && r.z == 0.0 && r.qw == 1.0 {
+                    String::new()
+                } else {
+                    format!("({:+.2}, {:+.2}, {:+.2})", r.x, r.y, r.z)
+                }
+            };
+            if flat {
+                let mut t = Table::new(&["LINK", "ROLE", "PARENT", "OFFSET", "PRIM"]);
+                for r in &records {
+                    let p = r.props();
+                    t.row(vec![
+                        r.name(),
+                        r.role(),
+                        r.parent().unwrap_or_default(),
+                        offset(r),
+                        p.get("prim").unwrap_or_default(),
+                    ]);
+                }
+                t.print();
+                return;
+            }
+            let mut children: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+            let mut roots = Vec::new();
+            for (i, r) in records.iter().enumerate() {
+                if r.parent_index == gearbox_api::LinkRecord::NO_PARENT
+                    || r.parent_index as usize >= records.len()
+                {
+                    roots.push(i);
+                } else {
+                    children[r.parent_index as usize].push(i);
+                }
+            }
+            fn walk(
+                i: usize,
+                depth: usize,
+                records: &[gearbox_api::LinkRecord],
+                children: &[Vec<usize>],
+                offset: &dyn Fn(&gearbox_api::LinkRecord) -> String,
+            ) {
+                let r = &records[i];
+                let p = r.props();
+                let coupling = p
+                    .get("coupling")
+                    .map(|c| format!("  coupling {c}"))
+                    .unwrap_or_default();
+                let via = p
+                    .get("joint")
+                    .map(|j| format!("  via {}", j.rsplit('/').next().unwrap_or(&j)))
+                    .unwrap_or_default();
+                println!(
+                    "{}{}  [{}]  {}{}{}",
+                    "  ".repeat(depth),
+                    r.name(),
+                    r.role(),
+                    offset(r),
+                    via,
+                    coupling
+                );
+                for &c in &children[i] {
+                    walk(c, depth + 1, records, children, offset);
+                }
+            }
+            for root in roots {
+                walk(root, 0, &records, &children, &offset);
+            }
+        },
+    );
+    Ok(())
 }

@@ -2956,6 +2956,22 @@ fn draw_controllers_panel(
                     readout_row(ui, "source", &machine.asset_label);
                     readout_row(ui, "id policy", &machine.id_policy);
                     readout_row(ui, "body", machine.body.as_deref().unwrap_or("—"));
+                    let tree = &machine.links;
+                    readout_row(
+                        ui,
+                        "links",
+                        &format!(
+                            "{}{}",
+                            tree.links.len(),
+                            if tree.derived { " (derived)" } else { "" }
+                        ),
+                    );
+                    for warning in &tree.warnings {
+                        sub_caption(ui, &format!("warning: {warning}"));
+                    }
+                    for error in &tree.errors {
+                        ui.colored_label(egui::Color32::LIGHT_RED, format!("rejected: {error}"));
+                    }
                     readout_row(
                         ui,
                         "control",

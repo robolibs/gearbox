@@ -189,3 +189,44 @@ impl MachineState {
         self.odom.twist.angular.vz
     }
 }
+
+/// One link of a machine's tree, answered on `/machines/<ns>/links`
+/// base_link first. The offset is the static transform to the parent link
+/// in the asset's Z-up frame; joint-connected links report zero.
+#[datapod::datapod(name = "gearbox.link_record.v1")]
+#[derive(Default)]
+pub struct LinkRecord {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub qw: f64,
+    pub qx: f64,
+    pub qy: f64,
+    pub qz: f64,
+    pub index: u32,
+    pub parent_index: u32,
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl LinkRecord {
+    pub const NO_PARENT: u32 = u32::MAX;
+
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn name(&self) -> String {
+        self.props().get("name").unwrap_or_default()
+    }
+
+    pub fn parent(&self) -> Option<String> {
+        self.props().get("parent").filter(|p| !p.is_empty())
+    }
+
+    pub fn role(&self) -> String {
+        self.props()
+            .get("role")
+            .unwrap_or_else(|| "link".to_string())
+    }
+}

@@ -163,8 +163,19 @@ fn machine_move_and_busy() {
     let (code, _, err) = env.gearbox(&["machine", "controllers", "oxbo"]);
     assert_eq!(code, 0, "{err}");
 
-    let (code, _, err) = env.gearbox(&["machine", "links", "oxbo"]);
-    assert_eq!(code, 5, "{err}");
+    let (code, out, err) = env.gearbox(&["machine", "links", "oxbo", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["links"][0]["props"]["name"], "base_link");
+    assert_eq!(v["links"][1]["props"]["parent"], "base_link");
+    assert_eq!(v["derived"], true);
+
+    let (code, out, err) = env.gearbox(&["machine", "links", "oxbo"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("base_link") && out.contains("wheel_left"),
+        "{out}"
+    );
 
     let (code, _, err) = env.gearbox(&["machine", "move", "nosuch", "--for", "100ms"]);
     assert_ne!(code, 0, "{err}");

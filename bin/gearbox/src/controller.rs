@@ -166,6 +166,7 @@ impl Plugin for ControllerDiscoveryPlugin {
             .init_resource::<ControllerStates>()
             .init_resource::<ControllerRuntimeState>()
             .init_resource::<MachineAgentKeys>()
+            .init_resource::<RejectedMachines>()
             .add_systems(
                 Update,
                 (
@@ -214,6 +215,11 @@ fn clear_controller_state_on_reset(
 #[derive(Resource, Default)]
 pub struct MachineAgentKeys(pub HashMap<String, ControllerKey>);
 
+/// Machines whose link tree failed validation, so the rejection is logged
+/// and published once rather than every frame.
+#[derive(Resource, Debug, Default)]
+pub struct RejectedMachines(pub std::collections::HashSet<String>);
+
 /// A single composed machine prim plus all controller instances authored on it.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -243,6 +249,8 @@ pub struct MachineInstanceSpec {
     pub brake_joints: Vec<String>,
     pub tool_joints: Vec<String>,
     pub controllers: Vec<ControllerSpec>,
+    /// Link tree per CONTROLLER_SPEC §7; `errors` non-empty means no agent.
+    pub links: crate::links::LinkTree,
 }
 
 /// One `GearboxControllerAPI:<instance>` application.
@@ -327,7 +335,11 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
             &namespace_default,
             machine_prim,
         );
+        let body = read_rel_first(&stage, &prim, "gearbox:machine:body")
+            .map(|p| rebase_asset_root_target(machine_prim, &p));
+        let links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
         machines.push(MachineInstanceSpec {
+            links,
             scene_root: None,
             asset_label: String::new(),
             source_path: String::new(),
@@ -529,6 +541,7 @@ fn append_isaac_compat_machines(
             source_path: String::new(),
             prim_path: prim_path.to_string(),
             id: id.clone(),
+            links: Default::default(),
             kind: Some("isaac_articulation".to_string()),
             interface_version: Some("isaac_compat:v0".to_string()),
             id_policy: "prim_path".to_string(),
@@ -765,7 +778,7 @@ fn prim_leaf_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn type_name(stage: &openusd::Stage, prim: &SdfPath) -> Option<String> {
+pub(crate) fn type_name(stage: &openusd::Stage, prim: &SdfPath) -> Option<String> {
     stage
         .field::<String>(prim.clone(), "typeName")
         .ok()
@@ -2972,19 +2985,19 @@ fn derive_machine_id(prim_path: &str) -> String {
     }
 }
 
-fn read_attr(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<Value> {
+pub(crate) fn read_attr(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<Value> {
     let attr = prim.append_property(name).ok()?;
     stage.field::<Value>(attr, "default").ok().flatten()
 }
 
-fn read_bool(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<bool> {
+pub(crate) fn read_bool(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<bool> {
     match read_attr(stage, prim, name)? {
         Value::Bool(v) => Some(v),
         _ => None,
     }
 }
 
-fn read_float(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<f32> {
+pub(crate) fn read_float(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<f32> {
     match read_attr(stage, prim, name)? {
         Value::Float(v) => Some(v),
         Value::Double(v) => Some(v as f32),
@@ -3001,11 +3014,11 @@ fn read_string(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<Str
     }
 }
 
-fn read_token(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
+pub(crate) fn read_token(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
     read_string(stage, prim, name)
 }
 
-fn read_token_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+pub(crate) fn read_token_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
     match read_attr(stage, prim, name) {
         Some(Value::TokenVec(v)) | Some(Value::StringVec(v)) => v,
         _ => Vec::new(),
@@ -3016,7 +3029,11 @@ fn read_string_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<
     read_token_array(stage, prim, name)
 }
 
-fn read_rel_targets(stage: &openusd::Stage, prim: &SdfPath, rel_name: &str) -> Vec<String> {
+pub(crate) fn read_rel_targets(
+    stage: &openusd::Stage,
+    prim: &SdfPath,
+    rel_name: &str,
+) -> Vec<String> {
     let Some(raw) = prim
         .append_property(rel_name)
         .ok()
@@ -3044,11 +3061,15 @@ fn read_rel_targets_rebased(
         .collect()
 }
 
-fn read_rel_first(stage: &openusd::Stage, prim: &SdfPath, rel_name: &str) -> Option<String> {
+pub(crate) fn read_rel_first(
+    stage: &openusd::Stage,
+    prim: &SdfPath,
+    rel_name: &str,
+) -> Option<String> {
     read_rel_targets(stage, prim, rel_name).into_iter().next()
 }
 
-fn rebase_asset_root_target(machine_prim: &str, target: &str) -> String {
+pub(crate) fn rebase_asset_root_target(machine_prim: &str, target: &str) -> String {
     const ASSET_ROOT: &str = "/robot";
     if machine_prim == ASSET_ROOT {
         return target.to_string();
@@ -3679,6 +3700,7 @@ fn sync_machine_agents(
     inventory: Res<ControllerInventory>,
     bus: Option<ResMut<GearboxBus>>,
     mut keys: ResMut<MachineAgentKeys>,
+    mut rejected: ResMut<RejectedMachines>,
 ) {
     let Some(mut bus) = bus else { return };
     let mut wanted: HashMap<String, (ControllerKey, MachineConfig)> = HashMap::new();
@@ -3693,10 +3715,34 @@ fn sync_machine_agents(
         else {
             continue;
         };
+        if !machine.links.is_valid() {
+            if rejected.0.insert(machine.id.clone()) {
+                for reason in &machine.links.errors {
+                    warn!(
+                        "gearbox-control: machine `{}` rejected: {reason}",
+                        machine.id
+                    );
+                }
+                let mut event = SceneEvent::new(event_kind::MACHINE_REJECTED, &drive.namespace)
+                    .with_prop("machine_id", &machine.id);
+                for (n, reason) in machine.links.errors.iter().enumerate() {
+                    event = event.with_prop(&format!("reason.{n}"), reason);
+                }
+                bus.publish_event(event);
+            }
+            continue;
+        }
+        for warning in &machine.links.warnings {
+            if rejected.0.insert(format!("{}:warned", machine.id)) {
+                warn!("gearbox-control: machine `{}`: {warning}", machine.id);
+            }
+        }
         let host = &bus.host.config;
         let mut config = MachineConfig::new(&host.instance, &drive.namespace);
         config.machine_id = machine.id.clone();
         config.kind = machine.kind.clone().unwrap_or_default();
+        config.links = link_descs(&machine.links);
+        config.links_derived = machine.links.derived;
         config.ephemeral = host.ephemeral;
         config.allow = host.allow.clone();
         config.allow_any = host.allow_any;
@@ -3844,4 +3890,35 @@ fn publish_machine_controller_states(
             agent.publish_state(wire);
         }
     }
+}
+
+/// The discovered tree as the machine agent answers it.
+fn link_descs(tree: &crate::links::LinkTree) -> Vec<gearbox_api::LinkDesc> {
+    tree.links
+        .iter()
+        .map(|l| {
+            let off = l.static_offset.unwrap_or_default();
+            gearbox_api::LinkDesc {
+                name: l.name.clone(),
+                parent: l.parent.clone(),
+                role: l.role.as_str().to_string(),
+                prim: l.prim_path.clone(),
+                joint: l.joint_prim.clone(),
+                body: l.body_prim.clone(),
+                offset: [
+                    off.translation.x,
+                    off.translation.y,
+                    off.translation.z,
+                    off.rotation.w,
+                    off.rotation.x,
+                    off.rotation.y,
+                    off.rotation.z,
+                ],
+                coupling: l
+                    .coupling
+                    .as_ref()
+                    .map(|c| format!("{}|{}|{}", c.side.as_str(), c.kind, c.name)),
+            }
+        })
+        .collect()
 }

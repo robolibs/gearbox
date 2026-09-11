@@ -63,6 +63,7 @@ pub fn types() -> Vec<TypeDesc> {
             controller_command_from
         ),
         desc!(MachineState, machine_state_json, machine_state_from),
+        desc!(LinkRecord, link_record_json, link_record_from),
     ]
 }
 
@@ -569,5 +570,33 @@ fn machine_state_from(v: &Value) -> Result<MachineState, String> {
             v,
             &["odom", "heading_rad", "roll_rad", "pitch_rad", "session"],
         ),
+    })
+}
+
+fn link_record_json(l: &LinkRecord) -> Value {
+    json!({
+        "index": l.index,
+        "parent_index": if l.parent_index == LinkRecord::NO_PARENT { Value::Null } else { json!(l.parent_index) },
+        "offset": { "x": l.x, "y": l.y, "z": l.z, "qw": l.qw, "qx": l.qx, "qy": l.qy, "qz": l.qz },
+        "props": props_json(&l.props),
+    })
+}
+
+fn link_record_from(v: &Value) -> Result<LinkRecord, String> {
+    let off = v.get("offset").cloned().unwrap_or(Value::Null);
+    Ok(LinkRecord {
+        x: num(&off, "x"),
+        y: num(&off, "y"),
+        z: num(&off, "z"),
+        qw: off.get("qw").and_then(Value::as_f64).unwrap_or(1.0),
+        qx: num(&off, "qx"),
+        qy: num(&off, "qy"),
+        qz: num(&off, "qz"),
+        index: uint(v, "index") as u32,
+        parent_index: match v.get("parent_index") {
+            None | Some(Value::Null) => LinkRecord::NO_PARENT,
+            _ => uint(v, "parent_index") as u32,
+        },
+        props: props_from(v, &["index", "parent_index", "offset"]),
     })
 }

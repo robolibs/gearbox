@@ -246,6 +246,12 @@ impl MachineClient<'_> {
         self.client.subscribe(&self.topic(topics::MACHINE_ODOM))
     }
 
+    /// The link tree, base_link first.
+    pub fn links(&self) -> agentio::Result<Vec<LinkRecord>> {
+        self.client
+            .query(&self.topic(topics::MACHINE_LINKS), &Ping::default())
+    }
+
     pub fn next_odom(
         &self,
         sub: &mut Subscriber<Env>,

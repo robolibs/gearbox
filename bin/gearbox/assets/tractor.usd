@@ -137,9 +137,23 @@ over "robot" (
     }
 
     over "chassis" (
-        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI"]
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI", "GearboxLinkAPI"]
     )
     {
+        token gearbox:link:name = "base_link"
+        token gearbox:link:role = "base"
+
+        def Xform "rear_hitch" (
+            prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"]
+        )
+        {
+            token gearbox:link:role = "tool"
+            token gearbox:coupling:side = "hitch"
+            token gearbox:coupling:type = "drawbar"
+            token gearbox:coupling:name = "rear_drawbar"
+            double3 xformOp:translate = (0, 1.9, 0.45)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
         point3f physics:centerOfMass = (0, -0.15, 0.85)
         vector3f physics:diagonalInertia = (1300, 850, 1450)
         rel physics:filteredPairs = [
@@ -190,9 +204,10 @@ over "robot" (
     }
 
     over "wheel_front_left" (
-        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
     )
     {
+        token gearbox:link:role = "wheel"
         vector3f physics:diagonalInertia = (12, 7, 7)
         float physics:mass = 110
 
@@ -208,9 +223,10 @@ over "robot" (
     }
 
     over "wheel_front_right" (
-        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
     )
     {
+        token gearbox:link:role = "wheel"
         vector3f physics:diagonalInertia = (12, 7, 7)
         float physics:mass = 110
 
@@ -226,9 +242,10 @@ over "robot" (
     }
 
     over "wheel_back_left" (
-        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
     )
     {
+        token gearbox:link:role = "wheel"
         vector3f physics:diagonalInertia = (30, 18, 18)
         float physics:mass = 200
 
@@ -244,9 +261,10 @@ over "robot" (
     }
 
     over "wheel_back_right" (
-        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
     )
     {
+        token gearbox:link:role = "wheel"
         vector3f physics:diagonalInertia = (30, 18, 18)
         float physics:mass = 200
 
@@ -262,17 +280,19 @@ over "robot" (
     }
 
     over "steer_front_left" (
-        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
     )
     {
+        token gearbox:link:role = "steer"
         vector3f physics:diagonalInertia = (3, 3, 3)
         float physics:mass = 50
     }
 
     over "steer_front_right" (
-        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
     )
     {
+        token gearbox:link:role = "steer"
         vector3f physics:diagonalInertia = (3, 3, 3)
         float physics:mass = 50
     }
