@@ -13,18 +13,21 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::process::{Child, Command};
-use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
+use gearbox_api::datapod::robot::{Odom, Twist};
+use gearbox_api::datapod::{Point, Quaternion};
+use gearbox_api::{
+    ControllerDesc, GearboxBus, MachineAgent, MachineConfig, MachineState, Props, SceneEvent,
+    clear_scope, event_kind,
+};
 use openusd::sdf::{Path as SdfPath, Value};
 use rapier3d::control::{DynamicRayCastVehicleController, WheelTuning};
 use rapier3d::pipeline::QueryFilter;
 use rapier3d::prelude::{
     CoefficientCombineRule, JointAxis, MultibodyJointHandle, RigidBodyHandle, Vector,
 };
-use serde::{Deserialize, Serialize};
 use usd_bevy::UsdPrimRef;
-use zenoh::Wait;
 
 /// All USD-authored machine/controller specs discovered from loaded assets.
 #[derive(Resource, Debug, Default, Clone)]
@@ -52,7 +55,7 @@ impl ControllerInventory {
 }
 
 /// Internal command buffer keyed by discovered controller instance.
-/// UI/keyboard/zenoh bridges write here; builtin controllers consume it.
+/// UI/keyboard/agent bridges write here; builtin controllers consume it.
 #[derive(Resource, Debug, Default, Clone)]
 pub struct ControllerCommands {
     pub cmd_vel: HashMap<ControllerKey, CmdVel>,
@@ -100,12 +103,15 @@ pub struct ControllerStates {
 struct ControllerRuntimeState {
     applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
     logged_empty_tire_pairs: HashSet<ControllerKey>,
+    diff_drive_debug_ticks: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ControllerState {
     pub position_m: [f64; 3],
     pub heading_rad: f64,
+    pub roll_rad: f64,
+    pub pitch_rad: f64,
     pub linear_speed_mps: f64,
     pub yaw_rate_rps: f64,
 }
@@ -159,28 +165,20 @@ impl Plugin for ControllerDiscoveryPlugin {
             .init_resource::<ExternalControllerProcesses>()
             .init_resource::<ControllerStates>()
             .init_resource::<ControllerRuntimeState>()
+            .init_resource::<MachineAgentKeys>()
             .add_systems(
                 Update,
                 (
                     clear_controller_state_on_reset,
-                    sync_machine_controller_api_topics,
+                    sync_machine_agents,
                     reconcile_external_process_controllers,
-                    apply_machine_controller_api_commands,
+                    apply_machine_agent_commands,
                     apply_builtin_ackermann_cmd_vel,
+                    apply_builtin_diff_drive_cmd_vel,
                 )
                     .chain(),
             )
             .add_systems(PostUpdate, publish_machine_controller_states);
-
-        match MachineControllerApi::open() {
-            Ok(api) => {
-                app.insert_resource(api);
-                info!("gearbox-control: machine controller zenoh API ready");
-            }
-            Err(err) => {
-                warn!("gearbox-control: machine controller zenoh API disabled: {err}");
-            }
-        }
     }
 }
 
@@ -190,10 +188,14 @@ fn clear_controller_state_on_reset(
     mut commands: ResMut<ControllerCommands>,
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
-    api: Option<Res<MachineControllerApi>>,
+    mut keys: ResMut<MachineAgentKeys>,
+    bus: Option<ResMut<GearboxBus>>,
 ) {
     let Some(mut messages) = messages else { return };
-    if messages.read().count() == 0 {
+    let clears_machines = messages
+        .read()
+        .any(|m| matches!(m.scope, clear_scope::ALL | clear_scope::MACHINES));
+    if !clears_machines {
         return;
     }
     inventory.machines.clear();
@@ -201,210 +203,16 @@ fn clear_controller_state_on_reset(
     runtime.applied_cmd_vel.clear();
     runtime.logged_empty_tire_pairs.clear();
     states.states.clear();
-    if let Some(api) = api {
-        api.clear_pending_cmd_vel();
+    keys.0.clear();
+    if let Some(mut bus) = bus {
+        bus.machines.clear();
     }
     info!("gearbox-control: cleared controller inventory/state");
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MachineCmdVelWire {
-    pub linear: [f64; 3],
-    pub angular: [f64; 3],
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MachineSessionWire {
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MachineStateWire {
-    pub machine_id: String,
-    pub controller: String,
-    pub position: [f64; 3],
-    pub heading_rad: f64,
-    pub linear_speed_mps: f64,
-    pub yaw_rate_rps: f64,
-}
-
-#[derive(Resource)]
-pub struct MachineControllerApi {
-    session: Arc<zenoh::Session>,
-    subscribers: Mutex<HashMap<ControllerKey, zenoh::pubsub::Subscriber<()>>>,
-    session_subscribers: Mutex<HashMap<ControllerKey, zenoh::pubsub::Subscriber<()>>>,
-    pending_cmd_vel: Arc<Mutex<HashMap<ControllerKey, MachineCmdVelWire>>>,
-    active_sessions: Arc<Mutex<HashMap<ControllerKey, String>>>,
-}
-
-impl MachineControllerApi {
-    fn open() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let session = Arc::new(zenoh::open(zenoh::Config::default()).wait()?);
-        Ok(Self {
-            session,
-            subscribers: Mutex::new(HashMap::new()),
-            session_subscribers: Mutex::new(HashMap::new()),
-            pending_cmd_vel: Arc::new(Mutex::new(HashMap::new())),
-            active_sessions: Arc::new(Mutex::new(HashMap::new())),
-        })
-    }
-
-    fn register_cmd_vel(&self, key: ControllerKey, namespace: &str) {
-        self.register_session_claim(key.clone(), namespace);
-
-        let Ok(mut subscribers) = self.subscribers.lock() else {
-            return;
-        };
-        if subscribers.contains_key(&key) {
-            return;
-        }
-        let topic = format!("gearbox/machines/{namespace}/cmd_vel");
-        let topic_for_cb = topic.clone();
-        let pending = Arc::clone(&self.pending_cmd_vel);
-        let active_sessions = Arc::clone(&self.active_sessions);
-        let key_for_cb = key.clone();
-        let result = self
-            .session
-            .declare_subscriber(topic.clone())
-            .callback(move |sample| {
-                let bytes = sample.payload().to_bytes();
-                match decode::<MachineCmdVelWire>(bytes.as_ref()) {
-                    Ok(cmd) => {
-                        if !command_session_is_active(&active_sessions, &key_for_cb, &cmd) {
-                            return;
-                        }
-                        if let Ok(mut q) = pending.lock() {
-                            q.insert(key_for_cb.clone(), cmd);
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("gearbox-control: bad cmd_vel payload on {topic_for_cb}: {err}");
-                    }
-                }
-            })
-            .wait();
-        match result {
-            Ok(sub) => {
-                subscribers.insert(key, sub);
-            }
-            Err(err) => {
-                warn!("gearbox-control: failed to subscribe {topic}: {err}");
-            }
-        }
-    }
-
-    fn register_session_claim(&self, key: ControllerKey, namespace: &str) {
-        let Ok(mut subscribers) = self.session_subscribers.lock() else {
-            return;
-        };
-        if subscribers.contains_key(&key) {
-            return;
-        }
-        let topic = format!("gearbox/machines/{namespace}/session");
-        let topic_for_cb = topic.clone();
-        let pending = Arc::clone(&self.pending_cmd_vel);
-        let active_sessions = Arc::clone(&self.active_sessions);
-        let key_for_cb = key.clone();
-        let result = self
-            .session
-            .declare_subscriber(topic.clone())
-            .callback(move |sample| {
-                let bytes = sample.payload().to_bytes();
-                match decode::<MachineSessionWire>(bytes.as_ref()) {
-                    Ok(claim) if !claim.session_id.is_empty() => {
-                        if let Ok(mut sessions) = active_sessions.lock() {
-                            sessions.insert(key_for_cb.clone(), claim.session_id.clone());
-                        }
-                        if let Ok(mut q) = pending.lock() {
-                            q.insert(
-                                key_for_cb.clone(),
-                                MachineCmdVelWire {
-                                    linear: [0.0, 0.0, 0.0],
-                                    angular: [0.0, 0.0, 0.0],
-                                    session_id: Some(claim.session_id),
-                                },
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        eprintln!("gearbox-control: empty session_id payload on {topic_for_cb}");
-                    }
-                    Err(err) => {
-                        eprintln!(
-                            "gearbox-control: bad session claim payload on {topic_for_cb}: {err}"
-                        );
-                    }
-                }
-            })
-            .wait();
-        match result {
-            Ok(sub) => {
-                subscribers.insert(key, sub);
-            }
-            Err(err) => {
-                warn!("gearbox-control: failed to subscribe {topic}: {err}");
-            }
-        }
-    }
-
-    fn snapshot_cmd_vel(&self) -> HashMap<ControllerKey, MachineCmdVelWire> {
-        self.pending_cmd_vel
-            .lock()
-            .map(|q| q.clone())
-            .unwrap_or_default()
-    }
-
-    fn clear_pending_cmd_vel(&self) {
-        if let Ok(mut q) = self.pending_cmd_vel.lock() {
-            q.clear();
-        }
-    }
-
-    fn publish_state(&self, namespace: &str, state: &MachineStateWire) {
-        let Ok(bytes) = encode(state) else {
-            return;
-        };
-        let topic = format!("gearbox/machines/{namespace}/state");
-        if let Err(err) = self.session.put(topic.clone(), bytes).wait() {
-            warn!("gearbox-control: failed to publish {topic}: {err}");
-        }
-    }
-}
-
-fn command_session_is_active(
-    active_sessions: &Mutex<HashMap<ControllerKey, String>>,
-    key: &ControllerKey,
-    cmd: &MachineCmdVelWire,
-) -> bool {
-    let Ok(mut sessions) = active_sessions.lock() else {
-        return false;
-    };
-    match cmd.session_id.as_deref() {
-        Some(session_id) if session_id.is_empty() => false,
-        Some(session_id) => match sessions.get(key) {
-            Some(active_session) => active_session == session_id,
-            None => {
-                sessions.insert(key.clone(), session_id.to_string());
-                true
-            }
-        },
-        None => !sessions.contains_key(key),
-    }
-}
-
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf)?;
-    Ok(buf)
-}
-
-fn decode<T: serde::de::DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, ciborium::de::Error<std::io::Error>> {
-    ciborium::from_reader(bytes)
-}
+/// Namespace of each live machine agent → the controller it drives.
+#[derive(Resource, Default)]
+pub struct MachineAgentKeys(pub HashMap<String, ControllerKey>);
 
 /// A single composed machine prim plus all controller instances authored on it.
 #[derive(Debug, Clone)]
@@ -1015,100 +823,6 @@ pub fn log_discovered_machines(label: &str, machines: &[MachineInstanceSpec]) {
     }
 }
 
-fn sync_machine_controller_api_topics(
-    inventory: Res<ControllerInventory>,
-    api: Option<Res<MachineControllerApi>>,
-) {
-    let Some(api) = api else {
-        return;
-    };
-    for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        for controller in &machine.controllers {
-            if !controller.enabled || controller.command_interface.as_deref() != Some("cmd_vel") {
-                continue;
-            }
-            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
-            api.register_cmd_vel(key, &controller.namespace);
-        }
-    }
-}
-
-fn apply_machine_controller_api_commands(
-    api: Option<Res<MachineControllerApi>>,
-    mut commands: ResMut<ControllerCommands>,
-) {
-    let Some(api) = api else {
-        return;
-    };
-    for (key, wire) in api.snapshot_cmd_vel() {
-        commands.cmd_vel.insert(
-            key,
-            CmdVel {
-                linear_mps: wire.linear[0] as f32,
-                angular_rps: cmd_vel_yaw_rate(&wire),
-            },
-        );
-    }
-}
-
-fn cmd_vel_yaw_rate(wire: &MachineCmdVelWire) -> f32 {
-    // Public cmd_vel follows ROS/base_link convention: yaw is angular.z.
-    // Bevy/Rapier internals are Y-up, and during manual debugging it is easy
-    // to publish angular.y instead. Accept angular.y as a fallback when
-    // angular.z is zero so either convention turns the tractor.
-    let yaw_z = wire.angular[2] as f32;
-    if yaw_z.abs() > 1e-9 {
-        yaw_z
-    } else {
-        wire.angular[1] as f32
-    }
-}
-
-fn publish_machine_controller_states(
-    inventory: Res<ControllerInventory>,
-    states: Res<ControllerStates>,
-    api: Option<Res<MachineControllerApi>>,
-) {
-    let Some(api) = api else {
-        return;
-    };
-    if states.states.is_empty() {
-        return;
-    }
-    for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        for controller in &machine.controllers {
-            if !controller
-                .state_interfaces
-                .iter()
-                .any(|iface| iface == "pose" || iface == "velocity")
-            {
-                continue;
-            }
-            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
-            let Some(state) = states.states.get(&key) else {
-                continue;
-            };
-            api.publish_state(
-                &controller.namespace,
-                &MachineStateWire {
-                    machine_id: machine.id.clone(),
-                    controller: controller.instance.clone(),
-                    position: state.position_m,
-                    heading_rad: state.heading_rad,
-                    linear_speed_mps: state.linear_speed_mps,
-                    yaw_rate_rps: state.yaw_rate_rps,
-                },
-            );
-        }
-    }
-}
-
 fn reconcile_external_process_controllers(
     inventory: Res<ControllerInventory>,
     policy: Res<ExternalControllerPolicy>,
@@ -1183,7 +897,7 @@ fn reconcile_external_process_controllers(
                 .env("GEARBOX_NAMESPACE", &controller.namespace)
                 .env(
                     "GEARBOX_TRANSPORT",
-                    controller.transport.as_deref().unwrap_or("zenoh"),
+                    controller.transport.as_deref().unwrap_or("agentio"),
                 );
             match cmd.spawn() {
                 Ok(child) => {
@@ -1285,11 +999,14 @@ fn apply_builtin_ackermann_cmd_vel(
                 // including when the command is zero. This lets the UI/API show
                 // that the controller is alive without needing movement.
                 let pos = body.translation();
+                let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
                 states.states.insert(
                     key.clone(),
                     ControllerState {
                         position_m: [pos.x, pos.y, pos.z],
                         heading_rad: body_heading,
+                        roll_rad,
+                        pitch_rad,
                         linear_speed_mps: body.linvel().length(),
                         yaw_rate_rps: body.angvel().y,
                     },
@@ -1415,6 +1132,191 @@ fn apply_builtin_ackermann_cmd_vel(
     }
 }
 
+/// Second builtin controller, for differential-drive machines: casters plus
+/// two driven wheels, turning on the spot. There is no steering geometry and
+/// no traction model to run — the commanded twist is written straight onto
+/// the chassis body as its horizontal velocity and yaw rate, leaving gravity
+/// and ground contact to the solver. The wheel bodies are visual and spin
+/// from the chassis motion at their own side, so the outer wheel turns faster
+/// through a curve and they counter-rotate on the spot.
+fn apply_builtin_diff_drive_cmd_vel(
+    inventory: Res<ControllerInventory>,
+    commands: Res<ControllerCommands>,
+    time: Res<Time>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    mut states: ResMut<ControllerStates>,
+    active: Res<usd_bevy::physics::PhysicsActive>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    joints: Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    parents: Query<&ChildOf>,
+    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+) {
+    if !active.0 || inventory.machines.is_empty() {
+        return;
+    }
+    let dt = time.delta_secs().clamp(1.0 / 240.0, 1.0 / 20.0);
+
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        for controller in &machine.controllers {
+            if !controller.enabled || controller.controller_type != "builtin:diff_drive_cmd_vel" {
+                continue;
+            }
+            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            let requested = commands.cmd_vel.get(&key).copied().unwrap_or_default();
+            let cmd = stable_cmd_vel(&key, requested, dt, &mut runtime);
+            let Some(body_path) = controller.body.as_ref().or(machine.body.as_ref()) else {
+                continue;
+            };
+            let Some(body_entity) = find_prim_entity(scene_root, body_path, &prims, &parents)
+            else {
+                continue;
+            };
+            let Some(body_handle) = physics.entity_to_body.get(&body_entity).copied() else {
+                continue;
+            };
+
+            {
+                let Some(body) = physics.bodies.get_mut(body_handle) else {
+                    continue;
+                };
+                let Some(forward) = body_forward_vector(body) else {
+                    continue;
+                };
+                let mut linvel = body.linvel();
+                linvel.x = forward.x * cmd.linear_mps as f64;
+                linvel.z = forward.z * cmd.linear_mps as f64;
+                let mut angvel = body.angvel();
+                angvel.y = cmd.angular_rps as f64;
+                let moving = cmd.linear_mps.abs() > 0.0 || cmd.angular_rps.abs() > 0.0;
+                body.set_linvel(linvel, moving);
+                body.set_angvel(angvel, moving);
+                if moving && runtime.diff_drive_debug_ticks % 60 == 0 {
+                    info!(
+                        "gearbox-control[diff] {}: requested v={:.2} w={:.2} applied v={:.2} w={:.2} body_type={:?} sleeping={} linvel={:?}",
+                        machine.id,
+                        requested.linear_mps,
+                        requested.angular_rps,
+                        cmd.linear_mps,
+                        cmd.angular_rps,
+                        body.body_type(),
+                        body.is_sleeping(),
+                        body.linvel()
+                    );
+                }
+                runtime.diff_drive_debug_ticks += 1;
+
+                let pos = body.translation();
+                let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
+                states.states.insert(
+                    key.clone(),
+                    ControllerState {
+                        position_m: [pos.x, pos.y, pos.z],
+                        heading_rad: machine_heading_rad(body),
+                        roll_rad,
+                        pitch_rad,
+                        linear_speed_mps: body.linvel().length(),
+                        yaw_rate_rps: body.angvel().y,
+                    },
+                );
+            }
+
+            // The tyres are along for the ride: with the chassis velocity
+            // written directly, four gripping wheels only fight the commanded
+            // spin, and a turn on the spot comes out at a third of the rate.
+            // Let them slide; the visual spin below still follows the ground.
+            let tire_pairs =
+                tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics);
+            set_wheel_colliders_friction(
+                &mut physics,
+                body_handle,
+                &tire_pairs,
+                DIFF_DRIVE_TIRE_FRICTION,
+            );
+            // And carry the wheels along at the velocity a rigid body would
+            // give them. Written on the chassis alone, the solver spends each
+            // step dragging it back towards wheels that were left behind, and
+            // the machine lurches forward at a third of the commanded speed.
+            carry_wheels_with_chassis(&mut physics, body_handle, &tire_pairs);
+
+            let wheel_targets = visual_wheel_spin_targets(
+                scene_root,
+                controller,
+                machine,
+                &joints,
+                &parents,
+                &physics,
+                body_handle,
+                controller.wheel_radius.unwrap_or(0.1) as f64,
+            );
+            apply_articulation_or_impulse_joint_motors(&mut physics, &wheel_targets, &[]);
+        }
+    }
+}
+
+/// Tyre friction under the differential controller, which drives the chassis
+/// by velocity rather than through the tyres.
+const DIFF_DRIVE_TIRE_FRICTION: f64 = 0.05;
+
+/// Give every wheel body the velocity its place on the chassis implies —
+/// `v + ω × r` — keeping its own spin about the axle and its own vertical
+/// motion, so gravity still seats it.
+fn carry_wheels_with_chassis(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+) {
+    let Some(body) = physics.bodies.get(chassis) else {
+        return;
+    };
+    let (origin, linvel, angvel) = (body.translation(), body.linvel(), body.angvel());
+    let wheels: Vec<RigidBodyHandle> = tire_pairs
+        .iter()
+        .filter_map(|pair| wheel_body_of(physics, chassis, *pair))
+        .collect();
+    for wheel in wheels {
+        let Some(wheel_body) = physics.bodies.get_mut(wheel) else {
+            continue;
+        };
+        let carried = linvel + angvel.cross(wheel_body.translation() - origin);
+        let mut wheel_linvel = wheel_body.linvel();
+        wheel_linvel.x = carried.x;
+        wheel_linvel.z = carried.z;
+        wheel_body.set_linvel(wheel_linvel, true);
+        let mut wheel_angvel = wheel_body.angvel();
+        wheel_angvel.y = angvel.y;
+        wheel_body.set_angvel(wheel_angvel, true);
+    }
+}
+
+fn set_wheel_colliders_friction(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+    friction: f64,
+) {
+    for pair in tire_pairs {
+        let Some(wheel) = wheel_body_of(physics, chassis, *pair) else {
+            continue;
+        };
+        let handles = physics
+            .bodies
+            .get(wheel)
+            .map(|b| b.colliders().to_vec())
+            .unwrap_or_default();
+        for ch in handles {
+            if let Some(col) = physics.colliders.get_mut(ch)
+                && (col.friction() - friction).abs() > 1e-6
+            {
+                col.set_friction(friction);
+                col.set_friction_combine_rule(CoefficientCombineRule::Min);
+            }
+        }
+    }
+}
+
 fn stable_cmd_vel(
     key: &ControllerKey,
     requested: CmdVel,
@@ -1428,8 +1330,8 @@ fn stable_cmd_vel(
         .copied()
         .unwrap_or_default();
     let next = CmdVel {
-        linear_mps: slew(previous.linear_mps, requested.linear_mps, 20.0 * dt),
-        angular_rps: slew(previous.angular_rps, requested.angular_rps, 1.5 * dt),
+        linear_mps: slew(previous.linear_mps, requested.linear_mps, 80.0 * dt),
+        angular_rps: slew(previous.angular_rps, requested.angular_rps, 6.0 * dt),
     };
     runtime.applied_cmd_vel.insert(key.clone(), next);
     next
@@ -1451,6 +1353,19 @@ fn machine_heading_rad(body: &rapier3d::prelude::RigidBody) -> f64 {
     forward.x.atan2(forward.z)
 }
 
+/// REP-103 roll and pitch of a chassis, from how far its forward and left
+/// axes have tilted out of the horizontal. The chassis keeps the USD basis —
+/// forward -Y, left +X, up +Z — and the world is Y-up, so a tilt is the
+/// world-y component of each axis: nose down is positive pitch, right side
+/// down is positive roll.
+fn machine_roll_pitch_rad(body: &rapier3d::prelude::RigidBody) -> (f64, f64) {
+    let forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
+    let left = body.rotation() * Vector::new(1.0, 0.0, 0.0);
+    let pitch = (-forward.y).clamp(-1.0, 1.0).asin();
+    let roll = left.y.clamp(-1.0, 1.0).asin();
+    (roll, pitch)
+}
+
 fn body_forward_vector(body: &rapier3d::prelude::RigidBody) -> Option<Vector> {
     let mut forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
     forward.y = 0.0;
@@ -1459,8 +1374,8 @@ fn body_forward_vector(body: &rapier3d::prelude::RigidBody) -> Option<Vector> {
 
 fn sanitize_cmd_vel(cmd: CmdVel) -> CmdVel {
     CmdVel {
-        linear_mps: deadband(cmd.linear_mps, 0.03).clamp(-4.0, 4.0),
-        angular_rps: deadband(cmd.angular_rps, 0.02).clamp(-1.2, 1.2),
+        linear_mps: deadband(cmd.linear_mps, 0.03).clamp(-16.0, 16.0),
+        angular_rps: deadband(cmd.angular_rps, 0.02).clamp(-4.8, 4.8),
     }
 }
 
@@ -1542,9 +1457,13 @@ const STEER_MAX_TORQUE: f64 = 1200.0;
 /// effective friction whatever the ground collider is authored at.
 const TIRE_FRICTION: f64 = 2.4;
 
-const RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL: f64 = 3_500.0;
-const RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL: f64 = 8_500.0;
-const RAYCAST_BRAKE_IMPULSE: f64 = 1_800.0;
+const RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL: f64 = 14_000.0;
+const RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL: f64 = 34_000.0;
+const RAYCAST_BRAKE_IMPULSE: f64 = 7_200.0;
+const RAYCAST_MAX_SUSPENSION_FORCE_PER_WHEEL: f64 = 30_000.0;
+/// Chassis mass the raycast force constants were tuned for; heavier
+/// machines scale them up proportionally.
+const RAYCAST_REFERENCE_CHASSIS_MASS_KG: f64 = 2_700.0;
 const RAYCAST_SUSPENSION_REST_LENGTH: f64 = 0.22;
 
 /// Largest collider half-extent of a body — a wheel's tyre radius, a
@@ -1664,13 +1583,17 @@ fn apply_rapier_raycast_vehicle_controller(
 
     set_wheel_colliders_sensor(physics, chassis, tire_pairs, true);
 
-    let (current_speed, force_per_rear) = {
+    let (current_speed, force_per_rear, mass_scale) = {
         let Some(body) = physics.bodies.get(chassis) else {
             return false;
         };
         let Some(forward) = body_forward_vector(body) else {
             return false;
         };
+        // The force constants below were tuned for the ~2.7 t tractor.
+        // Heavier machines get them scaled by mass, otherwise a 15 t
+        // harvester crawls and its suspension cannot hold it up.
+        let mass_scale = (body.mass() / RAYCAST_REFERENCE_CHASSIS_MASS_KG).max(1.0);
         let current_speed = body.linvel().dot(forward);
         let target_speed = cmd.linear_mps as f64;
         let speed_error = target_speed - current_speed;
@@ -1685,14 +1608,14 @@ fn apply_rapier_raycast_vehicle_controller(
             // giving enough push to climb modest field rolls.
             let forward_3d = body.rotation() * Vector::new(0.0, -1.0, 0.0);
             let slope_compensation_per_rear = body.mass() * 9.81 * forward_3d.y / 2.0;
-            speed_error * RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL + slope_compensation_per_rear
+            speed_error * RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL * mass_scale
+                + slope_compensation_per_rear
         };
+        let max_force = RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL * mass_scale;
         (
             current_speed,
-            force.clamp(
-                -RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL,
-                RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL,
-            ),
+            force.clamp(-max_force, max_force),
+            mass_scale,
         )
     };
 
@@ -1703,7 +1626,7 @@ fn apply_rapier_raycast_vehicle_controller(
     tuning.max_suspension_travel = 0.5;
     tuning.side_friction_stiffness = 1.0;
     tuning.friction_slip = 24.0;
-    tuning.max_suspension_force = 30_000.0;
+    tuning.max_suspension_force = RAYCAST_MAX_SUSPENSION_FORCE_PER_WHEEL * mass_scale;
 
     let mut vehicle = DynamicRayCastVehicleController::new(chassis);
     vehicle.index_up_axis = 2;
@@ -1749,7 +1672,8 @@ fn apply_rapier_raycast_vehicle_controller(
     }
 
     if cmd.linear_mps.abs() < 0.05 {
-        let brake = (current_speed.abs() * 900.0).clamp(0.0, RAYCAST_BRAKE_IMPULSE);
+        let brake = (current_speed.abs() * 900.0 * mass_scale)
+            .clamp(0.0, RAYCAST_BRAKE_IMPULSE * mass_scale);
         for wheel in vehicle.wheels_mut() {
             wheel.engine_force = 0.0;
             wheel.brake = brake;
@@ -2636,14 +2560,19 @@ fn visual_wheel_radius(
     path: &str,
     fallback: f64,
 ) -> f64 {
-    raycast_wheel_spec_for_path(path)
+    let measured = wheel_body_of(physics, chassis, pair)
+        .and_then(|wheel| body_max_collider_radius(physics, wheel))
+        .filter(|r| *r > 0.05);
+    // The named preset is the tractor's tyre *mesh* radius, which sits a
+    // little outside its collider and spins truer for it. It is matched on
+    // joint names alone, though, so any machine calling a joint
+    // `rev_front_left` used to be spun as a 0.5 m tractor wheel — a 0.16 m
+    // Hunter tyre turned at a third of its rolling speed and looked dragged.
+    // Only take the preset when the wheel actually is about that size.
+    let preset = raycast_wheel_spec_for_path(path)
         .map(|spec| spec.radius)
-        .or_else(|| {
-            wheel_body_of(physics, chassis, pair)
-                .and_then(|wheel| body_max_collider_radius(physics, wheel))
-                .filter(|r| *r > 0.05)
-        })
-        .unwrap_or(fallback)
+        .filter(|preset| measured.is_none_or(|r| (r - preset).abs() <= preset * 0.25));
+    preset.or(measured).unwrap_or(fallback)
 }
 
 fn chassis_forward_speed(
@@ -3480,11 +3409,11 @@ def Xform "Leatherback" (
         );
         assert_eq!(
             sanitize_cmd_vel(CmdVel {
-                linear_mps: 10.0,
+                linear_mps: 40.0,
                 angular_rps: 5.0
             })
             .linear_mps,
-            4.0
+            16.0
         );
         assert_eq!(
             sanitize_cmd_vel(CmdVel {
@@ -3492,7 +3421,7 @@ def Xform "Leatherback" (
                 angular_rps: 5.0
             })
             .angular_rps,
-            1.2
+            4.8
         );
         assert!((slew(0.0, 4.0, 0.25) - 0.25).abs() < 1e-6);
     }
@@ -3741,5 +3670,178 @@ def Xform "World"
         }
 
         let _ = std::fs::remove_file(world_path);
+    }
+}
+
+/// One agent per discovered machine that exposes `cmd_vel`. Created when
+/// the machine appears in the inventory, dropped when it leaves.
+fn sync_machine_agents(
+    inventory: Res<ControllerInventory>,
+    bus: Option<ResMut<GearboxBus>>,
+    mut keys: ResMut<MachineAgentKeys>,
+) {
+    let Some(mut bus) = bus else { return };
+    let mut wanted: HashMap<String, (ControllerKey, MachineConfig)> = HashMap::new();
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let Some(drive) = machine
+            .controllers
+            .iter()
+            .find(|c| c.enabled && c.command_interface.as_deref() == Some("cmd_vel"))
+        else {
+            continue;
+        };
+        let host = &bus.host.config;
+        let mut config = MachineConfig::new(&host.instance, &drive.namespace);
+        config.machine_id = machine.id.clone();
+        config.kind = machine.kind.clone().unwrap_or_default();
+        config.ephemeral = host.ephemeral;
+        config.allow = host.allow.clone();
+        config.allow_any = host.allow_any;
+        config.relay = host.relay;
+        config.controllers = machine
+            .controllers
+            .iter()
+            .map(|c| ControllerDesc {
+                instance: c.instance.clone(),
+                controller_type: c.controller_type.clone(),
+                command_interface: c.command_interface.clone(),
+                state_interfaces: c.state_interfaces.clone(),
+            })
+            .collect();
+        let key = ControllerKey::new(scene_root, &machine.id, &drive.instance);
+        wanted.insert(drive.namespace.clone(), (key, config));
+    }
+
+    let stale: Vec<String> = bus
+        .machines
+        .keys()
+        .filter(|ns| !wanted.contains_key(*ns))
+        .cloned()
+        .collect();
+    for ns in stale {
+        bus.machines.remove(&ns);
+        keys.0.remove(&ns);
+        info!("gearbox-control: machine agent `{ns}` withdrawn");
+    }
+
+    let host_id = bus.host.endpoint_id();
+    for (ns, (key, config)) in wanted {
+        if bus.machines.contains_key(&ns) {
+            keys.0.insert(ns, key);
+            continue;
+        }
+        match MachineAgent::new(config, host_id) {
+            Ok(agent) => {
+                let did = agent.did();
+                info!("gearbox-control: machine agent `{ns}` ready as {did}");
+                let event = SceneEvent::new(event_kind::MACHINE_READY, &ns)
+                    .with_prop("did", &did)
+                    .with_prop("machine_id", &key.machine_id);
+                bus.machines.insert(ns.clone(), agent);
+                keys.0.insert(ns, key);
+                bus.publish_event(event);
+            }
+            Err(err) => warn!("gearbox-control: machine agent `{ns}` failed: {err}"),
+        }
+    }
+}
+
+/// Copy each agent's current twist into the internal command buffer.
+fn apply_machine_agent_commands(
+    bus: Option<Res<GearboxBus>>,
+    keys: Res<MachineAgentKeys>,
+    mut commands: ResMut<ControllerCommands>,
+) {
+    let Some(bus) = bus else { return };
+    for (ns, agent) in &bus.machines {
+        let Some(key) = keys.0.get(ns) else { continue };
+        let twist = agent.twist();
+        commands.cmd_vel.insert(
+            key.clone(),
+            CmdVel {
+                linear_mps: twist.linear.vx as f32,
+                angular_rps: yaw_rate_of(&twist),
+            },
+        );
+    }
+}
+
+/// Public cmd_vel follows ROS convention: yaw is angular z. Accept angular
+/// y as a fallback so a Y-up client still turns the machine.
+fn yaw_rate_of(twist: &Twist) -> f32 {
+    if twist.angular.vz.abs() > 1e-9 {
+        twist.angular.vz as f32
+    } else {
+        twist.angular.vy as f32
+    }
+}
+
+fn publish_machine_controller_states(
+    inventory: Res<ControllerInventory>,
+    states: Res<ControllerStates>,
+    keys: Res<MachineAgentKeys>,
+    bus: Option<ResMut<GearboxBus>>,
+) {
+    let Some(mut bus) = bus else { return };
+    if states.states.is_empty() {
+        return;
+    }
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        for controller in &machine.controllers {
+            if !controller
+                .state_interfaces
+                .iter()
+                .any(|iface| iface == "pose" || iface == "velocity")
+            {
+                continue;
+            }
+            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            let Some(state) = states.states.get(&key) else {
+                continue;
+            };
+            if keys.0.get(&controller.namespace) != Some(&key) {
+                continue;
+            }
+            let Some(agent) = bus.machines.get_mut(&controller.namespace) else {
+                continue;
+            };
+            let half = state.heading_rad * 0.5;
+            let wire = MachineState {
+                odom: Odom {
+                    pose: gearbox_api::datapod::Pose {
+                        point: Point::new(
+                            state.position_m[0],
+                            state.position_m[1],
+                            state.position_m[2],
+                        ),
+                        rotation: Quaternion::new(half.cos(), 0.0, half.sin(), 0.0),
+                    },
+                    twist: Twist::from_components(
+                        state.linear_speed_mps,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        state.yaw_rate_rps,
+                    ),
+                },
+                heading_rad: state.heading_rad,
+                roll_rad: state.roll_rad,
+                pitch_rad: state.pitch_rad,
+                session: 0,
+                props: Props::from_pairs(&[
+                    ("machine_id", machine.id.as_str()),
+                    ("controller", controller.instance.as_str()),
+                ])
+                .into_bytes(),
+            };
+            agent.publish_state(wire);
+        }
     }
 }

@@ -2,8 +2,6 @@
 resolver = "2"
 members = [
     "crates/gearbox-api",
-    "crates/gearbox-link",
-    "crates/gearbox-world",
     "bin/gearbox",
 ]
 
@@ -15,7 +13,7 @@ license = "MIT"
 
 [workspace.dependencies]
 # Local sibling crate — spatial types the whole gearbox stack speaks.
-datapod = { git = "https://codeberg.org/robolibs/datapod" }
+datapod = { git = "https://codeberg.org/robolibs/datapod.git", tag = "0.4.1" }
 
 # Physics backend — f64 variant of rapier3d. Matches datapod's f64
 # spatial types, so every boundary crossing stops needing a lossy
@@ -68,26 +66,17 @@ bevy_egui = { version = "0.40.1", default-features = false, features = [
     "default_fonts",
     "render",
 ] }
-# Zenoh — pub/sub + query/reply transport for the **tool API**
-# (external robots / CLIs / scripting agents). Server-side only;
-# does not cross the simulator ↔ renderer boundary (zenoh doesn't
-# target wasm32).
-zenoh = "1"
-
-# aeronet — transport-agnostic Bevy networking, used for the
-# **simulator ↔ renderer** link when those two layers are split
-# across processes (e.g. headless sim + wasm browser renderer).
-# Pure Rust on both ends, wasm-friendly WebSocket IO layer.
-aeronet = "0.21"
-# WebTransport IO for aeronet — QUIC-based, no HOL blocking, unreliable
-# datagrams available. Declared with no default features so
-# `gearbox-link` can opt in to `client` / `server` / `dangerous-
-# configuration` independently; you want only one side per build
-# target (headless sim = server; wasm renderer = client).
-aeronet_webtransport = { version = "0.21", default-features = false }
+# peerbus + agentio — the tool API transport. peerbus moves datapod
+# payloads between ed25519 ids over shared memory or QUIC; agentio adds
+# persistent identity, `did:key`, and the signed topic directory. The
+# peerbus rev is the one agentio pins; using its head alone splits
+# authbox into two versions.
+peerbus = { git = "https://codeberg.org/robolibs/peerbus.git", rev = "f4b31c6155a294a10f5902167afae6f0b78aa528" }
+agentio = { path = "../agentio" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 gearbox-api     = { path = "crates/gearbox-api" }
-gearbox-link    = { path = "crates/gearbox-link" }
 mara            = { git = "https://github.com/bresilla/mara", branch = "develop", package = "mara", default-features = false }
 bevy_mara       = { git = "https://github.com/bresilla/mara", branch = "develop", package = "bevy_mara", default-features = false }
 # Vendored from bevy_openusd because upstream still pins older Bevy
@@ -95,3 +84,9 @@ bevy_mara       = { git = "https://github.com/bresilla/mara", branch = "develop"
 usd_bevy        = { path = "vendor/bevy_openusd/crates/usd_bevy" }
 usd_schema      = { path = "vendor/bevy_openusd/crates/usd_schema" }
 openusd         = { git = "https://github.com/mxpv/openusd", rev = "fe92b73224c611831be244afac9cf7654b5ef51e" }
+
+# Local peerbus carries the per-handle request-id seed fix; every crate in
+# the graph (agentio included) must see the same peerbus, so patch the
+# git source rather than depend on the path directly.
+[patch."https://codeberg.org/robolibs/peerbus.git"]
+peerbus = { path = "../peerbus" }

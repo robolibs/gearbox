@@ -4,8 +4,8 @@
 //! terrain surface itself is now a USD scene loaded by `load.rs`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::Entities;
@@ -22,14 +22,14 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
 use bevy::window::PrimaryWindow;
+use bevy_egui::input::egui_wants_any_keyboard_input;
 use bevy_mara::{ChaseCamera, GroundGrid, apply_rig};
+use gearbox_api::{GearboxBus, SceneEvent, event_kind};
 use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::{
     ColliderBuilder, ColliderHandle, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodyType,
 };
-use serde::Serialize;
 use usd_bevy::physics::PhysicsWorld;
-use zenoh::Wait;
 
 /// Earth-radius planet sphere. The simulator was tuned for this
 /// radius — vehicle wheel friction, camera fog distances, cloud
@@ -50,6 +50,135 @@ const FLAT_GROUND_VISUAL_SIZE_M: f32 = 10_000.0;
 const USD_TERRAIN_ACTIVATION_WARN_FRAMES: u32 = 120;
 
 static USD_TERRAIN_LOADED: AtomicBool = AtomicBool::new(false);
+/// Set when the loaded USD terrain mesh is level; `terrain_height_m` then
+/// returns its height instead of the procedural hill formula.
+static USD_TERRAIN_IS_FLAT: AtomicBool = AtomicBool::new(false);
+static USD_TERRAIN_FLAT_Y_BITS: AtomicU32 = AtomicU32::new(0);
+const USD_TERRAIN_FLAT_TOLERANCE_M: f32 = 0.05;
+/// The loaded terrain's exact surface, so placement uses the same shape the
+/// collider has rather than the procedural formula it approximates.
+static USD_TERRAIN_MESH: RwLock<Option<Arc<TerrainHeightMesh>>> = RwLock::new(None);
+const TERRAIN_HEIGHT_BINS: f32 = 512.0;
+
+struct TerrainHeightMesh {
+    vertices: Vec<[f32; 3]>,
+    triangles: Vec<[u32; 3]>,
+    min_x: f32,
+    min_z: f32,
+    cell: f32,
+    cols: usize,
+    rows: usize,
+    bins: Vec<Vec<u32>>,
+}
+
+impl TerrainHeightMesh {
+    fn build(vertices: &[DVec3], triangles: &[[u32; 3]]) -> Option<Self> {
+        let vertices: Vec<[f32; 3]> = vertices
+            .iter()
+            .map(|v| [v.x as f32, v.y as f32, v.z as f32])
+            .collect();
+        let triangles: Vec<[u32; 3]> = triangles
+            .iter()
+            .copied()
+            .filter(|t| t.iter().all(|&i| (i as usize) < vertices.len()))
+            .collect();
+        if vertices.is_empty() || triangles.is_empty() {
+            return None;
+        }
+        let (mut min_x, mut min_z, mut max_x, mut max_z) =
+            (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for v in &vertices {
+            min_x = min_x.min(v[0]);
+            max_x = max_x.max(v[0]);
+            min_z = min_z.min(v[2]);
+            max_z = max_z.max(v[2]);
+        }
+        let span = (max_x - min_x).max(max_z - min_z);
+        if !(span > 0.0) {
+            return None;
+        }
+        let cell = (span / TERRAIN_HEIGHT_BINS).max(1.0);
+        let cols = ((max_x - min_x) / cell).floor() as usize + 1;
+        let rows = ((max_z - min_z) / cell).floor() as usize + 1;
+        let mut bins = vec![Vec::new(); cols * rows];
+        for (t, tri) in triangles.iter().enumerate() {
+            let pts = tri.map(|i| vertices[i as usize]);
+            let lo_x = pts.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+            let hi_x = pts.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+            let lo_z = pts.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+            let hi_z = pts.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max);
+            let c0 = ((lo_x - min_x) / cell).floor() as usize;
+            let c1 = (((hi_x - min_x) / cell).floor() as usize).min(cols - 1);
+            let r0 = ((lo_z - min_z) / cell).floor() as usize;
+            let r1 = (((hi_z - min_z) / cell).floor() as usize).min(rows - 1);
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    bins[r * cols + c].push(t as u32);
+                }
+            }
+        }
+        Some(Self {
+            vertices,
+            triangles,
+            min_x,
+            min_z,
+            cell,
+            cols,
+            rows,
+            bins,
+        })
+    }
+
+    fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        let c = ((x - self.min_x) / self.cell).floor();
+        let r = ((z - self.min_z) / self.cell).floor();
+        if c < 0.0 || r < 0.0 || c as usize >= self.cols || r as usize >= self.rows {
+            return None;
+        }
+        let mut best: Option<f32> = None;
+        for &t in &self.bins[r as usize * self.cols + c as usize] {
+            let [a, b, c] = self.triangles[t as usize].map(|i| self.vertices[i as usize]);
+            if let Some(y) = triangle_height_at(a, b, c, x, z) {
+                best = Some(best.map_or(y, |h| h.max(y)));
+            }
+        }
+        best
+    }
+}
+
+fn triangle_height_at(a: [f32; 3], b: [f32; 3], c: [f32; 3], x: f32, z: f32) -> Option<f32> {
+    let det = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / det;
+    let l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / det;
+    let l3 = 1.0 - l1 - l2;
+    let eps = -1e-4;
+    if l1 < eps || l2 < eps || l3 < eps {
+        return None;
+    }
+    Some(l1 * a[1] + l2 * b[1] + l3 * c[1])
+}
+
+fn set_usd_terrain_height_profile(min_y: f32, max_y: f32) {
+    let flat = max_y - min_y <= USD_TERRAIN_FLAT_TOLERANCE_M;
+    USD_TERRAIN_FLAT_Y_BITS.store(max_y.to_bits(), Ordering::Relaxed);
+    USD_TERRAIN_IS_FLAT.store(flat, Ordering::Relaxed);
+}
+
+fn set_usd_terrain_height_mesh(vertices: &[DVec3], triangles: &[[u32; 3]]) {
+    if let Ok(mut slot) = USD_TERRAIN_MESH.write() {
+        *slot = TerrainHeightMesh::build(vertices, triangles).map(Arc::new);
+    }
+}
+
+fn clear_usd_terrain_height_profile() {
+    USD_TERRAIN_IS_FLAT.store(false, Ordering::Relaxed);
+    if let Ok(mut slot) = USD_TERRAIN_MESH.write() {
+        *slot = None;
+    }
+}
 
 pub struct WorldPlugin;
 
@@ -57,17 +186,24 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "../assets/shaders/terrain_material.wgsl");
         app.insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.86)))
-            // 8 k shadow map (4× Bevy's 2048 default). One cascade has
-            // to cover the whole ~100 m vehicle neighbourhood, so the
-            // extra texels go directly into shadow sharpness.
-            .insert_resource(DirectionalLightShadowMap { size: 8192 })
+            // 4 k shadow map per cascade; four cascades reach 800 m so
+            // shadows stay when the camera pulls back over the field.
+            .insert_resource(DirectionalLightShadowMap { size: 4096 })
             .init_resource::<StaticUsdPropBodies>()
             .init_resource::<PublishedUsdPoses>()
             .add_plugins(MaterialPlugin::<AntiRepeatTerrainMaterial>::default())
-            .add_systems(Startup, open_world_event_publisher)
             .add_systems(Startup, (spawn_world, spawn_flat_ground))
             .add_systems(Update, mark_new_usd_terrain_roots)
-            .add_systems(Update, (chase_camera_control, chase_camera_zoom))
+            .add_systems(
+                Update,
+                (
+                    chase_camera_control,
+                    chase_camera_zoom,
+                    chase_camera_keys.run_if(not(egui_wants_any_keyboard_input)),
+                    chase_camera_floor,
+                )
+                    .chain(),
+            )
             .add_systems(Update, snap_new_usd_roots_to_terrain)
             .add_systems(Update, apply_anti_repeat_material_to_usd_terrain)
             .add_systems(Update, freeze_settled_static_usd_prop_bodies)
@@ -102,6 +238,11 @@ struct AntiRepeatTerrainExtension {
     #[texture(106)]
     #[sampler(107)]
     terrain_detail_height: Handle<Image>,
+    /// RGB multiplies the field colour, A scales the cut-hay rows. Comes
+    /// from the USD material's constant `diffuseColor`; white and full hay
+    /// when the terrain material is textured or unset.
+    #[uniform(108)]
+    tint: Vec4,
 }
 
 impl MaterialExtension for AntiRepeatTerrainExtension {
@@ -147,33 +288,6 @@ struct StaticUsdPropBodies {
     handles: HashMap<Entity, (RigidBodyHandle, ColliderHandle)>,
 }
 
-#[derive(Resource, Clone)]
-struct WorldEventPublisher {
-    session: Arc<zenoh::Session>,
-}
-
-#[derive(Debug, Serialize)]
-struct UsdHarvestedWire {
-    id: String,
-    bale_id: Option<u32>,
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-/// Settled world pose of a loader-spawned static USD. Published once the prop
-/// body freezes, so scripts read the *real* terrain-snapped + physics-settled
-/// position instead of guessing. `top_y` is the world Y of the asset's visual
-/// top — a caller can drop a marker right above it with no terrain math.
-#[derive(Debug, Serialize)]
-struct UsdPoseWire {
-    id: String,
-    x: f32,
-    y: f32,
-    z: f32,
-    top_y: f32,
-}
-
 /// Prop entities whose settled pose has already been published. Keyed by
 /// `Entity` (not runtime id) so that re-loading an id — a fresh entity — is
 /// reported anew instead of being silently suppressed across script runs.
@@ -188,23 +302,6 @@ const STATIC_PROP_MIN_DYNAMIC_FRAMES: u32 = 12;
 const STATIC_PROP_FORCE_FREEZE_FRAMES: u32 = 45;
 const STATIC_PROP_SETTLED_LINEAR_SPEED_MPS: f64 = 0.12;
 const STATIC_PROP_SETTLED_ANGULAR_SPEED_RPS: f64 = 0.25;
-
-fn open_world_event_publisher(mut commands: Commands) {
-    match zenoh::open(zenoh::Config::default()).wait() {
-        Ok(session) => {
-            commands.insert_resource(WorldEventPublisher {
-                session: Arc::new(session),
-            });
-            info!(
-                "world: USD world events ready \
-                 (gearbox/usd/harvested/<id>, gearbox/usd/pose/<id>)"
-            );
-        }
-        Err(err) => {
-            warn!("world: USD world events disabled: {err}");
-        }
-    }
-}
 
 fn spawn_world(
     mut commands: Commands,
@@ -252,15 +349,15 @@ fn spawn_world(
         radius_f64,
     );
 
-    // ── Sun + tight cascade ──────────────────────────────────────────
-    // Single 100 m cascade so all texels land on the vehicle
-    // neighbourhood. Steep angle for a clear horizontal direction.
+    // ── Sun + cascades ───────────────────────────────────────────────
+    // Tight first cascade around the vehicle, three more out to 800 m.
+    // Steep angle for a clear horizontal direction.
     let sun_shadow = CascadeShadowConfigBuilder {
-        num_cascades: 1,
+        num_cascades: 4,
         minimum_distance: 0.1,
-        maximum_distance: 100.0,
-        first_cascade_far_bound: 100.0,
-        overlap_proportion: 0.0,
+        maximum_distance: 800.0,
+        first_cascade_far_bound: 40.0,
+        overlap_proportion: 0.2,
     }
     .build();
     commands.spawn((
@@ -391,6 +488,69 @@ fn chase_camera_control(
     }
 }
 
+/// How much of the view distance a second of a held key moves the view.
+const KEY_PAN_PER_SEC: f32 = 0.4;
+
+/// The lowest the camera's focus may sit, and the flattest it may look, with
+/// the view held above the ground. Three degrees above level keeps the camera
+/// itself above a focus that is on the ground, whatever the distance.
+const CAMERA_FLOOR_M: f32 = 0.0;
+const CAMERA_MIN_ELEVATION: f32 = 3.0_f32.to_radians();
+
+/// Keep the view above the ground. Runs after every other camera control, so
+/// whichever of them pushed the view down — a lift, an orbit, Q — it comes
+/// back up before the frame is drawn. Holding Alt lets it through, for the
+/// times looking up from underneath is what is wanted.
+fn chase_camera_floor(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
+    if keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight) {
+        return;
+    }
+    for (mut cam, mut transform) in &mut cameras {
+        let below = cam.focus.y < CAMERA_FLOOR_M || cam.elevation < CAMERA_MIN_ELEVATION;
+        if !below {
+            continue;
+        }
+        cam.focus.y = cam.focus.y.max(CAMERA_FLOOR_M);
+        cam.elevation = cam.elevation.max(CAMERA_MIN_ELEVATION);
+        apply_rig(&cam, &mut transform);
+    }
+}
+
+/// W/A/S/D move the view over the ground in the direction the camera faces,
+/// with the pitch left out — looking down and pressing W slides forward, it
+/// does not dive. Q and E take it down and up, Shift makes all of it faster.
+fn chase_camera_keys(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
+    let axis =
+        |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i8 - keys.pressed(neg) as i8) as f32;
+    // `forward` below points from the focus back to the camera, so W is the
+    // negative direction along it.
+    let ahead = axis(KeyCode::KeyW, KeyCode::KeyS);
+    let aside = axis(KeyCode::KeyA, KeyCode::KeyD);
+    let up = axis(KeyCode::KeyQ, KeyCode::KeyE);
+    if ahead == 0.0 && aside == 0.0 && up == 0.0 {
+        return;
+    }
+    let boost = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+        3.0
+    } else {
+        1.0
+    };
+    for (mut cam, mut transform) in &mut cameras {
+        let forward = Vec3::new(cam.yaw.sin(), 0.0, cam.yaw.cos());
+        let right = Vec3::new(forward.z, 0.0, -forward.x);
+        let speed = cam.distance * KEY_PAN_PER_SEC * boost * time.delta_secs();
+        cam.focus += (forward * ahead + right * aside + Vec3::Y * up) * speed;
+        apply_rig(&cam, &mut transform);
+    }
+}
+
 fn chase_camera_zoom(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -443,6 +603,7 @@ fn spawn_flat_ground(
     mut physics: ResMut<PhysicsWorld>,
 ) {
     USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
+    clear_usd_terrain_height_profile();
 
     let material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.48, 0.42, 0.30),
@@ -560,43 +721,38 @@ fn is_usd_terrain_scene_instantiated(root: Entity, children: &Query<&Children>) 
     collect_descendants(root, children).len() > 1
 }
 
+/// Hay-row strength for a tinted (crop) terrain; untinted soil keeps 1.0.
+const TINTED_TERRAIN_HAY_STRENGTH: f32 = 0.15;
+
+/// Tint for a terrain mesh's authored material: its constant
+/// `diffuseColor`, or white when it is textured or left at the default.
+fn terrain_tint_from_material(material: Option<&StandardMaterial>) -> Vec4 {
+    let Some(material) = material else {
+        return Vec4::ONE;
+    };
+    let base = LinearRgba::from(material.base_color);
+    let is_default = (base.red - 0.8).abs() < 1e-3
+        && (base.green - 0.8).abs() < 1e-3
+        && (base.blue - 0.8).abs() < 1e-3;
+    if material.base_color_texture.is_some() || is_default {
+        return Vec4::ONE;
+    }
+    Vec4::new(base.red, base.green, base.blue, TINTED_TERRAIN_HAY_STRENGTH)
+}
+
 fn apply_anti_repeat_material_to_usd_terrain(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<AntiRepeatTerrainMaterial>>,
+    standard_materials: Res<Assets<StandardMaterial>>,
     terrain_roots: Query<(Entity, &Name), With<usd_bevy::UsdSceneRoot>>,
     children: Query<&Children>,
-    terrain_meshes: Query<Entity, (With<Mesh3d>, Without<AntiRepeatTerrainMaterialApplied>)>,
-    mut material_handle: Local<Option<Handle<AntiRepeatTerrainMaterial>>>,
+    terrain_meshes: Query<
+        Option<&MeshMaterial3d<StandardMaterial>>,
+        (With<Mesh3d>, Without<AntiRepeatTerrainMaterialApplied>),
+    >,
+    mut material_handles: Local<HashMap<[u32; 4], Handle<AntiRepeatTerrainMaterial>>>,
 ) {
-    let handle = material_handle
-        .get_or_insert_with(|| {
-            materials.add(ExtendedMaterial {
-                base: StandardMaterial {
-                    double_sided: true,
-                    cull_mode: None,
-                    perceptual_roughness: 0.98,
-                    metallic: 0.0,
-                    ..default()
-                },
-                extension: AntiRepeatTerrainExtension {
-                    terrain_albedo: asset_server.load(asset_path(
-                        "textures/terrain/Ground001/Ground001_1K-JPG_Color.jpg",
-                    )),
-                    terrain_height: asset_server.load(asset_path(
-                        "textures/terrain/Ground001/Ground001_1K-JPG_Displacement.jpg",
-                    )),
-                    terrain_detail_albedo: asset_server.load(asset_path(
-                        "textures/terrain/Ground003/Ground003_1K-JPG_Color.jpg",
-                    )),
-                    terrain_detail_height: asset_server.load(asset_path(
-                        "textures/terrain/Ground003/Ground003_1K-JPG_Displacement.jpg",
-                    )),
-                },
-            })
-        })
-        .clone();
-
     let mut applied = 0usize;
     for (root, name) in terrain_roots.iter() {
         if !is_usd_terrain_root_name(name.as_str())
@@ -605,16 +761,45 @@ fn apply_anti_repeat_material_to_usd_terrain(
             continue;
         }
         for entity in collect_descendants(root, &children) {
-            if terrain_meshes.get(entity).is_err() {
+            let Ok(authored) = terrain_meshes.get(entity) else {
                 continue;
-            }
+            };
+            let tint = terrain_tint_from_material(
+                authored.and_then(|handle| standard_materials.get(&handle.0)),
+            );
+            let handle = material_handles
+                .entry(tint.to_array().map(f32::to_bits))
+                .or_insert_with(|| {
+                    materials.add(ExtendedMaterial {
+                        base: StandardMaterial {
+                            double_sided: true,
+                            cull_mode: None,
+                            perceptual_roughness: 0.98,
+                            metallic: 0.0,
+                            ..default()
+                        },
+                        extension: AntiRepeatTerrainExtension {
+                            terrain_albedo: asset_server.load(asset_path(
+                                "textures/terrain/Ground001/Ground001_1K-JPG_Color.jpg",
+                            )),
+                            terrain_height: asset_server.load(asset_path(
+                                "textures/terrain/Ground001/Ground001_1K-JPG_Displacement.jpg",
+                            )),
+                            terrain_detail_albedo: asset_server.load(asset_path(
+                                "textures/terrain/Ground003/Ground003_1K-JPG_Color.jpg",
+                            )),
+                            terrain_detail_height: asset_server.load(asset_path(
+                                "textures/terrain/Ground003/Ground003_1K-JPG_Displacement.jpg",
+                            )),
+                            tint,
+                        },
+                    })
+                })
+                .clone();
             commands
                 .entity(entity)
                 .remove::<MeshMaterial3d<StandardMaterial>>()
-                .insert((
-                    MeshMaterial3d(handle.clone()),
-                    AntiRepeatTerrainMaterialApplied,
-                ));
+                .insert((MeshMaterial3d(handle), AntiRepeatTerrainMaterialApplied));
             applied += 1;
         }
     }
@@ -643,6 +828,13 @@ fn attach_gearbox_terrain_trimesh(
         return None;
     };
     remove_terrain_descendant_colliders(root, children, physics);
+    let (min_y, max_y) = vertices
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v.y as f32), hi.max(v.y as f32))
+        });
+    set_usd_terrain_height_profile(min_y, max_y);
+    set_usd_terrain_height_mesh(&vertices, &indices);
     let Some(terrain) = ColliderBuilder::trimesh(vertices, indices).ok() else {
         warn!("world: failed to build exact Rapier trimesh collider for USD terrain");
         return None;
@@ -1042,11 +1234,11 @@ fn attach_static_usd_prop_body(
 /// things *are*; it never decides what anything targets.
 fn publish_loaded_usd_poses(
     physics: Res<PhysicsWorld>,
-    publisher: Option<Res<WorldEventPublisher>>,
+    bus: Option<ResMut<GearboxBus>>,
     mut published: ResMut<PublishedUsdPoses>,
     props: Query<(Entity, &Name, &Transform, &StaticUsdPhysicsProp)>,
 ) {
-    let Some(publisher) = publisher.as_deref() else {
+    let Some(mut bus) = bus else {
         return;
     };
     // Forget props that no longer exist (harvested / unloaded). A later load
@@ -1074,7 +1266,11 @@ fn publish_loaded_usd_poses(
         }
         let pos = tr.translation;
         let top_y = pos.y + prop.visual_top_offset_y;
-        publisher.publish_loaded_usd_pose(id, pos, top_y);
+        bus.publish_event(
+            SceneEvent::new(event_kind::POSE, id)
+                .at(pos.x, pos.y, pos.z)
+                .with_top(top_y),
+        );
         published.published.insert(entity);
     }
 }
@@ -1083,9 +1279,10 @@ fn harvest_bales_on_machine_contact(
     mut commands: Commands,
     mut physics: ResMut<PhysicsWorld>,
     mut prop_bodies: ResMut<StaticUsdPropBodies>,
-    publisher: Option<Res<WorldEventPublisher>>,
+    bus: Option<ResMut<GearboxBus>>,
     bales: Query<(Entity, &Name, &Transform, &StaticUsdPhysicsProp)>,
 ) {
+    let mut bus = bus;
     let prop_body_handles = prop_bodies
         .handles
         .values()
@@ -1130,8 +1327,12 @@ fn harvest_bales_on_machine_contact(
     for (entity, bale_id, pos) in touched {
         remove_static_prop_body(entity, physics.as_mut(), prop_bodies.as_mut());
         commands.entity(entity).despawn();
-        if let Some(publisher) = publisher.as_deref() {
-            publisher.publish_bale_harvested(&bale_id, pos);
+        if let Some(bus) = bus.as_deref_mut() {
+            bus.publish_event(
+                SceneEvent::new(event_kind::HARVESTED, &format!("bale_{bale_id}"))
+                    .at(pos.x, pos.y, pos.z)
+                    .with_prop("bale_id", &bale_id),
+            );
         }
     }
 }
@@ -1147,66 +1348,6 @@ fn parse_loaded_usd_id(name: &str) -> Option<&str> {
     let rest = name.strip_prefix("UsdLoad[")?;
     let end = rest.find(']')?;
     Some(&rest[..end])
-}
-
-impl WorldEventPublisher {
-    fn publish_bale_harvested(&self, bale_id: &str, pos: Vec3) {
-        let id = format!("bale_{bale_id}");
-        let event = UsdHarvestedWire {
-            id: id.clone(),
-            bale_id: bale_id.parse::<u32>().ok(),
-            x: pos.x,
-            y: pos.y,
-            z: pos.z,
-        };
-        let Ok(bytes) = encode(&event) else {
-            return;
-        };
-        let topic = format!("gearbox/usd/harvested/{id}");
-        // BLOCK congestion control: a dropped harvest event would leave the
-        // controlling script unaware that a bale was collected, so its tractor
-        // would keep targeting a bale that no longer exists. Harvest events
-        // are infrequent, so blocking briefly here costs nothing.
-        if let Err(err) = self
-            .session
-            .put(topic.clone(), bytes)
-            .congestion_control(zenoh::qos::CongestionControl::Block)
-            .wait()
-        {
-            warn!("world: failed to publish {topic}: {err}");
-        }
-    }
-
-    fn publish_loaded_usd_pose(&self, id: &str, pos: Vec3, top_y: f32) {
-        let event = UsdPoseWire {
-            id: id.to_string(),
-            x: pos.x,
-            y: pos.y,
-            z: pos.z,
-            top_y,
-        };
-        let Ok(bytes) = encode(&event) else {
-            return;
-        };
-        let topic = format!("gearbox/usd/pose/{id}");
-        // BLOCK congestion control: a dropped pose would leave a script with
-        // no position for that object — it could never be targeted. Each prop
-        // publishes its pose exactly once, so blocking briefly is free.
-        if let Err(err) = self
-            .session
-            .put(topic.clone(), bytes)
-            .congestion_control(zenoh::qos::CongestionControl::Block)
-            .wait()
-        {
-            warn!("world: failed to publish {topic}: {err}");
-        }
-    }
-}
-
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf)?;
-    Ok(buf)
 }
 
 fn freeze_settled_static_usd_prop_bodies(
@@ -1281,6 +1422,7 @@ fn cleanup_terrain_collision_without_usd_terrain(
     colliders.remove(terrain_collision.safety_floor, islands, bodies, true);
     commands.remove_resource::<TerrainCollision>();
     USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
+    clear_usd_terrain_height_profile();
     info!("world: removed terrain collision because USD terrain is no longer loaded");
 }
 
@@ -1367,6 +1509,13 @@ fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity>
 pub fn terrain_height_m(x: f32, z: f32) -> f32 {
     if !USD_TERRAIN_LOADED.load(Ordering::Relaxed) {
         return 0.0;
+    }
+    if USD_TERRAIN_IS_FLAT.load(Ordering::Relaxed) {
+        return f32::from_bits(USD_TERRAIN_FLAT_Y_BITS.load(Ordering::Relaxed));
+    }
+    let mesh = USD_TERRAIN_MESH.read().ok().and_then(|slot| slot.clone());
+    if let Some(h) = mesh.and_then(|m| m.height_at(x, z)) {
+        return h;
     }
     terrain_height_formula_m(x, z)
 }
@@ -1567,6 +1716,23 @@ mod tests {
     use super::{TERRAIN_MAX_HEIGHT_M, TERRAIN_MIN_HEIGHT_M, USD_TERRAIN_LOADED, terrain_height_m};
 
     static TERRAIN_FLAG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn terrain_mesh_heights_interpolate_the_loaded_surface() {
+        use super::{DVec3, TerrainHeightMesh};
+        let vertices = [
+            DVec3::new(-10.0, 0.0, -10.0),
+            DVec3::new(10.0, 4.0, -10.0),
+            DVec3::new(10.0, 8.0, 10.0),
+            DVec3::new(-10.0, 4.0, 10.0),
+        ];
+        let triangles = [[0, 1, 2], [0, 2, 3]];
+        let mesh = TerrainHeightMesh::build(&vertices, &triangles).expect("mesh");
+        assert!((mesh.height_at(0.0, 0.0).unwrap() - 4.0).abs() < 1e-3);
+        assert!((mesh.height_at(9.9, -9.9).unwrap() - 4.0).abs() < 0.05);
+        assert!((mesh.height_at(5.0, 5.0).unwrap() - 6.0).abs() < 1e-3);
+        assert!(mesh.height_at(50.0, 0.0).is_none());
+    }
 
     #[test]
     fn terrain_height_is_flat_until_usd_terrain_is_active() {

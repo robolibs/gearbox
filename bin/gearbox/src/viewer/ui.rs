@@ -44,6 +44,7 @@ pub const RIB_TIMELINE: &str = "viewer_timeline";
 pub const RIB_KEYS: &str = "viewer_keys";
 pub const RIB_LOG: &str = "viewer_log";
 pub const RIB_PLAY: &str = "viewer_play";
+pub const RIB_CLEAR: &str = "viewer_clear";
 
 const RIBBONS: &[RibbonDef] = &[RibbonDef {
     id: RIBBON_LEFT,
@@ -112,6 +113,16 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         slot: 1,
         glyph: RibbonGlyph::Icon("play"),
         tooltip: "Play / pause physics",
+        child_ribbon: None,
+        role: Some(RibbonRole::Icon),
+    },
+    RibbonItem {
+        id: RIB_CLEAR,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::Middle,
+        slot: 2,
+        glyph: RibbonGlyph::Icon("close"),
+        tooltip: "Clear scene (unload every runtime USD)",
         child_ribbon: None,
         role: Some(RibbonRole::Icon),
     },
@@ -988,35 +999,6 @@ fn tick_stage_time(
 
 // ─── Ribbon rail ────────────────────────────────────────────────────
 
-fn draw_ribbons(
-    mut contexts: EguiContexts,
-    accent: Res<AccentColor>,
-    mut open: ResMut<RibbonOpen>,
-    mut placement: ResMut<RibbonPlacement>,
-    mut drag: ResMut<RibbonDrag>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsActive>,
-) {
-    let Ok(ctx) = contexts.ctx_mut() else {
-        return;
-    };
-    let physics_on = physics.0;
-    let clicks = draw_assembly(
-        ctx,
-        Into::<egui::Color32>::into(accent.0),
-        RIBBONS,
-        RIBBON_ITEMS,
-        &mut open,
-        &mut placement,
-        &mut drag,
-        |id| id == RIB_PLAY && physics_on,
-    );
-    for click in clicks {
-        if click.item == RIB_PLAY {
-            physics.0 = !physics.0;
-        }
-    }
-}
-
 fn is_panel_open(open: &RibbonOpen, item: &'static str) -> bool {
     open.is_open(RIBBON_LEFT, item)
 }
@@ -1033,7 +1015,7 @@ struct MaraShellParams<'w, 's> {
     reload: ResMut<'w, ReloadRequest>,
     active: ResMut<'w, ActiveStage>,
     selected: ResMut<'w, SelectedPrim>,
-    selection: Res<'w, Selection>,
+    selection: ResMut<'w, Selection>,
     loaded: Query<'w, 's, (Entity, &'static LoadedAsset, &'static GlobalTransform)>,
     prims: Query<'w, 's, (Entity, &'static Name, &'static UsdPrimRef)>,
     inventory: Res<'w, ControllerInventory>,
@@ -1044,6 +1026,7 @@ struct MaraShellParams<'w, 's> {
     bookmarks: ResMut<'w, CameraBookmarks>,
     cameras: Query<'w, 's, &'static ChaseCamera>,
     log: Option<Res<'w, LoaderLog>>,
+    reset: MessageWriter<'w, gearbox_api::SimResetRequest>,
 }
 
 fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShellParams) {
@@ -1053,12 +1036,13 @@ fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShellParams) {
         mut placement,
         mut drag,
         mut physics,
+        mut reset,
         info,
         mut load_req,
         mut reload,
         mut active,
         mut selected,
-        selection,
+        mut selection,
         loaded,
         prims,
         inventory,
@@ -1090,6 +1074,15 @@ fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShellParams) {
     for click in clicks {
         if click.item == RIB_PLAY {
             physics.0 = !physics.0;
+        } else if click.item == RIB_CLEAR {
+            reset.write(gearbox_api::SimResetRequest {
+                pause_clock: true,
+                scope: gearbox_api::clear_scope::ALL,
+            });
+            physics.0 = false;
+            selection.0 = None;
+            selected.0 = None;
+            active.0 = None;
         }
     }
 

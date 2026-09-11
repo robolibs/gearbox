@@ -78,23 +78,19 @@ fn main() {
         .add_plugins(usd_bevy::physics::RapierAdapterPlugin)
         .add_plugins(usd_bevy::anim::AnimPlugin)
         .insert_resource(usd_bevy::physics::PhysicsActive(false))
+        // ── Tool API: one host agent per process, one agent per machine.
+        // Identity, allowlist, and relay come from GEARBOX_* env vars.
+        .add_plugins(gearbox_api::GearboxBusPlugin {
+            config: gearbox_api::HostConfig::from_env(env!("CARGO_PKG_VERSION")),
+        })
+        .insert_resource(gearbox_api::UsdAssetRoot(load::default_asset_root()))
+        .add_plugins(gearbox_api::UsdLoaderPlugin)
+        .add_plugins(gearbox_api::UsdMarkerPlugin)
         // ── Simulator surface: persistent planet world + the multi-
         // USD `LoadQueue`-driven loader.
         .add_plugins(world::WorldPlugin)
         .add_plugins(controller::ControllerDiscoveryPlugin)
-        .insert_resource(gearbox_api::UsdAssetRoot(load::default_asset_root()))
         .add_plugins(load::LoadPlugin { cli_paths })
-        // Generic external USD loader API. Loaded USDs may be static assets,
-        // variant-authored assets, or later other categories. Machine/robot
-        // USDs are handled by `load::LoadPlugin` because it also registers
-        // controller namespaces.
-        .add_plugins(gearbox_api::UsdLoaderApiPlugin)
-        // Global clear/reset API for scripts:
-        // `gearbox/sim/clear` or `gearbox/sim/reset`.
-        .add_plugins(gearbox_api::ResetApiPlugin)
-        // Lightweight marker entities keyed by caller UUID. These are not USD
-        // assets, so they move/delete in place without loader races.
-        .add_plugins(gearbox_api::UsdMarkerApiPlugin)
         // ── Viewer surface: full ribbon + panel set, overlays, prim
         // tree, prim-level selection, fly-to camera, log capture,
         // variants, cameras, materials.

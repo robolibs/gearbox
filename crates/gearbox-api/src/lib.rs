@@ -1,96 +1,32 @@
-//! # Tool API — external integration surface (zenoh).
+//! Gearbox tool API on agentio.
 //!
-//! This crate is the **tool API**: the network boundary gearbox
-//! exposes to *external tools* — a real robot publishing telemetry,
-//! a scripting agent issuing commands, a CLI pausing the sim, a
-//! second editor mirroring state. It speaks zenoh because zenoh is
-//! the lingua franca for robot / scene comms in the ecosystem we
-//! plug into.
-//!
-//! ## What this crate is NOT
-//!
-//! This is **not** the simulator ↔ renderer link. The simulator and
-//! renderer currently live in the same process (`bin/gearbox`) and
-//! share a `Sim` via a Bevy resource — no transport needed. When we
-//! later split them (headless sim server + wasm browser renderer),
-//! the transport for *that* split will be a separate crate (likely
-//! `aeronet` over WebSocket / WebTransport) because zenoh doesn't
-//! target `wasm32-unknown-unknown` and because the sim↔renderer
-//! traffic profile (60 Hz scene deltas) is very different from the
-//! tool-API traffic profile (low-rate commands + status).
-//!
-//! Architecturally:
-//!
-//! ```text
-//!     ┌──────────────────────────────────────────────────────┐
-//!     │                 bin/gearbox (one binary)             │
-//!     │                                                      │
-//!     │  ┌──────────┐   in-process   ┌─────────────────┐     │
-//!     │  │Simulator │ <────────────> │    Renderer     │     │
-//!     │  │  (Sim)   │    (same       │  (Bevy + egui)  │     │
-//!     │  └──────────┘    resource)   └─────────────────┘     │
-//!     │        ▲                                             │
-//!     │        │                                             │
-//!     │  ┌─────┴────────┐   ← THIS CRATE                     │
-//!     │  │ Tool API     │                                    │
-//!     │  │ (zenoh pub/  │                                    │
-//!     │  │  sub/query)  │                                    │
-//!     │  └───────┬──────┘                                    │
-//!     └──────────┼──────────────────────────────────────────-┘
-//!                │
-//!                ▼    external tools:
-//!                     real robots, CLIs, scripting agents, other
-//!                     editors — server/client terminology lives
-//!                     here, not in the sim↔renderer split.
-//! ```
-//!
-//! ## Module layout
-//!
-//! * [`broker`] — pure-Rust [`ApiBroker`] that owns the zenoh
-//!   session. No Bevy.
-//! * [`wire`] — CBOR-encoded message types.
-//! * `loader_api` / `mark_api` / `reset_api` — Bevy plugins for the
-//!   USD-only runtime tool surface.
+//! One `HostBus` per simulator process hosts the scene topics; one
+//! `MachineAgent` per simulated machine hosts that machine's control and
+//! telemetry topics under its own identity. `Client` talks to both.
+//! The `bevy` feature adds the plugins that wire the host into the app.
 
-pub mod broker;
+pub mod client;
+pub mod fake;
+pub mod host;
+pub mod machine;
+pub mod registry;
+pub mod topics;
 pub mod wire;
 
-// Generic USD loader — load / move / unload USD assets over zenoh.
-pub mod loader_api;
+#[cfg(feature = "bevy")]
+pub mod plugin;
 
-// Lightweight marker meshes — update by UUID without going through USD load.
-pub mod mark_api;
-
-// Pluggable scene reset — wipe every vehicle and every marker
-// without restarting the simulator.
-pub mod reset_api;
-
-pub use broker::ApiBroker;
-pub use wire::{ClockCommand, ClockWire};
+pub use agentio;
+pub use agentio::IdentitySource;
+pub use client::{Client, MachineClient, next_sample};
+pub use datapod;
+pub use host::{HostBus, HostConfig};
+pub use machine::{ControllerDesc, MachineAgent, MachineConfig};
+pub use peerbus;
+pub use wire::*;
 
 #[cfg(feature = "bevy")]
-use bevy::prelude::*;
-
-#[cfg(feature = "bevy")]
-#[derive(Message, Default, Debug, Clone, Copy)]
-pub struct SimResetRequest {
-    /// Re-pause the sim clock after reset. Off by default — examples usually
-    /// reload USDs and drive immediately.
-    pub pause_clock: bool,
-}
-
-#[cfg(feature = "bevy")]
-#[derive(Resource, Debug, Clone)]
-pub struct UsdAssetRoot(pub std::path::PathBuf);
-
-pub use loader_api::{UsdLoadWire, UsdLoaderBroker};
-#[cfg(feature = "bevy")]
-pub use loader_api::{UsdLoaderApiPlugin, UsdLoaderApiSession};
-
-pub use mark_api::MarkerBroker;
-#[cfg(feature = "bevy")]
-pub use mark_api::{MarkerApiSession, UsdMarkerApiPlugin};
-
-#[cfg(feature = "bevy")]
-pub use reset_api::{ResetApiPlugin, ResetApiSession};
-pub use reset_api::{ResetBroker, ResetWire};
+pub use plugin::{
+    GearboxBus, GearboxBusPlugin, MachineLoadQueue, SceneObjects, SelectionState, SimResetRequest,
+    UsdAssetRoot, UsdLoaderPlugin, UsdMarkerPlugin,
+};

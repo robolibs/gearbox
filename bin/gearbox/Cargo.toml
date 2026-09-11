@@ -31,9 +31,11 @@ usd_bevy.workspace = true
 
 usd_schema.workspace = true
 openusd.workspace = true
-zenoh.workspace = true
-serde = { version = "1", features = ["derive"] }
-ciborium = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+agentio.workspace = true
+peerbus.workspace = true
+datapod.workspace = true
 gearbox-api = { workspace = true, features = ["bevy"] }
 
 # rapier3d-f64 — needed to spawn the static ground collider directly

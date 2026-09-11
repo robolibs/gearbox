@@ -2,17 +2,17 @@
 //! mounted USD scene with `LoadedAsset` marker. The marker also tags the
 //! root for the UI's pick-and-gizmo wiring.
 
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
+use gearbox_api::{
+    GearboxBus, MachineLoadQueue, Props, SceneEvent, SceneObject, SceneObjects, clear_scope,
+    event_kind, object_kind,
+};
 use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::Pose;
-use serde::{Deserialize, Serialize};
 use usd_bevy::{UsdAsset, UsdLoaderSettings};
-use zenoh::Wait;
 
 use crate::controller::{ControllerInventory, discover_machines_from_usd, log_discovered_machines};
 use crate::world::terrain_height_m;
@@ -60,100 +60,6 @@ struct MachinePhysicsSyncPending {
 #[derive(Resource, Debug, Clone, Copy)]
 struct PhysicsActivationPending;
 
-/// Generic runtime USD load request.
-///
-/// This intentionally says nothing about tractors, bales, robots, etc. The
-/// caller gives Gearbox a USD path and an optional placement transform; the
-/// usual USD loader/discovery path decides whether that USD also contains a
-/// machine/controller.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeUsdLoadWire {
-    #[serde(default)]
-    pub category: String,
-    #[serde(default)]
-    pub usd_path: String,
-    #[serde(default)]
-    pub x: f32,
-    #[serde(default)]
-    pub y: f32,
-    #[serde(default)]
-    pub z: f32,
-    #[serde(default)]
-    pub yaw_deg: f32,
-    #[serde(default)]
-    pub label: Option<String>,
-    /// Optional runtime machine namespace for instance-specific controller
-    /// topics when the same USD is spawned multiple times.
-    #[serde(default)]
-    pub namespace: Option<String>,
-    #[serde(default)]
-    pub remove: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeUsdLoadedWire {
-    pub usd_path: String,
-    pub label: String,
-    pub namespace: Option<String>,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub yaw_deg: f32,
-}
-
-#[derive(Resource)]
-struct RuntimeUsdLoader {
-    session: Arc<zenoh::Session>,
-    inbox: Arc<Mutex<VecDeque<RuntimeUsdLoadWire>>>,
-    _load_subscriber: zenoh::pubsub::Subscriber<()>,
-}
-
-impl RuntimeUsdLoader {
-    fn open() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let session = Arc::new(zenoh::open(zenoh::Config::default()).wait()?);
-        let inbox: Arc<Mutex<VecDeque<RuntimeUsdLoadWire>>> = Arc::new(Mutex::new(VecDeque::new()));
-        let load_inbox_cb = Arc::clone(&inbox);
-        let load_subscriber = session
-            .declare_subscriber("gearbox/usd/load/**")
-            .callback(move |sample| {
-                let bytes = sample.payload().to_bytes();
-                match decode::<RuntimeUsdLoadWire>(bytes.as_ref()) {
-                    Ok(req) => {
-                        let category = req.category.as_str();
-                        if matches!(category, "machine" | "robot") {
-                            if let Ok(mut q) = load_inbox_cb.lock() {
-                                q.push_back(req);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("gearbox-load: bad USD load payload: {err}");
-                    }
-                }
-            })
-            .wait()?;
-        Ok(Self {
-            session,
-            inbox,
-            _load_subscriber: load_subscriber,
-        })
-    }
-
-    fn drain_inbox(&self) -> Vec<RuntimeUsdLoadWire> {
-        match self.inbox.lock() {
-            Ok(mut q) => q.drain(..).collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    fn publish_loaded(&self, ev: &RuntimeUsdLoadedWire) {
-        let Ok(bytes) = encode(ev) else { return };
-        if let Err(err) = self.session.put("gearbox/usd/loaded", bytes).wait() {
-            warn!("gearbox-load: failed to publish gearbox/usd/loaded: {err}");
-        }
-    }
-}
-
 pub struct LoadPlugin {
     pub cli_paths: Vec<PathBuf>,
 }
@@ -166,14 +72,14 @@ impl Plugin for LoadPlugin {
             .add_systems(Startup, move |mut q: ResMut<LoadQueue>| {
                 q.0.extend(cli.clone());
             })
-            .add_systems(Startup, open_runtime_usd_loader)
             .add_systems(
                 Update,
                 (
                     clear_runtime_usd_loads_on_reset_system,
                     drain_load_queue,
-                    drain_runtime_usd_loader,
+                    drain_machine_load_queue,
                     spawn_when_loaded,
+                    refresh_scene_objects,
                 ),
             )
             .add_systems(
@@ -215,7 +121,10 @@ fn clear_runtime_usd_loads_on_reset_system(
     children_q: Query<&Children>,
 ) {
     let Some(mut messages) = messages else { return };
-    if messages.read().count() == 0 {
+    let clears = messages
+        .read()
+        .any(|m| matches!(m.scope, clear_scope::ALL | clear_scope::MACHINES));
+    if !clears {
         return;
     }
 
@@ -262,18 +171,6 @@ fn remove_loaded_usd_physics(
     }
 }
 
-fn open_runtime_usd_loader(mut commands: Commands) {
-    match RuntimeUsdLoader::open() {
-        Ok(api) => {
-            commands.insert_resource(api);
-            info!("gearbox-load: USD machine loader ready (gearbox/usd/load/<id>)");
-        }
-        Err(err) => {
-            warn!("gearbox-load: runtime USD loader disabled: {err}");
-        }
-    }
-}
-
 fn drain_load_queue(
     asset_server: Res<AssetServer>,
     mut queue: ResMut<LoadQueue>,
@@ -307,65 +204,6 @@ fn drain_load_queue(
             Vec::new(),
             false,
         );
-    }
-}
-
-fn drain_runtime_usd_loader(
-    asset_server: Res<AssetServer>,
-    api: Option<Res<RuntimeUsdLoader>>,
-    mut inflight: ResMut<Inflight>,
-    mut physics_active: ResMut<usd_bevy::physics::PhysicsActive>,
-) {
-    let Some(api) = api else { return };
-    for req in api.drain_inbox() {
-        if req.remove {
-            continue;
-        }
-        let category = if req.category.is_empty() {
-            "machine"
-        } else {
-            req.category.as_str()
-        };
-        if !matches!(category, "machine" | "robot") {
-            continue;
-        }
-        if physics_active.0 {
-            physics_active.0 = false;
-            info!("gearbox-load: pausing physics until new machine USD is aligned to terrain");
-        }
-        let path = resolve_spawn_path(&req.usd_path);
-        let (load_path, source_path, extra_search_paths) = hotload_runtime_usd_path(&path);
-        let label = req.label.clone().unwrap_or_else(|| {
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| req.usd_path.clone())
-        });
-        let mut transform = Transform {
-            translation: Vec3::new(req.x, req.y, req.z),
-            rotation: Quat::from_rotation_y(req.yaw_deg.to_radians()),
-            ..default()
-        };
-        snap_grounded_machine_to_terrain(&mut transform);
-        queue_usd_load(
-            &asset_server,
-            &mut inflight,
-            load_path,
-            label.clone(),
-            transform,
-            req.namespace.clone(),
-            Some(source_path.clone()),
-            extra_search_paths,
-            true,
-        );
-        api.publish_loaded(&RuntimeUsdLoadedWire {
-            usd_path: path.to_string_lossy().into_owned(),
-            label,
-            namespace: req.namespace,
-            x: req.x,
-            y: req.y,
-            z: req.z,
-            yaw_deg: req.yaw_deg,
-        });
     }
 }
 
@@ -515,6 +353,7 @@ fn spawn_when_loaded(
     mut inflight: ResMut<Inflight>,
     mut controller_inventory: ResMut<ControllerInventory>,
     usd_assets: Res<Assets<UsdAsset>>,
+    mut bus: Option<ResMut<GearboxBus>>,
 ) {
     for entry in inflight.0.iter_mut() {
         if entry.spawned {
@@ -563,6 +402,16 @@ fn spawn_when_loaded(
             entry.transform.translation,
             spawned.len()
         );
+        if let Some(bus) = bus.as_deref_mut() {
+            let t = entry.transform.translation;
+            let mut event = SceneEvent::new(event_kind::LOADED, &entry.label)
+                .at(t.x, t.y, t.z)
+                .with_prop("path", &entry.path.to_string_lossy());
+            if let Some(ns) = entry.namespace.as_deref() {
+                event = event.with_prop("namespace", ns);
+            }
+            bus.publish_event(event);
+        }
 
         if let Some(mut machines) = discovered_machines.take() {
             if let Some(namespace) = entry.namespace.as_deref() {
@@ -832,14 +681,98 @@ fn apply_runtime_namespace(
     }
 }
 
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf)?;
-    Ok(buf)
+/// Machine-category loads that arrived over the bus.
+fn drain_machine_load_queue(
+    asset_server: Res<AssetServer>,
+    mut queue: ResMut<MachineLoadQueue>,
+    mut inflight: ResMut<Inflight>,
+    mut physics_active: ResMut<usd_bevy::physics::PhysicsActive>,
+) {
+    for req in queue.0.drain(..) {
+        if req.remove() || req.delete() {
+            warn!("gearbox-load: machine unload by id is not supported yet; use clear");
+            continue;
+        }
+        let Some(usd_path) = req.path() else {
+            warn!("gearbox-load: machine load `{}` has no path", req.id());
+            continue;
+        };
+        if physics_active.0 {
+            physics_active.0 = false;
+            info!("gearbox-load: pausing physics until new machine USD is aligned to terrain");
+        }
+        let path = resolve_spawn_path(&usd_path);
+        let (load_path, source_path, extra_search_paths) = hotload_runtime_usd_path(&path);
+        let props = req.props();
+        let namespace = req.namespace();
+        let label = props
+            .get("label")
+            .or_else(|| namespace.clone())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| usd_path.clone())
+            });
+        let mut transform = Transform {
+            translation: Vec3::new(req.x, req.y, req.z),
+            rotation: Quat::from_rotation_y(req.yaw_deg.to_radians()),
+            ..default()
+        };
+        snap_grounded_machine_to_terrain(&mut transform);
+        queue_usd_load(
+            &asset_server,
+            &mut inflight,
+            load_path,
+            label,
+            transform,
+            namespace,
+            Some(source_path),
+            extra_search_paths,
+            true,
+        );
+    }
 }
 
-fn decode<T: serde::de::DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, ciborium::de::Error<std::io::Error>> {
-    ciborium::from_reader(bytes)
+/// Report every loaded asset root for `/gearbox/scene/list`.
+fn refresh_scene_objects(
+    loaded: Query<(Entity, &LoadedAsset, &GlobalTransform)>,
+    inventory: Res<ControllerInventory>,
+    mut objects: ResMut<SceneObjects>,
+) {
+    let mut out = Vec::new();
+    for (entity, asset, transform) in loaded.iter() {
+        let machine = inventory
+            .machines
+            .iter()
+            .find(|m| m.scene_root == Some(entity));
+        let t = transform.translation();
+        let (_, yaw, _) = transform.rotation().to_euler(EulerRot::YXZ);
+        let mut props = Props::from_pairs(&[
+            ("id", asset.label.as_str()),
+            ("path", &asset.path.to_string_lossy()),
+        ]);
+        let kind = match machine {
+            Some(m) => {
+                props.set("machine_id", &m.id);
+                if let Some(c) = m.controllers.first() {
+                    props.set("namespace", &c.namespace);
+                }
+                if let Some(kind) = &m.kind {
+                    props.set("kind", kind);
+                }
+                object_kind::MACHINE
+            }
+            None if asset.label.to_ascii_lowercase().contains("terrain") => object_kind::TERRAIN,
+            None => object_kind::PROP,
+        };
+        out.push(SceneObject {
+            x: t.x,
+            y: t.y,
+            z: t.z,
+            yaw_deg: yaw.to_degrees(),
+            kind,
+            props: props.into_bytes(),
+        });
+    }
+    objects.machines = out;
 }
