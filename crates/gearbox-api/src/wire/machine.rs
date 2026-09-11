@@ -258,3 +258,105 @@ impl LinkPose {
         self.props().get("name").unwrap_or_default()
     }
 }
+
+/// Attach a slave to one of this machine's hitches
+/// (`/machines/<master>/tools/attach`). Props: `slave`, `hitch`, `coupler`.
+#[datapod::datapod(name = "gearbox.attach_request.v1")]
+#[derive(Default)]
+pub struct AttachRequest {
+    pub session: u64,
+    pub teleport: u32,
+    pub _pad: u32,
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl AttachRequest {
+    pub fn new(session: u64, slave: &str) -> Self {
+        Self {
+            session,
+            props: Props::from_pairs(&[("slave", slave)]).into_bytes(),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_hitch(mut self, hitch: &str) -> Self {
+        self.props = Props::from_bytes(&self.props)
+            .with("hitch", hitch)
+            .into_bytes();
+        self
+    }
+
+    pub fn with_coupler(mut self, coupler: &str) -> Self {
+        self.props = Props::from_bytes(&self.props)
+            .with("coupler", coupler)
+            .into_bytes();
+        self
+    }
+
+    pub fn teleporting(mut self) -> Self {
+        self.teleport = 1;
+        self
+    }
+
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn slave(&self) -> String {
+        self.props().get("slave").unwrap_or_default()
+    }
+
+    pub fn hitch(&self) -> Option<String> {
+        self.props().get("hitch").filter(|h| !h.is_empty())
+    }
+
+    pub fn coupler(&self) -> Option<String> {
+        self.props().get("coupler").filter(|c| !c.is_empty())
+    }
+}
+
+/// Detach a slave (`/machines/<master>/tools/detach`). Props: `slave`.
+#[datapod::datapod(name = "gearbox.detach_request.v1")]
+#[derive(Default)]
+pub struct DetachRequest {
+    pub session: u64,
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl DetachRequest {
+    pub fn new(session: u64, slave: &str) -> Self {
+        Self {
+            session,
+            props: Props::from_pairs(&[("slave", slave)]).into_bytes(),
+        }
+    }
+
+    pub fn slave(&self) -> String {
+        Props::from_bytes(&self.props)
+            .get("slave")
+            .unwrap_or_default()
+    }
+}
+
+/// One attachment of a composite, answered on `/machines/<master>/tools`
+/// depth-first. Props: `master`, `slave`, `hitch`, `coupler`, `type`.
+#[datapod::datapod(name = "gearbox.attachment.v1")]
+#[derive(Default)]
+pub struct AttachmentRecord {
+    pub controlled: u32,
+    pub depth: u32,
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl AttachmentRecord {
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn slave(&self) -> String {
+        self.props().get("slave").unwrap_or_default()
+    }
+}

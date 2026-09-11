@@ -933,4 +933,38 @@ def Xform "robot" (
         assert_eq!(wheel.parent.as_deref(), Some("steer_front_left"));
         assert!(tree.couplings().any(|(_, c)| c.name == "rear_drawbar"));
     }
+
+    #[test]
+    fn trailer_is_a_strict_slave_with_coupler_and_hitch() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/trailer.usd");
+        let machines = discover_machines_from_usd(&path).expect("trailer.usd should scan");
+        let machine = &machines[0];
+        assert_eq!(machine.kind.as_deref(), Some("trailer"));
+        assert!(machine.controllers.is_empty());
+        let tree = &machine.links;
+        assert!(tree.is_valid(), "{:?}", tree.errors);
+        assert!(!tree.derived);
+        let (eye_link, eye) = tree
+            .couplings()
+            .find(|(_, c)| c.side == CouplingSide::Coupler)
+            .expect("coupler");
+        assert_eq!(eye.name, "eye");
+        assert_eq!(eye.kind, "drawbar");
+        assert_eq!(eye_link.parent.as_deref(), Some("base_link"));
+        let off = eye_link.static_offset.unwrap();
+        assert!((off.translation.y + 2.25).abs() < 1e-6, "{off:?}");
+        assert!(
+            off.rotation
+                .angle_between(DQuat::from_rotation_z(std::f64::consts::PI))
+                < 1e-6
+        );
+        assert!(tree.couplings().any(|(_, c)| c.side == CouplingSide::Hitch));
+        assert_eq!(
+            tree.links
+                .iter()
+                .filter(|l| l.role == LinkRole::Wheel)
+                .count(),
+            2
+        );
+    }
 }

@@ -86,6 +86,9 @@ enum Cmd {
         /// Machine namespace (default: the selection)
         #[arg(long)]
         ns: Option<String>,
+        /// Route to a controller of this attached slave
+        #[arg(long)]
+        tool: Option<String>,
         #[arg(long)]
         take: bool,
     },
@@ -111,10 +114,46 @@ enum Cmd {
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
-    /// Attachments (reserved for TOOLS_SPEC)
+    /// Attachments: what hangs on a machine, attach and detach slaves
     Tools {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
+        #[command(subcommand)]
+        cmd: ToolsCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ToolsCmd {
+    /// Attachments below a master, depth-first
+    List { ns: Option<String> },
+    /// Hitches and couplers of a machine, free or occupied
+    Couplings { ns: Option<String> },
+    /// Hang SLAVE on a hitch of the master
+    Attach {
+        /// The slave's namespace
+        slave: String,
+        /// Master namespace (default: the selection)
+        #[arg(long)]
+        ns: Option<String>,
+        /// Hitch name on the master (default: the only free one of a matching type)
+        #[arg(long)]
+        hitch: Option<String>,
+        /// Coupler name on the slave (default: the only one of a matching type)
+        #[arg(long)]
+        coupler: Option<String>,
+        /// Move the slave onto the hitch first
+        #[arg(long)]
+        teleport: bool,
+        /// Steal the master's session if someone holds it
+        #[arg(long)]
+        take: bool,
+    },
+    /// Release SLAVE from the master
+    Detach {
+        slave: String,
+        #[arg(long)]
+        ns: Option<String>,
+        #[arg(long)]
+        take: bool,
     },
 }
 
@@ -142,8 +181,9 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             ns,
             controller,
             pairs,
+            tool,
             take,
-        } => command(ctx, ns, &controller, &pairs, take),
+        } => command(ctx, ns, &controller, &pairs, tool, take),
         Cmd::Controllers { ns } => controllers(ctx, ns),
         Cmd::Links { ns, flat } => links(ctx, ns, flat),
         Cmd::Tf {
@@ -152,9 +192,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             rate,
             count,
         } => tf(ctx, ns, link, rate, count),
-        Cmd::Tools { .. } => Err(CliError::unsupported(
-            "attachments are not implemented yet (see specs/TOOLS_SPEC.md)",
-        )),
+        Cmd::Tools { cmd } => tools(ctx, cmd),
     }
 }
 
@@ -409,7 +447,12 @@ fn claim(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Result<Clai
     if res.code != code::OK {
         return Err(CliError::new(
             crate::error::exit_for_wire_code(res.code),
-            format!("claim on `{ns}` refused with code {}", res.code),
+            format!(
+                "claim on `{ns}` refused: {}",
+                Props::from_bytes(&res.props)
+                    .get("message")
+                    .unwrap_or_else(|| format!("code {}", res.code))
+            ),
         ));
     }
     Ok(res)
@@ -494,12 +537,16 @@ fn command(
     ns: Option<String>,
     controller: &str,
     pairs: &[String],
+    tool: Option<String>,
     take: bool,
 ) -> Result<()> {
     let ns = ctx.machine_ns(ns)?;
     let client = ctx.client()?;
     let mc = client.machine(&ns);
     let mut props = Props::from_pairs(&[("controller", controller)]);
+    if let Some(tool) = &tool {
+        props.set("tool", tool);
+    }
     let mut value = 0.0;
     let mut element = 0u32;
     for pair in pairs {
@@ -870,4 +917,187 @@ fn tf(
     };
     let _ = mc.set_tf(false);
     result
+}
+
+fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
+    match cmd {
+        ToolsCmd::List { ns } => {
+            let ns = ctx.machine_ns(ns)?;
+            let records = ctx.client()?.machine(&ns).tools()?;
+            ctx.emit(
+                || {
+                    json!(
+                        records
+                            .iter()
+                            .filter_map(|r| wire_json::env_to_json(&pack(r)).ok())
+                            .collect::<Vec<_>>()
+                    )
+                },
+                || {
+                    if records.is_empty() {
+                        println!("nothing attached to `{ns}`");
+                        return;
+                    }
+                    let mut t = Table::new(&["SLAVE", "HITCH", "COUPLER", "TYPE", "CONTROLLED"]);
+                    for r in &records {
+                        let p = r.props();
+                        t.row(vec![
+                            format!("{}{}", "  ".repeat(r.depth as usize), r.slave()),
+                            p.get("hitch").unwrap_or_default(),
+                            p.get("coupler").unwrap_or_default(),
+                            p.get("type").unwrap_or_default(),
+                            out::yes_no(r.controlled != 0).into(),
+                        ]);
+                    }
+                    t.print();
+                },
+            );
+            Ok(())
+        }
+        ToolsCmd::Couplings { ns } => {
+            let ns = ctx.machine_ns(ns)?;
+            let client = ctx.client()?;
+            let mc = client.machine(&ns);
+            let links = mc.links()?;
+            let attached = mc.tools()?;
+            let info = mc.info()?;
+            let attached_to = info.props().get("attached_to").unwrap_or_default();
+            let mut rows: Vec<(String, String, String, String)> = Vec::new();
+            for l in &links {
+                let Some(c) = l.props().get("coupling") else {
+                    continue;
+                };
+                let mut parts = c.splitn(3, '|');
+                let side = parts.next().unwrap_or_default().to_string();
+                let kind = parts.next().unwrap_or_default().to_string();
+                let name = parts.next().unwrap_or_default().to_string();
+                let state = if side == "hitch" {
+                    attached
+                        .iter()
+                        .find(|a| a.props().get("hitch").as_deref() == Some(name.as_str()))
+                        .map(|a| format!("holds {}", a.slave()))
+                        .unwrap_or_else(|| "free".into())
+                } else if !attached_to.is_empty() {
+                    format!("on {attached_to}")
+                } else {
+                    "free".into()
+                };
+                rows.push((name, side, kind, state));
+            }
+            ctx.emit(
+                || {
+                    json!(
+                        rows.iter()
+                            .map(|r| json!({ "name": r.0, "side": r.1, "type": r.2, "state": r.3 }))
+                            .collect::<Vec<_>>()
+                    )
+                },
+                || {
+                    if rows.is_empty() {
+                        println!("`{ns}` has no couplings");
+                        return;
+                    }
+                    let mut t = Table::new(&["COUPLING", "SIDE", "TYPE", "STATE"]);
+                    for r in &rows {
+                        t.row(vec![r.0.clone(), r.1.clone(), r.2.clone(), r.3.clone()]);
+                    }
+                    t.print();
+                },
+            );
+            Ok(())
+        }
+        ToolsCmd::Attach {
+            slave,
+            ns,
+            hitch,
+            coupler,
+            teleport,
+            take,
+        } => {
+            let ns = ctx.machine_ns(ns)?;
+            let client = ctx.client()?;
+            let mc = client.machine(&ns);
+            let session = session_for(ctx, &mc, &ns, take)?;
+            let mut req = gearbox_api::AttachRequest::new(session, &slave);
+            if let Some(h) = &hitch {
+                req = req.with_hitch(h);
+            }
+            if let Some(c) = &coupler {
+                req = req.with_coupler(c);
+            }
+            if teleport {
+                req = req.teleporting();
+            }
+            let status = mc.attach(&req)?;
+            if session != 0 {
+                let _ = mc.release(session);
+            }
+            check(status, &format!("attach {slave} to {ns}"))?;
+            let record = mc
+                .tools()
+                .ok()
+                .and_then(|list| list.into_iter().find(|r| r.slave() == slave));
+            let (h, c, k) = record
+                .map(|r| {
+                    let p = r.props();
+                    (
+                        p.get("hitch").unwrap_or_default(),
+                        p.get("coupler").unwrap_or_default(),
+                        p.get("type").unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_default();
+            ctx.done(
+                &slave,
+                &format!("attached `{slave}` to `{ns}` via {h} / {c} ({k})"),
+                || json!({ "master": ns, "slave": slave, "hitch": h, "coupler": c, "type": k }),
+            );
+            Ok(())
+        }
+        ToolsCmd::Detach { slave, ns, take } => {
+            let ns = ctx.machine_ns(ns)?;
+            let client = ctx.client()?;
+            let mc = client.machine(&ns);
+            let session = session_for(ctx, &mc, &ns, take)?;
+            let status = mc.detach(session, &slave)?;
+            if session != 0 {
+                let _ = mc.release(session);
+            }
+            check(status, &format!("detach {slave} from {ns}"))?;
+            ctx.done(
+                &slave,
+                &format!("detached `{slave}` from `{ns}`"),
+                || json!({ "master": ns, "slave": slave }),
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The session an attachment request must carry: none while the master is
+/// free, ours after a claim (stolen with `--take`) while someone holds it.
+fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Result<u64> {
+    let session = mc.session()?;
+    if session.held == 0 {
+        return Ok(0);
+    }
+    if !take {
+        return Err(CliError::busy(format!(
+            "machine `{ns}` is held by {}; add --take",
+            session.holder()
+        )));
+    }
+    let res = mc.claim(ctx.timeout.as_millis() as u32, true)?;
+    if res.code != code::OK {
+        return Err(CliError::new(
+            crate::error::exit_for_wire_code(res.code),
+            format!(
+                "claim on `{ns}` refused: {}",
+                Props::from_bytes(&res.props)
+                    .get("message")
+                    .unwrap_or_else(|| format!("code {}", res.code))
+            ),
+        ));
+    }
+    Ok(res.session)
 }

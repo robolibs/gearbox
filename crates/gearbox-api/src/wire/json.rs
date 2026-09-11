@@ -65,6 +65,9 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(MachineState, machine_state_json, machine_state_from),
         desc!(LinkRecord, link_record_json, link_record_from),
         desc!(LinkPose, link_pose_json, link_pose_from),
+        desc!(AttachRequest, attach_request_json, attach_request_from),
+        desc!(DetachRequest, detach_request_json, detach_request_from),
+        desc!(AttachmentRecord, attachment_json, attachment_from),
     ]
 }
 
@@ -623,5 +626,41 @@ fn link_pose_from(v: &Value) -> Result<LinkPose, String> {
         index: uint(v, "index") as u32,
         stamp_ms: uint(v, "stamp_ms") as u32,
         props: props_from(v, &["index", "stamp_ms", "pose"]),
+    })
+}
+
+fn attach_request_json(a: &AttachRequest) -> Value {
+    json!({ "session": a.session, "teleport": a.teleport != 0, "props": props_json(&a.props) })
+}
+
+fn attach_request_from(v: &Value) -> Result<AttachRequest, String> {
+    Ok(AttachRequest {
+        session: uint(v, "session"),
+        teleport: uint(v, "teleport") as u32,
+        _pad: 0,
+        props: props_from(v, &["session", "teleport"]),
+    })
+}
+
+fn detach_request_json(d: &DetachRequest) -> Value {
+    json!({ "session": d.session, "props": props_json(&d.props) })
+}
+
+fn detach_request_from(v: &Value) -> Result<DetachRequest, String> {
+    Ok(DetachRequest {
+        session: uint(v, "session"),
+        props: props_from(v, &["session"]),
+    })
+}
+
+fn attachment_json(a: &AttachmentRecord) -> Value {
+    json!({ "controlled": a.controlled != 0, "depth": a.depth, "props": props_json(&a.props) })
+}
+
+fn attachment_from(v: &Value) -> Result<AttachmentRecord, String> {
+    Ok(AttachmentRecord {
+        controlled: uint(v, "controlled") as u32,
+        depth: uint(v, "depth") as u32,
+        props: props_from(v, &["controlled", "depth"]),
     })
 }

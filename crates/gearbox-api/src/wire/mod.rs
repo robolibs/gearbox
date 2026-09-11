@@ -13,6 +13,6 @@ pub use host::{
     event_kind, load_flag, object_kind,
 };
 pub use machine::{
-    ClaimRequest, ClaimResponse, ControllerCommand, LinkPose, LinkRecord, MachineInfo,
-    MachineState, SessionInfo, SessionRef, TwistCmd,
+    AttachRequest, AttachmentRecord, ClaimRequest, ClaimResponse, ControllerCommand, DetachRequest,
+    LinkPose, LinkRecord, MachineInfo, MachineState, SessionInfo, SessionRef, TwistCmd,
 };

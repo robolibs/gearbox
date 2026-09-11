@@ -22,6 +22,7 @@
     clippy::useless_conversion
 )]
 
+mod attach;
 mod controller;
 mod links;
 mod load;
@@ -91,6 +92,7 @@ fn main() {
         // USD `LoadQueue`-driven loader.
         .add_plugins(world::WorldPlugin)
         .add_plugins(controller::ControllerDiscoveryPlugin)
+        .add_plugins(attach::AttachPlugin)
         .add_plugins(load::LoadPlugin { cli_paths })
         // ── Viewer surface: full ribbon + panel set, overlays, prim
         // tree, prim-level selection, fly-to camera, log capture,

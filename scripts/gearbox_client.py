@@ -366,6 +366,27 @@ class LinkPose:
     props: bytes = b""
 
 
+@_pod("gearbox.attach_request.v1", "<QII", ("session", "teleport", "_pad"), payload="props")
+class AttachRequest:
+    session: int = 0
+    teleport: int = 0
+    _pad: int = 0
+    props: bytes = b""
+
+
+@_pod("gearbox.detach_request.v1", "<Q", ("session",), payload="props")
+class DetachRequest:
+    session: int = 0
+    props: bytes = b""
+
+
+@_pod("gearbox.attachment.v1", "<II", ("controlled", "depth"), payload="props")
+class AttachmentRecord:
+    controlled: int = 0
+    depth: int = 0
+    props: bytes = b""
+
+
 CLEAR_SCOPE = {"all": 0, "machines": 1, "props": 2, "markers": 3}
 OBJECT_KIND = {"any": 0, "machine": 1, "prop": 2, "marker": 3, "terrain": 4}
 EVENT_KIND = {0: "loaded", 1: "pose", 2: "harvested", 3: "removed", 4: "machine_ready"}
@@ -644,6 +665,30 @@ class Machine:
 
     def stop(self) -> Status:
         return self.cmd_vel(0.0, 0.0)
+
+    def attach(self, slave: str, hitch: str | None = None, coupler: str | None = None,
+               teleport: bool = False) -> Status:
+        """Hang `slave` on one of this machine's hitches (uses our session if held)."""
+        props = {"slave": slave}
+        if hitch:
+            props["hitch"] = hitch
+        if coupler:
+            props["coupler"] = coupler
+        req = AttachRequest(session=self.session, teleport=int(teleport), props=pack_map(props))
+        return self.gb.call(self.addr, self._topic("tools/attach"), req, Status)
+
+    def detach(self, slave: str) -> Status:
+        req = DetachRequest(session=self.session, props=pack_map({"slave": slave}))
+        return self.gb.call(self.addr, self._topic("tools/detach"), req, Status)
+
+    def tools(self) -> list[dict]:
+        """Attachments below this machine, depth-first."""
+        out = []
+        for r in self.gb.query(self.addr, self._topic("tools"), Ping(), AttachmentRecord):
+            d = unpack_map(r.props)
+            d.update({"controlled": bool(r.controlled), "depth": r.depth})
+            out.append(d)
+        return out
 
     def tf(self, on: bool = True) -> Status:
         """Switch the machine's link pose stream on or off (no session needed)."""

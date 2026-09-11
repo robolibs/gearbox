@@ -1,0 +1,204 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "gearbox single-axle flatbed trailer (primitive geometry)"
+        string conventions = "chassis forward is -Y like tractor.usd; the drawbar_eye coupler prim is rotated 180 deg about Z so that, placed on a hitch frame rotated 180 deg, the trailer faces the same way as its master"
+    }
+    defaultPrim = "robot"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "robot" (
+    apiSchemas = ["GearboxMachineAPI"]
+    displayName = "Flatbed trailer"
+)
+{
+    rel gearbox:machine:body = </robot/chassis>
+    token gearbox:machine:idPolicy = "prim_path"
+    token gearbox:machine:interfaceVersion = "0.1"
+    token gearbox:machine:kind = "trailer"
+    rel gearbox:machine:role:passiveWheelJoints = [
+        </robot/Joints/rev_left>,
+        </robot/Joints/rev_right>,
+    ]
+    token gearbox:machine:upAxis = "Z"
+
+    def Scope "Materials"
+    {
+        def Material "steel"
+        {
+            token outputs:surface.connect = </robot/Materials/steel/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.55, 0.12, 0.10)
+                float inputs:roughness = 0.6
+                float inputs:metallic = 0.3
+                token outputs:surface
+            }
+        }
+        def Material "rubber"
+        {
+            token outputs:surface.connect = </robot/Materials/rubber/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.08, 0.08, 0.08)
+                float inputs:roughness = 0.9
+                float inputs:metallic = 0.0
+                token outputs:surface
+            }
+        }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "rev_left"
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/wheel_left>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (1.0, 0.6, 0.5)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+
+        def PhysicsRevoluteJoint "rev_right"
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/wheel_right>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (-1.0, 0.6, 0.5)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+    }
+
+    def Xform "chassis" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:name = "base_link"
+        token gearbox:link:role = "base"
+        float physics:mass = 600
+        point3f physics:centerOfMass = (0, 0.3, 0.6)
+        vector3f physics:diagonalInertia = (600, 300, 700)
+        rel physics:filteredPairs = [
+            </robot/wheel_left>,
+            </robot/wheel_right>,
+        ]
+
+        def Cube "bed" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            rel material:binding = </robot/Materials/steel>
+            double3 xformOp:translate = (0, 0.1, 1.0)
+            double3 xformOp:scale = (1.8, 3.0, 0.25)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "drawbar_beam" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            rel material:binding = </robot/Materials/steel>
+            double3 xformOp:translate = (0, -1.3, 0.45)
+            double3 xformOp:scale = (0.12, 1.9, 0.12)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "axle" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            rel material:binding = </robot/Materials/steel>
+            double3 xformOp:translate = (0, 0.6, 0.5)
+            double3 xformOp:scale = (1.8, 0.1, 0.1)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Xform "drawbar_eye" (
+            prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"]
+        )
+        {
+            token gearbox:link:role = "tool"
+            token gearbox:coupling:side = "coupler"
+            token gearbox:coupling:type = "drawbar"
+            token gearbox:coupling:name = "eye"
+            float gearbox:coupling:capacityKg = 1500
+            double3 xformOp:translate = (0, -2.25, 0.45)
+            float xformOp:rotateZ = 180
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+        }
+
+        def Xform "rear_hitch" (
+            prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"]
+        )
+        {
+            token gearbox:link:role = "tool"
+            token gearbox:coupling:side = "hitch"
+            token gearbox:coupling:type = "drawbar"
+            token gearbox:coupling:name = "rear_drawbar"
+            double3 xformOp:translate = (0, 1.7, 0.45)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Xform "wheel_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:role = "wheel"
+        float physics:mass = 40
+        vector3f physics:diagonalInertia = (5, 3, 3)
+        double3 xformOp:translate = (1.0, 0.6, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "tire" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            token axis = "X"
+            double radius = 0.5
+            double height = 0.3
+            rel material:binding = </robot/Materials/rubber>
+        }
+    }
+
+    def Xform "wheel_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:role = "wheel"
+        float physics:mass = 40
+        vector3f physics:diagonalInertia = (5, 3, 3)
+        double3 xformOp:translate = (-1.0, 0.6, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "tire" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            token axis = "X"
+            double radius = 0.5
+            double height = 0.3
+            rel material:binding = </robot/Materials/rubber>
+        }
+    }
+}
+
+def PhysicsScene "PhysicsScene"
+{
+    vector3f physics:gravityDirection = (0, 0, -1)
+    float physics:gravityMagnitude = 9.81
+}

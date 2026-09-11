@@ -200,3 +200,53 @@ fn no_instance_is_exit_3() {
     assert_eq!(out.status.code(), Some(3));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn attach_and_detach_through_the_master() {
+    let env = Env::start(&["tractor", "trailer"]);
+    let (code, out, err) = env.gearbox(&["machine", "tools", "list", "tractor"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("nothing attached"), "{out}");
+
+    let (code, out, err) = env.gearbox(&[
+        "machine",
+        "tools",
+        "attach",
+        "trailer",
+        "--ns",
+        "tractor",
+        "--teleport",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["slave"], "trailer");
+
+    let (code, out, err) = env.gearbox(&["machine", "tools", "list", "tractor", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["props"]["slave"], "trailer");
+
+    let (code, out, err) = env.gearbox(&["machine", "links", "tractor", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let names: Vec<&str> = v["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["props"]["name"].as_str())
+        .collect();
+    assert!(names.contains(&"trailer/base_link"), "{names:?}");
+
+    let (code, _, err) = env.gearbox(&["machine", "move", "trailer", "--for", "200ms"]);
+    assert_eq!(code, 4, "an attached slave refuses commands: {err}");
+    assert!(err.contains("attached"), "{err}");
+
+    let (code, _, err) = env.gearbox(&["machine", "tools", "detach", "trailer", "--ns", "tractor"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, _) = env.gearbox(&["machine", "tools", "list", "tractor", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "[]");
+    let (code, _, err) = env.gearbox(&["machine", "move", "trailer", "--for", "200ms"]);
+    assert_eq!(code, 0, "detached slave drives again: {err}");
+}

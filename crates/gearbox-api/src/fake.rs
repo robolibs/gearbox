@@ -11,7 +11,7 @@ use datapod::{Point, Quaternion};
 use peerbus::EndpointId;
 
 use crate::host::{HostBus, HostConfig};
-use crate::machine::{MachineAgent, MachineConfig};
+use crate::machine::{MachineAgent, MachineConfig, ToolDesc};
 use crate::wire::*;
 
 #[derive(Debug, Clone, Default)]
@@ -366,5 +366,112 @@ fn serve_once(
     for m in agents.iter_mut() {
         m.agent.poll();
     }
+    serve_fake_attachments(host, agents);
     spawn
+}
+
+/// Attachments without physics: a slave hangs on any free hitch of the
+/// master, refuses its own commands, and follows nothing. Enough for the
+/// CLI and the Python client to be tested end to end.
+fn serve_fake_attachments(host: &mut HostBus, agents: &mut [FakeMachine]) {
+    let names: Vec<String> = agents
+        .iter()
+        .map(|m| m.agent.namespace().to_string())
+        .collect();
+    let mut events = Vec::new();
+    for i in 0..agents.len() {
+        let master = names[i].clone();
+        let attaches: Vec<_> = agents[i].agent.pending_attach.drain(..).collect();
+        for (req, token) in attaches {
+            let slave = req.slave();
+            let status = match names.iter().position(|n| *n == slave) {
+                None => Status::err(code::NOT_FOUND, &format!("no machine `{slave}`")),
+                Some(_) if slave == master => Status::err(code::REFUSED, "cannot attach to itself"),
+                Some(j) if agents[j].agent.attached_to().is_some() => {
+                    Status::err(code::REFUSED, &format!("`{slave}` is already attached"))
+                }
+                Some(_) if agents[i].agent.session_id() != req.session => {
+                    Status::err(code::REFUSED, "session does not hold the master")
+                }
+                Some(j) => {
+                    let hitch = req.hitch().unwrap_or_else(|| "rear_drawbar".to_string());
+                    let coupler = req.coupler().unwrap_or_else(|| "eye".to_string());
+                    let mut tools = agents[i].agent.tools().to_vec();
+                    tools.push(ToolDesc {
+                        slave: slave.clone(),
+                        hitch: hitch.clone(),
+                        coupler: coupler.clone(),
+                        kind: "drawbar".to_string(),
+                        controlled: true,
+                        depth: 0,
+                    });
+                    let mut links = Vec::new();
+                    for mut l in agents[j].agent.config.links.clone() {
+                        l.parent = Some(match l.parent {
+                            None => "base_link".to_string(),
+                            Some(p) => format!("{slave}/{p}"),
+                        });
+                        if l.role == "base" {
+                            l.role = "link".to_string();
+                        }
+                        l.name = format!("{slave}/{}", l.name);
+                        links.push(l);
+                    }
+                    agents[i].agent.set_tools(tools, links);
+                    agents[j].agent.set_attached_to(Some(master.clone()));
+                    events.push(
+                        SceneEvent::new(event_kind::ATTACHED, &slave)
+                            .with_prop("master", &master)
+                            .with_prop("slave", &slave)
+                            .with_prop("hitch", &hitch)
+                            .with_prop("coupler", &coupler)
+                            .with_prop("type", "drawbar"),
+                    );
+                    Status::ok()
+                }
+            };
+            agents[i].agent.respond_attach(token, &status);
+        }
+        let detaches: Vec<_> = agents[i].agent.pending_detach.drain(..).collect();
+        for (req, token) in detaches {
+            let slave = req.slave();
+            let mut tools = agents[i].agent.tools().to_vec();
+            let status = match tools.iter().position(|t| t.slave == slave) {
+                None => Status::err(
+                    code::NOT_FOUND,
+                    &format!("`{slave}` is not attached to `{master}`"),
+                ),
+                Some(_) if agents[i].agent.session_id() != req.session => {
+                    Status::err(code::REFUSED, "session does not hold the master")
+                }
+                Some(k) => {
+                    tools.remove(k);
+                    let remaining: Vec<String> = tools.iter().map(|t| t.slave.clone()).collect();
+                    let mut links = Vec::new();
+                    for t in &remaining {
+                        if let Some(j) = names.iter().position(|n| n == t) {
+                            for mut l in agents[j].agent.config.links.clone() {
+                                l.name = format!("{t}/{}", l.name);
+                                links.push(l);
+                            }
+                        }
+                    }
+                    agents[i].agent.set_tools(tools, links);
+                    if let Some(j) = names.iter().position(|n| *n == slave) {
+                        agents[j].agent.set_attached_to(None);
+                    }
+                    events.push(
+                        SceneEvent::new(event_kind::DETACHED, &slave)
+                            .with_prop("master", &master)
+                            .with_prop("slave", &slave),
+                    );
+                    Status::ok()
+                }
+            };
+            agents[i].agent.respond_detach(token, &status);
+        }
+    }
+    for ev in &events {
+        host.publish_event(ev);
+    }
 }

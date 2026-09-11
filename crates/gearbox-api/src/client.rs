@@ -259,6 +259,25 @@ impl MachineClient<'_> {
         self.command(&cmd)
     }
 
+    /// Hang `slave` on one of this machine's hitches.
+    pub fn attach(&self, req: &AttachRequest) -> agentio::Result<Status> {
+        self.client
+            .call(&self.topic(topics::MACHINE_TOOLS_ATTACH), req)
+    }
+
+    pub fn detach(&self, session: u64, slave: &str) -> agentio::Result<Status> {
+        self.client.call(
+            &self.topic(topics::MACHINE_TOOLS_DETACH),
+            &DetachRequest::new(session, slave),
+        )
+    }
+
+    /// Attachments below this machine, depth-first.
+    pub fn tools(&self) -> agentio::Result<Vec<AttachmentRecord>> {
+        self.client
+            .query(&self.topic(topics::MACHINE_TOOLS), &Ping::default())
+    }
+
     /// The link tree, base_link first.
     pub fn links(&self) -> agentio::Result<Vec<LinkRecord>> {
         self.client

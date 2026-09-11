@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
 use datapod::robot::Twist;
-use peerbus::{AnsServer, EndpointId, Publisher, ReqServer};
+use peerbus::{AnsServer, EndpointId, Publisher, ReqReplyToken, ReqServer};
 
 use crate::host::{serve_que, serve_req};
 use crate::topics::{self, machine_topic};
@@ -93,52 +93,7 @@ impl MachineConfig {
     }
 
     pub fn link_records(&self) -> Vec<LinkRecord> {
-        let index_of = |name: &str| {
-            self.links
-                .iter()
-                .position(|l| l.name == name)
-                .map(|i| i as u32)
-                .unwrap_or(LinkRecord::NO_PARENT)
-        };
-        self.links
-            .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                let mut props = Props::from_pairs(&[
-                    ("name", l.name.as_str()),
-                    ("role", l.role.as_str()),
-                    ("prim", l.prim.as_str()),
-                ]);
-                if let Some(p) = &l.parent {
-                    props.set("parent", p);
-                }
-                if let Some(j) = &l.joint {
-                    props.set("joint", j);
-                }
-                if let Some(b) = &l.body {
-                    props.set("body", b);
-                }
-                if let Some(c) = &l.coupling {
-                    props.set("coupling", c);
-                }
-                LinkRecord {
-                    x: l.offset[0],
-                    y: l.offset[1],
-                    z: l.offset[2],
-                    qw: l.offset[3],
-                    qx: l.offset[4],
-                    qy: l.offset[5],
-                    qz: l.offset[6],
-                    index: i as u32,
-                    parent_index: l
-                        .parent
-                        .as_deref()
-                        .map(index_of)
-                        .unwrap_or(LinkRecord::NO_PARENT),
-                    props: props.into_bytes(),
-                }
-            })
-            .collect()
+        link_records_for(&self.links)
     }
 
     pub fn with_cmd_vel(mut self, instance: &str, controller_type: &str) -> Self {
@@ -181,6 +136,18 @@ pub struct MachineAgent {
     links: Registered<AnsServer<Env, Env>>,
     tf_pub: Registered<Publisher<Env>>,
     tf_enabled: bool,
+    attach: Registered<ReqServer<Env, Env>>,
+    detach: Registered<ReqServer<Env, Env>>,
+    tools_q: Registered<AnsServer<Env, Env>>,
+    /// Set while this machine hangs on another machine's hitch.
+    attached_to: Option<String>,
+    /// Slaves hanging on this machine, depth-first, and their re-parented
+    /// links appended to `/links`.
+    tools: Vec<ToolDesc>,
+    tool_links: Vec<LinkDesc>,
+    /// Attach and detach requests waiting for the sim to act and answer.
+    pub pending_attach: Vec<(AttachRequest, ReqReplyToken)>,
+    pub pending_detach: Vec<(DetachRequest, ReqReplyToken)>,
     session: Option<Session>,
     next_session: u64,
     twist: Twist,
@@ -223,6 +190,14 @@ impl MachineAgent {
             links: agent.que_server(&t(topics::MACHINE_LINKS))?,
             tf_pub: agent.publish(&t(topics::MACHINE_TF))?,
             tf_enabled: false,
+            attach: agent.req_server(&t(topics::MACHINE_TOOLS_ATTACH))?,
+            detach: agent.req_server(&t(topics::MACHINE_TOOLS_DETACH))?,
+            tools_q: agent.que_server(&t(topics::MACHINE_TOOLS))?,
+            attached_to: None,
+            tools: Vec::new(),
+            tool_links: Vec::new(),
+            pending_attach: Vec::new(),
+            pending_detach: Vec::new(),
             agent,
             config,
             session: None,
@@ -266,6 +241,16 @@ impl MachineAgent {
             ("addr", &self.addr_hex()),
             ("link_count", &self.config.links.len().to_string()),
             ("links_derived", &self.config.links_derived.to_string()),
+            ("attached_to", self.attached_to.as_deref().unwrap_or("")),
+            (
+                "tools",
+                &self
+                    .tools
+                    .iter()
+                    .map(|t| t.slave.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
             (
                 "base_link",
                 self.config
@@ -312,13 +297,62 @@ impl MachineAgent {
     pub fn poll(&mut self) {
         let info = self.info();
         serve_req(&mut self.info, |_: Ping| info.clone_for_response());
-        let config = &self.config;
-        serve_que(&mut self.links, |_: Ping| config.link_records());
+        let all_links: Vec<LinkDesc> = self
+            .config
+            .links
+            .iter()
+            .chain(self.tool_links.iter())
+            .cloned()
+            .collect();
+        serve_que(&mut self.links, |_: Ping| link_records_for(&all_links));
+        let master = self.config.namespace.clone();
+        let tools = &self.tools;
+        serve_que(&mut self.tools_q, |_: Ping| {
+            tools.iter().map(|t| t.record(&master)).collect()
+        });
+        while let Ok(Some(pending)) = self.attach.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<AttachRequest>(sample.header().type_hash, sample.payload()) {
+                Ok(req) => self.pending_attach.push((req, token)),
+                Err(err) => {
+                    let _ = self
+                        .attach
+                        .respond_pending(token, &pack(&Status::err(code::USAGE, &err.to_string())));
+                }
+            }
+        }
+        while let Ok(Some(pending)) = self.detach.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<DetachRequest>(sample.header().type_hash, sample.payload()) {
+                Ok(req) => self.pending_detach.push((req, token)),
+                Err(err) => {
+                    let _ = self
+                        .detach
+                        .respond_pending(token, &pack(&Status::err(code::USAGE, &err.to_string())));
+                }
+            }
+        }
+        let attached_to = self.attached_to.clone();
 
         let now = Instant::now();
         let mut session = self.session.take();
         let mut next_session = self.next_session;
         serve_req(&mut self.claim, |req: ClaimRequest| {
+            if let Some(master) = &attached_to {
+                return ClaimResponse {
+                    session: 0,
+                    code: code::REFUSED,
+                    _pad: 0,
+                    props: Props::from_pairs(&[
+                        ("attached_to", master.as_str()),
+                        (
+                            "message",
+                            "machine is attached; command it through its master",
+                        ),
+                    ])
+                    .into_bytes(),
+                };
+            }
             if let Some(held) = &session
                 && req.take == 0
                 && now.duration_since(held.last_cmd) < AUTO_RELEASE
@@ -344,21 +378,35 @@ impl MachineAgent {
         self.next_session = next_session;
 
         let mut twist = self.twist;
-        serve_req(&mut self.cmd_vel, |req: TwistCmd| match &mut session {
-            Some(held) if held.id == req.session => {
-                held.last_cmd = now;
-                twist = req.twist;
-                Status::ok()
+        serve_req(&mut self.cmd_vel, |req: TwistCmd| {
+            if let Some(master) = &attached_to {
+                return Status::with(
+                    code::REFUSED,
+                    &[
+                        ("attached_to", master.as_str()),
+                        (
+                            "message",
+                            "machine is attached; command it through its master",
+                        ),
+                    ],
+                );
             }
-            Some(held) => Status::with(
-                code::BUSY,
-                &[("holder", &held.holder), ("message", "machine is held")],
-            ),
-            None if req.session == 0 => {
-                twist = req.twist;
-                Status::ok()
+            match &mut session {
+                Some(held) if held.id == req.session => {
+                    held.last_cmd = now;
+                    twist = req.twist;
+                    Status::ok()
+                }
+                Some(held) => Status::with(
+                    code::BUSY,
+                    &[("holder", &held.holder), ("message", "machine is held")],
+                ),
+                None if req.session == 0 => {
+                    twist = req.twist;
+                    Status::ok()
+                }
+                None => Status::err(code::REFUSED, "no such session; claim first"),
             }
-            None => Status::err(code::REFUSED, "no such session; claim first"),
         });
 
         serve_req(&mut self.release, |req: SessionRef| match &session {
@@ -436,6 +484,36 @@ impl MachineAgent {
         let _ = self.tf_pub.send(&pack(pose));
     }
 
+    pub fn attached_to(&self) -> Option<&str> {
+        self.attached_to.as_deref()
+    }
+
+    pub fn set_attached_to(&mut self, master: Option<String>) {
+        self.attached_to = master;
+        if self.attached_to.is_some() {
+            self.clear_session();
+        }
+    }
+
+    pub fn tools(&self) -> &[ToolDesc] {
+        &self.tools
+    }
+
+    /// Replace the composite below this machine: its attachments and the
+    /// slaves' links re-parented under the hitch links.
+    pub fn set_tools(&mut self, tools: Vec<ToolDesc>, tool_links: Vec<LinkDesc>) {
+        self.tools = tools;
+        self.tool_links = tool_links;
+    }
+
+    pub fn respond_attach(&mut self, token: ReqReplyToken, status: &Status) {
+        let _ = self.attach.respond_pending(token, &pack(status));
+    }
+
+    pub fn respond_detach(&mut self, token: ReqReplyToken, status: &Status) {
+        let _ = self.detach.respond_pending(token, &pack(status));
+    }
+
     pub fn publish_state(&mut self, mut state: MachineState) {
         state.session = self.session_id();
         let _ = self.odom_pub.send(&pack(&state.odom));
@@ -473,4 +551,82 @@ impl CloneForResponse for SessionInfo {
             props: self.props.clone(),
         }
     }
+}
+
+/// One slave hanging on a hitch of this machine.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolDesc {
+    pub slave: String,
+    pub hitch: String,
+    pub coupler: String,
+    pub kind: String,
+    pub controlled: bool,
+    pub depth: u32,
+}
+
+impl ToolDesc {
+    pub fn record(&self, master: &str) -> AttachmentRecord {
+        AttachmentRecord {
+            controlled: self.controlled as u32,
+            depth: self.depth,
+            props: Props::from_pairs(&[
+                ("master", master),
+                ("slave", self.slave.as_str()),
+                ("hitch", self.hitch.as_str()),
+                ("coupler", self.coupler.as_str()),
+                ("type", self.kind.as_str()),
+            ])
+            .into_bytes(),
+        }
+    }
+}
+
+/// Records for a link list, parents resolved by name within the list.
+pub fn link_records_for(links: &[LinkDesc]) -> Vec<LinkRecord> {
+    let index_of = |name: &str| {
+        links
+            .iter()
+            .position(|l| l.name == name)
+            .map(|i| i as u32)
+            .unwrap_or(LinkRecord::NO_PARENT)
+    };
+    links
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let mut props = Props::from_pairs(&[
+                ("name", l.name.as_str()),
+                ("role", l.role.as_str()),
+                ("prim", l.prim.as_str()),
+            ]);
+            if let Some(p) = &l.parent {
+                props.set("parent", p);
+            }
+            if let Some(j) = &l.joint {
+                props.set("joint", j);
+            }
+            if let Some(b) = &l.body {
+                props.set("body", b);
+            }
+            if let Some(c) = &l.coupling {
+                props.set("coupling", c);
+            }
+            LinkRecord {
+                x: l.offset[0],
+                y: l.offset[1],
+                z: l.offset[2],
+                qw: l.offset[3],
+                qx: l.offset[4],
+                qy: l.offset[5],
+                qz: l.offset[6],
+                index: i as u32,
+                parent_index: l
+                    .parent
+                    .as_deref()
+                    .map(index_of)
+                    .unwrap_or(LinkRecord::NO_PARENT),
+                props: props.into_bytes(),
+            }
+        })
+        .collect()
 }

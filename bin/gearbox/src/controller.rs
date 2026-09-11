@@ -968,6 +968,7 @@ fn apply_builtin_ackermann_cmd_vel(
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
     active: Res<usd_bevy::physics::PhysicsActive>,
+    towed: Res<crate::attach::TowedMass>,
     prims: Query<(Entity, &UsdPrimRef)>,
     joints: Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
     parents: Query<&ChildOf>,
@@ -1113,6 +1114,7 @@ fn apply_builtin_ackermann_cmd_vel(
                 &raycast_specs,
                 cmd,
                 steer_target_rad,
+                towed.0.get(&machine.id).copied().unwrap_or(0.0),
             );
             if using_raycast_vehicle {
                 // Raycast traction moves the chassis; the USD wheel rigid
@@ -1592,6 +1594,7 @@ fn apply_rapier_raycast_vehicle_controller(
     wheel_specs: &[RaycastVehicleWheelSpec],
     cmd: CmdVel,
     steer_target_rad: f64,
+    towed_mass_kg: f64,
 ) -> bool {
     if tire_pairs.is_empty() || wheel_specs.is_empty() {
         return false;
@@ -1609,7 +1612,8 @@ fn apply_rapier_raycast_vehicle_controller(
         // The force constants below were tuned for the ~2.7 t tractor.
         // Heavier machines get them scaled by mass, otherwise a 15 t
         // harvester crawls and its suspension cannot hold it up.
-        let mass_scale = (body.mass() / RAYCAST_REFERENCE_CHASSIS_MASS_KG).max(1.0);
+        let mass_scale =
+            ((body.mass() + towed_mass_kg) / RAYCAST_REFERENCE_CHASSIS_MASS_KG).max(1.0);
         let current_speed = body.linvel().dot(forward);
         let target_speed = cmd.linear_mps as f64;
         let speed_error = target_speed - current_speed;
@@ -2764,7 +2768,7 @@ fn find_joint_body_pair(
     Some((body0_entity, body1_entity, body0, body1))
 }
 
-fn find_prim_entity(
+pub(crate) fn find_prim_entity(
     scene_root: Entity,
     prim_path: &str,
     prims: &Query<(Entity, &UsdPrimRef)>,
@@ -3711,13 +3715,17 @@ fn sync_machine_agents(
         let Some(scene_root) = machine.scene_root else {
             continue;
         };
-        let Some(drive) = machine
+        // Every valid machine gets an agent; without a cmd_vel controller it
+        // still answers info, links and attachments and publishes its pose.
+        let drive = machine
             .controllers
             .iter()
-            .find(|c| c.enabled && c.command_interface.as_deref() == Some("cmd_vel"))
-        else {
-            continue;
-        };
+            .find(|c| c.enabled && c.command_interface.as_deref() == Some("cmd_vel"));
+        let namespace = drive
+            .map(|d| d.namespace.clone())
+            .or_else(|| machine.controllers.first().map(|c| c.namespace.clone()))
+            .unwrap_or_else(|| machine.id.clone());
+        let instance = drive.map(|d| d.instance.clone()).unwrap_or_default();
         if !machine.links.is_valid() {
             if rejected.0.insert(machine.id.clone()) {
                 for reason in &machine.links.errors {
@@ -3726,7 +3734,7 @@ fn sync_machine_agents(
                         machine.id
                     );
                 }
-                let mut event = SceneEvent::new(event_kind::MACHINE_REJECTED, &drive.namespace)
+                let mut event = SceneEvent::new(event_kind::MACHINE_REJECTED, &namespace)
                     .with_prop("machine_id", &machine.id);
                 for (n, reason) in machine.links.errors.iter().enumerate() {
                     event = event.with_prop(&format!("reason.{n}"), reason);
@@ -3741,7 +3749,7 @@ fn sync_machine_agents(
             }
         }
         let host = &bus.host.config;
-        let mut config = MachineConfig::new(&host.instance, &drive.namespace);
+        let mut config = MachineConfig::new(&host.instance, &namespace);
         config.machine_id = machine.id.clone();
         config.kind = machine.kind.clone().unwrap_or_default();
         config.links = link_descs(&machine.links);
@@ -3760,8 +3768,8 @@ fn sync_machine_agents(
                 state_interfaces: c.state_interfaces.clone(),
             })
             .collect();
-        let key = ControllerKey::new(scene_root, &machine.id, &drive.instance);
-        wanted.insert(drive.namespace.clone(), (key, config));
+        let key = ControllerKey::new(scene_root, &machine.id, &instance);
+        wanted.insert(namespace.clone(), (key, config));
     }
 
     let stale: Vec<String> = bus
@@ -3807,6 +3815,9 @@ fn apply_machine_agent_commands(
     let Some(bus) = bus else { return };
     for (ns, agent) in &bus.machines {
         let Some(key) = keys.0.get(ns) else { continue };
+        if key.controller_instance.is_empty() {
+            continue;
+        }
         let twist = agent.twist();
         commands.cmd_vel.insert(
             key.clone(),
@@ -3826,104 +3837,6 @@ fn yaw_rate_of(twist: &Twist) -> f32 {
     } else {
         twist.angular.vy as f32
     }
-}
-
-fn publish_machine_controller_states(
-    inventory: Res<ControllerInventory>,
-    states: Res<ControllerStates>,
-    keys: Res<MachineAgentKeys>,
-    bus: Option<ResMut<GearboxBus>>,
-) {
-    let Some(mut bus) = bus else { return };
-    if states.states.is_empty() {
-        return;
-    }
-    for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        for controller in &machine.controllers {
-            if !controller
-                .state_interfaces
-                .iter()
-                .any(|iface| iface == "pose" || iface == "velocity")
-            {
-                continue;
-            }
-            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
-            let Some(state) = states.states.get(&key) else {
-                continue;
-            };
-            if keys.0.get(&controller.namespace) != Some(&key) {
-                continue;
-            }
-            let Some(agent) = bus.machines.get_mut(&controller.namespace) else {
-                continue;
-            };
-            let half = state.heading_rad * 0.5;
-            let wire = MachineState {
-                odom: Odom {
-                    pose: gearbox_api::datapod::Pose {
-                        point: Point::new(
-                            state.position_m[0],
-                            state.position_m[1],
-                            state.position_m[2],
-                        ),
-                        rotation: Quaternion::new(half.cos(), 0.0, half.sin(), 0.0),
-                    },
-                    twist: Twist::from_components(
-                        state.linear_speed_mps,
-                        0.0,
-                        0.0,
-                        0.0,
-                        0.0,
-                        state.yaw_rate_rps,
-                    ),
-                },
-                heading_rad: state.heading_rad,
-                roll_rad: state.roll_rad,
-                pitch_rad: state.pitch_rad,
-                session: 0,
-                props: Props::from_pairs(&[
-                    ("machine_id", machine.id.as_str()),
-                    ("controller", controller.instance.as_str()),
-                ])
-                .into_bytes(),
-            };
-            agent.publish_state(wire);
-        }
-    }
-}
-
-/// The discovered tree as the machine agent answers it.
-fn link_descs(tree: &crate::links::LinkTree) -> Vec<gearbox_api::LinkDesc> {
-    tree.links
-        .iter()
-        .map(|l| {
-            let off = l.static_offset.unwrap_or_default();
-            gearbox_api::LinkDesc {
-                name: l.name.clone(),
-                parent: l.parent.clone(),
-                role: l.role.as_str().to_string(),
-                prim: l.prim_path.clone(),
-                joint: l.joint_prim.clone(),
-                body: l.body_prim.clone(),
-                offset: [
-                    off.translation.x,
-                    off.translation.y,
-                    off.translation.z,
-                    off.rotation.w,
-                    off.rotation.x,
-                    off.rotation.y,
-                    off.rotation.z,
-                ],
-                coupling: l
-                    .coupling
-                    .as_ref()
-                    .map(|c| format!("{}|{}|{}", c.side.as_str(), c.kind, c.name)),
-            }
-        })
-        .collect()
 }
 
 /// World poses of every link, for machines whose agent has `tf` switched on.
@@ -3979,4 +3892,149 @@ fn publish_link_poses(
             });
         }
     }
+}
+
+/// Publish each machine's state: from its drive controller when it has one,
+/// else straight from its body pose, so trailers report where they are.
+fn publish_machine_controller_states(
+    inventory: Res<ControllerInventory>,
+    states: Res<ControllerStates>,
+    keys: Res<MachineAgentKeys>,
+    bus: Option<ResMut<GearboxBus>>,
+    physics: Res<usd_bevy::physics::PhysicsWorld>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    parents: Query<&ChildOf>,
+) {
+    let Some(mut bus) = bus else { return };
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let Some((ns, key)) = keys
+            .0
+            .iter()
+            .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
+            .map(|(ns, k)| (ns.clone(), k.clone()))
+        else {
+            continue;
+        };
+        let Some(agent) = bus.machines.get_mut(&ns) else {
+            continue;
+        };
+        let mut props = Props::from_pairs(&[("machine_id", machine.id.as_str())]);
+        if let Some(master) = agent.attached_to() {
+            props.set("attached_to", master);
+        }
+        let tools: Vec<&str> = agent.tools().iter().map(|t| t.slave.as_str()).collect();
+        if !tools.is_empty() {
+            props.set("tools", &tools.join(","));
+        }
+
+        let from_controller = machine
+            .controllers
+            .iter()
+            .find(|c| {
+                c.instance == key.controller_instance
+                    && c.state_interfaces
+                        .iter()
+                        .any(|iface| iface == "pose" || iface == "velocity")
+            })
+            .and_then(|c| states.states.get(&key).map(|s| (c, *s)));
+
+        let (position, heading, roll, pitch, speed, yaw_rate) = match from_controller {
+            Some((controller, state)) => {
+                props.set("controller", &controller.instance);
+                (
+                    state.position_m,
+                    state.heading_rad,
+                    state.roll_rad,
+                    state.pitch_rad,
+                    state.linear_speed_mps,
+                    state.yaw_rate_rps,
+                )
+            }
+            None => {
+                let Some(body_prim) = machine
+                    .body
+                    .as_deref()
+                    .or_else(|| machine.links.base().and_then(|b| b.body_prim.as_deref()))
+                else {
+                    continue;
+                };
+                let Some(entity) = find_prim_entity(scene_root, body_prim, &prims, &parents) else {
+                    continue;
+                };
+                let Some(body) = physics
+                    .entity_to_body
+                    .get(&entity)
+                    .and_then(|h| physics.bodies.get(*h))
+                else {
+                    continue;
+                };
+                let p = body.position().translation;
+                let heading = body_forward_vector(body)
+                    .map(|f| f.x.atan2(f.z))
+                    .unwrap_or(0.0);
+                let (roll, pitch) = machine_roll_pitch_rad(body);
+                let v = body.linvel();
+                let speed = (v.x * v.x + v.z * v.z).sqrt();
+                (
+                    [p.x, p.y, p.z],
+                    heading,
+                    roll,
+                    pitch,
+                    speed,
+                    body.angvel().y,
+                )
+            }
+        };
+
+        let half = heading * 0.5;
+        let wire = MachineState {
+            odom: Odom {
+                pose: gearbox_api::datapod::Pose {
+                    point: Point::new(position[0], position[1], position[2]),
+                    rotation: Quaternion::new(half.cos(), 0.0, half.sin(), 0.0),
+                },
+                twist: Twist::from_components(speed, 0.0, 0.0, 0.0, 0.0, yaw_rate),
+            },
+            heading_rad: heading,
+            roll_rad: roll,
+            pitch_rad: pitch,
+            session: 0,
+            props: props.into_bytes(),
+        };
+        agent.publish_state(wire);
+    }
+}
+
+/// The discovered tree as the machine agent answers it.
+pub(crate) fn link_descs(tree: &crate::links::LinkTree) -> Vec<gearbox_api::LinkDesc> {
+    tree.links
+        .iter()
+        .map(|l| {
+            let off = l.static_offset.unwrap_or_default();
+            gearbox_api::LinkDesc {
+                name: l.name.clone(),
+                parent: l.parent.clone(),
+                role: l.role.as_str().to_string(),
+                prim: l.prim_path.clone(),
+                joint: l.joint_prim.clone(),
+                body: l.body_prim.clone(),
+                offset: [
+                    off.translation.x,
+                    off.translation.y,
+                    off.translation.z,
+                    off.rotation.w,
+                    off.rotation.x,
+                    off.rotation.y,
+                    off.rotation.z,
+                ],
+                coupling: l
+                    .coupling
+                    .as_ref()
+                    .map(|c| format!("{}|{}|{}", c.side.as_str(), c.kind, c.name)),
+            }
+        })
+        .collect()
 }
