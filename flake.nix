@@ -95,7 +95,9 @@
               pip
               cbor2
               zenoh
+              rerun-sdk
             ]))
+            pkgs.rerun
 
             nixGLAlias
             nixVulkanAlias
