@@ -48,12 +48,28 @@ pub struct Attachments(pub Vec<Attachment>);
 #[derive(Resource, Default)]
 pub struct TowedMass(pub HashMap<String, f64>);
 
+/// An attachment authored in a world layer, waiting for both machines to
+/// have agents before it is applied like a runtime attach with teleport.
+#[derive(Debug, Clone)]
+pub struct StaticAttachment {
+    pub scene_root: Entity,
+    pub hitch_prim: String,
+    pub coupler_prim: String,
+    pub frames_waited: u32,
+}
+
+#[derive(Resource, Default)]
+pub struct PendingStaticAttachments(pub Vec<StaticAttachment>);
+
+const STATIC_ATTACH_MAX_FRAMES: u32 = 1200;
+
 pub struct AttachPlugin;
 
 impl Plugin for AttachPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Attachments>()
             .init_resource::<TowedMass>()
+            .init_resource::<PendingStaticAttachments>()
             .add_systems(Update, serve_attachments);
     }
 }
@@ -581,6 +597,7 @@ fn serve_attachments(
     mut attachments: ResMut<Attachments>,
     mut towed: ResMut<TowedMass>,
     mut physics: ResMut<PhysicsWorld>,
+    mut pending_static: ResMut<PendingStaticAttachments>,
     prims: Query<(Entity, &'static UsdPrimRef)>,
     parents: Query<&'static ChildOf>,
     transforms: Query<&'static GlobalTransform>,
@@ -613,16 +630,84 @@ fn serve_attachments(
     }
     let mut changed = attachments.0.len() != before;
 
-    let mut attach_reqs: Vec<(String, AttachRequest, ReqReplyToken)> = Vec::new();
+    let mut attach_reqs: Vec<(String, AttachRequest, Option<ReqReplyToken>)> = Vec::new();
     let mut detach_reqs: Vec<(String, DetachRequest, ReqReplyToken)> = Vec::new();
     for (ns, agent) in bus.machines.iter_mut() {
         for (req, token) in agent.pending_attach.drain(..) {
-            attach_reqs.push((ns.clone(), req, token));
+            attach_reqs.push((ns.clone(), req, Some(token)));
         }
         for (req, token) in agent.pending_detach.drain(..) {
             detach_reqs.push((ns.clone(), req, token));
         }
     }
+
+    // World-layer attachments join once both machines have agents.
+    let mut still_pending = Vec::new();
+    for mut sa in pending_static.0.drain(..) {
+        let owner = |prim: &str| {
+            inventory
+                .machines
+                .iter()
+                .filter(|m| m.scene_root == Some(sa.scene_root))
+                .find(|m| prim == m.prim_path || prim.starts_with(&format!("{}/", m.prim_path)))
+        };
+        let ns_of = |m: &MachineInstanceSpec| {
+            keys.0
+                .iter()
+                .find(|(_, k)| Some(k.scene_root) == m.scene_root && k.machine_id == m.id)
+                .map(|(ns, _)| ns.clone())
+        };
+        let ready = match (owner(&sa.hitch_prim), owner(&sa.coupler_prim)) {
+            (Some(master), Some(slave)) => match (ns_of(master), ns_of(slave)) {
+                (Some(master_ns), Some(slave_ns))
+                    if bus.machines.contains_key(&master_ns)
+                        && bus.machines.contains_key(&slave_ns) =>
+                {
+                    let hitch = master
+                        .links
+                        .by_prim(&sa.hitch_prim)
+                        .and_then(|l| l.coupling.as_ref())
+                        .map(|c| c.name.clone());
+                    let coupler = slave
+                        .links
+                        .by_prim(&sa.coupler_prim)
+                        .and_then(|l| l.coupling.as_ref())
+                        .map(|c| c.name.clone());
+                    match (hitch, coupler) {
+                        (Some(h), Some(c)) => {
+                            let req = AttachRequest::new(0, &slave_ns)
+                                .with_hitch(&h)
+                                .with_coupler(&c)
+                                .teleporting();
+                            attach_reqs.push((master_ns, req, None));
+                            true
+                        }
+                        _ => {
+                            warn!(
+                                "gearbox-attach: static attachment {} -> {} names prims that are not couplings",
+                                sa.hitch_prim, sa.coupler_prim
+                            );
+                            true
+                        }
+                    }
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        if !ready {
+            sa.frames_waited += 1;
+            if sa.frames_waited > STATIC_ATTACH_MAX_FRAMES {
+                warn!(
+                    "gearbox-attach: static attachment {} -> {} never found both machines",
+                    sa.hitch_prim, sa.coupler_prim
+                );
+            } else {
+                still_pending.push(sa);
+            }
+        }
+    }
+    pending_static.0 = still_pending;
 
     for (master_ns, req, token) in attach_reqs {
         let outcome = try_attach(&master_ns, &req, &scene, &bus, &mut physics, &attachments.0);
@@ -653,7 +738,7 @@ fn serve_attachments(
                 status
             }
         };
-        if let Some(agent) = bus.machines.get_mut(&master_ns) {
+        if let (Some(token), Some(agent)) = (token, bus.machines.get_mut(&master_ns)) {
             agent.respond_attach(token, &status);
         }
     }

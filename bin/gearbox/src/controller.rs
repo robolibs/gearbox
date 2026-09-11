@@ -4038,3 +4038,34 @@ pub(crate) fn link_descs(tree: &crate::links::LinkTree) -> Vec<gearbox_api::Link
         })
         .collect()
 }
+
+/// `GearboxAttachmentAPI` prims in a loaded USD: (hitch prim, coupler prim)
+/// pairs the runtime joins once both machines have agents.
+pub fn discover_static_attachments_from_usd(usd_path: &Path) -> Vec<(String, String)> {
+    let Ok(stage) = open_stage_for_discovery(usd_path) else {
+        return Vec::new();
+    };
+    let mut prims = Vec::new();
+    let scan_root = stage
+        .default_prim()
+        .and_then(|name| openusd::sdf::path(&format!("/{name}")).ok())
+        .unwrap_or_else(SdfPath::abs_root);
+    walk_stage(&stage, scan_root, &mut prims);
+    let mut out = Vec::new();
+    for prim in &prims {
+        let schemas = stage.api_schemas(prim).unwrap_or_default();
+        let hitch = read_rel_first(&stage, prim, "gearbox:attachment:hitch");
+        let coupler = read_rel_first(&stage, prim, "gearbox:attachment:coupler");
+        if !schemas.iter().any(|s| s == "GearboxAttachmentAPI") && hitch.is_none() {
+            continue;
+        }
+        match (hitch, coupler) {
+            (Some(h), Some(c)) => out.push((h, c)),
+            _ => warn!(
+                "gearbox-control: attachment {} needs both gearbox:attachment:hitch and :coupler",
+                prim.as_str()
+            ),
+        }
+    }
+    out
+}

@@ -424,3 +424,65 @@ requesting `hitch:rear_lift` on a master without that grant shows
   mass also scales braking impulses; check that an unloaded tractor after a
   detach does not keep the high gains (recompute on detach, not only on
   attach).
+
+## 5. Implementation notes (2026-09-12)
+
+Phases 1 to 4 are implemented. Where the code differs from the plan above,
+the code wins and the difference is recorded here.
+
+- **Link discovery lives in `bin/gearbox/src/links.rs`**, called from
+  `discover_machines_from_usd`. Derived mode is exactly §1.1; strict mode
+  records §7.3 failures in `LinkTree::errors`, the Machine controllers pane
+  shows them in red, `sync_machine_agents` skips the machine and publishes
+  one `machine_rejected` event with `reason.<n>` props.
+- **Static offsets are in the asset's Z-up frame**, composed from
+  `xformOpOrder` (translate, orient, rotateXYZ, rotateX/Y/Z, transform).
+  No REP-103 re-basing of the chassis is done: the assets author their
+  chassis forward as −Y and the offsets say so honestly.
+- **`/machines/<ns>/links`** answers `gearbox.link_record.v1` (offset and
+  indices in the header, name / parent / role / prim / joint / body /
+  `coupling = side|type|name` as props). **`/machines/<ns>/tf`** streams
+  `gearbox.link_pose.v1` world poses (sim frame, Y up) while `/cmd` with
+  `tf = on` was received; the toggle needs no session.
+- **Every valid machine gets an agent**, not only those with a `cmd_vel`
+  controller. A machine without one refuses `cmd_vel` with `UNSUPPORTED`
+  from the CLI's side (no controller) and publishes `/state` from its body
+  pose, so a trailer reports where it is.
+- **Attachments are `bin/gearbox/src/attach.rs`.** Requests arrive on the
+  master agent (`/tools/attach`, `/tools/detach`, que/ans `/tools`) and are
+  parked with their reply token until the sim's `serve_attachments` system
+  acts and answers. The joint is a rapier `GenericJoint` per §2.2 with
+  `contacts_enabled(false)`, so the two coupled bodies never collide; no
+  collision groups were needed. Teleport moves every slave body by the rigid
+  transform that puts the coupler frame on the hitch frame rotated 180°
+  about the up axis; without teleport the 0.25 m / 30° tolerance applies.
+- **Composite mass** is a `TowedMass` resource keyed by machine id, summed
+  over everything below a master and added to the chassis mass in the
+  raycast vehicle force law.
+- **Coupling frame convention as authored.** `tractor.usd` has
+  `chassis/rear_hitch` (drawbar, identity rotation, 1.9 m behind the origin);
+  `trailer.usd` has `chassis/drawbar_eye` (drawbar, rotated 180° about Z,
+  2.25 m ahead of its origin) and its own `rear_hitch` for tandem use. With
+  the 180° rule the trailer faces the same way as the tractor.
+- **Slave refusals** carry `attached_to` and a message; the Python client
+  raises rather than re-claiming when it sees them.
+- **Master `/cmd` with `tool = <slave>`** is re-queued onto the slave
+  agent's command list by `serve_attachments`; no controller consumes
+  `ControllerCommand`s yet, so this is plumbing for phase 5.
+- **Static attachments** (`GearboxAttachmentAPI`, `world/yard.usda`) are
+  collected when a machine-category USD is spawned and applied with
+  teleport once both machines have agents (up to 1200 frames). A
+  multi-machine asset spawned with `--ns yard` names its machines
+  `yard_<id>`; `spawn machine` waits for any `yard_*` namespace.
+- **Manifests** take `[[attach]]` tables (`master`, `slave`, optional
+  `hitch`, `coupler`, `teleport = true` by default) after the spawns, and
+  `scene reset` replays them.
+- **Fake host** attaches without physics (records the tool, refuses the
+  slave's commands, re-parents links) so the CLI tests cover
+  `machine tools attach / list / detach` and the slave's refusal.
+- **Not verified in a window:** the physical joint behaviour (trailer
+  following, stability at the tractor / trailer mass ratio). Phase 3's
+  acceptance run needs the simulator window; `scripts/tractor_trailer.py`
+  is the script for it.
+- **Phase 5 is not implemented:** master-to-slave inputs, requests and
+  grants, `builtin:hitch` / `pto` / `hydraulic_valve`, trailer controllers.

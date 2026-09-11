@@ -217,7 +217,7 @@ pub fn wait_for_machine(ctx: &Ctx, ns: &str, timeout: Duration) -> Result<String
     let deadline = Instant::now() + timeout;
     loop {
         for m in client.machines()? {
-            if m.namespace() == ns {
+            if m.namespace() == ns || m.namespace().starts_with(&format!("{ns}_")) {
                 return Ok(m.did());
             }
         }
@@ -235,6 +235,24 @@ pub fn wait_for_machine(ctx: &Ctx, ns: &str, timeout: Duration) -> Result<String
 struct Manifest {
     #[serde(default)]
     spawn: Vec<Entry>,
+    /// `[[attach]]` tables applied after every spawn: master, slave,
+    /// optional hitch and coupler names, teleport.
+    #[serde(default)]
+    attach: Vec<AttachEntry>,
+}
+
+#[derive(Deserialize, Debug)]
+struct AttachEntry {
+    master: String,
+    slave: String,
+    hitch: Option<String>,
+    coupler: Option<String>,
+    #[serde(default = "default_true")]
+    teleport: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize, Debug)]
@@ -314,6 +332,28 @@ pub fn apply_manifest(ctx: &Ctx, file: &str) -> Result<()> {
             println!("{:8} {id}", e.kind);
         }
         applied.push(json!({ "kind": e.kind, "id": id, "path": path }));
+    }
+    for a in &manifest.attach {
+        wait_for_machine(ctx, &a.slave, Duration::from_secs(30))?;
+        wait_for_machine(ctx, &a.master, Duration::from_secs(30))?;
+        let mut req = gearbox_api::AttachRequest::new(0, &a.slave);
+        if let Some(h) = &a.hitch {
+            req = req.with_hitch(h);
+        }
+        if let Some(c) = &a.coupler {
+            req = req.with_coupler(c);
+        }
+        if a.teleport {
+            req = req.teleporting();
+        }
+        check(
+            client.machine(&a.master).attach(&req)?,
+            &format!("attach {} to {}", a.slave, a.master),
+        )?;
+        if !ctx.json && !ctx.quiet {
+            println!("{:8} {} -> {}", "attach", a.slave, a.master);
+        }
+        applied.push(json!({ "kind": "attach", "master": a.master, "slave": a.slave }));
     }
     let abs = std::fs::canonicalize(file)
         .map(|p| p.to_string_lossy().into_owned())

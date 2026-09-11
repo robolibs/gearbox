@@ -279,11 +279,25 @@ body translation in the Y-up world frame. `heading_rad` is
 `atan2(forward.x, forward.z)`: 0 faces +Z, +π/2 faces +X. `roll_rad` and
 `pitch_rad` follow REP-103.
 
-## 7. Link tree (PROPOSED)
+## 7. Link tree
 
 Every machine MUST declare its own link tree: which prims are links, which
 link is the root, and how they connect. Anything outside the machine's root
 link is not part of the machine and is not described here.
+
+The runtime answers the tree on `/machines/<ns>/links` (que/ans,
+`gearbox.link_record.v1` per link, `base_link` first) and streams world link
+poses on `/machines/<ns>/tf` (`gearbox.link_pose.v1`) while a client has
+switched them on with `/cmd` `tf = on`. `gearbox machine links` and
+`gearbox machine tf` show both.
+
+**Transition rule.** An asset that authors no `GearboxLinkAPI` at all is
+loaded with a *derived* tree: every rigid body is a link named after its
+prim, `physics:body1` is the child of `physics:body0`, the machine body is
+`base_link`. The runtime warns on every load and `MachineInfo` reports
+`links_derived = true`. The moment one prim carries `GearboxLinkAPI`, §7.3
+applies in full and a failing machine gets no agent (a `machine_rejected`
+scene event carries the reasons).
 
 ### 7.1 Marking links
 

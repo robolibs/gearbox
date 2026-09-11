@@ -967,4 +967,34 @@ def Xform "robot" (
             2
         );
     }
+
+    #[test]
+    fn yard_composes_two_machines_and_a_static_attachment() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/world/yard.usda");
+        let machines = discover_machines_from_usd(&path).expect("yard.usda should scan");
+        let kinds: Vec<&str> = machines.iter().filter_map(|m| m.kind.as_deref()).collect();
+        assert!(
+            kinds.contains(&"tractor") && kinds.contains(&"trailer"),
+            "{kinds:?}"
+        );
+        for m in &machines {
+            assert!(m.links.is_valid(), "{}: {:?}", m.prim_path, m.links.errors);
+        }
+        let pairs = crate::controller::discover_static_attachments_from_usd(&path);
+        assert_eq!(
+            pairs,
+            vec![(
+                "/World/Tractor_01/chassis/rear_hitch".to_string(),
+                "/World/Trailer_01/chassis/drawbar_eye".to_string()
+            )]
+        );
+        let tractor = machines
+            .iter()
+            .find(|m| m.kind.as_deref() == Some("tractor"))
+            .unwrap();
+        assert!(
+            tractor.links.by_prim(&pairs[0].0).is_some(),
+            "hitch prim is a link"
+        );
+    }
 }

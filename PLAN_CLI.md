@@ -499,8 +499,9 @@ plan above, the code wins and the difference is recorded here.
   which `scene reset` replays. Config is `$XDG_CONFIG_HOME/gearbox/config.toml`.
 - **`spawn usd` defaults to `static`**; discovery-based category defaults
   would need the CLI to parse USD, so `spawn machine` is the explicit form.
-- **`machine links` and `machine tools` exit 5** until the link tree and
-  attachments exist.
+- **`machine links`, `machine tf` and `machine tools` are implemented** by
+  `PLAN_TOOLS.md`; only `machine tools` for service controllers (phase 5) is
+  still to come.
 - **`make run`** builds both binaries and launches the sim through the CLI;
   `make sim` runs `gearbox-sim` directly; `make cli RUN_ARGS='…'` runs the CLI.
 - **Tests** run the built `gearbox` binary against an in-process fake host

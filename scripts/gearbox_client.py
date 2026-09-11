@@ -658,6 +658,11 @@ class Machine:
         # Our session lapsed (agent restarted, or we were silent too long):
         # claim again and resend. Someone else holding the machine raises.
         if status.code in (CODE_REFUSED, CODE_BUSY):
+            master = status.props.get("attached_to")
+            if master:
+                raise RuntimeError(
+                    f"machine `{self.namespace}` is attached to `{master}`; command it through its master"
+                )
             self.claim(hold_ms=self._hold_ms, client=self._client)
             req = TwistCmd(session=self.session, vx=forward_mps, wz=yaw_rps)
             status = self.gb.call(self.addr, self._topic("cmd_vel"), req, Status)

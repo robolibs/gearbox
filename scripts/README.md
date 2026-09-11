@@ -18,6 +18,8 @@ agent for scene work, and to each machine's own agent for control:
 | machine list with each machine's did and address | `/gearbox/machines/list` (host agent) |
 | claim, cmd_vel, release, session, info | `/machines/<ns>/...` (that machine's agent) |
 | state, odom | `/machines/<ns>/state`, `/machines/<ns>/odom` (that machine's agent) |
+| link tree, link poses | `/machines/<ns>/links`, `/machines/<ns>/tf` (`Machine.links()`, `Machine.tf()`) |
+| attach, detach, attachments | `/machines/<master>/tools/*` (`Machine.attach()`, `.detach()`, `.tools()`) |
 
 A machine is driven by whoever holds its session: `claim()` first, then
 `cmd_vel(v, w)` at your own rate. Silence longer than the claim's hold time

@@ -142,17 +142,24 @@ def Scope "Attachments"
 The runtime creates the §2.1 joint at load, before physics activates, after
 moving the slave so its coupler frame meets the hitch frame.
 
-### 3.2 Runtime, over zenoh
+### 3.2 Runtime, over the machine agent
 
-| Topic | Direction | Payload |
+The master's agent hosts the attachment topics (`PLAN_COM.md` §10 for the
+bus; `PLAN_TOOLS.md` for the implementation):
+
+| Topic | Mode | Request → Response |
 |---|---|---|
-| `gearbox/machines/<master_ns>/attach` | client → sim | `{ "slave": "<slave_ns>", "hitch": "rear_drawbar", "coupler": "eye", "teleport": false, "session_id": "..." }` |
-| `gearbox/machines/<master_ns>/detach` | client → sim | `{ "slave": "<slave_ns>", "session_id": "..." }` |
-| `gearbox/machines/<master_ns>/attachments` | sim → client | `{ "attached": [ { "slave": "trailer_1", "hitch": "rear_drawbar", "coupler": "eye", "type": "drawbar", "controlled": true } ] }` |
+| `/machines/<master_ns>/tools/attach` | req/res | `gearbox.attach_request.v1` (`session`, `teleport`, props `slave`, `hitch`, `coupler`) → `gearbox.status.v1` |
+| `/machines/<master_ns>/tools/detach` | req/res | `gearbox.detach_request.v1` (`session`, props `slave`) → `gearbox.status.v1` |
+| `/machines/<master_ns>/tools` | que/ans | `gearbox.ping.v1` → `gearbox.attachment.v1` × N, depth-first (`controlled`, `depth`, props `master`, `slave`, `hitch`, `coupler`, `type`) |
+
+`hitch` and `coupler` MAY be omitted when exactly one free pair of matching
+type exists. Every change is also a `attached` / `detached` scene event on
+`/gearbox/scene/events`.
 
 Rules, taken from Gazebo's `DetachableJoint` and Isaac's assembler:
 
-- The request MUST carry the master's session id.
+- The request MUST carry the master's session id (0 while nobody holds it).
 - `hitch` and `coupler` MUST have the same `type` and be free.
 - With `teleport = false` the coupler frame MUST lie within 0.25 m and 30° of
   the hitch frame or the request is refused. With `teleport = true` the slave
@@ -163,8 +170,8 @@ Rules, taken from Gazebo's `DetachableJoint` and Isaac's assembler:
 - A machine cannot attach to itself, and a coupler attaches to one hitch.
 - Detach removes the joint, restores collisions, and leaves the slave where
   it is with zero velocity commanded.
-- `attachments` is published on every change and answered as a zenoh
-  queryable at the same key for late joiners.
+- `/tools` answers late joiners; every change is also an `attached` or
+  `detached` scene event.
 
 ### 3.3 Tolerances and safety
 
@@ -206,14 +213,14 @@ tractor_1/base_link
 
 A composite has one command session, the master's. While attached:
 
-- the slave's own `gearbox/machines/<slave_ns>/cmd_vel` and `session` topics
-  are closed. A command there is dropped and logged once.
-- every slave controller is exposed under the master:
-  `gearbox/machines/<master_ns>/tools/<slave_ns>/<controller>/cmd` and
-  `.../state`. Nested slaves nest the path:
-  `.../tools/trailer_1/tools/trailer_2/steer/cmd`.
-- the master's `state` payload gains a `tools` array with each slave's
-  machine id, coupling, and controller states.
+- the slave's own `/machines/<slave_ns>/claim` and `cmd_vel` answer
+  `REFUSED` with an `attached_to` prop naming the master. Its `/info`,
+  `/state`, `/links` and `/tf` keep working, since watchers still want them.
+- a slave controller is commanded through the master's `/cmd` with a `tool`
+  prop naming the slave (`tool = "trailer_1"`, nested `"trailer_1/trailer_2"`);
+  the sim routes the command to that slave's controller.
+- the master's `/state` props gain `tools = <slave>,<slave>…`, and its
+  `/links` answers the composite tree of §4.
 
 This is the ISOBUS shape: the implement is on the tractor's bus, and the task
 controller talks to it through that bus, not around it.

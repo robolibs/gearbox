@@ -97,8 +97,9 @@ Inspect and drive machines
 | `drive [OPTIONS] [NS]` | Drive from the keyboard: WASD or arrows, space stops, q quits |
 | `cmd [OPTIONS] <CONTROLLER> [KEY=VAL]...` | Generic controller command: KEY=VAL pairs, `value=` and `element=` are numeric |
 | `controllers [NS]` | Controller table with types and interfaces |
-| `links [NS]` | The link tree (not implemented by the sim yet) |
-| `tools [REST]...` | Attachments (reserved for TOOLS_SPEC) |
+| `links [OPTIONS] [NS]` | The link tree: names, roles, parents, static offsets |
+| `tf [OPTIONS] [NS]` | Stream link poses: switches the machine's tf on, prints, switches it off |
+| `tools <COMMAND>` | Attachments: what hangs on a machine, attach and detach slaves |
 
 ## `gearbox access`
 

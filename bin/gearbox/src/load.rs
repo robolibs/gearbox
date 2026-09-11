@@ -354,6 +354,7 @@ fn spawn_when_loaded(
     mut controller_inventory: ResMut<ControllerInventory>,
     usd_assets: Res<Assets<UsdAsset>>,
     mut bus: Option<ResMut<GearboxBus>>,
+    mut pending_static: ResMut<crate::attach::PendingStaticAttachments>,
 ) {
     for entry in inflight.0.iter_mut() {
         if entry.spawned {
@@ -396,6 +397,15 @@ fn spawn_when_loaded(
                 });
         }
         entry.spawned = true;
+        for (hitch, coupler) in crate::controller::discover_static_attachments_from_usd(&entry.path)
+        {
+            pending_static.0.push(crate::attach::StaticAttachment {
+                scene_root,
+                hitch_prim: hitch,
+                coupler_prim: coupler,
+                frames_waited: 0,
+            });
+        }
         info!(
             "Spawned {} at {:?} ({} projected entities)",
             entry.label,
@@ -673,10 +683,18 @@ fn apply_runtime_namespace(
     machines: &mut [crate::controller::MachineInstanceSpec],
     namespace: &str,
 ) {
+    // One machine takes the namespace as is; several in one asset (a yard
+    // with a tractor and a trailer) get `<namespace>_<id>` each.
+    let several = machines.len() > 1;
     for machine in machines {
-        machine.id = namespace.to_string();
+        let ns = if several {
+            format!("{namespace}_{}", machine.id)
+        } else {
+            namespace.to_string()
+        };
+        machine.id = ns.clone();
         for controller in &mut machine.controllers {
-            controller.namespace = namespace.to_string();
+            controller.namespace = ns.clone();
         }
     }
 }
