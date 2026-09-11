@@ -98,6 +98,19 @@ enum Cmd {
         #[arg(long)]
         flat: bool,
     },
+    /// Stream link poses: switches the machine's tf on, prints, switches it off
+    Tf {
+        ns: Option<String>,
+        /// Only this link
+        #[arg(long)]
+        link: Option<String>,
+        /// Prints per second
+        #[arg(long, default_value_t = 5.0)]
+        rate: f64,
+        /// Stop after this many poses
+        #[arg(short = 'n', long)]
+        count: Option<usize>,
+    },
     /// Attachments (reserved for TOOLS_SPEC)
     Tools {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -133,6 +146,12 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         } => command(ctx, ns, &controller, &pairs, take),
         Cmd::Controllers { ns } => controllers(ctx, ns),
         Cmd::Links { ns, flat } => links(ctx, ns, flat),
+        Cmd::Tf {
+            ns,
+            link,
+            rate,
+            count,
+        } => tf(ctx, ns, link, rate, count),
         Cmd::Tools { .. } => Err(CliError::unsupported(
             "attachments are not implemented yet (see specs/TOOLS_SPEC.md)",
         )),
@@ -783,4 +802,72 @@ fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
         },
     );
     Ok(())
+}
+
+fn tf(
+    ctx: &Ctx,
+    ns: Option<String>,
+    link: Option<String>,
+    rate: f64,
+    count: Option<usize>,
+) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&ns);
+    let mut sub = mc.tf()?;
+    check(mc.set_tf(true)?, "tf on")?;
+    let stop_flag = install_ctrlc();
+    let period = Duration::from_secs_f64(1.0 / rate.max(0.1));
+    let mut last_print: std::collections::HashMap<String, Instant> = Default::default();
+    let mut seen = 0usize;
+    let started = Instant::now();
+    let result = loop {
+        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            break Ok(());
+        }
+        let pose = match next_sample::<gearbox_api::LinkPose>(&mut sub, Duration::from_millis(200))
+        {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                if seen == 0 && started.elapsed() > ctx.timeout {
+                    break Err(CliError::timeout(format!(
+                        "no link poses from `{ns}` within {:.1}s; is the clock running?",
+                        ctx.timeout.as_secs_f64()
+                    )));
+                }
+                continue;
+            }
+            Err(err) => break Err(err.into()),
+        };
+        let name = pose.name();
+        if link.as_deref().is_some_and(|l| l != name) {
+            continue;
+        }
+        let due = last_print
+            .get(&name)
+            .map(|t| t.elapsed() >= period)
+            .unwrap_or(true);
+        if !due {
+            continue;
+        }
+        last_print.insert(name.clone(), Instant::now());
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::to_string(&wire_json::env_to_json(&pack(&pose)).unwrap_or(json!({})))
+                    .unwrap_or_default()
+            );
+        } else {
+            println!(
+                "{:<24} ({:+8.3}, {:+8.3}, {:+8.3})  q({:+.3}, {:+.3}, {:+.3}, {:+.3})  t={}ms",
+                name, pose.x, pose.y, pose.z, pose.qw, pose.qx, pose.qy, pose.qz, pose.stamp_ms
+            );
+        }
+        seen += 1;
+        if count.is_some_and(|n| seen >= n) {
+            break Ok(());
+        }
+    };
+    let _ = mc.set_tf(false);
+    result
 }

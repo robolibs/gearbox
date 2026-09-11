@@ -179,7 +179,10 @@ impl Plugin for ControllerDiscoveryPlugin {
                 )
                     .chain(),
             )
-            .add_systems(PostUpdate, publish_machine_controller_states);
+            .add_systems(
+                PostUpdate,
+                (publish_machine_controller_states, publish_link_poses),
+            );
     }
 }
 
@@ -3921,4 +3924,59 @@ fn link_descs(tree: &crate::links::LinkTree) -> Vec<gearbox_api::LinkDesc> {
             }
         })
         .collect()
+}
+
+/// World poses of every link, for machines whose agent has `tf` switched on.
+fn publish_link_poses(
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    bus: Option<ResMut<GearboxBus>>,
+    time: Res<Time>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    parents: Query<&ChildOf>,
+    transforms: Query<&GlobalTransform>,
+) {
+    let Some(mut bus) = bus else { return };
+    let stamp_ms = (time.elapsed_secs_f64() * 1000.0) as u32;
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let Some(ns) = keys
+            .0
+            .iter()
+            .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
+            .map(|(ns, _)| ns.clone())
+        else {
+            continue;
+        };
+        let Some(agent) = bus.machines.get_mut(&ns) else {
+            continue;
+        };
+        if !agent.tf_enabled() {
+            continue;
+        }
+        for (index, link) in machine.links.links.iter().enumerate() {
+            let Some(entity) = find_prim_entity(scene_root, &link.prim_path, &prims, &parents)
+            else {
+                continue;
+            };
+            let Ok(gt) = transforms.get(entity) else {
+                continue;
+            };
+            let (_, rot, tr) = gt.to_scale_rotation_translation();
+            agent.publish_link_pose(&gearbox_api::LinkPose {
+                x: tr.x as f64,
+                y: tr.y as f64,
+                z: tr.z as f64,
+                qw: rot.w as f64,
+                qx: rot.x as f64,
+                qy: rot.y as f64,
+                qz: rot.z as f64,
+                index: index as u32,
+                stamp_ms,
+                props: Props::from_pairs(&[("name", link.name.as_str())]).into_bytes(),
+            });
+        }
+    }
 }

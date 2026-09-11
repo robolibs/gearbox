@@ -352,6 +352,20 @@ class LinkRecord:
     props: bytes = b""
 
 
+@_pod("gearbox.link_pose.v1", "<" + "d" * 7 + "II", ("x", "y", "z", "qw", "qx", "qy", "qz", "index", "stamp_ms"), payload="props")
+class LinkPose:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    qw: float = 1.0
+    qx: float = 0.0
+    qy: float = 0.0
+    qz: float = 0.0
+    index: int = 0
+    stamp_ms: int = 0
+    props: bytes = b""
+
+
 CLEAR_SCOPE = {"all": 0, "machines": 1, "props": 2, "markers": 3}
 OBJECT_KIND = {"any": 0, "machine": 1, "prop": 2, "marker": 3, "terrain": 4}
 EVENT_KIND = {0: "loaded", 1: "pose", 2: "harvested", 3: "removed", 4: "machine_ready"}
@@ -630,6 +644,32 @@ class Machine:
 
     def stop(self) -> Status:
         return self.cmd_vel(0.0, 0.0)
+
+    def tf(self, on: bool = True) -> Status:
+        """Switch the machine's link pose stream on or off (no session needed)."""
+        req = ControllerCommand(props=pack_map({"tf": "on" if on else "off"}))
+        return self.gb.call(self.addr, self._topic("cmd"), req, Status)
+
+    def tf_next(self, timeout: float = 1.0) -> dict | None:
+        """Next link pose as a dict, or None when nothing arrived in time."""
+        if getattr(self, "_tf_sub", None) is None:
+            self._tf_sub = self.gb.subscribe(self.addr, self._topic("tf"))
+        deadline = time.time() + timeout
+        while True:
+            try:
+                p = self._tf_sub.take(LinkPose)
+            except RuntimeError as err:
+                if "lagged" in str(err):
+                    continue
+                raise
+            if p is not None:
+                d = unpack_map(p.props)
+                d.update({"index": p.index, "stamp_ms": p.stamp_ms, "x": p.x, "y": p.y, "z": p.z,
+                          "qw": p.qw, "qx": p.qx, "qy": p.qy, "qz": p.qz})
+                return d
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.002)
 
     def links(self) -> list[dict]:
         """The link tree, base_link first: name, parent, role, prim, offset."""

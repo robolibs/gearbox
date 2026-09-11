@@ -230,3 +230,31 @@ impl LinkRecord {
             .unwrap_or_else(|| "link".to_string())
     }
 }
+
+/// World pose of one link, streamed on `/machines/<ns>/tf` while a client
+/// has switched it on with `/cmd` `tf = on`. Sim world frame, Y up.
+#[datapod::datapod(name = "gearbox.link_pose.v1")]
+#[derive(Default)]
+pub struct LinkPose {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub qw: f64,
+    pub qx: f64,
+    pub qy: f64,
+    pub qz: f64,
+    pub index: u32,
+    pub stamp_ms: u32,
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl LinkPose {
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn name(&self) -> String {
+        self.props().get("name").unwrap_or_default()
+    }
+}

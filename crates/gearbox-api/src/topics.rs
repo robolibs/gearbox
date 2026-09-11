@@ -22,6 +22,7 @@ pub const MACHINE_CMD: &str = "cmd";
 pub const MACHINE_STATE: &str = "state";
 pub const MACHINE_ODOM: &str = "odom";
 pub const MACHINE_LINKS: &str = "links";
+pub const MACHINE_TF: &str = "tf";
 
 /// Topics hosted by a machine's own agent, unique per namespace so the
 /// host directory holds one owner per topic.

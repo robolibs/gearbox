@@ -246,6 +246,19 @@ impl MachineClient<'_> {
         self.client.subscribe(&self.topic(topics::MACHINE_ODOM))
     }
 
+    /// Link poses, once `set_tf(true)` has switched the stream on.
+    pub fn tf(&self) -> agentio::Result<Subscriber<Env>> {
+        self.client.subscribe(&self.topic(topics::MACHINE_TF))
+    }
+
+    pub fn set_tf(&self, on: bool) -> agentio::Result<Status> {
+        let cmd = ControllerCommand {
+            props: Props::from_pairs(&[("tf", if on { "on" } else { "off" })]).into_bytes(),
+            ..Default::default()
+        };
+        self.command(&cmd)
+    }
+
     /// The link tree, base_link first.
     pub fn links(&self) -> agentio::Result<Vec<LinkRecord>> {
         self.client

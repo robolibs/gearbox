@@ -179,6 +179,8 @@ pub struct MachineAgent {
     state_pub: Registered<Publisher<Env>>,
     odom_pub: Registered<Publisher<Env>>,
     links: Registered<AnsServer<Env, Env>>,
+    tf_pub: Registered<Publisher<Env>>,
+    tf_enabled: bool,
     session: Option<Session>,
     next_session: u64,
     twist: Twist,
@@ -219,6 +221,8 @@ impl MachineAgent {
             state_pub: agent.publish(&t(topics::MACHINE_STATE))?,
             odom_pub: agent.publish(&t(topics::MACHINE_ODOM))?,
             links: agent.que_server(&t(topics::MACHINE_LINKS))?,
+            tf_pub: agent.publish(&t(topics::MACHINE_TF))?,
+            tf_enabled: false,
             agent,
             config,
             session: None,
@@ -368,18 +372,27 @@ impl MachineAgent {
         });
 
         let mut commands = std::mem::take(&mut self.commands);
-        serve_req(&mut self.cmd, |req: ControllerCommand| match &session {
-            Some(held) if held.id == req.session => {
-                commands.push(req);
-                Status::ok()
+        let mut tf_enabled = self.tf_enabled;
+        serve_req(&mut self.cmd, |req: ControllerCommand| {
+            // Switching the tf stream is a read-only concern; no session needed.
+            if let Some(flag) = req.props().get("tf") {
+                tf_enabled = matches!(flag.as_str(), "on" | "1" | "true");
+                return Status::ok();
             }
-            None if req.session == 0 => {
-                commands.push(req);
-                Status::ok()
+            match &session {
+                Some(held) if held.id == req.session => {
+                    commands.push(req);
+                    Status::ok()
+                }
+                None if req.session == 0 => {
+                    commands.push(req);
+                    Status::ok()
+                }
+                _ => Status::err(code::REFUSED, "session id does not match holder"),
             }
-            _ => Status::err(code::REFUSED, "session id does not match holder"),
         });
         self.commands = commands;
+        self.tf_enabled = tf_enabled;
 
         if let Some(held) = &session {
             let idle = now.duration_since(held.last_cmd);
@@ -413,6 +426,14 @@ impl MachineAgent {
 
         self.session = session;
         self.twist = twist;
+    }
+
+    pub fn tf_enabled(&self) -> bool {
+        self.tf_enabled
+    }
+
+    pub fn publish_link_pose(&mut self, pose: &LinkPose) {
+        let _ = self.tf_pub.send(&pack(pose));
     }
 
     pub fn publish_state(&mut self, mut state: MachineState) {
