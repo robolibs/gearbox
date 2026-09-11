@@ -2,16 +2,14 @@
 """Load flatland + Oxbo, then drive it from a Linux joystick event device.
 
 Run Gearbox first:
-
     make run
 
 Then run:
-
     python scripts/oxbo_joystick.py
 
-By default this reads ``/dev/input/warpout0`` and publishes to the USD machine
-controller namespace ``oxbo``. It talks directly to the Linux ``input_event``
-API, so it does not need pygame/evdev.
+By default this reads ``/dev/input/warpout0`` and drives the machine under
+namespace ``oxbo``. It talks directly to the Linux ``input_event`` API, so it
+does not need pygame/evdev.
 """
 
 from __future__ import annotations
@@ -21,12 +19,14 @@ import fcntl
 import os
 import selectors
 import struct
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
-import cbor2
-import zenoh
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from gearbox_client import Gearbox  # noqa: E402
 
 DEFAULT_DEVICE = "/dev/input/warpout0"
 FLATLAND_USD_PATH = "world/flatland.usd"
@@ -34,7 +34,6 @@ OXBO_USD_PATH = "bin/gearbox/assets/oxbo.usd"
 
 EV_KEY = 0x01
 EV_ABS = 0x03
-
 ABS_X = 0x00
 ABS_Y = 0x01
 ABS_Z = 0x02
@@ -43,7 +42,6 @@ ABS_RY = 0x04
 ABS_RZ = 0x05
 ABS_HAT0X = 0x10
 ABS_HAT0Y = 0x11
-
 AXIS_CODES = {
     "ABS_X": ABS_X,
     "ABS_Y": ABS_Y,
@@ -54,8 +52,6 @@ AXIS_CODES = {
     "ABS_HAT0X": ABS_HAT0X,
     "ABS_HAT0Y": ABS_HAT0Y,
 }
-
-# struct input_event { timeval sec/usec; unsigned short type/code; int value; }
 INPUT_EVENT = struct.Struct("llHHi")
 ABS_INFO = struct.Struct("iiiiii")
 
@@ -71,84 +67,7 @@ def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def open_session() -> zenoh.Session:
-    opened = zenoh.open(zenoh.Config())
-    return opened.wait() if hasattr(opened, "wait") else opened
-
-
-def put_cbor(session: zenoh.Session, key: str, payload: dict) -> None:
-    session.put(
-        key,
-        cbor2.dumps(payload),
-        congestion_control=zenoh.CongestionControl.BLOCK,
-    )
-
-
-def claim_machine_session(session: zenoh.Session, namespace: str, session_id: str) -> None:
-    put_cbor(
-        session,
-        f"gearbox/machines/{namespace}/session",
-        {"session_id": session_id},
-    )
-
-
-def clear_sim(session: zenoh.Session) -> None:
-    put_cbor(session, "gearbox/sim/clear", {"pause_clock": False})
-
-
-def load_flatland(session: zenoh.Session) -> None:
-    put_cbor(
-        session,
-        "gearbox/usd/load/flatland_terrain",
-        {
-            "category": "terrain",
-            "usd_path": FLATLAND_USD_PATH,
-            "x": 0.0,
-            "y": 0.0,
-            "z": 0.0,
-            "remove": False,
-        },
-    )
-
-
-def load_oxbo(session: zenoh.Session, namespace: str) -> None:
-    put_cbor(
-        session,
-        f"gearbox/usd/load/{namespace}",
-        {
-            "category": "machine",
-            "usd_path": OXBO_USD_PATH,
-            "namespace": namespace,
-            "label": "oxbo.usd",
-            "x": 0.0,
-            "y": 0.0,
-            "z": 0.0,
-            "yaw_deg": 0.0,
-            "remove": False,
-        },
-    )
-
-
-def publish_cmd(
-    session: zenoh.Session,
-    namespace: str,
-    session_id: str,
-    speed: float,
-    yaw_rate: float,
-) -> None:
-    put_cbor(
-        session,
-        f"gearbox/machines/{namespace}/cmd_vel",
-        {
-            "linear": [float(speed), 0.0, 0.0],
-            "angular": [0.0, 0.0, float(yaw_rate)],
-            "session_id": session_id,
-        },
-    )
-
-
 def eviocgabs(axis_code: int) -> int:
-    # #define EVIOCGABS(abs) _IOR('E', 0x40 + (abs), struct input_absinfo)
     return 0x80184540 + axis_code
 
 
@@ -179,7 +98,6 @@ def normalize_axis(value: int, info: AbsInfo | None, deadzone: float) -> float:
     else:
         normalized = float(value) / 32767.0
         flat = deadzone
-
     normalized = clamp(normalized, -1.0, 1.0)
     if abs(normalized) < flat:
         return 0.0
@@ -227,39 +145,31 @@ def main() -> None:
 
     steer_axis = parse_axis(args.steer_axis)
     throttle_axis = parse_axis(args.throttle_axis)
-    session_id = f"oxbo_joystick_{args.namespace}_{int(time.time() * 1000)}"
-
-    session = open_session()
+    gb = Gearbox()
+    gb.wait_ready()
     fd = os.open(args.device, os.O_RDONLY | os.O_NONBLOCK)
     selector = selectors.DefaultSelector()
     selector.register(fd, selectors.EVENT_READ)
-
     abs_infos = {
         axis: read_abs_info(fd, axis)
         for axis in {steer_axis, throttle_axis, ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_Z, ABS_RZ}
     }
     axes: dict[int, float] = {}
     buttons: dict[int, int] = {}
-
+    machine = None
     try:
-        print(f"claiming machine session `{session_id}` for namespace `{args.namespace}`")
-        claim_machine_session(session, args.namespace, session_id)
         if not args.no_clear:
-            clear_sim(session)
+            gb.clear()
             time.sleep(0.3)
         if not args.no_flatland:
-            load_flatland(session)
+            gb.load("flatland_terrain", FLATLAND_USD_PATH, category="terrain")
         print(f"loading {OXBO_USD_PATH}")
-        load_oxbo(session, args.namespace)
-        time.sleep(0.5)
-        claim_machine_session(session, args.namespace, session_id)
-
+        gb.load_machine(args.namespace, OXBO_USD_PATH, label="oxbo.usd")
+        machine = gb.machine(args.namespace, timeout=90.0)
+        machine.claim(hold_ms=1000, take=True, client="oxbo_joystick.py")
+        print(f"claimed machine `{args.namespace}` ({machine.did})")
         print(f"reading joystick events from {args.device}")
-        print(
-            "controls: "
-            f"{args.throttle_axis}=speed, {args.steer_axis}=turn, Ctrl-C to stop"
-        )
-
+        print(f"controls: {args.throttle_axis}=speed, {args.steer_axis}=turn, Ctrl-C to stop")
         next_publish = 0.0
         last_print = 0.0
         while True:
@@ -270,23 +180,19 @@ def main() -> None:
                     axes[code] = normalize_axis(value, abs_infos.get(code), args.deadzone)
                 elif event_type == EV_KEY:
                     buttons[code] = value
-
             now = time.monotonic()
             if now < next_publish:
                 continue
             next_publish = now + 0.05
-
             steer = axes.get(steer_axis, 0.0)
             throttle = axes.get(throttle_axis, 0.0)
             if args.invert_steer:
                 steer = -steer
             if args.invert_throttle:
                 throttle = -throttle
-
             speed = clamp(throttle * args.max_speed, -args.max_speed, args.max_speed)
             yaw_rate = clamp(steer * args.max_yaw, -args.max_yaw, args.max_yaw)
-            publish_cmd(session, args.namespace, session_id, speed, yaw_rate)
-
+            machine.cmd_vel(speed, yaw_rate)
             if now - last_print > 0.5:
                 last_print = now
                 print(
@@ -298,10 +204,11 @@ def main() -> None:
     except KeyboardInterrupt:
         print()
     finally:
-        publish_cmd(session, args.namespace, session_id, 0.0, 0.0)
+        if machine is not None:
+            machine.stop()
+            machine.release()
         selector.close()
         os.close(fd)
-        session.close()
         print("stopped Oxbo joystick control")
 
 

@@ -1,34 +1,59 @@
-# gearbox USD control scripts
+# gearbox control scripts
 
-Python helpers for the USD-only simulator path.
+Python helpers for driving a running Gearbox over agentio/peerbus.
 
-The command surface is:
+Every script goes through `gearbox_client.py`, which finds the running host
+in the registry (`$XDG_RUNTIME_DIR/gearbox/<name>.json`), talks to the host
+agent for scene work, and to each machine's own agent for control:
 
-- load USDs: `gearbox/usd/load/<id>`
-- machine state: `gearbox/machines/<namespace>/state`
-- machine commands: `gearbox/machines/<namespace>/cmd_vel`
-- command ownership: `gearbox/machines/<namespace>/session`
+| what | topic (hosted by) |
+|------|-------------------|
+| host info, clock, clear, scene list, events | `/gearbox/...` (host agent) |
+| load / delete USDs, markers | `/gearbox/usd/*`, `/gearbox/marker/*` (host agent) |
+| machine list with each machine's did and address | `/gearbox/machines/list` (host agent) |
+| claim, cmd_vel, release, session, info | `/machines/<ns>/...` (that machine's agent) |
+| state, odom | `/machines/<ns>/state`, `/machines/<ns>/odom` (that machine's agent) |
+
+A machine is driven by whoever holds its session: `claim()` first, then
+`cmd_vel(v, w)` at your own rate. Silence longer than the claim's hold time
+zeroes the command; a minute of silence releases the machine, and a client
+whose session lapsed claims again on its next `cmd_vel`.
 
 ## Setup
 
-Use the repo dev shell:
+Use the repo dev shell, which puts `.python-packages` on `PYTHONPATH`:
 
 ```bash
 nix develop --impure
+```
+
+The `peerbus` and `datapod` wheels are built from the sibling checkouts:
+
+```bash
+(cd ../datapod && maturin build --release --features python -o ../gearbox/target/wheels)
+(cd ../peerbus && maturin build --release --features python -o ../gearbox/target/wheels)
+pip install --no-deps --target .python-packages --upgrade target/wheels/*.whl
 ```
 
 ## Scripts
 
 | script | what it does |
 |--------|-------------|
+| `gearbox_client.py` | The client library: `Gearbox()`, `gb.load(...)`, `gb.machine(ns)`, `m.claim()`, `m.cmd_vel()`, `m.state()`. |
 | `oxbo_flatland.py` | Load flatland + one Oxbo USD machine. |
-| `oxbo_follow_points.py` | Load flatland + Oxbo, then drive it around waypoint points with the USD controller. |
-| `oxbo_joystick.py` | Load flatland + Oxbo, claim the `oxbo` session, then drive it from `/dev/input/warpout0`. |
-| `bale_run.py` | Load USD terrain + USD tractor + USD bales, then collect bales with the USD controller. |
-| `bale_run_multi.py` | Same as `bale_run.py`, but with multiple USD tractor instances. |
-| `stop.py <namespace>` | Claim a USD machine session and send zero `cmd_vel`. Default namespace: `oxbo`. |
+| `oxbo_follow_points.py` | Load the pea field + Oxbo, then drive it around waypoint points. |
+| `oxbo_follow_points_multi.py` | One Oxbo per `--route "x z x z ..."` (default two), each following its own route. |
+| `oxbo_maptrax_field.py` | Plan a GPS field with maptrax, draw the lines in Gearbox and rerun, drive one Oxbo per machine. |
+| `oxbo_joystick.py` | Load flatland + Oxbo, claim it, drive it from `/dev/input/warpout0`. |
+| `hunter_spawn.py` / `hunter_drive.py` / `barn_spawn.py` | Spawn AgileX machines on flatland or in the de Marke barn, drive them in circles. |
+| `bale_run.py` | Load USD terrain + one USD tractor + USD bales, collect the bales. |
+| `bale_run_multi.py` | Same with several tractors, each under its own namespace and agent. |
+| `stop.py <namespace>` | Take over a machine and send zero `cmd_vel`. Default namespace: `oxbo`. |
 
-The old preset/device scripts using `<robot_name>_<id>/cmd_vel`,
-`gearbox/sim/spawn`, `odom`, and `fix` have been removed. New examples should
-load USD assets and command the controller namespace authored/discovered from
-the USD machine.
+Without a GPU, the same scripts run against the fake host, which spawns a
+kinematic machine per machine load and reports bale poses and harvests:
+
+```bash
+cargo run -p gearbox-api --no-default-features --example fake_host -- fake
+python scripts/bale_run_multi.py 2 10 60
+```

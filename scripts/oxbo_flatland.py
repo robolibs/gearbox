@@ -1,94 +1,43 @@
 #!/usr/bin/env python3
-"""Load a flat textured terrain scene and one Oxbo pea harvester USD.
+"""Load the flat textured terrain and one Oxbo pea harvester.
 
 Run Gearbox first:
-
     make run
 
-Then in another shell:
-
+Then:
     python scripts/oxbo_flatland.py
 
-This is intentionally not a bale-collection demo: no tractors, no bales, no
-driving loop. It only asks the running Gearbox app to load:
-
-* ``world/flatland.usd`` as a terrain/world layer
-* ``bin/gearbox/assets/oxbo.usd`` as one USD machine named ``oxbo``
+Nothing drives the machine; use `oxbo_follow_points.py` or `oxbo_joystick.py`.
 """
 
 from __future__ import annotations
 
 import time
+from pathlib import Path
+import sys
 
-import cbor2
-import zenoh
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from gearbox_client import Gearbox  # noqa: E402
 
 FLATLAND_USD_PATH = "world/flatland.usd"
 OXBO_USD_PATH = "bin/gearbox/assets/oxbo.usd"
 
 
-def put_cbor(session: zenoh.Session, key: str, payload: dict) -> None:
-    session.put(
-        key,
-        cbor2.dumps(payload),
-        congestion_control=zenoh.CongestionControl.BLOCK,
-    )
-
-
-def clear_sim(session: zenoh.Session) -> None:
-    put_cbor(session, "gearbox/sim/clear", {"pause_clock": False})
-
-
-def load_flatland(session: zenoh.Session) -> None:
-    # Use an id containing "terrain" so Gearbox's terrain systems recognize
-    # this as the active terrain scene root.
-    put_cbor(
-        session,
-        "gearbox/usd/load/flatland_terrain",
-        {
-            "category": "terrain",
-            "usd_path": FLATLAND_USD_PATH,
-            "x": 0.0,
-            "y": 0.0,
-            "z": 0.0,
-            "remove": False,
-        },
-    )
-
-
-def load_oxbo(session: zenoh.Session) -> None:
-    put_cbor(
-        session,
-        "gearbox/usd/load/oxbo",
-        {
-            "category": "machine",
-            "usd_path": OXBO_USD_PATH,
-            "namespace": "oxbo",
-            "label": "oxbo.usd",
-            # Keep it at the exact flatland origin. The terrain height helper
-            # is also zero at origin, so this avoids hilly-demo assumptions.
-            "x": 0.0,
-            "y": 0.0,
-            "z": 0.0,
-            "yaw_deg": 0.0,
-            "remove": False,
-        },
-    )
-
-
 def main() -> None:
-    opened = zenoh.open(zenoh.Config())
-    session = opened.wait() if hasattr(opened, "wait") else opened
-    # Let subscriptions in the running app settle before publishing the loads.
-    time.sleep(0.2)
-    clear_sim(session)
+    gb = Gearbox()
+    gb.wait_ready()
+    gb.clear()
     time.sleep(0.3)
-    load_flatland(session)
+    # The id has to contain "terrain" for Gearbox's terrain systems to adopt
+    # this scene root as the ground.
+    gb.load("flatland_terrain", FLATLAND_USD_PATH, category="terrain")
     time.sleep(0.5)
-    load_oxbo(session)
+    gb.load_machine("oxbo", OXBO_USD_PATH, label="oxbo.usd")
     print(f"requested flatland terrain: {FLATLAND_USD_PATH}")
     print(f"requested Oxbo pea harvester: {OXBO_USD_PATH}")
+    machine = gb.machine("oxbo", timeout=90.0)
+    print(f"oxbo is up as {machine.did}")
 
 
 if __name__ == "__main__":
