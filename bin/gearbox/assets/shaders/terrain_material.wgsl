@@ -24,6 +24,9 @@ var terrain_detail_albedo_sampler: sampler;
 var terrain_detail_height: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107)
 var terrain_detail_height_sampler: sampler;
+// rgb multiplies the field colour, a scales the cut-hay rows.
+@group(#{MATERIAL_BIND_GROUP}) @binding(108)
+var<uniform> terrain_tint: vec4<f32>;
 
 fn saturate(v: f32) -> f32 {
     return clamp(v, 0.0, 1.0);
@@ -188,7 +191,7 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
     let hay = cut_hay_mask(world_xz);
     let hay_luma = 0.85 + straw_n * 0.15;
     let hay_color = vec4<f32>(0.92 * hay_luma, 0.78 * hay_luma, 0.42 * hay_luma, 1.0);
-    c = mix(c, hay_color, hay * 0.62);
+    c = mix(c, hay_color, hay * 0.62 * terrain_tint.a);
 
     let hard_noise = fbm(world_xz * vec2<f32>(0.026, 0.021) + vec2<f32>(-137.0, 53.0));
     let hard_mask = saturate(
@@ -231,7 +234,7 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
         clamp(c.rgb * vec3<f32>(micro_shade * 1.03, micro_shade, micro_shade * 0.92), vec3<f32>(0.0), vec3<f32>(1.0)),
         c.a
     );
-    return vec4<f32>(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    return vec4<f32>(clamp(c.rgb * terrain_tint.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 
 @fragment

@@ -67,16 +67,16 @@ def Xform "FlatTerrain"
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0, 2, 3, 1]
         point3f[] points = [
-            (-400, 400, 0),
-            (400, 400, 0),
-            (-400, -400, 0),
-            (400, -400, 0)
+            (-2000, 2000, 0),
+            (2000, 2000, 0),
+            (-2000, -2000, 0),
+            (2000, -2000, 0)
         ]
         texCoord2f[] primvars:st = [
             (0, 0),
-            (100, 0),
-            (0, 100),
-            (100, 100)
+            (500, 0),
+            (0, 500),
+            (500, 500)
         ]
         uniform token primvars:st:interpolation = "vertex"
     }

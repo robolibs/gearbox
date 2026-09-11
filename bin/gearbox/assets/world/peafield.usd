@@ -1,0 +1,76 @@
+#usda 1.0
+(
+    defaultPrim = "PeaFieldTerrain"
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+
+# Flat pea field: the flatland plate with a green crop tint. The constant
+# diffuseColor below is picked up by Gearbox's terrain material as the
+# field tint; a textured diffuseColor would leave the soil colour untouched.
+
+def Xform "PeaFieldTerrain"
+{
+    def Scope "Materials"
+    {
+        def Material "pea_field"
+        {
+            color3f inputs:diffuseColor = (0.30, 0.52, 0.20)
+            float inputs:roughness.connect = </PeaFieldTerrain/Materials/pea_field/RoughnessTex.outputs:r>
+            float inputs:metallic = 0
+            token outputs:surface.connect = </PeaFieldTerrain/Materials/pea_field/Surface.outputs:surface>
+
+            def Shader "PrimvarSt"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "RoughnessTex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../textures/terrain/Ground001/Ground001_1K-JPG_Roughness.jpg@
+                token inputs:sourceColorSpace = "raw"
+                token inputs:wrapS = "repeat"
+                token inputs:wrapT = "repeat"
+                float2 inputs:st.connect = </PeaFieldTerrain/Materials/pea_field/PrimvarSt.outputs:result>
+                float outputs:r
+            }
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </PeaFieldTerrain/Materials/pea_field.inputs:diffuseColor>
+                float inputs:roughness.connect = </PeaFieldTerrain/Materials/pea_field.inputs:roughness>
+                float inputs:metallic.connect = </PeaFieldTerrain/Materials/pea_field.inputs:metallic>
+                token outputs:surface
+            }
+        }
+    }
+
+    def Mesh "terrain" (
+        prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI", "MaterialBindingAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        uniform token physics:approximation = "none"
+        bool doubleSided = 1
+        rel material:binding = </PeaFieldTerrain/Materials/pea_field>
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 2, 3, 1]
+        point3f[] points = [
+            (-2000, 2000, 0),
+            (2000, 2000, 0),
+            (-2000, -2000, 0),
+            (2000, -2000, 0)
+        ]
+        texCoord2f[] primvars:st = [
+            (0, 0),
+            (500, 0),
+            (0, 500),
+            (500, 500)
+        ]
+        uniform token primvars:st:interpolation = "vertex"
+    }
+}
