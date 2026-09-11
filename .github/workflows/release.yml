@@ -74,19 +74,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          binary="target/${{ matrix.target }}/release/gearbox"
           package_dir="dist/package"
 
           mkdir -p "${package_dir}"
-          cp "${binary}" "${package_dir}/gearbox"
-          chmod +x "${package_dir}/gearbox"
-          strip "${package_dir}/gearbox" || true
+          for bin in gearbox gearbox-sim; do
+            cp "target/${{ matrix.target }}/release/${bin}" "${package_dir}/${bin}"
+            chmod +x "${package_dir}/${bin}"
+            strip "${package_dir}/${bin}" || true
+          done
 
           cat > "${package_dir}/README.txt" <<'EOF'
-          gearbox release binary
+          gearbox release binaries
+
+          gearbox      the CLI; `gearbox run` launches the simulator next to it
+          gearbox-sim  the simulator window
 
           Run:
-            ./gearbox
+            ./gearbox run
           EOF
 
           tar -C "${package_dir}" -czf "dist/${{ matrix.asset }}" .

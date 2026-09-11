@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/gearbox-api",
+    "crates/gearbox-cli",
     "bin/gearbox",
 ]
 
@@ -75,8 +76,12 @@ peerbus = { git = "https://codeberg.org/robolibs/peerbus.git", rev = "f4b31c6155
 agentio = { path = "../agentio" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.6"
+toml = "1"
+libc = "0.2"
 
-gearbox-api     = { path = "crates/gearbox-api" }
+gearbox-api     = { path = "crates/gearbox-api", default-features = false }
 mara            = { git = "https://github.com/bresilla/mara", branch = "develop", package = "mara", default-features = false }
 bevy_mara       = { git = "https://github.com/bresilla/mara", branch = "develop", package = "bevy_mara", default-features = false }
 # Vendored from bevy_openusd because upstream still pins older Bevy

@@ -2,6 +2,11 @@
 
 Python helpers for driving a running Gearbox over agentio/peerbus.
 
+For one-off work from the shell use the `gearbox` CLI instead (`make
+build-bins`, then `target/debug/gearbox --help`; the command tree is in
+`CLI.md`). `gearbox run` launches `gearbox-sim`, and every script below works
+against an instance started that way.
+
 Every script goes through `gearbox_client.py`, which finds the running host
 in the registry (`$XDG_RUNTIME_DIR/gearbox/<name>.json`), talks to the host
 agent for scene work, and to each machine's own agent for control:

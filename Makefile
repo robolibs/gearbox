@@ -27,7 +27,7 @@ $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info Display: $(BACKEND) backend)
 $(info ------------------------------------------)
 
-.PHONY: build b build-release-bin compile c run r test t check fmt bench clean bind bind-c bind-py help h
+.PHONY: build b build-release-bin build-bins compile c run r sim cli test t check fmt bench clean bind bind-c bind-py help h
 
 build:
 	@$(CARGO_ENV) build --lib
@@ -35,7 +35,10 @@ build:
 b: build
 
 build-release-bin:
-	@$(CARGO_ENV) build --release $(LOCKED) -p gearbox --bin gearbox $(TARGET_ARG)
+	@$(CARGO_ENV) build --release $(LOCKED) -p gearbox-sim --bin gearbox-sim -p gearbox-cli --bin gearbox $(TARGET_ARG)
+
+build-bins:
+	@$(CARGO_ENV) build -p gearbox-sim --bin gearbox-sim -p gearbox-cli --bin gearbox
 
 compile:
 	@$(CARGO) clean
@@ -43,10 +46,16 @@ compile:
 
 c: compile
 
-run:
-	@WINIT_UNIX_BACKEND=$(BACKEND) $(NIX) $(RUN_WITH) $(CARGO) run -p gearbox --bin gearbox -- $(RUN_ARGS)
+run: build-bins
+	@WINIT_UNIX_BACKEND=$(BACKEND) $(NIX) $(RUN_WITH) target/debug/gearbox run --sim target/debug/gearbox-sim $(RUN_ARGS)
 
 r: run
+
+sim: build-bins
+	@WINIT_UNIX_BACKEND=$(BACKEND) $(NIX) $(RUN_WITH) target/debug/gearbox-sim $(RUN_ARGS)
+
+cli:
+	@$(CARGO_ENV) run -q -p gearbox-cli --bin gearbox -- $(RUN_ARGS)
 
 test:
 	@$(CARGO_ENV) test --all-targets
@@ -94,10 +103,13 @@ help:
 	@echo
 	@echo "Available targets:"
 	@echo "  build        Build the library"
+	@echo "  build-bins   Build the gearbox CLI and gearbox-sim (debug)"
 	@echo "  build-release-bin"
-	@echo "               Build the release gearbox binary"
+	@echo "               Build the release gearbox and gearbox-sim binaries"
 	@echo "  compile      Clean and rebuild"
-	@echo "  run          Run the gearbox binary ($(BACKEND) backend, $(RUN_WITH) wrapper)"
+	@echo "  run          Launch the simulator through the CLI ($(BACKEND) backend, $(RUN_WITH) wrapper)"
+	@echo "  sim          Launch gearbox-sim directly"
+	@echo "  cli          Run the gearbox CLI: make cli RUN_ARGS='instance list'"
 	@echo "  test         Run all tests"
 	@echo "  bind         Generate both C and Python bindings"
 	@echo "  check        Run cargo check on all targets"

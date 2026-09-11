@@ -37,6 +37,31 @@ pub mod clock_op {
     pub const PLAY: u32 = 2;
     pub const TOGGLE: u32 = 3;
     pub const SHUTDOWN: u32 = 4;
+    /// Run `steps` physics frames, then pause again.
+    pub const STEP: u32 = 5;
+
+    pub fn name(value: u32) -> &'static str {
+        match value {
+            PAUSE => "pause",
+            PLAY => "play",
+            TOGGLE => "toggle",
+            SHUTDOWN => "shutdown",
+            STEP => "step",
+            _ => "get",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<u32> {
+        match name {
+            "get" | "status" => Some(GET),
+            "pause" => Some(PAUSE),
+            "play" | "resume" => Some(PLAY),
+            "toggle" => Some(TOGGLE),
+            "shutdown" | "stop" => Some(SHUTDOWN),
+            "step" => Some(STEP),
+            _ => None,
+        }
+    }
 }
 
 pub mod clear_scope {
@@ -44,6 +69,25 @@ pub mod clear_scope {
     pub const MACHINES: u32 = 1;
     pub const PROPS: u32 = 2;
     pub const MARKERS: u32 = 3;
+
+    pub fn name(value: u32) -> &'static str {
+        match value {
+            MACHINES => "machines",
+            PROPS => "props",
+            MARKERS => "markers",
+            _ => "all",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<u32> {
+        match name {
+            "all" => Some(ALL),
+            "machines" => Some(MACHINES),
+            "props" | "usd" => Some(PROPS),
+            "markers" => Some(MARKERS),
+            _ => None,
+        }
+    }
 }
 
 pub mod object_kind {
@@ -60,6 +104,17 @@ pub mod object_kind {
             MARKER => "marker",
             TERRAIN => "terrain",
             _ => "any",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<u32> {
+        match name {
+            "any" | "all" => Some(ANY),
+            "machine" => Some(MACHINE),
+            "prop" | "object" | "usd" => Some(PROP),
+            "marker" => Some(MARKER),
+            "terrain" => Some(TERRAIN),
+            _ => None,
         }
     }
 }

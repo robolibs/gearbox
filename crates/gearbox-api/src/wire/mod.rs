@@ -3,6 +3,7 @@
 
 pub mod common;
 pub mod host;
+pub mod json;
 pub mod machine;
 
 pub use common::{Env, Ping, Props, Status, code, decode, pack, unpack};

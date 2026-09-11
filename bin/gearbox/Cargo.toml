@@ -1,15 +1,16 @@
 [package]
-name = "gearbox"
-description = "gearbox — clean-slate USD simulator. Multi-USD loading, click-to-select, planet world, Mara UI. No legacy editor / viz / api crates."
+name = "gearbox-sim"
+description = "gearbox-sim — the USD simulator window. Multi-USD loading, click-to-select, planet world, Mara UI; driven by the `gearbox` CLI."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "gearbox"
+name = "gearbox-sim"
 path = "src/main.rs"
 
 [lib]
+name = "gearbox"
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 

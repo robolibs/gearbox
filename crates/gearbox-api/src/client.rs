@@ -75,6 +75,39 @@ impl Client {
         resolve_retry(|| self.agent.subscribe::<Env>(topic))
     }
 
+    /// Untyped req/res: the caller builds and reads envelopes itself.
+    pub fn call_env(&self, topic: &str, req: &Env) -> agentio::Result<Env> {
+        let mut client: ReqClient<Env, Env> = resolve_retry(|| self.agent.req_client(topic))?;
+        let res = client.call(req)?;
+        Ok(Env::new(res.header().type_hash, res.payload().to_vec()))
+    }
+
+    /// Untyped que/ans: every answer as an envelope.
+    pub fn query_env(&self, topic: &str, que: &Env) -> agentio::Result<Vec<Env>> {
+        let mut client = resolve_retry(|| self.agent.que_client::<Env, Env>(topic))?;
+        let mut answers = client.send(que)?;
+        let mut out = Vec::new();
+        while let Some(ans) = answers.next()? {
+            out.push(Env::new(ans.header().type_hash, ans.payload().to_vec()));
+        }
+        Ok(out)
+    }
+
+    pub fn subscribe_env(&self, topic: &str) -> agentio::Result<Subscriber<Env>> {
+        self.subscribe(topic)
+    }
+
+    pub fn resolve_topic(&self, topic: &str) -> agentio::Result<agentio::TopicEntry> {
+        resolve_retry(|| self.agent.resolve_topic(topic))
+    }
+
+    pub fn path_diagnostics(
+        &self,
+        peer: EndpointId,
+    ) -> agentio::Result<Option<peerbus::PeerPathDiagnostics>> {
+        Ok(self.agent.node().peer_path_diagnostics(peer)?)
+    }
+
     pub fn info(&self) -> agentio::Result<HostInfo> {
         self.call(topics::HOST_INFO, &Ping::default())
     }
@@ -274,7 +307,7 @@ where
             Ok(Some(sample)) => {
                 return Ok(Some(
                     unpack::<T>(sample.header().type_hash, sample.payload()).map_err(wire_err)?,
-                ))
+                ));
             }
             Ok(None) => return Ok(None),
             // A slow reader skips the samples it missed and carries on.

@@ -85,8 +85,12 @@ impl TerrainHeightMesh {
         if vertices.is_empty() || triangles.is_empty() {
             return None;
         }
-        let (mut min_x, mut min_z, mut max_x, mut max_z) =
-            (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        let (mut min_x, mut min_z, mut max_x, mut max_z) = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
         for v in &vertices {
             min_x = min_x.min(v[0]);
             max_x = max_x.max(v[0]);

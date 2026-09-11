@@ -1,0 +1,22 @@
+[package]
+name = "gearbox-cli"
+description = "gearbox — command-line front door for the simulator: launch, spawn, drive, inspect."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gearbox"
+path = "src/main.rs"
+
+[dependencies]
+gearbox-api.workspace = true
+agentio.workspace = true
+peerbus.workspace = true
+datapod.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+toml.workspace = true
+libc.workspace = true

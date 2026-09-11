@@ -11,7 +11,11 @@ use gearbox_api::registry::{self, RegistryEntry};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let name = args.next().unwrap_or_else(|| "fake".to_string());
+    // `gearbox run --sim <this>` passes the name through the environment.
+    let name = args
+        .next()
+        .or_else(|| std::env::var("GEARBOX_NAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "fake".to_string());
     let machines: Vec<String> = args.collect();
     let machines: Vec<&str> = if machines.is_empty() {
         vec!["oxbo"]

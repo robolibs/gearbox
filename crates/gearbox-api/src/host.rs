@@ -49,6 +49,7 @@ impl HostConfig {
         cfg.ephemeral = env_flag("GEARBOX_EPHEMERAL");
         cfg.allow_any = env_flag("GEARBOX_ALLOW_ANY");
         cfg.relay = env_flag("GEARBOX_RELAY");
+        cfg.log = std::env::var("GEARBOX_LOG").ok().filter(|s| !s.is_empty());
         if let Ok(list) = std::env::var("GEARBOX_ALLOW") {
             cfg.allow.extend(
                 list.split(|c| c == ':' || c == ',')
