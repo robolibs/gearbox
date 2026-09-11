@@ -39,6 +39,8 @@ pub struct Attachment {
     pub joint: ImpulseJointHandle,
     pub slave_mass_kg: f64,
     pub controlled: bool,
+    /// Slave requests the master does not grant (`TOOLS_SPEC.md` §5.3).
+    pub denied: Vec<String>,
 }
 
 #[derive(Resource, Default)]
@@ -481,12 +483,28 @@ fn try_attach(
         .impulse_joints
         .insert(hitch_body, coupler_body, joint, true);
 
+    let mut denied: Vec<String> = slave
+        .controllers
+        .iter()
+        .flat_map(|c| c.requests.iter())
+        .filter(|r| !master.grants.contains(*r))
+        .cloned()
+        .collect();
+    denied.sort();
+    denied.dedup();
+    if !denied.is_empty() {
+        warn!(
+            "gearbox-attach: `{master_ns}` does not grant `{slave_ns}` these requests: {}",
+            denied.join(", ")
+        );
+    }
     let event = SceneEvent::new(event_kind::ATTACHED, &slave_ns)
         .with_prop("master", master_ns)
         .with_prop("slave", &slave_ns)
         .with_prop("hitch", &hitch.name)
         .with_prop("coupler", &coupler.name)
-        .with_prop("type", &hitch.kind);
+        .with_prop("type", &hitch.kind)
+        .with_prop("denied", &denied.join(","));
     Ok(Attached {
         attachment: Attachment {
             master_ns: master_ns.to_string(),
@@ -498,6 +516,7 @@ fn try_attach(
             joint: handle,
             slave_mass_kg,
             controlled: !slave.controllers.is_empty(),
+            denied,
         },
         event,
     })
@@ -532,6 +551,7 @@ fn composite(
                 kind: a.kind.clone(),
                 controlled: a.controlled,
                 depth,
+                denied: a.denied.join(","),
             });
             let slave_prefix = format!("{prefix}{}/", a.slave_ns);
             let hitch_parent = format!("{prefix}{}", a.hitch_link);
@@ -590,7 +610,7 @@ fn recompute_towed(attachments: &[Attachment], scene: &Scene, towed: &mut TowedM
     }
 }
 
-fn serve_attachments(
+pub(crate) fn serve_attachments(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
     bus: Option<ResMut<GearboxBus>>,
@@ -807,7 +827,17 @@ fn serve_attachments(
             let leaf = tool.rsplit('/').next().unwrap_or(&tool).to_string();
             let reachable = attachments.0.iter().any(|a| a.slave_ns == leaf);
             if let (true, Some(slave)) = (reachable, bus.machines.get_mut(&leaf)) {
-                slave.commands.push(cmd);
+                // The slave sees the command as its own; the route is spent.
+                let mut props = gearbox_api::Props::new();
+                for (k, v) in cmd.props().iter() {
+                    if k != "tool" {
+                        props.set(&k, &v);
+                    }
+                }
+                slave.commands.push(gearbox_api::ControllerCommand {
+                    props: props.into_bytes(),
+                    ..cmd
+                });
             } else {
                 warn!("gearbox-attach: `{ns}` has no attached tool `{tool}`; command dropped");
             }

@@ -562,6 +562,8 @@ pub struct ToolDesc {
     pub kind: String,
     pub controlled: bool,
     pub depth: u32,
+    /// Requests of the slave the master does not grant, comma-separated.
+    pub denied: String,
 }
 
 impl ToolDesc {
@@ -575,6 +577,7 @@ impl ToolDesc {
                 ("hitch", self.hitch.as_str()),
                 ("coupler", self.coupler.as_str()),
                 ("type", self.kind.as_str()),
+                ("denied", self.denied.as_str()),
             ])
             .into_bytes(),
         }

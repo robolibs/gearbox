@@ -938,7 +938,8 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
                         println!("nothing attached to `{ns}`");
                         return;
                     }
-                    let mut t = Table::new(&["SLAVE", "HITCH", "COUPLER", "TYPE", "CONTROLLED"]);
+                    let mut t =
+                        Table::new(&["SLAVE", "HITCH", "COUPLER", "TYPE", "CONTROLLED", "DENIED"]);
                     for r in &records {
                         let p = r.props();
                         t.row(vec![
@@ -947,6 +948,9 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
                             p.get("coupler").unwrap_or_default(),
                             p.get("type").unwrap_or_default(),
                             out::yes_no(r.controlled != 0).into(),
+                            p.get("denied")
+                                .filter(|d| !d.is_empty())
+                                .unwrap_or_else(|| "-".into()),
                         ]);
                     }
                     t.print();

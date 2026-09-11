@@ -484,5 +484,26 @@ the code wins and the difference is recorded here.
   following, stability at the tractor / trailer mass ratio). Phase 3's
   acceptance run needs the simulator window; `scripts/tractor_trailer.py`
   is the script for it.
-- **Phase 5 is not implemented:** master-to-slave inputs, requests and
-  grants, `builtin:hitch` / `pto` / `hydraulic_valve`, trailer controllers.
+- **Phase 5 is in `bin/gearbox/src/services.rs`.** The six service
+  controller types drive one rapier joint each through motors
+  (`set_motor_position` / `set_motor_velocity`), found at runtime by the
+  pair of bodies a USD joint connects, in the impulse set or the multibody
+  set. Commands arrive as `/cmd` props keyed by `controller = <instance>`
+  and are merged per controller in `ServiceCommands`, so a motor keeps its
+  last setting. `MasterInputs` gives every attached slave its master's
+  ground speed, heading, roll, pitch, hitch positions and PTO state each
+  step (`feed_master_inputs`). `gearbox:controller:<n>:requests` and
+  `gearbox:machine:grants` are discovered; the ungranted set is reported as
+  `denied` on the attachment record and the `attached` event. A slave sends
+  a request as `/cmd` with `request = speed|steering` and `value`; granted
+  ones land in `TimRequests` and drive the master's `cmd_vel` while its own
+  session is quiet. `builtin:trailer_steer` follows the master's heading
+  when no angle is commanded. Assets: `tractor.usd` gained a
+  `rear_three_point` hitch and `grants = [speed, steering]`; `sprayer.usd`
+  is a three-point slave with a `boom` `builtin:joint_position` controller
+  that requests `speed` and `hitch:rear_lift` (the second is denied by the
+  tractor, on purpose).
+- **Not implemented from phase 5:** the PTO coupling motor between master
+  and slave stubs, `hitch:<name>` / `pto:<name>` / `aux_valve:<n>` requests
+  acting on the master's own controllers (only `speed` and `steering` do),
+  and the master's `state` carrying slave controller states.

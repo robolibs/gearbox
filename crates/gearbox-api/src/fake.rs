@@ -404,6 +404,7 @@ fn serve_fake_attachments(host: &mut HostBus, agents: &mut [FakeMachine]) {
                         kind: "drawbar".to_string(),
                         controlled: true,
                         depth: 0,
+                        denied: String::new(),
                     });
                     let mut links = Vec::new();
                     for mut l in agents[j].agent.config.links.clone() {

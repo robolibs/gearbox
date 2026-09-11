@@ -1,0 +1,157 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "gearbox mounted sprayer (primitive geometry): three-point coupler, folding boom"
+        string conventions = "chassis forward is -Y like tractor.usd; the coupler prim is rotated 180 deg about Z so the sprayer faces the same way as its master"
+    }
+    defaultPrim = "robot"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "robot" (
+    apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:boom"]
+    displayName = "Mounted sprayer"
+)
+{
+    rel gearbox:machine:body = </robot/chassis>
+    token gearbox:machine:idPolicy = "prim_path"
+    token gearbox:machine:interfaceVersion = "0.1"
+    token gearbox:machine:kind = "sprayer"
+    rel gearbox:machine:role:toolJoints = [
+        </robot/Joints/boom_fold>,
+    ]
+    token gearbox:machine:upAxis = "Z"
+
+    bool gearbox:controller:boom:enabled = 1
+    token gearbox:controller:boom:type = "builtin:joint_position"
+    rel gearbox:controller:boom:target = </robot/Joints/boom_fold>
+    token gearbox:controller:boom:commandInterface = "position"
+    token[] gearbox:controller:boom:stateInterfaces = ["joint_state"]
+    token gearbox:controller:boom:namespacePolicy = "machine_id"
+    token[] gearbox:controller:boom:requests = ["speed", "hitch:rear_lift"]
+
+    def Scope "Materials"
+    {
+        def Material "tank"
+        {
+            token outputs:surface.connect = </robot/Materials/tank/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.12, 0.35, 0.65)
+                float inputs:roughness = 0.5
+                float inputs:metallic = 0.1
+                token outputs:surface
+            }
+        }
+        def Material "frame"
+        {
+            token outputs:surface.connect = </robot/Materials/frame/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.25, 0.25, 0.28)
+                float inputs:roughness = 0.7
+                float inputs:metallic = 0.4
+                token outputs:surface
+            }
+        }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "boom_fold"
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/boom>
+            bool physics:collisionEnabled = 0
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 90
+            point3f physics:localPos0 = (0.9, 0.3, 1.2)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+    }
+
+    def Xform "chassis" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:name = "base_link"
+        token gearbox:link:role = "base"
+        float physics:mass = 450
+        point3f physics:centerOfMass = (0, 0.2, 0.8)
+        vector3f physics:diagonalInertia = (300, 250, 350)
+        rel physics:filteredPairs = [
+            </robot/boom>,
+        ]
+
+        def Cube "tank" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            rel material:binding = </robot/Materials/tank>
+            double3 xformOp:translate = (0, 0.4, 0.9)
+            double3 xformOp:scale = (1.4, 0.8, 1.0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "mast" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            rel material:binding = </robot/Materials/frame>
+            double3 xformOp:translate = (0, -0.15, 0.7)
+            double3 xformOp:scale = (0.9, 0.15, 1.2)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Xform "three_point" (
+            prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"]
+        )
+        {
+            token gearbox:link:role = "tool"
+            token gearbox:coupling:side = "coupler"
+            token gearbox:coupling:type = "three_point_mounted"
+            token gearbox:coupling:name = "three_point"
+            int gearbox:coupling:isoCategory = 2
+            double3 xformOp:translate = (0, -0.3, 0.6)
+            float xformOp:rotateZ = 180
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+        }
+    }
+
+    def Xform "boom" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:role = "tool"
+        float physics:mass = 60
+        vector3f physics:diagonalInertia = (5, 40, 40)
+        double3 xformOp:translate = (0.9, 0.3, 1.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "arm" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            rel material:binding = </robot/Materials/frame>
+            double3 xformOp:translate = (1.5, 0, 0)
+            double3 xformOp:scale = (3.0, 0.1, 0.1)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+    }
+}
+
+def PhysicsScene "PhysicsScene"
+{
+    vector3f physics:gravityDirection = (0, 0, -1)
+    float physics:gravityMagnitude = 9.81
+}

@@ -997,4 +997,51 @@ def Xform "robot" (
             "hitch prim is a link"
         );
     }
+
+    #[test]
+    fn sprayer_is_a_controlled_slave_with_requests() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/sprayer.usd");
+        let machines = discover_machines_from_usd(&path).expect("sprayer.usd should scan");
+        let machine = &machines[0];
+        assert_eq!(machine.kind.as_deref(), Some("sprayer"));
+        assert!(machine.links.is_valid(), "{:?}", machine.links.errors);
+        let boom = machine
+            .controllers
+            .iter()
+            .find(|c| c.instance == "boom")
+            .expect("boom controller");
+        assert_eq!(boom.controller_type, "builtin:joint_position");
+        assert_eq!(boom.target.as_deref(), Some("/robot/Joints/boom_fold"));
+        assert_eq!(
+            boom.requests,
+            vec!["speed".to_string(), "hitch:rear_lift".to_string()]
+        );
+        let (_, coupler) = machine
+            .links
+            .couplings()
+            .find(|(_, c)| c.side == CouplingSide::Coupler)
+            .expect("three-point coupler");
+        assert_eq!(coupler.kind, "three_point_mounted");
+        let boom_link = machine.links.get("boom").expect("boom link");
+        assert_eq!(boom_link.parent.as_deref(), Some("base_link"));
+        assert_eq!(
+            boom_link.joint_prim.as_deref(),
+            Some("/robot/Joints/boom_fold")
+        );
+
+        let tractor = discover_machines_from_usd(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tractor.usd"),
+        )
+        .expect("tractor");
+        assert_eq!(
+            tractor[0].grants,
+            vec!["speed".to_string(), "steering".to_string()]
+        );
+        assert!(
+            tractor[0]
+                .links
+                .couplings()
+                .any(|(_, c)| c.name == "rear_three_point" && c.kind == "three_point_mounted")
+        );
+    }
 }

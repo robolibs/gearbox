@@ -254,6 +254,8 @@ pub struct MachineInstanceSpec {
     pub controllers: Vec<ControllerSpec>,
     /// Link tree per CONTROLLER_SPEC §7; `errors` non-empty means no agent.
     pub links: crate::links::LinkTree,
+    /// Master functions this machine grants to attached slaves (`gearbox:machine:grants`).
+    pub grants: Vec<String>,
 }
 
 /// One `GearboxControllerAPI:<instance>` application.
@@ -300,6 +302,8 @@ pub struct ControllerSpec {
     pub executable: Option<String>,
     pub args: Vec<String>,
     pub transport: Option<String>,
+    /// Master functions this controller asks for when its machine is a slave.
+    pub requests: Vec<String>,
 }
 
 /// Reopen `usd_path` and discover gearbox machine/controller metadata.
@@ -343,6 +347,7 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
         let links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
         machines.push(MachineInstanceSpec {
             links,
+            grants: read_token_array(&stage, &prim, "gearbox:machine:grants"),
             scene_root: None,
             asset_label: String::new(),
             source_path: String::new(),
@@ -545,6 +550,7 @@ fn append_isaac_compat_machines(
             prim_path: prim_path.to_string(),
             id: id.clone(),
             links: Default::default(),
+            grants: Vec::new(),
             kind: Some("isaac_articulation".to_string()),
             interface_version: Some("isaac_compat:v0".to_string()),
             id_policy: "prim_path".to_string(),
@@ -606,6 +612,7 @@ fn append_isaac_compat_machines(
                 executable: None,
                 args: Vec::new(),
                 transport: None,
+                requests: Vec::new(),
             }],
         });
     }
@@ -1384,7 +1391,7 @@ fn machine_roll_pitch_rad(body: &rapier3d::prelude::RigidBody) -> (f64, f64) {
     (roll, pitch)
 }
 
-fn body_forward_vector(body: &rapier3d::prelude::RigidBody) -> Option<Vector> {
+pub(crate) fn body_forward_vector(body: &rapier3d::prelude::RigidBody) -> Option<Vector> {
     let mut forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
     forward.y = 0.0;
     (forward.length_squared() > 1e-9).then(|| forward.normalize())
@@ -2751,7 +2758,7 @@ fn rigid_body_pair_matches(
         || (authored.0 == actual_b && authored.1 == actual_a)
 }
 
-fn find_joint_body_pair(
+pub(crate) fn find_joint_body_pair(
     scene_root: Entity,
     prim_path: &str,
     joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
@@ -2782,7 +2789,7 @@ pub(crate) fn find_prim_entity(
         .map(|(entity, _)| entity)
 }
 
-fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&ChildOf>) -> bool {
+pub(crate) fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&ChildOf>) -> bool {
     let mut current = entity;
     for _ in 0..64 {
         if current == root {
@@ -2956,6 +2963,7 @@ fn discover_controllers(
                 executable: read_string(stage, prim, &(prefix.clone() + "executable")),
                 args: read_string_array(stage, prim, &(prefix.clone() + "args")),
                 transport: read_token(stage, prim, &(prefix.clone() + "transport")),
+                requests: read_token_array(stage, prim, &(prefix.clone() + "requests")),
             }
         })
         .collect();
@@ -3810,6 +3818,7 @@ fn sync_machine_agents(
 fn apply_machine_agent_commands(
     bus: Option<Res<GearboxBus>>,
     keys: Res<MachineAgentKeys>,
+    tim: Res<crate::services::TimRequests>,
     mut commands: ResMut<ControllerCommands>,
 ) {
     let Some(bus) = bus else { return };
@@ -3819,13 +3828,18 @@ fn apply_machine_agent_commands(
             continue;
         }
         let twist = agent.twist();
-        commands.cmd_vel.insert(
-            key.clone(),
-            CmdVel {
-                linear_mps: twist.linear.vx as f32,
-                angular_rps: yaw_rate_of(&twist),
-            },
-        );
+        let mut cmd = CmdVel {
+            linear_mps: twist.linear.vx as f32,
+            angular_rps: yaw_rate_of(&twist),
+        };
+        // A quiet session lets a granted slave request drive the master.
+        if cmd.linear_mps.abs() < 1e-6
+            && cmd.angular_rps.abs() < 1e-6
+            && let Some(requested) = tim.0.get(&key.machine_id)
+        {
+            cmd = *requested;
+        }
+        commands.cmd_vel.insert(key.clone(), cmd);
     }
 }
 

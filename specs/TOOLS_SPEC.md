@@ -272,6 +272,12 @@ written as commands onto the master's own controllers each step:
 The external session still owns the composite. A slave request never
 overrides a command the session sent in the same step.
 
+Over the bus a slave (or a script acting for it) sends a request as
+`/machines/<slave_ns>/cmd` with props `request = speed | steering` and a
+`value`; the runtime honours it only while the slave is attached and the
+master grants that request, and the attachment record lists the rest under
+`denied`. Only `speed` and `steering` act on the master today.
+
 ## 6. What a master must author
 
 A tractor that wants to tow or carry MUST author, in addition to

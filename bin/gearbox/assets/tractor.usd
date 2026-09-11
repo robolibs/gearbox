@@ -54,6 +54,7 @@ over "robot" (
         </robot/Joints/steer_front_right>,
     ]
     token gearbox:machine:upAxis = "Z"
+    token[] gearbox:machine:grants = ["speed", "steering"]
     double3 xformOp:translate = (0, 0, 0.01103192958831789)
     uniform token[] xformOpOrder = ["xformOp:translate"]
 
@@ -142,6 +143,19 @@ over "robot" (
     {
         token gearbox:link:name = "base_link"
         token gearbox:link:role = "base"
+
+        def Xform "rear_three_point" (
+            prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"]
+        )
+        {
+            token gearbox:link:role = "tool"
+            token gearbox:coupling:side = "hitch"
+            token gearbox:coupling:type = "three_point_mounted"
+            token gearbox:coupling:name = "rear_three_point"
+            int gearbox:coupling:isoCategory = 2
+            double3 xformOp:translate = (0, 1.6, 0.6)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
 
         def Xform "rear_hitch" (
             prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"]

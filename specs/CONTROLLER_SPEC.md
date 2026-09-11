@@ -160,6 +160,24 @@ topics. Deny by default. The runtime MUST be launched with
 `GEARBOX_TRANSPORT` (default `agentio`) in its environment. Blocked reasons are
 recorded per controller and shown in the Machine controllers pane.
 
+**Service controllers** drive one joint each with a rapier motor and are
+commanded through `/machines/<ns>/cmd` (`controller = <instance>` plus the
+keys below; `gearbox machine cmd <instance> key=val`). The joint is
+`gearbox:controller:<n>:target`, or the machine's first `toolJoints` entry.
+
+| Type | Keys | Drives |
+|---|---|---|
+| `builtin:joint_position` | `position` 0..1, `range` (rad or m, default 1) | motor position `position × range` on the target joint |
+| `builtin:hitch` | `position` 0..1 | the lift joint; reported to attached slaves as `hitch.<instance>.position` |
+| `builtin:pto` | `rpm` (default 540), `engaged` | motor velocity on the PTO stub; reported as `pto.<instance>` |
+| `builtin:hydraulic_valve` | `flow` −1..1, `rate` (default 0.5) | motor velocity `flow × rate` on the named joint |
+| `builtin:brake` | `level` 0..1 | a velocity motor braking every wheel joint (`wheelJoints`, else `brakeJoints`, else all wheels) |
+| `builtin:trailer_steer` | `angle_rad`, else automatic | steering joints follow the master's heading when attached, clamped to `maxSteerDeg` (default 35) |
+
+A controller MAY author `gearbox:controller:<n>:requests` (`speed`,
+`steering`, `hitch:<name>`, `pto:<name>`) and a machine MAY author
+`gearbox:machine:grants`; see `TOOLS_SPEC.md` §5.3.
+
 ### 3.2 Steering geometries
 
 | Token | Front | Middle | Rear |
