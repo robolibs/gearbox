@@ -114,6 +114,25 @@ enum Cmd {
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
+    /// ISO 11783-10 device elements with their process data
+    Elements { ns: Option<String> },
+    /// Write the machine's device description (DDOP) as ISOXML
+    Ddop {
+        ns: Option<String>,
+        /// File to write (default: stdout)
+        #[arg(long, short)]
+        out: Option<String>,
+    },
+    /// Set one process data value: ELEMENT DDI VALUE (e.g. 4 SetpointWorkState 1)
+    Pd {
+        element: u32,
+        ddi: String,
+        value: f64,
+        #[arg(long)]
+        ns: Option<String>,
+        #[arg(long)]
+        take: bool,
+    },
     /// Attachments: what hangs on a machine, attach and detach slaves
     Tools {
         #[command(subcommand)]
@@ -192,6 +211,15 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             rate,
             count,
         } => tf(ctx, ns, link, rate, count),
+        Cmd::Elements { ns } => elements(ctx, ns),
+        Cmd::Ddop { ns, out } => ddop(ctx, ns, out),
+        Cmd::Pd {
+            element,
+            ddi,
+            value,
+            ns,
+            take,
+        } => process_data(ctx, ns, element, &ddi, value, take),
         Cmd::Tools { cmd } => tools(ctx, cmd),
     }
 }
@@ -1104,4 +1132,126 @@ fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Resul
         ));
     }
     Ok(res.session)
+}
+
+fn elements(ctx: &Ctx, ns: Option<String>) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let records = ctx.client()?.machine(&ns).elements()?;
+    ctx.emit(
+        || {
+            json!(
+                records
+                    .iter()
+                    .filter_map(|r| wire_json::env_to_json(&pack(r)).ok())
+                    .collect::<Vec<_>>()
+            )
+        },
+        || {
+            if records.is_empty() {
+                println!("`{ns}` has no device elements");
+                return;
+            }
+            let mut children: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
+            let mut roots = Vec::new();
+            for (i, r) in records.iter().enumerate() {
+                match records.iter().position(|p| p.number == r.parent) {
+                    Some(p) if r.parent != gearbox_api::ElementRecord::NO_PARENT && p != i => {
+                        children[p].push(i)
+                    }
+                    _ => roots.push(i),
+                }
+            }
+            fn walk(
+                i: usize,
+                depth: usize,
+                records: &[gearbox_api::ElementRecord],
+                children: &[Vec<usize>],
+            ) {
+                let r = &records[i];
+                let pd: Vec<String> = r
+                    .process_data()
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
+                println!(
+                    "{}#{} {} [{}] ({:+.2}, {:+.2}, {:+.2}) {}",
+                    "  ".repeat(depth),
+                    r.number,
+                    r.designator(),
+                    r.kind(),
+                    r.x,
+                    r.y,
+                    r.z,
+                    pd.join(" ")
+                );
+                for &c in &children[i] {
+                    walk(c, depth + 1, records, children);
+                }
+            }
+            for root in roots {
+                walk(root, 0, &records, &children);
+            }
+        },
+    );
+    Ok(())
+}
+
+fn ddop(ctx: &Ctx, ns: Option<String>, out: Option<String>) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&ns);
+    let info = mc.info()?;
+    let records = mc.elements()?;
+    let xml = super::ddop::render(&ns, &info, &records);
+    match out {
+        Some(path) => {
+            std::fs::write(&path, &xml)?;
+            ctx.done(
+                &path,
+                &format!(
+                    "wrote DDOP of `{ns}` ({} elements) to {path}",
+                    records.len()
+                ),
+                || json!({ "namespace": ns, "elements": records.len(), "path": path }),
+            );
+        }
+        None => print!("{xml}"),
+    }
+    Ok(())
+}
+
+fn process_data(
+    ctx: &Ctx,
+    ns: Option<String>,
+    element: u32,
+    ddi: &str,
+    value: f64,
+    take: bool,
+) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&ns);
+    let res = mc.claim(DEFAULT_HOLD_MS, take)?;
+    if res.code == code::BUSY {
+        return Err(CliError::busy(format!(
+            "machine `{ns}` is held by {}; add --take",
+            res.holder()
+        )));
+    }
+    let cmd = ControllerCommand {
+        session: res.session,
+        value,
+        element,
+        _pad: 0,
+        props: Props::from_pairs(&[("ddi", ddi)]).into_bytes(),
+    };
+    let status = mc.command(&cmd)?;
+    let _ = mc.release(res.session);
+    check(status, "process data")?;
+    ctx.done(
+        &ns,
+        &format!("`{ns}` element {element} {ddi} = {value}"),
+        || json!({ "namespace": ns, "element": element, "ddi": ddi, "value": value }),
+    );
+    Ok(())
 }

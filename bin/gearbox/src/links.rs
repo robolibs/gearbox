@@ -92,6 +92,11 @@ pub struct CouplingSpec {
     pub services: Vec<String>,
     pub lift_joint: Option<String>,
     pub excludes: Vec<String>,
+    /// Coupler side: the slave joint a bound master PTO spins.
+    pub pto_joint: Option<String>,
+    /// Coupler side: slave joints bound to the master's hydraulic valves, in
+    /// valve order.
+    pub valve_joints: Vec<String>,
 }
 
 pub const COUPLING_TYPES: [&str; 12] = [
@@ -552,6 +557,16 @@ fn read_coupling(
         lift_joint: read_rel_first(stage, prim, "gearbox:coupling:lift")
             .map(|t| rebase_asset_root_target(root, &t)),
         excludes: read_token_array(stage, prim, "gearbox:coupling:excludes"),
+        pto_joint: read_rel_first(stage, prim, "gearbox:coupling:ptoJoint")
+            .map(|t| rebase_asset_root_target(root, &t)),
+        valve_joints: crate::controller::read_rel_targets(
+            stage,
+            prim,
+            "gearbox:coupling:valveJoints",
+        )
+        .into_iter()
+        .map(|t| rebase_asset_root_target(root, &t))
+        .collect(),
     })
 }
 
@@ -605,7 +620,11 @@ fn nearest_ancestor_link(
 }
 
 /// Composed local transform of `descendant` in `ancestor`'s frame.
-fn local_offset_between(stage: &openusd::Stage, ancestor: &str, descendant: &str) -> StaticOffset {
+pub(crate) fn local_offset_between(
+    stage: &openusd::Stage,
+    ancestor: &str,
+    descendant: &str,
+) -> StaticOffset {
     let Some(rel) = descendant.strip_prefix(ancestor) else {
         return StaticOffset::default();
     };
@@ -1035,7 +1054,11 @@ def Xform "robot" (
         .expect("tractor");
         assert_eq!(
             tractor[0].grants,
-            vec!["speed".to_string(), "steering".to_string()]
+            vec![
+                "speed".to_string(),
+                "steering".to_string(),
+                "pto:pto".to_string()
+            ]
         );
         assert!(
             tractor[0]

@@ -62,6 +62,8 @@ enum Cmd {
     },
     /// Clear, then reload the world and every recorded manifest
     Reset,
+    /// One tf-style tree of the scene: machines with their links, props and markers as leaves
+    Tree,
 }
 
 pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
@@ -78,6 +80,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Pose { id, watch } => pose(ctx, &id, watch),
         Cmd::Events { kind, count } => events(ctx, kind, count),
         Cmd::Reset => reset(ctx),
+        Cmd::Tree => tree(ctx),
     }
 }
 
@@ -330,6 +333,90 @@ fn reset(ctx: &Ctx) -> Result<()> {
         "reset",
         &format!("scene reset; reloaded {}", reloaded.len()),
         || json!({ "reloaded": reloaded }),
+    );
+    Ok(())
+}
+
+/// `world` → every machine with its (composite) link tree, then props and
+/// markers as single `base_link` leaves.
+fn tree(ctx: &Ctx) -> Result<()> {
+    let client = ctx.client()?;
+    let objects = client.list(object_kind::ANY)?;
+    let machines = client.machines()?;
+    let mut attached: std::collections::HashSet<String> = Default::default();
+    let mut machine_links: Vec<(String, Vec<gearbox_api::LinkRecord>)> = Vec::new();
+    for m in &machines {
+        let ns = m.namespace();
+        let mc = client.machine(&ns);
+        if let Ok(info) = mc.info()
+            && !info
+                .props()
+                .get("attached_to")
+                .unwrap_or_default()
+                .is_empty()
+        {
+            attached.insert(ns.clone());
+            continue;
+        }
+        machine_links.push((ns, mc.links().unwrap_or_default()));
+    }
+    ctx.emit(
+        || {
+            json!({
+                "machines": machine_links.iter().map(|(ns, links)| json!({
+                    "namespace": ns,
+                    "links": links.iter().filter_map(|r| wire_json::env_to_json(&pack(r)).ok()).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "objects": objects.iter().filter(|o| o.kind != object_kind::MACHINE)
+                    .filter_map(|o| wire_json::env_to_json(&pack(o)).ok()).collect::<Vec<_>>(),
+            })
+        },
+        || {
+            println!("world");
+            for (ns, links) in &machine_links {
+                println!("  {ns}");
+                let mut children: Vec<Vec<usize>> = vec![Vec::new(); links.len()];
+                let mut roots = Vec::new();
+                for (i, r) in links.iter().enumerate() {
+                    if r.parent_index == gearbox_api::LinkRecord::NO_PARENT
+                        || r.parent_index as usize >= links.len()
+                    {
+                        roots.push(i);
+                    } else {
+                        children[r.parent_index as usize].push(i);
+                    }
+                }
+                fn walk(
+                    i: usize,
+                    depth: usize,
+                    links: &[gearbox_api::LinkRecord],
+                    children: &[Vec<usize>],
+                ) {
+                    println!("{}{}  [{}]", "  ".repeat(depth), links[i].name(), links[i].role());
+                    for &c in &children[i] {
+                        walk(c, depth + 1, links, children);
+                    }
+                }
+                for r in roots {
+                    walk(r, 2, links, &children);
+                }
+            }
+            for o in objects.iter().filter(|o| o.kind != object_kind::MACHINE) {
+                let p = o.props();
+                println!(
+                    "  {}  [{}]",
+                    p.get("id").unwrap_or_default(),
+                    object_kind::name(o.kind)
+                );
+                println!(
+                    "    {}  ({:+.2}, {:+.2}, {:+.2})",
+                    p.get("link").unwrap_or_else(|| "base_link".into()),
+                    o.x,
+                    o.y,
+                    o.z
+                );
+            }
+        },
     );
     Ok(())
 }

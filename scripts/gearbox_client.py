@@ -380,6 +380,18 @@ class DetachRequest:
     props: bytes = b""
 
 
+@_pod("gearbox.element_record.v1", "<dddIIII", ("x", "y", "z", "number", "parent", "iso_type", "_pad"), payload="props")
+class ElementRecord:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    number: int = 0
+    parent: int = 0xFFFFFFFF
+    iso_type: int = 0
+    _pad: int = 0
+    props: bytes = b""
+
+
 @_pod("gearbox.attachment.v1", "<II", ("controlled", "depth"), payload="props")
 class AttachmentRecord:
     controlled: int = 0
@@ -685,6 +697,29 @@ class Machine:
     def detach(self, slave: str) -> Status:
         req = DetachRequest(session=self.session, props=pack_map({"slave": slave}))
         return self.gb.call(self.addr, self._topic("tools/detach"), req, Status)
+
+    def elements(self) -> list[dict]:
+        """ISO 11783-10 device elements, device first, with `pd` values."""
+        out = []
+        for r in self.gb.query(self.addr, self._topic("elements"), Ping(), ElementRecord):
+            props = unpack_map(r.props)
+            pd = {k[3:]: float(v) for k, v in props.items() if k.startswith("pd.")}
+            d = {k: v for k, v in props.items() if not k.startswith("pd.")}
+            d.update({
+                "number": r.number,
+                "parent": None if r.parent == 0xFFFFFFFF else r.parent,
+                "iso_type": r.iso_type,
+                "offset": {"x": r.x, "y": r.y, "z": r.z},
+                "process_data": pd,
+            })
+            out.append(d)
+        return out
+
+    def process_data(self, element: int, ddi: str, value: float) -> Status:
+        """Set one process data value on an element (`SetpointWorkState`, ...)."""
+        req = ControllerCommand(session=self.session, value=float(value), element=int(element),
+                                props=pack_map({"ddi": ddi}))
+        return self.gb.call(self.addr, self._topic("cmd"), req, Status)
 
     def tools(self) -> list[dict]:
         """Attachments below this machine, depth-first."""

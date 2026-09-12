@@ -503,7 +503,37 @@ the code wins and the difference is recorded here.
   is a three-point slave with a `boom` `builtin:joint_position` controller
   that requests `speed` and `hitch:rear_lift` (the second is denied by the
   tractor, on purpose).
-- **Not implemented from phase 5:** the PTO coupling motor between master
-  and slave stubs, `hitch:<name>` / `pto:<name>` / `aux_valve:<n>` requests
-  acting on the master's own controllers (only `speed` and `steering` do),
-  and the master's `state` carrying slave controller states.
+- **PTO and valve binding** (§6.2) needs two coupler-side attributes the
+  spec left open: `rel gearbox:coupling:ptoJoint` names the slave joint the
+  master's PTO spins, `rel gearbox:coupling:valveJoints` the slave joints
+  bound to the master's hydraulic valves in valve order. Bound joints with
+  no controller of their own follow the master's PTO speed and valve flows;
+  a `builtin:joint_velocity` on the PTO joint follows it too unless a
+  velocity was commanded directly. There is no fixed-ratio rapier joint
+  between the two shafts, the slave joint's motor is set to the master's
+  speed each step.
+- **Requests `hitch:<instance>`, `pto:<instance>`, `aux_valve:<n>`** write
+  the master's matching service controller (`ServiceCommands`), so a slave
+  can raise the hitch, engage the PTO or open a valve when granted.
+- **The master's `/state`** carries `tool.<slave>.controller.<instance>.<key>`
+  for every attached slave's service controller and `pd.<element>.<Ddi>`
+  for its own process data.
+- **Phase 6 is in too.** `bin/gearbox/src/elements.rs` discovers the ISO
+  11783-10 element tree (`GearboxElementAPI`, `gearbox:element:*`,
+  `gearbox:pd:*`), derives the device, connector (from couplers, with DDI
+  157) and navigation elements, checks numbers and structure per §8, and
+  warns on DDI names it does not know (the full ISO 11783-11 dictionary is
+  not shipped; a small table maps the ones the controllers use).
+  `/machines/<ns>/elements` answers `gearbox.element_record.v1`;
+  `gearbox machine elements`, `gearbox machine ddop [--out FILE]` (ISOXML
+  `DVC`/`DET`/`DPD`/`DPT`) and `gearbox machine pd ELEMENT DDI VALUE` use
+  it. `builtin:section_control` and `builtin:rate_control` run over the
+  element tree with ground speed from the master (`ProcessData` resource;
+  values ride `/state` as `pd.*`). `gearbox scene tree` prints one tf-style
+  view of machines and props (props and markers carry `link = base_link`
+  in `scene list`). Link frames are drawn as gizmos in the window for any
+  machine whose tf stream is on, so `gearbox machine tf` shows them live.
+  DDOP import (§7.5, the other direction) is not implemented.
+- **DDOP offsets** follow the spec's REP-103 formula `(x, −y, −z)`; the
+  repo's assets author their chassis forward as −Y, so their exported
+  offsets are rotated until they are re-based. `drpOffset` is not read.

@@ -1,7 +1,7 @@
 #usda 1.0
 (
     customLayerData = {
-        string creator = "gearbox mounted sprayer (primitive geometry): three-point coupler, folding boom"
+        string creator = "gearbox mounted sprayer (primitive geometry): three-point coupler, folding boom, PTO-driven pump, DDOP element tree"
         string conventions = "chassis forward is -Y like tractor.usd; the coupler prim is rotated 180 deg about Z so the sprayer faces the same way as its master"
     }
     defaultPrim = "robot"
@@ -11,7 +11,7 @@
 )
 
 def Xform "robot" (
-    apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:boom"]
+    apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:boom", "GearboxControllerAPI:sections", "GearboxControllerAPI:rate", "GearboxControllerAPI:pump"]
     displayName = "Mounted sprayer"
 )
 {
@@ -21,6 +21,7 @@ def Xform "robot" (
     token gearbox:machine:kind = "sprayer"
     rel gearbox:machine:role:toolJoints = [
         </robot/Joints/boom_fold>,
+        </robot/Joints/pump_shaft>,
     ]
     token gearbox:machine:upAxis = "Z"
 
@@ -31,6 +32,30 @@ def Xform "robot" (
     token[] gearbox:controller:boom:stateInterfaces = ["joint_state"]
     token gearbox:controller:boom:namespacePolicy = "machine_id"
     token[] gearbox:controller:boom:requests = ["speed", "hitch:rear_lift"]
+
+    bool gearbox:controller:sections:enabled = 1
+    token gearbox:controller:sections:type = "builtin:section_control"
+    rel gearbox:controller:sections:target = </robot/chassis/boom_frame>
+    token gearbox:controller:sections:commandInterface = "process_data"
+    token[] gearbox:controller:sections:stateInterfaces = ["process_data"]
+    token gearbox:controller:sections:namespacePolicy = "machine_id"
+    token[] gearbox:controller:sections:requests = ["speed"]
+
+    bool gearbox:controller:rate:enabled = 1
+    token gearbox:controller:rate:type = "builtin:rate_control"
+    rel gearbox:controller:rate:target = </robot/chassis/tank>
+    token gearbox:controller:rate:commandInterface = "process_data"
+    token[] gearbox:controller:rate:stateInterfaces = ["process_data"]
+    token gearbox:controller:rate:namespacePolicy = "machine_id"
+    token[] gearbox:controller:rate:requests = ["speed"]
+
+    bool gearbox:controller:pump:enabled = 1
+    token gearbox:controller:pump:type = "builtin:joint_velocity"
+    rel gearbox:controller:pump:target = </robot/Joints/pump_shaft>
+    token gearbox:controller:pump:commandInterface = "velocity"
+    token[] gearbox:controller:pump:stateInterfaces = ["joint_state"]
+    token gearbox:controller:pump:namespacePolicy = "machine_id"
+    token[] gearbox:controller:pump:requests = ["pto:pto"]
 
     def Scope "Materials"
     {
@@ -75,6 +100,18 @@ def Xform "robot" (
             quatf physics:localRot0 = (1, 0, 0, 0)
             quatf physics:localRot1 = (1, 0, 0, 0)
         }
+
+        def PhysicsRevoluteJoint "pump_shaft"
+        {
+            uniform token physics:axis = "Y"
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/pump_rotor>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (0, -0.05, 0.7)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
     }
 
     def Xform "chassis" (
@@ -88,12 +125,18 @@ def Xform "robot" (
         vector3f physics:diagonalInertia = (300, 250, 350)
         rel physics:filteredPairs = [
             </robot/boom>,
+            </robot/pump_rotor>,
         ]
 
         def Cube "tank" (
-            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]
+            prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI", "GearboxElementAPI"]
         )
         {
+            token gearbox:element:type = "bin"
+            int gearbox:element:number = 3
+            string gearbox:element:designator = "Tank"
+            float gearbox:pd:MaximumVolumeContent = 1200
+            float gearbox:pd:ActualVolumeContent = 1200
             double size = 1
             rel material:binding = </robot/Materials/tank>
             double3 xformOp:translate = (0, 0.4, 0.9)
@@ -112,6 +155,47 @@ def Xform "robot" (
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
         }
 
+        def Xform "boom_frame" (
+            prepend apiSchemas = ["GearboxElementAPI"]
+        )
+        {
+            token gearbox:element:type = "function"
+            int gearbox:element:number = 2
+            string gearbox:element:designator = "Boom"
+            float gearbox:pd:ActualWorkingWidth = 6.0
+            float gearbox:pd:SectionControlState = 1
+            double3 xformOp:translate = (0, 0.3, 1.2)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Xform "section_left" (
+                prepend apiSchemas = ["GearboxElementAPI"]
+            )
+            {
+                token gearbox:element:type = "section"
+                int gearbox:element:number = 4
+                string gearbox:element:designator = "Left"
+                float gearbox:pd:ActualWorkingWidth = 3.0
+                float gearbox:pd:SetpointWorkState = 0
+                float gearbox:pd:ActualWorkState = 0
+                double3 xformOp:translate = (1.5, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+
+            def Xform "section_right" (
+                prepend apiSchemas = ["GearboxElementAPI"]
+            )
+            {
+                token gearbox:element:type = "section"
+                int gearbox:element:number = 5
+                string gearbox:element:designator = "Right"
+                float gearbox:pd:ActualWorkingWidth = 3.0
+                float gearbox:pd:SetpointWorkState = 0
+                float gearbox:pd:ActualWorkState = 0
+                double3 xformOp:translate = (-1.5, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+        }
+
         def Xform "three_point" (
             prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"]
         )
@@ -121,6 +205,8 @@ def Xform "robot" (
             token gearbox:coupling:type = "three_point_mounted"
             token gearbox:coupling:name = "three_point"
             int gearbox:coupling:isoCategory = 2
+            token[] gearbox:coupling:services = ["pto"]
+            rel gearbox:coupling:ptoJoint = </robot/Joints/pump_shaft>
             double3 xformOp:translate = (0, -0.3, 0.6)
             float xformOp:rotateZ = 180
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
@@ -146,6 +232,27 @@ def Xform "robot" (
             double3 xformOp:translate = (1.5, 0, 0)
             double3 xformOp:scale = (3.0, 0.1, 0.1)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+    }
+
+    def Xform "pump_rotor" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:role = "tool"
+        float physics:mass = 6
+        vector3f physics:diagonalInertia = (0.05, 0.05, 0.05)
+        double3 xformOp:translate = (0, -0.05, 0.7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "shaft" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            token axis = "Y"
+            double radius = 0.03
+            double height = 0.2
+            rel material:binding = </robot/Materials/frame>
         }
     }
 }

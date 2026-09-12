@@ -360,3 +360,52 @@ impl AttachmentRecord {
         self.props().get("slave").unwrap_or_default()
     }
 }
+
+/// One ISO 11783-10 device element, answered on `/machines/<ns>/elements`
+/// device first. Offsets are the element origin in `base_link`, asset
+/// metres. Props: `kind`, `designator`, `prim`, `connector_type`, and one
+/// `pd.<Ddi>` per process data value.
+#[datapod::datapod(name = "gearbox.element_record.v1")]
+#[derive(Default)]
+pub struct ElementRecord {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub number: u32,
+    pub parent: u32,
+    pub iso_type: u32,
+    pub _pad: u32,
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl ElementRecord {
+    pub const NO_PARENT: u32 = u32::MAX;
+
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn kind(&self) -> String {
+        self.props().get("kind").unwrap_or_default()
+    }
+
+    pub fn designator(&self) -> String {
+        self.props().get("designator").unwrap_or_default()
+    }
+
+    /// `(ddi name, value)` pairs from the `pd.*` props.
+    pub fn process_data(&self) -> Vec<(String, f64)> {
+        let mut out: Vec<(String, f64)> = self
+            .props()
+            .iter()
+            .into_iter()
+            .filter_map(|(k, v)| {
+                k.strip_prefix("pd.")
+                    .map(|n| (n.to_string(), v.parse().unwrap_or(0.0)))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+}

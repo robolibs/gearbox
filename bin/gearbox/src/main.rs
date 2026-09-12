@@ -24,6 +24,7 @@
 
 mod attach;
 mod controller;
+mod elements;
 mod links;
 mod load;
 mod services;

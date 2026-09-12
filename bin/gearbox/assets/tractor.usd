@@ -16,7 +16,7 @@
 )
 
 over "robot" (
-    apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"]
+    apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive", "GearboxControllerAPI:pto"]
     displayName = "Fendt 300 Vario S4"
 )
 {
@@ -54,12 +54,30 @@ over "robot" (
         </robot/Joints/steer_front_right>,
     ]
     token gearbox:machine:upAxis = "Z"
-    token[] gearbox:machine:grants = ["speed", "steering"]
+    token[] gearbox:machine:grants = ["speed", "steering", "pto:pto"]
+    bool gearbox:controller:pto:enabled = 1
+    token gearbox:controller:pto:type = "builtin:pto"
+    rel gearbox:controller:pto:target = </robot/Joints/pto_shaft>
+    token gearbox:controller:pto:commandInterface = "pto"
+    token[] gearbox:controller:pto:stateInterfaces = ["joint_state"]
+    token gearbox:controller:pto:namespacePolicy = "machine_id"
     double3 xformOp:translate = (0, 0, 0.01103192958831789)
     uniform token[] xformOpOrder = ["xformOp:translate"]
 
     def Scope "Joints"
     {
+        def PhysicsRevoluteJoint "pto_shaft"
+        {
+            uniform token physics:axis = "Y"
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/pto_stub>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (0, 1.75, 0.7)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+
         def PhysicsRevoluteJoint "rev_back_left"
         {
             uniform token physics:axis = "X"
@@ -309,6 +327,23 @@ over "robot" (
         token gearbox:link:role = "steer"
         vector3f physics:diagonalInertia = (3, 3, 3)
         float physics:mass = 50
+    }
+    def Xform "pto_stub" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:role = "tool"
+        float physics:mass = 4
+        vector3f physics:diagonalInertia = (0.02, 0.02, 0.02)
+        double3 xformOp:translate = (0, 1.75, 0.7)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "shaft"
+        {
+            token axis = "Y"
+            double radius = 0.02
+            double height = 0.15
+        }
     }
 }
 

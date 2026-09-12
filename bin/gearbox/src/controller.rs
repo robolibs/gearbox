@@ -256,6 +256,8 @@ pub struct MachineInstanceSpec {
     pub links: crate::links::LinkTree,
     /// Master functions this machine grants to attached slaves (`gearbox:machine:grants`).
     pub grants: Vec<String>,
+    /// ISO 11783-10 device element tree (TOOLS_SPEC §7.3), device first.
+    pub elements: Vec<crate::elements::ElementSpec>,
 }
 
 /// One `GearboxControllerAPI:<instance>` application.
@@ -344,9 +346,15 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
         );
         let body = read_rel_first(&stage, &prim, "gearbox:machine:body")
             .map(|p| rebase_asset_root_target(machine_prim, &p));
-        let links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
+        let mut links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
+        let kind = read_token(&stage, &prim, "gearbox:machine:kind");
+        let (elements, element_errors, element_warnings) =
+            crate::elements::discover_elements(&stage, &prim, kind.as_deref(), &prims, &links);
+        links.errors.extend(element_errors);
+        links.warnings.extend(element_warnings);
         machines.push(MachineInstanceSpec {
             links,
+            elements,
             grants: read_token_array(&stage, &prim, "gearbox:machine:grants"),
             scene_root: None,
             asset_label: String::new(),
@@ -449,7 +457,7 @@ fn open_stage_for_discovery(usd_path: &Path) -> Result<openusd::Stage, String> {
     let open_str = open_path
         .to_str()
         .ok_or_else(|| "non-UTF-8 USD discovery path".to_string())?;
-    openusd::Stage::builder()
+    let stage = openusd::Stage::builder()
         .resolver(
             usd_schema::third_party::resolver::StripMetadataResolver::with_search_paths(search),
         )
@@ -458,15 +466,25 @@ fn open_stage_for_discovery(usd_path: &Path) -> Result<openusd::Stage, String> {
             Ok(())
         })
         .open(open_str)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    if is_text_usd && open_path != usd_path {
+        let _ = std::fs::remove_file(&open_path);
+    }
+    stage
 }
 
 fn discovery_temp_path(usd_path: &Path, ext: &str) -> std::path::PathBuf {
+    // Unique per call: two scans of the same asset at once (two machines
+    // in one world, tests in parallel) must not read each other's half
+    // written layer.
+    static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     usd_path.hash(&mut hasher);
+    let n = SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        ".gearbox_control_scan_{:016x}.{}",
+        ".gearbox_control_scan_{:016x}_{}_{n}.{}",
         hasher.finish(),
+        std::process::id(),
         ext
     ))
 }
@@ -551,6 +569,7 @@ fn append_isaac_compat_machines(
             id: id.clone(),
             links: Default::default(),
             grants: Vec::new(),
+            elements: Vec::new(),
             kind: Some("isaac_articulation".to_string()),
             interface_version: Some("isaac_compat:v0".to_string()),
             id_policy: "prim_path".to_string(),
@@ -3762,6 +3781,25 @@ fn sync_machine_agents(
         config.kind = machine.kind.clone().unwrap_or_default();
         config.links = link_descs(&machine.links);
         config.links_derived = machine.links.derived;
+        config.elements = machine
+            .elements
+            .iter()
+            .map(|e| gearbox_api::ElementDesc {
+                number: e.number,
+                parent: e.parent,
+                kind: e.kind.as_str().to_string(),
+                iso_type: e.kind.iso_type(),
+                designator: e.designator.clone(),
+                prim: e.prim_path.clone(),
+                offset: [
+                    e.offset_base_link.x,
+                    e.offset_base_link.y,
+                    e.offset_base_link.z,
+                ],
+                connector_type: e.connector_type,
+                process_data: e.process_data.clone(),
+            })
+            .collect();
         config.ephemeral = host.ephemeral;
         config.allow = host.allow.clone();
         config.allow_any = host.allow_any;
@@ -3918,6 +3956,9 @@ fn publish_machine_controller_states(
     physics: Res<usd_bevy::physics::PhysicsWorld>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
+    process_data: Res<crate::services::ProcessData>,
+    service: Res<crate::services::ServiceCommands>,
+    attachments: Res<crate::attach::Attachments>,
 ) {
     let Some(mut bus) = bus else { return };
     for machine in &inventory.machines {
@@ -3942,6 +3983,33 @@ fn publish_machine_controller_states(
         let tools: Vec<&str> = agent.tools().iter().map(|t| t.slave.as_str()).collect();
         if !tools.is_empty() {
             props.set("tools", &tools.join(","));
+        }
+        // Process data of this machine and the commanded state of every
+        // attached slave's service controllers (TOOLS_SPEC §5.1, §7.4).
+        for (element, ddi, value) in process_data.of_machine(&machine.id) {
+            props.set(&format!("pd.{element}.{ddi}"), &format!("{value}"));
+        }
+        for a in attachments.0.iter().filter(|a| a.master_ns == ns) {
+            let Some(slave_key) = keys.0.get(&a.slave_ns) else {
+                continue;
+            };
+            for (key, values) in service.0.iter() {
+                if key.scene_root != slave_key.scene_root || key.machine_id != slave_key.machine_id
+                {
+                    continue;
+                }
+                let mut sorted: Vec<(&String, &String)> = values.iter().collect();
+                sorted.sort();
+                for (k, v) in sorted {
+                    props.set(
+                        &format!(
+                            "tool.{}.controller.{}.{k}",
+                            a.slave_ns, key.controller_instance
+                        ),
+                        v,
+                    );
+                }
+            }
         }
 
         let from_controller = machine

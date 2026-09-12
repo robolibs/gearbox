@@ -14,5 +14,6 @@ pub use host::{
 };
 pub use machine::{
     AttachRequest, AttachmentRecord, ClaimRequest, ClaimResponse, ControllerCommand, DetachRequest,
-    LinkPose, LinkRecord, MachineInfo, MachineState, SessionInfo, SessionRef, TwistCmd,
+    ElementRecord, LinkPose, LinkRecord, MachineInfo, MachineState, SessionInfo, SessionRef,
+    TwistCmd,
 };

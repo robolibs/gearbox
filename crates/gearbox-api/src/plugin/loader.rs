@@ -73,8 +73,12 @@ fn refresh_props(
                 z: t.z,
                 yaw_deg: yaw.to_degrees(),
                 kind,
-                props: Props::from_pairs(&[("id", id.as_str()), ("path", &entry.signature.0)])
-                    .into_bytes(),
+                props: Props::from_pairs(&[
+                    ("id", id.as_str()),
+                    ("path", &entry.signature.0),
+                    ("link", "base_link"),
+                ])
+                .into_bytes(),
             })
         })
         .collect();

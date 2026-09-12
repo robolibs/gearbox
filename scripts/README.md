@@ -20,6 +20,7 @@ agent for scene work, and to each machine's own agent for control:
 | state, odom | `/machines/<ns>/state`, `/machines/<ns>/odom` (that machine's agent) |
 | link tree, link poses | `/machines/<ns>/links`, `/machines/<ns>/tf` (`Machine.links()`, `Machine.tf()`) |
 | attach, detach, attachments | `/machines/<master>/tools/*` (`Machine.attach()`, `.detach()`, `.tools()`) |
+| device elements, process data | `/machines/<ns>/elements`, `/machines/<ns>/cmd` with `ddi` (`Machine.elements()`, `.process_data()`) |
 
 A machine is driven by whoever holds its session: `claim()` first, then
 `cmd_vel(v, w)` at your own rate. Silence longer than the claim's hold time

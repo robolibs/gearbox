@@ -314,6 +314,14 @@ each hydraulic valve is bound to the slave joint the slave names for that
 valve. These are runtime joints like the coupling joint and go away on
 detach.
 
+The slave names the joints on its `coupler` coupling:
+`rel gearbox:coupling:ptoJoint` is the shaft the master's PTO spins and
+`rel gearbox:coupling:valveJoints` lists, in valve order, the joints the
+master's `builtin:hydraulic_valve` controllers move. The runtime sets the
+slave joint's motor to the master's PTO speed or valve flow each step; a
+`builtin:joint_velocity` on the same joint follows the PTO too unless it was
+commanded a velocity directly.
+
 ## 7. What a slave must author
 
 ### 7.1 Every slave

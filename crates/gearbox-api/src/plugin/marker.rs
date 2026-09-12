@@ -42,7 +42,8 @@ fn refresh_markers(
                 z: t.z,
                 yaw_deg: 0.0,
                 kind: object_kind::MARKER,
-                props: Props::from_pairs(&[("id", id.as_str())]).into_bytes(),
+                props: Props::from_pairs(&[("id", id.as_str()), ("link", "base_link")])
+                    .into_bytes(),
             })
         })
         .collect();

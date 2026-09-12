@@ -250,3 +250,20 @@ fn attach_and_detach_through_the_master() {
     let (code, _, err) = env.gearbox(&["machine", "move", "trailer", "--for", "200ms"]);
     assert_eq!(code, 0, "detached slave drives again: {err}");
 }
+
+#[test]
+fn elements_and_ddop_of_a_fake_machine() {
+    let env = Env::start(&["oxbo"]);
+    let (code, out, err) = env.gearbox(&["machine", "elements", "oxbo"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("no device elements"), "{out}");
+    let (code, out, err) = env.gearbox(&["machine", "ddop", "oxbo"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("<DVC ") && out.contains("</ISO11783_TaskData>"),
+        "{out}"
+    );
+    let (code, out, err) = env.gearbox(&["scene", "tree"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("oxbo") && out.contains("base_link"), "{out}");
+}
