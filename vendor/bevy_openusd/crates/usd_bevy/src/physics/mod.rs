@@ -82,10 +82,12 @@ impl Plugin for RapierAdapterPlugin {
                     bodies::convert_rigid_bodies,
                     colliders::convert_colliders.after(bodies::convert_rigid_bodies),
                     colliders::apply_physics_materials.after(colliders::convert_colliders),
+                    colliders::apply_collision_filters.after(bodies::convert_rigid_bodies),
                     joints::convert_joints.after(bodies::convert_rigid_bodies),
                     world::step_physics
                         .after(joints::convert_joints)
-                        .after(colliders::convert_colliders),
+                        .after(colliders::convert_colliders)
+                        .after(colliders::apply_collision_filters),
                 ),
             )
             // Writeback only runs while physics is stepping. With it

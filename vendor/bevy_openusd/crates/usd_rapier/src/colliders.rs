@@ -99,7 +99,10 @@ pub fn build_collider(
         return Ok(None);
     };
 
-    builder = builder.position(op.local_pose).user_data(op.user_data);
+    builder = builder
+        .position(op.local_pose)
+        .user_data(op.user_data)
+        .active_hooks(ActiveHooks::FILTER_CONTACT_PAIRS);
     if let Some(g) = op.collision_groups {
         builder = builder.collision_groups(g);
     }

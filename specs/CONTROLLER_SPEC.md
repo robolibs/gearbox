@@ -217,10 +217,26 @@ The controller's `body` (or the machine `body`) MUST point at a prim that:
   `physics:diagonalInertia`. Raycast engine, brake, and suspension forces are
   scaled by `mass / 2700 kg` when the chassis is heavier than the reference
   tractor.
+- `physics:diagonalInertia` MUST be plausible for the mass. The runtime
+  compares each component with a box estimate from the chassis collider
+  bounds (`m/12 · (b² + c²)`); when any component is below 25 % of that
+  estimate it substitutes the estimate for the whole tensor and logs
+  `chassis inertia (...) is implausible`. A 3.8 t tractor authored at
+  452 kg·m² on every axis rolled on its suspension and crept at rest until
+  this guard existed; the fix belongs in the asset, the guard only keeps
+  the machine usable.
 
 If the body relationship is missing, the prim is not found under the loaded
 scene root, or it has no rapier body, the controller silently does nothing
 every frame. No log line is emitted.
+
+### 4.1 Self-collision
+
+`PhysicsFilteredPairsAPI` on a body is honoured: every contact between that
+body and each listed body is dropped by a rapier pair filter. Linkages that
+run inside the chassis hull (three-point hitch rods, cylinders, stabilisers)
+MUST list the chassis and each other, or their hulls fight the chassis every
+step. Contacts between two bodies joined by a joint are always off.
 
 ## 5. Wheel joints
 

@@ -104,6 +104,7 @@ struct ControllerRuntimeState {
     applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
     logged_empty_tire_pairs: HashSet<ControllerKey>,
     logged_steer: HashSet<ControllerKey>,
+    inertia_guarded: HashSet<ControllerKey>,
     diff_drive_debug_ticks: u64,
 }
 
@@ -175,6 +176,7 @@ impl Plugin for ControllerDiscoveryPlugin {
                     sync_machine_agents,
                     reconcile_external_process_controllers,
                     apply_machine_agent_commands,
+                    guard_chassis_inertia,
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,
                 )
@@ -208,6 +210,7 @@ fn clear_controller_state_on_reset(
     runtime.applied_cmd_vel.clear();
     runtime.logged_empty_tire_pairs.clear();
     runtime.logged_steer.clear();
+    runtime.inertia_guarded.clear();
     states.states.clear();
     keys.0.clear();
     if let Some(mut bus) = bus {
@@ -1743,6 +1746,7 @@ fn apply_rapier_raycast_vehicle_controller(
         filter,
     );
     vehicle.update_vehicle(physics.integration_parameters.dt as f64, queries);
+    log_raycast_wheels(&vehicle, current_speed, force_per_rear, mass_scale);
     true
 }
 
@@ -4195,6 +4199,156 @@ fn hold_axle_pivots(
             && let Some(link) = multibody.link_mut(link_id)
         {
             hold(&mut link.joint.data);
+        }
+    }
+}
+
+static PHYSICS_LOG_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `GEARBOX_PHYSICS_LOG=1`: once a second, what the raycast vehicle sees
+/// per wheel.
+fn log_raycast_wheels(
+    vehicle: &DynamicRayCastVehicleController,
+    current_speed: f64,
+    force_per_rear: f64,
+    mass_scale: f64,
+) {
+    use std::sync::atomic::Ordering;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("GEARBOX_PHYSICS_LOG").is_some()) {
+        return;
+    }
+    if PHYSICS_LOG_TICK.fetch_add(1, Ordering::Relaxed) % 60 != 0 {
+        return;
+    }
+    let wheels: Vec<String> = vehicle
+        .wheels()
+        .iter()
+        .map(|w| {
+            format!(
+                "[hit={} len={:.3} susp={:.0} fwd={:.1} side={:.1} eng={:.0} brk={:.0} steer={:.2} r={:.3}]",
+                w.raycast_info().is_in_contact,
+                w.raycast_info().suspension_length,
+                w.wheel_suspension_force,
+                w.forward_impulse,
+                w.side_impulse,
+                w.engine_force,
+                w.brake,
+                w.steering,
+                w.radius
+            )
+        })
+        .collect();
+    info!(
+        "gearbox-raycast: speed {:.3} force/rear {:.0} scale {:.2}\n  {}",
+        current_speed,
+        force_per_rear,
+        mass_scale,
+        wheels.join("\n  ")
+    );
+}
+
+/// Authored inertia below this fraction of the box estimate from the
+/// chassis collider bounds is replaced by the estimate.
+const INERTIA_PLAUSIBLE_FRACTION: f64 = 0.25;
+
+/// A chassis whose `physics:diagonalInertia` is far too small for its mass
+/// spins on every suspension impulse. Substitute a box estimate from the
+/// collider bounds, once per machine, and say so.
+fn guard_chassis_inertia(
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    parents: Query<&ChildOf>,
+    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+) {
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let key = ControllerKey::new(scene_root, &machine.id, "chassis");
+        if runtime.inertia_guarded.contains(&key) {
+            continue;
+        }
+        // Only once the machine is fully up: agent created, bodies and
+        // colliders materialised, authored mass in place.
+        if !keys
+            .0
+            .values()
+            .any(|k| k.scene_root == scene_root && k.machine_id == machine.id)
+        {
+            continue;
+        }
+        let Some(body_path) = machine.body.as_deref() else {
+            continue;
+        };
+        let Some(entity) = find_prim_entity(scene_root, body_path, &prims, &parents) else {
+            continue;
+        };
+        let Some(handle) = physics.entity_to_body.get(&entity).copied() else {
+            continue;
+        };
+        let Some(body) = physics.bodies.get(handle) else {
+            continue;
+        };
+        if body.colliders().is_empty() {
+            continue;
+        }
+        let mut lo = Vector::new(f64::MAX, f64::MAX, f64::MAX);
+        let mut hi = Vector::new(f64::MIN, f64::MIN, f64::MIN);
+        for ch in body.colliders() {
+            if let Some(col) = physics.colliders.get(*ch) {
+                let aabb = col.shape().compute_aabb(
+                    col.position_wrt_parent()
+                        .unwrap_or(&rapier3d::math::Pose::IDENTITY),
+                );
+                lo = lo.min(aabb.mins);
+                hi = hi.max(aabb.maxs);
+            }
+        }
+        let mass = body.mass();
+        if mass < 100.0 {
+            continue;
+        }
+        runtime.inertia_guarded.insert(key);
+        let ext = hi - lo;
+        if ext.x <= 0.0 || ext.y <= 0.0 || ext.z <= 0.0 {
+            continue;
+        }
+        let estimate = Vector::new(
+            mass / 12.0 * (ext.y * ext.y + ext.z * ext.z),
+            mass / 12.0 * (ext.x * ext.x + ext.z * ext.z),
+            mass / 12.0 * (ext.x * ext.x + ext.y * ext.y),
+        );
+        let props = body.mass_properties().local_mprops;
+        let authored = props.principal_inertia();
+        let too_small = authored.x < estimate.x * INERTIA_PLAUSIBLE_FRACTION
+            || authored.y < estimate.y * INERTIA_PLAUSIBLE_FRACTION
+            || authored.z < estimate.z * INERTIA_PLAUSIBLE_FRACTION;
+        if !too_small {
+            continue;
+        }
+        let com = props.local_com;
+        warn!(
+            "gearbox-control: {} chassis inertia ({:.0}, {:.0}, {:.0}) is implausible for {:.0} kg over {:.1}x{:.1}x{:.1} m; using ({:.0}, {:.0}, {:.0})",
+            machine.id,
+            authored.x,
+            authored.y,
+            authored.z,
+            mass,
+            ext.x,
+            ext.y,
+            ext.z,
+            estimate.x,
+            estimate.y,
+            estimate.z
+        );
+        if let Some(body) = physics.bodies.get_mut(handle) {
+            body.set_additional_mass_properties(
+                rapier3d::prelude::MassProperties::new(com, mass, estimate),
+                true,
+            );
         }
     }
 }

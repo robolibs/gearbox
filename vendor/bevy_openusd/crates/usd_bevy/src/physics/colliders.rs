@@ -333,3 +333,25 @@ pub fn apply_physics_materials(
         }
     }
 }
+
+/// Feed every `PhysicsFilteredPairsAPI` into the world's contact filter
+/// once both bodies exist. Idempotent: the set dedups.
+pub fn apply_collision_filters(
+    filters: Query<(Entity, &crate::markers::UsdCollisionFilter)>,
+    mut world: ResMut<PhysicsWorld>,
+) {
+    let mut pairs = Vec::new();
+    for (entity, filter) in &filters {
+        let Some(a) = world.entity_to_body.get(&entity).copied() else {
+            continue;
+        };
+        for other in &filter.filtered {
+            if let Some(b) = world.entity_to_body.get(other).copied() {
+                pairs.push((a, b));
+            }
+        }
+    }
+    for (a, b) in pairs {
+        world.filter_pair(a, b);
+    }
+}

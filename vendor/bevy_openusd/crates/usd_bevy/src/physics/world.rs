@@ -6,7 +6,7 @@
 //! `rapier3d-f64`. Conversion happens at the Bevy boundary
 //! (`Transform`/`Vec3`/`Quat` are `f32`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use rapier3d_f64::prelude::*;
@@ -31,6 +31,9 @@ pub struct PhysicsWorld {
     pub entity_to_body: HashMap<Entity, RigidBodyHandle>,
     /// Bevy entity → Rapier collider handle.
     pub entity_to_collider: HashMap<Entity, ColliderHandle>,
+    /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
+    /// stored in both orders.
+    pub filtered_pairs: HashSet<(RigidBodyHandle, RigidBodyHandle)>,
 }
 
 impl Default for PhysicsWorld {
@@ -55,6 +58,7 @@ impl Default for PhysicsWorld {
             ccd_solver: CCDSolver::new(),
             entity_to_body: HashMap::new(),
             entity_to_collider: HashMap::new(),
+            filtered_pairs: HashSet::new(),
         }
     }
 }
@@ -74,9 +78,27 @@ impl PhysicsWorld {
             &mut self.impulse_joints,
             &mut self.multibody_joints,
             &mut self.ccd_solver,
-            &(),
+            &PairFilter(&self.filtered_pairs),
             &(),
         );
+    }
+
+    /// Drop every contact between two bodies, in either order.
+    pub fn filter_pair(&mut self, a: RigidBodyHandle, b: RigidBodyHandle) {
+        self.filtered_pairs.insert((a, b));
+        self.filtered_pairs.insert((b, a));
+    }
+}
+
+/// Contact filter backed by `PhysicsWorld::filtered_pairs`.
+struct PairFilter<'a>(&'a HashSet<(RigidBodyHandle, RigidBodyHandle)>);
+
+impl PhysicsHooks for PairFilter<'_> {
+    fn filter_contact_pair(&self, context: &PairFilterContext) -> Option<SolverFlags> {
+        match (context.rigid_body1, context.rigid_body2) {
+            (Some(a), Some(b)) if self.0.contains(&(a, b)) => None,
+            _ => Some(SolverFlags::COMPUTE_IMPULSES),
+        }
     }
 }
 
