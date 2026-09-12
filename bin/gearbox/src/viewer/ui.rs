@@ -276,6 +276,11 @@ const PALETTE_ITEMS: &[PaletteItem] = &[
         hint: None,
     },
     PaletteItem {
+        id: "toggle_tf",
+        label: "Toggle: TF tree (frames, names, links)",
+        hint: None,
+    },
+    PaletteItem {
         id: "reload_stage",
         label: "Stage: Reload",
         hint: Some("R"),
@@ -1468,6 +1473,18 @@ fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShellParams) {
                             .with_toggle_initial("Colliders", accent_col, toggles.show_colliders),
                     ],
                 );
+                let tf_id = cid(RIB_OVERLAYS, "tf");
+                body.add_normal(
+                    tf_id,
+                    "TF tree",
+                    "branch",
+                    vec![
+                        Pod::new(pid(RIB_OVERLAYS, "tf", 0))
+                            .with_toggle_initial("Frames", accent_col, toggles.show_tf_frames)
+                            .with_toggle_initial("Names", accent_col, toggles.show_tf_names)
+                            .with_toggle_initial("Parent links", accent_col, toggles.show_tf_links),
+                    ],
+                );
                 body.add_normal(
                     render_id,
                     "Render",
@@ -1501,6 +1518,11 @@ fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShellParams) {
                     set_toggle(&mut toggles.show_skeleton, resp, 3);
                     set_toggle(&mut toggles.show_physics, resp, 4);
                     set_toggle(&mut toggles.show_colliders, resp, 5);
+                }
+                if let Some(resp) = pod_response(&responses, tf_id, 0) {
+                    set_toggle(&mut toggles.show_tf_frames, resp, 0);
+                    set_toggle(&mut toggles.show_tf_names, resp, 1);
+                    set_toggle(&mut toggles.show_tf_links, resp, 2);
                 }
                 if let Some(resp) = pod_response(&responses, render_id, 0) {
                     set_toggle(&mut toggles.wireframe, resp, 0);
@@ -3691,6 +3713,12 @@ fn draw_palette_panel(
         }
         "toggle_wireframe" => {
             toggles.wireframe = !toggles.wireframe;
+        }
+        "toggle_tf" => {
+            let on = !(toggles.show_tf_frames || toggles.show_tf_links);
+            toggles.show_tf_frames = on;
+            toggles.show_tf_names = on;
+            toggles.show_tf_links = on;
         }
         "reload_stage" => {
             reload.requested = true;

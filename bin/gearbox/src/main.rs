@@ -100,6 +100,7 @@ fn main() {
         // tree, prim-level selection, fly-to camera, log capture,
         // variants, cameras, materials.
         .add_plugins(viewer::ui::ViewerUiPlugin)
+        .add_plugins(viewer::tf_overlay::TfOverlayPlugin)
         .add_plugins(viewer::keyboard::ViewerKeyboardPlugin)
         .add_plugins(viewer::overlays::OverlaysPlugin)
         .add_plugins(viewer::physics_overlay::PhysicsOverlayPlugin)

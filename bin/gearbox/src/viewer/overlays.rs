@@ -109,6 +109,9 @@ pub struct DisplayToggles {
     pub wireframe: bool,
     pub show_colliders: bool,
     pub light_intensity_scale: f32,
+    pub show_tf_frames: bool,
+    pub show_tf_names: bool,
+    pub show_tf_links: bool,
 }
 
 impl Default for DisplayToggles {
@@ -123,6 +126,9 @@ impl Default for DisplayToggles {
             wireframe: false,
             show_colliders: false,
             light_intensity_scale: 1.0,
+            show_tf_frames: false,
+            show_tf_names: false,
+            show_tf_links: false,
         }
     }
 }

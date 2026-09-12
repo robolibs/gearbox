@@ -136,7 +136,6 @@ impl Plugin for ServicesPlugin {
                     drain_service_commands.after(crate::attach::serve_attachments),
                     apply_service_controllers,
                     apply_process_controllers,
-                    draw_link_frames,
                 )
                     .chain(),
             )
@@ -908,48 +907,5 @@ fn feed_master_inputs(
             }
         }
         inputs.0.insert(slave.id.clone(), state);
-    }
-}
-
-/// Draw a frame at every link of a machine whose tf stream is on, so
-/// `gearbox machine tf` shows the same thing in the window.
-fn draw_link_frames(
-    mut gizmos: Gizmos,
-    inventory: Res<ControllerInventory>,
-    keys: Res<MachineAgentKeys>,
-    bus: Option<Res<GearboxBus>>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
-    transforms: Query<&GlobalTransform>,
-) {
-    let Some(bus) = bus else { return };
-    for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        let on = keys
-            .0
-            .iter()
-            .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
-            .and_then(|(ns, _)| bus.machines.get(ns))
-            .is_some_and(|agent| agent.tf_enabled());
-        if !on {
-            continue;
-        }
-        for link in &machine.links.links {
-            let Some(entity) = find_prim_entity(scene_root, &link.prim_path, &prims, &parents)
-            else {
-                continue;
-            };
-            let Ok(gt) = transforms.get(entity) else {
-                continue;
-            };
-            let size = if link.role == crate::links::LinkRole::Base {
-                0.8
-            } else {
-                0.35
-            };
-            gizmos.axes(*gt, size);
-        }
     }
 }
