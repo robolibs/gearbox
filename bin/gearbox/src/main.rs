@@ -1,13 +1,7 @@
-//! gearbox — USD simulator with the full bevy_openusd viewer panel
-//! set folded in on top of the planet world / multi-USD loader /
-//! play button.
-//!
-//! The simulator-specific surface (planet sphere, ChaseCamera +
-//! GroundGrid wiring, multi-USD `LoadQueue`, click-to-select) lives in
-//! `world` + `load`. The viewer-side panel
-//! set + selection-prim / fly-to / overlays / log capture / variants
-//! / cameras / materials live in the `viewer` submodule, ported from
-//! `bevy_openusd::*`.
+//! gearbox — USD tractor simulator. mara owns the window, ribbons and panes;
+//! Bevy renders the world into mara's viewport. The simulator surface
+//! (planet world, multi-USD loader, machines, physics, tool API) is wired in
+//! `app`, the panes in `host`, the per-frame viewer state in `viewer`.
 
 #![allow(
     dead_code,
@@ -22,8 +16,10 @@
     clippy::useless_conversion
 )]
 
+mod app;
 mod attach;
 mod controller;
+mod host;
 mod links;
 mod load;
 mod physics;
@@ -33,12 +29,13 @@ mod usd_ext;
 mod viewer;
 mod world;
 
-use bevy::log::LogPlugin;
-use bevy::prelude::*;
-use bevy_egui::EguiPlugin;
-use bevy_mara::MaraPlugin;
+use viewer::log::{LoaderLog, LoaderLogLayer};
 
-fn main() {
+/// Trace, panics and backtraces are mirrored here so a crash that takes the
+/// window is still readable afterwards.
+const LOG_FILE: &str = "/tmp/gearbox-sim.log";
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli_paths: Vec<std::path::PathBuf> = std::env::args()
         .skip(1)
         .map(|s| {
@@ -50,85 +47,69 @@ fn main() {
             }
         })
         .collect();
-
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "gearbox — USD simulator".to_string(),
-                        resolution: (1400, 900).into(),
-                        present_mode: present_mode_from_env(),
-                        ..default()
-                    }),
-                    ..default()
-                })
-                .set(AssetPlugin {
-                    file_path: "/".to_string(),
-                    unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow,
-                    ..default()
-                })
-                .set(LogPlugin {
-                    custom_layer: viewer::log_panel::loader_log_custom_layer,
-                    ..default()
-                }),
-        )
-        // Wireframe support for the Overlays panel toggle. Without
-        // this, `WireframeConfig` doesn't exist as a resource and
-        // the overlays sync system would panic on first frame.
-        .add_plugins(bevy::pbr::wireframe::WireframePlugin::default())
-        // ── UI stack: egui + Mara (glass theme + ribbons + widgets).
-        .add_plugins(EguiPlugin::default())
-        .add_plugins(MaraPlugin)
-        // ── USD pipeline (live stage projection) + gearbox's rapier world.
-        .add_plugins(usd_bevy::UsdPlugin)
-        .add_plugins(usd_bevy::asset::UsdAssetPlugin)
-        .add_plugins(physics::RapierAdapterPlugin)
-        .insert_resource(gearbox_api::PhysicsActive(false))
-        // ── Tool API: one host agent per process, one agent per machine.
-        // Identity, allowlist, and relay come from GEARBOX_* env vars.
-        .add_plugins(gearbox_api::GearboxBusPlugin {
-            config: gearbox_api::HostConfig::from_env(env!("CARGO_PKG_VERSION")),
-        })
-        .insert_resource(gearbox_api::UsdAssetRoot(load::default_asset_root()))
-        .add_plugins(gearbox_api::UsdLoaderPlugin)
-        .add_plugins(gearbox_api::UsdMarkerPlugin)
-        // ── Simulator surface: persistent planet world + the multi-
-        // USD `LoadQueue`-driven loader.
-        .add_plugins(world::WorldPlugin)
-        .add_plugins(controller::ControllerDiscoveryPlugin)
-        .add_plugins(attach::AttachPlugin)
-        .add_plugins(services::ServicesPlugin)
-        .add_plugins(physics_debug::PhysicsDebugPlugin)
-        .add_plugins(load::LoadPlugin { cli_paths })
-        // ── Viewer surface: full ribbon + panel set, overlays, prim
-        // tree, prim-level selection, fly-to camera, log capture,
-        // variants, cameras, materials.
-        .add_plugins(viewer::ui::ViewerUiPlugin)
-        .add_plugins(viewer::tf_overlay::TfOverlayPlugin)
-        .add_plugins(viewer::screenshot::ScreenshotPlugin)
-        .add_plugins(viewer::machine_panel::MachinePanelPlugin)
-        .add_plugins(viewer::agent_tree::AgentTreePlugin)
-        .add_plugins(viewer::keyboard::ViewerKeyboardPlugin)
-        .add_plugins(viewer::overlays::OverlaysPlugin)
-        .add_plugins(viewer::physics_overlay::PhysicsOverlayPlugin)
-        .run();
+    let log = LoaderLog::default();
+    init_tracing(&log);
+    install_panic_logger();
+    tracing::info!(target: "gearbox", "gearbox-sim starting — full log at {LOG_FILE}");
+    host::run(cli_paths, log)
 }
 
-/// `GEARBOX_PRESENT_MODE=vsync|novsync|immediate|mailbox|fifo`; a
-/// simulator defaults to no vsync so a compositor that withholds frames
-/// cannot stall the update loop.
-fn present_mode_from_env() -> bevy::window::PresentMode {
-    use bevy::window::PresentMode;
-    match std::env::var("GEARBOX_PRESENT_MODE")
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "vsync" | "autovsync" => PresentMode::AutoVsync,
-        "immediate" => PresentMode::Immediate,
-        "mailbox" => PresentMode::Mailbox,
-        "fifo" => PresentMode::Fifo,
-        _ => PresentMode::AutoNoVsync,
+/// Tracing to stderr, the log file and the Log pane. The embedded Bevy app
+/// has no `LogPlugin`, so this is the only subscriber. `RUST_LOG` overrides
+/// the filter.
+fn init_tracing(log: &LoaderLog) {
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let _ = std::fs::write(LOG_FILE, "");
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "warn,gearbox=info,gearbox_sim=info,gearbox_api=info,usd_bevy=info,agentio=error",
+        )
+    });
+    let to_file = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_FILE)
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap())
+    };
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(LoaderLogLayer::new(log))
+        .with(
+            fmt::layer()
+                .with_target(true)
+                .with_ansi(false)
+                .with_writer(std::io::stderr.and(to_file)),
+        )
+        .try_init();
+}
+
+/// Panics (message and backtrace) go to the log file and stderr; a panic in
+/// the embedded app would otherwise vanish with the window.
+fn install_panic_logger() {
+    unsafe {
+        if std::env::var_os("RUST_BACKTRACE").is_none() {
+            std::env::set_var("RUST_BACKTRACE", "full");
+        }
     }
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let msg = format!("\n==== gearbox-sim PANIC ====\n{info}\n{backtrace}\n");
+        tracing::error!(target: "gearbox", "PANIC: {info}");
+        eprint!("{msg}");
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_FILE)
+        {
+            let _ = f.write_all(msg.as_bytes());
+        }
+        prev(info);
+    }));
 }

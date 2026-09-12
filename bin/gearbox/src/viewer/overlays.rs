@@ -6,7 +6,7 @@
 //! light-intensity / wireframe glue.
 
 use bevy::prelude::*;
-use bevy_mara::GroundGrid;
+use mara::ui::modules::bevy::GroundGrid;
 use usd_bevy::UsdPrimRef;
 
 pub struct OverlaysPlugin;

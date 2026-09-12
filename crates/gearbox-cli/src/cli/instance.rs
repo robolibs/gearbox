@@ -45,11 +45,14 @@ enum Cmd {
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
     },
-    /// Save a screenshot of the viewer window to a PNG
+    /// Save a screenshot of the viewer window (panes included) to a PNG
     Screenshot {
         out: String,
         #[arg(long)]
         id: Option<String>,
+        /// Capture only the 3D viewport, without the panes
+        #[arg(long)]
+        viewport: bool,
         /// Seconds to wait for the file
         #[arg(long, default_value_t = 10.0)]
         timeout: f64,
@@ -86,7 +89,12 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Ping { id, count } => ping(ctx, id, count),
         Cmd::Wait { id, timeout } => wait(ctx, id, timeout),
         Cmd::Logs { id, follow, lines } => logs(ctx, id, follow, lines),
-        Cmd::Screenshot { out, id, timeout } => screenshot(ctx, id, &out, timeout),
+        Cmd::Screenshot {
+            out,
+            id,
+            viewport,
+            timeout,
+        } => screenshot(ctx, id, &out, viewport, timeout),
         Cmd::Camera {
             action,
             machine,
@@ -421,7 +429,13 @@ fn logs(ctx: &Ctx, id: Option<String>, follow: bool, lines: usize) -> Result<()>
     }
 }
 
-fn screenshot(ctx: &Ctx, id: Option<String>, out: &str, timeout: f64) -> Result<()> {
+fn screenshot(
+    ctx: &Ctx,
+    id: Option<String>,
+    out: &str,
+    viewport: bool,
+    timeout: f64,
+) -> Result<()> {
     let ctx = with_target(ctx, id)?;
     let target = ctx.target()?.clone();
     if target.pid == 0 {
@@ -431,7 +445,8 @@ fn screenshot(ctx: &Ctx, id: Option<String>, out: &str, timeout: f64) -> Result<
     }
     let out = std::path::absolute(out)?;
     let _ = std::fs::remove_file(&out);
-    let request = registry::registry_dir().join(format!("{}.shot", target.name));
+    let ext = if viewport { "shotvp" } else { "shot" };
+    let request = registry::registry_dir().join(format!("{}.{ext}", target.name));
     std::fs::write(&request, out.to_string_lossy().as_bytes())?;
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
     while !out.exists() {

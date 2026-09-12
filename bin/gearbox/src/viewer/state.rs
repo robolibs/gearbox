@@ -6,7 +6,7 @@
 //! top-level entity selection.
 
 use bevy::prelude::{Entity, Resource, Vec3};
-use bevy_mara::ChaseCamera;
+use mara::ui::modules::bevy::ChaseCamera;
 use std::path::PathBuf;
 
 /// The currently-focused loaded USD entity. Drives every panel that

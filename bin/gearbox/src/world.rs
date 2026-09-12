@@ -11,7 +11,6 @@ use crate::physics::PhysicsWorld;
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::Entities;
 use bevy::image::Image;
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster};
 use bevy::mesh::VertexAttributeValues;
 use bevy::pbr::{
@@ -22,9 +21,10 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
-use bevy::window::PrimaryWindow;
-use bevy_egui::input::egui_wants_any_keyboard_input;
-use bevy_mara::{ChaseCamera, GroundGrid, apply_rig};
+use mara::ui::modules::bevy::{
+    BevyViewportInput, BevyViewportRenderTarget, BevyViewportSet, ChaseCamera, GroundGrid,
+    apply_rig,
+};
 use gearbox_api::{GearboxBus, SceneEvent, event_kind};
 use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::{
@@ -196,14 +196,20 @@ impl Plugin for WorldPlugin {
             .init_resource::<StaticUsdPropBodies>()
             .init_resource::<PublishedUsdPoses>()
             .add_plugins(MaterialPlugin::<AntiRepeatTerrainMaterial>::default())
-            .add_systems(Startup, (spawn_world, spawn_flat_ground))
+            .add_systems(
+                Startup,
+                (
+                    spawn_world.after(BevyViewportSet::SetupTarget),
+                    spawn_flat_ground,
+                ),
+            )
             .add_systems(Update, mark_new_usd_terrain_roots)
             .add_systems(
                 Update,
                 (
                     chase_camera_control,
                     chase_camera_zoom,
-                    chase_camera_keys.run_if(not(egui_wants_any_keyboard_input)),
+                    chase_camera_keys,
                     chase_camera_floor,
                 )
                     .chain(),
@@ -312,6 +318,7 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    render_target: Option<Res<BevyViewportRenderTarget>>,
 ) {
     let radius = PLANET_RADIUS_M;
     let radius_f64 = PLANET_RADIUS_M as f64;
@@ -396,7 +403,7 @@ fn spawn_world(
     let mut camera_transform = Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y);
     apply_rig(&chase, &mut camera_transform);
 
-    commands.spawn((
+    let mut camera = commands.spawn((
         Name::new("Camera"),
         Camera3d::default(),
         camera_transform,
@@ -412,64 +419,27 @@ fn spawn_world(
             ..default()
         },
         chase,
-        transform_gizmo_bevy::GizmoCamera,
     ));
+    if let Some(target) = render_target {
+        camera.insert(bevy::camera::RenderTarget::from(target.0.clone()));
+    }
 }
 
+/// Pointer input arrives from the mara viewport in render-target pixels:
+/// a primary drag orbits, a middle drag pans, Shift with a middle drag
+/// lifts the focus instead.
 fn chase_camera_control(
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    primary_window: Query<&Window, With<PrimaryWindow>>,
-    mut pan_anchor: Local<Option<Vec2>>,
-    mut lift_anchor: Local<Option<Vec2>>,
-    mut orbit_anchor: Local<Option<Vec2>>,
+    input: Res<BevyViewportInput>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
-    let middle_pressed = mouse_buttons.pressed(MouseButton::Middle);
-    let left_pressed = mouse_buttons.pressed(MouseButton::Left);
-    let right_pressed = mouse_buttons.pressed(MouseButton::Right);
-
-    let lift_active = middle_pressed && (left_pressed || right_pressed);
-    let pan_active = middle_pressed && !lift_active;
-    let orbit_active = left_pressed && right_pressed && !middle_pressed;
-
-    if !pan_active {
-        *pan_anchor = None;
-    }
-    if !lift_active {
-        *lift_anchor = None;
-    }
-    if !orbit_active {
-        *orbit_anchor = None;
-    }
-
-    let cursor_position = primary_window
-        .single()
-        .ok()
-        .and_then(|w| w.cursor_position());
-    let mut pan_delta = Vec2::ZERO;
-    if pan_active && let Some(pos) = cursor_position {
-        if let Some(anchor) = *pan_anchor {
-            pan_delta = pos - anchor;
-        }
-        *pan_anchor = Some(pos);
-    }
-
-    let mut lift_delta = 0.0_f32;
-    if lift_active && let Some(pos) = cursor_position {
-        if let Some(anchor) = *lift_anchor {
-            lift_delta = (pos - anchor).y;
-        }
-        *lift_anchor = Some(pos);
-    }
-
-    let mut orbit_delta = Vec2::ZERO;
-    if orbit_active && let Some(pos) = cursor_position {
-        if let Some(anchor) = *orbit_anchor {
-            orbit_delta = pos - anchor;
-        }
-        *orbit_anchor = Some(pos);
-    }
-
+    let orbit_delta = Vec2::from(input.drag_delta);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let (pan_delta, lift_delta) = if shift {
+        (Vec2::ZERO, input.pan_delta[1])
+    } else {
+        (Vec2::from(input.pan_delta), 0.0)
+    };
     if pan_delta == Vec2::ZERO && lift_delta == 0.0 && orbit_delta == Vec2::ZERO {
         return;
     }
@@ -556,25 +526,22 @@ fn chase_camera_keys(
     }
 }
 
+/// The viewport reports scroll in 120-point units; one wheel notch is 50
+/// points in egui, so this brings it back to notches.
+const SCROLL_NOTCHES_PER_UNIT: f64 = 120.0 / 50.0;
+
 fn chase_camera_zoom(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut wheel: MessageReader<MouseWheel>,
+    input: Res<BevyViewportInput>,
     mut zoom_target: Local<Option<f64>>,
     mut last_written: Local<Option<f32>>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
     if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
-        wheel.read().for_each(drop);
         return;
     }
-    let mut scroll_delta = 0.0_f64;
-    for event in wheel.read() {
-        scroll_delta += match event.unit {
-            MouseScrollUnit::Line => event.y as f64,
-            MouseScrollUnit::Pixel => event.y as f64 / 32.0,
-        };
-    }
+    let scroll_delta = input.scroll_delta as f64 * SCROLL_NOTCHES_PER_UNIT;
 
     let Ok((mut cam, mut transform)) = cameras.single_mut() else {
         return;

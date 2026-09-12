@@ -4,7 +4,6 @@
 //! start.
 
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use usd_bevy::UsdPrimRef;
 
 use super::overlays::DisplayToggles;
@@ -22,7 +21,8 @@ impl Plugin for TfOverlayPlugin {
         app.init_gizmo_group::<TfGizmos>()
             .add_systems(Startup, configure_tf_gizmos)
             .add_systems(Update, draw_tf_gizmos)
-            .add_systems(EguiPrimaryContextPass, draw_tf_names);
+            .init_resource::<TfLabels>()
+            .add_systems(PostUpdate, publish_tf_labels);
     }
 }
 
@@ -118,41 +118,45 @@ fn draw_tf_gizmos(
     }
 }
 
-fn draw_tf_names(
+/// Link names with their position in the viewport, as a fraction of the
+/// render target, for the host to paint over the viewport.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct TfLabels(pub Vec<TfLabel>);
+
+#[derive(Debug, Clone)]
+pub struct TfLabel {
+    pub name: String,
+    pub at: [f32; 2],
+}
+
+fn publish_tf_labels(
     toggles: Res<DisplayToggles>,
     inventory: Res<ControllerInventory>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     transforms: Query<&GlobalTransform>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    mut contexts: EguiContexts,
+    mut labels: ResMut<TfLabels>,
 ) {
+    labels.0.clear();
     if !toggles.show_tf_names {
         return;
     }
     let Some((camera, cam_tr)) = cameras.iter().find(|(c, _)| c.is_active) else {
         return;
     };
-    let Ok(ctx) = contexts.ctx_mut() else {
+    let Some(size) = camera.logical_viewport_size() else {
         return;
     };
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Background,
-        egui::Id::new("gearbox_tf_names"),
-    ));
-    let font = egui::FontId::proportional(12.0);
-    let fg = egui::Color32::from_rgb(255, 235, 140);
-    let bg = egui::Color32::from_black_alpha(150);
     for machine in &inventory.machines {
         for frame in frames_of(machine, &prims, &parents, &transforms) {
             let Ok(screen) = camera.world_to_viewport(cam_tr, frame.transform.translation()) else {
                 continue;
             };
-            let pos = egui::pos2(screen.x + 6.0, screen.y - 6.0);
-            let galley = painter.layout_no_wrap(frame.name.to_string(), font.clone(), fg);
-            let rect = egui::Rect::from_min_size(pos, galley.size()).expand(2.0);
-            painter.rect_filled(rect, 2.0, bg);
-            painter.galley(pos, galley, fg);
+            labels.0.push(TfLabel {
+                name: frame.name.to_string(),
+                at: [screen.x / size.x, screen.y / size.y],
+            });
         }
     }
 }

@@ -1,21 +1,40 @@
-//! In-app log capture for the loader's tracing events. Ported
-//! verbatim from bevy_openusd. Filters on usd_bevy / usd_schema /
-//! usd_rapier / gearbox targets so the buffer doesn't fill with
-//! framework noise.
+//! In-app log capture for the Log pane. The mara host owns the tracing
+//! subscriber (the embedded Bevy app runs without a `LogPlugin`), so the
+//! layer is built there and its buffer is shared with the pane. Filters on
+//! usd_bevy / usd_schema / usd_rapier / gearbox targets so the buffer does
+//! not fill with framework noise.
 
-use bevy::log::BoxedLayer;
-use bevy::log::tracing::{self, Event, Level, Subscriber, field};
-use bevy::log::tracing_subscriber::{Layer, layer::Context};
-use bevy::prelude::*;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use tracing::{Event, Level, Subscriber, field};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+
 const MAX_LOG_LINES: usize = 500;
 
-#[derive(Resource, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct LoaderLog {
     pub buffer: Arc<Mutex<VecDeque<LogLine>>>,
+}
+
+impl LoaderLog {
+    /// The last `count` lines, oldest first, as `LEVEL target · message`.
+    pub fn tail(&self, count: usize) -> Vec<String> {
+        self.buffer
+            .lock()
+            .map(|buffer| {
+                buffer
+                    .iter()
+                    .rev()
+                    .take(count)
+                    .rev()
+                    .map(|line| format!("{} {} · {}", line.level, line.target, line.message))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +61,14 @@ impl field::Visit for LogVisitor {
 
 pub struct LoaderLogLayer {
     pub buffer: Arc<Mutex<VecDeque<LogLine>>>,
+}
+
+impl LoaderLogLayer {
+    pub fn new(log: &LoaderLog) -> Self {
+        Self {
+            buffer: Arc::clone(&log.buffer),
+        }
+    }
 }
 
 impl<S> Layer<S> for LoaderLogLayer
@@ -76,17 +103,3 @@ where
         }
     }
 }
-
-pub fn loader_log_custom_layer(app: &mut App) -> Option<BoxedLayer> {
-    let log = LoaderLog::default();
-    let layer = LoaderLogLayer {
-        buffer: Arc::clone(&log.buffer),
-    };
-    app.insert_resource(log);
-    Some(Box::new(layer))
-}
-
-#[allow(dead_code)]
-const _: () = {
-    let _ = tracing::Level::TRACE;
-};
