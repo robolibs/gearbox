@@ -55,6 +55,7 @@ fn main() {
                     primary_window: Some(Window {
                         title: "gearbox — USD simulator".to_string(),
                         resolution: (1400, 900).into(),
+                        present_mode: present_mode_from_env(),
                         ..default()
                     }),
                     ..default()
@@ -101,8 +102,27 @@ fn main() {
         // variants, cameras, materials.
         .add_plugins(viewer::ui::ViewerUiPlugin)
         .add_plugins(viewer::tf_overlay::TfOverlayPlugin)
+        .add_plugins(viewer::screenshot::ScreenshotPlugin)
         .add_plugins(viewer::keyboard::ViewerKeyboardPlugin)
         .add_plugins(viewer::overlays::OverlaysPlugin)
         .add_plugins(viewer::physics_overlay::PhysicsOverlayPlugin)
         .run();
+}
+
+/// `GEARBOX_PRESENT_MODE=vsync|novsync|immediate|mailbox|fifo`; a
+/// simulator defaults to no vsync so a compositor that withholds frames
+/// cannot stall the update loop.
+fn present_mode_from_env() -> bevy::window::PresentMode {
+    use bevy::window::PresentMode;
+    match std::env::var("GEARBOX_PRESENT_MODE")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "vsync" | "autovsync" => PresentMode::AutoVsync,
+        "immediate" => PresentMode::Immediate,
+        "mailbox" => PresentMode::Mailbox,
+        "fifo" => PresentMode::Fifo,
+        _ => PresentMode::AutoNoVsync,
+    }
 }

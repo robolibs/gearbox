@@ -8,6 +8,7 @@ pub mod log_panel;
 pub mod mara_ui;
 pub mod overlays;
 pub mod physics_overlay;
+pub mod screenshot;
 pub mod state;
 pub mod tf_overlay;
 pub mod ui;

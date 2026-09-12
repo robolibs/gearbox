@@ -52,7 +52,7 @@ impl HostConfig {
         cfg.log = std::env::var("GEARBOX_LOG").ok().filter(|s| !s.is_empty());
         if let Ok(list) = std::env::var("GEARBOX_ALLOW") {
             cfg.allow.extend(
-                list.split(|c| c == ':' || c == ',')
+                list.split([',', ';', ' ', '\n'])
                     .filter(|s| !s.is_empty())
                     .map(str::to_string),
             );

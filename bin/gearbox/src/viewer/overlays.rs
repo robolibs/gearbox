@@ -126,11 +126,19 @@ impl Default for DisplayToggles {
             wireframe: false,
             show_colliders: false,
             light_intensity_scale: 1.0,
-            show_tf_frames: false,
-            show_tf_names: false,
-            show_tf_links: false,
+            show_tf_frames: tf_env("frames"),
+            show_tf_names: tf_env("names"),
+            show_tf_links: tf_env("links"),
         }
     }
+}
+
+/// `GEARBOX_TF_OVERLAY=frames,names,links` (or `all`) switches TF overlay
+/// toggles on at start, for scripted runs and screenshots.
+fn tf_env(which: &str) -> bool {
+    std::env::var("GEARBOX_TF_OVERLAY")
+        .map(|v| v.split(',').any(|t| t.trim() == which || t.trim() == "all"))
+        .unwrap_or(false)
 }
 
 #[derive(Resource, Debug, Clone, Copy)]

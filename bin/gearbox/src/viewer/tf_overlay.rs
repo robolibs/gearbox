@@ -11,13 +11,25 @@ use super::overlays::DisplayToggles;
 use crate::controller::{ControllerInventory, MachineInstanceSpec, find_prim_entity};
 use crate::links::LinkRole;
 
+/// TF lines draw over geometry: a frame inside a body is still visible.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct TfGizmos;
+
 pub struct TfOverlayPlugin;
 
 impl Plugin for TfOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, draw_tf_gizmos)
+        app.init_gizmo_group::<TfGizmos>()
+            .add_systems(Startup, configure_tf_gizmos)
+            .add_systems(Update, draw_tf_gizmos)
             .add_systems(EguiPrimaryContextPass, draw_tf_names);
     }
+}
+
+fn configure_tf_gizmos(mut store: ResMut<GizmoConfigStore>) {
+    let (config, _) = store.config_mut::<TfGizmos>();
+    config.depth_bias = -1.0;
+    config.line.width = 2.5;
 }
 
 const LINK_COLOR: Color = Color::srgb(1.0, 0.85, 0.1);
@@ -87,7 +99,7 @@ fn draw_tf_gizmos(
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     transforms: Query<&GlobalTransform>,
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<TfGizmos>,
 ) {
     if !toggles.show_tf_frames && !toggles.show_tf_links {
         return;

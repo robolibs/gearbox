@@ -65,7 +65,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     let mut cmd = Command::new(&sim);
     cmd.args(&args.sim_args)
         .env("GEARBOX_NAME", &args.name)
-        .env("GEARBOX_ALLOW", allow.join(":"));
+        .env("GEARBOX_ALLOW", allow.join(","));
     if args.ephemeral {
         cmd.env("GEARBOX_EPHEMERAL", "1");
     }

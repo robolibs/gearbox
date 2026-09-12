@@ -45,6 +45,15 @@ enum Cmd {
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
     },
+    /// Save a screenshot of the viewer window to a PNG
+    Screenshot {
+        out: String,
+        #[arg(long)]
+        id: Option<String>,
+        /// Seconds to wait for the file
+        #[arg(long, default_value_t = 10.0)]
+        timeout: f64,
+    },
     /// Show the instance's log file
     Logs {
         id: Option<String>,
@@ -66,6 +75,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Ping { id, count } => ping(ctx, id, count),
         Cmd::Wait { id, timeout } => wait(ctx, id, timeout),
         Cmd::Logs { id, follow, lines } => logs(ctx, id, follow, lines),
+        Cmd::Screenshot { out, id, timeout } => screenshot(ctx, id, &out, timeout),
     }
 }
 
@@ -363,4 +373,36 @@ fn logs(ctx: &Ctx, id: Option<String>, follow: bool, lines: usize) -> Result<()>
             return Ok(());
         }
     }
+}
+
+fn screenshot(ctx: &Ctx, id: Option<String>, out: &str, timeout: f64) -> Result<()> {
+    let ctx = with_target(ctx, id)?;
+    let target = ctx.target()?.clone();
+    if target.pid == 0 {
+        return Err(CliError::error(
+            "instance addressed by did only; screenshot needs a registry entry",
+        ));
+    }
+    let out = std::path::absolute(out)?;
+    let _ = std::fs::remove_file(&out);
+    let request = registry::registry_dir().join(format!("{}.shot", target.name));
+    std::fs::write(&request, out.to_string_lossy().as_bytes())?;
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout);
+    while !out.exists() {
+        if Instant::now() >= deadline {
+            let _ = std::fs::remove_file(&request);
+            return Err(CliError::timeout(format!(
+                "instance `{}` did not write {} within {timeout}s",
+                target.name,
+                out.display()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    ctx.done(
+        &out.to_string_lossy(),
+        &format!("saved screenshot of `{}` to {}", target.name, out.display()),
+        || json!({ "instance": target.name, "path": out.to_string_lossy() }),
+    );
+    Ok(())
 }

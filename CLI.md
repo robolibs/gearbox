@@ -22,6 +22,7 @@ Find, inspect and stop instances; pick the default
 | `stop [OPTIONS] [ID]` | Ask an instance to shut down, then signal it |
 | `ping [OPTIONS] [ID]` | Round-trip time of `/gearbox/info` |
 | `wait [OPTIONS] [ID]` | Block until the instance answers |
+| `screenshot [OPTIONS] <OUT>` | Save a screenshot of the viewer window to a PNG |
 | `logs [OPTIONS] [ID]` | Show the instance's log file |
 
 ## `gearbox spawn`
