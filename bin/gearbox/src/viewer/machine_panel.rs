@@ -3,12 +3,13 @@
 //! paths the bus uses (`UiDrive` for twists, `ServiceCommands` and
 //! `LinkValues` for services and work controllers). Nothing here is fixed
 //! per machine kind; the widgets follow `gearbox:controller:*:type` and the
-//! link tree's element kinds and values.
+//! link tree's element kinds and values. Hitches share one container, PTOs
+//! another; everything but the machine head and the drive starts folded.
 
 use std::collections::HashSet;
 
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
+use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 
 use crate::controller::{
     CmdVel, ControllerInventory, ControllerKey, ControllerSpec, ControllerStates,
@@ -28,6 +29,7 @@ impl Plugin for MachinePanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MachinePanel>()
             .add_systems(Startup, open_from_env)
+            .add_systems(Update, wasd_drive)
             .add_systems(EguiPrimaryContextPass, draw_machine_panel);
     }
 }
@@ -44,11 +46,21 @@ pub struct MachinePanel {
     last_selection: Option<Entity>,
     /// Drive controllers the viewer currently holds.
     holding: HashSet<ControllerKey>,
+    /// The drive controller W/A/S/D steer, if any.
+    pub wasd: Option<ControllerKey>,
+    /// Machines whose containers have been folded once.
+    folded: HashSet<String>,
 }
 
 const DRIVE_TYPES: [&str; 2] = ["builtin:ackermann_cmd_vel", "builtin:diff_drive_cmd_vel"];
 const MAX_SPEED_MPS: f64 = 6.0;
 const MAX_YAW_RPS: f64 = 1.5;
+const WASD_SPEED_MPS: f32 = 2.5;
+const WASD_YAW_RPS: f32 = 0.8;
+const WASD_BOOST: f32 = 2.0;
+
+const GROUP_HITCHES: &str = "hitches";
+const GROUP_PTO: &str = "pto";
 
 fn cid(section: &str) -> MaraId {
     MaraId::new(("gearbox", RIB_MACHINE, section.to_string()))
@@ -111,6 +123,57 @@ fn element_links<'a>(machine: &'a MachineInstanceSpec, kind: &str) -> Vec<&'a Li
         .collect()
 }
 
+/// Which container a controller's pod lives in.
+fn group_of(c: &ControllerSpec) -> String {
+    match c.controller_type.as_str() {
+        "builtin:hitch" => GROUP_HITCHES.to_string(),
+        "builtin:pto" => GROUP_PTO.to_string(),
+        _ => c.instance.clone(),
+    }
+}
+
+/// W/A/S/D drive the held controller while the pane's WASD switch is on.
+fn wasd_drive(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut contexts: EguiContexts,
+    panel: Res<MachinePanel>,
+    mut ui_drive: ResMut<UiDrive>,
+) {
+    let Some(key) = panel.wasd.clone() else {
+        return;
+    };
+    if contexts
+        .ctx_mut()
+        .map(|c| c.wants_keyboard_input())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let axis =
+        |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i8 - keys.pressed(neg) as i8) as f32;
+    let boost = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+        WASD_BOOST
+    } else {
+        1.0
+    };
+    let cmd = CmdVel {
+        linear_mps: axis(KeyCode::KeyS, KeyCode::KeyW) * WASD_SPEED_MPS * boost,
+        angular_rps: axis(KeyCode::KeyD, KeyCode::KeyA) * WASD_YAW_RPS,
+    };
+    ui_drive.0.insert(key, cmd);
+}
+
+struct Block<'a> {
+    controller: &'a ControllerSpec,
+    key: ControllerKey,
+    group: String,
+    pod: usize,
+    link: Option<&'a LinkSpec>,
+    section_links: Vec<&'a LinkSpec>,
+    function_link: Option<&'a LinkSpec>,
+    bin_link: Option<&'a LinkSpec>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_machine_panel(
     mut contexts: EguiContexts,
@@ -145,8 +208,29 @@ fn draw_machine_panel(
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
-    let accent_col: bevy_egui::egui::Color32 = accent.0.into();
+    let accent_col: egui::Color32 = accent.0.into();
     let panel = &mut *panel;
+
+    // Every container but the head and the drive starts folded, once per
+    // machine.
+    if let Some(m) = machine
+        && !panel.folded.contains(&m.id)
+    {
+        panel.folded.insert(m.id.clone());
+        let mut fold: Vec<String> = vec![GROUP_HITCHES.to_string(), GROUP_PTO.to_string()];
+        fold.extend(
+            m.controllers
+                .iter()
+                .filter(|c| !DRIVE_TYPES.contains(&c.controller_type.as_str()))
+                .map(group_of),
+        );
+        ctx.data_mut(|d| {
+            for section in fold {
+                let id: egui::Id = cid(&section).into();
+                d.insert_persisted(id.with("body_open"), false);
+            }
+        });
+    }
 
     show_mara_pane_for_item(
         ctx,
@@ -174,10 +258,9 @@ fn draw_machine_panel(
             let Some(scene_root) = machine.scene_root else {
                 return;
             };
-            let id = machine.id.clone();
             body.add_normal(
                 cid("head"),
-                &id,
+                machine.id.clone(),
                 "cube",
                 vec![
                     Pod::new(pid("head", 0))
@@ -187,37 +270,45 @@ fn draw_machine_panel(
                 ],
             );
 
-            struct Block<'a> {
-                controller: &'a ControllerSpec,
-                key: ControllerKey,
-                link: Option<&'a LinkSpec>,
-                section_links: Vec<&'a LinkSpec>,
-                function_link: Option<&'a LinkSpec>,
-                bin_link: Option<&'a LinkSpec>,
-            }
             let mut blocks: Vec<Block> = Vec::new();
+            // Containers in order: drives, hitches, PTOs, the rest.
+            let mut containers: Vec<(String, String, &'static str, Vec<Pod>)> = Vec::new();
 
-            for controller in machine.controllers.iter().filter(|c| c.enabled) {
+            let mut ordered: Vec<&ControllerSpec> =
+                machine.controllers.iter().filter(|c| c.enabled).collect();
+            ordered.sort_by_key(|c| match c.controller_type.as_str() {
+                t if DRIVE_TYPES.contains(&t) => 0,
+                "builtin:hitch" => 1,
+                "builtin:pto" => 2,
+                _ => 3,
+            });
+
+            for controller in ordered {
                 let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
-                let section = controller.instance.clone();
                 let ty = controller.controller_type.as_str();
-                let title = format!(
-                    "{}  ·  {}",
-                    controller.instance,
-                    ty.trim_start_matches("builtin:")
-                );
+                let group = group_of(controller);
+                let pod_idx = containers
+                    .iter()
+                    .find(|c| c.0 == group)
+                    .map(|c| c.3.len())
+                    .unwrap_or(0);
                 let link = service_link(machine, controller);
-                let mut pod = Pod::new(pid(&section, 0));
+                let short = ty.trim_start_matches("builtin:");
+                let own_title = format!("{}  ·  {short}", controller.instance);
+                let mut pod = Pod::new(pid(&group, pod_idx));
                 let mut block = Block {
                     controller,
                     key: key.clone(),
+                    group: group.clone(),
+                    pod: pod_idx,
                     link,
                     section_links: Vec::new(),
                     function_link: None,
                     bin_link: None,
                 };
-                let icon;
+                let (title, icon);
                 if DRIVE_TYPES.contains(&ty) {
+                    title = own_title;
                     icon = "vehicle_tractor";
                     if let Some(state) = states.states.get(&key) {
                         pod = pod.with_readout(
@@ -229,12 +320,14 @@ fn draw_machine_panel(
                         );
                     }
                     let holding = panel.holding.contains(&key);
+                    let wasd = panel.wasd.as_ref() == Some(&key);
                     let cmd = ui_drive.0.get(&key).copied().unwrap_or(CmdVel {
                         linear_mps: 0.0,
                         angular_rps: 0.0,
                     });
                     pod = pod
                         .with_toggle_initial("Viewer drives", accent_col, holding)
+                        .with_toggle_initial("WASD keys", accent_col, wasd)
                         .with_slider(
                             "speed",
                             clamp(cmd.linear_mps as f64, -MAX_SPEED_MPS, MAX_SPEED_MPS),
@@ -255,14 +348,19 @@ fn draw_machine_panel(
                 } else {
                     match ty {
                         "builtin:hitch" | "builtin:joint_position" => {
+                            title = if ty == "builtin:hitch" {
+                                "Hitches".to_string()
+                            } else {
+                                own_title
+                            };
                             icon = "arrow_up";
                             let position =
                                 link_value(&values, machine, link, "position").unwrap_or(0.0);
-                            let range = link_value(&values, machine, link, "range");
+                            pod = pod.with_readout("controller", controller.instance.clone());
                             if let Some(l) = link {
                                 pod = pod.with_readout("link", l.name.clone());
                             }
-                            if let Some(r) = range {
+                            if let Some(r) = link_value(&values, machine, link, "range") {
                                 pod = pod.with_readout("range", format!("{r:.3} rad"));
                             }
                             pod = pod.with_slider(
@@ -275,10 +373,12 @@ fn draw_machine_panel(
                             );
                         }
                         "builtin:pto" => {
+                            title = "PTO".to_string();
                             icon = "arrow_sync";
                             let rpm = link_value(&values, machine, link, "rpm").unwrap_or(540.0);
                             let engaged =
                                 link_value(&values, machine, link, "engaged").unwrap_or(0.0) > 0.5;
+                            pod = pod.with_readout("controller", controller.instance.clone());
                             if let Some(l) = link {
                                 pod = pod.with_readout("link", l.name.clone());
                             }
@@ -287,6 +387,7 @@ fn draw_machine_panel(
                                 .with_toggle_initial("engaged", accent_col, engaged);
                         }
                         "builtin:joint_velocity" => {
+                            title = own_title;
                             icon = "arrow_sync";
                             let vel = link_value(&values, machine, link, "velocity").unwrap_or(0.0);
                             pod = pod.with_slider(
@@ -299,6 +400,7 @@ fn draw_machine_panel(
                             );
                         }
                         "builtin:hydraulic_valve" => {
+                            title = own_title;
                             icon = "arrow_sort";
                             let flow = link_value(&values, machine, link, "flow").unwrap_or(0.0);
                             pod = pod.with_slider(
@@ -311,6 +413,7 @@ fn draw_machine_panel(
                             );
                         }
                         "builtin:brake" => {
+                            title = own_title;
                             icon = "record_stop";
                             let level = link_value(&values, machine, link, "level").unwrap_or(0.0);
                             pod = pod.with_slider(
@@ -323,6 +426,7 @@ fn draw_machine_panel(
                             );
                         }
                         "builtin:trailer_steer" => {
+                            title = own_title;
                             icon = "arrow_turn_right";
                             let max = controller.max_steer_deg.unwrap_or(35.0) as f64;
                             let angle = link_value(&values, machine, link, "angle_rad")
@@ -338,6 +442,7 @@ fn draw_machine_panel(
                             );
                         }
                         "builtin:section_control" => {
+                            title = own_title;
                             icon = "grid";
                             let target = controller
                                 .target
@@ -377,6 +482,7 @@ fn draw_machine_panel(
                             }
                         }
                         "builtin:rate_control" => {
+                            title = own_title;
                             icon = "drop";
                             let target = controller
                                 .target
@@ -417,6 +523,7 @@ fn draw_machine_panel(
                             }
                         }
                         _ => {
+                            title = own_title;
                             icon = "options";
                             pod = pod.with_readout(
                                 "command",
@@ -425,15 +532,21 @@ fn draw_machine_panel(
                         }
                     }
                 }
-                body.add_normal(cid(&section), title, icon, vec![pod]);
+                if let Some(c) = containers.iter_mut().find(|c| c.0 == group) {
+                    c.3.push(pod);
+                } else {
+                    containers.push((group, title, icon, vec![pod]));
+                }
                 blocks.push(block);
+            }
+            for (group, title, icon, pods) in containers {
+                body.add_normal(cid(&group), title, icon, pods);
             }
 
             let responses = body.render();
             for block in blocks {
                 let c = block.controller;
-                let section = c.instance.as_str();
-                let Some(resp) = pod_response(&responses, cid(section), 0) else {
+                let Some(resp) = pod_response(&responses, cid(&block.group), block.pod) else {
                     continue;
                 };
                 let ty = c.controller_type.as_str();
@@ -450,12 +563,33 @@ fn draw_machine_panel(
                         } else {
                             panel.holding.remove(&block.key);
                             ui_drive.0.remove(&block.key);
+                            if panel.wasd.as_ref() == Some(&block.key) {
+                                panel.wasd = None;
+                            }
                         }
                     }
-                    if panel.holding.contains(&block.key) {
+                    if let Some(t) = resp.toggles.get(1)
+                        && t.changed
+                    {
+                        if t.on {
+                            panel.wasd = Some(block.key.clone());
+                            panel.holding.insert(block.key.clone());
+                        } else if panel.wasd.as_ref() == Some(&block.key) {
+                            panel.wasd = None;
+                            ui_drive.0.insert(
+                                block.key.clone(),
+                                CmdVel {
+                                    linear_mps: 0.0,
+                                    angular_rps: 0.0,
+                                },
+                            );
+                        }
+                    }
+                    let wasd_here = panel.wasd.as_ref() == Some(&block.key);
+                    if panel.holding.contains(&block.key) && !wasd_here {
                         let speed = resp.sliders.first().map(|s| s.value).unwrap_or(0.0);
                         let yaw = resp.sliders.get(1).map(|s| s.value).unwrap_or(0.0);
-                        let stop = button_clicked(&responses, cid(section), 0, 0);
+                        let stop = button_clicked(&responses, cid(&block.group), block.pod, 0);
                         ui_drive.0.insert(
                             block.key.clone(),
                             if stop {
@@ -474,85 +608,48 @@ fn draw_machine_panel(
                     continue;
                 }
                 let changed = |i: usize| resp.sliders.get(i).filter(|s| s.changed).map(|s| s.value);
+                let mut set = |name: &str, v: f64| {
+                    set_service_value(
+                        &mut service,
+                        &mut values,
+                        machine,
+                        &block.key,
+                        block.link,
+                        name,
+                        v,
+                    );
+                };
                 match ty {
                     "builtin:hitch" | "builtin:joint_position" => {
                         if let Some(v) = changed(0) {
-                            set_service_value(
-                                &mut service,
-                                &mut values,
-                                machine,
-                                &block.key,
-                                block.link,
-                                "position",
-                                v,
-                            );
+                            set("position", v);
                         }
                     }
                     "builtin:pto" => {
                         if let Some(t) = resp.toggles.first()
                             && t.changed
                         {
-                            set_service_value(
-                                &mut service,
-                                &mut values,
-                                machine,
-                                &block.key,
-                                block.link,
-                                "engaged",
-                                t.on as u8 as f64,
-                            );
+                            set("engaged", t.on as u8 as f64);
                         }
                     }
                     "builtin:joint_velocity" => {
                         if let Some(v) = changed(0) {
-                            set_service_value(
-                                &mut service,
-                                &mut values,
-                                machine,
-                                &block.key,
-                                block.link,
-                                "velocity",
-                                v,
-                            );
+                            set("velocity", v);
                         }
                     }
                     "builtin:hydraulic_valve" => {
                         if let Some(v) = changed(0) {
-                            set_service_value(
-                                &mut service,
-                                &mut values,
-                                machine,
-                                &block.key,
-                                block.link,
-                                "flow",
-                                v,
-                            );
+                            set("flow", v);
                         }
                     }
                     "builtin:brake" => {
                         if let Some(v) = changed(0) {
-                            set_service_value(
-                                &mut service,
-                                &mut values,
-                                machine,
-                                &block.key,
-                                block.link,
-                                "level",
-                                v,
-                            );
+                            set("level", v);
                         }
                     }
                     "builtin:trailer_steer" => {
                         if let Some(v) = changed(0) {
-                            set_service_value(
-                                &mut service,
-                                &mut values,
-                                machine,
-                                &block.key,
-                                block.link,
-                                "angle_rad",
-                                v.to_radians(),
-                            );
+                            set("angle_rad", v.to_radians());
                         }
                     }
                     "builtin:section_control" => {
