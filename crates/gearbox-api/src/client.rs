@@ -131,11 +131,13 @@ impl Client {
     }
 
     pub fn load(&self, req: &UsdLoad) -> agentio::Result<Status> {
-        self.call(topics::USD_LOAD, req)
+        let stamped = req.clone().with_prop(SENT_AT, &now_unix_ms().to_string());
+        self.call(topics::USD_LOAD, &stamped)
     }
 
     pub fn delete(&self, id: &str) -> agentio::Result<Status> {
-        self.call(topics::USD_DELETE, &UsdRef::new(id))
+        let req = UsdRef::new(id).with_prop(SENT_AT, &now_unix_ms().to_string());
+        self.call(topics::USD_DELETE, &req)
     }
 
     pub fn marker_set(&self, id: &str, x: f32, y: f32, z: f32) -> agentio::Result<Status> {

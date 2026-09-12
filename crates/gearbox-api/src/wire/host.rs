@@ -373,6 +373,12 @@ impl UsdRef {
         }
     }
 
+    pub fn with_prop(mut self, key: &str, value: &str) -> Self {
+        let props = Props::from_bytes(&self.props).with(key, value);
+        self.props = props.into_bytes();
+        self
+    }
+
     pub fn id(&self) -> String {
         Props::from_bytes(&self.props).get("id").unwrap_or_default()
     }

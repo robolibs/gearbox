@@ -6,7 +6,7 @@ pub mod host;
 pub mod json;
 pub mod machine;
 
-pub use common::{Env, Ping, Props, Status, code, decode, pack, unpack};
+pub use common::{Env, Ping, Props, SENT_AT, Status, code, decode, now_unix_ms, pack, unpack};
 pub use host::{
     ClearRequest, ClockCommand, ClockState, HostInfo, ListQuery, MachineRef, MarkerRef, MarkerSet,
     SceneEvent, SceneObject, Selection, UsdLoad, UsdRef, category, clear_scope, clock_op,

@@ -95,6 +95,7 @@ pub struct HostBus {
     pub agent: Agent,
     pub config: HostConfig,
     started: Instant,
+    started_unix_ms: u64,
     info: Registered<ReqServer<Env, Env>>,
     clock: Registered<ReqServer<Env, Env>>,
     clock_state: Registered<Publisher<Env>>,
@@ -146,6 +147,7 @@ impl HostBus {
             agent,
             config,
             started: Instant::now(),
+            started_unix_ms: now_unix_ms(),
         };
         if bus.config.write_registry {
             if let Err(err) = registry::write(&bus.registry_entry()) {
@@ -216,12 +218,26 @@ impl HostBus {
         serve_que(&mut self.list, f)
     }
 
-    pub fn serve_usd_load(&mut self, f: impl FnMut(UsdLoad) -> Status) -> usize {
-        serve_req(&mut self.usd_load, f)
+    pub fn serve_usd_load(&mut self, mut f: impl FnMut(UsdLoad) -> Status) -> usize {
+        let started = self.started_unix_ms;
+        serve_req(&mut self.usd_load, |req: UsdLoad| {
+            if predates(&req.props, started) {
+                stale_status("load", &req.id())
+            } else {
+                f(req)
+            }
+        })
     }
 
-    pub fn serve_usd_delete(&mut self, f: impl FnMut(UsdRef) -> Status) -> usize {
-        serve_req(&mut self.usd_delete, f)
+    pub fn serve_usd_delete(&mut self, mut f: impl FnMut(UsdRef) -> Status) -> usize {
+        let started = self.started_unix_ms;
+        serve_req(&mut self.usd_delete, |req: UsdRef| {
+            if predates(&req.props, started) {
+                stale_status("delete", &req.id())
+            } else {
+                f(req)
+            }
+        })
     }
 
     pub fn serve_marker_set(&mut self, f: impl FnMut(MarkerSet) -> Status) -> usize {
@@ -274,6 +290,23 @@ pub fn shm_limits() -> agentio::LocalConfig {
 
 /// Drain every pending request on a req/res server, answering each with
 /// the closure. Undecodable requests are dropped.
+/// Requests left over from a client's session with an earlier instance of
+/// this host arrive again when the host restarts; the `sent_at` stamp tells
+/// them apart from live ones. Unstamped requests pass.
+const STALE_SKEW_MS: u64 = 2_000;
+
+fn predates(props: &[u8], started_unix_ms: u64) -> bool {
+    Props::from_bytes(props)
+        .get(SENT_AT)
+        .and_then(|s| s.parse::<u64>().ok())
+        .is_some_and(|sent| sent + STALE_SKEW_MS < started_unix_ms)
+}
+
+fn stale_status(what: &str, id: &str) -> Status {
+    eprintln!("gearbox-api: dropped {what} `{id}` sent before this instance started");
+    Status::err(code::REFUSED, "request predates this instance")
+}
+
 pub fn serve_req<Req, Res>(server: &mut ReqServer<Env, Env>, mut f: impl FnMut(Req) -> Res) -> usize
 where
     Req: DataPodDecode + DataPodValidate + 'static,

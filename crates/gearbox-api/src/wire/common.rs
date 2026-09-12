@@ -2,6 +2,17 @@
 
 use datapod::{DataPodDecode, Map, WireError};
 
+/// Prop carrying the sender's wall clock in unix milliseconds; a host drops
+/// load and delete requests stamped before it started.
+pub const SENT_AT: &str = "sent_at";
+
+pub fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 pub mod code {
     pub const OK: u32 = 0;
     pub const ERROR: u32 = 1;
