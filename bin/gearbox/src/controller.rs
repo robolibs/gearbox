@@ -4323,10 +4323,20 @@ fn guard_chassis_inertia(
         );
         let props = body.mass_properties().local_mprops;
         let authored = props.principal_inertia();
-        let too_small = authored.x < estimate.x * INERTIA_PLAUSIBLE_FRACTION
-            || authored.y < estimate.y * INERTIA_PLAUSIBLE_FRACTION
-            || authored.z < estimate.z * INERTIA_PLAUSIBLE_FRACTION;
-        if !too_small {
+        // Per axis: an authored value that is plausible stays.
+        let fix = |a: f64, e: f64| {
+            if a < e * INERTIA_PLAUSIBLE_FRACTION {
+                e
+            } else {
+                a
+            }
+        };
+        let estimate = Vector::new(
+            fix(authored.x, estimate.x),
+            fix(authored.y, estimate.y),
+            fix(authored.z, estimate.z),
+        );
+        if estimate == authored {
             continue;
         }
         let com = props.local_com;

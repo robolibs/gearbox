@@ -220,7 +220,7 @@ The controller's `body` (or the machine `body`) MUST point at a prim that:
 - `physics:diagonalInertia` MUST be plausible for the mass. The runtime
   compares each component with a box estimate from the chassis collider
   bounds (`m/12 · (b² + c²)`); when any component is below 25 % of that
-  estimate it substitutes the estimate for the whole tensor and logs
+  estimate it substitutes the estimate on that axis and logs
   `chassis inertia (...) is implausible`. A 3.8 t tractor authored at
   452 kg·m² on every axis rolled on its suspension and crept at rest until
   this guard existed; the fix belongs in the asset, the guard only keeps
