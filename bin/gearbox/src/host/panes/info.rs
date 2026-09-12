@@ -6,7 +6,7 @@ use mara::ui::mara_core;
 use mara_core::pane::PaneBody;
 use mara_core::pod::Pod;
 
-use super::{PaneCtx, cid, nonempty_or, pid};
+use super::{PaneCtx, cid, nonempty_or, pid, short_path};
 use crate::host::PANE_INFO as P;
 use crate::viewer::state::StageInfo;
 
@@ -19,7 +19,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         "document",
         vec![
             Pod::new(pid(P, "stage", 0))
-                .with_readout("path", nonempty_or(&info.path, "No active stage"))
+                .with_readout("path", short_path(nonempty_or(&info.path, "No active stage"), 34))
                 .with_readout(
                     "default prim",
                     info.default_prim.as_deref().unwrap_or("None"),

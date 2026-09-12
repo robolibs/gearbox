@@ -30,7 +30,14 @@ impl LoaderLog {
                     .rev()
                     .take(count)
                     .rev()
-                    .map(|line| format!("{} {} · {}", line.level, line.target, line.message))
+                    .map(|line| {
+                        let message: String = line.message.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let mut text = format!("{} {} · {message}", line.level, line.target);
+                        if text.chars().count() > 160 {
+                            text = text.chars().take(159).chain(std::iter::once('…')).collect();
+                        }
+                        text
+                    })
                     .collect()
             })
             .unwrap_or_default()

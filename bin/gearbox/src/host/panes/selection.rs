@@ -9,7 +9,9 @@ use usd_bevy::UsdPrimRef;
 use usd_bevy::route::meta::UsdKind;
 use usd_bevy::route::{audio::UsdSpatialAudio, coverage::UsdProcedural};
 
-use super::{PaneCtx, button_clicked, cid, nonempty_or, pick_usd_file, pid, pod_response};
+use super::{
+    PaneCtx, button_clicked, cid, nonempty_or, pick_usd_file, pid, pod_response, short_path,
+};
 use crate::host::PANE_SELECTION as P;
 use crate::load::LoadedAsset;
 use crate::viewer::commands::HostCommand;
@@ -31,7 +33,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         "folder",
         vec![
             Pod::new(pid(P, "stage", 0))
-                .with_readout("file", nonempty_or(&info.path, "No active stage"))
+                .with_readout("file", short_path(nonempty_or(&info.path, "No active stage"), 34))
                 .with_readout(
                     "default prim",
                     info.default_prim.as_deref().unwrap_or("None"),
@@ -79,7 +81,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         Some((_, label, path, world_pos, local, yaw)) => {
             let mut pod = Pod::new(pose_pod)
                 .with_readout("asset", label.clone())
-                .with_readout("path", path.clone())
+                .with_readout("path", short_path(path, 34))
                 .with_readout(
                     "position",
                     format!(

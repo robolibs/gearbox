@@ -6,6 +6,7 @@
 pub mod capture;
 pub mod keys;
 pub mod panes;
+pub mod replay;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -94,6 +95,7 @@ pub struct GearboxApp {
 
 impl WindowApp for GearboxApp {
     fn new(ctx: CreationContext<'_>) -> Self {
+        replay::install(ctx.__internal_egui_ctx());
         let init = INIT.lock().unwrap().take();
         let (cli_paths, log) = match init {
             Some(init) => (init.cli_paths, init.log),
@@ -205,7 +207,7 @@ impl WindowApp for GearboxApp {
                 PANE_CONTROLLERS,
                 "options",
                 "Machine controllers",
-                PaneAnchor::LeftRail(RailZone::Middle),
+                PaneAnchor::LeftRail(RailZone::Start),
                 |body| panes::controllers::show(body, &mut world.borrow_mut(), &ctx),
             )
             .action_in(
@@ -296,6 +298,14 @@ fn hotkeys(
 ) {
     use egui::Key;
     let (ctrl, pressed) = egui.input(|i| {
+        let hit = |key: Key| {
+            i.events.iter().any(|event| {
+                matches!(event, egui::Event::Key { key: k, pressed: true, repeat: false, .. } if *k == key)
+            })
+        };
+        let ctrl = i.events.iter().any(|event| {
+            matches!(event, egui::Event::Key { pressed: true, modifiers, .. } if modifiers.ctrl)
+        }) || i.modifiers.ctrl;
         let keys = [
             Key::T,
             Key::N,
@@ -314,10 +324,7 @@ fn hotkeys(
             Key::R,
             Key::K,
         ];
-        (
-            i.modifiers.ctrl,
-            keys.map(|k| i.key_pressed(k)),
-        )
+        (ctrl, keys.map(hit))
     });
     let [t, n, i, o, m, f, slash, question, g, x, p, b, y, c, r, k] = pressed;
     if ctrl {

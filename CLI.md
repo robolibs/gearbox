@@ -22,7 +22,9 @@ Find, inspect and stop instances; pick the default
 | `stop [OPTIONS] [ID]` | Ask an instance to shut down, then signal it |
 | `ping [OPTIONS] [ID]` | Round-trip time of `/gearbox/info` |
 | `wait [OPTIONS] [ID]` | Block until the instance answers |
-| `screenshot [OPTIONS] <OUT>` | Save a screenshot of the viewer window to a PNG |
+| `screenshot [OPTIONS] <OUT>` | Save a screenshot of the viewer window (panes included) to a PNG |
+| `camera [OPTIONS] <ACTION> [MACHINE]` | Move the viewer camera: `fly MACHINE` flies behind a machine like a double-click in the Agents pane, `follow MACHINE` pins the camera to it, `unfollow` releases it |
+| `ui [OPTIONS] [STEPS]...` | Drive the window with scripted input, one step per argument or per `;`-separated part: `move X Y`, `down X Y`, `up X Y`, `click X Y`, `scroll DX DY`, `text …`, `key NAME`, `wait MS` |
 | `logs [OPTIONS] [ID]` | Show the instance's log file |
 
 ## `gearbox spawn`

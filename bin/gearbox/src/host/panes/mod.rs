@@ -144,3 +144,26 @@ pub fn pick_usd_file() -> Option<PathBuf> {
         .add_filter("USD stages", &["usda", "usdc", "usd", "usdz"])
         .pick_file()
 }
+
+/// A path that fits a readout: the file name when it fits, else the tail
+/// of the path with an ellipsis in front.
+pub fn short_path(path: &str, max_chars: usize) -> String {
+    let count = path.chars().count();
+    if count <= max_chars {
+        return path.to_string();
+    }
+    let tail: String = path
+        .chars()
+        .skip(count.saturating_sub(max_chars.saturating_sub(1)))
+        .collect();
+    format!("…{tail}")
+}
+
+impl PaneCtx<'_> {
+    /// Overwrite a slider's persisted value, for a control that resets it
+    /// (a Stop button under speed sliders).
+    pub fn set_slider(&self, pod: MaraId, index: usize, value: f64) {
+        let key: egui::Id = pod.with(("mara_pod_slider_val", index)).into();
+        self.egui.data_mut(|d| d.insert_persisted(key, value));
+    }
+}

@@ -149,7 +149,10 @@ pub(crate) fn apply_host_commands(
                     s.machine_fly.target = Some(FlyTarget::new(root, body, cam));
                 }
             }
-            HostCommand::ToggleFollow(root) => s.follow.toggle(root),
+            HostCommand::ToggleFollow(root) => {
+                s.follow.toggle(root);
+                debug!("gearbox-viewer: follow toggled -> {:?}", s.follow.entity);
+            }
             HostCommand::SetVisibility(entity, visible) => {
                 if let Ok(mut v) = q.visibility.get_mut(entity) {
                     *v = if visible {

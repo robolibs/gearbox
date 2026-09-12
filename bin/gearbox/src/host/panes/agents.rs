@@ -136,6 +136,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     if let Some(i) = list.radio_clicked
         && let Some((root, _)) = rows.get(i)
     {
+        tracing::debug!(target: "gearbox", "agents pane: radio {i} clicked (pinned now {:?})", list.pinned);
         ctx.send(HostCommand::ToggleFollow(*root));
     }
 }

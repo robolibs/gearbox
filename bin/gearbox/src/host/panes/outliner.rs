@@ -189,7 +189,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
             Pod::new(pid(P, "scene", 1))
                 .with_separator(SeparatorStyle::Line)
                 .fill()
-                .with_tree(7, move |tree| {
+                .with_tree(16, move |tree| {
                     if roots.is_empty() {
                         let mut none = false;
                         let mut slot = [TreeIconSlot::new(

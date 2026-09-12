@@ -68,6 +68,14 @@ enum Cmd {
         #[arg(long)]
         id: Option<String>,
     },
+    /// Drive the window with scripted input, one step per argument or per
+    /// `;`-separated part: `move X Y`, `down X Y`, `up X Y`, `click X Y`,
+    /// `scroll DX DY`, `text …`, `key NAME`, `wait MS`
+    Ui {
+        steps: Vec<String>,
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// Show the instance's log file
     Logs {
         id: Option<String>,
@@ -95,6 +103,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             viewport,
             timeout,
         } => screenshot(ctx, id, &out, viewport, timeout),
+        Cmd::Ui { steps, id } => ui(ctx, id, &steps),
         Cmd::Camera {
             action,
             machine,
@@ -464,6 +473,33 @@ fn screenshot(
         &out.to_string_lossy(),
         &format!("saved screenshot of `{}` to {}", target.name, out.display()),
         || json!({ "instance": target.name, "path": out.to_string_lossy() }),
+    );
+    Ok(())
+}
+
+fn ui(ctx: &Ctx, id: Option<String>, steps: &[String]) -> Result<()> {
+    let ctx = with_target(ctx, id)?;
+    let target = ctx.target()?.clone();
+    if target.pid == 0 {
+        return Err(CliError::error(
+            "instance addressed by did only; ui needs a registry entry",
+        ));
+    }
+    let script: Vec<String> = steps
+        .iter()
+        .flat_map(|s| s.split(';'))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if script.is_empty() {
+        return Err(CliError::error("ui needs at least one step"));
+    }
+    let request = registry::registry_dir().join(format!("{}.ui", target.name));
+    std::fs::write(&request, script.join("\n").as_bytes())?;
+    ctx.done(
+        &script.join("; "),
+        &format!("{} ui step(s) sent to `{}`", script.len(), target.name),
+        || json!({ "instance": target.name, "steps": script }),
     );
     Ok(())
 }

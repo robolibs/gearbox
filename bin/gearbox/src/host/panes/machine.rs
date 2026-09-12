@@ -419,6 +419,11 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                     let speed = resp.sliders.first().map(|s| s.value).unwrap_or(0.0);
                     let yaw = resp.sliders.get(1).map(|s| s.value).unwrap_or(0.0);
                     let stop = button_clicked(&responses, cid(P, &block.group), block.pod, 0);
+                    if stop {
+                        let pod = pid(P, &block.group, block.pod);
+                        ctx.set_slider(pod, 0, 0.0);
+                        ctx.set_slider(pod, 1, 0.0);
+                    }
                     ui_drive.0.insert(
                         block.key.clone(),
                         if stop {
