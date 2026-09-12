@@ -21,6 +21,11 @@ What the finished plans (`PLAN.md`, `PLAN_COM.md`, `PLAN_CLI.md`,
 
 ## Upstream asks against agentio
 
+- Queued requests (`/gearbox/usd/load`, `/gearbox/usd/delete`) sent to a
+  host that has since restarted replay into the new host within a second
+  of it binding, so a machine spawned in the last session reappears. The
+  host should drop requests older than its start, or the queue should not
+  survive the endpoint.
 - Python bindings for `Agent` (identity, `FrontDoor` resolution, typed
   `datapod_*` clients).
 - Host-local rendezvous: enumerate agents on this host without their ids.
