@@ -46,16 +46,29 @@ pub const RIB_LOG: &str = "viewer_log";
 pub const RIB_PLAY: &str = "viewer_play";
 pub const RIB_CLEAR: &str = "viewer_clear";
 
-const RIBBONS: &[RibbonDef] = &[RibbonDef {
-    id: RIBBON_LEFT,
-    edge: RibbonEdge::Left,
-    role: RibbonRole::Panel,
-    mode: RibbonMode::ThreeSided,
-    draggable: false,
-    accepts: &[],
-}];
+pub const RIBBON_RIGHT: &str = "viewer_right";
+pub const RIB_MACHINE: &str = "viewer_machine";
 
-const RIBBON_ITEMS: &[RibbonItem] = &[
+pub(crate) const RIBBONS: &[RibbonDef] = &[
+    RibbonDef {
+        id: RIBBON_LEFT,
+        edge: RibbonEdge::Left,
+        role: RibbonRole::Panel,
+        mode: RibbonMode::ThreeSided,
+        draggable: false,
+        accepts: &[],
+    },
+    RibbonDef {
+        id: RIBBON_RIGHT,
+        edge: RibbonEdge::Right,
+        role: RibbonRole::Panel,
+        mode: RibbonMode::ThreeSided,
+        draggable: false,
+        accepts: &[],
+    },
+];
+
+pub(crate) const RIBBON_ITEMS: &[RibbonItem] = &[
     RibbonItem {
         id: RIB_SELECTION,
         ribbon: RIBBON_LEFT,
@@ -93,6 +106,16 @@ const RIBBON_ITEMS: &[RibbonItem] = &[
         slot: 3,
         glyph: RibbonGlyph::Icon("cube"),
         tooltip: "Cameras",
+        child_ribbon: None,
+        role: None,
+    },
+    RibbonItem {
+        id: RIB_MACHINE,
+        ribbon: RIBBON_RIGHT,
+        cluster: RibbonCluster::Start,
+        slot: 0,
+        glyph: RibbonGlyph::Icon("vehicle_tractor"),
+        tooltip: "Machine: drive and services of the selected machine",
         child_ribbon: None,
         role: None,
     },
@@ -1034,7 +1057,7 @@ struct MaraShellParams<'w, 's> {
     reset: MessageWriter<'w, gearbox_api::SimResetRequest>,
 }
 
-fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShellParams) {
+pub(crate) fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShellParams) {
     let MaraShellParams {
         accent,
         mut open,
@@ -1680,7 +1703,7 @@ fn nonempty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-fn pod_response(
+pub(crate) fn pod_response(
     responses: &HashMap<MaraId, Vec<PodResponse>>,
     container: MaraId,
     pod: usize,
@@ -1688,7 +1711,7 @@ fn pod_response(
     responses.get(&container).and_then(|pods| pods.get(pod))
 }
 
-fn button_clicked(
+pub(crate) fn button_clicked(
     responses: &HashMap<MaraId, Vec<PodResponse>>,
     container: MaraId,
     pod: usize,

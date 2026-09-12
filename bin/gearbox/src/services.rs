@@ -445,7 +445,10 @@ const DEFAULT_PTO_RPM: f64 = 540.0;
 const DEFAULT_VALVE_RATE: f64 = 0.5;
 const DEFAULT_TRAILER_STEER_DEG: f64 = 35.0;
 
-fn controller_joints<'a>(machine: &'a MachineInstanceSpec, c: &'a ControllerSpec) -> Vec<&'a str> {
+pub(crate) fn controller_joints<'a>(
+    machine: &'a MachineInstanceSpec,
+    c: &'a ControllerSpec,
+) -> Vec<&'a str> {
     match c.controller_type.as_str() {
         "builtin:brake" => {
             let mut v: Vec<&str> = c.wheel_joints.iter().map(String::as_str).collect();
@@ -476,7 +479,7 @@ fn controller_joints<'a>(machine: &'a MachineInstanceSpec, c: &'a ControllerSpec
 }
 
 /// The link a joint moves: the tree link connected through that joint prim.
-fn moved_link<'a>(tree: &'a LinkTree, joint_prim: &str) -> Option<&'a LinkSpec> {
+pub(crate) fn moved_link<'a>(tree: &'a LinkTree, joint_prim: &str) -> Option<&'a LinkSpec> {
     tree.links
         .iter()
         .find(|l| l.joint_prim.as_deref() == Some(joint_prim))

@@ -61,6 +61,17 @@ pub struct ControllerCommands {
     pub cmd_vel: HashMap<ControllerKey, CmdVel>,
 }
 
+/// Twists the viewer drives while a person holds a machine in the Machine
+/// pane; applied after the bus so they win over an idle session.
+#[derive(Resource, Default)]
+pub struct UiDrive(pub HashMap<ControllerKey, CmdVel>);
+
+fn apply_ui_drive(ui: Res<UiDrive>, mut commands: ResMut<ControllerCommands>) {
+    for (key, cmd) in &ui.0 {
+        commands.cmd_vel.insert(key.clone(), *cmd);
+    }
+}
+
 /// Runtime policy for USD-authored `external:process` controllers.
 ///
 /// Deny-by-default: set `GEARBOX_ALLOW_USD_CONTROLLER_PROCESS=1` and
@@ -169,6 +180,7 @@ impl Plugin for ControllerDiscoveryPlugin {
             .init_resource::<ControllerRuntimeState>()
             .init_resource::<MachineAgentKeys>()
             .init_resource::<RejectedMachines>()
+            .init_resource::<UiDrive>()
             .add_systems(
                 Update,
                 (
@@ -176,6 +188,7 @@ impl Plugin for ControllerDiscoveryPlugin {
                     sync_machine_agents,
                     reconcile_external_process_controllers,
                     apply_machine_agent_commands,
+                    apply_ui_drive,
                     guard_chassis_inertia,
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,

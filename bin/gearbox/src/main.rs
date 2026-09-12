@@ -105,6 +105,7 @@ fn main() {
         .add_plugins(viewer::ui::ViewerUiPlugin)
         .add_plugins(viewer::tf_overlay::TfOverlayPlugin)
         .add_plugins(viewer::screenshot::ScreenshotPlugin)
+        .add_plugins(viewer::machine_panel::MachinePanelPlugin)
         .add_plugins(viewer::keyboard::ViewerKeyboardPlugin)
         .add_plugins(viewer::overlays::OverlaysPlugin)
         .add_plugins(viewer::physics_overlay::PhysicsOverlayPlugin)
