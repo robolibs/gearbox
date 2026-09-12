@@ -175,30 +175,74 @@ fn group_of(c: &ControllerSpec) -> String {
     }
 }
 
+/// Mara toggles keep their own persisted state; write the pane's truth over
+/// it every frame so a switch never shows a state the sim does not hold.
+fn sync_toggles(ctx: &egui::Context, pod: MaraId, states: &[bool]) {
+    ctx.data_mut(|d| {
+        for (i, on) in states.iter().enumerate() {
+            let key: egui::Id = pod.with(("mara_pod_toggle_state", i)).into();
+            d.insert_persisted(key, *on);
+        }
+    });
+}
+
 /// The first connected gamepad drives the held controller while the pane's
-/// switch is on: right trigger forward, left trigger back, left stick
-/// steers, south button stops.
+/// switch is on: right trigger forward, left trigger back (or a stick's Y,
+/// or the D-pad), left stick steers (or the D-pad), south button stops.
+/// Inputs are logged once a second while a stick or trigger is off centre.
 fn gamepad_drive(
-    gamepads: Query<&Gamepad>,
+    time: Res<Time>,
+    gamepads: Query<(&Gamepad, Option<&Name>)>,
     panel: Res<MachinePanel>,
     mut ui_drive: ResMut<UiDrive>,
+    mut log_at: Local<f32>,
 ) {
     let Some(key) = panel.gamepad.clone() else {
         return;
     };
-    let Some(pad) = gamepads.iter().next() else {
+    let Some((pad, name)) = gamepads.iter().next() else {
+        if time.elapsed_secs() >= *log_at {
+            *log_at = time.elapsed_secs() + 5.0;
+            warn!("gearbox-pad: the Gamepad switch is on but no gamepad is connected");
+        }
         return;
     };
     let dead = |v: f32| if v.abs() < PAD_DEADZONE { 0.0 } else { v };
-    let throttle = dead(pad.get(GamepadButton::RightTrigger2).unwrap_or(0.0))
-        - dead(pad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0));
-    let stick_y = dead(pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0));
-    let forward = if throttle.abs() > 0.0 {
-        throttle
+    let axis = |a: GamepadAxis| dead(pad.get(a).unwrap_or(0.0));
+    let button = |b: GamepadButton| dead(pad.get(b).unwrap_or(0.0));
+    let throttle = button(GamepadButton::RightTrigger2) - button(GamepadButton::LeftTrigger2);
+    let stick_y = if axis(GamepadAxis::LeftStickY) != 0.0 {
+        axis(GamepadAxis::LeftStickY)
     } else {
-        stick_y
+        axis(GamepadAxis::RightStickY)
     };
-    let steer = dead(pad.get(GamepadAxis::LeftStickX).unwrap_or(0.0));
+    let dpad_y = button(GamepadButton::DPadUp) - button(GamepadButton::DPadDown);
+    let forward = [throttle, stick_y, dpad_y]
+        .into_iter()
+        .find(|v| *v != 0.0)
+        .unwrap_or(0.0);
+    let dpad_x = button(GamepadButton::DPadRight) - button(GamepadButton::DPadLeft);
+    let steer = [
+        axis(GamepadAxis::LeftStickX),
+        axis(GamepadAxis::RightStickX),
+        dpad_x,
+    ]
+    .into_iter()
+    .find(|v| *v != 0.0)
+    .unwrap_or(0.0);
+    if (forward != 0.0 || steer != 0.0) && time.elapsed_secs() >= *log_at {
+        *log_at = time.elapsed_secs() + 1.0;
+        info!(
+            "gearbox-pad: {} → forward {forward:.2} steer {steer:.2} (RT {:.2} LT {:.2} LS {:.2},{:.2} RS {:.2},{:.2} dpad {dpad_x:.0},{dpad_y:.0})",
+            name.map(|n| n.as_str()).unwrap_or("gamepad"),
+            button(GamepadButton::RightTrigger2),
+            button(GamepadButton::LeftTrigger2),
+            axis(GamepadAxis::LeftStickX),
+            axis(GamepadAxis::LeftStickY),
+            axis(GamepadAxis::RightStickX),
+            axis(GamepadAxis::RightStickY),
+        );
+    }
     let cmd = if pad.pressed(GamepadButton::South) {
         CmdVel {
             linear_mps: 0.0,
@@ -373,6 +417,7 @@ fn draw_machine_panel(
                     }
                     let holding = panel.holding.contains(&key);
                     let pad = panel.gamepad.as_ref() == Some(&key);
+                    sync_toggles(ctx, pid(&group, pod_idx), &[holding, pad]);
                     let pad_label = if gamepads.iter().next().is_some() {
                         "Gamepad"
                     } else {
