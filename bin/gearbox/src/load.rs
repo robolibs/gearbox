@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use gearbox_api::{
-    GearboxBus, MachineLoadQueue, Props, SceneEvent, SceneObject, SceneObjects, clear_scope,
-    event_kind, object_kind,
+    GearboxBus, MachineDeleteQueue, MachineLoadQueue, Props, SceneEvent, SceneObject, SceneObjects,
+    clear_scope, event_kind, object_kind,
 };
 use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::Pose;
@@ -78,6 +78,7 @@ impl Plugin for LoadPlugin {
                     clear_runtime_usd_loads_on_reset_system,
                     drain_load_queue,
                     drain_machine_load_queue,
+                    drain_machine_delete_queue,
                     spawn_when_loaded,
                     refresh_scene_objects,
                 ),
@@ -708,7 +709,10 @@ fn drain_machine_load_queue(
 ) {
     for req in queue.0.drain(..) {
         if req.remove() || req.delete() {
-            warn!("gearbox-load: machine unload by id is not supported yet; use clear");
+            warn!(
+                "gearbox-load: machine unload `{}` reached the load queue",
+                req.id()
+            );
             continue;
         }
         let Some(usd_path) = req.path() else {
@@ -748,6 +752,47 @@ fn drain_machine_load_queue(
             extra_search_paths,
             true,
         );
+    }
+}
+
+/// `clear usd ID` and machine loads with `remove`/`delete`: the id is the
+/// machine id, its namespace or the asset label. Physics goes first, then
+/// the scene root; the agent follows once the inventory entry is gone.
+fn drain_machine_delete_queue(
+    mut commands: Commands,
+    mut queue: ResMut<MachineDeleteQueue>,
+    mut inventory: ResMut<ControllerInventory>,
+    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    mut bus: Option<ResMut<GearboxBus>>,
+    loaded: Query<(Entity, &LoadedAsset)>,
+    children_q: Query<&Children>,
+) {
+    if queue.0.is_empty() {
+        return;
+    }
+    for id in queue.0.drain(..) {
+        let root = inventory
+            .machines
+            .iter()
+            .find(|m| m.id == id || m.controllers.iter().any(|c| c.namespace == id))
+            .and_then(|m| m.scene_root)
+            .or_else(|| {
+                loaded
+                    .iter()
+                    .find(|(_, asset)| asset.label == id)
+                    .map(|(entity, _)| entity)
+            });
+        let Some(root) = root else {
+            warn!("gearbox-load: nothing loaded is called `{id}`");
+            continue;
+        };
+        remove_loaded_usd_physics(root, physics.as_mut(), &children_q);
+        inventory.machines.retain(|m| m.scene_root != Some(root));
+        commands.entity(root).try_despawn();
+        info!("gearbox-load: unloaded machine `{id}`");
+        if let Some(bus) = bus.as_mut() {
+            bus.publish_event(SceneEvent::new(event_kind::REMOVED, &id));
+        }
     }
 }
 

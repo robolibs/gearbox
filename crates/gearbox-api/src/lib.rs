@@ -29,6 +29,6 @@ pub use wire::*;
 
 #[cfg(feature = "bevy")]
 pub use plugin::{
-    GearboxBus, GearboxBusPlugin, MachineLoadQueue, SceneObjects, SelectionState, SimResetRequest,
-    UsdAssetRoot, UsdLoaderPlugin, UsdMarkerPlugin,
+    GearboxBus, GearboxBusPlugin, MachineDeleteQueue, MachineLoadQueue, SceneObjects,
+    SelectionState, SimResetRequest, UsdAssetRoot, UsdLoaderPlugin, UsdMarkerPlugin,
 };

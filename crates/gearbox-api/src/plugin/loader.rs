@@ -14,6 +14,11 @@ use crate::wire::*;
 #[derive(Resource, Default)]
 pub struct MachineLoadQueue(pub Vec<UsdLoad>);
 
+/// Ids of machines to unload, drained by the binary's loader; a delete
+/// that names nothing loaded here is assumed to name a machine.
+#[derive(Resource, Default)]
+pub struct MachineDeleteQueue(pub Vec<String>);
+
 /// Pending scene-load handle for a non-machine USD.
 #[derive(Component)]
 pub struct PendingLoadedUsd {
@@ -37,6 +42,7 @@ pub struct UsdLoaderPlugin;
 impl Plugin for UsdLoaderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MachineLoadQueue>()
+            .init_resource::<MachineDeleteQueue>()
             .init_resource::<LoaderState>()
             .add_systems(
                 Update,
@@ -91,6 +97,7 @@ fn serve_usd_loads(
     bus: Option<ResMut<GearboxBus>>,
     mut state: ResMut<LoaderState>,
     mut machine_queue: ResMut<MachineLoadQueue>,
+    mut machine_deletes: ResMut<MachineDeleteQueue>,
     asset_server: Res<AssetServer>,
     asset_root: Option<Res<UsdAssetRoot>>,
     live: &Entities,
@@ -101,16 +108,23 @@ fn serve_usd_loads(
     let mut events = Vec::new();
     bus.host.serve_usd_delete(|req| {
         let id = req.id();
-        if let Some(entry) = state.entities.remove(&id) {
-            commands.entity(entry.entity).try_despawn();
+        match state.entities.remove(&id) {
+            Some(entry) => {
+                commands.entity(entry.entity).try_despawn();
+                events.push(SceneEvent::new(event_kind::REMOVED, &id));
+            }
+            None => machine_deletes.0.push(id.clone()),
         }
         state.tombstones.insert(id.clone(), String::new());
-        events.push(SceneEvent::new(event_kind::REMOVED, &id));
         Status::ok()
     });
     bus.host.serve_usd_load(|req| {
         if req.is_machine() {
-            machine_queue.0.push(req);
+            if req.remove() || req.delete() {
+                machine_deletes.0.push(req.id());
+            } else {
+                machine_queue.0.push(req);
+            }
             return Status::ok();
         }
         let id = req.id();

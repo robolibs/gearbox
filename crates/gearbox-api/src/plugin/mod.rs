@@ -11,7 +11,7 @@ use crate::host::{HostBus, HostConfig};
 use crate::machine::MachineAgent;
 use crate::wire::*;
 
-pub use loader::{MachineLoadQueue, PendingLoadedUsd, UsdLoaderPlugin};
+pub use loader::{MachineDeleteQueue, MachineLoadQueue, PendingLoadedUsd, UsdLoaderPlugin};
 pub use marker::UsdMarkerPlugin;
 
 /// Scene-wide clear. Written by the API and by the UI, read by everything
