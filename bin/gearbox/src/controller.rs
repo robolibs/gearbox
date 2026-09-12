@@ -25,7 +25,7 @@ use openusd::sdf::{Path as SdfPath, Value};
 use rapier3d::control::{DynamicRayCastVehicleController, WheelTuning};
 use rapier3d::pipeline::QueryFilter;
 use rapier3d::prelude::{
-    CoefficientCombineRule, JointAxis, MultibodyJointHandle, RigidBodyHandle, Vector,
+    CoefficientCombineRule, JointAxis, MotorModel, MultibodyJointHandle, RigidBodyHandle, Vector,
 };
 use usd_bevy::UsdPrimRef;
 
@@ -103,6 +103,7 @@ pub struct ControllerStates {
 struct ControllerRuntimeState {
     applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
     logged_empty_tire_pairs: HashSet<ControllerKey>,
+    logged_steer: HashSet<ControllerKey>,
     diff_drive_debug_ticks: u64,
 }
 
@@ -206,6 +207,7 @@ fn clear_controller_state_on_reset(
     commands.cmd_vel.clear();
     runtime.applied_cmd_vel.clear();
     runtime.logged_empty_tire_pairs.clear();
+    runtime.logged_steer.clear();
     states.states.clear();
     keys.0.clear();
     if let Some(mut bus) = bus {
@@ -1158,11 +1160,25 @@ fn apply_builtin_ackermann_cmd_vel(
                 cmd,
                 steer_target_rad,
             );
-            apply_articulation_or_impulse_joint_motors(
+            if using_raycast_vehicle {
+                hold_axle_pivots(&mut physics, body_handle, &steer_targets);
+            }
+            let applied = apply_articulation_or_impulse_joint_motors(
                 &mut physics,
                 &wheel_targets,
                 &steer_targets,
             );
+            if runtime.logged_steer.insert(key.clone()) {
+                info!(
+                    "gearbox-control: {} steer joints={} applied={} wheel joints={} applied={} raycast={}",
+                    machine.id,
+                    steer_targets.len(),
+                    applied.steer,
+                    wheel_targets.len(),
+                    applied.drive,
+                    using_raycast_vehicle
+                );
+            }
         }
     }
 }
@@ -2687,6 +2703,7 @@ fn apply_articulation_or_impulse_joint_motors(
                 if let Some(link) = multibody.link_mut(link_id) {
                     link.joint
                         .data
+                        .set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
                         .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
                         .set_motor_max_force(JointAxis::AngX, target.max_torque);
                     applied.drive = true;
@@ -2701,6 +2718,7 @@ fn apply_articulation_or_impulse_joint_motors(
                 if let Some(link) = multibody.link_mut(link_id) {
                     link.joint
                         .data
+                        .set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
                         .set_motor_position(
                             JointAxis::AngX,
                             target.position,
@@ -2721,6 +2739,7 @@ fn apply_articulation_or_impulse_joint_motors(
         {
             joint
                 .data
+                .set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
                 .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
                 .set_motor_max_force(JointAxis::AngX, target.max_torque);
             applied.drive = true;
@@ -2736,6 +2755,7 @@ fn apply_articulation_or_impulse_joint_motors(
             // explode/flip the vehicle.
             joint
                 .data
+                .set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
                 .set_motor_position(
                     JointAxis::AngX,
                     target.position,
@@ -4126,4 +4146,55 @@ pub fn discover_static_attachments_from_usd(usd_path: &Path) -> Vec<(String, Str
         }
     }
     out
+}
+
+const AXLE_PIVOT_STIFFNESS: f64 = 400.0;
+const AXLE_PIVOT_DAMPING: f64 = 60.0;
+const AXLE_PIVOT_MAX_TORQUE: f64 = 200_000.0;
+
+/// A steering knuckle that hangs from an intermediate body (a pivoting
+/// front axle) instead of the chassis leaves that pivot a free pendulum
+/// once the raycast vehicle carries the chassis and the tyres are sensors.
+/// Hold every such pivot at its rest angle.
+fn hold_axle_pivots(
+    physics: &mut usd_bevy::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    steer_targets: &[JointPositionTarget],
+) {
+    let mut pivots: Vec<(RigidBodyHandle, RigidBodyHandle)> = Vec::new();
+    for target in steer_targets {
+        let parent = target.pair.0;
+        if parent != chassis && target.pair.1 != chassis {
+            push_unique_pair(&mut pivots, (chassis, parent));
+        }
+    }
+    if pivots.is_empty() {
+        return;
+    }
+    let hold = |data: &mut rapier3d::prelude::GenericJoint| {
+        data.set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
+            .set_motor_position(
+                JointAxis::AngX,
+                0.0,
+                AXLE_PIVOT_STIFFNESS,
+                AXLE_PIVOT_DAMPING,
+            )
+            .set_motor_max_force(JointAxis::AngX, AXLE_PIVOT_MAX_TORQUE);
+    };
+    for (_, joint) in physics.impulse_joints.iter_mut() {
+        if pivots
+            .iter()
+            .any(|p| rigid_body_pair_matches(*p, joint.body1, joint.body2))
+        {
+            hold(&mut joint.data);
+        }
+    }
+    for pair in &pivots {
+        if let Some(handle) = multibody_joint_handle(physics, *pair)
+            && let Some((multibody, link_id)) = physics.multibody_joints.get_mut(handle)
+            && let Some(link) = multibody.link_mut(link_id)
+        {
+            hold(&mut link.joint.data);
+        }
+    }
 }

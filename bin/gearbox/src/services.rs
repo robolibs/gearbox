@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use gearbox_api::GearboxBus;
-use rapier3d::prelude::{GenericJoint, JointAxis, RigidBodyHandle};
+use rapier3d::prelude::{GenericJoint, JointAxis, MotorModel, RigidBodyHandle};
 use usd_bevy::UsdPrimRef;
 use usd_bevy::physics::PhysicsWorld;
 
@@ -411,6 +411,9 @@ fn with_joint(physics: &mut PhysicsWorld, j: &JointRef, f: impl FnOnce(&mut Gene
         .map(|(h, _)| h);
     if let Some(h) = impulse {
         if let Some(joint) = physics.impulse_joints.get_mut(h, true) {
+            joint
+                .data
+                .set_motor_model(j.axis, MotorModel::AccelerationBased);
             f(&mut joint.data);
             return true;
         }
@@ -424,6 +427,9 @@ fn with_joint(physics: &mut PhysicsWorld, j: &JointRef, f: impl FnOnce(&mut Gene
         && let Some((mb, id)) = physics.multibody_joints.get_mut(h)
         && let Some(link) = mb.link_mut(id)
     {
+        link.joint
+            .data
+            .set_motor_model(j.axis, MotorModel::AccelerationBased);
         f(&mut link.joint.data);
         return true;
     }
