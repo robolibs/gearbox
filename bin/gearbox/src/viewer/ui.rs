@@ -14,7 +14,11 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use bevy_mara::{ChaseCamera, apply_rig};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use usd_bevy::{UsdAsset, UsdDisplayName, UsdKind, UsdPrimRef, UsdProcedural, UsdSpatialAudio};
+use usd_bevy::UsdPrimRef;
+use usd_bevy::instance::{UsdInstanceOverrides, UsdInstances};
+use usd_bevy::route::{audio::UsdSpatialAudio, camera::UsdCamera, coverage::UsdProcedural};
+
+use crate::viewer::state::{ActiveVariants, UsdDisplayName, UsdKind, VariantEntry};
 
 use crate::controller::{
     CmdVel, ControllerCommands, ControllerInventory, ControllerKey, ControllerStates,
@@ -361,6 +365,7 @@ impl Plugin for ViewerUiPlugin {
             .init_resource::<CameraMount>()
             .init_resource::<LoaderTuning>()
             .init_resource::<UsdStageTime>()
+            .init_resource::<ActiveVariants>()
             .init_resource::<CameraBookmarks>()
             .init_resource::<FollowTarget>()
             .init_resource::<ChaseCameraFly>()
@@ -440,79 +445,88 @@ fn auto_set_active_stage(
     }
 }
 
-/// Latch `StageInfo` from the active stage's `UsdAsset` when the
-/// asset finishes loading or when the active stage changes.
+/// Latch `StageInfo` and the variant sets from the active root's live stage
+/// when it is projected or the active stage changes. Counts come from one
+/// walk of the stage; what usd_bevy does not expose stays zero.
 fn capture_active_stage_info(
     active: Res<ActiveStage>,
-    handles: Query<(&UsdAssetHandle, &LoadedAsset)>,
-    usd_assets: Res<Assets<UsdAsset>>,
+    loaded: Query<&LoadedAsset>,
+    instances: NonSend<UsdInstances>,
     mut info: ResMut<StageInfo>,
+    mut variants: ResMut<ActiveVariants>,
     mut last_active: Local<Option<Entity>>,
     mut last_was_loaded: Local<bool>,
 ) {
     let Some(entity) = active.0 else {
         if last_active.is_some() {
             *info = StageInfo::default();
+            *variants = ActiveVariants::default();
             *last_active = None;
             *last_was_loaded = false;
         }
         return;
     };
-    let Ok((handle, la)) = handles.get(entity) else {
+    let Ok(la) = loaded.get(entity) else {
         return;
     };
     let active_changed = *last_active != Some(entity);
-    let asset = usd_assets.get(&handle.0);
-    let now_loaded = asset.is_some();
+    let stage = instances.stage(entity);
+    let now_loaded = stage.is_some();
     if !active_changed && *last_was_loaded == now_loaded {
         return;
     }
     *last_active = Some(entity);
     *last_was_loaded = now_loaded;
 
-    info.path = la.path.display().to_string();
-    if let Some(asset) = asset {
-        info.default_prim = asset.default_prim.clone();
-        info.layer_count = asset.layer_count;
-        info.variant_count = asset.variants.values().map(|sets| sets.len()).sum();
-        info.lights_directional = asset.light_tally.directional;
-        info.lights_point = asset.light_tally.point;
-        info.lights_spot = asset.light_tally.spot;
-        info.lights_dome = asset.light_tally.dome;
-        info.instance_prim_count = asset.instance_prim_count;
-        info.instance_prototype_reuses = asset.instance_prototype_reuses;
-        info.animated_prim_count = asset.animated_prims.len();
-        info.skeleton_count = asset.skeletons.len();
-        info.skel_root_count = asset.skel_roots.len();
-        info.skel_binding_count = asset.skel_bindings.len();
-        info.render_settings_count = asset.render_settings.len();
-        info.render_product_count = asset.render_products.len();
-        info.render_var_count = asset.render_vars.len();
-        let primary = asset.render_settings.first();
-        info.render_primary_resolution = primary.and_then(|s| s.resolution);
-        info.render_primary_path = primary.map(|s| s.path.clone());
-        info.rigid_body_count = asset.rigid_body_prims.len();
-        info.physics_scene_count = asset.physics_scene_prims.len();
-        info.joint_count = asset.joints.len();
-        info.custom_attr_prim_count = asset.custom_attrs.len();
-        info.custom_layer_data_entries = asset.custom_layer_data.len();
-        info.subdivision_prim_count = asset.subdivision_prims.len();
-        info.light_linked_count = asset.light_linking_prims.len();
-        info.clip_prim_count = asset.clip_sets.len();
-    }
+    *info = StageInfo {
+        path: la.path.display().to_string(),
+        ..Default::default()
+    };
+    *variants = ActiveVariants {
+        root: Some(entity),
+        entries: Vec::new(),
+    };
+    let Some(stage) = stage else {
+        return;
+    };
+    use crate::usd_ext::StageExt;
+    info.default_prim = stage.default_prim().map(|t| t.as_str().to_string());
+    info.layer_count = stage.layer_stack().len();
+    let _ = stage.traverse(Default::default(), |path: &openusd::sdf::Path| {
+        if let Ok(Some(ty)) = stage.type_name(path) {
+            if ty == "PhysicsScene" {
+                info.physics_scene_count += 1;
+            } else if ty.starts_with("Physics") && ty.ends_with("Joint") {
+                info.joint_count += 1;
+            }
+        }
+        if let Ok(schemas) = stage.api_schemas(path)
+            && schemas.iter().any(|s| s == "PhysicsRigidBodyAPI")
+        {
+            info.rigid_body_count += 1;
+        }
+        if let Ok(prim) = stage.prim(path.clone())
+            && let Ok(sets) = prim.variant_sets().get_all_variant_selections()
+        {
+            for (name, selection) in sets {
+                variants.entries.push(VariantEntry {
+                    prim: path.as_str().to_string(),
+                    name,
+                    selection: Some(selection),
+                    options: Vec::new(),
+                });
+            }
+        }
+    });
+    info.variant_count = variants.entries.len();
 }
 
-/// Resolve the active stage's `UsdAsset` from its `Handle<UsdAsset>`
-/// component. Returns the LoadedAsset's path label too (handy for
-/// panel headers).
-fn active_asset<'a>(
+/// The active root's live stage, once usd_bevy has projected it.
+fn active_stage<'a>(
     active: &ActiveStage,
-    handles: &Query<(&UsdAssetHandle, &LoadedAsset)>,
-    usd_assets: &'a Assets<UsdAsset>,
-) -> Option<&'a UsdAsset> {
-    let entity = active.0?;
-    let (handle, _) = handles.get(entity).ok()?;
-    usd_assets.get(&handle.0)
+    instances: &'a UsdInstances,
+) -> Option<&'a openusd::usd::Stage> {
+    instances.stage(active.0?)
 }
 
 // ─── Click in viewport → set Selection (top-level) ─────────────────
@@ -684,7 +698,7 @@ fn ray_aabb_world(
 fn sync_gizmo_target(
     mut commands: Commands,
     selection: Res<Selection>,
-    physics: Res<usd_bevy::physics::PhysicsActive>,
+    physics: Res<gearbox_api::PhysicsActive>,
     targets: Query<Entity, With<GizmoTarget>>,
     loaded: Query<Entity, With<LoadedAsset>>,
 ) {
@@ -783,7 +797,7 @@ fn follow_target(
 /// edit-mode hides the ring (gizmo handles take over).
 fn drive_selection_ring(
     selection: Res<Selection>,
-    physics: Res<usd_bevy::physics::PhysicsActive>,
+    physics: Res<gearbox_api::PhysicsActive>,
     accent: Res<AccentColor>,
     parents: Query<&ChildOf>,
     loaded: Query<Entity, With<LoadedAsset>>,
@@ -858,7 +872,7 @@ fn draw_selection_ring(ring: Res<SelectionRing>, mut gizmos: Gizmos) {
 /// the root) sits at the asset's original mount point even though
 /// the simulated robot drove away during play.
 fn rebase_loaded_assets_on_pause(
-    active: Res<usd_bevy::physics::PhysicsActive>,
+    active: Res<gearbox_api::PhysicsActive>,
     mut prev: Local<bool>,
     parents: Query<&ChildOf>,
     loaded: Query<Entity, With<LoadedAsset>>,
@@ -960,7 +974,7 @@ fn gate_gizmo_on_play(
 fn drain_despawn(
     mut commands: Commands,
     mut queue: ResMut<PendingDespawn>,
-    world: ResMut<usd_bevy::physics::PhysicsWorld>,
+    world: ResMut<crate::physics::PhysicsWorld>,
     mut selection: ResMut<Selection>,
     mut active: ResMut<ActiveStage>,
     children_q: Query<&Children>,
@@ -1306,19 +1320,16 @@ fn tick_stage_time(
     time: Res<Time>,
     mut clock: ResMut<UsdStageTime>,
     active: Res<ActiveStage>,
-    handles: Query<(&UsdAssetHandle, &LoadedAsset)>,
-    usd_assets: Res<Assets<UsdAsset>>,
+    instances: NonSend<UsdInstances>,
 ) {
     if !clock.initialized
-        && let Some(asset) = active_asset(&active, &handles, &usd_assets)
+        && let Some(stage) = active_stage(&active, &instances)
     {
-        clock.start_time_code = asset.start_time_code;
-        clock.end_time_code = asset.end_time_code;
-        clock.time_codes_per_second = asset.time_codes_per_second;
+        clock.start_time_code = stage.start_time_code();
+        clock.end_time_code = stage.end_time_code();
+        clock.time_codes_per_second = stage.time_codes_per_second().max(1e-6);
         clock.seconds = 0.0;
-        clock.playing = asset.animated_prims.iter().next().is_some()
-            || !asset.skel_animations.is_empty()
-            || asset.end_time_code > asset.start_time_code;
+        clock.playing = clock.end_time_code > clock.start_time_code;
         clock.initialized = true;
     }
     if clock.playing {
@@ -1342,7 +1353,7 @@ struct MaraShellParams<'w, 's> {
     open: ResMut<'w, RibbonOpen>,
     placement: ResMut<'w, RibbonPlacement>,
     drag: ResMut<'w, RibbonDrag>,
-    physics: ResMut<'w, usd_bevy::physics::PhysicsActive>,
+    physics: ResMut<'w, gearbox_api::PhysicsActive>,
     info: Res<'w, StageInfo>,
     load_req: ResMut<'w, LoadRequest>,
     reload: ResMut<'w, ReloadRequest>,
@@ -2182,7 +2193,8 @@ pub struct TreeParams<'w, 's> {
     pub visibility_q: Query<'w, 's, (Entity, &'static mut Visibility)>,
     pub children: Query<'w, 's, &'static Children>,
     pub gt_query: Query<'w, 's, &'static GlobalTransform>,
-    pub extent_q: Query<'w, 's, &'static usd_bevy::UsdLocalExtent>,
+    pub extent_q: Query<'w, 's, &'static bevy::camera::primitives::Aabb>,
+    pub overrides: Query<'w, 's, &'static mut UsdInstanceOverrides>,
     pub parents: Query<'w, 's, &'static ChildOf>,
     pub loaded_only: Query<'w, 's, Entity, With<LoadedAsset>>,
     pub materials_assets: ResMut<'w, Assets<StandardMaterial>>,
@@ -2202,10 +2214,10 @@ fn draw_tree_panel(
     mut expanded: ResMut<TreeExpanded>,
     mut filter: ResMut<TreeFilter>,
     mut despawn: ResMut<PendingDespawn>,
-    usd_assets: Res<Assets<UsdAsset>>,
+    variants: Res<ActiveVariants>,
     asset_server: Res<AssetServer>,
     mut loader_tuning: ResMut<LoaderTuning>,
-    mut reload: ResMut<ReloadRequest>,
+    _reload: ResMut<ReloadRequest>,
     mut params: TreeParams,
 ) {
     if !is_panel_open(&open, RIB_TREE) {
@@ -2489,14 +2501,13 @@ fn draw_tree_panel(
                             let vars_open_before =
                                 *expanded.0.entry(vars_key.clone()).or_insert(false);
                             let mut vars_open = vars_open_before;
-                            let asset = params
-                                .handles
-                                .get(*root_entity)
-                                .ok()
-                                .and_then(|(h, _)| usd_assets.get(&h.0));
-                            let var_count: usize = asset
-                                .map(|a| a.variants.values().map(|v| v.len()).sum())
-                                .unwrap_or(0);
+                            let var_entries: &[VariantEntry] =
+                                if variants.root == Some(*root_entity) {
+                                    &variants.entries
+                                } else {
+                                    &[]
+                                };
+                            let var_count = var_entries.len();
                             let vars_label = format!("Variants ({var_count})");
                             let vars_resp = tree_row(
                                 ui,
@@ -2537,12 +2548,10 @@ fn draw_tree_panel(
                                         accent_col,
                                         &mut placeholder_slot,
                                     );
-                                } else if let Some(asset) = asset {
-                                    let mut entries: Vec<(&String, &Vec<usd_bevy::VariantSet>)> =
-                                        asset.variants.iter().collect();
-                                    entries.sort_by(|a, b| a.0.cmp(b.0));
-                                    for (prim_path, sets) in entries {
-                                        for set in sets {
+                                } else {
+                                    for set in var_entries {
+                                        let prim_path = &set.prim;
+                                        {
                                             let key = (prim_path.clone(), set.name.clone());
                                             let authored = set.selection.as_deref().unwrap_or("");
                                             let current = loader_tuning
@@ -2612,10 +2621,26 @@ fn draw_tree_panel(
                                                                     }
                                                                 });
                                                                 if let Some(p) = picked {
-                                                                    loader_tuning
-                                                                        .variants
-                                                                        .insert(key.clone(), p);
-                                                                    reload.requested = true;
+                                                                    loader_tuning.variants.insert(
+                                                                        key.clone(),
+                                                                        p.clone(),
+                                                                    );
+                                                                    if let Ok(mut ov) = params
+                                                                        .overrides
+                                                                        .get_mut(*root_entity)
+                                                                    {
+                                                                        ov.variants.retain(
+                                                                            |(pr, s, _)| {
+                                                                                pr != &key.0
+                                                                                    || s != &key.1
+                                                                            },
+                                                                        );
+                                                                        ov.variants.push((
+                                                                            key.0.clone(),
+                                                                            key.1.clone(),
+                                                                            p,
+                                                                        ));
+                                                                    }
                                                                 }
                                                             },
                                                         );
@@ -3037,7 +3062,7 @@ fn draw_tree_row(
 fn fit_params_for_entity(
     root: Entity,
     gt_q: &Query<&GlobalTransform>,
-    extent_q: &Query<&usd_bevy::UsdLocalExtent>,
+    extent_q: &Query<&bevy::camera::primitives::Aabb>,
     children: &Query<&Children>,
     current_cam_dist: f32,
 ) -> (Vec3, f32) {
@@ -3047,13 +3072,15 @@ fn fit_params_for_entity(
 
     let mut stack: Vec<Entity> = vec![root];
     while let Some(e) = stack.pop() {
-        if let (Ok(gt), Ok(le)) = (gt_q.get(e), extent_q.get(e)) {
+        if let (Ok(gt), Ok(aabb)) = (gt_q.get(e), extent_q.get(e)) {
             let m = gt.to_matrix();
+            let lo = Vec3::from(aabb.center) - Vec3::from(aabb.half_extents);
+            let hi = Vec3::from(aabb.center) + Vec3::from(aabb.half_extents);
             for i in 0..8 {
                 let c = Vec3::new(
-                    if i & 1 == 0 { le.min[0] } else { le.max[0] },
-                    if i & 2 == 0 { le.min[1] } else { le.max[1] },
-                    if i & 4 == 0 { le.min[2] } else { le.max[2] },
+                    if i & 1 == 0 { lo.x } else { hi.x },
+                    if i & 2 == 0 { lo.y } else { hi.y },
+                    if i & 4 == 0 { lo.z } else { hi.z },
                 );
                 let w = m.transform_point3(c);
                 min = min.min(w);
@@ -3481,9 +3508,7 @@ fn draw_cameras_panel(
     open: Res<RibbonOpen>,
     placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
-    active: Res<ActiveStage>,
-    handles: Query<(&UsdAssetHandle, &LoadedAsset)>,
-    usd_assets: Res<Assets<UsdAsset>>,
+    usd_cams: Query<(&UsdPrimRef, &Projection), With<UsdCamera>>,
     mut camera_mount: ResMut<CameraMount>,
     mut bookmarks: ResMut<CameraBookmarks>,
     mut fly: ResMut<FlyTo>,
@@ -3567,12 +3592,9 @@ fn draw_cameras_panel(
             });
 
             pane.section("cameras_all", "Cameras", true, |ui| {
-                let asset = active_asset(&active, &handles, &usd_assets);
-                let Some(asset) = asset else {
-                    sub_caption(ui, "(no stage loaded yet)");
-                    return;
-                };
-                sub_caption(ui, &format!("{} authored cameras", asset.cameras.len()));
+                let mut authored: Vec<(&UsdPrimRef, &Projection)> = usd_cams.iter().collect();
+                authored.sort_by(|a, b| a.0.path.cmp(&b.0.path));
+                sub_caption(ui, &format!("{} authored cameras", authored.len()));
                 ui.add_space(style::space::BLOCK);
 
                 let arcball_active = matches!(*camera_mount, CameraMount::Arcball);
@@ -3591,22 +3613,23 @@ fn draw_cameras_panel(
                 row_separator(ui);
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for cam in &asset.cameras {
+                    for (pref, projection) in authored {
                         let mounted = matches!(
                             &*camera_mount,
-                            CameraMount::Mounted { prim_path } if prim_path == &cam.path
+                            CameraMount::Mounted { prim_path } if prim_path == &pref.path
                         );
-                        let name = cam.path.rsplit('/').next().unwrap_or(&cam.path);
-                        let focal = cam.data.focal_length_mm.unwrap_or(50.0);
-                        let proj = match cam.data.projection {
-                            Some(usd_schema::camera::Projection::Orthographic) => "ortho",
-                            _ => "persp",
+                        let name = pref.path.rsplit('/').next().unwrap_or(&pref.path);
+                        let trailing = match projection {
+                            Projection::Orthographic(_) => "ortho".to_string(),
+                            Projection::Perspective(p) => {
+                                format!("{:.0}° · persp", p.fov.to_degrees())
+                            }
+                            _ => "custom".to_string(),
                         };
                         let label = format!("📷  {name}");
-                        let trailing = format!("{focal:.0}mm · {proj}");
                         let r = hybrid_select_row(
                             ui,
-                            cam.path.as_str(),
+                            pref.path.as_str(),
                             &label,
                             Some(&trailing),
                             mounted,
@@ -3615,7 +3638,7 @@ fn draw_cameras_panel(
                         );
                         if r.body.clicked() || r.radio.clicked() {
                             *camera_mount = CameraMount::Mounted {
-                                prim_path: cam.path.clone(),
+                                prim_path: pref.path.clone(),
                             };
                         }
                     }
@@ -3755,9 +3778,7 @@ fn draw_timeline_panel(
     placement: Res<RibbonPlacement>,
     accent: Res<AccentColor>,
     mut clock: ResMut<UsdStageTime>,
-    active: Res<ActiveStage>,
-    handles: Query<(&UsdAssetHandle, &LoadedAsset)>,
-    usd_assets: Res<Assets<UsdAsset>>,
+    info: Res<StageInfo>,
 ) {
     if !is_panel_open(&open, RIB_TIMELINE) {
         return;
@@ -3779,8 +3800,7 @@ fn draw_timeline_panel(
         accent_col,
         |pane| {
             pane.section("timeline_playback", "Playback", true, |ui| {
-                let asset = active_asset(&active, &handles, &usd_assets);
-                let animated_count = asset.map(|a| a.animated_prims.len()).unwrap_or(0);
+                let animated_count = info.animated_prim_count;
                 sub_caption(
                     ui,
                     &format!(

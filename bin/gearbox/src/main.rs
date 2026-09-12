@@ -26,8 +26,10 @@ mod attach;
 mod controller;
 mod links;
 mod load;
+mod physics;
 mod physics_debug;
 mod services;
+mod usd_ext;
 mod viewer;
 mod world;
 
@@ -78,11 +80,11 @@ fn main() {
         // ── UI stack: egui + Mara (glass theme + ribbons + widgets).
         .add_plugins(EguiPlugin::default())
         .add_plugins(MaraPlugin)
-        // ── USD pipeline + rapier physics + animation playback.
+        // ── USD pipeline (live stage projection) + gearbox's rapier world.
         .add_plugins(usd_bevy::UsdPlugin)
-        .add_plugins(usd_bevy::physics::RapierAdapterPlugin)
-        .add_plugins(usd_bevy::anim::AnimPlugin)
-        .insert_resource(usd_bevy::physics::PhysicsActive(false))
+        .add_plugins(usd_bevy::asset::UsdAssetPlugin)
+        .add_plugins(physics::RapierAdapterPlugin)
+        .insert_resource(gearbox_api::PhysicsActive(false))
         // ── Tool API: one host agent per process, one agent per machine.
         // Identity, allowlist, and relay come from GEARBOX_* env vars.
         .add_plugins(gearbox_api::GearboxBusPlugin {

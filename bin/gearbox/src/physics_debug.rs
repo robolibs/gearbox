@@ -4,10 +4,10 @@
 
 use std::collections::HashMap;
 
+use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
 use rapier3d::prelude::RigidBodyHandle;
 use usd_bevy::UsdPrimRef;
-use usd_bevy::physics::PhysicsWorld;
 
 pub struct PhysicsDebugPlugin;
 

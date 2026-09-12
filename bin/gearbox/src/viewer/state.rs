@@ -5,7 +5,7 @@
 //! `SelectedPrim` for prim-tree clicks vs. gearbox's existing
 //! top-level entity selection.
 
-use bevy::prelude::{Entity, Resource, Vec3};
+use bevy::prelude::{Component, Entity, Resource, Vec3};
 use bevy_mara::ChaseCamera;
 use std::path::PathBuf;
 
@@ -203,19 +203,44 @@ pub struct LoaderTuning {
 }
 
 impl LoaderTuning {
-    pub fn to_variant_selections(&self) -> Vec<usd_bevy::VariantSelection> {
+    /// `(prim, set, selection)` triples in the shape `UsdInstanceOverrides`
+    /// takes.
+    pub fn to_variant_selections(&self) -> Vec<(String, String, String)> {
         self.variants
             .iter()
-            .map(
-                |((prim_path, set_name), option)| usd_bevy::VariantSelection {
-                    prim_path: prim_path.clone(),
-                    set_name: set_name.clone(),
-                    option: option.clone(),
-                },
-            )
+            .map(|((prim_path, set_name), option)| {
+                (prim_path.clone(), set_name.clone(), option.clone())
+            })
             .collect()
     }
 }
+
+/// One variant set on one prim of the active stage.
+#[derive(Debug, Clone, Default)]
+pub struct VariantEntry {
+    pub prim: String,
+    pub name: String,
+    pub selection: Option<String>,
+    pub options: Vec<String>,
+}
+
+/// Variant sets of the active stage, read when the active stage changes.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ActiveVariants {
+    pub root: Option<Entity>,
+    pub entries: Vec<VariantEntry>,
+}
+
+/// `kind` metadata of a prim. usd_bevy does not project it yet, so no
+/// entity carries this; the tree shows it when something does.
+#[derive(Component, Debug, Clone)]
+pub struct UsdKind {
+    pub kind: String,
+}
+
+/// `displayName` of a prim; same standing as [`UsdKind`].
+#[derive(Component, Debug, Clone)]
+pub struct UsdDisplayName(pub String);
 
 #[derive(Debug, Clone, Copy)]
 pub struct CurveTuning {

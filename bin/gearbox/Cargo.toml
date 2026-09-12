@@ -30,7 +30,7 @@ bevy_mara.workspace = true
 # wires them together with a minimal world / UI on top.
 usd_bevy.workspace = true
 
-usd_schema.workspace = true
+openusd-schemas.workspace = true
 openusd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +42,8 @@ gearbox-api = { workspace = true, features = ["bevy"] }
 # rapier3d-f64 — needed to spawn the static ground collider directly
 # into `usd_bevy::physics::PhysicsWorld`.
 rapier3d.workspace = true
+glam = "0.30"
+anyhow = "1"
 
 # Native file picker for the "📂 Load USD…" button.
 rfd = "0.15"

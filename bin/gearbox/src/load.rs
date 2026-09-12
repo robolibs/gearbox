@@ -12,7 +12,7 @@ use gearbox_api::{
 };
 use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::Pose;
-use usd_bevy::{UsdAsset, UsdLoaderSettings};
+use usd_bevy::{UsdScene, UsdSceneRoot, UsdSceneState};
 
 use crate::controller::{ControllerInventory, discover_machines_from_usd, log_discovered_machines};
 use crate::world::terrain_height_m;
@@ -30,7 +30,7 @@ pub struct LoadedAsset {
 /// `Assets<UsdAsset>::get(handle)` for stage metadata, variants,
 /// cameras, etc.
 #[derive(Component, Debug, Clone)]
-pub struct UsdAssetHandle(pub Handle<UsdAsset>);
+pub struct UsdAssetHandle(pub Handle<UsdScene>);
 
 /// Push a path here to load + spawn it next frame. The 📂 button
 /// (and CLI seeding) both write to this queue.
@@ -39,7 +39,7 @@ pub struct LoadQueue(pub Vec<PathBuf>);
 
 /// Tracking entry per in-flight or already-spawned load.
 struct InflightLoad {
-    handle: Handle<UsdAsset>,
+    root: Entity,
     path: PathBuf,
     label: String,
     transform: Transform,
@@ -100,7 +100,7 @@ fn activate_physics_after_machine_transforms_propagate(
     mut commands: Commands,
     pending_activation: Option<Res<PhysicsActivationPending>>,
     pending_machines: Query<Entity, With<MachinePhysicsSyncPending>>,
-    mut physics_active: ResMut<usd_bevy::physics::PhysicsActive>,
+    mut physics_active: ResMut<gearbox_api::PhysicsActive>,
 ) {
     if pending_activation.is_none() || !pending_machines.is_empty() {
         return;
@@ -117,7 +117,7 @@ fn clear_runtime_usd_loads_on_reset_system(
     mut commands: Commands,
     mut inflight: ResMut<Inflight>,
     mut controller_inventory: ResMut<ControllerInventory>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
     loaded_roots: Query<Entity, With<LoadedAsset>>,
     children_q: Query<&Children>,
 ) {
@@ -146,7 +146,7 @@ fn clear_runtime_usd_loads_on_reset_system(
 
 fn remove_loaded_usd_physics(
     root: Entity,
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     children_q: &Query<&Children>,
 ) {
     let mut stack = vec![root];
@@ -173,6 +173,7 @@ fn remove_loaded_usd_physics(
 }
 
 fn drain_load_queue(
+    mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut queue: ResMut<LoadQueue>,
     mut inflight: ResMut<Inflight>,
@@ -195,123 +196,62 @@ fn drain_load_queue(
         let z = r as f32 * 4.0 - 2.0;
         let mount = Vec3::new(x, terrain_height_m(x, z), z);
         queue_usd_load(
+            &mut commands,
             &asset_server,
             &mut inflight,
             abs,
             label,
             Transform::from_translation(mount),
             None,
-            None,
-            Vec::new(),
             false,
         );
     }
 }
 
+/// The scene root exists from the start: usd_bevy projects the stage under
+/// it once the asset is loaded, and `spawn_when_loaded` finishes the job when
+/// the root reports `UsdSceneState::Ready`.
+#[allow(clippy::too_many_arguments)]
 fn queue_usd_load(
+    commands: &mut Commands,
     asset_server: &AssetServer,
     inflight: &mut Inflight,
     path: PathBuf,
     label: String,
     transform: Transform,
     namespace: Option<String>,
-    source_path: Option<PathBuf>,
-    extra_search_paths: Vec<PathBuf>,
     activate_physics_after_sync: bool,
 ) {
-    let parent = path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let mut search = vec![parent];
-    for extra in extra_search_paths {
-        if !search.iter().any(|existing| existing == &extra) {
-            search.push(extra);
-        }
-    }
-    let source_path = source_path.unwrap_or_else(|| path.clone());
-    let load_path = path.to_string_lossy().into_owned();
-    let handle: Handle<UsdAsset> = asset_server.load_with_settings::<UsdAsset, _>(
-        load_path,
-        move |s: &mut UsdLoaderSettings| {
-            s.search_paths = search.clone();
-        },
-    );
+    // The asset root is `/`, and usd_bevy wants source-relative paths.
+    let asset_path = path.to_string_lossy().trim_start_matches('/').to_string();
+    let handle: Handle<UsdScene> = asset_server.load(asset_path);
     info!(
         "Load USD: {label} → translation={:?} yaw={:.1}°",
         transform.translation,
         transform.rotation.to_euler(EulerRot::YXZ).0.to_degrees(),
     );
+    let root = commands
+        .spawn((
+            Name::new(label.clone()),
+            transform,
+            Visibility::default(),
+            LoadedAsset {
+                path: path.clone(),
+                label: label.clone(),
+            },
+            UsdAssetHandle(handle.clone()),
+            UsdSceneRoot(handle),
+        ))
+        .id();
     inflight.0.push(InflightLoad {
-        handle,
-        path: source_path,
+        root,
+        path,
         label,
         transform,
         namespace,
         activate_physics_after_sync,
         spawned: false,
     });
-}
-
-fn hotload_runtime_usd_path(path: &Path) -> (PathBuf, PathBuf, Vec<PathBuf>) {
-    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-        return (
-            path.to_path_buf(),
-            path.to_path_buf(),
-            default_search_paths(path),
-        );
-    };
-    if !matches!(ext.to_ascii_lowercase().as_str(), "usd" | "usda" | "usdc") {
-        return (
-            path.to_path_buf(),
-            path.to_path_buf(),
-            default_search_paths(path),
-        );
-    }
-
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let stem = path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy())
-        .unwrap_or_else(|| std::borrow::Cow::Borrowed("runtime"));
-    let hotload_dir = std::env::temp_dir().join("gearbox_usd_hotload");
-    let hotload_path = hotload_dir.join(format!("{stem}_{}_{}.{}", std::process::id(), stamp, ext));
-
-    if let Err(err) = std::fs::create_dir_all(&hotload_dir) {
-        warn!(
-            "gearbox-load: failed to create hotload dir {}; using cached USD path: {err}",
-            hotload_dir.display()
-        );
-        return (
-            path.to_path_buf(),
-            path.to_path_buf(),
-            default_search_paths(path),
-        );
-    }
-    if let Err(err) = std::fs::copy(path, &hotload_path) {
-        warn!(
-            "gearbox-load: failed to hotload-copy {}; using cached USD path: {err}",
-            path.display()
-        );
-        return (
-            path.to_path_buf(),
-            path.to_path_buf(),
-            default_search_paths(path),
-        );
-    }
-
-    let mut search = default_search_paths(path);
-    search.push(hotload_dir);
-    (hotload_path, path.to_path_buf(), search)
-}
-
-fn default_search_paths(path: &Path) -> Vec<PathBuf> {
-    path.parent()
-        .map(|p| vec![p.to_path_buf()])
-        .unwrap_or_default()
 }
 
 fn snap_grounded_machine_to_terrain(transform: &mut Transform) {
@@ -353,7 +293,7 @@ fn spawn_when_loaded(
     mut commands: Commands,
     mut inflight: ResMut<Inflight>,
     mut controller_inventory: ResMut<ControllerInventory>,
-    usd_assets: Res<Assets<UsdAsset>>,
+    states: Query<&UsdSceneState>,
     mut bus: Option<ResMut<GearboxBus>>,
     mut pending_static: ResMut<crate::attach::PendingStaticAttachments>,
 ) {
@@ -361,9 +301,16 @@ fn spawn_when_loaded(
         if entry.spawned {
             continue;
         }
-        let Some(asset) = usd_assets.get(&entry.handle) else {
-            continue;
-        };
+        match states.get(entry.root) {
+            Ok(UsdSceneState::Ready) => {}
+            Ok(UsdSceneState::Failed(err)) => {
+                error!("gearbox-load: {} failed to load: {err}", entry.label);
+                entry.spawned = true;
+                continue;
+            }
+            _ => continue,
+        }
+        let scene_root = entry.root;
         let mut discovered_machines = match discover_machines_from_usd(&entry.path) {
             Ok(machines) => Some(machines),
             Err(err) => {
@@ -377,18 +324,6 @@ fn spawn_when_loaded(
         let is_machine_asset = discovered_machines
             .as_ref()
             .is_some_and(|machines| !machines.is_empty());
-        let scene_root = commands
-            .spawn((
-                Name::new(entry.label.clone()),
-                entry.transform,
-                LoadedAsset {
-                    path: entry.path.clone(),
-                    label: entry.label.clone(),
-                },
-                UsdAssetHandle(entry.handle.clone()),
-            ))
-            .id();
-        let spawned = asset.scene.spawn_under(&mut commands, scene_root);
         if is_machine_asset {
             commands
                 .entity(scene_root)
@@ -408,10 +343,8 @@ fn spawn_when_loaded(
             });
         }
         info!(
-            "Spawned {} at {:?} ({} projected entities)",
-            entry.label,
-            entry.transform.translation,
-            spawned.len()
+            "Spawned {} at {:?}",
+            entry.label, entry.transform.translation
         );
         if let Some(bus) = bus.as_deref_mut() {
             let t = entry.transform.translation;
@@ -452,7 +385,7 @@ fn sync_pending_machine_physics_to_scene_transforms(
     children: Query<&Children>,
     globals: Query<&GlobalTransform>,
     names: Query<&Name>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
     for (root, mut root_transform, mut pending, name) in pending.iter_mut() {
         let descendants = collect_descendants(root, &children);
@@ -487,6 +420,15 @@ fn sync_pending_machine_physics_to_scene_transforms(
                 continue;
             };
             let transform = gt.compute_transform();
+            if !transform.translation.is_finite() || !transform.rotation.is_finite() {
+                warn!(
+                    "gearbox-load: {} has a non-finite projected transform for {:?}: {:?}",
+                    name.map(|n| n.as_str()).unwrap_or("machine"),
+                    names.get(entity).map(|n| n.as_str()).unwrap_or("?"),
+                    transform
+                );
+                continue;
+            }
             body.set_position(
                 Pose {
                     translation: DVec3::new(
@@ -577,14 +519,14 @@ fn sync_pending_machine_physics_to_scene_transforms(
     }
 }
 
-fn propagate_body_positions_to_colliders(physics: &mut usd_bevy::physics::PhysicsWorld) {
+fn propagate_body_positions_to_colliders(physics: &mut crate::physics::PhysicsWorld) {
     let bodies = &physics.bodies;
     let colliders = &mut physics.colliders;
     bodies.propagate_modified_body_positions_to_colliders(colliders);
 }
 
 fn terrain_contact_alignment_delta(
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     collider_entities: &[(Entity, rapier3d::prelude::ColliderHandle)],
     names: &Query<&Name>,
 ) -> Option<f64> {
@@ -702,10 +644,11 @@ fn apply_runtime_namespace(
 
 /// Machine-category loads that arrived over the bus.
 fn drain_machine_load_queue(
+    mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut queue: ResMut<MachineLoadQueue>,
     mut inflight: ResMut<Inflight>,
-    mut physics_active: ResMut<usd_bevy::physics::PhysicsActive>,
+    mut physics_active: ResMut<gearbox_api::PhysicsActive>,
 ) {
     for req in queue.0.drain(..) {
         if req.remove() || req.delete() {
@@ -724,7 +667,6 @@ fn drain_machine_load_queue(
             info!("gearbox-load: pausing physics until new machine USD is aligned to terrain");
         }
         let path = resolve_spawn_path(&usd_path);
-        let (load_path, source_path, extra_search_paths) = hotload_runtime_usd_path(&path);
         let props = req.props();
         let namespace = req.namespace();
         let label = props
@@ -742,14 +684,13 @@ fn drain_machine_load_queue(
         };
         snap_grounded_machine_to_terrain(&mut transform);
         queue_usd_load(
+            &mut commands,
             &asset_server,
             &mut inflight,
-            load_path,
+            path,
             label,
             transform,
             namespace,
-            Some(source_path),
-            extra_search_paths,
             true,
         );
     }
@@ -762,7 +703,7 @@ fn drain_machine_delete_queue(
     mut commands: Commands,
     mut queue: ResMut<MachineDeleteQueue>,
     mut inventory: ResMut<ControllerInventory>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut bus: Option<ResMut<GearboxBus>>,
     loaded: Query<(Entity, &LoadedAsset)>,
     children_q: Query<&Children>,

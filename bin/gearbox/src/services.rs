@@ -8,11 +8,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
 use gearbox_api::GearboxBus;
 use rapier3d::prelude::{GenericJoint, JointAxis, MotorModel, RigidBodyHandle};
 use usd_bevy::UsdPrimRef;
-use usd_bevy::physics::PhysicsWorld;
 
 use crate::attach::Attachments;
 use crate::controller::{
@@ -383,7 +383,11 @@ struct JointRef {
 fn resolve_joint(
     scene_root: Entity,
     prim_path: &str,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
     physics: &PhysicsWorld,
 ) -> Option<JointRef> {
@@ -393,7 +397,7 @@ fn resolve_joint(
     let body0 = physics.entity_to_body.get(&joint.body0?).copied()?;
     let body1 = physics.entity_to_body.get(&joint.body1?).copied()?;
     let axis = match joint.kind {
-        usd_bevy::UsdJointKind::Prismatic => JointAxis::LinX,
+        crate::physics::markers::UsdJointKind::Prismatic => JointAxis::LinX,
         _ => JointAxis::AngX,
     };
     Some(JointRef { body0, body1, axis })
@@ -506,9 +510,13 @@ fn apply_service_controllers(
     service: Res<ServiceCommands>,
     values: Res<LinkValues>,
     inputs: Res<MasterInputs>,
-    active: Res<usd_bevy::physics::PhysicsActive>,
+    active: Res<gearbox_api::PhysicsActive>,
     mut physics: ResMut<PhysicsWorld>,
-    joints: Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     mut warned: ResMut<WarnedOnce>,
@@ -736,7 +744,7 @@ fn apply_process_controllers(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
     inputs: Res<MasterInputs>,
-    active: Res<usd_bevy::physics::PhysicsActive>,
+    active: Res<gearbox_api::PhysicsActive>,
     time: Res<Time>,
     mut values: ResMut<LinkValues>,
 ) {

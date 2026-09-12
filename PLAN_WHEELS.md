@@ -19,7 +19,7 @@ a model artefact. The raycast controller stays as a per-machine fallback
 until every asset drives on contact, then it is deleted.
 
 Everything here lives in `bin/gearbox/src/controller.rs`, the vendored
-`usd_bevy` / `usd_rapier` physics glue, and the specs. The stale
+`bin/gearbox/src/physics` (the rapier adapter), and the specs. The stale
 `gearbox-core` / `gearbox-physics` crates are not touched.
 
 ## What exists today (the code this plan changes)
@@ -56,12 +56,12 @@ Everything here lives in `bin/gearbox/src/controller.rs`, the vendored
   `angvel`, tyre friction 0.05, `carry_wheels_with_chassis`.
 - `publish_machine_controller_states`: `/state` from the chassis body.
 
-`vendor/bevy_openusd/crates/usd_rapier/src/colliders.rs`: a USD `Cylinder`
+`bin/gearbox/src/physics/rapier/colliders.rs`: a USD `Cylinder`
 becomes `ColliderBuilder::cylinder` (a sharp-edged cylinder). USD drives
 become joint motors (`joints.rs`, `MotorModel::ForceBased`); the sim pins
 `AccelerationBased` on every joint it drives.
 
-`vendor/bevy_openusd/crates/usd_bevy/src/physics/world.rs`: one rapier
+`bin/gearbox/src/physics/world.rs`: one rapier
 step per render frame at the default `dt` (1/60 s) regardless of frame
 time, `num_solver_iterations` 16, `PairFilter` hook dropping the contacts
 `PhysicsFilteredPairsAPI` lists, no CCD.
@@ -108,7 +108,7 @@ Physics changes that help both models and are safe to land alone.
   lists stay honoured for anything finer. Attached slaves are separate
   machines and keep colliding with the master except through the coupling
   joint, which already disables its own pair.
-- **Round tyres.** `usd_rapier::colliders`: a `Cylinder` prim whose body is
+- **Round tyres.** `physics::rapier::colliders`: a `Cylinder` prim whose body is
   a `wheel` link, or that carries `gearbox:collider:round = true`, becomes
   `ColliderBuilder::round_cylinder(half_h, r − b, b)` with `b = 0.05 · r`.
   A sharp cylinder edge on a plane is what makes rapier contacts twitch;
@@ -175,7 +175,7 @@ original complaint made measurable.
 
 - `gearbox:machine:role:suspensionJoints` (rel[], optional): prismatic
   joints between chassis and knuckle whose USD drive (`stiffness`,
-  `damping`, `maxForce`) is the spring. `usd_rapier` already turns the
+  `damping`, `maxForce`) is the spring. `physics::rapier` already turns the
   drive into a motor; the sim leaves those joints alone. `links.rs`
   validation warns when a suspension joint is not prismatic.
 - The Oxbo's six wheels and rear steer axle need no code beyond Phase 2:
@@ -239,7 +239,7 @@ in CI; until then they are scripted acceptance runs.
   is what jittered this week until the inertia guard. Contact adds load on
   the same joints; the fixed step and `num_solver_iterations` 16 should
   hold, else the machine goes multibody (`ArticulationRootAPI` on the
-  chassis, which `usd_rapier` already supports) with the hitch loops
+  chassis, which `physics::rapier` already supports) with the hitch loops
   excluded, as the pipeline authors them.
 - **Frame rate.** Debug builds run 10 fps with two tractors; the
   accumulator's 4-step cap means physics slows below 30 fps rather than
@@ -255,7 +255,7 @@ in CI; until then they are scripted acceptance runs.
 | `bin/gearbox/src/controller.rs` | `traction` switch, contact drive path, torque and steer caps from mass, slip readout, machine self-collision registration; later deletions |
 | `bin/gearbox/src/attach.rs` | `TowedMass` unused under contact, removed in Phase 5 |
 | `bin/gearbox/src/links.rs` | `role:suspensionJoints` validation |
-| `vendor/bevy_openusd/crates/usd_rapier/src/colliders.rs` | round cylinder for tyres |
-| `vendor/bevy_openusd/crates/usd_bevy/src/physics/world.rs` | fixed timestep, per-machine pair filter, CCD |
+| `bin/gearbox/src/physics/rapier/colliders.rs` | round cylinder for tyres |
+| `bin/gearbox/src/physics/world.rs` | fixed timestep, per-machine pair filter, CCD |
 | `specs/CONTROLLER_SPEC.md` | §3, §4, §5, §7.5, §8 |
 | `bin/gearbox/assets/*.usd`, `~/machines/usd/*` | tyre physics materials, torque caps, axle damping |

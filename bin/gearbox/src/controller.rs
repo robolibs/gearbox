@@ -10,10 +10,10 @@
 //! stable USD-joint-to-Rapier-handle index.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::process::{Child, Command};
 
+use crate::usd_ext::StageExt;
 use bevy::prelude::*;
 use gearbox_api::datapod::robot::{Odom, Twist};
 use gearbox_api::datapod::{Point, Quaternion};
@@ -336,7 +336,7 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
 
     let mut machines = Vec::new();
     for prim in &prims {
-        let api_schemas = stage.api_schemas(&prim).unwrap_or_default();
+        let api_schemas = stage.api_schemas(prim).unwrap_or_default();
         let is_machine = api_schemas.iter().any(|api| api == "GearboxMachineAPI")
             || read_token(&stage, &prim, "gearbox:machine:kind").is_some()
             || read_token(&stage, &prim, "gearbox:machine:idPolicy").is_some()
@@ -434,81 +434,15 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
     Ok(machines)
 }
 
-fn open_stage_for_discovery(usd_path: &Path) -> Result<openusd::Stage, String> {
-    let bytes = std::fs::read(usd_path).map_err(|e| e.to_string())?;
-    let ext = usd_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("usd");
-    let is_text_usd = ext.eq_ignore_ascii_case("usda")
-        || (ext.eq_ignore_ascii_case("usd") && is_text_usd(&bytes));
-
-    // Match usd_bevy's tolerance for USDA files that contain metadata tokens
-    // openusd-rs cannot parse directly yet. We only need authored gearbox
-    // control metadata from the root layer, so a stripped temp layer is enough.
-    let open_path = if is_text_usd {
-        let final_bytes =
-            usd_schema::third_party::strip_metadata::strip_unsupported_prim_metadata(&bytes);
-        let tmp = discovery_temp_path(usd_path, ext);
-        std::fs::write(&tmp, final_bytes).map_err(|e| e.to_string())?;
-        tmp
-    } else {
-        usd_path.to_path_buf()
-    };
-
-    let mut search = Vec::new();
-    if let Some(parent) = usd_path.parent() {
-        search.push(parent.to_path_buf());
-    }
-    if let Some(parent) = open_path.parent() {
-        search.push(parent.to_path_buf());
-    }
-
-    let open_str = open_path
+fn open_stage_for_discovery(usd_path: &Path) -> Result<openusd::usd::Stage, String> {
+    let open_str = usd_path
         .to_str()
         .ok_or_else(|| "non-UTF-8 USD discovery path".to_string())?;
-    let stage = openusd::Stage::builder()
-        .resolver(
-            usd_schema::third_party::resolver::StripMetadataResolver::with_search_paths(search),
-        )
-        .on_error(|err| {
-            bevy::log::warn!("gearbox-control USD composition: {err}");
-            Ok(())
-        })
-        .open(open_str)
-        .map_err(|e| e.to_string());
-    if is_text_usd && open_path != usd_path {
-        let _ = std::fs::remove_file(&open_path);
-    }
-    stage
-}
-
-fn discovery_temp_path(usd_path: &Path, ext: &str) -> std::path::PathBuf {
-    // Unique per call: two scans of the same asset at once (two machines
-    // in one world, tests in parallel) must not read each other's half
-    // written layer.
-    static SCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    usd_path.hash(&mut hasher);
-    let n = SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        ".gearbox_control_scan_{:016x}_{}_{n}.{}",
-        hasher.finish(),
-        std::process::id(),
-        ext
-    ))
-}
-
-fn is_text_usd(bytes: &[u8]) -> bool {
-    let start = bytes
-        .iter()
-        .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0xEF | 0xBB | 0xBF))
-        .unwrap_or(bytes.len());
-    bytes[start..].starts_with(b"#usda")
+    openusd::usd::Stage::open(open_str).map_err(|e| e.to_string())
 }
 
 fn append_isaac_compat_machines(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prims: &[SdfPath],
     machines: &mut Vec<MachineInstanceSpec>,
 ) {
@@ -652,10 +586,10 @@ struct IsaacJointGroups {
     drive: Vec<String>,
 }
 
-fn discover_isaac_joint_groups(stage: &openusd::Stage, prims: &[SdfPath]) -> IsaacJointGroups {
+fn discover_isaac_joint_groups(stage: &openusd::usd::Stage, prims: &[SdfPath]) -> IsaacJointGroups {
     let mut groups = IsaacJointGroups::default();
     for prim in prims {
-        let prop_names = stage.prim_properties(prim.clone()).unwrap_or_default();
+        let prop_names = stage.prim_properties(prim).unwrap_or_default();
         if prop_names.is_empty() {
             continue;
         }
@@ -694,7 +628,11 @@ fn discover_isaac_joint_groups(stage: &openusd::Stage, prims: &[SdfPath]) -> Isa
     groups
 }
 
-fn physics_joint_paths_under(stage: &openusd::Stage, prims: &[SdfPath], root: &str) -> Vec<String> {
+fn physics_joint_paths_under(
+    stage: &openusd::usd::Stage,
+    prims: &[SdfPath],
+    root: &str,
+) -> Vec<String> {
     prims
         .iter()
         .filter(|prim| path_is_under(prim.as_str(), root))
@@ -709,7 +647,11 @@ fn physics_joint_paths_under(stage: &openusd::Stage, prims: &[SdfPath], root: &s
         .collect()
 }
 
-fn first_rigid_body_under(stage: &openusd::Stage, prims: &[SdfPath], root: &str) -> Option<String> {
+fn first_rigid_body_under(
+    stage: &openusd::usd::Stage,
+    prims: &[SdfPath],
+    root: &str,
+) -> Option<String> {
     prims
         .iter()
         .filter(|prim| path_is_under(prim.as_str(), root))
@@ -775,17 +717,19 @@ fn steering_side_targets(steer_joints: &[String]) -> (Option<String>, Option<Str
     (left, right)
 }
 
-fn read_name_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
-    match read_attr(stage, prim, name) {
-        Some(Value::TokenVec(v)) | Some(Value::StringVec(v)) => v,
-        Some(Value::Token(v)) | Some(Value::String(v)) => v
-            .split([',', ' '])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
+fn read_name_array(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+    let text = match read_attr(stage, prim, name) {
+        Some(Value::TokenVec(v)) => return v.iter().map(|t| t.as_str().to_string()).collect(),
+        Some(Value::StringVec(v)) => return v,
+        Some(Value::Token(v)) => v.as_str().to_string(),
+        Some(Value::String(v)) => v,
+        _ => return Vec::new(),
+    };
+    text.split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn looks_like_joint_names_attr(name: &str) -> bool {
@@ -816,25 +760,21 @@ fn prim_leaf_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-pub(crate) fn type_name(stage: &openusd::Stage, prim: &SdfPath) -> Option<String> {
-    stage
-        .field::<String>(prim.clone(), "typeName")
-        .ok()
-        .flatten()
+pub(crate) fn type_name(stage: &openusd::usd::Stage, prim: &SdfPath) -> Option<String> {
+    StageExt::type_name(stage, prim).ok().flatten()
 }
 
 fn append_value_context(context: &mut String, value: &Value) {
+    let mut push = |s: &str| {
+        context.push(' ');
+        context.push_str(&s.to_ascii_lowercase());
+    };
     match value {
-        Value::String(v) | Value::Token(v) | Value::AssetPath(v) => {
-            context.push(' ');
-            context.push_str(&v.to_ascii_lowercase());
-        }
-        Value::StringVec(v) | Value::TokenVec(v) => {
-            for item in v {
-                context.push(' ');
-                context.push_str(&item.to_ascii_lowercase());
-            }
-        }
+        Value::String(v) => push(v),
+        Value::Token(v) => push(v.as_str()),
+        Value::AssetPath(v) => push(v.as_str()),
+        Value::StringVec(v) => v.iter().for_each(|item| push(item)),
+        Value::TokenVec(v) => v.iter().for_each(|item| push(item.as_str())),
         _ => {}
     }
 }
@@ -1002,12 +942,16 @@ fn apply_builtin_ackermann_cmd_vel(
     time: Res<Time>,
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
-    active: Res<usd_bevy::physics::PhysicsActive>,
+    active: Res<gearbox_api::PhysicsActive>,
     towed: Res<crate::attach::TowedMass>,
     prims: Query<(Entity, &UsdPrimRef)>,
-    joints: Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: Query<&ChildOf>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
     if !active.0 || inventory.machines.is_empty() {
         return;
@@ -1212,11 +1156,15 @@ fn apply_builtin_diff_drive_cmd_vel(
     time: Res<Time>,
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
-    active: Res<usd_bevy::physics::PhysicsActive>,
+    active: Res<gearbox_api::PhysicsActive>,
     prims: Query<(Entity, &UsdPrimRef)>,
-    joints: Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: Query<&ChildOf>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
     if !active.0 || inventory.machines.is_empty() {
         return;
@@ -1331,7 +1279,7 @@ const DIFF_DRIVE_TIRE_FRICTION: f64 = 0.05;
 /// `v + ω × r` — keeping its own spin about the axle and its own vertical
 /// motion, so gravity still seats it.
 fn carry_wheels_with_chassis(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
 ) {
@@ -1359,7 +1307,7 @@ fn carry_wheels_with_chassis(
 }
 
 fn set_wheel_colliders_friction(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
     friction: f64,
@@ -1536,7 +1484,7 @@ const RAYCAST_SUSPENSION_REST_LENGTH: f64 = 0.22;
 /// Largest collider half-extent of a body — a wheel's tyre radius, a
 /// chassis's bounding half-size. `None` if the body has no collider.
 fn body_max_collider_radius(
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     body: RigidBodyHandle,
 ) -> Option<f64> {
     let body = physics.bodies.get(body)?;
@@ -1553,7 +1501,7 @@ fn body_max_collider_radius(
 /// isn't the chassis, or — for a knuckle↔wheel joint where neither is
 /// the chassis — the larger-collider body (the tyre, not the knuckle).
 fn wheel_body_of(
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     pair: (RigidBodyHandle, RigidBodyHandle),
 ) -> Option<RigidBodyHandle> {
@@ -1586,7 +1534,7 @@ fn wheel_body_of(
 /// powered and passive tyres; passive front tyres still need grip to
 /// steer instead of sliding sideways. Idempotent.
 fn ensure_tire_grip(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
 ) {
@@ -1614,7 +1562,7 @@ fn ensure_tire_grip(
 }
 
 fn set_wheel_colliders_sensor(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
     sensor: bool,
@@ -1637,7 +1585,7 @@ fn set_wheel_colliders_sensor(
 }
 
 fn apply_rapier_raycast_vehicle_controller(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
     wheel_specs: &[RaycastVehicleWheelSpec],
@@ -1810,9 +1758,13 @@ fn raycast_vehicle_wheel_specs_for_controller(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     wheel_radius_fallback_m: f64,
 ) -> Vec<RaycastVehicleWheelSpec> {
@@ -2028,7 +1980,7 @@ fn raycast_wheel_spec_for_path(path: &str) -> Option<RaycastVehicleWheelSpec> {
 }
 
 fn wake_vehicle_for_command(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
     cmd: CmdVel,
@@ -2056,9 +2008,13 @@ fn tire_joint_pairs(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
 ) -> Vec<(RigidBodyHandle, RigidBodyHandle)> {
     let mut pairs = Vec::new();
     for path in machine
@@ -2144,9 +2100,13 @@ fn steering_joint_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     geometry: &str,
     center_steer_rad: f64,
     wheel_base_m: f32,
@@ -2233,9 +2193,13 @@ fn steering_joint_targets(
 fn explicit_steering_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     left_position: f64,
     right_position: f64,
 ) -> Vec<JointPositionTarget> {
@@ -2268,9 +2232,13 @@ fn all_role_steering_targets(
     scene_root: Entity,
     machine: &MachineInstanceSpec,
     controller: &ControllerSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     center_position: f64,
     max_steer_deg: f32,
 ) -> Vec<JointPositionTarget> {
@@ -2358,7 +2326,7 @@ fn visual_turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64)
 }
 
 fn wheel_lateral_offset(
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     pair: (RigidBodyHandle, RigidBodyHandle),
 ) -> Option<f64> {
@@ -2374,9 +2342,13 @@ fn wheel_lateral_offset(
 fn role_steering_targets(
     scene_root: Entity,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     left_position: f64,
     right_position: f64,
 ) -> Vec<JointPositionTarget> {
@@ -2418,9 +2390,13 @@ fn wheel_joint_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     geometry: &str,
     linear_mps: f64,
@@ -2512,9 +2488,13 @@ fn parking_brake_wheel_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
 ) -> Vec<JointVelocityTarget> {
     let mut targets = Vec::new();
     for path in machine
@@ -2541,9 +2521,13 @@ fn visual_wheel_spin_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     wheel_radius_fallback_m: f64,
 ) -> Vec<JointVelocityTarget> {
@@ -2595,9 +2579,13 @@ fn push_visual_wheel_spin_target(
     targets: &mut Vec<JointVelocityTarget>,
     scene_root: Entity,
     path: &str,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     wheel_radius_fallback_m: f64,
 ) {
@@ -2624,7 +2612,7 @@ fn push_visual_wheel_spin_target(
 }
 
 fn visual_wheel_radius(
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     pair: (RigidBodyHandle, RigidBodyHandle),
     path: &str,
@@ -2646,7 +2634,7 @@ fn visual_wheel_radius(
 }
 
 fn chassis_forward_speed(
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
 ) -> Option<f64> {
     let body = physics.bodies.get(chassis)?;
@@ -2655,7 +2643,7 @@ fn chassis_forward_speed(
 }
 
 fn visual_wheel_side_ground_speed(
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     pair: (RigidBodyHandle, RigidBodyHandle),
     path: &str,
@@ -2690,9 +2678,13 @@ fn visual_spin_lateral_x(side: Option<SideHint>, measured_lateral_x: f64) -> f64
 fn joint_pair(
     scene_root: Entity,
     path: &str,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
 ) -> Option<(RigidBodyHandle, RigidBodyHandle)> {
     let (_, _, body0, body1) = find_joint_body_pair(scene_root, path, joints, parents, physics)?;
     Some((body0, body1))
@@ -2705,7 +2697,7 @@ struct MotorApplication {
 }
 
 fn apply_articulation_or_impulse_joint_motors(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     wheel_targets: &[JointVelocityTarget],
     steer_targets: &[JointPositionTarget],
 ) -> MotorApplication {
@@ -2787,7 +2779,7 @@ fn apply_articulation_or_impulse_joint_motors(
 }
 
 fn multibody_joint_handle(
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     pair: (RigidBodyHandle, RigidBodyHandle),
 ) -> Option<MultibodyJointHandle> {
     physics
@@ -2808,9 +2800,13 @@ fn rigid_body_pair_matches(
 pub(crate) fn find_joint_body_pair(
     scene_root: Entity,
     prim_path: &str,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
 ) -> Option<(Entity, Entity, RigidBodyHandle, RigidBodyHandle)> {
     let (_, _, joint) = joints.iter().find(|(entity, prim, _)| {
         prim.path == prim_path && is_descendant_of(*entity, scene_root, parents)
@@ -2851,7 +2847,7 @@ pub(crate) fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&Ch
 }
 
 fn discover_controllers(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prim: &SdfPath,
     api_schemas: &[String],
     namespace_default: &str,
@@ -3018,11 +3014,11 @@ fn discover_controllers(
     out
 }
 
-fn walk_stage(stage: &openusd::Stage, path: SdfPath, out: &mut Vec<SdfPath>) {
+fn walk_stage(stage: &openusd::usd::Stage, path: SdfPath, out: &mut Vec<SdfPath>) {
     if path.as_str() != "/" {
         out.push(path.clone());
     }
-    for child_name in stage.prim_children(path.clone()).unwrap_or_default() {
+    for child_name in stage.prim_children(&path).unwrap_or_default() {
         let Ok(child_path) = path.append_path(child_name.as_str()) else {
             continue;
         };
@@ -3047,19 +3043,18 @@ fn derive_machine_id(prim_path: &str) -> String {
     }
 }
 
-pub(crate) fn read_attr(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<Value> {
-    let attr = prim.append_property(name).ok()?;
-    stage.field::<Value>(attr, "default").ok().flatten()
+pub(crate) fn read_attr(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<Value> {
+    crate::usd_ext::authored_value(stage, prim, name)
 }
 
-pub(crate) fn read_bool(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<bool> {
+pub(crate) fn read_bool(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<bool> {
     match read_attr(stage, prim, name)? {
         Value::Bool(v) => Some(v),
         _ => None,
     }
 }
 
-pub(crate) fn read_float(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<f32> {
+pub(crate) fn read_float(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<f32> {
     match read_attr(stage, prim, name)? {
         Value::Float(v) => Some(v),
         Value::Double(v) => Some(v as f32),
@@ -3069,50 +3064,55 @@ pub(crate) fn read_float(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> 
     }
 }
 
-fn read_string(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
+fn read_string(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
     match read_attr(stage, prim, name)? {
-        Value::String(v) | Value::Token(v) | Value::AssetPath(v) => Some(v),
+        Value::String(v) => Some(v),
+        Value::Token(v) => Some(v.as_str().to_string()),
+        Value::AssetPath(v) => Some(v.as_str().to_string()),
         _ => None,
     }
 }
 
-pub(crate) fn read_token(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
+pub(crate) fn read_token(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    name: &str,
+) -> Option<String> {
     read_string(stage, prim, name)
 }
 
-pub(crate) fn read_token_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+pub(crate) fn read_token_array(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    name: &str,
+) -> Vec<String> {
     match read_attr(stage, prim, name) {
-        Some(Value::TokenVec(v)) | Some(Value::StringVec(v)) => v,
+        Some(Value::TokenVec(v)) => v.iter().map(|t| t.as_str().to_string()).collect(),
+        Some(Value::StringVec(v)) => v,
         _ => Vec::new(),
     }
 }
 
-fn read_string_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+fn read_string_array(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
     read_token_array(stage, prim, name)
 }
 
 pub(crate) fn read_rel_targets(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prim: &SdfPath,
     rel_name: &str,
 ) -> Vec<String> {
-    let Some(raw) = prim
-        .append_property(rel_name)
-        .ok()
-        .and_then(|rel| stage.field::<Value>(rel, "targetPaths").ok().flatten())
-    else {
+    let Ok(prim) = stage.prim(prim.clone()) else {
         return Vec::new();
     };
-    let paths = match raw {
-        Value::PathListOp(op) => op.flatten(),
-        Value::PathVec(v) => v,
-        _ => return Vec::new(),
-    };
-    paths.into_iter().map(|p| p.as_str().to_string()).collect()
+    prim.relationship(rel_name)
+        .targets()
+        .map(|paths| paths.into_iter().map(|p| p.as_str().to_string()).collect())
+        .unwrap_or_default()
 }
 
 fn read_rel_targets_rebased(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prim: &SdfPath,
     rel_name: &str,
     machine_prim: &str,
@@ -3124,7 +3124,7 @@ fn read_rel_targets_rebased(
 }
 
 pub(crate) fn read_rel_first(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prim: &SdfPath,
     rel_name: &str,
 ) -> Option<String> {
@@ -3555,7 +3555,7 @@ def Xform "Leatherback" (
     fn impulse_joint_motors_bind_authored_body_pairs() {
         use rapier3d::prelude::{RevoluteJointBuilder, RigidBodyBuilder, Vector};
 
-        let mut physics = usd_bevy::physics::PhysicsWorld::default();
+        let mut physics = crate::physics::PhysicsWorld::default();
         let chassis = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
         let wheel = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
         let steer = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
@@ -3614,7 +3614,7 @@ def Xform "Leatherback" (
     fn multibody_joint_motors_bind_authored_body_pairs() {
         use rapier3d::prelude::{RevoluteJointBuilder, RigidBodyBuilder, Vector};
 
-        let mut physics = usd_bevy::physics::PhysicsWorld::default();
+        let mut physics = crate::physics::PhysicsWorld::default();
         let chassis = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
         let wheel = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
         let steer = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
@@ -3962,7 +3962,7 @@ fn publish_machine_controller_states(
     states: Res<ControllerStates>,
     keys: Res<MachineAgentKeys>,
     bus: Option<ResMut<GearboxBus>>,
-    physics: Res<usd_bevy::physics::PhysicsWorld>,
+    physics: Res<crate::physics::PhysicsWorld>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     link_values: Res<crate::services::LinkValues>,
@@ -4174,7 +4174,7 @@ const AXLE_PIVOT_MAX_TORQUE: f64 = 200_000.0;
 /// once the raycast vehicle carries the chassis and the tyres are sensors.
 /// Hold every such pivot at its rest angle.
 fn hold_axle_pivots(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     steer_targets: &[JointPositionTarget],
 ) {
@@ -4274,7 +4274,7 @@ fn guard_chassis_inertia(
     mut runtime: ResMut<ControllerRuntimeState>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {

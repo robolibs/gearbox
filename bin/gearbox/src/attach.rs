@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
 use gearbox_api::{
     AttachRequest, DetachRequest, GearboxBus, LinkDesc, SceneEvent, Status, ToolDesc, code,
@@ -17,7 +18,6 @@ use rapier3d::prelude::{
     RigidBodyHandle,
 };
 use usd_bevy::UsdPrimRef;
-use usd_bevy::physics::PhysicsWorld;
 
 use crate::controller::{
     ControllerInventory, MachineAgentKeys, MachineInstanceSpec, find_prim_entity, link_descs,

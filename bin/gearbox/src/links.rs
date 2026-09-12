@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::usd_ext::StageExt;
 use bevy::math::{DMat4, DQuat, DVec3, EulerRot};
 use openusd::sdf::{Path as SdfPath, Value};
 
@@ -172,7 +173,7 @@ struct JointRecord {
 /// Discover the link tree of the machine rooted at `machine_prim`.
 /// `machine_body` is the `gearbox:machine:body` target when authored.
 pub fn discover_link_tree(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     machine_prim: &SdfPath,
     machine_body: Option<&str>,
     prims: &[SdfPath],
@@ -528,7 +529,7 @@ pub fn discover_link_tree(
 }
 
 fn read_coupling(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prim: &SdfPath,
     root: &str,
     errors: &mut Vec<String>,
@@ -639,7 +640,7 @@ fn nearest_ancestor_link(
 
 /// Composed local transform of `descendant` in `ancestor`'s frame.
 pub(crate) fn local_offset_between(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     ancestor: &str,
     descendant: &str,
 ) -> StaticOffset {
@@ -662,7 +663,7 @@ pub(crate) fn local_offset_between(
 }
 
 /// The prim's own xform from its `xformOpOrder`, ignoring scale and pivots.
-pub fn prim_local_matrix(stage: &openusd::Stage, prim: &SdfPath) -> DMat4 {
+pub fn prim_local_matrix(stage: &openusd::usd::Stage, prim: &SdfPath) -> DMat4 {
     let order = read_token_array(stage, prim, "xformOpOrder");
     let ops: Vec<String> = if order.is_empty() {
         [
@@ -686,17 +687,18 @@ pub fn prim_local_matrix(stage: &openusd::Stage, prim: &SdfPath) -> DMat4 {
         };
         let base = name.split(':').take(2).collect::<Vec<_>>().join(":");
         let step = match (base.as_str(), value) {
-            ("xformOp:translate", Value::Vec3d(v)) => DMat4::from_translation(DVec3::from(v)),
-            ("xformOp:translate", Value::Vec3f(v)) => {
-                DMat4::from_translation(DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64))
+            ("xformOp:translate", Value::Vec3d(v)) => {
+                DMat4::from_translation(DVec3::new(v.x, v.y, v.z))
             }
-            ("xformOp:orient", Value::Quatd(q)) => DMat4::from_quat(quat_wxyz(q)),
-            ("xformOp:orient", Value::Quatf(q)) => DMat4::from_quat(quat_wxyz([
-                q[0] as f64,
-                q[1] as f64,
-                q[2] as f64,
-                q[3] as f64,
-            ])),
+            ("xformOp:translate", Value::Vec3f(v)) => {
+                DMat4::from_translation(DVec3::new(v.x as f64, v.y as f64, v.z as f64))
+            }
+            ("xformOp:orient", Value::Quatd(q)) => {
+                DMat4::from_quat(quat_wxyz([q.w, q.x, q.y, q.z]))
+            }
+            ("xformOp:orient", Value::Quatf(q)) => {
+                DMat4::from_quat(quat_wxyz([q.w as f64, q.x as f64, q.y as f64, q.z as f64]))
+            }
             ("xformOp:rotateXYZ", Value::Vec3f(v)) => DMat4::from_quat(DQuat::from_euler(
                 EulerRot::XYZ,
                 (v[0] as f64).to_radians(),
@@ -718,7 +720,7 @@ pub fn prim_local_matrix(stage: &openusd::Stage, prim: &SdfPath) -> DMat4 {
             ("xformOp:transform", Value::Matrix4d(v)) => {
                 // A USD row-vector matrix's rows are the images of the
                 // axes, which is exactly glam's column layout.
-                DMat4::from_cols_array(&v)
+                DMat4::from_cols_array(&v.0)
             }
             _ => continue,
         };
@@ -1144,7 +1146,7 @@ pub const ELEMENT_KINDS: [&str; 7] = [
 ];
 
 fn read_element(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prim: &SdfPath,
     errors: &mut Vec<String>,
 ) -> Option<ElementInfo> {
@@ -1162,7 +1164,8 @@ fn read_element(
         _ => None,
     };
     let designator = match read_attr(stage, prim, "gearbox:element:designator") {
-        Some(Value::String(s)) | Some(Value::Token(s)) => s,
+        Some(Value::String(s)) => s,
+        Some(Value::Token(s)) => s.as_str().to_string(),
         _ => leaf(prim.as_str()).to_string(),
     };
     Some(ElementInfo {
@@ -1173,9 +1176,9 @@ fn read_element(
 }
 
 /// Every `gearbox:value:*` attribute on a prim, sorted by name.
-fn read_values(stage: &openusd::Stage, prim: &SdfPath) -> Vec<(String, f64)> {
+fn read_values(stage: &openusd::usd::Stage, prim: &SdfPath) -> Vec<(String, f64)> {
     let mut out = Vec::new();
-    for name in stage.prim_properties(prim.clone()).unwrap_or_default() {
+    for name in stage.prim_properties(prim).unwrap_or_default() {
         let Some(key) = name.strip_prefix("gearbox:value:") else {
             continue;
         };

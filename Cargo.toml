@@ -85,14 +85,33 @@ libc = "0.2"
 gearbox-api     = { path = "crates/gearbox-api", default-features = false }
 mara            = { git = "https://github.com/bresilla/mara", branch = "develop", package = "mara", default-features = false }
 bevy_mara       = { git = "https://github.com/bresilla/mara", branch = "develop", package = "bevy_mara", default-features = false }
-# Vendored from bevy_openusd because upstream still pins older Bevy
-# APIs. Keep the local copy on the same Bevy major as gearbox.
-usd_bevy        = { path = "vendor/bevy_openusd/crates/usd_bevy" }
-usd_schema      = { path = "vendor/bevy_openusd/crates/usd_schema" }
-openusd         = { git = "https://github.com/mxpv/openusd", rev = "fe92b73224c611831be244afac9cf7654b5ef51e" }
+# bevy_openusd v0.1.0: the live stage editor. openusd is the copy vendored
+# and patched inside that repository, so both sides speak the same `Stage`.
+usd_bevy        = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0" }
+openusd         = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0" }
+openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0", features = ["geom", "shade", "physics"] }
 
 # Local peerbus carries the per-handle request-id seed fix; every crate in
 # the graph (agentio included) must see the same peerbus, so patch the
 # git source rather than depend on the path directly.
 [patch."https://codeberg.org/robolibs/peerbus.git"]
 peerbus = { path = "../peerbus" }
+
+# The USD stack projects on the main thread; unoptimised it takes minutes per
+# tractor, so those crates get optimised even in dev builds.
+[profile.dev.package.usd_bevy]
+opt-level = 3
+[profile.dev.package.openusd]
+opt-level = 3
+[profile.dev.package.openusd-schemas]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.zip]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3

@@ -22,7 +22,7 @@ pub struct MachineDeleteQueue(pub Vec<String>);
 /// Pending scene-load handle for a non-machine USD.
 #[derive(Component)]
 pub struct PendingLoadedUsd {
-    pub handle: Handle<usd_bevy::UsdAsset>,
+    pub handle: Handle<usd_bevy::UsdScene>,
     pub load_id: String,
 }
 
@@ -188,33 +188,16 @@ fn serve_usd_loads(
         } else {
             root.0.join(&path)
         };
-        let parent = asset_file
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| root.0.clone());
-        let variants: Vec<usd_bevy::VariantSelection> = req
-            .variants()
-            .into_iter()
-            .map(|(prim_path, set_name, option)| usd_bevy::VariantSelection {
-                prim_path,
-                set_name,
-                option,
-            })
-            .collect();
-        let asset_path_string = asset_file.to_string_lossy().into_owned();
-        let asset_path: bevy::asset::AssetPath<'static> = if variants.is_empty() {
-            asset_path_string.into()
-        } else {
-            let label = usd_bevy::variant_label(&variants);
-            bevy::asset::AssetPath::from(asset_path_string).with_label(label)
+        let overrides = usd_bevy::instance::UsdInstanceOverrides {
+            variants: req.variants(),
+            attributes: Vec::new(),
         };
-        let variants_for_settings = variants.clone();
-        let handle: Handle<usd_bevy::UsdAsset> = asset_server.load_with_settings(
-            asset_path,
-            move |s: &mut usd_bevy::UsdLoaderSettings| {
-                s.search_paths = vec![parent.clone()];
-                s.variant_selections = variants_for_settings.clone();
-            },
+        // The asset root is `/`, and usd_bevy wants source-relative paths.
+        let handle: Handle<usd_bevy::UsdScene> = asset_server.load(
+            asset_file
+                .to_string_lossy()
+                .trim_start_matches('/')
+                .to_string(),
         );
         let is_world = matches!(req.category, category::WORLD | category::TERRAIN);
         let name = if is_world {
@@ -235,6 +218,8 @@ fn serve_usd_loads(
                     ..default()
                 },
                 Visibility::default(),
+                usd_bevy::UsdSceneRoot(handle.clone()),
+                overrides,
                 PendingLoadedUsd {
                     handle,
                     load_id: id.clone(),
@@ -251,27 +236,23 @@ fn serve_usd_loads(
     }
 }
 
+/// usd_bevy projects a `UsdSceneRoot` itself; this only reports when it is
+/// ready or failed.
 fn instantiate_pending(
     mut commands: Commands,
     bus: Option<ResMut<GearboxBus>>,
-    asset_server: Res<AssetServer>,
-    usd_assets: Res<Assets<usd_bevy::UsdAsset>>,
-    pending: Query<(Entity, &PendingLoadedUsd, &Transform)>,
+    pending: Query<(
+        Entity,
+        &PendingLoadedUsd,
+        &Transform,
+        Option<&usd_bevy::UsdSceneState>,
+    )>,
 ) {
-    use bevy::asset::LoadState;
     let mut bus = bus;
-    for (entity, pend, transform) in pending.iter() {
-        match asset_server.get_load_state(&pend.handle) {
-            Some(LoadState::Loaded) => {
-                let Some(asset) = usd_assets.get(&pend.handle) else {
-                    continue;
-                };
-                let spawned = asset.scene.spawn_under(&mut commands, entity);
-                info!(
-                    "gearbox-api: instantiated USD load `{}` ({} projected entities)",
-                    pend.load_id,
-                    spawned.len()
-                );
+    for (entity, pend, transform, state) in pending.iter() {
+        match state {
+            Some(usd_bevy::UsdSceneState::Ready) => {
+                info!("gearbox-api: instantiated USD load `{}`", pend.load_id);
                 commands.entity(entity).remove::<PendingLoadedUsd>();
                 if let Some(bus) = bus.as_deref_mut() {
                     let t = transform.translation;
@@ -280,7 +261,7 @@ fn instantiate_pending(
                     );
                 }
             }
-            Some(LoadState::Failed(err)) => {
+            Some(usd_bevy::UsdSceneState::Failed(err)) => {
                 error!("gearbox-api: USD load FAILED for `{}`: {err}", pend.load_id);
                 commands.entity(entity).remove::<PendingLoadedUsd>();
             }

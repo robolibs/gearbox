@@ -21,15 +21,15 @@
 //! Independent from any physics engine — pure ECS-data visualisation.
 //! Joint shape primitives are local debug-gizmo helpers.
 
+use crate::physics::markers::{
+    UsdArticulationRoot, UsdDof, UsdJointKind, UsdMass, UsdPhysicsJoint, UsdPhysicsScene,
+    UsdRigidBody,
+};
 use bevy::color::palettes::tailwind;
 use bevy::gizmos::config::{GizmoConfigGroup, GizmoConfigStore};
 use bevy::prelude::*;
 use bevy::reflect::Reflect;
 use core::f32::consts::TAU;
-use usd_bevy::{
-    UsdArticulationRoot, UsdDof, UsdJointKind, UsdMass, UsdPhysicsJoint, UsdPhysicsScene,
-    UsdRigidBody,
-};
 
 use crate::viewer::overlays::{DisplayToggles, SceneExtent};
 

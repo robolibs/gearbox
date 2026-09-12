@@ -91,7 +91,7 @@ fn sync_ground_grid_visibility(toggles: Res<DisplayToggles>, mut grid: ResMut<Gr
 
 fn sync_collider_debug_visibility(
     toggles: Res<DisplayToggles>,
-    mut enabled: ResMut<usd_bevy::physics::ColliderDebugEnabled>,
+    mut enabled: ResMut<crate::physics::ColliderDebugEnabled>,
 ) {
     if enabled.0 != toggles.show_colliders {
         enabled.0 = toggles.show_colliders;
@@ -177,33 +177,14 @@ impl SceneExtent {
 }
 
 fn compute_extent(
-    prims: Query<
-        (
-            &GlobalTransform,
-            Option<&usd_bevy::UsdLocalExtent>,
-            Option<&bevy::camera::primitives::Aabb>,
-        ),
-        With<UsdPrimRef>,
-    >,
+    prims: Query<(&GlobalTransform, Option<&bevy::camera::primitives::Aabb>), With<UsdPrimRef>>,
     mut extent: ResMut<SceneExtent>,
 ) {
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
     let mut count = 0u32;
-    for (gt, local, aabb) in prims.iter() {
-        if let Some(le) = local {
-            let m = gt.to_matrix();
-            for i in 0..8 {
-                let c = Vec3::new(
-                    if i & 1 == 0 { le.min[0] } else { le.max[0] },
-                    if i & 2 == 0 { le.min[1] } else { le.max[1] },
-                    if i & 4 == 0 { le.min[2] } else { le.max[2] },
-                );
-                let w = m.transform_point3(c);
-                min = min.min(w);
-                max = max.max(w);
-            }
-        } else if let Some(aabb) = aabb {
+    for (gt, aabb) in prims.iter() {
+        if let Some(aabb) = aabb {
             let m = gt.to_matrix();
             let center = Vec3::from(aabb.center);
             let half = Vec3::from(aabb.half_extents);

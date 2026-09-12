@@ -25,6 +25,11 @@ pub struct SimResetRequest {
 #[derive(Resource, Debug, Clone)]
 pub struct UsdAssetRoot(pub std::path::PathBuf);
 
+/// Whether the physics world steps this frame: the clock the play button
+/// and `/gearbox/scene/clock` flip. Starts paused.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct PhysicsActive(pub bool);
+
 /// Objects the host reports on `/gearbox/scene/list`. Each owner refreshes
 /// its own list: the binary for loaded assets, the loader plugin for props,
 /// the marker plugin for markers.
@@ -128,7 +133,7 @@ impl Plugin for GearboxBusPlugin {
 
 fn serve_host_core(
     mut bus: ResMut<GearboxBus>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsActive>,
+    mut physics: ResMut<PhysicsActive>,
     objects: Res<SceneObjects>,
     mut selection: ResMut<SelectionState>,
     mut reset: MessageWriter<SimResetRequest>,
@@ -266,7 +271,7 @@ fn poll_machine_agents(mut bus: ResMut<GearboxBus>) {
     }
 }
 
-fn publish_clock(mut bus: ResMut<GearboxBus>, physics: Res<usd_bevy::physics::PhysicsActive>) {
+fn publish_clock(mut bus: ResMut<GearboxBus>, physics: Res<PhysicsActive>) {
     let state = ClockState {
         step: bus.physics_steps,
         paused: (!physics.0) as u32,

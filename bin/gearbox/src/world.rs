@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
+use crate::physics::PhysicsWorld;
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::Entities;
 use bevy::image::Image;
@@ -29,7 +30,6 @@ use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::{
     ColliderBuilder, ColliderHandle, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodyType,
 };
-use usd_bevy::physics::PhysicsWorld;
 
 /// Earth-radius planet sphere. The simulator was tuned for this
 /// radius — vehicle wheel friction, camera fog distances, cloud
@@ -1026,7 +1026,6 @@ fn align_new_grounded_usd_bounds_to_terrain(
         Option<&usd_bevy::UsdSceneRoot>,
         Option<&StaticUsdPhysicsProp>,
         Option<&Mesh3d>,
-        Option<&usd_bevy::UsdLocalExtent>,
         Option<&bevy::camera::primitives::Aabb>,
     )>,
 ) {
@@ -1101,7 +1100,6 @@ fn loaded_usd_world_extent(
         Option<&usd_bevy::UsdSceneRoot>,
         Option<&StaticUsdPhysicsProp>,
         Option<&Mesh3d>,
-        Option<&usd_bevy::UsdLocalExtent>,
         Option<&bevy::camera::primitives::Aabb>,
     )>,
 ) -> Option<WorldExtent> {
@@ -1112,7 +1110,7 @@ fn loaded_usd_world_extent(
     let mut has_scene_root = false;
     let mut has_static_prop_body = false;
     for entity in collect_descendants(root, children) {
-        let Ok((gt, scene_root, prop_body, mesh3d, local_extent, aabb)) = bounds.get(entity) else {
+        let Ok((gt, scene_root, prop_body, mesh3d, aabb)) = bounds.get(entity) else {
             continue;
         };
         has_scene_root |= scene_root.is_some();
@@ -1137,24 +1135,6 @@ fn loaded_usd_world_extent(
             let half = Vec3::from(aabb.half_extents);
             let (box_min, box_max, box_clearance) =
                 local_box_world_bounds_and_terrain_clearance(gt, center - half, center + half);
-            min = min.min(box_min);
-            max = max.max(box_max);
-            min_terrain_clearance = min_terrain_clearance.min(box_clearance);
-            count += 1;
-        } else if let Some(local_extent) = local_extent {
-            let (box_min, box_max, box_clearance) = local_box_world_bounds_and_terrain_clearance(
-                gt,
-                Vec3::new(
-                    local_extent.min[0],
-                    local_extent.min[1],
-                    local_extent.min[2],
-                ),
-                Vec3::new(
-                    local_extent.max[0],
-                    local_extent.max[1],
-                    local_extent.max[2],
-                ),
-            );
             min = min.min(box_min);
             max = max.max(box_max);
             min_terrain_clearance = min_terrain_clearance.min(box_clearance);
