@@ -132,12 +132,14 @@ dependencies = [
 [[package]]
 name = "agentio"
 version = "0.1.0"
+source = "git+https://github.com/robolibs/agentio?rev=4f422d63ddc17548ec0d0d4f108385d2cfb0e0d7#4f422d63ddc17548ec0d0d4f108385d2cfb0e0d7"
 dependencies = [
  "authbox",
  "datapod",
  "peerbus",
  "postcard",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7412,8 +7414,8 @@ checksum = "2a34bde3561f980a51c70495164200569a11662644fe5af017f0b5d7015688cc"
 dependencies = [
  "cfg-if 0.1.10",
  "libc",
- "nix 0.23.2",
- "rand 0.8.6",
+ "nix 0.31.3",
+ "rand 0.10.2",
  "winapi",
 ]
 

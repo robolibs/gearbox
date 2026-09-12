@@ -29,14 +29,6 @@ What the finished plans (`PLAN.md`, `PLAN_COM.md`, `PLAN_CLI.md`,
 
 ## Upstream asks against agentio
 
-- Requests (`/gearbox/usd/load`, `/gearbox/usd/delete`) sent to a host
-  that has since restarted arrive again at the new host within a second of
-  it binding. The host now drops requests whose `sent_at` prop predates its
-  start; the transport should not redeliver answered requests at all.
 - Python bindings for `Agent` (identity, `FrontDoor` resolution, typed
   `datapod_*` clients).
-- Host-local rendezvous: enumerate agents on this host without their ids.
 - Runtime `allow_peer` on a live agent.
-- `publish_in` and a per-agent participant prefix.
-- `query_directory` continues past a bad candidate.
-- Feed the directory from `peerbus::Node::hosted_topics()`.
