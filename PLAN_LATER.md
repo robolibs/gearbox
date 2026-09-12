@@ -27,8 +27,3 @@ What the finished plans (`PLAN.md`, `PLAN_COM.md`, `PLAN_CLI.md`,
 - `gearbox shell`: a REPL keeping one agent open.
 - Runtime allowlist changes, once agentio can add a peer to a live agent.
 
-## Upstream asks against agentio
-
-- Python bindings for `Agent` (identity, `FrontDoor` resolution, typed
-  `datapod_*` clients).
-- Runtime `allow_peer` on a live agent.

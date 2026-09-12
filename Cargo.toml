@@ -69,8 +69,8 @@ bevy = { version = "0.19", default-features = false, features = [
 # persistent identity, `did:key`, and the signed topic directory. The
 # peerbus rev is the one agentio pins; using its head alone splits
 # authbox into two versions.
-peerbus = { git = "https://codeberg.org/robolibs/peerbus.git", rev = "f4b31c6155a294a10f5902167afae6f0b78aa528" }
-agentio = { git = "https://github.com/robolibs/agentio", rev = "4f422d63ddc17548ec0d0d4f108385d2cfb0e0d7" }
+peerbus = { git = "https://codeberg.org/robolibs/peerbus.git", rev = "8e91c6834d1d898b4a1c3b1477827dae1afa6c70" }
+agentio = { git = "https://github.com/robolibs/agentio", rev = "ea6057431b8bcc2fb5440f130ca113c46c8cf0e8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
