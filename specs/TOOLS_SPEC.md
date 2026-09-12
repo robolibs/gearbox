@@ -138,8 +138,8 @@ moving the slave so its coupler frame meets the hitch frame.
 
 ### 3.2 Runtime, over the machine agent
 
-The master's agent hosts the attachment topics (`PLAN_COM.md` §10 for the
-bus; `PLAN_TOOLS.md` for the implementation):
+The master's agent hosts the attachment topics (`bin/gearbox/src/attach.rs`
+serves them):
 
 | Topic | Mode | Request → Response |
 |---|---|---|
