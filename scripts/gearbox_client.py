@@ -401,7 +401,10 @@ class AttachmentRecord:
 
 CLEAR_SCOPE = {"all": 0, "machines": 1, "props": 2, "markers": 3}
 OBJECT_KIND = {"any": 0, "machine": 1, "prop": 2, "marker": 3, "terrain": 4}
-EVENT_KIND = {0: "loaded", 1: "pose", 2: "harvested", 3: "removed", 4: "machine_ready"}
+EVENT_KIND = {
+    0: "loaded", 1: "pose", 2: "harvested", 3: "removed", 4: "machine_ready",
+    5: "attached", 6: "detached", 7: "machine_rejected",
+}
 LOAD_REMOVE = 1
 LOAD_DELETE = 2
 CODE_REFUSED = 4

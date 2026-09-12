@@ -92,26 +92,45 @@ def step_toward(machine: Machine, points: list[tuple[float, float]], goal_idx: i
     return goal_idx
 
 
-def follow_points(machine: Machine, points: list[tuple[float, float]]) -> None:
+def follow_points(machine: Machine, points: list[tuple[float, float]], record_tf: bool = False) -> None:
     goal_idx = 0
     print("following points:")
     for i, (x, z) in enumerate(points):
         print(f"  {i}: x={x:.1f}, z={z:.1f}")
     print("Ctrl-C to stop.")
+    if record_tf:
+        machine.tf(True)
+        print("recording wheel link poses (tf) once a second")
+    last_tf_print = time.time()
     try:
         while True:
             goal_idx = step_toward(machine, points, goal_idx)
+            if record_tf:
+                # Drain the tf stream; keep the newest pose per wheel link.
+                wheels: dict[str, dict] = {}
+                while (pose := machine.tf_next(0.0)) is not None:
+                    if "wheel" in pose.get("name", ""):
+                        wheels[pose["name"]] = pose
+                if wheels and time.time() - last_tf_print >= 1.0:
+                    last_tf_print = time.time()
+                    for name in sorted(wheels):
+                        p = wheels[name]
+                        print(f"  tf {name}: ({p['x']:+.2f}, {p['y']:+.2f}, {p['z']:+.2f}) q({p['qw']:+.2f}, {p['qx']:+.2f}, {p['qy']:+.2f}, {p['qz']:+.2f})")
             time.sleep(TICK_DT)
     except KeyboardInterrupt:
         pass
     finally:
+        if record_tf:
+            machine.tf(False)
         machine.stop()
         machine.release()
         print("stopped Oxbo")
 
 
 def main() -> None:
-    points = parse_points(sys.argv[1:])
+    argv = [a for a in sys.argv[1:] if a != "--tf"]
+    record_tf = len(argv) != len(sys.argv) - 1
+    points = parse_points(argv)
     gb = Gearbox()
     gb.wait_ready()
     gb.clear()
@@ -124,7 +143,7 @@ def main() -> None:
     machine.claim(hold_ms=1000, take=True, client="oxbo_follow_points.py")
     if machine.state(wait=30.0) is None:
         raise SystemExit(f"no state from machine `{NAMESPACE}`. Is Gearbox running?")
-    follow_points(machine, points)
+    follow_points(machine, points, record_tf)
 
 
 if __name__ == "__main__":
