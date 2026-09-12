@@ -104,6 +104,7 @@ pub(crate) fn apply_host_commands(
     for command in std::mem::take(&mut queue.0) {
         match command {
             HostCommand::SelectRoot(root) => {
+                debug!("gearbox-viewer: select root {root:?}");
                 s.selection.0 = root;
                 if root.is_some() {
                     s.active.0 = root;

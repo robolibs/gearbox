@@ -71,6 +71,7 @@ impl Plugin for ViewerSystemsPlugin {
                 Update,
                 (
                     apply_host_commands,
+                    mirror_api_selection,
                     pick_on_click,
                     rebase_loaded_assets_on_pause,
                     drive_selection_ring,
@@ -984,4 +985,40 @@ pub(crate) fn start_fly_to(fly: &mut FlyTo, cam: &ChaseCamera, focus: Vec3, dist
     fly.target_elevation = None;
     fly.duration = 0.4;
     fly.remaining = 0.4;
+}
+
+// ─── Bus selection → viewer selection ──────────────────────────────
+
+/// `gearbox select machine NS` (and `object ID`) reaches the viewer through
+/// `SelectionState`; apply it once and clear the flag.
+fn mirror_api_selection(
+    mut state: ResMut<gearbox_api::SelectionState>,
+    inventory: Res<ControllerInventory>,
+    loaded: Query<(Entity, &LoadedAsset)>,
+    mut selection: ResMut<Selection>,
+    mut active: ResMut<ActiveStage>,
+) {
+    if !state.from_api {
+        return;
+    }
+    state.from_api = false;
+    if state.id.is_empty() {
+        selection.0 = None;
+        return;
+    }
+    let root = inventory
+        .machines
+        .iter()
+        .find(|m| m.id == state.id)
+        .and_then(|m| m.scene_root)
+        .or_else(|| {
+            loaded
+                .iter()
+                .find(|(_, asset)| asset.label == state.id)
+                .map(|(entity, _)| entity)
+        });
+    if let Some(root) = root {
+        selection.0 = Some(root);
+        active.0 = Some(root);
+    }
 }

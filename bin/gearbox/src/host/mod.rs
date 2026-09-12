@@ -267,6 +267,7 @@ impl WindowApp for GearboxApp {
         host.show_ribbon_rail(right, accent);
 
         for click in clicks {
+            tracing::debug!(target: "gearbox", "ribbon click {:?} {:?}", click.item, click.action);
             if click.action == ribbon_action(ACTION_PLAY) {
                 outbox.push(HostCommand::SetPhysics(!physics_on));
             } else if click.action == ribbon_action(ACTION_CLEAR) {

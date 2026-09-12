@@ -110,7 +110,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         }
         None => Pod::new(pose_pod)
             .with_readout("asset", "None")
-            .with_readout("hint", "Click a loaded asset or pick one in the outliner"),
+            .with_readout("hint", "click an asset or an outliner row"),
     };
     body.add_normal(selected_id, "Selected asset", "cube", vec![selected_pod]);
 

@@ -117,6 +117,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     if let Some(i) = list.body_clicked
         && let Some((root, _)) = rows.get(i)
     {
+        tracing::debug!(target: "gearbox", "agents pane: row {i} clicked -> {root:?}");
         ctx.send(HostCommand::SelectRoot(Some(*root)));
     }
     if let Some(i) = list.body_double_clicked
