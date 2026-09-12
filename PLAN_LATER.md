@@ -2,15 +2,12 @@
 
 What the finished plans (`PLAN.md`, `PLAN_COM.md`, `PLAN_CLI.md`,
 `PLAN_TOOLS.md`, removed 2026-09-12) left undone. The specs in `specs/` and
-`CLI.md` describe what exists; `PLAN_WHEELS.md` is the one plan still open,
-and it must be rewritten against `bin/gearbox/src/controller.rs` before it
-can start, since it targets the stale `gearbox-core` / `gearbox-physics`
-crates.
+`CLI.md` describe what exists; `PLAN_WHEELS.md` is the one plan still open.
 
 ## Runtime
 
 - Physically simulated wheels instead of the raycast vehicle
-  (`PLAN_WHEELS.md`, retargeted).
+  (`PLAN_WHEELS.md`).
 - `run --headless`: the sim cannot start without a window.
 - Generated OpenUSD API schemas for `GearboxMachineAPI`,
   `GearboxControllerAPI`, `GearboxLinkAPI`, `GearboxCouplingAPI`,

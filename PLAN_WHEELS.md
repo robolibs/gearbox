@@ -1,239 +1,261 @@
-# gearbox physical wheels — raycast → simulated-contact transition
+# gearbox physical wheels — raycast to contact, in `bin/gearbox`
 
 ## Goal
 
-Replace the raycast vehicle model with physically-simulated wheels, **inside
-rapier**. Today every preset vehicle rides on rapier's
-`DynamicRayCastVehicleController`: wheels are downward raycasts, suspension and
-tire forces are computed analytically, and the wheel colliders are explicitly
-kept *off* the ground. That analytic friction model is tuned for fast, light
-cars — on a heavy, slow, high-torque tractor it produces unrealistic slip. With
-real wheel contact, traction becomes `normal_load × friction`, so the vehicle
-slips exactly when commanded torque exceeds available grip. Slip becomes a
-*tunable physical quantity* instead of a model artifact.
+Every machine in `bin/gearbox` already has real wheels: a USD chassis body,
+knuckle and wheel bodies, revolute joints between them
+(`specs/CONTROLLER_SPEC.md` §7.5), and a cylinder collider on each tyre.
+None of that carries the machine. `builtin:ackermann_cmd_vel` switches the
+tyre colliders to sensors every frame and rides the chassis on rapier's
+`DynamicRayCastVehicleController`; the wheel joints only get a visual spin
+derived from chassis motion. `builtin:diff_drive_cmd_vel` writes the twist
+straight onto the chassis velocity.
 
-## Guiding principle
+This plan makes the tyres do the work: contact friction between the wheel
+collider and the ground carries and propels the machine, the wheel joint
+motors deliver torque, and slip becomes `torque > μ · N · r`, a physical
+quantity that the asset tunes with mass, friction and torque caps instead of
+a model artefact. The raycast controller stays as a per-machine fallback
+until every asset drives on contact, then it is deleted.
 
-The change is **contained to `gearbox-physics`**, plus two new fields in
-`gearbox-core`. The `BodyProxy` / `WheelsProxy` boundary in
-`vehicle_physics.rs` is what makes this contained: the drive controllers
-(`drive/ackermann.rs`, `differential.rs`, `omni.rs`) keep their logic — only
-the *meaning* of `set_engine_force` / `set_brake` shifts from raycast-wheel
-fields to joint/body torques.
+Everything here lives in `bin/gearbox/src/controller.rs`, the vendored
+`usd_bevy` / `usd_rapier` physics glue, and the specs. The stale
+`gearbox-core` / `gearbox-physics` crates are not touched.
 
-Side benefit: this **converges the two vehicle representations**. The
-USD-robot path in `bin/gearbox/src/controller.rs` already drives real rapier
-joints (`controller.rs:2336-2450`); only the preset/spec path
-(`Sim::spawn_vehicle`) uses the raycast hack. After this work both speak the
-same language.
+## What exists today (the code this plan changes)
 
-## Target architecture — the wheel rig
+`bin/gearbox/src/controller.rs`:
 
-Each wheel becomes a real dynamic body. Per wheel, a light intermediate **hub**
-body carries suspension + steering; the **wheel** body carries spin:
+- `apply_builtin_ackermann_cmd_vel` (~981): per machine and frame, computes
+  `steer_targets` (`steering_joint_targets`), `wheel_targets`
+  (`wheel_joint_targets`: velocity = ground speed / collider radius, with a
+  turn ratio per side), `parking_brake_wheel_targets` (velocity 0 when the
+  command is under 0.05 m/s), `tire_joint_pairs`, then calls
+  `apply_rapier_raycast_vehicle_controller`. When that returns true the
+  wheel targets are replaced by `visual_wheel_spin_targets` (soft motors,
+  `WHEEL_VISUAL_*`). Finally `apply_articulation_or_impulse_joint_motors`
+  writes the motors, on impulse or multibody joints.
+- `apply_rapier_raycast_vehicle_controller` (~1639): `set_wheel_colliders_sensor(true)`,
+  rebuilds a `DynamicRayCastVehicleController` from
+  `raycast_vehicle_wheel_specs_for_controller` (hard point = wheel body
+  position + `RAYCAST_SUSPENSION_REST_LENGTH`, radius from
+  `body_max_collider_radius`), engine force = speed servo
+  `RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL · mass_scale` plus slope
+  compensation and `attach::TowedMass`, brake proportional to speed,
+  fixed `WheelTuning` (stiffness 90, damping 7, `friction_slip` 24).
+- `ensure_tire_grip`: forces tyre friction to `TIRE_FRICTION` (2.4, `Max`
+  combine) and restitution 0. `set_wheel_colliders_friction` sets 0.05 for
+  the diff drive.
+- Constants (~1497): `WHEEL_DRIVE_DAMPING` 240, `WHEEL_DRIVE_MAX_TORQUE`
+  6000, `WHEEL_VISUAL_*`, `STEER_STIFFNESS` 300, `STEER_DAMPING` 90,
+  `STEER_MAX_TORQUE` 1200, `RAYCAST_*`.
+- `hold_axle_pivots`: while the raycast carries the chassis, an
+  intermediate axle pivot (Kubota `front_axle`) is held at rest.
+- `guard_chassis_inertia`: replaces implausible authored inertia per axis.
+- `apply_builtin_diff_drive_cmd_vel` (~1209): sets chassis `linvel` /
+  `angvel`, tyre friction 0.05, `carry_wheels_with_chassis`.
+- `publish_machine_controller_states`: `/state` from the chassis body.
 
-```text
-chassis (root)
-  └── hub[i]        ── joint A: prismatic (suspension, sprung)
-        │                      + revolute (steer, steered wheels only)
-        └── wheel[i]  ── joint B: revolute (spin, driven)
+`vendor/bevy_openusd/crates/usd_rapier/src/colliders.rs`: a USD `Cylinder`
+becomes `ColliderBuilder::cylinder` (a sharp-edged cylinder). USD drives
+become joint motors (`joints.rs`, `MotorModel::ForceBased`); the sim pins
+`AccelerationBased` on every joint it drives.
+
+`vendor/bevy_openusd/crates/usd_bevy/src/physics/world.rs`: one rapier
+step per render frame at the default `dt` (1/60 s) regardless of frame
+time, `num_solver_iterations` 16, `PairFilter` hook dropping the contacts
+`PhysicsFilteredPairsAPI` lists, no CCD.
+
+Assets: `bin/gearbox/assets/tractor.usd` and `oxbo.usd` author cylinder
+tyre colliders and wheel masses (110 / 200 kg, 260 kg) but no physics
+material; `~/machines/usd/*.usdz` author friction 0.9 / 1.1 on the chassis.
+
+## Target
+
+```
+ground  ⟷  wheel collider (round cylinder, μ from the asset)
+                 │ revolute `roll_*`, velocity motor, torque-capped
+              knuckle / axle / chassis (as authored, §7.5)
 ```
 
-- **Joint A (chassis → hub):** prismatic along `suspension_dir` with a spring
-  motor (rest target = 0) and travel limits. For steered wheels, also a
-  revolute about the kingpin (`suspension_dir`) with a stiff position motor.
-  Non-steered wheels lock the steer DOF.
-- **Joint B (hub → wheel):** revolute about `axle_dir`. Drive torque is
-  applied here.
+- The tyre collider is solid and carries load. Traction is rapier's
+  contact friction. Nothing casts rays.
+- The wheel joint motor is the engine: velocity target from the command,
+  torque cap from the machine's grip and power, damping as the brake.
+- Suspension is whatever the asset authors: nothing (rigid axle, the
+  present assets), a pivoting axle (`front_axle` on the Kubota, free again),
+  or prismatic suspension joints with USD drives (`role:suspensionJoints`,
+  new).
+- One machine never collides with itself; it collides with the ground and
+  with other machines.
+- Physics steps at a fixed rate independent of the frame rate.
 
-Using a hub for *every* wheel keeps one uniform code path — non-steered wheels
-simply lock the steer axis. The hub is light (~2–5 kg).
+## Phases
 
-**Joint set:** use `MultibodyJointSet` — one multibody per vehicle, chassis as
-root. Reduced coordinates give stable suspension, no joint drift, and adjacent
-links auto-skip contact. Fallback if multibody setup proves fiddly:
-`ImpulseJointSet` — simpler, but softer suspension.
+### Phase 0 — ground under the wheels
 
-## Phase breakdown
+Physics changes that help both models and are safe to land alone.
 
-### Phase 0 — Core spec + scaffolding
+- **Fixed timestep.** `world.rs::step_physics` runs an accumulator: `dt`
+  1/120 s, at most 4 steps per frame, remainder carried. The debug build
+  at 10 fps today runs physics at a fraction of real time; contacts on a
+  fast tyre need the finer step more than the raycast did. Expose
+  `GEARBOX_PHYSICS_HZ` for experiments.
+- **Machine self-collision off.** `PairFilter` gains a second set: body
+  handle → machine id. `controller.rs` fills it when a machine's bodies
+  exist (same place `guard_chassis_inertia` runs). Contacts between two
+  bodies of one machine are dropped; the asset's `PhysicsFilteredPairsAPI`
+  lists stay honoured for anything finer. Attached slaves are separate
+  machines and keep colliding with the master except through the coupling
+  joint, which already disables its own pair.
+- **Round tyres.** `usd_rapier::colliders`: a `Cylinder` prim whose body is
+  a `wheel` link, or that carries `gearbox:collider:round = true`, becomes
+  `ColliderBuilder::round_cylinder(half_h, r − b, b)` with `b = 0.05 · r`.
+  A sharp cylinder edge on a plane is what makes rapier contacts twitch;
+  the rolling radius stays `r`.
+- **Tyre friction from the asset.** `ensure_tire_grip` stops forcing 2.4.
+  It applies the USD physics material when one is bound, else
+  `TIRE_FRICTION` = 1.1, `Max` combine, restitution 0. The diff-drive
+  0.05 override goes with Phase 4.
+- **CCD** on wheel bodies (`RigidBody::enable_ccd`) so a tyre at 10 m/s
+  cannot pass a terrain triangle in one step.
 
-**`gearbox-core/src/vehicle/wheel.rs` — `WheelSpec`** (`wheel.rs:834`):
+Accept: the Fendt and Kubota still drive on the raycast exactly as before
+(rest drift under 5 cm in 10 s, steering angles as measured on 2026-09-12),
+and `GEARBOX_CONTACT_LOG=1` shows zero intra-machine contact pairs with the
+tyres solid.
 
-- Add `pub mass: f64` — wheel mass (kg). There is no mass field today; wheels
-  need real inertia now.
-- Add `pub hub_mass: f64` — default ~3.0.
-- Reinterpret existing suspension fields: `suspension_stiffness` /
-  `suspension_damping` now feed a prismatic **spring motor**;
-  `suspension_rest_length` becomes the prismatic limit midpoint;
-  `max_suspension_force` becomes the motor force cap.
-- Delete `friction_slip` (real contact friction replaces it). Add
-  `pub tire_friction: f64` — collider friction coefficient (~1.0–1.4 for ag
-  tires).
-- `ChassisSpec.mass` stays, but note total vehicle mass is now
-  `chassis + Σ(hub + wheel)` — presets must be re-balanced.
+### Phase 1 — contact traction behind a switch
 
-**`gearbox-core/src/presets/*`** — populate the new fields, re-tune. Tractor
-rear wheel mass ≈ 80–150 kg.
+- New controller attribute `gearbox:controller:<n>:traction` (token,
+  `raycast` | `contact`, default `raycast`). `ControllerSpec.traction`.
+- In `apply_builtin_ackermann_cmd_vel`, when `traction == contact`:
+  skip `apply_rapier_raycast_vehicle_controller` and
+  `visual_wheel_spin_targets`; leave the tyre colliders solid
+  (`set_wheel_colliders_sensor(false)` once); keep `wheel_joint_targets`
+  as the drive, `parking_brake_wheel_targets` as the hold, the steering
+  targets, and `apply_articulation_or_impulse_joint_motors`. The chassis is
+  not touched by the controller at all.
+- `hold_axle_pivots` runs only under `raycast`; under `contact` the axle
+  pivot is the real oscillating axle.
+- `attach::TowedMass` is ignored under `contact`: the trailer's weight
+  reaches the tyres through the coupling joint.
+- The `/state` `linear_speed_mps` stays the chassis speed; add
+  `link.<wheel>.slip` values (`ω · r / v − 1`, 0 when stopped) so slip is
+  observable from the bus and the Machine pane.
 
-**`gearbox-physics/src/world.rs`:**
+Accept, on `bin/gearbox/assets/tractor.usd` with `traction = contact`:
+stands still (drift under 2 cm in 10 s), reaches 2 m/s within 3 s of a
+`machine move --forward 2`, holds a 0.5 rad/s turn, and reports slip under
+0.1 on the flat world.
 
-- `wheel_groups()` now collides with `GROUND ∪ CHASSIS ∪ WHEEL` (today it
-  explicitly skips ground — `world.rs:32-34`).
-- Delete `wheel_raycast_groups()` — no raycasts anymore.
-- Add a `PhysicsHooks` impl: a contact filter that **skips contact pairs
-  belonging to the same vehicle**. Tag every collider's `user_data` with the
-  `VehicleId` at spawn; the hook skips a pair when both sides carry a matching
-  tag. This replaces rapier's same-body auto-skip (wheels are separate bodies
-  now) and is unbounded — collision groups would cap us at 32 vehicles. The
-  hook must be conservative: skip only when *both* colliders carry a matching
-  tag, so USD-robot bodies (no tag) still collide normally.
+### Phase 2 — torque, brake and steering from the machine, not constants
 
-### Phase 1 — The rig in `spawn_vehicle`
+- **Torque cap per wheel** replaces `WHEEL_DRIVE_MAX_TORQUE`:
+  `τ_max = 0.9 · μ · N · r`, with `N = m_total · g / n_driven` from the
+  rigid-body masses (chassis plus every wheel and knuckle) and `μ` the
+  tyre's collider friction. Optional overrides
+  `gearbox:controller:<n>:maxWheelTorqueNm` and `maxPowerKw`
+  (`τ ≤ P / ω`), both documented in `CONTROLLER_SPEC.md` §3.
+- **Brake** replaces the parking-brake hack: velocity target 0 with the
+  motor damping as the brake, capped at `τ_max`; `builtin:brake` in
+  `services.rs` already drives the same joints and keeps working.
+- **Steering torque cap** replaces `STEER_MAX_TORQUE`:
+  `μ · N_front · w/2` with `w` the tyre width from the collider, so a
+  loaded front tyre still turns at standstill and a light one does not
+  oscillate.
+- Slope: gravity does it. Delete the slope-compensation term.
 
-Rewrite `Sim::spawn_vehicle` (`sim.rs:103-247`):
+Accept: the same tractor climbs the 10° slope in `world/peafield.usd` at
+1 m/s, and on a `physics:dynamicFriction = 0.2` ground the wheels outrun
+the chassis (`slip > 0.5`) under full throttle. That slip test is the
+original complaint made measurable.
 
-1. Chassis body + cuboid collider — unchanged. Keep the explicit
-   `MassProperties` (`sim.rs:134-144`).
-2. Delete the mass-0 wheel cylinder colliders (`sim.rs:160-180`) and the
-   `DynamicRayCastVehicleController` block (`sim.rs:211-231`).
-3. For each `WheelSpec`, build:
-   - a **hub body** at `chassis_connection`;
-   - a **wheel body** at the suspension rest point;
-   - a **round-cylinder collider** on the wheel
-     (`ColliderBuilder::round_cylinder` — far more stable on a plane than a
-     bare cylinder edge), oriented so the cylinder axis matches `axle_dir`,
-     with `friction(tire_friction)` and the vehicle-id `user_data`.
-4. Wire joints A and B into the per-vehicle multibody. Wheel inertia = analytic
-   cylinder (`½·m·r²` about the axle).
+### Phase 3 — suspension and the six-wheeler
 
-**`PhysicsHandles`** (`vehicle_physics.rs:21`) becomes:
+- `gearbox:machine:role:suspensionJoints` (rel[], optional): prismatic
+  joints between chassis and knuckle whose USD drive (`stiffness`,
+  `damping`, `maxForce`) is the spring. `usd_rapier` already turns the
+  drive into a motor; the sim leaves those joints alone. `links.rs`
+  validation warns when a suspension joint is not prismatic.
+- The Oxbo's six wheels and rear steer axle need no code beyond Phase 2:
+  `wheel_joint_targets` already covers every wheel path and
+  `steering_multiplier_for_wheel_path` the rear axle. Tune its 15 t on
+  contact: friction, torque cap, the guard's inertia estimate.
+- The Kubota's `front_axle` pivot: limits stay ±10°, add a small USD
+  damping drive to the asset so it settles.
 
-```rust
-pub(crate) struct PhysicsHandles {
-    pub body: RigidBodyHandle,                 // chassis
-    pub wheels: Vec<WheelHandles>,
-}
-struct WheelHandles {
-    hub: RigidBodyHandle,
-    wheel: RigidBodyHandle,
-    susp_joint: MultibodyJointHandle,          // joint A (prismatic)
-    steer_joint: Option<MultibodyJointHandle>, // joint A steer DOF
-    spin_joint: MultibodyJointHandle,          // joint B (revolute)
-}
-```
+Accept: Oxbo and Kubota drive on contact with the Phase 1 numbers.
 
-### Phase 2 — Proxy rewrite (keeps controllers stable)
+### Phase 4 — everything on contact
 
-Rewrite `WheelsProxy` / `WheelView` / `WheelCtrl` (`vehicle_physics.rs:97-175`)
-— same method names, new bodies underneath:
+- Default `traction` becomes `contact`; `raycast` stays selectable.
+- `builtin:diff_drive_cmd_vel` moves to contact too: per-side wheel
+  velocity targets (`v ± ω · track/2`) with the Phase 2 torque cap; delete
+  `carry_wheels_with_chassis`, the 0.05 friction and the direct
+  `set_linvel`. Skid steering then costs what it costs: scrubbing tyres.
+- Every repo asset and `~/machines/usd/*` gets a physics material on its
+  tyres and a torque cap check; record the numbers in the asset READMEs.
 
-- `set_engine_force(f)` → apply **drive torque** to the wheel body:
-  `torque = f · radius`, via `add_torque` about the axle. Traction-limited slip
-  now emerges from contact friction — the entire point of this work.
-- `set_brake(b)` → apply a capped opposing torque, or set the spin revolute
-  motor to velocity 0 with max force `b · max_brake`.
-- `set_steering(θ)` → set the steer joint position-motor target.
-- `steering()` → read the steer joint angle.
-- `normal_forces()` → sum the normal contact impulses on each wheel collider
-  (`narrow_phase.contact_pair`), `/dt`. This keeps Ackermann's weight-transfer
-  open differential (`ackermann.rs:60-76`) working unchanged. Alt: read the
-  suspension joint reaction impulse. May need a 1-frame low-pass — contact
-  impulses are noisy.
+Accept: `scripts/tractor_trailer.py`, `scripts/oxbo_follow_points.py` and
+`scripts/hunter_drive.py` run to completion on contact.
 
-`BodyProxy` (`vehicle_physics.rs:36-87`) — unchanged.
+### Phase 5 — delete the raycast
 
-### Phase 3 — Step loop cleanup
-
-In `Sim::step` (`sim.rs:533-675`):
-
-- Delete the raycast `update_vehicle` pass (`sim.rs:630-658`) and the raycast
-  in `refresh_kinematics` (`sim.rs:509-530`).
-- Delete the parking-brake hack (`sim.rs:604-628`) and the `brake_gate` in
-  `GroundFrame` (`drive/mod.rs:104-110`). Both exist only to mask the raycast
-  controller's copysign-brake oscillation. With a real brake motor, standstill
-  holding is honest. Add a small real hold torque if creep needs killing.
-- `pipeline.step` — pass the new `PhysicsHooks` instead of `&()`
-  (`sim.rs:672`).
-- Power tick (`sim.rs:553-569`) — unchanged.
-
-### Phase 4 — Pose readback & editor integration
-
-- `wheel_pose` (`sim.rs:365-439`) → return the wheel body's pose directly
-  (`bodies.get(wheel).position()`). The ~60 lines of kingpin-offset / airborne
-  fixup math (`sim.rs:381-438`) mostly delete — real geometry handles it.
-- `wheel_spin_angle` / `wheel_steering_angle` → read the revolute joint angles.
-  Downstream consumers keep their API: `gearbox-viz/src/spawn.rs:281,286`,
-  `gearbox-viz/src/sync.rs:17`, `gearbox-editor/src/selection.rs:249`.
-- `set_vehicle_pose` (`sim.rs:285-295`) → apply the pose delta to chassis +
-  all hub + wheel bodies, zeroing every velocity. Teleporting only the chassis
-  would explode the joints.
-- `despawn_vehicle` (`sim.rs:259-271`) → remove all hub/wheel bodies + the
-  multibody, not just the chassis.
-
-### Phase 5 — Tuning & solver
-
-- `IntegrationParameters`: raise `num_solver_iterations`; consider 120 Hz
-  physics — the viz fixed-step accumulator (`gearbox-viz/src/step.rs`) already
-  supports it, just lower the step.
-- Keep `ccd_enabled` on the chassis; evaluate CCD on fast-spinning wheels.
-- Per-preset tuning pass: tire friction, suspension stiffness/damping, wheel
-  mass, hub mass.
+- Remove `apply_rapier_raycast_vehicle_controller`,
+  `raycast_vehicle_wheel_specs*`, `raycast_wheel_spec_for_path`,
+  `visual_wheel_spin_targets`, `set_wheel_colliders_sensor`,
+  `hold_axle_pivots`, `WHEEL_VISUAL_*`, every `RAYCAST_*` constant, the
+  `traction` attribute, and the `rapier3d::control` import.
+- `attach::TowedMass` goes with its only consumer.
+- Specs: `CONTROLLER_SPEC.md` §3.1 (both controller descriptions), §4
+  (mass scaling paragraph), §5 (tyre collider requirements: round, material,
+  mass), §7.5 (axle pivot sentence), §8 (raycast assumptions). `PLAN_LATER.md`
+  loses the wheels line.
 
 ## Testing
 
-- `tests/headless.rs::tractor_settles_and_drives` must still pass (settle,
-  then drive > 1 m).
-- New tests:
-  - wheel does not tunnel through the ground;
-  - wheel spin angle increases under throttle;
-  - **slip test** — high throttle on a low-friction collider makes wheel
-    angular speed outrun vehicle linear speed (proves real slip — the
-    original complaint).
+Unit tests in `controller.rs` keep covering the targets: add cases for the
+torque cap arithmetic, the slip readout, and `traction` parsing. The
+physics itself is verified the way this week's work was, with the sim
+running and measured over the bus:
 
-## Risks / watch-items
+- rest drift and per-link wobble (`machine tf` samples, the `tfrel.py`
+  method);
+- speed reached, turn held, slope climbed (`machine state`);
+- slip under throttle on the low-friction ground (`link.<wheel>.slip`);
+- `GEARBOX_PHYSICS_LOG` / `GEARBOX_CONTACT_LOG` for contact pairs and
+  joint gaps.
 
-1. **Cylinder-on-plane jitter** — a bare cylinder edge-contacts a plane and
-   rapier's contact generation gets twitchy. Mitigated by `round_cylinder`; if
-   still twitchy, fall back to a sphere wheel collider (loses the contact
-   patch).
-2. **Multibody setup complexity** — fallback to impulse joints, documented
-   above.
-3. **`normal_forces` fidelity** — contact-impulse summing is noisy frame to
-   frame; low-pass before feeding the open differential.
-4. **Preset re-tuning is real work** — every tractor/robot preset needs a
-   suspension + friction pass. Budget for it.
-5. **USD path shares the world** — verify the same-vehicle contact hook only
-   skips when both colliders carry a matching vehicle tag, so USD robots
-   collide normally.
+A headless harness (`run --headless`, `PLAN_LATER.md`) would let these run
+in CI; until then they are scripted acceptance runs.
+
+## Risks
+
+- **Cylinder contact jitter.** Round cylinders and the fixed 120 Hz step are
+  the mitigation; if a tyre still chatters on flat ground, a ball collider
+  of the tyre radius is the fallback (loses the contact patch width).
+- **Mass ratios.** A 3.8 t chassis on 130 kg wheels through impulse joints
+  is what jittered this week until the inertia guard. Contact adds load on
+  the same joints; the fixed step and `num_solver_iterations` 16 should
+  hold, else the machine goes multibody (`ArticulationRootAPI` on the
+  chassis, which `usd_rapier` already supports) with the hitch loops
+  excluded, as the pipeline authors them.
+- **Frame rate.** Debug builds run 10 fps with two tractors; the
+  accumulator's 4-step cap means physics slows below 30 fps rather than
+  spiralling. Release builds are the real target.
+- **Asset tuning is real work.** Friction, torque cap, inertia and tyre
+  width per asset; the pipeline should author them rather than the sim
+  guessing.
 
 ## Files touched
 
 | File | Change |
 |---|---|
-| `gearbox-core/src/vehicle/wheel.rs` | `WheelSpec`: add `mass`, `hub_mass`, `tire_friction`; drop `friction_slip` |
-| `gearbox-core/src/presets/*` | populate new fields, re-tune |
-| `gearbox-physics/src/vehicle_physics.rs` | rewrite `PhysicsHandles`, `WheelsProxy`, `WheelView`, `WheelCtrl`; `BodyProxy` unchanged |
-| `gearbox-physics/src/sim.rs` | rewrite `spawn_vehicle`, `step`, `wheel_pose`, `wheel_spin_angle`, `wheel_steering_angle`, `refresh_kinematics`, `set_vehicle_pose`, `despawn_vehicle` |
-| `gearbox-physics/src/world.rs` | collision groups; new `PhysicsHooks` contact filter |
-| `gearbox-physics/src/drive/mod.rs` | simplify/remove `GroundFrame::brake_gate` |
-| `gearbox-physics/src/drive/{ackermann,differential,omni}.rs` | none — proxy contract preserved |
-| `gearbox-physics/tests/headless.rs` | keep existing test, add slip test |
-
-Untouched: `convert.rs` (rapier types stay), the USD-robot path in
-`bin/gearbox/src/controller.rs` (already real joints), `gearbox-world` /
-`bin/gearbox/src/world.rs` ground inserts, the `DroneController` (airborne, no
-wheels).
-
-## Suggested rollout
-
-Land incrementally:
-
-1. Do Phase 0–2 for one preset (`tractor_articulated` — the headless-test
-   vehicle), keeping the raycast path compiled for other presets behind a
-   `WheelSpec` flag.
-2. Compare slip behavior against the old model.
-3. Convert remaining presets.
-4. Delete the raycast code — the `rapier3d::control` import,
-   `DynamicRayCastVehicleController` — once all presets are migrated. The
-   rapier `control` feature can then be dropped from `Cargo.toml`.
+| `bin/gearbox/src/controller.rs` | `traction` switch, contact drive path, torque and steer caps from mass, slip readout, machine self-collision registration; later deletions |
+| `bin/gearbox/src/attach.rs` | `TowedMass` unused under contact, removed in Phase 5 |
+| `bin/gearbox/src/links.rs` | `role:suspensionJoints` validation |
+| `vendor/bevy_openusd/crates/usd_rapier/src/colliders.rs` | round cylinder for tyres |
+| `vendor/bevy_openusd/crates/usd_bevy/src/physics/world.rs` | fixed timestep, per-machine pair filter, CCD |
+| `specs/CONTROLLER_SPEC.md` | §3, §4, §5, §7.5, §8 |
+| `bin/gearbox/assets/*.usd`, `~/machines/usd/*` | tyre physics materials, torque caps, axle damping |
