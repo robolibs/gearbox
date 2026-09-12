@@ -561,6 +561,7 @@ fn chase_camera_zoom(
     keys: Res<ButtonInput<KeyCode>>,
     mut wheel: MessageReader<MouseWheel>,
     mut zoom_target: Local<Option<f64>>,
+    mut last_written: Local<Option<f32>>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
     if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
@@ -579,6 +580,11 @@ fn chase_camera_zoom(
         return;
     };
     let target = zoom_target.get_or_insert(cam.distance as f64);
+    // A distance set elsewhere (fly, fit) becomes the new zoom target instead
+    // of being pulled back to the last scrolled one.
+    if last_written.is_some_and(|d| (d - cam.distance).abs() > 1e-4) {
+        *target = cam.distance as f64;
+    }
     if scroll_delta != 0.0 {
         let log_target = target.max(0.1).log10();
         let new_log = log_target - scroll_delta * cam.zoom_step;
@@ -599,6 +605,7 @@ fn chase_camera_zoom(
         cam.distance = *target as f32;
         apply_rig(&cam, &mut transform);
     }
+    *last_written = Some(cam.distance);
 }
 
 fn spawn_flat_ground(

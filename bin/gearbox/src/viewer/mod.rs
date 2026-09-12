@@ -3,6 +3,7 @@
 //! Overlays / Timeline / Keys / Log) on top of the gearbox simulator's
 //! existing world / multi-USD loader / transform-gizmo / play button.
 
+pub mod agent_tree;
 pub mod keyboard;
 pub mod log_panel;
 pub mod machine_panel;

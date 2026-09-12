@@ -8,7 +8,7 @@ use crate::viewer::mara_ui::RibbonOpen;
 use crate::viewer::overlays::DisplayToggles;
 use crate::viewer::state::ReloadRequest;
 use crate::viewer::ui::{
-    RIB_INFO, RIB_KEYS, RIB_MACHINE, RIB_OVERLAYS, RIB_TREE, RIBBON_LEFT, RIBBON_RIGHT,
+    RIB_AGENTS, RIB_INFO, RIB_KEYS, RIB_MACHINE, RIB_OVERLAYS, RIB_TREE, RIBBON_LEFT, RIBBON_RIGHT,
     ViewerCommandPalette,
 };
 
@@ -51,6 +51,9 @@ fn handle_keys(
 ) {
     if keys.just_pressed(KeyCode::KeyT) {
         ribbon.toggle(RIBBON_LEFT, RIB_TREE);
+    }
+    if keys.just_pressed(KeyCode::KeyN) {
+        ribbon.toggle(RIBBON_LEFT, RIB_AGENTS);
     }
     if keys.just_pressed(KeyCode::KeyI) {
         ribbon.toggle(RIBBON_LEFT, RIB_INFO);

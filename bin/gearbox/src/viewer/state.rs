@@ -6,6 +6,7 @@
 //! top-level entity selection.
 
 use bevy::prelude::{Entity, Resource, Vec3};
+use bevy_mara::ChaseCamera;
 use std::path::PathBuf;
 
 /// The currently-focused loaded USD entity. Drives every panel that
@@ -84,6 +85,59 @@ pub struct FlyTo {
     pub target_yaw: Option<f32>,
     pub start_elevation: Option<f32>,
     pub target_elevation: Option<f32>,
+}
+
+/// Scripted "fly to behind the machine" move, started from the agent tree.
+/// Phase A pins the camera in place and turns it toward the machine; phase
+/// B pulls back to the apex, orbits to behind the machine and settles at
+/// `distance` with the elevation the user had.
+#[derive(Clone, Copy, Debug)]
+pub struct FlyTarget {
+    pub root: Entity,
+    pub body: Entity,
+    pub distance: f32,
+    pub duration: f32,
+    pub elapsed: f32,
+    pub start_focus: Vec3,
+    pub start_cam_world: Vec3,
+    pub start_elevation: f32,
+    pub apex_distance: f32,
+    pub last_target_pos: Option<Vec3>,
+}
+
+impl FlyTarget {
+    pub const APEX_DISTANCE: f32 = 45.0;
+    pub const PHASE_A_END: f32 = 0.30;
+    pub const FINAL_DISTANCE: f32 = 18.0;
+    pub const DURATION: f32 = 3.0;
+
+    pub fn new(root: Entity, body: Entity, cam: &ChaseCamera) -> Self {
+        let horizontal = cam.distance * cam.elevation.cos();
+        let vertical = cam.distance * cam.elevation.sin();
+        let offset = Vec3::new(
+            horizontal * cam.yaw.sin(),
+            vertical,
+            horizontal * cam.yaw.cos(),
+        );
+        Self {
+            root,
+            body,
+            distance: Self::FINAL_DISTANCE,
+            duration: Self::DURATION,
+            elapsed: 0.0,
+            start_focus: cam.focus,
+            start_cam_world: cam.focus + offset,
+            start_elevation: cam.elevation,
+            apex_distance: Self::APEX_DISTANCE,
+            last_target_pos: None,
+        }
+    }
+}
+
+/// The fly in flight, if any.
+#[derive(Resource, Default, Debug)]
+pub struct ChaseCameraFly {
+    pub target: Option<FlyTarget>,
 }
 
 /// The loaded asset the chase camera translates with. Position only: the

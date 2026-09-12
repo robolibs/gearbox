@@ -28,9 +28,10 @@ use crate::viewer::overlays::DisplayToggles;
 use transform_gizmo_bevy::{GizmoMode, GizmoOptions, GizmoTarget, TransformGizmoPlugin};
 
 use crate::viewer::state::{
-    ActiveStage, CameraBookmark, CameraBookmarks, CameraMount, FlyTo, FollowTarget, LoadRequest,
-    LoaderTuning, ReloadRequest, SelectedPrim, StageInfo, UsdStageTime,
+    ActiveStage, CameraBookmark, CameraBookmarks, CameraMount, ChaseCameraFly, FlyTarget, FlyTo,
+    FollowTarget, LoadRequest, LoaderTuning, ReloadRequest, SelectedPrim, StageInfo, UsdStageTime,
 };
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 
 // ─── Ribbon declaration ─────────────────────────────────────────────
 
@@ -38,6 +39,7 @@ pub const RIBBON_LEFT: &str = "viewer_left";
 
 pub const RIB_SELECTION: &str = "viewer_selection";
 pub const RIB_TREE: &str = "viewer_tree";
+pub const RIB_AGENTS: &str = "viewer_agents";
 pub const RIB_INFO: &str = "viewer_info";
 pub const RIB_CONTROLLERS: &str = "viewer_controllers";
 pub const RIB_CAMERAS: &str = "viewer_cameras";
@@ -92,10 +94,20 @@ pub(crate) const RIBBON_ITEMS: &[RibbonItem] = &[
         role: None,
     },
     RibbonItem {
-        id: RIB_INFO,
+        id: RIB_AGENTS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
         slot: 2,
+        glyph: RibbonGlyph::Icon("vehicle_tractor"),
+        tooltip: "Agents: controllable machines (N)",
+        child_ribbon: None,
+        role: None,
+    },
+    RibbonItem {
+        id: RIB_INFO,
+        ribbon: RIBBON_LEFT,
+        cluster: RibbonCluster::Start,
+        slot: 3,
         glyph: RibbonGlyph::Icon("document"),
         tooltip: "Stage info (I)",
         child_ribbon: None,
@@ -105,7 +117,7 @@ pub(crate) const RIBBON_ITEMS: &[RibbonItem] = &[
         id: RIB_CAMERAS,
         ribbon: RIBBON_LEFT,
         cluster: RibbonCluster::Start,
-        slot: 3,
+        slot: 4,
         glyph: RibbonGlyph::Icon("cube"),
         tooltip: "Cameras",
         child_ribbon: None,
@@ -246,6 +258,11 @@ const PALETTE_ITEMS: &[PaletteItem] = &[
         hint: Some("T"),
     },
     PaletteItem {
+        id: "open_agents",
+        label: "Open: Agents",
+        hint: Some("N"),
+    },
+    PaletteItem {
         id: "open_info",
         label: "Open: Stage info",
         hint: Some("I"),
@@ -346,6 +363,7 @@ impl Plugin for ViewerUiPlugin {
             .init_resource::<UsdStageTime>()
             .init_resource::<CameraBookmarks>()
             .init_resource::<FollowTarget>()
+            .init_resource::<ChaseCameraFly>()
             .add_plugins(TransformGizmoPlugin)
             .insert_resource(GizmoOptions {
                 gizmo_modes: GizmoMode::all_translate() | GizmoMode::all_rotate(),
@@ -369,6 +387,7 @@ impl Plugin for ViewerUiPlugin {
                     apply_load_request,
                     apply_reload_request,
                     apply_fly_to,
+                    chase_camera_fly,
                     draw_selected_prim_highlight,
                     tick_stage_time,
                 )
@@ -723,6 +742,7 @@ fn asset_bounds(
 fn follow_target(
     mut follow: ResMut<FollowTarget>,
     fly: Res<FlyTo>,
+    agent_fly: Res<ChaseCameraFly>,
     inventory: Res<ControllerInventory>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
@@ -733,17 +753,11 @@ fn follow_target(
         follow.last_pos = None;
         return;
     };
-    if fly.remaining > 0.0 {
+    if fly.remaining > 0.0 || agent_fly.target.is_some() {
         follow.last_pos = None;
         return;
     }
-    let body = inventory
-        .machines
-        .iter()
-        .find(|m| m.scene_root == Some(root))
-        .and_then(|m| m.body.as_deref())
-        .and_then(|body| crate::controller::find_prim_entity(root, body, &prims, &parents))
-        .unwrap_or(root);
+    let body = machine_body_entity(root, &inventory, &prims, &parents);
     let Ok(gt) = transforms.get(body) else {
         follow.set(None);
         return;
@@ -1058,6 +1072,161 @@ fn apply_fly_to(
     apply_rig(&cam, &mut transform);
 }
 
+/// The chassis prim entity of the machine rooted at `root`, or the root
+/// itself when the machine names no body.
+pub(crate) fn machine_body_entity(
+    root: Entity,
+    inventory: &ControllerInventory,
+    prims: &Query<(Entity, &UsdPrimRef)>,
+    parents: &Query<&ChildOf>,
+) -> Entity {
+    inventory
+        .machines
+        .iter()
+        .find(|m| m.scene_root == Some(root))
+        .and_then(|m| m.body.as_deref())
+        .and_then(|body| crate::controller::find_prim_entity(root, body, prims, parents))
+        .unwrap_or(root)
+}
+
+/// World heading of a machine body: the published controller state when
+/// there is one, else the chassis prim's forward axis (USD -Y) projected on
+/// the ground. 0 rad = +Z, +pi/2 = +X, like `heading_rad`.
+fn machine_heading(
+    root: Entity,
+    gt: &GlobalTransform,
+    inventory: &ControllerInventory,
+    states: &ControllerStates,
+) -> f32 {
+    let published = inventory
+        .machines
+        .iter()
+        .find(|m| m.scene_root == Some(root))
+        .and_then(|m| {
+            m.controllers.iter().find_map(|c| {
+                states
+                    .states
+                    .get(&ControllerKey::new(root, &m.id, &c.instance))
+                    .map(|s| s.heading_rad as f32)
+            })
+        });
+    published.unwrap_or_else(|| {
+        let fwd = gt.rotation() * Vec3::NEG_Y;
+        fwd.x.atan2(fwd.z)
+    })
+}
+
+// ─── Fly behind a machine (agent tree double-click) ────────────────
+
+/// Two phases over `FlyTarget::duration`: A (0–30 %) keeps the camera where
+/// it is and turns it toward the machine; B pulls back to the apex, arcs the
+/// yaw to behind the machine and comes in to the final distance while the
+/// elevation eases back to what the user had. Any camera input cancels it.
+fn chase_camera_fly(
+    time: Res<Time>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut fly: ResMut<ChaseCameraFly>,
+    inventory: Res<ControllerInventory>,
+    states: Res<ControllerStates>,
+    transforms: Query<&GlobalTransform>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
+    let Some(mut target) = fly.target else {
+        wheel.read().for_each(drop);
+        return;
+    };
+    let middle = mouse_buttons.pressed(MouseButton::Middle);
+    let both_lr =
+        mouse_buttons.pressed(MouseButton::Left) && mouse_buttons.pressed(MouseButton::Right);
+    let scrolled = wheel.read().any(|e| match e.unit {
+        MouseScrollUnit::Line | MouseScrollUnit::Pixel => e.y.abs() > f32::EPSILON,
+    });
+    if middle || both_lr || scrolled {
+        fly.target = None;
+        return;
+    }
+    let Ok(gt) = transforms.get(target.body) else {
+        fly.target = None;
+        return;
+    };
+    let Ok((mut cam, mut tr)) = cameras.single_mut() else {
+        return;
+    };
+
+    target.elapsed += time.delta_secs();
+    let t = (target.elapsed / target.duration).clamp(0.0, 1.0);
+
+    let target_focus = gt.translation();
+    let target_cam_yaw =
+        machine_heading(target.root, gt, &inventory, &states) + std::f32::consts::PI;
+
+    // Slide the start references with the machine so a driving target does
+    // not shift the geometry under the interpolation.
+    if let Some(last) = target.last_target_pos {
+        let delta = target_focus - last;
+        target.start_focus += delta;
+        target.start_cam_world += delta;
+    }
+    target.last_target_pos = Some(target_focus);
+
+    let phase_a_end = FlyTarget::PHASE_A_END;
+    if t < phase_a_end {
+        let s = smoothstep((t / phase_a_end).clamp(0.0, 1.0));
+        let focus = target.start_focus.lerp(target_focus, s);
+        let off = target.start_cam_world - focus;
+        let dist = off.length().max(0.1);
+        cam.focus = focus;
+        cam.distance = dist;
+        cam.yaw = off.x.atan2(off.z);
+        cam.elevation = (off.y / dist).clamp(-1.0, 1.0).asin();
+    } else {
+        let tb = ((t - phase_a_end) / (1.0 - phase_a_end)).clamp(0.0, 1.0);
+        let off = target.start_cam_world - target_focus;
+        let dist_b_start = off.length().max(0.1);
+        let yaw_b_start = off.x.atan2(off.z);
+        let elev_b_start = (off.y / dist_b_start).clamp(-1.0, 1.0).asin();
+
+        let distance = if tb < 0.5 {
+            let s = smoothstep(sub_progress(tb, 0.0, 0.5));
+            dist_b_start + (target.apex_distance - dist_b_start) * s
+        } else {
+            let s = smoothstep(sub_progress(tb, 0.5, 1.0));
+            target.apex_distance + (target.distance - target.apex_distance) * s
+        };
+        let yaw = lerp_angle(
+            yaw_b_start,
+            target_cam_yaw,
+            smoothstep(sub_progress(tb, 0.0, 0.85)),
+        );
+        let elevation = elev_b_start + (target.start_elevation - elev_b_start) * smoothstep(tb);
+
+        cam.focus = target_focus;
+        cam.yaw = yaw;
+        cam.distance = distance;
+        cam.elevation = elevation;
+    }
+
+    if t >= 1.0 {
+        cam.focus = target_focus;
+        cam.yaw = target_cam_yaw;
+        cam.distance = target.distance;
+        cam.elevation = target.start_elevation;
+        fly.target = None;
+    } else {
+        fly.target = Some(target);
+    }
+    apply_rig(&cam, &mut tr);
+}
+
+fn sub_progress(t: f32, a: f32, b: f32) -> f32 {
+    ((t - a) / (b - a)).clamp(0.0, 1.0)
+}
+
+fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
     let two_pi = core::f32::consts::TAU;
     let mut delta = (b - a) % two_pi;
@@ -1163,7 +1332,7 @@ fn tick_stage_time(
 
 // ─── Ribbon rail ────────────────────────────────────────────────────
 
-fn is_panel_open(open: &RibbonOpen, item: &'static str) -> bool {
+pub(crate) fn is_panel_open(open: &RibbonOpen, item: &'static str) -> bool {
     open.is_open(RIBBON_LEFT, item)
 }
 
@@ -1760,6 +1929,7 @@ pub(crate) fn draw_mara_example_shell(mut contexts: EguiContexts, shell: MaraShe
                     "keyboard",
                     vec![Pod::new(pid(RIB_KEYS, "keys", 0)).with_keybindings(vec![
                         ("T", "Open tree"),
+                        ("N", "Open agents"),
                         ("I", "Open info"),
                         ("O", "Open overlays"),
                         ("?", "Open controls"),
@@ -3691,6 +3861,7 @@ fn draw_keys_panel(
             });
             pane.section("keys_panels", "Panels", true, |ui| {
                 keybinding_row(ui, "T", "Toggle prim tree");
+                keybinding_row(ui, "N", "Toggle agents");
                 keybinding_row(ui, "I", "Toggle stage info");
                 keybinding_row(ui, "O", "Toggle overlays");
                 keybinding_row(ui, "?", "Toggle this panel");
@@ -3839,6 +4010,9 @@ fn draw_palette_panel(
         }
         "open_tree" => {
             ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_TREE);
+        }
+        "open_agents" => {
+            ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_AGENTS);
         }
         "open_info" => {
             ribbon.per_ribbon.insert(RIBBON_LEFT, RIB_INFO);

@@ -54,6 +54,17 @@ enum Cmd {
         #[arg(long, default_value_t = 10.0)]
         timeout: f64,
     },
+    /// Move the viewer camera: `fly MACHINE` flies behind a machine like a
+    /// double-click in the Agents pane, `follow MACHINE` pins the camera to
+    /// it, `unfollow` releases it
+    Camera {
+        /// fly | follow | unfollow
+        action: String,
+        /// Machine id (`gearbox:machine:id`), needed by fly and follow
+        machine: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// Show the instance's log file
     Logs {
         id: Option<String>,
@@ -76,7 +87,42 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Wait { id, timeout } => wait(ctx, id, timeout),
         Cmd::Logs { id, follow, lines } => logs(ctx, id, follow, lines),
         Cmd::Screenshot { out, id, timeout } => screenshot(ctx, id, &out, timeout),
+        Cmd::Camera {
+            action,
+            machine,
+            id,
+        } => camera(ctx, id, &action, machine.as_deref()),
     }
+}
+
+fn camera(ctx: &Ctx, id: Option<String>, action: &str, machine: Option<&str>) -> Result<()> {
+    let ctx = with_target(ctx, id)?;
+    let target = ctx.target()?.clone();
+    if target.pid == 0 {
+        return Err(CliError::error(
+            "instance addressed by did only; camera needs a registry entry",
+        ));
+    }
+    let line = match (action, machine) {
+        ("fly", Some(m)) | ("follow", Some(m)) => format!("{action} {m}"),
+        ("unfollow", _) => "unfollow".to_string(),
+        ("fly", None) | ("follow", None) => {
+            return Err(CliError::error(format!("`{action}` needs a machine id")));
+        }
+        _ => {
+            return Err(CliError::error(
+                "camera action must be fly, follow or unfollow",
+            ));
+        }
+    };
+    let request = registry::registry_dir().join(format!("{}.camera", target.name));
+    std::fs::write(&request, line.as_bytes())?;
+    ctx.done(
+        &line,
+        &format!("camera request `{line}` sent to `{}`", target.name),
+        || json!({ "instance": target.name, "request": line }),
+    );
+    Ok(())
 }
 
 fn with_target(ctx: &Ctx, id: Option<String>) -> Result<Ctx> {
