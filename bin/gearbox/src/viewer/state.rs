@@ -5,7 +5,7 @@
 //! `SelectedPrim` for prim-tree clicks vs. gearbox's existing
 //! top-level entity selection.
 
-use bevy::prelude::{Component, Entity, Resource, Vec3};
+use bevy::prelude::{Entity, Resource, Vec3};
 use bevy_mara::ChaseCamera;
 use std::path::PathBuf;
 
@@ -230,17 +230,6 @@ pub struct ActiveVariants {
     pub root: Option<Entity>,
     pub entries: Vec<VariantEntry>,
 }
-
-/// `kind` metadata of a prim. usd_bevy does not project it yet, so no
-/// entity carries this; the tree shows it when something does.
-#[derive(Component, Debug, Clone)]
-pub struct UsdKind {
-    pub kind: String,
-}
-
-/// `displayName` of a prim; same standing as [`UsdKind`].
-#[derive(Component, Debug, Clone)]
-pub struct UsdDisplayName(pub String);
 
 #[derive(Debug, Clone, Copy)]
 pub struct CurveTuning {

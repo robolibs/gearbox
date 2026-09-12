@@ -97,6 +97,18 @@ openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.
 [patch."https://codeberg.org/robolibs/peerbus.git"]
 peerbus = { path = "../peerbus" }
 
+# bevy_openusd work in progress (physics markers, incremental projection,
+# variant options) comes from the sibling checkout until it is tagged.
+[patch."https://github.com/bresilla/bevy_openusd"]
+usd_bevy        = { path = "../../OUSD/bevy_openusd/crates/usd_bevy" }
+openusd         = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openusd" }
+openusd-schemas = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openusd-schemas" }
+
+# bevy_openusd's bevy_asset serialises loads of one source so an older
+# snapshot cannot land after a newer one; the patch has to cover the graph.
+[patch.crates-io]
+bevy_asset = { path = "../../OUSD/bevy_openusd/vendor/bevy_asset" }
+
 # The USD stack projects on the main thread; unoptimised it takes minutes per
 # tractor, so those crates get optimised even in dev builds.
 [profile.dev.package.usd_bevy]

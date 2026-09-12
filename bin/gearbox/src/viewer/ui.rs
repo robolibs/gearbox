@@ -18,7 +18,8 @@ use usd_bevy::UsdPrimRef;
 use usd_bevy::instance::{UsdInstanceOverrides, UsdInstances};
 use usd_bevy::route::{audio::UsdSpatialAudio, camera::UsdCamera, coverage::UsdProcedural};
 
-use crate::viewer::state::{ActiveVariants, UsdDisplayName, UsdKind, VariantEntry};
+use crate::viewer::state::{ActiveVariants, VariantEntry};
+use usd_bevy::route::meta::{UsdDisplayName, UsdKind};
 
 use crate::controller::{
     CmdVel, ControllerCommands, ControllerInventory, ControllerKey, ControllerStates,
@@ -509,11 +510,12 @@ fn capture_active_stage_info(
             && let Ok(sets) = prim.variant_sets().get_all_variant_selections()
         {
             for (name, selection) in sets {
+                let options = usd_bevy::read::variants::variant_options(stage, path, &name);
                 variants.entries.push(VariantEntry {
                     prim: path.as_str().to_string(),
                     name,
                     selection: Some(selection),
-                    options: Vec::new(),
+                    options,
                 });
             }
         }

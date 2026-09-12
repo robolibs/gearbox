@@ -719,8 +719,6 @@ dependencies = [
 [[package]]
 name = "bevy_asset"
 version = "0.19.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1624eddbf2293441b2158506aba75e523432b898d9da26eb6ed3e20af4c7fd38"
 dependencies = [
  "async-broadcast",
  "async-channel",
@@ -6467,7 +6465,6 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 [[package]]
 name = "openusd"
 version = "0.7.0"
-source = "git+https://github.com/bresilla/bevy_openusd?tag=v0.1.0#43ac9f28d6735ba90e45b4209c64c30fbd4e7075"
 dependencies = [
  "bitflags 2.13.0",
  "bytemuck",
@@ -6485,7 +6482,6 @@ dependencies = [
 [[package]]
 name = "openusd-build"
 version = "0.7.0"
-source = "git+https://github.com/bresilla/bevy_openusd?tag=v0.1.0#43ac9f28d6735ba90e45b4209c64c30fbd4e7075"
 dependencies = [
  "openusd",
  "prettyplease",
@@ -6498,7 +6494,6 @@ dependencies = [
 [[package]]
 name = "openusd-schemas"
 version = "0.7.0"
-source = "git+https://github.com/bresilla/bevy_openusd?tag=v0.1.0#43ac9f28d6735ba90e45b4209c64c30fbd4e7075"
 dependencies = [
  "derive_more",
  "openusd",
@@ -9435,7 +9430,6 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 [[package]]
 name = "usd_bevy"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/bevy_openusd?tag=v0.1.0#43ac9f28d6735ba90e45b4209c64c30fbd4e7075"
 dependencies = [
  "anyhow",
  "bevy",
@@ -9454,7 +9448,6 @@ dependencies = [
 [[package]]
 name = "usd_macro"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/bevy_openusd?tag=v0.1.0#43ac9f28d6735ba90e45b4209c64c30fbd4e7075"
 dependencies = [
  "openusd",
  "proc-macro2",

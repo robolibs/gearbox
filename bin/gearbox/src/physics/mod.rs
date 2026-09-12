@@ -117,12 +117,10 @@ fn attach_projected_stages(world: &mut World) {
         let Some(stage) = instances.stage(root) else {
             continue;
         };
-        let mut prims: Vec<(String, Entity)> = Vec::new();
-        let _ = stage.traverse(Default::default(), |path: &openusd::sdf::Path| {
-            if let Some(entity) = instances.entity(root, path.as_str()) {
-                prims.push((path.as_str().to_string(), entity));
-            }
-        });
+        let prims: Vec<(String, Entity)> = instances
+            .prims(root)
+            .map(|(path, entity)| (path.to_string(), entity))
+            .collect();
         let meta = attach::read_stage_meta(stage);
         let mut pending = attach::PendingPhysics::default();
         let mut by_path: HashMap<String, Entity> = HashMap::with_capacity(prims.len());
@@ -131,17 +129,14 @@ fn attach_projected_stages(world: &mut World) {
             if path == "/" {
                 continue;
             }
-            let Ok(sdf) = openusd::sdf::path(path) else {
-                continue;
-            };
-            if let Some(name) = sdf.name()
+            if let Some(name) = path.rsplit('/').next()
                 && world.get::<Name>(*entity).is_none()
             {
                 world
                     .entity_mut(*entity)
                     .insert(Name::new(name.to_string()));
             }
-            attach::attach_physics_to_prim(stage, &sdf, *entity, world, &mut pending, &meta);
+            attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
         }
         attach::resolve_pending_physics(world, &pending, &by_path);
         attach::populate_articulation_joints(world, &pending.articulation_roots);
