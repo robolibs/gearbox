@@ -389,8 +389,8 @@ requesting `hitch:rear_lift` on a master without that grant shows
 
 ### Phase 6 — later
 
-- DDOP export (`TOOLS_SPEC.md` §7.3 to §7.5): element tree and process data
-  over `/cmd`, `gearbox machine ddop NS` writing the XML.
+- Working parts as links (`TOOLS_SPEC.md` §7.3, §7.4): element kinds and
+  named values on the link tree, `gearbox machine set-value LINK NAME VALUE`.
 - Link tree on the host's `/gearbox/scene/list` for props, so bales and
   markers appear in one `tf`-style view.
 - A `gearbox tf` viewer extension that draws frames in the sim.
@@ -516,24 +516,23 @@ the code wins and the difference is recorded here.
   the master's matching service controller (`ServiceCommands`), so a slave
   can raise the hitch, engage the PTO or open a valve when granted.
 - **The master's `/state`** carries `tool.<slave>.controller.<instance>.<key>`
-  for every attached slave's service controller and `pd.<element>.<Ddi>`
-  for its own process data.
-- **Phase 6 is in too.** `bin/gearbox/src/elements.rs` discovers the ISO
-  11783-10 element tree (`GearboxElementAPI`, `gearbox:element:*`,
-  `gearbox:pd:*`), derives the device, connector (from couplers, with DDI
-  157) and navigation elements, checks numbers and structure per §8, and
-  warns on DDI names it does not know (the full ISO 11783-11 dictionary is
-  not shipped; a small table maps the ones the controllers use).
-  `/machines/<ns>/elements` answers `gearbox.element_record.v1`;
-  `gearbox machine elements`, `gearbox machine ddop [--out FILE]` (ISOXML
-  `DVC`/`DET`/`DPD`/`DPT`) and `gearbox machine pd ELEMENT DDI VALUE` use
-  it. `builtin:section_control` and `builtin:rate_control` run over the
-  element tree with ground speed from the master (`ProcessData` resource;
-  values ride `/state` as `pd.*`). `gearbox scene tree` prints one tf-style
-  view of machines and props (props and markers carry `link = base_link`
-  in `scene list`). Link frames are drawn as gizmos in the window for any
-  machine whose tf stream is on, so `gearbox machine tf` shows them live.
-  DDOP import (§7.5, the other direction) is not implemented.
-- **DDOP offsets** follow the spec's REP-103 formula `(x, −y, −z)`; the
-  repo's assets author their chassis forward as −Y, so their exported
-  offsets are rotated until they are re-based. `drpOffset` is not read.
+  for every attached slave's service controller and `link.<link>.<Name>`
+  for its own link values.
+- **Phase 6 is in as one tree.** There is no separate element tree and no
+  device-description export: a working part is a link that also carries
+  `GearboxElementAPI` (`bin/gearbox/src/links.rs` reads
+  `gearbox:element:*` and `gearbox:value:*`; a prim with only the element
+  schema still becomes a `tool` link). `/links` records carry `element`,
+  `number`, `designator` and `value.<Name>` props. Values live in the
+  `LinkValues` resource (`bin/gearbox/src/services.rs`), seeded from the
+  asset and set through `/cmd` with `link` + `name` props (`gearbox machine
+  set-value LINK NAME VALUE`, `Machine.set_value()`). A service controller
+  overlays the values of the link its joint moves onto its command props,
+  and a `controller=` command writes the same props back onto that link, so
+  a link addressed from the tf tree can be moved directly and both paths
+  agree. `builtin:section_control` and `builtin:rate_control` act on links
+  by element kind (`function` → its `section` children, `bin`) with ground
+  speed from the master. `gearbox scene tree` prints one tf-style view of
+  machines and props (props and markers carry `link = base_link` in `scene
+  list`). Link frames are drawn as gizmos in the window for any machine whose
+  tf stream is on, so `gearbox machine tf` shows them live.

@@ -175,15 +175,20 @@ keys below; `gearbox machine cmd <instance> key=val`). The joint is
 | `builtin:trailer_steer` | `angle_rad`, else automatic | steering joints follow the master's heading when attached, clamped to `maxSteerDeg` (default 35) |
 | `builtin:joint_velocity` | `velocity` rad/s, else bound PTO | motor velocity on the target joint; a joint named by the coupler's `gearbox:coupling:ptoJoint` turns with the master's PTO |
 
-**Process data controllers** (`TOOLS_SPEC.md` §7.4) act on the element tree
-rather than a joint and are commanded with `/cmd` carrying `element` and a
-`ddi` prop (`gearbox machine pd ELEMENT DDI VALUE`); their values ride
-`/state` as `pd.<element>.<Ddi>`:
+Every link of the tree carries **named values** (`TOOLS_SPEC.md` §7.3),
+seeded from `gearbox:value:<Name>` attributes and set at runtime with `/cmd`
+carrying `link` and `name` props (`gearbox machine set-value LINK NAME
+VALUE`). A service controller overlays the values of the link its joint moves
+onto its own command props, so `set-value boom position 0.8` moves the boom
+without naming a controller. Values ride `/links` as `value.<Name>` props and
+`/state` as `link.<link>.<Name>`.
+
+**Work controllers** act on links by element kind rather than on a joint:
 
 | Type | Acts on | Behaviour |
 |---|---|---|
-| `builtin:section_control` | the `function` element it targets and its `section` children | `SetpointWorkState` becomes `ActualWorkState` while the master moves and `SectionControlState` is on; `TotalArea` and `EffectiveTotalDistance` accumulate from speed × active width |
-| `builtin:rate_control` | the `bin` element it targets | `SetpointVolumePerAreaApplicationRate` becomes the actual rate while sections work; `ActualVolumeContent` drains from speed × active width × rate |
+| `builtin:section_control` | the `function` link it targets and its `section` children | `SetpointWorkState` becomes `ActualWorkState` while the master moves and `SectionControlState` is on; `TotalArea` and `EffectiveTotalDistance` accumulate from speed × active width |
+| `builtin:rate_control` | the `bin` link it targets | `SetpointVolumePerAreaApplicationRate` becomes the actual rate while sections work; `ActualVolumeContent` drains from speed × active width × rate |
 
 A controller MAY author `gearbox:controller:<n>:requests` (`speed`,
 `steering`, `hitch:<name>`, `pto:<name>`) and a machine MAY author

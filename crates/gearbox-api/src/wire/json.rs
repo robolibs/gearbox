@@ -68,7 +68,6 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(AttachRequest, attach_request_json, attach_request_from),
         desc!(DetachRequest, detach_request_json, detach_request_from),
         desc!(AttachmentRecord, attachment_json, attachment_from),
-        desc!(ElementRecord, element_record_json, element_record_from),
     ]
 }
 
@@ -663,36 +662,5 @@ fn attachment_from(v: &Value) -> Result<AttachmentRecord, String> {
         controlled: uint(v, "controlled") as u32,
         depth: uint(v, "depth") as u32,
         props: props_from(v, &["controlled", "depth"]),
-    })
-}
-
-fn element_record_json(e: &ElementRecord) -> Value {
-    json!({
-        "number": e.number,
-        "parent": if e.parent == ElementRecord::NO_PARENT { Value::Null } else { json!(e.parent) },
-        "iso_type": e.iso_type,
-        "offset": { "x": e.x, "y": e.y, "z": e.z },
-        "process_data": e.process_data().iter().map(|(k, v)| (k.clone(), json!(v))).collect::<Map<_, _>>(),
-        "props": props_json(&e.props),
-    })
-}
-
-fn element_record_from(v: &Value) -> Result<ElementRecord, String> {
-    let off = v.get("offset").cloned().unwrap_or(Value::Null);
-    Ok(ElementRecord {
-        x: num(&off, "x"),
-        y: num(&off, "y"),
-        z: num(&off, "z"),
-        number: uint(v, "number") as u32,
-        parent: match v.get("parent") {
-            None | Some(Value::Null) => ElementRecord::NO_PARENT,
-            _ => uint(v, "parent") as u32,
-        },
-        iso_type: uint(v, "iso_type") as u32,
-        _pad: 0,
-        props: props_from(
-            v,
-            &["number", "parent", "iso_type", "offset", "process_data"],
-        ),
     })
 }

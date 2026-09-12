@@ -29,8 +29,6 @@ pub struct MachineConfig {
     /// The link tree, base_link first; `derived` when the asset marked none.
     pub links: Vec<LinkDesc>,
     pub links_derived: bool,
-    /// ISO 11783-10 device elements, device first.
-    pub elements: Vec<ElementDesc>,
     pub ephemeral: bool,
     pub allow: Vec<String>,
     pub allow_any: bool,
@@ -50,6 +48,13 @@ pub struct LinkDesc {
     pub offset: [f64; 7],
     /// `side|type|name` of a coupling on this link, when it carries one.
     pub coupling: Option<String>,
+    /// Element kind when the link is a working part: function, bin,
+    /// section, unit, connector, navigation.
+    pub element: Option<String>,
+    pub number: Option<u32>,
+    pub designator: Option<String>,
+    /// Named values authored on the link (`gearbox:value:<Name>`).
+    pub values: Vec<(String, f64)>,
 }
 
 impl LinkDesc {
@@ -63,6 +68,10 @@ impl LinkDesc {
             body: None,
             offset: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             coupling: None,
+            element: None,
+            number: None,
+            designator: None,
+            values: Vec::new(),
         }
     }
 }
@@ -77,7 +86,6 @@ impl MachineConfig {
             controllers: Vec::new(),
             links: Vec::new(),
             links_derived: false,
-            elements: Vec::new(),
             ephemeral: false,
             allow: Vec::new(),
             allow_any: false,
@@ -142,7 +150,6 @@ pub struct MachineAgent {
     attach: Registered<ReqServer<Env, Env>>,
     detach: Registered<ReqServer<Env, Env>>,
     tools_q: Registered<AnsServer<Env, Env>>,
-    elements_q: Registered<AnsServer<Env, Env>>,
     /// Set while this machine hangs on another machine's hitch.
     attached_to: Option<String>,
     /// Slaves hanging on this machine, depth-first, and their re-parented
@@ -197,7 +204,6 @@ impl MachineAgent {
             attach: agent.req_server(&t(topics::MACHINE_TOOLS_ATTACH))?,
             detach: agent.req_server(&t(topics::MACHINE_TOOLS_DETACH))?,
             tools_q: agent.que_server(&t(topics::MACHINE_TOOLS))?,
-            elements_q: agent.que_server(&t(topics::MACHINE_ELEMENTS))?,
             attached_to: None,
             tools: Vec::new(),
             tool_links: Vec::new(),
@@ -310,10 +316,6 @@ impl MachineAgent {
             .cloned()
             .collect();
         serve_que(&mut self.links, |_: Ping| link_records_for(&all_links));
-        let elements = &self.config.elements;
-        serve_que(&mut self.elements_q, |_: Ping| {
-            element_records_for(elements)
-        });
         let master = self.config.namespace.clone();
         let tools = &self.tools;
         serve_que(&mut self.tools_q, |_: Ping| {
@@ -623,6 +625,18 @@ pub fn link_records_for(links: &[LinkDesc]) -> Vec<LinkRecord> {
             if let Some(c) = &l.coupling {
                 props.set("coupling", c);
             }
+            if let Some(e) = &l.element {
+                props.set("element", e);
+            }
+            if let Some(n) = l.number {
+                props.set("number", &n.to_string());
+            }
+            if let Some(d) = &l.designator {
+                props.set("designator", d);
+            }
+            for (k, v) in &l.values {
+                props.set(&format!("value.{k}"), &v.to_string());
+            }
             LinkRecord {
                 x: l.offset[0],
                 y: l.offset[1],
@@ -637,50 +651,6 @@ pub fn link_records_for(links: &[LinkDesc]) -> Vec<LinkRecord> {
                     .as_deref()
                     .map(index_of)
                     .unwrap_or(LinkRecord::NO_PARENT),
-                props: props.into_bytes(),
-            }
-        })
-        .collect()
-}
-
-/// One ISO 11783-10 device element as the agent answers it on `/elements`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ElementDesc {
-    pub number: u32,
-    pub parent: Option<u32>,
-    pub kind: String,
-    pub iso_type: u32,
-    pub designator: String,
-    pub prim: String,
-    /// Origin in `base_link`, asset metres.
-    pub offset: [f64; 3],
-    pub connector_type: Option<u32>,
-    pub process_data: Vec<(String, f64)>,
-}
-
-pub fn element_records_for(elements: &[ElementDesc]) -> Vec<ElementRecord> {
-    elements
-        .iter()
-        .map(|e| {
-            let mut props = Props::from_pairs(&[
-                ("kind", e.kind.as_str()),
-                ("designator", e.designator.as_str()),
-                ("prim", e.prim.as_str()),
-            ]);
-            if let Some(c) = e.connector_type {
-                props.set("connector_type", &c.to_string());
-            }
-            for (ddi, value) in &e.process_data {
-                props.set(&format!("pd.{ddi}"), &value.to_string());
-            }
-            ElementRecord {
-                x: e.offset[0],
-                y: e.offset[1],
-                z: e.offset[2],
-                number: e.number,
-                parent: e.parent.unwrap_or(ElementRecord::NO_PARENT),
-                iso_type: e.iso_type,
-                _pad: 0,
                 props: props.into_bytes(),
             }
         })

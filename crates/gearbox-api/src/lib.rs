@@ -22,7 +22,7 @@ pub use client::{Client, MachineClient, next_sample};
 pub use datapod;
 pub use host::{HostBus, HostConfig};
 pub use machine::{
-    ControllerDesc, ElementDesc, LinkDesc, MachineAgent, MachineConfig, ToolDesc, link_records_for,
+    ControllerDesc, LinkDesc, MachineAgent, MachineConfig, ToolDesc, link_records_for,
 };
 pub use peerbus;
 pub use wire::*;

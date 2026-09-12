@@ -124,6 +124,10 @@ pub struct LinkSpec {
     pub body_prim: Option<String>,
     pub static_offset: Option<StaticOffset>,
     pub coupling: Option<CouplingSpec>,
+    /// Working-part element this link is (function, bin, section, ...).
+    pub element: Option<ElementInfo>,
+    /// Named values authored on the link (`gearbox:value:<Name>`).
+    pub values: Vec<(String, f64)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -182,6 +186,7 @@ pub fn discover_link_tree(
     let mut bodies: Vec<String> = Vec::new();
     let mut marked: Vec<String> = Vec::new();
     let mut couplings: Vec<String> = Vec::new();
+    let mut elements: Vec<String> = Vec::new();
     let mut joints: Vec<JointRecord> = Vec::new();
     for prim in &inside {
         let schemas = stage.api_schemas(prim).unwrap_or_default();
@@ -199,6 +204,11 @@ pub fn discover_link_tree(
             || read_token(stage, prim, "gearbox:coupling:side").is_some()
         {
             couplings.push(path.clone());
+        }
+        if schemas.iter().any(|s| s == "GearboxElementAPI")
+            || read_token(stage, prim, "gearbox:element:type").is_some()
+        {
+            elements.push(path.clone());
         }
         let ty = type_name(stage, prim).unwrap_or_default();
         if ty.starts_with("Physics") && ty.ends_with("Joint") {
@@ -237,6 +247,11 @@ pub fn discover_link_tree(
         }
         v
     };
+    for e in &elements {
+        if !link_prims.contains(e) {
+            link_prims.push(e.clone());
+        }
+    }
     link_prims.sort();
     link_prims.dedup();
 
@@ -295,6 +310,7 @@ pub fn discover_link_tree(
                 LinkRole::Base
             }
             None if couplings.contains(prim) => LinkRole::Tool,
+            None if elements.contains(prim) => LinkRole::Tool,
             None => LinkRole::Link,
         };
         let name = match read_token(stage, &sdf, "gearbox:link:name") {
@@ -317,6 +333,8 @@ pub fn discover_link_tree(
             body_prim: bodies.contains(prim).then(|| prim.clone()),
             static_offset: None,
             coupling,
+            element: read_element(stage, &sdf, &mut tree.errors),
+            values: read_values(stage, &sdf),
         });
     }
 
@@ -1047,6 +1065,25 @@ def Xform "robot" (
             boom_link.joint_prim.as_deref(),
             Some("/robot/Joints/boom_fold")
         );
+        assert_eq!(
+            boom_link.element.as_ref().map(|e| e.kind.as_str()),
+            Some("function")
+        );
+        let left = machine.links.get("section_left").expect("section link");
+        assert_eq!(left.parent.as_deref(), Some("boom"));
+        assert_eq!(
+            left.element.as_ref().map(|e| e.kind.as_str()),
+            Some("section")
+        );
+        assert!(
+            left.values
+                .contains(&("ActualWorkingWidth".to_string(), 3.0)),
+            "{:?}",
+            left.values
+        );
+        let tank = machine.links.get("tank").expect("tank link");
+        assert_eq!(tank.parent.as_deref(), Some("base_link"));
+        assert_eq!(tank.element.as_ref().map(|e| e.kind.as_str()), Some("bin"));
 
         let tractor = discover_machines_from_usd(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tractor.usd"),
@@ -1067,4 +1104,73 @@ def Xform "robot" (
                 .any(|(_, c)| c.name == "rear_three_point" && c.kind == "three_point_mounted")
         );
     }
+}
+
+/// A link that is also a working part of the machine (`TOOLS_SPEC.md`
+/// §7.3): the tree stays the link tree, the element is a label on it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElementInfo {
+    pub kind: String,
+    pub number: Option<u32>,
+    pub designator: String,
+}
+
+pub const ELEMENT_KINDS: [&str; 7] = [
+    "device",
+    "function",
+    "bin",
+    "section",
+    "unit",
+    "connector",
+    "navigation",
+];
+
+fn read_element(
+    stage: &openusd::Stage,
+    prim: &SdfPath,
+    errors: &mut Vec<String>,
+) -> Option<ElementInfo> {
+    let kind = read_token(stage, prim, "gearbox:element:type")?;
+    if !ELEMENT_KINDS.contains(&kind.as_str()) {
+        errors.push(format!(
+            "{}: unknown gearbox:element:type `{kind}`",
+            prim.as_str()
+        ));
+        return None;
+    }
+    let number = match read_attr(stage, prim, "gearbox:element:number") {
+        Some(Value::Int(n)) if n >= 0 => Some(n as u32),
+        Some(Value::Uint(n)) => Some(n),
+        _ => None,
+    };
+    let designator = match read_attr(stage, prim, "gearbox:element:designator") {
+        Some(Value::String(s)) | Some(Value::Token(s)) => s,
+        _ => leaf(prim.as_str()).to_string(),
+    };
+    Some(ElementInfo {
+        kind,
+        number,
+        designator,
+    })
+}
+
+/// Every `gearbox:value:*` attribute on a prim, sorted by name.
+fn read_values(stage: &openusd::Stage, prim: &SdfPath) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for name in stage.prim_properties(prim.clone()).unwrap_or_default() {
+        let Some(key) = name.strip_prefix("gearbox:value:") else {
+            continue;
+        };
+        let value = match read_attr(stage, prim, &name) {
+            Some(Value::Float(v)) => v as f64,
+            Some(Value::Double(v)) => v,
+            Some(Value::Int(v)) => v as f64,
+            Some(Value::Uint(v)) => v as f64,
+            Some(Value::Bool(b)) => b as u8 as f64,
+            _ => continue,
+        };
+        out.push((key.to_string(), value));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }

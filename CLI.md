@@ -100,9 +100,7 @@ Inspect and drive machines
 | `controllers [NS]` | Controller table with types and interfaces |
 | `links [OPTIONS] [NS]` | The link tree: names, roles, parents, static offsets |
 | `tf [OPTIONS] [NS]` | Stream link poses: switches the machine's tf on, prints, switches it off |
-| `elements [NS]` | ISO 11783-10 device elements with their process data |
-| `ddop [OPTIONS] [NS]` | Write the machine's device description (DDOP) as ISOXML |
-| `pd [OPTIONS] <ELEMENT> <DDI> <VALUE>` | Set one process data value: ELEMENT DDI VALUE (e.g. 4 SetpointWorkState 1) |
+| `set-value [OPTIONS] <LINK> <NAME> <VALUE>` | Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8) |
 | `tools <COMMAND>` | Attachments: what hangs on a machine, attach and detach slaves |
 
 ## `gearbox access`

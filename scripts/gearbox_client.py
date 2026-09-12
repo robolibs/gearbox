@@ -380,18 +380,6 @@ class DetachRequest:
     props: bytes = b""
 
 
-@_pod("gearbox.element_record.v1", "<dddIIII", ("x", "y", "z", "number", "parent", "iso_type", "_pad"), payload="props")
-class ElementRecord:
-    x: float = 0.0
-    y: float = 0.0
-    z: float = 0.0
-    number: int = 0
-    parent: int = 0xFFFFFFFF
-    iso_type: int = 0
-    _pad: int = 0
-    props: bytes = b""
-
-
 @_pod("gearbox.attachment.v1", "<II", ("controlled", "depth"), payload="props")
 class AttachmentRecord:
     controlled: int = 0
@@ -701,27 +689,14 @@ class Machine:
         req = DetachRequest(session=self.session, props=pack_map({"slave": slave}))
         return self.gb.call(self.addr, self._topic("tools/detach"), req, Status)
 
-    def elements(self) -> list[dict]:
-        """ISO 11783-10 device elements, device first, with `pd` values."""
-        out = []
-        for r in self.gb.query(self.addr, self._topic("elements"), Ping(), ElementRecord):
-            props = unpack_map(r.props)
-            pd = {k[3:]: float(v) for k, v in props.items() if k.startswith("pd.")}
-            d = {k: v for k, v in props.items() if not k.startswith("pd.")}
-            d.update({
-                "number": r.number,
-                "parent": None if r.parent == 0xFFFFFFFF else r.parent,
-                "iso_type": r.iso_type,
-                "offset": {"x": r.x, "y": r.y, "z": r.z},
-                "process_data": pd,
-            })
-            out.append(d)
-        return out
+    def set_value(self, link: str, name: str, value: float) -> Status:
+        """Set a named value on a link of the tree (`position`, `SetpointWorkState`, ...).
 
-    def process_data(self, element: int, ddi: str, value: float) -> Status:
-        """Set one process data value on an element (`SetpointWorkState`, ...)."""
-        req = ControllerCommand(session=self.session, value=float(value), element=int(element),
-                                props=pack_map({"ddi": ddi}))
+        The controller driving the joint that moves `link` reads the link's
+        values, so `set_value("boom", "position", 1.0)` moves the boom.
+        """
+        req = ControllerCommand(session=self.session, value=float(value),
+                                props=pack_map({"link": link, "name": name}))
         return self.gb.call(self.addr, self._topic("cmd"), req, Status)
 
     def tools(self) -> list[dict]:

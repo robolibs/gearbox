@@ -1,8 +1,10 @@
-//! Service and process-data controllers (`specs/TOOLS_SPEC.md` §6.2, §7.2,
-//! §7.4) and the ISOBUS shaped exchange between a master and its slaves:
-//! the master's state reaches every slave controller as inputs, a slave's
-//! granted requests act on the master, and bound PTO and valve joints on
-//! the slave follow the master's services.
+//! Service controllers (`specs/TOOLS_SPEC.md` §6.2, §7.2, §7.4) and the
+//! exchange between a master and its slaves: the master's state reaches
+//! every slave controller as inputs, a slave's granted requests act on the
+//! master, and bound PTO and valve joints on the slave follow the master's
+//! services. Every working part is a link of the tree; values live on links
+//! and a controller that drives a joint reads the values of the link that
+//! joint moves.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,8 +19,7 @@ use crate::controller::{
     CmdVel, ControllerInventory, ControllerKey, ControllerSpec, ControllerStates, MachineAgentKeys,
     MachineInstanceSpec, body_forward_vector, find_prim_entity,
 };
-use crate::elements::ElementKind;
-use crate::links::CouplingSide;
+use crate::links::{CouplingSide, LinkSpec, LinkTree};
 
 pub const SERVICE_TYPES: [&str; 7] = [
     "builtin:hitch",
@@ -71,29 +72,40 @@ pub struct TimRequests(pub HashMap<String, CmdVel>);
 #[derive(Resource, Default)]
 pub struct ServiceCommands(pub HashMap<ControllerKey, HashMap<String, String>>);
 
-/// Live process data: (machine id, element number, DDI name) → value.
+/// Live named values per link: (machine id, link name, value name) → value.
 #[derive(Resource, Default)]
-pub struct ProcessData(pub HashMap<(String, u32, String), f64>);
+pub struct LinkValues(pub HashMap<(String, String, String), f64>);
 
-impl ProcessData {
-    pub fn get(&self, machine: &str, element: u32, ddi: &str) -> Option<f64> {
+impl LinkValues {
+    pub fn get(&self, machine: &str, link: &str, name: &str) -> Option<f64> {
         self.0
-            .get(&(machine.to_string(), element, ddi.to_string()))
+            .get(&(machine.to_string(), link.to_string(), name.to_string()))
             .copied()
     }
 
-    pub fn set(&mut self, machine: &str, element: u32, ddi: &str, value: f64) {
-        self.0
-            .insert((machine.to_string(), element, ddi.to_string()), value);
+    pub fn set(&mut self, machine: &str, link: &str, name: &str, value: f64) {
+        self.0.insert(
+            (machine.to_string(), link.to_string(), name.to_string()),
+            value,
+        );
     }
 
-    /// Every value of one machine, sorted by element then DDI.
-    pub fn of_machine(&self, machine: &str) -> Vec<(u32, String, f64)> {
-        let mut out: Vec<(u32, String, f64)> = self
+    /// Every value of one link, by name.
+    pub fn of_link(&self, machine: &str, link: &str) -> HashMap<String, f64> {
+        self.0
+            .iter()
+            .filter(|((m, l, _), _)| m == machine && l == link)
+            .map(|((_, _, n), v)| (n.clone(), *v))
+            .collect()
+    }
+
+    /// Every value of one machine, sorted by link then name.
+    pub fn of_machine(&self, machine: &str) -> Vec<(String, String, f64)> {
+        let mut out: Vec<(String, String, f64)> = self
             .0
             .iter()
             .filter(|((m, _, _), _)| m == machine)
-            .map(|((_, e, d), v)| (*e, d.clone(), *v))
+            .map(|((_, l, n), v)| (l.clone(), n.clone(), *v))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         out
@@ -103,9 +115,9 @@ impl ProcessData {
 #[derive(Resource, Default)]
 struct WarnedOnce(HashSet<String>);
 
-/// Machines whose authored process data has been copied into `ProcessData`.
+/// Machines whose authored link values have been copied into `LinkValues`.
 #[derive(Resource, Default)]
-struct SeededProcessData(HashSet<String>);
+struct SeededLinkValues(HashSet<String>);
 
 pub struct ServicesPlugin;
 
@@ -114,12 +126,13 @@ impl Plugin for ServicesPlugin {
         app.init_resource::<MasterInputs>()
             .init_resource::<TimRequests>()
             .init_resource::<ServiceCommands>()
-            .init_resource::<ProcessData>()
+            .init_resource::<LinkValues>()
             .init_resource::<WarnedOnce>()
-            .init_resource::<SeededProcessData>()
+            .init_resource::<SeededLinkValues>()
             .add_systems(
                 Update,
                 (
+                    seed_link_values,
                     drain_service_commands.after(crate::attach::serve_attachments),
                     apply_service_controllers,
                     apply_process_controllers,
@@ -143,6 +156,14 @@ fn machine_for<'a>(
         .find(|m| m.scene_root == Some(key.scene_root) && m.id == key.machine_id)
 }
 
+fn has_agent(keys: &MachineAgentKeys, machine: &MachineInstanceSpec) -> bool {
+    machine.scene_root.is_some_and(|root| {
+        keys.0
+            .values()
+            .any(|k| k.scene_root == root && k.machine_id == machine.id)
+    })
+}
+
 fn num(props: &HashMap<String, String>, key: &str) -> Option<f64> {
     props.get(key).and_then(|v| v.parse().ok())
 }
@@ -151,6 +172,27 @@ fn flag(props: &HashMap<String, String>, key: &str) -> Option<bool> {
     props
         .get(key)
         .map(|v| matches!(v.as_str(), "1" | "true" | "on" | "yes"))
+}
+
+/// Values authored on the links become the live values once per machine.
+fn seed_link_values(
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    mut values: ResMut<LinkValues>,
+    mut seeded: ResMut<SeededLinkValues>,
+) {
+    for machine in &inventory.machines {
+        if !has_agent(&keys, machine) || !seeded.0.insert(machine.id.clone()) {
+            continue;
+        }
+        for link in &machine.links.links {
+            for (name, value) in &link.values {
+                if values.get(&machine.id, &link.name, name).is_none() {
+                    values.set(&machine.id, &link.name, name, *value);
+                }
+            }
+        }
+    }
 }
 
 /// Write a granted slave request onto the master (`TOOLS_SPEC.md` §5.3).
@@ -216,8 +258,8 @@ fn apply_request(
 }
 
 /// Commands from the bus land per controller; `request=` commands from an
-/// attached slave act on the master when granted; `ddi=` commands set
-/// process data on an element.
+/// attached slave act on the master when granted; `link=` + `name=` set a
+/// value on a link of the tree.
 fn drain_service_commands(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
@@ -225,7 +267,7 @@ fn drain_service_commands(
     attachments: Res<Attachments>,
     mut service: ResMut<ServiceCommands>,
     mut tim: ResMut<TimRequests>,
-    mut pd: ResMut<ProcessData>,
+    mut values: ResMut<LinkValues>,
     mut warned: ResMut<WarnedOnce>,
 ) {
     let Some(mut bus) = bus else { return };
@@ -245,8 +287,8 @@ fn drain_service_commands(
                 keep.push(cmd);
                 continue;
             }
+            let value = num(&props, "value").unwrap_or(cmd.value);
             if let Some(request) = props.get("request").cloned() {
-                let value = num(&props, "value").unwrap_or(cmd.value);
                 let Some(att) = attachments.0.iter().find(|a| a.slave_ns == ns) else {
                     if warned.0.insert(format!("{ns}:request:{request}")) {
                         warn!("gearbox-services: `{ns}` requested `{request}` but is not attached");
@@ -275,15 +317,17 @@ fn drain_service_commands(
                 }
                 continue;
             }
-            if let Some(ddi) = props.get("ddi").cloned() {
-                let value = num(&props, "value").unwrap_or(cmd.value);
-                if machine.elements.iter().any(|e| e.number == cmd.element) {
-                    pd.set(&machine.id, cmd.element, &ddi, value);
-                } else if warned.0.insert(format!("{ns}:element:{}", cmd.element)) {
-                    warn!(
-                        "gearbox-services: `{ns}` has no element {}; process data dropped",
-                        cmd.element
-                    );
+            if let Some(link) = props.get("link").cloned() {
+                let Some(name) = props.get("name").cloned() else {
+                    if warned.0.insert(format!("{ns}:link:noname")) {
+                        warn!("gearbox-services: `{ns}`: a link value needs `name`");
+                    }
+                    continue;
+                };
+                if machine.links.get(&link).is_some() {
+                    values.set(&machine.id, &link, &name, value);
+                } else if warned.0.insert(format!("{ns}:link:{link}")) {
+                    warn!("gearbox-services: `{ns}` has no link `{link}`; value dropped");
                 }
                 continue;
             }
@@ -303,10 +347,30 @@ fn drain_service_commands(
             if !props.contains_key("value") {
                 props.insert("value".to_string(), cmd.value.to_string());
             }
+            // The link this controller's joint moves takes the same values,
+            // so `cmd` and `set-value` agree on what the link is doing.
+            for prim in controller_joints(machine, controller) {
+                let Some(link) = moved_link(&machine.links, prim) else {
+                    continue;
+                };
+                for (k, v) in &props {
+                    if let Some(v) = numeric(v) {
+                        values.set(&machine.id, &link.name, k, v);
+                    }
+                }
+            }
             let key = ControllerKey::new(scene_root, &machine.id, &instance);
             service.0.entry(key).or_default().extend(props);
         }
         agent.commands = keep;
+    }
+}
+
+fn numeric(v: &str) -> Option<f64> {
+    match v {
+        "true" | "on" | "yes" => Some(1.0),
+        "false" | "off" | "no" => Some(0.0),
+        _ => v.parse().ok(),
     }
 }
 
@@ -406,6 +470,13 @@ fn controller_joints<'a>(machine: &'a MachineInstanceSpec, c: &'a ControllerSpec
     }
 }
 
+/// The link a joint moves: the tree link connected through that joint prim.
+fn moved_link<'a>(tree: &'a LinkTree, joint_prim: &str) -> Option<&'a LinkSpec> {
+    tree.links
+        .iter()
+        .find(|l| l.joint_prim.as_deref() == Some(joint_prim))
+}
+
 /// The slave-side coupler binding this machine's joints to its master's
 /// PTO and valves, when attached.
 fn coupler_bindings(machine: &MachineInstanceSpec) -> Option<(Option<String>, Vec<String>)> {
@@ -420,6 +491,7 @@ fn apply_service_controllers(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
     service: Res<ServiceCommands>,
+    values: Res<LinkValues>,
     inputs: Res<MasterInputs>,
     active: Res<usd_bevy::physics::PhysicsActive>,
     mut physics: ResMut<PhysicsWorld>,
@@ -435,11 +507,7 @@ fn apply_service_controllers(
         let Some(scene_root) = machine.scene_root else {
             continue;
         };
-        if !keys
-            .0
-            .values()
-            .any(|k| k.scene_root == scene_root && k.machine_id == machine.id)
-        {
+        if !has_agent(&keys, machine) {
             continue;
         }
         let master = inputs.0.get(&machine.id);
@@ -453,8 +521,6 @@ fn apply_service_controllers(
                 continue;
             }
             let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
-            let empty = HashMap::new();
-            let props = service.0.get(&key).unwrap_or(&empty);
             let joint_prims = controller_joints(machine, controller);
             if joint_prims.is_empty() {
                 if warned
@@ -472,6 +538,16 @@ fn apply_service_controllers(
                 let Some(j) = resolve_joint(scene_root, prim, &joints, &parents, &physics) else {
                     continue;
                 };
+                // Controller props, overlaid by the values of the link this
+                // joint moves, so a link addressed from the tree moves.
+                let mut props: HashMap<String, String> =
+                    service.0.get(&key).cloned().unwrap_or_default();
+                if let Some(link) = moved_link(&machine.links, prim) {
+                    for (name, value) in values.of_link(&machine.id, &link.name) {
+                        props.insert(name, value.to_string());
+                    }
+                }
+                let props = &props;
                 let ok = match controller.controller_type.as_str() {
                     "builtin:joint_position" | "builtin:hitch" => {
                         let position = num(props, "position")
@@ -490,8 +566,6 @@ fn apply_service_controllers(
                         })
                     }
                     "builtin:joint_velocity" => {
-                        // A joint bound to the master's PTO turns with it
-                        // unless a velocity was commanded directly.
                         let bound = bound_pto.as_deref() == Some(prim);
                         let vel = match (num(props, "velocity"), bound, master) {
                             (Some(v), _, _) => v,
@@ -636,40 +710,27 @@ fn auto_trailer_steer(
     Some((diff + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI)
 }
 
-/// Section and rate control over the element tree (`TOOLS_SPEC.md` §7.4):
+fn element_kind(link: &LinkSpec) -> Option<&str> {
+    link.element.as_ref().map(|e| e.kind.as_str())
+}
+
+/// Section and rate control over the link tree (`TOOLS_SPEC.md` §7.4):
 /// work state follows the setpoint while the master moves, totals and tank
-/// content follow speed × active width.
+/// content follow speed × active width. Every value lives on a link.
 fn apply_process_controllers(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
     inputs: Res<MasterInputs>,
     active: Res<usd_bevy::physics::PhysicsActive>,
     time: Res<Time>,
-    mut pd: ResMut<ProcessData>,
-    mut seeded: ResMut<SeededProcessData>,
+    mut values: ResMut<LinkValues>,
 ) {
+    if !active.0 {
+        return;
+    }
     let dt = time.delta_secs_f64();
     for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        if !keys
-            .0
-            .values()
-            .any(|k| k.scene_root == scene_root && k.machine_id == machine.id)
-        {
-            continue;
-        }
-        if seeded.0.insert(machine.id.clone()) {
-            for e in &machine.elements {
-                for (ddi, value) in &e.process_data {
-                    if pd.get(&machine.id, e.number, ddi).is_none() {
-                        pd.set(&machine.id, e.number, ddi, *value);
-                    }
-                }
-            }
-        }
-        if !active.0 {
+        if !has_agent(&keys, machine) {
             continue;
         }
         let speed = inputs
@@ -678,98 +739,97 @@ fn apply_process_controllers(
             .map(|m| m.ground_speed_mps)
             .unwrap_or(0.0);
         let id = machine.id.as_str();
+        let tree = &machine.links;
         for controller in &machine.controllers {
             if !controller.enabled || !PROCESS_TYPES.contains(&controller.controller_type.as_str())
             {
                 continue;
             }
-            let target = controller
-                .target
-                .as_deref()
-                .and_then(|t| machine.elements.iter().find(|e| e.prim_path == t));
+            let target = controller.target.as_deref().and_then(|t| tree.by_prim(t));
             match controller.controller_type.as_str() {
                 "builtin:section_control" => {
-                    let function =
-                        target
-                            .filter(|e| e.kind == ElementKind::Function)
-                            .or_else(|| {
-                                machine
-                                    .elements
-                                    .iter()
-                                    .find(|e| e.kind == ElementKind::Function)
-                            });
+                    let function = target
+                        .filter(|l| element_kind(l) == Some("function"))
+                        .or_else(|| {
+                            tree.links
+                                .iter()
+                                .find(|l| element_kind(l) == Some("function"))
+                        });
                     let Some(function) = function else { continue };
-                    let sections: Vec<_> = machine
-                        .elements
+                    let sections: Vec<&LinkSpec> = tree
+                        .links
                         .iter()
-                        .filter(|e| {
-                            e.kind == ElementKind::Section && e.parent == Some(function.number)
+                        .filter(|l| {
+                            element_kind(l) == Some("section")
+                                && l.parent.as_deref() == Some(function.name.as_str())
                         })
                         .collect();
-                    let control_on = pd
-                        .get(id, function.number, "SectionControlState")
+                    let control_on = values
+                        .get(id, &function.name, "SectionControlState")
                         .unwrap_or(1.0)
                         > 0.5;
                     let mut active_width = 0.0;
                     for s in &sections {
-                        let setpoint = pd.get(id, s.number, "SetpointWorkState").unwrap_or(0.0);
+                        let setpoint = values.get(id, &s.name, "SetpointWorkState").unwrap_or(0.0);
                         let working = control_on && setpoint > 0.5 && speed > 0.05;
-                        pd.set(id, s.number, "ActualWorkState", working as u8 as f64);
+                        values.set(id, &s.name, "ActualWorkState", working as u8 as f64);
                         if working {
                             active_width +=
-                                pd.get(id, s.number, "ActualWorkingWidth").unwrap_or(0.0);
+                                values.get(id, &s.name, "ActualWorkingWidth").unwrap_or(0.0);
                         }
                     }
                     if !sections.is_empty() {
-                        pd.set(
+                        values.set(
                             id,
-                            function.number,
+                            &function.name,
                             "ActualWorkState",
                             (active_width > 0.0) as u8 as f64,
                         );
                     }
-                    let area = pd.get(id, function.number, "TotalArea").unwrap_or(0.0);
-                    pd.set(
+                    let area = values.get(id, &function.name, "TotalArea").unwrap_or(0.0);
+                    values.set(
                         id,
-                        function.number,
+                        &function.name,
                         "TotalArea",
                         area + speed * active_width * dt / 10_000.0,
                     );
-                    let dist = pd
-                        .get(id, function.number, "EffectiveTotalDistance")
+                    let dist = values
+                        .get(id, &function.name, "EffectiveTotalDistance")
                         .unwrap_or(0.0);
-                    pd.set(
+                    values.set(
                         id,
-                        function.number,
+                        &function.name,
                         "EffectiveTotalDistance",
                         dist + if active_width > 0.0 { speed * dt } else { 0.0 },
                     );
                 }
                 "builtin:rate_control" => {
                     let bin = target
-                        .filter(|e| e.kind == ElementKind::Bin)
-                        .or_else(|| machine.elements.iter().find(|e| e.kind == ElementKind::Bin));
+                        .filter(|l| element_kind(l) == Some("bin"))
+                        .or_else(|| tree.links.iter().find(|l| element_kind(l) == Some("bin")));
                     let Some(bin) = bin else { continue };
-                    let setpoint = pd
-                        .get(id, bin.number, "SetpointVolumePerAreaApplicationRate")
+                    let setpoint = values
+                        .get(id, &bin.name, "SetpointVolumePerAreaApplicationRate")
                         .unwrap_or(0.0);
-                    let active_width: f64 = machine
-                        .elements
+                    let active_width: f64 = tree
+                        .links
                         .iter()
-                        .filter(|e| e.kind == ElementKind::Section)
-                        .filter(|e| pd.get(id, e.number, "ActualWorkState").unwrap_or(0.0) > 0.5)
-                        .map(|e| pd.get(id, e.number, "ActualWorkingWidth").unwrap_or(0.0))
+                        .filter(|l| element_kind(l) == Some("section"))
+                        .filter(|l| values.get(id, &l.name, "ActualWorkState").unwrap_or(0.0) > 0.5)
+                        .map(|l| values.get(id, &l.name, "ActualWorkingWidth").unwrap_or(0.0))
                         .sum();
-                    let content = pd.get(id, bin.number, "ActualVolumeContent").unwrap_or(0.0);
+                    let content = values
+                        .get(id, &bin.name, "ActualVolumeContent")
+                        .unwrap_or(0.0);
                     let applying = active_width > 0.0 && content > 0.0 && speed > 0.05;
                     let actual = if applying { setpoint } else { 0.0 };
-                    pd.set(id, bin.number, "ActualVolumePerAreaApplicationRate", actual);
+                    values.set(id, &bin.name, "ActualVolumePerAreaApplicationRate", actual);
                     if applying {
                         // l/ha × ha/s → litres drained this step.
                         let drained = actual * speed * active_width * dt / 10_000.0;
-                        pd.set(
+                        values.set(
                             id,
-                            bin.number,
+                            &bin.name,
                             "ActualVolumeContent",
                             (content - drained).max(0.0),
                         );

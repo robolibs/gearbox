@@ -272,12 +272,6 @@ impl MachineClient<'_> {
         )
     }
 
-    /// ISO 11783-10 device elements, device first.
-    pub fn elements(&self) -> agentio::Result<Vec<ElementRecord>> {
-        self.client
-            .query(&self.topic(topics::MACHINE_ELEMENTS), &Ping::default())
-    }
-
     /// Attachments below this machine, depth-first.
     pub fn tools(&self) -> agentio::Result<Vec<AttachmentRecord>> {
         self.client

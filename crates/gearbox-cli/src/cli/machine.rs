@@ -114,19 +114,10 @@ enum Cmd {
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
-    /// ISO 11783-10 device elements with their process data
-    Elements { ns: Option<String> },
-    /// Write the machine's device description (DDOP) as ISOXML
-    Ddop {
-        ns: Option<String>,
-        /// File to write (default: stdout)
-        #[arg(long, short)]
-        out: Option<String>,
-    },
-    /// Set one process data value: ELEMENT DDI VALUE (e.g. 4 SetpointWorkState 1)
-    Pd {
-        element: u32,
-        ddi: String,
+    /// Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8)
+    SetValue {
+        link: String,
+        name: String,
         value: f64,
         #[arg(long)]
         ns: Option<String>,
@@ -211,15 +202,13 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             rate,
             count,
         } => tf(ctx, ns, link, rate, count),
-        Cmd::Elements { ns } => elements(ctx, ns),
-        Cmd::Ddop { ns, out } => ddop(ctx, ns, out),
-        Cmd::Pd {
-            element,
-            ddi,
+        Cmd::SetValue {
+            link,
+            name,
             value,
             ns,
             take,
-        } => process_data(ctx, ns, element, &ddi, value, take),
+        } => set_value(ctx, ns, &link, &name, value, take),
         Cmd::Tools { cmd } => tools(ctx, cmd),
     }
 }
@@ -815,15 +804,24 @@ fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
                     format!("({:+.2}, {:+.2}, {:+.2})", r.x, r.y, r.z)
                 }
             };
+            let values = |r: &gearbox_api::LinkRecord| {
+                r.values()
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
             if flat {
-                let mut t = Table::new(&["LINK", "ROLE", "PARENT", "OFFSET", "PRIM"]);
+                let mut t = Table::new(&["LINK", "ROLE", "ELEMENT", "PARENT", "OFFSET", "VALUES", "PRIM"]);
                 for r in &records {
                     let p = r.props();
                     t.row(vec![
                         r.name(),
                         r.role(),
+                        r.element().unwrap_or_default(),
                         r.parent().unwrap_or_default(),
                         offset(r),
+                        values(r),
                         p.get("prim").unwrap_or_default(),
                     ]);
                 }
@@ -847,9 +845,14 @@ fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
                 records: &[gearbox_api::LinkRecord],
                 children: &[Vec<usize>],
                 offset: &dyn Fn(&gearbox_api::LinkRecord) -> String,
+                values: &dyn Fn(&gearbox_api::LinkRecord) -> String,
             ) {
                 let r = &records[i];
                 let p = r.props();
+                let element = r
+                    .element()
+                    .map(|e| format!(" {e}"))
+                    .unwrap_or_default();
                 let coupling = p
                     .get("coupling")
                     .map(|c| format!("  coupling {c}"))
@@ -858,21 +861,29 @@ fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
                     .get("joint")
                     .map(|j| format!("  via {}", j.rsplit('/').next().unwrap_or(&j)))
                     .unwrap_or_default();
+                let vals = values(r);
+                let vals = if vals.is_empty() {
+                    vals
+                } else {
+                    format!("  {vals}")
+                };
                 println!(
-                    "{}{}  [{}]  {}{}{}",
+                    "{}{}  [{}{}]  {}{}{}{}",
                     "  ".repeat(depth),
                     r.name(),
                     r.role(),
+                    element,
                     offset(r),
                     via,
-                    coupling
+                    coupling,
+                    vals
                 );
                 for &c in &children[i] {
-                    walk(c, depth + 1, records, children, offset);
+                    walk(c, depth + 1, records, children, offset, values);
                 }
             }
             for root in roots {
-                walk(root, 0, &records, &children, &offset);
+                walk(root, 0, &records, &children, &offset, &values);
             }
         },
     );
@@ -1134,103 +1145,22 @@ fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Resul
     Ok(res.session)
 }
 
-fn elements(ctx: &Ctx, ns: Option<String>) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
-    let records = ctx.client()?.machine(&ns).elements()?;
-    ctx.emit(
-        || {
-            json!(
-                records
-                    .iter()
-                    .filter_map(|r| wire_json::env_to_json(&pack(r)).ok())
-                    .collect::<Vec<_>>()
-            )
-        },
-        || {
-            if records.is_empty() {
-                println!("`{ns}` has no device elements");
-                return;
-            }
-            let mut children: Vec<Vec<usize>> = vec![Vec::new(); records.len()];
-            let mut roots = Vec::new();
-            for (i, r) in records.iter().enumerate() {
-                match records.iter().position(|p| p.number == r.parent) {
-                    Some(p) if r.parent != gearbox_api::ElementRecord::NO_PARENT && p != i => {
-                        children[p].push(i)
-                    }
-                    _ => roots.push(i),
-                }
-            }
-            fn walk(
-                i: usize,
-                depth: usize,
-                records: &[gearbox_api::ElementRecord],
-                children: &[Vec<usize>],
-            ) {
-                let r = &records[i];
-                let pd: Vec<String> = r
-                    .process_data()
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect();
-                println!(
-                    "{}#{} {} [{}] ({:+.2}, {:+.2}, {:+.2}) {}",
-                    "  ".repeat(depth),
-                    r.number,
-                    r.designator(),
-                    r.kind(),
-                    r.x,
-                    r.y,
-                    r.z,
-                    pd.join(" ")
-                );
-                for &c in &children[i] {
-                    walk(c, depth + 1, records, children);
-                }
-            }
-            for root in roots {
-                walk(root, 0, &records, &children);
-            }
-        },
-    );
-    Ok(())
-}
-
-fn ddop(ctx: &Ctx, ns: Option<String>, out: Option<String>) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
-    let client = ctx.client()?;
-    let mc = client.machine(&ns);
-    let info = mc.info()?;
-    let records = mc.elements()?;
-    let xml = super::ddop::render(&ns, &info, &records);
-    match out {
-        Some(path) => {
-            std::fs::write(&path, &xml)?;
-            ctx.done(
-                &path,
-                &format!(
-                    "wrote DDOP of `{ns}` ({} elements) to {path}",
-                    records.len()
-                ),
-                || json!({ "namespace": ns, "elements": records.len(), "path": path }),
-            );
-        }
-        None => print!("{xml}"),
-    }
-    Ok(())
-}
-
-fn process_data(
+fn set_value(
     ctx: &Ctx,
     ns: Option<String>,
-    element: u32,
-    ddi: &str,
+    link: &str,
+    name: &str,
     value: f64,
     take: bool,
 ) -> Result<()> {
     let ns = ctx.machine_ns(ns)?;
     let client = ctx.client()?;
     let mc = client.machine(&ns);
+    if !mc.links()?.iter().any(|r| r.name() == link) {
+        return Err(CliError::usage(format!(
+            "machine `{ns}` has no link `{link}`; see `gearbox machine links {ns}`"
+        )));
+    }
     let res = mc.claim(DEFAULT_HOLD_MS, take)?;
     if res.code == code::BUSY {
         return Err(CliError::busy(format!(
@@ -1241,17 +1171,17 @@ fn process_data(
     let cmd = ControllerCommand {
         session: res.session,
         value,
-        element,
+        element: 0,
         _pad: 0,
-        props: Props::from_pairs(&[("ddi", ddi)]).into_bytes(),
+        props: Props::from_pairs(&[("link", link), ("name", name)]).into_bytes(),
     };
     let status = mc.command(&cmd)?;
     let _ = mc.release(res.session);
-    check(status, "process data")?;
+    check(status, "set value")?;
     ctx.done(
         &ns,
-        &format!("`{ns}` element {element} {ddi} = {value}"),
-        || json!({ "namespace": ns, "element": element, "ddi": ddi, "value": value }),
+        &format!("`{ns}` {link}.{name} = {value}"),
+        || json!({ "namespace": ns, "link": link, "name": name, "value": value }),
     );
     Ok(())
 }

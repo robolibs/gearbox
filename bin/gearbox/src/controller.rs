@@ -256,8 +256,6 @@ pub struct MachineInstanceSpec {
     pub links: crate::links::LinkTree,
     /// Master functions this machine grants to attached slaves (`gearbox:machine:grants`).
     pub grants: Vec<String>,
-    /// ISO 11783-10 device element tree (TOOLS_SPEC §7.3), device first.
-    pub elements: Vec<crate::elements::ElementSpec>,
 }
 
 /// One `GearboxControllerAPI:<instance>` application.
@@ -346,15 +344,9 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
         );
         let body = read_rel_first(&stage, &prim, "gearbox:machine:body")
             .map(|p| rebase_asset_root_target(machine_prim, &p));
-        let mut links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
-        let kind = read_token(&stage, &prim, "gearbox:machine:kind");
-        let (elements, element_errors, element_warnings) =
-            crate::elements::discover_elements(&stage, &prim, kind.as_deref(), &prims, &links);
-        links.errors.extend(element_errors);
-        links.warnings.extend(element_warnings);
+        let links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
         machines.push(MachineInstanceSpec {
             links,
-            elements,
             grants: read_token_array(&stage, &prim, "gearbox:machine:grants"),
             scene_root: None,
             asset_label: String::new(),
@@ -569,7 +561,6 @@ fn append_isaac_compat_machines(
             id: id.clone(),
             links: Default::default(),
             grants: Vec::new(),
-            elements: Vec::new(),
             kind: Some("isaac_articulation".to_string()),
             interface_version: Some("isaac_compat:v0".to_string()),
             id_policy: "prim_path".to_string(),
@@ -3781,25 +3772,6 @@ fn sync_machine_agents(
         config.kind = machine.kind.clone().unwrap_or_default();
         config.links = link_descs(&machine.links);
         config.links_derived = machine.links.derived;
-        config.elements = machine
-            .elements
-            .iter()
-            .map(|e| gearbox_api::ElementDesc {
-                number: e.number,
-                parent: e.parent,
-                kind: e.kind.as_str().to_string(),
-                iso_type: e.kind.iso_type(),
-                designator: e.designator.clone(),
-                prim: e.prim_path.clone(),
-                offset: [
-                    e.offset_base_link.x,
-                    e.offset_base_link.y,
-                    e.offset_base_link.z,
-                ],
-                connector_type: e.connector_type,
-                process_data: e.process_data.clone(),
-            })
-            .collect();
         config.ephemeral = host.ephemeral;
         config.allow = host.allow.clone();
         config.allow_any = host.allow_any;
@@ -3956,7 +3928,7 @@ fn publish_machine_controller_states(
     physics: Res<usd_bevy::physics::PhysicsWorld>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
-    process_data: Res<crate::services::ProcessData>,
+    link_values: Res<crate::services::LinkValues>,
     service: Res<crate::services::ServiceCommands>,
     attachments: Res<crate::attach::Attachments>,
 ) {
@@ -3986,8 +3958,8 @@ fn publish_machine_controller_states(
         }
         // Process data of this machine and the commanded state of every
         // attached slave's service controllers (TOOLS_SPEC §5.1, §7.4).
-        for (element, ddi, value) in process_data.of_machine(&machine.id) {
-            props.set(&format!("pd.{element}.{ddi}"), &format!("{value}"));
+        for (link, key, value) in link_values.of_machine(&machine.id) {
+            props.set(&format!("link.{link}.{key}"), &format!("{value}"));
         }
         for a in attachments.0.iter().filter(|a| a.master_ns == ns) {
             let Some(slave_key) = keys.0.get(&a.slave_ns) else {
@@ -4116,6 +4088,10 @@ pub(crate) fn link_descs(tree: &crate::links::LinkTree) -> Vec<gearbox_api::Link
                     .coupling
                     .as_ref()
                     .map(|c| format!("{}|{}|{}", c.side.as_str(), c.kind, c.name)),
+                element: l.element.as_ref().map(|e| e.kind.clone()),
+                number: l.element.as_ref().and_then(|e| e.number),
+                designator: l.element.as_ref().map(|e| e.designator.clone()),
+                values: l.values.clone(),
             }
         })
         .collect()

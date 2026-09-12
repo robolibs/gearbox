@@ -26,7 +26,6 @@ pub const MACHINE_TF: &str = "tf";
 pub const MACHINE_TOOLS: &str = "tools";
 pub const MACHINE_TOOLS_ATTACH: &str = "tools/attach";
 pub const MACHINE_TOOLS_DETACH: &str = "tools/detach";
-pub const MACHINE_ELEMENTS: &str = "elements";
 
 /// Topics hosted by a machine's own agent, unique per namespace so the
 /// host directory holds one owner per topic.

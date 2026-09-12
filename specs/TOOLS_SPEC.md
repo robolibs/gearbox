@@ -347,92 +347,71 @@ controlled slave and authors controllers for those:
 A tandem trailer authors a `hitch` coupling on its rear as well. Nesting
 depth is not limited by this spec; the loop rule in §3.2 is the only guard.
 
-### 7.3 Implements as a DDOP tree
+### 7.3 Working parts as links of the tree
 
-A controlled implement MUST describe its working parts as a device element
-tree so a DDOP can be generated from it and a DDOP can be turned into it.
-Elements are prims under the slave's machine prim carrying
-`GearboxElementAPI`. The parent element is the nearest ancestor element
-prim, exactly as ISO 11783-10 stores a parent object id per element.
+A controlled implement MUST describe its working parts as links of its link
+tree (`CONTROLLER_SPEC.md` §7). A working part is an ordinary link that also
+carries `GearboxElementAPI`, which names what kind of part it is; the parent
+part is the nearest ancestor link. One tree answers every question: where a
+part is (`/tf`), what it is (`element`), what it holds (`value.<Name>`) and
+how to move it (`set-value`).
 
 ```usda
 def Xform "boom" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxElementAPI"])
 {
+    token gearbox:link:role = "tool"
     token gearbox:element:type = "function"
-    int gearbox:element:number = 2
     string gearbox:element:designator = "Boom"
-    float gearbox:pd:ActualWorkingWidth = 24.0
+    float gearbox:value:ActualWorkingWidth = 24.0
+    float gearbox:value:position = 0.0
 
-    def Xform "section_0" (prepend apiSchemas = ["GearboxElementAPI"])
+    def Xform "section_0" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxElementAPI"])
     {
         token gearbox:element:type = "section"
-        int gearbox:element:number = 4
-        float gearbox:pd:ActualWorkingWidth = 3.0
+        float gearbox:value:ActualWorkingWidth = 3.0
         double3 xformOp:translate = (-2.5, 10.5, 0.0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 }
-def Xform "tank" (prepend apiSchemas = ["GearboxElementAPI"])
+def Xform "tank" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxElementAPI"])
 {
     token gearbox:element:type = "bin"
-    int gearbox:element:number = 3
-    float gearbox:pd:MaximumVolumeContent = 4000.0
-    float gearbox:pd:ActualVolumeContent = 4000.0
+    float gearbox:value:MaximumVolumeContent = 4000.0
+    float gearbox:value:ActualVolumeContent = 4000.0
 }
 ```
 
 | Property | Type | Status | Notes |
 |---|---|---|---|
-| `gearbox:element:type` | token | MUST | `device`, `function`, `bin`, `section`, `unit`, `connector`, `navigation`. DDOP types 1..7. |
-| `gearbox:element:number` | int | MUST | Device element number, unique in the machine. Process data is addressed by it. |
+| `gearbox:element:type` | token | MUST | `device`, `function`, `bin`, `section`, `unit`, `connector`, `navigation`. |
+| `gearbox:element:number` | int | optional | A stable number for tools that want one; unique in the machine when given. |
 | `gearbox:element:designator` | string | SHOULD | prim name | Human label. |
-| `gearbox:pd:<DdiName>` | float or int | optional | One attribute per DDI the element exposes, named by the AgIsoStack `DataDescriptionIndex` enum entry. Settable ones become commands. |
+| `gearbox:value:<Name>` | float or int | optional | One named value per attribute. Every value is settable; controllers read the ones they know. |
 
-Derived, never authored:
+A prim with `GearboxElementAPI` but no `GearboxLinkAPI` is still made a link
+(role `tool`) so it has a frame in `/tf`. The tree constraints are the ones
+of §7 of `CONTROLLER_SPEC.md`; element kinds add none.
 
-- The `device` element is the machine prim itself. Its designator is
-  `gearbox:machine:kind` unless a `GearboxElementAPI` is applied there.
-- The `connector` element is every `coupler` coupling.
-- The `navigation` element is the link named `gps_link` or `gnss_link` if
-  one exists.
-- `DeviceElementOffsetX/Y/Z` of every element, connectors included, is its
-  prim origin in `base_link`, converted to the ISO 11783-10 device frame.
+### 7.4 Values on links, and the controllers that read them
 
-ISO 11783-10 measures offsets from the **device reference point** (DRP) in
-a frame with x forward, **y right, z down**. `base_link` is x forward, y
-left, z up, so the export is `(x, y, z)_iso = (x, −y, −z)_base_link` in
-millimetres. The standard fixes the DRP at the rear-axle centre for a
-tractor and the front-axle centre for a wheeled implement, free otherwise.
-`base_link` SHOULD be placed there. When it is not, author
-`double3 gearbox:machine:drpOffset` in `base_link` metres and the export
-subtracts it.
+Every link has a set of named values. They start from `gearbox:value:*` and
+change through `/cmd` with `link` and `name` props:
 
-Element tree constraints, from ISO 11783-10:
-
-- exactly one `device`, and it is the root;
-- `connector` and `navigation` are direct children of `device`;
-- `section` and `unit` hang under `function` or `device`;
-- `bin` hangs under `device` or `function`;
-- an element prim is not required to be a link, but if it is a link the link
-  tree and the element tree MUST agree on the parent.
-
-### 7.4 Process data controllers
-
-Tool controllers speak process data, not twists. A controller with
-`commandInterface = "process_data"` accepts:
-
-```json
-{ "element": 4, "ddi": "SetpointWorkState", "value": 1, "session_id": "..." }
+```
+gearbox machine set-value boom position 0.8 --ns sprayer
 ```
 
-and publishes `{ "element", "ddi", "value" }` on its state topic for every
-DDI that changes. This is one bridge away from a task controller: the DDI
-numbers and element numbers are the DDOP's own.
+Two kinds of controller read them:
+
+- A **service controller** (§6.2) that drives a joint overlays the values of
+  the link that joint moves onto its own command props. Setting `position`
+  on the boom link moves the boom; nobody has to know the controller's name.
+- A **work controller** acts on links by element kind:
 
 | Controller type | Acts on | Behaviour |
 |---|---|---|
-| `builtin:section_control` | `section` elements | `SetpointWorkState` per section sets `ActualWorkState`; `SectionControlState` on the parent function; totals `TotalArea` from speed × active width. |
-| `builtin:rate_control` | `bin` element | `SetpointVolumePerAreaApplicationRate` → `ActualVolumePerAreaApplicationRate`; drains `ActualVolumeContent` from speed × active width × rate. |
+| `builtin:section_control` | `section` links under a `function` link | `SetpointWorkState` per section sets `ActualWorkState`; `SectionControlState` on the parent function; totals `TotalArea` from speed × active width. |
+| `builtin:rate_control` | a `bin` link | `SetpointVolumePerAreaApplicationRate` → `ActualVolumePerAreaApplicationRate`; drains `ActualVolumeContent` from speed × active width × rate. |
 | `builtin:joint_position` | a joint | folding, lifting, unloading. |
 | `builtin:joint_velocity` | a joint | augers, rotors, conveyors. Coupled to the master's PTO when a `pto` service is bound. |
 
@@ -440,23 +419,8 @@ Work state and rate need ground speed. They read it from §5.2, so an
 implement that is not attached, or is attached to a master that publishes no
 speed, reports `ActualWorkState = 0`.
 
-### 7.5 DDOP round-trip
-
-| DDOP | USD |
-|---|---|
-| `Device` designator, structure label | machine prim, `gearbox:machine:kind`, `gearbox:machine:interfaceVersion` |
-| `DeviceElement` type, number, designator, parent | `gearbox:element:*` on a prim, parent from prim hierarchy |
-| `Connector` element + `ConnectorType` (DDI 157) | `coupler` coupling, `gearbox:coupling:type` |
-| `DeviceElementOffsetX/Y/Z` (DDI 134..136) | prim origin in `base_link`, minus `drpOffset`, y and z negated, metres to millimetres |
-| `DeviceProcessData` DDI, settable, trigger | `gearbox:pd:<Ddi>`; settable when a controller acts on it |
-| `DeviceProperty` DDI + value | `gearbox:pd:<Ddi>` on an element with no controller |
-
-Importing a DDOP creates one `Xform` per element, positioned by its offsets,
-under the parent element's prim, with a placeholder box visual sized by
-`ActualWorkingWidth` where present. Exporting walks the prims and emits
-AgIsoStack `add_device_element` / `add_device_process_data` /
-`add_device_property` calls in tree order. `AgIsoDDOPGenerator` can then load
-the binary to inspect it.
+Values are published twice: on `/links` as `value.<Name>` props of each
+link, and on the machine's `/state` as `link.<link>.<Name>`.
 
 ## 8. Validation
 

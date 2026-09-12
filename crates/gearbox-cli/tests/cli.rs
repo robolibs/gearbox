@@ -252,17 +252,34 @@ fn attach_and_detach_through_the_master() {
 }
 
 #[test]
-fn elements_and_ddop_of_a_fake_machine() {
+fn scene_tree_and_link_values_of_a_fake_machine() {
     let env = Env::start(&["oxbo"]);
-    let (code, out, err) = env.gearbox(&["machine", "elements", "oxbo"]);
-    assert_eq!(code, 0, "{err}");
-    assert!(out.contains("no device elements"), "{out}");
-    let (code, out, err) = env.gearbox(&["machine", "ddop", "oxbo"]);
+    let (code, out, err) = env.gearbox(&["machine", "links", "oxbo", "--flat"]);
     assert_eq!(code, 0, "{err}");
     assert!(
-        out.contains("<DVC ") && out.contains("</ISO11783_TaskData>"),
+        out.contains("ELEMENT") && out.contains("base_link"),
         "{out}"
     );
+    let (code, _, err) = env.gearbox(&[
+        "machine",
+        "set-value",
+        "nope",
+        "position",
+        "1",
+        "--ns",
+        "oxbo",
+    ]);
+    assert_eq!(code, 2, "unknown link is a usage error: {err}");
+    let (code, _, err) = env.gearbox(&[
+        "machine",
+        "set-value",
+        "base_link",
+        "position",
+        "1",
+        "--ns",
+        "oxbo",
+    ]);
+    assert_eq!(code, 0, "{err}");
     let (code, out, err) = env.gearbox(&["scene", "tree"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("oxbo") && out.contains("base_link"), "{out}");
