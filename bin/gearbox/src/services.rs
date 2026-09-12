@@ -442,6 +442,11 @@ const MOTOR_MAX_FORCE: f64 = 50_000.0;
 const VELOCITY_FACTOR: f64 = 200.0;
 const BRAKE_FACTOR: f64 = 400.0;
 const DEFAULT_PTO_RPM: f64 = 540.0;
+const MAX_PTO_RPM: f64 = 1200.0;
+/// A PTO stub weighs a few kilograms; the hitch torque cap would throw the
+/// machine.
+const PTO_MAX_TORQUE: f64 = 150.0;
+const JOINT_VELOCITY_MAX_TORQUE: f64 = 2_000.0;
 const DEFAULT_VALVE_RATE: f64 = 0.5;
 const DEFAULT_TRAILER_STEER_DEG: f64 = 35.0;
 
@@ -582,11 +587,13 @@ fn apply_service_controllers(
                         };
                         with_joint(&mut physics, &j, |g| {
                             g.set_motor_velocity(j.axis, vel, VELOCITY_FACTOR);
-                            g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
+                            g.set_motor_max_force(j.axis, JOINT_VELOCITY_MAX_TORQUE);
                         })
                     }
                     "builtin:pto" => {
-                        let rpm = num(props, "rpm").unwrap_or(DEFAULT_PTO_RPM);
+                        let rpm = num(props, "rpm")
+                            .unwrap_or(DEFAULT_PTO_RPM)
+                            .clamp(0.0, MAX_PTO_RPM);
                         let engaged = flag(props, "engaged").unwrap_or(false);
                         let vel = if engaged {
                             rpm * std::f64::consts::TAU / 60.0
@@ -595,7 +602,7 @@ fn apply_service_controllers(
                         };
                         with_joint(&mut physics, &j, |g| {
                             g.set_motor_velocity(j.axis, vel, VELOCITY_FACTOR);
-                            g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
+                            g.set_motor_max_force(j.axis, PTO_MAX_TORQUE);
                         })
                     }
                     "builtin:hydraulic_valve" => {
@@ -675,7 +682,7 @@ fn apply_service_controllers(
             let vel = m.pto_rad_s();
             with_joint(&mut physics, &j, |g| {
                 g.set_motor_velocity(j.axis, vel, VELOCITY_FACTOR);
-                g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
+                g.set_motor_max_force(j.axis, PTO_MAX_TORQUE);
             });
         }
         for (n, valve_joint) in bound_valves.iter().enumerate() {
@@ -893,7 +900,10 @@ fn feed_master_inputs(
                     state.hitch.insert(c.instance.clone(), position);
                 }
                 "builtin:pto" => {
-                    let rpm = props.and_then(|p| num(p, "rpm")).unwrap_or(DEFAULT_PTO_RPM);
+                    let rpm = props
+                        .and_then(|p| num(p, "rpm"))
+                        .unwrap_or(DEFAULT_PTO_RPM)
+                        .clamp(0.0, MAX_PTO_RPM);
                     let engaged = props.and_then(|p| flag(p, "engaged")).unwrap_or(false);
                     state.pto.insert(c.instance.clone(), (rpm, engaged));
                 }

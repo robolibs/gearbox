@@ -279,20 +279,12 @@ fn draw_machine_panel(
                             let rpm = link_value(&values, machine, link, "rpm").unwrap_or(540.0);
                             let engaged =
                                 link_value(&values, machine, link, "engaged").unwrap_or(0.0) > 0.5;
-                            let max = (rpm * 2.0).max(1200.0);
                             if let Some(l) = link {
                                 pod = pod.with_readout("link", l.name.clone());
                             }
                             pod = pod
-                                .with_toggle_initial("engaged", accent_col, engaged)
-                                .with_slider(
-                                    "rpm",
-                                    clamp(rpm, 0.0, max),
-                                    0.0..=max,
-                                    0,
-                                    " rpm",
-                                    accent_col,
-                                );
+                                .with_readout("rpm", format!("{:.0}", rpm.clamp(0.0, 1200.0)))
+                                .with_toggle_initial("engaged", accent_col, engaged);
                         }
                         "builtin:joint_velocity" => {
                             icon = "arrow_sync";
@@ -508,17 +500,6 @@ fn draw_machine_panel(
                                 block.link,
                                 "engaged",
                                 t.on as u8 as f64,
-                            );
-                        }
-                        if let Some(v) = changed(0) {
-                            set_service_value(
-                                &mut service,
-                                &mut values,
-                                machine,
-                                &block.key,
-                                block.link,
-                                "rpm",
-                                v,
                             );
                         }
                     }
