@@ -716,9 +716,9 @@ pub fn prim_local_matrix(stage: &openusd::Stage, prim: &SdfPath) -> DMat4 {
             ("xformOp:rotateY", Value::Float(a)) => DMat4::from_rotation_y((a as f64).to_radians()),
             ("xformOp:rotateY", Value::Double(a)) => DMat4::from_rotation_y(a.to_radians()),
             ("xformOp:transform", Value::Matrix4d(v)) => {
-                // USD matrices are row-major with the translation in the
-                // last row; glam wants columns.
-                DMat4::from_cols_array(&v).transpose()
+                // A USD row-vector matrix's rows are the images of the
+                // axes, which is exactly glam's column layout.
+                DMat4::from_cols_array(&v)
             }
             _ => continue,
         };
@@ -820,6 +820,24 @@ def Xform "robot" (
         let wheel = tree.get("wheel_left").unwrap();
         assert_eq!(wheel.parent.as_deref(), Some("base_link"));
         assert_eq!(wheel.joint_prim.as_deref(), Some("/robot/Joints/rev_left"));
+    }
+
+    #[test]
+    fn matrix_transform_child_offset() {
+        let links = CHASSIS_AND_WHEEL.replace(
+            "double3 xformOp:translate = (0.5, 0, 1.2)\n            uniform token[] xformOpOrder = [\"xformOp:translate\"]",
+            "matrix4d xformOp:transform:gearbox = ( (0, -1, 0, 0), (1, 0, 0, 0), (0, 0, 1, 0), (-0.216, 0.91, -0.031, 1) )\n            uniform token[] xformOpOrder = [\"xformOp:transform:gearbox\"]",
+        );
+        assert!(links.contains("xformOp:transform:gearbox"));
+        let tree = discover(&machine_with(&links, WHEEL_JOINT));
+        assert!(tree.is_valid(), "{:?}", tree.errors);
+        let imu = tree.get("imu").unwrap();
+        let off = imu.static_offset.expect("static offset");
+        assert!(
+            (off.translation - DVec3::new(-0.216, 0.91, -0.031)).length() < 1e-6,
+            "{:?}",
+            off.translation
+        );
     }
 
     #[test]
