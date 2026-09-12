@@ -86,6 +86,30 @@ pub struct FlyTo {
     pub target_elevation: Option<f32>,
 }
 
+/// The loaded asset the chase camera translates with. Position only: the
+/// camera keeps its yaw and distance and moves by the asset's frame-to-frame
+/// delta, so looking away still works.
+#[derive(Resource, Default, Debug)]
+pub struct FollowTarget {
+    pub entity: Option<Entity>,
+    pub last_pos: Option<Vec3>,
+}
+
+impl FollowTarget {
+    pub fn set(&mut self, entity: Option<Entity>) {
+        self.entity = entity;
+        self.last_pos = None;
+    }
+
+    pub fn toggle(&mut self, entity: Entity) {
+        if self.entity == Some(entity) {
+            self.set(None);
+        } else {
+            self.set(Some(entity));
+        }
+    }
+}
+
 /// Saved camera viewpoints — `Cameras` panel.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct CameraBookmarks {

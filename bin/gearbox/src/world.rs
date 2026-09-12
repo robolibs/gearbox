@@ -412,6 +412,7 @@ fn spawn_world(
             ..default()
         },
         chase,
+        transform_gizmo_bevy::GizmoCamera,
     ));
 }
 
@@ -529,26 +530,14 @@ fn chase_camera_floor(
 fn chase_camera_keys(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    panel: Res<crate::viewer::machine_panel::MachinePanel>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
     let axis =
         |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i8 - keys.pressed(neg) as i8) as f32;
-    // While the Machine pane hands W/A/S/D to a machine the camera keeps
-    // only Q and E.
-    let driving = panel.wasd.is_some();
     // `forward` below points from the focus back to the camera, so W is the
     // negative direction along it.
-    let ahead = if driving {
-        0.0
-    } else {
-        axis(KeyCode::KeyW, KeyCode::KeyS)
-    };
-    let aside = if driving {
-        0.0
-    } else {
-        axis(KeyCode::KeyA, KeyCode::KeyD)
-    };
+    let ahead = axis(KeyCode::KeyW, KeyCode::KeyS);
+    let aside = axis(KeyCode::KeyA, KeyCode::KeyD);
     let up = axis(KeyCode::KeyQ, KeyCode::KeyE);
     if ahead == 0.0 && aside == 0.0 && up == 0.0 {
         return;

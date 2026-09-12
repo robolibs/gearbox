@@ -25,9 +25,11 @@ use crate::viewer::log_panel::LoaderLog;
 use crate::viewer::mara_ui::style;
 use crate::viewer::mara_ui::*;
 use crate::viewer::overlays::DisplayToggles;
+use transform_gizmo_bevy::{GizmoMode, GizmoOptions, GizmoTarget, TransformGizmoPlugin};
+
 use crate::viewer::state::{
-    ActiveStage, CameraBookmark, CameraBookmarks, CameraMount, FlyTo, LoadRequest, LoaderTuning,
-    ReloadRequest, SelectedPrim, StageInfo, UsdStageTime,
+    ActiveStage, CameraBookmark, CameraBookmarks, CameraMount, FlyTo, FollowTarget, LoadRequest,
+    LoaderTuning, ReloadRequest, SelectedPrim, StageInfo, UsdStageTime,
 };
 
 // ─── Ribbon declaration ─────────────────────────────────────────────
@@ -343,7 +345,15 @@ impl Plugin for ViewerUiPlugin {
             .init_resource::<LoaderTuning>()
             .init_resource::<UsdStageTime>()
             .init_resource::<CameraBookmarks>()
+            .init_resource::<FollowTarget>()
+            .add_plugins(TransformGizmoPlugin)
+            .insert_resource(GizmoOptions {
+                gizmo_modes: GizmoMode::all_translate() | GizmoMode::all_rotate(),
+                hotkeys: None,
+                ..default()
+            })
             .add_systems(Startup, open_default_panel)
+            .add_systems(PostUpdate, follow_target)
             .add_systems(
                 Update,
                 (
@@ -499,11 +509,18 @@ fn pick_on_click(
     mut contexts: EguiContexts,
     mut selection: ResMut<Selection>,
     mut active: ResMut<ActiveStage>,
+    gizmo_targets: Query<&GizmoTarget>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
         selection.0 = None;
     }
     if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    if gizmo_targets
+        .iter()
+        .any(|t| t.is_focused() || t.is_active())
+    {
         return;
     }
     if buttons.pressed(MouseButton::Right) {
@@ -643,11 +660,105 @@ fn ray_aabb_world(
     }
 }
 
-fn sync_gizmo_target(_selection: Res<Selection>, _physics: Res<usd_bevy::physics::PhysicsActive>) {
-    // Mara replaces the old transform gizmo stack. The
-    // selection state is still kept for panels, active-stage picking,
-    // and the play-mode ring, but there is no external transform target
-    // component to synchronize anymore.
+/// While physics is paused the selected loaded asset carries the transform
+/// gizmo; play removes it so nothing drags a simulated body.
+fn sync_gizmo_target(
+    mut commands: Commands,
+    selection: Res<Selection>,
+    physics: Res<usd_bevy::physics::PhysicsActive>,
+    targets: Query<Entity, With<GizmoTarget>>,
+    loaded: Query<Entity, With<LoadedAsset>>,
+) {
+    let wanted = if physics.0 {
+        None
+    } else {
+        selection.0.filter(|e| loaded.get(*e).is_ok())
+    };
+    for entity in &targets {
+        if Some(entity) != wanted {
+            commands.entity(entity).remove::<GizmoTarget>();
+        }
+    }
+    if let Some(entity) = wanted
+        && targets.get(entity).is_err()
+    {
+        commands.entity(entity).insert(GizmoTarget::default());
+    }
+}
+
+/// World-space bounding sphere of everything under a loaded asset.
+fn asset_bounds(
+    root: Entity,
+    parents: &Query<&ChildOf>,
+    loaded: &Query<Entity, With<LoadedAsset>>,
+    aabbs: &Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb)>,
+) -> Option<(Vec3, f32)> {
+    let mut wmin = Vec3::splat(f32::INFINITY);
+    let mut wmax = Vec3::splat(f32::NEG_INFINITY);
+    for (e, gt, aabb) in aabbs.iter() {
+        if find_loaded_ancestor(e, parents, loaded) != Some(root) {
+            continue;
+        }
+        let m = gt.to_matrix();
+        let c = Vec3::from(aabb.center);
+        let h = Vec3::from(aabb.half_extents);
+        for sx in [-1.0, 1.0] {
+            for sy in [-1.0, 1.0] {
+                for sz in [-1.0, 1.0] {
+                    let p = m.transform_point3(c + Vec3::new(sx, sy, sz) * h);
+                    wmin = wmin.min(p);
+                    wmax = wmax.max(p);
+                }
+            }
+        }
+    }
+    if !wmin.is_finite() || !wmax.is_finite() {
+        return None;
+    }
+    Some(((wmin + wmax) * 0.5, (wmax - wmin).length() * 0.5))
+}
+
+/// The follow target moves the chase camera by its own frame-to-frame
+/// delta; yaw and distance stay as the user left them.
+fn follow_target(
+    mut follow: ResMut<FollowTarget>,
+    fly: Res<FlyTo>,
+    inventory: Res<ControllerInventory>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    parents: Query<&ChildOf>,
+    transforms: Query<&GlobalTransform>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
+    let Some(root) = follow.entity else {
+        follow.last_pos = None;
+        return;
+    };
+    if fly.remaining > 0.0 {
+        follow.last_pos = None;
+        return;
+    }
+    let body = inventory
+        .machines
+        .iter()
+        .find(|m| m.scene_root == Some(root))
+        .and_then(|m| m.body.as_deref())
+        .and_then(|body| crate::controller::find_prim_entity(root, body, &prims, &parents))
+        .unwrap_or(root);
+    let Ok(gt) = transforms.get(body) else {
+        follow.set(None);
+        return;
+    };
+    let current = gt.translation();
+    if let Some(last) = follow.last_pos {
+        let delta = current - last;
+        if delta.length_squared() > 0.0 {
+            for (mut cam, mut tr) in &mut cameras {
+                cam.focus += delta;
+                apply_rig(&cam, &mut tr);
+            }
+        }
+    }
+    follow.last_pos = Some(current);
 }
 
 /// During play, the gizmo is hidden — so the selection ring is the
@@ -802,10 +913,35 @@ fn rebase_loaded_assets_on_pause(
     }
 }
 
-/// Legacy hook kept in the chain where the old transform gizmo was
-/// gated. Mara does not ship that gizmo, so play mode only affects the
-/// local selection ring now.
-fn gate_gizmo_on_play(_physics: Res<usd_bevy::physics::PhysicsActive>) {}
+/// The gizmo tracks the asset's apparent size: about 80 % of its projected
+/// radius, never below 6 px nor above 200 px.
+fn gate_gizmo_on_play(
+    mut options: ResMut<GizmoOptions>,
+    targets: Query<Entity, With<GizmoTarget>>,
+    parents: Query<&ChildOf>,
+    loaded: Query<Entity, With<LoadedAsset>>,
+    aabbs: Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb)>,
+    cameras: Query<(&GlobalTransform, &Projection), With<ChaseCamera>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    let Some(target) = targets.iter().next() else {
+        return;
+    };
+    let Some((centre, radius)) = asset_bounds(target, &parents, &loaded, &aabbs) else {
+        return;
+    };
+    let Ok((cam_gt, projection)) = cameras.single() else {
+        return;
+    };
+    let fov = match projection {
+        Projection::Perspective(p) => p.fov,
+        _ => 0.8,
+    };
+    let height = windows.single().map(|w| w.height()).unwrap_or(900.0);
+    let dist = (centre - cam_gt.translation()).length().max(0.1);
+    let projected_px = radius / (dist * (fov * 0.5).tan()) * (height * 0.5);
+    options.visuals.gizmo_size = (projected_px * 0.8).clamp(6.0, 200.0);
+}
 
 fn drain_despawn(
     mut commands: Commands,

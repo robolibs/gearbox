@@ -49,3 +49,4 @@ pyo3 = { version = "0.23", optional = true, features = [
     "abi3-py39",
     "extension-module",
 ] }
+transform-gizmo-bevy = "0.11"

@@ -4,7 +4,9 @@
 //! `LinkValues` for services and work controllers). Nothing here is fixed
 //! per machine kind; the widgets follow `gearbox:controller:*:type` and the
 //! link tree's element kinds and values. Hitches share one container, PTOs
-//! another; everything but the machine head and the drive starts folded.
+//! another; everything but the machine head and the drive starts folded. A
+//! gamepad can take a drive controller, and the head offers fly-to and
+//! follow for the camera.
 
 use std::collections::HashSet;
 
@@ -18,10 +20,12 @@ use crate::controller::{
 use crate::links::LinkSpec;
 use crate::services::{LinkValues, ServiceCommands, controller_joints, moved_link};
 use crate::viewer::mara_ui::*;
-use crate::viewer::state::ActiveStage;
+use crate::viewer::state::{ActiveStage, FlyTo, FollowTarget};
 use crate::viewer::ui::{
     RIB_MACHINE, RIBBON_ITEMS, RIBBON_RIGHT, RIBBONS, Selection, button_clicked, pod_response,
 };
+use bevy::ecs::system::SystemParam;
+use bevy_mara::ChaseCamera;
 
 pub struct MachinePanelPlugin;
 
@@ -29,7 +33,7 @@ impl Plugin for MachinePanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MachinePanel>()
             .add_systems(Startup, open_from_env)
-            .add_systems(Update, wasd_drive)
+            .add_systems(Update, gamepad_drive)
             .add_systems(EguiPrimaryContextPass, draw_machine_panel);
     }
 }
@@ -46,8 +50,8 @@ pub struct MachinePanel {
     last_selection: Option<Entity>,
     /// Drive controllers the viewer currently holds.
     holding: HashSet<ControllerKey>,
-    /// The drive controller W/A/S/D steer, if any.
-    pub wasd: Option<ControllerKey>,
+    /// The drive controller the gamepad steers, if any.
+    pub gamepad: Option<ControllerKey>,
     /// Machines whose containers have been folded once.
     folded: HashSet<String>,
 }
@@ -55,9 +59,10 @@ pub struct MachinePanel {
 const DRIVE_TYPES: [&str; 2] = ["builtin:ackermann_cmd_vel", "builtin:diff_drive_cmd_vel"];
 const MAX_SPEED_MPS: f64 = 6.0;
 const MAX_YAW_RPS: f64 = 1.5;
-const WASD_SPEED_MPS: f32 = 2.5;
-const WASD_YAW_RPS: f32 = 0.8;
-const WASD_BOOST: f32 = 2.0;
+const PAD_SPEED_MPS: f32 = 4.0;
+const PAD_YAW_RPS: f32 = 1.0;
+const PAD_DEADZONE: f32 = 0.12;
+const FLY_ELEVATION_RAD: f32 = 0.35;
 
 const GROUP_HITCHES: &str = "hitches";
 const GROUP_PTO: &str = "pto";
@@ -132,35 +137,55 @@ fn group_of(c: &ControllerSpec) -> String {
     }
 }
 
-/// W/A/S/D drive the held controller while the pane's WASD switch is on.
-fn wasd_drive(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut contexts: EguiContexts,
+/// The first connected gamepad drives the held controller while the pane's
+/// switch is on: right trigger forward, left trigger back, left stick
+/// steers, south button stops.
+fn gamepad_drive(
+    gamepads: Query<&Gamepad>,
     panel: Res<MachinePanel>,
     mut ui_drive: ResMut<UiDrive>,
 ) {
-    let Some(key) = panel.wasd.clone() else {
+    let Some(key) = panel.gamepad.clone() else {
         return;
     };
-    if contexts
-        .ctx_mut()
-        .map(|c| c.wants_keyboard_input())
-        .unwrap_or(false)
-    {
+    let Some(pad) = gamepads.iter().next() else {
         return;
-    }
-    let axis =
-        |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i8 - keys.pressed(neg) as i8) as f32;
-    let boost = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
-        WASD_BOOST
+    };
+    let dead = |v: f32| if v.abs() < PAD_DEADZONE { 0.0 } else { v };
+    let throttle = dead(pad.get(GamepadButton::RightTrigger2).unwrap_or(0.0))
+        - dead(pad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0));
+    let stick_y = dead(pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0));
+    let forward = if throttle.abs() > 0.0 {
+        throttle
     } else {
-        1.0
+        stick_y
     };
-    let cmd = CmdVel {
-        linear_mps: axis(KeyCode::KeyS, KeyCode::KeyW) * WASD_SPEED_MPS * boost,
-        angular_rps: axis(KeyCode::KeyD, KeyCode::KeyA) * WASD_YAW_RPS,
+    let steer = dead(pad.get(GamepadAxis::LeftStickX).unwrap_or(0.0));
+    let cmd = if pad.pressed(GamepadButton::South) {
+        CmdVel {
+            linear_mps: 0.0,
+            angular_rps: 0.0,
+        }
+    } else {
+        CmdVel {
+            linear_mps: forward * PAD_SPEED_MPS,
+            angular_rps: -steer * PAD_YAW_RPS,
+        }
     };
     ui_drive.0.insert(key, cmd);
+}
+
+/// Camera-side handles the pane needs; bundled to stay under Bevy's
+/// parameter limit.
+#[derive(SystemParam)]
+struct PanelCamera<'w, 's> {
+    follow: ResMut<'w, FollowTarget>,
+    fly: ResMut<'w, FlyTo>,
+    cameras: Query<'w, 's, &'static ChaseCamera>,
+    gamepads: Query<'w, 's, &'static Gamepad>,
+    transforms: Query<'w, 's, &'static GlobalTransform>,
+    prims: Query<'w, 's, (Entity, &'static usd_bevy::UsdPrimRef)>,
+    parents: Query<'w, 's, &'static ChildOf>,
 }
 
 struct Block<'a> {
@@ -188,6 +213,7 @@ fn draw_machine_panel(
     mut service: ResMut<ServiceCommands>,
     mut values: ResMut<LinkValues>,
     mut panel: ResMut<MachinePanel>,
+    mut rig: PanelCamera,
 ) {
     let picked = selection.0.or(active.0);
     let machine = picked.and_then(|entity| {
@@ -258,6 +284,7 @@ fn draw_machine_panel(
             let Some(scene_root) = machine.scene_root else {
                 return;
             };
+            let following = rig.follow.entity == Some(scene_root);
             body.add_normal(
                 cid("head"),
                 machine.id.clone(),
@@ -266,7 +293,9 @@ fn draw_machine_panel(
                     Pod::new(pid("head", 0))
                         .with_readout("kind", machine.kind.as_deref().unwrap_or("—"))
                         .with_readout("controllers", machine.controllers.len().to_string())
-                        .with_readout("links", machine.links.links.len().to_string()),
+                        .with_readout("links", machine.links.links.len().to_string())
+                        .with_toggle_initial("Camera follows", accent_col, following)
+                        .with_button("Fly behind", accent_col),
                 ],
             );
 
@@ -320,14 +349,19 @@ fn draw_machine_panel(
                         );
                     }
                     let holding = panel.holding.contains(&key);
-                    let wasd = panel.wasd.as_ref() == Some(&key);
+                    let pad = panel.gamepad.as_ref() == Some(&key);
+                    let pad_label = if rig.gamepads.iter().next().is_some() {
+                        "Gamepad"
+                    } else {
+                        "Gamepad (none connected)"
+                    };
                     let cmd = ui_drive.0.get(&key).copied().unwrap_or(CmdVel {
                         linear_mps: 0.0,
                         angular_rps: 0.0,
                     });
                     pod = pod
                         .with_toggle_initial("Viewer drives", accent_col, holding)
-                        .with_toggle_initial("WASD keys", accent_col, wasd)
+                        .with_toggle_initial(pad_label, accent_col, pad)
                         .with_slider(
                             "speed",
                             clamp(cmd.linear_mps as f64, -MAX_SPEED_MPS, MAX_SPEED_MPS),
@@ -544,6 +578,53 @@ fn draw_machine_panel(
             }
 
             let responses = body.render();
+            if let Some(head) = pod_response(&responses, cid("head"), 0) {
+                if let Some(t) = head.toggles.first()
+                    && t.changed
+                {
+                    rig.follow.set(if t.on { Some(scene_root) } else { None });
+                }
+                if button_clicked(&responses, cid("head"), 0, 0)
+                    && let Ok(cam) = rig.cameras.single()
+                {
+                    let body = machine
+                        .body
+                        .as_deref()
+                        .and_then(|b| {
+                            crate::controller::find_prim_entity(
+                                scene_root,
+                                b,
+                                &rig.prims,
+                                &rig.parents,
+                            )
+                        })
+                        .unwrap_or(scene_root);
+                    if let Ok(gt) = rig.transforms.get(body) {
+                        let heading = machine
+                            .controllers
+                            .iter()
+                            .find_map(|c| {
+                                states.states.get(&ControllerKey::new(
+                                    scene_root,
+                                    &machine.id,
+                                    &c.instance,
+                                ))
+                            })
+                            .map(|s| s.heading_rad as f32)
+                            .unwrap_or(0.0);
+                        rig.fly.start_focus = cam.focus;
+                        rig.fly.start_distance = cam.distance;
+                        rig.fly.start_yaw = Some(cam.yaw);
+                        rig.fly.start_elevation = Some(cam.elevation);
+                        rig.fly.target_focus = gt.translation();
+                        rig.fly.target_distance = 12.0;
+                        rig.fly.target_yaw = Some(heading + std::f32::consts::PI);
+                        rig.fly.target_elevation = Some(FLY_ELEVATION_RAD);
+                        rig.fly.duration = 0.6;
+                        rig.fly.remaining = 0.6;
+                    }
+                }
+            }
             for block in blocks {
                 let c = block.controller;
                 let Some(resp) = pod_response(&responses, cid(&block.group), block.pod) else {
@@ -563,8 +644,8 @@ fn draw_machine_panel(
                         } else {
                             panel.holding.remove(&block.key);
                             ui_drive.0.remove(&block.key);
-                            if panel.wasd.as_ref() == Some(&block.key) {
-                                panel.wasd = None;
+                            if panel.gamepad.as_ref() == Some(&block.key) {
+                                panel.gamepad = None;
                             }
                         }
                     }
@@ -572,10 +653,10 @@ fn draw_machine_panel(
                         && t.changed
                     {
                         if t.on {
-                            panel.wasd = Some(block.key.clone());
+                            panel.gamepad = Some(block.key.clone());
                             panel.holding.insert(block.key.clone());
-                        } else if panel.wasd.as_ref() == Some(&block.key) {
-                            panel.wasd = None;
+                        } else if panel.gamepad.as_ref() == Some(&block.key) {
+                            panel.gamepad = None;
                             ui_drive.0.insert(
                                 block.key.clone(),
                                 CmdVel {
@@ -585,8 +666,8 @@ fn draw_machine_panel(
                             );
                         }
                     }
-                    let wasd_here = panel.wasd.as_ref() == Some(&block.key);
-                    if panel.holding.contains(&block.key) && !wasd_here {
+                    let pad_here = panel.gamepad.as_ref() == Some(&block.key);
+                    if panel.holding.contains(&block.key) && !pad_here {
                         let speed = resp.sliders.first().map(|s| s.value).unwrap_or(0.0);
                         let yaw = resp.sliders.get(1).map(|s| s.value).unwrap_or(0.0);
                         let stop = button_clicked(&responses, cid(&block.group), block.pod, 0);

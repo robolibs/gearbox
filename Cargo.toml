@@ -34,6 +34,7 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_window",
     "bevy_winit",
     "bevy_input_focus",
+    "bevy_gilrs",
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_pbr",
