@@ -25,5 +25,6 @@ What the finished plans (`PLAN.md`, `PLAN_COM.md`, `PLAN_CLI.md`,
 ## CLI
 
 - `gearbox shell`: a REPL keeping one agent open.
-- Runtime allowlist changes, once agentio can add a peer to a live agent.
+- Runtime allowlist changes over the bus (`Agent::allow_peer` exists upstream
+  since agentio ea60574; the host still only reads its allowlist at launch).
 
