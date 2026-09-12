@@ -21,12 +21,10 @@ Terms:
 
 External conventions this spec binds to:
 
-- ISO 11783-10 device descriptor object pool (DDOP): one `Device` element,
-  a `Connector` element locating the coupling, `Function`, `Section`, `Unit`,
-  `Bin`, `NavigationReference` elements in a parent/child tree, process data
-  addressed by DDI number. AgIsoStack's `DeviceElementObject::Type` numbers
-  them 1..7 in that order.
-- ISO 11783-7 DDI 157 connector types, the enumeration §3.2 reuses.
+- The working-part hierarchy every implement is described by: one device,
+  the connector that locates the coupling, then functions, sections, units,
+  bins and a navigation reference in a parent/child tree, each with named
+  values. Gearbox keeps that tree as its link tree (§7.3) and nothing else.
 - ISO 11783-9 tractor ECU classes: class 1 and 2 broadcast tractor state to
   the implement, class 3 also executes implement commands. AEF TIM is the
   cross-vendor form of class 3: the implement commands speed, steering, PTO,
@@ -83,20 +81,20 @@ def Xform "rear_hitch" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCoupling
 
 ### 2.1 Coupling types and the joint they imply
 
-Types follow ISO 11783-7 DDI 157 so a DDOP `ConnectorType` maps one-to-one.
+Each type names a mechanical coupling and implies the joint below.
 
-| `type` | DDI 157 | Joint created between hitch link and coupler link |
+| `type` | Standard | Joint created between hitch link and coupler link |
 |---|---|---|
-| `drawbar` | 1, ISO 6489-3 | revolute about Z, pitch free ±20°, roll free ±10° |
-| `three_point_semi_mounted` | 2, ISO 730 | revolute about Z at the lower links, lift via `lift` |
-| `three_point_mounted` | 3, ISO 730 | fixed, lift via `lift` |
-| `hitch_hook` | 4, ISO 6489-1 | spherical, cone limit 25° |
-| `clevis` | 5, ISO 6489-2 | revolute about Z, pitch free ±20° |
-| `piton` | 6, ISO 6489-4 | revolute about Z, pitch free ±15° |
-| `cuna` | 7, ISO 6489-5 | spherical, cone limit 20° |
-| `ball` | 8, ISO 24347 | spherical, cone limit 30° |
-| `chassis_mounted` | 9 | fixed. Self-propelled machine carrying its own implement. |
-| `pivot_wagon` | 10, ISO 5692-2 | revolute about Z |
+| `drawbar` | ISO 6489-3 | revolute about Z, pitch free ±20°, roll free ±10° |
+| `three_point_semi_mounted` | ISO 730 | revolute about Z at the lower links, lift via `lift` |
+| `three_point_mounted` | ISO 730 | fixed, lift via `lift` |
+| `hitch_hook` | ISO 6489-1 | spherical, cone limit 25° |
+| `clevis` | ISO 6489-2 | revolute about Z, pitch free ±20° |
+| `piton` | ISO 6489-4 | revolute about Z, pitch free ±15° |
+| `cuna` | ISO 6489-5 | spherical, cone limit 20° |
+| `ball` | ISO 24347 | spherical, cone limit 30° |
+| `chassis_mounted` | — | fixed. Self-propelled machine carrying its own implement. |
+| `pivot_wagon` | ISO 5692-2 | revolute about Z |
 | `fifth_wheel` | — | revolute about Z, pitch free ±15° |
 | `loader_carriage` | — | fixed. Front-loader tool carrier, quick-attach frames. |
 
@@ -111,10 +109,6 @@ REP-103 relative to the machine it belongs to: +X toward that machine's
 front, +Z up. Attaching places the coupler frame coincident with the hitch
 frame and rotated 180° about Z, so the slave faces the same way as the
 master.
-
-For DDOP export the coupler's pose in the slave's `base_link` becomes the
-`Connector` element's `DeviceElementOffsetX/Y/Z` (DDI 134, 135, 136) after
-the frame conversion in §7.3.
 
 ## 3. Attaching
 
@@ -328,7 +322,7 @@ commanded a velocity directly.
 
 - A full `CONTROLLER_SPEC.md` machine: `GearboxMachineAPI`, body, link tree
   with its own `base_link`. A trailer is a machine even when carried.
-- At least one `coupler` coupling (§2). Its frame is the DDOP connector.
+- At least one `coupler` coupling (§2). Its frame is where the master's hitch lands.
 - `gearbox:machine:kind` SHOULD name the implement class: `trailer`,
   `sprayer`, `seeder`, `baler`, `mower`, `spreader`, `loader_tool`.
 
@@ -430,11 +424,9 @@ In addition to `CONTROLLER_SPEC.md` §7.3, the runtime MUST refuse:
 - a `hitch` and `coupler` attach request with different `type`;
 - a three-point `hitch` whose `lift` is not a joint of the same machine;
 - an attach that would create a loop or a second parent for a slave root;
-- an element tree with no `device`, two `device`s, a `connector` not under
-  `device`, or an element prim whose link parent differs from its element
-  parent;
-- a `gearbox:pd:<Ddi>` name that is not a `DataDescriptionIndex` entry;
-- duplicate `gearbox:element:number` in one machine.
+- a `gearbox:element:type` outside the seven kinds of §7.3;
+- duplicate `gearbox:element:number` in one machine, when numbers are
+  authored.
 
 Warnings, not refusals: ISO category mismatch, capacity exceeded, a slave
 requesting a function the master does not grant, an implement attached to a
@@ -486,7 +478,7 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxController
     rel gearbox:machine:role:passiveWheelJoints = [</robot/Joints/rev_left>, </robot/Joints/rev_right>]
     token gearbox:controller:tip:type = "builtin:joint_position"
     rel gearbox:controller:tip:joint = </robot/Joints/tip>
-    token gearbox:controller:tip:commandInterface = "process_data"
+    token gearbox:controller:tip:commandInterface = "position"
 
     def Xform "frame" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
     {
@@ -530,7 +522,7 @@ headland. Attached, it is commanded at
   contact event.
 - Load transfer through the three-point linkage (draft sensing) beyond the
   `float` and `draft` modes of `builtin:hitch`.
-- ISOBUS transport itself. The payloads are DDOP-shaped so a bridge to
-  AgIsoStack is mechanical, but Gearbox does not speak CAN.
+- ISOBUS or CAN transport of any kind, and any device-description export
+  or import. The link tree is the only description of a machine.
 - Detaching by breaking force. `physics:breakForce` on the coupling joint
   is honoured if authored on the hitch, and reported as a detach.
