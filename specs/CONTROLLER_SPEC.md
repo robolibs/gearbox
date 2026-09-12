@@ -243,7 +243,8 @@ relationships. A joint is **driven** if it is in `role:poweredWheelJoints`,
 Steering joints follow the same rule: each path in `role:steeringJoints`,
 `steerJoints`, `steerLeftJoint`, or `steerRightJoint` MUST resolve to a
 `UsdPhysicsJoint` between two rapier bodies, typically chassis and a steering
-knuckle body. The knuckle then carries the wheel joint as `physics:body0`.
+knuckle body. The knuckle then carries the wheel joint as `physics:body0`;
+§7.5 fixes that chain.
 Steering resolution order for `ackermann` geometry: explicit left/right pair,
 then role joints matched by axle and side hint, then every steering joint at
 the centre angle. Other geometries skip the Ackermann split.
@@ -374,7 +375,7 @@ Rules:
   `camera_link`, `lidar_link`. A camera SHOULD also author
   `<name>_optical` as a child link with the REP-103 optical rotation.
 - Wheel bodies SHOULD use `role = "wheel"` and steering knuckles
-  `role = "steer"`. The controller role relationships in §2 keep pointing at
+  `role = "steer"`, chained as §7.5 describes. The controller role relationships in §2 keep pointing at
   joints; the link role is descriptive and lets the validator check that a
   `poweredWheelJoints` target actually drives a wheel link.
 
@@ -422,6 +423,58 @@ or URDF compiles to this layout without renaming:
 | `Sensor.link_name` + `Sensor.origin` | static `Xform` under that link with `GearboxLinkAPI`, `role = "sensor"` |
 | `Ros2ControlJoint.command_interfaces` | `gearbox:controller:<n>:commandInterface` |
 | `Ros2ControlJoint.state_interfaces` | `gearbox:controller:<n>:stateInterfaces` |
+
+### 7.5 Steered wheels: one chain, two joints
+
+A wheel that both spins and steers is two links in series, never one link
+with two joints and never two joints side by side. This is the URDF rule (a
+link has exactly one parent joint) and the shape ros2_control's steering
+controllers expect: `steering_joints_names` take a position in radians,
+`traction_joints_names` take a velocity in rad/s, as two separate joint lists.
+
+```
+chassis                              role = link (or base)
+└─ steer_<pos>      revolute about the up axis, limited to ±maxSteerDeg
+   └─ steer_<pos>   role = steer      the knuckle
+      └─ wheel_<pos>   revolute about the axle axis, unlimited
+         └─ wheel_<pos>   role = wheel    the tyre
+```
+
+- The **steer link is the parent of the wheel link**. Steering turns the
+  knuckle; the tyre follows because it is the knuckle's child. Spin is one
+  level below, about the axle.
+- The steer joint's axis is the machine up axis; the wheel joint's axis is
+  the axle (X in a Z-up asset whose front is −Y). Positive steer MUST turn
+  the machine toward its up axis (REP-103), which the runtime's
+  `steeringGeometry` sign convention assumes.
+- The knuckle's origin SHOULD sit at the wheel centre, so the steer axis
+  passes through the tyre and the wheel joint's `physics:localPos0` is zero.
+  Kingpin offset, if wanted, is authored as the wheel joint's local position
+  inside the knuckle, not as another link.
+- A wheel that does not steer skips the knuckle: `chassis → wheel_<pos>`.
+- A pivoting axle is one more revolute level between the chassis and the
+  steer links (`chassis → axle → steer → wheel`). It is optional. While the
+  raycast vehicle carries the chassis (§3) the runtime holds every such pivot
+  at its rest angle, because the tyres are sensors then and nothing else
+  supports the axle.
+- Names carry the axle and side hints the runtime matches on (§8):
+  `steer_front_left`, `wheel_front_left`, `roll_front_left` all pair up;
+  `wheel_back_left` pairs with nothing and is not steered.
+
+In the tf tree this is what `gearbox machine links` prints for a tractor:
+
+```
+base_link  [base]
+  chassis  [link]
+    steer_front_left  [steer]    via steer_front_left
+      wheel_front_left  [wheel]    via roll_front_left
+    wheel_back_left  [wheel]    via roll_back_left
+```
+
+Validation (§7.3) warns when a `wheel` link's parent is a `steer` link but
+the joint between them is not a revolute, or when a `steer` link's joint
+axis is not the up axis; it rejects a `wheel` link that has more than one
+joint to its parent.
 
 ## 8. Fixed conventions the runtime assumes
 
