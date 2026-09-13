@@ -9,7 +9,7 @@ use bevy::asset::{AssetPlugin, UnapprovedPathMode};
 use bevy::prelude::*;
 use mara::ui::modules::bevy::BevyViewportInput;
 
-use crate::{attach, controller, load, physics, physics_debug, services, terrain, viewer, world};
+use crate::{attach, controller, grass, load, physics, physics_debug, services, terrain, viewer, world};
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
 pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
@@ -25,6 +25,15 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>) {
         // Wireframe support for the Overlays pane toggle; without it the
         // `WireframeConfig` resource would not exist.
         .add_plugins(bevy::pbr::wireframe::WireframePlugin::default())
+        // Frame time and fps land in the log every ten seconds.
+        .add_plugins((
+            bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+            bevy::render::diagnostic::RenderDiagnosticsPlugin,
+            bevy::diagnostic::LogDiagnosticsPlugin {
+                wait_duration: std::time::Duration::from_secs(10),
+                ..default()
+            },
+        ))
         // USD pipeline (live stage projection) + gearbox's rapier world.
         .add_plugins(usd_bevy::UsdPlugin)
         .add_plugins(usd_bevy::asset::UsdAssetPlugin)
@@ -43,7 +52,9 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>) {
         .add_plugins(gearbox_api::UsdMarkerPlugin)
         // Simulator surface: planet world, machines, links, services.
         .add_plugins(world::WorldPlugin)
+        .add_plugins(grass::GrassPlugin)
         .add_plugins(terrain::TerrainPlugin)
+        .add_systems(Startup, log_render_adapter)
         .add_plugins(controller::ControllerDiscoveryPlugin)
         .add_plugins(attach::AttachPlugin)
         .add_plugins(services::ServicesPlugin)
@@ -64,6 +75,18 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>) {
 /// keeps an editor smooth but stretches a 4000-prim machine over a minute,
 /// and the stage parse blocks the frame anyway, so a simulator finishes the
 /// projection in that same frame.
+/// Which GPU and backend the window renders with; the wrong one is the
+/// first thing to rule out when frames are slow.
+fn log_render_adapter(adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>) {
+    match adapter {
+        Some(info) => info!(
+            "render adapter: {} ({:?}, {:?}, driver {})",
+            info.name, info.backend, info.device_type, info.driver_info
+        ),
+        None => warn!("render adapter: unknown"),
+    }
+}
+
 fn projection_budget_from_env() -> usd_bevy::UsdProjectionBudget {
     const DEFAULT_MS: u64 = 0;
     let millis = std::env::var("GEARBOX_PROJECTION_BUDGET_MS")

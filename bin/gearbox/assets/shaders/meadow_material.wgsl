@@ -53,7 +53,7 @@ fn fbm(p: vec2<f32>) -> f32 {
     var amp = 0.5;
     var freq = 1.0;
     var norm = 0.0;
-    for (var i = 0; i < 5; i = i + 1) {
+    for (var i = 0; i < 3; i = i + 1) {
         sum = sum + amp * noise(p * freq);
         norm = norm + amp;
         amp = amp * 0.5;
@@ -62,8 +62,9 @@ fn fbm(p: vec2<f32>) -> f32 {
     return sum / norm;
 }
 
-// One texture sample per tile with a per-tile rotation and offset, so
-// the repeat never lines up.
+// One texture sample per tile with a per-tile rotation about the tile
+// centre. No offset: shifted tiles differ in low-frequency brightness and
+// the blend between them reads as a checkerboard.
 fn sample_variant(
     tex: texture_2d<f32>,
     smp: sampler,
@@ -81,8 +82,7 @@ fn sample_variant(
     } else if (quarter == 3.0) {
         p = vec2<f32>(p.y, 1.0 - p.x);
     }
-    let offset = vec2<f32>(hash21(cell * 1.7 + seed), hash21(cell * 2.3 - seed));
-    return textureSample(tex, smp, fract(p + offset));
+    return textureSample(tex, smp, fract(p));
 }
 
 fn scatter_sample(tex: texture_2d<f32>, smp: sampler, uv: vec2<f32>, seed: f32) -> vec4<f32> {
@@ -98,8 +98,8 @@ fn scatter_sample(tex: texture_2d<f32>, smp: sampler, uv: vec2<f32>, seed: f32) 
 
 fn meadow_color(world_xz: vec2<f32>, normal: vec3<f32>) -> vec4<f32> {
     let grass = scatter_sample(grass_albedo, grass_albedo_sampler, world_xz / 2.6, 11.0);
-    let grass_micro = scatter_sample(grass_albedo, grass_albedo_sampler, world_xz / 0.8 + vec2<f32>(61.0, -37.0), 59.0);
-    let grass_h = luma(scatter_sample(grass_albedo, grass_albedo_sampler, world_xz / 2.6 + vec2<f32>(3.1, -1.7), 23.0)) * 2.2;
+    let grass_micro = textureSample(grass_albedo, grass_albedo_sampler, fract(world_xz / 0.8));
+    let grass_h = luma(grass) * 2.2;
     var g = mix(grass, grass_micro, 0.3);
 
     // Broad dry and lush patches, then a mid-scale shade so the field is
@@ -110,7 +110,7 @@ fn meadow_color(world_xz: vec2<f32>, normal: vec3<f32>) -> vec4<f32> {
     let lush = smooth01((0.42 - macro_n) / 0.25);
     g = mix(g, g * vec4<f32>(0.82, 1.02, 0.78, 1.0), lush * 0.5);
     let shade = 0.70 + fbm(world_xz * 0.05 + vec2<f32>(-31.0, 19.0)) * 0.42;
-    g = vec4<f32>(g.rgb * vec3<f32>(0.62, 0.70, 0.50) * shade * (0.75 + grass_h * 0.40), 1.0);
+    g = vec4<f32>(g.rgb * vec3<f32>(0.62, 0.70, 0.50) * shade * (0.88 + grass_h * 0.16), 1.0);
 
     let dirt = scatter_sample(dirt_albedo, dirt_albedo_sampler, world_xz / 2.2 + vec2<f32>(19.3, -7.1), 37.0);
     let dirt_h = luma(dirt) * 1.6;

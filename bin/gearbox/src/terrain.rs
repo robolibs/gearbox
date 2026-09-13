@@ -1,40 +1,54 @@
 //! Procedural ground: a heightfield mesh under an anti-repeat grass
-//! material, the matching Rapier heightfield collider, and blade chunks that
-//! follow the camera. Replaces the flat startup ground unless
-//! `GEARBOX_TERRAIN=flat`; a loaded USD terrain retires it.
+//! material, the matching Rapier heightfield collider, and GPU-instanced
+//! blade chunks that follow the camera. Replaces the flat startup ground
+//! unless `GEARBOX_TERRAIN=flat`; a loaded USD terrain retires it.
 
 use std::sync::{Arc, RwLock};
 
 use bevy::asset::RenderAssetUsages;
-use bevy::light::NotShadowCaster;
+use bevy::camera::primitives::Aabb;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin, StandardMaterial};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
 use bevy::shader::ShaderRef;
 use rapier3d::math::Vector as DVec3;
 use rapier3d::prelude::{ColliderBuilder, ColliderHandle};
 
+use crate::grass::{GrassChunkDraw, GrassField, GrassParams};
 use crate::physics::PhysicsWorld;
 use crate::world::{
     FlatGround, TerrainCollision, asset_path, fbm_world, remove_flat_ground, smooth_hill,
 };
 
 const SIZE_M: f32 = 800.0;
+/// Height grid, collider and near surface tiles; `GEARBOX_TERRAIN_CELL_M`
+/// overrides it, `GEARBOX_TERRAIN_COLLIDER_CELL_M` the collider alone.
 const CELL_M: f32 = 1.0;
+const TILE_M: f32 = 50.0;
+/// Tiles farther than this from the camera drop to the coarse cell.
+const TILE_FINE_RADIUS_M: f32 = 180.0;
+const TILE_COARSE_CELL_M: f32 = 4.0;
+const TILE_SKIRT_M: f32 = 2.0;
+const TILE_REBUILDS_PER_FRAME: usize = 2;
 const SPAWN_FLAT_RADIUS_M: f32 = 30.0;
 const SPAWN_RELIEF_RADIUS_M: f32 = 70.0;
 const SAFETY_FLOOR_Y_M: f64 = -40.0;
 const SAFETY_FLOOR_HALF_EXTENT_M: f64 = 10_000.0;
+const HORIZON_COLOR: Color = Color::srgb(0.46, 0.55, 0.30);
 
 const CHUNK_M: f32 = 16.0;
-/// Outer radius of each detail ring and its blades per square metre.
-const GRASS_RINGS: [(f32, f32); 3] = [(48.0, 10.0), (96.0, 5.0), (150.0, 2.0)];
-const GRASS_CHUNK_BUILDS_PER_FRAME: usize = 12;
-/// Below this surface-normal Y the ground reads as bare dirt: no blades.
-const DIRT_SLOPE_NORMAL_Y: f32 = 0.86;
-const HORIZON_COLOR: Color = Color::srgb(0.46, 0.55, 0.30);
+/// Blades per square metre next to the camera; `GEARBOX_GRASS_DENSITY`
+/// overrides it, 0 turns the grass off.
+const GRASS_DENSITY_PER_M2: f32 = 2000.0;
+/// Full density holds to the first distance and is gone at the second.
+const GRASS_FADE_START_M: f32 = 12.0;
+const GRASS_FADE_END_M: f32 = 40.0;
+/// Blade template segments by chunk distance; centimetre blades are one
+/// triangle at any range.
+const GRASS_LODS: [(f32, u32); 1] = [(f32::INFINITY, 1)];
+const BLADE_MAX_HEIGHT_M: f32 = 0.12;
 
 static HEIGHT_GRID: RwLock<Option<Arc<HeightGrid>>> = RwLock::new(None);
 
@@ -43,14 +57,13 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "../assets/shaders/meadow_material.wgsl");
-        bevy::asset::embedded_asset!(app, "../assets/shaders/grass_material.wgsl");
-        app.add_plugins((
-            MaterialPlugin::<MeadowMaterial>::default(),
-            MaterialPlugin::<GrassMaterial>::default(),
-        ))
-        .init_resource::<GrassChunks>()
-        .add_systems(PostStartup, spawn_procedural_terrain)
-        .add_systems(Update, (retire_for_usd_terrain, update_grass_chunks).chain());
+        app.add_plugins(MaterialPlugin::<MeadowMaterial>::default())
+            .init_resource::<GrassChunks>()
+            .add_systems(PostStartup, spawn_procedural_terrain)
+            .add_systems(
+                Update,
+                (retire_for_usd_terrain, update_terrain_tiles, update_grass_chunks).chain(),
+            );
     }
 }
 
@@ -193,21 +206,6 @@ impl MaterialExtension for MeadowExtension {
 
 type MeadowMaterial = ExtendedMaterial<StandardMaterial, MeadowExtension>;
 
-#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
-struct GrassExtension {
-    /// x: sway amplitude (m), y: speed, z/w: wind direction.
-    #[uniform(100)]
-    wind: Vec4,
-}
-
-impl MaterialExtension for GrassExtension {
-    fn vertex_shader() -> ShaderRef {
-        "embedded://gearbox_sim/../assets/shaders/grass_material.wgsl".into()
-    }
-}
-
-type GrassMaterial = ExtendedMaterial<StandardMaterial, GrassExtension>;
-
 /// The active procedural ground and everything that must go with it.
 #[derive(Resource)]
 pub struct ProceduralTerrain {
@@ -215,12 +213,20 @@ pub struct ProceduralTerrain {
     collider: ColliderHandle,
     safety_floor: ColliderHandle,
     grid: Arc<HeightGrid>,
+    material: Handle<MeadowMaterial>,
+    fine_cell: f32,
+    tiles: HashMap<(i32, i32), (Entity, f32)>,
 }
 
+#[derive(Component)]
+struct TerrainTile;
+
+/// Every chunk owns its own blade mesh so the renderer never batches two
+/// chunks into one draw.
 #[derive(Resource, Default)]
 struct GrassChunks {
-    material: Option<Handle<GrassMaterial>>,
     chunks: HashMap<(i32, i32), (Entity, usize)>,
+    blades_per_chunk: f32,
 }
 
 #[derive(Component)]
@@ -228,13 +234,14 @@ struct GrassChunk;
 
 fn spawn_procedural_terrain(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MeadowMaterial>>,
     mut physics: ResMut<PhysicsWorld>,
     asset_server: Res<AssetServer>,
     flat: Option<Res<FlatGround>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
     horizon: Query<(&Name, &MeshMaterial3d<StandardMaterial>)>,
+    mut images: ResMut<Assets<Image>>,
+    mut chunks: ResMut<GrassChunks>,
 ) {
     let preset = TerrainPreset::from_env();
     if preset == TerrainPreset::Flat {
@@ -242,8 +249,18 @@ fn spawn_procedural_terrain(
         return;
     }
     let started = std::time::Instant::now();
-    let grid = Arc::new(HeightGrid::sample(SIZE_M, CELL_M, meadow_height));
-    let mesh = meshes.add(terrain_mesh(&grid));
+    let cell = std::env::var("GEARBOX_TERRAIN_CELL_M")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| *value >= 0.5)
+        .unwrap_or(CELL_M);
+    let collider_cell = std::env::var("GEARBOX_TERRAIN_COLLIDER_CELL_M")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| *value >= 0.5)
+        .unwrap_or(cell);
+    let grid = Arc::new(HeightGrid::sample(SIZE_M, cell, meadow_height));
+    let collider_grid = HeightGrid::sample(SIZE_M, collider_cell, meadow_height);
     let material = materials.add(ExtendedMaterial {
         base: StandardMaterial {
             perceptual_roughness: 0.95,
@@ -260,17 +277,12 @@ fn spawn_procedural_terrain(
         },
     });
     let entity = commands
-        .spawn((
-            Name::new("MeadowTerrain"),
-            Transform::IDENTITY,
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-        ))
+        .spawn((Name::new("MeadowTerrain"), Transform::IDENTITY, Visibility::default()))
         .id();
 
     let collider = physics
         .colliders
-        .insert(heightfield_collider(&grid).friction(1.4).restitution(0.0).build());
+        .insert(heightfield_collider(&collider_grid).friction(1.4).restitution(0.0).build());
     physics.entity_to_collider.insert(entity, collider);
     let safety_floor = physics.colliders.insert(
         ColliderBuilder::cuboid(SAFETY_FLOOR_HALF_EXTENT_M, 0.10, SAFETY_FLOOR_HALF_EXTENT_M)
@@ -294,45 +306,149 @@ fn spawn_procedural_terrain(
             material.base_color = HORIZON_COLOR;
         }
     }
-    commands.insert_resource(ProceduralTerrain { entity, collider, safety_floor, grid });
+    let density = grass_density_from_env();
+    chunks.blades_per_chunk = CHUNK_M * CHUNK_M * density;
+    if density > 0.0 {
+        commands.insert_resource(GrassField {
+            heightmap: images.add(heightmap_image(&grid)),
+            params: GrassParams {
+                corner: Vec2::ZERO,
+                origin: Vec2::new(grid.min_x, grid.min_z),
+                texels_per_metre: 1.0 / grid.cell,
+                chunk_size: CHUNK_M,
+                fade_start: GRASS_FADE_START_M,
+                fade_end: GRASS_FADE_END_M,
+                blades_per_chunk: chunks.blades_per_chunk,
+                texel_count: grid.cols as f32,
+            },
+        });
+    }
+    commands.insert_resource(ProceduralTerrain {
+        entity,
+        collider,
+        safety_floor,
+        grid,
+        material,
+        fine_cell: cell,
+        tiles: HashMap::default(),
+    });
     info!(
         "terrain: {preset:?} ground ready, {} m at {} m cells, in {:?}",
         SIZE_M,
-        CELL_M,
+        cell,
         started.elapsed()
     );
 }
 
-fn terrain_mesh(grid: &HeightGrid) -> Mesh {
-    let count = grid.cols * grid.rows;
-    let mut positions = Vec::with_capacity(count);
-    let mut normals = Vec::with_capacity(count);
-    let mut uvs = Vec::with_capacity(count);
-    let size = (grid.cols - 1) as f32 * grid.cell;
-    for i in 0..grid.rows {
-        for j in 0..grid.cols {
-            let x = grid.min_x + j as f32 * grid.cell;
-            let z = grid.min_z + i as f32 * grid.cell;
-            positions.push([x, grid.at(i, j), z]);
-            normals.push(grid.normal_at_index(i, j).to_array());
-            uvs.push([(x - grid.min_x) / size, (z - grid.min_z) / size]);
+/// One surface tile at `cell` metres, with a skirt hanging below its rim so
+/// a coarser neighbour cannot open a crack.
+fn tile_mesh(grid: &HeightGrid, tx: i32, tz: i32, cell: f32) -> Mesh {
+    let n = (TILE_M / cell).round() as usize;
+    let min_x = tx as f32 * TILE_M;
+    let min_z = tz as f32 * TILE_M;
+    let count = (n + 1) * (n + 1);
+    let mut positions = Vec::with_capacity(count + 4 * (n + 1));
+    let mut normals = Vec::with_capacity(positions.capacity());
+    let mut uvs = Vec::with_capacity(positions.capacity());
+    for i in 0..=n {
+        for j in 0..=n {
+            let x = min_x + j as f32 * cell;
+            let z = min_z + i as f32 * cell;
+            positions.push([x, grid.height_at(x, z).unwrap_or(0.0), z]);
+            normals.push(grid.normal_at(x, z).to_array());
+            uvs.push([j as f32 / n as f32, i as f32 / n as f32]);
         }
     }
-    let mut indices = Vec::with_capacity((grid.cols - 1) * (grid.rows - 1) * 6);
-    for i in 0..grid.rows - 1 {
-        for j in 0..grid.cols - 1 {
-            let v00 = (i * grid.cols + j) as u32;
-            let v10 = v00 + 1;
-            let v01 = v00 + grid.cols as u32;
-            let v11 = v01 + 1;
+    let mut indices = Vec::with_capacity(n * n * 6 + n * 24);
+    let at = |i: usize, j: usize| (i * (n + 1) + j) as u32;
+    for i in 0..n {
+        for j in 0..n {
+            let (v00, v10, v01, v11) = (at(i, j), at(i, j + 1), at(i + 1, j), at(i + 1, j + 1));
             indices.extend_from_slice(&[v00, v01, v10, v10, v01, v11]);
         }
+    }
+    // Skirt: every rim vertex gets a twin `TILE_SKIRT_M` lower; quads join them.
+    let rim: Vec<u32> = (0..=n)
+        .map(|j| at(0, j))
+        .chain((1..=n).map(|i| at(i, n)))
+        .chain((0..n).rev().map(|j| at(n, j)))
+        .chain((1..n).rev().map(|i| at(i, 0)))
+        .collect();
+    let base = positions.len() as u32;
+    for &v in &rim {
+        let p = positions[v as usize];
+        positions.push([p[0], p[1] - TILE_SKIRT_M, p[2]]);
+        normals.push(normals[v as usize]);
+        uvs.push(uvs[v as usize]);
+    }
+    for k in 0..rim.len() {
+        let a = rim[k];
+        let b = rim[(k + 1) % rim.len()];
+        let (a_low, b_low) = (base + k as u32, base + ((k + 1) % rim.len()) as u32);
+        indices.extend_from_slice(&[a, a_low, b, b, a_low, b_low, a, b, a_low, b, b_low, a_low]);
     }
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_indices(Indices::U32(indices))
+}
+
+/// Surface tiles near the camera are built at the fine cell, the rest at
+/// the coarse one; a tile is rebuilt when its level changes.
+fn update_terrain_tiles(
+    mut commands: Commands,
+    terrain: Option<ResMut<ProceduralTerrain>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut tiles: Query<&mut Mesh3d, With<TerrainTile>>,
+) {
+    let Some(mut terrain) = terrain else {
+        return;
+    };
+    let Some(camera) = cameras.iter().next() else {
+        return;
+    };
+    let eye = camera.translation();
+    let eye_xz = Vec2::new(eye.x, eye.z);
+    let half = terrain.grid.half_size();
+    let span = (half / TILE_M).round() as i32;
+    let terrain = terrain.as_mut();
+    let mut rebuilt = 0usize;
+    for tz in -span..span {
+        for tx in -span..span {
+            let min = Vec2::new(tx as f32 * TILE_M, tz as f32 * TILE_M);
+            let nearest = eye_xz.clamp(min, min + Vec2::splat(TILE_M)).distance(eye_xz);
+            let cell = if nearest <= TILE_FINE_RADIUS_M { terrain.fine_cell } else { TILE_COARSE_CELL_M };
+            match terrain.tiles.get_mut(&(tx, tz)) {
+                Some((entity, current)) if *current != cell => {
+                    if rebuilt >= TILE_REBUILDS_PER_FRAME {
+                        continue;
+                    }
+                    if let Ok(mut mesh) = tiles.get_mut(*entity) {
+                        mesh.0 = meshes.add(tile_mesh(&terrain.grid, tx, tz, cell));
+                        *current = cell;
+                        rebuilt += 1;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let entity = commands
+                        .spawn((
+                            Name::new(format!("Terrain[{tx},{tz}]")),
+                            TerrainTile,
+                            ChildOf(terrain.entity),
+                            Transform::IDENTITY,
+                            Mesh3d(meshes.add(tile_mesh(&terrain.grid, tx, tz, cell))),
+                            MeshMaterial3d(terrain.material.clone()),
+                            bevy::light::NotShadowCaster,
+                        ))
+                        .id();
+                    terrain.tiles.insert((tx, tz), (entity, cell));
+                }
+            }
+        }
+    }
 }
 
 /// Rows run along Z and columns along X, centred on the origin like the
@@ -375,65 +491,58 @@ fn retire_for_usd_terrain(
     if let Ok(mut slot) = HEIGHT_GRID.write() {
         *slot = None;
     }
+    commands.remove_resource::<GrassField>();
     commands.remove_resource::<ProceduralTerrain>();
     info!("terrain: USD terrain active, procedural ground retired");
 }
 
+/// Keeps one draw per chunk around the camera. Blade count and template
+/// follow the chunk's distance every frame; the shader does the rest.
 fn update_grass_chunks(
     mut commands: Commands,
     terrain: Option<Res<ProceduralTerrain>>,
+    field: Option<Res<GrassField>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     mut chunks: ResMut<GrassChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<GrassMaterial>>,
+    mut draws: Query<(&mut GrassChunkDraw, &mut Mesh3d, &mut Aabb)>,
 ) {
-    let Some(terrain) = terrain else {
+    let (Some(terrain), Some(_)) = (terrain, field) else {
         return;
     };
     let Some(camera) = cameras.iter().next() else {
         return;
     };
     let eye = camera.translation();
-    let (max_radius, _) = GRASS_RINGS[GRASS_RINGS.len() - 1];
+    let eye_xz = Vec2::new(eye.x, eye.z);
     let half = terrain.grid.half_size();
-    let material = chunks
-        .material
-        .get_or_insert_with(|| {
-            materials.add(ExtendedMaterial {
-                base: StandardMaterial {
-                    base_color: Color::WHITE,
-                    perceptual_roughness: 0.9,
-                    double_sided: true,
-                    cull_mode: None,
-                    ..default()
-                },
-                extension: GrassExtension { wind: Vec4::new(0.12, 1.6, 0.8, 0.6) },
-            })
-        })
-        .clone();
 
-    let lo_x = ((eye.x - max_radius) / CHUNK_M).floor() as i32;
-    let hi_x = ((eye.x + max_radius) / CHUNK_M).floor() as i32;
-    let lo_z = ((eye.z - max_radius) / CHUNK_M).floor() as i32;
-    let hi_z = ((eye.z + max_radius) / CHUNK_M).floor() as i32;
-    let mut wanted: HashMap<(i32, i32), usize> = HashMap::default();
+    let lo_x = ((eye.x - GRASS_FADE_END_M) / CHUNK_M).floor() as i32;
+    let hi_x = ((eye.x + GRASS_FADE_END_M) / CHUNK_M).floor() as i32;
+    let lo_z = ((eye.z - GRASS_FADE_END_M) / CHUNK_M).floor() as i32;
+    let hi_z = ((eye.z + GRASS_FADE_END_M) / CHUNK_M).floor() as i32;
+    let mut wanted: HashMap<(i32, i32), (u32, usize)> = HashMap::default();
     for cz in lo_z..=hi_z {
         for cx in lo_x..=hi_x {
-            let centre = Vec2::new((cx as f32 + 0.5) * CHUNK_M, (cz as f32 + 0.5) * CHUNK_M);
+            let centre = chunk_centre(cx, cz);
             if centre.x.abs() > half || centre.y.abs() > half {
                 continue;
             }
-            let distance = centre.distance(Vec2::new(eye.x, eye.z));
-            if let Some(ring) = GRASS_RINGS.iter().position(|(radius, _)| distance <= *radius) {
-                wanted.insert((cx, cz), ring);
+            let nearest = chunk_nearest_distance(cx, cz, eye_xz);
+            let density = grass_density_at(nearest);
+            if density <= 0.0 {
+                continue;
             }
+            let instances = (chunks.blades_per_chunk * density).ceil() as u32;
+            let lod = GRASS_LODS.iter().position(|(radius, _)| nearest <= *radius).unwrap_or(0);
+            wanted.insert((cx, cz), (instances, lod));
         }
     }
 
     let stale: Vec<_> = chunks
         .chunks
         .iter()
-        .filter(|(key, (_, ring))| wanted.get(*key) != Some(ring))
+        .filter(|(key, _)| !wanted.contains_key(*key))
         .map(|(key, (entity, _))| (*key, *entity))
         .collect();
     for (key, entity) in stale {
@@ -441,130 +550,132 @@ fn update_grass_chunks(
         chunks.chunks.remove(&key);
     }
 
-    let mut budget = GRASS_CHUNK_BUILDS_PER_FRAME;
-    let mut missing: Vec<_> = wanted
-        .iter()
-        .filter(|(key, _)| !chunks.chunks.contains_key(*key))
-        .map(|(key, ring)| (*key, *ring))
-        .collect();
-    missing.sort_by_key(|((cx, cz), _)| {
-        let centre = Vec2::new((*cx as f32 + 0.5) * CHUNK_M, (*cz as f32 + 0.5) * CHUNK_M);
-        centre.distance_squared(Vec2::new(eye.x, eye.z)) as i64
-    });
-    for ((cx, cz), ring) in missing {
-        if budget == 0 {
-            break;
-        }
-        budget -= 1;
-        let Some(mesh) = grass_chunk_mesh(&terrain.grid, cx, cz, ring) else {
+    for (&(cx, cz), &(instances, lod)) in &wanted {
+        if let Some((entity, current_lod)) = chunks.chunks.get_mut(&(cx, cz)) {
+            if let Ok((mut draw, mut mesh, mut aabb)) = draws.get_mut(*entity) {
+                draw.instances = instances;
+                if *current_lod != lod {
+                    *current_lod = lod;
+                    mesh.0 = meshes.add(blade_template(GRASS_LODS[lod].1));
+                    *aabb = chunk_aabb(&terrain.grid, cx, cz);
+                }
+            }
             continue;
-        };
+        }
+        let corner = Vec3::new(cx as f32 * CHUNK_M, 0.0, cz as f32 * CHUNK_M);
         let entity = commands
             .spawn((
                 Name::new(format!("Grass[{cx},{cz}]")),
                 GrassChunk,
-                Transform::IDENTITY,
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(material.clone()),
-                NotShadowCaster,
+                Transform::from_translation(corner),
+                Mesh3d(meshes.add(blade_template(GRASS_LODS[lod].1))),
+                chunk_aabb(&terrain.grid, cx, cz),
+                GrassChunkDraw { corner: Vec2::new(corner.x, corner.z), instances },
             ))
             .id();
-        chunks.chunks.insert((cx, cz), (entity, ring));
+        chunks.chunks.insert((cx, cz), (entity, lod));
     }
 }
 
-struct Rng(u32);
-
-impl Rng {
-    fn seeded(cx: i32, cz: i32, ring: usize) -> Self {
-        let mut seed = (cx as u32).wrapping_mul(73_856_093)
-            ^ (cz as u32).wrapping_mul(19_349_663)
-            ^ (ring as u32 + 1).wrapping_mul(83_492_791);
-        if seed == 0 {
-            seed = 0x9E37_79B9;
-        }
-        Self(seed)
-    }
-
-    fn next(&mut self) -> f32 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.0 = x;
-        (x >> 8) as f32 / (1u32 << 24) as f32
-    }
-
-    fn range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + (hi - lo) * self.next()
-    }
+/// Same curve as the shader: full to the fade start, zero at the end.
+fn grass_density_at(distance: f32) -> f32 {
+    let fade = 1.0
+        - ((distance - GRASS_FADE_START_M) / (GRASS_FADE_END_M - GRASS_FADE_START_M))
+            .clamp(0.0, 1.0);
+    fade * fade
 }
 
-/// Blades of one chunk merged into a single mesh; `None` when nothing grows.
-fn grass_chunk_mesh(grid: &HeightGrid, cx: i32, cz: i32, ring: usize) -> Option<Mesh> {
-    let (_, density) = GRASS_RINGS[ring];
-    let blades = (CHUNK_M * CHUNK_M * density) as usize;
-    let mut rng = Rng::seeded(cx, cz, ring);
-    let origin = Vec2::new(cx as f32 * CHUNK_M, cz as f32 * CHUNK_M);
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(blades * 7);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(blades * 7);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(blades * 7);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(blades * 7);
-    let mut indices: Vec<u32> = Vec::with_capacity(blades * 15);
-    for _ in 0..blades {
-        let x = origin.x + rng.range(0.0, CHUNK_M);
-        let z = origin.y + rng.range(0.0, CHUNK_M);
-        let Some(y) = grid.height_at(x, z) else {
-            continue;
-        };
-        let normal = grid.normal_at(x, z);
-        if normal.y < DIRT_SLOPE_NORMAL_Y {
-            continue;
-        }
-        let yaw = rng.range(0.0, std::f32::consts::TAU);
-        let height = rng.range(0.25, 0.7);
-        let width = rng.range(0.025, 0.055);
-        let lean = Vec3::new(rng.range(-0.15, 0.15), 0.0, rng.range(-0.15, 0.15));
-        let right = Vec3::new(yaw.cos(), 0.0, yaw.sin());
-        let tone = rng.range(0.75, 1.2);
-        let dry = if rng.next() < 0.18 { rng.range(0.3, 1.0) } else { 0.0 };
-        let root = Vec3::new(0.10, 0.22, 0.04) * tone;
-        let tip = Vec3::new(0.36, 0.62, 0.14).lerp(Vec3::new(0.55, 0.52, 0.16), dry) * tone;
-        let base = positions.len() as u32;
-        for k in 0..=3u32 {
-            let t = k as f32 / 3.0;
-            let centre = Vec3::new(x, y, z) + Vec3::Y * (height * t) + lean * (height * t * t);
-            let half_width = width * 0.5 * (1.0 - t * 0.85);
-            let color = root.lerp(tip, t);
-            let samples = if k == 3 { 1 } else { 2 };
-            for s in 0..samples {
-                let side = if samples == 1 { 0.0 } else if s == 0 { -1.0 } else { 1.0 };
-                let p = centre + right * (half_width * side);
-                positions.push(p.to_array());
-                normals.push(normal.to_array());
-                uvs.push([0.5 + 0.5 * side, t]);
-                colors.push([color.x, color.y, color.z, 1.0]);
+fn grass_density_from_env() -> f32 {
+    std::env::var("GEARBOX_GRASS_DENSITY")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .map(|value| value.max(0.0))
+        .unwrap_or(GRASS_DENSITY_PER_M2)
+}
+
+fn chunk_nearest_distance(cx: i32, cz: i32, point: Vec2) -> f32 {
+    let min = Vec2::new(cx as f32 * CHUNK_M, cz as f32 * CHUNK_M);
+    let max = min + Vec2::splat(CHUNK_M);
+    let closest = point.clamp(min, max);
+    closest.distance(point)
+}
+
+/// Local-space bounds of a chunk draw: the entity sits at the chunk corner.
+fn chunk_aabb(grid: &HeightGrid, cx: i32, cz: i32) -> Aabb {
+    let min_x = cx as f32 * CHUNK_M;
+    let min_z = cz as f32 * CHUNK_M;
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    let samples = (CHUNK_M / grid.cell).ceil() as i32;
+    for i in 0..=samples {
+        for j in 0..=samples {
+            let x = min_x + j as f32 * grid.cell;
+            let z = min_z + i as f32 * grid.cell;
+            if let Some(h) = grid.height_at(x, z) {
+                lo = lo.min(h);
+                hi = hi.max(h);
             }
         }
-        for k in 0..2u32 {
-            let l = base + k * 2;
-            let r = l + 1;
-            let l2 = l + 2;
-            let r2 = l + 3;
-            indices.extend_from_slice(&[l, l2, r, r, l2, r2]);
+    }
+    if !lo.is_finite() {
+        lo = 0.0;
+        hi = 0.0;
+    }
+    Aabb::from_min_max(
+        Vec3::new(0.0, lo - 0.5, 0.0),
+        Vec3::new(CHUNK_M, hi + BLADE_MAX_HEIGHT_M + 0.5, CHUNK_M),
+    )
+}
+
+fn chunk_centre(cx: i32, cz: i32) -> Vec2 {
+    Vec2::new((cx as f32 + 0.5) * CHUNK_M, (cz as f32 + 0.5) * CHUNK_M)
+}
+
+/// One blade as a strip: two vertices per segment and a single tip.
+/// `position.x` is the side, `position.y` the height fraction.
+fn blade_template(segments: u32) -> Mesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    for k in 0..=segments {
+        let t = k as f32 / segments as f32;
+        let sides: &[f32] = if k == segments { &[0.0] } else { &[-1.0, 1.0] };
+        for side in sides {
+            positions.push([*side, t, 0.0]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([0.5 + 0.5 * side, t]);
         }
-        indices.extend_from_slice(&[base + 4, base + 6, base + 5]);
     }
-    if positions.is_empty() {
-        return None;
+    let mut indices = Vec::new();
+    for k in 0..segments.saturating_sub(1) {
+        let l = k * 2;
+        indices.extend_from_slice(&[l, l + 2, l + 1, l + 1, l + 2, l + 3]);
     }
-    Some(
-        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-            .with_inserted_indices(Indices::U32(indices)),
+    let last = (segments - 1) * 2;
+    indices.extend_from_slice(&[last, last + 2, last + 1]);
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices))
+}
+
+
+/// RGBA32F texels of (height, normal x, normal z, 0) for the grass shader.
+fn heightmap_image(grid: &HeightGrid) -> Image {
+    let mut texels: Vec<f32> = Vec::with_capacity(grid.cols * grid.rows * 4);
+    for i in 0..grid.rows {
+        for j in 0..grid.cols {
+            let normal = grid.normal_at_index(i, j);
+            texels.extend_from_slice(&[grid.at(i, j), normal.x, normal.z, 0.0]);
+        }
+    }
+    Image::new(
+        Extent3d { width: grid.cols as u32, height: grid.rows as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        bytemuck::cast_slice(&texels).to_vec(),
+        TextureFormat::Rgba32Float,
+        RenderAssetUsages::RENDER_WORLD,
     )
 }
 

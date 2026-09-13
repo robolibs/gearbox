@@ -3586,6 +3586,7 @@ dependencies = [
  "agentio",
  "anyhow",
  "bevy",
+ "bytemuck",
  "datapod",
  "egui",
  "gearbox-api",

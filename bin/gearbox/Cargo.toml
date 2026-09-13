@@ -40,6 +40,7 @@ gearbox-api = { workspace = true, features = ["bevy"] }
 # rapier3d-f64 — needed to spawn the static ground collider directly
 # into `usd_bevy::physics::PhysicsWorld`.
 rapier3d.workspace = true
+bytemuck = "1"
 glam = "0.30"
 egui.workspace = true
 tracing.workspace = true

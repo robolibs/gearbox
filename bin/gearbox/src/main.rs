@@ -25,6 +25,7 @@ mod load;
 mod physics;
 mod physics_debug;
 mod services;
+mod grass;
 mod terrain;
 mod usd_ext;
 mod viewer;
@@ -67,7 +68,7 @@ fn init_tracing(log: &LoaderLog) {
     let _ = std::fs::write(LOG_FILE, "");
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
-            "warn,gearbox=info,gearbox_sim=info,gearbox_api=info,usd_bevy=info,agentio=error",
+            "warn,gearbox=info,gearbox_sim=info,gearbox_api=info,usd_bevy=info,bevy_diagnostic=info,agentio=error",
         )
     });
     let to_file = || {

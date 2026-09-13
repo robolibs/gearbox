@@ -63,8 +63,19 @@ pub fn run(cli_paths: Vec<PathBuf>, log: LoaderLog) -> Result<(), Box<dyn std::e
     *INIT.lock().unwrap() = Some(HostInit { cli_paths, log });
     mara::window::AppRunner::new()
         .title("gearbox — USD simulator")
-        .size(1400.0, 900.0)
+        .size(window_size().0, window_size().1)
         .run::<GearboxApp>()
+}
+
+/// `GEARBOX_WINDOW=WxH` sizes the window in points; 1400x900 by default.
+fn window_size() -> (f32, f32) {
+    std::env::var("GEARBOX_WINDOW")
+        .ok()
+        .and_then(|value| {
+            let (w, h) = value.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or((1400.0, 900.0))
 }
 
 /// `GEARBOX_OPEN_PANEL=agents|machine|selection|info|overlays|log|tree`
