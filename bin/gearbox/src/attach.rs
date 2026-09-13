@@ -322,8 +322,34 @@ fn set_cross_collisions(
             .fold(Group::NONE, |acc, c| acc | c.collision_groups().memberships)
     }
     let (ca, cb) = (colliders_of(physics, a), colliders_of(physics, b));
+    // Machines that are not articulations sit in every group; give each
+    // one its own bit first, or there is nothing to mask out.
+    let mut taken = Group::NONE;
+    for (handles, bodies) in [(&ca, a), (&cb, b)] {
+        let current = memberships(physics, handles);
+        if current != Group::ALL {
+            taken |= current;
+            continue;
+        }
+        let seed = bodies.first().map_or(0, |h| h.into_raw_parts().0);
+        let mut bit = Group::from_bits_truncate(1 << ((seed % 31) + 1));
+        while taken.contains(bit) {
+            bit = Group::from_bits_truncate((bit.bits() << 1).max(2) & !1);
+            if bit == Group::NONE {
+                bit = Group::GROUP_2;
+            }
+        }
+        taken |= bit;
+        for h in handles.iter() {
+            if let Some(c) = physics.colliders.get_mut(*h) {
+                let mut groups = c.collision_groups();
+                groups.memberships = bit;
+                c.set_collision_groups(groups);
+            }
+        }
+    }
     let (ma, mb) = (memberships(physics, &ca), memberships(physics, &cb));
-    if ma == Group::ALL || mb == Group::ALL {
+    if ma == mb {
         return;
     }
     for (handles, other) in [(&ca, mb), (&cb, ma)] {

@@ -1720,18 +1720,14 @@ fn apply_rapier_raycast_vehicle_controller(
     true
 }
 
-/// Every wheel of every driven machine, every frame, for the grass trample
-/// map: the wheel body's footprint, oriented along its own axle, rolling
-/// the way the chassis moves (its heading when it stands still).
+/// Every wheel of every machine, every frame, for the grass trample map:
+/// each wheel link of the link tree that touches the ground, oriented along
+/// its own axle and rolling the way it moves (the chassis heading when it
+/// stands still). Trailers and robots press the grass like tractors.
 fn record_wheel_tracks(
     inventory: Res<ControllerInventory>,
     active: Res<gearbox_api::PhysicsActive>,
     prims: Query<(Entity, &UsdPrimRef)>,
-    joints: Query<(
-        Entity,
-        &UsdPrimRef,
-        &crate::physics::markers::UsdPhysicsJoint,
-    )>,
     parents: Query<&ChildOf>,
     physics: Res<crate::physics::PhysicsWorld>,
     mut contacts: ResMut<crate::grass::WheelContacts>,
@@ -1739,66 +1735,69 @@ fn record_wheel_tracks(
     if !active.0 {
         return;
     }
+    let body_of = |scene_root: Entity, prim: &str| {
+        let entity = find_prim_entity(scene_root, prim, &prims, &parents)?;
+        let handle = physics.entity_to_body.get(&entity).copied()?;
+        Some(handle)
+    };
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {
             continue;
         };
-        for controller in &machine.controllers {
-            if !controller.enabled || controller.controller_type != "builtin:ackermann_cmd_vel" {
+        let heading = machine
+            .body
+            .as_deref()
+            .and_then(|p| body_of(scene_root, p))
+            .and_then(|h| physics.bodies.get(h))
+            .map(|b| {
+                let f = b.rotation() * Vector::new(0.0, -1.0, 0.0);
+                Vec2::new(f.x as f32, f.z as f32)
+            });
+        for link in &machine.links.links {
+            if link.role != crate::links::LinkRole::Wheel {
                 continue;
             }
-            let Some(body_path) = controller.body.as_ref().or(machine.body.as_ref()) else {
-                continue;
-            };
-            let Some(body_entity) = find_prim_entity(scene_root, body_path, &prims, &parents)
+            let Some(handle) = link.body_prim.as_deref().and_then(|p| body_of(scene_root, p))
             else {
                 continue;
             };
-            let Some(chassis) = physics.entity_to_body.get(&body_entity).copied() else {
+            let Some(body) = physics.bodies.get(handle) else {
                 continue;
             };
-            let Some(chassis_body) = physics.bodies.get(chassis) else {
+            let Some((axle_local, width, radius)) = body_tyre_geometry(&physics, handle) else {
                 continue;
             };
-            let forward = chassis_body.rotation() * Vector::new(0.0, -1.0, 0.0);
-            let heading = Vec2::new(forward.x as f32, forward.z as f32).normalize_or(Vec2::X);
-            let velocity =
-                Vec2::new(chassis_body.linvel().x as f32, chassis_body.linvel().z as f32);
-            let travel = if velocity.length() > 0.05 { velocity } else { heading };
-            for pair in tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics)
-            {
-                let Some(wheel) = wheel_body_of(&physics, chassis, pair) else {
-                    continue;
-                };
-                let Some(body) = physics.bodies.get(wheel) else {
-                    continue;
-                };
-                let Some((axle_local, width)) = body_tyre_axle_and_width(&physics, wheel) else {
-                    continue;
-                };
-                let axle_world = body.rotation() * axle_local;
-                let axle = Vec2::new(axle_world.x as f32, axle_world.z as f32).normalize_or(Vec2::X);
-                let mut roll = axle.perp();
-                if roll.dot(travel) < 0.0 {
-                    roll = -roll;
-                }
-                let p = body.translation();
-                contacts.contacts.push(crate::grass::WheelContact {
-                    position: Vec3::new(p.x as f32, p.y as f32, p.z as f32),
-                    direction: roll,
-                    width: width as f32,
-                });
+            let p = body.translation();
+            let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
+            if p.y as f32 - radius as f32 > ground + WHEEL_TRACK_CONTACT_SLACK_M {
+                continue;
             }
+            let axle_world = body.rotation() * axle_local;
+            let axle = Vec2::new(axle_world.x as f32, axle_world.z as f32).normalize_or(Vec2::X);
+            let mut roll = axle.perp();
+            let velocity = Vec2::new(body.linvel().x as f32, body.linvel().z as f32);
+            let travel = if velocity.length() > 0.05 { velocity } else { heading.unwrap_or(roll) };
+            if roll.dot(travel) < 0.0 {
+                roll = -roll;
+            }
+            contacts.contacts.push(crate::grass::WheelContact {
+                position: Vec3::new(p.x as f32, ground, p.z as f32),
+                direction: roll,
+                width: width as f32,
+            });
         }
     }
 }
 
-/// The tyre's axle in the wheel body's frame and its width: the thinnest
-/// axis of the largest collider's local box.
-fn body_tyre_axle_and_width(
+/// A wheel counts as on the ground while its lowest point is this close.
+const WHEEL_TRACK_CONTACT_SLACK_M: f32 = 0.08;
+
+/// The tyre's axle in the wheel body's frame, its width and its radius:
+/// the thinnest and the largest axis of the largest collider's local box.
+fn body_tyre_geometry(
     physics: &crate::physics::PhysicsWorld,
     body: RigidBodyHandle,
-) -> Option<(Vector, f64)> {
+) -> Option<(Vector, f64, f64)> {
     let body = physics.bodies.get(body)?;
     let collider = body
         .colliders()
@@ -1820,7 +1819,7 @@ fn body_tyre_axle_and_width(
         Some(pose) => pose.rotation * axis,
         None => axis,
     };
-    Some((axis, width))
+    Some((axis, width, half.max_element()))
 }
 
 
