@@ -41,6 +41,9 @@ pub struct Attachment {
     pub controlled: bool,
     /// Slave requests the master does not grant (`TOOLS_SPEC.md` §5.3).
     pub denied: Vec<String>,
+    /// The slave's parking stand (`gearbox:coupling:stand` on the coupler),
+    /// hidden and without collision while hitched.
+    pub stand: Option<String>,
 }
 
 #[derive(Resource, Default)]
@@ -392,6 +395,60 @@ fn remove_hitch_joint(physics: &mut PhysicsWorld, joint: HitchJoint) {
     }
 }
 
+/// The prim a slave's coupler names as its parking stand.
+fn stand_of(
+    scene: &Scene,
+    instances: Option<&usd_bevy::instance::UsdInstances>,
+    slave_ns: &str,
+    coupler: &str,
+) -> Option<String> {
+    let slave = scene.machine(slave_ns)?;
+    let stage = instances?.stage(slave.scene_root?)?;
+    let link = slave
+        .links
+        .links
+        .iter()
+        .find(|l| l.coupling.as_ref().is_some_and(|c| c.name == coupler))?;
+    let prim = openusd::sdf::path(&link.prim_path).ok()?;
+    crate::controller::read_rel_first(stage, &prim, "gearbox:coupling:stand")
+}
+
+/// Hitched, a slave selects its `coupling` variant `hitched` (the stand
+/// disappears) and the stand stops colliding; parked reverses both.
+fn set_stand(
+    scene: &Scene,
+    physics: &mut PhysicsWorld,
+    overrides: &mut Query<&mut usd_bevy::instance::UsdInstanceOverrides>,
+    slave_ns: &str,
+    stand: &str,
+    hitched: bool,
+) {
+    let Some(slave) = scene.machine(slave_ns) else {
+        return;
+    };
+    if let Some(body) = scene.body(slave, stand, physics) {
+        let colliders: Vec<_> = physics
+            .bodies
+            .get(body)
+            .map(|b| b.colliders().to_vec())
+            .unwrap_or_default();
+        for handle in colliders {
+            if let Some(c) = physics.colliders.get_mut(handle) {
+                c.set_enabled(!hitched);
+            }
+        }
+    }
+    let Some(root) = slave.scene_root else {
+        return;
+    };
+    let option = if hitched { "hitched" } else { "parked" };
+    info!("gearbox-attach: `{slave_ns}` stand {stand} {option}");
+    if let Ok(mut o) = overrides.get_mut(root) {
+        o.variants.retain(|(prim, set, _)| !(prim == &slave.prim_path && set == "coupling"));
+        o.variants.push((slave.prim_path.clone(), "coupling".to_string(), option.to_string()));
+    }
+}
+
 /// Does `candidate_master` already hang, directly or through others, below
 /// `slave`? Attaching would then close a loop.
 fn would_loop(attachments: &[Attachment], candidate_master: &str, slave: &str) -> bool {
@@ -619,6 +676,7 @@ fn try_attach(
             slave_mass_kg,
             controlled: !slave.controllers.is_empty(),
             denied,
+            stand: None,
         },
         event,
     })
@@ -723,6 +781,8 @@ pub(crate) fn serve_attachments(
     prims: Query<(Entity, &'static UsdPrimRef)>,
     parents: Query<&'static ChildOf>,
     transforms: Query<&'static GlobalTransform>,
+    instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
+    mut overrides: Query<&mut usd_bevy::instance::UsdInstanceOverrides>,
 ) {
     let Some(mut bus) = bus else { return };
     let scene = Scene {
@@ -834,8 +894,13 @@ pub(crate) fn serve_attachments(
     for (master_ns, req, token) in attach_reqs {
         let outcome = try_attach(&master_ns, &req, &scene, &bus, &mut physics, &attachments.0);
         let status = match outcome {
-            Ok(done) => {
+            Ok(mut done) => {
                 let slave_ns = done.attachment.slave_ns.clone();
+                done.attachment.stand =
+                    stand_of(&scene, instances.as_deref(), &slave_ns, &done.attachment.coupler);
+                if let Some(stand) = done.attachment.stand.clone() {
+                    set_stand(&scene, physics.as_mut(), &mut overrides, &slave_ns, &stand, true);
+                }
                 info!(
                     "gearbox-attach: `{slave_ns}` on `{master_ns}` via {} / {} ({})",
                     done.attachment.hitch, done.attachment.coupler, done.attachment.kind
@@ -884,6 +949,9 @@ pub(crate) fn serve_attachments(
                     if let (Some(m), Some(s)) = (scene.machine(&master_ns), scene.machine(&slave_ns)) {
                         let (mb, sb) = (scene.bodies(m, &physics), scene.bodies(s, &physics));
                         set_cross_collisions(physics.as_mut(), &mb, &sb, true);
+                    }
+                    if let Some(stand) = a.stand.as_deref() {
+                        set_stand(&scene, physics.as_mut(), &mut overrides, &slave_ns, stand, false);
                     }
                     if let Some(slave) = bus.machines.get_mut(&slave_ns) {
                         slave.set_attached_to(None);

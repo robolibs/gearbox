@@ -733,8 +733,16 @@ fn auto_trailer_steer(
         .and_then(|h| physics.bodies.get(*h))?;
     let heading = body_forward_vector(body).map(|f| f.x.atan2(f.z))?;
     let diff = master.heading_rad - heading;
-    Some((diff + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI)
+    let articulation =
+        (diff + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+    // Forced steering: the steered axle sits behind the coupler, so it turns
+    // against the tractor's turn and the trailer tracks the tractor's path. A
+    // positive angle turns the wheels to the trailer's left.
+    Some(-TRAILER_STEER_GAIN * articulation)
 }
+
+/// Trailer steer angle per radian of articulation between tractor and trailer.
+const TRAILER_STEER_GAIN: f64 = 1.0;
 
 fn element_kind(link: &LinkSpec) -> Option<&str> {
     link.element.as_ref().map(|e| e.kind.as_str())
