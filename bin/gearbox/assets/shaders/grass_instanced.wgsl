@@ -14,11 +14,44 @@ struct GrassParams {
     fade_end: f32,
     blades_per_chunk: f32,
     texel_count: f32,
+    trample_texels_per_metre: f32,
+    trample_texel_count: f32,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
 @group(3) @binding(1) var heightmap_sampler: sampler;
 @group(3) @binding(2) var<uniform> field: GrassParams;
+@group(3) @binding(3) var trample: texture_2d<u32>;
+
+const TRAMPLE_CLOCK_S: f32 = 3600.0;
+const TRAMPLE_RECOVER_S: f32 = 45.0;
+
+// One trample texel: how pressed (0..1, recovering with age) and the roll
+// direction scaled by it. Angle 0 marks a texel no wheel ever touched.
+fn trample_texel(index: vec2<i32>) -> vec3<f32> {
+    let texel = textureLoad(trample, index, 0);
+    if (texel.g == 0u) {
+        return vec3<f32>(0.0);
+    }
+    let stamped = f32(texel.r) / 65535.0 * TRAMPLE_CLOCK_S;
+    let age = (globals.time - stamped + TRAMPLE_CLOCK_S) % TRAMPLE_CLOCK_S;
+    let press = 1.0 - clamp(age / TRAMPLE_RECOVER_S, 0.0, 1.0);
+    let angle = f32(texel.g - 1u) / 65534.0 * 6.2831853 - 3.1415927;
+    return vec3<f32>(press, cos(angle) * press, sin(angle) * press);
+}
+
+// Bilinear read of the trample map at a world XZ position.
+fn sample_trample(world_xz: vec2<f32>) -> vec3<f32> {
+    let t = (world_xz - field.origin) * field.trample_texels_per_metre;
+    let max_index = i32(field.trample_texel_count) - 1;
+    let i = clamp(vec2<i32>(floor(t)), vec2<i32>(0), vec2<i32>(max_index - 1));
+    let f = clamp(t - vec2<f32>(i), vec2<f32>(0.0), vec2<f32>(1.0));
+    let s00 = trample_texel(i);
+    let s10 = trample_texel(i + vec2<i32>(1, 0));
+    let s01 = trample_texel(i + vec2<i32>(0, 1));
+    let s11 = trample_texel(i + vec2<i32>(1, 1));
+    return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+}
 
 // The blade template: position.x is the side (-1, 0, 1), position.y the
 // height fraction. Everything else is derived from the instance index.
@@ -101,6 +134,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     let t = vertex.position.y;
     let side = vertex.position.x;
+
+    // A wheel that rolled over this spot lays the blade flat along its
+    // direction; it springs back over TRAMPLE_RECOVER_S.
+    let pressed = sample_trample(base_xz);
+    let flat = clamp(pressed.x, 0.0, 1.0);
+    let roll = vec3<f32>(pressed.y, 0.0, pressed.z);
     let yaw = seed * 6.2831853;
     let height = (BLADE_MIN_HEIGHT + (BLADE_MAX_HEIGHT - BLADE_MIN_HEIGHT) * rand(id, 6u)) * alive;
     let width = (BLADE_MIN_WIDTH + (BLADE_MAX_WIDTH - BLADE_MIN_WIDTH) * rand(id, 7u)) * widen;
@@ -118,7 +157,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let bend = t * t * WIND_SWAY * height * (0.55 + gust) * alive;
 
     var p = vec3<f32>(base_xz.x, ground_y, base_xz.y)
-        + vec3<f32>(0.0, 1.0, 0.0) * (height * t)
+        + vec3<f32>(0.0, 1.0, 0.0) * (height * t * (1.0 - 0.9 * flat))
+        + roll * (height * t * 0.9)
         + lean * (height * t * t)
         + right * (width * 0.5 * side * (1.0 - t * 0.85) * alive)
         + WIND_DIR * bend;
@@ -134,7 +174,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.world_position = vec4<f32>(p, 1.0);
     out.clip_position = view.clip_from_world * vec4<f32>(p, 1.0);
     out.world_normal = normalize(ground_normal + lean_dir * 0.3);
-    out.color = vec4<f32>(mix(root, tip, t), 1.0);
+    out.color = vec4<f32>(mix(root, tip, t) * (1.0 - 0.25 * flat), 1.0);
     return out;
 }
 

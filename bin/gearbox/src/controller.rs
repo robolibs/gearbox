@@ -952,6 +952,7 @@ fn apply_builtin_ackermann_cmd_vel(
     mut states: ResMut<ControllerStates>,
     active: Res<gearbox_api::PhysicsActive>,
     towed: Res<crate::attach::TowedMass>,
+    mut wheel_contacts: ResMut<crate::grass::WheelContacts>,
     prims: Query<(Entity, &UsdPrimRef)>,
     joints: Query<(
         Entity,
@@ -1102,6 +1103,7 @@ fn apply_builtin_ackermann_cmd_vel(
                 cmd,
                 steer_target_rad,
                 towed.0.get(&machine.id).copied().unwrap_or(0.0),
+                &mut wheel_contacts.contacts,
             );
             if using_raycast_vehicle {
                 // Raycast traction moves the chassis; the USD wheel rigid
@@ -1600,6 +1602,7 @@ fn apply_rapier_raycast_vehicle_controller(
     cmd: CmdVel,
     steer_target_rad: f64,
     towed_mass_kg: f64,
+    wheel_contacts: &mut Vec<crate::grass::WheelContact>,
 ) -> bool {
     if tire_pairs.is_empty() || wheel_specs.is_empty() {
         return false;
@@ -1716,7 +1719,40 @@ fn apply_rapier_raycast_vehicle_controller(
     );
     vehicle.update_vehicle(physics.integration_parameters.dt as f64, queries);
     log_raycast_wheels(&vehicle, current_speed, force_per_rear, mass_scale);
+    record_wheel_contacts(physics, chassis, &vehicle, wheel_contacts);
     true
+}
+
+/// Every wheel touching the ground, rolling the way the chassis moves (its
+/// heading when it stands still), for the grass trample map.
+fn record_wheel_contacts(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    vehicle: &DynamicRayCastVehicleController,
+    out: &mut Vec<crate::grass::WheelContact>,
+) {
+    let Some(body) = physics.bodies.get(chassis) else {
+        return;
+    };
+    let forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
+    let mut direction = Vec2::new(forward.x as f32, forward.z as f32);
+    let velocity = Vec2::new(body.linvel().x as f32, body.linvel().z as f32);
+    if velocity.length() > 0.05 {
+        direction = velocity;
+    }
+    let direction = direction.normalize_or(Vec2::X);
+    for wheel in vehicle.wheels() {
+        let info = wheel.raycast_info();
+        if !info.is_in_contact {
+            continue;
+        }
+        let p = info.contact_point_ws;
+        out.push(crate::grass::WheelContact {
+            position: Vec3::new(p.x as f32, p.y as f32, p.z as f32),
+            direction,
+            width: (wheel.radius * 0.6) as f32,
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

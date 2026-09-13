@@ -6,6 +6,7 @@
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
+    mesh_view_bindings::globals,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -16,6 +17,35 @@ var grass_albedo_sampler: sampler;
 var dirt_albedo: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103)
 var dirt_albedo_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(104)
+var trample: texture_2d<u32>;
+// origin x, origin z, texels per metre, texel count.
+@group(#{MATERIAL_BIND_GROUP}) @binding(105)
+var<uniform> trample_params: vec4<f32>;
+
+const TRAMPLE_CLOCK_S: f32 = 3600.0;
+const TRAMPLE_RECOVER_S: f32 = 45.0;
+
+// How pressed the ground is here (0..1); wheel stamps recover with age.
+fn trample_at(index: vec2<i32>) -> f32 {
+    let texel = textureLoad(trample, index, 0);
+    if (texel.g == 0u) {
+        return 0.0;
+    }
+    let stamped = f32(texel.r) / 65535.0 * TRAMPLE_CLOCK_S;
+    let age = (globals.time - stamped + TRAMPLE_CLOCK_S) % TRAMPLE_CLOCK_S;
+    return 1.0 - clamp(age / TRAMPLE_RECOVER_S, 0.0, 1.0);
+}
+
+fn trample_pressed(world_xz: vec2<f32>) -> f32 {
+    let t = (world_xz - trample_params.xy) * trample_params.z;
+    let max_index = i32(trample_params.w) - 1;
+    let i = clamp(vec2<i32>(floor(t)), vec2<i32>(0), vec2<i32>(max_index - 1));
+    let f = clamp(t - vec2<f32>(i), vec2<f32>(0.0), vec2<f32>(1.0));
+    let s0 = mix(trample_at(i), trample_at(i + vec2<i32>(1, 0)), f.x);
+    let s1 = mix(trample_at(i + vec2<i32>(0, 1)), trample_at(i + vec2<i32>(1, 1)), f.x);
+    return mix(s0, s1, f.y);
+}
 
 fn luma(c: vec4<f32>) -> f32 {
     return dot(c.rgb, vec3<f32>(0.30, 0.59, 0.11));
@@ -131,7 +161,8 @@ fn meadow_color(world_xz: vec2<f32>, normal: vec3<f32>) -> vec4<f32> {
     let steep = 1.0 - saturate((normal.y - 0.80) / 0.12);
     let worn = smooth01((fbm(world_xz * 0.02 + vec2<f32>(71.0, -113.0)) - 0.66) / 0.10) * 0.35;
     let mask = smooth01((steep + worn - (grass_h - dirt_h) * 0.5 - 0.25) / 0.35);
-    return mix(g, d, mask);
+    let pressed = trample_pressed(world_xz);
+    return mix(g, d, mask) * (1.0 - 0.3 * pressed);
 }
 
 @fragment

@@ -17,6 +17,7 @@ use rapier3d::math::Vector as DVec3;
 use rapier3d::prelude::{ColliderBuilder, ColliderHandle};
 
 use crate::grass::{GrassChunkDraw, GrassField, GrassParams};
+use bevy::asset::RenderAssetUsages as Usages;
 use crate::physics::PhysicsWorld;
 use crate::world::{
     FlatGround, TerrainCollision, asset_path, fbm_world, remove_flat_ground, smooth_hill,
@@ -49,6 +50,8 @@ const GRASS_FADE_END_M: f32 = 40.0;
 /// triangle at any range.
 const GRASS_LODS: [(f32, u32); 1] = [(f32::INFINITY, 1)];
 const BLADE_MAX_HEIGHT_M: f32 = 0.12;
+/// Trample map resolution; a tractor tyre is two texels wide.
+const TRAMPLE_TEXELS_PER_M: f32 = 4.0;
 
 static HEIGHT_GRID: RwLock<Option<Arc<HeightGrid>>> = RwLock::new(None);
 
@@ -196,6 +199,11 @@ struct MeadowExtension {
     #[texture(102)]
     #[sampler(103)]
     dirt_albedo: Handle<Image>,
+    #[texture(104, sample_type = "u_int")]
+    trample: Handle<Image>,
+    /// origin x, origin z, texels per metre, texel count of the trample map.
+    #[uniform(105)]
+    trample_params: Vec4,
 }
 
 impl MaterialExtension for MeadowExtension {
@@ -249,6 +257,14 @@ fn spawn_procedural_terrain(
         return;
     }
     let started = std::time::Instant::now();
+    let trample_count = (SIZE_M * TRAMPLE_TEXELS_PER_M) as u32 + 1;
+    let trample = images.add(Image::new_fill(
+        Extent3d { width: trample_count, height: trample_count, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        &[0u8; 4],
+        TextureFormat::Rg16Uint,
+        Usages::RENDER_WORLD,
+    ));
     let cell = std::env::var("GEARBOX_TERRAIN_CELL_M")
         .ok()
         .and_then(|value| value.parse::<f32>().ok())
@@ -274,6 +290,13 @@ fn spawn_procedural_terrain(
             dirt_albedo: asset_server.load(asset_path(
                 "textures/terrain/Ground001/Ground001_1K-JPG_Color.jpg",
             )),
+            trample: trample.clone(),
+            trample_params: Vec4::new(
+                -SIZE_M * 0.5,
+                -SIZE_M * 0.5,
+                TRAMPLE_TEXELS_PER_M,
+                trample_count as f32,
+            ),
         },
     });
     let entity = commands
@@ -311,6 +334,7 @@ fn spawn_procedural_terrain(
     if density > 0.0 {
         commands.insert_resource(GrassField {
             heightmap: images.add(heightmap_image(&grid)),
+            trample,
             params: GrassParams {
                 corner: Vec2::ZERO,
                 origin: Vec2::new(grid.min_x, grid.min_z),
@@ -320,6 +344,8 @@ fn spawn_procedural_terrain(
                 fade_end: GRASS_FADE_END_M,
                 blades_per_chunk: chunks.blades_per_chunk,
                 texel_count: grid.cols as f32,
+                trample_texels_per_metre: TRAMPLE_TEXELS_PER_M,
+                trample_texel_count: trample_count as f32,
             },
         });
     }

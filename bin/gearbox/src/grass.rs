@@ -55,12 +55,49 @@ impl ExtractComponent for GrassChunkDraw {
     }
 }
 
-/// The terrain heightmap (RGBA32F: height, normal x, normal z) and the
-/// numbers the shader needs to place blades on it.
+/// The terrain heightmap (RGBA32F: height, normal x, normal z), the trample
+/// map wheels write into (RG16Uint: press time, roll direction), and the
+/// numbers the shader needs to place blades on them.
 #[derive(Resource, ExtractResource, Clone)]
 pub struct GrassField {
     pub heightmap: Handle<Image>,
+    pub trample: Handle<Image>,
     pub params: GrassParams,
+}
+
+/// One wheel on the ground this frame: where, which way it rolls, how wide.
+#[derive(Clone, Copy, Debug)]
+pub struct WheelContact {
+    pub position: Vec3,
+    pub direction: Vec2,
+    pub width: f32,
+}
+
+/// Wheel contacts collected by the controllers during one frame, stamped
+/// into the trample map by the render world.
+#[derive(Resource, ExtractResource, Clone, Default)]
+pub struct WheelContacts {
+    pub contacts: Vec<WheelContact>,
+    /// `Time::elapsed_secs_wrapped` this frame, the clock the stamps carry.
+    pub now: f32,
+}
+
+/// Wheel contacts are stamped into a wrapped-time clock with this period;
+/// it has to match `Time`'s wrap period.
+pub const TRAMPLE_CLOCK_S: f32 = 3600.0;
+
+/// Encodes a stamp: time on the wrapped clock and roll direction as an angle;
+/// 0 in the angle channel means never stamped.
+pub fn trample_texel(now: f32, direction: Vec2) -> [u16; 2] {
+    let time = ((now.rem_euclid(TRAMPLE_CLOCK_S) / TRAMPLE_CLOCK_S) * 65535.0).round() as u16;
+    let angle = (direction.y.atan2(direction.x) + std::f32::consts::PI) / std::f32::consts::TAU;
+    let angle = ((angle * 65534.0).round() as u16).saturating_add(1);
+    [time, angle]
+}
+
+fn begin_wheel_contacts(mut contacts: ResMut<WheelContacts>, time: Res<Time>) {
+    contacts.contacts.clear();
+    contacts.now = time.elapsed_secs_wrapped();
 }
 
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
@@ -79,6 +116,8 @@ pub struct GrassParams {
     /// Blades per chunk at full density.
     pub blades_per_chunk: f32,
     pub texel_count: f32,
+    pub trample_texels_per_metre: f32,
+    pub trample_texel_count: f32,
 }
 
 pub struct GrassPlugin;
@@ -89,7 +128,10 @@ impl Plugin for GrassPlugin {
         app.add_plugins((
             ExtractComponentPlugin::<GrassChunkDraw>::default(),
             ExtractResourcePlugin::<GrassField>::default(),
-        ));
+            ExtractResourcePlugin::<WheelContacts>::default(),
+        ))
+        .init_resource::<WheelContacts>()
+        .add_systems(First, begin_wheel_contacts);
         app.sub_app_mut(RenderApp)
             .add_render_command::<Transparent3d, DrawGrass>()
             .init_resource::<SpecializedMeshPipelines<GrassPipeline>>()
@@ -100,6 +142,7 @@ impl Plugin for GrassPlugin {
                 (
                     queue_grass.in_set(RenderSystems::QueueMeshes),
                     prepare_grass_uniforms.in_set(RenderSystems::PrepareResources),
+                    stamp_wheel_contacts.in_set(RenderSystems::PrepareResources),
                     prepare_grass_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
             );
@@ -218,17 +261,69 @@ fn prepare_grass_bind_group(
         commands.remove_resource::<GrassBindGroup>();
         return;
     };
-    let (Some(image), Some(binding)) = (images.get(&field.heightmap), uniforms.0.binding())
-    else {
+    let (Some(image), Some(trample), Some(binding)) = (
+        images.get(&field.heightmap),
+        images.get(&field.trample),
+        uniforms.0.binding(),
+    ) else {
         commands.remove_resource::<GrassBindGroup>();
         return;
     };
     let bind_group = render_device.create_bind_group(
         "grass field",
         &pipeline_cache.get_bind_group_layout(&pipeline.field_layout),
-        &BindGroupEntries::sequential((&image.texture_view, &pipeline.sampler, binding)),
+        &BindGroupEntries::sequential((
+            &image.texture_view,
+            &pipeline.sampler,
+            binding,
+            &trample.texture_view,
+        )),
     );
     commands.insert_resource(GrassBindGroup(bind_group));
+}
+
+/// Writes each wheel's footprint into the trample map: a small square of
+/// texels carrying this frame's clock and the roll direction.
+fn stamp_wheel_contacts(
+    field: Option<Res<GrassField>>,
+    contacts: Option<Res<WheelContacts>>,
+    images: Res<RenderAssets<GpuImage>>,
+    render_queue: Res<RenderQueue>,
+) {
+    let (Some(field), Some(contacts)) = (field, contacts) else {
+        return;
+    };
+    if contacts.contacts.is_empty() {
+        return;
+    }
+    let Some(trample) = images.get(&field.trample) else {
+        return;
+    };
+    let tpm = field.params.trample_texels_per_metre;
+    let count = field.params.trample_texel_count as i32;
+    for contact in &contacts.contacts {
+        let centre_x = ((contact.position.x - field.params.origin.x) * tpm).round() as i32;
+        let centre_z = ((contact.position.z - field.params.origin.y) * tpm).round() as i32;
+        let half = ((contact.width * 0.5 * tpm).ceil() as i32).max(1);
+        let x0 = (centre_x - half).clamp(0, count - 1);
+        let x1 = (centre_x + half).clamp(0, count - 1);
+        let z0 = (centre_z - half).clamp(0, count - 1);
+        let z1 = (centre_z + half).clamp(0, count - 1);
+        if x1 < x0 || z1 < z0 {
+            continue;
+        }
+        let (width, height) = ((x1 - x0 + 1) as u32, (z1 - z0 + 1) as u32);
+        let texel = trample_texel(contacts.now, contact.direction);
+        let data: Vec<u16> = texel.iter().copied().cycle().take((width * height * 2) as usize).collect();
+        let mut target = trample.texture.as_image_copy();
+        target.origin = Origin3d { x: x0 as u32, y: z0 as u32, z: 0 };
+        render_queue.write_texture(
+            target,
+            bytemuck::cast_slice(&data),
+            TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: None },
+            Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+    }
 }
 
 #[derive(Resource)]
@@ -253,6 +348,7 @@ fn init_grass_pipeline(
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 sampler(SamplerBindingType::NonFiltering),
                 uniform_buffer::<GrassParams>(true),
+                texture_2d(TextureSampleType::Uint),
             ),
         ),
     );
