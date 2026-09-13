@@ -9,7 +9,7 @@ use bevy::asset::{AssetPlugin, UnapprovedPathMode};
 use bevy::prelude::*;
 use mara::ui::modules::bevy::BevyViewportInput;
 
-use crate::{attach, controller, load, physics, physics_debug, services, viewer, world};
+use crate::{attach, controller, load, physics, physics_debug, services, terrain, viewer, world};
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
 pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
@@ -43,6 +43,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>) {
         .add_plugins(gearbox_api::UsdMarkerPlugin)
         // Simulator surface: planet world, machines, links, services.
         .add_plugins(world::WorldPlugin)
+        .add_plugins(terrain::TerrainPlugin)
         .add_plugins(controller::ControllerDiscoveryPlugin)
         .add_plugins(attach::AttachPlugin)
         .add_plugins(services::ServicesPlugin)

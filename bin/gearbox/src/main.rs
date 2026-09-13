@@ -25,6 +25,7 @@ mod load;
 mod physics;
 mod physics_debug;
 mod services;
+mod terrain;
 mod usd_ext;
 mod viewer;
 mod world;

@@ -257,7 +257,7 @@ struct AntiRepeatTerrainExtension {
 
 impl MaterialExtension for AntiRepeatTerrainExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox/../assets/shaders/terrain_material.wgsl".into()
+        "embedded://gearbox_sim/../assets/shaders/terrain_material.wgsl".into()
     }
 }
 
@@ -282,13 +282,13 @@ struct StaticUsdPhysicsProp {
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
-struct FlatGround {
+pub(crate) struct FlatGround {
     entity: Entity,
     collider: ColliderHandle,
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
-struct TerrainCollision {
+pub(crate) struct TerrainCollision {
     terrain: ColliderHandle,
     safety_floor: ColliderHandle,
 }
@@ -787,7 +787,7 @@ fn apply_anti_repeat_material_to_usd_terrain(
     }
 }
 
-fn asset_path(relative: &str) -> String {
+pub(crate) fn asset_path(relative: &str) -> String {
     crate::load::default_asset_root()
         .join(relative)
         .to_string_lossy()
@@ -945,7 +945,7 @@ fn remove_terrain_descendant_colliders(
     }
 }
 
-fn remove_flat_ground(commands: &mut Commands, physics: &mut PhysicsWorld, flat: FlatGround) {
+pub(crate) fn remove_flat_ground(commands: &mut Commands, physics: &mut PhysicsWorld, flat: FlatGround) {
     commands.entity(flat.entity).despawn();
     let colliders = &mut physics.colliders;
     let islands = &mut physics.islands;
@@ -1466,6 +1466,9 @@ fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity>
 }
 
 pub fn terrain_height_m(x: f32, z: f32) -> f32 {
+    if let Some(h) = crate::terrain::procedural_height_m(x, z) {
+        return h;
+    }
     if !USD_TERRAIN_LOADED.load(Ordering::Relaxed) {
         return 0.0;
     }
@@ -1535,7 +1538,7 @@ fn smoothstep_range(edge0: f32, edge1: f32, value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn smooth_hill(x: f32, z: f32, cx: f32, cz: f32, radius: f32, height: f32) -> f32 {
+pub(crate) fn smooth_hill(x: f32, z: f32, cx: f32, cz: f32, radius: f32, height: f32) -> f32 {
     let dx = x - cx;
     let dz = z - cz;
     let d2 = dx * dx + dz * dz;
@@ -1622,7 +1625,7 @@ fn fbm_tileable(u: f32, v: f32) -> f32 {
     (sum * 0.5 + 0.5).clamp(0.0, 1.0)
 }
 
-fn fbm_world(x: f32, z: f32, octaves: u32) -> f32 {
+pub(crate) fn fbm_world(x: f32, z: f32, octaves: u32) -> f32 {
     let mut sum = 0.0;
     let mut amp = 0.5;
     let mut freq = 1.0;
