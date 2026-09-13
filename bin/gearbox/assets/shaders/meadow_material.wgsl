@@ -38,26 +38,36 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453123);
 }
 
-fn noise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = smooth2(fract(p));
-    let a = hash21(i);
-    let b = hash21(i + vec2<f32>(1.0, 0.0));
-    let c = hash21(i + vec2<f32>(0.0, 1.0));
-    let d = hash21(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+// Gradient noise: value noise shows its lattice as a checkerboard at the
+// scales the ground uses, gradient noise does not.
+fn gradient(cell: vec2<f32>) -> vec2<f32> {
+    let angle = hash21(cell) * 6.2831853;
+    return vec2<f32>(cos(angle), sin(angle));
 }
 
+fn noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a = dot(gradient(i), f);
+    let b = dot(gradient(i + vec2<f32>(1.0, 0.0)), f - vec2<f32>(1.0, 0.0));
+    let c = dot(gradient(i + vec2<f32>(0.0, 1.0)), f - vec2<f32>(0.0, 1.0));
+    let d = dot(gradient(i + vec2<f32>(1.0, 1.0)), f - vec2<f32>(1.0, 1.0));
+    return 0.5 + 0.7 * mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Each octave is rotated so no axis of the lattice survives.
 fn fbm(p: vec2<f32>) -> f32 {
+    let rot = mat2x2<f32>(0.80, 0.60, -0.60, 0.80);
+    var q = p;
     var sum = 0.0;
     var amp = 0.5;
-    var freq = 1.0;
     var norm = 0.0;
     for (var i = 0; i < 3; i = i + 1) {
-        sum = sum + amp * noise(p * freq);
+        sum = sum + amp * noise(q);
         norm = norm + amp;
         amp = amp * 0.5;
-        freq = freq * 2.03;
+        q = rot * q * 2.03 + vec2<f32>(17.3, -9.1);
     }
     return sum / norm;
 }
@@ -109,7 +119,7 @@ fn meadow_color(world_xz: vec2<f32>, normal: vec3<f32>) -> vec4<f32> {
     g = mix(g, g * vec4<f32>(1.18, 1.06, 0.66, 1.0), dry * 0.55);
     let lush = smooth01((0.42 - macro_n) / 0.25);
     g = mix(g, g * vec4<f32>(0.82, 1.02, 0.78, 1.0), lush * 0.5);
-    let shade = 0.70 + fbm(world_xz * 0.05 + vec2<f32>(-31.0, 19.0)) * 0.42;
+    let shade = 0.86 + fbm(world_xz * 0.05 + vec2<f32>(-31.0, 19.0)) * 0.2;
     g = vec4<f32>(g.rgb * vec3<f32>(0.62, 0.70, 0.50) * shade * (0.88 + grass_h * 0.16), 1.0);
 
     let dirt = scatter_sample(dirt_albedo, dirt_albedo_sampler, world_xz / 2.2 + vec2<f32>(19.3, -7.1), 37.0);
