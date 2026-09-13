@@ -4452,24 +4452,27 @@ fn guard_chassis_inertia(
             mass / 12.0 * (ext.x * ext.x + ext.z * ext.z),
             mass / 12.0 * (ext.x * ext.x + ext.y * ext.y),
         );
+        // Compare in the body frame, where the box estimate lives: rapier's
+        // principal values are sorted into their own frame and do not line
+        // up with the collider axes.
         let props = body.mass_properties().local_mprops;
-        let authored = props.principal_inertia();
-        // Per axis: an authored value that is plausible stays.
-        let fix = |a: f64, e: f64| {
-            if a < e * INERTIA_PLAUSIBLE_FRACTION {
-                e
-            } else {
-                a
-            }
-        };
-        let estimate = Vector::new(
-            fix(authored.x, estimate.x),
-            fix(authored.y, estimate.y),
-            fix(authored.z, estimate.z),
-        );
-        if estimate == authored {
+        let mut tensor = props.reconstruct_inertia_matrix();
+        let authored = Vector::new(tensor.x_axis.x, tensor.y_axis.y, tensor.z_axis.z);
+        let too_small = |a: f64, e: f64| a < e * INERTIA_PLAUSIBLE_FRACTION;
+        if !too_small(authored.x, estimate.x)
+            && !too_small(authored.y, estimate.y)
+            && !too_small(authored.z, estimate.z)
+        {
             continue;
         }
+        let estimate = Vector::new(
+            if too_small(authored.x, estimate.x) { estimate.x } else { authored.x },
+            if too_small(authored.y, estimate.y) { estimate.y } else { authored.y },
+            if too_small(authored.z, estimate.z) { estimate.z } else { authored.z },
+        );
+        tensor.x_axis.x = estimate.x;
+        tensor.y_axis.y = estimate.y;
+        tensor.z_axis.z = estimate.z;
         let com = props.local_com;
         warn!(
             "gearbox-control: {} chassis inertia ({:.0}, {:.0}, {:.0}) is implausible for {:.0} kg over {:.1}x{:.1}x{:.1} m; using ({:.0}, {:.0}, {:.0})",
@@ -4487,7 +4490,7 @@ fn guard_chassis_inertia(
         );
         if let Some(body) = physics.bodies.get_mut(handle) {
             body.set_additional_mass_properties(
-                rapier3d::prelude::MassProperties::new(com, mass, estimate),
+                rapier3d::prelude::MassProperties::with_inertia_matrix(com, mass, tensor),
                 true,
             );
         }

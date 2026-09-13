@@ -14,8 +14,8 @@ use gearbox_api::{
 use peerbus::ReqReplyToken;
 use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::{
-    GenericJoint, GenericJointBuilder, ImpulseJointHandle, JointAxesMask, JointAxis, Pose,
-    RigidBodyHandle,
+    ColliderHandle, GenericJoint, GenericJointBuilder, Group, ImpulseJointHandle, JointAxesMask,
+    JointAxis, MultibodyJointHandle, Pose, RigidBodyHandle,
 };
 use usd_bevy::UsdPrimRef;
 
@@ -36,7 +36,7 @@ pub struct Attachment {
     pub hitch_link: String,
     pub coupler: String,
     pub kind: String,
-    pub joint: ImpulseJointHandle,
+    pub joint: HitchJoint,
     pub slave_mass_kg: f64,
     pub controlled: bool,
     /// Slave requests the master does not grant (`TOOLS_SPEC.md` §5.3).
@@ -248,38 +248,42 @@ fn pick_coupling<'a>(
 fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> GenericJoint {
     let lin = JointAxesMask::LIN_X | JointAxesMask::LIN_Y | JointAxesMask::LIN_Z;
     let deg = |d: f64| d.to_radians();
-    // Joint frames are Y up: yaw about Y, pitch about Z, roll about X.
+    // Coupling frames are prim frames on bodies that keep the USD basis:
+    // X right, Y back, Z up. So yaw is about Z, pitch about X, roll about Y.
     let (mask, limits): (JointAxesMask, Vec<(JointAxis, f64)>) = match kind {
         "three_point_mounted" | "chassis_mounted" | "loader_carriage" => (
             lin | JointAxesMask::ANG_X | JointAxesMask::ANG_Y | JointAxesMask::ANG_Z,
             vec![],
         ),
+        // Pitch and yaw free, roll locked, and 15 cm of vertical slack: a
+        // coupler a few centimetres above the hitch would otherwise lift the
+        // tractor's rear until its driven wheels lose the ground.
         "drawbar" => (
-            lin,
-            vec![(JointAxis::AngZ, deg(20.0)), (JointAxis::AngX, deg(10.0))],
+            JointAxesMask::LIN_X | JointAxesMask::LIN_Y | JointAxesMask::ANG_Y,
+            vec![(JointAxis::LinZ, 0.15)],
         ),
         "clevis" => (
-            lin | JointAxesMask::ANG_X,
-            vec![(JointAxis::AngZ, deg(20.0))],
+            lin | JointAxesMask::ANG_Y,
+            vec![(JointAxis::AngX, deg(20.0))],
         ),
         "piton" | "fifth_wheel" => (
-            lin | JointAxesMask::ANG_X,
-            vec![(JointAxis::AngZ, deg(15.0))],
+            lin | JointAxesMask::ANG_Y,
+            vec![(JointAxis::AngX, deg(15.0))],
         ),
         "pivot_wagon" | "three_point_semi_mounted" => {
-            (lin | JointAxesMask::ANG_X | JointAxesMask::ANG_Z, vec![])
+            (lin | JointAxesMask::ANG_X | JointAxesMask::ANG_Y, vec![])
         }
         "hitch_hook" => (
             lin,
-            vec![(JointAxis::AngX, deg(25.0)), (JointAxis::AngZ, deg(25.0))],
+            vec![(JointAxis::AngX, deg(25.0)), (JointAxis::AngY, deg(25.0))],
         ),
         "cuna" => (
             lin,
-            vec![(JointAxis::AngX, deg(20.0)), (JointAxis::AngZ, deg(20.0))],
+            vec![(JointAxis::AngX, deg(20.0)), (JointAxis::AngY, deg(20.0))],
         ),
         "ball" => (
             lin,
-            vec![(JointAxis::AngX, deg(30.0)), (JointAxis::AngZ, deg(30.0))],
+            vec![(JointAxis::AngX, deg(30.0)), (JointAxis::AngY, deg(30.0))],
         ),
         _ => (lin, vec![]),
     };
@@ -291,6 +295,75 @@ fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> GenericJoint {
         b = b.limits(axis, [-limit, limit]);
     }
     b.build()
+}
+
+/// A hitched pair is one vehicle: the slave's drawbar runs through the
+/// master's hitch parts and wheels, so every body of one stops colliding
+/// with every body of the other (and starts again on detach). Each machine
+/// owns one collision group bit, so the other side's memberships are
+/// masked out of each collider's filter.
+fn set_cross_collisions(
+    physics: &mut PhysicsWorld,
+    a: &[RigidBodyHandle],
+    b: &[RigidBodyHandle],
+    enabled: bool,
+) {
+    fn colliders_of(physics: &PhysicsWorld, bodies: &[RigidBodyHandle]) -> Vec<ColliderHandle> {
+        bodies
+            .iter()
+            .filter_map(|h| physics.bodies.get(*h))
+            .flat_map(|b| b.colliders().iter().copied())
+            .collect()
+    }
+    fn memberships(physics: &PhysicsWorld, handles: &[ColliderHandle]) -> Group {
+        handles
+            .iter()
+            .filter_map(|h| physics.colliders.get(*h))
+            .fold(Group::NONE, |acc, c| acc | c.collision_groups().memberships)
+    }
+    let (ca, cb) = (colliders_of(physics, a), colliders_of(physics, b));
+    let (ma, mb) = (memberships(physics, &ca), memberships(physics, &cb));
+    if ma == Group::ALL || mb == Group::ALL {
+        return;
+    }
+    for (handles, other) in [(&ca, mb), (&cb, ma)] {
+        for h in handles {
+            if let Some(c) = physics.colliders.get_mut(*h) {
+                let mut groups = c.collision_groups();
+                groups.filter = if enabled { groups.filter | other } else { groups.filter.difference(other) };
+                c.set_collision_groups(groups);
+            }
+        }
+    }
+}
+
+/// The physical hitch. An impulse joint: merging the two Featherstone trees
+/// with a multibody joint blows up (NaN poses) and rapier only implements a
+/// few joint shapes there anyway.
+#[derive(Debug, Clone, Copy)]
+pub enum HitchJoint {
+    Multibody(MultibodyJointHandle),
+    Impulse(ImpulseJointHandle),
+}
+
+fn insert_hitch_joint(
+    physics: &mut PhysicsWorld,
+    hitch_body: RigidBodyHandle,
+    coupler_body: RigidBodyHandle,
+    joint: GenericJoint,
+) -> HitchJoint {
+    HitchJoint::Impulse(physics.impulse_joints.insert(hitch_body, coupler_body, joint, true))
+}
+
+fn remove_hitch_joint(physics: &mut PhysicsWorld, joint: HitchJoint) {
+    match joint {
+        HitchJoint::Multibody(handle) => {
+            physics.multibody_joints.remove(handle, true);
+        }
+        HitchJoint::Impulse(handle) => {
+            physics.impulse_joints.remove(handle, true);
+        }
+    }
 }
 
 /// Does `candidate_master` already hang, directly or through others, below
@@ -442,11 +515,14 @@ fn try_attach(
             .position(),
     );
 
-    // The coupler must sit on the hitch, facing the same way as the master.
-    let target = Frame {
-        translation: hitch_world.translation,
-        rotation: hitch_world.rotation * DQuat::from_rotation_y(std::f64::consts::PI),
-    };
+    // Only the prims' positions count. Every body keeps the USD basis (X
+    // right, Y back, Z up), so aligning the two bodies puts the slave behind
+    // the master facing the same way; an authored prim rotation would tip
+    // the whole slave over on teleport.
+    let hitch_world = Frame { translation: hitch_world.translation, rotation: hitch_body_world.rotation };
+    let coupler_world =
+        Frame { translation: coupler_world.translation, rotation: coupler_body_world.rotation };
+    let target = Frame { translation: hitch_world.translation, rotation: hitch_body_world.rotation };
     let frame1 = hitch_body_world.inverse().then(&hitch_world);
     let frame2 = coupler_body_world.inverse().then(&coupler_world);
 
@@ -479,9 +555,9 @@ fn try_attach(
         .map(|b| b.mass())
         .sum();
     let joint = joint_for(&hitch.kind, frame1.pose(), frame2.pose());
-    let handle = physics
-        .impulse_joints
-        .insert(hitch_body, coupler_body, joint, true);
+    let handle = insert_hitch_joint(physics, hitch_body, coupler_body, joint);
+    let master_bodies = scene.bodies(master, physics);
+    set_cross_collisions(physics, &master_bodies, &slave_bodies, false);
 
     let mut denied: Vec<String> = slave
         .controllers
@@ -643,7 +719,7 @@ pub(crate) fn serve_attachments(
         alive
     });
     for a in dropped {
-        physics.impulse_joints.remove(a.joint, true);
+        remove_hitch_joint(physics.as_mut(), a.joint);
         if let Some(slave) = bus.machines.get_mut(&a.slave_ns) {
             slave.set_attached_to(None);
         }
@@ -778,7 +854,11 @@ pub(crate) fn serve_attachments(
                 None => not_found(format!("`{slave_ns}` is not attached to `{master_ns}`")),
                 Some(i) => {
                     let a = attachments.0.remove(i);
-                    physics.impulse_joints.remove(a.joint, true);
+                    remove_hitch_joint(physics.as_mut(), a.joint);
+                    if let (Some(m), Some(s)) = (scene.machine(&master_ns), scene.machine(&slave_ns)) {
+                        let (mb, sb) = (scene.bodies(m, &physics), scene.bodies(s, &physics));
+                        set_cross_collisions(physics.as_mut(), &mb, &sb, true);
+                    }
                     if let Some(slave) = bus.machines.get_mut(&slave_ns) {
                         slave.set_attached_to(None);
                     }

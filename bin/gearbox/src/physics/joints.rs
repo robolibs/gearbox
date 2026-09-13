@@ -16,12 +16,27 @@ pub fn convert_joints(
     mut commands: Commands,
     mut world: ResMut<PhysicsWorld>,
     joints: Query<(Entity, &UsdPhysicsJoint), Without<JointAttached>>,
-    articulations: Query<&UsdArticulationRoot>,
+    articulation_roots: Query<(), With<UsdArticulationRoot>>,
+    parents: Query<&ChildOf>,
 ) {
     if joints.is_empty() {
         return;
     }
-    let any_articulation = !articulations.is_empty();
+    // Featherstone multibodies are opt-in (`GEARBOX_MULTIBODY=1`): rapier
+    // 0.32 indexes past its Jacobian table when a multibody is assembled
+    // over several frames, and has no two-axis joint there. With it on, a
+    // joint joins one only when its own bodies sit under an articulation
+    // root, so one articulated machine cannot convert everyone else's.
+    let multibody = std::env::var_os("GEARBOX_MULTIBODY").is_some_and(|v| v == "1");
+    let articulated = |e: Entity| {
+        crate::physics::colliders::find_articulation_root_ancestor(
+            e,
+            parents.get(e).ok(),
+            &articulation_roots,
+            &parents,
+        )
+        .is_some()
+    };
 
     for (joint_entity, joint) in &joints {
         if !joint.joint_enabled {
@@ -48,7 +63,10 @@ pub fn convert_joints(
             continue;
         };
 
-        let use_multibody = any_articulation && !joint.exclude_from_articulation;
+        let use_multibody = multibody
+            && articulated(body0_e)
+            && articulated(body1_e)
+            && !joint.exclude_from_articulation;
         let read_joint = bridge_to_read_joint(joint);
         if std::env::var_os("GEARBOX_PHYSICS_LOG").is_some() {
             info!(

@@ -264,7 +264,7 @@ fn usd_approx_to_openusd(a: UsdCollisionApprox) -> CollisionApprox {
     }
 }
 
-fn find_articulation_root_ancestor(
+pub(crate) fn find_articulation_root_ancestor(
     start: Entity,
     own_parent: Option<&ChildOf>,
     articulation_roots: &Query<(), With<UsdArticulationRoot>>,

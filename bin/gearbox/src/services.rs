@@ -625,9 +625,12 @@ fn apply_service_controllers(
                         })
                     }
                     "builtin:brake" => {
+                        // Uncoupled and uncommanded, a trailer holds itself
+                        // like a parking brake; hitched, it rolls free.
+                        let parked = if master.is_none() { 1.0 } else { 0.0 };
                         let level = num(props, "level")
                             .or_else(|| num(props, "value"))
-                            .unwrap_or(0.0)
+                            .unwrap_or(parked)
                             .clamp(0.0, 1.0);
                         with_joint(&mut physics, &j, |g| {
                             g.set_motor_velocity(j.axis, 0.0, level * BRAKE_FACTOR);
