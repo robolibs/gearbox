@@ -58,6 +58,9 @@ enum Cmd {
         /// Seconds to wait for the machine agent
         #[arg(long, default_value_t = 30.0)]
         wait_timeout: f64,
+        /// Variant selection PRIM SET OPTION, repeatable (e.g. /robot hitchRear linked)
+        #[arg(long, num_args = 3, value_names = ["PRIM", "SET", "OPTION"])]
+        variant: Vec<String>,
     },
     /// Load a world USD
     World { path: String },
@@ -116,14 +119,20 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             place,
             no_wait,
             wait_timeout,
+            variant,
         } => {
             let ns = ns.unwrap_or_else(|| default_id(&path));
             let (x, y, z) = xyz(&place.at);
-            let req = UsdLoad::new(&ns, &usd_path(&path))
+            let mut req = UsdLoad::new(&ns, &usd_path(&path))
                 .at(x, y, z)
                 .yaw(place.yaw)
                 .category(category::MACHINE)
                 .with_prop("namespace", &ns);
+            for (n, chunk) in variant.chunks(3).enumerate() {
+                if let [prim, set, opt] = chunk {
+                    req = req.with_prop(&format!("variant.{n}"), &format!("{prim}|{set}|{opt}"));
+                }
+            }
             let client = ctx.client()?;
             check(client.load(&req)?, &format!("load machine {ns}"))?;
             let mut did = String::new();

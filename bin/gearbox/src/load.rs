@@ -204,6 +204,7 @@ fn drain_load_queue(
             Transform::from_translation(mount),
             None,
             false,
+            Vec::new(),
         );
     }
 }
@@ -223,6 +224,7 @@ fn queue_usd_load(
     transform: Transform,
     namespace: Option<String>,
     activate_physics_after_sync: bool,
+    variants: Vec<(String, String, String)>,
 ) {
     let read_started = std::time::Instant::now();
     let source = std::fs::read(&path)
@@ -259,6 +261,7 @@ fn queue_usd_load(
             },
             UsdAssetHandle(handle.clone()),
             UsdSceneRoot(handle),
+            usd_bevy::instance::UsdInstanceOverrides { variants, ..default() },
         ))
         .id();
     inflight.0.push(InflightLoad {
@@ -737,6 +740,7 @@ fn drain_machine_load_queue(
             transform,
             namespace,
             true,
+            req.variants(),
         );
     }
 }

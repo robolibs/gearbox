@@ -1,3 +1,7 @@
+------------------------------------------
+Project: gearbox-sim v0.0.6
+Display: wayland backend
+------------------------------------------
 # gearbox CLI
 
 Launch, inspect and drive the gearbox simulator
