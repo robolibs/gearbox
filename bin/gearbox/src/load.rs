@@ -1,4 +1,4 @@
-//! Multi-USD loading: CLI args + 📂 ribbon button → asset_server →
+//! Multi-USD loading: CLI args + 📂 ribbon button → `Assets<UsdScene>` →
 //! mounted USD scene with `LoadedAsset` marker. The marker also tags the
 //! root for the UI's pick-and-gizmo wiring.
 
@@ -174,7 +174,7 @@ fn remove_loaded_usd_physics(
 
 fn drain_load_queue(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    mut scenes: ResMut<Assets<UsdScene>>,
     mut queue: ResMut<LoadQueue>,
     mut inflight: ResMut<Inflight>,
 ) {
@@ -197,7 +197,7 @@ fn drain_load_queue(
         let mount = Vec3::new(x, terrain_height_m(x, z), z);
         queue_usd_load(
             &mut commands,
-            &asset_server,
+            &mut scenes,
             &mut inflight,
             abs,
             label,
@@ -209,12 +209,14 @@ fn drain_load_queue(
 }
 
 /// The scene root exists from the start: usd_bevy projects the stage under
-/// it once the asset is loaded, and `spawn_when_loaded` finishes the job when
-/// the root reports `UsdSceneState::Ready`.
+/// it on the next frame, and `spawn_when_loaded` finishes the job when the
+/// root reports `UsdSceneState::Ready`. The bytes go straight into
+/// `Assets<UsdScene>`: the asset-server loader would parse the stage once
+/// more just to probe it, which for a large usdz costs more than the read.
 #[allow(clippy::too_many_arguments)]
 fn queue_usd_load(
     commands: &mut Commands,
-    asset_server: &AssetServer,
+    scenes: &mut Assets<UsdScene>,
     inflight: &mut Inflight,
     path: PathBuf,
     label: String,
@@ -222,9 +224,25 @@ fn queue_usd_load(
     namespace: Option<String>,
     activate_physics_after_sync: bool,
 ) {
-    // The asset root is `/`, and usd_bevy wants source-relative paths.
-    let asset_path = path.to_string_lossy().trim_start_matches('/').to_string();
-    let handle: Handle<UsdScene> = asset_server.load(asset_path);
+    let read_started = std::time::Instant::now();
+    let source = std::fs::read(&path)
+        .and_then(|bytes| usd_bevy::UsdSource::new(&path, bytes));
+    let source = match source {
+        Ok(source) => source,
+        Err(err) => {
+            error!("gearbox-load: {label} cannot read {}: {err}", path.display());
+            return;
+        }
+    };
+    let handle = scenes.add(UsdScene {
+        source,
+        textures: default(),
+    });
+    info!(
+        "gearbox-load: read {} in {:?}",
+        path.display(),
+        read_started.elapsed()
+    );
     info!(
         "Load USD: {label} → translation={:?} yaw={:.1}°",
         transform.translation,
@@ -296,6 +314,8 @@ fn spawn_when_loaded(
     states: Query<&UsdSceneState>,
     mut bus: Option<ResMut<GearboxBus>>,
     mut pending_static: ResMut<crate::attach::PendingStaticAttachments>,
+    timings: Option<Res<usd_bevy::asset::UsdSceneTimings>>,
+    instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
 ) {
     for entry in inflight.0.iter_mut() {
         if entry.spawned {
@@ -311,7 +331,21 @@ fn spawn_when_loaded(
             _ => continue,
         }
         let scene_root = entry.root;
-        let mut discovered_machines = match discover_machines_from_usd(&entry.path) {
+        if let Some(t) = timings.as_deref() {
+            info!(
+                "gearbox-load: {} ready; usd_bevy so far: open {:?} overrides {:?} validation {:?} textures {:?} projection {:?} ({} attempts, {} failed)",
+                entry.label, t.open, t.overrides, t.validation, t.textures, t.projection, t.attempts, t.failures
+            );
+        }
+        let discovery_started = std::time::Instant::now();
+        // The projected stage is already open; scanning it beats parsing
+        // the file again.
+        let projected = instances.as_deref().and_then(|i| i.stage(scene_root));
+        let scanned = match projected {
+            Some(stage) => crate::controller::discover_machines_from_stage(stage),
+            None => discover_machines_from_usd(&entry.path),
+        };
+        let mut discovered_machines = match scanned {
             Ok(machines) => Some(machines),
             Err(err) => {
                 warn!(
@@ -333,8 +367,17 @@ fn spawn_when_loaded(
                 });
         }
         entry.spawned = true;
-        for (hitch, coupler) in crate::controller::discover_static_attachments_from_usd(&entry.path)
-        {
+        info!(
+            "gearbox-load: {} machine discovery took {:?}",
+            entry.label,
+            discovery_started.elapsed()
+        );
+        let attachments_started = std::time::Instant::now();
+        let attachments = match projected {
+            Some(stage) => crate::controller::discover_static_attachments_from_stage(stage),
+            None => crate::controller::discover_static_attachments_from_usd(&entry.path),
+        };
+        for (hitch, coupler) in attachments {
             pending_static.0.push(crate::attach::StaticAttachment {
                 scene_root,
                 hitch_prim: hitch,
@@ -343,8 +386,10 @@ fn spawn_when_loaded(
             });
         }
         info!(
-            "Spawned {} at {:?}",
-            entry.label, entry.transform.translation
+            "Spawned {} at {:?} (static attachment scan {:?})",
+            entry.label,
+            entry.transform.translation,
+            attachments_started.elapsed()
         );
         if let Some(bus) = bus.as_deref_mut() {
             let t = entry.transform.translation;
@@ -645,7 +690,7 @@ fn apply_runtime_namespace(
 /// Machine-category loads that arrived over the bus.
 fn drain_machine_load_queue(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    mut scenes: ResMut<Assets<UsdScene>>,
     mut queue: ResMut<MachineLoadQueue>,
     mut inflight: ResMut<Inflight>,
     mut physics_active: ResMut<gearbox_api::PhysicsActive>,
@@ -685,7 +730,7 @@ fn drain_machine_load_queue(
         snap_grounded_machine_to_terrain(&mut transform);
         queue_usd_load(
             &mut commands,
-            &asset_server,
+            &mut scenes,
             &mut inflight,
             path,
             label,

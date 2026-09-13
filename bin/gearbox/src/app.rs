@@ -28,6 +28,10 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>) {
         // USD pipeline (live stage projection) + gearbox's rapier world.
         .add_plugins(usd_bevy::UsdPlugin)
         .add_plugins(usd_bevy::asset::UsdAssetPlugin)
+        // Accumulates open / override / validation / projection time per
+        // load; the loader logs it when a root becomes ready.
+        .init_resource::<usd_bevy::asset::UsdSceneTimings>()
+        .insert_resource(projection_budget_from_env())
         .add_plugins(physics::RapierAdapterPlugin)
         .insert_resource(gearbox_api::PhysicsActive(false))
         // Tool API: one host agent per process, one agent per machine.
@@ -52,4 +56,23 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>) {
         .add_plugins(viewer::screenshot::ScreenshotPlugin)
         .add_plugins(viewer::overlays::OverlaysPlugin)
         .add_plugins(viewer::physics_overlay::PhysicsOverlayPlugin);
+}
+
+/// How much of a frame the loader may spend projecting prims:
+/// `GEARBOX_PROJECTION_BUDGET_MS`, unbounded by default. usd_bevy's 10 ms
+/// keeps an editor smooth but stretches a 4000-prim machine over a minute,
+/// and the stage parse blocks the frame anyway, so a simulator finishes the
+/// projection in that same frame.
+fn projection_budget_from_env() -> usd_bevy::UsdProjectionBudget {
+    const DEFAULT_MS: u64 = 0;
+    let millis = std::env::var("GEARBOX_PROJECTION_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MS);
+    let budget = if millis == 0 {
+        std::time::Duration::MAX
+    } else {
+        std::time::Duration::from_millis(millis)
+    };
+    usd_bevy::UsdProjectionBudget(budget)
 }

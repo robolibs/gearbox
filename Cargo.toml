@@ -130,3 +130,7 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.image]
 opt-level = 3
+[profile.dev.package.bevy_mesh]
+opt-level = 3
+[profile.dev.package.bevy_mikktspace]
+opt-level = 3

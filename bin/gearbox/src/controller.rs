@@ -327,6 +327,14 @@ pub struct ControllerSpec {
 /// Reopen `usd_path` and discover gearbox machine/controller metadata.
 pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstanceSpec>, String> {
     let stage = open_stage_for_discovery(usd_path)?;
+    discover_machines_from_stage(&stage)
+}
+
+/// The machines authored in an already-open stage; the loader hands over the
+/// stage usd_bevy projected so the file is not parsed a second time.
+pub fn discover_machines_from_stage(
+    stage: &openusd::usd::Stage,
+) -> Result<Vec<MachineInstanceSpec>, String> {
     let mut prims = Vec::new();
     let scan_root = stage
         .default_prim()
@@ -429,7 +437,7 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
         });
     }
 
-    append_isaac_compat_machines(&stage, &prims, &mut machines);
+    append_isaac_compat_machines(stage, &prims, &mut machines);
 
     Ok(machines)
 }
@@ -4140,6 +4148,11 @@ pub fn discover_static_attachments_from_usd(usd_path: &Path) -> Vec<(String, Str
     let Ok(stage) = open_stage_for_discovery(usd_path) else {
         return Vec::new();
     };
+    discover_static_attachments_from_stage(&stage)
+}
+
+/// The static attachments authored in an already-open stage.
+pub fn discover_static_attachments_from_stage(stage: &openusd::usd::Stage) -> Vec<(String, String)> {
     let mut prims = Vec::new();
     let scan_root = stage
         .default_prim()
