@@ -86,9 +86,16 @@ pub fn convert_colliders(
 
         // Build the backend-neutral ShapeInput.
         let shape = match &col.shape {
-            UsdColliderShape::Cube { size } => ShapeInput::Cube { size: *size as f64 },
+            // Primitive dimensions follow the prim's scale relative to its body;
+            // a scaled cube is a box, not the unit cube it was authored as.
+            UsdColliderShape::Cube { size } => {
+                let half = local_scale.abs() * (*size * 0.5);
+                ShapeInput::Cube {
+                    half_extents: DVec3::new(half.x as f64, half.y as f64, half.z as f64),
+                }
+            }
             UsdColliderShape::Sphere { radius } => ShapeInput::Sphere {
-                radius: *radius as f64,
+                radius: (*radius * local_scale.abs().max_element()) as f64,
             },
             UsdColliderShape::Capsule {
                 radius,

@@ -258,13 +258,9 @@ fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> GenericJoint {
             lin | JointAxesMask::ANG_X | JointAxesMask::ANG_Y | JointAxesMask::ANG_Z,
             vec![],
         ),
-        // Pitch and yaw free, roll locked, and 15 cm of vertical slack: a
-        // coupler a few centimetres above the hitch would otherwise lift the
-        // tractor's rear until its driven wheels lose the ground.
-        "drawbar" => (
-            JointAxesMask::LIN_X | JointAxesMask::LIN_Y | JointAxesMask::ANG_Y,
-            vec![(JointAxis::LinZ, 0.15)],
-        ),
+        // Pinned at the eye, pitch and yaw free, roll locked: the tractor
+        // carries the trailer's nose.
+        "drawbar" => (lin | JointAxesMask::ANG_Y, vec![]),
         "clevis" => (
             lin | JointAxesMask::ANG_Y,
             vec![(JointAxis::AngX, deg(20.0))],

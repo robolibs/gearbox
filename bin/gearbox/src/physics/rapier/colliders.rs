@@ -25,8 +25,10 @@ use rapier3d::prelude::*;
 /// collider's pose) — so this module never touches Bevy / scene-tree
 /// info.
 pub enum ShapeInput {
+    /// Half extents per axis: authored `size / 2` times the prim's scale
+    /// relative to its body.
     Cube {
-        size: f64,
+        half_extents: DVec3,
     },
     Sphere {
         radius: f64,
@@ -75,10 +77,11 @@ pub fn build_collider(
     op: ColliderOpinion,
 ) -> Result<Option<ColliderHandle>> {
     let builder_opt: Option<ColliderBuilder> = match op.shape {
-        ShapeInput::Cube { size } => {
-            let h = size * 0.5;
-            Some(ColliderBuilder::cuboid(h, h, h))
-        }
+        ShapeInput::Cube { half_extents } => Some(ColliderBuilder::cuboid(
+            half_extents.x,
+            half_extents.y,
+            half_extents.z,
+        )),
         ShapeInput::Sphere { radius } => Some(ColliderBuilder::ball(radius)),
         ShapeInput::Capsule { half, radius } => {
             Some(ColliderBuilder::capsule_from_endpoints(-half, half, radius))
