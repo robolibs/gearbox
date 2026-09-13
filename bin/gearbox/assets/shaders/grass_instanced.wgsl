@@ -24,7 +24,7 @@ struct GrassParams {
 @group(3) @binding(3) var trample: texture_2d<u32>;
 
 const TRAMPLE_CLOCK_S: f32 = 3600.0;
-const TRAMPLE_RECOVER_S: f32 = 45.0;
+const TRAMPLE_RECOVER_S: f32 = 300.0;
 
 // One trample texel: how pressed (0..1, recovering with age) and the roll
 // direction scaled by it. Angle 0 marks a texel no wheel ever touched.

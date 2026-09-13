@@ -50,8 +50,8 @@ const GRASS_FADE_END_M: f32 = 40.0;
 /// triangle at any range.
 const GRASS_LODS: [(f32, u32); 1] = [(f32::INFINITY, 1)];
 const BLADE_MAX_HEIGHT_M: f32 = 0.12;
-/// Trample map resolution; a tractor tyre is two texels wide.
-const TRAMPLE_TEXELS_PER_M: f32 = 4.0;
+/// Trample map resolution: 12.5 cm texels, a tractor tyre is four wide.
+const TRAMPLE_TEXELS_PER_M: f32 = 8.0;
 
 static HEIGHT_GRID: RwLock<Option<Arc<HeightGrid>>> = RwLock::new(None);
 

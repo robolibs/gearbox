@@ -24,7 +24,7 @@ var trample: texture_2d<u32>;
 var<uniform> trample_params: vec4<f32>;
 
 const TRAMPLE_CLOCK_S: f32 = 3600.0;
-const TRAMPLE_RECOVER_S: f32 = 45.0;
+const TRAMPLE_RECOVER_S: f32 = 300.0;
 
 // How pressed the ground is here (0..1); wheel stamps recover with age.
 fn trample_at(index: vec2<i32>) -> f32 {

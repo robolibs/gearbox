@@ -192,6 +192,7 @@ impl Plugin for ControllerDiscoveryPlugin {
                     guard_chassis_inertia,
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,
+                    record_wheel_tracks,
                 )
                     .chain(),
             )
@@ -952,7 +953,6 @@ fn apply_builtin_ackermann_cmd_vel(
     mut states: ResMut<ControllerStates>,
     active: Res<gearbox_api::PhysicsActive>,
     towed: Res<crate::attach::TowedMass>,
-    mut wheel_contacts: ResMut<crate::grass::WheelContacts>,
     prims: Query<(Entity, &UsdPrimRef)>,
     joints: Query<(
         Entity,
@@ -1103,7 +1103,6 @@ fn apply_builtin_ackermann_cmd_vel(
                 cmd,
                 steer_target_rad,
                 towed.0.get(&machine.id).copied().unwrap_or(0.0),
-                &mut wheel_contacts.contacts,
             );
             if using_raycast_vehicle {
                 // Raycast traction moves the chassis; the USD wheel rigid
@@ -1602,7 +1601,6 @@ fn apply_rapier_raycast_vehicle_controller(
     cmd: CmdVel,
     steer_target_rad: f64,
     towed_mass_kg: f64,
-    wheel_contacts: &mut Vec<crate::grass::WheelContact>,
 ) -> bool {
     if tire_pairs.is_empty() || wheel_specs.is_empty() {
         return false;
@@ -1719,41 +1717,112 @@ fn apply_rapier_raycast_vehicle_controller(
     );
     vehicle.update_vehicle(physics.integration_parameters.dt as f64, queries);
     log_raycast_wheels(&vehicle, current_speed, force_per_rear, mass_scale);
-    record_wheel_contacts(physics, chassis, &vehicle, wheel_contacts);
     true
 }
 
-/// Every wheel touching the ground, rolling the way the chassis moves (its
-/// heading when it stands still), for the grass trample map.
-fn record_wheel_contacts(
-    physics: &crate::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    vehicle: &DynamicRayCastVehicleController,
-    out: &mut Vec<crate::grass::WheelContact>,
+/// Every wheel of every driven machine, every frame, for the grass trample
+/// map: the wheel body's footprint, oriented along its own axle, rolling
+/// the way the chassis moves (its heading when it stands still).
+fn record_wheel_tracks(
+    inventory: Res<ControllerInventory>,
+    active: Res<gearbox_api::PhysicsActive>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    joints: Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: Query<&ChildOf>,
+    physics: Res<crate::physics::PhysicsWorld>,
+    mut contacts: ResMut<crate::grass::WheelContacts>,
 ) {
-    let Some(body) = physics.bodies.get(chassis) else {
+    if !active.0 {
         return;
-    };
-    let forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
-    let mut direction = Vec2::new(forward.x as f32, forward.z as f32);
-    let velocity = Vec2::new(body.linvel().x as f32, body.linvel().z as f32);
-    if velocity.length() > 0.05 {
-        direction = velocity;
     }
-    let direction = direction.normalize_or(Vec2::X);
-    for wheel in vehicle.wheels() {
-        let info = wheel.raycast_info();
-        if !info.is_in_contact {
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
             continue;
+        };
+        for controller in &machine.controllers {
+            if !controller.enabled || controller.controller_type != "builtin:ackermann_cmd_vel" {
+                continue;
+            }
+            let Some(body_path) = controller.body.as_ref().or(machine.body.as_ref()) else {
+                continue;
+            };
+            let Some(body_entity) = find_prim_entity(scene_root, body_path, &prims, &parents)
+            else {
+                continue;
+            };
+            let Some(chassis) = physics.entity_to_body.get(&body_entity).copied() else {
+                continue;
+            };
+            let Some(chassis_body) = physics.bodies.get(chassis) else {
+                continue;
+            };
+            let forward = chassis_body.rotation() * Vector::new(0.0, -1.0, 0.0);
+            let heading = Vec2::new(forward.x as f32, forward.z as f32).normalize_or(Vec2::X);
+            let velocity =
+                Vec2::new(chassis_body.linvel().x as f32, chassis_body.linvel().z as f32);
+            let travel = if velocity.length() > 0.05 { velocity } else { heading };
+            for pair in tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics)
+            {
+                let Some(wheel) = wheel_body_of(&physics, chassis, pair) else {
+                    continue;
+                };
+                let Some(body) = physics.bodies.get(wheel) else {
+                    continue;
+                };
+                let Some((axle_local, width)) = body_tyre_axle_and_width(&physics, wheel) else {
+                    continue;
+                };
+                let axle_world = body.rotation() * axle_local;
+                let axle = Vec2::new(axle_world.x as f32, axle_world.z as f32).normalize_or(Vec2::X);
+                let mut roll = axle.perp();
+                if roll.dot(travel) < 0.0 {
+                    roll = -roll;
+                }
+                let p = body.translation();
+                contacts.contacts.push(crate::grass::WheelContact {
+                    position: Vec3::new(p.x as f32, p.y as f32, p.z as f32),
+                    direction: roll,
+                    width: width as f32,
+                });
+            }
         }
-        let p = info.contact_point_ws;
-        out.push(crate::grass::WheelContact {
-            position: Vec3::new(p.x as f32, p.y as f32, p.z as f32),
-            direction,
-            width: (wheel.radius * 0.6) as f32,
-        });
     }
 }
+
+/// The tyre's axle in the wheel body's frame and its width: the thinnest
+/// axis of the largest collider's local box.
+fn body_tyre_axle_and_width(
+    physics: &crate::physics::PhysicsWorld,
+    body: RigidBodyHandle,
+) -> Option<(Vector, f64)> {
+    let body = physics.bodies.get(body)?;
+    let collider = body
+        .colliders()
+        .iter()
+        .filter_map(|ch| physics.colliders.get(*ch))
+        .max_by(|a, b| {
+            let extent = |c: &rapier3d::prelude::Collider| c.shape().compute_local_aabb().half_extents().max_element();
+            extent(a).total_cmp(&extent(b))
+        })?;
+    let half = collider.shape().compute_local_aabb().half_extents();
+    let (axis, width) = if half.x <= half.y && half.x <= half.z {
+        (Vector::new(1.0, 0.0, 0.0), half.x * 2.0)
+    } else if half.y <= half.z {
+        (Vector::new(0.0, 1.0, 0.0), half.y * 2.0)
+    } else {
+        (Vector::new(0.0, 0.0, 1.0), half.z * 2.0)
+    };
+    let axis = match collider.position_wrt_parent() {
+        Some(pose) => pose.rotation * axis,
+        None => axis,
+    };
+    Some((axis, width))
+}
+
 
 #[derive(Debug, Clone, Copy)]
 struct RaycastVehicleWheelSpec {

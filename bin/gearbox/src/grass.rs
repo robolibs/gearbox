@@ -85,6 +85,8 @@ pub struct WheelContacts {
 /// Wheel contacts are stamped into a wrapped-time clock with this period;
 /// it has to match `Time`'s wrap period.
 pub const TRAMPLE_CLOCK_S: f32 = 3600.0;
+/// How much tyre touches the ground along the roll direction.
+const TRAMPLE_PATCH_LENGTH_M: f32 = 0.25;
 
 /// Encodes a stamp: time on the wrapped clock and roll direction as an angle;
 /// 0 in the angle channel means never stamped.
@@ -302,27 +304,44 @@ fn stamp_wheel_contacts(
     let tpm = field.params.trample_texels_per_metre;
     let count = field.params.trample_texel_count as i32;
     for contact in &contacts.contacts {
-        let centre_x = ((contact.position.x - field.params.origin.x) * tpm).round() as i32;
-        let centre_z = ((contact.position.z - field.params.origin.y) * tpm).round() as i32;
-        let half = ((contact.width * 0.5 * tpm).ceil() as i32).max(1);
-        let x0 = (centre_x - half).clamp(0, count - 1);
-        let x1 = (centre_x + half).clamp(0, count - 1);
-        let z0 = (centre_z - half).clamp(0, count - 1);
-        let z1 = (centre_z + half).clamp(0, count - 1);
-        if x1 < x0 || z1 < z0 {
-            continue;
-        }
-        let (width, height) = ((x1 - x0 + 1) as u32, (z1 - z0 + 1) as u32);
-        let texel = trample_texel(contacts.now, contact.direction);
-        let data: Vec<u16> = texel.iter().copied().cycle().take((width * height * 2) as usize).collect();
-        let mut target = trample.texture.as_image_copy();
-        target.origin = Origin3d { x: x0 as u32, y: z0 as u32, z: 0 };
-        render_queue.write_texture(
-            target,
-            bytemuck::cast_slice(&data),
-            TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: None },
-            Extent3d { width, height, depth_or_array_layers: 1 },
+        // The footprint is a rectangle in the wheel's own frame: tyre width
+        // across the axle, a short contact patch along the roll. Texel
+        // centres sit on integer coordinates; a texel is stamped only when
+        // its centre lies inside that rectangle, row by row.
+        let centre = Vec2::new(
+            (contact.position.x - field.params.origin.x) * tpm,
+            (contact.position.z - field.params.origin.y) * tpm,
         );
+        let roll = contact.direction.normalize_or(Vec2::X);
+        let axle = roll.perp();
+        let half_width = (contact.width * 0.5 * tpm).max(0.5);
+        let half_length = (TRAMPLE_PATCH_LENGTH_M * 0.5 * tpm).max(0.5);
+        let reach = half_width.hypot(half_length);
+        let z0 = ((centre.y - reach).ceil() as i32).clamp(0, count - 1);
+        let z1 = ((centre.y + reach).floor() as i32).clamp(0, count - 1);
+        let x_lo = ((centre.x - reach).ceil() as i32).clamp(0, count - 1);
+        let x_hi = ((centre.x + reach).floor() as i32).clamp(0, count - 1);
+        let texel = trample_texel(contacts.now, roll);
+        for z in z0..=z1 {
+            let inside = |x: i32| {
+                let d = Vec2::new(x as f32, z as f32) - centre;
+                d.dot(axle).abs() <= half_width && d.dot(roll).abs() <= half_length
+            };
+            let Some(x0) = (x_lo..=x_hi).find(|x| inside(*x)) else {
+                continue;
+            };
+            let x1 = (x0..=x_hi).take_while(|x| inside(*x)).last().unwrap_or(x0);
+            let width = (x1 - x0 + 1) as u32;
+            let data: Vec<u16> = texel.iter().copied().cycle().take((width * 2) as usize).collect();
+            let mut target = trample.texture.as_image_copy();
+            target.origin = Origin3d { x: x0 as u32, y: z as u32, z: 0 };
+            render_queue.write_texture(
+                target,
+                bytemuck::cast_slice(&data),
+                TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: None },
+                Extent3d { width, height: 1, depth_or_array_layers: 1 },
+            );
+        }
     }
 }
 
