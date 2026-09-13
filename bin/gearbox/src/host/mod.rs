@@ -31,7 +31,6 @@ use crate::viewer::tf_overlay::TfLabels;
 use panes::{Outbox, PaneCtx};
 
 pub const RIBBON_LEFT: &str = "gearbox_left";
-pub const RIBBON_RIGHT: &str = "gearbox_right";
 
 pub const PANE_SELECTION: &str = "gearbox_pane_selection";
 pub const PANE_OUTLINER: &str = "gearbox_pane_outliner";
@@ -69,16 +68,16 @@ pub fn run(cli_paths: Vec<PathBuf>, log: LoaderLog) -> Result<(), Box<dyn std::e
 }
 
 /// `GEARBOX_OPEN_PANEL=agents|machine|selection|info|overlays|log|tree`
-/// picks the panes open at start, for scripted runs.
-fn default_panes() -> (&'static str, Option<&'static str>) {
+/// picks the pane open at start, for scripted runs.
+fn default_panes() -> &'static str {
     match std::env::var("GEARBOX_OPEN_PANEL").as_deref() {
-        Ok("agents") => (PANE_AGENTS, None),
-        Ok("machine") => (PANE_OUTLINER, Some(PANE_MACHINE)),
-        Ok("selection") => (PANE_SELECTION, None),
-        Ok("info") => (PANE_INFO, None),
-        Ok("overlays") => (PANE_OVERLAYS, None),
-        Ok("log") => (PANE_LOG, None),
-        _ => (PANE_OUTLINER, None),
+        Ok("agents") => PANE_AGENTS,
+        Ok("machine") => PANE_MACHINE,
+        Ok("selection") => PANE_SELECTION,
+        Ok("info") => PANE_INFO,
+        Ok("overlays") => PANE_OVERLAYS,
+        Ok("log") => PANE_LOG,
+        _ => PANE_OUTLINER,
     }
 }
 
@@ -90,7 +89,6 @@ pub struct GearboxApp {
     keys: keys::KeyBridge,
     capture: capture::WindowCapture,
     default_left: &'static str,
-    default_right: Option<&'static str>,
 }
 
 impl WindowApp for GearboxApp {
@@ -108,7 +106,7 @@ impl WindowApp for GearboxApp {
         );
         // A simulator animates on its own: never wait for pointer input.
         view.set_continuous_rendering(true);
-        let (default_left, default_right) = default_panes();
+        let default_left = default_panes();
         Self {
             view,
             workspace: WorkspaceStack::new("gearbox-workspace"),
@@ -117,7 +115,6 @@ impl WindowApp for GearboxApp {
             keys: keys::KeyBridge::default(),
             capture: capture::WindowCapture::default(),
             default_left,
-            default_right,
         }
     }
 
@@ -134,7 +131,6 @@ impl WindowApp for GearboxApp {
             keys,
             capture,
             default_left,
-            default_right,
         } = self;
         capture.update(&egui);
 
@@ -168,6 +164,13 @@ impl WindowApp for GearboxApp {
 
         let left = RibbonRail::view_left(RIBBON_LEFT, "gearbox.ribbons")
             .default_open(default_left)
+            .pane(
+                PANE_MACHINE,
+                "vehicle-tractor",
+                "Machine",
+                PaneAnchor::LeftRail(RailZone::Start),
+                |body| panes::machine::show(body, &mut world.borrow_mut(), &ctx),
+            )
             .pane(
                 PANE_SELECTION,
                 "folder-open",
@@ -254,18 +257,6 @@ impl WindowApp for GearboxApp {
             );
         let clicks = host.show_ribbon_rail(left, accent);
 
-        let mut right = RibbonRail::view_right(RIBBON_RIGHT, "gearbox.ribbons").pane(
-            PANE_MACHINE,
-            "vehicle-tractor",
-            "Machine",
-            PaneAnchor::RightRail(RailZone::Start),
-            |body| panes::machine::show(body, &mut world.borrow_mut(), &ctx),
-        );
-        if let Some(pane) = default_right {
-            right = right.default_open(pane);
-        }
-        host.show_ribbon_rail(right, accent);
-
         for click in clicks {
             tracing::debug!(target: "gearbox", "ribbon click {:?} {:?}", click.item, click.action);
             if click.action == ribbon_action(ACTION_PLAY) {
@@ -345,7 +336,7 @@ fn hotkeys(
         (o, RIBBON_LEFT, PANE_OVERLAYS),
         (f, RIBBON_LEFT, PANE_SELECTION),
         (slash || question, RIBBON_LEFT, PANE_KEYS),
-        (m, RIBBON_RIGHT, PANE_MACHINE),
+        (m, RIBBON_LEFT, PANE_MACHINE),
     ];
     for (hit, rail, pane) in toggles {
         if hit {
@@ -488,7 +479,7 @@ fn palette_action(id: &str, host: &MaraHostCtx<'_>, world: &mut World, outbox: &
         "open_info" => open(RIBBON_LEFT, PANE_INFO),
         "open_cameras" => open(RIBBON_LEFT, PANE_CAMERAS),
         "open_controllers" => open(RIBBON_LEFT, PANE_CONTROLLERS),
-        "open_machine" => open(RIBBON_RIGHT, PANE_MACHINE),
+        "open_machine" => open(RIBBON_LEFT, PANE_MACHINE),
         "open_overlays" => open(RIBBON_LEFT, PANE_OVERLAYS),
         "open_timeline" => open(RIBBON_LEFT, PANE_TIMELINE),
         "open_keys" => open(RIBBON_LEFT, PANE_KEYS),

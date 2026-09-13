@@ -17,7 +17,7 @@ use crate::controller::{
     CmdVel, ControllerInventory, ControllerKey, ControllerSpec, ControllerStates,
     MachineInstanceSpec, UiDrive,
 };
-use crate::host::{PANE_MACHINE as P, RIBBON_RIGHT};
+use crate::host::{PANE_MACHINE as P, RIBBON_LEFT};
 use crate::links::LinkSpec;
 use crate::services::{LinkValues, ServiceCommands, controller_joints, moved_link};
 use crate::viewer::drive::{DRIVE_TYPES, MachinePanel};
@@ -90,7 +90,7 @@ pub fn auto_open(host: &MaraHostCtx<'_>, world: &mut World) {
     if selection != panel.last_selection {
         panel.last_selection = selection;
         if is_machine {
-            host.set_rail_pane_open(RIBBON_RIGHT, P, true);
+            host.set_rail_pane_open(RIBBON_LEFT, P, true);
         }
     }
 }
