@@ -27,6 +27,7 @@ pub(super) fn route(
     mut state: ResMut<GamepadState>,
     mut follow: ResMut<FollowTarget>,
     mut commands: ResMut<HostCommands>,
+    mut settings: ResMut<super::ControlSettings>,
 ) {
     let device = state
         .device
@@ -77,10 +78,22 @@ pub(super) fn route(
             previous_pressed: pad.just_pressed(GamepadButton::DPadLeft),
             next_pressed: pad.just_pressed(GamepadButton::DPadRight),
             follow_pressed: pad.just_pressed(GamepadButton::DPadUp),
-            unfollow_pressed: pad.just_pressed(GamepadButton::DPadDown),
+            cinematic_pressed: pad.just_pressed(GamepadButton::DPadDown),
         })
         .unwrap_or_default();
     let mut frame = state.router.update(input);
+    if frame.toggle_cinematic {
+        settings.cinematic_transitions = !settings.cinematic_transitions;
+        if let Err(error) = settings.save() {
+            warn!(
+                "Camera transition setting changed for this session but could not be saved: {error}"
+            );
+        }
+        info!(
+            "gearbox-pad: cinematic_transitions={}",
+            settings.cinematic_transitions
+        );
+    }
     if !focus.0 || input.stop || input.l1 {
         for previous in panel.holding.drain() {
             ui.stop_once(&previous);
@@ -102,8 +115,9 @@ pub(super) fn route(
             state.router.require_release();
         }
     }
-    if let Some(enabled) = frame.follow {
-        follow.set(if enabled { root } else { None });
+    if frame.toggle_follow {
+        let target = if follow.entity.is_some() { None } else { root };
+        follow.set(target);
         info!("gearbox-pad: follow={:?}", follow.entity);
     }
     if state.selected != root {
@@ -180,8 +194,8 @@ pub(super) fn camera(
     let input = state
         .frame
         .camera
-        .for_view(settings.invert_right_y, follow.entity.is_some());
-    if state.frame.follow.is_some() {
+        .for_view(settings.invert_look_y, follow.entity.is_some());
+    if state.frame.toggle_follow || (settings.is_changed() && !settings.cinematic_transitions) {
         fly.remaining = 0.0;
         machine_fly.target = None;
     }

@@ -7,6 +7,7 @@ pub mod camera_requests;
 pub mod commands;
 pub mod drive;
 pub mod log;
+pub mod machine_context;
 pub mod overlays;
 pub mod physics_overlay;
 pub mod screenshot;

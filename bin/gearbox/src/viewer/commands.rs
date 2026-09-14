@@ -76,6 +76,7 @@ pub(crate) struct CommandState<'w> {
     tuning: ResMut<'w, LoaderTuning>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
     inventory: Res<'w, ControllerInventory>,
+    controls: Res<'w, crate::viewer::drive::ControlSettings>,
     reset: MessageWriter<'w, gearbox_api::SimResetRequest>,
 }
 
@@ -140,14 +141,23 @@ pub(crate) fn apply_host_commands(
                 }
             }
             HostCommand::FlyToMachine(root) => {
-                if let Ok((cam, _)) = q.cameras.single() {
+                if let Ok((mut cam, mut transform)) = q.cameras.single_mut() {
                     let body = crate::viewer::systems::machine_body_entity(
                         root,
                         &s.inventory,
                         &q.prims,
                         &q.parents,
                     );
-                    s.machine_fly.target = Some(FlyTarget::new(root, body, cam));
+                    s.fly.remaining = 0.0;
+                    if s.controls.cinematic_transitions {
+                        s.machine_fly.target = Some(FlyTarget::new(root, body, &cam));
+                    } else {
+                        s.machine_fly.target = None;
+                        if let Ok(gt) = q.globals.get(body) {
+                            cam.focus = gt.translation();
+                            mara::ui::modules::bevy::apply_rig(&cam, &mut transform);
+                        }
+                    }
                 }
             }
             HostCommand::ToggleFollow(root) => {

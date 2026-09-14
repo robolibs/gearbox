@@ -29,7 +29,6 @@ pub(crate) struct HostInputFocus(pub bool);
 
 #[derive(Resource, Default)]
 pub struct MachinePanel {
-    pub last_selection: Option<Entity>,
     pub holding: HashSet<ControllerKey>,
     pub gamepad: Option<ControllerKey>,
     pub folded: HashSet<String>,
@@ -50,13 +49,16 @@ impl MachinePanel {
 #[derive(Resource, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ControlSettings {
-    pub invert_right_y: bool,
+    #[serde(alias = "invert_right_y")]
+    pub invert_look_y: bool,
+    pub cinematic_transitions: bool,
 }
 
 impl Default for ControlSettings {
     fn default() -> Self {
         Self {
-            invert_right_y: true,
+            invert_look_y: true,
+            cinematic_transitions: true,
         }
     }
 }

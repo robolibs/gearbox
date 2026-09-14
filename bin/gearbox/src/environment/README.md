@@ -66,7 +66,7 @@ azimuth wraps at 360. Invalid/non-finite values use the defaults.
 ## Environment panel
 
 The sun icon in the left ribbon opens **Environment**, also available in the command palette.
-`GEARBOX_OPEN_PANEL=environment` opens it at startup. Controls update live:
+All panels start closed; open Environment from its ribbon button. Controls update live:
 
 - Cloud cover: 0–100%, with Clear, Broken clouds and Overcast presets.
 - Time of day: 0–24 **solar hours**, not civil time or a timezone; noon is the highest sun.

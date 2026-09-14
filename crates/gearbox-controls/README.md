@@ -12,7 +12,7 @@ Vehicle kinematics and torque remain in `bin/gearbox/src/controller/`.
 
 | Modifier | Sticks | D-pad |
 |---|---|---|
-| None | Right: orbit. Left Y: move forward/back; left X: strafe. | Left/right: previous/next machine and fly to it. Up: follow; down: unfollow. |
+| None | Right: orbit. Left Y: move forward/back; left X: strafe. | Left/right: previous/next machine. Up: toggle follow. Down: toggle cinematic transitions. |
 | R1 / right bumper held | Left Y: forward/reverse; left X: steering. Right stick unused. | Unused. |
 | L1 / left bumper held | Reserved for machine internals; no actions yet. | Unused. |
 
@@ -38,14 +38,20 @@ the normal command slew. The physics brakes stop the vehicle; this is not an
 instant velocity teleport or a safety-rated hardware emergency stop.
 The adapter pins one gamepad until it disconnects. Mouse/keyboard bindings remain unchanged.
 Follow pins the camera focus to the actual chassis. Gamepad translation and lift
-are blocked until D-pad Down releases the lock; mouse-wheel zoom remains available
+are blocked until D-pad Up toggles the lock off; mouse-wheel zoom remains available
 both in free mode and while following. It tracks body motion whether driven locally
 or externally. R1 release sends one stop, then relinquishes the local override.
 
 The bottom-left joystick icon opens Controller and keyboard settings, bindings and
-events. Vertical right-stick inversion defaults on and can be disabled there;
+events. Vertical right-look-stick inversion defaults on and can be disabled there;
+cinematic machine transitions also default on. D-pad Down or the panel toggle
+disables the fly-around animation: switching machines then recenters immediately
+while preserving camera yaw, elevation and distance. Turning cinematic movement
+off cancels any transition already in progress without resetting the perspective.
+Follow and cinematic movement are independent toggles. Both controller
 preferences are saved in `$XDG_CONFIG_HOME/gearbox/controls.json` (or
 `~/.config/gearbox/controls.json`). Inversion does not affect steering or mouse input.
+The `invert_look_y` setting accepts the previous `invert_right_y` key when loading.
 The drive menu is always available: sliders submit commands only when changed,
 and changing selection stops the previous local drive. R1 targets the current
 selection only, after host/API/mouse selection updates; it never selects a machine
@@ -60,7 +66,7 @@ Regression cases cover exclusive layers, L1 priority, trigger lift, release-to-r
 or unfocused input and machine-list wrapping. Tests are authored but not run under
 the current no-automated-tests constraint. Build the preview with `make build-bins`.
 
-The live preview confirmed right-stick orbit, left-stick depth movement and R1
+An earlier live preview confirmed right-stick orbit, left-stick depth movement and R1
 press/release layer transitions on both loaded machine roots. See
 `/tmp/gearbox-controls-ready.log` and `/tmp/gearbox-controls-panel.png`.
 The initial host adapter incorrectly queried Bevy windows; the Mara focus bridge

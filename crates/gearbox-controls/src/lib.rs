@@ -23,7 +23,7 @@ pub struct Input {
     pub previous_pressed: bool,
     pub next_pressed: bool,
     pub follow_pressed: bool,
-    pub unfollow_pressed: bool,
+    pub cinematic_pressed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -60,7 +60,8 @@ pub struct Frame {
     pub steering: f32,
     pub camera: CameraInput,
     pub select_step: i8,
-    pub follow: Option<bool>,
+    pub toggle_follow: bool,
+    pub toggle_cinematic: bool,
 }
 
 #[derive(Debug, Default)]
@@ -120,13 +121,8 @@ impl Router {
                 lift: deadzone(input.r2).max(0.0) - deadzone(input.l2).max(0.0),
             },
             select_step: i8::from(input.next_pressed) - i8::from(input.previous_pressed),
-            follow: if input.unfollow_pressed {
-                Some(false)
-            } else if input.follow_pressed {
-                Some(true)
-            } else {
-                None
-            },
+            toggle_follow: input.follow_pressed,
+            toggle_cinematic: input.cinematic_pressed,
             ..Frame::default()
         }
     }
@@ -154,6 +150,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn left_stick_moves_camera_and_drives_machine() {
+        let mut router = Router::default();
+        let sticks = Input {
+            left: [-1.0, 1.0],
+            right: [1.0, -1.0],
+            ..input()
+        };
+        let camera = router.update(sticks).camera;
+        assert_eq!(camera.orbit, [1.0, -1.0]);
+        assert_eq!(camera.pan, -1.0);
+        assert_eq!(camera.forward, 1.0);
+        let inverted = camera.for_view(true, false);
+        assert_eq!(inverted.orbit, [1.0, 1.0]);
+        assert_eq!(inverted.pan, -1.0);
+        assert_eq!(inverted.forward, 1.0);
+        let drive = router.update(Input { r1: true, ..sticks });
+        assert!(drive.drive_enabled);
+        assert_eq!(drive.throttle, 1.0);
+        assert_eq!(drive.steering, 1.0);
+        assert!(!drive.camera.active());
+    }
+
+    #[test]
     fn follow_lock_allows_only_orbit_and_inverts_only_vertical() {
         let input = CameraInput {
             orbit: [0.4, -0.8],
@@ -171,28 +190,39 @@ mod tests {
     }
 
     #[test]
-    fn down_releases_follow_and_wins_over_up() {
+    fn follow_and_cinematic_toggles_are_independent() {
         let mut router = Router::default();
-        assert_eq!(
-            router
-                .update(Input {
-                    follow_pressed: true,
-                    ..input()
-                })
-                .follow,
-            Some(true)
-        );
-        assert_eq!(
-            router
-                .update(Input {
-                    follow_pressed: true,
-                    unfollow_pressed: true,
-                    ..input()
-                })
-                .follow,
-            Some(false)
-        );
-        assert_eq!(router.update(input()).follow, None);
+        let up = router.update(Input {
+            follow_pressed: true,
+            ..input()
+        });
+        assert!(up.toggle_follow);
+        assert!(!up.toggle_cinematic);
+        let down = router.update(Input {
+            cinematic_pressed: true,
+            ..input()
+        });
+        assert!(!down.toggle_follow);
+        assert!(down.toggle_cinematic);
+        let both = Input {
+            follow_pressed: true,
+            cinematic_pressed: true,
+            ..input()
+        };
+        let frame = router.update(both);
+        assert!(frame.toggle_follow && frame.toggle_cinematic);
+        for input in [
+            Input { r1: true, ..both },
+            Input { l1: true, ..both },
+            Input {
+                focused: false,
+                ..both
+            },
+            input(),
+        ] {
+            let frame = router.update(input);
+            assert!(!frame.toggle_follow && !frame.toggle_cinematic);
+        }
     }
 
     fn input() -> Input {
@@ -309,7 +339,7 @@ mod tests {
             ..input()
         };
         assert_eq!(router.update(nav).select_step, 1);
-        assert_eq!(router.update(nav).follow, Some(true));
+        assert!(router.update(nav).toggle_follow);
         assert_eq!(router.update(Input { r1: true, ..nav }).select_step, 0);
         assert_eq!(cycle_index(Some(2), 3, 1), Some(0));
         assert_eq!(cycle_index(Some(0), 3, -1), Some(2));

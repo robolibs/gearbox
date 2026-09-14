@@ -155,7 +155,7 @@ Rules, taken from Gazebo's `DetachableJoint` and Isaac's assembler:
 
 - The request MUST carry the master's session id (0 while nobody holds it).
 - `hitch` and `coupler` MUST have the same `type` and be free.
-- With `teleport = false` the coupler frame MUST lie within 0.25 m and 30° of
+- With `teleport = false` the coupler frame MUST lie within 0.5 m and 30° of
   the hitch frame or the request is refused. With `teleport = true` the slave
   is moved onto the hitch first. Teleport is refused while the slave's bodies
   are in contact with anything but the ground.

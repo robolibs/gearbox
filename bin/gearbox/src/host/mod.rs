@@ -6,6 +6,8 @@
 pub mod capture;
 pub mod gizmo;
 pub mod keys;
+mod machine_context;
+mod ground_card;
 pub mod panes;
 pub mod replay;
 
@@ -73,18 +75,6 @@ fn window_size() -> (f32, f32) {
         .unwrap_or((1400.0, 900.0))
 }
 
-/// `GEARBOX_OPEN_PANEL=machine|scene|view|environment|log` picks the pane open at
-/// start, for scripted runs.
-fn default_panes() -> &'static str {
-    match std::env::var("GEARBOX_OPEN_PANEL").as_deref() {
-        Ok("scene") => PANE_SCENE,
-        Ok("view") => PANE_VIEW,
-        Ok("log" | "controls") => PANE_LOG,
-        Ok("environment") => PANE_ENVIRONMENT,
-        _ => PANE_MACHINE,
-    }
-}
-
 pub struct GearboxApp {
     view: mara_bevy::MaraBevyViewport,
     workspace: WorkspaceStack,
@@ -93,7 +83,8 @@ pub struct GearboxApp {
     keys: keys::KeyBridge,
     capture: capture::WindowCapture,
     gizmo: gizmo::PoseGizmo,
-    default_left: &'static str,
+    machine_context: machine_context::MachineContext,
+    panels_initialized: bool,
 }
 
 impl WindowApp for GearboxApp {
@@ -116,7 +107,6 @@ impl WindowApp for GearboxApp {
         );
         // A simulator animates on its own: never wait for pointer input.
         view.set_continuous_rendering(true);
-        let default_left = default_panes();
         Self {
             view,
             workspace: WorkspaceStack::new("gearbox-workspace"),
@@ -125,7 +115,8 @@ impl WindowApp for GearboxApp {
             keys: keys::KeyBridge::default(),
             capture: capture::WindowCapture::default(),
             gizmo: gizmo::PoseGizmo::default(),
-            default_left,
+            machine_context: machine_context::MachineContext::default(),
+            panels_initialized: false,
         }
     }
 
@@ -142,9 +133,16 @@ impl WindowApp for GearboxApp {
             keys,
             capture,
             gizmo,
-            default_left,
+            machine_context,
+            panels_initialized,
         } = self;
         capture.update(&egui);
+        if !*panels_initialized {
+            for pane in [PANE_MACHINE, PANE_SCENE, PANE_VIEW, PANE_ENVIRONMENT, PANE_LOG] {
+                host.set_rail_pane_open(RIBBON_LEFT, pane, false);
+            }
+            *panels_initialized = true;
+        }
 
         // Input goes into the world before the viewport ticks it.
         if let Some(world) = view.world_mut() {
@@ -153,8 +151,12 @@ impl WindowApp for GearboxApp {
             if !egui.egui_wants_keyboard_input() {
                 hotkeys(&egui, host, world, palette);
             }
-            panes::machine::auto_open(host, world);
-            gizmo.interact(&egui, world);
+            machine_context.interact(&egui, world);
+            if !world.resource::<crate::viewer::machine_context::MachineHover>().captures_pointer {
+                gizmo.interact(&egui, world);
+            } else {
+                world.resource_mut::<crate::viewer::systems::GizmoGrab>().0 = false;
+            }
         }
 
         let viewport = {
@@ -177,7 +179,6 @@ impl WindowApp for GearboxApp {
         };
 
         let left = RibbonRail::view_left(RIBBON_LEFT, "gearbox.ribbons")
-            .default_open(default_left)
             .pane(
                 PANE_MACHINE,
                 "vehicle-tractor",
@@ -245,6 +246,7 @@ impl WindowApp for GearboxApp {
 
         paint_tf_labels(&egui, viewport, &world.borrow());
         gizmo.paint(&egui, viewport);
+        machine_context.show(&egui, viewport.into(), &mut world.borrow_mut());
         world
             .borrow_mut()
             .resource_mut::<HostCommands>()

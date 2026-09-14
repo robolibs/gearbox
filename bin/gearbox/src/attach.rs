@@ -3,7 +3,6 @@
 //! master's agent answers the requests, the slave's agent refuses commands
 //! while attached, and the master's `/links` grows the slave's tree.
 
-
 use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
 use gearbox_api::{
@@ -13,8 +12,8 @@ use gearbox_api::{
 use peerbus::ReqReplyToken;
 use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::{
-    ColliderHandle, GenericJoint, GenericJointBuilder, Group, ImpulseJointHandle, JointAxesMask,
-    JointAxis, MultibodyJointHandle, Pose, RigidBodyHandle,
+    GenericJoint, GenericJointBuilder, ImpulseJointHandle, JointAxesMask, JointAxis,
+    MultibodyJointHandle, Pose, RigidBodyHandle, SpringCoefficients,
 };
 use usd_bevy::UsdPrimRef;
 
@@ -24,8 +23,34 @@ use crate::controller::{
 use crate::links::{CouplingSide, LinkSpec, LinkTree};
 
 /// Without teleport the coupler must already be this close to the hitch.
-const SNAP_DISTANCE_M: f64 = 0.25;
-const SNAP_ANGLE_RAD: f64 = 30.0_f64.to_radians();
+pub(crate) const SNAP_DISTANCE_M: f64 = 0.5;
+pub(crate) const SNAP_ANGLE_RAD: f64 = 30.0_f64.to_radians();
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum LocalAttachmentAction {
+    Connect {
+        master: String,
+        slave: String,
+        hitch: String,
+        coupler: String,
+    },
+    Disconnect {
+        master: String,
+        slave: String,
+    },
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct LocalAttachments {
+    pub pending: Vec<LocalAttachmentAction>,
+    pub feedback: Option<(bool, String)>,
+}
+
+enum Reply {
+    Remote(ReqReplyToken),
+    Local,
+    Static,
+}
 
 #[derive(Debug, Clone)]
 pub struct Attachment {
@@ -68,7 +93,7 @@ pub struct AttachPlugin;
 impl Plugin for AttachPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Attachments>()
-
+            .init_resource::<LocalAttachments>()
             .init_resource::<PendingStaticAttachments>()
             .add_systems(Update, serve_attachments);
     }
@@ -198,7 +223,11 @@ fn lift_tyres_out_of_terrain(
             return;
         }
         let up = DQuat::from_axis_angle(axis, (depth / reach).atan());
-        let turn = if (up * offset).y > offset.y { up } else { up.inverse() };
+        let turn = if (up * offset).y > offset.y {
+            up
+        } else {
+            up.inverse()
+        };
         for handle in bodies {
             if let Some(body) = physics.bodies.get_mut(*handle) {
                 let pose = body.position();
@@ -213,7 +242,7 @@ fn lift_tyres_out_of_terrain(
 }
 
 /// The rigid-body link a (possibly body-less) link rides on.
-fn body_link<'a>(tree: &'a LinkTree, link: &'a LinkSpec) -> Option<&'a LinkSpec> {
+pub(crate) fn body_link<'a>(tree: &'a LinkTree, link: &'a LinkSpec) -> Option<&'a LinkSpec> {
     let mut cur = link;
     for _ in 0..64 {
         if cur.body_prim.is_some() {
@@ -327,6 +356,7 @@ fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> GenericJoint {
     let mut b = GenericJointBuilder::new(mask)
         .local_frame1(frame1)
         .local_frame2(frame2)
+        .softness(SpringCoefficients::new(30.0, 1.0))
         .contacts_enabled(false);
     for (axis, limit) in limits {
         b = b.limits(axis, [-limit, limit]);
@@ -334,67 +364,21 @@ fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> GenericJoint {
     b.build()
 }
 
-/// A hitched pair is one vehicle: the slave's drawbar runs through the
-/// master's hitch parts and wheels, so every body of one stops colliding
-/// with every body of the other (and starts again on detach). Each machine
-/// owns one collision group bit, so the other side's memberships are
-/// masked out of each collider's filter.
+/// Suppress only the connected machines' body pairs; keep authored filters unchanged.
 fn set_cross_collisions(
     physics: &mut PhysicsWorld,
     a: &[RigidBodyHandle],
     b: &[RigidBodyHandle],
     enabled: bool,
 ) {
-    fn colliders_of(physics: &PhysicsWorld, bodies: &[RigidBodyHandle]) -> Vec<ColliderHandle> {
-        bodies
-            .iter()
-            .filter_map(|h| physics.bodies.get(*h))
-            .flat_map(|b| b.colliders().iter().copied())
-            .collect()
-    }
-    fn memberships(physics: &PhysicsWorld, handles: &[ColliderHandle]) -> Group {
-        handles
-            .iter()
-            .filter_map(|h| physics.colliders.get(*h))
-            .fold(Group::NONE, |acc, c| acc | c.collision_groups().memberships)
-    }
-    let (ca, cb) = (colliders_of(physics, a), colliders_of(physics, b));
-    // Machines that are not articulations sit in every group; give each
-    // one its own bit first, or there is nothing to mask out.
-    let mut taken = Group::NONE;
-    for (handles, bodies) in [(&ca, a), (&cb, b)] {
-        let current = memberships(physics, handles);
-        if current != Group::ALL {
-            taken |= current;
-            continue;
-        }
-        let seed = bodies.first().map_or(0, |h| h.into_raw_parts().0);
-        let mut bit = Group::from_bits_truncate(1 << ((seed % 31) + 1));
-        while taken.contains(bit) {
-            bit = Group::from_bits_truncate((bit.bits() << 1).max(2) & !1);
-            if bit == Group::NONE {
-                bit = Group::GROUP_2;
-            }
-        }
-        taken |= bit;
-        for h in handles.iter() {
-            if let Some(c) = physics.colliders.get_mut(*h) {
-                let mut groups = c.collision_groups();
-                groups.memberships = bit;
-                c.set_collision_groups(groups);
-            }
-        }
-    }
-    let (ma, mb) = (memberships(physics, &ca), memberships(physics, &cb));
-    if ma == mb {
-        return;
-    }
-    for (handles, other) in [(&ca, mb), (&cb, ma)] {
-        for h in handles {
-            if let Some(c) = physics.colliders.get_mut(*h) {
-                let mut groups = c.collision_groups();
-                groups.filter = if enabled { groups.filter | other } else { groups.filter.difference(other) };
-                c.set_collision_groups(groups);
+    for &a in a {
+        for &b in b {
+            for pair in [(a, b), (b, a)] {
+                if enabled {
+                    physics.attachment_filtered_pairs.remove(&pair);
+                } else {
+                    physics.attachment_filtered_pairs.insert(pair);
+                }
             }
         }
     }
@@ -415,7 +399,11 @@ fn insert_hitch_joint(
     coupler_body: RigidBodyHandle,
     joint: GenericJoint,
 ) -> HitchJoint {
-    HitchJoint::Impulse(physics.impulse_joints.insert(hitch_body, coupler_body, joint, true))
+    HitchJoint::Impulse(
+        physics
+            .impulse_joints
+            .insert(hitch_body, coupler_body, joint, true),
+    )
 }
 
 fn remove_hitch_joint(physics: &mut PhysicsWorld, joint: HitchJoint) {
@@ -478,14 +466,19 @@ fn set_stand(
     let option = if hitched { "hitched" } else { "parked" };
     info!("gearbox-attach: `{slave_ns}` stand {stand} {option}");
     if let Ok(mut o) = overrides.get_mut(root) {
-        o.variants.retain(|(prim, set, _)| !(prim == &slave.prim_path && set == "coupling"));
-        o.variants.push((slave.prim_path.clone(), "coupling".to_string(), option.to_string()));
+        o.variants
+            .retain(|(prim, set, _)| !(prim == &slave.prim_path && set == "coupling"));
+        o.variants.push((
+            slave.prim_path.clone(),
+            "coupling".to_string(),
+            option.to_string(),
+        ));
     }
 }
 
 /// Does `candidate_master` already hang, directly or through others, below
 /// `slave`? Attaching would then close a loop.
-fn would_loop(attachments: &[Attachment], candidate_master: &str, slave: &str) -> bool {
+pub(crate) fn would_loop(attachments: &[Attachment], candidate_master: &str, slave: &str) -> bool {
     let mut cur = candidate_master.to_string();
     for _ in 0..64 {
         if cur == slave {
@@ -632,14 +625,37 @@ fn try_attach(
             .position(),
     );
 
+    let hitch_scene_body = scene
+        .frame(
+            master,
+            hitch_body_link.body_prim.as_deref().unwrap_or_default(),
+        )
+        .ok_or_else(|| refused("hitch body transform is unavailable"))?;
+    let coupler_scene_body = scene
+        .frame(
+            slave,
+            coupler_body_link.body_prim.as_deref().unwrap_or_default(),
+        )
+        .ok_or_else(|| refused("coupler body transform is unavailable"))?;
+    let hitch_world = hitch_body_world.then(&hitch_scene_body.inverse().then(&hitch_world));
+    let coupler_world = coupler_body_world.then(&coupler_scene_body.inverse().then(&coupler_world));
+
     // Only the prims' positions count. Every body keeps the USD basis (X
     // right, Y back, Z up), so aligning the two bodies puts the slave behind
     // the master facing the same way; an authored prim rotation would tip
     // the whole slave over on teleport.
-    let hitch_world = Frame { translation: hitch_world.translation, rotation: hitch_body_world.rotation };
-    let coupler_world =
-        Frame { translation: coupler_world.translation, rotation: coupler_body_world.rotation };
-    let target = Frame { translation: hitch_world.translation, rotation: hitch_body_world.rotation };
+    let hitch_world = Frame {
+        translation: hitch_world.translation,
+        rotation: hitch_body_world.rotation,
+    };
+    let coupler_world = Frame {
+        translation: coupler_world.translation,
+        rotation: coupler_body_world.rotation,
+    };
+    let target = Frame {
+        translation: hitch_world.translation,
+        rotation: hitch_body_world.rotation,
+    };
     let frame1 = hitch_body_world.inverse().then(&hitch_world);
     let frame2 = coupler_body_world.inverse().then(&coupler_world);
 
@@ -686,8 +702,16 @@ fn try_attach(
         .filter_map(|h| physics.bodies.get(*h))
         .map(|b| b.mass())
         .sum();
-    let joint = joint_for(&hitch.kind, frame1.pose(), frame2.pose());
+    let current_hitch = Frame::from_pose(physics.bodies[hitch_body].position()).then(&frame1);
+    let initial_frame2 = Frame::from_pose(physics.bodies[coupler_body].position())
+        .inverse()
+        .then(&current_hitch);
+    let mut joint = joint_for(&hitch.kind, frame1.pose(), initial_frame2.pose());
+    joint.softness = SpringCoefficients::new(8.0, 1.0);
     let handle = insert_hitch_joint(physics, hitch_body, coupler_body, joint);
+    if let HitchJoint::Impulse(handle) = handle {
+        physics.capture_hitch(handle, frame2.pose());
+    }
     let master_bodies = scene.bodies(master, physics);
     set_cross_collisions(physics, &master_bodies, &slave_bodies, false);
 
@@ -815,6 +839,7 @@ pub(crate) fn serve_attachments(
     transforms: Query<&'static GlobalTransform>,
     instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
     mut overrides: Query<&mut usd_bevy::instance::UsdInstanceOverrides>,
+    mut local: ResMut<LocalAttachments>,
 ) {
     let Some(mut bus) = bus else { return };
     let scene = Scene {
@@ -842,16 +867,72 @@ pub(crate) fn serve_attachments(
             slave.set_attached_to(None);
         }
     }
+    if attachments.0.len() != before {
+        let physics = physics.as_mut();
+        physics
+            .attachment_filtered_pairs
+            .retain(|(a, b)| physics.bodies.contains(*a) && physics.bodies.contains(*b));
+    }
     let mut changed = attachments.0.len() != before;
 
-    let mut attach_reqs: Vec<(String, AttachRequest, Option<ReqReplyToken>)> = Vec::new();
-    let mut detach_reqs: Vec<(String, DetachRequest, ReqReplyToken)> = Vec::new();
+    let mut attach_reqs: Vec<(String, AttachRequest, Reply)> = Vec::new();
+    let mut detach_reqs: Vec<(String, DetachRequest, Reply)> = Vec::new();
     for (ns, agent) in bus.machines.iter_mut() {
         for (req, token) in agent.pending_attach.drain(..) {
-            attach_reqs.push((ns.clone(), req, Some(token)));
+            attach_reqs.push((ns.clone(), req, Reply::Remote(token)));
         }
         for (req, token) in agent.pending_detach.drain(..) {
-            detach_reqs.push((ns.clone(), req, token));
+            detach_reqs.push((ns.clone(), req, Reply::Remote(token)));
+        }
+    }
+
+    for action in std::mem::take(&mut local.pending) {
+        let (master, slave) = match &action {
+            LocalAttachmentAction::Connect { master, slave, .. }
+            | LocalAttachmentAction::Disconnect { master, slave } => (master, slave),
+        };
+        let safe = [master, slave].into_iter().all(|ns| {
+            let Some(agent) = bus.machines.get(ns) else {
+                return false;
+            };
+            let Some(machine) = scene.machine(ns) else {
+                return false;
+            };
+            let Some(body) = machine
+                .body
+                .as_deref()
+                .and_then(|p| scene.body(machine, p, &physics))
+                .and_then(|h| physics.bodies.get(h))
+            else {
+                return false;
+            };
+            agent.session_id() == 0 && body.linvel().length() < 0.3 && body.angvel().length() < 0.2
+        });
+        if !safe {
+            local.feedback = Some((
+                false,
+                "Stop both machines and release external control first.".into(),
+            ));
+            continue;
+        }
+        match action {
+            LocalAttachmentAction::Connect {
+                master,
+                slave,
+                hitch,
+                coupler,
+            } => {
+                attach_reqs.push((
+                    master,
+                    AttachRequest::new(0, &slave)
+                        .with_hitch(&hitch)
+                        .with_coupler(&coupler),
+                    Reply::Local,
+                ));
+            }
+            LocalAttachmentAction::Disconnect { master, slave } => {
+                detach_reqs.push((master, DetachRequest::new(0, &slave), Reply::Local));
+            }
         }
     }
 
@@ -893,7 +974,7 @@ pub(crate) fn serve_attachments(
                                 .with_hitch(&h)
                                 .with_coupler(&c)
                                 .teleporting();
-                            attach_reqs.push((master_ns, req, None));
+                            attach_reqs.push((master_ns, req, Reply::Static));
                             true
                         }
                         _ => {
@@ -928,10 +1009,21 @@ pub(crate) fn serve_attachments(
         let status = match outcome {
             Ok(mut done) => {
                 let slave_ns = done.attachment.slave_ns.clone();
-                done.attachment.stand =
-                    stand_of(&scene, instances.as_deref(), &slave_ns, &done.attachment.coupler);
+                done.attachment.stand = stand_of(
+                    &scene,
+                    instances.as_deref(),
+                    &slave_ns,
+                    &done.attachment.coupler,
+                );
                 if let Some(stand) = done.attachment.stand.clone() {
-                    set_stand(&scene, physics.as_mut(), &mut overrides, &slave_ns, &stand, true);
+                    set_stand(
+                        &scene,
+                        physics.as_mut(),
+                        &mut overrides,
+                        &slave_ns,
+                        &stand,
+                        true,
+                    );
                 }
                 info!(
                     "gearbox-attach: `{slave_ns}` on `{master_ns}` via {} / {} ({})",
@@ -957,8 +1049,23 @@ pub(crate) fn serve_attachments(
                 status
             }
         };
-        if let (Some(token), Some(agent)) = (token, bus.machines.get_mut(&master_ns)) {
-            agent.respond_attach(token, &status);
+        match token {
+            Reply::Remote(token) => {
+                if let Some(agent) = bus.machines.get_mut(&master_ns) {
+                    agent.respond_attach(token, &status);
+                }
+            }
+            Reply::Local => {
+                local.feedback = Some((
+                    status.is_ok(),
+                    if status.is_ok() {
+                        format!("{} connected to {master_ns}", req.slave())
+                    } else {
+                        status.message()
+                    },
+                ))
+            }
+            Reply::Static => {}
         }
     }
 
@@ -978,12 +1085,21 @@ pub(crate) fn serve_attachments(
                 Some(i) => {
                     let a = attachments.0.remove(i);
                     remove_hitch_joint(physics.as_mut(), a.joint);
-                    if let (Some(m), Some(s)) = (scene.machine(&master_ns), scene.machine(&slave_ns)) {
+                    if let (Some(m), Some(s)) =
+                        (scene.machine(&master_ns), scene.machine(&slave_ns))
+                    {
                         let (mb, sb) = (scene.bodies(m, &physics), scene.bodies(s, &physics));
                         set_cross_collisions(physics.as_mut(), &mb, &sb, true);
                     }
                     if let Some(stand) = a.stand.as_deref() {
-                        set_stand(&scene, physics.as_mut(), &mut overrides, &slave_ns, stand, false);
+                        set_stand(
+                            &scene,
+                            physics.as_mut(),
+                            &mut overrides,
+                            &slave_ns,
+                            stand,
+                            false,
+                        );
                     }
                     if let Some(slave) = bus.machines.get_mut(&slave_ns) {
                         slave.set_attached_to(None);
@@ -1001,14 +1117,28 @@ pub(crate) fn serve_attachments(
                 }
             },
         };
-        if let Some(agent) = bus.machines.get_mut(&master_ns) {
-            agent.respond_detach(token, &status);
+        match token {
+            Reply::Remote(token) => {
+                if let Some(agent) = bus.machines.get_mut(&master_ns) {
+                    agent.respond_detach(token, &status);
+                }
+            }
+            Reply::Local => {
+                local.feedback = Some((
+                    status.is_ok(),
+                    if status.is_ok() {
+                        format!("{slave_ns} disconnected")
+                    } else {
+                        status.message()
+                    },
+                ))
+            }
+            Reply::Static => {}
         }
     }
 
     if changed {
         refresh_masters(&mut bus, &attachments.0, &scene);
-
     }
 
     // Commands aimed at a slave through its master land in the slave's queue.

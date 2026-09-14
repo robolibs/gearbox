@@ -34,6 +34,8 @@ pub struct PhysicsWorld {
     /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
     /// stored in both orders.
     pub filtered_pairs: HashSet<(RigidBodyHandle, RigidBodyHandle)>,
+    pub attachment_filtered_pairs: HashSet<(RigidBodyHandle, RigidBodyHandle)>,
+    hitch_captures: HashMap<ImpulseJointHandle, HitchCapture>,
     /// Entities whose bodies the last step disabled for non-finite state.
     pub quarantined: Vec<Entity>,
     /// Fixed physics rate; the frame's real time is spent in steps of it.
@@ -80,6 +82,8 @@ impl Default for PhysicsWorld {
             entity_to_body: HashMap::new(),
             entity_to_collider: HashMap::new(),
             filtered_pairs: HashSet::new(),
+            attachment_filtered_pairs: HashSet::new(),
+            hitch_captures: HashMap::new(),
             quarantined: Vec::new(),
             step_hz,
             accumulator: 0.0,
@@ -93,6 +97,7 @@ impl PhysicsWorld {
     /// gravity + parameters. No event handlers.
     pub fn step(&mut self) {
         self.quarantine_non_finite();
+        self.advance_hitch_captures();
         self.physics_pipeline.step(
             self.gravity,
             &self.integration_parameters,
@@ -104,7 +109,7 @@ impl PhysicsWorld {
             &mut self.impulse_joints,
             &mut self.multibody_joints,
             &mut self.ccd_solver,
-            &PairFilter(&self.filtered_pairs),
+            &PairFilter(&self.filtered_pairs, &self.attachment_filtered_pairs),
             &(),
         );
     }
@@ -141,13 +146,71 @@ impl PhysicsWorld {
     }
 }
 
-/// Contact filter backed by `PhysicsWorld::filtered_pairs`.
-struct PairFilter<'a>(&'a HashSet<(RigidBodyHandle, RigidBodyHandle)>);
+struct HitchCapture {
+    start: Pose,
+    target: Pose,
+    elapsed: f64,
+    duration: f64,
+}
+
+impl PhysicsWorld {
+    /// Move a hitch's second local frame to its authored anchor at fixed-step speed.
+    pub(crate) fn capture_hitch(&mut self, handle: ImpulseJointHandle, target: Pose) {
+        let Some(joint) = self.impulse_joints.get(handle) else {
+            return;
+        };
+        let start = joint.data.local_frame2;
+        let distance = start.translation.distance(target.translation);
+        let angle = start.rotation.angle_between(target.rotation);
+        let duration = (1.5 * (distance / 0.2).max(angle / 0.2)).max(0.5);
+        self.hitch_captures.insert(
+            handle,
+            HitchCapture {
+                start,
+                target,
+                elapsed: 0.0,
+                duration,
+            },
+        );
+    }
+
+    fn advance_hitch_captures(&mut self) {
+        let dt = self.integration_parameters.dt;
+        self.hitch_captures.retain(|handle, capture| {
+            let Some(joint) = self.impulse_joints.get_mut(*handle, true) else {
+                return false;
+            };
+            capture.elapsed = (capture.elapsed + dt).min(capture.duration);
+            let t = capture.elapsed / capture.duration;
+            let s = t * t * (3.0 - 2.0 * t);
+            joint.data.local_frame2 = Pose {
+                translation: capture
+                    .start
+                    .translation
+                    .lerp(capture.target.translation, s),
+                rotation: capture.start.rotation.slerp(capture.target.rotation, s),
+            };
+            joint.data.softness = SpringCoefficients::new(8.0 + 22.0 * s, 1.0);
+            for body in [joint.body1, joint.body2] {
+                if let Some(body) = self.bodies.get_mut(body) {
+                    body.wake_up(true);
+                }
+            }
+            t < 1.0
+        });
+    }
+}
+
+/// Authored exclusions and runtime hitch exclusions remain independent.
+struct PairFilter<'a>(
+    &'a HashSet<(RigidBodyHandle, RigidBodyHandle)>,
+    &'a HashSet<(RigidBodyHandle, RigidBodyHandle)>,
+);
 
 impl PhysicsHooks for PairFilter<'_> {
     fn filter_contact_pair(&self, context: &PairFilterContext) -> Option<SolverFlags> {
         match (context.rigid_body1, context.rigid_body2) {
-            (Some(a), Some(b)) if self.0.contains(&(a, b)) => None,
+            (Some(a), Some(b)) if self.0.contains(&(a, b)) || self.1.contains(&(a, b)) => None,
             _ => Some(SolverFlags::COMPUTE_IMPULSES),
         }
     }

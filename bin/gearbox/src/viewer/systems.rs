@@ -31,17 +31,13 @@ pub struct GizmoGrab(pub bool);
 
 #[derive(Resource, Debug, Clone)]
 pub struct SelectionRing {
-    pub anchor: Option<Vec3>,
     pub outer_radius: f32,
-    pub color: Color,
 }
 
 impl Default for SelectionRing {
     fn default() -> Self {
         Self {
-            anchor: None,
             outer_radius: 1.0,
-            color: Color::srgb(0.9, 0.9, 0.95),
         }
     }
 }
@@ -55,6 +51,7 @@ pub struct ViewerSystemsPlugin;
 impl Plugin for ViewerSystemsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
+            .add_plugins(super::machine_context::MachineContextPlugin)
             .init_resource::<SelectionRing>()
             .init_resource::<GizmoGrab>()
             .init_resource::<PendingDespawn>()
@@ -86,8 +83,6 @@ impl Plugin for ViewerSystemsPlugin {
                     mirror_api_selection,
                     pick_on_click,
                     rebase_loaded_assets_on_pause,
-                    drive_selection_ring,
-                    draw_selection_ring,
                     drain_despawn,
                     auto_set_active_stage,
                     capture_active_stage_info,
@@ -365,74 +360,6 @@ fn follow_target(
         cam.focus = current;
         apply_rig(&cam, &mut tr);
     }
-}
-
-/// During play, the gizmo is hidden — so the selection ring is the
-/// only visual cue for "this asset is selected". Position the ring at
-/// the asset's footprint on the ground tangent plane (`y = 0`) and
-/// size it from the asset's world-AABB radius. Mirrors the old
-/// `gearbox-editor::selection_ring::update_selection_ring` rule:
-/// edit-mode hides the ring (gizmo handles take over).
-fn drive_selection_ring(
-    selection: Res<Selection>,
-    physics: Res<gearbox_api::PhysicsActive>,
-    parents: Query<&ChildOf>,
-    loaded: Query<Entity, With<LoadedAsset>>,
-    aabbs: Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb)>,
-    mut ring: ResMut<SelectionRing>,
-) {
-    if !physics.0 {
-        ring.anchor = None;
-        return;
-    }
-    let Some(root) = selection.0 else {
-        ring.anchor = None;
-        return;
-    };
-    // Anchor the ring at the **world AABB centroid** of the asset's
-    // mesh subtree, not the root entity's translation — rapier writes
-    // poses onto the descendant prims, not the root, so during play
-    // the root stays at its mount point even though the visual robot
-    // has driven away. The centroid follows wherever the meshes are.
-    let mut wmin = Vec3::splat(f32::INFINITY);
-    let mut wmax = Vec3::splat(f32::NEG_INFINITY);
-    for (e, gt, aabb) in aabbs.iter() {
-        if find_loaded_ancestor(e, &parents, &loaded) != Some(root) {
-            continue;
-        }
-        let m = gt.to_matrix();
-        let c = Vec3::from(aabb.center);
-        let h = Vec3::from(aabb.half_extents);
-        for i in 0..8 {
-            let local = Vec3::new(
-                if i & 1 == 0 { c.x - h.x } else { c.x + h.x },
-                if i & 2 == 0 { c.y - h.y } else { c.y + h.y },
-                if i & 4 == 0 { c.z - h.z } else { c.z + h.z },
-            );
-            let w = m.transform_point3(local);
-            wmin = wmin.min(w);
-            wmax = wmax.max(w);
-        }
-    }
-    if wmin.x.is_infinite() {
-        ring.anchor = None;
-        return;
-    }
-    let centroid = (wmin + wmax) * 0.5;
-    let half = (wmax - wmin) * 0.5;
-    let outer = (half.x.max(half.z) + 0.3).max(1.0);
-    ring.anchor = Some(Vec3::new(centroid.x, 0.05, centroid.z));
-    ring.outer_radius = outer;
-}
-
-fn draw_selection_ring(ring: Res<SelectionRing>, mut gizmos: Gizmos) {
-    let Some(anchor) = ring.anchor else {
-        return;
-    };
-    let iso = Isometry3d::new(anchor, Quat::from_rotation_x(core::f32::consts::FRAC_PI_2));
-    gizmos
-        .circle(iso, ring.outer_radius.max(0.05), ring.color)
-        .resolution(96);
 }
 
 /// On the ON→OFF edge of `PhysicsActive`, rebase each LoadedAsset's
@@ -851,14 +778,16 @@ pub(crate) fn pick_on_click(
     cameras: Query<(&Camera, &GlobalTransform), With<ChaseCamera>>,
     loaded: Query<Entity, With<LoadedAsset>>,
     parents: Query<&ChildOf>,
-    aabbs: Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb)>,
+    aabbs: Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb, Option<&InheritedVisibility>)>,
     mut selection: ResMut<Selection>,
     mut active: ResMut<ActiveStage>,
+    mut hover: ResMut<super::machine_context::MachineHover>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
         selection.0 = None;
     }
-    if !input.primary_clicked || grab.0 {
+    hover.hit = None;
+    if grab.0 || hover.captures_pointer {
         return;
     }
     let Some(cursor) = input.pointer_pos else {
@@ -873,7 +802,8 @@ pub(crate) fn pick_on_click(
     let origin = ray.origin;
     let dir = *ray.direction;
     let mut best: Option<(Entity, f32)> = None;
-    for (e, gt, aabb) in aabbs.iter() {
+    for (e, gt, aabb, visibility) in aabbs.iter() {
+        if visibility.is_some_and(|v| !v.get()) { continue; }
         let Some(root) = find_loaded_ancestor(e, &parents, &loaded) else {
             continue;
         };
@@ -884,6 +814,10 @@ pub(crate) fn pick_on_click(
         }
     }
     if let Some((root, t)) = best {
+        hover.hit = Some(root);
+        if !input.primary_clicked {
+            return;
+        }
         info!("pick: hit LoadedAsset {root:?} at t={t:.3}");
         selection.0 = Some(root);
         active.0 = Some(root);

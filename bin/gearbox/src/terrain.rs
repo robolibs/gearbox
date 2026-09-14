@@ -198,6 +198,34 @@ pub struct ProceduralTerrain {
     tiles: HashMap<(i32, i32), (Entity, f32)>,
 }
 
+impl ProceduralTerrain {
+    /// Height on the rendered tile's current LOD triangles.
+    pub(crate) fn surface_height_m(&self, x: f32, z: f32) -> Option<f32> {
+        let tx = (x / TILE_M).floor() as i32;
+        let tz = (z / TILE_M).floor() as i32;
+        let (_, cell) = self.tiles.get(&(tx, tz))?;
+        let n = tile_segments(*cell);
+        let step = TILE_M / n as f32;
+        let fx = (x - tx as f32 * TILE_M) / step;
+        let fz = (z - tz as f32 * TILE_M) / step;
+        let j = (fx.floor() as usize).min(n - 1);
+        let i = (fz.floor() as usize).min(n - 1);
+        let u = (fx - j as f32).clamp(0.0, 1.0);
+        let v = (fz - i as f32).clamp(0.0, 1.0);
+        let x0 = tx as f32 * TILE_M + j as f32 * step;
+        let z0 = tz as f32 * TILE_M + i as f32 * step;
+        let h00 = self.grid.height_at(x0, z0)?;
+        let h10 = self.grid.height_at(x0 + step, z0)?;
+        let h01 = self.grid.height_at(x0, z0 + step)?;
+        let h11 = self.grid.height_at(x0 + step, z0 + step)?;
+        Some(if u + v <= 1.0 {
+            h00 + (h10 - h00) * u + (h01 - h00) * v
+        } else {
+            h11 + (h01 - h11) * (1.0 - u) + (h10 - h11) * (1.0 - v)
+        })
+    }
+}
+
 #[derive(Component)]
 struct TerrainTile;
 

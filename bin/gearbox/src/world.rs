@@ -372,8 +372,12 @@ fn chase_camera_control(
     input: Res<BevyViewportInput>,
     keys: Res<ButtonInput<KeyCode>>,
     grab: Res<crate::viewer::systems::GizmoGrab>,
+    context: Res<crate::viewer::machine_context::MachineHover>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
+    if context.captures_pointer {
+        return;
+    }
     let orbit_delta = if grab.0 {
         Vec2::ZERO
     } else {
@@ -444,12 +448,13 @@ pub(crate) fn chase_camera_floor(
     }
 }
 
-/// W/A/S/D move the view over the ground in the direction the camera faces,
-/// with the pitch left out — looking down and pressing W slides forward, it
-/// does not dive. Q and E take it down and up, Shift makes all of it faster.
+/// W/S fly the camera along its view: they close in on the focus and, once
+/// at the nearest distance, carry the focus along and drop any follow.
+/// A/D slide over the ground, Q/E go down and up, Shift speeds all of it.
 fn chase_camera_keys(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut follow: ResMut<crate::viewer::state::FollowTarget>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
     let axis =
@@ -470,8 +475,19 @@ fn chase_camera_keys(
     for (mut cam, mut transform) in &mut cameras {
         let forward = Vec3::new(cam.yaw.sin(), 0.0, cam.yaw.cos());
         let right = Vec3::new(forward.z, 0.0, -forward.x);
-        let speed = cam.distance * KEY_PAN_PER_SEC * boost * time.delta_secs();
-        cam.focus += (forward * ahead + right * aside + Vec3::Y * up) * speed;
+        let offset = Vec3::new(
+            forward.x * cam.elevation.cos(),
+            cam.elevation.sin(),
+            forward.z * cam.elevation.cos(),
+        );
+        let speed = cam.distance.max(2.0) * KEY_PAN_PER_SEC * boost * time.delta_secs();
+        let reach = cam.distance + ahead * speed;
+        cam.distance = reach.max(cam.min_distance);
+        let carried = reach - cam.distance;
+        if carried < 0.0 {
+            follow.set(None);
+        }
+        cam.focus += offset * carried + (right * aside + Vec3::Y * up) * speed;
         apply_rig(&cam, &mut transform);
     }
 }
@@ -484,6 +500,7 @@ fn chase_camera_zoom(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     input: Res<BevyViewportInput>,
+    context: Res<crate::viewer::machine_context::MachineHover>,
     mut zoom_target: Local<Option<f64>>,
     mut last_written: Local<Option<f32>>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
@@ -491,7 +508,11 @@ fn chase_camera_zoom(
     if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
         return;
     }
-    let scroll_delta = input.scroll_delta as f64 * SCROLL_NOTCHES_PER_UNIT;
+    let scroll_delta = if context.captures_pointer {
+        0.0
+    } else {
+        input.scroll_delta as f64 * SCROLL_NOTCHES_PER_UNIT
+    };
 
     let Ok((mut cam, mut transform)) = cameras.single_mut() else {
         return;

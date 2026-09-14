@@ -11,7 +11,6 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use mara::host::MaraHostCtx;
 use mara::ui::mara_core;
 use mara_core::pane::PaneBody;
 use mara_core::pod::{Pod, PodResponse};
@@ -24,7 +23,7 @@ use crate::controller::{
     CmdVel, ControllerInventory, ControllerKey, ControllerSpec, ControllerStates,
     MachineInstanceSpec, UiDrive,
 };
-use crate::host::{PANE_MACHINE as P, RIBBON_LEFT};
+use crate::host::PANE_MACHINE as P;
 use crate::links::LinkSpec;
 use crate::services::{LinkValues, ServiceCommands, controller_joints, moved_link};
 use crate::viewer::drive::{DRIVE_TYPES, MachinePanel};
@@ -79,25 +78,6 @@ fn picked_machine(world: &World) -> Option<MachineInstanceSpec> {
         .iter()
         .find(|m| m.scene_root == Some(picked))
         .cloned()
-}
-
-/// Selecting a machine opens the pane, once per selection change.
-pub fn auto_open(host: &MaraHostCtx<'_>, world: &mut World) {
-    let selection = world.resource::<Selection>().0;
-    let is_machine = selection.is_some_and(|root| {
-        world
-            .resource::<ControllerInventory>()
-            .machines
-            .iter()
-            .any(|m| m.scene_root == Some(root))
-    });
-    let mut panel = world.resource_mut::<MachinePanel>();
-    if selection != panel.last_selection {
-        panel.last_selection = selection;
-        if is_machine {
-            host.set_rail_pane_open(RIBBON_LEFT, P, true);
-        }
-    }
 }
 
 /// The machine rows at the top of the pane and each row's drive keys.
@@ -326,7 +306,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                 pod = pod.with_readout("pad layer", layer)
                     .with_readout("normal sticks", "right: orbit · left: strafe/move")
                     .with_readout("normal triggers", "R2: raise · L2: lower camera")
-                    .with_readout("normal D-pad", "←/→ machine · ↑/↓ follow");
+                    .with_readout("normal D-pad", "←/→ machine · ↑ follow · ↓ cinematic");
             }
             let cmd = ui_drive.commands.get(&key).copied().unwrap_or_default();
             ctx.set_slider(pod_id, 0, cmd.linear_mps as f64);

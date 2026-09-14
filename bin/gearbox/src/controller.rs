@@ -1443,8 +1443,14 @@ fn stable_cmd_vel(
         .get(key)
         .copied()
         .unwrap_or_default();
+    // Speeding up is immediate (traction control guards the tyres); slowing
+    // down, a stop included, brakes at a comfortable rate so a zero command
+    // at speed does not slam the parking hold on.
+    let braking = requested.linear_mps.abs() < previous.linear_mps.abs()
+        || requested.linear_mps * previous.linear_mps < 0.0;
+    let rate = if braking { CMD_BRAKE_MPS2 } else { CMD_ACCEL_MPS2 };
     let next = CmdVel {
-        linear_mps: slew(previous.linear_mps, requested.linear_mps, CMD_ACCEL_MPS2 * dt),
+        linear_mps: slew(previous.linear_mps, requested.linear_mps, rate * dt),
         angular_rps: slew(previous.angular_rps, requested.angular_rps, 6.0 * dt),
     };
     runtime.applied_cmd_vel.insert(key.clone(), next);
@@ -1571,8 +1577,12 @@ const WHEEL_GRIP_USE: f64 = 0.9;
 const WHEEL_FULL_TORQUE_ERROR_RAD_S: f64 = 0.1;
 /// The same for a parked machine holding a slope.
 const WHEEL_HOLD_ERROR_RAD_S: f64 = 0.005;
-/// Commanded speed changes at most this fast (m/s²).
-const CMD_ACCEL_MPS2: f32 = 2.0;
+/// Commanded speed changes at most this fast (m/s²): effectively at once.
+/// Traction control keeps the wheels from spinning; a gentle ramp here
+/// swallowed short commands, such as a planner's brief reverse.
+const CMD_ACCEL_MPS2: f32 = 80.0;
+/// Commanded speed falls at most this fast (m/s²): a firm, smooth brake.
+const CMD_BRAKE_MPS2: f32 = 3.0;
 /// Traction control band around a wheel's own ground speed: a share of it
 /// plus a floor (m/s), so a lightly loaded wheel cannot spin up or lock.
 const WHEEL_SLIP_SHARE: f64 = 0.08;
