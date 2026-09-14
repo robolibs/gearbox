@@ -79,16 +79,57 @@ fn init_tracing(log: &LoaderLog) {
             .open(LOG_FILE)
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap())
     };
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(LoaderLogLayer::new(log))
-        .with(
+    // A fresh layer per subscriber: its type depends on the layers under it.
+    macro_rules! fmt_layer {
+        () => {
             fmt::layer()
                 .with_target(true)
                 .with_ansi(false)
-                .with_writer(std::io::stderr.and(to_file)),
-        )
+                .with_writer(std::io::stderr.and(to_file))
+        };
+    }
+    // Profiling: the trace sees every span; the log filter moves onto the logs.
+    #[cfg(feature = "profile")]
+    if let Ok(path) = std::env::var("GEARBOX_TRACE") {
+        use tracing_subscriber::Layer;
+        let _ = tracing_subscriber::registry()
+            .with(chrome_layer(path))
+            .with(LoaderLogLayer::new(log).and_then(fmt_layer!()).with_filter(filter))
+            .try_init();
+        return;
+    }
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(LoaderLogLayer::new(log))
+        .with(fmt_layer!())
         .try_init();
+}
+
+/// Chrome trace of every Bevy system and render stage (`profile` feature and
+/// `GEARBOX_TRACE=path`), written for `GEARBOX_TRACE_SECONDS` (default 60)
+/// and then flushed; open it in ui.perfetto.dev.
+#[cfg(feature = "profile")]
+fn chrome_layer<S>(path: String) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a> + Send + Sync,
+{
+    use tracing_subscriber::Layer;
+    let seconds = std::env::var("GEARBOX_TRACE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(60);
+    let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
+        .file(path)
+        .include_args(true)
+        .build();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+        drop(guard);
+    });
+    // Rapier and parry trace every constraint; recording them costs more than solving.
+    layer.with_filter(tracing_subscriber::EnvFilter::new(
+        "info,rapier3d_f64=warn,parry3d_f64=warn",
+    ))
 }
 
 /// Panics (message and backtrace) go to the log file and stderr; a panic in

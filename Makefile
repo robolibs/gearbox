@@ -27,7 +27,7 @@ $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info Display: $(BACKEND) backend)
 $(info ------------------------------------------)
 
-.PHONY: build b build-release-bin build-bins compile c run r sim cli test t check fmt bench clean bind bind-c bind-py help h
+.PHONY: build b build-release-bin build-bins build-profile compile c run r sim cli test t check fmt bench clean bind bind-c bind-py help h
 
 build:
 	@$(CARGO_ENV) build --lib
@@ -39,6 +39,10 @@ build-release-bin:
 
 build-bins:
 	@$(CARGO_ENV) build -p gearbox-sim --bin gearbox-sim -p gearbox-cli --bin gearbox
+
+# Debug sim with per-system Chrome tracing; run it with GEARBOX_TRACE=file.json.
+build-profile:
+	@$(CARGO_ENV) build -p gearbox-sim --bin gearbox-sim --features gearbox-sim/profile -p gearbox-cli --bin gearbox
 
 compile:
 	@$(CARGO) clean
