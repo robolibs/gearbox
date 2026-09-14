@@ -38,6 +38,10 @@ RING_RADIUS = 15.0
 # Field speeds. Physics runs in real time now and the tyres deliver what is
 # commanded; faster than this the tractor overshoots a bale between ticks.
 MAX_SPEED_MPS = 2.0
+# A bale counts as picked up this close to the tractor's origin (rear axle):
+# the nose is ~2.5 m ahead and the bale ~0.7 m in radius. Waiting for a
+# physical contact meant ramming a fixed bale and stopping dead.
+REACH_M = 4.0
 MAX_YAW_RPS = 1.2
 TICK_DT = 0.10
 MARKER_GAP_M = 0.6
@@ -58,7 +62,7 @@ def _build_tracker():
     tracker.set_config(cfg)
     cons = ondrive.RobotConstraints.default_()
     cons.steering_type = "ackermann"
-    cons.wheelbase = 2.37
+    cons.wheelbase = WHEELBASE_M
     cons.max_linear_velocity = MAX_SPEED_MPS
     cons.min_linear_velocity = 0.0
     cons.max_angular_velocity = MAX_YAW_RPS
@@ -67,13 +71,33 @@ def _build_tracker():
     return tracker
 
 
-# A target more than this far off the nose is reached by a tight forward
-# turn first; the tracker takes over again within the exit angle. A timed
-# reverse was tuned for the old slow-motion physics: in real time it
-# backed the tractor most of the way to the bale.
+# A target more than this far off the nose is reached by a forward turn at
+# full lock first. The steering servo straightens at about 30°/s and the
+# tractor keeps rotating meanwhile, so the turn lets go of the wheel once the
+# heading error is down to that remaining swing; the tracker takes over when
+# the wheels are straight.
 TURN_ENTER_RAD = math.pi / 2.0
-TURN_EXIT_RAD = math.radians(30.0)
+TURN_SETTLED_RPS = 0.08
 TURN_SPEED_MPS = 1.0
+TURN_RADIUS_M = 3.4
+WHEELBASE_M = 2.37
+STEER_RATE_RPS = math.radians(30.0)
+CMD_LATENCY_S = 0.2
+
+
+def swing_left(speed: float, yaw_rate: float) -> float:
+    """Heading the tractor still turns if its steering starts straightening now."""
+    v = max(abs(speed), 0.3)
+    steer = math.atan(WHEELBASE_M * abs(yaw_rate) / v)
+    unwind = v * -math.log(math.cos(steer)) / (WHEELBASE_M * STEER_RATE_RPS)
+    return unwind + abs(yaw_rate) * CMD_LATENCY_S
+
+
+def turn_side(cx: float, cz: float, heading: float, tx: float, tz: float, err: float) -> float:
+    """Turn toward the target, unless it sits inside that side's turning circle."""
+    sign = 1.0 if err >= 0.0 else -1.0
+    ox, oz = cx + sign * TURN_RADIUS_M * math.cos(heading), cz - sign * TURN_RADIUS_M * math.sin(heading)
+    return -sign if math.hypot(tx - ox, tz - oz) < 1.1 * TURN_RADIUS_M else sign
 
 
 def wrap_pi(angle: float) -> float:
@@ -100,6 +124,8 @@ class RobotProxy:
         self.pose = (0.0, 0.0)
         self.last_pose = (0.0, 0.0)
         self.heading_rad: float | None = None
+        self.yaw_rate = 0.0
+        self.speed = 0.0
         self.seen = False
         self.target_bale: int | None = None
         self.marker_bale: int | None = None
@@ -136,6 +162,8 @@ class RobotProxy:
         self.last_pose = self.pose
         self.pose = (s.x, s.z)
         self.heading_rad = s.heading_rad
+        self.yaw_rate = s.yaw_rate
+        self.speed = s.linear_speed
         self.seen = True
         return True
 
@@ -266,18 +294,24 @@ def drive_toward(robot: RobotProxy, target: tuple[float, float]) -> float:
     heading_err = wrap_pi(math.atan2(tx - cx, tz - cz) - heading)
 
     now = time.time()
-    if robot._maneuver == "forward":
-        if abs(heading_err) > TURN_ENTER_RAD and d_now > 2.0:
-            robot._maneuver = "turn"
-            robot._turn_sign = 1.0 if heading_err > 0.0 else -1.0
-    elif abs(heading_err) < TURN_EXIT_RAD:
-        # Replan the path from where the turn ended.
+    if robot._maneuver == "forward" and abs(heading_err) > TURN_ENTER_RAD and d_now > 2.0:
+        robot._maneuver = "turn"
+        robot._turn_sign = turn_side(cx, cz, heading, tx, tz, heading_err)
+
+    if (
+        robot._maneuver == "turn"
+        and heading_err * robot._turn_sign > 0.0
+        and abs(heading_err) <= swing_left(robot.speed, robot.yaw_rate)
+    ):
+        robot._maneuver = "straighten"
+    if robot._maneuver == "straighten" and abs(robot.yaw_rate) < TURN_SETTLED_RPS:
+        # Nose on the bale, wheels straight: replan from here and hand back.
         robot._maneuver = "forward"
         robot._tracker_target = None
         return d_now
-
-    if robot._maneuver == "turn":
-        robot.publish_cmd(TURN_SPEED_MPS, robot._turn_sign * MAX_YAW_RPS)
+    if robot._maneuver in ("turn", "straighten"):
+        yaw = robot._turn_sign * MAX_YAW_RPS if robot._maneuver == "turn" else 0.0
+        robot.publish_cmd(TURN_SPEED_MPS, yaw)
         return d_now
 
     px, py = _planar(cx, cz)
@@ -377,7 +411,8 @@ def run(robots: list[RobotProxy], n_bales: int, field: float, seed: int, instanc
 
                 if robot.target_bale is not None:
                     bx, _by, bz, _top = bale_pos[robot.target_bale]
-                    drive_toward(robot, (bx, bz))
+                    if drive_toward(robot, (bx, bz)) < REACH_M:
+                        mark_harvested(robot.target_bale)
 
                 if robot.is_idle:
                     pick = pick_nearest_bale(robot, bale_pos, visited, claimed)
