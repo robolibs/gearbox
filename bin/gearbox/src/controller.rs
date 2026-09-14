@@ -28,6 +28,9 @@ use rapier3d::prelude::{
 };
 use usd_bevy::UsdPrimRef;
 
+mod traction;
+mod steering;
+
 /// All USD-authored machine/controller specs discovered from loaded assets.
 #[derive(Resource, Debug, Default, Clone)]
 pub struct ControllerInventory {
@@ -60,14 +63,52 @@ pub struct ControllerCommands {
     pub cmd_vel: HashMap<ControllerKey, CmdVel>,
 }
 
-/// Twists the viewer drives while a person holds a machine in the Machine
-/// pane; applied after the bus so they win over an idle session.
+/// Local drive commands and one-shot stops, applied after bus input.
 #[derive(Resource, Default)]
-pub struct UiDrive(pub HashMap<ControllerKey, CmdVel>);
+pub struct UiDrive {
+    pub commands: HashMap<ControllerKey, CmdVel>,
+    pub steering: HashMap<ControllerKey, f32>,
+    pub inhibited: HashSet<ControllerKey>,
+    release_after_stop: HashSet<ControllerKey>,
+}
 
-fn apply_ui_drive(ui: Res<UiDrive>, mut commands: ResMut<ControllerCommands>) {
-    for (key, cmd) in &ui.0 {
+impl UiDrive {
+    pub fn drive(&mut self, key: &ControllerKey, command: CmdVel, steering: Option<f32>) {
+        self.release_after_stop.remove(key);
+        self.inhibited.remove(key);
+        self.commands.insert(key.clone(), command);
+        if let Some(steering) = steering {
+            self.steering.insert(key.clone(), steering);
+        } else {
+            self.steering.remove(key);
+        }
+    }
+
+    pub fn stop_once(&mut self, key: &ControllerKey) {
+        self.commands.insert(key.clone(), CmdVel::default());
+        self.steering.remove(key);
+        self.inhibited.insert(key.clone());
+        self.release_after_stop.insert(key.clone());
+    }
+}
+
+pub(crate) fn apply_ui_drive(
+    mut ui: ResMut<UiDrive>,
+    mut commands: ResMut<ControllerCommands>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+) {
+    for (key, cmd) in &ui.commands {
         commands.cmd_vel.insert(key.clone(), *cmd);
+    }
+    for key in &ui.inhibited {
+        commands.cmd_vel.insert(key.clone(), CmdVel::default());
+        runtime.applied_cmd_vel.insert(key.clone(), CmdVel::default());
+        runtime.speed_trim.remove(key);
+    }
+    for key in std::mem::take(&mut ui.release_after_stop) {
+        ui.commands.remove(&key);
+        ui.steering.remove(&key);
+        ui.inhibited.remove(&key);
     }
 }
 
@@ -107,10 +148,20 @@ pub struct ExternalControllerProcesses {
 #[derive(Resource, Debug, Default, Clone)]
 pub struct ControllerStates {
     pub states: HashMap<ControllerKey, ControllerState>,
+    pub drive_limits: HashMap<ControllerKey, DriveLimits>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DriveLimits {
+    pub driven_wheels: usize,
+    pub supported_wheels: usize,
+    pub torque_nm: f64,
+    pub power_scale: f64,
+    pub parked: bool,
 }
 
 #[derive(Resource, Debug, Default, Clone)]
-struct ControllerRuntimeState {
+pub(crate) struct ControllerRuntimeState {
     applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
     logged_empty_tire_pairs: HashSet<ControllerKey>,
     logged_steer: HashSet<ControllerKey>,
@@ -118,9 +169,9 @@ struct ControllerRuntimeState {
     machines_prepared: HashSet<ControllerKey>,
     /// Integral wheel-speed trim per controller under contact traction.
     speed_trim: HashMap<ControllerKey, f64>,
-    /// Rigid bodies per machine id; their live mass sets the torque cap.
+    /// Rigid bodies per machine id for steering loads and diagnostics.
     machine_bodies: HashMap<String, Vec<RigidBodyHandle>>,
-    /// Wheel bodies per machine id; the weight spreads over all of them.
+    /// Wheel bodies per machine id for tyre setup and contact diagnostics.
     machine_wheels: HashMap<String, Vec<RigidBodyHandle>>,
     diff_drive_debug_ticks: u64,
 }
@@ -207,7 +258,8 @@ impl Plugin for ControllerDiscoveryPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (publish_machine_controller_states, publish_link_poses),
+                (publish_machine_controller_states, publish_link_poses)
+                    .after(bevy::transform::TransformSystems::Propagate),
             );
     }
 }
@@ -977,6 +1029,7 @@ fn is_allowlisted(executable: &Path, allowlist_dirs: &[std::path::PathBuf]) -> b
 fn apply_builtin_ackermann_cmd_vel(
     inventory: Res<ControllerInventory>,
     commands: Res<ControllerCommands>,
+    ui_drive: Res<UiDrive>,
     time: Res<Time>,
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
@@ -989,6 +1042,7 @@ fn apply_builtin_ackermann_cmd_vel(
     )>,
     parents: Query<&ChildOf>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
+    mut steering_log_at: Local<f32>,
 ) {
     if !active.0 || inventory.machines.is_empty() {
         return;
@@ -1058,29 +1112,27 @@ fn apply_builtin_ackermann_cmd_vel(
                 .or(controller.track_width)
                 .unwrap_or(1.5675);
             let max_steer_deg = controller.max_steer_deg.unwrap_or(45.0);
-            let steer_target_rad = steering_target_radians(
-                cmd.linear_mps,
-                cmd.angular_rps,
-                wheel_base_m,
-                max_steer_deg,
-            );
+            let steering_input = ui_drive.steering.get(&key).copied()
+                .filter(|_| ui_drive.commands.contains_key(&key));
+            let steer_target_rad = steering_input
+                .map(|input| input as f64 * (max_steer_deg as f64).to_radians())
+                .unwrap_or_else(|| steering_target_radians(
+                    cmd.linear_mps, cmd.angular_rps, wheel_base_m, max_steer_deg,
+                ));
             let geometry = controller
                 .steering_geometry
                 .as_deref()
                 .unwrap_or("ackermann");
-            let steer_targets = steering_joint_targets(
-                scene_root,
-                controller,
-                machine,
-                &joints,
-                &parents,
-                &physics,
-                geometry,
-                steer_target_rad,
-                wheel_base_m,
-                track_width_m,
-                max_steer_deg,
+            let turn = steering::solve(
+                scene_root, controller, machine, &joints, &parents, &physics,
+                body_handle, cmd,
+                steering_input,
             );
+            let steer_targets = turn.as_ref().map(|turn| turn.targets())
+                .unwrap_or_else(|| steering_joint_targets(
+                    scene_root, controller, machine, &joints, &parents, &physics,
+                    geometry, steer_target_rad, wheel_base_m, track_width_m, max_steer_deg,
+                ));
             let traction_track_width_m = controller
                 .rear_track_width
                 .or(controller.track_width)
@@ -1106,8 +1158,16 @@ fn apply_builtin_ackermann_cmd_vel(
                 wheel_base_m,
                 traction_track_width_m,
                 wheel_radius_m,
+                turn.as_ref(),
             );
             let driven = wheel_targets.len();
+            if time.elapsed_secs() >= *steering_log_at
+                && std::env::var_os("GEARBOX_STEERING_DEBUG").is_some()
+                && let Some(turn) = &turn
+            {
+                *steering_log_at = time.elapsed_secs() + 1.0;
+                turn.trace(&physics, body_handle, &machine.id, &wheel_targets);
+            }
             let passive =
                 parking_brake_wheel_targets(scene_root, controller, machine, &joints, &parents, &physics);
             let wheels = runtime
@@ -1139,17 +1199,16 @@ fn apply_builtin_ackermann_cmd_vel(
                         .map(|b| b.mass())
                         .sum::<f64>()
                 });
-                cap_wheel_torque(
+                let mut limits = cap_wheel_torque(
                     &physics,
                     body_handle,
                     controller,
                     &mut wheel_targets,
-                    mass,
-                    wheels,
-                    driven,
                     wheel_radius_m,
                     cmd.linear_mps.abs() < 0.05,
                 );
+                limits.driven_wheels = driven;
+                states.drive_limits.insert(key.clone(), limits);
                 if traction_control_enabled(controller) {
                     limit_wheel_slip(&physics, body_handle, &mut wheel_targets);
                 }
@@ -1165,6 +1224,9 @@ fn apply_builtin_ackermann_cmd_vel(
                 cmd,
                 steer_target_rad,
             );
+            if let Some(turn) = &turn {
+                turn.configure_servos(&mut physics, steer_cap);
+            }
             let applied = apply_joint_motors(&mut physics, &wheel_targets, &steer_targets, steer_cap);
             if runtime.logged_steer.insert(key.clone()) {
                 info!(
@@ -1446,19 +1508,16 @@ fn steering_target_radians(
     wheel_base_m: f32,
     max_steer_deg: f32,
 ) -> f64 {
-    // Isaac's Ackermann controller takes steeringAngle and speed as separate
-    // inputs. When we adapt cmd_vel, steering is defined relative to the
-    // vehicle's forward frame, so reverse must not flip the visual steering
-    // direction. Only wheel/base speed changes sign. Also: steering angle is
-    // allowed to move while stopped; at zero speed cmd_vel's yaw-rate field is
-    // treated as a steering request against a nominal walking-speed reference
-    // instead of forcing the wheels straight.
     const STOPPED_STEERING_REFERENCE_SPEED_MPS: f32 = 0.8;
 
     if angular_rps.abs() < 1e-3 {
         return 0.0;
     }
-    let speed_for_steering = linear_mps.abs().max(STOPPED_STEERING_REFERENCE_SPEED_MPS);
+    let speed_for_steering = if linear_mps.abs() < STOPPED_STEERING_REFERENCE_SPEED_MPS {
+        STOPPED_STEERING_REFERENCE_SPEED_MPS.copysign(if linear_mps == 0.0 { 1.0 } else { linear_mps })
+    } else {
+        linear_mps
+    };
     let max = max_steer_deg.to_radians() as f64;
     ((wheel_base_m as f64 * angular_rps as f64) / speed_for_steering as f64)
         .atan()
@@ -1467,18 +1526,17 @@ fn steering_target_radians(
 
 fn ackermann_steering_angles(
     center_steer_rad: f64,
-    _wheel_base_m: f32,
-    _track_width_m: f32,
+    wheel_base_m: f32,
+    track_width_m: f32,
     max_steer_deg: f32,
 ) -> (f64, f64) {
     let max = max_steer_deg.to_radians() as f64;
-    let angle = center_steer_rad.clamp(-max, max);
-    // The current USD tractor has mechanically tied front steering. Do NOT
-    // command separate inner/outer Ackermann angles here: with the present
-    // joint/collider setup that made the two front wheels toe inward/outward
-    // and scrub instead of rolling. Both steering links are locked to the exact
-    // same target angle.
-    (angle, angle)
+    let length = (wheel_base_m as f64).abs().max(0.01);
+    let half_track = (track_width_m as f64).abs() * 0.5;
+    let curvature_limit = max.tan() / (length + half_track * max.tan());
+    let curvature = (center_steer_rad.tan() / length).clamp(-curvature_limit, curvature_limit);
+    ((length * curvature).atan2(1.0 - curvature * half_track),
+     (length * curvature).atan2(1.0 + curvature * half_track))
 }
 
 /// Drive-motor damping for the wheel velocity motor.
@@ -1493,11 +1551,9 @@ const WHEEL_DRIVE_MAX_TORQUE: f64 = 6000.0;
 /// Soft motors for wheels that only spin for show (the diff drive).
 const WHEEL_VISUAL_DAMPING: f64 = 60.0;
 const WHEEL_VISUAL_MAX_TORQUE: f64 = 350.0;
-/// Steering position-motor gains + torque cap (N·m). Stiffer than the
-/// old values so the steered wheels hold their angle against the tyre
-/// scrub forces that now actually turn the vehicle.
-const STEER_STIFFNESS: f64 = 50_000.0;
-const STEER_DAMPING: f64 = 4_000.0;
+/// Fallback steering-servo error and velocity at its torque ceiling.
+const STEER_LOAD_ERROR_RAD: f64 = 0.5 * std::f64::consts::PI / 180.0;
+const STEER_SERVO_RATE_RPS: f64 = 30.0 * std::f64::consts::PI / 180.0;
 const STEER_MAX_TORQUE: f64 = 100_000.0;
 /// Friction coefficient forced onto wheel colliders. Imported USD
 /// colliders default to 0.5 when the asset authors no physics material
@@ -1533,7 +1589,8 @@ fn wheel_ground_speed(
     let wheel = wheel_body_of(physics, chassis, pair)?;
     let body = physics.bodies.get(wheel)?;
     let (axle_local, _, radius) = body_tyre_geometry(physics, wheel)?;
-    let mut roll = (body.rotation() * axle_local).cross(Vector::Y).normalize_or_zero();
+    let normal = traction::wheel_support(physics, chassis, wheel).normal;
+    let mut roll = (body.rotation() * axle_local).cross(normal).normalize_or_zero();
     if roll.dot(forward) < 0.0 {
         roll = -roll;
     }
@@ -1543,6 +1600,7 @@ fn wheel_ground_speed(
 /// Below this wheel speed the power limit holds at its value here: the
 /// gearbox, not the engine, limits torque when crawling.
 const WHEEL_POWER_MIN_OMEGA_RAD_S: f64 = 0.5;
+const UNLOADED_WHEEL_ACCEL_RAD_S2: f64 = 4.0;
 
 /// One wheel's drive torque cap: the lowest of its grip limit, the authored
 /// per-wheel torque and its share of the machine's power at its speed.
@@ -1554,7 +1612,7 @@ fn wheel_torque_cap(
 ) -> f64 {
     let mut cap = grip_nm;
     if let Some(max) = max_torque_nm {
-        cap = cap.min(max);
+        cap = cap.min(max.max(0.0));
     }
     if let Some(power) = power_w_per_wheel {
         cap = cap.min(power / omega_rad_s.abs().max(WHEEL_POWER_MIN_OMEGA_RAD_S));
@@ -1574,8 +1632,7 @@ fn traction_control_enabled(controller: &ControllerSpec) -> bool {
     controller.traction_control.or(*env).unwrap_or(true)
 }
 
-/// Standstill scrub torque a steer motor must beat, `μ · N · w / 2`: `N`
-/// one wheel's share of the weight, `w` the steered tyres' mean width.
+/// Steering scrub budget from supported tyre loads, bounded by the fallback ceiling.
 #[allow(clippy::too_many_arguments)]
 fn steer_torque_cap(
     scene_root: Entity,
@@ -1594,18 +1651,22 @@ fn steer_torque_cap(
 ) -> Option<f64> {
     let mass = machine_mass?;
     let knuckles = steering_knuckles(scene_root, controller, machine, joints, parents, physics);
-    let widths: Vec<f64> = tire_joint_pairs(scene_root, controller, machine, joints, parents, physics)
+    let loads: Vec<(f64, f64)> = tire_joint_pairs(scene_root, controller, machine, joints, parents, physics)
         .into_iter()
         .filter(|p| knuckles.contains(&p.0) || knuckles.contains(&p.1))
         .filter_map(|p| wheel_body_of(physics, chassis, p))
-        .filter_map(|wheel| body_tyre_geometry(physics, wheel))
-        .map(|(_, width, _)| width)
+        .filter_map(|wheel| {
+            let (_, width, _) = body_tyre_geometry(physics, wheel)?;
+            Some((width, traction::wheel_support(physics, chassis, wheel).grip_force_n))
+        })
         .collect();
-    if widths.is_empty() {
+    if loads.is_empty() {
         return None;
     }
-    let width = widths.iter().sum::<f64>() / widths.len() as f64;
-    Some(TIRE_FRICTION * mass * 9.81 / wheels.max(1) as f64 * width / 2.0)
+    let width = loads.iter().map(|(width, _)| width).sum::<f64>() / loads.len() as f64;
+    let nominal = TIRE_FRICTION * mass * 9.81 / wheels.max(1) as f64 * width / 2.0;
+    let loaded = loads.iter().map(|(width, grip)| width * grip / 2.0).fold(0.0, f64::max);
+    Some((1.25 * nominal.max(loaded)).min(STEER_MAX_TORQUE))
 }
 
 /// Traction control and ABS in one: each driven wheel's target stays within
@@ -1617,13 +1678,24 @@ fn limit_wheel_slip(
     targets: &mut [JointVelocityTarget],
 ) {
     for target in targets.iter_mut().filter(|t| t.force_based && t.damping > 0.0) {
+        if wheel_body_of(physics, chassis, target.pair)
+            .is_some_and(|wheel| traction::wheel_support(physics, chassis, wheel).grip_force_n <= 0.0)
+        {
+            continue;
+        }
         let Some((ground, radius)) = wheel_ground_speed(physics, chassis, target.pair) else {
             continue;
         };
         let band = WHEEL_SLIP_SHARE * ground.abs() + WHEEL_SLIP_FLOOR_MPS;
-        target.velocity = target
-            .velocity
-            .clamp((ground - band) / radius, (ground + band) / radius);
+        let requested = target.velocity;
+        let limited = requested.clamp((ground - band) / radius, (ground + band) / radius);
+        target.velocity = if requested > 0.0 {
+            limited.max(0.0)
+        } else if requested < 0.0 {
+            limited.min(0.0)
+        } else {
+            0.0
+        };
     }
 }
 
@@ -1812,24 +1884,15 @@ fn warn_low_colliders(
     }
 }
 
-/// Cap every wheel motor at the grip its tyre has: `μ · N · r`, the load
-/// `N` the machine's weight spread over all its wheels. Released motors
-/// (no damping) stay released.
-#[allow(clippy::too_many_arguments)]
+/// Limit driven torque by solved tyre loads, authored wheel torque and shared power.
 fn cap_wheel_torque(
     physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
     controller: &ControllerSpec,
     targets: &mut [JointVelocityTarget],
-    machine_mass: Option<f64>,
-    wheels: usize,
-    driven: usize,
     radius_fallback_m: f64,
     parked: bool,
-) {
-    let Some(mass) = machine_mass else {
-        return;
-    };
+) -> DriveLimits {
     // Parked, the wheels hold a slope: full torque at a tiny speed error, so
     // the velocity motor creeps millimetres instead of centimetres.
     let full_torque_error = if parked {
@@ -1837,26 +1900,55 @@ fn cap_wheel_torque(
     } else {
         WHEEL_FULL_TORQUE_ERROR_RAD_S
     };
-    let load = mass * 9.81 / wheels.max(1) as f64;
-    let power = controller
-        .max_power_kw
-        .map(|kw| kw as f64 * 1000.0 / driven.max(1) as f64);
-    for target in targets.iter_mut().filter(|t| t.damping > 0.0) {
-        let radius = wheel_body_of(physics, chassis, target.pair)
-            .and_then(|wheel| body_max_collider_radius(physics, wheel))
-            .unwrap_or(radius_fallback_m);
-        let omega = wheel_ground_speed(physics, chassis, target.pair)
-            .map(|(ground, r)| ground / r)
-            .unwrap_or(0.0);
-        target.max_torque = wheel_torque_cap(
-            WHEEL_GRIP_USE * TIRE_FRICTION * load * radius,
+    let mut budgets = Vec::new();
+    let mut supported_wheels = 0;
+    for (index, target) in targets.iter().enumerate().filter(|(_, t)| t.damping > 0.0) {
+        let Some(wheel) = wheel_body_of(physics, chassis, target.pair) else { continue; };
+        let radius = body_max_collider_radius(physics, wheel).unwrap_or(radius_fallback_m);
+        let support = traction::wheel_support(physics, chassis, wheel);
+        supported_wheels += usize::from(support.grip_force_n > 0.0);
+        let omega = body_tyre_geometry(physics, wheel)
+            .and_then(|(axis, _, _)| physics.bodies.get(wheel).map(|body| {
+                let parent = if wheel == target.pair.0 { target.pair.1 } else { target.pair.0 };
+                let parent_spin = physics.bodies.get(parent).map(|p| p.angvel()).unwrap_or(Vector::ZERO);
+                (body.angvel() - parent_spin).dot(body.rotation() * axis).abs()
+            })).unwrap_or(0.0);
+        let shaft_budget = if parked {
+            controller.max_wheel_torque_nm.map(f64::from).unwrap_or(WHEEL_DRIVE_MAX_TORQUE)
+        } else if support.grip_force_n <= 0.0 {
+            physics.bodies.get(wheel)
+                .map(|body| body.mass() * radius * radius * UNLOADED_WHEEL_ACCEL_RAD_S2)
+                .unwrap_or(0.0)
+        } else {
+            WHEEL_GRIP_USE * support.grip_force_n * radius
+        };
+        let torque = wheel_torque_cap(
+            shaft_budget,
             controller.max_wheel_torque_nm.map(f64::from),
-            power,
+            None,
             omega,
         );
+        budgets.push((index, torque, omega.max(WHEEL_POWER_MIN_OMEGA_RAD_S)));
+    }
+    let demand: f64 = budgets.iter().map(|(_, torque, omega)| torque * omega).sum();
+    let power_scale = if parked { 1.0 } else {
+        controller.max_power_kw.map(|kw| (f64::from(kw).max(0.0) * 1000.0 / demand.max(1e-6)).min(1.0))
+            .unwrap_or(1.0)
+    };
+    let mut limits = DriveLimits {
+        supported_wheels,
+        power_scale,
+        parked,
+        ..Default::default()
+    };
+    for (index, torque, _) in budgets {
+        let target = &mut targets[index];
+        target.max_torque = torque * power_scale;
         target.damping = target.max_torque / full_torque_error;
         target.force_based = true;
+        limits.torque_nm += target.max_torque;
     }
+    limits
 }
 
 /// Once per machine: its bodies stop colliding with each other, and every
@@ -2038,7 +2130,7 @@ fn record_wheel_tracks(
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     physics: Res<crate::physics::PhysicsWorld>,
-    mut contacts: ResMut<crate::grass::WheelContacts>,
+    mut contacts: ResMut<crate::fields::contacts::WheelContacts>,
     mut values: ResMut<crate::services::LinkValues>,
     runtime: Res<ControllerRuntimeState>,
 ) {
@@ -2112,7 +2204,7 @@ fn record_wheel_tracks(
             if roll.dot(travel) < 0.0 {
                 roll = -roll;
             }
-            contacts.contacts.push(crate::grass::WheelContact {
+            contacts.contacts.push(crate::fields::contacts::WheelContact {
                 position: Vec3::new(p.x as f32, ground, p.z as f32),
                 direction: roll,
                 width: width as f32,
@@ -2718,6 +2810,8 @@ fn steering_knuckles(
         .steering_joints
         .iter()
         .chain(controller.steer_joints.iter())
+        .chain(controller.steer_left_joint.iter())
+        .chain(controller.steer_right_joint.iter())
         .filter_map(|p| joint_pair(scene_root, p, joints, parents, physics))
         .map(|(_, knuckle)| knuckle)
         .collect()
@@ -2833,6 +2927,7 @@ fn wheel_joint_targets(
     wheel_base_m: f32,
     traction_track_width_m: f32,
     wheel_radius_fallback_m: f64,
+    turn: Option<&steering::Turn>,
 ) -> Vec<JointVelocityTarget> {
     // Wheel angular-velocity target for one joint pair. The spin rate is
     // `ground_speed / wheel_radius`, using the wheel's *actual* collider
@@ -2853,6 +2948,11 @@ fn wheel_joint_targets(
             .and_then(|wheel| body_max_collider_radius(physics, wheel))
             .filter(|r| *r > 0.05)
             .unwrap_or(wheel_radius_fallback_m);
+        if let Some(turn) = turn
+            && let Some(center) = wheel_local_center(physics, chassis, pair)
+        {
+            return drive_wheel_velocity_target(pair, turn.speed(linear_mps, center) / radius);
+        }
         let lateral_x =
             wheel_lateral_offset(physics, chassis, pair).unwrap_or_else(|| match side_hint(path) {
                 Some(SideHint::Left) => traction_track_width_m as f64 * 0.5,
@@ -3217,11 +3317,21 @@ fn set_steer_motor(
             data.set_motor_position(JointAxis::AngX, position, stiffness, damping);
         }
         None => {
-            data.set_motor_model(JointAxis::AngX, MotorModel::ForceBased)
-                .set_motor_position(JointAxis::AngX, position, STEER_STIFFNESS, STEER_DAMPING)
-                .set_motor_max_force(JointAxis::AngX, max_torque.unwrap_or(STEER_MAX_TORQUE));
+            configure_fallback_steer_motor(data, position, max_torque);
         }
     }
+}
+
+fn configure_fallback_steer_motor(
+    data: &mut rapier3d::prelude::GenericJoint,
+    position: f64,
+    max_torque: Option<f64>,
+) {
+    let torque = max_torque.unwrap_or(STEER_MAX_TORQUE).max(0.0);
+    data.set_motor_model(JointAxis::AngX, MotorModel::ForceBased)
+        .set_motor_position(JointAxis::AngX, position,
+            torque / STEER_LOAD_ERROR_RAD, torque / STEER_SERVO_RATE_RPS)
+        .set_motor_max_force(JointAxis::AngX, torque);
 }
 
 fn multibody_joint_handle(
@@ -3884,17 +3994,19 @@ def Xform "Leatherback" (
         let target = steering_target_radians(2.0, 10.0, 2.4, 30.0);
         assert!((target - 30_f64.to_radians()).abs() < 1e-6);
         let reverse = steering_target_radians(-2.0, 1.0, 2.4, 45.0);
-        assert!(reverse > 0.0);
-        assert_eq!(reverse, steering_target_radians(2.0, 1.0, 2.4, 45.0));
-        assert_eq!(reverse, steering_target_radians(0.0, 1.0, 2.4, 45.0));
+        assert!(reverse < 0.0);
+        assert_eq!(reverse, -steering_target_radians(2.0, 1.0, 2.4, 45.0));
     }
 
     #[test]
-    fn ackermann_outputs_parallel_steering_for_tied_front_axle() {
+    fn ackermann_inner_wheel_turns_more_than_outer() {
         let center = 0.25;
         let (left, right) = ackermann_steering_angles(center, 2.37, 1.5675, 45.0);
-        assert_eq!(left, center);
-        assert_eq!(right, center);
+        assert!(left > center);
+        assert!(right < center);
+        let (reverse_left, reverse_right) = ackermann_steering_angles(-center, 2.37, 1.5675, 45.0);
+        assert_eq!(reverse_left, -right);
+        assert_eq!(reverse_right, -left);
     }
 
     #[test]
@@ -4062,7 +4174,7 @@ def Xform "Leatherback" (
             if rigid_body_pair_matches((steer, steer_link), joint.body1, joint.body2) {
                 let motor = joint.data.motor(JointAxis::AngX).expect("steer motor");
                 assert!((motor.target_pos - 0.25).abs() < 1e-9);
-                assert_eq!(motor.stiffness, STEER_STIFFNESS);
+                assert_eq!(motor.stiffness, STEER_MAX_TORQUE / STEER_LOAD_ERROR_RAD);
                 saw_steer = true;
             }
         }

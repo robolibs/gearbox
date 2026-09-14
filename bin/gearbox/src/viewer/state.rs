@@ -140,19 +140,15 @@ pub struct ChaseCameraFly {
     pub target: Option<FlyTarget>,
 }
 
-/// The loaded asset the chase camera translates with. Position only: the
-/// camera keeps its yaw and distance and moves by the asset's frame-to-frame
-/// delta, so looking away still works.
+/// Camera focus locked to a machine body, independent of its drive source.
 #[derive(Resource, Default, Debug)]
 pub struct FollowTarget {
     pub entity: Option<Entity>,
-    pub last_pos: Option<Vec3>,
 }
 
 impl FollowTarget {
     pub fn set(&mut self, entity: Option<Entity>) {
         self.entity = entity;
-        self.last_pos = None;
     }
 
     pub fn toggle(&mut self, entity: Entity) {

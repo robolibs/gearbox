@@ -25,7 +25,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, ctx: &PaneCtx) {
             ("M", "Machines"),
             ("F", "Scene"),
             ("O", "View"),
-            ("?", "Log and keys"),
+            ("?", "Controller and keyboard"),
             ("R", "Reload"),
             ("Ctrl+K", "Command palette"),
             ("G / X", "Ground grid / axes"),

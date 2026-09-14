@@ -37,6 +37,7 @@ pub const PANE_MACHINE: &str = "gearbox_pane_machine";
 pub const PANE_SCENE: &str = "gearbox_pane_scene";
 pub const PANE_VIEW: &str = "gearbox_pane_view";
 pub const PANE_LOG: &str = "gearbox_pane_log";
+pub const PANE_ENVIRONMENT: &str = "gearbox_pane_environment";
 
 const ACTION_PLAY: &str = "gearbox_action_play";
 const ACTION_CLEAR: &str = "gearbox_action_clear";
@@ -72,13 +73,14 @@ fn window_size() -> (f32, f32) {
         .unwrap_or((1400.0, 900.0))
 }
 
-/// `GEARBOX_OPEN_PANEL=machine|scene|view|log` picks the pane open at
+/// `GEARBOX_OPEN_PANEL=machine|scene|view|environment|log` picks the pane open at
 /// start, for scripted runs.
 fn default_panes() -> &'static str {
     match std::env::var("GEARBOX_OPEN_PANEL").as_deref() {
         Ok("scene") => PANE_SCENE,
         Ok("view") => PANE_VIEW,
-        Ok("log") => PANE_LOG,
+        Ok("log" | "controls") => PANE_LOG,
+        Ok("environment") => PANE_ENVIRONMENT,
         _ => PANE_MACHINE,
     }
 }
@@ -102,10 +104,15 @@ impl WindowApp for GearboxApp {
             Some(init) => (init.cli_paths, init.log),
             None => (Vec::new(), LoaderLog::default()),
         };
+        let wireframe_supported = ctx.__internal_render_state().is_some_and(|state| {
+            use bevy::render::settings::WgpuFeatures;
+            state.device.limits().max_immediate_size >= 16
+                && state.device.features().contains(WgpuFeatures::POLYGON_MODE_LINE | WgpuFeatures::IMMEDIATES)
+        });
         let mut view = mara_bevy::MaraBevyViewport::with_render_state_plugins_and_content(
             ctx.__internal_render_state(),
             crate::app::configure_plugins,
-            move |app: &mut App| crate::app::configure(app, cli_paths.clone()),
+            move |app: &mut App| crate::app::configure(app, cli_paths.clone(), wireframe_supported),
         );
         // A simulator animates on its own: never wait for pointer input.
         view.set_continuous_rendering(true);
@@ -141,6 +148,7 @@ impl WindowApp for GearboxApp {
 
         // Input goes into the world before the viewport ticks it.
         if let Some(world) = view.world_mut() {
+            world.resource_mut::<crate::viewer::drive::HostInputFocus>().0 = egui.input(|i| i.focused);
             keys.forward(&egui, world);
             if !egui.egui_wants_keyboard_input() {
                 hotkeys(&egui, host, world, palette);
@@ -191,6 +199,13 @@ impl WindowApp for GearboxApp {
                 PaneAnchor::LeftRail(RailZone::Start),
                 |body| panes::view::show(body, &mut world.borrow_mut(), &ctx),
             )
+            .pane(
+                PANE_ENVIRONMENT,
+                "weather-sunny",
+                "Environment",
+                PaneAnchor::LeftRail(RailZone::Start),
+                |body| panes::environment::show(body, &mut world.borrow_mut(), &ctx),
+            )
             .action_in(
                 mara_core::ribbon::RibbonCluster::Middle,
                 ACTION_PLAY,
@@ -207,10 +222,10 @@ impl WindowApp for GearboxApp {
             )
             .pane(
                 PANE_LOG,
-                "document-text",
-                "Log",
+                "joystick",
+                "Controller and keyboard",
                 PaneAnchor::LeftRail(RailZone::End),
-                |body| panes::log::show(body, &ctx),
+                |body| panes::controls::show(body, &mut world.borrow_mut(), &ctx),
             );
         let clicks = host.show_ribbon_rail(left, accent);
 
@@ -317,7 +332,8 @@ const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { id: "open_machine", label: "Open: Machines", hint: Some("M") },
     PaletteItem { id: "open_scene", label: "Open: Scene", hint: Some("F") },
     PaletteItem { id: "open_view", label: "Open: View", hint: Some("O") },
-    PaletteItem { id: "open_log", label: "Open: Log and keys", hint: Some("?") },
+    PaletteItem { id: "open_environment", label: "Open: Environment", hint: None },
+    PaletteItem { id: "open_log", label: "Open: Controller and keyboard", hint: Some("?") },
     PaletteItem { id: "toggle_grid", label: "Toggle: Ground grid", hint: Some("G") },
     PaletteItem { id: "toggle_axes", label: "Toggle: World axes", hint: Some("X") },
     PaletteItem { id: "toggle_wireframe", label: "Toggle: Wireframe", hint: None },
@@ -334,6 +350,7 @@ fn palette_action(id: &str, host: &MaraHostCtx<'_>, world: &mut World, outbox: &
         "open_machine" => open(RIBBON_LEFT, PANE_MACHINE),
         "open_scene" => open(RIBBON_LEFT, PANE_SCENE),
         "open_view" => open(RIBBON_LEFT, PANE_VIEW),
+        "open_environment" => open(RIBBON_LEFT, PANE_ENVIRONMENT),
         "open_log" => open(RIBBON_LEFT, PANE_LOG),
         "toggle_grid" => {
             let mut t = world.resource_mut::<DisplayToggles>();

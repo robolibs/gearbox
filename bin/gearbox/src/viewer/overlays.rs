@@ -20,7 +20,7 @@ impl Plugin for OverlaysPlugin {
                 (
                     compute_extent,
                     capture_original_light_levels,
-                    apply_light_intensity_scale,
+                    apply_light_intensity_scale.after(crate::environment::DaylightUpdate),
                     apply_wireframe_toggle,
                     sync_ground_grid_visibility,
                     sync_collider_debug_visibility,
@@ -75,13 +75,18 @@ fn apply_light_intensity_scale(
 }
 
 fn apply_wireframe_toggle(
-    toggles: Res<DisplayToggles>,
+    mut toggles: ResMut<DisplayToggles>,
+    available: Res<WireframeAvailable>,
     mut cfg: ResMut<bevy::pbr::wireframe::WireframeConfig>,
 ) {
+    if !available.0 { toggles.wireframe = false; }
     if cfg.global != toggles.wireframe {
         cfg.global = toggles.wireframe;
     }
 }
+
+#[derive(Resource)]
+pub(crate) struct WireframeAvailable(pub bool);
 
 fn sync_ground_grid_visibility(toggles: Res<DisplayToggles>, mut grid: ResMut<GroundGrid>) {
     if grid.visible != toggles.show_world_grid {
@@ -112,6 +117,7 @@ pub struct DisplayToggles {
     pub show_tf_frames: bool,
     pub show_tf_names: bool,
     pub show_tf_links: bool,
+    pub tf_wheels_only: bool,
 }
 
 impl Default for DisplayToggles {
@@ -129,6 +135,8 @@ impl Default for DisplayToggles {
             show_tf_frames: tf_env("frames"),
             show_tf_names: tf_env("names"),
             show_tf_links: tf_env("links"),
+            tf_wheels_only: std::env::var("GEARBOX_TF_OVERLAY")
+                .is_ok_and(|v| v.split(',').any(|t| t.trim() == "wheels")),
         }
     }
 }

@@ -32,6 +32,9 @@ pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
 pub use world::{PhysicsWorld, step_physics};
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PhysicsWriteback;
+
 /// Wires the Rapier world, every marker → Rapier conversion system and the
 /// writeback path. Adds `PhysicsWorld` and `ColliderDebugEnabled`;
 /// `PhysicsActive` is gearbox-api's clock switch.
@@ -61,9 +64,20 @@ impl Plugin for RapierAdapterPlugin {
             )
             .add_systems(
                 PostUpdate,
-                writeback::writeback_transforms.run_if(physics_is_active),
+                writeback::writeback_transforms
+                    .run_if(physics_is_active)
+                    .in_set(PhysicsWriteback)
+                    .before(bevy::transform::TransformSystems::Propagate),
             )
             .add_systems(Last, debug::draw_collider_gizmos);
+        if std::env::var_os("GEARBOX_TF_DEBUG").is_some() {
+            app.add_systems(
+                PostUpdate,
+                debug::report_transform_alignment
+                    .run_if(physics_is_active)
+                    .after(bevy::transform::TransformSystems::Propagate),
+            );
+        }
     }
 }
 

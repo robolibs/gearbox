@@ -9,7 +9,9 @@ use bevy::asset::{AssetPlugin, UnapprovedPathMode};
 use bevy::prelude::*;
 use mara::ui::modules::bevy::BevyViewportInput;
 
-use crate::{attach, controller, grass, load, physics, physics_debug, services, terrain, viewer, world};
+use crate::{
+    attach, controller, fields, load, physics, physics_debug, services, terrain, viewer, world,
+};
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
 pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
@@ -20,11 +22,15 @@ pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
     })
 }
 
-pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>) {
+pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bool) {
+    app.insert_resource(viewer::overlays::WireframeAvailable(wireframe_supported));
+    if wireframe_supported {
+        app.add_plugins(bevy::pbr::wireframe::WireframePlugin::default());
+    } else {
+        app.init_resource::<bevy::pbr::wireframe::WireframeConfig>();
+        warn!("wireframe unavailable: shared GPU device lacks line mode or 16-byte immediates");
+    }
     app.init_resource::<BevyViewportInput>()
-        // Wireframe support for the Overlays pane toggle; without it the
-        // `WireframeConfig` resource would not exist.
-        .add_plugins(bevy::pbr::wireframe::WireframePlugin::default())
         // Frame time and fps land in the log every ten seconds.
         .add_plugins((
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
@@ -52,7 +58,8 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>) {
         .add_plugins(gearbox_api::UsdMarkerPlugin)
         // Simulator surface: planet world, machines, links, services.
         .add_plugins(world::WorldPlugin)
-        .add_plugins(grass::GrassPlugin)
+        .add_plugins(crate::environment::EnvironmentPlugin)
+        .add_plugins(fields::FieldsPlugin)
         .add_plugins(terrain::TerrainPlugin)
         .add_systems(Startup, log_render_adapter)
         .add_plugins(controller::ControllerDiscoveryPlugin)

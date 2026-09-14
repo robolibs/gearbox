@@ -4,6 +4,8 @@
 //! `HostCommand`s.
 
 pub mod log;
+pub mod controls;
+pub mod environment;
 pub mod machine;
 pub mod scene;
 pub mod view;

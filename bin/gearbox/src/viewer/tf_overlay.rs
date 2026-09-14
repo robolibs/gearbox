@@ -20,9 +20,12 @@ impl Plugin for TfOverlayPlugin {
     fn build(&self, app: &mut App) {
         app.init_gizmo_group::<TfGizmos>()
             .add_systems(Startup, configure_tf_gizmos)
-            .add_systems(Update, draw_tf_gizmos)
             .init_resource::<TfLabels>()
-            .add_systems(PostUpdate, publish_tf_labels);
+            .add_systems(
+                PostUpdate,
+                (draw_tf_gizmos, publish_tf_labels)
+                    .after(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 
@@ -83,6 +86,12 @@ fn frames_of<'a>(
 }
 
 fn axes_length(frame: &Frame<'_>) -> f32 {
+    if frame.role == LinkRole::Wheel {
+        return 0.45;
+    }
+    if frame.role == LinkRole::Steer {
+        return 0.16;
+    }
     if frame.role == LinkRole::Base {
         return BASE_AXES_M;
     }
@@ -105,9 +114,12 @@ fn draw_tf_gizmos(
         return;
     }
     for machine in &inventory.machines {
-        for frame in frames_of(machine, &prims, &parents, &transforms) {
+        for frame in frames_of(machine, &prims, &parents, &transforms)
+            .into_iter()
+            .filter(|f| !toggles.tf_wheels_only || f.role == LinkRole::Wheel)
+        {
             if toggles.show_tf_frames {
-                gizmos.axes(frame.transform, axes_length(&frame));
+                gizmos.axes(frame.transform.to_isometry(), axes_length(&frame));
             }
             if toggles.show_tf_links
                 && let Some(parent) = frame.parent
@@ -149,7 +161,10 @@ fn publish_tf_labels(
         return;
     };
     for machine in &inventory.machines {
-        for frame in frames_of(machine, &prims, &parents, &transforms) {
+        for frame in frames_of(machine, &prims, &parents, &transforms)
+            .into_iter()
+            .filter(|f| !toggles.tf_wheels_only || f.role == LinkRole::Wheel)
+        {
             let Ok(screen) = camera.world_to_viewport(cam_tr, frame.transform.translation()) else {
                 continue;
             };

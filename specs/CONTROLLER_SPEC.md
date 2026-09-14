@@ -124,15 +124,15 @@ properties below live on the machine prim with the prefix
 | `frontTrackWidth` / `rearTrackWidth` | float, m | optional | `trackWidth` | Per-axle override. |
 | `maxSteerDeg` | float | SHOULD | `45` | Steer clamp. |
 | `steeringGeometry` | token | optional | `ackermann` | See §3.2. |
-| `frontSteerMultiplier` / `middleSteerMultiplier` / `rearSteerMultiplier` | float | optional | geometry default | Per-axle multiplier of the centre steer angle. |
-| `frontLeftSteerDifferentialDeg` etc. (four corners) | float | optional | `0` | Additive per-corner offset. |
+| `frontSteerMultiplier` / `middleSteerMultiplier` / `rearSteerMultiplier` | float | optional | geometry default | Legacy per-axle angle multiplier; front/rear ratios locate the virtual pivot when all Ackermann axles steer. Ignored with a resolved fixed axle. |
+| `frontLeftSteerDifferentialDeg` etc. (four corners) | float | optional | `0` | Legacy per-corner offset, not used by resolved geometric Ackermann. |
 | `driveWheelJoints`, `passiveWheelJoints`, `wheelJoints` | rel[] | optional | `[]` | Controller-level joint overrides, merged with machine roles. |
 | `frontLeftWheelJoint` … `rearRightWheelJoint` | rel | optional | none | Explicit corner joints. The rear pair counts as powered. |
-| `steerLeftJoint` / `steerRightJoint` | rel | optional | none | Explicit steering pair. When both resolve they take precedence over `role:steeringJoints` and receive the true Ackermann left/right angles. |
+| `steerLeftJoint` / `steerRightJoint` | rel | optional | none | Explicit steering pair, merged with roles by the geometric solver; takes precedence in legacy fallback resolution. |
 | `steerJoints` | rel[] | optional | `[]` | Extra steering joints, merged with `role:steeringJoints`. Last-resort fallback receives the centre angle. |
 
 | `maxWheelTorqueNm` | float | optional | none | Per-wheel drive torque limit, applied on top of the grip cap. |
-| `maxPowerKw` | float | optional | none | Drive power shared over the driven wheels: each wheel's torque stays under `P / n / ω`, `ω` held at 0.5 rad/s or more. |
+| `maxPowerKw` | float | optional | none | Total drive power: grip/torque-limited wheel budgets are scaled together so `Σ τ·max(abs(ω),0.5) ≤ P`; wheel speed is relative to its parent body. Parking brakes are not engine-power-limited. |
 | `tractionControl` | bool | optional | `true` | Keeps each driven wheel within 8 % + 0.15 m/s of its ground speed. `GEARBOX_TRACTION_CONTROL=0` sets the default off. |
 | `driveWheels`, `target` | rel | IGNORED | | |
 | `updateRateHz` | float | IGNORED | `60` | Controllers run every Update frame. |
@@ -211,8 +211,23 @@ A controller MAY author `gearbox:controller:<n>:requests` (`speed`,
 | `crab` | 1.0 | 1.0 | −1.0 |
 | `six_wheel_ackermann`, `oxbo`, `rear_counter_half`, `counter_steer_half` | 1.0 | 0.0 | −0.5 |
 
-A wheel is steered only if some path in `role:steeringJoints` shares its axle
-hint and side hint (§8). Per-axle multiplier attributes override the table.
+For Ackermann and counter-steering tokens, resolved joint geometry takes precedence
+over this legacy multiplier table. Steering roles and explicit joint relationships
+are merged and deduplicated. Fixed wheels locate the turn-centre axle line; steering
+pivots determine each wheel angle. When all axles steer, front/rear multiplier ratios
+locate the virtual pivot. With a fixed axle, multipliers and differential-degree
+offsets are not used. `parallel` and `crab` retain their legacy mappings.
+
+All Ackermann wheel targets use one curvature, reduced together to satisfy every
+steering joint's USD limits and `maxSteerDeg`. Inner wheels steer more sharply;
+front and rear wheels counter-steer about a fixed middle axle when present.
+Wheel speeds use the complete local rolling vector and each tyre's radius,
+including both lateral and longitudinal offsets from the turn centre.
+
+Bus `cmd_vel` uses signed `angular / linear` curvature; positive yaw in reverse
+requires opposite steering. At standstill it cannot request a finite turn.
+The gamepad instead supplies normalized steering separately, independent of speed,
+including while parked. Its dead zone is rescaled continuously to avoid an input jump.
 
 ## 4. Body
 
@@ -265,6 +280,10 @@ rapier bodies. In USD terms:
   material decides the grip, zeroes restitution, and turns on CCD. Name the
   collider `tire_collider` so spawn alignment finds it. Generated grounds
   take `GEARBOX_GROUND_FRICTION` when set.
+- Wheel-speed traction control measures motion along the tyre's contact plane using
+  impulse-weighted contact normals, falling back to the chassis up axis without support.
+  Its slip clamp does not reverse the requested drive direction during rollback or turn
+  a zero-speed parking command into a downhill wheel-speed target.
 - steer joints without an authored drive get a force-based motor capped at
   the standstill scrub torque `μ · N · w / 2` of their tyre.
 
@@ -274,14 +293,33 @@ Joint sources, all merged and deduplicated:
 relationships. A joint is **driven** if it is in `role:poweredWheelJoints`,
 `driveWheelJoints`, `rearLeftWheelJoint`, or `rearRightWheelJoint`.
 
+For an all-wheel-drive asset, list every driven rolling joint in `poweredWheelJoints`
+and remove those joints from `passiveWheelJoints`. Torque remains bounded by tyre grip,
+`maxWheelTorqueNm` and `maxPowerKw`; multiplying the torque ceiling alone cannot bypass grip.
+
+Drive grip comes from the last solved tyre contact impulses divided by the physics timestep,
+using each solver contact's combined friction. Unsupported powered wheels receive only a
+shaft-spin budget (`mass × radius² × 4 rad/s²`), not ground traction. Supported wheels retain
+their grip-derived budget; all powered wheels share the total power ceiling. Slip limiting
+requires solved support. Parking torque is independent of contact load, bounded by authored
+wheel torque (6,000 Nm fallback), so lifted wheels can brake too.
+Axle load transfer and trailer tongue load therefore affect grip through the physical joints
+and contacts, rather than an equal share of the tractor's own mass. This is a wheel-torque /
+power-envelope model, not an engine-RPM, clutch or discrete-gear simulation. Assets intended
+for towing should author both limits; omitting power keeps the legacy grip-only power budget.
+The Machines drive panel reports authored limits, powered/loaded wheel counts, the current
+motor torque budget and whether the power ceiling is active. The budget is not measured torque.
+
 Steering joints follow the same rule: each path in `role:steeringJoints`,
 `steerJoints`, `steerLeftJoint`, or `steerRightJoint` MUST resolve to a
 `UsdPhysicsJoint` between two rapier bodies, typically chassis and a steering
 knuckle body. The knuckle then carries the wheel joint as `physics:body0`;
 §7.5 fixes that chain.
-Steering resolution order for `ackermann` geometry: explicit left/right pair,
-then role joints matched by axle and side hint, then every steering joint at
-the centre angle. Other geometries skip the Ackermann split.
+The geometric Ackermann solver merges explicit and role steering joints. Assets
+without resolvable geometry retain legacy target resolution as a fallback.
+Steering joints must define straight-ahead at zero and rotate about chassis up
+(reversed axes are supported). Multiple fixed axles at different longitudinal
+positions cannot all roll without scrub in a turn; their mean line is an approximation.
 
 Rigid bodies MUST be siblings in the prim tree, not nested inside one another.
 Nested bodies hit transform write-back ordering and drift off the machine each
@@ -358,6 +396,21 @@ The runtime answers the tree on `/machines/<ns>/links` (que/ans,
 poses on `/machines/<ns>/tf` (`gearbox.link_pose.v1`) while a client has
 switched them on with `/cmd` `tf = on`. `gearbox machine links` and
 `gearbox machine tf` show both.
+
+TF poses and the viewer's TF axes/names use the same propagated world
+transforms as the rendered links. Frame order is physics step → parent-first
+body writeback → transform propagation → TF publication and overlays.
+Nested rigid bodies factor out the current parent pose, including intervening
+non-physical Xforms and scene-unit scale, not the previous frame's parent pose.
+Wheel frames include both steering and axle spin; steering-knuckle frames
+include steering only.
+
+The viewer's **Wheels only** TF filter shows wheel links without coincident
+steering-knuckle frames. Wheel axes are larger than knuckle axes; display
+lengths are in world metres, independent of authored scene-unit scale.
+`GEARBOX_TF_DEBUG=1` reports body/physics pose error and wheel-mesh rotation
+relative to its wheel frame. `GEARBOX_TF_OVERLAY=frames,names,wheels` opens a
+labelled wheel-only view.
 
 **Transition rule.** An asset that authors no `GearboxLinkAPI` at all is
 loaded with a *derived* tree: every rigid body is a link named after its

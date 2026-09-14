@@ -1,31 +1,21 @@
-//! The persistent world: horizon/background helpers, cloud shell,
-//! atmospheric DistanceFog, sun with a single tight shadow cascade,
-//! ChaseCamera configuration, and world-event publishing. The local
-//! terrain surface itself is now a USD scene loaded by `load.rs`.
+//! Persistent scene lifecycle, camera controls, USD terrain collision,
+//! object placement, and world-event publishing.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::physics::PhysicsWorld;
-use bevy::asset::RenderAssetUsages;
 use bevy::ecs::entity::Entities;
-use bevy::image::Image;
-use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster};
+use bevy::light::NotShadowCaster;
 use bevy::mesh::VertexAttributeValues;
-use bevy::pbr::{
-    DistanceFog, ExtendedMaterial, FogFalloff, MaterialExtension, MaterialPlugin, StandardMaterial,
-};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
+use gearbox_api::{GearboxBus, SceneEvent, event_kind};
 use mara::ui::modules::bevy::{
     BevyViewportInput, BevyViewportRenderTarget, BevyViewportSet, ChaseCamera, GroundGrid,
     apply_rig,
 };
-use gearbox_api::{GearboxBus, SceneEvent, event_kind};
 use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
 use rapier3d::prelude::{
     ColliderBuilder, ColliderHandle, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodyType,
@@ -38,9 +28,6 @@ const PLANET_RADIUS_M: f32 = 6_371_000.0;
 /// Keep the old planet/horizon helper below the hilly local terrain.
 /// Otherwise it reads as a flat plate under the terrain mesh.
 const PLANET_VISUAL_DROP_M: f32 = 40.0;
-/// Cloud deck height above the planet surface. ~4 km gives visible
-/// separation from the terrain when zoomed out.
-const CLOUD_ALTITUDE_M: f64 = 4_000.0;
 const TERRAIN_FLAT_SPAWN_RADIUS_M: f32 = 24.0;
 const TERRAIN_FULL_RELIEF_RADIUS_M: f32 = 55.0;
 const TERRAIN_MIN_HEIGHT_M: f32 = -5.0;
@@ -48,6 +35,9 @@ const TERRAIN_MAX_HEIGHT_M: f32 = 10.0;
 const FLAT_GROUND_HALF_EXTENT_M: f64 = 10_000.0;
 const FLAT_GROUND_VISUAL_SIZE_M: f32 = 10_000.0;
 const USD_TERRAIN_ACTIVATION_WARN_FRAMES: u32 = 120;
+const CAMERA_HALF_SPAN_M: f32 = 5_000.0;
+const CAMERA_MAX_DISTANCE_M: f32 = 5_000.0;
+const CAMERA_MAX_HEIGHT_M: f32 = 3_000.0;
 
 static USD_TERRAIN_LOADED: AtomicBool = AtomicBool::new(false);
 /// Set when the loaded USD terrain mesh is level; `terrain_height_m` then
@@ -188,14 +178,8 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "../assets/shaders/terrain_material.wgsl");
-        app.insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.86)))
-            // 4 k shadow map per cascade; four cascades reach 800 m so
-            // shadows stay when the camera pulls back over the field.
-            .insert_resource(DirectionalLightShadowMap { size: 4096 })
-            .init_resource::<StaticUsdPropBodies>()
+        app.init_resource::<StaticUsdPropBodies>()
             .init_resource::<PublishedUsdPoses>()
-            .add_plugins(MaterialPlugin::<AntiRepeatTerrainMaterial>::default())
             .add_systems(
                 Startup,
                 (
@@ -206,16 +190,9 @@ impl Plugin for WorldPlugin {
             .add_systems(Update, mark_new_usd_terrain_roots)
             .add_systems(
                 Update,
-                (
-                    chase_camera_control,
-                    chase_camera_zoom,
-                    chase_camera_keys,
-                    chase_camera_floor,
-                )
-                    .chain(),
+                (chase_camera_control, chase_camera_zoom, chase_camera_keys).chain(),
             )
             .add_systems(Update, snap_new_usd_roots_to_terrain)
-            .add_systems(Update, apply_anti_repeat_material_to_usd_terrain)
             .add_systems(Update, freeze_settled_static_usd_prop_bodies)
             .add_systems(Update, publish_loaded_usd_poses)
             .add_systems(Update, harvest_bales_on_machine_contact)
@@ -224,6 +201,7 @@ impl Plugin for WorldPlugin {
             .add_systems(
                 PostUpdate,
                 (
+                    chase_camera_floor.before(TransformSystems::Propagate),
                     activate_usd_terrain_when_collider_ready.after(TransformSystems::Propagate),
                     align_new_grounded_usd_bounds_to_terrain
                         .after(activate_usd_terrain_when_collider_ready),
@@ -231,38 +209,6 @@ impl Plugin for WorldPlugin {
             );
     }
 }
-
-type AntiRepeatTerrainMaterial = ExtendedMaterial<StandardMaterial, AntiRepeatTerrainExtension>;
-
-#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
-struct AntiRepeatTerrainExtension {
-    #[texture(100)]
-    #[sampler(101)]
-    terrain_albedo: Handle<Image>,
-    #[texture(102)]
-    #[sampler(103)]
-    terrain_height: Handle<Image>,
-    #[texture(104)]
-    #[sampler(105)]
-    terrain_detail_albedo: Handle<Image>,
-    #[texture(106)]
-    #[sampler(107)]
-    terrain_detail_height: Handle<Image>,
-    /// RGB multiplies the field colour, A scales the cut-hay rows. Comes
-    /// from the USD material's constant `diffuseColor`; white and full hay
-    /// when the terrain material is textured or unset.
-    #[uniform(108)]
-    tint: Vec4,
-}
-
-impl MaterialExtension for AntiRepeatTerrainExtension {
-    fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_sim/../assets/shaders/terrain_material.wgsl".into()
-    }
-}
-
-#[derive(Component, Debug, Clone, Copy)]
-struct AntiRepeatTerrainMaterialApplied;
 
 #[derive(Component, Debug, Clone, Copy)]
 struct TerrainBoundsSnapPending {
@@ -317,11 +263,9 @@ fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
     render_target: Option<Res<BevyViewportRenderTarget>>,
 ) {
     let radius = PLANET_RADIUS_M;
-    let radius_f64 = PLANET_RADIUS_M as f64;
 
     // ── Planet sphere ────────────────────────────────────────────────
     // Warm sandy / tan ground colour. Higher UV resolution than a
@@ -351,53 +295,12 @@ fn spawn_world(
         ..GroundGrid::default()
     });
 
-    // ── Cloud shell ──────────────────────────────────────────────────
-    spawn_cloud_shell(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &mut images,
-        radius_f64,
-    );
-
-    // ── Sun + cascades ───────────────────────────────────────────────
-    // Tight first cascade around the vehicle, three more out to 800 m.
-    // Steep angle for a clear horizontal direction.
-    let sun_shadow = CascadeShadowConfigBuilder {
-        num_cascades: 4,
-        minimum_distance: 0.1,
-        maximum_distance: 800.0,
-        first_cascade_far_bound: 40.0,
-        overlap_proportion: 0.2,
-    }
-    .build();
-    commands.spawn((
-        Name::new("Sun"),
-        Transform::from_xyz(5.0, 50.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        DirectionalLight {
-            illuminance: 10_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        sun_shadow,
-    ));
-
-    // ── Atmospheric fog ──────────────────────────────────────────────
-    let fog = DistanceFog {
-        color: Color::srgb(0.55, 0.70, 0.86),
-        falloff: FogFalloff::Atmospheric {
-            extinction: Vec3::new(0.00008, 0.00012, 0.00020),
-            inscattering: Vec3::new(0.00010, 0.00015, 0.00025),
-        },
-        ..default()
-    };
-
     // ── Camera ──────────────────────────────────────────────────────
     let chase = ChaseCamera {
         focus: Vec3::new(0.0, 0.5, 0.0),
         distance: 14.0,
         elevation: 25_f32.to_radians(),
-        max_distance: radius * 3.0,
+        max_distance: CAMERA_MAX_DISTANCE_M,
         ..default()
     };
     let mut camera_transform = Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y);
@@ -406,18 +309,13 @@ fn spawn_world(
     let mut camera = commands.spawn((
         Name::new("Camera"),
         Camera3d::default(),
+        bevy::render::view::NoIndirectDrawing,
         camera_transform,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
-            far: radius * 2.5,
+            far: 80_000.0,
             ..default()
         }),
-        fog,
-        AmbientLight {
-            color: Color::WHITE,
-            brightness: 120.0,
-            ..default()
-        },
         chase,
     ));
     if let Some(target) = render_target {
@@ -434,7 +332,11 @@ fn chase_camera_control(
     grab: Res<crate::viewer::systems::GizmoGrab>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
-    let orbit_delta = if grab.0 { Vec2::ZERO } else { Vec2::from(input.drag_delta) };
+    let orbit_delta = if grab.0 {
+        Vec2::ZERO
+    } else {
+        Vec2::from(input.drag_delta)
+    };
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let (pan_delta, lift_delta) = if shift {
         (Vec2::ZERO, input.pan_delta[1])
@@ -473,24 +375,29 @@ const KEY_PAN_PER_SEC: f32 = 0.4;
 const CAMERA_FLOOR_M: f32 = 0.0;
 const CAMERA_MIN_ELEVATION: f32 = 3.0_f32.to_radians();
 
-/// Keep the view above the ground. Runs after every other camera control, so
-/// whichever of them pushed the view down — a lift, an orbit, Q — it comes
-/// back up before the frame is drawn. Holding Alt lets it through, for the
-/// times looking up from underneath is what is wanted.
-fn chase_camera_floor(
+/// Bounds the camera after controls and fly-to updates; Alt bypasses only the floor.
+pub(crate) fn chase_camera_floor(
     keys: Res<ButtonInput<KeyCode>>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
-    if keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight) {
-        return;
-    }
+    let below_ground = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     for (mut cam, mut transform) in &mut cameras {
-        let below = cam.focus.y < CAMERA_FLOOR_M || cam.elevation < CAMERA_MIN_ELEVATION;
-        if !below {
-            continue;
+        cam.max_distance = CAMERA_MAX_DISTANCE_M;
+        cam.distance = cam.distance.clamp(cam.min_distance, CAMERA_MAX_DISTANCE_M);
+        cam.focus.x = cam.focus.x.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
+        cam.focus.z = cam.focus.z.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
+        if !below_ground {
+            cam.focus.y = cam.focus.y.max(CAMERA_FLOOR_M);
+            cam.elevation = cam.elevation.max(CAMERA_MIN_ELEVATION);
         }
-        cam.focus.y = cam.focus.y.max(CAMERA_FLOOR_M);
-        cam.elevation = cam.elevation.max(CAMERA_MIN_ELEVATION);
+        let rise = cam.distance * cam.elevation.sin().max(0.0);
+        if rise > CAMERA_MAX_HEIGHT_M {
+            cam.distance = CAMERA_MAX_HEIGHT_M / cam.elevation.sin();
+        }
+        cam.focus.y = cam
+            .focus
+            .y
+            .min(CAMERA_MAX_HEIGHT_M - cam.distance * cam.elevation.sin());
         apply_rig(&cam, &mut transform);
     }
 }
@@ -693,99 +600,12 @@ fn activate_usd_terrain_when_collider_ready(
     }
 }
 
-fn is_usd_terrain_root_name(name: &str) -> bool {
+pub(crate) fn is_usd_terrain_root_name(name: &str) -> bool {
     name == "WorldTerrain" || name.to_ascii_lowercase().contains("terrain")
 }
 
-fn is_usd_terrain_scene_instantiated(root: Entity, children: &Query<&Children>) -> bool {
+pub(crate) fn is_usd_terrain_scene_instantiated(root: Entity, children: &Query<&Children>) -> bool {
     collect_descendants(root, children).len() > 1
-}
-
-/// Hay-row strength for a tinted (crop) terrain; untinted soil keeps 1.0.
-const TINTED_TERRAIN_HAY_STRENGTH: f32 = 0.15;
-
-/// Tint for a terrain mesh's authored material: its constant
-/// `diffuseColor`, or white when it is textured or left at the default.
-fn terrain_tint_from_material(material: Option<&StandardMaterial>) -> Vec4 {
-    let Some(material) = material else {
-        return Vec4::ONE;
-    };
-    let base = LinearRgba::from(material.base_color);
-    let is_default = (base.red - 0.8).abs() < 1e-3
-        && (base.green - 0.8).abs() < 1e-3
-        && (base.blue - 0.8).abs() < 1e-3;
-    if material.base_color_texture.is_some() || is_default {
-        return Vec4::ONE;
-    }
-    Vec4::new(base.red, base.green, base.blue, TINTED_TERRAIN_HAY_STRENGTH)
-}
-
-fn apply_anti_repeat_material_to_usd_terrain(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<AntiRepeatTerrainMaterial>>,
-    standard_materials: Res<Assets<StandardMaterial>>,
-    terrain_roots: Query<(Entity, &Name), With<usd_bevy::UsdSceneRoot>>,
-    children: Query<&Children>,
-    terrain_meshes: Query<
-        Option<&MeshMaterial3d<StandardMaterial>>,
-        (With<Mesh3d>, Without<AntiRepeatTerrainMaterialApplied>),
-    >,
-    mut material_handles: Local<HashMap<[u32; 4], Handle<AntiRepeatTerrainMaterial>>>,
-) {
-    let mut applied = 0usize;
-    for (root, name) in terrain_roots.iter() {
-        if !is_usd_terrain_root_name(name.as_str())
-            || !is_usd_terrain_scene_instantiated(root, &children)
-        {
-            continue;
-        }
-        for entity in collect_descendants(root, &children) {
-            let Ok(authored) = terrain_meshes.get(entity) else {
-                continue;
-            };
-            let tint = terrain_tint_from_material(
-                authored.and_then(|handle| standard_materials.get(&handle.0)),
-            );
-            let handle = material_handles
-                .entry(tint.to_array().map(f32::to_bits))
-                .or_insert_with(|| {
-                    materials.add(ExtendedMaterial {
-                        base: StandardMaterial {
-                            double_sided: true,
-                            cull_mode: None,
-                            perceptual_roughness: 0.98,
-                            metallic: 0.0,
-                            ..default()
-                        },
-                        extension: AntiRepeatTerrainExtension {
-                            terrain_albedo: asset_server.load(asset_path(
-                                "textures/terrain/Ground001/Ground001_1K-JPG_Color.jpg",
-                            )),
-                            terrain_height: asset_server.load(asset_path(
-                                "textures/terrain/Ground001/Ground001_1K-JPG_Displacement.jpg",
-                            )),
-                            terrain_detail_albedo: asset_server.load(asset_path(
-                                "textures/terrain/Ground003/Ground003_1K-JPG_Color.jpg",
-                            )),
-                            terrain_detail_height: asset_server.load(asset_path(
-                                "textures/terrain/Ground003/Ground003_1K-JPG_Displacement.jpg",
-                            )),
-                            tint,
-                        },
-                    })
-                })
-                .clone();
-            commands
-                .entity(entity)
-                .remove::<MeshMaterial3d<StandardMaterial>>()
-                .insert((MeshMaterial3d(handle), AntiRepeatTerrainMaterialApplied));
-            applied += 1;
-        }
-    }
-    if applied > 0 {
-        info!("world: applied anti-repeating terrain material to {applied} USD terrain mesh(es)");
-    }
 }
 
 pub(crate) fn asset_path(relative: &str) -> String {
@@ -819,9 +639,12 @@ fn attach_gearbox_terrain_trimesh(
         warn!("world: failed to build exact Rapier trimesh collider for USD terrain");
         return None;
     };
-    let terrain = physics
-        .colliders
-        .insert(terrain.friction(ground_friction(1.4)).restitution(0.0).build());
+    let terrain = physics.colliders.insert(
+        terrain
+            .friction(ground_friction(1.4))
+            .restitution(0.0)
+            .build(),
+    );
     physics.entity_to_collider.insert(root, terrain);
 
     // Belt-and-braces catch floor below the lowest authored terrain. It
@@ -946,7 +769,11 @@ fn remove_terrain_descendant_colliders(
     }
 }
 
-pub(crate) fn remove_flat_ground(commands: &mut Commands, physics: &mut PhysicsWorld, flat: FlatGround) {
+pub(crate) fn remove_flat_ground(
+    commands: &mut Commands,
+    physics: &mut PhysicsWorld,
+    flat: FlatGround,
+) {
     commands.entity(flat.entity).despawn();
     let colliders = &mut physics.colliders;
     let islands = &mut physics.islands;
@@ -1453,7 +1280,7 @@ fn local_box_world_bounds_and_terrain_clearance(
     (min, max, min_clearance)
 }
 
-fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity> {
+pub(crate) fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity> {
     let mut out = vec![root];
     let mut cursor = 0usize;
     while cursor < out.len() {
@@ -1544,86 +1371,6 @@ pub(crate) fn smooth_hill(x: f32, z: f32, cx: f32, cz: f32, radius: f32, height:
     let dz = z - cz;
     let d2 = dx * dx + dz * dz;
     height * (-d2 / (2.0 * radius * radius)).exp()
-}
-
-/// Translucent cloud shell — a UV sphere at `planet_radius + 4 km`,
-/// double-sided so it reads from inside (ground level overcast) and
-/// outside (orbital cloud bands), `NotShadowCaster` so it doesn't
-/// blow up the directional cascade.
-fn spawn_cloud_shell(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    planet_radius: f64,
-) {
-    let shell_radius = planet_radius + CLOUD_ALTITUDE_M;
-    let mesh = meshes.add(Sphere::new(shell_radius as f32).mesh().uv(256, 128));
-    let cloud_tex = images.add(make_cloud_texture());
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 1.0, 1.0, 0.92),
-        base_color_texture: Some(cloud_tex),
-        alpha_mode: AlphaMode::Blend,
-        unlit: false,
-        double_sided: true,
-        cull_mode: None,
-        perceptual_roughness: 1.0,
-        metallic: 0.0,
-        ..default()
-    });
-    commands.spawn((
-        Name::new("CloudShell"),
-        Transform::from_xyz(0.0, -planet_radius as f32, 0.0),
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        NotShadowCaster,
-    ));
-}
-
-fn make_cloud_texture() -> Image {
-    const W: u32 = 1024;
-    const H: u32 = 512;
-    let mut data = Vec::with_capacity((W * H * 4) as usize);
-    let coverage: f32 = 0.55;
-    let max_alpha: f32 = 0.92;
-    for y in 0..H {
-        for x in 0..W {
-            let u = x as f32 / W as f32;
-            let v = y as f32 / H as f32;
-            let n = fbm_tileable(u, v);
-            let t = ((n - (1.0 - coverage)) / coverage).clamp(0.0, 1.0);
-            let a = (t * t * (3.0 - 2.0 * t)) * max_alpha;
-            data.extend_from_slice(&[255, 255, 255, (a * 255.0) as u8]);
-        }
-    }
-    Image::new(
-        Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8Unorm,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    )
-}
-
-fn fbm_tileable(u: f32, v: f32) -> f32 {
-    use std::f32::consts::TAU;
-    let mut sum = 0.0;
-    let mut amp = 0.5;
-    let mut freq: f32 = 3.0;
-    let mut phase = 0.0;
-    for _ in 0..5 {
-        let fu = u * TAU * freq;
-        let fv = v * std::f32::consts::PI * freq;
-        sum += amp * ((fu + phase).sin() * fv.sin());
-        amp *= 0.55;
-        freq *= 2.07;
-        phase += 1.73;
-    }
-    (sum * 0.5 + 0.5).clamp(0.0, 1.0)
 }
 
 pub(crate) fn fbm_world(x: f32, z: f32, octaves: u32) -> f32 {

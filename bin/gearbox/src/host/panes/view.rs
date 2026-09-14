@@ -43,7 +43,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     let tf_pod = pid(P, "tf", 0);
     ctx.sync_toggles(
         tf_pod,
-        &[toggles.show_tf_frames, toggles.show_tf_names, toggles.show_tf_links],
+        &[toggles.show_tf_frames, toggles.show_tf_names, toggles.show_tf_links, toggles.tf_wheels_only],
     );
     body.add_normal(
         tf_id,
@@ -53,12 +53,19 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
             Pod::new(tf_pod)
                 .with_toggle_initial("Frames", accent, toggles.show_tf_frames)
                 .with_toggle_initial("Names", accent, toggles.show_tf_names)
-                .with_toggle_initial("Parent links", accent, toggles.show_tf_links),
+                .with_toggle_initial("Parent links", accent, toggles.show_tf_links)
+                .with_toggle_initial("Wheels only", accent, toggles.tf_wheels_only)
+                .with_readout("wheel axes", "Steering + spin; knuckles steer only"),
         ],
     );
 
     let render_id = cid(P, "render");
     let render_pod = pid(P, "render", 0);
+    let wireframe_label = if world.resource::<crate::viewer::overlays::WireframeAvailable>().0 {
+        "Wireframe"
+    } else {
+        "Wireframe (GPU unavailable)"
+    };
     ctx.sync_toggles(render_pod, &[toggles.wireframe]);
     body.add_normal(
         render_id,
@@ -66,7 +73,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         "options",
         vec![
             Pod::new(render_pod)
-                .with_toggle_initial("Wireframe", accent, toggles.wireframe)
+                .with_toggle_initial(wireframe_label, accent, toggles.wireframe)
                 .with_slider(
                     "Light",
                     (toggles.light_intensity_scale as f64).clamp(0.0, 4.0),
@@ -117,6 +124,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         set_toggle(&mut toggles.show_tf_frames, resp, 0);
         set_toggle(&mut toggles.show_tf_names, resp, 1);
         set_toggle(&mut toggles.show_tf_links, resp, 2);
+        set_toggle(&mut toggles.tf_wheels_only, resp, 3);
     }
     if let Some(resp) = pod_response(&responses, render_id, 0) {
         set_toggle(&mut toggles.wireframe, resp, 0);

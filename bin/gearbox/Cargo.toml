@@ -19,6 +19,8 @@ python = ["dep:pyo3"]
 
 [dependencies]
 bevy.workspace = true
+gearbox-controls = { path = "../../crates/gearbox-controls" }
+bevy-volumetric-clouds = { path = "../../vendored/bevy-volumetric-clouds" }
 
 # mara owns the window, ribbons and panes; Bevy renders into its viewport.
 mara.workspace = true

@@ -72,7 +72,13 @@ impl Plugin for ViewerSystemsPlugin {
             .init_resource::<FollowTarget>()
             .init_resource::<ChaseCameraFly>()
             .init_resource::<HostCommands>()
-            .add_systems(PostUpdate, follow_target)
+            .add_systems(
+                PostUpdate,
+                follow_target
+                    .after(crate::physics::PhysicsWriteback)
+                    .after(crate::world::chase_camera_floor)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            )
             .add_systems(
                 Update,
                 (
@@ -323,42 +329,42 @@ pub(crate) fn asset_bounds(
     Some(((wmin + wmax) * 0.5, (wmax - wmin).length() * 0.5))
 }
 
-/// The follow target moves the chase camera by its own frame-to-frame
-/// delta; yaw and distance stay as the user left them.
+/// Pin the camera focus to the current body position without overriding zoom.
 fn follow_target(
     mut follow: ResMut<FollowTarget>,
+    commands: Res<HostCommands>,
     fly: Res<FlyTo>,
     agent_fly: Res<ChaseCameraFly>,
     inventory: Res<ControllerInventory>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
-    transforms: Query<&GlobalTransform>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    mut camera: ParamSet<(
+        bevy::transform::helper::TransformHelper,
+        Query<(&mut ChaseCamera, &mut Transform)>,
+    )>,
 ) {
     let Some(root) = follow.entity else {
-        follow.last_pos = None;
         return;
     };
-    if fly.remaining > 0.0 || agent_fly.target.is_some() {
-        follow.last_pos = None;
+    if fly.remaining > 0.0
+        || agent_fly.target.is_some()
+        || commands.0.iter().any(|command| {
+            matches!(command,
+                crate::viewer::commands::HostCommand::FlyToMachine(target) if *target == root)
+        })
+    {
         return;
     }
     let body = machine_body_entity(root, &inventory, &prims, &parents);
-    let Ok(gt) = transforms.get(body) else {
+    let Ok(gt) = camera.p0().compute_global_transform(body) else {
         follow.set(None);
         return;
     };
     let current = gt.translation();
-    if let Some(last) = follow.last_pos {
-        let delta = current - last;
-        if delta.length_squared() > 0.0 {
-            for (mut cam, mut tr) in &mut cameras {
-                cam.focus += delta;
-                apply_rig(&cam, &mut tr);
-            }
-        }
+    for (mut cam, mut tr) in &mut camera.p1() {
+        cam.focus = current;
+        apply_rig(&cam, &mut tr);
     }
-    follow.last_pos = Some(current);
 }
 
 /// During play, the gizmo is hidden — so the selection ring is the
@@ -838,7 +844,7 @@ pub(crate) fn fit_params_for_entity(
 
 /// A primary click on the viewport (mara forwards it with the pointer in
 /// render-target pixels) picks the closest loaded asset under the cursor.
-fn pick_on_click(
+pub(crate) fn pick_on_click(
     input: Res<BevyViewportInput>,
     grab: Res<GizmoGrab>,
     keys: Res<ButtonInput<KeyCode>>,

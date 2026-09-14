@@ -8,22 +8,26 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
 }
 
+#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
+#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(111) var surface_heightmap: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112) var<uniform> geometry: SurfaceGeometryParams;
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(109) var tracks: texture_2d<u32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(110) var<uniform> wheels: WheelMapParams;
+
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var terrain_albedo: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var terrain_albedo_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102)
 var terrain_height: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103)
-var terrain_height_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104)
 var terrain_detail_albedo: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105)
-var terrain_detail_albedo_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106)
 var terrain_detail_height: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(107)
-var terrain_detail_height_sampler: sampler;
 // rgb multiplies the field colour, a scales the cut-hay rows.
 @group(#{MATERIAL_BIND_GROUP}) @binding(108)
 var<uniform> terrain_tint: vec4<f32>;
@@ -72,48 +76,65 @@ fn fbm(p: vec2<f32>) -> f32 {
 fn sample_variant(
     tex: texture_2d<f32>,
     smp: sampler,
-    local: vec2<f32>,
+    uv: vec2<f32>,
     cell: vec2<f32>,
     seed: f32,
 ) -> vec4<f32> {
     let r = hash21(cell + vec2<f32>(seed, seed * 1.37));
+    let local = fract(uv);
     var p = local;
+    var dx = dpdx(uv);
+    var dy = dpdy(uv);
     if (r < 0.25) {
         p = local;
     } else if (r < 0.5) {
         p = vec2<f32>(local.y, 1.0 - local.x);
+        dx = vec2<f32>(dx.y, -dx.x);
+        dy = vec2<f32>(dy.y, -dy.x);
     } else if (r < 0.75) {
         p = vec2<f32>(1.0 - local.x, 1.0 - local.y);
+        dx = -dx;
+        dy = -dy;
     } else {
         p = vec2<f32>(1.0 - local.y, local.x);
+        dx = vec2<f32>(-dx.y, dx.x);
+        dy = vec2<f32>(-dy.y, dy.x);
     }
     if (hash21(cell + vec2<f32>(seed * 2.1, 19.7)) > 0.5) {
         p.x = 1.0 - p.x;
+        dx.x = -dx.x;
+        dy.x = -dy.x;
     }
     let offset = vec2<f32>(
         hash21(cell + vec2<f32>(41.3 + seed, 7.1)),
         hash21(cell + vec2<f32>(13.9, 67.7 + seed))
     );
-    return textureSample(tex, smp, fract(p + offset));
+    return textureSampleGrad(tex, smp, fract(p + offset), dx, dy);
 }
 
 fn scatter_sample(tex: texture_2d<f32>, smp: sampler, uv: vec2<f32>, seed: f32) -> vec4<f32> {
     let cell = floor(uv);
     let local = fract(uv);
     let f = smooth2(local);
-    let c00 = sample_variant(tex, smp, local, cell, seed);
-    let c10 = sample_variant(tex, smp, local, cell + vec2<f32>(1.0, 0.0), seed);
-    let c01 = sample_variant(tex, smp, local, cell + vec2<f32>(0.0, 1.0), seed);
-    let c11 = sample_variant(tex, smp, local, cell + vec2<f32>(1.0, 1.0), seed);
+    let c00 = sample_variant(tex, smp, uv, cell, seed);
+    let c10 = sample_variant(tex, smp, uv, cell + vec2<f32>(1.0, 0.0), seed);
+    let c01 = sample_variant(tex, smp, uv, cell + vec2<f32>(0.0, 1.0), seed);
+    let c11 = sample_variant(tex, smp, uv, cell + vec2<f32>(1.0, 1.0), seed);
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
+const HARVEST_PASS_WIDTH_M: f32 = 4.0;
+const HARVEST_RESIDUE_WIDTH_M: f32 = 1.0;
+const HARVEST_EDGE_BLEND_M: f32 = 0.4;
+
 fn cut_hay_mask(world_xz: vec2<f32>) -> f32 {
-    let spacing = 7.3;
+    let spacing = HARVEST_PASS_WIDTH_M;
     let waviness = sin(world_xz.x * 0.030 + 3.0 * fbm(world_xz * 0.010)) * 1.4;
     let row = fract((world_xz.y + waviness + 1000.0) / spacing) * spacing;
     let dist = abs(row - spacing * 0.5);
-    let core = pow(saturate(1.0 - dist / 2.1), 1.7);
+    let half_width = HARVEST_RESIDUE_WIDTH_M * 0.5;
+    let half_blend = HARVEST_EDGE_BLEND_M * 0.5;
+    let core = 1.0 - smoothstep(half_width - half_blend, half_width + half_blend, dist);
     let clumps = fbm(world_xz * vec2<f32>(0.055, 0.035) + vec2<f32>(17.0, -23.0));
     let broken = smooth01((clumps - 0.22) / 0.78);
     let flecks = pow(fbm(world_xz * vec2<f32>(0.35, 0.22) + vec2<f32>(-8.0, 14.0)), 5.0) * 0.28;
@@ -121,17 +142,15 @@ fn cut_hay_mask(world_xz: vec2<f32>) -> f32 {
 }
 
 fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
-    // GPU "virtual high resolution": source textures are small, but
-    // sampled at short world scales and layered like games do. This
-    // gives sharp close-up texture without baking a giant image.
+    // Layer ground textures at coarse and fine world-space scales.
     let base = scatter_sample(terrain_albedo, terrain_albedo_sampler, world_xz / 3.6, 11.0);
-    let base_h = scatter_sample(terrain_height, terrain_height_sampler, world_xz / 3.6 + vec2<f32>(3.1, -1.7), 23.0).r;
+    let base_h = scatter_sample(terrain_height, terrain_albedo_sampler, world_xz / 3.6 + vec2<f32>(3.1, -1.7), 23.0).r;
     let base_micro = scatter_sample(terrain_albedo, terrain_albedo_sampler, world_xz / 1.25 + vec2<f32>(61.0, -37.0), 59.0);
-    let base_micro_h = scatter_sample(terrain_height, terrain_height_sampler, world_xz / 1.25 + vec2<f32>(7.7, -5.3), 61.0).r;
-    let detail = scatter_sample(terrain_detail_albedo, terrain_detail_albedo_sampler, world_xz / 2.2 + vec2<f32>(19.3, -7.1), 37.0);
-    let detail_h = scatter_sample(terrain_detail_height, terrain_detail_height_sampler, world_xz / 2.2 + vec2<f32>(-2.9, 4.7), 41.0).r;
-    let detail_micro = scatter_sample(terrain_detail_albedo, terrain_detail_albedo_sampler, world_xz / 0.85 + vec2<f32>(-43.0, 91.0), 83.0);
-    let detail_micro_h = scatter_sample(terrain_detail_height, terrain_detail_height_sampler, world_xz / 0.85 + vec2<f32>(12.0, 31.0), 89.0).r;
+    let base_micro_h = scatter_sample(terrain_height, terrain_albedo_sampler, world_xz / 1.25 + vec2<f32>(7.7, -5.3), 61.0).r;
+    let detail = scatter_sample(terrain_detail_albedo, terrain_albedo_sampler, world_xz / 2.2 + vec2<f32>(19.3, -7.1), 37.0);
+    let detail_h = scatter_sample(terrain_detail_height, terrain_albedo_sampler, world_xz / 2.2 + vec2<f32>(-2.9, 4.7), 41.0).r;
+    let detail_micro = scatter_sample(terrain_detail_albedo, terrain_albedo_sampler, world_xz / 0.85 + vec2<f32>(-43.0, 91.0), 83.0);
+    let detail_micro_h = scatter_sample(terrain_detail_height, terrain_albedo_sampler, world_xz / 0.85 + vec2<f32>(12.0, 31.0), 89.0).r;
 
     var c = mix(base, base_micro, 0.22);
     let macro_n = fbm(world_xz * 0.0018 + vec2<f32>(5.0, -11.0));
@@ -155,8 +174,7 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
     let broad_noise = fbm(world_xz * 0.0018 + vec2<f32>(71.0, -113.0));
     let mid_noise = fbm(world_xz * 0.010 + vec2<f32>(-31.0, 57.0));
     let fine_noise = fbm(world_xz * 0.18 + vec2<f32>(129.0, -203.0));
-    // Continuous high-frequency grain. Do NOT floor world space here:
-    // that makes a visible checker/cell board when magnified.
+    // Continuous high-frequency grain.
     let fine_grain = fbm(world_xz * 1.35 + vec2<f32>(401.0, -277.0));
     let broad_mask = smooth01((broad_noise - 0.16) / 0.62);
     let mid_mask = smooth01((mid_noise - 0.12) / 0.52);
@@ -181,17 +199,12 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
         1.0
     );
     let height_shade = 0.66 + (base_h * 0.25 + base_micro_h * 0.20 + detail_height_mix * 0.55) * 0.62;
-    c = mix(c, broad_field, broad_mask * 0.34);
-    c = mix(c, mid_brown, mid_mask * 0.54);
+    c = mix(c, broad_field, broad_mask * 0.10);
+    c = mix(c, mid_brown, mid_mask * 0.16);
     c = vec4<f32>(
         clamp(c.rgb * vec3<f32>(height_shade, height_shade, height_shade * 0.90), vec3<f32>(0.0), vec3<f32>(1.0)),
         c.a
     );
-
-    let hay = cut_hay_mask(world_xz);
-    let hay_luma = 0.85 + straw_n * 0.15;
-    let hay_color = vec4<f32>(0.92 * hay_luma, 0.78 * hay_luma, 0.42 * hay_luma, 1.0);
-    c = mix(c, hay_color, hay * 0.62 * terrain_tint.a);
 
     let hard_noise = fbm(world_xz * vec2<f32>(0.026, 0.021) + vec2<f32>(-137.0, 53.0));
     let hard_mask = saturate(
@@ -204,7 +217,7 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
         0.045 + detail_luma * 0.22 + detail_height_mix * 0.03,
         1.0
     );
-    c = mix(c, hard_detail, hard_mask * 0.46);
+    c = mix(c, hard_detail, hard_mask * 0.14);
 
     let fine_stubble = vec4<f32>(
         0.40 + detail_luma * 0.38,
@@ -218,8 +231,7 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
     c = mix(c, fine_bright_straw, fine_mask * smooth01((fine_grain - 0.70) / 0.20) * 0.26);
     c = mix(c, fine_dark_stubble, fine_mask * smooth01((0.24 - fine_grain) / 0.24) * 0.32);
 
-    // Extra contrast modulation so the fine pattern is not washed out by
-    // PBR lighting or the creamy wheat tint.
+    // Modulate fine-pattern contrast.
     let fine_contrast = 0.84 + fine_mask * (0.18 + fine_grain * 0.14);
     c = vec4<f32>(
         clamp(c.rgb * vec3<f32>(fine_contrast * 1.04, fine_contrast, fine_contrast * 0.90), vec3<f32>(0.0), vec3<f32>(1.0)),
@@ -234,22 +246,40 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
         clamp(c.rgb * vec3<f32>(micro_shade * 1.03, micro_shade, micro_shade * 0.92), vec3<f32>(0.0), vec3<f32>(1.0)),
         c.a
     );
-    return vec4<f32>(clamp(c.rgb * terrain_tint.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    let footprint = surface_footprint(world_xz);
+    let clumps = filtered_clumps(world_xz, 0.65, footprint, 71.3);
+    let litter = filtered_clumps(world_xz, 1.9, footprint, 23.7);
+    let chopped = fiber_stamp(world_xz, 0.14, 0.028, footprint, 31.4);
+    let straw = fiber_stamp(world_xz, 0.28, 0.035, footprint, 57.8);
+    let mat = fiber_stamp(world_xz, 0.32, 0.018, footprint, 91.2);
+    let straw_color = mix(vec3<f32>(0.43, 0.28, 0.095), vec3<f32>(0.67, 0.47, 0.20), litter);
+    let broken_soil = c.rgb * mix(0.72, 1.12, clumps);
+    c = vec4<f32>(mix(broken_soil, straw_color, clamp(chopped * 0.75 + straw * 0.65 + mat * 0.40, 0.0, 0.9)), c.a);
+    let residue = cut_hay_mask(world_xz) * terrain_tint.a;
+    let residue_tint = mix(vec3<f32>(1.0), vec3<f32>(0.94, 0.925, 0.91), residue);
+    return vec4<f32>(clamp(c.rgb * residue_tint * terrain_tint.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
+    let normal = surface_geometry_normal(surface_heightmap, geometry, in.world_position.xz, in.world_normal);
+    pbr_input.N = surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz));
+    pbr_input.world_normal = normal;
     var color = terrain_color(in.world_position.xz);
+    let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x;
+    color = vec4<f32>(color.rgb * (1.0 - wheels.darkening * pressed), 1.0);
 #ifdef VERTEX_COLORS
     color = color * in.color;
 #endif
     pbr_input.material.base_color = alpha_discard(pbr_input.material, color);
     pbr_input.material.perceptual_roughness = 0.98;
+    pbr_input.material.reflectance = vec3<f32>(0.04);
+    pbr_input.specular_occlusion = 0.0;
     pbr_input.material.metallic = 0.0;
 
     var out: FragmentOutput;
-    out.color = apply_pbr_lighting(pbr_input);
+    out.color = surface_lighting(pbr_input, 0.45 * (1.0 - pressed));
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }

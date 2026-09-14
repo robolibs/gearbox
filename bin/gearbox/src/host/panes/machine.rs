@@ -28,7 +28,6 @@ use crate::host::{PANE_MACHINE as P, RIBBON_LEFT};
 use crate::links::LinkSpec;
 use crate::services::{LinkValues, ServiceCommands, controller_joints, moved_link};
 use crate::viewer::drive::{DRIVE_TYPES, MachinePanel};
-use crate::viewer::state::ActiveStage;
 use crate::viewer::systems::Selection;
 
 const MAX_SPEED_MPS: f64 = 6.0;
@@ -69,12 +68,11 @@ fn group_of(c: &ControllerSpec) -> String {
     }
 }
 
-/// The machine the pane shows: the selected root, else the active stage.
+/// The selected machine.
 fn picked_machine(world: &World) -> Option<MachineInstanceSpec> {
     let picked = world
         .resource::<Selection>()
-        .0
-        .or(world.resource::<ActiveStage>().0)?;
+        .0?;
     world
         .resource::<ControllerInventory>()
         .machines
@@ -164,7 +162,7 @@ fn add_machine_list(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCt
 fn handle_machine_list(
     responses: &HashMap<MaraId, Vec<PodResponse>>,
     list: &MachineList,
-    world: &mut World,
+    _world: &mut World,
     ctx: &PaneCtx,
 ) {
     let Some(rows) = pod_response(responses, cid(P, "list"), 0).and_then(|r| r.hybrid_select_lists.first())
@@ -177,18 +175,10 @@ fn handle_machine_list(
         ctx.send(HostCommand::SelectRoot(Some(*root)));
     }
     if let Some(i) = rows.body_double_clicked
-        && let Some((root, drives)) = list.rows.get(i)
+        && let Some((root, _)) = list.rows.get(i)
     {
         ctx.send(HostCommand::SelectRoot(Some(*root)));
         ctx.send(HostCommand::FlyToMachine(*root));
-        if let Some(key) = drives.first() {
-            world.resource_scope(|world, mut panel: Mut<MachinePanel>| {
-                if !drives.iter().any(|k| panel.holds(k)) {
-                    let mut ui_drive = world.resource_mut::<UiDrive>();
-                    panel.set_viewer_drive(&mut ui_drive, key, true);
-                }
-            });
-        }
     }
     if let Some(i) = rows.radio_clicked
         && let Some((root, _)) = list.rows.get(i)
@@ -301,6 +291,21 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         if DRIVE_TYPES.contains(&ty) {
             title = own_title;
             icon = "vehicle-tractor";
+            if ty == "builtin:ackermann_cmd_vel" {
+                pod = pod
+                    .with_readout("drive power", controller.max_power_kw
+                        .map(|p| format!("{p:.0} kW")).unwrap_or_else(|| "not authored".into()))
+                    .with_readout("wheel torque ceiling", controller.max_wheel_torque_nm
+                        .map(|t| format!("{:.1} kNm / wheel", t / 1000.0)).unwrap_or_else(|| "grip limited".into()));
+                if let Some(limits) = states.drive_limits.get(&key) {
+                    pod = pod
+                        .with_readout("powered wheels", limits.driven_wheels.to_string())
+                        .with_readout("loaded motor wheels", limits.supported_wheels.to_string())
+                        .with_readout(if limits.parked { "holding torque budget" } else { "drive torque budget" },
+                            format!("{:.1} kNm total", limits.torque_nm / 1000.0))
+                        .with_readout("power limiting", if limits.power_scale < 0.999 { "active" } else { "no" });
+                }
+            }
             if let Some(state) = states.states.get(&key) {
                 pod = pod.with_readout(
                     "state",
@@ -310,18 +315,24 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                     ),
                 );
             }
-            let holding = panel.holds(&key);
-            let pad = panel.gamepad_on(&key);
-            ctx.sync_toggles(pod_id, &[holding, pad]);
-            let pad_label = if has_gamepad {
-                "Gamepad"
-            } else {
-                "Gamepad (none connected)"
-            };
-            let cmd = ui_drive.0.get(&key).copied().unwrap_or_default();
+            if has_gamepad {
+                let layer = match panel.layer {
+                    gearbox_controls::Layer::Camera => "Normal · camera",
+                    gearbox_controls::Layer::Vehicle if panel.deadman_active => "R1 · vehicle enabled",
+                    gearbox_controls::Layer::Vehicle => "R1 · release to re-arm",
+                    gearbox_controls::Layer::Machine => "L1 · reserved",
+                    gearbox_controls::Layer::Inactive => "Inactive · drive stopped",
+                };
+                pod = pod.with_readout("pad layer", layer)
+                    .with_readout("normal sticks", "right: orbit · left: strafe/move")
+                    .with_readout("normal triggers", "R2: raise · L2: lower camera")
+                    .with_readout("normal D-pad", "←/→ machine · ↑/↓ follow");
+            }
+            let cmd = ui_drive.commands.get(&key).copied().unwrap_or_default();
+            ctx.set_slider(pod_id, 0, cmd.linear_mps as f64);
+            ctx.set_slider(pod_id, 1, cmd.angular_rps as f64);
             pod = pod
-                .with_toggle_initial("Viewer drives", accent, holding)
-                .with_toggle_initial(pad_label, accent, pad)
+                .with_readout("drive input", "Ready · hold R1 to drive selection")
                 .with_slider(
                     "speed",
                     clamp(cmd.linear_mps as f64, -MAX_SPEED_MPS, MAX_SPEED_MPS),
@@ -500,37 +511,21 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         if DRIVE_TYPES.contains(&ty) {
             world.resource_scope(|world, mut panel: Mut<MachinePanel>| {
                 let mut ui_drive = world.resource_mut::<UiDrive>();
-                if let Some(t) = resp.toggles.first()
-                    && t.changed
-                {
-                    panel.set_viewer_drive(&mut ui_drive, &block.key, t.on);
-                }
-                if let Some(t) = resp.toggles.get(1)
-                    && t.changed
-                {
-                    panel.set_gamepad(&mut ui_drive, &block.key, t.on);
-                }
-                let pad_here = panel.gamepad_on(&block.key);
-                if panel.holds(&block.key) && !pad_here {
+                let stop = button_clicked(&responses, cid(P, &block.group), block.pod, 0);
+                if stop {
+                    panel.holding.remove(&block.key);
+                    if panel.gamepad_on(&block.key) {
+                        panel.gamepad = None;
+                    }
+                    ui_drive.stop_once(&block.key);
+                } else if !panel.gamepad_on(&block.key) && resp.sliders.iter().any(|s| s.changed) {
                     let speed = resp.sliders.first().map(|s| s.value).unwrap_or(0.0);
                     let yaw = resp.sliders.get(1).map(|s| s.value).unwrap_or(0.0);
-                    let stop = button_clicked(&responses, cid(P, &block.group), block.pod, 0);
-                    if stop {
-                        let pod = pid(P, &block.group, block.pod);
-                        ctx.set_slider(pod, 0, 0.0);
-                        ctx.set_slider(pod, 1, 0.0);
-                    }
-                    ui_drive.0.insert(
-                        block.key.clone(),
-                        if stop {
-                            CmdVel::default()
-                        } else {
-                            CmdVel {
-                                linear_mps: speed as f32,
-                                angular_rps: yaw as f32,
-                            }
-                        },
-                    );
+                    panel.holding.insert(block.key.clone());
+                    ui_drive.drive(&block.key, CmdVel {
+                        linear_mps: speed as f32,
+                        angular_rps: yaw as f32,
+                    }, None);
                 }
             });
             continue;

@@ -656,6 +656,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy-volumetric-clouds"
+version = "0.2.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_a11y"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3707,16 +3714,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "gearbox-controls"
+version = "0.0.6"
+
+[[package]]
 name = "gearbox-sim"
 version = "0.0.6"
 dependencies = [
  "agentio",
  "anyhow",
  "bevy",
+ "bevy-volumetric-clouds",
  "bytemuck",
  "datapod",
  "egui",
  "gearbox-api",
+ "gearbox-controls",
  "glam 0.30.10",
  "mara",
  "openusd",

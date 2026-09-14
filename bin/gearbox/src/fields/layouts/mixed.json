@@ -1,0 +1,11 @@
+{
+  "default": "grassland",
+  "fields": [
+    {
+      "name": "harvested-east",
+      "profile": "harvested_wheat",
+      "min": [1.5, -147.5],
+      "max": [173.5, 152.5]
+    }
+  ]
+}

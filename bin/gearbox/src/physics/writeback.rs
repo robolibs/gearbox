@@ -1,53 +1,130 @@
-//! Copy Rapier rigid-body world poses back into Bevy `Transform`
-//! after each physics step. Runs in `PostUpdate` so subsequent
-//! transform-propagation runs see the updated values.
-//!
-//! Rapier writes WORLD-space pose for each body. Bevy entities have
-//! local transforms (relative to parent). For bodies whose entity
-//! has a parent, we factor out the parent's GlobalTransform so the
-//! local Transform we write produces the right world position.
+//! Copy solved world poses into local transforms, ancestors before descendants.
 
 use bevy::prelude::*;
+use bevy::transform::helper::TransformHelper;
 
 use super::convert::{quat_from_d, vec3_from_d};
 use super::world::PhysicsWorld;
 
 pub fn writeback_transforms(
     world: Res<PhysicsWorld>,
-    mut q_targets: Query<(Entity, &mut Transform, Option<&ChildOf>)>,
-    q_parent_gt: Query<&GlobalTransform>,
+    parents: Query<&ChildOf>,
+    mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
-    for (entity, mut tr, parent) in &mut q_targets {
-        let Some(handle) = world.entity_to_body.get(&entity).copied() else {
+    let mut entities: Vec<_> = world.entity_to_body.keys().copied().collect();
+    entities.sort_by_cached_key(|entity| parents.iter_ancestors(*entity).count());
+    for entity in entities {
+        let Some(rb) = world
+            .entity_to_body
+            .get(&entity)
+            .and_then(|h| world.bodies.get(*h))
+        else {
             continue;
         };
-        let Some(rb) = world.bodies.get(handle) else {
-            continue;
+        let parent_world = if let Ok(parent) = parents.get(entity) {
+            let Ok(transform) = transforms.p0().compute_global_transform(parent.parent()) else {
+                continue;
+            };
+            transform
+        } else {
+            GlobalTransform::IDENTITY
         };
         let pose = rb.position();
-        let world_translation = vec3_from_d(pose.translation);
-        let world_rotation = quat_from_d(pose.rotation);
-
-        if let Some(parent_link) = parent {
-            if let Ok(parent_gt) = q_parent_gt.get(parent_link.parent()) {
-                let parent_iso = parent_gt.compute_transform();
-                let inv_rot = parent_iso.rotation.inverse();
-                // Factor out parent's world scale too — UsdRoot
-                // applies `metersPerUnit` (typically 0.01 on Isaac
-                // assets) as a scale, and forgetting to divide here
-                // collapses every body toward origin frame-by-frame
-                // because Bevy then re-multiplies local × parent.scale.
-                let local_delta = inv_rot * (world_translation - parent_iso.translation);
-                tr.translation = Vec3::new(
-                    local_delta.x / parent_iso.scale.x,
-                    local_delta.y / parent_iso.scale.y,
-                    local_delta.z / parent_iso.scale.z,
-                );
-                tr.rotation = inv_rot * world_rotation;
-                continue;
-            }
+        let translation = parent_world
+            .affine()
+            .inverse()
+            .transform_point3(vec3_from_d(pose.translation));
+        let rotation =
+            parent_world.compute_transform().rotation.inverse() * quat_from_d(pose.rotation);
+        if let Ok(mut transform) = transforms.p1().get_mut(entity) {
+            transform.translation = translation;
+            transform.rotation = rotation;
         }
-        tr.translation = world_translation;
-        tr.rotation = world_rotation;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::convert::{quat_to_d, vec3_to_d};
+    use super::*;
+    use bevy::ecs::system::{RunSystemOnce, SystemState};
+    use rapier3d::prelude::{Pose, RigidBodyBuilder};
+
+    #[test]
+    fn nested_wheel_uses_current_parent_pose_through_scaled_wrappers() {
+        let mut world = World::new();
+        let root = world
+            .spawn(
+                Transform::from_xyz(10.0, 2.0, -4.0)
+                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                    .with_scale(Vec3::splat(0.01)),
+            )
+            .id();
+        let wheel = world.spawn(Transform::IDENTITY).id();
+        let knuckle = world.spawn(Transform::IDENTITY).id();
+        let chassis = world.spawn((Transform::IDENTITY, ChildOf(root))).id();
+        let wrapper = world
+            .spawn((
+                Transform::from_xyz(20.0, 0.0, 0.0).with_rotation(Quat::from_rotation_z(0.2)),
+                ChildOf(chassis),
+            ))
+            .id();
+        world.entity_mut(knuckle).insert(ChildOf(wrapper));
+        world.entity_mut(wheel).insert(ChildOf(knuckle));
+        let mesh_local = Transform::from_rotation(Quat::from_rotation_z(0.5));
+        let mesh = world.spawn((mesh_local, ChildOf(wheel))).id();
+        let mut physics = PhysicsWorld::default();
+        for entity in [wheel, knuckle, chassis] {
+            let handle = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+            physics.entity_to_body.insert(entity, handle);
+        }
+        world.insert_resource(physics);
+
+        for angle in [0.3_f32, 0.7, -0.4] {
+            let base_rotation = Quat::from_rotation_y(angle * 0.5);
+            let steer_rotation = base_rotation * Quat::from_rotation_y(angle);
+            let wheel_rotation = steer_rotation * Quat::from_rotation_x(angle * 4.0);
+            let expected = [
+                (chassis, Vec3::new(4.0 + angle, 2.0, 7.0), base_rotation),
+                (knuckle, Vec3::new(5.0 + angle, 2.0, 7.0), steer_rotation),
+                (wheel, Vec3::new(5.0 + angle, 2.0, 7.0), wheel_rotation),
+            ];
+            {
+                let mut physics = world.resource_mut::<PhysicsWorld>();
+                for (entity, translation, rotation) in expected {
+                    let handle = physics.entity_to_body[&entity];
+                    physics.bodies[handle].set_position(
+                        Pose {
+                            translation: vec3_to_d(translation),
+                            rotation: quat_to_d(rotation),
+                        },
+                        true,
+                    );
+                }
+            }
+            world.run_system_once(writeback_transforms).unwrap();
+            let mut state = SystemState::<TransformHelper>::new(&mut world);
+            let helper = state.get(&world);
+            for (entity, translation, rotation) in expected {
+                let actual = helper
+                    .compute_global_transform(entity)
+                    .unwrap()
+                    .compute_transform();
+                assert!(actual.translation.abs_diff_eq(translation, 1e-4));
+                assert!(actual.rotation.dot(rotation).abs() > 0.99999);
+                assert!(actual.scale.abs_diff_eq(Vec3::splat(0.01), 1e-5));
+            }
+            let mesh_rotation = helper
+                .compute_global_transform(mesh)
+                .unwrap()
+                .compute_transform()
+                .rotation;
+            assert!(
+                mesh_rotation
+                    .dot(wheel_rotation * mesh_local.rotation)
+                    .abs()
+                    > 0.99999
+            );
+        }
     }
 }
