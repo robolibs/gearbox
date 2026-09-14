@@ -25,13 +25,14 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::sync_component::SyncComponent;
 use bevy::render::sync_world::MainEntity;
-use bevy::render::texture::GpuImage;
+use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::view::ExtractedView;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use super::contacts::{WheelContacts, trample_texel};
 use super::profile::WheelMapParams;
 use bevy::platform::collections::HashMap;
+use std::ops::Range;
 
 /// Per-chunk draw: the chunk corner and how many blade instances this frame.
 #[derive(Component, Clone)]
@@ -44,6 +45,10 @@ pub struct VegetationChunk {
     pub fade_start: f32,
     pub fade_end: f32,
     pub inverse_square_thinning: bool,
+    /// Albedo of an asset clump layer; procedural layers bind the fallback.
+    pub albedo: Option<Handle<Image>>,
+    /// Index ranges of a clump mesh's variants, one draw each; empty draws it whole.
+    pub variants: Vec<Range<u32>>,
 }
 
 impl SyncComponent for VegetationChunk {
@@ -137,6 +142,7 @@ fn queue_vegetation(
     views: Query<&ExtractedView>,
     view_key_cache: Res<ViewKeyCache>,
     fields: Res<RenderFields>,
+    mut warned: Local<bool>,
 ) {
     if fields.0.is_empty() {
         return;
@@ -165,14 +171,22 @@ fn queue_vegetation(
                     mesh.primitive_topology(),
                     mesh.index_format(),
                 );
-            let Ok(pipeline) = pipelines.specialize(
+            let pipeline = match pipelines.specialize(
                 &pipeline_cache,
                 &vegetation_pipeline,
                 (key, draw.shader.clone()),
                 &mesh.layout,
-            ) else {
-                continue;
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    if !*warned {
+                        warn!("vegetation pipeline for {:?}: {error}", draw.shader.path());
+                        *warned = true;
+                    }
+                    continue;
+                }
             };
+
             let mesh_center = pbr::get_mesh_instance_world_from_local(
                 *main_entity,
                 mesh_instance.current_uniform_index,
@@ -232,13 +246,17 @@ fn prepare_vegetation_uniforms(
 }
 
 #[derive(Resource)]
-struct FieldBindGroups(HashMap<Entity, BindGroup>);
+struct FieldBindGroups(HashMap<(Entity, Option<AssetId<Image>>), BindGroup>);
 
-/// Field bindings rebuilt against the current dynamic uniform buffer.
+/// Field bindings rebuilt against the current dynamic uniform buffer, one per
+/// field and albedo in use.
+#[allow(clippy::too_many_arguments)]
 fn prepare_vegetation_bind_group(
     mut commands: Commands,
     fields: Res<RenderFields>,
+    chunks: Query<&VegetationChunk>,
     images: Res<RenderAssets<GpuImage>>,
+    fallback: Res<FallbackImage>,
     pipeline: Res<VegetationPipeline>,
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
@@ -246,9 +264,20 @@ fn prepare_vegetation_bind_group(
 ) {
     let mut groups = HashMap::default();
     if let Some(binding) = uniforms.0.binding() {
-        for (&id, field) in &fields.0 {
-            let (Some(image), Some(trample)) =
-                (images.get(&field.heightmap), images.get(&field.trample))
+        for draw in &chunks {
+            let key = (draw.field_id, draw.albedo.as_ref().map(Handle::id));
+            if groups.contains_key(&key) {
+                continue;
+            }
+            let Some(field) = fields.0.get(&draw.field_id) else {
+                continue;
+            };
+            let albedo = match key.1 {
+                Some(id) => images.get(id),
+                None => Some(&fallback.d2),
+            };
+            let (Some(image), Some(trample), Some(albedo)) =
+                (images.get(&field.heightmap), images.get(&field.trample), albedo)
             else {
                 continue;
             };
@@ -260,9 +289,11 @@ fn prepare_vegetation_bind_group(
                     &pipeline.sampler,
                     binding.clone(),
                     &trample.texture_view,
+                    &albedo.texture_view,
+                    &albedo.sampler,
                 )),
             );
-            groups.insert(id, group);
+            groups.insert(key, group);
         }
     }
     commands.insert_resource(FieldBindGroups(groups));
@@ -377,6 +408,8 @@ fn init_vegetation_pipeline(
                 sampler(SamplerBindingType::NonFiltering),
                 uniform_buffer::<VegetationParams>(true),
                 texture_2d(TextureSampleType::Uint),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
             ),
         ),
     );
@@ -447,7 +480,8 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetFieldBindGroup<I> {
         let (Some(field), Some((offset, draw))) = (field, offset) else {
             return RenderCommandResult::Skip;
         };
-        let Some(group) = field.into_inner().0.get(&draw.field_id) else {
+        let key = (draw.field_id, draw.albedo.as_ref().map(Handle::id));
+        let Some(group) = field.into_inner().0.get(&key) else {
             return RenderCommandResult::Skip;
         };
         pass.set_bind_group(I, group, &[offset.0]);
@@ -501,11 +535,27 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
                     return RenderCommandResult::Skip;
                 };
                 pass.set_index_buffer(index_slice.buffer.slice(..), *index_format);
-                pass.draw_indexed(
-                    index_slice.range.start..(index_slice.range.start + count),
-                    vertex_slice.range.start as i32,
-                    0..draw.instances,
-                );
+                let start = index_slice.range.start;
+                if draw.variants.is_empty() {
+                    pass.draw_indexed(
+                        start..(start + count),
+                        vertex_slice.range.start as i32,
+                        0..draw.instances,
+                    );
+                }
+                // One draw per clump variant; the first instance tells the
+                // shader the variant count and which variant this is.
+                let variants = draw.variants.len() as u32;
+                for (variant, range) in draw.variants.iter().enumerate() {
+                    let variant = variant as u32;
+                    let instances = (draw.instances + variants - 1 - variant) / variants;
+                    let first = (variants << 28) | (variant << 24);
+                    pass.draw_indexed(
+                        (start + range.start)..(start + range.end),
+                        vertex_slice.range.start as i32,
+                        first..first + instances,
+                    );
+                }
             }
             RenderMeshBufferInfo::NonIndexed => {
                 pass.draw(vertex_slice.range, 0..draw.instances);

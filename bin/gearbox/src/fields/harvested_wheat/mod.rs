@@ -173,6 +173,7 @@ impl Plugin for HarvestedWheatPlugin {
             .and_then(|value| value.parse::<f32>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0)
             .unwrap_or(6000.0);
+        let share = density / 6000.0;
         app.world_mut()
             .resource_mut::<FieldProfiles>()
             .register(FieldProfile {
@@ -190,6 +191,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 4.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
+                    albedo: None,
                 }, VegetationLayer {
                     shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: leaf_template,
@@ -197,6 +199,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 24.0,
                     fade_end: 96.0,
                     inverse_square_thinning: true,
+                    albedo: None,
                 }, VegetationLayer {
                     shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: super::canopy::template,
@@ -204,7 +207,9 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 12.0,
                     fade_end: super::canopy::FADE_END_M,
                     inverse_square_thinning: true,
-                }],
+                    albedo: None,
+                }, super::clumps::sorrel(share * 15.0, 20.0),
+                super::clumps::flat_weeds(share * 0.25, 18.0)],
                 ground: create_ground,
             });
     }

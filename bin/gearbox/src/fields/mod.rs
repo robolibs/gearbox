@@ -1,6 +1,7 @@
 //! Field surfaces layered independently over terrain geometry.
 
 mod canopy;
+mod clumps;
 pub(crate) mod contacts;
 mod geometry;
 mod grassland;
@@ -30,6 +31,7 @@ impl Plugin for FieldsPlugin {
             .add_systems(First, contacts::begin_wheel_contacts)
             .add_systems(Update, textures::prepare_textures)
             .add_plugins((
+                clumps::ClumpsPlugin,
                 grassland::GrasslandPlugin,
                 harvested_wheat::HarvestedWheatPlugin,
                 render::VegetationPlugin,

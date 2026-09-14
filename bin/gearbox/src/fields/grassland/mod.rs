@@ -55,6 +55,7 @@ impl Plugin for GrasslandPlugin {
             .and_then(|value| value.parse::<f32>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0)
             .unwrap_or(6000.0);
+        let share = density / 6000.0;
         app.world_mut()
             .resource_mut::<FieldProfiles>()
             .register(FieldProfile {
@@ -62,7 +63,7 @@ impl Plugin for GrasslandPlugin {
                 wheel_response: WheelResponse {
                     recovery_seconds: 300.0,
                     bend: 0.9,
-                    darkening: 0.25,
+                    darkening: 0.43,
                     footprint_length: 0.25,
                 },
                 layers: vec![
@@ -73,6 +74,7 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 4.0,
                         fade_end: 32.0,
                         inverse_square_thinning: true,
+                        albedo: None,
                     },
                     VegetationLayer {
                         shader,
@@ -81,6 +83,7 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 8.0,
                         fade_end: 24.0,
                         inverse_square_thinning: false,
+                        albedo: None,
                     },
                     VegetationLayer {
                         shader,
@@ -89,7 +92,12 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 12.0,
                         fade_end: super::canopy::FADE_END_M,
                         inverse_square_thinning: true,
+                        albedo: None,
                     },
+                    super::clumps::bermuda(share * 120.0, 26.0),
+                    super::clumps::meadow_tufts(share * 50.0, 24.0),
+                    super::clumps::sorrel(share * 30.0, 20.0),
+                    super::clumps::celandine(share * 1.0, 22.0),
                 ],
                 ground: create_ground,
             });

@@ -435,6 +435,8 @@ pub fn stream_vegetation(
             continue;
         }
         let corner = Vec2::new(key.2 as f32, key.3 as f32) * CHUNK_M;
+        let mesh = (layer.template)();
+        let variants = super::clumps::variant_ranges(&mesh);
         let entity = commands
             .spawn((
                 Name::new(format!(
@@ -444,7 +446,7 @@ pub fn stream_vegetation(
                 ChildOf(field.entity),
                 Transform::from_xyz(corner.x, 0.0, corner.y),
                 GlobalTransform::from_translation(Vec3::new(corner.x, 0.0, corner.y)),
-                Mesh3d(meshes.add((layer.template)())),
+                Mesh3d(meshes.add(mesh)),
                 NoFrustumCulling,
                 VegetationChunk {
                     corner,
@@ -455,6 +457,8 @@ pub fn stream_vegetation(
                     fade_start: layer.fade_start,
                     fade_end: layer.fade_end,
                     inverse_square_thinning: layer.inverse_square_thinning,
+                    albedo: layer.albedo.map(|path| assets.load(path)),
+                    variants,
                 },
             ))
             .id();

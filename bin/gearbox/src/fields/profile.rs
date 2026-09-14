@@ -47,6 +47,8 @@ pub struct VegetationLayer {
     pub fade_start: f32,
     pub fade_end: f32,
     pub inverse_square_thinning: bool,
+    /// Albedo of an asset clump layer; procedural layers have none.
+    pub albedo: Option<&'static str>,
 }
 
 #[derive(ShaderType, Reflect, Clone, Copy, Debug, Default)]
