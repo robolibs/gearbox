@@ -413,13 +413,6 @@ fn spawn_world(
             ..default()
         }),
         fog,
-        // Wheels turn 10-20° between frames at tractor speeds; without blur
-        // the tread strobes and a rolling wheel looks frozen.
-        bevy::post_process::motion_blur::MotionBlur {
-            shutter_angle: 1.0,
-            samples: 4,
-            ..default()
-        },
         AmbientLight {
             color: Color::WHITE,
             brightness: 120.0,
