@@ -36,7 +36,20 @@ pub struct PhysicsWorld {
     pub filtered_pairs: HashSet<(RigidBodyHandle, RigidBodyHandle)>,
     /// Entities whose bodies the last step disabled for non-finite state.
     pub quarantined: Vec<Entity>,
+    /// Fixed physics rate; the frame's real time is spent in steps of it.
+    pub step_hz: f64,
+    /// Real time not yet simulated.
+    pub accumulator: f64,
+    /// Steps this frame runs, planned in `First` so controllers can scale
+    /// per-frame impulses by the time they cover.
+    pub pending_steps: u32,
 }
+
+/// Default physics rate; `GEARBOX_PHYSICS_HZ` overrides it.
+const DEFAULT_STEP_HZ: f64 = 120.0;
+/// Most steps one frame may run; below that frame rate physics slows
+/// down instead of spiralling.
+const MAX_STEPS_PER_FRAME: u32 = 12;
 
 impl Default for PhysicsWorld {
     fn default() -> Self {
@@ -46,6 +59,12 @@ impl Default for PhysicsWorld {
         // impulse when the multibody solver can't take all of them.
         integration_parameters.num_solver_iterations = 16;
         integration_parameters.num_internal_pgs_iterations = 4;
+        let step_hz = std::env::var("GEARBOX_PHYSICS_HZ")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|hz| *hz >= 30.0)
+            .unwrap_or(DEFAULT_STEP_HZ);
+        integration_parameters.dt = 1.0 / step_hz;
         Self {
             gravity: Vector::new(0.0, -9.81, 0.0),
             integration_parameters,
@@ -62,6 +81,9 @@ impl Default for PhysicsWorld {
             entity_to_collider: HashMap::new(),
             filtered_pairs: HashSet::new(),
             quarantined: Vec::new(),
+            step_hz,
+            accumulator: 0.0,
+            pending_steps: 0,
         }
     }
 }
@@ -133,9 +155,53 @@ impl PhysicsHooks for PairFilter<'_> {
 
 pub use gearbox_api::PhysicsActive;
 
-/// Step the world once per frame when `PhysicsActive(true)`.
-pub fn step_physics(active: Res<PhysicsActive>, mut world: ResMut<PhysicsWorld>) {
-    if active.0 {
+/// Turn the frame's real time into a whole number of fixed steps.
+pub fn plan_physics_steps(
+    time: Res<Time>,
+    active: Res<PhysicsActive>,
+    mut world: ResMut<PhysicsWorld>,
+) {
+    if !active.0 {
+        world.accumulator = 0.0;
+        world.pending_steps = 0;
+        return;
+    }
+    let dt = 1.0 / world.step_hz;
+    world.accumulator += time.delta_secs_f64().min(0.25);
+    let steps = ((world.accumulator / dt) as u32).min(MAX_STEPS_PER_FRAME);
+    world.accumulator -= steps as f64 * dt;
+    if steps == MAX_STEPS_PER_FRAME {
+        world.accumulator = world.accumulator.min(dt);
+    }
+    world.pending_steps = steps;
+}
+
+/// Run the steps `plan_physics_steps` planned for this frame, and log the
+/// cost per step every 10 s.
+pub fn step_physics(
+    active: Res<PhysicsActive>,
+    time: Res<Time>,
+    mut world: ResMut<PhysicsWorld>,
+    mut stats: Local<(f64, u32, f64)>,
+) {
+    if !active.0 {
+        return;
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..world.pending_steps {
         world.step();
+    }
+    stats.0 += start.elapsed().as_secs_f64();
+    stats.1 += world.pending_steps;
+    let now = time.elapsed_secs_f64();
+    if now >= stats.2 {
+        if stats.1 > 0 {
+            info!(
+                "gearbox-physics: {:.2} ms per step, {} steps in the last 10 s",
+                1000.0 * stats.0 / stats.1 as f64,
+                stats.1
+            );
+        }
+        *stats = (0.0, 0, now + 10.0);
     }
 }

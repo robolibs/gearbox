@@ -30,7 +30,7 @@ use usd_bevy::{UsdSceneRoot, UsdSceneState};
 
 pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
-pub use world::PhysicsWorld;
+pub use world::{PhysicsWorld, step_physics};
 
 /// Wires the Rapier world, every marker → Rapier conversion system and the
 /// writeback path. Adds `PhysicsWorld` and `ColliderDebugEnabled`;
@@ -42,6 +42,7 @@ impl Plugin for RapierAdapterPlugin {
         app.init_resource::<PhysicsWorld>()
             .init_resource::<PhysicsActive>()
             .init_resource::<ColliderDebugEnabled>()
+            .add_systems(First, world::plan_physics_steps)
             .add_systems(
                 Update,
                 (

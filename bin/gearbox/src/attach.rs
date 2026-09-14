@@ -174,6 +174,49 @@ impl Scene<'_, '_> {
     }
 }
 
+/// A parked trailer stands nose-up on its stand; levelled onto the hitch its
+/// axles swing into the ground. Pitch the slave about the hitch until no tyre
+/// is below the terrain.
+fn lift_tyres_out_of_terrain(
+    physics: &mut PhysicsWorld,
+    bodies: &[RigidBodyHandle],
+    wheels: &[RigidBodyHandle],
+    pivot: DVec3,
+    axis: DVec3,
+) {
+    for _ in 0..3 {
+        let deepest = wheels
+            .iter()
+            .filter_map(|w| {
+                let radius = crate::controller::body_max_collider_radius(physics, *w)?;
+                let p = physics.bodies.get(*w)?.position().translation;
+                let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32) as f64;
+                let offset = p - pivot;
+                let reach = (offset - axis * offset.dot(axis)).length();
+                (reach > 0.5).then_some((ground - (p.y - radius), reach, offset))
+            })
+            .max_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)));
+        let Some((depth, reach, offset)) = deepest else {
+            return;
+        };
+        if depth <= 0.005 {
+            return;
+        }
+        let up = DQuat::from_axis_angle(axis, (depth / reach).atan());
+        let turn = if (up * offset).y > offset.y { up } else { up.inverse() };
+        for handle in bodies {
+            if let Some(body) = physics.bodies.get_mut(*handle) {
+                let pose = body.position();
+                let moved = Pose {
+                    translation: pivot + turn * (pose.translation - pivot),
+                    rotation: turn * pose.rotation,
+                };
+                body.set_position(moved, true);
+            }
+        }
+    }
+}
+
 /// The rigid-body link a (possibly body-less) link rides on.
 fn body_link<'a>(tree: &'a LinkTree, link: &'a LinkSpec) -> Option<&'a LinkSpec> {
     let mut cur = link;
@@ -617,6 +660,21 @@ fn try_attach(
                 body.set_angvel(DVec3::ZERO, true);
             }
         }
+        let wheels: Vec<RigidBodyHandle> = slave
+            .links
+            .links
+            .iter()
+            .filter(|l| l.role == crate::links::LinkRole::Wheel)
+            .filter_map(|l| l.body_prim.as_deref())
+            .filter_map(|p| scene.body(slave, p, physics))
+            .collect();
+        lift_tyres_out_of_terrain(
+            &mut *physics,
+            &slave_bodies,
+            &wheels,
+            target.translation,
+            target.rotation * DVec3::X,
+        );
     } else {
         let gap = (coupler_world.translation - target.translation).length();
         let turn = coupler_world.rotation.angle_between(target.rotation);

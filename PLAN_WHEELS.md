@@ -1,5 +1,37 @@
 # gearbox physical wheels — raycast to contact, in `bin/gearbox`
 
+## Status (2026-09-14)
+
+Phases 0–2 are in, and `contact` is the default traction of
+`builtin:ackermann_cmd_vel` (the first half of Phase 4):
+
+- physics steps at a fixed 120 Hz (`GEARBOX_PHYSICS_HZ`), at most 12 steps a  frame, planned in `First` so per-frame impulses know their time span;
+- `prepare_machine_physics` turns machine self-collision off and gives every
+  `wheel` link a rounded, grippy (≥ 1.1, `max`), CCD tyre, for trailers too;
+- wheel motors are force-based (acceleration-based gains scale with the
+  joint's inertia, near zero on a light knuckle), capped at
+  `0.9 · μ · N · r` with `N` the weight over all wheels, full torque at
+  0.3 rad/s error; an integral trim (±10 %) holds the commanded speed;
+  passive wheels get a light motor at ground speed while driving, so an
+  unloaded one still turns;
+- per-wheel turn speeds: the old turn ratio sped up the inside wheels (body
+  X points left); Ackermann wheels ahead of the rear axle add the longer arc;
+- steer joints keep their authored USD drive gains, else force-based
+  50 000 N·m/rad; steer angles use the real speed down to 0.8 m/s;
+- wheels are `wheel` links or the wheel side of any wheel joint pair, so
+  derived link trees (Hunter) count;
+- `link.<wheel>.slip` is in `/state`; a warning names colliders that hang
+  near the tyres' contact plane.
+
+Measured 2026-09-14 on the meadow: Kubota, Fendt, Oxbo hold 2.00 m/s; the
+Kubota yaws 0.44 rad/s for 0.4 with every wheel under 4 % slip; Claas and
+Krampe tow on all four tyres at 2 m/s and steer against the articulation.
+Physics costs ~1 ms a step with five machines.
+
+Still open: the diff drive writes chassis velocity (Phase 4, second half),
+the raycast code is still there (Phase 5), `role:suspensionJoints` (Phase 3),
+the Oxbo yaws 0.14–0.21 rad/s for 0.3 and its middle axle sits 8 mm up.
+
 ## Goal
 
 Every machine in `bin/gearbox` already has real wheels: a USD chassis body,

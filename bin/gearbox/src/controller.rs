@@ -116,6 +116,13 @@ struct ControllerRuntimeState {
     logged_empty_tire_pairs: HashSet<ControllerKey>,
     logged_steer: HashSet<ControllerKey>,
     inertia_guarded: HashSet<ControllerKey>,
+    machines_prepared: HashSet<ControllerKey>,
+    /// Integral wheel-speed trim per controller under contact traction.
+    speed_trim: HashMap<ControllerKey, f64>,
+    /// Rigid bodies per machine id; their live mass sets the torque cap.
+    machine_bodies: HashMap<String, Vec<RigidBodyHandle>>,
+    /// Wheel bodies per machine id; the weight spreads over all of them.
+    machine_wheels: HashMap<String, Vec<RigidBodyHandle>>,
     diff_drive_debug_ticks: u64,
 }
 
@@ -190,11 +197,14 @@ impl Plugin for ControllerDiscoveryPlugin {
                     apply_machine_agent_commands,
                     apply_ui_drive,
                     guard_chassis_inertia,
+                    prepare_machine_physics,
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,
                     record_wheel_tracks,
+                    dump_joints_periodically,
                 )
-                    .chain(),
+                    .chain()
+                    .before(crate::physics::step_physics),
             )
             .add_systems(
                 PostUpdate,
@@ -310,6 +320,8 @@ pub struct ControllerSpec {
     pub rear_track_width: Option<f32>,
     pub max_steer_deg: Option<f32>,
     pub steering_geometry: Option<String>,
+    /// `contact` (tyres carry the machine) or `raycast` (legacy vehicle).
+    pub traction: Option<String>,
     pub front_steer_multiplier: Option<f32>,
     pub middle_steer_multiplier: Option<f32>,
     pub rear_steer_multiplier: Option<f32>,
@@ -569,6 +581,7 @@ fn append_isaac_compat_machines(
                 rear_track_width: None,
                 max_steer_deg: Some(45.0),
                 steering_geometry: Some("ackermann".to_string()),
+                traction: None,
                 front_steer_multiplier: None,
                 middle_steer_multiplier: None,
                 rear_steer_multiplier: None,
@@ -1052,6 +1065,17 @@ fn apply_builtin_ackermann_cmd_vel(
                 .rear_track_width
                 .or(controller.track_width)
                 .unwrap_or(track_width_m);
+            let contact = uses_contact_traction(controller);
+            let forward_mps = physics
+                .bodies
+                .get(body_handle)
+                .and_then(|b| body_forward_vector(b).map(|f| b.linvel().dot(f)))
+                .unwrap_or(0.0);
+            let wheel_speed_mps = if contact {
+                trimmed_wheel_speed(&mut runtime, &key, cmd.linear_mps as f64, forward_mps, dt as f64)
+            } else {
+                cmd.linear_mps as f64
+            };
             let mut wheel_targets = wheel_joint_targets(
                 scene_root,
                 controller,
@@ -1061,16 +1085,24 @@ fn apply_builtin_ackermann_cmd_vel(
                 &physics,
                 body_handle,
                 geometry,
-                cmd.linear_mps as f64,
+                wheel_speed_mps,
                 steer_target_rad,
                 wheel_base_m,
                 traction_track_width_m,
                 wheel_radius_m,
             );
+            let passive =
+                parking_brake_wheel_targets(scene_root, controller, machine, &joints, &parents, &physics);
+            let wheels = runtime
+                .machine_wheels
+                .get(&machine.id)
+                .map(Vec::len)
+                .unwrap_or(wheel_targets.len() + passive.len());
+            let mut idle = Vec::new();
             if cmd.linear_mps.abs() < 0.05 {
-                wheel_targets.extend(parking_brake_wheel_targets(
-                    scene_root, controller, machine, &joints, &parents, &physics,
-                ));
+                wheel_targets.extend(passive);
+            } else if contact {
+                idle = passive;
             }
             let tire_pairs =
                 tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics);
@@ -1090,20 +1122,32 @@ fn apply_builtin_ackermann_cmd_vel(
                     machine.id, controller.instance
                 );
             }
-            ensure_tire_grip(&mut physics, body_handle, &tire_pairs);
-            // Drive physics with the same Bullet/Rapier raycast vehicle model
-            // that the old working `main` tractor used. USD joints/colliders
-            // are kept for visuals/body collisions; tire traction/suspension is
-            // controller-owned, not raw cylinder-contact-owned.
-            let using_raycast_vehicle = apply_rapier_raycast_vehicle_controller(
-                &mut physics,
-                body_handle,
-                &tire_pairs,
-                &raycast_specs,
-                cmd,
-                steer_target_rad,
-                towed.0.get(&machine.id).copied().unwrap_or(0.0),
-            );
+            // Contact traction: the solid tyres carry the machine and the
+            // wheel motors are its engine and brake, capped at what the
+            // tyre can grip. Raycast: the legacy vehicle rides the chassis.
+            let using_raycast_vehicle = if contact {
+                set_wheel_colliders_sensor(&mut physics, body_handle, &tire_pairs, false);
+                let mass = runtime.machine_bodies.get(&machine.id).map(|bodies| {
+                    bodies
+                        .iter()
+                        .filter_map(|h| physics.bodies.get(*h))
+                        .map(|b| b.mass())
+                        .sum::<f64>()
+                });
+                cap_wheel_torque(&physics, body_handle, &mut wheel_targets, mass, wheels, wheel_radius_m);
+                roll_idle_wheels(&physics, body_handle, &mut wheel_targets, idle, forward_mps, wheel_radius_m);
+                false
+            } else {
+                apply_rapier_raycast_vehicle_controller(
+                    &mut physics,
+                    body_handle,
+                    &tire_pairs,
+                    &raycast_specs,
+                    cmd,
+                    steer_target_rad,
+                    towed.0.get(&machine.id).copied().unwrap_or(0.0),
+                )
+            };
             if using_raycast_vehicle {
                 // Raycast traction moves the chassis; the USD wheel rigid
                 // bodies are visual only. Therefore their spin must be derived
@@ -1425,7 +1469,7 @@ fn steering_target_radians(
     // allowed to move while stopped; at zero speed cmd_vel's yaw-rate field is
     // treated as a steering request against a nominal walking-speed reference
     // instead of forcing the wheels straight.
-    const STOPPED_STEERING_REFERENCE_SPEED_MPS: f32 = 2.4;
+    const STOPPED_STEERING_REFERENCE_SPEED_MPS: f32 = 0.8;
 
     if angular_rps.abs() < 1e-3 {
         return 0.0;
@@ -1471,15 +1515,361 @@ const WHEEL_VISUAL_MAX_TORQUE: f64 = 350.0;
 /// Steering position-motor gains + torque cap (N·m). Stiffer than the
 /// old values so the steered wheels hold their angle against the tyre
 /// scrub forces that now actually turn the vehicle.
-const STEER_STIFFNESS: f64 = 300.0;
-const STEER_DAMPING: f64 = 90.0;
-const STEER_MAX_TORQUE: f64 = 1200.0;
+const STEER_STIFFNESS: f64 = 50_000.0;
+const STEER_DAMPING: f64 = 4_000.0;
+const STEER_MAX_TORQUE: f64 = 100_000.0;
 /// Friction coefficient forced onto wheel colliders. Imported USD
 /// colliders default to 0.5 when the asset authors no physics material
 /// — far too slippery for a driven tyre. Applied with a `Max` combine
 /// rule so the *grippier* of (tyre, ground) wins, guaranteeing a high
 /// effective friction whatever the ground collider is authored at.
-const TIRE_FRICTION: f64 = 2.4;
+const TIRE_FRICTION: f64 = 1.1;
+/// Rounded tyre edge as a fraction of the radius: a sharp cylinder rim on
+/// the ground is what makes contacts twitch.
+const TIRE_EDGE_FRACTION: f64 = 0.05;
+/// Share of the grip limit the drive motor may use.
+const WHEEL_GRIP_USE: f64 = 0.9;
+/// Wheel speed error (rad/s) at which the contact drive motor gives its
+/// full, grip-capped torque.
+const WHEEL_FULL_TORQUE_ERROR_RAD_S: f64 = 0.3;
+
+/// Contact traction unless the controller, or `GEARBOX_TRACTION`, asks for
+/// the raycast vehicle.
+fn uses_contact_traction(controller: &ControllerSpec) -> bool {
+    static ENV: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let env = ENV.get_or_init(|| std::env::var("GEARBOX_TRACTION").ok());
+    controller.traction.as_deref().or(env.as_deref()) != Some("raycast")
+}
+
+/// Every 5 s, the joints of the machine named by `GEARBOX_JOINT_DUMP`.
+fn dump_joints_periodically(
+    time: Res<Time>,
+    mut next: Local<f64>,
+    runtime: Res<ControllerRuntimeState>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    physics: Res<crate::physics::PhysicsWorld>,
+) {
+    static MACHINE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(machine) = MACHINE.get_or_init(|| std::env::var("GEARBOX_JOINT_DUMP").ok()) else {
+        return;
+    };
+    if time.elapsed_secs_f64() < *next {
+        return;
+    }
+    *next = time.elapsed_secs_f64() + 5.0;
+    if let Some(bodies) = runtime.machine_bodies.get(machine) {
+        dump_machine_joints(&physics, bodies, &prims);
+        if let Some(wheels) = runtime.machine_wheels.get(machine) {
+            warn_low_colliders(&physics, machine, bodies, wheels, &prims);
+        }
+    }
+}
+
+/// Every impulse joint inside one machine with its locked axes and AngX
+/// motor, for `GEARBOX_JOINT_DUMP=<machine id>`.
+fn dump_machine_joints(
+    physics: &crate::physics::PhysicsWorld,
+    bodies: &[RigidBodyHandle],
+    prims: &Query<(Entity, &UsdPrimRef)>,
+) {
+    let name = |h: RigidBodyHandle| {
+        physics
+            .bodies
+            .get(h)
+            .and_then(|b| prims.get(Entity::from_bits(b.user_data as u64)).ok())
+            .map(|(_, p)| p.path.to_string())
+            .unwrap_or_default()
+    };
+    for (_, joint) in physics.impulse_joints.iter() {
+        if !bodies.contains(&joint.body1) || !bodies.contains(&joint.body2) {
+            continue;
+        }
+        info!(
+            "gearbox-joints: {} -> {} locked {:?} motor {:?} enabled {:?}",
+            name(joint.body1),
+            name(joint.body2),
+            joint.data.locked_axes,
+            joint.data.motor(JointAxis::AngX),
+            joint.data.is_enabled()
+        );
+    }
+    for handle in bodies.iter().filter(|h| name(**h).contains("wheel")) {
+        let Some(body) = physics.bodies.get(*handle) else {
+            continue;
+        };
+        for c in body.colliders().iter().filter_map(|c| physics.colliders.get(*c)) {
+            let aabb = c.compute_aabb();
+            info!(
+                "gearbox-joints: collider of {} {:?} sensor {} enabled {} groups {:?} friction {:.2} y {:.3}..{:.3}",
+                name(*handle),
+                c.shape().shape_type(),
+                c.is_sensor(),
+                c.is_enabled(),
+                c.collision_groups(),
+                c.friction(),
+                aabb.mins.y,
+                aabb.maxs.y
+            );
+        }
+    }
+}
+
+/// Share of a driven wheel's torque cap a passive wheel's idle motor gets.
+const WHEEL_IDLE_TORQUE_SHARE: f64 = 0.02;
+
+/// Passive wheels while driving: a light motor at ground speed, replacing
+/// the parking brake's. A loaded tyre rolls by friction anyway; an unloaded
+/// one (a three-axle machine rests on two) would stand still and look like
+/// it skids.
+fn roll_idle_wheels(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    targets: &mut Vec<JointVelocityTarget>,
+    idle: Vec<JointVelocityTarget>,
+    forward_mps: f64,
+    radius_fallback_m: f64,
+) {
+    let cap = targets
+        .iter()
+        .filter(|t| t.force_based)
+        .map(|t| t.max_torque)
+        .fold(0.0, f64::max)
+        * WHEEL_IDLE_TORQUE_SHARE;
+    for target in idle {
+        let radius = wheel_body_of(physics, chassis, target.pair)
+            .and_then(|wheel| body_max_collider_radius(physics, wheel))
+            .unwrap_or(radius_fallback_m);
+        targets.push(JointVelocityTarget {
+            velocity: forward_mps / radius,
+            damping: cap / WHEEL_FULL_TORQUE_ERROR_RAD_S,
+            max_torque: cap,
+            force_based: true,
+            ..target
+        });
+    }
+}
+
+/// Integral gain (1/s) of the wheel-speed trim.
+const SPEED_TRIM_GAIN: f64 = 1.5;
+/// A collider this close above the tyres' contact plane touches the ground.
+const LOW_COLLIDER_CLEARANCE_M: f64 = 0.03;
+
+/// The wheel motors lag their target by the solver's rolling resistance; an
+/// integral trim, run only near steady speed, holds the commanded speed.
+fn trimmed_wheel_speed(
+    runtime: &mut ControllerRuntimeState,
+    key: &ControllerKey,
+    cmd_mps: f64,
+    forward_mps: f64,
+    dt: f64,
+) -> f64 {
+    let trim = runtime.speed_trim.entry(key.clone()).or_insert(0.0);
+    if cmd_mps.abs() < 0.05 {
+        *trim = 0.0;
+        return cmd_mps;
+    }
+    let error = cmd_mps - forward_mps;
+    if error.abs() < 0.4 * cmd_mps.abs() {
+        let limit = 0.1 * cmd_mps.abs() + 0.05;
+        *trim = (*trim + error * dt * SPEED_TRIM_GAIN).clamp(-limit, limit);
+    }
+    cmd_mps + *trim
+}
+
+/// Name every non-wheel collider hanging near the tyres' contact plane: on
+/// contact traction it drags on the ground or props the machine up.
+fn warn_low_colliders(
+    physics: &crate::physics::PhysicsWorld,
+    machine: &str,
+    bodies: &[RigidBodyHandle],
+    wheels: &[RigidBodyHandle],
+    prims: &Query<(Entity, &UsdPrimRef)>,
+) {
+    let Some(ground) = wheels
+        .iter()
+        .filter_map(|h| {
+            let (_, _, radius) = body_tyre_geometry(physics, *h)?;
+            Some(physics.bodies.get(*h)?.translation().y - radius)
+        })
+        .reduce(f64::min)
+    else {
+        return;
+    };
+    for handle in bodies.iter().filter(|h| !wheels.contains(h)) {
+        let Some(body) = physics.bodies.get(*handle) else {
+            continue;
+        };
+        let low = body
+            .colliders()
+            .iter()
+            .filter_map(|c| physics.colliders.get(*c))
+            .filter(|c| !c.is_sensor())
+            .map(|c| c.compute_aabb().mins.y)
+            .reduce(f64::min);
+        if let Some(low) = low
+            && low < ground + LOW_COLLIDER_CLEARANCE_M
+        {
+            let path = prims
+                .get(Entity::from_bits(body.user_data as u64))
+                .map(|(_, p)| p.path.to_string())
+                .unwrap_or_default();
+            warn!(
+                "gearbox-control: {machine}: `{path}` sits {:.2} m above the tyre contact plane; it drags on the ground unless it is a parking stand",
+                low - ground
+            );
+        }
+    }
+}
+
+/// Cap every wheel motor at the grip its tyre has: `μ · N · r`, the load
+/// `N` the machine's weight spread over all its wheels. Released motors
+/// (no damping) stay released.
+fn cap_wheel_torque(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    targets: &mut [JointVelocityTarget],
+    machine_mass: Option<f64>,
+    wheels: usize,
+    radius_fallback_m: f64,
+) {
+    let Some(mass) = machine_mass else {
+        return;
+    };
+    let load = mass * 9.81 / wheels.max(1) as f64;
+    for target in targets.iter_mut().filter(|t| t.damping > 0.0) {
+        let radius = wheel_body_of(physics, chassis, target.pair)
+            .and_then(|wheel| body_max_collider_radius(physics, wheel))
+            .unwrap_or(radius_fallback_m);
+        target.max_torque = WHEEL_GRIP_USE * TIRE_FRICTION * load * radius;
+        target.damping = target.max_torque / WHEEL_FULL_TORQUE_ERROR_RAD_S;
+        target.force_based = true;
+    }
+}
+
+/// Once per machine: its bodies stop colliding with each other, and every
+/// wheel link gets a rounded, grippy tyre with CCD that carries load.
+fn prepare_machine_physics(
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    joints: Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: Query<&ChildOf>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
+) {
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let key = ControllerKey::new(scene_root, &machine.id, "physics");
+        if runtime.machines_prepared.contains(&key)
+            || !keys
+                .0
+                .values()
+                .any(|k| k.scene_root == scene_root && k.machine_id == machine.id)
+        {
+            continue;
+        }
+        let Some(root) = find_prim_entity(scene_root, &machine.prim_path, &prims, &parents) else {
+            continue;
+        };
+        let bodies: Vec<RigidBodyHandle> = physics
+            .entity_to_body
+            .iter()
+            .filter(|(e, _)| **e == root || is_descendant_of(**e, root, &parents))
+            .map(|(_, h)| *h)
+            .collect();
+        if bodies.is_empty() {
+            continue;
+        }
+        runtime.machines_prepared.insert(key);
+        for (i, a) in bodies.iter().enumerate() {
+            for b in &bodies[i + 1..] {
+                physics.filter_pair(*a, *b);
+            }
+        }
+        let physics = physics.as_mut();
+        let mut mass = 0.0;
+        for handle in &bodies {
+            if let Some(body) = physics.bodies.get_mut(*handle) {
+                body.recompute_mass_properties_from_colliders(&physics.colliders);
+                mass += body.mass();
+            }
+        }
+        runtime.machine_bodies.insert(machine.id.clone(), bodies.clone());
+
+        // Wheels: `wheel` links, plus the wheel side of every controller's
+        // wheel joints, so derived link trees count too.
+        let mut wheels: Vec<RigidBodyHandle> = machine
+            .links
+            .links
+            .iter()
+            .filter(|l| l.role == crate::links::LinkRole::Wheel)
+            .filter_map(|l| l.body_prim.as_deref())
+            .filter_map(|p| find_prim_entity(scene_root, p, &prims, &parents))
+            .filter_map(|e| physics.entity_to_body.get(&e).copied())
+            .collect();
+        let chassis = machine
+            .body
+            .as_deref()
+            .and_then(|p| find_prim_entity(scene_root, p, &prims, &parents))
+            .and_then(|e| physics.entity_to_body.get(&e).copied());
+        if let Some(chassis) = chassis {
+            for controller in &machine.controllers {
+                for pair in tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &*physics) {
+                    if let Some(wheel) = wheel_body_of(&*physics, chassis, pair)
+                        && !wheels.contains(&wheel)
+                    {
+                        wheels.push(wheel);
+                    }
+                }
+            }
+        }
+        let mut tyres = 0;
+        for &handle in &wheels {
+            let Some(body) = physics.bodies.get_mut(handle) else {
+                continue;
+            };
+            body.enable_ccd(true);
+            let colliders = body.colliders().to_vec();
+            for ch in colliders {
+                let Some(col) = physics.colliders.get_mut(ch) else {
+                    continue;
+                };
+                if let Some((half_height, radius)) =
+                    col.shape().as_cylinder().map(|c| (c.half_height, c.radius))
+                {
+                    let edge = TIRE_EDGE_FRACTION * radius;
+                    col.set_shape(rapier3d::geometry::SharedShape::round_cylinder(
+                        (half_height - edge).max(edge),
+                        radius - edge,
+                        edge,
+                    ));
+                }
+                if col.friction() < TIRE_FRICTION {
+                    col.set_friction(TIRE_FRICTION);
+                }
+                col.set_friction_combine_rule(CoefficientCombineRule::Max);
+                col.set_restitution(0.0);
+                tyres += 1;
+            }
+        }
+        warn_low_colliders(physics, &machine.id, &bodies, &wheels, &prims);
+        runtime.machine_wheels.insert(machine.id.clone(), wheels.clone());
+
+        info!(
+            "gearbox-control: {} physics: {} bodies, {:.0} kg, {} tyres rounded, self-collision off",
+            machine.id,
+            bodies.len(),
+            mass,
+            tyres
+        );
+    }
+}
 
 const RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL: f64 = 14_000.0;
 const RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL: f64 = 34_000.0;
@@ -1492,7 +1882,7 @@ const RAYCAST_SUSPENSION_REST_LENGTH: f64 = 0.22;
 
 /// Largest collider half-extent of a body — a wheel's tyre radius, a
 /// chassis's bounding half-size. `None` if the body has no collider.
-fn body_max_collider_radius(
+pub(crate) fn body_max_collider_radius(
     physics: &crate::physics::PhysicsWorld,
     body: RigidBodyHandle,
 ) -> Option<f64> {
@@ -1532,44 +1922,6 @@ fn wheel_body_of(
     }
 }
 
-/// Measure a wheel's rolling radius from its collider. Returns `None`
-/// when no usable collider is found, so callers can fall back.
-///
-/// The wheel-speed command is `linear_speed / radius`: a wrong radius
-/// makes the tyres spin at the wrong rate and slip against the ground.
-/// Condition every wheel collider so the tyres can actually hold the
-/// ground: grippy friction, and zero restitution so a hard contact load
-/// doesn't bounce the wheel (and hop the whole tractor). This applies to
-/// powered and passive tyres; passive front tyres still need grip to
-/// steer instead of sliding sideways. Idempotent.
-fn ensure_tire_grip(
-    physics: &mut crate::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
-) {
-    for pair in tire_pairs {
-        let Some(wheel) = wheel_body_of(physics, chassis, *pair) else {
-            continue;
-        };
-        let handles = physics
-            .bodies
-            .get(wheel)
-            .map(|b| b.colliders().to_vec())
-            .unwrap_or_default();
-        for ch in handles {
-            if let Some(col) = physics.colliders.get_mut(ch) {
-                if col.friction() < TIRE_FRICTION {
-                    col.set_friction(TIRE_FRICTION);
-                }
-                // "Stickiest wins" — the tyre's high friction holds
-                // regardless of what the ground collider is authored at.
-                col.set_friction_combine_rule(CoefficientCombineRule::Max);
-                col.set_restitution(0.0);
-            }
-        }
-    }
-}
-
 fn set_wheel_colliders_sensor(
     physics: &mut crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
@@ -1586,7 +1938,9 @@ fn set_wheel_colliders_sensor(
             .map(|b| b.colliders().to_vec())
             .unwrap_or_default();
         for ch in handles {
-            if let Some(col) = physics.colliders.get_mut(ch) {
+            if let Some(col) = physics.colliders.get_mut(ch)
+                && col.is_sensor() != sensor
+            {
                 col.set_sensor(sensor);
             }
         }
@@ -1715,7 +2069,8 @@ fn apply_rapier_raycast_vehicle_controller(
         &mut physics.colliders,
         filter,
     );
-    vehicle.update_vehicle(physics.integration_parameters.dt as f64, queries);
+    let frame_dt = physics.integration_parameters.dt * physics.pending_steps.max(1) as f64;
+    vehicle.update_vehicle(frame_dt, queries);
     log_raycast_wheels(&vehicle, current_speed, force_per_rear, mass_scale);
     true
 }
@@ -1731,6 +2086,8 @@ fn record_wheel_tracks(
     parents: Query<&ChildOf>,
     physics: Res<crate::physics::PhysicsWorld>,
     mut contacts: ResMut<crate::grass::WheelContacts>,
+    mut values: ResMut<crate::services::LinkValues>,
+    runtime: Res<ControllerRuntimeState>,
 ) {
     if !active.0 {
         return;
@@ -1753,20 +2110,42 @@ fn record_wheel_tracks(
                 let f = b.rotation() * Vector::new(0.0, -1.0, 0.0);
                 Vec2::new(f.x as f32, f.z as f32)
             });
+        let wheels = runtime.machine_wheels.get(&machine.id);
         for link in &machine.links.links {
-            if link.role != crate::links::LinkRole::Wheel {
-                continue;
-            }
             let Some(handle) = link.body_prim.as_deref().and_then(|p| body_of(scene_root, p))
             else {
                 continue;
             };
+            if link.role != crate::links::LinkRole::Wheel
+                && !wheels.is_some_and(|w| w.contains(&handle))
+            {
+                continue;
+            }
             let Some(body) = physics.bodies.get(handle) else {
                 continue;
             };
             let Some((axle_local, width, radius)) = body_tyre_geometry(&physics, handle) else {
                 continue;
             };
+            // Slip: tyre surface speed against ground speed, `link.<wheel>.slip`.
+            let parent_spin = link
+                .parent
+                .as_deref()
+                .and_then(|p| machine.links.get(p))
+                .and_then(|l| l.body_prim.as_deref())
+                .and_then(|p| body_of(scene_root, p))
+                .and_then(|h| physics.bodies.get(h))
+                .map(|b| b.angvel())
+                .unwrap_or(Vector::ZERO);
+            let axle = body.rotation() * axle_local;
+            let surface = (body.angvel() - parent_spin).dot(axle).abs() * radius;
+            let ground = (body.linvel() - axle * body.linvel().dot(axle)).length();
+            let slip = if surface.max(ground) < 0.05 {
+                0.0
+            } else {
+                (surface - ground) / ground.max(0.1)
+            };
+            values.set(&machine.id, &link.name, "slip", (slip * 1000.0).round() / 1000.0);
             let p = body.translation();
             let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
             if p.y as f32 - radius as f32 > ground + WHEEL_TRACK_CONTACT_SLACK_M {
@@ -2181,6 +2560,8 @@ struct JointVelocityTarget {
     velocity: f64,
     damping: f64,
     max_torque: f64,
+    /// Damping in N·m·s/rad instead of scaled by the joint's inertia.
+    force_based: bool,
 }
 
 fn drive_wheel_velocity_target(
@@ -2192,6 +2573,7 @@ fn drive_wheel_velocity_target(
         velocity,
         damping: WHEEL_DRIVE_DAMPING,
         max_torque: WHEEL_DRIVE_MAX_TORQUE,
+        force_based: false,
     }
 }
 
@@ -2204,6 +2586,7 @@ fn visual_wheel_velocity_target(
         velocity,
         damping: WHEEL_VISUAL_DAMPING,
         max_torque: WHEEL_VISUAL_MAX_TORQUE,
+        force_based: false,
     }
 }
 
@@ -2422,7 +2805,8 @@ fn turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64) -> f64
     if linear_mps.abs() < 0.05 || yaw_rate_rps.abs() < 1e-5 {
         return 1.0;
     }
-    ((linear_mps + yaw_rate_rps * lateral_x_m) / linear_mps).clamp(0.25, 1.75)
+    // Body X points left, so a left turn (positive yaw) slows the left side.
+    ((linear_mps - yaw_rate_rps * lateral_x_m) / linear_mps).clamp(0.25, 1.75)
 }
 
 const VISUAL_TURN_SPEED_BOOST: f64 = 1.45;
@@ -2442,12 +2826,20 @@ fn wheel_lateral_offset(
     chassis: RigidBodyHandle,
     pair: (RigidBodyHandle, RigidBodyHandle),
 ) -> Option<f64> {
+    wheel_local_center(physics, chassis, pair).map(|c| c.x)
+}
+
+/// A wheel's centre in the chassis body frame (X left, Y back, Z up).
+fn wheel_local_center(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    pair: (RigidBodyHandle, RigidBodyHandle),
+) -> Option<Vector> {
     let chassis_body = physics.bodies.get(chassis)?;
     let wheel = wheel_body_of(physics, chassis, pair)?;
     let wheel_body = physics.bodies.get(wheel)?;
     let world_offset = wheel_body.translation() - chassis_body.translation();
-    let local_center = chassis_body.rotation().inverse() * world_offset;
-    Some(local_center.x)
+    Some(chassis_body.rotation().inverse() * world_offset)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2524,6 +2916,16 @@ fn wheel_joint_targets(
     // Apply a simple differential: while turning, each wheel target uses the
     // forward speed at its lateral offset from the chassis center. The outside
     // side therefore spins faster and the inside side slower.
+    // An Ackermann machine turns about a point on its rear axle line: a
+    // wheel ahead of that line runs the longer arc.
+    let rear_y = (geometry == "ackermann").then(|| {
+        tire_joint_pairs(scene_root, controller, machine, joints, parents, physics)
+            .into_iter()
+            .filter_map(|p| wheel_local_center(physics, chassis, p))
+            .map(|c| c.y)
+            .fold(f64::MIN, f64::max)
+    });
+    let yaw_rate = steering_yaw_rate_for_differential(linear_mps, center_steer_rad, wheel_base_m);
     let target = |path: &str, pair: (RigidBodyHandle, RigidBodyHandle)| {
         let radius = wheel_body_of(physics, chassis, pair)
             .and_then(|wheel| body_max_collider_radius(physics, wheel))
@@ -2535,12 +2937,11 @@ fn wheel_joint_targets(
                 Some(SideHint::Right) => -traction_track_width_m as f64 * 0.5,
                 None => 0.0,
             });
-        let ground_speed = linear_mps
-            * turn_speed_ratio(
-                linear_mps,
-                steering_yaw_rate_for_differential(linear_mps, center_steer_rad, wheel_base_m),
-                lateral_x,
-            );
+        let mut ground_speed = linear_mps * turn_speed_ratio(linear_mps, yaw_rate, lateral_x);
+        if let (Some(rear_y), Some(center)) = (rear_y, wheel_local_center(physics, chassis, pair)) {
+            let ahead = (rear_y - center.y).max(0.0);
+            ground_speed = ground_speed.signum() * ground_speed.hypot(yaw_rate * ahead);
+        }
         drive_wheel_velocity_target(pair, ground_speed / radius)
     };
 
@@ -2772,11 +3173,9 @@ fn visual_wheel_side_ground_speed(
 }
 
 fn visual_side_turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64) -> f64 {
-    // Rapier's chassis angular velocity sign is opposite the USD/Gearbox
-    // visual side convention used for named left/right wheels. The physics
-    // drive path keeps the controller convention, but visual spin needs this
-    // sign flip so the outside wheels, not the inside wheels, read faster.
-    visual_turn_speed_ratio(linear_mps, -yaw_rate_rps, lateral_x_m)
+    // `turn_speed_ratio` already slows the +X (left) side in a left turn,
+    // so the observed yaw goes in unchanged.
+    visual_turn_speed_ratio(linear_mps, yaw_rate_rps, lateral_x_m)
 }
 
 fn visual_spin_lateral_x(side: Option<SideHint>, measured_lateral_x: f64) -> f64 {
@@ -2822,11 +3221,7 @@ fn apply_articulation_or_impulse_joint_motors(
         if let Some(handle) = multibody_joint_handle(physics, target.pair) {
             if let Some((multibody, link_id)) = physics.multibody_joints.get_mut(handle) {
                 if let Some(link) = multibody.link_mut(link_id) {
-                    link.joint
-                        .data
-                        .set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
-                        .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
-                        .set_motor_max_force(JointAxis::AngX, target.max_torque);
+                    set_wheel_motor(&mut link.joint.data, target);
                     applied.drive = true;
                 }
             }
@@ -2837,16 +3232,7 @@ fn apply_articulation_or_impulse_joint_motors(
         if let Some(handle) = multibody_joint_handle(physics, target.pair) {
             if let Some((multibody, link_id)) = physics.multibody_joints.get_mut(handle) {
                 if let Some(link) = multibody.link_mut(link_id) {
-                    link.joint
-                        .data
-                        .set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
-                        .set_motor_position(
-                            JointAxis::AngX,
-                            target.position,
-                            STEER_STIFFNESS,
-                            STEER_DAMPING,
-                        )
-                        .set_motor_max_force(JointAxis::AngX, STEER_MAX_TORQUE);
+                    set_steer_motor(&mut link.joint.data, target.position);
                     applied.steer = true;
                 }
             }
@@ -2858,11 +3244,7 @@ fn apply_articulation_or_impulse_joint_motors(
             .iter()
             .find(|target| rigid_body_pair_matches(target.pair, joint.body1, joint.body2))
         {
-            joint
-                .data
-                .set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
-                .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
-                .set_motor_max_force(JointAxis::AngX, target.max_torque);
+            set_wheel_motor(&mut joint.data, target);
             applied.drive = true;
         }
         if let Some(target) = steer_targets
@@ -2874,20 +3256,43 @@ fn apply_articulation_or_impulse_joint_motors(
             // baked into the joint local axis when usd_rapier builds the
             // revolute joint. Driving AngZ fights a locked axis and can
             // explode/flip the vehicle.
-            joint
-                .data
-                .set_motor_model(JointAxis::AngX, MotorModel::AccelerationBased)
-                .set_motor_position(
-                    JointAxis::AngX,
-                    target.position,
-                    STEER_STIFFNESS,
-                    STEER_DAMPING,
-                )
-                .set_motor_max_force(JointAxis::AngX, STEER_MAX_TORQUE);
+            set_steer_motor(&mut joint.data, target.position);
             applied.steer = true;
         }
     }
     applied
+}
+
+/// Write a wheel velocity motor. Acceleration-based gains scale with the
+/// joint's inertia, which is tiny on a light steering knuckle.
+fn set_wheel_motor(data: &mut rapier3d::prelude::GenericJoint, target: &JointVelocityTarget) {
+    let model = if target.force_based {
+        MotorModel::ForceBased
+    } else {
+        MotorModel::AccelerationBased
+    };
+    data.set_motor_model(JointAxis::AngX, model)
+        .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
+        .set_motor_max_force(JointAxis::AngX, target.max_torque);
+}
+
+/// Drive a steer joint to `position` with its authored USD drive, else with
+/// force-based gains like the ones the assets author.
+fn set_steer_motor(data: &mut rapier3d::prelude::GenericJoint, position: f64) {
+    let authored = data
+        .motor(JointAxis::AngX)
+        .filter(|m| matches!(m.model, MotorModel::ForceBased) && m.stiffness > 0.0)
+        .map(|m| (m.stiffness, m.damping));
+    match authored {
+        Some((stiffness, damping)) => {
+            data.set_motor_position(JointAxis::AngX, position, stiffness, damping);
+        }
+        None => {
+            data.set_motor_model(JointAxis::AngX, MotorModel::ForceBased)
+                .set_motor_position(JointAxis::AngX, position, STEER_STIFFNESS, STEER_DAMPING)
+                .set_motor_max_force(JointAxis::AngX, STEER_MAX_TORQUE);
+        }
+    }
 }
 
 fn multibody_joint_handle(
@@ -3079,6 +3484,7 @@ fn discover_controllers(
                 wheel_radius: read_float(stage, prim, &(prefix.clone() + "wheelRadius")),
                 max_steer_deg: read_float(stage, prim, &(prefix.clone() + "maxSteerDeg")),
                 steering_geometry: read_token(stage, prim, &(prefix.clone() + "steeringGeometry")),
+                traction: read_token(stage, prim, &(prefix.clone() + "traction")),
                 front_steer_multiplier: read_float(
                     stage,
                     prim,
@@ -3630,14 +4036,13 @@ def Xform "Leatherback" (
 
     #[test]
     fn ackermann_differential_speeds_outside_wheels_up() {
-        // Gearbox heading convention: positive yaw turns toward +X. In the
-        // authored machines, named left wheels sit at positive local X and
-        // named right wheels at negative local X.
-        assert!(turn_speed_ratio(2.0, 0.5, 1.4) > 1.0);
-        assert!(turn_speed_ratio(2.0, 0.5, -1.4) < 1.0);
+        // Positive yaw turns toward +X, the left, where the named left wheels
+        // sit: they run the inside arc, the right wheels (-X) the outside.
+        assert!(turn_speed_ratio(2.0, 0.5, 1.4) < 1.0);
+        assert!(turn_speed_ratio(2.0, 0.5, -1.4) > 1.0);
 
-        assert!(turn_speed_ratio(2.0, -0.5, -1.4) > 1.0);
-        assert!(turn_speed_ratio(2.0, -0.5, 1.4) < 1.0);
+        assert!(turn_speed_ratio(2.0, -0.5, -1.4) < 1.0);
+        assert!(turn_speed_ratio(2.0, -0.5, 1.4) > 1.0);
     }
 
     #[test]
@@ -3650,8 +4055,8 @@ def Xform "Leatherback" (
 
     #[test]
     fn visual_turn_ratio_makes_outside_wheels_read_faster() {
-        assert!(visual_turn_speed_ratio(2.0, 0.5, 1.4) > turn_speed_ratio(2.0, 0.5, 1.4));
-        assert!(visual_turn_speed_ratio(2.0, 0.5, -1.4) < turn_speed_ratio(2.0, 0.5, -1.4));
+        assert!(visual_turn_speed_ratio(2.0, 0.5, -1.4) > turn_speed_ratio(2.0, 0.5, -1.4));
+        assert!(visual_turn_speed_ratio(2.0, 0.5, 1.4) < turn_speed_ratio(2.0, 0.5, 1.4));
     }
 
     #[test]
@@ -3693,6 +4098,7 @@ def Xform "Leatherback" (
                 velocity: 7.5,
                 damping: WHEEL_DRIVE_DAMPING,
                 max_torque: WHEEL_DRIVE_MAX_TORQUE,
+                force_based: false,
             }],
             &[JointPositionTarget {
                 pair: (steer, steer_link),
@@ -3752,6 +4158,7 @@ def Xform "Leatherback" (
                 velocity: 3.5,
                 damping: WHEEL_DRIVE_DAMPING,
                 max_torque: WHEEL_DRIVE_MAX_TORQUE,
+                force_based: false,
             }],
             &[JointPositionTarget {
                 pair: (steer, steer_link),
