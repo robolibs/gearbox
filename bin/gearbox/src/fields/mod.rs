@@ -46,6 +46,7 @@ impl Plugin for FieldsPlugin {
                 PostUpdate,
                 runtime::stream_vegetation
                     .after(bevy::transform::TransformSystems::Propagate)
+                    .after(bevy::camera::visibility::VisibilitySystems::UpdateFrusta)
                     .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),
             );
     }

@@ -9,7 +9,7 @@
 }
 
 #import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
-#import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::regrowth
+#import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
 
@@ -256,6 +256,26 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
     let straw_color = mix(vec3<f32>(0.43, 0.28, 0.095), vec3<f32>(0.67, 0.47, 0.20), litter);
     let broken_soil = c.rgb * mix(0.72, 1.12, clumps);
     c = vec4<f32>(mix(broken_soil, straw_color, clamp(chopped * 0.75 + straw * 0.65 + mat * 0.40, 0.0, 0.9)), c.a);
+    // Drill rows of cut stubs, a pale top per plant and soil between; rows
+    // settle to their average once one spans only a few pixels.
+    let row_y = world_xz.y - row_drift(world_xz);
+    let row_index = floor(row_y / 0.125);
+    let plant_cell = floor(world_xz.x / 0.05);
+    let row_d = abs(row_y - (row_index + 0.5) * 0.125 - row_wobble(row_index, world_xz.x)
+        - plant_jog(row_index, plant_cell));
+    let plant_x = (plant_cell + 0.5 + (hash21(vec2<f32>(plant_cell, row_index)) - 0.5) * 0.6) * 0.05;
+    let gap = step(0.12, hash21(vec2<f32>(plant_cell + 0.5, row_index * 1.7)));
+    let stubs = (1.0 - smoothstep(0.012, 0.03 + footprint, row_d))
+        * mix(0.55, 1.0, noise(vec2<f32>(world_xz.x * 1.5, row_index * 3.1)));
+    let dots = stubs * gap * (1.0 - smoothstep(0.008, 0.016 + footprint, abs(world_xz.x - plant_x)));
+    let resolved_rows = 1.0 - smoothstep(0.03, 0.08, footprint);
+    let rows = mix(0.35, stubs, resolved_rows);
+    let tops = mix(0.12, dots, resolved_rows);
+    c = vec4<f32>(mix(c.rgb * mix(0.85, 1.0, rows), vec3<f32>(0.50, 0.38, 0.17), rows * 0.45), 1.0);
+    c = vec4<f32>(mix(c.rgb, vec3<f32>(0.78, 0.64, 0.34), tops * 0.5), 1.0);
+    // Alternate combine passes lean their stubble opposite ways.
+    let cut_pass = floor((world_xz.y + 2.0 * sin(world_xz.x * 0.03)) / 4.0);
+    c = vec4<f32>(c.rgb * select(0.94, 1.05, fract(cut_pass * 0.5) < 0.25), 1.0);
     // Regrowth patches: olive-green cover over the straw.
     let green_luma = saturate(dot(c.rgb, vec3<f32>(0.30, 0.59, 0.11)));
     let regrowth_color = vec3<f32>(0.20, 0.29, 0.075) * (0.75 + green_luma * 0.6) * mix(0.9, 1.1, litter);

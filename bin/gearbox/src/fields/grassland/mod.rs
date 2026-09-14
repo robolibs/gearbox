@@ -56,6 +56,8 @@ impl Plugin for GrasslandPlugin {
             .filter(|value| value.is_finite() && *value >= 0.0)
             .unwrap_or(6000.0);
         let share = density / 6000.0;
+        // Near and mid meshes fold two blades from each root.
+        let blades = density / 2.0;
         app.world_mut()
             .resource_mut::<FieldProfiles>()
             .register(FieldProfile {
@@ -67,23 +69,46 @@ impl Plugin for GrasslandPlugin {
                     footprint_length: 0.25,
                 },
                 layers: vec![
+                    // One blade population at three levels of detail.
                     VegetationLayer {
                         shader,
-                        template: base_template,
-                        density,
-                        fade_start: 4.0,
-                        fade_end: 32.0,
+                        template: got_near,
+                        density: blades,
+                        fade_start: 8.0,
+                        fade_end: 128.0,
                         inverse_square_thinning: true,
                         albedo: None,
+                        lod_band: GOT_NEAR_BAND,
+                    },
+                    VegetationLayer {
+                        shader,
+                        template: got_mid,
+                        density: blades,
+                        fade_start: 8.0,
+                        fade_end: 128.0,
+                        inverse_square_thinning: true,
+                        albedo: None,
+                        lod_band: GOT_MID_BAND,
+                    },
+                    VegetationLayer {
+                        shader,
+                        template: got_far,
+                        density: blades,
+                        fade_start: 8.0,
+                        fade_end: 128.0,
+                        inverse_square_thinning: true,
+                        albedo: None,
+                        lod_band: GOT_FAR_BAND,
                     },
                     VegetationLayer {
                         shader,
                         template: meadow_detail_template,
                         density: if density > 0.0 { 80.0 } else { 0.0 },
-                        fade_start: 8.0,
-                        fade_end: 24.0,
-                        inverse_square_thinning: false,
+                        fade_start: 32.0,
+                        fade_end: 144.0,
+                        inverse_square_thinning: true,
                         albedo: None,
+                        lod_band: [0.0, f32::MAX],
                     },
                     VegetationLayer {
                         shader,
@@ -93,11 +118,12 @@ impl Plugin for GrasslandPlugin {
                         fade_end: super::canopy::FADE_END_M,
                         inverse_square_thinning: true,
                         albedo: None,
+                        lod_band: [0.0, f32::MAX],
                     },
-                    super::clumps::bermuda(share * 120.0, 26.0),
-                    super::clumps::meadow_tufts(share * 50.0, 24.0),
-                    super::clumps::sorrel(share * 30.0, 20.0),
-                    super::clumps::celandine(share * 1.0, 22.0),
+                    super::clumps::bermuda(share * 120.0, 40.0),
+                    super::clumps::meadow_tufts(share * 50.0, 36.0),
+                    super::clumps::sorrel(share * 30.0, 32.0),
+                    super::clumps::celandine(share * 1.0, 40.0),
                 ],
                 ground: create_ground,
             });
@@ -145,8 +171,54 @@ fn create_ground(
     Arc::new(MaterialSurface(material))
 }
 
-fn base_template() -> Mesh {
-    blade_template(1)
+/// Distance bands of the three blade meshes (metres from the camera).
+const GOT_NEAR_BAND: [f32; 2] = [0.0, 8.0];
+const GOT_MID_BAND: [f32; 2] = [8.0, 32.0];
+const GOT_FAR_BAND: [f32; 2] = [32.0, 1.0e9];
+
+/// A blade mesh of one detail level: `blades` strips of `segments` from one
+/// root (normal.x numbers the strip, so a short blade folds into twins);
+/// uv carries the distance band it draws in, and the same roots swap meshes
+/// across the bands.
+fn got_template(segments: u32, blades: u32, band: [f32; 2]) -> Mesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+    for blade in 0..blades {
+        let start = positions.len() as u32;
+        for k in 0..=segments {
+            let t = k as f32 / segments as f32;
+            let sides: &[f32] = if k == segments { &[0.0] } else { &[-1.0, 1.0] };
+            for side in sides {
+                positions.push([*side, t, 0.0]);
+                normals.push([blade as f32, 1.0, 0.0]);
+            }
+        }
+        for k in 0..segments.saturating_sub(1) {
+            let l = start + k * 2;
+            indices.extend_from_slice(&[l, l + 2, l + 1, l + 1, l + 2, l + 3]);
+        }
+        let last = start + (segments - 1) * 2;
+        indices.extend_from_slice(&[last, last + 2, last + 1]);
+    }
+    let count = positions.len();
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![band; count])
+        .with_inserted_indices(Indices::U32(indices))
+}
+
+fn got_near() -> Mesh {
+    got_template(4, 2, GOT_NEAR_BAND)
+}
+
+fn got_mid() -> Mesh {
+    got_template(2, 2, GOT_MID_BAND)
+}
+
+fn got_far() -> Mesh {
+    got_template(1, 1, GOT_FAR_BAND)
 }
 
 fn blade_template(segments: u32) -> Mesh {

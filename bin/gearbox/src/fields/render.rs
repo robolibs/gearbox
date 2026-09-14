@@ -36,6 +36,8 @@ use std::ops::Range;
 #[derive(Component, Clone)]
 pub struct VegetationChunk {
     pub corner: Vec2,
+    /// Chunk side in metres.
+    pub size: f32,
     pub instances: u32,
     pub capacity: f32,
     pub field_id: Entity,
@@ -155,10 +157,7 @@ fn queue_vegetation(
             continue;
         };
         for (entity, main_entity, draw) in &chunks {
-            let Some(field) = fields.0.get(&draw.field_id) else {
-                continue;
-            };
-            if draw.instances == 0 {
+            if !fields.0.contains_key(&draw.field_id) || draw.instances == 0 {
                 continue;
             }
             let Some(mesh) = meshes.get(draw.mesh.id()) else {
@@ -185,7 +184,7 @@ fn queue_vegetation(
                 }
             };
 
-            let half = field.params.chunk_size * 0.5;
+            let half = draw.size * 0.5;
             let mesh_center = Vec3::new(draw.corner.x + half, 0.0, draw.corner.y + half);
             phase.add_retained(Transparent3d {
                 sorting_info: TransparentSortingInfo3d::Sorted {
@@ -223,6 +222,7 @@ struct VegetationOffset(u32);
 fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
     VegetationParams {
         corner: draw.corner,
+        chunk_size: draw.size,
         blades_per_chunk: draw.capacity,
         fade_start: draw.fade_start,
         fade_end: draw.fade_end,
@@ -235,7 +235,7 @@ fn chunk_digest(draw: &VegetationChunk) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut digest = std::hash::DefaultHasher::new();
     (draw.field_id, draw.inverse_square_thinning).hash(&mut digest);
-    for value in [draw.corner.x, draw.corner.y, draw.capacity, draw.fade_start, draw.fade_end] {
+    for value in [draw.corner.x, draw.corner.y, draw.size, draw.capacity, draw.fade_start, draw.fade_end] {
         value.to_bits().hash(&mut digest);
     }
     digest.finish()

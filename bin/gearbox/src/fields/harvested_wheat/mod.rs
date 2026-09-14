@@ -174,6 +174,8 @@ impl Plugin for HarvestedWheatPlugin {
             .filter(|value| value.is_finite() && *value >= 0.0)
             .unwrap_or(6000.0);
         let share = density / 6000.0;
+        // Stalk roots stand in drill rows and fold into twin stalks.
+        let stalks = density * 0.375;
         app.world_mut()
             .resource_mut::<FieldProfiles>()
             .register(FieldProfile {
@@ -184,22 +186,52 @@ impl Plugin for HarvestedWheatPlugin {
                     darkening: 0.44,
                     footprint_length: 0.30,
                 },
+                // Stalks at three levels of detail, one root population.
                 layers: vec![VegetationLayer {
                     shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
-                    template: stalk_template,
-                    density,
-                    fade_start: 4.0,
+                    template: stalk_near,
+                    density: stalks,
+                    fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
                     albedo: None,
+                    lod_band: STALK_NEAR_BAND,
+                }, VegetationLayer {
+                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    template: stalk_mid,
+                    density: stalks,
+                    fade_start: 5.0,
+                    fade_end: 32.0,
+                    inverse_square_thinning: true,
+                    albedo: None,
+                    lod_band: STALK_MID_BAND,
+                }, VegetationLayer {
+                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    template: stalk_far,
+                    density: stalks,
+                    fade_start: 5.0,
+                    fade_end: 32.0,
+                    inverse_square_thinning: true,
+                    albedo: None,
+                    lod_band: STALK_FAR_BAND,
+                }, VegetationLayer {
+                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    template: straw_template,
+                    density: if density > 0.0 { 500.0 } else { 0.0 },
+                    fade_start: 8.0,
+                    fade_end: 48.0,
+                    inverse_square_thinning: true,
+                    albedo: None,
+                    lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
                     shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: leaf_template,
                     density: if density > 0.0 { 60.0 } else { 0.0 },
-                    fade_start: 24.0,
-                    fade_end: 96.0,
+                    fade_start: 16.0,
+                    fade_end: 80.0,
                     inverse_square_thinning: true,
                     albedo: None,
+                    lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
                     shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: super::canopy::template,
@@ -208,8 +240,9 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_end: super::canopy::FADE_END_M,
                     inverse_square_thinning: true,
                     albedo: None,
-                }, super::clumps::sorrel(share * 15.0, 20.0),
-                super::clumps::flat_weeds(share * 0.25, 18.0)],
+                    lod_band: [0.0, f32::MAX],
+                }, super::clumps::sorrel(share * 15.0, 32.0),
+                super::clumps::flat_weeds(share * 0.25, 30.0)],
                 ground: create_ground,
             });
     }
@@ -290,24 +323,64 @@ fn leaf_template() -> Mesh {
     .with_inserted_indices(Indices::U32(indices))
 }
 
-/// Two-segment stalk; the middle row is the node it kinks at.
-fn stalk_template() -> Mesh {
+/// A straw piece lying on the stubble, what a cut field shows from above;
+// position.z = 0.25 routes it to the shader's lying-straw path.
+fn straw_template() -> Mesh {
     Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     )
     .with_inserted_attribute(
         Mesh::ATTRIBUTE_POSITION,
-        vec![
-            [-1.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [-1.0, 0.5, 0.0],
-            [1.0, 0.5, 0.0],
-            [-1.0, 1.0, 0.0],
-            [1.0, 1.0, 0.0],
-        ],
+        vec![[-1.0, 0.0, 0.25], [1.0, 0.0, 0.25], [-1.0, 1.0, 0.25], [1.0, 1.0, 0.25]],
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 6])
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; 6])
-    .with_inserted_indices(Indices::U32(vec![0, 2, 1, 1, 2, 3, 2, 4, 3, 3, 4, 5]))
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 4])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; 4])
+    .with_inserted_indices(Indices::U32(vec![0, 2, 1, 1, 2, 3]))
+}
+
+/// Distance bands of the three stalk meshes (metres from the camera).
+const STALK_NEAR_BAND: [f32; 2] = [0.0, 8.0];
+const STALK_MID_BAND: [f32; 2] = [8.0, 20.0];
+const STALK_FAR_BAND: [f32; 2] = [20.0, 1.0e9];
+
+/// A stalk mesh of one detail level: `strips` flat-cut stalks of `segments`
+/// from one root (normal.x numbers the strip, so twins fold from a root; a
+/// middle row is the node it kinks at); uv carries its distance band.
+fn stalk_lod(segments: u32, strips: u32, band: [f32; 2]) -> Mesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+    for strip in 0..strips {
+        let start = positions.len() as u32;
+        for k in 0..=segments {
+            let t = k as f32 / segments as f32;
+            for side in [-1.0, 1.0] {
+                positions.push([side, t, 0.0]);
+                normals.push([strip as f32, 1.0, 0.0]);
+            }
+        }
+        for k in 0..segments {
+            let l = start + k * 2;
+            indices.extend_from_slice(&[l, l + 2, l + 1, l + 1, l + 2, l + 3]);
+        }
+    }
+    let count = positions.len();
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![band; count])
+        .with_inserted_indices(Indices::U32(indices))
+}
+
+fn stalk_near() -> Mesh {
+    stalk_lod(2, 2, STALK_NEAR_BAND)
+}
+
+fn stalk_mid() -> Mesh {
+    stalk_lod(1, 2, STALK_MID_BAND)
+}
+
+fn stalk_far() -> Mesh {
+    stalk_lod(1, 1, STALK_FAR_BAND)
 }

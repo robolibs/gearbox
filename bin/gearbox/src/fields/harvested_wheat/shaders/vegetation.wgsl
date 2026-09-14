@@ -9,7 +9,7 @@
 #import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
 #import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
-#import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::regrowth
+#import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -173,10 +173,240 @@ fn stubble_detail(vertex: Vertex) -> VertexOutput {
     return out;
 }
 
+const ROW_M: f32 = 0.125;
+const PLANT_M: f32 = 0.05;
+const CLUMP_CELL_M: f32 = 0.6;
+const LOD_JITTER_M: f32 = 1.5;
+
+struct Clump {
+    centre: vec2<f32>,
+    id: u32,
+};
+
+// Nearest Voronoi clump centre: patches of the field share height and tone.
+fn clump_of(p: vec2<f32>) -> Clump {
+    let cell = vec2<i32>(floor(p / CLUMP_CELL_M));
+    var best = Clump(p, 0u);
+    var best_d = 1e9;
+    for (var dz = -1; dz <= 1; dz = dz + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let c = cell + vec2<i32>(dx, dz);
+            let h = pcg(bitcast<u32>(c.x) * 73856093u ^ bitcast<u32>(c.y) * 19349663u ^ 0x7E57A1Bu);
+            let centre = (vec2<f32>(c) + vec2<f32>(rand(h, 1u), rand(h, 2u))) * CLUMP_CELL_M;
+            let d = dot(p - centre, p - centre);
+            if (d < best_d) {
+                best_d = d;
+                best = Clump(centre, h);
+            }
+        }
+    }
+    return best;
+}
+
+// Low-discrepancy (R2) placement: any prefix of a chunk's instances covers it
+// evenly, so thinning by rank never opens holes.
+fn r2(index: u32, seed: u32) -> vec2<f32> {
+    let x = index * 3242174889u + seed;
+    let y = index * 2447445414u + pcg(seed);
+    return vec2<f32>(f32(x >> 8u), f32(y >> 8u)) / 16777216.0;
+}
+
+fn ease_out(x: f32, power: f32) -> f32 {
+    return 1.0 - pow(1.0 - x, power);
+}
+
+// A cut stalk after the Ghost of Tsushima grass, without the wind: stalks
+// stand in drill rows along the harvest direction, tillered into plants and
+// folded into twins, thickened along the screen when edge-on, with rounded
+// waxy shading from a shaded base to a pale top. vertex.uv is the distance
+// band of this detail level.
+fn got_stalk(vertex: Vertex) -> VertexOutput {
+    let chunk_seed = pcg(bitcast<u32>(i32(field.corner.x)) * 73856093u
+        ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
+    let id = pcg(vertex.instance_index ^ chunk_seed);
+    let spot = field.corner + r2(vertex.instance_index, chunk_seed) * field.chunk_size;
+    // Drill rows run along x; along each row the stalks gather into plants.
+    let drift = row_drift(spot);
+    let row = floor((spot.y - drift) / ROW_M);
+    let row_hash = pcg(bitcast<u32>(i32(row)) ^ 0x51ED27u);
+    let wobble = drift + row_wobble(row, spot.x);
+    let plant = floor(spot.x / PLANT_M);
+    let plant_id = pcg(bitcast<u32>(i32(plant)) * 2654435761u ^ row_hash);
+    let plant_centre = vec2<f32>((plant + 0.5 + (rand(plant_id, 1u) - 0.5) * 0.6) * PLANT_M,
+        (row + 0.5) * ROW_M + wobble + plant_jog(row, plant));
+    let twin = vertex.normal.x > 0.5;
+    let own_yaw = rand(id, 4u) * 6.2831853 + select(0.0, mix(0.6, 1.4, rand(id, 30u)), twin);
+    var base_xz = vec2<f32>(mix(spot.x, plant_centre.x, 0.7),
+        plant_centre.y + (rand(id, 2u) - 0.5) * 0.02);
+    if (twin) {
+        base_xz += vec2<f32>(cos(own_yaw), sin(own_yaw)) * mix(0.006, 0.015, rand(id, 31u));
+    }
+    let clump = clump_of(base_xz);
+    let sampled = sample_field(base_xz);
+    let root = vec3<f32>(base_xz.x, sampled.x, base_xz.y);
+    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
+    let distance = length(root - view.world_position);
+
+    // Density fades by rank; each stalk swaps detail level at a jittered
+    // band edge; stalks under ~1.2 px wide are widened and thinned alike.
+    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
+    let blade_end = blade_fade_end(rank);
+    let coverage = 1.0 - smoothstep(max(field.fade_start, blade_end - BLADE_FADE_M), blade_end, distance);
+    let jitter = (rand(id, 23u) - 0.5) * 2.0 * LOD_JITTER_M;
+    let in_band = (vertex.uv.x <= 0.0 || distance >= vertex.uv.x + jitter)
+        && distance < vertex.uv.y + jitter;
+    let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
+    let widen = max(1.0, 1.2 * pixel_m / BLADE_MAX_WIDTH);
+    let alive = select(0.0, coverage, in_band && ground_normal.y >= DIRT_SLOPE_NORMAL_Y
+        && within_field(base_xz) && rand(id, 19u) * widen < 1.0);
+
+    let height = mix(BLADE_MIN_HEIGHT, BLADE_MAX_HEIGHT, rand(id, 6u))
+        * mix(0.8, 1.2, rand(plant_id, 3u)) * select(1.0, 0.0, rand(plant_id, 7u) < 0.12) * mix(0.85, 1.15, rand(clump.id, 3u))
+        * select(1.0, mix(0.8, 0.95, rand(id, 32u)), twin) * alive;
+    let width = mix(BLADE_MIN_WIDTH, BLADE_MAX_WIDTH, rand(id, 7u)) * widen * alive;
+
+    // Stalks fan out from the plant centre; the header snapped some over,
+    // mostly along its direction of travel.
+    let fan = base_xz - plant_centre + vec2<f32>(cos(own_yaw), sin(own_yaw)) * 1e-3;
+    let lean_xz = normalize(fan);
+    let lean = vec3<f32>(lean_xz.x, 0.0, lean_xz.y) * mix(0.05, 0.3, rand(id, 8u));
+    let pressed = sample_trample(base_xz);
+    let flat = clamp(pressed.x, 0.0, 1.0);
+    let roll = vec3<f32>(pressed.y, 0.0, pressed.z);
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let t = vertex.position.y;
+    let side = vertex.position.x;
+    var axis_point = up * (height * t * (1.0 - field.wheels.bend * flat))
+        + roll * (height * t * field.wheels.bend) + lean * (height * t);
+    let knee = max(t - 0.5, 0.0) * 2.0;
+    let snapped = rand(id, 14u) < 0.35;
+    let kink = select(0.1, 0.4, snapped) + select(0.15, 0.6, snapped) * rand(id, 15u);
+    // Alternate combine passes cut in opposite directions, so each pass
+    // snaps its stalks its own way and reads as a band from above.
+    let cut_pass = floor((base_xz.y + 2.0 * sin(base_xz.x * 0.03)) / 4.0);
+    let heading = select(-1.0, 1.0, fract(cut_pass * 0.5) < 0.25);
+    let travel = heading * select(-1.0, 1.0, rand(id, 16u) < 0.8);
+    let kink_dir = normalize(mix(vec3<f32>(travel, 0.0, 0.0), vec3<f32>(lean_xz.x, 0.0, lean_xz.y), 0.4));
+    axis_point += (kink_dir * sin(kink) - up * (1.0 - cos(kink))) * (0.5 * height * knee * (1.0 - flat));
+
+    let right = vec3<f32>(cos(own_yaw), 0.0, sin(own_yaw));
+    let axis = normalize(up + lean + kink_dir * knee * sin(kink));
+    let normal = normalize(cross(right, axis));
+    let half_w = width * 0.5 * side;
+    let p = root + axis_point + right * half_w;
+
+    // View-space thickening (talk, 14:05): a stalk edge-on to the view is
+    // widened along the screen, easing off right at edge-on.
+    let to_eye = normalize(view.world_position - p);
+    let face_xz = normalize(vec2<f32>(normal.x, normal.z) + vec2<f32>(1e-5, 0.0));
+    let eye_xz = normalize(vec2<f32>(to_eye.x, to_eye.z) + vec2<f32>(1e-5, 0.0));
+    let facing_eye = abs(dot(face_xz, eye_xz));
+    let thicken = ease_out(1.0 - facing_eye, 4.0) * smoothstep(0.0, 0.2, facing_eye);
+    var view_pos = view.view_from_world * vec4<f32>(p, 1.0);
+    let right_view = (view.view_from_world * vec4<f32>(right, 0.0)).x;
+    view_pos.x += thicken * select(-1.0, 1.0, right_view >= 0.0) * half_w;
+
+    // A hollow stalk shades like a tube: normals roll strongly across it,
+    // leaning to the sky, settling onto the ground normal with distance.
+    let rounded = normalize(normal + right * side * 0.9);
+    let sky = normalize(mix(ground_normal, rounded, 0.45));
+    let settle = smoothstep(8.0, 40.0, distance);
+
+    // Shaded grey-brown bases to pale golden tops; green volunteer shoots
+    // in regrowth patches.
+    let tone = mix(0.9, 1.1, rand(id, 5u)) * mix(0.8, 1.15, rand(plant_id, 5u))
+        * mix(0.85, 1.1, rand(clump.id, 6u)) * select(0.94, 1.05, heading > 0.0);
+    let dry = rand(id, 11u);
+    let base_colour = mix(vec3<f32>(0.10, 0.075, 0.035), vec3<f32>(0.14, 0.10, 0.05), dry);
+    let top_colour = mix(vec3<f32>(0.62, 0.48, 0.22), vec3<f32>(0.76, 0.62, 0.33), dry);
+    let shoot = regrowth(base_xz) * step(rand(id, 9u), 0.5);
+    let root_colour = mix(base_colour, vec3<f32>(0.03, 0.08, 0.015), shoot);
+    let tip_colour = mix(top_colour, vec3<f32>(0.30, 0.52, 0.14), shoot);
+    let occlusion = mix(0.3, 1.0, t * t);
+    let ramp = mix(root_colour, tip_colour, pow(t, 1.5)) * tone * occlusion;
+    // Past a few metres a stalk settles onto its average colour so pale tops
+    // under a pixel do not flicker like fireflies.
+    let average = mix(root_colour, tip_colour, 0.45) * tone * 0.75;
+    let colour = mix(ramp, average, smoothstep(4.0, 20.0, distance));
+
+    var out: VertexOutput;
+    out.world_position = vec4<f32>(p, 1.0);
+    out.clip_position = view.clip_from_view * view_pos;
+    out.world_normal = normalize(mix(mix(sky, ground_normal, settle * 0.8), ground_normal, flat));
+    out.ground_normal = ground_normal;
+    out.canopy_uv = vec3<f32>(side, t, 0.0);
+    out.color = vec4<f32>(colour * (1.0 - field.wheels.darkening * flat), 1.0);
+    return out;
+}
+
+// Chopped straw lying on the stubble, the part of a cut field that reads from
+// above. position.y runs along the piece, position.x across it.
+fn lying_straw(vertex: Vertex) -> VertexOutput {
+    let chunk_seed = pcg(bitcast<u32>(i32(field.corner.x)) * 73856093u
+        ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
+    let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x5A17C3E1u);
+    let base = field.corner + r2(vertex.instance_index, chunk_seed ^ 0x5A17C3E1u) * field.chunk_size;
+    let sampled = sample_field(base);
+    let ground = vec3<f32>(base.x, sampled.x, base.y);
+    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
+    let distance = length(ground - view.world_position);
+    let end = blade_fade_end(f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0));
+    let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
+        * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+    // Kept at least ~1.2 px wide, thinned by the same share, like the stalks.
+    let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
+    let width = mix(0.003, 0.005, rand(id, 7u));
+    let widen = max(1.0, 1.2 * pixel_m / width);
+    // Swaths: straw lies thick in the combine's bands along x, sparse between.
+    let swath = 1.0 - smoothstep(0.3, 0.8, abs(fract((base.y + 2.0 * sin(base.x * 0.03)) / 4.0) - 0.5) * 2.0);
+    let kept = select(0.0, 1.0, rand(id, 19u) * widen < mix(0.35, 1.0, swath));
+    // Pieces lie mostly along the harvest direction.
+    let yaw = (rand(id, 4u) - 0.5) * 1.1 + select(0.0, 3.14159265, rand(id, 24u) < 0.5);
+    let along = vec3<f32>(cos(yaw), 0.0, sin(yaw));
+    let across = vec3<f32>(-sin(yaw), 0.0, cos(yaw));
+    let piece = mix(0.05, 0.18, rand(id, 6u));
+    let lift = rand(id, 8u) * 0.25;
+    let t = vertex.position.y - 0.5;
+    let side = vertex.position.x;
+    // At a grazing view a lying piece tips its near edge up towards the
+    // camera so it keeps its width on screen (the talk's thickening).
+    let to_eye = normalize(view.world_position - ground);
+    let grazing = 1.0 - abs(dot(ground_normal, to_eye));
+    let half_w = width * widen * 0.5;
+    let offset = along * (t * piece)
+        + across * (side * half_w)
+        + ground_normal * (0.008 + max(t, 0.0) * piece * lift + side * half_w * grazing);
+    let flat = clamp(sample_trample(base).x, 0.0, 1.0);
+    // A straw is a tube: normals roll across it, leaning to the sky.
+    let rounded = normalize(ground_normal + across * side * 0.9);
+    let sky = normalize(mix(ground_normal, rounded, 0.45));
+    // Where a piece rests on the stubble it sits in shade.
+    let contact = mix(0.7, 1.0, smoothstep(0.0, 0.02, max(t, 0.0) * piece * lift));
+    let tone = 0.75 + 0.45 * rand(id, 5u);
+    let fresh = mix(vec3<f32>(0.62, 0.46, 0.20), vec3<f32>(0.80, 0.66, 0.36), rand(id, 9u)) * tone * contact;
+    // Far off a piece settles onto the stubble's straw tone so pale pieces
+    // under a pixel do not sparkle.
+    let color = mix(fresh, vec3<f32>(0.55, 0.42, 0.19), smoothstep(6.0, 30.0, distance));
+    var out: VertexOutput;
+    out.world_position = vec4<f32>(ground + offset * coverage * kept, 1.0);
+    out.clip_position = view.clip_from_world * out.world_position;
+    out.world_normal = sky;
+    out.ground_normal = ground_normal;
+    out.canopy_uv = vec3<f32>(vertex.position.x, vertex.position.y, 0.0);
+    out.color = vec4<f32>(color * (1.0 - field.wheels.darkening * flat), 1.0);
+    return out;
+}
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
+    if (vertex.position.z > 0.1 && vertex.position.z < 0.5) {
+        return lying_straw(vertex);
+    }
     if (vertex.position.z > 0.5) {
         return stubble_detail(vertex);
+    }
+    if (vertex.position.z > -0.5) {
+        return got_stalk(vertex);
     }
     let corner = field.corner;
     let chunk_seed = pcg(bitcast<u32>(i32(corner.x)) * 73856093u ^ bitcast<u32>(i32(corner.y)) * 19349663u);
@@ -221,57 +451,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             * (0.94 + seed * 0.12) * (1.0 - pressed.x * field.wheels.darkening), 1.0);
         return out;
     }
-    let flat = clamp(pressed.x, 0.0, 1.0);
-    let roll = vec3<f32>(pressed.y, 0.0, pressed.z);
-    let yaw = seed * 6.2831853;
-    let height = (BLADE_MIN_HEIGHT + (BLADE_MAX_HEIGHT - BLADE_MIN_HEIGHT) * rand(id, 6u)) * alive;
-    let width = BLADE_MIN_WIDTH + (BLADE_MAX_WIDTH - BLADE_MIN_WIDTH) * rand(id, 7u);
-    let dry = select(0.0, 0.3 + 0.7 * hash11(seed * 9.1), hash11(seed * 4.4 + 3.0) < 0.18);
-
-    let right = vec3<f32>(cos(yaw), 0.0, sin(yaw));
-    let lean_angle = hash11(seed * 6.1 + 4.0) * 6.2831853;
-    let lean_dir = vec3<f32>(sin(lean_angle), 0.0, cos(lean_angle));
-    let lean = lean_dir * (0.08 + 0.26 * hash11(seed * 7.13 + 5.0));
-
-    let phase = base_xz.x * 0.31 + base_xz.y * 0.23 + seed * 2.0;
-    let gust = sin(globals.time * 1.6 + phase) * 0.6
-        + sin(globals.time * 4.3 + phase * 2.1) * 0.25
-        + sin(globals.time * 0.37 + phase * 0.11) * 0.15;
-    let bend = t * t * WIND_SWAY * height * (0.55 + gust) * alive;
-
-    var p = vec3<f32>(base_xz.x, ground_y, base_xz.y)
-        + vec3<f32>(0.0, 1.0, 0.0) * (height * t * (1.0 - field.wheels.bend * flat))
-        + roll * (height * t * field.wheels.bend)
-        + lean * (height * t)
-        + right * (width * 0.5 * side * alive)
-        + WIND_DIR * bend;
-    p.y = p.y - abs(bend) * 0.15;
-    // Stalks kink at the node halfway up; a third were snapped over by the header.
-    let knee = max(t - 0.5, 0.0) * 2.0;
-    let snapped = rand(id, 14u) < 0.35;
-    let kink = select(0.1, 0.4, snapped) + select(0.15, 0.6, snapped) * rand(id, 15u);
-    let kink_yaw = rand(id, 16u) * 6.2831853;
-    let kink_dir = vec3<f32>(cos(kink_yaw), 0.0, sin(kink_yaw));
-    p += (kink_dir * sin(kink) - vec3<f32>(0.0, 1.0 - cos(kink), 0.0))
-        * (0.5 * height * knee * (1.0 - flat));
-
-    // Cut stalks grade from shaded straw roots to pale dry tips.
-    let tone = 0.65 + 0.7 * rand(id, 5u);
-    let root_straw = vec3<f32>(0.28, 0.18, 0.065) * tone;
-    let straw_tip = mix(vec3<f32>(0.46, 0.30, 0.10), vec3<f32>(0.60, 0.43, 0.18), dry) * tone;
-    // In regrowth patches half the stalks are green volunteer shoots.
-    let shoot = green * step(rand(id, 8u), 0.5);
-    let root = mix(root_straw, vec3<f32>(0.11, 0.20, 0.045) * tone, shoot);
-    let tip = mix(straw_tip, vec3<f32>(0.22, 0.40, 0.09) * tone, shoot);
-
-    var out: VertexOutput;
-    out.world_position = vec4<f32>(p, 1.0);
-    out.clip_position = view.clip_from_world * vec4<f32>(p, 1.0);
-    let stalk_normal = normalize(cross(right, vec3<f32>(0.0, 1.0, 0.0) + lean));
-    out.world_normal = normalize(mix(stalk_normal + ground_normal * 0.7, ground_normal, flat));
-    out.ground_normal = ground_normal;
-    out.color = vec4<f32>(mix(root, tip, smoothstep(0.0, 0.7, t)) * (1.0 - field.wheels.darkening * flat), 1.0);
-    return out;
+    return got_stalk(vertex);
 }
 
 @fragment
@@ -279,12 +459,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let alpha = select(1.0, canopy_alpha(in.canopy_uv, true), in.canopy_uv.z > 0.5);
     if (alpha < 0.001) { discard; }
     var pbr_input = pbr_input_new();
-    pbr_input.material.base_color = in.color;
-    pbr_input.material.perceptual_roughness = 1.0;
+    // Stalks and straw: matte, edges darker than the midrib, little
+    // translucency.
+    let stalk = in.canopy_uv.z < 0.5;
+    let across = abs(in.canopy_uv.x);
+    let rib = select(1.0, mix(1.0, 0.82, smoothstep(0.1, 0.9, across)), stalk);
+    pbr_input.material.base_color = vec4<f32>(in.color.rgb * rib, in.color.a);
+    pbr_input.material.perceptual_roughness = select(1.0, 0.92, stalk);
     pbr_input.material.metallic = 0.0;
     pbr_input.material.reflectance = vec3<f32>(0.04);
     pbr_input.specular_occlusion = 0.0;
-    pbr_input.material.diffuse_transmission = select(0.25, 0.15, in.canopy_uv.z > 0.5);
+    pbr_input.material.diffuse_transmission = select(0.15, 0.15, in.canopy_uv.z > 0.5);
     pbr_input.material.thickness = 0.0006;
     pbr_input.material.flags = pbr_input.material.flags | STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
     pbr_input.frag_coord = in.clip_position;

@@ -12,14 +12,16 @@ fn canopy_vertex(local: vec3<f32>, ground: vec3<f32>, normal: vec3<f32>, seed: f
     let yaw = seed * 6.2831853 + (local.z + 1.0) * 1.5707963;
     let right = vec3<f32>(cos(yaw), 0.0, sin(yaw));
     let grazing = smoothstep(0.4, 0.9, length(direction) / max(distance, 0.001));
-    let growth = smoothstep(8.0, 20.0, distance) * alive * grazing;
+    let growth = smoothstep(8.0, 20.0, distance) * alive * select(1.0, grazing, straw);
     let width = mix(0.10, 0.17, seed) * mix(1.0, 1.5, smoothstep(20.0, 96.0, distance));
     let height = select(mix(0.065, 0.105, seed), mix(0.08, 0.14, seed), straw);
     let flat = clamp(pressed.x, 0.0, 1.0);
-    let lateral = right * local.x * width * 0.5;
+    let forward = vec3<f32>(-right.z, 0.0, right.x);
+    let arch = select(0.65, 0.0, straw) * local.y * local.y * height * (1.0 - flat * bend);
+    let lateral = right * local.x * width * 0.5 + forward * arch;
     let ground_offset = -dot(normal.xz, lateral.xz) / max(normal.y, 0.1);
     let wind = sin(globals.time * 1.6 + ground.x * 0.31 + ground.z * 0.23) * select(0.1, 0.004, straw);
-    let tip = local.y * height * growth;
+    let tip = local.y * height * growth * (1.0 - select(0.2, 0.0, straw) * local.y);
     let position = ground + lateral * growth + vec3<f32>(0.0, ground_offset * growth + tip * (1.0 - flat * bend), 0.0)
         + vec3<f32>(pressed.y + wind, 0.0, pressed.z) * tip * bend;
     return CanopyVertex(position, normal, vec3<f32>(local.x * 0.5 + 0.5, local.y, seed - local.z));

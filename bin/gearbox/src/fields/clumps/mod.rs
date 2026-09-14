@@ -41,6 +41,7 @@ macro_rules! pack {
                     $model,
                     ".png"
                 )),
+                lod_band: [0.0, f32::MAX],
             }
         }
     };

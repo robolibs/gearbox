@@ -26,11 +26,11 @@ available for USD-relative paths. Neighbouring fields share terrain collision an
 
 ## Select a layout
 
-The default remains all grassland. From the repository root:
+The default is all harvested wheat (straw stubble). From the repository root:
 
 ```sh
 GEARBOX_FIELD_LAYOUT=bin/gearbox/src/fields/layouts/mixed.json make run
-GEARBOX_FIELD_LAYOUT=bin/gearbox/src/fields/layouts/harvested_wheat.json make run
+GEARBOX_FIELD_LAYOUT=bin/gearbox/src/fields/layouts/grassland.json make run
 ```
 
 Use `BACKEND=wayland` and `WAYLAND_DISPLAY=wayland-0` where required by the desktop.
@@ -93,12 +93,14 @@ renderer stage limit when combined with Bevy's PBR bindings.
 
 ## Near-to-far coverage
 
-Primary blades retain full density through 4 m and inverse-square thinning to 32 m.
-Secondary grassland plants retain the separate, gentler 8–24 m fade. Distant clusters use
+Primary grassland blades retain full density through 4 m and inverse-square thinning to 128 m.
+Secondary grassland plants retain full density through 32 m and thin to zero at 144 m
+with their own inverse-square tail and quadratic outer fade. Distant clusters use
 80 instances/m² before LOD (scaled by the profile density override), inverse-square thinning
 from 12 m to 360 m, and a gradual 8–20 m entrance. Each cluster has two crossed quads with
 procedural grass tips or flat-cut straw, stable world-space orientation and wheel deformation.
-Their contribution decreases toward overhead views, where the ground surface supplies coverage.
+Grass clusters lean outward and retain coverage in overhead views; straw clusters still
+decrease toward overhead views, where the ground surface supplies coverage.
 These distances are camera-to-root distances; CPU chunk bounds remain conservative.
 The shared `canopy::FADE_END_M` controls both distant layers. Their per-clump fade spans
 12% of the clump's cutoff distance (at least 4 m); individual near blades retain their 4 m fade.

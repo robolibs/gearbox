@@ -5,7 +5,7 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 
-#import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{meadow_pattern, meadow_tint, grass_species, species_tint}
+#import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint}
 #import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 
@@ -208,10 +208,204 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
     return out;
 }
 
+const GOT_MIN_HEIGHT: f32 = 0.04;
+const GOT_MAX_HEIGHT: f32 = 0.10;
+const GOT_MIN_WIDTH: f32 = 0.006;
+const GOT_MAX_WIDTH: f32 = 0.011;
+const CLUMP_CELL_M: f32 = 0.45;
+const LOD_JITTER_M: f32 = 1.5;
+
+struct Clump {
+    centre: vec2<f32>,
+    id: u32,
+};
+
+// Nearest Voronoi clump centre: blades of a clump share height, facing,
+// lean and tone.
+fn clump_of(p: vec2<f32>) -> Clump {
+    let cell = vec2<i32>(floor(p / CLUMP_CELL_M));
+    var best = Clump(p, 0u);
+    var best_d = 1e9;
+    for (var dz = -1; dz <= 1; dz = dz + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let c = cell + vec2<i32>(dx, dz);
+            let h = pcg(bitcast<u32>(c.x) * 73856093u ^ bitcast<u32>(c.y) * 19349663u ^ 0x2C1A5E7u);
+            let centre = (vec2<f32>(c) + vec2<f32>(rand(h, 1u), rand(h, 2u))) * CLUMP_CELL_M;
+            let d = dot(p - centre, p - centre);
+            if (d < best_d) {
+                best_d = d;
+                best = Clump(centre, h);
+            }
+        }
+    }
+    return best;
+}
+
+// Quadratic Bezier from the root (origin) through `mid` to `tip`.
+fn bezier(mid: vec3<f32>, tip: vec3<f32>, t: f32) -> vec3<f32> {
+    return 2.0 * (1.0 - t) * t * mid + t * t * tip;
+}
+
+fn bezier_tangent(mid: vec3<f32>, tip: vec3<f32>, t: f32) -> vec3<f32> {
+    return 2.0 * (1.0 - t) * mid + 2.0 * t * (tip - mid);
+}
+
+const CLUMP_PULL: f32 = 0.0;
+
+// Low-discrepancy (R2) placement: any prefix of a chunk's instances covers it
+// evenly, so thinning by rank never opens holes (the talk's jittered grid).
+fn r2(index: u32, seed: u32) -> vec2<f32> {
+    let x = index * 3242174889u + seed;
+    let y = index * 2447445414u + pcg(seed);
+    return vec2<f32>(f32(x >> 8u), f32(y >> 8u)) / 16777216.0;
+}
+
+fn ease_out(x: f32, power: f32) -> f32 {
+    return 1.0 - pow(1.0 - x, power);
+}
+
+// A Ghost of Tsushima style blade: evenly placed, pulled into clump tufts,
+// folded into twin blades from one root, a tapered Bezier shaped by the
+// clump and the wind, thickened along the screen when seen edge-on, with
+// rounded sky-leaning normals and a dark-root to bright-tip ramp.
+// vertex.uv is the distance band this detail level draws in.
+fn got_blade(vertex: Vertex) -> VertexOutput {
+    let chunk_seed = pcg(bitcast<u32>(i32(field.corner.x)) * 73856093u
+        ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
+    let id = pcg(vertex.instance_index ^ chunk_seed);
+    let spot = field.corner + r2(vertex.instance_index, chunk_seed) * field.chunk_size;
+    let clump = clump_of(spot);
+    let twin = vertex.normal.x > 0.5;
+    let own_yaw = rand(id, 4u) * 6.2831853 + select(0.0, mix(0.6, 1.2, rand(id, 30u)), twin);
+    var base_xz = mix(spot, clump.centre, CLUMP_PULL * rand(clump.id, 7u));
+    if (twin) {
+        base_xz += vec2<f32>(-sin(own_yaw), cos(own_yaw)) * mix(0.01, 0.03, rand(id, 31u));
+    }
+    let sampled = sample_field(base_xz);
+    let root = vec3<f32>(base_xz.x, sampled.x, base_xz.y);
+    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
+    let distance = length(root - view.world_position);
+
+    // Density fades by rank; each blade swaps detail level at a jittered
+    // band edge; blades under ~1.2 px wide are widened and thinned alike.
+    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
+    let blade_end = blade_fade_end(rank);
+    let coverage = 1.0 - smoothstep(max(field.fade_start, blade_end - BLADE_FADE_M), blade_end, distance);
+    let jitter = (rand(id, 23u) - 0.5) * 2.0 * LOD_JITTER_M;
+    let in_band = (vertex.uv.x <= 0.0 || distance >= vertex.uv.x + jitter)
+        && distance < vertex.uv.y + jitter;
+    let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
+    let widen = max(1.0, 1.2 * pixel_m / GOT_MAX_WIDTH);
+    let alive = select(0.0, coverage, in_band && ground_normal.y >= DIRT_SLOPE_NORMAL_Y
+        && within_field(base_xz) && rand(id, 19u) * widen < 1.0);
+
+    let species = grass_species(base_xz);
+    let pick = rand(id, 13u);
+    let fescue = pick < species.x;
+    let rye = !fescue && pick < species.x + species.y;
+    let height = mix(GOT_MIN_HEIGHT, GOT_MAX_HEIGHT, rand(id, 6u))
+        * mix(0.9, 1.1, rand(clump.id, 3u)) * select(1.0, 0.8, fescue)
+        * select(1.0, mix(0.75, 0.95, rand(id, 32u)), twin) * alive;
+    let width = mix(GOT_MIN_WIDTH, GOT_MAX_WIDTH, rand(id, 7u))
+        * select(select(1.0, 1.6, rye), 0.6, fescue) * widen * alive;
+
+    // Facing follows the clump; blades lean out from its centre.
+    let clump_yaw = rand(clump.id, 4u) * 6.2831853;
+    let facing = normalize(mix(vec2<f32>(cos(own_yaw), sin(own_yaw)),
+        vec2<f32>(cos(clump_yaw), sin(clump_yaw)), 0.6) + vec2<f32>(1e-4, 0.0));
+    let outward = base_xz - clump.centre;
+    let out_dir = select(facing, normalize(outward), dot(outward, outward) > 1e-6);
+    let lean_xz = normalize(mix(vec2<f32>(cos(own_yaw + 1.7), sin(own_yaw + 1.7)), out_dir, 0.7)
+        + vec2<f32>(1e-4, 0.0));
+    let lean = vec3<f32>(lean_xz.x, 0.0, lean_xz.y)
+        * mix(0.25, 0.7, rand(id, 8u)) * mix(0.8, 1.2, rand(clump.id, 5u));
+
+    // Wind: a scrolling gust field; the bob's phase runs along the blade so
+    // it sways instead of pivoting.
+    let gust = noise(base_xz * 0.12 - WIND_DIR.xz * globals.time * 0.8);
+    let phase = globals.time * 2.7 + rand(id, 9u) * 6.2831853;
+    let sway_mid = WIND_DIR * (gust * 0.55 + sin(phase - 0.8) * 0.08) * 0.3;
+    let sway_tip = WIND_DIR * (gust * 0.55 + sin(phase - 1.6) * 0.08);
+
+    // Control points relative to the root; wheels lay the blade down.
+    let pressed = sample_trample(base_xz);
+    let flat = clamp(pressed.x, 0.0, 1.0);
+    let roll = vec3<f32>(pressed.y, 0.0, pressed.z);
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let press = flat * field.wheels.bend;
+    let tip = mix((up + lean + sway_tip) * height, (roll * 0.9 + up * 0.08) * height, press);
+    let mid = mix((up * 0.6 + lean * 0.2 + sway_mid) * height, (roll * 0.45 + up * 0.06) * height, press);
+
+    let t = vertex.position.y;
+    let side = vertex.position.x;
+    let axis = normalize(bezier_tangent(mid, tip, t) + up * 1e-4);
+    let right = normalize(cross(axis, vec3<f32>(facing.x, 0.0, facing.y)) + vec3<f32>(1e-5, 0.0, 0.0));
+    let normal = normalize(cross(right, axis));
+    // Wide at the root, tapering fast to the tip.
+    let half_w = width * 0.5 * ease_out(1.0 - t, 2.0) * side;
+    let p = root + bezier(mid, tip, t) + right * half_w;
+
+    // View-space thickening (talk, 14:05): a blade edge-on to the view is
+    // widened along the screen, easing off right at edge-on.
+    let to_eye = normalize(view.world_position - p);
+    let face_xz = normalize(vec2<f32>(normal.x, normal.z) + vec2<f32>(1e-5, 0.0));
+    let eye_xz = normalize(vec2<f32>(to_eye.x, to_eye.z) + vec2<f32>(1e-5, 0.0));
+    let facing_eye = abs(dot(face_xz, eye_xz));
+    let thicken = ease_out(1.0 - facing_eye, 4.0) * smoothstep(0.0, 0.2, facing_eye);
+    var view_pos = view.view_from_world * vec4<f32>(p, 1.0);
+    let right_view = (view.view_from_world * vec4<f32>(right, 0.0)).x;
+    view_pos.x += thicken * select(-1.0, 1.0, right_view >= 0.0) * half_w;
+
+    // Normals: tilted outward per half for a rounded blade, mostly sky
+    // facing so blades light like the sward, settling onto the ground
+    // normal with distance so far grass does not glitter.
+    let rounded = normalize(normal + right * side * 0.6);
+    let sky = normalize(mix(ground_normal, rounded, 0.35));
+    let settle = smoothstep(8.0, 40.0, distance);
+
+    // Dark roots to bright tips, the tip colour set by the clump.
+    let tone = mix(0.9, 1.1, rand(id, 5u)) * mix(0.85, 1.12, rand(clump.id, 8u));
+    // Patches a few metres across and tufts under a metre shade the sward
+    // from above, where single blades are too small to read.
+    let tint_patch = smoothstep(0.3, 0.7, noise(base_xz * 0.11 + vec2<f32>(13.0, -7.0)));
+    let tuft = noise(base_xz * 1.3 + vec2<f32>(-29.0, 41.0));
+    let mottle = mix(vec3<f32>(1.08, 1.02, 0.80), vec3<f32>(0.82, 0.95, 0.90), tint_patch) * mix(0.8, 1.15, tuft);
+    let clump_hue = rand(clump.id, 6u);
+    let dry = select(0.0, 0.3 + 0.7 * rand(id, 11u), rand(id, 12u) < 0.15);
+    var base_colour = mix(vec3<f32>(0.020, 0.075, 0.010), vec3<f32>(0.025, 0.100, 0.012), clump_hue);
+    var tip_colour = mix(vec3<f32>(0.50, 0.66, 0.18), vec3<f32>(0.62, 0.74, 0.28), clump_hue);
+    tip_colour = mix(tip_colour, vec3<f32>(0.66, 0.58, 0.26), dry);
+    if (fescue) {
+        base_colour = vec3<f32>(0.02, 0.07, 0.04);
+        tip_colour = vec3<f32>(0.40, 0.58, 0.30);
+    } else if (rye) {
+        base_colour = vec3<f32>(0.015, 0.08, 0.01);
+        tip_colour = vec3<f32>(0.30, 0.62, 0.10);
+    }
+    let occlusion = mix(0.25, 1.0, t * t);
+    let ramp = mix(base_colour, tip_colour, t * t) * tone * mottle * occlusion;
+    // Past a few metres a blade settles onto its average colour: a lone bright
+    // tip on a sub-pixel blade would otherwise flicker like a firefly.
+    let average = mix(base_colour, tip_colour, 0.35) * tone * mottle * 0.7;
+    let colour = mix(ramp, average, smoothstep(4.0, 20.0, distance));
+
+    var out: VertexOutput;
+    out.world_position = vec4<f32>(p, 1.0);
+    out.clip_position = view.clip_from_view * view_pos;
+    out.world_normal = normalize(mix(mix(sky, ground_normal, settle * 0.8), ground_normal, flat));
+    out.ground_normal = ground_normal;
+    out.canopy_uv = vec3<f32>(side, t, 0.0);
+    out.color = vec4<f32>(colour * (1.0 - field.wheels.darkening * flat), 1.0);
+    return out;
+}
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     if (vertex.position.z > 0.5) {
         return meadow_detail(vertex);
+    }
+    if (vertex.position.z > -0.5) {
+        return got_blade(vertex);
     }
     let corner = field.corner;
     let chunk_seed = pcg(bitcast<u32>(i32(corner.x)) * 73856093u ^ bitcast<u32>(i32(corner.y)) * 19349663u);
@@ -255,60 +449,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             * (0.94 + seed * 0.12) * (1.0 - pressed.x * field.wheels.darkening), 1.0);
         return out;
     }
-    let flat = clamp(pressed.x, 0.0, 1.0);
-    let roll = vec3<f32>(pressed.y, 0.0, pressed.z);
-    let yaw = seed * 6.2831853;
-    // Fescue and ryegrass take over by patch, mixed blade by blade at the edges.
-    let species = grass_species(base_xz);
-    let pick = rand(id, 13u);
-    let fescue = pick < species.x;
-    let rye = !fescue && pick < species.x + species.y;
-    let height = (BLADE_MIN_HEIGHT + (BLADE_MAX_HEIGHT - BLADE_MIN_HEIGHT) * rand(id, 6u))
-        * select(1.0, 0.85, fescue) * alive;
-    let width = (BLADE_MIN_WIDTH + (BLADE_MAX_WIDTH - BLADE_MIN_WIDTH) * rand(id, 7u))
-        * select(select(1.0, 1.7, rye), 0.6, fescue);
-    let dry = select(0.0, 0.3 + 0.7 * hash11(seed * 9.1), hash11(seed * 4.4 + 3.0) < 0.18);
-
-    let right = vec3<f32>(cos(yaw), 0.0, sin(yaw));
-    let lean_angle = hash11(seed * 6.1 + 4.0) * 6.2831853;
-    let lean_dir = vec3<f32>(sin(lean_angle), 0.0, cos(lean_angle));
-    // Every blade tilts 10-35 degrees so the sward still reads from above.
-    let lean = lean_dir * (select(0.18, 0.28, fescue) + 0.45 * hash11(seed * 7.13 + 5.0));
-
-    let phase = base_xz.x * 0.31 + base_xz.y * 0.23 + seed * 2.0;
-    let gust = sin(globals.time * 1.6 + phase) * 0.6
-        + sin(globals.time * 4.3 + phase * 2.1) * 0.25
-        + sin(globals.time * 0.37 + phase * 0.11) * 0.15;
-    let bend = t * t * WIND_SWAY * height * (0.55 + gust) * alive;
-
-    var p = vec3<f32>(base_xz.x, ground_y, base_xz.y)
-        + vec3<f32>(0.0, 1.0, 0.0) * (height * t * (1.0 - field.wheels.bend * flat))
-        + roll * (height * t * field.wheels.bend)
-        + lean * (height * t * t)
-        + right * (width * 0.5 * side * (1.0 - t * 0.85) * alive)
-        + WIND_DIR * bend;
-    p.y = p.y - abs(bend) * 0.15;
-
-    // Roots grade into green or dry tips.
-    let tone = 0.65 + 0.7 * rand(id, 5u);
-    var root = vec3<f32>(0.11, 0.20, 0.045) * tone;
-    var tip = mix(vec3<f32>(0.22, 0.42, 0.09), vec3<f32>(0.40, 0.34, 0.10), dry) * tone;
-    if (fescue) {
-        root = vec3<f32>(0.08, 0.17, 0.09) * tone;
-        tip = vec3<f32>(0.20, 0.35, 0.24) * tone;
-    } else if (rye) {
-        root = vec3<f32>(0.05, 0.16, 0.03) * tone;
-        tip = vec3<f32>(0.13, 0.40, 0.05) * tone;
-    }
-
-    var out: VertexOutput;
-    out.world_position = vec4<f32>(p, 1.0);
-    out.clip_position = view.clip_from_world * vec4<f32>(p, 1.0);
-    let blade_normal = normalize(cross(right, vec3<f32>(0.0, 1.0, 0.0) + lean * (2.0 * t)));
-    out.world_normal = normalize(mix(blade_normal + ground_normal * 0.7, ground_normal, flat));
-    out.ground_normal = ground_normal;
-    out.color = vec4<f32>(mix(root, tip, smoothstep(0.0, 0.7, t)) * (1.0 - field.wheels.darkening * flat), 1.0);
-    return out;
+    return got_blade(vertex);
 }
 
 @fragment
@@ -317,12 +458,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if (alpha < 0.001) { discard; }
     var pbr_input = pbr_input_new();
     let tint = meadow_tint(meadow_pattern(in.world_position.xz));
-    pbr_input.material.base_color = vec4<f32>(in.color.rgb * tint, in.color.a);
-    pbr_input.material.perceptual_roughness = 0.98;
+    // Blades: matte, the edges darker than the midrib; translucency grows
+    // towards the tip.
+    let blade = in.canopy_uv.z < 0.5;
+    let across = abs(in.canopy_uv.x);
+    let rib = select(1.0, mix(1.0, 0.85, smoothstep(0.1, 0.9, across)), blade);
+    pbr_input.material.base_color = vec4<f32>(in.color.rgb * tint * rib, in.color.a);
+    pbr_input.material.perceptual_roughness = select(0.98, 0.92, blade);
     pbr_input.material.metallic = 0.0;
     pbr_input.material.reflectance = vec3<f32>(0.04);
     pbr_input.specular_occlusion = 0.0;
-    pbr_input.material.diffuse_transmission = select(0.45, 0.35, in.canopy_uv.z > 0.5);
+    pbr_input.material.diffuse_transmission = select(0.35, mix(0.3, 0.5, in.canopy_uv.y), blade);
     pbr_input.material.thickness = 0.0002;
     pbr_input.material.flags = pbr_input.material.flags | STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
     pbr_input.frag_coord = in.clip_position;

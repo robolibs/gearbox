@@ -96,10 +96,11 @@ mod tests {
 
 use super::geometry::{clip_mesh, mesh_bounds};
 use super::layout::{FieldBounds, FieldLayout};
-use super::profile::{FieldProfile, FieldProfiles, GroundSurface, WheelMapParams};
+use super::profile::{FieldProfile, FieldProfiles, GroundSurface, VegetationLayer, WheelMapParams};
 use super::render::{FieldGpu, RenderFields, VegetationChunk, VegetationParams};
 use crate::terrain::{HeightGrid, ProceduralTerrain, TerrainBackdrop, TerrainSurfaceMesh};
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -367,45 +368,82 @@ pub fn instance_budget(
     (capacity * (fade * projected).powi(2)).ceil() as u32
 }
 
+/// Chunk side for a layer: detail levels near the camera stream in small
+/// chunks so their density follows distance instead of the whole chunk.
+fn chunk_m(layer: &VegetationLayer) -> f32 {
+    (layer.lod_band[1] / 8.0).clamp(4.0, CHUNK_M)
+}
+
+fn farthest_distance(bounds: &FieldBounds, point: Vec2) -> f32 {
+    let far = Vec2::new(
+        (point.x - bounds.min.x).abs().max((point.x - bounds.max.x).abs()),
+        (point.y - bounds.min.y).abs().max((point.y - bounds.max.y).abs()),
+    );
+    far.length()
+}
+
+/// Terrain height span of a chunk, with room for vegetation above it.
+fn chunk_height_span(corner: Vec2, size: f32) -> (f32, f32) {
+    let samples = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)]
+        .map(|(u, v)| crate::world::terrain_height_m(corner.x + u * size, corner.y + v * size));
+    let low = samples.iter().copied().fold(f32::INFINITY, f32::min);
+    let high = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    (low - 2.0, high + 2.0)
+}
+
 pub fn stream_vegetation(
     mut commands: Commands,
     active: Option<Res<ActiveFields>>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<(&GlobalTransform, &Frustum), With<Camera3d>>,
     mut chunks: ResMut<VegetationChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<AssetServer>,
     mut draws: Query<&mut VegetationChunk>,
     mut layer_meshes: Local<HashMap<(&'static str, usize), (Handle<Mesh>, Vec<std::ops::Range<u32>>)>>,
+    mut heights: Local<HashMap<(i32, i32, u32), (f32, f32)>>,
 ) {
     let Some(active) = active else {
         return;
     };
-    let Some(camera) = cameras.iter().next() else {
+    let Some((camera, frustum)) = cameras.iter().next() else {
         return;
     };
     let eye = camera.translation().xz();
+    let eye_y = camera.translation().y;
     let mut wanted: HashMap<_, _> = HashMap::default();
     for field in &active.fields {
         for (layer_index, layer) in field.profile.layers.iter().enumerate() {
             if layer.density <= 0.0 || field.bounds.nearest_distance(eye) >= layer.fade_end {
                 continue;
             }
+            let size = chunk_m(layer);
             let min = (eye - Vec2::splat(layer.fade_end)).max(field.bounds.min);
             let max = (eye + Vec2::splat(layer.fade_end)).min(field.bounds.max);
-            for z in (min.y / CHUNK_M).floor() as i32..=(max.y / CHUNK_M).floor() as i32 {
-                for x in (min.x / CHUNK_M).floor() as i32..=(max.x / CHUNK_M).floor() as i32 {
-                    let corner = Vec2::new(x as f32, z as f32) * CHUNK_M;
+            for z in (min.y / size).floor() as i32..=(max.y / size).floor() as i32 {
+                for x in (min.x / size).floor() as i32..=(max.x / size).floor() as i32 {
+                    let corner = Vec2::new(x as f32, z as f32) * size;
                     let bounds = FieldBounds {
                         min: corner.max(field.bounds.min),
-                        max: (corner + Vec2::splat(CHUNK_M)).min(field.bounds.max),
+                        max: (corner + Vec2::splat(size)).min(field.bounds.max),
                     };
                     if !bounds.min.cmplt(bounds.max).all() {
                         continue;
                     }
-                    let capacity = CHUNK_M * CHUNK_M * layer.density;
+                    let (low, high) = *heights
+                        .entry((x, z, size.to_bits()))
+                        .or_insert_with(|| chunk_height_span(corner, size));
+                    // Blades fade by distance to the eye, so height above them counts.
+                    let lift = (eye_y - high).max(low - eye_y).max(0.0);
+                    let nearest = bounds.nearest_distance(eye).hypot(lift);
+                    let farthest = farthest_distance(&bounds, eye).hypot((eye_y - low).abs().max((eye_y - high).abs()));
+                    // Beyond this detail level's band the next mesh takes over.
+                    if nearest > layer.lod_band[1] + 2.0 || farthest < layer.lod_band[0] - 2.0 {
+                        continue;
+                    }
+                    let capacity = size * size * layer.density;
                     let instances = instance_budget(
                         capacity,
-                        bounds.nearest_distance(eye),
+                        nearest,
                         layer.fade_start,
                         layer.fade_end,
                         layer.inverse_square_thinning,
@@ -413,8 +451,14 @@ pub fn stream_vegetation(
                     if instances == 0 {
                         continue;
                     }
+                    // Chunks outside the view keep their slot but draw nothing.
+                    let extent = Aabb::from_min_max(
+                        Vec3::new(corner.x, low, corner.y),
+                        Vec3::new(corner.x + size, high, corner.y + size),
+                    );
+                    let instances = if frustum.intersects_obb_identity(&extent) { instances } else { 0 };
                     let key = (field.entity, layer_index, x, z);
-                    wanted.insert(key, (field, layer, capacity, instances));
+                    wanted.insert(key, (field, layer, size, capacity, instances));
                 }
             }
         }
@@ -427,14 +471,14 @@ pub fn stream_vegetation(
             false
         }
     });
-    for (key, (field, layer, capacity, instances)) in wanted {
+    for (key, (field, layer, size, capacity, instances)) in wanted {
         if let Some(&entity) = chunks.0.get(&key) {
             if let Ok(mut draw) = draws.get_mut(entity) {
                 draw.instances = instances;
             }
             continue;
         }
-        let corner = Vec2::new(key.2 as f32, key.3 as f32) * CHUNK_M;
+        let corner = Vec2::new(key.2 as f32, key.3 as f32) * size;
         // One mesh per layer, built once: chunks only place its instances.
         let (mesh, variants) = layer_meshes
             .entry((field.profile.name, key.1))
@@ -453,6 +497,7 @@ pub fn stream_vegetation(
                 ChildOf(field.entity),
                 VegetationChunk {
                     corner,
+                    size,
                     instances,
                     capacity,
                     field_id: field.entity,

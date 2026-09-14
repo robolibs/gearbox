@@ -49,6 +49,9 @@ pub struct VegetationLayer {
     pub inverse_square_thinning: bool,
     /// Albedo of an asset clump layer; procedural layers have none.
     pub albedo: Option<&'static str>,
+    /// Camera distance band this layer's mesh draws in; detail levels of
+    /// one blade population split the distance between them.
+    pub lod_band: [f32; 2],
 }
 
 #[derive(ShaderType, Reflect, Clone, Copy, Debug, Default)]
