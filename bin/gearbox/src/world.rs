@@ -259,6 +259,46 @@ const STATIC_PROP_FORCE_FREEZE_FRAMES: u32 = 45;
 const STATIC_PROP_SETTLED_LINEAR_SPEED_MPS: f64 = 0.12;
 const STATIC_PROP_SETTLED_ANGULAR_SPEED_RPS: f64 = 0.25;
 
+/// The part of the planet anyone can see: a spherical cap around the pole
+/// under the field, out to the horizon from the 5 km camera ceiling. Rings
+/// tighten towards the field, keeping the true curvature with ~12k vertices
+/// where a full 1024x512 sphere uploaded 29 MB at every launch.
+fn planet_cap_mesh(radius: f32) -> Mesh {
+    const CAP_RAD: f32 = 3.0 * std::f32::consts::PI / 180.0;
+    const RINGS: u32 = 48;
+    const SEGMENTS: u32 = 256;
+    let mut positions = vec![[0.0, radius, 0.0]];
+    let mut normals = vec![[0.0, 1.0, 0.0]];
+    for ring in 1..=RINGS {
+        let theta = CAP_RAD * (ring as f32 / RINGS as f32).powi(2);
+        for segment in 0..SEGMENTS {
+            let phi = segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            let normal = [theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin()];
+            positions.push(normal.map(|c| c * radius));
+            normals.push(normal);
+        }
+    }
+    let at = |ring: u32, segment: u32| 1 + (ring - 1) * SEGMENTS + segment % SEGMENTS;
+    let mut indices = Vec::new();
+    for segment in 0..SEGMENTS {
+        indices.extend([0, at(1, segment + 1), at(1, segment)]);
+    }
+    for ring in 1..RINGS {
+        for segment in 0..SEGMENTS {
+            let (a, b) = (at(ring, segment), at(ring, segment + 1));
+            let (c, d) = (at(ring + 1, segment), at(ring + 1, segment + 1));
+            indices.extend([a, b, c, b, d, c]);
+        }
+    }
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices))
+}
+
 fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -267,9 +307,8 @@ fn spawn_world(
 ) {
     let radius = PLANET_RADIUS_M;
 
-    // ── Planet sphere ────────────────────────────────────────────────
-    // Warm sandy / tan ground colour. Higher UV resolution than a
-    // toy sphere because this fills the whole horizon. It is lowered
+    // ── Planet ───────────────────────────────────────────────────────
+    // Warm sandy / tan ground colour, filling the horizon. It is lowered
     // below the local terrain so it cannot appear as a second flat
     // ground plate under the hilly field mesh.
     let planet_mat = materials.add(StandardMaterial {
@@ -277,7 +316,7 @@ fn spawn_world(
         perceptual_roughness: 0.95,
         ..default()
     });
-    let planet_mesh = meshes.add(Sphere::new(radius).mesh().uv(1024, 512));
+    let planet_mesh = meshes.add(planet_cap_mesh(radius));
     commands.spawn((
         Name::new("Planet"),
         Transform::from_xyz(0.0, -radius - PLANET_VISUAL_DROP_M, 0.0),
