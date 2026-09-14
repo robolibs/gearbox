@@ -37,7 +37,7 @@ BALE_USD_PATH = "markers/hay_bale.usda"
 RING_RADIUS = 15.0
 # Field speeds. Physics runs in real time now and the tyres deliver what is
 # commanded; faster than this the tractor overshoots a bale between ticks.
-MAX_SPEED_MPS = 4.0
+MAX_SPEED_MPS = 2.0
 MAX_YAW_RPS = 1.2
 TICK_DT = 0.10
 MARKER_GAP_M = 0.6
@@ -73,7 +73,7 @@ def _build_tracker():
 # backed the tractor most of the way to the bale.
 TURN_ENTER_RAD = math.pi / 2.0
 TURN_EXIT_RAD = math.radians(30.0)
-TURN_SPEED_MPS = 1.5
+TURN_SPEED_MPS = 1.0
 
 
 def wrap_pi(angle: float) -> float:
