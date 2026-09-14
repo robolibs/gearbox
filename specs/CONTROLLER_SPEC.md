@@ -131,6 +131,9 @@ properties below live on the machine prim with the prefix
 | `steerLeftJoint` / `steerRightJoint` | rel | optional | none | Explicit steering pair. When both resolve they take precedence over `role:steeringJoints` and receive the true Ackermann left/right angles. |
 | `steerJoints` | rel[] | optional | `[]` | Extra steering joints, merged with `role:steeringJoints`. Last-resort fallback receives the centre angle. |
 | `traction` | token | optional | `contact` | `contact`: the tyres carry the machine and the wheel motors drive it. `raycast`: the legacy raycast vehicle. `GEARBOX_TRACTION` sets the default. |
+| `maxWheelTorqueNm` | float | optional | none | Per-wheel drive torque limit, applied on top of the grip cap. |
+| `maxPowerKw` | float | optional | none | Drive power shared over the driven wheels: each wheel's torque stays under `P / n / ω`, `ω` held at 0.5 rad/s or more. |
+| `tractionControl` | bool | optional | `true` | Keeps each driven wheel within 8 % + 0.15 m/s of its ground speed. `GEARBOX_TRACTION_CONTROL=0` sets the default off. |
 | `driveWheels`, `target` | rel | IGNORED | | |
 | `updateRateHz` | float | IGNORED | `60` | Controllers run every Update frame. |
 | `frameConvention` | token | IGNORED | | Author `usd_z_up`; the runtime assumes it anyway. |
@@ -262,8 +265,12 @@ rapier bodies. In USD terms:
   radius if above 0.05 m, otherwise `wheelRadius` is used.
 - on contact traction the tyres of every `wheel` link carry the machine. The
   runtime rounds a `Cylinder` tyre's edge (5 % of the radius), raises its
-  friction to at least 1.1 with a `max` combine rule, zeroes restitution, and
-  turns on CCD. Name the collider `tire_collider` so spawn alignment finds it.
+  friction to at least 1.1 with a `min` combine rule, so the ground's
+  material decides the grip, zeroes restitution, and turns on CCD. Name the
+  collider `tire_collider` so spawn alignment finds it. Generated grounds
+  take `GEARBOX_GROUND_FRICTION` when set.
+- steer joints without an authored drive get a force-based motor capped at
+  the standstill scrub torque `μ · N · w / 2` of their tyre.
 
 Joint sources, all merged and deduplicated:
 `role:poweredWheelJoints`, `role:passiveWheelJoints`, controller

@@ -607,7 +607,7 @@ fn spawn_flat_ground(
     let collider =
         ColliderBuilder::cuboid(FLAT_GROUND_HALF_EXTENT_M, 0.02, FLAT_GROUND_HALF_EXTENT_M)
             .translation(DVec3::new(0.0, -0.02, 0.0))
-            .friction(1.0)
+            .friction(ground_friction(1.0))
             .restitution(0.0)
             .build();
     let collider = physics.colliders.insert(collider);
@@ -820,7 +820,7 @@ fn attach_gearbox_terrain_trimesh(
     };
     let terrain = physics
         .colliders
-        .insert(terrain.friction(1.4).restitution(0.0).build());
+        .insert(terrain.friction(ground_friction(1.4)).restitution(0.0).build());
     physics.entity_to_collider.insert(root, terrain);
 
     // Belt-and-braces catch floor below the lowest authored terrain. It
@@ -1740,4 +1740,14 @@ mod tests {
         );
         USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
     }
+}
+
+/// Friction of the generated grounds; `GEARBOX_GROUND_FRICTION` overrides
+/// it to test slippery surfaces.
+pub fn ground_friction(default: f64) -> f64 {
+    std::env::var("GEARBOX_GROUND_FRICTION")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|f| *f >= 0.0)
+        .unwrap_or(default)
 }

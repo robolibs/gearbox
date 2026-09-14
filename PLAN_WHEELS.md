@@ -40,12 +40,25 @@ Kubota and Oxbo drift 1 cm in 10 s and reach 2 m/s within 3 s; the Kubota
 yaws 0.60 for 0.5 (steady), the Oxbo tracks ±0.2 at 2 m/s; its steering
 limits cap it near 0.3 rad/s at 2 m/s, so 0.5 is out of its reach.
 
+Phase 2 leftovers (2026-09-14): `maxWheelTorqueNm` and `maxPowerKw`
+(`τ ≤ P / n / ω`, `ω` held at 0.5 rad/s or more) cap the wheel torque
+together with the grip; steer joints without an authored drive are capped
+at `μ · N · w / 2`; `tractionControl` (default on,
+`GEARBOX_TRACTION_CONTROL=0`) can be switched off; tyres combine friction by
+`min`, so the ground's material decides, and `GEARBOX_GROUND_FRICTION` sets
+the generated grounds; parked wheels reach full torque at 5 mrad/s.
+`world/peafield.usd` is flat, so the slope run loads
+`world/slope10_gravity.usda` first (gravity tilted 10°). Measured: the
+Kubota climbs and descends that slope at 1.00 m/s with slip under 0.01 and
+creeps 2–3 cm in 10 s parked on it. On ground friction 0.05 at full throttle
+its wheels spin at slip 2.2–2.6 with traction control off and stay at
+0.13–0.53 with it on; both accelerate at the grip limit, ~0.45 m/s².
+
 Still open: the diff drive writes chassis velocity (Phase 4, second half),
-the raycast code is still there (Phase 5), the Phase 2 overrides
-`maxWheelTorqueNm` / `maxPowerKw` and a load-based steering torque cap, the
-slope and low-friction acceptance runs, and a USD tyre material on every
-asset. The Oxbo and Krampe tyre colliders are still larger than their
-meshes.
+the raycast code is still there (Phase 5), a USD tyre material on every
+asset, and the Oxbo and Krampe tyre colliders are still larger than their
+meshes. A static ramp prop loaded with `spawn usd` blocked a tractor at its
+foot while its mesh was drawn elsewhere; not investigated.
 
 ## Goal
 

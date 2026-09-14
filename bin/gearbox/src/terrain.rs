@@ -305,7 +305,7 @@ fn spawn_procedural_terrain(
 
     let collider = physics
         .colliders
-        .insert(heightfield_collider(&collider_grid).friction(1.4).restitution(0.0).build());
+        .insert(heightfield_collider(&collider_grid).friction(crate::world::ground_friction(1.4)).restitution(0.0).build());
     physics.entity_to_collider.insert(entity, collider);
     let safety_floor = physics.colliders.insert(
         ColliderBuilder::cuboid(SAFETY_FLOOR_HALF_EXTENT_M, 0.10, SAFETY_FLOOR_HALF_EXTENT_M)

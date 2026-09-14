@@ -324,6 +324,12 @@ pub struct ControllerSpec {
     pub steering_geometry: Option<String>,
     /// `contact` (tyres carry the machine) or `raycast` (legacy vehicle).
     pub traction: Option<String>,
+    /// Per-wheel drive torque limit (N·m) on top of the grip cap.
+    pub max_wheel_torque_nm: Option<f32>,
+    /// Machine drive power (kW), shared over the driven wheels as `τ ≤ P / ω`.
+    pub max_power_kw: Option<f32>,
+    /// Keep each driven wheel near its ground speed; on unless set false.
+    pub traction_control: Option<bool>,
     pub front_steer_multiplier: Option<f32>,
     pub middle_steer_multiplier: Option<f32>,
     pub rear_steer_multiplier: Option<f32>,
@@ -591,6 +597,9 @@ fn append_isaac_compat_machines(
                 max_steer_deg: Some(45.0),
                 steering_geometry: Some("ackermann".to_string()),
                 traction: None,
+                max_wheel_torque_nm: None,
+                max_power_kw: None,
+                traction_control: None,
                 front_steer_multiplier: None,
                 middle_steer_multiplier: None,
                 rear_steer_multiplier: None,
@@ -1105,6 +1114,7 @@ fn apply_builtin_ackermann_cmd_vel(
                 traction_track_width_m,
                 wheel_radius_m,
             );
+            let driven = wheel_targets.len();
             let passive =
                 parking_brake_wheel_targets(scene_root, controller, machine, &joints, &parents, &physics);
             let wheels = runtime
@@ -1139,6 +1149,7 @@ fn apply_builtin_ackermann_cmd_vel(
             // Contact traction: the solid tyres carry the machine and the
             // wheel motors are its engine and brake, capped at what the
             // tyre can grip. Raycast: the legacy vehicle rides the chassis.
+            let mut steer_cap = None;
             let using_raycast_vehicle = if contact {
                 set_wheel_colliders_sensor(&mut physics, body_handle, &tire_pairs, false);
                 let mass = runtime.machine_bodies.get(&machine.id).map(|bodies| {
@@ -1148,9 +1159,24 @@ fn apply_builtin_ackermann_cmd_vel(
                         .map(|b| b.mass())
                         .sum::<f64>()
                 });
-                cap_wheel_torque(&physics, body_handle, &mut wheel_targets, mass, wheels, wheel_radius_m);
-                limit_wheel_slip(&physics, body_handle, &mut wheel_targets);
+                cap_wheel_torque(
+                    &physics,
+                    body_handle,
+                    controller,
+                    &mut wheel_targets,
+                    mass,
+                    wheels,
+                    driven,
+                    wheel_radius_m,
+                    cmd.linear_mps.abs() < 0.05,
+                );
+                if traction_control_enabled(controller) {
+                    limit_wheel_slip(&physics, body_handle, &mut wheel_targets);
+                }
                 roll_idle_wheels(&physics, body_handle, &mut wheel_targets, idle, forward_mps, wheel_radius_m);
+                steer_cap = steer_torque_cap(
+                    scene_root, controller, machine, &joints, &parents, &physics, body_handle, mass, wheels,
+                );
                 false
             } else {
                 apply_rapier_raycast_vehicle_controller(
@@ -1191,11 +1217,7 @@ fn apply_builtin_ackermann_cmd_vel(
             if using_raycast_vehicle {
                 hold_axle_pivots(&mut physics, body_handle, &steer_targets);
             }
-            let applied = apply_articulation_or_impulse_joint_motors(
-                &mut physics,
-                &wheel_targets,
-                &steer_targets,
-            );
+            let applied = apply_joint_motors(&mut physics, &wheel_targets, &steer_targets, steer_cap);
             if runtime.logged_steer.insert(key.clone()) {
                 info!(
                     "gearbox-control: {} steer joints={} applied={} wheel joints={} applied={} raycast={}",
@@ -1547,6 +1569,8 @@ const WHEEL_GRIP_USE: f64 = 0.9;
 /// Wheel speed error (rad/s) at which the contact drive motor gives its
 /// full, grip-capped torque.
 const WHEEL_FULL_TORQUE_ERROR_RAD_S: f64 = 0.1;
+/// The same for a parked machine holding a slope.
+const WHEEL_HOLD_ERROR_RAD_S: f64 = 0.005;
 /// Commanded speed changes at most this fast (m/s²).
 const CMD_ACCEL_MPS2: f32 = 2.0;
 /// Traction control band around a wheel's own ground speed: a share of it
@@ -1570,6 +1594,74 @@ fn wheel_ground_speed(
         roll = -roll;
     }
     Some((body.linvel().dot(roll), radius))
+}
+
+/// Below this wheel speed the power limit holds at its value here: the
+/// gearbox, not the engine, limits torque when crawling.
+const WHEEL_POWER_MIN_OMEGA_RAD_S: f64 = 0.5;
+
+/// One wheel's drive torque cap: the lowest of its grip limit, the authored
+/// per-wheel torque and its share of the machine's power at its speed.
+fn wheel_torque_cap(
+    grip_nm: f64,
+    max_torque_nm: Option<f64>,
+    power_w_per_wheel: Option<f64>,
+    omega_rad_s: f64,
+) -> f64 {
+    let mut cap = grip_nm;
+    if let Some(max) = max_torque_nm {
+        cap = cap.min(max);
+    }
+    if let Some(power) = power_w_per_wheel {
+        cap = cap.min(power / omega_rad_s.abs().max(WHEEL_POWER_MIN_OMEGA_RAD_S));
+    }
+    cap
+}
+
+/// Traction control stays on unless the controller or
+/// `GEARBOX_TRACTION_CONTROL=0` turns it off.
+fn traction_control_enabled(controller: &ControllerSpec) -> bool {
+    static ENV: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let env = ENV.get_or_init(|| {
+        std::env::var("GEARBOX_TRACTION_CONTROL")
+            .ok()
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "off"))
+    });
+    controller.traction_control.or(*env).unwrap_or(true)
+}
+
+/// Standstill scrub torque a steer motor must beat, `μ · N · w / 2`: `N`
+/// one wheel's share of the weight, `w` the steered tyres' mean width.
+#[allow(clippy::too_many_arguments)]
+fn steer_torque_cap(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: &Query<&ChildOf>,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    machine_mass: Option<f64>,
+    wheels: usize,
+) -> Option<f64> {
+    let mass = machine_mass?;
+    let knuckles = steering_knuckles(scene_root, controller, machine, joints, parents, physics);
+    let widths: Vec<f64> = tire_joint_pairs(scene_root, controller, machine, joints, parents, physics)
+        .into_iter()
+        .filter(|p| knuckles.contains(&p.0) || knuckles.contains(&p.1))
+        .filter_map(|p| wheel_body_of(physics, chassis, p))
+        .filter_map(|wheel| body_tyre_geometry(physics, wheel))
+        .map(|(_, width, _)| width)
+        .collect();
+    if widths.is_empty() {
+        return None;
+    }
+    let width = widths.iter().sum::<f64>() / widths.len() as f64;
+    Some(TIRE_FRICTION * mass * 9.81 / wheels.max(1) as f64 * width / 2.0)
 }
 
 /// Traction control and ABS in one: each driven wheel's target stays within
@@ -1787,24 +1879,46 @@ fn warn_low_colliders(
 /// Cap every wheel motor at the grip its tyre has: `μ · N · r`, the load
 /// `N` the machine's weight spread over all its wheels. Released motors
 /// (no damping) stay released.
+#[allow(clippy::too_many_arguments)]
 fn cap_wheel_torque(
     physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
+    controller: &ControllerSpec,
     targets: &mut [JointVelocityTarget],
     machine_mass: Option<f64>,
     wheels: usize,
+    driven: usize,
     radius_fallback_m: f64,
+    parked: bool,
 ) {
     let Some(mass) = machine_mass else {
         return;
     };
+    // Parked, the wheels hold a slope: full torque at a tiny speed error, so
+    // the velocity motor creeps millimetres instead of centimetres.
+    let full_torque_error = if parked {
+        WHEEL_HOLD_ERROR_RAD_S
+    } else {
+        WHEEL_FULL_TORQUE_ERROR_RAD_S
+    };
     let load = mass * 9.81 / wheels.max(1) as f64;
+    let power = controller
+        .max_power_kw
+        .map(|kw| kw as f64 * 1000.0 / driven.max(1) as f64);
     for target in targets.iter_mut().filter(|t| t.damping > 0.0) {
         let radius = wheel_body_of(physics, chassis, target.pair)
             .and_then(|wheel| body_max_collider_radius(physics, wheel))
             .unwrap_or(radius_fallback_m);
-        target.max_torque = WHEEL_GRIP_USE * TIRE_FRICTION * load * radius;
-        target.damping = target.max_torque / WHEEL_FULL_TORQUE_ERROR_RAD_S;
+        let omega = wheel_ground_speed(physics, chassis, target.pair)
+            .map(|(ground, r)| ground / r)
+            .unwrap_or(0.0);
+        target.max_torque = wheel_torque_cap(
+            WHEEL_GRIP_USE * TIRE_FRICTION * load * radius,
+            controller.max_wheel_torque_nm.map(f64::from),
+            power,
+            omega,
+        );
+        target.damping = target.max_torque / full_torque_error;
         target.force_based = true;
     }
 }
@@ -1916,7 +2030,9 @@ fn prepare_machine_physics(
                 if col.friction() < TIRE_FRICTION {
                     col.set_friction(TIRE_FRICTION);
                 }
-                col.set_friction_combine_rule(CoefficientCombineRule::Max);
+                // The lower friction governs, so the ground's material decides
+                // how slippery it is.
+                col.set_friction_combine_rule(CoefficientCombineRule::Min);
                 col.set_restitution(0.0);
                 tyres += 1;
             }
@@ -2907,13 +3023,7 @@ fn steer_axle_lines(
     physics: &crate::physics::PhysicsWorld,
     chassis: RigidBodyHandle,
 ) -> Option<(f64, f64)> {
-    let knuckles: Vec<RigidBodyHandle> = machine
-        .steering_joints
-        .iter()
-        .chain(controller.steer_joints.iter())
-        .filter_map(|p| joint_pair(scene_root, p, joints, parents, physics))
-        .map(|(_, knuckle)| knuckle)
-        .collect();
+    let knuckles = steering_knuckles(scene_root, controller, machine, joints, parents, physics);
     let (mut fixed, mut front) = (Vec::new(), f64::MAX);
     for pair in tire_joint_pairs(scene_root, controller, machine, joints, parents, physics) {
         let Some(center) = wheel_local_center(physics, chassis, pair) else {
@@ -2929,6 +3039,28 @@ fn steer_axle_lines(
         return None;
     }
     Some((fixed.iter().sum::<f64>() / fixed.len() as f64, front))
+}
+
+/// The bodies the machine's steer joints turn.
+fn steering_knuckles(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: &Query<&ChildOf>,
+    physics: &crate::physics::PhysicsWorld,
+) -> Vec<RigidBodyHandle> {
+    machine
+        .steering_joints
+        .iter()
+        .chain(controller.steer_joints.iter())
+        .filter_map(|p| joint_pair(scene_root, p, joints, parents, physics))
+        .map(|(_, knuckle)| knuckle)
+        .collect()
 }
 
 /// Steering wheelbase when none is authored: how far the front steered
@@ -3342,6 +3474,17 @@ fn apply_articulation_or_impulse_joint_motors(
     wheel_targets: &[JointVelocityTarget],
     steer_targets: &[JointPositionTarget],
 ) -> MotorApplication {
+    apply_joint_motors(physics, wheel_targets, steer_targets, None)
+}
+
+/// Write the wheel and steer motors; `steer_cap` limits the torque of steer
+/// joints without an authored drive.
+fn apply_joint_motors(
+    physics: &mut crate::physics::PhysicsWorld,
+    wheel_targets: &[JointVelocityTarget],
+    steer_targets: &[JointPositionTarget],
+    steer_cap: Option<f64>,
+) -> MotorApplication {
     let mut applied = MotorApplication::default();
     if wheel_targets.is_empty() && steer_targets.is_empty() {
         return applied;
@@ -3362,7 +3505,7 @@ fn apply_articulation_or_impulse_joint_motors(
         if let Some(handle) = multibody_joint_handle(physics, target.pair) {
             if let Some((multibody, link_id)) = physics.multibody_joints.get_mut(handle) {
                 if let Some(link) = multibody.link_mut(link_id) {
-                    set_steer_motor(&mut link.joint.data, target.position);
+                    set_steer_motor(&mut link.joint.data, target.position, steer_cap);
                     applied.steer = true;
                 }
             }
@@ -3386,7 +3529,7 @@ fn apply_articulation_or_impulse_joint_motors(
             // baked into the joint local axis when usd_rapier builds the
             // revolute joint. Driving AngZ fights a locked axis and can
             // explode/flip the vehicle.
-            set_steer_motor(&mut joint.data, target.position);
+            set_steer_motor(&mut joint.data, target.position, steer_cap);
             applied.steer = true;
         }
     }
@@ -3408,7 +3551,11 @@ fn set_wheel_motor(data: &mut rapier3d::prelude::GenericJoint, target: &JointVel
 
 /// Drive a steer joint to `position` with its authored USD drive, else with
 /// force-based gains like the ones the assets author.
-fn set_steer_motor(data: &mut rapier3d::prelude::GenericJoint, position: f64) {
+fn set_steer_motor(
+    data: &mut rapier3d::prelude::GenericJoint,
+    position: f64,
+    max_torque: Option<f64>,
+) {
     let authored = data
         .motor(JointAxis::AngX)
         .filter(|m| matches!(m.model, MotorModel::ForceBased) && m.stiffness > 0.0)
@@ -3420,7 +3567,7 @@ fn set_steer_motor(data: &mut rapier3d::prelude::GenericJoint, position: f64) {
         None => {
             data.set_motor_model(JointAxis::AngX, MotorModel::ForceBased)
                 .set_motor_position(JointAxis::AngX, position, STEER_STIFFNESS, STEER_DAMPING)
-                .set_motor_max_force(JointAxis::AngX, STEER_MAX_TORQUE);
+                .set_motor_max_force(JointAxis::AngX, max_torque.unwrap_or(STEER_MAX_TORQUE));
         }
     }
 }
@@ -3615,6 +3762,9 @@ fn discover_controllers(
                 max_steer_deg: read_float(stage, prim, &(prefix.clone() + "maxSteerDeg")),
                 steering_geometry: read_token(stage, prim, &(prefix.clone() + "steeringGeometry")),
                 traction: read_token(stage, prim, &(prefix.clone() + "traction")),
+                max_wheel_torque_nm: read_float(stage, prim, &(prefix.clone() + "maxWheelTorqueNm")),
+                max_power_kw: read_float(stage, prim, &(prefix.clone() + "maxPowerKw")),
+                traction_control: read_bool(stage, prim, &(prefix.clone() + "tractionControl")),
                 front_steer_multiplier: read_float(
                     stage,
                     prim,
@@ -4173,6 +4323,16 @@ def Xform "Leatherback" (
 
         assert!(turn_speed_ratio(2.0, -0.5, -1.4) < 1.0);
         assert!(turn_speed_ratio(2.0, -0.5, 1.4) > 1.0);
+    }
+
+    #[test]
+    fn wheel_torque_cap_takes_the_lowest_limit() {
+        assert_eq!(wheel_torque_cap(8000.0, None, None, 3.0), 8000.0);
+        assert_eq!(wheel_torque_cap(8000.0, Some(5000.0), None, 3.0), 5000.0);
+        // 60 kW on one wheel at 10 rad/s: 6 kN·m.
+        assert_eq!(wheel_torque_cap(8000.0, None, Some(60_000.0), 10.0), 6000.0);
+        // Crawling, the power term holds at the minimum wheel speed.
+        assert_eq!(wheel_torque_cap(8000.0, None, Some(60_000.0), 0.0), 8000.0);
     }
 
     #[test]
