@@ -2,8 +2,8 @@
 
 ## Status (2026-09-14)
 
-Phases 0–3 are in, and `contact` is the default traction of
-`builtin:ackermann_cmd_vel` (the first half of Phase 4):
+Phases 0–3 and 5 are in; tyre contact is the only traction of
+`builtin:ackermann_cmd_vel` (Phase 4 first half, Phase 5):
 
 - physics steps at a fixed 120 Hz (`GEARBOX_PHYSICS_HZ`), at most 12 steps a  frame, planned in `First` so per-frame impulses know their time span;
 - `prepare_machine_physics` turns machine self-collision off and gives every
@@ -54,10 +54,15 @@ creeps 2–3 cm in 10 s parked on it. On ground friction 0.05 at full throttle
 its wheels spin at slip 2.2–2.6 with traction control off and stay at
 0.13–0.53 with it on; both accelerate at the grip limit, ~0.45 m/s².
 
+Phase 5 (2026-09-14): the raycast vehicle is gone: its controller, wheel
+specs and presets, the sensor toggle, the axle-pivot hold, the `traction`
+attribute and `GEARBOX_TRACTION`, and `attach::TowedMass`. The Ackermann
+controller only drives through tyre contact. The visual wheel spin stays
+for the diff drive until it moves to contact.
+
 Still open: the diff drive writes chassis velocity (Phase 4, second half),
-the raycast code is still there (Phase 5), a USD tyre material on every
-asset, and the Oxbo and Krampe tyre colliders are still larger than their
-meshes. A static ramp prop loaded with `spawn usd` blocked a tractor at its
+a USD tyre material on every asset, and the Oxbo and Krampe tyre colliders
+are still larger than their meshes. A static ramp prop loaded with `spawn usd` blocked a tractor at its
 foot while its mesh was drawn elsewhere; not investigated.
 
 ## Goal

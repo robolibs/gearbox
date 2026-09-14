@@ -130,7 +130,7 @@ properties below live on the machine prim with the prefix
 | `frontLeftWheelJoint` … `rearRightWheelJoint` | rel | optional | none | Explicit corner joints. The rear pair counts as powered. |
 | `steerLeftJoint` / `steerRightJoint` | rel | optional | none | Explicit steering pair. When both resolve they take precedence over `role:steeringJoints` and receive the true Ackermann left/right angles. |
 | `steerJoints` | rel[] | optional | `[]` | Extra steering joints, merged with `role:steeringJoints`. Last-resort fallback receives the centre angle. |
-| `traction` | token | optional | `contact` | `contact`: the tyres carry the machine and the wheel motors drive it. `raycast`: the legacy raycast vehicle. `GEARBOX_TRACTION` sets the default. |
+
 | `maxWheelTorqueNm` | float | optional | none | Per-wheel drive torque limit, applied on top of the grip cap. |
 | `maxPowerKw` | float | optional | none | Drive power shared over the driven wheels: each wheel's torque stays under `P / n / ω`, `ω` held at 0.5 rad/s or more. |
 | `tractionControl` | bool | optional | `true` | Keeps each driven wheel within 8 % + 0.15 m/s of its ground speed. `GEARBOX_TRACTION_CONTROL=0` sets the default off. |
@@ -142,16 +142,13 @@ properties below live on the machine prim with the prefix
 
 ### 3.1 Controller types
 
-**`builtin:ackermann_cmd_vel`** — wheeled vehicles with steered axles. With
-`traction = "contact"` (the default) the solid tyre colliders carry the
-machine: the wheel joints are velocity motors capped at the tyre's grip
+**`builtin:ackermann_cmd_vel`** — wheeled vehicles with steered axles. The
+solid tyre colliders carry the machine: the wheel joints are velocity
+motors capped at the tyre's grip
 (`0.9 · μ · N · r`, `N` the machine's weight over all its wheels), passive
 wheels idle at ground speed, an integral trim holds the commanded ground
 speed, and steer joints keep their authored USD drive gains (else
-50 000 N·m/rad) and only take new targets. `traction = "raycast"`
-(or `GEARBOX_TRACTION=raycast`) selects the legacy rapier
-`DynamicRayCastVehicleController`: tyres become sensors, raycasts carry the
-chassis, and the wheel joints only spin for show. Requires body (§4) and at
+50 000 N·m/rad) and only take new targets. Requires body (§4) and at
 least one resolvable wheel joint pair (§5). Without wheel pairs it logs
 `no wheel joint pairs found ...` once and stops. Every wheel link publishes
 `link.<wheel>.slip` (tyre surface speed over ground speed, minus one).
@@ -225,9 +222,8 @@ The controller's `body` (or the machine `body`) MUST point at a prim that:
 - has a collider somewhere in the machine, so terrain alignment can finish
   (`load.rs` waits for both bodies and colliders and warns after 120 frames);
 - SHOULD carry `PhysicsMassAPI` with `physics:mass` and
-  `physics:diagonalInertia`. On contact traction the machine's total mass
-  sets the wheel torque cap; the raycast vehicle scales its forces by
-  `mass / 2700 kg` when the chassis is heavier than the reference tractor.
+  `physics:diagonalInertia`. The machine's total mass sets the wheel
+  torque cap.
 - `physics:diagonalInertia` MUST be plausible for the mass. The runtime
   compares each component with a box estimate from the chassis collider
   bounds (`m/12 · (b² + c²)`); when any component is below 25 % of that
@@ -263,7 +259,7 @@ rapier bodies. In USD terms:
   both prims carrying `PhysicsRigidBodyAPI`;
 - the wheel body has a collider. Its largest half-extent is taken as the tyre
   radius if above 0.05 m, otherwise `wheelRadius` is used.
-- on contact traction the tyres of every `wheel` link carry the machine. The
+- the tyres of every `wheel` link carry the machine. The
   runtime rounds a `Cylinder` tyre's edge (5 % of the radius), raises its
   friction to at least 1.1 with a `min` combine rule, so the ground's
   material decides the grip, zeroes restitution, and turns on CCD. Name the
@@ -490,9 +486,9 @@ chassis                              role = link (or base)
   inside the knuckle, not as another link.
 - A wheel that does not steer skips the knuckle: `chassis → wheel_<pos>`.
 - A pivoting axle is one more revolute level between the chassis and the
-  steer links (`chassis → axle → steer → wheel`). It is optional. On contact
-  traction it swings freely within its limits; while the raycast vehicle
-  carries the chassis (§3) the runtime holds it at its rest angle.
+  steer links (`chassis → axle → steer → wheel`). It is optional and swings
+  freely within its limits, carried by its tyres; a small USD drive on it
+  damps the swing.
 - A tandem of two rigid axles rocks onto one of them as soon as a hitch pins
   the nose. Hang both axles from a walking beam instead: a `bogie` link on a
   revolute (axis X, a few degrees each way) between the chassis and a point

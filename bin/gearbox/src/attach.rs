@@ -3,7 +3,6 @@
 //! master's agent answers the requests, the slave's agent refuses commands
 //! while attached, and the master's `/links` grows the slave's tree.
 
-use std::collections::HashMap;
 
 use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
@@ -49,10 +48,6 @@ pub struct Attachment {
 #[derive(Resource, Default)]
 pub struct Attachments(pub Vec<Attachment>);
 
-/// Extra mass each master tows, by machine id, for the engine force law.
-#[derive(Resource, Default)]
-pub struct TowedMass(pub HashMap<String, f64>);
-
 /// An attachment authored in a world layer, waiting for both machines to
 /// have agents before it is applied like a runtime attach with teleport.
 #[derive(Debug, Clone)]
@@ -73,7 +68,7 @@ pub struct AttachPlugin;
 impl Plugin for AttachPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Attachments>()
-            .init_resource::<TowedMass>()
+
             .init_resource::<PendingStaticAttachments>()
             .add_systems(Update, serve_attachments);
     }
@@ -807,29 +802,12 @@ fn refresh_masters(bus: &mut GearboxBus, attachments: &[Attachment], scene: &Sce
     }
 }
 
-fn recompute_towed(attachments: &[Attachment], scene: &Scene, towed: &mut TowedMass) {
-    towed.0.clear();
-    for a in attachments {
-        // Everything below a master, however deep, weighs on its engine.
-        let mut cur = a.master_ns.clone();
-        for _ in 0..64 {
-            if let Some(m) = scene.machine(&cur) {
-                *towed.0.entry(m.id.clone()).or_default() += a.slave_mass_kg;
-            }
-            match attachments.iter().find(|x| x.slave_ns == cur) {
-                Some(up) => cur = up.master_ns.clone(),
-                None => break,
-            }
-        }
-    }
-}
-
 pub(crate) fn serve_attachments(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
     bus: Option<ResMut<GearboxBus>>,
     mut attachments: ResMut<Attachments>,
-    mut towed: ResMut<TowedMass>,
+
     mut physics: ResMut<PhysicsWorld>,
     mut pending_static: ResMut<PendingStaticAttachments>,
     prims: Query<(Entity, &'static UsdPrimRef)>,
@@ -1030,7 +1008,7 @@ pub(crate) fn serve_attachments(
 
     if changed {
         refresh_masters(&mut bus, &attachments.0, &scene);
-        recompute_towed(&attachments.0, &scene, &mut towed);
+
     }
 
     // Commands aimed at a slave through its master land in the slave's queue.

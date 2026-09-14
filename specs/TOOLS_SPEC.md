@@ -169,11 +169,11 @@ Rules, taken from Gazebo's `DetachableJoint` and Isaac's assembler:
 
 ### 3.3 Tolerances and safety
 
-The master's body mass, wheel forces, and brake constants already scale with
-chassis mass (`CONTROLLER_SPEC.md` §4). Attached slaves add their mass to
-the towed load, not to the chassis, so the raycast vehicle's engine force
-MUST also scale with total composite mass or a loaded trailer stalls the
-tractor.
+The master's wheel torque cap comes from its own mass and tyre grip
+(`CONTROLLER_SPEC.md` §4). An attached slave rolls on its own tyres and
+pulls on the master only through the coupling joint, so a heavy trailer
+slows or stalls the tractor physically; nothing adds its mass to the
+master's force law.
 
 ## 4. Effect on the link tree
 
