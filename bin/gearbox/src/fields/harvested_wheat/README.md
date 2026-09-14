@@ -16,6 +16,10 @@ the full close-up density is unchanged.
 
 The ground keeps a consistent straw-brown palette with subdued broad colour variation.
 Residue strips slightly darken the existing colour instead of adding bright hay bands.
+Regrowth patches (`shaders/patches.wgsl`, warped 10–30 m blobs) turn the ground olive green,
+turn half the stalks into green volunteer shoots and tint the distant clumps. A leaf layer
+(60/m², fading 24–96 m) scatters clover and rosettes the cutter passed over: thick in the
+patches, one in ten elsewhere. Wheel tracks bend and darken them like the stalks.
 
 The ground material comes from the existing multi-bale field:
 `scripts/bale_run_multi.py` loads `assets/world/terrain.usd`.

@@ -9,6 +9,7 @@
 #import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
 #import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
+#import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::regrowth
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -93,8 +94,90 @@ fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
     return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
+fn blade_fade_end(rank: f32) -> f32 {
+    if field.inverse_square_thinning == 0u {
+        return mix(field.fade_end, field.fade_start, sqrt(rank));
+    }
+    return field.fade_start * field.fade_end
+        / (field.fade_start + (field.fade_end - field.fade_start) * sqrt(rank));
+}
+
+// Clover and rosettes the cutter bar passed over: thick in regrowth
+// patches, scattered elsewhere. position.z selects the leaf.
+fn stubble_detail(vertex: Vertex) -> VertexOutput {
+    let chunk_seed = pcg(bitcast<u32>(i32(field.corner.x)) * 73856093u
+        ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
+    let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x8DA6B343u);
+    let base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
+    let sampled = sample_field(base);
+    let ground = vec3<f32>(base.x, sampled.x, base.y);
+    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
+    let distance = length(ground - view.world_position);
+    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
+    let end = blade_fade_end(rank);
+    let kept = rand(id, 9u) < 0.10 + 0.90 * regrowth(base);
+    let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
+        * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+    let clover = rand(id, 17u) < 0.8;
+    let leaf = u32(vertex.position.z - 1.0);
+    let t = vertex.position.y;
+    let side = vertex.position.x;
+    let yaw = rand(id, 4u) * 6.2831853;
+    let tone = 0.85 + 0.25 * rand(id, 5u);
+    var offset: vec3<f32>;
+    var normal: vec3<f32>;
+    var color: vec3<f32>;
+
+    if (clover) {
+        let head = leaf / 3u;
+        let stem_yaw = yaw + f32(head) * 2.7;
+        let stem_dir = vec3<f32>(cos(stem_yaw), 0.0, sin(stem_yaw));
+        let angle = yaw + f32(leaf % 3u) * 2.0943951 + f32(head) * 0.9;
+        let forward = vec3<f32>(cos(angle), 0.0, sin(angle));
+        let right = vec3<f32>(-sin(angle), 0.0, cos(angle));
+        let size = 0.8 + 0.4 * rand(id, 11u + head);
+        let leaf_width = 0.022 * pow(max(sin(t * 3.14159265), 0.0), 0.65);
+        let cup = 0.003 * side * side * sin(t * 3.14159265);
+        offset = stem_dir * 0.035 + vec3<f32>(0.0, 0.105 + 0.015 * f32(head), 0.0)
+            + forward * (0.002 + t * 0.031 * size)
+            + right * (side * leaf_width * 0.5 * size)
+            + vec3<f32>(0.0, 0.009 * t - 0.006 * t * t + cup, 0.0);
+        let band = 1.0 - smoothstep(0.035, 0.105, abs(t - (0.54 + 0.16 * abs(side))));
+        color = mix(vec3<f32>(0.055, 0.18, 0.065), vec3<f32>(0.24, 0.36, 0.17), band * 0.7) * tone;
+        normal = normalize(ground_normal - forward * 0.15 + right * side * 0.25);
+    } else {
+        let angle = yaw + f32(leaf) * 2.3999632;
+        let forward = vec3<f32>(cos(angle), 0.0, sin(angle));
+        let right = vec3<f32>(-sin(angle), 0.0, cos(angle));
+        let size = 0.8 + 0.35 * rand(id, 20u + leaf);
+        let profile = pow(max(sin(t * 3.14159265), 0.0), 0.8);
+        offset = forward * (0.008 + t * 0.085 * size)
+            + right * (side * 0.010 * profile * size)
+            + vec3<f32>(0.0, 0.035 + 0.095 * sin(t * 2.0), 0.0);
+        normal = normalize(ground_normal - forward * cos(t * 2.0) * 0.7 + right * side * 0.2);
+        let vein = 1.0 - abs(side);
+        color = mix(vec3<f32>(0.09, 0.21, 0.035), vec3<f32>(0.16, 0.29, 0.07), vein * 0.4) * tone;
+    }
+
+    let pressed = sample_trample(base);
+    let flat = clamp(pressed.x, 0.0, 1.0);
+    offset += vec3<f32>(pressed.y, 0.0, pressed.z) * offset.y * 0.9;
+    offset.y *= 1.0 - flat * field.wheels.bend;
+    let p = ground + offset * coverage;
+    var out: VertexOutput;
+    out.world_position = vec4<f32>(p, 1.0);
+    out.clip_position = view.clip_from_world * out.world_position;
+    out.world_normal = normalize(mix(normal, ground_normal, flat));
+    out.ground_normal = ground_normal;
+    out.color = vec4<f32>(color * (1.0 - field.wheels.darkening * flat), 1.0);
+    return out;
+}
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
+    if (vertex.position.z > 0.5) {
+        return stubble_detail(vertex);
+    }
     let corner = field.corner;
     let chunk_seed = pcg(bitcast<u32>(i32(corner.x)) * 73856093u ^ bitcast<u32>(i32(corner.y)) * 19349663u);
     let id = vertex.instance_index ^ chunk_seed;
@@ -112,11 +195,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // Instance rank sets each blade's radial fade interval.
     let distance = length(vec3<f32>(base_xz.x, ground_y, base_xz.y) - view.world_position);
     let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
-    var blade_end = mix(field.fade_end, field.fade_start, sqrt(rank));
-    if field.inverse_square_thinning != 0u {
-        blade_end = field.fade_start * field.fade_end
-            / (field.fade_start + (field.fade_end - field.fade_start) * sqrt(rank));
-    }
+    let blade_end = blade_fade_end(rank);
     let fade_span = select(BLADE_FADE_M, max(BLADE_FADE_M, blade_end * 0.12), vertex.position.z < -0.5);
     let blade_start = max(field.fade_start, blade_end - fade_span);
     let coverage = 1.0 - smoothstep(blade_start, blade_end, distance);
@@ -127,6 +206,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     // Wheel pressure bends vegetation along the rolling direction.
     let pressed = sample_trample(base_xz);
+    let green = regrowth(base_xz);
     if (vertex.position.z < -0.5) {
         let cluster = canopy_vertex(vertex.position, vec3<f32>(base_xz.x, ground_y, base_xz.y),
             ground_normal, seed, distance, alive, pressed, field.wheels.bend, true);
@@ -136,7 +216,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_normal = cluster.normal;
         out.ground_normal = ground_normal;
         out.canopy_uv = cluster.uv;
-        out.color = vec4<f32>(vec3<f32>(0.43, 0.30, 0.115) * mix(0.88, 1.08, t)
+        out.color = vec4<f32>(mix(vec3<f32>(0.43, 0.30, 0.115), vec3<f32>(0.20, 0.30, 0.08), green * 0.7)
+            * mix(0.88, 1.08, t)
             * (0.94 + seed * 0.12) * (1.0 - pressed.x * field.wheels.darkening), 1.0);
         return out;
     }
@@ -168,8 +249,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     // Cut stalks grade from shaded straw roots to pale dry tips.
     let tone = 0.65 + 0.7 * rand(id, 5u);
-    let root = vec3<f32>(0.28, 0.18, 0.065) * tone;
-    let tip = mix(vec3<f32>(0.46, 0.30, 0.10), vec3<f32>(0.60, 0.43, 0.18), dry) * tone;
+    let root_straw = vec3<f32>(0.28, 0.18, 0.065) * tone;
+    let straw_tip = mix(vec3<f32>(0.46, 0.30, 0.10), vec3<f32>(0.60, 0.43, 0.18), dry) * tone;
+    // In regrowth patches half the stalks are green volunteer shoots.
+    let shoot = green * step(rand(id, 8u), 0.5);
+    let root = mix(root_straw, vec3<f32>(0.11, 0.20, 0.045) * tone, shoot);
+    let tip = mix(straw_tip, vec3<f32>(0.22, 0.40, 0.09) * tone, shoot);
 
     var out: VertexOutput;
     out.world_position = vec4<f32>(p, 1.0);

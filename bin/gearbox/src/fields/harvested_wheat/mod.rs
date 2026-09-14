@@ -159,6 +159,7 @@ pub(super) struct HarvestedWheatPlugin;
 
 impl Plugin for HarvestedWheatPlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "shaders/patches.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
         bevy::asset::embedded_asset!(app, "textures/soil_albedo.jpg");
@@ -179,7 +180,7 @@ impl Plugin for HarvestedWheatPlugin {
                 wheel_response: WheelResponse {
                     recovery_seconds: 1800.0,
                     bend: 0.94,
-                    darkening: 0.6,
+                    darkening: 0.44,
                     footprint_length: 0.30,
                 },
                 layers: vec![VegetationLayer {
@@ -188,6 +189,13 @@ impl Plugin for HarvestedWheatPlugin {
                     density,
                     fade_start: 4.0,
                     fade_end: 32.0,
+                    inverse_square_thinning: true,
+                }, VegetationLayer {
+                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    template: leaf_template,
+                    density: if density > 0.0 { 60.0 } else { 0.0 },
+                    fade_start: 24.0,
+                    fade_end: 96.0,
                     inverse_square_thinning: true,
                 }, VegetationLayer {
                     shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
@@ -241,6 +249,40 @@ fn create_ground(
             extension,
         });
     Arc::new(MaterialSurface(material))
+}
+
+/// Six segmented leaves for clover and rosettes; position.z selects the leaf.
+fn leaf_template() -> Mesh {
+    let segments = 5u32;
+    let mut positions = Vec::new();
+    let mut indices = Vec::new();
+    for leaf in 0..6 {
+        let start = positions.len() as u32;
+        for step in 0..=segments {
+            let t = step as f32 / segments as f32;
+            if step == segments {
+                positions.push([0.0, t, (leaf + 1) as f32]);
+            } else {
+                positions.push([-1.0, t, (leaf + 1) as f32]);
+                positions.push([1.0, t, (leaf + 1) as f32]);
+            }
+        }
+        for step in 0..segments - 1 {
+            let i = start + step * 2;
+            indices.extend_from_slice(&[i, i + 2, i + 1, i + 1, i + 2, i + 3]);
+        }
+        let i = start + (segments - 1) * 2;
+        indices.extend_from_slice(&[i, i + 2, i + 1]);
+    }
+    let count = positions.len();
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; count])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; count])
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 fn stalk_template() -> Mesh {
