@@ -1,4 +1,6 @@
-//! The Machine pane on the right rail: click a machine and it fills with
+//! The Machines pane: every machine in the scene as a list (click selects,
+//! double-click flies behind it and takes its drive, the radio pins the
+//! camera to it); below, the selected machine fills with
 //! one block per controller the USD authored, driving the same command
 //! paths the bus uses (`UiDrive` for twists, `ServiceCommands` and
 //! `LinkValues` for services and work controllers). Nothing here is fixed
@@ -6,13 +8,18 @@
 //! link tree's element kinds and values. Hitches share one container, PTOs
 //! another; everything but the machine head and the drive starts folded.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use mara::host::MaraHostCtx;
 use mara::ui::mara_core;
 use mara_core::pane::PaneBody;
-use mara_core::pod::Pod;
+use mara_core::pod::{Pod, PodResponse};
+use mara_core::vocab::Id as MaraId;
 
 use super::{PaneCtx, button_clicked, cid, pid, pod_response};
+use crate::viewer::commands::HostCommand;
+use crate::viewer::state::FollowTarget;
 use crate::controller::{
     CmdVel, ControllerInventory, ControllerKey, ControllerSpec, ControllerStates,
     MachineInstanceSpec, UiDrive,
@@ -95,6 +102,101 @@ pub fn auto_open(host: &MaraHostCtx<'_>, world: &mut World) {
     }
 }
 
+/// The machine rows at the top of the pane and each row's drive keys.
+struct MachineList {
+    rows: Vec<(Entity, Vec<ControllerKey>)>,
+}
+
+fn drive_keys(root: Entity, machine: &MachineInstanceSpec) -> Vec<ControllerKey> {
+    machine
+        .controllers
+        .iter()
+        .filter(|c| c.enabled && DRIVE_TYPES.contains(&c.controller_type.as_str()))
+        .map(|c| ControllerKey::new(root, &machine.id, &c.instance))
+        .collect()
+}
+
+/// One row per machine; the trailing text says who holds its drive.
+fn add_machine_list(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) -> MachineList {
+    let inventory = world.resource::<ControllerInventory>();
+    let panel = world.resource::<MachinePanel>();
+    let selection = world.resource::<Selection>().0;
+    let follow = world.resource::<FollowTarget>().entity;
+    let mut machines: Vec<(Entity, &MachineInstanceSpec)> = inventory
+        .machines
+        .iter()
+        .filter_map(|m| m.scene_root.map(|root| (root, m)))
+        .collect();
+    machines.sort_by(|a, b| a.1.id.cmp(&b.1.id));
+    let index_of =
+        |entity: Option<Entity>| entity.and_then(|e| machines.iter().position(|(root, _)| *root == e));
+    let list_pod = pid(P, "list", 0);
+    ctx.sync_list_memory(list_pod, index_of(selection), index_of(follow));
+    let pod = if machines.is_empty() {
+        Pod::new(list_pod)
+            .with_readout("machines", "none")
+            .with_readout("hint", "spawn a machine")
+    } else {
+        let labels: Vec<String> = machines.iter().map(|(_, m)| m.id.clone()).collect();
+        let trailing: Vec<String> = machines
+            .iter()
+            .map(|(root, m)| {
+                let drives = drive_keys(*root, m);
+                let holder = if drives.iter().any(|k| panel.gamepad_on(k)) {
+                    " · gamepad"
+                } else if drives.iter().any(|k| panel.holds(k)) {
+                    " · viewer"
+                } else {
+                    ""
+                };
+                format!("{}{holder}", m.kind.as_deref().unwrap_or("machine"))
+            })
+            .collect();
+        Pod::new(list_pod).with_hybrid_select_list(labels, Some(trailing), ctx.accent)
+    };
+    body.add_normal(cid(P, "list"), "Machines", "vehicle-tractor", vec![pod]);
+    MachineList {
+        rows: machines.iter().map(|(root, m)| (*root, drive_keys(*root, m))).collect(),
+    }
+}
+
+/// Clicks on the machine list: select, fly behind and drive, follow.
+fn handle_machine_list(
+    responses: &HashMap<MaraId, Vec<PodResponse>>,
+    list: &MachineList,
+    world: &mut World,
+    ctx: &PaneCtx,
+) {
+    let Some(rows) = pod_response(responses, cid(P, "list"), 0).and_then(|r| r.hybrid_select_lists.first())
+    else {
+        return;
+    };
+    if let Some(i) = rows.body_clicked
+        && let Some((root, _)) = list.rows.get(i)
+    {
+        ctx.send(HostCommand::SelectRoot(Some(*root)));
+    }
+    if let Some(i) = rows.body_double_clicked
+        && let Some((root, drives)) = list.rows.get(i)
+    {
+        ctx.send(HostCommand::SelectRoot(Some(*root)));
+        ctx.send(HostCommand::FlyToMachine(*root));
+        if let Some(key) = drives.first() {
+            world.resource_scope(|world, mut panel: Mut<MachinePanel>| {
+                if !drives.iter().any(|k| panel.holds(k)) {
+                    let mut ui_drive = world.resource_mut::<UiDrive>();
+                    panel.set_viewer_drive(&mut ui_drive, key, true);
+                }
+            });
+        }
+    }
+    if let Some(i) = rows.radio_clicked
+        && let Some((root, _)) = list.rows.get(i)
+    {
+        ctx.send(HostCommand::ToggleFollow(*root));
+    }
+}
+
 /// One controller's pod: where it was placed and which links it drives.
 struct Block {
     controller: ControllerSpec,
@@ -109,17 +211,10 @@ struct Block {
 
 pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     let accent = ctx.accent;
-    let Some(machine) = picked_machine(world) else {
-        body.add_normal(
-            cid(P, "none"),
-            "No machine",
-            "cube",
-            vec![
-                Pod::new(pid(P, "none", 0))
-                    .with_readout("selected", "nothing")
-                    .with_readout("hint", "click a machine in the scene"),
-            ],
-        );
+    let list = add_machine_list(body, world, ctx);
+    let Some(machine) = picked_machine(world).filter(|m| m.scene_root.is_some()) else {
+        let responses = body.render();
+        handle_machine_list(&responses, &list, world, ctx);
         return;
     };
     let Some(scene_root) = machine.scene_root else {
@@ -396,6 +491,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     }
 
     let responses = body.render();
+    handle_machine_list(&responses, &list, world, ctx);
     for block in blocks {
         let Some(resp) = pod_response(&responses, cid(P, &block.group), block.pod) else {
             continue;

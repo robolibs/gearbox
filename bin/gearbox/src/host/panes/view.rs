@@ -1,56 +1,49 @@
-//! Overlay toggles and render knobs, written straight to `DisplayToggles`.
+//! View: overlays, the TF tree, render knobs and saved camera views.
 
 use bevy::prelude::*;
 use mara::ui::mara_core;
 use mara_core::pane::PaneBody;
 use mara_core::pod::Pod;
 
-use super::{PaneCtx, cid, pid, pod_response, set_toggle};
-use crate::host::PANE_OVERLAYS as P;
+use super::{PaneCtx, button_clicked, cid, pid, pod_response, select_list_clicked, set_toggle};
+use crate::host::PANE_VIEW as P;
+use crate::viewer::commands::HostCommand;
 use crate::viewer::overlays::DisplayToggles;
-use crate::viewer::state::LoaderTuning;
+use crate::viewer::state::CameraBookmarks;
 
 pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     let accent = ctx.accent;
     let toggles = world.resource::<DisplayToggles>().clone();
-    let curve_radius = world.resource::<LoaderTuning>().curves.default_radius;
 
-    let toggles_id = cid(P, "toggles");
-    let toggles_pod = pid(P, "toggles", 0);
+    let overlays_id = cid(P, "overlays");
+    let overlays_pod = pid(P, "overlays", 0);
     ctx.sync_toggles(
-        toggles_pod,
+        overlays_pod,
         &[
             toggles.show_world_grid,
             toggles.show_world_axes,
-            toggles.show_prim_markers,
-            toggles.show_skeleton,
             toggles.show_physics,
             toggles.show_colliders,
         ],
     );
     body.add_normal(
-        toggles_id,
-        "World overlays",
+        overlays_id,
+        "Overlays",
         "color",
         vec![
-            Pod::new(toggles_pod)
-                .with_toggle_initial("World grid", accent, toggles.show_world_grid)
+            Pod::new(overlays_pod)
+                .with_toggle_initial("Ground grid", accent, toggles.show_world_grid)
                 .with_toggle_initial("World axes", accent, toggles.show_world_axes)
-                .with_toggle_initial("Prim markers", accent, toggles.show_prim_markers)
-                .with_toggle_initial("Skeleton", accent, toggles.show_skeleton)
-                .with_toggle_initial("Physics overlay", accent, toggles.show_physics)
+                .with_toggle_initial("Physics", accent, toggles.show_physics)
                 .with_toggle_initial("Colliders", accent, toggles.show_colliders),
         ],
     );
+
     let tf_id = cid(P, "tf");
     let tf_pod = pid(P, "tf", 0);
     ctx.sync_toggles(
         tf_pod,
-        &[
-            toggles.show_tf_frames,
-            toggles.show_tf_names,
-            toggles.show_tf_links,
-        ],
+        &[toggles.show_tf_frames, toggles.show_tf_names, toggles.show_tf_links],
     );
     body.add_normal(
         tf_id,
@@ -63,6 +56,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                 .with_toggle_initial("Parent links", accent, toggles.show_tf_links),
         ],
     );
+
     let render_id = cid(P, "render");
     let render_pod = pid(P, "render", 0);
     ctx.sync_toggles(render_pod, &[toggles.wireframe]);
@@ -74,33 +68,50 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
             Pod::new(render_pod)
                 .with_toggle_initial("Wireframe", accent, toggles.wireframe)
                 .with_slider(
-                    "Light intensity",
+                    "Light",
                     (toggles.light_intensity_scale as f64).clamp(0.0, 4.0),
                     0.0..=4.0,
                     2,
                     "x",
                     accent,
-                )
-                .with_slider(
-                    "Curve radius",
-                    (curve_radius as f64).clamp(0.001, 0.25),
-                    0.001..=0.25,
-                    3,
-                    " m",
-                    accent,
                 ),
         ],
     );
 
+    // Saved camera views: save, clear, and one row per view to recall it.
+    let bookmarks = world.resource::<CameraBookmarks>();
+    let cameras_id = cid(P, "cameras");
+    let mut camera_pods = vec![
+        Pod::new(pid(P, "cameras", 0))
+            .with_button("Save view", accent)
+            .with_button("Clear", accent),
+    ];
+    if !bookmarks.items.is_empty() {
+        let rows: Vec<String> = bookmarks.items.iter().map(|b| b.name.clone()).collect();
+        let trailing: Vec<String> =
+            bookmarks.items.iter().map(|b| format!("{:.1} m", b.distance)).collect();
+        camera_pods.push(
+            Pod::new(pid(P, "cameras", 1)).with_select_list(rows, Some(trailing), accent),
+        );
+    }
+    body.add_normal(cameras_id, "Cameras", "camera", camera_pods);
+
     let responses = body.render();
+    if button_clicked(&responses, cameras_id, 0, 0) {
+        ctx.send(HostCommand::SaveBookmark);
+    }
+    if button_clicked(&responses, cameras_id, 0, 1) {
+        ctx.send(HostCommand::ClearBookmarks);
+    }
+    if let Some(index) = select_list_clicked(&responses, cameras_id, 1) {
+        ctx.send(HostCommand::RecallBookmark(index));
+    }
     let mut toggles = world.resource_mut::<DisplayToggles>();
-    if let Some(resp) = pod_response(&responses, toggles_id, 0) {
+    if let Some(resp) = pod_response(&responses, overlays_id, 0) {
         set_toggle(&mut toggles.show_world_grid, resp, 0);
         set_toggle(&mut toggles.show_world_axes, resp, 1);
-        set_toggle(&mut toggles.show_prim_markers, resp, 2);
-        set_toggle(&mut toggles.show_skeleton, resp, 3);
-        set_toggle(&mut toggles.show_physics, resp, 4);
-        set_toggle(&mut toggles.show_colliders, resp, 5);
+        set_toggle(&mut toggles.show_physics, resp, 2);
+        set_toggle(&mut toggles.show_colliders, resp, 3);
     }
     if let Some(resp) = pod_response(&responses, tf_id, 0) {
         set_toggle(&mut toggles.show_tf_frames, resp, 0);
@@ -113,11 +124,6 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
             && slider.changed
         {
             toggles.light_intensity_scale = slider.value as f32;
-        }
-        if let Some(slider) = resp.sliders.get(1)
-            && slider.changed
-        {
-            world.resource_mut::<LoaderTuning>().curves.default_radius = slider.value as f32;
         }
     }
 }

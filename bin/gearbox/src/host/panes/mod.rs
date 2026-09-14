@@ -3,17 +3,10 @@
 //! pods, renders them and turns the responses into resource writes or
 //! `HostCommand`s.
 
-pub mod agents;
-pub mod cameras;
-pub mod controllers;
-pub mod info;
-pub mod keys;
 pub mod log;
 pub mod machine;
-pub mod outliner;
-pub mod overlays;
-pub mod selection;
-pub mod timeline;
+pub mod scene;
+pub mod view;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

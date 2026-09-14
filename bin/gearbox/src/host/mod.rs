@@ -32,17 +32,10 @@ use panes::{Outbox, PaneCtx};
 
 pub const RIBBON_LEFT: &str = "gearbox_left";
 
-pub const PANE_SELECTION: &str = "gearbox_pane_selection";
-pub const PANE_OUTLINER: &str = "gearbox_pane_outliner";
-pub const PANE_AGENTS: &str = "gearbox_pane_agents";
-pub const PANE_INFO: &str = "gearbox_pane_info";
-pub const PANE_CAMERAS: &str = "gearbox_pane_cameras";
-pub const PANE_CONTROLLERS: &str = "gearbox_pane_controllers";
-pub const PANE_OVERLAYS: &str = "gearbox_pane_overlays";
-pub const PANE_TIMELINE: &str = "gearbox_pane_timeline";
-pub const PANE_KEYS: &str = "gearbox_pane_keys";
-pub const PANE_LOG: &str = "gearbox_pane_log";
 pub const PANE_MACHINE: &str = "gearbox_pane_machine";
+pub const PANE_SCENE: &str = "gearbox_pane_scene";
+pub const PANE_VIEW: &str = "gearbox_pane_view";
+pub const PANE_LOG: &str = "gearbox_pane_log";
 
 const ACTION_PLAY: &str = "gearbox_action_play";
 const ACTION_CLEAR: &str = "gearbox_action_clear";
@@ -62,7 +55,7 @@ static INIT: Mutex<Option<HostInit>> = Mutex::new(None);
 pub fn run(cli_paths: Vec<PathBuf>, log: LoaderLog) -> Result<(), Box<dyn std::error::Error>> {
     *INIT.lock().unwrap() = Some(HostInit { cli_paths, log });
     mara::window::AppRunner::new()
-        .title("gearbox — USD simulator")
+        .title("gearbox — robotics simulator")
         .size(window_size().0, window_size().1)
         .run::<GearboxApp>()
 }
@@ -78,17 +71,14 @@ fn window_size() -> (f32, f32) {
         .unwrap_or((1400.0, 900.0))
 }
 
-/// `GEARBOX_OPEN_PANEL=agents|machine|selection|info|overlays|log|tree`
-/// picks the pane open at start, for scripted runs.
+/// `GEARBOX_OPEN_PANEL=machine|scene|view|log` picks the pane open at
+/// start, for scripted runs.
 fn default_panes() -> &'static str {
     match std::env::var("GEARBOX_OPEN_PANEL").as_deref() {
-        Ok("agents") => PANE_AGENTS,
-        Ok("machine") => PANE_MACHINE,
-        Ok("selection") => PANE_SELECTION,
-        Ok("info") => PANE_INFO,
-        Ok("overlays") => PANE_OVERLAYS,
+        Ok("scene") => PANE_SCENE,
+        Ok("view") => PANE_VIEW,
         Ok("log") => PANE_LOG,
-        _ => PANE_OUTLINER,
+        _ => PANE_MACHINE,
     }
 }
 
@@ -178,51 +168,23 @@ impl WindowApp for GearboxApp {
             .pane(
                 PANE_MACHINE,
                 "vehicle-tractor",
-                "Machine",
+                "Machines",
                 PaneAnchor::LeftRail(RailZone::Start),
                 |body| panes::machine::show(body, &mut world.borrow_mut(), &ctx),
             )
             .pane(
-                PANE_SELECTION,
-                "folder-open",
-                "Selection",
+                PANE_SCENE,
+                "list",
+                "Scene",
                 PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::selection::show(body, &mut world.borrow_mut(), &ctx),
+                |body| panes::scene::show(body, &mut world.borrow_mut(), &ctx),
             )
             .pane(
-                PANE_OUTLINER,
-                "cube-tree",
-                "Outliner",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::outliner::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_AGENTS,
-                "vehicle-tractor",
-                "Agents",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::agents::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_INFO,
-                "info",
-                "Stage info",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::info::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_CAMERAS,
+                PANE_VIEW,
                 "camera",
-                "Cameras",
+                "View",
                 PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::cameras::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_CONTROLLERS,
-                "options",
-                "Machine controllers",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::controllers::show(body, &mut world.borrow_mut(), &ctx),
+                |body| panes::view::show(body, &mut world.borrow_mut(), &ctx),
             )
             .action_in(
                 mara_core::ribbon::RibbonCluster::Middle,
@@ -235,29 +197,8 @@ impl WindowApp for GearboxApp {
                 mara_core::ribbon::RibbonCluster::Middle,
                 ACTION_CLEAR,
                 "broom",
-                "Clear scene (unload every runtime USD)",
+                "Clear scene",
                 ribbon_action(ACTION_CLEAR),
-            )
-            .pane(
-                PANE_OVERLAYS,
-                "color",
-                "Overlays",
-                PaneAnchor::LeftRail(RailZone::End),
-                |body| panes::overlays::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_TIMELINE,
-                "clock",
-                "Timeline",
-                PaneAnchor::LeftRail(RailZone::End),
-                |body| panes::timeline::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_KEYS,
-                "keyboard",
-                "Controls",
-                PaneAnchor::LeftRail(RailZone::End),
-                |body| panes::keys::show(body, &ctx),
             )
             .pane(
                 PANE_LOG,
@@ -310,9 +251,6 @@ fn hotkeys(
             matches!(event, egui::Event::Key { pressed: true, modifiers, .. } if modifiers.ctrl)
         }) || i.modifiers.ctrl;
         let keys = [
-            Key::T,
-            Key::N,
-            Key::I,
             Key::O,
             Key::M,
             Key::F,
@@ -321,7 +259,6 @@ fn hotkeys(
             Key::G,
             Key::X,
             Key::P,
-            Key::B,
             Key::Y,
             Key::C,
             Key::R,
@@ -329,7 +266,7 @@ fn hotkeys(
         ];
         (ctrl, keys.map(hit))
     });
-    let [t, n, i, o, m, f, slash, question, g, x, p, b, y, c, r, k] = pressed;
+    let [o, m, f, slash, question, g, x, p, y, c, r, k] = pressed;
     if ctrl {
         if k || p {
             palette.open = !palette.open;
@@ -340,14 +277,11 @@ fn hotkeys(
         }
         return;
     }
-    let toggles: [(bool, &'static str, &'static str); 7] = [
-        (t, RIBBON_LEFT, PANE_OUTLINER),
-        (n, RIBBON_LEFT, PANE_AGENTS),
-        (i, RIBBON_LEFT, PANE_INFO),
-        (o, RIBBON_LEFT, PANE_OVERLAYS),
-        (f, RIBBON_LEFT, PANE_SELECTION),
-        (slash || question, RIBBON_LEFT, PANE_KEYS),
+    let toggles: [(bool, &'static str, &'static str); 4] = [
         (m, RIBBON_LEFT, PANE_MACHINE),
+        (f, RIBBON_LEFT, PANE_SCENE),
+        (o, RIBBON_LEFT, PANE_VIEW),
+        (slash || question, RIBBON_LEFT, PANE_LOG),
     ];
     for (hit, rail, pane) in toggles {
         if hit {
@@ -361,12 +295,7 @@ fn hotkeys(
     if x {
         display.show_world_axes = !display.show_world_axes;
     }
-    if p {
-        display.show_prim_markers = !display.show_prim_markers;
-    }
-    if b {
-        display.show_skeleton = !display.show_skeleton;
-    }
+
     if y {
         display.show_physics = !display.show_physics;
     }
@@ -379,121 +308,26 @@ fn hotkeys(
 }
 
 const PALETTE_ITEMS: &[PaletteItem] = &[
-    PaletteItem {
-        id: "open_selection",
-        label: "Open: Selection",
-        hint: Some("F"),
-    },
-    PaletteItem {
-        id: "open_tree",
-        label: "Open: Outliner",
-        hint: Some("T"),
-    },
-    PaletteItem {
-        id: "open_agents",
-        label: "Open: Agents",
-        hint: Some("N"),
-    },
-    PaletteItem {
-        id: "open_info",
-        label: "Open: Stage info",
-        hint: Some("I"),
-    },
-    PaletteItem {
-        id: "open_cameras",
-        label: "Open: Cameras",
-        hint: None,
-    },
-    PaletteItem {
-        id: "open_controllers",
-        label: "Open: Machine controllers",
-        hint: None,
-    },
-    PaletteItem {
-        id: "open_machine",
-        label: "Open: Machine",
-        hint: Some("M"),
-    },
-    PaletteItem {
-        id: "open_overlays",
-        label: "Open: Overlays",
-        hint: Some("O"),
-    },
-    PaletteItem {
-        id: "open_timeline",
-        label: "Open: Timeline",
-        hint: None,
-    },
-    PaletteItem {
-        id: "open_keys",
-        label: "Open: Controls",
-        hint: Some("?"),
-    },
-    PaletteItem {
-        id: "open_log",
-        label: "Open: Log",
-        hint: None,
-    },
-    PaletteItem {
-        id: "toggle_grid",
-        label: "Toggle: Ground grid",
-        hint: Some("G"),
-    },
-    PaletteItem {
-        id: "toggle_axes",
-        label: "Toggle: World axes",
-        hint: Some("X"),
-    },
-    PaletteItem {
-        id: "toggle_markers",
-        label: "Toggle: Prim markers",
-        hint: Some("P"),
-    },
-    PaletteItem {
-        id: "toggle_wireframe",
-        label: "Toggle: Wireframe",
-        hint: None,
-    },
-    PaletteItem {
-        id: "toggle_tf",
-        label: "Toggle: TF tree (frames, names, links)",
-        hint: None,
-    },
-    PaletteItem {
-        id: "toggle_physics",
-        label: "Physics: Play / pause",
-        hint: None,
-    },
-    PaletteItem {
-        id: "reload_stage",
-        label: "Stage: Reload",
-        hint: Some("R"),
-    },
-    PaletteItem {
-        id: "browse_usd",
-        label: "Stage: Add USD…",
-        hint: None,
-    },
-    PaletteItem {
-        id: "clear_scene",
-        label: "Scene: Clear",
-        hint: None,
-    },
+    PaletteItem { id: "open_machine", label: "Open: Machines", hint: Some("M") },
+    PaletteItem { id: "open_scene", label: "Open: Scene", hint: Some("F") },
+    PaletteItem { id: "open_view", label: "Open: View", hint: Some("O") },
+    PaletteItem { id: "open_log", label: "Open: Log and keys", hint: Some("?") },
+    PaletteItem { id: "toggle_grid", label: "Toggle: Ground grid", hint: Some("G") },
+    PaletteItem { id: "toggle_axes", label: "Toggle: World axes", hint: Some("X") },
+    PaletteItem { id: "toggle_wireframe", label: "Toggle: Wireframe", hint: None },
+    PaletteItem { id: "toggle_tf", label: "Toggle: TF tree (frames, names, links)", hint: None },
+    PaletteItem { id: "toggle_physics", label: "Physics: Play / pause", hint: None },
+    PaletteItem { id: "reload_stage", label: "Scene: Reload", hint: Some("R") },
+    PaletteItem { id: "browse_usd", label: "Scene: Load USD…", hint: None },
+    PaletteItem { id: "clear_scene", label: "Scene: Clear", hint: None },
 ];
 
 fn palette_action(id: &str, host: &MaraHostCtx<'_>, world: &mut World, outbox: &Outbox) {
     let open = |rail, pane| host.set_rail_pane_open(rail, pane, true);
     match id {
-        "open_selection" => open(RIBBON_LEFT, PANE_SELECTION),
-        "open_tree" => open(RIBBON_LEFT, PANE_OUTLINER),
-        "open_agents" => open(RIBBON_LEFT, PANE_AGENTS),
-        "open_info" => open(RIBBON_LEFT, PANE_INFO),
-        "open_cameras" => open(RIBBON_LEFT, PANE_CAMERAS),
-        "open_controllers" => open(RIBBON_LEFT, PANE_CONTROLLERS),
         "open_machine" => open(RIBBON_LEFT, PANE_MACHINE),
-        "open_overlays" => open(RIBBON_LEFT, PANE_OVERLAYS),
-        "open_timeline" => open(RIBBON_LEFT, PANE_TIMELINE),
-        "open_keys" => open(RIBBON_LEFT, PANE_KEYS),
+        "open_scene" => open(RIBBON_LEFT, PANE_SCENE),
+        "open_view" => open(RIBBON_LEFT, PANE_VIEW),
         "open_log" => open(RIBBON_LEFT, PANE_LOG),
         "toggle_grid" => {
             let mut t = world.resource_mut::<DisplayToggles>();
@@ -503,10 +337,7 @@ fn palette_action(id: &str, host: &MaraHostCtx<'_>, world: &mut World, outbox: &
             let mut t = world.resource_mut::<DisplayToggles>();
             t.show_world_axes = !t.show_world_axes;
         }
-        "toggle_markers" => {
-            let mut t = world.resource_mut::<DisplayToggles>();
-            t.show_prim_markers = !t.show_prim_markers;
-        }
+
         "toggle_wireframe" => {
             let mut t = world.resource_mut::<DisplayToggles>();
             t.wireframe = !t.wireframe;
