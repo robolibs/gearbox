@@ -431,9 +431,10 @@ fn spawn_world(
 fn chase_camera_control(
     input: Res<BevyViewportInput>,
     keys: Res<ButtonInput<KeyCode>>,
+    grab: Res<crate::viewer::systems::GizmoGrab>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
-    let orbit_delta = Vec2::from(input.drag_delta);
+    let orbit_delta = if grab.0 { Vec2::ZERO } else { Vec2::from(input.drag_delta) };
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let (pan_delta, lift_delta) = if shift {
         (Vec2::ZERO, input.pan_delta[1])

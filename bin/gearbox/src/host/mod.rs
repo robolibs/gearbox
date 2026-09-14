@@ -4,6 +4,7 @@
 //! query-shaped through `HostCommands`.
 
 pub mod capture;
+pub mod gizmo;
 pub mod keys;
 pub mod panes;
 pub mod replay;
@@ -89,6 +90,7 @@ pub struct GearboxApp {
     palette: CommandPaletteState,
     keys: keys::KeyBridge,
     capture: capture::WindowCapture,
+    gizmo: gizmo::PoseGizmo,
     default_left: &'static str,
 }
 
@@ -115,6 +117,7 @@ impl WindowApp for GearboxApp {
             palette: CommandPaletteState::default(),
             keys: keys::KeyBridge::default(),
             capture: capture::WindowCapture::default(),
+            gizmo: gizmo::PoseGizmo::default(),
             default_left,
         }
     }
@@ -131,6 +134,7 @@ impl WindowApp for GearboxApp {
             palette,
             keys,
             capture,
+            gizmo,
             default_left,
         } = self;
         capture.update(&egui);
@@ -142,6 +146,7 @@ impl WindowApp for GearboxApp {
                 hotkeys(&egui, host, world, palette);
             }
             panes::machine::auto_open(host, world);
+            gizmo.interact(&egui, world);
         }
 
         let viewport = {
@@ -224,6 +229,7 @@ impl WindowApp for GearboxApp {
         }
 
         paint_tf_labels(&egui, viewport, &world.borrow());
+        gizmo.paint(&egui, viewport);
         world
             .borrow_mut()
             .resource_mut::<HostCommands>()

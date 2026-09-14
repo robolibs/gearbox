@@ -24,6 +24,11 @@ use crate::viewer::state::{
 #[derive(Resource, Default)]
 pub struct Selection(pub Option<Entity>);
 
+/// The pose gizmo holds the pointer: the camera does not orbit and a click
+/// does not reselect.
+#[derive(Resource, Default)]
+pub struct GizmoGrab(pub bool);
+
 #[derive(Resource, Debug, Clone)]
 pub struct SelectionRing {
     pub anchor: Option<Vec3>,
@@ -51,6 +56,7 @@ impl Plugin for ViewerSystemsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
             .init_resource::<SelectionRing>()
+            .init_resource::<GizmoGrab>()
             .init_resource::<PendingDespawn>()
             .init_resource::<ActiveStage>()
             .init_resource::<StageInfo>()
@@ -834,6 +840,7 @@ pub(crate) fn fit_params_for_entity(
 /// render-target pixels) picks the closest loaded asset under the cursor.
 fn pick_on_click(
     input: Res<BevyViewportInput>,
+    grab: Res<GizmoGrab>,
     keys: Res<ButtonInput<KeyCode>>,
     cameras: Query<(&Camera, &GlobalTransform), With<ChaseCamera>>,
     loaded: Query<Entity, With<LoadedAsset>>,
@@ -845,7 +852,7 @@ fn pick_on_click(
     if keys.just_pressed(KeyCode::Escape) {
         selection.0 = None;
     }
-    if !input.primary_clicked {
+    if !input.primary_clicked || grab.0 {
         return;
     }
     let Some(cursor) = input.pointer_pos else {

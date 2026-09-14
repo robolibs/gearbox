@@ -43,6 +43,8 @@ rapier3d.workspace = true
 bytemuck = "1"
 glam = "0.30"
 egui.workspace = true
+# Move and yaw handles on the selected object while paused.
+transform-gizmo = "0.11"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow = "1"

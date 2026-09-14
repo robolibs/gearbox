@@ -21,6 +21,7 @@ struct Object {
     entity: Entity,
     label: String,
     icon: &'static str,
+    machine: bool,
     visible: bool,
 }
 
@@ -41,6 +42,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                 entity,
                 label: asset.label.clone(),
                 icon: if machines.contains(&entity) { "vehicle-tractor" } else { "cube" },
+                machine: machines.contains(&entity),
                 visible: !matches!(vis, Some(Visibility::Hidden)),
             })
             .collect()
@@ -91,6 +93,13 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                         );
                         if resp.body.clicked() {
                             outbox.push(HostCommand::SelectRoot(Some(object.entity)));
+                        }
+                        if resp.body.double_clicked() {
+                            outbox.push(if object.machine {
+                                HostCommand::FlyToMachine(object.entity)
+                            } else {
+                                HostCommand::FitPrim(object.entity)
+                            });
                         }
                         if resp.icons.get(1).is_some_and(|i| i.clicked()) {
                             outbox.push(HostCommand::Despawn(object.entity));
