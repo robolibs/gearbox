@@ -2,7 +2,7 @@
 
 ## Status (2026-09-14)
 
-Phases 0–2 are in, and `contact` is the default traction of
+Phases 0–3 are in, and `contact` is the default traction of
 `builtin:ackermann_cmd_vel` (the first half of Phase 4):
 
 - physics steps at a fixed 120 Hz (`GEARBOX_PHYSICS_HZ`), at most 12 steps a  frame, planned in `First` so per-frame impulses know their time span;
@@ -28,9 +28,24 @@ Kubota yaws 0.44 rad/s for 0.4 with every wheel under 4 % slip; Claas and
 Krampe tow on all four tyres at 2 m/s and steer against the articulation.
 Physics costs ~1 ms a step with five machines.
 
+Phase 3 (2026-09-14): `gearbox:machine:role:suspensionJoints` is read and
+a non-prismatic target is a link tree warning. The Oxbo's middle wheels
+hang from `susp_middle_*` bodies on vertical prismatic springs (1.5 MN/m,
+40 kN·s/m, 3 cm preload), so its fixed middle axle carries load. Without an
+authored `wheelBase` the steering wheelbase is the front steered axle's
+distance ahead of the unsteered axle over the front multiplier (Oxbo:
+1.6 m / 0.56), and every wheel's turn arc is measured from that axle. The
+Kubota's front axle pivot has a damping drive. Accepted on flat ground:
+Kubota and Oxbo drift 1 cm in 10 s and reach 2 m/s within 3 s; the Kubota
+yaws 0.60 for 0.5 (steady), the Oxbo tracks ±0.2 at 2 m/s; its steering
+limits cap it near 0.3 rad/s at 2 m/s, so 0.5 is out of its reach.
+
 Still open: the diff drive writes chassis velocity (Phase 4, second half),
-the raycast code is still there (Phase 5), `role:suspensionJoints` (Phase 3),
-the Oxbo yaws 0.14–0.21 rad/s for 0.3 and its middle axle sits 8 mm up.
+the raycast code is still there (Phase 5), the Phase 2 overrides
+`maxWheelTorqueNm` / `maxPowerKw` and a load-based steering torque cap, the
+slope and low-friction acceptance runs, and a USD tyre material on every
+asset. The Oxbo and Krampe tyre colliders are still larger than their
+meshes.
 
 ## Goal
 

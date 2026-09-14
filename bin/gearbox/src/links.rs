@@ -13,8 +13,8 @@ use bevy::math::{DMat4, DQuat, DVec3, EulerRot};
 use openusd::sdf::{Path as SdfPath, Value};
 
 use crate::controller::{
-    read_attr, read_bool, read_float, read_rel_first, read_token, read_token_array,
-    rebase_asset_root_target, type_name,
+    read_attr, read_bool, read_float, read_rel_first, read_rel_targets, read_token,
+    read_token_array, rebase_asset_root_target, type_name,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +189,7 @@ pub fn discover_link_tree(
     let mut couplings: Vec<String> = Vec::new();
     let mut elements: Vec<String> = Vec::new();
     let mut joints: Vec<JointRecord> = Vec::new();
+    let mut prismatic: Vec<String> = Vec::new();
     for prim in &inside {
         let schemas = stage.api_schemas(prim).unwrap_or_default();
         let path = prim.as_str().to_string();
@@ -212,6 +213,9 @@ pub fn discover_link_tree(
             elements.push(path.clone());
         }
         let ty = type_name(stage, prim).unwrap_or_default();
+        if ty == "PhysicsPrismaticJoint" {
+            prismatic.push(path.clone());
+        }
         if ty.starts_with("Physics") && ty.ends_with("Joint") {
             joints.push(JointRecord {
                 prim: path.clone(),
@@ -229,6 +233,16 @@ pub fn discover_link_tree(
         derived: marked.is_empty(),
         ..Default::default()
     };
+
+    // Suspension joints are springs the runtime leaves alone; only a
+    // prismatic joint can be one.
+    for joint in read_rel_targets(stage, machine_prim, "gearbox:machine:role:suspensionJoints") {
+        let joint = rebase_asset_root_target(root, &joint);
+        if !prismatic.contains(&joint) {
+            tree.warnings
+                .push(format!("suspension joint {joint} is not a PhysicsPrismaticJoint"));
+        }
+    }
 
     // Which prims are links, and what they are called.
     let mut link_prims: Vec<String> = if tree.derived {

@@ -279,6 +279,8 @@ pub struct MachineInstanceSpec {
     pub passive_wheel_joints: Vec<String>,
     pub steering_joints: Vec<String>,
     pub brake_joints: Vec<String>,
+    /// Prismatic spring joints the runtime leaves alone (`role:suspensionJoints`).
+    pub suspension_joints: Vec<String>,
     pub tool_joints: Vec<String>,
     pub controllers: Vec<ControllerSpec>,
     /// Link tree per CONTROLLER_SPEC §7; `errors` non-empty means no agent.
@@ -440,6 +442,12 @@ pub fn discover_machines_from_stage(
                 "gearbox:machine:role:brakeJoints",
                 machine_prim,
             ),
+            suspension_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:role:suspensionJoints",
+                machine_prim,
+            ),
             tool_joints: read_rel_targets_rebased(
                 &stage,
                 &prim,
@@ -546,6 +554,7 @@ fn append_isaac_compat_machines(
             passive_wheel_joints: passive_wheel_joints.clone(),
             steering_joints: steer_joints.clone(),
             brake_joints: Vec::new(),
+            suspension_joints: Vec::new(),
             tool_joints: Vec::new(),
             controllers: vec![ControllerSpec {
                 instance: "drive".to_string(),
@@ -1032,7 +1041,12 @@ fn apply_builtin_ackermann_cmd_vel(
             }
 
             let wheel_radius_m = controller.wheel_radius.unwrap_or(0.45) as f64;
-            let wheel_base_m = controller.wheel_base.unwrap_or(2.37);
+            let wheel_base_m = controller
+                .wheel_base
+                .or_else(|| {
+                    derived_wheel_base(scene_root, controller, machine, &joints, &parents, &physics, body_handle)
+                })
+                .unwrap_or(2.37);
             let track_width_m = controller
                 .front_track_width
                 .or(controller.track_width)
@@ -1540,6 +1554,24 @@ const CMD_ACCEL_MPS2: f32 = 2.0;
 const WHEEL_SLIP_SHARE: f64 = 0.08;
 const WHEEL_SLIP_FLOOR_MPS: f64 = 0.15;
 
+/// Ground speed along a wheel's rolling direction, forward positive, and
+/// its tyre radius.
+fn wheel_ground_speed(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    pair: (RigidBodyHandle, RigidBodyHandle),
+) -> Option<(f64, f64)> {
+    let forward = physics.bodies.get(chassis).and_then(body_forward_vector)?;
+    let wheel = wheel_body_of(physics, chassis, pair)?;
+    let body = physics.bodies.get(wheel)?;
+    let (axle_local, _, radius) = body_tyre_geometry(physics, wheel)?;
+    let mut roll = (body.rotation() * axle_local).cross(Vector::Y).normalize_or_zero();
+    if roll.dot(forward) < 0.0 {
+        roll = -roll;
+    }
+    Some((body.linvel().dot(roll), radius))
+}
+
 /// Traction control and ABS in one: each driven wheel's target stays within
 /// the slip band of the ground speed under that wheel. The grip cap assumes
 /// an even load; a light front wheel would otherwise spin at twice its speed.
@@ -1548,23 +1580,10 @@ fn limit_wheel_slip(
     chassis: RigidBodyHandle,
     targets: &mut [JointVelocityTarget],
 ) {
-    let Some(forward) = physics.bodies.get(chassis).and_then(body_forward_vector) else {
-        return;
-    };
     for target in targets.iter_mut().filter(|t| t.force_based && t.damping > 0.0) {
-        let Some(wheel) = wheel_body_of(physics, chassis, target.pair) else {
+        let Some((ground, radius)) = wheel_ground_speed(physics, chassis, target.pair) else {
             continue;
         };
-        let (Some(body), Some((axle_local, _, radius))) =
-            (physics.bodies.get(wheel), body_tyre_geometry(physics, wheel))
-        else {
-            continue;
-        };
-        let mut roll = (body.rotation() * axle_local).cross(Vector::Y).normalize_or_zero();
-        if roll.dot(forward) < 0.0 {
-            roll = -roll;
-        }
-        let ground = body.linvel().dot(roll);
         let band = WHEEL_SLIP_SHARE * ground.abs() + WHEEL_SLIP_FLOOR_MPS;
         target.velocity = target
             .velocity
@@ -1675,11 +1694,16 @@ fn roll_idle_wheels(
         .fold(0.0, f64::max)
         * WHEEL_IDLE_TORQUE_SHARE;
     for target in idle {
-        let radius = wheel_body_of(physics, chassis, target.pair)
-            .and_then(|wheel| body_max_collider_radius(physics, wheel))
-            .unwrap_or(radius_fallback_m);
+        let velocity = wheel_ground_speed(physics, chassis, target.pair)
+            .map(|(ground, radius)| ground / radius)
+            .unwrap_or_else(|| {
+                let radius = wheel_body_of(physics, chassis, target.pair)
+                    .and_then(|wheel| body_max_collider_radius(physics, wheel))
+                    .unwrap_or(radius_fallback_m);
+                forward_mps / radius
+            });
         targets.push(JointVelocityTarget {
-            velocity: forward_mps / radius,
+            velocity,
             damping: cap / WHEEL_FULL_TORQUE_ERROR_RAD_S,
             max_torque: cap,
             force_based: true,
@@ -2868,6 +2892,76 @@ fn wheel_lateral_offset(
     wheel_local_center(physics, chassis, pair).map(|c| c.x)
 }
 
+/// Chassis-frame Y (back) of the unsteered axle line, the mean of the
+/// wheels no steer joint turns, and of the frontmost steered wheel.
+fn steer_axle_lines(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: &Query<&ChildOf>,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+) -> Option<(f64, f64)> {
+    let knuckles: Vec<RigidBodyHandle> = machine
+        .steering_joints
+        .iter()
+        .chain(controller.steer_joints.iter())
+        .filter_map(|p| joint_pair(scene_root, p, joints, parents, physics))
+        .map(|(_, knuckle)| knuckle)
+        .collect();
+    let (mut fixed, mut front) = (Vec::new(), f64::MAX);
+    for pair in tire_joint_pairs(scene_root, controller, machine, joints, parents, physics) {
+        let Some(center) = wheel_local_center(physics, chassis, pair) else {
+            continue;
+        };
+        if knuckles.contains(&pair.0) || knuckles.contains(&pair.1) {
+            front = front.min(center.y);
+        } else {
+            fixed.push(center.y);
+        }
+    }
+    if fixed.is_empty() {
+        return None;
+    }
+    Some((fixed.iter().sum::<f64>() / fixed.len() as f64, front))
+}
+
+/// Steering wheelbase when none is authored: how far the front steered
+/// axle sits ahead of the unsteered one, over the front steer multiplier.
+/// The Oxbo turns about its fixed middle axle, not its rear one.
+fn derived_wheel_base(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: &Query<&ChildOf>,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+) -> Option<f32> {
+    let (fixed_y, front_y) =
+        steer_axle_lines(scene_root, controller, machine, joints, parents, physics, chassis)?;
+    let ahead = fixed_y - front_y;
+    if !(0.3..20.0).contains(&ahead) {
+        return None;
+    }
+    let multiplier = controller
+        .front_steer_multiplier
+        .map(f64::from)
+        .unwrap_or(1.0)
+        .abs()
+        .max(0.1);
+    Some((ahead / multiplier) as f32)
+}
+
 /// A wheel's centre in the chassis body frame (X left, Y back, Z up).
 fn wheel_local_center(
     physics: &crate::physics::PhysicsWorld,
@@ -2955,15 +3049,12 @@ fn wheel_joint_targets(
     // Apply a simple differential: while turning, each wheel target uses the
     // forward speed at its lateral offset from the chassis center. The outside
     // side therefore spins faster and the inside side slower.
-    // An Ackermann machine turns about a point on its rear axle line: a
-    // wheel ahead of that line runs the longer arc.
-    let rear_y = (geometry == "ackermann").then(|| {
-        tire_joint_pairs(scene_root, controller, machine, joints, parents, physics)
-            .into_iter()
-            .filter_map(|p| wheel_local_center(physics, chassis, p))
-            .map(|c| c.y)
-            .fold(f64::MIN, f64::max)
-    });
+    // The machine turns about a point on the line of its unsteered axle: a
+    // wheel ahead of or behind that line runs the longer arc.
+    let pivot_y = (!matches!(geometry, "crab" | "parallel"))
+        .then(|| steer_axle_lines(scene_root, controller, machine, joints, parents, physics, chassis))
+        .flatten()
+        .map(|(fixed_y, _)| fixed_y);
     let yaw_rate = steering_yaw_rate_for_differential(linear_mps, center_steer_rad, wheel_base_m);
     let target = |path: &str, pair: (RigidBodyHandle, RigidBodyHandle)| {
         let radius = wheel_body_of(physics, chassis, pair)
@@ -2977,8 +3068,8 @@ fn wheel_joint_targets(
                 None => 0.0,
             });
         let mut ground_speed = linear_mps * turn_speed_ratio(linear_mps, yaw_rate, lateral_x);
-        if let (Some(rear_y), Some(center)) = (rear_y, wheel_local_center(physics, chassis, pair)) {
-            let ahead = (rear_y - center.y).max(0.0);
+        if let (Some(pivot_y), Some(center)) = (pivot_y, wheel_local_center(physics, chassis, pair)) {
+            let ahead = (pivot_y - center.y).abs();
             ground_speed = ground_speed.signum() * ground_speed.hypot(yaw_rate * ahead);
         }
         drive_wheel_velocity_target(pair, ground_speed / radius)

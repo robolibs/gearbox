@@ -72,6 +72,7 @@ for files whose `apiSchemas` were stripped.
 | `gearbox:machine:body` | rel | MUST unless every controller has its own `body` | Chassis prim. See §4. |
 | `gearbox:machine:role:poweredWheelJoints` | rel[] | MUST for ackermann | Joints that receive drive torque. |
 | `gearbox:machine:role:passiveWheelJoints` | rel[] | SHOULD for ackermann | Free-rolling joints, still used as tyre contacts. |
+| `gearbox:machine:role:suspensionJoints` | rel[] | optional | Prismatic springs between the chassis and a wheel carrier; their USD drive (`stiffness`, `damping`, `maxForce`, `targetPosition` as preload) is the spring and the runtime never drives them. A non-prismatic target is a link tree warning. |
 | `gearbox:machine:role:steeringJoints` | rel[] | SHOULD for ackermann | Joints that receive steer position targets. |
 | `gearbox:machine:role:brakeJoints` | rel[] | IGNORED | |
 | `gearbox:machine:role:toolJoints` | rel[] | IGNORED | |
