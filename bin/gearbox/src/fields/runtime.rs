@@ -100,7 +100,6 @@ use super::profile::{FieldProfile, FieldProfiles, GroundSurface, WheelMapParams}
 use super::render::{FieldGpu, RenderFields, VegetationChunk, VegetationParams};
 use crate::terrain::{HeightGrid, ProceduralTerrain, TerrainBackdrop, TerrainSurfaceMesh};
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::visibility::NoFrustumCulling;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -376,6 +375,7 @@ pub fn stream_vegetation(
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<AssetServer>,
     mut draws: Query<&mut VegetationChunk>,
+    mut layer_meshes: Local<HashMap<(&'static str, usize), (Handle<Mesh>, Vec<std::ops::Range<u32>>)>>,
 ) {
     let Some(active) = active else {
         return;
@@ -435,8 +435,15 @@ pub fn stream_vegetation(
             continue;
         }
         let corner = Vec2::new(key.2 as f32, key.3 as f32) * CHUNK_M;
-        let mesh = (layer.template)();
-        let variants = super::clumps::variant_ranges(&mesh);
+        // One mesh per layer, built once: chunks only place its instances.
+        let (mesh, variants) = layer_meshes
+            .entry((field.profile.name, key.1))
+            .or_insert_with(|| {
+                let mesh = (layer.template)();
+                let variants = super::clumps::variant_ranges(&mesh);
+                (meshes.add(mesh), variants)
+            })
+            .clone();
         let entity = commands
             .spawn((
                 Name::new(format!(
@@ -444,16 +451,13 @@ pub fn stream_vegetation(
                     field.name, key.1, key.2, key.3
                 )),
                 ChildOf(field.entity),
-                Transform::from_xyz(corner.x, 0.0, corner.y),
-                GlobalTransform::from_translation(Vec3::new(corner.x, 0.0, corner.y)),
-                Mesh3d(meshes.add(mesh)),
-                NoFrustumCulling,
                 VegetationChunk {
                     corner,
                     instances,
                     capacity,
                     field_id: field.entity,
                     shader: assets.load(layer.shader),
+                    mesh,
                     fade_start: layer.fade_start,
                     fade_end: layer.fade_end,
                     inverse_square_thinning: layer.inverse_square_thinning,

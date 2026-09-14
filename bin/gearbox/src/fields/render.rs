@@ -5,12 +5,10 @@ use bevy::ecs::query::QueryItem;
 use bevy::ecs::system::{SystemParamItem, lifetimeless::*};
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{
-    self, MeshInputUniform, MeshPipeline, MeshPipelineKey, MeshPipelineSystems, MeshUniform,
-    RenderMeshInstances, SetMeshBindGroup, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup,
-    ViewKeyCache,
+    MeshPipeline, MeshPipelineKey, MeshPipelineSystems, SetMeshViewBindGroup,
+    SetMeshViewBindingArrayBindGroup, ViewKeyCache,
 };
 use bevy::prelude::*;
-use bevy::render::batching::gpu_preprocessing::BatchedInstanceBuffers;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::mesh::allocator::MeshAllocator;
@@ -42,6 +40,9 @@ pub struct VegetationChunk {
     pub capacity: f32,
     pub field_id: Entity,
     pub shader: Handle<Shader>,
+    /// The layer's mesh, shared by all its chunks; chunks are not mesh
+    /// instances, so Bevy uploads no per-chunk mesh data every frame.
+    pub mesh: Handle<Mesh>,
     pub fade_start: f32,
     pub fade_end: f32,
     pub inverse_square_thinning: bool,
@@ -135,8 +136,6 @@ fn queue_vegetation(
     mut pipelines: ResMut<SpecializedMeshPipelines<VegetationPipeline>>,
     pipeline_cache: Res<PipelineCache>,
     meshes: Res<RenderAssets<RenderMesh>>,
-    render_mesh_instances: Res<RenderMeshInstances>,
-    batched: Option<Res<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>>,
     chunks: Query<(Entity, &MainEntity, &VegetationChunk)>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     views: Query<&ExtractedView>,
@@ -156,14 +155,13 @@ fn queue_vegetation(
             continue;
         };
         for (entity, main_entity, draw) in &chunks {
-            if draw.instances == 0 || !fields.0.contains_key(&draw.field_id) {
-                continue;
-            }
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*main_entity)
-            else {
+            let Some(field) = fields.0.get(&draw.field_id) else {
                 continue;
             };
-            let Some(mesh) = meshes.get(mesh_instance.mesh_asset_id()) else {
+            if draw.instances == 0 {
+                continue;
+            }
+            let Some(mesh) = meshes.get(draw.mesh.id()) else {
                 continue;
             };
             let key = view_key
@@ -187,13 +185,8 @@ fn queue_vegetation(
                 }
             };
 
-            let mesh_center = pbr::get_mesh_instance_world_from_local(
-                *main_entity,
-                mesh_instance.current_uniform_index,
-                &render_mesh_instances,
-                batched.as_deref(),
-            )
-            .transform_point3(mesh.aabb_center);
+            let half = field.params.chunk_size * 0.5;
+            let mesh_center = Vec3::new(draw.corner.x + half, 0.0, draw.corner.y + half);
             phase.add_retained(Transparent3d {
                 sorting_info: TransparentSortingInfo3d::Sorted {
                     mesh_center,
@@ -211,42 +204,133 @@ fn queue_vegetation(
     }
 }
 
-/// One uniform slot per chunk, rewritten every frame.
+/// One persistent uniform slot per chunk. A chunk writes its own slot when
+/// it streams in or changes; the whole buffer is rewritten only when it
+/// grows or the fields are rebuilt. Rewriting every chunk each frame cost
+/// ~25-35 ms in uploads.
 #[derive(Resource, Default)]
-struct VegetationUniforms(DynamicUniformBuffer<VegetationParams>);
+struct VegetationUniforms {
+    buffer: Option<Buffer>,
+    capacity: u32,
+    next: u32,
+    free: Vec<u32>,
+    slots: HashMap<Entity, (u32, u64)>,
+}
 
 #[derive(Component)]
 struct VegetationOffset(u32);
+
+fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
+    VegetationParams {
+        corner: draw.corner,
+        blades_per_chunk: draw.capacity,
+        fade_start: draw.fade_start,
+        fade_end: draw.fade_end,
+        inverse_square_thinning: u32::from(draw.inverse_square_thinning),
+        ..field.params
+    }
+}
+
+fn chunk_digest(draw: &VegetationChunk) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut digest = std::hash::DefaultHasher::new();
+    (draw.field_id, draw.inverse_square_thinning).hash(&mut digest);
+    for value in [draw.corner.x, draw.corner.y, draw.capacity, draw.fade_start, draw.fade_end] {
+        value.to_bits().hash(&mut digest);
+    }
+    digest.finish()
+}
+
+fn encode_params(params: &VegetationParams) -> Vec<u8> {
+    let mut bytes = encase::UniformBuffer::new(Vec::<u8>::new());
+    bytes.write(params).expect("encode vegetation params");
+    bytes.into_inner()
+}
 
 fn prepare_vegetation_uniforms(
     mut commands: Commands,
     fields: Res<RenderFields>,
     chunks: Query<(Entity, &VegetationChunk)>,
-    mut uniforms: ResMut<VegetationUniforms>,
+    uniforms: ResMut<VegetationUniforms>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
 ) {
-    uniforms.0.clear();
+    let stride = VegetationParams::min_size()
+        .get()
+        .next_multiple_of(render_device.limits().min_uniform_buffer_offset_alignment as u64);
+    let VegetationUniforms { buffer, capacity, next, free, slots } = uniforms.into_inner();
+    slots.retain(|entity, (slot, _)| {
+        let live = chunks.contains(*entity);
+        if !live {
+            free.push(*slot);
+        }
+        live
+    });
+    let mut changed = Vec::new();
     for (entity, draw) in &chunks {
         let Some(field) = fields.0.get(&draw.field_id) else {
             continue;
         };
-        let params = VegetationParams {
-            corner: draw.corner,
-            blades_per_chunk: draw.capacity,
-            fade_start: draw.fade_start,
-            fade_end: draw.fade_end,
-            inverse_square_thinning: u32::from(draw.inverse_square_thinning),
-            ..field.params
+        let digest = chunk_digest(draw);
+        let slot = match slots.get(&entity) {
+            Some(&(_, known)) if known == digest => continue,
+            Some(&(slot, _)) => slot,
+            None => free.pop().unwrap_or_else(|| {
+                *next += 1;
+                *next - 1
+            }),
         };
-        let offset = uniforms.0.push(&params);
-        commands.entity(entity).insert(VegetationOffset(offset));
+        slots.insert(entity, (slot, digest));
+        commands.entity(entity).insert(VegetationOffset((slot as u64 * stride) as u32));
+        changed.push((slot, chunk_params(draw, field)));
     }
-    uniforms.0.write_buffer(&render_device, &render_queue);
+
+    if buffer.is_none() || *next > *capacity || fields.is_changed() {
+        *capacity = (*next).max(*capacity).max(256).next_power_of_two();
+        let target = buffer.get_or_insert_with(|| {
+            render_device.create_buffer(&BufferDescriptor {
+                label: Some("vegetation chunk uniforms"),
+                size: *capacity as u64 * stride,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        if target.size() < *capacity as u64 * stride {
+            *target = render_device.create_buffer(&BufferDescriptor {
+                label: Some("vegetation chunk uniforms"),
+                size: *capacity as u64 * stride,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        let mut data = vec![0u8; (*capacity as u64 * stride) as usize];
+        for (entity, draw) in &chunks {
+            let (Some(field), Some(&(slot, _))) = (fields.0.get(&draw.field_id), slots.get(&entity))
+            else {
+                continue;
+            };
+            let bytes = encode_params(&chunk_params(draw, field));
+            let at = (slot as u64 * stride) as usize;
+            data[at..at + bytes.len()].copy_from_slice(&bytes);
+        }
+        render_queue.write_buffer(target, 0, &data);
+        return;
+    }
+    let Some(target) = buffer.as_ref() else {
+        return;
+    };
+    for (slot, params) in changed {
+        render_queue.write_buffer(target, slot as u64 * stride, &encode_params(&params));
+    }
 }
 
+/// Field bindings per field and albedo, and the empty group bound where the
+/// mesh pipeline expects per-mesh data the vegetation shaders never read.
 #[derive(Resource)]
-struct FieldBindGroups(HashMap<(Entity, Option<AssetId<Image>>), BindGroup>);
+struct FieldBindGroups {
+    fields: HashMap<(Entity, Option<AssetId<Image>>), BindGroup>,
+    empty: BindGroup,
+}
 
 /// Field bindings rebuilt against the current dynamic uniform buffer, one per
 /// field and albedo in use.
@@ -261,9 +345,15 @@ fn prepare_vegetation_bind_group(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     uniforms: Res<VegetationUniforms>,
+    mut empty: Local<Option<BindGroup>>,
 ) {
     let mut groups = HashMap::default();
-    if let Some(binding) = uniforms.0.binding() {
+    if let Some(buffer) = uniforms.buffer.as_ref() {
+        let binding = BufferBinding {
+            buffer,
+            offset: 0,
+            size: Some(VegetationParams::min_size()),
+        };
         for draw in &chunks {
             let key = (draw.field_id, draw.albedo.as_ref().map(Handle::id));
             if groups.contains_key(&key) {
@@ -296,7 +386,16 @@ fn prepare_vegetation_bind_group(
             groups.insert(key, group);
         }
     }
-    commands.insert_resource(FieldBindGroups(groups));
+    let empty = empty
+        .get_or_insert_with(|| {
+            render_device.create_bind_group(
+                "vegetation empty",
+                &pipeline_cache.get_bind_group_layout(&pipeline.empty_layout),
+                &[],
+            )
+        })
+        .clone();
+    commands.insert_resource(FieldBindGroups { fields: groups, empty });
 }
 
 /// Writes oriented wheel footprints with a timestamp and roll direction.
@@ -391,6 +490,7 @@ fn stamp_wheel_contacts(
 struct VegetationPipeline {
     mesh_pipeline: MeshPipeline,
     field_layout: BindGroupLayoutDescriptor,
+    empty_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
 }
 
@@ -424,6 +524,7 @@ fn init_vegetation_pipeline(
     commands.insert_resource(VegetationPipeline {
         mesh_pipeline: mesh_pipeline.clone(),
         field_layout,
+        empty_layout: BindGroupLayoutDescriptor::new("vegetation empty layout", &[]),
         sampler,
     });
 }
@@ -446,6 +547,9 @@ impl SpecializedMeshPipeline for VegetationPipeline {
         fragment
             .shader_defs
             .push("STANDARD_MATERIAL_DIFFUSE_OR_SPECULAR_TRANSMISSION".into());
+        if let Some(mesh_group) = descriptor.layout.get_mut(2) {
+            *mesh_group = self.empty_layout.clone();
+        }
         descriptor.layout.push(self.field_layout.clone());
         descriptor.primitive.cull_mode = None;
         descriptor.multisample.alpha_to_coverage_enabled = descriptor.multisample.count > 1;
@@ -457,10 +561,33 @@ type DrawVegetation = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
     SetMeshViewBindingArrayBindGroup<1>,
-    SetMeshBindGroup<2>,
+    SetEmptyBindGroup<2>,
     SetFieldBindGroup<3>,
     DrawBlades,
 );
+
+struct SetEmptyBindGroup<const I: usize>;
+
+impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetEmptyBindGroup<I> {
+    type Param = Option<SRes<FieldBindGroups>>;
+    type ViewQuery = ();
+    type ItemQuery = ();
+
+    #[inline]
+    fn render<'w>(
+        _item: &P,
+        _view: (),
+        _entity: Option<()>,
+        groups: SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let Some(groups) = groups else {
+            return RenderCommandResult::Skip;
+        };
+        pass.set_bind_group(I, &groups.into_inner().empty, &[]);
+        RenderCommandResult::Success
+    }
+}
 
 struct SetFieldBindGroup<const I: usize>;
 
@@ -481,7 +608,7 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetFieldBindGroup<I> {
             return RenderCommandResult::Skip;
         };
         let key = (draw.field_id, draw.albedo.as_ref().map(Handle::id));
-        let Some(group) = field.into_inner().0.get(&key) else {
+        let Some(group) = field.into_inner().fields.get(&key) else {
             return RenderCommandResult::Skip;
         };
         pass.set_bind_group(I, group, &[offset.0]);
@@ -492,35 +619,27 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetFieldBindGroup<I> {
 struct DrawBlades;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
-    type Param = (
-        SRes<RenderAssets<RenderMesh>>,
-        SRes<RenderMeshInstances>,
-        SRes<MeshAllocator>,
-    );
+    type Param = (SRes<RenderAssets<RenderMesh>>, SRes<MeshAllocator>);
     type ViewQuery = ();
     type ItemQuery = Read<VegetationChunk>;
 
     #[inline]
     fn render<'w>(
-        item: &P,
+        _item: &P,
         _view: (),
         draw: Option<&'w VegetationChunk>,
-        (meshes, render_mesh_instances, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
+        (meshes, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let mesh_allocator = mesh_allocator.into_inner();
         let Some(draw) = draw else {
             return RenderCommandResult::Skip;
         };
-        let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(item.main_entity())
-        else {
+        let mesh_id = draw.mesh.id();
+        let Some(gpu_mesh) = meshes.into_inner().get(mesh_id) else {
             return RenderCommandResult::Skip;
         };
-        let Some(gpu_mesh) = meshes.into_inner().get(mesh_instance.mesh_asset_id()) else {
-            return RenderCommandResult::Skip;
-        };
-        let Some(vertex_slice) = mesh_allocator.mesh_vertex_slice(&mesh_instance.mesh_asset_id())
-        else {
+        let Some(vertex_slice) = mesh_allocator.mesh_vertex_slice(&mesh_id) else {
             return RenderCommandResult::Skip;
         };
         pass.set_vertex_buffer(0, vertex_slice.buffer.slice(..));
@@ -529,9 +648,7 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
                 index_format,
                 count,
             } => {
-                let Some(index_slice) =
-                    mesh_allocator.mesh_index_slice(&mesh_instance.mesh_asset_id())
-                else {
+                let Some(index_slice) = mesh_allocator.mesh_index_slice(&mesh_id) else {
                     return RenderCommandResult::Skip;
                 };
                 pass.set_index_buffer(index_slice.buffer.slice(..), *index_format);
