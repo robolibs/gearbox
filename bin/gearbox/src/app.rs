@@ -34,7 +34,6 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         // Frame time and fps land in the log every ten seconds.
         .add_plugins((
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
-            bevy::render::diagnostic::RenderDiagnosticsPlugin,
             bevy::diagnostic::LogDiagnosticsPlugin {
                 wait_duration: std::time::Duration::from_secs(10),
                 ..default()
