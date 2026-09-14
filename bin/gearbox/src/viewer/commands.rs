@@ -46,11 +46,11 @@ pub enum HostCommand {
         selection: String,
     },
     SetMaterialColor(AssetId<StandardMaterial>, [f32; 3]),
-    /// Move a paused asset's root: translation and yaw in world space.
+    /// Move a paused asset's root: translation and rotation in world space.
     PoseRoot {
         root: Entity,
         translation: Vec3,
-        yaw: f32,
+        rotation: Quat,
     },
     SaveBookmark,
     RecallBookmark(usize),
@@ -200,11 +200,11 @@ pub(crate) fn apply_host_commands(
             HostCommand::PoseRoot {
                 root,
                 translation,
-                yaw,
+                rotation,
             } => {
                 if let Ok(mut tr) = q.transforms.get_mut(root) {
                     tr.translation = translation;
-                    tr.rotation = Quat::from_rotation_y(yaw);
+                    tr.rotation = rotation;
                 }
             }
             HostCommand::SaveBookmark => {

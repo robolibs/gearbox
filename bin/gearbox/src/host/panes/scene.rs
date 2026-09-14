@@ -129,12 +129,13 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
             world_pos,
             transform.translation,
             yaw,
+            transform.rotation,
         ))
     });
     let selected_id = cid(P, "selected");
     let pose_pod = pid(P, "selected", 0);
     let selected_pod = match &picked {
-        Some((_, label, path, world_pos, local, yaw)) => {
+        Some((_, label, path, world_pos, local, yaw, _)) => {
             let mut pod = Pod::new(pose_pod)
                 .with_readout("object", label.clone())
                 .with_readout("file", short_path(path, 34))
@@ -178,7 +179,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         ctx.send(HostCommand::Reload);
     }
     if paused
-        && let Some((root, _, _, _, local, yaw)) = picked
+        && let Some((root, _, _, _, local, yaw, rotation)) = picked
         && let Some(resp) = pod_response(&responses, selected_id, 0)
         && resp.drag_values.iter().any(|d| d.changed)
     {
@@ -188,7 +189,11 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         ctx.send(HostCommand::PoseRoot {
             root,
             translation: Vec3::new(value(0, local.x), value(1, local.y), value(2, local.z)),
-            yaw: value(3, yaw.to_degrees()).to_radians(),
+            // A new heading keeps whatever tilt the gizmo gave the object.
+            rotation: {
+                let (_, pitch, roll) = rotation.to_euler(EulerRot::YXZ);
+                Quat::from_euler(EulerRot::YXZ, value(3, yaw.to_degrees()).to_radians(), pitch, roll)
+            },
         });
     }
 }

@@ -1,7 +1,7 @@
-//! The pose gizmo: while physics is paused the selected object gets move
-//! arrows and a yaw ring over the viewport, on the machine's body (or the
-//! object's origin); a drag moves the whole object with `PoseRoot`. Built on
-//! the `transform-gizmo` core crate.
+//! The pose gizmo: while physics is paused the selected object gets every
+//! translate handle and rotate ring of `transform-gizmo`, as the viewer had
+//! before the mara re-host, on the machine's body (or the object's origin);
+//! a drag moves and turns the whole object with `PoseRoot`.
 
 use bevy::prelude::*;
 use mara::ui::modules::bevy as mara_bevy;
@@ -165,11 +165,7 @@ impl PoseGizmo {
                 viewport.min.x..=viewport.max.x,
                 viewport.min.y..=viewport.max.y,
             ),
-            modes: GizmoMode::TranslateX
-                | GizmoMode::TranslateY
-                | GizmoMode::TranslateZ
-                | GizmoMode::TranslateXZ
-                | GizmoMode::RotateY,
+            modes: GizmoMode::all_translate() | GizmoMode::all_rotate(),
             orientation: GizmoOrientation::Global,
             visuals,
             pixels_per_point: egui.pixels_per_point(),
@@ -196,11 +192,11 @@ impl PoseGizmo {
             // pivot, then move with it.
             let turn = new_pivot.rotation * pivot.rotation.inverse();
             let translation = new_pivot.translation + turn * (root_pose.translation - pivot.translation);
-            let (yaw, _, _) = (turn * root_pose.rotation).to_euler(EulerRot::YXZ);
+            let rotation = (turn * root_pose.rotation).normalize();
             world
                 .resource_mut::<HostCommands>()
                 .0
-                .push(HostCommand::PoseRoot { root, translation, yaw });
+                .push(HostCommand::PoseRoot { root, translation, rotation });
         }
         self.gizmo.is_focused()
     }
