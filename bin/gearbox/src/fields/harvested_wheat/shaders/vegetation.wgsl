@@ -231,7 +231,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let right = vec3<f32>(cos(yaw), 0.0, sin(yaw));
     let lean_angle = hash11(seed * 6.1 + 4.0) * 6.2831853;
     let lean_dir = vec3<f32>(sin(lean_angle), 0.0, cos(lean_angle));
-    let lean = lean_dir * (0.015 + 0.04 * hash11(seed * 7.13 + 5.0));
+    let lean = lean_dir * (0.08 + 0.26 * hash11(seed * 7.13 + 5.0));
 
     let phase = base_xz.x * 0.31 + base_xz.y * 0.23 + seed * 2.0;
     let gust = sin(globals.time * 1.6 + phase) * 0.6
@@ -246,6 +246,14 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         + right * (width * 0.5 * side * alive)
         + WIND_DIR * bend;
     p.y = p.y - abs(bend) * 0.15;
+    // Stalks kink at the node halfway up; a third were snapped over by the header.
+    let knee = max(t - 0.5, 0.0) * 2.0;
+    let snapped = rand(id, 14u) < 0.35;
+    let kink = select(0.1, 0.4, snapped) + select(0.15, 0.6, snapped) * rand(id, 15u);
+    let kink_yaw = rand(id, 16u) * 6.2831853;
+    let kink_dir = vec3<f32>(cos(kink_yaw), 0.0, sin(kink_yaw));
+    p += (kink_dir * sin(kink) - vec3<f32>(0.0, 1.0 - cos(kink), 0.0))
+        * (0.5 * height * knee * (1.0 - flat));
 
     // Cut stalks grade from shaded straw roots to pale dry tips.
     let tone = 0.65 + 0.7 * rand(id, 5u);

@@ -4,6 +4,8 @@ Registers the `harvested_wheat` field profile: brown post-harvest soil, layered 
 textures, subtle 1 m darker residue strips every 4 m with 0.4 m soft edge transitions,
 and 5–15 cm cut stalks at 6000 stalks/m², matching the default base-grass density.
 Stalks keep their full 4–6 mm width up to a flat-cut top, with minimal wind motion.
+Each stalk leans 5–19° and kinks at a node halfway up (6–14°, or 23–57° for the third
+snapped over by the header), so the stubble reads from above.
 Two-sided PBR shading uses 15% diffuse transmission and 0.6 mm optical thickness;
 dry stalks transmit less light than green leaves.
 Stalks and soil use low reflectance (0.04), high roughness, and no specular environment

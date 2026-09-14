@@ -58,3 +58,19 @@ fn meadow_tint(pattern: vec3<f32>) -> vec3<f32> {
 fn meadow_canopy(pattern: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.19, 0.31, 0.075) * meadow_tint(pattern);
 }
+
+// Fescue (x) and ryegrass (y) patch weights; meadow grass fills the rest.
+fn grass_species(world_xz: vec2<f32>) -> vec2<f32> {
+    let warp = vec2<f32>(noise(world_xz * 0.035 + vec2<f32>(3.7, -8.1)),
+        noise(world_xz * 0.035 + vec2<f32>(-5.9, 2.3))) - vec2<f32>(0.5);
+    let p = world_xz + warp * 16.0;
+    let fescue = smoothstep(0.56, 0.74, noise(p * 0.07 + vec2<f32>(41.0, 7.0)));
+    let rye = smoothstep(0.56, 0.74, noise(p * 0.055 + vec2<f32>(-19.0, 63.0)));
+    return vec2<f32>(fescue, rye) / max(fescue + rye, 1.0);
+}
+
+// Colour shift a species patch gives the ground and distant clumps.
+fn species_tint(species: vec2<f32>) -> vec3<f32> {
+    return vec3<f32>(1.0) + species.x * vec3<f32>(-0.12, 0.02, 0.22)
+        + species.y * vec3<f32>(-0.25, 0.18, -0.30);
+}

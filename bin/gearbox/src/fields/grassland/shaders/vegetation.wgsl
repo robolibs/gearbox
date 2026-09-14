@@ -5,7 +5,7 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 
-#import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{meadow_pattern, meadow_tint}
+#import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{meadow_pattern, meadow_tint, grass_species, species_tint}
 #import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 
@@ -172,9 +172,10 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
         let angle = yaw + f32(leaf) * 2.3999632 + rand(id, 12u + leaf) * 0.3;
         let forward = vec3<f32>(cos(angle), 0.0, sin(angle));
         let right = vec3<f32>(-sin(angle), 0.0, cos(angle));
+        let species = grass_species(base);
         let variety = rand(id, 10u);
-        let fine = variety < 0.4;
-        let broad = variety > 0.75;
+        let fine = variety < 0.25 + 0.5 * species.x;
+        let broad = !fine && variety > 0.8 - 0.5 * species.y;
         let height = mix(0.105, 0.165, rand(id, 20u + leaf)) * select(1.0, 0.9, broad);
         let width = mix(0.003, 0.0045, rand(id, 30u + leaf))
             * select(select(1.0, 2.0, broad), 0.65, fine);
@@ -249,21 +250,30 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_normal = cluster.normal;
         out.ground_normal = ground_normal;
         out.canopy_uv = cluster.uv;
-        out.color = vec4<f32>(vec3<f32>(0.19, 0.31, 0.075) * mix(0.88, 1.08, t)
+        out.color = vec4<f32>(vec3<f32>(0.19, 0.31, 0.075) * species_tint(grass_species(base_xz))
+            * mix(0.88, 1.08, t)
             * (0.94 + seed * 0.12) * (1.0 - pressed.x * field.wheels.darkening), 1.0);
         return out;
     }
     let flat = clamp(pressed.x, 0.0, 1.0);
     let roll = vec3<f32>(pressed.y, 0.0, pressed.z);
     let yaw = seed * 6.2831853;
-    let height = (BLADE_MIN_HEIGHT + (BLADE_MAX_HEIGHT - BLADE_MIN_HEIGHT) * rand(id, 6u)) * alive;
-    let width = BLADE_MIN_WIDTH + (BLADE_MAX_WIDTH - BLADE_MIN_WIDTH) * rand(id, 7u);
+    // Fescue and ryegrass take over by patch, mixed blade by blade at the edges.
+    let species = grass_species(base_xz);
+    let pick = rand(id, 13u);
+    let fescue = pick < species.x;
+    let rye = !fescue && pick < species.x + species.y;
+    let height = (BLADE_MIN_HEIGHT + (BLADE_MAX_HEIGHT - BLADE_MIN_HEIGHT) * rand(id, 6u))
+        * select(1.0, 0.85, fescue) * alive;
+    let width = (BLADE_MIN_WIDTH + (BLADE_MAX_WIDTH - BLADE_MIN_WIDTH) * rand(id, 7u))
+        * select(select(1.0, 1.7, rye), 0.6, fescue);
     let dry = select(0.0, 0.3 + 0.7 * hash11(seed * 9.1), hash11(seed * 4.4 + 3.0) < 0.18);
 
     let right = vec3<f32>(cos(yaw), 0.0, sin(yaw));
     let lean_angle = hash11(seed * 6.1 + 4.0) * 6.2831853;
     let lean_dir = vec3<f32>(sin(lean_angle), 0.0, cos(lean_angle));
-    let lean = lean_dir * (0.08 + 0.16 * hash11(seed * 7.13 + 5.0));
+    // Every blade tilts 10-35 degrees so the sward still reads from above.
+    let lean = lean_dir * (select(0.18, 0.28, fescue) + 0.45 * hash11(seed * 7.13 + 5.0));
 
     let phase = base_xz.x * 0.31 + base_xz.y * 0.23 + seed * 2.0;
     let gust = sin(globals.time * 1.6 + phase) * 0.6
@@ -281,8 +291,15 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     // Roots grade into green or dry tips.
     let tone = 0.65 + 0.7 * rand(id, 5u);
-    let root = vec3<f32>(0.11, 0.20, 0.045) * tone;
-    let tip = mix(vec3<f32>(0.22, 0.42, 0.09), vec3<f32>(0.40, 0.34, 0.10), dry) * tone;
+    var root = vec3<f32>(0.11, 0.20, 0.045) * tone;
+    var tip = mix(vec3<f32>(0.22, 0.42, 0.09), vec3<f32>(0.40, 0.34, 0.10), dry) * tone;
+    if (fescue) {
+        root = vec3<f32>(0.08, 0.17, 0.09) * tone;
+        tip = vec3<f32>(0.20, 0.35, 0.24) * tone;
+    } else if (rye) {
+        root = vec3<f32>(0.05, 0.16, 0.03) * tone;
+        tip = vec3<f32>(0.13, 0.40, 0.05) * tone;
+    }
 
     var out: VertexOutput;
     out.world_position = vec4<f32>(p, 1.0);

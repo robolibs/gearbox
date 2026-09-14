@@ -285,6 +285,7 @@ fn leaf_template() -> Mesh {
     .with_inserted_indices(Indices::U32(indices))
 }
 
+/// Two-segment stalk; the middle row is the node it kinks at.
 fn stalk_template() -> Mesh {
     Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -295,11 +296,13 @@ fn stalk_template() -> Mesh {
         vec![
             [-1.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
+            [-1.0, 0.5, 0.0],
+            [1.0, 0.5, 0.0],
             [-1.0, 1.0, 0.0],
             [1.0, 1.0, 0.0],
         ],
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 4])
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; 4])
-    .with_inserted_indices(Indices::U32(vec![0, 2, 1, 1, 2, 3]))
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 6])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; 6])
+    .with_inserted_indices(Indices::U32(vec![0, 2, 1, 1, 2, 3, 2, 4, 3, 3, 4, 5]))
 }

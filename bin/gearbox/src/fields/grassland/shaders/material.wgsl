@@ -9,7 +9,7 @@
     mesh_view_bindings::globals,
 }
 
-#import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_canopy, meadow_tint, meadow_pocket_blend}
+#import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_canopy, meadow_tint, meadow_pocket_blend, grass_species, species_tint}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
 
@@ -127,6 +127,7 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
         * mix(0.72, 1.20, tufts) * mix(0.90, 1.08, litter);
     let blade_color = mix(vec3<f32>(0.23, 0.39, 0.095), vec3<f32>(0.30, 0.34, 0.105), dry * 0.5) * meadow_tint(pattern);
     ground = mix(ground, blade_color, clamp(fine * 0.55 + blades * 0.50 + mat * 0.30, 0.0, 0.8));
+    ground *= species_tint(grass_species(world_xz));
     let pressed = trample_pressed(world_xz);
     return MeadowSurface(
         vec4<f32>(ground * (1.0 - trample_params.darkening * 1.2 * pressed), 1.0),
