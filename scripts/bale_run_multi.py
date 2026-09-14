@@ -75,8 +75,9 @@ def _build_tracker():
 # full lock first. The steering servo straightens at about 30°/s and the
 # tractor keeps rotating meanwhile, so the turn lets go of the wheel once the
 # heading error is down to that remaining swing; the tracker takes over when
-# the wheels are straight.
-TURN_ENTER_RAD = math.pi / 2.0
+# the wheels are straight. The tracker alone swings well past any corner
+# sharper than this at field speed.
+TURN_ENTER_RAD = math.radians(25.0)
 TURN_SETTLED_RPS = 0.08
 TURN_SPEED_MPS = 1.0
 TURN_RADIUS_M = 3.4
