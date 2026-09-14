@@ -39,7 +39,7 @@ mod tests {
         let regions = FieldLayout::default().regions(domain);
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].bounds(), domain);
-        assert_eq!(regions[0].profile, "grassland");
+        assert_eq!(regions[0].profile, "harvested_wheat");
     }
 }
 
@@ -96,7 +96,7 @@ pub struct FieldLayout {
 impl Default for FieldLayout {
     fn default() -> Self {
         Self {
-            default: "grassland".into(),
+            default: "harvested_wheat".into(),
             fields: Vec::new(),
         }
     }

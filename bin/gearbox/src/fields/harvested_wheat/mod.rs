@@ -179,7 +179,7 @@ impl Plugin for HarvestedWheatPlugin {
                 wheel_response: WheelResponse {
                     recovery_seconds: 1800.0,
                     bend: 0.94,
-                    darkening: 0.28,
+                    darkening: 0.6,
                     footprint_length: 0.30,
                 },
                 layers: vec![VegetationLayer {
