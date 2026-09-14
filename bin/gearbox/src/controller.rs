@@ -1135,6 +1135,7 @@ fn apply_builtin_ackermann_cmd_vel(
                         .sum::<f64>()
                 });
                 cap_wheel_torque(&physics, body_handle, &mut wheel_targets, mass, wheels, wheel_radius_m);
+                limit_wheel_slip(&physics, body_handle, &mut wheel_targets);
                 roll_idle_wheels(&physics, body_handle, &mut wheel_targets, idle, forward_mps, wheel_radius_m);
                 false
             } else {
@@ -1398,7 +1399,7 @@ fn stable_cmd_vel(
         .copied()
         .unwrap_or_default();
     let next = CmdVel {
-        linear_mps: slew(previous.linear_mps, requested.linear_mps, 80.0 * dt),
+        linear_mps: slew(previous.linear_mps, requested.linear_mps, CMD_ACCEL_MPS2 * dt),
         angular_rps: slew(previous.angular_rps, requested.angular_rps, 6.0 * dt),
     };
     runtime.applied_cmd_vel.insert(key.clone(), next);
@@ -1531,7 +1532,45 @@ const TIRE_EDGE_FRACTION: f64 = 0.05;
 const WHEEL_GRIP_USE: f64 = 0.9;
 /// Wheel speed error (rad/s) at which the contact drive motor gives its
 /// full, grip-capped torque.
-const WHEEL_FULL_TORQUE_ERROR_RAD_S: f64 = 0.3;
+const WHEEL_FULL_TORQUE_ERROR_RAD_S: f64 = 0.1;
+/// Commanded speed changes at most this fast (m/s²).
+const CMD_ACCEL_MPS2: f32 = 2.0;
+/// Traction control band around a wheel's own ground speed: a share of it
+/// plus a floor (m/s), so a lightly loaded wheel cannot spin up or lock.
+const WHEEL_SLIP_SHARE: f64 = 0.08;
+const WHEEL_SLIP_FLOOR_MPS: f64 = 0.15;
+
+/// Traction control and ABS in one: each driven wheel's target stays within
+/// the slip band of the ground speed under that wheel. The grip cap assumes
+/// an even load; a light front wheel would otherwise spin at twice its speed.
+fn limit_wheel_slip(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: RigidBodyHandle,
+    targets: &mut [JointVelocityTarget],
+) {
+    let Some(forward) = physics.bodies.get(chassis).and_then(body_forward_vector) else {
+        return;
+    };
+    for target in targets.iter_mut().filter(|t| t.force_based && t.damping > 0.0) {
+        let Some(wheel) = wheel_body_of(physics, chassis, target.pair) else {
+            continue;
+        };
+        let (Some(body), Some((axle_local, _, radius))) =
+            (physics.bodies.get(wheel), body_tyre_geometry(physics, wheel))
+        else {
+            continue;
+        };
+        let mut roll = (body.rotation() * axle_local).cross(Vector::Y).normalize_or_zero();
+        if roll.dot(forward) < 0.0 {
+            roll = -roll;
+        }
+        let ground = body.linvel().dot(roll);
+        let band = WHEEL_SLIP_SHARE * ground.abs() + WHEEL_SLIP_FLOOR_MPS;
+        target.velocity = target
+            .velocity
+            .clamp((ground - band) / radius, (ground + band) / radius);
+    }
+}
 
 /// Contact traction unless the controller, or `GEARBOX_TRACTION`, asks for
 /// the raycast vehicle.
