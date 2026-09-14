@@ -26,8 +26,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import datapod
-import peerbus
+# The peerbus, datapod and ondrive wheels live in the repo's
+# .python-packages; outside `nix develop` nothing puts them on the path.
+_PACKAGES = Path(__file__).resolve().parent.parent / ".python-packages"
+if _PACKAGES.is_dir() and str(_PACKAGES) not in sys.path:
+    sys.path.insert(0, str(_PACKAGES))
+
+import datapod  # noqa: E402
+import peerbus  # noqa: E402
 
 # ─── Registry ────────────────────────────────────────────────────────
 
