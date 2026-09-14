@@ -310,6 +310,9 @@ fn spawn_world(
         Name::new("Camera"),
         Camera3d::default(),
         bevy::render::view::NoIndirectDrawing,
+        // Sunlight only: no point or spot lights to cluster, and building
+        // the (empty) clusters cost ~18 ms a frame.
+        bevy::light::cluster::ClusterConfig::None,
         camera_transform,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,

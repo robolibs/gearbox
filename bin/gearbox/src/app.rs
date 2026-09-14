@@ -61,7 +61,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(crate::environment::EnvironmentPlugin)
         .add_plugins(fields::FieldsPlugin)
         .add_plugins(terrain::TerrainPlugin)
-        .add_systems(Startup, log_render_adapter)
+        .add_systems(Startup, (log_render_adapter, use_cpu_light_clustering))
         .add_plugins(controller::ControllerDiscoveryPlugin)
         .add_plugins(attach::AttachPlugin)
         .add_plugins(services::ServicesPlugin)
@@ -84,6 +84,16 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
 /// projection in that same frame.
 /// Which GPU and backend the window renders with; the wrong one is the
 /// first thing to rule out when frames are slow.
+/// The scene is lit by the sun, which needs no clusters. Bevy's GPU
+/// clustering rebuilt its buffers every frame (~30 ms at a far plane of
+/// 80 km); CPU clustering still serves any point or spot lights a USD brings.
+fn use_cpu_light_clustering(settings: Option<ResMut<bevy::light::cluster::GlobalClusterSettings>>) {
+    if let Some(mut settings) = settings {
+        settings.gpu_clustering = None;
+        info!("light clustering: CPU");
+    }
+}
+
 fn log_render_adapter(adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>) {
     match adapter {
         Some(info) => info!(
