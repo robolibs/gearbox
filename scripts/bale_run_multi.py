@@ -35,6 +35,10 @@ TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
 # The Poly Haven bale in metres; bale.usdz alone is drawn 100x too big.
 BALE_USD_PATH = "markers/hay_bale.usda"
 RING_RADIUS = 15.0
+# Field speeds. Physics runs in real time now and the tyres deliver what is
+# commanded; faster than this the tractor overshoots a bale between ticks.
+MAX_SPEED_MPS = 4.0
+MAX_YAW_RPS = 1.2
 TICK_DT = 0.10
 MARKER_GAP_M = 0.6
 
@@ -55,25 +59,21 @@ def _build_tracker():
     cons = ondrive.RobotConstraints.default_()
     cons.steering_type = "ackermann"
     cons.wheelbase = 2.37
-    cons.max_linear_velocity = 12.0
+    cons.max_linear_velocity = MAX_SPEED_MPS
     cons.min_linear_velocity = 0.0
-    cons.max_angular_velocity = 4.0
+    cons.max_angular_velocity = MAX_YAW_RPS
     cons.max_steering_angle = math.radians(40.0)
     tracker.init(cons)
     return tracker
 
 
-REVERSE_ENTER_RAD = math.pi / 2.0
-REVERSE_EXIT_RAD = math.radians(70.0)
-REVERSE_SPEED_MPS = 4.8
-REVERSE_YAW_RPS = 4.8
-MAX_REVERSE_SECS = 1.5
-
-
-def _reverse_maneuver_cmd(turn_sign: float) -> tuple[float, float]:
-    """Reverse with the wheels cranked opposite to a forward turn; the
-    controller does not flip the steer sign when reversing."""
-    return -REVERSE_SPEED_MPS, -turn_sign * REVERSE_YAW_RPS
+# A target more than this far off the nose is reached by a tight forward
+# turn first; the tracker takes over again within the exit angle. A timed
+# reverse was tuned for the old slow-motion physics: in real time it
+# backed the tractor most of the way to the bale.
+TURN_ENTER_RAD = math.pi / 2.0
+TURN_EXIT_RAD = math.radians(30.0)
+TURN_SPEED_MPS = 1.5
 
 
 def wrap_pi(angle: float) -> float:
@@ -267,18 +267,17 @@ def drive_toward(robot: RobotProxy, target: tuple[float, float]) -> float:
 
     now = time.time()
     if robot._maneuver == "forward":
-        if abs(heading_err) > REVERSE_ENTER_RAD and d_now > 2.0:
-            robot._maneuver = "reverse"
+        if abs(heading_err) > TURN_ENTER_RAD and d_now > 2.0:
+            robot._maneuver = "turn"
             robot._turn_sign = 1.0 if heading_err > 0.0 else -1.0
-            robot._maneuver_t0 = now
-    else:
-        timed_out = now - robot._maneuver_t0 > MAX_REVERSE_SECS
-        if abs(heading_err) < REVERSE_EXIT_RAD or timed_out:
-            robot._maneuver = "forward"
+    elif abs(heading_err) < TURN_EXIT_RAD:
+        # Replan the path from where the turn ended.
+        robot._maneuver = "forward"
+        robot._tracker_target = None
+        return d_now
 
-    if robot._maneuver == "reverse":
-        lin, ang = _reverse_maneuver_cmd(robot._turn_sign)
-        robot.publish_cmd(lin, ang)
+    if robot._maneuver == "turn":
+        robot.publish_cmd(TURN_SPEED_MPS, robot._turn_sign * MAX_YAW_RPS)
         return d_now
 
     px, py = _planar(cx, cz)
@@ -352,7 +351,9 @@ def run(robots: list[RobotProxy], n_bales: int, field: float, seed: int, instanc
             gb.delete(bale_runtime_ids[bale_id])
             for robot in robots:
                 if robot.target_bale == bale_id:
-                    robot.stop()
+                    # Keep rolling: the next target is picked this tick. A
+                    # zero command between bales braked the tractor to a
+                    # dead stop at every bale.
                     robot.collected.append(bale_id)
                     robot.target_bale = None
                     print(
@@ -372,7 +373,6 @@ def run(robots: list[RobotProxy], n_bales: int, field: float, seed: int, instanc
 
             for robot in robots:
                 if robot.target_bale in visited:
-                    robot.stop()
                     robot.target_bale = None
 
                 if robot.target_bale is not None:
