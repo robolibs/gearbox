@@ -54,7 +54,7 @@ pip install --no-deps --target .python-packages --upgrade target/wheels/*.whl
 | `oxbo_maptrax_field.py` | Plan a GPS field with maptrax, draw the lines in Gearbox and rerun, drive one Oxbo per machine. |
 | `oxbo_joystick.py` | Load flatland + Oxbo, claim it, drive it from `/dev/input/warpout0`. |
 | `hunter_spawn.py` / `hunter_drive.py` / `barn_spawn.py` | Spawn AgileX machines on flatland or in the de Marke barn, drive them in circles. |
-| `bale_run.py` | Load USD terrain + one USD tractor + USD bales, collect the bales. |
+| `bale_run.py` | One USD tractor collects USD bales on the sim's own ground (meadow, wheat); no USD terrain is loaded. |
 | `bale_run_multi.py` | Same with several tractors, each under its own namespace and agent. |
 | `stop.py <namespace>` | Take over a machine and send zero `cmd_vel`. Default namespace: `oxbo`. |
 

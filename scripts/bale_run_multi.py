@@ -32,8 +32,8 @@ except ModuleNotFoundError:
 
 
 TRACTOR_USD_PATH = "bin/gearbox/assets/tractor.usd"
-TERRAIN_USD_PATH = "world/terrain.usd"
-BALE_USD_PATH = "markers/bale.usdz"
+# The Poly Haven bale in metres; bale.usdz alone is drawn 100x too big.
+BALE_USD_PATH = "markers/hay_bale.usda"
 RING_RADIUS = 15.0
 TICK_DT = 0.10
 MARKER_GAP_M = 0.6
@@ -306,12 +306,11 @@ def run(robots: list[RobotProxy], n_bales: int, field: float, seed: int, instanc
     gb.wait_ready()
     watch: SceneWatch | None = None
     try:
+        # The sim's own ground (meadow, wheat) is the field: loading a USD
+        # terrain would retire it for the rest of the session.
         print("clearing simulator")
         gb.clear()
         time.sleep(0.3)
-        print("loading USD terrain")
-        gb.load("terrain", TERRAIN_USD_PATH, category="terrain")
-        time.sleep(1.0)
 
         print(f"spawning {len(robots)} USD tractors")
         spawn_usd_tractors(gb, robots)
