@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use clap::{Args as ClapArgs, Subcommand};
+use gearbox_api::datapod::robot::{Imu, TurnRadius, WheelEncoders};
 use gearbox_api::wire::json as wire_json;
 use gearbox_api::{
     ClaimResponse, ControllerCommand, MachineClient, MachineInfo, MachineState, Props, code,
@@ -34,6 +35,36 @@ enum Cmd {
     Info { ns: Option<String> },
     /// Stream the machine's state
     State {
+        ns: Option<String>,
+        /// Keep printing
+        #[arg(long)]
+        watch: bool,
+        /// Prints per second while watching
+        #[arg(long, default_value_t = 5.0)]
+        rate: f64,
+    },
+    /// Stream the machine's wheel encoders
+    Encoders {
+        ns: Option<String>,
+        /// Keep printing
+        #[arg(long)]
+        watch: bool,
+        /// Prints per second while watching
+        #[arg(long, default_value_t = 5.0)]
+        rate: f64,
+    },
+    /// Stream the machine's IMU (gyroscope, accelerometer, orientation)
+    Imu {
+        ns: Option<String>,
+        /// Keep printing
+        #[arg(long)]
+        watch: bool,
+        /// Prints per second while watching
+        #[arg(long, default_value_t = 5.0)]
+        rate: f64,
+    },
+    /// Stream the machine's current turn radius
+    TurnRadius {
         ns: Option<String>,
         /// Keep printing
         #[arg(long)]
@@ -172,6 +203,9 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::List => list(ctx),
         Cmd::Info { ns } => info(ctx, ns),
         Cmd::State { ns, watch, rate } => state(ctx, ns, watch, rate),
+        Cmd::Encoders { ns, watch, rate } => encoders(ctx, ns, watch, rate),
+        Cmd::Imu { ns, watch, rate } => imu(ctx, ns, watch, rate),
+        Cmd::TurnRadius { ns, watch, rate } => turn_radius(ctx, ns, watch, rate),
         Cmd::Move {
             ns,
             forward,
@@ -432,6 +466,143 @@ fn state_line(ns: &str, s: &MachineState) -> String {
         s.pitch_rad,
         s.session
     )
+}
+
+fn encoders(ctx: &Ctx, ns: Option<String>, watch: bool, rate: f64) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&ns);
+    let mut sub = mc.encoders()?;
+    let period = Duration::from_secs_f64(1.0 / rate.max(0.1));
+    let mut last_print = Instant::now() - period;
+    loop {
+        let Some(e) = next_sample::<WheelEncoders>(&mut sub, ctx.timeout)? else {
+            return Err(CliError::timeout(format!(
+                "no encoders from machine `{ns}` within {:.1}s",
+                ctx.timeout.as_secs_f64()
+            )));
+        };
+        if last_print.elapsed() < period {
+            continue;
+        }
+        last_print = Instant::now();
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::to_string(&wire_json::env_to_json(&pack(&e)).unwrap_or(json!({})))
+                    .unwrap_or_default()
+            );
+        } else {
+            println!("{}", encoders_line(&ns, &e));
+        }
+        if !watch {
+            return Ok(());
+        }
+    }
+}
+
+fn encoders_line(ns: &str, e: &WheelEncoders) -> String {
+    let wheels: Vec<String> = e
+        .wheels
+        .iter()
+        .map(|w| {
+            format!(
+                "#{} {:+.3} rad {:+.3} rad/s",
+                w.wheel_id, w.angle_rad, w.velocity_rad_s
+            )
+        })
+        .collect();
+    format!("{ns}: {}", wheels.join("  "))
+}
+
+fn imu(ctx: &Ctx, ns: Option<String>, watch: bool, rate: f64) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&ns);
+    let mut sub = mc.imu()?;
+    let period = Duration::from_secs_f64(1.0 / rate.max(0.1));
+    let mut last_print = Instant::now() - period;
+    loop {
+        let Some(i) = next_sample::<Imu>(&mut sub, ctx.timeout)? else {
+            return Err(CliError::timeout(format!(
+                "no imu from machine `{ns}` within {:.1}s",
+                ctx.timeout.as_secs_f64()
+            )));
+        };
+        if last_print.elapsed() < period {
+            continue;
+        }
+        last_print = Instant::now();
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::to_string(&wire_json::env_to_json(&pack(&i)).unwrap_or(json!({})))
+                    .unwrap_or_default()
+            );
+        } else {
+            println!("{}", imu_line(&ns, &i));
+        }
+        if !watch {
+            return Ok(());
+        }
+    }
+}
+
+fn imu_line(ns: &str, i: &Imu) -> String {
+    format!(
+        "{ns}: gyro ({:+.3}, {:+.3}, {:+.3}) rad/s  accel ({:+.2}, {:+.2}, {:+.2}) m/s^2  orient (w{:+.3} x{:+.3} y{:+.3} z{:+.3})",
+        i.angular_velocity.vx,
+        i.angular_velocity.vy,
+        i.angular_velocity.vz,
+        i.linear_acceleration.ax,
+        i.linear_acceleration.ay,
+        i.linear_acceleration.az,
+        i.orientation.w,
+        i.orientation.x,
+        i.orientation.y,
+        i.orientation.z,
+    )
+}
+
+fn turn_radius(ctx: &Ctx, ns: Option<String>, watch: bool, rate: f64) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&ns);
+    let mut sub = mc.turn_radius()?;
+    let period = Duration::from_secs_f64(1.0 / rate.max(0.1));
+    let mut last_print = Instant::now() - period;
+    loop {
+        let Some(t) = next_sample::<TurnRadius>(&mut sub, ctx.timeout)? else {
+            return Err(CliError::timeout(format!(
+                "no turn radius from machine `{ns}` within {:.1}s",
+                ctx.timeout.as_secs_f64()
+            )));
+        };
+        if last_print.elapsed() < period {
+            continue;
+        }
+        last_print = Instant::now();
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::to_string(&wire_json::env_to_json(&pack(&t)).unwrap_or(json!({})))
+                    .unwrap_or_default()
+            );
+        } else {
+            println!("{}", turn_radius_line(&ns, &t));
+        }
+        if !watch {
+            return Ok(());
+        }
+    }
+}
+
+fn turn_radius_line(ns: &str, t: &TurnRadius) -> String {
+    if t.is_straight() {
+        format!("{ns}: straight")
+    } else {
+        format!("{ns}: {:+.2} m", t.radius_m)
+    }
 }
 
 /// Claim the machine, refusing early when it cannot take a twist.

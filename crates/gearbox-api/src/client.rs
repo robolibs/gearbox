@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource};
-use datapod::robot::Odom;
+use datapod::robot::{Imu, Odom, TurnRadius, WheelEncoders};
 use datapod::{DataPod, DataPodDecode, DataPodValidate, LeWireHeader};
 use peerbus::{EndpointId, ReqClient, Subscriber};
 
@@ -253,6 +253,19 @@ impl MachineClient<'_> {
         self.client.subscribe(&self.topic(topics::MACHINE_TF))
     }
 
+    pub fn encoders(&self) -> agentio::Result<Subscriber<Env>> {
+        self.client.subscribe(&self.topic(topics::MACHINE_ENCODERS))
+    }
+
+    pub fn imu(&self) -> agentio::Result<Subscriber<Env>> {
+        self.client.subscribe(&self.topic(topics::MACHINE_IMU))
+    }
+
+    pub fn turn_radius(&self) -> agentio::Result<Subscriber<Env>> {
+        self.client
+            .subscribe(&self.topic(topics::MACHINE_TURN_RADIUS))
+    }
+
     pub fn set_tf(&self, on: bool) -> agentio::Result<Status> {
         let cmd = ControllerCommand {
             props: Props::from_pairs(&[("tf", if on { "on" } else { "off" })]).into_bytes(),
@@ -292,6 +305,30 @@ impl MachineClient<'_> {
         timeout: Duration,
     ) -> agentio::Result<Option<Odom>> {
         next_sample::<Odom>(sub, timeout)
+    }
+
+    pub fn next_encoders(
+        &self,
+        sub: &mut Subscriber<Env>,
+        timeout: Duration,
+    ) -> agentio::Result<Option<WheelEncoders>> {
+        next_sample::<WheelEncoders>(sub, timeout)
+    }
+
+    pub fn next_imu(
+        &self,
+        sub: &mut Subscriber<Env>,
+        timeout: Duration,
+    ) -> agentio::Result<Option<Imu>> {
+        next_sample::<Imu>(sub, timeout)
+    }
+
+    pub fn next_turn_radius(
+        &self,
+        sub: &mut Subscriber<Env>,
+        timeout: Duration,
+    ) -> agentio::Result<Option<TurnRadius>> {
+        next_sample::<TurnRadius>(sub, timeout)
     }
 }
 

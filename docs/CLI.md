@@ -100,6 +100,9 @@ Inspect and drive machines
 | `list` | Machines with their controllers and holders |
 | `info [NS]` | Everything a machine reports about itself |
 | `state [OPTIONS] [NS]` | Stream the machine's state |
+| `encoders [OPTIONS] [NS]` | Stream the machine's wheel encoders |
+| `imu [OPTIONS] [NS]` | Stream the machine's IMU (gyroscope, accelerometer, orientation) |
+| `turn-radius [OPTIONS] [NS]` | Stream the machine's current turn radius |
 | `move [OPTIONS] [NS]` | Drive with a constant twist for a while, then stop |
 | `stop [OPTIONS] [NS]` | Send a zero twist and release |
 | `drive [OPTIONS] [NS]` | Drive from the keyboard: WASD or arrows, space stops, q quits |
