@@ -25,6 +25,7 @@ bevy-volumetric-clouds = { path = "../../vendored/bevy-volumetric-clouds" }
 
 # mara owns the window, ribbons and panes; Bevy renders into its viewport.
 mara.workspace = true
+half = "2.7"
 
 # USD asset pipeline + rapier physics + animation playback. These
 # are the bevy_openusd workspace's plugins; the gearbox binary just

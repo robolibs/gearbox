@@ -304,6 +304,7 @@ fn spawn_band(
         bevy::light::NotShadowCaster,
         bevy::light::NotShadowReceiver,
         bevy::camera::visibility::NoFrustumCulling,
+        bevy::camera::visibility::RenderLayers::layer(super::recorder::OVERLAY_LAYER),
     ));
 }
 

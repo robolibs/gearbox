@@ -10,7 +10,7 @@ washer, stud, nut, and valve details. All 62 visual parts per wheel remain attac
 to its original rolling body. Axle positions, rolling radii, steering, and collision
 dimensions are unchanged. This is reconstructed visual detail, not manufacturer CAD.
 
-Load it through the existing `scripts/oxbo_flatland.py` workflow, or:
+Load it through the existing `examples/python/oxbo_flatland.py` workflow, or:
 
 ```sh
 make run RUN_ARGS=bin/gearbox/assets/oxbo.usd

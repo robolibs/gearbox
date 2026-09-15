@@ -32,3 +32,17 @@ fn sample_wheels(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f3
     let d = wheel_texel(tex, i + vec2<i32>(1, 1), params.recovery_seconds);
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
+
+// Unit roll direction of a wheel sample; zero where nothing has rolled.
+fn wheel_roll(pressed: vec3<f32>) -> vec3<f32> {
+    let size = length(pressed.yz);
+    if (size < 1e-4) { return vec3<f32>(0.0); }
+    return vec3<f32>(pressed.y, 0.0, pressed.z) / size;
+}
+
+// The roll direction turned by `angle` radians about the vertical.
+fn scatter_roll(roll: vec3<f32>, angle: f32) -> vec3<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec3<f32>(roll.x * c - roll.z * s, 0.0, roll.x * s + roll.z * c);
+}

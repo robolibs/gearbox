@@ -10,6 +10,7 @@ pub mod log;
 pub mod machine_context;
 pub mod overlays;
 pub mod physics_overlay;
+pub mod recorder;
 pub mod screenshot;
 pub mod state;
 pub mod systems;

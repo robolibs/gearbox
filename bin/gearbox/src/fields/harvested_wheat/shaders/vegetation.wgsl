@@ -6,7 +6,7 @@
 }
 
 
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 #import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
@@ -161,7 +161,7 @@ fn stubble_detail(vertex: Vertex) -> VertexOutput {
 
     let pressed = sample_trample(base);
     let flat = clamp(pressed.x, 0.0, 1.0);
-    offset += vec3<f32>(pressed.y, 0.0, pressed.z) * offset.y * 0.9;
+    offset += wheel_roll(pressed) * (flat * offset.y * 0.9);
     offset.y *= 1.0 - flat * field.wheels.bend;
     let p = ground + offset * coverage;
     var out: VertexOutput;
@@ -272,12 +272,15 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     let lean = vec3<f32>(lean_xz.x, 0.0, lean_xz.y) * mix(0.05, 0.3, rand(id, 8u));
     let pressed = sample_trample(base_xz);
     let flat = clamp(pressed.x, 0.0, 1.0);
-    let roll = vec3<f32>(pressed.y, 0.0, pressed.z);
     let up = vec3<f32>(0.0, 1.0, 0.0);
+    // Wheels snap stalks over along their roll, scattered; the stiffest stand
+    // back up first as the track recovers.
+    let crush = smoothstep(0.0, mix(0.5, 1.0, rand(id, 36u)), flat) * field.wheels.bend;
+    let roll = scatter_roll(wheel_roll(pressed), (rand(id, 37u) - 0.5) * 1.0);
     let t = vertex.position.y;
     let side = vertex.position.x;
-    var axis_point = up * (height * t * (1.0 - field.wheels.bend * flat))
-        + roll * (height * t * field.wheels.bend) + lean * (height * t);
+    var axis_point = up * (height * t * (1.0 - crush))
+        + roll * (height * t * crush) + lean * (height * t * (1.0 - crush));
     let knee = max(t - 0.5, 0.0) * 2.0;
     let snapped = rand(id, 14u) < 0.35;
     let kink = select(0.1, 0.4, snapped) + select(0.15, 0.6, snapped) * rand(id, 15u);
@@ -287,10 +290,13 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     let heading = select(-1.0, 1.0, fract(cut_pass * 0.5) < 0.25);
     let travel = heading * select(-1.0, 1.0, rand(id, 16u) < 0.8);
     let kink_dir = normalize(mix(vec3<f32>(travel, 0.0, 0.0), vec3<f32>(lean_xz.x, 0.0, lean_xz.y), 0.4));
-    axis_point += (kink_dir * sin(kink) - up * (1.0 - cos(kink))) * (0.5 * height * knee * (1.0 - flat));
+    axis_point += (kink_dir * sin(kink) - up * (1.0 - cos(kink))) * (0.5 * height * knee * (1.0 - crush));
 
-    let right = vec3<f32>(cos(own_yaw), 0.0, sin(own_yaw));
-    let axis = normalize(up + lean + kink_dir * knee * sin(kink));
+    let stand_right = vec3<f32>(cos(own_yaw), 0.0, sin(own_yaw));
+    let lay = cross(up, roll);
+    let lay_right = select(-lay, lay, dot(lay, stand_right) >= 0.0);
+    let right = normalize(mix(stand_right, lay_right, crush) + vec3<f32>(1e-5, 0.0, 0.0));
+    let axis = normalize(mix(up + lean + kink_dir * knee * sin(kink), roll + up * 0.05, crush));
     let normal = normalize(cross(right, axis));
     let half_w = width * 0.5 * side;
     let p = root + axis_point + right * half_w;

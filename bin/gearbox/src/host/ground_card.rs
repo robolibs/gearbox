@@ -44,6 +44,9 @@ impl GroundCard {
                 bevy::light::NotShadowCaster,
                 bevy::light::NotShadowReceiver,
                 bevy::camera::visibility::NoFrustumCulling,
+                bevy::camera::visibility::RenderLayers::layer(
+                    crate::viewer::recorder::OVERLAY_LAYER,
+                ),
             ))
             .id();
         Self {

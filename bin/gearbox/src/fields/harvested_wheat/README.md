@@ -24,7 +24,7 @@ turn half the stalks into green volunteer shoots and tint the distant clumps. A 
 patches, one in ten elsewhere. Wheel tracks bend and darken them like the stalks.
 
 The ground material comes from the existing multi-bale field:
-`scripts/bale_run_multi.py` loads `assets/world/terrain.usd`.
+`examples/python/bale_run_multi.py` loads `assets/world/terrain.usd`.
 The USD material adapter preserves authored tint and reduced hay-row strength for
 explicitly tinted crop terrain. That legacy adapter remains material-only; generated
 stalks and wheel maps belong to procedural field instances.

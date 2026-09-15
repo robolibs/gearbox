@@ -7,9 +7,10 @@
 
 #import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint}
 #import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
+#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{WIND_DIR, wind_strength, wind_bob}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -64,7 +65,6 @@ struct VertexOutput {
     @location(4) ground_normal: vec3<f32>,
 };
 
-const WIND_DIR: vec3<f32> = vec3<f32>(0.8, 0.0, 0.6);
 // Sway is a fraction of the blade height.
 const WIND_SWAY: f32 = 0.3;
 const BLADE_MIN_HEIGHT: f32 = 0.04;
@@ -194,10 +194,12 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
 
     let pressed = sample_trample(base);
     let flat = clamp(pressed.x, 0.0, 1.0);
-    offset += vec3<f32>(pressed.y, 0.0, pressed.z) * offset.y * 0.9;
+    offset += wheel_roll(pressed) * (flat * offset.y * 0.9);
     offset.y *= 1.0 - flat * field.wheels.bend;
-    let gust = sin(globals.time * 1.6 + base.x * 0.7 + base.y * 0.5);
-    offset += WIND_DIR * (gust * 0.09 * offset.y * t * t);
+    let strength = wind_strength(base, globals.time);
+    let sway = strength * 0.6
+        + wind_bob(globals.time, rand(id, 9u), t) * 0.25 * mix(0.4, 1.0, strength);
+    offset += WIND_DIR * (sway * 0.12 * offset.y * t * t);
     let p = ground + offset * coverage;
     var out: VertexOutput;
     out.world_position = vec4<f32>(p, 1.0);
@@ -320,26 +322,32 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
     let lean = vec3<f32>(lean_xz.x, 0.0, lean_xz.y)
         * mix(0.25, 0.7, rand(id, 8u)) * mix(0.8, 1.2, rand(clump.id, 5u));
 
-    // Wind: a scrolling gust field; the bob's phase runs along the blade so
-    // it sways instead of pivoting.
-    let gust = noise(base_xz * 0.12 - WIND_DIR.xz * globals.time * 0.8);
-    let phase = globals.time * 2.7 + rand(id, 9u) * 6.2831853;
-    let sway_mid = WIND_DIR * (gust * 0.55 + sin(phase - 0.8) * 0.08) * 0.3;
-    let sway_tip = WIND_DIR * (gust * 0.55 + sin(phase - 1.6) * 0.08);
+    // Wind: the shared gust field pushes, and the blade's own bob runs
+    // along it so it sways instead of pivoting.
+    let strength = wind_strength(base_xz, globals.time);
+    let flutter = 0.08 * mix(0.4, 1.0, strength);
+    let seed = rand(id, 9u);
+    let sway_mid = WIND_DIR * (strength * 0.45 + wind_bob(globals.time, seed, 0.5) * flutter) * 0.3;
+    let sway_tip = WIND_DIR * (strength * 0.45 + wind_bob(globals.time, seed, 1.0) * flutter);
 
-    // Control points relative to the root; wheels lay the blade down.
+    // Control points relative to the root. Wheels lay blades along their
+    // roll with some scatter, face up; the stiffest spring back first as the
+    // track recovers.
     let pressed = sample_trample(base_xz);
     let flat = clamp(pressed.x, 0.0, 1.0);
-    let roll = vec3<f32>(pressed.y, 0.0, pressed.z);
+    let roll = scatter_roll(wheel_roll(pressed), (rand(id, 37u) - 0.5) * 0.6);
     let up = vec3<f32>(0.0, 1.0, 0.0);
-    let press = flat * field.wheels.bend;
-    let tip = mix((up + lean + sway_tip) * height, (roll * 0.9 + up * 0.08) * height, press);
-    let mid = mix((up * 0.6 + lean * 0.2 + sway_mid) * height, (roll * 0.45 + up * 0.06) * height, press);
+    let press = smoothstep(0.0, mix(0.4, 1.0, rand(id, 36u)), flat) * field.wheels.bend;
+    let tip = mix((up + lean + sway_tip) * height, (roll * 0.92 + up * 0.06) * height, press);
+    let mid = mix((up * 0.6 + lean * 0.2 + sway_mid) * height, (roll * 0.5 + up * 0.07) * height, press);
 
     let t = vertex.position.y;
     let side = vertex.position.x;
     let axis = normalize(bezier_tangent(mid, tip, t) + up * 1e-4);
-    let right = normalize(cross(axis, vec3<f32>(facing.x, 0.0, facing.y)) + vec3<f32>(1e-5, 0.0, 0.0));
+    let stand_right = cross(axis, vec3<f32>(facing.x, 0.0, facing.y));
+    let lay = cross(up, roll);
+    let lay_right = select(-lay, lay, dot(lay, stand_right) >= 0.0);
+    let right = normalize(mix(stand_right, lay_right, press) + vec3<f32>(1e-5, 0.0, 0.0));
     let normal = normalize(cross(right, axis));
     // Wide at the root, tapering fast to the tip.
     let half_w = width * 0.5 * ease_out(1.0 - t, 2.0) * side;

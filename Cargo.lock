@@ -3736,6 +3736,7 @@ dependencies = [
  "gearbox-api",
  "gearbox-controls",
  "glam 0.30.10",
+ "half",
  "mara",
  "openusd",
  "openusd-schemas",

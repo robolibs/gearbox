@@ -21,6 +21,7 @@ impl Plugin for FieldsPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "shaders/interaction.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/surface_detail.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/wind.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/canopy.wgsl");
         app.insert_resource(layout::FieldLayout::from_env().expect("read field layout"))
             .init_resource::<profile::FieldProfiles>()

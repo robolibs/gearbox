@@ -334,7 +334,7 @@ The simulator hosts one agentio agent for the scene and one per discovered
 machine. Every topic carries a `DatapodMsg` envelope whose payload is a
 datapod named `gearbox.<type>.v1`; the Rust definitions are in
 `crates/gearbox-api/src/wire`, the Python mirrors in
-`scripts/gearbox_client.py`.
+`examples/python/gearbox_client.py`.
 
 A running host writes `$XDG_RUNTIME_DIR/gearbox/<name>.json` with its
 `did:key`, its endpoint address, and pid. Machines are listed by the host.

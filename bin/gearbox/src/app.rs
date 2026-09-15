@@ -72,6 +72,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(viewer::camera_requests::CameraRequestsPlugin)
         .add_plugins(viewer::tf_overlay::TfOverlayPlugin)
         .add_plugins(viewer::screenshot::ScreenshotPlugin)
+        .add_plugins(viewer::recorder::RecorderPlugin)
         .add_plugins(viewer::overlays::OverlaysPlugin)
         .add_plugins(viewer::physics_overlay::PhysicsOverlayPlugin);
 }

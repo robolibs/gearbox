@@ -40,9 +40,11 @@ pub const PANE_SCENE: &str = "gearbox_pane_scene";
 pub const PANE_VIEW: &str = "gearbox_pane_view";
 pub const PANE_LOG: &str = "gearbox_pane_log";
 pub const PANE_ENVIRONMENT: &str = "gearbox_pane_environment";
+pub const PANE_CAPTURE: &str = "gearbox_pane_capture";
 
 const ACTION_PLAY: &str = "gearbox_action_play";
 const ACTION_CLEAR: &str = "gearbox_action_clear";
+
 
 fn ribbon_action(id: &'static str) -> RibbonAction {
     RibbonAction::Command(MaraId::new(id))
@@ -138,7 +140,7 @@ impl WindowApp for GearboxApp {
         } = self;
         capture.update(&egui);
         if !*panels_initialized {
-            for pane in [PANE_MACHINE, PANE_SCENE, PANE_VIEW, PANE_ENVIRONMENT, PANE_LOG] {
+            for pane in [PANE_MACHINE, PANE_SCENE, PANE_VIEW, PANE_ENVIRONMENT, PANE_CAPTURE, PANE_LOG] {
                 host.set_rail_pane_open(RIBBON_LEFT, pane, false);
             }
             *panels_initialized = true;
@@ -169,6 +171,9 @@ impl WindowApp for GearboxApp {
             return;
         };
         let physics_on = world.resource::<gearbox_api::PhysicsActive>().0;
+        let recording = world
+            .resource::<crate::viewer::recorder::Recorder>()
+            .is_recording();
         let outbox = Outbox::default();
         let world = RefCell::new(world);
         let ctx = PaneCtx {
@@ -207,6 +212,13 @@ impl WindowApp for GearboxApp {
                 PaneAnchor::LeftRail(RailZone::Start),
                 |body| panes::environment::show(body, &mut world.borrow_mut(), &ctx),
             )
+            .pane(
+                PANE_CAPTURE,
+                if recording { "stop" } else { "record" },
+                "Capture",
+                PaneAnchor::LeftRail(RailZone::Start),
+                |body| panes::capture::show(body, &mut world.borrow_mut(), &ctx),
+            )
             .action_in(
                 mara_core::ribbon::RibbonCluster::Middle,
                 ACTION_PLAY,
@@ -221,6 +233,7 @@ impl WindowApp for GearboxApp {
                 "Clear scene",
                 ribbon_action(ACTION_CLEAR),
             )
+
             .pane(
                 PANE_LOG,
                 "joystick",

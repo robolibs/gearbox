@@ -1,4 +1,6 @@
 #import bevy_pbr::mesh_view_bindings::{view, globals}
+#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{WIND_DIR, wind_strength, wind_bob}
+#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::wheel_roll
 
 struct CanopyVertex {
     position: vec3<f32>,
@@ -20,10 +22,12 @@ fn canopy_vertex(local: vec3<f32>, ground: vec3<f32>, normal: vec3<f32>, seed: f
     let arch = select(0.65, 0.0, straw) * local.y * local.y * height * (1.0 - flat * bend);
     let lateral = right * local.x * width * 0.5 + forward * arch;
     let ground_offset = -dot(normal.xz, lateral.xz) / max(normal.y, 0.1);
-    let wind = sin(globals.time * 1.6 + ground.x * 0.31 + ground.z * 0.23) * select(0.1, 0.004, straw);
+    let strength = wind_strength(ground.xz, globals.time);
+    let wind = (strength * 0.6 + wind_bob(globals.time, seed, local.y) * 0.25 * mix(0.4, 1.0, strength))
+        * select(0.1, 0.004, straw);
     let tip = local.y * height * growth * (1.0 - select(0.2, 0.0, straw) * local.y);
     let position = ground + lateral * growth + vec3<f32>(0.0, ground_offset * growth + tip * (1.0 - flat * bend), 0.0)
-        + vec3<f32>(pressed.y + wind, 0.0, pressed.z) * tip * bend;
+        + (wheel_roll(pressed) * flat + WIND_DIR * wind) * tip * bend;
     return CanopyVertex(position, normal, vec3<f32>(local.x * 0.5 + 0.5, local.y, seed - local.z));
 }
 

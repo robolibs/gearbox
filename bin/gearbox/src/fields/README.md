@@ -61,7 +61,7 @@ Rectangular maps allocate in proportion to field area, rather than a full terrai
 
 ## Existing USD workflow
 
-`scripts/bale_run_multi.py` loads `assets/world/terrain.usd`. The harvested-wheat package
+`examples/python/bale_run_multi.py` loads `assets/world/terrain.usd`. The harvested-wheat package
 preserves its previous material override, authored tint, and cut-hay rows. Loading USD terrain
 retires procedural field entities and their renderer resources with the procedural terrain.
 The legacy USD adapter is material-only: mixed layouts, generated stalks, and field wheel maps

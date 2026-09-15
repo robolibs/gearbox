@@ -3,6 +3,7 @@
 //! pods, renders them and turns the responses into resource writes or
 //! `HostCommand`s.
 
+pub mod capture;
 pub mod log;
 pub mod controls;
 pub mod environment;
@@ -138,6 +139,16 @@ pub fn pick_usd_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("USD stages", &["usda", "usdc", "usd", "usdz"])
         .pick_file()
+}
+
+/// The native folder picker, opening at `start` when given.
+pub fn pick_folder(start: Option<&std::path::Path>) -> Option<PathBuf> {
+    let dialog = rfd::FileDialog::new();
+    match start {
+        Some(start) => dialog.set_directory(start),
+        None => dialog,
+    }
+    .pick_folder()
 }
 
 /// A path that fits a readout: the file name when it fits, else the tail

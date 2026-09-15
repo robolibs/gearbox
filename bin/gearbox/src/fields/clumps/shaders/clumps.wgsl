@@ -5,8 +5,9 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::foliage_normal
+#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{WIND_DIR, wind_strength, wind_bob}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -47,7 +48,6 @@ struct VertexOutput {
     @location(4) ground_normal: vec3<f32>,
 };
 
-const WIND_DIR: vec3<f32> = vec3<f32>(0.8, 0.0, 0.6);
 const FADE_M: f32 = 3.0;
 const DIRT_SLOPE_NORMAL_Y: f32 = 0.86;
 
@@ -135,10 +135,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // Wheels lay the clump down along the roll; wind sways its top.
     let pressed = sample_wheels(trample, field.wheels, base);
     let flat = clamp(pressed.x, 0.0, 1.0);
-    local += vec3<f32>(pressed.y, 0.0, pressed.z) * local.y * field.wheels.bend;
+    local += wheel_roll(pressed) * (flat * local.y * field.wheels.bend);
     local.y *= 1.0 - flat * field.wheels.bend;
-    let gust = sin(globals.time * 1.6 + base.x * 0.7 + base.y * 0.5);
-    local += WIND_DIR * (gust * 1.5 * local.y * local.y);
+    let strength = wind_strength(base, globals.time);
+    let sway = strength * 0.6
+        + wind_bob(globals.time, rand(id, 9u), 1.0) * 0.25 * mix(0.4, 1.0, strength);
+    local += WIND_DIR * (sway * 1.2 * local.y * local.y);
 
     var out: VertexOutput;
     out.world_position = vec4<f32>(ground + local, 1.0);
