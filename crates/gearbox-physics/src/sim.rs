@@ -524,6 +524,32 @@ impl Sim {
             .unwrap_or(0.0)
     }
 
+    /// Instantaneous spin rate of a wheel (radians/second around its axle) —
+    /// the same quantity the physics step integrates into `wheel_spin_angle`
+    /// each tick, exposed directly rather than differenced from the
+    /// cumulative angle.
+    pub fn wheel_angular_velocity(&self, id: VehicleId, wheel: usize) -> f64 {
+        let Some(v) = self.vehicles.get(&id) else {
+            return 0.0;
+        };
+        let Some(wh) = v.handles.wheels.get(wheel) else {
+            return 0.0;
+        };
+        let Some(wrb) = self.bodies.get(wh.wheel) else {
+            return 0.0;
+        };
+        let world_axle = (*wrb.rotation()) * wh.axle_local;
+        wrb.angvel().dot(world_axle)
+    }
+
+    /// How many wheels a vehicle has.
+    pub fn wheel_count(&self, id: VehicleId) -> usize {
+        self.vehicles
+            .get(&id)
+            .map(|v| v.handles.wheels.len())
+            .unwrap_or(0)
+    }
+
     pub fn vehicles(&self) -> impl Iterator<Item = (VehicleId, &VehicleState)> {
         self.vehicles.iter().map(|(id, v)| (*id, v))
     }

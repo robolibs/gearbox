@@ -15,8 +15,8 @@ use std::process::{Child, Command};
 
 use crate::usd_ext::StageExt;
 use bevy::prelude::*;
-use gearbox_api::datapod::robot::{Odom, Twist};
-use gearbox_api::datapod::{Point, Quaternion};
+use gearbox_api::datapod::robot::{Imu, Odom, Twist, TurnRadius, WheelEncoder, WheelEncoders};
+use gearbox_api::datapod::{Acceleration, Point, Quaternion, Velocity};
 use gearbox_api::{
     ControllerDesc, GearboxBus, MachineAgent, MachineConfig, MachineState, Props, SceneEvent,
     clear_scope, event_kind,
@@ -174,9 +174,20 @@ pub(crate) struct ControllerRuntimeState {
     /// Wheel bodies per machine id for tyre setup and contact diagnostics.
     machine_wheels: HashMap<String, Vec<RigidBodyHandle>>,
     diff_drive_debug_ticks: u64,
+    /// Cumulative wheel spin angle (radians), integrated from measured
+    /// angular velocity each tick — nothing else here tracks it, so an
+    /// encoder reading has to keep its own running total.
+    wheel_spin_angles: HashMap<ControllerKey, Vec<f64>>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+/// Forward speed as of the last publish tick, per machine — the only history
+/// an IMU's longitudinal acceleration needs. Kept separate from
+/// `ControllerRuntimeState` because it's read and written by the publish
+/// system, not the command-application one.
+#[derive(Resource, Debug, Default, Clone)]
+pub(crate) struct LastLinearSpeed(HashMap<ControllerKey, f64>);
+
+#[derive(Debug, Clone, Default)]
 pub struct ControllerState {
     pub position_m: [f64; 3],
     pub heading_rad: f64,
@@ -184,6 +195,9 @@ pub struct ControllerState {
     pub pitch_rad: f64,
     pub linear_speed_mps: f64,
     pub yaw_rate_rps: f64,
+    /// One `(angle_rad, velocity_rad_s)` pair per driven wheel, indexed the
+    /// same as `wheel_targets` was when they were measured.
+    pub wheel_encoders: Vec<(f64, f64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -235,9 +249,11 @@ impl Plugin for ControllerDiscoveryPlugin {
             .init_resource::<ExternalControllerProcesses>()
             .init_resource::<ControllerStates>()
             .init_resource::<ControllerRuntimeState>()
+            .init_resource::<LastLinearSpeed>()
             .init_resource::<MachineAgentKeys>()
             .init_resource::<RejectedMachines>()
             .init_resource::<UiDrive>()
+            .add_systems(Update, rediscover_swapped_machines.before(prepare_machine_physics))
             .add_systems(
                 Update,
                 (
@@ -286,6 +302,7 @@ fn clear_controller_state_on_reset(
     runtime.logged_empty_tire_pairs.clear();
     runtime.logged_steer.clear();
     runtime.inertia_guarded.clear();
+    runtime.wheel_spin_angles.clear();
     states.states.clear();
     keys.0.clear();
     if let Some(mut bus) = bus {
@@ -1096,6 +1113,8 @@ fn apply_builtin_ackermann_cmd_vel(
                         pitch_rad,
                         linear_speed_mps: body.linvel().length(),
                         yaw_rate_rps: body.angvel().y,
+                        // Filled in below, once wheel_targets exists.
+                        wheel_encoders: Vec::new(),
                     },
                 );
             }
@@ -1167,6 +1186,35 @@ fn apply_builtin_ackermann_cmd_vel(
             {
                 *steering_log_at = time.elapsed_secs() + 1.0;
                 turn.trace(&physics, body_handle, &machine.id, &wheel_targets);
+            }
+            // Real per-wheel encoder readings: angular velocity is the same
+            // wheel-spin-around-its-axle measurement `turn.trace` above logs
+            // for debugging, taken every tick instead of only when
+            // GEARBOX_STEERING_DEBUG is set. Angle is that velocity
+            // integrated — nothing else in this simulator tracks cumulative
+            // wheel rotation, so an encoder has to keep its own running total.
+            {
+                let angles = runtime.wheel_spin_angles.entry(key.clone()).or_default();
+                angles.resize(wheel_targets.len(), 0.0);
+                let mut readings = Vec::with_capacity(wheel_targets.len());
+                for (i, target) in wheel_targets.iter().enumerate() {
+                    let velocity_rad_s = wheel_body_of(&physics, body_handle, target.pair)
+                        .and_then(|wheel| {
+                            let wheel_body = physics.bodies.get(wheel)?;
+                            let chassis_body = physics.bodies.get(body_handle)?;
+                            let (axis, _, _) = body_tyre_geometry(&physics, wheel)?;
+                            Some(
+                                (wheel_body.angvel() - chassis_body.angvel())
+                                    .dot(wheel_body.rotation() * axis),
+                            )
+                        })
+                        .unwrap_or(0.0);
+                    angles[i] += velocity_rad_s * dt as f64;
+                    readings.push((angles[i], velocity_rad_s));
+                }
+                if let Some(state) = states.states.get_mut(&key) {
+                    state.wheel_encoders = readings;
+                }
             }
             let passive =
                 parking_brake_wheel_targets(scene_root, controller, machine, &joints, &parents, &physics);
@@ -1333,6 +1381,9 @@ fn apply_builtin_diff_drive_cmd_vel(
                         pitch_rad,
                         linear_speed_mps: body.linvel().length(),
                         yaw_rate_rps: body.angvel().y,
+                        // Differential-drive path: no wheel_targets computed
+                        // here, so no measured encoder readings yet either.
+                        wheel_encoders: Vec::new(),
                     },
                 );
             }
@@ -1963,6 +2014,71 @@ fn cap_wheel_torque(
 
 /// Once per machine: its bodies stop colliding with each other, and every
 /// wheel link gets a rounded, grippy tyre with CCD that carries load.
+/// After a variant swap the machine's controllers and links are read again
+/// from its recomposed stage, keeping the ids its load gave it; its physics
+/// is prepared again on the next pass.
+fn rediscover_swapped_machines(
+    mut commands: Commands,
+    swapped: Query<Entity, With<crate::physics::SwappedStage>>,
+    instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
+    mut inventory: ResMut<ControllerInventory>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    mut seeded: Option<ResMut<crate::services::SeededLinkValues>>,
+) {
+    for root in &swapped {
+        commands.entity(root).remove::<crate::physics::SwappedStage>();
+        let Some(stage) = instances.as_ref().and_then(|instances| instances.stage(root)) else {
+            continue;
+        };
+        let started = std::time::Instant::now();
+        let mut machines = match discover_machines_from_stage(stage) {
+            Ok(machines) => machines,
+            Err(error) => {
+                warn!("gearbox-control: rescanning {root:?} after a variant swap: {error}");
+                continue;
+            }
+        };
+        let old: Vec<MachineInstanceSpec> = inventory
+            .machines
+            .iter()
+            .filter(|m| m.scene_root == Some(root))
+            .cloned()
+            .collect();
+        let Some(first) = old.first() else {
+            continue;
+        };
+        // A runtime namespace renamed the machine at load; keep it.
+        for machine in &mut machines {
+            if let Some(before) = old.iter().find(|m| m.prim_path == machine.prim_path)
+                && before.id != machine.id
+            {
+                machine.id = before.id.clone();
+                for controller in &mut machine.controllers {
+                    controller.namespace = before.id.clone();
+                }
+            }
+        }
+        // New links carry authored values (a loader's range) to seed; live
+        // values already set are kept.
+        for machine in &old {
+            runtime.machine_bodies.remove(&machine.id);
+            runtime.machine_wheels.remove(&machine.id);
+            if let Some(seeded) = seeded.as_mut() {
+                seeded.0.remove(&machine.id);
+            }
+        }
+        runtime.machines_prepared.retain(|key| key.scene_root != root);
+        inventory.machines.retain(|m| m.scene_root != Some(root));
+        let (label, path) = (first.asset_label.clone(), first.source_path.clone());
+        let controllers: usize = machines.iter().map(|m| m.controllers.len()).sum();
+        info!(
+            "gearbox-control: `{label}` rescanned after a variant swap: {controllers} controller(s) in {:?}",
+            started.elapsed()
+        );
+        inventory.push_loaded_asset(root, label, path, machines);
+    }
+}
+
 fn prepare_machine_physics(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
@@ -4424,7 +4540,12 @@ fn sync_machine_agents(
 
     let host_id = bus.host.endpoint_id();
     for (ns, (key, config)) in wanted {
-        if bus.machines.contains_key(&ns) {
+        if let Some(agent) = bus.machines.get_mut(&ns) {
+            // A variant swap changes a live machine's links and controllers.
+            agent.config.kind = config.kind;
+            agent.config.links = config.links;
+            agent.config.links_derived = config.links_derived;
+            agent.config.controllers = config.controllers;
             keys.0.insert(ns, key);
             continue;
         }
@@ -4551,7 +4672,10 @@ fn publish_machine_controller_states(
     link_values: Res<crate::services::LinkValues>,
     service: Res<crate::services::ServiceCommands>,
     attachments: Res<crate::attach::Attachments>,
+    mut last_speed: ResMut<LastLinearSpeed>,
+    time: Res<Time>,
 ) {
+    let dt = time.delta_secs_f64().max(1e-6);
     let Some(mut bus) = bus else { return };
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {
@@ -4613,9 +4737,10 @@ fn publish_machine_controller_states(
                         .iter()
                         .any(|iface| iface == "pose" || iface == "velocity")
             })
-            .and_then(|c| states.states.get(&key).map(|s| (c, *s)));
+            .and_then(|c| states.states.get(&key).map(|s| (c, s.clone())));
 
-        let (position, heading, roll, pitch, speed, yaw_rate) = match from_controller {
+        let (position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
+        {
             Some((controller, state)) => {
                 props.set("controller", &controller.instance);
                 (
@@ -4625,6 +4750,7 @@ fn publish_machine_controller_states(
                     state.pitch_rad,
                     state.linear_speed_mps,
                     state.yaw_rate_rps,
+                    state.wheel_encoders,
                 )
             }
             None => {
@@ -4659,6 +4785,7 @@ fn publish_machine_controller_states(
                     pitch,
                     speed,
                     body.angvel().y,
+                    Vec::new(),
                 )
             }
         };
@@ -4679,6 +4806,47 @@ fn publish_machine_controller_states(
             props: props.into_bytes(),
         };
         agent.publish_state(wire);
+
+        if !wheel_encoders.is_empty() {
+            agent.publish_encoders(&WheelEncoders::new(
+                wheel_encoders
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (angle_rad, velocity_rad_s))| {
+                        WheelEncoder::new(i as u8, *angle_rad, *velocity_rad_s)
+                    })
+                    .collect(),
+            ));
+        }
+
+        // Turn radius from the same kinematic relationship every differential
+        // or Ackermann-steered machine obeys (R = v / omega), rather than a
+        // geometric formula that would only hold for one steering layout.
+        let turn_radius = if yaw_rate.abs() > 1e-6 {
+            TurnRadius::new(speed / yaw_rate)
+        } else {
+            TurnRadius::straight()
+        };
+        agent.publish_turn_radius(&turn_radius);
+
+        // Longitudinal acceleration from the change in forward speed since
+        // the last publish tick; zero on the first tick, when there's no
+        // history yet. Lateral/vertical acceleration aren't derived yet.
+        let prior_speed = last_speed.0.insert(key.clone(), speed);
+        let forward_accel = prior_speed.map(|prev| (speed - prev) / dt).unwrap_or(0.0);
+        agent.publish_imu(&Imu::new(
+            Velocity {
+                vx: 0.0,
+                vy: yaw_rate,
+                vz: 0.0,
+            },
+            Acceleration {
+                ax: forward_accel,
+                ay: 0.0,
+                az: 0.0,
+            },
+            Quaternion::new(half.cos(), 0.0, half.sin(), 0.0),
+        ));
     }
 }
 

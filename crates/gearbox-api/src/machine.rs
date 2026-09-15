@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
-use datapod::robot::Twist;
+use datapod::robot::{Imu, Twist, TurnRadius, WheelEncoders};
 use peerbus::{AnsServer, EndpointId, Publisher, ReqReplyToken, ReqServer};
 
 use crate::host::{serve_que, serve_req};
@@ -147,6 +147,9 @@ pub struct MachineAgent {
     links: Registered<AnsServer<Env, Env>>,
     tf_pub: Registered<Publisher<Env>>,
     tf_enabled: bool,
+    encoders_pub: Registered<Publisher<Env>>,
+    imu_pub: Registered<Publisher<Env>>,
+    turn_radius_pub: Registered<Publisher<Env>>,
     attach: Registered<ReqServer<Env, Env>>,
     detach: Registered<ReqServer<Env, Env>>,
     tools_q: Registered<AnsServer<Env, Env>>,
@@ -201,6 +204,9 @@ impl MachineAgent {
             links: agent.que_server(&t(topics::MACHINE_LINKS))?,
             tf_pub: agent.publish(&t(topics::MACHINE_TF))?,
             tf_enabled: false,
+            encoders_pub: agent.publish(&t(topics::MACHINE_ENCODERS))?,
+            imu_pub: agent.publish(&t(topics::MACHINE_IMU))?,
+            turn_radius_pub: agent.publish(&t(topics::MACHINE_TURN_RADIUS))?,
             attach: agent.req_server(&t(topics::MACHINE_TOOLS_ATTACH))?,
             detach: agent.req_server(&t(topics::MACHINE_TOOLS_DETACH))?,
             tools_q: agent.que_server(&t(topics::MACHINE_TOOLS))?,
@@ -529,6 +535,18 @@ impl MachineAgent {
         state.session = self.session_id();
         let _ = self.odom_pub.send(&pack(&state.odom));
         let _ = self.state_pub.send(&pack(&state));
+    }
+
+    pub fn publish_encoders(&mut self, encoders: &WheelEncoders) {
+        let _ = self.encoders_pub.send(&pack(encoders));
+    }
+
+    pub fn publish_imu(&mut self, imu: &Imu) {
+        let _ = self.imu_pub.send(&pack(imu));
+    }
+
+    pub fn publish_turn_radius(&mut self, turn_radius: &TurnRadius) {
+        let _ = self.turn_radius_pub.send(&pack(turn_radius));
     }
 
     pub fn clear_session(&mut self) {
