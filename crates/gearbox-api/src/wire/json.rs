@@ -94,11 +94,49 @@ pub fn env_to_json(env: &Env) -> Result<Value, String> {
         return Ok(odom_json(&odom));
     }
     let view = env.dynamic().map_err(|e| e.to_string())?;
-    Ok(json!({
-        "type": view.schema().canonical_name,
-        "type_hash": env.type_hash(),
-        "bytes": env.wire().len(),
-    }))
+    Ok(dynamic_view_json(&view))
+}
+
+/// Generic JSON for any registered datapod type, walked by schema alone —
+/// no per-type Rust code, so a new wire type just works the moment it's
+/// registered with `datapod`.
+fn dynamic_view_json(view: &datapod::dynamic::DynamicView<'_>) -> Value {
+    let mut map = Map::new();
+    for field in &view.schema().fields {
+        let value = view
+            .field(field.name)
+            .map(dynamic_value_json)
+            .unwrap_or(Value::Null);
+        map.insert(field.name.to_string(), value);
+    }
+    Value::Object(map)
+}
+
+fn dynamic_value_json(value: datapod::dynamic::DynamicValue<'_>) -> Value {
+    use datapod::dynamic::DynamicValue as V;
+    match value {
+        V::U8(v) => json!(v),
+        V::U16(v) => json!(v),
+        V::U32(v) => json!(v),
+        V::U64(v) => json!(v),
+        V::U128(v) => json!(v.to_string()),
+        V::I8(v) => json!(v),
+        V::I16(v) => json!(v),
+        V::I32(v) => json!(v),
+        V::I64(v) => json!(v),
+        V::I128(v) => json!(v.to_string()),
+        V::F32(v) => json!(v),
+        V::F64(v) => json!(v),
+        V::Bool(v) => json!(v),
+        V::Bytes(bytes) => json!(format!("0x{}", hex_encode(bytes))),
+        V::ArrayBytes { bytes, .. } => json!(format!("0x{}", hex_encode(bytes))),
+        V::Nested(nested) => dynamic_view_json(&nested),
+        V::NestedList(items) => Value::Array(items.iter().map(dynamic_view_json).collect()),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn env_from_json(name: &str, value: &Value) -> Result<Env, String> {

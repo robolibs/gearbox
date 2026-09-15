@@ -4813,7 +4813,7 @@ fn publish_machine_controller_states(
                     .iter()
                     .enumerate()
                     .map(|(i, (angle_rad, velocity_rad_s))| {
-                        WheelEncoder::new(i as u8, *angle_rad, *velocity_rad_s)
+                        WheelEncoder::new(i as u64, *angle_rad, *velocity_rad_s)
                     })
                     .collect(),
             ));

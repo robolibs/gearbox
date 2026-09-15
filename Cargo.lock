@@ -132,7 +132,7 @@ dependencies = [
 [[package]]
 name = "agentio"
 version = "0.1.0"
-source = "git+https://github.com/robolibs/agentio?rev=09528f6f45df59caa9298e6f77dc4c3fb9807045#09528f6f45df59caa9298e6f77dc4c3fb9807045"
+source = "git+https://github.com/robolibs/agentio?rev=4e1d8a15b5e2b6379dcc6b2ec5d87bbde7dd3f3b#4e1d8a15b5e2b6379dcc6b2ec5d87bbde7dd3f3b"
 dependencies = [
  "authbox",
  "datapod",
@@ -2715,8 +2715,8 @@ dependencies = [
 
 [[package]]
 name = "datapod"
-version = "0.5.0"
-source = "git+https://codeberg.org/robolibs/datapod.git?tag=0.5.0#da9b8c04db46c26455227b69053697d9608ed7a0"
+version = "0.6.0"
+source = "git+https://codeberg.org/robolibs/datapod.git?tag=0.6.0#7133bb347a7f816f2a2456cbd4367ecfa23cd849"
 dependencies = [
  "bytemuck",
  "datapod-macros",
@@ -2725,7 +2725,7 @@ dependencies = [
 [[package]]
 name = "datapod-macros"
 version = "0.0.1"
-source = "git+https://codeberg.org/robolibs/datapod.git?tag=0.5.0#da9b8c04db46c26455227b69053697d9608ed7a0"
+source = "git+https://codeberg.org/robolibs/datapod.git?tag=0.6.0#7133bb347a7f816f2a2456cbd4367ecfa23cd849"
 dependencies = [
  "proc-macro2",
  "quote",
