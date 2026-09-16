@@ -95,8 +95,9 @@ def main() -> None:
             s = tractor.state(wait=0.05)
             ts = trailer.state()
             if s and ts and int(elapsed * 10) % 20 == 0:
-                gap = math.hypot(s.x - ts.x, s.z - ts.z)
-                print(f"  t={elapsed:5.1f}s tractor ({s.x:+.1f}, {s.z:+.1f}) trailer ({ts.x:+.1f}, {ts.z:+.1f}) gap {gap:.2f} m")
+                # Odom is REP-103 now (Z up); x/y are the ground plane.
+                gap = math.hypot(s.x - ts.x, s.y - ts.y)
+                print(f"  t={elapsed:5.1f}s tractor ({s.x:+.1f}, {s.y:+.1f}) trailer ({ts.x:+.1f}, {ts.y:+.1f}) gap {gap:.2f} m")
             time.sleep(0.05)
     finally:
         tractor.stop()
@@ -113,7 +114,7 @@ def main() -> None:
     s = tractor.state(wait=0.2)
     ts = trailer.state(wait=0.2)
     if s and ts:
-        print(f"tractor left the trailer {math.hypot(s.x - ts.x, s.z - ts.z):.1f} m behind")
+        print(f"tractor left the trailer {math.hypot(s.x - ts.x, s.y - ts.y):.1f} m behind")
 
 
 if __name__ == "__main__":

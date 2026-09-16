@@ -161,7 +161,11 @@ class RobotProxy:
         if s is None:
             return False
         self.last_pose = self.pose
-        self.pose = (s.x, s.z)
+        # Odom is REP-103 now (Z up); this file's (x, z) math predates that
+        # and still expects the old sim-native (X, Z) ground-plane pair, so
+        # reconstruct it here rather than touch every formula below: old_x
+        # is the new y, old_z is the new x.
+        self.pose = (s.y, s.x)
         self.heading_rad = s.heading_rad
         self.yaw_rate = s.yaw_rate
         self.speed = s.linear_speed

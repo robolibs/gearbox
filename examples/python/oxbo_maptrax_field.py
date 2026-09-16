@@ -350,7 +350,10 @@ class Machine:
         if self.machine is not None:
             s = self.machine.state()
             if s is not None:
-                self.pose = MachinePose(s.x, s.z, s.heading_rad, True)
+                # Odom is REP-103 now (Z up); MachinePose here still means
+                # the old sim-native (X, Z) ground plane, so reconstruct
+                # it: old_x is the new y, old_z is the new x.
+                self.pose = MachinePose(s.y, s.x, s.heading_rad, True)
         return MachinePose(self.pose.x, self.pose.z, self.pose.heading_rad, self.pose.seen)
 
     def load(self, gb: Gearbox) -> None:

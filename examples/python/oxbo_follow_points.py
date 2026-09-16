@@ -71,14 +71,17 @@ def step_toward(machine: Machine, points: list[tuple[float, float]], goal_idx: i
     if pose is None:
         machine.cmd_vel(0.0, 0.0)
         return goal_idx
+    # Odom is REP-103 now (Z up); pose.x/pose.z here still mean the old
+    # sim-native (X, Z) ground plane, so reconstruct it: old_x is the new
+    # y, old_z is the new x.
     gx, gz = points[goal_idx]
-    dx, dz = gx - pose.x, gz - pose.z
+    dx, dz = gx - pose.y, gz - pose.x
     dist = math.hypot(dx, dz)
     if dist < GOAL_TOLERANCE_M:
         print(f"{machine.namespace}: reached point {goal_idx}: x={gx:.1f}, z={gz:.1f}")
         goal_idx = (goal_idx + 1) % len(points)
         gx, gz = points[goal_idx]
-        dx, dz = gx - pose.x, gz - pose.z
+        dx, dz = gx - pose.y, gz - pose.x
         dist = math.hypot(dx, dz)
     heading_err = wrap_pi(math.atan2(dx, dz) - pose.heading_rad)
     abs_err = abs(heading_err)

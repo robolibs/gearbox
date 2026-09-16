@@ -4793,11 +4793,25 @@ fn publish_machine_controller_states(
         };
 
         let half = heading * 0.5;
+        // World-frame position and orientation go out REP-103/Gazebo/Isaac
+        // Sim style (Z up, X/Y the ground plane), not the sim's own internal
+        // Bevy/Rapier frame (Y up, X/Z the ground plane). The remap is the
+        // axis permutation (ros_x, ros_y, ros_z) = (sim_z, sim_x, sim_y): it's
+        // right-handed (verified: ros_x × ros_y = ros_z), and it lines up
+        // `heading_rad` with standard ROS yaw for free — heading 0 already
+        // means "facing +sim_z", which under this permutation is "facing
+        // +ros_x", and a positive heading rotates a (cos,sin,0) vector in
+        // ros_x/ros_y exactly like a standard yaw does. So `heading_rad`,
+        // `roll_rad`, `pitch_rad`, and every body-frame twist/IMU field
+        // below (already X-forward, Z-up-yaw) need no change at all — only
+        // the world-frame point and quaternion do.
+        let ros_point = Point::new(position[2], position[0], position[1]);
+        let ros_rotation = Quaternion::new(half.cos(), 0.0, 0.0, half.sin());
         let wire = MachineState {
             odom: Odom {
                 pose: gearbox_api::datapod::Pose {
-                    point: Point::new(position[0], position[1], position[2]),
-                    rotation: Quaternion::new(half.cos(), 0.0, half.sin(), 0.0),
+                    point: ros_point,
+                    rotation: ros_rotation,
                 },
                 twist: Twist::from_components(speed, 0.0, 0.0, 0.0, 0.0, yaw_rate),
             },
@@ -4870,7 +4884,7 @@ fn publish_machine_controller_states(
                 ay: 0.0,
                 az: 0.0,
             },
-            Quaternion::new(half.cos(), 0.0, half.sin(), 0.0),
+            ros_rotation,
         ));
     }
 }
