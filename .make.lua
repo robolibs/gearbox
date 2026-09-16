@@ -23,9 +23,14 @@ local make = oslo.make
 -- present (its detection function always returned success — a bare `if` with no `else`
 -- exits 0 whether or not the test matched), and never actually switched RUN_WITH to the
 -- Intel/Mesa wrapper on a machine without NVIDIA either. Forcing the NVIDIA vendor on a
--- box with no NVIDIA GPU is exactly the "crazy slow" symptom this must never reproduce, so
--- the check below only forces anything NVIDIA-specific when `/proc/driver/nvidia/version`
--- genuinely exists.
+-- box with no NVIDIA GPU is exactly the "crazy slow" symptom this must never reproduce.
+--
+-- Presence is checked against the PCI bus (`lspci`), not `/proc/driver/nvidia/version`:
+-- that proc entry is tied to the kernel module being loaded at this exact instant and has
+-- been observed to read as briefly absent even while `nvidia-smi`/`lspci` see the card
+-- fine moments before and after (module reload / on-demand-load race) — a real NVIDIA
+-- laptop hit exactly this and silently fell back to llvmpipe software rendering. The PCI
+-- device itself doesn't come and go, so it can't flap the same way.
 local function fresh_display_env(cmd)
   return ([[
 unset BACKEND RUN_WITH WAYLAND_DISPLAY DISPLAY __NV_PRIME_RENDER_OFFLOAD __NV_PRIME_RENDER_OFFLOAD_PROVIDER __GLX_VENDOR_LIBRARY_NAME __VK_LAYER_NV_optimus
@@ -38,7 +43,7 @@ else
   export BACKEND=x11
   export DISPLAY="${DISPLAY:-:1}"
 fi
-if [ -r /proc/driver/nvidia/version ]; then
+if lspci -d ::0300 2>/dev/null | grep -qi nvidia; then
   export __NV_PRIME_RENDER_OFFLOAD=1
   export __NV_PRIME_RENDER_OFFLOAD_PROVIDER=NVIDIA-G0
   export __GLX_VENDOR_LIBRARY_NAME=nvidia
