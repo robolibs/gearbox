@@ -107,9 +107,16 @@ Inspect and drive machines
 | `controllers [NS]` | Controller table with types and interfaces |
 | `links [OPTIONS] [NS]` | The link tree: names, roles, parents, static offsets |
 | `tf [OPTIONS] [NS]` | Stream link poses: switches the machine's tf on, prints, switches it off |
-| `sub [OPTIONS] <TOPIC>` | Stream any topic: a leaf under this machine (`imu`, `turn_radius`, `encoders`, `odom`, `tf`, `state`) or a full path starting with `/` |
 | `set-value [OPTIONS] <LINK> <NAME> <VALUE>` | Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8) |
 | `tools <COMMAND>` | Attachments: what hangs on a machine, attach and detach slaves |
+
+## `gearbox subscribe`
+
+Stream any topic, host-level or under a machine
+
+```
+subscribe [OPTIONS] <TOPIC>
+```
 
 ## `gearbox access`
 
@@ -133,7 +140,6 @@ Raw topic access, schemas, diagnostics
 |---|---|
 | `topics` | Topics of the target and its machines, with types |
 | `call [OPTIONS] <TOPIC> [BODY]` | req/res call with a JSON body |
-| `sub [OPTIONS] <TOPIC>` | Tail a pub/sub topic |
 | `que [OPTIONS] <TOPIC> [BODY]` | que/ans query, one line per answer |
 | `schema [TYPE_NAME]` | Schema of a wire type, or the list of all |
 | `diag [DID]` | Transport path to the target (or a peer did) |

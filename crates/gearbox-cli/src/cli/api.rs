@@ -1,7 +1,5 @@
 //! `gearbox api`: raw topics, schemas, diagnostics, doctor.
 
-use std::time::Duration;
-
 use clap::{Args as ClapArgs, Subcommand};
 use gearbox_api::wire::json as wire_json;
 use gearbox_api::{Env, HostInfo, Ping, topics};
@@ -29,12 +27,6 @@ enum Cmd {
         /// Request wire type when it cannot be inferred from the topic
         #[arg(long = "type")]
         type_name: Option<String>,
-    },
-    /// Tail a pub/sub topic
-    Sub {
-        topic: String,
-        #[arg(short = 'n', long)]
-        count: Option<usize>,
     },
     /// que/ans query, one line per answer
     Que {
@@ -197,26 +189,6 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             let res = ctx.client()?.call_env(&topic, &req)?;
             print_env(ctx, &res);
             Ok(())
-        }
-        Cmd::Sub { topic, count } => {
-            let client = ctx.client()?;
-            let mut sub = client.subscribe_env(&topic)?;
-            let mut seen = 0usize;
-            loop {
-                match sub.recv_timeout(Duration::from_secs(1)) {
-                    Ok(Some(sample)) => {
-                        let env = Env::new(sample.header().type_hash, sample.payload().to_vec());
-                        print_env(ctx, &env);
-                        seen += 1;
-                        if count.is_some_and(|n| seen >= n) {
-                            return Ok(());
-                        }
-                    }
-                    Ok(None) => continue,
-                    Err(peerbus::Error::Lagged { .. }) => continue,
-                    Err(err) => return Err(agentio::Error::from(err).into()),
-                }
-            }
         }
         Cmd::Que {
             topic,

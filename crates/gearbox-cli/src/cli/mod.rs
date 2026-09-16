@@ -11,6 +11,7 @@ pub mod run;
 pub mod scene;
 pub mod select;
 pub mod spawn;
+pub mod subscribe;
 
 use gearbox_api::Status;
 
@@ -54,6 +55,32 @@ pub fn default_id(path: &str) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string())
+}
+
+/// A flag that flips on `SIGINT`/`SIGTERM`, for commands that stream until
+/// interrupted.
+pub fn install_ctrlc() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+    let flag = FLAG
+        .get_or_init(|| {
+            let flag = Arc::new(AtomicBool::new(false));
+            extern "C" fn handler(_: libc::c_int) {
+                if let Some(f) = FLAG.get() {
+                    f.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            // SAFETY: installing a plain signal handler that only stores a flag.
+            unsafe {
+                libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
+                libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
+            }
+            flag
+        })
+        .clone();
+    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+    flag
 }
 
 pub fn parse_duration(text: &str) -> Result<std::time::Duration> {

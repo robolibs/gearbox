@@ -207,24 +207,25 @@ fn machine_move_and_busy() {
     assert_eq!(code, 0, "{err}");
 }
 
-/// `machine sub` builds `/machines/<ns>/<leaf>` and decodes it generically,
-/// with no per-topic code — this is what makes `state` show up correctly
-/// even though it's read through the untyped path, not `machine state`'s
-/// typed one.
+/// `subscribe` builds `/machines/<machine>/<leaf>` and decodes it
+/// generically, with no per-topic code — this is what makes `state` show
+/// up correctly even though it's read through the untyped path, not
+/// `machine state`'s typed one.
 #[test]
-fn machine_sub_decodes_a_topic_by_leaf_name() {
+fn subscribe_decodes_a_topic_by_leaf_name() {
     let env = Env::start(&["oxbo"]);
-    let (code, out, err) = env.gearbox(&["machine", "sub", "state", "--ns", "oxbo", "-n", "1"]);
+    let (code, out, err) = env.gearbox(&["subscribe", "state", "--machine", "oxbo", "-n", "1"]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("odom").is_some(), "{out}");
 
-    let (code, _, err) = env.gearbox(&["machine", "sub", "nosuchtopic", "--ns", "oxbo", "-n", "1"]);
+    let (code, _, err) =
+        env.gearbox(&["subscribe", "nosuchtopic", "--machine", "oxbo", "-n", "1"]);
     assert_ne!(code, 0, "{err}");
 
-    // A full path starting with `/` is used as-is, no ns needed — the leaf
-    // form is a shorthand, not the only way in.
-    let (code, out, err) = env.gearbox(&["machine", "sub", "/machines/oxbo/state", "-n", "1"]);
+    // A full path starting with `/` is used as-is, no --machine needed —
+    // the leaf form is a shorthand, not the only way in.
+    let (code, out, err) = env.gearbox(&["subscribe", "/machines/oxbo/state", "-n", "1"]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("odom").is_some(), "{out}");
@@ -234,7 +235,7 @@ fn machine_sub_decodes_a_topic_by_leaf_name() {
 /// escape hatch), skipping the host's directory entirely — real proof it
 /// works, not just that it compiles.
 #[test]
-fn machine_sub_dials_the_machines_own_did_directly() {
+fn subscribe_dials_the_machines_own_did_directly() {
     let env = Env::start(&["oxbo"]);
     let (code, out, err) = env.gearbox(&["machine", "list", "--json"]);
     assert_eq!(code, 0, "{err}");
@@ -242,17 +243,16 @@ fn machine_sub_dials_the_machines_own_did_directly() {
     let did = list[0]["did"].as_str().expect("machine did").to_string();
 
     let (code, out, err) = env.gearbox(&[
-        "machine", "sub", "state", "--ns", "oxbo", "--did", &did, "-n", "1",
+        "subscribe", "state", "--machine", "oxbo", "--did", &did, "-n", "1",
     ]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("odom").is_some(), "{out}");
 
     let (code, _, err) = env.gearbox(&[
-        "machine",
-        "sub",
+        "subscribe",
         "state",
-        "--ns",
+        "--machine",
         "oxbo",
         "--did",
         "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
@@ -266,7 +266,7 @@ fn machine_sub_dials_the_machines_own_did_directly() {
 /// happens to resolve: an empty registry and no `GEARBOX_INSTANCE` still
 /// reaches the machine.
 #[test]
-fn machine_sub_by_did_needs_no_instance() {
+fn subscribe_by_did_needs_no_instance() {
     let env = Env::start(&["oxbo"]);
     let (code, out, err) = env.gearbox(&["machine", "list", "--json"]);
     assert_eq!(code, 0, "{err}");
@@ -274,7 +274,7 @@ fn machine_sub_by_did_needs_no_instance() {
     let did = list[0]["did"].as_str().expect("machine did").to_string();
 
     let (code, out, err) = env.gearbox_no_instance(&[
-        "machine", "sub", "state", "--ns", "oxbo", "--did", &did, "-n", "1",
+        "subscribe", "state", "--machine", "oxbo", "--did", &did, "-n", "1",
     ]);
     assert_eq!(code, 0, "no instance registered, yet --did worked: {err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();

@@ -7,13 +7,12 @@ use std::time::{Duration, Instant};
 use clap::{Args as ClapArgs, Subcommand};
 use gearbox_api::wire::json as wire_json;
 use gearbox_api::{
-    ClaimResponse, ControllerCommand, Env, MachineClient, MachineInfo, MachineState, Props, code,
-    next_sample, pack, topics,
+    ClaimResponse, ControllerCommand, MachineClient, MachineInfo, MachineState, Props, code,
+    next_sample, pack,
 };
 use serde_json::json;
 
-use super::api::print_env;
-use super::{check, parse_duration};
+use super::{check, install_ctrlc, parse_duration};
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::out::{self, Table};
@@ -115,21 +114,6 @@ enum Cmd {
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
-    /// Stream any topic: a leaf under this machine (`imu`, `turn_radius`,
-    /// `encoders`, `odom`, `tf`, `state`) or a full path starting with `/`
-    Sub {
-        topic: String,
-        /// Machine namespace (default: the selection)
-        #[arg(long)]
-        ns: Option<String>,
-        /// Dial the machine's own did directly instead of resolving `ns`
-        /// through the host's directory; works even if the host is down
-        #[arg(long)]
-        did: Option<String>,
-        /// Stop after this many messages
-        #[arg(short = 'n', long)]
-        count: Option<usize>,
-    },
     /// Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8)
     SetValue {
         link: String,
@@ -218,12 +202,6 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             rate,
             count,
         } => tf(ctx, ns, link, rate, count),
-        Cmd::Sub {
-            topic,
-            ns,
-            did,
-            count,
-        } => sub(ctx, ns, did, &topic, count),
         Cmd::SetValue {
             link,
             name,
@@ -715,30 +693,6 @@ fn drive(ctx: &Ctx, ns: Option<String>, speed: f64, yaw: f64, take: bool) -> Res
     Ok(())
 }
 
-fn install_ctrlc() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    static FLAG: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
-    let flag = FLAG
-        .get_or_init(|| {
-            let flag = Arc::new(AtomicBool::new(false));
-            extern "C" fn handler(_: libc::c_int) {
-                if let Some(f) = FLAG.get() {
-                    f.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            // SAFETY: installing a plain signal handler that only stores a flag.
-            unsafe {
-                libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
-                libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
-            }
-            flag
-        })
-        .clone();
-    flag.store(false, std::sync::atomic::Ordering::Relaxed);
-    flag
-}
-
 /// Raw, non-blocking stdin for the interactive drive; restored on drop.
 struct RawTerminal {
     original: libc::termios,
@@ -977,53 +931,6 @@ fn tf(
     };
     let _ = mc.set_tf(false);
     result
-}
-
-/// Stream any topic, same generic decode `gearbox api sub` uses. A topic
-/// starting with `/` is used exactly as given; anything else is a leaf
-/// resolved under this machine's own namespace, e.g. `imu` becomes
-/// `/machines/<ns>/imu`. With `--did`, the machine's own endpoint is dialed
-/// directly instead of resolving `ns` through the host's directory — this
-/// still needs `ns` (or a selection) to name the topic, a `did` alone can't
-/// recover it, but skips depending on the host being reachable at all.
-fn sub(
-    ctx: &Ctx,
-    ns: Option<String>,
-    did: Option<String>,
-    topic: &str,
-    count: Option<usize>,
-) -> Result<()> {
-    let full_topic = if topic.starts_with('/') {
-        topic.to_string()
-    } else {
-        topics::machine_topic(&ctx.machine_ns(ns)?, topic)
-    };
-    // `--did` dials the machine directly and needs no instance at all; the
-    // usual path connects through one to resolve the topic's owner.
-    let mut sub = match did {
-        Some(did) => ctx.bare_client()?.subscribe_env_direct(&did, &full_topic)?,
-        None => ctx.client()?.subscribe_env(&full_topic)?,
-    };
-    let stop_flag = install_ctrlc();
-    let mut seen = 0usize;
-    loop {
-        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(());
-        }
-        match sub.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(sample)) => {
-                let env = Env::new(sample.header().type_hash, sample.payload().to_vec());
-                print_env(ctx, &env);
-                seen += 1;
-                if count.is_some_and(|n| seen >= n) {
-                    return Ok(());
-                }
-            }
-            Ok(None) => continue,
-            Err(peerbus::Error::Lagged { .. }) => continue,
-            Err(err) => return Err(agentio::Error::from(err).into()),
-        }
-    }
 }
 
 fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
