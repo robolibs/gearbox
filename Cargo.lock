@@ -3728,6 +3728,7 @@ dependencies = [
  "datapod",
  "egui",
  "gearbox-api",
+ "gearbox-cli",
  "gearbox-controls",
  "glam 0.30.10",
  "half",

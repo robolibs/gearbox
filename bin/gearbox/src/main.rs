@@ -39,8 +39,19 @@ use viewer::log::{LoaderLog, LoaderLogLayer};
 const LOG_FILE: &str = "/tmp/gearbox-sim.log";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli_paths: Vec<std::path::PathBuf> = std::env::args()
-        .skip(1)
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // No arguments, or an explicit `launch`, boots the sim; anything else is
+    // a CLI command handled by `gearbox_cli::run()` in this same process —
+    // there is no separate CLI binary any more.
+    let launching = args.is_empty() || args.first().map(String::as_str) == Some("launch");
+    if !launching {
+        std::process::exit(gearbox_cli::run());
+    }
+    if !args.is_empty() {
+        args.remove(0);
+    }
+    let cli_paths: Vec<std::path::PathBuf> = args
+        .iter()
         .map(|s| {
             let p = std::path::PathBuf::from(&s);
             if p.is_absolute() {
@@ -69,7 +80,7 @@ fn init_tracing(log: &LoaderLog) {
     let _ = std::fs::write(LOG_FILE, "");
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
-            "warn,gearbox=info,gearbox_sim=info,gearbox_api=info,usd_bevy=info,bevy_diagnostic=info,agentio=error",
+            "warn,gearbox=info,gearbox_api=info,usd_bevy=info,bevy_diagnostic=info,agentio=error",
         )
     });
     let to_file = || {

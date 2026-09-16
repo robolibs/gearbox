@@ -5,12 +5,12 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 
-#import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint}
-#import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
-#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{plant_lean, blade_leans}
-#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
+#import "embedded://gearbox/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint}
+#import "embedded://gearbox/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
+#import "embedded://gearbox/fields/shaders/wind.wgsl"::{plant_lean, blade_leans}
+#import "embedded://gearbox/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
+#import "embedded://gearbox/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 
 struct VegetationParams {
     corner: vec2<f32>,

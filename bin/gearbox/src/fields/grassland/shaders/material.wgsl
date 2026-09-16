@@ -9,14 +9,14 @@
     mesh_view_bindings::globals,
 }
 
-#import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_canopy, meadow_tint, meadow_pocket_blend, grass_species, species_tint}
-#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
-#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
+#import "embedded://gearbox/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_canopy, meadow_tint, meadow_pocket_blend, grass_species, species_tint}
+#import "embedded://gearbox/fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
+#import "embedded://gearbox/fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var surface_heightmap: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var<uniform> geometry: SurfaceGeometryParams;
 
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var grass_albedo: texture_2d<f32>;

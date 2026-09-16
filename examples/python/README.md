@@ -4,7 +4,7 @@ Python helpers for driving a running Gearbox over agentio/peerbus.
 
 For one-off work from the shell use the `gearbox` CLI instead (`make
 build-bins`, then `target/debug/gearbox --help`; the command tree is in
-`CLI.md`). `gearbox run` launches `gearbox-sim`, and every script below works
+`CLI.md`). `gearbox run` launches the sim, and every script below works
 against an instance started that way.
 
 Every script goes through `gearbox_client.py`, which finds the running host

@@ -35,7 +35,7 @@ struct MeadowExtension {
 
 impl MaterialExtension for MeadowExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_sim/fields/grassland/shaders/material.wgsl".into()
+        "embedded://gearbox/fields/grassland/shaders/material.wgsl".into()
     }
 }
 
@@ -49,7 +49,7 @@ impl Plugin for GrasslandPlugin {
         bevy::asset::embedded_asset!(app, "textures/grass_albedo.jpg");
         bevy::asset::embedded_asset!(app, "textures/soil_albedo.jpg");
         app.add_plugins(MaterialPlugin::<MeadowMaterial>::default());
-        let shader = "embedded://gearbox_sim/fields/grassland/shaders/vegetation.wgsl";
+        let shader = "embedded://gearbox/fields/grassland/shaders/vegetation.wgsl";
         let density = std::env::var("GEARBOX_GRASS_DENSITY")
             .ok()
             .and_then(|value| value.parse::<f32>().ok())
@@ -152,13 +152,13 @@ fn create_ground(
         .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| {
             settings.sampler = bevy::image::ImageSampler::linear();
         })
-        .load("embedded://gearbox_sim/fields/grassland/textures/grass_albedo.jpg");
+        .load("embedded://gearbox/fields/grassland/textures/grass_albedo.jpg");
     let dirt_albedo = assets
         .load_builder()
         .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| {
             settings.sampler = bevy::image::ImageSampler::linear();
         })
-        .load("embedded://gearbox_sim/fields/grassland/textures/soil_albedo.jpg");
+        .load("embedded://gearbox/fields/grassland/textures/soil_albedo.jpg");
     let material = world
         .resource_mut::<Assets<MeadowMaterial>>()
         .add(ExtendedMaterial {

@@ -16,7 +16,7 @@ pub fn prepare_textures(
         };
         if !path
             .to_string()
-            .starts_with("embedded://gearbox_sim/fields/")
+            .starts_with("embedded://gearbox/fields/")
             || !path.path().to_string_lossy().contains("/textures/")
         {
             continue;

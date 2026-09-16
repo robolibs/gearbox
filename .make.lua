@@ -34,30 +34,27 @@ make.alias("b", "build")
 
 make.recipe{
   name = "build-bins",
-  desc = "the gearbox CLI and gearbox-sim (debug)",
+  desc = "the merged gearbox binary (debug)",
   run = function()
-    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox-sim",
-                       "-p", "gearbox-cli", "--bin", "gearbox")
+    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
   end,
 }
 
 make.recipe{
   name = "build-release-bin",
-  desc = "the release gearbox and gearbox-sim binaries",
+  desc = "the merged gearbox binary (release)",
   run = function()
-    sh.cargo("build", "--release", "-p", "gearbox-sim", "--bin", "gearbox-sim",
-                                    "-p", "gearbox-cli", "--bin", "gearbox")
+    sh.cargo("build", "--release", "-p", "gearbox-sim", "--bin", "gearbox")
   end,
 }
 
 -- Debug sim with per-system Chrome tracing; run it with GEARBOX_TRACE=file.json.
 make.recipe{
   name = "build-profile",
-  desc = "debug sim built with the profile feature (GEARBOX_TRACE=file.json to use it)",
+  desc = "debug binary built with the profile feature (GEARBOX_TRACE=file.json to use it)",
   run = function()
-    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox-sim",
-                       "--features", "gearbox-sim/profile",
-                       "-p", "gearbox-cli", "--bin", "gearbox")
+    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox",
+                       "--features", "gearbox-sim/profile")
   end,
 }
 
@@ -70,7 +67,7 @@ make.recipe{
   params = { { "--args", desc = "passed through to `gearbox run`, e.g. a USD scene path" } },
   deps = { "build-bins" },
   run = function(a)
-    sh.sh("-c", ("env WINIT_UNIX_BACKEND=%s %s target/debug/gearbox run --sim target/debug/gearbox-sim %s")
+    sh.sh("-c", ("env WINIT_UNIX_BACKEND=%s %s target/debug/gearbox run %s")
       :format(BACKEND, RUN_WITH, a.args or ""))
   end,
 }
@@ -78,11 +75,11 @@ make.alias("r", "run")
 
 make.recipe{
   name = "sim",
-  desc = "launch gearbox-sim directly",
-  params = { { "--args", desc = "passed through to gearbox-sim" } },
+  desc = "launch the sim directly, bypassing `gearbox run`'s instance management",
+  params = { { "--args", desc = "USD scenes to load, passed through to `gearbox launch`" } },
   deps = { "build-bins" },
   run = function(a)
-    sh.sh("-c", ("env WINIT_UNIX_BACKEND=%s %s target/debug/gearbox-sim %s")
+    sh.sh("-c", ("env WINIT_UNIX_BACKEND=%s %s target/debug/gearbox launch %s")
       :format(BACKEND, RUN_WITH, a.args or ""))
   end,
 }
@@ -91,8 +88,9 @@ make.recipe{
   name = "cli",
   desc = "run the gearbox CLI: make cli --args 'instance list'",
   params = { { "--args", desc = "arguments passed through to the CLI" } },
+  deps = { "build-bins" },
   run = function(a)
-    sh.sh("-c", ("cargo run -q -p gearbox-cli --bin gearbox -- %s"):format(a.args or ""))
+    sh.sh("-c", ("target/debug/gearbox %s"):format(a.args or ""))
   end,
 }
 

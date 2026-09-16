@@ -47,7 +47,7 @@ struct AntiRepeatTerrainExtension {
 
 impl MaterialExtension for AntiRepeatTerrainExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_sim/fields/harvested_wheat/shaders/material.wgsl".into()
+        "embedded://gearbox/fields/harvested_wheat/shaders/material.wgsl".into()
     }
 }
 
@@ -129,10 +129,10 @@ fn apply_anti_repeat_material_to_usd_terrain(
                             ..default()
                         },
                         extension: AntiRepeatTerrainExtension {
-                            terrain_albedo: asset_server.load("embedded://gearbox_sim/fields/harvested_wheat/textures/soil_albedo.jpg"),
-                            terrain_height: asset_server.load("embedded://gearbox_sim/fields/harvested_wheat/textures/soil_height.jpg"),
-                            terrain_detail_albedo: asset_server.load("embedded://gearbox_sim/fields/harvested_wheat/textures/detail_albedo.jpg"),
-                            terrain_detail_height: asset_server.load("embedded://gearbox_sim/fields/harvested_wheat/textures/detail_height.jpg"),
+                            terrain_albedo: asset_server.load("embedded://gearbox/fields/harvested_wheat/textures/soil_albedo.jpg"),
+                            terrain_height: asset_server.load("embedded://gearbox/fields/harvested_wheat/textures/soil_height.jpg"),
+                            terrain_detail_albedo: asset_server.load("embedded://gearbox/fields/harvested_wheat/textures/detail_albedo.jpg"),
+                            terrain_detail_height: asset_server.load("embedded://gearbox/fields/harvested_wheat/textures/detail_height.jpg"),
                             tint,
                             tracks: inactive.clone(),
                             wheels: WheelMapParams { origin: Vec2::splat(1_000_000.0),
@@ -188,7 +188,7 @@ impl Plugin for HarvestedWheatPlugin {
                 },
                 // Stalks at three levels of detail, one root population.
                 layers: vec![VegetationLayer {
-                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: stalk_near,
                     density: stalks,
                     fade_start: 5.0,
@@ -197,7 +197,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: STALK_NEAR_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: stalk_mid,
                     density: stalks,
                     fade_start: 5.0,
@@ -206,7 +206,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: STALK_MID_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: stalk_far,
                     density: stalks,
                     fade_start: 5.0,
@@ -215,7 +215,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: STALK_FAR_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: straw_template,
                     density: if density > 0.0 { 500.0 } else { 0.0 },
                     fade_start: 8.0,
@@ -224,7 +224,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: leaf_template,
                     density: if density > 0.0 { 60.0 } else { 0.0 },
                     fade_start: 16.0,
@@ -233,7 +233,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_sim/fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox/fields/harvested_wheat/shaders/vegetation.wgsl",
                     template: super::canopy::template,
                     density: (density / 6000.0) * 80.0,
                     fade_start: 12.0,
@@ -261,13 +261,13 @@ fn create_ground(
             .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| {
                 settings.sampler = bevy::image::ImageSampler::linear();
             })
-            .load("embedded://gearbox_sim/fields/harvested_wheat/textures/soil_albedo.jpg"),
+            .load("embedded://gearbox/fields/harvested_wheat/textures/soil_albedo.jpg"),
         terrain_height: assets
-            .load("embedded://gearbox_sim/fields/harvested_wheat/textures/soil_height.jpg"),
+            .load("embedded://gearbox/fields/harvested_wheat/textures/soil_height.jpg"),
         terrain_detail_albedo: assets
-            .load("embedded://gearbox_sim/fields/harvested_wheat/textures/detail_albedo.jpg"),
+            .load("embedded://gearbox/fields/harvested_wheat/textures/detail_albedo.jpg"),
         terrain_detail_height: assets
-            .load("embedded://gearbox_sim/fields/harvested_wheat/textures/detail_height.jpg"),
+            .load("embedded://gearbox/fields/harvested_wheat/textures/detail_height.jpg"),
         tint: Vec4::ONE,
         tracks,
         wheels,

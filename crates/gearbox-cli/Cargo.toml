@@ -5,8 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "gearbox_cli"
+path = "src/lib.rs"
+
+# Dev/test-only binary — see src/main.rs. The shipped `gearbox` binary is
+# built from `bin/gearbox`, which depends on this crate as a library.
 [[bin]]
-name = "gearbox"
+name = "gearbox-cli"
 path = "src/main.rs"
 
 [dependencies]

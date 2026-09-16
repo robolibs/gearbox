@@ -5,9 +5,9 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
-#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::foliage_normal
-#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{plant_lean}
+#import "embedded://gearbox/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
+#import "embedded://gearbox/fields/shaders/surface_detail.wgsl"::foliage_normal
+#import "embedded://gearbox/fields/shaders/wind.wgsl"::{plant_lean}
 
 struct VegetationParams {
     corner: vec2<f32>,

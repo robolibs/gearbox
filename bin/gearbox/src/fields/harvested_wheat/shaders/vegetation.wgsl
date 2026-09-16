@@ -6,11 +6,11 @@
 }
 
 
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
-#import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
-#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{plant_lean}
-#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
-#import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
+#import "embedded://gearbox/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
+#import "embedded://gearbox/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
+#import "embedded://gearbox/fields/shaders/wind.wgsl"::{plant_lean}
+#import "embedded://gearbox/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
+#import "embedded://gearbox/fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 
 struct VegetationParams {
     corner: vec2<f32>,

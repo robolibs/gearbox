@@ -1,12 +1,12 @@
 [package]
 name = "gearbox-sim"
-description = "gearbox-sim — the USD simulator window. Multi-USD loading, click-to-select, planet world, Mara UI; driven by the `gearbox` CLI."
+description = "gearbox — the USD simulator window and its command-line front door in one binary: no arguments (or `launch`) opens the window, any other argument is a CLI command."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "gearbox-sim"
+name = "gearbox"
 path = "src/main.rs"
 
 [lib]
@@ -41,6 +41,9 @@ peerbus.workspace = true
 datapod.workspace = true
 concord.workspace = true
 gearbox-api = { workspace = true, features = ["bevy"] }
+# CLI dispatch, statically linked in: no arguments (or `launch`) boots the
+# sim directly in this same process; anything else goes to `gearbox_cli::run()`.
+gearbox-cli.workspace = true
 
 # rapier3d-f64 — needed to spawn the static ground collider directly
 # into `usd_bevy::physics::PhysicsWorld`.

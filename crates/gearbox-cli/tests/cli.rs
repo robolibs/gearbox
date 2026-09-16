@@ -47,7 +47,7 @@ impl Env {
     }
 
     fn gearbox(&self, args: &[&str]) -> (i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_gearbox"))
+        let out = Command::new(env!("CARGO_BIN_EXE_gearbox-cli"))
             .args(args)
             .env("GEARBOX_REGISTRY_DIR", self.dir.join("run"))
             .env("XDG_CONFIG_HOME", self.dir.join("config"))
@@ -70,7 +70,7 @@ impl Env {
     fn gearbox_no_instance(&self, args: &[&str]) -> (i32, String, String) {
         let empty_run = self.dir.join("run-empty");
         std::fs::create_dir_all(&empty_run).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_gearbox"))
+        let out = Command::new(env!("CARGO_BIN_EXE_gearbox-cli"))
             .args(args)
             .env("GEARBOX_REGISTRY_DIR", empty_run)
             .env("XDG_CONFIG_HOME", self.dir.join("config"))
@@ -377,7 +377,7 @@ fn no_instance_given_picks_the_first_of_several() {
         std::fs::copy(entry.path(), a.dir.join("run").join(entry.file_name())).unwrap();
     }
 
-    let out = Command::new(env!("CARGO_BIN_EXE_gearbox"))
+    let out = Command::new(env!("CARGO_BIN_EXE_gearbox-cli"))
         .args(["instance", "info", "--json"])
         .env("GEARBOX_REGISTRY_DIR", a.dir.join("run"))
         .env("XDG_CONFIG_HOME", a.dir.join("config"))
@@ -401,7 +401,7 @@ fn no_instance_given_picks_the_first_of_several() {
 fn no_instance_is_exit_3() {
     let dir = std::env::temp_dir().join(format!("gearbox-cli-empty-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("run")).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_gearbox"))
+    let out = Command::new(env!("CARGO_BIN_EXE_gearbox-cli"))
         .args(["scene", "status"])
         .env("GEARBOX_REGISTRY_DIR", dir.join("run"))
         .env("XDG_CONFIG_HOME", dir.join("config"))

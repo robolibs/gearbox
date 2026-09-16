@@ -7,7 +7,7 @@ use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use std::ops::Range;
 
-const SHADER: &str = "embedded://gearbox_sim/fields/clumps/shaders/clumps.wgsl";
+const SHADER: &str = "embedded://gearbox/fields/clumps/shaders/clumps.wgsl";
 
 pub struct ClumpsPlugin;
 
@@ -37,7 +37,7 @@ macro_rules! pack {
                 fade_end,
                 inverse_square_thinning: true,
                 albedo: Some(concat!(
-                    "embedded://gearbox_sim/fields/clumps/textures/",
+                    "embedded://gearbox/fields/clumps/textures/",
                     $model,
                     ".png"
                 )),

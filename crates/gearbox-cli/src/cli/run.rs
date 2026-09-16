@@ -1,5 +1,6 @@
-//! `gearbox run`: launch `gearbox-sim`, wait for it to register, apply the
-//! initial loads, then either follow it or detach.
+//! `gearbox run`: launch the sim (a child `gearbox launch`, this same
+//! binary by default), wait for it to register, apply the initial loads,
+//! then either follow it or detach.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -41,10 +42,10 @@ pub struct Args {
     /// Daemonize and print the registry entry as JSON
     #[arg(long)]
     detach: bool,
-    /// Path to gearbox-sim (else GEARBOX_SIM, config `sim`, next to this binary, PATH)
+    /// Path to the sim binary (else GEARBOX_SIM, config `sim`, this same binary)
     #[arg(long, value_name = "PATH")]
     sim: Option<PathBuf>,
-    /// Arguments passed through to gearbox-sim
+    /// Arguments passed through to the sim, e.g. USD scenes to load
     #[arg(last = true)]
     sim_args: Vec<String>,
 }
@@ -63,7 +64,11 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     allow.push(cli_did);
 
     let mut cmd = Command::new(&sim);
-    cmd.args(&args.sim_args)
+    // `launch` tells the merged binary to boot the sim instead of parsing
+    // this as a CLI command; harmless to pass to an explicit `--sim`
+    // override too, since that's expected to be a build of this same binary.
+    cmd.arg("launch")
+        .args(&args.sim_args)
         .env("GEARBOX_NAME", &args.name)
         .env("GEARBOX_ALLOW", allow.join(","));
     if args.ephemeral {
@@ -152,9 +157,9 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Some(0) => Ok(()),
         Some(code) => Err(CliError::new(
             code,
-            format!("gearbox-sim exited with {code}"),
+            format!("the sim exited with {code}"),
         )),
-        None => Err(CliError::error("gearbox-sim was killed by a signal")),
+        None => Err(CliError::error("the sim was killed by a signal")),
     }
 }
 
@@ -169,19 +174,14 @@ fn find_sim(ctx: &Ctx, flag: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = &ctx.config.sim {
         candidates.push(PathBuf::from(p));
     }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        candidates.push(dir.join("gearbox-sim"));
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            candidates.push(dir.join("gearbox-sim"));
-        }
+    // The sim is built into this same binary — spawn a `launch` child of
+    // ourselves unless something more specific was given above.
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.push(exe);
     }
     candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| {
         CliError::error(
-            "gearbox-sim not found: pass --sim, set GEARBOX_SIM, or `gearbox env set sim PATH`",
+            "sim binary not found: pass --sim, set GEARBOX_SIM, or `gearbox env set sim PATH`",
         )
     })
 }
@@ -201,12 +201,12 @@ fn wait_registered(
         }
         if let Some(status) = exited() {
             return Err(CliError::error(format!(
-                "gearbox-sim exited before registering ({status})"
+                "the sim exited before registering ({status})"
             )));
         }
         if Instant::now() >= deadline {
             return Err(CliError::timeout(format!(
-                "gearbox-sim did not register `{name}` within {}s",
+                "the sim did not register `{name}` within {}s",
                 timeout.as_secs()
             )));
         }

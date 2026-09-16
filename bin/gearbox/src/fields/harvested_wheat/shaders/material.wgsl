@@ -8,10 +8,10 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
 }
 
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
-#import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
-#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
-#import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
+#import "embedded://gearbox/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox/fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
+#import "embedded://gearbox/fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
+#import "embedded://gearbox/fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(111) var surface_heightmap: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(112) var<uniform> geometry: SurfaceGeometryParams;

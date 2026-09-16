@@ -83,6 +83,7 @@ toml = "1"
 libc = "0.2"
 
 gearbox-api     = { path = "crates/gearbox-api", default-features = false }
+gearbox-cli     = { path = "crates/gearbox-cli" }
 mara            = { git = "https://github.com/bresilla/mara", branch = "develop", package = "mara", default-features = false, features = ["window", "bevy"] }
 egui            = { version = "0.34", default-features = false }
 tracing         = "0.1"

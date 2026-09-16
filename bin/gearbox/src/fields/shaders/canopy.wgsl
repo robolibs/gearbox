@@ -1,6 +1,6 @@
 #import bevy_pbr::mesh_view_bindings::{view, globals}
-#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{plant_lean}
-#import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::wheel_roll
+#import "embedded://gearbox/fields/shaders/wind.wgsl"::{plant_lean}
+#import "embedded://gearbox/fields/shaders/interaction.wgsl"::wheel_roll
 
 struct CanopyVertex {
     position: vec3<f32>,
