@@ -10,11 +10,13 @@ use gearbox_api::{Env, topics};
 use super::api::print_env;
 use super::install_ctrlc;
 use crate::ctx::Ctx;
-use crate::error::Result;
+use crate::error::{CliError, Result};
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// A leaf under --machine (e.g. `imu`), or a full path starting with `/`
+    /// A topic, always starting with `/` — a single segment like `/imu`
+    /// resolves under --machine; a full path (e.g. `/machines/oxbo/imu`,
+    /// `/gearbox/info`) is used exactly as given
     topic: String,
     /// Resolve the topic under this machine (default: the selection)
     #[arg(long)]
@@ -30,10 +32,18 @@ pub struct Args {
 }
 
 pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
-    let full_topic = if args.topic.starts_with('/') {
-        args.topic.clone()
+    let Some(leaf) = args.topic.strip_prefix('/') else {
+        return Err(CliError::usage(format!(
+            "topic `{}` must start with `/`, e.g. `/imu` or `/machines/oxbo/imu`",
+            args.topic
+        )));
+    };
+    // A single segment (no further `/`) is a leaf resolved under --machine;
+    // anything with more segments is already a full path, used as given.
+    let full_topic = if !leaf.is_empty() && !leaf.contains('/') {
+        topics::machine_topic(&ctx.machine_ns(args.machine)?, leaf)
     } else {
-        topics::machine_topic(&ctx.machine_ns(args.machine)?, &args.topic)
+        args.topic.clone()
     };
     // `--did` dials the machine directly and needs no instance at all; the
     // usual path connects through one to resolve the topic's owner.

@@ -214,21 +214,26 @@ fn machine_move_and_busy() {
 #[test]
 fn subscribe_decodes_a_topic_by_leaf_name() {
     let env = Env::start(&["oxbo"]);
-    let (code, out, err) = env.gearbox(&["subscribe", "state", "--machine", "oxbo", "-n", "1"]);
+    let (code, out, err) = env.gearbox(&["subscribe", "/state", "--machine", "oxbo", "-n", "1"]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("odom").is_some(), "{out}");
 
     let (code, _, err) =
-        env.gearbox(&["subscribe", "nosuchtopic", "--machine", "oxbo", "-n", "1"]);
+        env.gearbox(&["subscribe", "/nosuchtopic", "--machine", "oxbo", "-n", "1"]);
     assert_ne!(code, 0, "{err}");
 
-    // A full path starting with `/` is used as-is, no --machine needed —
-    // the leaf form is a shorthand, not the only way in.
+    // A full path is used as-is, no --machine needed — the leaf form is a
+    // shorthand, not the only way in.
     let (code, out, err) = env.gearbox(&["subscribe", "/machines/oxbo/state", "-n", "1"]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("odom").is_some(), "{out}");
+
+    // Every topic is spelled as a topic — a bare word with no leading `/`
+    // is rejected, not silently treated as a leaf.
+    let (code, _, err) = env.gearbox(&["subscribe", "state", "--machine", "oxbo", "-n", "1"]);
+    assert_ne!(code, 0, "bare word without a leading / should be rejected: {err}");
 }
 
 /// `--did` dials the machine's own endpoint directly (agentio's `by_id`
@@ -243,7 +248,7 @@ fn subscribe_dials_the_machines_own_did_directly() {
     let did = list[0]["did"].as_str().expect("machine did").to_string();
 
     let (code, out, err) = env.gearbox(&[
-        "subscribe", "state", "--machine", "oxbo", "--did", &did, "-n", "1",
+        "subscribe", "/state", "--machine", "oxbo", "--did", &did, "-n", "1",
     ]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -251,7 +256,7 @@ fn subscribe_dials_the_machines_own_did_directly() {
 
     let (code, _, err) = env.gearbox(&[
         "subscribe",
-        "state",
+        "/state",
         "--machine",
         "oxbo",
         "--did",
@@ -274,7 +279,7 @@ fn subscribe_by_did_needs_no_instance() {
     let did = list[0]["did"].as_str().expect("machine did").to_string();
 
     let (code, out, err) = env.gearbox_no_instance(&[
-        "subscribe", "state", "--machine", "oxbo", "--did", &did, "-n", "1",
+        "subscribe", "/state", "--machine", "oxbo", "--did", &did, "-n", "1",
     ]);
     assert_eq!(code, 0, "no instance registered, yet --did worked: {err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
