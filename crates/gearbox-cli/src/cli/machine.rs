@@ -115,8 +115,8 @@ enum Cmd {
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
-    /// Stream any of the machine's topics by leaf name, e.g. `imu`,
-    /// `turn_radius`, `encoders`, `odom`, `tf`, `state`
+    /// Stream any topic: a leaf under this machine (`imu`, `turn_radius`,
+    /// `encoders`, `odom`, `tf`, `state`) or a full path starting with `/`
     Sub {
         topic: String,
         /// Machine namespace (default: the selection)
@@ -971,11 +971,16 @@ fn tf(
     result
 }
 
-/// Stream any topic under this machine's own namespace by leaf name — the
-/// same generic decode `gearbox api sub` uses, without the full topic path.
+/// Stream any topic, same generic decode `gearbox api sub` uses. A topic
+/// starting with `/` is used exactly as given; anything else is a leaf
+/// resolved under this machine's own namespace, e.g. `imu` becomes
+/// `/machines/<ns>/imu`.
 fn sub(ctx: &Ctx, ns: Option<String>, topic: &str, count: Option<usize>) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
-    let full_topic = topics::machine_topic(&ns, topic);
+    let full_topic = if topic.starts_with('/') {
+        topic.to_string()
+    } else {
+        topics::machine_topic(&ctx.machine_ns(ns)?, topic)
+    };
     let client = ctx.client()?;
     let mut sub = client.subscribe_env(&full_topic)?;
     let stop_flag = install_ctrlc();

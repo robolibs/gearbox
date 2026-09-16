@@ -198,6 +198,13 @@ fn machine_sub_decodes_a_topic_by_leaf_name() {
 
     let (code, _, err) = env.gearbox(&["machine", "sub", "nosuchtopic", "--ns", "oxbo", "-n", "1"]);
     assert_ne!(code, 0, "{err}");
+
+    // A full path starting with `/` is used as-is, no ns needed — the leaf
+    // form is a shorthand, not the only way in.
+    let (code, out, err) = env.gearbox(&["machine", "sub", "/machines/oxbo/state", "-n", "1"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v.get("odom").is_some(), "{out}");
 }
 
 #[test]
