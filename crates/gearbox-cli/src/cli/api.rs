@@ -262,10 +262,10 @@ fn list_topics(ctx: &Ctx) -> Result<()> {
         ));
     }
     for m in client.machines()? {
-        let ns = m.machine_id();
+        let machine_id = m.machine_id();
         for (leaf, mode, req, res) in MACHINE_TOPICS {
             rows.push((
-                topics::machine_topic(&ns, leaf),
+                topics::machine_topic(&machine_id, leaf),
                 mode.into(),
                 req.into(),
                 res.into(),

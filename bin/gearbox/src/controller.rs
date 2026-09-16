@@ -4527,38 +4527,38 @@ fn sync_machine_agents(
     let stale: Vec<String> = bus
         .machines
         .keys()
-        .filter(|ns| !wanted.contains_key(*ns))
+        .filter(|machine_id| !wanted.contains_key(*machine_id))
         .cloned()
         .collect();
-    for ns in stale {
-        bus.machines.remove(&ns);
-        keys.0.remove(&ns);
-        info!("gearbox-control: machine agent `{ns}` withdrawn");
+    for machine_id in stale {
+        bus.machines.remove(&machine_id);
+        keys.0.remove(&machine_id);
+        info!("gearbox-control: machine agent `{machine_id}` withdrawn");
     }
 
     let host_id = bus.host.endpoint_id();
-    for (ns, (key, config)) in wanted {
-        if let Some(agent) = bus.machines.get_mut(&ns) {
+    for (machine_id, (key, config)) in wanted {
+        if let Some(agent) = bus.machines.get_mut(&machine_id) {
             // A variant swap changes a live machine's links and controllers.
             agent.config.kind = config.kind;
             agent.config.links = config.links;
             agent.config.links_derived = config.links_derived;
             agent.config.controllers = config.controllers;
-            keys.0.insert(ns, key);
+            keys.0.insert(machine_id, key);
             continue;
         }
         match MachineAgent::new(config, host_id) {
             Ok(agent) => {
                 let did = agent.did();
-                info!("gearbox-control: machine agent `{ns}` ready as {did}");
-                let event = SceneEvent::new(event_kind::MACHINE_READY, &ns)
+                info!("gearbox-control: machine agent `{machine_id}` ready as {did}");
+                let event = SceneEvent::new(event_kind::MACHINE_READY, &machine_id)
                     .with_prop("did", &did)
                     .with_prop("machine_id", &key.machine_id);
-                bus.machines.insert(ns.clone(), agent);
-                keys.0.insert(ns, key);
+                bus.machines.insert(machine_id.clone(), agent);
+                keys.0.insert(machine_id, key);
                 bus.publish_event(event);
             }
-            Err(err) => warn!("gearbox-control: machine agent `{ns}` failed: {err}"),
+            Err(err) => warn!("gearbox-control: machine agent `{machine_id}` failed: {err}"),
         }
     }
 }
@@ -4571,8 +4571,8 @@ fn apply_machine_agent_commands(
     mut commands: ResMut<ControllerCommands>,
 ) {
     let Some(bus) = bus else { return };
-    for (ns, agent) in &bus.machines {
-        let Some(key) = keys.0.get(ns) else { continue };
+    for (machine_id, agent) in &bus.machines {
+        let Some(key) = keys.0.get(machine_id) else { continue };
         if key.controller_instance.is_empty() {
             continue;
         }
@@ -4618,15 +4618,15 @@ fn publish_link_poses(
         let Some(scene_root) = machine.scene_root else {
             continue;
         };
-        let Some(ns) = keys
+        let Some(machine_id) = keys
             .0
             .iter()
             .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
-            .map(|(ns, _)| ns.clone())
+            .map(|(machine_id, _)| machine_id.clone())
         else {
             continue;
         };
-        let Some(agent) = bus.machines.get_mut(&ns) else {
+        let Some(agent) = bus.machines.get_mut(&machine_id) else {
             continue;
         };
         if !agent.tf_enabled() {
@@ -4679,15 +4679,15 @@ fn publish_machine_controller_states(
         let Some(scene_root) = machine.scene_root else {
             continue;
         };
-        let Some((ns, key)) = keys
+        let Some((machine_id, key)) = keys
             .0
             .iter()
             .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
-            .map(|(ns, k)| (ns.clone(), k.clone()))
+            .map(|(machine_id, k)| (machine_id.clone(), k.clone()))
         else {
             continue;
         };
-        let Some(agent) = bus.machines.get_mut(&ns) else {
+        let Some(agent) = bus.machines.get_mut(&machine_id) else {
             continue;
         };
         let mut props = Props::from_pairs(&[("machine_id", machine.id.as_str())]);
@@ -4703,8 +4703,8 @@ fn publish_machine_controller_states(
         for (link, key, value) in link_values.of_machine(&machine.id) {
             props.set(&format!("link.{link}.{key}"), &format!("{value}"));
         }
-        for a in attachments.0.iter().filter(|a| a.master_ns == ns) {
-            let Some(slave_key) = keys.0.get(&a.slave_ns) else {
+        for a in attachments.0.iter().filter(|a| a.master_id == machine_id) {
+            let Some(slave_key) = keys.0.get(&a.slave_id) else {
                 continue;
             };
             for (key, values) in service.0.iter() {
@@ -4718,7 +4718,7 @@ fn publish_machine_controller_states(
                     props.set(
                         &format!(
                             "tool.{}.controller.{}.{k}",
-                            a.slave_ns, key.controller_instance
+                            a.slave_id, key.controller_instance
                         ),
                         v,
                     );

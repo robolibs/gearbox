@@ -31,10 +31,10 @@ enum Cmd {
     /// Machines with their controllers and holders
     List,
     /// Everything a machine reports about itself
-    Info { ns: Option<String> },
+    Info { machine: Option<String> },
     /// Stream the machine's state
     State {
-        ns: Option<String>,
+        machine: Option<String>,
         /// Keep printing
         #[arg(long)]
         watch: bool,
@@ -44,7 +44,7 @@ enum Cmd {
     },
     /// Drive with a constant twist for a while, then stop
     Move {
-        ns: Option<String>,
+        machine: Option<String>,
         /// Forward speed in m/s (negative reverses)
         #[arg(long, default_value_t = 1.0)]
         forward: f64,
@@ -63,14 +63,14 @@ enum Cmd {
     },
     /// Send a zero twist and release
     Stop {
-        ns: Option<String>,
+        machine: Option<String>,
         /// Steal the session from its holder
         #[arg(long)]
         take: bool,
     },
     /// Drive from the keyboard: WASD or arrows, space stops, q quits
     Drive {
-        ns: Option<String>,
+        machine: Option<String>,
         #[arg(long, default_value_t = 2.0)]
         speed: f64,
         #[arg(long, default_value_t = 0.8)]
@@ -83,9 +83,9 @@ enum Cmd {
         controller: String,
         #[arg(value_name = "KEY=VAL")]
         pairs: Vec<String>,
-        /// Machine namespace (default: the selection)
+        /// Machine (default: the selection)
         #[arg(long)]
-        ns: Option<String>,
+        machine: Option<String>,
         /// Route to a controller of this attached slave
         #[arg(long)]
         tool: Option<String>,
@@ -93,17 +93,17 @@ enum Cmd {
         take: bool,
     },
     /// Controller table with types and interfaces
-    Controllers { ns: Option<String> },
+    Controllers { machine: Option<String> },
     /// The link tree: names, roles, parents, static offsets
     Links {
-        ns: Option<String>,
+        machine: Option<String>,
         /// One row per link instead of an indented tree
         #[arg(long)]
         flat: bool,
     },
     /// Stream link poses: switches the machine's tf on, prints, switches it off
     Tf {
-        ns: Option<String>,
+        machine: Option<String>,
         /// Only this link
         #[arg(long)]
         link: Option<String>,
@@ -120,7 +120,7 @@ enum Cmd {
         name: String,
         value: f64,
         #[arg(long)]
-        ns: Option<String>,
+        machine: Option<String>,
         #[arg(long)]
         take: bool,
     },
@@ -134,16 +134,16 @@ enum Cmd {
 #[derive(Subcommand, Debug)]
 enum ToolsCmd {
     /// Attachments below a master, depth-first
-    List { ns: Option<String> },
+    List { machine: Option<String> },
     /// Hitches and couplers of a machine, free or occupied
-    Couplings { ns: Option<String> },
+    Couplings { machine: Option<String> },
     /// Hang SLAVE on a hitch of the master
     Attach {
-        /// The slave's namespace
+        /// The slave's machine id
         slave: String,
-        /// Master namespace (default: the selection)
+        /// Master machine (default: the selection)
         #[arg(long)]
-        ns: Option<String>,
+        machine: Option<String>,
         /// Hitch name on the master (default: the only free one of a matching type)
         #[arg(long)]
         hitch: Option<String>,
@@ -161,7 +161,7 @@ enum ToolsCmd {
     Detach {
         slave: String,
         #[arg(long)]
-        ns: Option<String>,
+        machine: Option<String>,
         #[arg(long)]
         take: bool,
     },
@@ -170,45 +170,49 @@ enum ToolsCmd {
 pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     match args.cmd {
         Cmd::List => list(ctx),
-        Cmd::Info { ns } => info(ctx, ns),
-        Cmd::State { ns, watch, rate } => state(ctx, ns, watch, rate),
+        Cmd::Info { machine } => info(ctx, machine),
+        Cmd::State {
+            machine,
+            watch,
+            rate,
+        } => state(ctx, machine, watch, rate),
         Cmd::Move {
-            ns,
+            machine,
             forward,
             turn,
             duration,
             hold,
             take,
-        } => move_for(ctx, ns, forward, turn, &duration, hold, take),
-        Cmd::Stop { ns, take } => stop(ctx, ns, take),
+        } => move_for(ctx, machine, forward, turn, &duration, hold, take),
+        Cmd::Stop { machine, take } => stop(ctx, machine, take),
         Cmd::Drive {
-            ns,
+            machine,
             speed,
             yaw,
             take,
-        } => drive(ctx, ns, speed, yaw, take),
+        } => drive(ctx, machine, speed, yaw, take),
         Cmd::Cmd {
-            ns,
+            machine,
             controller,
             pairs,
             tool,
             take,
-        } => command(ctx, ns, &controller, &pairs, tool, take),
-        Cmd::Controllers { ns } => controllers(ctx, ns),
-        Cmd::Links { ns, flat } => links(ctx, ns, flat),
+        } => command(ctx, machine, &controller, &pairs, tool, take),
+        Cmd::Controllers { machine } => controllers(ctx, machine),
+        Cmd::Links { machine, flat } => links(ctx, machine, flat),
         Cmd::Tf {
-            ns,
+            machine,
             link,
             rate,
             count,
-        } => tf(ctx, ns, link, rate, count),
+        } => tf(ctx, machine, link, rate, count),
         Cmd::SetValue {
             link,
             name,
             value,
-            ns,
+            machine,
             take,
-        } => set_value(ctx, ns, &link, &name, value, take),
+        } => set_value(ctx, machine, &link, &name, value, take),
         Cmd::Tools { cmd } => tools(ctx, cmd),
     }
 }
@@ -218,8 +222,8 @@ fn list(ctx: &Ctx) -> Result<()> {
     let refs = client.machines()?;
     let mut rows = Vec::new();
     for r in &refs {
-        let ns = r.machine_id();
-        let mc = client.machine(&ns);
+        let machine_id = r.machine_id();
+        let mc = client.machine(&machine_id);
         let info = mc.info().ok();
         let session = mc.session().ok();
         rows.push((r.clone(), info, session));
@@ -229,10 +233,9 @@ fn list(ctx: &Ctx) -> Result<()> {
             json!(rows
                 .iter()
                 .map(|(r, info, session)| {
-                    let mut v = json!({ "namespace": r.machine_id(), "did": r.did() });
+                    let mut v = json!({ "machine_id": r.machine_id(), "did": r.did() });
                     let p = r.props();
                     v["kind"] = json!(p.get("kind").unwrap_or_default());
-                    v["machine_id"] = json!(p.get("machine_id").unwrap_or_default());
                     v["addr"] = json!(p.get("addr").unwrap_or_default());
                     if let Some(i) = info {
                         v["controllers"] = json!(controller_rows(i)
@@ -253,7 +256,7 @@ fn list(ctx: &Ctx) -> Result<()> {
                 println!("no machines");
                 return;
             }
-            let mut t = Table::new(&["NAMESPACE", "KIND", "CONTROLLERS", "HELD BY", "DID"]);
+            let mut t = Table::new(&["MACHINE", "KIND", "CONTROLLERS", "HELD BY", "DID"]);
             for (r, info, session) in &rows {
                 let p = r.props();
                 let ctrls = info
@@ -303,10 +306,10 @@ fn controller_rows(info: &MachineInfo) -> Vec<(String, String, String, String)> 
         .collect()
 }
 
-fn info(ctx: &Ctx, ns: Option<String>) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+fn info(ctx: &Ctx, machine: Option<String>) -> Result<()> {
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mc = client.machine(&ns);
+    let mc = client.machine(&machine_id);
     let info = mc.info()?;
     let session = mc.session()?;
     let p = info.props();
@@ -361,9 +364,9 @@ fn info(ctx: &Ctx, ns: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn controllers(ctx: &Ctx, ns: Option<String>) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
-    let info = ctx.client()?.machine(&ns).info()?;
+fn controllers(ctx: &Ctx, machine: Option<String>) -> Result<()> {
+    let machine_id = ctx.machine_id(machine)?;
+    let info = ctx.client()?.machine(&machine_id).info()?;
     let rows = controller_rows(&info);
     ctx.emit(
         || {
@@ -384,17 +387,17 @@ fn controllers(ctx: &Ctx, ns: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn state(ctx: &Ctx, ns: Option<String>, watch: bool, rate: f64) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+fn state(ctx: &Ctx, machine: Option<String>, watch: bool, rate: f64) -> Result<()> {
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mc = client.machine(&ns);
+    let mc = client.machine(&machine_id);
     let mut sub = mc.state()?;
     let period = Duration::from_secs_f64(1.0 / rate.max(0.1));
     let mut last_print = Instant::now() - period;
     loop {
         let Some(s) = next_sample::<MachineState>(&mut sub, ctx.timeout)? else {
             return Err(CliError::timeout(format!(
-                "no state from machine `{ns}` within {:.1}s",
+                "no state from machine `{machine_id}` within {:.1}s",
                 ctx.timeout.as_secs_f64()
             )));
         };
@@ -409,7 +412,7 @@ fn state(ctx: &Ctx, ns: Option<String>, watch: bool, rate: f64) -> Result<()> {
                     .unwrap_or_default()
             );
         } else {
-            println!("{}", state_line(&ns, &s));
+            println!("{}", state_line(&machine_id, &s));
         }
         if !watch {
             return Ok(());
@@ -417,10 +420,10 @@ fn state(ctx: &Ctx, ns: Option<String>, watch: bool, rate: f64) -> Result<()> {
     }
 }
 
-fn state_line(ns: &str, s: &MachineState) -> String {
+fn state_line(machine_id: &str, s: &MachineState) -> String {
     let p = s.position();
     format!(
-        "{ns}: pos ({:+.2}, {:+.2}, {:+.2}) heading {:+.2} rad speed {:.2} m/s yaw {:+.2} rad/s roll {:+.2} pitch {:+.2} session {}",
+        "{machine_id}: pos ({:+.2}, {:+.2}, {:+.2}) heading {:+.2} rad speed {:.2} m/s yaw {:+.2} rad/s roll {:+.2} pitch {:+.2} session {}",
         p[0],
         p[1],
         p[2],
@@ -434,7 +437,7 @@ fn state_line(ns: &str, s: &MachineState) -> String {
 }
 
 /// Claim the machine, refusing early when it cannot take a twist.
-fn claim(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Result<ClaimResponse> {
+fn claim(ctx: &Ctx, mc: &MachineClient<'_>, machine_id: &str, take: bool) -> Result<ClaimResponse> {
     let info = mc.info()?;
     if info.controllers_with_command("cmd_vel").is_empty() {
         let rows = controller_rows(&info);
@@ -444,7 +447,7 @@ fn claim(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Result<Clai
             .map(|c| format!("{}={}", c.0, c.2))
             .collect();
         return Err(CliError::unsupported(format!(
-            "machine `{ns}` has no cmd_vel controller; command interfaces: {}",
+            "machine `{machine_id}` has no cmd_vel controller; command interfaces: {}",
             if have.is_empty() {
                 "none".to_string()
             } else {
@@ -456,7 +459,7 @@ fn claim(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Result<Clai
     let res = mc.claim(hold, take)?;
     if res.code == code::BUSY {
         return Err(CliError::busy(format!(
-            "machine `{ns}` is held by {}; add --take to steal it",
+            "machine `{machine_id}` is held by {}; add --take to steal it",
             res.holder()
         )));
     }
@@ -464,7 +467,7 @@ fn claim(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Result<Clai
         return Err(CliError::new(
             crate::error::exit_for_wire_code(res.code),
             format!(
-                "claim on `{ns}` refused: {}",
+                "claim on `{machine_id}` refused: {}",
                 Props::from_bytes(&res.props)
                     .get("message")
                     .unwrap_or_else(|| format!("code {}", res.code))
@@ -476,17 +479,17 @@ fn claim(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Result<Clai
 
 fn move_for(
     ctx: &Ctx,
-    ns: Option<String>,
+    machine: Option<String>,
     forward: f64,
     turn: f64,
     duration: &str,
     hold: bool,
     take: bool,
 ) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mut mc = client.machine(&ns);
-    let session = claim(ctx, &mc, &ns, take)?.session;
+    let mut mc = client.machine(&machine_id);
+    let session = claim(ctx, &mc, &machine_id, take)?.session;
     let period = Duration::from_secs_f64(1.0 / STREAM_HZ);
     let dur = parse_duration(duration)?;
     let deadline = Instant::now() + dur;
@@ -508,7 +511,7 @@ fn move_for(
             && last_print.elapsed() >= Duration::from_millis(500)
             && let Some(s) = &last_state
         {
-            eprintln!("{}", state_line(&ns, s));
+            eprintln!("{}", state_line(&machine_id, s));
             last_print = Instant::now();
         }
         std::thread::sleep(period);
@@ -520,45 +523,45 @@ fn move_for(
         .map(|s| s.position())
         .unwrap_or([0.0; 3]);
     ctx.done(
-        &ns,
+        &machine_id,
         &format!(
-            "drove `{ns}` forward {forward} m/s turn {turn} rad/s for {:.1}s; now at ({:.2}, {:.2}, {:.2}); released",
+            "drove `{machine_id}` forward {forward} m/s turn {turn} rad/s for {:.1}s; now at ({:.2}, {:.2}, {:.2}); released",
             dur.as_secs_f64(),
             pos[0],
             pos[1],
             pos[2]
         ),
-        || json!({ "namespace": ns, "forward": forward, "turn": turn, "seconds": dur.as_secs_f64(), "x": pos[0], "y": pos[1], "z": pos[2] }),
+        || json!({ "machine_id": machine_id, "forward": forward, "turn": turn, "seconds": dur.as_secs_f64(), "x": pos[0], "y": pos[1], "z": pos[2] }),
     );
     Ok(())
 }
 
-fn stop(ctx: &Ctx, ns: Option<String>, take: bool) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+fn stop(ctx: &Ctx, machine: Option<String>, take: bool) -> Result<()> {
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mut mc = client.machine(&ns);
-    let session = claim(ctx, &mc, &ns, take)?.session;
+    let mut mc = client.machine(&machine_id);
+    let session = claim(ctx, &mc, &machine_id, take)?.session;
     check(mc.cmd_vel(session, 0.0, 0.0)?, "cmd_vel")?;
     check(mc.release(session)?, "release")?;
     ctx.done(
-        &ns,
-        &format!("stopped `{ns}` and released"),
-        || json!({ "namespace": ns, "stopped": true }),
+        &machine_id,
+        &format!("stopped `{machine_id}` and released"),
+        || json!({ "machine_id": machine_id, "stopped": true }),
     );
     Ok(())
 }
 
 fn command(
     ctx: &Ctx,
-    ns: Option<String>,
+    machine: Option<String>,
     controller: &str,
     pairs: &[String],
     tool: Option<String>,
     take: bool,
 ) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mc = client.machine(&ns);
+    let mc = client.machine(&machine_id);
     let mut props = Props::from_pairs(&[("controller", controller)]);
     if let Some(tool) = &tool {
         props.set("tool", tool);
@@ -586,7 +589,7 @@ fn command(
     let res = mc.claim(DEFAULT_HOLD_MS, take)?;
     if res.code == code::BUSY {
         return Err(CliError::busy(format!(
-            "machine `{ns}` is held by {}; add --take",
+            "machine `{machine_id}` is held by {}; add --take",
             res.holder()
         )));
     }
@@ -601,21 +604,21 @@ fn command(
     let _ = mc.release(res.session);
     check(status, "controller command")?;
     ctx.done(
-        &ns,
-        &format!("sent {controller} command to `{ns}`"),
-        || json!({ "namespace": ns, "controller": controller, "value": value, "element": element }),
+        &machine_id,
+        &format!("sent {controller} command to `{machine_id}`"),
+        || json!({ "machine_id": machine_id, "controller": controller, "value": value, "element": element }),
     );
     Ok(())
 }
 
-fn drive(ctx: &Ctx, ns: Option<String>, speed: f64, yaw: f64, take: bool) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+fn drive(ctx: &Ctx, machine: Option<String>, speed: f64, yaw: f64, take: bool) -> Result<()> {
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mut mc = client.machine(&ns);
-    let session = claim(ctx, &mc, &ns, take)?.session;
+    let mut mc = client.machine(&machine_id);
+    let session = claim(ctx, &mc, &machine_id, take)?.session;
     let mut sub = mc.state().ok();
     let raw = RawTerminal::enable()?;
-    eprintln!("driving `{ns}`: W/S forward/back, A/D turn, space stop, Q quit\r");
+    eprintln!("driving `{machine_id}`: W/S forward/back, A/D turn, space stop, Q quit\r");
     let (mut v, mut w) = (0.0f64, 0.0f64);
     let period = Duration::from_secs_f64(1.0 / STREAM_HZ);
     let stop_flag = install_ctrlc();
@@ -689,7 +692,7 @@ fn drive(ctx: &Ctx, ns: Option<String>, speed: f64, yaw: f64, take: bool) -> Res
     let _ = mc.cmd_vel(session, 0.0, 0.0);
     let _ = mc.release(session);
     drop(raw);
-    eprintln!("\nreleased `{ns}`");
+    eprintln!("\nreleased `{machine_id}`");
     Ok(())
 }
 
@@ -742,14 +745,14 @@ impl Drop for RawTerminal {
     }
 }
 
-fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+fn links(ctx: &Ctx, machine: Option<String>, flat: bool) -> Result<()> {
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mc = client.machine(&ns);
+    let mc = client.machine(&machine_id);
     let records = mc.links()?;
     if records.is_empty() {
         return Err(CliError::unsupported(format!(
-            "machine `{ns}` reports no links"
+            "machine `{machine_id}` reports no links"
         )));
     }
     let info = mc.info().ok();
@@ -760,7 +763,7 @@ fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
     ctx.emit(
         || {
             json!({
-                "namespace": ns,
+                "machine_id": machine_id,
                 "derived": derived,
                 "links": records
                     .iter()
@@ -770,7 +773,7 @@ fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
         },
         || {
             if derived {
-                println!("{ns}: link tree derived from rigid bodies; author GearboxLinkAPI to make it explicit");
+                println!("{machine_id}: link tree derived from rigid bodies; author GearboxLinkAPI to make it explicit");
             }
             let offset = |r: &gearbox_api::LinkRecord| {
                 if r.x == 0.0 && r.y == 0.0 && r.z == 0.0 && r.qw == 1.0 {
@@ -867,14 +870,14 @@ fn links(ctx: &Ctx, ns: Option<String>, flat: bool) -> Result<()> {
 
 fn tf(
     ctx: &Ctx,
-    ns: Option<String>,
+    machine: Option<String>,
     link: Option<String>,
     rate: f64,
     count: Option<usize>,
 ) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mc = client.machine(&ns);
+    let mc = client.machine(&machine_id);
     let mut sub = mc.tf()?;
     check(mc.set_tf(true)?, "tf on")?;
     let stop_flag = install_ctrlc();
@@ -892,7 +895,7 @@ fn tf(
             Ok(None) => {
                 if seen == 0 && started.elapsed() > ctx.timeout {
                     break Err(CliError::timeout(format!(
-                        "no link poses from `{ns}` within {:.1}s; is the clock running?",
+                        "no link poses from `{machine_id}` within {:.1}s; is the clock running?",
                         ctx.timeout.as_secs_f64()
                     )));
                 }
@@ -935,9 +938,9 @@ fn tf(
 
 fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
     match cmd {
-        ToolsCmd::List { ns } => {
-            let ns = ctx.machine_ns(ns)?;
-            let records = ctx.client()?.machine(&ns).tools()?;
+        ToolsCmd::List { machine } => {
+            let machine_id = ctx.machine_id(machine)?;
+            let records = ctx.client()?.machine(&machine_id).tools()?;
             ctx.emit(
                 || {
                     json!(
@@ -949,7 +952,7 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
                 },
                 || {
                     if records.is_empty() {
-                        println!("nothing attached to `{ns}`");
+                        println!("nothing attached to `{machine_id}`");
                         return;
                     }
                     let mut t =
@@ -972,10 +975,10 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
             );
             Ok(())
         }
-        ToolsCmd::Couplings { ns } => {
-            let ns = ctx.machine_ns(ns)?;
+        ToolsCmd::Couplings { machine } => {
+            let machine_id = ctx.machine_id(machine)?;
             let client = ctx.client()?;
-            let mc = client.machine(&ns);
+            let mc = client.machine(&machine_id);
             let links = mc.links()?;
             let attached = mc.tools()?;
             let info = mc.info()?;
@@ -1012,7 +1015,7 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
                 },
                 || {
                     if rows.is_empty() {
-                        println!("`{ns}` has no couplings");
+                        println!("`{machine_id}` has no couplings");
                         return;
                     }
                     let mut t = Table::new(&["COUPLING", "SIDE", "TYPE", "STATE"]);
@@ -1026,16 +1029,16 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
         }
         ToolsCmd::Attach {
             slave,
-            ns,
+            machine,
             hitch,
             coupler,
             teleport,
             take,
         } => {
-            let ns = ctx.machine_ns(ns)?;
+            let machine_id = ctx.machine_id(machine)?;
             let client = ctx.client()?;
-            let mc = client.machine(&ns);
-            let session = session_for(ctx, &mc, &ns, take)?;
+            let mc = client.machine(&machine_id);
+            let session = session_for(ctx, &mc, &machine_id, take)?;
             let mut req = gearbox_api::AttachRequest::new(session, &slave);
             if let Some(h) = &hitch {
                 req = req.with_hitch(h);
@@ -1050,7 +1053,7 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
             if session != 0 {
                 let _ = mc.release(session);
             }
-            check(status, &format!("attach {slave} to {ns}"))?;
+            check(status, &format!("attach {slave} to {machine_id}"))?;
             let record = mc
                 .tools()
                 .ok()
@@ -1067,25 +1070,29 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
                 .unwrap_or_default();
             ctx.done(
                 &slave,
-                &format!("attached `{slave}` to `{ns}` via {h} / {c} ({k})"),
-                || json!({ "master": ns, "slave": slave, "hitch": h, "coupler": c, "type": k }),
+                &format!("attached `{slave}` to `{machine_id}` via {h} / {c} ({k})"),
+                || json!({ "master": machine_id, "slave": slave, "hitch": h, "coupler": c, "type": k }),
             );
             Ok(())
         }
-        ToolsCmd::Detach { slave, ns, take } => {
-            let ns = ctx.machine_ns(ns)?;
+        ToolsCmd::Detach {
+            slave,
+            machine,
+            take,
+        } => {
+            let machine_id = ctx.machine_id(machine)?;
             let client = ctx.client()?;
-            let mc = client.machine(&ns);
-            let session = session_for(ctx, &mc, &ns, take)?;
+            let mc = client.machine(&machine_id);
+            let session = session_for(ctx, &mc, &machine_id, take)?;
             let status = mc.detach(session, &slave)?;
             if session != 0 {
                 let _ = mc.release(session);
             }
-            check(status, &format!("detach {slave} from {ns}"))?;
+            check(status, &format!("detach {slave} from {machine_id}"))?;
             ctx.done(
                 &slave,
-                &format!("detached `{slave}` from `{ns}`"),
-                || json!({ "master": ns, "slave": slave }),
+                &format!("detached `{slave}` from `{machine_id}`"),
+                || json!({ "master": machine_id, "slave": slave }),
             );
             Ok(())
         }
@@ -1094,14 +1101,14 @@ fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {
 
 /// The session an attachment request must carry: none while the master is
 /// free, ours after a claim (stolen with `--take`) while someone holds it.
-fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Result<u64> {
+fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, machine_id: &str, take: bool) -> Result<u64> {
     let session = mc.session()?;
     if session.held == 0 {
         return Ok(0);
     }
     if !take {
         return Err(CliError::busy(format!(
-            "machine `{ns}` is held by {}; add --take",
+            "machine `{machine_id}` is held by {}; add --take",
             session.holder()
         )));
     }
@@ -1110,7 +1117,7 @@ fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Resul
         return Err(CliError::new(
             crate::error::exit_for_wire_code(res.code),
             format!(
-                "claim on `{ns}` refused: {}",
+                "claim on `{machine_id}` refused: {}",
                 Props::from_bytes(&res.props)
                     .get("message")
                     .unwrap_or_else(|| format!("code {}", res.code))
@@ -1122,24 +1129,24 @@ fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, ns: &str, take: bool) -> Resul
 
 fn set_value(
     ctx: &Ctx,
-    ns: Option<String>,
+    machine: Option<String>,
     link: &str,
     name: &str,
     value: f64,
     take: bool,
 ) -> Result<()> {
-    let ns = ctx.machine_ns(ns)?;
+    let machine_id = ctx.machine_id(machine)?;
     let client = ctx.client()?;
-    let mc = client.machine(&ns);
+    let mc = client.machine(&machine_id);
     if !mc.links()?.iter().any(|r| r.name() == link) {
         return Err(CliError::usage(format!(
-            "machine `{ns}` has no link `{link}`; see `gearbox machine links {ns}`"
+            "machine `{machine_id}` has no link `{link}`; see `gearbox machine links {machine_id}`"
         )));
     }
     let res = mc.claim(DEFAULT_HOLD_MS, take)?;
     if res.code == code::BUSY {
         return Err(CliError::busy(format!(
-            "machine `{ns}` is held by {}; add --take",
+            "machine `{machine_id}` is held by {}; add --take",
             res.holder()
         )));
     }
@@ -1154,9 +1161,9 @@ fn set_value(
     let _ = mc.release(res.session);
     check(status, "set value")?;
     ctx.done(
-        &ns,
-        &format!("`{ns}` {link}.{name} = {value}"),
-        || json!({ "namespace": ns, "link": link, "name": name, "value": value }),
+        &machine_id,
+        &format!("`{machine_id}` {link}.{name} = {value}"),
+        || json!({ "machine_id": machine_id, "link": link, "name": name, "value": value }),
     );
     Ok(())
 }

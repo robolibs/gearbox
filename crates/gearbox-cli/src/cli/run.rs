@@ -35,7 +35,7 @@ pub struct Args {
     /// World USD to load once the sim answers
     #[arg(long, value_name = "USD")]
     world: Option<String>,
-    /// Machine USDs to load once the sim answers (namespace = file stem)
+    /// Machine USDs to load once the sim answers (machine id = file stem)
     #[arg(long = "load", value_name = "USD")]
     load: Vec<String>,
     /// Daemonize and print the registry entry as JSON
@@ -120,11 +120,11 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             context.save()?;
         }
         for path in &args.load {
-            let ns = default_id(path);
-            let req = UsdLoad::new(&ns, &usd_path(path))
+            let machine_id = default_id(path);
+            let req = UsdLoad::new(&machine_id, &usd_path(path))
                 .category(category::MACHINE)
-                .with_prop("machine_id", &ns);
-            check(client.load(&req)?, &format!("load machine {ns}"))?;
+                .with_prop("machine_id", &machine_id);
+            check(client.load(&req)?, &format!("load machine {machine_id}"))?;
         }
     }
 

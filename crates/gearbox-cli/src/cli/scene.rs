@@ -346,8 +346,8 @@ fn tree(ctx: &Ctx) -> Result<()> {
     let mut attached: std::collections::HashSet<String> = Default::default();
     let mut machine_links: Vec<(String, Vec<gearbox_api::LinkRecord>)> = Vec::new();
     for m in &machines {
-        let ns = m.machine_id();
-        let mc = client.machine(&ns);
+        let machine_id = m.machine_id();
+        let mc = client.machine(&machine_id);
         if let Ok(info) = mc.info()
             && !info
                 .props()
@@ -355,16 +355,16 @@ fn tree(ctx: &Ctx) -> Result<()> {
                 .unwrap_or_default()
                 .is_empty()
         {
-            attached.insert(ns.clone());
+            attached.insert(machine_id.clone());
             continue;
         }
-        machine_links.push((ns, mc.links().unwrap_or_default()));
+        machine_links.push((machine_id, mc.links().unwrap_or_default()));
     }
     ctx.emit(
         || {
             json!({
-                "machines": machine_links.iter().map(|(ns, links)| json!({
-                    "namespace": ns,
+                "machines": machine_links.iter().map(|(machine_id, links)| json!({
+                    "machine_id": machine_id,
                     "links": links.iter().filter_map(|r| wire_json::env_to_json(&pack(r)).ok()).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
                 "objects": objects.iter().filter(|o| o.kind != object_kind::MACHINE)
@@ -373,8 +373,8 @@ fn tree(ctx: &Ctx) -> Result<()> {
         },
         || {
             println!("world");
-            for (ns, links) in &machine_links {
-                println!("  {ns}");
+            for (machine_id, links) in &machine_links {
+                println!("  {machine_id}");
                 let mut children: Vec<Vec<usize>> = vec![Vec::new(); links.len()];
                 let mut roots = Vec::new();
                 for (i, r) in links.iter().enumerate() {

@@ -32,9 +32,9 @@ enum Cmd {
     /// Remove a peer from the launch allowlist
     Revoke { did: String },
     /// Steal a machine's session, then release it
-    Take { ns: String },
+    Take { machine: String },
     /// Force-release whoever holds a machine
-    Release { ns: String },
+    Release { machine: String },
     /// Manage CLI identities under agentio's key dir
     Identity {
         #[command(subcommand)]
@@ -108,8 +108,8 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Take { ns } => take(ctx, &ns, "took"),
-        Cmd::Release { ns } => take(ctx, &ns, "released"),
+        Cmd::Take { machine } => take(ctx, &machine, "took"),
+        Cmd::Release { machine } => take(ctx, &machine, "released"),
         Cmd::Identity { cmd } => identity(ctx, cmd),
     }
 }
@@ -136,9 +136,9 @@ fn list(ctx: &Ctx) -> Result<()> {
     let pending = paths::read_allow_file();
     let mut sessions = Vec::new();
     for m in client.machines()? {
-        let ns = m.machine_id();
-        if let Ok(s) = client.machine(&ns).session() {
-            sessions.push((ns, s));
+        let machine_id = m.machine_id();
+        if let Ok(s) = client.machine(&machine_id).session() {
+            sessions.push((machine_id, s));
         }
     }
     ctx.emit(
@@ -148,8 +148,8 @@ fn list(ctx: &Ctx) -> Result<()> {
                 "allow_any": allow_any,
                 "allowed": allowed,
                 "next_launch": pending,
-                "sessions": sessions.iter().map(|(ns, s)| json!({
-                    "namespace": ns, "held": s.held != 0, "holder": s.holder(),
+                "sessions": sessions.iter().map(|(machine_id, s)| json!({
+                    "machine_id": machine_id, "held": s.held != 0, "holder": s.holder(),
                     "session": s.session, "age_ms": s.age_ms, "idle_ms": s.idle_ms,
                 })).collect::<Vec<_>>(),
             })
@@ -177,10 +177,10 @@ fn list(ctx: &Ctx) -> Result<()> {
             ]);
             println!();
             let mut t = Table::new(&["MACHINE", "HELD BY", "SESSION", "AGE", "IDLE"]);
-            for (ns, s) in &sessions {
+            for (machine_id, s) in &sessions {
                 if s.held != 0 {
                     t.row(vec![
-                        ns.clone(),
+                        machine_id.clone(),
                         s.holder(),
                         s.session.to_string(),
                         out::fmt_ms(s.age_ms),
@@ -188,7 +188,7 @@ fn list(ctx: &Ctx) -> Result<()> {
                     ]);
                 } else {
                     t.row(vec![
-                        ns.clone(),
+                        machine_id.clone(),
                         "-".into(),
                         "-".into(),
                         "-".into(),
@@ -206,28 +206,28 @@ fn list(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn take(ctx: &Ctx, ns: &str, verb: &str) -> Result<()> {
+fn take(ctx: &Ctx, machine_id: &str, verb: &str) -> Result<()> {
     let client = ctx.client()?;
-    let mut mc = client.machine(ns);
+    let mut mc = client.machine(machine_id);
     let before = mc.session()?;
     let res = mc.claim(500, true)?;
     if res.code != code::OK {
         return Err(CliError::new(
             crate::error::exit_for_wire_code(res.code),
-            format!("could not take `{ns}`: code {}", res.code),
+            format!("could not take `{machine_id}`: code {}", res.code),
         ));
     }
     let _ = mc.cmd_vel(res.session, 0.0, 0.0);
     check(mc.release(res.session)?, "release")?;
     let holder = before.holder();
     ctx.done(
-        ns,
+        machine_id,
         &if before.held != 0 {
-            format!("{verb} `{ns}` from {holder}; machine is free")
+            format!("{verb} `{machine_id}` from {holder}; machine is free")
         } else {
-            format!("`{ns}` was already free")
+            format!("`{machine_id}` was already free")
         },
-        || json!({ "namespace": ns, "previous_holder": holder, "held": false }),
+        || json!({ "machine_id": machine_id, "previous_holder": holder, "held": false }),
     );
     Ok(())
 }

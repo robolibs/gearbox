@@ -44,12 +44,12 @@ enum Cmd {
         #[arg(long, num_args = 3, value_names = ["PRIM", "SET", "OPTION"])]
         variant: Vec<String>,
     },
-    /// Load a machine USD under a namespace and wait for its agent
+    /// Load a machine USD under an id and wait for its agent
     Machine {
         path: String,
-        /// Machine namespace (default: file stem)
+        /// Machine id (default: file stem)
         #[arg(long)]
-        ns: Option<String>,
+        machine: Option<String>,
         #[command(flatten)]
         place: Place,
         /// Return as soon as the load is accepted
@@ -115,33 +115,37 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         }
         Cmd::Machine {
             path,
-            ns,
+            machine,
             place,
             no_wait,
             wait_timeout,
             variant,
         } => {
-            let ns = ns.unwrap_or_else(|| default_id(&path));
+            let machine_id = machine.unwrap_or_else(|| default_id(&path));
             let (x, y, z) = xyz(&place.at);
-            let mut req = UsdLoad::new(&ns, &usd_path(&path))
+            let mut req = UsdLoad::new(&machine_id, &usd_path(&path))
                 .at(x, y, z)
                 .yaw(place.yaw)
                 .category(category::MACHINE)
-                .with_prop("machine_id", &ns);
+                .with_prop("machine_id", &machine_id);
             for (n, chunk) in variant.chunks(3).enumerate() {
                 if let [prim, set, opt] = chunk {
                     req = req.with_prop(&format!("variant.{n}"), &format!("{prim}|{set}|{opt}"));
                 }
             }
             let client = ctx.client()?;
-            check(client.load(&req)?, &format!("load machine {ns}"))?;
+            check(client.load(&req)?, &format!("load machine {machine_id}"))?;
             let mut did = String::new();
             if !no_wait {
-                did = wait_for_machine(ctx, &ns, Duration::from_secs_f64(wait_timeout))?;
+                did = wait_for_machine(ctx, &machine_id, Duration::from_secs_f64(wait_timeout))?;
             }
-            ctx.done(&ns, &format!("machine {ns} ready {did}"), || {
-                json!({ "namespace": ns, "path": path, "did": did, "x": x, "y": y, "z": z, "yaw_deg": place.yaw })
-            });
+            ctx.done(
+                &machine_id,
+                &format!("machine {machine_id} ready {did}"),
+                || {
+                    json!({ "machine_id": machine_id, "path": path, "did": did, "x": x, "y": y, "z": z, "yaw_deg": place.yaw })
+                },
+            );
             Ok(())
         }
         Cmd::World { path } => {
@@ -221,18 +225,20 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     }
 }
 
-pub fn wait_for_machine(ctx: &Ctx, ns: &str, timeout: Duration) -> Result<String> {
+pub fn wait_for_machine(ctx: &Ctx, machine_id: &str, timeout: Duration) -> Result<String> {
     let client = ctx.client()?;
     let deadline = Instant::now() + timeout;
     loop {
         for m in client.machines()? {
-            if m.machine_id() == ns || m.machine_id().starts_with(&format!("{ns}_")) {
+            if m.machine_id() == machine_id
+                || m.machine_id().starts_with(&format!("{machine_id}_"))
+            {
                 return Ok(m.did());
             }
         }
         if Instant::now() >= deadline {
             return Err(CliError::timeout(format!(
-                "machine `{ns}` did not appear within {:.0}s; is the USD a machine (GearboxMachineAPI)?",
+                "machine `{machine_id}` did not appear within {:.0}s; is the USD a machine (GearboxMachineAPI)?",
                 timeout.as_secs_f64()
             )));
         }
@@ -270,7 +276,8 @@ struct Entry {
     #[serde(default)]
     path: String,
     id: Option<String>,
-    ns: Option<String>,
+    #[serde(alias = "ns")]
+    machine: Option<String>,
     #[serde(default)]
     at: Vec<f32>,
     #[serde(default)]
@@ -278,7 +285,7 @@ struct Entry {
 }
 
 /// `[[spawn]]` tables applied in order: kind = usd | machine | world |
-/// terrain | marker, with path, id/ns, at = [x, y, z], yaw.
+/// terrain | marker, with path, id/machine, at = [x, y, z], yaw.
 pub fn apply_manifest(ctx: &Ctx, file: &str) -> Result<()> {
     let text = std::fs::read_to_string(file)
         .map_err(|e| CliError::error(format!("cannot read manifest {file}: {e}")))?;
@@ -304,7 +311,7 @@ pub fn apply_manifest(ctx: &Ctx, file: &str) -> Result<()> {
         };
         let id =
             e.id.clone()
-                .or_else(|| e.ns.clone())
+                .or_else(|| e.machine.clone())
                 .unwrap_or_else(|| default_id(&e.path));
         match e.kind.as_str() {
             "usd" | "static" | "prop" => {

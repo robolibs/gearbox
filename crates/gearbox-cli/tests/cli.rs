@@ -167,7 +167,7 @@ fn machine_move_and_busy() {
     let (code, out, err) = env.gearbox(&["machine", "list", "--json"]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v[0]["namespace"], "oxbo");
+    assert_eq!(v[0]["machine_id"], "oxbo");
 
     let (code, out, err) = env.gearbox(&[
         "machine",
@@ -394,7 +394,7 @@ fn attach_and_detach_through_the_master() {
         "tools",
         "attach",
         "trailer",
-        "--ns",
+        "--machine",
         "tractor",
         "--teleport",
         "--json",
@@ -423,7 +423,7 @@ fn attach_and_detach_through_the_master() {
     assert_eq!(code, 4, "an attached slave refuses commands: {err}");
     assert!(err.contains("attached"), "{err}");
 
-    let (code, _, err) = env.gearbox(&["machine", "tools", "detach", "trailer", "--ns", "tractor"]);
+    let (code, _, err) = env.gearbox(&["machine", "tools", "detach", "trailer", "--machine", "tractor"]);
     assert_eq!(code, 0, "{err}");
     let (code, out, _) = env.gearbox(&["machine", "tools", "list", "tractor", "--json"]);
     assert_eq!(code, 0);
@@ -447,7 +447,7 @@ fn scene_tree_and_link_values_of_a_fake_machine() {
         "nope",
         "position",
         "1",
-        "--ns",
+        "--machine",
         "oxbo",
     ]);
     assert_eq!(code, 2, "unknown link is a usage error: {err}");
@@ -457,7 +457,7 @@ fn scene_tree_and_link_values_of_a_fake_machine() {
         "base_link",
         "position",
         "1",
-        "--ns",
+        "--machine",
         "oxbo",
     ]);
     assert_eq!(code, 0, "{err}");

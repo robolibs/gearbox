@@ -38,7 +38,7 @@ Put things into the scene
 | Leaf | Does |
 |---|---|
 | `usd [OPTIONS] <PATH>` | Load a USD as a prop (or another category) |
-| `machine [OPTIONS] <PATH>` | Load a machine USD under a namespace and wait for its agent |
+| `machine [OPTIONS] <PATH>` | Load a machine USD under an id and wait for its agent |
 | `world <PATH>` | Load a world USD |
 | `terrain <PATH>` | Load a terrain USD |
 | `marker --at <M> <M>... <ID>` | Place a marker |
@@ -84,7 +84,7 @@ Choose the thing later commands act on
 | Leaf | Does |
 |---|---|
 | `show` | Current selection |
-| `machine <NS>` | Select a machine by namespace |
+| `machine <MACHINE>` | Select a machine by id |
 | `object <ID>` | Select a loaded object by id |
 | `marker <ID>` | Select a marker by id |
 | `next` | Select the next object in `scene list` order |
@@ -98,15 +98,15 @@ Inspect and drive machines
 | Leaf | Does |
 |---|---|
 | `list` | Machines with their controllers and holders |
-| `info [NS]` | Everything a machine reports about itself |
-| `state [OPTIONS] [NS]` | Stream the machine's state |
-| `move [OPTIONS] [NS]` | Drive with a constant twist for a while, then stop |
-| `stop [OPTIONS] [NS]` | Send a zero twist and release |
-| `drive [OPTIONS] [NS]` | Drive from the keyboard: WASD or arrows, space stops, q quits |
+| `info [MACHINE]` | Everything a machine reports about itself |
+| `state [OPTIONS] [MACHINE]` | Stream the machine's state |
+| `move [OPTIONS] [MACHINE]` | Drive with a constant twist for a while, then stop |
+| `stop [OPTIONS] [MACHINE]` | Send a zero twist and release |
+| `drive [OPTIONS] [MACHINE]` | Drive from the keyboard: WASD or arrows, space stops, q quits |
 | `cmd [OPTIONS] <CONTROLLER> [KEY=VAL]...` | Generic controller command: KEY=VAL pairs, `value=` and `element=` are numeric |
-| `controllers [NS]` | Controller table with types and interfaces |
-| `links [OPTIONS] [NS]` | The link tree: names, roles, parents, static offsets |
-| `tf [OPTIONS] [NS]` | Stream link poses: switches the machine's tf on, prints, switches it off |
+| `controllers [MACHINE]` | Controller table with types and interfaces |
+| `links [OPTIONS] [MACHINE]` | The link tree: names, roles, parents, static offsets |
+| `tf [OPTIONS] [MACHINE]` | Stream link poses: switches the machine's tf on, prints, switches it off |
 | `set-value [OPTIONS] <LINK> <NAME> <VALUE>` | Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8) |
 | `tools <COMMAND>` | Attachments: what hangs on a machine, attach and detach slaves |
 
@@ -128,8 +128,8 @@ Identities, allowlists, sessions
 | `list` | Allowed peers of the instance and who holds each machine |
 | `grant [OPTIONS] <DID>` | Allow a peer now, on a live instance, and on every future launch |
 | `revoke <DID>` | Remove a peer from the launch allowlist |
-| `take <NS>` | Steal a machine's session, then release it |
-| `release <NS>` | Force-release whoever holds a machine |
+| `take <MACHINE>` | Steal a machine's session, then release it |
+| `release <MACHINE>` | Force-release whoever holds a machine |
 | `identity <COMMAND>` | Manage CLI identities under agentio's key dir |
 
 ## `gearbox api`

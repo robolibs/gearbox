@@ -175,7 +175,7 @@ impl MachineContext {
         self.buttons.clear();
         if let Some(card) = card {
             let plate = self.card.get_or_insert_with(|| GroundCard::new(world));
-            let corners = plate.show(ctx, world, &card, &card.ns, selected == Some(card.root));
+            let corners = plate.show(ctx, world, &card, &card.machine_id, selected == Some(card.root));
             let mut camera =
                 world.query_filtered::<(&Camera, &GlobalTransform), With<ChaseCamera>>();
             if let Ok((camera, gt)) = camera.single(world)

@@ -140,14 +140,14 @@ impl Ctx {
     }
 
     /// The machine a `machine` leaf acts on: the argument, else the selection.
-    pub fn machine_ns(&self, arg: Option<String>) -> Result<String> {
-        if let Some(ns) = arg {
-            return Ok(ns);
+    pub fn machine_id(&self, arg: Option<String>) -> Result<String> {
+        if let Some(machine_id) = arg {
+            return Ok(machine_id);
         }
         match &self.context.selection {
             Some(sel) if sel.kind == object_kind::name(object_kind::MACHINE) => Ok(sel.id.clone()),
             _ => Err(CliError::usage(
-                "no machine given and none selected; pass NS or run `gearbox select machine NS`",
+                "no machine given and none selected; pass MACHINE or run `gearbox select machine MACHINE`",
             )),
         }
     }

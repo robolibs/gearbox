@@ -40,8 +40,8 @@ impl FakeHost {
         let addr_hex = host.addr();
         let endpoint_id = host.endpoint_id();
         let mut agents = Vec::new();
-        for ns in machines {
-            let cfg = MachineConfig::new(instance, ns);
+        for machine_id in machines {
+            let cfg = MachineConfig::new(instance, machine_id);
             let mut cfg = cfg
                 .with_cmd_vel("drive", "builtin:ackermann_cmd_vel")
                 .with_minimal_links();

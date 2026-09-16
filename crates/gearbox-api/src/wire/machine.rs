@@ -190,7 +190,7 @@ impl MachineState {
     }
 }
 
-/// One link of a machine's tree, answered on `/machines/<ns>/links`
+/// One link of a machine's tree, answered on `/machines/<machine_id>/links`
 /// base_link first. The offset is the static transform to the parent link
 /// in the asset's Z-up frame; joint-connected links report zero.
 #[datapod::datapod(name = "gearbox.link_record.v1")]
@@ -251,7 +251,7 @@ impl LinkRecord {
     }
 }
 
-/// World pose of one link, streamed on `/machines/<ns>/tf` while a client
+/// World pose of one link, streamed on `/machines/<machine_id>/tf` while a client
 /// has switched it on with `/cmd` `tf = on`. Sim world frame, Y up.
 #[datapod::datapod(name = "gearbox.link_pose.v1")]
 #[derive(Default)]

@@ -54,8 +54,8 @@ enum Reply {
 
 #[derive(Debug, Clone)]
 pub struct Attachment {
-    pub master_ns: String,
-    pub slave_ns: String,
+    pub master_id: String,
+    pub slave_id: String,
     pub hitch: String,
     pub hitch_link: String,
     pub coupler: String,
@@ -152,8 +152,8 @@ struct Scene<'w, 's> {
 }
 
 impl Scene<'_, '_> {
-    fn machine(&self, ns: &str) -> Option<&MachineInstanceSpec> {
-        let key = self.keys.0.get(ns)?;
+    fn machine(&self, machine_id: &str) -> Option<&MachineInstanceSpec> {
+        let key = self.keys.0.get(machine_id)?;
         self.inventory
             .machines
             .iter()
@@ -421,10 +421,10 @@ fn remove_hitch_joint(physics: &mut PhysicsWorld, joint: HitchJoint) {
 fn stand_of(
     scene: &Scene,
     instances: Option<&usd_bevy::instance::UsdInstances>,
-    slave_ns: &str,
+    slave_id: &str,
     coupler: &str,
 ) -> Option<String> {
-    let slave = scene.machine(slave_ns)?;
+    let slave = scene.machine(slave_id)?;
     let stage = instances?.stage(slave.scene_root?)?;
     let link = slave
         .links
@@ -441,11 +441,11 @@ fn set_stand(
     scene: &Scene,
     physics: &mut PhysicsWorld,
     overrides: &mut Query<&mut usd_bevy::instance::UsdInstanceOverrides>,
-    slave_ns: &str,
+    slave_id: &str,
     stand: &str,
     hitched: bool,
 ) {
-    let Some(slave) = scene.machine(slave_ns) else {
+    let Some(slave) = scene.machine(slave_id) else {
         return;
     };
     if let Some(body) = scene.body(slave, stand, physics) {
@@ -464,7 +464,7 @@ fn set_stand(
         return;
     };
     let option = if hitched { "hitched" } else { "parked" };
-    info!("gearbox-attach: `{slave_ns}` stand {stand} {option}");
+    info!("gearbox-attach: `{slave_id}` stand {stand} {option}");
     if let Ok(mut o) = overrides.get_mut(root) {
         o.variants
             .retain(|(prim, set, _)| !(prim == &slave.prim_path && set == "coupling"));
@@ -484,8 +484,8 @@ pub(crate) fn would_loop(attachments: &[Attachment], candidate_master: &str, sla
         if cur == slave {
             return true;
         }
-        match attachments.iter().find(|a| a.slave_ns == cur) {
-            Some(a) => cur = a.master_ns.clone(),
+        match attachments.iter().find(|a| a.slave_id == cur) {
+            Some(a) => cur = a.master_id.clone(),
             None => return false,
         }
     }
@@ -498,55 +498,55 @@ struct Attached {
 }
 
 fn try_attach(
-    master_ns: &str,
+    master_id: &str,
     req: &AttachRequest,
     scene: &Scene,
     bus: &GearboxBus,
     physics: &mut PhysicsWorld,
     attachments: &[Attachment],
 ) -> Result<Attached, Status> {
-    let slave_ns = req.slave();
-    if slave_ns.is_empty() {
-        return Err(Status::err(code::USAGE, "attach needs a `slave` namespace"));
+    let slave_id = req.slave();
+    if slave_id.is_empty() {
+        return Err(Status::err(code::USAGE, "attach needs a `slave` id"));
     }
-    if slave_ns == master_ns {
+    if slave_id == master_id {
         return Err(refused("a machine cannot attach to itself"));
     }
     let master_agent = bus
         .machines
-        .get(master_ns)
-        .ok_or_else(|| not_found(format!("no machine `{master_ns}`")))?;
+        .get(master_id)
+        .ok_or_else(|| not_found(format!("no machine `{master_id}`")))?;
     if master_agent.session_id() != req.session {
         return Err(refused(format!(
-            "session {} does not hold `{master_ns}`",
+            "session {} does not hold `{master_id}`",
             req.session
         )));
     }
     let slave_agent = bus
         .machines
-        .get(&slave_ns)
-        .ok_or_else(|| not_found(format!("no machine `{slave_ns}`")))?;
+        .get(&slave_id)
+        .ok_or_else(|| not_found(format!("no machine `{slave_id}`")))?;
     if let Some(already) = slave_agent.attached_to() {
         return Err(refused(format!(
-            "`{slave_ns}` is already attached to `{already}`"
+            "`{slave_id}` is already attached to `{already}`"
         )));
     }
-    if would_loop(attachments, master_ns, &slave_ns) {
+    if would_loop(attachments, master_id, &slave_id) {
         return Err(refused(format!(
-            "`{master_ns}` already hangs below `{slave_ns}`; attaching would close a loop"
+            "`{master_id}` already hangs below `{slave_id}`; attaching would close a loop"
         )));
     }
     let master = scene
-        .machine(master_ns)
-        .ok_or_else(|| not_found(format!("`{master_ns}` has no loaded machine")))?;
+        .machine(master_id)
+        .ok_or_else(|| not_found(format!("`{master_id}` has no loaded machine")))?;
     let slave = scene
-        .machine(&slave_ns)
-        .ok_or_else(|| not_found(format!("`{slave_ns}` has no loaded machine")))?;
+        .machine(&slave_id)
+        .ok_or_else(|| not_found(format!("`{slave_id}` has no loaded machine")))?;
 
     let hitch_busy = |name: &str| {
         attachments
             .iter()
-            .any(|a| a.master_ns == master_ns && a.hitch == name)
+            .any(|a| a.master_id == master_id && a.hitch == name)
     };
     let coupler_kind_hint = req.coupler().and_then(|c| {
         slave
@@ -726,21 +726,21 @@ fn try_attach(
     denied.dedup();
     if !denied.is_empty() {
         warn!(
-            "gearbox-attach: `{master_ns}` does not grant `{slave_ns}` these requests: {}",
+            "gearbox-attach: `{master_id}` does not grant `{slave_id}` these requests: {}",
             denied.join(", ")
         );
     }
-    let event = SceneEvent::new(event_kind::ATTACHED, &slave_ns)
-        .with_prop("master", master_ns)
-        .with_prop("slave", &slave_ns)
+    let event = SceneEvent::new(event_kind::ATTACHED, &slave_id)
+        .with_prop("master", master_id)
+        .with_prop("slave", &slave_id)
         .with_prop("hitch", &hitch.name)
         .with_prop("coupler", &coupler.name)
         .with_prop("type", &hitch.kind)
         .with_prop("denied", &denied.join(","));
     Ok(Attached {
         attachment: Attachment {
-            master_ns: master_ns.to_string(),
-            slave_ns,
+            master_id: master_id.to_string(),
+            slave_id,
             hitch: hitch.name.clone(),
             hitch_link: hitch_link.name.clone(),
             coupler: coupler.name.clone(),
@@ -758,7 +758,7 @@ fn try_attach(
 /// The master's composite: attachments depth-first and every slave's links
 /// re-parented under the hitch link, names prefixed with the slave path.
 fn composite(
-    master_ns: &str,
+    master_id: &str,
     attachments: &[Attachment],
     scene: &Scene,
 ) -> (Vec<ToolDesc>, Vec<LinkDesc>) {
@@ -776,9 +776,9 @@ fn composite(
         if depth > 16 {
             return;
         }
-        for a in attachments.iter().filter(|a| a.master_ns == owner) {
+        for a in attachments.iter().filter(|a| a.master_id == owner) {
             tools.push(ToolDesc {
-                slave: a.slave_ns.clone(),
+                slave: a.slave_id.clone(),
                 hitch: a.hitch.clone(),
                 coupler: a.coupler.clone(),
                 kind: a.kind.clone(),
@@ -786,9 +786,9 @@ fn composite(
                 depth,
                 denied: a.denied.join(","),
             });
-            let slave_prefix = format!("{prefix}{}/", a.slave_ns);
+            let slave_prefix = format!("{prefix}{}/", a.slave_id);
             let hitch_parent = format!("{prefix}{}", a.hitch_link);
-            if let Some(slave) = scene.machine(&a.slave_ns) {
+            if let Some(slave) = scene.machine(&a.slave_id) {
                 for mut l in link_descs(&slave.links) {
                     l.parent = Some(match &l.parent {
                         None => hitch_parent.clone(),
@@ -802,7 +802,7 @@ fn composite(
                 }
             }
             walk(
-                &a.slave_ns,
+                &a.slave_id,
                 &slave_prefix,
                 depth + 1,
                 attachments,
@@ -812,15 +812,15 @@ fn composite(
             );
         }
     }
-    walk(master_ns, "", 0, attachments, scene, &mut tools, &mut links);
+    walk(master_id, "", 0, attachments, scene, &mut tools, &mut links);
     (tools, links)
 }
 
 fn refresh_masters(bus: &mut GearboxBus, attachments: &[Attachment], scene: &Scene) {
     let masters: Vec<String> = bus.machines.keys().cloned().collect();
-    for ns in masters {
-        let (tools, links) = composite(&ns, attachments, scene);
-        if let Some(agent) = bus.machines.get_mut(&ns) {
+    for machine_id in masters {
+        let (tools, links) = composite(&machine_id, attachments, scene);
+        if let Some(agent) = bus.machines.get_mut(&machine_id) {
             agent.set_tools(tools, links);
         }
     }
@@ -855,7 +855,7 @@ pub(crate) fn serve_attachments(
     let mut dropped = Vec::new();
     attachments.0.retain(|a| {
         let alive =
-            bus.machines.contains_key(&a.master_ns) && bus.machines.contains_key(&a.slave_ns);
+            bus.machines.contains_key(&a.master_id) && bus.machines.contains_key(&a.slave_id);
         if !alive {
             dropped.push(a.clone());
         }
@@ -863,7 +863,7 @@ pub(crate) fn serve_attachments(
     });
     for a in dropped {
         remove_hitch_joint(physics.as_mut(), a.joint);
-        if let Some(slave) = bus.machines.get_mut(&a.slave_ns) {
+        if let Some(slave) = bus.machines.get_mut(&a.slave_id) {
             slave.set_attached_to(None);
         }
     }
@@ -877,12 +877,12 @@ pub(crate) fn serve_attachments(
 
     let mut attach_reqs: Vec<(String, AttachRequest, Reply)> = Vec::new();
     let mut detach_reqs: Vec<(String, DetachRequest, Reply)> = Vec::new();
-    for (ns, agent) in bus.machines.iter_mut() {
+    for (machine_id, agent) in bus.machines.iter_mut() {
         for (req, token) in agent.pending_attach.drain(..) {
-            attach_reqs.push((ns.clone(), req, Reply::Remote(token)));
+            attach_reqs.push((machine_id.clone(), req, Reply::Remote(token)));
         }
         for (req, token) in agent.pending_detach.drain(..) {
-            detach_reqs.push((ns.clone(), req, Reply::Remote(token)));
+            detach_reqs.push((machine_id.clone(), req, Reply::Remote(token)));
         }
     }
 
@@ -891,11 +891,11 @@ pub(crate) fn serve_attachments(
             LocalAttachmentAction::Connect { master, slave, .. }
             | LocalAttachmentAction::Disconnect { master, slave } => (master, slave),
         };
-        let safe = [master, slave].into_iter().all(|ns| {
-            let Some(agent) = bus.machines.get(ns) else {
+        let safe = [master, slave].into_iter().all(|machine_id| {
+            let Some(agent) = bus.machines.get(machine_id) else {
                 return false;
             };
-            let Some(machine) = scene.machine(ns) else {
+            let Some(machine) = scene.machine(machine_id) else {
                 return false;
             };
             let Some(body) = machine
@@ -950,13 +950,13 @@ pub(crate) fn serve_attachments(
             keys.0
                 .iter()
                 .find(|(_, k)| Some(k.scene_root) == m.scene_root && k.machine_id == m.id)
-                .map(|(ns, _)| ns.clone())
+                .map(|(machine_id, _)| machine_id.clone())
         };
         let ready = match (owner(&sa.hitch_prim), owner(&sa.coupler_prim)) {
             (Some(master), Some(slave)) => match (ns_of(master), ns_of(slave)) {
-                (Some(master_ns), Some(slave_ns))
-                    if bus.machines.contains_key(&master_ns)
-                        && bus.machines.contains_key(&slave_ns) =>
+                (Some(master_id), Some(slave_id))
+                    if bus.machines.contains_key(&master_id)
+                        && bus.machines.contains_key(&slave_id) =>
                 {
                     let hitch = master
                         .links
@@ -970,11 +970,11 @@ pub(crate) fn serve_attachments(
                         .map(|c| c.name.clone());
                     match (hitch, coupler) {
                         (Some(h), Some(c)) => {
-                            let req = AttachRequest::new(0, &slave_ns)
+                            let req = AttachRequest::new(0, &slave_id)
                                 .with_hitch(&h)
                                 .with_coupler(&c)
                                 .teleporting();
-                            attach_reqs.push((master_ns, req, Reply::Static));
+                            attach_reqs.push((master_id, req, Reply::Static));
                             true
                         }
                         _ => {
@@ -1004,15 +1004,15 @@ pub(crate) fn serve_attachments(
     }
     pending_static.0 = still_pending;
 
-    for (master_ns, req, token) in attach_reqs {
-        let outcome = try_attach(&master_ns, &req, &scene, &bus, &mut physics, &attachments.0);
+    for (master_id, req, token) in attach_reqs {
+        let outcome = try_attach(&master_id, &req, &scene, &bus, &mut physics, &attachments.0);
         let status = match outcome {
             Ok(mut done) => {
-                let slave_ns = done.attachment.slave_ns.clone();
+                let slave_id = done.attachment.slave_id.clone();
                 done.attachment.stand = stand_of(
                     &scene,
                     instances.as_deref(),
-                    &slave_ns,
+                    &slave_id,
                     &done.attachment.coupler,
                 );
                 if let Some(stand) = done.attachment.stand.clone() {
@@ -1020,29 +1020,29 @@ pub(crate) fn serve_attachments(
                         &scene,
                         physics.as_mut(),
                         &mut overrides,
-                        &slave_ns,
+                        &slave_id,
                         &stand,
                         true,
                     );
                 }
                 info!(
-                    "gearbox-attach: `{slave_ns}` on `{master_ns}` via {} / {} ({})",
+                    "gearbox-attach: `{slave_id}` on `{master_id}` via {} / {} ({})",
                     done.attachment.hitch, done.attachment.coupler, done.attachment.kind
                 );
                 attachments.0.push(done.attachment);
-                if let Some(slave) = bus.machines.get_mut(&slave_ns) {
-                    slave.set_attached_to(Some(master_ns.clone()));
+                if let Some(slave) = bus.machines.get_mut(&slave_id) {
+                    slave.set_attached_to(Some(master_id.clone()));
                 }
                 bus.publish_event(done.event);
                 changed = true;
                 Status::ok_with(&gearbox_api::Props::from_pairs(&[(
                     "slave",
-                    slave_ns.as_str(),
+                    slave_id.as_str(),
                 )]))
             }
             Err(status) => {
                 warn!(
-                    "gearbox-attach: `{master_ns}` refused attach of `{}`: {}",
+                    "gearbox-attach: `{master_id}` refused attach of `{}`: {}",
                     req.slave(),
                     status.message()
                 );
@@ -1051,7 +1051,7 @@ pub(crate) fn serve_attachments(
         };
         match token {
             Reply::Remote(token) => {
-                if let Some(agent) = bus.machines.get_mut(&master_ns) {
+                if let Some(agent) = bus.machines.get_mut(&master_id) {
                     agent.respond_attach(token, &status);
                 }
             }
@@ -1059,7 +1059,7 @@ pub(crate) fn serve_attachments(
                 local.feedback = Some((
                     status.is_ok(),
                     if status.is_ok() {
-                        format!("{} connected to {master_ns}", req.slave())
+                        format!("{} connected to {master_id}", req.slave())
                     } else {
                         status.message()
                     },
@@ -1069,24 +1069,24 @@ pub(crate) fn serve_attachments(
         }
     }
 
-    for (master_ns, req, token) in detach_reqs {
-        let slave_ns = req.slave();
-        let status = match bus.machines.get(&master_ns) {
+    for (master_id, req, token) in detach_reqs {
+        let slave_id = req.slave();
+        let status = match bus.machines.get(&master_id) {
             Some(agent) if agent.session_id() != req.session => refused(format!(
-                "session {} does not hold `{master_ns}`",
+                "session {} does not hold `{master_id}`",
                 req.session
             )),
             _ => match attachments
                 .0
                 .iter()
-                .position(|a| a.master_ns == master_ns && a.slave_ns == slave_ns)
+                .position(|a| a.master_id == master_id && a.slave_id == slave_id)
             {
-                None => not_found(format!("`{slave_ns}` is not attached to `{master_ns}`")),
+                None => not_found(format!("`{slave_id}` is not attached to `{master_id}`")),
                 Some(i) => {
                     let a = attachments.0.remove(i);
                     remove_hitch_joint(physics.as_mut(), a.joint);
                     if let (Some(m), Some(s)) =
-                        (scene.machine(&master_ns), scene.machine(&slave_ns))
+                        (scene.machine(&master_id), scene.machine(&slave_id))
                     {
                         let (mb, sb) = (scene.bodies(m, &physics), scene.bodies(s, &physics));
                         set_cross_collisions(physics.as_mut(), &mb, &sb, true);
@@ -1096,19 +1096,19 @@ pub(crate) fn serve_attachments(
                             &scene,
                             physics.as_mut(),
                             &mut overrides,
-                            &slave_ns,
+                            &slave_id,
                             stand,
                             false,
                         );
                     }
-                    if let Some(slave) = bus.machines.get_mut(&slave_ns) {
+                    if let Some(slave) = bus.machines.get_mut(&slave_id) {
                         slave.set_attached_to(None);
                     }
-                    info!("gearbox-attach: `{slave_ns}` detached from `{master_ns}`");
+                    info!("gearbox-attach: `{slave_id}` detached from `{master_id}`");
                     bus.publish_event(
-                        SceneEvent::new(event_kind::DETACHED, &slave_ns)
-                            .with_prop("master", &master_ns)
-                            .with_prop("slave", &slave_ns)
+                        SceneEvent::new(event_kind::DETACHED, &slave_id)
+                            .with_prop("master", &master_id)
+                            .with_prop("slave", &slave_id)
                             .with_prop("hitch", &a.hitch)
                             .with_prop("coupler", &a.coupler),
                     );
@@ -1119,7 +1119,7 @@ pub(crate) fn serve_attachments(
         };
         match token {
             Reply::Remote(token) => {
-                if let Some(agent) = bus.machines.get_mut(&master_ns) {
+                if let Some(agent) = bus.machines.get_mut(&master_id) {
                     agent.respond_detach(token, &status);
                 }
             }
@@ -1127,7 +1127,7 @@ pub(crate) fn serve_attachments(
                 local.feedback = Some((
                     status.is_ok(),
                     if status.is_ok() {
-                        format!("{slave_ns} disconnected")
+                        format!("{slave_id} disconnected")
                     } else {
                         status.message()
                     },
@@ -1143,9 +1143,9 @@ pub(crate) fn serve_attachments(
 
     // Commands aimed at a slave through its master land in the slave's queue.
     let masters: Vec<String> = bus.machines.keys().cloned().collect();
-    for ns in masters {
+    for machine_id in masters {
         let routed: Vec<(String, gearbox_api::ControllerCommand)> = {
-            let Some(agent) = bus.machines.get_mut(&ns) else {
+            let Some(agent) = bus.machines.get_mut(&machine_id) else {
                 continue;
             };
             let mut keep = Vec::new();
@@ -1161,7 +1161,7 @@ pub(crate) fn serve_attachments(
         };
         for (tool, cmd) in routed {
             let leaf = tool.rsplit('/').next().unwrap_or(&tool).to_string();
-            let reachable = attachments.0.iter().any(|a| a.slave_ns == leaf);
+            let reachable = attachments.0.iter().any(|a| a.slave_id == leaf);
             if let (true, Some(slave)) = (reachable, bus.machines.get_mut(&leaf)) {
                 // The slave sees the command as its own; the route is spent.
                 let mut props = gearbox_api::Props::new();
@@ -1175,7 +1175,7 @@ pub(crate) fn serve_attachments(
                     ..cmd
                 });
             } else {
-                warn!("gearbox-attach: `{ns}` has no attached tool `{tool}`; command dropped");
+                warn!("gearbox-attach: `{machine_id}` has no attached tool `{tool}`; command dropped");
             }
         }
     }

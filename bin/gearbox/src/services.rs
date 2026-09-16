@@ -146,9 +146,9 @@ impl Plugin for ServicesPlugin {
 fn machine_for<'a>(
     inventory: &'a ControllerInventory,
     keys: &MachineAgentKeys,
-    ns: &str,
+    machine_id: &str,
 ) -> Option<&'a MachineInstanceSpec> {
-    let key = keys.0.get(ns)?;
+    let key = keys.0.get(machine_id)?;
     inventory
         .machines
         .iter()
@@ -270,13 +270,13 @@ fn drain_service_commands(
     mut warned: ResMut<WarnedOnce>,
 ) {
     let Some(mut bus) = bus else { return };
-    let namespaces: Vec<String> = bus.machines.keys().cloned().collect();
-    for ns in namespaces {
-        let Some(machine) = machine_for(&inventory, &keys, &ns) else {
+    let machine_ids: Vec<String> = bus.machines.keys().cloned().collect();
+    for machine_id in machine_ids {
+        let Some(machine) = machine_for(&inventory, &keys, &machine_id) else {
             continue;
         };
         let scene_root = machine.scene_root.expect("keyed machines have a root");
-        let Some(agent) = bus.machines.get_mut(&ns) else {
+        let Some(agent) = bus.machines.get_mut(&machine_id) else {
             continue;
         };
         let mut keep = Vec::new();
@@ -288,45 +288,45 @@ fn drain_service_commands(
             }
             let value = num(&props, "value").unwrap_or(cmd.value);
             if let Some(request) = props.get("request").cloned() {
-                let Some(att) = attachments.0.iter().find(|a| a.slave_ns == ns) else {
-                    if warned.0.insert(format!("{ns}:request:{request}")) {
-                        warn!("gearbox-services: `{ns}` requested `{request}` but is not attached");
+                let Some(att) = attachments.0.iter().find(|a| a.slave_id == machine_id) else {
+                    if warned.0.insert(format!("{machine_id}:request:{request}")) {
+                        warn!("gearbox-services: `{machine_id}` requested `{request}` but is not attached");
                     }
                     continue;
                 };
-                let Some(master) = machine_for(&inventory, &keys, &att.master_ns) else {
+                let Some(master) = machine_for(&inventory, &keys, &att.master_id) else {
                     continue;
                 };
                 if !master.grants.iter().any(|g| *g == request) {
-                    if warned.0.insert(format!("{ns}:denied:{request}")) {
+                    if warned.0.insert(format!("{machine_id}:denied:{request}")) {
                         warn!(
-                            "gearbox-services: `{}` does not grant `{request}` to `{ns}`; ignored",
-                            att.master_ns
+                            "gearbox-services: `{}` does not grant `{request}` to `{machine_id}`; ignored",
+                            att.master_id
                         );
                     }
                     continue;
                 }
                 if !apply_request(&request, value, master, &mut service, &mut tim)
-                    && warned.0.insert(format!("{ns}:norequest:{request}"))
+                    && warned.0.insert(format!("{machine_id}:norequest:{request}"))
                 {
                     warn!(
                         "gearbox-services: `{}` grants `{request}` but has no controller for it",
-                        att.master_ns
+                        att.master_id
                     );
                 }
                 continue;
             }
             if let Some(link) = props.get("link").cloned() {
                 let Some(name) = props.get("name").cloned() else {
-                    if warned.0.insert(format!("{ns}:link:noname")) {
-                        warn!("gearbox-services: `{ns}`: a link value needs `name`");
+                    if warned.0.insert(format!("{machine_id}:link:noname")) {
+                        warn!("gearbox-services: `{machine_id}`: a link value needs `name`");
                     }
                     continue;
                 };
                 if machine.links.get(&link).is_some() {
                     values.set(&machine.id, &link, &name, value);
-                } else if warned.0.insert(format!("{ns}:link:{link}")) {
-                    warn!("gearbox-services: `{ns}` has no link `{link}`; value dropped");
+                } else if warned.0.insert(format!("{machine_id}:link:{link}")) {
+                    warn!("gearbox-services: `{machine_id}` has no link `{link}`; value dropped");
                 }
                 continue;
             }
@@ -335,8 +335,8 @@ fn drain_service_commands(
             };
             let Some(controller) = machine.controllers.iter().find(|c| c.instance == instance)
             else {
-                if warned.0.insert(format!("{ns}:controller:{instance}")) {
-                    warn!("gearbox-services: `{ns}` has no controller `{instance}`");
+                if warned.0.insert(format!("{machine_id}:controller:{instance}")) {
+                    warn!("gearbox-services: `{machine_id}` has no controller `{instance}`");
                 }
                 continue;
             };
@@ -887,10 +887,10 @@ fn feed_master_inputs(
 ) {
     inputs.0.clear();
     for a in &attachments.0 {
-        let Some(master) = machine_for(&inventory, &keys, &a.master_ns) else {
+        let Some(master) = machine_for(&inventory, &keys, &a.master_id) else {
             continue;
         };
-        let Some(slave) = machine_for(&inventory, &keys, &a.slave_ns) else {
+        let Some(slave) = machine_for(&inventory, &keys, &a.slave_id) else {
             continue;
         };
         let Some(scene_root) = master.scene_root else {
@@ -900,7 +900,7 @@ fn feed_master_inputs(
             master_id: master.id.clone(),
             ..Default::default()
         };
-        if let Some(key) = keys.0.get(&a.master_ns)
+        if let Some(key) = keys.0.get(&a.master_id)
             && let Some(s) = states.states.get(key)
         {
             state.ground_speed_mps = s.linear_speed_mps;

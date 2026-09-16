@@ -31,7 +31,7 @@ pub(crate) struct CouplingAction {
 
 #[derive(Clone)]
 pub(crate) struct MachineCard {
-    pub ns: String,
+    pub machine_id: String,
     pub root: Entity,
     pub ground_center: Vec3,
     pub ground_right: Vec3,
@@ -94,8 +94,8 @@ fn publish_cards(
     cards.0.clear();
     let mut ports = Vec::new();
     let mut agents: Vec<_> = keys.0.iter().collect();
-    agents.sort_by_key(|(ns, _)| *ns);
-    for (ns, key) in agents {
+    agents.sort_by_key(|(machine_id, _)| *machine_id);
+    for (machine_id, key) in agents {
         let Some(machine) = inventory
             .machines
             .iter()
@@ -161,7 +161,7 @@ fn publish_cards(
             .unwrap_or(Vec3::X);
         let radius = ((max - min).xz().length() * 0.5 + 0.35).max(1.0);
         cards.0.push(MachineCard {
-            ns: ns.clone(),
+            machine_id: machine_id.clone(),
             root: key.scene_root,
             ground_center: center + right * (radius + 0.55),
             ground_right: right.cross(Vec3::Y),
@@ -171,16 +171,16 @@ fn publish_cards(
             stopped: body.is_some_and(|b| b.linvel().length() < 0.3 && b.angvel().length() < 0.2),
             available: bus
                 .as_ref()
-                .and_then(|b| b.machines.get(ns))
+                .and_then(|b| b.machines.get(machine_id))
                 .is_some_and(|a| a.session_id() == 0),
             actions: Vec::new(),
         });
     }
     for attachment in &attachments.0 {
-        let Some(mi) = cards.0.iter().position(|c| c.ns == attachment.master_ns) else {
+        let Some(mi) = cards.0.iter().position(|c| c.machine_id == attachment.master_id) else {
             continue;
         };
-        let Some(si) = cards.0.iter().position(|c| c.ns == attachment.slave_ns) else {
+        let Some(si) = cards.0.iter().position(|c| c.machine_id == attachment.slave_id) else {
             continue;
         };
         let enabled = [mi, si]
@@ -198,15 +198,15 @@ fn publish_cards(
         };
         let action = CouplingAction {
             action: LocalAttachmentAction::Disconnect {
-                master: attachment.master_ns.clone(),
-                slave: attachment.slave_ns.clone(),
+                master: attachment.master_id.clone(),
+                slave: attachment.slave_id.clone(),
             },
             endpoints: [hitch.position, coupler.position],
             label: "Disconnect".into(),
             detail: format!(
                 "{} ↔ {} · {}{}",
-                attachment.master_ns,
-                attachment.slave_ns,
+                attachment.master_id,
+                attachment.slave_id,
                 attachment.kind,
                 if enabled {
                     ""
@@ -227,9 +227,9 @@ fn publish_cards(
             let gap = hitch.position.distance(coupler.position) as f64;
             if gap > 3.0
                 || attachments.0.iter().any(|a| {
-                    a.slave_ns == slave.ns || (a.master_ns == master.ns && a.hitch == hitch.name)
+                    a.slave_id == slave.machine_id || (a.master_id == master.machine_id && a.hitch == hitch.name)
                 })
-                || would_loop(&attachments.0, &master.ns, &slave.ns)
+                || would_loop(&attachments.0, &master.machine_id, &slave.machine_id)
             {
                 continue;
             }
@@ -247,8 +247,8 @@ fn publish_cards(
             };
             let action = CouplingAction {
                 action: LocalAttachmentAction::Connect {
-                    master: master.ns.clone(),
-                    slave: slave.ns.clone(),
+                    master: master.machine_id.clone(),
+                    slave: slave.machine_id.clone(),
                     hitch: hitch.name.clone(),
                     coupler: coupler.name.clone(),
                 },
@@ -256,8 +256,8 @@ fn publish_cards(
                 label: "Connect".into(),
                 detail: format!(
                     "{} ↔ {}\n{} / {} · {:.0} cm · {:.0}°\n{}",
-                    master.ns,
-                    slave.ns,
+                    master.machine_id,
+                    slave.machine_id,
                     hitch.name,
                     coupler.name,
                     gap * 100.0,

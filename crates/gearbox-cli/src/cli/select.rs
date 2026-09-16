@@ -19,8 +19,8 @@ pub struct Args {
 enum Cmd {
     /// Current selection
     Show,
-    /// Select a machine by namespace
-    Machine { ns: String },
+    /// Select a machine by id
+    Machine { machine: String },
     /// Select a loaded object by id
     Object { id: String },
     /// Select a marker by id
@@ -64,7 +64,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Machine { ns } => set(ctx, object_kind::MACHINE, &ns),
+        Cmd::Machine { machine } => set(ctx, object_kind::MACHINE, &machine),
         Cmd::Object { id } => set(ctx, object_kind::PROP, &id),
         Cmd::Marker { id } => set(ctx, object_kind::MARKER, &id),
         Cmd::Next => cycle(ctx, 1),
