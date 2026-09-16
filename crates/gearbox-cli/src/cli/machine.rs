@@ -122,6 +122,10 @@ enum Cmd {
         /// Machine namespace (default: the selection)
         #[arg(long)]
         ns: Option<String>,
+        /// Dial the machine's own did directly instead of resolving `ns`
+        /// through the host's directory; works even if the host is down
+        #[arg(long)]
+        did: Option<String>,
         /// Stop after this many messages
         #[arg(short = 'n', long)]
         count: Option<usize>,
@@ -214,7 +218,12 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             rate,
             count,
         } => tf(ctx, ns, link, rate, count),
-        Cmd::Sub { topic, ns, count } => sub(ctx, ns, &topic, count),
+        Cmd::Sub {
+            topic,
+            ns,
+            did,
+            count,
+        } => sub(ctx, ns, did, &topic, count),
         Cmd::SetValue {
             link,
             name,
@@ -231,7 +240,7 @@ fn list(ctx: &Ctx) -> Result<()> {
     let refs = client.machines()?;
     let mut rows = Vec::new();
     for r in &refs {
-        let ns = r.namespace();
+        let ns = r.machine_id();
         let mc = client.machine(&ns);
         let info = mc.info().ok();
         let session = mc.session().ok();
@@ -242,7 +251,7 @@ fn list(ctx: &Ctx) -> Result<()> {
             json!(rows
                 .iter()
                 .map(|(r, info, session)| {
-                    let mut v = json!({ "namespace": r.namespace(), "did": r.did() });
+                    let mut v = json!({ "namespace": r.machine_id(), "did": r.did() });
                     let p = r.props();
                     v["kind"] = json!(p.get("kind").unwrap_or_default());
                     v["machine_id"] = json!(p.get("machine_id").unwrap_or_default());
@@ -285,7 +294,7 @@ fn list(ctx: &Ctx) -> Result<()> {
                     .map(|s| s.holder())
                     .unwrap_or_default();
                 t.row(vec![
-                    r.namespace(),
+                    r.machine_id(),
                     p.get("kind").unwrap_or_default(),
                     ctrls,
                     holder,
@@ -331,9 +340,8 @@ fn info(ctx: &Ctx, ns: Option<String>) -> Result<()> {
         },
         || {
             let mut pairs = vec![
-                ("namespace", p.get("namespace").unwrap_or_default()),
-                ("kind", p.get("kind").unwrap_or_default()),
                 ("machine id", p.get("machine_id").unwrap_or_default()),
+                ("kind", p.get("kind").unwrap_or_default()),
                 ("did", p.get("did").unwrap_or_default()),
                 ("controllers", info.controller_count.to_string()),
                 (
@@ -974,15 +982,27 @@ fn tf(
 /// Stream any topic, same generic decode `gearbox api sub` uses. A topic
 /// starting with `/` is used exactly as given; anything else is a leaf
 /// resolved under this machine's own namespace, e.g. `imu` becomes
-/// `/machines/<ns>/imu`.
-fn sub(ctx: &Ctx, ns: Option<String>, topic: &str, count: Option<usize>) -> Result<()> {
+/// `/machines/<ns>/imu`. With `--did`, the machine's own endpoint is dialed
+/// directly instead of resolving `ns` through the host's directory — this
+/// still needs `ns` (or a selection) to name the topic, a `did` alone can't
+/// recover it, but skips depending on the host being reachable at all.
+fn sub(
+    ctx: &Ctx,
+    ns: Option<String>,
+    did: Option<String>,
+    topic: &str,
+    count: Option<usize>,
+) -> Result<()> {
     let full_topic = if topic.starts_with('/') {
         topic.to_string()
     } else {
         topics::machine_topic(&ctx.machine_ns(ns)?, topic)
     };
     let client = ctx.client()?;
-    let mut sub = client.subscribe_env(&full_topic)?;
+    let mut sub = match did {
+        Some(did) => client.subscribe_env_direct(&did, &full_topic)?,
+        None => client.subscribe_env(&full_topic)?,
+    };
     let stop_flag = install_ctrlc();
     let mut seen = 0usize;
     loop {

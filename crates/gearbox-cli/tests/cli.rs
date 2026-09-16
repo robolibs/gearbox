@@ -207,6 +207,38 @@ fn machine_sub_decodes_a_topic_by_leaf_name() {
     assert!(v.get("odom").is_some(), "{out}");
 }
 
+/// `--did` dials the machine's own endpoint directly (agentio's `by_id`
+/// escape hatch), skipping the host's directory entirely — real proof it
+/// works, not just that it compiles.
+#[test]
+fn machine_sub_dials_the_machines_own_did_directly() {
+    let env = Env::start(&["oxbo"]);
+    let (code, out, err) = env.gearbox(&["machine", "list", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let list: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let did = list[0]["did"].as_str().expect("machine did").to_string();
+
+    let (code, out, err) = env.gearbox(&[
+        "machine", "sub", "state", "--ns", "oxbo", "--did", &did, "-n", "1",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v.get("odom").is_some(), "{out}");
+
+    let (code, _, err) = env.gearbox(&[
+        "machine",
+        "sub",
+        "state",
+        "--ns",
+        "oxbo",
+        "--did",
+        "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        "-n",
+        "1",
+    ]);
+    assert_ne!(code, 0, "wrong did should not silently resolve: {err}");
+}
+
 #[test]
 fn no_instance_is_exit_3() {
     let dir = std::env::temp_dir().join(format!("gearbox-cli-empty-{}", std::process::id()));

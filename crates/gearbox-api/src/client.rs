@@ -75,6 +75,51 @@ impl Client {
         resolve_retry(|| self.agent.subscribe::<Env>(topic))
     }
 
+    /// Dial `peer` directly and call, skipping directory resolution — works
+    /// even when the host that owns `peer`'s directory is unreachable, as
+    /// long as `peer` itself answers.
+    fn call_direct<Req, Res>(
+        &self,
+        peer: EndpointId,
+        topic: &str,
+        req: &Req,
+    ) -> agentio::Result<Res>
+    where
+        Req: DataPod + DataPodValidate + 'static,
+        Req::Header: LeWireHeader,
+        Res: DataPodDecode + DataPodValidate + 'static,
+        Res::Header: LeWireHeader,
+    {
+        let mut client: ReqClient<Env, Env> =
+            resolve_retry(|| self.agent.by_id(peer)?.req_client(topic))?;
+        call_with(&mut client, req)
+    }
+
+    fn query_direct<Que, Ans>(
+        &self,
+        peer: EndpointId,
+        topic: &str,
+        que: &Que,
+    ) -> agentio::Result<Vec<Ans>>
+    where
+        Que: DataPod + DataPodValidate + 'static,
+        Que::Header: LeWireHeader,
+        Ans: DataPodDecode + DataPodValidate + 'static,
+        Ans::Header: LeWireHeader,
+    {
+        let mut client = resolve_retry(|| self.agent.by_id(peer)?.que_client::<Env, Env>(topic))?;
+        let mut answers = client.send(&pack(que))?;
+        let mut out = Vec::new();
+        while let Some(ans) = answers.next()? {
+            out.push(unpack::<Ans>(ans.header().type_hash, ans.payload()).map_err(wire_err)?);
+        }
+        Ok(out)
+    }
+
+    fn subscribe_direct(&self, peer: EndpointId, topic: &str) -> agentio::Result<Subscriber<Env>> {
+        resolve_retry(|| self.agent.by_id(peer)?.subscribe::<Env>(topic))
+    }
+
     /// Untyped req/res: the caller builds and reads envelopes itself.
     pub fn call_env(&self, topic: &str, req: &Env) -> agentio::Result<Env> {
         let mut client: ReqClient<Env, Env> = resolve_retry(|| self.agent.req_client(topic))?;
@@ -95,6 +140,14 @@ impl Client {
 
     pub fn subscribe_env(&self, topic: &str) -> agentio::Result<Subscriber<Env>> {
         self.subscribe(topic)
+    }
+
+    /// Subscribe by dialing `did` directly, skipping directory resolution —
+    /// works even when the host that owns the directory is unreachable, as
+    /// long as `did` itself answers.
+    pub fn subscribe_env_direct(&self, did: &str, topic: &str) -> agentio::Result<Subscriber<Env>> {
+        let peer = agentio::did_key::did_key_to_endpoint(did)?;
+        self.subscribe_direct(peer, topic)
     }
 
     pub fn resolve_topic(&self, topic: &str) -> agentio::Result<agentio::TopicEntry> {
@@ -164,12 +217,29 @@ impl Client {
         self.subscribe(topics::SCENE_CLOCK_STATE)
     }
 
-    pub fn machine(&self, namespace: &str) -> MachineClient<'_> {
+    /// Address a machine by id, resolved through the connected host's
+    /// directory — needs the host to be up and reachable.
+    pub fn machine(&self, machine_id: &str) -> MachineClient<'_> {
         MachineClient {
             client: self,
-            namespace: namespace.to_string(),
+            machine_id: machine_id.to_string(),
+            direct_peer: None,
             cmd_vel: None,
         }
+    }
+
+    /// Address a machine by id, dialing its own `did` directly — skips the
+    /// host's directory entirely, so this works even if the host is down,
+    /// as long as the machine's own endpoint answers. `machine_id` is still
+    /// needed to name its topics; a `did` alone doesn't recover it.
+    pub fn machine_by_did(&self, machine_id: &str, did: &str) -> agentio::Result<MachineClient<'_>> {
+        let peer = agentio::did_key::did_key_to_endpoint(did)?;
+        Ok(MachineClient {
+            client: self,
+            machine_id: machine_id.to_string(),
+            direct_peer: Some(peer),
+            cmd_vel: None,
+        })
     }
 
     /// Wait until the host answers `info`, for scripts racing a launch.
@@ -187,18 +257,53 @@ impl Client {
 
 pub struct MachineClient<'a> {
     client: &'a Client,
-    namespace: String,
+    machine_id: String,
+    /// `Some` dials this endpoint directly (see [`Client::machine_by_did`]);
+    /// `None` resolves `machine_id` through the host's directory.
+    direct_peer: Option<EndpointId>,
     cmd_vel: Option<ReqClient<Env, Env>>,
 }
 
 impl MachineClient<'_> {
     fn topic(&self, leaf: &str) -> String {
-        machine_topic(&self.namespace, leaf)
+        machine_topic(&self.machine_id, leaf)
+    }
+
+    fn call<Req, Res>(&self, topic: &str, req: &Req) -> agentio::Result<Res>
+    where
+        Req: DataPod + DataPodValidate + 'static,
+        Req::Header: LeWireHeader,
+        Res: DataPodDecode + DataPodValidate + 'static,
+        Res::Header: LeWireHeader,
+    {
+        match self.direct_peer {
+            Some(peer) => self.client.call_direct(peer, topic, req),
+            None => self.client.call(topic, req),
+        }
+    }
+
+    fn query<Que, Ans>(&self, topic: &str, que: &Que) -> agentio::Result<Vec<Ans>>
+    where
+        Que: DataPod + DataPodValidate + 'static,
+        Que::Header: LeWireHeader,
+        Ans: DataPodDecode + DataPodValidate + 'static,
+        Ans::Header: LeWireHeader,
+    {
+        match self.direct_peer {
+            Some(peer) => self.client.query_direct(peer, topic, que),
+            None => self.client.query(topic, que),
+        }
+    }
+
+    fn subscribe(&self, topic: &str) -> agentio::Result<Subscriber<Env>> {
+        match self.direct_peer {
+            Some(peer) => self.client.subscribe_direct(peer, topic),
+            None => self.client.subscribe(topic),
+        }
     }
 
     pub fn info(&self) -> agentio::Result<MachineInfo> {
-        self.client
-            .call(&self.topic(topics::MACHINE_INFO), &Ping::default())
+        self.call(&self.topic(topics::MACHINE_INFO), &Ping::default())
     }
 
     pub fn claim(&self, hold_ms: u32, take: bool) -> agentio::Result<ClaimResponse> {
@@ -206,19 +311,15 @@ impl MachineClient<'_> {
         if take {
             req = req.taking();
         }
-        self.client.call(&self.topic(topics::MACHINE_CLAIM), &req)
+        self.call(&self.topic(topics::MACHINE_CLAIM), &req)
     }
 
     pub fn release(&self, session: u64) -> agentio::Result<Status> {
-        self.client.call(
-            &self.topic(topics::MACHINE_RELEASE),
-            &SessionRef { session },
-        )
+        self.call(&self.topic(topics::MACHINE_RELEASE), &SessionRef { session })
     }
 
     pub fn session(&self) -> agentio::Result<SessionInfo> {
-        self.client
-            .call(&self.topic(topics::MACHINE_SESSION), &Ping::default())
+        self.call(&self.topic(topics::MACHINE_SESSION), &Ping::default())
     }
 
     /// Cached client, since this is called at command rate.
@@ -230,27 +331,30 @@ impl MachineClient<'_> {
     ) -> agentio::Result<Status> {
         if self.cmd_vel.is_none() {
             let topic = self.topic(topics::MACHINE_CMD_VEL);
-            self.cmd_vel = Some(resolve_retry(|| self.client.agent.req_client(&topic))?);
+            self.cmd_vel = Some(match self.direct_peer {
+                Some(peer) => resolve_retry(|| self.client.agent.by_id(peer)?.req_client(&topic))?,
+                None => resolve_retry(|| self.client.agent.req_client(&topic))?,
+            });
         }
         let client = self.cmd_vel.as_mut().expect("cached above");
         call_with(client, &TwistCmd::new(session, forward_mps, yaw_rps))
     }
 
     pub fn command(&self, cmd: &ControllerCommand) -> agentio::Result<Status> {
-        self.client.call(&self.topic(topics::MACHINE_CMD), cmd)
+        self.call(&self.topic(topics::MACHINE_CMD), cmd)
     }
 
     pub fn state(&self) -> agentio::Result<Subscriber<Env>> {
-        self.client.subscribe(&self.topic(topics::MACHINE_STATE))
+        self.subscribe(&self.topic(topics::MACHINE_STATE))
     }
 
     pub fn odom(&self) -> agentio::Result<Subscriber<Env>> {
-        self.client.subscribe(&self.topic(topics::MACHINE_ODOM))
+        self.subscribe(&self.topic(topics::MACHINE_ODOM))
     }
 
     /// Link poses, once `set_tf(true)` has switched the stream on.
     pub fn tf(&self) -> agentio::Result<Subscriber<Env>> {
-        self.client.subscribe(&self.topic(topics::MACHINE_TF))
+        self.subscribe(&self.topic(topics::MACHINE_TF))
     }
 
     pub fn set_tf(&self, on: bool) -> agentio::Result<Status> {
@@ -263,12 +367,11 @@ impl MachineClient<'_> {
 
     /// Hang `slave` on one of this machine's hitches.
     pub fn attach(&self, req: &AttachRequest) -> agentio::Result<Status> {
-        self.client
-            .call(&self.topic(topics::MACHINE_TOOLS_ATTACH), req)
+        self.call(&self.topic(topics::MACHINE_TOOLS_ATTACH), req)
     }
 
     pub fn detach(&self, session: u64, slave: &str) -> agentio::Result<Status> {
-        self.client.call(
+        self.call(
             &self.topic(topics::MACHINE_TOOLS_DETACH),
             &DetachRequest::new(session, slave),
         )
@@ -276,14 +379,12 @@ impl MachineClient<'_> {
 
     /// Attachments below this machine, depth-first.
     pub fn tools(&self) -> agentio::Result<Vec<AttachmentRecord>> {
-        self.client
-            .query(&self.topic(topics::MACHINE_TOOLS), &Ping::default())
+        self.query(&self.topic(topics::MACHINE_TOOLS), &Ping::default())
     }
 
     /// The link tree, base_link first.
     pub fn links(&self) -> agentio::Result<Vec<LinkRecord>> {
-        self.client
-            .query(&self.topic(topics::MACHINE_LINKS), &Ping::default())
+        self.query(&self.topic(topics::MACHINE_LINKS), &Ping::default())
     }
 
     pub fn next_odom(
