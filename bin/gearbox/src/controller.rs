@@ -183,9 +183,13 @@ pub(crate) struct ControllerRuntimeState {
 /// Forward speed as of the last publish tick, per machine — the only history
 /// an IMU's longitudinal acceleration needs. Kept separate from
 /// `ControllerRuntimeState` because it's read and written by the publish
-/// system, not the command-application one.
+/// system, not the command-application one. `(speed, accel)`: physics steps
+/// on a fixed accumulator, not every render frame, so a frame with no new
+/// step reuses the last computed acceleration instead of dividing an
+/// unchanged (or, worse, just-changed-by-several-steps) speed by this
+/// frame's render `dt`, which is a different, unrelated time base.
 #[derive(Resource, Debug, Default, Clone)]
-pub(crate) struct LastLinearSpeed(HashMap<ControllerKey, f64>);
+pub(crate) struct LastLinearSpeed(HashMap<ControllerKey, (f64, f64)>);
 
 #[derive(Debug, Clone, Default)]
 pub struct ControllerState {
@@ -287,6 +291,7 @@ fn clear_controller_state_on_reset(
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
     mut keys: ResMut<MachineAgentKeys>,
+    mut last_speed: ResMut<LastLinearSpeed>,
     bus: Option<ResMut<GearboxBus>>,
 ) {
     let Some(mut messages) = messages else { return };
@@ -303,6 +308,7 @@ fn clear_controller_state_on_reset(
     runtime.logged_steer.clear();
     runtime.inertia_guarded.clear();
     runtime.wheel_spin_angles.clear();
+    last_speed.0.clear();
     states.states.clear();
     keys.0.clear();
     if let Some(mut bus) = bus {
@@ -4671,9 +4677,7 @@ fn publish_machine_controller_states(
     service: Res<crate::services::ServiceCommands>,
     attachments: Res<crate::attach::Attachments>,
     mut last_speed: ResMut<LastLinearSpeed>,
-    time: Res<Time>,
 ) {
-    let dt = time.delta_secs_f64().max(1e-6);
     let Some(mut bus) = bus else { return };
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {
@@ -4820,7 +4824,12 @@ fn publish_machine_controller_states(
         // Turn radius from the same kinematic relationship every differential
         // or Ackermann-steered machine obeys (R = v / omega), rather than a
         // geometric formula that would only hold for one steering layout.
-        let turn_radius = if yaw_rate.abs() > 1e-6 {
+        // `omega` still carries real tire/suspension noise on a dead-straight
+        // line (observed up to ~0.02 rad/s), and dividing by that noise
+        // swings the radius by thousands of metres; only treat the machine
+        // as actually turning meaningfully above it.
+        const MIN_YAW_RATE_FOR_TURN_RADIUS: f64 = 0.05;
+        let turn_radius = if yaw_rate.abs() > MIN_YAW_RATE_FOR_TURN_RADIUS {
             TurnRadius::new(speed / yaw_rate)
         } else {
             TurnRadius::straight()
@@ -4828,10 +4837,26 @@ fn publish_machine_controller_states(
         agent.publish_turn_radius(&turn_radius);
 
         // Longitudinal acceleration from the change in forward speed since
-        // the last publish tick; zero on the first tick, when there's no
-        // history yet. Lateral/vertical acceleration aren't derived yet.
-        let prior_speed = last_speed.0.insert(key.clone(), speed);
-        let forward_accel = prior_speed.map(|prev| (speed - prev) / dt).unwrap_or(0.0);
+        // the last physics step, over the simulated time that step actually
+        // covers — not this render frame's `dt`, which runs on its own
+        // clock and only sometimes lines up with a physics step landing.
+        // Zero on the first sample; on a frame with no new step, hold the
+        // last computed value instead of dividing a same-as-before speed
+        // (or, on the step frame right after, several steps' worth of
+        // change) by an unrelated render `dt`. Lateral/vertical
+        // acceleration aren't derived yet.
+        let forward_accel = if physics.pending_steps > 0 {
+            let step_dt = physics.pending_steps as f64 / physics.step_hz;
+            let accel = last_speed
+                .0
+                .get(&key)
+                .map(|(prev, _)| (speed - prev) / step_dt)
+                .unwrap_or(0.0);
+            last_speed.0.insert(key.clone(), (speed, accel));
+            accel
+        } else {
+            last_speed.0.get(&key).map(|(_, accel)| *accel).unwrap_or(0.0)
+        };
         agent.publish_imu(&Imu::new(
             Velocity {
                 vx: 0.0,
