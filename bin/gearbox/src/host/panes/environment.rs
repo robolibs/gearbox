@@ -1,6 +1,10 @@
 use bevy::prelude::*;
 use mara::ui::mara_core;
-use mara_core::{pane::PaneBody, pod::Pod};
+use mara_core::container::Tab;
+use mara_core::pod::{Pod, PodResponse};
+use mara_core::shelf::ShelfContainer;
+use mara_core::vocab::Id as MaraId;
+use std::collections::HashMap;
 
 use super::{PaneCtx, button_clicked, cid, pid, pod_response};
 use crate::environment::EnvironmentSettings;
@@ -11,7 +15,7 @@ const BEAUFORT_NAMES: [&str; 13] = [
     "strong breeze", "near gale", "gale", "strong gale", "storm", "violent storm", "hurricane",
 ];
 
-pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
+pub fn container(world: &World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     let settings = world.resource::<EnvironmentSettings>();
     let calendar = settings.calendar;
     let weather = pid(P, "weather", 0);
@@ -28,72 +32,61 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     {
         ctx.set_slider(sun, i, value);
     }
-    body.add_normal(
-        cid(P, "weather"),
-        "Weather",
-        "cloud",
-        vec![
-            Pod::new(weather)
-                .with_slider("Cloud cover", coverage, 0.0..=100.0, 0, " %", ctx.accent)
-                .with_readout("range", "Clear sky → overcast")
-                .with_button("Clear", ctx.accent)
-                .with_button("Broken clouds", ctx.accent)
-                .with_button("Overcast", ctx.accent),
-        ],
-    );
+    let weather_tab = Tab::new(cid(P, "weather"), "Weather", "cloud").pods(vec![
+        Pod::new(weather)
+            .with_slider("Cloud cover", coverage, 0.0..=100.0, 0, " %", ctx.accent)
+            .with_readout("range", "Clear sky → overcast")
+            .with_button("Clear", ctx.accent)
+            .with_button("Broken clouds", ctx.accent)
+            .with_button("Overcast", ctx.accent),
+    ]);
     let minutes = (calendar.hour * 60.0).round() as u32;
     let elevation = settings.sun_position.normalize().y.asin().to_degrees();
-    body.add_normal(
-        cid(P, "sun"),
-        "Sun and season",
-        "weather-sunny",
-        vec![
-            Pod::new(sun)
-                .with_readout(
-                    "sun control",
-                    if settings.sun_override {
-                        "Startup override"
-                    } else {
-                        "Solar calendar"
-                    },
-                )
-                .with_readout(
-                    "solar time",
-                    format!("{:02}:{:02}", minutes / 60, minutes % 60),
-                )
-                .with_slider(
-                    "Time of day",
-                    calendar.hour as f64,
-                    0.0..=24.0,
-                    2,
-                    " h",
-                    ctx.accent,
-                )
-                .with_readout("date", calendar.date_label())
-                .with_slider(
-                    "Day of year",
-                    calendar.day as f64,
-                    1.0..=365.0,
-                    0,
-                    "",
-                    ctx.accent,
-                )
-                .with_slider(
-                    "Latitude",
-                    calendar.latitude as f64,
-                    -90.0..=90.0,
-                    1,
-                    "°",
-                    ctx.accent,
-                )
-                .with_readout("sun elevation", format!("{elevation:.1}°"))
-                .with_readout("time basis", "Solar time: noon = highest sun")
-                .with_readout("season", "Changes sunlight, not field crops")
-                .with_button("Use calendar", ctx.accent),
-        ],
-    );
+    let sun_tab = Tab::new(cid(P, "sun"), "Sun and season", "weather-sunny").pods(vec![
+        Pod::new(sun)
+            .with_readout(
+                "sun control",
+                if settings.sun_override {
+                    "Startup override"
+                } else {
+                    "Solar calendar"
+                },
+            )
+            .with_readout(
+                "solar time",
+                format!("{:02}:{:02}", minutes / 60, minutes % 60),
+            )
+            .with_slider(
+                "Time of day",
+                calendar.hour as f64,
+                0.0..=24.0,
+                2,
+                " h",
+                ctx.accent,
+            )
+            .with_readout("date", calendar.date_label())
+            .with_slider(
+                "Day of year",
+                calendar.day as f64,
+                1.0..=365.0,
+                0,
+                "",
+                ctx.accent,
+            )
+            .with_slider(
+                "Latitude",
+                calendar.latitude as f64,
+                -90.0..=90.0,
+                1,
+                "°",
+                ctx.accent,
+            )
+            .with_readout("sun elevation", format!("{elevation:.1}°"))
+            .with_readout("time basis", "Solar time: noon = highest sun")
+            .with_readout("season", "Changes sunlight, not field crops")
+            .with_button("Use calendar", ctx.accent),
+    ]);
     let wind = pid(P, "wind", 0);
-    let settings = world.resource::<EnvironmentSettings>();
     let (speed, heading, gust) = (
         settings.wind_speed_mps as f64,
         settings.wind_heading_deg as f64,
@@ -103,23 +96,27 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     for (i, value) in [speed, heading, gust].into_iter().enumerate() {
         ctx.set_slider(wind, i, value);
     }
-    body.add_normal(
-        cid(P, "wind"),
-        "Wind",
-        "weather-squalls",
-        vec![
-            Pod::new(wind)
-                .with_readout("beaufort", format!("{force} · {}", BEAUFORT_NAMES[force]))
-                .with_slider("Speed", speed, 0.0..=20.0, 1, " m/s", ctx.accent)
-                .with_slider("Towards", heading, 0.0..=360.0, 0, "°", ctx.accent)
-                .with_slider("Gustiness", gust, 0.0..=100.0, 0, " %", ctx.accent)
-                .with_button("Calm", ctx.accent)
-                .with_button("Breeze", ctx.accent)
-                .with_button("Gale", ctx.accent),
-        ],
-    );
-    let responses = body.render();
-    if let Some(resp) = pod_response(&responses, cid(P, "wind"), 0) {
+    let wind_tab = Tab::new(cid(P, "wind"), "Wind", "weather-squalls").pods(vec![
+        Pod::new(wind)
+            .with_readout("beaufort", format!("{force} · {}", BEAUFORT_NAMES[force]))
+            .with_slider("Speed", speed, 0.0..=20.0, 1, " m/s", ctx.accent)
+            .with_slider("Towards", heading, 0.0..=360.0, 0, "°", ctx.accent)
+            .with_slider("Gustiness", gust, 0.0..=100.0, 0, " %", ctx.accent)
+            .with_button("Calm", ctx.accent)
+            .with_button("Breeze", ctx.accent)
+            .with_button("Gale", ctx.accent),
+    ]);
+
+    ShelfContainer::tabbed(
+        cid(P, "root"),
+        "Environment",
+        "weather-sunny",
+        vec![weather_tab, sun_tab, wind_tab],
+    )
+}
+
+pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, _ctx: &PaneCtx) {
+    if let Some(resp) = pod_response(responses, cid(P, "wind"), 0) {
         let preset = [(1.0, 0.3), (5.0, 0.7), (15.0, 0.9)]
             .into_iter()
             .enumerate()
@@ -148,7 +145,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
             }
         }
     }
-    if let Some(resp) = pod_response(&responses, cid(P, "weather"), 0) {
+    if let Some(resp) = pod_response(responses, cid(P, "weather"), 0) {
         let preset = [0.0, 0.55, 1.0]
             .into_iter()
             .enumerate()
@@ -167,9 +164,9 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                 .clouds_coverage = value;
         }
     }
-    if let Some(resp) = pod_response(&responses, cid(P, "sun"), 0)
+    if let Some(resp) = pod_response(responses, cid(P, "sun"), 0)
         && (resp.sliders.iter().any(|s| s.changed)
-            || button_clicked(&responses, cid(P, "sun"), 0, 0))
+            || button_clicked(responses, cid(P, "sun"), 0, 0))
     {
         let mut settings = world.resource_mut::<EnvironmentSettings>();
         for (index, slider) in resp.sliders.iter().enumerate().filter(|(_, s)| s.changed) {

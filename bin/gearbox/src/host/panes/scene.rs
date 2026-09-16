@@ -3,10 +3,12 @@
 
 use bevy::prelude::*;
 use mara::ui::mara_core;
-use mara_core::container::SeparatorStyle;
-use mara_core::pane::PaneBody;
-use mara_core::pod::Pod;
+use mara_core::container::{SeparatorStyle, Tab};
+use mara_core::pod::{Pod, PodResponse};
+use mara_core::shelf::ShelfContainer;
+use mara_core::vocab::Id as MaraId;
 use mara_core::widget::{TreeIconKind, TreeIconSlot};
+use std::collections::HashMap;
 
 use super::{PaneCtx, button_clicked, cid, pick_usd_file, pid, pod_response, short_path};
 use crate::controller::ControllerInventory;
@@ -25,7 +27,7 @@ struct Object {
     visible: bool,
 }
 
-pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
+pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     let accent = ctx.accent;
     let selection = world.resource::<Selection>().0;
     let paused = !world.resource::<gearbox_api::PhysicsActive>().0;
@@ -53,64 +55,59 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
     let objects_id = cid(P, "objects");
     let outbox = ctx.outbox.clone();
     let count = objects.len();
-    body.add_normal(
-        objects_id,
-        format!("Objects ({count})"),
-        "list",
-        vec![
-            Pod::new(pid(P, "objects", 0))
-                .with_button("Load USD…", accent)
-                .with_button("Reload", accent),
-            Pod::new(pid(P, "objects", 1))
-                .with_separator(SeparatorStyle::Line)
-                .fill()
-                .with_tree(16, move |tree| {
-                    if objects.is_empty() {
-                        let mut none = false;
-                        let mut slot =
-                            [TreeIconSlot::new(TreeIconKind::Glyph { on: "·", off: "·" }, &mut none)];
-                        tree.row("empty", 0, None, None, "Nothing loaded", false, accent, &mut slot);
-                        return;
+    let objects_tab = Tab::new(objects_id, format!("Objects ({count})"), "list").pods(vec![
+        Pod::new(pid(P, "objects", 0))
+            .with_button("Load USD…", accent)
+            .with_button("Reload", accent),
+        Pod::new(pid(P, "objects", 1))
+            .with_separator(SeparatorStyle::Line)
+            .fill()
+            .with_tree(16, move |tree| {
+                if objects.is_empty() {
+                    let mut none = false;
+                    let mut slot =
+                        [TreeIconSlot::new(TreeIconKind::Glyph { on: "·", off: "·" }, &mut none)];
+                    tree.row("empty", 0, None, None, "Nothing loaded", false, accent, &mut slot);
+                    return;
+                }
+                for object in &objects {
+                    let mut visible = object.visible;
+                    let mut remove = false;
+                    let mut slots = [
+                        TreeIconSlot::new(TreeIconKind::Eye, &mut visible)
+                            .with_tooltip("Toggle visibility"),
+                        TreeIconSlot::new(TreeIconKind::Glyph { on: "🗑", off: "🗑" }, &mut remove)
+                            .with_tooltip("Remove from scene"),
+                    ];
+                    let resp = tree.row(
+                        object.entity.to_bits(),
+                        0,
+                        None,
+                        Some(object.icon),
+                        &object.label,
+                        selection == Some(object.entity),
+                        accent,
+                        &mut slots,
+                    );
+                    if resp.body.clicked() {
+                        outbox.push(HostCommand::SelectRoot(Some(object.entity)));
                     }
-                    for object in &objects {
-                        let mut visible = object.visible;
-                        let mut remove = false;
-                        let mut slots = [
-                            TreeIconSlot::new(TreeIconKind::Eye, &mut visible)
-                                .with_tooltip("Toggle visibility"),
-                            TreeIconSlot::new(TreeIconKind::Glyph { on: "🗑", off: "🗑" }, &mut remove)
-                                .with_tooltip("Remove from scene"),
-                        ];
-                        let resp = tree.row(
-                            object.entity.to_bits(),
-                            0,
-                            None,
-                            Some(object.icon),
-                            &object.label,
-                            selection == Some(object.entity),
-                            accent,
-                            &mut slots,
-                        );
-                        if resp.body.clicked() {
-                            outbox.push(HostCommand::SelectRoot(Some(object.entity)));
-                        }
-                        if resp.body.double_clicked() {
-                            outbox.push(if object.machine {
-                                HostCommand::FlyToMachine(object.entity)
-                            } else {
-                                HostCommand::FitPrim(object.entity)
-                            });
-                        }
-                        if resp.icons.get(1).is_some_and(|i| i.clicked()) {
-                            outbox.push(HostCommand::Despawn(object.entity));
-                        }
-                        if visible != object.visible {
-                            outbox.push(HostCommand::SetVisibility(object.entity, visible));
-                        }
+                    if resp.body.double_clicked() {
+                        outbox.push(if object.machine {
+                            HostCommand::FlyToMachine(object.entity)
+                        } else {
+                            HostCommand::FitPrim(object.entity)
+                        });
                     }
-                }),
-        ],
-    );
+                    if resp.icons.get(1).is_some_and(|i| i.clicked()) {
+                        outbox.push(HostCommand::Despawn(object.entity));
+                    }
+                    if visible != object.visible {
+                        outbox.push(HostCommand::SetVisibility(object.entity, visible));
+                    }
+                }
+            }),
+    ]);
 
     // Selected object: where it is, and drag values for its pose while paused.
     let picked = selection.and_then(|root| {
@@ -167,20 +164,33 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
             .with_readout("object", "none")
             .with_readout("hint", "click an object here or in the view"),
     };
-    body.add_normal(selected_id, "Selected", "cube", vec![selected_pod]);
+    let selected_tab = Tab::new(selected_id, "Selected", "cube").pods(vec![selected_pod]);
 
-    let responses = body.render();
-    if button_clicked(&responses, objects_id, 0, 0)
+    ShelfContainer::tabbed(cid(P, "root"), "Scene", "list", vec![objects_tab, selected_tab])
+}
+
+pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, ctx: &PaneCtx) {
+    let objects_id = cid(P, "objects");
+    let selected_id = cid(P, "selected");
+    let paused = !world.resource::<gearbox_api::PhysicsActive>().0;
+    let selection = world.resource::<Selection>().0;
+    if button_clicked(responses, objects_id, 0, 0)
         && let Some(path) = pick_usd_file()
     {
         ctx.send(HostCommand::Load(path));
     }
-    if button_clicked(&responses, objects_id, 0, 1) {
+    if button_clicked(responses, objects_id, 0, 1) {
         ctx.send(HostCommand::Reload);
     }
+    let picked = selection.and_then(|root| {
+        let entity = world.get_entity(root).ok()?;
+        let transform = entity.get::<Transform>()?;
+        let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
+        Some((root, transform.translation, yaw, transform.rotation))
+    });
     if paused
-        && let Some((root, _, _, _, local, yaw, rotation)) = picked
-        && let Some(resp) = pod_response(&responses, selected_id, 0)
+        && let Some((root, local, yaw, rotation)) = picked
+        && let Some(resp) = pod_response(responses, selected_id, 0)
         && resp.drag_values.iter().any(|d| d.changed)
     {
         let value = |i: usize, fallback: f32| {

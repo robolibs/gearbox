@@ -12,8 +12,9 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use mara::ui::mara_core;
-use mara_core::pane::PaneBody;
+use mara_core::container::Tab;
 use mara_core::pod::{Pod, PodResponse};
+use mara_core::shelf::ShelfContainer;
 use mara_core::vocab::Id as MaraId;
 
 use super::{PaneCtx, button_clicked, cid, pid, pod_response};
@@ -67,7 +68,6 @@ fn group_of(c: &ControllerSpec) -> String {
     }
 }
 
-/// The selected machine.
 /// The machine prim's variant sets: name, current selection, options.
 fn machine_variants(world: &World, root: Entity, prim: &str) -> Vec<(String, String, Vec<String>)> {
     use usd_bevy::read::variants::{variant_options, variant_selection, variant_set_names};
@@ -117,7 +117,7 @@ fn drive_keys(root: Entity, machine: &MachineInstanceSpec) -> Vec<ControllerKey>
 }
 
 /// One row per machine; the trailing text says who holds its drive.
-fn add_machine_list(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) -> MachineList {
+fn machine_list_tab(world: &World, ctx: &PaneCtx) -> (Tab, MachineList) {
     let inventory = world.resource::<ControllerInventory>();
     let panel = world.resource::<MachinePanel>();
     let selection = world.resource::<Selection>().0;
@@ -154,17 +154,17 @@ fn add_machine_list(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCt
             .collect();
         Pod::new(list_pod).with_hybrid_select_list(labels, Some(trailing), ctx.accent)
     };
-    body.add_normal(cid(P, "list"), "Machines", "vehicle-tractor", vec![pod]);
-    MachineList {
+    let tab = Tab::new(cid(P, "list"), "Machines", "vehicle-tractor").pods(vec![pod]);
+    let list = MachineList {
         rows: machines.iter().map(|(root, m)| (*root, drive_keys(*root, m))).collect(),
-    }
+    };
+    (tab, list)
 }
 
 /// Clicks on the machine list: select, fly behind and drive, follow.
 fn handle_machine_list(
     responses: &HashMap<MaraId, Vec<PodResponse>>,
     list: &MachineList,
-    _world: &mut World,
     ctx: &PaneCtx,
 ) {
     let Some(rows) = pod_response(responses, cid(P, "list"), 0).and_then(|r| r.hybrid_select_lists.first())
@@ -201,16 +201,27 @@ struct Block {
     bin_link: Option<LinkSpec>,
 }
 
-pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
+/// Same-frame handoff from `container` to `apply`: rebuilding this from
+/// scratch in `apply` would mean keeping two copies of the per-controller
+/// switch below in sync, so it's built once and stashed here instead.
+#[derive(Resource, Default)]
+struct MachineBuildCache(
+    Option<(
+        MachineList,
+        Option<(MachineInstanceSpec, Entity, Vec<(String, String, Vec<String>)>, Vec<Block>)>,
+    )>,
+);
+
+pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     let accent = ctx.accent;
-    let list = add_machine_list(body, world, ctx);
+    let (list_tab, list) = machine_list_tab(world, ctx);
     let Some(machine) = picked_machine(world).filter(|m| m.scene_root.is_some()) else {
-        let responses = body.render();
-        handle_machine_list(&responses, &list, world, ctx);
-        return;
+        world.insert_resource(MachineBuildCache(Some((list, None))));
+        return ShelfContainer::tabbed(cid(P, "root"), "Machines", "vehicle-tractor", vec![list_tab]);
     };
     let Some(scene_root) = machine.scene_root else {
-        return;
+        world.insert_resource(MachineBuildCache(Some((list, None))));
+        return ShelfContainer::tabbed(cid(P, "root"), "Machines", "vehicle-tractor", vec![list_tab]);
     };
 
     // Every container but the head and the drive starts folded, once per
@@ -233,22 +244,20 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         }
     }
 
-    body.add_normal(
-        cid(P, "head"),
-        machine.id.clone(),
-        "cube",
-        vec![
+    let mut tabs = vec![list_tab];
+    tabs.push(
+        Tab::new(cid(P, "head"), machine.id.clone(), "cube").pods(vec![
             Pod::new(pid(P, "head", 0))
                 .with_readout("kind", machine.kind.as_deref().unwrap_or("—"))
                 .with_readout("controllers", machine.controllers.len().to_string())
                 .with_readout("links", machine.links.links.len().to_string()),
-        ],
+        ]),
     );
 
     // Variants of the machine prim: a row per set, a button per option.
     let variants = machine_variants(world, scene_root, &machine.prim_path);
     if !variants.is_empty() {
-        let pods = variants
+        let pods: Vec<Pod> = variants
             .iter()
             .enumerate()
             .map(|(i, (set, selection, options))| {
@@ -258,7 +267,7 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                 )
             })
             .collect();
-        body.add_normal(cid(P, "variants"), "Variants", "layer", pods);
+        tabs.push(Tab::new(cid(P, "variants"), "Variants", "layer").pods(pods));
     }
 
     let has_gamepad = {
@@ -516,16 +525,32 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         blocks.push(block);
     }
     for (group, title, icon, pods) in containers {
-        body.add_normal(cid(P, &group), title, icon, pods);
+        tabs.push(Tab::new(cid(P, &group), title, icon).pods(pods));
     }
 
-    let responses = body.render();
-    handle_machine_list(&responses, &list, world, ctx);
+    world.insert_resource(MachineBuildCache(Some((
+        list,
+        Some((machine, scene_root, variants, blocks)),
+    ))));
+    ShelfContainer::tabbed(cid(P, "root"), "Machines", "vehicle-tractor", tabs)
+}
+
+pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, ctx: &PaneCtx) {
+    let cached = world
+        .get_resource_mut::<MachineBuildCache>()
+        .and_then(|mut cache| cache.0.take());
+    let Some((list, selected)) = cached else {
+        return;
+    };
+    handle_machine_list(responses, &list, ctx);
+    let Some((machine, scene_root, variants, blocks)) = selected else {
+        return;
+    };
     for (i, (set, selection, options)) in variants.iter().enumerate() {
         let picked = options
             .iter()
             .enumerate()
-            .find(|(j, _)| button_clicked(&responses, cid(P, "variants"), i, *j))
+            .find(|(j, _)| button_clicked(responses, cid(P, "variants"), i, *j))
             .map(|(_, option)| option);
         if let Some(option) = picked.filter(|option| *option != selection) {
             ctx.send(HostCommand::SetVariant {
@@ -537,14 +562,14 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
         }
     }
     for block in blocks {
-        let Some(resp) = pod_response(&responses, cid(P, &block.group), block.pod) else {
+        let Some(resp) = pod_response(responses, cid(P, &block.group), block.pod) else {
             continue;
         };
         let ty = block.controller.controller_type.as_str();
         if DRIVE_TYPES.contains(&ty) {
             world.resource_scope(|world, mut panel: Mut<MachinePanel>| {
                 let mut ui_drive = world.resource_mut::<UiDrive>();
-                let stop = button_clicked(&responses, cid(P, &block.group), block.pod, 0);
+                let stop = button_clicked(responses, cid(P, &block.group), block.pod, 0);
                 if stop {
                     panel.holding.remove(&block.key);
                     if panel.gamepad_on(&block.key) {

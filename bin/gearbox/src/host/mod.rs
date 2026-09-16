@@ -11,7 +11,6 @@ mod ground_card;
 pub mod panes;
 pub mod replay;
 
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -20,8 +19,8 @@ use mara::host::{MaraHostCtx, RibbonRail};
 use mara::ui::mara_core;
 use mara::ui::modules::bevy as mara_bevy;
 use mara::window::{CreationContext, WindowApp};
-use mara_core::pane::{PaneAnchor, RailZone};
 use mara_core::ribbon::RibbonAction;
+use mara_core::shelf::{ShelfDef, ShelfEdge};
 use mara_core::style::{AccentColor, GlassOpacity, Mode, active_accent};
 use mara_core::vocab::Id as MaraId;
 use mara_core::{CommandPaletteState, PaletteItem, RibbonAvoidance, WorkspaceStack};
@@ -35,6 +34,13 @@ use panes::{Outbox, PaneCtx};
 
 pub const RIBBON_LEFT: &str = "gearbox_left";
 
+/// The docked sidebar: Machines/Scene/View/Environment/Capture/Controls,
+/// all visible together as stacked collapsible sections — not a
+/// ribbon-opened floating pane. Toggled by `ACTION_SIDEBAR`.
+pub const SHELF_LEFT: &str = "gearbox_shelf_left";
+
+/// These no longer name a rail-opened pane; they just namespace each
+/// pane module's own `cid`/`pid` calls (unchanged since before the shelf).
 pub const PANE_MACHINE: &str = "gearbox_pane_machine";
 pub const PANE_SCENE: &str = "gearbox_pane_scene";
 pub const PANE_VIEW: &str = "gearbox_pane_view";
@@ -42,6 +48,7 @@ pub const PANE_LOG: &str = "gearbox_pane_log";
 pub const PANE_ENVIRONMENT: &str = "gearbox_pane_environment";
 pub const PANE_CAPTURE: &str = "gearbox_pane_capture";
 
+const ACTION_SIDEBAR: &str = "gearbox_action_sidebar";
 const ACTION_PLAY: &str = "gearbox_action_play";
 const ACTION_CLEAR: &str = "gearbox_action_clear";
 
@@ -86,7 +93,8 @@ pub struct GearboxApp {
     capture: capture::WindowCapture,
     gizmo: gizmo::PoseGizmo,
     machine_context: machine_context::MachineContext,
-    panels_initialized: bool,
+    shelf_state: mara_core::ShelfState,
+    sidebar_open: bool,
 }
 
 impl WindowApp for GearboxApp {
@@ -118,7 +126,8 @@ impl WindowApp for GearboxApp {
             capture: capture::WindowCapture::default(),
             gizmo: gizmo::PoseGizmo::default(),
             machine_context: machine_context::MachineContext::default(),
-            panels_initialized: false,
+            shelf_state: mara_core::ShelfState::default(),
+            sidebar_open: true,
         }
     }
 
@@ -136,22 +145,17 @@ impl WindowApp for GearboxApp {
             capture,
             gizmo,
             machine_context,
-            panels_initialized,
+            shelf_state,
+            sidebar_open,
         } = self;
         capture.update(&egui);
-        if !*panels_initialized {
-            for pane in [PANE_MACHINE, PANE_SCENE, PANE_VIEW, PANE_ENVIRONMENT, PANE_CAPTURE, PANE_LOG] {
-                host.set_rail_pane_open(RIBBON_LEFT, pane, false);
-            }
-            *panels_initialized = true;
-        }
 
         // Input goes into the world before the viewport ticks it.
         if let Some(world) = view.world_mut() {
             world.resource_mut::<crate::viewer::drive::HostInputFocus>().0 = egui.input(|i| i.focused);
             keys.forward(&egui, world);
             if !egui.egui_wants_keyboard_input() {
-                hotkeys(&egui, host, world, palette);
+                hotkeys(&egui, world, palette, sidebar_open);
             }
             machine_context.interact(&egui, world);
             if !world.resource::<crate::viewer::machine_context::MachineHover>().captures_pointer {
@@ -171,11 +175,7 @@ impl WindowApp for GearboxApp {
             return;
         };
         let physics_on = world.resource::<gearbox_api::PhysicsActive>().0;
-        let recording = world
-            .resource::<crate::viewer::recorder::Recorder>()
-            .is_recording();
         let outbox = Outbox::default();
-        let world = RefCell::new(world);
         let ctx = PaneCtx {
             accent,
             egui: &egui,
@@ -183,41 +183,42 @@ impl WindowApp for GearboxApp {
             log,
         };
 
+        // The sidebar: Machines/Scene/View/Environment/Capture/Controls,
+        // all visible together as stacked collapsible sections — a real
+        // docked Shelf, not a ribbon-opened floating pane. `ACTION_SIDEBAR`
+        // toggles it; play and clear stay as direct rail actions.
+        let shelves = if *sidebar_open {
+            vec![
+                ShelfDef::new(SHELF_LEFT, ShelfEdge::Left, accent)
+                    .default_size(340.0)
+                    .movable()
+                    .container(panes::machine::container(world, &ctx))
+                    .container(panes::scene::container(world, &ctx))
+                    .container(panes::view::container(world, &ctx))
+                    .container(panes::environment::container(world, &ctx))
+                    .container(panes::capture::container(world, &ctx))
+                    .container(panes::controls::container(world, &ctx)),
+            ]
+        } else {
+            Vec::new()
+        };
+        let layout = host.layout_shelves(&shelves, shelf_state);
+        let responses = host.show_shelves(layout, shelves, shelf_state);
+
+        panes::machine::apply(&responses, world, &ctx);
+        panes::scene::apply(&responses, world, &ctx);
+        panes::view::apply(&responses, world, &ctx);
+        panes::environment::apply(&responses, world, &ctx);
+        panes::capture::apply(&responses, world, &ctx);
+        panes::controls::apply(&responses, world, &ctx);
+
         let left = RibbonRail::view_left(RIBBON_LEFT, "gearbox.ribbons")
-            .pane(
-                PANE_MACHINE,
-                "vehicle-tractor",
-                "Machines",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::machine::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_SCENE,
-                "list",
-                "Scene",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::scene::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_VIEW,
-                "camera",
-                "View",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::view::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_ENVIRONMENT,
-                "weather-sunny",
-                "Environment",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::environment::show(body, &mut world.borrow_mut(), &ctx),
-            )
-            .pane(
-                PANE_CAPTURE,
-                if recording { "stop" } else { "record" },
-                "Capture",
-                PaneAnchor::LeftRail(RailZone::Start),
-                |body| panes::capture::show(body, &mut world.borrow_mut(), &ctx),
+            .action_in(
+                mara_core::ribbon::RibbonCluster::Start,
+                ACTION_SIDEBAR,
+                "line-horizontal-3",
+                if *sidebar_open { "Hide sidebar" } else { "Show sidebar" },
+                ribbon_action(ACTION_SIDEBAR),
             )
             .action_in(
                 mara_core::ribbon::RibbonCluster::Middle,
@@ -232,20 +233,14 @@ impl WindowApp for GearboxApp {
                 "broom",
                 "Clear scene",
                 ribbon_action(ACTION_CLEAR),
-            )
-
-            .pane(
-                PANE_LOG,
-                "joystick",
-                "Controller and keyboard",
-                PaneAnchor::LeftRail(RailZone::End),
-                |body| panes::controls::show(body, &mut world.borrow_mut(), &ctx),
             );
         let clicks = host.show_ribbon_rail(left, accent);
 
         for click in clicks {
             tracing::debug!(target: "gearbox", "ribbon click {:?} {:?}", click.item, click.action);
-            if click.action == ribbon_action(ACTION_PLAY) {
+            if click.action == ribbon_action(ACTION_SIDEBAR) {
+                *sidebar_open = !*sidebar_open;
+            } else if click.action == ribbon_action(ACTION_PLAY) {
                 outbox.push(HostCommand::SetPhysics(!physics_on));
             } else if click.action == ribbon_action(ACTION_CLEAR) {
                 outbox.push(HostCommand::Clear);
@@ -253,28 +248,24 @@ impl WindowApp for GearboxApp {
         }
 
         if let Some(id) = host.command_palette(palette, PALETTE_ITEMS, accent) {
-            palette_action(id, host, &mut world.borrow_mut(), &outbox);
+            palette_action(id, world, &outbox, sidebar_open);
             palette.open = false;
         }
 
-        paint_tf_labels(&egui, viewport, &world.borrow());
+        paint_tf_labels(&egui, viewport, world);
         gizmo.paint(&egui, viewport);
-        machine_context.show(&egui, viewport.into(), &mut world.borrow_mut());
-        world
-            .borrow_mut()
-            .resource_mut::<HostCommands>()
-            .0
-            .extend(outbox.drain());
+        machine_context.show(&egui, viewport.into(), world);
+        world.resource_mut::<HostCommands>().0.extend(outbox.drain());
     }
 }
 
-/// Single-key shortcuts while no text field has the keyboard: pane toggles,
+/// Single-key shortcuts while no text field has the keyboard: the sidebar,
 /// overlay toggles, reload, and the command palette on Ctrl+K / Ctrl+P.
 fn hotkeys(
     egui: &egui::Context,
-    host: &MaraHostCtx<'_>,
     world: &mut World,
     palette: &mut CommandPaletteState,
+    sidebar_open: &mut bool,
 ) {
     use egui::Key;
     let (ctrl, pressed) = egui.input(|i| {
@@ -313,16 +304,8 @@ fn hotkeys(
         }
         return;
     }
-    let toggles: [(bool, &'static str, &'static str); 4] = [
-        (m, RIBBON_LEFT, PANE_MACHINE),
-        (f, RIBBON_LEFT, PANE_SCENE),
-        (o, RIBBON_LEFT, PANE_VIEW),
-        (slash || question, RIBBON_LEFT, PANE_LOG),
-    ];
-    for (hit, rail, pane) in toggles {
-        if hit {
-            host.toggle_rail_pane(rail, pane);
-        }
+    if m || f || o || slash || question {
+        *sidebar_open = !*sidebar_open;
     }
     let mut display = world.resource_mut::<DisplayToggles>();
     if g {
@@ -359,14 +342,11 @@ const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { id: "clear_scene", label: "Scene: Clear", hint: None },
 ];
 
-fn palette_action(id: &str, host: &MaraHostCtx<'_>, world: &mut World, outbox: &Outbox) {
-    let open = |rail, pane| host.set_rail_pane_open(rail, pane, true);
+fn palette_action(id: &str, world: &mut World, outbox: &Outbox, sidebar_open: &mut bool) {
     match id {
-        "open_machine" => open(RIBBON_LEFT, PANE_MACHINE),
-        "open_scene" => open(RIBBON_LEFT, PANE_SCENE),
-        "open_view" => open(RIBBON_LEFT, PANE_VIEW),
-        "open_environment" => open(RIBBON_LEFT, PANE_ENVIRONMENT),
-        "open_log" => open(RIBBON_LEFT, PANE_LOG),
+        "open_machine" | "open_scene" | "open_view" | "open_environment" | "open_log" => {
+            *sidebar_open = true;
+        }
         "toggle_grid" => {
             let mut t = world.resource_mut::<DisplayToggles>();
             t.show_world_grid = !t.show_world_grid;
