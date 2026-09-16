@@ -285,6 +285,44 @@ fn subscribe_by_did_needs_no_instance() {
     assert_ne!(code, 0, "should fail without any instance: {err}");
 }
 
+/// `access grant` reaches a running instance immediately, not just its
+/// next launch — the host's live `allowed_peers()` list actually changes.
+#[test]
+fn access_grant_applies_to_the_live_instance() {
+    let env = Env::start(&["oxbo"]);
+    let (code, out, err) = env.gearbox(&["access", "identity", "new", "guest", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let did = v["did"].as_str().expect("guest did").to_string();
+
+    let (code, out, err) = env.gearbox(&["instance", "info", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let before: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        !before["props"]["allowed"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&did),
+        "guest should not be allowed yet: {before}"
+    );
+
+    let (code, out, err) = env.gearbox(&["access", "grant", &did, "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["live"], true, "should have reached the running instance: {v}");
+
+    let (code, out, err) = env.gearbox(&["instance", "info", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let after: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        after["props"]["allowed"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&did),
+        "guest should be allowed live, no restart: {after}"
+    );
+}
+
 /// With several instances running and none named, the CLI picks one
 /// (alphabetically first) instead of erroring.
 #[test]

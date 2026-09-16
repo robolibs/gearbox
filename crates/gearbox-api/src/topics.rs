@@ -12,6 +12,7 @@ pub const MARKER_SET: &str = "/gearbox/marker/set";
 pub const MARKER_DELETE: &str = "/gearbox/marker/delete";
 pub const SELECT: &str = "/gearbox/select";
 pub const MACHINES_LIST: &str = "/gearbox/machines/list";
+pub const ACCESS_GRANT: &str = "/gearbox/access/grant";
 
 pub const MACHINE_INFO: &str = "info";
 pub const MACHINE_CLAIM: &str = "claim";

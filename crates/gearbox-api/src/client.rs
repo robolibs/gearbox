@@ -30,6 +30,10 @@ impl Client {
         identity: IdentitySource,
         name: &str,
     ) -> agentio::Result<Self> {
+        // No `.no_relay()`: a same-machine host still connects direct (iroh
+        // tries that first regardless), but a remote one may only be
+        // reachable through iroh's relay fallback, same as the host side
+        // already allows with `gearbox run --relay`.
         let agent = Agent::builder()
             .name(name)
             .identity(identity)
@@ -37,7 +41,6 @@ impl Client {
             .directory(DirectoryMode::FrontDoor(host))
             .local_config(crate::host::shm_limits())
             .allow_peer(host)
-            .no_relay()
             .build()?;
         Ok(Self {
             agent,
@@ -48,9 +51,7 @@ impl Client {
     /// A bare agent with no bootstrap host at all — for pure direct-by-did
     /// use ([`Client::machine_by_did`], [`Client::subscribe_env_direct`])
     /// that doesn't need any gearbox instance to be reachable, or even
-    /// running. Unlike [`Client::connect_id`], this allows iroh's relay
-    /// fallback, since reaching an arbitrary remote did can't assume a
-    /// direct path exists.
+    /// running.
     pub fn bare(identity: IdentitySource, name: &str) -> agentio::Result<Self> {
         let agent = Agent::builder()
             .name(name)
@@ -227,6 +228,12 @@ impl Client {
 
     pub fn machines(&self) -> agentio::Result<Vec<MachineRef>> {
         self.query(topics::MACHINES_LIST, &Ping::default())
+    }
+
+    /// Allow `did` on the live instance now, on the host and every machine
+    /// it already owns — not just on its next launch.
+    pub fn grant(&self, did: &str) -> agentio::Result<Status> {
+        self.call(topics::ACCESS_GRANT, &GrantRequest::new(did))
     }
 
     pub fn events(&self) -> agentio::Result<Subscriber<Env>> {

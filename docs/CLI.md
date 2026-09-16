@@ -126,7 +126,7 @@ Identities, allowlists, sessions
 |---|---|
 | `whoami` | The CLI's did and key path |
 | `list` | Allowed peers of the instance and who holds each machine |
-| `grant [OPTIONS] <DID>` | Allow a peer on the next launch (live grants need agentio support) |
+| `grant [OPTIONS] <DID>` | Allow a peer now, on a live instance, and on every future launch |
 | `revoke <DID>` | Remove a peer from the launch allowlist |
 | `take <NS>` | Steal a machine's session, then release it |
 | `release <NS>` | Force-release whoever holds a machine |

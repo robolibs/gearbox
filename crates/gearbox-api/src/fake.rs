@@ -233,13 +233,21 @@ fn serve_once(
     let paused = s.paused;
     let object_count = s.objects.len() as u32;
     let machine_count = agents.len() as u32;
+    let allowed = host
+        .agent
+        .allowed_peers()
+        .iter()
+        .filter_map(|id| agentio::did_key::endpoint_to_did_key(id).ok())
+        .collect::<Vec<_>>()
+        .join(",");
     host.serve_info(|_| HostInfo {
         uptime_ms: uptime,
         pid: std::process::id(),
         paused: paused as u32,
         machine_count,
         object_count,
-        props: Props::from_pairs(&[("name", "fake"), ("version", "fake")]).into_bytes(),
+        props: Props::from_pairs(&[("name", "fake"), ("version", "fake"), ("allowed", &allowed)])
+            .into_bytes(),
     });
     let mut paused = s.paused;
     host.serve_clock(|cmd| {
@@ -363,6 +371,22 @@ fn serve_once(
             })
             .collect()
     });
+
+    let mut granted = Vec::new();
+    host.serve_access_grant(|req| match agentio::did_key::did_key_to_endpoint(&req.did()) {
+        Ok(peer) => {
+            granted.push(peer);
+            Status::ok()
+        }
+        Err(err) => Status::err(code::USAGE, &format!("bad did: {err}")),
+    });
+    for peer in granted {
+        let _ = host.agent.allow_peer(peer);
+        for m in agents.iter() {
+            let _ = m.agent.agent.allow_peer(peer);
+        }
+    }
+
     for m in agents.iter_mut() {
         m.agent.poll();
     }

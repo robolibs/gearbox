@@ -22,7 +22,7 @@ enum Cmd {
     Whoami,
     /// Allowed peers of the instance and who holds each machine
     List,
-    /// Allow a peer on the next launch (live grants need agentio support)
+    /// Allow a peer now, on a live instance, and on every future launch
     Grant {
         did: String,
         /// Kept for every future launch (the default; flag kept for scripts)
@@ -78,17 +78,19 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 dids.push(did.clone());
                 paths::write_allow_file(&dids)?;
             }
-            let live = ctx.client().is_ok();
-            let note = if live {
-                "; the running instance keeps its current allowlist until relaunch"
+            let live = ctx
+                .client()
+                .ok()
+                .and_then(|c| c.grant(&did).ok())
+                .is_some_and(|s| s.is_ok());
+            let message = if live {
+                format!("{did} allowed now, and on every future `gearbox run`")
             } else {
-                ""
+                format!("{did} allowed on the next `gearbox run`; no live instance to grant on now")
             };
-            ctx.done(
-                &did,
-                &format!("{did} allowed on the next `gearbox run`{note}"),
-                || json!({ "did": did, "persist": persist, "live": false }),
-            );
+            ctx.done(&did, &message, || {
+                json!({ "did": did, "persist": persist, "live": live })
+            });
             Ok(())
         }
         Cmd::Revoke { did } => {

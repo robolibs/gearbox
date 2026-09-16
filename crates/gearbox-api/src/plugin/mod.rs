@@ -263,6 +263,27 @@ fn serve_host_core(
             })
             .collect()
     });
+
+    let mut granted = Vec::new();
+    bus.host.serve_access_grant(|req| {
+        let did = req.did();
+        match agentio::did_key::did_key_to_endpoint(&did) {
+            Ok(peer) => {
+                granted.push(peer);
+                Status::ok()
+            }
+            Err(err) => Status::err(code::USAGE, &format!("bad did `{did}`: {err}")),
+        }
+    });
+    // Allowed on the live host agent and every machine agent it already
+    // owns, so a grant reaches a machine dialed directly by did too, not
+    // just the host's own directory.
+    for peer in granted {
+        let _ = bus.host.agent.allow_peer(peer);
+        for machine in bus.machines.values() {
+            let _ = machine.agent.allow_peer(peer);
+        }
+    }
 }
 
 fn poll_machine_agents(mut bus: ResMut<GearboxBus>) {

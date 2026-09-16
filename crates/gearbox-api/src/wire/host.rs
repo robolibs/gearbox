@@ -384,6 +384,26 @@ impl UsdRef {
     }
 }
 
+/// Allow a peer's `did` on the live instance, not just its next launch.
+#[datapod::datapod(name = "gearbox.grant_request.v1")]
+#[derive(Default)]
+pub struct GrantRequest {
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl GrantRequest {
+    pub fn new(did: &str) -> Self {
+        Self {
+            props: Props::from_pairs(&[("did", did)]).into_bytes(),
+        }
+    }
+
+    pub fn did(&self) -> String {
+        Props::from_bytes(&self.props).get("did").unwrap_or_default()
+    }
+}
+
 #[datapod::datapod(name = "gearbox.marker_set.v1")]
 #[derive(Default)]
 pub struct MarkerSet {
