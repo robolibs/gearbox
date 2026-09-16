@@ -4858,10 +4858,12 @@ fn publish_machine_controller_states(
             last_speed.0.get(&key).map(|(_, accel)| *accel).unwrap_or(0.0)
         };
         agent.publish_imu(&Imu::new(
+            // Z is yaw here, matching `Odom.twist.angular.vz` right above —
+            // not Y, which is what this used to (wrongly) carry it on.
             Velocity {
                 vx: 0.0,
-                vy: yaw_rate,
-                vz: 0.0,
+                vy: 0.0,
+                vz: yaw_rate,
             },
             Acceleration {
                 ax: forward_accel,
