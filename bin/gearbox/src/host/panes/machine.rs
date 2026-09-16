@@ -32,8 +32,6 @@ use crate::viewer::systems::Selection;
 
 const MAX_SPEED_MPS: f64 = 6.0;
 const MAX_YAW_RPS: f64 = 1.5;
-const GROUP_HITCHES: &str = "hitches";
-const GROUP_PTO: &str = "pto";
 
 fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
     if v.is_finite() { v.clamp(lo, hi) } else { lo }
@@ -57,15 +55,6 @@ fn element_links<'a>(machine: &'a MachineInstanceSpec, kind: &str) -> Vec<&'a Li
         .iter()
         .filter(|l| l.element.as_ref().is_some_and(|e| e.kind == kind))
         .collect()
-}
-
-/// Which container a controller's pod lives in.
-fn group_of(c: &ControllerSpec) -> String {
-    match c.controller_type.as_str() {
-        "builtin:hitch" => GROUP_HITCHES.to_string(),
-        "builtin:pto" => GROUP_PTO.to_string(),
-        _ => c.instance.clone(),
-    }
 }
 
 /// The machine prim's variant sets: name, current selection, options.
@@ -117,7 +106,7 @@ fn drive_keys(root: Entity, machine: &MachineInstanceSpec) -> Vec<ControllerKey>
 }
 
 /// One row per machine; the trailing text says who holds its drive.
-fn machine_list_tab(world: &World, ctx: &PaneCtx) -> (Tab, MachineList) {
+fn machine_list_pod(world: &World, ctx: &PaneCtx) -> (Pod, MachineList) {
     let inventory = world.resource::<ControllerInventory>();
     let panel = world.resource::<MachinePanel>();
     let selection = world.resource::<Selection>().0;
@@ -154,11 +143,10 @@ fn machine_list_tab(world: &World, ctx: &PaneCtx) -> (Tab, MachineList) {
             .collect();
         Pod::new(list_pod).with_hybrid_select_list(labels, Some(trailing), ctx.accent)
     };
-    let tab = Tab::new(cid(P, "list"), "Machines", "vehicle-tractor").pods(vec![pod]);
     let list = MachineList {
         rows: machines.iter().map(|(root, m)| (*root, drive_keys(*root, m))).collect(),
     };
-    (tab, list)
+    (pod, list)
 }
 
 /// Clicks on the machine list: select, fly behind and drive, follow.
@@ -167,7 +155,7 @@ fn handle_machine_list(
     list: &MachineList,
     ctx: &PaneCtx,
 ) {
-    let Some(rows) = pod_response(responses, cid(P, "list"), 0).and_then(|r| r.hybrid_select_lists.first())
+    let Some(rows) = pod_response(responses, cid(P, "machine"), 0).and_then(|r| r.hybrid_select_lists.first())
     else {
         return;
     };
@@ -193,7 +181,6 @@ fn handle_machine_list(
 struct Block {
     controller: ControllerSpec,
     key: ControllerKey,
-    group: String,
     pod: usize,
     link: Option<LinkSpec>,
     section_links: Vec<LinkSpec>,
@@ -208,66 +195,43 @@ struct Block {
 struct MachineBuildCache(
     Option<(
         MachineList,
-        Option<(MachineInstanceSpec, Entity, Vec<(String, String, Vec<String>)>, Vec<Block>)>,
+        Option<(MachineInstanceSpec, Entity, usize, Vec<(String, String, Vec<String>)>, Vec<Block>)>,
     )>,
 );
 
 pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     let accent = ctx.accent;
-    let (list_tab, list) = machine_list_tab(world, ctx);
+    let (list_pod, list) = machine_list_pod(world, ctx);
+    let mut pods = vec![list_pod];
     let Some(machine) = picked_machine(world).filter(|m| m.scene_root.is_some()) else {
         world.insert_resource(MachineBuildCache(Some((list, None))));
-        return ShelfContainer::tabbed(cid(P, "root"), "Machines", "vehicle-tractor", vec![list_tab]);
+        let tab = Tab::new(cid(P, "machine"), "Machine", "vehicle-tractor").pods(pods);
+        return ShelfContainer::tabbed(cid(P, "root"), "Machine", "vehicle-tractor", vec![tab]);
     };
     let Some(scene_root) = machine.scene_root else {
         world.insert_resource(MachineBuildCache(Some((list, None))));
-        return ShelfContainer::tabbed(cid(P, "root"), "Machines", "vehicle-tractor", vec![list_tab]);
+        let tab = Tab::new(cid(P, "machine"), "Machine", "vehicle-tractor").pods(pods);
+        return ShelfContainer::tabbed(cid(P, "root"), "Machine", "vehicle-tractor", vec![tab]);
     };
 
-    // Every container but the head and the drive starts folded, once per
-    // machine.
-    {
-        let mut panel = world.resource_mut::<MachinePanel>();
-        if !panel.folded.contains(&machine.id) {
-            panel.folded.insert(machine.id.clone());
-            let mut fold: Vec<String> = vec![GROUP_HITCHES.to_string(), GROUP_PTO.to_string()];
-            fold.extend(
-                machine
-                    .controllers
-                    .iter()
-                    .filter(|c| !DRIVE_TYPES.contains(&c.controller_type.as_str()))
-                    .map(group_of),
-            );
-            for section in fold {
-                ctx.fold_container(cid(P, &section));
-            }
-        }
-    }
-
-    let mut tabs = vec![list_tab];
-    tabs.push(
-        Tab::new(cid(P, "head"), machine.id.clone(), "cube").pods(vec![
-            Pod::new(pid(P, "head", 0))
-                .with_readout("kind", machine.kind.as_deref().unwrap_or("—"))
-                .with_readout("controllers", machine.controllers.len().to_string())
-                .with_readout("links", machine.links.links.len().to_string()),
-        ]),
+    pods.push(
+        Pod::new(pid(P, "head", 0))
+            .with_readout("machine", machine.id.clone())
+            .with_readout("kind", machine.kind.as_deref().unwrap_or("—"))
+            .with_readout("controllers", machine.controllers.len().to_string())
+            .with_readout("links", machine.links.links.len().to_string()),
     );
 
     // Variants of the machine prim: a row per set, a button per option.
     let variants = machine_variants(world, scene_root, &machine.prim_path);
+    let variants_offset = pods.len();
     if !variants.is_empty() {
-        let pods: Vec<Pod> = variants
-            .iter()
-            .enumerate()
-            .map(|(i, (set, selection, options))| {
-                options.iter().fold(
-                    Pod::new(pid(P, "variants", i)).with_readout(set.as_str(), selection.as_str()),
-                    |pod, option| pod.with_button(option.as_str(), accent),
-                )
-            })
-            .collect();
-        tabs.push(Tab::new(cid(P, "variants"), "Variants", "layer").pods(pods));
+        for (i, (set, selection, options)) in variants.iter().enumerate() {
+            pods.push(options.iter().fold(
+                Pod::new(pid(P, "variants", i)).with_readout(set.as_str(), selection.as_str()),
+                |pod, option| pod.with_button(option.as_str(), accent),
+            ));
+        }
     }
 
     let has_gamepad = {
@@ -280,8 +244,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     let panel = world.resource::<MachinePanel>();
 
     let mut blocks: Vec<Block> = Vec::new();
-    // Containers in order: drives, hitches, PTOs, the rest.
-    let mut containers: Vec<(String, String, &'static str, Vec<Pod>)> = Vec::new();
+    // Order: drives, hitches, PTOs, the rest — all as pods in one tab.
     let mut ordered: Vec<&ControllerSpec> = machine.controllers.iter().filter(|c| c.enabled).collect();
     ordered.sort_by_key(|c| match c.controller_type.as_str() {
         t if DRIVE_TYPES.contains(&t) => 0,
@@ -293,31 +256,24 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     for controller in ordered {
         let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
         let ty = controller.controller_type.as_str();
-        let group = group_of(controller);
-        let pod_idx = containers
-            .iter()
-            .find(|c| c.0 == group)
-            .map(|c| c.3.len())
-            .unwrap_or(0);
+        let pod_idx = pods.len();
         let link = service_link(&machine, controller);
         let short = ty.trim_start_matches("builtin:");
         let own_title = format!("{}  ·  {short}", controller.instance);
-        let pod_id = pid(P, &group, pod_idx);
+        let pod_id = pid(P, "detail", pod_idx);
         let mut pod = Pod::new(pod_id);
         let mut block = Block {
             controller: controller.clone(),
             key: key.clone(),
-            group: group.clone(),
             pod: pod_idx,
             link: link.cloned(),
             section_links: Vec::new(),
             function_link: None,
             bin_link: None,
         };
-        let (title, icon);
+        let title;
         if DRIVE_TYPES.contains(&ty) {
             title = own_title;
-            icon = "vehicle-tractor";
             if ty == "builtin:ackermann_cmd_vel" {
                 pod = pod
                     .with_readout("drive power", controller.max_power_kw
@@ -385,7 +341,6 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                     } else {
                         own_title
                     };
-                    icon = "arrow-up";
                     let position = link_value(values, &machine, link, "position").unwrap_or(0.0);
                     pod = pod.with_readout("controller", controller.instance.clone());
                     if let Some(l) = link {
@@ -398,7 +353,6 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 }
                 "builtin:pto" => {
                     title = "PTO".to_string();
-                    icon = "arrow-sync";
                     let rpm = link_value(values, &machine, link, "rpm").unwrap_or(540.0);
                     let engaged = link_value(values, &machine, link, "engaged").unwrap_or(0.0) > 0.5;
                     ctx.sync_toggles(pod_id, &[engaged]);
@@ -412,25 +366,21 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 }
                 "builtin:joint_velocity" => {
                     title = own_title;
-                    icon = "arrow-sync";
                     let vel = link_value(values, &machine, link, "velocity").unwrap_or(0.0);
                     pod = pod.with_slider("velocity", clamp(vel, -120.0, 120.0), -120.0..=120.0, 1, " rad/s", accent);
                 }
                 "builtin:hydraulic_valve" => {
                     title = own_title;
-                    icon = "arrow-sort";
                     let flow = link_value(values, &machine, link, "flow").unwrap_or(0.0);
                     pod = pod.with_slider("flow", clamp(flow, -1.0, 1.0), -1.0..=1.0, 2, "", accent);
                 }
                 "builtin:brake" => {
                     title = own_title;
-                    icon = "record-stop";
                     let level = link_value(values, &machine, link, "level").unwrap_or(0.0);
                     pod = pod.with_slider("level", clamp(level, 0.0, 1.0), 0.0..=1.0, 2, "", accent);
                 }
                 "builtin:trailer_steer" => {
                     title = own_title;
-                    icon = "arrow-turn-right";
                     let max = controller.max_steer_deg.unwrap_or(35.0) as f64;
                     let angle = link_value(values, &machine, link, "angle_rad")
                         .unwrap_or(0.0)
@@ -439,7 +389,6 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 }
                 "builtin:section_control" => {
                     title = own_title;
-                    icon = "grid";
                     let target = controller
                         .target
                         .as_deref()
@@ -479,7 +428,6 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 }
                 "builtin:rate_control" => {
                     title = own_title;
-                    icon = "drop";
                     let target = controller
                         .target
                         .as_deref()
@@ -509,7 +457,6 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 }
                 _ => {
                     title = own_title;
-                    icon = "options";
                     pod = pod.with_readout(
                         "command",
                         controller.command_interface.as_deref().unwrap_or("—"),
@@ -517,22 +464,17 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 }
             }
         }
-        if let Some(c) = containers.iter_mut().find(|c| c.0 == group) {
-            c.3.push(pod);
-        } else {
-            containers.push((group, title, icon, vec![pod]));
-        }
+        pod = pod.with_readout("part", title);
+        pods.push(pod);
         blocks.push(block);
-    }
-    for (group, title, icon, pods) in containers {
-        tabs.push(Tab::new(cid(P, &group), title, icon).pods(pods));
     }
 
     world.insert_resource(MachineBuildCache(Some((
         list,
-        Some((machine, scene_root, variants, blocks)),
+        Some((machine, scene_root, variants_offset, variants, blocks)),
     ))));
-    ShelfContainer::tabbed(cid(P, "root"), "Machines", "vehicle-tractor", tabs)
+    let tab = Tab::new(cid(P, "machine"), "Machine", "vehicle-tractor").pods(pods);
+    ShelfContainer::tabbed(cid(P, "root"), "Machine", "vehicle-tractor", vec![tab])
 }
 
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, ctx: &PaneCtx) {
@@ -543,14 +485,14 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
         return;
     };
     handle_machine_list(responses, &list, ctx);
-    let Some((machine, scene_root, variants, blocks)) = selected else {
+    let Some((machine, scene_root, variants_offset, variants, blocks)) = selected else {
         return;
     };
     for (i, (set, selection, options)) in variants.iter().enumerate() {
         let picked = options
             .iter()
             .enumerate()
-            .find(|(j, _)| button_clicked(responses, cid(P, "variants"), i, *j))
+            .find(|(j, _)| button_clicked(responses, cid(P, "machine"), variants_offset + i, *j))
             .map(|(_, option)| option);
         if let Some(option) = picked.filter(|option| *option != selection) {
             ctx.send(HostCommand::SetVariant {
@@ -562,14 +504,14 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
         }
     }
     for block in blocks {
-        let Some(resp) = pod_response(responses, cid(P, &block.group), block.pod) else {
+        let Some(resp) = pod_response(responses, cid(P, "machine"), block.pod) else {
             continue;
         };
         let ty = block.controller.controller_type.as_str();
         if DRIVE_TYPES.contains(&ty) {
             world.resource_scope(|world, mut panel: Mut<MachinePanel>| {
                 let mut ui_drive = world.resource_mut::<UiDrive>();
-                let stop = button_clicked(responses, cid(P, &block.group), block.pod, 0);
+                let stop = button_clicked(responses, cid(P, "machine"), block.pod, 0);
                 if stop {
                     panel.holding.remove(&block.key);
                     if panel.gamepad_on(&block.key) {

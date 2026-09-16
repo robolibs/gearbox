@@ -20,10 +20,10 @@ use mara::ui::mara_core;
 use mara::ui::modules::bevy as mara_bevy;
 use mara::window::{CreationContext, WindowApp};
 use mara_core::ribbon::RibbonAction;
-use mara_core::shelf::{ShelfDef, ShelfEdge};
+use mara_core::shelf::{ShelfContainer, ShelfDef, ShelfEdge};
 use mara_core::style::{AccentColor, GlassOpacity, Mode, active_accent};
 use mara_core::vocab::Id as MaraId;
-use mara_core::{CommandPaletteState, PaletteItem, RibbonAvoidance, WorkspaceStack};
+use mara_core::{CommandPaletteState, PaletteItem, RibbonAvoidance, ShellBar, ShellEvent, WorkspaceStack};
 
 use crate::viewer::commands::{HostCommand, HostCommands};
 use crate::viewer::log::LoaderLog;
@@ -34,10 +34,12 @@ use panes::{Outbox, PaneCtx};
 
 pub const RIBBON_LEFT: &str = "gearbox_left";
 
-/// The docked sidebar: Machines/Scene/View/Environment/Capture/Controls,
-/// all visible together as stacked collapsible sections — not a
-/// ribbon-opened floating pane. Toggled by `ACTION_SIDEBAR`.
+/// Three docked Shelves — real reserved-space chrome, not ribbon-opened
+/// floating panes. Left holds Scene/View/Environment/Capture/Controls;
+/// Right holds the Machine pane; Bottom holds Shortcuts.
 pub const SHELF_LEFT: &str = "gearbox_shelf_left";
+pub const SHELF_RIGHT: &str = "gearbox_shelf_right";
+pub const SHELF_BOTTOM: &str = "gearbox_shelf_bottom";
 
 /// These no longer name a rail-opened pane; they just namespace each
 /// pane module's own `cid`/`pid` calls (unchanged since before the shelf).
@@ -47,8 +49,8 @@ pub const PANE_VIEW: &str = "gearbox_pane_view";
 pub const PANE_LOG: &str = "gearbox_pane_log";
 pub const PANE_ENVIRONMENT: &str = "gearbox_pane_environment";
 pub const PANE_CAPTURE: &str = "gearbox_pane_capture";
+pub const PANE_SHORTCUTS: &str = "gearbox_pane_shortcuts";
 
-const ACTION_SIDEBAR: &str = "gearbox_action_sidebar";
 const ACTION_PLAY: &str = "gearbox_action_play";
 const ACTION_CLEAR: &str = "gearbox_action_clear";
 
@@ -94,7 +96,6 @@ pub struct GearboxApp {
     gizmo: gizmo::PoseGizmo,
     machine_context: machine_context::MachineContext,
     shelf_state: mara_core::ShelfState,
-    sidebar_open: bool,
 }
 
 impl WindowApp for GearboxApp {
@@ -126,8 +127,28 @@ impl WindowApp for GearboxApp {
             capture: capture::WindowCapture::default(),
             gizmo: gizmo::PoseGizmo::default(),
             machine_context: machine_context::MachineContext::default(),
-            shelf_state: mara_core::ShelfState::default(),
-            sidebar_open: true,
+            shelf_state: {
+                let mut state = mara_core::ShelfState::default();
+                state.set_edge_visible(ShelfEdge::Left, false);
+                state.set_edge_visible(ShelfEdge::Right, false);
+                state.set_edge_visible(ShelfEdge::Bottom, false);
+                state
+            },
+        }
+    }
+
+    fn configure_shell(&mut self, bar: &mut ShellBar) {
+        bar.app_menu = false;
+    }
+
+    fn on_shell_event(&mut self, event: ShellEvent, _ctx: &mut MaraHostCtx<'_>) {
+        match event {
+            ShellEvent::LeftShelfToggled => self.shelf_state.toggle_edge_visible(ShelfEdge::Left),
+            ShellEvent::RightShelfToggled => self.shelf_state.toggle_edge_visible(ShelfEdge::Right),
+            ShellEvent::BottomShelfToggled => {
+                self.shelf_state.toggle_edge_visible(ShelfEdge::Bottom)
+            }
+            _ => {}
         }
     }
 
@@ -146,7 +167,6 @@ impl WindowApp for GearboxApp {
             gizmo,
             machine_context,
             shelf_state,
-            sidebar_open,
         } = self;
         capture.update(&egui);
 
@@ -155,7 +175,7 @@ impl WindowApp for GearboxApp {
             world.resource_mut::<crate::viewer::drive::HostInputFocus>().0 = egui.input(|i| i.focused);
             keys.forward(&egui, world);
             if !egui.egui_wants_keyboard_input() {
-                hotkeys(&egui, world, palette, sidebar_open);
+                hotkeys(&egui, world, palette, shelf_state);
             }
             machine_context.interact(&egui, world);
             if !world.resource::<crate::viewer::machine_context::MachineHover>().captures_pointer {
@@ -183,25 +203,34 @@ impl WindowApp for GearboxApp {
             log,
         };
 
-        // The sidebar: Machines/Scene/View/Environment/Capture/Controls,
-        // all visible together as stacked collapsible sections — a real
-        // docked Shelf, not a ribbon-opened floating pane. `ACTION_SIDEBAR`
-        // toggles it; play and clear stay as direct rail actions.
-        let shelves = if *sidebar_open {
+        // Three docked Shelves: Left is one tabbed container swapping
+        // between Scene/View/Environment/Capture/Controls, Right is the
+        // Machine pane, Bottom is Shortcuts.
+        let left = ShelfContainer::tabbed(
+            MaraId::new(SHELF_LEFT),
+            "Left",
+            "list",
             vec![
-                ShelfDef::new(SHELF_LEFT, ShelfEdge::Left, accent)
-                    .default_size(340.0)
-                    .movable()
-                    .container(panes::machine::container(world, &ctx))
-                    .container(panes::scene::container(world, &ctx))
-                    .container(panes::view::container(world, &ctx))
-                    .container(panes::environment::container(world, &ctx))
-                    .container(panes::capture::container(world, &ctx))
-                    .container(panes::controls::container(world, &ctx)),
-            ]
-        } else {
-            Vec::new()
-        };
+                panes::scene::tab(world, &ctx),
+                panes::view::tab(world, &ctx),
+                panes::environment::tab(world, &ctx),
+                panes::capture::tab(world, &ctx),
+                panes::controls::tab(world, &ctx),
+            ],
+        );
+        let shelves = vec![
+            ShelfDef::new(SHELF_LEFT, ShelfEdge::Left, accent)
+                .default_size(340.0)
+                .movable()
+                .container(left),
+            ShelfDef::new(SHELF_RIGHT, ShelfEdge::Right, accent)
+                .default_size(340.0)
+                .movable()
+                .container(panes::machine::container(world, &ctx)),
+            ShelfDef::new(SHELF_BOTTOM, ShelfEdge::Bottom, accent)
+                .default_size(220.0)
+                .container(panes::shortcuts::container(world, &ctx)),
+        ];
         let layout = host.layout_shelves(&shelves, shelf_state);
         let responses = host.show_shelves(layout, shelves, shelf_state);
 
@@ -211,15 +240,9 @@ impl WindowApp for GearboxApp {
         panes::environment::apply(&responses, world, &ctx);
         panes::capture::apply(&responses, world, &ctx);
         panes::controls::apply(&responses, world, &ctx);
+        panes::shortcuts::apply(&responses, world, &ctx);
 
         let left = RibbonRail::view_left(RIBBON_LEFT, "gearbox.ribbons")
-            .action_in(
-                mara_core::ribbon::RibbonCluster::Start,
-                ACTION_SIDEBAR,
-                "line-horizontal-3",
-                if *sidebar_open { "Hide sidebar" } else { "Show sidebar" },
-                ribbon_action(ACTION_SIDEBAR),
-            )
             .action_in(
                 mara_core::ribbon::RibbonCluster::Middle,
                 ACTION_PLAY,
@@ -238,9 +261,7 @@ impl WindowApp for GearboxApp {
 
         for click in clicks {
             tracing::debug!(target: "gearbox", "ribbon click {:?} {:?}", click.item, click.action);
-            if click.action == ribbon_action(ACTION_SIDEBAR) {
-                *sidebar_open = !*sidebar_open;
-            } else if click.action == ribbon_action(ACTION_PLAY) {
+            if click.action == ribbon_action(ACTION_PLAY) {
                 outbox.push(HostCommand::SetPhysics(!physics_on));
             } else if click.action == ribbon_action(ACTION_CLEAR) {
                 outbox.push(HostCommand::Clear);
@@ -248,7 +269,7 @@ impl WindowApp for GearboxApp {
         }
 
         if let Some(id) = host.command_palette(palette, PALETTE_ITEMS, accent) {
-            palette_action(id, world, &outbox, sidebar_open);
+            palette_action(id, world, &outbox, shelf_state);
             palette.open = false;
         }
 
@@ -259,13 +280,14 @@ impl WindowApp for GearboxApp {
     }
 }
 
-/// Single-key shortcuts while no text field has the keyboard: the sidebar,
-/// overlay toggles, reload, and the command palette on Ctrl+K / Ctrl+P.
+/// Single-key shortcuts while no text field has the keyboard: the left
+/// sidebar, overlay toggles, reload, and the command palette on
+/// Ctrl+K / Ctrl+P.
 fn hotkeys(
     egui: &egui::Context,
     world: &mut World,
     palette: &mut CommandPaletteState,
-    sidebar_open: &mut bool,
+    shelf_state: &mut mara_core::ShelfState,
 ) {
     use egui::Key;
     let (ctrl, pressed) = egui.input(|i| {
@@ -304,8 +326,14 @@ fn hotkeys(
         }
         return;
     }
-    if m || f || o || slash || question {
-        *sidebar_open = !*sidebar_open;
+    if f || o {
+        shelf_state.toggle_edge_visible(ShelfEdge::Left);
+    }
+    if m {
+        shelf_state.toggle_edge_visible(ShelfEdge::Right);
+    }
+    if slash || question {
+        shelf_state.toggle_edge_visible(ShelfEdge::Bottom);
     }
     let mut display = world.resource_mut::<DisplayToggles>();
     if g {
@@ -327,11 +355,12 @@ fn hotkeys(
 }
 
 const PALETTE_ITEMS: &[PaletteItem] = &[
-    PaletteItem { id: "open_machine", label: "Open: Machines", hint: Some("M") },
+    PaletteItem { id: "open_machine", label: "Open: Machine", hint: Some("M") },
     PaletteItem { id: "open_scene", label: "Open: Scene", hint: Some("F") },
     PaletteItem { id: "open_view", label: "Open: View", hint: Some("O") },
     PaletteItem { id: "open_environment", label: "Open: Environment", hint: None },
-    PaletteItem { id: "open_log", label: "Open: Controller and keyboard", hint: Some("?") },
+    PaletteItem { id: "open_controller", label: "Open: Controller", hint: None },
+    PaletteItem { id: "open_shortcuts", label: "Open: Shortcuts", hint: Some("?") },
     PaletteItem { id: "toggle_grid", label: "Toggle: Ground grid", hint: Some("G") },
     PaletteItem { id: "toggle_axes", label: "Toggle: World axes", hint: Some("X") },
     PaletteItem { id: "toggle_wireframe", label: "Toggle: Wireframe", hint: None },
@@ -342,10 +371,16 @@ const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { id: "clear_scene", label: "Scene: Clear", hint: None },
 ];
 
-fn palette_action(id: &str, world: &mut World, outbox: &Outbox, sidebar_open: &mut bool) {
+fn palette_action(id: &str, world: &mut World, outbox: &Outbox, shelf_state: &mut mara_core::ShelfState) {
     match id {
-        "open_machine" | "open_scene" | "open_view" | "open_environment" | "open_log" => {
-            *sidebar_open = true;
+        "open_machine" => {
+            shelf_state.set_edge_visible(ShelfEdge::Right, true);
+        }
+        "open_scene" | "open_view" | "open_environment" | "open_controller" => {
+            shelf_state.set_edge_visible(ShelfEdge::Left, true);
+        }
+        "open_shortcuts" => {
+            shelf_state.set_edge_visible(ShelfEdge::Bottom, true);
         }
         "toggle_grid" => {
             let mut t = world.resource_mut::<DisplayToggles>();

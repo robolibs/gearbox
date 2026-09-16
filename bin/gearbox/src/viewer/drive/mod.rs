@@ -33,7 +33,6 @@ pub struct MachinePanel {
     pub holding: HashSet<ControllerKey>,
     pub gamepad: Option<ControllerKey>,
     pub keyboard: Option<ControllerKey>,
-    pub folded: HashSet<String>,
     pub layer: gearbox_controls::Layer,
     pub deadman_active: bool,
 }

@@ -8,6 +8,7 @@ pub mod controls;
 pub mod environment;
 pub mod machine;
 pub mod scene;
+pub mod shortcuts;
 pub mod view;
 
 use std::collections::HashMap;

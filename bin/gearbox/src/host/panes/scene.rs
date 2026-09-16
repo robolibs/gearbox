@@ -5,7 +5,6 @@ use bevy::prelude::*;
 use mara::ui::mara_core;
 use mara_core::container::{SeparatorStyle, Tab};
 use mara_core::pod::{Pod, PodResponse};
-use mara_core::shelf::ShelfContainer;
 use mara_core::vocab::Id as MaraId;
 use mara_core::widget::{TreeIconKind, TreeIconSlot};
 use std::collections::HashMap;
@@ -27,7 +26,7 @@ struct Object {
     visible: bool,
 }
 
-pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
+pub fn tab(world: &mut World, ctx: &PaneCtx) -> Tab {
     let accent = ctx.accent;
     let selection = world.resource::<Selection>().0;
     let paused = !world.resource::<gearbox_api::PhysicsActive>().0;
@@ -52,10 +51,9 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     objects.sort_by(|a, b| a.label.cmp(&b.label));
 
     // Objects: one row each, eye and trash on the right.
-    let objects_id = cid(P, "objects");
     let outbox = ctx.outbox.clone();
     let count = objects.len();
-    let objects_tab = Tab::new(objects_id, format!("Objects ({count})"), "list").pods(vec![
+    let objects_pods = vec![
         Pod::new(pid(P, "objects", 0))
             .with_button("Load USD…", accent)
             .with_button("Reload", accent),
@@ -107,7 +105,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                     }
                 }
             }),
-    ]);
+    ];
 
     // Selected object: where it is, and drag values for its pose while paused.
     let picked = selection.and_then(|root| {
@@ -129,7 +127,6 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
             transform.rotation,
         ))
     });
-    let selected_id = cid(P, "selected");
     let pose_pod = pid(P, "selected", 0);
     let selected_pod = match &picked {
         Some((_, label, path, world_pos, local, yaw, _)) => {
@@ -164,22 +161,22 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
             .with_readout("object", "none")
             .with_readout("hint", "click an object here or in the view"),
     };
-    let selected_tab = Tab::new(selected_id, "Selected", "cube").pods(vec![selected_pod]);
-
-    ShelfContainer::tabbed(cid(P, "root"), "Scene", "list", vec![objects_tab, selected_tab])
+    let mut pods = objects_pods;
+    pods.push(selected_pod);
+    Tab::new(cid(P, "scene"), format!("Scene ({count})"), "list").pods(pods)
 }
 
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, ctx: &PaneCtx) {
-    let objects_id = cid(P, "objects");
-    let selected_id = cid(P, "selected");
+    let scene_id = cid(P, "scene");
+    let selected_pod_idx = 2;
     let paused = !world.resource::<gearbox_api::PhysicsActive>().0;
     let selection = world.resource::<Selection>().0;
-    if button_clicked(responses, objects_id, 0, 0)
+    if button_clicked(responses, scene_id, 0, 0)
         && let Some(path) = pick_usd_file()
     {
         ctx.send(HostCommand::Load(path));
     }
-    if button_clicked(responses, objects_id, 0, 1) {
+    if button_clicked(responses, scene_id, 0, 1) {
         ctx.send(HostCommand::Reload);
     }
     let picked = selection.and_then(|root| {
@@ -190,7 +187,7 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
     });
     if paused
         && let Some((root, local, yaw, rotation)) = picked
-        && let Some(resp) = pod_response(responses, selected_id, 0)
+        && let Some(resp) = pod_response(responses, scene_id, selected_pod_idx)
         && resp.drag_values.iter().any(|d| d.changed)
     {
         let value = |i: usize, fallback: f32| {

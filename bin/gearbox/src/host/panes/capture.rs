@@ -4,7 +4,6 @@ use bevy::prelude::*;
 use mara::ui::mara_core;
 use mara_core::container::Tab;
 use mara_core::pod::{Pod, PodResponse};
-use mara_core::shelf::ShelfContainer;
 use mara_core::vocab::Id as MaraId;
 use std::collections::HashMap;
 
@@ -12,7 +11,7 @@ use super::{PaneCtx, button_clicked, cid, pick_folder, pid, short_path};
 use crate::host::PANE_CAPTURE as P;
 use crate::viewer::recorder::Recorder;
 
-pub fn container(world: &World, ctx: &PaneCtx) -> ShelfContainer<'static> {
+pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
     let recorder = world.resource::<Recorder>();
     let recording = recorder.is_recording();
     let status = recorder.status();
@@ -24,24 +23,17 @@ pub fn container(world: &World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         || "~/Pictures, ~/Videos /gearbox".to_string(),
         |folder| short_path(&folder.display().to_string(), 34),
     );
-    ShelfContainer::tabbed(
-        cid(P, "root"),
-        "Capture",
-        "record",
-        vec![
-            Tab::new(cid(P, "capture"), "Capture", "record").pods(vec![
-                Pod::new(pid(P, "capture", 0))
-                    .with_readout("status", status)
-                    .with_readout("last", last)
-                    .with_readout("folder", folder)
-                    .with_readout("formats", "EXR + PNG, HDR10 HEVC video")
-                    .with_button("Screenshot", ctx.accent)
-                    .with_button(if recording { "Stop recording" } else { "Record video" }, ctx.accent)
-                    .with_button("Choose folder…", ctx.accent)
-                    .with_button("Default folders", ctx.accent),
-            ]),
-        ],
-    )
+    Tab::new(cid(P, "capture"), "Capture", "record").pods(vec![
+        Pod::new(pid(P, "capture", 0))
+            .with_readout("status", status)
+            .with_readout("last", last)
+            .with_readout("folder", folder)
+            .with_readout("formats", "EXR + PNG, HDR10 HEVC video")
+            .with_button("Screenshot", ctx.accent)
+            .with_button(if recording { "Stop recording" } else { "Record video" }, ctx.accent)
+            .with_button("Choose folder…", ctx.accent)
+            .with_button("Default folders", ctx.accent),
+    ])
 }
 
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, _ctx: &PaneCtx) {
