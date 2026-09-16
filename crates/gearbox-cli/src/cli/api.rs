@@ -226,16 +226,21 @@ fn build_request(topic: &str, body: Option<&str>, type_name: Option<&str>) -> Re
 }
 
 pub(crate) fn print_env(ctx: &Ctx, env: &Env) {
+    println!("{}", render_env(ctx, env));
+}
+
+/// The same decoding `print_env` prints, as a string — for callers that
+/// redraw it in place (`subscribe --inline`) instead of just printing it.
+pub(crate) fn render_env(ctx: &Ctx, env: &Env) -> String {
     match wire_json::env_to_json(env) {
         Ok(v) => {
-            let text = if ctx.json {
+            if ctx.json {
                 serde_json::to_string(&v).unwrap_or_default()
             } else {
-                serde_json::to_string_pretty(&v).unwrap_or_default()
-            };
-            println!("{text}");
+                crate::out::pretty_json(&v)
+            }
         }
-        Err(err) => println!(
+        Err(err) => format!(
             "{{\"type_hash\": {}, \"bytes\": {}, \"error\": \"{err}\"}}",
             env.type_hash(),
             env.wire().len()

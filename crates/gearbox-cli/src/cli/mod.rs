@@ -7,6 +7,7 @@ pub mod env;
 pub mod extension;
 pub mod instance;
 pub mod machine;
+pub mod peer;
 pub mod run;
 pub mod scene;
 pub mod select;

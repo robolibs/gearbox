@@ -155,10 +155,7 @@ impl Ctx {
     /// Print JSON when asked, otherwise run the human printer.
     pub fn emit(&self, json: impl FnOnce() -> Value, human: impl FnOnce()) {
         if self.json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json()).unwrap_or_default()
-            );
+            println!("{}", crate::out::pretty_json(&json()));
         } else if !self.quiet {
             human();
         }

@@ -227,6 +227,42 @@ fn subscribe_decodes_a_topic_by_full_path() {
     assert_ne!(code, 0, "bare word without a leading / should be rejected: {err}");
 }
 
+/// A path with no owner of its own but live topics under it lists those
+/// instead of erroring — `/machines/oxbo` isn't a topic, `/machines/oxbo/state`
+/// is. A path with nothing under it either way still errors.
+#[test]
+fn subscribe_on_a_prefix_lists_its_children() {
+    let env = Env::start(&["oxbo"]);
+    let (code, out, err) = env.gearbox(&["subscribe", "/machines/oxbo", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let topics: Vec<&str> = v.as_array().unwrap().iter()
+        .map(|row| row["topic"].as_str().unwrap())
+        .collect();
+    assert!(topics.contains(&"/machines/oxbo/state"), "{out}");
+    assert!(topics.contains(&"/machines/oxbo/odom"), "{out}");
+    assert!(topics.iter().all(|t| t.starts_with("/machines/oxbo/")), "{out}");
+
+    let (code, _, err) = env.gearbox(&["subscribe", "/machines/nosuchmachine", "-n", "1"]);
+    assert_ne!(code, 0, "a prefix with nothing under it should still error: {err}");
+}
+
+/// `peer list`/`peer sub` are the general-purpose form of the same
+/// directory listing and streaming `subscribe` already does for one topic.
+#[test]
+fn peer_list_and_sub() {
+    let env = Env::start(&["oxbo"]);
+    let (code, out, err) = env.gearbox(&["peer", "list", "/machines/oxbo", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(!v.as_array().unwrap().is_empty(), "{out}");
+
+    let (code, out, err) = env.gearbox(&["peer", "sub", "/machines/oxbo/state", "-n", "1"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v.get("odom").is_some(), "{out}");
+}
+
 /// `--did` dials the machine's own endpoint directly (agentio's `by_id`
 /// escape hatch), skipping the host's directory entirely — real proof it
 /// works, not just that it compiles.
