@@ -551,7 +551,10 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                         panel.gamepad = None;
                     }
                     ui_drive.stop_once(&block.key);
-                } else if !panel.gamepad_on(&block.key) && resp.sliders.iter().any(|s| s.changed) {
+                } else if !panel.gamepad_on(&block.key)
+                    && !panel.keyboard_on(&block.key)
+                    && resp.sliders.iter().any(|s| s.changed)
+                {
                     let speed = resp.sliders.first().map(|s| s.value).unwrap_or(0.0);
                     let yaw = resp.sliders.get(1).map(|s| s.value).unwrap_or(0.0);
                     panel.holding.insert(block.key.clone());

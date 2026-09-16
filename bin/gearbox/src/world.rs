@@ -415,13 +415,20 @@ fn chase_camera_control(
 /// How much of the view distance a second of a held key moves the view.
 const KEY_PAN_PER_SEC: f32 = 0.4;
 
-/// The lowest the camera's focus may sit, and the flattest it may look, with
-/// the view held above the ground. Three degrees above level keeps the camera
-/// itself above a focus that is on the ground, whatever the distance.
-const CAMERA_FLOOR_M: f32 = 0.0;
+/// How far above the actual terrain surface (hills included, not just
+/// `y=0`) the camera's eye is kept. Three degrees above level keeps the
+/// camera itself above a focus that is on the ground, whatever the distance.
+const CAMERA_TERRAIN_CLEARANCE_M: f32 = 0.5;
 const CAMERA_MIN_ELEVATION: f32 = 3.0_f32.to_radians();
 
-/// Bounds the camera after controls and fly-to updates; Alt bypasses only the floor.
+/// Bounds the camera after controls and fly-to updates; Alt bypasses only the
+/// floor. The floor tracks the terrain surface under the camera's eye (not
+/// `focus`, and not a flat `y=0`), so flying over a hill rises with it and
+/// looking straight down stops right at the ground instead of clipping
+/// through — `apply_rig` puts the eye at `focus + distance` along
+/// `yaw`/`elevation`, so the same offset is used here to find what's
+/// actually under the eye before solving back for the `focus.y` that keeps
+/// it clear.
 pub(crate) fn chase_camera_floor(
     keys: Res<ButtonInput<KeyCode>>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
@@ -433,8 +440,16 @@ pub(crate) fn chase_camera_floor(
         cam.focus.x = cam.focus.x.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
         cam.focus.z = cam.focus.z.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
         if !below_ground {
-            cam.focus.y = cam.focus.y.max(CAMERA_FLOOR_M);
             cam.elevation = cam.elevation.max(CAMERA_MIN_ELEVATION);
+            let horizontal = cam.elevation.cos();
+            let rise = cam.distance * cam.elevation.sin();
+            let eye_x = cam.focus.x + cam.distance * cam.yaw.sin() * horizontal;
+            let eye_z = cam.focus.z + cam.distance * cam.yaw.cos() * horizontal;
+            let ground = terrain_height_m(eye_x, eye_z);
+            cam.focus.y = cam
+                .focus
+                .y
+                .max(ground + CAMERA_TERRAIN_CLEARANCE_M - rise);
         }
         let rise = cam.distance * cam.elevation.sin().max(0.0);
         if rise > CAMERA_MAX_HEIGHT_M {
@@ -448,15 +463,23 @@ pub(crate) fn chase_camera_floor(
     }
 }
 
-/// W/S fly the camera along its view: they close in on the focus and, once
-/// at the nearest distance, carry the focus along and drop any follow.
-/// A/D slide over the ground, Q/E go down and up, Shift speeds all of it.
+/// W/S fly the camera forward/back along its view, translating it rather
+/// than zooming — distance to focus is untouched, so this never changes
+/// perspective, only position. A/D slide over the ground, Q/E go down and
+/// up, Shift speeds all of it. W/S drop any follow, since a followed
+/// target's position would otherwise fight the translation every frame.
+/// Yields WASD to `viewer::drive::keyboard` while it's driving the selected
+/// machine, so the keys don't do both at once.
 fn chase_camera_keys(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    panel: Res<crate::viewer::drive::MachinePanel>,
     mut follow: ResMut<crate::viewer::state::FollowTarget>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
+    if panel.keyboard.is_some() {
+        return;
+    }
     let axis =
         |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i8 - keys.pressed(neg) as i8) as f32;
     // `forward` below points from the focus back to the camera, so W is the
@@ -472,6 +495,9 @@ fn chase_camera_keys(
     } else {
         1.0
     };
+    if ahead != 0.0 {
+        follow.set(None);
+    }
     for (mut cam, mut transform) in &mut cameras {
         let forward = Vec3::new(cam.yaw.sin(), 0.0, cam.yaw.cos());
         let right = Vec3::new(forward.z, 0.0, -forward.x);
@@ -481,13 +507,7 @@ fn chase_camera_keys(
             forward.z * cam.elevation.cos(),
         );
         let speed = cam.distance.max(2.0) * KEY_PAN_PER_SEC * boost * time.delta_secs();
-        let reach = cam.distance + ahead * speed;
-        cam.distance = reach.max(cam.min_distance);
-        let carried = reach - cam.distance;
-        if carried < 0.0 {
-            follow.set(None);
-        }
-        cam.focus += offset * carried + (right * aside + Vec3::Y * up) * speed;
+        cam.focus += offset * ahead * speed + (right * aside + Vec3::Y * up) * speed;
         apply_rig(&cam, &mut transform);
     }
 }

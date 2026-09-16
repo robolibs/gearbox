@@ -1,6 +1,7 @@
 //! Viewer ownership and the Bevy adapter for layered operator controls.
 
 mod gamepad;
+mod keyboard;
 
 use crate::controller::ControllerKey;
 use bevy::prelude::*;
@@ -16,7 +17,7 @@ impl Plugin for DrivePlugin {
             .insert_resource(ControlSettings::load())
             .add_systems(
                 Update,
-                (gamepad::route, gamepad::camera)
+                (gamepad::route, keyboard::route, gamepad::camera)
                     .chain()
                     .before(crate::controller::apply_ui_drive)
                     .after(crate::viewer::systems::pick_on_click),
@@ -31,6 +32,7 @@ pub(crate) struct HostInputFocus(pub bool);
 pub struct MachinePanel {
     pub holding: HashSet<ControllerKey>,
     pub gamepad: Option<ControllerKey>,
+    pub keyboard: Option<ControllerKey>,
     pub folded: HashSet<String>,
     pub layer: gearbox_controls::Layer,
     pub deadman_active: bool,
@@ -43,6 +45,10 @@ impl MachinePanel {
 
     pub fn gamepad_on(&self, key: &ControllerKey) -> bool {
         self.gamepad.as_ref() == Some(key)
+    }
+
+    pub fn keyboard_on(&self, key: &ControllerKey) -> bool {
+        self.keyboard.as_ref() == Some(key)
     }
 }
 
