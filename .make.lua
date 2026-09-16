@@ -11,17 +11,44 @@
 
 local make = oslo.make
 
-local DISPLAY_SH = "/home/bresilla/data/code/robolibs/.display.sh"
-
--- `run`/`sim` re-detect the Wayland socket and NVIDIA prime-offload vars fresh, every
+-- `run`/`sim` re-detect the Wayland socket and (real) NVIDIA presence fresh, every
 -- launch, instead of trusting whatever BACKEND/DISPLAY a shell happened to inherit — a
 -- stale BACKEND=x11 (no live Wayland socket seen the first time this shell started, or a
--- multiplexer/SSH session with a stubborn old DISPLAY) silently falls back to XWayland with
--- no NVIDIA render-offload, which is dramatically slower than the native Wayland + Vulkan
--- path. `. DISPLAY_SH` is the same detection `.env.lua` runs on `cd`; unsetting first forces
--- it to run again rather than early-out on an already-set value.
+-- multiplexer/SSH session with a stubborn old DISPLAY) silently falls back to XWayland,
+-- which is dramatically slower than the native Wayland + Vulkan path.
+--
+-- Self-contained on purpose, not sourced from the shared `.display.sh`: that script's
+-- NVIDIA check unconditionally exported `__GLX_VENDOR_LIBRARY_NAME=nvidia` and
+-- `__VK_LAYER_NV_optimus=NVIDIA_only` regardless of whether NVIDIA hardware was actually
+-- present (its detection function always returned success — a bare `if` with no `else`
+-- exits 0 whether or not the test matched), and never actually switched RUN_WITH to the
+-- Intel/Mesa wrapper on a machine without NVIDIA either. Forcing the NVIDIA vendor on a
+-- box with no NVIDIA GPU is exactly the "crazy slow" symptom this must never reproduce, so
+-- the check below only forces anything NVIDIA-specific when `/proc/driver/nvidia/version`
+-- genuinely exists.
 local function fresh_display_env(cmd)
-  return ("unset BACKEND RUN_WITH WAYLAND_DISPLAY DISPLAY; . %s; %s"):format(DISPLAY_SH, cmd)
+  return ([[
+unset BACKEND RUN_WITH WAYLAND_DISPLAY DISPLAY __NV_PRIME_RENDER_OFFLOAD __NV_PRIME_RENDER_OFFLOAD_PROVIDER __GLX_VENDOR_LIBRARY_NAME __VK_LAYER_NV_optimus
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+sock="$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}"
+if [ -S "$sock" ]; then
+  export BACKEND=wayland
+  export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+else
+  export BACKEND=x11
+  export DISPLAY="${DISPLAY:-:1}"
+fi
+if [ -r /proc/driver/nvidia/version ]; then
+  export __NV_PRIME_RENDER_OFFLOAD=1
+  export __NV_PRIME_RENDER_OFFLOAD_PROVIDER=NVIDIA-G0
+  export __GLX_VENDOR_LIBRARY_NAME=nvidia
+  export __VK_LAYER_NV_optimus=NVIDIA_only
+  export RUN_WITH=nixVulkan
+else
+  export RUN_WITH=nixVulkanIntel
+fi
+%s
+]]):format(cmd)
 end
 
 local function need(tool, why)
