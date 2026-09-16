@@ -103,10 +103,9 @@ fn main() {
             for m in client.machines().expect("machines") {
                 let p = m.props();
                 println!(
-                    "{:12} kind {:10} id {:12} {}",
-                    m.namespace(),
+                    "{:12} kind {:10} {}",
+                    m.machine_id(),
                     p.get("kind").unwrap_or_default(),
-                    p.get("machine_id").unwrap_or_default(),
                     m.did()
                 );
             }

@@ -65,11 +65,11 @@ impl FakeHost {
                 let mut last_state = Instant::now();
                 while !stop.load(Ordering::Relaxed) {
                     let spawn = serve_once(&mut host, &scene, &mut agents);
-                    for ns in spawn {
-                        if agents.iter().any(|m| m.agent.namespace() == ns) {
+                    for machine_id in spawn {
+                        if agents.iter().any(|m| m.agent.machine_id() == machine_id) {
                             continue;
                         }
-                        let mut cfg = MachineConfig::new(&instance, &ns)
+                        let mut cfg = MachineConfig::new(&instance, &machine_id)
                             .with_cmd_vel("drive", "builtin:ackermann_cmd_vel")
                             .with_minimal_links();
                         cfg.ephemeral = true;
@@ -82,8 +82,8 @@ impl FakeHost {
                                     s.objects
                                         .iter()
                                         .find(|o| {
-                                            o.props().get("namespace").as_deref()
-                                                == Some(ns.as_str())
+                                            o.props().get("machine_id").as_deref()
+                                                == Some(machine_id.as_str())
                                         })
                                         .map(|o| {
                                             (
@@ -218,8 +218,8 @@ fn harvest_touched_bales(
     }
 }
 
-/// Serve one round of host requests. Returns namespaces of machine loads
-/// that arrived, so the caller can create their agents.
+/// Serve one round of host requests. Returns ids of machine loads that
+/// arrived, so the caller can create their agents.
 fn serve_once(
     host: &mut HostBus,
     scene: &Arc<Mutex<FakeScene>>,
@@ -306,8 +306,8 @@ fn serve_once(
                 .with_prop("path", &req.path().unwrap_or_default()),
         );
         if req.is_machine() {
-            if let Some(ns) = req.namespace() {
-                spawn.push(ns);
+            if let Some(machine_id) = req.machine_id() {
+                spawn.push(machine_id);
             }
         } else {
             // A real prop settles on the terrain first; here it lands at once.
@@ -376,7 +376,7 @@ fn serve_once(
 fn serve_fake_attachments(host: &mut HostBus, agents: &mut [FakeMachine]) {
     let names: Vec<String> = agents
         .iter()
-        .map(|m| m.agent.namespace().to_string())
+        .map(|m| m.agent.machine_id().to_string())
         .collect();
     let mut events = Vec::new();
     for i in 0..agents.len() {

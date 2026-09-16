@@ -48,7 +48,7 @@ fn machine_claim_drive_and_busy() {
 
     let machines = a.machines().expect("machines list");
     assert_eq!(machines.len(), 1);
-    assert_eq!(machines[0].namespace(), "oxbo");
+    assert_eq!(machines[0].machine_id(), "oxbo");
     assert!(machines[0].did().starts_with("did:key:"));
 
     let mut oxbo = a.machine("oxbo");

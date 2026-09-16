@@ -179,7 +179,7 @@ fn list(ctx: &Ctx, kind: Option<String>) -> Result<()> {
                     format!("{:.2}", o.z),
                     format!("{:.1}", o.yaw_deg),
                     p.get("path")
-                        .or_else(|| p.get("namespace"))
+                        .or_else(|| p.get("machine_id"))
                         .unwrap_or_default(),
                 ]);
             }
@@ -192,7 +192,7 @@ fn list(ctx: &Ctx, kind: Option<String>) -> Result<()> {
 fn pose(ctx: &Ctx, id: &str, watch: bool) -> Result<()> {
     let client = ctx.client()?;
     let machines = client.machines()?;
-    if machines.iter().any(|m| m.namespace() == id) {
+    if machines.iter().any(|m| m.machine_id() == id) {
         let mc = client.machine(id);
         let mut sub = mc.state()?;
         loop {
@@ -346,7 +346,7 @@ fn tree(ctx: &Ctx) -> Result<()> {
     let mut attached: std::collections::HashSet<String> = Default::default();
     let mut machine_links: Vec<(String, Vec<gearbox_api::LinkRecord>)> = Vec::new();
     for m in &machines {
-        let ns = m.namespace();
+        let ns = m.machine_id();
         let mc = client.machine(&ns);
         if let Ok(info) = mc.info()
             && !info

@@ -134,7 +134,7 @@ fn list(ctx: &Ctx) -> Result<()> {
     let pending = paths::read_allow_file();
     let mut sessions = Vec::new();
     for m in client.machines()? {
-        let ns = m.namespace();
+        let ns = m.machine_id();
         if let Ok(s) = client.machine(&ns).session() {
             sessions.push((ns, s));
         }

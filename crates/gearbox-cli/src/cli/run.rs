@@ -123,7 +123,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             let ns = default_id(path);
             let req = UsdLoad::new(&ns, &usd_path(path))
                 .category(category::MACHINE)
-                .with_prop("namespace", &ns);
+                .with_prop("machine_id", &ns);
             check(client.load(&req)?, &format!("load machine {ns}"))?;
         }
     }

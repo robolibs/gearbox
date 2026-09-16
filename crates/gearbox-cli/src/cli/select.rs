@@ -86,7 +86,7 @@ fn set(ctx: &Ctx, kind: u32, id: &str) -> Result<()> {
     let client = ctx.client()?;
     let exists = client.list(object_kind::ANY)?.iter().any(|o| {
         o.props().get("id").as_deref() == Some(id)
-            || o.props().get("namespace").as_deref() == Some(id)
+            || o.props().get("machine_id").as_deref() == Some(id)
     });
     if !exists {
         return Err(CliError::new(1, format!("no `{id}` in the scene")));

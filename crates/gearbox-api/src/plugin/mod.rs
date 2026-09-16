@@ -84,7 +84,7 @@ impl GearboxBus {
 
     pub fn machine_refs(&self) -> Vec<MachineRef> {
         let mut refs: Vec<_> = self.machines.values().map(|m| m.machine_ref()).collect();
-        refs.sort_by_key(|r| r.namespace());
+        refs.sort_by_key(|r| r.machine_id());
         refs
     }
 

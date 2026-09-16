@@ -100,7 +100,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 .yaw(place.yaw)
                 .category(cat_code);
             if cat_code == category::MACHINE {
-                req = req.with_prop("namespace", &id);
+                req = req.with_prop("machine_id", &id);
             }
             for (n, chunk) in variant.chunks(3).enumerate() {
                 if let [prim, set, opt] = chunk {
@@ -127,7 +127,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 .at(x, y, z)
                 .yaw(place.yaw)
                 .category(category::MACHINE)
-                .with_prop("namespace", &ns);
+                .with_prop("machine_id", &ns);
             for (n, chunk) in variant.chunks(3).enumerate() {
                 if let [prim, set, opt] = chunk {
                     req = req.with_prop(&format!("variant.{n}"), &format!("{prim}|{set}|{opt}"));
@@ -207,8 +207,8 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 .at(x, y, z)
                 .yaw(place.yaw)
                 .category(cat);
-            if let Some(ns) = props.get("namespace") {
-                req = req.with_prop("namespace", &ns);
+            if let Some(machine_id) = props.get("machine_id") {
+                req = req.with_prop("machine_id", &machine_id);
             }
             check(client.load(&req)?, &format!("move {id}"))?;
             ctx.done(
@@ -226,7 +226,7 @@ pub fn wait_for_machine(ctx: &Ctx, ns: &str, timeout: Duration) -> Result<String
     let deadline = Instant::now() + timeout;
     loop {
         for m in client.machines()? {
-            if m.namespace() == ns || m.namespace().starts_with(&format!("{ns}_")) {
+            if m.machine_id() == ns || m.machine_id().starts_with(&format!("{ns}_")) {
                 return Ok(m.did());
             }
         }
@@ -316,7 +316,7 @@ pub fn apply_manifest(ctx: &Ctx, file: &str) -> Result<()> {
                     .at(x, y, z)
                     .yaw(e.yaw)
                     .category(category::MACHINE)
-                    .with_prop("namespace", &id);
+                    .with_prop("machine_id", &id);
                 check(client.load(&req)?, &format!("load machine {id}"))?;
                 wait_for_machine(ctx, &id, Duration::from_secs(30))?;
             }

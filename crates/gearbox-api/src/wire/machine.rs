@@ -18,8 +18,8 @@ impl MachineInfo {
         Props::from_bytes(&self.props)
     }
 
-    pub fn namespace(&self) -> String {
-        self.props().get("namespace").unwrap_or_default()
+    pub fn machine_id(&self) -> String {
+        self.props().get("machine_id").unwrap_or_default()
     }
 
     /// Controller instances with the given command interface.

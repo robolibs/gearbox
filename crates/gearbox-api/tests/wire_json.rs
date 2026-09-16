@@ -20,7 +20,7 @@ fn every_type_round_trips_through_json() {
 fn flat_keys_become_props_and_names_are_short_or_long() {
     let env = env_from_json(
         "usd_load",
-        &json!({ "id": "bale_1", "path": "markers/bale.usdz", "x": 1.5, "category": "machine", "namespace": "oxbo" }),
+        &json!({ "id": "bale_1", "path": "markers/bale.usdz", "x": 1.5, "category": "machine", "machine_id": "oxbo" }),
     )
     .expect("usd_load from json");
     let load: UsdLoad = gearbox_api::unpack(env.type_hash(), env.wire()).expect("decode");
@@ -28,7 +28,7 @@ fn flat_keys_become_props_and_names_are_short_or_long() {
     assert_eq!(load.path().as_deref(), Some("markers/bale.usdz"));
     assert_eq!(load.x, 1.5);
     assert_eq!(load.category, category::MACHINE);
-    assert_eq!(load.namespace().as_deref(), Some("oxbo"));
+    assert_eq!(load.machine_id().as_deref(), Some("oxbo"));
 
     let back = env_to_json(&pack(&load)).expect("to json");
     assert_eq!(back["props"]["id"], "bale_1");

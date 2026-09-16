@@ -364,7 +364,7 @@ pub struct ControllerSpec {
     pub instance: String,
     pub enabled: bool,
     pub controller_type: String,
-    pub namespace: String,
+    pub machine_id: String,
     pub namespace_policy: String,
     pub update_rate_hz: f32,
     pub command_interface: Option<String>,
@@ -446,14 +446,14 @@ pub fn discover_machines_from_stage(
             .unwrap_or_else(|| "prim_path".to_string());
         let id = read_token(&stage, &prim, "gearbox:machine:id")
             .unwrap_or_else(|| derive_machine_id(&prim_path));
-        let namespace_default = id.clone();
+        let machine_id_default = id.clone();
 
         let machine_prim = prim.as_str();
         let controllers = discover_controllers(
             &stage,
             &prim,
             &api_schemas,
-            &namespace_default,
+            &machine_id_default,
             machine_prim,
         );
         let body = read_rel_first(&stage, &prim, "gearbox:machine:body")
@@ -633,7 +633,7 @@ fn append_isaac_compat_machines(
                 instance: "drive".to_string(),
                 enabled: true,
                 controller_type: "builtin:ackermann_cmd_vel".to_string(),
-                namespace: id,
+                machine_id: id,
                 namespace_policy: "machine_id".to_string(),
                 update_rate_hz: 60.0,
                 command_interface: Some("cmd_vel".to_string()),
@@ -907,11 +907,11 @@ pub fn log_discovered_machines(label: &str, machines: &[MachineInstanceSpec]) {
         );
         for controller in &machine.controllers {
             info!(
-                "gearbox-control:   controller:{} type={} enabled={} ns={} target={:?} powered_wheel_joints={} steering_joints={} drive_wheel_overrides={}",
+                "gearbox-control:   controller:{} type={} enabled={} machine_id={} target={:?} powered_wheel_joints={} steering_joints={} drive_wheel_overrides={}",
                 controller.instance,
                 controller.controller_type,
                 controller.enabled,
-                controller.namespace,
+                controller.machine_id,
                 controller.target,
                 machine.powered_wheel_joints.len(),
                 machine.steering_joints.len(),
@@ -992,7 +992,6 @@ fn reconcile_external_process_controllers(
             cmd.args(&controller.args)
                 .env("GEARBOX_MACHINE_ID", &machine.id)
                 .env("GEARBOX_CONTROLLER", &controller.instance)
-                .env("GEARBOX_NAMESPACE", &controller.namespace)
                 .env(
                     "GEARBOX_TRANSPORT",
                     controller.transport.as_deref().unwrap_or("agentio"),
@@ -2047,14 +2046,14 @@ fn rediscover_swapped_machines(
         let Some(first) = old.first() else {
             continue;
         };
-        // A runtime namespace renamed the machine at load; keep it.
+        // A runtime rename gave the machine a chosen id at load; keep it.
         for machine in &mut machines {
             if let Some(before) = old.iter().find(|m| m.prim_path == machine.prim_path)
                 && before.id != machine.id
             {
                 machine.id = before.id.clone();
                 for controller in &mut machine.controllers {
-                    controller.namespace = before.id.clone();
+                    controller.machine_id = before.id.clone();
                 }
             }
         }
@@ -3532,7 +3531,7 @@ fn discover_controllers(
     stage: &openusd::usd::Stage,
     prim: &SdfPath,
     api_schemas: &[String],
-    namespace_default: &str,
+    machine_id_default: &str,
     machine_prim: &str,
 ) -> Vec<ControllerSpec> {
     let mut instances = HashSet::new();
@@ -3558,14 +3557,14 @@ fn discover_controllers(
             let prefix = format!("gearbox:controller:{instance}:");
             let namespace_policy = read_token(stage, prim, &(prefix.clone() + "namespacePolicy"))
                 .unwrap_or_else(|| "machine_id".to_string());
-            let namespace = read_string(stage, prim, &(prefix.clone() + "namespace"))
-                .unwrap_or_else(|| namespace_default.to_string());
+            let machine_id = read_string(stage, prim, &(prefix.clone() + "namespace"))
+                .unwrap_or_else(|| machine_id_default.to_string());
             ControllerSpec {
                 instance,
                 enabled: read_bool(stage, prim, &(prefix.clone() + "enabled")).unwrap_or(true),
                 controller_type: read_token(stage, prim, &(prefix.clone() + "type"))
                     .unwrap_or_else(|| "builtin:unknown".to_string()),
-                namespace,
+                machine_id,
                 namespace_policy,
                 update_rate_hz: read_float(stage, prim, &(prefix.clone() + "updateRateHz"))
                     .unwrap_or(60.0),
@@ -3874,7 +3873,7 @@ mod tests {
             .expect("tractor should author a drive controller");
         assert!(drive.enabled);
         assert_eq!(drive.controller_type, "builtin:ackermann_cmd_vel");
-        assert_eq!(drive.namespace, "robot");
+        assert_eq!(drive.machine_id, "robot");
         assert_eq!(drive.command_interface.as_deref(), Some("cmd_vel"));
         assert_eq!(drive.steering_geometry.as_deref(), Some("parallel"));
         assert_eq!(
@@ -4435,7 +4434,7 @@ def Xform "World"
             let id = format!("tractor_{idx:02}");
             let root = format!("/World/Tractor_{idx:02}");
             assert_eq!(machine.id, id);
-            assert_eq!(machine.controllers[0].namespace, id);
+            assert_eq!(machine.controllers[0].machine_id, id);
             assert_eq!(machine.controllers[0].instance, "drive");
             assert!(
                 machine
@@ -4475,9 +4474,9 @@ fn sync_machine_agents(
             .controllers
             .iter()
             .find(|c| c.enabled && c.command_interface.as_deref() == Some("cmd_vel"));
-        let namespace = drive
-            .map(|d| d.namespace.clone())
-            .or_else(|| machine.controllers.first().map(|c| c.namespace.clone()))
+        let machine_id = drive
+            .map(|d| d.machine_id.clone())
+            .or_else(|| machine.controllers.first().map(|c| c.machine_id.clone()))
             .unwrap_or_else(|| machine.id.clone());
         let instance = drive.map(|d| d.instance.clone()).unwrap_or_default();
         if !machine.links.is_valid() {
@@ -4488,7 +4487,7 @@ fn sync_machine_agents(
                         machine.id
                     );
                 }
-                let mut event = SceneEvent::new(event_kind::MACHINE_REJECTED, &namespace)
+                let mut event = SceneEvent::new(event_kind::MACHINE_REJECTED, &machine_id)
                     .with_prop("machine_id", &machine.id);
                 for (n, reason) in machine.links.errors.iter().enumerate() {
                     event = event.with_prop(&format!("reason.{n}"), reason);
@@ -4503,8 +4502,7 @@ fn sync_machine_agents(
             }
         }
         let host = &bus.host.config;
-        let mut config = MachineConfig::new(&host.instance, &namespace);
-        config.machine_id = machine.id.clone();
+        let mut config = MachineConfig::new(&host.instance, &machine_id);
         config.kind = machine.kind.clone().unwrap_or_default();
         config.links = link_descs(&machine.links);
         config.links_derived = machine.links.derived;
@@ -4523,7 +4521,7 @@ fn sync_machine_agents(
             })
             .collect();
         let key = ControllerKey::new(scene_root, &machine.id, &instance);
-        wanted.insert(namespace.clone(), (key, config));
+        wanted.insert(machine_id.clone(), (key, config));
     }
 
     let stale: Vec<String> = bus

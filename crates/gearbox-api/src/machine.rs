@@ -22,7 +22,6 @@ pub struct ControllerDesc {
 #[derive(Debug, Clone)]
 pub struct MachineConfig {
     pub instance: String,
-    pub namespace: String,
     pub machine_id: String,
     pub kind: String,
     pub controllers: Vec<ControllerDesc>,
@@ -77,11 +76,10 @@ impl LinkDesc {
 }
 
 impl MachineConfig {
-    pub fn new(instance: &str, namespace: &str) -> Self {
+    pub fn new(instance: &str, machine_id: &str) -> Self {
         Self {
             instance: instance.to_string(),
-            namespace: namespace.to_string(),
-            machine_id: namespace.to_string(),
+            machine_id: machine_id.to_string(),
             kind: String::new(),
             controllers: Vec::new(),
             links: Vec::new(),
@@ -174,10 +172,10 @@ impl MachineAgent {
         let identity = if config.ephemeral {
             IdentitySource::Random
         } else {
-            IdentitySource::Name(format!("gearbox/{}/{}", config.instance, config.namespace))
+            IdentitySource::Name(format!("gearbox/{}/{}", config.instance, config.machine_id))
         };
         let mut builder = Agent::builder()
-            .name(format!("{}/{}", config.instance, config.namespace))
+            .name(format!("{}/{}", config.instance, config.machine_id))
             .identity(identity)
             .bootstrap([host])
             .directory(DirectoryMode::FrontDoor(host))
@@ -190,8 +188,8 @@ impl MachineAgent {
             builder = builder.no_relay();
         }
         let agent = builder.build()?;
-        let ns = config.namespace.clone();
-        let t = |leaf: &str| machine_topic(&ns, leaf);
+        let machine_id = config.machine_id.clone();
+        let t = |leaf: &str| machine_topic(&machine_id, leaf);
         Ok(Self {
             info: agent.req_server(&t(topics::MACHINE_INFO))?,
             claim: agent.req_server(&t(topics::MACHINE_CLAIM))?,
@@ -232,17 +230,12 @@ impl MachineAgent {
         crate::registry::endpoint_addr_hex(&self.agent.endpoint_addr())
     }
 
-    pub fn namespace(&self) -> &str {
-        &self.config.namespace
+    pub fn machine_id(&self) -> &str {
+        &self.config.machine_id
     }
 
     pub fn machine_ref(&self) -> MachineRef {
-        let mut r = MachineRef::new(
-            &self.config.namespace,
-            &self.did(),
-            &self.config.kind,
-            &self.config.machine_id,
-        );
+        let mut r = MachineRef::new(&self.did(), &self.config.kind, &self.config.machine_id);
         r.props = Props::from_bytes(&r.props)
             .with("addr", &self.addr_hex())
             .into_bytes();
@@ -251,7 +244,6 @@ impl MachineAgent {
 
     pub fn info(&self) -> MachineInfo {
         let mut props = Props::from_pairs(&[
-            ("namespace", self.config.namespace.as_str()),
             ("machine_id", self.config.machine_id.as_str()),
             ("kind", self.config.kind.as_str()),
             ("did", &self.did()),
@@ -322,7 +314,7 @@ impl MachineAgent {
             .cloned()
             .collect();
         serve_que(&mut self.links, |_: Ping| link_records_for(&all_links));
-        let master = self.config.namespace.clone();
+        let master = self.config.machine_id.clone();
         let tools = &self.tools;
         serve_que(&mut self.tools_q, |_: Ping| {
             tools.iter().map(|t| t.record(&master)).collect()

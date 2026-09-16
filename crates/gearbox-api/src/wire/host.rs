@@ -318,8 +318,8 @@ impl UsdLoad {
         self.props().get("path")
     }
 
-    pub fn namespace(&self) -> Option<String> {
-        self.props().get("namespace")
+    pub fn machine_id(&self) -> Option<String> {
+        self.props().get("machine_id")
     }
 
     pub fn nonce(&self) -> String {
@@ -468,15 +468,10 @@ pub struct MachineRef {
 }
 
 impl MachineRef {
-    pub fn new(namespace: &str, did: &str, kind: &str, machine_id: &str) -> Self {
+    pub fn new(did: &str, kind: &str, machine_id: &str) -> Self {
         Self {
-            props: Props::from_pairs(&[
-                ("namespace", namespace),
-                ("did", did),
-                ("kind", kind),
-                ("machine_id", machine_id),
-            ])
-            .into_bytes(),
+            props: Props::from_pairs(&[("did", did), ("kind", kind), ("machine_id", machine_id)])
+                .into_bytes(),
         }
     }
 
@@ -484,8 +479,8 @@ impl MachineRef {
         Props::from_bytes(&self.props)
     }
 
-    pub fn namespace(&self) -> String {
-        self.props().get("namespace").unwrap_or_default()
+    pub fn machine_id(&self) -> String {
+        self.props().get("machine_id").unwrap_or_default()
     }
 
     pub fn did(&self) -> String {

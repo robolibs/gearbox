@@ -43,7 +43,7 @@ struct InflightLoad {
     path: PathBuf,
     label: String,
     transform: Transform,
-    namespace: Option<String>,
+    machine_id: Option<String>,
     activate_physics_after_sync: bool,
     spawned: bool,
 }
@@ -222,7 +222,7 @@ fn queue_usd_load(
     path: PathBuf,
     label: String,
     transform: Transform,
-    namespace: Option<String>,
+    machine_id: Option<String>,
     activate_physics_after_sync: bool,
     variants: Vec<(String, String, String)>,
 ) {
@@ -269,7 +269,7 @@ fn queue_usd_load(
         path,
         label,
         transform,
-        namespace,
+        machine_id,
         activate_physics_after_sync,
         spawned: false,
     });
@@ -399,15 +399,15 @@ fn spawn_when_loaded(
             let mut event = SceneEvent::new(event_kind::LOADED, &entry.label)
                 .at(t.x, t.y, t.z)
                 .with_prop("path", &entry.path.to_string_lossy());
-            if let Some(ns) = entry.namespace.as_deref() {
-                event = event.with_prop("namespace", ns);
+            if let Some(machine_id) = entry.machine_id.as_deref() {
+                event = event.with_prop("machine_id", machine_id);
             }
             bus.publish_event(event);
         }
 
         if let Some(mut machines) = discovered_machines.take() {
-            if let Some(namespace) = entry.namespace.as_deref() {
-                apply_runtime_namespace(&mut machines, namespace);
+            if let Some(machine_id) = entry.machine_id.as_deref() {
+                apply_runtime_machine_id(&mut machines, machine_id);
             }
             log_discovered_machines(&entry.label, &machines);
             if !machines.is_empty() {
@@ -670,22 +670,22 @@ fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity>
     out
 }
 
-fn apply_runtime_namespace(
+fn apply_runtime_machine_id(
     machines: &mut [crate::controller::MachineInstanceSpec],
-    namespace: &str,
+    machine_id: &str,
 ) {
-    // One machine takes the namespace as is; several in one asset (a yard
-    // with a tractor and a trailer) get `<namespace>_<id>` each.
+    // One machine takes the id as is; several in one asset (a yard with a
+    // tractor and a trailer) get `<machine_id>_<id>` each.
     let several = machines.len() > 1;
     for machine in machines {
-        let ns = if several {
-            format!("{namespace}_{}", machine.id)
+        let id = if several {
+            format!("{machine_id}_{}", machine.id)
         } else {
-            namespace.to_string()
+            machine_id.to_string()
         };
-        machine.id = ns.clone();
+        machine.id = id.clone();
         for controller in &mut machine.controllers {
-            controller.namespace = ns.clone();
+            controller.machine_id = id.clone();
         }
     }
 }
@@ -716,10 +716,10 @@ fn drain_machine_load_queue(
         }
         let path = resolve_spawn_path(&usd_path);
         let props = req.props();
-        let namespace = req.namespace();
+        let machine_id = req.machine_id();
         let label = props
             .get("label")
-            .or_else(|| namespace.clone())
+            .or_else(|| machine_id.clone())
             .unwrap_or_else(|| {
                 path.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -738,7 +738,7 @@ fn drain_machine_load_queue(
             path,
             label,
             transform,
-            namespace,
+            machine_id,
             true,
             req.variants(),
         );
@@ -746,8 +746,8 @@ fn drain_machine_load_queue(
 }
 
 /// `clear usd ID` and machine loads with `remove`/`delete`: the id is the
-/// machine id, its namespace or the asset label. Physics goes first, then
-/// the scene root; the agent follows once the inventory entry is gone.
+/// machine id or the asset label. Physics goes first, then the scene root;
+/// the agent follows once the inventory entry is gone.
 fn drain_machine_delete_queue(
     mut commands: Commands,
     mut queue: ResMut<MachineDeleteQueue>,
@@ -764,7 +764,7 @@ fn drain_machine_delete_queue(
         let root = inventory
             .machines
             .iter()
-            .find(|m| m.id == id || m.controllers.iter().any(|c| c.namespace == id))
+            .find(|m| m.id == id || m.controllers.iter().any(|c| c.machine_id == id))
             .and_then(|m| m.scene_root)
             .or_else(|| {
                 loaded
@@ -807,9 +807,6 @@ fn refresh_scene_objects(
         let kind = match machine {
             Some(m) => {
                 props.set("machine_id", &m.id);
-                if let Some(c) = m.controllers.first() {
-                    props.set("namespace", &c.namespace);
-                }
                 if let Some(kind) = &m.kind {
                     props.set("kind", kind);
                 }

@@ -30,8 +30,8 @@ pub const MACHINE_TOOLS: &str = "tools";
 pub const MACHINE_TOOLS_ATTACH: &str = "tools/attach";
 pub const MACHINE_TOOLS_DETACH: &str = "tools/detach";
 
-/// Topics hosted by a machine's own agent, unique per namespace so the
+/// Topics hosted by a machine's own agent, unique per machine so the
 /// host directory holds one owner per topic.
-pub fn machine_topic(namespace: &str, leaf: &str) -> String {
-    format!("/machines/{namespace}/{leaf}")
+pub fn machine_topic(machine_id: &str, leaf: &str) -> String {
+    format!("/machines/{machine_id}/{leaf}")
 }
