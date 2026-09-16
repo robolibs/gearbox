@@ -15,8 +15,9 @@ use std::process::{Child, Command};
 
 use crate::usd_ext::StageExt;
 use bevy::prelude::*;
-use gearbox_api::datapod::robot::{Imu, Odom, Twist, TurnRadius, WheelEncoder, WheelEncoders};
-use gearbox_api::datapod::{Acceleration, Point, Quaternion, Velocity};
+use concord::{Enu, to_wgs_from_enu};
+use gearbox_api::datapod::robot::{Gnss, Imu, Odom, Twist, TurnRadius, WheelEncoder, WheelEncoders};
+use gearbox_api::datapod::{Acceleration, Geo, Point, Quaternion, Velocity};
 use gearbox_api::{
     ControllerDesc, GearboxBus, MachineAgent, MachineConfig, MachineState, Props, SceneEvent,
     clear_scope, event_kind,
@@ -4663,6 +4664,18 @@ fn publish_link_poses(
     }
 }
 
+/// Lat/lon/alt the world's local origin sits at. The sim has no notion of
+/// where on Earth it is, so GNSS needs a fixed datum to project the local
+/// ENU-style world frame (see the REP-103 remap above: world +X/+Y/+Z is
+/// already East/North/Up by construction) onto real WGS84 coordinates.
+/// Amsterdam, matching the default used elsewhere in this workspace for a
+/// stand-in geo reference.
+const WORLD_GEO_DATUM: Geo = Geo {
+    latitude: 52.370216,
+    longitude: 4.895168,
+    altitude: 0.0,
+};
+
 /// Publish each machine's state: from its drive controller when it has one,
 /// else straight from its body pose, so trailers report where they are.
 fn publish_machine_controller_states(
@@ -4886,6 +4899,15 @@ fn publish_machine_controller_states(
             },
             ros_rotation,
         ));
+
+        // GNSS: project the world-frame ENU point onto the fixed datum, and
+        // convert `heading_rad` (0 = East, counter-clockwise) to a compass
+        // bearing (0 = North, clockwise) since that's what a real GNSS
+        // receiver's heading output means.
+        let enu = Enu::new(ros_point.x, ros_point.y, ros_point.z, WORLD_GEO_DATUM);
+        let fix = to_wgs_from_enu(enu);
+        let bearing = (std::f64::consts::FRAC_PI_2 - heading).rem_euclid(std::f64::consts::TAU);
+        agent.publish_gnss(&Gnss::new(fix, bearing));
     }
 }
 

@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
-use datapod::robot::{Imu, Twist, TurnRadius, WheelEncoders};
+use datapod::robot::{Gnss, Imu, Twist, TurnRadius, WheelEncoders};
 use peerbus::{AnsServer, EndpointId, Publisher, ReqReplyToken, ReqServer};
 
 use crate::host::{serve_que, serve_req};
@@ -147,6 +147,7 @@ pub struct MachineAgent {
     tf_enabled: bool,
     encoders_pub: Registered<Publisher<Env>>,
     imu_pub: Registered<Publisher<Env>>,
+    gnss_pub: Registered<Publisher<Env>>,
     turn_radius_pub: Registered<Publisher<Env>>,
     attach: Registered<ReqServer<Env, Env>>,
     detach: Registered<ReqServer<Env, Env>>,
@@ -204,6 +205,7 @@ impl MachineAgent {
             tf_enabled: false,
             encoders_pub: agent.publish(&t(topics::MACHINE_ENCODERS))?,
             imu_pub: agent.publish(&t(topics::MACHINE_IMU))?,
+            gnss_pub: agent.publish(&t(topics::MACHINE_GNSS))?,
             turn_radius_pub: agent.publish(&t(topics::MACHINE_TURN_RADIUS))?,
             attach: agent.req_server(&t(topics::MACHINE_TOOLS_ATTACH))?,
             detach: agent.req_server(&t(topics::MACHINE_TOOLS_DETACH))?,
@@ -535,6 +537,10 @@ impl MachineAgent {
 
     pub fn publish_imu(&mut self, imu: &Imu) {
         let _ = self.imu_pub.send(&pack(imu));
+    }
+
+    pub fn publish_gnss(&mut self, gnss: &Gnss) {
+        let _ = self.gnss_pub.send(&pack(gnss));
     }
 
     pub fn publish_turn_radius(&mut self, turn_radius: &TurnRadius) {

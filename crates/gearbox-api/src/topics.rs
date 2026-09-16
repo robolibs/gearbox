@@ -26,6 +26,7 @@ pub const MACHINE_LINKS: &str = "links";
 pub const MACHINE_TF: &str = "tf";
 pub const MACHINE_ENCODERS: &str = "encoders";
 pub const MACHINE_IMU: &str = "imu";
+pub const MACHINE_GNSS: &str = "gnss";
 pub const MACHINE_TURN_RADIUS: &str = "turn_radius";
 pub const MACHINE_TOOLS: &str = "tools";
 pub const MACHINE_TOOLS_ATTACH: &str = "tools/attach";

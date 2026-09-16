@@ -39,6 +39,7 @@ serde_json.workspace = true
 agentio.workspace = true
 peerbus.workspace = true
 datapod.workspace = true
+concord.workspace = true
 gearbox-api = { workspace = true, features = ["bevy"] }
 
 # rapier3d-f64 — needed to spawn the static ground collider directly
