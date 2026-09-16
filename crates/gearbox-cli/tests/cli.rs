@@ -184,6 +184,22 @@ fn machine_move_and_busy() {
     assert_eq!(code, 0, "{err}");
 }
 
+/// `machine sub` builds `/machines/<ns>/<leaf>` and decodes it generically,
+/// with no per-topic code — this is what makes `state` show up correctly
+/// even though it's read through the untyped path, not `machine state`'s
+/// typed one.
+#[test]
+fn machine_sub_decodes_a_topic_by_leaf_name() {
+    let env = Env::start(&["oxbo"]);
+    let (code, out, err) = env.gearbox(&["machine", "sub", "state", "--ns", "oxbo", "-n", "1"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v.get("odom").is_some(), "{out}");
+
+    let (code, _, err) = env.gearbox(&["machine", "sub", "nosuchtopic", "--ns", "oxbo", "-n", "1"]);
+    assert_ne!(code, 0, "{err}");
+}
+
 #[test]
 fn no_instance_is_exit_3() {
     let dir = std::env::temp_dir().join(format!("gearbox-cli-empty-{}", std::process::id()));

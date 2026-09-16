@@ -107,6 +107,7 @@ Inspect and drive machines
 | `controllers [NS]` | Controller table with types and interfaces |
 | `links [OPTIONS] [NS]` | The link tree: names, roles, parents, static offsets |
 | `tf [OPTIONS] [NS]` | Stream link poses: switches the machine's tf on, prints, switches it off |
+| `sub [OPTIONS] <TOPIC>` | Stream any of the machine's topics by leaf name, e.g. `imu`, `turn_radius`, `encoders`, `odom`, `tf`, `state` |
 | `set-value [OPTIONS] <LINK> <NAME> <VALUE>` | Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8) |
 | `tools <COMMAND>` | Attachments: what hangs on a machine, attach and detach slaves |
 

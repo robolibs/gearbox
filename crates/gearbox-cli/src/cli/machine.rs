@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 use clap::{Args as ClapArgs, Subcommand};
 use gearbox_api::wire::json as wire_json;
 use gearbox_api::{
-    ClaimResponse, ControllerCommand, MachineClient, MachineInfo, MachineState, Props, code,
-    next_sample, pack,
+    ClaimResponse, ControllerCommand, Env, MachineClient, MachineInfo, MachineState, Props, code,
+    next_sample, pack, topics,
 };
 use serde_json::json;
 
+use super::api::print_env;
 use super::{check, parse_duration};
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -114,6 +115,17 @@ enum Cmd {
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
+    /// Stream any of the machine's topics by leaf name, e.g. `imu`,
+    /// `turn_radius`, `encoders`, `odom`, `tf`, `state`
+    Sub {
+        topic: String,
+        /// Machine namespace (default: the selection)
+        #[arg(long)]
+        ns: Option<String>,
+        /// Stop after this many messages
+        #[arg(short = 'n', long)]
+        count: Option<usize>,
+    },
     /// Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8)
     SetValue {
         link: String,
@@ -202,6 +214,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             rate,
             count,
         } => tf(ctx, ns, link, rate, count),
+        Cmd::Sub { topic, ns, count } => sub(ctx, ns, &topic, count),
         Cmd::SetValue {
             link,
             name,
@@ -956,6 +969,35 @@ fn tf(
     };
     let _ = mc.set_tf(false);
     result
+}
+
+/// Stream any topic under this machine's own namespace by leaf name — the
+/// same generic decode `gearbox api sub` uses, without the full topic path.
+fn sub(ctx: &Ctx, ns: Option<String>, topic: &str, count: Option<usize>) -> Result<()> {
+    let ns = ctx.machine_ns(ns)?;
+    let full_topic = topics::machine_topic(&ns, topic);
+    let client = ctx.client()?;
+    let mut sub = client.subscribe_env(&full_topic)?;
+    let stop_flag = install_ctrlc();
+    let mut seen = 0usize;
+    loop {
+        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        match sub.recv_timeout(Duration::from_millis(200)) {
+            Ok(Some(sample)) => {
+                let env = Env::new(sample.header().type_hash, sample.payload().to_vec());
+                print_env(ctx, &env);
+                seen += 1;
+                if count.is_some_and(|n| seen >= n) {
+                    return Ok(());
+                }
+            }
+            Ok(None) => continue,
+            Err(peerbus::Error::Lagged { .. }) => continue,
+            Err(err) => return Err(agentio::Error::from(err).into()),
+        }
+    }
 }
 
 fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {

@@ -253,7 +253,7 @@ fn build_request(topic: &str, body: Option<&str>, type_name: Option<&str>) -> Re
     wire_json::env_from_json(&name, &value).map_err(CliError::usage)
 }
 
-fn print_env(ctx: &Ctx, env: &Env) {
+pub(crate) fn print_env(ctx: &Ctx, env: &Env) {
     match wire_json::env_to_json(env) {
         Ok(v) => {
             let text = if ctx.json {
