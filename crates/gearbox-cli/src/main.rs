@@ -1,6 +1,6 @@
 //! `gearbox` — the command-line front door for the simulator.
 //!
-//! Twelve command groups; `main` only parses and dispatches. Anything that
+//! Eleven command groups; `main` only parses and dispatches. Anything that
 //! is not a core group runs `gearbox-<name>` from `PATH`, git-style.
 
 mod cli;
@@ -62,8 +62,6 @@ pub enum Command {
     Select(cli::select::Args),
     /// Inspect and drive machines
     Machine(cli::machine::Args),
-    /// Stream any topic, host-level or under a machine
-    Subscribe(cli::subscribe::Args),
     /// Browse the live topic directory, or stream one of its topics
     Peer(cli::peer::Args),
     /// Identities, allowlists, sessions
@@ -101,7 +99,6 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Scene(args) => cli::scene::run(&ctx, args),
         Command::Select(args) => cli::select::run(&ctx, args),
         Command::Machine(args) => cli::machine::run(&ctx, args),
-        Command::Subscribe(args) => cli::subscribe::run(&ctx, args),
         Command::Peer(args) => cli::peer::run(&ctx, args),
         Command::Access(args) => cli::access::run(&ctx, args),
         Command::Api(args) => cli::api::run(&ctx, args),

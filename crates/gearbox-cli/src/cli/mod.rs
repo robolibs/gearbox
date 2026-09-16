@@ -12,7 +12,6 @@ pub mod run;
 pub mod scene;
 pub mod select;
 pub mod spawn;
-pub mod subscribe;
 
 use gearbox_api::Status;
 

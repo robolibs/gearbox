@@ -207,33 +207,34 @@ fn machine_move_and_busy() {
     assert_eq!(code, 0, "{err}");
 }
 
-/// `subscribe` decodes any full topic path generically, with no per-topic
+/// `peer sub` decodes any full topic path generically, with no per-topic
 /// code — this is what makes `state` show up correctly even though it's
 /// read through the untyped path, not `machine state`'s typed one.
 #[test]
-fn subscribe_decodes_a_topic_by_full_path() {
+fn peer_sub_decodes_a_topic_by_full_path() {
     let env = Env::start(&["oxbo"]);
-    let (code, out, err) = env.gearbox(&["subscribe", "/machines/oxbo/state", "-n", "1"]);
+    let (code, out, err) = env.gearbox(&["peer", "sub", "/machines/oxbo/state", "-n", "1"]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("odom").is_some(), "{out}");
 
-    let (code, _, err) = env.gearbox(&["subscribe", "/machines/oxbo/nosuchtopic", "-n", "1"]);
+    let (code, _, err) = env.gearbox(&["peer", "sub", "/machines/oxbo/nosuchtopic", "-n", "1"]);
     assert_ne!(code, 0, "{err}");
 
     // Every topic is spelled as a topic — a bare word with no leading `/`
     // is rejected, not silently treated as a leaf.
-    let (code, _, err) = env.gearbox(&["subscribe", "state", "-n", "1"]);
+    let (code, _, err) = env.gearbox(&["peer", "sub", "state", "-n", "1"]);
     assert_ne!(code, 0, "bare word without a leading / should be rejected: {err}");
 }
 
-/// A path with no owner of its own but live topics under it lists those
-/// instead of erroring — `/machines/oxbo` isn't a topic, `/machines/oxbo/state`
-/// is. A path with nothing under it either way still errors.
+/// `peer list` returns the same topics directly; `peer sub` on a path with
+/// no owner of its own but live topics under it lists those instead of
+/// erroring — `/machines/oxbo` isn't a topic, `/machines/oxbo/state` is. A
+/// path with nothing under it either way still errors.
 #[test]
-fn subscribe_on_a_prefix_lists_its_children() {
+fn peer_list_and_sub_on_a_prefix_lists_its_children() {
     let env = Env::start(&["oxbo"]);
-    let (code, out, err) = env.gearbox(&["subscribe", "/machines/oxbo", "--json"]);
+    let (code, out, err) = env.gearbox(&["peer", "list", "/machines/oxbo", "--json"]);
     assert_eq!(code, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     let topics: Vec<&str> = v.as_array().unwrap().iter()
@@ -243,31 +244,23 @@ fn subscribe_on_a_prefix_lists_its_children() {
     assert!(topics.contains(&"/machines/oxbo/odom"), "{out}");
     assert!(topics.iter().all(|t| t.starts_with("/machines/oxbo/")), "{out}");
 
-    let (code, _, err) = env.gearbox(&["subscribe", "/machines/nosuchmachine", "-n", "1"]);
+    let (code, out, err) = env.gearbox(&["peer", "sub", "/machines/oxbo", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let topics: Vec<&str> = v.as_array().unwrap().iter()
+        .map(|row| row["topic"].as_str().unwrap())
+        .collect();
+    assert!(topics.contains(&"/machines/oxbo/state"), "{out}");
+
+    let (code, _, err) = env.gearbox(&["peer", "sub", "/machines/nosuchmachine", "-n", "1"]);
     assert_ne!(code, 0, "a prefix with nothing under it should still error: {err}");
-}
-
-/// `peer list`/`peer sub` are the general-purpose form of the same
-/// directory listing and streaming `subscribe` already does for one topic.
-#[test]
-fn peer_list_and_sub() {
-    let env = Env::start(&["oxbo"]);
-    let (code, out, err) = env.gearbox(&["peer", "list", "/machines/oxbo", "--json"]);
-    assert_eq!(code, 0, "{err}");
-    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(!v.as_array().unwrap().is_empty(), "{out}");
-
-    let (code, out, err) = env.gearbox(&["peer", "sub", "/machines/oxbo/state", "-n", "1"]);
-    assert_eq!(code, 0, "{err}");
-    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(v.get("odom").is_some(), "{out}");
 }
 
 /// `--did` dials the machine's own endpoint directly (agentio's `by_id`
 /// escape hatch), skipping the host's directory entirely — real proof it
 /// works, not just that it compiles.
 #[test]
-fn subscribe_dials_the_machines_own_did_directly() {
+fn peer_sub_dials_the_machines_own_did_directly() {
     let env = Env::start(&["oxbo"]);
     let (code, out, err) = env.gearbox(&["machine", "list", "--json"]);
     assert_eq!(code, 0, "{err}");
@@ -275,7 +268,8 @@ fn subscribe_dials_the_machines_own_did_directly() {
     let did = list[0]["did"].as_str().expect("machine did").to_string();
 
     let (code, out, err) = env.gearbox(&[
-        "subscribe",
+        "peer",
+        "sub",
         "/machines/oxbo/state",
         "--did",
         &did,
@@ -287,7 +281,8 @@ fn subscribe_dials_the_machines_own_did_directly() {
     assert!(v.get("odom").is_some(), "{out}");
 
     let (code, _, err) = env.gearbox(&[
-        "subscribe",
+        "peer",
+        "sub",
         "/machines/oxbo/state",
         "--did",
         "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
@@ -301,7 +296,7 @@ fn subscribe_dials_the_machines_own_did_directly() {
 /// happens to resolve: an empty registry and no `GEARBOX_INSTANCE` still
 /// reaches the machine.
 #[test]
-fn subscribe_by_did_needs_no_instance() {
+fn peer_sub_by_did_needs_no_instance() {
     let env = Env::start(&["oxbo"]);
     let (code, out, err) = env.gearbox(&["machine", "list", "--json"]);
     assert_eq!(code, 0, "{err}");
@@ -309,7 +304,8 @@ fn subscribe_by_did_needs_no_instance() {
     let did = list[0]["did"].as_str().expect("machine did").to_string();
 
     let (code, out, err) = env.gearbox_no_instance(&[
-        "subscribe",
+        "peer",
+        "sub",
         "/machines/oxbo/state",
         "--did",
         &did,
