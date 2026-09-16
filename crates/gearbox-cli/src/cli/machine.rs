@@ -998,10 +998,11 @@ fn sub(
     } else {
         topics::machine_topic(&ctx.machine_ns(ns)?, topic)
     };
-    let client = ctx.client()?;
+    // `--did` dials the machine directly and needs no instance at all; the
+    // usual path connects through one to resolve the topic's owner.
     let mut sub = match did {
-        Some(did) => client.subscribe_env_direct(&did, &full_topic)?,
-        None => client.subscribe_env(&full_topic)?,
+        Some(did) => ctx.bare_client()?.subscribe_env_direct(&did, &full_topic)?,
+        None => ctx.client()?.subscribe_env(&full_topic)?,
     };
     let stop_flag = install_ctrlc();
     let mut seen = 0usize;

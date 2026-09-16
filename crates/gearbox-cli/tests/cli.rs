@@ -63,6 +63,29 @@ impl Env {
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
     }
+
+    /// Same fake host, but with no registry entry visible and no instance
+    /// named — proves a code path needs no instance at all, not just that
+    /// one happens to be resolvable.
+    fn gearbox_no_instance(&self, args: &[&str]) -> (i32, String, String) {
+        let empty_run = self.dir.join("run-empty");
+        std::fs::create_dir_all(&empty_run).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_gearbox"))
+            .args(args)
+            .env("GEARBOX_REGISTRY_DIR", empty_run)
+            .env("XDG_CONFIG_HOME", self.dir.join("config"))
+            .env("XDG_STATE_HOME", self.dir.join("state"))
+            .env("AGENTIO_KEYS_DIR", self.dir.join("keys"))
+            .env_remove("GEARBOX_INSTANCE")
+            .env("HOME", &self.dir)
+            .output()
+            .expect("run gearbox");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
 }
 
 impl Drop for Env {
@@ -237,6 +260,67 @@ fn machine_sub_dials_the_machines_own_did_directly() {
         "1",
     ]);
     assert_ne!(code, 0, "wrong did should not silently resolve: {err}");
+}
+
+/// `--did` needs no instance at all — real proof, not just that one
+/// happens to resolve: an empty registry and no `GEARBOX_INSTANCE` still
+/// reaches the machine.
+#[test]
+fn machine_sub_by_did_needs_no_instance() {
+    let env = Env::start(&["oxbo"]);
+    let (code, out, err) = env.gearbox(&["machine", "list", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let list: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let did = list[0]["did"].as_str().expect("machine did").to_string();
+
+    let (code, out, err) = env.gearbox_no_instance(&[
+        "machine", "sub", "state", "--ns", "oxbo", "--did", &did, "-n", "1",
+    ]);
+    assert_eq!(code, 0, "no instance registered, yet --did worked: {err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v.get("odom").is_some(), "{out}");
+
+    // Same environment, no --did: this one really does need an instance.
+    let (code, _, err) = env.gearbox_no_instance(&["machine", "list"]);
+    assert_ne!(code, 0, "should fail without any instance: {err}");
+}
+
+/// With several instances running and none named, the CLI picks one
+/// (alphabetically first) instead of erroring.
+#[test]
+fn no_instance_given_picks_the_first_of_several() {
+    let a = Env::start(&[]);
+    let b = Env::start(&[]);
+    let names = {
+        let mut n = [a.name.clone(), b.name.clone()];
+        n.sort();
+        n
+    };
+    // Point b's registry lookups at a's directory too, so both entries are
+    // visible from one process without a real shared registry dir.
+    for entry in std::fs::read_dir(b.dir.join("run")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), a.dir.join("run").join(entry.file_name())).unwrap();
+    }
+
+    let out = Command::new(env!("CARGO_BIN_EXE_gearbox"))
+        .args(["instance", "info", "--json"])
+        .env("GEARBOX_REGISTRY_DIR", a.dir.join("run"))
+        .env("XDG_CONFIG_HOME", a.dir.join("config"))
+        .env("XDG_STATE_HOME", a.dir.join("state"))
+        .env("AGENTIO_KEYS_DIR", a.dir.join("keys"))
+        .env_remove("GEARBOX_INSTANCE")
+        .env("HOME", &a.dir)
+        .output()
+        .expect("run gearbox");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["props"]["name"], "fake");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&names[0]),
+        "should say which instance it picked: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

@@ -91,11 +91,13 @@ impl Ctx {
                         registry::registry_dir().display()
                     )));
                 }
-                many => {
-                    return Err(CliError::no_instance(format!(
-                        "several instances are running; pick one with --instance or `gearbox instance use`{}",
-                        candidates(many)
-                    )));
+                [first, ..] => {
+                    eprintln!(
+                        "several instances are running; using `{}` (pass --instance or `gearbox instance use` to pick another){}",
+                        first.name,
+                        candidates(entries.as_slice())
+                    );
+                    first.clone()
                 }
             },
         };
@@ -124,6 +126,17 @@ impl Ctx {
         })?;
         let _ = self.client.set(client);
         Ok(self.client.get().expect("set above"))
+    }
+
+    /// A bare client with no bootstrap host — for a command addressing a
+    /// machine directly by its own did, which needs no gearbox instance to
+    /// be resolvable, reachable, or even running.
+    pub fn bare_client(&self) -> Result<Client> {
+        ensure_cli_did()?;
+        Ok(Client::bare(
+            IdentitySource::Name(CLI_IDENTITY.to_string()),
+            CLI_IDENTITY,
+        )?)
     }
 
     /// The machine a `machine` leaf acts on: the argument, else the selection.
