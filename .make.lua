@@ -1,7 +1,7 @@
 -- gearbox's build, as recipes. This replaced the Makefile; there is no other.
 --
 --   make            the recipes, with what each of them says it does
---   make build      the library
+--   make build      everything in the workspace (debug)
 --   make run        the simulator, through the CLI
 --   make test       the suite
 --
@@ -11,8 +11,18 @@
 
 local make = oslo.make
 
-local BACKEND = os.getenv("BACKEND") or "x11"
-local RUN_WITH = os.getenv("RUN_WITH") or "nixVulkan"
+local DISPLAY_SH = "/home/bresilla/data/code/robolibs/.display.sh"
+
+-- `run`/`sim` re-detect the Wayland socket and NVIDIA prime-offload vars fresh, every
+-- launch, instead of trusting whatever BACKEND/DISPLAY a shell happened to inherit — a
+-- stale BACKEND=x11 (no live Wayland socket seen the first time this shell started, or a
+-- multiplexer/SSH session with a stubborn old DISPLAY) silently falls back to XWayland with
+-- no NVIDIA render-offload, which is dramatically slower than the native Wayland + Vulkan
+-- path. `. DISPLAY_SH` is the same detection `.env.lua` runs on `cd`; unsetting first forces
+-- it to run again rather than early-out on an already-set value.
+local function fresh_display_env(cmd)
+  return ("unset BACKEND RUN_WITH WAYLAND_DISPLAY DISPLAY; . %s; %s"):format(DISPLAY_SH, cmd)
+end
 
 local function need(tool, why)
   assert(oslo.run{ "sh", "-c", "command -v " .. tool, capture = true }.ok, why)
@@ -28,17 +38,12 @@ end
 
 local NAME = project_name()
 
-make.recipe{ name = "build", desc = "the library",
-             run = function() sh.cargo("build", "--lib") end }
-make.alias("b", "build")
-
 make.recipe{
-  name = "build-bins",
-  desc = "the merged gearbox binary (debug)",
-  run = function()
-    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
-  end,
+  name = "build",
+  desc = "everything in the workspace (debug) — every crate, lib and bin",
+  run = function() sh.cargo("build") end,
 }
+make.alias("b", "build")
 
 make.recipe{
   name = "build-release-bin",
@@ -63,12 +68,12 @@ make.alias("c", "compile")
 
 make.recipe{
   name = "run",
-  desc = ("launch the simulator through the CLI (%s backend, %s wrapper)"):format(BACKEND, RUN_WITH),
+  desc = "launch the simulator through the CLI (fresh Wayland/NVIDIA detection, nixVulkan wrapper)",
   params = { { "--args", desc = "passed through to `gearbox run`, e.g. a USD scene path" } },
-  deps = { "build-bins" },
+  deps = { "build" },
   run = function(a)
-    sh.sh("-c", ("env WINIT_UNIX_BACKEND=%s %s target/debug/gearbox run %s")
-      :format(BACKEND, RUN_WITH, a.args or ""))
+    sh.sh("-c", fresh_display_env(
+      ("env WINIT_UNIX_BACKEND=$BACKEND $RUN_WITH target/debug/gearbox run %s"):format(a.args or "")))
   end,
 }
 make.alias("r", "run")
@@ -77,10 +82,10 @@ make.recipe{
   name = "sim",
   desc = "launch the sim directly, bypassing `gearbox run`'s instance management",
   params = { { "--args", desc = "USD scenes to load, passed through to `gearbox launch`" } },
-  deps = { "build-bins" },
+  deps = { "build" },
   run = function(a)
-    sh.sh("-c", ("env WINIT_UNIX_BACKEND=%s %s target/debug/gearbox launch %s")
-      :format(BACKEND, RUN_WITH, a.args or ""))
+    sh.sh("-c", fresh_display_env(
+      ("env WINIT_UNIX_BACKEND=$BACKEND $RUN_WITH target/debug/gearbox launch %s"):format(a.args or "")))
   end,
 }
 
@@ -88,7 +93,7 @@ make.recipe{
   name = "cli",
   desc = "run the gearbox CLI: make cli --args 'instance list'",
   params = { { "--args", desc = "arguments passed through to the CLI" } },
-  deps = { "build-bins" },
+  deps = { "build" },
   run = function(a)
     sh.sh("-c", ("target/debug/gearbox %s"):format(a.args or ""))
   end,
