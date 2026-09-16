@@ -27,7 +27,9 @@ pub const TRAMPLE_CLOCK_S: f32 = 3600.0;
 /// Encodes a stamp: time on the wrapped clock and roll direction as an angle;
 /// 0 in the angle channel means never stamped.
 pub fn trample_texel(now: f32, direction: Vec2) -> [u16; 2] {
-    let time = ((now.rem_euclid(TRAMPLE_CLOCK_S) / TRAMPLE_CLOCK_S) * 65535.0).round() as u16;
+    // Floored so a stamp never lands ahead of the shader clock: a stamp in
+    // the future would read as a whole clock period old and spring back up.
+    let time = ((now.rem_euclid(TRAMPLE_CLOCK_S) / TRAMPLE_CLOCK_S) * 65535.0).floor() as u16;
     let angle = (direction.y.atan2(direction.x) + std::f32::consts::PI) / std::f32::consts::TAU;
     let angle = ((angle * 65534.0).round() as u16).saturating_add(1);
     [time, angle]

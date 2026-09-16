@@ -14,7 +14,9 @@ fn wheel_texel(tex: texture_2d<u32>, index: vec2<i32>, recovery: f32) -> vec3<f3
     let texel = textureLoad(tex, index, 0);
     if (texel.g == 0u) { return vec3<f32>(0.0); }
     let stamped = f32(texel.r) / 65535.0 * 3600.0;
-    let age = (globals.time - stamped + 3600.0) % 3600.0;
+    // A stamp a moment ahead of this frame is fresh, not a period old.
+    let delta = globals.time - stamped;
+    let age = select(delta, max(delta + 3600.0, 0.0), delta < -8.0);
     let press = 1.0 - clamp(age / max(recovery, 0.001), 0.0, 1.0);
     let angle = f32(texel.g - 1u) / 65534.0 * 6.2831853 - 3.1415927;
     return vec3<f32>(press, cos(angle) * press, sin(angle) * press);
