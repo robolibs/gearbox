@@ -22,11 +22,14 @@ mod scene;
 mod world;
 mod writeback;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use bevy::math::Affine3A;
 use bevy::prelude::*;
 use usd_bevy::instance::UsdInstances;
-use usd_bevy::{UsdSceneRoot, UsdSceneState};
+use usd_bevy::{UsdSceneInstance, UsdSceneRoot, UsdSceneState};
+
+use convert::{quat_from_d, vec3_from_d};
 
 pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
@@ -50,6 +53,7 @@ impl Plugin for RapierAdapterPlugin {
                 Update,
                 (
                     attach_projected_stages,
+                    refresh_swapped_stages,
                     scene::sync_gravity_from_usd_scene,
                     bodies::convert_rigid_bodies,
                     colliders::convert_colliders,
@@ -80,6 +84,7 @@ impl Plugin for RapierAdapterPlugin {
         }
     }
 }
+
 
 fn physics_is_active(active: Res<PhysicsActive>) -> bool {
     active.0
@@ -152,6 +157,7 @@ fn attach_projected_stages(world: &mut World) {
                     .insert(Name::new(name.to_string()));
             }
             attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
+            world.entity_mut(*entity).insert(PhysicsScanned);
         }
         attach::resolve_pending_physics(world, &pending, &by_path);
         attach::populate_articulation_joints(world, &pending.articulation_roots);
@@ -162,6 +168,212 @@ fn attach_projected_stages(world: &mut World) {
         );
     }
     world.insert_non_send_resource(instances);
+}
+
+/// A prim entity whose physics markers were read; prims a variant swap adds
+/// lack it, so only they are attached after the swap.
+#[derive(Component)]
+struct PhysicsScanned;
+
+/// A variant switch was asked for on this scene root; the host sets it so
+/// only requested swaps rebuild physics and controllers.
+#[derive(Component)]
+pub(crate) struct VariantSwapRequested;
+
+/// A scene root whose variant swap is attached; the controller discovery
+/// rereads its machines and drops the marker.
+#[derive(Component)]
+pub(crate) struct SwappedStage;
+
+/// Once usd_bevy has reconciled a requested variant swap: drop the physics
+/// of the prims it despawned, carry the prims it added onto the machine
+/// where it stands now, and attach their physics.
+fn refresh_swapped_stages(world: &mut World) {
+    let swapped: Vec<Entity> = world
+        .query_filtered::<(Entity, &UsdSceneState), (
+            With<PhysicsAttached>,
+            With<VariantSwapRequested>,
+            Changed<UsdSceneInstance>,
+        )>()
+        .iter(world)
+        .filter(|(_, state)| **state == UsdSceneState::Ready)
+        .map(|(entity, _)| entity)
+        .collect();
+    if swapped.is_empty() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    drop_dead_physics(world);
+    let Some(instances) = world.remove_non_send::<UsdInstances>() else {
+        return;
+    };
+    for root in swapped {
+        world
+            .entity_mut(root)
+            .remove::<VariantSwapRequested>()
+            .insert(SwappedStage);
+        let Some(stage) = instances.stage(root) else {
+            continue;
+        };
+        let prims: Vec<(String, Entity)> = instances
+            .prims(root)
+            .map(|(path, entity)| (path.to_string(), entity))
+            .collect();
+        let fresh: Vec<(String, Entity)> = prims
+            .iter()
+            .filter(|(path, entity)| path != "/" && world.get::<PhysicsScanned>(*entity).is_none())
+            .cloned()
+            .collect();
+        if fresh.is_empty() {
+            continue;
+        }
+        carry_onto_machine(world, stage, &prims, &fresh);
+        let by_path: HashMap<String, Entity> = prims.iter().cloned().collect();
+        let meta = attach::read_stage_meta(stage);
+        let mut pending = attach::PendingPhysics::default();
+        for (path, entity) in &fresh {
+            if let Some(name) = path.rsplit('/').next()
+                && world.get::<Name>(*entity).is_none()
+            {
+                world
+                    .entity_mut(*entity)
+                    .insert(Name::new(name.to_string()));
+            }
+            attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
+            world.entity_mut(*entity).insert(PhysicsScanned);
+        }
+        attach::resolve_pending_physics(world, &pending, &by_path);
+        let articulations: Vec<Entity> = prims
+            .iter()
+            .map(|(_, entity)| *entity)
+            .filter(|entity| world.get::<markers::UsdArticulationRoot>(*entity).is_some())
+            .collect();
+        attach::populate_articulation_joints(world, &articulations);
+        info!(
+            "gearbox-physics: variant swap attached {} new prim(s) of {root:?} in {:?}",
+            fresh.len(),
+            started.elapsed()
+        );
+    }
+    world.insert_non_send(instances);
+}
+
+/// Removes the rapier bodies and colliders of entities that no longer
+/// exist; a removed body takes its joints with it.
+fn drop_dead_physics(world: &mut World) {
+    let (bodies, colliders): (Vec<Entity>, Vec<Entity>) = {
+        let physics = world.resource::<PhysicsWorld>();
+        let dead = |entity: &Entity| world.get_entity(*entity).is_err();
+        (
+            physics.entity_to_body.keys().copied().filter(dead).collect(),
+            physics.entity_to_collider.keys().copied().filter(dead).collect(),
+        )
+    };
+    let mut physics = world.resource_mut::<PhysicsWorld>();
+    let physics = physics.as_mut();
+    for entity in bodies {
+        if let Some(handle) = physics.entity_to_body.remove(&entity) {
+            let _ = physics.bodies.remove(
+                handle,
+                &mut physics.islands,
+                &mut physics.colliders,
+                &mut physics.impulse_joints,
+                &mut physics.multibody_joints,
+                true,
+            );
+        }
+    }
+    for entity in colliders {
+        if let Some(handle) = physics.entity_to_collider.remove(&entity) {
+            physics
+                .colliders
+                .remove(handle, &mut physics.islands, &mut physics.bodies, false);
+        }
+    }
+}
+
+/// Moves the top prims a swap added by the displacement of the machine's
+/// heaviest body, its pose now against its authored one, so a new tool
+/// appears on the machine where it stands. Prims under an existing body
+/// already ride with it.
+fn carry_onto_machine(
+    world: &mut World,
+    stage: &openusd::usd::Stage,
+    prims: &[(String, Entity)],
+    fresh: &[(String, Entity)],
+) {
+    let reference = {
+        let physics = world.resource::<PhysicsWorld>();
+        prims
+            .iter()
+            .filter_map(|(path, entity)| {
+                let body = physics
+                    .entity_to_body
+                    .get(entity)
+                    .and_then(|handle| physics.bodies.get(*handle))?;
+                Some((path.clone(), *entity, body.mass(), body.position().clone()))
+            })
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+    };
+    let Some((path, entity, _, pose)) = reference else {
+        return;
+    };
+    let Some(local) = openusd::sdf::path(&path)
+        .ok()
+        .and_then(|path| usd_bevy::read::xform::read_transform(stage, &path).ok().flatten())
+    else {
+        return;
+    };
+    let authored_local = Transform {
+        translation: Vec3::from(local.translate),
+        rotation: Quat::from_array(local.rotate),
+        scale: Vec3::from(local.scale),
+    };
+    let parent = world.get::<ChildOf>(entity).map(ChildOf::parent);
+    let authored = parent.map_or(GlobalTransform::IDENTITY, |p| chain_world(world, p)) * authored_local;
+    let (_, rotation, translation) = authored.to_scale_rotation_translation();
+    let now = Affine3A::from_rotation_translation(quat_from_d(pose.rotation), vec3_from_d(pose.translation));
+    let displacement = now * Affine3A::from_rotation_translation(rotation, translation).inverse();
+    let fresh_set: HashSet<Entity> = fresh.iter().map(|(_, entity)| *entity).collect();
+    for (_, entity) in fresh {
+        let parent = world.get::<ChildOf>(*entity).map(ChildOf::parent);
+        if parent.is_some_and(|p| fresh_set.contains(&p)) || rides_a_body(world, *entity) {
+            continue;
+        }
+        let moved = displacement * chain_world(world, *entity).affine();
+        let parent_world = parent.map_or(GlobalTransform::IDENTITY, |p| chain_world(world, p));
+        let local = parent_world.affine().inverse() * moved;
+        world
+            .entity_mut(*entity)
+            .insert(Transform::from_matrix(Mat4::from(local)));
+    }
+    // Bodies are built from `GlobalTransform`, before propagation runs.
+    for (_, entity) in fresh {
+        let global = chain_world(world, *entity);
+        world.entity_mut(*entity).insert(global);
+    }
+}
+
+/// World pose composed from local transforms, for entities spawned since
+/// propagation last ran.
+fn chain_world(world: &World, entity: Entity) -> GlobalTransform {
+    let local = world.get::<Transform>(entity).copied().unwrap_or_default();
+    match world.get::<ChildOf>(entity) {
+        Some(parent) => chain_world(world, parent.parent()) * local,
+        None => GlobalTransform::from(local),
+    }
+}
+
+fn rides_a_body(world: &World, entity: Entity) -> bool {
+    let physics = world.resource::<PhysicsWorld>();
+    let mut current = world.get::<ChildOf>(entity).map(ChildOf::parent);
+    while let Some(ancestor) = current {
+        if physics.entity_to_body.contains_key(&ancestor) {
+            return true;
+        }
+        current = world.get::<ChildOf>(ancestor).map(ChildOf::parent);
+    }
+    false
 }
 
 /// On the OFF→ON edge of `PhysicsActive`, sync every body's pose to its

@@ -8,6 +8,7 @@
 
 #import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
+#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{plant_lean}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 #import "embedded://gearbox_sim/fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 
@@ -23,6 +24,7 @@ struct VegetationParams {
     inverse_square_thinning: u32,
     bounds: vec4<f32>,
     wheels: WheelMapParams,
+    wind: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -118,6 +120,9 @@ fn stubble_detail(vertex: Vertex) -> VertexOutput {
     let kept = rand(id, 9u) < 0.10 + 0.90 * regrowth(base);
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+    if (coverage <= 0.0) {
+        return culled_vertex();
+    }
     let clover = rand(id, 17u) < 0.8;
     let leaf = u32(vertex.position.z - 1.0);
     let t = vertex.position.y;
@@ -163,6 +168,8 @@ fn stubble_detail(vertex: Vertex) -> VertexOutput {
     let flat = clamp(pressed.x, 0.0, 1.0);
     offset += wheel_roll(pressed) * (flat * offset.y * 0.9);
     offset.y *= 1.0 - flat * field.wheels.bend;
+    offset += plant_lean(base, globals.time, field.wind, rand(id, 9u), t)
+        * (max(offset.y, 0.0) * t * 1.2 * (1.0 - flat));
     let p = ground + offset * coverage;
     var out: VertexOutput;
     out.world_position = vec4<f32>(p, 1.0);
@@ -259,6 +266,9 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     let widen = max(1.0, 1.2 * pixel_m / BLADE_MAX_WIDTH);
     let alive = select(0.0, coverage, in_band && ground_normal.y >= DIRT_SLOPE_NORMAL_Y
         && within_field(base_xz) && rand(id, 19u) * widen < 1.0);
+    if (alive <= 0.0) {
+        return culled_vertex();
+    }
 
     let height = mix(BLADE_MIN_HEIGHT, BLADE_MAX_HEIGHT, rand(id, 6u))
         * mix(0.8, 1.2, rand(plant_id, 3u)) * select(1.0, 0.0, rand(plant_id, 7u) < 0.12) * mix(0.85, 1.15, rand(clump.id, 3u))
@@ -291,6 +301,11 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     let travel = heading * select(-1.0, 1.0, rand(id, 16u) < 0.8);
     let kink_dir = normalize(mix(vec3<f32>(travel, 0.0, 0.0), vec3<f32>(lean_xz.x, 0.0, lean_xz.y), 0.4));
     axis_point += (kink_dir * sin(kink) - up * (1.0 - cos(kink))) * (0.5 * height * knee * (1.0 - crush));
+    // Stalks are stiff, a tenth of the grass's sway; green shoots sway fully.
+    let green = regrowth(base_xz) * step(rand(id, 9u), 0.5);
+    let give = mix(0.28, 1.0, green) * (1.0 - crush);
+    axis_point += plant_lean(root.xz, globals.time, field.wind, rand(id, 9u), t)
+        * (give * height * t);
 
     let stand_right = vec3<f32>(cos(own_yaw), 0.0, sin(own_yaw));
     let lay = cross(up, roll);
@@ -359,6 +374,9 @@ fn lying_straw(vertex: Vertex) -> VertexOutput {
     let end = blade_fade_end(f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0));
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+    if (coverage <= 0.0) {
+        return culled_vertex();
+    }
     // Kept at least ~1.2 px wide, thinned by the same share, like the stalks.
     let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
     let width = mix(0.003, 0.005, rand(id, 7u));
@@ -400,6 +418,13 @@ fn lying_straw(vertex: Vertex) -> VertexOutput {
     out.ground_normal = ground_normal;
     out.canopy_uv = vec3<f32>(vertex.position.x, vertex.position.y, 0.0);
     out.color = vec4<f32>(color * (1.0 - field.wheels.darkening * flat), 1.0);
+    return out;
+}
+
+// A vertex of an instance culled before any shaping: outside the clip volume.
+fn culled_vertex() -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
     return out;
 }
 
@@ -445,7 +470,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let green = regrowth(base_xz);
     if (vertex.position.z < -0.5) {
         let cluster = canopy_vertex(vertex.position, vec3<f32>(base_xz.x, ground_y, base_xz.y),
-            ground_normal, seed, distance, alive, pressed, field.wheels.bend, true);
+            ground_normal, seed, distance, alive, pressed, field.wheels.bend, true, field.wind);
         var out: VertexOutput;
         out.world_position = vec4<f32>(cluster.position, 1.0);
         out.clip_position = view.clip_from_world * out.world_position;
@@ -482,7 +507,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.world_position = in.world_position;
     pbr_input.world_normal = normalize(in.ground_normal);
     pbr_input.V = calculate_view(in.world_position, false);
-    pbr_input.N = foliage_normal(normalize(in.world_normal), pbr_input.world_normal, pbr_input.V);
+    pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
 
     var color = apply_pbr_lighting(pbr_input);

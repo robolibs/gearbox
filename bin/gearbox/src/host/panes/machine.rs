@@ -68,6 +68,28 @@ fn group_of(c: &ControllerSpec) -> String {
 }
 
 /// The selected machine.
+/// The machine prim's variant sets: name, current selection, options.
+fn machine_variants(world: &World, root: Entity, prim: &str) -> Vec<(String, String, Vec<String>)> {
+    use usd_bevy::read::variants::{variant_options, variant_selection, variant_set_names};
+    let Some(stage) = world
+        .get_non_send::<usd_bevy::instance::UsdInstances>()
+        .and_then(|instances| instances.stage(root))
+    else {
+        return Vec::new();
+    };
+    let Ok(path) = openusd::sdf::path(prim) else {
+        return Vec::new();
+    };
+    variant_set_names(stage, &path)
+        .into_iter()
+        .map(|set| {
+            let selection = variant_selection(stage, &path, &set).unwrap_or_default();
+            let options = variant_options(stage, &path, &set);
+            (set, selection, options)
+        })
+        .collect()
+}
+
 fn picked_machine(world: &World) -> Option<MachineInstanceSpec> {
     let picked = world
         .resource::<Selection>()
@@ -222,6 +244,22 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
                 .with_readout("links", machine.links.links.len().to_string()),
         ],
     );
+
+    // Variants of the machine prim: a row per set, a button per option.
+    let variants = machine_variants(world, scene_root, &machine.prim_path);
+    if !variants.is_empty() {
+        let pods = variants
+            .iter()
+            .enumerate()
+            .map(|(i, (set, selection, options))| {
+                options.iter().fold(
+                    Pod::new(pid(P, "variants", i)).with_readout(set.as_str(), selection.as_str()),
+                    |pod, option| pod.with_button(option.as_str(), accent),
+                )
+            })
+            .collect();
+        body.add_normal(cid(P, "variants"), "Variants", "layer", pods);
+    }
 
     let has_gamepad = {
         let mut pads = world.query::<&Gamepad>();
@@ -483,6 +521,21 @@ pub fn show(body: &mut PaneBody<'_, '_>, world: &mut World, ctx: &PaneCtx) {
 
     let responses = body.render();
     handle_machine_list(&responses, &list, world, ctx);
+    for (i, (set, selection, options)) in variants.iter().enumerate() {
+        let picked = options
+            .iter()
+            .enumerate()
+            .find(|(j, _)| button_clicked(&responses, cid(P, "variants"), i, *j))
+            .map(|(_, option)| option);
+        if let Some(option) = picked.filter(|option| *option != selection) {
+            ctx.send(HostCommand::SetVariant {
+                root: scene_root,
+                prim: machine.prim_path.clone(),
+                set: set.clone(),
+                selection: option.clone(),
+            });
+        }
+    }
     for block in blocks {
         let Some(resp) = pod_response(&responses, cid(P, &block.group), block.pod) else {
             continue;

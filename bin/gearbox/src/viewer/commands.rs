@@ -92,6 +92,7 @@ pub(crate) struct CommandQueries<'w, 's> {
     prims: Query<'w, 's, (Entity, &'static UsdPrimRef)>,
     visibility: Query<'w, 's, &'static mut Visibility>,
     overrides: Query<'w, 's, &'static mut UsdInstanceOverrides>,
+    commands: Commands<'w, 's>,
 }
 
 pub(crate) fn apply_host_commands(
@@ -193,12 +194,16 @@ pub(crate) fn apply_host_commands(
                 set,
                 selection,
             } => {
+                info!("gearbox-viewer: variant {prim} {set} = {selection}");
                 s.tuning
                     .variants
                     .insert((prim.clone(), set.clone()), selection.clone());
                 if let Ok(mut ov) = q.overrides.get_mut(root) {
                     ov.variants.retain(|(p, st, _)| p != &prim || st != &set);
                     ov.variants.push((prim, set, selection));
+                    q.commands
+                        .entity(root)
+                        .insert(crate::physics::VariantSwapRequested);
                 }
             }
             HostCommand::SetMaterialColor(id, rgb) => {

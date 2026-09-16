@@ -362,10 +362,11 @@ fn update_band(
     active: Res<gearbox_api::PhysicsActive>,
     mut ring: ResMut<SelectionRing>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut band: Query<(&Mesh3d, &mut Visibility), With<SelectionBand>>,
+    mut band: Query<(&Mesh3d, &mut Visibility, &mut Transform), With<SelectionBand>>,
     terrain: Option<Res<crate::terrain::ProceduralTerrain>>,
+    mut built: Local<Vec<(Vec3, f32, bool)>>,
 ) {
-    let Ok((mesh, mut visibility)) = band.single_mut() else {
+    let Ok((mesh, mut visibility, mut transform)) = band.single_mut() else {
         return;
     };
     let mut bands = Vec::new();
@@ -383,9 +384,22 @@ fn update_band(
     } else {
         Visibility::Visible
     };
-    if !bands.is_empty()
-        && let Some(mut mesh) = meshes.get_mut(&mesh.0)
-    {
-        *mesh = band_mesh(&bands, terrain.as_deref());
+    if bands.is_empty() {
+        return;
+    }
+    // A rebuilt band is uploaded again, so it is rebuilt only when a card
+    // moved a quarter metre or changed; in between it rides along.
+    let stale = bands.len() != built.len()
+        || bands.iter().zip(built.iter()).any(|(now, then)| {
+            now.0.xz().distance(then.0.xz()) > 0.25 || (now.1 - then.1).abs() > 0.01 || now.2 != then.2
+        });
+    if stale {
+        if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
+            *mesh = band_mesh(&bands, terrain.as_deref());
+        }
+        *built = bands;
+        transform.translation = Vec3::ZERO;
+    } else if let (Some(now), Some(then)) = (bands.first(), built.first()) {
+        transform.translation = Vec3::new(now.0.x - then.0.x, 0.0, now.0.z - then.0.z);
     }
 }

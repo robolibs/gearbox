@@ -7,7 +7,7 @@
 
 #import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::foliage_normal
-#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{WIND_DIR, wind_strength, wind_bob}
+#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{plant_lean}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -21,6 +21,7 @@ struct VegetationParams {
     inverse_square_thinning: u32,
     bounds: vec4<f32>,
     wheels: WheelMapParams,
+    wind: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -99,6 +100,13 @@ fn patch_noise(p: vec2<f32>) -> f32 {
         mix(rand(c, 31u), rand(d, 31u), blend.x), blend.y);
 }
 
+// A vertex of an instance culled before any shaping: outside the clip volume.
+fn culled_vertex() -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+    return out;
+}
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     // The draw's first instance carries the variant count (bits 28-31) and
@@ -122,6 +130,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let kept = rand(id, 9u) < mix(vertex.color.z, 1.0, patchiness);
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+    if (coverage <= 0.0) {
+        return culled_vertex();
+    }
 
     let yaw = rand(id, 4u) * 6.2831853;
     let c = cos(yaw);
@@ -137,10 +148,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let flat = clamp(pressed.x, 0.0, 1.0);
     local += wheel_roll(pressed) * (flat * local.y * field.wheels.bend);
     local.y *= 1.0 - flat * field.wheels.bend;
-    let strength = wind_strength(base, globals.time);
-    let sway = strength * 0.6
-        + wind_bob(globals.time, rand(id, 9u), 1.0) * 0.25 * mix(0.4, 1.0, strength);
-    local += WIND_DIR * (sway * 1.2 * local.y * local.y);
+    let rise = max(local.y, 0.0);
+    local += plant_lean(base, globals.time, field.wind, rand(id, 9u), 1.0)
+        * (rise * min(rise / 0.08, 1.0) * 0.9 * (1.0 - flat));
 
     var out: VertexOutput;
     out.world_position = vec4<f32>(ground + local, 1.0);
@@ -178,7 +188,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.world_position = in.world_position;
     pbr_input.world_normal = normalize(in.ground_normal);
     pbr_input.V = calculate_view(in.world_position, false);
-    pbr_input.N = foliage_normal(normalize(in.world_normal), pbr_input.world_normal, pbr_input.V);
+    pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
     var color = apply_pbr_lighting(pbr_input);
     color = main_pass_post_lighting_processing(pbr_input, color);

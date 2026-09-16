@@ -112,6 +112,16 @@ impl Plugin for GrasslandPlugin {
                     },
                     VegetationLayer {
                         shader,
+                        template: flower_template,
+                        density: if density > 0.0 { 36.0 } else { 0.0 },
+                        fade_start: 6.0,
+                        fade_end: 45.0,
+                        inverse_square_thinning: true,
+                        albedo: None,
+                        lod_band: [0.0, f32::MAX],
+                    },
+                    VegetationLayer {
+                        shader,
                         template: super::canopy::template,
                         density: (density / 6000.0) * 80.0,
                         fade_start: 12.0,
@@ -249,6 +259,38 @@ fn blade_template(segments: u32) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_indices(Indices::U32(indices))
+}
+
+/// One flower: a stem (z = 10), eight petals (z = 11..18) and two leaves
+/// (z = 30, 31); the shader shapes them per kind.
+fn flower_template() -> Mesh {
+    let mut positions = Vec::new();
+    let mut indices = Vec::new();
+    let mut strip = |part: f32, segments: u32| {
+        let start = positions.len() as u32;
+        for step in 0..=segments {
+            let t = step as f32 / segments as f32;
+            positions.push([-1.0, t, part]);
+            positions.push([1.0, t, part]);
+        }
+        for step in 0..segments {
+            let i = start + step * 2;
+            indices.extend_from_slice(&[i, i + 2, i + 1, i + 1, i + 2, i + 3]);
+        }
+    };
+    strip(10.0, 4);
+    for petal in 0..8 {
+        strip(11.0 + petal as f32, 2);
+    }
+    for leaf in 0..2 {
+        strip(30.0 + leaf as f32, 3);
+    }
+    let count = positions.len();
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; count])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; count])
+        .with_inserted_indices(Indices::U32(indices))
 }
 
 /// Six segmented leaves; position.z selects the leaf within a plant.

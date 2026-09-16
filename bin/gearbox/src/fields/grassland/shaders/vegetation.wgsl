@@ -7,7 +7,7 @@
 
 #import "embedded://gearbox_sim/fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint}
 #import "embedded://gearbox_sim/fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
-#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{WIND_DIR, wind_strength, wind_bob}
+#import "embedded://gearbox_sim/fields/shaders/wind.wgsl"::{plant_lean, blade_leans}
 #import "embedded://gearbox_sim/fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 
 #import "embedded://gearbox_sim/fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
@@ -24,6 +24,7 @@ struct VegetationParams {
     inverse_square_thinning: u32,
     bounds: vec4<f32>,
     wheels: WheelMapParams,
+    wind: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -127,6 +128,9 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
     let end = blade_fade_end(rank);
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+    if (coverage <= 0.0) {
+        return culled_vertex();
+    }
     let habitat = meadow_noise(base * 0.8 + vec2<f32>(7.2, 3.1));
     let clover = rand(id, 9u) < 0.18 + smoothstep(0.38, 0.70, habitat) * 0.62;
     let rosette = !clover && rand(id, 17u) < 0.14;
@@ -169,37 +173,15 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
         let vein = 1.0 - abs(side);
         color = mix(vec3<f32>(0.09, 0.21, 0.035), vec3<f32>(0.16, 0.29, 0.07), vein * 0.4) * tone;
     } else {
-        let angle = yaw + f32(leaf) * 2.3999632 + rand(id, 12u + leaf) * 0.3;
-        let forward = vec3<f32>(cos(angle), 0.0, sin(angle));
-        let right = vec3<f32>(-sin(angle), 0.0, cos(angle));
-        let species = grass_species(base);
-        let variety = rand(id, 10u);
-        let fine = variety < 0.25 + 0.5 * species.x;
-        let broad = !fine && variety > 0.8 - 0.5 * species.y;
-        let height = mix(0.105, 0.165, rand(id, 20u + leaf)) * select(1.0, 0.9, broad);
-        let width = mix(0.003, 0.0045, rand(id, 30u + leaf))
-            * select(select(1.0, 2.0, broad), 0.65, fine);
-        let curve = select(select(0.4, 0.65, broad), 0.2, fine) + 0.25 * rand(id, 40u + leaf);
-        let bend = height * curve * t * t;
-        offset = forward * (0.007 + bend)
-            + vec3<f32>(0.0, height * (t - 0.22 * t * t), 0.0)
-            + right * (side * width * 0.5 * (1.0 - t * t));
-        let blade_normal = normalize(-forward * (1.0 - 0.44 * t)
-            + vec3<f32>(0.0, 2.0 * curve * t, 0.0));
-        normal = normalize(ground_normal * 0.8 + blade_normal * 0.2 + right * side * 0.12);
-        let tip = select(select(vec3<f32>(0.18, 0.36, 0.075), vec3<f32>(0.12, 0.28, 0.09), broad),
-            vec3<f32>(0.28, 0.38, 0.12), fine);
-        color = mix(vec3<f32>(0.11, 0.20, 0.045), tip, smoothstep(0.0, 0.7, t)) * tone;
+        return meadow_grass(base, ground, ground_normal, id, leaf, t, side, yaw, tone, coverage, distance);
     }
 
     let pressed = sample_trample(base);
     let flat = clamp(pressed.x, 0.0, 1.0);
     offset += wheel_roll(pressed) * (flat * offset.y * 0.9);
     offset.y *= 1.0 - flat * field.wheels.bend;
-    let strength = wind_strength(base, globals.time);
-    let sway = strength * 0.6
-        + wind_bob(globals.time, rand(id, 9u), t) * 0.25 * mix(0.4, 1.0, strength);
-    offset += WIND_DIR * (sway * 0.12 * offset.y * t * t);
+    offset += plant_lean(base, globals.time, field.wind, rand(id, 9u), t)
+        * (max(offset.y, 0.0) * t * 1.2 * (1.0 - flat));
     let p = ground + offset * coverage;
     var out: VertexOutput;
     out.world_position = vec4<f32>(p, 1.0);
@@ -207,6 +189,82 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
     out.world_normal = normalize(mix(normal, ground_normal, flat));
     out.ground_normal = ground_normal;
     out.color = vec4<f32>(color * (1.0 - field.wheels.darkening * flat), 1.0);
+    return out;
+}
+
+// The meadow's taller grasses shaped like the sward's blades (talk): a Bezier
+// leaf arching out of its tuft, swaying in the shared wind, widened on screen
+// when seen edge-on, with rounded sky-leaning normals.
+fn meadow_grass(base: vec2<f32>, ground: vec3<f32>, ground_normal: vec3<f32>, id: u32, leaf: u32,
+    t: f32, side: f32, yaw: f32, tone: f32, coverage: f32, distance: f32) -> VertexOutput {
+    let angle = yaw + f32(leaf) * 2.3999632 + rand(id, 12u + leaf) * 0.3;
+    let out_dir = vec3<f32>(cos(angle), 0.0, sin(angle));
+    let species = grass_species(base);
+    let variety = rand(id, 10u);
+    let fine = variety < 0.25 + 0.5 * species.x;
+    let broad = !fine && variety > 0.8 - 0.5 * species.y;
+    let height = mix(0.12, 0.20, rand(id, 20u + leaf)) * select(1.0, 0.9, broad) * coverage;
+    let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
+    let base_w = mix(0.005, 0.008, rand(id, 30u + leaf)) * select(select(1.0, 1.8, broad), 0.6, fine);
+    let width = base_w * max(1.0, 1.2 * pixel_m / base_w) * coverage;
+    let arch = select(select(0.45, 0.7, broad), 0.3, fine) + 0.25 * rand(id, 40u + leaf);
+
+    // Arched out of the tuft, pushed downwind; wheels lay it along the roll.
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let pressed = sample_trample(base);
+    let flat = clamp(pressed.x, 0.0, 1.0);
+    let roll = scatter_roll(wheel_roll(pressed), (rand(id, 37u + leaf) - 0.5) * 0.6);
+    let press = smoothstep(0.0, mix(0.4, 1.0, rand(id, 36u + leaf)), flat) * field.wheels.bend;
+    let seed = rand(id, 9u + leaf);
+    let gust = blade_leans(base, globals.time, field.wind, seed);
+    let downwind = vec3<f32>(gust.x, 0.0, gust.y);
+    let leans = gust.zw;
+    let sway_mid = downwind * leans.x * 0.3;
+    let sway_tip = downwind * leans.y;
+    let tip = mix((up * (1.0 - 0.4 * arch) + out_dir * arch + sway_tip * (1.0 - flat)) * height,
+        (roll * 0.92 + up * 0.06) * height, press);
+    let mid = mix((up * 0.6 + out_dir * (0.3 * arch) + sway_mid * (1.0 - flat)) * height,
+        (roll * 0.5 + up * 0.07) * height, press);
+
+    let axis = normalize(bezier_tangent(mid, tip, t) + up * 1e-4);
+    let right = normalize(cross(axis, out_dir) + vec3<f32>(1e-5, 0.0, 0.0));
+    let normal = normalize(cross(right, axis));
+    let half_w = width * 0.5 * ease_out(1.0 - t, 2.0) * side;
+    let p = ground + bezier(mid, tip, t) + right * half_w;
+    let to_eye = normalize(view.world_position - p);
+    let face_xz = normalize(vec2<f32>(normal.x, normal.z) + vec2<f32>(1e-5, 0.0));
+    let eye_xz = normalize(vec2<f32>(to_eye.x, to_eye.z) + vec2<f32>(1e-5, 0.0));
+    let facing_eye = abs(dot(face_xz, eye_xz));
+    let thicken = ease_out(1.0 - facing_eye, 4.0) * smoothstep(0.0, 0.2, facing_eye);
+    var view_pos = view.view_from_world * vec4<f32>(p, 1.0);
+    let right_view = (view.view_from_world * vec4<f32>(right, 0.0)).x;
+    view_pos.x += thicken * select(-1.0, 1.0, right_view >= 0.0) * half_w;
+
+    // Dark roots to bright tips per species, settling with distance.
+    let rounded = normalize(normal + right * side * 0.6);
+    let sky = normalize(mix(ground_normal, rounded, 0.35));
+    let settle = smoothstep(8.0, 40.0, distance);
+    var root = vec3<f32>(0.05, 0.12, 0.025);
+    var top = vec3<f32>(0.46, 0.62, 0.17);
+    if (fine) {
+        root = vec3<f32>(0.055, 0.12, 0.055);
+        top = vec3<f32>(0.44, 0.60, 0.26);
+    } else if (broad) {
+        root = vec3<f32>(0.045, 0.11, 0.022);
+        top = vec3<f32>(0.34, 0.56, 0.14);
+    }
+    let occlusion = mix(0.5, 1.0, t * t);
+    let ramp = mix(root, top, t * t) * tone * occlusion;
+    let average = mix(root, top, 0.35) * tone * 0.7;
+    let colour = mix(ramp, average, smoothstep(4.0, 20.0, distance));
+
+    var out: VertexOutput;
+    out.world_position = vec4<f32>(p, 1.0);
+    out.clip_position = view.clip_from_view * view_pos;
+    out.world_normal = normalize(mix(mix(sky, ground_normal, settle * 0.8), ground_normal, flat));
+    out.ground_normal = ground_normal;
+    out.canopy_uv = vec3<f32>(side, t, 0.0);
+    out.color = vec4<f32>(colour * (1.0 - field.wheels.darkening * flat), 1.0);
     return out;
 }
 
@@ -300,6 +358,9 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
     let widen = max(1.0, 1.2 * pixel_m / GOT_MAX_WIDTH);
     let alive = select(0.0, coverage, in_band && ground_normal.y >= DIRT_SLOPE_NORMAL_Y
         && within_field(base_xz) && rand(id, 19u) * widen < 1.0);
+    if (alive <= 0.0) {
+        return culled_vertex();
+    }
 
     let species = grass_species(base_xz);
     let pick = rand(id, 13u);
@@ -324,11 +385,12 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
 
     // Wind: the shared gust field pushes, and the blade's own bob runs
     // along it so it sways instead of pivoting.
-    let strength = wind_strength(base_xz, globals.time);
-    let flutter = 0.08 * mix(0.4, 1.0, strength);
     let seed = rand(id, 9u);
-    let sway_mid = WIND_DIR * (strength * 0.45 + wind_bob(globals.time, seed, 0.5) * flutter) * 0.3;
-    let sway_tip = WIND_DIR * (strength * 0.45 + wind_bob(globals.time, seed, 1.0) * flutter);
+    let gust = blade_leans(base_xz, globals.time, field.wind, seed);
+    let downwind = vec3<f32>(gust.x, 0.0, gust.y);
+    let leans = gust.zw;
+    let sway_mid = downwind * leans.x * 0.3;
+    let sway_tip = downwind * leans.y;
 
     // Control points relative to the root. Wheels lay blades along their
     // roll with some scatter, face up; the stiffest spring back first as the
@@ -338,8 +400,8 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
     let roll = scatter_roll(wheel_roll(pressed), (rand(id, 37u) - 0.5) * 0.6);
     let up = vec3<f32>(0.0, 1.0, 0.0);
     let press = smoothstep(0.0, mix(0.4, 1.0, rand(id, 36u)), flat) * field.wheels.bend;
-    let tip = mix((up + lean + sway_tip) * height, (roll * 0.92 + up * 0.06) * height, press);
-    let mid = mix((up * 0.6 + lean * 0.2 + sway_mid) * height, (roll * 0.5 + up * 0.07) * height, press);
+    let tip = mix((up + lean + sway_tip * (1.0 - flat)) * height, (roll * 0.92 + up * 0.06) * height, press);
+    let mid = mix((up * 0.6 + lean * 0.2 + sway_mid * (1.0 - flat)) * height, (roll * 0.5 + up * 0.07) * height, press);
 
     let t = vertex.position.y;
     let side = vertex.position.x;
@@ -380,17 +442,17 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
     let mottle = mix(vec3<f32>(1.08, 1.02, 0.80), vec3<f32>(0.82, 0.95, 0.90), tint_patch) * mix(0.8, 1.15, tuft);
     let clump_hue = rand(clump.id, 6u);
     let dry = select(0.0, 0.3 + 0.7 * rand(id, 11u), rand(id, 12u) < 0.15);
-    var base_colour = mix(vec3<f32>(0.020, 0.075, 0.010), vec3<f32>(0.025, 0.100, 0.012), clump_hue);
+    var base_colour = mix(vec3<f32>(0.045, 0.120, 0.022), vec3<f32>(0.055, 0.150, 0.026), clump_hue);
     var tip_colour = mix(vec3<f32>(0.50, 0.66, 0.18), vec3<f32>(0.62, 0.74, 0.28), clump_hue);
     tip_colour = mix(tip_colour, vec3<f32>(0.66, 0.58, 0.26), dry);
     if (fescue) {
-        base_colour = vec3<f32>(0.02, 0.07, 0.04);
+        base_colour = vec3<f32>(0.045, 0.115, 0.065);
         tip_colour = vec3<f32>(0.40, 0.58, 0.30);
     } else if (rye) {
-        base_colour = vec3<f32>(0.015, 0.08, 0.01);
+        base_colour = vec3<f32>(0.035, 0.125, 0.022);
         tip_colour = vec3<f32>(0.30, 0.62, 0.10);
     }
-    let occlusion = mix(0.25, 1.0, t * t);
+    let occlusion = mix(0.5, 1.0, t * t);
     let ramp = mix(base_colour, tip_colour, t * t) * tone * mottle * occlusion;
     // Past a few metres a blade settles onto its average colour: a lone bright
     // tip on a sub-pixel blade would otherwise flicker like a firefly.
@@ -407,8 +469,150 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
     return out;
 }
 
+// Flower patches: each meadow cell of about 14 m blooms with one kind, thick
+// where noise opens a patch, a rare stray elsewhere. position.z picks the
+// part: stem 10, petals 11-18, leaves 30-31.
+struct Bloom {
+    height: f32,
+    petals: u32,
+    petal_len: f32,
+    petal_w: f32,
+    cup: f32,
+    // Above zero the petals stack up a seed head this tall instead.
+    spike: f32,
+    petal: vec3<f32>,
+    centre: vec3<f32>,
+};
+
+fn bloom_kind(kind: u32, pick: f32) -> Bloom {
+    if (kind == 0u) { // daisy
+        return Bloom(mix(0.14, 0.20, pick), 8u, 0.013, 0.005, 0.1, 0.0, vec3<f32>(0.92, 0.92, 0.86), vec3<f32>(0.88, 0.66, 0.10));
+    }
+    if (kind == 1u) { // buttercup
+        return Bloom(mix(0.25, 0.38, pick), 5u, 0.010, 0.009, 0.9, 0.0, vec3<f32>(0.96, 0.80, 0.08), vec3<f32>(0.82, 0.60, 0.05));
+    }
+    if (kind == 2u) { // red clover
+        return Bloom(mix(0.12, 0.18, pick), 8u, 0.009, 0.006, 1.8, 0.0, vec3<f32>(0.80, 0.34, 0.55), vec3<f32>(0.62, 0.22, 0.40));
+    }
+    if (kind == 3u) { // cornflower
+        return Bloom(mix(0.35, 0.50, pick), 8u, 0.015, 0.006, 0.3, 0.0, vec3<f32>(0.24, 0.36, 0.86), vec3<f32>(0.18, 0.14, 0.45));
+    }
+    if (kind == 4u) { // poppy
+        return Bloom(mix(0.35, 0.50, pick), 4u, 0.026, 0.024, 0.7, 0.0, vec3<f32>(0.86, 0.10, 0.05), vec3<f32>(0.16, 0.12, 0.08));
+    }
+    if (kind == 5u) { // dandelion
+        return Bloom(mix(0.15, 0.25, pick), 8u, 0.014, 0.005, 0.5, 0.0, vec3<f32>(0.96, 0.82, 0.10), vec3<f32>(0.90, 0.70, 0.08));
+    }
+    // timothy: a tall grass with a cylindrical seed head
+    return Bloom(mix(0.45, 0.70, pick), 8u, 0.006, 0.006, 0.0, 0.08, vec3<f32>(0.36, 0.44, 0.20), vec3<f32>(0.30, 0.38, 0.16));
+}
+
+// A stem point `t` up a plant: upright with a downwind bow, laid along the
+// roll where a wheel pressed it.
+fn flower_stem(t: f32, height: f32, bow: vec3<f32>, lay: vec3<f32>, flat: f32) -> vec3<f32> {
+    let upright = vec3<f32>(0.0, height * t, 0.0) + bow * (height * t * t);
+    return mix(upright, lay * (height * t) + vec3<f32>(0.0, 0.01 * t, 0.0), flat);
+}
+
+fn flower(vertex: Vertex) -> VertexOutput {
+    let chunk_seed = pcg(bitcast<u32>(i32(field.corner.x)) * 73856093u
+        ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
+    let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x5F3759DFu);
+    let base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
+    let sampled = sample_field(base);
+    let ground = vec3<f32>(base.x, sampled.x, base.y);
+    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
+    let distance = length(ground - view.world_position);
+    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
+    let end = blade_fade_end(rank);
+    // One kind per warped cell; noise opens the patches inside it.
+    let warp = vec2<f32>(noise(base * 0.04 + vec2<f32>(5.1, -3.3)),
+        noise(base * 0.04 + vec2<f32>(-7.7, 2.9))) - vec2<f32>(0.5);
+    let cell = floor((base + warp * 24.0) / 14.0);
+    let kind = pcg(bitcast<u32>(i32(cell.x)) * 2654435761u ^ bitcast<u32>(i32(cell.y)) * 40503u) % 7u;
+    let opening = smoothstep(0.52, 0.72, noise(base * 0.11 + cell * 3.7));
+    let kept = rand(id, 3u) < opening + 0.004;
+    let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
+        * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+    if (coverage <= 0.0) {
+        return culled_vertex();
+    }
+    let b = bloom_kind(kind, rand(id, 4u));
+    // Heads grow a little with distance so a patch still reads as colour.
+    let head = clamp(distance / 8.0, 1.0, 3.0);
+    let part = vertex.position.z;
+    let t = vertex.position.y;
+    let side = vertex.position.x;
+    let yaw = rand(id, 5u) * 6.2831853;
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let pressed = sample_trample(base);
+    let flat = clamp(pressed.x, 0.0, 1.0) * field.wheels.bend;
+    let roll = wheel_roll(pressed);
+    let tilt = vec2<f32>(cos(yaw), sin(yaw)) * 0.12 * rand(id, 6u);
+    let bow = vec3<f32>(tilt.x, 0.0, tilt.y)
+        + plant_lean(base, globals.time, field.wind, rand(id, 9u), 1.0) * 1.1
+            * (1.0 - clamp(pressed.x, 0.0, 1.0));
+    let top = flower_stem(1.0, b.height, bow, roll, flat);
+    var offset: vec3<f32>;
+    var normal: vec3<f32>;
+    var color: vec3<f32>;
+    if (part < 10.5) {
+        let across = vec3<f32>(-sin(yaw), 0.0, cos(yaw));
+        offset = flower_stem(t, b.height, bow, roll, flat) + across * (side * 0.0012 * (1.4 - t));
+        color = mix(vec3<f32>(0.07, 0.16, 0.04), vec3<f32>(0.20, 0.34, 0.10), t);
+        normal = normalize(ground_normal + across * side * 0.5);
+    } else if (part < 19.5) {
+        let k = u32(part - 10.5);
+        let angle = yaw + f32(k) / f32(b.petals) * 6.2831853;
+        let out_dir = vec3<f32>(cos(angle), 0.0, sin(angle));
+        let across = vec3<f32>(-sin(angle), 0.0, cos(angle));
+        let width = b.petal_w * head * sin(3.14159265 * min(t * 0.85 + 0.15, 1.0)) * side * 0.5;
+        var petal: vec3<f32>;
+        if (b.spike > 0.0) {
+            petal = top + up * ((f32(k) + t * 1.5) / 8.0 * b.spike)
+                + out_dir * 0.003 * head + across * width;
+        } else {
+            petal = top + out_dir * (t * b.petal_len * head)
+                + up * (b.cup * t * t * b.petal_len * head) + across * width;
+        }
+        offset = select(top, petal, k < b.petals);
+        color = mix(b.centre, b.petal, smoothstep(0.2, 0.4, t)) * mix(1.0, 0.65, smoothstep(8.0, 30.0, distance));
+        normal = normalize(up + out_dir * (0.3 - b.cup * 0.3));
+    } else {
+        let leaf = part - 30.0;
+        let angle = yaw + 2.2 + leaf * 3.1;
+        let out_dir = vec3<f32>(cos(angle), 0.0, sin(angle));
+        let across = vec3<f32>(-sin(angle), 0.0, cos(angle));
+        let leaf_len = b.height * 0.35;
+        offset = flower_stem(0.25 + 0.2 * leaf, b.height, bow, roll, flat)
+            + out_dir * (t * leaf_len) + up * (leaf_len * (0.4 * t - 0.5 * t * t))
+            + across * (side * 0.004 * sin(3.14159265 * t));
+        color = vec3<f32>(0.10, 0.22, 0.06) * (0.9 + 0.2 * t);
+        normal = normalize(up + out_dir * 0.4);
+    }
+    let tone = 0.9 + 0.2 * rand(id, 7u);
+    var out: VertexOutput;
+    out.world_position = vec4<f32>(ground + offset * coverage, 1.0);
+    out.clip_position = view.clip_from_world * out.world_position;
+    out.world_normal = normalize(mix(normal, ground_normal, flat));
+    out.ground_normal = ground_normal;
+    out.canopy_uv = vec3<f32>(side, t, 0.0);
+    out.color = vec4<f32>(color * tone * (1.0 - field.wheels.darkening * clamp(pressed.x, 0.0, 1.0)), 1.0);
+    return out;
+}
+
+// A vertex of an instance culled before any shaping: outside the clip volume.
+fn culled_vertex() -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+    return out;
+}
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
+    if (vertex.position.z > 9.5) {
+        return flower(vertex);
+    }
     if (vertex.position.z > 0.5) {
         return meadow_detail(vertex);
     }
@@ -445,7 +649,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let pressed = sample_trample(base_xz);
     if (vertex.position.z < -0.5) {
         let cluster = canopy_vertex(vertex.position, vec3<f32>(base_xz.x, ground_y, base_xz.y),
-            ground_normal, seed, distance, alive, pressed, field.wheels.bend, false);
+            ground_normal, seed, distance, alive, pressed, field.wheels.bend, false, field.wind);
         var out: VertexOutput;
         out.world_position = vec4<f32>(cluster.position, 1.0);
         out.clip_position = view.clip_from_world * out.world_position;
@@ -483,7 +687,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.world_position = in.world_position;
     pbr_input.world_normal = normalize(in.ground_normal);
     pbr_input.V = calculate_view(in.world_position, false);
-    pbr_input.N = foliage_normal(normalize(in.world_normal), pbr_input.world_normal, pbr_input.V);
+    pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
 
     var color = apply_pbr_lighting(pbr_input);

@@ -9,6 +9,7 @@ mod harvested_wheat;
 mod layout;
 mod profile;
 mod render;
+mod wind_map;
 mod runtime;
 mod textures;
 
@@ -30,7 +31,7 @@ impl Plugin for FieldsPlugin {
             .init_resource::<contacts::WheelContacts>()
             .add_plugins(ExtractResourcePlugin::<contacts::WheelContacts>::default())
             .add_systems(First, contacts::begin_wheel_contacts)
-            .add_systems(Update, textures::prepare_textures)
+            .add_systems(Update, (textures::prepare_textures, render::sync_wind))
             .add_plugins((
                 clumps::ClumpsPlugin,
                 grassland::GrasslandPlugin,

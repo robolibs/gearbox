@@ -7,8 +7,10 @@ struct SurfaceGeometryParams {
 }
 
 fn foliage_normal(normal: vec3<f32>, ground: vec3<f32>, view: vec3<f32>) -> vec3<f32> {
-    let vertical = dot(normal, ground);
-    var lateral = normal - ground * vertical;
+    // A degenerate or NaN blade normal falls back to the ground's.
+    let n = select(ground, normalize(normal), dot(normal, normal) > 1e-8);
+    let vertical = dot(n, ground);
+    var lateral = n - ground * vertical;
     lateral *= select(-1.0, 1.0, dot(lateral, view) >= 0.0);
     return normalize(lateral + ground * max(abs(vertical), 0.55));
 }

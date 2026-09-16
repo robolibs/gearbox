@@ -125,7 +125,7 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     let mat = fiber_stamp(world_xz, 0.27, 0.032, footprint, 83.6);
     var ground = meadow_canopy(pattern) * texture_detail
         * mix(0.72, 1.20, tufts) * mix(0.90, 1.08, litter);
-    let blade_color = mix(vec3<f32>(0.23, 0.39, 0.095), vec3<f32>(0.30, 0.34, 0.105), dry * 0.5) * meadow_tint(pattern);
+    let blade_color = mix(vec3<f32>(0.16, 0.27, 0.066), vec3<f32>(0.21, 0.24, 0.074), dry * 0.5) * meadow_tint(pattern);
     ground = mix(ground, blade_color, clamp(fine * 0.55 + blades * 0.50 + mat * 0.30, 0.0, 0.8));
     ground *= species_tint(grass_species(world_xz));
     let pressed = trample_pressed(world_xz);

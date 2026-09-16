@@ -23,6 +23,11 @@ pub struct EnvironmentSettings {
     pub fog_extinction: f32,
     pub clouds: CloudsConfig,
     pub cloud_velocity: Vec2,
+    /// Where the wind blows towards, degrees from +X towards +Z.
+    pub wind_heading_deg: f32,
+    pub wind_speed_mps: f32,
+    /// How far the push drops between gusts: 0 steady, 1 gusty.
+    pub wind_gustiness: f32,
 }
 
 impl Default for EnvironmentSettings {
@@ -83,6 +88,9 @@ impl Default for EnvironmentSettings {
                 ..default()
             },
             cloud_velocity: Vec2::new(12.0, 4.0),
+            wind_heading_deg: 36.87,
+            wind_speed_mps: 4.0,
+            wind_gustiness: 0.7,
         }
     }
 }
@@ -91,6 +99,19 @@ impl EnvironmentSettings {
     pub fn apply_calendar(&mut self) {
         self.sun_override = false;
         self.sun_position = self.calendar.sun_direction();
+    }
+
+    /// The wind as the vegetation shaders read it: downwind x and z, speed in
+    /// m/s and gustiness.
+    pub fn wind_vector(&self) -> Vec4 {
+        let (sin, cos) = self.wind_heading_deg.to_radians().sin_cos();
+        Vec4::new(cos, sin, self.wind_speed_mps.max(0.0), self.wind_gustiness.clamp(0.0, 1.0))
+    }
+
+    /// Beaufort force of the wind speed, 0 calm to 12 hurricane.
+    pub fn beaufort(&self) -> usize {
+        const LIMITS: [f32; 12] = [0.5, 1.6, 3.4, 5.5, 8.0, 10.8, 13.9, 17.2, 20.8, 24.5, 28.5, 32.7];
+        LIMITS.iter().filter(|limit| self.wind_speed_mps >= **limit).count()
     }
 }
 

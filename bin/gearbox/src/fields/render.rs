@@ -101,6 +101,23 @@ pub struct VegetationParams {
     pub inverse_square_thinning: u32,
     pub bounds: Vec4,
     pub wheels: WheelMapParams,
+    /// Downwind direction (x, z), speed in m/s and gustiness, for every layer.
+    pub wind: Vec4,
+}
+
+/// Carries the environment's wind to every field's vegetation uniforms,
+/// writing only when it changed so the chunk uniforms are not rewritten.
+pub(crate) fn sync_wind(
+    settings: Res<crate::environment::EnvironmentSettings>,
+    mut fields: ResMut<RenderFields>,
+) {
+    let wind = settings.wind_vector();
+    if fields.0.values().all(|field| field.params.wind == wind) {
+        return;
+    }
+    for field in fields.0.values_mut() {
+        field.params.wind = wind;
+    }
 }
 
 pub struct VegetationPlugin;
@@ -381,6 +398,8 @@ fn prepare_vegetation_bind_group(
                     &trample.texture_view,
                     &albedo.texture_view,
                     &albedo.sampler,
+                    &pipeline.wind_map,
+                    &pipeline.wind_sampler,
                 )),
             );
             groups.insert(key, group);
@@ -492,12 +511,15 @@ struct VegetationPipeline {
     field_layout: BindGroupLayoutDescriptor,
     empty_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
+    wind_map: TextureView,
+    wind_sampler: Sampler,
 }
 
 fn init_vegetation_pipeline(
     mut commands: Commands,
     mesh_pipeline: Res<MeshPipeline>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
 ) {
     let field_layout = BindGroupLayoutDescriptor::new(
         "vegetation field layout",
@@ -508,6 +530,8 @@ fn init_vegetation_pipeline(
                 sampler(SamplerBindingType::NonFiltering),
                 uniform_buffer::<VegetationParams>(true),
                 texture_2d(TextureSampleType::Uint),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
             ),
@@ -521,11 +545,42 @@ fn init_vegetation_pipeline(
         min_filter: FilterMode::Nearest,
         ..default()
     });
+    let wind_map = render_device
+        .create_texture_with_data(
+            &render_queue,
+            &TextureDescriptor {
+                label: Some("vegetation gust map"),
+                size: Extent3d {
+                    width: super::wind_map::SIZE,
+                    height: super::wind_map::SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba8Unorm,
+                usage: TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            TextureDataOrder::LayerMajor,
+            &super::wind_map::bake(),
+        )
+        .create_view(&TextureViewDescriptor::default());
+    let wind_sampler = render_device.create_sampler(&SamplerDescriptor {
+        label: Some("vegetation gust sampler"),
+        address_mode_u: AddressMode::Repeat,
+        address_mode_v: AddressMode::Repeat,
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Linear,
+        ..default()
+    });
     commands.insert_resource(VegetationPipeline {
         mesh_pipeline: mesh_pipeline.clone(),
         field_layout,
         empty_layout: BindGroupLayoutDescriptor::new("vegetation empty layout", &[]),
         sampler,
+        wind_map,
+        wind_sampler,
     });
 }
 

@@ -117,7 +117,7 @@ struct WarnedOnce(HashSet<String>);
 
 /// Machines whose authored link values have been copied into `LinkValues`.
 #[derive(Resource, Default)]
-struct SeededLinkValues(HashSet<String>);
+pub(crate) struct SeededLinkValues(pub(crate) HashSet<String>);
 
 pub struct ServicesPlugin;
 

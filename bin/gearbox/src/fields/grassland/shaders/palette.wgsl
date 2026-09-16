@@ -56,7 +56,7 @@ fn meadow_tint(pattern: vec3<f32>) -> vec3<f32> {
 }
 
 fn meadow_canopy(pattern: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(0.19, 0.31, 0.075) * meadow_tint(pattern);
+    return vec3<f32>(0.13, 0.215, 0.052) * meadow_tint(pattern);
 }
 
 // Fescue (x) and ryegrass (y) patch weights; meadow grass fills the rest.
