@@ -29,8 +29,15 @@ local make = oslo.make
 -- that proc entry is tied to the kernel module being loaded at this exact instant and has
 -- been observed to read as briefly absent even while `nvidia-smi`/`lspci` see the card
 -- fine moments before and after (module reload / on-demand-load race) — a real NVIDIA
--- laptop hit exactly this and silently fell back to llvmpipe software rendering. The PCI
--- device itself doesn't come and go, so it can't flap the same way.
+-- laptop hit exactly this and silently fell back to llvmpipe software rendering.
+--
+-- Even the PCI bus itself was then observed to briefly not list the card right after a
+-- `cargo build` finished — PRIME/Optimus runtime power management on some laptops
+-- electrically powers the discrete GPU down while it's unused (a CPU-only build never
+-- touches it) and it takes a moment to come back once something asks for it. So this
+-- retries a few times over ~2s before believing "no NVIDIA" — cheap on a machine that
+-- truly has none (every retry misses instantly), but saves a real GPU from being
+-- mistaken for absent during its own wake-up.
 local function fresh_display_env(cmd)
   return ([[
 unset BACKEND RUN_WITH WAYLAND_DISPLAY DISPLAY __NV_PRIME_RENDER_OFFLOAD __NV_PRIME_RENDER_OFFLOAD_PROVIDER __GLX_VENDOR_LIBRARY_NAME __VK_LAYER_NV_optimus
@@ -43,7 +50,15 @@ else
   export BACKEND=x11
   export DISPLAY="${DISPLAY:-:1}"
 fi
-if lspci -d ::0300 2>/dev/null | grep -qi nvidia; then
+has_nvidia=0
+for attempt in 1 2 3 4 5; do
+  if lspci -d ::0300 2>/dev/null | grep -qi nvidia; then
+    has_nvidia=1
+    break
+  fi
+  sleep 0.4
+done
+if [ "$has_nvidia" = 1 ]; then
   export __NV_PRIME_RENDER_OFFLOAD=1
   export __NV_PRIME_RENDER_OFFLOAD_PROVIDER=NVIDIA-G0
   export __GLX_VENDOR_LIBRARY_NAME=nvidia
