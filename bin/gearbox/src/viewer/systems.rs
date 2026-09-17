@@ -324,13 +324,20 @@ pub(crate) fn asset_bounds(
     Some(((wmin + wmax) * 0.5, (wmax - wmin).length() * 0.5))
 }
 
-/// Pin the camera focus to the current body position without overriding zoom.
+/// Pin the camera focus to the current body position without overriding
+/// zoom, and slew the orbit yaw toward "behind the machine" as it turns —
+/// otherwise `chase_camera_fly`'s one-shot yaw alignment (on double-click)
+/// is the only place yaw ever tracks heading, and it freezes the moment
+/// that cinematic ends, so a machine that turns afterward drifts out from
+/// in front of the camera instead of staying chased.
 fn follow_target(
     mut follow: ResMut<FollowTarget>,
     commands: Res<HostCommands>,
     fly: Res<FlyTo>,
     agent_fly: Res<ChaseCameraFly>,
+    time: Res<Time>,
     inventory: Res<ControllerInventory>,
+    states: Res<ControllerStates>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     mut camera: ParamSet<(
@@ -356,8 +363,14 @@ fn follow_target(
         return;
     };
     let current = gt.translation();
+    let target_yaw = machine_heading(root, &gt, &inventory, &states) + std::f32::consts::PI;
+    // Frame-rate independent exponential smoothing, same shape as the fly's
+    // smoothstep-lerp but running every frame instead of over a fixed span.
+    const CATCH_UP_RATE: f32 = 2.5;
+    let s = 1.0 - (-CATCH_UP_RATE * time.delta_secs()).exp();
     for (mut cam, mut tr) in &mut camera.p1() {
         cam.focus = current;
+        cam.yaw = lerp_angle(cam.yaw, target_yaw, s);
         apply_rig(&cam, &mut tr);
     }
 }
