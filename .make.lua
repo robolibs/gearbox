@@ -38,38 +38,62 @@ local make = oslo.make
 -- retries a few times over ~2s before believing "no NVIDIA" — cheap on a machine that
 -- truly has none (every retry misses instantly), but saves a real GPU from being
 -- mistaken for absent during its own wake-up.
+--
+-- Deliberately does NOT use the names `BACKEND`/`RUN_WITH`/`WAYLAND_DISPLAY`/`DISPLAY` for
+-- its own computed values: on at least one machine those names came back `readonly` in the
+-- interactive shell (set once, presumably by the same `.env.lua`/`.display.sh` activation
+-- on `cd`, then locked), so `unset`/`export` on them silently no-ops and this whole
+-- detection block would compute the right answer and then have it thrown away. `_gb_*`
+-- names can't collide with anything set before this script runs.
 local function fresh_display_env(cmd)
   return ([[
-unset BACKEND RUN_WITH WAYLAND_DISPLAY DISPLAY __NV_PRIME_RENDER_OFFLOAD __NV_PRIME_RENDER_OFFLOAD_PROVIDER __GLX_VENDOR_LIBRARY_NAME __VK_LAYER_NV_optimus
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-sock="$XDG_RUNTIME_DIR/${WAYLAND_DISPLAY:-wayland-0}"
-if [ -S "$sock" ]; then
-  export BACKEND=wayland
-  export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+_gb_xdg_runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# An inherited WAYLAND_DISPLAY can name a socket that doesn't exist any more
+# — a compositor restart hands out a fresh randomized socket name, and a
+# long-lived shell keeps the old one exported forever. So this never trusts
+# the name alone: it only uses it if that exact socket is still live, then
+# falls back to the conventional wayland-0, then as a last resort picks
+# whichever wayland-* socket in the runtime dir was touched most recently
+# (the one a fresh compositor session would have just made).
+_gb_wl=""
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$_gb_xdg_runtime/$WAYLAND_DISPLAY" ]; then
+  _gb_wl="$WAYLAND_DISPLAY"
+elif [ -S "$_gb_xdg_runtime/wayland-0" ]; then
+  _gb_wl="wayland-0"
 else
-  export BACKEND=x11
+  _gb_wl=$(ls -t "$_gb_xdg_runtime"/wayland-* 2>/dev/null | grep -v '\.lock$' | head -n1 | xargs -r basename)
+fi
+if [ -n "$_gb_wl" ]; then
+  _gb_backend=wayland
+  export WAYLAND_DISPLAY="$_gb_wl"
+  unset DISPLAY
+else
+  _gb_backend=x11
   export DISPLAY="${DISPLAY:-:1}"
+  unset WAYLAND_DISPLAY
 fi
 echo "gpu-detect: lspci=$(command -v lspci || echo 'NOT FOUND')" 1>&2
-has_nvidia=0
-for attempt in 1 2 3 4 5; do
-  lspci_out=$(lspci -d ::0300 2>&1)
-  echo "gpu-detect: attempt $attempt: [$lspci_out]" 1>&2
-  if echo "$lspci_out" | grep -qi nvidia; then
-    has_nvidia=1
+_gb_has_nvidia=0
+for _gb_attempt in 1 2 3 4 5; do
+  _gb_lspci_out=$(lspci -d ::0300 2>&1)
+  echo "gpu-detect: attempt $_gb_attempt: [$_gb_lspci_out]" 1>&2
+  if echo "$_gb_lspci_out" | grep -qi nvidia; then
+    _gb_has_nvidia=1
     break
   fi
   sleep 0.4
 done
-if [ "$has_nvidia" = 1 ]; then
+if [ "$_gb_has_nvidia" = 1 ]; then
   export __NV_PRIME_RENDER_OFFLOAD=1
   export __NV_PRIME_RENDER_OFFLOAD_PROVIDER=NVIDIA-G0
   export __GLX_VENDOR_LIBRARY_NAME=nvidia
   export __VK_LAYER_NV_optimus=NVIDIA_only
-  export RUN_WITH=nixVulkan
+  _gb_run_with=nixVulkan
 else
-  export RUN_WITH=nixVulkanIntel
+  unset __NV_PRIME_RENDER_OFFLOAD __NV_PRIME_RENDER_OFFLOAD_PROVIDER __GLX_VENDOR_LIBRARY_NAME __VK_LAYER_NV_optimus
+  _gb_run_with=nixVulkanIntel
 fi
+echo "gpu-detect: resolved backend=$_gb_backend run_with=$_gb_run_with" 1>&2
 %s
 ]]):format(cmd)
 end
@@ -123,7 +147,7 @@ make.recipe{
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$BACKEND $RUN_WITH target/debug/gearbox run %s"):format(a.args or "")))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend $_gb_run_with target/debug/gearbox run %s"):format(a.args or "")))
   end,
 }
 make.alias("r", "run")
@@ -135,7 +159,7 @@ make.recipe{
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$BACKEND $RUN_WITH target/debug/gearbox launch %s"):format(a.args or "")))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend $_gb_run_with target/debug/gearbox launch %s"):format(a.args or "")))
   end,
 }
 
