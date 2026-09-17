@@ -47,6 +47,7 @@ local make = oslo.make
 -- names can't collide with anything set before this script runs.
 local function fresh_display_env(cmd)
   return ([[
+set -x
 _gb_xdg_runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # An inherited WAYLAND_DISPLAY can name a socket that doesn't exist any more
 # — a compositor restart hands out a fresh randomized socket name, and a
