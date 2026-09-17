@@ -26,14 +26,16 @@ available for USD-relative paths. Neighbouring fields share terrain collision an
 
 ## Select a layout
 
-The default is all harvested wheat (straw stubble). From the repository root:
+The default is the bundled `mixed.json` (grassland with a harvested-wheat stubble region).
+From the repository root:
 
 ```sh
-GEARBOX_FIELD_LAYOUT=bin/gearbox/src/fields/layouts/mixed.json make run
 GEARBOX_FIELD_LAYOUT=bin/gearbox/src/fields/layouts/grassland.json make run
+GEARBOX_FIELD_LAYOUT=bin/gearbox/src/fields/layouts/harvested_wheat.json make run
 ```
 
-Use `BACKEND=wayland` and `WAYLAND_DISPLAY=wayland-0` where required by the desktop.
+`make run` detects Wayland/NVIDIA on its own each launch; no `BACKEND`/`WAYLAND_DISPLAY`
+setup is needed.
 
 A layout chooses a `default` profile for uncovered terrain and optional named rectangular
 `fields`. Coordinates are world XZ metres. Fields must have finite, positive bounds inside

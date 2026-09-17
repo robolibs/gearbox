@@ -7,9 +7,10 @@ oslo.direnv.path_add("./target/release")
 
 oslo.env.set("TOP_HEAD", oslo.sys.pwd())
 
--- Bevy/wgpu needs the render-offload provider and a live display socket; shared with every
--- other robolibs checkout so the Wayland/NVIDIA detection lives in one place.
-oslo.source("/home/bresilla/data/code/robolibs/.display.sh")
+-- Wayland/NVIDIA render-offload detection lives entirely in `.make.lua`'s `run`/`sim`
+-- recipes now (self-contained, no external file) — it runs fresh on every launch rather
+-- than once here, so it can't go stale for the rest of the shell session the way sourcing
+-- it here once did.
 
 oslo.env.set_alias("_b", "make build")
 oslo.env.set_alias("_c", "make compile")
