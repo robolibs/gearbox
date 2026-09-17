@@ -31,15 +31,14 @@ mod tests {
     }
 
     #[test]
-    fn default_layout_is_one_region() {
+    fn default_layout_is_the_bundled_mixed_layout() {
         let domain = FieldBounds {
             min: Vec2::splat(-400.0),
             max: Vec2::splat(400.0),
         };
         let regions = FieldLayout::default().regions(domain);
-        assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].bounds(), domain);
-        assert_eq!(regions[0].profile, "harvested_wheat");
+        assert!(regions.iter().any(|field| field.profile == "grassland"));
+        assert!(regions.iter().any(|field| field.profile == "harvested_wheat"));
     }
 }
 
@@ -95,10 +94,11 @@ pub struct FieldLayout {
 
 impl Default for FieldLayout {
     fn default() -> Self {
-        Self {
-            default: "harvested_wheat".into(),
-            fields: Vec::new(),
-        }
+        // Grass everywhere, with a harvested-wheat stubble region cut into
+        // it — the bundled `mixed.json` is the single source of truth for
+        // this so the default layout can't drift from its own test fixture.
+        serde_json::from_str(include_str!("layouts/mixed.json"))
+            .expect("bundled default field layout must be valid")
     }
 }
 
