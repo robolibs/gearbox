@@ -6,23 +6,42 @@
 --   make test       the suite
 --
 -- At an oslo prompt in this directory `make` is enough; everywhere else it is `oslo make`.
--- The dev shell's toolchain comes from `.env.lua`'s `nix_develop()`, so recipes call `cargo`
--- directly rather than wrapping every command in `nix develop -c`.
+-- The dev shell's toolchain comes from `.env.lua`'s `nix_develop()`, so most recipes call
+-- `cargo` directly rather than wrapping every command in `nix develop -c`. `run`/`sim` are
+-- the exception — they invoke `nix develop -c` themselves; see `fresh_display_env` below
+-- for why.
 
 local make = oslo.make
 
--- `run`/`sim` re-detect the Wayland socket fresh, every launch, instead of trusting
--- whatever WAYLAND_DISPLAY a shell happened to inherit — a compositor restart hands out a
--- fresh randomized socket name, and a long-lived shell keeps the old (now-dead) one
--- exported forever, which would silently fall back to XWayland.
+-- `run`/`sim` re-detect the Wayland socket and NVIDIA presence fresh, every launch, and
+-- invoke `nix develop` themselves — deliberately NOT relying on `.env.lua`'s one-time,
+-- already-cached devshell activation (or oslo's own `oslo.env.set`) for the NVIDIA choice.
 --
--- NVIDIA/`nixVulkan` is deliberately NOT re-decided here: `.env.lua` sets NVIDIA_VERSION
--- (and the PRIME render-offload vars) once, before the flake's devshell is evaluated,
--- which is what actually decides whether the `nixVulkan` alias symlinks to
--- `nixVulkanNvidia-<version>` or `nixVulkanIntel` — that choice is baked into the nix
--- store at devshell-build time, so re-picking it per launch here can't override it
--- anyway. Get `.env.lua`'s detection right (re-`cd` into the directory) rather than
--- fighting it here.
+-- gearbox's flake.nix decides once, at devshell-evaluation time, whether `nixVulkan`
+-- symlinks to `nixVulkanNvidia-<version>` or `nixVulkanIntel`, by reading NVIDIA_VERSION
+-- through Nix's impure `builtins.getEnv`. Getting a correctly-detected value in front of
+-- that read turned out to need real care:
+--   - `oslo.env.set(...)` in `.env.lua` does NOT set a real process environment variable
+--     immediately — it only queues something for the *calling* shell to pick up after the
+--     whole script returns, so a `nix_develop()` call later in that same script can never
+--     see it (proven: an unconditional `error()` at the top of `.env.lua` doesn't even
+--     fire during `oslo make <recipe>` — that file isn't evaluated by these commands at
+--     all, only by the interactive shell's own directory-entry hook).
+--   - Nix's evaluation sandbox blocks raw file reads like `/proc/driver/nvidia/version`
+--     even with `--impure` (`builtins.readFile` "succeeds" but returns empty), so
+--     `flake.nix` reading the version itself isn't an option either.
+--   - The one thing that reliably works: a real shell `export FOO=...` followed by
+--     `nix develop --impure -c ...` *in that same process* — env vars genuinely are
+--     inherited through the sandbox for `builtins.getEnv`, just not files. So this runs
+--     `nix develop` itself, right after exporting, instead of trusting whatever devshell
+--     was already active.
+--
+-- NVIDIA presence is checked via /sys/bus/pci/devices/*/vendor (the kernel's own PCI bus
+-- enumeration — no `lspci` dependency, so no PATH-availability risk), which reflects
+-- hardware presence regardless of whether the nvidia kernel module is loaded at this
+-- instant. The driver *version* does need the module loaded, via
+-- /proc/driver/nvidia/version, which can briefly lag behind hardware presence (module
+-- reload / on-demand-load race), so only that read retries.
 --
 -- Deliberately does NOT use the names `BACKEND`/`WAYLAND_DISPLAY`/`DISPLAY` for its own
 -- computed values: on at least one machine those names came back `readonly` in the
@@ -49,7 +68,21 @@ else
   export DISPLAY="${DISPLAY:-:1}"
   unset WAYLAND_DISPLAY
 fi
-%s
+unset NVIDIA_VERSION
+for _gb_vendor_file in /sys/bus/pci/devices/*/vendor; do
+  if [ "$(cat "$_gb_vendor_file" 2>/dev/null)" = "0x10de" ]; then
+    for _gb_attempt in 1 2 3 4 5; do
+      _gb_ver=$(sed -nE 's/.*  ([0-9.]+)  Release.*/\1/p' /proc/driver/nvidia/version 2>/dev/null | head -n1)
+      if [ -n "$_gb_ver" ]; then
+        export NVIDIA_VERSION="$_gb_ver"
+        break
+      fi
+      sleep 0.4
+    done
+    break
+  fi
+done
+exec nix develop --impure -c %s
 ]]):format(cmd)
 end
 
