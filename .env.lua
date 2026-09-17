@@ -6,27 +6,45 @@
 -- that alias silently bakes in nixVulkanIntel instead — permanently, for the whole
 -- session, regardless of what real hardware is present. So this has to run first.
 --
--- Presence is checked against the PCI bus, not the driver version file directly: that
--- proc entry is tied to the kernel module being loaded at this exact instant and has been
--- observed to briefly read as absent even while `lspci` sees the card fine moments before
--- and after (module reload / on-demand-load race), so this retries a few times before
--- giving up — cheap on a machine with no NVIDIA GPU (every retry misses instantly), but
--- saves a real GPU's driver version from being missed during a momentary reload.
+-- Pure Lua/`oslo.fs`, no shelling out to `lspci`/`sh` at all: this runs as part of an
+-- interactive login shell's own directory-entry hook (this machine's shell IS `oslo`), a
+-- context that can have a much more minimal PATH than a one-off `oslo make` invocation
+-- does — `lspci` silently not being found there was exactly what caused this to keep
+-- computing "no NVIDIA" even right after being fixed and re-verified working from a
+-- plain shell. `/sys/bus/pci/devices/*/vendor` is the kernel's own PCI bus enumeration,
+-- always readable with no external command, and reflects hardware presence regardless of
+-- whether the nvidia kernel module happens to be loaded at this exact instant.
+--
+-- The driver *version* (for the `nixVulkanNvidia-<version>` package name) does need the
+-- module loaded, via /proc/driver/nvidia/version, which can briefly lag behind hardware
+-- presence (module reload / on-demand-load race) — so only that read retries, with a
+-- pure-Lua busy-wait (no external `sleep` either) between attempts.
+local function busy_wait(seconds)
+  local start = os.clock()
+  while os.clock() - start < seconds do end
+end
+
 local function detect_nvidia_version()
-  local pci = oslo.run{ "sh", "-c", "lspci -d 10de::03xx 2>/dev/null", capture = true }
-  if not pci.ok or not pci.out or pci.out:match("^%s*$") then
+  local has_nvidia = false
+  for _, path in ipairs(oslo.fs.glob("/sys/bus/pci/devices/*/vendor")) do
+    local vendor = oslo.fs.read(path)
+    if vendor and vendor:match("^%s*0x10de%s*$") then
+      has_nvidia = true
+      break
+    end
+  end
+  if not has_nvidia then
     return nil
   end
   for _ = 1, 5 do
-    local ver = oslo.run{
-      "sh", "-c",
-      "head -n1 /proc/driver/nvidia/version 2>/dev/null | sed -nE 's/.*  ([0-9.]+)  Release.*/\\1/p'",
-      capture = true,
-    }
-    if ver.ok and ver.out and not ver.out:match("^%s*$") then
-      return ver.out:match("^%s*(.-)%s*$")
+    local ver = oslo.fs.read("/proc/driver/nvidia/version")
+    if ver then
+      local version = ver:match("%s%s(%d[%d%.]*)%s%sRelease")
+      if version then
+        return version
+      end
     end
-    oslo.run{ "sh", "-c", "sleep 0.3" }
+    busy_wait(0.3)
   end
   return nil
 end
