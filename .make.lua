@@ -6,37 +6,20 @@
 --   make test       the suite
 --
 -- At an oslo prompt in this directory `make` is enough; everywhere else it is `oslo make`.
--- The dev shell's toolchain comes from `.env.lua`'s `nix_develop()`, so most recipes call
--- `cargo` directly rather than wrapping every command in `nix develop -c`. `run`/`sim` are
--- the exception — they invoke `nix develop -c` themselves; see `fresh_display_env` below.
+-- The dev shell's toolchain comes from `.env.lua`'s `nix_develop({ impure = true })`, so
+-- recipes call `cargo` directly rather than wrapping every command in `nix develop -c`.
+-- NVIDIA/`nixVulkan` detection lives in `.env.lua` (it decides the flake's own devshell
+-- package selection, so it has to run before `nix_develop()` does, once per
+-- directory-entry — see that file). This file only re-detects the Wayland socket per
+-- launch, since that (unlike NVIDIA presence) can genuinely change mid-session
+-- (compositor restart).
 
 local make = oslo.make
 
--- `run`/`sim` re-detect the Wayland socket and NVIDIA presence fresh, every launch, and
--- invoke `nix develop` themselves rather than trusting `.env.lua`'s devshell activation for
--- the NVIDIA choice specifically.
---
--- gearbox's flake.nix decides, at devshell-evaluation time, whether `nixVulkan` symlinks to
--- `nixVulkanNvidia-<version>` or `nixVulkanIntel`, by reading NVIDIA_VERSION through Nix's
--- impure `builtins.getEnv`. `.env.lua` (this directory's own) does correctly detect NVIDIA
--- and call `oslo.env.set("NVIDIA_VERSION", ...)` before its own `nix_develop()` call — but
--- `oslo.direnv.nix_develop()`'s internal `nix print-dev-env` invocation does not observe a
--- same-script `oslo.env.set()`, confirmed via a minimal repro flake (filed as
--- ISSUE_OSLO_MAKE.md in the oslo repo) even though `os.getenv()` and `oslo.run{}`
--- subprocesses now correctly do. So this can't be fixed from `.env.lua` alone yet.
---
--- The one thing proven to work: a real shell `export FOO=...` followed by
--- `nix develop --impure -c ...` *in that same shell script* — env vars are inherited
--- through Nix's sandbox for `builtins.getEnv`, just not through `nix_develop()`'s internal
--- subprocess spawn. So this exports NVIDIA_VERSION and calls `nix develop` itself, in one
--- script, instead of relying on whatever devshell was already active.
---
--- NVIDIA presence is checked via /sys/bus/pci/devices/*/vendor (the kernel's own PCI bus
--- enumeration — no `lspci` dependency, so no PATH-availability risk), which reflects
--- hardware presence regardless of whether the nvidia kernel module is loaded at this
--- instant. The driver *version* does need the module loaded, via
--- /proc/driver/nvidia/version, which can briefly lag behind hardware presence (module
--- reload / on-demand-load race), so only that read retries.
+-- `run`/`sim` re-detect the Wayland socket fresh, every launch, instead of trusting
+-- whatever WAYLAND_DISPLAY a shell happened to inherit — a compositor restart hands out a
+-- fresh randomized socket name, and a long-lived shell keeps the old (now-dead) one
+-- exported forever, which would silently fall back to XWayland.
 --
 -- Deliberately does NOT use the names `BACKEND`/`WAYLAND_DISPLAY`/`DISPLAY` for its own
 -- computed values: on at least one machine those names came back `readonly` in the
@@ -63,21 +46,7 @@ else
   export DISPLAY="${DISPLAY:-:1}"
   unset WAYLAND_DISPLAY
 fi
-unset NVIDIA_VERSION
-for _gb_vendor_file in /sys/bus/pci/devices/*/vendor; do
-  if [ "$(cat "$_gb_vendor_file" 2>/dev/null)" = "0x10de" ]; then
-    for _gb_attempt in 1 2 3 4 5; do
-      _gb_ver=$(sed -nE 's/.*  ([0-9.]+)  Release.*/\1/p' /proc/driver/nvidia/version 2>/dev/null | head -n1)
-      if [ -n "$_gb_ver" ]; then
-        export NVIDIA_VERSION="$_gb_ver"
-        break
-      fi
-      sleep 0.4
-    done
-    break
-  fi
-done
-exec nix develop --impure -c %s
+%s
 ]]):format(cmd)
 end
 
