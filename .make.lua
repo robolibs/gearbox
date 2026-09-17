@@ -50,9 +50,12 @@ else
   export BACKEND=x11
   export DISPLAY="${DISPLAY:-:1}"
 fi
+echo "gpu-detect: lspci=$(command -v lspci || echo 'NOT FOUND')" 1>&2
 has_nvidia=0
 for attempt in 1 2 3 4 5; do
-  if lspci -d ::0300 2>/dev/null | grep -qi nvidia; then
+  lspci_out=$(lspci -d ::0300 2>&1)
+  echo "gpu-detect: attempt $attempt: [$lspci_out]" 1>&2
+  if echo "$lspci_out" | grep -qi nvidia; then
     has_nvidia=1
     break
   fi
