@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 use mara::ui::mara_core;
-use mara_core::container::Tab;
+use mara_core::container::{Tab, TabContainer};
 use mara_core::pod::{Pod, PodResponse};
 use mara_core::vocab::Id as MaraId;
 use std::collections::HashMap;
@@ -79,9 +79,13 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         );
     }
 
-    let mut pods = vec![overlays_pod_built, tf_pod_built, render_pod_built];
-    pods.extend(camera_pods);
-    Tab::new(cid(P, "view"), "View", "camera").pods(pods)
+    // Same order as the flat list was, so `apply`'s pod indices hold.
+    Tab::new(cid(P, "view"), "View", "camera").containers(vec![
+        TabContainer::new(cid(P, "overlays"), "Overlays", "eye", vec![overlays_pod_built]),
+        TabContainer::new(cid(P, "tf"), "TF frames", "cube", vec![tf_pod_built]),
+        TabContainer::new(cid(P, "render"), "Render", "image", vec![render_pod_built]),
+        TabContainer::new(cid(P, "cameras"), "Saved views", "bookmark", camera_pods),
+    ])
 }
 
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, ctx: &PaneCtx) {

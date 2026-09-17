@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use mara::ui::mara_core;
-use mara_core::container::Tab;
+use mara_core::container::{Tab, TabContainer};
 use mara_core::pod::{Pod, PodResponse};
 use mara_core::vocab::Id as MaraId;
 use std::collections::HashMap;
@@ -100,7 +100,12 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         .with_button("Breeze", ctx.accent)
         .with_button("Gale", ctx.accent);
 
-    Tab::new(cid(P, "env"), "Environment", "weather-sunny").pods(vec![weather_pod, sun_pod, wind_pod])
+    // Same order as the flat list was, so `apply`'s pod indices hold.
+    Tab::new(cid(P, "env"), "Environment", "weather-sunny").containers(vec![
+        TabContainer::new(cid(P, "weather"), "Weather", "weather-cloudy", vec![weather_pod]),
+        TabContainer::new(cid(P, "sun"), "Sun", "weather-sunny", vec![sun_pod]),
+        TabContainer::new(cid(P, "wind"), "Wind", "weather-squalls", vec![wind_pod]),
+    ])
 }
 
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, _ctx: &PaneCtx) {

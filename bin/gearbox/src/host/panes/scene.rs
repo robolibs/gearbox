@@ -3,10 +3,9 @@
 
 use bevy::prelude::*;
 use mara::ui::mara_core;
-use mara_core::container::{SeparatorStyle, Tab};
+use mara_core::container::{SeparatorStyle, Tab, TabContainer};
 use mara_core::pod::{Pod, PodResponse};
 use mara_core::vocab::Id as MaraId;
-use mara_core::widget::{TreeIconKind, TreeIconSlot};
 use std::collections::HashMap;
 
 use super::{PaneCtx, button_clicked, cid, pick_usd_file, pid, pod_response, short_path};
@@ -21,91 +20,71 @@ const POSE_RANGE_M: f64 = 100_000.0;
 struct Object {
     entity: Entity,
     label: String,
-    icon: &'static str,
     machine: bool,
     visible: bool,
 }
 
-pub fn tab(world: &mut World, ctx: &PaneCtx) -> Tab {
-    let accent = ctx.accent;
-    let selection = world.resource::<Selection>().0;
-    let paused = !world.resource::<gearbox_api::PhysicsActive>().0;
+/// Every loaded object, in the order the list shows them.
+fn objects(world: &mut World) -> Vec<Object> {
     let machines: Vec<Entity> = world
         .resource::<ControllerInventory>()
         .machines
         .iter()
         .filter_map(|m| m.scene_root)
         .collect();
-    let mut objects: Vec<Object> = {
-        let mut q = world.query::<(Entity, &LoadedAsset, Option<&Visibility>)>();
-        q.iter(world)
-            .map(|(entity, asset, vis)| Object {
-                entity,
-                label: asset.label.clone(),
-                icon: if machines.contains(&entity) { "vehicle-tractor" } else { "cube" },
-                machine: machines.contains(&entity),
-                visible: !matches!(vis, Some(Visibility::Hidden)),
-            })
-            .collect()
-    };
-    objects.sort_by(|a, b| a.label.cmp(&b.label));
+    let mut q = world.query::<(Entity, &LoadedAsset, Option<&Visibility>)>();
+    let mut objects: Vec<Object> = q
+        .iter(world)
+        .map(|(entity, asset, vis)| Object {
+            entity,
+            label: asset.label.clone(),
+            machine: machines.contains(&entity),
+            visible: !matches!(vis, Some(Visibility::Hidden)),
+        })
+        .collect();
+    objects.sort_by(|a, b| (&a.label, a.entity).cmp(&(&b.label, b.entity)));
+    objects
+}
 
-    // Objects: one row each, eye and trash on the right.
-    let outbox = ctx.outbox.clone();
+pub fn tab(world: &mut World, ctx: &PaneCtx) -> Tab {
+    let accent = ctx.accent;
+    let selection = world.resource::<Selection>().0;
+    let paused = !world.resource::<gearbox_api::PhysicsActive>().0;
+    let objects = objects(world);
     let count = objects.len();
+
+    // Objects: one row each, sized to the rows rather than the shelf.
+    let list_pod = pid(P, "objects", 1);
+    let list = if objects.is_empty() {
+        Pod::new(list_pod).with_readout("objects", "nothing loaded")
+    } else {
+        ctx.sync_list_memory(
+            list_pod,
+            selection.and_then(|s| objects.iter().position(|o| o.entity == s)),
+            None,
+        );
+        let labels: Vec<String> = objects.iter().map(|o| o.label.clone()).collect();
+        let trailing: Vec<String> = objects
+            .iter()
+            .map(|o| {
+                let kind = if o.machine { "machine" } else { "object" };
+                if o.visible { kind.to_string() } else { format!("{kind} · hidden") }
+            })
+            .collect();
+        Pod::new(list_pod)
+            .with_separator(SeparatorStyle::LineDots)
+            .resizable()
+            .with_hybrid_select_list(labels, Some(trailing), accent)
+    };
     let objects_pods = vec![
         Pod::new(pid(P, "objects", 0))
             .with_button("Load USD…", accent)
             .with_button("Reload", accent),
-        Pod::new(pid(P, "objects", 1))
-            .with_separator(SeparatorStyle::Line)
-            .fill()
-            .with_tree(16, move |tree| {
-                if objects.is_empty() {
-                    let mut none = false;
-                    let mut slot =
-                        [TreeIconSlot::new(TreeIconKind::Glyph { on: "·", off: "·" }, &mut none)];
-                    tree.row("empty", 0, None, None, "Nothing loaded", false, accent, &mut slot);
-                    return;
-                }
-                for object in &objects {
-                    let mut visible = object.visible;
-                    let mut remove = false;
-                    let mut slots = [
-                        TreeIconSlot::new(TreeIconKind::Eye, &mut visible)
-                            .with_tooltip("Toggle visibility"),
-                        TreeIconSlot::new(TreeIconKind::Glyph { on: "🗑", off: "🗑" }, &mut remove)
-                            .with_tooltip("Remove from scene"),
-                    ];
-                    let resp = tree.row(
-                        object.entity.to_bits(),
-                        0,
-                        None,
-                        Some(object.icon),
-                        &object.label,
-                        selection == Some(object.entity),
-                        accent,
-                        &mut slots,
-                    );
-                    if resp.body.clicked() {
-                        outbox.push(HostCommand::SelectRoot(Some(object.entity)));
-                    }
-                    if resp.body.double_clicked() {
-                        outbox.push(if object.machine {
-                            HostCommand::FlyToMachine(object.entity)
-                        } else {
-                            HostCommand::FitPrim(object.entity)
-                        });
-                    }
-                    if resp.icons.get(1).is_some_and(|i| i.clicked()) {
-                        outbox.push(HostCommand::Despawn(object.entity));
-                    }
-                    if visible != object.visible {
-                        outbox.push(HostCommand::SetVisibility(object.entity, visible));
-                    }
-                }
-            }),
+        list,
     ];
+    let selected_visible = selection
+        .and_then(|s| objects.iter().find(|o| o.entity == s))
+        .is_none_or(|o| o.visible);
 
     // Selected object: where it is, and drag values for its pose while paused.
     let picked = selection.and_then(|root| {
@@ -155,15 +134,24 @@ pub fn tab(world: &mut World, ctx: &PaneCtx) -> Tab {
             } else {
                 pod = pod.with_readout("pose", "pause physics to edit");
             }
-            pod
+            ctx.sync_toggles(pose_pod, &[selected_visible]);
+            pod.with_toggle_initial("visible", accent, selected_visible)
+                .with_button("Remove from scene", accent)
         }
         None => Pod::new(pose_pod)
             .with_readout("object", "none")
             .with_readout("hint", "click an object here or in the view"),
     };
-    let mut pods = objects_pods;
-    pods.push(selected_pod);
-    Tab::new(cid(P, "scene"), format!("Scene ({count})"), "list").pods(pods)
+    // The pose container's pod still answers at index 2, after the two
+    // object pods.
+    Tab::new(cid(P, "scene"), format!("Scene ({count})"), "list")
+        .pods(objects_pods)
+        .containers(vec![TabContainer::new(
+            cid(P, "selected"),
+            "Selected",
+            "cursor-click",
+            vec![selected_pod],
+        )])
 }
 
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, ctx: &PaneCtx) {
@@ -178,6 +166,27 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
     }
     if button_clicked(responses, scene_id, 0, 1) {
         ctx.send(HostCommand::Reload);
+    }
+    if let Some(rows) = pod_response(responses, scene_id, 1).and_then(|r| r.hybrid_select_lists.first()) {
+        let objects = objects(world);
+        if let Some(object) = rows.body_clicked.and_then(|i| objects.get(i)) {
+            ctx.send(HostCommand::SelectRoot(Some(object.entity)));
+        }
+        if let Some(object) = rows.body_double_clicked.and_then(|i| objects.get(i)) {
+            ctx.send(if object.machine {
+                HostCommand::FlyToMachine(object.entity)
+            } else {
+                HostCommand::FitPrim(object.entity)
+            });
+        }
+    }
+    if let (Some(root), Some(resp)) = (selection, pod_response(responses, scene_id, selected_pod_idx)) {
+        if let Some(toggle) = resp.toggles.first().filter(|t| t.changed) {
+            ctx.send(HostCommand::SetVisibility(root, toggle.on));
+        }
+        if resp.buttons.first().is_some_and(|b| b.clicked) {
+            ctx.send(HostCommand::Despawn(root));
+        }
     }
     let picked = selection.and_then(|root| {
         let entity = world.get_entity(root).ok()?;
