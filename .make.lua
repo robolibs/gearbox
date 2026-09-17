@@ -75,9 +75,16 @@ fi
 echo "gpu-detect: lspci=$(command -v lspci || echo 'NOT FOUND')" 1>&2
 _gb_has_nvidia=0
 for _gb_attempt in 1 2 3 4 5; do
-  _gb_lspci_out=$(lspci -d ::0300 2>&1)
+  # 10de = NVIDIA's PCI vendor ID (stable, not text-matched — lspci prints raw
+  # hex instead of "NVIDIA Corporation" when its pci.ids database is missing
+  # or stale, which would silently break a name-based grep). 03xx = any
+  # display-class device, not just 0300 "VGA compatible controller": a
+  # laptop's discrete GPU with no display output wired to it commonly
+  # enumerates as 0302 "3D controller" instead, and 0300-only would never
+  # see it regardless of which physical PCI slot/lane it's actually on.
+  _gb_lspci_out=$(lspci -d 10de::03xx 2>&1)
   echo "gpu-detect: attempt $_gb_attempt: [$_gb_lspci_out]" 1>&2
-  if echo "$_gb_lspci_out" | grep -qi nvidia; then
+  if [ -n "$_gb_lspci_out" ]; then
     _gb_has_nvidia=1
     break
   fi
