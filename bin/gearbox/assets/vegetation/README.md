@@ -6,6 +6,6 @@ Plant models from [Poly Haven](https://polyhaven.com/models), CC0 1.0 (public do
 1k glTF, its textures and the separate 1k alpha map (`*_alpha_1k.png`).
 
 `scripts/pack_vegetation.py` picks clumps out of these into
-`bin/gearbox/src/fields/clumps/` (`meshes/*.bin`, `textures/*.png`), which the field
+`crates/gearbox-fields/src/clumps/` (`meshes/*.bin`, `textures/*.png`), which the field
 profiles draw as instanced layers. Edit the `PACKS` table there and rerun it from the
 repository root to change which clumps are used.

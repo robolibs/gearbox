@@ -6,6 +6,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use gearbox_fields::HeightGrid;
 use rapier3d::math::Vector as DVec3;
 use rapier3d::prelude::{ColliderBuilder, ColliderHandle};
 
@@ -33,7 +34,7 @@ static HEIGHT_GRID: RwLock<Option<Arc<HeightGrid>>> = RwLock::new(None);
 pub struct TerrainPlugin;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct TerrainUpdates;
+pub struct TerrainUpdates;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
@@ -63,101 +64,6 @@ impl TerrainPreset {
     }
 }
 
-/// Regular height samples over a square centred on the origin.
-pub struct HeightGrid {
-    pub(crate) min_x: f32,
-    pub(crate) min_z: f32,
-    pub(crate) cell: f32,
-    pub(crate) cols: usize,
-    pub(crate) rows: usize,
-    heights: Vec<f32>,
-}
-
-impl HeightGrid {
-    fn sample(size: f32, cell: f32, height: impl Fn(f32, f32) -> f32) -> Self {
-        let cols = (size / cell).ceil().max(1.0) as usize + 1;
-        let rows = cols;
-        let cell = size / (cols - 1) as f32;
-        let min_x = -size * 0.5;
-        let min_z = -size * 0.5;
-        let mut heights = Vec::with_capacity(cols * rows);
-        for i in 0..rows {
-            let z = min_z + i as f32 * cell;
-            for j in 0..cols {
-                let x = min_x + j as f32 * cell;
-                heights.push(height(x, z));
-            }
-        }
-        Self {
-            min_x,
-            min_z,
-            cell,
-            cols,
-            rows,
-            heights,
-        }
-    }
-
-    pub(crate) fn at(&self, i: usize, j: usize) -> f32 {
-        self.heights[i * self.cols + j]
-    }
-
-    /// Bilinear height, `None` outside the grid.
-    pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
-        let fx = (x - self.min_x) / self.cell;
-        let fz = (z - self.min_z) / self.cell;
-        if fx < 0.0 || fz < 0.0 {
-            return None;
-        }
-        let j = (fx.floor() as usize).min(self.cols - 2);
-        let i = (fz.floor() as usize).min(self.rows - 2);
-        if fx > (self.cols - 1) as f32 || fz > (self.rows - 1) as f32 {
-            return None;
-        }
-        let tx = (fx - j as f32).clamp(0.0, 1.0);
-        let tz = (fz - i as f32).clamp(0.0, 1.0);
-        let h00 = self.at(i, j);
-        let h10 = self.at(i, j + 1);
-        let h01 = self.at(i + 1, j);
-        let h11 = self.at(i + 1, j + 1);
-        let h0 = h00 + (h10 - h00) * tx;
-        let h1 = h01 + (h11 - h01) * tx;
-        Some(h0 + (h1 - h0) * tz)
-    }
-
-    fn normal_at(&self, x: f32, z: f32) -> Vec3 {
-        let d = self.cell;
-        let max_x = self.min_x + (self.cols - 1) as f32 * d;
-        let max_z = self.min_z + (self.rows - 1) as f32 * d;
-        let x = x.clamp(self.min_x, max_x);
-        let z = z.clamp(self.min_z, max_z);
-        let xl = (x - d).max(self.min_x);
-        let xr = (x + d).min(max_x);
-        let zl = (z - d).max(self.min_z);
-        let zr = (z + d).min(max_z);
-        let h = |x: f32, z: f32| {
-            self.height_at(x, z)
-                .expect("normal sample inside height grid")
-        };
-        let dx = (h(xr, z) - h(xl, z)) / (xr - xl);
-        let dz = (h(x, zr) - h(x, zl)) / (zr - zl);
-        Vec3::new(-dx, 1.0, -dz).normalize()
-    }
-
-    pub(crate) fn normal_at_index(&self, i: usize, j: usize) -> Vec3 {
-        let jl = j.saturating_sub(1);
-        let jr = (j + 1).min(self.cols - 1);
-        let iu = i.saturating_sub(1);
-        let id = (i + 1).min(self.rows - 1);
-        let dx = (self.at(i, jr) - self.at(i, jl)) / ((jr - jl) as f32 * self.cell);
-        let dz = (self.at(id, j) - self.at(iu, j)) / ((id - iu) as f32 * self.cell);
-        Vec3::new(-dx, 1.0, -dz).normalize()
-    }
-
-    pub(crate) fn half_size(&self) -> f32 {
-        (self.cols - 1) as f32 * self.cell * 0.5
-    }
-}
 
 /// Height of the procedural ground, `None` when none is active or outside it.
 pub fn procedural_height_m(x: f32, z: f32) -> Option<f32> {
@@ -272,10 +178,12 @@ fn spawn_procedural_terrain(
     commands.spawn((
         Name::new("Distant meadow landscape"),
         TerrainBackdrop,
+        gearbox_fields::CoverBackdrop,
         ChildOf(entity),
         Transform::IDENTITY,
         Mesh3d(meshes.add(horizon_mesh(&grid))),
         TerrainSurfaceMesh,
+        gearbox_fields::CoverSurfaceMesh,
         bevy::light::NotShadowCaster,
     ));
 
@@ -511,6 +419,7 @@ fn update_terrain_tiles(
                             Transform::IDENTITY,
                             Mesh3d(meshes.add(tile_mesh(&terrain.grid, tx, tz, cell))),
                             TerrainSurfaceMesh,
+                            gearbox_fields::CoverSurfaceMesh,
                             bevy::light::NotShadowCaster,
                         ))
                         .id();
@@ -666,5 +575,51 @@ mod tests {
         for p in positions {
             assert!(p[0].abs().max(p[2].abs()) >= SIZE_M * 0.5);
         }
+    }
+}
+
+/// Ground height for the field cover: the procedural grid, else USD terrain.
+struct GroundHeights;
+
+impl gearbox_fields::HeightSource for GroundHeights {
+    fn height(&self, x: f32, z: f32) -> f32 {
+        crate::world::terrain_height_m(x, z)
+    }
+}
+
+/// Hands the active ground and the USD terrain roots to the field cover.
+pub fn publish_cover_terrain(
+    mut commands: Commands,
+    terrain: Option<Res<ProceduralTerrain>>,
+    roots: Query<(Entity, &Name), With<usd_bevy::UsdSceneRoot>>,
+    children: Query<&Children>,
+    mut cover_roots: ResMut<gearbox_fields::CoverTerrainRoots>,
+    mut published: Local<Option<Entity>>,
+) {
+    match terrain.as_deref() {
+        Some(terrain) if *published != Some(terrain.entity) => {
+            commands.insert_resource(gearbox_fields::CoverTerrain {
+                entity: terrain.entity,
+                grid: terrain.grid.clone(),
+            });
+            commands.insert_resource(gearbox_fields::CoverHeights(Arc::new(GroundHeights)));
+            *published = Some(terrain.entity);
+        }
+        None if published.is_some() => {
+            commands.remove_resource::<gearbox_fields::CoverTerrain>();
+            *published = None;
+        }
+        _ => {}
+    }
+    let found: Vec<Entity> = roots
+        .iter()
+        .filter(|(root, name)| {
+            crate::world::is_usd_terrain_root_name(name.as_str())
+                && crate::world::is_usd_terrain_scene_instantiated(*root, &children)
+        })
+        .map(|(root, _)| root)
+        .collect();
+    if found != cover_roots.0 {
+        cover_roots.0 = found;
     }
 }

@@ -10,7 +10,8 @@ use bevy::prelude::*;
 use mara::ui::modules::bevy::BevyViewportInput;
 
 use crate::{
-    attach, controller, fields, load, physics, physics_debug, services, terrain, viewer, world,
+    attach, controller, environment, load, physics, physics_debug, services, terrain, viewer,
+    world,
 };
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
@@ -57,9 +58,20 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(gearbox_api::UsdMarkerPlugin)
         // Simulator surface: planet world, machines, links, services.
         .add_plugins(world::WorldPlugin)
-        .add_plugins(crate::environment::EnvironmentPlugin)
-        .add_plugins(fields::FieldsPlugin)
+        .add_plugins(environment::EnvironmentPlugin)
+        .add_plugins(gearbox_fields::FieldsPlugin::default())
         .add_plugins(terrain::TerrainPlugin)
+        .configure_sets(
+            Update,
+            gearbox_fields::CoverUpdates.after(terrain::TerrainUpdates),
+        )
+        .add_systems(
+            Update,
+            (
+                terrain::publish_cover_terrain.in_set(terrain::TerrainUpdates),
+                environment::sync_cover_wind,
+            ),
+        )
         .add_systems(Startup, (log_render_adapter, use_cpu_light_clustering))
         .add_plugins(controller::ControllerDiscoveryPlugin)
         .add_plugins(attach::AttachPlugin)

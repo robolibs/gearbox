@@ -126,3 +126,16 @@ impl Plugin for EnvironmentPlugin {
             .add_plugins(skybox::SkyboxPlugin);
     }
 }
+
+/// The environment pane's wind, handed to the field cover.
+pub fn sync_cover_wind(
+    settings: Res<EnvironmentSettings>,
+    mut wind: ResMut<gearbox_fields::CoverWind>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    wind.heading_deg = settings.wind_heading_deg;
+    wind.speed_mps = settings.wind_speed_mps;
+    wind.gustiness = settings.wind_gustiness;
+}

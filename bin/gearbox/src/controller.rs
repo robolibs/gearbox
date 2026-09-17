@@ -2262,7 +2262,7 @@ fn record_wheel_tracks(
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     physics: Res<crate::physics::PhysicsWorld>,
-    mut contacts: ResMut<crate::fields::contacts::WheelContacts>,
+    mut contacts: ResMut<gearbox_fields::WheelContacts>,
     mut values: ResMut<crate::services::LinkValues>,
     runtime: Res<ControllerRuntimeState>,
 ) {
@@ -2336,7 +2336,7 @@ fn record_wheel_tracks(
             if roll.dot(travel) < 0.0 {
                 roll = -roll;
             }
-            contacts.contacts.push(crate::fields::contacts::WheelContact {
+            contacts.contacts.push(gearbox_fields::WheelContact {
                 position: Vec3::new(p.x as f32, ground, p.z as f32),
                 direction: roll,
                 width: width as f32,

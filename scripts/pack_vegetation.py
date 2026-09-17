@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image
 
 ROOT = Path("bin/gearbox/assets/vegetation")
-OUT = Path("bin/gearbox/src/fields/clumps")
+OUT = Path("crates/gearbox-fields/src/clumps")
 # model: (nodes by name suffix, patch salt, share of plants outside patches)
 PACKS = {
     "grass_bermuda_01": ([f"medium_{c}" for c in "abcdef"] + [f"small_{c}" for c in "abcdef"]

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/gearbox-api",
     "crates/gearbox-controls",
+    "crates/gearbox-fields",
     "crates/gearbox-cli",
     "bin/gearbox",
     "vendored/bevy-volumetric-clouds",

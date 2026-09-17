@@ -3716,6 +3716,16 @@ name = "gearbox-controls"
 version = "0.0.6"
 
 [[package]]
+name = "gearbox-fields"
+version = "0.0.6"
+dependencies = [
+ "bevy",
+ "bytemuck",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gearbox-sim"
 version = "0.0.6"
 dependencies = [
@@ -3730,6 +3740,7 @@ dependencies = [
  "gearbox-api",
  "gearbox-cli",
  "gearbox-controls",
+ "gearbox-fields",
  "glam 0.30.10",
  "half",
  "mara",

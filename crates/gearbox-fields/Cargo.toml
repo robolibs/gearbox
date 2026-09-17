@@ -1,0 +1,16 @@
+[package]
+name = "gearbox-fields"
+description = "Field ground cover for Bevy: grassland and harvested-wheat surfaces with instanced vegetation, wheel trample maps and a shared gust-map wind."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "gearbox_fields"
+path = "src/lib.rs"
+
+[dependencies]
+bevy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytemuck = "1"
