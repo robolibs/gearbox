@@ -17,7 +17,7 @@ pub fn writeback_transforms(
         let Some(rb) = world
             .entity_to_body
             .get(&entity)
-            .and_then(|h| world.bodies.get(*h))
+            .and_then(|h| world.body(*h))
         else {
             continue;
         };
@@ -48,7 +48,7 @@ mod tests {
     use super::super::convert::{quat_to_d, vec3_to_d};
     use super::*;
     use bevy::ecs::system::{RunSystemOnce, SystemState};
-    use rapier3d::prelude::{Pose, RigidBodyBuilder};
+    use crate::physics::backend::{BodyDesc, Pose};
 
     #[test]
     fn nested_wheel_uses_current_parent_pose_through_scaled_wrappers() {
@@ -75,7 +75,7 @@ mod tests {
         let mesh = world.spawn((mesh_local, ChildOf(wheel))).id();
         let mut physics = PhysicsWorld::default();
         for entity in [wheel, knuckle, chassis] {
-            let handle = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
+            let handle = physics.insert_body(BodyDesc::dynamic());
             physics.entity_to_body.insert(entity, handle);
         }
         world.insert_resource(physics);
@@ -93,7 +93,7 @@ mod tests {
                 let mut physics = world.resource_mut::<PhysicsWorld>();
                 for (entity, translation, rotation) in expected {
                     let handle = physics.entity_to_body[&entity];
-                    physics.bodies[handle].set_position(
+                    physics.body_mut(handle).unwrap().set_position(
                         Pose {
                             translation: vec3_to_d(translation),
                             rotation: quat_to_d(rotation),
@@ -104,7 +104,7 @@ mod tests {
             }
             world.run_system_once(writeback_transforms).unwrap();
             let mut state = SystemState::<TransformHelper>::new(&mut world);
-            let helper = state.get(&world);
+            let helper = state.get(&world).unwrap();
             for (entity, translation, rotation) in expected {
                 let actual = helper
                     .compute_global_transform(entity)

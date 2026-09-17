@@ -1,15 +1,18 @@
-//! Rapier physics on top of usd_bevy's projected stage.
+//! Rigid-body physics on top of usd_bevy's projected stage.
 //!
 //! usd_bevy holds the composed stage live and projects prims into entities,
-//! but simulates nothing. This module owns the Rapier f64 world
-//! (`PhysicsWorld`), reads the UsdPhysics opinions of every projected stage
-//! itself (`reader`, `attach`) into marker components (`markers`), converts
-//! those into Rapier bodies, colliders and joints (`bodies`, `colliders`,
-//! `joints`, `rapier`), steps the world and writes poses back into
-//! `Transform`s. Values are SI; quaternions are Bevy order; `lower > upper`
-//! on a limit locks the DOF.
+//! but simulates nothing. This module owns the f64 world (`PhysicsWorld`),
+//! reads the UsdPhysics opinions of every projected stage itself (`reader`,
+//! `attach`) into marker components (`markers`), converts those into bodies,
+//! colliders and joints (`bodies`, `colliders`, `joints`), steps the world
+//! and writes poses back into `Transform`s. Values are SI; quaternions are
+//! Bevy order; `lower > upper` on a limit locks the DOF.
+//!
+//! The engine itself sits behind `backend::PhysicsBackend`; `rapier` is the
+//! one implementation and the only place that names `rapier3d`.
 
 mod attach;
+pub mod backend;
 mod bodies;
 mod colliders;
 mod convert;
@@ -38,12 +41,12 @@ pub use world::{PhysicsWorld, step_physics};
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PhysicsWriteback;
 
-/// Wires the Rapier world, every marker → Rapier conversion system and the
-/// writeback path. Adds `PhysicsWorld` and `ColliderDebugEnabled`;
+/// Wires the physics world, every marker → backend conversion system and
+/// the writeback path. Adds `PhysicsWorld` and `ColliderDebugEnabled`;
 /// `PhysicsActive` is gearbox-api's clock switch.
-pub struct RapierAdapterPlugin;
+pub struct PhysicsPlugin;
 
-impl Plugin for RapierAdapterPlugin {
+impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PhysicsWorld>()
             .init_resource::<PhysicsActive>()
@@ -270,25 +273,11 @@ fn drop_dead_physics(world: &mut World) {
         )
     };
     let mut physics = world.resource_mut::<PhysicsWorld>();
-    let physics = physics.as_mut();
     for entity in bodies {
-        if let Some(handle) = physics.entity_to_body.remove(&entity) {
-            let _ = physics.bodies.remove(
-                handle,
-                &mut physics.islands,
-                &mut physics.colliders,
-                &mut physics.impulse_joints,
-                &mut physics.multibody_joints,
-                true,
-            );
-        }
+        physics.remove_entity_body(entity);
     }
     for entity in colliders {
-        if let Some(handle) = physics.entity_to_collider.remove(&entity) {
-            physics
-                .colliders
-                .remove(handle, &mut physics.islands, &mut physics.bodies, false);
-        }
+        physics.remove_entity_collider(entity, false);
     }
 }
 
@@ -310,8 +299,8 @@ fn carry_onto_machine(
                 let body = physics
                     .entity_to_body
                     .get(entity)
-                    .and_then(|handle| physics.bodies.get(*handle))?;
-                Some((path.clone(), *entity, body.mass(), body.position().clone()))
+                    .and_then(|handle| physics.body(*handle))?;
+                Some((path.clone(), *entity, body.mass(), body.position()))
             })
             .max_by(|a, b| a.2.total_cmp(&b.2))
     };
@@ -390,20 +379,18 @@ fn sync_bodies_to_transforms_on_resume(
     if !active.0 || was {
         return;
     }
-    use rapier3d::prelude::*;
-    let world = world.as_mut();
-    let pairs: Vec<(Entity, RigidBodyHandle)> =
+    let pairs: Vec<(Entity, backend::BodyId)> =
         world.entity_to_body.iter().map(|(e, h)| (*e, *h)).collect();
     for (entity, handle) in pairs {
         let Ok(gt) = transforms.get(entity) else {
             continue;
         };
         let t = gt.compute_transform();
-        let Some(rb) = world.bodies.get_mut(handle) else {
+        let Some(rb) = world.body_mut(handle) else {
             continue;
         };
         rb.set_position(
-            Pose {
+            backend::Pose {
                 translation: convert::vec3_to_d(t.translation),
                 rotation: convert::quat_to_d(t.rotation),
             },

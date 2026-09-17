@@ -1,17 +1,25 @@
-//! `UsdCollider` → entries in `PhysicsWorld.colliders`. Bevy ECS
-//! adapter; all builder construction lives in `super::rapier::colliders`.
+//! `UsdCollider` → colliders in `PhysicsWorld`.
+//!
+//! Mesh approximation fallback:
+//!
+//! | Authored      | Static body | Dynamic body          |
+//! | ------------- | ----------- | --------------------- |
+//! | None/default  | TriMesh     | ConvexHull (warn)     |
+//! | ConvexHull    | ConvexHull  | ConvexHull            |
+//! | ConvexDecomp  | Decomp      | Decomp                |
+//! | MeshSimplify  | TriMesh     | ConvexHull (warn)     |
+//!
+//! `UsdGeomCylinder.axis` defaults to Z while backend cylinders run along
+//! Y; `compute_local_pose` folds the Y→authored-axis rotation into the pose.
 
+use super::backend::{ColliderDesc, CollisionGroups, Pose, Shape};
 use super::markers::{
     UsdArticulationRoot, UsdCollider, UsdColliderShape, UsdCollisionApprox, UsdPhysicsMaterial,
     UsdRigidBody,
 };
-use super::rapier::colliders::{ColliderOpinion, ShapeInput, build_collider};
-use super::reader::CollisionApprox;
 use bevy::mesh::Mesh3d;
 use bevy::prelude::*;
 use glam::DVec3;
-use rapier3d::geometry::{Group, InteractionGroups, InteractionTestMode};
-use rapier3d::math::Pose;
 
 use super::convert::{quat_to_d, vec3_to_d};
 use super::world::PhysicsWorld;
@@ -84,17 +92,16 @@ pub fn convert_colliders(
         let entity_scale = mesh_world_scale;
         let is_dynamic = rb_opt.is_some_and(|b| b.enabled && !b.kinematic);
 
-        // Build the backend-neutral ShapeInput.
         let shape = match &col.shape {
             // Primitive dimensions follow the prim's scale relative to its body;
             // a scaled cube is a box, not the unit cube it was authored as.
             UsdColliderShape::Cube { size } => {
                 let half = local_scale.abs() * (*size * 0.5);
-                ShapeInput::Cube {
+                Shape::Cuboid {
                     half_extents: DVec3::new(half.x as f64, half.y as f64, half.z as f64),
                 }
             }
-            UsdColliderShape::Sphere { radius } => ShapeInput::Sphere {
+            UsdColliderShape::Sphere { radius } => Shape::Ball {
                 radius: (*radius * local_scale.abs().max_element()) as f64,
             },
             UsdColliderShape::Capsule {
@@ -103,10 +110,8 @@ pub fn convert_colliders(
                 axis,
             } => {
                 let half = axis.normalize_or_zero() * (*height * 0.5);
-                ShapeInput::Capsule {
-                    half: DVec3::new(half.x as f64, half.y as f64, half.z as f64),
-                    radius: *radius as f64,
-                }
+                let half = DVec3::new(half.x as f64, half.y as f64, half.z as f64);
+                Shape::Capsule { a: -half, b: half, radius: *radius as f64 }
             }
             UsdColliderShape::Cylinder {
                 radius,
@@ -132,12 +137,15 @@ pub fn convert_colliders(
                             entity_scale.x.abs().max(entity_scale.z.abs()),
                         )
                     };
-                ShapeInput::Cylinder {
+                Shape::Cylinder {
                     half_height: (*height * 0.5 * height_scale) as f64,
                     radius: (*radius * radius_scale) as f64,
                 }
             }
-            UsdColliderShape::Plane => ShapeInput::Plane,
+            // UsdPhysics has no bounded plane; a thin slab stands in.
+            UsdColliderShape::Plane => Shape::Cuboid {
+                half_extents: DVec3::new(50.0, 0.001, 50.0),
+            },
             UsdColliderShape::Mesh => {
                 let Some(mesh3d) = mesh3d.as_ref() else {
                     continue;
@@ -146,28 +154,30 @@ pub fn convert_colliders(
                     continue;
                 };
                 info!(
-                    "RapierAdapter[mesh-collider]: ent={entity:?} local_scale={:?} approx={:?}",
+                    "gearbox-physics[mesh-collider]: ent={entity:?} local_scale={:?} approx={:?}",
                     local_scale, col.approximation
                 );
                 let Some((vertices, indices)) = extract_mesh(mesh, local_scale) else {
                     continue;
                 };
-                ShapeInput::Mesh {
-                    vertices,
-                    indices,
-                    approx: col.approximation.map(usd_approx_to_openusd),
-                    is_dynamic,
-                }
+                let Some(shape) = mesh_shape(vertices, indices, col.approximation, is_dynamic)
+                else {
+                    continue;
+                };
+                shape
             }
         };
 
-        // Compute the collider's body-local pose: includes the mesh's
-        // entity-to-body translation/rotation, plus the Y→authored-axis
-        // remap for primitive cylinders/capsules so Rapier's Y-default
-        // long-axis matches what the mesh xform expects.
-        let local_pose = compute_local_pose(parent_entity, &globals, gt, &col.shape);
-
-        let groups = find_articulation_root_ancestor(
+        // The collider's body-local pose: the mesh's entity-to-body
+        // translation/rotation, plus the Y→authored-axis remap for primitive
+        // cylinders/capsules so the backend's Y long-axis matches what the
+        // mesh xform expects.
+        let mut desc = ColliderDesc::new(shape)
+            .pose(compute_local_pose(parent_entity, &globals, gt, &col.shape))
+            .entity(entity);
+        desc.parent = parent_handle;
+        // Colliders of one articulation never touch each other.
+        desc.groups = find_articulation_root_ancestor(
             entity,
             child_of,
             &articulation_roots,
@@ -175,31 +185,49 @@ pub fn convert_colliders(
         )
         .map(|root| {
             let bit = articulation_group_bit(root);
-            InteractionGroups::new(bit, Group::ALL.difference(bit), InteractionTestMode::And)
+            CollisionGroups { memberships: bit, filter: !bit }
         });
 
-        let op = ColliderOpinion {
-            shape,
-            local_pose,
-            friction: None,
-            restitution: None,
-            collision_groups: groups,
-            user_data: entity.to_bits() as u128,
-        };
-
-        let world_mut = world.as_mut();
-        match build_collider(
-            &mut world_mut.colliders,
-            &mut world_mut.bodies,
-            parent_handle,
-            op,
-        ) {
-            Ok(Some(handle)) => {
-                world_mut.entity_to_collider.insert(entity, handle);
-                commands.entity(entity).insert(ColliderAttached);
-            }
-            _ => {}
+        if let Some(handle) = world.insert_collider(desc) {
+            world.entity_to_collider.insert(entity, handle);
+            commands.entity(entity).insert(ColliderAttached);
         }
+    }
+}
+
+/// The shape a mesh collider gets; see the table at the top.
+fn mesh_shape(
+    vertices: Vec<DVec3>,
+    indices: Option<Vec<[u32; 3]>>,
+    approx: Option<UsdCollisionApprox>,
+    is_dynamic: bool,
+) -> Option<Shape> {
+    match approx.unwrap_or(UsdCollisionApprox::None) {
+        UsdCollisionApprox::ConvexDecomposition => {
+            let Some(indices) = indices else {
+                warn!("gearbox-physics: convex decomposition needs an indexed mesh; skipping");
+                return None;
+            };
+            Some(Shape::ConvexDecomposition { vertices, indices })
+        }
+        approx @ (UsdCollisionApprox::None | UsdCollisionApprox::MeshSimplification) => {
+            if is_dynamic {
+                warn!(
+                    "gearbox-physics: mesh collider on dynamic body approx={approx:?}; \
+                     falling back to a convex hull (a dynamic trimesh has no volume)"
+                );
+                return Some(Shape::ConvexHull { points: vertices });
+            }
+            let indices = indices.unwrap_or_else(|| {
+                (0..vertices.len() / 3)
+                    .map(|i| [(i * 3) as u32, (i * 3 + 1) as u32, (i * 3 + 2) as u32])
+                    .collect()
+            });
+            Some(Shape::TriMesh { vertices, indices })
+        }
+        UsdCollisionApprox::ConvexHull
+        | UsdCollisionApprox::BoundingSphere
+        | UsdCollisionApprox::BoundingCube => Some(Shape::ConvexHull { points: vertices }),
     }
 }
 
@@ -260,17 +288,6 @@ fn compute_local_pose(
     }
 }
 
-fn usd_approx_to_openusd(a: UsdCollisionApprox) -> CollisionApprox {
-    match a {
-        UsdCollisionApprox::None => CollisionApprox::None,
-        UsdCollisionApprox::ConvexHull => CollisionApprox::ConvexHull,
-        UsdCollisionApprox::ConvexDecomposition => CollisionApprox::ConvexDecomposition,
-        UsdCollisionApprox::BoundingSphere => CollisionApprox::BoundingSphere,
-        UsdCollisionApprox::BoundingCube => CollisionApprox::BoundingCube,
-        UsdCollisionApprox::MeshSimplification => CollisionApprox::MeshSimplification,
-    }
-}
-
 pub(crate) fn find_articulation_root_ancestor(
     start: Entity,
     own_parent: Option<&ChildOf>,
@@ -290,11 +307,11 @@ pub(crate) fn find_articulation_root_ancestor(
     None
 }
 
-/// Hash an articulation-root entity to one of Rapier's 32 group
-/// bits, skipping bit 0 (reserved for "world / unfiltered").
-fn articulation_group_bit(entity: Entity) -> Group {
+/// Hash an articulation-root entity to one of the 32 group bits,
+/// skipping bit 0 (reserved for "world / unfiltered").
+fn articulation_group_bit(entity: Entity) -> u32 {
     let bit_index = (entity.to_bits() % 31) + 1;
-    Group::from_bits_truncate(1 << bit_index)
+    1 << bit_index
 }
 
 fn find_rigid_body_ancestor(
@@ -332,7 +349,7 @@ pub fn apply_physics_materials(
             continue;
         };
         let friction_coef = mat.dynamic_friction.or(mat.static_friction).unwrap_or(0.5);
-        if let Some(c) = world.colliders.get_mut(handle) {
+        if let Some(c) = world.collider_mut(handle) {
             c.set_friction(friction_coef as f64);
             if let Some(r) = mat.restitution {
                 c.set_restitution(r as f64);

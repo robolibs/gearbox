@@ -130,7 +130,7 @@ fn publish_cards(
             .as_deref()
             .and_then(entity_of)
             .and_then(|e| physics.entity_to_body.get(&e))
-            .and_then(|h| physics.bodies.get(*h));
+            .and_then(|h| physics.body(*h));
         let index = cards.0.len();
         for (link, coupling) in machine.links.couplings() {
             let Some(gt) = entity_of(&link.prim_path).and_then(|e| transforms.get(e).ok()) else {

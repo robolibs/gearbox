@@ -1,12 +1,18 @@
-//! `UsdPhysicsJoint` → entries in `PhysicsWorld.{multibody,impulse}_joints`.
-//! Bevy ECS adapter; all joint construction lives in `super::rapier::joints`.
+//! `UsdPhysicsJoint` → joints in `PhysicsWorld`.
+//!
+//! Revolute and prismatic joints move about the backend's joint X; the
+//! authored axis rides in `JointKind`, so motors and limits always address
+//! `AngX` / `LinX` whatever the USD axis token was.
 
-use super::markers::{UsdArticulationRoot, UsdDof, UsdDriveType, UsdJointKind, UsdPhysicsJoint};
-use super::rapier::joints::build_and_insert_joint;
-use super::reader::{Dof, JointKind, ReadDrive, ReadJoint, ReadLimit};
+use super::backend::{
+    JointAxis, JointDesc, JointKind, MotorDesc, MotorModel, MotorTarget, Pose,
+};
+use super::convert::{quat_to_d, vec3_to_d};
+use super::markers::{UsdArticulationRoot, UsdDof, UsdJointDrive, UsdJointKind, UsdPhysicsJoint};
 use bevy::prelude::*;
-use rapier3d::prelude::*;
+use glam::DVec3;
 
+use super::backend::BodyKind;
 use super::world::PhysicsWorld;
 
 #[derive(Component)]
@@ -22,7 +28,7 @@ pub fn convert_joints(
     if joints.is_empty() {
         return;
     }
-    // Featherstone multibodies are opt-in (`GEARBOX_MULTIBODY=1`): rapier
+    // Reduced-coordinate joints are opt-in (`GEARBOX_MULTIBODY=1`): rapier
     // 0.32 indexes past its Jacobian table when a multibody is assembled
     // over several frames, and has no two-axis joint there. With it on, a
     // joint joins one only when its own bodies sit under an articulation
@@ -45,12 +51,11 @@ pub fn convert_joints(
         }
         let (Some(body0_e), Some(body1_e)) = (joint.body0, joint.body1) else {
             // World-anchored joint — pin the referenced body to fixed.
-            if let Some(target) = joint.body1.or(joint.body0) {
-                if let Some(handle) = world.entity_to_body.get(&target).copied() {
-                    if let Some(b) = world.bodies.get_mut(handle) {
-                        b.set_body_type(RigidBodyType::Fixed, false);
-                    }
-                }
+            if let Some(target) = joint.body1.or(joint.body0)
+                && let Some(handle) = world.entity_to_body.get(&target).copied()
+                && let Some(b) = world.body_mut(handle)
+            {
+                b.set_kind(BodyKind::Fixed, false);
             }
             commands.entity(joint_entity).insert(JointAttached);
             continue;
@@ -63,11 +68,6 @@ pub fn convert_joints(
             continue;
         };
 
-        let use_multibody = multibody
-            && articulated(body0_e)
-            && articulated(body1_e)
-            && !joint.exclude_from_articulation;
-        let read_joint = bridge_to_read_joint(joint);
         if std::env::var_os("GEARBOX_PHYSICS_LOG").is_some() {
             info!(
                 "gearbox-physics: joint {joint_entity:?} {:?} {body0_e:?}->{body1_e:?} pos0 {:?} rot0 {:?} pos1 {:?} rot1 {:?} axis {:?} limit {:?} excl {} drives {}",
@@ -83,122 +83,98 @@ pub fn convert_joints(
             );
         }
 
-        let world_mut = world.as_mut();
-        if let Ok(_) = build_and_insert_joint(
-            &mut world_mut.multibody_joints,
-            &mut world_mut.impulse_joints,
-            &read_joint,
-            body0,
-            body1,
-            use_multibody,
-        ) {
-            commands.entity(joint_entity).insert(JointAttached);
+        if let Some(mut desc) = joint_desc(joint) {
+            desc.reduced = multibody
+                && articulated(body0_e)
+                && articulated(body1_e)
+                && !joint.exclude_from_articulation;
+            world.insert_joint(body0, body1, desc);
         }
+        commands.entity(joint_entity).insert(JointAttached);
     }
 }
 
-/// Bridge a Bevy-component `UsdPhysicsJoint` (Vec3/Quat fields) to
-/// the upstream `super::reader::ReadJoint` ([f32; 3] / [f32; 4]
-/// fields) the `usd_rapier` builder expects.
-fn bridge_to_read_joint(j: &UsdPhysicsJoint) -> ReadJoint {
-    let (lower, upper) = match j.built_in_limit {
-        Some((lo, hi)) => (Some(lo), Some(hi)),
-        None => (None, None),
-    };
-    let axis_token = if j.axis.x.abs() > 0.9 {
-        Some("X".into())
-    } else if j.axis.y.abs() > 0.9 {
-        Some("Y".into())
+/// `None` for the joint kinds no backend path exists for yet.
+fn joint_desc(j: &UsdPhysicsJoint) -> Option<JointDesc> {
+    let frame1 = Pose::new(vec3_to_d(j.local_pos0), quat_to_d(j.local_rot0));
+    let frame2 = Pose::new(vec3_to_d(j.local_pos1), quat_to_d(j.local_rot1));
+    let axis = if j.axis.y.abs() > 0.9 {
+        DVec3::Y
     } else if j.axis.z.abs() > 0.9 {
-        Some("Z".into())
+        DVec3::Z
     } else {
-        None
+        DVec3::X
     };
-    ReadJoint {
-        path: String::new(),
-        kind: kind_to_openusd(j.kind),
-        body0: None,
-        body1: None,
-        local_pos0: [j.local_pos0.x, j.local_pos0.y, j.local_pos0.z],
-        // USD authors quat as (w, x, y, z); Bevy Quat is (x, y, z, w).
-        local_rot0: [
-            j.local_rot0.w,
-            j.local_rot0.x,
-            j.local_rot0.y,
-            j.local_rot0.z,
-        ],
-        local_pos1: [j.local_pos1.x, j.local_pos1.y, j.local_pos1.z],
-        local_rot1: [
-            j.local_rot1.w,
-            j.local_rot1.x,
-            j.local_rot1.y,
-            j.local_rot1.z,
-        ],
-        axis: axis_token,
-        lower_limit: lower,
-        upper_limit: upper,
-        collision_enabled: j.collision_enabled,
-        joint_enabled: j.joint_enabled,
-        exclude_from_articulation: j.exclude_from_articulation,
-        break_force: j.break_force,
-        break_torque: j.break_torque,
-        min_distance: j.distance_limit.map(|(lo, _)| lo),
-        max_distance: j.distance_limit.map(|(_, hi)| hi),
-        cone_angle_0: j.cone_limit.map(|(a, _)| a),
-        cone_angle_1: j.cone_limit.map(|(_, b)| b),
-        limits: j
-            .limits
-            .iter()
-            .map(|l| ReadLimit {
-                dof: dof_to_openusd(l.dof),
-                low: l.low,
-                high: l.high,
-            })
-            .collect(),
-        drives: j
-            .drives
-            .iter()
-            .map(|d| ReadDrive {
-                dof: dof_to_openusd(d.dof),
-                drive_type: drive_type_to_openusd(d.drive_type),
-                target_position: d.target_position,
-                target_velocity: d.target_velocity,
-                stiffness: d.stiffness,
-                damping: d.damping,
-                max_force: d.max_force,
-            })
-            .collect(),
+    let (kind, free_axis): (JointKind, fn(UsdDof) -> bool) = match j.kind {
+        UsdJointKind::Revolute => (JointKind::Revolute { axis }, dof_is_angular),
+        UsdJointKind::Prismatic => (JointKind::Prismatic { axis }, dof_is_linear),
+        // Anchors only: fixed and spherical joints ignore the authored
+        // frame rotations.
+        UsdJointKind::Fixed => {
+            return Some(JointDesc::new(
+                JointKind::Fixed,
+                Pose::from_translation(frame1.translation),
+                Pose::from_translation(frame2.translation),
+            ));
+        }
+        UsdJointKind::Spherical => {
+            return Some(JointDesc::new(JointKind::Spherical, frame1, frame2));
+        }
+        UsdJointKind::Distance => {
+            warn!("gearbox-physics: PhysicsDistanceJoint not yet supported; skipping");
+            return None;
+        }
+        UsdJointKind::Generic => {
+            warn!(
+                "gearbox-physics: generic D6 joint not yet implemented; skipping ({} limits, {} drives)",
+                j.limits.len(),
+                j.drives.len()
+            );
+            return None;
+        }
+    };
+    let motor_axis = match kind {
+        JointKind::Prismatic { .. } => JointAxis::LinX,
+        _ => JointAxis::AngX,
+    };
+    let mut desc = JointDesc::new(kind, frame1, frame2);
+    if let Some((lo, hi)) = j.built_in_limit {
+        desc.limits.push((motor_axis, [lo as f64, hi as f64]));
+    }
+    if let Some(drive) = j.drives.iter().find(|d| free_axis(d.dof)) {
+        // Joints whose frames share a basis have always run force-based
+        // drives; the differing-basis path kept the backend's default.
+        let same_basis = frame1.rotation.abs_diff_eq(frame2.rotation, 1e-4);
+        desc.motors.push(motor_desc(motor_axis, drive, same_basis));
+    }
+    Some(desc)
+}
+
+fn motor_desc(axis: JointAxis, d: &UsdJointDrive, force_based: bool) -> MotorDesc {
+    let target = if let Some(target) = d.target_position {
+        Some(MotorTarget::Position {
+            target: target as f64,
+            stiffness: d.stiffness as f64,
+            damping: d.damping as f64,
+        })
+    } else {
+        d.target_velocity.map(|velocity| MotorTarget::Velocity {
+            target: velocity as f64,
+            damping: d.damping as f64,
+        })
+    };
+    MotorDesc {
+        axis,
+        target,
+        max_force: d.max_force.map(|f| f as f64),
+        model: force_based.then_some(MotorModel::Force),
     }
 }
 
-fn kind_to_openusd(k: UsdJointKind) -> JointKind {
-    match k {
-        UsdJointKind::Fixed => JointKind::Fixed,
-        UsdJointKind::Revolute => JointKind::Revolute,
-        UsdJointKind::Prismatic => JointKind::Prismatic,
-        UsdJointKind::Spherical => JointKind::Spherical,
-        UsdJointKind::Distance => JointKind::Distance,
-        UsdJointKind::Generic => JointKind::Generic,
-    }
+fn dof_is_angular(dof: UsdDof) -> bool {
+    matches!(dof, UsdDof::Angular | UsdDof::RotX | UsdDof::RotY | UsdDof::RotZ)
 }
 
-fn dof_to_openusd(d: UsdDof) -> Dof {
-    match d {
-        UsdDof::TransX => Dof::TransX,
-        UsdDof::TransY => Dof::TransY,
-        UsdDof::TransZ => Dof::TransZ,
-        UsdDof::RotX => Dof::RotX,
-        UsdDof::RotY => Dof::RotY,
-        UsdDof::RotZ => Dof::RotZ,
-        UsdDof::Linear => Dof::Linear,
-        UsdDof::Angular => Dof::Angular,
-        UsdDof::Distance => Dof::Distance,
-    }
-}
-
-fn drive_type_to_openusd(t: UsdDriveType) -> super::reader::DriveType {
-    match t {
-        UsdDriveType::Acceleration => super::reader::DriveType::Acceleration,
-        UsdDriveType::Force => super::reader::DriveType::Force,
-    }
+fn dof_is_linear(dof: UsdDof) -> bool {
+    matches!(dof, UsdDof::Linear | UsdDof::TransX | UsdDof::TransY | UsdDof::TransZ)
 }

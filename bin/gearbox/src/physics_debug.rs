@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
-use rapier3d::prelude::RigidBodyHandle;
+use crate::physics::backend::{BodyId, ColliderId};
 use usd_bevy::UsdPrimRef;
 
 pub struct PhysicsDebugPlugin;
@@ -32,7 +32,7 @@ fn log_contacts(
     if !tick.0.tick(time.delta()).just_finished() {
         return;
     }
-    let names: HashMap<RigidBodyHandle, String> = physics
+    let names: HashMap<BodyId, String> = physics
         .entity_to_body
         .iter()
         .map(|(entity, handle)| {
@@ -43,56 +43,52 @@ fn log_contacts(
             (*handle, name)
         })
         .collect();
-    let mut lines = Vec::new();
-    for pair in physics.narrow_phase.contact_pairs() {
-        if !pair.has_any_active_contact() {
-            continue;
+    // Deepest point of every collider pair in active contact.
+    let mut depths: HashMap<(ColliderId, ColliderId), f64> = HashMap::new();
+    for manifold in physics.contacts().iter().filter(|m| m.active) {
+        let depth = depths
+            .entry((manifold.collider1, manifold.collider2))
+            .or_insert(0.0);
+        for point in &manifold.points {
+            *depth = depth.min(point.dist);
         }
-        let body = |c| {
-            physics
-                .colliders
-                .get(c)
-                .and_then(|col| col.parent())
-                .and_then(|h| names.get(&h).cloned())
-                .unwrap_or_else(|| "static".to_string())
-        };
-        let depth = pair
-            .manifolds
-            .iter()
-            .flat_map(|m| m.points.iter().map(|p| p.dist))
-            .fold(0.0_f64, f64::min);
-        lines.push(format!(
-            "{} <> {} depth {:.4}",
-            body(pair.collider1),
-            body(pair.collider2),
-            depth
-        ));
     }
+    let body = |c: ColliderId| {
+        physics
+            .collider(c)
+            .and_then(|col| col.parent())
+            .and_then(|h| names.get(&h).cloned())
+            .unwrap_or_else(|| "static".to_string())
+    };
+    let mut lines: Vec<String> = depths
+        .iter()
+        .map(|((c1, c2), depth)| format!("{} <> {} depth {:.4}", body(*c1), body(*c2), depth))
+        .collect();
     lines.sort();
     // Closed loops that cannot close leave a permanent anchor gap that the
     // solver fights every step.
     let mut gaps: Vec<(f64, String)> = Vec::new();
-    for (_, joint) in physics.impulse_joints.iter() {
-        let (Some(b1), Some(b2)) = (
-            physics.bodies.get(joint.body1),
-            physics.bodies.get(joint.body2),
-        ) else {
+    for id in physics.joints() {
+        if physics.joint_is_reduced(id) {
+            continue;
+        }
+        let (Some((body1, body2)), Some(joint)) = (physics.joint_bodies(id), physics.joint(id))
+        else {
             continue;
         };
-        let a1 = b1
-            .position()
-            .transform_point(joint.data.local_frame1.translation);
-        let a2 = b2
-            .position()
-            .transform_point(joint.data.local_frame2.translation);
+        let (Some(b1), Some(b2)) = (physics.body(body1), physics.body(body2)) else {
+            continue;
+        };
+        let a1 = b1.position().transform_point(joint.frame1().translation);
+        let a2 = b2.position().transform_point(joint.frame2().translation);
         let gap = (a1 - a2).length();
         if gap > 0.002 {
             gaps.push((
                 gap,
                 format!(
                     "{} - {}",
-                    names.get(&joint.body1).cloned().unwrap_or_default(),
-                    names.get(&joint.body2).cloned().unwrap_or_default()
+                    names.get(&body1).cloned().unwrap_or_default(),
+                    names.get(&body2).cloned().unwrap_or_default()
                 ),
             ));
         }

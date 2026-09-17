@@ -10,8 +10,7 @@ use gearbox_api::{
     GearboxBus, MachineDeleteQueue, MachineLoadQueue, Props, SceneEvent, SceneObject, SceneObjects,
     clear_scope, event_kind, object_kind,
 };
-use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
-use rapier3d::prelude::Pose;
+use crate::physics::backend::{DQuat, DVec3, Pose};
 use usd_bevy::{UsdScene, UsdSceneRoot, UsdSceneState};
 
 use crate::controller::{ControllerInventory, discover_machines_from_usd, log_discovered_machines};
@@ -151,21 +150,8 @@ fn remove_loaded_usd_physics(
 ) {
     let mut stack = vec![root];
     while let Some(entity) = stack.pop() {
-        if let Some(handle) = physics.entity_to_body.remove(&entity) {
-            let _ = physics.bodies.remove(
-                handle,
-                &mut physics.islands,
-                &mut physics.colliders,
-                &mut physics.impulse_joints,
-                &mut physics.multibody_joints,
-                true,
-            );
-        }
-        if let Some(collider) = physics.entity_to_collider.remove(&entity) {
-            physics
-                .colliders
-                .remove(collider, &mut physics.islands, &mut physics.bodies, false);
-        }
+        physics.remove_entity_body(entity);
+        physics.remove_entity_collider(entity, false);
         if let Ok(children) = children_q.get(entity) {
             stack.extend(children.iter());
         }
@@ -464,7 +450,7 @@ fn sync_pending_machine_physics_to_scene_transforms(
             let Ok(gt) = globals.get(entity) else {
                 continue;
             };
-            let Some(body) = physics.bodies.get_mut(handle) else {
+            let Some(body) = physics.body_mut(handle) else {
                 continue;
             };
             let transform = gt.compute_transform();
@@ -534,8 +520,8 @@ fn sync_pending_machine_physics_to_scene_transforms(
                 .map(|(_, handle)| *handle)
                 .collect::<Vec<_>>()
             {
-                if let Some(body) = physics.bodies.get_mut(handle) {
-                    let mut pose = *body.position();
+                if let Some(body) = physics.body_mut(handle) {
+                    let mut pose = body.position();
                     pose.translation.y += delta_y;
                     body.set_position(pose, true);
                     body.set_linvel(DVec3::ZERO, true);
@@ -568,14 +554,12 @@ fn sync_pending_machine_physics_to_scene_transforms(
 }
 
 fn propagate_body_positions_to_colliders(physics: &mut crate::physics::PhysicsWorld) {
-    let bodies = &physics.bodies;
-    let colliders = &mut physics.colliders;
-    bodies.propagate_modified_body_positions_to_colliders(colliders);
+    physics.sync_collider_positions();
 }
 
 fn terrain_contact_alignment_delta(
     physics: &crate::physics::PhysicsWorld,
-    collider_entities: &[(Entity, rapier3d::prelude::ColliderHandle)],
+    collider_entities: &[(Entity, crate::physics::backend::ColliderId)],
     names: &Query<&Name>,
 ) -> Option<f64> {
     let mut tire_handles = Vec::new();
@@ -599,10 +583,10 @@ fn terrain_contact_alignment_delta(
 
     let mut min_clearance = f64::INFINITY;
     for handle in handles {
-        let Some(collider) = physics.colliders.get(*handle) else {
+        let Some(collider) = physics.collider(*handle) else {
             continue;
         };
-        let aabb = collider.compute_aabb();
+        let aabb = collider.aabb();
         let ground =
             max_terrain_height_under_aabb(aabb.mins.x, aabb.maxs.x, aabb.mins.z, aabb.maxs.z);
         let clearance = aabb.mins.y - ground;

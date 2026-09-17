@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
 use gearbox_api::GearboxBus;
-use rapier3d::prelude::{GenericJoint, JointAxis, MotorModel, RigidBodyHandle};
+use crate::physics::backend::{BodyId, JointAxis, JointMut, MotorModel};
 use usd_bevy::UsdPrimRef;
 
 use crate::attach::Attachments;
@@ -375,8 +375,8 @@ fn numeric(v: &str) -> Option<f64> {
 
 /// The joint a controller drives: the bodies it connects and its kind.
 struct JointRef {
-    body0: RigidBodyHandle,
-    body1: RigidBodyHandle,
+    body0: BodyId,
+    body1: BodyId,
     axis: JointAxis,
 }
 
@@ -403,41 +403,24 @@ fn resolve_joint(
     Some(JointRef { body0, body1, axis })
 }
 
-/// Apply `f` to the rapier joint between two bodies, wherever it lives.
-fn with_joint(physics: &mut PhysicsWorld, j: &JointRef, f: impl FnOnce(&mut GenericJoint)) -> bool {
-    let pair = |a: RigidBodyHandle, b: RigidBodyHandle| {
-        (a == j.body0 && b == j.body1) || (a == j.body1 && b == j.body0)
-    };
-    let impulse = physics
-        .impulse_joints
+/// Apply `f` to the joint between two bodies; a constraint joint wins over
+/// a reduced-coordinate one when both exist.
+fn with_joint(physics: &mut PhysicsWorld, j: &JointRef, f: impl FnOnce(&mut dyn JointMut)) -> bool {
+    let between = physics.joints_between(j.body0, j.body1);
+    let Some(id) = between
         .iter()
-        .find(|(_, joint)| pair(joint.body1, joint.body2))
-        .map(|(h, _)| h);
-    if let Some(h) = impulse {
-        if let Some(joint) = physics.impulse_joints.get_mut(h, true) {
-            joint
-                .data
-                .set_motor_model(j.axis, MotorModel::AccelerationBased);
-            f(&mut joint.data);
-            return true;
-        }
-    }
-    let multibody = physics
-        .multibody_joints
-        .attached_joints(j.body1)
-        .find(|(a, b, _)| pair(*a, *b))
-        .map(|(_, _, h)| h);
-    if let Some(h) = multibody
-        && let Some((mb, id)) = physics.multibody_joints.get_mut(h)
-        && let Some(link) = mb.link_mut(id)
-    {
-        link.joint
-            .data
-            .set_motor_model(j.axis, MotorModel::AccelerationBased);
-        f(&mut link.joint.data);
-        return true;
-    }
-    false
+        .copied()
+        .find(|id| !physics.joint_is_reduced(*id))
+        .or(between.first().copied())
+    else {
+        return false;
+    };
+    let Some(joint) = physics.joint_mut(id, true) else {
+        return false;
+    };
+    joint.set_motor_model(j.axis, MotorModel::Acceleration);
+    f(joint);
+    true
 }
 
 const POSITION_STIFFNESS: f64 = 4_000.0;
@@ -730,7 +713,7 @@ fn auto_trailer_steer(
     let body = physics
         .entity_to_body
         .get(&entity)
-        .and_then(|h| physics.bodies.get(*h))?;
+        .and_then(|h| physics.body(*h))?;
     let heading = body_forward_vector(body).map(|f| f.x.atan2(f.z))?;
     let diff = master.heading_rad - heading;
     let articulation =

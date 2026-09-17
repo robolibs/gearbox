@@ -4,7 +4,7 @@
 
 use bevy::math::primitives::{Cuboid, Cylinder, Sphere};
 use bevy::prelude::*;
-use rapier3d::parry::shape::TypedShape;
+use super::backend::ShapeView;
 
 use super::convert::{quat_from_d, vec3_from_d};
 use super::world::PhysicsWorld;
@@ -39,7 +39,7 @@ pub fn report_transform_alignment(
     let mut wheel_speed = 0.0_f64;
     let mut wheels = std::collections::HashMap::new();
     for (entity, handle) in &world.entity_to_body {
-        let (Ok((global, prim)), Some(body)) = (globals.get(*entity), world.bodies.get(*handle))
+        let (Ok((global, prim)), Some(body)) = (globals.get(*entity), world.body(*handle))
         else {
             continue;
         };
@@ -98,49 +98,60 @@ pub fn draw_collider_gizmos(
     if !enabled.0 {
         return;
     }
-    for (_handle, collider) in world.colliders.iter() {
+    for id in world.colliders() {
+        let Some(collider) = world.collider(id) else {
+            continue;
+        };
         let pose = collider.position();
         let translation = vec3_from_d(pose.translation);
         let rotation = quat_from_d(pose.rotation);
         let iso = Isometry3d::new(translation, rotation);
 
-        match collider.shape().as_typed_shape() {
-            TypedShape::Cuboid(c) => {
-                let h = c.half_extents;
+        match collider.shape() {
+            ShapeView::Cuboid { half_extents: h } => {
                 gizmos.primitive_3d(
                     &Cuboid::new(h.x as f32 * 2.0, h.y as f32 * 2.0, h.z as f32 * 2.0),
                     iso,
                     DEBUG_COLOR,
                 );
             }
-            TypedShape::Ball(b) => {
+            ShapeView::Ball { radius } => {
                 gizmos
-                    .primitive_3d(&Sphere::new(b.radius as f32), iso, DEBUG_COLOR)
+                    .primitive_3d(&Sphere::new(radius as f32), iso, DEBUG_COLOR)
                     .resolution(32);
             }
-            TypedShape::Cylinder(c) => {
+            ShapeView::Cylinder { half_height, radius } => {
                 gizmos
                     .primitive_3d(
-                        &Cylinder::new(c.radius as f32, c.half_height as f32 * 2.0),
+                        &Cylinder::new(radius as f32, half_height as f32 * 2.0),
                         iso,
                         DEBUG_COLOR,
                     )
                     .resolution(32);
             }
-            TypedShape::Capsule(c) => {
-                let a = vec3_from_d(c.segment.a);
-                let b = vec3_from_d(c.segment.b);
+            ShapeView::RoundCylinder { half_height, radius, border_radius } => {
+                gizmos
+                    .primitive_3d(
+                        &Cylinder::new(
+                            (radius + border_radius) as f32,
+                            (half_height + border_radius) as f32 * 2.0,
+                        ),
+                        iso,
+                        DEBUG_COLOR,
+                    )
+                    .resolution(32);
+            }
+            ShapeView::Capsule { a, b, .. } => {
                 gizmos.line(
-                    translation + rotation * a,
-                    translation + rotation * b,
+                    translation + rotation * vec3_from_d(a),
+                    translation + rotation * vec3_from_d(b),
                     DEBUG_COLOR,
                 );
             }
-            TypedShape::ConvexPolyhedron(poly) => {
-                let points = poly.points();
-                for edge in poly.edges() {
-                    let a = vec3_from_d(points[edge.vertices[0] as usize]);
-                    let b = vec3_from_d(points[edge.vertices[1] as usize]);
+            ShapeView::ConvexPolyhedron { points, edges } => {
+                for edge in edges {
+                    let a = vec3_from_d(points[edge[0] as usize]);
+                    let b = vec3_from_d(points[edge[1] as usize]);
                     gizmos.line(
                         translation + rotation * a,
                         translation + rotation * b,
@@ -149,9 +160,8 @@ pub fn draw_collider_gizmos(
                 }
             }
             // Trimeshes / heightfields fall through to AABB outline.
-            _ => {
-                let aabb = collider.shape().compute_local_aabb();
-                let h = aabb.half_extents();
+            ShapeView::Other => {
+                let h = collider.local_aabb().half_extents();
                 gizmos.primitive_3d(
                     &Cuboid::new(h.x as f32 * 2.0, h.y as f32 * 2.0, h.z as f32 * 2.0),
                     iso,

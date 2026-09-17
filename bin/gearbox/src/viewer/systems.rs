@@ -472,21 +472,8 @@ fn drain_despawn(
         }
         let mut stack = vec![root];
         while let Some(e) = stack.pop() {
-            if let Some(handle) = world.entity_to_body.remove(&e) {
-                let _ = world.bodies.remove(
-                    handle,
-                    &mut world.islands,
-                    &mut world.colliders,
-                    &mut world.impulse_joints,
-                    &mut world.multibody_joints,
-                    true,
-                );
-            }
-            if let Some(coll) = world.entity_to_collider.remove(&e) {
-                world
-                    .colliders
-                    .remove(coll, &mut world.islands, &mut world.bodies, false);
-            }
+            world.remove_entity_body(e);
+            world.remove_entity_collider(e, false);
             if let Ok(cs) = children_q.get(e) {
                 stack.extend(cs.iter());
             }
