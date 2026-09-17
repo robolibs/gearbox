@@ -10,6 +10,7 @@ mod machine_context;
 mod ground_card;
 pub mod panes;
 pub mod replay;
+mod window_geometry;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -69,21 +70,31 @@ static INIT: Mutex<Option<HostInit>> = Mutex::new(None);
 
 pub fn run(cli_paths: Vec<PathBuf>, log: LoaderLog) -> Result<(), Box<dyn std::error::Error>> {
     *INIT.lock().unwrap() = Some(HostInit { cli_paths, log });
-    mara::window::AppRunner::new()
+    // `GEARBOX_WINDOW=WxH` always wins over a remembered size, since
+    // asking for one explicitly is a stronger signal than whatever the
+    // window happened to be left at last time.
+    let remembered = window_geometry::load();
+    let (width, height) = window_size().unwrap_or_else(|| {
+        remembered.map_or((1400.0, 900.0), |g| (g.width, g.height))
+    });
+    let mut runner = mara::window::AppRunner::new()
         .title("gearbox — robotics simulator")
-        .size(window_size().0, window_size().1)
-        .run::<GearboxApp>()
+        .size(width, height);
+    if window_size().is_none()
+        && let Some(g) = remembered
+    {
+        runner = runner.position(g.x, g.y);
+    }
+    runner.run::<GearboxApp>()
 }
 
-/// `GEARBOX_WINDOW=WxH` sizes the window in points; 1400x900 by default.
-fn window_size() -> (f32, f32) {
-    std::env::var("GEARBOX_WINDOW")
-        .ok()
-        .and_then(|value| {
-            let (w, h) = value.split_once('x')?;
-            Some((w.parse().ok()?, h.parse().ok()?))
-        })
-        .unwrap_or((1400.0, 900.0))
+/// `GEARBOX_WINDOW=WxH` sizes the window in points; unset defers to the
+/// remembered size, else 1400x900.
+fn window_size() -> Option<(f32, f32)> {
+    std::env::var("GEARBOX_WINDOW").ok().and_then(|value| {
+        let (w, h) = value.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    })
 }
 
 pub struct GearboxApp {
@@ -96,6 +107,7 @@ pub struct GearboxApp {
     gizmo: gizmo::PoseGizmo,
     machine_context: machine_context::MachineContext,
     shelf_state: mara_core::ShelfState,
+    window_geometry: window_geometry::WindowGeometry,
 }
 
 impl WindowApp for GearboxApp {
@@ -134,11 +146,29 @@ impl WindowApp for GearboxApp {
                 state.set_edge_visible(ShelfEdge::Bottom, false);
                 state
             },
+            window_geometry: window_geometry::load().unwrap_or(window_geometry::WindowGeometry {
+                width: 1400.0,
+                height: 900.0,
+                x: 0.0,
+                y: 0.0,
+            }),
         }
     }
 
     fn configure_shell(&mut self, bar: &mut ShellBar) {
         bar.app_menu = false;
+    }
+
+    fn on_window_resized(&mut self, width: f32, height: f32) {
+        self.window_geometry.width = width;
+        self.window_geometry.height = height;
+        window_geometry::save(self.window_geometry);
+    }
+
+    fn on_window_moved(&mut self, x: f32, y: f32) {
+        self.window_geometry.x = x;
+        self.window_geometry.y = y;
+        window_geometry::save(self.window_geometry);
     }
 
     fn on_shell_event(&mut self, event: ShellEvent, _ctx: &mut MaraHostCtx<'_>) {
@@ -167,6 +197,7 @@ impl WindowApp for GearboxApp {
             gizmo,
             machine_context,
             shelf_state,
+            window_geometry: _,
         } = self;
         capture.update(&egui);
 
