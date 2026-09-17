@@ -8,33 +8,28 @@
 -- At an oslo prompt in this directory `make` is enough; everywhere else it is `oslo make`.
 -- The dev shell's toolchain comes from `.env.lua`'s `nix_develop()`, so most recipes call
 -- `cargo` directly rather than wrapping every command in `nix develop -c`. `run`/`sim` are
--- the exception — they invoke `nix develop -c` themselves; see `fresh_display_env` below
--- for why.
+-- the exception — they invoke `nix develop -c` themselves; see `fresh_display_env` below.
 
 local make = oslo.make
 
 -- `run`/`sim` re-detect the Wayland socket and NVIDIA presence fresh, every launch, and
--- invoke `nix develop` themselves — deliberately NOT relying on `.env.lua`'s one-time,
--- already-cached devshell activation (or oslo's own `oslo.env.set`) for the NVIDIA choice.
+-- invoke `nix develop` themselves rather than trusting `.env.lua`'s devshell activation for
+-- the NVIDIA choice specifically.
 --
--- gearbox's flake.nix decides once, at devshell-evaluation time, whether `nixVulkan`
--- symlinks to `nixVulkanNvidia-<version>` or `nixVulkanIntel`, by reading NVIDIA_VERSION
--- through Nix's impure `builtins.getEnv`. Getting a correctly-detected value in front of
--- that read turned out to need real care:
---   - `oslo.env.set(...)` in `.env.lua` does NOT set a real process environment variable
---     immediately — it only queues something for the *calling* shell to pick up after the
---     whole script returns, so a `nix_develop()` call later in that same script can never
---     see it (proven: an unconditional `error()` at the top of `.env.lua` doesn't even
---     fire during `oslo make <recipe>` — that file isn't evaluated by these commands at
---     all, only by the interactive shell's own directory-entry hook).
---   - Nix's evaluation sandbox blocks raw file reads like `/proc/driver/nvidia/version`
---     even with `--impure` (`builtins.readFile` "succeeds" but returns empty), so
---     `flake.nix` reading the version itself isn't an option either.
---   - The one thing that reliably works: a real shell `export FOO=...` followed by
---     `nix develop --impure -c ...` *in that same process* — env vars genuinely are
---     inherited through the sandbox for `builtins.getEnv`, just not files. So this runs
---     `nix develop` itself, right after exporting, instead of trusting whatever devshell
---     was already active.
+-- gearbox's flake.nix decides, at devshell-evaluation time, whether `nixVulkan` symlinks to
+-- `nixVulkanNvidia-<version>` or `nixVulkanIntel`, by reading NVIDIA_VERSION through Nix's
+-- impure `builtins.getEnv`. `.env.lua` (this directory's own) does correctly detect NVIDIA
+-- and call `oslo.env.set("NVIDIA_VERSION", ...)` before its own `nix_develop()` call — but
+-- `oslo.direnv.nix_develop()`'s internal `nix print-dev-env` invocation does not observe a
+-- same-script `oslo.env.set()`, confirmed via a minimal repro flake (filed as
+-- ISSUE_OSLO_MAKE.md in the oslo repo) even though `os.getenv()` and `oslo.run{}`
+-- subprocesses now correctly do. So this can't be fixed from `.env.lua` alone yet.
+--
+-- The one thing proven to work: a real shell `export FOO=...` followed by
+-- `nix develop --impure -c ...` *in that same shell script* — env vars are inherited
+-- through Nix's sandbox for `builtins.getEnv`, just not through `nix_develop()`'s internal
+-- subprocess spawn. So this exports NVIDIA_VERSION and calls `nix develop` itself, in one
+-- script, instead of relying on whatever devshell was already active.
 --
 -- NVIDIA presence is checked via /sys/bus/pci/devices/*/vendor (the kernel's own PCI bus
 -- enumeration — no `lspci` dependency, so no PATH-availability risk), which reflects
