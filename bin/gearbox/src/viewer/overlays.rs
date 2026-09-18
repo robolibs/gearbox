@@ -112,6 +112,8 @@ pub struct DisplayToggles {
     pub show_physics: bool,
     pub wireframe: bool,
     pub show_colliders: bool,
+    /// Lifts the camera's 5 km zoom ceiling, out to where the whole planet fits.
+    pub unlimited_zoom: bool,
     pub light_intensity_scale: f32,
     pub show_tf_frames: bool,
     pub show_tf_names: bool,
@@ -130,6 +132,7 @@ impl Default for DisplayToggles {
             show_physics: false,
             wireframe: false,
             show_colliders: false,
+            unlimited_zoom: std::env::var("GEARBOX_UNLIMITED_ZOOM").is_ok_and(|v| v == "1"),
             light_intensity_scale: 1.0,
             show_tf_frames: tf_env("frames"),
             show_tf_names: tf_env("names"),

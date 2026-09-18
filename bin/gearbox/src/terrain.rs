@@ -27,7 +27,8 @@ const SPAWN_FLAT_RADIUS_M: f32 = 30.0;
 const SPAWN_RELIEF_RADIUS_M: f32 = 70.0;
 const SAFETY_FLOOR_Y_M: f64 = -40.0;
 const SAFETY_FLOOR_HALF_EXTENT_M: f64 = 10_000.0;
-const HORIZON_COLOR: Color = Color::srgb(0.46, 0.55, 0.30);
+// Measured against the meadow backdrop it borders, from 60 km in clear air.
+const HORIZON_COLOR: Color = Color::linear_rgb(0.058, 0.108, 0.015);
 /// Peak-to-trough relief of the distant land around the meadow.
 pub(crate) const HORIZON_RELIEF_M: f32 = 220.0;
 

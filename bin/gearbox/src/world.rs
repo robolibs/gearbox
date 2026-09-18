@@ -38,6 +38,8 @@ const FLAT_GROUND_VISUAL_SIZE_M: f32 = 10_000.0;
 const USD_TERRAIN_ACTIVATION_WARN_FRAMES: u32 = 120;
 const CAMERA_HALF_SPAN_M: f32 = 5_000.0;
 const CAMERA_MAX_DISTANCE_M: f32 = 5_000.0;
+/// With the ceiling lifted: far enough for the whole planet to fit the view.
+const CAMERA_ORBIT_DISTANCE_M: f32 = 40_000_000.0;
 const CAMERA_MAX_HEIGHT_M: f32 = 3_000.0;
 
 static USD_TERRAIN_LOADED: AtomicBool = AtomicBool::new(false);
@@ -260,18 +262,26 @@ const STATIC_PROP_FORCE_FREEZE_FRAMES: u32 = 45;
 const STATIC_PROP_SETTLED_LINEAR_SPEED_MPS: f64 = 0.12;
 const STATIC_PROP_SETTLED_ANGULAR_SPEED_RPS: f64 = 0.25;
 
-/// The part of the planet anyone can see: a spherical cap around the pole
-/// under the field, out to the horizon from the 5 km camera ceiling. Rings
-/// tighten towards the field, keeping the true curvature with ~12k vertices
+/// The planet: fine rings in a cap around the pole under the field, where it is
+/// seen from near, and coarse ones round the rest for a camera in orbit. Rings
+/// tighten towards the field, keeping the true curvature with ~35k vertices
 /// where a full 1024x512 sphere uploaded 29 MB at every launch.
 fn planet_cap_mesh(radius: f32) -> Mesh {
     const CAP_RAD: f32 = 3.0 * std::f32::consts::PI / 180.0;
-    const RINGS: u32 = 48;
+    const CAP_RINGS: u32 = 48;
+    // Past the cap, coarse rings close the globe for a camera in orbit.
+    const GLOBE_RINGS: u32 = 90;
+    const RINGS: u32 = CAP_RINGS + GLOBE_RINGS;
     const SEGMENTS: u32 = 256;
     let mut positions = vec![[0.0, radius, 0.0]];
     let mut normals = vec![[0.0, 1.0, 0.0]];
     for ring in 1..=RINGS {
-        let theta = CAP_RAD * (ring as f32 / RINGS as f32).powi(2);
+        let theta = if ring <= CAP_RINGS {
+            CAP_RAD * (ring as f32 / CAP_RINGS as f32).powi(2)
+        } else {
+            let t = (ring - CAP_RINGS) as f32 / (GLOBE_RINGS + 1) as f32;
+            CAP_RAD + (std::f32::consts::PI - CAP_RAD) * t
+        };
         for segment in 0..SEGMENTS {
             let phi = segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
             let normal = [theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin()];
@@ -290,6 +300,13 @@ fn planet_cap_mesh(radius: f32) -> Mesh {
             let (c, d) = (at(ring + 1, segment), at(ring + 1, segment + 1));
             indices.extend([a, b, c, b, d, c]);
         }
+    }
+    // The far pole closes it.
+    let south = positions.len() as u32;
+    positions.push([0.0, -radius, 0.0]);
+    normals.push([0.0, -1.0, 0.0]);
+    for segment in 0..SEGMENTS {
+        indices.extend([south, at(RINGS, segment), at(RINGS, segment + 1)]);
     }
     Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
@@ -342,7 +359,7 @@ fn spawn_world(
     };
     let chase = ChaseCamera {
         focus: Vec3::new(0.0, 0.5, 0.0),
-        distance: view("GEARBOX_CAMERA_DISTANCE", 14.0).clamp(1.0, CAMERA_MAX_DISTANCE_M),
+        distance: view("GEARBOX_CAMERA_DISTANCE", 14.0).clamp(1.0, CAMERA_ORBIT_DISTANCE_M),
         elevation: view("GEARBOX_CAMERA_ELEVATION", 15.0).clamp(-10.0, 89.0).to_radians(),
         max_distance: CAMERA_MAX_DISTANCE_M,
         ..default()
@@ -360,7 +377,9 @@ fn spawn_world(
         camera_transform,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
-            far: 80_000.0,
+            // Only culling reads it (depth is reversed and unbounded): past the
+            // far side of the planet from the highest orbit.
+            far: 1.0e8,
             ..default()
         }),
         chase,
@@ -436,12 +455,27 @@ const CAMERA_MIN_ELEVATION: f32 = 3.0_f32.to_radians();
 /// it clear.
 pub(crate) fn chase_camera_floor(
     keys: Res<ButtonInput<KeyCode>>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    toggles: Res<crate::viewer::overlays::DisplayToggles>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut Projection)>,
 ) {
+    let (ceiling, max_height) = if toggles.unlimited_zoom {
+        (CAMERA_ORBIT_DISTANCE_M, CAMERA_ORBIT_DISTANCE_M)
+    } else {
+        (CAMERA_MAX_DISTANCE_M, CAMERA_MAX_HEIGHT_M)
+    };
     let below_ground = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    for (mut cam, mut transform) in &mut cameras {
-        cam.max_distance = CAMERA_MAX_DISTANCE_M;
-        cam.distance = cam.distance.clamp(cam.min_distance, CAMERA_MAX_DISTANCE_M);
+    for (mut cam, mut transform, mut projection) in &mut cameras {
+        cam.max_distance = ceiling;
+        cam.distance = cam.distance.clamp(cam.min_distance, ceiling);
+        // Depth precision falls with the square of distance over the near
+        // plane, so the near plane backs off as the camera does; nothing is
+        // ever that close to a camera that far out.
+        let near = (cam.distance / 200.0).clamp(0.1, 100_000.0);
+        if let Projection::Perspective(lens) = projection.as_mut()
+            && (lens.near - near).abs() > near * 0.05
+        {
+            lens.near = near;
+        }
         cam.focus.x = cam.focus.x.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
         cam.focus.z = cam.focus.z.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
         if !below_ground {
@@ -457,13 +491,13 @@ pub(crate) fn chase_camera_floor(
                 .max(ground + CAMERA_TERRAIN_CLEARANCE_M - rise);
         }
         let rise = cam.distance * cam.elevation.sin().max(0.0);
-        if rise > CAMERA_MAX_HEIGHT_M {
-            cam.distance = CAMERA_MAX_HEIGHT_M / cam.elevation.sin();
+        if rise > max_height {
+            cam.distance = max_height / cam.elevation.sin();
         }
         cam.focus.y = cam
             .focus
             .y
-            .min(CAMERA_MAX_HEIGHT_M - cam.distance * cam.elevation.sin());
+            .min(max_height - cam.distance * cam.elevation.sin());
         apply_rig(&cam, &mut transform);
     }
 }

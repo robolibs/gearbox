@@ -25,13 +25,15 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
             toggles.show_world_axes,
             toggles.show_physics,
             toggles.show_colliders,
+            toggles.unlimited_zoom,
         ],
     );
     let overlays_pod_built = Pod::new(overlays_pod)
         .with_toggle_initial("Ground grid", accent, toggles.show_world_grid)
         .with_toggle_initial("World axes", accent, toggles.show_world_axes)
         .with_toggle_initial("Physics", accent, toggles.show_physics)
-        .with_toggle_initial("Colliders", accent, toggles.show_colliders);
+        .with_toggle_initial("Colliders", accent, toggles.show_colliders)
+        .with_toggle_initial("Unlimited zoom", accent, toggles.unlimited_zoom);
 
     let tf_pod = pid(P, "tf", 0);
     ctx.sync_toggles(
@@ -105,6 +107,7 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
         set_toggle(&mut toggles.show_world_axes, resp, 1);
         set_toggle(&mut toggles.show_physics, resp, 2);
         set_toggle(&mut toggles.show_colliders, resp, 3);
+        set_toggle(&mut toggles.unlimited_zoom, resp, 4);
     }
     if let Some(resp) = pod_response(responses, view_id, 1) {
         set_toggle(&mut toggles.show_tf_frames, resp, 0);
