@@ -43,6 +43,7 @@ impl Plugin for SkyPlugin {
                     carry_cloud_shadows,
                     synchronize_daylight,
                     follow_with_cloud_shadows,
+                    thin_air_with_height,
                 )
                     .chain()
                     .in_set(DaylightUpdate),
@@ -278,6 +279,7 @@ fn cloud_drift(settings: &WeatherSettings) -> Vec3 {
 /// texel at a time and the reach in steps, because a map that slid or
 /// stretched smoothly would make every shadow edge crawl.
 fn follow_with_cloud_shadows(
+    settings: Res<WeatherSettings>,
     shadows: Option<Res<crate::clouds::CloudShadowMap>>,
     cameras: Query<&GlobalTransform, With<CloudsCamera>>,
     mut clouds: ResMut<CloudsConfig>,
@@ -289,7 +291,8 @@ fn follow_with_cloud_shadows(
     let (eye, forward) = (camera.translation(), camera.forward().as_vec3());
     // From height more land is in view; the reach doubles in half-steps.
     let wanted = (shadows.half_extent + 1.6 * eye.y.max(0.0)) / shadows.half_extent;
-    let half = shadows.half_extent * 2f32.powf((wanted.log2() * 2.0).ceil() / 2.0);
+    // Beyond a few tens of kilometres single cloud shadows are below a pixel.
+    let half = (shadows.half_extent * 2f32.powf((wanted.log2() * 2.0).ceil() / 2.0)).min(32_000.0);
     // The ground in the middle of the view, or a way ahead when the view
     // never meets it.
     let ahead = if forward.y < -0.05 { eye.y.max(0.0) / -forward.y } else { f32::MAX };
@@ -307,5 +310,43 @@ fn follow_with_cloud_shadows(
             clouds.cloud_shadow_center = center;
             clouds.cloud_shadow_extent = 2.0 * half;
         }
+        // From high enough no single cloud's shadow can be made out, and the
+        // map's repeats would show as a grid instead: the shadows fade away.
+        let opacity = settings.clouds.cloud_shadow_opacity
+            * (1.0 - ((eye.y - 8_000.0) / 22_000.0).clamp(0.0, 1.0));
+        if (clouds.cloud_shadow_opacity - opacity).abs() > 0.005 {
+            clouds.cloud_shadow_opacity = opacity;
+        }
     }
+}
+
+/// Haze and sky blue are the air between the eye and the scene, and the air
+/// thins with height: its haze layer is some 1.5 km deep, so a camera well
+/// above it looks down through a fixed depth of haze however far it climbs,
+/// and the blue overhead fades out with the pressure, to black in orbit.
+fn thin_air_with_height(
+    settings: Res<WeatherSettings>,
+    mut cameras: Query<(&GlobalTransform, &mut DistanceFog), With<CloudsCamera>>,
+    mut clouds: ResMut<CloudsConfig>,
+    mut applied: Local<Option<f32>>,
+) {
+    const HAZE_DEPTH_M: f32 = 1_500.0;
+    const SKY_SCALE_HEIGHT_M: f32 = 8_400.0;
+    let Some(height) = cameras.iter().map(|(at, _)| at.translation().y.max(1.0)).reduce(f32::max)
+    else {
+        return;
+    };
+    // Mean haze along a sight line to the ground, against haze at the ground.
+    let haze = HAZE_DEPTH_M / height * (1.0 - (-height / HAZE_DEPTH_M).exp());
+    if !settings.is_changed() && applied.is_some_and(|was| (was - haze).abs() < 0.01 * was) {
+        return;
+    }
+    *applied = Some(haze);
+    for (_, mut fog) in &mut cameras {
+        fog.falloff = haze_falloff(settings.haze_visibility_km / haze);
+    }
+    let sky = (-height / SKY_SCALE_HEIGHT_M).exp();
+    let daylight = Daylight::from_settings(&settings);
+    clouds.sky_zenith_color = daylight.zenith * sky;
+    clouds.sky_horizon_color = daylight.horizon * sky;
 }
