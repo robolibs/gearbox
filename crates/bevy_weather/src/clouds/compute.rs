@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use super::config::CloudsConfig;
 
 use super::{
-    images::{GROUND_SHADOW_SIZE, IMAGE_SIZE},
+    images::{GLOBE_WEATHER_SIZE, GROUND_SHADOW_SIZE, IMAGE_SIZE},
     uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer},
 };
 
@@ -135,6 +135,7 @@ fn prepare_textures_bind_group(
         Some(sky_view),
         Some(history),
         Some(ground_shadow),
+        Some(globe_weather),
     ) = (
         gpu_images.get(&clouds_image.cloud_render_image),
         gpu_images.get(&clouds_image.cloud_atlas_image),
@@ -142,6 +143,7 @@ fn prepare_textures_bind_group(
         gpu_images.get(&clouds_image.sky_image),
         gpu_images.get(&clouds_image.history_image),
         gpu_images.get(&clouds_image.ground_shadow_image),
+        gpu_images.get(&clouds_image.globe_weather_image),
     )
     else {
         commands.remove_resource::<CloudsImageBindGroup>();
@@ -167,6 +169,7 @@ fn prepare_textures_bind_group(
             &sky_view.texture_view,
             &history.texture_view,
             &ground_shadow.texture_view,
+            &globe_weather.texture_view,
         )),
     );
     commands.insert_resource(CloudsImageBindGroup(bind_group));
@@ -302,7 +305,10 @@ fn run_clouds_compute_pass(
     pass.set_bind_group(1, &textures.0, &[]);
     pass.set_pipeline(compute);
     let (width, height) = if initialize {
-        (IMAGE_SIZE, IMAGE_SIZE)
+        (
+            IMAGE_SIZE.max(GLOBE_WEATHER_SIZE.x),
+            IMAGE_SIZE.max(GLOBE_WEATHER_SIZE.y),
+        )
     } else {
         (size.width, size.height)
     };

@@ -9,6 +9,8 @@ use bevy::{
 pub(crate) const IMAGE_SIZE: u32 = 512;
 /// Texels along a side of the ground shadow map.
 pub(crate) const GROUND_SHADOW_SIZE: u32 = 768;
+/// Texels across and down the weather map of the whole planet.
+pub(crate) const GLOBE_WEATHER_SIZE: UVec2 = UVec2::new(2048, 1024);
 
 pub(crate) fn cloud_image(size: Extent3d, dimension: TextureDimension) -> Image {
     filled_image(size, dimension, &[0, 0, 0, 0, 0, 0, 0, 0x3c])
@@ -67,6 +69,14 @@ pub(crate) fn build_images(images: &mut Assets<Image>, resolution: UVec2) -> Clo
             },
             TextureDimension::D2,
             &[0, 0x3c, 0, 0, 0, 0, 0, 0x3c],
+        )),
+        globe_weather_image: images.add(cloud_image(
+            Extent3d {
+                width: GLOBE_WEATHER_SIZE.x,
+                height: GLOBE_WEATHER_SIZE.y,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
         )),
     }
 }

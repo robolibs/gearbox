@@ -112,4 +112,6 @@ pub(crate) struct CloudsImage {
     pub history_image: Handle<Image>,
     #[storage_texture(5, image_format = Rgba16Float, access = ReadWrite)]
     pub ground_shadow_image: Handle<Image>,
+    #[storage_texture(6, image_format = Rgba16Float, access = ReadWrite)]
+    pub globe_weather_image: Handle<Image>,
 }

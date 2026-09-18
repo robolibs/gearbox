@@ -52,6 +52,7 @@ struct Config {
 @group(1) @binding(3) var sky_texture: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(4) var history_texture: texture_2d<f32>;
 @group(1) @binding(5) var ground_shadow_texture: texture_storage_2d<rgba16float, read_write>;
+@group(1) @binding(6) var globe_weather_texture: texture_storage_2d<rgba16float, read_write>;
 
 struct Ray {
     step_distance: f32,
@@ -79,33 +80,52 @@ fn sample_atlas(position: vec2f) -> vec4f {
         mix(atlas_texel(cell + vec2i(0, 1)), atlas_texel(cell + vec2i(1, 1)), f.x), f.y);
 }
 
-// Cloud shape and weather over a flat map `q` of the ground.
-fn cloud_map_planar(q: vec2f, normalized_height: f32) -> vec2f {
-    let rotate = mat2x2f(0.8, 0.6, -0.6, 0.8);
-    let weather_a = sample_atlas(q / 160000.0 + vec2f(0.13, 0.39)).a;
-    let weather_b = sample_atlas(rotate * q / 57000.0 + vec2f(0.63, 0.17)).a;
-    let weather = smoothstep(0.24, 0.73, weather_a * 0.65 + weather_b * 0.35);
-    let warp = vec2f(weather_a - 0.5, weather_b - 0.5) * 9000.0;
-    let uv = (q + warp) * (0.00005 * config.clouds_base_scale);
-    let cloud = mix(sample_atlas(uv), sample_atlas(rotate * uv * 1.713 + vec2f(0.37, 0.61)), 0.28);
-    let height = normalized_height / mix(0.65, 1.1, weather);
-    let n = height * height * cloud.b + pow(1.0 - normalized_height, 16.0);
-    return vec2f(common::remap(cloud.r - n, cloud.g, 1.0), weather);
+// The weather of the whole planet, read where `direction` leaves its centre.
+// The map's poles lie on the x axis, so the field sits on its equator.
+fn sample_globe_weather(direction: vec3f) -> vec4f {
+    let size = vec2i(textureDimensions(globe_weather_texture));
+    let longitude = atan2(direction.z, direction.y) / 6.2831853 + 0.5;
+    let latitude = asin(clamp(direction.x, -1.0, 1.0)) / 3.1415927 + 0.5;
+    let uv = vec2f(longitude, latitude) * vec2f(size) - vec2f(0.5);
+    let cell = vec2i(floor(uv));
+    let f = fract(uv);
+    let x0 = (cell.x % size.x + size.x) % size.x;
+    let x1 = (x0 + 1) % size.x;
+    let y0 = clamp(cell.y, 0, size.y - 1);
+    let y1 = clamp(cell.y + 1, 0, size.y - 1);
+    return mix(
+        mix(textureLoad(globe_weather_texture, vec2i(x0, y0)), textureLoad(globe_weather_texture, vec2i(x1, y0)), f.x),
+        mix(textureLoad(globe_weather_texture, vec2i(x0, y1)), textureLoad(globe_weather_texture, vec2i(x1, y1)), f.x), f.y);
 }
 
-// A flat map cannot wrap a globe: it smears where the ground turns away from
-// it. So the map is laid from three sides and each place takes the side it
-// faces. `p` is measured from the pole under the field and `up` points away
-// from the planet's centre; around the field only the map from above counts,
-// and the clouds there are what a single flat map gave.
-fn cloud_map_base(p: vec3f, up: vec3f, normalized_height: f32) -> vec2f {
-    var facing = pow(abs(up), vec3f(8.0));
-    facing /= facing.x + facing.y + facing.z;
-    var shape = vec2f(0.0);
-    if facing.y > 0.004 { shape += facing.y * cloud_map_planar(p.xz, normalized_height); }
-    if facing.x > 0.004 { shape += facing.x * cloud_map_planar(p.zy, normalized_height); }
-    if facing.z > 0.004 { shape += facing.z * cloud_map_planar(p.xy, normalized_height); }
-    return shape;
+// Cloud shape and weather from noise in the planet's own space: `p` is
+// measured from its centre, so the clouds are one field over the whole globe
+// with no tile to repeat and no map to stretch. `globe` is the planet's
+// weather there, as a shift about the field's own.
+fn cloud_map_base(p: vec3f, normalized_height: f32, globe: f32, span: f32) -> vec2f {
+    // Each octave is turned against the last so their lattices never line up.
+    let turn = mat3x3f(0.80, 0.36, -0.48, -0.36, 0.93, 0.10, 0.48, 0.10, 0.87);
+    let q = turn * p;
+    let r = turn * q;
+    // An octave finer than the pixel that sees it is left out, not aliased.
+    var fronts = 0.55 * (1.0 - smoothstep(15000.0, 45000.0, span)) * common::gradient_noise(p / 61000.0, 1.0e6);
+    if span < 18000.0 { fronts += 0.30 * (1.0 - smoothstep(6000.0, 18000.0, span)) * common::gradient_noise(q / 23000.0 + vec3f(31.7), 1.0e6); }
+    if span < 7000.0 { fronts += 0.15 * (1.0 - smoothstep(2500.0, 7000.0, span)) * common::gradient_noise(r / 9700.0 + vec3f(53.1), 1.0e6); }
+    let weather = clamp(0.5 + 1.1 * fronts + globe, 0.0, 1.0);
+
+    let broad = common::gradient_noise(p / 5200.0 + vec3f(7.1), 1.0e6);
+    let middle = common::gradient_noise(q / 2300.0 + vec3f(11.3), 1.0e6);
+    let fine = common::gradient_noise(r / 1050.0 + vec3f(23.9), 1.0e6);
+    let body = 0.46 + 1.6 * (0.6 * broad + 0.3 * middle + 0.15 * fine);
+    // Billows come from the cell volume, read twice at unrelated turns and
+    // scales so its small tile never shows.
+    let cells = p / 130.0;
+    let puffs = 0.45 + 0.3 * (worley_at(cells) + worley_at(turn * cells * 1.618034 + vec3f(11.3, 5.7, 17.1)));
+    let shape = mix(1.0, body, 0.9) * mix(1.0, puffs, 0.7);
+
+    let height = normalized_height / mix(0.65, 1.1, weather);
+    let n = height * height * (0.5 - 0.6 * middle) + pow(1.0 - normalized_height, 16.0);
+    return vec2f(common::remap(shape - n, -0.5 + 0.3 * fine, 1.0), weather);
 }
 
 fn worley_texel(index: vec3i) -> f32 {
@@ -150,8 +170,16 @@ fn get_cloud_map_density(pos: vec3f, normalized_height: f32, sample_span: f32) -
     }
     let ps = pos - vec3f(0.0, config.planet_radius, 0.0) - config.wind_displacement;
     let shape_position = ps + vec3f(normalized_height * 180.0, 0.0, normalized_height * 90.0);
-    let base = cloud_map_base(shape_position, normalize(pos), normalized_height);
-    var m = base.x * cloud_gradient(normalized_height);
+    // The field keeps the sky it was given; the planet's weather grows in around it.
+    let radius = vec3f(0.0, config.planet_radius, 0.0);
+    let far = smoothstep(40000.0, 600000.0, length(ps.xz) + max(-ps.y, 0.0));
+    var globe = 0.0;
+    if far > 0.0 { globe = far * (sample_globe_weather(normalize(ps + radius)).r - 0.5); }
+    let base = cloud_map_base(shape_position + radius, normalized_height, globe, sample_span);
+    // Single clouds smaller than a pixel would sparkle: from far off they merge
+    // into the even cover they average to, with a softer edge.
+    let unresolved = smoothstep(600.0, 5000.0, sample_span);
+    var m = mix(base.x, 0.42, unresolved) * cloud_gradient(normalized_height);
 
 	let clouds_detail_strength = (1.0 - smoothstep(0.5, 1.0, m));
 
@@ -170,8 +198,8 @@ fn get_cloud_map_density(pos: vec3f, normalized_height: f32, sample_span: f32) -
     }
 
 	let weather_variation = 4.0 * config.clouds_coverage * (1.0 - config.clouds_coverage);
-	let local_coverage = clamp(config.clouds_coverage + (base.y - 0.5) * 0.55 * weather_variation, 0.0, 1.0);
-	m = smoothstep(0.0, config.clouds_base_edge_softness, m + local_coverage - 1.0);
+	let local_coverage = clamp(config.clouds_coverage + (base.y - 0.5) * 0.8 * weather_variation, 0.0, 1.0);
+	m = smoothstep(0.0, mix(config.clouds_base_edge_softness, 0.35, unresolved), m + local_coverage - 1.0);
     m *= common::linearstep0(config.clouds_bottom_softness, normalized_height);
 
     return clamp(m * config.clouds_density, 0.0, 1.0);
@@ -326,6 +354,47 @@ fn get_sky_color(ray_dir: vec3f) -> vec3f {
     return col;
 }
 
+// Noise over the unit sphere that never tiles: `d` is a direction.
+fn globe_fbm(d: vec3f, octaves: i32) -> f32 {
+    var sum = 0.0;
+    var amplitude = 0.5;
+    var p = d + vec3f(100.0);
+    for (var i = 0; i < octaves; i++) {
+        sum += amplitude * common::gradient_noise(p, 4096.0);
+        p = p * 2.03 + vec3f(17.1, 3.7, 9.2);
+        amplitude *= 0.5;
+    }
+    return sum;
+}
+
+fn globe_fbm3(d: vec3f, octaves: i32) -> vec3f {
+    return vec3f(
+        globe_fbm(d, octaves),
+        globe_fbm(d + vec3f(5.2, 1.3, 8.7), octaves),
+        globe_fbm(d + vec3f(2.8, 9.1, 4.4), octaves));
+}
+
+// The planet's weather: fronts and swirls from noise folded through itself
+// twice, wetter along the equator and the storm tracks and drier between.
+// r is the cover.
+fn render_globe_weather(id: vec2u) -> vec4f {
+    let size = vec2f(textureDimensions(globe_weather_texture));
+    let longitude = ((f32(id.x) + 0.5) / size.x - 0.5) * 6.2831853;
+    let latitude = ((f32(id.y) + 0.5) / size.y - 0.5) * 3.1415927;
+    let d = vec3f(sin(latitude), cos(latitude) * cos(longitude), cos(latitude) * sin(longitude));
+
+    let first = globe_fbm3(d * 2.2, 4);
+    let second = globe_fbm3(d * 2.2 + 1.6 * first, 4);
+    let systems = globe_fbm(d * 3.4 + 1.4 * second, 8);
+
+    let parallel = abs(degrees(asin(clamp(dot(d, vec3f(0.0, 0.766, 0.643)), -1.0, 1.0))));
+    let climate = 0.12 * (1.0 - smoothstep(4.0, 14.0, parallel))
+        - 0.22 * smoothstep(14.0, 24.0, parallel) * (1.0 - smoothstep(30.0, 42.0, parallel))
+        + 0.10 * smoothstep(40.0, 50.0, parallel) * (1.0 - smoothstep(62.0, 75.0, parallel));
+
+    return vec4f(clamp(0.5 + 1.5 * systems + climate, 0.0, 1.0), 0.0, 0.0, 1.0);
+}
+
 fn render_clouds_atlas(frag_coord: vec2f) -> vec4f {
     let v_uv = frag_coord / vec2f(textureDimensions(clouds_atlas_texture));
     let coord = vec3f(v_uv, 0.5);
@@ -391,6 +460,9 @@ fn get_ray_direction(frag_coord: vec2f) -> vec3f {
 
 @compute @workgroup_size(8, 8, 1)
 fn init(@builtin(global_invocation_id) id: vec3u) {
+    if all(id.xy < textureDimensions(globe_weather_texture)) {
+        textureStore(globe_weather_texture, id.xy, render_globe_weather(id.xy));
+    }
     if all(id.xy < textureDimensions(clouds_atlas_texture)) {
         textureStore(clouds_atlas_texture, id.xy, render_clouds_atlas(vec2f(id.xy) + vec2f(0.5)));
     }
