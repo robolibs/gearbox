@@ -114,18 +114,19 @@ fn synchronize_daylight(
         *transform = Transform {
             translation: transform.translation,
             rotation: crate::clouds::sun_rotation(daylight.direction),
-            scale: Vec3::splat(shadows.as_ref().map_or(1.0, |map| map.half_extent)),
-            ..default()
+            scale: transform.scale,
         };
         light.color = daylight.direct_color;
         light.illuminance = settings.illuminance * daylight.direct_strength;
         original.0 = light.illuminance;
         light.shadow_maps_enabled = daylight.direct_strength > 0.0;
     }
-    let (resolution, shadow_center) = (clouds.render_resolution, clouds.cloud_shadow_center);
+    let (resolution, center, extent) =
+        (clouds.render_resolution, clouds.cloud_shadow_center, clouds.cloud_shadow_extent);
     *clouds = settings.clouds;
     clouds.render_resolution = resolution;
-    clouds.cloud_shadow_center = shadow_center;
+    clouds.cloud_shadow_center = center;
+    clouds.cloud_shadow_extent = extent;
     clouds.wind_velocity = cloud_drift(&settings);
     clouds.sun_dir = daylight.direction.extend(0.0);
     clouds.sun_color = daylight.sun_radiance;
@@ -271,9 +272,11 @@ fn cloud_drift(settings: &WeatherSettings) -> Vec3 {
     Vec3::new(cos, 0.0, sin) * settings.cloud_drift_mps.max(0.0)
 }
 
-/// The cloud shadow map follows the camera, as engines' cloud shadows do, so
-/// its texels are spent where they are seen. The centre moves a whole texel at
-/// a time: a map that slid smoothly would make every shadow edge crawl.
+/// The cloud shadow map follows the view, as engines' cloud shadows do, so its
+/// texels are spent where they are seen: it centres on the ground the camera
+/// looks at and reaches further as the camera climbs. The centre moves a whole
+/// texel at a time and the reach in steps, because a map that slid or
+/// stretched smoothly would make every shadow edge crawl.
 fn follow_with_cloud_shadows(
     shadows: Option<Res<crate::clouds::CloudShadowMap>>,
     cameras: Query<&GlobalTransform, With<CloudsCamera>>,
@@ -283,16 +286,26 @@ fn follow_with_cloud_shadows(
     let (Some(shadows), Some(camera)) = (shadows, cameras.iter().next()) else {
         return;
     };
+    let (eye, forward) = (camera.translation(), camera.forward().as_vec3());
+    // From height more land is in view; the reach doubles in half-steps.
+    let wanted = (shadows.half_extent + 1.6 * eye.y.max(0.0)) / shadows.half_extent;
+    let half = shadows.half_extent * 2f32.powf((wanted.log2() * 2.0).ceil() / 2.0);
+    // The ground in the middle of the view, or a way ahead when the view
+    // never meets it.
+    let ahead = if forward.y < -0.05 { eye.y.max(0.0) / -forward.y } else { f32::MAX };
+    let focus = eye + forward * ahead.min(0.6 * half);
+    let texel = 2.0 * half / shadows.resolution as f32;
     for mut sun in &mut suns {
         let (right, up) = (sun.rotation * Vec3::X, sun.rotation * Vec3::Y);
-        let eye = camera.translation();
-        let snap = |along: Vec3| (eye.dot(along) / shadows.texel).round() * shadows.texel;
+        let snap = |along: Vec3| (focus.dot(along) / texel).round() * texel;
         let center = right * snap(right) + up * snap(up);
-        if sun.translation != center {
+        if sun.translation != center || sun.scale != Vec3::splat(half) {
             sun.translation = center;
+            sun.scale = Vec3::splat(half);
         }
-        if clouds.cloud_shadow_center != center {
+        if clouds.cloud_shadow_center != center || clouds.cloud_shadow_extent != 2.0 * half {
             clouds.cloud_shadow_center = center;
+            clouds.cloud_shadow_extent = 2.0 * half;
         }
     }
 }

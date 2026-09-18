@@ -385,6 +385,9 @@ fn ground_shadow(@builtin(global_invocation_id) id: vec3u) {
             optical_depth += get_cloud_map_density(pos, get_normalized_height(pos), span) * span;
         }
     }
-    let shadow = 1.0 - config.shadow_opacity * (1.0 - exp(-optical_depth));
+    // Towards the map's rim the shadows fade to full sun: past it the texture
+    // repeats, and a shadow cut off at the seam would draw a straight line.
+    let rim = smoothstep(0.0, 0.1, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)));
+    let shadow = 1.0 - config.shadow_opacity * rim * (1.0 - exp(-optical_depth));
     textureStore(ground_shadow_texture, vec2i(id.xy), vec4f(shadow, 0.0, 0.0, 1.0));
 }
