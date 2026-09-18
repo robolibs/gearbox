@@ -27,7 +27,7 @@ use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::view::ExtractedView;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
-use super::contacts::{WheelContacts, trample_texel};
+use super::contacts::{WheelContacts, trample_texel, tread_texel};
 use super::profile::WheelMapParams;
 use bevy::platform::collections::HashMap;
 use std::ops::Range;
@@ -77,6 +77,8 @@ pub struct FieldGpu {
     pub trample: Handle<Image>,
     pub params: VegetationParams,
     pub footprint_length: f32,
+    /// The wheel map carries tread coordinates in two more channels.
+    pub tread: bool,
 }
 
 #[derive(Resource, ExtractResource, Clone, Default)]
@@ -457,7 +459,6 @@ fn stamp_wheel_contacts(
             let z1 = ((centre.y + reach).floor() as i32).clamp(0, height - 1);
             let x_lo = ((centre.x - reach).ceil() as i32).clamp(0, width - 1);
             let x_hi = ((centre.x + reach).floor() as i32).clamp(0, width - 1);
-            let texel = trample_texel(contacts.now, roll);
             for z in z0..=z1 {
                 let inside = |x: i32| {
                     let d = Vec2::new(x as f32, z as f32) - centre;
@@ -468,12 +469,19 @@ fn stamp_wheel_contacts(
                 };
                 let x1 = (x0..=x_hi).take_while(|x| inside(*x)).last().unwrap_or(x0);
                 let width = (x1 - x0 + 1) as u32;
-                let data: Vec<u16> = texel
-                    .iter()
-                    .copied()
-                    .cycle()
-                    .take((width * 2) as usize)
+                // A tread map also records, per texel, how far the wheel had
+                // rolled and where across the tyre the texel lies.
+                let data: Vec<u16> = (x0..=x1)
+                    .flat_map(|x| {
+                        let d = Vec2::new(x as f32, z as f32) - centre;
+                        let stamp = trample_texel(contacts.now, roll, d.dot(axle) / half_width, contact.scrub);
+                        let tread = field.tread.then(|| {
+                            tread_texel(contact.travelled + d.dot(roll) / tpm, d.dot(axle) / tpm, half_width / tpm)
+                        });
+                        stamp.into_iter().chain(tread.into_iter().flatten())
+                    })
                     .collect();
+                let texel_bytes = if field.tread { 8 } else { 4 };
                 let mut target = trample.texture.as_image_copy();
                 target.origin = Origin3d {
                     x: x0 as u32,
@@ -485,7 +493,7 @@ fn stamp_wheel_contacts(
                     bytemuck::cast_slice(&data),
                     TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(width * 4),
+                        bytes_per_row: Some(width * texel_bytes),
                         rows_per_image: None,
                     },
                     Extent3d {

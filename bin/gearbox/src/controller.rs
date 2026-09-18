@@ -2258,6 +2258,8 @@ fn wheel_body_of(
 /// stands still). Trailers and robots press the grass like tractors.
 fn record_wheel_tracks(
     inventory: Res<ControllerInventory>,
+    time: Res<Time>,
+    mut odometers: Local<HashMap<(String, String), f32>>,
     active: Res<gearbox_api::PhysicsActive>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
@@ -2323,6 +2325,18 @@ fn record_wheel_tracks(
                 (surface - ground) / ground.max(0.1)
             };
             values.set(&machine.id, &link.name, "slip", (slip * 1000.0).round() / 1000.0);
+            // How hard the tyre works the ground: wheelspin, side-slip, and the
+            // contact patch twisting as the wheel yaws through a turn.
+            let scrub = (0.1
+                + 0.6 * (surface - ground).abs()
+                + 1.2 * body.linvel().dot(axle).abs()
+                + 1.4 * body.angvel().y.abs()) as f32;
+            // Metres this wheel has rolled, which places its tread along the track.
+            let odometer = odometers
+                .entry((machine.id.to_string(), link.name.to_string()))
+                .or_insert(0.0);
+            *odometer += ground as f32 * time.delta_secs();
+            let travelled = *odometer;
             let p = body.translation();
             let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
             if p.y as f32 - radius as f32 > ground + WHEEL_TRACK_CONTACT_SLACK_M {
@@ -2340,6 +2354,8 @@ fn record_wheel_tracks(
                 position: Vec3::new(p.x as f32, ground, p.z as f32),
                 direction: roll,
                 width: width as f32,
+                scrub: scrub.clamp(0.0, 1.0),
+                travelled,
             });
         }
     }

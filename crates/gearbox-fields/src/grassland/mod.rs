@@ -65,6 +65,7 @@ impl Plugin for GrasslandPlugin {
                     bend: 0.9,
                     darkening: 0.43,
                     footprint_length: 0.25,
+                    tread: false,
                 },
                 layers: vec![
                     // One blade population at three levels of detail.

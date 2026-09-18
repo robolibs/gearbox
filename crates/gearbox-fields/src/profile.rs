@@ -26,6 +26,9 @@ pub struct WheelResponse {
     pub bend: f32,
     pub darkening: f32,
     pub footprint_length: f32,
+    /// Hard ground that prints tyre tread: its wheel map carries two more
+    /// channels of tread coordinates, doubling its size.
+    pub tread: bool,
 }
 
 #[derive(ShaderType, Reflect, Clone, Copy, Debug, Default)]

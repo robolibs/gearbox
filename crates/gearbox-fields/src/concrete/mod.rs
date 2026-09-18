@@ -1,4 +1,4 @@
-//! Concrete yard profile: 10 m cast slabs of scanned concrete (Poly Haven
+//! Concrete yard profile: 3 m cast slabs of scanned concrete (Poly Haven
 //! `concrete_floor_worn_001` and the mossy `concrete_floor_02`, both CC0)
 //! with open joints, and the weeds that root in those joints.
 
@@ -74,12 +74,14 @@ impl Plugin for ConcretePlugin {
             .resource_mut::<FieldProfiles>()
             .register(FieldProfile {
                 name: "concrete",
-                // Tyres polish the slabs faintly and crush the joint weeds.
+                // Tyres print their tread where they scrub and crush the joint
+                // weeds; marks wear off in a few minutes.
                 wheel_response: WheelResponse {
-                    recovery_seconds: 90.0,
+                    recovery_seconds: 240.0,
                     bend: 0.85,
-                    darkening: 0.1,
+                    darkening: 0.2,
                     footprint_length: 0.25,
+                    tread: true,
                 },
                 layers: vec![
                     VegetationLayer {

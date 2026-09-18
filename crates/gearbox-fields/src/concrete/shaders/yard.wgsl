@@ -3,8 +3,8 @@
 // have gone to seed.
 
 // Slab pitch, and the open gap between two pours.
-const SLAB_M: f32 = 10.0;
-const JOINT_M: f32 = 0.05;
+const SLAB_M: f32 = 3.0;
+const JOINT_M: f32 = 0.012;
 
 fn yard_pcg(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;

@@ -131,7 +131,13 @@ pub struct VegetationChunks(HashMap<(Entity, usize, i32, i32), Entity>);
 #[derive(Component)]
 pub struct SurfaceParts(Vec<Entity>);
 
-fn track_image(width: u32, height: u32) -> Image {
+// Two channels for a wheel map, four where the cover prints tyre tread.
+fn track_image(width: u32, height: u32, tread: bool) -> Image {
+    let (texel, format): (&[u8], _) = if tread {
+        (&[0u8; 8], TextureFormat::Rgba16Uint)
+    } else {
+        (&[0u8; 4], TextureFormat::Rg16Uint)
+    };
     Image::new_fill(
         Extent3d {
             width,
@@ -139,8 +145,8 @@ fn track_image(width: u32, height: u32) -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0u8; 4],
-        TextureFormat::Rg16Uint,
+        texel,
+        format,
         RenderAssetUsages::RENDER_WORLD,
     )
 }
@@ -214,7 +220,7 @@ pub fn ensure_fields(world: &mut World) {
         let height = (size.y * TRACK_TEXELS_PER_M).ceil() as u32 + 1;
         let trample = world
             .resource_mut::<Assets<Image>>()
-            .add(track_image(width, height));
+            .add(track_image(width, height, profile.wheel_response.tread));
         let response = profile.wheel_response;
         let wheels = WheelMapParams {
             origin: bounds.min,
@@ -240,6 +246,7 @@ pub fn ensure_fields(world: &mut World) {
                 heightmap: heightmap.clone(),
                 trample,
                 footprint_length: response.footprint_length,
+                tread: response.tread,
                 params: VegetationParams {
                     origin: Vec2::new(grid.min_x, grid.min_z),
                     texels_per_metre: 1.0 / grid.cell,
@@ -263,7 +270,7 @@ pub fn ensure_fields(world: &mut World) {
             ground,
         });
     }
-    let background_track = world.resource_mut::<Assets<Image>>().add(track_image(2, 2));
+    let background_track = world.resource_mut::<Assets<Image>>().add(track_image(2, 2, false));
     let background = (profiles[&layout.default].ground)(
         world,
         background_track,

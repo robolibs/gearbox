@@ -55,7 +55,7 @@ impl Default for FieldsPlugin {
                 .ok()
                 .and_then(|value| value.parse::<f32>().ok())
                 .filter(|value| value.is_finite() && *value >= 0.0)
-                .unwrap_or(14.0),
+                .unwrap_or(36.0),
         }
     }
 }

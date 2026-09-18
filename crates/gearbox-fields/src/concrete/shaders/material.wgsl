@@ -1,4 +1,4 @@
-// Cast concrete yard: 10 m slabs of scanned concrete (Poly Haven, CC0).
+// Cast concrete yard: 3 m slabs of scanned concrete (Poly Haven, CC0).
 // Every slab is its own pour — the scan is turned and shifted per slab and
 // the seams fall in the joints — and mossy concrete creeps in from the
 // joints where the yard has gone to seed.
@@ -15,7 +15,7 @@
 }
 
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheel_mark}
 #import "embedded://gearbox_fields/concrete/shaders/yard.wgsl"::{SLAB_M, JOINT_M, slab_rand, yard_noise, slab_cell, joint_distances, yard_weedy}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var clean_albedo: texture_2d<f32>;
@@ -81,14 +81,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Joints: the open gap, and how near this point is to one.
     let reach = joint_distances(world_xz);
     let to_joint = min(reach.x, reach.y);
-    let soft = max(fwidth(to_joint), 0.002);
+    let soft = max(fwidth(to_joint), 0.001);
     let gap = 1.0 - smoothstep(JOINT_M * 0.5 - soft, JOINT_M * 0.5 + soft, to_joint);
 
     // Moss and staining where the yard is weedy: patches on the slab,
     // thickest along the joints it spreads from.
     let weedy = yard_weedy(world_xz);
     let patches = smoothstep(0.45, 0.75, yard_noise(world_xz * 0.6 + vec2<f32>(5.0, 11.0)));
-    let creep = (1.0 - smoothstep(0.0, 1.6, to_joint)) * smoothstep(0.25, 0.6, yard_noise(world_xz * 1.7));
+    let creep = (1.0 - smoothstep(0.0, 0.5, to_joint)) * smoothstep(0.25, 0.6, yard_noise(world_xz * 1.7));
     let moss = clamp(weedy * max(patches * 0.8, creep), 0.0, 1.0);
     if (moss > 0.004) {
         let uv_moss = local / MOSS_M + shift.yx * 3.0;
@@ -100,22 +100,23 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // No two pours cure to the same grey, and dirt gathers along an edge.
     let pour = slab_rand(cell, 4u);
     albedo *= mix(0.86, 1.06, pour) * mix(vec3<f32>(1.0, 0.99, 0.965), vec3<f32>(0.975, 0.99, 1.0), slab_rand(cell, 5u));
-    albedo *= 1.0 - (1.0 - smoothstep(0.0, 0.3, to_joint)) * mix(0.1, 0.28, weedy);
-
-    // Half of the slabs carry a saw-cut control joint down the middle.
-    let middle = abs(select(local.x, local.y, slab_rand(cell, 6u) > 0.5));
-    let cut_soft = max(fwidth(middle), 0.001);
-    let cut = (1.0 - smoothstep(0.004 - cut_soft, 0.004 + cut_soft, middle)) * step(0.5, slab_rand(cell, 7u));
-    albedo *= 1.0 - cut * 0.55;
+    albedo *= 1.0 - (1.0 - smoothstep(0.0, 0.12, to_joint)) * mix(0.08, 0.22, weedy);
 
     // The gap itself: dark sealant where kept, soil where weeds root.
     let fill = mix(vec3<f32>(0.035, 0.035, 0.036), vec3<f32>(0.075, 0.058, 0.04), weedy)
         * mix(0.7, 1.2, yard_noise(world_xz * 23.0));
     albedo = mix(albedo, fill, gap);
 
-    // Tyres leave a faint dark polish rather than a rut.
-    let pressed = sample_wheels(trample, trample_params, world_xz).x;
-    albedo *= 1.0 - trample_params.darkening * pressed;
+    // Tyres print their tread in rubber and dust: barely rolling straight,
+    // clearly where they scrubbed through a turn. Lug bars slant back from
+    // the centreline, the two sides half a pitch apart, as on a tractor tyre;
+    // too far to resolve, the bars settle to their average.
+    let mark = sample_wheel_mark(trample, trample_params, world_xz);
+    let bar = fract(mark.along + abs(mark.across) * 1.1 + select(0.0, 0.5, mark.across > 0.0));
+    let lug = smoothstep(0.0, 0.08, bar) * (1.0 - smoothstep(0.42, 0.5, bar))
+        * smoothstep(0.05, 0.14, abs(mark.across)) * (1.0 - smoothstep(0.85, 1.0, abs(mark.across)));
+    let tread = mix(lug, 0.4, smoothstep(0.015, 0.06, footprint));
+    albedo *= 1.0 - trample_params.darkening * mark.press * mark.scrub * mix(0.2, 1.0, tread);
 
     // Scan relief back in world space, each slab settled a touch out of
     // level, its edge chamfered into the joint.
@@ -125,7 +126,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let settle = (vec2<f32>(slab_rand(cell, 8u), slab_rand(cell, 9u)) - vec2<f32>(0.5)) * 0.02;
     let toward = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), reach.x < reach.y)
         * sign(fract(world_xz / SLAB_M) - vec2<f32>(0.5));
-    let chamfer = (1.0 - smoothstep(JOINT_M * 0.5, JOINT_M * 0.5 + 0.03, to_joint)) * (1.0 - gap);
+    let chamfer = (1.0 - smoothstep(JOINT_M * 0.5, JOINT_M * 0.5 + 0.012, to_joint)) * (1.0 - gap);
     let lean = (relief * relief_strength + settle) * (1.0 - gap) + toward * chamfer * 0.7;
     let normal = normalize(tangent * lean.x + bitangent * lean.y + ground * max(bump.z, 0.2));
 

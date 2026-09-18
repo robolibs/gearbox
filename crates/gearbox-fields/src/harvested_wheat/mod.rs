@@ -176,6 +176,7 @@ impl Plugin for HarvestedWheatPlugin {
                     bend: 0.94,
                     darkening: 0.44,
                     footprint_length: 0.30,
+                    tread: false,
                 },
                 // Stalks at three levels of detail, one root population.
                 layers: vec![VegetationLayer {
