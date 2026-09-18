@@ -86,7 +86,7 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         settings.wind_speed_mps as f64,
         settings.wind_heading_deg as f64,
         settings.wind_gustiness as f64 * 100.0,
-        settings.cloud_drift_mps as f64,
+        (settings.cloud_drift_mps as f64).clamp(0.0, 60.0),
     );
     let force = settings.beaufort();
     for (i, value) in [speed, heading, gust, drift].into_iter().enumerate() {
@@ -103,8 +103,9 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         .with_button("Gale", ctx.accent);
 
     let air = pid(P, "air", 0);
-    let fov = world.resource::<crate::environment::ViewerLens>().fov_deg as f64;
-    let visibility = settings.haze_visibility_km as f64;
+    // A slider asserts its value lies in its range; the settings reach wider.
+    let fov = (world.resource::<crate::environment::ViewerLens>().fov_deg as f64).clamp(35.0, 85.0);
+    let visibility = (settings.haze_visibility_km as f64).clamp(1.0, 40.0);
     for (i, value) in [visibility, fov].into_iter().enumerate() {
         ctx.set_slider(air, i, value);
     }
