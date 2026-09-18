@@ -98,34 +98,64 @@ fn sample_globe_weather(direction: vec3f) -> vec4f {
         mix(textureLoad(globe_weather_texture, vec2i(x0, y1)), textureLoad(globe_weather_texture, vec2i(x1, y1)), f.x), f.y);
 }
 
+// How much of a noise octave with cells `cell` metres wide a sample `span`
+// metres wide can still carry. Nearing half a cell a sample the octave would alias
+// into grain, so it fades to its mean instead.
+fn octave_kept(span: f32, cell: f32) -> f32 {
+    return 1.0 - smoothstep(0.2, 0.55, span / cell);
+}
+
 // Cloud shape and weather from noise in the planet's own space: `p` is
 // measured from its centre, so the clouds are one field over the whole globe
 // with no tile to repeat and no map to stretch. `globe` is the planet's
-// weather there, as a shift about the field's own.
-fn cloud_map_base(p: vec3f, normalized_height: f32, globe: f32, span: f32) -> vec2f {
+// weather there, as a shift about the field's own. Returns the shape, the
+// weather and the spread of the octaves `span` was too coarse to carry.
+fn cloud_map_base(p: vec3f, normalized_height: f32, globe: f32, far: f32, span: f32) -> vec3f {
     // Each octave is turned against the last so their lattices never line up.
     let turn = mat3x3f(0.80, 0.36, -0.48, -0.36, 0.93, 0.10, 0.48, 0.10, 0.87);
     let q = turn * p;
     let r = turn * q;
-    // An octave finer than the pixel that sees it is left out, not aliased.
-    var fronts = 0.55 * (1.0 - smoothstep(15000.0, 45000.0, span)) * common::gradient_noise(p / 61000.0, 1.0e6);
-    if span < 18000.0 { fronts += 0.30 * (1.0 - smoothstep(6000.0, 18000.0, span)) * common::gradient_noise(q / 23000.0 + vec3f(31.7), 1.0e6); }
-    if span < 7000.0 { fronts += 0.15 * (1.0 - smoothstep(2500.0, 7000.0, span)) * common::gradient_noise(r / 9700.0 + vec3f(53.1), 1.0e6); }
-    let weather = clamp(0.5 + 1.1 * fronts + globe, 0.0, 1.0);
+    var lost = 0.0;
 
-    let broad = common::gradient_noise(p / 5200.0 + vec3f(7.1), 1.0e6);
-    let middle = common::gradient_noise(q / 2300.0 + vec3f(11.3), 1.0e6);
-    let fine = common::gradient_noise(r / 1050.0 + vec3f(23.9), 1.0e6);
-    let body = 0.46 + 1.6 * (0.6 * broad + 0.3 * middle + 0.15 * fine);
+    var fronts = 0.0;
+    let keep_wide = octave_kept(span, 61000.0);
+    let keep_mid = octave_kept(span, 23000.0);
+    let keep_near = octave_kept(span, 9700.0);
+    if keep_wide > 0.0 { fronts += 0.55 * keep_wide * common::gradient_noise(p / 61000.0, 1.0e6); }
+    if keep_mid > 0.0 { fronts += 0.30 * keep_mid * common::gradient_noise(q / 23000.0 + vec3f(31.7), 1.0e6); }
+    if keep_near > 0.0 { fronts += 0.15 * keep_near * common::gradient_noise(r / 9700.0 + vec3f(53.1), 1.0e6); }
+    lost += pow(0.116 * (1.0 - keep_wide), 2.0) + pow(0.063 * (1.0 - keep_mid), 2.0) + pow(0.032 * (1.0 - keep_near), 2.0);
+    // Away from the field the planet's systems lead and the local fronts only ruffle them.
+    let weather = clamp(0.5 + mix(1.1, 0.45, far) * fronts + 1.15 * globe, 0.0, 1.0);
+
+    var broad = 0.0;
+    var middle = 0.0;
+    var fine = 0.0;
+    var cells_read = 0.45;
+    let keep_broad = octave_kept(span, 5200.0);
+    let keep_middle = octave_kept(span, 2300.0);
+    let keep_fine = octave_kept(span, 1050.0);
+    let keep_cells = octave_kept(span, 450.0);
+    if keep_broad > 0.0 { broad = keep_broad * common::gradient_noise(p / 5200.0 + vec3f(7.1), 1.0e6); }
+    if keep_middle > 0.0 { middle = keep_middle * common::gradient_noise(q / 2300.0 + vec3f(11.3), 1.0e6); }
+    if keep_fine > 0.0 { fine = keep_fine * common::gradient_noise(r / 1050.0 + vec3f(23.9), 1.0e6); }
     // Billows come from the cell volume, read twice at unrelated turns and
     // scales so its small tile never shows.
-    let cells = p / 130.0;
-    let puffs = 0.45 + 0.3 * (worley_at(cells) + worley_at(turn * cells * 1.618034 + vec3f(11.3, 5.7, 17.1)));
+    if keep_cells > 0.0 {
+        let cells = p / 130.0;
+        let read = 0.5 * (worley_at(cells) + worley_at(turn * cells * 1.618034 + vec3f(11.3, 5.7, 17.1)));
+        cells_read = mix(cells_read, read, keep_cells);
+    }
+    lost += pow(0.12 * (1.0 - keep_broad), 2.0) + pow(0.06 * (1.0 - keep_middle), 2.0)
+        + pow(0.03 * (1.0 - keep_fine), 2.0) + pow(0.04 * (1.0 - keep_cells), 2.0);
+
+    let body = 0.46 + 1.6 * (0.6 * broad + 0.3 * middle + 0.15 * fine);
+    let puffs = 0.45 + 0.6 * cells_read;
     let shape = mix(1.0, body, 0.9) * mix(1.0, puffs, 0.7);
 
     let height = normalized_height / mix(0.65, 1.1, weather);
     let n = height * height * (0.5 - 0.6 * middle) + pow(1.0 - normalized_height, 16.0);
-    return vec2f(common::remap(shape - n, -0.5 + 0.3 * fine, 1.0), weather);
+    return vec3f(common::remap(shape - n, -0.5 + 0.3 * fine, 1.0), weather, sqrt(lost));
 }
 
 fn worley_texel(index: vec3i) -> f32 {
@@ -172,14 +202,14 @@ fn get_cloud_map_density(pos: vec3f, normalized_height: f32, sample_span: f32) -
     let shape_position = ps + vec3f(normalized_height * 180.0, 0.0, normalized_height * 90.0);
     // The field keeps the sky it was given; the planet's weather grows in around it.
     let radius = vec3f(0.0, config.planet_radius, 0.0);
-    let far = smoothstep(40000.0, 600000.0, length(ps.xz) + max(-ps.y, 0.0));
+    // Seen from so high that single clouds merge, the field is one more place on the planet.
+    let far = max(
+        smoothstep(30000.0, 1500000.0, length(ps.xz) + max(-ps.y, 0.0)),
+        smoothstep(800.0, 5000.0, sample_span));
     var globe = 0.0;
-    if far > 0.0 { globe = far * (sample_globe_weather(normalize(ps + radius)).r - 0.5); }
-    let base = cloud_map_base(shape_position + radius, normalized_height, globe, sample_span);
-    // Single clouds smaller than a pixel would sparkle: from far off they merge
-    // into the even cover they average to, with a softer edge.
-    let unresolved = smoothstep(600.0, 5000.0, sample_span);
-    var m = mix(base.x, 0.42, unresolved) * cloud_gradient(normalized_height);
+    if far > 0.0 { globe = far * (smoothstep(0.36, 0.64, sample_globe_weather(normalize(ps + radius)).r) - 0.5); }
+    let base = cloud_map_base(shape_position + radius, normalized_height, globe, far, sample_span);
+    var m = base.x * cloud_gradient(normalized_height);
 
 	let clouds_detail_strength = (1.0 - smoothstep(0.5, 1.0, m));
 
@@ -198,11 +228,19 @@ fn get_cloud_map_density(pos: vec3f, normalized_height: f32, sample_span: f32) -
     }
 
 	let weather_variation = 4.0 * config.clouds_coverage * (1.0 - config.clouds_coverage);
-	let local_coverage = clamp(config.clouds_coverage + (base.y - 0.5) * 0.8 * weather_variation, 0.0, 1.0);
-	m = smoothstep(0.0, mix(config.clouds_base_edge_softness, 0.35, unresolved), m + local_coverage - 1.0);
+	let local_coverage = clamp(config.clouds_coverage + (base.y - 0.5) * mix(0.8, 1.3, far) * weather_variation, 0.0, 1.0);
+    // Octaves too fine to carry would have cut the cover into clouds and gaps
+    // within the sample: their spread becomes a part cover with a wide edge.
+    let edge = 1.7 * base.z;
+    m = smoothstep(-edge, config.clouds_base_edge_softness + edge, m + local_coverage - 1.0);
     m *= common::linearstep0(config.clouds_bottom_softness, normalized_height);
 
-    return clamp(m * config.clouds_density, 0.0, 1.0);
+    // A part cover is gaps between opaque clouds, not thin cloud: the layer
+    // through it must let just the gaps' share of light by, however deep it is.
+    let depth = config.clouds_top_height - config.clouds_bottom_height;
+    let part_cover = -log(1.0 - 0.97 * m) / depth;
+    let density = mix(m * config.clouds_density, part_cover, clamp(base.z / 0.1, 0.0, 1.0));
+    return clamp(density, 0.0, 1.0);
 }
 
 fn get_normalized_height(pos: vec3f) -> f32 {
@@ -210,7 +248,9 @@ fn get_normalized_height(pos: vec3f) -> f32 {
     return (length(pos) - (config.planet_radius + config.clouds_bottom_height)) / clouds_height;
 }
 
-fn volumetric_shadow(origin: vec3f, ray_dot_sun: f32) -> f32 {
+// `span` is how coarsely the view samples here: light marched finer than
+// that would put back the grain the view left out.
+fn volumetric_shadow(origin: vec3f, ray_dot_sun: f32, span: f32) -> f32 {
     var ray_step_size = config.clouds_shadow_raymarch_step_size;
     var distance_along_ray = ray_step_size * 0.5;
     var transmittance = 1.0;
@@ -221,7 +261,7 @@ fn volumetric_shadow(origin: vec3f, ray_dot_sun: f32) -> f32 {
 
         if (normalized_height > 1.0) { return transmittance; };
 
-        let clouds_density = get_cloud_map_density(pos, normalized_height, ray_step_size);
+        let clouds_density = get_cloud_map_density(pos, normalized_height, max(ray_step_size, span));
         transmittance *= exp(-clouds_density * ray_step_size);
 
         ray_step_size *= config.clouds_shadow_raymarch_step_multiply;
@@ -305,7 +345,8 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32) -> RaymarchResult 
 
         let normalized_height = clamp(get_normalized_height(world_position), 0.0, 1.0);
         let pixel_span = dir_length * 2.0 * abs(config.inverse_camera_projection[1][1]) / max(config.render_resolution.y, 1.0);
-        let clouds_density_sampled = get_cloud_map_density(world_position, normalized_height, max(ray.step_distance, pixel_span));
+        let sample_span = max(ray.step_distance, pixel_span);
+        let clouds_density_sampled = get_cloud_map_density(world_position, normalized_height, sample_span);
 
         if (clouds_density_sampled > 0.0) {
             dist = min(dist, dir_length);
@@ -323,7 +364,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32) -> RaymarchResult 
             let toward = dot(world_position, config.sun_dir.xyz);
             let clearance = (length(world_position) - config.planet_radius) * (length(world_position) + config.planet_radius);
             let eclipsed = toward < 0.0 && toward * toward > clearance;
-            let sunlight = select(volumetric_shadow(world_position, ray_dot_sun), 0.0, eclipsed);
+            let sunlight = select(volumetric_shadow(world_position, ray_dot_sun, sample_span), 0.0, eclipsed);
 
             // Frostbite energy-conversing integration
             let S = clouds_density_sampled * day * (
