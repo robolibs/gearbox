@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use super::config::CloudsConfig;
 
 use super::{
-    images::IMAGE_SIZE,
+    images::{GROUND_SHADOW_SIZE, IMAGE_SIZE},
     uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer},
 };
 
@@ -100,6 +100,11 @@ fn prepare_uniforms_bind_group(
     buffer.inverse_camera_view = camera.inverse_camera_view;
     buffer.inverse_camera_projection = camera.inverse_camera_projection;
     buffer.wind_displacement += time.delta_secs() * clouds_config.wind_velocity;
+    let frame = super::sun_rotation(clouds_config.sun_dir.truncate());
+    buffer.shadow_right = frame * Vec3::X;
+    buffer.shadow_up = frame * Vec3::Y;
+    buffer.shadow_half_extent = 0.5 * clouds_config.cloud_shadow_extent;
+    buffer.shadow_strength = clouds_config.cloud_shadow_strength.clamp(0.0, 1.0);
 
     clouds_uniform_buffer
         .buffer
@@ -128,12 +133,14 @@ fn prepare_textures_bind_group(
         Some(cloud_worley_view),
         Some(sky_view),
         Some(history),
+        Some(ground_shadow),
     ) = (
         gpu_images.get(&clouds_image.cloud_render_image),
         gpu_images.get(&clouds_image.cloud_atlas_image),
         gpu_images.get(&clouds_image.cloud_worley_image),
         gpu_images.get(&clouds_image.sky_image),
         gpu_images.get(&clouds_image.history_image),
+        gpu_images.get(&clouds_image.ground_shadow_image),
     )
     else {
         commands.remove_resource::<CloudsImageBindGroup>();
@@ -158,6 +165,7 @@ fn prepare_textures_bind_group(
             &cloud_worley_view.texture_view,
             &sky_view.texture_view,
             &history.texture_view,
+            &ground_shadow.texture_view,
         )),
     );
     commands.insert_resource(CloudsImageBindGroup(bind_group));
@@ -173,6 +181,7 @@ struct CloudsPipeline {
     uniform_bind_group_layout: BindGroupLayoutDescriptor,
     init_pipeline: CachedComputePipelineId,
     update_pipeline: CachedComputePipelineId,
+    ground_shadow_pipeline: CachedComputePipelineId,
 }
 
 impl FromWorld for CloudsPipeline {
@@ -210,16 +219,30 @@ impl FromWorld for CloudsPipeline {
                 texture_bind_group_layout.clone(),
             ],
             immediate_size: 0,
-            shader,
+            shader: shader.clone(),
             shader_defs: vec![],
             entry_point: Some(Cow::from("update")),
         });
+        let ground_shadow_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                zero_initialize_workgroup_memory: false,
+                label: None,
+                layout: vec![
+                    uniform_bind_group_layout.clone(),
+                    texture_bind_group_layout.clone(),
+                ],
+                immediate_size: 0,
+                shader,
+                shader_defs: vec![],
+                entry_point: Some(Cow::from("ground_shadow")),
+            });
 
         CloudsPipeline {
             texture_bind_group_layout,
             uniform_bind_group_layout,
             init_pipeline,
             update_pipeline,
+            ground_shadow_pipeline,
         }
     }
 }
@@ -287,6 +310,14 @@ fn run_clouds_compute_pass(
         height.div_ceil(WORKGROUP_SIZE),
         1,
     );
+    // The ground shadow map rides the same pass once the noise is baked.
+    if !initialize
+        && let Some(shadow) = pipeline_cache.get_compute_pipeline(pipeline.ground_shadow_pipeline)
+    {
+        pass.set_pipeline(shadow);
+        let groups = GROUND_SHADOW_SIZE.div_ceil(WORKGROUP_SIZE);
+        pass.dispatch_workgroups(groups, groups, 1);
+    }
     if !initialize {
         history_state.0 = Some((*camera, *config, fields.cloud_render_image.id()));
     }

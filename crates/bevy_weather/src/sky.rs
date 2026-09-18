@@ -1,12 +1,15 @@
 //! Volumetric clouds, scene sunlight, ambient fill, and camera rendering settings.
 
 use super::daylight::Daylight;
-use super::{DaylightUpdate, WeatherSettings};
+use super::{DaylightUpdate, SkyLight, WeatherSettings};
 use crate::OriginalIlluminance;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{Exposure, Hdr};
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, EnvironmentMapLight};
+use bevy::light::{
+    CascadeShadowConfigBuilder, DirectionalLightShadowMap, DirectionalLightTexture,
+    EnvironmentMapLight,
+};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -26,7 +29,7 @@ impl Plugin for SkyPlugin {
         let settings = app.world().resource::<WeatherSettings>();
         let clouds = CloudsConfig {
             sun_dir: Daylight::from_settings(settings).direction.extend(0.0),
-            wind_velocity: Vec3::new(settings.cloud_velocity.x, 0.0, settings.cloud_velocity.y),
+            wind_velocity: cloud_drift(settings),
             ..settings.clouds
         };
         app.insert_resource(clouds)
@@ -35,7 +38,7 @@ impl Plugin for SkyPlugin {
             .add_systems(Startup, spawn_daylight)
             .add_systems(
                 Update,
-                (configure_cameras, synchronize_daylight)
+                (configure_cameras, carry_cloud_shadows, synchronize_daylight)
                     .chain()
                     .in_set(DaylightUpdate),
             );
@@ -68,6 +71,8 @@ fn spawn_daylight(mut commands: Commands, settings: Res<WeatherSettings>) {
 
 fn synchronize_daylight(
     settings: Res<WeatherSettings>,
+    mut sky_light: ResMut<SkyLight>,
+    shadows: Option<Res<crate::clouds::CloudShadowMap>>,
     mut clouds: ResMut<CloudsConfig>,
     mut sun: Query<
         (
@@ -94,25 +99,27 @@ fn synchronize_daylight(
         return;
     }
     let daylight = Daylight::from_settings(&settings);
-    let overcast = ((settings.clouds.clouds_coverage - 0.55) / 0.45).clamp(0.0, 1.0);
+    let sky = SkyLight::from_cover(settings.clouds.clouds_coverage);
+    if *sky_light != sky {
+        *sky_light = sky;
+    }
     for (mut transform, mut light, mut original) in &mut sun {
-        let up = if daylight.direction.y.abs() > 0.999 {
-            Vec3::Z
-        } else {
-            Vec3::Y
+        // Its scale is the reach of the cloud shadow map it carries as a light
+        // texture; only its rotation lights and shadows anything.
+        *transform = Transform {
+            rotation: crate::clouds::sun_rotation(daylight.direction),
+            scale: Vec3::splat(shadows.as_ref().map_or(1.0, |map| map.half_extent)),
+            ..default()
         };
-        *transform =
-            Transform::from_translation(daylight.direction).looking_to(-daylight.direction, up);
         light.color = daylight.direct_color;
-        light.illuminance =
-            settings.illuminance * daylight.direct_strength * (1.0 - 0.85 * overcast * overcast);
+        light.illuminance = settings.illuminance * daylight.direct_strength;
         original.0 = light.illuminance;
         light.shadow_maps_enabled = daylight.direct_strength > 0.0;
     }
     let resolution = clouds.render_resolution;
     *clouds = settings.clouds;
     clouds.render_resolution = resolution;
-    clouds.wind_velocity = Vec3::new(settings.cloud_velocity.x, 0.0, settings.cloud_velocity.y);
+    clouds.wind_velocity = cloud_drift(&settings);
     clouds.sun_dir = daylight.direction.extend(0.0);
     clouds.sun_color = daylight.sun_radiance;
     clouds.sky_zenith_color = daylight.zenith;
@@ -143,7 +150,7 @@ fn synchronize_daylight(
     let map = EnvironmentMapLight {
         diffuse_map: handle.clone(),
         specular_map: handle,
-        intensity: settings.indirect_intensity * daylight.fill_strength,
+        intensity: settings.indirect_intensity * daylight.fill_strength * sky.diffuse_gain,
         ..default()
     };
     for (mut fog, mut ambient, mut environment) in &mut cameras {
@@ -152,7 +159,7 @@ fn synchronize_daylight(
         // Haze toward the sun takes its colour: the glow that gives a low sun depth.
         fog.directional_light_color = daylight.direct_color.with_alpha(0.45);
         ambient.color = daylight.ambient;
-        ambient.brightness = 50.0 * daylight.fill_strength;
+        ambient.brightness = 50.0 * daylight.fill_strength * sky.diffuse_gain;
         *environment = map.clone();
     }
 }
@@ -228,4 +235,31 @@ fn configure_cameras(
             EnvironmentMapLight::default(),
         ));
     }
+}
+
+/// The sun carries the clouds' shadow as its light texture, so a cloud dims
+/// the direct light of everything under it alike — land, plants and
+/// machines — and leaves the sky's light alone.
+fn carry_cloud_shadows(
+    mut commands: Commands,
+    shadows: Option<Res<crate::clouds::CloudShadowMap>>,
+    suns: Query<Entity, (With<Sun>, Without<DirectionalLightTexture>)>,
+) {
+    let Some(shadows) = shadows else {
+        return;
+    };
+    for sun in &suns {
+        commands.entity(sun).insert(DirectionalLightTexture {
+            image: shadows.image.clone(),
+            // Tiled: outside an untiled texture the light is simply off, and the
+            // land past the map should repeat distant shadows, not lose its sun.
+            tiled: true,
+        });
+    }
+}
+
+// Clouds ride the wind: its heading, at their own speed aloft.
+fn cloud_drift(settings: &WeatherSettings) -> Vec3 {
+    let (sin, cos) = settings.wind_heading_deg.to_radians().sin_cos();
+    Vec3::new(cos, 0.0, sin) * settings.cloud_drift_mps.max(0.0)
 }

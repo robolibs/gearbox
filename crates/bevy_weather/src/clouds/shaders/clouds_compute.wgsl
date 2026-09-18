@@ -37,6 +37,10 @@ struct Config {
     inverse_camera_view: mat4x4f,
     inverse_camera_projection: mat4x4f,
     wind_displacement: vec3f,
+    shadow_right: vec3f,
+    shadow_half_extent: f32,
+    shadow_up: vec3f,
+    shadow_strength: f32,
 };
 
 @group(0) @binding(0) var<uniform> config: Config;
@@ -46,6 +50,7 @@ struct Config {
 @group(1) @binding(2) var clouds_worley_texture: texture_storage_3d<rgba16float, read_write>;
 @group(1) @binding(3) var sky_texture: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(4) var history_texture: texture_2d<f32>;
+@group(1) @binding(5) var ground_shadow_texture: texture_storage_2d<rgba16float, read_write>;
 
 struct Ray {
     step_distance: f32,
@@ -91,8 +96,8 @@ fn worley_texel(index: vec3i) -> f32 {
     return textureLoad(clouds_worley_texture, (index % size + size) % size).r;
 }
 
-fn cloud_map_detail(position: vec3f) -> f32 {
-    let p = position * (0.0016 * config.clouds_base_scale * config.clouds_detail_scale);
+// The Worley volume read at a point, blended between its eight texels.
+fn worley_at(p: vec3f) -> f32 {
     let cell = vec3i(floor(p));
     let f = fract(p);
     let lower = mix(
@@ -102,6 +107,16 @@ fn cloud_map_detail(position: vec3f) -> f32 {
         mix(worley_texel(cell + vec3i(0, 0, 1)), worley_texel(cell + vec3i(1, 0, 1)), f.x),
         mix(worley_texel(cell + vec3i(0, 1, 1)), worley_texel(cell + vec3i(1, 1, 1)), f.x), f.y);
     return mix(lower, upper, f.z);
+}
+
+// The volume is small and tiles, so one reading of it is a regular lattice of
+// puffs, and a lattice seen in perspective draws rows that converge on the
+// horizon. A second reading, turned in all three axes and scaled by the
+// golden ratio, never lines up with the first, so their blend has no rows.
+fn cloud_map_detail(position: vec3f) -> f32 {
+    let p = position * (0.0016 * config.clouds_base_scale * config.clouds_detail_scale);
+    let turned = mat3x3f(0.80, 0.36, -0.48, -0.36, 0.93, 0.10, 0.48, 0.10, 0.87);
+    return mix(worley_at(p), worley_at(turned * p * 1.618034 + vec3f(11.3, 5.7, 17.1)), 0.5);
 }
 
 // Erode a bit from the clouds_bottom_height and clouds_top_height of the cloud layer
@@ -125,7 +140,10 @@ fn get_cloud_map_density(pos: vec3f, normalized_height: f32, sample_span: f32) -
 
     // Erode with detail
     if clouds_detail_strength > 0.0 {
-        let resolved_detail = 1.0 - smoothstep(12.0, 80.0, sample_span);
+        // Detail the march cannot resolve is dropped, not sampled: its finest
+        // puffs are some 57 m across, and read at coarser steps than that they
+        // alias into a ripple across the sky.
+        let resolved_detail = 1.0 - smoothstep(16.0, 48.0, sample_span);
         var detail = 0.35;
         if resolved_detail > 0.0 {
             let evolution = config.time * vec3f(0.3, -0.2, 0.15);
@@ -253,15 +271,6 @@ fn get_sky_color(ray_dir: vec3f) -> vec3f {
     return col;
 }
 
-fn get_sun_disk(ray_dir: vec3f) -> vec3f {
-    let angle = acos(clamp(dot(ray_dir, config.sun_dir.xyz), -1.0, 1.0));
-    let edge = min(0.002, 0.7 / max(config.render_resolution.y, 1.0));
-    let disk = 1.0 - smoothstep(0.00465 - edge, 0.00465 + edge, angle);
-    let horizon = smoothstep(-0.001, 0.001, ray_dir.y);
-    let col = 32.0 * config.sun_color.rgb * disk * horizon;
-    return col;
-}
-
 fn render_clouds_atlas(frag_coord: vec2f) -> vec4f {
     let v_uv = frag_coord / vec2f(textureDimensions(clouds_atlas_texture));
     let coord = vec3f(v_uv, 0.5);
@@ -343,5 +352,36 @@ fn update(@builtin(global_invocation_id) id: vec3u) {
     let ray_dir = get_ray_direction(pixel);
     let color = get_clouds_color(id.xy, ray_dir, ray_origin);
     textureStore(clouds_render_texture, id.xy, color);
-    textureStore(sky_texture, id.xy, vec4f(get_sky_color(ray_dir) + get_sun_disk(ray_dir), 1.0));
+    textureStore(sky_texture, id.xy, vec4f(get_sky_color(ray_dir), 1.0));
+}
+
+// The clouds' shadow as the sun sees it, for the sun's light texture. Each
+// texel is one sun ray through the square facing the sun about the world
+// origin, laid out as a directional light reads its texture; it marches the
+// density the sky is drawn from, so a shadow lies under its cloud, drifts with
+// it, and falls the same on the land and on whatever stands on it.
+@compute @workgroup_size(8, 8, 1)
+fn ground_shadow(@builtin(global_invocation_id) id: vec3u) {
+    let size = textureDimensions(ground_shadow_texture);
+    if any(id.xy >= size) { return; }
+    let uv = (vec2f(id.xy) + vec2f(0.5)) / vec2f(size);
+    let across = (config.shadow_right * (1.0 - 2.0 * uv.x) + config.shadow_up * (2.0 * uv.y - 1.0))
+        * config.shadow_half_extent;
+    let origin = across + vec3f(0.0, config.planet_radius, 0.0);
+    let sun = config.sun_dir.xyz;
+    var transmittance = 1.0;
+    if sun.y > 0.02 {
+        // Signed distances along the ray, so a ray whose texel lies above the
+        // clouds is still marched through the layer behind it.
+        let enter = intersect_planet_sphere(origin, sun, config.clouds_bottom_height);
+        let leave = intersect_planet_sphere(origin, sun, config.clouds_top_height);
+        let steps = 10u;
+        let span = (leave - enter) / f32(steps);
+        for (var step = 0u; step < steps; step++) {
+            let pos = origin + sun * (enter + span * (f32(step) + 0.5));
+            let density = get_cloud_map_density(pos, get_normalized_height(pos), span);
+            transmittance *= exp(-density * span * config.shadow_strength);
+        }
+    }
+    textureStore(ground_shadow_texture, vec2i(id.xy), vec4f(transmittance, 0.0, 0.0, 1.0));
 }

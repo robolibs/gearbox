@@ -23,6 +23,24 @@ use bevy::prelude::*;
 #[derive(Component)]
 pub struct CloudsCamera;
 
+/// The clouds' shadow as the sun sees it: each texel is one sun ray, its red
+/// channel 1 where the ray reaches the land and 0 where solid cloud stops
+/// it. It covers rays within `half_extent` metres of the world origin, in the
+/// frame of [`sun_rotation`], which is how a directional light reads a
+/// light texture.
+#[derive(Resource, Clone)]
+pub struct CloudShadowMap {
+    pub image: Handle<Image>,
+    pub half_extent: f32,
+}
+
+/// The sun's orientation: it shines along its local -Z, and its local X and Y
+/// span the cloud shadow map.
+pub fn sun_rotation(towards_sun: Vec3) -> Quat {
+    let up = if towards_sun.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
+    Transform::IDENTITY.looking_to(-towards_sun, up).rotation
+}
+
 /// Renders upstream volumetric clouds for the selected scene camera.
 pub struct CloudsPlugin;
 
@@ -31,6 +49,7 @@ impl Plugin for CloudsPlugin {
         app.init_resource::<CloudsConfig>()
             .add_plugins((CloudsComputePlugin, CloudsShaderPlugin))
             .add_systems(Startup, clouds_setup)
+            .add_systems(Update, sync_sun_disc)
             .add_systems(
                 PostUpdate,
                 (update_skybox_transform, update_camera_matrices)
@@ -47,9 +66,15 @@ fn clouds_setup(
     config: Res<CloudsConfig>,
 ) {
     let fields = build_images(&mut images, config.render_resolution.as_uvec2());
+    commands.insert_resource(CloudShadowMap {
+        image: fields.ground_shadow_image.clone(),
+        half_extent: 0.5 * config.cloud_shadow_extent,
+    });
     let material = materials.add(CloudsMaterial {
         cloud_render_image: fields.cloud_render_image.clone(),
         sky_image: fields.sky_image.clone(),
+        sun: sun_disc(&config),
+        sun_radiance: sun_disc_radiance(&config),
     });
     init_skybox_mesh(
         &mut commands,
@@ -110,6 +135,34 @@ fn update_camera_matrices(
         if material.cloud_render_image.id() == old_output {
             material.cloud_render_image = fields.cloud_render_image.clone();
             material.sky_image = fields.sky_image.clone();
+        }
+    }
+}
+
+/// The real sun's angular radius, in radians.
+const SUN_ANGULAR_RADIUS: f32 = 0.004_65;
+
+fn sun_disc(config: &CloudsConfig) -> Vec4 {
+    config.sun_dir.truncate().extend(SUN_ANGULAR_RADIUS * config.sun_disc_scale.max(0.1))
+}
+
+// Far brighter than the sky around it, so it blooms and tonemaps to white.
+fn sun_disc_radiance(config: &CloudsConfig) -> Vec4 {
+    (config.sun_color.truncate() * 40.0).extend(1.0)
+}
+
+/// The disc follows the sun across the sky and takes its colour.
+fn sync_sun_disc(config: Res<CloudsConfig>, mut materials: ResMut<Assets<CloudsMaterial>>) {
+    let (sun, radiance) = (sun_disc(&config), sun_disc_radiance(&config));
+    let stale: Vec<_> = materials
+        .iter()
+        .filter(|(_, material)| material.sun != sun || material.sun_radiance != radiance)
+        .map(|(id, _)| id)
+        .collect();
+    for id in stale {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.sun = sun;
+            material.sun_radiance = radiance;
         }
     }
 }

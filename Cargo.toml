@@ -68,6 +68,7 @@ bevy = { version = "0.19", default-features = false, features = [
     "x11",
     "wayland",
     "reflect_auto_register",
+    "pbr_light_textures",
 ] }
 # peerbus + agentio — the tool API transport. peerbus moves datapod
 # payloads between ed25519 ids over shared memory or QUIC; agentio adds

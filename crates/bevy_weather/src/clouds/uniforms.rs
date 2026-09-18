@@ -40,6 +40,10 @@ pub(crate) struct CloudsUniform {
     pub inverse_camera_view: Mat4,
     pub inverse_camera_projection: Mat4,
     pub wind_displacement: Vec3,
+    pub shadow_right: Vec3,
+    pub shadow_half_extent: f32,
+    pub shadow_up: Vec3,
+    pub shadow_strength: f32,
 }
 
 impl Default for CloudsUniform {
@@ -76,6 +80,10 @@ impl Default for CloudsUniform {
             inverse_camera_view: Mat4::IDENTITY,
             inverse_camera_projection: Mat4::IDENTITY,
             wind_displacement: Vec3::new(-11.0, 0.0, 23.0),
+            shadow_right: Vec3::X,
+            shadow_half_extent: 1.0,
+            shadow_up: Vec3::Y,
+            shadow_strength: 0.35,
         }
     }
 }
@@ -100,4 +108,6 @@ pub(crate) struct CloudsImage {
     pub sky_image: Handle<Image>,
     #[texture(4, filterable = false, visibility(compute))]
     pub history_image: Handle<Image>,
+    #[storage_texture(5, image_format = Rgba16Float, access = ReadWrite)]
+    pub ground_shadow_image: Handle<Image>,
 }

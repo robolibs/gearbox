@@ -13,6 +13,12 @@ pub(crate) struct CloudsMaterial {
     pub cloud_render_image: Handle<Image>,
     #[texture(106)]
     pub sky_image: Handle<Image>,
+    /// Direction towards the sun, with the disc's angular radius in `w`.
+    #[uniform(107)]
+    pub sun: Vec4,
+    /// Radiance of the sun's disc.
+    #[uniform(108)]
+    pub sun_radiance: Vec4,
 }
 
 impl Material for CloudsMaterial {
