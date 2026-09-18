@@ -18,7 +18,7 @@ use bevy::{
 /// Controls the compute shader which renders the volumetric clouds.
 use std::borrow::Cow;
 
-use crate::config::CloudsConfig;
+use super::config::CloudsConfig;
 
 use super::{
     images::IMAGE_SIZE,

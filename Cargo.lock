@@ -663,13 +663,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy-volumetric-clouds"
-version = "0.2.0"
-dependencies = [
- "bevy",
-]
-
-[[package]]
 name = "bevy_a11y"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1734,6 +1727,14 @@ dependencies = [
  "disqualified",
  "indexmap",
  "thread_local",
+]
+
+[[package]]
+name = "bevy_weather"
+version = "0.0.6"
+dependencies = [
+ "bevy",
+ "half",
 ]
 
 [[package]]
@@ -3732,7 +3733,7 @@ dependencies = [
  "agentio",
  "anyhow",
  "bevy",
- "bevy-volumetric-clouds",
+ "bevy_weather",
  "bytemuck",
  "concord",
  "datapod",

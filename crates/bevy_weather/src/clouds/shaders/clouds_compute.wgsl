@@ -1,4 +1,4 @@
-#import bevy_volumetric_clouds::common
+#import bevy_weather::clouds::common
 
 const EPSILON = 0.000001;
 const MAX_DISTANCE = 1.0e9;

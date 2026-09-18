@@ -58,7 +58,8 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(gearbox_api::UsdMarkerPlugin)
         // Simulator surface: planet world, machines, links, services.
         .add_plugins(world::WorldPlugin)
-        .add_plugins(environment::EnvironmentPlugin)
+        .add_plugins(environment::WeatherPlugin)
+        .init_resource::<environment::ViewerLens>()
         .add_plugins(gearbox_fields::FieldsPlugin::default())
         .add_plugins(terrain::TerrainPlugin)
         .configure_sets(
@@ -70,6 +71,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
             (
                 terrain::publish_cover_terrain.in_set(terrain::TerrainUpdates),
                 environment::sync_cover_wind,
+                environment::sync_lens,
             ),
         )
         .add_systems(Startup, (log_render_adapter, use_cpu_light_clustering))

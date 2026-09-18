@@ -4,9 +4,9 @@ members = [
     "crates/gearbox-api",
     "crates/gearbox-controls",
     "crates/gearbox-fields",
+    "crates/bevy_weather",
     "crates/gearbox-cli",
     "bin/gearbox",
-    "vendored/bevy-volumetric-clouds",
 ]
 
 # Shared metadata. Each member inherits with `version.workspace = true`.

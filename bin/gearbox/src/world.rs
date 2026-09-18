@@ -338,7 +338,7 @@ fn spawn_world(
     let chase = ChaseCamera {
         focus: Vec3::new(0.0, 0.5, 0.0),
         distance: 14.0,
-        elevation: 25_f32.to_radians(),
+        elevation: 15_f32.to_radians(),
         max_distance: CAMERA_MAX_DISTANCE_M,
         ..default()
     };

@@ -1,8 +1,8 @@
 //! Volumetric clouds, scene sunlight, ambient fill, and camera rendering settings.
 
 use super::daylight::Daylight;
-use super::{DaylightUpdate, EnvironmentSettings};
-use crate::viewer::overlays::OriginalIlluminance;
+use super::{DaylightUpdate, WeatherSettings};
+use crate::OriginalIlluminance;
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::{Exposure, Hdr};
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -13,18 +13,18 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
-use bevy_volumetric_clouds::config::CloudsConfig;
-use bevy_volumetric_clouds::{CloudsCamera, CloudsPlugin};
+use crate::clouds::config::CloudsConfig;
+use crate::clouds::{CloudsCamera, CloudsPlugin};
 
 #[derive(Component)]
 struct Sun;
 
-pub(super) struct SkyboxPlugin;
+pub(super) struct SkyPlugin;
 
-impl Plugin for SkyboxPlugin {
+impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
-        let settings = app.world().resource::<EnvironmentSettings>();
-        let clouds = bevy_volumetric_clouds::config::CloudsConfig {
+        let settings = app.world().resource::<WeatherSettings>();
+        let clouds = CloudsConfig {
             sun_dir: Daylight::from_settings(settings).direction.extend(0.0),
             wind_velocity: Vec3::new(settings.cloud_velocity.x, 0.0, settings.cloud_velocity.y),
             ..settings.clouds
@@ -42,7 +42,7 @@ impl Plugin for SkyboxPlugin {
     }
 }
 
-fn spawn_daylight(mut commands: Commands, settings: Res<EnvironmentSettings>) {
+fn spawn_daylight(mut commands: Commands, settings: Res<WeatherSettings>) {
     commands.insert_resource(ClearColor(settings.fog_color));
     commands.spawn((
         Sun,
@@ -67,7 +67,7 @@ fn spawn_daylight(mut commands: Commands, settings: Res<EnvironmentSettings>) {
 }
 
 fn synchronize_daylight(
-    settings: Res<EnvironmentSettings>,
+    settings: Res<WeatherSettings>,
     mut clouds: ResMut<CloudsConfig>,
     mut sun: Query<
         (
@@ -148,6 +148,9 @@ fn synchronize_daylight(
     };
     for (mut fog, mut ambient, mut environment) in &mut cameras {
         fog.color = daylight.fog;
+        fog.falloff = haze_falloff(settings.haze_visibility_km);
+        // Haze toward the sun takes its colour: the glow that gives a low sun depth.
+        fog.directional_light_color = daylight.direct_color.with_alpha(0.45);
         ambient.color = daylight.ambient;
         ambient.brightness = 50.0 * daylight.fill_strength;
         *environment = map.clone();
@@ -183,10 +186,20 @@ fn gradient_cubemap(texels: Vec<u8>) -> Image {
     }
 }
 
+// Air scatters blue out of what lies behind it and scatters sky blue in, so
+// distant land cools and pales toward the sky instead of greying.
+fn haze_falloff(visibility_km: f32) -> FogFalloff {
+    FogFalloff::from_visibility_colors(
+        visibility_km * 1000.0,
+        Color::srgb(0.35, 0.5, 0.66),
+        Color::srgb(0.8, 0.844, 1.0),
+    )
+}
+
 fn configure_cameras(
     mut commands: Commands,
     cameras: Query<Entity, Added<Camera3d>>,
-    settings: Res<EnvironmentSettings>,
+    settings: Res<WeatherSettings>,
 ) {
     for entity in &cameras {
         commands.entity(entity).insert((
@@ -203,10 +216,8 @@ fn configure_cameras(
             Msaa::Sample4,
             DistanceFog {
                 color: settings.fog_color,
-                falloff: FogFalloff::Atmospheric {
-                    extinction: Vec3::splat(settings.fog_extinction),
-                    inscattering: Vec3::splat(settings.fog_extinction),
-                },
+                falloff: haze_falloff(settings.haze_visibility_km),
+                directional_light_exponent: 24.0,
                 ..default()
             },
             AmbientLight {

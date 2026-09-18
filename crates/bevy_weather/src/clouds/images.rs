@@ -1,4 +1,4 @@
-use crate::uniforms::CloudsImage;
+use super::uniforms::CloudsImage;
 use bevy::{
     asset::RenderAssetUsages,
     image::ImageSampler,

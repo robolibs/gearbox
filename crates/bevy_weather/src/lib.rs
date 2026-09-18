@@ -1,16 +1,19 @@
-//! Scene-wide sky and illumination, independent of terrain and field surfaces.
+//! Weather for a Bevy scene: the sun by calendar and hour, daylight colour,
+//! atmospheric haze, volumetric clouds and the wind, independent of whatever
+//! terrain lies under them.
 
 mod calendar;
+pub mod clouds;
 mod daylight;
-mod skybox;
+mod sky;
 
 pub use calendar::SolarCalendar;
 
 use bevy::prelude::*;
-use bevy_volumetric_clouds::config::CloudsConfig;
+use clouds::config::CloudsConfig;
 
 #[derive(Resource, Clone)]
-pub struct EnvironmentSettings {
+pub struct WeatherSettings {
     pub calendar: SolarCalendar,
     pub sun_override: bool,
     pub sun_position: Vec3,
@@ -20,7 +23,8 @@ pub struct EnvironmentSettings {
     pub exposure_ev100: f32,
     pub bloom_intensity: f32,
     pub fog_color: Color,
-    pub fog_extinction: f32,
+    /// How far the air lets you see: distant land fades into the sky by it.
+    pub haze_visibility_km: f32,
     pub clouds: CloudsConfig,
     pub cloud_velocity: Vec2,
     /// Where the wind blows towards, degrees from +X towards +Z.
@@ -30,7 +34,7 @@ pub struct EnvironmentSettings {
     pub wind_gustiness: f32,
 }
 
-impl Default for EnvironmentSettings {
+impl Default for WeatherSettings {
     fn default() -> Self {
         let calendar = SolarCalendar::default();
         let mut sun_position = Vec3::new(-4.0, 7.0, 5.0);
@@ -75,7 +79,7 @@ impl Default for EnvironmentSettings {
             exposure_ev100: 13.5,
             bloom_intensity: 0.035,
             fog_color: Color::srgb(0.55, 0.70, 0.86),
-            fog_extinction: 0.00012,
+            haze_visibility_km: angle("GEARBOX_HAZE_KM", 6.0).clamp(0.5, 80.0),
             clouds: CloudsConfig {
                 clouds_raymarch_steps_count: 96,
                 clouds_coverage: 0.55,
@@ -95,7 +99,7 @@ impl Default for EnvironmentSettings {
     }
 }
 
-impl EnvironmentSettings {
+impl WeatherSettings {
     pub fn apply_calendar(&mut self) {
         self.sun_override = false;
         self.sun_position = self.calendar.sun_direction();
@@ -115,27 +119,19 @@ impl EnvironmentSettings {
     }
 }
 
-pub struct EnvironmentPlugin;
+pub struct WeatherPlugin;
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DaylightUpdate;
 
-impl Plugin for EnvironmentPlugin {
+impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<EnvironmentSettings>()
-            .add_plugins(skybox::SkyboxPlugin);
+        app.init_resource::<WeatherSettings>()
+            .add_plugins(sky::SkyPlugin);
     }
 }
 
-/// The environment pane's wind, handed to the field cover.
-pub fn sync_cover_wind(
-    settings: Res<EnvironmentSettings>,
-    mut wind: ResMut<gearbox_fields::CoverWind>,
-) {
-    if !settings.is_changed() {
-        return;
-    }
-    wind.heading_deg = settings.wind_heading_deg;
-    wind.speed_mps = settings.wind_speed_mps;
-    wind.gustiness = settings.wind_gustiness;
-}
+/// A directional light's illuminance before anything scales it; the sun
+/// carries one so viewers can dim or boost it without losing the original.
+#[derive(Component, Debug, Copy, Clone)]
+pub struct OriginalIlluminance(pub f32);

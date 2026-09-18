@@ -1,4 +1,4 @@
-#define_import_path bevy_volumetric_clouds::common
+#define_import_path bevy_weather::clouds::common
 
 const UI0 = u32(1597334673);
 const UI1 = u32(3812015801);

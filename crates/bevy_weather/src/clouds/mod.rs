@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! Volumetric clouds and procedural sky, from evroon's `bevy-volumetric-clouds`
+//! (MIT, see `LICENSE` and `UPSTREAM.md` beside this file).
+
 
 mod compute;
 pub mod config;
@@ -7,7 +9,7 @@ mod render;
 mod skybox;
 mod uniforms;
 
-use crate::{
+use self::{
     compute::{CameraMatrices, CloudsComputePlugin},
     config::CloudsConfig,
     images::build_images,

@@ -1,4 +1,4 @@
-use super::EnvironmentSettings;
+use super::WeatherSettings;
 use bevy::prelude::*;
 
 pub(super) struct Daylight {
@@ -29,7 +29,7 @@ fn air_mass(elevation: f32) -> f32 {
 }
 
 impl Daylight {
-    pub fn from_settings(settings: &EnvironmentSettings) -> Self {
+    pub fn from_settings(settings: &WeatherSettings) -> Self {
         let direction = settings
             .sun_position
             .try_normalize()

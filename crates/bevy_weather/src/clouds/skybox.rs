@@ -1,6 +1,6 @@
 use core::f32::consts::PI;
 
-use crate::CloudsCamera;
+use super::CloudsCamera;
 use bevy::{
     camera::visibility::NoFrustumCulling,
     light::{NotShadowCaster, NotShadowReceiver},

@@ -30,8 +30,7 @@ impl Plugin for OverlaysPlugin {
     }
 }
 
-#[derive(Component, Debug, Copy, Clone)]
-pub struct OriginalIlluminance(pub f32);
+pub use bevy_weather::OriginalIlluminance;
 
 #[derive(Component, Debug, Copy, Clone)]
 pub struct OriginalLightIntensity(pub f32);
