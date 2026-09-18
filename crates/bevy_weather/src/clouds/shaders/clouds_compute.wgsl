@@ -40,7 +40,8 @@ struct Config {
     shadow_right: vec3f,
     shadow_half_extent: f32,
     shadow_up: vec3f,
-    shadow_strength: f32,
+    shadow_opacity: f32,
+    shadow_center: vec3f,
 };
 
 @group(0) @binding(0) var<uniform> config: Config;
@@ -356,10 +357,12 @@ fn update(@builtin(global_invocation_id) id: vec3u) {
 }
 
 // The clouds' shadow as the sun sees it, for the sun's light texture. Each
-// texel is one sun ray through the square facing the sun about the world
-// origin, laid out as a directional light reads its texture; it marches the
-// density the sky is drawn from, so a shadow lies under its cloud, drifts with
-// it, and falls the same on the land and on whatever stands on it.
+// texel is one sun ray through a square that faces the sun and follows the
+// camera, laid out as a directional light reads its texture. It marches the
+// density the sky is drawn from, so a shadow lies under its cloud and drifts
+// with it, and it takes the clouds' extinction as it is (Beer-Lambert): a
+// cloud that hides the sun casts a full shadow and a gap casts none. Opacity
+// is the artist's hand, applied after the physics.
 @compute @workgroup_size(8, 8, 1)
 fn ground_shadow(@builtin(global_invocation_id) id: vec3u) {
     let size = textureDimensions(ground_shadow_texture);
@@ -367,21 +370,21 @@ fn ground_shadow(@builtin(global_invocation_id) id: vec3u) {
     let uv = (vec2f(id.xy) + vec2f(0.5)) / vec2f(size);
     let across = (config.shadow_right * (1.0 - 2.0 * uv.x) + config.shadow_up * (2.0 * uv.y - 1.0))
         * config.shadow_half_extent;
-    let origin = across + vec3f(0.0, config.planet_radius, 0.0);
+    let origin = config.shadow_center + across + vec3f(0.0, config.planet_radius, 0.0);
     let sun = config.sun_dir.xyz;
-    var transmittance = 1.0;
+    var optical_depth = 0.0;
     if sun.y > 0.02 {
         // Signed distances along the ray, so a ray whose texel lies above the
         // clouds is still marched through the layer behind it.
         let enter = intersect_planet_sphere(origin, sun, config.clouds_bottom_height);
         let leave = intersect_planet_sphere(origin, sun, config.clouds_top_height);
-        let steps = 10u;
+        let steps = 12u;
         let span = (leave - enter) / f32(steps);
         for (var step = 0u; step < steps; step++) {
             let pos = origin + sun * (enter + span * (f32(step) + 0.5));
-            let density = get_cloud_map_density(pos, get_normalized_height(pos), span);
-            transmittance *= exp(-density * span * config.shadow_strength);
+            optical_depth += get_cloud_map_density(pos, get_normalized_height(pos), span) * span;
         }
     }
-    textureStore(ground_shadow_texture, vec2i(id.xy), vec4f(transmittance, 0.0, 0.0, 1.0));
+    let shadow = 1.0 - config.shadow_opacity * (1.0 - exp(-optical_depth));
+    textureStore(ground_shadow_texture, vec2i(id.xy), vec4f(shadow, 0.0, 0.0, 1.0));
 }

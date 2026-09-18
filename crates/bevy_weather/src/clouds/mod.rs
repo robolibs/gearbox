@@ -32,6 +32,8 @@ pub struct CloudsCamera;
 pub struct CloudShadowMap {
     pub image: Handle<Image>,
     pub half_extent: f32,
+    /// Metres of ground one texel covers.
+    pub texel: f32,
 }
 
 /// The sun's orientation: it shines along its local -Z, and its local X and Y
@@ -69,6 +71,7 @@ fn clouds_setup(
     commands.insert_resource(CloudShadowMap {
         image: fields.ground_shadow_image.clone(),
         half_extent: 0.5 * config.cloud_shadow_extent,
+        texel: config.cloud_shadow_extent / images::GROUND_SHADOW_SIZE as f32,
     });
     let material = materials.add(CloudsMaterial {
         cloud_render_image: fields.cloud_render_image.clone(),

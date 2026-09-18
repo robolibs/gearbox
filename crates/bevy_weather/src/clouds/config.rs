@@ -73,13 +73,15 @@ pub struct CloudsConfig {
     pub reprojection_strength: f32,
     /// Fraction of the scene viewport rendered by the cloud pass.
     pub render_scale: f32,
-    /// Side, in metres, of the square of sun rays the cloud shadow map covers,
-    /// centred on the world origin and facing the sun.
+    /// Side, in metres, of the square of sun rays the cloud shadow map covers.
+    /// It faces the sun and follows the camera; smaller is sharper.
     pub cloud_shadow_extent: f32,
-    /// How much of a cloud's optical depth its shadow keeps. Clouds scatter most
-    /// light forward rather than absorbing it, so well under 1: near 0 even
-    /// deep cloud barely dims the land, at 1 any wisp casts a full shadow.
-    pub cloud_shadow_strength: f32,
+    /// How dark a cloud's shadow may get, 0 none to 1 the full shadow its
+    /// density casts. The shadow itself is the clouds' own extinction.
+    pub cloud_shadow_opacity: f32,
+    /// Where the shadow map is centred this frame: the camera, snapped to the
+    /// map's texels so shadows do not crawl as it moves. Set by the sky.
+    pub cloud_shadow_center: Vec3,
     /// The disc's size against the real sun's 0.53 degrees. At true size it
     /// is a handful of pixels, so skies are drawn with it enlarged.
     pub sun_disc_scale: f32,
@@ -119,8 +121,9 @@ impl Default for CloudsConfig {
             sky_horizon_color: Vec4::new(0.7, 0.85, 0.95, 1.0),
             reprojection_strength: 0.95,
             render_scale: 0.5,
-            cloud_shadow_extent: 16_000.0,
-            cloud_shadow_strength: 0.35,
+            cloud_shadow_extent: 8_000.0,
+            cloud_shadow_opacity: 0.9,
+            cloud_shadow_center: Vec3::ZERO,
             sun_disc_scale: 2.4,
             render_resolution: Vec2::new(960.0, 540.0),
             wind_velocity: Vec3::new(-1.1, 0.0, 2.3),

@@ -104,7 +104,8 @@ fn prepare_uniforms_bind_group(
     buffer.shadow_right = frame * Vec3::X;
     buffer.shadow_up = frame * Vec3::Y;
     buffer.shadow_half_extent = 0.5 * clouds_config.cloud_shadow_extent;
-    buffer.shadow_strength = clouds_config.cloud_shadow_strength.clamp(0.0, 1.0);
+    buffer.shadow_opacity = clouds_config.cloud_shadow_opacity.clamp(0.0, 1.0);
+    buffer.shadow_center = clouds_config.cloud_shadow_center;
 
     clouds_uniform_buffer
         .buffer

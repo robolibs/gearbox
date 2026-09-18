@@ -38,7 +38,12 @@ impl Plugin for SkyPlugin {
             .add_systems(Startup, spawn_daylight)
             .add_systems(
                 Update,
-                (configure_cameras, carry_cloud_shadows, synchronize_daylight)
+                (
+                    configure_cameras,
+                    carry_cloud_shadows,
+                    synchronize_daylight,
+                    follow_with_cloud_shadows,
+                )
                     .chain()
                     .in_set(DaylightUpdate),
             );
@@ -107,6 +112,7 @@ fn synchronize_daylight(
         // Its scale is the reach of the cloud shadow map it carries as a light
         // texture; only its rotation lights and shadows anything.
         *transform = Transform {
+            translation: transform.translation,
             rotation: crate::clouds::sun_rotation(daylight.direction),
             scale: Vec3::splat(shadows.as_ref().map_or(1.0, |map| map.half_extent)),
             ..default()
@@ -116,9 +122,10 @@ fn synchronize_daylight(
         original.0 = light.illuminance;
         light.shadow_maps_enabled = daylight.direct_strength > 0.0;
     }
-    let resolution = clouds.render_resolution;
+    let (resolution, shadow_center) = (clouds.render_resolution, clouds.cloud_shadow_center);
     *clouds = settings.clouds;
     clouds.render_resolution = resolution;
+    clouds.cloud_shadow_center = shadow_center;
     clouds.wind_velocity = cloud_drift(&settings);
     clouds.sun_dir = daylight.direction.extend(0.0);
     clouds.sun_color = daylight.sun_radiance;
@@ -262,4 +269,30 @@ fn carry_cloud_shadows(
 fn cloud_drift(settings: &WeatherSettings) -> Vec3 {
     let (sin, cos) = settings.wind_heading_deg.to_radians().sin_cos();
     Vec3::new(cos, 0.0, sin) * settings.cloud_drift_mps.max(0.0)
+}
+
+/// The cloud shadow map follows the camera, as engines' cloud shadows do, so
+/// its texels are spent where they are seen. The centre moves a whole texel at
+/// a time: a map that slid smoothly would make every shadow edge crawl.
+fn follow_with_cloud_shadows(
+    shadows: Option<Res<crate::clouds::CloudShadowMap>>,
+    cameras: Query<&GlobalTransform, With<CloudsCamera>>,
+    mut clouds: ResMut<CloudsConfig>,
+    mut suns: Query<&mut Transform, With<Sun>>,
+) {
+    let (Some(shadows), Some(camera)) = (shadows, cameras.iter().next()) else {
+        return;
+    };
+    for mut sun in &mut suns {
+        let (right, up) = (sun.rotation * Vec3::X, sun.rotation * Vec3::Y);
+        let eye = camera.translation();
+        let snap = |along: Vec3| (eye.dot(along) / shadows.texel).round() * shadows.texel;
+        let center = right * snap(right) + up * snap(up);
+        if sun.translation != center {
+            sun.translation = center;
+        }
+        if clouds.cloud_shadow_center != center {
+            clouds.cloud_shadow_center = center;
+        }
+    }
 }

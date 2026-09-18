@@ -8,7 +8,7 @@ use bevy::{
 
 pub(crate) const IMAGE_SIZE: u32 = 512;
 /// Texels along a side of the ground shadow map.
-pub(crate) const GROUND_SHADOW_SIZE: u32 = 512;
+pub(crate) const GROUND_SHADOW_SIZE: u32 = 768;
 
 pub(crate) fn cloud_image(size: Extent3d, dimension: TextureDimension) -> Image {
     filled_image(size, dimension, &[0, 0, 0, 0, 0, 0, 0, 0x3c])

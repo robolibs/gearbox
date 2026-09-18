@@ -43,7 +43,8 @@ pub(crate) struct CloudsUniform {
     pub shadow_right: Vec3,
     pub shadow_half_extent: f32,
     pub shadow_up: Vec3,
-    pub shadow_strength: f32,
+    pub shadow_opacity: f32,
+    pub shadow_center: Vec3,
 }
 
 impl Default for CloudsUniform {
@@ -83,7 +84,8 @@ impl Default for CloudsUniform {
             shadow_right: Vec3::X,
             shadow_half_extent: 1.0,
             shadow_up: Vec3::Y,
-            shadow_strength: 0.35,
+            shadow_opacity: 0.9,
+            shadow_center: Vec3::ZERO,
         }
     }
 }

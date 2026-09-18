@@ -84,7 +84,7 @@ impl Default for WeatherSettings {
             clouds: CloudsConfig {
                 clouds_raymarch_steps_count: 96,
                 clouds_coverage: angle("GEARBOX_CLOUD_COVER", 0.55).clamp(0.0, 1.0),
-                cloud_shadow_strength: angle("GEARBOX_CLOUD_SHADOWS", 0.35).clamp(0.0, 1.0),
+                cloud_shadow_opacity: angle("GEARBOX_CLOUD_SHADOWS", 0.9).clamp(0.0, 1.0),
                 clouds_base_scale: 0.7,
                 clouds_detail_strength: 0.18,
                 clouds_base_edge_softness: 0.14,
