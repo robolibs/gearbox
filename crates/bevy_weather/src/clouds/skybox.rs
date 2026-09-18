@@ -39,7 +39,7 @@ impl<M: Material> SkyboxMaterials<M> {
 /// Make sure the `standard_materials` are unlit.
 pub(crate) fn init_skybox_mesh<M: Material>(
     commands: &mut Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
+    meshes: &mut Assets<Mesh>,
     standard_materials: SkyboxMaterials<M>,
 ) {
     let box_size = 1.0;

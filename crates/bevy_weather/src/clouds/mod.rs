@@ -65,7 +65,7 @@ impl Plugin for CloudsPlugin {
 fn clouds_setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    meshes: ResMut<Assets<Mesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<CloudsMaterial>>,
     config: Res<CloudsConfig>,
 ) {
@@ -75,17 +75,21 @@ fn clouds_setup(
         half_extent: 0.5 * config.cloud_shadow_extent,
         resolution: images::GROUND_SHADOW_SIZE,
     });
-    let material = materials.add(CloudsMaterial {
-        cloud_render_image: fields.cloud_render_image.clone(),
-        sky_image: fields.sky_image.clone(),
-        sun: sun_disc(&config),
-        sun_radiance: sun_disc_radiance(&config),
-    });
-    init_skybox_mesh(
-        &mut commands,
-        meshes,
-        SkyboxMaterials::from_one_material(MeshMaterial3d(material)),
-    );
+    // The sky behind the scene, and the clouds over it for a camera above them.
+    for overlay in [0.0, 1.0] {
+        let material = materials.add(CloudsMaterial {
+            cloud_render_image: fields.cloud_render_image.clone(),
+            sky_image: fields.sky_image.clone(),
+            sun: sun_disc(&config),
+            sun_radiance: sun_disc_radiance(&config),
+            shell: cloud_shell(&config, overlay),
+        });
+        init_skybox_mesh(
+            &mut commands,
+            &mut meshes,
+            SkyboxMaterials::from_one_material(MeshMaterial3d(material)),
+        );
+    }
     commands.insert_resource(fields);
     commands.insert_resource(CameraMatrices {
         translation: Vec3::ZERO,
@@ -147,6 +151,10 @@ fn update_camera_matrices(
 /// The real sun's angular radius, in radians.
 const SUN_ANGULAR_RADIUS: f32 = 0.004_65;
 
+fn cloud_shell(config: &CloudsConfig, overlay: f32) -> Vec4 {
+    Vec4::new(config.clouds_bottom_height, config.clouds_top_height, config.planet_radius, overlay)
+}
+
 fn sun_disc(config: &CloudsConfig) -> Vec4 {
     config.sun_dir.truncate().extend(SUN_ANGULAR_RADIUS * config.sun_disc_scale.max(0.1))
 }
@@ -161,13 +169,18 @@ fn sync_sun_disc(config: Res<CloudsConfig>, mut materials: ResMut<Assets<CloudsM
     let (sun, radiance) = (sun_disc(&config), sun_disc_radiance(&config));
     let stale: Vec<_> = materials
         .iter()
-        .filter(|(_, material)| material.sun != sun || material.sun_radiance != radiance)
+        .filter(|(_, material)| {
+            material.sun != sun
+                || material.sun_radiance != radiance
+                || material.shell != cloud_shell(&config, material.shell.w)
+        })
         .map(|(id, _)| id)
         .collect();
     for id in stale {
         if let Some(mut material) = materials.get_mut(id) {
             material.sun = sun;
             material.sun_radiance = radiance;
+            material.shell = cloud_shell(&config, material.shell.w);
         }
     }
 }

@@ -79,17 +79,33 @@ fn sample_atlas(position: vec2f) -> vec4f {
         mix(atlas_texel(cell + vec2i(0, 1)), atlas_texel(cell + vec2i(1, 1)), f.x), f.y);
 }
 
-fn cloud_map_base(p: vec3f, normalized_height: f32) -> vec2f {
+// Cloud shape and weather over a flat map `q` of the ground.
+fn cloud_map_planar(q: vec2f, normalized_height: f32) -> vec2f {
     let rotate = mat2x2f(0.8, 0.6, -0.6, 0.8);
-    let weather_a = sample_atlas(p.xz / 160000.0 + vec2f(0.13, 0.39)).a;
-    let weather_b = sample_atlas(rotate * p.xz / 57000.0 + vec2f(0.63, 0.17)).a;
+    let weather_a = sample_atlas(q / 160000.0 + vec2f(0.13, 0.39)).a;
+    let weather_b = sample_atlas(rotate * q / 57000.0 + vec2f(0.63, 0.17)).a;
     let weather = smoothstep(0.24, 0.73, weather_a * 0.65 + weather_b * 0.35);
     let warp = vec2f(weather_a - 0.5, weather_b - 0.5) * 9000.0;
-    let uv = (p.xz + warp) * (0.00005 * config.clouds_base_scale);
+    let uv = (q + warp) * (0.00005 * config.clouds_base_scale);
     let cloud = mix(sample_atlas(uv), sample_atlas(rotate * uv * 1.713 + vec2f(0.37, 0.61)), 0.28);
     let height = normalized_height / mix(0.65, 1.1, weather);
     let n = height * height * cloud.b + pow(1.0 - normalized_height, 16.0);
     return vec2f(common::remap(cloud.r - n, cloud.g, 1.0), weather);
+}
+
+// A flat map cannot wrap a globe: it smears where the ground turns away from
+// it. So the map is laid from three sides and each place takes the side it
+// faces. `p` is measured from the pole under the field and `up` points away
+// from the planet's centre; around the field only the map from above counts,
+// and the clouds there are what a single flat map gave.
+fn cloud_map_base(p: vec3f, up: vec3f, normalized_height: f32) -> vec2f {
+    var facing = pow(abs(up), vec3f(8.0));
+    facing /= facing.x + facing.y + facing.z;
+    var shape = vec2f(0.0);
+    if facing.y > 0.004 { shape += facing.y * cloud_map_planar(p.xz, normalized_height); }
+    if facing.x > 0.004 { shape += facing.x * cloud_map_planar(p.zy, normalized_height); }
+    if facing.z > 0.004 { shape += facing.z * cloud_map_planar(p.xy, normalized_height); }
+    return shape;
 }
 
 fn worley_texel(index: vec3i) -> f32 {
@@ -134,7 +150,7 @@ fn get_cloud_map_density(pos: vec3f, normalized_height: f32, sample_span: f32) -
     }
     let ps = pos - vec3f(0.0, config.planet_radius, 0.0) - config.wind_displacement;
     let shape_position = ps + vec3f(normalized_height * 180.0, 0.0, normalized_height * 90.0);
-    let base = cloud_map_base(shape_position, normalized_height);
+    let base = cloud_map_base(shape_position, normalize(pos), normalized_height);
     var m = base.x * cloud_gradient(normalized_height);
 
 	let clouds_detail_strength = (1.0 - smoothstep(0.5, 1.0, m));
@@ -199,10 +215,39 @@ fn henyey_greenstein(ray_dot_sun: f32, g: f32) -> f32 {
     return (1.0 - g_squared) / pow(1.0 + g_squared - 2.0 * g * ray_dot_sun, 1.5);
 }
 
+// Where a ray meets the sphere `height` above the ground: the near and far
+// distances along it, the far one negative when it misses.
+fn sphere_span(origin: vec3f, ray_dir: vec3f, height: f32) -> vec2f {
+    let radius = length(origin);
+    let b = dot(origin, ray_dir);
+    let c = (radius - config.planet_radius - height) * (radius + config.planet_radius + height);
+    let disc = b * b - c;
+    if disc < 0.0 { return vec2f(1.0, -1.0); }
+    let root = sqrt(disc);
+    return vec2f(-b - root, -b + root);
+}
+
+// The stretch of a view ray inside the cloud shell, from an eye under it,
+// within it or above it, out to orbit. The ground ends a ray that meets it.
 fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32) -> Ray {
-    if ray_dir.y < 0.0 { return Ray(0.0, max_dist + 1.0, max_dist + 1.0); }
-    let start = max(intersect_planet_sphere(ray_origin, ray_dir, config.clouds_bottom_height), 0.0);
-    let end = min(intersect_planet_sphere(ray_origin, ray_dir, config.clouds_top_height), max_dist);
+    let none = Ray(0.0, max_dist + 1.0, max_dist + 1.0);
+    let top = sphere_span(ray_origin, ray_dir, config.clouds_top_height);
+    if top.y <= 0.0 { return none; }
+    let base = sphere_span(ray_origin, ray_dir, config.clouds_bottom_height);
+    let eye_height = length(ray_origin) - config.planet_radius;
+    var start = 0.0;
+    var end = top.y;
+    if eye_height < config.clouds_bottom_height {
+        let ground = sphere_span(ray_origin, ray_dir, 0.0);
+        if ground.y > 0.0 && ground.x > 0.0 { return none; }
+        start = base.y;
+    } else {
+        // Looking down it leaves through the base; otherwise through the top.
+        if base.y > 0.0 && base.x > 0.0 { end = base.x; }
+        if eye_height > config.clouds_top_height { start = top.x; }
+    }
+    start = max(start, 0.0);
+    end = min(end, max_dist);
     let step_distance = max(end - start, 0.0) / f32(max(config.clouds_raymarch_steps_count, 1u));
     return Ray(step_distance, start + step_distance * 0.5, start);
 }
@@ -243,10 +288,19 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32) -> RaymarchResult 
                 normalized_height
             );
 
+            // Across a globe the sun stands lower than over the field, down to
+            // night: light there falls off, and the planet shadows its far side.
+            let local_sun = dot(normalize(world_position), config.sun_dir.xyz);
+            let day = min(smoothstep(-0.1, 0.15, local_sun) / max(smoothstep(-0.1, 0.15, config.sun_dir.y), 0.001), 1.0);
+            let toward = dot(world_position, config.sun_dir.xyz);
+            let clearance = (length(world_position) - config.planet_radius) * (length(world_position) + config.planet_radius);
+            let eclipsed = toward < 0.0 && toward * toward > clearance;
+            let sunlight = select(volumetric_shadow(world_position, ray_dot_sun), 0.0, eclipsed);
+
             // Frostbite energy-conversing integration
-            let S = clouds_density_sampled * (
+            let S = clouds_density_sampled * day * (
                 ambient_light.rgb +
-                config.sun_color.rgb * scattering * volumetric_shadow(world_position, ray_dot_sun)
+                config.sun_color.rgb * scattering * sunlight
             );
             let delta_transmittance = exp(-clouds_density_sampled * ray.step_distance);
             let integrated_scattering = S * (1.0 - delta_transmittance) / clouds_density_sampled;
@@ -304,7 +358,9 @@ fn render_clouds_worley(coord: vec3f) -> vec4f {
 fn get_clouds_color(pixel: vec2u, ray_dir: vec3f, ray_origin: vec3f) -> vec4f {
     let result = raymarch(ray_origin, ray_dir, MAX_DISTANCE);
     let transmittance = result.color.a;
-    let fog_factor = clamp(0.8 - exp(-4.0e-5 * result.dist), 0.0, 0.8);
+    // Distant clouds fade into the air between; from above it there is little.
+    let eye_height = max(length(ray_origin) - config.planet_radius, 0.0);
+    let fog_factor = clamp(0.8 - exp(-4.0e-5 * result.dist), 0.0, 0.8) * exp(-eye_height / 6000.0);
     let color = vec4f(mix(result.color.rgb,
         get_sky_color(ray_dir) * (1.0 - transmittance), fog_factor), transmittance);
     let previous = textureLoad(history_texture, vec2i(pixel), 0);

@@ -19,9 +19,19 @@ pub(crate) struct CloudsMaterial {
     /// Radiance of the sun's disc.
     #[uniform(108)]
     pub sun_radiance: Vec4,
+    /// The cloud shell: its base and top above the ground, the planet's
+    /// radius, and 1 for the pass drawn over the scene, 0 for the sky behind.
+    #[uniform(109)]
+    pub shell: Vec4,
 }
 
 impl Material for CloudsMaterial {
+    // Under the clouds they belong to the sky, behind everything. From above
+    // them they lie over the land, so a second pass blends them in front.
+    fn alpha_mode(&self) -> AlphaMode {
+        if self.shell.w > 0.5 { AlphaMode::Premultiplied } else { AlphaMode::Opaque }
+    }
+
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Path(
             AssetPath::from_path_buf(embedded_path!("shaders/clouds.wgsl")).with_source("embedded"),
