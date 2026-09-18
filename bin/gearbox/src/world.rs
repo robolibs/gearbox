@@ -25,9 +25,10 @@ use rapier3d::prelude::{
 /// radius — vehicle wheel friction, camera fog distances, cloud
 /// altitude, and shadow cascades all assume ~6 371 km.
 const PLANET_RADIUS_M: f32 = 6_371_000.0;
-/// Keep the old planet/horizon helper below the hilly local terrain.
-/// Otherwise it reads as a flat plate under the terrain mesh.
-const PLANET_VISUAL_DROP_M: f32 = 40.0;
+/// The planet cap lies under the deepest valley of the distant land, with
+/// room for the meadow's own hollows; any shallower and it shows through the
+/// valleys as flat pale islands.
+const PLANET_VISUAL_DROP_M: f32 = 0.5 * crate::terrain::HORIZON_RELIEF_M + 30.0;
 const TERRAIN_FLAT_SPAWN_RADIUS_M: f32 = 24.0;
 const TERRAIN_FULL_RELIEF_RADIUS_M: f32 = 55.0;
 const TERRAIN_MIN_HEIGHT_M: f32 = -5.0;

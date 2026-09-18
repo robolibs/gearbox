@@ -28,6 +28,8 @@ const SPAWN_RELIEF_RADIUS_M: f32 = 70.0;
 const SAFETY_FLOOR_Y_M: f64 = -40.0;
 const SAFETY_FLOOR_HALF_EXTENT_M: f64 = 10_000.0;
 const HORIZON_COLOR: Color = Color::srgb(0.46, 0.55, 0.30);
+/// Peak-to-trough relief of the distant land around the meadow.
+pub(crate) const HORIZON_RELIEF_M: f32 = 220.0;
 
 static HEIGHT_GRID: RwLock<Option<Arc<HeightGrid>>> = RwLock::new(None);
 
@@ -235,7 +237,7 @@ fn spawn_procedural_terrain(
 fn horizon_height(x: f32, z: f32) -> f32 {
     let edge = x.abs().max(z.abs());
     let t = ((edge - SIZE_M * 0.5) / 1_600.0).clamp(0.0, 1.0);
-    let relief = (fbm_world(x * 0.00045 + 41.0, z * 0.00045 - 13.0, 4) - 0.5) * 220.0;
+    let relief = (fbm_world(x * 0.00045 + 41.0, z * 0.00045 - 13.0, 4) - 0.5) * HORIZON_RELIEF_M;
     meadow_height(x, z) + relief * t * t * (3.0 - 2.0 * t)
 }
 
