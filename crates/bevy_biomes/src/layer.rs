@@ -126,6 +126,40 @@ impl Covers {
                     colour: Srgba::new(1.0, 1.0, 1.0, 0.88),
                 }),
         );
+        // Dry country: little in bloom, and what the wind lifts is mostly dust.
+        covers.insert(
+            Cover::new(Land::Steppe)
+                .with_air(Motes {
+                    kind: MoteKind::Leaf,
+                    per_hectare: 5200.0,
+                    size_mm: [22.0, 50.0],
+                    rise_mps: -0.08,
+                    drag: 0.95,
+                    ceiling_m: 1.5,
+                    reach_m: 15.0,
+                    colour: Srgba::new(1.0, 1.0, 1.0, 0.88),
+                })
+                .with_air(Motes {
+                    kind: MoteKind::Dust,
+                    per_hectare: 9000.0,
+                    size_mm: [10.0, 26.0],
+                    rise_mps: 0.07,
+                    drag: 0.85,
+                    ceiling_m: 2.6,
+                    reach_m: 16.0,
+                    colour: Srgba::new(0.74, 0.66, 0.5, 0.2),
+                })
+                .with_air(Motes {
+                    kind: MoteKind::Petal,
+                    per_hectare: 500.0,
+                    size_mm: [22.0, 44.0],
+                    rise_mps: -0.2,
+                    drag: 0.9,
+                    ceiling_m: 1.5,
+                    reach_m: 15.0,
+                    colour: Srgba::new(1.0, 1.0, 1.0, 0.85),
+                }),
+        );
         covers.insert(
             Cover::new(Field::Stubble)
                 .with_air(Motes {

@@ -34,7 +34,12 @@ fn publish_biomes(
     if held.is_some() && !layout.is_changed() {
         return;
     }
+    // Where the layout says plain grassland, the damp of the ground decides
+    // between meadow and steppe instead.
     let mut biomes = Biomes::new(biome_of(&layout.default));
+    if biomes.background == Land::Grassland.into() {
+        biomes = biomes.under(bevy_biomes::Climate::default());
+    }
     for spec in &layout.fields {
         let bounds = spec.bounds();
         biomes = biomes.with(Region::new(

@@ -36,12 +36,20 @@ impl Region {
 pub struct Biomes {
     /// What covers the ground where nothing else does.
     pub background: Biome,
+    /// Where the background is not one land but two, by how damp the ground is.
+    pub climate: Option<crate::climate::Climate>,
     pub regions: Vec<Region>,
 }
 
 impl Biomes {
     pub fn new(background: impl Into<Biome>) -> Self {
-        Self { background: background.into(), regions: Vec::new() }
+        Self { background: background.into(), climate: None, regions: Vec::new() }
+    }
+
+    /// Let the damp of the ground decide the land, instead of one land everywhere.
+    pub fn under(mut self, climate: crate::climate::Climate) -> Self {
+        self.climate = Some(climate);
+        self
     }
 
     pub fn with(mut self, region: Region) -> Self {
@@ -73,7 +81,15 @@ impl Biomes {
                 mix.add(region.biome, share);
             }
         }
-        mix.add(self.background, (1.0 - taken).max(0.0));
+        let left = (1.0 - taken).max(0.0);
+        match self.climate {
+            Some(climate) => {
+                let share = climate.share(place);
+                mix.add(climate.damp_land.into(), left * share);
+                mix.add(climate.dry_land.into(), left * (1.0 - share));
+            }
+            None => mix.add(self.background, left),
+        }
         mix.settle();
         mix
     }
@@ -252,5 +268,38 @@ mod tests {
         let shares: Vec<f32> = mix.iter().map(|(_, share)| share).collect();
         assert!(shares.windows(2).all(|pair| pair[0] >= pair[1]), "{shares:?}");
         assert_eq!(mix.strongest(), Some(Land::Steppe.into()));
+    }
+}
+
+#[cfg(test)]
+mod climate_tests {
+    use super::*;
+    use crate::biome::{Field, Land};
+    use crate::climate::Climate;
+
+    #[test]
+    fn the_background_follows_the_damp_when_it_is_asked_to() {
+        let world = Biomes::new(Land::Grassland).under(Climate::default());
+        let (mut meadow, mut steppe) = (0, 0);
+        for step in 0..900 {
+            let place = Vec2::new(step as f32 * 31.0 - 14000.0, step as f32 * 17.0);
+            let mix = world.at(place);
+            let total: f32 = mix.iter().map(|(_, share)| share).sum();
+            assert!((total - 1.0).abs() < 1e-5);
+            match mix.strongest() {
+                Some(Biome::Land(Land::Grassland)) => meadow += 1,
+                Some(Biome::Land(Land::Steppe)) => steppe += 1,
+                other => panic!("nothing grows there: {other:?}"),
+            }
+        }
+        assert!(meadow > 80 && steppe > 80, "{meadow} meadow, {steppe} steppe");
+    }
+
+    #[test]
+    fn a_field_still_owns_its_inside_whatever_the_weather() {
+        let world = Biomes::new(Land::Grassland)
+            .under(Climate::default())
+            .with(Region::new(Field::Stubble, Rect::from_center_size(Vec2::ZERO, Vec2::splat(40.0))));
+        assert!((world.at(Vec2::new(10.0, -10.0)).share_of(Field::Stubble.into()) - 1.0).abs() < 1e-6);
     }
 }

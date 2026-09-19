@@ -66,7 +66,8 @@ pub struct MoteField {
     pub colour: Vec4,
     /// Downwind x, downwind z, speed, gustiness.
     pub wind: Vec4,
-    /// Motes a hectare where no region covers the ground.
+    /// Motes a hectare over the damp land and over the dry one, and the damp
+    /// readings between which the one gives way to the other.
     pub background: Vec4,
     pub size_m: Vec2,
     pub rise_mps: f32,
@@ -251,7 +252,11 @@ fn carry_mote_fields(
                 .get(biome)
                 .and_then(|cover| cover.air.iter().find(|air| air.kind == kind.0).copied())
         };
-        let Some(recipe) = air(biomes.background).or_else(|| {
+        let (damp_land, dry_land) = match biomes.climate {
+            Some(climate) => (climate.damp_land.into(), climate.dry_land.into()),
+            None => (biomes.background, biomes.background),
+        };
+        let Some(recipe) = air(damp_land).or_else(|| air(dry_land)).or_else(|| {
             biomes.regions.iter().find_map(|region| air(region.biome))
         }) else {
             material.field.count = 0;
@@ -261,10 +266,10 @@ fn carry_mote_fields(
             colour: LinearRgba::from(recipe.colour).to_vec4(),
             wind: Vec4::new(downwind.x, downwind.y, wind.speed_mps, wind.gustiness),
             background: Vec4::new(
-                air(biomes.background).map_or(0.0, |air| air.per_hectare) * budget.density,
-                0.0,
-                0.0,
-                0.0,
+                air(damp_land).map_or(0.0, |air| air.per_hectare) * budget.density,
+                air(dry_land).map_or(0.0, |air| air.per_hectare) * budget.density,
+                biomes.climate.map_or(0.0, |climate| climate.parched),
+                biomes.climate.map_or(1.0e-4, |climate| climate.lush),
             ),
             size_m: Vec2::new(recipe.size_mm[0], recipe.size_mm[1]) * 0.001,
             rise_mps: recipe.rise_mps,
@@ -277,7 +282,7 @@ fn carry_mote_fields(
             seed: kind.0 as u32 as f32 * 17.13,
             ..default()
         };
-        let mut most_per_hectare = field.background.x;
+        let mut most_per_hectare = field.background.x.max(field.background.y);
         for (slot, region) in biomes.regions.iter().take(REGIONS).enumerate() {
             let here = air(region.biome).map_or(0.0, |air| air.per_hectare) * budget.density;
             let (metres, hard) = match region.border {

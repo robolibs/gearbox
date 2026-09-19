@@ -102,6 +102,19 @@ fn noise(p: vec2<f32>) -> f32 {
     return 0.5 + 0.7 * mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+// How damp the ground is, read exactly as the lands read it, so the air over
+// dry country is the dry country's air.
+fn damp(place: vec2<f32>) -> f32 {
+    let broad = noise(place / 420.0 + vec2<f32>(13.7, -4.1));
+    let fine = noise(place / 95.0 + vec2<f32>(-27.3, 8.9));
+    return clamp(broad * 0.72 + fine * 0.28, 0.0, 1.0);
+}
+
+// The share of the damp land at a place; the rest is the dry one.
+fn damp_share(place: vec2<f32>) -> f32 {
+    return smoothstep(field.background.z, field.background.w, damp(place));
+}
+
 // The flower patch under a place: how much of it is in bloom, and which
 // flower it is. One kind to a patch, as they grow.
 fn flower_patch(place: vec2<f32>) -> vec2<f32> {
@@ -166,7 +179,8 @@ fn air_at(place: vec2<f32>) -> f32 {
         here = here + share * air.x;
         taken = taken + share;
     }
-    return here + max(1.0 - taken, 0.0) * field.background.x;
+    let background = mix(field.background.y, field.background.x, damp_share(place));
+    return here + max(1.0 - taken, 0.0) * background;
 }
 
 // Enough stirring that the air is never a conveyor belt; it displaces rather
@@ -235,7 +249,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         tint = mix(held, dull, 0.08);
         size_scale = select(1.0, 1.7, u32(bloom.y) == 4u);
     } else if (field.kind == LEAF) {
-        tint = grass_colour(world.xz);
+        // A blade off dry country is straw; off a damp meadow it is still green.
+        tint = mix(vec3<f32>(0.6, 0.5, 0.25), grass_colour(world.xz), damp_share(world.xz));
     } else {
         // Dust and chaff are the ground they came off: paler where it has
         // dried out, darker over the damp, and never the same twice.
