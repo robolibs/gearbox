@@ -26,6 +26,7 @@ struct VegetationParams {
     bounds: vec4<f32>,
     wheels: WheelMapParams,
     wind: vec4<f32>,
+    follow_grass: f32,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -129,10 +130,11 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
     let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x51EDu);
     var base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
-    // Nought marks a stone, a half a crumb of the ground's own earth, one a
-    // tuft of grass. Only the tufts grow in clumps.
-    let is_tuft = vertex.uv.x > 0.75;
-    let is_stone = vertex.uv.x < 0.25;
+    // What the first coordinate marks this instance as: a stone, a crumb of
+    // the ground's own earth, a weed, or a tuft of grass. Only tufts clump.
+    let is_stone = vertex.uv.x < 0.18;
+    let is_tuft = vertex.uv.x >= 0.88;
+    let is_lump = !is_tuft;
     var clump_seed = 0u;
     var out_of_clump = 0.0;
     if (is_tuft) {
@@ -172,7 +174,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // is ragged with stragglers rather than cut with a knife.
     let luck = rand(id, 12u);
     let grassy = smoothstep(0.42, 0.70, green);
-    if (!is_tuft && luck < grassy * 0.85) {
+    if (is_lump && luck < grassy * 0.85) {
         return culled_vertex();
     }
     if (is_tuft && luck > grassy) {
@@ -185,7 +187,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let flat = clamp(pressed.x, 0.0, 1.0);
 
     var out: VertexOutput;
-    if (!is_tuft) {
+    if (is_lump) {
         // Mostly grit, a few pebbles, and now and then a stone worth kicking:
         // the size is drawn from a tail, not from a range, and a tyre presses
         // what it rolls over half into the soil.
@@ -194,7 +196,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // A crumb of earth is smaller than a stone and sits flatter in the
         // ground, and a wheel crushes it outright rather than pressing it in.
         if (!is_stone) {
-            size = mix(0.004, 0.042, pow(rand(id, 6u), 3.2)) * alive * (1.0 - flat * 0.8);
+            size = mix(0.005, 0.05, pow(rand(id, 6u), 2.8)) * alive * (1.0 - flat * 0.8);
             squat = mix(0.3, 0.6, rand(id, 7u));
         }
         let local = vertex.position * vec3<f32>(size, size * squat, size);
@@ -253,7 +255,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         let height = min(drawn, 0.17) * alive;
         let width = mix(0.005, 0.011, rand(id, 7u));
         let t = vertex.position.y;
-        let leaf = vertex.position.z - 1.0;
+        let leaf = vertex.position.z;
         // Each leaf on its own bearing, bowing outward and tapering to a point.
         let bearing = yaw + leaf * 2.3999632 + rand(id, 13u) * 0.6;
         let out_of = vec2<f32>(cos(bearing), sin(bearing));
@@ -287,19 +289,18 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // A leaf is tapered in its shape already; its edges are only softened so
-    // it does not end in a hard line of pixels. A stone is solid.
+    // A grass blade is tapered in its shape already; its edges are only
+    // softened so it does not end in a hard line of pixels. A stone is solid.
     var alpha = 1.0;
     if (in.shape.x > 0.5) {
-        let across = abs(in.shape.z);
-        alpha = 1.0 - smoothstep(0.72, 1.0, across);
+        alpha = 1.0 - smoothstep(0.72, 1.0, abs(in.shape.z));
     }
     if (alpha < 0.02) {
         discard;
     }
     var pbr_input = pbr_input_new();
     pbr_input.material.base_color = in.color;
-    pbr_input.material.perceptual_roughness = select(0.94, 0.95, in.shape.x > 0.5);
+    pbr_input.material.perceptual_roughness = select(0.94, 0.9, in.shape.x > 0.5);
     pbr_input.material.metallic = 0.0;
     pbr_input.material.reflectance = vec3<f32>(0.0);
     pbr_input.specular_occlusion = 0.0;
@@ -307,9 +308,18 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.frag_coord = in.clip_position;
     pbr_input.world_position = in.world_position;
     pbr_input.V = calculate_view(in.world_position, false);
-    if (in.shape.x > 0.5) {
-        // A leaf is a sheet: it is lit by the ground it stands in, turned a
-        // little towards whoever is looking at it.
+    if (in.shape.x > 1.5) {
+        // A weed's leaf is a real face, held at its own angle: light it by that
+        // face, turned to meet whoever is looking at whichever side they see.
+        let face = normalize(in.world_normal);
+        let facing = dot(face, pbr_input.V) > 0.0;
+        pbr_input.world_normal = select(-face, face, facing);
+        pbr_input.N = pbr_input.world_normal;
+        // The underside of a leaf is paler than the top, not black.
+        pbr_input.material.base_color = vec4<f32>(in.color.rgb * select(1.45, 1.0, facing), 1.0);
+    } else if (in.shape.x > 0.5) {
+        // A grass blade is a sheet: it is lit by the ground it stands in,
+        // turned a little towards whoever is looking at it.
         pbr_input.world_normal = normalize(in.ground_normal);
         pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
     } else {

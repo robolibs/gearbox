@@ -55,6 +55,18 @@ pub struct VegetationLayer {
     /// Camera distance band this layer's mesh draws in; detail levels of
     /// one blade population split the distance between them.
     pub lod_band: [f32; 2],
+    /// Nought to scatter this layer by its own reckoning. Otherwise the layer
+    /// follows the grass patches of the ground it stands on, and this is the
+    /// share of it that is still allowed out on the bare between them.
+    pub follow_grass: f32,
+}
+
+impl VegetationLayer {
+    /// The same layer, kept to the ground's grass patches but for `share` of it.
+    pub fn following(mut self, share: f32) -> Self {
+        self.follow_grass = share.max(0.001);
+        self
+    }
 }
 
 #[derive(ShaderType, Reflect, Clone, Copy, Debug, Default)]

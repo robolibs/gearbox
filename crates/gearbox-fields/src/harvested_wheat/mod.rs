@@ -186,6 +186,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: STALK_NEAR_BAND,
                 }, VegetationLayer {
@@ -195,6 +196,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: STALK_MID_BAND,
                 }, VegetationLayer {
@@ -204,6 +206,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: STALK_FAR_BAND,
                 }, VegetationLayer {
@@ -213,6 +216,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 8.0,
                     fade_end: 48.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
@@ -222,6 +226,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 16.0,
                     fade_end: 80.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
@@ -231,6 +236,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 12.0,
                     fade_end: super::canopy::FADE_END_M,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, super::clumps::sorrel(share * 15.0, 32.0),

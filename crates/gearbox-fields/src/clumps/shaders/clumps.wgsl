@@ -22,6 +22,7 @@ struct VegetationParams {
     bounds: vec4<f32>,
     wheels: WheelMapParams,
     wind: vec4<f32>,
+    follow_grass: f32,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -100,6 +101,24 @@ fn patch_noise(p: vec2<f32>) -> f32 {
         mix(rand(c, 31u), rand(d, 31u), blend.x), blend.y);
 }
 
+// The nine-metre grass patches of a bare ground, hashed exactly as that
+// ground's own shader hashes them. A different hash here would put the weeds
+// in patches of their own that have nothing to do with where the grass is.
+fn grass_patch(place: vec2<f32>) -> f32 {
+    let cell = floor(place / 9.0);
+    let f = fract(place / 9.0);
+    let ease = f * f * (3.0 - 2.0 * f);
+    let corner = array<vec2<f32>, 4>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+    var heights = array<f32, 4>();
+    for (var i = 0; i < 4; i = i + 1) {
+        let c = cell + corner[i];
+        var h = u32(i32(c.x)) * 0x9E3779B9u ^ u32(i32(c.y)) * 0x85EBCA6Bu;
+        h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
+        heights[i] = f32(h) / 4294967295.0;
+    }
+    return mix(mix(heights[0], heights[1], ease.x), mix(heights[2], heights[3], ease.x), ease.y);
+}
+
 // A vertex of an instance culled before any shaping: outside the clip volume.
 fn culled_vertex() -> VertexOutput {
     var out: VertexOutput;
@@ -126,8 +145,16 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let end = blade_fade_end(f32(index) / max(field.blades_per_chunk, 1.0));
 
     // Thick inside this pack's patches, a sparse share of plants elsewhere.
-    let patchiness = smoothstep(0.55, 0.78, patch_noise(base * 0.08 + vec2<f32>(salt * 37.1, -salt * 19.7)));
-    let kept = rand(id, 9u) < mix(vertex.color.z, 1.0, patchiness);
+    var patchiness = smoothstep(0.55, 0.78, patch_noise(base * 0.08 + vec2<f32>(salt * 37.1, -salt * 19.7)));
+    var loose = vertex.color.z;
+    if (field.follow_grass > 0.0) {
+        // On bare ground a weed comes up where the grass has, not where this
+        // pack would have put it: the same nine-metre patches the tufts of that
+        // ground are thinned by, and only the given share out on the bare.
+        patchiness = smoothstep(0.42, 0.70, grass_patch(base));
+        loose = field.follow_grass;
+    }
+    let kept = rand(id, 9u) < mix(loose, 1.0, patchiness);
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
     if (coverage <= 0.0) {

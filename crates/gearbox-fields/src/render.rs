@@ -48,6 +48,9 @@ pub struct VegetationChunk {
     pub fade_start: f32,
     pub fade_end: f32,
     pub inverse_square_thinning: bool,
+    /// Share of this layer allowed outside the ground's grass patches; nought
+    /// scatters it by its own reckoning instead.
+    pub follow_grass: f32,
     /// Albedo of an asset clump layer; procedural layers bind the fallback.
     pub albedo: Option<Handle<Image>>,
     /// Index ranges of a clump mesh's variants, one draw each; empty draws it whole.
@@ -113,6 +116,9 @@ pub struct VegetationParams {
     pub wheels: WheelMapParams,
     /// Downwind direction (x, z), speed in m/s and gustiness, for every layer.
     pub wind: Vec4,
+    /// Nought to scatter by the layer's own reckoning; otherwise the share of
+    /// this layer allowed outside the ground's grass patches.
+    pub follow_grass: f32,
 }
 
 /// Carries the environment's wind to every field's vegetation uniforms,
@@ -256,6 +262,7 @@ fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
         fade_start: draw.fade_start,
         fade_end: draw.fade_end,
         inverse_square_thinning: u32::from(draw.inverse_square_thinning),
+        follow_grass: draw.follow_grass,
         ..field.params
     }
 }

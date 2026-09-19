@@ -572,6 +572,7 @@ pub fn stream_vegetation(
                     fade_start: layer.fade_start,
                     fade_end: layer.fade_end,
                     inverse_square_thinning: layer.inverse_square_thinning,
+                    follow_grass: layer.follow_grass,
                     albedo: layer.albedo.map(|path| assets.load(path)),
                     variants,
                 },

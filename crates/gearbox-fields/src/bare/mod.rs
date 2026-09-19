@@ -2,9 +2,11 @@
 //!
 //! One ground serves sand, dirt and ploughed earth alike; they differ in
 //! their colour, how coarse their clods are and whether the wind has combed
-//! ripples into them. None of it is read from a photograph: the soil is made
-//! in the shader, and what stands in it — stones and tufts of grass — is
-//! instanced geometry placed from its own number.
+//! ripples into them. The soil itself is made in the shader rather than read
+//! from a photograph, and so are the stones, the crumbs of earth and the tufts
+//! of grass standing in it. The weeds are not: those are scanned plants, drawn
+//! from the packed clumps, because there are few enough of them in view to
+//! afford it.
 
 use std::sync::Arc;
 
@@ -25,38 +27,38 @@ use crate::profile::{
 /// so no two of its faces lie flat. The top and bottom rings close to a single
 /// point, or the stone is a tube and the ground shows through the hole.
 fn pebble() -> Mesh {
-    lump_mesh(STONE, 0.0)
+    lump_mesh(STONE, 0.0, 9, 5)
 }
 
 /// The same stone, marked in its second channel as one the sun and the sand
 /// have bleached: no flint, and nothing darker than the ground it lies on.
 fn bleached_pebble() -> Mesh {
-    lump_mesh(STONE, 1.0)
+    lump_mesh(STONE, 1.0, 9, 5)
 }
 
 /// A crumb of the ground's own earth, not a stone. The second channel says
 /// which soil it was broken off, so the shader can colour it to match.
+/// Coarse on purpose: a crumb is a centimetre across and there are thousands
+/// of them, so it gets a fifth of a stone's triangles and none of them show.
 fn turned_clod() -> Mesh {
-    lump_mesh(CLOD, 0.0)
+    lump_mesh(CLOD, 0.0, 5, 3)
 }
 
 fn worn_clod() -> Mesh {
-    lump_mesh(CLOD, 0.25)
+    lump_mesh(CLOD, 0.25, 5, 3)
 }
 
 fn blown_clod() -> Mesh {
-    lump_mesh(CLOD, 0.5)
+    lump_mesh(CLOD, 0.5, 5, 3)
 }
 
 /// What the first channel of a lump's texture coordinate marks it as. A tuft
 /// carries one; a stone's own coordinates run the whole way round it, so they
 /// cannot be used to say.
 const STONE: f32 = 0.0;
-const CLOD: f32 = 0.5;
+const CLOD: f32 = 0.35;
 
-fn lump_mesh(kind: f32, mark: f32) -> Mesh {
-    const AROUND: u32 = 9;
-    const RINGS: u32 = 5;
+fn lump_mesh(kind: f32, mark: f32, around: u32, rings: u32) -> Mesh {
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut indices = Vec::new();
@@ -69,13 +71,13 @@ fn lump_mesh(kind: f32, mark: f32) -> Mesh {
         h ^= h >> 12;
         0.76 + 0.24 * (h as f32 / u32::MAX as f32)
     };
-    for ring in 0..=RINGS {
-        let v = ring as f32 / RINGS as f32;
-        let pole = ring == 0 || ring == RINGS;
+    for ring in 0..=rings {
+        let v = ring as f32 / rings as f32;
+        let pole = ring == 0 || ring == rings;
         let lift = (v * std::f32::consts::PI).cos();
         let round = if pole { 0.0 } else { (v * std::f32::consts::PI).sin() };
-        for step in 0..AROUND {
-            let u = step as f32 / AROUND as f32 * std::f32::consts::TAU;
+        for step in 0..around {
+            let u = step as f32 / around as f32 * std::f32::consts::TAU;
             // Every vertex of a closing ring takes the same radius, so they
             // land on one another and the cap has no seam.
             let radius = dent(ring, if pole { 0 } else { step });
@@ -88,13 +90,13 @@ fn lump_mesh(kind: f32, mark: f32) -> Mesh {
             });
         }
     }
-    for ring in 0..RINGS {
-        for step in 0..AROUND {
-            let next = (step + 1) % AROUND;
-            let a = ring * AROUND + step;
-            let b = ring * AROUND + next;
-            let c = (ring + 1) * AROUND + step;
-            let d = (ring + 1) * AROUND + next;
+    for ring in 0..rings {
+        for step in 0..around {
+            let next = (step + 1) % around;
+            let a = ring * around + step;
+            let b = ring * around + next;
+            let c = (ring + 1) * around + step;
+            let d = (ring + 1) * around + next;
             indices.extend_from_slice(&[a, c, b, b, c, d]);
         }
     }
@@ -105,18 +107,22 @@ fn lump_mesh(kind: f32, mark: f32) -> Mesh {
         .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
-/// A tuft of three leaves, each a strip two quads tall. `position.z` is the
-/// leaf's number, raised by one so it cannot be taken for a stone.
+/// A tuft of three leaves, each a strip two quads tall.
 fn tuft() -> Mesh {
-    let (leaves, steps) = (3u32, 3u32);
+    leaf_mesh(TUFT, 3, 3)
+}
+
+const TUFT: f32 = 1.0;
+
+fn leaf_mesh(kind: f32, leaves: u32, steps: u32) -> Mesh {
     let mut positions = Vec::new();
     let mut indices = Vec::new();
     for leaf in 0..leaves {
         let start = positions.len() as u32;
         for step in 0..=steps {
             let t = step as f32 / steps as f32;
-            positions.push([-1.0, t, leaf as f32 + 1.0]);
-            positions.push([1.0, t, leaf as f32 + 1.0]);
+            positions.push([-1.0, t, leaf as f32]);
+            positions.push([1.0, t, leaf as f32]);
         }
         for step in 0..steps {
             let row = start + step * 2;
@@ -127,14 +133,15 @@ fn tuft() -> Mesh {
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; count])
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[1.0, 0.0]; count])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[kind, 0.0]; count])
         .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
 /// What stands in a bare ground: stones, crumbs of its own earth, and the
 /// tufts of grass that take it back. Sand carries no tufts; a worn track
 /// carries all three.
-fn standing(stones: f32, clods: f32, tufts: f32, soil: fn() -> Mesh) -> Vec<VegetationLayer> {
+fn standing(stones: f32, clods: f32, tufts: f32, weeds: f32, soil: fn() -> Mesh) -> Vec<VegetationLayer> {
+    use super::clumps;
     let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wgsl";
     let bleached = soil == blown_clod as fn() -> Mesh;
     let mut layers = vec![
@@ -145,6 +152,7 @@ fn standing(stones: f32, clods: f32, tufts: f32, soil: fn() -> Mesh) -> Vec<Vege
             fade_start: 6.0,
             fade_end: 42.0,
             inverse_square_thinning: true,
+            follow_grass: 0.0,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         },
@@ -155,8 +163,9 @@ fn standing(stones: f32, clods: f32, tufts: f32, soil: fn() -> Mesh) -> Vec<Vege
             template: soil,
             density: clods,
             fade_start: 3.0,
-            fade_end: 12.0,
+            fade_end: 14.0,
             inverse_square_thinning: true,
+            follow_grass: 0.0,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         },
@@ -169,9 +178,19 @@ fn standing(stones: f32, clods: f32, tufts: f32, soil: fn() -> Mesh) -> Vec<Vege
             fade_start: 6.0,
             fade_end: 34.0,
             inverse_square_thinning: true,
+            follow_grass: 0.0,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         });
+    }
+    // The weeds themselves are scanned plants, not shapes made in a shader:
+    // there are only ever a few dozen of them in view, so they can carry the
+    // triangles and the alpha maps the grass never could.
+    if weeds > 0.0 {
+        layers.push(clumps::flat_weeds(weeds * 0.5, 34.0).following(0.06));
+        layers.push(clumps::dandelion(weeds * 0.3, 34.0).following(0.1));
+        layers.push(clumps::nettle(weeds * 0.12, 30.0).following(0.03));
+        layers.push(clumps::celandine(weeds * 0.2, 30.0).following(0.05));
     }
     layers
 }
@@ -231,19 +250,19 @@ impl Plugin for BarePlugin {
         profiles.register(FieldProfile {
             name: "ploughed",
             wheel_response: response,
-            layers: standing(170.0, 700.0, 440.0, turned_clod),
+            layers: standing(170.0, 2400.0, 440.0, 3.0, turned_clod),
             ground: ploughed_ground,
         });
         profiles.register(FieldProfile {
             name: "dirt",
             wheel_response: response,
-            layers: standing(240.0, 420.0, 1900.0, worn_clod),
+            layers: standing(240.0, 1600.0, 1900.0, 6.0, worn_clod),
             ground: dirt_ground,
         });
         profiles.register(FieldProfile {
             name: "sand",
             wheel_response: WheelResponse { darkening: 0.16, ..response },
-            layers: standing(55.0, 240.0, 0.0, blown_clod),
+            layers: standing(55.0, 900.0, 0.0, 0.8, blown_clod),
             ground: sand_ground,
         });
     }
