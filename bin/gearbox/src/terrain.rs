@@ -780,9 +780,16 @@ pub fn publish_cover_terrain(
 ) {
     match terrain.as_deref() {
         Some(terrain) if *published != Some(terrain.entity) => {
+            let space = LAND.read().ok().and_then(|land| *land).map_or(0, |land| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                (land.site, land.frame.up.to_array().map(f64::to_bits)).hash(&mut hasher);
+                hasher.finish()
+            });
             commands.insert_resource(gearbox_fields::CoverTerrain {
                 entity: terrain.entity,
                 grid: terrain.grid.clone(),
+                space,
             });
             commands.insert_resource(gearbox_fields::CoverHeights(Arc::new(GroundHeights)));
             *published = Some(terrain.entity);

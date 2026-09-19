@@ -82,7 +82,15 @@ pub struct FieldGpu {
 }
 
 #[derive(Resource, ExtractResource, Clone, Default)]
-pub struct RenderFields(pub HashMap<Entity, FieldGpu>);
+pub struct RenderFields(pub HashMap<Entity, FieldGpu>, pub RetiredFields);
+
+/// The fields of the ground that was just replaced, kept a moment so the new
+/// fields can take over the wheel tracks where they overlap.
+#[derive(Clone, Default)]
+pub struct RetiredFields {
+    pub fields: Vec<FieldGpu>,
+    pub frames_left: u32,
+}
 
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct VegetationParams {
@@ -143,7 +151,9 @@ impl Plugin for VegetationPlugin {
                 (
                     queue_vegetation.in_set(RenderSystems::QueueMeshes),
                     prepare_vegetation_uniforms.in_set(RenderSystems::PrepareResources),
-                    stamp_wheel_contacts.in_set(RenderSystems::PrepareResources),
+                    (carry_wheel_tracks, stamp_wheel_contacts)
+                        .chain()
+                        .in_set(RenderSystems::PrepareResources),
                     prepare_vegetation_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
             );
@@ -742,5 +752,68 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
             }
         }
         RenderCommandResult::Success
+    }
+}
+
+/// A new field takes the wheel tracks of the retired fields it overlaps: the
+/// shared part of each old map is copied into the new one, texel for texel.
+fn carry_wheel_tracks(
+    fields: Res<RenderFields>,
+    images: Res<RenderAssets<GpuImage>>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    mut carried: Local<bevy::platform::collections::HashSet<Entity>>,
+) {
+    carried.retain(|entity| fields.0.contains_key(entity));
+    if fields.1.fields.is_empty() {
+        return;
+    }
+    let mut encoder = render_device.create_command_encoder(&default());
+    let mut copied = false;
+    for (&entity, field) in &fields.0 {
+        let Some(new) = images.get(&field.trample) else {
+            continue;
+        };
+        if !carried.insert(entity) {
+            continue;
+        }
+        let tpm = field.params.wheels.texels_per_metre;
+        let bounds = field.params.bounds;
+        for old in fields.1.fields.iter().filter(|old| old.tread == field.tread) {
+            let Some(source) = images.get(&old.trample) else {
+                continue;
+            };
+            let low = bounds.xy().max(old.params.bounds.xy());
+            let high = bounds.zw().min(old.params.bounds.zw());
+            if !low.cmplt(high).all() {
+                continue;
+            }
+            let from = ((low - old.params.wheels.origin) * tpm).round().as_uvec2();
+            let to = ((low - field.params.wheels.origin) * tpm).round().as_uvec2();
+            let room = |size: Vec2, at: UVec2| (size.as_uvec2()).saturating_sub(at);
+            let old_size = Vec2::new(old.params.wheels.width, old.params.wheels.height);
+            let new_size = Vec2::new(field.params.wheels.width, field.params.wheels.height);
+            let extent = ((high - low) * tpm)
+                .floor()
+                .as_uvec2()
+                .min(room(old_size, from))
+                .min(room(new_size, to));
+            if extent.x == 0 || extent.y == 0 {
+                continue;
+            }
+            let mut src = source.texture.as_image_copy();
+            src.origin = Origin3d { x: from.x, y: from.y, z: 0 };
+            let mut dst = new.texture.as_image_copy();
+            dst.origin = Origin3d { x: to.x, y: to.y, z: 0 };
+            encoder.copy_texture_to_texture(
+                src,
+                dst,
+                Extent3d { width: extent.x, height: extent.y, depth_or_array_layers: 1 },
+            );
+            copied = true;
+        }
+    }
+    if copied {
+        render_queue.submit([encoder.finish()]);
     }
 }

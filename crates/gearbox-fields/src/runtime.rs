@@ -121,6 +121,7 @@ pub struct RuntimeField {
 #[derive(Resource)]
 pub struct ActiveFields {
     pub terrain: Entity,
+    pub space: u64,
     pub fields: Vec<RuntimeField>,
     pub background: Arc<dyn GroundSurface>,
 }
@@ -175,8 +176,8 @@ fn heightmap_image(grid: &HeightGrid) -> Image {
 pub fn ensure_fields(world: &mut World) {
     let terrain = world
         .get_resource::<CoverTerrain>()
-        .map(|terrain| (terrain.entity, terrain.grid.clone()));
-    let Some((root, grid)) = terrain else {
+        .map(|terrain| (terrain.entity, terrain.grid.clone(), terrain.space));
+    let Some((root, grid, space)) = terrain else {
         if world.remove_resource::<ActiveFields>().is_some() {
             world.resource_mut::<RenderFields>().0.clear();
             world.resource_mut::<VegetationChunks>().0.clear();
@@ -187,9 +188,23 @@ pub fn ensure_fields(world: &mut World) {
         .get_resource::<ActiveFields>()
         .is_some_and(|fields| fields.terrain == root)
     {
+        // Retired fields are held only until the new ones have taken their tracks.
+        let retired = &mut world.resource_mut::<RenderFields>().1;
+        retired.frames_left = retired.frames_left.saturating_sub(1);
+        if retired.frames_left == 0 && !retired.fields.is_empty() {
+            retired.fields.clear();
+        }
         return;
     }
-    world.resource_mut::<RenderFields>().0.clear();
+    let same_space = world
+        .get_resource::<ActiveFields>()
+        .is_some_and(|fields| fields.space == space);
+    let mut render = world.resource_mut::<RenderFields>();
+    let retired: Vec<_> = render.0.drain().map(|(_, field)| field).collect();
+    render.1 = super::render::RetiredFields {
+        fields: if same_space { retired } else { Vec::new() },
+        frames_left: 240,
+    };
     world.resource_mut::<VegetationChunks>().0.clear();
     let domain = FieldBounds {
         min: Vec2::new(grid.min_x, grid.min_z),
@@ -286,6 +301,7 @@ pub fn ensure_fields(world: &mut World) {
     );
     world.insert_resource(ActiveFields {
         terrain: root,
+        space,
         fields,
         background,
     });
