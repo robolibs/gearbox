@@ -736,7 +736,14 @@ fn drain_machine_load_queue(
         let lla = number("lat").zip(number("lon")).map(|(lat, lon)| {
             gearbox_globe::Geodetic::new(lat, lon, number("alt").unwrap_or(0.0))
         });
-        let (datum, translation) = sites.place(&mut commands, lla, Vec3::new(req.x, req.y, req.z));
+        let (datum, translation, put) = sites.place(&mut commands, lla, Vec3::new(req.x, req.y, req.z));
+        // `datum_lat`/`datum_lon` name the machine's own datum; else it is where it is put.
+        if let Some(id) = &machine_id {
+            let own = number("datum_lat")
+                .zip(number("datum_lon"))
+                .unwrap_or((put.latitude, put.longitude));
+            crate::globe::set_machine_datum(id, gearbox_globe::Datum::at(own.0, own.1));
+        }
         let transform = Transform {
             translation,
             rotation: Quat::from_rotation_y(req.yaw_deg.to_radians()),

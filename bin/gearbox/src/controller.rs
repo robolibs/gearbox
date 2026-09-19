@@ -4836,7 +4836,6 @@ fn publish_machine_controller_states(
             }
         };
 
-        let half = heading * 0.5;
         // World-frame position and orientation go out REP-103/Gazebo/Isaac
         // Sim style (Z up, X/Y the ground plane), not the sim's own internal
         // Bevy/Rapier frame (Y up, X/Z the ground plane). The remap is the
@@ -4849,16 +4848,29 @@ fn publish_machine_controller_states(
         // `roll_rad`, `pitch_rad`, and every body-frame twist/IMU field
         // below (already X-forward, Z-up-yaw) need no change at all — only
         // the world-frame point and quaternion do.
-        let ros_point = Point::new(position[2], position[0], position[1]);
-        // The pose is in the machine's datum; where that is on Earth goes along.
+        // What is reported is the pose in the machine's own fixed datum, worked out
+        // from where it truly is on Earth: the frame it is simulated in never shows.
         let place = crate::globe::earth_place(region, position);
+        let own = crate::globe::machine_datum(&machine.id);
+        let (position, heading) = match (&place, &own) {
+            (Some(place), Some(own)) => {
+                let at = own.from_ecef(place.ecef);
+                let facing = bevy::math::DVec3::new(heading.sin(), 0.0, heading.cos());
+                let facing = own.rotation.inverse() * (place.datum.rotation * facing);
+                ([at.x, at.y, at.z], facing.x.atan2(facing.z))
+            }
+            _ => (position, heading),
+        };
+        let ros_point = Point::new(position[2], position[0], position[1]);
         if let Some(place) = &place {
             props.set("lat", &format!("{:.9}", place.geodetic.latitude));
             props.set("lon", &format!("{:.9}", place.geodetic.longitude));
             props.set("alt", &format!("{:.3}", place.geodetic.altitude));
             props.set("ecef", &format!("{:.3} {:.3} {:.3}", place.ecef.x, place.ecef.y, place.ecef.z));
-            props.set("datum", &format!("{:.9} {:.9}", place.datum.latitude, place.datum.longitude));
+            let anchor = own.unwrap_or(place.datum);
+            props.set("datum", &format!("{:.9} {:.9}", anchor.latitude, anchor.longitude));
         }
+        let half = heading * 0.5;
         let ros_rotation = Quaternion::new(half.cos(), 0.0, 0.0, half.sin());
         let wire = MachineState {
             odom: Odom {

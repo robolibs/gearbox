@@ -439,7 +439,7 @@ impl Sites {
         commands: &mut Commands,
         lla: Option<Geodetic>,
         at: Vec3,
-    ) -> (usize, Vec3) {
+    ) -> (usize, Vec3, Geodetic) {
         let asked = lla.unwrap_or_else(|| {
             let mut there = self.home().frame.geodetic(at.as_dvec3());
             there.altitude = at.y as f64;
@@ -450,7 +450,7 @@ impl Sites {
         let local = self.list[region].frame.from_ecef(ground);
         let (x, z) = (local.x as f32, local.z as f32);
         let y = if asked.altitude.abs() < 0.001 { self.height(region, x, z) } else { asked.altitude as f32 };
-        (region, Vec3::new(x, y, z))
+        (region, Vec3::new(x, y, z), asked)
     }
 }
 
@@ -547,4 +547,21 @@ fn reanchor_machines(
         into.latitude,
         into.longitude
     );
+}
+
+static MACHINE_DATUMS: std::sync::RwLock<Option<std::collections::HashMap<String, Datum>>> =
+    std::sync::RwLock::new(None);
+
+/// A machine's own datum: the fixed anchor its reported x, y, z are measured
+/// from, north, up and east. It is where the machine was put down unless the
+/// request named another, and it never moves; the frames the simulation
+/// works in are a separate matter and never show.
+pub fn set_machine_datum(machine: &str, datum: Datum) {
+    if let Ok(mut datums) = MACHINE_DATUMS.write() {
+        datums.get_or_insert_with(Default::default).insert(machine.to_string(), datum);
+    }
+}
+
+pub fn machine_datum(machine: &str) -> Option<Datum> {
+    MACHINE_DATUMS.read().ok()?.as_ref()?.get(machine).copied()
 }
