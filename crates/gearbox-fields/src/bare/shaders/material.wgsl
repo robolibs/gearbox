@@ -267,8 +267,11 @@ fn clods(p: vec2<f32>) -> f32 {
 
 // Bare ground: the swell of it, the clods lying on it in two sizes, the crumb
 // between them, and the comb of the plough or the wind across the lot.
-fn made_relief(place: vec2<f32>, close: f32) -> f32 {
+fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     let clod = max(ground.grain.x, 0.05);
+    // Furrows narrower than the pixel that looks at them are not drawn. Left
+    // in, they beat against the pixel grid and the field moirés from the air.
+    let combed_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
     let swell = ground_fbm(place / 26.0, 3);
     let coarseness = ground_fbm(place / 5.5 + vec2<f32>(31.0, 17.0), 2);
     // Far apart in size, and not the same amount of each everywhere.
@@ -286,7 +289,7 @@ fn made_relief(place: vec2<f32>, close: f32) -> f32 {
         // The furrows are the ground's shape; the clods only lie on them. How
         // deep a comb cuts goes with how far apart its teeth are, so a plough's
         // furrow is a trench and the wind's ripple is a wrinkle.
-        + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62)
+        + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62) * combed_seen
         + slabs * ground.grain.y * mix(0.04, 0.12, coarseness) * broken
         + lumps * ground.grain.y * mix(0.12, 0.04, coarseness) * broken
         + crumb * ground.grain.y * 0.05
@@ -314,7 +317,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let speck = mix(0.5, ground_fbm(place / (clod * 0.3), 2), close);
     // A crest dries pale; the trough beside it stays damp and dark.
     let shade = comb(place, ground.grain.w, 128.0);
-    let crest = shade.crest * shade.worked;
+    // Faded out at the range where the furrows are finer than the pixel, as
+    // their shape is: a stripe of albedo moirés just as readily.
+    let stripes_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
+    let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
     colour = ground.tint.rgb * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
         * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
@@ -332,7 +338,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // the patch. Drawing the dots at that range only speckles the ground.
         let spread_out = grassy * ground.grass.w;
         let away = under_clumps(place);
-        let took = max((1.0 - smoothstep(0.5, 1.2, away)) * spread_out,
+        let took = max((1.0 - smoothstep(0.5, 1.2, away)) * spread_out * close,
             spread_out * 0.5 * (1.0 - close));
         // A clump keeps the sky off the ground around its foot. Nothing here
         // casts a shadow, so the ground has to darken itself, or every clump
@@ -347,7 +353,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let straw = vec3<f32>(0.115, 0.088, 0.030);
         let green = mix(ground.grass.rgb, straw, clamp(0.3 + thirst * 0.55, 0.0, 1.0))
             * mix(0.72, 1.22, tufts) * mix(0.9, 1.1, blades);
-        let soil_height = made_relief(place, close) * 2.0;
+        let soil_height = made_relief(place, close, pixel_m) * 2.0;
         let met = height_blend(colour, soil_height, 1.0 - took, green, grass_height, took);
         colour = met.rgb;
         grass_share = met.a;
@@ -366,9 +372,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // out with distance instead of boiling.
     let step = max(max(clod * 0.07, 0.014), pixel_m * 0.7);
     let pressed_down = 1.0 - rolled * 0.75;
-    let here = made_relief(place, close) * pressed_down;
-    let east = made_relief(place + vec2<f32>(step, 0.0), close) * pressed_down;
-    let north = made_relief(place + vec2<f32>(0.0, step), close) * pressed_down;
+    let here = made_relief(place, close, pixel_m) * pressed_down;
+    let east = made_relief(place + vec2<f32>(step, 0.0), close, pixel_m) * pressed_down;
+    let north = made_relief(place + vec2<f32>(0.0, step), close, pixel_m) * pressed_down;
     // The slope of that height, taken across a step of it.
     let bumps = normalize(vec3<f32>((here - east) * 0.5, step, (here - north) * 0.5));
     let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0));
