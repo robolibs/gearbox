@@ -94,6 +94,27 @@ Evidence: `/tmp/molla-cache-live.log`, `/tmp/molla-physics-stages.json`,
 `/tmp/molla-loop-state.json`. The last telemetry sample reports all four tyres
 at 1.8 bar and approximately 53.5–54.3 mm deflection while driving at 2 m/s.
 
+The detailed loop trace identifies 39 DOFs, 22 constraint rows and a successful
+Cholesky factorization. The full-rank response now uses a normalized Cholesky
+Gram product, avoiding the second triangular solve and duplicate symmetric
+products. A paired 39-DOF/22-row benchmark measured 15.292–21.525 microseconds
+for Gram assembly versus 25.535–43.504 for the previous inverse products;
+every paired batch improved. Full/singular inverse-product reference tests
+include scales 1e-60 through 1e60. The tiny-scale test also fixes an existing
+unnormalized triangular-solve failure. Latest solver suite: 372 passed,
+0 failed, 4 ignored; isolated Molla binary tests: 78 passed, 1 ignored.
+
+Real-machine acceptance remains open. Concurrent release builds disturbed
+timings. The final `molla-gram-perf` drive reached 2 m/s, later stopped around
+x=8.82 m, and the window closed before final telemetry could be collected.
+A selection event was logged during the run; the stop's cause is not proven.
+Do not count the CLI's completed-duration acknowledgement as successful
+continuous driving. Reproduce with controlled inputs/headless import before
+claiming that regression gate. A pre-load renderer slab use-after-free error
+also occurs in both earlier and latest runs, not only after the Gram change.
+Evidence: `/tmp/molla-gram-{paired,full-tests,drive,live}.log` and
+`/tmp/molla-gram-stages{.json,-summary.txt}`.
+
 ## Correctness and gates
 
 - Binary tests cover conservative bounds, both pressure directions, unchanged
