@@ -16,11 +16,14 @@ use crate::{
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
 pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
-    group.set(AssetPlugin {
-        file_path: "/".to_string(),
-        unapproved_path_mode: UnapprovedPathMode::Allow,
-        ..default()
-    })
+    // big_space propagates transforms in the stock plugin's place.
+    group
+        .set(AssetPlugin {
+            file_path: "/".to_string(),
+            unapproved_path_mode: UnapprovedPathMode::Allow,
+            ..default()
+        })
+        .disable::<TransformPlugin>()
 }
 
 pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bool) {
@@ -57,6 +60,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(gearbox_api::UsdLoaderPlugin)
         .add_plugins(gearbox_api::UsdMarkerPlugin)
         // Simulator surface: planet world, machines, links, services.
+        .add_plugins(crate::globe::GlobePlugin)
         .add_plugins(world::WorldPlugin)
         .add_plugins(environment::WeatherPlugin)
         .init_resource::<environment::ViewerLens>()

@@ -23,6 +23,7 @@ bevy.workspace = true
 gearbox-controls = { path = "../../crates/gearbox-controls" }
 gearbox-fields = { path = "../../crates/gearbox-fields" }
 bevy_weather = { path = "../../crates/bevy_weather" }
+big_space.workspace = true
 
 # mara owns the window, ribbons and panes; Bevy renders into its viewport.
 mara.workspace = true

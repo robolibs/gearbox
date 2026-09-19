@@ -1806,6 +1806,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_space"
+version = "0.13.0"
+source = "git+https://github.com/aevyrie/big_space?rev=5f255228e9b4ff30756347b80f92b19ebf7b5c56#5f255228e9b4ff30756347b80f92b19ebf7b5c56"
+dependencies = [
+ "async-channel",
+ "bevy_app",
+ "bevy_camera",
+ "bevy_color",
+ "bevy_ecs",
+ "bevy_input",
+ "bevy_log",
+ "bevy_math",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_tasks",
+ "bevy_time",
+ "bevy_transform",
+ "bevy_utils",
+ "smallvec",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3734,6 +3756,7 @@ dependencies = [
  "anyhow",
  "bevy",
  "bevy_weather",
+ "big_space",
  "bytemuck",
  "concord",
  "datapod",

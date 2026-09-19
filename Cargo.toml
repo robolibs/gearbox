@@ -16,6 +16,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+# Floating origin and nested high-precision grids: the planet frame and the
+# sites on it. Upstream's own Bevy 0.19 branch, pinned until it is released.
+big_space = { git = "https://github.com/aevyrie/big_space", rev = "5f255228e9b4ff30756347b80f92b19ebf7b5c56", features = ["i64", "bevy_camera"] }
 # Local sibling crate — spatial types the whole gearbox stack speaks.
 datapod = { git = "https://codeberg.org/robolibs/datapod.git", tag = "0.6.2" }
 # WGS84/ENU geodesy — local sim positions to real lat/lon/alt for GNSS.
