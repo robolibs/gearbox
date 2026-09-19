@@ -98,7 +98,7 @@ replaced by pressure contact support, not added to it. Traction uses the
 brush grip budget and loaded rolling radius. Field stamps consume the actual
 patch length/width rather than a fixed longitudinal footprint.
 
-The Machine pane has a separate **Tyres** tab with per-wheel and all-wheel
+The Machine sidebar has per-wheel and all-wheel
 target sliders, actual pressure, loaded radius and tread contact area.
 The all-wheel slider requires overlapping supported ranges. Targets apply
 atomically per machine through the same backend path as CLI edits:
@@ -119,10 +119,12 @@ bounds, `tyre_loaded_radius_m`, `tyre_deflection_m`, patch length/width,
 `tyre_tread_area_m2` and rolling moment magnitude. Area is summed curved
 tread-cell area, not projected ground footprint area.
 
-The separate Tyres tab avoids response offsets depending on collapsed
-controller containers. Sliders synchronize through Mara's typed memory store,
+Pressure pods appear before variants and collapsible controller sections, so
+their response offsets do not depend on folded sections. Sliders synchronize through Mara's typed memory store,
 not egui's separate persisted-value store. Regression tests cover tab routing,
-all-wheel versus individual edits and authoritative slider memory.
+all-wheel versus individual edits and authoritative slider memory. The direct
+sidebar layout was visually checked in `/tmp/molla-sidebar-pressure.png`;
+the corresponding Molla binary suite passes 64 tests and native build passes.
 
 Live Kubota evidence: straight 2 m/s with zero turn reaches about 2.01 m/s;
 lowering front pressure from 1.8 to 1.0 bar increases settled deflection from

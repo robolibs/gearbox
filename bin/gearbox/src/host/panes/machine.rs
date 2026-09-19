@@ -201,7 +201,7 @@ fn apply_tyre_targets(
     values: &mut LinkValues,
 ) {
     for block in blocks {
-        if let Some(value) = pod_response(responses, cid(P, "tyres"), block.pod)
+        if let Some(value) = pod_response(responses, cid(P, "machine"), block.pod)
             .and_then(|r| r.sliders.first())
             .filter(|s| s.changed)
             .map(|s| s.value)
@@ -249,7 +249,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
 
     // Variants of the machine prim: a row per set, a button per option.
     let variants = machine_variants(world, scene_root, &machine.prim_path);
-    let variants_offset = pods.len();
+    let mut variants_offset = pods.len();
     if !variants.is_empty() {
         for (i, (set, selection, options)) in variants.iter().enumerate() {
             pods.push(options.iter().fold(
@@ -530,7 +530,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
             });
             let matched = tyres.iter().all(|t| (t.2 - target).abs() < 0.005);
             tyre_pods.push(Pod::new(pid(P, "tyres-all", 0))
-                .with_readout("units", "bar (gauge)")
+                .with_readout("tyre pressure", "bar (gauge)")
                 .with_readout("changes", "ramp while playing")
                 .with_readout("targets", if matched { "matched" } else { "mixed" })
                 .with_slider("all tyres", clamp(target, low, high), low..=high, 2, " bar", accent));
@@ -552,6 +552,17 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         }
     }
 
+    let tyre_offset = 2;
+    let tyre_count = tyre_pods.len();
+    for block in &mut tyre_blocks {
+        block.pod += tyre_offset;
+    }
+    for block in &mut blocks {
+        block.pod += tyre_count;
+    }
+    variants_offset += tyre_count;
+    pods.splice(tyre_offset..tyre_offset, tyre_pods);
+
     world.insert_resource(MachineBuildCache(Some((
         list,
         Some((machine, scene_root, variants_offset, variants, blocks, tyre_blocks)),
@@ -559,11 +570,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     let tab = Tab::new(cid(P, "machine"), "Machine", "vehicle-tractor")
         .pods(pods)
         .containers(containers);
-    let mut tabs = vec![tab];
-    if !tyre_pods.is_empty() {
-        tabs.push(Tab::new(cid(P, "tyres"), "Tyres", "options").pods(tyre_pods));
-    }
-    ShelfContainer::tabbed(cid(P, "root"), "Machine", "vehicle-tractor", tabs)
+    ShelfContainer::tabbed(cid(P, "root"), "Machine", "vehicle-tractor", vec![tab])
 }
 
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, ctx: &PaneCtx) {
@@ -726,10 +733,10 @@ mod tests {
     use mara_core::pod::SliderResponse;
 
     #[test]
-    fn tyre_targets_use_their_own_tab_responses() {
+    fn sidebar_tyre_targets_use_top_level_pod_offsets() {
         let blocks = [
-            TyreBlock { pod: 0, links: vec!["left".into(), "right".into()] },
-            TyreBlock { pod: 1, links: vec!["left".into()] },
+            TyreBlock { pod: 2, links: vec!["left".into(), "right".into()] },
+            TyreBlock { pod: 3, links: vec!["left".into()] },
         ];
         let response = |value, changed| PodResponse {
             sliders: vec![SliderResponse { value, changed }],
@@ -739,12 +746,18 @@ mod tests {
         let mut values = LinkValues::default();
         apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
         assert_eq!(values.get("tractor", "left", "tyre_target_pressure_bar"), None);
-        responses.insert(cid(P, "tyres"), vec![response(2.2, true), response(1.8, false)]);
+        responses.insert(cid(P, "machine"), vec![
+            PodResponse::default(), PodResponse::default(),
+            response(2.2, true), response(1.8, false),
+        ]);
         apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
         for link in ["left", "right"] {
             assert_eq!(values.get("tractor", link, "tyre_target_pressure_bar"), Some(2.2));
         }
-        responses.insert(cid(P, "tyres"), vec![response(2.2, false), response(1.0, true)]);
+        responses.insert(cid(P, "machine"), vec![
+            PodResponse::default(), PodResponse::default(),
+            response(2.2, false), response(1.0, true),
+        ]);
         apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
         assert_eq!(values.get("tractor", "left", "tyre_target_pressure_bar"), Some(1.0));
         assert_eq!(values.get("tractor", "right", "tyre_target_pressure_bar"), Some(2.2));
