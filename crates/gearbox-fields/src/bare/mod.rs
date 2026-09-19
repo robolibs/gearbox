@@ -227,7 +227,7 @@ fn ploughed_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.030, 0.020, 0.013, 1.0),
+            tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
             grass: Vec4::new(0.055, 0.085, 0.022, 0.0),
         },
@@ -248,8 +248,8 @@ fn dirt_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.062, 0.049, 0.035, 1.0),
-            grain: Vec4::new(0.3, 0.3, 0.1, 1.6),
+            tint: Vec4::new(0.115, 0.070, 0.038, 1.0),
+            grain: Vec4::new(0.3, 0.40, 0.1, 1.6),
             grass: Vec4::new(0.05, 0.075, 0.02, 0.0),
         },
         0.88,
@@ -269,8 +269,7 @@ fn sand_ground(
         trample_params,
         geometry,
         BareGround {
-            // The last of the tint says it is made rather than read.
-            tint: Vec4::new(0.155, 0.126, 0.082, 1.0),
+            tint: Vec4::new(0.230, 0.178, 0.108, 1.0),
             grain: Vec4::new(1.6, 0.3, 1.0, 0.9),
             grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
         },

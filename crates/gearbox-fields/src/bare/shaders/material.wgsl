@@ -169,6 +169,7 @@ fn clods(p: vec2<f32>) -> f32 {
     let f = p - cell;
     var nearest = 8.0;
     var next = 8.0;
+    var owner = cell;
     for (var dy = -1; dy <= 1; dy = dy + 1) {
         for (var dx = -1; dx <= 1; dx = dx + 1) {
             let step = vec2<f32>(f32(dx), f32(dy));
@@ -178,6 +179,7 @@ fn clods(p: vec2<f32>) -> f32 {
             if (away < nearest) {
                 next = nearest;
                 nearest = away;
+                owner = seed;
             } else if (away < next) {
                 next = away;
             }
@@ -186,7 +188,11 @@ fn clods(p: vec2<f32>) -> f32 {
     // Rounded, not peaked: the raw gap between the two nearest seeds leaves a
     // ridge at every border and the ground reads as faceted glass.
     let gap = clamp(next - nearest, 0.0, 1.0);
-    return gap * gap * (3.0 - 2.0 * gap);
+    let lump = gap * gap * (3.0 - 2.0 * gap);
+    // The borders of the cells make one unbroken net across the ground, which
+    // reads as crazy paving. Softening each cell by its own roll breaks the
+    // net without losing the lumps.
+    return lump * mix(0.3, 1.0, hash21(owner + vec2<f32>(7.7, 1.3)));
 }
 
 
@@ -197,9 +203,12 @@ fn made_relief(place: vec2<f32>, close: f32) -> f32 {
     let swell = ground_fbm(place / 26.0, 3);
     let coarseness = ground_fbm(place / 5.5 + vec2<f32>(31.0, 17.0), 2);
     // Far apart in size, and not the same amount of each everywhere.
-    let slabs = clods(place / (clod * 5.5));
+    let slabs = clods(place / (clod * 3.2));
     let lumps = clods(place / (clod * 0.9) + vec2<f32>(17.0, 4.0));
     let crumb = mix(0.5, ground_fbm(place / (clod * 0.22), 2), close);
+    // Under the clods, the grit: too small to make a shape of its own, but it
+    // is the whole of what the ground looks like from a step away.
+    let grit = mix(0.5, clods(place / (clod * 0.25) + vec2<f32>(3.0, 29.0)), close);
     let drawn = comb(place, ground.grain.w, 128.0);
     let combed = drawn.crest * drawn.depth * drawn.worked;
     // Where the plough turned, it left broken ground instead of furrows.
@@ -207,9 +216,10 @@ fn made_relief(place: vec2<f32>, close: f32) -> f32 {
     return swell * 0.08
         // The furrows are the ground's shape; the clods only lie on them.
         + combed * ground.grain.z * 0.62
-        + slabs * ground.grain.y * mix(0.1, 0.3, coarseness) * broken
-        + lumps * ground.grain.y * mix(0.22, 0.07, coarseness) * broken
-        + crumb * ground.grain.y * 0.05;
+        + slabs * ground.grain.y * mix(0.04, 0.12, coarseness) * broken
+        + lumps * ground.grain.y * mix(0.12, 0.04, coarseness) * broken
+        + crumb * ground.grain.y * 0.05
+        + grit * ground.grain.y * 0.045;
 }
 
 @fragment
@@ -234,7 +244,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // A crest dries pale; the trough beside it stays damp and dark.
     let shade = comb(place, ground.grain.w, 128.0);
     let crest = shade.crest * shade.worked;
-    colour = ground.tint.rgb * mix(0.72, 1.18, patchy) * mix(0.9, 1.1, speck)
+    let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
+    colour = ground.tint.rgb * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
         * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
 
     // Grass takes the ground in patches, and holds it where it is tallest.
@@ -262,13 +273,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     // The normal from the height itself: a step to each side, and the cross
     // of what that leaves. Clods lit from the side read as clods.
-    let step = max(clod * 0.12, 0.02);
+    // The step is taken no finer than the pixel can see, so the relief fades
+    // out with distance instead of boiling.
+    let step = max(max(clod * 0.07, 0.014), pixel_m * 0.7);
     let pressed_down = 1.0 - rolled * 0.75;
     let here = made_relief(place, close) * pressed_down;
     let east = made_relief(place + vec2<f32>(step, 0.0), close) * pressed_down;
     let north = made_relief(place + vec2<f32>(0.0, step), close) * pressed_down;
     // The slope of that height, taken across a step of it.
-    let bumps = normalize(vec3<f32>((here - east) * 0.4, step, (here - north) * 0.4));
+    let bumps = normalize(vec3<f32>((here - east) * 0.5, step, (here - north) * 0.5));
     let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0));
 
     // Hollows between the clods keep the light out of them.
@@ -279,6 +292,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Sand glitters a little where its grains face the light.
     let glint = (ground_noise(place / (clod * 0.08)) - 0.5) * 0.18 * close;
     pbr_input.material.perceptual_roughness = clamp(mix(0.95, 0.78, rolled) + glint, 0.35, 1.0);
+    // Soil is not a dielectric with a polished surface. Left at the default,
+    // the sheen off it is worth more than the earth's own colour and the
+    // ground comes out grey whatever it is tinted.
+    pbr_input.material.reflectance = vec3<f32>(0.03);
     pbr_input.world_normal = shaped;
     pbr_input.N = shaped;
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);

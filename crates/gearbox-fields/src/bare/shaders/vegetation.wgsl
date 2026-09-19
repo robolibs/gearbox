@@ -171,10 +171,18 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_position = vec4<f32>(ground + vec3<f32>(spun.x, local.y - sunk, spun.y), 1.0);
         let spun_n = turn * vertex.normal.xz;
         out.world_normal = normalize(vec3<f32>(spun_n.x, vertex.normal.y, spun_n.y));
-        // No two stones are the same stone: some flint, some sandstone.
-        let grey = mix(0.035, 0.115, rand(id, 9u));
-        let warm = mix(0.86, 1.25, rand(id, 10u));
-        out.color = vec4<f32>(vec3<f32>(grey * warm, grey * mix(0.94, 1.02, rand(id, 11u)), grey * (2.0 - warm)), 1.0);
+        // No two stones are the same stone: some flint, some sandstone. All of
+        // them warm, though — a stone lying in soil is stained by it, and a
+        // cold grey one reads as a pebble washed up on a beach.
+        let tone = mix(0.055, 0.155, rand(id, 9u));
+        let iron = rand(id, 10u);
+        let stone = vec3<f32>(tone * mix(1.0, 1.42, iron),
+            tone * mix(0.94, 1.0, iron),
+            tone * mix(0.82, 0.66, iron));
+        // Dust settles on whatever faces the sky, so the top of a stone is
+        // nearer the colour of the ground than the stone's own.
+        let dust = vec3<f32>(0.130, 0.090, 0.055);
+        out.color = vec4<f32>(mix(stone, dust, 0.35 * rand(id, 11u)), 1.0);
         out.shape = vec3<f32>(0.0, vertex.position.y, 0.0);
     } else {
         // A tuft leans downwind and lies flat where a wheel has been over it.
@@ -200,10 +208,18 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_position = vec4<f32>(ground + stand, 1.0);
         out.world_normal = ground_normal;
         // Darker at the root, and no two tufts the same green.
-        let blade = mix(0.5, 1.15, rand(id, 9u)) * mix(0.55, 1.0, t)
+        let blade = mix(0.5, 1.15, rand(id, 9u)) * mix(0.5, 1.0, t)
             * (1.0 - flat * field.wheels.darkening);
-        let dry = mix(1.0, 1.5, rand(clump_seed, 6u)) * mix(0.94, 1.06, rand(id, 15u));
-        out.color = vec4<f32>(vec3<f32>(0.05 * dry, 0.095, 0.026) * blade, 1.0);
+        // A clump at the thin edge of a patch is a clump short of water, and
+        // it goes over to straw before the ones in the thick of it do.
+        let thirst = 1.0 - smoothstep(0.40, 0.88, green);
+        let dry = clamp(rand(clump_seed, 6u) * 0.65 + thirst * 0.7, 0.0, 1.0);
+        let fresh = vec3<f32>(0.026, 0.082, 0.018);
+        let straw = vec3<f32>(0.115, 0.088, 0.030);
+        // The tips go first, so a drying clump is straw-headed and green-footed.
+        let hue = mix(fresh, straw, clamp(dry * mix(0.55, 1.15, t), 0.0, 1.0));
+        out.color = vec4<f32>(hue * blade * mix(0.82, 1.2, rand(clump_seed, 7u))
+            * mix(0.92, 1.08, rand(id, 15u)), 1.0);
         out.shape = vec3<f32>(1.0, t, vertex.position.x);
     }
     out.clip_position = view.clip_from_world * out.world_position;
@@ -226,16 +242,25 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     var pbr_input = pbr_input_new();
     pbr_input.material.base_color = in.color;
-    pbr_input.material.perceptual_roughness = select(0.72, 0.95, in.shape.x > 0.5);
+    pbr_input.material.perceptual_roughness = select(0.94, 0.95, in.shape.x > 0.5);
     pbr_input.material.metallic = 0.0;
     pbr_input.material.reflectance = vec3<f32>(0.0);
     pbr_input.specular_occlusion = 0.0;
     pbr_input.material.flags = pbr_input.material.flags | STANDARD_MATERIAL_FLAGS_FOG_ENABLED_BIT;
     pbr_input.frag_coord = in.clip_position;
     pbr_input.world_position = in.world_position;
-    pbr_input.world_normal = normalize(in.ground_normal);
     pbr_input.V = calculate_view(in.world_position, false);
-    pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
+    if (in.shape.x > 0.5) {
+        // A leaf is a sheet: it is lit by the ground it stands in, turned a
+        // little towards whoever is looking at it.
+        pbr_input.world_normal = normalize(in.ground_normal);
+        pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
+    } else {
+        // A stone is a solid, and has to be lit by its own faces, or it reads
+        // as a flat disc painted on the soil.
+        pbr_input.world_normal = normalize(in.world_normal);
+        pbr_input.N = pbr_input.world_normal;
+    }
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
     var colour = apply_pbr_lighting(pbr_input);
     colour = main_pass_post_lighting_processing(pbr_input, colour);
