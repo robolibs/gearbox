@@ -71,3 +71,7 @@ pyo3 = { version = "0.23", optional = true, features = [
     "abi3-py39",
     "extension-module",
 ] }
+
+[dev-dependencies]
+pollster = "0.4"
+wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }

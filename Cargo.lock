@@ -3754,6 +3754,7 @@ dependencies = [
  "openusd-schemas",
  "peerbus",
  "png",
+ "pollster",
  "pyo3",
  "rapier3d-f64",
  "rfd",
@@ -3764,6 +3765,7 @@ dependencies = [
  "tracing-subscriber",
  "transform-gizmo",
  "usd_bevy",
+ "wgpu",
 ]
 
 [[package]]

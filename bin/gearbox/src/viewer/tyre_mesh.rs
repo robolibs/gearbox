@@ -5,17 +5,26 @@ use bevy::camera::primitives::MeshAabb;
 use bevy::math::Affine3A;
 use bevy::mesh::{PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
+use bevy::render::storage::ShaderBuffer;
 use molla_vehicle::real_tire::LoadedTireEnvelope;
 use usd_bevy::UsdPrimRef;
 
 use crate::physics::PhysicsWorld;
 use crate::physics::backend::{BodyId, WheelForceOutput};
 use crate::controller::wheel_forces::{rigid_name, rubber_name};
+use super::tyre_gpu::{GpuRubber, TyreFrame, TyreMaterial};
 
 pub(super) struct TyreMeshPlugin;
 
 impl Plugin for TyreMeshPlugin {
     fn build(&self, app: &mut App) {
+        if app.get_sub_app(bevy::render::RenderApp).is_some()
+            && std::env::var("GEARBOX_TYRE_RENDER").as_deref() != Ok("cpu")
+        {
+            bevy::asset::embedded_asset!(app, "tyre_deform.wgsl");
+            bevy::asset::embedded_asset!(app, "tyre_gpu.wgsl");
+            app.add_plugins(bevy::pbr::MaterialPlugin::<TyreMaterial>::default());
+        }
         app.init_resource::<TyreMeshes>().add_systems(
             PostUpdate,
             update_tyre_meshes
@@ -36,6 +45,7 @@ struct RubberMesh {
     body: BodyId,
     bead_radius: f64,
     last_frame: Option<(Affine3A, LoadedTireEnvelope, Option<f64>)>,
+    gpu: Option<GpuRubber>,
 }
 
 fn contact_frame(sample: WheelForceOutput) -> Option<Affine3A> {
@@ -66,7 +76,7 @@ fn reference_positions(mesh: &Mesh) -> Option<Vec<[f32; 3]>> {
     }
 }
 
-fn supported_vertex(envelope: LoadedTireEnvelope, point: [f64; 3], ground_distance: Option<f64>) -> [f64; 3] {
+pub(super) fn supported_vertex(envelope: LoadedTireEnvelope, point: [f64; 3], ground_distance: Option<f64>) -> [f64; 3] {
     let mut point = envelope.deform(point);
     if let Some(distance) = ground_distance {
         point[1] = point[1].max(-distance);
@@ -87,6 +97,12 @@ fn update_tyre_meshes(
         Option<&GlobalTransform>,
     )>,
     mut trace_at: Local<Option<std::time::Instant>>,
+    materials: Option<Res<Assets<StandardMaterial>>>,
+    mut gpu_materials: Option<ResMut<Assets<TyreMaterial>>>,
+    standard: Query<&MeshMaterial3d<StandardMaterial>>,
+    material_events: Option<Res<Messages<AssetEvent<StandardMaterial>>>>,
+    mut material_cursor: Local<bevy::ecs::message::MessageCursor<AssetEvent<StandardMaterial>>>,
+    mut gpu_buffers: Option<ResMut<Assets<ShaderBuffer>>>,
 ) {
     let started = std::time::Instant::now();
     let mut timings = [0.0; 3];
@@ -110,26 +126,52 @@ fn update_tyre_meshes(
     if samples.is_empty() && rubber.0.is_empty() {
         return;
     }
+    let mut changed_materials = std::collections::HashSet::new();
+    if let Some(events) = material_events.as_ref() {
+        for event in material_cursor.read(events) {
+            if let AssetEvent::Modified { id } = event {
+                changed_materials.insert(*id);
+            }
+        }
+    }
+    let mut retired = std::collections::HashSet::new();
     rubber.0.retain(|entity, entry| {
         let Ok((_, mut mesh, _)) = visuals.get_mut(*entity) else {
             return false;
         };
-        if mesh.0 != entry.private {
-            return false;
-        }
-        if !samples.contains_key(&entry.body) {
-            mesh.0 = entry.source.clone();
-            if let Some(bounds) = meshes.get(&entry.source).and_then(Mesh::compute_aabb) {
+        if mesh.0 != entry.private || !samples.contains_key(&entry.body) {
+            if let Some(gpu) = &entry.gpu {
+                let mut entity_commands = commands.entity(*entity);
+                entity_commands.remove::<MeshMaterial3d<TyreMaterial>>();
+                if standard.get(*entity).is_err() {
+                    entity_commands.insert(MeshMaterial3d(gpu.source.clone()));
+                }
+            }
+            if mesh.0 == entry.private { mesh.0 = entry.source.clone(); }
+            if let Some(bounds) = meshes.get(&mesh.0).and_then(Mesh::compute_aabb) {
                 commands.entity(*entity).insert(bounds);
             }
+            retired.insert(*entity);
             return false;
         }
         true
     });
+    let mut ancestor_bodies = HashMap::<Entity, Option<BodyId>>::new();
+    let mut ancestry = Vec::new();
     for (entity, mut mesh, global) in &mut visuals {
-        if rubber.0.contains_key(&entity) {
+        if rubber.0.contains_key(&entity) || retired.contains(&entity) {
             continue;
         }
+        let mut current = entity;
+        let candidate = loop {
+            if let Some(body) = ancestor_bodies.get(&current) { break *body; }
+            ancestry.push(current);
+            if let Some(body) = physics.entity_to_body.get(&current) { break Some(*body); }
+            let Ok((Some(parent), _, _, _)) = hierarchy.get(current) else { break None };
+            current = parent.parent();
+        };
+        for ancestor in ancestry.drain(..) { ancestor_bodies.insert(ancestor, candidate); }
+        if !candidate.is_some_and(|body| samples.contains_key(&body)) { continue; }
         let mut current = entity;
         let mut is_rubber = false;
         let body = loop {
@@ -174,19 +216,36 @@ fn update_tyre_meshes(
             })
             .fold(radius, f64::min)
             .clamp(0.2 * radius, 0.9 * radius);
-        let mut private = source.clone();
-        private.final_aabb = None;
-        private.asset_usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
-        let private = meshes.add(private);
+        let gpu = standard.get(entity).ok().and_then(|material| {
+            if source.contains_attribute(Mesh::ATTRIBUTE_JOINT_INDEX) || source.morph_targets().is_some() { return None; }
+            let base = materials.as_ref()?.get(&material.0)?.clone();
+            let bounds = source.compute_aabb()?;
+            let pressure = sample.pressure?;
+            let envelope = LoadedTireEnvelope { radius, bead_radius, width: pressure.width, loaded_radius: pressure.loaded_radius };
+            let ground = pressure.ground.map(|g| (pressure.hub - g.point).dot(g.normal));
+            let gpu = GpuRubber::new(material.0.clone(), base, bounds, TyreFrame::new(to_frame, envelope, ground), gpu_materials.as_mut()?, gpu_buffers.as_mut()?);
+            commands.entity(entity).remove::<MeshMaterial3d<StandardMaterial>>()
+                .insert(MeshMaterial3d(gpu.material.clone()));
+            Some(gpu)
+        });
+        let private = if gpu.is_some() {
+            mesh.0.clone()
+        } else {
+            let mut private = source.clone();
+            private.final_aabb = None;
+            private.asset_usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
+            meshes.add(private)
+        };
         rubber.0.insert(
             entity,
             RubberMesh {
                 source: mesh.0.clone(),
                 private: private.clone(),
-                positions,
+                positions: if gpu.is_some() { Vec::new() } else { positions },
                 body,
                 bead_radius,
                 last_frame: None,
+                gpu,
             },
         );
         mesh.0 = private;
@@ -215,6 +274,27 @@ fn update_tyre_meshes(
         };
         let to_frame = frame.inverse() * global.affine();
         if !to_frame.is_finite() || to_frame.matrix3.determinant().abs() < 1e-12 {
+            continue;
+        }
+        if let Some(gpu) = &mut entry.gpu {
+            let Some(gpu_materials) = gpu_materials.as_mut() else { continue };
+            let mut changed = changed_materials.contains(&gpu.source.id());
+            if let Ok(material) = standard.get(*entity) {
+                changed |= gpu.source != material.0;
+                gpu.source = material.0.clone();
+                commands.entity(*entity).remove::<MeshMaterial3d<StandardMaterial>>();
+            }
+            if changed && let Some(base) = materials.as_ref().and_then(|m| m.get(&gpu.source))
+                && let Some(material) = gpu_materials.get_mut(&gpu.material)
+            {
+                material.into_inner().base = base.clone();
+            }
+            let state = TyreFrame::new(to_frame, envelope, ground_distance);
+            if let Some(buffers) = gpu_buffers.as_mut() { gpu.update(state, buffers); }
+            if entry.last_frame != Some((to_frame, envelope, ground_distance)) {
+                commands.entity(*entity).insert(state.bounds(gpu.bounds));
+            }
+            entry.last_frame = Some((to_frame, envelope, ground_distance));
             continue;
         }
         if entry.last_frame == Some((to_frame, envelope, ground_distance)) {
@@ -255,8 +335,10 @@ fn update_tyre_meshes(
         && trace_at.is_none_or(|at| at.elapsed().as_secs() >= 3)
     {
         *trace_at = Some(std::time::Instant::now());
-        info!("tyre-mesh timing: total_ms={} deform_ms={} normals_ms={} tangents_ms={}", started.elapsed().as_secs_f64() * 1000.0, timings[0] * 1000.0, timings[1] * 1000.0, timings[2] * 1000.0);
+        let gpu_count = rubber.0.values().filter(|entry| entry.gpu.is_some()).count();
+        info!("tyre-mesh timing: gpu_meshes={gpu_count} cpu_meshes={} total_ms={} deform_ms={} normals_ms={} tangents_ms={}", rubber.0.len() - gpu_count, started.elapsed().as_secs_f64() * 1000.0, timings[0] * 1000.0, timings[1] * 1000.0, timings[2] * 1000.0);
         for (entity, entry) in &rubber.0 {
+            if entry.gpu.is_some() { continue; }
             let Ok((_, _, global)) = visuals.get(*entity) else { continue };
             let Some(mesh) = meshes.get(&entry.private) else { continue };
             let Some(VertexAttributeValues::Float32x3(current)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { continue };
@@ -289,6 +371,15 @@ mod tests {
 
     #[test]
     fn pressure_changes_private_rubber_in_both_directions() {
+        pressure_changes_rubber(false);
+    }
+
+    #[test]
+    fn gpu_pressure_changes_uniforms_without_mutating_meshes() {
+        pressure_changes_rubber(true);
+    }
+
+    fn pressure_changes_rubber(gpu: bool) {
         let mut backend = MollaBackend::default();
         let ground = backend.insert_collider(ColliderDesc::new(Shape::Cuboid {
             half_extents: DVec3::new(5.0, 0.1, 5.0),
@@ -319,6 +410,13 @@ mod tests {
         let steps = (8.0 / backend.settings().dt).ceil() as usize;
         let mut app = App::new();
         app.init_resource::<Assets<Mesh>>().add_plugins(TyreMeshPlugin);
+        let material = if gpu {
+            app.init_resource::<Assets<StandardMaterial>>()
+                .init_resource::<Assets<TyreMaterial>>()
+                .init_resource::<Assets<ShaderBuffer>>()
+                .init_resource::<Messages<AssetEvent<StandardMaterial>>>();
+            Some(app.world_mut().resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial::default()))
+        } else { None };
         let body = app.world_mut().spawn(GlobalTransform::IDENTITY).id();
         let mut physics = PhysicsWorld::with_backend(Box::new(backend));
         physics.entity_to_body.insert(body, wheel);
@@ -330,6 +428,9 @@ mod tests {
         let rubber = app.world_mut().spawn((
             ChildOf(body), Name::new("radial_tyre"), Mesh3d(source.clone()), GlobalTransform::IDENTITY,
         )).id();
+        if let Some(material) = &material {
+            app.world_mut().entity_mut(rubber).insert(MeshMaterial3d(material.clone()));
+        }
         let sample = |app: &mut App, target| {
             let hub = {
                 let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
@@ -345,10 +446,22 @@ mod tests {
             }
             app.update();
             let handle = &app.world().get::<Mesh3d>(rubber).unwrap().0;
-            assert_ne!(*handle, source);
             let meshes = app.world().resource::<Assets<Mesh>>();
             assert_eq!(reference_positions(meshes.get(&source).unwrap()).unwrap(), original);
-            let positions = reference_positions(meshes.get(handle).unwrap()).unwrap();
+            let positions = if gpu {
+                assert_eq!(*handle, source);
+                assert_eq!(meshes.len(), 1);
+                assert!(app.world().get::<MeshMaterial3d<StandardMaterial>>(rubber).is_none());
+                let material = &app.world().get::<MeshMaterial3d<TyreMaterial>>(rubber).unwrap().0;
+                let tracked = &app.world().resource::<TyreMeshes>().0[&rubber];
+                let (to_frame, envelope, ground) = tracked.last_frame.unwrap();
+                assert!(app.world().resource::<Assets<TyreMaterial>>().get(material).is_some());
+                tracked.gpu.as_ref().unwrap().assert_frame(TyreFrame::new(to_frame, envelope, ground));
+                original.iter().map(|point| supported_vertex(envelope, point.map(f64::from), ground).map(|v| v as f32)).collect()
+            } else {
+                assert_ne!(*handle, source);
+                reference_positions(meshes.get(handle).unwrap()).unwrap()
+            };
             assert!((f64::from(positions[0][1]) + hub.y).abs() < 1e-6);
             positions
         };
@@ -358,6 +471,28 @@ mod tests {
         let returned = sample(&mut app, 50_000.0);
         for (a, b) in returned.iter().flatten().zip(low.iter().flatten()) {
             assert!((a - b).abs() < 1e-5);
+        }
+        if let Some(material) = material {
+            app.world_mut().resource_mut::<Assets<StandardMaterial>>()
+                .get_mut(&material).unwrap().perceptual_roughness = 0.37;
+            app.world_mut().resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                .write(AssetEvent::Modified { id: material.id() });
+            app.update();
+            let extended = app.world().get::<MeshMaterial3d<TyreMaterial>>(rubber).unwrap().0.clone();
+            assert_eq!(app.world().resource::<Assets<TyreMaterial>>().get(&extended).unwrap().base.perceptual_roughness, 0.37);
+            let replacement = app.world_mut().resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial {
+                perceptual_roughness: 0.71, ..Default::default()
+            });
+            app.world_mut().entity_mut(rubber).insert(MeshMaterial3d(replacement.clone()));
+            app.update();
+            assert!(app.world().get::<MeshMaterial3d<StandardMaterial>>(rubber).is_none());
+            assert_eq!(app.world().resource::<Assets<TyreMaterial>>().get(&extended).unwrap().base.perceptual_roughness, 0.71);
+            app.world_mut().resource_mut::<PhysicsWorld>().remove_body(wheel);
+            app.update();
+            assert_eq!(app.world().get::<Mesh3d>(rubber).unwrap().0, source);
+            assert_eq!(app.world().get::<MeshMaterial3d<StandardMaterial>>(rubber).unwrap().0, replacement);
+            assert!(app.world().get::<MeshMaterial3d<TyreMaterial>>(rubber).is_none());
+            assert!(app.world().resource::<TyreMeshes>().0.is_empty());
         }
     }
 

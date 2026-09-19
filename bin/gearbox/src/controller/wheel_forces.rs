@@ -530,11 +530,18 @@ pub(super) fn sync_machine_wheel_forces(
         let Some(wheels) = runtime.machine_wheels.get(&machine.id) else {
             continue;
         };
+        let body_paths: HashMap<_, _> = physics.entity_to_body.iter()
+            .filter_map(|(entity, body)| {
+                let (_, prim) = prims.get(*entity).ok()?;
+                is_descendant_of(*entity, root, &parents).then_some((prim.path.as_str(), *body))
+            }).collect();
+        let wheel_links: HashMap<_, _> = machine.links.links.iter().rev()
+            .filter_map(|link| Some((*body_paths.get(link.body_prim.as_deref()?)?, link)))
+            .collect();
         let Some(chassis) = machine
             .body
             .as_deref()
-            .and_then(|path| find_prim_entity(root, path, &prims, &parents))
-            .and_then(|entity| physics.entity_to_body.get(&entity).copied())
+            .and_then(|path| body_paths.get(path).copied())
         else {
             continue;
         };
@@ -544,13 +551,7 @@ pub(super) fn sync_machine_wheel_forces(
         let mut axle_geometry = Vec::new();
         let mut axle_metadata_valid = true;
         for &wheel in wheels {
-            let link = machine.links.links.iter().find(|link| {
-                link.body_prim
-                    .as_deref()
-                    .and_then(|path| find_prim_entity(root, path, &prims, &parents))
-                    .and_then(|entity| physics.entity_to_body.get(&entity).copied())
-                    == Some(wheel)
-            });
+            let link = wheel_links.get(&wheel).copied();
             let authored = link.and_then(|link| {
                 link.values
                     .iter()
@@ -654,13 +655,7 @@ pub(super) fn sync_machine_wheel_forces(
             let mass = (mass / wheels.len().max(1) as f64)
                 .max(body.mass())
                 .max(1.0);
-            let link = machine.links.links.iter().find(|link| {
-                link.body_prim
-                    .as_deref()
-                    .and_then(|path| find_prim_entity(root, path, &prims, &parents))
-                    .and_then(|entity| physics.entity_to_body.get(&entity).copied())
-                    == Some(wheel)
-            });
+            let link = wheel_links.get(&wheel).copied();
             let tyre = tyre_properties(link, width);
             let registration = Registration {
                 joint,

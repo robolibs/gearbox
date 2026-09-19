@@ -143,8 +143,8 @@ load, loaded radius, footprint and grip. Imported rubber deformation follows
 that loaded radius using a compact contact-envelope approximation; hubs/rims
 stay rigid. It is not a calibrated FEM carcass solution. Current visual
 selection recognizes Kubota rubber names and Krampe BKT naming, not arbitrary
-imported meshes. Nonplanar/camber agreement, GPU parity and performance gates
-remain incomplete.
+imported meshes. Nonplanar/camber agreement, general machine compatibility and
+scene-scale performance gates remain incomplete.
 
 At first wheel registration, available undeformed rubber meshes define the
 outer support radius, including tread lugs, in the wheel body's frame. Rims,
@@ -152,6 +152,28 @@ hubs and collider helpers are excluded. The radius stays fixed as rubber
 deforms; collider radius is the fallback when no matching mesh is available.
 Inflation changes support stiffness and chassis height, not this reference
 radius. The loaded tyre retains a contact patch even at maximum pressure.
+
+## Rubber rendering
+
+The viewer deforms eligible static rubber meshes in the vertex shader. Source
+vertex buffers stay resident; per-mesh contact transforms, the loaded envelope
+and ground plane occupy persistent 320-byte GPU buffers. Updating those buffers
+does not rebuild the materials or their texture bindings. Forward, shadow and prepass vertices use the
+same deformation. Normals and tangents follow the deformed surface, and bounds
+conservatively include the displacement. Pressure physics and collision
+support remain in the backend, not in the material.
+
+Standard-material edits and reassignment propagate to the tyre material.
+Removing wheel support restores the source material and bounds. Rims and hubs
+remain on their original meshes/materials. Skinned, morphed or non-standard
+materials retain the CPU path. `GEARBOX_TYRE_RENDER=cpu` selects that reference
+path for comparison; `GEARBOX_TYRE_MESH_TRACE=1` logs GPU/CPU mesh counts and
+CPU update costs.
+
+The ignored Vulkan test `gpu_envelope_matches_cpu_pressure_and_ground_sweep`
+executes the production deformation WGSL over 124,416 pressure/geometry/ground
+cases and compares positions with the f64 CPU reference. This is geometric
+parity, not validation of a physical tyre model or all render pipeline variants.
 
 ## Machine configuration persistence
 
