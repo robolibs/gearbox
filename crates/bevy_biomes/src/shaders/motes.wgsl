@@ -225,10 +225,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             return culled();
         }
         let bloom_tint = bloom_colour(u32(bloom.y));
-        // White blooms shed cream, not paper: nothing here is brighter than straw.
-        let creamed = min(bloom_tint, vec3<f32>(0.62, 0.58, 0.46));
-        let dull = vec3<f32>(dot(creamed, vec3<f32>(0.3, 0.6, 0.1)));
-        tint = mix(creamed, dull, 0.45) * 0.62;
+        // Held to the brightness of straw, but by the whole colour at once: a
+        // cornflower petal that lost its blue would only be another white speck.
+        let brightest = max(max(bloom_tint.r, bloom_tint.g), bloom_tint.b);
+        let held = bloom_tint * min(1.0, 0.66 / max(brightest, 0.001));
+        let dull = vec3<f32>(dot(held, vec3<f32>(0.3, 0.6, 0.1)));
+        tint = mix(held, dull, 0.18);
         size_scale = select(1.0, 1.7, u32(bloom.y) == 4u);
     } else if (field.kind == LEAF) {
         tint = grass_colour(world.xz);
@@ -240,6 +242,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         tint = tint * mix(0.72, 1.18, dry) * mix(0.88, 1.06, damp);
     }
 
+    // Never against the sky: a scrap that small, seen against something that
+    // bright, is a white speck whatever colour it is. Below the eye it is
+    // seen against the ground, where its own colour shows.
+    if (world.y > view.world_position.y - 0.25) {
+        return culled();
+    }
     let from_view = world - view.world_position;
     let distance = length(from_view);
     let near = smoothstep(0.5, 1.6, distance);
@@ -310,13 +318,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         sunlight = lights.directional_lights[0].color.rgb;
     }
     let to_view = normalize(view.world_position - in.world_position);
-    let into_sun = max(dot(-to_view, sun), 0.0);
-    let glow = 1.0 + 0.5 * pow(into_sun, 5.0);
     let day = clamp(sun.y * 4.0, 0.06, 1.0);
     // Lit as the thing it broke off would be: some sky on it, some sun, and
     // darker as it turns edge on. Nothing here makes its own light.
-    let sky = vec3<f32>(0.30, 0.33, 0.38);
-    let colour = in.tint * (sky + sunlight * day * 0.22 * in.shade) * glow;
+    let sky = vec3<f32>(0.16, 0.18, 0.21);
+    let colour = in.tint * (sky + sunlight * day * 0.32 * in.shade);
     let strength = alpha * field.colour.a;
     return vec4<f32>(colour * strength, strength);
 }

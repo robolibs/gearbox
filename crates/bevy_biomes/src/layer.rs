@@ -108,22 +108,22 @@ impl Covers {
                 .with_air(Motes {
                     kind: MoteKind::Petal,
                     per_hectare: 180.0,
-                    size_mm: [8.0, 16.0],
+                    size_mm: [20.0, 38.0],
                     rise_mps: -0.22,
                     drag: 0.85,
-                    ceiling_m: 1.8,
-                    reach_m: 20.0,
-                    colour: Srgba::new(1.0, 1.0, 1.0, 0.5),
+                    ceiling_m: 1.2,
+                    reach_m: 15.0,
+                    colour: Srgba::new(1.0, 1.0, 1.0, 0.92),
                 })
                 .with_air(Motes {
                     kind: MoteKind::Leaf,
                     per_hectare: 900.0,
-                    size_mm: [10.0, 26.0],
+                    size_mm: [18.0, 40.0],
                     rise_mps: -0.1,
                     drag: 0.95,
-                    ceiling_m: 1.6,
-                    reach_m: 20.0,
-                    colour: Srgba::new(1.0, 1.0, 1.0, 0.45),
+                    ceiling_m: 1.1,
+                    reach_m: 15.0,
+                    colour: Srgba::new(1.0, 1.0, 1.0, 0.88),
                 }),
         );
         covers.insert(
@@ -131,12 +131,12 @@ impl Covers {
                 .with_air(Motes {
                     kind: MoteKind::Chaff,
                     per_hectare: 520.0,
-                    size_mm: [16.0, 42.0],
+                    size_mm: [26.0, 60.0],
                     rise_mps: -0.12,
                     drag: 0.95,
-                    ceiling_m: 1.9,
-                    reach_m: 20.0,
-                    colour: Srgba::new(0.8, 0.72, 0.52, 0.4),
+                    ceiling_m: 1.3,
+                    reach_m: 15.0,
+                    colour: Srgba::new(0.8, 0.72, 0.52, 0.88),
                 })
                 .with_air(Motes {
                     kind: MoteKind::Dust,
