@@ -6,6 +6,7 @@ mod convert;
 mod joint;
 #[cfg(test)]
 mod tests;
+mod wheel;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -41,6 +42,8 @@ pub struct MollaBackend {
     colliders: BTreeMap<ColliderId, ColliderAccess>,
     joints: BTreeMap<JointId, JointAccess>,
     settings: SolverSettings,
+    wheels: BTreeMap<BodyId, (JointId, f64)>,
+    wheel_step_dt: f64,
 }
 
 impl Default for MollaBackend {
@@ -52,6 +55,8 @@ impl Default for MollaBackend {
             bodies: BTreeMap::new(),
             colliders: BTreeMap::new(),
             joints: BTreeMap::new(),
+            wheels: BTreeMap::new(),
+            wheel_step_dt: 1.0 / 120.0,
             settings: SolverSettings {
                 dt: 1.0 / 120.0,
                 solver_iterations: 16,
@@ -62,6 +67,51 @@ impl Default for MollaBackend {
 }
 
 impl PhysicsBackend for MollaBackend {
+    fn uses_wheel_forces(&self) -> bool {
+        true
+    }
+
+    fn configure_wheel(&mut self, desc: WheelForceDesc) -> Result<(), String> {
+        self.configure_wheel_force(desc)
+    }
+
+    fn register_wheel_ground(
+        &mut self,
+        collider: ColliderId,
+        friction: Option<TerrainFrictionGrid>,
+    ) -> Result<(), String> {
+        let handle = self
+            .colliders
+            .get(&collider)
+            .ok_or("unknown tyre terrain")?
+            .handle;
+        let mut world = self.shared.world();
+        let RigidWorld { scene, wheels, .. } = &mut *world;
+        wheels
+            .register_ground(
+                scene,
+                handle,
+                friction.map(|grid| molla_solvers::wheel_forces::FrictionGrid {
+                    origin: grid.origin,
+                    cell_size: grid.cell_size,
+                    cols: grid.cols,
+                    rows: grid.rows,
+                    values: grid.values,
+                }),
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn wheel_output(&self, body: BodyId) -> Option<WheelForceOutput> {
+        self.wheel_force_output(body)
+    }
+
+    fn wheel_drive_sign(&self, joint: JointId) -> f64 {
+        self.wheels
+            .values()
+            .find(|(id, _)| *id == joint)
+            .map_or(1.0, |(_, sign)| *sign)
+    }
     fn name(&self) -> &'static str {
         "molla"
     }
@@ -83,6 +133,7 @@ impl PhysicsBackend for MollaBackend {
         self.settings = settings;
     }
     fn step(&mut self, excluded: PairExcluded<'_>) {
+        self.wheel_step_dt = self.settings.dt;
         let result = self.shared.world().step_filtered(self.settings.dt, |a, b| {
             a.zip(b)
                 .is_some_and(|(a, b)| excluded(BodyId(a.to_bits()), BodyId(b.to_bits())))
@@ -144,6 +195,9 @@ impl PhysicsBackend for MollaBackend {
                 .retain(|_, c| world.scene.collider(c.handle).is_some());
             self.joints
                 .retain(|_, j| world.scene.joint(j.handle).is_some());
+            self.wheels.retain(|body, (joint, _)| {
+                self.bodies.contains_key(body) && self.joints.contains_key(joint)
+            });
         }
     }
     fn body(&self, id: BodyId) -> Option<&dyn Body> {
@@ -300,6 +354,7 @@ impl PhysicsBackend for MollaBackend {
                 return;
             }
             self.joints.remove(&id);
+            self.wheels.retain(|_, (joint, _)| *joint != id);
         }
     }
     fn joint(&self, id: JointId) -> Option<&dyn Joint> {

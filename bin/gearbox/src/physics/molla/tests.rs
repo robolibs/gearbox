@@ -325,3 +325,125 @@ fn physics_world_hitch_capture_uses_live_softness() {
         DVec3::ZERO,
     );
 }
+
+fn wheel_rig(axis: DVec3) -> (MollaBackend, BodyId, BodyId, JointId, ColliderId) {
+    let mut backend = MollaBackend::default();
+    backend.set_gravity(DVec3::ZERO);
+    let fixed = backend.insert_body(BodyDesc::fixed());
+    let chassis = backend.insert_body(dynamic().pose(Pose::from_translation(DVec3::Y * 0.49)));
+    let wheel = backend.insert_body(dynamic().pose(Pose::from_translation(DVec3::Y * 0.49)));
+    backend.insert_joint(
+        fixed,
+        chassis,
+        JointDesc::new(
+            JointKind::Prismatic { axis: DVec3::X },
+            Pose::from_translation(DVec3::Y * 0.49),
+            Pose::IDENTITY,
+        ),
+    );
+    let joint = backend.insert_joint(
+        chassis,
+        wheel,
+        JointDesc::new(JointKind::Revolute { axis }, Pose::IDENTITY, Pose::IDENTITY),
+    );
+    backend
+        .insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.5 }).parent(wheel))
+        .unwrap();
+    let ground = backend
+        .insert_collider(
+            ColliderDesc::new(Shape::Cuboid {
+                half_extents: DVec3::new(10.0, 0.1, 10.0),
+            })
+            .translation(-DVec3::Y * 0.1)
+            .friction(0.6),
+        )
+        .unwrap();
+    backend.register_wheel_ground(ground, None).unwrap();
+    backend
+        .configure_wheel(WheelForceDesc {
+            body: wheel,
+            joint,
+            local_hub: DVec3::ZERO,
+            forward: DVec3::X,
+            radius: 0.5,
+            supported_mass: 100.0,
+        })
+        .unwrap();
+    (backend, chassis, wheel, joint, ground)
+}
+
+#[test]
+fn tyre_readout_replaces_ground_manifolds_and_respects_material_cells() {
+    let (mut backend, _, wheel, _, ground) = wheel_rig(-DVec3::Z);
+    backend
+        .register_wheel_ground(
+            ground,
+            Some(TerrainFrictionGrid {
+                origin: [-10.0, -10.0],
+                cell_size: [20.0, 20.0],
+                cols: 1,
+                rows: 1,
+                values: vec![0.2],
+            }),
+        )
+        .unwrap();
+    backend.step(&|_, _| false);
+    let output = backend.wheel_output(wheel).unwrap();
+    assert!(output.in_contact);
+    near(output.normal, DVec3::Y);
+    assert!((output.normal_force - 490.5).abs() < 1e-6);
+    assert!((output.grip_force - output.normal_force * 0.2).abs() < 1e-8);
+    assert!(backend.contacts_with(ground).is_empty());
+    let mut settings = backend.settings();
+    settings.dt *= 2.0;
+    backend.set_settings(settings);
+    assert_eq!(
+        backend.wheel_output(wheel).unwrap().normal_force,
+        output.normal_force
+    );
+    backend.collider_mut(ground).unwrap().set_enabled(false);
+    backend.step(&|_, _| false);
+    assert!(!backend.wheel_output(wheel).unwrap().in_contact);
+}
+
+#[test]
+fn opposite_authored_axles_use_opposite_motor_signs_for_forward_motion() {
+    for axis in [-DVec3::Z, DVec3::Z] {
+        let (mut backend, chassis, wheel, joint, _) = wheel_rig(axis);
+        let sign = backend.wheel_drive_sign(joint);
+        assert_eq!(sign, -axis.z);
+        let motor = backend.joint_mut(joint, true).unwrap();
+        motor.set_motor_model(JointAxis::AngX, MotorModel::Force);
+        motor.set_motor_velocity(JointAxis::AngX, 2.0 * sign, 2.0);
+        motor.set_motor_max_force(JointAxis::AngX, 10.0);
+        for _ in 0..120 {
+            backend.step(&|_, _| false);
+        }
+        assert!(backend.body(chassis).unwrap().translation().x > 0.01);
+        assert!(backend.wheel_output(wheel).unwrap().normal_force > 0.0);
+        assert!(backend.quarantined_bodies().is_empty());
+    }
+}
+
+#[test]
+fn failed_wheel_registration_preserves_active_tyre_and_removal_clears_it() {
+    let (mut backend, _, wheel, joint, _) = wheel_rig(-DVec3::Z);
+    assert!(
+        backend
+            .configure_wheel(WheelForceDesc {
+                body: wheel,
+                joint,
+                local_hub: DVec3::ZERO,
+                forward: DVec3::X,
+                radius: f64::NAN,
+                supported_mass: 100.0
+            })
+            .is_err()
+    );
+    backend.step(&|_, _| false);
+    assert!(backend.wheel_output(wheel).unwrap().in_contact);
+    backend.remove_joint(joint);
+    assert!(backend.wheel_output(wheel).is_none());
+    backend.remove_body(wheel);
+    assert!(backend.wheel_output(wheel).is_none());
+}

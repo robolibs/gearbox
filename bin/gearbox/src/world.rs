@@ -603,6 +603,9 @@ fn spawn_flat_ground(
         )
         .expect("a cuboid always builds");
     commands.insert_resource(FlatGround { entity, collider });
+    if let Err(error) = physics.register_wheel_ground(collider, None) {
+        warn!("world: tyre ground registration failed: {error}");
+    }
 }
 
 fn mark_new_usd_terrain_roots(
@@ -727,6 +730,9 @@ fn attach_gearbox_terrain_trimesh(
         return None;
     };
     physics.entity_to_collider.insert(root, terrain);
+    if let Err(error) = physics.register_wheel_ground(terrain, None) {
+        warn!("world: tyre terrain registration failed: {error}");
+    }
 
     // Belt-and-braces catch floor below the lowest authored terrain. It
     // should never be contacted in normal use, but it prevents assets from

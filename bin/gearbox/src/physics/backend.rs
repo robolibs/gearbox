@@ -601,10 +601,61 @@ pub struct SolverSettings {
 /// Decides which body pairs the step must not let touch.
 pub type PairExcluded<'a> = &'a (dyn Fn(BodyId, BodyId) -> bool + Send + Sync);
 
+#[derive(Clone, Copy, Debug)]
+pub struct WheelForceDesc {
+    pub body: BodyId,
+    pub joint: JointId,
+    pub local_hub: DVec3,
+    pub forward: DVec3,
+    pub radius: f64,
+    pub supported_mass: f64,
+}
+
+#[derive(Clone, Debug)]
+pub struct TerrainFrictionGrid {
+    pub origin: [f64; 2],
+    pub cell_size: [f64; 2],
+    pub cols: usize,
+    pub rows: usize,
+    pub values: Vec<f64>,
+}
+
+/// Last-step mean tyre loads and normal-impulse-weighted contact/slip readout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WheelForceOutput {
+    pub in_contact: bool,
+    pub normal: DVec3,
+    pub contact_point: DVec3,
+    pub normal_force: f64,
+    pub grip_force: f64,
+    pub slip_ratio: f64,
+    pub slip_angle: f64,
+}
+
 /// A rigid-body engine gearbox can run on.
 pub trait PhysicsBackend: Send + Sync {
     /// Short name, for logs.
     fn name(&self) -> &'static str;
+
+    fn uses_wheel_forces(&self) -> bool {
+        false
+    }
+    fn configure_wheel(&mut self, _desc: WheelForceDesc) -> Result<(), String> {
+        Err("wheel force elements are not supported".into())
+    }
+    fn register_wheel_ground(
+        &mut self,
+        _collider: ColliderId,
+        _friction: Option<TerrainFrictionGrid>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn wheel_output(&self, _body: BodyId) -> Option<WheelForceOutput> {
+        None
+    }
+    fn wheel_drive_sign(&self, _joint: JointId) -> f64 {
+        1.0
+    }
 
     fn gravity(&self) -> DVec3;
     fn set_gravity(&mut self, gravity: DVec3);

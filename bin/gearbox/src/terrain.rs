@@ -193,6 +193,9 @@ fn spawn_procedural_terrain(
                 .restitution(0.0),
         )
         .expect("a height grid always makes a heightfield");
+    if let Err(error) = physics.register_wheel_ground(collider, None) {
+        warn!("terrain: tyre ground registration failed: {error}");
+    }
     physics.entity_to_collider.insert(entity, collider);
     let safety_floor = physics
         .insert_collider(

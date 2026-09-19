@@ -32,6 +32,7 @@ use usd_bevy::UsdPrimRef;
 
 mod traction;
 mod steering;
+mod wheel_forces;
 
 /// All USD-authored machine/controller specs discovered from loaded assets.
 #[derive(Resource, Debug, Default, Clone)]
@@ -270,6 +271,7 @@ impl Plugin for ControllerDiscoveryPlugin {
                     apply_ui_drive,
                     guard_chassis_inertia,
                     prepare_machine_physics,
+                    wheel_forces::sync_machine_wheel_forces,
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,
                     record_wheel_tracks,
@@ -2320,7 +2322,10 @@ fn record_wheel_tracks(
             let axle = body.rotation() * axle_local;
             let surface = (body.angvel() - parent_spin).dot(axle).abs() * radius;
             let ground = (body.linvel() - axle * body.linvel().dot(axle)).length();
-            let slip = if surface.max(ground) < 0.05 {
+            let tyre = physics.wheel_output(handle);
+            let slip = if let Some(output) = tyre {
+                output.slip_ratio
+            } else if surface.max(ground) < 0.05 {
                 0.0
             } else {
                 (surface - ground) / ground.max(0.1)
@@ -2328,9 +2333,22 @@ fn record_wheel_tracks(
             values.set(&machine.id, &link.name, "slip", (slip * 1000.0).round() / 1000.0);
             let p = body.translation();
             let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
-            if p.y as f32 - radius as f32 > ground + WHEEL_TRACK_CONTACT_SLACK_M {
+            let contact_point = if let Some(output) = tyre {
+                values.set(&machine.id, &link.name, "normal_force", output.normal_force);
+                values.set(&machine.id, &link.name, "slip_angle", output.slip_angle);
+                if !output.in_contact {
+                    continue;
+                }
+                Vec3::new(
+                    output.contact_point.x as f32,
+                    output.contact_point.y as f32,
+                    output.contact_point.z as f32,
+                )
+            } else if p.y as f32 - radius as f32 > ground + WHEEL_TRACK_CONTACT_SLACK_M {
                 continue;
-            }
+            } else {
+                Vec3::new(p.x as f32, ground, p.z as f32)
+            };
             let axle_world = body.rotation() * axle_local;
             let axle = Vec2::new(axle_world.x as f32, axle_world.z as f32).normalize_or(Vec2::X);
             let mut roll = axle.perp();
@@ -2340,7 +2358,7 @@ fn record_wheel_tracks(
                 roll = -roll;
             }
             contacts.contacts.push(gearbox_fields::WheelContact {
-                position: Vec3::new(p.x as f32, ground, p.z as f32),
+                position: contact_point,
                 direction: roll,
                 width: width as f32,
             });
@@ -3381,8 +3399,12 @@ fn apply_joint_motors(
 
     for target in wheel_targets {
         for id in physics.joints_between(target.pair.0, target.pair.1) {
+            let target = JointVelocityTarget {
+                velocity: target.velocity * physics.wheel_drive_sign(id),
+                ..*target
+            };
             if let Some(joint) = physics.joint_mut(id, false) {
-                set_wheel_motor(joint, target);
+                set_wheel_motor(joint, &target);
                 applied.drive = true;
             }
         }

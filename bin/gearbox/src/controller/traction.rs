@@ -6,7 +6,7 @@ pub(super) struct WheelSupport {
     pub grip_force_n: f64,
 }
 
-/// Support normal and friction budget from the last solved wheel contacts.
+/// Support normal and friction budget from tyre output or solved wheel contacts.
 pub(super) fn wheel_support(
     physics: &PhysicsWorld,
     chassis: BodyId,
@@ -18,6 +18,12 @@ pub(super) fn wheel_support(
         .unwrap_or(DVec3::Y);
     let mut support = DVec3::ZERO;
     let mut grip_impulse = 0.0;
+    if let Some(output) = physics.wheel_output(wheel) {
+        return WheelSupport {
+            normal: if output.in_contact { output.normal } else { up },
+            grip_force_n: output.grip_force,
+        };
+    }
     if let Some(body) = physics.body(wheel) {
         for collider in body.colliders() {
             for manifold in physics.contacts_with(collider) {
