@@ -133,8 +133,10 @@ fn grass_colour(place: vec2<f32>) -> vec3<f32> {
     let species = vec2<f32>(fescue, rye) / max(fescue + rye, 1.0);
     let tint = vec3<f32>(1.0) + species.x * vec3<f32>(-0.12, 0.02, 0.22)
         + species.y * vec3<f32>(-0.25, 0.18, -0.30);
-    // A blade off the plant has dried a little: paler and browner than one on it.
-    return vec3<f32>(0.19, 0.31, 0.075) * tint * 1.15 + vec3<f32>(0.05, 0.04, 0.015);
+    // A blade off the plant is a dried one: straw, keeping only a little of the
+    // green it had, which is what lets it be seen at all against the living grass.
+    let living = vec3<f32>(0.19, 0.31, 0.075) * tint * 1.9;
+    return mix(living, vec3<f32>(0.66, 0.56, 0.28), 0.72);
 }
 
 // How far a place is outside a rectangle; negative inside it.
@@ -230,7 +232,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         let brightest = max(max(bloom_tint.r, bloom_tint.g), bloom_tint.b);
         let held = bloom_tint * min(1.0, 0.66 / max(brightest, 0.001));
         let dull = vec3<f32>(dot(held, vec3<f32>(0.3, 0.6, 0.1)));
-        tint = mix(held, dull, 0.18);
+        tint = mix(held, dull, 0.08);
         size_scale = select(1.0, 1.7, u32(bloom.y) == 4u);
     } else if (field.kind == LEAF) {
         tint = grass_colour(world.xz);
@@ -327,7 +329,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // about as dark as the field.
     let sun_hue = sunlight / max(max(sunlight.r, max(sunlight.g, sunlight.b)), 0.0001);
     let sky = vec3<f32>(0.10, 0.11, 0.13);
-    let colour = in.tint * (sky + sun_hue * day * 0.55 * in.shade);
+    let colour = in.tint * (sky + sun_hue * day * 1.25 * in.shade);
     let strength = alpha * field.colour.a;
     return vec4<f32>(colour * strength, strength);
 }

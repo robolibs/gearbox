@@ -54,7 +54,7 @@ pub struct MoteBudget {
 
 impl Default for MoteBudget {
     fn default() -> Self {
-        Self { extent_m: 48.0, most: 3000, density: 1.0, ground_m: 0.0 }
+        Self { extent_m: 26.0, most: 4500, density: 1.0, ground_m: 0.0 }
     }
 }
 
