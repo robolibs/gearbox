@@ -14,10 +14,14 @@ pub struct ViewerLens {
     /// moves smears. 0 is a still every frame.
     pub shutter: f32,
     /// Colour split at the corners, the glass never quite bringing every
-    /// wavelength to the same place.
+    /// wavelength to the same place. It is a smear along the way out from the
+    /// middle, so any of it at all softens the edges of the frame: off unless asked.
     pub fringing: f32,
     /// How much darker the corners are than the middle.
     pub vignette: f32,
+    /// How soft the far ground goes. The blur to hand takes the near ground
+    /// with it, so there is little of it.
+    pub softness: f32,
 }
 
 impl Default for ViewerLens {
@@ -30,8 +34,9 @@ impl Default for ViewerLens {
         Self {
             fov_deg: fov_deg.clamp(20.0, 100.0),
             shutter: 0.12,
-            fringing: 0.015,
+            fringing: 0.005,
             vignette: 0.22,
+            softness: 1.0,
         }
     }
 }
@@ -66,29 +71,45 @@ pub fn sync_lens(lens: Res<ViewerLens>, mut cameras: Query<&mut Projection, With
 pub fn sync_camera_lens(
     lens: Res<ViewerLens>,
     cameras: Query<Entity, With<CloudsCamera>>,
+    chase: Query<&mara::ui::modules::bevy::ChaseCamera>,
     mut commands: Commands,
     mut fitted: Query<(
         &mut bevy::post_process::effect_stack::ChromaticAberration,
         &mut bevy::post_process::effect_stack::Vignette,
+        &mut bevy::post_process::dof::DepthOfField,
     )>,
 ) {
+    use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
     use bevy::post_process::effect_stack::{ChromaticAberration, Vignette};
+
+    let focus = chase.iter().next().map_or(14.0, |chase| chase.distance);
+    let softness = if std::env::var_os("GEARBOX_NO_DOF").is_some() { 0.0 } else { lens.softness };
 
     for entity in &cameras {
         if fitted.get(entity).is_err() {
             commands.entity(entity).insert((
-                ChromaticAberration { intensity: lens.fringing, ..default() },
+                ChromaticAberration { intensity: lens.fringing, max_samples: 3, ..default() },
                 Vignette {
                     intensity: lens.vignette,
                     radius: 0.85,
                     smoothness: 2.2,
                     ..default()
                 },
+                DepthOfField {
+                    mode: DepthOfFieldMode::Gaussian,
+                    focal_distance: focus,
+                    aperture_f_stops: 45.0,
+                    max_circle_of_confusion_diameter: softness,
+                    ..default()
+                },
             ));
         }
     }
-    for (mut fringing, mut vignette) in &mut fitted {
+    for (mut fringing, mut vignette, mut dof) in &mut fitted {
         fringing.intensity = lens.fringing;
         vignette.intensity = lens.vignette;
+        // The lens takes a moment to find focus, as a lens does.
+        dof.focal_distance += (focus - dof.focal_distance) * 0.15;
+        dof.max_circle_of_confusion_diameter = softness;
     }
 }

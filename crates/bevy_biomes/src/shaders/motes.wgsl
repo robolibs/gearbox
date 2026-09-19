@@ -230,6 +230,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         size_scale = select(1.0, 1.7, u32(bloom.y) == 4u);
     } else if (field.kind == LEAF) {
         tint = grass_colour(world.xz);
+    } else {
+        // Dust and chaff are the ground they came off: paler where it has
+        // dried out, darker over the damp, and never the same twice.
+        let dry = noise(world.xz * 0.045 + vec2<f32>(19.0, -7.0));
+        let damp = noise(world.xz * 0.012 + vec2<f32>(-31.0, 53.0));
+        tint = tint * mix(0.72, 1.18, dry) * mix(0.88, 1.06, damp);
     }
 
     let from_view = world - view.world_position;
