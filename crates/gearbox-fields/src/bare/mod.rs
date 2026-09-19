@@ -38,7 +38,7 @@ fn pebble() -> Mesh {
     for ring in 0..=RINGS {
         let v = ring as f32 / RINGS as f32;
         let lift = (v * std::f32::consts::PI).cos();
-        let round = (v * std::f32::consts::PI).sin();
+        let round = (v * std::f32::consts::PI).sin().max(0.22);
         for step in 0..AROUND {
             let u = step as f32 / AROUND as f32 * std::f32::consts::TAU;
             let radius = dent(ring, step);
@@ -55,9 +55,10 @@ fn pebble() -> Mesh {
         let v = ring as f32 / RINGS as f32;
         let u = step as f32 / AROUND as f32 * std::f32::consts::TAU;
         let radius = dent(ring, step);
-        point[0] = u.cos() * (v * std::f32::consts::PI).sin() * radius;
+        let round = (v * std::f32::consts::PI).sin().max(0.22);
+        point[0] = u.cos() * round * radius;
         point[1] = (v * std::f32::consts::PI).cos() * radius;
-        point[2] = u.sin() * (v * std::f32::consts::PI).sin() * radius;
+        point[2] = u.sin() * round * radius;
     }
     for ring in 0..RINGS {
         for step in 0..AROUND {
@@ -72,6 +73,8 @@ fn pebble() -> Mesh {
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone())
+        // The first channel marks the kind: nought a stone, one a tuft. A stone's
+        // own coordinates run the whole way round it, so they cannot say.
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; normals.len()])
         .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
@@ -98,7 +101,7 @@ fn tuft() -> Mesh {
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; count])
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; count])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[1.0, 0.0]; count])
         .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
@@ -109,7 +112,7 @@ fn standing() -> Vec<VegetationLayer> {
         VegetationLayer {
             shader,
             template: pebble,
-            density: 5.0,
+            density: 9.0,
             fade_start: 6.0,
             fade_end: 42.0,
             inverse_square_thinning: true,
@@ -119,7 +122,7 @@ fn standing() -> Vec<VegetationLayer> {
         VegetationLayer {
             shader,
             template: tuft,
-            density: 90.0,
+            density: 1100.0,
             fade_start: 6.0,
             fade_end: 34.0,
             inverse_square_thinning: true,
@@ -224,9 +227,9 @@ fn ploughed_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.052, 0.036, 0.024, 1.0),
+            tint: Vec4::new(0.030, 0.020, 0.013, 1.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
-            grass: Vec4::new(0.055, 0.085, 0.022, 0.18),
+            grass: Vec4::new(0.055, 0.085, 0.022, 0.0),
         },
         0.93,
     )
@@ -245,9 +248,9 @@ fn dirt_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.105, 0.086, 0.064, 1.0),
-            grain: Vec4::new(0.3, 0.45, 0.1, 1.6),
-            grass: Vec4::new(0.05, 0.075, 0.02, 0.32),
+            tint: Vec4::new(0.062, 0.049, 0.035, 1.0),
+            grain: Vec4::new(0.3, 0.3, 0.1, 1.6),
+            grass: Vec4::new(0.05, 0.075, 0.02, 0.0),
         },
         0.88,
     )
@@ -267,9 +270,9 @@ fn sand_ground(
         geometry,
         BareGround {
             // The last of the tint says it is made rather than read.
-            tint: Vec4::new(0.235, 0.19, 0.125, 1.0),
+            tint: Vec4::new(0.155, 0.126, 0.082, 1.0),
             grain: Vec4::new(1.6, 0.3, 1.0, 0.9),
-            grass: Vec4::new(0.06, 0.08, 0.03, 0.05),
+            grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
         },
         0.82,
     )

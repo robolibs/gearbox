@@ -234,7 +234,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // A crest dries pale; the trough beside it stays damp and dark.
     let shade = comb(place, ground.grain.w, 128.0);
     let crest = shade.crest * shade.worked;
-    colour = ground.tint.rgb * mix(0.62, 1.34, patchy) * mix(0.88, 1.14, speck)
+    colour = ground.tint.rgb * mix(0.72, 1.18, patchy) * mix(0.9, 1.1, speck)
         * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
 
     // Grass takes the ground in patches, and holds it where it is tallest.

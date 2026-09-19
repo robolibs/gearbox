@@ -105,7 +105,29 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let chunk_seed = pcg(bitcast<u32>(i32(field.corner.x)) * 73856093u
         ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
     let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x51EDu);
-    let base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
+    var base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
+    // Grass grows in clumps with bare ground between them, so a tuft is drawn
+    // most of the way to the middle of the clump it belongs to.
+    let is_stone = vertex.uv.x < 0.5;
+    var clump_seed = 0u;
+    var out_of_clump = 0.0;
+    if (!is_stone) {
+        let cell_m = 0.85;
+        let cell = floor(base / cell_m);
+        clump_seed = pcg(bitcast<u32>(i32(cell.x)) * 2654435761u ^ bitcast<u32>(i32(cell.y)) * 40503u);
+        // The clump sits anywhere in its cell, not at the middle of it, or the
+        // grass comes up in rows like a crop.
+        let middle = (cell + vec2<f32>(rand(clump_seed, 1u), rand(clump_seed, 2u))) * cell_m;
+        // Some ground has no clump at all, and no two clumps are as tight.
+        if (rand(clump_seed, 3u) < 0.38) {
+            return culled_vertex();
+        }
+        let spread = mix(0.1, 0.3, rand(clump_seed, 4u));
+        let about = rand(id, 20u) * 6.2831853;
+        let out_by = sqrt(rand(id, 21u)) * spread;
+        base = middle + vec2<f32>(cos(about), sin(about)) * out_by;
+        out_of_clump = out_by / max(spread, 0.001);
+    }
     let sampled = sample_field(base);
     let ground = vec3<f32>(base.x, sampled.x, base.y);
     let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
@@ -120,13 +142,15 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         return culled_vertex();
     }
 
-    // A stone is meant for bare ground, a tuft for ground the grass has taken.
-    let is_stone = vertex.position.z < 0.5;
     let green = taken(base);
-    if (is_stone && green > 0.62) {
+    // Whether one stands here is a chance weighted by the patch, so its edge
+    // is ragged with stragglers rather than cut with a knife.
+    let luck = rand(id, 12u);
+    let grassy = smoothstep(0.42, 0.70, green);
+    if (is_stone && luck < grassy * 0.85) {
         return culled_vertex();
     }
-    if (!is_stone && green < 0.58) {
+    if (!is_stone && luck > grassy) {
         return culled_vertex();
     }
 
@@ -139,7 +163,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     if (is_stone) {
         // Stones are of a size, lie on their broadest face, and sit down into
         // the ground rather than on it.
-        let size = mix(0.035, 0.16, pow(rand(id, 6u), 2.2)) * alive;
+        let size = mix(0.012, 0.13, pow(rand(id, 6u), 3.6)) * alive;
         let squat = mix(0.4, 0.75, rand(id, 7u));
         let local = vertex.position * vec3<f32>(size, size * squat, size);
         let spun = turn * local.xz;
@@ -147,24 +171,40 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_position = vec4<f32>(ground + vec3<f32>(spun.x, local.y - sunk, spun.y), 1.0);
         let spun_n = turn * vertex.normal.xz;
         out.world_normal = normalize(vec3<f32>(spun_n.x, vertex.normal.y, spun_n.y));
-        let grey = mix(0.09, 0.2, rand(id, 9u));
-        out.color = vec4<f32>(vec3<f32>(grey * 1.05, grey, grey * 0.92), 1.0);
+        // No two stones are the same stone: some flint, some sandstone.
+        let grey = mix(0.035, 0.115, rand(id, 9u));
+        let warm = mix(0.86, 1.25, rand(id, 10u));
+        out.color = vec4<f32>(vec3<f32>(grey * warm, grey * mix(0.94, 1.02, rand(id, 11u)), grey * (2.0 - warm)), 1.0);
         out.shape = vec3<f32>(0.0, vertex.position.y, 0.0);
     } else {
         // A tuft leans downwind and lies flat where a wheel has been over it.
-        let height = mix(0.05, 0.13, rand(id, 6u)) * alive;
-        let width = mix(0.010, 0.02, rand(id, 7u));
+        // The clump has its own stature, and every leaf in it its own.
+        let stature = mix(0.55, 1.35, rand(clump_seed, 5u));
+        let domed = 1.0 - out_of_clump * out_of_clump * 0.55;
+        let height = mix(0.11, 0.26, rand(id, 6u)) * stature * domed * alive;
+        let width = mix(0.012, 0.024, rand(id, 7u));
         let t = vertex.position.y;
+        let leaf = vertex.position.z - 1.0;
+        // Each leaf of the tuft stands on its own bearing and bows outward,
+        // and every one tapers from its base to a point.
+        let bearing = yaw + leaf * 2.3999632 + rand(id, 13u) * 0.6;
+        let out_of = vec2<f32>(cos(bearing), sin(bearing));
+        let taper = width * (1.0 - t * 0.82);
+        let across = vec2<f32>(-out_of.y, out_of.x) * vertex.position.x * taper;
+        let bow = out_of * t * t * height * mix(0.18, 0.42, rand(id, 14u));
         let leans = blade_leans(base, globals.time, field.wind, rand(id, 3u));
         let lean = vec3<f32>(leans.x, 0.0, leans.y) * leans.w * t * t;
         let roll = wheel_roll(pressed) * flat * field.wheels.bend;
-        let side = turn * vec2<f32>(vertex.position.x * width, 0.0);
-        let stand = vec3<f32>(side.x, t * height, side.y) + (lean + roll) * height;
+        let stand = vec3<f32>(across.x + bow.x, t * height * (1.0 - flat * 0.7), across.y + bow.y)
+            + (lean + roll) * height;
         out.world_position = vec4<f32>(ground + stand, 1.0);
         out.world_normal = ground_normal;
-        let blade = mix(0.55, 1.1, rand(id, 9u)) * (1.0 - flat * field.wheels.darkening);
-        out.color = vec4<f32>(vec3<f32>(0.055, 0.1, 0.028) * blade, 1.0);
-        out.shape = vec3<f32>(1.0, t, vertex.position.z - 1.0);
+        // Darker at the root, and no two tufts the same green.
+        let blade = mix(0.5, 1.15, rand(id, 9u)) * mix(0.55, 1.0, t)
+            * (1.0 - flat * field.wheels.darkening);
+        let dry = mix(1.0, 1.5, rand(clump_seed, 6u)) * mix(0.94, 1.06, rand(id, 15u));
+        out.color = vec4<f32>(vec3<f32>(0.05 * dry, 0.095, 0.026) * blade, 1.0);
+        out.shape = vec3<f32>(1.0, t, vertex.position.x);
     }
     out.clip_position = view.clip_from_world * out.world_position;
     out.ground_normal = ground_normal;
@@ -174,16 +214,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // A tuft is cut out of its quad into blades; a stone is solid.
+    // A leaf is already tapered in its shape; the edges of it are only
+    // softened so it does not end in a hard line of pixels.
     var alpha = 1.0;
     if (in.shape.x > 0.5) {
-        let x = (in.shape.z + 0.5) * 3.0;
-        let blade = floor(x);
-        let random = fract(sin(blade * 37.7) * 4375.3);
-        let top = mix(0.5, 1.0, random);
-        let width = 0.32 * (1.0 - in.shape.y / top);
-        let across = abs(fract(x) - 0.5);
-        alpha = (1.0 - smoothstep(width - 0.05, width + 0.05, across))
-            * (1.0 - smoothstep(top - 0.06, top + 0.06, in.shape.y));
+        let across = abs(in.shape.z);
+        alpha = 1.0 - smoothstep(0.72, 1.0, across);
     }
     if (alpha < 0.02) {
         discard;
