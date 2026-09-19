@@ -289,6 +289,20 @@ pub fn ensure_fields(world: &mut World) {
         fields,
         background,
     });
+    // Surfaces matched against the fields before these are matched again.
+    let mut matched = world.query::<(Entity, &SurfaceParts)>();
+    let stale: Vec<(Entity, Vec<Entity>)> = matched
+        .iter(world)
+        .map(|(entity, parts)| (entity, parts.0.clone()))
+        .collect();
+    for (entity, parts) in stale {
+        for part in parts {
+            if let Ok(part) = world.get_entity_mut(part) {
+                part.despawn();
+            }
+        }
+        world.entity_mut(entity).remove::<SurfaceParts>();
+    }
 }
 
 pub fn assign_surfaces(

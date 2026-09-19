@@ -14,11 +14,16 @@ pub struct HeightGrid {
 
 impl HeightGrid {
     pub fn sample(size: f32, cell: f32, height: impl Fn(f32, f32) -> f32) -> Self {
+        Self::sample_at(Vec2::ZERO, size, cell, height)
+    }
+
+    /// A square grid `size` metres wide centred on `center`.
+    pub fn sample_at(center: Vec2, size: f32, cell: f32, height: impl Fn(f32, f32) -> f32) -> Self {
         let cols = (size / cell).ceil().max(1.0) as usize + 1;
         let rows = cols;
         let cell = size / (cols - 1) as f32;
-        let min_x = -size * 0.5;
-        let min_z = -size * 0.5;
+        let min_x = center.x - size * 0.5;
+        let min_z = center.y - size * 0.5;
         let mut heights = Vec::with_capacity(cols * rows);
         for i in 0..rows {
             let z = min_z + i as f32 * cell;
@@ -95,5 +100,11 @@ impl HeightGrid {
 
     pub fn half_size(&self) -> f32 {
         (self.cols - 1) as f32 * self.cell * 0.5
+    }
+}
+
+impl HeightGrid {
+    pub fn center(&self) -> Vec2 {
+        Vec2::new(self.min_x, self.min_z) + Vec2::splat(self.half_size())
     }
 }

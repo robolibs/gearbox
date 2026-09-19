@@ -353,12 +353,19 @@ fn spawn_world(
     });
 
     // ── Camera ──────────────────────────────────────────────────────
-    // Scripted views: `GEARBOX_CAMERA_DISTANCE` (m) and `GEARBOX_CAMERA_ELEVATION` (deg).
+    // Scripted views: `GEARBOX_CAMERA_DISTANCE` (m), `GEARBOX_CAMERA_ELEVATION` (deg)
+    // and `GEARBOX_CAMERA_FOCUS` ("x,z" in m).
     let view = |name: &str, fallback: f32| {
         std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite()).unwrap_or(fallback)
     };
     let chase = ChaseCamera {
-        focus: Vec3::new(0.0, 0.5, 0.0),
+        focus: std::env::var("GEARBOX_CAMERA_FOCUS")
+            .ok()
+            .and_then(|v| {
+                let (x, z) = v.split_once(',')?;
+                Some(Vec3::new(x.trim().parse().ok()?, 0.5, z.trim().parse().ok()?))
+            })
+            .unwrap_or(Vec3::new(0.0, 0.5, 0.0)),
         distance: view("GEARBOX_CAMERA_DISTANCE", 14.0).clamp(1.0, CAMERA_ORBIT_DISTANCE_M),
         elevation: view("GEARBOX_CAMERA_ELEVATION", 15.0).clamp(-10.0, 89.0).to_radians(),
         max_distance: CAMERA_MAX_DISTANCE_M,

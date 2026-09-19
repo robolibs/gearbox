@@ -27,6 +27,15 @@ const SPAWN_FLAT_RADIUS_M: f32 = 30.0;
 const SPAWN_RELIEF_RADIUS_M: f32 = 70.0;
 const SAFETY_FLOOR_Y_M: f64 = -40.0;
 const SAFETY_FLOOR_HALF_EXTENT_M: f64 = 10_000.0;
+/// The ground square moves once the view rests this far from its centre, to a
+/// centre on this grid, no farther from the spawn point than the reach: past
+/// that the flat land would part from the planet's curve.
+const FOLLOW_SLACK_M: f32 = 220.0;
+const FOLLOW_SNAP_M: f32 = 100.0;
+const FOLLOW_REACH_M: f32 = 25_000.0;
+const FOLLOW_LOOK_AHEAD_M: f32 = 300.0;
+const FOLLOW_MAX_EYE_HEIGHT_M: f32 = 1_500.0;
+const FOLLOW_MACHINE_MARGIN_M: f32 = 40.0;
 // Measured against the meadow backdrop it borders, from 60 km in clear air.
 const HORIZON_COLOR: Color = Color::linear_rgb(0.058, 0.108, 0.015);
 /// Peak-to-trough relief of the distant land around the meadow.
@@ -44,7 +53,7 @@ impl Plugin for TerrainPlugin {
         app.add_systems(PostStartup, spawn_procedural_terrain)
             .add_systems(
                 Update,
-                (retire_for_usd_terrain, update_terrain_tiles)
+                (retire_for_usd_terrain, follow_view, update_terrain_tiles)
                     .chain()
                     .in_set(TerrainUpdates),
             );
@@ -145,6 +154,96 @@ pub(crate) struct TerrainSurfaceMesh;
 #[derive(Component)]
 pub(crate) struct TerrainBackdrop;
 
+/// Everything of a ground square that can be worked out off the main thread.
+struct GroundParts {
+    center: Vec2,
+    cell: f32,
+    grid: HeightGrid,
+    collider_grid: HeightGrid,
+    horizon: Mesh,
+}
+
+fn cell_from_env(name: &str, fallback: f32) -> f32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| *value >= 0.5)
+        .unwrap_or(fallback)
+}
+
+fn build_ground(center: Vec2) -> GroundParts {
+    let cell = cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M);
+    let collider_cell = cell_from_env("GEARBOX_TERRAIN_COLLIDER_CELL_M", cell);
+    let grid = HeightGrid::sample_at(center, SIZE_M, cell, horizon_height);
+    let collider_grid = HeightGrid::sample_at(center, SIZE_M, collider_cell, horizon_height);
+    let horizon = horizon_mesh(&grid);
+    GroundParts { center, cell, grid, collider_grid, horizon }
+}
+
+fn install_ground(
+    commands: &mut Commands,
+    physics: &mut PhysicsWorld,
+    meshes: &mut Assets<Mesh>,
+    parts: GroundParts,
+) -> ProceduralTerrain {
+    let grid = Arc::new(parts.grid);
+    let entity = commands
+        .spawn((
+            Name::new("MeadowTerrain"),
+            Transform::IDENTITY,
+            Visibility::default(),
+        ))
+        .id();
+    commands.spawn((
+        Name::new("Distant meadow landscape"),
+        TerrainBackdrop,
+        gearbox_fields::CoverBackdrop,
+        ChildOf(entity),
+        Transform::IDENTITY,
+        Mesh3d(meshes.add(parts.horizon)),
+        TerrainSurfaceMesh,
+        gearbox_fields::CoverSurfaceMesh,
+        bevy::light::NotShadowCaster,
+    ));
+    let center = DVec3::new(parts.center.x as f64, 0.0, parts.center.y as f64);
+    let collider = physics.colliders.insert(
+        heightfield_collider(&parts.collider_grid)
+            .translation(center)
+            .friction(crate::world::ground_friction(1.4))
+            .restitution(0.0)
+            .build(),
+    );
+    physics.entity_to_collider.insert(entity, collider);
+    let safety_floor = physics.colliders.insert(
+        ColliderBuilder::cuboid(SAFETY_FLOOR_HALF_EXTENT_M, 0.10, SAFETY_FLOOR_HALF_EXTENT_M)
+            .translation(center + DVec3::new(0.0, SAFETY_FLOOR_Y_M, 0.0))
+            .friction(1.2)
+            .restitution(0.0)
+            .build(),
+    );
+    if let Ok(mut slot) = HEIGHT_GRID.write() {
+        *slot = Some(grid.clone());
+    }
+    ProceduralTerrain {
+        entity,
+        collider,
+        safety_floor,
+        grid,
+        fine_cell: parts.cell,
+        tiles: HashMap::default(),
+    }
+}
+
+fn remove_ground(commands: &mut Commands, physics: &mut PhysicsWorld, terrain: &ProceduralTerrain) {
+    commands.entity(terrain.entity).despawn();
+    physics.entity_to_collider.remove(&terrain.entity);
+    let colliders = &mut physics.colliders;
+    let islands = &mut physics.islands;
+    let bodies = &mut physics.bodies;
+    colliders.remove(terrain.collider, islands, bodies, true);
+    colliders.remove(terrain.safety_floor, islands, bodies, true);
+}
+
 fn spawn_procedural_terrain(
     mut commands: Commands,
     mut physics: ResMut<PhysicsWorld>,
@@ -159,57 +258,12 @@ fn spawn_procedural_terrain(
         return;
     }
     let started = std::time::Instant::now();
-    let cell = std::env::var("GEARBOX_TERRAIN_CELL_M")
-        .ok()
-        .and_then(|value| value.parse::<f32>().ok())
-        .filter(|value| *value >= 0.5)
-        .unwrap_or(CELL_M);
-    let collider_cell = std::env::var("GEARBOX_TERRAIN_COLLIDER_CELL_M")
-        .ok()
-        .and_then(|value| value.parse::<f32>().ok())
-        .filter(|value| *value >= 0.5)
-        .unwrap_or(cell);
-    let grid = Arc::new(HeightGrid::sample(SIZE_M, cell, meadow_height));
-    let collider_grid = HeightGrid::sample(SIZE_M, collider_cell, meadow_height);
-    let entity = commands
-        .spawn((
-            Name::new("MeadowTerrain"),
-            Transform::IDENTITY,
-            Visibility::default(),
-        ))
-        .id();
-    commands.spawn((
-        Name::new("Distant meadow landscape"),
-        TerrainBackdrop,
-        gearbox_fields::CoverBackdrop,
-        ChildOf(entity),
-        Transform::IDENTITY,
-        Mesh3d(meshes.add(horizon_mesh(&grid))),
-        TerrainSurfaceMesh,
-        gearbox_fields::CoverSurfaceMesh,
-        bevy::light::NotShadowCaster,
-    ));
-
-    let collider = physics.colliders.insert(
-        heightfield_collider(&collider_grid)
-            .friction(crate::world::ground_friction(1.4))
-            .restitution(0.0)
-            .build(),
-    );
-    physics.entity_to_collider.insert(entity, collider);
-    let safety_floor = physics.colliders.insert(
-        ColliderBuilder::cuboid(SAFETY_FLOOR_HALF_EXTENT_M, 0.10, SAFETY_FLOOR_HALF_EXTENT_M)
-            .translation(DVec3::new(0.0, SAFETY_FLOOR_Y_M, 0.0))
-            .friction(1.2)
-            .restitution(0.0)
-            .build(),
-    );
+    let parts = build_ground(Vec2::ZERO);
+    let cell = parts.cell;
+    let terrain = install_ground(&mut commands, physics.as_mut(), meshes.as_mut(), parts);
     if let Some(flat) = flat.as_deref().copied() {
         remove_flat_ground(&mut commands, physics.as_mut(), flat);
         commands.remove_resource::<FlatGround>();
-    }
-    if let Ok(mut slot) = HEIGHT_GRID.write() {
-        *slot = Some(grid.clone());
     }
     // The planet sphere fills the horizon past the terrain edge.
     for (name, material) in &horizon {
@@ -219,14 +273,7 @@ fn spawn_procedural_terrain(
             material.base_color = HORIZON_COLOR;
         }
     }
-    commands.insert_resource(ProceduralTerrain {
-        entity,
-        collider,
-        safety_floor,
-        grid,
-        fine_cell: cell,
-        tiles: HashMap::default(),
-    });
+    commands.insert_resource(terrain);
     info!(
         "terrain: {preset:?} ground ready, {} m at {} m cells, in {:?}",
         SIZE_M,
@@ -235,6 +282,63 @@ fn spawn_procedural_terrain(
     );
 }
 
+/// The ground square follows where the view rests, so the meadow, its grass
+/// and its collider are wherever one goes. The new square is worked out on a
+/// background thread and swapped in whole. It stays put while a machine would
+/// be left without ground, and while the view is too high to see grass.
+fn follow_view(
+    mut commands: Commands,
+    terrain: Option<ResMut<ProceduralTerrain>>,
+    mut physics: ResMut<PhysicsWorld>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    mut pending: Local<Option<bevy::tasks::Task<GroundParts>>>,
+) {
+    let Some(mut terrain) = terrain else {
+        *pending = None;
+        return;
+    };
+    if let Some(task) = pending.as_mut() {
+        let Some(parts) = bevy::tasks::block_on(bevy::tasks::poll_once(task)) else {
+            return;
+        };
+        *pending = None;
+        let started = std::time::Instant::now();
+        let center = parts.center;
+        remove_ground(&mut commands, physics.as_mut(), &terrain);
+        *terrain = install_ground(&mut commands, physics.as_mut(), meshes.as_mut(), parts);
+        info!("terrain: ground moved to {center}, swapped in {:?}", started.elapsed());
+        return;
+    }
+    let Some(camera) = cameras.iter().next() else {
+        return;
+    };
+    let eye = camera.translation();
+    if eye.y > FOLLOW_MAX_EYE_HEIGHT_M {
+        return;
+    }
+    let forward = camera.forward().as_vec3();
+    let reach = (eye.y.max(0.0) / (-forward.y).max(0.2)).min(FOLLOW_LOOK_AHEAD_M);
+    let focus = Vec2::new(eye.x + forward.x * reach, eye.z + forward.z * reach);
+    let center = terrain.grid.center();
+    if (focus - center).abs().max_element() < FOLLOW_SLACK_M {
+        return;
+    }
+    let wanted = ((focus / FOLLOW_SNAP_M).round() * FOLLOW_SNAP_M).clamp_length_max(FOLLOW_REACH_M);
+    if wanted == center {
+        return;
+    }
+    let keep = SIZE_M * 0.5 - FOLLOW_MACHINE_MARGIN_M;
+    let stranded = physics.bodies.iter().any(|(_, body)| {
+        let at = body.translation();
+        body.is_dynamic()
+            && (Vec2::new(at.x as f32, at.z as f32) - wanted).abs().max_element() > keep
+    });
+    if stranded {
+        return;
+    }
+    *pending = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { build_ground(wanted) }));
+}
 fn horizon_height(x: f32, z: f32) -> f32 {
     let edge = x.abs().max(z.abs());
     let t = ((edge - SIZE_M * 0.5) / 1_600.0).clamp(0.0, 1.0);
@@ -251,6 +355,7 @@ fn horizon_mesh(grid: &HeightGrid) -> Mesh {
     ];
     let steps = (SIZE_M / TILE_M) as usize * tile_segments(grid.cell);
     let ring_len = steps * 4;
+    let center = grid.center();
     let mut positions = Vec::with_capacity(radii.len() * ring_len);
     let mut normals = Vec::with_capacity(positions.capacity());
     let mut uvs = Vec::with_capacity(positions.capacity());
@@ -265,6 +370,7 @@ fn horizon_mesh(grid: &HeightGrid) -> Mesh {
                     2 => (radius, -t * radius),
                     _ => (-t * radius, -radius),
                 };
+                let (x, z) = (center.x + x, center.y + z);
                 let (y, normal) = if ring == 0 {
                     (
                         grid.height_at(x, z)
@@ -387,15 +493,19 @@ fn update_terrain_tiles(
     let eye_xz = Vec2::new(eye.x, eye.z);
     let half = terrain.grid.half_size();
     let span = (half / TILE_M).round() as i32;
+    let middle = (terrain.grid.center() / TILE_M).round().as_ivec2();
     let terrain = terrain.as_mut();
     let mut rebuilt = 0usize;
-    for tz in -span..span {
-        for tx in -span..span {
+    for tz in middle.y - span..middle.y + span {
+        for tx in middle.x - span..middle.x + span {
             let min = Vec2::new(tx as f32 * TILE_M, tz as f32 * TILE_M);
             let nearest = eye_xz
                 .clamp(min, min + Vec2::splat(TILE_M))
                 .distance(eye_xz);
-            let boundary = tx == -span || tz == -span || tx == span - 1 || tz == span - 1;
+            let boundary = tx == middle.x - span
+                || tz == middle.y - span
+                || tx == middle.x + span - 1
+                || tz == middle.y + span - 1;
             let cell = if boundary || nearest <= TILE_FINE_RADIUS_M {
                 terrain.fine_cell
             } else {
@@ -458,14 +568,7 @@ fn retire_for_usd_terrain(
     let (Some(_), Some(terrain)) = (usd_terrain, terrain) else {
         return;
     };
-    commands.entity(terrain.entity).despawn();
-    physics.entity_to_collider.remove(&terrain.entity);
-    let physics = physics.as_mut();
-    let colliders = &mut physics.colliders;
-    let islands = &mut physics.islands;
-    let bodies = &mut physics.bodies;
-    colliders.remove(terrain.collider, islands, bodies, true);
-    colliders.remove(terrain.safety_floor, islands, bodies, true);
+    remove_ground(&mut commands, physics.as_mut(), &terrain);
     if let Ok(mut slot) = HEIGHT_GRID.write() {
         *slot = None;
     }
