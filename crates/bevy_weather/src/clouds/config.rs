@@ -82,6 +82,8 @@ pub struct CloudsConfig {
     /// Where the shadow map is centred this frame: the camera, snapped to the
     /// map's texels so shadows do not crawl as it moves. Set by the sky.
     pub cloud_shadow_center: Vec3,
+    /// Turns the frame the clouds are drawn in into the planet's own.
+    pub planet_from_site: Mat3,
     /// The disc's size against the real sun's 0.53 degrees. At true size it
     /// is a handful of pixels, so skies are drawn with it enlarged.
     pub sun_disc_scale: f32,
@@ -124,6 +126,7 @@ impl Default for CloudsConfig {
             cloud_shadow_extent: 8_000.0,
             cloud_shadow_opacity: 0.9,
             cloud_shadow_center: Vec3::ZERO,
+            planet_from_site: Mat3::IDENTITY,
             sun_disc_scale: 2.4,
             render_resolution: Vec2::new(960.0, 540.0),
             wind_velocity: Vec3::new(-1.1, 0.0, 2.3),

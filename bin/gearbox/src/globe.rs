@@ -28,7 +28,7 @@ impl Plugin for GlobePlugin {
             .add_systems(PreUpdate, adopt_loaded_roots)
             .add_systems(
                 Update,
-                (join_watched_site, travel).chain().before(crate::terrain::TerrainUpdates),
+                (join_watched_site, travel, orient_sky).chain().before(crate::terrain::TerrainUpdates),
             );
     }
 }
@@ -327,4 +327,13 @@ fn join_watched_site(
     fly.target = None;
     chase.focus = transform_in_site(watched, &parents, &transforms, &grids).translation();
     enter_site(&mut commands, &mut sites, &layout, camera, to);
+}
+
+/// The sun and the weather are the planet's: the sky of a site is theirs as
+/// seen from where it stands.
+fn orient_sky(sites: Res<Sites>, mut weather: ResMut<bevy_weather::WeatherSettings>) {
+    let rotation = sites.current().frame.rotation.as_quat();
+    if weather.planet_from_site != rotation {
+        weather.planet_from_site = rotation;
+    }
 }

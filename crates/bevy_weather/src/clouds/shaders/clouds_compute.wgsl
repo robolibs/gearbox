@@ -42,6 +42,7 @@ struct Config {
     shadow_up: vec3f,
     shadow_opacity: f32,
     shadow_center: vec3f,
+    planet_from_site: mat3x3f,
 };
 
 @group(0) @binding(0) var<uniform> config: Config;
@@ -207,8 +208,9 @@ fn get_cloud_map_density(pos: vec3f, normalized_height: f32, sample_span: f32) -
         smoothstep(30000.0, 1500000.0, length(ps.xz) + max(-ps.y, 0.0)),
         smoothstep(800.0, 5000.0, sample_span));
     var globe = 0.0;
-    if far > 0.0 { globe = far * (smoothstep(0.36, 0.64, sample_globe_weather(normalize(ps + radius)).r) - 0.5); }
-    let base = cloud_map_base(shape_position + radius, normalized_height, globe, far, sample_span);
+    // The weather and the clouds belong to the planet, whichever way up it is drawn.
+    if far > 0.0 { globe = far * (smoothstep(0.36, 0.64, sample_globe_weather(config.planet_from_site * normalize(ps + radius)).r) - 0.5); }
+    let base = cloud_map_base(config.planet_from_site * (shape_position + radius), normalized_height, globe, far, sample_span);
     var m = base.x * cloud_gradient(normalized_height);
 
 	let clouds_detail_strength = (1.0 - smoothstep(0.5, 1.0, m));

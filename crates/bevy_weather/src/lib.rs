@@ -28,6 +28,9 @@ pub struct WeatherSettings {
     pub clouds: CloudsConfig,
     /// How fast the clouds drift, downwind, in m/s.
     pub cloud_drift_mps: f32,
+    /// Turns the frame the sky is drawn in into the planet's own. The sun and
+    /// the weather belong to the planet: elsewhere on it they stand differently.
+    pub planet_from_site: Quat,
     /// Where the wind blows towards, degrees from +X towards +Z.
     pub wind_heading_deg: f32,
     pub wind_speed_mps: f32,
@@ -94,6 +97,7 @@ impl Default for WeatherSettings {
                 ..default()
             },
             cloud_drift_mps: 18.0,
+            planet_from_site: Quat::IDENTITY,
             wind_heading_deg: 36.87,
             wind_speed_mps: 4.0,
             wind_gustiness: 0.7,

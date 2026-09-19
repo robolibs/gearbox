@@ -128,6 +128,7 @@ fn synchronize_daylight(
     clouds.render_resolution = resolution;
     clouds.cloud_shadow_center = center;
     clouds.cloud_shadow_extent = extent;
+    clouds.planet_from_site = Mat3::from_quat(settings.planet_from_site);
     clouds.wind_velocity = cloud_drift(&settings);
     clouds.sun_dir = daylight.direction.extend(0.0);
     clouds.sun_color = daylight.sun_radiance;

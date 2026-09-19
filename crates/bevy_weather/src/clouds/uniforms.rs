@@ -45,6 +45,7 @@ pub(crate) struct CloudsUniform {
     pub shadow_up: Vec3,
     pub shadow_opacity: f32,
     pub shadow_center: Vec3,
+    pub planet_from_site: Mat3,
 }
 
 impl Default for CloudsUniform {
@@ -86,6 +87,7 @@ impl Default for CloudsUniform {
             shadow_up: Vec3::Y,
             shadow_opacity: 0.9,
             shadow_center: Vec3::ZERO,
+            planet_from_site: Mat3::IDENTITY,
         }
     }
 }

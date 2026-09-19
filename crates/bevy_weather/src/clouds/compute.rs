@@ -106,6 +106,7 @@ fn prepare_uniforms_bind_group(
     buffer.shadow_half_extent = 0.5 * clouds_config.cloud_shadow_extent;
     buffer.shadow_opacity = clouds_config.cloud_shadow_opacity.clamp(0.0, 1.0);
     buffer.shadow_center = clouds_config.cloud_shadow_center;
+    buffer.planet_from_site = clouds_config.planet_from_site;
 
     clouds_uniform_buffer
         .buffer

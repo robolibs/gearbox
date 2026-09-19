@@ -35,6 +35,7 @@ impl Daylight {
             .try_normalize()
             .filter(|v| v.is_finite())
             .unwrap_or(Vec3::new(-4.0, 7.0, 5.0).normalize());
+        let direction = settings.planet_from_site.inverse() * direction;
         let elevation = direction.y.clamp(-1.0, 1.0).asin().to_degrees();
         let reference = Vec3::new(-4.0, 7.0, 5.0).normalize().y.asin().to_degrees();
         let path = (air_mass(elevation) - air_mass(reference)).max(0.0);
