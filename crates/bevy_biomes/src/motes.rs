@@ -66,9 +66,11 @@ pub struct MoteField {
     pub colour: Vec4,
     /// Downwind x, downwind z, speed, gustiness.
     pub wind: Vec4,
-    /// Motes a hectare over the damp land and over the dry one, and the damp
-    /// readings between which the one gives way to the other.
+    /// Motes a hectare over the damp land, the dry one and the parched one.
     pub background: Vec4,
+    /// The damp readings at which one land gives way to the next: sand to dry
+    /// grass, then dry grass to meadow.
+    pub bands: Vec4,
     pub size_m: Vec2,
     pub rise_mps: f32,
     pub drag: f32,
@@ -253,11 +255,18 @@ fn carry_mote_fields(
                 .get(biome)
                 .and_then(|cover| cover.air.iter().find(|air| air.kind == kind.0).copied())
         };
-        let (damp_land, dry_land) = match biomes.climate {
-            Some(climate) => (climate.damp_land.into(), climate.dry_land.into()),
-            None => (biomes.background, biomes.background),
+        let (damp_land, dry_land, parched_land) = match biomes.climate {
+            Some(climate) => (
+                climate.damp_land.into(),
+                climate.dry_land.into(),
+                climate.parched_land.into(),
+            ),
+            None => (biomes.background, biomes.background, biomes.background),
         };
-        let Some(recipe) = air(damp_land).or_else(|| air(dry_land)).or_else(|| {
+        let Some(recipe) = air(damp_land)
+            .or_else(|| air(dry_land))
+            .or_else(|| air(parched_land))
+            .or_else(|| {
             biomes.regions.iter().find_map(|region| air(region.biome))
         }) else {
             material.field.count = 0;
@@ -269,9 +278,16 @@ fn carry_mote_fields(
             background: Vec4::new(
                 air(damp_land).map_or(0.0, |air| air.per_hectare) * budget.density,
                 air(dry_land).map_or(0.0, |air| air.per_hectare) * budget.density,
-                biomes.climate.map_or(0.0, |climate| climate.parched),
-                biomes.climate.map_or(1.0e-4, |climate| climate.lush),
+                air(parched_land).map_or(0.0, |air| air.per_hectare) * budget.density,
+                0.0,
             ),
+            bands: match biomes.climate {
+                Some(climate) => {
+                    Vec4::new(climate.sand.0, climate.sand.1, climate.lush.0, climate.lush.1)
+                }
+                // No climate: the damp land is everywhere, whatever the ground.
+                None => Vec4::new(-2.0, -1.0, -2.0, -1.0),
+            },
             size_m: Vec2::new(recipe.size_mm[0], recipe.size_mm[1]) * 0.001,
             rise_mps: recipe.rise_mps,
             drag: recipe.drag,
@@ -283,7 +299,7 @@ fn carry_mote_fields(
             seed: kind.0 as u32 as f32 * 17.13,
             ..default()
         };
-        let mut most_per_hectare = field.background.x.max(field.background.y);
+        let mut most_per_hectare = field.background.x.max(field.background.y).max(field.background.z);
         for (slot, region) in biomes.regions.iter().take(REGIONS).enumerate() {
             let here = air(region.biome).map_or(0.0, |air| air.per_hectare) * budget.density;
             let (metres, hard) = match region.border {

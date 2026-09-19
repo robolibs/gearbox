@@ -35,7 +35,12 @@ fn land_damp(place: vec2<f32>) -> f32 {
     return clamp(broad * 0.54 + middle * 0.31 + fine * 0.15, 0.0, 1.0);
 }
 
-// The share of the damp land at a place; the rest is the dry one.
-fn land_damp_share(place: vec2<f32>, parched: f32, lush: f32) -> f32 {
-    return smoothstep(parched, lush, land_damp(place));
+// How much of each land there is at a place: parched sand, dry grass, damp
+// meadow. They add up to one. `bands` holds the damp at which the sand has
+// wholly given way, where it begins to, and the same for the meadow.
+fn land_shares(place: vec2<f32>, bands: vec4<f32>) -> vec3<f32> {
+    let wet = land_damp(place);
+    let parched = 1.0 - smoothstep(bands.x, bands.y, wet);
+    let meadow = smoothstep(bands.z, bands.w, wet);
+    return vec3<f32>(parched, max(1.0 - parched - meadow, 0.0), meadow);
 }

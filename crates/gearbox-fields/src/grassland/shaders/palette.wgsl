@@ -93,17 +93,31 @@ fn meadow_damp(place: vec2<f32>) -> f32 {
     return clamp(broad * 0.54 + middle * 0.31 + fine * 0.15, 0.0, 1.0);
 }
 
+// How much of each land there is at a place: parched sand, dry grass, damp
+// meadow. These readings are `bevy_biomes`' own, and must move with them.
+fn land_shares(place: vec2<f32>) -> vec3<f32> {
+    let wet = meadow_damp(place);
+    let parched = 1.0 - smoothstep(0.395, 0.445, wet);
+    let meadow = smoothstep(0.505, 0.570, wet);
+    return vec3<f32>(parched, max(1.0 - parched - meadow, 0.0), meadow);
+}
+
 // How much of a place is damp meadow rather than parched country.
 fn meadow_share(place: vec2<f32>) -> f32 {
-    return smoothstep(0.42, 0.56, meadow_damp(place));
+    return land_shares(place).z;
 }
 
-// Parched country is paler, yellower and less green than a damp meadow.
+// Parched ground is paler and yellower, dry ground a little so, and the
+// meadow keeps its own colour. Sand is not made by tinting grass: the
+// parched land will want a ground of its own before it can be desert.
 fn dry_country(place: vec2<f32>) -> vec3<f32> {
-    return mix(vec3<f32>(1.14, 1.07, 0.88), vec3<f32>(1.0), meadow_share(place));
+    let lands = land_shares(place);
+    return lands.x * vec3<f32>(1.22, 1.12, 0.84)
+        + lands.y * vec3<f32>(1.10, 1.05, 0.91)
+        + lands.z * vec3<f32>(1.0, 1.0, 1.0);
 }
 
-// And what grows in it is shorter for want of water.
+// What grows in dry ground is shorter and thinner for want of water.
 fn dry_growth(place: vec2<f32>) -> f32 {
-    return mix(0.78, 1.0, meadow_share(place));
+    return dot(land_shares(place), vec3<f32>(0.55, 0.84, 1.0));
 }

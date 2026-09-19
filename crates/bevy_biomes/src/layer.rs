@@ -126,6 +126,17 @@ impl Covers {
                     colour: Srgba::new(1.0, 1.0, 1.0, 0.88),
                 }),
         );
+        // Sand: nothing stands in it, and the air over it is all dust.
+        covers.insert(Cover::new(Land::Desert).with_air(Motes {
+            kind: MoteKind::Dust,
+            per_hectare: 16000.0,
+            size_mm: [9.0, 30.0],
+            rise_mps: 0.1,
+            drag: 0.9,
+            ceiling_m: 3.4,
+            reach_m: 18.0,
+            colour: Srgba::new(0.86, 0.78, 0.6, 0.22),
+        }));
         // Dry country: little in bloom, and what the wind lifts is mostly dust.
         covers.insert(
             Cover::new(Land::Steppe)

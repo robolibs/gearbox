@@ -84,9 +84,9 @@ impl Biomes {
         let left = (1.0 - taken).max(0.0);
         match self.climate {
             Some(climate) => {
-                let share = climate.share(place);
-                mix.add(climate.damp_land.into(), left * share);
-                mix.add(climate.dry_land.into(), left * (1.0 - share));
+                for (land, share) in climate.lands(place) {
+                    mix.add(land.into(), left * share);
+                }
             }
             None => mix.add(self.background, left),
         }
@@ -280,7 +280,7 @@ mod climate_tests {
     #[test]
     fn the_background_follows_the_damp_when_it_is_asked_to() {
         let world = Biomes::new(Land::Grassland).under(Climate::default());
-        let (mut meadow, mut steppe) = (0, 0);
+        let (mut meadow, mut steppe, mut sand) = (0, 0, 0);
         for step in 0..900 {
             let place = Vec2::new(step as f32 * 31.0 - 14000.0, step as f32 * 17.0);
             let mix = world.at(place);
@@ -289,10 +289,11 @@ mod climate_tests {
             match mix.strongest() {
                 Some(Biome::Land(Land::Grassland)) => meadow += 1,
                 Some(Biome::Land(Land::Steppe)) => steppe += 1,
+                Some(Biome::Land(Land::Desert)) => sand += 1,
                 other => panic!("nothing grows there: {other:?}"),
             }
         }
-        assert!(meadow > 80 && steppe > 80, "{meadow} meadow, {steppe} steppe");
+        assert!(meadow > 60 && steppe > 60 && sand > 20, "{meadow} meadow, {steppe} steppe, {sand} sand");
     }
 
     #[test]

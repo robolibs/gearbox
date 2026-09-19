@@ -48,28 +48,63 @@ pub fn damp(place: Vec2) -> f32 {
     (broad * 0.54 + middle * 0.31 + fine * 0.15).clamp(0.0, 1.0)
 }
 
-/// The land somewhere, where nobody has laid one out: the damp ground grows
-/// meadow, the parched grows steppe, and between them they interleave.
+/// The lands where nobody has laid one out, in the order the ground's damp
+/// puts them: sand where it is parched, dry grass over it, meadow where the
+/// water is. Each gives way to the next across a band, never at a line.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Climate {
-    /// Below this it is all steppe, above it all meadow.
-    pub parched: f32,
-    pub lush: f32,
+    /// The damp at which the sand has wholly given way, and where it begins to.
+    pub sand: (f32, f32),
+    /// And the damp between which dry grass becomes meadow.
+    pub lush: (f32, f32),
+    pub parched_land: Land,
     pub dry_land: Land,
     pub damp_land: Land,
 }
 
 impl Default for Climate {
     fn default() -> Self {
-        Self { parched: 0.42, lush: 0.56, dry_land: Land::Steppe, damp_land: Land::Grassland }
+        Self {
+            // A fifth of the country is sand, a third meadow, the rest dry grass:
+            // the readings are where the damp falls, not round numbers.
+            sand: (0.395, 0.445),
+            lush: (0.505, 0.570),
+            parched_land: Land::Desert,
+            dry_land: Land::Steppe,
+            damp_land: Land::Grassland,
+        }
     }
 }
 
+fn ease(low: f32, high: f32, value: f32) -> f32 {
+    let t = ((value - low) / (high - low)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 impl Climate {
-    /// The share of the damp land at a place; the rest is the dry one.
+    /// How much of each land there is at a place: parched, dry, damp. They
+    /// add up to one.
+    pub fn shares(&self, place: Vec2) -> [f32; 3] {
+        let wet = damp(place);
+        let parched = 1.0 - ease(self.sand.0, self.sand.1, wet);
+        let damp_share = ease(self.lush.0, self.lush.1, wet);
+        [parched, (1.0 - parched - damp_share).max(0.0), damp_share]
+    }
+
+    /// The lands at a place with their shares.
+    pub fn lands(&self, place: Vec2) -> [(Land, f32); 3] {
+        let shares = self.shares(place);
+        [
+            (self.parched_land, shares[0]),
+            (self.dry_land, shares[1]),
+            (self.damp_land, shares[2]),
+        ]
+    }
+
+    /// The share of the damp land at a place, for anything that only wants to
+    /// know how green it is.
     pub fn share(&self, place: Vec2) -> f32 {
-        let t = ((damp(place) - self.parched) / (self.lush - self.parched)).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
+        self.shares(place)[2]
     }
 }
 
@@ -128,5 +163,69 @@ mod tests {
         }
         assert!(crossings > 2, "only {crossings} borders in six kilometres");
         assert_eq!(abrupt, 0, "the lands meet in a line somewhere");
+    }
+}
+
+#[cfg(test)]
+mod land_tests {
+    use super::*;
+
+    #[test]
+    fn the_three_lands_always_add_up_to_one() {
+        let climate = Climate::default();
+        for step in 0..3000 {
+            let place = Vec2::new(step as f32 * 23.0 - 30000.0, step as f32 * -11.0);
+            let shares = climate.shares(place);
+            assert!(shares.iter().all(|share| (0.0..=1.0).contains(share)), "{shares:?}");
+            assert!((shares.iter().sum::<f32>() - 1.0).abs() < 1e-5, "{shares:?}");
+        }
+    }
+
+    #[test]
+    fn there_is_sand_dry_grass_and_meadow_in_the_world() {
+        let climate = Climate::default();
+        let mut found = [0; 3];
+        for x in -70..70 {
+            for z in -70..70 {
+                let shares = climate.shares(Vec2::new(x as f32 * 55.0, z as f32 * 55.0));
+                for (count, share) in found.iter_mut().zip(shares) {
+                    if share > 0.8 {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        assert!(found.iter().all(|count| *count > 120), "{found:?}");
+    }
+
+    #[test]
+    fn sand_never_touches_meadow_without_dry_grass_between() {
+        let climate = Climate::default();
+        for step in 0..6000 {
+            let shares = climate.shares(Vec2::new(step as f32 * 1.7, 42.0));
+            assert!(shares[0] * shares[2] < 0.06, "{shares:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod spread {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn print_the_spread_of_the_damp() {
+        let mut readings: Vec<f32> = (0..200_000)
+            .map(|step| {
+                let place = Vec2::new((step % 450) as f32 * 37.0, (step / 450) as f32 * 41.0);
+                damp(place)
+            })
+            .collect();
+        readings.sort_by(f32::total_cmp);
+        let at = |q: f32| readings[(q * (readings.len() - 1) as f32) as usize];
+        println!(
+            "5% {:.3}  20% {:.3}  35% {:.3}  50% {:.3}  65% {:.3}  80% {:.3}  95% {:.3}",
+            at(0.05), at(0.20), at(0.35), at(0.50), at(0.65), at(0.80), at(0.95)
+        );
     }
 }

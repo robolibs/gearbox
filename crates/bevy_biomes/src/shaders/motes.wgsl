@@ -5,12 +5,13 @@
 // grass, and neither is anywhere the thing it came from is not.
 
 #import bevy_pbr::mesh_view_bindings::{view, globals, lights}
-#import "embedded://bevy_biomes/shaders/land.wgsl"::{land_damp_share}
+#import "embedded://bevy_biomes/shaders/land.wgsl"::{land_shares}
 
 struct MoteField {
     colour: vec4<f32>,
     wind: vec4<f32>,
     background: vec4<f32>,
+    bands: vec4<f32>,
     size_m: vec2<f32>,
     rise_mps: f32,
     drag: f32,
@@ -104,9 +105,14 @@ fn noise(p: vec2<f32>) -> f32 {
 }
 
 
-// The share of the damp land at a place; the rest is the dry one.
+// The lands at a place: parched, dry, damp.
+fn lands_at(place: vec2<f32>) -> vec3<f32> {
+    return land_shares(place, field.bands);
+}
+
+// How much of a place is damp meadow.
 fn damp_share(place: vec2<f32>) -> f32 {
-    return land_damp_share(place, field.background.z, field.background.w);
+    return lands_at(place).z;
 }
 
 // The flower patch under a place: how much of it is in bloom, and which
@@ -173,7 +179,8 @@ fn air_at(place: vec2<f32>) -> f32 {
         here = here + share * air.x;
         taken = taken + share;
     }
-    let background = mix(field.background.y, field.background.x, damp_share(place));
+    let lands = lands_at(place);
+    let background = dot(lands, vec3<f32>(field.background.z, field.background.y, field.background.x));
     return here + max(1.0 - taken, 0.0) * background;
 }
 
