@@ -321,8 +321,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let day = clamp(sun.y * 4.0, 0.06, 1.0);
     // Lit as the thing it broke off would be: some sky on it, some sun, and
     // darker as it turns edge on. Nothing here makes its own light.
-    let sky = vec3<f32>(0.16, 0.18, 0.21);
-    let colour = in.tint * (sky + sunlight * day * 0.32 * in.shade);
+    // A light's colour here carries its illuminance with it, tens of thousands
+    // of lux, so only its hue is any use: multiplied by the rest a mote would
+    // come out white whatever colour it was given. A scrap lying in a field is
+    // about as dark as the field.
+    let sun_hue = sunlight / max(max(sunlight.r, max(sunlight.g, sunlight.b)), 0.0001);
+    let sky = vec3<f32>(0.10, 0.11, 0.13);
+    let colour = in.tint * (sky + sun_hue * day * 0.55 * in.shade);
     let strength = alpha * field.colour.a;
     return vec4<f32>(colour * strength, strength);
 }
