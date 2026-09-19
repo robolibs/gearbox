@@ -23,8 +23,13 @@ pub struct GlobePlugin;
 impl Plugin for GlobePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(BigSpaceDefaultPlugins)
+            .init_resource::<Goto>()
             .add_systems(PreStartup, spawn_globe)
-            .add_systems(PreUpdate, adopt_loaded_roots);
+            .add_systems(PreUpdate, adopt_loaded_roots)
+            .add_systems(
+                Update,
+                (join_watched_site, travel).chain().before(crate::terrain::TerrainUpdates),
+            );
     }
 }
 
@@ -88,12 +93,14 @@ fn spawn_globe(mut commands: Commands) {
         .id();
     let frame = SiteFrame::at(DVec3::Y);
     let entity = commands.spawn(site_bundle(0, "home", &frame, root)).id();
-    commands.insert_resource(Sites {
+    let sites = Sites {
         root,
         list: vec![SiteEntry { entity, name: "home".into(), frame }],
         current: 0,
         land: Terrain::new(&frame),
-    });
+    };
+    publish_frames(&sites);
+    commands.insert_resource(sites);
 }
 
 static CURRENT_SITE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -148,4 +155,176 @@ fn adopt_loaded_roots(
     for root in &roots {
         commands.entity(root).insert(ChildOf(sites.current().entity));
     }
+}
+
+/// A site is left for another once the view rests this far from where it
+/// touches the planet, and an existing site is taken if it touches this near.
+const LEAVE_SITE_M: f64 = 0.8 * gearbox_globe::SITE_REACH_M;
+const JOIN_SITE_M: f64 = 0.6 * gearbox_globe::SITE_REACH_M;
+
+impl Sites {
+    fn nearest(&self, up: DVec3) -> Option<usize> {
+        (0..self.list.len())
+            .map(|index| (index, self.list[index].frame.ground_distance(up)))
+            .filter(|(_, distance)| *distance < JOIN_SITE_M)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(index, _)| index)
+    }
+}
+
+/// A place the view is asked to go: bearing in degrees and kilometres along
+/// the ground from home.
+#[derive(Resource, Default)]
+pub struct Goto(pub Option<(f64, f64)>);
+
+/// `GEARBOX_CAMERA_SITE="bearing_deg,distance_km"`: where a scripted view starts.
+fn scripted_site() -> Option<(f64, f64)> {
+    let value = std::env::var("GEARBOX_CAMERA_SITE").ok()?;
+    let (bearing, distance) = value.split_once(',')?;
+    Some((bearing.trim().parse().ok()?, distance.trim().parse().ok()?))
+}
+
+/// The view moves over the planet from site to site. Where it rests too far
+/// from its site it joins the site already there, or takes its own site along
+/// if nothing stands in it, or founds a new one. Its focus and heading carry
+/// over through the planet frame, so the view itself does not jump.
+fn travel(
+    mut commands: Commands,
+    mut sites: ResMut<Sites>,
+    physics: Res<crate::physics::PhysicsWorld>,
+    mut cameras: Query<(Entity, &mut mara::ui::modules::bevy::ChaseCamera)>,
+    mut grids: Query<(&mut Transform, &mut CellCoord), With<Site>>,
+    layout: Res<gearbox_fields::FieldLayout>,
+    mut goto: ResMut<Goto>,
+    mut started: Local<bool>,
+) {
+    let Ok((camera, mut chase)) = cameras.single_mut() else {
+        return;
+    };
+    let from = sites.current().frame;
+    let asked = goto.0.take().or_else(|| if *started { None } else { scripted_site() });
+    *started = true;
+    let scripted = asked.map(|(bearing, distance)| {
+        sites.home().frame.travelled(bearing.to_radians(), distance * 1000.0).up
+    });
+    let focus = chase.focus.as_dvec3();
+    let destination = match scripted {
+        Some(up) => up,
+        None if focus.x.hypot(focus.z) > LEAVE_SITE_M => from.direction(focus.x, focus.z),
+        None => return,
+    };
+    let here = sites.current;
+    let occupied = physics.bodies.iter().any(|(_, body)| {
+        body.is_dynamic() && gearbox_globe::site_of_physics(body.translation().x) == here
+    });
+    let frame = SiteFrame::at(destination);
+    let to = if let Some(index) = sites.nearest(destination).filter(|index| *index != here) {
+        index
+    } else if here != 0 && !occupied {
+        let entry = &mut sites.list[here];
+        entry.frame = frame;
+        if let Ok((mut transform, mut cell)) = grids.get_mut(entry.entity) {
+            let (new_cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(frame.origin());
+            *cell = new_cell;
+            *transform = Transform::from_translation(local).with_rotation(frame.rotation.as_quat());
+        }
+        here
+    } else {
+        let index = sites.list.len();
+        let name = format!("site-{index}");
+        let entity = commands.spawn(site_bundle(index, &name, &frame, sites.root)).id();
+        sites.list.push(SiteEntry { entity, name, frame });
+        index
+    };
+    let into = sites.list[to].frame;
+    // The focus lands on the ground of the new site; a scripted view starts at its middle.
+    let carried = into.from_planet(from.to_planet(DVec3::new(focus.x, 0.0, focus.z)));
+    let heading = from.rotation * DVec3::new(chase.yaw.sin() as f64, 0.0, chase.yaw.cos() as f64);
+    let heading = into.rotation.inverse() * heading;
+    // It keeps its height above the ground, not its height.
+    let above = chase.focus.y - sites.height(here, chase.focus.x, chase.focus.z);
+    let (x, z) = if scripted.is_some() { (0.0, 0.0) } else { (carried.x as f32, carried.z as f32) };
+    chase.focus = Vec3::new(x, sites.height(to, x, z) + above, z);
+    chase.yaw = heading.x.atan2(heading.z) as f32;
+    enter_site(&mut commands, &mut sites, &layout, camera, to);
+}
+
+static FRAMES: std::sync::RwLock<Vec<SiteFrame>> = std::sync::RwLock::new(Vec::new());
+static LAND: std::sync::OnceLock<Terrain> = std::sync::OnceLock::new();
+
+fn publish_frames(sites: &Sites) {
+    let _ = LAND.set(sites.land);
+    if let Ok(mut frames) = FRAMES.write() {
+        *frames = sites.list.iter().map(|site| site.frame).collect();
+    }
+}
+
+/// Height of the ground under a place in the physics world, in its own site's
+/// frame: the drawn ground where the view is, the land itself anywhere else.
+pub fn ground_height_at_physics(x: f64, z: f64) -> f64 {
+    let (site, local) = site_local(x, 0.0, z);
+    if site == current_site() {
+        return crate::world::terrain_height_m(local[0] as f32, local[2] as f32) as f64;
+    }
+    let frame = FRAMES.read().ok().and_then(|frames| frames.get(site).copied());
+    match (frame, LAND.get()) {
+        (Some(frame), Some(land)) => land.local_height(&frame, local[0], local[2]) as f64,
+        _ => 0.0,
+    }
+}
+
+/// The fields laid out at home; every other site is open land of the same cover.
+#[derive(Resource, Clone)]
+struct HomeLayout(gearbox_fields::FieldLayout);
+
+fn enter_site(
+    commands: &mut Commands,
+    sites: &mut Sites,
+    layout: &gearbox_fields::FieldLayout,
+    camera: Entity,
+    to: usize,
+) {
+    if sites.current == 0 {
+        commands.insert_resource(HomeLayout(layout.clone()));
+    }
+    sites.current = to;
+    set_current_site(to);
+    publish_frames(sites);
+    commands.entity(camera).insert((ChildOf(sites.list[to].entity), CellCoord::default()));
+    commands.queue(move |world: &mut World| {
+        let Some(home) = world.get_resource::<HomeLayout>().cloned() else {
+            return;
+        };
+        let fields = if to == 0 { home.0.fields.clone() } else { Vec::new() };
+        world.insert_resource(gearbox_fields::FieldLayout { default: home.0.default, fields });
+    });
+    info!("globe: view now in site `{}` ({} sites)", sites.list[to].name, sites.list.len());
+}
+
+/// Flying to a machine, or following one, takes the view to the machine's site.
+fn join_watched_site(
+    mut commands: Commands,
+    mut sites: ResMut<Sites>,
+    layout: Res<gearbox_fields::FieldLayout>,
+    follow: Res<crate::viewer::state::FollowTarget>,
+    mut fly: ResMut<crate::viewer::state::ChaseCameraFly>,
+    mut cameras: Query<(Entity, &mut mara::ui::modules::bevy::ChaseCamera)>,
+    parents: Query<&ChildOf>,
+    transforms: Query<&Transform>,
+    grids: Query<&Site>,
+) {
+    let Some(watched) = fly.target.as_ref().map(|target| target.body).or(follow.entity) else {
+        return;
+    };
+    let to = site_of(watched, &parents, &grids);
+    let Ok((camera, mut chase)) = cameras.single_mut() else {
+        return;
+    };
+    if to == sites.current || to >= sites.list.len() {
+        return;
+    }
+    // Across the planet there is no path worth flying: the view cuts over.
+    fly.target = None;
+    chase.focus = transform_in_site(watched, &parents, &transforms, &grids).translation();
+    enter_site(&mut commands, &mut sites, &layout, camera, to);
 }

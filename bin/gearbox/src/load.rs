@@ -637,7 +637,7 @@ fn max_terrain_height_under_aabb(min_x: f64, max_x: f64, min_z: f64, max_z: f64)
     ];
     samples
         .into_iter()
-        .map(|(x, z)| terrain_height_m(x as f32, z as f32) as f64)
+        .map(|(x, z)| crate::globe::ground_height_at_physics(x, z))
         .fold(f64::NEG_INFINITY, f64::max)
 }
 

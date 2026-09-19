@@ -83,7 +83,7 @@ impl Turn {
                 let support = traction::wheel_support(physics, chassis, wheel);
                 let p = body.translation();
                 let gap =
-                    p.y - radius - crate::world::terrain_height_m(p.x as f32, p.z as f32) as f64;
+                    p.y - radius - crate::globe::ground_height_at_physics(p.x, p.z);
                 Some((
                     center.x,
                     center.y,

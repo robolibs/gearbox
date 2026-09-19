@@ -30,6 +30,7 @@ fn serve_camera_requests(
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     cameras: Query<&ChaseCamera>,
+    mut goto: ResMut<crate::globe::Goto>,
 ) {
     if !poll.0.tick(time.delta()).just_finished() {
         return;
@@ -59,6 +60,14 @@ fn serve_camera_requests(
         }
         ("follow", Some(root)) => follow.set(Some(root)),
         ("unfollow", _) => follow.set(None),
+        // `goto BEARING_DEG DISTANCE_KM`: a place on the planet, along the ground from home.
+        ("goto", _) => {
+            let mut numbers = text.split_whitespace().skip(1).filter_map(|w| w.parse::<f64>().ok());
+            if let (Some(bearing), Some(distance)) = (numbers.next(), numbers.next()) {
+                follow.set(None);
+                goto.0 = Some((bearing, distance));
+            }
+        }
         _ => warn!(
             "gearbox-viewer: camera request `{}` not understood",
             text.trim()

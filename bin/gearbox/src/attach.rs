@@ -210,7 +210,7 @@ fn lift_tyres_out_of_terrain(
             .filter_map(|w| {
                 let radius = crate::controller::body_max_collider_radius(physics, *w)?;
                 let p = physics.bodies.get(*w)?.position().translation;
-                let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32) as f64;
+                let ground = crate::globe::ground_height_at_physics(p.x, p.z);
                 let offset = p - pivot;
                 let reach = (offset - axis * offset.dot(axis)).length();
                 (reach > 0.5).then_some((ground - (p.y - radius), reach, offset))

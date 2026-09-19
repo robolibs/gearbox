@@ -323,7 +323,8 @@ fn follow_view(
     let reach = (eye.y.max(0.0) / (-forward.y).max(0.2)).min(FOLLOW_LOOK_AHEAD_M);
     let focus = Vec2::new(eye.x + forward.x * reach, eye.z + forward.z * reach);
     let center = terrain.grid.center();
-    let moved_site = terrain.site != sites.current;
+    let moved_site = terrain.site != sites.current
+        || LAND.read().ok().and_then(|land| *land).is_some_and(|land| land.frame != sites.current().frame);
     if !moved_site && (focus - center).abs().max_element() < FOLLOW_SLACK_M {
         return;
     }
