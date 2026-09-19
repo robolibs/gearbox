@@ -26,14 +26,14 @@ use crate::profile::{
 /// so no two of its faces lie flat. The top and bottom rings close to a single
 /// point, or the stone is a tube and the ground shows through the hole.
 fn pebble() -> Mesh {
-    const AROUND: u32 = 7;
+    const AROUND: u32 = 9;
     const RINGS: u32 = 5;
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut indices = Vec::new();
     let dent = |ring: u32, step: u32| {
         let n = (ring * 7 + step * 13) as f32;
-        0.72 + 0.28 * ((n * 1.7).sin() * 0.5 + 0.5)
+        0.58 + 0.42 * ((n * 1.7).sin() * 0.5 + 0.5)
     };
     for ring in 0..=RINGS {
         let v = ring as f32 / RINGS as f32;

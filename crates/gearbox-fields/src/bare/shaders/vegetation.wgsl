@@ -166,7 +166,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // Mostly grit, a few pebbles, and now and then a stone worth kicking:
         // the size is drawn from a tail, not from a range.
         let size = mix(0.004, 0.115, pow(rand(id, 6u), 4.5)) * alive;
-        let squat = mix(0.4, 0.75, rand(id, 7u));
+        let squat = mix(0.3, 0.62, rand(id, 7u));
         let local = vertex.position * vec3<f32>(size, size * squat, size);
         let spun = turn * local.xz;
         // Well down into the soil: a stone sitting on top of the ground reads
@@ -178,11 +178,16 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // No two stones are the same stone: some flint, some sandstone. All of
         // them warm, though — a stone lying in soil is stained by it, and a
         // cold grey one reads as a pebble washed up on a beach.
-        let tone = mix(0.038, 0.110, rand(id, 9u));
-        let iron = rand(id, 10u);
-        let stone = vec3<f32>(tone * mix(1.0, 1.38, iron),
-            tone * mix(0.86, 0.80, iron),
-            tone * mix(0.70, 0.50, iron));
+        let kind = rand(id, 10u);
+        var rock = vec3<f32>(0.088, 0.078, 0.066);
+        if (kind < 0.34) {
+            rock = vec3<f32>(0.042, 0.039, 0.036);
+        } else if (kind < 0.64) {
+            rock = vec3<f32>(0.112, 0.081, 0.047);
+        } else if (kind > 0.88) {
+            rock = vec3<f32>(0.168, 0.152, 0.128);
+        }
+        let stone = rock * mix(0.65, 1.3, rand(id, 9u));
         // Dust settles on whatever faces the sky, so the top of a stone is
         // nearer the colour of the ground than the stone's own.
         let dust = vec3<f32>(0.105, 0.072, 0.044);
@@ -269,11 +274,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if (length(across) > 1e-12) {
             facet = normalize(across) * select(-1.0, 1.0, dot(across, rounded) > 0.0);
         }
-        pbr_input.world_normal = normalize(mix(rounded, facet, 0.8));
+        pbr_input.world_normal = normalize(mix(rounded, facet, 0.6));
         pbr_input.N = pbr_input.world_normal;
         // What of a stone is down in the soil sees little of the sky, which is
         // what stops it reading as a stone dropped on top of the ground.
-        pbr_input.diffuse_occlusion = vec3<f32>(mix(0.3, 1.0, smoothstep(-1.0, 0.25, in.shape.y)));
+        pbr_input.diffuse_occlusion = vec3<f32>(mix(0.55, 1.0, smoothstep(-1.0, 0.25, in.shape.y)));
     }
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
     var colour = apply_pbr_lighting(pbr_input);
