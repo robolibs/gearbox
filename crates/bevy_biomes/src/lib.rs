@@ -6,6 +6,7 @@
 //! dust, pollen and chaff that keep a view from looking swept.
 
 mod biome;
+mod climate;
 mod blend;
 mod layer;
 mod motes;
@@ -13,6 +14,7 @@ mod motes;
 use bevy::prelude::*;
 
 pub use biome::{Biome, Border, Field, Land};
+pub use climate::{Climate, damp};
 pub use blend::{Biomes, MOST, Mix, Region};
 pub use layer::{Cover, Covers, MoteKind, Motes, Plants};
 pub use motes::{AmbientWind, MoteBudget};

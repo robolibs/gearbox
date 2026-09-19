@@ -107,7 +107,7 @@ impl Covers {
                 // Petals only where something is in bloom, in that patch's colour.
                 .with_air(Motes {
                     kind: MoteKind::Petal,
-                    per_hectare: 9000.0,
+                    per_hectare: 3200.0,
                     size_mm: [30.0, 58.0],
                     rise_mps: -0.22,
                     drag: 0.85,
@@ -117,7 +117,7 @@ impl Covers {
                 })
                 .with_air(Motes {
                     kind: MoteKind::Leaf,
-                    per_hectare: 22000.0,
+                    per_hectare: 8000.0,
                     size_mm: [26.0, 55.0],
                     rise_mps: -0.1,
                     drag: 0.95,
@@ -130,7 +130,7 @@ impl Covers {
             Cover::new(Field::Stubble)
                 .with_air(Motes {
                     kind: MoteKind::Chaff,
-                    per_hectare: 14000.0,
+                    per_hectare: 5500.0,
                     size_mm: [40.0, 90.0],
                     rise_mps: -0.12,
                     drag: 0.95,
@@ -140,7 +140,7 @@ impl Covers {
                 })
                 .with_air(Motes {
                     kind: MoteKind::Dust,
-                    per_hectare: 18000.0,
+                    per_hectare: 7000.0,
                     size_mm: [8.0, 20.0],
                     rise_mps: 0.08,
                     drag: 0.8,

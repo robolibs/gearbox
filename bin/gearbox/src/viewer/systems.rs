@@ -341,6 +341,7 @@ fn follow_target(
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     sites: Query<&crate::globe::Site>,
+    toggles: Res<crate::viewer::overlays::DisplayToggles>,
     mut camera: ParamSet<(Query<&Transform>, Query<(&mut ChaseCamera, &mut Transform)>)>,
 ) {
     let Some(root) = follow.entity else {
@@ -368,9 +369,14 @@ fn follow_target(
     // smoothstep-lerp but running every frame instead of over a fixed span.
     const CATCH_UP_RATE: f32 = 2.5;
     let s = 1.0 - (-CATCH_UP_RATE * time.delta_secs()).exp();
+    // Either the view is carried around behind the machine, or it holds the
+    // angle it was on and only travels with it.
+    let swing = toggles.follow_from_behind;
     for (mut cam, mut tr) in &mut camera.p1() {
         cam.focus = current;
-        cam.yaw = lerp_angle(cam.yaw, target_yaw, s);
+        if swing {
+            cam.yaw = lerp_angle(cam.yaw, target_yaw, s);
+        }
         apply_rig(&cam, &mut tr);
     }
 }
