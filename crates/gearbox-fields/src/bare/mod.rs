@@ -25,16 +25,36 @@ use crate::profile::{
 /// so no two of its faces lie flat. The top and bottom rings close to a single
 /// point, or the stone is a tube and the ground shows through the hole.
 fn pebble() -> Mesh {
-    stone_mesh(0.0)
+    lump_mesh(STONE, 0.0)
 }
 
 /// The same stone, marked in its second channel as one the sun and the sand
 /// have bleached: no flint, and nothing darker than the ground it lies on.
 fn bleached_pebble() -> Mesh {
-    stone_mesh(1.0)
+    lump_mesh(STONE, 1.0)
 }
 
-fn stone_mesh(bleach: f32) -> Mesh {
+/// A crumb of the ground's own earth, not a stone. The second channel says
+/// which soil it was broken off, so the shader can colour it to match.
+fn turned_clod() -> Mesh {
+    lump_mesh(CLOD, 0.0)
+}
+
+fn worn_clod() -> Mesh {
+    lump_mesh(CLOD, 0.25)
+}
+
+fn blown_clod() -> Mesh {
+    lump_mesh(CLOD, 0.5)
+}
+
+/// What the first channel of a lump's texture coordinate marks it as. A tuft
+/// carries one; a stone's own coordinates run the whole way round it, so they
+/// cannot be used to say.
+const STONE: f32 = 0.0;
+const CLOD: f32 = 0.5;
+
+fn lump_mesh(kind: f32, mark: f32) -> Mesh {
     const AROUND: u32 = 9;
     const RINGS: u32 = 5;
     let mut positions = Vec::new();
@@ -81,9 +101,7 @@ fn stone_mesh(bleach: f32) -> Mesh {
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone())
-        // The first channel marks the kind: nought a stone, one a tuft. A stone's
-        // own coordinates run the whole way round it, so they cannot say.
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, bleach]; normals.len()])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[kind, mark]; normals.len()])
         .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
@@ -113,20 +131,36 @@ fn tuft() -> Mesh {
         .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
-/// Stones lying in the soil, and the tufts that take it back. Sand carries a
-/// few of the first and none of the second; a worn track carries both.
-fn standing(stones: f32, tufts: f32, bleached: bool) -> Vec<VegetationLayer> {
+/// What stands in a bare ground: stones, crumbs of its own earth, and the
+/// tufts of grass that take it back. Sand carries no tufts; a worn track
+/// carries all three.
+fn standing(stones: f32, clods: f32, tufts: f32, soil: fn() -> Mesh) -> Vec<VegetationLayer> {
     let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wgsl";
-    let mut layers = vec![VegetationLayer {
-        shader,
-        template: if bleached { bleached_pebble } else { pebble },
-        density: stones,
-        fade_start: 6.0,
-        fade_end: 42.0,
-        inverse_square_thinning: true,
-        albedo: None,
-        lod_band: [0.0, f32::MAX],
-    }];
+    let bleached = soil == blown_clod as fn() -> Mesh;
+    let mut layers = vec![
+        VegetationLayer {
+            shader,
+            template: if bleached { bleached_pebble } else { pebble },
+            density: stones,
+            fade_start: 6.0,
+            fade_end: 42.0,
+            inverse_square_thinning: true,
+            albedo: None,
+            lod_band: [0.0, f32::MAX],
+        },
+        // Crumbs are smaller than stones and far more of them, so they are not
+        // worth carrying anything like as far.
+        VegetationLayer {
+            shader,
+            template: soil,
+            density: clods,
+            fade_start: 4.0,
+            fade_end: 20.0,
+            inverse_square_thinning: true,
+            albedo: None,
+            lod_band: [0.0, f32::MAX],
+        },
+    ];
     if tufts > 0.0 {
         layers.push(VegetationLayer {
             shader,
@@ -161,7 +195,8 @@ struct BareExtension {
 /// What kind of bare ground this is.
 #[derive(ShaderType, Reflect, Debug, Clone, Copy)]
 pub struct BareGround {
-    /// Multiplies the soil's own colour.
+    /// Multiplies the soil's own colour; the last of it says how readily this
+    /// ground cracks as it dries.
     pub tint: Vec4,
     /// Metres across the clods, how deep they sit, how much the wind has
     /// combed it into ripples, and how far apart those ripples run.
@@ -197,19 +232,19 @@ impl Plugin for BarePlugin {
         profiles.register(FieldProfile {
             name: "ploughed",
             wheel_response: response,
-            layers: standing(170.0, 440.0, false),
+            layers: standing(170.0, 1500.0, 440.0, turned_clod),
             ground: ploughed_ground,
         });
         profiles.register(FieldProfile {
             name: "dirt",
             wheel_response: response,
-            layers: standing(240.0, 1900.0, false),
+            layers: standing(240.0, 900.0, 1900.0, worn_clod),
             ground: dirt_ground,
         });
         profiles.register(FieldProfile {
             name: "sand",
             wheel_response: WheelResponse { darkening: 0.16, ..response },
-            layers: standing(55.0, 0.0, true),
+            layers: standing(55.0, 500.0, 0.0, blown_clod),
             ground: sand_ground,
         });
     }
@@ -228,7 +263,7 @@ fn ploughed_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
+            tint: Vec4::new(0.060, 0.034, 0.018, 0.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
             grass: Vec4::new(0.030, 0.082, 0.018, 0.55),
         },
@@ -270,7 +305,7 @@ fn sand_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.245, 0.182, 0.098, 1.0),
+            tint: Vec4::new(0.245, 0.182, 0.098, 0.0),
             grain: Vec4::new(0.16, 0.30, 1.0, 0.22),
             grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
         },

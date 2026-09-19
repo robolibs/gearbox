@@ -129,10 +129,13 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
     let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x51EDu);
     var base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
-    let is_stone = vertex.uv.x < 0.5;
+    // Nought marks a stone, a half a crumb of the ground's own earth, one a
+    // tuft of grass. Only the tufts grow in clumps.
+    let is_tuft = vertex.uv.x > 0.75;
+    let is_stone = vertex.uv.x < 0.25;
     var clump_seed = 0u;
     var out_of_clump = 0.0;
-    if (!is_stone) {
+    if (is_tuft) {
         let cell_m = 0.85;
         let cell = floor(base / cell_m);
         clump_seed = pcg(bitcast<u32>(i32(cell.x)) * 2654435761u ^ bitcast<u32>(i32(cell.y)) * 40503u);
@@ -169,10 +172,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // is ragged with stragglers rather than cut with a knife.
     let luck = rand(id, 12u);
     let grassy = smoothstep(0.42, 0.70, green);
-    if (is_stone && luck < grassy * 0.85) {
+    if (!is_tuft && luck < grassy * 0.85) {
         return culled_vertex();
     }
-    if (!is_stone && luck > grassy) {
+    if (is_tuft && luck > grassy) {
         return culled_vertex();
     }
 
@@ -182,12 +185,18 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let flat = clamp(pressed.x, 0.0, 1.0);
 
     var out: VertexOutput;
-    if (is_stone) {
+    if (!is_tuft) {
         // Mostly grit, a few pebbles, and now and then a stone worth kicking:
         // the size is drawn from a tail, not from a range, and a tyre presses
         // what it rolls over half into the soil.
-        let size = mix(0.003, 0.085, pow(rand(id, 6u), 5.5)) * alive * (1.0 - flat * 0.35);
-        let squat = mix(0.4, 0.72, rand(id, 7u));
+        var size = mix(0.003, 0.085, pow(rand(id, 6u), 5.5)) * alive * (1.0 - flat * 0.35);
+        var squat = mix(0.4, 0.72, rand(id, 7u));
+        // A crumb of earth is smaller than a stone and sits flatter in the
+        // ground, and a wheel crushes it outright rather than pressing it in.
+        if (!is_stone) {
+            size = mix(0.004, 0.042, pow(rand(id, 6u), 3.2)) * alive * (1.0 - flat * 0.8);
+            squat = mix(0.3, 0.6, rand(id, 7u));
+        }
         let local = vertex.position * vec3<f32>(size, size * squat, size);
         let spun = turn * local.xz;
         // Well down into the soil: a stone sitting on top of the ground reads
@@ -213,9 +222,20 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             rock = mix(vec3<f32>(0.262, 0.216, 0.150), vec3<f32>(0.178, 0.152, 0.114), kind);
             spread_of_tone = vec2<f32>(0.82, 1.14);
         }
-        let stone = rock * mix(spread_of_tone.x, spread_of_tone.y, rand(id, 9u));
+        var lump = rock * mix(spread_of_tone.x, spread_of_tone.y, rand(id, 9u));
+        // A crumb is not a stone: it is a piece of the ground it lies on, so
+        // it takes that ground's own colour and only differs in how damp it is.
+        if (!is_stone) {
+            var earth = vec3<f32>(0.115, 0.070, 0.038);
+            if (vertex.uv.y < 0.125) {
+                earth = vec3<f32>(0.060, 0.034, 0.018);
+            } else if (vertex.uv.y > 0.375) {
+                earth = vec3<f32>(0.245, 0.182, 0.098);
+            }
+            lump = earth * mix(0.62, 1.22, rand(id, 9u));
+        }
         let dust = vec3<f32>(0.105, 0.072, 0.044);
-        out.color = vec4<f32>(mix(stone, dust, 0.4 * rand(id, 11u)), 1.0);
+        out.color = vec4<f32>(mix(lump, dust, 0.4 * rand(id, 11u) * f32(is_stone)), 1.0);
         out.shape = vec3<f32>(0.0, vertex.position.y, 0.0);
     } else {
         let stature = mix(0.6, 1.3, pow(rand(clump_seed, 5u), 1.5));
