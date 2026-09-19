@@ -75,9 +75,10 @@ fn within_field(world_xz: vec2<f32>) -> bool {
     return all(world_xz >= field.bounds.xy) && all(world_xz < field.bounds.zw);
 }
 
-fn taken(place: vec2<f32>) -> f32 {
-    let cell = floor(place / 9.0);
-    let f = fract(place / 9.0);
+// Value noise on a lattice of `across` metres.
+fn lattice(place: vec2<f32>, across: f32) -> f32 {
+    let cell = floor(place / across);
+    let f = fract(place / across);
     let ease = f * f * (3.0 - 2.0 * f);
     let corner = array<vec2<f32>, 4>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
     var heights = array<f32, 4>();
@@ -90,6 +91,11 @@ fn taken(place: vec2<f32>) -> f32 {
     let low = mix(heights[0], heights[1], ease.x);
     let high = mix(heights[2], heights[3], ease.x);
     return mix(low, high, ease.y);
+}
+
+// How much of the ground grass has taken. Mirrored in the ground material.
+fn taken(place: vec2<f32>) -> f32 {
+    return lattice(place, 9.0);
 }
 
 // A clump of grass is not a disc: it is longer one way than the other and its
@@ -212,9 +218,16 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.color = vec4<f32>(mix(stone, dust, 0.4 * rand(id, 11u)), 1.0);
         out.shape = vec3<f32>(0.0, vertex.position.y, 0.0);
     } else {
-        let stature = mix(0.55, 1.35, rand(clump_seed, 5u));
-        let domed = 1.0 - out_of_clump * out_of_clump * 0.55;
-        let height = mix(0.11, 0.26, rand(id, 6u)) * stature * domed * alive;
+        let stature = mix(0.45, 1.5, pow(rand(clump_seed, 5u), 1.9));
+        let domed = 1.0 - out_of_clump * out_of_clump * mix(0.25, 0.8, rand(clump_seed, 8u));
+        // Grass does not come up evenly inside a clump: it runs tall in one
+        // corner of it and thin in another, in patches of its own, and the eye
+        // averages out per-tuft randomness that has no shape to it.
+        let uneven = lattice(base, 0.37) * 0.62 + lattice(base + vec2<f32>(37.0, 11.0), 0.14) * 0.38;
+        // Drawn from a tail, not a range: most of a clump is short stuff, with
+        // the odd blade run up well above it.
+        let height = mix(0.045, 0.34, pow(rand(id, 6u), 2.8)) * stature * domed
+            * mix(0.45, 1.5, uneven) * alive;
         let width = mix(0.005, 0.011, rand(id, 7u));
         let t = vertex.position.y;
         let leaf = vertex.position.z - 1.0;
