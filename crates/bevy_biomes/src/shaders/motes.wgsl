@@ -134,7 +134,7 @@ fn grass_colour(place: vec2<f32>) -> vec3<f32> {
     let tint = vec3<f32>(1.0) + species.x * vec3<f32>(-0.12, 0.02, 0.22)
         + species.y * vec3<f32>(-0.25, 0.18, -0.30);
     // A blade off the plant has dried a little: paler and browner than one on it.
-    return vec3<f32>(0.19, 0.31, 0.075) * tint * 2.3 + vec3<f32>(0.18, 0.15, 0.06);
+    return vec3<f32>(0.19, 0.31, 0.075) * tint * 1.15 + vec3<f32>(0.05, 0.04, 0.015);
 }
 
 // How far a place is outside a rectangle; negative inside it.
@@ -225,8 +225,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             return culled();
         }
         let bloom_tint = bloom_colour(u32(bloom.y));
-        let dull = vec3<f32>(dot(bloom_tint, vec3<f32>(0.3, 0.6, 0.1)));
-        tint = mix(bloom_tint, dull, 0.35) * 0.55;
+        // White blooms shed cream, not paper: nothing here is brighter than straw.
+        let creamed = min(bloom_tint, vec3<f32>(0.62, 0.58, 0.46));
+        let dull = vec3<f32>(dot(creamed, vec3<f32>(0.3, 0.6, 0.1)));
+        tint = mix(creamed, dull, 0.45) * 0.62;
         size_scale = select(1.0, 1.7, u32(bloom.y) == 4u);
     } else if (field.kind == LEAF) {
         tint = grass_colour(world.xz);
@@ -313,8 +315,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let day = clamp(sun.y * 4.0, 0.06, 1.0);
     // Lit as the thing it broke off would be: some sky on it, some sun, and
     // darker as it turns edge on. Nothing here makes its own light.
-    let sky = vec3<f32>(0.42, 0.46, 0.54);
-    let colour = in.tint * (sky + sunlight * day * 0.3 * in.shade) * glow;
+    let sky = vec3<f32>(0.30, 0.33, 0.38);
+    let colour = in.tint * (sky + sunlight * day * 0.22 * in.shade) * glow;
     let strength = alpha * field.colour.a;
     return vec4<f32>(colour * strength, strength);
 }
