@@ -28,7 +28,7 @@ impl Plugin for GlobePlugin {
             .add_systems(PreUpdate, adopt_loaded_roots)
             .add_systems(
                 Update,
-                (join_watched_site, travel, orient_sky, seat_planet)
+                (reanchor_machines, join_watched_site, travel, orient_sky, seat_planet)
                     .chain()
                     .before(crate::terrain::TerrainUpdates),
             );
@@ -174,8 +174,17 @@ fn adopt_loaded_roots(
 
 /// A site is left for another once the view rests this far from where it
 /// touches the planet, and an existing site is taken if it touches this near.
-const LEAVE_SITE_M: f64 = 0.8 * gearbox_globe::DATUM_REACH_M;
-const JOIN_SITE_M: f64 = 0.6 * gearbox_globe::DATUM_REACH_M;
+/// `GEARBOX_DATUM_REACH_M` shrinks a datum's reach, to watch re-anchoring happen.
+fn reach() -> f64 {
+    static REACH: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *REACH.get_or_init(|| {
+        std::env::var("GEARBOX_DATUM_REACH_M")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| *value > 100.0)
+            .unwrap_or(gearbox_globe::DATUM_REACH_M)
+    })
+}
 
 impl Sites {
     fn nearest(&self, up: DVec3) -> Option<usize> {
@@ -183,7 +192,7 @@ impl Sites {
 
         (0..self.list.len())
             .map(|index| (index, self.list[index].frame.ground_distance(up)))
-            .filter(|(_, distance)| *distance < JOIN_SITE_M)
+            .filter(|(_, distance)| *distance < (0.6 * reach()))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(index, _)| index)
     }
@@ -231,7 +240,7 @@ fn travel(
     let held = follow.entity.is_some() || fly.target.is_some();
     let destination = match scripted {
         Some(up) => up,
-        None if !held && focus.x.hypot(focus.z) > LEAVE_SITE_M => {
+        None if !held && focus.x.hypot(focus.z) > (0.8 * reach()) => {
             let under = from.geodetic(DVec3::new(focus.x, 0.0, focus.z));
             Geodetic::new(under.latitude, under.longitude, 0.0).ecef()
         }
@@ -443,4 +452,99 @@ impl Sites {
         let y = if asked.altitude.abs() < 0.001 { self.height(region, x, z) } else { asked.altitude as f32 };
         (region, Vec3::new(x, y, z))
     }
+}
+
+/// A machine that has gone far from its datum is given a new one where it is,
+/// so it can go on forever: its bodies, and whatever is hitched to it, are
+/// re-expressed in the new datum through ECEF, velocities and all. Nothing
+/// about where it is on Earth changes.
+fn reanchor_machines(
+    mut commands: Commands,
+    mut sites: ResMut<Sites>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
+    parents: Query<&ChildOf>,
+    loaded: Query<(), With<crate::load::LoadedAsset>>,
+    mut transforms: Query<&mut Transform>,
+) {
+    use rapier3d::math::{Rotation, Vector};
+    const TOGETHER_M: f64 = 1_000.0;
+    let strayed = physics.bodies.iter().find_map(|(_, body)| {
+        let at = body.translation();
+        let (region, local) = site_local(at.x, at.y, at.z);
+        (body.is_dynamic() && region < sites.list.len() && local[0].hypot(local[2]) > 0.8 * reach())
+            .then_some((region, DVec3::from_array(local)))
+    });
+    let Some((from_region, trigger)) = strayed else {
+        return;
+    };
+    let from = sites.list[from_region].frame;
+    let under = from.geodetic(trigger);
+    let ground = Geodetic::new(under.latitude, under.longitude, 0.0).ecef();
+    let to_region = sites.datum_for(&mut commands, ground);
+    if to_region == from_region {
+        return;
+    }
+    let into = sites.list[to_region].frame;
+    let turn = into.rotation.inverse() * from.rotation;
+    let (from_x, to_x) = (
+        gearbox_globe::physics_offset(from_region).x,
+        gearbox_globe::physics_offset(to_region).x,
+    );
+    let physics = physics.as_mut();
+    let moved: Vec<Entity> = physics
+        .entity_to_body
+        .iter()
+        .filter(|(_, handle)| {
+            physics.bodies.get(**handle).is_some_and(|body| {
+                let at = body.translation();
+                let (region, local) = site_local(at.x, at.y, at.z);
+                region == from_region && (DVec3::from_array(local) - trigger).length() < TOGETHER_M
+            })
+        })
+        .map(|(entity, _)| *entity)
+        .collect();
+    let spin = |v: Vector| {
+        let turned = turn * DVec3::new(v.x, v.y, v.z);
+        Vector::new(turned.x, turned.y, turned.z)
+    };
+    for entity in &moved {
+        let Some(body) = physics.entity_to_body.get(entity).and_then(|h| physics.bodies.get_mut(*h)) else {
+            continue;
+        };
+        let mut pose = *body.position();
+        let local = DVec3::new(pose.translation.x - from_x, pose.translation.y, pose.translation.z);
+        let carried = into.from_ecef(from.to_ecef(local));
+        pose.translation = Vector::new(carried.x + to_x, carried.y, carried.z);
+        let q = pose.rotation;
+        let turned = turn * bevy::math::DQuat::from_xyzw(q.x, q.y, q.z, q.w);
+        pose.rotation = Rotation::from_xyzw(turned.x, turned.y, turned.z, turned.w);
+        let (linvel, angvel) = (spin(body.linvel()), spin(body.angvel()));
+        body.set_position(pose, true);
+        body.set_linvel(linvel, true);
+        body.set_angvel(angvel, true);
+    }
+    physics.bodies.propagate_modified_body_positions_to_colliders(&mut physics.colliders);
+    // The roots the bodies hang from change datum with them.
+    let mut roots: Vec<Entity> = moved
+        .iter()
+        .filter_map(|entity| {
+            std::iter::once(*entity).chain(parents.iter_ancestors(*entity)).find(|e| loaded.contains(*e))
+        })
+        .collect();
+    roots.sort();
+    roots.dedup();
+    for root in roots {
+        if let Ok(mut transform) = transforms.get_mut(root) {
+            let carried = into.from_ecef(from.to_ecef(transform.translation.as_dvec3()));
+            transform.translation = carried.as_vec3();
+            transform.rotation = turn.as_quat() * transform.rotation;
+        }
+        commands.entity(root).insert((ChildOf(sites.list[to_region].entity), InDatum(to_region)));
+    }
+    info!(
+        "globe: {} bodies re-anchored to datum {:.5}, {:.5}",
+        moved.len(),
+        into.latitude,
+        into.longitude
+    );
 }

@@ -340,10 +340,8 @@ fn follow_target(
     states: Res<ControllerStates>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
-    mut camera: ParamSet<(
-        bevy::transform::helper::TransformHelper,
-        Query<(&mut ChaseCamera, &mut Transform)>,
-    )>,
+    sites: Query<&crate::globe::Site>,
+    mut camera: ParamSet<(Query<&Transform>, Query<(&mut ChaseCamera, &mut Transform)>)>,
 ) {
     let Some(root) = follow.entity else {
         return;
@@ -358,10 +356,12 @@ fn follow_target(
         return;
     }
     let body = machine_body_entity(root, &inventory, &prims, &parents);
-    let Ok(gt) = camera.p0().compute_global_transform(body) else {
+    // The pose in the machine's own datum, which the view shares while it follows.
+    if !camera.p0().contains(body) {
         follow.set(None);
         return;
-    };
+    }
+    let gt = crate::globe::transform_in_site(body, &parents, &camera.p0(), &sites);
     let current = gt.translation();
     let target_yaw = machine_heading(root, &gt, &inventory, &states) + std::f32::consts::PI;
     // Frame-rate independent exponential smoothing, same shape as the fly's
