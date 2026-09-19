@@ -166,12 +166,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // Mostly grit, a few pebbles, and now and then a stone worth kicking:
         // the size is drawn from a tail, not from a range.
         let size = mix(0.004, 0.115, pow(rand(id, 6u), 4.5)) * alive;
-        let squat = mix(0.3, 0.62, rand(id, 7u));
+        let squat = mix(0.4, 0.72, rand(id, 7u));
         let local = vertex.position * vec3<f32>(size, size * squat, size);
         let spun = turn * local.xz;
         // Well down into the soil: a stone sitting on top of the ground reads
         // as dropped there rather than turned up out of it.
-        let sunk = size * squat * mix(0.42, 0.78, rand(id, 8u));
+        let sunk = size * squat * mix(0.3, 0.62, rand(id, 8u));
         out.world_position = vec4<f32>(ground + vec3<f32>(spun.x, local.y - sunk, spun.y), 1.0);
         let spun_n = turn * vertex.normal.xz;
         out.world_normal = normalize(vec3<f32>(spun_n.x, vertex.normal.y, spun_n.y));

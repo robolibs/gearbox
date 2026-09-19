@@ -31,9 +31,14 @@ fn pebble() -> Mesh {
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut indices = Vec::new();
+    // A hash, not a sine: one sine of `step` turns the same amount every face
+    // and dents the stone in and out by turns, which carves it into a starfish.
     let dent = |ring: u32, step: u32| {
-        let n = (ring * 7 + step * 13) as f32;
-        0.58 + 0.42 * ((n * 1.7).sin() * 0.5 + 0.5)
+        let mut h = ring.wrapping_mul(0x9E37_79B9) ^ step.wrapping_mul(0x85EB_CA6B);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        h ^= h >> 12;
+        0.76 + 0.24 * (h as f32 / u32::MAX as f32)
     };
     for ring in 0..=RINGS {
         let v = ring as f32 / RINGS as f32;

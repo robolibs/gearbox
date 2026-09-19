@@ -97,8 +97,9 @@ fn taken(place: vec2<f32>) -> f32 {
     return mix(low, high, ease.y);
 }
 
-// Whether this pixel lies under a clump of grass: the clump cells the tufts
-// are drawn in, read back from the ground's side.
+// How far this pixel lies from the middle of the nearest clump of grass, as a
+// share of that clump's own spread: the clump cells the tufts are drawn in,
+// read back from the ground's side. Under a metre, and it is in the clump.
 fn under_clumps(place: vec2<f32>) -> f32 {
     let cell_m = 0.85;
     let cell = floor(place / cell_m);
@@ -115,7 +116,7 @@ fn under_clumps(place: vec2<f32>) -> f32 {
             nearest = min(nearest, length(place - middle) / spread);
         }
     }
-    return 1.0 - smoothstep(0.5, 1.2, nearest);
+    return nearest;
 }
 
 // One cell's reading of a scan, taken from its own corner of it and turned
@@ -317,6 +318,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     // Grass takes the ground in patches, and holds it where it is tallest.
     var grass_share = 0.0;
+    var shade_of_clumps = 1.0;
     if (ground.grass.w > 0.001) {
         let grown = taken(place);
         // A tuft only stands here if the patch it is in lets it, so the ground
@@ -326,7 +328,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // the pixel that looks at them and what is left is a wash of green over
         // the patch. Drawing the dots at that range only speckles the ground.
         let spread_out = grassy * ground.grass.w;
-        let took = max(under_clumps(place) * spread_out, spread_out * 0.5 * (1.0 - close));
+        let away = under_clumps(place);
+        let took = max((1.0 - smoothstep(0.5, 1.2, away)) * spread_out,
+            spread_out * 0.5 * (1.0 - close));
+        // A clump keeps the sky off the ground around its foot. Nothing here
+        // casts a shadow, so the ground has to darken itself, or every clump
+        // looks stuck on rather than grown out of it.
+        shade_of_clumps = mix(1.0, 0.66, (1.0 - smoothstep(0.7, 2.1, away)) * spread_out);
         let tufts = ground_fbm(place / 0.38 + vec2<f32>(8.0, 14.0), 2);
         let blades = mix(0.5, ground_fbm(place / 0.09, 2), close);
         let grass_height = tufts * 0.7 + blades * 0.3;
@@ -341,6 +349,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         colour = met.rgb;
         grass_share = met.a;
     }
+
+    colour *= shade_of_clumps;
 
     // Where a wheel has passed the ground is pressed flat and darkened.
     let pressed = sample_wheels(tracks, wheels, place);
