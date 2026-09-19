@@ -75,8 +75,6 @@ fn within_field(world_xz: vec2<f32>) -> bool {
     return all(world_xz >= field.bounds.xy) && all(world_xz < field.bounds.zw);
 }
 
-// Where grass has taken the ground back. The same reading the soil under it
-// makes, so the tufts stand where the soil shows green.
 fn taken(place: vec2<f32>) -> f32 {
     let cell = floor(place / 9.0);
     let f = fract(place / 9.0);
@@ -94,19 +92,17 @@ fn taken(place: vec2<f32>) -> f32 {
     return mix(low, high, ease.y);
 }
 
-// The outline of a clump, as a radius against the bearing you look along it.
 // A clump of grass is not a disc: it is longer one way than the other and its
-// edge runs in and out. Both this and `clump_frame` are mirrored in the ground
-// material, which has to agree with it pixel for pixel.
+// edge runs in and out. This and `clump_frame` are mirrored in the ground
+// material, which has to agree with them pixel for pixel.
 fn clump_edge(about: f32, seed: u32) -> f32 {
     let a = rand(seed, 30u) * 6.2831853;
     let b = rand(seed, 31u) * 6.2831853;
     return max(1.0 + 0.44 * sin(about * 3.0 + a) + 0.26 * sin(about * 5.0 + b), 0.3);
 }
 
-// Which way a clump lies and how far it is drawn out along that way. The
-// bearing is shared by every clump in a five-metre square, so neighbouring
-// clumps run parallel and grow together into ribbons instead of spots.
+// The bearing is shared by every clump in a five-metre square, so neighbours
+// run parallel and grow together into ribbons instead of scattered spots.
 fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     let run = floor(cell * cell_m / 5.0);
     var h = u32(i32(run.x)) * 0x9E3779B9u ^ u32(i32(run.y)) * 0xC2B2AE35u;
@@ -127,8 +123,6 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
     let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x51EDu);
     var base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
-    // Grass grows in clumps with bare ground between them, so a tuft is drawn
-    // most of the way to the middle of the clump it belongs to.
     let is_stone = vertex.uv.x < 0.5;
     var clump_seed = 0u;
     var out_of_clump = 0.0;
@@ -136,8 +130,6 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         let cell_m = 0.85;
         let cell = floor(base / cell_m);
         clump_seed = pcg(bitcast<u32>(i32(cell.x)) * 2654435761u ^ bitcast<u32>(i32(cell.y)) * 40503u);
-        // The clump sits anywhere in its cell, not at the middle of it, or the
-        // grass comes up in rows like a crop.
         let middle = (cell + vec2<f32>(rand(clump_seed, 1u), rand(clump_seed, 2u))) * cell_m;
         // Some ground has no clump at all, and no two clumps are as tight.
         if (rand(clump_seed, 3u) < 0.30) {
@@ -147,8 +139,6 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         let frame = clump_frame(cell, cell_m, clump_seed);
         let along = frame.xy;
         let about = rand(id, 20u) * 6.2831853;
-        // A point inside the clump's own outline, then drawn out along the way
-        // the clump lies.
         let out_by = sqrt(rand(id, 21u)) * clump_edge(about, clump_seed);
         let inside = vec2<f32>(cos(about), sin(about)) * out_by * spread;
         base = middle + along * inside.x * frame.z + vec2<f32>(-along.y, along.x) * inside.y;
@@ -187,12 +177,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     var out: VertexOutput;
     if (is_stone) {
-        // Stones are of a size, lie on their broadest face, and sit down into
-        // the ground rather than on it.
         // Mostly grit, a few pebbles, and now and then a stone worth kicking:
-        // the size is drawn from a tail, not from a range.
-        // A tyre presses what it rolls over down into the soil, so a stone in
-        // a wheel mark is a stone half gone.
+        // the size is drawn from a tail, not from a range, and a tyre presses
+        // what it rolls over half into the soil.
         let size = mix(0.003, 0.085, pow(rand(id, 6u), 5.5)) * alive * (1.0 - flat * 0.35);
         let squat = mix(0.4, 0.72, rand(id, 7u));
         let local = vertex.position * vec3<f32>(size, size * squat, size);
@@ -203,9 +190,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_position = vec4<f32>(ground + vec3<f32>(spun.x, local.y - sunk, spun.y), 1.0);
         let spun_n = turn * vertex.normal.xz;
         out.world_normal = normalize(vec3<f32>(spun_n.x, vertex.normal.y, spun_n.y));
-        // No two stones are the same stone: some flint, some sandstone. All of
-        // them warm, though — a stone lying in soil is stained by it, and a
-        // cold grey one reads as a pebble washed up on a beach.
+        // All of them warm: a stone lying in soil is stained by it, and a cold
+        // grey one reads as a pebble washed up on a beach.
         let kind = rand(id, 10u);
         var rock = vec3<f32>(0.088, 0.078, 0.066);
         if (kind < 0.34) {
@@ -222,22 +208,17 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             spread_of_tone = vec2<f32>(0.82, 1.14);
         }
         let stone = rock * mix(spread_of_tone.x, spread_of_tone.y, rand(id, 9u));
-        // Dust settles on whatever faces the sky, so the top of a stone is
-        // nearer the colour of the ground than the stone's own.
         let dust = vec3<f32>(0.105, 0.072, 0.044);
         out.color = vec4<f32>(mix(stone, dust, 0.4 * rand(id, 11u)), 1.0);
         out.shape = vec3<f32>(0.0, vertex.position.y, 0.0);
     } else {
-        // A tuft leans downwind and lies flat where a wheel has been over it.
-        // The clump has its own stature, and every leaf in it its own.
         let stature = mix(0.55, 1.35, rand(clump_seed, 5u));
         let domed = 1.0 - out_of_clump * out_of_clump * 0.55;
         let height = mix(0.11, 0.26, rand(id, 6u)) * stature * domed * alive;
         let width = mix(0.005, 0.011, rand(id, 7u));
         let t = vertex.position.y;
         let leaf = vertex.position.z - 1.0;
-        // Each leaf of the tuft stands on its own bearing and bows outward,
-        // and every one tapers from its base to a point.
+        // Each leaf on its own bearing, bowing outward and tapering to a point.
         let bearing = yaw + leaf * 2.3999632 + rand(id, 13u) * 0.6;
         let out_of = vec2<f32>(cos(bearing), sin(bearing));
         let taper = width * (1.0 - t * t * 0.94);
@@ -250,16 +231,14 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             + (lean + roll) * height;
         out.world_position = vec4<f32>(ground + stand, 1.0);
         out.world_normal = ground_normal;
-        // Darker at the root, and no two tufts the same green.
         let blade = mix(0.5, 1.15, rand(id, 9u)) * mix(0.5, 1.0, t)
             * (1.0 - flat * field.wheels.darkening);
-        // A clump at the thin edge of a patch is a clump short of water, and
-        // it goes over to straw before the ones in the thick of it do.
+        // A clump at the thin edge of a patch is short of water, and goes over
+        // to straw — tips first — before those in the thick of it.
         let thirst = 1.0 - smoothstep(0.40, 0.88, green);
         let dry = clamp(rand(clump_seed, 6u) * 0.5 + thirst * 0.55, 0.0, 1.0);
         let fresh = vec3<f32>(0.026, 0.082, 0.018);
         let straw = vec3<f32>(0.115, 0.088, 0.030);
-        // The tips go first, so a drying clump is straw-headed and green-footed.
         let hue = mix(fresh, straw, clamp(dry * mix(0.55, 1.15, t), 0.0, 1.0));
         out.color = vec4<f32>(hue * blade * mix(0.82, 1.2, rand(clump_seed, 7u))
             * mix(0.92, 1.08, rand(id, 15u)), 1.0);
@@ -272,9 +251,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    // A tuft is cut out of its quad into blades; a stone is solid.
-    // A leaf is already tapered in its shape; the edges of it are only
-    // softened so it does not end in a hard line of pixels.
+    // A leaf is tapered in its shape already; its edges are only softened so
+    // it does not end in a hard line of pixels. A stone is solid.
     var alpha = 1.0;
     if (in.shape.x > 0.5) {
         let across = abs(in.shape.z);

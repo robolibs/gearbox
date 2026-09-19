@@ -2,13 +2,12 @@
 //!
 //! One ground serves sand, dirt and ploughed earth alike; they differ in
 //! their colour, how coarse their clods are and whether the wind has combed
-//! ripples into them. It carries wheel marks like any field, and it borrows
-//! the soil scans the stubble field already ships rather than its own.
+//! ripples into them. None of it is read from a photograph: the soil is made
+//! in the shader, and what stands in it — stones and tufts of grass — is
+//! instanced geometry placed from its own number.
 
 use std::sync::Arc;
 
-use bevy::asset::AssetServer;
-use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -147,15 +146,6 @@ type BareMaterial = ExtendedMaterial<StandardMaterial, BareExtension>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 struct BareExtension {
-    #[texture(100)]
-    #[sampler(101)]
-    soil_albedo: Handle<Image>,
-    #[texture(102)]
-    soil_height: Handle<Image>,
-    #[texture(103)]
-    grit_albedo: Handle<Image>,
-    #[texture(104)]
-    grit_height: Handle<Image>,
     #[texture(105, sample_type = "u_int")]
     trample: Handle<Image>,
     #[uniform(106)]
@@ -194,8 +184,8 @@ impl Plugin for BarePlugin {
         bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
         app.add_plugins(MaterialPlugin::<BareMaterial>::default());
-        // Nothing stands in it, so it has no vegetation layers at all: the
-        // whole of it is its ground.
+        // A worn track recovers slowly and marks deeply; sand holds a wheel
+        // mark just as long but hardly darkens where it has been pressed.
         let response = WheelResponse {
             recovery_seconds: 900.0,
             bend: 0.9,
@@ -296,12 +286,7 @@ fn ground(
     bare: BareGround,
     roughness: f32,
 ) -> Arc<dyn GroundSurface> {
-    let assets = world.resource::<AssetServer>();
     let extension = BareExtension {
-        soil_albedo: soil(assets, "soil_albedo", true),
-        soil_height: soil(assets, "soil_height", false),
-        grit_albedo: soil(assets, "detail_albedo", true),
-        grit_height: soil(assets, "detail_height", false),
         trample,
         trample_params,
         heightmap: geometry.heightmap,
@@ -319,19 +304,4 @@ fn ground(
             extension,
         });
     Arc::new(MaterialSurface(material))
-}
-
-fn soil(assets: &AssetServer, name: &str, srgb: bool) -> Handle<Image> {
-    assets
-        .load_with_settings(
-            format!("embedded://gearbox_fields/harvested_wheat/textures/{name}.jpg"),
-            move |settings: &mut ImageLoaderSettings| {
-                settings.is_srgb = srgb;
-                settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-                    address_mode_u: ImageAddressMode::Repeat,
-                    address_mode_v: ImageAddressMode::Repeat,
-                    ..ImageSamplerDescriptor::linear()
-                });
-            },
-        )
 }

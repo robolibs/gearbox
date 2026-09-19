@@ -1,10 +1,7 @@
-// Bare soil: no blades, so all of it has to come from the ground itself.
-//
-// Two readings of one scan at unrelated scales, each taken from a different
-// corner of it per cell so the eye never finds the tile; a height built from
-// the same readings, and the normal taken from that height rather than from
-// a scan, so clods catch the light from whichever side it comes; and, where
-// the wind has combed the ground, ripples across the slope.
+// Bare soil, made rather than scanned, so there is no tile to find in it at
+// any range: a swell, clods in three sizes, grit under them, and the comb of a
+// plough or of the wind. Anything finer than the pixel looking at it is left
+// out rather than drawn, or the ground crawls with static.
 
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
@@ -14,11 +11,6 @@
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var soil_albedo: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var soil_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var soil_height: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var grit_albedo: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var grit_height: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var surface_heightmap: texture_2d<f32>;
@@ -27,14 +19,12 @@
 struct BareGround {
     tint: vec4<f32>,
     grain: vec4<f32>,
-    // The grass that grows through it, and how much of the ground it holds.
     grass: vec4<f32>,
 };
 
-// Two surfaces met by their own heights, not faded into one another: the
-// taller of the two wins a pixel outright, and only within a shallow band of
-// each other do they mix. It is what puts soil in the gaps between tufts
-// instead of a grey halo round every patch.
+// Two surfaces met by their own heights: the taller wins the pixel outright,
+// and they mix only within a shallow band. Fading them instead leaves a grey
+// halo round every patch of grass.
 fn height_blend(a: vec3<f32>, a_height: f32, a_share: f32,
     b: vec3<f32>, b_height: f32, b_share: f32) -> vec4<f32> {
     let band = 0.2;
@@ -47,10 +37,8 @@ fn height_blend(a: vec3<f32>, a_height: f32, a_share: f32,
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var<uniform> ground: BareGround;
 
-// A hash of whole numbers, mixed bit by bit. The usual `fract(sin(dot(..)))`
-// is not a hash at all at these coordinates: its own periods beat against the
-// lattice and draw rings and whorls across the ground, which is what put
-// fingerprints in the soil.
+// The usual `fract(sin(dot(..)))` is not a hash at these coordinates: its own
+// periods beat against the lattice and draw whorls across the ground.
 fn hash21(p: vec2<f32>) -> f32 {
     let i = vec2<i32>(floor(p + 0.5));
     var h = u32(i.x) * 0x9E3779B9u ^ u32(i.y) * 0x85EBCA6Bu;
@@ -66,9 +54,9 @@ fn smooth2(v: vec2<f32>) -> vec2<f32> {
     return v * v * (3.0 - 2.0 * v);
 }
 
-// The same hashes the tufts standing in this ground are placed by, so the
-// green the ground is stained is the green the tufts are, and nothing changes
-// colour when they fade out at the far end of their reach.
+// The hashes the tufts standing in this ground are placed by, copied from the
+// vegetation shader. The two must stay in step or the ground is green where
+// nothing grows.
 fn pcg(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
     let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -79,7 +67,6 @@ fn seeded(seed: u32, salt: u32) -> f32 {
     return f32(pcg(seed ^ (salt * 0x9E3779B9u))) / 4294967295.0;
 }
 
-// How much of the ground grass has taken, in patches nine metres across.
 fn taken(place: vec2<f32>) -> f32 {
     let cell = floor(place / 9.0);
     let f = fract(place / 9.0);
@@ -97,9 +84,6 @@ fn taken(place: vec2<f32>) -> f32 {
     return mix(low, high, ease.y);
 }
 
-// The outline of a clump and the way it lies. Both are copied from the
-// vegetation shader that places the tufts, and the two must stay in step or
-// the ground is green where nothing grows.
 fn clump_edge(about: f32, seed: u32) -> f32 {
     let a = seeded(seed, 30u) * 6.2831853;
     let b = seeded(seed, 31u) * 6.2831853;
@@ -114,10 +98,9 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, seeded(seed, 33u)));
 }
 
-// How far this pixel lies from the middle of the nearest clump of grass, as a
-// share of that clump's own reach along the bearing it lies on. Under one, and
-// it is inside the clump. The search runs two cells out because a clump drawn
-// out three times its width reaches well past its own.
+// Distance to the nearest clump, as a share of its reach along its own
+// bearing: under one is inside it. Two cells out, because an elongated clump
+// reaches well past the cell it was seeded in.
 fn under_clumps(place: vec2<f32>) -> f32 {
     let cell_m = 0.85;
     let cell = floor(place / cell_m);
@@ -133,8 +116,6 @@ fn under_clumps(place: vec2<f32>) -> f32 {
             let spread = mix(0.1, 0.3, seeded(seed, 4u));
             let frame = clump_frame(c, cell_m, seed);
             let off = place - middle;
-            // Into the clump's own frame, and squashed back along its length so
-            // the outline can be read as a radius.
             let local = vec2<f32>(dot(off, frame.xy) / frame.z,
                 dot(off, vec2<f32>(-frame.y, frame.x))) / spread;
             let about = atan2(local.y, local.x);
@@ -144,42 +125,12 @@ fn under_clumps(place: vec2<f32>) -> f32 {
     return nearest;
 }
 
-// One cell's reading of a scan, taken from its own corner of it and turned
-// by its own quarter, so neighbouring cells never show the same piece twice.
-fn cell_read(tex: texture_2d<f32>, uv: vec2<f32>, cell: vec2<f32>, seed: f32) -> vec4<f32> {
-    let pick = hash21(cell + seed);
-    let turn = floor(pick * 4.0) * 1.5707963;
-    let offset = vec2<f32>(hash21(cell + seed + 3.7), hash21(cell + seed + 9.1));
-    let centred = uv - cell - vec2<f32>(0.5);
-    let turned = vec2<f32>(
-        centred.x * cos(turn) - centred.y * sin(turn),
-        centred.x * sin(turn) + centred.y * cos(turn),
-    );
-    return textureSample(tex, soil_sampler, turned + offset);
-}
-
-// The scan read without its tile: four cells' readings blended across.
-fn scattered(tex: texture_2d<f32>, uv: vec2<f32>, seed: f32) -> vec4<f32> {
-    let cell = floor(uv);
-    let f = smooth2(fract(uv));
-    let a = cell_read(tex, uv, cell, seed);
-    let b = cell_read(tex, uv, cell + vec2<f32>(1.0, 0.0), seed);
-    let c = cell_read(tex, uv, cell + vec2<f32>(0.0, 1.0), seed);
-    let d = cell_read(tex, uv, cell + vec2<f32>(1.0, 1.0), seed);
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-// Ripples the wind has combed across the ground, running with the slope and
-// only where the ground is near enough level to hold them.
-// The comb across bare ground: a plough's furrows, or the wind's ripples.
-// One heading to a plot, dead straight, because steering it by the lie of the
-// land curls furrows into whorls. But no two furrows are the same depth, and
-// none of them runs perfectly true along its length.
+// The comb across bare ground: a plough's furrows, or the wind's ripples. One
+// heading to a plot, dead straight — steering it by the lie of the land curls
+// the furrows into whorls.
 struct Comb {
     crest: f32,
-    // How deep this furrow is cut, against its neighbours.
     depth: f32,
-    // Nought on the headland where the plough turned, one out in the field.
     worked: f32,
 };
 
@@ -188,25 +139,20 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
     let heading = hash21(plot) * 3.1415927;
     let lean = vec2<f32>(cos(heading), sin(heading));
     let along = dot(place, lean);
-    // The line of it wanders a little, as a tractor does — and a wind ripple
-    // wanders more. Three waves that do not divide into one another, so the
-    // wander never comes back round to where it started.
+    // Three waves that do not divide into one another, so the line never comes
+    // back round to where it started.
     let wander = sin(along * 0.11 + hash21(plot + 3.0) * 6.28) * 0.22
         + sin(along * 0.037 + 1.9) * 0.3
         + sin(along * 0.0143 + hash21(plot + 11.0) * 6.28) * 0.5;
     let across = dot(place, vec2<f32>(-lean.y, lean.x)) / max(spacing, 0.05) + wander;
     let furrow = floor(across);
-    // The headland: a turning strip round the edge of the plot, worked over
-    // rather than drawn through.
     let within = abs(fract(place / plot_m) - vec2<f32>(0.5)) * 2.0;
     let edge = max(within.x, within.y);
     var comb: Comb;
-    // Nought at the line between one furrow and the next. A crest that is half
-    // way up there instead steps wherever two furrows are cut to different
-    // depths, and the step draws a hairline crack the length of the field.
+    // Nought at the line between one furrow and the next: a crest half way up
+    // there steps wherever two furrows differ in depth, and the step draws a
+    // hairline crack the length of the field.
     comb.crest = 0.5 - 0.5 * cos(across * 6.2831853);
-    // Not the same all the way along: a furrow shallows and deepens over its
-    // length, and a ripple dies out altogether and picks up again further on.
     let run = along / max(spacing * 18.0, 2.0);
     let stretch = floor(run);
     let into = smooth2(vec2<f32>(run - stretch)).x;
@@ -220,9 +166,9 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
     return comb;
 }
 
-// Gradient noise, not value noise: value noise on a square lattice lays its
-// own grid through everything stacked on it, and the bias shows at 45 and 90
-// degrees. Each octave is turned against the last for the same reason.
+// Gradient noise, not value noise: value noise on a square lattice lays its own
+// grid through everything stacked on it, biased to 45 and 90 degrees. Each
+// octave is turned against the last for the same reason.
 fn slope_of(cell: vec2<f32>) -> vec2<f32> {
     let angle = hash21(cell) * 6.2831853;
     return vec2<f32>(cos(angle), sin(angle));
@@ -254,10 +200,9 @@ fn ground_fbm(p: vec2<f32>, octaves: i32) -> f32 {
     return sum / weight;
 }
 
-// A clod is a lump of earth, which is a cell and not a hump of noise: each
-// belongs to the seed nearest it, and it stands highest at its middle and
-// falls to nothing where it meets its neighbours. The difference between the
-// two nearest seeds gives that shape directly.
+// A clod is a cell, not a hump of noise: it belongs to the seed nearest it and
+// falls to nothing where it meets its neighbours, which is what the gap
+// between the two nearest seeds gives directly.
 fn clods(p: vec2<f32>) -> f32 {
     let cell = floor(p);
     let f = p - cell;
@@ -279,19 +224,14 @@ fn clods(p: vec2<f32>) -> f32 {
             }
         }
     }
-    // Rounded, not peaked: the raw gap between the two nearest seeds leaves a
-    // ridge at every border and the ground reads as faceted glass.
     let gap = clamp(next - nearest, 0.0, 1.0);
     let lump = gap * gap * (3.0 - 2.0 * gap);
-    // The borders of the cells make one unbroken net across the ground, which
-    // reads as crazy paving. Softening each cell by its own roll breaks the
-    // net without losing the lumps.
+    // Scaled by the owning seed's own roll: otherwise the cell borders make one
+    // unbroken net and the ground reads as crazy paving.
     return lump * mix(0.3, 1.0, hash21(owner + vec2<f32>(7.7, 1.3)));
 }
 
 
-// Bare ground: the swell of it, the clods lying on it in two sizes, the crumb
-// between them, and the comb of the plough or the wind across the lot.
 fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     let clod = max(ground.grain.x, 0.05);
     // Furrows narrower than the pixel that looks at them are not drawn. Left
@@ -299,21 +239,16 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     let combed_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
     let swell = ground_fbm(place / 26.0, 3);
     let coarseness = ground_fbm(place / 5.5 + vec2<f32>(31.0, 17.0), 2);
-    // Far apart in size, and not the same amount of each everywhere.
     let slabs = clods(place / (clod * 3.2));
     let lumps = clods(place / (clod * 0.9) + vec2<f32>(17.0, 4.0));
     let crumb = mix(0.5, ground_fbm(place / (clod * 0.22), 2), close);
-    // Under the clods, the grit: too small to make a shape of its own, but it
-    // is the whole of what the ground looks like from a step away.
     let grit = mix(0.5, clods(place / (clod * 0.25) + vec2<f32>(3.0, 29.0)), close);
     let drawn = comb(place, ground.grain.w, 128.0);
     let combed = drawn.crest * drawn.depth * drawn.worked;
-    // Where the plough turned, it left broken ground instead of furrows.
     let broken = 1.0 + (1.0 - drawn.worked) * 1.4;
     return swell * 0.08
-        // The furrows are the ground's shape; the clods only lie on them. How
-        // deep a comb cuts goes with how far apart its teeth are, so a plough's
-        // furrow is a trench and the wind's ripple is a wrinkle.
+        // How deep a comb cuts goes with how far apart its teeth are: a plough
+        // cuts a trench, the wind wrinkles.
         + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62) * combed_seen
         + slabs * ground.grain.y * mix(0.04, 0.12, coarseness) * broken
         + lumps * ground.grain.y * mix(0.12, 0.04, coarseness) * broken
@@ -326,54 +261,39 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let place = in.world_position.xz;
 
-    // The ground's own shape, so the clods lie along the land and not across it.
     let land = surface_geometry_normal(surface_heightmap, geometry, place, in.world_normal);
     let slope = vec2<f32>(land.x, land.z);
 
     var colour = vec3<f32>(0.0);
-    // Grain finer than the pixel that sees it is left out, not drawn: it
-    // would only come back as a crawl of static.
     let pixel_m = max(fwidth(place.x), fwidth(place.y));
     let close = 1.0 - smoothstep(0.09, 0.42, pixel_m);
-    // Patches of damper, coarser ground lie through the drier: the colour is
-    // made of the same noise the shape is, so they agree.
     let clod = max(ground.grain.x, 0.05);
     let patchy = ground_fbm(place / 7.0 + vec2<f32>(3.3, 8.8), 3);
     let speck = mix(0.5, ground_fbm(place / (clod * 0.3), 2), close);
-    // A crest dries pale; the trough beside it stays damp and dark.
     let shade = comb(place, ground.grain.w, 128.0);
-    // Faded out at the range where the furrows are finer than the pixel, as
-    // their shape is: a stripe of albedo moirés just as readily.
     let stripes_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
     let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
     colour = ground.tint.rgb * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
         * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
 
-    // Grass takes the ground in patches, and holds it where it is tallest.
     var grass_share = 0.0;
     var shade_of_clumps = 1.0;
     if (ground.grass.w > 0.001) {
         let grown = taken(place);
-        // A tuft only stands here if the patch it is in lets it, so the ground
-        // is green by the same measure: the clump, thinned by the patch.
         let grassy = smoothstep(0.42, 0.70, grown);
-        // Near to, each clump is its own; far off, the clumps are smaller than
-        // the pixel that looks at them and what is left is a wash of green over
-        // the patch. Drawing the dots at that range only speckles the ground.
+        // Near to, each clump is its own; far off they are smaller than a pixel
+        // and drawing them only speckles the ground, so a wash is left instead.
         let spread_out = grassy * ground.grass.w;
         let away = under_clumps(place);
         let took = max((1.0 - smoothstep(0.72, 1.06, away)) * spread_out * close,
             spread_out * 0.5 * (1.0 - close));
-        // A clump keeps the sky off the ground around its foot. Nothing here
-        // casts a shadow, so the ground has to darken itself, or every clump
-        // looks stuck on rather than grown out of it.
+        // Nothing here casts a shadow, so the ground darkens itself round the
+        // foot of a clump, or the clump looks stuck on rather than grown.
         shade_of_clumps = mix(1.0, 0.66, (1.0 - smoothstep(0.9, 1.8, away)) * spread_out);
         let tufts = ground_fbm(place / 0.38 + vec2<f32>(8.0, 14.0), 2);
         let blades = mix(0.5, ground_fbm(place / 0.09, 2), close);
         let grass_height = tufts * 0.7 + blades * 0.3;
-        // Thin grass at the edge of a patch is grass short of water, as the
-        // tufts standing in it are.
         let thirst = 1.0 - smoothstep(0.40, 0.88, grown);
         let straw = vec3<f32>(0.115, 0.088, 0.030);
         let green = mix(ground.grass.rgb, straw, clamp(0.3 + thirst * 0.55, 0.0, 1.0))
@@ -386,35 +306,27 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     colour *= shade_of_clumps;
 
-    // Where a wheel has passed the ground is pressed flat and darkened.
     let pressed = sample_wheels(tracks, wheels, place);
     let rolled = clamp(pressed.x, 0.0, 1.0);
     colour *= 1.0 - rolled * wheels.darkening;
 
-    // The normal from the height itself: a step to each side, and the cross
-    // of what that leaves. Clods lit from the side read as clods.
-    // The step is taken no finer than the pixel can see, so the relief fades
-    // out with distance instead of boiling.
+    // The normal from the height itself, stepped no finer than the pixel can
+    // see so the relief fades with distance instead of boiling.
     let step = max(max(clod * 0.07, 0.014), pixel_m * 0.7);
     let pressed_down = 1.0 - rolled * 0.75;
     let here = made_relief(place, close, pixel_m) * pressed_down;
     let east = made_relief(place + vec2<f32>(step, 0.0), close, pixel_m) * pressed_down;
     let north = made_relief(place + vec2<f32>(0.0, step), close, pixel_m) * pressed_down;
-    // The slope of that height, taken across a step of it.
     let bumps = normalize(vec3<f32>((here - east) * 0.5, step, (here - north) * 0.5));
     let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0));
 
-    // Hollows between the clods keep the light out of them.
-    // What stands proud catches the light; the hollows between keep it out.
     let pit = clamp(0.82 + here * 1.1, 0.7, 1.22);
 
     pbr_input.material.base_color = vec4<f32>(colour * pit, 1.0);
-    // Sand glitters a little where its grains face the light.
     let glint = (ground_noise(place / (clod * 0.08)) - 0.5) * 0.18 * close;
     pbr_input.material.perceptual_roughness = clamp(mix(0.95, 0.78, rolled) + glint, 0.35, 1.0);
-    // Soil is not a dielectric with a polished surface. Left at the default,
-    // the sheen off it is worth more than the earth's own colour and the
-    // ground comes out grey whatever it is tinted.
+    // Left at the default, the sheen off the soil is worth more than the earth's
+    // own colour and the ground comes out grey whatever it is tinted.
     pbr_input.material.reflectance = vec3<f32>(0.03);
     pbr_input.world_normal = shaped;
     pbr_input.N = shaped;
