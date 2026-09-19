@@ -97,23 +97,48 @@ fn taken(place: vec2<f32>) -> f32 {
     return mix(low, high, ease.y);
 }
 
+// The outline of a clump and the way it lies. Both are copied from the
+// vegetation shader that places the tufts, and the two must stay in step or
+// the ground is green where nothing grows.
+fn clump_edge(about: f32, seed: u32) -> f32 {
+    let a = seeded(seed, 30u) * 6.2831853;
+    let b = seeded(seed, 31u) * 6.2831853;
+    return max(1.0 + 0.44 * sin(about * 3.0 + a) + 0.26 * sin(about * 5.0 + b), 0.3);
+}
+
+fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
+    let run = floor(cell * cell_m / 5.0);
+    var h = u32(i32(run.x)) * 0x9E3779B9u ^ u32(i32(run.y)) * 0xC2B2AE35u;
+    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 13u);
+    let lie = f32(h) / 4294967295.0 * 3.1415927 + (seeded(seed, 32u) - 0.5) * 0.7;
+    return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, seeded(seed, 33u)));
+}
+
 // How far this pixel lies from the middle of the nearest clump of grass, as a
-// share of that clump's own spread: the clump cells the tufts are drawn in,
-// read back from the ground's side. Under a metre, and it is in the clump.
+// share of that clump's own reach along the bearing it lies on. Under one, and
+// it is inside the clump. The search runs two cells out because a clump drawn
+// out three times its width reaches well past its own.
 fn under_clumps(place: vec2<f32>) -> f32 {
     let cell_m = 0.85;
     let cell = floor(place / cell_m);
     var nearest = 1000.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
             let c = cell + vec2<f32>(f32(dx), f32(dy));
             let seed = pcg(bitcast<u32>(i32(c.x)) * 2654435761u ^ bitcast<u32>(i32(c.y)) * 40503u);
-            if (seeded(seed, 3u) < 0.38) {
+            if (seeded(seed, 3u) < 0.30) {
                 continue;
             }
             let middle = (c + vec2<f32>(seeded(seed, 1u), seeded(seed, 2u))) * cell_m;
             let spread = mix(0.1, 0.3, seeded(seed, 4u));
-            nearest = min(nearest, length(place - middle) / spread);
+            let frame = clump_frame(c, cell_m, seed);
+            let off = place - middle;
+            // Into the clump's own frame, and squashed back along its length so
+            // the outline can be read as a radius.
+            let local = vec2<f32>(dot(off, frame.xy) / frame.z,
+                dot(off, vec2<f32>(-frame.y, frame.x))) / spread;
+            let about = atan2(local.y, local.x);
+            nearest = min(nearest, length(local) / clump_edge(about, seed));
         }
     }
     return nearest;
@@ -338,12 +363,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // the patch. Drawing the dots at that range only speckles the ground.
         let spread_out = grassy * ground.grass.w;
         let away = under_clumps(place);
-        let took = max((1.0 - smoothstep(0.5, 1.2, away)) * spread_out * close,
+        let took = max((1.0 - smoothstep(0.72, 1.06, away)) * spread_out * close,
             spread_out * 0.5 * (1.0 - close));
         // A clump keeps the sky off the ground around its foot. Nothing here
         // casts a shadow, so the ground has to darken itself, or every clump
         // looks stuck on rather than grown out of it.
-        shade_of_clumps = mix(1.0, 0.66, (1.0 - smoothstep(0.7, 2.1, away)) * spread_out);
+        shade_of_clumps = mix(1.0, 0.66, (1.0 - smoothstep(0.9, 1.8, away)) * spread_out);
         let tufts = ground_fbm(place / 0.38 + vec2<f32>(8.0, 14.0), 2);
         let blades = mix(0.5, ground_fbm(place / 0.09, 2), close);
         let grass_height = tufts * 0.7 + blades * 0.3;

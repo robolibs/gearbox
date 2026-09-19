@@ -94,6 +94,27 @@ fn taken(place: vec2<f32>) -> f32 {
     return mix(low, high, ease.y);
 }
 
+// The outline of a clump, as a radius against the bearing you look along it.
+// A clump of grass is not a disc: it is longer one way than the other and its
+// edge runs in and out. Both this and `clump_frame` are mirrored in the ground
+// material, which has to agree with it pixel for pixel.
+fn clump_edge(about: f32, seed: u32) -> f32 {
+    let a = rand(seed, 30u) * 6.2831853;
+    let b = rand(seed, 31u) * 6.2831853;
+    return max(1.0 + 0.44 * sin(about * 3.0 + a) + 0.26 * sin(about * 5.0 + b), 0.3);
+}
+
+// Which way a clump lies and how far it is drawn out along that way. The
+// bearing is shared by every clump in a five-metre square, so neighbouring
+// clumps run parallel and grow together into ribbons instead of spots.
+fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
+    let run = floor(cell * cell_m / 5.0);
+    var h = u32(i32(run.x)) * 0x9E3779B9u ^ u32(i32(run.y)) * 0xC2B2AE35u;
+    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 13u);
+    let lie = f32(h) / 4294967295.0 * 3.1415927 + (rand(seed, 32u) - 0.5) * 0.7;
+    return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, rand(seed, 33u)));
+}
+
 fn culled_vertex() -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
@@ -119,14 +140,19 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // grass comes up in rows like a crop.
         let middle = (cell + vec2<f32>(rand(clump_seed, 1u), rand(clump_seed, 2u))) * cell_m;
         // Some ground has no clump at all, and no two clumps are as tight.
-        if (rand(clump_seed, 3u) < 0.38) {
+        if (rand(clump_seed, 3u) < 0.30) {
             return culled_vertex();
         }
         let spread = mix(0.1, 0.3, rand(clump_seed, 4u));
+        let frame = clump_frame(cell, cell_m, clump_seed);
+        let along = frame.xy;
         let about = rand(id, 20u) * 6.2831853;
-        let out_by = sqrt(rand(id, 21u)) * spread;
-        base = middle + vec2<f32>(cos(about), sin(about)) * out_by;
-        out_of_clump = out_by / max(spread, 0.001);
+        // A point inside the clump's own outline, then drawn out along the way
+        // the clump lies.
+        let out_by = sqrt(rand(id, 21u)) * clump_edge(about, clump_seed);
+        let inside = vec2<f32>(cos(about), sin(about)) * out_by * spread;
+        base = middle + along * inside.x * frame.z + vec2<f32>(-along.y, along.x) * inside.y;
+        out_of_clump = clamp(out_by, 0.0, 1.0);
     }
     let sampled = sample_field(base);
     let ground = vec3<f32>(base.x, sampled.x, base.y);

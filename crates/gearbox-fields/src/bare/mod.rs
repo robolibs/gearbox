@@ -207,13 +207,13 @@ impl Plugin for BarePlugin {
         profiles.register(FieldProfile {
             name: "ploughed",
             wheel_response: response,
-            layers: standing(170.0, 260.0, false),
+            layers: standing(170.0, 440.0, false),
             ground: ploughed_ground,
         });
         profiles.register(FieldProfile {
             name: "dirt",
             wheel_response: response,
-            layers: standing(240.0, 1100.0, false),
+            layers: standing(240.0, 1900.0, false),
             ground: dirt_ground,
         });
         profiles.register(FieldProfile {
