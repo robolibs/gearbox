@@ -30,14 +30,21 @@ pub fn writeback_transforms(
             }
             _ => GlobalTransform::IDENTITY,
         };
+        // Physics steps at its own fixed rate, so a frame falls somewhere between
+        // two steps. What is drawn is the pose carried on by the time left over:
+        // drawn as stepped, a moving body would stutter against the frame rate.
+        let ahead = if rb.is_dynamic() { world.accumulator } else { 0.0 };
         let pose = rb.position();
-        let (_, local) = crate::globe::site_local(pose.translation.x, pose.translation.y, pose.translation.z);
+        let at = pose.translation + rb.linvel() * ahead;
+        let (_, local) = crate::globe::site_local(at.x, at.y, at.z);
         let translation = parent_world
             .affine()
             .inverse()
             .transform_point3(Vec3::new(local[0] as f32, local[1] as f32, local[2] as f32));
-        let rotation =
-            parent_world.compute_transform().rotation.inverse() * quat_from_d(pose.rotation);
+        let turned = rb.angvel() * ahead;
+        let spin = Quat::from_scaled_axis(Vec3::new(turned.x as f32, turned.y as f32, turned.z as f32));
+        let rotation = parent_world.compute_transform().rotation.inverse()
+            * (spin * quat_from_d(pose.rotation));
         if let Ok(mut transform) = transforms.p1().get_mut(entity) {
             transform.translation = translation;
             transform.rotation = rotation;

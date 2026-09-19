@@ -48,7 +48,9 @@ impl Plugin for RapierAdapterPlugin {
         app.init_resource::<PhysicsWorld>()
             .init_resource::<PhysicsActive>()
             .init_resource::<ColliderDebugEnabled>()
-            .add_systems(First, world::plan_physics_steps)
+            // After the clock moves: planned before it, a frame's steps would be the
+            // last frame's time, and uneven frames would show as jerks.
+            .add_systems(First, world::plan_physics_steps.after(bevy::time::TimeSystems))
             .add_systems(
                 Update,
                 (

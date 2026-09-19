@@ -779,7 +779,12 @@ fn carry_wheel_tracks(
         }
         let tpm = field.params.wheels.texels_per_metre;
         let bounds = field.params.bounds;
-        for old in fields.1.fields.iter().filter(|old| old.tread == field.tread) {
+        for old in fields
+            .1
+            .fields
+            .iter()
+            .filter(|old| old.tread == field.tread && old.trample.id() != field.trample.id())
+        {
             let Some(source) = images.get(&old.trample) else {
                 continue;
             };

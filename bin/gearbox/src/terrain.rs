@@ -36,6 +36,9 @@ const FOLLOW_SNAP_M: f32 = 100.0;
 const FOLLOW_REACH_M: f32 = 25_000.0;
 const FOLLOW_LOOK_AHEAD_M: f32 = 300.0;
 const FOLLOW_MAX_EYE_HEIGHT_M: f32 = 1_500.0;
+/// Ground that has been replaced stays drawn this long, while its successor
+/// uploads its maps unseen; then the two change places in one frame.
+const FOLLOW_HANDOVER_S: f32 = 1.0;
 /// Collider chunks: kept this far around a moving body, dropped past the
 /// farther distance so a body pacing a chunk edge does not churn them.
 const GROUND_CHUNK_M: f32 = 64.0;
@@ -194,13 +197,14 @@ fn install_ground(
     meshes: &mut Assets<Mesh>,
     sites: &Sites,
     parts: GroundParts,
+    visibility: Visibility,
 ) -> ProceduralTerrain {
     let grid = Arc::new(parts.grid);
     let entity = commands
         .spawn((
             Name::new("MeadowTerrain"),
             Transform::IDENTITY,
-            Visibility::default(),
+            visibility,
             ChildOf(sites.list[parts.land.site].entity),
         ))
         .id();
@@ -261,7 +265,14 @@ fn spawn_procedural_terrain(
     let started = std::time::Instant::now();
     let parts = build_ground(Land::of(&sites, sites.current), Vec2::ZERO);
     let cell = parts.cell;
-    let terrain = install_ground(&mut commands, physics.as_mut(), meshes.as_mut(), &sites, parts);
+    let terrain = install_ground(
+        &mut commands,
+        physics.as_mut(),
+        meshes.as_mut(),
+        &sites,
+        parts,
+        Visibility::default(),
+    );
     if let Some(flat) = flat.as_deref().copied() {
         remove_flat_ground(&mut commands, physics.as_mut(), flat);
         commands.remove_resource::<FlatGround>();
@@ -294,12 +305,27 @@ fn follow_view(
     mut meshes: ResMut<Assets<Mesh>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     sites: Res<Sites>,
+    time: Res<Time>,
     mut pending: Local<Option<bevy::tasks::Task<GroundParts>>>,
+    mut retiring: Local<Option<(Entity, ColliderHandle, f32)>>,
 ) {
     let Some(mut terrain) = terrain else {
         *pending = None;
         return;
     };
+    // The replaced ground bows out once its successor has had time to get ready.
+    if let Some((old, floor, left)) = retiring.as_mut() {
+        *left -= time.delta_secs();
+        if *left > 0.0 {
+            return;
+        }
+        commands.entity(*old).despawn();
+        let physics = physics.as_mut();
+        physics.colliders.remove(*floor, &mut physics.islands, &mut physics.bodies, true);
+        commands.entity(terrain.entity).insert(Visibility::Inherited);
+        *retiring = None;
+        return;
+    }
     if let Some(task) = pending.as_mut() {
         let Some(parts) = bevy::tasks::block_on(bevy::tasks::poll_once(task)) else {
             return;
@@ -307,8 +333,17 @@ fn follow_view(
         *pending = None;
         let started = std::time::Instant::now();
         let center = parts.center;
-        remove_ground(&mut commands, physics.as_mut(), &terrain);
-        *terrain = install_ground(&mut commands, physics.as_mut(), meshes.as_mut(), &sites, parts);
+        // Unseen at first: the ground it replaces stays until the handover.
+        let next = install_ground(
+            &mut commands,
+            physics.as_mut(),
+            meshes.as_mut(),
+            &sites,
+            parts,
+            Visibility::Hidden,
+        );
+        let old = std::mem::replace(&mut *terrain, next);
+        *retiring = Some((old.entity, old.safety_floor, FOLLOW_HANDOVER_S));
         info!("terrain: ground moved to {center}, swapped in {:?}", started.elapsed());
         return;
     }

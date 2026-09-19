@@ -188,19 +188,17 @@ pub fn ensure_fields(world: &mut World) {
         .get_resource::<ActiveFields>()
         .is_some_and(|fields| fields.terrain == root)
     {
-        // Retired fields are held only until the new ones have taken their tracks.
-        let retired = &mut world.resource_mut::<RenderFields>().1;
-        retired.frames_left = retired.frames_left.saturating_sub(1);
-        if retired.frames_left == 0 && !retired.fields.is_empty() {
-            retired.fields.clear();
-        }
+        forget_despawned_fields(world);
         return;
     }
+    forget_despawned_fields(world);
     let same_space = world
         .get_resource::<ActiveFields>()
         .is_some_and(|fields| fields.space == space);
+    // The fields of the ground being replaced stay as they are: the host keeps
+    // that ground drawn until this one is ready, and they go when it goes.
     let mut render = world.resource_mut::<RenderFields>();
-    let retired: Vec<_> = render.0.drain().map(|(_, field)| field).collect();
+    let retired: Vec<_> = render.0.values().cloned().collect();
     render.1 = super::render::RetiredFields {
         fields: if same_space { retired } else { Vec::new() },
         frames_left: 240,
@@ -554,5 +552,25 @@ pub fn stream_vegetation(
             ))
             .id();
         chunks.0.insert(key, entity);
+    }
+}
+
+/// Fields whose ground is gone stop being drawn and stamped; retired fields
+/// are held only until the new ones have taken their tracks.
+fn forget_despawned_fields(world: &mut World) {
+    let gone: Vec<Entity> = world
+        .resource::<RenderFields>()
+        .0
+        .keys()
+        .copied()
+        .filter(|entity| world.get_entity(*entity).is_err())
+        .collect();
+    let mut render = world.resource_mut::<RenderFields>();
+    for entity in gone {
+        render.0.remove(&entity);
+    }
+    render.1.frames_left = render.1.frames_left.saturating_sub(1);
+    if render.1.frames_left == 0 && !render.1.fields.is_empty() {
+        render.1.fields.clear();
     }
 }

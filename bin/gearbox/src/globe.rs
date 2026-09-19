@@ -53,6 +53,8 @@ pub struct Sites {
     pub list: Vec<SiteEntry>,
     pub current: usize,
     pub land: Terrain,
+    /// Frames the view left with nothing in them, oldest first, to be used again.
+    pub spare: Vec<usize>,
 }
 
 impl Sites {
@@ -111,6 +113,7 @@ fn spawn_globe(mut commands: Commands) {
         list: vec![SiteEntry { entity, name: "home".into(), frame }],
         current: 0,
         land: Terrain::new(&frame),
+        spare: Vec::new(),
     };
     publish_frames(&sites);
     commands.insert_resource(sites);
@@ -218,7 +221,6 @@ fn travel(
     mut sites: ResMut<Sites>,
     physics: Res<crate::physics::PhysicsWorld>,
     mut cameras: Query<(Entity, &mut mara::ui::modules::bevy::ChaseCamera)>,
-    mut grids: Query<(&mut Transform, &mut CellCoord), With<Site>>,
     layout: Res<gearbox_fields::FieldLayout>,
     follow: Res<crate::viewer::state::FollowTarget>,
     fly: Res<crate::viewer::state::ChaseCameraFly>,
@@ -250,25 +252,13 @@ fn travel(
     let occupied = physics.bodies.iter().any(|(_, body)| {
         body.is_dynamic() && gearbox_globe::region_of_physics(body.translation().x) == here
     });
-    let frame = Datum::under(destination);
-    let to = if let Some(index) = sites.nearest(destination).filter(|index| *index != here) {
-        index
-    } else if here != 0 && !occupied {
-        let entry = &mut sites.list[here];
-        entry.frame = frame;
-        if let Ok((mut transform, mut cell)) = grids.get_mut(entry.entity) {
-            let (new_cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(frame.origin);
-            *cell = new_cell;
-            *transform = Transform::from_translation(local).with_rotation(frame.rotation.as_quat());
-        }
-        here
-    } else {
-        let index = sites.list.len();
-        let name = format!("site-{index}");
-        let entity = commands.spawn(site_bundle(index, &name, &frame, sites.root)).id();
-        sites.list.push(SiteEntry { entity, name, frame });
-        index
-    };
+    let to = sites.datum_for(&mut commands, destination);
+    if to == here {
+        return;
+    }
+    if here != 0 && !occupied && !sites.spare.contains(&here) {
+        sites.spare.push(here);
+    }
     let into = sites.list[to].frame;
     // The focus lands on the ground of the new site; a scripted view starts at its middle.
     let carried = into.from_ecef(destination);
@@ -420,11 +410,25 @@ impl Sites {
     /// reach, else a new one anchored there.
     pub fn datum_for(&mut self, commands: &mut Commands, ground: DVec3) -> usize {
         if let Some(index) = self.nearest(ground) {
+            self.spare.retain(|spare| *spare != index);
+            return index;
+        }
+        let frame = Datum::under(ground);
+        // The oldest spare frame is moved here, once a newer spare shows that
+        // nothing of it is still being drawn.
+        if self.spare.len() >= 2 {
+            let index = self.spare.remove(0);
+            let (cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(frame.origin);
+            commands.entity(self.list[index].entity).insert((
+                cell,
+                Transform::from_translation(local).with_rotation(frame.rotation.as_quat()),
+            ));
+            self.list[index].frame = frame;
+            publish_frames(self);
             return index;
         }
         let index = self.list.len();
         let name = format!("datum-{index}");
-        let frame = Datum::under(ground);
         let entity = commands.spawn(site_bundle(index, &name, &frame, self.root)).id();
         self.list.push(SiteEntry { entity, name, frame });
         publish_frames(self);
