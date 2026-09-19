@@ -10,6 +10,7 @@ use usd_bevy::UsdPrimRef;
 
 use crate::physics::PhysicsWorld;
 use crate::physics::backend::{BodyId, WheelForceOutput};
+use crate::controller::wheel_forces::{rigid_name, rubber_name};
 
 pub(super) struct TyreMeshPlugin;
 
@@ -35,21 +36,6 @@ struct RubberMesh {
     body: BodyId,
     bead_radius: f64,
     last_frame: Option<(Affine3A, LoadedTireEnvelope, Option<f64>)>,
-}
-
-fn rubber_name(name: &str) -> bool {
-    let name = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
-    if rigid_name(&name) {
-        return false;
-    }
-    ["tyre", "tire", "tread", "mould_line", "bkt_fl630"]
-        .iter()
-        .any(|s| name.contains(s))
-}
-
-fn rigid_name(name: &str) -> bool {
-    let name = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
-    ["rim", "hub", "collision", "collider"].iter().any(|s| name.contains(s))
 }
 
 fn contact_frame(sample: WheelForceOutput) -> Option<Affine3A> {

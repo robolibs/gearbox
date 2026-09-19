@@ -2,6 +2,58 @@ use super::*;
 use crate::physics::backend::{
     JointAxes, JointId, PressureTyreDesc, PressureTyreOutput, WheelForceDesc,
 };
+use bevy::math::Affine3A;
+use bevy::mesh::VertexAttributeValues;
+
+pub(crate) fn rubber_name(name: &str) -> bool {
+    let name = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    !rigid_name(&name)
+        && ["tyre", "tire", "tread", "mould_line", "bkt_fl630"]
+            .iter().any(|s| name.contains(s))
+}
+
+pub(crate) fn rigid_name(name: &str) -> bool {
+    let name = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    ["rim", "hub", "collision", "collider"].iter().any(|s| name.contains(s))
+}
+
+type TyreHierarchy<'w, 's> = Query<'w, 's, (
+    Option<&'static ChildOf>, Option<&'static Transform>,
+    Option<&'static UsdPrimRef>, Option<&'static Name>,
+)>;
+
+fn radial_extent(positions: &[[f32; 3]], to_body: Affine3A, hub: DVec3, axle: DVec3) -> Option<f64> {
+    let axle = axle.try_normalize()?;
+    positions.iter().filter_map(|p| {
+        let p = DVec3::from_array(to_body.transform_point3(Vec3::from_array(*p)).to_array().map(f64::from)) - hub;
+        let radius = (p - axle * p.dot(axle)).length();
+        (radius.is_finite() && radius > 0.0).then_some(radius)
+    }).reduce(f64::max)
+}
+
+fn reference_rubber_radius(
+    body: Entity, hub: DVec3, axle: DVec3,
+    meshes: &Assets<Mesh>, visuals: &Query<(Entity, &Mesh3d)>, hierarchy: &TyreHierarchy,
+) -> Option<f64> {
+    visuals.iter().filter_map(|(entity, handle)| {
+        let mut current = entity;
+        let mut to_body = Affine3A::IDENTITY;
+        let mut rubber = false;
+        while current != body {
+            let (parent, transform, prim, name) = hierarchy.get(current).ok()?;
+            if prim.is_some_and(|p| rigid_name(&p.path)) || name.is_some_and(|n| rigid_name(n.as_str())) {
+                return None;
+            }
+            rubber |= prim.is_some_and(|p| rubber_name(&p.path)) || name.is_some_and(|n| rubber_name(n.as_str()));
+            to_body = transform.map_or(Affine3A::IDENTITY, Transform::compute_affine) * to_body;
+            current = parent?.parent();
+        }
+        if !rubber { return None; }
+        let mesh = meshes.get(&handle.0)?;
+        let VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)? else { return None };
+        radial_extent(positions, to_body, hub, axle)
+    }).reduce(f64::max)
+}
 
 #[derive(Default)]
 pub(super) struct Registrations {
@@ -149,6 +201,34 @@ mod tests {
     };
 
     #[test]
+    fn reference_radius_uses_rubber_transforms_not_rims_or_axle_width() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        let body = app.world_mut().spawn_empty().id();
+        let make_mesh = |radius: f32| {
+            let mut mesh = Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::all());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[radius, 0.0, 4.0], [0.0, -radius, -4.0], [-radius, 0.0, 4.0]]);
+            mesh
+        };
+        let rubber = app.world_mut().resource_mut::<Assets<Mesh>>().add(make_mesh(0.7));
+        let other = app.world_mut().resource_mut::<Assets<Mesh>>().add(make_mesh(2.0));
+        let hub = DVec3::new(0.2, 0.3, 0.0);
+        let parent = app.world_mut().spawn((
+            ChildOf(body), Name::new("radial_tyre"),
+            Transform::from_translation(Vec3::from_array(hub.to_array().map(|v| v as f32))).with_rotation(Quat::from_rotation_z(0.6)),
+        )).id();
+        app.world_mut().spawn((ChildOf(parent), Mesh3d(rubber), Transform::from_scale(Vec3::splat(1.1))));
+        for name in ["rim", "tire_collider", "tyre_collision"] {
+            app.world_mut().spawn((ChildOf(body), Name::new(name), Mesh3d(other.clone()), Transform::IDENTITY));
+        }
+        app.world_mut().spawn((Name::new("radial_tyre"), Mesh3d(other), Transform::IDENTITY));
+        let mut state = bevy::ecs::system::SystemState::<(Res<Assets<Mesh>>, Query<(Entity, &Mesh3d)>, TyreHierarchy)>::new(app.world_mut());
+        let (meshes, visuals, hierarchy) = state.get(app.world()).unwrap();
+        let radius = reference_rubber_radius(body, hub, DVec3::Z, &meshes, &visuals, &hierarchy).unwrap();
+        assert!((radius - 0.77).abs() < 1e-6, "{radius}");
+    }
+
+    #[test]
     fn axle_inference_orders_rows_and_respects_authored_ids() {
         let wheels = [
             (BodyId(4), -1.0, None),
@@ -290,6 +370,11 @@ mod tests {
             .machine_bodies
             .insert("test".into(), vec![chassis, wheel]);
         runtime.machine_wheels.insert("test".into(), vec![wheel]);
+        app.init_resource::<Assets<Mesh>>();
+        let mut rubber = Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::all());
+        rubber.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.1, -0.55, 0.0], [-0.1, -0.55, 0.0], [0.0, 0.55, 0.0]]);
+        let rubber = app.world_mut().resource_mut::<Assets<Mesh>>().add(rubber);
+        app.world_mut().spawn((ChildOf(wheel_entity), Name::new("radial_tyre"), Mesh3d(rubber.clone()), Transform::IDENTITY));
         app.insert_resource(physics)
             .insert_resource(runtime)
             .insert_resource(ControllerInventory {
@@ -333,6 +418,7 @@ mod tests {
             assert_eq!(tracks.contacts.len(), 1);
             assert!(tracks.contacts[0].position.y > 2.9);
             let pressure = output.pressure.unwrap();
+            assert!((pressure.radius - 0.55).abs() < 1e-6);
             assert_eq!(
                 tracks.contacts[0].length,
                 Some(pressure.patch_length as f32)
@@ -347,6 +433,8 @@ mod tests {
                 Some(output.normal_force)
             );
             let initial_pressure = pressure.pressure_pa;
+            app.world_mut().resource_mut::<Assets<Mesh>>().get_mut(&rubber).unwrap()
+                .insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0, -0.4, 0.0]; 3]);
             app.world_mut()
                 .resource_mut::<gearbox_api::PhysicsActive>()
                 .0 = false;
@@ -361,6 +449,7 @@ mod tests {
                 .unwrap();
             assert_eq!(paused.normal_force, output.normal_force);
             assert_eq!(paused.pressure.unwrap().pressure_pa, initial_pressure);
+            assert_eq!(paused.pressure.unwrap().radius, pressure.radius);
             assert!((paused.pressure.unwrap().target_pressure_pa - 220_000.0).abs() < 1e-8);
             app.world_mut()
                 .resource_mut::<crate::services::LinkValues>()
@@ -418,6 +507,9 @@ pub(super) fn sync_machine_wheel_forces(
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut values: ResMut<crate::services::LinkValues>,
     mut registered: Local<Registrations>,
+    meshes: Option<Res<Assets<Mesh>>>,
+    visuals: Query<(Entity, &Mesh3d)>,
+    hierarchy: TyreHierarchy,
 ) {
     if !physics.uses_wheel_forces() {
         return;
@@ -523,7 +615,7 @@ pub(super) fn sync_machine_wheel_forces(
         let mut targets = Vec::new();
         let mut readouts = Vec::new();
         for &wheel in wheels {
-            let Some((_, width, radius)) = body_tyre_geometry(&physics, wheel) else {
+            let Some((axle, width, collider_radius)) = body_tyre_geometry(&physics, wheel) else {
                 continue;
             };
             let joint = physics.joints().into_iter().find(|id| {
@@ -556,6 +648,9 @@ pub(super) fn sync_machine_wheel_forces(
                         .map_or(center, |p| p.translation + p.rotation * center)
                 })
                 .unwrap_or(DVec3::ZERO);
+            let radius = registered.wheels.get(&wheel).map(|r| r.radius)
+                .or_else(|| reference_rubber_radius(body.entity()?, hub, axle, meshes.as_deref()?, &visuals, &hierarchy))
+                .unwrap_or(collider_radius);
             let mass = (mass / wheels.len().max(1) as f64)
                 .max(body.mass())
                 .max(1.0);

@@ -70,6 +70,13 @@ selection recognizes Kubota rubber names and Krampe BKT naming, not arbitrary
 imported meshes. Nonplanar/camber agreement, GPU parity and performance gates
 remain incomplete.
 
+At first wheel registration, available undeformed rubber meshes define the
+outer support radius, including tread lugs, in the wheel body's frame. Rims,
+hubs and collider helpers are excluded. The radius stays fixed as rubber
+deforms; collider radius is the fallback when no matching mesh is available.
+Inflation changes support stiffness and chassis height, not this reference
+radius. The loaded tyre retains a contact patch even at maximum pressure.
+
 ## Machine configuration persistence
 
 Pause before exporting a standalone pressure-tyre machine:
