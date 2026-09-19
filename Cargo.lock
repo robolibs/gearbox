@@ -5580,6 +5580,7 @@ dependencies = [
  "molla-math",
  "molla-sim",
  "molla-storage",
+ "molla-vehicle",
  "tracing",
 ]
 
@@ -5592,6 +5593,10 @@ dependencies = [
  "molla-core",
  "molla-math",
 ]
+
+[[package]]
+name = "molla-vehicle"
+version = "0.0.1"
 
 [[package]]
 name = "moxcms"
