@@ -322,7 +322,7 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     render_target: Option<Res<BevyViewportRenderTarget>>,
-    globe: Res<crate::globe::Globe>,
+    sites: Res<crate::globe::Sites>,
 ) {
     let radius = PLANET_RADIUS_M;
 
@@ -341,7 +341,7 @@ fn spawn_world(
         // At the centre of its own frame, shrunk to sit under the land everywhere.
         Transform::from_scale(Vec3::splat(1.0 - PLANET_VISUAL_DROP_M / radius)),
         big_space::prelude::CellCoord::default(),
-        ChildOf(globe.root),
+        ChildOf(sites.root),
         Mesh3d(planet_mesh),
         MeshMaterial3d(planet_mat.clone()),
         NotShadowCaster,
@@ -396,7 +396,7 @@ fn spawn_world(
         chase,
         big_space::prelude::CellCoord::default(),
         big_space::prelude::FloatingOrigin,
-        ChildOf(globe.home),
+        ChildOf(sites.home().entity),
     ));
     if let Some(target) = render_target {
         camera.insert(bevy::camera::RenderTarget::from(target.0.clone()));

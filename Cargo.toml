@@ -4,6 +4,7 @@ members = [
     "crates/gearbox-api",
     "crates/gearbox-controls",
     "crates/gearbox-fields",
+    "crates/gearbox-globe",
     "crates/bevy_weather",
     "crates/gearbox-cli",
     "bin/gearbox",
@@ -125,6 +126,9 @@ bevy_asset = { path = "../../OUSD/bevy_openusd/vendor/bevy_asset" }
 # Dependencies are optimised even in dev builds: unoptimised Bevy spends the
 # whole frame on the CPU. Our own crates stay at the dev defaults.
 [profile.dev.package."*"]
+opt-level = 3
+# Terrain noise is sampled a million times a square: never unoptimised.
+[profile.dev.package.gearbox-globe]
 opt-level = 3
 [profile.dev.package.usd_bevy]
 opt-level = 3

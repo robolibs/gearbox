@@ -3749,6 +3749,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gearbox-globe"
+version = "0.0.6"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "gearbox-sim"
 version = "0.0.6"
 dependencies = [
@@ -3765,6 +3772,7 @@ dependencies = [
  "gearbox-cli",
  "gearbox-controls",
  "gearbox-fields",
+ "gearbox-globe",
  "glam 0.30.10",
  "half",
  "mara",
