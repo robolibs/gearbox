@@ -168,6 +168,9 @@ impl ColliderMut for ColliderAccess {
         }
     }
     fn set_friction(&mut self, friction: f64) {
+        if self.friction() == friction {
+            return;
+        }
         self.edit(
             |c| {
                 c.friction = friction;
@@ -177,6 +180,9 @@ impl ColliderMut for ColliderAccess {
         );
     }
     fn set_restitution(&mut self, restitution: f64) {
+        if self.restitution() == restitution {
+            return;
+        }
         self.edit(
             |c| {
                 c.restitution = restitution;
@@ -186,6 +192,18 @@ impl ColliderMut for ColliderAccess {
         );
     }
     fn set_friction_combine_rule(&mut self, rule: CombineRule) {
+        if self
+            .shared
+            .world()
+            .scene
+            .collider(self.handle)
+            .expect("collider handle")
+            .contact_material
+            .friction_combine
+            == convert::combine(rule)
+        {
+            return;
+        }
         self.edit(
             |c| {
                 c.contact_material.friction_combine = convert::combine(rule);

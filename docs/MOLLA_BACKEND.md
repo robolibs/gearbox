@@ -85,8 +85,8 @@ nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 GEARBOX_PHYSICS=molla nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 ```
 
-The original 43 binary tests plus fifteen new backend/integration checks pass
-with explicit `GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (58 tests each). The new
+The original 43 binary tests plus sixteen new backend/integration checks pass
+with explicit `GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (59 tests each). The new
 checks include real capped motor motion, mass/impulse response, stable handles,
 heightfield rays/live bounds, pair filtering/contact impulses, quarantine and
 its entity-report propagation, compliant frame motion and the actual
@@ -103,13 +103,25 @@ bodies, 4917 kg, four tyres and five controllers. A native Molla run of
 captured heading rose from approximately zero to +0.365 rad (not the specified
 +0.60 rad reference). Wheel stamping ran and the tractor was visually checked.
 Current debug timing is approximately 5 ms per physics step, not <1 ms.
-Paused tyre-load telemetry was zero and needs lifecycle/order investigation.
+The initial zero tyre-load telemetry was traced to identical material writes
+rebuilding colliders before traction/stamping consumed the previous step.
+Unchanged friction/restitution/combine-rule writes now retain scene identity
+and readout. Live turning loads total approximately 48.3 kN, consistent with
+the 4917 kg machine's weight; acceleration and steering improve accordingly.
+The last streamed sample during the same 4 s command is approximately +0.64
+rad and 1.6 m/s. Later paused samples include CLI delay and are not an exact
+fixed-step reference comparison.
 This is partial live evidence, not a parity or full acceptance claim.
 Live TF sampling confirms both engaged PTO bodies rotating. Changing hitch
 position from 1 to 0 changed rear rockshaft orientation by approximately
 0.966 rad and front lower-hitch orientation by 0.395 rad, with nearly constant
 chassis heading. Command properties alone were not used as movement proof.
 Exact PTO speeds, loaded hitches, trailer towing and the slope gate remain.
+An initial paused teleport-attach of the 6729 kg Krampe succeeds structurally
+but the next play explodes and rejects steps. Tow/detach acceptance is not met.
+Group teleports currently call individual body setters, and resume sync uses
+ECS transforms which may still predate the backend teleport; these paths need
+joint-aware batch semantics and stale-transform handling.
 
 Strict Clippy is not green in this checkout: dependency-inclusive linting finds
 existing issues in `gearbox-api`, `gearbox-fields` and vendored clouds; the

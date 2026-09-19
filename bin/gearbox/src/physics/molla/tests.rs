@@ -437,6 +437,30 @@ fn tyre_readout_replaces_ground_manifolds_and_respects_material_cells() {
 }
 
 #[test]
+fn unchanged_material_sync_preserves_tyre_readout_and_scene() {
+    let (mut backend, _, wheel, _, ground) = wheel_rig(-DVec3::Z);
+    backend.step(&|_, _| false);
+    let output = backend.wheel_output(wheel).unwrap();
+    assert!(output.in_contact && output.normal_force > 0.0);
+    let stamp = backend.shared.world().scene.stamp();
+    let friction = backend.collider(ground).unwrap().friction();
+    let restitution = backend.collider(ground).unwrap().restitution();
+    for _ in 0..3 {
+        let collider = backend.collider_mut(ground).unwrap();
+        collider.set_friction(friction);
+        collider.set_restitution(restitution);
+        collider.set_friction_combine_rule(CombineRule::Average);
+        assert_eq!(backend.shared.world().scene.stamp(), stamp);
+        assert_eq!(backend.wheel_output(wheel).unwrap().normal_force, output.normal_force);
+    }
+    backend.collider_mut(ground).unwrap().set_friction(friction * 0.5);
+    assert_ne!(backend.shared.world().scene.stamp(), stamp);
+    assert!(!backend.wheel_output(wheel).unwrap().in_contact);
+    backend.step(&|_, _| false);
+    assert!(backend.wheel_output(wheel).unwrap().in_contact);
+}
+
+#[test]
 fn opposite_authored_axles_use_opposite_motor_signs_for_forward_motion() {
     for axis in [-DVec3::Z, DVec3::Z] {
         let (mut backend, chassis, wheel, joint, _) = wheel_rig(axis);
