@@ -195,6 +195,8 @@ fn travel(
     mut cameras: Query<(Entity, &mut mara::ui::modules::bevy::ChaseCamera)>,
     mut grids: Query<(&mut Transform, &mut CellCoord), With<Site>>,
     layout: Res<gearbox_fields::FieldLayout>,
+    follow: Res<crate::viewer::state::FollowTarget>,
+    fly: Res<crate::viewer::state::ChaseCameraFly>,
     mut goto: ResMut<Goto>,
     mut started: Local<bool>,
 ) {
@@ -208,9 +210,11 @@ fn travel(
         sites.home().frame.travelled(bearing.to_radians(), distance * 1000.0).up
     });
     let focus = chase.focus.as_dvec3();
+    // A view held on a machine stays in the machine's site.
+    let held = follow.entity.is_some() || fly.target.is_some();
     let destination = match scripted {
         Some(up) => up,
-        None if focus.x.hypot(focus.z) > LEAVE_SITE_M => from.direction(focus.x, focus.z),
+        None if !held && focus.x.hypot(focus.z) > LEAVE_SITE_M => from.direction(focus.x, focus.z),
         None => return,
     };
     let here = sites.current;
@@ -238,7 +242,7 @@ fn travel(
     };
     let into = sites.list[to].frame;
     // The focus lands on the ground of the new site; a scripted view starts at its middle.
-    let carried = into.from_planet(from.to_planet(DVec3::new(focus.x, 0.0, focus.z)));
+    let carried = into.from_planet(destination * gearbox_globe::PLANET_RADIUS_M);
     let heading = from.rotation * DVec3::new(chase.yaw.sin() as f64, 0.0, chase.yaw.cos() as f64);
     let heading = into.rotation.inverse() * heading;
     // It keeps its height above the ground, not its height.
