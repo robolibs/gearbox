@@ -154,8 +154,8 @@ fn standing(stones: f32, clods: f32, tufts: f32, soil: fn() -> Mesh) -> Vec<Vege
             shader,
             template: soil,
             density: clods,
-            fade_start: 4.0,
-            fade_end: 20.0,
+            fade_start: 3.0,
+            fade_end: 12.0,
             inverse_square_thinning: true,
             albedo: None,
             lod_band: [0.0, f32::MAX],
@@ -195,8 +195,7 @@ struct BareExtension {
 /// What kind of bare ground this is.
 #[derive(ShaderType, Reflect, Debug, Clone, Copy)]
 pub struct BareGround {
-    /// Multiplies the soil's own colour; the last of it says how readily this
-    /// ground cracks as it dries.
+    /// Multiplies the soil's own colour.
     pub tint: Vec4,
     /// Metres across the clods, how deep they sit, how much the wind has
     /// combed it into ripples, and how far apart those ripples run.
@@ -232,19 +231,19 @@ impl Plugin for BarePlugin {
         profiles.register(FieldProfile {
             name: "ploughed",
             wheel_response: response,
-            layers: standing(170.0, 1500.0, 440.0, turned_clod),
+            layers: standing(170.0, 700.0, 440.0, turned_clod),
             ground: ploughed_ground,
         });
         profiles.register(FieldProfile {
             name: "dirt",
             wheel_response: response,
-            layers: standing(240.0, 900.0, 1900.0, worn_clod),
+            layers: standing(240.0, 420.0, 1900.0, worn_clod),
             ground: dirt_ground,
         });
         profiles.register(FieldProfile {
             name: "sand",
             wheel_response: WheelResponse { darkening: 0.16, ..response },
-            layers: standing(55.0, 500.0, 0.0, blown_clod),
+            layers: standing(55.0, 240.0, 0.0, blown_clod),
             ground: sand_ground,
         });
     }
@@ -263,7 +262,7 @@ fn ploughed_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.060, 0.034, 0.018, 0.0),
+            tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
             grass: Vec4::new(0.030, 0.082, 0.018, 0.55),
         },
@@ -305,7 +304,7 @@ fn sand_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.245, 0.182, 0.098, 0.0),
+            tint: Vec4::new(0.245, 0.182, 0.098, 1.0),
             grain: Vec4::new(0.16, 0.30, 1.0, 0.22),
             grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
         },

@@ -200,37 +200,6 @@ fn ground_fbm(p: vec2<f32>, octaves: i32) -> f32 {
     return sum / weight;
 }
 
-// The net of cracks a dried ground splits into: the borders of a cell pattern,
-// which is what a shrinking crust actually breaks along. One is drawn where
-// the two nearest seeds are near enough equidistant, and its width is held to
-// the pixel looking at it so the net thins away instead of aliasing.
-fn crack_net(at: vec2<f32>, pixel: f32) -> f32 {
-    // Warped before it is cut, or the net is a clean polygon mesh drawn on the
-    // soil: real cracks wander, and no two cells are the same size or shape.
-    let p = at + vec2<f32>(ground_noise(at * 0.7) - 0.5, ground_noise(at * 0.7 + 19.0) - 0.5) * 0.9;
-    let cell = floor(p);
-    let f = p - cell;
-    var nearest = 8.0;
-    var next = 8.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let step = vec2<f32>(f32(dx), f32(dy));
-            let seed = cell + step;
-            let at = step + vec2<f32>(hash21(seed + vec2<f32>(9.4, 2.1)), hash21(seed + vec2<f32>(1.7, 6.3)));
-            let away = length(at - f);
-            if (away < nearest) {
-                next = nearest;
-                nearest = away;
-            } else if (away < next) {
-                next = away;
-            }
-        }
-    }
-    // Each crack its own width, and never finer than the pixel that sees it.
-    let width = mix(0.008, 0.03, hash21(cell * 2.3)) + pixel;
-    return 1.0 - smoothstep(0.0, width, next - nearest);
-}
-
 // A clod is a cell, not a hump of noise: it belongs to the seed nearest it and
 // falls to nothing where it meets its neighbours, which is what the gap
 // between the two nearest seeds gives directly.
@@ -280,16 +249,7 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     // Cracks are cut into the ground, not laid on it, so they belong to the
     // height as much as to the colour. Only a ground that cracks, and only
     // where it has dried out.
-    // Only the wide net is cut into the height. The relief is sampled three
-    // times over for its normal, and the fine net costs as much again for a
-    // groove too shallow to catch the light.
-    var split = 0.0;
-    if (ground.tint.w > 0.001 && close > 0.01) {
-        let dry = smoothstep(0.42, 0.68, ground_fbm(place / 4.5 + vec2<f32>(61.0, -17.0), 3));
-        split = crack_net(place / 0.42, pixel_m / 0.42) * dry * ground.tint.w;
-    }
     return swell * 0.08
-        - split * 0.055
         // How deep a comb cuts goes with how far apart its teeth are: a plough
         // cuts a trench, the wind wrinkles.
         + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62) * combed_seen
@@ -317,17 +277,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let stripes_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
     let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
-    // The same net the height is cut by, so a crack darkens where it deepens.
-    var split = 0.0;
-    if (ground.tint.w > 0.001) {
-        let dry = smoothstep(0.42, 0.68, ground_fbm(place / 4.5 + vec2<f32>(61.0, -17.0), 3));
-        split = max(crack_net(place / 0.42, pixel_m / 0.42),
-            crack_net(place / 0.15 + vec2<f32>(23.0, 8.0), pixel_m / 0.15) * 0.55)
-            * dry * ground.tint.w;
-    }
     colour = ground.tint.rgb * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
-        * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z)
-        * (1.0 - split * 0.5);
+        * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
 
     var grass_share = 0.0;
     var shade_of_clumps = 1.0;
