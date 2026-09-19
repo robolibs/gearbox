@@ -58,7 +58,15 @@ deflection depends on the substep size. Soft angular coordinates use D6's XYZ
 chart; unwrapped multi-turn soft revolute position targets are not implemented.
 The hard revolute path retains its scalar coordinates.
 
-Closed joint loops remain unsupported. Invalid body descriptions or impossible
+Authored `excludeFromArticulation` edges now become compliant loop-force
+joints, separate from the reduced tree, initially 30 Hz and critically damped.
+Their coupled articulated response, unilateral bounds and motor caps produce
+substep body wrenches; Featherstone remains the rigid integrator. Ordinary
+unmarked tree cycles remain rejected. Loop orientation uses the principal
+rotation log, not unwrapped multi-turn coordinates. Free-acceleration/bias
+prediction is not included in the implicit loop force solve.
+
+Invalid body descriptions or impossible
 joint insertions fail explicitly; fallible runtime edits log rejection and
 retain the last valid operation state. Collider replacement followed by mass
 recomputation is not yet one combined transaction and needs failure-path
@@ -77,8 +85,8 @@ nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 GEARBOX_PHYSICS=molla nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 ```
 
-The original 43 binary tests plus fourteen new backend/integration checks pass
-with explicit `GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (57 tests each). The new
+The original 43 binary tests plus fifteen new backend/integration checks pass
+with explicit `GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (58 tests each). The new
 checks include real capped motor motion, mass/impulse response, stable handles,
 heightfield rays/live bounds, pair filtering/contact impulses, quarantine and
 its entity-report propagation, compliant frame motion and the actual
@@ -88,6 +96,20 @@ opposite axle signs, configuration failure/removal, and a headless ECS scene
 exercising registration, traction and elevated contact-point stamping. The ECS
 tyre assertions run with Molla selected; Rapier exercises its unchanged fallback.
 This does not establish any of the live tractor/hitch/PTO/slope acceptance gates.
+
+The real Kubota asset now loads without the previous joint-cycle panic: 26
+bodies, 4917 kg, four tyres and five controllers. A native Molla run of
+`machine move tractor --forward 2 --turn 0.4 --for 4s` drove and steered;
+captured heading rose from approximately zero to +0.365 rad (not the specified
++0.60 rad reference). Wheel stamping ran and the tractor was visually checked.
+Current debug timing is approximately 5 ms per physics step, not <1 ms.
+Paused tyre-load telemetry was zero and needs lifecycle/order investigation.
+This is partial live evidence, not a parity or full acceptance claim.
+Live TF sampling confirms both engaged PTO bodies rotating. Changing hitch
+position from 1 to 0 changed rear rockshaft orientation by approximately
+0.966 rad and front lower-hitch orientation by 0.395 rad, with nearly constant
+chassis heading. Command properties alone were not used as movement proof.
+Exact PTO speeds, loaded hitches, trailer towing and the slope gate remain.
 
 Strict Clippy is not green in this checkout: dependency-inclusive linting finds
 existing issues in `gearbox-api`, `gearbox-fields` and vendored clouds; the

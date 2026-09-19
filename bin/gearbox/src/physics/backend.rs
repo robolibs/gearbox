@@ -23,16 +23,25 @@ impl Pose {
     };
 
     pub fn new(translation: DVec3, rotation: DQuat) -> Self {
-        Self { translation, rotation }
+        Self {
+            translation,
+            rotation,
+        }
     }
 
     pub fn from_translation(translation: DVec3) -> Self {
-        Self { translation, rotation: DQuat::IDENTITY }
+        Self {
+            translation,
+            rotation: DQuat::IDENTITY,
+        }
     }
 
     pub fn inverse(&self) -> Self {
         let rotation = self.rotation.inverse();
-        Self { translation: rotation * -self.translation, rotation }
+        Self {
+            translation: rotation * -self.translation,
+            rotation,
+        }
     }
 
     pub fn transform_point(&self, point: DVec3) -> DVec3 {
@@ -156,30 +165,76 @@ impl BodyDesc {
 /// capsules-by-axis run along Y.
 #[derive(Clone, Debug)]
 pub enum Shape {
-    Cuboid { half_extents: DVec3 },
-    Ball { radius: f64 },
-    Capsule { a: DVec3, b: DVec3, radius: f64 },
-    Cylinder { half_height: f64, radius: f64 },
+    Cuboid {
+        half_extents: DVec3,
+    },
+    Ball {
+        radius: f64,
+    },
+    Capsule {
+        a: DVec3,
+        b: DVec3,
+        radius: f64,
+    },
+    Cylinder {
+        half_height: f64,
+        radius: f64,
+    },
     /// A cylinder shrunk by `border_radius` and rounded back out by it.
-    RoundCylinder { half_height: f64, radius: f64, border_radius: f64 },
-    ConvexHull { points: Vec<DVec3> },
-    ConvexDecomposition { vertices: Vec<DVec3>, indices: Vec<[u32; 3]> },
-    TriMesh { vertices: Vec<DVec3>, indices: Vec<[u32; 3]> },
+    RoundCylinder {
+        half_height: f64,
+        radius: f64,
+        border_radius: f64,
+    },
+    ConvexHull {
+        points: Vec<DVec3>,
+    },
+    ConvexDecomposition {
+        vertices: Vec<DVec3>,
+        indices: Vec<[u32; 3]>,
+    },
+    TriMesh {
+        vertices: Vec<DVec3>,
+        indices: Vec<[u32; 3]>,
+    },
     /// `heights` is row-major, `rows × cols`, spanning `scale.x × scale.z`
     /// centred on the collider origin; `scale.y` multiplies the heights.
-    Heightfield { rows: usize, cols: usize, heights: Vec<f64>, scale: DVec3 },
+    Heightfield {
+        rows: usize,
+        cols: usize,
+        heights: Vec<f64>,
+        scale: DVec3,
+    },
 }
 
 /// What a collider's shape looks like from outside, for gizmos and
 /// geometry queries. Meshes report their bounds only.
 #[derive(Clone, Debug)]
 pub enum ShapeView {
-    Cuboid { half_extents: DVec3 },
-    Ball { radius: f64 },
-    Capsule { a: DVec3, b: DVec3, radius: f64 },
-    Cylinder { half_height: f64, radius: f64 },
-    RoundCylinder { half_height: f64, radius: f64, border_radius: f64 },
-    ConvexPolyhedron { points: Vec<DVec3>, edges: Vec<[u32; 2]> },
+    Cuboid {
+        half_extents: DVec3,
+    },
+    Ball {
+        radius: f64,
+    },
+    Capsule {
+        a: DVec3,
+        b: DVec3,
+        radius: f64,
+    },
+    Cylinder {
+        half_height: f64,
+        radius: f64,
+    },
+    RoundCylinder {
+        half_height: f64,
+        radius: f64,
+        border_radius: f64,
+    },
+    ConvexPolyhedron {
+        points: Vec<DVec3>,
+        edges: Vec<[u32; 2]>,
+    },
     Other,
 }
 
@@ -209,7 +264,10 @@ pub struct CollisionGroups {
 }
 
 impl CollisionGroups {
-    pub const ALL: Self = Self { memberships: u32::MAX, filter: u32::MAX };
+    pub const ALL: Self = Self {
+        memberships: u32::MAX,
+        filter: u32::MAX,
+    };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,8 +427,15 @@ pub struct Motor {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MotorTarget {
-    Position { target: f64, stiffness: f64, damping: f64 },
-    Velocity { target: f64, damping: f64 },
+    Position {
+        target: f64,
+        stiffness: f64,
+        damping: f64,
+    },
+    Velocity {
+        target: f64,
+        damping: f64,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -384,13 +449,19 @@ pub struct MotorDesc {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum JointKind {
     /// One free rotation about `axis` of the first frame.
-    Revolute { axis: DVec3 },
+    Revolute {
+        axis: DVec3,
+    },
     /// One free translation along `axis` of the first frame.
-    Prismatic { axis: DVec3 },
+    Prismatic {
+        axis: DVec3,
+    },
     Fixed,
     Spherical,
     /// Exactly the `locked` axes are held; the joint's X is frame X.
-    Generic { locked: JointAxes },
+    Generic {
+        locked: JointAxes,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -409,6 +480,8 @@ pub struct JointDesc {
     /// Ask for a reduced-coordinate joint; the backend falls back to a
     /// constraint joint where it cannot (loop closures, no such solver).
     pub reduced: bool,
+    /// Close an articulation loop without adding a reduced-coordinate edge.
+    pub loop_closure: bool,
 }
 
 impl JointDesc {
@@ -422,6 +495,7 @@ impl JointDesc {
             softness: None,
             contacts_enabled: false,
             reduced: false,
+            loop_closure: false,
         }
     }
 }
@@ -495,11 +569,23 @@ pub trait BodyMut: Body {
     fn set_position(&mut self, pose: Pose, wake: bool);
     fn set_translation(&mut self, translation: DVec3, wake: bool) {
         let rotation = self.rotation();
-        self.set_position(Pose { translation, rotation }, wake);
+        self.set_position(
+            Pose {
+                translation,
+                rotation,
+            },
+            wake,
+        );
     }
     fn set_rotation(&mut self, rotation: DQuat, wake: bool) {
         let translation = self.translation();
-        self.set_position(Pose { translation, rotation }, wake);
+        self.set_position(
+            Pose {
+                translation,
+                rotation,
+            },
+            wake,
+        );
     }
     fn set_linvel(&mut self, linvel: DVec3, wake: bool);
     fn set_angvel(&mut self, angvel: DVec3, wake: bool);

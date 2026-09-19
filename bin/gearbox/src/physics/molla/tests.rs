@@ -15,6 +15,36 @@ fn dynamic() -> BodyDesc {
 }
 
 #[test]
+fn authored_loop_closure_keeps_tree_and_joint_access() {
+    let mut backend = MollaBackend::default();
+    backend.set_gravity(DVec3::ZERO);
+    let a = backend.insert_body(BodyDesc::fixed());
+    let b = backend.insert_body(dynamic());
+    let hinge = JointDesc::new(
+        JointKind::Revolute { axis: DVec3::Z },
+        Pose::IDENTITY,
+        Pose::IDENTITY,
+    );
+    let tree = backend.insert_joint(a, b, hinge.clone());
+    let mut desc = hinge;
+    desc.loop_closure = true;
+    let closure = backend.insert_joint(a, b, desc);
+    assert_ne!(tree, closure);
+    assert_eq!(backend.joints_between(a, b).len(), 2);
+    assert!(!backend.joint(closure).unwrap().contacts_enabled());
+    backend
+        .joint_mut(closure, true)
+        .unwrap()
+        .set_motor_velocity(JointAxis::AngX, 0.2, 5.0);
+    for _ in 0..30 {
+        backend.step(&|_, _| false);
+    }
+    assert!(backend.body(b).unwrap().angvel().z > 0.01);
+    backend.remove_joint(closure);
+    assert!(backend.joint(tree).is_some());
+}
+
+#[test]
 fn backend_is_send_sync_and_preserves_body_mass_and_tags() {
     fn send_sync<T: Send + Sync>() {}
     send_sync::<MollaBackend>();

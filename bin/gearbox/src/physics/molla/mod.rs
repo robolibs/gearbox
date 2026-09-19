@@ -285,17 +285,27 @@ impl PhysicsBackend for MollaBackend {
         };
         let handle = {
             let mut world = self.shared.world();
-            let handle = world
-                .scene
-                .insert_joint(rt::JointDesc {
-                    parent: Some(parent),
-                    child,
-                    kind,
-                    axis,
-                    frame_parent: convert::transform(desc.frame1),
-                    frame_child: convert::transform(desc.frame2),
-                })
-                .expect("invalid Molla joint topology");
+            let runtime = rt::JointDesc {
+                parent: Some(parent),
+                child,
+                kind,
+                axis,
+                frame_parent: convert::transform(desc.frame1),
+                frame_child: convert::transform(desc.frame2),
+            };
+            let handle = if desc.loop_closure {
+                let (natural_frequency, damping_ratio) = desc.softness.unwrap_or((30.0, 1.0));
+                world.scene.insert_loop_joint(
+                    runtime,
+                    jc::JointSoftness {
+                        natural_frequency,
+                        damping_ratio,
+                    },
+                )
+            } else {
+                world.scene.insert_joint(runtime)
+            }
+            .expect("invalid Molla joint topology");
             if let JointKind::Generic { locked } = desc.kind {
                 apply(
                     world

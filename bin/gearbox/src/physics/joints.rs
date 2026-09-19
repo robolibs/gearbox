@@ -4,9 +4,7 @@
 //! authored axis rides in `JointKind`, so motors and limits always address
 //! `AngX` / `LinX` whatever the USD axis token was.
 
-use super::backend::{
-    JointAxis, JointDesc, JointKind, MotorDesc, MotorModel, MotorTarget, Pose,
-};
+use super::backend::{JointAxis, JointDesc, JointKind, MotorDesc, MotorModel, MotorTarget, Pose};
 use super::convert::{quat_to_d, vec3_to_d};
 use super::markers::{UsdArticulationRoot, UsdDof, UsdJointDrive, UsdJointKind, UsdPhysicsJoint};
 use bevy::prelude::*;
@@ -84,6 +82,7 @@ pub fn convert_joints(
         }
 
         if let Some(mut desc) = joint_desc(joint) {
+            desc.loop_closure = joint.exclude_from_articulation;
             desc.reduced = multibody
                 && articulated(body0_e)
                 && articulated(body1_e)
@@ -172,9 +171,15 @@ fn motor_desc(axis: JointAxis, d: &UsdJointDrive, force_based: bool) -> MotorDes
 }
 
 fn dof_is_angular(dof: UsdDof) -> bool {
-    matches!(dof, UsdDof::Angular | UsdDof::RotX | UsdDof::RotY | UsdDof::RotZ)
+    matches!(
+        dof,
+        UsdDof::Angular | UsdDof::RotX | UsdDof::RotY | UsdDof::RotZ
+    )
 }
 
 fn dof_is_linear(dof: UsdDof) -> bool {
-    matches!(dof, UsdDof::Linear | UsdDof::TransX | UsdDof::TransY | UsdDof::TransZ)
+    matches!(
+        dof,
+        UsdDof::Linear | UsdDof::TransX | UsdDof::TransY | UsdDof::TransZ
+    )
 }
