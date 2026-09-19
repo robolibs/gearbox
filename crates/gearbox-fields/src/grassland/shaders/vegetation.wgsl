@@ -5,7 +5,7 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 
-#import "embedded://gearbox_fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint, dry_country}
+#import "embedded://gearbox_fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint, dry_country, dry_growth, meadow_share}
 #import "embedded://gearbox_fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean, blade_leans}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
@@ -210,7 +210,8 @@ fn meadow_grass(base: vec2<f32>, ground: vec3<f32>, ground_normal: vec3<f32>, id
     let variety = rand(id, 10u);
     let fine = variety < 0.25 + 0.5 * species.x;
     let broad = !fine && variety > 0.8 - 0.5 * species.y;
-    let height = mix(0.12, 0.20, rand(id, 20u + leaf)) * select(1.0, 0.9, broad) * coverage;
+    let height = mix(0.12, 0.20, rand(id, 20u + leaf)) * select(1.0, 0.9, broad) * coverage
+        * dry_growth(base);
     let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
     let base_w = mix(0.005, 0.008, rand(id, 30u + leaf)) * select(select(1.0, 1.8, broad), 0.6, fine);
     let width = base_w * max(1.0, 1.2 * pixel_m / base_w) * coverage;
@@ -377,7 +378,7 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
     let rye = !fescue && pick < species.x + species.y;
     let height = mix(GOT_MIN_HEIGHT, GOT_MAX_HEIGHT, rand(id, 6u))
         * mix(0.9, 1.1, rand(clump.id, 3u)) * select(1.0, 0.8, fescue)
-        * select(1.0, mix(0.75, 0.95, rand(id, 32u)), twin) * alive;
+        * select(1.0, mix(0.75, 0.95, rand(id, 32u)), twin) * alive * dry_growth(base_xz);
     let width = mix(GOT_MIN_WIDTH, GOT_MAX_WIDTH, rand(id, 7u))
         * select(select(1.0, 1.6, rye), 0.6, fescue) * widen * alive;
 
@@ -539,7 +540,9 @@ fn flower(vertex: Vertex) -> VertexOutput {
         noise(base * 0.04 + vec2<f32>(-7.7, 2.9))) - vec2<f32>(0.5);
     let cell = floor((base + warp * 24.0) / 14.0);
     let kind = pcg(bitcast<u32>(i32(cell.x)) * 2654435761u ^ bitcast<u32>(i32(cell.y)) * 40503u) % 7u;
-    let opening = smoothstep(0.52, 0.72, noise(base * 0.11 + cell * 3.7));
+    // Little blooms where the ground is parched.
+    let opening = smoothstep(0.52, 0.72, noise(base * 0.11 + cell * 3.7))
+        * mix(0.22, 1.0, meadow_share(base));
     let kept = rand(id, 3u) < opening + 0.004;
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));

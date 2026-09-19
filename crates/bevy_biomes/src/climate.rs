@@ -9,11 +9,6 @@ use bevy::prelude::*;
 
 use crate::biome::Land;
 
-/// Metres across the broad damp and dry country.
-pub const BROAD_M: f32 = 420.0;
-/// And of the patches within it.
-pub const FINE_M: f32 = 95.0;
-
 fn gradient(cell: Vec2) -> Vec2 {
     let hash = (cell.dot(Vec2::new(127.1, 311.7)).sin() * 43758.5453123).fract();
     let angle = hash * std::f32::consts::TAU;
@@ -35,10 +30,22 @@ pub fn noise(place: Vec2) -> f32 {
 }
 
 /// How damp the ground is, 0 parched and 1 sodden.
+///
+/// Noise on a lattice shows its lattice: diamonds, and edges along the axes.
+/// Folding the place through a coarse reading of itself, and turning each
+/// finer reading against the last, leaves nothing straight to see. The
+/// shaders read it the same way, term for term.
 pub fn damp(place: Vec2) -> f32 {
-    let broad = noise(place / BROAD_M + Vec2::new(13.7, -4.1));
-    let fine = noise(place / FINE_M + Vec2::new(-27.3, 8.9));
-    (broad * 0.72 + fine * 0.28).clamp(0.0, 1.0)
+    let turn = Mat2::from_cols(Vec2::new(0.80, 0.60), Vec2::new(-0.60, 0.80));
+    let warp = Vec2::new(
+        noise(place / 610.0 + Vec2::new(5.2, 1.3)),
+        noise(place / 610.0 + Vec2::new(-3.1, 7.7)),
+    ) - Vec2::splat(0.5);
+    let folded = place + warp * 260.0;
+    let broad = noise(folded / 430.0 + Vec2::new(13.7, -4.1));
+    let middle = noise(turn * folded / 170.0 + Vec2::new(-27.3, 8.9));
+    let fine = noise(turn * turn * folded / 68.0 + Vec2::new(41.0, -9.3));
+    (broad * 0.54 + middle * 0.31 + fine * 0.15).clamp(0.0, 1.0)
 }
 
 /// The land somewhere, where nobody has laid one out: the damp ground grows
@@ -80,7 +87,7 @@ mod tests {
             assert!((0.0..=1.0).contains(&value));
             least = least.min(value);
             most = most.max(value);
-            assert!((value - damp(place + Vec2::X)).abs() < 0.02);
+            assert!((value - damp(place + Vec2::X)).abs() < 0.03);
         }
         assert!(most - least > 0.25, "the country is all one dampness: {least}..{most}");
     }

@@ -80,13 +80,30 @@ fn species_tint(species: vec2<f32>) -> vec3<f32> {
 // the blades, the soil and the motes in the air all agree on where the
 // country turns dry; change one and change the others.
 fn meadow_damp(place: vec2<f32>) -> f32 {
-    let broad = noise(place / 420.0 + vec2<f32>(13.7, -4.1));
-    let fine = noise(place / 95.0 + vec2<f32>(-27.3, 8.9));
-    return clamp(broad * 0.72 + fine * 0.28, 0.0, 1.0);
+    // Noise on a lattice shows its lattice: diamonds, and edges along the
+    // axes. Folding the place through a coarse reading of itself, and turning
+    // each finer reading against the last, leaves nothing straight to see.
+    let turn = mat2x2<f32>(0.80, 0.60, -0.60, 0.80);
+    let warp = vec2<f32>(noise(place / 610.0 + vec2<f32>(5.2, 1.3)),
+        noise(place / 610.0 + vec2<f32>(-3.1, 7.7))) - vec2<f32>(0.5);
+    let folded = place + warp * 260.0;
+    let broad = noise(folded / 430.0 + vec2<f32>(13.7, -4.1));
+    let middle = noise(turn * folded / 170.0 + vec2<f32>(-27.3, 8.9));
+    let fine = noise(turn * turn * folded / 68.0 + vec2<f32>(41.0, -9.3));
+    return clamp(broad * 0.54 + middle * 0.31 + fine * 0.15, 0.0, 1.0);
+}
+
+// How much of a place is damp meadow rather than parched country.
+fn meadow_share(place: vec2<f32>) -> f32 {
+    return smoothstep(0.42, 0.56, meadow_damp(place));
 }
 
 // Parched country is paler, yellower and less green than a damp meadow.
 fn dry_country(place: vec2<f32>) -> vec3<f32> {
-    let share = smoothstep(0.42, 0.56, meadow_damp(place));
-    return mix(vec3<f32>(1.42, 1.22, 0.66), vec3<f32>(1.0), share);
+    return mix(vec3<f32>(1.14, 1.07, 0.88), vec3<f32>(1.0), meadow_share(place));
+}
+
+// And what grows in it is shorter for want of water.
+fn dry_growth(place: vec2<f32>) -> f32 {
+    return mix(0.78, 1.0, meadow_share(place));
 }
