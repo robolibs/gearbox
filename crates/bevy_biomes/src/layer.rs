@@ -108,9 +108,9 @@ impl Covers {
                     size_mm: [4.0, 9.0],
                     rise_mps: 0.02,
                     drag: 0.55,
-                    ceiling_m: 3.5,
-                    reach_m: 26.0,
-                    colour: Srgba::new(0.93, 0.9, 0.74, 0.1),
+                    ceiling_m: 2.4,
+                    reach_m: 22.0,
+                    colour: Srgba::new(0.9, 0.88, 0.76, 0.06),
                 })
                 .with_air(Motes {
                     kind: MoteKind::Petal,
@@ -120,7 +120,7 @@ impl Covers {
                     drag: 0.85,
                     ceiling_m: 2.2,
                     reach_m: 30.0,
-                    colour: Srgba::new(0.93, 0.86, 0.85, 0.3),
+                    colour: Srgba::new(0.9, 0.84, 0.83, 0.16),
                 })
                 .with_air(Motes {
                     kind: MoteKind::Seed,
@@ -128,22 +128,22 @@ impl Covers {
                     size_mm: [10.0, 20.0],
                     rise_mps: 0.06,
                     drag: 0.95,
-                    ceiling_m: 4.0,
-                    reach_m: 30.0,
-                    colour: Srgba::new(0.9, 0.9, 0.84, 0.14),
+                    ceiling_m: 2.8,
+                    reach_m: 24.0,
+                    colour: Srgba::new(0.88, 0.88, 0.83, 0.07),
                 }),
         );
         covers.insert(
             Cover::new(Field::Stubble)
                 .with_air(Motes {
                     kind: MoteKind::Chaff,
-                    per_hectare: 700.0,
-                    size_mm: [25.0, 65.0],
+                    per_hectare: 420.0,
+                    size_mm: [16.0, 42.0],
                     rise_mps: -0.12,
                     drag: 0.95,
-                    ceiling_m: 2.6,
-                    reach_m: 32.0,
-                    colour: Srgba::new(0.82, 0.73, 0.52, 0.42),
+                    ceiling_m: 1.9,
+                    reach_m: 26.0,
+                    colour: Srgba::new(0.78, 0.7, 0.52, 0.17),
                 })
                 .with_air(Motes {
                     kind: MoteKind::Dust,
@@ -151,9 +151,9 @@ impl Covers {
                     size_mm: [8.0, 20.0],
                     rise_mps: 0.08,
                     drag: 0.8,
-                    ceiling_m: 5.0,
-                    reach_m: 34.0,
-                    colour: Srgba::new(0.74, 0.67, 0.54, 0.09),
+                    ceiling_m: 3.2,
+                    reach_m: 28.0,
+                    colour: Srgba::new(0.72, 0.66, 0.55, 0.05),
                 }),
         );
         covers.insert(Cover::new(Field::Yard).with_air(Motes {
@@ -164,7 +164,7 @@ impl Covers {
             drag: 0.7,
             ceiling_m: 3.0,
             reach_m: 26.0,
-            colour: Srgba::new(0.72, 0.7, 0.66, 0.08),
+            colour: Srgba::new(0.7, 0.69, 0.66, 0.05),
         }));
         covers
     }

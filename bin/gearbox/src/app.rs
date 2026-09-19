@@ -77,6 +77,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
                 terrain::publish_cover_terrain.in_set(terrain::TerrainUpdates),
                 environment::sync_cover_wind,
                 environment::sync_lens,
+                environment::sync_camera_lens,
             ),
         )
         .add_systems(Startup, (log_render_adapter, use_cpu_light_clustering))
