@@ -14,6 +14,9 @@ Terms:
 - **IGNORED** — parsed into the spec struct but never read by any system.
 - **PROPOSED** — not implemented yet. Assets SHOULD author it now so they
   work unchanged when the runtime catches up. §7 is entirely PROPOSED.
+- **REQUIRED CONTRACT** — required for full asset compatibility, but not yet
+  enforced by the current loader. Unlike MUST above, this does not claim that
+  the runtime already rejects an asset which omits it.
 
 External conventions this spec binds to:
 
@@ -327,6 +330,26 @@ frame. Both `tractor.usd` and `hunter.usd` follow this.
 
 Collision shapes SHOULD be primitives. The collider adapter bakes prim `scale`
 into `Cube` and `Sphere` sizes.
+
+### 5.1 Wheel and tyre compatibility — REQUIRED CONTRACT
+
+Every compatible machine must explicitly classify its ground-contact wheels:
+pneumatic tyre, solid wheel, or another supported contact model. Every
+pneumatic wheel must satisfy the [tyre asset contract](TYRE_PRESSURE.md#required-machine-asset-contract),
+whether powered, passive, steered, a caster, or attached to a trailer or
+implement. Machine brand and mesh names must not decide support.
+
+That contract requires explicit wheel/joint and rubber/rigid-part bindings,
+reference geometry, axle identity, pressure bounds and material properties.
+One tyre state must supply support, grip, visible deformation and readout.
+Solid wheels and tracks must declare their applicable model; machines without
+wheels are not required to invent tyres or pressure controls.
+
+**Enforcement is incomplete.** The isolated Molla adapter currently recognises
+rubber by names and derives missing dimensions/default properties. Those are
+legacy import fallbacks, not evidence of full compatibility. Explicit contact-
+type/mesh-binding schema and loader validation still need implementation.
+Rapier currently provides rigid wheel behaviour, not pressure-tyre capability.
 
 ## 6. Tool interface (agentio over peerbus)
 

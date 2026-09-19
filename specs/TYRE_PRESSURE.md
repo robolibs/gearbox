@@ -3,6 +3,82 @@
 Run this worktree with `GEARBOX_PHYSICS=molla`. Rapier retains rigid tyres;
 it does not implement these pressure mechanics.
 
+## Required machine asset contract
+
+**REQUIRED CONTRACT — authoring requirement; loader enforcement incomplete.**
+This is part of full Gearbox machine compatibility, not an optional feature
+for selected brands. Loading successfully does not establish compliance.
+
+Every machine must explicitly identify its ground-contact model. Every
+pneumatic wheel, including passive trailer/implement wheels and casters,
+must provide the following information:
+
+| Required information | Contract |
+|---|---|
+| Wheel identity and motion | Stable wheel link, owning machine, wheel rigid body, real rolling joint, hub centre and rolling axis. Steering is a separate joint where applicable. |
+| Contact type | Pneumatic tyre, rather than inferring it from a wheel name. Solid wheels, tracks and other contact models declare their actual type. No-wheel machines declare tyre requirements inapplicable. |
+| Mesh bindings | Explicit deformable rubber/tread mesh targets and separate rigid rim/hub targets, all owned by this wheel. Collider helpers are not rubber. Renaming meshes must not change behaviour. |
+| Reference geometry | Unloaded outer radius including tread, bead/rim radius, width and reference pressure, in declared units. Reference geometry stays immutable during inflation and wheel rotation. |
+| Pressure configuration | Initial gauge pressure, supported minimum/maximum, and positive bounded inflation/deflation rate. User-facing pressure is gauge bar; solver pressure is Pa. |
+| Tyre response | Carcass stiffness/damping, tread/material and hysteresis parameters with a documented supported load/pressure range. Simulation defaults are not manufacturer calibration. |
+| Axle identity | Explicit axle/group membership for consistent whole-machine, axle and individual-wheel controls. |
+
+Solid wheels, tracks and non-wheel implements are exempt from pneumatic
+pressure/deformation fields, not from declaring the appropriate contact type.
+Decorative wheels must be distinguishable from load-bearing ones.
+
+### Existing fields and implementation gaps
+
+The isolated adapter already consumes these numeric wheel-link attributes:
+
+| Attribute | Units |
+|---|---|
+| `gearbox:value:tyre_axle` | Positive integer axle id |
+| `gearbox:value:tyre_pressure_bar` | Initial gauge bar |
+| `gearbox:value:tyre_min_pressure_bar` | Gauge bar |
+| `gearbox:value:tyre_max_pressure_bar` | Gauge bar |
+| `gearbox:value:tyre_pressure_rate_bar_s` | Bar per simulated second |
+| `gearbox:value:tyre_width_m` | Metres |
+| `gearbox:value:tyre_carcass_stiffness_pa_m` | Pa/m |
+| `gearbox:value:tyre_tread_stiffness_n_m3` | N/m³ |
+| `gearbox:value:tyre_damping_ratio` | Dimensionless |
+| `gearbox:value:tyre_hysteresis_fraction` | Dimensionless |
+
+Explicit contact-type, rubber/rigid mesh-binding and reference-geometry
+schema fields are not yet defined/consumed. They must be implemented before
+the loader can certify this contract. The existing mesh-name recognition,
+collider/mesh dimension inference and unauthored defaults remain legacy import
+fallbacks; they must not silently certify an asset as fully compatible.
+
+### Compatibility validation and acceptance
+
+The compatibility validator must reject or report non-compliant pneumatic
+wheels with the machine id, wheel path, missing/invalid field and required
+correction. It must detect unresolved/cross-wheel mesh bindings, conflicting
+rigid/rubber membership, missing rolling joints, inconsistent geometry,
+non-finite/non-positive dimensions and rates, and invalid pressure ranges.
+Legacy preview loading may continue with a clear degraded-status report.
+An unsupported backend must report the missing capability, not silently
+present rigid tyres as pressure-compatible behaviour.
+
+Each machine's acceptance test must demonstrate:
+
+1. All pneumatic wheels are discovered without name/brand heuristics, with
+   correct axle membership and pressure controls, including passive wheels.
+2. At fixed load and surface, minimum/reference/maximum pressure and both
+   transition directions change support, loaded radius, footprint and visible
+   rubber consistently. High-pressure rubber is rounder, but remains loaded.
+3. Rubber stays on the sampled ground; rims/hubs remain rigid. Inflation does
+   not teleport the chassis, reset wheel speed or create duplicate support.
+4. Paused/running edits, per-wheel/axle/all groups, supported save/reload,
+   attach/detach and unrelated spawn/remove operations retain valid state.
+5. Renaming mesh prims while updating explicit relationships leaves behaviour
+   unchanged; missing metadata cannot silently disable deformation.
+
+These are required gates, not a claim that every gate or machine has already
+passed. Current live visual coverage is the Kubota; Krampe naming recognition
+alone does not establish trailer compatibility.
+
 ## Controls
 
 The Machine sidebar has all-tyre, axle and individual-wheel target sliders.
