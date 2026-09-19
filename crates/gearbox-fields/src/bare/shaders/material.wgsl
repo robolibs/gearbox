@@ -27,7 +27,23 @@
 struct BareGround {
     tint: vec4<f32>,
     grain: vec4<f32>,
+    // The grass that grows through it, and how much of the ground it holds.
+    grass: vec4<f32>,
 };
+
+// Two surfaces met by their own heights, not faded into one another: the
+// taller of the two wins a pixel outright, and only within a shallow band of
+// each other do they mix. It is what puts soil in the gaps between tufts
+// instead of a grey halo round every patch.
+fn height_blend(a: vec3<f32>, a_height: f32, a_share: f32,
+    b: vec3<f32>, b_height: f32, b_share: f32) -> vec4<f32> {
+    let band = 0.2;
+    let tallest = max(a_height + a_share, b_height + b_share) - band;
+    let weight_a = max(a_height + a_share - tallest, 0.0);
+    let weight_b = max(b_height + b_share - tallest, 0.0);
+    let total = max(weight_a + weight_b, 0.0001);
+    return vec4<f32>((a * weight_a + b * weight_b) / total, weight_b / total);
+}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var<uniform> ground: BareGround;
 
@@ -78,16 +94,36 @@ fn scattered(tex: texture_2d<f32>, uv: vec2<f32>, seed: f32) -> vec4<f32> {
 // Ripples the wind has combed across the ground, running with the slope and
 // only where the ground is near enough level to hold them.
 // The comb across bare ground: a plough's furrows, or the wind's ripples.
-//
-// It runs dead straight, on one heading for each plot of ground, because
-// steering it by the lie of the land is what curls furrows into fingerprints:
-// warping a coordinate by noise is precisely how one draws a whorl.
-fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> f32 {
+// One heading to a plot, dead straight, because steering it by the lie of the
+// land curls furrows into whorls. But no two furrows are the same depth, and
+// none of them runs perfectly true along its length.
+struct Comb {
+    crest: f32,
+    // How deep this furrow is cut, against its neighbours.
+    depth: f32,
+    // Nought on the headland where the plough turned, one out in the field.
+    worked: f32,
+};
+
+fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
     let plot = floor(place / plot_m);
     let heading = hash21(plot) * 3.1415927;
     let lean = vec2<f32>(cos(heading), sin(heading));
-    let across = dot(place, vec2<f32>(-lean.y, lean.x)) / max(spacing, 0.05);
-    return sin(across * 6.2831853) * 0.5 + 0.5;
+    let along = dot(place, lean);
+    // The line of it wanders a little, as a tractor does.
+    let wander = sin(along * 0.11 + hash21(plot + 3.0) * 6.28) * 0.22
+        + sin(along * 0.037 + 1.9) * 0.3;
+    let across = dot(place, vec2<f32>(-lean.y, lean.x)) / max(spacing, 0.05) + wander;
+    let furrow = floor(across);
+    // The headland: a turning strip round the edge of the plot, worked over
+    // rather than drawn through.
+    let within = abs(fract(place / plot_m) - vec2<f32>(0.5)) * 2.0;
+    let edge = max(within.x, within.y);
+    var comb: Comb;
+    comb.crest = sin(across * 6.2831853) * 0.5 + 0.5;
+    comb.depth = mix(0.72, 1.28, hash21(vec2<f32>(furrow, plot.x + plot.y * 7.0)));
+    comb.worked = 1.0 - smoothstep(0.86, 0.99, edge);
+    return comb;
 }
 
 // Gradient noise, not value noise: value noise on a square lattice lays its
@@ -164,12 +200,16 @@ fn made_relief(place: vec2<f32>, close: f32) -> f32 {
     let slabs = clods(place / (clod * 5.5));
     let lumps = clods(place / (clod * 0.9) + vec2<f32>(17.0, 4.0));
     let crumb = mix(0.5, ground_fbm(place / (clod * 0.22), 2), close);
-    let combed = comb(place, ground.grain.w, 128.0);
+    let drawn = comb(place, ground.grain.w, 128.0);
+    let combed = drawn.crest * drawn.depth * drawn.worked;
+    // Where the plough turned, it left broken ground instead of furrows.
+    let broken = 1.0 + (1.0 - drawn.worked) * 1.4;
     return swell * 0.08
-        + slabs * ground.grain.y * mix(0.08, 0.34, coarseness)
-        + lumps * ground.grain.y * mix(0.22, 0.05, coarseness)
-        + crumb * ground.grain.y * 0.05
-        + combed * ground.grain.z * 0.10;
+        // The furrows are the ground's shape; the clods only lie on them.
+        + combed * ground.grain.z * 0.62
+        + slabs * ground.grain.y * mix(0.1, 0.3, coarseness) * broken
+        + lumps * ground.grain.y * mix(0.22, 0.07, coarseness) * broken
+        + crumb * ground.grain.y * 0.05;
 }
 
 @fragment
@@ -191,9 +231,29 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let clod = max(ground.grain.x, 0.05);
     let patchy = ground_fbm(place / 7.0 + vec2<f32>(3.3, 8.8), 3);
     let speck = mix(0.5, ground_fbm(place / (clod * 0.3), 2), close);
-    let furrow_shade = comb(place, ground.grain.w, 128.0);
-    colour = ground.tint.rgb * mix(0.74, 1.2, patchy) * mix(0.9, 1.12, speck)
-        * mix(1.0, 0.94 + 0.12 * furrow_shade, ground.grain.z);
+    // A crest dries pale; the trough beside it stays damp and dark.
+    let shade = comb(place, ground.grain.w, 128.0);
+    let crest = shade.crest * shade.worked;
+    colour = ground.tint.rgb * mix(0.62, 1.34, patchy) * mix(0.88, 1.14, speck)
+        * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
+
+    // Grass takes the ground in patches, and holds it where it is tallest.
+    var grass_share = 0.0;
+    if (ground.grass.w > 0.001) {
+        let where_it_grows = ground_fbm(place / 9.0 + vec2<f32>(51.0, -23.0), 3);
+        let tufts = ground_fbm(place / 0.38 + vec2<f32>(8.0, 14.0), 2);
+        let blades = mix(0.5, ground_fbm(place / 0.09, 2), close);
+        let grass_height = tufts * 0.7 + blades * 0.3;
+        // The noise sits about its middle, so the level it must pass to count as
+        // grass is set from the share wanted, not from the share itself.
+        let level = mix(0.74, 0.26, ground.grass.w);
+        let took = smoothstep(level - 0.07, level + 0.07, where_it_grows);
+        let green = ground.grass.rgb * mix(0.72, 1.22, tufts) * mix(0.9, 1.1, blades);
+        let soil_height = made_relief(place, close) * 2.0;
+        let met = height_blend(colour, soil_height, 1.0 - took, green, grass_height, took);
+        colour = met.rgb;
+        grass_share = met.a;
+    }
 
     // Where a wheel has passed the ground is pressed flat and darkened.
     let pressed = sample_wheels(tracks, wheels, place);
