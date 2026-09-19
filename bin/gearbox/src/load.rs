@@ -433,9 +433,12 @@ fn sync_pending_machine_physics_to_scene_transforms(
     children: Query<&Children>,
     globals: Query<&GlobalTransform>,
     names: Query<&Name>,
+    parents: Query<&ChildOf>,
+    sites: Query<&crate::globe::Site>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
     for (root, mut root_transform, mut pending, name) in pending.iter_mut() {
+        let region = gearbox_globe::physics_offset(crate::globe::site_of(root, &parents, &sites));
         let descendants = collect_descendants(root, &children);
         let body_entities = descendants
             .into_iter()
@@ -480,7 +483,7 @@ fn sync_pending_machine_physics_to_scene_transforms(
             body.set_position(
                 Pose {
                     translation: DVec3::new(
-                        transform.translation.x as f64,
+                        transform.translation.x as f64 + region.x,
                         transform.translation.y as f64,
                         transform.translation.z as f64,
                     ),

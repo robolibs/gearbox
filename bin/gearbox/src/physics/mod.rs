@@ -356,11 +356,14 @@ fn carry_onto_machine(
 
 /// World pose composed from local transforms, for entities spawned since
 /// propagation last ran.
+/// "World" is the entity's site: the chain stops at the site's grid.
 fn chain_world(world: &World, entity: Entity) -> GlobalTransform {
     let local = world.get::<Transform>(entity).copied().unwrap_or_default();
     match world.get::<ChildOf>(entity) {
-        Some(parent) => chain_world(world, parent.parent()) * local,
-        None => GlobalTransform::from(local),
+        Some(parent) if world.get::<crate::globe::Site>(parent.parent()).is_none() => {
+            chain_world(world, parent.parent()) * local
+        }
+        _ => GlobalTransform::from(local),
     }
 }
 
@@ -383,7 +386,9 @@ fn sync_bodies_to_transforms_on_resume(
     active: Res<PhysicsActive>,
     mut prev_active: Local<bool>,
     mut world: ResMut<PhysicsWorld>,
-    transforms: Query<&GlobalTransform>,
+    transforms: Query<&Transform>,
+    parents: Query<&ChildOf>,
+    sites: Query<&crate::globe::Site>,
 ) {
     let was = *prev_active;
     *prev_active = active.0;
@@ -395,16 +400,19 @@ fn sync_bodies_to_transforms_on_resume(
     let pairs: Vec<(Entity, RigidBodyHandle)> =
         world.entity_to_body.iter().map(|(e, h)| (*e, *h)).collect();
     for (entity, handle) in pairs {
-        let Ok(gt) = transforms.get(entity) else {
+        if !transforms.contains(entity) {
             continue;
-        };
-        let t = gt.compute_transform();
+        }
+        let t = crate::globe::transform_in_site(entity, &parents, &transforms, &sites).compute_transform();
+        let region = gearbox_globe::physics_offset(crate::globe::site_of(entity, &parents, &sites));
         let Some(rb) = world.bodies.get_mut(handle) else {
             continue;
         };
+        let mut translation = convert::vec3_to_d(t.translation);
+        translation.x += region.x;
         rb.set_position(
             Pose {
-                translation: convert::vec3_to_d(t.translation),
+                translation,
                 rotation: convert::quat_to_d(t.rotation),
             },
             true,

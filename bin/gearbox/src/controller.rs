@@ -1109,11 +1109,12 @@ fn apply_builtin_ackermann_cmd_vel(
                 // including when the command is zero. This lets the UI/API show
                 // that the controller is alive without needing movement.
                 let pos = body.translation();
+                let (_, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
                 let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
                 states.states.insert(
                     key.clone(),
                     ControllerState {
-                        position_m: [pos.x, pos.y, pos.z],
+                        position_m,
                         heading_rad: body_heading,
                         roll_rad,
                         pitch_rad,
@@ -1377,11 +1378,12 @@ fn apply_builtin_diff_drive_cmd_vel(
                 runtime.diff_drive_debug_ticks += 1;
 
                 let pos = body.translation();
+                let (_, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
                 let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
                 states.states.insert(
                     key.clone(),
                     ControllerState {
-                        position_m: [pos.x, pos.y, pos.z],
+                        position_m,
                         heading_rad: machine_heading_rad(body),
                         roll_rad,
                         pitch_rad,
@@ -2337,7 +2339,12 @@ fn record_wheel_tracks(
                 .or_insert(0.0);
             *odometer += ground as f32 * time.delta_secs();
             let travelled = *odometer;
-            let p = body.translation();
+            // Tracks are laid in the cover that is drawn: the view's site.
+            let (site, p) = crate::globe::site_local(body.translation().x, body.translation().y, body.translation().z);
+            if site != crate::globe::current_site() {
+                continue;
+            }
+            let p = rapier3d::math::Vector::new(p[0], p[1], p[2]);
             let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
             if p.y as f32 - radius as f32 > ground + WHEEL_TRACK_CONTACT_SLACK_M {
                 continue;
@@ -4803,6 +4810,8 @@ fn publish_machine_controller_states(
                     continue;
                 };
                 let p = body.position().translation;
+                let (_, p) = crate::globe::site_local(p.x, p.y, p.z);
+                let p = rapier3d::math::Vector::new(p[0], p[1], p[2]);
                 let heading = body_forward_vector(body)
                     .map(|f| f.x.atan2(f.z))
                     .unwrap_or(0.0);

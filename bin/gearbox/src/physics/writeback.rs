@@ -1,15 +1,18 @@
 //! Copy solved world poses into local transforms, ancestors before descendants.
 
 use bevy::prelude::*;
-use bevy::transform::helper::TransformHelper;
 
-use super::convert::{quat_from_d, vec3_from_d};
+use super::convert::quat_from_d;
 use super::world::PhysicsWorld;
+use crate::globe::{Site, transform_in_site};
 
+// A body's pose is in its site's region of the physics world; its transform
+// is in its site's frame, so the chain stops at the site's grid.
 pub fn writeback_transforms(
     world: Res<PhysicsWorld>,
     parents: Query<&ChildOf>,
-    mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
+    sites: Query<&Site>,
+    mut transforms: ParamSet<(Query<&Transform>, Query<&mut Transform>)>,
 ) {
     let mut entities: Vec<_> = world.entity_to_body.keys().copied().collect();
     entities.sort_by_cached_key(|entity| parents.iter_ancestors(*entity).count());
@@ -21,19 +24,18 @@ pub fn writeback_transforms(
         else {
             continue;
         };
-        let parent_world = if let Ok(parent) = parents.get(entity) {
-            let Ok(transform) = transforms.p0().compute_global_transform(parent.parent()) else {
-                continue;
-            };
-            transform
-        } else {
-            GlobalTransform::IDENTITY
+        let parent_world = match parents.get(entity) {
+            Ok(parent) if !sites.contains(parent.parent()) => {
+                transform_in_site(parent.parent(), &parents, &transforms.p0(), &sites)
+            }
+            _ => GlobalTransform::IDENTITY,
         };
         let pose = rb.position();
+        let (_, local) = crate::globe::site_local(pose.translation.x, pose.translation.y, pose.translation.z);
         let translation = parent_world
             .affine()
             .inverse()
-            .transform_point3(vec3_from_d(pose.translation));
+            .transform_point3(Vec3::new(local[0] as f32, local[1] as f32, local[2] as f32));
         let rotation =
             parent_world.compute_transform().rotation.inverse() * quat_from_d(pose.rotation);
         if let Ok(mut transform) = transforms.p1().get_mut(entity) {
@@ -47,6 +49,7 @@ pub fn writeback_transforms(
 mod tests {
     use super::super::convert::{quat_to_d, vec3_to_d};
     use super::*;
+    use bevy::transform::helper::TransformHelper;
     use bevy::ecs::system::{RunSystemOnce, SystemState};
     use rapier3d::prelude::{Pose, RigidBodyBuilder};
 

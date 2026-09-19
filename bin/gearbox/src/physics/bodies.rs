@@ -26,12 +26,18 @@ pub fn convert_rigid_bodies(
         ),
         (Added<UsdRigidBody>, Without<BodyAttached>),
     >,
+    parents: Query<&ChildOf>,
+    sites: Query<&crate::globe::Site>,
 ) {
     for (entity, rb, mass, gt) in &bodies {
+        // The transform is in the site's frame; the body goes in the site's region.
+        let region = gearbox_globe::physics_offset(crate::globe::site_of(entity, &parents, &sites));
         let (world_translation, world_rotation) = match gt {
             Some(g) => {
                 let t = g.compute_transform();
-                (vec3_to_d(t.translation), quat_to_d(t.rotation))
+                let mut translation = vec3_to_d(t.translation);
+                translation.x += region.x;
+                (translation, quat_to_d(t.rotation))
             }
             None => (Default::default(), Default::default()),
         };

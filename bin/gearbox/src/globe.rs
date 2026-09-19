@@ -23,7 +23,8 @@ pub struct GlobePlugin;
 impl Plugin for GlobePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(BigSpaceDefaultPlugins)
-            .add_systems(PreStartup, spawn_globe);
+            .add_systems(PreStartup, spawn_globe)
+            .add_systems(PreUpdate, adopt_loaded_roots);
     }
 }
 
@@ -93,4 +94,58 @@ fn spawn_globe(mut commands: Commands) {
         current: 0,
         land: Terrain::new(&frame),
     });
+}
+
+static CURRENT_SITE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The site the view is in, for code with no access to [`Sites`].
+pub fn current_site() -> usize {
+    CURRENT_SITE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_current_site(index: usize) {
+    CURRENT_SITE.store(index, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A physics position as its site sees it: the site, and the place in it.
+pub fn site_local(x: f64, y: f64, z: f64) -> (usize, [f64; 3]) {
+    let site = gearbox_globe::site_of_physics(x);
+    (site, [x - gearbox_globe::physics_offset(site).x, y, z])
+}
+
+/// The site an entity stands in: the nearest [`Site`] above it, home if none.
+pub fn site_of(entity: Entity, parents: &Query<&ChildOf>, sites: &Query<&Site>) -> usize {
+    std::iter::once(entity)
+        .chain(parents.iter_ancestors(entity))
+        .find_map(|e| sites.get(e).ok())
+        .map_or(0, |site| site.0)
+}
+
+/// An entity's transform in its site's frame: its chain of local transforms
+/// up to, and not including, the site's grid.
+pub fn transform_in_site(
+    entity: Entity,
+    parents: &Query<&ChildOf>,
+    transforms: &Query<&Transform>,
+    sites: &Query<&Site>,
+) -> GlobalTransform {
+    let mut chain = GlobalTransform::from(transforms.get(entity).copied().unwrap_or_default());
+    for ancestor in parents.iter_ancestors(entity) {
+        if sites.contains(ancestor) {
+            break;
+        }
+        chain = GlobalTransform::from(transforms.get(ancestor).copied().unwrap_or_default()) * chain;
+    }
+    chain
+}
+
+/// What is loaded stands where the view is: a loaded root joins the site in view.
+fn adopt_loaded_roots(
+    mut commands: Commands,
+    sites: Res<Sites>,
+    roots: Query<Entity, (Added<crate::load::LoadedAsset>, Without<ChildOf>)>,
+) {
+    for root in &roots {
+        commands.entity(root).insert(ChildOf(sites.current().entity));
+    }
 }
