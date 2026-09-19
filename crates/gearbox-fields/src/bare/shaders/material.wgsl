@@ -139,23 +139,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let land = surface_geometry_normal(surface_heightmap, geometry, place, in.world_normal);
     let slope = vec2<f32>(land.x, land.z);
 
-    // Sand is made, not read; everything else is a scan of real ground.
-    let made = ground.tint.w > 0.5;
     var colour = vec3<f32>(0.0);
     // Grain finer than the pixel that sees it is left out, not drawn: it
     // would only come back as a crawl of static.
     let pixel_m = max(fwidth(place.x), fwidth(place.y));
     let close = 1.0 - smoothstep(0.09, 0.42, pixel_m);
-    if (made) {
-        let blown = sand_fbm(place / 7.0 + vec2<f32>(3.3, 8.8), 3);
-        let fine = mix(0.5, sand_fbm(place / 0.22, 2), close);
-        // Drifts of coarser, darker grains lie through the finer pale sand.
-        colour = ground.tint.rgb * mix(0.78, 1.18, blown) * mix(0.94, 1.06, fine);
-    } else {
-        let soil = scattered(soil_albedo, place / max(ground.grain.x, 0.05), 11.0).rgb;
-        let grit = scattered(grit_albedo, place / max(ground.grain.x * 0.24, 0.02) + vec2<f32>(61.0, -37.0), 59.0).rgb;
-        colour = mix(soil, grit, 0.22) * ground.tint.rgb;
-    }
+    // Patches of damper, coarser ground lie through the drier: the colour is
+    // made of the same noise the shape is, so they agree.
+    let clod = max(ground.grain.x, 0.05);
+    let patchy = sand_fbm(place / 7.0 + vec2<f32>(3.3, 8.8), 3);
+    let speck = mix(0.5, sand_fbm(place / (clod * 0.3), 2), close);
+    colour = ground.tint.rgb * mix(0.74, 1.2, patchy) * mix(0.9, 1.12, speck);
 
     // Where a wheel has passed the ground is pressed flat and darkened.
     let pressed = sample_wheels(tracks, wheels, place);
@@ -164,30 +158,22 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     // The normal from the height itself: a step to each side, and the cross
     // of what that leaves. Clods lit from the side read as clods.
-    let step = select(max(ground.grain.x * 0.06, 0.01), 0.05, made);
+    let step = max(clod * 0.12, 0.02);
     let pressed_down = 1.0 - rolled * 0.75;
-    var here = 0.0;
-    var east = 0.0;
-    var north = 0.0;
-    if (made) {
-        here = sand_relief(place, slope) * pressed_down;
-        east = sand_relief(place + vec2<f32>(step, 0.0), slope) * pressed_down;
-        north = sand_relief(place + vec2<f32>(0.0, step), slope) * pressed_down;
-    } else {
-        here = relief(place, slope) * pressed_down;
-        east = relief(place + vec2<f32>(step, 0.0), slope) * pressed_down;
-        north = relief(place + vec2<f32>(0.0, step), slope) * pressed_down;
-    }
-    let bumps = normalize(vec3<f32>(here - east, step * 2.2, here - north));
+    let here = made_relief(place, slope, close) * pressed_down;
+    let east = made_relief(place + vec2<f32>(step, 0.0), slope, close) * pressed_down;
+    let north = made_relief(place + vec2<f32>(0.0, step), slope, close) * pressed_down;
+    // The slope of that height, taken across a step of it.
+    let bumps = normalize(vec3<f32>((here - east) * 1.6, step, (here - north) * 1.6));
     let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0));
 
     // Hollows between the clods keep the light out of them.
-    let pit = select(clamp(1.0 - (here - 0.35) * 0.9, 0.55, 1.15),
-        clamp(1.0 + (here - 0.14) * 0.9, 0.86, 1.14), made);
+    // What stands proud catches the light; the hollows between keep it out.
+    let pit = clamp(0.82 + here * 1.1, 0.7, 1.22);
 
     pbr_input.material.base_color = vec4<f32>(colour * pit, 1.0);
     // Sand glitters a little where its grains face the light.
-    let glint = select(0.0, (sand_fbm(place / 0.06, 1) - 0.5) * 0.22 * close, made);
+    let glint = (sand_fbm(place / (clod * 0.08), 1) - 0.5) * 0.18 * close;
     pbr_input.material.perceptual_roughness = clamp(mix(0.95, 0.78, rolled) + glint, 0.35, 1.0);
     pbr_input.world_normal = shaped;
     pbr_input.N = shaped;
