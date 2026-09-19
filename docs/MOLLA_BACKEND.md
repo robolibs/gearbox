@@ -72,6 +72,75 @@ retain the last valid operation state. Collider replacement followed by mass
 recomputation is not yet one combined transaction and needs failure-path
 hardening before final acceptance.
 
+## Pressure-dependent tyres
+
+The Molla wheel path now enables the core pressure brush model for discovered
+machine wheels. Rapier keeps its existing contact path. Width and unloaded
+radius come from wheel collider geometry; these optional link values override
+the uncalibrated reference configuration:
+
+| `gearbox:value:` suffix | Unit | Reference |
+| --- | --- | --- |
+| `tyre_pressure_bar` | gauge bar | 1.8 |
+| `tyre_min_pressure_bar` | gauge bar | 0.5 |
+| `tyre_max_pressure_bar` | gauge bar | 4.0 |
+| `tyre_pressure_rate_bar_s` | bar/s of simulated time | 0.2 |
+| `tyre_width_m` | m | measured geometry |
+| `tyre_carcass_stiffness_pa_m` | Pa/m | 400000 |
+| `tyre_tread_stiffness_n_m3` | N/m³ | 2600000 |
+| `tyre_damping_ratio` | dimensionless | 0.7 |
+| `tyre_hysteresis_fraction` | dimensionless | 0.1 |
+
+These defaults are not calibrated Kubota/Fendt tyre data or operational
+inflation recommendations. Backend pressure values are gauge Pa, converted
+explicitly from the authored/UI gauge bar values. The normal spring is
+replaced by pressure contact support, not added to it. Traction uses the
+brush grip budget and loaded rolling radius. Field stamps consume the actual
+patch length/width rather than a fixed longitudinal footprint.
+
+The Machine pane has a separate **Tyres** tab with per-wheel and all-wheel
+target sliders, actual pressure, loaded radius and tread contact area.
+The all-wheel slider requires overlapping supported ranges. Targets apply
+atomically per machine through the same backend path as CLI edits:
+
+```sh
+target/debug/gearbox -i INSTANCE machine set-value wheel_front_left \
+  tyre_target_pressure_bar 1.0 --machine tractor
+target/debug/gearbox -i INSTANCE --json machine state tractor
+```
+
+`set-value` queues a request; its immediate echo is not acceptance evidence.
+Invalid groups are logged and readback returns the accepted targets. Paused
+edits change targets only, retaining actual pressure and previous contact
+support. Inflation/deflation advances only when simulation advances. Targets
+survive unchanged registration and unrelated scene rebuilds, not save/reload
+yet. Link telemetry includes `tyre_pressure_bar`, `tyre_target_pressure_bar`,
+bounds, `tyre_loaded_radius_m`, `tyre_deflection_m`, patch length/width,
+`tyre_tread_area_m2` and rolling moment magnitude. Area is summed curved
+tread-cell area, not projected ground footprint area.
+
+The separate Tyres tab avoids response offsets depending on collapsed
+controller containers. Sliders synchronize through Mara's typed memory store,
+not egui's separate persisted-value store. Regression tests cover tab routing,
+all-wheel versus individual edits and authoritative slider memory.
+
+Live Kubota evidence: straight 2 m/s with zero turn reaches about 2.01 m/s;
+lowering front pressure from 1.8 to 1.0 bar increases settled deflection from
+about 53 to 67 mm, while raising rear pressure to 2.4 bar reduces it to 47 mm.
+The four loads total about 48.2 kN. A captured all-wheel UI edit changed all
+accepted targets from 1.8 to 2.58427 bar without changing paused pressure or
+deflection (`/tmp/molla-pressure-controls-all.{json,png}`). The mixed-target
+view exposed stale slider memory; the subsequent typed-memory correction is
+unit-tested, but its final live CLI-to-slider recheck was interrupted when
+the test instance disappeared. Do not count that recheck as passed.
+
+Remaining tyre requirements include axle controls, saved pressure state,
+visible mesh flattening/bulging, nonplanar/per-cell scene friction, calibration,
+pressure-extreme towing/slope gates, deterministic replay, GPU parity and the
+timing target. Footprint plumbing is tested, but visual pressure-sweep stamp
+comparison is still pending. This is an integration checkpoint, not full
+`FULL_COMPACT.md` acceptance.
+
 ## Build notes
 
 Use the repository Nix environment; the host Rust compiler is too old for this
@@ -85,8 +154,8 @@ nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 GEARBOX_PHYSICS=molla nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 ```
 
-The original 43 binary tests plus sixteen new backend/integration checks pass
-with explicit `GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (59 tests each). The new
+The original 43 binary tests plus nineteen new backend/integration checks pass
+with explicit `GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (62 tests each). The new
 checks include real capped motor motion, mass/impulse response, stable handles,
 heightfield rays/live bounds, pair filtering/contact impulses, quarantine and
 its entity-report propagation, compliant frame motion and the actual
@@ -95,6 +164,9 @@ Tyre checks cover grid friction, load readout without penalty manifolds,
 opposite axle signs, configuration failure/removal, and a headless ECS scene
 exercising registration, traction and elevated contact-point stamping. The ECS
 tyre assertions run with Molla selected; Rapier exercises its unchanged fallback.
+Pressure coverage includes backend target validation/ramping/re-registration,
+paused contact preservation, brush grip, ECS readback/rejection and patch-sized
+stamps. The fields library's eight tests also pass.
 This does not establish any of the live tractor/hitch/PTO/slope acceptance gates.
 
 The real Kubota asset now loads without the previous joint-cycle panic: 26
@@ -125,7 +197,9 @@ joint-aware batch semantics and stale-transform handling.
 
 Strict Clippy is not green in this checkout: dependency-inclusive linting finds
 existing issues in `gearbox-api`, `gearbox-fields` and vendored clouds; the
-`--no-deps` binary lane finds seven existing issues outside the Molla adapter.
+`--no-deps` binary lane finds eight existing issues outside the new tyre code
+(including the Bevy deprecation warning); see
+`/tmp/gearbox-pressure-controls-clippy.log`.
 No lint suppressions or unrelated source fixes were added to hide those failures.
 
 Local path dependencies currently expect Molla at `../../OUSD/molla` relative

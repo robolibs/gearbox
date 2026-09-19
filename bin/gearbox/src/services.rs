@@ -121,6 +121,9 @@ pub(crate) struct SeededLinkValues(pub(crate) HashSet<String>);
 
 pub struct ServicesPlugin;
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ServiceCommandSet;
+
 impl Plugin for ServicesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MasterInputs>()
@@ -133,7 +136,7 @@ impl Plugin for ServicesPlugin {
                 Update,
                 (
                     seed_link_values,
-                    drain_service_commands.after(crate::attach::serve_attachments),
+                    drain_service_commands.after(crate::attach::serve_attachments).in_set(ServiceCommandSet),
                     apply_service_controllers,
                     apply_process_controllers,
                 )

@@ -189,6 +189,30 @@ struct Block {
     bin_link: Option<LinkSpec>,
 }
 
+struct TyreBlock {
+    pod: usize,
+    links: Vec<String>,
+}
+
+fn apply_tyre_targets(
+    responses: &HashMap<MaraId, Vec<PodResponse>>,
+    machine: &str,
+    blocks: &[TyreBlock],
+    values: &mut LinkValues,
+) {
+    for block in blocks {
+        if let Some(value) = pod_response(responses, cid(P, "tyres"), block.pod)
+            .and_then(|r| r.sliders.first())
+            .filter(|s| s.changed)
+            .map(|s| s.value)
+        {
+            for link in &block.links {
+                values.set(machine, link, "tyre_target_pressure_bar", value);
+            }
+        }
+    }
+}
+
 /// Same-frame handoff from `container` to `apply`: rebuilding this from
 /// scratch in `apply` would mean keeping two copies of the per-controller
 /// switch below in sync, so it's built once and stashed here instead.
@@ -196,7 +220,7 @@ struct Block {
 struct MachineBuildCache(
     Option<(
         MachineList,
-        Option<(MachineInstanceSpec, Entity, usize, Vec<(String, String, Vec<String>)>, Vec<Block>)>,
+        Option<(MachineInstanceSpec, Entity, usize, Vec<(String, String, Vec<String>)>, Vec<Block>, Vec<TyreBlock>)>,
     )>,
 );
 
@@ -481,14 +505,65 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         containers.push(TabContainer::new(cid(P, &group), title, icon, group_pods));
     }
 
+    let tyres: Vec<_> = machine.links.links.iter().filter_map(|link| {
+        let current = values.get(&machine.id, &link.name, "tyre_pressure_bar")?;
+        let target = values.get(&machine.id, &link.name, "tyre_target_pressure_bar")?;
+        let low = values.get(&machine.id, &link.name, "tyre_min_pressure_bar")?;
+        let high = values.get(&machine.id, &link.name, "tyre_max_pressure_bar")?;
+        if [current, target, low, high].iter().all(|v| v.is_finite()) && low <= high {
+            Some((link, current, target, low, high))
+        } else {
+            None
+        }
+    }).collect();
+    let mut tyre_blocks = Vec::new();
+    let mut tyre_pods = Vec::new();
+    if !tyres.is_empty() {
+        let low = tyres.iter().map(|t| t.3).fold(f64::NEG_INFINITY, f64::max);
+        let high = tyres.iter().map(|t| t.4).fold(f64::INFINITY, f64::min);
+        if low <= high {
+            let target = tyres.iter().map(|t| t.2).sum::<f64>() / tyres.len() as f64;
+            ctx.sync_sliders(pid(P, "tyres-all", 0), &[clamp(target, low, high)]);
+            tyre_blocks.push(TyreBlock {
+                pod: tyre_pods.len(),
+                links: tyres.iter().map(|t| t.0.name.clone()).collect(),
+            });
+            let matched = tyres.iter().all(|t| (t.2 - target).abs() < 0.005);
+            tyre_pods.push(Pod::new(pid(P, "tyres-all", 0))
+                .with_readout("units", "bar (gauge)")
+                .with_readout("changes", "ramp while playing")
+                .with_readout("targets", if matched { "matched" } else { "mixed" })
+                .with_slider("all tyres", clamp(target, low, high), low..=high, 2, " bar", accent));
+        }
+        for (i, (link, current, target, low, high)) in tyres.iter().enumerate() {
+            let radius = values.get(&machine.id, &link.name, "tyre_loaded_radius_m").unwrap_or(0.0);
+            let area = values.get(&machine.id, &link.name, "tyre_tread_area_m2").unwrap_or(0.0);
+            ctx.sync_sliders(pid(P, "tyre", i), &[clamp(*target, *low, *high)]);
+            tyre_blocks.push(TyreBlock {
+                pod: tyre_pods.len(),
+                links: vec![link.name.clone()],
+            });
+            tyre_pods.push(Pod::new(pid(P, "tyre", i))
+                .with_readout("wheel", link.name.clone())
+                .with_readout("applied pressure", format!("{current:.2} bar"))
+                .with_readout("loaded radius", format!("{radius:.3} m"))
+                .with_readout("tread contact area", format!("{area:.4} m²"))
+                .with_slider("target pressure", clamp(*target, *low, *high), *low..=*high, 2, " bar", accent));
+        }
+    }
+
     world.insert_resource(MachineBuildCache(Some((
         list,
-        Some((machine, scene_root, variants_offset, variants, blocks)),
+        Some((machine, scene_root, variants_offset, variants, blocks, tyre_blocks)),
     ))));
     let tab = Tab::new(cid(P, "machine"), "Machine", "vehicle-tractor")
         .pods(pods)
         .containers(containers);
-    ShelfContainer::tabbed(cid(P, "root"), "Machine", "vehicle-tractor", vec![tab])
+    let mut tabs = vec![tab];
+    if !tyre_pods.is_empty() {
+        tabs.push(Tab::new(cid(P, "tyres"), "Tyres", "options").pods(tyre_pods));
+    }
+    ShelfContainer::tabbed(cid(P, "root"), "Machine", "vehicle-tractor", tabs)
 }
 
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, ctx: &PaneCtx) {
@@ -499,9 +574,15 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
         return;
     };
     handle_machine_list(responses, &list, ctx);
-    let Some((machine, scene_root, variants_offset, variants, blocks)) = selected else {
+    let Some((machine, scene_root, variants_offset, variants, blocks, tyre_blocks)) = selected else {
         return;
     };
+    apply_tyre_targets(
+        responses,
+        &machine.id,
+        &tyre_blocks,
+        &mut world.resource_mut::<LinkValues>(),
+    );
     for (i, (set, selection, options)) in variants.iter().enumerate() {
         let picked = options
             .iter()
@@ -636,5 +717,55 @@ fn set_service_value(
         world
             .resource_mut::<LinkValues>()
             .set(&machine.id, &l.name, name, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mara_core::pod::SliderResponse;
+
+    #[test]
+    fn tyre_targets_use_their_own_tab_responses() {
+        let blocks = [
+            TyreBlock { pod: 0, links: vec!["left".into(), "right".into()] },
+            TyreBlock { pod: 1, links: vec!["left".into()] },
+        ];
+        let response = |value, changed| PodResponse {
+            sliders: vec![SliderResponse { value, changed }],
+            ..Default::default()
+        };
+        let mut responses = HashMap::from([(cid(P, "machine"), vec![response(4.0, true)])]);
+        let mut values = LinkValues::default();
+        apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
+        assert_eq!(values.get("tractor", "left", "tyre_target_pressure_bar"), None);
+        responses.insert(cid(P, "tyres"), vec![response(2.2, true), response(1.8, false)]);
+        apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
+        for link in ["left", "right"] {
+            assert_eq!(values.get("tractor", link, "tyre_target_pressure_bar"), Some(2.2));
+        }
+        responses.insert(cid(P, "tyres"), vec![response(2.2, false), response(1.0, true)]);
+        apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
+        assert_eq!(values.get("tractor", "left", "tyre_target_pressure_bar"), Some(1.0));
+        assert_eq!(values.get("tractor", "right", "tyre_target_pressure_bar"), Some(2.2));
+    }
+
+    #[test]
+    fn tyre_slider_memory_tracks_authoritative_values() {
+        use mara_core::memory::MaraMemoryCtx;
+        let egui = egui::Context::default();
+        let log = crate::viewer::log::LoaderLog::default();
+        let ctx = PaneCtx {
+            accent: mara_core::vocab::Color32::WHITE,
+            egui: &egui,
+            outbox: Default::default(),
+            log: &log,
+        };
+        let pod = pid(P, "tyre", 0);
+        ctx.sync_sliders(pod, &[2.2]);
+        ctx.sync_sliders(pod, &[1.8]);
+        let key = pod.with(("mara_pod_slider_val", 0usize));
+        let seam = mara::host::MaraHostCtx::ui_only(&egui, None).seam();
+        assert_eq!(MaraMemoryCtx::new(&seam).get_persisted::<f64>(key), Some(1.8));
     }
 }

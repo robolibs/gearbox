@@ -695,6 +695,51 @@ pub struct WheelForceDesc {
     pub forward: DVec3,
     pub radius: f64,
     pub supported_mass: f64,
+    pub tyre: Option<PressureTyreDesc>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PressureTyreDesc {
+    pub width: f64,
+    pub pressure_pa: f64,
+    pub min_pressure_pa: f64,
+    pub max_pressure_pa: f64,
+    pub pressure_rate_pa_s: f64,
+    pub carcass_stiffness: f64,
+    pub tread_stiffness: f64,
+    pub damping_ratio: f64,
+    pub hysteresis_fraction: f64,
+}
+
+impl PressureTyreDesc {
+    /// Uncalibrated reference properties; pressures are gauge Pa.
+    pub fn reference(width: f64) -> Self {
+        Self {
+            width,
+            pressure_pa: 180_000.0,
+            min_pressure_pa: 50_000.0,
+            max_pressure_pa: 400_000.0,
+            pressure_rate_pa_s: 20_000.0,
+            carcass_stiffness: 400_000.0,
+            tread_stiffness: 2_600_000.0,
+            damping_ratio: 0.7,
+            hysteresis_fraction: 0.1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PressureTyreOutput {
+    pub pressure_pa: f64,
+    pub target_pressure_pa: f64,
+    pub min_pressure_pa: f64,
+    pub max_pressure_pa: f64,
+    pub loaded_radius: f64,
+    pub deflection: f64,
+    pub patch_length: f64,
+    pub patch_width: f64,
+    pub patch_area: f64,
+    pub rolling_moment: DVec3,
 }
 
 #[derive(Clone, Debug)]
@@ -716,6 +761,7 @@ pub struct WheelForceOutput {
     pub grip_force: f64,
     pub slip_ratio: f64,
     pub slip_angle: f64,
+    pub pressure: Option<PressureTyreOutput>,
 }
 
 /// A rigid-body engine gearbox can run on.
@@ -738,6 +784,9 @@ pub trait PhysicsBackend: Send + Sync {
     }
     fn wheel_output(&self, _body: BodyId) -> Option<WheelForceOutput> {
         None
+    }
+    fn set_wheel_pressures(&mut self, _targets: &[(BodyId, f64)]) -> Result<(), String> {
+        Err("pressure-dependent tyres are not supported".into())
     }
     fn wheel_drive_sign(&self, _joint: JointId) -> f64 {
         1.0

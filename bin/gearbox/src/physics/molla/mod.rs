@@ -106,6 +106,23 @@ impl PhysicsBackend for MollaBackend {
         self.wheel_force_output(body)
     }
 
+    fn set_wheel_pressures(&mut self, targets: &[(BodyId, f64)]) -> Result<(), String> {
+        let targets: Result<Vec<_>, _> = targets
+            .iter()
+            .map(|&(body, pressure)| {
+                self.bodies
+                    .get(&body)
+                    .map(|body| (body.handle, pressure))
+                    .ok_or_else(|| "unknown tyre body".to_string())
+            })
+            .collect();
+        let mut world = self.shared.world();
+        let RigidWorld { scene, wheels, .. } = &mut *world;
+        wheels
+            .set_pressures(scene, &targets?)
+            .map_err(|e| e.to_string())
+    }
+
     fn wheel_drive_sign(&self, joint: JointId) -> f64 {
         self.wheels
             .values()

@@ -18,6 +18,38 @@ impl MollaBackend {
             .handle;
         let joint = self.joints.get(&desc.joint).ok_or("unknown wheel joint")?;
         let mut world = self.shared.world();
+        let pressure = desc
+            .tyre
+            .map(|tyre| molla_solvers::pressure_tire::PressureTireConfig {
+                tire: molla_vehicle::real_tire::RealTireParams {
+                    radius: desc.radius,
+                    width: tyre.width,
+                    pressure_pa: tyre.pressure_pa,
+                    carcass_normal_stiffness: tyre.carcass_stiffness,
+                    tread_shear_stiffness: tyre.tread_stiffness,
+                    ..Default::default()
+                },
+                min_pressure_pa: tyre.min_pressure_pa,
+                max_pressure_pa: tyre.max_pressure_pa,
+                pressure_rate_pa_s: tyre.pressure_rate_pa_s,
+                supported_mass: desc.supported_mass,
+                damping_ratio: tyre.damping_ratio,
+                hysteresis_fraction: tyre.hysteresis_fraction,
+            });
+        if let Some(config) = &pressure {
+            config.validate().map_err(|e| e.to_string())?;
+            if world
+                .wheels
+                .pressure_tire(&world.scene, body)
+                .is_some_and(|state| {
+                    [state.pressure_pa, state.target_pressure_pa]
+                        .iter()
+                        .any(|p| !(config.min_pressure_pa..=config.max_pressure_pa).contains(p))
+                })
+            {
+                return Err("existing tyre pressure outside new bounds".into());
+            }
+        }
         let authored = world
             .scene
             .joint(joint.handle)
@@ -67,6 +99,13 @@ impl MollaBackend {
         wheels
             .insert(scene, config)
             .map_err(|error| error.to_string())?;
+        if let Some(config) = pressure {
+            wheels
+                .configure_pressure_tire(body, config)
+                .map_err(|e| e.to_string())?;
+        } else {
+            wheels.remove_pressure_tire(body);
+        }
         self.wheels.insert(desc.body, (desc.joint, sign));
         Ok(())
     }
@@ -77,6 +116,17 @@ impl MollaBackend {
         self.joints.get(joint)?;
         let world = self.shared.world();
         let mut out = WheelForceOutput::default();
+        out.pressure = world
+            .wheels
+            .pressure_tire(&world.scene, wheel)
+            .map(|state| PressureTyreOutput {
+                pressure_pa: state.pressure_pa,
+                target_pressure_pa: state.target_pressure_pa,
+                min_pressure_pa: state.config.min_pressure_pa,
+                max_pressure_pa: state.config.max_pressure_pa,
+                loaded_radius: state.config.tire.radius,
+                ..Default::default()
+            });
         let mut impulse = 0.0;
         for sample in world
             .wheels
@@ -84,6 +134,14 @@ impl MollaBackend {
             .iter()
             .filter(|s| s.wheel == wheel)
         {
+            if let (Some(out), Some(sample)) = (&mut out.pressure, &sample.pressure) {
+                out.loaded_radius = sample.loaded_radius;
+                out.deflection = sample.deflection;
+                out.patch_length = sample.patch_length;
+                out.patch_width = sample.patch_width;
+                out.patch_area = sample.patch_area;
+                out.rolling_moment = sample.rolling_moment;
+            }
             let normal_impulse = sample.output.fz.max(0.0) * sample.dt;
             if !sample.output.in_contact || normal_impulse <= 0.0 {
                 continue;
@@ -91,7 +149,12 @@ impl MollaBackend {
             impulse += normal_impulse;
             out.normal += sample.normal * normal_impulse;
             out.contact_point += DVec3::from_array(sample.output.contact_point) * normal_impulse;
-            out.grip_force += sample.friction * normal_impulse;
+            out.grip_force += sample
+                .pressure
+                .as_ref()
+                .map_or(sample.friction * normal_impulse, |p| {
+                    p.grip_force * sample.dt
+                });
             out.slip_ratio += sample.output.slip_ratio * normal_impulse;
             out.slip_angle += sample.output.slip_angle * normal_impulse;
         }

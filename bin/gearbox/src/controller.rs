@@ -271,7 +271,7 @@ impl Plugin for ControllerDiscoveryPlugin {
                     apply_ui_drive,
                     guard_chassis_inertia,
                     prepare_machine_physics,
-                    wheel_forces::sync_machine_wheel_forces,
+                    wheel_forces::sync_machine_wheel_forces.after(crate::services::ServiceCommandSet),
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,
                     record_wheel_tracks,
@@ -1661,7 +1661,7 @@ fn wheel_ground_speed(
     if roll.dot(forward) < 0.0 {
         roll = -roll;
     }
-    Some((body.linvel().dot(roll), radius))
+    Some((body.linvel().dot(roll), effective_wheel_radius(physics, wheel).unwrap_or(radius)))
 }
 
 /// Below this wheel speed the power limit holds at its value here: the
@@ -1871,7 +1871,7 @@ fn roll_idle_wheels(
             .map(|(ground, radius)| ground / radius)
             .unwrap_or_else(|| {
                 let radius = wheel_body_of(physics, chassis, target.pair)
-                    .and_then(|wheel| body_max_collider_radius(physics, wheel))
+                    .and_then(|wheel| effective_wheel_radius(physics, wheel))
                     .unwrap_or(radius_fallback_m);
                 forward_mps / radius
             });
@@ -1978,7 +1978,7 @@ fn cap_wheel_torque(
     let mut supported_wheels = 0;
     for (index, target) in targets.iter().enumerate().filter(|(_, t)| t.damping > 0.0) {
         let Some(wheel) = wheel_body_of(physics, chassis, target.pair) else { continue; };
-        let radius = body_max_collider_radius(physics, wheel).unwrap_or(radius_fallback_m);
+        let radius = effective_wheel_radius(physics, wheel).unwrap_or(radius_fallback_m);
         let support = traction::wheel_support(physics, chassis, wheel);
         supported_wheels += usize::from(support.grip_force_n > 0.0);
         let omega = body_tyre_geometry(physics, wheel)
@@ -2215,8 +2215,14 @@ fn prepare_machine_physics(
     }
 }
 
-/// Largest collider half-extent of a body — a wheel's tyre radius, a
-/// chassis's bounding half-size. `None` if the body has no collider.
+/// Current loaded tyre radius, falling back to collider geometry.
+fn effective_wheel_radius(physics: &crate::physics::PhysicsWorld, wheel: BodyId) -> Option<f64> {
+    physics.wheel_output(wheel).and_then(|out| out.pressure)
+        .map(|p| p.loaded_radius).filter(|r| r.is_finite() && *r > 1e-6)
+        .or_else(|| body_max_collider_radius(physics, wheel))
+}
+
+/// Largest collider half-extent of a body, or `None` without colliders.
 pub(crate) fn body_max_collider_radius(
     physics: &crate::physics::PhysicsWorld,
     body: BodyId,
@@ -2360,7 +2366,8 @@ fn record_wheel_tracks(
             contacts.contacts.push(gearbox_fields::WheelContact {
                 position: contact_point,
                 direction: roll,
-                width: width as f32,
+                width: tyre.and_then(|out| out.pressure).map_or(width, |p| p.patch_width) as f32,
+                length: tyre.and_then(|out| out.pressure).map(|p| p.patch_length as f32),
             });
         }
     }
@@ -3100,7 +3107,7 @@ fn wheel_joint_targets(
     let yaw_rate = steering_yaw_rate_for_differential(linear_mps, center_steer_rad, wheel_base_m);
     let target = |path: &str, pair: (BodyId, BodyId)| {
         let radius = wheel_body_of(physics, chassis, pair)
-            .and_then(|wheel| body_max_collider_radius(physics, wheel))
+            .and_then(|wheel| effective_wheel_radius(physics, wheel))
             .filter(|r| *r > 0.05)
             .unwrap_or(wheel_radius_fallback_m);
         if let Some(turn) = turn
@@ -3309,7 +3316,7 @@ fn visual_wheel_radius(
     fallback: f64,
 ) -> f64 {
     let measured = wheel_body_of(physics, chassis, pair)
-        .and_then(|wheel| body_max_collider_radius(physics, wheel))
+        .and_then(|wheel| effective_wheel_radius(physics, wheel))
         .filter(|r| *r > 0.05);
     let _ = path;
     measured.unwrap_or(fallback)

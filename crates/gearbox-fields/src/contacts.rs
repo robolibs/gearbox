@@ -9,6 +9,33 @@ pub struct WheelContact {
     pub position: Vec3,
     pub direction: Vec2,
     pub width: f32,
+    /// Physical rolling-direction footprint length; None uses the field default.
+    pub length: Option<f32>,
+}
+
+impl WheelContact {
+    pub fn footprint_length(&self, fallback: f32) -> f32 {
+        self.length
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(fallback)
+    }
+}
+
+#[test]
+fn explicit_wheel_footprint_overrides_field_default() {
+    let mut wheel = WheelContact {
+        position: Vec3::ZERO,
+        direction: Vec2::X,
+        width: 0.4,
+        length: None,
+    };
+    assert_eq!(wheel.footprint_length(0.3), 0.3);
+    for length in [0.0, 0.2, 0.6] {
+        wheel.length = Some(length);
+        assert_eq!(wheel.footprint_length(0.3), length);
+    }
+    wheel.length = Some(f32::NAN);
+    assert_eq!(wheel.footprint_length(0.3), 0.3);
 }
 
 /// Wheel contacts collected by the controllers during one frame, stamped

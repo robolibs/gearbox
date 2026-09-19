@@ -451,7 +451,7 @@ fn stamp_wheel_contacts(
             let roll = contact.direction.normalize_or(Vec2::X);
             let axle = roll.perp();
             let half_width = (contact.width * 0.5 * tpm).max(0.5);
-            let half_length = (field.footprint_length * 0.5 * tpm).max(0.5);
+            let half_length = (contact.footprint_length(field.footprint_length) * 0.5 * tpm).max(0.5);
             let reach = half_width.hypot(half_length);
             let z0 = ((centre.y - reach).ceil() as i32).clamp(0, height - 1);
             let z1 = ((centre.y + reach).floor() as i32).clamp(0, height - 1);

@@ -63,6 +63,16 @@ impl PaneCtx<'_> {
         });
     }
 
+    /// Synchronize persisted slider values with the current model.
+    pub fn sync_sliders(&self, pod: MaraId, values: &[f64]) {
+        use mara_core::memory::MaraMemoryCtx;
+        let seam = mara::host::MaraHostCtx::ui_only(self.egui, None).seam();
+        let mut memory = MaraMemoryCtx::new(&seam);
+        for (i, value) in values.iter().enumerate() {
+            memory.set_persisted(pod.with(("mara_pod_slider_val", i)), *value);
+        }
+    }
+
     /// Same for a hybrid select list's selected and pinned rows.
     pub fn sync_list_memory(&self, pod: MaraId, selected: Option<usize>, pinned: Option<usize>) {
         let sel_key: egui::Id = pod.with(("mara_pod_hybrid_select_list_sel", 0usize)).into();

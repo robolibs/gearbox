@@ -1,5 +1,7 @@
 use super::*;
-use crate::physics::backend::{JointAxes, JointId, WheelForceDesc};
+use crate::physics::backend::{
+    JointAxes, JointId, PressureTyreDesc, PressureTyreOutput, WheelForceDesc,
+};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct Registration {
@@ -7,6 +9,55 @@ pub(super) struct Registration {
     radius: f64,
     hub: DVec3,
     mass: f64,
+    tyre: PressureTyreDesc,
+}
+
+fn tyre_properties(link: Option<&crate::links::LinkSpec>, width: f64) -> PressureTyreDesc {
+    let mut tyre = PressureTyreDesc::reference(width);
+    let authored = |name: &str, fallback: f64| {
+        link.and_then(|l| l.values.iter().find(|(n, _)| n == name))
+            .map_or(fallback, |(_, v)| *v)
+    };
+    tyre.pressure_pa = authored("tyre_pressure_bar", tyre.pressure_pa / 100_000.0) * 100_000.0;
+    tyre.min_pressure_pa =
+        authored("tyre_min_pressure_bar", tyre.min_pressure_pa / 100_000.0) * 100_000.0;
+    tyre.max_pressure_pa =
+        authored("tyre_max_pressure_bar", tyre.max_pressure_pa / 100_000.0) * 100_000.0;
+    tyre.pressure_rate_pa_s = authored(
+        "tyre_pressure_rate_bar_s",
+        tyre.pressure_rate_pa_s / 100_000.0,
+    ) * 100_000.0;
+    tyre.width = authored("tyre_width_m", width);
+    tyre.carcass_stiffness = authored("tyre_carcass_stiffness_pa_m", tyre.carcass_stiffness);
+    tyre.tread_stiffness = authored("tyre_tread_stiffness_n_m3", tyre.tread_stiffness);
+    tyre.damping_ratio = authored("tyre_damping_ratio", tyre.damping_ratio);
+    tyre.hysteresis_fraction = authored("tyre_hysteresis_fraction", tyre.hysteresis_fraction);
+    tyre
+}
+
+fn pressure_readout(
+    values: &mut crate::services::LinkValues,
+    machine: &str,
+    link: &str,
+    tyre: PressureTyreOutput,
+) {
+    for (name, value) in [
+        ("tyre_pressure_bar", tyre.pressure_pa / 100_000.0),
+        (
+            "tyre_target_pressure_bar",
+            tyre.target_pressure_pa / 100_000.0,
+        ),
+        ("tyre_min_pressure_bar", tyre.min_pressure_pa / 100_000.0),
+        ("tyre_max_pressure_bar", tyre.max_pressure_pa / 100_000.0),
+        ("tyre_loaded_radius_m", tyre.loaded_radius),
+        ("tyre_deflection_m", tyre.deflection),
+        ("tyre_patch_length_m", tyre.patch_length),
+        ("tyre_patch_width_m", tyre.patch_width),
+        ("tyre_tread_area_m2", tyre.patch_area),
+        ("tyre_rolling_moment_nm", tyre.rolling_moment.length()),
+    ] {
+        values.set(machine, link, name, value);
+    }
 }
 
 #[cfg(test)]
@@ -139,7 +190,12 @@ mod tests {
                 Update,
                 (
                     sync_machine_wheel_forces,
-                    |mut world: ResMut<crate::physics::PhysicsWorld>| world.step(),
+                    |mut world: ResMut<crate::physics::PhysicsWorld>,
+                     active: Res<gearbox_api::PhysicsActive>| {
+                        if active.0 {
+                            world.step();
+                        }
+                    },
                     record_wheel_tracks,
                 )
                     .chain(),
@@ -156,6 +212,12 @@ mod tests {
             let tracks = app.world().resource::<gearbox_fields::WheelContacts>();
             assert_eq!(tracks.contacts.len(), 1);
             assert!(tracks.contacts[0].position.y > 2.9);
+            let pressure = output.pressure.unwrap();
+            assert_eq!(
+                tracks.contacts[0].length,
+                Some(pressure.patch_length as f32)
+            );
+            assert_eq!(tracks.contacts[0].width, pressure.patch_width as f32);
             assert_eq!(
                 app.world().resource::<crate::services::LinkValues>().get(
                     "test",
@@ -163,6 +225,48 @@ mod tests {
                     "normal_force"
                 ),
                 Some(output.normal_force)
+            );
+            let initial_pressure = pressure.pressure_pa;
+            app.world_mut()
+                .resource_mut::<gearbox_api::PhysicsActive>()
+                .0 = false;
+            app.world_mut()
+                .resource_mut::<crate::services::LinkValues>()
+                .set("test", "wheel", "tyre_target_pressure_bar", 2.2);
+            app.update();
+            let paused = app
+                .world()
+                .resource::<crate::physics::PhysicsWorld>()
+                .wheel_output(wheel)
+                .unwrap();
+            assert_eq!(paused.normal_force, output.normal_force);
+            assert_eq!(paused.pressure.unwrap().pressure_pa, initial_pressure);
+            assert!((paused.pressure.unwrap().target_pressure_pa - 220_000.0).abs() < 1e-8);
+            app.world_mut()
+                .resource_mut::<crate::services::LinkValues>()
+                .set("test", "wheel", "tyre_target_pressure_bar", f64::NAN);
+            app.update();
+            assert_eq!(
+                app.world().resource::<crate::services::LinkValues>().get(
+                    "test",
+                    "wheel",
+                    "tyre_target_pressure_bar"
+                ),
+                Some(2.2)
+            );
+            app.world_mut()
+                .resource_mut::<gearbox_api::PhysicsActive>()
+                .0 = true;
+            app.update();
+            assert!(
+                app.world()
+                    .resource::<crate::physics::PhysicsWorld>()
+                    .wheel_output(wheel)
+                    .unwrap()
+                    .pressure
+                    .unwrap()
+                    .pressure_pa
+                    > initial_pressure
             );
             app.world_mut()
                 .resource_mut::<crate::physics::PhysicsWorld>()
@@ -192,6 +296,7 @@ pub(super) fn sync_machine_wheel_forces(
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
+    mut values: ResMut<crate::services::LinkValues>,
     mut registered: Local<HashMap<BodyId, Registration>>,
 ) {
     if !physics.uses_wheel_forces() {
@@ -224,8 +329,10 @@ pub(super) fn sync_machine_wheel_forces(
             .filter_map(|id| physics.body(*id))
             .map(|b| b.mass())
             .sum();
+        let mut targets = Vec::new();
+        let mut readouts = Vec::new();
         for &wheel in wheels {
-            let Some((_, _, radius)) = body_tyre_geometry(&physics, wheel) else {
+            let Some((_, width, radius)) = body_tyre_geometry(&physics, wheel) else {
                 continue;
             };
             let joint = physics.joints().into_iter().find(|id| {
@@ -261,31 +368,65 @@ pub(super) fn sync_machine_wheel_forces(
             let mass = (mass / wheels.len().max(1) as f64)
                 .max(body.mass())
                 .max(1.0);
+            let link = machine.links.links.iter().find(|link| {
+                link.body_prim
+                    .as_deref()
+                    .and_then(|path| find_prim_entity(root, path, &prims, &parents))
+                    .and_then(|entity| physics.entity_to_body.get(&entity).copied())
+                    == Some(wheel)
+            });
+            let tyre = tyre_properties(link, width);
             let registration = Registration {
                 joint,
                 radius,
                 hub,
                 mass,
+                tyre,
             };
-            if registered.get(&wheel) == Some(&registration)
-                && physics.wheel_output(wheel).is_some()
+            if registered.get(&wheel) != Some(&registration)
+                || physics.wheel_output(wheel).is_none()
             {
-                continue;
-            }
-            match physics.configure_wheel(WheelForceDesc {
-                body: wheel,
-                joint,
-                local_hub: hub,
-                forward,
-                radius,
-                supported_mass: mass,
-            }) {
-                Ok(()) => {
-                    registered.insert(wheel, registration);
+                match physics.configure_wheel(WheelForceDesc {
+                    body: wheel,
+                    joint,
+                    local_hub: hub,
+                    forward,
+                    radius,
+                    supported_mass: mass,
+                    tyre: Some(tyre),
+                }) {
+                    Ok(()) => {
+                        registered.insert(wheel, registration);
+                    }
+                    Err(error) => warn!(
+                        "gearbox-control: wheel force registration rejected for {wheel:?}: {error}"
+                    ),
                 }
-                Err(error) => warn!(
-                    "gearbox-control: wheel force registration rejected for {wheel:?}: {error}"
-                ),
+            }
+            if let Some(link) = link
+                && let Some(tyre) = physics.wheel_output(wheel).and_then(|out| out.pressure)
+            {
+                let requested = values
+                    .get(&machine.id, &link.name, "tyre_target_pressure_bar")
+                    .unwrap_or(tyre.target_pressure_pa / 100_000.0)
+                    * 100_000.0;
+                if requested != tyre.target_pressure_pa {
+                    targets.push((wheel, requested));
+                }
+                readouts.push((wheel, link.name.clone()));
+            }
+        }
+        if !targets.is_empty()
+            && let Err(error) = physics.set_wheel_pressures(&targets)
+        {
+            warn!(
+                "gearbox-control: tyre pressure group rejected for {}: {error}",
+                machine.id
+            );
+        }
+        for (wheel, link) in readouts {
+            if let Some(tyre) = physics.wheel_output(wheel).and_then(|out| out.pressure) {
+                pressure_readout(&mut values, &machine.id, &link, tyre);
             }
         }
     }

@@ -397,6 +397,7 @@ fn wheel_rig(axis: DVec3) -> (MollaBackend, BodyId, BodyId, JointId, ColliderId)
             forward: DVec3::X,
             radius: 0.5,
             supported_mass: 100.0,
+            tyre: None,
         })
         .unwrap();
     (backend, chassis, wheel, joint, ground)
@@ -451,9 +452,15 @@ fn unchanged_material_sync_preserves_tyre_readout_and_scene() {
         collider.set_restitution(restitution);
         collider.set_friction_combine_rule(CombineRule::Average);
         assert_eq!(backend.shared.world().scene.stamp(), stamp);
-        assert_eq!(backend.wheel_output(wheel).unwrap().normal_force, output.normal_force);
+        assert_eq!(
+            backend.wheel_output(wheel).unwrap().normal_force,
+            output.normal_force
+        );
     }
-    backend.collider_mut(ground).unwrap().set_friction(friction * 0.5);
+    backend
+        .collider_mut(ground)
+        .unwrap()
+        .set_friction(friction * 0.5);
     assert_ne!(backend.shared.world().scene.stamp(), stamp);
     assert!(!backend.wheel_output(wheel).unwrap().in_contact);
     backend.step(&|_, _| false);
@@ -490,7 +497,8 @@ fn failed_wheel_registration_preserves_active_tyre_and_removal_clears_it() {
                 local_hub: DVec3::ZERO,
                 forward: DVec3::X,
                 radius: f64::NAN,
-                supported_mass: 100.0
+                supported_mass: 100.0,
+                tyre: None,
             })
             .is_err()
     );
@@ -498,6 +506,82 @@ fn failed_wheel_registration_preserves_active_tyre_and_removal_clears_it() {
     assert!(backend.wheel_output(wheel).unwrap().in_contact);
     backend.remove_joint(joint);
     assert!(backend.wheel_output(wheel).is_none());
+    backend.remove_body(wheel);
+    assert!(backend.wheel_output(wheel).is_none());
+}
+
+#[test]
+fn pressure_backend_preserves_targets_and_reports_brush_grip() {
+    let (mut backend, chassis, wheel, joint, ground) = wheel_rig(-DVec3::Z);
+    let desc = WheelForceDesc {
+        body: wheel,
+        joint,
+        local_hub: DVec3::ZERO,
+        forward: DVec3::X,
+        radius: 0.5,
+        supported_mass: 100.0,
+        tyre: Some(PressureTyreDesc::reference(0.3)),
+    };
+    backend.configure_wheel(desc).unwrap();
+    assert!(
+        backend
+            .set_wheel_pressures(&[(wheel, 220_000.0), (chassis, 220_000.0)])
+            .is_err()
+    );
+    assert_eq!(
+        backend
+            .wheel_output(wheel)
+            .unwrap()
+            .pressure
+            .unwrap()
+            .target_pressure_pa,
+        180_000.0
+    );
+    backend.set_wheel_pressures(&[(wheel, 220_000.0)]).unwrap();
+    let before = backend.body(wheel).unwrap().translation();
+    backend.step(&|_, _| false);
+    near(backend.body(wheel).unwrap().translation(), before);
+    let output = backend.wheel_output(wheel).unwrap();
+    let tyre = output.pressure.unwrap();
+    assert!((tyre.pressure_pa - (180_000.0 + 20_000.0 * backend.settings().dt)).abs() < 1e-6);
+    assert!(output.in_contact && tyre.patch_area > 0.0 && tyre.deflection > 0.0);
+    assert!(
+        output.grip_force > 0.0 && output.grip_force <= 1.12 * 0.6 * output.normal_force + 1e-8,
+        "{output:?}"
+    );
+    assert!((output.grip_force - 0.6 * output.normal_force).abs() > 1.0);
+    assert!(backend.contacts_with(ground).is_empty());
+    backend.configure_wheel(desc).unwrap();
+    assert_eq!(
+        backend
+            .wheel_output(wheel)
+            .unwrap()
+            .pressure
+            .unwrap()
+            .pressure_pa,
+        tyre.pressure_pa
+    );
+    assert_eq!(
+        backend
+            .wheel_output(wheel)
+            .unwrap()
+            .pressure
+            .unwrap()
+            .target_pressure_pa,
+        220_000.0
+    );
+    let mut bad = desc;
+    bad.tyre.as_mut().unwrap().width = f64::NAN;
+    assert!(backend.configure_wheel(bad).is_err());
+    assert_eq!(
+        backend
+            .wheel_output(wheel)
+            .unwrap()
+            .pressure
+            .unwrap()
+            .target_pressure_pa,
+        220_000.0
+    );
     backend.remove_body(wheel);
     assert!(backend.wheel_output(wheel).is_none());
 }
