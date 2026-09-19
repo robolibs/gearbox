@@ -58,7 +58,8 @@ axle layouts should author explicit ids instead of relying on inference.
 ## Model and limits
 
 Defaults are inspectable, uncalibrated simulation values: 1.8 gauge bar,
-0.5–4.0 bar bounds, and 0.2 bar per simulated second. These are not tyre
+0.5–4.0 bar bounds, and 1.0 bar per simulated second. Authored
+`gearbox:value:tyre_pressure_rate_bar_s` overrides the default. These are not tyre
 manufacturer specifications or real-machine inflation advice.
 
 Molla uses Pa internally. Pressure-dependent brush support supplies normal

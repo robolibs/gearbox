@@ -547,7 +547,7 @@ fn pressure_backend_preserves_targets_and_reports_brush_grip() {
     near(tyre.forward, DVec3::X);
     assert_eq!(tyre.radius, desc.radius);
     assert_eq!(tyre.width, desc.tyre.unwrap().width);
-    assert!((tyre.pressure_pa - (180_000.0 + 20_000.0 * backend.settings().dt)).abs() < 1e-6);
+    assert!((tyre.pressure_pa - (180_000.0 + desc.tyre.unwrap().pressure_rate_pa_s * backend.settings().dt)).abs() < 1e-6);
     assert!(output.in_contact && tyre.patch_area > 0.0 && tyre.deflection > 0.0);
     assert!(
         output.grip_force > 0.0 && output.grip_force <= 1.12 * 0.6 * output.normal_force + 1e-8,
@@ -588,4 +588,54 @@ fn pressure_backend_preserves_targets_and_reports_brush_grip() {
     );
     backend.remove_body(wheel);
     assert!(backend.wheel_output(wheel).is_none());
+}
+
+#[test]
+fn inflation_lifts_supported_body_and_keeps_final_envelope_on_ground() {
+    let mut backend = MollaBackend::default();
+    let ground = backend.insert_collider(ColliderDesc::new(Shape::Cuboid {
+        half_extents: DVec3::new(5.0, 0.1, 5.0),
+    }).translation(-DVec3::Y * 0.1)).unwrap();
+    backend.register_wheel_ground(ground, None).unwrap();
+    let anchor = backend.insert_body(BodyDesc::fixed());
+    let mut chassis_desc = dynamic().pose(Pose::from_translation(DVec3::Y * 0.48));
+    chassis_desc.additional_mass.as_mut().unwrap().mass = 100.0;
+    let chassis = backend.insert_body(chassis_desc);
+    let wheel = backend.insert_body(dynamic().pose(Pose::from_translation(DVec3::Y * 0.48)));
+    backend.insert_joint(anchor, chassis, JointDesc::new(
+        JointKind::Prismatic { axis: DVec3::Y },
+        Pose::from_translation(DVec3::Y * 0.48), Pose::IDENTITY,
+    ));
+    let joint = backend.insert_joint(chassis, wheel, JointDesc::new(
+        JointKind::Revolute { axis: DVec3::Z }, Pose::IDENTITY, Pose::IDENTITY,
+    ));
+    let mut tyre = PressureTyreDesc::reference(0.3);
+    tyre.pressure_pa = 50_000.0;
+    backend.configure_wheel(WheelForceDesc {
+        body: wheel, joint, local_hub: DVec3::ZERO, forward: DVec3::X,
+        radius: 0.5, supported_mass: 101.0, tyre: Some(tyre),
+    }).unwrap();
+    let steps = (8.0 / backend.settings().dt).ceil() as usize;
+    for _ in 0..steps { backend.step(&|_, _| false); }
+    let low = backend.body(chassis).unwrap().translation().y;
+    backend.set_wheel_pressures(&[(wheel, 400_000.0)]).unwrap();
+    assert_eq!(backend.body(chassis).unwrap().translation().y, low);
+    let mut previous = low;
+    for _ in 0..steps {
+        backend.step(&|_, _| false);
+        let output = backend.wheel_output(wheel).unwrap();
+        let pressure = output.pressure.unwrap();
+        assert!(output.in_contact);
+        let bottom = pressure.hub - output.normal * pressure.loaded_radius;
+        assert!(bottom.y.abs() < 1e-8, "{output:?}");
+        let height = backend.body(chassis).unwrap().translation().y;
+        assert!((height - previous).abs() < 0.005);
+        previous = height;
+    }
+    let high = backend.body(chassis).unwrap().translation().y;
+    assert!(high > low + 0.005, "low={low} high={high}");
+    backend.set_wheel_pressures(&[(wheel, 50_000.0)]).unwrap();
+    for _ in 0..steps { backend.step(&|_, _| false); }
+    assert!((backend.body(chassis).unwrap().translation().y - low).abs() < 1e-5);
+    assert!(backend.quarantined_bodies().is_empty());
 }

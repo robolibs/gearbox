@@ -719,7 +719,7 @@ impl PressureTyreDesc {
             pressure_pa: 180_000.0,
             min_pressure_pa: 50_000.0,
             max_pressure_pa: 400_000.0,
-            pressure_rate_pa_s: 20_000.0,
+            pressure_rate_pa_s: 100_000.0,
             carcass_stiffness: 400_000.0,
             tread_stiffness: 2_600_000.0,
             damping_ratio: 0.7,
@@ -732,6 +732,7 @@ impl PressureTyreDesc {
 pub struct PressureTyreOutput {
     pub hub: DVec3,
     pub forward: DVec3,
+    pub ground: Option<TyreGroundPlane>,
     pub radius: f64,
     pub width: f64,
     pub pressure_pa: f64,
@@ -744,6 +745,12 @@ pub struct PressureTyreOutput {
     pub patch_width: f64,
     pub patch_area: f64,
     pub rolling_moment: DVec3,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TyreGroundPlane {
+    pub point: DVec3,
+    pub normal: DVec3,
 }
 
 #[derive(Clone, Debug)]

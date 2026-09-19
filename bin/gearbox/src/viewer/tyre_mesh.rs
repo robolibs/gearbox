@@ -34,7 +34,7 @@ struct RubberMesh {
     positions: Vec<[f32; 3]>,
     body: BodyId,
     bead_radius: f64,
-    last_frame: Option<(Affine3A, LoadedTireEnvelope)>,
+    last_frame: Option<(Affine3A, LoadedTireEnvelope, Option<f64>)>,
 }
 
 fn rubber_name(name: &str) -> bool {
@@ -49,17 +49,13 @@ fn rubber_name(name: &str) -> bool {
 
 fn rigid_name(name: &str) -> bool {
     let name = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
-    ["rim", "hub", "collision"].iter().any(|s| name.contains(s))
+    ["rim", "hub", "collision", "collider"].iter().any(|s| name.contains(s))
 }
 
 fn contact_frame(sample: WheelForceOutput) -> Option<Affine3A> {
     let pressure = sample.pressure?;
     let vector = |v: glam::DVec3| Vec3::from_array(v.to_array().map(|v| v as f32));
-    let up = if sample.in_contact {
-        vector(sample.normal)
-    } else {
-        Vec3::Y
-    };
+    let up = pressure.ground.map_or(Vec3::Y, |ground| vector(ground.normal));
     let up = up.try_normalize()?;
     let forward = vector(pressure.forward);
     let forward = (forward - up * forward.dot(up)).try_normalize()?;
@@ -84,6 +80,14 @@ fn reference_positions(mesh: &Mesh) -> Option<Vec<[f32; 3]>> {
     }
 }
 
+fn supported_vertex(envelope: LoadedTireEnvelope, point: [f64; 3], ground_distance: Option<f64>) -> [f64; 3] {
+    let mut point = envelope.deform(point);
+    if let Some(distance) = ground_distance {
+        point[1] = point[1].max(-distance);
+    }
+    point
+}
+
 fn update_tyre_meshes(
     mut commands: Commands,
     physics: Res<PhysicsWorld>,
@@ -96,7 +100,10 @@ fn update_tyre_meshes(
         Option<&Name>,
         Option<&GlobalTransform>,
     )>,
+    mut trace_at: Local<Option<std::time::Instant>>,
 ) {
+    let started = std::time::Instant::now();
+    let mut timings = [0.0; 3];
     let samples: HashMap<_, _> = physics
         .entity_to_body
         .iter()
@@ -213,47 +220,77 @@ fn update_tyre_meshes(
             continue;
         };
         let pressure = sample.pressure.unwrap();
+        let ground_distance = pressure.ground.map(|ground| (pressure.hub - ground.point).dot(ground.normal));
         let envelope = LoadedTireEnvelope {
             radius: pressure.radius,
             bead_radius: beads[&entry.body],
             width: pressure.width,
-            loaded_radius: if sample.in_contact {
-                pressure.loaded_radius
-            } else {
-                pressure.radius
-            },
+            loaded_radius: pressure.loaded_radius,
         };
         let to_frame = frame.inverse() * global.affine();
         if !to_frame.is_finite() || to_frame.matrix3.determinant().abs() < 1e-12 {
             continue;
         }
-        if entry.last_frame == Some((to_frame, envelope)) {
+        if entry.last_frame == Some((to_frame, envelope, ground_distance)) {
             continue;
         }
         let Some(mut mesh) = meshes.get_mut(&entry.private) else {
             continue;
         };
         let from_frame = to_frame.inverse();
+        let deform_at = std::time::Instant::now();
         let positions: Vec<_> = entry
             .positions
             .iter()
             .map(|p| {
                 let p = to_frame.transform_point3(Vec3::from_array(*p));
-                let p = envelope.deform(p.to_array().map(f64::from));
+                let p = supported_vertex(envelope, p.to_array().map(f64::from), ground_distance);
                 from_frame
                     .transform_point3(Vec3::from_array(p.map(|v| v as f32)))
                     .to_array()
             })
             .collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        timings[0] += deform_at.elapsed().as_secs_f64();
+        let normals_at = std::time::Instant::now();
         mesh.compute_normals();
+        timings[1] += normals_at.elapsed().as_secs_f64();
+        let tangents_at = std::time::Instant::now();
         if mesh.contains_attribute(Mesh::ATTRIBUTE_TANGENT) {
             let _ = mesh.generate_tangents();
         }
+        timings[2] += tangents_at.elapsed().as_secs_f64();
         if let Some(bounds) = mesh.compute_aabb() {
             commands.entity(*entity).insert(bounds);
         }
-        entry.last_frame = Some((to_frame, envelope));
+        entry.last_frame = Some((to_frame, envelope, ground_distance));
+    }
+    if std::env::var_os("GEARBOX_TYRE_MESH_TRACE").is_some()
+        && trace_at.is_none_or(|at| at.elapsed().as_secs() >= 3)
+    {
+        *trace_at = Some(std::time::Instant::now());
+        info!("tyre-mesh timing: total_ms={} deform_ms={} normals_ms={} tangents_ms={}", started.elapsed().as_secs_f64() * 1000.0, timings[0] * 1000.0, timings[1] * 1000.0, timings[2] * 1000.0);
+        for (entity, entry) in &rubber.0 {
+            let Ok((_, _, global)) = visuals.get(*entity) else { continue };
+            let Some(mesh) = meshes.get(&entry.private) else { continue };
+            let Some(VertexAttributeValues::Float32x3(current)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else { continue };
+            let Some((frame, envelope, _)) = entry.last_frame else { continue };
+            let mut moved = 0;
+            let mut maximum = 0.0_f32;
+            let mut bottom = f32::INFINITY;
+            let mut world_bottom = f32::INFINITY;
+            for (reference, deformed) in entry.positions.iter().zip(current) {
+                let delta = global.affine().transform_vector3(Vec3::from_array(*deformed) - Vec3::from_array(*reference)).length();
+                moved += usize::from(delta > 0.0001);
+                maximum = maximum.max(delta);
+                bottom = bottom.min(frame.transform_point3(Vec3::from_array(*reference)).y);
+                world_bottom = world_bottom.min(global.transform_point(Vec3::from_array(*deformed)).y);
+            }
+            let name = hierarchy.get(*entity).ok().and_then(|(_, prim, name, _)| prim.map(|p| p.path.as_str()).or(name.map(|n| n.as_str()))).unwrap_or("subset");
+            let pressure = samples[&entry.body].0.pressure.unwrap();
+            let ground_y = pressure.ground.map_or(f64::NAN, |ground| ground.point.y);
+            info!("tyre-mesh: {name} body={:?} vertices={} moved={moved} maximum_m={maximum} reference_bottom={bottom} world_bottom={world_bottom} ground_y={ground_y} hub_y={} radius={} bead={} loaded={}", entry.body, current.len(), pressure.hub.y, envelope.radius, envelope.bead_radius, envelope.loaded_radius);
+        }
     }
 }
 
@@ -263,6 +300,100 @@ mod tests {
     use crate::physics::MollaBackend;
     use crate::physics::backend::*;
     use glam::DVec3;
+
+    #[test]
+    fn pressure_changes_private_rubber_in_both_directions() {
+        let mut backend = MollaBackend::default();
+        let ground = backend.insert_collider(ColliderDesc::new(Shape::Cuboid {
+            half_extents: DVec3::new(5.0, 0.1, 5.0),
+        }).translation(-DVec3::Y * 0.1)).unwrap();
+        backend.register_wheel_ground(ground, None).unwrap();
+        let anchor = backend.insert_body(BodyDesc::fixed());
+        let dynamic = |mass| {
+            let mut desc = BodyDesc::dynamic().pose(Pose::from_translation(DVec3::Y * 0.48));
+            desc.additional_mass = Some(MassProps {
+                local_com: DVec3::ZERO, mass, inertia: Inertia::Principal(DVec3::ONE),
+            });
+            desc
+        };
+        let chassis = backend.insert_body(dynamic(100.0));
+        let wheel = backend.insert_body(dynamic(1.0));
+        backend.insert_joint(anchor, chassis, JointDesc::new(
+            JointKind::Prismatic { axis: DVec3::Y },
+            Pose::from_translation(DVec3::Y * 0.48), Pose::IDENTITY,
+        ));
+        let joint = backend.insert_joint(chassis, wheel, JointDesc::new(
+            JointKind::Revolute { axis: DVec3::Z }, Pose::IDENTITY, Pose::IDENTITY,
+        ));
+        backend.configure_wheel(WheelForceDesc {
+            body: wheel, joint, local_hub: DVec3::ZERO, forward: DVec3::X,
+            radius: 0.5, supported_mass: 101.0,
+            tyre: Some(PressureTyreDesc { pressure_pa: 50_000.0, ..PressureTyreDesc::reference(0.3) }),
+        }).unwrap();
+        let steps = (8.0 / backend.settings().dt).ceil() as usize;
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>().add_plugins(TyreMeshPlugin);
+        let body = app.world_mut().spawn(GlobalTransform::IDENTITY).id();
+        let mut physics = PhysicsWorld::with_backend(Box::new(backend));
+        physics.entity_to_body.insert(body, wheel);
+        app.insert_resource(physics);
+        let original = vec![[0.0, -0.5, 0.1], [0.1, -0.49, 0.1], [0.0, -0.25, 0.1]];
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, original.clone());
+        let source = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+        let rubber = app.world_mut().spawn((
+            ChildOf(body), Name::new("radial_tyre"), Mesh3d(source.clone()), GlobalTransform::IDENTITY,
+        )).id();
+        let sample = |app: &mut App, target| {
+            let hub = {
+                let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
+                physics.set_wheel_pressures(&[(wheel, target)]).unwrap();
+                for _ in 0..steps { physics.backend.step(&|_, _| false); }
+                let pressure = physics.wheel_output(wheel).unwrap().pressure.unwrap();
+                assert_eq!(pressure.pressure_pa, target);
+                pressure.hub
+            };
+            let global = GlobalTransform::from_translation(Vec3::from_array(hub.to_array().map(|v| v as f32)));
+            for entity in [body, rubber] {
+                *app.world_mut().get_mut::<GlobalTransform>(entity).unwrap() = global;
+            }
+            app.update();
+            let handle = &app.world().get::<Mesh3d>(rubber).unwrap().0;
+            assert_ne!(*handle, source);
+            let meshes = app.world().resource::<Assets<Mesh>>();
+            assert_eq!(reference_positions(meshes.get(&source).unwrap()).unwrap(), original);
+            let positions = reference_positions(meshes.get(handle).unwrap()).unwrap();
+            assert!((f64::from(positions[0][1]) + hub.y).abs() < 1e-6);
+            positions
+        };
+        let low = sample(&mut app, 50_000.0);
+        let high = sample(&mut app, 400_000.0);
+        assert!(high[0][1] < low[0][1] - 0.005);
+        let returned = sample(&mut app, 50_000.0);
+        for (a, b) in returned.iter().flatten().zip(low.iter().flatten()) {
+            assert!((a - b).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn zero_force_rubber_stays_above_the_ground_plane_including_tread_lugs() {
+        for normal in [DVec3::Y, DVec3::new(0.0, 1.0, 0.2).normalize()] {
+            for distance in [0.8_f64, 1.02] {
+                let ground = TyreGroundPlane { point: DVec3::new(1.0, 0.3, 2.0), normal };
+                let pressure = PressureTyreOutput {
+                    hub: ground.point + normal * distance, forward: DVec3::X,
+                    radius: 1.0, loaded_radius: distance.min(1.0), width: 0.4,
+                    ground: Some(ground), ..Default::default()
+                };
+                let frame = contact_frame(WheelForceOutput { pressure: Some(pressure), ..Default::default() }).unwrap();
+                let envelope = LoadedTireEnvelope { radius: 1.0, bead_radius: 0.5, width: 0.4, loaded_radius: pressure.loaded_radius };
+                let point = supported_vertex(envelope, [0.0, -1.05, 0.2], Some(distance));
+                let world = frame.transform_point3(Vec3::from_array(point.map(|v| v as f32)));
+                assert!((DVec3::from_array(world.to_array().map(f64::from)) - ground.point).dot(normal).abs() < 1e-6);
+            }
+        }
+        assert!(!rubber_name("tire_collider"));
+    }
 
     #[test]
     fn empty_subset_parents_are_not_uploaded_as_private_meshes() {

@@ -141,13 +141,14 @@ impl MollaBackend {
             .iter()
             .filter(|s| s.wheel == wheel)
         {
-            if let (Some(out), Some(sample)) = (&mut out.pressure, &sample.pressure) {
-                out.loaded_radius = sample.loaded_radius;
-                out.deflection = sample.deflection;
-                out.patch_length = sample.patch_length;
-                out.patch_width = sample.patch_width;
-                out.patch_area = sample.patch_area;
-                out.rolling_moment = sample.rolling_moment;
+            if let (Some(out), Some(pressure)) = (&mut out.pressure, &sample.pressure) {
+                out.ground = Some(TyreGroundPlane { point: sample.ground_point, normal: sample.normal });
+                out.loaded_radius = (out.hub - sample.ground_point).dot(sample.normal).clamp(0.0, out.radius);
+                out.deflection = out.radius - out.loaded_radius;
+                out.patch_length = pressure.patch_length;
+                out.patch_width = pressure.patch_width;
+                out.patch_area = pressure.patch_area;
+                out.rolling_moment = pressure.rolling_moment;
             }
             let normal_impulse = sample.output.fz.max(0.0) * sample.dt;
             if !sample.output.in_contact || normal_impulse <= 0.0 {
