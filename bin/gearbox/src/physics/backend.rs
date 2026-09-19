@@ -730,6 +730,10 @@ impl PressureTyreDesc {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PressureTyreOutput {
+    pub hub: DVec3,
+    pub forward: DVec3,
+    pub radius: f64,
+    pub width: f64,
     pub pressure_pa: f64,
     pub target_pressure_pa: f64,
     pub min_pressure_pa: f64,

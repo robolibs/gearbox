@@ -52,6 +52,7 @@ impl Plugin for ViewerSystemsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Selection>()
             .add_plugins(super::machine_context::MachineContextPlugin)
+            .add_plugins(super::tyre_mesh::TyreMeshPlugin)
             .init_resource::<SelectionRing>()
             .init_resource::<GizmoGrab>()
             .init_resource::<PendingDespawn>()

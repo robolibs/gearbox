@@ -15,3 +15,4 @@ pub mod screenshot;
 pub mod state;
 pub mod systems;
 pub mod tf_overlay;
+mod tyre_mesh;

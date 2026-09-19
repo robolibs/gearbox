@@ -543,6 +543,10 @@ fn pressure_backend_preserves_targets_and_reports_brush_grip() {
     near(backend.body(wheel).unwrap().translation(), before);
     let output = backend.wheel_output(wheel).unwrap();
     let tyre = output.pressure.unwrap();
+    near(tyre.hub, backend.body(wheel).unwrap().translation());
+    near(tyre.forward, DVec3::X);
+    assert_eq!(tyre.radius, desc.radius);
+    assert_eq!(tyre.width, desc.tyre.unwrap().width);
     assert!((tyre.pressure_pa - (180_000.0 + 20_000.0 * backend.settings().dt)).abs() < 1e-6);
     assert!(output.in_contact && tyre.patch_area > 0.0 && tyre.deflection > 0.0);
     assert!(

@@ -20,6 +20,8 @@ mod debug;
 mod joints;
 pub mod markers;
 mod molla;
+#[cfg(test)]
+pub(crate) use molla::MollaBackend;
 mod rapier;
 pub mod reader;
 mod scene;

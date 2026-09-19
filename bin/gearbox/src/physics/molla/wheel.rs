@@ -115,11 +115,18 @@ impl MollaBackend {
         let wheel = self.bodies.get(&body)?.handle;
         self.joints.get(joint)?;
         let world = self.shared.world();
+        let desc = world.wheels.descriptor(wheel)?;
+        let pose = world.scene.body_pose(wheel).ok()?;
+        let bearing = world.scene.body_pose(desc.heading_body).ok()?;
         let mut out = WheelForceOutput::default();
         out.pressure = world
             .wheels
             .pressure_tire(&world.scene, wheel)
             .map(|state| PressureTyreOutput {
+                hub: pose.position + pose.rotation * desc.local_hub,
+                forward: bearing.rotation * desc.local_heading,
+                radius: desc.radius,
+                width: state.config.tire.width,
                 pressure_pa: state.pressure_pa,
                 target_pressure_pa: state.target_pressure_pa,
                 min_pressure_pa: state.config.min_pressure_pa,
