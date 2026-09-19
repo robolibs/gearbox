@@ -54,7 +54,7 @@ static LAND: RwLock<Option<Land>> = RwLock::new(None);
 #[derive(Clone, Copy)]
 struct Land {
     site: usize,
-    frame: gearbox_globe::SiteFrame,
+    frame: gearbox_globe::Datum,
     terrain: gearbox_globe::Terrain,
 }
 
@@ -383,7 +383,7 @@ fn stream_ground_colliders(
         .iter()
         .filter(|(_, body)| body.is_dynamic())
         .map(|(_, body)| {
-            let site = gearbox_globe::site_of_physics(body.translation().x);
+            let site = gearbox_globe::region_of_physics(body.translation().x);
             let x = body.translation().x - gearbox_globe::physics_offset(site).x;
             (site, Vec2::new(x as f32, body.translation().z as f32))
         })
@@ -783,7 +783,7 @@ pub fn publish_cover_terrain(
             let space = LAND.read().ok().and_then(|land| *land).map_or(0, |land| {
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                (land.site, land.frame.up.to_array().map(f64::to_bits)).hash(&mut hasher);
+                (land.site, land.frame.origin.to_array().map(f64::to_bits)).hash(&mut hasher);
                 hasher.finish()
             });
             commands.insert_resource(gearbox_fields::CoverTerrain {

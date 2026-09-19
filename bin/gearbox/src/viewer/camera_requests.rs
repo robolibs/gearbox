@@ -60,7 +60,7 @@ fn serve_camera_requests(
         }
         ("follow", Some(root)) => follow.set(Some(root)),
         ("unfollow", _) => follow.set(None),
-        // `goto BEARING_DEG DISTANCE_KM`: a place on the planet, along the ground from home.
+        // `goto LAT LON`: a place on Earth, in degrees.
         ("goto", _) => {
             let mut numbers = text.split_whitespace().skip(1).filter_map(|w| w.parse::<f64>().ok());
             if let (Some(bearing), Some(distance)) = (numbers.next(), numbers.next()) {

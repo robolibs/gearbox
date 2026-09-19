@@ -338,6 +338,7 @@ fn spawn_world(
     let planet_mesh = meshes.add(planet_cap_mesh(radius));
     commands.spawn((
         Name::new("Planet"),
+        crate::globe::PlanetBall,
         // At the centre of its own frame, shrunk to sit under the land everywhere.
         Transform::from_scale(Vec3::splat(1.0 - PLANET_VISUAL_DROP_M / radius)),
         big_space::prelude::CellCoord::default(),

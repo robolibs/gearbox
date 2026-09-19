@@ -1,8 +1,8 @@
-//! The land: one height for every place on the planet.
+//! The land: one height above the ellipsoid for every place on Earth.
 
 use bevy::math::DVec3;
 
-use crate::{PLANET_RADIUS_M, SiteFrame, noise};
+use crate::{Datum, Geodetic, noise};
 
 const FLAT_RADIUS_M: f64 = 30.0;
 const GENTLE_RADIUS_M: f64 = 70.0;
@@ -16,8 +16,8 @@ fn smooth(t: f64) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The planet's land. It is level where `home` touches it, and gentle around
-/// that, so a field can be laid there; the broad relief rises farther out.
+/// The land. It is level where `home` is anchored, and gentle around that, so
+/// a field can be laid there; the broad relief rises farther out.
 #[derive(Clone, Copy, Debug)]
 pub struct Terrain {
     home: DVec3,
@@ -25,9 +25,8 @@ pub struct Terrain {
 }
 
 impl Terrain {
-    pub fn new(home: &SiteFrame) -> Self {
-        let home = home.origin();
-        Self { home, home_raw: Self::meadow(home) }
+    pub fn new(home: &Datum) -> Self {
+        Self { home: home.origin, home_raw: Self::meadow(home.origin) }
     }
 
     fn meadow(p: DVec3) -> f32 {
@@ -36,24 +35,23 @@ impl Terrain {
             + (noise::fbm(p * 0.0011 + DVec3::splat(53.0), 3) - 0.5) * 34.0
     }
 
-    /// Height above the sphere in the direction `direction` from the centre.
-    pub fn height(&self, direction: DVec3) -> f32 {
-        let p = direction * PLANET_RADIUS_M;
-        let from_home = (p - self.home).length();
+    /// Height above the ellipsoid of the land over `ground`, an ECEF place on it.
+    pub fn height(&self, ground: DVec3) -> f32 {
+        let from_home = (ground - self.home).length();
         let level = smooth((from_home - FLAT_RADIUS_M) / (GENTLE_RADIUS_M - FLAT_RADIUS_M));
         let relief = smooth((from_home - RELIEF_FROM_M) / (RELIEF_FULL_M - RELIEF_FROM_M))
-            * (noise::fbm(p * 0.00045 + DVec3::splat(97.0), 4) - 0.5)
+            * (noise::fbm(ground * 0.00045 + DVec3::splat(97.0), 4) - 0.5)
             * RELIEF_M;
-        (Self::meadow(p) - self.home_raw) * level + relief
+        (Self::meadow(ground) - self.home_raw) * level + relief
     }
 
-    /// Height of the land in a site's own frame at its local `x`, `z`: the
-    /// land's height less what the planet's curve has dropped by there.
-    pub fn local_height(&self, site: &SiteFrame, x: f64, z: f64) -> f32 {
-        let tangent = site.to_planet(DVec3::new(x, 0.0, z));
-        let length = tangent.length();
-        let height = self.height(tangent / length) as f64;
-        ((PLANET_RADIUS_M + height) * (PLANET_RADIUS_M / length) - PLANET_RADIUS_M) as f32
+    /// Height of the land in a datum's frame at its `x`, `z`: the land's
+    /// altitude there, less the altitude the datum's flat ground has reached
+    /// by leaving the curving Earth.
+    pub fn local_height(&self, datum: &Datum, x: f64, z: f64) -> f32 {
+        let flat = datum.geodetic(DVec3::new(x, 0.0, z));
+        let ground = Geodetic::new(flat.latitude, flat.longitude, 0.0).ecef();
+        (self.height(ground) as f64 - flat.altitude) as f32
     }
 }
 
@@ -61,9 +59,11 @@ impl Terrain {
 mod tests {
     use super::*;
 
+    const FIELD: (f64, f64) = (52.370216, 4.895168);
+
     #[test]
     fn the_home_field_is_level_where_it_starts() {
-        let home = SiteFrame::at(DVec3::Y);
+        let home = Datum::at(FIELD.0, FIELD.1);
         let land = Terrain::new(&home);
         assert!(land.local_height(&home, 0.0, 0.0).abs() < 1e-3);
         assert!(land.local_height(&home, 12.0, -9.0).abs() < 1e-3);
@@ -71,22 +71,23 @@ mod tests {
 
     #[test]
     fn the_ground_falls_away_with_the_curve() {
-        let home = SiteFrame::at(DVec3::Y);
+        let home = Datum::at(FIELD.0, FIELD.1);
         let land = Terrain::new(&home);
-        let drop = 20_000.0f64.powi(2) / (2.0 * PLANET_RADIUS_M);
+        let drop = 20_000.0f64.powi(2) / (2.0 * crate::PLANET_RADIUS_M);
         let height = land.local_height(&home, 20_000.0, 0.0) as f64;
         assert!((height + drop).abs() < RELIEF_M as f64, "{height} vs {drop}");
     }
 
     #[test]
-    fn two_sites_agree_on_the_land_they_share() {
-        let home = SiteFrame::at(DVec3::Y);
+    fn two_datums_agree_on_the_land_they_share() {
+        let home = Datum::at(FIELD.0, FIELD.1);
         let land = Terrain::new(&home);
-        let near = home.travelled(0.7, 9_000.0);
-        let spot = near.to_planet(DVec3::new(150.0, 0.0, -80.0)).normalize();
-        let seen_from_home = home.from_planet(spot * PLANET_RADIUS_M);
-        let a = land.height(near.direction(150.0, -80.0));
-        let b = land.height(home.direction(seen_from_home.x, seen_from_home.z));
+        let near = home.travelled(40.0, 9_000.0);
+        let spot = near.geodetic(DVec3::new(150.0, 0.0, -80.0));
+        let from_home = home.local(Geodetic::new(spot.latitude, spot.longitude, 0.0));
+        let a = land.local_height(&near, 150.0, -80.0) as f64 + spot.altitude;
+        let seen = home.geodetic(DVec3::new(from_home.x, 0.0, from_home.z));
+        let b = land.local_height(&home, from_home.x, from_home.z) as f64 + seen.altitude;
         assert!((a - b).abs() < 0.05, "{a} vs {b}");
     }
 }

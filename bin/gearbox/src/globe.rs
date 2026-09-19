@@ -10,7 +10,7 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::prelude::*;
-use gearbox_globe::{SiteFrame, Terrain};
+use gearbox_globe::{Datum, Geodetic, Terrain};
 
 /// Edge of the planet frame's cells.
 const PLANET_CELL_M: f32 = 10_000.0;
@@ -28,7 +28,9 @@ impl Plugin for GlobePlugin {
             .add_systems(PreUpdate, adopt_loaded_roots)
             .add_systems(
                 Update,
-                (join_watched_site, travel, orient_sky).chain().before(crate::terrain::TerrainUpdates),
+                (join_watched_site, travel, orient_sky, seat_planet)
+                    .chain()
+                    .before(crate::terrain::TerrainUpdates),
             );
     }
 }
@@ -41,7 +43,7 @@ pub struct Site(pub usize);
 pub struct SiteEntry {
     pub entity: Entity,
     pub name: String,
-    pub frame: SiteFrame,
+    pub frame: Datum,
 }
 
 /// Every site on the planet; the first is home and the view is in `current`.
@@ -69,8 +71,8 @@ impl Sites {
 }
 
 /// The components that stand a site's grid on the planet.
-pub fn site_bundle(index: usize, name: &str, frame: &SiteFrame, root: Entity) -> impl Bundle {
-    let (cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(frame.origin());
+pub fn site_bundle(index: usize, name: &str, frame: &Datum, root: Entity) -> impl Bundle {
+    let (cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(frame.origin);
     (
         Name::new(format!("Site {name}")),
         Site(index),
@@ -84,6 +86,17 @@ pub fn site_bundle(index: usize, name: &str, frame: &SiteFrame, root: Entity) ->
     )
 }
 
+/// Where on Earth the world starts: `GEARBOX_DATUM="lat,lon"` in degrees, else
+/// the field outside Amsterdam the GNSS has always reported.
+fn home_datum() -> Datum {
+    let given = std::env::var("GEARBOX_DATUM").ok().and_then(|value| {
+        let (lat, lon) = value.split_once(',')?;
+        Some((lat.trim().parse::<f64>().ok()?, lon.trim().parse::<f64>().ok()?))
+    });
+    let (latitude, longitude) = given.unwrap_or((52.370216, 4.895168));
+    Datum::at(latitude, longitude)
+}
+
 fn spawn_globe(mut commands: Commands) {
     let root = commands
         .spawn((
@@ -91,7 +104,7 @@ fn spawn_globe(mut commands: Commands) {
             BigSpaceRootBundle { grid: Grid::new(PLANET_CELL_M, 0.0), ..default() },
         ))
         .id();
-    let frame = SiteFrame::at(DVec3::Y);
+    let frame = home_datum();
     let entity = commands.spawn(site_bundle(0, "home", &frame, root)).id();
     let sites = Sites {
         root,
@@ -116,7 +129,7 @@ pub(crate) fn set_current_site(index: usize) {
 
 /// A physics position as its site sees it: the site, and the place in it.
 pub fn site_local(x: f64, y: f64, z: f64) -> (usize, [f64; 3]) {
-    let site = gearbox_globe::site_of_physics(x);
+    let site = gearbox_globe::region_of_physics(x);
     (site, [x - gearbox_globe::physics_offset(site).x, y, z])
 }
 
@@ -159,11 +172,13 @@ fn adopt_loaded_roots(
 
 /// A site is left for another once the view rests this far from where it
 /// touches the planet, and an existing site is taken if it touches this near.
-const LEAVE_SITE_M: f64 = 0.8 * gearbox_globe::SITE_REACH_M;
-const JOIN_SITE_M: f64 = 0.6 * gearbox_globe::SITE_REACH_M;
+const LEAVE_SITE_M: f64 = 0.8 * gearbox_globe::DATUM_REACH_M;
+const JOIN_SITE_M: f64 = 0.6 * gearbox_globe::DATUM_REACH_M;
 
 impl Sites {
     fn nearest(&self, up: DVec3) -> Option<usize> {
+        // `up` is an ECEF place on the ground.
+
         (0..self.list.len())
             .map(|index| (index, self.list[index].frame.ground_distance(up)))
             .filter(|(_, distance)| *distance < JOIN_SITE_M)
@@ -172,14 +187,13 @@ impl Sites {
     }
 }
 
-/// A place the view is asked to go: bearing in degrees and kilometres along
-/// the ground from home.
+/// A place the view is asked to go: latitude and longitude in degrees.
 #[derive(Resource, Default)]
 pub struct Goto(pub Option<(f64, f64)>);
 
-/// `GEARBOX_CAMERA_SITE="bearing_deg,distance_km"`: where a scripted view starts.
+/// `GEARBOX_CAMERA_LLA="lat,lon"`: where a scripted view starts.
 fn scripted_site() -> Option<(f64, f64)> {
-    let value = std::env::var("GEARBOX_CAMERA_SITE").ok()?;
+    let value = std::env::var("GEARBOX_CAMERA_LLA").ok()?;
     let (bearing, distance) = value.split_once(',')?;
     Some((bearing.trim().parse().ok()?, distance.trim().parse().ok()?))
 }
@@ -207,28 +221,32 @@ fn travel(
     let asked = goto.0.take().or_else(|| if *started { None } else { scripted_site() });
     *started = true;
     let scripted = asked.map(|(bearing, distance)| {
-        sites.home().frame.travelled(bearing.to_radians(), distance * 1000.0).up
+        // The pair is latitude and longitude.
+        Geodetic::new(bearing, distance, 0.0).ecef()
     });
     let focus = chase.focus.as_dvec3();
     // A view held on a machine stays in the machine's site.
     let held = follow.entity.is_some() || fly.target.is_some();
     let destination = match scripted {
         Some(up) => up,
-        None if !held && focus.x.hypot(focus.z) > LEAVE_SITE_M => from.direction(focus.x, focus.z),
+        None if !held && focus.x.hypot(focus.z) > LEAVE_SITE_M => {
+            let under = from.geodetic(DVec3::new(focus.x, 0.0, focus.z));
+            Geodetic::new(under.latitude, under.longitude, 0.0).ecef()
+        }
         None => return,
     };
     let here = sites.current;
     let occupied = physics.bodies.iter().any(|(_, body)| {
-        body.is_dynamic() && gearbox_globe::site_of_physics(body.translation().x) == here
+        body.is_dynamic() && gearbox_globe::region_of_physics(body.translation().x) == here
     });
-    let frame = SiteFrame::at(destination);
+    let frame = Datum::under(destination);
     let to = if let Some(index) = sites.nearest(destination).filter(|index| *index != here) {
         index
     } else if here != 0 && !occupied {
         let entry = &mut sites.list[here];
         entry.frame = frame;
         if let Ok((mut transform, mut cell)) = grids.get_mut(entry.entity) {
-            let (new_cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(frame.origin());
+            let (new_cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(frame.origin);
             *cell = new_cell;
             *transform = Transform::from_translation(local).with_rotation(frame.rotation.as_quat());
         }
@@ -242,7 +260,7 @@ fn travel(
     };
     let into = sites.list[to].frame;
     // The focus lands on the ground of the new site; a scripted view starts at its middle.
-    let carried = into.from_planet(destination * gearbox_globe::PLANET_RADIUS_M);
+    let carried = into.from_ecef(destination);
     let heading = from.rotation * DVec3::new(chase.yaw.sin() as f64, 0.0, chase.yaw.cos() as f64);
     let heading = into.rotation.inverse() * heading;
     // It keeps its height above the ground, not its height.
@@ -253,7 +271,7 @@ fn travel(
     enter_site(&mut commands, &mut sites, &layout, camera, to);
 }
 
-static FRAMES: std::sync::RwLock<Vec<SiteFrame>> = std::sync::RwLock::new(Vec::new());
+static FRAMES: std::sync::RwLock<Vec<Datum>> = std::sync::RwLock::new(Vec::new());
 static LAND: std::sync::OnceLock<Terrain> = std::sync::OnceLock::new();
 
 fn publish_frames(sites: &Sites) {
@@ -336,8 +354,34 @@ fn join_watched_site(
 /// The sun and the weather are the planet's: the sky of a site is theirs as
 /// seen from where it stands.
 fn orient_sky(sites: Res<Sites>, mut weather: ResMut<bevy_weather::WeatherSettings>) {
-    let rotation = sites.current().frame.rotation.as_quat();
+    // The sun is set for home's sky, so home's frame stands for the planet's.
+    let rotation = (sites.home().frame.rotation.inverse() * sites.current().frame.rotation).as_quat();
     if weather.planet_from_site != rotation {
         weather.planet_from_site = rotation;
+    }
+}
+
+/// The sphere drawn for the planet.
+#[derive(Component)]
+pub struct PlanetBall;
+
+/// The Earth is an ellipsoid and the drawn planet a sphere, so the sphere is
+/// seated to touch the ground under the datum in view, where it is looked at.
+fn seat_planet(
+    sites: Res<Sites>,
+    mut balls: Query<(&mut Transform, &mut CellCoord), With<PlanetBall>>,
+    mut seated: Local<Option<DVec3>>,
+) {
+    let datum = sites.current().frame;
+    if *seated == Some(datum.origin) {
+        return;
+    }
+    let centre = datum.origin - datum.up() * gearbox_globe::PLANET_RADIUS_M;
+    for (mut transform, mut cell) in &mut balls {
+        let (new_cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(centre);
+        *cell = new_cell;
+        transform.translation = local;
+        transform.rotation = datum.rotation.as_quat();
+        *seated = Some(datum.origin);
     }
 }

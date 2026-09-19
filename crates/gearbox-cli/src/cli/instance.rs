@@ -59,14 +59,16 @@ enum Cmd {
     },
     /// Move the viewer camera: `fly MACHINE` flies behind a machine like a
     /// double-click in the Agents pane, `follow MACHINE` pins the camera to
-    /// it, `unfollow` releases it, `goto BEARING KM` takes the view to a place
-    /// on the planet that far along the ground from home (bearing in degrees)
+    /// it, `unfollow` releases it, `goto LAT LON` takes the view to that
+    /// latitude and longitude, in degrees
     Camera {
         /// fly | follow | unfollow | goto
         action: String,
-        /// Machine id (`gearbox:machine:id`) for fly and follow; the bearing for goto
+        /// Machine id (`gearbox:machine:id`) for fly and follow; the latitude for goto
+        #[arg(allow_negative_numbers = true)]
         machine: Option<String>,
-        /// Kilometres along the ground from home, for goto
+        /// Longitude in degrees, for goto
+        #[arg(allow_negative_numbers = true)]
         distance_km: Option<f64>,
         #[arg(long)]
         id: Option<String>,
@@ -136,9 +138,9 @@ fn camera(
         ("goto", Some(bearing)) => {
             let bearing: f64 = bearing
                 .parse()
-                .map_err(|_| CliError::error("`goto` needs a bearing in degrees and a distance in km"))?;
+                .map_err(|_| CliError::error("`goto` needs a latitude and a longitude in degrees"))?;
             let distance = distance_km
-                .ok_or_else(|| CliError::error("`goto` needs a bearing in degrees and a distance in km"))?;
+                .ok_or_else(|| CliError::error("`goto` needs a latitude and a longitude in degrees"))?;
             format!("goto {bearing} {distance}")
         }
         ("fly", None) | ("follow", None) => {
