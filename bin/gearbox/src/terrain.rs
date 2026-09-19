@@ -35,7 +35,12 @@ const FOLLOW_SNAP_M: f32 = 100.0;
 const FOLLOW_REACH_M: f32 = 25_000.0;
 const FOLLOW_LOOK_AHEAD_M: f32 = 300.0;
 const FOLLOW_MAX_EYE_HEIGHT_M: f32 = 1_500.0;
-const FOLLOW_MACHINE_MARGIN_M: f32 = 40.0;
+/// Collider chunks: kept this far around a moving body, dropped past the
+/// farther distance so a body pacing a chunk edge does not churn them.
+const GROUND_CHUNK_M: f32 = 64.0;
+const GROUND_KEEP_M: f32 = 96.0;
+const GROUND_DROP_M: f32 = 224.0;
+const GROUND_CHUNKS_PER_FRAME: usize = 3;
 // Measured against the meadow backdrop it borders, from 60 km in clear air.
 const HORIZON_COLOR: Color = Color::linear_rgb(0.058, 0.108, 0.015);
 /// Peak-to-trough relief of the distant land around the meadow.
@@ -50,10 +55,16 @@ pub struct TerrainUpdates;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostStartup, spawn_procedural_terrain)
+        app.init_resource::<GroundColliders>()
+            .add_systems(PostStartup, spawn_procedural_terrain)
             .add_systems(
                 Update,
-                (retire_for_usd_terrain, follow_view, update_terrain_tiles)
+                (
+                    retire_for_usd_terrain,
+                    follow_view,
+                    update_terrain_tiles,
+                    stream_ground_colliders,
+                )
                     .chain()
                     .in_set(TerrainUpdates),
             );
@@ -80,7 +91,7 @@ impl TerrainPreset {
 /// Height of the procedural ground, `None` when none is active or outside it.
 pub fn procedural_height_m(x: f32, z: f32) -> Option<f32> {
     let grid = HEIGHT_GRID.read().ok()?.clone()?;
-    grid.height_at(x, z)
+    Some(grid.height_at(x, z).unwrap_or_else(|| horizon_height(x, z)))
 }
 
 fn meadow_height_raw(x: f32, z: f32) -> f32 {
@@ -109,7 +120,6 @@ fn meadow_height(x: f32, z: f32) -> f32 {
 #[derive(Resource)]
 pub struct ProceduralTerrain {
     pub(crate) entity: Entity,
-    collider: ColliderHandle,
     safety_floor: ColliderHandle,
     pub(crate) grid: Arc<HeightGrid>,
     fine_cell: f32,
@@ -159,7 +169,6 @@ struct GroundParts {
     center: Vec2,
     cell: f32,
     grid: HeightGrid,
-    collider_grid: HeightGrid,
     horizon: Mesh,
 }
 
@@ -173,11 +182,9 @@ fn cell_from_env(name: &str, fallback: f32) -> f32 {
 
 fn build_ground(center: Vec2) -> GroundParts {
     let cell = cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M);
-    let collider_cell = cell_from_env("GEARBOX_TERRAIN_COLLIDER_CELL_M", cell);
     let grid = HeightGrid::sample_at(center, SIZE_M, cell, horizon_height);
-    let collider_grid = HeightGrid::sample_at(center, SIZE_M, collider_cell, horizon_height);
     let horizon = horizon_mesh(&grid);
-    GroundParts { center, cell, grid, collider_grid, horizon }
+    GroundParts { center, cell, grid, horizon }
 }
 
 fn install_ground(
@@ -206,14 +213,6 @@ fn install_ground(
         bevy::light::NotShadowCaster,
     ));
     let center = DVec3::new(parts.center.x as f64, 0.0, parts.center.y as f64);
-    let collider = physics.colliders.insert(
-        heightfield_collider(&parts.collider_grid)
-            .translation(center)
-            .friction(crate::world::ground_friction(1.4))
-            .restitution(0.0)
-            .build(),
-    );
-    physics.entity_to_collider.insert(entity, collider);
     let safety_floor = physics.colliders.insert(
         ColliderBuilder::cuboid(SAFETY_FLOOR_HALF_EXTENT_M, 0.10, SAFETY_FLOOR_HALF_EXTENT_M)
             .translation(center + DVec3::new(0.0, SAFETY_FLOOR_Y_M, 0.0))
@@ -226,7 +225,6 @@ fn install_ground(
     }
     ProceduralTerrain {
         entity,
-        collider,
         safety_floor,
         grid,
         fine_cell: parts.cell,
@@ -236,12 +234,7 @@ fn install_ground(
 
 fn remove_ground(commands: &mut Commands, physics: &mut PhysicsWorld, terrain: &ProceduralTerrain) {
     commands.entity(terrain.entity).despawn();
-    physics.entity_to_collider.remove(&terrain.entity);
-    let colliders = &mut physics.colliders;
-    let islands = &mut physics.islands;
-    let bodies = &mut physics.bodies;
-    colliders.remove(terrain.collider, islands, bodies, true);
-    colliders.remove(terrain.safety_floor, islands, bodies, true);
+    physics.colliders.remove(terrain.safety_floor, &mut physics.islands, &mut physics.bodies, true);
 }
 
 fn spawn_procedural_terrain(
@@ -282,10 +275,10 @@ fn spawn_procedural_terrain(
     );
 }
 
-/// The ground square follows where the view rests, so the meadow, its grass
-/// and its collider are wherever one goes. The new square is worked out on a
-/// background thread and swapped in whole. It stays put while a machine would
-/// be left without ground, and while the view is too high to see grass.
+/// The ground square that is drawn follows where the view rests, so the meadow
+/// and its grass are wherever one looks. The new square is worked out on a
+/// background thread and swapped in whole; it waits while the view is too high
+/// to see grass. What machines stand on is `stream_ground_colliders`' business.
 fn follow_view(
     mut commands: Commands,
     terrain: Option<ResMut<ProceduralTerrain>>,
@@ -328,17 +321,83 @@ fn follow_view(
     if wanted == center {
         return;
     }
-    let keep = SIZE_M * 0.5 - FOLLOW_MACHINE_MARGIN_M;
-    let stranded = physics.bodies.iter().any(|(_, body)| {
-        let at = body.translation();
-        body.is_dynamic()
-            && (Vec2::new(at.x as f32, at.z as f32) - wanted).abs().max_element() > keep
-    });
-    if stranded {
-        return;
-    }
     *pending = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { build_ground(wanted) }));
 }
+
+/// The ground machines stand on, in chunks kept around every moving body
+/// wherever it is, seen or not. Chunks share the world's height function and
+/// lattice with the drawn ground, so both agree to the sample.
+#[derive(Resource, Default)]
+pub struct GroundColliders(HashMap<IVec2, ColliderHandle>);
+
+fn ground_chunk(at: Vec2) -> IVec2 {
+    (at / GROUND_CHUNK_M).floor().as_ivec2()
+}
+
+fn ground_chunk_collider(chunk: IVec2) -> rapier3d::prelude::Collider {
+    let cell = cell_from_env(
+        "GEARBOX_TERRAIN_COLLIDER_CELL_M",
+        cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M),
+    );
+    let center = (chunk.as_vec2() + Vec2::splat(0.5)) * GROUND_CHUNK_M;
+    let grid = HeightGrid::sample_at(center, GROUND_CHUNK_M, cell, horizon_height);
+    heightfield_collider(&grid)
+        .translation(DVec3::new(center.x as f64, 0.0, center.y as f64))
+        .friction(crate::world::ground_friction(1.4))
+        .restitution(0.0)
+        .build()
+}
+
+fn stream_ground_colliders(
+    terrain: Option<Res<ProceduralTerrain>>,
+    mut ground: ResMut<GroundColliders>,
+    mut physics: ResMut<PhysicsWorld>,
+) {
+    let physics = physics.as_mut();
+    if terrain.is_none() {
+        for (_, collider) in ground.0.drain() {
+            physics.colliders.remove(collider, &mut physics.islands, &mut physics.bodies, true);
+        }
+        return;
+    }
+    let sources: Vec<Vec2> = physics
+        .bodies
+        .iter()
+        .filter(|(_, body)| body.is_dynamic())
+        .map(|(_, body)| Vec2::new(body.translation().x as f32, body.translation().z as f32))
+        .collect();
+    // The chunk under a body is laid at once; the rest of its surroundings
+    // arrive a few a frame.
+    let mut budget = GROUND_CHUNKS_PER_FRAME;
+    for &source in &sources {
+        let (low, high) = (
+            ground_chunk(source - Vec2::splat(GROUND_KEEP_M)),
+            ground_chunk(source + Vec2::splat(GROUND_KEEP_M)),
+        );
+        for z in low.y..=high.y {
+            for x in low.x..=high.x {
+                let chunk = IVec2::new(x, z);
+                let underfoot = chunk == ground_chunk(source);
+                if ground.0.contains_key(&chunk) || (!underfoot && budget == 0) {
+                    continue;
+                }
+                budget = budget.saturating_sub(1);
+                ground.0.insert(chunk, physics.colliders.insert(ground_chunk_collider(chunk)));
+            }
+        }
+    }
+    ground.0.retain(|chunk, collider| {
+        let center = (chunk.as_vec2() + Vec2::splat(0.5)) * GROUND_CHUNK_M;
+        let kept = sources
+            .iter()
+            .any(|source| (*source - center).abs().max_element() < GROUND_DROP_M);
+        if !kept {
+            physics.colliders.remove(*collider, &mut physics.islands, &mut physics.bodies, true);
+        }
+        kept
+    });
+}
+
 fn horizon_height(x: f32, z: f32) -> f32 {
     let edge = x.abs().max(z.abs());
     let t = ((edge - SIZE_M * 0.5) / 1_600.0).clamp(0.0, 1.0);

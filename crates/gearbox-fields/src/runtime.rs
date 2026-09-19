@@ -197,7 +197,7 @@ pub fn ensure_fields(world: &mut World) {
     };
     let layout = world.resource::<FieldLayout>().clone();
     layout
-        .validate(world.resource::<FieldProfiles>(), domain)
+        .validate(world.resource::<FieldProfiles>())
         .expect("valid field layout");
     let profiles = world.resource::<FieldProfiles>().0.clone();
     let heightmap = world

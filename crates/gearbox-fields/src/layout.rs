@@ -116,7 +116,7 @@ impl FieldLayout {
         }
     }
 
-    pub fn validate(&self, profiles: &FieldProfiles, terrain: FieldBounds) -> Result<(), String> {
+    pub fn validate(&self, profiles: &FieldProfiles) -> Result<(), String> {
         if !profiles.0.contains_key(&self.default) {
             return Err(format!("unknown default field profile: {}", self.default));
         }
@@ -134,13 +134,8 @@ impl FieldLayout {
             if !bounds.min.is_finite()
                 || !bounds.max.is_finite()
                 || !bounds.min.cmplt(bounds.max).all()
-                || !terrain.contains(bounds.min)
-                || !terrain.contains(bounds.max)
             {
-                return Err(format!(
-                    "invalid or out-of-terrain bounds for {}",
-                    field.name
-                ));
+                return Err(format!("invalid bounds for {}", field.name));
             }
             if self.fields[..i]
                 .iter()
@@ -152,10 +147,22 @@ impl FieldLayout {
         Ok(())
     }
 
+    /// The fields as they fall on `terrain`, cut to it, and the default cover
+    /// over the rest of it. The terrain may lie anywhere over the layout.
     pub fn regions(&self, terrain: FieldBounds) -> Vec<FieldSpec> {
+        let fields: Vec<FieldSpec> = self
+            .fields
+            .iter()
+            .filter(|field| field.bounds().overlaps(terrain))
+            .map(|field| FieldSpec {
+                min: field.bounds().min.max(terrain.min).to_array(),
+                max: field.bounds().max.min(terrain.max).to_array(),
+                ..field.clone()
+            })
+            .collect();
         let mut xs = vec![terrain.min.x, terrain.max.x];
         let mut zs = vec![terrain.min.y, terrain.max.y];
-        for field in &self.fields {
+        for field in &fields {
             xs.extend([field.min[0], field.max[0]]);
             zs.extend([field.min[1], field.max[1]]);
         }
@@ -163,13 +170,12 @@ impl FieldLayout {
         zs.sort_by(f32::total_cmp);
         xs.dedup();
         zs.dedup();
-        let mut regions = self.fields.clone();
+        let mut regions = fields.clone();
         for z in zs.windows(2) {
             let mut start = None;
             for x in xs.windows(2) {
                 let middle = Vec2::new((x[0] + x[1]) * 0.5, (z[0] + z[1]) * 0.5);
-                let occupied = self
-                    .fields
+                let occupied = fields
                     .iter()
                     .any(|field| field.bounds().contains(middle));
                 if occupied {
