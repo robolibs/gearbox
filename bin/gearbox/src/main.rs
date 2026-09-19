@@ -20,6 +20,7 @@ mod app;
 mod attach;
 mod controller;
 mod environment;
+mod biomes;
 mod globe;
 mod host;
 mod links;

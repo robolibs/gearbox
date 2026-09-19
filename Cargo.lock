@@ -783,6 +783,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_biomes"
+version = "0.0.6"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_camera"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3763,6 +3770,7 @@ dependencies = [
  "agentio",
  "anyhow",
  "bevy",
+ "bevy_biomes",
  "bevy_weather",
  "big_space",
  "bytemuck",

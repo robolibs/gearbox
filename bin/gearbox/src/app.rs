@@ -63,6 +63,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(crate::globe::GlobePlugin)
         .add_plugins(world::WorldPlugin)
         .add_plugins(environment::WeatherPlugin)
+        .add_plugins(crate::biomes::WorldBiomesPlugin)
         .init_resource::<environment::ViewerLens>()
         .add_plugins(gearbox_fields::FieldsPlugin::default())
         .add_plugins(terrain::TerrainPlugin)
