@@ -9,7 +9,7 @@
 //! Bevy order; `lower > upper` on a limit locks the DOF.
 //!
 //! The engine itself sits behind `backend::PhysicsBackend`; `rapier` is the
-//! one implementation and the only place that names `rapier3d`.
+//! reference implementation; `molla` provides CPU Featherstone dynamics.
 
 mod attach;
 pub mod backend;
@@ -19,6 +19,7 @@ mod convert;
 mod debug;
 mod joints;
 pub mod markers;
+mod molla;
 mod rapier;
 pub mod reader;
 mod scene;

@@ -613,6 +613,11 @@ pub trait PhysicsBackend: Send + Sync {
     /// Advance by `settings().dt`, skipping contacts of excluded pairs.
     fn step(&mut self, excluded: PairExcluded<'_>);
 
+    /// Bodies isolated internally during the latest step attempt.
+    fn quarantined_bodies(&self) -> Vec<BodyId> {
+        Vec::new()
+    }
+
     fn insert_body(&mut self, desc: BodyDesc) -> BodyId;
     /// Takes the body's colliders and joints with it.
     fn remove_body(&mut self, id: BodyId);

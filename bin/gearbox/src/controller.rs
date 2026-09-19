@@ -4254,7 +4254,7 @@ def Xform "Leatherback" (
         assert!(applied.steer);
 
         let drive = physics.joint_between(chassis, wheel).expect("drive joint");
-        assert!(!physics.joint_is_reduced(drive));
+        assert_eq!(physics.joint_is_reduced(drive), physics.name() == "molla");
         let motor = physics.joint(drive).unwrap().motor(JointAxis::AngX).expect("drive motor");
         assert!((motor.target_velocity - 7.5).abs() < 1e-9);
         assert_eq!(motor.max_force, WHEEL_DRIVE_MAX_TORQUE);

@@ -13,6 +13,7 @@ use std::ops::{Deref, DerefMut};
 use bevy::prelude::*;
 
 use super::backend::{BodyId, ColliderId, JointId, PhysicsBackend, Pose, SolverSettings};
+use super::molla::MollaBackend;
 use super::rapier::RapierBackend;
 
 /// All physics state for the loaded scene. Exactly one of these in the world.
@@ -56,11 +57,18 @@ impl Default for PhysicsWorld {
 fn backend_by_name(name: Option<&str>) -> Box<dyn PhysicsBackend> {
     match name {
         None | Some("rapier") => Box::new(RapierBackend::default()),
+        Some("molla") => Box::new(MollaBackend::default()),
         Some(other) => {
             warn!("gearbox-physics: no backend `{other}`; running on rapier");
             Box::new(RapierBackend::default())
         }
     }
+}
+
+#[test]
+fn named_backends_select_the_requested_engine() {
+    assert_eq!(backend_by_name(Some("molla")).name(), "molla");
+    assert_eq!(backend_by_name(Some("rapier")).name(), "rapier");
 }
 
 impl Deref for PhysicsWorld {
@@ -119,6 +127,13 @@ impl PhysicsWorld {
         let (authored, attached) = (&self.filtered_pairs, &self.attachment_filtered_pairs);
         self.backend
             .step(&|a, b| authored.contains(&(a, b)) || attached.contains(&(a, b)));
+        for body in self.backend.quarantined_bodies() {
+            if let Some(entity) = self.backend.body(body).and_then(|body| body.entity()) {
+                if !self.quarantined.contains(&entity) {
+                    self.quarantined.push(entity);
+                }
+            }
+        }
     }
 
     /// A body whose pose or velocity went non-finite would take the broad
