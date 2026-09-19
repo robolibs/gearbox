@@ -4,7 +4,6 @@ pub(super) struct JointAccess {
     pub shared: Shared,
     pub handle: rt::JointHandle,
     pub bodies: (BodyId, BodyId),
-    pub softness: Option<(f64, f64)>,
 }
 
 impl JointAccess {
@@ -185,10 +184,13 @@ impl JointMut for JointAccess {
         self.edit_motor(axis, |m| m.max_force = max_force);
     }
     fn set_softness(&mut self, natural_frequency: f64, damping_ratio: f64) {
-        self.softness = Some((natural_frequency, damping_ratio));
-        bevy::log::warn!(
-            "molla: compliant joint capture is not implemented; this joint remains rigid"
-        );
+        apply(self.shared.world().scene.set_joint_softness(
+            self.handle,
+            Some(jc::JointSoftness {
+                natural_frequency,
+                damping_ratio,
+            }),
+        ));
     }
     fn set_contacts_enabled(&mut self, enabled: bool) {
         let mut world = self.shared.world();

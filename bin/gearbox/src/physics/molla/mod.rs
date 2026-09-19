@@ -263,7 +263,6 @@ impl PhysicsBackend for MollaBackend {
             shared: self.shared.clone(),
             handle,
             bodies: (body1, body2),
-            softness: None,
         };
         for (axis, limits) in desc.limits {
             joint.set_limits(axis, limits);

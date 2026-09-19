@@ -19,17 +19,26 @@ joint and world traits; the Molla adapter is in `bin/gearbox/src/physics/molla`.
   to `PhysicsWorld`'s entity report after each step.
 - All Molla joints are reduced-coordinate joints, including requests that would
   select Rapier constraint joints. `joint_is_reduced` reports this truthfully.
+- Soft joints lower to D6 spring freedoms while retaining their logical kind,
+  authored frames and semantic motor axes. Runtime frame edits preserve live
+  body kinematics and change the spring rest frame. Hitch capture's 8-to-30 Hz
+  updates drive real Featherstone forces rather than retaining rigid locks.
 - `internal_iterations` maps to twice that many Featherstone substeps, bounded
   to 2–128. Featherstone's direct articulated solve does not use Rapier's outer
   iteration count. Requested settings remain readable.
 
 ## Not yet accepted
 
-Compliant joint softness is not implemented: requests are recorded and warn
-that the joint remains rigid. Sleeping/waking are no-ops and bodies report
-never sleeping. CCD is a stored no-op, as allowed by the Molla integration
+Sleeping/waking are no-ops and bodies report never sleeping. CCD is a stored
+no-op, as allowed by the Molla integration
 specification. Tyre/terrain force elements and live machine acceptance remain
 unfinished. Do not treat this checkpoint as a production backend release.
+
+Compliance uses scalar backward-Euler force regularization with effective
+articulation inertia, not a fully coupled implicit spring solve. Static
+deflection depends on the substep size. Soft angular coordinates use D6's XYZ
+chart; unwrapped multi-turn soft revolute position targets are not implemented.
+The hard revolute path retains its scalar coordinates.
 
 Closed joint loops remain unsupported. Invalid body descriptions or impossible
 joint insertions fail explicitly; fallible runtime edits log rejection and
@@ -50,11 +59,12 @@ nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 GEARBOX_PHYSICS=molla nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 ```
 
-The original 43 binary tests plus eight new backend checks pass with explicit
-`GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (51 tests each). The new
+The original 43 binary tests plus ten new backend checks pass with explicit
+`GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (53 tests each). The new
 checks include real capped motor motion, mass/impulse response, stable handles,
 heightfield rays/live bounds, pair filtering/contact impulses, quarantine and
-its entity-report propagation.
+its entity-report propagation, compliant frame motion and the actual
+`PhysicsWorld::capture_hitch` / fixed-step capture loop.
 This does not establish any of the live tractor/hitch/PTO/slope acceptance gates.
 
 Strict Clippy is not green in this checkout: dependency-inclusive linting finds

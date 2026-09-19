@@ -258,3 +258,70 @@ fn internal_quarantine_reaches_the_gearbox_entity_report() {
     assert!(!world.body(body).unwrap().is_enabled());
     assert_eq!(world.quarantined, vec![entity]);
 }
+
+#[test]
+fn softness_and_frame_edits_produce_compliant_motion() {
+    let mut backend = MollaBackend::default();
+    backend.set_gravity(DVec3::ZERO);
+    let fixed = backend.insert_body(BodyDesc::fixed());
+    let moving = backend.insert_body(dynamic().pose(Pose::from_translation(DVec3::X * 0.1)));
+    let mut desc = JointDesc::new(
+        JointKind::Fixed,
+        Pose::IDENTITY,
+        Pose::from_translation(-DVec3::X * 0.1),
+    );
+    desc.softness = Some((8.0, 1.0));
+    let j = backend.insert_joint(fixed, moving, desc);
+    backend
+        .joint_mut(j, true)
+        .unwrap()
+        .set_frame2(Pose::IDENTITY);
+    near(
+        backend.body(moving).unwrap().position().translation,
+        DVec3::X * 0.1,
+    );
+    backend.step(&|_, _| false);
+    let body = backend.body(moving).unwrap();
+    assert!(body.position().translation.x > 0.05 && body.position().translation.x < 0.1);
+    assert!(body.linvel().x < 0.0);
+    for _ in 0..120 {
+        backend.step(&|_, _| false);
+    }
+    near(
+        backend.body(moving).unwrap().position().translation,
+        DVec3::ZERO,
+    );
+    assert!(backend.quarantined_bodies().is_empty());
+}
+
+#[test]
+fn physics_world_hitch_capture_uses_live_softness() {
+    let backend = MollaBackend::default();
+    let mut world = crate::physics::PhysicsWorld::with_backend(Box::new(backend));
+    world.set_gravity(DVec3::ZERO);
+    let fixed = world.insert_body(BodyDesc::fixed());
+    let moving = world.insert_body(dynamic().pose(Pose::from_translation(DVec3::X * 0.1)));
+    let mut desc = JointDesc::new(
+        JointKind::Generic {
+            locked: JointAxes(63),
+        },
+        Pose::IDENTITY,
+        Pose::from_translation(-DVec3::X * 0.1),
+    );
+    desc.softness = Some((8.0, 1.0));
+    let j = world.insert_joint(fixed, moving, desc);
+    world.capture_hitch(j, Pose::IDENTITY);
+    for _ in 0..240 {
+        let before = world.body(moving).unwrap().position().translation;
+        world.step();
+        let body = world.body(moving).unwrap();
+        assert!(body.is_enabled());
+        assert!((body.position().translation - before).length() < 0.01);
+        assert!(world.quarantined.is_empty());
+    }
+    near(world.joint(j).unwrap().frame2().translation, DVec3::ZERO);
+    near(
+        world.body(moving).unwrap().position().translation,
+        DVec3::ZERO,
+    );
+}
