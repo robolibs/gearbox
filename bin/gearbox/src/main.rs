@@ -138,7 +138,8 @@ where
     });
     // Rapier and parry trace every constraint; recording them costs more than solving.
     layer.with_filter(tracing_subscriber::EnvFilter::new(
-        "info,rapier3d_f64=warn,parry3d_f64=warn",
+        std::env::var("GEARBOX_TRACE_FILTER")
+            .unwrap_or_else(|_| "info,rapier3d_f64=warn,parry3d_f64=warn".into()),
     ))
 }
 

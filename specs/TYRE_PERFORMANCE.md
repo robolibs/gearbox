@@ -60,6 +60,40 @@ versus 0.35–0.46 ms for original Rapier in these runs. Roughly 1,200 fixed ste
 per ten seconds were logged. This work does not establish solver or fleet-scale
 parity.
 
+## Solver follow-up — 2026-09-20
+
+Rebuilt the isolated viewer after Molla's tyre mass-factor and triangle-mesh
+BVH caching changes. The real 26-body, 4,917 kg Kubota on flat ground still
+measured roughly 1.47–1.59 ms per step at 120 Hz, driving straight at 2 m/s.
+The mesh gate improved to 28.9 microseconds/call, but the flat-ground scene is
+not that mesh benchmark. Do not extrapolate its speedup to the live tractor.
+
+Focused stage traces after warmup measured approximately 19 microseconds for
+collision, 148 for external forces (including 66 for wheels), and 67 for a
+Featherstone substep (including 36 for drive inertia). There are eight substeps.
+These inclusive timings overlap and tracing adds overhead: the traced full
+step was approximately 2.00 ms, not the untraced 1.5 ms measurement.
+
+The loop-closure and motor inertia paths also repeated singular mass
+decompositions across right-hand sides. Reusing those factors within the
+current articulation/substep reduced a synthetic 26-body pressure-tyre scene
+with a compliant closure and motor from median 0.855 to 0.527 ms/step (38%).
+Replay, support, closure convergence and driving checks pass. This fixture is
+not the imported Kubota. The subsequent live run still measured 1.51–1.61 ms
+in typical windows, with 1.72–2.06 ms spikes during concurrent user work.
+No real-machine gain or Rapier parity is established by that run.
+
+Molla release solver regression coverage: 371 passed, 0 failed, 3 ignored.
+Isolated Gearbox Molla binary tests: 78 passed, 1 ignored. Original Gearbox
+remains independently running/developed and was not modified or stopped.
+
+Evidence: `/tmp/molla-cache-live.log`, `/tmp/molla-physics-stages.json`,
+`/tmp/molla-physics-stages-summary.txt`, `/tmp/molla-loop-perf-before.log`,
+`/tmp/molla-loop-perf-after.log`, `/tmp/molla-loop-cache-full-tests.log`,
+`/tmp/molla-loop-cache-final-tests.log`, `/tmp/molla-loop-live.log`, and
+`/tmp/molla-loop-state.json`. The last telemetry sample reports all four tyres
+at 1.8 bar and approximately 53.5–54.3 mm deflection while driving at 2 m/s.
+
 ## Correctness and gates
 
 - Binary tests cover conservative bounds, both pressure directions, unchanged
@@ -109,6 +143,12 @@ For system attribution, use `oslo make build-profile` and set `GEARBOX_TRACE` an
 `GEARBOX_TRACE_SECONDS` when launching. Do not mix traced and untraced timings
 without labeling them. Trace files can grow to several GB; stream event records
 instead of loading the complete JSON array into memory during a benchmark.
+
+Set `GEARBOX_TRACE_FILTER='off,molla_solvers=debug'` to record only Molla's
+rigid-step, collision, external-force, wheel, loop-closure, mass-matrix and
+Featherstone stages. Omit it to retain the existing system/render trace filter.
+Debug stage spans are disabled by the normal info-level logger. Inspect nested
+spans as inclusive timings rather than summing parent and child durations.
 
 Evidence in this session: `/tmp/molla-before-trace.json`,
 `/tmp/molla-gpu-final-trace.json`, `/tmp/perf-rapier-matched.log`,
