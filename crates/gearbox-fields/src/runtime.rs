@@ -104,7 +104,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use std::sync::Arc;
 
 const CHUNK_M: f32 = 16.0;
@@ -132,27 +132,29 @@ pub struct VegetationChunks(HashMap<(Entity, usize, i32, i32), Entity>);
 #[derive(Component)]
 pub struct SurfaceParts(Vec<Entity>);
 
-// Two channels for a wheel map, four where the cover prints tyre tread.
+// Two channels for a wheel map, four where the cover prints tyre tread. The
+// map lives on the GPU alone, which hands it over zeroed: filled and uploaded
+// from here, its hundred-odd megabytes would stall the frame they are made in.
 fn track_image(width: u32, height: u32, tread: bool) -> Image {
-    let (texel, format): (&[u8], _) = if tread {
-        (&[0u8; 8], TextureFormat::Rgba16Uint)
-    } else {
-        (&[0u8; 4], TextureFormat::Rg16Uint)
-    };
-    Image::new_fill(
+    let format = if tread { TextureFormat::Rgba16Uint } else { TextureFormat::Rg16Uint };
+    let mut image = Image::new_uninit(
         Extent3d {
             width,
             height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        texel,
         format,
         RenderAssetUsages::RENDER_WORLD,
-    )
+    );
+    image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::COPY_SRC;
+    image
 }
 
-fn heightmap_image(grid: &HeightGrid) -> Image {
+/// The terrain as the cover shaders read it: height and normal per grid point.
+/// A host may build it ahead, off the main thread, and hand it over with the terrain.
+pub fn heightmap_image(grid: &HeightGrid) -> Image {
     let mut texels = Vec::<f32>::with_capacity(grid.cols * grid.rows * 4);
     for i in 0..grid.rows {
         for j in 0..grid.cols {
@@ -213,9 +215,10 @@ pub fn ensure_fields(world: &mut World) {
         .validate(world.resource::<FieldProfiles>())
         .expect("valid field layout");
     let profiles = world.resource::<FieldProfiles>().0.clone();
+    let ready = world.resource_mut::<CoverTerrain>().heightmap.take();
     let heightmap = world
         .resource_mut::<Assets<Image>>()
-        .add(heightmap_image(&grid));
+        .add(ready.unwrap_or_else(|| heightmap_image(&grid)));
     let surface_geometry = super::profile::SurfaceGeometry {
         heightmap: heightmap.clone(),
         params: super::profile::SurfaceGeometryParams {
@@ -319,9 +322,19 @@ pub fn ensure_fields(world: &mut World) {
     }
 }
 
+/// Seconds a frame may spend matching surface meshes to fields.
+const SURFACE_BUDGET_S: f32 = 0.004;
+
+/// How many surface meshes of the active ground still wait for their cover.
+#[derive(Resource, Default)]
+pub struct CoverPending(pub usize);
+
+
 pub fn assign_surfaces(
     mut commands: Commands,
     active: Option<Res<ActiveFields>>,
+    parents: Query<&ChildOf>,
+    mut pending: ResMut<CoverPending>,
     mut meshes: ResMut<Assets<Mesh>>,
     sources: Query<
         (
@@ -339,7 +352,19 @@ pub fn assign_surfaces(
     let Some(active) = active else {
         return;
     };
+    // Clipping a ground's worth of meshes in one frame would stall it: a few
+    // milliseconds' worth are matched a frame, and the host is told how many wait.
+    let started = std::time::Instant::now();
+    let mut waiting = 0usize;
     for (entity, source, backdrop, previous) in &sources {
+        // Surfaces of ground that is not the active one belong to fields that are gone or not yet made.
+        if parents.get(entity).is_ok_and(|parent| parent.parent() != active.terrain) {
+            continue;
+        }
+        if started.elapsed().as_secs_f32() > SURFACE_BUDGET_S {
+            waiting += 1;
+            continue;
+        }
         if backdrop.is_some() {
             active.background.apply(&mut commands, entity);
             commands.entity(entity).insert(SurfaceParts(Vec::new()));
@@ -386,6 +411,7 @@ pub fn assign_surfaces(
         }
         commands.entity(entity).insert(SurfaceParts(parts));
     }
+    pending.0 = waiting;
 }
 
 pub fn instance_budget(

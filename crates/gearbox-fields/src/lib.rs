@@ -23,6 +23,7 @@ pub use host::{
     HeightSource,
 };
 pub use layout::{FieldBounds, FieldLayout};
+pub use runtime::{CoverPending, heightmap_image};
 pub use profile::{
     FieldProfile, FieldProfiles, GroundSurface, MaterialSurface, SurfaceGeometry,
     SurfaceGeometryParams, VegetationLayer, WheelMapParams, WheelResponse,
@@ -78,6 +79,7 @@ impl Plugin for FieldsPlugin {
             .init_resource::<profile::FieldProfiles>()
             .init_resource::<render::RenderFields>()
             .init_resource::<runtime::VegetationChunks>()
+            .init_resource::<runtime::CoverPending>()
             .init_resource::<contacts::WheelContacts>()
             .init_resource::<CoverWind>()
             .init_resource::<CoverTerrainRoots>()

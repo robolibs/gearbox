@@ -24,6 +24,10 @@ const TILE_FINE_RADIUS_M: f32 = 180.0;
 const TILE_COARSE_CELL_M: f32 = 4.0;
 const TILE_SKIRT_M: f32 = 2.0;
 const TILE_REBUILDS_PER_FRAME: usize = 2;
+/// Seconds a frame may spend making the meshes of tiles that have none yet.
+const TILE_BUDGET_S: f32 = 0.005;
+/// Entities of replaced ground taken down a frame.
+const DISMANTLE_PER_FRAME: usize = 120;
 const SPAWN_FLAT_RADIUS_M: f32 = 30.0;
 const SPAWN_RELIEF_RADIUS_M: f32 = 70.0;
 const SAFETY_FLOOR_Y_M: f64 = -40.0;
@@ -127,6 +131,10 @@ pub struct ProceduralTerrain {
     pub(crate) grid: Arc<HeightGrid>,
     fine_cell: f32,
     tiles: HashMap<(i32, i32), (Entity, f32)>,
+    /// Every tile of the square has its mesh.
+    complete: bool,
+    /// Built with the ground, for the cover to take.
+    heightmap: Option<Image>,
 }
 
 impl ProceduralTerrain {
@@ -170,6 +178,7 @@ pub(crate) struct TerrainBackdrop;
 /// Everything of a ground square that can be worked out off the main thread.
 struct GroundParts {
     land: Land,
+    heightmap: Image,
     center: Vec2,
     cell: f32,
     grid: HeightGrid,
@@ -188,7 +197,8 @@ fn build_ground(land: Land, center: Vec2) -> GroundParts {
     let cell = cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M);
     let grid = HeightGrid::sample_at(center, SIZE_M, cell, |x, z| land.height(x, z));
     let horizon = horizon_mesh(&grid, |x, z| land.height(x, z));
-    GroundParts { land, center, cell, grid, horizon }
+    let heightmap = gearbox_fields::heightmap_image(&grid);
+    GroundParts { land, heightmap, center, cell, grid, horizon }
 }
 
 fn install_ground(
@@ -240,6 +250,8 @@ fn install_ground(
         grid,
         fine_cell: parts.cell,
         tiles: HashMap::default(),
+        complete: false,
+        heightmap: Some(parts.heightmap),
     }
 }
 
@@ -308,6 +320,10 @@ fn follow_view(
     time: Res<Time>,
     mut pending: Local<Option<bevy::tasks::Task<GroundParts>>>,
     mut retiring: Local<Option<(Entity, ColliderHandle, f32)>>,
+    mut settled: Local<u32>,
+    mut dismantling: Local<std::collections::VecDeque<Entity>>,
+    children: Query<&Children>,
+    cover_pending: Res<gearbox_fields::CoverPending>,
 ) {
     let Some(mut terrain) = terrain else {
         *pending = None;
@@ -316,15 +332,40 @@ fn follow_view(
     // The replaced ground bows out once its successor has had time to get ready.
     if let Some((old, floor, left)) = retiring.as_mut() {
         *left -= time.delta_secs();
-        if *left > 0.0 {
+        // Its successor must be whole first: every tile meshed and under its cover.
+        *settled = if terrain.complete && cover_pending.0 == 0 { *settled + 1 } else { 0 };
+        if *left > 0.0 || *settled < 4 {
             return;
         }
-        commands.entity(*old).despawn();
+        *settled = 0;
+        // The two change places now; the old ground's thousands of entities are
+        // then taken down leaves first, a little each frame, not in one stall.
+        commands.entity(*old).insert(Visibility::Hidden);
+        commands.entity(terrain.entity).insert(Visibility::Inherited);
         let physics = physics.as_mut();
         physics.colliders.remove(*floor, &mut physics.islands, &mut physics.bodies, true);
-        commands.entity(terrain.entity).insert(Visibility::Inherited);
+        let mut order = vec![*old];
+        let mut next = 0;
+        while next < order.len() {
+            if let Ok(kids) = children.get(order[next]) {
+                order.extend(kids.iter());
+            }
+            next += 1;
+        }
+        dismantling.extend(order.into_iter().rev());
         *retiring = None;
         return;
+    }
+    if !dismantling.is_empty() {
+        for _ in 0..DISMANTLE_PER_FRAME {
+            let Some(entity) = dismantling.pop_front() else {
+                break;
+            };
+            commands.entity(entity).try_despawn();
+        }
+        if !dismantling.is_empty() {
+            return;
+        }
     }
     if let Some(task) = pending.as_mut() {
         let Some(parts) = bevy::tasks::block_on(bevy::tasks::poll_once(task)) else {
@@ -594,6 +635,10 @@ fn update_terrain_tiles(
     mut meshes: ResMut<Assets<Mesh>>,
     mut tiles: Query<&mut Mesh3d, With<TerrainTile>>,
 ) {
+    // A square's worth of tile meshes would stall the frame they were all made
+    // in, so a few milliseconds' worth are made a frame.
+    let started = std::time::Instant::now();
+    let mut missing = false;
     let Some(mut terrain) = terrain else {
         return;
     };
@@ -635,6 +680,10 @@ fn update_terrain_tiles(
                 }
                 Some(_) => {}
                 None => {
+                    if started.elapsed().as_secs_f32() > TILE_BUDGET_S {
+                        missing = true;
+                        continue;
+                    }
                     let entity = commands
                         .spawn((
                             Name::new(format!("Terrain[{tx},{tz}]")),
@@ -652,6 +701,7 @@ fn update_terrain_tiles(
             }
         }
     }
+    terrain.complete = !missing;
 }
 
 /// Rows run along Z and columns along X, centred on the origin like the
@@ -807,13 +857,13 @@ impl gearbox_fields::HeightSource for GroundHeights {
 /// Hands the active ground and the USD terrain roots to the field cover.
 pub fn publish_cover_terrain(
     mut commands: Commands,
-    terrain: Option<Res<ProceduralTerrain>>,
+    mut terrain: Option<ResMut<ProceduralTerrain>>,
     roots: Query<(Entity, &Name), With<usd_bevy::UsdSceneRoot>>,
     children: Query<&Children>,
     mut cover_roots: ResMut<gearbox_fields::CoverTerrainRoots>,
     mut published: Local<Option<Entity>>,
 ) {
-    match terrain.as_deref() {
+    match terrain.as_deref_mut() {
         Some(terrain) if *published != Some(terrain.entity) => {
             let space = LAND.read().ok().and_then(|land| *land).map_or(0, |land| {
                 use std::hash::{Hash, Hasher};
@@ -825,6 +875,7 @@ pub fn publish_cover_terrain(
                 entity: terrain.entity,
                 grid: terrain.grid.clone(),
                 space,
+                heightmap: terrain.heightmap.take(),
             });
             commands.insert_resource(gearbox_fields::CoverHeights(Arc::new(GroundHeights)));
             *published = Some(terrain.entity);

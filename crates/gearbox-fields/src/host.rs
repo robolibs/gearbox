@@ -21,6 +21,8 @@ pub struct CoverTerrain {
     /// Names the space the grid's coordinates are in. Ground that succeeds
     /// other ground in the same space inherits the wheel tracks they share.
     pub space: u64,
+    /// [`heightmap_image`](crate::heightmap_image) of `grid`, if the host built it ahead.
+    pub heightmap: Option<Image>,
 }
 
 /// Mesh geometry a field surface may be assigned to.
