@@ -197,19 +197,19 @@ impl Plugin for BarePlugin {
         profiles.register(FieldProfile {
             name: "ploughed",
             wheel_response: response,
-            layers: standing(90.0, 260.0),
+            layers: standing(170.0, 260.0),
             ground: ploughed_ground,
         });
         profiles.register(FieldProfile {
             name: "dirt",
             wheel_response: response,
-            layers: standing(130.0, 1100.0),
+            layers: standing(240.0, 1100.0),
             ground: dirt_ground,
         });
         profiles.register(FieldProfile {
             name: "sand",
             wheel_response: WheelResponse { darkening: 0.16, ..response },
-            layers: standing(45.0, 0.0),
+            layers: standing(80.0, 0.0),
             ground: sand_ground,
         });
     }

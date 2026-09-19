@@ -165,7 +165,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // the ground rather than on it.
         // Mostly grit, a few pebbles, and now and then a stone worth kicking:
         // the size is drawn from a tail, not from a range.
-        let size = mix(0.004, 0.115, pow(rand(id, 6u), 4.5)) * alive;
+        let size = mix(0.003, 0.085, pow(rand(id, 6u), 5.5)) * alive;
         let squat = mix(0.4, 0.72, rand(id, 7u));
         let local = vertex.position * vec3<f32>(size, size * squat, size);
         let spun = turn * local.xz;
