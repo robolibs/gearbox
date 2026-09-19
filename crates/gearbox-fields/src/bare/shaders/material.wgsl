@@ -67,16 +67,18 @@ fn scattered(tex: texture_2d<f32>, uv: vec2<f32>, seed: f32) -> vec4<f32> {
 // Ripples the wind has combed across the ground, running with the slope and
 // only where the ground is near enough level to hold them.
 fn ripples(place: vec2<f32>, slope: vec2<f32>, spacing: f32) -> f32 {
-    // Ripples that run dead straight read as corduroy. Their line wanders
-    // with the ground, their spacing drifts, and they break up along their
-    // length, as combed sand does.
-    let along = normalize(slope * 3.0 + vec2<f32>(0.31, -0.19));
-    let turn = sin(place.x * 0.031) * 0.3 + sin(place.y * 0.027 + 1.7) * 0.3;
-    let lean = vec2<f32>(along.x * cos(turn) - along.y * sin(turn), along.x * sin(turn) + along.y * cos(turn));
+    // A plough runs in straight lines; wind-combed sand wanders with the
+    // ground. Which of the two this is follows from how far apart they are.
+    let straight = smoothstep(0.32, 0.55, spacing);
+    let blown = normalize(slope * 3.0 + vec2<f32>(0.31, -0.19));
+    let drawn = vec2<f32>(0.9284767, 0.3713907);
+    let turn = (sin(place.x * 0.031) * 0.3 + sin(place.y * 0.027 + 1.7) * 0.3) * (1.0 - straight);
+    let heading = normalize(mix(blown, drawn, straight));
+    let lean = vec2<f32>(heading.x * cos(turn) - heading.y * sin(turn), heading.x * sin(turn) + heading.y * cos(turn));
     let across = dot(place, vec2<f32>(-lean.y, lean.x)) / max(spacing, 0.05);
-    let wander = sin(dot(place, lean) * 0.9) * 0.4 + sin(dot(place, lean) * 0.23 + 2.1) * 0.6;
+    let wander = (sin(dot(place, lean) * 0.9) * 0.4 + sin(dot(place, lean) * 0.23 + 2.1) * 0.6) * (1.0 - straight * 0.85);
     let crest = sin((across + wander) * 6.2831853) * 0.5 + 0.5;
-    let broken = 0.55 + 0.45 * sin(dot(place, lean) * 1.7 + 0.6);
+    let broken = mix(0.55 + 0.45 * sin(dot(place, lean) * 1.7 + 0.6), 0.85, straight);
     return crest * broken;
 }
 
@@ -109,16 +111,24 @@ fn sand_fbm(p: vec2<f32>, octaves: i32) -> f32 {
 }
 
 // Dunes, and the smaller drifts lying over them.
-fn sand_relief(place: vec2<f32>, slope: vec2<f32>) -> f32 {
+// Bare ground, however it was made bare: broad swells, the clods or drifts
+// lying on them, and the comb of the plough or the wind across the lot. The
+// clods are the size the ground says, so one shape serves turned earth, a
+// worn track and sand alike. What stands proud of a field is centimetres,
+// not metres, or the shading of it shows the ground's own triangles.
+fn made_relief(place: vec2<f32>, slope: vec2<f32>, close: f32) -> f32 {
+    let clod = max(ground.grain.x, 0.05);
     let warp = vec2<f32>(sand_fbm(place / 34.0, 2), sand_fbm(place / 34.0 + vec2<f32>(4.1, -7.3), 2)) - vec2<f32>(0.5);
-    let dunes = sand_fbm((place + warp * 22.0) / 26.0, 3);
-    let drifts = sand_fbm(place / 3.1 + vec2<f32>(19.0, -3.0), 3);
-    let grit = sand_fbm(place / 0.35 + vec2<f32>(-7.0, 12.0), 2);
-    // (the grain of it is left to the colour, which knows how far away it is)
+    let swell = sand_fbm((place + warp * 22.0) / 26.0, 3);
+    // Ridged rather than rounded, which is what makes turned earth read as turned.
+    let lumps = sand_fbm(place / clod + vec2<f32>(19.0, -3.0), 3);
+    let ridged = 1.0 - abs(lumps * 2.0 - 1.0);
+    let fine = mix(0.5, sand_fbm(place / (clod * 0.22) + vec2<f32>(-7.0, 12.0), 2), close);
     let combed = ripples(place, slope, ground.grain.w);
-    // A field of sand is flat: what stands proud of it is centimetres, not
-    // metres, or the shading of it shows the ground's own triangles.
-    return dunes * 0.16 + drifts * 0.09 + grit * 0.025 + combed * ground.grain.z * 0.1;
+    return swell * 0.1
+        + mix(lumps, ridged, 0.55) * ground.grain.y * 0.32
+        + fine * ground.grain.y * 0.07
+        + combed * ground.grain.z * 0.13;
 }
 
 // The height of the ground under a place, from the two readings and the
