@@ -2,6 +2,7 @@
 
 mod canopy;
 mod clumps;
+mod bare;
 mod concrete;
 pub mod contacts;
 mod geometry;
@@ -89,6 +90,7 @@ impl Plugin for FieldsPlugin {
             .add_plugins((
                 clumps::ClumpsPlugin,
                 grassland::GrasslandPlugin { density: self.grass_density },
+                bare::BarePlugin,
                 harvested_wheat::HarvestedWheatPlugin { density: self.stubble_density },
                 concrete::ConcretePlugin { weed_density: self.concrete_weed_density },
                 render::VegetationPlugin,
