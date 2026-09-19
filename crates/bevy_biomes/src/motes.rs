@@ -23,16 +23,19 @@ use crate::blend::Biomes;
 use crate::layer::{Covers, MoteKind};
 
 /// The wind the motes ride. The host sets it; it is the same wind the plants get.
-#[derive(Resource, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Debug)]
 pub struct AmbientWind {
     pub heading_deg: f32,
     pub speed_mps: f32,
     pub gustiness: f32,
+    /// A tiling gust map, 256 m to the tile: red broad gusts, green their
+    /// detail, blue the turn of the wind. Without one the air is only stirred.
+    pub gust_map: Option<Handle<Image>>,
 }
 
 impl Default for AmbientWind {
     fn default() -> Self {
-        Self { heading_deg: 36.87, speed_mps: 4.0, gustiness: 0.7 }
+        Self { heading_deg: 36.87, speed_mps: 4.0, gustiness: 0.7, gust_map: None }
     }
 }
 
@@ -89,6 +92,10 @@ pub struct MoteField {
 pub struct MoteMaterial {
     #[uniform(0)]
     pub field: MoteField,
+    /// The gust map the plants lean in, so the air moves with them.
+    #[texture(1)]
+    #[sampler(2)]
+    pub gust_map: Option<Handle<Image>>,
 }
 
 impl Material for MoteMaterial {
@@ -154,6 +161,7 @@ fn spawn_mote_fields(
     biomes: Option<Res<Biomes>>,
     covers: Res<Covers>,
     budget: Res<MoteBudget>,
+    wind: Res<AmbientWind>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<MoteMaterial>>,
     fields: Query<(Entity, &MoteFieldOf)>,
@@ -162,7 +170,12 @@ fn spawn_mote_fields(
     let Some(biomes) = biomes else {
         return;
     };
-    if !biomes.is_changed() && !covers.is_changed() && !budget.is_changed() && !fields.is_empty() {
+    if !biomes.is_changed()
+        && !covers.is_changed()
+        && !budget.is_changed()
+        && !wind.is_changed()
+        && !fields.is_empty()
+    {
         return;
     }
     let mut wanted: Vec<MoteKind> = Vec::new();
@@ -197,7 +210,10 @@ fn spawn_mote_fields(
             Name::new(format!("Motes {kind:?}")),
             MoteFieldOf(kind),
             Mesh3d(mesh.clone()),
-            MeshMaterial3d(materials.add(MoteMaterial { field: MoteField::default() })),
+            MeshMaterial3d(materials.add(MoteMaterial {
+                field: MoteField::default(),
+                gust_map: wind.gust_map.clone(),
+            })),
             Transform::IDENTITY,
             NoFrustumCulling,
             NotShadowCaster,
@@ -227,6 +243,9 @@ fn carry_mote_fields(
         let Some(mut material) = materials.get_mut(&handle.0) else {
             continue;
         };
+        if material.gust_map != wind.gust_map {
+            material.gust_map = wind.gust_map.clone();
+        }
         let air = |biome| {
             covers
                 .get(biome)

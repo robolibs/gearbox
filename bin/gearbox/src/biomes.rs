@@ -49,8 +49,12 @@ fn carry_the_air(
     wind: Res<gearbox_fields::CoverWind>,
     mut ambient: ResMut<AmbientWind>,
     mut budget: ResMut<MoteBudget>,
+    mut images: ResMut<Assets<Image>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
 ) {
+    if ambient.gust_map.is_none() {
+        ambient.gust_map = Some(images.add(gust_map()));
+    }
     ambient.heading_deg = wind.heading_deg;
     ambient.speed_mps = wind.speed_mps;
     ambient.gustiness = wind.gustiness;
@@ -58,4 +62,23 @@ fn carry_the_air(
         let eye = camera.translation();
         budget.ground_m = crate::world::terrain_height_m(eye.x, eye.z);
     }
+}
+
+/// The plants' own gust map, as an image the air can read: one map, so the
+/// motes surge where the blades lean.
+fn gust_map() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::ImageSampler;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+    let size = gearbox_fields::wind_map::SIZE;
+    let mut image = Image::new(
+        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        gearbox_fields::wind_map::bake(),
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::linear();
+    image
 }

@@ -14,7 +14,7 @@ mod profile;
 mod render;
 mod runtime;
 mod textures;
-mod wind_map;
+pub mod wind_map;
 
 pub use contacts::{WheelContact, WheelContacts};
 pub use heights::HeightGrid;

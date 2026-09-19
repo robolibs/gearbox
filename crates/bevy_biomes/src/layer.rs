@@ -50,6 +50,8 @@ pub enum MoteKind {
     Chaff,
     /// A tuft that hardly falls at all.
     Seed,
+    /// A sliver off a blade, pale where it has dried.
+    Leaf,
 }
 
 /// Everything about one biome.
@@ -102,48 +104,39 @@ impl Covers {
         let mut covers = Self::default();
         covers.insert(
             Cover::new(Land::Grassland)
-                .with_air(Motes {
-                    kind: MoteKind::Pollen,
-                    per_hectare: 2600.0,
-                    size_mm: [4.0, 9.0],
-                    rise_mps: 0.02,
-                    drag: 0.55,
-                    ceiling_m: 2.4,
-                    reach_m: 22.0,
-                    colour: Srgba::new(0.9, 0.88, 0.76, 0.06),
-                })
+                // Petals only where something is in bloom, in that patch's colour.
                 .with_air(Motes {
                     kind: MoteKind::Petal,
-                    per_hectare: 380.0,
-                    size_mm: [14.0, 26.0],
+                    per_hectare: 180.0,
+                    size_mm: [8.0, 16.0],
                     rise_mps: -0.22,
                     drag: 0.85,
-                    ceiling_m: 2.2,
-                    reach_m: 30.0,
-                    colour: Srgba::new(0.9, 0.84, 0.83, 0.16),
+                    ceiling_m: 1.8,
+                    reach_m: 20.0,
+                    colour: Srgba::new(1.0, 1.0, 1.0, 0.5),
                 })
                 .with_air(Motes {
-                    kind: MoteKind::Seed,
-                    per_hectare: 220.0,
-                    size_mm: [10.0, 20.0],
-                    rise_mps: 0.06,
+                    kind: MoteKind::Leaf,
+                    per_hectare: 900.0,
+                    size_mm: [10.0, 26.0],
+                    rise_mps: -0.1,
                     drag: 0.95,
-                    ceiling_m: 2.8,
-                    reach_m: 24.0,
-                    colour: Srgba::new(0.88, 0.88, 0.83, 0.07),
+                    ceiling_m: 1.6,
+                    reach_m: 20.0,
+                    colour: Srgba::new(1.0, 1.0, 1.0, 0.45),
                 }),
         );
         covers.insert(
             Cover::new(Field::Stubble)
                 .with_air(Motes {
                     kind: MoteKind::Chaff,
-                    per_hectare: 420.0,
+                    per_hectare: 520.0,
                     size_mm: [16.0, 42.0],
                     rise_mps: -0.12,
                     drag: 0.95,
                     ceiling_m: 1.9,
-                    reach_m: 26.0,
-                    colour: Srgba::new(0.78, 0.7, 0.52, 0.17),
+                    reach_m: 20.0,
+                    colour: Srgba::new(0.8, 0.72, 0.52, 0.4),
                 })
                 .with_air(Motes {
                     kind: MoteKind::Dust,
@@ -152,7 +145,7 @@ impl Covers {
                     rise_mps: 0.08,
                     drag: 0.8,
                     ceiling_m: 3.2,
-                    reach_m: 28.0,
+                    reach_m: 20.0,
                     colour: Srgba::new(0.72, 0.66, 0.55, 0.05),
                 }),
         );
@@ -163,7 +156,7 @@ impl Covers {
             rise_mps: 0.04,
             drag: 0.7,
             ceiling_m: 3.0,
-            reach_m: 26.0,
+            reach_m: 18.0,
             colour: Srgba::new(0.7, 0.69, 0.66, 0.05),
         }));
         covers
