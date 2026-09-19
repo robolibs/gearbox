@@ -110,9 +110,12 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
     let heading = hash21(plot) * 3.1415927;
     let lean = vec2<f32>(cos(heading), sin(heading));
     let along = dot(place, lean);
-    // The line of it wanders a little, as a tractor does.
+    // The line of it wanders a little, as a tractor does — and a wind ripple
+    // wanders more. Three waves that do not divide into one another, so the
+    // wander never comes back round to where it started.
     let wander = sin(along * 0.11 + hash21(plot + 3.0) * 6.28) * 0.22
-        + sin(along * 0.037 + 1.9) * 0.3;
+        + sin(along * 0.037 + 1.9) * 0.3
+        + sin(along * 0.0143 + hash21(plot + 11.0) * 6.28) * 0.5;
     let across = dot(place, vec2<f32>(-lean.y, lean.x)) / max(spacing, 0.05) + wander;
     let furrow = floor(across);
     // The headland: a turning strip round the edge of the plot, worked over
@@ -121,7 +124,17 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
     let edge = max(within.x, within.y);
     var comb: Comb;
     comb.crest = sin(across * 6.2831853) * 0.5 + 0.5;
-    comb.depth = mix(0.72, 1.28, hash21(vec2<f32>(furrow, plot.x + plot.y * 7.0)));
+    // Not the same all the way along: a furrow shallows and deepens over its
+    // length, and a ripple dies out altogether and picks up again further on.
+    let run = along / max(spacing * 18.0, 2.0);
+    let stretch = floor(run);
+    let into = smooth2(vec2<f32>(run - stretch)).x;
+    let strength = mix(
+        hash21(vec2<f32>(furrow * 3.0 + 0.5, stretch)),
+        hash21(vec2<f32>(furrow * 3.0 + 0.5, stretch + 1.0)),
+        into);
+    comb.depth = mix(0.72, 1.28, hash21(vec2<f32>(furrow, plot.x + plot.y * 7.0)))
+        * mix(0.45, 1.2, strength);
     comb.worked = 1.0 - smoothstep(0.86, 0.99, edge);
     return comb;
 }
@@ -214,8 +227,10 @@ fn made_relief(place: vec2<f32>, close: f32) -> f32 {
     // Where the plough turned, it left broken ground instead of furrows.
     let broken = 1.0 + (1.0 - drawn.worked) * 1.4;
     return swell * 0.08
-        // The furrows are the ground's shape; the clods only lie on them.
-        + combed * ground.grain.z * 0.62
+        // The furrows are the ground's shape; the clods only lie on them. How
+        // deep a comb cuts goes with how far apart its teeth are, so a plough's
+        // furrow is a trench and the wind's ripple is a wrinkle.
+        + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62)
         + slabs * ground.grain.y * mix(0.04, 0.12, coarseness) * broken
         + lumps * ground.grain.y * mix(0.12, 0.04, coarseness) * broken
         + crumb * ground.grain.y * 0.05

@@ -23,11 +23,11 @@ use crate::profile::{
 };
 
 /// A stone, as a lump with `rings` bands of `around` faces, pushed in and out
-/// so no two of its faces lie flat. `position.z` under a half marks it a
-/// stone rather than a tuft.
+/// so no two of its faces lie flat. The top and bottom rings close to a single
+/// point, or the stone is a tube and the ground shows through the hole.
 fn pebble() -> Mesh {
     const AROUND: u32 = 7;
-    const RINGS: u32 = 4;
+    const RINGS: u32 = 5;
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut indices = Vec::new();
@@ -37,28 +37,22 @@ fn pebble() -> Mesh {
     };
     for ring in 0..=RINGS {
         let v = ring as f32 / RINGS as f32;
+        let pole = ring == 0 || ring == RINGS;
         let lift = (v * std::f32::consts::PI).cos();
-        let round = (v * std::f32::consts::PI).sin().max(0.22);
+        let round = if pole { 0.0 } else { (v * std::f32::consts::PI).sin() };
         for step in 0..AROUND {
             let u = step as f32 / AROUND as f32 * std::f32::consts::TAU;
-            let radius = dent(ring, step);
+            // Every vertex of a closing ring takes the same radius, so they
+            // land on one another and the cap has no seam.
+            let radius = dent(ring, if pole { 0 } else { step });
             let point = Vec3::new(u.cos() * round * radius, lift * radius, u.sin() * round * radius);
-            positions.push([point.x, point.y, 0.0_f32.max(0.0)]);
-            normals.push(point.normalize().to_array());
+            positions.push(point.to_array());
+            normals.push(if pole {
+                [0.0, lift.signum(), 0.0]
+            } else {
+                point.normalize().to_array()
+            });
         }
-    }
-    // The z of a position marks the kind, so the shape is carried in x and y
-    // and the third axis of each point is put back by the shader's own turn.
-    for (index, point) in positions.iter_mut().enumerate() {
-        let ring = index as u32 / AROUND;
-        let step = index as u32 % AROUND;
-        let v = ring as f32 / RINGS as f32;
-        let u = step as f32 / AROUND as f32 * std::f32::consts::TAU;
-        let radius = dent(ring, step);
-        let round = (v * std::f32::consts::PI).sin().max(0.22);
-        point[0] = u.cos() * round * radius;
-        point[1] = (v * std::f32::consts::PI).cos() * radius;
-        point[2] = u.sin() * round * radius;
     }
     for ring in 0..RINGS {
         for step in 0..AROUND {
@@ -105,31 +99,33 @@ fn tuft() -> Mesh {
         .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
-/// Stones lying in the soil, and the tufts that take it back.
-fn standing() -> Vec<VegetationLayer> {
+/// Stones lying in the soil, and the tufts that take it back. Sand carries a
+/// few of the first and none of the second; a worn track carries both.
+fn standing(stones: f32, tufts: f32) -> Vec<VegetationLayer> {
     let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wgsl";
-    vec![
-        VegetationLayer {
-            shader,
-            template: pebble,
-            density: 9.0,
-            fade_start: 6.0,
-            fade_end: 42.0,
-            inverse_square_thinning: true,
-            albedo: None,
-            lod_band: [0.0, f32::MAX],
-        },
-        VegetationLayer {
+    let mut layers = vec![VegetationLayer {
+        shader,
+        template: pebble,
+        density: stones,
+        fade_start: 6.0,
+        fade_end: 42.0,
+        inverse_square_thinning: true,
+        albedo: None,
+        lod_band: [0.0, f32::MAX],
+    }];
+    if tufts > 0.0 {
+        layers.push(VegetationLayer {
             shader,
             template: tuft,
-            density: 1100.0,
+            density: tufts,
             fade_start: 6.0,
             fade_end: 34.0,
             inverse_square_thinning: true,
             albedo: None,
             lod_band: [0.0, f32::MAX],
-        },
-    ]
+        });
+    }
+    layers
 }
 
 type BareMaterial = ExtendedMaterial<StandardMaterial, BareExtension>;
@@ -196,19 +192,19 @@ impl Plugin for BarePlugin {
         profiles.register(FieldProfile {
             name: "ploughed",
             wheel_response: response,
-            layers: standing(),
+            layers: standing(90.0, 260.0),
             ground: ploughed_ground,
         });
         profiles.register(FieldProfile {
             name: "dirt",
             wheel_response: response,
-            layers: standing(),
+            layers: standing(130.0, 1100.0),
             ground: dirt_ground,
         });
         profiles.register(FieldProfile {
             name: "sand",
             wheel_response: WheelResponse { darkening: 0.16, ..response },
-            layers: standing(),
+            layers: standing(45.0, 0.0),
             ground: sand_ground,
         });
     }
@@ -270,7 +266,7 @@ fn sand_ground(
         geometry,
         BareGround {
             tint: Vec4::new(0.230, 0.178, 0.108, 1.0),
-            grain: Vec4::new(1.6, 0.3, 1.0, 0.9),
+            grain: Vec4::new(0.16, 0.30, 1.0, 0.22),
             grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
         },
         0.82,

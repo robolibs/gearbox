@@ -163,26 +163,30 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     if (is_stone) {
         // Stones are of a size, lie on their broadest face, and sit down into
         // the ground rather than on it.
-        let size = mix(0.012, 0.13, pow(rand(id, 6u), 3.6)) * alive;
+        // Mostly grit, a few pebbles, and now and then a stone worth kicking:
+        // the size is drawn from a tail, not from a range.
+        let size = mix(0.004, 0.115, pow(rand(id, 6u), 4.5)) * alive;
         let squat = mix(0.4, 0.75, rand(id, 7u));
         let local = vertex.position * vec3<f32>(size, size * squat, size);
         let spun = turn * local.xz;
-        let sunk = size * squat * mix(0.25, 0.55, rand(id, 8u));
+        // Well down into the soil: a stone sitting on top of the ground reads
+        // as dropped there rather than turned up out of it.
+        let sunk = size * squat * mix(0.42, 0.78, rand(id, 8u));
         out.world_position = vec4<f32>(ground + vec3<f32>(spun.x, local.y - sunk, spun.y), 1.0);
         let spun_n = turn * vertex.normal.xz;
         out.world_normal = normalize(vec3<f32>(spun_n.x, vertex.normal.y, spun_n.y));
         // No two stones are the same stone: some flint, some sandstone. All of
         // them warm, though — a stone lying in soil is stained by it, and a
         // cold grey one reads as a pebble washed up on a beach.
-        let tone = mix(0.055, 0.155, rand(id, 9u));
+        let tone = mix(0.038, 0.110, rand(id, 9u));
         let iron = rand(id, 10u);
-        let stone = vec3<f32>(tone * mix(1.0, 1.42, iron),
-            tone * mix(0.94, 1.0, iron),
-            tone * mix(0.82, 0.66, iron));
+        let stone = vec3<f32>(tone * mix(1.0, 1.38, iron),
+            tone * mix(0.86, 0.80, iron),
+            tone * mix(0.70, 0.50, iron));
         // Dust settles on whatever faces the sky, so the top of a stone is
         // nearer the colour of the ground than the stone's own.
-        let dust = vec3<f32>(0.130, 0.090, 0.055);
-        out.color = vec4<f32>(mix(stone, dust, 0.35 * rand(id, 11u)), 1.0);
+        let dust = vec3<f32>(0.105, 0.072, 0.044);
+        out.color = vec4<f32>(mix(stone, dust, 0.4 * rand(id, 11u)), 1.0);
         out.shape = vec3<f32>(0.0, vertex.position.y, 0.0);
     } else {
         // A tuft leans downwind and lies flat where a wheel has been over it.
@@ -213,7 +217,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // A clump at the thin edge of a patch is a clump short of water, and
         // it goes over to straw before the ones in the thick of it do.
         let thirst = 1.0 - smoothstep(0.40, 0.88, green);
-        let dry = clamp(rand(clump_seed, 6u) * 0.65 + thirst * 0.7, 0.0, 1.0);
+        let dry = clamp(rand(clump_seed, 6u) * 0.5 + thirst * 0.55, 0.0, 1.0);
         let fresh = vec3<f32>(0.026, 0.082, 0.018);
         let straw = vec3<f32>(0.115, 0.088, 0.030);
         // The tips go first, so a drying clump is straw-headed and green-footed.
@@ -257,9 +261,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
     } else {
         // A stone is a solid, and has to be lit by its own faces, or it reads
-        // as a flat disc painted on the soil.
-        pbr_input.world_normal = normalize(in.world_normal);
+        // as a flat disc painted on the soil. The face it is actually on beats
+        // the rounded normal it was given: a stone is chipped, not turned.
+        let rounded = normalize(in.world_normal);
+        let across = cross(dpdx(in.world_position.xyz), dpdy(in.world_position.xyz));
+        var facet = rounded;
+        if (length(across) > 1e-12) {
+            facet = normalize(across) * select(-1.0, 1.0, dot(across, rounded) > 0.0);
+        }
+        pbr_input.world_normal = normalize(mix(rounded, facet, 0.8));
         pbr_input.N = pbr_input.world_normal;
+        // What of a stone is down in the soil sees little of the sky, which is
+        // what stops it reading as a stone dropped on top of the ground.
+        pbr_input.diffuse_occlusion = vec3<f32>(mix(0.3, 1.0, smoothstep(-1.0, 0.25, in.shape.y)));
     }
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
     var colour = apply_pbr_lighting(pbr_input);
