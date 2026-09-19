@@ -66,6 +66,58 @@ fn smooth2(v: vec2<f32>) -> vec2<f32> {
     return v * v * (3.0 - 2.0 * v);
 }
 
+// The same hashes the tufts standing in this ground are placed by, so the
+// green the ground is stained is the green the tufts are, and nothing changes
+// colour when they fade out at the far end of their reach.
+fn pcg(input: u32) -> u32 {
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn seeded(seed: u32, salt: u32) -> f32 {
+    return f32(pcg(seed ^ (salt * 0x9E3779B9u))) / 4294967295.0;
+}
+
+// How much of the ground grass has taken, in patches nine metres across.
+fn taken(place: vec2<f32>) -> f32 {
+    let cell = floor(place / 9.0);
+    let f = fract(place / 9.0);
+    let ease = f * f * (3.0 - 2.0 * f);
+    let corner = array<vec2<f32>, 4>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+    var heights = array<f32, 4>();
+    for (var i = 0; i < 4; i = i + 1) {
+        let c = cell + corner[i];
+        var h = u32(i32(c.x)) * 0x9E3779B9u ^ u32(i32(c.y)) * 0x85EBCA6Bu;
+        h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
+        heights[i] = f32(h) / 4294967295.0;
+    }
+    let low = mix(heights[0], heights[1], ease.x);
+    let high = mix(heights[2], heights[3], ease.x);
+    return mix(low, high, ease.y);
+}
+
+// Whether this pixel lies under a clump of grass: the clump cells the tufts
+// are drawn in, read back from the ground's side.
+fn under_clumps(place: vec2<f32>) -> f32 {
+    let cell_m = 0.85;
+    let cell = floor(place / cell_m);
+    var nearest = 1000.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let c = cell + vec2<f32>(f32(dx), f32(dy));
+            let seed = pcg(bitcast<u32>(i32(c.x)) * 2654435761u ^ bitcast<u32>(i32(c.y)) * 40503u);
+            if (seeded(seed, 3u) < 0.38) {
+                continue;
+            }
+            let middle = (c + vec2<f32>(seeded(seed, 1u), seeded(seed, 2u))) * cell_m;
+            let spread = mix(0.1, 0.3, seeded(seed, 4u));
+            nearest = min(nearest, length(place - middle) / spread);
+        }
+    }
+    return 1.0 - smoothstep(0.5, 1.2, nearest);
+}
+
 // One cell's reading of a scan, taken from its own corner of it and turned
 // by its own quarter, so neighbouring cells never show the same piece twice.
 fn cell_read(tex: texture_2d<f32>, uv: vec2<f32>, cell: vec2<f32>, seed: f32) -> vec4<f32> {
@@ -266,15 +318,24 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Grass takes the ground in patches, and holds it where it is tallest.
     var grass_share = 0.0;
     if (ground.grass.w > 0.001) {
-        let where_it_grows = ground_fbm(place / 9.0 + vec2<f32>(51.0, -23.0), 3);
+        let grown = taken(place);
+        // A tuft only stands here if the patch it is in lets it, so the ground
+        // is green by the same measure: the clump, thinned by the patch.
+        let grassy = smoothstep(0.42, 0.70, grown);
+        // Near to, each clump is its own; far off, the clumps are smaller than
+        // the pixel that looks at them and what is left is a wash of green over
+        // the patch. Drawing the dots at that range only speckles the ground.
+        let spread_out = grassy * ground.grass.w;
+        let took = max(under_clumps(place) * spread_out, spread_out * 0.5 * (1.0 - close));
         let tufts = ground_fbm(place / 0.38 + vec2<f32>(8.0, 14.0), 2);
         let blades = mix(0.5, ground_fbm(place / 0.09, 2), close);
         let grass_height = tufts * 0.7 + blades * 0.3;
-        // The noise sits about its middle, so the level it must pass to count as
-        // grass is set from the share wanted, not from the share itself.
-        let level = mix(0.74, 0.26, ground.grass.w);
-        let took = smoothstep(level - 0.07, level + 0.07, where_it_grows);
-        let green = ground.grass.rgb * mix(0.72, 1.22, tufts) * mix(0.9, 1.1, blades);
+        // Thin grass at the edge of a patch is grass short of water, as the
+        // tufts standing in it are.
+        let thirst = 1.0 - smoothstep(0.40, 0.88, grown);
+        let straw = vec3<f32>(0.115, 0.088, 0.030);
+        let green = mix(ground.grass.rgb, straw, clamp(0.3 + thirst * 0.55, 0.0, 1.0))
+            * mix(0.72, 1.22, tufts) * mix(0.9, 1.1, blades);
         let soil_height = made_relief(place, close) * 2.0;
         let met = height_blend(colour, soil_height, 1.0 - took, green, grass_height, took);
         colour = met.rgb;

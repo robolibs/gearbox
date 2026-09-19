@@ -184,10 +184,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             rock = vec3<f32>(0.042, 0.039, 0.036);
         } else if (kind < 0.64) {
             rock = vec3<f32>(0.112, 0.081, 0.047);
-        } else if (kind > 0.88) {
-            rock = vec3<f32>(0.168, 0.152, 0.128);
+        } else if (kind > 0.94) {
+            rock = vec3<f32>(0.104, 0.094, 0.080);
         }
-        let stone = rock * mix(0.65, 1.3, rand(id, 9u));
+        let stone = rock * mix(0.6, 1.2, rand(id, 9u));
         // Dust settles on whatever faces the sky, so the top of a stone is
         // nearer the colour of the ground than the stone's own.
         let dust = vec3<f32>(0.105, 0.072, 0.044);
@@ -199,14 +199,14 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         let stature = mix(0.55, 1.35, rand(clump_seed, 5u));
         let domed = 1.0 - out_of_clump * out_of_clump * 0.55;
         let height = mix(0.11, 0.26, rand(id, 6u)) * stature * domed * alive;
-        let width = mix(0.012, 0.024, rand(id, 7u));
+        let width = mix(0.005, 0.011, rand(id, 7u));
         let t = vertex.position.y;
         let leaf = vertex.position.z - 1.0;
         // Each leaf of the tuft stands on its own bearing and bows outward,
         // and every one tapers from its base to a point.
         let bearing = yaw + leaf * 2.3999632 + rand(id, 13u) * 0.6;
         let out_of = vec2<f32>(cos(bearing), sin(bearing));
-        let taper = width * (1.0 - t * 0.82);
+        let taper = width * (1.0 - t * t * 0.94);
         let across = vec2<f32>(-out_of.y, out_of.x) * vertex.position.x * taper;
         let bow = out_of * t * t * height * mix(0.18, 0.42, rand(id, 14u));
         let leans = blade_leans(base, globals.time, field.wind, rand(id, 3u));

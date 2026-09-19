@@ -76,7 +76,7 @@ fn pebble() -> Mesh {
 /// A tuft of three leaves, each a strip two quads tall. `position.z` is the
 /// leaf's number, raised by one so it cannot be taken for a stone.
 fn tuft() -> Mesh {
-    let (leaves, steps) = (3u32, 2u32);
+    let (leaves, steps) = (3u32, 3u32);
     let mut positions = Vec::new();
     let mut indices = Vec::new();
     for leaf in 0..leaves {
@@ -225,7 +225,7 @@ fn ploughed_ground(
         BareGround {
             tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
-            grass: Vec4::new(0.055, 0.085, 0.022, 0.0),
+            grass: Vec4::new(0.030, 0.082, 0.018, 0.55),
         },
         0.93,
     )
@@ -245,8 +245,8 @@ fn dirt_ground(
         geometry,
         BareGround {
             tint: Vec4::new(0.115, 0.070, 0.038, 1.0),
-            grain: Vec4::new(0.3, 0.40, 0.1, 1.6),
-            grass: Vec4::new(0.05, 0.075, 0.02, 0.0),
+            grain: Vec4::new(0.3, 0.40, 0.0, 1.6),
+            grass: Vec4::new(0.030, 0.082, 0.018, 0.9),
         },
         0.88,
     )
