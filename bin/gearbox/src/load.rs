@@ -45,10 +45,14 @@ struct InflightLoad {
     machine_id: Option<String>,
     activate_physics_after_sync: bool,
     spawned: bool,
+    tyres: gearbox_api::tyres::SavedTyres,
 }
 
 #[derive(Resource, Default)]
 struct Inflight(Vec<InflightLoad>);
+
+#[derive(Resource, Default)]
+struct RejectedLoads(Vec<Entity>);
 
 #[derive(Component, Debug, Clone, Copy)]
 struct MachinePhysicsSyncPending {
@@ -68,6 +72,8 @@ impl Plugin for LoadPlugin {
         let cli = self.cli_paths.clone();
         app.init_resource::<LoadQueue>()
             .init_resource::<Inflight>()
+            .init_resource::<RejectedLoads>()
+            .add_systems(Last, remove_rejected_loads)
             .add_systems(Startup, move |mut q: ResMut<LoadQueue>| {
                 q.0.extend(cli.clone());
             })
@@ -95,6 +101,28 @@ impl Plugin for LoadPlugin {
     }
 }
 
+fn remove_rejected_loads(world: &mut World) {
+    let roots = std::mem::take(&mut world.resource_mut::<RejectedLoads>().0);
+    for root in roots {
+        let mut entities = vec![root];
+        let mut index = 0;
+        while index < entities.len() {
+            if let Some(children) = world.get::<Children>(entities[index]) {
+                entities.extend(children.iter());
+            }
+            index += 1;
+        }
+        let mut physics = world.resource_mut::<crate::physics::PhysicsWorld>();
+        for entity in entities {
+            physics.remove_entity_body(entity);
+            physics.remove_entity_collider(entity, false);
+        }
+        if let Ok(entity) = world.get_entity_mut(root) {
+            entity.despawn();
+        }
+    }
+}
+
 fn activate_physics_after_machine_transforms_propagate(
     mut commands: Commands,
     pending_activation: Option<Res<PhysicsActivationPending>>,
@@ -119,6 +147,8 @@ fn clear_runtime_usd_loads_on_reset_system(
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     loaded_roots: Query<Entity, With<LoadedAsset>>,
     children_q: Query<&Children>,
+    mut values: ResMut<crate::services::LinkValues>,
+    mut seeded: ResMut<crate::services::SeededLinkValues>,
 ) {
     let Some(mut messages) = messages else { return };
     let clears = messages
@@ -129,6 +159,10 @@ fn clear_runtime_usd_loads_on_reset_system(
     }
 
     inflight.0.clear();
+    for machine in &controller_inventory.machines {
+        values.0.retain(|(id, _, _), _| id != &machine.id);
+        seeded.0.remove(&machine.id);
+    }
     controller_inventory.machines.clear();
 
     let physics = physics.as_mut();
@@ -181,7 +215,7 @@ fn drain_load_queue(
         let x = (c as f32 - half) * 4.0;
         let z = r as f32 * 4.0 - 2.0;
         let mount = Vec3::new(x, terrain_height_m(x, z), z);
-        queue_usd_load(
+        let _ = queue_usd_load(
             &mut commands,
             &mut scenes,
             &mut inflight,
@@ -191,6 +225,7 @@ fn drain_load_queue(
             None,
             false,
             Vec::new(),
+            Default::default(),
         );
     }
 }
@@ -211,7 +246,8 @@ fn queue_usd_load(
     machine_id: Option<String>,
     activate_physics_after_sync: bool,
     variants: Vec<(String, String, String)>,
-) {
+    tyres: gearbox_api::tyres::SavedTyres,
+) -> Result<(), String> {
     let read_started = std::time::Instant::now();
     let source = std::fs::read(&path)
         .and_then(|bytes| usd_bevy::UsdSource::new(&path, bytes));
@@ -219,7 +255,7 @@ fn queue_usd_load(
         Ok(source) => source,
         Err(err) => {
             error!("gearbox-load: {label} cannot read {}: {err}", path.display());
-            return;
+            return Err(format!("cannot read {}: {err}", path.display()));
         }
     };
     let handle = scenes.add(UsdScene {
@@ -258,7 +294,9 @@ fn queue_usd_load(
         machine_id,
         activate_physics_after_sync,
         spawned: false,
+        tyres,
     });
+    Ok(())
 }
 
 fn snap_grounded_machine_to_terrain(transform: &mut Transform) {
@@ -305,6 +343,9 @@ fn spawn_when_loaded(
     mut pending_static: ResMut<crate::attach::PendingStaticAttachments>,
     timings: Option<Res<usd_bevy::asset::UsdSceneTimings>>,
     instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
+    mut values: ResMut<crate::services::LinkValues>,
+    mut seeded: ResMut<crate::services::SeededLinkValues>,
+    mut rejected: ResMut<RejectedLoads>,
 ) {
     for entry in inflight.0.iter_mut() {
         if entry.spawned {
@@ -314,6 +355,12 @@ fn spawn_when_loaded(
             Ok(UsdSceneState::Ready) => {}
             Ok(UsdSceneState::Failed(err)) => {
                 error!("gearbox-load: {} failed to load: {err}", entry.label);
+                if !entry.tyres.is_empty() {
+                    if let Some(bus) = bus.as_deref_mut() {
+                        bus.publish_event(SceneEvent::new(event_kind::MACHINE_REJECTED, &entry.label).with_prop("reason", &err.to_string()));
+                    }
+                    rejected.0.push(entry.root);
+                }
                 entry.spawned = true;
                 continue;
             }
@@ -344,6 +391,19 @@ fn spawn_when_loaded(
                 None
             }
         };
+        if !entry.tyres.is_empty() {
+            let result = discovered_machines.as_mut().ok_or_else(|| "machine discovery failed".to_owned())
+                .and_then(|machines| restore_tyre_configuration(machines, &entry.tyres));
+            if let Err(reason) = result {
+                error!("gearbox-load: {} pressure restore rejected: {reason}", entry.label);
+                if let Some(bus) = bus.as_deref_mut() {
+                    bus.publish_event(SceneEvent::new(event_kind::MACHINE_REJECTED, &entry.label).with_prop("reason", &reason));
+                }
+                rejected.0.push(entry.root);
+                entry.spawned = true;
+                continue;
+            }
+        }
         let is_machine_asset = discovered_machines
             .as_ref()
             .is_some_and(|machines| !machines.is_empty());
@@ -394,6 +454,16 @@ fn spawn_when_loaded(
         if let Some(mut machines) = discovered_machines.take() {
             if let Some(machine_id) = entry.machine_id.as_deref() {
                 apply_runtime_machine_id(&mut machines, machine_id);
+            }
+            if !entry.tyres.is_empty() {
+                for machine in &machines {
+                    values.0.retain(|(id, _, _), _| id != &machine.id);
+                    seeded.0.remove(&machine.id);
+                    for (link, pressure) in &entry.tyres {
+                        values.set(&machine.id, link, "tyre_pressure_bar", pressure.applied_bar);
+                        values.set(&machine.id, link, "tyre_target_pressure_bar", pressure.target_bar);
+                    }
+                }
             }
             log_discovered_machines(&entry.label, &machines);
             if !machines.is_empty() {
@@ -674,6 +744,37 @@ fn apply_runtime_machine_id(
     }
 }
 
+fn restore_tyre_configuration(
+    machines: &mut [crate::controller::MachineInstanceSpec],
+    tyres: &gearbox_api::tyres::SavedTyres,
+) -> Result<(), String> {
+    gearbox_api::tyres::validate_saved(tyres)?;
+    if machines.len() != 1 { return Err("tyre snapshots require a single-machine asset".into()); }
+    let machine = &mut machines[0];
+    for (name, pressure) in tyres {
+        let link = machine.links.get(name).ok_or_else(|| format!("saved tyre link {name} is missing"))?;
+        if link.role != crate::links::LinkRole::Wheel {
+            return Err(format!("saved tyre {name} is not a wheel link"));
+        }
+        let bound = |name: &str, default| link.values.iter().find(|(key, _)| key == name).map_or(default, |(_, value)| *value);
+        let low = bound("tyre_min_pressure_bar", 0.5);
+        let high = bound("tyre_max_pressure_bar", 4.0);
+        if !low.is_finite() || !high.is_finite() || low <= 0.0 || low > high
+            || ![pressure.applied_bar, pressure.target_bar].iter().all(|p| (low..=high).contains(p))
+        {
+            return Err(format!("saved tyre {name} must be within {low}..={high} gauge bar"));
+        }
+    }
+    for link in &mut machine.links.links {
+        if let Some(pressure) = tyres.get(&link.name) {
+            link.values.retain(|(key, _)| key != "tyre_pressure_bar" && key != "tyre_target_pressure_bar");
+            link.values.push(("tyre_pressure_bar".into(), pressure.applied_bar));
+            link.values.push(("tyre_target_pressure_bar".into(), pressure.target_bar));
+        }
+    }
+    Ok(())
+}
+
 /// Machine-category loads that arrived over the bus.
 fn drain_machine_load_queue(
     mut commands: Commands,
@@ -681,6 +782,11 @@ fn drain_machine_load_queue(
     mut queue: ResMut<MachineLoadQueue>,
     mut inflight: ResMut<Inflight>,
     mut physics_active: ResMut<gearbox_api::PhysicsActive>,
+    inventory: Res<ControllerInventory>,
+    loaded: Query<&LoadedAsset>,
+    physics: Res<crate::physics::PhysicsWorld>,
+    mut pending: Query<&mut MachinePhysicsSyncPending>,
+    mut bus: Option<ResMut<GearboxBus>>,
 ) {
     for req in queue.0.drain(..) {
         if req.remove() || req.delete() {
@@ -694,6 +800,39 @@ fn drain_machine_load_queue(
             warn!("gearbox-load: machine load `{}` has no path", req.id());
             continue;
         };
+        let mut reject = |reason: &str| {
+            warn!("gearbox-load: {}: {reason}", req.id());
+            if let Some(bus) = bus.as_deref_mut() {
+                bus.publish_event(SceneEvent::new(event_kind::MACHINE_REJECTED, &req.id()).with_prop("reason", reason));
+            }
+        };
+        let tyres: gearbox_api::tyres::SavedTyres = match req.props().get("tyre_snapshot") {
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(tyres) => tyres,
+                Err(error) => { reject(&format!("invalid tyre snapshot: {error}")); continue; }
+            },
+            None => Default::default(),
+        };
+        if let Err(error) = gearbox_api::tyres::validate_saved(&tyres) {
+            reject(&error); continue;
+        }
+        if !tyres.is_empty() && req.machine_id().is_none_or(|id| id.trim().is_empty()) {
+            reject("pressure snapshot requires an explicit machine id"); continue;
+        }
+        if !tyres.is_empty() && !physics.uses_wheel_forces() {
+            reject("this backend does not support pressure snapshots"); continue;
+        }
+        if !tyres.is_empty() && (inventory.machines.iter().any(|m| Some(m.id.clone()) == req.machine_id())
+            || inflight.0.iter().any(|e| e.machine_id == req.machine_id() && (!e.spawned || loaded.get(e.root).is_ok())))
+        {
+            reject("snapshot restore requires a fresh machine id"); continue;
+        }
+        let keep_paused = !tyres.is_empty() || req.props().get("start_paused").as_deref() == Some("true");
+        if keep_paused {
+            commands.remove_resource::<PhysicsActivationPending>();
+            for entry in &mut inflight.0 { entry.activate_physics_after_sync = false; }
+            for mut machine in &mut pending { machine.activate_after_sync = false; }
+        }
         if physics_active.0 {
             physics_active.0 = false;
             info!("gearbox-load: pausing physics until new machine USD is aligned to terrain");
@@ -715,7 +854,7 @@ fn drain_machine_load_queue(
             ..default()
         };
         snap_grounded_machine_to_terrain(&mut transform);
-        queue_usd_load(
+        if let Err(reason) = queue_usd_load(
             &mut commands,
             &mut scenes,
             &mut inflight,
@@ -723,9 +862,12 @@ fn drain_machine_load_queue(
             label,
             transform,
             machine_id,
-            true,
+            !keep_paused,
             req.variants(),
-        );
+            tyres,
+        ) {
+            reject(&reason);
+        }
     }
 }
 
@@ -740,6 +882,8 @@ fn drain_machine_delete_queue(
     mut bus: Option<ResMut<GearboxBus>>,
     loaded: Query<(Entity, &LoadedAsset)>,
     children_q: Query<&Children>,
+    mut values: ResMut<crate::services::LinkValues>,
+    mut seeded: ResMut<crate::services::SeededLinkValues>,
 ) {
     if queue.0.is_empty() {
         return;
@@ -761,6 +905,10 @@ fn drain_machine_delete_queue(
             continue;
         };
         remove_loaded_usd_physics(root, physics.as_mut(), &children_q);
+        for machine in inventory.machines.iter().filter(|m| m.scene_root == Some(root)) {
+            values.0.retain(|(id, _, _), _| id != &machine.id);
+            seeded.0.remove(&machine.id);
+        }
         inventory.machines.retain(|m| m.scene_root != Some(root));
         commands.entity(root).try_despawn();
         info!("gearbox-load: unloaded machine `{id}`");
@@ -775,6 +923,9 @@ fn refresh_scene_objects(
     loaded: Query<(Entity, &LoadedAsset, &GlobalTransform)>,
     inventory: Res<ControllerInventory>,
     mut objects: ResMut<SceneObjects>,
+    overrides: Query<&usd_bevy::instance::UsdInstanceOverrides>,
+    attachments: Res<crate::attach::Attachments>,
+    physics: Res<crate::physics::PhysicsWorld>,
 ) {
     let mut out = Vec::new();
     for (entity, asset, transform) in loaded.iter() {
@@ -791,6 +942,17 @@ fn refresh_scene_objects(
         let kind = match machine {
             Some(m) => {
                 props.set("machine_id", &m.id);
+                if physics.uses_wheel_forces()
+                    && inventory.machines.iter().filter(|m| m.scene_root == Some(entity)).count() == 1
+                    && !attachments.0.iter().any(|a| a.master_id == m.id || a.slave_id == m.id)
+                    && let Ok(opinions) = overrides.get(entity)
+                    && opinions.attributes.is_empty()
+                {
+                    props.set("configuration_snapshot", "1");
+                    if let Ok(variants) = serde_json::to_string(&opinions.variants) {
+                        props.set("snapshot_variants", &variants);
+                    }
+                }
                 if let Some(kind) = &m.kind {
                     props.set("kind", kind);
                 }
@@ -809,4 +971,62 @@ fn refresh_scene_objects(
         });
     }
     objects.machines = out;
+}
+
+#[cfg(test)]
+mod pressure_snapshot_tests {
+    use super::*;
+    use gearbox_api::tyres::{SavedTyrePressure, SavedTyres};
+
+    #[test]
+    fn rejected_load_cleanup_follows_projection_commands_and_removes_physics() {
+        let mut app = App::new();
+        app.insert_resource(crate::physics::PhysicsWorld::with_backend(Box::new(crate::physics::MollaBackend::default())))
+            .init_resource::<RejectedLoads>()
+            .add_systems(Last, remove_rejected_loads);
+        let root = app.world_mut().spawn_empty().id();
+        let child = app.world_mut().spawn(ChildOf(root)).id();
+        let body = {
+            let mut physics = app.world_mut().resource_mut::<crate::physics::PhysicsWorld>();
+            let body = physics.insert_body(crate::physics::backend::BodyDesc::fixed());
+            physics.entity_to_body.insert(child, body);
+            body
+        };
+        app.add_systems(Update, move |mut commands: Commands, mut rejected: ResMut<RejectedLoads>| {
+            rejected.0.push(root);
+            commands.entity(child).insert(Visibility::Visible);
+        });
+        app.update();
+        assert!(app.world().get_entity(root).is_err());
+        assert!(app.world().get_entity(child).is_err());
+        let physics = app.world().resource::<crate::physics::PhysicsWorld>();
+        assert!(physics.body(body).is_none());
+        assert!(physics.entity_to_body.is_empty());
+    }
+
+    #[test]
+    fn restore_validates_every_tyre_before_modifying_discovered_properties() {
+        let path = default_asset_root().join("tractor.usd");
+        let mut machines = discover_machines_from_usd(&path).unwrap();
+        let wheels: Vec<_> = machines[0].links.links.iter().filter(|l| l.role == crate::links::LinkRole::Wheel).map(|l| l.name.clone()).collect();
+        assert!(wheels.len() >= 2);
+        let saved: SavedTyres = wheels.iter().map(|name| (name.clone(), SavedTyrePressure { applied_bar: 1.3, target_bar: 2.2 })).collect();
+        let before = machines[0].links.links.clone();
+        for bad in [-1.0, 4.1, f64::NAN] {
+            let mut invalid = saved.clone();
+            invalid.get_mut(&wheels[1]).unwrap().target_bar = bad;
+            assert!(restore_tyre_configuration(&mut machines, &invalid).is_err());
+            assert_eq!(machines[0].links.links, before);
+        }
+        let mut invalid = saved.clone();
+        invalid.insert("absent".into(), SavedTyrePressure { applied_bar: 1.3, target_bar: 2.2 });
+        assert!(restore_tyre_configuration(&mut machines, &invalid).is_err());
+        assert_eq!(machines[0].links.links, before);
+        restore_tyre_configuration(&mut machines, &saved).unwrap();
+        for name in wheels {
+            let values = &machines[0].links.get(&name).unwrap().values;
+            assert!(values.contains(&("tyre_pressure_bar".into(), 1.3)));
+            assert!(values.contains(&("tyre_target_pressure_bar".into(), 2.2)));
+        }
+    }
 }

@@ -1,4 +1,25 @@
 use crate::Props;
+use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedTyrePressure {
+    pub applied_bar: f64,
+    pub target_bar: f64,
+}
+
+pub type SavedTyres = BTreeMap<String, SavedTyrePressure>;
+
+pub fn validate_saved(tyres: &SavedTyres) -> Result<(), String> {
+    for (link, pressure) in tyres {
+        if link.is_empty() || [pressure.applied_bar, pressure.target_bar]
+            .iter().any(|p| !p.is_finite() || *p <= 0.0)
+        {
+            return Err(format!("invalid saved tyre pressure for {link}"));
+        }
+    }
+    Ok(())
+}
 
 /// Gauge-bar pressure telemetry for one registered tyre.
 #[derive(Clone, Debug, PartialEq)]

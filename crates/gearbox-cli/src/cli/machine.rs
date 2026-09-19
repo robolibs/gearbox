@@ -32,6 +32,12 @@ enum Cmd {
     List,
     /// Everything a machine reports about itself
     Info { machine: Option<String> },
+    /// Save a paused standalone machine configuration, including applied/target tyre pressures
+    Save {
+        file: String,
+        #[arg(long)]
+        machine: Option<String>,
+    },
     /// Stream the machine's state
     State {
         machine: Option<String>,
@@ -185,6 +191,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     match args.cmd {
         Cmd::List => list(ctx),
         Cmd::Info { machine } => info(ctx, machine),
+        Cmd::Save { file, machine } => super::spawn::save_machine(ctx, &file, machine),
         Cmd::State {
             machine,
             watch,

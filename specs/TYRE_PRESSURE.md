@@ -69,10 +69,39 @@ selection recognizes Kubota rubber names and Krampe BKT naming, not arbitrary
 imported meshes. Nonplanar/camber agreement, GPU parity and performance gates
 remain incomplete.
 
-## Persistence status
+## Machine configuration persistence
 
-Pressure survives unrelated runtime rebuilds while the wheel handles remain.
-The current scene reset replays spawn manifests; it is not a live simulation
-snapshot. Those manifests do not yet save applied/target tyre state. A full
-supported save/reload cycle remains required work; editor UI persistence does
-not satisfy it.
+Pause before exporting a standalone pressure-tyre machine:
+
+```sh
+gearbox -i INSTANCE scene pause
+gearbox -i INSTANCE machine save tractor.toml --machine tractor
+gearbox -i INSTANCE clear usd tractor
+gearbox -i INSTANCE spawn from tractor.toml --wait-timeout 90
+gearbox -i INSTANCE scene play
+```
+
+The version-1 TOML configuration stores the absolute source asset path,
+variant selections, scene-root placement/yaw, and each wheel's applied and
+target gauge pressure. Source files are not modified. Publication refuses to
+overwrite an existing file, including a source asset or symlink. Restoring
+requires a fresh machine id and leaves the simulation paused. Readback must
+confirm both pressures before `spawn from` reports success. Play resumes the
+bounded transition from the saved applied value toward its saved target.
+Machine-agent ownership can take time to expire after unloading an ephemeral
+machine; manifest loading allows 90 seconds by default, independently of the
+per-request `--timeout`.
+
+Pressure entries are validated together against the loaded source's wheel
+links and supported ranges before inventory publication. Failed restores
+report a rejection and remove the rejected instance without changing another
+machine's pressure. Delete/reset also clear cached values for removed ids.
+Pressure continues to survive unrelated runtime rebuilds with unchanged wheel
+handles. Scene reset replays the recorded configuration files.
+
+This is a machine configuration, not a full simulation checkpoint. Velocities,
+joint positions, contact history, terrain and other scene objects are not
+saved. Attached or multi-machine assets and runtime USD attribute overrides
+are refused rather than silently dropped. Source files must remain available;
+the export is not a self-contained asset package. A synchronized whole-scene
+save and articulated solver warm-state restoration remain separate work.
