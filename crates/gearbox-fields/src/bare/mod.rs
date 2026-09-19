@@ -280,7 +280,7 @@ fn sand_ground(
         trample_params,
         geometry,
         BareGround {
-            tint: Vec4::new(0.230, 0.178, 0.108, 1.0),
+            tint: Vec4::new(0.245, 0.182, 0.098, 1.0),
             grain: Vec4::new(0.16, 0.30, 1.0, 0.22),
             grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
         },
