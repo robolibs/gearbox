@@ -38,6 +38,16 @@ fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
     if v.is_finite() { v.clamp(lo, hi) } else { lo }
 }
 
+fn tyre_pressure_status(playing: bool, mut pressures: impl Iterator<Item = (f64, f64)>) -> &'static str {
+    if !playing {
+        "paused — press Play"
+    } else if pressures.any(|(applied, target)| (applied - target).abs() > 0.005) {
+        "inflating / deflating"
+    } else {
+        "at target"
+    }
+}
+
 /// The link a service controller's joint moves, if any.
 fn service_link<'a>(machine: &'a MachineInstanceSpec, c: &'a ControllerSpec) -> Option<&'a LinkSpec> {
     controller_joints(machine, c)
@@ -247,6 +257,8 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     pods.push(
         Pod::new(pid(P, "head", 0))
             .with_readout("machine", machine.id.clone())
+            .with_readout("instance", std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into()))
+            .with_readout("physics", world.resource::<crate::physics::PhysicsWorld>().name())
             .with_readout("kind", machine.kind.as_deref().unwrap_or("—"))
             .with_readout("controllers", machine.controllers.len().to_string())
             .with_readout("links", machine.links.links.len().to_string()),
@@ -534,9 +546,15 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 links: tyres.iter().map(|t| t.0.name.clone()).collect(),
             });
             let matched = tyres.iter().all(|t| (t.2 - target).abs() < 0.005);
+            let applied_low = tyres.iter().map(|t| t.1).fold(f64::INFINITY, f64::min);
+            let applied_high = tyres.iter().map(|t| t.1).fold(f64::NEG_INFINITY, f64::max);
             tyre_pods.push(Pod::new(pid(P, "tyres-all", 0))
                 .with_readout("tyre pressure", "bar (gauge)")
-                .with_readout("changes", "ramp while playing")
+                .with_readout("changes", tyre_pressure_status(
+                    world.resource::<gearbox_api::PhysicsActive>().0,
+                    tyres.iter().map(|t| (t.1, t.2)),
+                ))
+                .with_readout("applied pressure", format!("{applied_low:.2}–{applied_high:.2} bar"))
                 .with_readout("targets", if matched { "matched" } else { "mixed" })
                 .with_slider("all tyres", clamp(target, low, high), low..=high, 2, " bar", accent));
         }
@@ -569,6 +587,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         }
         for (i, (link, current, target, low, high)) in tyres.iter().enumerate() {
             let radius = values.get(&machine.id, &link.name, "tyre_loaded_radius_m").unwrap_or(0.0);
+            let deflection = values.get(&machine.id, &link.name, "tyre_deflection_m");
             let area = values.get(&machine.id, &link.name, "tyre_tread_area_m2").unwrap_or(0.0);
             ctx.sync_sliders(pid(P, "tyre", i), &[clamp(*target, *low, *high)]);
             tyre_blocks.push(TyreBlock {
@@ -578,6 +597,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
             tyre_pods.push(Pod::new(pid(P, "tyre", i))
                 .with_readout("wheel", link.name.clone())
                 .with_readout("applied pressure", format!("{current:.2} bar"))
+                .with_readout("deflection", deflection.map_or_else(|| "—".into(), |m| format!("{:.1} mm", m * 1000.0)))
                 .with_readout("loaded radius", format!("{radius:.3} m"))
                 .with_readout("tread contact area", format!("{area:.4} m²"))
                 .with_slider("target pressure", clamp(*target, *low, *high), *low..=*high, 2, " bar", accent));
@@ -763,6 +783,15 @@ fn set_service_value(
 mod tests {
     use super::*;
     use mara_core::pod::SliderResponse;
+
+    #[test]
+    fn tyre_status_distinguishes_paused_targets_from_applied_pressure() {
+        let status = |playing, pressures: &[(f64, f64)]| tyre_pressure_status(playing, pressures.iter().copied());
+        assert_eq!(status(false, &[(1.8, 0.5)]), "paused — press Play");
+        assert_eq!(status(true, &[(1.8, 0.5)]), "inflating / deflating");
+        assert_eq!(status(true, &[(0.5, 0.5), (1.8, 4.0)]), "inflating / deflating");
+        assert_eq!(status(true, &[(0.5, 0.5), (4.0, 4.0)]), "at target");
+    }
 
     #[test]
     fn sidebar_tyre_targets_use_top_level_pod_offsets() {

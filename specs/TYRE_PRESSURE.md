@@ -11,6 +11,22 @@ unchanged until the group slider is edited. Applied pressure is separate
 from the requested target: target edits work while paused; inflation/deflation
 advances only during successful simulated steps.
 
+The sidebar identifies the instance and active physics backend. Its pressure
+status distinguishes paused, adjusting and at-target states; applied pressure
+is shown above the group slider, and each wheel reports deflection in mm.
+Only loaded rubber flattens and bulges; a pressure target is not immediate
+whole-wheel scaling. At low frame rates the simulation clock, and therefore
+inflation/deflation, can run slower than wall time.
+
+Launch this isolated build separately from the original Gearbox:
+
+```sh
+GEARBOX_PHYSICS=molla nix develop --impure -c oslo make run '--args=--name molla-tyres --ephemeral'
+```
+
+Use `-i molla-tyres` for its CLI controls; do not rely on the default instance
+when the original Gearbox is also running.
+
 ```sh
 gearbox -i INSTANCE machine tyre-pressure 1.0 --axle 1 --machine tractor
 gearbox -i INSTANCE machine tyre-pressure 2.4 --axle 2 --machine tractor
