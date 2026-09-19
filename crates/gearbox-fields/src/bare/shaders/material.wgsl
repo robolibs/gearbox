@@ -176,7 +176,10 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
     let within = abs(fract(place / plot_m) - vec2<f32>(0.5)) * 2.0;
     let edge = max(within.x, within.y);
     var comb: Comb;
-    comb.crest = sin(across * 6.2831853) * 0.5 + 0.5;
+    // Nought at the line between one furrow and the next. A crest that is half
+    // way up there instead steps wherever two furrows are cut to different
+    // depths, and the step draws a hairline crack the length of the field.
+    comb.crest = 0.5 - 0.5 * cos(across * 6.2831853);
     // Not the same all the way along: a furrow shallows and deepens over its
     // length, and a ripple dies out altogether and picks up again further on.
     let run = along / max(spacing * 18.0, 2.0);

@@ -26,6 +26,16 @@ use crate::profile::{
 /// so no two of its faces lie flat. The top and bottom rings close to a single
 /// point, or the stone is a tube and the ground shows through the hole.
 fn pebble() -> Mesh {
+    stone_mesh(0.0)
+}
+
+/// The same stone, marked in its second channel as one the sun and the sand
+/// have bleached: no flint, and nothing darker than the ground it lies on.
+fn bleached_pebble() -> Mesh {
+    stone_mesh(1.0)
+}
+
+fn stone_mesh(bleach: f32) -> Mesh {
     const AROUND: u32 = 9;
     const RINGS: u32 = 5;
     let mut positions = Vec::new();
@@ -74,7 +84,7 @@ fn pebble() -> Mesh {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals.clone())
         // The first channel marks the kind: nought a stone, one a tuft. A stone's
         // own coordinates run the whole way round it, so they cannot say.
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; normals.len()])
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, bleach]; normals.len()])
         .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
@@ -106,11 +116,11 @@ fn tuft() -> Mesh {
 
 /// Stones lying in the soil, and the tufts that take it back. Sand carries a
 /// few of the first and none of the second; a worn track carries both.
-fn standing(stones: f32, tufts: f32) -> Vec<VegetationLayer> {
+fn standing(stones: f32, tufts: f32, bleached: bool) -> Vec<VegetationLayer> {
     let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wgsl";
     let mut layers = vec![VegetationLayer {
         shader,
-        template: pebble,
+        template: if bleached { bleached_pebble } else { pebble },
         density: stones,
         fade_start: 6.0,
         fade_end: 42.0,
@@ -197,19 +207,19 @@ impl Plugin for BarePlugin {
         profiles.register(FieldProfile {
             name: "ploughed",
             wheel_response: response,
-            layers: standing(170.0, 260.0),
+            layers: standing(170.0, 260.0, false),
             ground: ploughed_ground,
         });
         profiles.register(FieldProfile {
             name: "dirt",
             wheel_response: response,
-            layers: standing(240.0, 1100.0),
+            layers: standing(240.0, 1100.0, false),
             ground: dirt_ground,
         });
         profiles.register(FieldProfile {
             name: "sand",
             wheel_response: WheelResponse { darkening: 0.16, ..response },
-            layers: standing(80.0, 0.0),
+            layers: standing(55.0, 0.0, true),
             ground: sand_ground,
         });
     }

@@ -187,7 +187,13 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         } else if (kind > 0.94) {
             rock = vec3<f32>(0.104, 0.094, 0.080);
         }
-        let stone = rock * mix(0.6, 1.2, rand(id, 9u));
+        // Stones lying in sand are the sand's own: sun-bleached, never flint.
+        var spread_of_tone = vec2<f32>(0.6, 1.2);
+        if (vertex.uv.y > 0.5) {
+            rock = mix(vec3<f32>(0.262, 0.216, 0.150), vec3<f32>(0.178, 0.152, 0.114), kind);
+            spread_of_tone = vec2<f32>(0.82, 1.14);
+        }
+        let stone = rock * mix(spread_of_tone.x, spread_of_tone.y, rand(id, 9u));
         // Dust settles on whatever faces the sky, so the top of a stone is
         // nearer the colour of the ground than the stone's own.
         let dust = vec3<f32>(0.105, 0.072, 0.044);
