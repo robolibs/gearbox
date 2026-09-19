@@ -218,16 +218,19 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.color = vec4<f32>(mix(stone, dust, 0.4 * rand(id, 11u)), 1.0);
         out.shape = vec3<f32>(0.0, vertex.position.y, 0.0);
     } else {
-        let stature = mix(0.45, 1.5, pow(rand(clump_seed, 5u), 1.9));
+        let stature = mix(0.6, 1.3, pow(rand(clump_seed, 5u), 1.5));
         let domed = 1.0 - out_of_clump * out_of_clump * mix(0.25, 0.8, rand(clump_seed, 8u));
         // Grass does not come up evenly inside a clump: it runs tall in one
         // corner of it and thin in another, in patches of its own, and the eye
         // averages out per-tuft randomness that has no shape to it.
         let uneven = lattice(base, 0.37) * 0.62 + lattice(base + vec2<f32>(37.0, 11.0), 0.14) * 0.38;
         // Drawn from a tail, not a range: most of a clump is short stuff, with
-        // the odd blade run up well above it.
-        let height = mix(0.045, 0.34, pow(rand(id, 6u), 2.8)) * stature * domed
-            * mix(0.45, 1.5, uneven) * alive;
+        // the odd blade run up above it. Capped, because three skewed draws
+        // multiplied together throw out the occasional stalk twice the height
+        // of anything near it.
+        let drawn = mix(0.05, 0.19, pow(rand(id, 6u), 2.1)) * stature * domed
+            * mix(0.6, 1.3, uneven);
+        let height = min(drawn, 0.17) * alive;
         let width = mix(0.005, 0.011, rand(id, 7u));
         let t = vertex.position.y;
         let leaf = vertex.position.z - 1.0;
