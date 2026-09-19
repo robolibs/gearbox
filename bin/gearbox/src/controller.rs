@@ -194,6 +194,8 @@ pub(crate) struct LastLinearSpeed(HashMap<ControllerKey, (f64, f64)>);
 
 #[derive(Debug, Clone, Default)]
 pub struct ControllerState {
+    /// The datum the position is in, by its region of the physics world.
+    pub region: usize,
     pub position_m: [f64; 3],
     pub heading_rad: f64,
     pub roll_rad: f64,
@@ -1109,11 +1111,12 @@ fn apply_builtin_ackermann_cmd_vel(
                 // including when the command is zero. This lets the UI/API show
                 // that the controller is alive without needing movement.
                 let pos = body.translation();
-                let (_, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
+                let (region, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
                 let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
                 states.states.insert(
                     key.clone(),
                     ControllerState {
+                        region,
                         position_m,
                         heading_rad: body_heading,
                         roll_rad,
@@ -1378,11 +1381,12 @@ fn apply_builtin_diff_drive_cmd_vel(
                 runtime.diff_drive_debug_ticks += 1;
 
                 let pos = body.translation();
-                let (_, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
+                let (region, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
                 let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
                 states.states.insert(
                     key.clone(),
                     ControllerState {
+                        region,
                         position_m,
                         heading_rad: machine_heading_rad(body),
                         roll_rad,
@@ -4777,11 +4781,12 @@ fn publish_machine_controller_states(
             })
             .and_then(|c| states.states.get(&key).map(|s| (c, s.clone())));
 
-        let (position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
+        let (region, position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
         {
             Some((controller, state)) => {
                 props.set("controller", &controller.instance);
                 (
+                    state.region,
                     state.position_m,
                     state.heading_rad,
                     state.roll_rad,
@@ -4810,7 +4815,7 @@ fn publish_machine_controller_states(
                     continue;
                 };
                 let p = body.position().translation;
-                let (_, p) = crate::globe::site_local(p.x, p.y, p.z);
+                let (region, p) = crate::globe::site_local(p.x, p.y, p.z);
                 let p = rapier3d::math::Vector::new(p[0], p[1], p[2]);
                 let heading = body_forward_vector(body)
                     .map(|f| f.x.atan2(f.z))
@@ -4819,6 +4824,7 @@ fn publish_machine_controller_states(
                 let v = body.linvel();
                 let speed = (v.x * v.x + v.z * v.z).sqrt();
                 (
+                    region,
                     [p.x, p.y, p.z],
                     heading,
                     roll,
@@ -4844,6 +4850,15 @@ fn publish_machine_controller_states(
         // below (already X-forward, Z-up-yaw) need no change at all — only
         // the world-frame point and quaternion do.
         let ros_point = Point::new(position[2], position[0], position[1]);
+        // The pose is in the machine's datum; where that is on Earth goes along.
+        let place = crate::globe::earth_place(region, position);
+        if let Some(place) = &place {
+            props.set("lat", &format!("{:.9}", place.geodetic.latitude));
+            props.set("lon", &format!("{:.9}", place.geodetic.longitude));
+            props.set("alt", &format!("{:.3}", place.geodetic.altitude));
+            props.set("ecef", &format!("{:.3} {:.3} {:.3}", place.ecef.x, place.ecef.y, place.ecef.z));
+            props.set("datum", &format!("{:.9} {:.9}", place.datum.latitude, place.datum.longitude));
+        }
         let ros_rotation = Quaternion::new(half.cos(), 0.0, 0.0, half.sin());
         let wire = MachineState {
             odom: Odom {
@@ -4929,8 +4944,14 @@ fn publish_machine_controller_states(
         // convert `heading_rad` (0 = East, counter-clockwise) to a compass
         // bearing (0 = North, clockwise) since that's what a real GNSS
         // receiver's heading output means.
-        let enu = Enu::new(ros_point.x, ros_point.y, ros_point.z, WORLD_GEO_DATUM);
-        let fix = to_wgs_from_enu(enu);
+        let fix = match &place {
+            Some(place) => Geo {
+                latitude: place.geodetic.latitude,
+                longitude: place.geodetic.longitude,
+                altitude: place.geodetic.altitude,
+            },
+            None => to_wgs_from_enu(Enu::new(ros_point.x, ros_point.y, ros_point.z, WORLD_GEO_DATUM)),
+        };
         let bearing = (std::f64::consts::FRAC_PI_2 - heading).rem_euclid(std::f64::consts::TAU);
         agent.publish_gnss(&Gnss::new(fix, bearing));
     }

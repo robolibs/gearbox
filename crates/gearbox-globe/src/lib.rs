@@ -5,7 +5,7 @@
 //! global, and neither is fit to simulate in: ECEF numbers are huge and its
 //! axes point nowhere useful. So whatever stands on the ground is simulated in
 //! the flat frame of a [`Datum`], an anchor at some latitude and longitude with
-//! x east, y up and z south. A datum is a convenience of the moment; a place's
+//! x north, y up and z east. A datum is a convenience of the moment; a place's
 //! latitude, longitude and altitude are what it keeps.
 
 mod noise;
@@ -48,7 +48,7 @@ impl Geodetic {
     }
 }
 
-/// A flat frame anchored on the ellipsoid: x east, y up, z south.
+/// A flat frame anchored on the ellipsoid: x north, y up, z east.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Datum {
     pub latitude: f64,
@@ -69,7 +69,7 @@ impl Datum {
             latitude,
             longitude,
             origin: Geodetic::new(latitude, longitude, 0.0).ecef(),
-            rotation: DQuat::from_mat3(&DMat3::from_cols(east, up, -north)),
+            rotation: DQuat::from_mat3(&DMat3::from_cols(north, up, east)),
         }
     }
 
@@ -133,10 +133,10 @@ mod tests {
     const FIELD: (f64, f64) = (52.370216, 4.895168);
 
     #[test]
-    fn a_datum_has_east_up_and_south_for_axes() {
+    fn a_datum_has_north_up_and_east_for_axes() {
         let datum = Datum::at(FIELD.0, FIELD.1);
-        let north = datum.geodetic(DVec3::new(0.0, 0.0, -1000.0));
-        let east = datum.geodetic(DVec3::new(1000.0, 0.0, 0.0));
+        let north = datum.geodetic(DVec3::new(1000.0, 0.0, 0.0));
+        let east = datum.geodetic(DVec3::new(0.0, 0.0, 1000.0));
         let above = datum.geodetic(DVec3::new(0.0, 50.0, 0.0));
         assert!(north.latitude > FIELD.0 && (north.longitude - FIELD.1).abs() < 1e-6);
         assert!(east.longitude > FIELD.1 && (east.latitude - FIELD.0).abs() < 1e-3);
@@ -158,7 +158,7 @@ mod tests {
     fn a_metre_north_is_a_metre() {
         let datum = Datum::at(FIELD.0, FIELD.1);
         let a = datum.geodetic(DVec3::ZERO).ecef();
-        let b = datum.geodetic(DVec3::new(0.0, 0.0, -1.0)).ecef();
+        let b = datum.geodetic(DVec3::new(1.0, 0.0, 0.0)).ecef();
         assert!(((a - b).length() - 1.0).abs() < 1e-6);
     }
 

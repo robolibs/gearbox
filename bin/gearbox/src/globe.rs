@@ -159,14 +159,16 @@ pub fn transform_in_site(
     chain
 }
 
-/// What is loaded stands where the view is: a loaded root joins the site in view.
+/// A loaded root joins the datum it was placed in, or the one in view if it was
+/// placed nowhere in particular.
 fn adopt_loaded_roots(
     mut commands: Commands,
     sites: Res<Sites>,
-    roots: Query<Entity, (Added<crate::load::LoadedAsset>, Without<ChildOf>)>,
+    roots: Query<(Entity, Option<&InDatum>), (Added<crate::load::LoadedAsset>, Without<ChildOf>)>,
 ) {
-    for root in &roots {
-        commands.entity(root).insert(ChildOf(sites.current().entity));
+    for (root, placed) in &roots {
+        let datum = placed.map_or(sites.current, |placed| placed.0.min(sites.list.len() - 1));
+        commands.entity(root).insert(ChildOf(sites.list[datum].entity));
     }
 }
 
@@ -383,5 +385,62 @@ fn seat_planet(
         transform.translation = local;
         transform.rotation = datum.rotation.as_quat();
         *seated = Some(datum.origin);
+    }
+}
+
+/// Where on Earth a place in datum `region`'s frame is: its latitude,
+/// longitude and altitude, the same in ECEF, and the datum's own anchor.
+pub struct EarthPlace {
+    pub geodetic: Geodetic,
+    pub ecef: DVec3,
+    pub datum: Datum,
+}
+
+pub fn earth_place(region: usize, local: [f64; 3]) -> Option<EarthPlace> {
+    let datum = FRAMES.read().ok()?.get(region).copied()?;
+    let ecef = datum.to_ecef(DVec3::from_array(local));
+    Some(EarthPlace { geodetic: Geodetic::of_ecef(ecef), ecef, datum })
+}
+
+/// Put on a loaded root: the datum it was placed in.
+#[derive(Component, Clone, Copy)]
+pub struct InDatum(pub usize);
+
+impl Sites {
+    /// The datum that serves an ECEF place on the ground: the nearest one in
+    /// reach, else a new one anchored there.
+    pub fn datum_for(&mut self, commands: &mut Commands, ground: DVec3) -> usize {
+        if let Some(index) = self.nearest(ground) {
+            return index;
+        }
+        let index = self.list.len();
+        let name = format!("datum-{index}");
+        let frame = Datum::under(ground);
+        let entity = commands.spawn(site_bundle(index, &name, &frame, self.root)).id();
+        self.list.push(SiteEntry { entity, name, frame });
+        publish_frames(self);
+        index
+    }
+
+    /// Where a request lands: `lla` if given, else `at` as metres north, up
+    /// and east of home. Returns the datum and the place in its frame; a
+    /// height of zero means on the ground.
+    pub fn place(
+        &mut self,
+        commands: &mut Commands,
+        lla: Option<Geodetic>,
+        at: Vec3,
+    ) -> (usize, Vec3) {
+        let asked = lla.unwrap_or_else(|| {
+            let mut there = self.home().frame.geodetic(at.as_dvec3());
+            there.altitude = at.y as f64;
+            there
+        });
+        let ground = Geodetic::new(asked.latitude, asked.longitude, 0.0).ecef();
+        let region = self.datum_for(commands, ground);
+        let local = self.list[region].frame.from_ecef(ground);
+        let (x, z) = (local.x as f32, local.z as f32);
+        let y = if asked.altitude.abs() < 0.001 { self.height(region, x, z) } else { asked.altitude as f32 };
+        (region, Vec3::new(x, y, z))
     }
 }

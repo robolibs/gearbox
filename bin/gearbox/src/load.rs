@@ -225,7 +225,7 @@ fn queue_usd_load(
     machine_id: Option<String>,
     activate_physics_after_sync: bool,
     variants: Vec<(String, String, String)>,
-) {
+) -> Option<Entity> {
     let read_started = std::time::Instant::now();
     let source = std::fs::read(&path)
         .and_then(|bytes| usd_bevy::UsdSource::new(&path, bytes));
@@ -233,7 +233,7 @@ fn queue_usd_load(
         Ok(source) => source,
         Err(err) => {
             error!("gearbox-load: {label} cannot read {}: {err}", path.display());
-            return;
+            return None;
         }
     };
     let handle = scenes.add(UsdScene {
@@ -273,6 +273,7 @@ fn queue_usd_load(
         activate_physics_after_sync,
         spawned: false,
     });
+    Some(root)
 }
 
 fn snap_grounded_machine_to_terrain(transform: &mut Transform) {
@@ -700,6 +701,7 @@ fn drain_machine_load_queue(
     mut queue: ResMut<MachineLoadQueue>,
     mut inflight: ResMut<Inflight>,
     mut physics_active: ResMut<gearbox_api::PhysicsActive>,
+    mut sites: ResMut<crate::globe::Sites>,
 ) {
     for req in queue.0.drain(..) {
         if req.remove() || req.delete() {
@@ -728,13 +730,19 @@ fn drain_machine_load_queue(
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| usd_path.clone())
             });
-        let mut transform = Transform {
-            translation: Vec3::new(req.x, req.y, req.z),
+        // `lat`/`lon`(/`alt`) props say where on Earth; else x, y, z are metres
+        // north, up and east of home. Either way the datum is found from the place.
+        let number = |key: &str| props.get(key).and_then(|v| v.parse::<f64>().ok());
+        let lla = number("lat").zip(number("lon")).map(|(lat, lon)| {
+            gearbox_globe::Geodetic::new(lat, lon, number("alt").unwrap_or(0.0))
+        });
+        let (datum, translation) = sites.place(&mut commands, lla, Vec3::new(req.x, req.y, req.z));
+        let transform = Transform {
+            translation,
             rotation: Quat::from_rotation_y(req.yaw_deg.to_radians()),
             ..default()
         };
-        snap_grounded_machine_to_terrain(&mut transform);
-        queue_usd_load(
+        let root = queue_usd_load(
             &mut commands,
             &mut scenes,
             &mut inflight,
@@ -745,6 +753,9 @@ fn drain_machine_load_queue(
             true,
             req.variants(),
         );
+        if let Some(root) = root {
+            commands.entity(root).insert(crate::globe::InDatum(datum));
+        }
     }
 }
 
