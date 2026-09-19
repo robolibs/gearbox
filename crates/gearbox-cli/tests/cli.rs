@@ -10,6 +10,23 @@ use gearbox_api::registry::{self, RegistryEntry};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+#[test]
+fn tyre_pressure_rejects_invalid_values_and_conflicting_selectors() {
+    let env = Env::start(&["tractor"]);
+    for bar in ["NaN", "inf", "0"] {
+        let (code, _, err) = env.gearbox(&["machine", "tyre-pressure", bar, "--machine", "tractor"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("finite positive"), "{err}");
+    }
+    for args in [
+        vec!["machine", "tyre-pressure", "1.8", "--axle", "0"],
+        vec!["machine", "tyre-pressure", "1.8", "--axle", "1", "--wheel", "left"],
+    ] {
+        let (code, _, err) = env.gearbox(&args);
+        assert_eq!(code, 2, "{err}");
+    }
+}
+
 struct Env {
     dir: PathBuf,
     _host: FakeHost,

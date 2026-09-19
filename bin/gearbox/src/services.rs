@@ -290,6 +290,12 @@ fn drain_service_commands(
                 continue;
             }
             let value = num(&props, "value").unwrap_or(cmd.value);
+            if let Some(scope) = props.get("tyre_pressure_scope") {
+                if let Err(error) = crate::controller::wheel_forces::set_pressure_group(machine, &mut values, scope, value) {
+                    warn!("gearbox-services: pressure request rejected for {machine_id}: {error}");
+                }
+                continue;
+            }
             if let Some(request) = props.get("request").cloned() {
                 let Some(att) = attachments.0.iter().find(|a| a.slave_id == machine_id) else {
                     if warned.0.insert(format!("{machine_id}:request:{request}")) {

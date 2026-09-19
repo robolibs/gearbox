@@ -3,6 +3,87 @@ use crate::physics::backend::{
     JointAxes, JointId, PressureTyreDesc, PressureTyreOutput, WheelForceDesc,
 };
 
+#[derive(Default)]
+pub(super) struct Registrations {
+    wheels: HashMap<BodyId, Registration>,
+    axles: HashMap<String, (Vec<(BodyId, Option<u16>)>, HashMap<BodyId, u16>)>,
+    invalid_axles: HashSet<String>,
+}
+
+fn infer_axles(wheels: &[(BodyId, f64, Option<u16>)]) -> Result<HashMap<BodyId, u16>, String> {
+    if wheels.iter().any(|w| !w.1.is_finite() || w.2 == Some(0)) {
+        return Err("invalid wheel position or axle id".into());
+    }
+    let mut sorted = wheels.to_vec();
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut used: HashSet<_> = sorted.iter().filter_map(|w| w.2).collect();
+    let mut result = HashMap::new();
+    let mut start = 0;
+    while start < sorted.len() {
+        let end = start
+            + sorted[start..]
+                .iter()
+                .take_while(|w| (w.1 - sorted[start].1).abs() <= 0.25)
+                .count();
+        let group = &sorted[start..end];
+        let ids: HashSet<_> = group.iter().filter_map(|w| w.2).collect();
+        if ids.len() > 1 && group.iter().any(|w| w.2.is_none()) {
+            return Err(
+                "ambiguous partial axle metadata; author tyre_axle on every wheel in this row"
+                    .into(),
+            );
+        }
+        let axle = if let Some(id) = ids.iter().min() {
+            *id
+        } else {
+            (1..=u16::MAX)
+                .find(|id| !used.contains(id))
+                .ok_or("too many tyre axles")?
+        };
+        used.insert(axle);
+        for &(body, _, authored) in group {
+            result.insert(body, authored.unwrap_or(axle));
+        }
+        start = end;
+    }
+    Ok(result)
+}
+
+pub(crate) fn pressure_tyres(
+    machine: &MachineInstanceSpec,
+    values: &crate::services::LinkValues,
+) -> Result<Vec<gearbox_api::tyres::TyrePressure>, String> {
+    machine
+        .links
+        .links
+        .iter()
+        .filter(|link| {
+            values
+                .get(&machine.id, &link.name, "tyre_target_pressure_bar")
+                .is_some()
+        })
+        .map(|link| {
+            gearbox_api::tyres::TyrePressure::read(&link.name, |name| {
+                values.get(&machine.id, &link.name, name)
+            })
+            .ok_or_else(|| format!("incomplete tyre pressure telemetry for {}", link.name))
+        })
+        .collect()
+}
+
+pub(crate) fn set_pressure_group(
+    machine: &MachineInstanceSpec,
+    values: &mut crate::services::LinkValues,
+    scope: &str,
+    bar: f64,
+) -> Result<(), String> {
+    let links = gearbox_api::tyres::targets(&pressure_tyres(machine, values)?, scope, bar)?;
+    for link in links {
+        values.set(&machine.id, &link, "tyre_target_pressure_bar", bar);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct Registration {
     joint: JointId,
@@ -66,6 +147,37 @@ mod tests {
     use crate::physics::backend::{
         BodyDesc, ColliderDesc, DQuat, Inertia, JointDesc, JointKind, MassProps,
     };
+
+    #[test]
+    fn axle_inference_orders_rows_and_respects_authored_ids() {
+        let wheels = [
+            (BodyId(4), -1.0, None),
+            (BodyId(2), 2.05, None),
+            (BodyId(3), -1.02, None),
+            (BodyId(1), 2.0, None),
+        ];
+        let axles = infer_axles(&wheels).unwrap();
+        assert_eq!(axles[&BodyId(1)], 1);
+        assert_eq!(axles[&BodyId(2)], 1);
+        assert_eq!(axles[&BodyId(3)], 2);
+        assert_eq!(axles[&BodyId(4)], 2);
+        let mut authored = wheels;
+        authored[0].2 = Some(7);
+        assert_eq!(infer_axles(&authored).unwrap()[&BodyId(3)], 7);
+        let mut reversed = wheels;
+        reversed.reverse();
+        assert_eq!(infer_axles(&reversed).unwrap(), axles);
+        assert!(infer_axles(&[(BodyId(1), f64::NAN, None)]).is_err());
+        assert!(infer_axles(&[(BodyId(1), 0.0, Some(0))]).is_err());
+        assert!(
+            infer_axles(&[
+                (BodyId(1), 0.0, Some(1)),
+                (BodyId(2), 0.0, Some(2)),
+                (BodyId(3), 0.0, None)
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn scene_wheels_feed_traction_and_tracks_from_tyre_output() {
@@ -203,6 +315,14 @@ mod tests {
         app.update();
         let physics = app.world().resource::<crate::physics::PhysicsWorld>();
         if force_backend {
+            assert_eq!(
+                app.world().resource::<crate::services::LinkValues>().get(
+                    "test",
+                    "wheel",
+                    "tyre_axle"
+                ),
+                Some(1.0)
+            );
             let output = physics.wheel_output(wheel).unwrap();
             assert!(output.in_contact && output.normal_force > 0.0);
             assert!(physics.contacts_with(ground).is_empty());
@@ -297,12 +417,20 @@ pub(super) fn sync_machine_wheel_forces(
     parents: Query<&ChildOf>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut values: ResMut<crate::services::LinkValues>,
-    mut registered: Local<HashMap<BodyId, Registration>>,
+    mut registered: Local<Registrations>,
 ) {
     if !physics.uses_wheel_forces() {
         return;
     }
-    registered.retain(|body, _| physics.contains_body(*body));
+    registered
+        .wheels
+        .retain(|body, _| physics.contains_body(*body));
+    registered
+        .axles
+        .retain(|machine, _| inventory.machines.iter().any(|m| &m.id == machine));
+    registered
+        .invalid_axles
+        .retain(|machine| inventory.machines.iter().any(|m| &m.id == machine));
     for machine in &inventory.machines {
         let Some(root) = machine.scene_root else {
             continue;
@@ -321,6 +449,69 @@ pub(super) fn sync_machine_wheel_forces(
         let Some(forward) = physics.body(chassis).and_then(body_forward_vector) else {
             continue;
         };
+        let mut axle_geometry = Vec::new();
+        let mut axle_metadata_valid = true;
+        for &wheel in wheels {
+            let link = machine.links.links.iter().find(|link| {
+                link.body_prim
+                    .as_deref()
+                    .and_then(|path| find_prim_entity(root, path, &prims, &parents))
+                    .and_then(|entity| physics.entity_to_body.get(&entity).copied())
+                    == Some(wheel)
+            });
+            let authored = link.and_then(|link| {
+                link.values
+                    .iter()
+                    .find(|(name, _)| name == "tyre_axle")
+                    .map(|(_, value)| *value)
+            });
+            if authored.is_some_and(|id| {
+                !id.is_finite() || id < 1.0 || id > u16::MAX as f64 || id.fract() != 0.0
+            }) {
+                axle_metadata_valid = false;
+                break;
+            }
+            if let Some(body) = physics.body(wheel) {
+                axle_geometry.push((
+                    wheel,
+                    body.translation().dot(forward),
+                    authored.map(|id| id as u16),
+                ));
+            }
+        }
+        if !axle_metadata_valid {
+            if registered.invalid_axles.insert(machine.id.clone()) {
+                warn!(
+                    "gearbox-control: {}: tyre_axle must be an integer from 1 to 65535",
+                    machine.id
+                );
+            }
+            continue;
+        }
+        let signature: Vec<_> = axle_geometry
+            .iter()
+            .map(|(body, _, axle)| (*body, *axle))
+            .collect();
+        if registered
+            .axles
+            .get(&machine.id)
+            .is_none_or(|(key, _)| key != &signature)
+        {
+            match infer_axles(&axle_geometry) {
+                Ok(axles) => {
+                    registered
+                        .axles
+                        .insert(machine.id.clone(), (signature, axles));
+                }
+                Err(error) => {
+                    if registered.invalid_axles.insert(machine.id.clone()) {
+                        warn!("gearbox-control: {}: {error}", machine.id);
+                    }
+                    continue;
+                }
+            }
+        }
+        registered.invalid_axles.remove(&machine.id);
         let mass: f64 = runtime
             .machine_bodies
             .get(&machine.id)
@@ -383,7 +574,7 @@ pub(super) fn sync_machine_wheel_forces(
                 mass,
                 tyre,
             };
-            if registered.get(&wheel) != Some(&registration)
+            if registered.wheels.get(&wheel) != Some(&registration)
                 || physics.wheel_output(wheel).is_none()
             {
                 match physics.configure_wheel(WheelForceDesc {
@@ -396,7 +587,7 @@ pub(super) fn sync_machine_wheel_forces(
                     tyre: Some(tyre),
                 }) {
                     Ok(()) => {
-                        registered.insert(wheel, registration);
+                        registered.wheels.insert(wheel, registration);
                     }
                     Err(error) => warn!(
                         "gearbox-control: wheel force registration rejected for {wheel:?}: {error}"
@@ -406,6 +597,9 @@ pub(super) fn sync_machine_wheel_forces(
             if let Some(link) = link
                 && let Some(tyre) = physics.wheel_output(wheel).and_then(|out| out.pressure)
             {
+                if let Some(axle) = registered.axles[&machine.id].1.get(&wheel) {
+                    values.set(&machine.id, &link.name, "tyre_axle", f64::from(*axle));
+                }
                 let requested = values
                     .get(&machine.id, &link.name, "tyre_target_pressure_bar")
                     .unwrap_or(tyre.target_pressure_pa / 100_000.0)

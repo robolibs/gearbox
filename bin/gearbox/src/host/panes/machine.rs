@@ -206,6 +206,11 @@ fn apply_tyre_targets(
             .filter(|s| s.changed)
             .map(|s| s.value)
         {
+            if !value.is_finite() || block.links.iter().any(|link| {
+                let low = values.get(machine, link, "tyre_min_pressure_bar");
+                let high = values.get(machine, link, "tyre_max_pressure_bar");
+                !low.zip(high).is_some_and(|(lo, hi)| (lo..=hi).contains(&value))
+            }) { continue; }
             for link in &block.links {
                 values.set(machine, link, "tyre_target_pressure_bar", value);
             }
@@ -535,6 +540,33 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 .with_readout("targets", if matched { "matched" } else { "mixed" })
                 .with_slider("all tyres", clamp(target, low, high), low..=high, 2, " bar", accent));
         }
+        let mut axles = std::collections::BTreeMap::<u16, Vec<usize>>::new();
+        for (i, tyre) in tyres.iter().enumerate() {
+            if let Some(axle) = values.get(&machine.id, &tyre.0.name, "tyre_axle")
+                && axle.is_finite() && axle >= 1.0 && axle <= u16::MAX as f64 && axle.fract() == 0.0
+            {
+                axles.entry(axle as u16).or_default().push(i);
+            }
+        }
+        for (axle, members) in axles {
+            let low = members.iter().map(|&i| tyres[i].3).fold(f64::NEG_INFINITY, f64::max);
+            let high = members.iter().map(|&i| tyres[i].4).fold(f64::INFINITY, f64::min);
+            if low > high { continue; }
+            let target = members.iter().map(|&i| tyres[i].2).sum::<f64>() / members.len() as f64;
+            let matched = members.iter().all(|&i| (tyres[i].2 - target).abs() < 0.005);
+            let applied_low = members.iter().map(|&i| tyres[i].1).fold(f64::INFINITY, f64::min);
+            let applied_high = members.iter().map(|&i| tyres[i].1).fold(f64::NEG_INFINITY, f64::max);
+            let pod = pid(P, "tyre-axle", usize::from(axle));
+            ctx.sync_sliders(pod, &[clamp(target, low, high)]);
+            tyre_blocks.push(TyreBlock {
+                pod: tyre_pods.len(), links: members.iter().map(|&i| tyres[i].0.name.clone()).collect(),
+            });
+            tyre_pods.push(Pod::new(pod)
+                .with_readout("axle", format!("{axle} · {} tyres", members.len()))
+                .with_readout("applied pressure", format!("{applied_low:.2}–{applied_high:.2} bar"))
+                .with_readout("targets", if matched { "matched" } else { "mixed" })
+                .with_slider("axle target", clamp(target, low, high), low..=high, 2, " bar", accent));
+        }
         for (i, (link, current, target, low, high)) in tyres.iter().enumerate() {
             let radius = values.get(&machine.id, &link.name, "tyre_loaded_radius_m").unwrap_or(0.0);
             let area = values.get(&machine.id, &link.name, "tyre_tread_area_m2").unwrap_or(0.0);
@@ -744,6 +776,10 @@ mod tests {
         };
         let mut responses = HashMap::from([(cid(P, "machine"), vec![response(4.0, true)])]);
         let mut values = LinkValues::default();
+        for link in ["left", "right"] {
+            values.set("tractor", link, "tyre_min_pressure_bar", 0.5);
+            values.set("tractor", link, "tyre_max_pressure_bar", 4.0);
+        }
         apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
         assert_eq!(values.get("tractor", "left", "tyre_target_pressure_bar"), None);
         responses.insert(cid(P, "machine"), vec![
@@ -761,6 +797,13 @@ mod tests {
         apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
         assert_eq!(values.get("tractor", "left", "tyre_target_pressure_bar"), Some(1.0));
         assert_eq!(values.get("tractor", "right", "tyre_target_pressure_bar"), Some(2.2));
+        let before = values.0.clone();
+        values.set("tractor", "right", "tyre_max_pressure_bar", 2.0);
+        responses.insert(cid(P, "machine"), vec![PodResponse::default(), PodResponse::default(), response(3.0, true)]);
+        apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
+        for link in ["left", "right"] {
+            assert_eq!(values.get("tractor", link, "tyre_target_pressure_bar"), before.get(&("tractor".into(), link.into(), "tyre_target_pressure_bar".into())).copied());
+        }
     }
 
     #[test]

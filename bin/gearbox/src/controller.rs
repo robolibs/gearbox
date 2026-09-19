@@ -32,7 +32,7 @@ use usd_bevy::UsdPrimRef;
 
 mod traction;
 mod steering;
-mod wheel_forces;
+pub(crate) mod wheel_forces;
 
 /// All USD-authored machine/controller specs discovered from loaded assets.
 #[derive(Resource, Debug, Default, Clone)]

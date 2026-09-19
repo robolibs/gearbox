@@ -124,6 +124,20 @@ enum Cmd {
         #[arg(long)]
         take: bool,
     },
+    /// Set gauge-bar tyre pressure atomically and wait for accepted target readback
+    TyrePressure {
+        bar: f64,
+        /// One-based axle id from machine state (inferred front to rear unless authored)
+        #[arg(long, conflicts_with = "wheel", value_parser = clap::value_parser!(u16).range(1..))]
+        axle: Option<u16>,
+        /// Link name; omit both selectors to change every tyre
+        #[arg(long)]
+        wheel: Option<String>,
+        #[arg(long)]
+        machine: Option<String>,
+        #[arg(long)]
+        take: bool,
+    },
     /// Attachments: what hangs on a machine, attach and detach slaves
     Tools {
         #[command(subcommand)]
@@ -213,6 +227,11 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             machine,
             take,
         } => set_value(ctx, machine, &link, &name, value, take),
+        Cmd::TyrePressure { bar, axle, wheel, machine, take } => {
+            let scope = axle.map(|a| format!("axle:{a}"))
+                .or_else(|| wheel.map(|w| format!("wheel:{w}"))).unwrap_or_else(|| "all".into());
+            set_tyre_pressure(ctx, machine, &scope, bar, take)
+        }
         Cmd::Tools { cmd } => tools(ctx, cmd),
     }
 }
@@ -1125,6 +1144,46 @@ fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, machine_id: &str, take: bool) 
         ));
     }
     Ok(res.session)
+}
+
+fn set_tyre_pressure(ctx: &Ctx, machine: Option<String>, scope: &str, bar: f64, take: bool) -> Result<()> {
+    use gearbox_api::tyres::{from_props, targets};
+    if !bar.is_finite() || bar <= 0.0 {
+        return Err(CliError::usage("pressure must be finite positive gauge bar"));
+    }
+    let machine_id = ctx.machine_id(machine)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&machine_id);
+    let mut sub = mc.state()?;
+    let state = next_sample::<MachineState>(&mut sub, ctx.timeout)?
+        .ok_or_else(|| CliError::timeout("no tyre telemetry before pressure edit"))?;
+    let tyres = from_props(&state.props()).map_err(CliError::usage)?;
+    let links = targets(&tyres, scope, bar).map_err(CliError::usage)?;
+    let claim = mc.claim(DEFAULT_HOLD_MS, take)?;
+    if claim.code == code::BUSY {
+        return Err(CliError::busy(format!("machine `{machine_id}` is held by {}; add --take", claim.holder())));
+    }
+    let command = ControllerCommand {
+        session: claim.session, value: bar, element: 0, _pad: 0,
+        props: Props::from_pairs(&[("tyre_pressure_scope", scope)]).into_bytes(),
+    };
+    let response = mc.command(&command);
+    let _ = mc.release(claim.session);
+    check(response?, "set tyre pressure")?;
+    let deadline = Instant::now() + ctx.timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(CliError::timeout("pressure request queued but accepted targets were not confirmed")); }
+        let Some(state) = next_sample::<MachineState>(&mut sub, remaining)? else {
+            return Err(CliError::timeout("pressure request queued but accepted targets were not confirmed"));
+        };
+        let readings = from_props(&state.props()).map_err(CliError::error)?;
+        if links.iter().all(|link| readings.iter().any(|t| &t.link == link && (t.target - bar).abs() < 1e-6)) {
+            ctx.done(&machine_id, &format!("`{machine_id}` {scope}: accepted {bar} bar target on {} tyres (ramps while playing)", links.len()),
+                || json!({"machine_id": machine_id, "scope": scope, "target_bar": bar, "links": links, "accepted": true}));
+            return Ok(());
+        }
+    }
 }
 
 fn set_value(
