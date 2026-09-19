@@ -201,7 +201,7 @@ fn lift_tyres_out_of_terrain(
     wheels: &[BodyId],
     pivot: DVec3,
     axis: DVec3,
-) {
+) -> Result<(), String> {
     for _ in 0..3 {
         let deepest = wheels
             .iter()
@@ -215,10 +215,10 @@ fn lift_tyres_out_of_terrain(
             })
             .max_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)));
         let Some((depth, reach, offset)) = deepest else {
-            return;
+            return Ok(());
         };
         if depth <= 0.005 {
-            return;
+            return Ok(());
         }
         let up = DQuat::from_axis_angle(axis, (depth / reach).atan());
         let turn = if (up * offset).y > offset.y {
@@ -226,17 +226,19 @@ fn lift_tyres_out_of_terrain(
         } else {
             up.inverse()
         };
-        for handle in bodies {
-            if let Some(body) = physics.body_mut(*handle) {
+        let poses: Vec<_> = bodies.iter().filter_map(|handle| {
+            physics.body(*handle).map(|body| {
                 let pose = body.position();
                 let moved = Pose {
                     translation: pivot + turn * (pose.translation - pivot),
                     rotation: turn * pose.rotation,
                 };
-                body.set_position(moved, true);
-            }
-        }
+                (*handle, moved)
+            })
+        }).collect();
+        physics.set_body_poses(&poses, true)?;
     }
+    Ok(())
 }
 
 /// The rigid-body link a (possibly body-less) link rides on.
@@ -634,15 +636,14 @@ fn try_attach(
     let slave_bodies = scene.bodies(slave, physics);
     if req.teleport != 0 {
         let delta = target.then(&coupler_world.inverse());
-        for handle in &slave_bodies {
-            if let Some(body) = physics.body_mut(*handle) {
+        let poses: Vec<_> = slave_bodies.iter().filter_map(|handle| {
+            physics.body(*handle).map(|body| {
                 let cur = Frame::from_pose(&body.position());
                 let moved = delta.then(&cur);
-                body.set_position(moved.pose(), true);
-                body.set_linvel(DVec3::ZERO, true);
-                body.set_angvel(DVec3::ZERO, true);
-            }
-        }
+                (*handle, moved.pose())
+            })
+        }).collect();
+        physics.set_body_poses(&poses, true).map_err(refused)?;
         let wheels: Vec<BodyId> = slave
             .links
             .links
@@ -657,7 +658,7 @@ fn try_attach(
             &wheels,
             target.translation,
             target.rotation * DVec3::X,
-        );
+        ).map_err(refused)?;
     } else {
         let gap = (coupler_world.translation - target.translation).length();
         let turn = coupler_world.rotation.angle_between(target.rotation);

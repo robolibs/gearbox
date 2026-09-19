@@ -129,6 +129,27 @@ impl PhysicsBackend for MollaBackend {
             .find(|(id, _)| *id == joint)
             .map_or(1.0, |(_, sign)| *sign)
     }
+
+    fn set_body_poses(
+        &mut self,
+        poses: &[(BodyId, Pose)],
+        reset_velocity: bool,
+    ) -> Result<(), String> {
+        let poses: Result<Vec<_>, _> = poses
+            .iter()
+            .map(|&(id, pose)| {
+                self.bodies
+                    .get(&id)
+                    .map(|body| (body.handle, convert::transform(pose)))
+                    .ok_or_else(|| "unknown body in pose batch".to_string())
+            })
+            .collect();
+        self.shared
+            .world()
+            .scene
+            .set_body_poses(&poses?, reset_velocity)
+            .map_err(|e| e.to_string())
+    }
     fn name(&self) -> &'static str {
         "molla"
     }

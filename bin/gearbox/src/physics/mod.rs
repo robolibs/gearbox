@@ -73,7 +73,6 @@ impl Plugin for PhysicsPlugin {
             .add_systems(
                 PostUpdate,
                 writeback::writeback_transforms
-                    .run_if(physics_is_active)
                     .in_set(PhysicsWriteback)
                     .before(bevy::transform::TransformSystems::Propagate),
             )
@@ -366,38 +365,34 @@ fn rides_a_body(world: &World, entity: Entity) -> bool {
     false
 }
 
-/// On the OFF→ON edge of `PhysicsActive`, sync every body's pose to its
-/// entity's current `GlobalTransform` so a gizmo drag while paused is not
-/// undone by the first writeback.
+/// On resume, apply transforms edited since the last physics publication.
 fn sync_bodies_to_transforms_on_resume(
     active: Res<PhysicsActive>,
     mut prev_active: Local<bool>,
     mut world: ResMut<PhysicsWorld>,
-    transforms: Query<&GlobalTransform>,
+    transforms: bevy::transform::helper::TransformHelper,
 ) {
     let was = *prev_active;
     *prev_active = active.0;
     if !active.0 || was {
         return;
     }
-    let pairs: Vec<(Entity, backend::BodyId)> =
-        world.entity_to_body.iter().map(|(e, h)| (*e, *h)).collect();
-    for (entity, handle) in pairs {
-        let Ok(gt) = transforms.get(entity) else {
-            continue;
-        };
-        let t = gt.compute_transform();
-        let Some(rb) = world.body_mut(handle) else {
-            continue;
-        };
-        rb.set_position(
-            backend::Pose {
-                translation: convert::vec3_to_d(t.translation),
-                rotation: convert::quat_to_d(t.rotation),
-            },
-            true,
-        );
-        rb.set_linvel(glam::DVec3::ZERO, true);
-        rb.set_angvel(glam::DVec3::ZERO, true);
+    let poses: Vec<_> = world.entity_to_body.iter().filter_map(|(&entity, &body)| {
+        let published = world.published_transforms.get(&entity)?;
+        if published.body != body {
+            return None;
+        }
+        let current = transforms.compute_global_transform(entity).ok()?;
+        if current.affine().abs_diff_eq(published.global.affine(), 1e-6) {
+            return None;
+        }
+        let t = current.compute_transform();
+        Some((body, backend::Pose {
+            translation: convert::vec3_to_d(t.translation),
+            rotation: convert::quat_to_d(t.rotation),
+        }))
+    }).collect();
+    if let Err(error) = world.set_body_poses(&poses, true) {
+        warn!("gearbox-physics: paused transform edits rejected: {error}");
     }
 }

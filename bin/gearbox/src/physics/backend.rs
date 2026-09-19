@@ -810,6 +810,34 @@ pub trait PhysicsBackend: Send + Sync {
     fn body(&self, id: BodyId) -> Option<&dyn Body>;
     fn body_mut(&mut self, id: BodyId) -> Option<&mut dyn BodyMut>;
     fn bodies(&self) -> Vec<BodyId>;
+    /// Set a validated group of world poses without sequential subtree transforms.
+    fn set_body_poses(
+        &mut self,
+        poses: &[(BodyId, Pose)],
+        reset_velocity: bool,
+    ) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for (body, pose) in poses {
+            if !seen.insert(*body) || !self.contains_body(*body) {
+                return Err("unknown or duplicate body in pose batch".into());
+            }
+            if !pose.translation.is_finite()
+                || !pose.rotation.is_finite()
+                || (pose.rotation.length_squared() - 1.0).abs() > 1e-6
+            {
+                return Err("pose must be finite with a unit quaternion".into());
+            }
+        }
+        for &(body, pose) in poses {
+            let body = self.body_mut(body).expect("validated body");
+            body.set_position(pose, true);
+            if reset_velocity {
+                body.set_linvel(DVec3::ZERO, true);
+                body.set_angvel(DVec3::ZERO, true);
+            }
+        }
+        Ok(())
+    }
     fn contains_body(&self, id: BodyId) -> bool {
         self.body(id).is_some()
     }

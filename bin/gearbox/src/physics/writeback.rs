@@ -6,21 +6,38 @@ use bevy::transform::helper::TransformHelper;
 use super::convert::{quat_from_d, vec3_from_d};
 use super::world::PhysicsWorld;
 
+pub(super) struct PublishedTransform {
+    pub body: super::backend::BodyId,
+    pub pose: super::backend::Pose,
+    pub global: GlobalTransform,
+}
+
 pub fn writeback_transforms(
-    world: Res<PhysicsWorld>,
+    mut world: ResMut<PhysicsWorld>,
+    active: Res<super::PhysicsActive>,
     parents: Query<&ChildOf>,
     mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
 ) {
     let mut entities: Vec<_> = world.entity_to_body.keys().copied().collect();
     entities.sort_by_cached_key(|entity| parents.iter_ancestors(*entity).count());
+    let mut written = std::collections::HashSet::new();
     for entity in entities {
-        let Some(rb) = world
-            .entity_to_body
-            .get(&entity)
-            .and_then(|h| world.body(*h))
-        else {
+        let handle = world.entity_to_body[&entity];
+        let Some(rb) = world.body(handle) else {
             continue;
         };
+        let pose = rb.position();
+        if !active.0
+            && world
+                .published_transforms
+                .get(&entity)
+                .is_some_and(|old| old.body == handle && old.pose == pose)
+            && !parents
+                .iter_ancestors(entity)
+                .any(|parent| written.contains(&parent))
+        {
+            continue;
+        }
         let parent_world = if let Ok(parent) = parents.get(entity) {
             let Ok(transform) = transforms.p0().compute_global_transform(parent.parent()) else {
                 continue;
@@ -29,7 +46,6 @@ pub fn writeback_transforms(
         } else {
             GlobalTransform::IDENTITY
         };
-        let pose = rb.position();
         let translation = parent_world
             .affine()
             .inverse()
@@ -39,16 +55,181 @@ pub fn writeback_transforms(
         if let Ok(mut transform) = transforms.p1().get_mut(entity) {
             transform.translation = translation;
             transform.rotation = rotation;
+            written.insert(entity);
+        }
+        if written.contains(&entity)
+            && let Ok(global) = transforms.p0().compute_global_transform(entity)
+        {
+            world.published_transforms.insert(
+                entity,
+                PublishedTransform {
+                    body: handle,
+                    pose,
+                    global,
+                },
+            );
         }
     }
+    let live: std::collections::HashSet<_> = world.entity_to_body.keys().copied().collect();
+    world
+        .published_transforms
+        .retain(|entity, _| live.contains(entity));
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::convert::{quat_to_d, vec3_to_d};
     use super::*;
-    use bevy::ecs::system::{RunSystemOnce, SystemState};
     use crate::physics::backend::{BodyDesc, Pose};
+    use bevy::ecs::system::{RunSystemOnce, SystemState};
+
+    #[test]
+    fn paused_teleports_publish_and_resume_only_applies_external_edits() {
+        use crate::physics::backend::{DQuat, DVec3, JointDesc, JointKind, PhysicsBackend};
+        for backend in [
+            Box::new(crate::physics::molla::MollaBackend::default()) as Box<dyn PhysicsBackend>,
+            Box::new(crate::physics::rapier::RapierBackend::default()),
+        ] {
+            let mut app = App::new();
+            let root = app.world_mut().spawn(Transform::IDENTITY).id();
+            let chassis = app
+                .world_mut()
+                .spawn((Transform::IDENTITY, ChildOf(root)))
+                .id();
+            let wheel = app
+                .world_mut()
+                .spawn((Transform::from_xyz(1.0, 0.0, 0.0), ChildOf(chassis)))
+                .id();
+            let mut physics = PhysicsWorld::with_backend(backend);
+            let a = physics.insert_body(BodyDesc::dynamic().entity(chassis));
+            let b = physics.insert_body(
+                BodyDesc::dynamic()
+                    .entity(wheel)
+                    .pose(Pose::from_translation(DVec3::X)),
+            );
+            let extra = physics.insert_body(BodyDesc::dynamic());
+            physics.entity_to_body.insert(chassis, a);
+            physics.entity_to_body.insert(wheel, b);
+            physics.insert_joint(
+                a,
+                b,
+                JointDesc::new(
+                    JointKind::Revolute { axis: DVec3::X },
+                    Pose::from_translation(DVec3::X),
+                    Pose::IDENTITY,
+                ),
+            );
+            physics.body_mut(extra).unwrap().set_linvel(DVec3::Z, true);
+            app.insert_resource(physics)
+                .insert_resource(super::super::PhysicsActive(false))
+                .add_systems(Update, super::super::sync_bodies_to_transforms_on_resume)
+                .add_systems(PostUpdate, writeback_transforms);
+            app.update();
+
+            let rotation = DQuat::from_rotation_y(0.4);
+            let target = Pose::new(DVec3::new(4.0, 2.0, -3.0), rotation);
+            let wheel_target = Pose::new(target.transform_point(DVec3::X), rotation);
+            app.world_mut()
+                .resource_mut::<PhysicsWorld>()
+                .set_body_poses(&[(b, wheel_target), (a, target)], true)
+                .unwrap();
+            app.update();
+            let mut state = SystemState::<TransformHelper>::new(app.world_mut());
+            for (entity, pose) in [(chassis, target), (wheel, wheel_target)] {
+                let gt = state
+                    .get(app.world())
+                    .unwrap()
+                    .compute_global_transform(entity)
+                    .unwrap();
+                assert!((vec3_to_d(gt.translation()) - pose.translation).length() < 1e-5);
+            }
+
+            app.world_mut()
+                .resource_mut::<PhysicsWorld>()
+                .body_mut(a)
+                .unwrap()
+                .set_linvel(DVec3::X * 2.0, true);
+            app.world_mut()
+                .resource_mut::<super::super::PhysicsActive>()
+                .0 = true;
+            app.update();
+            let physics = app.world().resource::<PhysicsWorld>();
+            assert!(
+                (physics.body(a).unwrap().position().translation - target.translation).length()
+                    < 1e-8
+            );
+            assert!((physics.body(a).unwrap().linvel() - DVec3::X * 2.0).length() < 1e-8);
+
+            app.world_mut()
+                .resource_mut::<super::super::PhysicsActive>()
+                .0 = false;
+            app.update();
+            app.world_mut()
+                .get_mut::<Transform>(root)
+                .unwrap()
+                .translation
+                .z += 5.0;
+            app.update();
+            assert!(
+                (app.world()
+                    .resource::<PhysicsWorld>()
+                    .body(a)
+                    .unwrap()
+                    .position()
+                    .translation
+                    - target.translation)
+                    .length()
+                    < 1e-8
+            );
+            app.world_mut()
+                .resource_mut::<super::super::PhysicsActive>()
+                .0 = true;
+            app.update();
+            let physics = app.world().resource::<PhysicsWorld>();
+            for (id, pose) in [(a, target), (b, wheel_target)] {
+                assert!(
+                    (physics.body(id).unwrap().position().translation
+                        - pose.translation
+                        - DVec3::Z * 5.0)
+                        .length()
+                        < 1e-5
+                );
+                assert!(physics.body(id).unwrap().linvel().length() < 1e-8);
+            }
+            assert_eq!(physics.body(extra).unwrap().linvel(), DVec3::Z);
+
+            app.world_mut()
+                .resource_mut::<super::super::PhysicsActive>()
+                .0 = false;
+            app.update();
+            let newest = Pose::from_translation(DVec3::new(-8.0, 4.0, 2.0));
+            app.world_mut()
+                .resource_mut::<PhysicsWorld>()
+                .set_body_poses(
+                    &[
+                        (a, newest),
+                        (b, Pose::from_translation(newest.translation + DVec3::X)),
+                    ],
+                    true,
+                )
+                .unwrap();
+            app.world_mut()
+                .resource_mut::<super::super::PhysicsActive>()
+                .0 = true;
+            app.update();
+            assert!(
+                (app.world()
+                    .resource::<PhysicsWorld>()
+                    .body(a)
+                    .unwrap()
+                    .position()
+                    .translation
+                    - newest.translation)
+                    .length()
+                    < 1e-8
+            );
+        }
+    }
 
     #[test]
     fn nested_wheel_uses_current_parent_pose_through_scaled_wrappers() {
@@ -79,6 +260,7 @@ mod tests {
             physics.entity_to_body.insert(entity, handle);
         }
         world.insert_resource(physics);
+        world.insert_resource(super::super::PhysicsActive(false));
 
         for angle in [0.3_f32, 0.7, -0.4] {
             let base_rotation = Quat::from_rotation_y(angle * 0.5);

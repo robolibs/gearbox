@@ -2165,11 +2165,7 @@ fn prepare_machine_physics(
         if let Some(chassis) = chassis {
             for controller in &machine.controllers {
                 for pair in tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &*physics) {
-                    if let Some(wheel) = wheel_body_of(&*physics, chassis, pair)
-                        && !wheels.contains(&wheel)
-                    {
-                        wheels.push(wheel);
-                    }
+                    include_wheel_pair(&mut wheels, &*physics, chassis, pair);
                 }
             }
         }
@@ -2261,6 +2257,39 @@ fn wheel_body_of(
         (None, Some(_)) => Some(b),
         (None, None) => None,
     }
+}
+
+fn include_wheel_pair(
+    wheels: &mut Vec<BodyId>,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    pair: (BodyId, BodyId),
+) {
+    if wheels.contains(&pair.0) || wheels.contains(&pair.1) {
+        return;
+    }
+    if let Some(wheel) = wheel_body_of(physics, chassis, pair) {
+        wheels.push(wheel);
+    }
+}
+
+#[test]
+fn authored_wheel_prevents_large_axle_becoming_an_extra_tyre() {
+    let mut physics = crate::physics::PhysicsWorld::default();
+    let chassis = physics.insert_body(crate::physics::backend::BodyDesc::dynamic());
+    let axle = physics.insert_body(crate::physics::backend::BodyDesc::dynamic());
+    let wheel = physics.insert_body(crate::physics::backend::BodyDesc::dynamic());
+    physics.insert_collider(crate::physics::backend::ColliderDesc::new(Shape::Cuboid {
+        half_extents: DVec3::new(1.5, 0.1, 0.1),
+    }).parent(axle)).unwrap();
+    physics.insert_collider(crate::physics::backend::ColliderDesc::new(Shape::Cylinder {
+        half_height: 0.2, radius: 0.6,
+    }).parent(wheel)).unwrap();
+    assert_eq!(wheel_body_of(&physics, chassis, (axle, wheel)), Some(axle));
+    let mut wheels = vec![wheel];
+    include_wheel_pair(&mut wheels, &physics, chassis, (axle, wheel));
+    include_wheel_pair(&mut wheels, &physics, chassis, (wheel, axle));
+    assert_eq!(wheels, vec![wheel]);
 }
 
 /// Every wheel of every machine, every frame, for the grass trample map:

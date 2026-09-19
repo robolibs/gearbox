@@ -154,8 +154,8 @@ nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 GEARBOX_PHYSICS=molla nix develop --impure -c cargo test -p gearbox-sim --bin gearbox
 ```
 
-The original 43 binary tests plus nineteen new backend/integration checks pass
-with explicit `GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (62 tests each). The new
+The original 43 binary tests plus twenty-one new backend/integration checks pass
+with explicit `GEARBOX_PHYSICS=rapier` and `GEARBOX_PHYSICS=molla` (64 tests each). The new
 checks include real capped motor motion, mass/impulse response, stable handles,
 heightfield rays/live bounds, pair filtering/contact impulses, quarantine and
 its entity-report propagation, compliant frame motion and the actual
@@ -189,11 +189,31 @@ position from 1 to 0 changed rear rockshaft orientation by approximately
 0.966 rad and front lower-hitch orientation by 0.395 rad, with nearly constant
 chassis heading. Command properties alone were not used as movement proof.
 Exact PTO speeds, loaded hitches, trailer towing and the slope gate remain.
-An initial paused teleport-attach of the 6729 kg Krampe succeeds structurally
-but the next play explodes and rejects steps. Tow/detach acceptance is not met.
-Group teleports currently call individual body setters, and resume sync uses
-ECS transforms which may still predate the backend teleport; these paths need
-joint-aware batch semantics and stale-transform handling.
+The paused teleport/resume corruption is fixed: attachment and terrain lift
+use validated pose batches rather than sequential articulated subtree moves.
+Writeback publishes changed backend poses even while paused and records the
+resulting ECS transform. Resume batches only externally edited transforms;
+unchanged bodies retain their pose and velocity. A regression runs both
+backends through paused teleport, publication, gizmo-style ancestor edits,
+same-frame teleport/resume and unrelated moving bodies.
+
+The first repaired Krampe run attached, resumed and detached without rejected
+steps, but towing stalled at about 0.06 m/s. Telemetry identified a second bug:
+the large front axle was inferred as an extra tyre even though its joint's
+actual wheel was already authored. Its fictitious footprint carried 42 kN
+while the four real wheels were unloaded. Known wheel endpoints now suppress
+that extra inference, with a large-axle regression test.
+
+After both fixes, an eight-second `--forward 2 --turn 0.4` Kubota/Krampe run
+reached approximately 2.05 m/s and 0.44 rad/s, with the trailer following the
+turn and all four real trailer wheels supporting load. No rejected steps or
+quarantine messages appear in the run log. Screenshots and JSON:
+`/tmp/molla-tow-wheels-driven*`; log: `/tmp/gearbox-tow-wheels-live.log`.
+The final-build detach recheck was interrupted by control-plane timeout and
+the instance subsequently disappeared; do not count it as verified. The
+earlier batch-only build's detach did run successfully. Full paired-backend,
+pressure-extreme and deterministic towing acceptance remains pending.
+Current two-machine debug timing is about 7.55 ms/step, still above target.
 
 Strict Clippy is not green in this checkout: dependency-inclusive linting finds
 existing issues in `gearbox-api`, `gearbox-fields` and vendored clouds; the

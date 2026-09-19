@@ -23,6 +23,7 @@ pub struct PhysicsWorld {
     /// Bevy entity → body. Lets writeback look up which body to copy into
     /// the entity's Transform each tick.
     pub entity_to_body: HashMap<Entity, BodyId>,
+    pub(super) published_transforms: HashMap<Entity, super::writeback::PublishedTransform>,
     /// Bevy entity → collider.
     pub entity_to_collider: HashMap<Entity, ColliderId>,
     /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
@@ -104,6 +105,7 @@ impl PhysicsWorld {
         Self {
             backend,
             entity_to_body: HashMap::new(),
+            published_transforms: HashMap::new(),
             entity_to_collider: HashMap::new(),
             filtered_pairs: HashSet::new(),
             attachment_filtered_pairs: HashSet::new(),
@@ -167,6 +169,7 @@ impl PhysicsWorld {
 
     /// Remove an entity's body (with its colliders and joints) and forget it.
     pub fn remove_entity_body(&mut self, entity: Entity) {
+        self.published_transforms.remove(&entity);
         if let Some(id) = self.entity_to_body.remove(&entity) {
             self.backend.remove_body(id);
         }
