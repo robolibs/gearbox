@@ -74,3 +74,19 @@ fn species_tint(species: vec2<f32>) -> vec3<f32> {
     return vec3<f32>(1.0) + species.x * vec3<f32>(-0.12, 0.02, 0.22)
         + species.y * vec3<f32>(-0.25, 0.18, -0.30);
 }
+
+// How damp the ground is, and what that does to the colour of what grows in
+// it. This mirrors `bevy_biomes`' own reading of the land, term for term, so
+// the blades, the soil and the motes in the air all agree on where the
+// country turns dry; change one and change the others.
+fn meadow_damp(place: vec2<f32>) -> f32 {
+    let broad = noise(place / 420.0 + vec2<f32>(13.7, -4.1));
+    let fine = noise(place / 95.0 + vec2<f32>(-27.3, 8.9));
+    return clamp(broad * 0.72 + fine * 0.28, 0.0, 1.0);
+}
+
+// Parched country is paler, yellower and less green than a damp meadow.
+fn dry_country(place: vec2<f32>) -> vec3<f32> {
+    let share = smoothstep(0.42, 0.56, meadow_damp(place));
+    return mix(vec3<f32>(1.42, 1.22, 0.66), vec3<f32>(1.0), share);
+}

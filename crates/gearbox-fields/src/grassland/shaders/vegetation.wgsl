@@ -5,7 +5,7 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 
-#import "embedded://gearbox_fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint}
+#import "embedded://gearbox_fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint, dry_country}
 #import "embedded://gearbox_fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean, blade_leans}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
@@ -668,7 +668,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_normal = cluster.normal;
         out.ground_normal = ground_normal;
         out.canopy_uv = cluster.uv;
-        out.color = vec4<f32>(vec3<f32>(0.19, 0.31, 0.075) * species_tint(grass_species(base_xz))
+        out.color = vec4<f32>(vec3<f32>(0.19, 0.31, 0.075) * species_tint(grass_species(base_xz)) * dry_country(base_xz)
             * mix(0.88, 1.08, t)
             * (0.94 + seed * 0.12) * (1.0 - pressed.x * field.wheels.darkening), 1.0);
         return out;

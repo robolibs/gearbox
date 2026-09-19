@@ -133,6 +133,7 @@ pub struct MotesPlugin;
 
 impl Plugin for MotesPlugin {
     fn build(&self, app: &mut App) {
+        embedded_asset!(app, "shaders/land.wgsl");
         embedded_asset!(app, "shaders/motes.wgsl");
         app.add_plugins(MaterialPlugin::<MoteMaterial>::default())
             .add_systems(Update, (spawn_mote_fields, carry_mote_fields).chain());
