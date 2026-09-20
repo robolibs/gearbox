@@ -26,7 +26,11 @@ impl Fixture {
         let mut machines = discover_machines_from_stage(&stage).unwrap();
         assert_eq!(machines.len(), 1, "benchmark requires one machine");
         let mut machine = machines.remove(0);
-        assert_eq!(path.file_name().unwrap(), "kubota_tractor.usdz", "this gate is the real Kubota fixture");
+        let kubota = match path.file_name().unwrap().to_str().unwrap() {
+            "kubota_tractor.usdz" => true,
+            "krampe_trailer.usdz" => false,
+            _ => panic!("benchmark requires the real Kubota or Krampe asset"),
+        };
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins,
@@ -79,15 +83,19 @@ impl Fixture {
         let mut bodies = runtime.machine_bodies[&machine.id].clone();
         bodies.sort();
         let wheels = runtime.machine_wheels[&machine.id].clone();
-        assert_eq!(bodies.len(), 26);
+        assert_eq!(bodies.len(), if kubota { 26 } else { 15 });
         assert_eq!(wheels.len(), 4);
         let chassis_entity = app.world_mut().query::<(Entity, &UsdPrimRef)>()
             .iter(app.world()).find(|(_, prim)| Some(&prim.path) == machine.body.as_ref()).unwrap().0;
         let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
         let chassis = physics.entity_to_body[&chassis_entity];
         let mass: f64 = bodies.iter().map(|id| physics.body(*id).unwrap().mass()).sum();
-        let expected_mass = if molla { 4916.010223 } else { 4913.449268 };
-        assert!((mass - expected_mass).abs() < 0.001, "imported mass {mass}");
+        if kubota {
+            let expected_mass = if molla { 4916.010223 } else { 4913.449268 };
+            assert!((mass - expected_mass).abs() < 0.001, "imported mass {mass}");
+        } else {
+            assert!((6500.0..7000.0).contains(&mass), "imported trailer mass {mass}");
+        }
         let clearance = wheels.iter().flat_map(|id| physics.body(*id).unwrap().colliders())
             .map(|id| physics.collider(id).unwrap().aabb().mins.y).fold(f64::INFINITY, f64::min);
         for body in bodies {
@@ -102,8 +110,8 @@ impl Fixture {
         physics.register_wheel_ground(ground, None).unwrap();
         eprintln!("imported fixture: bodies={} joints={} colliders={} tyres={} mass={mass} dt={}",
             physics.bodies().len(), physics.joints().len(), physics.colliders().len(), wheels.len(), physics.dt());
-        assert_eq!(physics.joints().len(), 31);
-        assert_eq!(physics.colliders().len(), 18);
+        assert_eq!(physics.joints().len(), if kubota { 31 } else { 14 });
+        assert_eq!(physics.colliders().len(), if kubota { 18 } else { 19 });
         assert!((physics.dt() - 1.0 / 120.0).abs() < 1e-15, "benchmark requires 120 Hz");
         let services = crate::services::benchmark_schedule(&mut app);
         Self { app, controllers, services, chassis, ground, wheels, machine }
@@ -359,6 +367,31 @@ fn imported_kubota_straight_turn_and_track_contacts() {
     }
     assert_eq!(straight_footprints.len(), 3);
     assert!(straight_footprints.windows(2).all(|pair| pair[0] > pair[1] + 0.02), "pressure must change track footprints: {straight_footprints:?}");
+}
+
+#[test]
+#[ignore = "requires GEARBOX_BENCH_TRAILER pointing to real krampe_trailer.usdz"]
+fn imported_krampe_parking_support() {
+    let asset = std::env::var_os("GEARBOX_BENCH_TRAILER").expect("set GEARBOX_BENCH_TRAILER");
+    let mut outcomes = Vec::new();
+    for pressure in [None, Some(0.5), Some(1.8), Some(4.0)] {
+        let mut fixture = Fixture::load_backend(Path::new(&asset), pressure.is_some());
+        if let Some(bar) = pressure { fixture.pressure(bar); }
+        for _ in 0..1800 { fixture.tick(); }
+        let physics = fixture.app.world().resource::<PhysicsWorld>();
+        let body = physics.body(fixture.chassis).unwrap();
+        let (roll, pitch) = machine_roll_pitch_rad(body);
+        eprintln!("parked trailer: backend={} pressure={pressure:?} roll={roll} pitch={pitch} speed={} position={:?}", physics.name(), body.linvel().length(), body.translation());
+        for wheel in &fixture.wheels {
+            let output = physics.wheel_output(*wheel);
+            eprintln!("wheel {wheel:?}: position={:?} normal_force={:?} pressure={:?}", physics.body(*wheel).unwrap().translation(), output.map(|out| out.normal_force), output.and_then(|out| out.pressure).map(|p| (p.pressure_pa, p.deflection)));
+        }
+        outcomes.push((pressure, roll, pitch, body.linvel().length()));
+    }
+    for (pressure, roll, pitch, speed) in outcomes {
+        assert!(roll.abs() < 0.1 && pitch.abs() < 0.2, "parked trailer tipped at {pressure:?}: roll={roll}, pitch={pitch}");
+        assert!(speed < 0.05, "parked trailer moving at {pressure:?}: {speed}");
+    }
 }
 
 #[test]

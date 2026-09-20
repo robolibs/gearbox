@@ -353,6 +353,70 @@ Vulkan loader and Bevy slab allocator diagnostics on both backends; no
 quarantine/non-finite diagnostics were found. All three assistant-owned viewers
 (including the initial flat probe `molla-track-gate`) were explicitly stopped.
 
+### Krampe towing and unresolved parked-support regression
+
+Live flat-ground runs used the Kubota and `krampe_trailer.usdz` spawned as
+`trailer1`, with `rear_drawbar` / `front_coupler`, teleport attach, an 8 s
+`--forward 2 --turn 0.4` command, and detach. Both backends accepted these
+commands and the screenshots show the trailer following the turn. Rapier's
+attachment list became empty after detach and its trailer pitch read back
+0.00199 rad. No rejected-step, quarantine or non-finite diagnostics appeared
+in the three run logs. This alone does not establish stable detach on Molla.
+
+Molla's low run used 0.5 bar on the tractor and the trailer's default pressure;
+the high run used 4 bar on all eight tyres. Tractor pressure survived the
+trailer spawn/attach and towing. The high run returned an empty attachment list
+and the detached trailer still reported 4 bar on all four wheels. The low run's
+post-detach host API requests timed out despite continuing physics logs and
+successful file-based screenshots; that readback remains unverified. The high
+run did complete API readback. All owned viewers were explicitly stopped.
+
+**Molla tips the uncoupled trailer nose-up.** High-pressure live telemetry
+already showed pitch -0.50662 rad before attachment and -0.55680 rad after
+detach, later -0.45518 rad. Thus this is not isolated to joint removal or
+teleport. The cause has not been established. Do not mask it by freezing the
+trailer, changing its authored mass, or disabling its valid ground contacts.
+
+The new external-asset gate `imported_krampe_parking_support` reproduces this
+without any host/network, tractor, teleport or hitch. It projects all 15 real
+bodies, 14 joints, four tyres and 19 colliders including the ground, runs the
+production drive/service/track systems for 15 simulated seconds at 120 Hz,
+and checks body finiteness/enabled state and quarantine every step. Gross-tip
+limits are |roll| <0.1 rad, |pitch| <0.2 rad and parked speed <0.05 m/s; these
+are regression bounds, not calibrated trailer data. The 0.2-rad pitch bound
+permits the reference asset's approximately 0.11-rad nose-down parked angle.
+
+| Backend / pressure | Final pitch (rad) | Final speed (m/s) |
+| --- | ---: | ---: |
+| Rapier | +0.10997 | 0.01861 |
+| Molla / 0.5 bar | -0.32082 | 0.01368 |
+| Molla / 1.8 bar | -0.38409 | 0.05080 |
+| Molla / 4 bar | -0.42598 | 0.10532 |
+
+All Molla cases lift the front tyres clear of the ground. The gate is
+**currently failing**, intentionally retaining its support requirement.
+Ordinary binary suites pass 87 tests each with seven ignored (six imported
+asset gates and Vulkan); that does not override this failing acceptance gate.
+
+```sh
+GEARBOX_PHYSICS=molla \
+GEARBOX_BENCH_TRAILER=/home/bresilla/data/code/OUSD/machines/usd/krampe_trailer.usdz \
+CARGO_BUILD_JOBS=4 nix develop --impure -c cargo test --release \
+  -p gearbox-sim --bin gearbox \
+  controller::benchmark::imported_krampe_parking_support \
+  -- --ignored --nocapture --test-threads=1
+```
+
+Evidence: `/tmp/gearbox-krampe-parking-final.log`,
+`/tmp/gearbox-krampe-{molla,rapier}-regression.log`,
+`/tmp/{molla-tow-gate,molla-tow-high-gate,rapier-tow-gate}.log` and
+`/tmp/{molla-tow-low,molla-tow-high,rapier-tow}-{driven,detached}.png`.
+Krampe asset SHA256:
+`72a67eb19ad5d7ad981767762e1c124873fdd8d83ff98e8899b1cab52c5bf9a1`.
+Next: isolate the uncoupled support dynamics against the same-scene reference,
+fix the underlying fault, then repeat all towing/pressure/detach gates and
+deterministic replay. These debug runs do not establish performance parity.
+
 ### Commands
 
 Use the repository Nix environment; the host Rust compiler is too old for this
