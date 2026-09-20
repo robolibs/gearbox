@@ -140,14 +140,20 @@ fn leaf_mesh(kind: f32, leaves: u32, steps: u32) -> Mesh {
 /// What stands in a bare ground: stones, crumbs of its own earth, and the
 /// tufts of grass that take it back. Sand carries no tufts; a worn track
 /// carries all three.
-fn standing(stones: f32, clods: f32, tufts: f32, weeds: f32, soil: fn() -> Mesh) -> Vec<VegetationLayer> {
+fn standing(
+    stones: f32,
+    clods: f32,
+    tufts: f32,
+    weeds: f32,
+    soil: fn() -> Mesh,
+    stone: fn() -> Mesh,
+) -> Vec<VegetationLayer> {
     use super::clumps;
     let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wgsl";
-    let bleached = soil == blown_clod as fn() -> Mesh;
     let mut layers = vec![
         VegetationLayer {
             shader,
-            template: if bleached { bleached_pebble } else { pebble },
+            template: stone,
             density: stones,
             fade_start: 6.0,
             fade_end: 42.0,
@@ -271,7 +277,7 @@ impl Plugin for BarePlugin {
             name: "ploughed",
             surface_tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
             wheel_response: response,
-            layers: standing(30.0, 2400.0, 440.0, 3.0, turned_clod),
+            layers: standing(30.0, 2400.0, 440.0, 3.0, turned_clod, pebble),
             ground: ploughed_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
@@ -280,7 +286,7 @@ impl Plugin for BarePlugin {
             name: "dirt",
             surface_tint: Vec4::new(0.115, 0.070, 0.038, 1.0),
             wheel_response: response,
-            layers: standing(130.0, 1600.0, 1900.0, 6.0, worn_clod),
+            layers: standing(130.0, 1600.0, 1900.0, 6.0, worn_clod, pebble),
             ground: dirt_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
@@ -294,7 +300,7 @@ impl Plugin for BarePlugin {
                 name,
                 surface_tint: Vec4::new(0.108, 0.068, 0.038, 1.0),
                 wheel_response: response,
-                layers: standing(90.0, 900.0, 1400.0, 5.0, worn_clod),
+                layers: standing(90.0, 900.0, 1400.0, 5.0, worn_clod, pebble),
                 ground,
                 tread: crate::runtime::bare_tread(worn),
                 soft_border: 0.8,
@@ -304,7 +310,7 @@ impl Plugin for BarePlugin {
             name: "sand",
             surface_tint: Vec4::new(0.245, 0.182, 0.098, 1.0),
             wheel_response: WheelResponse { darkening: 0.16, ..response },
-            layers: standing(22.0, 120.0, 0.0, 0.8, blown_clod),
+            layers: standing(22.0, 120.0, 0.0, 0.8, blown_clod, bleached_pebble),
             ground: sand_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
