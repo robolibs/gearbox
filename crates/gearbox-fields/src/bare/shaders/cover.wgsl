@@ -187,8 +187,19 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     // but never so far that they leave the way and the verge cuts them off,
     // which on a narrow path broke it into a dotted line.
     let sway = (lattice(against.xy, 23.0) - 0.5) * min(1.1, half * 0.7);
-    let rut = abs(abs(against.z + sway) - gauge);
-    let wheel = 1.0 - smoothstep(tread.y * 0.55, tread.y * 1.6, rut);
+    let across_way = against.z + sway;
+    // The two wheels do not run one line apart: each wanders on its own and
+    // each finds firmer ground in different places, so one fades where the
+    // other is at its deepest. Taken together they were a mirrored pair, which
+    // is what makes ruts read as ruled geometry rather than as something driven.
+    // Both fade out as the ruts close together on a narrow way: there the two
+    // are one strip and telling them apart would seam it down its middle.
+    let apart = smoothstep(0.25, 0.7, gauge);
+    let side = select(vec2<f32>(37.0, -11.0), vec2<f32>(-91.0, 53.0), across_way > 0.0);
+    let own = (lattice(against.xy + side, 7.0) - 0.5) * min(0.3, half * 0.2) * apart;
+    let firm = 1.0 - (1.0 - lattice(against.xy + side, 5.0)) * 0.3 * apart;
+    let rut = abs(abs(across_way) - gauge + own);
+    let wheel = (1.0 - smoothstep(tread.y * 0.55, tread.y * 1.6, rut)) * firm;
     // Ragged by moving where the edge falls, not by scaling the wear: as a
     // multiplier it took a road bare across its width down to two thirds. Both
     // how far the edge softens and how far it wanders are held within the way
