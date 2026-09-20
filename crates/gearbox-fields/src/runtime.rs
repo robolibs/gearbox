@@ -3,6 +3,56 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plot(name: &str, profile: &str, min: [f32; 2], max: [f32; 2]) -> FieldSpec {
+        FieldSpec {
+            name: name.into(),
+            profile: profile.into(),
+            min,
+            max,
+            wear: None,
+            way: Vec::new(),
+            way_width: None,
+        }
+    }
+
+    // The wash exists to hide the join between two different covers. Applied to
+    // a join between two of the same it does the opposite: both sides flatten
+    // their last metre towards one colour and the seam becomes visible. The
+    // background is cut into regions round every field, so this is the common
+    // case, not the rare one.
+    #[test]
+    fn the_same_cover_either_side_washes_nothing() {
+        let cover = |name: &str| match name {
+            "grassland" => Some((Vec4::new(0.1, 0.2, 0.05, 1.0), 1.3)),
+            "track" => Some((Vec4::new(0.11, 0.07, 0.04, 1.0), 0.8)),
+            _ => None,
+        };
+        let west = plot("west", "grassland", [-100.0, -50.0], [0.0, 50.0]);
+        let middle = plot("middle", "grassland", [0.0, -50.0], [40.0, 50.0]);
+        let east = plot("east", "track", [40.0, -50.0], [46.0, 50.0]);
+        let specs = [west, middle.clone(), east];
+
+        let (tint, reach) = neighbours_of(&specs, &middle, cover);
+        // West is more of the same meadow: nothing to blend towards.
+        assert_eq!(tint[0], Vec4::ZERO);
+        assert_eq!(reach[0], 0.0);
+        // East is a track, so that side washes by the softer of the two borders.
+        assert_eq!(tint[1], cover("track").unwrap().0);
+        assert_eq!(reach[1], 0.8);
+        // Nothing north or south of it at all.
+        assert_eq!((reach[2], reach[3]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_corner_touch_is_not_a_shared_side() {
+        let cover = |_: &str| Some((Vec4::ONE, 1.0));
+        let mine = plot("mine", "grassland", [0.0, 0.0], [10.0, 10.0]);
+        let corner = plot("corner", "track", [10.0, 10.0], [20.0, 20.0]);
+        let (_, reach) = neighbours_of(&[mine.clone(), corner], &mine, cover);
+        assert_eq!(reach, [0.0; 4]);
+    }
+
     const START: f32 = 4.0;
     const END: f32 = 32.0;
     fn density(distance: f32) -> f32 {
@@ -630,7 +680,6 @@ fn placed_of(
     self_spec: &FieldSpec,
 ) -> crate::profile::Placed {
     let mine = self_spec.bounds();
-    let own = profiles.get(&self_spec.profile);
     // A road laid over the whole layout wears every field it crosses; a way the
     // field names for itself is its own business and comes first. Where two of
     // them cross the same field, both wear it and the harder wins.
@@ -649,6 +698,25 @@ fn placed_of(
             roads.fold(first, crate::layout::Way::crossing)
         }),
         ..default()
+    };
+    (near.tint, near.reach) = neighbours_of(specs, self_spec, |name| {
+        profiles.get(name).map(|p| (p.surface_tint, p.soft_border))
+    });
+    near
+}
+
+/// What lies across each of a field's four sides, as that neighbour's distant
+/// colour and how far the two wash together: west, east, south, north. `cover`
+/// answers for a profile by name, which is all of one this needs.
+fn neighbours_of(
+    specs: &[FieldSpec],
+    self_spec: &FieldSpec,
+    cover: impl Fn(&str) -> Option<(Vec4, f32)>,
+) -> ([Vec4; 4], [f32; 4]) {
+    let (mut tint, mut reach) = ([Vec4::ZERO; 4], [0.0; 4]);
+    let mine = self_spec.bounds();
+    let Some((_, own_border)) = cover(&self_spec.profile) else {
+        return (tint, reach);
     };
     for other in specs {
         if other.name == self_spec.name {
@@ -678,15 +746,13 @@ fn placed_of(
         if other.profile == self_spec.profile {
             continue;
         }
-        let Some(across) = profiles.get(&other.profile) else {
+        let Some((their_tint, their_border)) = cover(&other.profile) else {
             continue;
         };
-        near.tint[side] = across.surface_tint;
-        near.reach[side] = own
-            .map(|own| own.soft_border.min(across.soft_border))
-            .unwrap_or(0.0);
+        tint[side] = their_tint;
+        reach[side] = own_border.min(their_border);
     }
-    near
+    (tint, reach)
 }
 
 /// Fields whose ground is gone stop being drawn and stamped; retired fields
