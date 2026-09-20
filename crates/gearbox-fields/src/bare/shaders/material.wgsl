@@ -78,14 +78,11 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
         return Driven(vec4<f32>(0.0), vec3<f32>(0.0));
     }
     let count = i32(driven.count.x);
-    // Every wheel whose line covers this point has its say. Taking only the
-    // nearest is what rubbed marks out: where two wheels run close — a tractor
-    // through a turn, the rear tyre cutting inside the front — the nearer line
-    // won the pixel outright and the other one's tread simply stopped. Tracks
-    // are allowed to lie over one another; the deeper mark shows, and neither
-    // is erased by the other being there.
-    var bars = vec4<f32>(0.0);
-    var rut = vec3<f32>(0.0);
+    var best_gap = 1e30;
+    var best_across = 0.0;
+    var best_along = 0.0;
+    var best_half = 0.0;
+    var best_heading = vec2<f32>(1.0, 0.0);
     for (var i = 1; i < count; i = i + 1) {
         let to = driven.points[i];
         // A run's first point begins a line rather than continuing one.
@@ -98,43 +95,39 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
         let heading = leg / length_of;
         let at = clamp(dot(place - back.xy, heading), 0.0, length_of);
         let near = back.xy + heading * at;
-        let half_width = abs(to.w);
-        if (half_width <= 0.0 || distance(place, near) > half_width * 1.8) {
-            continue;
-        }
-        let axle = vec2<f32>(-heading.y, heading.x);
-        let across = dot(place - near, axle);
-        // Fading by how far out of the tyre's own width the point lies, so the
-        // print ends where the tyre did and not where any grid happened to fall.
-        let within = 1.0 - smoothstep(0.80, 1.0, abs(across) / half_width);
-        if (within <= 0.0) {
-            continue;
-        }
-        let laid = tyre_bars(abs(back.z) + at, across, heading, axle,
-            driven.bar, within, footprint);
-        if (laid.x > bars.x) {
-            bars = laid;
-        }
-        // The trough, across the tyre: a rounded floor out to the shoulder,
-        // then the spoil standing proud just outside it. How deep goes with how
-        // hard the ground was worked here, so a wheel that merely passed leaves
-        // a crease and one that has been over a dozen times leaves a rut.
-        let share = across / half_width;
-        let deep = RUT_DEEP_M * clamp(pressed, 0.0, 1.0);
-        let floor_of = 1.0 - smoothstep(0.0, 1.0, abs(share));
-        let shoulder = (1.0 - smoothstep(0.0, 0.55, abs(abs(share) - 1.22))) * 0.42;
-        let depth = -deep * floor_of + deep * shoulder;
-        // The slope of that profile, taken in closed form and laid straight
-        // into the normal: the trough is a hand's breadth across and the
-        // terrain carries a metre to the cell, so it can never be dug in.
-        let falls = deep * 1.9 * share * (1.0 - smoothstep(0.7, 1.35, abs(share)));
-        let here = vec3<f32>(depth, falls * axle.x / half_width, falls * axle.y / half_width);
-        // The deepest hollow holds the ground where two of them meet.
-        if (here.x < rut.x) {
-            rut = here;
+        let gap = distance(place, near);
+        if (gap < best_gap) {
+            best_gap = gap;
+            best_across = dot(place - near, vec2<f32>(-heading.y, heading.x));
+            best_along = abs(back.z) + at;
+            best_half = abs(to.w);
+            best_heading = heading;
         }
     }
-    return Driven(bars, rut);
+    if (best_gap > best_half * 1.8 || best_half <= 0.0) {
+        return Driven(vec4<f32>(0.0), vec3<f32>(0.0));
+    }
+    // Fading by how far out of the tyre's own width the point lies, so the
+    // print ends where the tyre did and not where any grid happened to fall.
+    let within = 1.0 - smoothstep(0.80, 1.0, abs(best_across) / best_half);
+    let bars = tyre_bars(best_along, best_across, best_heading,
+        vec2<f32>(-best_heading.y, best_heading.x), driven.bar, within, footprint);
+
+    // The trough, across the tyre: a rounded floor out to the shoulder, then
+    // the spoil standing proud just outside it. How deep goes with how hard the
+    // ground was worked here, so a wheel that merely passed leaves a crease and
+    // one that has been over a dozen times leaves a rut.
+    let axle = vec2<f32>(-best_heading.y, best_heading.x);
+    let share = best_across / best_half;
+    let deep = RUT_DEEP_M * clamp(pressed, 0.0, 1.0);
+    let floor_of = 1.0 - smoothstep(0.0, 1.0, abs(share));
+    let shoulder = (1.0 - smoothstep(0.0, 0.55, abs(abs(share) - 1.22))) * 0.42;
+    let depth = -deep * floor_of + deep * shoulder;
+    // The slope of that profile, taken in closed form and laid straight into
+    // the normal: the trough is a hand's breadth across and the terrain carries
+    // a metre to the cell, so it can never be dug into the mesh.
+    let falls = deep * 1.9 * share * (1.0 - smoothstep(0.7, 1.35, abs(share)));
+    return Driven(bars, vec3<f32>(depth, falls * axle.x / best_half, falls * axle.y / best_half));
 }
 
 
