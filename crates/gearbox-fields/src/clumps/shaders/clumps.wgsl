@@ -220,7 +220,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.world_position = in.world_position;
     pbr_input.world_normal = normalize(in.ground_normal);
     pbr_input.V = calculate_view(in.world_position, false);
-    pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
+    // A grass blade stands on edge, so its face points sideways and wants the
+    // flattening that keeps a sward from shimmering. A broad leaf is held out
+    // flat, its face points at the sky, and flattening it too leaves the plant
+    // reading as a paper cut-out. How far the face is from upright decides it.
+    let face = normalize(in.world_normal);
+    let lit = select(-face, face, dot(face, pbr_input.V) > 0.0);
+    pbr_input.N = normalize(mix(
+        foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V),
+        lit,
+        smoothstep(0.35, 0.8, abs(face.y))));
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
     var color = apply_pbr_lighting(pbr_input);
     color = main_pass_post_lighting_processing(pbr_input, color);
