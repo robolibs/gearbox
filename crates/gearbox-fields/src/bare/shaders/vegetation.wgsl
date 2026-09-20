@@ -1,7 +1,6 @@
-// What stands in bare ground: stones half buried in it, and the tufts of
-// grass that take hold wherever it is left alone. Both are instanced — one
-// mesh drawn many times, each one placed, turned and sized from its own
-// number — so nothing is stored per stone but the number itself.
+// What stands in bare ground: stones, crumbs of its own earth and tufts of
+// grass, all instanced — one mesh drawn many times, each placed, turned and
+// sized from its own number.
 
 #import bevy_pbr::{
     mesh_view_bindings::{view, globals},
@@ -92,11 +91,6 @@ fn within_field(world_xz: vec2<f32>) -> bool {
 // ground material, and it must stay in step with it: the grass has to stop
 // exactly where the soil the material draws starts showing.
 // How much of the ground grass has taken. Mirrored in the ground material.
-// A clump of grass is not a disc: it is longer one way than the other and its
-// edge runs in and out. This and `clump_frame` are mirrored in the ground
-// material, which has to agree with them pixel for pixel.
-// The bearing is shared by every clump in a five-metre square, so neighbours
-// run parallel and grow together into ribbons instead of scattered spots.
 fn culled_vertex() -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
@@ -159,8 +153,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // not worn, rather than wherever the patches fall.
     let green = select(patchy_cover, mix(patchy_cover, 1.0, 0.85), field.tread.z > 0.0)
         * (1.0 - bared);
-    // Whether one stands here is a chance weighted by the patch, so its edge
-    // is ragged with stragglers rather than cut with a knife.
+    // A chance weighted by the patch, so its edge is ragged with stragglers.
     let luck = rand(id, 12u);
     let grassy = smoothstep(0.42, 0.70, green);
     // Stones lie where the grass does not, and thickest where a wheel has
@@ -177,9 +170,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     var out: VertexOutput;
     if (is_lump) {
-        // Mostly grit, a few pebbles, and now and then a stone worth kicking:
-        // the size is drawn from a tail, not from a range, and a tyre presses
-        // what it rolls over half into the soil.
+        // A tail, not a range: mostly grit, and a tyre presses what it
+        // rolls over half into the soil.
         var size = mix(0.002, 0.048, pow(rand(id, 6u), 5.5)) * alive * (1.0 - flat * 0.35);
         var squat = mix(0.4, 0.72, rand(id, 7u));
         // A crumb of earth is smaller than a stone and sits flatter in the
@@ -188,15 +180,13 @@ fn vertex(vertex: Vertex) -> VertexOutput {
             size = mix(0.004, 0.020, pow(rand(id, 6u), 2.2)) * alive * (1.0 - flat * 0.8);
             squat = mix(0.3, 0.6, rand(id, 7u));
         } else {
-            // Slabs as readily as blocks: one lump scaled the same every way is
-            // a round stone every time, however it is turned.
+            // One lump scaled the same every way is round every time.
             squat = mix(0.2, 0.8, rand(id, 7u));
         }
         var shape = vertex.position
             * vec3<f32>(mix(0.55, 1.5, rand(id, 50u)), 1.0, mix(0.55, 1.5, rand(id, 51u)));
-        // Chipped, not turned: whatever stands past a cutting plane is pushed
-        // back onto it, and what is left is a flat face. Two or three of them
-        // make a stone that has been broken rather than rolled.
+        // Chipped, not turned: what stands past a cutting plane is pushed back
+        // onto it, leaving a flat face.
         // Not all of them: a stone that has been in a river long enough is
         // round again, and a ground of nothing but chips reads as rubble.
         if (is_stone && rand(id, 49u) < 0.62) {
@@ -214,14 +204,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         }
         let local = shape * vec3<f32>(size, size * squat, size);
         let spun = turn * local.xz;
-        // Well down into the soil: a stone sitting on top of the ground reads
-        // as dropped there rather than turned up out of it.
+        // Down into the soil, or it reads as dropped rather than turned up.
         let sunk = size * squat * mix(mix(0.3, 0.62, rand(id, 8u)), 0.95, flat);
         out.world_position = vec4<f32>(ground + vec3<f32>(spun.x, local.y - sunk, spun.y), 1.0);
         let spun_n = turn * vertex.normal.xz;
         out.world_normal = normalize(vec3<f32>(spun_n.x, vertex.normal.y, spun_n.y));
-        // All of them warm: a stone lying in soil is stained by it, and a cold
-        // grey one reads as a pebble washed up on a beach.
+        // All warm: a cold grey one reads as a beach pebble.
         let kind = rand(id, 10u);
         var rock = vec3<f32>(0.088, 0.078, 0.066);
         if (kind < 0.34) {
@@ -255,21 +243,17 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     } else {
         let stature = mix(0.6, 1.3, pow(rand(clump_seed, 5u), 1.5));
         let domed = 1.0 - out_of_clump * out_of_clump * mix(0.25, 0.8, rand(clump_seed, 8u));
-        // Grass does not come up evenly inside a clump: it runs tall in one
-        // corner of it and thin in another, in patches of its own, and the eye
-        // averages out per-tuft randomness that has no shape to it.
+        // Lumpy inside a clump: the eye averages out per-tuft randomness that
+        // has no shape to it.
         let uneven = lattice(base, 0.37) * 0.62 + lattice(base + vec2<f32>(37.0, 11.0), 0.14) * 0.38;
-        // Drawn from a tail, not a range: most of a clump is short stuff, with
-        // the odd blade run up above it. Capped, because three skewed draws
-        // multiplied together throw out the occasional stalk twice the height
-        // of anything near it.
+        // Mostly short stuff. Capped, because three skewed draws multiplied
+        // together throw out a stalk twice the height of anything near it.
         let drawn = mix(0.05, 0.19, pow(rand(id, 6u), 2.1)) * stature * domed
             * mix(0.6, 1.3, uneven);
         let height = min(drawn, 0.17) * alive;
         let width = mix(0.005, 0.011, rand(id, 7u));
         let t = vertex.position.y;
         let leaf = vertex.position.z;
-        // Each leaf on its own bearing, bowing outward and tapering to a point.
         let bearing = yaw + leaf * 2.3999632 + rand(id, 13u) * 0.6;
         let out_of = vec2<f32>(cos(bearing), sin(bearing));
         let taper = width * (1.0 - t * t * 0.94);
@@ -284,8 +268,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_normal = ground_normal;
         let blade = mix(0.5, 1.15, rand(id, 9u)) * mix(0.5, 1.0, t)
             * (1.0 - flat * field.wheels.darkening);
-        // A clump at the thin edge of a patch is short of water, and goes over
-        // to straw — tips first — before those in the thick of it.
+        // Short of water at a patch's thin edge: straw, tips first.
         let thirst = 1.0 - smoothstep(0.40, 0.88, green);
         let dry = clamp(rand(clump_seed, 6u) * 0.5 + thirst * 0.55, 0.0, 1.0);
         let fresh = vec3<f32>(0.026, 0.082, 0.018);

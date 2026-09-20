@@ -1,7 +1,6 @@
-// Bare soil, made rather than scanned, so there is no tile to find in it at
-// any range: a swell, clods in three sizes, grit under them, and the comb of a
-// plough or of the wind. Anything finer than the pixel looking at it is left
-// out rather than drawn, or the ground crawls with static.
+// Bare soil, made rather than scanned, so there is no tile to find in it at any
+// range. Anything finer than the pixel looking at it is left out rather than
+// drawn, or the ground crawls with static.
 
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
@@ -31,9 +30,8 @@ struct BareGround {
     reach: vec4<f32>,
 };
 
-// Two surfaces met by their own heights: the taller wins the pixel outright,
-// and they mix only within a shallow band. Fading them instead leaves a grey
-// halo round every patch of grass.
+// The taller of two surfaces wins the pixel outright, and they mix only within
+// a shallow band. Fading them instead leaves a grey halo round every patch.
 fn height_blend(a: vec3<f32>, a_height: f32, a_share: f32,
     b: vec3<f32>, b_height: f32, b_share: f32) -> vec4<f32> {
     let band = 0.2;
@@ -46,8 +44,8 @@ fn height_blend(a: vec3<f32>, a_height: f32, a_share: f32,
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var<uniform> ground: BareGround;
 
-// The usual `fract(sin(dot(..)))` is not a hash at these coordinates: its own
-// periods beat against the lattice and draw whorls across the ground.
+// `fract(sin(dot(..)))` is not a hash at these coordinates: its own periods
+// beat against the lattice and draw whorls across the ground.
 fn hash21(p: vec2<f32>) -> f32 {
     let i = vec2<i32>(floor(p + 0.5));
     var h = u32(i.x) * 0x9E3779B9u ^ u32(i.y) * 0x85EBCA6Bu;
@@ -63,13 +61,9 @@ fn smooth2(v: vec2<f32>) -> vec2<f32> {
     return v * v * (3.0 - 2.0 * v);
 }
 
-// The hashes the tufts standing in this ground are placed by, copied from the
-// vegetation shader. The two must stay in step or the ground is green where
-// nothing grows.
-// The ground washed into whatever lies across each side. A field that stops
-// its own colour dead on its boundary shows a ruled line however softly the
-// plants either side interleave; over the last metre or so of it, the soil
-// takes on the colour of the ground it is running into.
+// The ground washed into whatever lies across each side: a field that stops its
+// own colour dead on its boundary shows a ruled line however softly the plants
+// either side interleave.
 fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
     var out = colour;
     let past = vec4<f32>(
@@ -81,16 +75,14 @@ fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
         if (reach <= 0.0) {
             continue;
         }
-        // Ragged, not a clean ramp: a soil boundary is never ruled either.
         let edge = past[i] / reach + 1.0 + (lattice(place, 1.7) - 0.5) * 0.55;
         out = mix(out, sides[i].rgb, clamp(edge, 0.0, 1.0) * 0.85);
     }
     return out;
 }
 
-// Distance to the nearest clump, as a share of its reach along its own
-// bearing: under one is inside it. Two cells out, because an elongated clump
-// reaches well past the cell it was seeded in.
+// Distance to the nearest clump as a share of its own reach: under one is
+// inside it. Two cells out, because an elongated clump overruns its own.
 fn under_clumps(place: vec2<f32>) -> f32 {
     let cell_m = 0.85;
     let cell = floor(place / cell_m);
@@ -115,9 +107,8 @@ fn under_clumps(place: vec2<f32>) -> f32 {
     return nearest;
 }
 
-// The comb across bare ground: a plough's furrows, or the wind's ripples. One
-// heading to a plot, dead straight — steering it by the lie of the land curls
-// the furrows into whorls.
+// The comb across bare ground: a plough's furrows, or the wind's ripples.
+// Steering it by the lie of the land curls the furrows into whorls.
 struct Comb {
     crest: f32,
     depth: f32,
@@ -135,9 +126,8 @@ fn comb(place: vec2<f32>, spacing: f32) -> Comb {
     let lean = vec2<f32>(cos(heading), sin(heading));
     let along = dot(place, lean);
     // Three waves that do not divide into one another, so the line never comes
-    // back round to where it started. A plough is steered and runs near enough
-    // straight; the wind is not, and its ripples wander by several of their own
-    // widths, so how much the line strays goes by how fine the comb is.
+    // back round. A plough is steered and runs near straight; the wind is not,
+    // so how far the line strays goes by how fine the comb is.
     let strays = 1.0 + 2.6 * smoothstep(0.8, 0.15, spacing);
     let wander = (sin(along * 0.11 + hash21(plot + 3.0) * 6.28) * 0.22
         + sin(along * 0.037 + 1.9) * 0.3
@@ -145,10 +135,9 @@ fn comb(place: vec2<f32>, spacing: f32) -> Comb {
     let across = dot(place, vec2<f32>(-lean.y, lean.x)) / max(spacing, 0.05) + wander;
     let furrow = floor(across);
     var comb: Comb;
-    // A furrow is not a wave. The plough turns a slice over, so the ridge
-    // stands up sharply on the side it was laid from and falls away long and
-    // shallow on the other. Still nought at both edges, or the step between
-    // two furrows of different depth draws a hairline crack down the field.
+    // A turned slice, not a wave: steep where it was laid from, falling away
+    // long on the other side. Nought at both edges, or the step between two
+    // furrows of different depth draws a hairline crack down the field.
     let within_furrow = across - furrow;
     comb.crest = sin(3.1415927 * pow(within_furrow, 0.68));
     let run = along / max(spacing * 18.0, 2.0);
@@ -160,24 +149,22 @@ fn comb(place: vec2<f32>, spacing: f32) -> Comb {
         into);
     comb.depth = mix(0.72, 1.28, hash21(vec2<f32>(furrow, plot.x + plot.y * 7.0)))
         * mix(0.45, 1.2, strength);
-    // A plough turns on the headland: a strip round the edge of the field
-    // worked over rather than drawn through. Without it the furrows run at
-    // full depth into whatever is next door and stop mid-stride on the line.
+    // The headland a plough turns on. Without it the furrows run at full depth
+    // into whatever is next door and stop mid-stride on the line.
     var boundary = 1.0;
     if (worked_field) {
         let to_edge = min(
             min(place.x - ground.extent.x, ground.extent.z - place.x),
             min(place.y - ground.extent.y, ground.extent.w - place.y));
-        // A headland is about a machine's width, and it is not ruled either.
-        boundary = smoothstep(0.0, 5.5, to_edge + (lattice(place, 7.0) - 0.5) * 2.2);
+            boundary = smoothstep(0.0, 5.5, to_edge + (lattice(place, 7.0) - 0.5) * 2.2);
     }
     comb.worked = boundary;
     return comb;
 }
 
-// Gradient noise, not value noise: value noise on a square lattice lays its own
-// grid through everything stacked on it, biased to 45 and 90 degrees. Each
-// octave is turned against the last for the same reason.
+// Gradient noise: value noise on a square lattice lays its own grid through
+// everything stacked on it, biased to 45 and 90 degrees. Octaves are turned
+// against one another for the same reason.
 fn slope_of(cell: vec2<f32>) -> vec2<f32> {
     let angle = hash21(cell) * 6.2831853;
     return vec2<f32>(cos(angle), sin(angle));
@@ -209,13 +196,8 @@ fn ground_fbm(p: vec2<f32>, octaves: i32) -> f32 {
     return sum / weight;
 }
 
-// How far this ground has been worn back to bare earth. A road is worn in two
-// ruts where the wheels run and less between them; a field is worn evenly, and
-// gets nought here. The same reading is made by whatever stands in the ground,
-// so the grass stops exactly where the soil starts showing.
-// A clod is a cell, not a hump of noise: it belongs to the seed nearest it and
-// falls to nothing where it meets its neighbours, which is what the gap
-// between the two nearest seeds gives directly.
+// A clod is a cell, not a hump of noise: the gap between the two nearest seeds
+// gives one that falls to nothing where it meets its neighbours.
 fn clods(p: vec2<f32>) -> f32 {
     let cell = floor(p);
     let f = p - cell;
@@ -239,16 +221,16 @@ fn clods(p: vec2<f32>) -> f32 {
     }
     let gap = clamp(next - nearest, 0.0, 1.0);
     let lump = gap * gap * (3.0 - 2.0 * gap);
-    // Scaled by the owning seed's own roll: otherwise the cell borders make one
-    // unbroken net and the ground reads as crazy paving.
+    // Scaled by the owning seed, or the cell borders make one unbroken net and
+    // the ground reads as crazy paving.
     return lump * mix(0.3, 1.0, hash21(owner + vec2<f32>(7.7, 1.3)));
 }
 
 
 fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     let clod = max(ground.grain.x, 0.05);
-    // Furrows narrower than the pixel that looks at them are not drawn. Left
-    // in, they beat against the pixel grid and the field moirés from the air.
+    // Furrows narrower than their own pixel beat against the pixel grid and
+    // the field moirés from the air.
     let combed_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
     let swell = ground_fbm(place / 26.0, 3);
     let coarseness = ground_fbm(place / 5.5 + vec2<f32>(31.0, 17.0), 2);
@@ -259,19 +241,14 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     let drawn = comb(place, ground.grain.w);
     let combed = drawn.crest * drawn.depth * drawn.worked;
     let broken = 1.0 + (1.0 - drawn.worked) * 1.4;
-    // Cracks are cut into the ground, not laid on it, so they belong to the
-    // height as much as to the colour. Only a ground that cracks, and only
-    // where it has dried out.
-    // A way driven often is not just a different colour: the wheels press it
-    // into hollows and crush the clods flat in them, so it lies lower and
-    // smoother than the ground either side. This is the relief the normal is
-    // taken from, not the mesh, so a rut shades but never breaks a silhouette.
+    // Driving presses the ground into hollows and crushes its clods flat. This
+    // is the relief the normal is taken from, not the mesh, so a rut shades but
+    // never breaks a silhouette.
     let pressed_in = worn(place, ground.extent, ground.tread);
     let crushed = 1.0 - pressed_in * 0.55;
     return swell * 0.08
         - pressed_in * 0.09
-        // How deep a comb cuts goes with how far apart its teeth are: a plough
-        // cuts a trench, the wind wrinkles.
+        // How deep a comb cuts goes with how far apart its teeth are.
         + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62) * combed_seen
         + slabs * ground.grain.y * mix(0.04, 0.12, coarseness) * broken * crushed
         + lumps * ground.grain.y * mix(0.12, 0.04, coarseness) * broken * crushed

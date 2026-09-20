@@ -1,10 +1,8 @@
-// What decides where a bare ground is bare. The ground material draws the soil
-// and the vegetation shader stands the grass, stones and crumbs in it, and the
-// two have to agree pixel for pixel: grass must stop exactly where the soil the
-// material draws starts showing. They used to agree by holding identical copies
-// of these, which nothing enforced — a sway noise that differed between them
-// once put the ruts of the ground and the ruts of the grass in different
-// places. One copy now, imported by both.
+// What decides where a bare ground is bare, imported by the ground material,
+// by what stands in it and by the clumps. They must agree pixel for pixel —
+// grass stops exactly where the soil starts showing — and held as separate
+// copies they drifted: a sway noise that differed between two of them once put
+// the ruts of the ground and the ruts of the grass in different places.
 
 fn pcg(input: u32) -> u32 {
     let state = input * 747796405u + 2891336453u;
@@ -51,10 +49,9 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, rand(seed, 33u)));
 }
 
-// How far the wheels have worn a ground back to bare earth. `extent` is the
-// field's rectangle, `tread` how it is worn: half the gauge between the ruts,
-// half a rut's width, how bare the rut is, how bare the rest is. A ground that
-// wears evenly has a tread of nought and gets nought here.
+// How far the wheels have worn a ground back to bare earth. `tread` is half the
+// gauge between the ruts, half a rut's width, how bare the rut is and how bare
+// the rest is; all nought for a ground that wears evenly.
 fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>) -> f32 {
     if (tread.z <= 0.0) {
         return 0.0;
@@ -70,7 +67,7 @@ fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>) -> f32 {
     let rut = abs(abs(off) - tread.x);
     let wheel = 1.0 - smoothstep(tread.y * 0.55, tread.y * 1.6, rut);
     // Ragged by moving where the edge falls, not by scaling the wear: as a
-    // multiplier this took a road bare across its width down to two thirds.
+    // multiplier it took a road bare across its width down to two thirds.
     let half = abs(dot(span, across)) * 0.5;
     let inside = half - abs(dot(place - middle, across));
     let verge = smoothstep(0.0, 1.15, inside + (lattice(place, 4.0) - 0.5) * 0.9);
