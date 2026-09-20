@@ -110,7 +110,12 @@ fn worn(place: vec2<f32>) -> f32 {
     let off = dot(place - middle, across) + sway;
     let rut = abs(abs(off) - field.tread.x);
     let wheel = 1.0 - smoothstep(field.tread.y * 0.55, field.tread.y * 1.6, rut);
-    return clamp(mix(field.tread.w, field.tread.z, wheel), 0.0, 1.0);
+    // Nothing is worn right to its edge: the verge closes in from both sides,
+    // and a road that stops dead at a straight line reads as a painted strip.
+    let half = abs(dot(span, across)) * 0.5;
+    let inside = half - abs(dot(place - middle, across));
+    let verge = smoothstep(0.0, 1.15, inside) * (0.55 + 0.45 * lattice(place, 4.0));
+    return clamp(mix(field.tread.w, field.tread.z, wheel) * clamp(verge, 0.0, 1.0), 0.0, 1.0);
 }
 
 // How much of the ground grass has taken. Mirrored in the ground material.
