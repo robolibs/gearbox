@@ -195,7 +195,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let settle = smoothstep(6.0, 30.0, distance) * 0.9;
     out.world_normal = normalize(mix(normal, ground_normal, max(flat * 0.7, settle)));
     out.uv = vertex.uv;
-    out.shade = vec3<f32>(0.85 + 0.3 * rand(id, 6u), flat, vertex.color.w);
+    // What of a plant is down among its own leaves and the sward around it
+    // sees little of the sky. Nothing here casts a shadow, so a plant that is
+    // lit as brightly at its root as at its crown reads as stuck on the ground
+    // rather than growing out of it.
+    let rooted = mix(0.42, 1.0, smoothstep(0.0, 0.2, rise));
+    out.shade = vec3<f32>((0.85 + 0.3 * rand(id, 6u)) * rooted, flat, vertex.color.w);
     out.ground_normal = ground_normal;
     return out;
 }
