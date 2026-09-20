@@ -16,6 +16,47 @@ mod tests {
         }
     }
 
+    fn road(name: &str, points: Vec<[f32; 2]>, wear: f32) -> crate::layout::WaySpec {
+        crate::layout::WaySpec { name: name.into(), points, width: 6.0, wear }
+    }
+
+    // Which line wears a field is settled in one expression, and it has three
+    // jobs at once: a field's own way, a road laid over the layout, and both
+    // together where a road crosses a lane.
+    #[test]
+    fn a_field_takes_its_own_way_and_any_road_that_crosses_it() {
+        let profiles = bevy::platform::collections::HashMap::default();
+        let plain = plot("plain", "grassland", [0.0, 0.0], [100.0, 100.0]);
+        let mut laned = plain.clone();
+        laned.way = vec![[10.0, 0.0], [10.0, 100.0]];
+        laned.way_width = Some(5.0);
+        laned.wear = Some(0.9);
+        let across = road("across", vec![[0.0, 50.0], [100.0, 50.0]], 0.4);
+        let far = road("far", vec![[0.0, 900.0], [100.0, 900.0]], 0.4);
+
+        // Nothing named and nothing crossing: the wear runs down the long axis.
+        let bare = placed_of(&[plain.clone()], &profiles, &[], &plain);
+        assert_eq!(bare.way.points(), 0);
+        assert_eq!(bare.wear, None);
+
+        // A road crossing a plain field lends it both its line and its wear.
+        let crossed = placed_of(&[plain.clone()], &profiles, &[across.clone()], &plain);
+        assert_eq!(crossed.way.points(), 2);
+        assert_eq!(crossed.wear, Some(0.4));
+
+        // A road that misses it leaves it alone.
+        let missed = placed_of(&[plain.clone()], &profiles, &[far], &plain);
+        assert_eq!(missed.way.points(), 0);
+        assert_eq!(missed.wear, None);
+
+        // Its own way comes first, and the road joins as the second line; the
+        // field's own wear wins, because it said so itself.
+        let both = placed_of(&[laned.clone()], &profiles, &[across], &laned);
+        assert_eq!(both.way.points(), 4);
+        assert_eq!(both.way.packed().2.y, 2.5, "its own half width leads");
+        assert_eq!(both.wear, Some(0.9));
+    }
+
     // The wash exists to hide the join between two different covers. Applied to
     // a join between two of the same it does the opposite: both sides flatten
     // their last metre towards one colour and the seam becomes visible. The
