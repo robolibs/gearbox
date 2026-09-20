@@ -278,6 +278,7 @@ impl Plugin for ControllerDiscoveryPlugin {
                     guard_chassis_inertia,
                     prepare_machine_physics,
                     wheel_forces::sync_machine_wheel_forces.after(crate::services::ServiceCommandSet),
+                    // wheel_forces::apply_motion_resistance,
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,
                     record_wheel_tracks,
@@ -1243,6 +1244,31 @@ fn apply_builtin_ackermann_cmd_vel(
                 .body(body_handle)
                 .and_then(|b| body_forward_vector(b).map(|f| b.linvel().dot(f)))
                 .unwrap_or(0.0);
+            // Nothing asked for is neutral, not a stop: the machine carries on
+            // under its own momentum and only the ground slows it. Asking for
+            // the opposite direction is the brake, and it goes on through zero
+            // into that direction, which is how a hydrostat is driven. Held to
+            // a speed of zero instead, a released pedal stopped the machine
+            // dead, which no mass does.
+            let neutral = requested.linear_mps.abs() < COAST_DEADBAND_MPS
+                && requested.angular_rps.abs() < COAST_DEADBAND_RPS;
+            let rolling = forward_mps.abs() > PARKED_MPS;
+            let coasting = neutral && rolling;
+            // Only a machine that has actually come to rest is held; held while
+            // it still rolls, the hold is a handbrake slammed on at speed.
+            let parked = neutral && !rolling;
+            if coasting {
+                // The command follows the machine, so pressing again picks up
+                // from the speed it really has rather than jumping to it.
+                runtime.applied_cmd_vel.insert(key.clone(), CmdVel {
+                    linear_mps: forward_mps as f32,
+                    angular_rps: cmd.angular_rps,
+                });
+            }
+            if std::env::var_os("GEARBOX_DRIVE_DEBUG").is_some() {
+                info!("drive {}: asked {:.2} cmd {:.2} actual {:.2} n={neutral} c={coasting} p={parked}",
+                    machine.id, requested.linear_mps, cmd.linear_mps, forward_mps);
+            }
             let wheel_speed_mps =
                 trimmed_wheel_speed(&mut runtime, &key, cmd.linear_mps as f64, forward_mps, dt as f64);
             let mut wheel_targets = wheel_joint_targets(
@@ -1306,10 +1332,16 @@ fn apply_builtin_ackermann_cmd_vel(
                 .map(Vec::len)
                 .unwrap_or(wheel_targets.len() + passive.len());
             let mut idle = Vec::new();
-            if cmd.linear_mps.abs() < 0.05 {
+            if parked {
                 wheel_targets.extend(passive);
             } else {
                 idle = passive;
+            }
+            // In neutral every wheel free-wheels: the driven ones join the
+            // passive ones and are merely rolled to match the ground, so no
+            // motor pushes or holds and the momentum is the machine's own.
+            if coasting {
+                idle.append(&mut wheel_targets);
             }
             let tire_pairs =
                 tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics);
@@ -1335,7 +1367,7 @@ fn apply_builtin_ackermann_cmd_vel(
                     controller,
                     &mut wheel_targets,
                     wheel_radius_m,
-                    cmd.linear_mps.abs() < 0.05,
+                    parked,
                 );
                 limits.driven_wheels = driven;
                 states.drive_limits.insert(key.clone(), limits);
@@ -1357,7 +1389,7 @@ fn apply_builtin_ackermann_cmd_vel(
             if let Some(turn) = &turn {
                 turn.configure_servos(&mut physics, steer_cap);
             }
-            let holds = runtime.parking.prepare(&physics, &wheel_targets, cmd.linear_mps.abs() < 0.05);
+            let holds = runtime.parking.prepare(&physics, &wheel_targets, parked);
             let applied = apply_joint_motors_with_holds(&mut physics, &wheel_targets, &steer_targets, steer_cap, &holds);
             if runtime.logged_steer.insert(key.clone()) {
                 info!(
@@ -1711,11 +1743,17 @@ const WHEEL_GRIP_USE: f64 = 0.9;
 const WHEEL_FULL_TORQUE_ERROR_RAD_S: f64 = 0.1;
 /// The same for a parked machine holding a slope.
 const WHEEL_HOLD_ERROR_RAD_S: f64 = 0.005;
+/// Below this a lever is at rest and the machine is in neutral.
+const COAST_DEADBAND_MPS: f32 = 0.05;
+const COAST_DEADBAND_RPS: f32 = 0.02;
+/// Below this the machine has stopped and may be held.
+const PARKED_MPS: f64 = 0.25;
+
 /// What a loaded machine can pull away at (m/s²). Twenty tonnes on soft
 /// ground takes seconds to reach working speed, not a frame: set high enough
 /// to answer a command at once, a harvester left the line like a go-kart.
 /// A short command now gets the speed such a command really reaches.
-const CMD_ACCEL_MPS2: f32 = 0.9;
+const CMD_ACCEL_MPS2: f32 = 1.2;
 /// What it can shed on the brakes (m/s²). Firmer than pulling away, because
 /// brakes outrank a driveline, but nothing like a car: run too hard the mass
 /// pitches onto the front axle every time a command goes to zero, which is
@@ -2552,7 +2590,7 @@ const WHEEL_TRACK_CONTACT_SLACK_M: f32 = 0.08;
 
 /// The tyre's axle in the wheel body's frame, its width and its radius:
 /// the thinnest and the largest axis of the largest collider's local box.
-fn body_tyre_geometry(
+pub(crate) fn body_tyre_geometry(
     physics: &crate::physics::PhysicsWorld,
     body: BodyId,
 ) -> Option<(DVec3, f64, f64)> {

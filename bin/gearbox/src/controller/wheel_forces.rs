@@ -807,3 +807,152 @@ pub(super) fn sync_machine_wheel_forces(
         }
     }
 }
+
+/// What the ground takes back from a machine that is merely rolling.
+///
+/// A tyre is not a hoop. It flattens under load, the carcass loses energy
+/// flexing back out, and on ground that gives way it has to climb out of the
+/// rut it just made. Both losses scale with the load the tyre carries, so the
+/// retarding force is a coefficient times that load — which is what the whole
+/// of `Crr` is. Nothing modelled any of it, so a machine held its commanded
+/// speed to the centimetre and, let go of, coasted for ever.
+const ROLL_RESIST_BASE: f64 = 0.022;
+/// What the carcass adds, per unit of deflection over the free radius. A soft
+/// tyre lays down more patch and loses more in it, so it takes more pulling —
+/// the same flattening that makes it harder to turn.
+const ROLL_RESIST_FLEX: f64 = 0.17;
+/// The resistance fades in over this speed, so it dies away with the motion
+/// rather than shoving a machine that has already stopped.
+const ROLL_RESIST_FADE_MPS: f64 = 0.25;
+
+/// How much of its load a tyre gives back to the ground, from how far it is
+/// flattened. A tyre reporting no deflection is taken as a hard one.
+fn rolling_resistance(deflection_m: f64, radius_m: f64) -> f64 {
+    let flex = if radius_m > 1e-3 {
+        (deflection_m / radius_m).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    ROLL_RESIST_BASE + ROLL_RESIST_FLEX * flex
+}
+
+/// Every tyre on the ground drags, and the machine is what it drags on.
+///
+/// The drag is worked out tyre by tyre, from the load each one carries and how
+/// far it is flattened, and then put on the chassis as one retarding impulse.
+/// Not on the wheels: a driven wheel is held to a speed by its motor, which
+/// simply cancels anything applied to it, and an idle one has almost no torque
+/// to give, so the same drag stops it dead and it skids along as a brake. On
+/// the chassis it is what it should be — something the driveline works against.
+pub(super) fn apply_motion_resistance(
+    inventory: Res<ControllerInventory>,
+    runtime: Res<ControllerRuntimeState>,
+    active: Res<gearbox_api::PhysicsActive>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
+) {
+    if !active.0 || !physics.uses_wheel_forces() {
+        return;
+    }
+    // Given as an impulse over the physics this frame will run, because a
+    // wrench put on a body stays on it: added every frame it piles up, and a
+    // few seconds of that pins the machine to the ground.
+    let over = physics.dt() * f64::from(physics.pending_steps.max(1));
+    if !(over > 0.0) {
+        return;
+    }
+    for machine in &inventory.machines {
+        let Some(wheels) = runtime.machine_wheels.get(&machine.id) else {
+            continue;
+        };
+        // The heaviest body of the machine is its chassis, and everything else
+        // hangs off it; nothing here needs to know which prim that was.
+        let Some(chassis) = runtime
+            .machine_bodies
+            .get(&machine.id)
+            .and_then(|bodies| {
+                bodies
+                    .iter()
+                    .filter(|body| !wheels.contains(body))
+                    .filter_map(|body| Some((*body, physics.body(*body)?.mass())))
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+            })
+            .map(|(body, _)| body)
+        else {
+            continue;
+        };
+        // The drag slows the whole machine, so it is shed at the rate its
+        // whole mass gives, not the chassis body's alone.
+        let machine_mass: f64 = runtime
+            .machine_bodies
+            .get(&machine.id)
+            .into_iter()
+            .flatten()
+            .filter_map(|body| physics.body(*body))
+            .map(|body| body.mass())
+            .sum();
+        let mut drag = 0.0;
+        for &wheel in wheels {
+            let Some(output) = physics.wheel_output(wheel) else {
+                continue;
+            };
+            if !output.in_contact || !(output.normal_force > 0.0) {
+                continue;
+            }
+            let coefficient = output
+                .pressure
+                .map(|tyre| rolling_resistance(tyre.deflection, tyre.radius))
+                .unwrap_or(ROLL_RESIST_BASE);
+            drag += coefficient * output.normal_force;
+        }
+        if !(drag > 0.0) || !drag.is_finite() {
+            continue;
+        }
+        let Some(body) = physics.body(chassis) else {
+            continue;
+        };
+        // Only the travel over the ground is resisted, and it fades out with
+        // the motion so a machine that has stopped is not shoved backwards.
+        let travel = body.linvel();
+        let travel = DVec3::new(travel.x, 0.0, travel.z);
+        let speed = travel.length();
+        if !(speed > 1e-4) {
+            continue;
+        }
+        // Taken off the speed outright rather than handed to the solver as an
+        // impulse: the step runs several substeps and an impulse given to it
+        // is felt once per substep, which multiplied the drag by eight and
+        // pinned the machine to the spot. Never more than the speed itself,
+        // so resistance can only stop a machine, never reverse it.
+        let mass = machine_mass.max(1.0);
+        let shed =
+            (drag * (speed / ROLL_RESIST_FADE_MPS).tanh() / mass * over).clamp(0.0, speed);
+        if !(shed > 0.0) {
+            continue;
+        }
+        let slowed = travel * ((speed - shed) / speed);
+        if let Some(body) = physics.body_mut(chassis) {
+            let full = body.linvel();
+            body.set_linvel(DVec3::new(slowed.x, full.y, slowed.z), true);
+        }
+    }
+}
+
+#[cfg(test)]
+mod resistance_tests {
+    use super::*;
+
+    // A softer tyre is flattened further and takes more pulling; that is the
+    // whole of what pressure does to how a machine rolls and turns.
+    #[test]
+    fn a_flatter_tyre_resists_more_and_a_hard_one_still_resists() {
+        let hard = rolling_resistance(0.058, 0.75);
+        let soft = rolling_resistance(0.148, 0.75);
+        assert!(soft > hard * 1.5, "soft {soft} against hard {hard}");
+        assert!(hard > ROLL_RESIST_BASE);
+        // A tyre reporting nothing still rolls against the ground.
+        assert_eq!(rolling_resistance(0.0, 0.75), ROLL_RESIST_BASE);
+        assert_eq!(rolling_resistance(0.1, 0.0), ROLL_RESIST_BASE);
+        // However flat it goes it never becomes a brake.
+        assert!(rolling_resistance(10.0, 0.75) <= ROLL_RESIST_BASE + ROLL_RESIST_FLEX);
+    }
+}
