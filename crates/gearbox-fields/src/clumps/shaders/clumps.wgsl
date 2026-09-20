@@ -8,6 +8,9 @@
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean}
+// The patches a bare ground thins its own grass by, so a weed standing in
+// one comes up where that grass does and not in a patch of its own.
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::taken
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -124,21 +127,6 @@ fn patch_noise(p: vec2<f32>) -> f32 {
 // The nine-metre grass patches of a bare ground, hashed exactly as that
 // ground's own shader hashes them. A different hash here would put the weeds
 // in patches of their own that have nothing to do with where the grass is.
-fn grass_patch(place: vec2<f32>) -> f32 {
-    let cell = floor(place / 9.0);
-    let f = fract(place / 9.0);
-    let ease = f * f * (3.0 - 2.0 * f);
-    let corner = array<vec2<f32>, 4>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
-    var heights = array<f32, 4>();
-    for (var i = 0; i < 4; i = i + 1) {
-        let c = cell + corner[i];
-        var h = u32(i32(c.x)) * 0x9E3779B9u ^ u32(i32(c.y)) * 0x85EBCA6Bu;
-        h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
-        heights[i] = f32(h) / 4294967295.0;
-    }
-    return mix(mix(heights[0], heights[1], ease.x), mix(heights[2], heights[3], ease.x), ease.y);
-}
-
 // A vertex of an instance culled before any shaping: outside the clip volume.
 fn culled_vertex() -> VertexOutput {
     var out: VertexOutput;
@@ -171,7 +159,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // On bare ground a weed comes up where the grass has, not where this
         // pack would have put it: the same nine-metre patches the tufts of that
         // ground are thinned by, and only the given share out on the bare.
-        patchiness = smoothstep(0.42, 0.70, grass_patch(base));
+        patchiness = smoothstep(0.42, 0.70, taken(base));
         loose = field.follow_grass;
     }
     let kept = rand(id, 9u) < mix(loose, 1.0, patchiness);
