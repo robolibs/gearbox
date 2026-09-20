@@ -23,7 +23,7 @@ pub use host::{
     CoverBackdrop, CoverHeights, CoverSurfaceMesh, CoverTerrain, CoverTerrainRoots, CoverWind,
     HeightSource,
 };
-pub use layout::{FieldBounds, FieldLayout};
+pub use layout::{FieldBounds, FieldLayout, Hollows};
 pub use runtime::{CoverPending, heightmap_image};
 pub use profile::{
     FieldProfile, FieldProfiles, GroundSurface, MaterialSurface, SurfaceGeometry,

@@ -193,9 +193,14 @@ fn cell_from_env(name: &str, fallback: f32) -> f32 {
         .unwrap_or(fallback)
 }
 
-fn build_ground(land: Land, center: Vec2) -> GroundParts {
+/// The ways of the layout sink the ground they run over, so a track is a
+/// hollow the wheels drop into rather than a stripe painted on a flat field.
+/// The grid is what the collider is built from, so this is felt as well as seen.
+fn build_ground(land: Land, center: Vec2, hollows: &gearbox_fields::Hollows) -> GroundParts {
     let cell = cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M);
-    let grid = HeightGrid::sample_at(center, SIZE_M, cell, |x, z| land.height(x, z));
+    let lie = |x: f32, z: f32| land.height(x, z) - hollows.depth_at(x, z);
+    let grid = HeightGrid::sample_at(center, SIZE_M, cell, lie);
+    // The horizon is far enough off that no road shows on it.
     let horizon = horizon_mesh(&grid, |x, z| land.height(x, z));
     let heightmap = gearbox_fields::heightmap_image(&grid);
     GroundParts { land, heightmap, center, cell, grid, horizon }
@@ -268,6 +273,7 @@ fn spawn_procedural_terrain(
     horizon: Query<(&Name, &MeshMaterial3d<StandardMaterial>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     sites: Res<Sites>,
+    layout: Res<gearbox_fields::FieldLayout>,
 ) {
     let preset = TerrainPreset::from_env();
     if preset == TerrainPreset::Flat {
@@ -275,7 +281,8 @@ fn spawn_procedural_terrain(
         return;
     }
     let started = std::time::Instant::now();
-    let parts = build_ground(Land::of(&sites, sites.current), Vec2::ZERO);
+    let hollows = gearbox_fields::Hollows::of(&layout);
+    let parts = build_ground(Land::of(&sites, sites.current), Vec2::ZERO, &hollows);
     let cell = parts.cell;
     let terrain = install_ground(
         &mut commands,
@@ -324,6 +331,7 @@ fn follow_view(
     mut dismantling: Local<std::collections::VecDeque<Entity>>,
     children: Query<&Children>,
     cover_pending: Res<gearbox_fields::CoverPending>,
+    layout: Res<gearbox_fields::FieldLayout>,
 ) {
     let Some(mut terrain) = terrain else {
         *pending = None;
@@ -409,7 +417,11 @@ fn follow_view(
         return;
     }
     let land = Land::of(&sites, sites.current);
-    *pending = Some(bevy::tasks::AsyncComputeTaskPool::get().spawn(async move { build_ground(land, wanted) }));
+    let hollows = gearbox_fields::Hollows::of(&layout);
+    *pending = Some(
+        bevy::tasks::AsyncComputeTaskPool::get()
+            .spawn(async move { build_ground(land, wanted, &hollows) }),
+    );
 }
 
 /// The ground machines stand on, in chunks kept around every moving body

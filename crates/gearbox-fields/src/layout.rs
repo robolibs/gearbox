@@ -123,6 +123,42 @@ mod tests {
         }
     }
 
+    // The hollow sinks the terrain grid, which is what the collider is built
+    // from, so getting its shape wrong is felt and not just seen.
+    #[test]
+    fn a_hollow_is_deepest_on_the_way_and_nothing_off_it() {
+        let layout: FieldLayout = serde_json::from_str(
+            r#"{"default":"grassland","ways":[{"name":"lane","width":6.0,"wear":0.5,
+                "points":[[0,0],[100,0]]}]}"#,
+        )
+        .unwrap();
+        let hollows = Hollows::of(&layout);
+        let on_it = hollows.depth_at(50.0, 0.0);
+        // 0.08 + 0.5 * 0.35, the sink a half-worn way settles to.
+        assert!((on_it - 0.255).abs() < 1e-5, "on the way: {on_it}");
+        // A wheel must ride in and out, so the steepest side stays gentle.
+        let slope = (0..60)
+            .map(|step| {
+                let at = step as f32 * 0.1;
+                (hollows.depth_at(50.0, at) - hollows.depth_at(50.0, at + 0.1)).abs() / 0.1
+            })
+            .fold(0.0f32, f32::max);
+        assert!(slope < 0.2, "sides of one in {:.0}", 1.0 / slope);
+        // Level with the field again well outside the way and its sides.
+        assert_eq!(hollows.depth_at(50.0, 3.0 + FADE_M + 0.1), 0.0);
+        assert_eq!(hollows.depth_at(50.0, 400.0), 0.0);
+        assert_eq!(hollows.depth_at(-400.0, 0.0), 0.0);
+        // Sides that fall away, never a step.
+        let mut last = on_it;
+        for step in 1..40 {
+            let here = hollows.depth_at(50.0, step as f32 * 0.15);
+            assert!(here <= last + 1e-6, "the sides must not rise again");
+            assert!(last - here < 0.05, "no step in the sides");
+            last = here;
+        }
+        assert!(Hollows::of(&FieldLayout::default()).depth_at(0.0, 0.0) >= 0.0);
+    }
+
     #[test]
     fn a_road_that_misses_a_field_clips_to_nothing() {
         let road = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0)];
@@ -357,6 +393,90 @@ impl WaySpec {
     pub fn across(&self, bounds: FieldBounds) -> Option<Way> {
         Way::clipped(&self.line(), self.width * 0.5, bounds)
     }
+}
+
+/// How deep the ways of a layout sit below the ground around them, as a plain
+/// function of world XZ. A track used for years is a hollow, not a stripe of
+/// colour on a flat field: this is what lets one break the skyline at a
+/// grazing angle, and what a wheel feels when it drops into one — the terrain
+/// grid carries the collider, so sinking it here sinks it for the physics too.
+#[derive(Clone, Debug, Default)]
+pub struct Hollows(Vec<Hollow>);
+
+#[derive(Clone, Debug)]
+struct Hollow {
+    line: Vec<Vec2>,
+    half: f32,
+    sink: f32,
+    min: Vec2,
+    max: Vec2,
+}
+
+impl Hollows {
+    /// A metre of cell means the ruts themselves can never be geometry; the
+    /// trough the whole way sits in is several metres across and can.
+    pub fn of(layout: &FieldLayout) -> Self {
+        let hollows = layout
+            .ways
+            .iter()
+            .filter(|way| way.points.len() >= 2 && way.width > 0.0)
+            .map(|way| {
+                let line = way.line();
+                let half = way.width * 0.5;
+                let reach = Vec2::splat(half + FADE_M);
+                let fold = |pick: fn(Vec2, Vec2) -> Vec2| {
+                    line.iter().copied().reduce(pick).unwrap_or(Vec2::ZERO)
+                };
+                Hollow {
+                    half,
+                    // Barely marked where a lane is hardly worn, a proper sunken
+                    // way where it is a road. Even at its deepest the sides are
+                    // gentler than one in six, so a wheel rides in and out of it
+                    // rather than catching on the lip.
+                    sink: 0.08 + way.wear.clamp(0.0, 1.0) * 0.35,
+                    min: fold(Vec2::min) - reach,
+                    max: fold(Vec2::max) + reach,
+                    line,
+                }
+            })
+            .collect();
+        Self(hollows)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How far the ground drops here, in metres; nought away from every way.
+    pub fn depth_at(&self, x: f32, z: f32) -> f32 {
+        let place = Vec2::new(x, z);
+        let mut deepest = 0.0f32;
+        for hollow in &self.0 {
+            // Nearly every point of a square kilometre is nowhere near a road,
+            // and the walk down its legs is far dearer than four compares.
+            if place.cmplt(hollow.min).any() || place.cmpgt(hollow.max).any() {
+                continue;
+            }
+            let mut nearest = f32::MAX;
+            for leg in hollow.line.windows(2) {
+                let run = leg[1] - leg[0];
+                let length = run.length().max(1e-4);
+                let at = (place - leg[0]).dot(run / length).clamp(0.0, length);
+                nearest = nearest.min(place.distance(leg[0] + run / length * at));
+            }
+            let sides = 1.0 - smoothstep(hollow.half * 0.55, hollow.half + FADE_M, nearest);
+            deepest = deepest.max(hollow.sink * sides);
+        }
+        deepest
+    }
+}
+
+/// How far out a hollow's sides run past the worn part of the way.
+const FADE_M: f32 = 1.6;
+
+fn smoothstep(from: f32, to: f32, at: f32) -> f32 {
+    let t = ((at - from) / (to - from)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[derive(Resource, Clone, Debug, Deserialize)]
