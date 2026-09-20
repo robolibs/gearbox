@@ -82,7 +82,9 @@ it borders, because the ground there is disturbed and nothing crops or cuts it. 
 measured in metres out from the way's edge (`way_beyond` in `cover.wgsl`) rather than from
 the wear, because two metres out — where a verge still is one — the wear is already nought
 and reads the same as open field; keyed on the wear it outlines the road in a ribbon of green
-instead. So a way is four bands and not two: field, verge, damp edge, road.
+instead. So a way is four bands and not two: field, verge, damp edge, road. Only an authored
+way gets the thickening: a field worn across its whole width has no room inside itself for a
+verge, and the band would fall in its neighbour, which knows nothing of it.
 
 The wear is read by the ground material and by everything standing in it alike, so it
 decides the soil's colour as it wears down to the stone under it, whether grass holds,
