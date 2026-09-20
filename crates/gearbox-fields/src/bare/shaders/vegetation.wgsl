@@ -196,7 +196,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // A crumb of earth is smaller than a stone and sits flatter in the
         // ground, and a wheel crushes it outright rather than pressing it in.
         if (!is_stone) {
-            size = mix(0.005, 0.05, pow(rand(id, 6u), 2.8)) * alive * (1.0 - flat * 0.8);
+            size = mix(0.004, 0.020, pow(rand(id, 6u), 2.2)) * alive * (1.0 - flat * 0.8);
             squat = mix(0.3, 0.6, rand(id, 7u));
         } else {
             // Slabs as readily as blocks: one lump scaled the same every way is

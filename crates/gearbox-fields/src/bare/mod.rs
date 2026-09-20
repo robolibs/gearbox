@@ -157,13 +157,14 @@ fn standing(stones: f32, clods: f32, tufts: f32, weeds: f32, soil: fn() -> Mesh)
             lod_band: [0.0, f32::MAX],
         },
         // Crumbs are smaller than stones and far more of them, so they are not
-        // worth carrying anything like as far.
+        // worth carrying anything like as far — but the fade has to be long, or
+        // the ground ends in a ring of coarse texture with smooth beyond it.
         VegetationLayer {
             shader,
             template: soil,
             density: clods,
-            fade_start: 3.0,
-            fade_end: 14.0,
+            fade_start: 6.0,
+            fade_end: 26.0,
             inverse_square_thinning: true,
             follow_grass: 0.0,
             albedo: None,
