@@ -151,3 +151,38 @@ fn imported_kubota_fleet() {
         }
     }
 }
+
+#[cfg(feature = "profile")]
+#[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET and GEARBOX_TRACE; four active tractors"]
+fn imported_kubota_fleet_trace() {
+    use tracing_subscriber::prelude::*;
+
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    let path = std::env::var_os("GEARBOX_TRACE").expect("set GEARBOX_TRACE");
+    let mut fixture = Fixture::load_fleet(Path::new(&asset), true, 4);
+    for _ in 0..600 {
+        fixture.tick();
+    }
+    fixture.drive_fleet(4);
+    for _ in 0..600 {
+        fixture.tick();
+    }
+    fixture.verify_fleet(4, true, true);
+    let (layer, flush) = tracing_chrome::ChromeLayerBuilder::new()
+        .file(path)
+        .include_args(true)
+        .build();
+    let subscriber = tracing_subscriber::registry().with(layer.with_filter(
+        tracing_subscriber::EnvFilter::new("off,molla_solvers=debug"),
+    ));
+    let dispatch = tracing::Dispatch::new(subscriber);
+    {
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        for _ in 0..120 {
+            fixture.tick();
+        }
+    }
+    drop(flush);
+    fixture.verify_fleet(4, true, true);
+}
