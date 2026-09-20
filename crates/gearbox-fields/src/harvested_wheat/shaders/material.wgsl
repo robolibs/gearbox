@@ -338,7 +338,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         worn_ground.way, worn_ground.way_more, worn_ground.way_shape,
         worn_ground.bar, worn_ground.bar_more, footprint_here);
     let mark = sample_wheel_mark(tracks, wheels, in.world_position.xz);
-    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.across, mark.roll,
+    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
         wheels.bar, mark.press, footprint_here);
     let print = select(rolled_print, laid_print, laid_print.x >= rolled_print.x);
     pbr_input.N = normalize(

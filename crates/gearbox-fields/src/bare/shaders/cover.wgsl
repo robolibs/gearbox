@@ -600,7 +600,7 @@ fn wheel_print(along: f32, across: f32, share: f32, roll: vec2<f32>, bar: vec4<f
     // width either way. The cut is held inside even the narrowest of those, or
     // on the stretches where the stamp happens to fall short it is the stamp's
     // ragged edge that shows through rather than this one.
-    let within = 1.0 - smoothstep(0.88, 1.02, abs(share));
+    let within = 1.0 - smoothstep(0.88, 1.02, share);
     // A fresh mark holds its print; an old one has had the weather on it.
     return tyre_bars(along, across, roll, axle, bar,
         smoothstep(0.04, 0.40, press) * within, footprint);

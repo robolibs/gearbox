@@ -213,7 +213,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let laid_print = way_print(in.world_position.xz, edges.extent, edges.tread,
         edges.way, edges.way_more, edges.way_shape, edges.bar, edges.bar_more, footprint_here);
     let mark = sample_wheel_mark(trample, trample_params, in.world_position.xz);
-    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.across, mark.roll,
+    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
         trample_params.bar, mark.press, footprint_here);
     let print = select(rolled_print, laid_print, laid_print.x >= rolled_print.x);
     pbr_input.N = normalize(

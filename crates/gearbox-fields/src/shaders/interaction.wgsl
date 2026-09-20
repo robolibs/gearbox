@@ -83,6 +83,15 @@ struct WheelMark {
     across: f32,
     metres: vec2<f32>,
     roll: vec2<f32>,
+    /// How far off the tyre's middle this point lies as a share of its half
+    /// width, taken as the *nearest* of what the four texels round it say
+    /// rather than their average. Through a turn each of them was stamped with
+    /// the axle pointing a different way, so they disagree about where across
+    /// the tyre a point is; averaged, the answer reads as outside the tyre and
+    /// the mark is cut away exactly where the machine turned. The ground a
+    /// turning wheel covers is the union of its poses, and the nearest reading
+    /// is that union.
+    inside: f32,
 }
 
 const TREAD_PITCH_M: f32 = 0.192;
@@ -109,6 +118,7 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
     let near_across = (f32(texel.a >> 8u) - 128.0) * 0.005
         + dot(near_out, vec2<f32>(-near_roll.y, near_roll.x));
     let near_width = max(f32(texel.a & 255u) * 0.005, 0.01);
+    var closest = 1e9;
     var across_sum = 0.0;
     var roll_sum = vec2<f32>(0.0);
     var width_sum = 0.0;
@@ -132,10 +142,11 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
         let out_by = (t - vec2<f32>(at)) / params.texels_per_metre;
         let its_across = select(near_across,
             (f32(there.a >> 8u) - 128.0) * 0.005 + dot(out_by, its_axle), known);
+        let its_width = select(near_width, max(f32(there.a & 255u) * 0.005, 0.01), known);
+        closest = min(closest, abs(its_across) / max(its_width, 0.01));
         across_sum = across_sum + share * its_across;
         roll_sum = roll_sum + share * its_roll;
-        width_sum = width_sum
-            + share * select(near_width, max(f32(there.a & 255u) * 0.005, 0.01), known);
+        width_sum = width_sum + share * its_width;
     }
     let weight = 1.0;
     // `texel.a` nought means this map carries no tread channels at all — the
@@ -144,7 +155,7 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
     // every bar then leans the same way and the chevron comes out as half of
     // itself, drawn as parallel diagonals.
     if (press < 0.001 || texel.g == 0u || texel.a == 0u) {
-        return WheelMark(0.0, 0.0, 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0));
+        return WheelMark(0.0, 0.0, 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0), 1e9);
     }
     // Rolled distance stays the nearest texel's, unblended: the stamp writes a
     // place projected on the heading, so neighbours already agree to a
@@ -158,7 +169,7 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
     let across = across_sum / weight;
     let half_width = width_sum / weight;
     return WheelMark(press, f32(texel.g & 15u) / 15.0, along / TREAD_PITCH_M, across / half_width,
-        vec2<f32>(along, across), roll);
+        vec2<f32>(along, across), roll, closest);
 }
 
 // How much of a tyre's width covers this point: one in the middle of it, nought
@@ -177,5 +188,5 @@ fn wheel_edge(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>)
     if (mark.press <= 0.0) {
         return 1.0;
     }
-    return 1.0 - smoothstep(0.88, 1.02, abs(mark.across));
+    return 1.0 - smoothstep(0.88, 1.02, mark.inside);
 }

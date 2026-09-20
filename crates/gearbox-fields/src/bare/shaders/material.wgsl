@@ -283,7 +283,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let laid_print = way_print(place, ground.extent, ground.tread,
         ground.way, ground.way_more, ground.way_shape, ground.bar, ground.bar_more, pixel_m);
     let mark = sample_wheel_mark(tracks, wheels, place);
-    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.across, mark.roll,
+    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
         wheels.bar, mark.press, pixel_m);
     let print = select(rolled_print, laid_print, laid_print.x >= rolled_print.x);
     let laid = read.x;
