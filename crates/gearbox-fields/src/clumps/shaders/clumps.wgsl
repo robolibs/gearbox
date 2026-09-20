@@ -10,7 +10,7 @@
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean}
 // The patches a bare ground thins its own grass by, so a weed standing in
 // one comes up where that grass does and not in a patch of its own.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{taken, worn}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{taken, worn, way_beyond}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -165,10 +165,16 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         patchiness = smoothstep(0.42, 0.70, taken(base));
         loose = field.follow_grass;
     }
-    // Nothing broad-leaved survives where a way is worn; a few stragglers hold
-    // on at its edge, which is where the wear is already fading.
+    // Nothing broad-leaved survives where a way is worn. Its verge is the other
+    // way about and carries more than the field it borders: the ground there is
+    // disturbed, nothing crops it and nothing cuts it. Measured in metres out
+    // from the way's own edge and faded over two and a half of them, or the
+    // extra lands in the half metre where the wear happens to be fading and
+    // outlines the road in a ribbon of green instead of thickening beside it.
     let bared = worn(base, field.bounds, field.tread, field.way, field.way_more, field.way_shape);
-    let kept = rand(id, 9u) < mix(loose, 1.0, patchiness) * (1.0 - bared);
+    let beyond = way_beyond(base, field.tread, field.way, field.way_more, field.way_shape);
+    let verge = (1.0 - smoothstep(0.0, 2.5, beyond)) * (1.0 - bared);
+    let kept = rand(id, 9u) < mix(loose, 1.0, patchiness) * (1.0 - bared) + verge * 0.3;
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
     if (coverage <= 0.0) {

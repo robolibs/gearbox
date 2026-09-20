@@ -211,6 +211,27 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     return clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0);
 }
 
+// How far out from a way's own edge this point stands, in metres, taking the
+// nearer of the two lines; a large number where the field has no way. A verge
+// is a band *outside* a way and the wear cannot locate it — two metres out,
+// where a verge still is one, the wear is already nought and reads the same as
+// open field. Only what is scattered rather than shaded wants this, so it is a
+// second walk of the line and not a wider answer from `worn()`: a clump asks
+// once, where a blade of grass would ask hundreds of thousands of times.
+fn way_beyond(place: vec2<f32>, tread: vec4<f32>,
+              way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> f32 {
+    let first = i32(shape.x);
+    if (max(tread.z, tread.w) <= 0.0 || first < 2) {
+        return 1e30;
+    }
+    var out = way_offset(place, way, more, 0, first).w - max(shape.y, 0.1);
+    let second = i32(shape.z);
+    if (second >= 2) {
+        out = min(out, way_offset(place, way, more, first, second).w - max(shape.w, 0.1));
+    }
+    return max(out, 0.0);
+}
+
 // How far the wheels have worn a ground back to bare earth. `tread` is half the
 // gauge between the ruts, half a rut's width, then how hard each of the two
 // ways is worn; all nought for a ground nothing has worn. `shape` is how many

@@ -77,6 +77,13 @@ top of a field rather than worn into it. It is deliberately narrow — widen it 
 the crown between the ruts, and a half-worn track flattens into one dark band instead of two
 ruts with grass up the middle.
 
+Beyond that the weeds **thicken** for a couple of metres: a verge carries more than the field
+it borders, because the ground there is disturbed and nothing crops or cuts it. That one is
+measured in metres out from the way's edge (`way_beyond` in `cover.wgsl`) rather than from
+the wear, because two metres out — where a verge still is one — the wear is already nought
+and reads the same as open field; keyed on the wear it outlines the road in a ribbon of green
+instead. So a way is four bands and not two: field, verge, damp edge, road.
+
 The wear is read by the ground material and by everything standing in it alike, so it
 decides the soil's colour as it wears down to the stone under it, whether grass holds,
 how thickly stones lie, and how far the wheels have pressed it. Driving over a field wears
