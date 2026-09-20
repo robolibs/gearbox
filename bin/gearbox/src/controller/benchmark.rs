@@ -11,6 +11,16 @@ mod fleet;
 #[path = "benchmark/terrain.rs"]
 mod terrain;
 
+#[path = "benchmark/oxbo.rs"]
+mod oxbo;
+
+#[derive(Clone, Copy, PartialEq)]
+enum FixtureKind {
+    Kubota,
+    Krampe,
+    Oxbo,
+}
+
 #[derive(Clone)]
 struct FleetMachine {
     chassis: BodyId,
@@ -38,15 +48,19 @@ impl Fixture {
     fn load_backend(path: &Path, molla: bool) -> Self {
         let source = usd_bevy::UsdSource::from_file(path).expect("read benchmark asset");
         let stage = source.open_stage().expect("open benchmark stage");
-        let kubota = match path.file_name().unwrap().to_str().unwrap() {
-            "kubota_tractor.usdz" => true,
-            "krampe_trailer.usdz" => false,
-            _ => panic!("benchmark requires the real Kubota or Krampe asset"),
+        let kind = match path.file_name().unwrap().to_str().unwrap() {
+            "kubota_tractor.usdz" => FixtureKind::Kubota,
+            "krampe_trailer.usdz" => FixtureKind::Krampe,
+            "oxbo_harvester.usdz" => FixtureKind::Oxbo,
+            _ => panic!("benchmark requires the real Kubota, Krampe or Oxbo asset"),
         };
-        Self::from_stage(&stage, molla, kubota, 1)
+        Self::from_stage(&stage, molla, kind, 1)
     }
 
-    fn from_stage(stage: &openusd::usd::Stage, molla: bool, kubota: bool, count: usize) -> Self {
+    fn from_stage(stage: &openusd::usd::Stage, molla: bool, kind: FixtureKind, count: usize) -> Self {
+        let kubota = kind == FixtureKind::Kubota;
+        let body_count = match kind { FixtureKind::Kubota => 26, FixtureKind::Krampe => 15, FixtureKind::Oxbo => 40 };
+        let wheel_count = if kind == FixtureKind::Oxbo { 6 } else { 4 };
         let mut machines = discover_machines_from_stage(stage).unwrap();
         machines.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(machines.len(), count);
@@ -116,8 +130,8 @@ impl Fixture {
             let mut bodies = runtime.machine_bodies[&machine.id].clone();
             bodies.sort();
             let wheels = runtime.machine_wheels[&machine.id].clone();
-            assert_eq!(bodies.len(), if kubota { 26 } else { 15 });
-            assert_eq!(wheels.len(), 4);
+            assert_eq!(bodies.len(), body_count);
+            assert_eq!(wheels.len(), wheel_count);
             let chassis_entity = app.world_mut().query::<(Entity, &UsdPrimRef)>()
                 .iter(app.world()).find(|(_, prim)| Some(&prim.path) == machine.body.as_ref()).unwrap().0;
             let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
@@ -126,8 +140,10 @@ impl Fixture {
             if kubota {
                 let expected_mass = if molla { 4916.010223 } else { 4913.449268 };
                 assert!((mass - expected_mass).abs() < 0.001, "imported mass {mass}");
-            } else {
+            } else if kind == FixtureKind::Krampe {
                 assert!((6500.0..7000.0).contains(&mass), "imported trailer mass {mass}");
+            } else {
+                assert!((20_000.0..21_000.0).contains(&mass), "imported harvester mass {mass}");
             }
             let clearance = wheels.iter().flat_map(|id| physics.body(*id).unwrap().colliders())
                 .map(|id| physics.collider(id).unwrap().aabb().mins.y).fold(f64::INFINITY, f64::min);
@@ -146,10 +162,15 @@ impl Fixture {
         physics.register_wheel_ground(ground, None).unwrap();
         let mass: f64 = fleet.iter().flat_map(|m| &m.bodies).map(|&id| physics.body(id).unwrap().mass()).sum();
         eprintln!("imported fixture: machines={count} bodies={} joints={} colliders={} tyres={} mass={mass} settings={:?}",
-            physics.bodies().len(), physics.joints().len(), physics.colliders().len(), count * 4, physics.settings());
-        assert_eq!(physics.bodies().len(), count * if kubota { 26 } else { 15 });
-        assert_eq!(physics.joints().len(), count * if kubota { 31 } else { 14 });
-        assert_eq!(physics.colliders().len(), count * if kubota { 17 } else { 18 } + 1);
+            physics.bodies().len(), physics.joints().len(), physics.colliders().len(), count * wheel_count, physics.settings());
+        assert_eq!(physics.bodies().len(), count * body_count);
+        let (joint_count, collider_count) = match kind {
+            FixtureKind::Kubota => (31, 17),
+            FixtureKind::Krampe => (14, 18),
+            FixtureKind::Oxbo => (46, 13),
+        };
+        assert_eq!(physics.joints().len(), count * joint_count);
+        assert_eq!(physics.colliders().len(), count * collider_count + 1);
         assert!((physics.dt() - 1.0 / 120.0).abs() < 1e-15, "benchmark requires 120 Hz");
         let services = crate::services::benchmark_schedule(&mut app);
         let first = fleet[0].clone();

@@ -33,7 +33,7 @@ def Xform "Slot{index}" {{
         let stage = source
             .open_stage()
             .expect("compose referenced Kubota fleet");
-        Self::from_stage(&stage, molla, true, count)
+        Self::from_stage(&stage, molla, FixtureKind::Kubota, count)
     }
 
     fn drive_fleet(&mut self, active: usize) {

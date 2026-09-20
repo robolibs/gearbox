@@ -478,6 +478,17 @@ fn spawn_when_loaded(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn benchmark_align_machine(app: &mut App, root: Entity) {
+    app.world_mut().entity_mut(root).insert(MachinePhysicsSyncPending {
+        frames_waited: 0,
+        activate_after_sync: false,
+    });
+    let mut schedule = bevy::ecs::schedule::Schedule::default();
+    schedule.add_systems(sync_pending_machine_physics_to_scene_transforms);
+    schedule.run(app.world_mut());
+}
+
 fn sync_pending_machine_physics_to_scene_transforms(
     mut commands: Commands,
     mut pending: Query<(
