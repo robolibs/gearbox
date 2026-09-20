@@ -176,7 +176,7 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     // band of colour laid over the field.
     let pool = vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, lattice(world_xz, 7.5) * 0.62 + lattice(world_xz + 29.0, 1.9) * 0.38), read.w);
     let earth = mix(edges.soil.rgb, edges.stony.rgb, settled(read.x)) * (0.74 + dirt_detail * 0.86)
-        * earth_mottle(world_xz) * mix(1.0, 0.58, pool.y)
+        * earth_mottle(world_xz, footprint) * mix(1.0, 0.58, pool.y)
         * mix(1.0, pool.z, 1.0 - smoothstep(0.02, 0.10, footprint));
     // Not a fade between the two: each brings its own relief and the taller
     // takes the pixel, so the earth comes up first through the hollows of the

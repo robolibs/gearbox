@@ -339,7 +339,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let grit = fbm(in.world_position.xz * 1.6);
     let pool = vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, lattice(in.world_position.xz, 7.5) * 0.62 + lattice(in.world_position.xz + 29.0, 1.9) * 0.38), read.w);
     let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(read.x)) * (0.8 + grit * 0.5)
-        * earth_mottle(in.world_position.xz) * mix(1.0, 0.58, pool.y)
+        * earth_mottle(in.world_position.xz, surface_footprint(in.world_position.xz)) * mix(1.0, 0.58, pool.y)
         * mix(1.0, pool.z, 1.0 - smoothstep(0.02, 0.10, surface_footprint(in.world_position.xz)));
     // The taller of the two takes the pixel rather than the two being faded
     // together: the earth rises through the stubble's own hollows instead of

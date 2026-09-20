@@ -346,11 +346,18 @@ fn way_beyond(place: vec2<f32>, tread: vec4<f32>,
 // clod was crushed into it. Three scales, the finest a few centimetres, so
 // however close the eye gets it never finds a flat area — which is the thing
 // that reads as a texture rather than as ground.
-fn earth_mottle(place: vec2<f32>) -> f32 {
+// `footprint` is how much ground one pixel covers. Anything finer than that is
+// left out rather than drawn, or the ground crawls with static — which is the
+// rule this whole cover is built on, and the fine octaves are exactly where it
+// bites. A tenth of a metre is sub-pixel from thirty, and drawn there anyway it
+// is not detail but noise.
+fn earth_mottle(place: vec2<f32>, footprint: f32) -> f32 {
+    let close = 1.0 - smoothstep(0.03, 0.12, footprint);
+    let closer = 1.0 - smoothstep(0.012, 0.05, footprint);
     return 1.0
         + (lattice(place, 0.85) - 0.5) * 0.22
-        + (lattice(place + 17.0, 0.29) - 0.5) * 0.16
-        + (lattice(place + 71.0, 0.10) - 0.5) * 0.10;
+        + (lattice(place + 17.0, 0.29) - 0.5) * 0.16 * close
+        + (lattice(place + 71.0, 0.10) - 0.5) * 0.10 * closer;
 }
 
 // Two things about a way that its wear cannot tell you.
