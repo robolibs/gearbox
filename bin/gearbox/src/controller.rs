@@ -2265,6 +2265,7 @@ fn wheel_body_of(
 fn record_wheel_tracks(
     inventory: Res<ControllerInventory>,
     time: Res<Time>,
+    mut odometers: Local<HashMap<(String, String), f32>>,
     // One rolled distance for the whole machine, beside each wheel's own. It is
     // what places the tread along a track, and every wheel of one machine has
     // to place it the same: a tractor puts two wheels down the same line, and
@@ -2272,17 +2273,6 @@ fn record_wheel_tracks(
     // stamp lands on texels the front one wrote holding a number metres apart,
     // and the chevrons break wherever the two overlap.
     mut machine_odometers: Local<HashMap<String, (f32, f32, Vec2)>>,
-    // The middle of a machine's wheels, and where each side of it runs. Taken
-    // from the frame before, because the wheels are walked one at a time and
-    // the middle is only known once they all have been — a frame's lag on a
-    // number that changes as slowly as a tractor's own geometry.
-    //
-    // Both wheels down one side must lay one track. Through a turn the rear
-    // cuts inside the front, so each side's band becomes two passes crossing,
-    // and along the seam between them the tread has two answers and wavers
-    // between them. Given one line per side there is only ever one answer.
-    mut machine_middle: Local<HashMap<String, (Vec2, Vec2, f32, f32)>>,
-    mut machine_sides: Local<HashMap<(String, i32), (f32, f32)>>,
     active: Res<gearbox_api::PhysicsActive>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
@@ -2400,45 +2390,18 @@ fn record_wheel_tracks(
             // the track nothing is smoothed — a lag there would drag the tread
             // behind the wheel.
             let axle_of_roll = roll.perp();
-            // The middle of all this machine's wheels, gathered as they are
-            // walked and read back a frame later. Measured from a wheel instead,
-            // one side would read no offset at all and the other a whole track
-            // width, and the two could not be told apart by their sign.
-            let middle = {
-                let seen = machine_middle
-                    .entry(machine.id.to_string())
-                    .or_insert((here, Vec2::ZERO, 0.0, f32::NEG_INFINITY));
-                if seen.3 != now {
-                    if seen.2 > 0.0 {
-                        seen.0 = seen.1 / seen.2;
-                    }
-                    seen.1 = Vec2::ZERO;
-                    seen.2 = 0.0;
-                    seen.3 = now;
-                }
-                seen.1 += here;
-                seen.2 += 1.0;
-                seen.0
-            };
-            // One line and one width for each side of the machine, whichever of
-            // its wheels is laying the mark. The offset is a fact of the
-            // machine's build, so it is smoothed hard; the width is whichever
-            // of that side's tyres is widest, so the band never narrows when a
-            // narrower wheel of the pair happens to be the one stamping.
-            let sideways = (here - middle).dot(axle_of_roll);
-            let side = if sideways >= 0.0 { 1 } else { -1 };
-            let run = machine_sides
-                .entry((machine.id.to_string(), side))
-                .or_insert((sideways.abs(), width as f32));
-            run.0 += (sideways.abs() - run.0) * 0.05;
-            run.1 = run.1.max(width as f32);
-            let centreline = middle
-                + axle_of_roll * (side as f32 * run.0)
-                + roll * (here - middle).dot(roll);
+            let sideways = (here - anchor).dot(axle_of_roll);
+            let held = odometers
+                .entry((machine.id.to_string(), link.name.to_string()))
+                .or_insert(sideways);
+            *held += (sideways - *held) * 0.04;
+            let centreline = anchor
+                + axle_of_roll * *held
+                + roll * (here - anchor).dot(roll);
             contacts.contacts.push(gearbox_fields::WheelContact {
                 position: Vec3::new(p.x as f32, ground, p.z as f32),
                 direction: roll,
-                width: run.1,
+                width: width as f32,
                 scrub: scrub.clamp(0.0, 1.0),
                 travelled,
                 anchor,
