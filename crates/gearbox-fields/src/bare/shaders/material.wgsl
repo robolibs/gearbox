@@ -140,10 +140,13 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
     let lean = vec2<f32>(cos(heading), sin(heading));
     let along = dot(place, lean);
     // Three waves that do not divide into one another, so the line never comes
-    // back round to where it started.
-    let wander = sin(along * 0.11 + hash21(plot + 3.0) * 6.28) * 0.22
+    // back round to where it started. A plough is steered and runs near enough
+    // straight; the wind is not, and its ripples wander by several of their own
+    // widths, so how much the line strays goes by how fine the comb is.
+    let strays = 1.0 + 2.6 * smoothstep(0.8, 0.15, spacing);
+    let wander = (sin(along * 0.11 + hash21(plot + 3.0) * 6.28) * 0.22
         + sin(along * 0.037 + 1.9) * 0.3
-        + sin(along * 0.0143 + hash21(plot + 11.0) * 6.28) * 0.5;
+        + sin(along * 0.0143 + hash21(plot + 11.0) * 6.28) * 0.5) * strays;
     let across = dot(place, vec2<f32>(-lean.y, lean.x)) / max(spacing, 0.05) + wander;
     let furrow = floor(across);
     let within = abs(fract(place / plot_m) - vec2<f32>(0.5)) * 2.0;
