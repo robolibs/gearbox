@@ -147,12 +147,12 @@ impl Fixture {
             }
             let clearance = wheels.iter().flat_map(|id| physics.body(*id).unwrap().colliders())
                 .map(|id| physics.collider(id).unwrap().aabb().mins.y).fold(f64::INFINITY, f64::min);
-            for &body in &bodies {
-                let body = physics.body_mut(body).unwrap();
-                let mut pose = body.position();
+            let aligned: Vec<_> = bodies.iter().map(|&body| {
+                let mut pose = physics.body(body).unwrap().position();
                 pose.translation.y += 0.03 - clearance;
-                body.set_position(pose, true);
-            }
+                (body, pose)
+            }).collect();
+            physics.set_body_poses(&aligned, true).unwrap();
             fleet.push(FleetMachine { chassis, bodies, wheels, machine });
         }
         let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
@@ -183,12 +183,11 @@ impl Fixture {
         let mut physics = self.app.world_mut().resource_mut::<PhysicsWorld>();
         let mut bodies = physics.bodies();
         bodies.sort();
-        let poses: Vec<_> = bodies.into_iter().map(|id| (id, physics.body(id).unwrap().position())).collect();
-        for (id, pose) in poses {
-            physics.body_mut(id).unwrap().set_position(
-                Pose::new(rotation * pose.translation, rotation * pose.rotation), true,
-            );
-        }
+        let poses: Vec<_> = bodies.into_iter().map(|id| {
+            let pose = physics.body(id).unwrap().position();
+            (id, Pose::new(rotation * pose.translation, rotation * pose.rotation))
+        }).collect();
+        physics.set_body_poses(&poses, true).unwrap();
         physics.collider_mut(self.ground).unwrap().set_position(
             Pose::new(rotation * DVec3::new(0.0, -0.02, 0.0), rotation),
         );

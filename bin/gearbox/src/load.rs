@@ -505,7 +505,7 @@ fn sync_pending_machine_physics_to_scene_transforms(
     for (root, mut root_transform, mut pending, name) in pending.iter_mut() {
         let descendants = collect_descendants(root, &children);
         let body_entities = descendants
-            .into_iter()
+            .iter().copied()
             .filter_map(|entity| {
                 physics
                     .entity_to_body
@@ -526,25 +526,10 @@ fn sync_pending_machine_physics_to_scene_transforms(
             continue;
         }
 
-        let mut synced = 0usize;
-        for (entity, handle) in body_entities {
-            let Ok(gt) = globals.get(entity) else {
-                continue;
-            };
-            let Some(body) = physics.body_mut(handle) else {
-                continue;
-            };
+        let poses: Result<Vec<_>, &str> = body_entities.iter().map(|&(entity, handle)| {
+            let gt = globals.get(entity).map_err(|_| "missing projected body transform")?;
             let transform = gt.compute_transform();
-            if !transform.translation.is_finite() || !transform.rotation.is_finite() {
-                warn!(
-                    "gearbox-load: {} has a non-finite projected transform for {:?}: {:?}",
-                    name.map(|n| n.as_str()).unwrap_or("machine"),
-                    names.get(entity).map(|n| n.as_str()).unwrap_or("?"),
-                    transform
-                );
-                continue;
-            }
-            body.set_position(
+            Ok((handle,
                 Pose {
                     translation: DVec3::new(
                         transform.translation.x as f64,
@@ -557,21 +542,14 @@ fn sync_pending_machine_physics_to_scene_transforms(
                         transform.rotation.z as f64,
                         transform.rotation.w as f64,
                     ),
-                },
-                true,
-            );
-            body.set_linvel(DVec3::ZERO, true);
-            body.set_angvel(DVec3::ZERO, true);
-            synced += 1;
-        }
-
-        if synced == 0 {
+                }))
+        }).collect();
+        let Ok(poses) = poses else {
+            pending.frames_waited += 1;
             continue;
-        }
+        };
 
-        propagate_body_positions_to_colliders(physics.as_mut());
-
-        let collider_entities = collect_descendants(root, &children)
+        let collider_entities = descendants
             .into_iter()
             .filter_map(|entity| {
                 physics
@@ -591,24 +569,27 @@ fn sync_pending_machine_physics_to_scene_transforms(
             }
             continue;
         }
+        if let Err(error) = physics.set_body_poses(&poses, true) {
+            pending.frames_waited += 1;
+            if pending.frames_waited == 1 || pending.frames_waited == 120 {
+                warn!("gearbox-load: cannot align {}: {error}", name.map(|n| n.as_str()).unwrap_or("machine"));
+            }
+            continue;
+        }
+        let synced = poses.len();
+        propagate_body_positions_to_colliders(physics.as_mut());
         if let Some(delta_y) = terrain_contact_alignment_delta(&physics, &collider_entities, &names)
         {
-            root_transform.translation.y += delta_y as f32;
-            for handle in physics
-                .entity_to_body
-                .iter()
-                .filter(|(entity, _)| is_descendant_or_self(root, **entity, &children))
-                .map(|(_, handle)| *handle)
-                .collect::<Vec<_>>()
-            {
-                if let Some(body) = physics.body_mut(handle) {
-                    let mut pose = body.position();
-                    pose.translation.y += delta_y;
-                    body.set_position(pose, true);
-                    body.set_linvel(DVec3::ZERO, true);
-                    body.set_angvel(DVec3::ZERO, true);
-                }
+            let shifted: Vec<_> = poses.iter().map(|&(handle, _)| {
+                let mut pose = physics.body(handle).expect("aligned body").position();
+                pose.translation.y += delta_y;
+                (handle, pose)
+            }).collect();
+            if let Err(error) = physics.set_body_poses(&shifted, true) {
+                warn!("gearbox-load: terrain alignment rejected: {error}");
+                continue;
             }
+            root_transform.translation.y += delta_y as f32;
             propagate_body_positions_to_colliders(physics.as_mut());
             info!(
                 "gearbox-load: terrain contact adjusted {} by {delta_y:+.3} m",
@@ -701,25 +682,6 @@ fn max_terrain_height_under_aabb(min_x: f64, max_x: f64, min_z: f64, max_z: f64)
         .into_iter()
         .map(|(x, z)| terrain_height_m(x as f32, z as f32) as f64)
         .fold(f64::NEG_INFINITY, f64::max)
-}
-
-fn is_descendant_or_self(root: Entity, candidate: Entity, children: &Query<&Children>) -> bool {
-    if root == candidate {
-        return true;
-    }
-    let mut stack = vec![root];
-    while let Some(entity) = stack.pop() {
-        let Ok(kids) = children.get(entity) else {
-            continue;
-        };
-        for child in kids.iter() {
-            if child == candidate {
-                return true;
-            }
-            stack.push(child);
-        }
-    }
-    false
 }
 
 fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity> {
@@ -983,6 +945,10 @@ fn refresh_scene_objects(
     }
     objects.machines = out;
 }
+
+#[cfg(test)]
+#[path = "load/alignment_tests.rs"]
+mod alignment_tests;
 
 #[cfg(test)]
 mod pressure_snapshot_tests {
