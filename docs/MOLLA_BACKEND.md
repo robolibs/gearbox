@@ -200,8 +200,9 @@ the wheels still rotate under the unchanged parking velocity motors. Parking
 hold remains unfinished; neither friction nor acceptance tolerances were
 increased to hide that. Source regressions cover retained shear, frame
 projection, airborne reset, unrelated rebuilds, rollback and teleport.
-The ordinary release binary suite passes 84 tests with four external-asset
-tests ignored. Final imported log: `/tmp/gearbox-shear-imported-final.log`.
+The ordinary release binary suite passes 84 tests with four environment-dependent
+tests ignored (three imported-asset gates plus the Vulkan parity test).
+Final imported log: `/tmp/gearbox-shear-imported-final.log`.
 
 That run measured full-machine CPU-step medians of 0.7423–0.7587 ms across
 parked/driving and 0.5/1.8/4 bar; p95 was 0.8522–1.1040 ms, maxima up to
@@ -238,8 +239,9 @@ three tests passed, zero failures. Three focused brake tests cover multi-turn
 capture, loaded hold, release/re-engagement, zero budget, removed joints,
 overload slip with bounded reference, and Rapier's unchanged fallback.
 Ordinary release binary suites pass 87 tests each with explicit Molla and
-Rapier selection; four external-asset tests are ignored in those ordinary
-suites. Native `oslo make build` passes. The viewer is rebuilt, not launched.
+Rapier selection; four environment-dependent tests are ignored in those ordinary
+suites (three imported-asset gates and the Vulkan parity test). Native
+`oslo make build` passes. The viewer is rebuilt, not launched.
 
 Final CPU-step medians are 0.7320–0.7448 ms; p95 0.7643–1.2219 ms and maxima
 up to 2.3572 ms on the shared host. No other assistant test/build overlapped
@@ -247,6 +249,48 @@ those samples. These remain headless step samples, not hard real-time or
 Rapier-parity acceptance. Logs: `/tmp/gearbox-parking-{slope,imported,unit}.log`,
 `/tmp/gearbox-parking-{molla,rapier}-regression.log` and
 `/tmp/gearbox-parking-build.log`.
+
+### Five-controller imported fixture
+
+The headless imported fixture now executes production service controllers as
+well as the drive controller each tick. Earlier headless checkpoints did not
+execute the service-controller schedule; their timings and states are not a
+five-active-controller baseline. The service schedule is test-only wiring and
+does not change the live application's existing service path.
+
+`controller::benchmark::imported_kubota_hitch_and_pto_controllers` requires the
+authored five controllers, resolves each service's target joint/link, and
+writes the same link values consumed by production service controllers. It
+checks actual motor-space coordinates, not merely requested motor targets:
+
+- Hitch commands 0.75 and then 0.15 move both joints, stay within authored
+  limits at the raised position, and track within 0.05 rad. The front hitch's
+  authored range is negative. Raised front/rear positions were -0.295727 and
+  +0.686723 rad; returned positions -0.058691 and +0.106347 rad.
+- Front/rear PTOs use authored 1000/540 RPM values. Measured over one simulated
+  second after settling, rates were 104.404530/56.378446 rad/s, within the test's
+  0.5 rad/s tolerance of their targets. After disengagement and settling, every
+  step of a one-second observation is checked below 0.01 rad/s; measured peaks
+  were about 1.39e-8/0 rad/s. All bodies stay finite/enabled with no quarantine.
+
+With the corrected fixture, all four imported tests pass: hitch/PTO actuation,
+pressure/driving, exact replay and slope parking. Physics-step medians across
+parked/driving and pressure settings were 0.7472–0.7992 ms, p95 0.7945–1.4431 ms,
+maxima up to 1.8752 ms on the shared host. Controller execution remains outside
+the timed physics step; this is not rendered FPS, full-frame timing or matched
+Rapier performance. No assistant build/test overlapped those timing samples.
+
+Reproduce using the slope command above with the test filter replaced by
+`controller::benchmark::imported_kubota_`. Logs:
+`/tmp/gearbox-five-controller-gates.log` and
+`/tmp/gearbox-five-controller-final.log`. This is Molla headless actuation
+coverage, not Rapier service actuation, CLI/network delivery, visual validation,
+or attached-master/slave service propagation.
+
+Ordinary release binary suites pass 87 tests on each selected backend, with
+five ignored: the four imported-asset tests above and one Vulkan parity test.
+Earlier summaries describing every ignored test as external-asset-dependent
+were imprecise; Vulkan parity is a separate environment gate.
 
 ### Commands
 

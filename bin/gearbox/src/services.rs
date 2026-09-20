@@ -121,6 +121,14 @@ pub(crate) struct SeededLinkValues(pub(crate) HashSet<String>);
 
 pub struct ServicesPlugin;
 
+#[cfg(test)]
+pub(crate) fn benchmark_schedule(app: &mut App) -> bevy::ecs::schedule::Schedule {
+    app.init_resource::<MasterInputs>().init_resource::<ServiceCommands>().init_resource::<WarnedOnce>();
+    let mut schedule = bevy::ecs::schedule::Schedule::default();
+    schedule.add_systems(apply_service_controllers);
+    schedule
+}
+
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ServiceCommandSet;
 

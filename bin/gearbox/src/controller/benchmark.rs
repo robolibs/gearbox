@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 struct Fixture {
     app: App,
     controllers: bevy::ecs::schedule::Schedule,
+    services: bevy::ecs::schedule::Schedule,
     chassis: BodyId,
     ground: ColliderId,
     wheels: Vec<BodyId>,
@@ -95,7 +96,8 @@ impl Fixture {
         assert_eq!(physics.joints().len(), 31);
         assert_eq!(physics.colliders().len(), 18);
         assert!((physics.dt() - 1.0 / 120.0).abs() < 1e-15, "benchmark requires 120 Hz");
-        Self { app, controllers, chassis, ground, wheels, machine }
+        let services = crate::services::benchmark_schedule(&mut app);
+        Self { app, controllers, services, chassis, ground, wheels, machine }
     }
 
     fn incline(&mut self, radians: f64) -> DVec3 {
@@ -118,6 +120,7 @@ impl Fixture {
     fn tick(&mut self) -> Duration {
         self.app.world_mut().resource_mut::<Time>().advance_by(Duration::from_secs_f64(1.0 / 120.0));
         self.controllers.run(self.app.world_mut());
+        self.services.run(self.app.world_mut());
         let mut physics = self.app.world_mut().resource_mut::<PhysicsWorld>();
         let start = Instant::now();
         physics.step();
@@ -276,6 +279,107 @@ fn imported_kubota_slope_parking() {
     for (degrees, bar, drift, speed) in results {
         assert!(drift < 0.01 && speed < 0.001,
             "slope creep at {degrees} degrees, {bar} bar: {drift} m, {speed} m/s");
+    }
+}
+
+#[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET pointing to real kubota_tractor.usdz; five controllers"]
+fn imported_kubota_hitch_and_pto_controllers() {
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    let mut fixture = Fixture::load(Path::new(&asset));
+    assert_eq!(fixture.machine.controllers.len(), 5);
+    let mut controls = Vec::new();
+    for controller in &fixture.machine.controllers {
+        eprintln!("imported controller: {} type={} target={:?}", controller.instance, controller.controller_type, controller.target);
+        if !matches!(controller.controller_type.as_str(), "builtin:hitch" | "builtin:pto") { continue; }
+        let paths = crate::services::controller_joints(&fixture.machine, controller);
+        assert_eq!(paths.len(), 1);
+        let link = crate::services::moved_link(&fixture.machine.links, paths[0]).expect("controlled link");
+        let marker = fixture.app.world_mut().query::<(&UsdPrimRef, &crate::physics::markers::UsdPhysicsJoint)>()
+            .iter(fixture.app.world()).find(|(prim, _)| prim.path == paths[0]).unwrap().1.clone();
+        let physics = fixture.app.world().resource::<PhysicsWorld>();
+        let a = physics.entity_to_body[&marker.body0.unwrap()];
+        let b = physics.entity_to_body[&marker.body1.unwrap()];
+        let joints = physics.joints_between(a, b);
+        assert_eq!(joints.len(), 1, "ambiguous controller joint");
+        eprintln!("controlled link: {} values={:?} joint={:?}", link.name, link.values, joints[0]);
+        controls.push((controller.controller_type.clone(), link.name.clone(), joints[0]));
+    }
+    assert_eq!(controls.iter().filter(|(kind, _, _)| kind == "builtin:hitch").count(), 2);
+    assert_eq!(controls.iter().filter(|(kind, _, _)| kind == "builtin:pto").count(), 2);
+    for _ in 0..600 { fixture.tick(); }
+    for (kind, link, _) in &controls {
+        let id = &fixture.machine.id;
+        let mut values = fixture.app.world_mut().resource_mut::<crate::services::LinkValues>();
+        if kind == "builtin:hitch" {
+            values.set(id, link, "position", 0.75);
+        } else {
+            assert!(values.get(id, link, "rpm").unwrap() > 0.0);
+            values.set(id, link, "engaged", 1.0);
+        }
+    }
+    let initial: Vec<_> = controls.iter().map(|(_, _, id)| fixture.app.world().resource::<PhysicsWorld>()
+        .joint(*id).unwrap().motor_position(JointAxis::AngX).expect("joint coordinate")).collect();
+    for _ in 0..600 { fixture.tick(); }
+    let physics = fixture.app.world().resource::<PhysicsWorld>();
+    let mut running = Vec::new();
+    for ((kind, link, id), start) in controls.iter().zip(initial) {
+        let joint = physics.joint(*id).unwrap();
+        let position = joint.motor_position(JointAxis::AngX).unwrap();
+        let motor = joint.motor(JointAxis::AngX).expect("service motor");
+        eprintln!("service result: {kind} link={link} start={start} position={position} motor={motor:?}");
+        assert!((position - start).abs() > if kind == "builtin:hitch" { 0.05 } else { 10.0 }, "controller did not move {link}");
+        if kind == "builtin:hitch" {
+            let range = fixture.app.world().resource::<crate::services::LinkValues>().get(&fixture.machine.id, link, "range").unwrap();
+            assert!((motor.target_position - 0.75 * range).abs() < 1e-12);
+            assert!((position - motor.target_position).abs() < 0.05, "hitch tracking error {link}");
+            let limits = joint.limits(JointAxis::AngX).unwrap();
+            assert!(position >= limits[0] - 1e-3 && position <= limits[1] + 1e-3);
+        }
+        running.push(position);
+    }
+    for _ in 0..120 { fixture.tick(); }
+    for ((kind, link, id), before) in controls.iter().zip(&running) {
+        if kind != "builtin:pto" { continue; }
+        let rpm = fixture.app.world().resource::<crate::services::LinkValues>().get(&fixture.machine.id, link, "rpm").unwrap();
+        let measured = fixture.app.world().resource::<PhysicsWorld>().joint(*id).unwrap()
+            .motor_position(JointAxis::AngX).unwrap() - before;
+        eprintln!("PTO measured: {link} rpm={rpm} angular_velocity={measured}");
+        assert!((measured - rpm * std::f64::consts::TAU / 60.0).abs() < 0.5);
+    }
+    for (kind, link, _) in &controls {
+        fixture.app.world_mut().resource_mut::<crate::services::LinkValues>()
+            .set(&fixture.machine.id, link, if kind == "builtin:hitch" { "position" } else { "engaged" },
+                if kind == "builtin:hitch" { 0.15 } else { 0.0 });
+    }
+    for _ in 0..600 { fixture.tick(); }
+    let stopped: Vec<_> = controls.iter().map(|(_, _, id)| fixture.app.world().resource::<PhysicsWorld>()
+        .joint(*id).unwrap().motor_position(JointAxis::AngX).unwrap()).collect();
+    let mut previous = stopped.clone();
+    let mut peak_speed = vec![0.0_f64; controls.len()];
+    for _ in 0..120 {
+        fixture.tick();
+        let physics = fixture.app.world().resource::<PhysicsWorld>();
+        for (index, (_, _, id)) in controls.iter().enumerate() {
+            let current = physics.joint(*id).unwrap().motor_position(JointAxis::AngX).unwrap();
+            peak_speed[index] = peak_speed[index].max((current - previous[index]).abs() * 120.0);
+            previous[index] = current;
+        }
+    }
+    for (index, (((kind, link, id), raised), stopped)) in controls.iter().zip(&running).zip(stopped).enumerate() {
+        let physics = fixture.app.world().resource::<PhysicsWorld>();
+        let joint = physics.joint(*id).unwrap();
+        let final_position = joint.motor_position(JointAxis::AngX).unwrap();
+        if kind == "builtin:hitch" {
+            let range = fixture.app.world().resource::<crate::services::LinkValues>().get(&fixture.machine.id, link, "range").unwrap();
+            assert!((final_position - 0.15 * range).abs() < 0.05, "hitch return {link}: {final_position}");
+            assert!((final_position - raised).abs() > 0.05);
+        } else {
+            assert_eq!(joint.motor(JointAxis::AngX).unwrap().target_velocity, 0.0);
+            assert!((final_position - stopped).abs() < 0.01, "PTO failed to disengage {link}");
+            assert!(peak_speed[index] < 0.01, "PTO still moving after disengagement {link}: {}", peak_speed[index]);
+        }
+        eprintln!("service returned: {kind} link={link} position={final_position} peak_speed={}", peak_speed[index]);
     }
 }
 
