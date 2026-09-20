@@ -125,11 +125,13 @@ stand. Nothing draws water yet — `rut_of(...).y` is the ground being ready for
 already earns its keep as the dark, damp, silted stretches of a used track, and the grit is
 swallowed there because silt covers it.
 
-The bars of an agricultural tyre stand at 45°, which every maker has settled on, spaced wide
-enough to shed mud each turn. They print into the rut floor and nowhere else. That is a
-20 cm detail, so each ground fades it out by its own pixel footprint; it cannot be faded
-inside the shared rule, because `worn()` is called from vertex shaders too and `fwidth` does
-not exist there.
+A tyre's **tread** is deliberately not printed. It was tried as a tone laid on the rut floor
+— chevrons at the 45° every tyre maker has settled on — and drawn that way it is either
+invisible or wrong: at any strength that survives the loose stone already covering the rut it
+reads as hatching, and at a strength that does not shout it cannot be seen at all, even with
+the distance fade lifted. Bars a fifth of a metre apart are the wrong thing to draw *in
+colour* on a surface made of chippings. It wants the wheel map's own tread channels pressed
+into the **relief**, and until it is done that way it is better absent than half there.
 
 Under all of it, `earth_mottle` varies the ground at 0.85 m, 0.29 m and 0.10 m. The cover
 textures repeat at about two metres, so without it there was nothing below a metre at all and

@@ -288,15 +288,20 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     let lean = select(-1.0, 1.0, lattice(against.xy + side, 21.0) > 0.5);
     let channel = 1.0 - smoothstep(0.0, tread.y * 0.75,
         abs(off_middle - lean * tread.y * 0.42));
-    // The bars of an agricultural tyre stand at 45° — every maker has settled
-    // on it — and are spaced wide enough that the tread sheds its mud each
-    // turn. They print into the floor of a rut and nowhere else. The way's own
-    // direction is had from the offset to its nearest point, which is square to
-    // it by construction; equal weight to along and across is the 45°.
-    let off_line = place - against.xy;
-    let along_way = normalize(vec2<f32>(-off_line.y, off_line.x) + vec2<f32>(1e-5, 0.0));
-    let bar = sin((dot(against.xy, along_way) + off_middle) * 32.0);
-    let lug = mix(0.88, 1.04, smoothstep(-0.35, 0.6, bar));
+    // `rut` and not the signed offset, so the bars meet at the tyre's own
+    // centreline and make the chevron a farm tyre actually prints. Signed, each
+    // rut came out as parallel diagonals — and since the offset is measured
+    // outward from the middle of the *way*, its slope ran opposite ways in the
+    // two ruts, so one wheel leaned one way and the other the other.
+    // No tyre tread is printed here, and the attempt is worth recording so it
+    // is not made again the same way. Drawn as a tone on the ground it is
+    // either invisible or wrong: at any strength that survives the stone lying
+    // on the rut it reads as hatching rather than as chevrons, and at a
+    // strength that does not shout it cannot be seen at all, even with the
+    // distance fade lifted. Bars a fifth of a metre apart are the wrong thing
+    // to draw in colour on a surface already covered in loose chippings. It
+    // wants the wheel map's own tread channels pressed into the *relief*, and
+    // until it is done that way it is better absent than half there.
     // The material a wheel displaces has to go somewhere, and it stands in a
     // low ridge just outside each rut. That ridge drains and dries before the
     // rut does, so it reads paler than either the rut or the ground beside it.
@@ -317,7 +322,7 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     // the first: the floor of a rut and a road worn bare across its width both
     // read as fully worn, but only one of them has a tyre going down it.
     return vec4<f32>(clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0), wheel * verge,
-        channel * verge, mix(1.0, lug, wheel * verge) * mix(1.0, 1.09, berm * verge));
+        channel * verge, mix(1.0, 1.09, berm * verge));
 }
 
 // How far out from a way's own edge this point stands, in metres, taking the
