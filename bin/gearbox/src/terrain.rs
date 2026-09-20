@@ -349,7 +349,7 @@ fn follow_view(
     sites: Res<Sites>,
     time: Res<Time>,
     mut pending: Local<Option<bevy::tasks::Task<GroundParts>>>,
-    mut retiring: Local<Option<(Entity, ColliderHandle, f32)>>,
+    mut retiring: Local<Option<(Entity, ColliderId, f32)>>,
     mut settled: Local<u32>,
     mut dismantling: Local<std::collections::VecDeque<Entity>>,
     children: Query<&Children>,
@@ -373,8 +373,7 @@ fn follow_view(
         // then taken down leaves first, a little each frame, not in one stall.
         commands.entity(*old).insert(Visibility::Hidden);
         commands.entity(terrain.entity).insert(Visibility::Inherited);
-        let physics = physics.as_mut();
-        physics.colliders.remove(*floor, &mut physics.islands, &mut physics.bodies, true);
+        physics.remove_collider(*floor, true);
         let mut order = vec![*old];
         let mut next = 0;
         while next < order.len() {
@@ -451,7 +450,7 @@ fn follow_view(
 /// wherever it is, seen or not. Chunks share the world's height function and
 /// lattice with the drawn ground, so both agree to the sample.
 #[derive(Resource, Default)]
-pub struct GroundColliders(HashMap<(usize, IVec2), ColliderHandle>);
+pub struct GroundColliders(pub(crate) HashMap<(usize, IVec2), ColliderId>);
 
 fn ground_chunk(at: Vec2) -> IVec2 {
     (at / GROUND_CHUNK_M).floor().as_ivec2()
@@ -461,7 +460,7 @@ fn ground_chunk_collider(
     land: Land,
     hollows: &gearbox_fields::Hollows,
     chunk: IVec2,
-) -> rapier3d::prelude::Collider {
+) -> ColliderDesc {
     let cell = cell_from_env(
         "GEARBOX_TERRAIN_COLLIDER_CELL_M",
         cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M),
@@ -477,7 +476,6 @@ fn ground_chunk_collider(
         ))
         .friction(crate::world::ground_friction(1.4))
         .restitution(0.0)
-        .build()
 }
 
 fn stream_ground_colliders(
@@ -490,19 +488,21 @@ fn stream_ground_colliders(
     let physics = physics.as_mut();
     if terrain.is_none() {
         for (_, collider) in ground.0.drain() {
-            physics.colliders.remove(collider, &mut physics.islands, &mut physics.bodies, true);
+            physics.remove_collider(collider, true);
         }
         return;
     }
     // Each body is in the region of its site: where it is there, and which site.
     let sources: Vec<(usize, Vec2)> = physics
-        .bodies
-        .iter()
-        .filter(|(_, body)| body.is_dynamic())
-        .map(|(_, body)| {
-            let site = gearbox_globe::region_of_physics(body.translation().x);
-            let x = body.translation().x - gearbox_globe::physics_offset(site).x;
-            (site, Vec2::new(x as f32, body.translation().z as f32))
+        .bodies()
+        .into_iter()
+        .filter_map(|id| physics.body(id))
+        .filter(|body| body.is_dynamic())
+        .map(|body| {
+            let at = body.translation();
+            let site = gearbox_globe::region_of_physics(at.x);
+            let x = at.x - gearbox_globe::physics_offset(site).x;
+            (site, Vec2::new(x as f32, at.z as f32))
         })
         .filter(|(site, _)| *site < sites.list.len())
         .collect();
@@ -526,8 +526,17 @@ fn stream_ground_colliders(
                 // Built only when a chunk is actually laid, so a frame that
                 // lays none walks no lines.
                 let hollows = hollows.get_or_insert_with(|| gearbox_fields::Hollows::of(&layout));
-                let collider = ground_chunk_collider(Land::of(&sites, site), hollows, chunk);
-                ground.0.insert((site, chunk), physics.colliders.insert(collider));
+                let desc = ground_chunk_collider(Land::of(&sites, site), hollows, chunk);
+                let Some(collider) = physics.insert_collider(desc) else {
+                    warn!("terrain: chunk {chunk} of site {site} makes no heightfield");
+                    continue;
+                };
+                // A tyre reads the ground it stands on, so every chunk a wheel
+                // can reach has to be one the wheel forces know about.
+                if let Err(error) = physics.register_wheel_ground(collider, None) {
+                    warn!("terrain: tyre ground registration failed: {error}");
+                }
+                ground.0.insert((site, chunk), collider);
             }
         }
     }
@@ -537,7 +546,7 @@ fn stream_ground_colliders(
             .iter()
             .any(|(at, source)| at == site && (*source - center).abs().max_element() < GROUND_DROP_M);
         if !kept {
-            physics.colliders.remove(*collider, &mut physics.islands, &mut physics.bodies, true);
+            physics.remove_collider(*collider, true);
         }
         kept
     });
@@ -769,9 +778,15 @@ fn heightfield_collider(grid: &HeightGrid) -> ColliderDesc {
 
 #[cfg(test)]
 pub(crate) fn benchmark_meadow_collider() -> ColliderDesc {
-    heightfield_collider(&HeightGrid::sample(SIZE_M, CELL_M, meadow_height))
-        .friction(1.4)
-        .restitution(0.0)
+    // The meadow is the home datum's own land; there is no flat height
+    // function of its own any more.
+    let frame = crate::globe::home_datum();
+    let land = gearbox_globe::Terrain::new(&frame);
+    heightfield_collider(&HeightGrid::sample(SIZE_M, CELL_M, |x, z| {
+        land.local_height(&frame, x as f64, z as f64)
+    }))
+    .friction(1.4)
+    .restitution(0.0)
 }
 
 /// A USD terrain that reaches its collider takes over the ground.

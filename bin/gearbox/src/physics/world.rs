@@ -55,13 +55,16 @@ impl Default for PhysicsWorld {
 }
 
 /// The engine `GEARBOX_PHYSICS` names; a second backend gets an arm here.
+/// Molla runs the machines: it is the one that carries pressure tyres, wheel
+/// forces and authored joint loops. Rapier stays reachable by name, because
+/// the paired benchmarks measure one against the other.
 fn backend_by_name(name: Option<&str>) -> Box<dyn PhysicsBackend> {
     match name {
-        None | Some("rapier") => Box::new(RapierBackend::default()),
-        Some("molla") => Box::new(MollaBackend::default()),
+        None | Some("molla") => Box::new(MollaBackend::default()),
+        Some("rapier") => Box::new(RapierBackend::default()),
         Some(other) => {
-            warn!("gearbox-physics: no backend `{other}`; running on rapier");
-            Box::new(RapierBackend::default())
+            warn!("gearbox-physics: no backend `{other}`; running on molla");
+            Box::new(MollaBackend::default())
         }
     }
 }
@@ -70,6 +73,8 @@ fn backend_by_name(name: Option<&str>) -> Box<dyn PhysicsBackend> {
 fn named_backends_select_the_requested_engine() {
     assert_eq!(backend_by_name(Some("molla")).name(), "molla");
     assert_eq!(backend_by_name(Some("rapier")).name(), "rapier");
+    assert_eq!(backend_by_name(None).name(), "molla");
+    assert_eq!(backend_by_name(Some("nonesuch")).name(), "molla");
 }
 
 impl Deref for PhysicsWorld {

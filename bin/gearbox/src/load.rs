@@ -299,17 +299,6 @@ fn queue_usd_load(
     Ok(root)
 }
 
-fn snap_grounded_machine_to_terrain(transform: &mut Transform) {
-    // Runtime machine load requests use y=0 to mean "put this machine on the
-    // ground". Once the world became a real heightfield, leaving y=0 made
-    // tractors float above valleys or spawn half-buried inside hills. Treat
-    // nonzero y as an explicit caller-provided vertical offset.
-    if transform.translation.y.abs() < 0.001 {
-        transform.translation.y =
-            terrain_height_m(transform.translation.x, transform.translation.z);
-    }
-}
-
 fn resolve_spawn_path(raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {
@@ -844,7 +833,6 @@ fn drain_machine_load_queue(
             rotation: Quat::from_rotation_y(req.yaw_deg.to_radians()),
             ..default()
         };
-        snap_grounded_machine_to_terrain(&mut transform);
         let loading = queue_usd_load(
             &mut commands,
             &mut scenes,

@@ -68,9 +68,14 @@ fn invalid_material_geometry_or_grid_is_rejected() {
     let mut layout = layout();
     layout.fields[1].min[0] = -0.1;
     assert!(layout.friction_samples(&grid, 1.0).is_err());
+    // A field reaching past the terrain is clipped, not refused: the ground
+    // square is a window that follows the view over a layout laid out once,
+    // so which fields fall wholly inside it changes as the machine drives.
+    // The samples inside the window still carry that field's friction.
     layout.fields[1].min[0] = 0.0;
     layout.fields[1].max[0] = 3.0;
-    assert!(layout.friction_samples(&grid, 1.0).is_err());
+    let reaching = layout.friction_samples(&grid, 1.0).unwrap().unwrap();
+    assert_eq!(&reaching[5..10], &[0.0, 0.0, 1.2, 1.2, 1.2]);
     let mut invalid_grid = HeightGrid::sample(4.0, 1.0, |_, _| 0.0);
     invalid_grid.cols = usize::MAX;
     assert!(self::layout().friction_samples(&invalid_grid, 1.0).is_err());

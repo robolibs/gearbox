@@ -500,14 +500,17 @@ mod tests {
         let refuses = |json: &str| {
             serde_json::from_str::<FieldLayout>(json)
                 .expect("valid json")
-                .validate(&profiles)
+                .validate(&profiles, FieldBounds { min: Vec2::splat(-400.0), max: Vec2::splat(400.0) })
                 .expect_err("should have been refused")
         };
         // The layout with nothing wrong with it must pass, or every assertion
         // below could be objecting to something else entirely.
         let sound = r#"{"default":"grassland","ways":[
             {"name":"a","width":6,"wear":0.5,"points":[[0,0],[9,0]]}]}"#;
-        serde_json::from_str::<FieldLayout>(sound).unwrap().validate(&profiles).unwrap();
+        serde_json::from_str::<FieldLayout>(sound)
+            .unwrap()
+            .validate(&profiles, FieldBounds { min: Vec2::splat(-400.0), max: Vec2::splat(400.0) })
+            .unwrap();
 
         let with = |ways: &str| format!(r#"{{"default":"grassland","ways":[{ways}]}}"#);
         assert!(
@@ -668,7 +671,7 @@ impl Default for TyreTread {
 
 /// What a layout may write in place of the four numbers: a name for a tyre
 /// anyone would recognise, or the numbers themselves for one nobody would.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum TreadSpec {
     Named(String),
@@ -1004,7 +1007,7 @@ impl FieldSpec {
 /// it passes over is worn along it, whatever that field grows, so a track can
 /// run from one end of the country to the other without the fields being cut
 /// up to describe it.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WaySpec {
     pub name: String,

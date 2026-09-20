@@ -14,6 +14,7 @@ mod tests {
             way: Vec::new(),
             way_width: None,
             tyre: None,
+            friction: None,
         }
     }
 
@@ -334,7 +335,7 @@ pub fn ensure_fields(world: &mut World) {
     };
     let layout = world.resource::<FieldLayout>().clone();
     layout
-        .validate(world.resource::<FieldProfiles>())
+        .validate(world.resource::<FieldProfiles>(), domain)
         .expect("valid field layout");
     let profiles = world.resource::<FieldProfiles>().0.clone();
     let ready = world.resource_mut::<CoverTerrain>().heightmap.take();

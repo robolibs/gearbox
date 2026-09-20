@@ -460,6 +460,9 @@ mod tests {
             .insert_resource(gearbox_api::PhysicsActive(true))
             .init_resource::<gearbox_fields::WheelContacts>()
             .init_resource::<crate::services::LinkValues>()
+            // The tread is placed along the track by rolled distance, so the
+            // recorder reads the clock.
+            .init_resource::<Time>()
             .add_systems(
                 Update,
                 (

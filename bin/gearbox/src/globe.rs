@@ -7,7 +7,7 @@
 //! the planet and every other site are placed around it in high precision.
 //! All sites share one physics world, each in its own region of it.
 
-use bevy::math::DVec3;
+use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use big_space::prelude::*;
 use gearbox_globe::{Datum, Geodetic, Terrain};
@@ -90,7 +90,7 @@ pub fn site_bundle(index: usize, name: &str, frame: &Datum, root: Entity) -> imp
 
 /// Where on Earth the world starts: `GEARBOX_DATUM="lat,lon"` in degrees, else
 /// the field outside Amsterdam the GNSS has always reported.
-fn home_datum() -> Datum {
+pub(crate) fn home_datum() -> Datum {
     let given = std::env::var("GEARBOX_DATUM").ok().and_then(|value| {
         let (lat, lon) = value.split_once(',')?;
         Some((lat.trim().parse::<f64>().ok()?, lon.trim().parse::<f64>().ok()?))
@@ -249,8 +249,10 @@ fn travel(
         None => return,
     };
     let here = sites.current;
-    let occupied = physics.bodies.iter().any(|(_, body)| {
-        body.is_dynamic() && gearbox_globe::region_of_physics(body.translation().x) == here
+    let occupied = physics.bodies().into_iter().any(|id| {
+        physics.body(id).is_some_and(|body| {
+            body.is_dynamic() && gearbox_globe::region_of_physics(body.translation().x) == here
+        })
     });
     let to = sites.datum_for(&mut commands, destination);
     if to == here {
@@ -327,6 +329,7 @@ fn enter_site(
         };
         world.insert_resource(gearbox_fields::FieldLayout {
             default: home.0.default,
+            default_friction: home.0.default_friction,
             fields,
             ways,
         });
@@ -480,9 +483,9 @@ fn reanchor_machines(
     loaded: Query<(), With<crate::load::LoadedAsset>>,
     mut transforms: Query<&mut Transform>,
 ) {
-    use rapier3d::math::{Rotation, Vector};
     const TOGETHER_M: f64 = 1_000.0;
-    let strayed = physics.bodies.iter().find_map(|(_, body)| {
+    let strayed = physics.bodies().into_iter().find_map(|id| {
+        let body = physics.body(id)?;
         let at = body.translation();
         let (region, local) = site_local(at.x, at.y, at.z);
         (body.is_dynamic() && region < sites.list.len() && local[0].hypot(local[2]) > 0.8 * reach())
@@ -505,39 +508,54 @@ fn reanchor_machines(
         gearbox_globe::physics_offset(to_region).x,
     );
     let physics = physics.as_mut();
-    let moved: Vec<Entity> = physics
+    let carried_here: Vec<(Entity, crate::physics::backend::BodyId)> = physics
         .entity_to_body
         .iter()
         .filter(|(_, handle)| {
-            physics.bodies.get(**handle).is_some_and(|body| {
+            physics.body(**handle).is_some_and(|body| {
                 let at = body.translation();
                 let (region, local) = site_local(at.x, at.y, at.z);
                 region == from_region && (DVec3::from_array(local) - trigger).length() < TOGETHER_M
             })
         })
-        .map(|(entity, _)| *entity)
+        .map(|(entity, handle)| (*entity, *handle))
         .collect();
-    let spin = |v: Vector| {
-        let turned = turn * DVec3::new(v.x, v.y, v.z);
-        Vector::new(turned.x, turned.y, turned.z)
-    };
-    for entity in &moved {
-        let Some(body) = physics.entity_to_body.get(entity).and_then(|h| physics.bodies.get_mut(*h)) else {
+    let moved: Vec<Entity> = carried_here.iter().map(|(entity, _)| *entity).collect();
+    // A machine is an articulation, so its bodies move as one batch: carried
+    // over one at a time, each move drags the joints of the ones not yet moved.
+    let mut poses = Vec::with_capacity(carried_here.len());
+    let mut spun = Vec::with_capacity(carried_here.len());
+    for (_, handle) in &carried_here {
+        let Some(body) = physics.body(*handle) else {
             continue;
         };
-        let mut pose = *body.position();
+        let pose = body.position();
         let local = DVec3::new(pose.translation.x - from_x, pose.translation.y, pose.translation.z);
         let carried = into.from_ecef(from.to_ecef(local));
-        pose.translation = Vector::new(carried.x + to_x, carried.y, carried.z);
-        let q = pose.rotation;
-        let turned = turn * bevy::math::DQuat::from_xyzw(q.x, q.y, q.z, q.w);
-        pose.rotation = Rotation::from_xyzw(turned.x, turned.y, turned.z, turned.w);
-        let (linvel, angvel) = (spin(body.linvel()), spin(body.angvel()));
-        body.set_position(pose, true);
-        body.set_linvel(linvel, true);
-        body.set_angvel(angvel, true);
+        let spin = |v: crate::physics::backend::DVec3| {
+            let turned = turn * DVec3::new(v.x, v.y, v.z);
+            crate::physics::backend::DVec3::new(turned.x, turned.y, turned.z)
+        };
+        let q = turn * DQuat::from_xyzw(pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w);
+        poses.push((
+            *handle,
+            crate::physics::backend::Pose::new(
+                crate::physics::backend::DVec3::new(carried.x + to_x, carried.y, carried.z),
+                crate::physics::backend::DQuat::from_xyzw(q.x, q.y, q.z, q.w),
+            ),
+        ));
+        spun.push((*handle, spin(body.linvel()), spin(body.angvel())));
     }
-    physics.bodies.propagate_modified_body_positions_to_colliders(&mut physics.colliders);
+    if let Err(error) = physics.set_body_poses(&poses, false) {
+        warn!("gearbox-globe: carrying bodies to the new datum was rejected: {error}");
+        return;
+    }
+    for (handle, linvel, angvel) in spun {
+        if let Some(body) = physics.body_mut(handle) {
+            body.set_linvel(linvel, true);
+            body.set_angvel(angvel, true);
+        }
+    }
     // The roots the bodies hang from change datum with them.
     let mut roots: Vec<Entity> = moved
         .iter()

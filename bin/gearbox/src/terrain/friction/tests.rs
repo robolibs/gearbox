@@ -55,23 +55,34 @@ fn fixture() -> (App, [BodyId; 2], ColliderId) {
     profiles.register(FieldProfile {
         name: "test",
         layers: vec![],
-        ground: |_, _, _, _| panic!("headless material factory"),
+        ground: |_, _, _, _, _| panic!("headless material factory"),
         wheel_response: WheelResponse {
             recovery_seconds: 1.0,
             bend: 0.0,
             darkening: 0.0,
             footprint_length: 0.3,
+            tread: false,
         },
+        tread: Vec4::ZERO,
+        surface_tint: Vec4::ONE,
+        soft_border: 0.0,
     });
     app.insert_resource(PhysicsWorld::with_backend(Box::new(backend)))
         .insert_resource(ProceduralTerrain {
+            site: 0,
             entity,
-            collider,
             safety_floor: collider,
             grid: Arc::new(HeightGrid::sample(4.0, 0.1, |_, _| 0.0)),
             fine_cell: 0.1,
             tiles: HashMap::default(),
+            complete: true,
+            heightmap: None,
         })
+        // The ground under the wheels is streamed in chunks; the grid is
+        // published onto whichever are laid, so the fixture lays one.
+        .insert_resource(super::super::GroundColliders(
+            [((0usize, IVec2::ZERO), collider)].into_iter().collect(),
+        ))
         .insert_resource(profiles)
         .insert_resource(layout())
         .add_systems(Update, publish);
@@ -242,8 +253,9 @@ fn replacement_terrain_recovers_after_invalid_layout_and_preserves_pressure() {
     {
         let mut terrain = app.world_mut().resource_mut::<ProceduralTerrain>();
         terrain.entity = entity;
-        terrain.collider = ground;
         terrain.grid = Arc::new(HeightGrid::sample(4.0, 0.2, |_, _| 0.0));
+        app.world_mut().resource_mut::<super::super::GroundColliders>().0 =
+            [((0usize, IVec2::ZERO), ground)].into_iter().collect();
     }
     {
         let mut layout = app.world_mut().resource_mut::<FieldLayout>();

@@ -4,7 +4,7 @@ use gearbox_fields::{FieldBounds, FieldLayout, FieldProfiles};
 
 struct Attempt {
     entity: Entity,
-    collider: ColliderId,
+    colliders: Vec<ColliderId>,
     grid: Arc<HeightGrid>,
     fallback: f64,
     layout: FieldLayout,
@@ -13,14 +13,18 @@ struct Attempt {
 #[derive(Default)]
 pub(super) struct Publication {
     attempt: Option<Attempt>,
-    published: Option<ColliderId>,
+    published: Vec<ColliderId>,
     layout: Option<(Entity, FieldLayout)>,
 }
 
+/// The ground under the wheels is streamed in chunks, so the friction grid is
+/// registered on every chunk that is currently laid. The grid is in world
+/// coordinates, so each chunk reads its own part of the one grid.
 pub(super) fn publish(
     terrain: Option<Res<ProceduralTerrain>>,
     layout: Option<Res<FieldLayout>>,
     profiles: Option<Res<FieldProfiles>>,
+    ground: Res<super::GroundColliders>,
     mut physics: ResMut<PhysicsWorld>,
     mut state: Local<Publication>,
 ) {
@@ -38,13 +42,18 @@ pub(super) fn publish(
     if !physics.uses_wheel_forces() {
         return;
     }
-    let Some(collider) = physics.collider(terrain.collider) else {
+    let mut colliders: Vec<ColliderId> = ground.0.values().copied().collect();
+    colliders.sort();
+    let Some(fallback) = colliders
+        .first()
+        .and_then(|collider| physics.collider(*collider))
+        .map(|collider| collider.friction())
+    else {
         return;
     };
-    let fallback = collider.friction();
     if state.attempt.as_ref().is_some_and(|last| {
         last.entity == terrain.entity
-            && last.collider == terrain.collider
+            && last.colliders == colliders
             && Arc::ptr_eq(&last.grid, &terrain.grid)
             && last.fallback == fallback
             && (!layout.is_changed() || last.layout == *layout)
@@ -54,7 +63,7 @@ pub(super) fn publish(
     }
     state.attempt = Some(Attempt {
         entity: terrain.entity,
-        collider: terrain.collider,
+        colliders: colliders.clone(),
         grid: terrain.grid.clone(),
         fallback,
         layout: layout.clone(),
@@ -101,15 +110,19 @@ pub(super) fn publish(
         rows: grid.rows,
         values,
     };
-    if let Err(error) = physics.register_wheel_ground(terrain.collider, Some(friction)) {
-        state.attempt = None;
-        warn!("terrain: field friction registration failed: {error}");
-        return;
+    for collider in &colliders {
+        if let Err(error) = physics.register_wheel_ground(*collider, Some(friction.clone())) {
+            state.attempt = None;
+            warn!("terrain: field friction registration failed: {error}");
+            return;
+        }
     }
-    if state.published != Some(terrain.collider) {
-        clear(&mut physics, &mut state);
-    }
-    state.published = Some(terrain.collider);
+    // Chunks that went away since the last publication keep no grid.
+    let stale: Vec<ColliderId> =
+        state.published.iter().copied().filter(|c| !colliders.contains(c)).collect();
+    state.published = stale;
+    clear(&mut physics, &mut state);
+    state.published = colliders;
     state.layout = Some((terrain.entity, layout.clone()));
 }
 
@@ -122,13 +135,17 @@ fn same_regions(a: &FieldLayout, b: &FieldLayout) -> bool {
 }
 
 fn clear(physics: &mut PhysicsWorld, state: &mut Publication) {
-    if let Some(collider) = state.published.take()
-        && physics.collider(collider).is_some()
-        && let Err(error) = physics.register_wheel_ground(collider, None)
-    {
-        state.published = Some(collider);
-        warn!("terrain: field friction reset failed: {error}");
+    let mut kept = Vec::new();
+    for collider in std::mem::take(&mut state.published) {
+        if physics.collider(collider).is_none() {
+            continue;
+        }
+        if let Err(error) = physics.register_wheel_ground(collider, None) {
+            kept.push(collider);
+            warn!("terrain: field friction reset failed: {error}");
+        }
     }
+    state.published = kept;
 }
 
 #[cfg(test)]
