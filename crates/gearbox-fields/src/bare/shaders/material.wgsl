@@ -321,11 +321,12 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     // where it has dried out.
     // A way driven often is not just a different colour: the wheels press it
     // into hollows and crush the clods flat in them, so it lies lower and
-    // smoother than the ground either side.
+    // smoother than the ground either side. This is the relief the normal is
+    // taken from, not the mesh, so a rut shades but never breaks a silhouette.
     let pressed_in = worn(place);
     let crushed = 1.0 - pressed_in * 0.55;
     return swell * 0.08
-        - pressed_in * 0.045
+        - pressed_in * 0.09
         // How deep a comb cuts goes with how far apart its teeth are: a plough
         // cuts a trench, the wind wrinkles.
         + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62) * combed_seen
