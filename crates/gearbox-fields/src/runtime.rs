@@ -255,7 +255,7 @@ pub fn ensure_fields(world: &mut World) {
             bend: response.bend,
             darkening: response.darkening,
         };
-        let placed = placed_of(&specs, &profiles, &spec);
+        let placed = placed_of(&specs, &profiles, &layout.ways, &spec);
         let ground =
             (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone(), placed);
         let entity = world
@@ -289,7 +289,9 @@ pub fn ensure_fields(world: &mut World) {
             spec.name, profile.name, bounds.min, bounds.max, width, height,
             placed.way.points()
         );
-        let tread = match spec.wear {
+        // `placed` already settled what wears this field — its own `wear`, or a
+        // road laid across the layout that happens to cross it.
+        let tread = match placed.wear {
             Some(wear) => bare_tread(wear),
             None => profile.tread,
         };
@@ -619,14 +621,22 @@ pub fn bare_tread(worn: f32) -> Vec4 {
 fn placed_of(
     specs: &[FieldSpec],
     profiles: &bevy::platform::collections::HashMap<String, Arc<FieldProfile>>,
+    ways: &[crate::layout::WaySpec],
     self_spec: &FieldSpec,
 ) -> crate::profile::Placed {
     let mine = self_spec.bounds();
     let own = profiles.get(&self_spec.profile);
+    // A road laid over the whole layout wears every field it crosses; a way the
+    // field names for itself is its own business and comes first.
+    let road = ways.iter().find_map(|way| way.across(mine).map(|line| (way, line)));
     let mut near = crate::profile::Placed {
         bounds: mine,
-        wear: self_spec.wear,
-        way: self_spec.way(),
+        wear: self_spec.wear.or(road.as_ref().map(|(spec, _)| spec.wear)),
+        way: match (self_spec.way().points() >= 2, road) {
+            (true, _) => self_spec.way(),
+            (false, Some((_, line))) => line,
+            (false, None) => crate::layout::Way::straight(),
+        },
         ..default()
     };
     for other in specs {

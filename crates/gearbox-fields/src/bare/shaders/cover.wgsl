@@ -82,8 +82,11 @@ fn way_offset(place: vec2<f32>, way: mat4x4<f32>, count: i32) -> vec3<f32> {
 // How far the wheels have worn a ground back to bare earth. `tread` is half the
 // gauge between the ruts, half a rut's width, how bare the rut is and how bare
 // the rest is; all nought for a ground that wears evenly. `shape` is how many
-// points the way has and half its width; fewer than two points and the wear
-// runs down the field's own long axis, which is every straight way.
+// points the way has, half its width, and how far along the whole road its
+// first point lies — a road crossing two fields is clipped to each of them, and
+// without that offset the ruts would restart their wander at the boundary and
+// step sideways on it. Fewer than two points and the wear runs down the field's
+// own long axis, which is every straight way.
 fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         way: mat4x4<f32>, shape: vec4<f32>) -> f32 {
     if (tread.z <= 0.0) {
@@ -93,6 +96,7 @@ fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
     var half = 0.0;
     if (i32(shape.x) >= 2) {
         against = way_offset(place, way, i32(shape.x));
+        against.x = against.x + shape.z;
         half = max(shape.y, 0.1);
     } else {
         let span = extent.zw - extent.xy;

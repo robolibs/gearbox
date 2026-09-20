@@ -472,6 +472,18 @@ fn ground(
     bare.north = placed.tint[3];
     bare.reach = Vec4::from_array(placed.reach);
     (bare.way, bare.way_shape) = placed.way.packed();
+    // A road laid across the layout wears whatever it crosses, so a ploughed or
+    // sandy field is worn along it too — not only the profiles that are ways in
+    // themselves and set a tread of their own.
+    if let Some(wear) = placed.wear {
+        bare.tread = crate::runtime::bare_tread(wear);
+        // What it wears down to, for the profiles that are not ways themselves
+        // and so have never had to say: the same hardcore a track comes to, or
+        // a road over a ploughed field is only its own soil flattened.
+        if bare.stony.w <= 0.0 {
+            bare.stony = WAY_HARDCORE;
+        }
+    }
     let extension = BareExtension {
         trample,
         trample_params,

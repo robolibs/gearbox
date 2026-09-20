@@ -64,6 +64,49 @@ mod tests {
         assert_eq!(Way::bend(&many, 1.0).points(), Way::MOST as u32);
     }
 
+    // Points of a way, in order, read back the way a shader reads them.
+    fn line_of(way: &Way) -> Vec<Vec2> {
+        let (points, shape) = way.packed();
+        (0..shape.x as usize)
+            .map(|i| {
+                let column = points.col(i / 2);
+                if i % 2 == 0 { column.xy() } else { column.zw() }
+            })
+            .collect()
+    }
+
+    // The whole point of clipping rather than resampling: two fields either
+    // side of a boundary must describe the road with the *same* points, or it
+    // kinks where they meet. The arc offset has to be right too, or the ruts
+    // restart their wander on the boundary and step sideways there.
+    #[test]
+    fn two_fields_clip_one_road_to_the_same_line() {
+        let road: Vec<Vec2> = (0..12).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
+        let west = FieldBounds { min: Vec2::new(0.0, -20.0), max: Vec2::new(50.0, 20.0) };
+        let east = FieldBounds { min: Vec2::new(50.0, -20.0), max: Vec2::new(110.0, 20.0) };
+        for bounds in [west, east] {
+            let way = Way::clipped(&road, 3.0, bounds).unwrap();
+            let kept = line_of(&way);
+            // A contiguous run of the road itself — nothing moved or resampled.
+            let at = road.iter().position(|p| *p == kept[0]).unwrap();
+            assert_eq!(kept, road[at..at + kept.len()]);
+            // The road runs along x from the origin, so arc length is just x.
+            assert_eq!(way.packed().1.z, kept[0].x);
+        }
+        let west_line = line_of(&Way::clipped(&road, 3.0, west).unwrap());
+        let east_line = line_of(&Way::clipped(&road, 3.0, east).unwrap());
+        let shared: Vec<Vec2> =
+            west_line.iter().copied().filter(|p| east_line.contains(p)).collect();
+        assert!(!shared.is_empty(), "the two fields must overlap on the road");
+    }
+
+    #[test]
+    fn a_road_that_misses_a_field_clips_to_nothing() {
+        let road = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0)];
+        let away = FieldBounds { min: Vec2::new(0.0, 60.0), max: Vec2::new(100.0, 90.0) };
+        assert!(Way::clipped(&road, 3.0, away).is_none());
+    }
+
     #[test]
     fn a_layout_way_defaults_to_the_field_width() {
         let spec: FieldSpec = serde_json::from_str(
@@ -108,11 +151,17 @@ impl FieldBounds {
 /// The line the wheels follow through a field, in world XZ. A field is always a
 /// rectangle, so without this a way can only run straight down one; with it the
 /// field is merely the corridor a track winds along inside.
+///
+/// A road longer than one field is clipped to each field it crosses, and `arc`
+/// is how far along the whole road the first kept point lies. The shader adds
+/// it back, so the ruts wander by one noise down the road's whole length rather
+/// than restarting at every boundary and stepping sideways there.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Way {
     points: [Vec2; Way::MOST],
     count: u32,
     half_width: f32,
+    arc: f32,
 }
 
 impl Way {
@@ -140,7 +189,40 @@ impl Way {
         way
     }
 
-    /// For a shader: the points two to a column, and (how many, half the width).
+    /// The stretch of a longer road that `bounds` can see, or `None` where the
+    /// road does not come near this field at all. Both sides of a boundary clip
+    /// the *same* points, so the two halves of a road meet exactly; only the
+    /// ends are cut, never moved, and nothing is resampled.
+    pub fn clipped(points: &[Vec2], half_width: f32, bounds: FieldBounds) -> Option<Self> {
+        if points.len() < 2 {
+            return None;
+        }
+        // Far enough out that the verge and its noise are still decided by the
+        // real line and not by where the clip happened to fall.
+        let reach = Vec2::splat(half_width + 2.0);
+        let (min, max) = (bounds.min - reach, bounds.max + reach);
+        let seen: Vec<usize> = (0..points.len() - 1)
+            .filter(|&i| segment_meets(points[i], points[i + 1], min, max))
+            .collect();
+        let (&first, &last) = (seen.first()?, seen.last()?);
+        // One leg beyond each end, so the way still has a direction at the
+        // field's edge instead of stopping dead on it.
+        let start = first.saturating_sub(1);
+        let end = (last + 2).min(points.len() - 1);
+        let kept = &points[start..=end];
+        let arc = points[..=start].windows(2).map(|p| p[0].distance(p[1])).sum();
+        if kept.len() > Self::MOST {
+            warn!(
+                "way of {} points needs {} of them over [{:?}..{:?}]; only {} fit, so the \
+                 road is cut short there — split the field or use fewer points",
+                points.len(), kept.len(), bounds.min, bounds.max, Self::MOST
+            );
+        }
+        Some(Self { arc, ..Self::bend(kept, half_width) })
+    }
+
+    /// For a shader: the points two to a column, then how many, half the width,
+    /// and how far along the whole road the first of them lies.
     pub fn packed(&self) -> (Mat4, Vec4) {
         let pair = |i: usize| {
             let (a, b) = (self.points[i * 2], self.points[i * 2 + 1]);
@@ -148,9 +230,32 @@ impl Way {
         };
         (
             Mat4::from_cols(pair(0), pair(1), pair(2), pair(3)),
-            Vec4::new(self.count as f32, self.half_width, 0.0, 0.0),
+            Vec4::new(self.count as f32, self.half_width, self.arc, 0.0),
         )
     }
+}
+
+/// Whether a segment comes inside an axis-aligned box, by clipping it against
+/// each pair of slabs in turn.
+fn segment_meets(a: Vec2, b: Vec2, min: Vec2, max: Vec2) -> bool {
+    let run = b - a;
+    let (mut enter, mut leave) = (0.0f32, 1.0f32);
+    for axis in 0..2 {
+        if run[axis].abs() < 1e-6 {
+            if a[axis] < min[axis] || a[axis] > max[axis] {
+                return false;
+            }
+            continue;
+        }
+        let near = (min[axis] - a[axis]) / run[axis];
+        let far = (max[axis] - a[axis]) / run[axis];
+        enter = enter.max(near.min(far));
+        leave = leave.min(near.max(far));
+        if enter > leave {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -192,12 +297,43 @@ impl FieldSpec {
     }
 }
 
+/// A road laid across the whole layout rather than down one field. Every field
+/// it passes over is worn along it, whatever that field grows, so a track can
+/// run from one end of the country to the other without the fields being cut
+/// up to describe it.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaySpec {
+    pub name: String,
+    /// World XZ points of the line, as many as the road needs.
+    pub points: Vec<[f32; 2]>,
+    /// How wide the worn corridor is, in metres.
+    pub width: f32,
+    /// How hard it is worn, nought to one, for the fields it crosses that do
+    /// not say for themselves.
+    pub wear: f32,
+}
+
+impl WaySpec {
+    fn line(&self) -> Vec<Vec2> {
+        self.points.iter().copied().map(Vec2::from_array).collect()
+    }
+
+    /// The stretch of this road a field can see, if it crosses that field.
+    pub fn across(&self, bounds: FieldBounds) -> Option<Way> {
+        Way::clipped(&self.line(), self.width * 0.5, bounds)
+    }
+}
+
 #[derive(Resource, Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldLayout {
     pub default: String,
     #[serde(default)]
     pub fields: Vec<FieldSpec>,
+    /// Roads laid over the fields; the first one a field meets wears it.
+    #[serde(default)]
+    pub ways: Vec<WaySpec>,
 }
 
 impl Default for FieldLayout {

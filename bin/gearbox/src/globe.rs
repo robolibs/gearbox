@@ -318,8 +318,18 @@ fn enter_site(
         let Some(home) = world.get_resource::<HomeLayout>().cloned() else {
             return;
         };
-        let fields = if to == 0 { home.0.fields.clone() } else { Vec::new() };
-        world.insert_resource(gearbox_fields::FieldLayout { default: home.0.default, fields });
+        // Only the home site is laid out; elsewhere the default cover stands
+        // alone, so its roads have nothing to cross either.
+        let (fields, ways) = if to == 0 {
+            (home.0.fields.clone(), home.0.ways.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        world.insert_resource(gearbox_fields::FieldLayout {
+            default: home.0.default,
+            fields,
+            ways,
+        });
     });
     info!("globe: view now in site `{}` ({} sites)", sites.list[to].name, sites.list.len());
 }

@@ -41,6 +41,37 @@ struct AntiRepeatTerrainExtension {
     heightmap: Option<Handle<Image>>,
     #[uniform(112)]
     geometry: SurfaceGeometryParams,
+    #[uniform(113)]
+    worn: WornStubble,
+}
+
+/// A way worn across the stubble. The same six numbers the meadow carries: what
+/// they mean lives in `bare_tread`, `WAY_SOIL`/`WAY_HARDCORE` and `worn()`, so
+/// this is only how they travel.
+#[derive(bevy::render::render_resource::ShaderType, Reflect, Debug, Clone, Copy, Default)]
+struct WornStubble {
+    extent: Vec4,
+    tread: Vec4,
+    way: Mat4,
+    way_shape: Vec4,
+    soil: Vec4,
+    stony: Vec4,
+}
+
+impl WornStubble {
+    fn of(placed: &crate::profile::Placed) -> Self {
+        let (way, way_shape) = placed.way.packed();
+        Self {
+            extent: Vec4::new(
+                placed.bounds.min.x, placed.bounds.min.y,
+                placed.bounds.max.x, placed.bounds.max.y),
+            tread: placed.wear.map(crate::runtime::bare_tread).unwrap_or_default(),
+            way,
+            way_shape,
+            soil: crate::bare::WAY_SOIL,
+            stony: crate::bare::WAY_HARDCORE,
+        }
+    }
 }
 
 impl MaterialExtension for AntiRepeatTerrainExtension {
@@ -132,6 +163,9 @@ fn apply_anti_repeat_material_to_usd_terrain(
                                 texels_per_metre: 1.0, width: 2.0, height: 2.0, recovery_seconds: 1800.0, ..default() },
                             heightmap: None,
                             geometry: SurfaceGeometryParams::default(),
+                            // A stubble authored in USD belongs to no field, so
+                            // no way crosses it: a zero tread wears nothing.
+                            worn: WornStubble::default(),
                         },
                     })
                 })
@@ -258,7 +292,7 @@ fn create_ground(
     tracks: Handle<Image>,
     wheels: WheelMapParams,
     geometry: SurfaceGeometry,
-    _placed: crate::profile::Placed,
+    placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = AntiRepeatTerrainExtension {
@@ -279,6 +313,7 @@ fn create_ground(
         wheels,
         heightmap: Some(geometry.heightmap),
         geometry: geometry.params,
+        worn: WornStubble::of(&placed),
     };
     let material = world
         .resource_mut::<Assets<AntiRepeatTerrainMaterial>>()

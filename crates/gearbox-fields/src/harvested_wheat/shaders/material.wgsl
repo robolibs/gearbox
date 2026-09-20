@@ -19,6 +19,25 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var<uniform> wheels: WheelMapParams;
 
+struct WornStubble {
+    extent: vec4<f32>,
+    tread: vec4<f32>,
+    way: mat4x4<f32>,
+    way_shape: vec4<f32>,
+    soil: vec4<f32>,
+    stony: vec4<f32>,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(113) var<uniform> worn_ground: WornStubble;
+
+// The same wear the bare grounds and the meadow read, so a road crossing from
+// one field to the next does not change shape or colour on the boundary.
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn}
+
+fn stubble_worn(place: vec2<f32>) -> f32 {
+    return worn(place, worn_ground.extent, worn_ground.tread,
+        worn_ground.way, worn_ground.way_shape);
+}
+
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var terrain_albedo: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101)
@@ -294,6 +313,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var color = terrain_color(in.world_position.xz);
     let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x;
     color = vec4<f32>(color.rgb * (1.0 - wheels.darkening * pressed), 1.0);
+    // A way worn across the stubble: the rows go and the earth under them shows.
+    let bared = stubble_worn(in.world_position.xz);
+    let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, bared)
+        * (0.8 + fbm(in.world_position.xz * 1.6) * 0.5);
+    color = vec4<f32>(mix(color.rgb, earth, bared), 1.0);
 #ifdef VERTEX_COLORS
     color = color * in.color;
 #endif
