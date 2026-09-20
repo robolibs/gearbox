@@ -193,9 +193,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         return culled_vertex();
     }
 
-    // Grass holds what the wheels have not worn away; stones and crumbs show
-    // wherever it has not.
-    let bared = worn(base);
+    let pressed = sample_wheels(trample, field.wheels, base);
+    let flat = clamp(pressed.x, 0.0, 1.0);
+    // A way beaten by driving wears the ground as surely as one laid out that
+    // way, and grass holds only what is left. The same reading the ground
+    // material makes, so the two agree.
+    let bared = max(worn(base), flat * 0.8);
     let patchy_cover = taken(base);
     // Matches the ground material: a driven surface is green wherever it is
     // not worn, rather than wherever the patches fall.
@@ -214,8 +217,6 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     let yaw = rand(id, 5u) * 6.2831853;
     let turn = mat2x2<f32>(cos(yaw), -sin(yaw), sin(yaw), cos(yaw));
-    let pressed = sample_wheels(trample, field.wheels, base);
-    let flat = clamp(pressed.x, 0.0, 1.0);
 
     var out: VertexOutput;
     if (is_lump) {

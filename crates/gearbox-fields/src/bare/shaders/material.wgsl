@@ -325,8 +325,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     var grass_share = 0.0;
     var shade_of_clumps = 1.0;
-    // Where the wheels have worn the ground, no grass holds it.
-    let bared = worn(place);
+    // Where the wheels have worn the ground, no grass holds it — whether that
+    // is a road laid out as worn, or a way beaten across a field by driving it.
+    let rolled_now = clamp(sample_wheels(tracks, wheels, place).x, 0.0, 1.0);
+    let bared = max(worn(place), rolled_now * 0.8);
     if (ground.grass.w > 0.001) {
         let grown = taken(place);
         // On a driven surface the patches do not decide it: what is not worn
