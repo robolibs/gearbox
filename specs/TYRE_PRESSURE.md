@@ -3,6 +3,11 @@
 Run this worktree with `GEARBOX_PHYSICS=molla`. Rapier retains rigid tyres;
 it does not implement these pressure mechanics.
 
+Procedural field layouts can author `default_friction` and per-region `friction`
+for footprint sampling. Missing values retain collider friction; no coefficients
+are inferred from visual profile names. See the [field friction contract](../crates/gearbox-fields/README.md#physical-friction-in-the-molla-worktree)
+for schema, interpolation, update semantics and current terrain/backend limits.
+
 ## Required machine asset contract
 
 **REQUIRED CONTRACT — authoring requirement; loader enforcement incomplete.**

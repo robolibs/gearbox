@@ -1,5 +1,7 @@
 //! Procedural terrain geometry, sampled heights, mesh LOD, and collision.
 
+mod friction;
+
 use std::sync::{Arc, RwLock};
 
 use bevy::asset::RenderAssetUsages;
@@ -38,6 +40,12 @@ pub struct TerrainUpdates;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PostStartup, spawn_procedural_terrain)
+            .add_systems(
+                Update,
+                friction::publish
+                    .after(gearbox_fields::CoverUpdates)
+                    .before(crate::physics::step_physics),
+            )
             .add_systems(
                 Update,
                 (retire_for_usd_terrain, update_terrain_tiles)

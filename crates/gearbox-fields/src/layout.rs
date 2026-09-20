@@ -1,6 +1,10 @@
 //! Validated scene field layout and rectangular region partitioning.
 
 #[cfg(test)]
+#[path = "layout/friction_tests.rs"]
+mod friction_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -66,13 +70,16 @@ impl FieldBounds {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldSpec {
     pub name: String,
     pub profile: String,
     pub min: [f32; 2],
     pub max: [f32; 2],
+    /// Dimensionless ground friction; absent values inherit the layout default.
+    #[serde(default)]
+    pub friction: Option<f64>,
 }
 
 impl FieldSpec {
@@ -84,10 +91,13 @@ impl FieldSpec {
     }
 }
 
-#[derive(Resource, Clone, Debug, Deserialize)]
+#[derive(Resource, Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldLayout {
     pub default: String,
+    /// Dimensionless background friction; absent values use the ground collider.
+    #[serde(default)]
+    pub default_friction: Option<f64>,
     #[serde(default)]
     pub fields: Vec<FieldSpec>,
 }
@@ -117,8 +127,33 @@ impl FieldLayout {
     }
 
     pub fn validate(&self, profiles: &FieldProfiles, terrain: FieldBounds) -> Result<(), String> {
+        self.validate_bounds(terrain)?;
         if !profiles.0.contains_key(&self.default) {
             return Err(format!("unknown default field profile: {}", self.default));
+        }
+        for field in &self.fields {
+            if !profiles.0.contains_key(&field.profile) {
+                return Err(format!("unknown field profile: {}", field.profile));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_bounds(&self, terrain: FieldBounds) -> Result<(), String> {
+        if !terrain.min.is_finite()
+            || !terrain.max.is_finite()
+            || !terrain.min.cmplt(terrain.max).all()
+        {
+            return Err("invalid field terrain bounds".into());
+        }
+        for friction in self
+            .default_friction
+            .iter()
+            .chain(self.fields.iter().filter_map(|field| field.friction.as_ref()))
+        {
+            if !friction.is_finite() || *friction < 0.0 {
+                return Err("field friction must be finite and non-negative".into());
+            }
         }
         for (i, field) in self.fields.iter().enumerate() {
             let bounds = field.bounds();
@@ -127,9 +162,6 @@ impl FieldLayout {
                 || self.fields[..i].iter().any(|f| f.name == field.name)
             {
                 return Err(format!("empty or duplicate field name: {}", field.name));
-            }
-            if !profiles.0.contains_key(&field.profile) {
-                return Err(format!("unknown field profile: {}", field.profile));
             }
             if !bounds.min.is_finite()
                 || !bounds.max.is_finite()
@@ -150,6 +182,58 @@ impl FieldLayout {
             }
         }
         Ok(())
+    }
+
+    /// Row-major world-XZ friction samples, or None when no friction is authored.
+    pub fn friction_samples(
+        &self,
+        grid: &super::HeightGrid,
+        fallback: f64,
+    ) -> Result<Option<Vec<f64>>, String> {
+        if !fallback.is_finite()
+            || fallback < 0.0
+            || !grid.cell.is_finite()
+            || grid.cell <= 0.0
+            || grid.cols < 2
+            || grid.rows < 2
+        {
+            return Err("invalid field friction grid or collider friction".into());
+        }
+        let domain = FieldBounds {
+            min: Vec2::new(grid.min_x, grid.min_z),
+            max: Vec2::new(
+                grid.min_x + (grid.cols - 1) as f32 * grid.cell,
+                grid.min_z + (grid.rows - 1) as f32 * grid.cell,
+            ),
+        };
+        self.validate_bounds(domain)?;
+        let count = grid.cols
+            .checked_mul(grid.rows)
+            .filter(|&n| n <= 16_777_216)
+            .ok_or("field friction grid exceeds 16 million samples")?;
+        if self.default_friction.is_none() && self.fields.iter().all(|field| field.friction.is_none()) {
+            return Ok(None);
+        }
+        let default = self.default_friction.unwrap_or(fallback);
+        let mut values = Vec::with_capacity(count);
+        for row in 0..grid.rows {
+            for col in 0..grid.cols {
+                let point = Vec2::new(
+                    grid.min_x + col as f32 * grid.cell,
+                    grid.min_z + row as f32 * grid.cell,
+                );
+                let friction = self.fields
+                    .iter()
+                    .find(|field| {
+                        point.cmpge(Vec2::from_array(field.min)).all()
+                            && point.cmplt(Vec2::from_array(field.max)).all()
+                    })
+                    .and_then(|field| field.friction)
+                    .unwrap_or(default);
+                values.push(friction);
+            }
+        }
+        Ok(Some(values))
     }
 
     pub fn regions(&self, terrain: FieldBounds) -> Vec<FieldSpec> {
@@ -199,6 +283,7 @@ impl FieldLayout {
             profile: self.default.clone(),
             min: [x0, z0],
             max: [x1, z1],
+            friction: self.default_friction,
         }
     }
 }
