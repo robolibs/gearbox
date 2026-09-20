@@ -120,8 +120,13 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>)
     let rut = abs(abs(against.z + sway) - gauge);
     let wheel = 1.0 - smoothstep(tread.y * 0.55, tread.y * 1.6, rut);
     // Ragged by moving where the edge falls, not by scaling the wear: as a
-    // multiplier it took a road bare across its width down to two thirds.
-    let verge = smoothstep(0.0, 1.15, half - against.w + (lattice(place, 4.0) - 0.5) * 0.9);
+    // multiplier it took a road bare across its width down to two thirds. Both
+    // how far the edge softens and how far it wanders are held within the way
+    // itself, or a path narrower than the softening never wears at all — its
+    // own verge closes over its middle.
+    let soften = min(1.15, half * 0.9);
+    let wander = (lattice(place, 4.0) - 0.5) * min(0.9, half * 0.6);
+    let verge = smoothstep(0.0, soften, half - against.w + wander);
     return clamp(mix(tread.w, tread.z, wheel) * verge, 0.0, 1.0);
 }
 
