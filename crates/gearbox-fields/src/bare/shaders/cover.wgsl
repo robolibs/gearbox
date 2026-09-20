@@ -243,7 +243,7 @@ fn way_offset(place: vec2<f32>, way: mat4x4<f32>, more: mat4x4<f32>,
 // point, across, distance), `half` how wide the worn part of it is and `wear`
 // how hard this line in particular is used. Two lines crossing a field each
 // bring their own, so a farm track may join a metalled road.
-fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>, wear: f32) -> vec2<f32> {
+fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>, wear: f32) -> vec3<f32> {
     // No stretch of a way is worn quite like the next, and without that a road
     // is one flat tone end to end, which is what reads as paint at a distance.
     // Drawn from the nearest point of the line, so both sides of a boundary see
@@ -276,8 +276,18 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     let side = select(vec2<f32>(37.0, -11.0), vec2<f32>(-91.0, 53.0), across_way > 0.0);
     let own = (lattice(against.xy + side, 7.0) - 0.5) * min(0.3, half * 0.2) * apart;
     let firm = 1.0 - (1.0 - lattice(against.xy + side, 5.0)) * 0.3 * apart;
-    let rut = abs(abs(across_way) - gauge + own);
+    // Signed, so which side of the rut's middle a point falls on is known and
+    // not only how far off it.
+    let off_middle = abs(across_way) - gauge + own;
+    let rut = abs(off_middle);
     let wheel = (1.0 - smoothstep(tread.y * 0.55, tread.y * 1.6, rut)) * firm;
+    // A rut's floor is not flat across it. The tyre pushes material to one side
+    // and leaves a channel down the other, and it is that channel — not the
+    // middle of the rut — that a wheel walks beside and water runs along. Which
+    // side is the rut's own business and holds for a long stretch together.
+    let lean = select(-1.0, 1.0, lattice(against.xy + side, 21.0) > 0.5);
+    let channel = 1.0 - smoothstep(0.0, tread.y * 0.75,
+        abs(off_middle - lean * tread.y * 0.42));
     // Ragged by moving where the edge falls, not by scaling the wear: as a
     // multiplier it took a road bare across its width down to two thirds. Both
     // how far the edge softens and how far it wanders are held within the way
@@ -290,7 +300,7 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     // The two are not the same thing and the second cannot be recovered from
     // the first: the floor of a rut and a road worn bare across its width both
     // read as fully worn, but only one of them has a tyre going down it.
-    return vec2<f32>(clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0), wheel * verge);
+    return vec3<f32>(clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0), wheel * verge, channel * verge);
 }
 
 // How far out from a way's own edge this point stands, in metres, taking the
@@ -346,6 +356,7 @@ fn rut_of(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         return vec2<f32>(0.0, 0.0);
     }
     var swept = 0.0;
+    var channel = 0.0;
     let first = i32(shape.x);
     if (first < 2) {
         let span = extent.zw - extent.xy;
@@ -354,20 +365,26 @@ fn rut_of(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         let off = dot(place - middle, across);
         let along = dot(place - middle, vec2<f32>(-across.y, across.x));
         let against = vec4<f32>(middle + vec2<f32>(-across.y, across.x) * along, off, abs(off));
-        swept = worn_along(place, against, abs(dot(span, across)) * 0.5, tread, tread.z).y;
+        let one = worn_along(place, against, abs(dot(span, across)) * 0.5, tread, tread.z);
+        swept = one.y;
+        channel = one.z;
     } else {
         let along_first = way_offset(place, way, more, 0, first);
-        swept = worn_along(place, along_first, max(shape.y, 0.1), tread, tread.z).y;
+        let one = worn_along(place, along_first, max(shape.y, 0.1), tread, tread.z);
+        swept = one.y;
+        channel = one.z;
         let second = i32(shape.z);
         if (second >= 2) {
             let crossing = way_offset(place, way, more, first, second);
-            swept = max(swept, worn_along(place, crossing, max(shape.w, 0.1), tread, tread.w).y);
+            let two = worn_along(place, crossing, max(shape.w, 0.1), tread, tread.w);
+            swept = max(swept, two.y);
+            channel = max(channel, two.z);
         }
     }
-    // Long dips with short ones inside them: a stretch that holds water, and
-    // within it the few feet that hold it longest.
-    let low = lattice(place, 7.5) * 0.62 + lattice(place + 29.0, 1.9) * 0.38;
-    return vec2<f32>(swept, swept * smoothstep(0.46, 0.86, low));
+    // Long dips with short ones inside them: a stretch of channel that holds
+    // water, and within it the few feet that hold it longest.
+    let dip = lattice(place, 7.5) * 0.62 + lattice(place + 29.0, 1.9) * 0.38;
+    return vec2<f32>(swept, channel * smoothstep(0.46, 0.86, dip));
 }
 
 // How far the wheels have worn a ground back to bare earth. `tread` is half the
