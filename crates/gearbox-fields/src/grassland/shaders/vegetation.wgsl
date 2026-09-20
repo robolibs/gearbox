@@ -11,6 +11,7 @@
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -126,6 +127,12 @@ fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
     return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
+// How far a way has worn the sward away here. Read by both blade paths and by
+// the meadow material, so the grass stops exactly where the earth shows.
+fn way_wear(place: vec2<f32>) -> f32 {
+    return worn(place, field.bounds, field.tread, field.way, field.way_shape);
+}
+
 fn meadow_noise(p: vec2<f32>) -> f32 {
     let cell = vec2<i32>(floor(p));
     let f = fract(p);
@@ -152,6 +159,13 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
     if (coverage <= 0.0) {
+        return culled_vertex();
+    }
+    // A way worn across the meadow takes the sward with it. A chance per blade
+    // rather than a shrinking of them all, so the edge of the track is ragged
+    // with stragglers instead of being mown to a line; what survives near it is
+    // shorter. The same reading the meadow material makes, so the two agree.
+    if (rand(id, 41u) < way_wear(base)) {
         return culled_vertex();
     }
     let habitat = meadow_noise(base * 0.8 + vec2<f32>(7.2, 3.1));
@@ -234,7 +248,7 @@ fn meadow_grass(base: vec2<f32>, ground: vec3<f32>, ground_normal: vec3<f32>, id
     let fine = variety < 0.25 + 0.5 * species.x;
     let broad = !fine && variety > 0.8 - 0.5 * species.y;
     let height = mix(0.12, 0.20, rand(id, 20u + leaf)) * select(1.0, 0.9, broad) * coverage
-        * dry_growth(base);
+        * dry_growth(base) * (1.0 - way_wear(base) * 0.55);
     let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
     let base_w = mix(0.0025, 0.004, rand(id, 30u + leaf)) * select(select(1.0, 1.8, broad), 0.6, fine);
     let width = base_w * max(1.0, 1.2 * pixel_m / base_w) * coverage;
@@ -395,13 +409,22 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
         return culled_vertex();
     }
 
+    // A way worn across the meadow takes the sward with it. A chance per blade
+    // rather than a shrinking of them all, so the track's edge is ragged with
+    // stragglers rather than mown to a line; what holds on near it is shorter.
+    let bared = way_wear(base_xz);
+    if (rand(id, 41u) < bared) {
+        return culled_vertex();
+    }
+
     let species = grass_species(base_xz);
     let pick = rand(id, 13u);
     let fescue = pick < species.x;
     let rye = !fescue && pick < species.x + species.y;
     let height = mix(GOT_MIN_HEIGHT, GOT_MAX_HEIGHT, rand(id, 6u))
         * mix(0.9, 1.1, rand(clump.id, 3u)) * select(1.0, 0.8, fescue)
-        * select(1.0, mix(0.75, 0.95, rand(id, 32u)), twin) * alive * dry_growth(base_xz);
+        * select(1.0, mix(0.75, 0.95, rand(id, 32u)), twin) * alive * dry_growth(base_xz)
+        * (1.0 - bared * 0.55);
     let width = mix(GOT_MIN_WIDTH, GOT_MAX_WIDTH, rand(id, 7u))
         * select(select(1.0, 1.6, rye), 0.6, fescue) * widen * alive;
 

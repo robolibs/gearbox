@@ -202,6 +202,12 @@ fn standing(
     layers
 }
 
+/// The soil a way is worn down to, and the hardcore under that — grey and
+/// gritty. Any surface a way crosses wears to these, so a track reads the same
+/// whether the field it runs over is a lane or a meadow.
+pub const WAY_SOIL: Vec4 = Vec4::new(0.108, 0.068, 0.038, 1.0);
+pub const WAY_HARDCORE: Vec4 = Vec4::new(0.126, 0.106, 0.082, 1.0);
+
 type BareMaterial = ExtendedMaterial<StandardMaterial, BareExtension>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
@@ -410,12 +416,11 @@ fn track(
         geometry,
         placed,
         BareGround {
-            tint: Vec4::new(0.108, 0.068, 0.038, 1.0),
+            tint: WAY_SOIL,
             grain: Vec4::new(0.28, 0.42, 0.0, 1.6),
             grass: Vec4::new(0.033, 0.068, 0.023, 1.0),
             tread,
-            // Hardcore: what a farm track wears down to, grey and gritty.
-            stony: Vec4::new(0.126, 0.106, 0.082, 1.0),
+            stony: WAY_HARDCORE,
             ..default()
         },
         0.9,

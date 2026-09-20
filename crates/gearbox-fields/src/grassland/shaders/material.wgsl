@@ -23,8 +23,21 @@ struct MeadowEdges {
     south: vec4<f32>,
     north: vec4<f32>,
     reach: vec4<f32>,
+    tread: vec4<f32>,
+    way: mat4x4<f32>,
+    way_shape: vec4<f32>,
+    soil: vec4<f32>,
+    stony: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var<uniform> edges: MeadowEdges;
+
+// The same wear the bare grounds read, so a track crossing a meadow is worn by
+// one rule and not by a second one that has to be kept in step with it.
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn}
+
+fn meadow_worn(place: vec2<f32>) -> f32 {
+    return worn(place, edges.extent, edges.tread, edges.way, edges.way_shape);
+}
 
 // The sward washed into whatever lies across each side, so a meadow meets a
 // track from its own side too and the two blends meet in the middle.
@@ -143,7 +156,10 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     let breakup = edge * 0.025 + (dirt_detail - grass_detail) * 0.06;
     let soil = meadow_pocket_blend(pattern.z + dry * 0.055 + breakup);
     let steep = 1.0 - saturate((normal.y - 0.80) / 0.12);
-    let exposed = max(soil, smoothstep(0.15, 0.8, steep + breakup));
+    // A way worn across the meadow: bare earth where the wheels run, and the
+    // sward left to close over the rest of it.
+    let bared = clamp(meadow_worn(world_xz) + breakup * 1.6, 0.0, 1.0);
+    let exposed = max(max(soil, bared), smoothstep(0.15, 0.8, steep + breakup));
     let footprint = surface_footprint(world_xz);
     let texture_visibility = 1.0 - smoothstep(0.015, 0.12, footprint);
     let texture_detail = mix(1.0, clamp(0.78 + mix(grass_detail, dirt_detail, exposed * 0.45) * 1.2, 0.8, 1.2), texture_visibility);
@@ -156,8 +172,13 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
         * mix(0.72, 1.20, tufts) * mix(0.90, 1.08, litter);
     let blade_color = mix(vec3<f32>(0.16, 0.27, 0.066), vec3<f32>(0.21, 0.24, 0.074), dry * 0.5)
         * meadow_tint(pattern) * dry_country(world_xz);
-    ground = mix(ground, blade_color, clamp(fine * 0.55 + blades * 0.50 + mat * 0.30, 0.0, 0.8));
+    ground = mix(ground, blade_color,
+        clamp(fine * 0.55 + blades * 0.50 + mat * 0.30, 0.0, 0.8) * (1.0 - bared));
     ground *= species_tint(grass_species(world_xz)) * dry_country(world_xz);
+    // The earth under the turf, lit by the dirt map so the way is not a flat
+    // band of colour laid over the field.
+    let earth = mix(edges.soil.rgb, edges.stony.rgb, bared) * (0.74 + dirt_detail * 0.86);
+    ground = mix(ground, earth, bared);
     let pressed = trample_pressed(world_xz);
     return MeadowSurface(
         vec4<f32>(ground * (1.0 - trample_params.darkening * 1.2 * pressed), 1.0),

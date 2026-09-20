@@ -37,7 +37,9 @@ struct MeadowExtension {
 
 /// Where this meadow sits and what lies across each of its sides, so it meets
 /// its neighbours in a wash rather than on a line — the same blend the bare
-/// grounds make, from the other side of it.
+/// grounds make, from the other side of it. A way is a track worn across the
+/// meadow itself: wear is not a thing bare ground alone can have, or a road
+/// could never cross a field without the field being cut in three.
 #[derive(bevy::render::render_resource::ShaderType, Reflect, Debug, Clone, Copy, Default)]
 struct MeadowEdges {
     extent: Vec4,
@@ -46,6 +48,13 @@ struct MeadowEdges {
     south: Vec4,
     north: Vec4,
     reach: Vec4,
+    tread: Vec4,
+    way: Mat4,
+    way_shape: Vec4,
+    /// What a way wears the meadow down to, shared with the bare grounds so a
+    /// track does not change colour where it leaves one field for the next.
+    soil: Vec4,
+    stony: Vec4,
 }
 
 impl MaterialExtension for MeadowExtension {
@@ -211,6 +220,11 @@ fn create_ground(
                     south: placed.tint[2],
                     north: placed.tint[3],
                     reach: Vec4::from_array(placed.reach),
+                    tread: placed.wear.map(crate::runtime::bare_tread).unwrap_or_default(),
+                    way: placed.way.packed().0,
+                    way_shape: placed.way.packed().1,
+                    soil: crate::bare::WAY_SOIL,
+                    stony: crate::bare::WAY_HARDCORE,
                 },
                 grass_albedo,
                 dirt_albedo,
