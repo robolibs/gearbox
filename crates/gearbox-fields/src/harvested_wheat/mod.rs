@@ -294,7 +294,8 @@ impl Plugin for HarvestedWheatPlugin {
                 super::clumps::dandelion(share * 1.2, 34.0),
                 super::clumps::nettle(share * 0.35, 30.0),
                 // Chippings where a track crosses the stubble.
-                super::bare::way_grit(2800.0)],
+                super::bare::way_grit(5200.0),
+                super::bare::way_litter(2600.0)],
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 0.7,

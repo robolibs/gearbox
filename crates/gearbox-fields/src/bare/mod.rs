@@ -61,6 +61,14 @@ fn way_grit_stone() -> Mesh {
     lump_mesh(STONE, WAY_GRIT, 9, 5)
 }
 
+/// The rest of what lies on a used track and is not stone: crumbs knocked off
+/// the ridges, dried clods carried out of the field on a tyre and dropped,
+/// what the hedge has shed. A road is not gravel on nothing, and a track that
+/// carries only stones reads as gravel spread over a lawn.
+fn way_grit_clod() -> Mesh {
+    lump_mesh(CLOD, WAY_GRIT, 5, 3)
+}
+
 /// What the first channel of a lump's texture coordinate marks it as. A tuft
 /// carries one; a stone's own coordinates run the whole way round it, so they
 /// cannot be used to say.
@@ -73,9 +81,19 @@ pub const WAY_GRIT: f32 = 2.0;
 /// Everywhere the way has not worn, every one of these is culled before it
 /// costs anything, so the density buys detail on the road alone.
 pub fn way_grit(density: f32) -> VegetationLayer {
+    way_lying(way_grit_stone, density)
+}
+
+/// The crumbs and clods that lie on a way beside its stone, on the same terms:
+/// only where the way has worn, and gone before they cost anything elsewhere.
+pub fn way_litter(density: f32) -> VegetationLayer {
+    way_lying(way_grit_clod, density)
+}
+
+fn way_lying(template: fn() -> Mesh, density: f32) -> VegetationLayer {
     VegetationLayer {
         shader: "embedded://gearbox_fields/bare/shaders/vegetation.wgsl",
-        template: way_grit_stone,
+        template,
         density,
         fade_start: 5.0,
         fade_end: 38.0,

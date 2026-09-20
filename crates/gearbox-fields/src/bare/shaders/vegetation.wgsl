@@ -11,7 +11,7 @@
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{blade_leans}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, wheel_scar}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, WAY_METALLED, inside_field}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, WAY_METALLED, inside_field, rut_of}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -164,7 +164,18 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // itself carries it so that a track crossing it has chippings underfoot,
     // and off the way every one of them goes before it costs anything.
     let metalled = smoothstep(WAY_METALLED, 0.95, bared);
-    if (vertex.uv.y > 1.5 && luck > metalled) {
+    // And on a way it does not lie evenly. Traffic shoves the loose coarse
+    // material off the floor of the rut — out to the shoulder and in to the
+    // strip between the two — so the stones gather at the rut edges and the
+    // floor is left as fines. A made road keeps more of its own, because it is
+    // stone through and through and what is pressed into the floor stays;
+    // whatever is left is swallowed where the water stands and silts over.
+    var lies = 1.0;
+    if (vertex.uv.y > 1.5) {
+        let pool = rut_of(base, field.bounds, field.tread, field.way, field.way_more, field.way_shape);
+        lies = mix(1.0, mix(0.2, 0.75, metalled), pool.x) * (1.0 - pool.y * 0.75);
+    }
+    if (vertex.uv.y > 1.5 && luck > metalled * lies) {
         return culled_vertex();
     }
     // Stones lie where the grass does not, and thickest where a wheel has
@@ -258,6 +269,11 @@ fn vertex(vertex: Vertex) -> VertexOutput {
                 earth = vec3<f32>(0.060, 0.034, 0.018);
             } else if (vertex.uv.y > 0.375) {
                 earth = vec3<f32>(0.245, 0.182, 0.098);
+            }
+            // A crumb lying on a way is not the field's: it was carried out on
+            // a tyre and dropped, damp underneath and dusted over.
+            if (vertex.uv.y > 1.5) {
+                earth = vec3<f32>(0.104, 0.074, 0.047);
             }
             lump = earth * mix(0.62, 1.22, rand(id, 9u));
         }

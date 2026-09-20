@@ -243,7 +243,7 @@ fn way_offset(place: vec2<f32>, way: mat4x4<f32>, more: mat4x4<f32>,
 // point, across, distance), `half` how wide the worn part of it is and `wear`
 // how hard this line in particular is used. Two lines crossing a field each
 // bring their own, so a farm track may join a metalled road.
-fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>, wear: f32) -> f32 {
+fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>, wear: f32) -> vec2<f32> {
     // No stretch of a way is worn quite like the next, and without that a road
     // is one flat tone end to end, which is what reads as paint at a distance.
     // Drawn from the nearest point of the line, so both sides of a boundary see
@@ -286,7 +286,11 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     let soften = min(1.15, half * 0.9);
     let wander = (lattice(place, 4.0) - 0.5) * min(0.9, half * 0.6);
     let verge = smoothstep(0.0, soften, half - against.w + wander);
-    return clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0);
+    // How worn, and — separately — how much the wheels themselves sweep here.
+    // The two are not the same thing and the second cannot be recovered from
+    // the first: the floor of a rut and a road worn bare across its width both
+    // read as fully worn, but only one of them has a tyre going down it.
+    return vec2<f32>(clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0), wheel * verge);
 }
 
 // How far out from a way's own edge this point stands, in metres, taking the
@@ -308,6 +312,62 @@ fn way_beyond(place: vec2<f32>, tread: vec4<f32>,
         out = min(out, way_offset(place, way, more, first, second).w - max(shape.w, 0.1));
     }
     return max(out, 0.0);
+}
+
+// Ground is never one tone for a metre together. There is a damp patch a hand
+// across, a paler place where the fines have blown off, a darker one where a
+// clod was crushed into it. Three scales, the finest a few centimetres, so
+// however close the eye gets it never finds a flat area — which is the thing
+// that reads as a texture rather than as ground.
+fn earth_mottle(place: vec2<f32>) -> f32 {
+    return 1.0
+        + (lattice(place, 0.85) - 0.5) * 0.22
+        + (lattice(place + 17.0, 0.29) - 0.5) * 0.16
+        + (lattice(place + 71.0, 0.10) - 0.5) * 0.10;
+}
+
+// Two things about a way that its wear cannot tell you.
+//
+// `.x` — how much the **wheels themselves** sweep here, which is the floor of a
+// rut and nothing else. Traffic shoves the loose coarse material off that
+// floor, out to the shoulder and in to the strip between the two ruts, so the
+// stones on a track lie everywhere on it *except* where the tyres run and the
+// floor is left as fines. Not recoverable from the wear: a rut floor and a road
+// worn bare across its width read alike, and only one has a tyre down it.
+//
+// `.y` — where water will stand. A rut does not fall evenly along its length;
+// it is deeper where the ground was softest when it was made, and a rut sheds
+// nothing sideways, so the water finds those low places and stays. Nothing
+// draws water yet; this is the ground being ready for it, and it is already
+// worth having as the damp, dark, silted patches of a used track.
+fn rut_of(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
+          way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> vec2<f32> {
+    if (max(tread.z, tread.w) <= 0.0) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    var swept = 0.0;
+    let first = i32(shape.x);
+    if (first < 2) {
+        let span = extent.zw - extent.xy;
+        let middle = (extent.xy + extent.zw) * 0.5;
+        let across = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), span.x < span.y);
+        let off = dot(place - middle, across);
+        let along = dot(place - middle, vec2<f32>(-across.y, across.x));
+        let against = vec4<f32>(middle + vec2<f32>(-across.y, across.x) * along, off, abs(off));
+        swept = worn_along(place, against, abs(dot(span, across)) * 0.5, tread, tread.z).y;
+    } else {
+        let along_first = way_offset(place, way, more, 0, first);
+        swept = worn_along(place, along_first, max(shape.y, 0.1), tread, tread.z).y;
+        let second = i32(shape.z);
+        if (second >= 2) {
+            let crossing = way_offset(place, way, more, first, second);
+            swept = max(swept, worn_along(place, crossing, max(shape.w, 0.1), tread, tread.w).y);
+        }
+    }
+    // Long dips with short ones inside them: a stretch that holds water, and
+    // within it the few feet that hold it longest.
+    let low = lattice(place, 7.5) * 0.62 + lattice(place + 29.0, 1.9) * 0.38;
+    return vec2<f32>(swept, swept * smoothstep(0.46, 0.86, low));
 }
 
 // How far the wheels have worn a ground back to bare earth. `tread` is half the
@@ -332,16 +392,16 @@ fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         let off = dot(place - middle, across);
         let along = dot(place - middle, vec2<f32>(-across.y, across.x));
         let against = vec4<f32>(middle + vec2<f32>(-across.y, across.x) * along, off, abs(off));
-        return worn_along(place, against, abs(dot(span, across)) * 0.5, tread, tread.z);
+        return worn_along(place, against, abs(dot(span, across)) * 0.5, tread, tread.z).x;
     }
     let along_first = way_offset(place, way, more, 0, first);
-    let down = worn_along(place, along_first, max(shape.y, 0.1), tread, tread.z);
+    let down = worn_along(place, along_first, max(shape.y, 0.1), tread, tread.z).x;
     let second = i32(shape.z);
     if (second < 2) {
         return down;
     }
     let crossing = way_offset(place, way, more, first, second);
-    let across = worn_along(place, crossing, max(shape.w, 0.1), tread, tread.w);
+    let across = worn_along(place, crossing, max(shape.w, 0.1), tread, tread.w).x;
     // Where two ways meet, the ground is worn worse than either takes alone:
     // everything turning off one onto the other churns the same few metres. So
     // the lesser adds to the greater instead of hiding under it, and a

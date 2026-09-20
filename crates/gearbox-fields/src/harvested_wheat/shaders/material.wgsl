@@ -37,7 +37,7 @@ struct WornStubble {
 
 // The same wear the bare grounds and the meadow read, so a road crossing from
 // one field to the next does not change shape or colour on the boundary.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle}
 
 fn stubble_worn(place: vec2<f32>) -> f32 {
     return worn(place, worn_ground.extent, worn_ground.tread,
@@ -337,7 +337,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         wheel_scar(tracks, wheels, in.world_position.xz) * 0.6,
     );
     let grit = fbm(in.world_position.xz * 1.6);
-    let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(stubble_worn(in.world_position.xz))) * (0.8 + grit * 0.5);
+    let pool = rut_of(in.world_position.xz, worn_ground.extent, worn_ground.tread, worn_ground.way, worn_ground.way_more, worn_ground.way_shape);
+    let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(stubble_worn(in.world_position.xz))) * (0.8 + grit * 0.5)
+        * earth_mottle(in.world_position.xz) * mix(1.0, 0.58, pool.y);
     // The taller of the two takes the pixel rather than the two being faded
     // together: the earth rises through the stubble's own hollows instead of
     // being washed over it, which is the difference between worn and painted.

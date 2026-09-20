@@ -174,7 +174,8 @@ impl Plugin for GrasslandPlugin {
                     super::clumps::celandine(share * 1.0, 40.0),
                     // Chippings where a track crosses the meadow. A recoloured
                     // ground is not a road; something has to lie loose on it.
-                    super::bare::way_grit(2800.0),
+                    super::bare::way_grit(5200.0),
+                    super::bare::way_litter(2600.0),
                 ],
                 ground: create_ground,
                 tread: Vec4::ZERO,
