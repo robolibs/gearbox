@@ -261,8 +261,12 @@ fn worn(place: vec2<f32>) -> f32 {
     // and a road that stops dead at a straight line reads as a painted strip.
     let half = abs(dot(span, across)) * 0.5;
     let inside = half - abs(dot(place - middle, across));
-    let verge = smoothstep(0.0, 1.15, inside) * (0.55 + 0.45 * lattice(place, 4.0));
-    return clamp(mix(ground.tread.w, ground.tread.z, wheel) * clamp(verge, 0.0, 1.0), 0.0, 1.0);
+    // Ragged by moving where the edge falls, not by scaling the wear: as a
+    // multiplier this took a road bare across its width down to two thirds
+    // worn down the middle of it, and every wear looked alike from the air.
+    let ragged = inside + (lattice(place, 4.0) - 0.5) * 0.9;
+    let verge = smoothstep(0.0, 1.15, ragged);
+    return clamp(mix(ground.tread.w, ground.tread.z, wheel) * verge, 0.0, 1.0);
 }
 
 // A clod is a cell, not a hump of noise: it belongs to the seed nearest it and
