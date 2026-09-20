@@ -301,7 +301,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let grass_height = tufts * 0.7 + blades * 0.3;
         let thirst = 1.0 - smoothstep(0.40, 0.88, grown);
         let straw = vec3<f32>(0.115, 0.088, 0.030);
-        let green = mix(ground.grass.rgb, straw, clamp(0.3 + thirst * 0.55, 0.0, 1.0))
+        // The tufts standing in this are mostly straw-headed, and past their
+        // reach the wash is all that is left: kept as green as the grass tint
+        // it starts from, the patches read as painted-on emerald from the air.
+        let green = mix(ground.grass.rgb, straw, clamp(0.46 + thirst * 0.5, 0.0, 1.0))
             * mix(0.72, 1.22, tufts) * mix(0.9, 1.1, blades);
         let soil_height = made_relief(place, close, pixel_m) * 2.0;
         let met = height_blend(colour, soil_height, 1.0 - took, green, grass_height, took);

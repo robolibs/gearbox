@@ -284,7 +284,7 @@ fn ploughed_ground(
         BareGround {
             tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
-            grass: Vec4::new(0.030, 0.082, 0.018, 0.55),
+            grass: Vec4::new(0.033, 0.068, 0.023, 0.55),
         },
         0.93,
     )
@@ -305,7 +305,7 @@ fn dirt_ground(
         BareGround {
             tint: Vec4::new(0.115, 0.070, 0.038, 1.0),
             grain: Vec4::new(0.3, 0.40, 0.0, 1.6),
-            grass: Vec4::new(0.030, 0.082, 0.018, 0.9),
+            grass: Vec4::new(0.033, 0.068, 0.023, 0.9),
         },
         0.88,
     )
