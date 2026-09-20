@@ -36,7 +36,7 @@ struct MeadowEdges {
 
 // The same wear the bare grounds read, so a track crossing a meadow is worn by
 // one rule and not by a second one that has to be kept in step with it.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, lattice}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, wheel_print, lattice}
 
 fn meadow_worn(place: vec2<f32>) -> f32 {
     return worn(place, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
@@ -49,7 +49,7 @@ fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
         mat4x4<f32>(edges.west, edges.east, edges.south, edges.north), edges.reach);
 }
 
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var grass_albedo: texture_2d<f32>;
@@ -202,8 +202,16 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let normal = surface_geometry_normal(surface_heightmap, geometry, in.world_position.xz, in.world_normal);
     // The print of the tyre bars, tilting the normal rather than tinting the
     // ground: a chevron is a shape, and a shape wants the sun to find it.
-    let print = way_print(in.world_position.xz, edges.extent, edges.tread,
-        edges.way, edges.way_more, edges.way_shape, edges.bar, edges.bar_more, surface_footprint(in.world_position.xz));
+    // Two ways a tyre can have been here: a way the layout laid out, and a
+    // wheel that has just rolled over it. Whichever left the deeper print holds
+    // the ground — they are the same tyre, so they never want blending.
+    let footprint_here = surface_footprint(in.world_position.xz);
+    let laid_print = way_print(in.world_position.xz, edges.extent, edges.tread,
+        edges.way, edges.way_more, edges.way_shape, edges.bar, edges.bar_more, footprint_here);
+    let mark = sample_wheel_mark(trample, trample_params, in.world_position.xz);
+    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.across, mark.roll,
+        trample_params.bar, mark.press, footprint_here);
+    let print = select(rolled_print, laid_print, laid_print.x >= rolled_print.x);
     pbr_input.N = normalize(
         surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz))
         + vec3<f32>(print.y, 0.0, print.z));
@@ -217,7 +225,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     let shaded = mix(0.72, 1.0, smoothstep(0.1, 0.7, sun_height));
     pbr_input.material.base_color = alpha_discard(pbr_input.material,
-        vec4<f32>(washed(in.world_position.xz, surface.color.rgb) * shaded * mix(1.0, 0.90, print.x),
+        vec4<f32>(washed(in.world_position.xz, surface.color.rgb) * shaded * mix(1.0, 0.40, print.x) * (1.0 + print.w * 0.85),
             surface.color.a));
     pbr_input.material.perceptual_roughness = surface.roughness;
     pbr_input.material.metallic = 0.0;

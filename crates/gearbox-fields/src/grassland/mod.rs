@@ -95,7 +95,10 @@ impl Plugin for GrasslandPlugin {
                     bend: 0.9,
                     darkening: 0.43,
                     footprint_length: 0.25,
-                    tread: false,
+                    // A tyre prints its bars into a meadow's soil as surely as
+                    // into a track's, wherever the wheel has taken the sward
+                    // off it. It costs the wheel map its other two channels.
+                    tread: true,
                 },
                 layers: vec![
                     // One blade population at three levels of detail.

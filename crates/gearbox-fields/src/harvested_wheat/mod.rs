@@ -229,7 +229,9 @@ impl Plugin for HarvestedWheatPlugin {
                     bend: 0.94,
                     darkening: 0.44,
                     footprint_length: 0.30,
-                    tread: false,
+                    // Stubble is driven on more than anything else on a farm,
+                    // and the earth under it takes a print.
+                    tread: true,
                 },
                 // Stalks at three levels of detail, one root population.
                 layers: vec![VegetationLayer {

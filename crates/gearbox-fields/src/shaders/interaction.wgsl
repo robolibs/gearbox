@@ -8,6 +8,9 @@ struct WheelMapParams {
     recovery_seconds: f32,
     bend: f32,
     darkening: f32,
+    /// The tyre rolling here — pitch, lean, duty, depth — so a mark driven
+    /// across open ground carries the same print as a way laid out for one.
+    bar: vec4<f32>,
 }
 
 fn wheel_texel(tex: texture_2d<u32>, index: vec2<i32>, recovery: f32) -> vec3<f32> {
@@ -70,12 +73,16 @@ fn scatter_roll(roll: vec3<f32>, angle: f32) -> vec3<f32> {
 
 // A tyre mark on a tread map: how fresh it is, how hard the tyre scrubbed,
 // and where this point lies in the tread — lug pitches rolled along the
-// track, and -1..1 across the tyre.
+// track, and -1..1 across the tyre. `metres` gives the same two in metres and
+// `roll` the world direction the wheel was going, which is what a cover needs
+// to press the tyre's own bars into its relief rather than only tint them.
 struct WheelMark {
     press: f32,
     scrub: f32,
     along: f32,
     across: f32,
+    metres: vec2<f32>,
+    roll: vec2<f32>,
 }
 
 const TREAD_PITCH_M: f32 = 0.192;
@@ -87,15 +94,69 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
     let press = sample_wheels(tex, params, world_xz).x;
     let t = (world_xz - params.origin) * params.texels_per_metre;
     let last = vec2<i32>(i32(params.width), i32(params.height)) - vec2<i32>(1);
+    // Where across the tyre a point lies is read from all four texels round it
+    // and not from the nearest alone. Each texel was stamped on its own frame,
+    // with the wheel a little further on, so each holds a slightly different
+    // idea of where the tyre's middle was; taking the nearest one steps between
+    // those ideas on the texel boundary and the whole tread jumps sideways a
+    // few centimetres along a ruled line. Each corner is asked where this point
+    // lies against *its* tyre, and the four answers are blended.
     let nearest = clamp(vec2<i32>(round(t)), vec2<i32>(0), last);
     let texel = textureLoad(tex, nearest, 0);
-    if (press < 0.001 || texel.g == 0u) { return WheelMark(0.0, 0.0, 0.0, 0.0); }
-    let angle = f32(texel.g >> 8u) / 255.0 * 6.2831853 - 3.1415927;
-    let roll = vec2<f32>(cos(angle), sin(angle));
-    let axle = vec2<f32>(-roll.y, roll.x);
-    let offset = (t - vec2<f32>(nearest)) / params.texels_per_metre;
-    let along = f32(texel.b) * 0.004 + dot(offset, roll);
-    let across = (f32(texel.a >> 8u) - 128.0) * 0.005 + dot(offset, axle);
-    let half_width = max(f32(texel.a & 255u) * 0.005, 0.01);
-    return WheelMark(press, f32(texel.g & 15u) / 15.0, along / TREAD_PITCH_M, across / half_width);
+    let near_turn = f32(texel.g >> 8u) / 255.0 * 6.2831853 - 3.1415927;
+    let near_roll = vec2<f32>(cos(near_turn), sin(near_turn));
+    let near_out = (t - vec2<f32>(nearest)) / params.texels_per_metre;
+    let near_across = (f32(texel.a >> 8u) - 128.0) * 0.005
+        + dot(near_out, vec2<f32>(-near_roll.y, near_roll.x));
+    let near_width = max(f32(texel.a & 255u) * 0.005, 0.01);
+    var across_sum = 0.0;
+    var roll_sum = vec2<f32>(0.0);
+    var width_sum = 0.0;
+    let corner = clamp(vec2<i32>(floor(t)), vec2<i32>(0), last - vec2<i32>(1));
+    let into = clamp(t - vec2<f32>(corner), vec2<f32>(0.0), vec2<f32>(1.0));
+    for (var k = 0; k < 4; k = k + 1) {
+        let step = vec2<i32>(k & 1, k >> 1);
+        let at = corner + step;
+        let there = textureLoad(tex, at, 0);
+        let share = select(1.0 - into.x, into.x, step.x == 1)
+            * select(1.0 - into.y, into.y, step.y == 1);
+        // A corner with nothing stamped on it takes the nearest texel's own
+        // reading rather than dropping out of the blend. Dropped and the rest
+        // renormalised, the answer steps by a share of the tyre's width
+        // wherever a corner falls off the end of a pass — which is a seam
+        // running diagonally down the track, exactly where two passes meet.
+        let known = there.g != 0u && there.a != 0u;
+        let turn = f32(there.g >> 8u) / 255.0 * 6.2831853 - 3.1415927;
+        let its_roll = select(near_roll, vec2<f32>(cos(turn), sin(turn)), known);
+        let its_axle = vec2<f32>(-its_roll.y, its_roll.x);
+        let out_by = (t - vec2<f32>(at)) / params.texels_per_metre;
+        let its_across = select(near_across,
+            (f32(there.a >> 8u) - 128.0) * 0.005 + dot(out_by, its_axle), known);
+        across_sum = across_sum + share * its_across;
+        roll_sum = roll_sum + share * its_roll;
+        width_sum = width_sum
+            + share * select(near_width, max(f32(there.a & 255u) * 0.005, 0.01), known);
+    }
+    let weight = 1.0;
+    // `texel.a` nought means this map carries no tread channels at all — the
+    // ground it belongs to never asked for them. Read anyway, the across byte
+    // reads as its own bias, which is a constant offset from the tyre's middle:
+    // every bar then leans the same way and the chevron comes out as half of
+    // itself, drawn as parallel diagonals.
+    if (press < 0.001 || texel.g == 0u || texel.a == 0u) {
+        return WheelMark(0.0, 0.0, 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0));
+    }
+    // Rolled distance stays the nearest texel's, unblended: the stamp writes a
+    // place projected on the heading, so neighbours already agree to a
+    // millimetre and averaging would only round the corners of that agreement.
+    let along = f32(texel.b) * 0.004 + dot(near_out, near_roll);
+    // A wheel that went one way and later came back leaves neighbouring texels
+    // pointing opposite ways, and their blend is nothing at all; there the
+    // nearest texel's own direction is the honest answer.
+    let blended = roll_sum / weight;
+    let roll = select(near_roll, normalize(blended), length(blended) > 0.3);
+    let across = across_sum / weight;
+    let half_width = width_sum / weight;
+    return WheelMark(press, f32(texel.g & 15u) / 15.0, along / TREAD_PITCH_M, across / half_width,
+        vec2<f32>(along, across), roll);
 }

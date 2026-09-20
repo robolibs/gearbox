@@ -44,10 +44,10 @@ const COVER: &str = "bare/shaders/cover.wgsl";
 /// way has worn, where two covers meet, which of two surfaces takes a pixel,
 /// and the patches a ground thins its own grass by. A second copy of any of
 /// these is the bug this file exists to catch.
-const MUST_AGREE: [&str; 16] = [
+const MUST_AGREE: [&str; 18] = [
     "worn", "washed_into", "height_blend", "settled", "verge_damp", "way_beyond", "taken",
     "lattice", "clump_frame", "edge_stray", "inside_field", "rut_of", "way_read", "earth_mottle",
-    "way_walk", "way_print",
+    "way_walk", "way_print", "wheel_print", "tyre_bars",
 ];
 
 /// `pcg` and `rand` are not rules, only hashing, and a cover that does not wear
@@ -218,7 +218,7 @@ fn no_shader_imports_the_same_rule_twice() {
 fn the_tyre_bars_meet_at_the_centre_of_the_rut() {
     let all = shaders();
     let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
-    let body = body_of(cover, "worn_along").expect("cover.wgsl wears a way along a line");
+    let body = body_of(cover, "tyre_bars").expect("cover.wgsl presses a tyre's bars");
     let phase = body
         .split("let phase = ")
         .nth(1)
@@ -226,7 +226,7 @@ fn the_tyre_bars_meet_at_the_centre_of_the_rut() {
         .map(|(it, _)| it.to_owned())
         .expect("the print has a phase");
     assert!(
-        phase.contains("abs(off_middle)"),
+        phase.contains("abs(across)"),
         "the bars are placed from `{phase}`; taken from the signed offset they are \
          diagonals, and mirrored between the two ruts"
     );

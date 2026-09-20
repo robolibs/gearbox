@@ -254,9 +254,77 @@ struct WayRead {
     // A multiplier on the ground's own colour: the berm outside a rut reads
     // paler, having drained first.
     tone: f32,
-    // The tyre bars: how much of a bar's print is here, and the slope its
-    // relief stands at, in world x and z.
-    bar: vec3<f32>,
+    // The tyre bars: how much of a bar's print is here, the slope its relief
+    // stands at in world x and z, and last the shading of the bar's own two
+    // edges — which is a reading of the phase alone, so the two arms of a
+    // chevron are shaded exactly alike and only mirrored.
+    bar: vec4<f32>,
+}
+
+// The relief a tyre's bars press into ground soft enough to take them, from
+// where a point stands in the tyre's own frame: `along` is how far down the
+// track it lies and `across` how far off the tyre's middle, both in metres,
+// with the world directions those two run in. `bar` is the tyre — pitch, lean,
+// duty, depth. `strength` is how much of a print the ground has taken here, and
+// `footprint` how much ground a pixel covers.
+//
+// Returns how much of a bar is here, the slope of its relief in world x and z,
+// and how its own edges are shaded. One copy, because a way laid out in a
+// layout and a track a machine has just driven must print the same tyre the
+// same way — what differs is only where the frame comes from: a line's own
+// direction for one, the roll direction stamped into the wheel map for the
+// other.
+//
+// The edge shading matters as much as the relief, and for a reason worth
+// stating. A chevron's two arms stand at right angles to each other, so a sun
+// that rakes one of them along its length rakes the other across it: tilt the
+// normal and nothing else, and one arm blazes while the other cannot be seen at
+// all — half a chevron, and which half changes as the sun moves. Taken from the
+// phase, which is built from `abs(across)` and so is already mirror-symmetric,
+// the shading is the same on both arms whatever the light is doing, and the
+// print reads as one shape.
+fn tyre_bars(along: f32, across: f32, heading: vec2<f32>, across_dir: vec2<f32>,
+        bar: vec4<f32>, strength: f32, footprint: f32) -> vec4<f32> {
+    // Bars finer than a pixel are a shimmer and not a print, so a close-cut
+    // road tyre goes out with distance long before an ag lug does — which is
+    // the pitch doing the deciding, not a number written here.
+    let pitch = max(bar.x, 0.02);
+    let seen = 1.0 - smoothstep(pitch * 0.2, pitch * 0.95, footprint);
+    let printed = strength * seen;
+    if (printed <= 0.0 || bar.w <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    // `abs(across)` and not the signed offset, so a leaning bar meets its
+    // opposite at the tyre's own centreline and makes a chevron rather than
+    // parallel diagonals. A tyre that leans none prints square across and the
+    // middle is nothing in particular, which is a lorry's tread.
+    let turn = 6.2831853 / pitch;
+    // Half a pitch of stagger on one side, so the two arms' heads pass each
+    // other at the tyre's middle instead of meeting there. A moulded lug does
+    // not run unbroken from shoulder to shoulder — it would have nowhere to
+    // shed what it picks up — so the two sides alternate and the print is a
+    // broken chevron, one head after another rather than a row of arrowheads.
+    let stagger = select(0.0, 3.1415927, across < 0.0);
+    let phase = (along + abs(across) * bar.y) * turn + stagger;
+    // A raised cosine taken to a power: the higher the power the narrower what
+    // is left standing, so one number turns the wide-voided ag lug into the
+    // close blocks of a road tyre. And it differentiates in closed form, so the
+    // slope costs no second walk of anything.
+    let sharp = clamp(0.5 / max(bar.z, 0.04), 0.5, 8.0);
+    let raised = 0.5 - 0.5 * cos(phase);
+    let steepest = heading + across_dir * bar.y * select(-1.0, 1.0, across >= 0.0);
+    let rise = sharp * pow(max(raised, 0.0), sharp - 1.0) * 0.5 * sin(phase);
+    let slope = bar.w * rise * turn * printed;
+    // The relief is deliberately the quiet part. It is the one term whose look
+    // depends on where the sun is, and a chevron's two arms stand at right
+    // angles, so at full strength it lights one arm and leaves the other
+    // invisible — half a print, and which half changes with the hour. The depth
+    // and the edge shading beside it carry the weight instead: both are read
+    // from the phase, which is built from `abs(across)` and is therefore the
+    // same on both arms whatever the light does. That is how the print comes
+    // out hard *and* even, which turning the relief up cannot do.
+    return vec4<f32>(pow(max(raised, 0.0), sharp) * printed,
+        slope * steepest.x * 0.25, slope * steepest.y * 0.25, rise * printed);
 }
 
 // Wear from one line: `against` is where the point stands against it (nearest
@@ -342,46 +410,22 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     let out_across = normalize(select(against.xy - place, place - against.xy, against.z >= 0.0)
         + vec2<f32>(1e-6, 1e-6));
     let heading = vec2<f32>(out_across.y, -out_across.x);
-    // Bars finer than a pixel are a shimmer and not a print, so a close-cut
-    // road tyre goes out with distance long before an ag lug does — which is
-    // the pitch doing the deciding, not a number written here.
-    let pitch = max(bar.x, 0.02);
-    let seen = 1.0 - smoothstep(pitch * 0.2, pitch * 0.95, footprint);
-    var print = vec3<f32>(0.0);
-    if (seen > 0.0 && bar.w > 0.0) {
-        // `abs(off_middle)` and not the signed offset, so a leaning bar meets
-        // its opposite at the tyre's own centreline and makes a chevron rather
-        // than parallel diagonals. A tyre that leans none prints square across
-        // and the middle is nothing in particular, which is a lorry's tread.
-        let turn = 6.2831853 / pitch;
-        let phase = (dot(place, heading) + abs(off_middle) * bar.y) * turn;
-        // A raised cosine taken to a power: the higher the power the narrower
-        // what is left standing, so one number turns the wide-voided ag lug
-        // into the close blocks of a road tyre. And it differentiates in closed
-        // form, so the slope costs no second walk of the line.
-        let sharp = clamp(0.5 / max(bar.z, 0.04), 0.5, 8.0);
-        let raised = 0.5 - 0.5 * cos(phase);
-        let bitten = pow(max(raised, 0.0), sharp);
-        // A print is only as good as the ground was soft when it was made.
-        // Metalled stone barely takes one; a beaten track takes it and holds it
-        // until the next pass smears it over, so it comes in stretches and not
-        // clean from end to end. Both wheels print — the patches only thin it,
-        // or one rut carries the whole tread and the other reads as untouched.
-        let takes = smoothstep(0.10, 0.40, used)
-            * mix(1.0, 0.35, smoothstep(WAY_METALLED, 0.95, used))
-            * mix(0.45, 1.0, smoothstep(0.18, 0.62, lattice(against.xy + side, 2.6)));
-        // A print is only as wide as the tyre that made it, which is narrower
-        // than the ground that tyre wears: the rut spreads either side of it,
-        // and bars drawn out to the edge of that make arms a metre and a half
-        // long — a chevron the size of a gate, not of a wheel.
-        let width = 1.0 - smoothstep(0.35, 0.80, rut / max(tread.y, 0.05));
-        let printed = wheel * verge * takes * width * seen;
-        let across_dir = out_across * select(-1.0, 1.0, across_way >= 0.0);
-        let steepest = heading + across_dir * bar.y * select(-1.0, 1.0, off_middle >= 0.0);
-        let slope = bar.w * sharp * pow(max(raised, 0.0), sharp - 1.0)
-            * 0.5 * sin(phase) * turn * printed;
-        print = vec3<f32>(bitten * printed, slope * steepest.x, slope * steepest.y);
-    }
+    // A print is only as good as the ground was soft when it was made. Metalled
+    // stone barely takes one; a beaten track takes it and holds it until the
+    // next pass smears it over, so it comes in stretches and not clean from end
+    // to end. Both wheels print — the patches only thin it, or one rut carries
+    // the whole tread and the other reads as untouched.
+    let takes = smoothstep(0.10, 0.40, used)
+        * mix(1.0, 0.35, smoothstep(WAY_METALLED, 0.95, used))
+        * mix(0.45, 1.0, smoothstep(0.18, 0.62, lattice(against.xy + side, 2.6)));
+    // A print is only as wide as the tyre that made it, which is narrower than
+    // the ground that tyre wears: the rut spreads either side of it, and bars
+    // drawn out to the edge of that make arms a metre and a half long — a
+    // chevron the size of a gate, not of a wheel.
+    let width = 1.0 - smoothstep(0.35, 0.80, rut / max(tread.y, 0.05));
+    let across_dir = out_across * select(-1.0, 1.0, across_way >= 0.0);
+    let print = tyre_bars(dot(place, heading), off_middle, heading, across_dir,
+        bar, wheel * verge * takes * width, footprint);
     // How worn, and — separately — how much the wheels themselves sweep here.
     // The two are not the same thing and the second cannot be recovered from
     // the first: the floor of a rut and a road worn bare across its width both
@@ -455,7 +499,7 @@ fn way_walk(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>,
         bar: vec4<f32>, bar_more: vec4<f32>, footprint: f32) -> WayRead {
     if (max(tread.z, tread.w) <= 0.0) {
-        return WayRead(0.0, 0.0, 0.0, 1.0, vec3<f32>(0.0));
+        return WayRead(0.0, 0.0, 0.0, 1.0, vec4<f32>(0.0));
     }
     let first = i32(shape.x);
     if (first < 2) {
@@ -516,8 +560,44 @@ fn way_read(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
 // are the tyres printing each of the two lines that may cross this field.
 fn way_print(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>,
-        bar: vec4<f32>, bar_more: vec4<f32>, footprint: f32) -> vec3<f32> {
+        bar: vec4<f32>, bar_more: vec4<f32>, footprint: f32) -> vec4<f32> {
     return way_walk(place, extent, tread, way, more, shape, bar, bar_more, footprint).bar;
+}
+
+// The same bars, pressed by a wheel that has actually rolled here rather than
+// by a way somebody laid out. `across` comes from the wheel map — how far off
+// the tyre's centreline this point lies — and `roll` is the direction the wheel
+// was going, so the frame is the tyre's own and no line has to be searched for.
+//
+// How far *along* comes from the map, which stamps each texel with its own
+// place projected on the roll rather than with the wheel's odometer, so every
+// wheel of one machine writes the same number for the same texel. Taken here
+// from world coordinates instead, the roll's eight-bit quantisation gets
+// multiplied by the distance to the world origin: a degree and a half at sixty
+// metres out slides the whole tread sideways by seven lug pitches, along a
+// ruled line where one stamped angle gives way to the next.
+fn wheel_print(along: f32, across: f32, share: f32, roll: vec2<f32>, bar: vec4<f32>,
+        press: f32, footprint: f32) -> vec4<f32> {
+    if (press <= 0.0 || dot(roll, roll) < 1e-6) {
+        return vec4<f32>(0.0);
+    }
+    let axle = vec2<f32>(-roll.y, roll.x);
+    // How wide the print is taken from how far off the tyre's middle the point
+    // lies, as a share of its half width — never from how far the *stamp*
+    // reached. The stamp is a rectangle cut to whole texels, an eighth of a
+    // metre each, so as a machine drifts sideways against that grid one edge
+    // gains a texel and then, metres later, the other one does: the print keeps
+    // getting a hand's breadth wider down one side and then the other, over and
+    // over. Cut short of where the stamp ends, the edge is sub-texel and steady.
+    // The stamp's own edge can fall anywhere within half a texel of the tyre's
+    // half width, which at an eighth of a metre a texel is a fifth of that
+    // width either way. The cut is held inside even the narrowest of those, or
+    // on the stretches where the stamp happens to fall short it is the stamp's
+    // ragged edge that shows through rather than this one.
+    let within = 1.0 - smoothstep(0.62, 0.84, abs(share));
+    // A fresh mark holds its print; an old one has had the weather on it.
+    return tyre_bars(along, across, roll, axle, bar,
+        smoothstep(0.04, 0.40, press) * within, footprint);
 }
 
 fn rut_of(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,

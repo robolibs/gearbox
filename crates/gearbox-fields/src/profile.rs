@@ -40,6 +40,10 @@ pub struct WheelMapParams {
     pub recovery_seconds: f32,
     pub bend: f32,
     pub darkening: f32,
+    /// The tyre rolling here, as `TyreTread::packed`. A field's wheel map is
+    /// stamped by whatever drives over it, and until a machine declares its own
+    /// tyre this is the one it is taken to have.
+    pub bar: Vec4,
 }
 
 #[derive(Clone)]

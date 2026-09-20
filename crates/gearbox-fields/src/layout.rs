@@ -401,7 +401,9 @@ mod tests {
         let (first, second) = lane.crossing(metalled).bars();
         assert_eq!(first, TyreTread::AG.packed(), "the farm track lost its lug");
         assert_eq!(second, TyreTread::ROAD.packed(), "the road took the tractor's tread");
-        assert!(first.y > 0.5, "an ag lug leans, and that is what makes the chevron");
+        // Leaning at all is what makes a chevron; the sign of the lean is only
+        // which way round the V points.
+        assert!(first.y.abs() > 0.5, "an ag lug leans, and that is what makes the chevron");
         assert_eq!(second.y, 0.0, "a lorry prints square across, never a chevron");
         assert!(second.x < first.x, "a road tyre's blocks are closer than an ag lug's bars");
     }
@@ -635,7 +637,7 @@ pub struct TyreTread {
 
 impl TyreTread {
     /// An agricultural lug: the 45° chevron, widely spaced, pressing deep.
-    pub const AG: Self = Self { pitch: 0.21, lean: 1.0, duty: 0.34, depth: 0.022 };
+    pub const AG: Self = Self { pitch: 0.21, lean: -1.0, duty: 0.34, depth: 0.022 };
 
     /// A lorry or a car: close bars square across the tread, barely biting.
     pub const ROAD: Self = Self { pitch: 0.085, lean: 0.0, duty: 0.55, depth: 0.006 };

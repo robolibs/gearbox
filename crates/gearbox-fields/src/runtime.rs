@@ -394,6 +394,11 @@ pub fn ensure_fields(world: &mut World) {
             recovery_seconds: response.recovery_seconds,
             bend: response.bend,
             darkening: response.darkening,
+            // Whatever drives a field is taken to be shod like whatever drives
+            // its ways, so a tractor crossing open ground leaves the tread it
+            // would leave on the track. The field's own way names the tyre when
+            // it has one; otherwise the default, which is an ag lug.
+            bar: placed_of(&specs, &profiles, &layout.ways, &spec).bars().0,
         };
         let placed = placed_of(&specs, &profiles, &layout.ways, &spec);
         let ground =
@@ -456,6 +461,7 @@ pub fn ensure_fields(world: &mut World) {
             height: 2.0,
             texels_per_metre: 1.0,
             recovery_seconds: 300.0,
+            bar: crate::layout::TyreTread::default().packed(),
             ..default()
         },
         surface_geometry,
