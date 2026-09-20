@@ -248,12 +248,36 @@ fn standing(
     layers
 }
 
-/// The hardcore a way is finally worn down to — grey and gritty, and the *same*
-/// under every cover, so the heart of a road does not change colour where it
-/// crosses from a meadow onto stubble. What a cover wears through on the way
-/// there is its own: its subsoil shows at the verge, where the wheels have only
-/// grazed it, and gives out to this in the ruts.
+/// The hardcore a *laid* way is worn down to — grey and gritty, and the same
+/// under every cover that chooses it, so the heart of a road does not change
+/// colour where it crosses from a meadow onto stubble.
+///
+/// It is offered, never imposed. A cover says what its own way comes to, in its
+/// own `stony`, because only the cover knows: a lane across a ploughed field is
+/// that field's soil rolled flat, and grey chippings on it are a road somebody
+/// laid where nobody laid one. Nothing here fills a cover's answer in for it.
 pub const WAY_HARDCORE: Vec4 = Vec4::new(0.126, 0.106, 0.082, 1.0);
+
+/// A soil rolled flat, given the loose surface it was rolled from: darker and
+/// duller, because what a wheel leaves is the same earth with the crumb pressed
+/// out of it and the air gone. The cover that has no stone of its own says
+/// this, and says how far, in the last of its own `stony`.
+pub fn compacted(loose: Vec4) -> Vec4 {
+    // Pressed earth is duller than the tilth it was pressed from — a little of
+    // the colour goes out of it — and darker, because the crumb that was
+    // catching the light from every angle has been squeezed flat. Adding grey
+    // *to* it instead of mixing grey *into* it lightens a dark soil, and a pale
+    // lane over dark plough is the hazy veil that reads as paint.
+    let grey = (loose.x + loose.y + loose.z) / 3.0;
+    let dull = 0.35;
+    let press = 0.82;
+    Vec4::new(
+        (loose.x * (1.0 - dull) + grey * dull) * press,
+        (loose.y * (1.0 - dull) + grey * dull) * press,
+        (loose.z * (1.0 - dull) + grey * dull) * press,
+        1.0,
+    )
+}
 
 /// The subsoil under a made track — what a lane's own surface wears through.
 pub const WAY_SOIL: Vec4 = Vec4::new(0.108, 0.068, 0.038, 1.0);
@@ -311,6 +335,10 @@ pub struct BareGround {
     pub way: Mat4,
     pub way_more: Mat4,
     pub way_shape: Vec4,
+    /// The tyre that prints each of the two lines: pitch, lean, duty, depth.
+    /// It belongs to whatever drives the way, not to the ground under it.
+    pub bar: Vec4,
+    pub bar_more: Vec4,
 }
 
 impl MaterialExtension for BareExtension {
@@ -400,6 +428,10 @@ fn ploughed_ground(
             tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
             grass: Vec4::new(0.033, 0.068, 0.023, 0.55),
+            // A lane over a ploughed field is that field, rolled. Nobody carted
+            // stone onto it, so it keeps its own dark tilth and only loses the
+            // crumb; grey chippings here read as a road painted across a field.
+            stony: compacted(Vec4::new(0.060, 0.034, 0.018, 1.0)).with_w(0.9),
             ..default()
         },
         0.93,
@@ -424,6 +456,8 @@ fn dirt_ground(
             tint: Vec4::new(0.115, 0.070, 0.038, 1.0),
             grain: Vec4::new(0.3, 0.40, 0.0, 1.6),
             grass: Vec4::new(0.033, 0.068, 0.023, 0.9),
+            // Dirt is already packed; a way over it is the same dirt, harder.
+            stony: compacted(Vec4::new(0.115, 0.070, 0.038, 1.0)).with_w(0.75),
             ..default()
         },
         0.88,
@@ -496,6 +530,9 @@ fn sand_ground(
             tint: Vec4::new(0.245, 0.182, 0.098, 1.0),
             grain: Vec4::new(0.16, 0.30, 1.0, 0.22),
             grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
+            // Damp sand packs hard under a wheel and darkens doing it, which is
+            // the one place a way over sand can be told from the sand.
+            stony: compacted(Vec4::new(0.245, 0.182, 0.098, 1.0)).with_w(0.8),
             ..default()
         },
         0.82,
@@ -523,17 +560,20 @@ fn ground(
     bare.north = placed.tint[3];
     bare.reach = Vec4::from_array(placed.reach);
     (bare.way, bare.way_more, bare.way_shape) = placed.way.packed();
+    (bare.bar, bare.bar_more) = placed.bars();
     // A road laid across the layout wears whatever it crosses, so a ploughed or
     // sandy field is worn along it too — not only the profiles that are ways in
     // themselves and set a tread of their own.
     if placed.worn() {
         bare.tread = placed.tread();
-        // What it wears down to, for the profiles that are not ways themselves
-        // and so have never had to say: the same hardcore a track comes to, or
-        // a road over a ploughed field is only its own soil flattened.
-        if bare.stony.w <= 0.0 {
-            bare.stony = WAY_HARDCORE;
-        }
+        // What it wears down to is the cover's own answer and is not filled in
+        // here. Filling it in is how every ploughed and sandy field came to
+        // have a grey stone lane across it: the way told the ground what colour
+        // to be, when only the ground knows what is under it.
+        debug_assert!(
+            bare.stony.w > 0.0,
+            "a bare cover that can be worn must say what its way comes to",
+        );
     }
     let extension = BareExtension {
         trample,
