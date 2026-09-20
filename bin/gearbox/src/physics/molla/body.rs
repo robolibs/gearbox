@@ -151,8 +151,8 @@ impl BodyMut for BodyAccess {
     fn enable_ccd(&mut self, enabled: bool) {
         apply(self.shared.world().scene.set_body_ccd(self.handle, enabled));
     }
-    fn wake_up(&mut self, _strong: bool) {
-        apply(self.shared.world().wake_body(self.handle));
+    fn wake_up(&mut self, strong: bool) {
+        apply(self.shared.world().wake_body_with_strength(self.handle, strong));
     }
     fn sleep(&mut self) {
         apply(self.shared.world().sleep_body(self.handle));

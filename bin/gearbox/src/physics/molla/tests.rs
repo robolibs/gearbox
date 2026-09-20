@@ -39,6 +39,50 @@ fn authored_sleep_and_explicit_wake_advance_the_real_backend() {
 }
 
 #[test]
+fn weak_and_strong_wakes_match_rapier_sleep_eligibility() {
+    let backends: [Box<dyn PhysicsBackend>; 2] = [
+        Box::new(MollaBackend::default()),
+        Box::new(crate::physics::rapier::RapierBackend::default()),
+    ];
+    for mut backend in backends {
+        check_wake_strength(&mut *backend, false);
+    }
+    check_wake_strength(&mut MollaBackend::default(), true);
+}
+
+#[test]
+#[ignore = "Rapier 0.32 panics when explicitly sleeping a mixed-wake active island"]
+fn rapier_explicit_sleep_mixed_wake_regression() {
+    check_wake_strength(&mut crate::physics::rapier::RapierBackend::default(), true);
+}
+
+fn check_wake_strength(backend: &mut dyn PhysicsBackend, explicit: bool) {
+    backend.set_gravity(DVec3::ZERO);
+    let weak = backend.insert_body(dynamic());
+    let strong = backend.insert_body(dynamic());
+    let untouched = backend.insert_body(dynamic());
+    backend.step(&|_, _| false);
+    if explicit {
+        for body in [weak, strong, untouched] {
+            backend.body_mut(body).unwrap().sleep();
+        }
+    } else {
+        for _ in 0..480 { backend.step(&|_, _| false); }
+    }
+    for body in [weak, strong, untouched] {
+        assert!(backend.body(body).unwrap().is_sleeping());
+    }
+    backend.body_mut(weak).unwrap().wake_up(false);
+    backend.body_mut(strong).unwrap().wake_up(true);
+    assert!(!backend.body(weak).unwrap().is_sleeping());
+    assert!(!backend.body(strong).unwrap().is_sleeping());
+    backend.step(&|_, _| false);
+    assert!(backend.body(weak).unwrap().is_sleeping(), "{} weak", backend.name());
+    assert!(!backend.body(strong).unwrap().is_sleeping(), "{} strong", backend.name());
+    assert!(backend.body(untouched).unwrap().is_sleeping(), "{} unrelated", backend.name());
+}
+
+#[test]
 fn backend_sleep_and_motor_wake_cover_the_whole_tree() {
     let mut backend = MollaBackend::default();
     let a = backend.insert_body(dynamic());
