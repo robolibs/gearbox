@@ -308,6 +308,53 @@ and `/tmp/molla-imported-solver{.json,-summary.txt}`. Both backend selections
 pass 84 binary tests with three ignored; the external-asset tests were run
 explicitly, not silently counted as ordinary suite coverage.
 
+### Release baseline and shared external-force responses
+
+The first release benchmark/replay build completed in 7m20s and both imported
+tests passed. Baseline medians were 0.835–0.853 ms/step across the six conditions;
+p95 reached 1.199 ms. This distinguishes optimized adapter timings from the
+earlier dev/test-profile table without declaring full performance acceptance.
+
+Molla now shares the articulation mass factor and COM Jacobians between tyre
+and loop-force calculations in the same immutable substep callback. Each new
+substep creates a fresh cache. Motor inertia remains separate because it runs
+after the mimic/FK pre-pass. No substeps, contacts, tyre physics, constraint
+rows or numerical precision were removed. The short trace confirms 1,920 mass
+matrix evaluations instead of 2,880 over 120 physics steps: the loop-phase
+rebuilds disappeared, while wheel and motor evaluations remain. Trace durations
+were affected by unrelated builds and are not used as a before/after ratio.
+
+Preserved baseline/new release test executables were run sequentially in
+before/after/after/before order on CPU 2, without concurrent assistant builds
+or tests. Other user workloads remained untouched. Mean of the two medians:
+
+| Gauge bar | Parked before/after ms | Driving before/after ms |
+|---|---:|---:|
+| 0.5 | 0.8436 / 0.7675 | 0.8499 / 0.7761 |
+| 1.8 | 0.8414 / 0.7676 | 0.8465 / 0.7794 |
+| 4.0 | 0.8362 / 0.7606 | 0.8422 / 0.7702 |
+
+This is approximately 8–9% less whole-machine physics time per condition.
+All new medians (0.7586–0.7814 ms) and p95 values (0.7786–0.8668 ms) were below
+1 ms in these paired runs; occasional maxima reached 1.201 ms. This is neither
+a hard real-time guarantee nor proof of Rapier parity, live rendering budget,
+fleet scaling, towing or slope acceptance.
+
+The full CPU solver suite passes 376 tests, zero failures and five ignored.
+Imported benchmark/replay both pass; before/after logged pressure/drive
+checkpoints are text-identical, and the new build passes exact independent-run
+replay. Sampled before/after equality is not every-step baseline/new equality.
+Cache tests cover two articulations, shared Gram/quadratic requests, Jacobian
+reuse, changed-state refresh, singular/zero masses and invalid dimensions.
+
+Evidence: `/tmp/gearbox-imported-release.log`,
+`/tmp/gearbox-shared-response-{release,paired,trace,unit,build}.log`,
+`/tmp/molla-shared-response-full-final.log`, and
+`/tmp/molla-shared-response-solver{.json,-summary.txt}`.
+The first post-change release run overlapped other CPU work and is used only
+for correctness; the paired log is the speedup evidence. Saved binaries are
+`/tmp/gearbox-imported-{before,after}-cache`.
+
 ## Reproduction
 
 From the isolated checkout, build through its native recipes:
