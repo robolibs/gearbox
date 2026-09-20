@@ -138,6 +138,12 @@ impl Plugin for GrasslandPlugin {
                     super::clumps::bermuda(share * 120.0, 40.0),
                     super::clumps::meadow_tufts(share * 50.0, 36.0),
                     super::clumps::sorrel(share * 30.0, 32.0),
+                    // Scanned plants, a few dozen in view against the sward's
+                    // millions of blades: they carry the detail the blades
+                    // cannot, and are rare enough that the eye never finds the
+                    // same one twice.
+                    super::clumps::dandelion(share * 2.5, 38.0),
+                    super::clumps::nettle(share * 0.8, 34.0),
                     super::clumps::celandine(share * 1.0, 40.0),
                 ],
                 ground: create_ground,
