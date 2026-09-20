@@ -30,6 +30,8 @@ struct WornStubble {
     way: mat4x4<f32>,
     way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
+    bar: vec4<f32>,
+    bar_more: vec4<f32>,
     soil: vec4<f32>,
     stony: vec4<f32>,
 };
@@ -37,7 +39,7 @@ struct WornStubble {
 
 // The same wear the bare grounds and the meadow read, so a road crossing from
 // one field to the next does not change shape or colour on the boundary.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, lattice}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, lattice}
 
 fn stubble_worn(place: vec2<f32>) -> f32 {
     return worn(place, worn_ground.extent, worn_ground.tread,
@@ -326,7 +328,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let normal = surface_geometry_normal(surface_heightmap, geometry, in.world_position.xz, in.world_normal);
-    pbr_input.N = surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz));
+    // The print of the tyre bars, tilting the normal rather than tinting the
+    // ground: a chevron is a shape, and a shape wants the sun to find it.
+    let print = way_print(in.world_position.xz, worn_ground.extent, worn_ground.tread,
+        worn_ground.way, worn_ground.way_more, worn_ground.way_shape,
+        worn_ground.bar, worn_ground.bar_more, surface_footprint(in.world_position.xz));
+    pbr_input.N = normalize(
+        surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz))
+        + vec3<f32>(print.y, 0.0, print.z));
     pbr_input.world_normal = normal;
     var color = terrain_color(in.world_position.xz);
     let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x;
@@ -346,7 +355,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // being washed over it, which is the difference between worn and painted.
     let met = height_blend(color.rgb, saturate(dot(color.rgb, vec3<f32>(0.3, 0.59, 0.11))),
         1.0 - bared, earth, grit, bared);
-    color = vec4<f32>(washed(in.world_position.xz, met.rgb * mix(1.0, 0.74, verge_damp(bared))), 1.0);
+    color = vec4<f32>(washed(in.world_position.xz,
+        met.rgb * mix(1.0, 0.74, verge_damp(bared)) * mix(1.0, 0.92, print.x)), 1.0);
 #ifdef VERTEX_COLORS
     color = color * in.color;
 #endif

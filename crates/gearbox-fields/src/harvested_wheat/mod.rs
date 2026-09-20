@@ -60,6 +60,9 @@ struct WornStubble {
     way: Mat4,
     way_more: Mat4,
     way_shape: Vec4,
+    /// The tyre that prints each of the two lines: pitch, lean, duty, depth.
+    bar: Vec4,
+    bar_more: Vec4,
     soil: Vec4,
     stony: Vec4,
 }
@@ -80,6 +83,8 @@ impl WornStubble {
             way,
             way_more,
             way_shape,
+            bar: placed.bars().0,
+            bar_more: placed.bars().1,
             // Worked ground: paler and drier than a meadow's, being ploughed
             // every year and cropped of what held it together.
             soil: Vec4::new(0.132, 0.099, 0.056, 1.0),

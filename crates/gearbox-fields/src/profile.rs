@@ -118,6 +118,13 @@ impl Placed {
     pub fn tread(&self) -> Vec4 {
         self.way.tread(self.wear)
     }
+
+    /// The tyre that prints each line crossing it. A field worn down its own
+    /// long axis with no line bent through it has no tyre of its own to name,
+    /// and takes the default one.
+    pub fn bars(&self) -> (Vec4, Vec4) {
+        self.way.bars()
+    }
 }
 
 pub struct FieldProfile {

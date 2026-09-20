@@ -362,6 +362,67 @@ mod tests {
     // dropped from the *wear* — but `Hollows` knows nothing of that limit and
     // sinks the ground along all three. A triple crossing therefore leaves a
     // shallow grassy trough where the third road should have been painted.
+    /// Only the default layout is compiled in; the rest are read from a path at
+    /// run time, so a typo in one of them used to show up as a sim that would
+    /// not start rather than as a failing test. `deny_unknown_fields` makes this
+    /// worth more than a parse: a key nobody reads is caught here.
+    #[test]
+    fn every_bundled_layout_parses() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/layouts");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("the bundled layouts") {
+            let path = entry.expect("a layout").path();
+            if path.extension().is_none_or(|it| it != "json") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("readable");
+            let layout: FieldLayout = serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            assert!(
+                !layout.fields.is_empty() || !layout.default.is_empty(),
+                "{}: a layout with neither fields nor a default covers nothing",
+                path.display()
+            );
+            seen += 1;
+        }
+        assert!(seen > 5, "found only {seen} layouts; the walk is wrong");
+    }
+
+    /// The print belongs to whatever drives the way. A lorry road and a farm
+    /// track crossing the same field must reach the shader as two different
+    /// tyres, or the ground decides what everything that drives on it leaves
+    /// behind — which is how the chevron came to be printed by everything.
+    #[test]
+    fn each_line_carries_its_own_tyre() {
+        let lane = Way::bend(&[Vec2::new(-50.0, 0.0), Vec2::new(50.0, 0.0)], 3.0, 0.6)
+            .printed_by(TyreTread::AG);
+        let metalled = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0, 0.9)
+            .printed_by(TyreTread::ROAD);
+        let (first, second) = lane.crossing(metalled).bars();
+        assert_eq!(first, TyreTread::AG.packed(), "the farm track lost its lug");
+        assert_eq!(second, TyreTread::ROAD.packed(), "the road took the tractor's tread");
+        assert!(first.y > 0.5, "an ag lug leans, and that is what makes the chevron");
+        assert_eq!(second.y, 0.0, "a lorry prints square across, never a chevron");
+        assert!(second.x < first.x, "a road tyre's blocks are closer than an ag lug's bars");
+    }
+
+    /// A tyre with no pattern left prints none: the depth is what the shader
+    /// skips on, so a bald tyre costs nothing rather than printing a flat bar.
+    #[test]
+    fn a_bald_tyre_prints_nothing() {
+        assert_eq!(TyreTread::SMOOTH.packed().w, 0.0);
+        assert!(TyreTread::AG.packed().w > 0.0);
+    }
+
+    #[test]
+    fn a_tyre_nobody_has_heard_of_is_an_ag_lug() {
+        let named = |name: &str| TreadSpec::Named(name.into()).tread();
+        assert_eq!(named("ag"), TyreTread::AG);
+        assert_eq!(named("lorry"), TyreTread::ROAD);
+        assert_eq!(named("bald"), TyreTread::SMOOTH);
+        assert_eq!(named("penny-farthing"), TyreTread::AG);
+    }
+
     #[test]
     fn a_third_way_over_one_field_is_sunk_but_not_worn() {
         let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0, 0.5);
@@ -546,16 +607,99 @@ pub struct Way {
     lines: [Line; 2],
 }
 
-/// One line's share of the points: how many of them, how wide it is worn and
-/// how hard. The wear belongs to the line and not to the field, or a farm track
-/// crossing a metalled lane would take that lane's wear and the pair of them
-/// read as one road — the fields a way crosses have nothing to say about how
-/// used that way is.
+/// The mark a tyre leaves, which belongs to the tyre and not to the ground it
+/// is left on. A tractor prints the 45° chevron of an agricultural lug; a lorry
+/// prints fine bars straight across; a trailer tyre run bald prints nothing at
+/// all. The ground's part is to be soft enough to take it — what shape it takes
+/// is none of the ground's business.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TyreTread {
+    /// Metres from one bar to the next along the direction of travel. A rear
+    /// tractor tyre carries something like two dozen lugs round five metres of
+    /// circumference; a lorry's blocks are far closer together.
+    pub pitch: f32,
+    /// How far a bar runs along the way for every metre it runs across it.
+    /// Nought is a bar square across the tread, one is the 45° of an ag lug —
+    /// and because the bars are placed from the distance out of the tyre's own
+    /// middle, anything but nought meets there as a chevron.
+    pub lean: f32,
+    /// What share of the pitch the bar itself takes, the rest being the void
+    /// between. An ag tyre is mostly void, so the soil it picks up can drop out
+    /// of it; a road tyre is mostly rubber.
+    pub duty: f32,
+    /// How deep it presses into soft ground, in metres. Nought is a tyre that
+    /// leaves no pattern — worn smooth, or never having had one.
+    pub depth: f32,
+}
+
+impl TyreTread {
+    /// An agricultural lug: the 45° chevron, widely spaced, pressing deep.
+    pub const AG: Self = Self { pitch: 0.21, lean: 1.0, duty: 0.34, depth: 0.022 };
+
+    /// A lorry or a car: close bars square across the tread, barely biting.
+    pub const ROAD: Self = Self { pitch: 0.085, lean: 0.0, duty: 0.55, depth: 0.006 };
+
+    /// A tyre that leaves no pattern, only the rut.
+    pub const SMOOTH: Self = Self { pitch: 0.2, lean: 0.0, duty: 0.0, depth: 0.0 };
+
+    /// The four numbers a shader prints from.
+    pub fn packed(&self) -> Vec4 {
+        Vec4::new(
+            self.pitch.clamp(0.02, 2.0),
+            self.lean.clamp(-4.0, 4.0),
+            self.duty.clamp(0.0, 1.0),
+            self.depth.clamp(0.0, 0.2),
+        )
+    }
+}
+
+impl Default for TyreTread {
+    fn default() -> Self {
+        Self::AG
+    }
+}
+
+/// What a layout may write in place of the four numbers: a name for a tyre
+/// anyone would recognise, or the numbers themselves for one nobody would.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum TreadSpec {
+    Named(String),
+    Given(TyreTread),
+}
+
+impl TreadSpec {
+    /// The tread itself. An unknown name is said out loud and treated as the
+    /// agricultural one, since a silent fallback here prints the wrong tyre for
+    /// the rest of the layout's life.
+    pub fn tread(&self) -> TyreTread {
+        match self {
+            Self::Given(tread) => *tread,
+            Self::Named(name) => match name.as_str() {
+                "ag" | "tractor" => TyreTread::AG,
+                "road" | "lorry" | "car" | "truck" => TyreTread::ROAD,
+                "smooth" | "bald" | "none" => TyreTread::SMOOTH,
+                other => {
+                    warn!("no tyre called `{other}`; the way is printed by an ag lug");
+                    TyreTread::AG
+                }
+            },
+        }
+    }
+}
+
+/// One line's share of the points: how many of them, how wide it is worn, how
+/// hard, and what tyre prints it. The wear belongs to the line and not to the
+/// field, or a farm track crossing a metalled lane would take that lane's wear
+/// and the pair of them read as one road — the fields a way crosses have
+/// nothing to say about how used that way is. Nor about what uses it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Line {
     count: u32,
     half_width: f32,
     wear: f32,
+    tread: TyreTread,
 }
 
 impl Way {
@@ -718,6 +862,19 @@ impl Way {
         };
         Vec4::new(HALF_GAUGE_M, HALF_RUT_M, first, second)
     }
+
+    /// The tyre that prints each of the two lines, for a shader.
+    pub fn bars(&self) -> (Vec4, Vec4) {
+        (self.lines[0].tread.packed(), self.lines[1].tread.packed())
+    }
+
+    /// The tyre that prints this way. Set after bending or clipping, so the
+    /// long signatures those already carry do not grow a fourth thing that is
+    /// nothing to do with where the line runs.
+    pub fn printed_by(mut self, tread: TyreTread) -> Self {
+        self.lines[0].tread = tread;
+        self
+    }
 }
 
 /// Half the gauge a tractor's wheels sit at, and half the width of one rut.
@@ -795,6 +952,10 @@ pub struct FieldSpec {
     /// field is across.
     #[serde(default)]
     pub way_width: Option<f32>,
+    /// What drives it: "ag", "road" or "smooth", or the four numbers of a tyre
+    /// nobody has a name for. Left out, a tractor.
+    #[serde(default)]
+    pub tyre: Option<TreadSpec>,
 }
 
 impl FieldSpec {
@@ -807,7 +968,12 @@ impl FieldSpec {
 
     pub fn way(&self) -> Way {
         let (line, width, wear) = self.laid_way();
-        Way::bend(&line, width * 0.5, wear)
+        Way::bend(&line, width * 0.5, wear).printed_by(self.tyre())
+    }
+
+    /// The tyre that prints this field's own way.
+    pub fn tyre(&self) -> TyreTread {
+        self.tyre.as_ref().map_or_else(TyreTread::default, TreadSpec::tread)
     }
 
     /// The line this field lays down for itself, how wide it is worn and how
@@ -840,6 +1006,10 @@ pub struct WaySpec {
     /// How hard it is worn, nought to one, for the fields it crosses that do
     /// not say for themselves.
     pub wear: f32,
+    /// What drives it: "ag", "road" or "smooth", or the four numbers of a tyre
+    /// nobody has a name for. Left out, a tractor.
+    #[serde(default)]
+    pub tyre: Option<TreadSpec>,
 }
 
 impl WaySpec {
@@ -849,7 +1019,9 @@ impl WaySpec {
 
     /// The stretch of this road a field can see, if it crosses that field.
     pub fn across(&self, bounds: FieldBounds) -> Option<Way> {
+        let tyre = self.tyre.as_ref().map_or_else(TyreTread::default, TreadSpec::tread);
         Way::clipped(&self.line(), self.width * 0.5, self.wear, bounds)
+            .map(|way| way.printed_by(tyre))
     }
 }
 
@@ -1124,6 +1296,7 @@ impl FieldLayout {
             wear: None,
             way: Vec::new(),
             way_width: None,
+            tyre: None,
         }
     }
 }

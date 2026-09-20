@@ -13,11 +13,12 @@ mod tests {
             wear: None,
             way: Vec::new(),
             way_width: None,
+            tyre: None,
         }
     }
 
     fn road(name: &str, points: Vec<[f32; 2]>, wear: f32) -> crate::layout::WaySpec {
-        crate::layout::WaySpec { name: name.into(), points, width: 6.0, wear }
+        crate::layout::WaySpec { name: name.into(), points, width: 6.0, wear, tyre: None }
     }
 
     // Which line wears a field is settled in one expression, and it has three

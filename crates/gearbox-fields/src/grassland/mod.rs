@@ -52,6 +52,9 @@ struct MeadowEdges {
     way: Mat4,
     way_more: Mat4,
     way_shape: Vec4,
+    /// The tyre that prints each of the two lines: pitch, lean, duty, depth.
+    bar: Vec4,
+    bar_more: Vec4,
     /// What a way wears the meadow down to, shared with the bare grounds so a
     /// track does not change colour where it leaves one field for the next.
     soil: Vec4,
@@ -229,6 +232,8 @@ fn create_ground(
                     way: placed.way.packed().0,
                     way_more: placed.way.packed().1,
                     way_shape: placed.way.packed().2,
+                    bar: placed.bars().0,
+                    bar_more: placed.bars().1,
                     // Dark loam: what is under turf that has never been broken.
                     soil: Vec4::new(0.072, 0.050, 0.030, 1.0),
                     stony: crate::bare::WAY_HARDCORE,

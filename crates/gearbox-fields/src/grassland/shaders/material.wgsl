@@ -27,6 +27,8 @@ struct MeadowEdges {
     way: mat4x4<f32>,
     way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
+    bar: vec4<f32>,
+    bar_more: vec4<f32>,
     soil: vec4<f32>,
     stony: vec4<f32>,
 };
@@ -34,7 +36,7 @@ struct MeadowEdges {
 
 // The same wear the bare grounds read, so a track crossing a meadow is worn by
 // one rule and not by a second one that has to be kept in step with it.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, lattice}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, lattice}
 
 fn meadow_worn(place: vec2<f32>) -> f32 {
     return worn(place, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
@@ -198,7 +200,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let normal = surface_geometry_normal(surface_heightmap, geometry, in.world_position.xz, in.world_normal);
-    pbr_input.N = surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz));
+    // The print of the tyre bars, tilting the normal rather than tinting the
+    // ground: a chevron is a shape, and a shape wants the sun to find it.
+    let print = way_print(in.world_position.xz, edges.extent, edges.tread,
+        edges.way, edges.way_more, edges.way_shape, edges.bar, edges.bar_more, surface_footprint(in.world_position.xz));
+    pbr_input.N = normalize(
+        surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz))
+        + vec3<f32>(print.y, 0.0, print.z));
     pbr_input.world_normal = normal;
     let surface = meadow_surface(in.world_position.xz, normal);
     // A low sun is caught by the blades before it reaches the soil between
@@ -209,7 +217,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     let shaded = mix(0.72, 1.0, smoothstep(0.1, 0.7, sun_height));
     pbr_input.material.base_color = alpha_discard(pbr_input.material,
-        vec4<f32>(washed(in.world_position.xz, surface.color.rgb) * shaded, surface.color.a));
+        vec4<f32>(washed(in.world_position.xz, surface.color.rgb) * shaded * mix(1.0, 0.90, print.x),
+            surface.color.a));
     pbr_input.material.perceptual_roughness = surface.roughness;
     pbr_input.material.metallic = 0.0;
     pbr_input.material.reflectance = vec3<f32>(0.04);

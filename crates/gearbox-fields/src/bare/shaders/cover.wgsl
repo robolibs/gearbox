@@ -239,11 +239,41 @@ fn way_offset(place: vec2<f32>, way: mat4x4<f32>, more: mat4x4<f32>,
     return found;
 }
 
+// Everything one walk of a way can say about the point it was walked for. Held
+// as a struct and not a vector because the last of them is not a number: the
+// print of the tyre bars is a relief, and a relief is a height and the slope it
+// stands at.
+struct WayRead {
+    // How worn the ground is here, nought to one.
+    wear: f32,
+    // How much the wheels themselves sweep here — the floor of a rut and
+    // nothing else. Not recoverable from the wear.
+    swept: f32,
+    // The channel down one side of a rut, where water will stand.
+    channel: f32,
+    // A multiplier on the ground's own colour: the berm outside a rut reads
+    // paler, having drained first.
+    tone: f32,
+    // The tyre bars: how much of a bar's print is here, and the slope its
+    // relief stands at, in world x and z.
+    bar: vec3<f32>,
+}
+
 // Wear from one line: `against` is where the point stands against it (nearest
 // point, across, distance), `half` how wide the worn part of it is and `wear`
 // how hard this line in particular is used. Two lines crossing a field each
 // bring their own, so a farm track may join a metalled road.
-fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>, wear: f32) -> vec4<f32> {
+//
+// `bar` is the tyre that prints it, and it is the tyre's and not the ground's:
+// how far from one bar to the next, how far a bar leans along the way for every
+// metre it runs across it, what share of the pitch is bar rather than void, and
+// how deep it presses. An agricultural lug leans a whole metre in one — 45° —
+// and meets its opposite at the tyre's middle as a chevron; a lorry's blocks
+// lean none and print square across; a bald tyre presses no depth and prints
+// nothing. `footprint` is how much ground a pixel covers, and bars finer than
+// that are left out rather than drawn.
+fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>, wear: f32,
+        bar: vec4<f32>, footprint: f32) -> WayRead {
     // No stretch of a way is worn quite like the next, and without that a road
     // is one flat tone end to end, which is what reads as paint at a distance.
     // Drawn from the nearest point of the line, so both sides of a boundary see
@@ -288,20 +318,6 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     let lean = select(-1.0, 1.0, lattice(against.xy + side, 21.0) > 0.5);
     let channel = 1.0 - smoothstep(0.0, tread.y * 0.75,
         abs(off_middle - lean * tread.y * 0.42));
-    // `rut` and not the signed offset, so the bars meet at the tyre's own
-    // centreline and make the chevron a farm tyre actually prints. Signed, each
-    // rut came out as parallel diagonals — and since the offset is measured
-    // outward from the middle of the *way*, its slope ran opposite ways in the
-    // two ruts, so one wheel leaned one way and the other the other.
-    // No tyre tread is printed here, and the attempt is worth recording so it
-    // is not made again the same way. Drawn as a tone on the ground it is
-    // either invisible or wrong: at any strength that survives the stone lying
-    // on the rut it reads as hatching rather than as chevrons, and at a
-    // strength that does not shout it cannot be seen at all, even with the
-    // distance fade lifted. Bars a fifth of a metre apart are the wrong thing
-    // to draw in colour on a surface already covered in loose chippings. It
-    // wants the wheel map's own tread channels pressed into the *relief*, and
-    // until it is done that way it is better absent than half there.
     // The material a wheel displaces has to go somewhere, and it stands in a
     // low ridge just outside each rut. That ridge drains and dries before the
     // rut does, so it reads paler than either the rut or the ground beside it.
@@ -317,12 +333,61 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     let soften = min(1.15, half * 0.9);
     let wander = (lattice(place, 4.0) - 0.5) * min(0.9, half * 0.6);
     let verge = smoothstep(0.0, soften, half - against.w + wander);
+    // The line's own direction, got back from where the point stands against
+    // it: the nearest point is the foot of a perpendicular, so what runs from
+    // one to the other is across the way and a quarter turn of it is along.
+    // Signed by which side of the line the point falls on, or the direction
+    // reverses across the middle of the way and the two ruts print opposite
+    // chevrons — which is exactly how the first attempt at this went wrong.
+    let out_across = normalize(select(against.xy - place, place - against.xy, against.z >= 0.0)
+        + vec2<f32>(1e-6, 1e-6));
+    let heading = vec2<f32>(out_across.y, -out_across.x);
+    // Bars finer than a pixel are a shimmer and not a print, so a close-cut
+    // road tyre goes out with distance long before an ag lug does — which is
+    // the pitch doing the deciding, not a number written here.
+    let pitch = max(bar.x, 0.02);
+    let seen = 1.0 - smoothstep(pitch * 0.2, pitch * 0.95, footprint);
+    var print = vec3<f32>(0.0);
+    if (seen > 0.0 && bar.w > 0.0) {
+        // `abs(off_middle)` and not the signed offset, so a leaning bar meets
+        // its opposite at the tyre's own centreline and makes a chevron rather
+        // than parallel diagonals. A tyre that leans none prints square across
+        // and the middle is nothing in particular, which is a lorry's tread.
+        let turn = 6.2831853 / pitch;
+        let phase = (dot(place, heading) + abs(off_middle) * bar.y) * turn;
+        // A raised cosine taken to a power: the higher the power the narrower
+        // what is left standing, so one number turns the wide-voided ag lug
+        // into the close blocks of a road tyre. And it differentiates in closed
+        // form, so the slope costs no second walk of the line.
+        let sharp = clamp(0.5 / max(bar.z, 0.04), 0.5, 8.0);
+        let raised = 0.5 - 0.5 * cos(phase);
+        let bitten = pow(max(raised, 0.0), sharp);
+        // A print is only as good as the ground was soft when it was made.
+        // Metalled stone barely takes one; a beaten track takes it and holds it
+        // until the next pass smears it over, so it comes in stretches and not
+        // clean from end to end. Both wheels print — the patches only thin it,
+        // or one rut carries the whole tread and the other reads as untouched.
+        let takes = smoothstep(0.10, 0.40, used)
+            * mix(1.0, 0.35, smoothstep(WAY_METALLED, 0.95, used))
+            * mix(0.45, 1.0, smoothstep(0.18, 0.62, lattice(against.xy + side, 2.6)));
+        // A print is only as wide as the tyre that made it, which is narrower
+        // than the ground that tyre wears: the rut spreads either side of it,
+        // and bars drawn out to the edge of that make arms a metre and a half
+        // long — a chevron the size of a gate, not of a wheel.
+        let width = 1.0 - smoothstep(0.35, 0.80, rut / max(tread.y, 0.05));
+        let printed = wheel * verge * takes * width * seen;
+        let across_dir = out_across * select(-1.0, 1.0, across_way >= 0.0);
+        let steepest = heading + across_dir * bar.y * select(-1.0, 1.0, off_middle >= 0.0);
+        let slope = bar.w * sharp * pow(max(raised, 0.0), sharp - 1.0)
+            * 0.5 * sin(phase) * turn * printed;
+        print = vec3<f32>(bitten * printed, slope * steepest.x, slope * steepest.y);
+    }
     // How worn, and — separately — how much the wheels themselves sweep here.
     // The two are not the same thing and the second cannot be recovered from
     // the first: the floor of a rut and a road worn bare across its width both
     // read as fully worn, but only one of them has a tyre going down it.
-    return vec4<f32>(clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0), wheel * verge,
-        channel * verge, mix(1.0, 1.09, berm * verge));
+    return WayRead(clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0), wheel * verge,
+        channel * verge, mix(1.0, 1.09, berm * verge), print);
 }
 
 // How far out from a way's own edge this point stands, in metres, taking the
@@ -386,10 +451,11 @@ fn earth_mottle(place: vec2<f32>, footprint: f32) -> f32 {
 // worn by whichever of them has taken more of it. Fewer than two points in the
 // first and the wear runs down the field's own long axis, which is every
 // straight way.
-fn way_read(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
-        way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> vec4<f32> {
+fn way_walk(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
+        way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>,
+        bar: vec4<f32>, bar_more: vec4<f32>, footprint: f32) -> WayRead {
     if (max(tread.z, tread.w) <= 0.0) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        return WayRead(0.0, 0.0, 0.0, 1.0, vec3<f32>(0.0));
     }
     let first = i32(shape.x);
     if (first < 2) {
@@ -400,39 +466,65 @@ fn way_read(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         let off = dot(place - middle, across);
         let along = dot(place - middle, vec2<f32>(-across.y, across.x));
         let against = vec4<f32>(middle + vec2<f32>(-across.y, across.x) * along, off, abs(off));
-        return worn_along(place, against, abs(dot(span, across)) * 0.5, tread, tread.z);
+        return worn_along(place, against, abs(dot(span, across)) * 0.5, tread, tread.z,
+            bar, footprint);
     }
     let along_first = way_offset(place, way, more, 0, first);
-    let one = worn_along(place, along_first, max(shape.y, 0.1), tread, tread.z);
+    let one = worn_along(place, along_first, max(shape.y, 0.1), tread, tread.z, bar, footprint);
     let second = i32(shape.z);
     if (second < 2) {
         return one;
     }
     let crossing = way_offset(place, way, more, first, second);
-    let two = worn_along(place, crossing, max(shape.w, 0.1), tread, tread.w);
+    let two = worn_along(place, crossing, max(shape.w, 0.1), tread, tread.w, bar_more, footprint);
     // Where two ways meet, the ground is worn worse than either takes alone:
     // everything turning off one onto the other churns the same few metres. So
     // the lesser adds to the greater instead of hiding under it, and a
     // crossroads goes bare while the two roads either side of it keep their ruts.
-    return vec4<f32>(
-        clamp(max(one.x, two.x) + min(one.x, two.x) * 0.6, 0.0, 1.0),
-        max(one.y, two.y), max(one.z, two.z), min(one.w, two.w));
+    // The print, though, is whichever wheel came last — not two chevrons laid
+    // over each other, which is a cross-hatch and not a tyre mark.
+    return WayRead(
+        clamp(max(one.wear, two.wear) + min(one.wear, two.wear) * 0.6, 0.0, 1.0),
+        max(one.swept, two.swept), max(one.channel, two.channel), min(one.tone, two.tone),
+        select(two.bar, one.bar, one.swept >= two.swept));
 }
 
 // One walk of the line answers every question about it, so a ground that wants
-// the wear and the rut both pays for the search once. Kept as two readings of
-// it because most callers want only one: what stands in a field asks for the
+// the wear and the rut both pays for the search once. Kept as separate readings
+// of it because most callers want only one: what stands in a field asks for the
 // wear alone, hundreds of thousands of times a frame.
+// A reading that wants no print passes no tyre and a pixel the size of a field,
+// so the bars are skipped rather than worked out and thrown away. It is also
+// why these keep their old six arguments: the wear is read from vertex shaders
+// too, where a pixel has no size yet and a tyre has nothing to print on.
+const NO_TYRE: vec4<f32> = vec4<f32>(0.2, 0.0, 0.0, 0.0);
+const NO_PIXEL: f32 = 1e9;
+
 fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> f32 {
-    return way_read(place, extent, tread, way, more, shape).x;
+    return way_walk(place, extent, tread, way, more, shape, NO_TYRE, NO_TYRE, NO_PIXEL).wear;
+}
+
+fn way_read(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
+        way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> vec4<f32> {
+    let read = way_walk(place, extent, tread, way, more, shape, NO_TYRE, NO_TYRE, NO_PIXEL);
+    return vec4<f32>(read.wear, read.swept, read.channel, read.tone);
+}
+
+// The print of the tyre bars: how much of a bar is here, then the slope of its
+// relief in world x and z, to tilt the ground's normal by. `bar` and `bar_more`
+// are the tyres printing each of the two lines that may cross this field.
+fn way_print(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
+        way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>,
+        bar: vec4<f32>, bar_more: vec4<f32>, footprint: f32) -> vec3<f32> {
+    return way_walk(place, extent, tread, way, more, shape, bar, bar_more, footprint).bar;
 }
 
 fn rut_of(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
           way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> vec3<f32> {
-    let read = way_read(place, extent, tread, way, more, shape);
+    let read = way_walk(place, extent, tread, way, more, shape, NO_TYRE, NO_TYRE, NO_PIXEL);
     // Long dips with short ones inside them: a stretch of channel that holds
     // water, and within it the few feet that hold it longest.
     let dip = lattice(place, 7.5) * 0.62 + lattice(place + 29.0, 1.9) * 0.38;
-    return vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, dip), read.w);
+    return vec3<f32>(read.swept, read.channel * smoothstep(0.46, 0.86, dip), read.tone);
 }
