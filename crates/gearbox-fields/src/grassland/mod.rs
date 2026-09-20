@@ -149,6 +149,7 @@ impl Plugin for GrasslandPlugin {
                     super::clumps::celandine(share * 1.0, 40.0),
                 ],
                 ground: create_ground,
+                tread: Vec4::ZERO,
             });
     }
 }
@@ -158,6 +159,7 @@ fn create_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
+    _bounds: crate::layout::FieldBounds,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let grass_albedo = assets

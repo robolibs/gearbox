@@ -51,6 +51,8 @@ pub struct VegetationChunk {
     /// Share of this layer allowed outside the ground's grass patches; nought
     /// scatters it by its own reckoning instead.
     pub follow_grass: f32,
+    /// The wear of this field's surface, as `BareGround::tread`.
+    pub tread: Vec4,
     /// Albedo of an asset clump layer; procedural layers bind the fallback.
     pub albedo: Option<Handle<Image>>,
     /// Index ranges of a clump mesh's variants, one draw each; empty draws it whole.
@@ -119,6 +121,9 @@ pub struct VegetationParams {
     /// Nought to scatter by the layer's own reckoning; otherwise the share of
     /// this layer allowed outside the ground's grass patches.
     pub follow_grass: f32,
+    /// How the wheels have worn this field: half the gauge between the ruts,
+    /// half the width of one, how bare the rut is and how bare the rest is.
+    pub tread: Vec4,
 }
 
 /// Carries the environment's wind to every field's vegetation uniforms,
@@ -263,6 +268,7 @@ fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
         fade_end: draw.fade_end,
         inverse_square_thinning: u32::from(draw.inverse_square_thinning),
         follow_grass: draw.follow_grass,
+        tread: draw.tread,
         ..field.params
     }
 }

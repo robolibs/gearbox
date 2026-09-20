@@ -108,6 +108,7 @@ impl Plugin for ConcretePlugin {
                     },
                 ],
                 ground: create_ground,
+                tread: Vec4::ZERO,
             });
     }
 }
@@ -169,6 +170,7 @@ fn create_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
+    _bounds: crate::layout::FieldBounds,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = ConcreteExtension {

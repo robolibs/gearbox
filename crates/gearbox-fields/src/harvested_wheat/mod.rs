@@ -246,6 +246,7 @@ impl Plugin for HarvestedWheatPlugin {
                 super::clumps::dandelion(share * 1.2, 34.0),
                 super::clumps::nettle(share * 0.35, 30.0)],
                 ground: create_ground,
+                tread: Vec4::ZERO,
             });
     }
 }
@@ -255,6 +256,7 @@ fn create_ground(
     tracks: Handle<Image>,
     wheels: WheelMapParams,
     geometry: SurfaceGeometry,
+    _bounds: crate::layout::FieldBounds,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = AntiRepeatTerrainExtension {

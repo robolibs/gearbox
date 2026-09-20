@@ -27,6 +27,7 @@ struct VegetationParams {
     wheels: WheelMapParams,
     wind: vec4<f32>,
     follow_grass: f32,
+    tread: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -92,6 +93,24 @@ fn lattice(place: vec2<f32>, across: f32) -> f32 {
     let low = mix(heights[0], heights[1], ease.x);
     let high = mix(heights[2], heights[3], ease.x);
     return mix(low, high, ease.y);
+}
+
+// How far the wheels have worn this ground back to bare earth. Copied from the
+// ground material, and it must stay in step with it: the grass has to stop
+// exactly where the soil the material draws starts showing.
+fn worn(place: vec2<f32>) -> f32 {
+    if (field.tread.z <= 0.0) {
+        return 0.0;
+    }
+    let span = field.bounds.zw - field.bounds.xy;
+    let middle = (field.bounds.xy + field.bounds.zw) * 0.5;
+    let across = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), span.x < span.y);
+    let along = dot(place - middle, vec2<f32>(-across.y, across.x));
+    let sway = (lattice(vec2<f32>(along, 0.0), 23.0) - 0.5) * 1.1;
+    let off = dot(place - middle, across) + sway;
+    let rut = abs(abs(off) - field.tread.x);
+    let wheel = 1.0 - smoothstep(field.tread.y * 0.55, field.tread.y * 1.6, rut);
+    return clamp(mix(field.tread.w, field.tread.z, wheel), 0.0, 1.0);
 }
 
 // How much of the ground grass has taken. Mirrored in the ground material.
@@ -169,7 +188,14 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         return culled_vertex();
     }
 
-    let green = taken(base);
+    // Grass holds what the wheels have not worn away; stones and crumbs show
+    // wherever it has not.
+    let bared = worn(base);
+    let patchy_cover = taken(base);
+    // Matches the ground material: a driven surface is green wherever it is
+    // not worn, rather than wherever the patches fall.
+    let green = select(patchy_cover, mix(patchy_cover, 1.0, 0.85), field.tread.z > 0.0)
+        * (1.0 - bared);
     // Whether one stands here is a chance weighted by the patch, so its edge
     // is ragged with stragglers rather than cut with a knife.
     let luck = rand(id, 12u);

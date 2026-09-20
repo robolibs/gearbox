@@ -20,6 +20,8 @@ struct BareGround {
     tint: vec4<f32>,
     grain: vec4<f32>,
     grass: vec4<f32>,
+    extent: vec4<f32>,
+    tread: vec4<f32>,
 };
 
 // Two surfaces met by their own heights: the taller wins the pixel outright,
@@ -67,9 +69,9 @@ fn seeded(seed: u32, salt: u32) -> f32 {
     return f32(pcg(seed ^ (salt * 0x9E3779B9u))) / 4294967295.0;
 }
 
-fn taken(place: vec2<f32>) -> f32 {
-    let cell = floor(place / 9.0);
-    let f = fract(place / 9.0);
+fn lattice(place: vec2<f32>, across: f32) -> f32 {
+    let cell = floor(place / across);
+    let f = fract(place / across);
     let ease = f * f * (3.0 - 2.0 * f);
     let corner = array<vec2<f32>, 4>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
     var heights = array<f32, 4>();
@@ -82,6 +84,10 @@ fn taken(place: vec2<f32>) -> f32 {
     let low = mix(heights[0], heights[1], ease.x);
     let high = mix(heights[2], heights[3], ease.x);
     return mix(low, high, ease.y);
+}
+
+fn taken(place: vec2<f32>) -> f32 {
+    return lattice(place, 9.0);
 }
 
 fn clump_edge(about: f32, seed: u32) -> f32 {
@@ -205,6 +211,28 @@ fn ground_fbm(p: vec2<f32>, octaves: i32) -> f32 {
     return sum / weight;
 }
 
+// How far this ground has been worn back to bare earth. A road is worn in two
+// ruts where the wheels run and less between them; a field is worn evenly, and
+// gets nought here. The same reading is made by whatever stands in the ground,
+// so the grass stops exactly where the soil starts showing.
+fn worn(place: vec2<f32>) -> f32 {
+    if (ground.tread.z <= 0.0) {
+        return 0.0;
+    }
+    let span = ground.extent.zw - ground.extent.xy;
+    let middle = (ground.extent.xy + ground.extent.zw) * 0.5;
+    // A road runs down the long side of its field, so across it is the short.
+    let across = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), span.x < span.y);
+    // No driver holds a line to the centimetre, and no two passes take quite
+    // the same one, so the ruts wander down the length of the road.
+    let along = dot(place - middle, vec2<f32>(-across.y, across.x));
+    let sway = (lattice(vec2<f32>(along, 0.0), 23.0) - 0.5) * 1.1;
+    let off = dot(place - middle, across) + sway;
+    let rut = abs(abs(off) - ground.tread.x);
+    let wheel = 1.0 - smoothstep(ground.tread.y * 0.55, ground.tread.y * 1.6, rut);
+    return clamp(mix(ground.tread.w, ground.tread.z, wheel), 0.0, 1.0);
+}
+
 // A clod is a cell, not a hump of noise: it belongs to the seed nearest it and
 // falls to nothing where it meets its neighbours, which is what the gap
 // between the two nearest seeds gives directly.
@@ -292,12 +320,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     var grass_share = 0.0;
     var shade_of_clumps = 1.0;
+    // Where the wheels have worn the ground, no grass holds it.
+    let bared = worn(place);
     if (ground.grass.w > 0.001) {
         let grown = taken(place);
-        let grassy = smoothstep(0.42, 0.70, grown);
+        // On a driven surface the patches do not decide it: what is not worn
+        // is green, and the ruts are what make the pattern.
+        let patchy_cover = smoothstep(0.42, 0.70, grown);
+        let grassy = select(patchy_cover, mix(patchy_cover, 1.0, 0.85), ground.tread.z > 0.0);
         // Near to, each clump is its own; far off they are smaller than a pixel
         // and drawing them only speckles the ground, so a wash is left instead.
-        let spread_out = grassy * ground.grass.w;
+        let spread_out = grassy * ground.grass.w * (1.0 - bared);
         let away = under_clumps(place);
         let took = max((1.0 - smoothstep(0.72, 1.06, away)) * spread_out * close,
             spread_out * 0.5 * (1.0 - close));

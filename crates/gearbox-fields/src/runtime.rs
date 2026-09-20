@@ -247,7 +247,7 @@ pub fn ensure_fields(world: &mut World) {
             bend: response.bend,
             darkening: response.darkening,
         };
-        let ground = (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone());
+        let ground = (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone(), bounds);
         let entity = world
             .spawn((
                 Name::new(format!("Field {} ({})", spec.name, profile.name)),
@@ -299,6 +299,7 @@ pub fn ensure_fields(world: &mut World) {
             ..default()
         },
         surface_geometry,
+        domain,
     );
     world.insert_resource(ActiveFields {
         terrain: root,
@@ -573,6 +574,7 @@ pub fn stream_vegetation(
                     fade_end: layer.fade_end,
                     inverse_square_thinning: layer.inverse_square_thinning,
                     follow_grass: layer.follow_grass,
+                    tread: field.profile.tread,
                     albedo: layer.albedo.map(|path| assets.load(path)),
                     variants,
                 },

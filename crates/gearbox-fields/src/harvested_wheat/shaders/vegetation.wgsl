@@ -26,6 +26,7 @@ struct VegetationParams {
     wheels: WheelMapParams,
     wind: vec4<f32>,
     follow_grass: f32,
+    tread: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;

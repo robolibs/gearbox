@@ -82,14 +82,25 @@ pub struct SurfaceGeometry {
     pub params: SurfaceGeometryParams,
 }
 
-pub type GroundFactory =
-    fn(&mut World, Handle<Image>, WheelMapParams, SurfaceGeometry) -> Arc<dyn GroundSurface>;
+/// Builds a field's ground. The bounds are the field's own rectangle: a
+/// surface that wears unevenly — a road with ruts down it — needs to know
+/// where the field runs before it can say which part of it is worn.
+pub type GroundFactory = fn(
+    &mut World,
+    Handle<Image>,
+    WheelMapParams,
+    SurfaceGeometry,
+    super::layout::FieldBounds,
+) -> Arc<dyn GroundSurface>;
 
 pub struct FieldProfile {
     pub name: &'static str,
     pub wheel_response: WheelResponse,
     pub layers: Vec<VegetationLayer>,
     pub ground: GroundFactory,
+    /// How this profile's surface is worn by wheels, as `BareGround::tread`:
+    /// zero for a surface that wears evenly, which is most of them.
+    pub tread: Vec4,
 }
 
 #[derive(Resource, Default)]
