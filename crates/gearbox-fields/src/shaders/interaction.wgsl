@@ -22,17 +22,36 @@ fn wheel_texel(tex: texture_2d<u32>, index: vec2<i32>, recovery: f32) -> vec3<f3
     return vec3<f32>(press, cos(angle) * press, sin(angle) * press);
 }
 
-fn sample_wheels(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>) -> vec3<f32> {
+// How long a wheel's bare scar takes to green over. A flattened sward springs
+// back in minutes — that is what `recovery_seconds` is for — but the ground it
+// was pressed into stays showing far longer, so one map is read on two clocks.
+// Nothing can outlast the stamp clock itself, which spans an hour.
+const SCAR_SECONDS: f32 = 3000.0;
+
+fn sample_wheels_over(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>,
+                      recovery: f32) -> vec3<f32> {
     let t = (world_xz - params.origin) * params.texels_per_metre;
     let last = vec2<i32>(i32(params.width), i32(params.height)) - vec2<i32>(1);
     if (any(t < vec2<f32>(0.0)) || any(t > vec2<f32>(last))) { return vec3<f32>(0.0); }
     let i = clamp(vec2<i32>(floor(t)), vec2<i32>(0), last - vec2<i32>(1));
     let f = clamp(t - vec2<f32>(i), vec2<f32>(0.0), vec2<f32>(1.0));
-    let a = wheel_texel(tex, i, params.recovery_seconds);
-    let b = wheel_texel(tex, i + vec2<i32>(1, 0), params.recovery_seconds);
-    let c = wheel_texel(tex, i + vec2<i32>(0, 1), params.recovery_seconds);
-    let d = wheel_texel(tex, i + vec2<i32>(1, 1), params.recovery_seconds);
+    let a = wheel_texel(tex, i, recovery);
+    let b = wheel_texel(tex, i + vec2<i32>(1, 0), recovery);
+    let c = wheel_texel(tex, i + vec2<i32>(0, 1), recovery);
+    let d = wheel_texel(tex, i + vec2<i32>(1, 1), recovery);
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+fn sample_wheels(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>) -> vec3<f32> {
+    return sample_wheels_over(tex, params, world_xz, params.recovery_seconds);
+}
+
+// How bare a wheel has left this ground, on the slow clock. Taken together with
+// whatever the layout says and the harder wins, so a mark driven into a field
+// lasts like one laid out in it rather than fading while the other stays.
+fn wheel_scar(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>) -> f32 {
+    if (params.recovery_seconds <= 0.0) { return 0.0; }
+    return clamp(sample_wheels_over(tex, params, world_xz, SCAR_SECONDS).x, 0.0, 1.0);
 }
 
 // Unit roll direction of a wheel sample; zero where nothing has rolled.

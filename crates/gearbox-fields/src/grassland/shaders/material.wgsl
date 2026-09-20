@@ -47,7 +47,7 @@ fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
         mat4x4<f32>(edges.west, edges.east, edges.south, edges.north), edges.reach);
 }
 
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var grass_albedo: texture_2d<f32>;
@@ -145,15 +145,13 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     let breakup = edge * 0.025 + (dirt_detail - grass_detail) * 0.06;
     let soil = meadow_pocket_blend(pattern.z + dry * 0.055 + breakup);
     let steep = 1.0 - saturate((normal.y - 0.80) / 0.12);
-    // A way worn across the meadow: bare earth where the wheels run, and the
-    // sward left to close over the rest of it.
     // Driving bares a meadow as surely as a way laid across it: the two are
     // taken together and the harder wins, as on the bare grounds. Gentler than
     // there, because one pass over turf presses the sward down into the soil
     // rather than stripping it — the blades are not culled for this, they lie
     // flattened over what shows through, which is what a fresh tyre mark is.
-    let bared = clamp(max(meadow_worn(world_xz), trample_pressed(world_xz) * 0.5)
-        + breakup * 1.6, 0.0, 1.0);
+    let scar = wheel_scar(trample, trample_params, world_xz);
+    let bared = clamp(max(meadow_worn(world_xz), scar * 0.5) + breakup * 1.6, 0.0, 1.0);
     let exposed = max(max(soil, bared), smoothstep(0.15, 0.8, steep + breakup));
     let footprint = surface_footprint(world_xz);
     let texture_visibility = 1.0 - smoothstep(0.015, 0.12, footprint);

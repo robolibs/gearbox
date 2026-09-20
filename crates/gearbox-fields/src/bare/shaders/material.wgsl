@@ -7,7 +7,7 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
 }
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into}
 
@@ -267,7 +267,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
     // Where the wheels have worn the ground, no grass holds it — whether that
     // is a road laid out as worn, or a way beaten across a field by driving it.
-    let rolled_now = clamp(sample_wheels(tracks, wheels, place).x, 0.0, 1.0);
+    let rolled_now = wheel_scar(tracks, wheels, place);
     let bared = max(
         worn(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape),
         rolled_now * 0.8,

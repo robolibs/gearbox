@@ -8,7 +8,7 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
 }
 
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 #import "embedded://gearbox_fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
@@ -329,7 +329,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x;
     color = vec4<f32>(color.rgb * (1.0 - wheels.darkening * pressed), 1.0);
     // A way worn across the stubble: the rows go and the earth under them shows.
-    let bared = max(stubble_worn(in.world_position.xz), pressed * 0.6);
+    let bared = max(
+        stubble_worn(in.world_position.xz),
+        wheel_scar(tracks, wheels, in.world_position.xz) * 0.6,
+    );
     let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, bared)
         * (0.8 + fbm(in.world_position.xz * 1.6) * 0.5);
     color = vec4<f32>(washed(in.world_position.xz, mix(color.rgb, earth, bared)), 1.0);

@@ -10,7 +10,7 @@
 }
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{blade_leans}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, wheel_scar}
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn}
 
 struct VegetationParams {
@@ -152,7 +152,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // material makes, so the two agree.
     let bared = max(
         worn(base, field.bounds, field.tread, field.way, field.way_more, field.way_shape),
-        flat * 0.8,
+        wheel_scar(trample, field.wheels, base) * 0.8,
     );
     let patchy_cover = taken(base);
     // Matches the ground material: a driven surface is green wherever it is

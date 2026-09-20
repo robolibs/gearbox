@@ -63,6 +63,14 @@ That holds on every cover that can wear — bare ground, meadow and stubble alik
 wheel bares turf more gently than it bares soil, and the blades are not taken away for it:
 they lie flattened over what shows through, which is what a fresh tyre mark on grass is. A
 concrete yard is the exception and wears not at all.
+
+One map, two clocks. A flattened sward springs back over the profile's own
+`recovery_seconds` — five minutes for a meadow — but the bare scar a wheel presses in greens
+over far more slowly, so `wheel_scar` reads the same marks on a much longer one. Without it
+a layout's wear stayed for good while a driven mark evaporated, though both are meant to be
+the same rule. Nothing outlasts the stamp clock itself, which spans an hour: a mark driven
+into a field lasts a working session, not for ever. A record that truly never fades wants a
+map of its own.
 `tracks.json` keeps a `drive-me` lane at positive coordinates, barely worn, to drive along
 and watch a wheel mark wear it bare:
 
