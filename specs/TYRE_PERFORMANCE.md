@@ -142,6 +142,40 @@ and `/tmp/molla-control-pressure-drive.log`. The files named
 `molla-control-high-state.json`/`molla-control-high.png` were captured after a
 refused request and still represent low pressure, not an accepted transition.
 
+### Concurrent pressure/drive follow-up
+
+The explicit `machine tyre-pressure --reuse-session` flag now borrows an active
+session with the same reported CLI holder without claiming or releasing it.
+It refuses idle/zero sessions and different identities, conflicts with `--take`,
+and retains the driving lease on command rejection or transport failure.
+Four new unit tests cover parsing, ownership, claim rejection and the release
+lifecycle matrix. CLI tests pass: six unit tests and fourteen integration tests.
+The native isolated build passes; positive concurrent-edit coverage below is a
+real-machine run, not the fake-host integration fixture.
+
+In `molla-pressure-reuse`, a selected Kubota drove at 2 m/s with a 0.12 rad/s
+turn. All tyres reached 4 bar after an accepted mid-drive edit from 0.5 bar;
+direct state readback reported 2.004 m/s. Session id 2 and its holder stayed
+unchanged before/after the request. Front deflections at 4 bar were 34.60 and
+35.68 mm; rear deflections were 36.95 and 38.27 mm under the turning load.
+A subsequent front-axle edit changed only its two targets to 0.5 bar. An invalid
+99-bar request returned exit 2 with every target and the driving session intact.
+A rear-left-only edit changed that target to 1.8 bar, leaving rear-right at 4
+and both fronts at 0.5. Fresh readback confirmed all four applied values reached
+those targets while the vehicle still travelled at 2.004 m/s on session 2.
+The inspected screenshot confirms the selected machine and Molla/PLAYING
+instance; it is not a close-up tyre-shape acceptance comparison.
+
+This closes the CLI mid-drive session conflict, not the full tyre acceptance
+suite or performance gate. Live step samples during the run were 1.61–1.92 ms;
+other user workloads were running, so these are not a controlled regression
+comparison. Existing pre-load renderer slab and Vulkan loader diagnostics remain.
+
+Evidence: `/tmp/gearbox-pressure-session-{tests,build}.log`,
+`/tmp/molla-pressure-reuse.log`, `/tmp/molla-reuse-drive.log`,
+`/tmp/molla-reuse-{before,after,high,axle,invalid-state,wheel,final-state}.json`,
+`/tmp/molla-reuse-invalid.log`, and `/tmp/molla-reuse-scoped.png`.
+
 ## Correctness and gates
 
 - Binary tests cover conservative bounds, both pressure directions, unchanged

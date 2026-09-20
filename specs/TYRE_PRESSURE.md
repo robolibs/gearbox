@@ -108,8 +108,18 @@ gearbox -i INSTANCE machine tyre-pressure 1.0 --axle 1 --machine tractor
 gearbox -i INSTANCE machine tyre-pressure 2.4 --axle 2 --machine tractor
 gearbox -i INSTANCE machine tyre-pressure 1.8 --machine tractor
 gearbox -i INSTANCE machine tyre-pressure 1.2 --wheel wheel_front_left --machine tractor
+gearbox -i INSTANCE machine tyre-pressure 2.4 --machine tractor --reuse-session
 gearbox -i INSTANCE --json machine state tractor
 ```
+
+During a CLI drive, pass `--reuse-session` to borrow the active session held
+by the same CLI identity. The pressure command neither claims nor releases
+that session, including on command failure or acknowledgement timeout. It
+refuses an idle session or a different reported holder, and cannot be combined
+with `--take`. Without the flag, pressure commands claim and release their own
+short session; a busy driving session is not automatically stolen. `--take`
+explicitly steals ownership and can interrupt the drive. The reuse check is
+CLI-side holder validation, not additional server-side authentication.
 
 The command uses one grouped request and confirms accepted target telemetry
 before reporting success. It does not wait for applied pressure to reach the
