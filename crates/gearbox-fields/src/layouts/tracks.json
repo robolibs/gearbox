@@ -1,9 +1,69 @@
 {
   "default": "grassland",
   "fields": [
-    { "name": "green-lane", "profile": "track", "wear": 0.25, "min": [-60.0, -120.0], "max": [-54.0, 120.0] },
-    { "name": "worn-track", "profile": "track", "min": [-8.0, -120.0], "max": [-2.0, 120.0] },
-    { "name": "half-worn", "profile": "track", "wear": 0.45, "min": [16.0, -120.0], "max": [22.0, 120.0] },
-    { "name": "bare-road", "profile": "track", "wear": 1.0, "min": [44.0, -120.0], "max": [50.0, 120.0] }
+    {
+      "name": "green-lane",
+      "profile": "track",
+      "wear": 0.25,
+      "min": [
+        -60.0,
+        -120.0
+      ],
+      "max": [
+        -54.0,
+        120.0
+      ]
+    },
+    {
+      "name": "worn-track",
+      "profile": "track",
+      "min": [
+        -8.0,
+        -120.0
+      ],
+      "max": [
+        -2.0,
+        120.0
+      ]
+    },
+    {
+      "name": "half-worn",
+      "profile": "track",
+      "wear": 0.45,
+      "min": [
+        16.0,
+        -120.0
+      ],
+      "max": [
+        22.0,
+        120.0
+      ]
+    },
+    {
+      "name": "bare-road",
+      "profile": "track",
+      "wear": 1.0,
+      "min": [
+        44.0,
+        -120.0
+      ],
+      "max": [
+        50.0,
+        120.0
+      ]
+    },
+    {
+      "name": "drive-me",
+      "profile": "track",
+      "wear": 0.2,
+      "min": [
+        80.0,
+        -120.0
+      ],
+      "max": [
+        86.0,
+        120.0
+      ]
+    }
   ]
 }
