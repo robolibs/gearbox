@@ -44,6 +44,28 @@ Names starting with `__background/` are reserved. The distant visual ground uses
 profile; only the sampled physical terrain receives bounded vegetation and wheel maps.
 The mixed example deliberately crosses mesh/chunk boundaries.
 
+A field may also carry `"wear"`, nought to one, saying how far the wheels have taken it
+back to bare ground. It is the whole of a way's character: a green lane barely marked at a
+quarter, two bare ruts with grass holding between them at a half, a road worn bare from side
+to side at one. Left out, the profile decides. One `track` profile therefore covers every
+kind of way:
+
+```json
+{ "name": "green-lane", "profile": "track", "wear": 0.25, "min": [-60, -120], "max": [-54, 120] },
+{ "name": "bare-road",  "profile": "track", "wear": 1.0,  "min": [ 44, -120], "max": [ 50, 120] }
+```
+
+The wear is read by the ground material and by everything standing in it alike, so it
+decides the soil's colour as it wears down to the stone under it, whether grass holds,
+how thickly stones lie, and how far the wheels have pressed it. Driving over a field wears
+it the same way, whatever its layout says: the two are taken together, the harder winning.
+See `layouts/tracks.json`.
+
+Fields meet one another over the softer of their two `soft_border` widths: what grows in
+each carries that far past its own edge and thins as it goes, and the ground washes towards
+the neighbour's colour over the same distance. A yard's border is nought, so it ends on a
+line.
+
 Layout and `EnvironmentSettings` are startup configuration, not live-editable settings.
 
 ## Add a package
