@@ -266,6 +266,7 @@ pub(super) struct BarePlugin;
 
 impl Plugin for BarePlugin {
     fn build(&self, app: &mut App) {
+        bevy::asset::embedded_asset!(app, "shaders/cover.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
         app.add_plugins(MaterialPlugin::<BareMaterial>::default());

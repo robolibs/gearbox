@@ -10,6 +10,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -65,51 +66,6 @@ fn smooth2(v: vec2<f32>) -> vec2<f32> {
 // The hashes the tufts standing in this ground are placed by, copied from the
 // vegetation shader. The two must stay in step or the ground is green where
 // nothing grows.
-fn pcg(input: u32) -> u32 {
-    let state = input * 747796405u + 2891336453u;
-    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-fn seeded(seed: u32, salt: u32) -> f32 {
-    return f32(pcg(seed ^ (salt * 0x9E3779B9u))) / 4294967295.0;
-}
-
-fn lattice(place: vec2<f32>, across: f32) -> f32 {
-    let cell = floor(place / across);
-    let f = fract(place / across);
-    let ease = f * f * (3.0 - 2.0 * f);
-    let corner = array<vec2<f32>, 4>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
-    var heights = array<f32, 4>();
-    for (var i = 0; i < 4; i = i + 1) {
-        let c = cell + corner[i];
-        var h = u32(i32(c.x)) * 0x9E3779B9u ^ u32(i32(c.y)) * 0x85EBCA6Bu;
-        h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
-        heights[i] = f32(h) / 4294967295.0;
-    }
-    let low = mix(heights[0], heights[1], ease.x);
-    let high = mix(heights[2], heights[3], ease.x);
-    return mix(low, high, ease.y);
-}
-
-fn taken(place: vec2<f32>) -> f32 {
-    return lattice(place, 9.0);
-}
-
-fn clump_edge(about: f32, seed: u32) -> f32 {
-    let a = seeded(seed, 30u) * 6.2831853;
-    let b = seeded(seed, 31u) * 6.2831853;
-    return max(1.0 + 0.44 * sin(about * 3.0 + a) + 0.26 * sin(about * 5.0 + b), 0.3);
-}
-
-fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
-    let run = floor(cell * cell_m / 5.0);
-    var h = u32(i32(run.x)) * 0x9E3779B9u ^ u32(i32(run.y)) * 0xC2B2AE35u;
-    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 13u);
-    let lie = f32(h) / 4294967295.0 * 3.1415927 + (seeded(seed, 32u) - 0.5) * 0.7;
-    return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, seeded(seed, 33u)));
-}
-
 // The ground washed into whatever lies across each side. A field that stops
 // its own colour dead on its boundary shows a ruled line however softly the
 // plants either side interleave; over the last metre or so of it, the soil
@@ -143,11 +99,11 @@ fn under_clumps(place: vec2<f32>) -> f32 {
         for (var dx = -2; dx <= 2; dx = dx + 1) {
             let c = cell + vec2<f32>(f32(dx), f32(dy));
             let seed = pcg(bitcast<u32>(i32(c.x)) * 2654435761u ^ bitcast<u32>(i32(c.y)) * 40503u);
-            if (seeded(seed, 3u) < 0.30) {
+            if (rand(seed, 3u) < 0.30) {
                 continue;
             }
-            let middle = (c + vec2<f32>(seeded(seed, 1u), seeded(seed, 2u))) * cell_m;
-            let spread = mix(0.1, 0.3, seeded(seed, 4u));
+            let middle = (c + vec2<f32>(rand(seed, 1u), rand(seed, 2u))) * cell_m;
+            let spread = mix(0.1, 0.3, rand(seed, 4u));
             let frame = clump_frame(c, cell_m, seed);
             let off = place - middle;
             let local = vec2<f32>(dot(off, frame.xy) / frame.z,
@@ -243,33 +199,6 @@ fn ground_fbm(p: vec2<f32>, octaves: i32) -> f32 {
 // ruts where the wheels run and less between them; a field is worn evenly, and
 // gets nought here. The same reading is made by whatever stands in the ground,
 // so the grass stops exactly where the soil starts showing.
-fn worn(place: vec2<f32>) -> f32 {
-    if (ground.tread.z <= 0.0) {
-        return 0.0;
-    }
-    let span = ground.extent.zw - ground.extent.xy;
-    let middle = (ground.extent.xy + ground.extent.zw) * 0.5;
-    // A road runs down the long side of its field, so across it is the short.
-    let across = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), span.x < span.y);
-    // No driver holds a line to the centimetre, and no two passes take quite
-    // the same one, so the ruts wander down the length of the road.
-    let along = dot(place - middle, vec2<f32>(-across.y, across.x));
-    let sway = (lattice(vec2<f32>(along, 0.0), 23.0) - 0.5) * 1.1;
-    let off = dot(place - middle, across) + sway;
-    let rut = abs(abs(off) - ground.tread.x);
-    let wheel = 1.0 - smoothstep(ground.tread.y * 0.55, ground.tread.y * 1.6, rut);
-    // Nothing is worn right to its edge: the verge closes in from both sides,
-    // and a road that stops dead at a straight line reads as a painted strip.
-    let half = abs(dot(span, across)) * 0.5;
-    let inside = half - abs(dot(place - middle, across));
-    // Ragged by moving where the edge falls, not by scaling the wear: as a
-    // multiplier this took a road bare across its width down to two thirds
-    // worn down the middle of it, and every wear looked alike from the air.
-    let ragged = inside + (lattice(place, 4.0) - 0.5) * 0.9;
-    let verge = smoothstep(0.0, 1.15, ragged);
-    return clamp(mix(ground.tread.w, ground.tread.z, wheel) * verge, 0.0, 1.0);
-}
-
 // A clod is a cell, not a hump of noise: it belongs to the seed nearest it and
 // falls to nothing where it meets its neighbours, which is what the gap
 // between the two nearest seeds gives directly.
@@ -323,7 +252,7 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     // into hollows and crush the clods flat in them, so it lies lower and
     // smoother than the ground either side. This is the relief the normal is
     // taken from, not the mesh, so a rut shades but never breaks a silhouette.
-    let pressed_in = worn(place);
+    let pressed_in = worn(place, ground.extent, ground.tread);
     let crushed = 1.0 - pressed_in * 0.55;
     return swell * 0.08
         - pressed_in * 0.09
@@ -356,7 +285,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Where the wheels have worn the ground, no grass holds it — whether that
     // is a road laid out as worn, or a way beaten across a field by driving it.
     let rolled_now = clamp(sample_wheels(tracks, wheels, place).x, 0.0, 1.0);
-    let bared = max(worn(place), rolled_now * 0.8);
+    let bared = max(worn(place, ground.extent, ground.tread), rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
     // Ground changes over tens of metres as well as over inches — drainage,
     // the lie of the land, where the subsoil comes nearer the surface. Without

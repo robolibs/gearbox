@@ -12,6 +12,7 @@
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{blade_leans}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -52,16 +53,6 @@ struct VertexOutput {
     @location(4) @interpolate(perspective, centroid) ground_normal: vec3<f32>,
 };
 
-fn pcg(input: u32) -> u32 {
-    let state = input * 747796405u + 2891336453u;
-    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-fn rand(seed: u32, salt: u32) -> f32 {
-    return f32(pcg(seed ^ (salt * 0x9E3779B9u))) / 4294967295.0;
-}
-
 fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
     let t = (world_xz - field.origin) * field.texels_per_metre;
     let max_index = i32(field.texel_count) - 1;
@@ -97,74 +88,15 @@ fn within_field(world_xz: vec2<f32>) -> bool {
 }
 
 // Value noise on a lattice of `across` metres.
-fn lattice(place: vec2<f32>, across: f32) -> f32 {
-    let cell = floor(place / across);
-    let f = fract(place / across);
-    let ease = f * f * (3.0 - 2.0 * f);
-    let corner = array<vec2<f32>, 4>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
-    var heights = array<f32, 4>();
-    for (var i = 0; i < 4; i = i + 1) {
-        let c = cell + corner[i];
-        var h = u32(i32(c.x)) * 0x9E3779B9u ^ u32(i32(c.y)) * 0x85EBCA6Bu;
-        h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
-        heights[i] = f32(h) / 4294967295.0;
-    }
-    let low = mix(heights[0], heights[1], ease.x);
-    let high = mix(heights[2], heights[3], ease.x);
-    return mix(low, high, ease.y);
-}
-
 // How far the wheels have worn this ground back to bare earth. Copied from the
 // ground material, and it must stay in step with it: the grass has to stop
 // exactly where the soil the material draws starts showing.
-fn worn(place: vec2<f32>) -> f32 {
-    if (field.tread.z <= 0.0) {
-        return 0.0;
-    }
-    let span = field.bounds.zw - field.bounds.xy;
-    let middle = (field.bounds.xy + field.bounds.zw) * 0.5;
-    let across = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), span.x < span.y);
-    let along = dot(place - middle, vec2<f32>(-across.y, across.x));
-    let sway = (lattice(vec2<f32>(along, 0.0), 23.0) - 0.5) * 1.1;
-    let off = dot(place - middle, across) + sway;
-    let rut = abs(abs(off) - field.tread.x);
-    let wheel = 1.0 - smoothstep(field.tread.y * 0.55, field.tread.y * 1.6, rut);
-    // Nothing is worn right to its edge: the verge closes in from both sides,
-    // and a road that stops dead at a straight line reads as a painted strip.
-    let half = abs(dot(span, across)) * 0.5;
-    let inside = half - abs(dot(place - middle, across));
-    // Ragged by moving where the edge falls, not by scaling the wear: as a
-    // multiplier this took a road bare across its width down to two thirds
-    // worn down the middle of it, and every wear looked alike from the air.
-    let ragged = inside + (lattice(place, 4.0) - 0.5) * 0.9;
-    let verge = smoothstep(0.0, 1.15, ragged);
-    return clamp(mix(field.tread.w, field.tread.z, wheel) * verge, 0.0, 1.0);
-}
-
 // How much of the ground grass has taken. Mirrored in the ground material.
-fn taken(place: vec2<f32>) -> f32 {
-    return lattice(place, 9.0);
-}
-
 // A clump of grass is not a disc: it is longer one way than the other and its
 // edge runs in and out. This and `clump_frame` are mirrored in the ground
 // material, which has to agree with them pixel for pixel.
-fn clump_edge(about: f32, seed: u32) -> f32 {
-    let a = rand(seed, 30u) * 6.2831853;
-    let b = rand(seed, 31u) * 6.2831853;
-    return max(1.0 + 0.44 * sin(about * 3.0 + a) + 0.26 * sin(about * 5.0 + b), 0.3);
-}
-
 // The bearing is shared by every clump in a five-metre square, so neighbours
 // run parallel and grow together into ribbons instead of scattered spots.
-fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
-    let run = floor(cell * cell_m / 5.0);
-    var h = u32(i32(run.x)) * 0x9E3779B9u ^ u32(i32(run.y)) * 0xC2B2AE35u;
-    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 13u);
-    let lie = f32(h) / 4294967295.0 * 3.1415927 + (rand(seed, 32u) - 0.5) * 0.7;
-    return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, rand(seed, 33u)));
-}
-
 fn culled_vertex() -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vec4<f32>(0.0, 0.0, -2.0, 1.0);
@@ -221,7 +153,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // A way beaten by driving wears the ground as surely as one laid out that
     // way, and grass holds only what is left. The same reading the ground
     // material makes, so the two agree.
-    let bared = max(worn(base), flat * 0.8);
+    let bared = max(worn(base, field.bounds, field.tread), flat * 0.8);
     let patchy_cover = taken(base);
     // Matches the ground material: a driven surface is green wherever it is
     // not worn, rather than wherever the patches fall.
