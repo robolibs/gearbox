@@ -167,9 +167,10 @@ two ways over any one field, or cut the field so each crossing has its own.
 
 A way may also run straight **along** a boundary rather than through a field: each side wears
 its own half, the hollow sinks across both, and nothing seams down the middle —
-`layouts/boundary.json` lays one between a ploughed field and stubble. Where such a road is
-not fully worn, each half keeps a little of its own field's colour, so give it `wear: 1.0`
-if it should look the same all the way across.
+`layouts/boundary.json` lays one between a ploughed field and stubble. The two halves wear to
+the same stone and reach it faster than the wear itself rises, so a made road matches across
+its width; only a faint one keeps a little of each field's own earth, which is all a faint
+mark is.
 
 An authored way also **sinks the ground it runs over** — a little under a foot for a
 half-worn farm track, tapering out over a metre and a half either side, and proportionately

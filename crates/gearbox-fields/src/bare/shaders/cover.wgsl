@@ -63,6 +63,16 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
 const WAY_BRUISED: f32 = 0.25;
 const WAY_METALLED: f32 = 0.55;
 
+// How much of what a way has worn down to is the stone under it rather than the
+// field's own earth. It rises faster than the wear itself: the two sides of a
+// road running along a boundary wear to the *same* stone and differ only in
+// their earth, so left proportional such a road reads as two roads meeting down
+// its middle — ploughed earth is nearly three times darker than stubble's. A
+// faint mark still shows the field it is in, which is all a faint mark is.
+fn settled(bared: f32) -> f32 {
+    return smoothstep(0.0, 0.85, bared);
+}
+
 // The taller of two surfaces wins the pixel outright, and they mix only within
 // a shallow band. Fading them instead leaves a grey halo round every patch —
 // and where a way meets a field, a plain fade is what makes a road read as
