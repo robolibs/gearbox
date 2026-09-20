@@ -298,6 +298,82 @@ mod tests {
         assert_eq!(joined.packed().2.z, 0.0);
     }
 
+    // A layout is the one place a mistake can be named. Past it these numbers
+    // reach the terrain grid and the shaders, where a bad one is a silently
+    // wrong ground or a collider full of holes.
+    #[test]
+    fn a_layout_names_what_is_wrong_with_its_ways() {
+        // A profile that grows nothing and builds no ground: `validate` only
+        // ever looks up its name, its border and its colour.
+        struct NoGround;
+        impl crate::profile::GroundSurface for NoGround {
+            fn apply(&self, _: &mut Commands, _: Entity) {}
+        }
+        fn no_ground(
+            _: &mut World,
+            _: Handle<Image>,
+            _: crate::profile::WheelMapParams,
+            _: crate::profile::SurfaceGeometry,
+            _: crate::profile::Placed,
+        ) -> std::sync::Arc<dyn crate::profile::GroundSurface> {
+            std::sync::Arc::new(NoGround)
+        }
+        let mut profiles = FieldProfiles::default();
+        profiles.register(crate::profile::FieldProfile {
+            name: "grassland",
+            wheel_response: crate::profile::WheelResponse {
+                recovery_seconds: 1.0,
+                bend: 0.0,
+                darkening: 0.0,
+                footprint_length: 0.1,
+                tread: false,
+            },
+            layers: Vec::new(),
+            ground: no_ground,
+            tread: Vec4::ZERO,
+            surface_tint: Vec4::ONE,
+            soft_border: 1.0,
+        });
+        let refuses = |json: &str| {
+            serde_json::from_str::<FieldLayout>(json)
+                .expect("valid json")
+                .validate(&profiles)
+                .expect_err("should have been refused")
+        };
+        // The layout with nothing wrong with it must pass, or every assertion
+        // below could be objecting to something else entirely.
+        let sound = r#"{"default":"grassland","ways":[
+            {"name":"a","width":6,"wear":0.5,"points":[[0,0],[9,0]]}]}"#;
+        serde_json::from_str::<FieldLayout>(sound).unwrap().validate(&profiles).unwrap();
+
+        let with = |ways: &str| format!(r#"{{"default":"grassland","ways":[{ways}]}}"#);
+        assert!(
+            refuses(&with(r#"{"name":"a","width":6,"wear":0.5,"points":[[0,0]]}"#))
+                .contains("two points")
+        );
+        assert!(
+            refuses(&with(r#"{"name":"a","width":0,"wear":0.5,"points":[[0,0],[9,0]]}"#))
+                .contains("0 m wide")
+        );
+        // JSON cannot write NaN, but it can write a number too big to hold,
+        // which arrives as an infinity and would sink the terrain to nothing.
+        assert!(
+            refuses(&with(r#"{"name":"a","width":6,"wear":0.5,"points":[[1e40,0],[9,0]]}"#))
+                .contains("not a number")
+        );
+        assert!(
+            refuses(&with(r#"{"name":"a","width":6,"wear":4,"points":[[0,0],[9,0]]}"#))
+                .contains("not nought to one")
+        );
+        assert!(
+            refuses(&with(
+                r#"{"name":"a","width":6,"wear":0.5,"points":[[0,0],[9,0]]},
+                   {"name":"a","width":6,"wear":0.5,"points":[[0,9],[9,9]]}"#
+            ))
+            .contains("duplicate way name")
+        );
+    }
+
     #[test]
     fn a_road_that_misses_a_field_clips_to_nothing() {
         let road = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0)];
@@ -499,6 +575,32 @@ impl Way {
                 self.lines[1].half_width,
             ),
         )
+    }
+}
+
+/// What every way must be, whether a field names it or the layout lays it over
+/// them all: real points, a width to wear and a wear between nothing and bare.
+/// A width or a wear left out is not checked: the field supplies its own, from
+/// bounds this has already made sure of.
+fn check_way(
+    name: &str,
+    points: &[[f32; 2]],
+    width: Option<f32>,
+    wear: Option<f32>,
+) -> Result<(), String> {
+    if points.iter().flatten().any(|at| !at.is_finite()) {
+        return Err(format!("way of {name} has a point that is not a number"));
+    }
+    if let Some(width) = width
+        && (!width.is_finite() || width <= 0.0)
+    {
+        return Err(format!("way of {name} is {width} m wide"));
+    }
+    match wear {
+        Some(wear) if !wear.is_finite() || !(0.0..=1.0).contains(&wear) => {
+            Err(format!("wear of {name} is {wear}, not nought to one"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -760,6 +862,21 @@ impl FieldLayout {
             {
                 return Err(format!("overlapping field: {}", field.name));
             }
+            // A way's points reach the terrain grid through `Hollows`, and one
+            // that is not a number sinks the ground to nothing — taking the
+            // collider with it, far from anything that would name this layout.
+            check_way(&field.name, &field.way, field.way_width, field.wear)?;
+        }
+        for (i, way) in self.ways.iter().enumerate() {
+            if way.name.trim().is_empty()
+                || self.ways[..i].iter().any(|other| other.name == way.name)
+            {
+                return Err(format!("empty or duplicate way name: {}", way.name));
+            }
+            if way.points.len() < 2 {
+                return Err(format!("way {} needs two points to lead anywhere", way.name));
+            }
+            check_way(&way.name, &way.points, Some(way.width), Some(way.wear))?;
         }
         Ok(())
     }
