@@ -9,7 +9,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, lattice}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -31,6 +31,8 @@ struct BareGround {
     way: mat4x4<f32>,
     way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
+    bar: vec4<f32>,
+    bar_more: vec4<f32>,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var<uniform> ground: BareGround;
@@ -226,10 +228,15 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     let pressed_in =
         worn(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
     let crushed = 1.0 - pressed_in * 0.55;
+    // A furrow does not survive being driven over. The ridges go down first and
+    // the whole comb after them, so a lane across a ploughed field cuts the
+    // furrows instead of lying on top of them — which is what made it read as
+    // paint: the plough ran through the road without a break in it.
+    let flattened = 1.0 - pressed_in * 0.95;
     return swell * 0.08
         - pressed_in * 0.09
         // How deep a comb cuts goes with how far apart its teeth are.
-        + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62) * combed_seen
+        + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62) * combed_seen * flattened
         + slabs * ground.grain.y * mix(0.04, 0.12, coarseness) * broken * crushed
         + lumps * ground.grain.y * mix(0.12, 0.04, coarseness) * broken * crushed
         + crumb * ground.grain.y * 0.05 * crushed
@@ -265,6 +272,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // One walk of the way answers all of it: how worn, how the wheels sweep it,
     // where water will stand and the print of the tyre bars.
     let read = way_read(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
+    // The print of the tyre bars, and the one thing on this ground that is
+    // relief before it is colour: the chevron is a shape the sun finds, so it
+    // goes into the normal and takes only a little shade of its own for the
+    // ground lying in the bottom of it.
+    let print = way_print(place, ground.extent, ground.tread,
+        ground.way, ground.way_more, ground.way_shape, ground.bar, ground.bar_more, pixel_m);
     let laid = read.x;
     let bared = max(laid, rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
@@ -285,7 +298,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         * mix(1.0, pool.z, 1.0 - smoothstep(0.05, 0.22, pixel_m));
     colour = earth * mix(0.78, 1.24, country)
         * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
-        * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
+        // The stripe the comb shades with goes out with the comb itself, or the
+        // furrows keep showing as colour across a lane that has no furrows left.
+        * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z * (1.0 - laid * 0.95));
 
     var grass_share = 0.0;
     var shade_of_clumps = 1.0;
@@ -320,7 +335,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         grass_share = met.a;
     }
 
-    colour *= shade_of_clumps * mix(1.0, 0.74, verge_damp(bared));
+    colour *= shade_of_clumps * mix(1.0, 0.74, verge_damp(bared)) * mix(1.0, 0.92, print.x);
 
     let pressed = sample_wheels(tracks, wheels, place);
     let rolled = clamp(pressed.x, 0.0, 1.0);
@@ -334,7 +349,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let east = made_relief(place + vec2<f32>(step, 0.0), close, pixel_m) * pressed_down;
     let north = made_relief(place + vec2<f32>(0.0, step), close, pixel_m) * pressed_down;
     let bumps = normalize(vec3<f32>((here - east) * 0.5, step, (here - north) * 0.5));
-    let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0));
+    let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0)
+        + vec3<f32>(print.y, 0.0, print.z));
 
     let pit = clamp(0.82 + here * 1.1, 0.7, 1.22);
 
