@@ -55,6 +55,8 @@ pub struct VegetationChunk {
     pub tread: Vec4,
     /// How far this field's plants carry past its own edge, in metres.
     pub soft_border: f32,
+    /// The line the wheels follow through this field.
+    pub way: crate::layout::Way,
     /// Albedo of an asset clump layer; procedural layers bind the fallback.
     pub albedo: Option<Handle<Image>>,
     /// Index ranges of a clump mesh's variants, one draw each; empty draws it whole.
@@ -128,6 +130,11 @@ pub struct VegetationParams {
     pub tread: Vec4,
     /// How far this field's plants carry past its own edge, in metres.
     pub soft_border: f32,
+    /// The line the wheels follow, as eight points two to a column, with
+    /// (how many, half the worn width) beside it. Fewer than two points and the
+    /// wear runs down the field's own long axis.
+    pub way: Mat4,
+    pub way_shape: Vec4,
 }
 
 /// Carries the environment's wind to every field's vegetation uniforms,
@@ -264,7 +271,10 @@ struct VegetationUniforms {
 struct VegetationOffset(u32);
 
 fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
+    let (way, way_shape) = draw.way.packed();
     VegetationParams {
+        way,
+        way_shape,
         corner: draw.corner,
         chunk_size: draw.size,
         blades_per_chunk: draw.capacity,

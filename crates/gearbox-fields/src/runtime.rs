@@ -120,6 +120,9 @@ pub struct RuntimeField {
     /// leaving it to the profile. What stands in the ground reads this, so the
     /// grass stops where the ground material says the soil starts.
     pub tread: Vec4,
+    /// The line the wheels follow through it, so what stands in the ground
+    /// thins along the same curve the ground material wears along.
+    pub way: crate::layout::Way,
 }
 
 #[derive(Resource)]
@@ -282,8 +285,9 @@ pub fn ensure_fields(world: &mut World) {
             },
         );
         info!(
-            "field {}: {} [{:?}..{:?}], independent {}x{} wheel map",
-            spec.name, profile.name, bounds.min, bounds.max, width, height
+            "field {}: {} [{:?}..{:?}], independent {}x{} wheel map, way of {} points",
+            spec.name, profile.name, bounds.min, bounds.max, width, height,
+            placed.way.points()
         );
         let tread = match spec.wear {
             Some(wear) => bare_tread(wear),
@@ -296,6 +300,7 @@ pub fn ensure_fields(world: &mut World) {
             profile,
             ground,
             tread,
+            way: placed.way,
         });
     }
     let background_track = world.resource_mut::<Assets<Image>>().add(track_image(2, 2, false));
@@ -588,6 +593,7 @@ pub fn stream_vegetation(
                     follow_grass: layer.follow_grass,
                     tread: field.tread,
                     soft_border: field.profile.soft_border,
+                    way: field.way,
                     albedo: layer.albedo.map(|path| assets.load(path)),
                     variants,
                 },
@@ -617,7 +623,12 @@ fn placed_of(
 ) -> crate::profile::Placed {
     let mine = self_spec.bounds();
     let own = profiles.get(&self_spec.profile);
-    let mut near = crate::profile::Placed { bounds: mine, wear: self_spec.wear, ..default() };
+    let mut near = crate::profile::Placed {
+        bounds: mine,
+        wear: self_spec.wear,
+        way: self_spec.way(),
+        ..default()
+    };
     for other in specs {
         if other.name == self_spec.name {
             continue;

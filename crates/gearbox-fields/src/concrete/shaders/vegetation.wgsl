@@ -30,6 +30,8 @@ struct VegetationParams {
     follow_grass: f32,
     tread: vec4<f32>,
     soft_border: f32,
+    way: mat4x4<f32>,
+    way_shape: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;

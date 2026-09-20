@@ -102,6 +102,8 @@ pub struct Placed {
     /// How hard this particular field is worn, nought to one, when the layout
     /// says so. `None` leaves it to the profile.
     pub wear: Option<f32>,
+    /// The line the wheels follow through it, when the layout bends one.
+    pub way: super::layout::Way,
 }
 
 pub struct FieldProfile {

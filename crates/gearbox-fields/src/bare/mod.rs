@@ -218,8 +218,10 @@ struct BareExtension {
     ground: BareGround,
 }
 
-/// What kind of bare ground this is.
-#[derive(ShaderType, Reflect, Debug, Clone, Copy)]
+/// What kind of bare ground this is. Everything a profile cannot know — where
+/// its field runs, what it abuts, the way through it — is left at its default
+/// here and filled in by `ground` from the field's `Placed`.
+#[derive(ShaderType, Reflect, Debug, Clone, Copy, Default)]
 pub struct BareGround {
     /// Multiplies the soil's own colour.
     pub tint: Vec4,
@@ -247,6 +249,11 @@ pub struct BareGround {
     pub south: Vec4,
     pub north: Vec4,
     pub reach: Vec4,
+    /// The line the wheels follow, as eight points two to a column, with
+    /// (how many, half the worn width) beside it. Fewer than two points and the
+    /// wear runs down the field's own long axis, which is every straight way.
+    pub way: Mat4,
+    pub way_shape: Vec4,
 }
 
 impl MaterialExtension for BareExtension {
@@ -336,14 +343,7 @@ fn ploughed_ground(
             tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
             grass: Vec4::new(0.033, 0.068, 0.023, 0.55),
-            extent: Vec4::ZERO,
-            tread: Vec4::ZERO,
-            stony: Vec4::ZERO,
-            west: Vec4::ZERO,
-            east: Vec4::ZERO,
-            south: Vec4::ZERO,
-            north: Vec4::ZERO,
-            reach: Vec4::ZERO,
+            ..default()
         },
         0.93,
     )
@@ -367,14 +367,7 @@ fn dirt_ground(
             tint: Vec4::new(0.115, 0.070, 0.038, 1.0),
             grain: Vec4::new(0.3, 0.40, 0.0, 1.6),
             grass: Vec4::new(0.033, 0.068, 0.023, 0.9),
-            extent: Vec4::ZERO,
-            tread: Vec4::ZERO,
-            stony: Vec4::ZERO,
-            west: Vec4::ZERO,
-            east: Vec4::ZERO,
-            south: Vec4::ZERO,
-            north: Vec4::ZERO,
-            reach: Vec4::ZERO,
+            ..default()
         },
         0.88,
     )
@@ -420,15 +413,10 @@ fn track(
             tint: Vec4::new(0.108, 0.068, 0.038, 1.0),
             grain: Vec4::new(0.28, 0.42, 0.0, 1.6),
             grass: Vec4::new(0.033, 0.068, 0.023, 1.0),
-            extent: Vec4::ZERO,
             tread,
             // Hardcore: what a farm track wears down to, grey and gritty.
             stony: Vec4::new(0.126, 0.106, 0.082, 1.0),
-            west: Vec4::ZERO,
-            east: Vec4::ZERO,
-            south: Vec4::ZERO,
-            north: Vec4::ZERO,
-            reach: Vec4::ZERO,
+            ..default()
         },
         0.9,
     )
@@ -452,14 +440,7 @@ fn sand_ground(
             tint: Vec4::new(0.245, 0.182, 0.098, 1.0),
             grain: Vec4::new(0.16, 0.30, 1.0, 0.22),
             grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
-            extent: Vec4::ZERO,
-            tread: Vec4::ZERO,
-            stony: Vec4::ZERO,
-            west: Vec4::ZERO,
-            east: Vec4::ZERO,
-            south: Vec4::ZERO,
-            north: Vec4::ZERO,
-            reach: Vec4::ZERO,
+            ..default()
         },
         0.82,
     )
@@ -485,6 +466,7 @@ fn ground(
     bare.south = placed.tint[2];
     bare.north = placed.tint[3];
     bare.reach = Vec4::from_array(placed.reach);
+    (bare.way, bare.way_shape) = placed.way.packed();
     let extension = BareExtension {
         trample,
         trample_params,

@@ -40,6 +40,39 @@ mod tests {
         assert!(regions.iter().any(|field| field.profile == "grassland"));
         assert!(regions.iter().any(|field| field.profile == "harvested_wheat"));
     }
+
+    // The shader reads the points by position out of the matrix columns, so the
+    // packing is a contract between two files and not an implementation detail.
+    #[test]
+    fn a_way_packs_two_points_to_a_column() {
+        let points: Vec<Vec2> = (0..8).map(|i| Vec2::new(i as f32, 10.0 + i as f32)).collect();
+        let (matrix, shape) = Way::bend(&points, 2.5).packed();
+        assert_eq!(shape.x, 8.0);
+        assert_eq!(shape.y, 2.5);
+        for (i, point) in points.iter().enumerate() {
+            let column = matrix.col(i / 2);
+            let packed = if i % 2 == 0 { column.xy() } else { column.zw() };
+            assert_eq!(packed, *point);
+        }
+    }
+
+    #[test]
+    fn a_way_needs_two_points_and_keeps_at_most_eight() {
+        assert_eq!(Way::bend(&[Vec2::ZERO], 1.0).points(), 0);
+        assert_eq!(Way::straight().points(), 0);
+        let many: Vec<Vec2> = (0..12).map(|i| Vec2::splat(i as f32)).collect();
+        assert_eq!(Way::bend(&many, 1.0).points(), Way::MOST as u32);
+    }
+
+    #[test]
+    fn a_layout_way_defaults_to_the_field_width() {
+        let spec: FieldSpec = serde_json::from_str(
+            r#"{"name":"lane","profile":"track","min":[0,0],"max":[10,100],
+                "way":[[5,0],[5,100]]}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.way().packed().1.y, 5.0);
+    }
 }
 
 use super::profile::FieldProfiles;
@@ -72,6 +105,54 @@ impl FieldBounds {
     }
 }
 
+/// The line the wheels follow through a field, in world XZ. A field is always a
+/// rectangle, so without this a way can only run straight down one; with it the
+/// field is merely the corridor a track winds along inside.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Way {
+    points: [Vec2; Way::MOST],
+    count: u32,
+    half_width: f32,
+}
+
+impl Way {
+    pub const MOST: usize = 8;
+
+    /// Nothing, for a field whose wear runs down its own long axis.
+    pub fn straight() -> Self {
+        Self::default()
+    }
+
+    /// How many points bend it; fewer than two is no way at all.
+    pub fn points(&self) -> u32 {
+        self.count
+    }
+
+    /// Fewer than two points is no way at all; beyond `MOST` the tail is cut.
+    pub fn bend(points: &[Vec2], half_width: f32) -> Self {
+        let mut way = Self { half_width, ..Self::default() };
+        if points.len() < 2 {
+            return way;
+        }
+        let taken = points.len().min(Self::MOST);
+        way.points[..taken].copy_from_slice(&points[..taken]);
+        way.count = taken as u32;
+        way
+    }
+
+    /// For a shader: the points two to a column, and (how many, half the width).
+    pub fn packed(&self) -> (Mat4, Vec4) {
+        let pair = |i: usize| {
+            let (a, b) = (self.points[i * 2], self.points[i * 2 + 1]);
+            Vec4::new(a.x, a.y, b.x, b.y)
+        };
+        (
+            Mat4::from_cols(pair(0), pair(1), pair(2), pair(3)),
+            Vec4::new(self.count as f32, self.half_width, 0.0, 0.0),
+        )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldSpec {
@@ -84,6 +165,14 @@ pub struct FieldSpec {
     /// out, the profile decides.
     #[serde(default)]
     pub wear: Option<f32>,
+    /// World XZ points of the line the wheels follow, at most eight. Left out,
+    /// the wear runs straight down the field's long axis.
+    #[serde(default)]
+    pub way: Vec<[f32; 2]>,
+    /// How wide the worn corridor is, in metres. Left out, it is as wide as the
+    /// field is across.
+    #[serde(default)]
+    pub way_width: Option<f32>,
 }
 
 impl FieldSpec {
@@ -92,6 +181,14 @@ impl FieldSpec {
             min: Vec2::from_array(self.min),
             max: Vec2::from_array(self.max),
         }
+    }
+
+    pub fn way(&self) -> Way {
+        let bounds = self.bounds();
+        let span = bounds.max - bounds.min;
+        let across = if span.x < span.y { span.x } else { span.y };
+        let points: Vec<Vec2> = self.way.iter().copied().map(Vec2::from_array).collect();
+        Way::bend(&points, self.way_width.unwrap_or(across) * 0.5)
     }
 }
 
@@ -217,6 +314,8 @@ impl FieldLayout {
             min: [x0, z0],
             max: [x1, z1],
             wear: None,
+            way: Vec::new(),
+            way_width: None,
         }
     }
 }

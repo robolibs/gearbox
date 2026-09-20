@@ -49,27 +49,66 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, rand(seed, 33u)));
 }
 
+// One point of a way: eight of them live two to a column of the matrix, which
+// spares both uniforms an array and the shared file a struct to import.
+fn way_point(way: mat4x4<f32>, i: i32) -> vec2<f32> {
+    let pair = way[i / 2];
+    return select(pair.xy, pair.zw, (i & 1) == 1);
+}
+
+// Where a point stands against a way: distance along it to the nearest point of
+// it, signed distance across, and plain distance to the line itself. A field is
+// always a rectangle, so a winding track is a line through one, not its shape.
+// The last two differ at a bend — across folds where two legs meet, distance
+// rounds — so the ruts follow the one and the edge of the way the other.
+fn way_offset(place: vec2<f32>, way: mat4x4<f32>, count: i32) -> vec3<f32> {
+    var found = vec3<f32>(0.0, 0.0, 1e30);
+    var run = 0.0;
+    for (var i = 0; i < count - 1; i = i + 1) {
+        let a = way_point(way, i);
+        let leg = way_point(way, i + 1) - a;
+        let length_of = max(length(leg), 1e-4);
+        let heading = leg / length_of;
+        let at = clamp(dot(place - a, heading), 0.0, length_of);
+        let gap = distance(place, a + heading * at);
+        if (gap < found.z) {
+            found = vec3<f32>(run + at, dot(place - a, vec2<f32>(-heading.y, heading.x)), gap);
+        }
+        run = run + length_of;
+    }
+    return found;
+}
+
 // How far the wheels have worn a ground back to bare earth. `tread` is half the
 // gauge between the ruts, half a rut's width, how bare the rut is and how bare
-// the rest is; all nought for a ground that wears evenly.
-fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>) -> f32 {
+// the rest is; all nought for a ground that wears evenly. `shape` is how many
+// points the way has and half its width; fewer than two points and the wear
+// runs down the field's own long axis, which is every straight way.
+fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
+        way: mat4x4<f32>, shape: vec4<f32>) -> f32 {
     if (tread.z <= 0.0) {
         return 0.0;
     }
-    let span = extent.zw - extent.xy;
-    let middle = (extent.xy + extent.zw) * 0.5;
-    // A road runs down the long side of its field, so across it is the short.
-    let across = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), span.x < span.y);
+    var against = vec3<f32>(0.0);
+    var half = 0.0;
+    if (i32(shape.x) >= 2) {
+        against = way_offset(place, way, i32(shape.x));
+        half = max(shape.y, 0.1);
+    } else {
+        let span = extent.zw - extent.xy;
+        let middle = (extent.xy + extent.zw) * 0.5;
+        // A road runs down the long side of its field, so across it is the short.
+        let across = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), span.x < span.y);
+        let off = dot(place - middle, across);
+        against = vec3<f32>(dot(place - middle, vec2<f32>(-across.y, across.x)), off, abs(off));
+        half = abs(dot(span, across)) * 0.5;
+    }
     // No driver holds a line to the centimetre, so the ruts wander along it.
-    let along = dot(place - middle, vec2<f32>(-across.y, across.x));
-    let sway = (lattice(vec2<f32>(along, 0.0), 23.0) - 0.5) * 1.1;
-    let off = dot(place - middle, across) + sway;
-    let rut = abs(abs(off) - tread.x);
+    let sway = (lattice(vec2<f32>(against.x, 0.0), 23.0) - 0.5) * 1.1;
+    let rut = abs(abs(against.y + sway) - tread.x);
     let wheel = 1.0 - smoothstep(tread.y * 0.55, tread.y * 1.6, rut);
     // Ragged by moving where the edge falls, not by scaling the wear: as a
     // multiplier it took a road bare across its width down to two thirds.
-    let half = abs(dot(span, across)) * 0.5;
-    let inside = half - abs(dot(place - middle, across));
-    let verge = smoothstep(0.0, 1.15, inside + (lattice(place, 4.0) - 0.5) * 0.9);
+    let verge = smoothstep(0.0, 1.15, half - against.z + (lattice(place, 4.0) - 0.5) * 0.9);
     return clamp(mix(tread.w, tread.z, wheel) * verge, 0.0, 1.0);
 }

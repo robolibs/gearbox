@@ -28,6 +28,8 @@ struct BareGround {
     south: vec4<f32>,
     north: vec4<f32>,
     reach: vec4<f32>,
+    way: mat4x4<f32>,
+    way_shape: vec4<f32>,
 };
 
 // The taller of two surfaces wins the pixel outright, and they mix only within
@@ -244,7 +246,7 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     // Driving presses the ground into hollows and crushes its clods flat. This
     // is the relief the normal is taken from, not the mesh, so a rut shades but
     // never breaks a silhouette.
-    let pressed_in = worn(place, ground.extent, ground.tread);
+    let pressed_in = worn(place, ground.extent, ground.tread, ground.way, ground.way_shape);
     let crushed = 1.0 - pressed_in * 0.55;
     return swell * 0.08
         - pressed_in * 0.09
@@ -276,7 +278,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Where the wheels have worn the ground, no grass holds it — whether that
     // is a road laid out as worn, or a way beaten across a field by driving it.
     let rolled_now = clamp(sample_wheels(tracks, wheels, place).x, 0.0, 1.0);
-    let bared = max(worn(place, ground.extent, ground.tread), rolled_now * 0.8);
+    let bared = max(
+        worn(place, ground.extent, ground.tread, ground.way, ground.way_shape),
+        rolled_now * 0.8,
+    );
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
     // Ground changes over tens of metres as well as over inches — drainage,
     // the lie of the land, where the subsoil comes nearer the surface. Without

@@ -29,6 +29,8 @@ struct VegetationParams {
     follow_grass: f32,
     tread: vec4<f32>,
     soft_border: f32,
+    way: mat4x4<f32>,
+    way_shape: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -147,7 +149,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // A way beaten by driving wears the ground as surely as one laid out that
     // way, and grass holds only what is left. The same reading the ground
     // material makes, so the two agree.
-    let bared = max(worn(base, field.bounds, field.tread), flat * 0.8);
+    let bared = max(
+        worn(base, field.bounds, field.tread, field.way, field.way_shape),
+        flat * 0.8,
+    );
     let patchy_cover = taken(base);
     // Matches the ground material: a driven surface is green wherever it is
     // not worn, rather than wherever the patches fall.
