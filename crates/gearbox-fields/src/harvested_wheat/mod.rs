@@ -43,6 +43,8 @@ struct AntiRepeatTerrainExtension {
     geometry: SurfaceGeometryParams,
     #[uniform(113)]
     worn: WornStubble,
+    #[uniform(114)]
+    trail: crate::bare::DrivenTrail,
 }
 
 /// A way worn across the stubble. The same six numbers the meadow carries: what
@@ -172,6 +174,7 @@ fn apply_anti_repeat_material_to_usd_terrain(
                             ..default()
                         },
                         extension: AntiRepeatTerrainExtension {
+                            trail: crate::bare::DrivenTrail::default(),
                             terrain_albedo: asset_server.load("embedded://gearbox_fields/harvested_wheat/textures/soil_albedo.jpg"),
                             terrain_height: asset_server.load("embedded://gearbox_fields/harvested_wheat/textures/soil_height.jpg"),
                             terrain_detail_albedo: asset_server.load("embedded://gearbox_fields/harvested_wheat/textures/detail_albedo.jpg"),
@@ -205,6 +208,20 @@ pub(super) struct HarvestedWheatPlugin {
     pub density: f32,
 }
 
+/// Hands this cover the lines the wheels have driven, as `bare` does.
+fn carry_trail(
+    trails: Res<crate::contacts::WheelTrails>,
+    mut materials: ResMut<Assets<AntiRepeatTerrainMaterial>>,
+) {
+    if !trails.is_changed() {
+        return;
+    }
+    let laid = crate::bare::DrivenTrail::of(&trails);
+    for (_, material) in materials.iter_mut() {
+        material.extension.trail = laid;
+    }
+}
+
 impl Plugin for HarvestedWheatPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "shaders/patches.wgsl");
@@ -214,6 +231,7 @@ impl Plugin for HarvestedWheatPlugin {
         bevy::asset::embedded_asset!(app, "textures/soil_height.jpg");
         bevy::asset::embedded_asset!(app, "textures/detail_albedo.jpg");
         bevy::asset::embedded_asset!(app, "textures/detail_height.jpg");
+        app.add_systems(Update, carry_trail);
         app.add_plugins(MaterialPlugin::<AntiRepeatTerrainMaterial>::default())
             .add_systems(Update, apply_anti_repeat_material_to_usd_terrain);
         let density = self.density;
@@ -320,6 +338,7 @@ fn create_ground(
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = AntiRepeatTerrainExtension {
+        trail: crate::bare::DrivenTrail::default(),
         terrain_albedo: assets
             .load_builder()
             .with_settings(|settings: &mut bevy::image::ImageLoaderSettings| {

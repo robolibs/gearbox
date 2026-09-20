@@ -33,6 +33,8 @@ struct MeadowExtension {
     geometry: SurfaceGeometryParams,
     #[uniform(108)]
     edges: MeadowEdges,
+    #[uniform(109)]
+    trail: crate::bare::DrivenTrail,
 }
 
 /// Where this meadow sits and what lies across each of its sides, so it meets
@@ -71,6 +73,20 @@ pub(super) struct GrasslandPlugin {
     pub density: f32,
 }
 
+/// Hands this cover the lines the wheels have driven, as `bare` does.
+fn carry_trail(
+    trails: Res<crate::contacts::WheelTrails>,
+    mut materials: ResMut<Assets<MeadowMaterial>>,
+) {
+    if !trails.is_changed() {
+        return;
+    }
+    let laid = crate::bare::DrivenTrail::of(&trails);
+    for (_, material) in materials.iter_mut() {
+        material.extension.trail = laid;
+    }
+}
+
 impl Plugin for GrasslandPlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "shaders/palette.wgsl");
@@ -79,6 +95,7 @@ impl Plugin for GrasslandPlugin {
         bevy::asset::embedded_asset!(app, "textures/grass_albedo.jpg");
         bevy::asset::embedded_asset!(app, "textures/soil_albedo.jpg");
         app.add_plugins(MaterialPlugin::<MeadowMaterial>::default());
+        app.add_systems(Update, carry_trail);
         let shader = "embedded://gearbox_fields/grassland/shaders/vegetation.wgsl";
         let density = self.density;
         let share = density / 6000.0;
@@ -222,6 +239,7 @@ fn create_ground(
                 ..default()
             },
             extension: MeadowExtension {
+                trail: crate::bare::DrivenTrail::default(),
                 edges: MeadowEdges {
                     extent: Vec4::new(
                         placed.bounds.min.x, placed.bounds.min.y,
