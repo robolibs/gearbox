@@ -115,8 +115,10 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>)
     // path they close towards its middle and meet as one worn strip, which is
     // what a path too narrow for a tractor is worn into anyway.
     let gauge = min(tread.x, max(half - tread.y, 0.0));
-    // No driver holds a line to the centimetre, so the ruts wander along it.
-    let sway = (lattice(against.xy, 23.0) - 0.5) * 1.1;
+    // No driver holds a line to the centimetre, so the ruts wander along it —
+    // but never so far that they leave the way and the verge cuts them off,
+    // which on a narrow path broke it into a dotted line.
+    let sway = (lattice(against.xy, 23.0) - 0.5) * min(1.1, half * 0.7);
     let rut = abs(abs(against.z + sway) - gauge);
     let wheel = 1.0 - smoothstep(tread.y * 0.55, tread.y * 1.6, rut);
     // Ragged by moving where the edge falls, not by scaling the wear: as a
