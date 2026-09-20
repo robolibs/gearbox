@@ -34,7 +34,7 @@ struct MeadowEdges {
 
 // The same wear the bare grounds read, so a track crossing a meadow is worn by
 // one rule and not by a second one that has to be kept in step with it.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, lattice}
 
 fn meadow_worn(place: vec2<f32>) -> f32 {
     return worn(place, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
@@ -151,7 +151,10 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     // rather than stripping it — the blades are not culled for this, they lie
     // flattened over what shows through, which is what a fresh tyre mark is.
     let scar = wheel_scar(trample, trample_params, world_xz);
-    let driven = max(meadow_worn(world_xz), scar * 0.5);
+    // One walk of the way for all of it, rather than one for the wear, one for
+    // the same wear again and a third for the rut.
+    let read = way_read(world_xz, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
+    let driven = max(read.x, scar * 0.5);
     let bared = clamp(driven + breakup * 1.6, 0.0, 1.0);
     let exposed = max(max(soil, bared), smoothstep(0.15, 0.8, steep + breakup));
     let footprint = surface_footprint(world_xz);
@@ -171,8 +174,8 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     ground *= species_tint(grass_species(world_xz)) * dry_country(world_xz);
     // The earth under the turf, lit by the dirt map so the way is not a flat
     // band of colour laid over the field.
-    let pool = rut_of(world_xz, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
-    let earth = mix(edges.soil.rgb, edges.stony.rgb, settled(meadow_worn(world_xz))) * (0.74 + dirt_detail * 0.86)
+    let pool = vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, lattice(world_xz, 7.5) * 0.62 + lattice(world_xz + 29.0, 1.9) * 0.38), read.w);
+    let earth = mix(edges.soil.rgb, edges.stony.rgb, settled(read.x)) * (0.74 + dirt_detail * 0.86)
         * earth_mottle(world_xz) * mix(1.0, 0.58, pool.y)
         * mix(1.0, pool.z, 1.0 - smoothstep(0.02, 0.10, footprint));
     // Not a fade between the two: each brings its own relief and the taller

@@ -37,7 +37,7 @@ struct WornStubble {
 
 // The same wear the bare grounds and the meadow read, so a road crossing from
 // one field to the next does not change shape or colour on the boundary.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, lattice}
 
 fn stubble_worn(place: vec2<f32>) -> f32 {
     return worn(place, worn_ground.extent, worn_ground.tread,
@@ -332,13 +332,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x;
     color = vec4<f32>(color.rgb * (1.0 - wheels.darkening * pressed), 1.0);
     // A way worn across the stubble: the rows go and the earth under them shows.
-    let bared = max(
-        stubble_worn(in.world_position.xz),
-        wheel_scar(tracks, wheels, in.world_position.xz) * 0.6,
-    );
+    // One walk of the way for the wear and the rut both.
+    let read = way_read(in.world_position.xz, worn_ground.extent, worn_ground.tread,
+        worn_ground.way, worn_ground.way_more, worn_ground.way_shape);
+    let bared = max(read.x, wheel_scar(tracks, wheels, in.world_position.xz) * 0.6);
     let grit = fbm(in.world_position.xz * 1.6);
-    let pool = rut_of(in.world_position.xz, worn_ground.extent, worn_ground.tread, worn_ground.way, worn_ground.way_more, worn_ground.way_shape);
-    let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(stubble_worn(in.world_position.xz))) * (0.8 + grit * 0.5)
+    let pool = vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, lattice(in.world_position.xz, 7.5) * 0.62 + lattice(in.world_position.xz + 29.0, 1.9) * 0.38), read.w);
+    let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(read.x)) * (0.8 + grit * 0.5)
         * earth_mottle(in.world_position.xz) * mix(1.0, 0.58, pool.y)
         * mix(1.0, pool.z, 1.0 - smoothstep(0.02, 0.10, surface_footprint(in.world_position.xz)));
     // The taller of the two takes the pixel rather than the two being faded

@@ -9,7 +9,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, lattice}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -262,7 +262,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Where the wheels have worn the ground, no grass holds it — whether that
     // is a road laid out as worn, or a way beaten across a field by driving it.
     let rolled_now = wheel_scar(tracks, wheels, place);
-    let laid = worn(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
+    // One walk of the way answers all of it: how worn, how the wheels sweep it,
+    // where water will stand and the print of the tyre bars.
+    let read = way_read(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
+    let laid = read.x;
     let bared = max(laid, rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
     // Ground changes over tens of metres as well as over inches — drainage,
@@ -276,7 +279,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // field presses its soil and takes what grows in it, and reaching for the
     // hardcore by the press alone laid a pale grey pair of tracks across a
     // ploughed field — road metal where nothing had made a road.
-    let pool = rut_of(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
+    let pool = vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, lattice(place, 7.5) * 0.62 + lattice(place + 29.0, 1.9) * 0.38), read.w);
     let earth = mix(ground.tint.rgb, ground.stony.rgb, settled(laid) * ground.stony.w)
         * earth_mottle(place) * mix(1.0, 0.58, pool.y)
         * mix(1.0, pool.z, 1.0 - smoothstep(0.05, 0.22, pixel_m));
