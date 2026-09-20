@@ -234,6 +234,80 @@ and `/tmp/molla-quadratic-high.png`.
 - Multi-machine scaling, nonplanar terrain/camber, every prepass variant and
   calibrated tyre behavior remain separate acceptance work.
 
+## Headless imported-machine benchmark
+
+The ignored `controller::benchmark` tests load the real Kubota USDZ through
+`usd_bevy::live::project_stage_under` and Gearbox's existing physics-marker,
+body, collider, joint, inertia-guard, wheel-registration and drive-controller
+systems. They do not build a synthetic tractor or start a viewer/network agent.
+Initialization retains the authored machine id; the CLI filename-based rename
+is outside this test. Assets and shared USD/renderer dependencies are read-only.
+
+The fixture asserts 26 bodies, 31 joints, 18 colliders including flat ground,
+four pressure tyres and approximately 4916 kg. It checks the imported rubber
+reference radii (front 0.691259 m, rear 0.888205 m), sustained normal support,
+applied pressure, finite enabled bodies and quarantine absence. Ground is the
+same 10-km-half-extent flat slab at y=0 with friction 1.0. Initial placement
+leaves 30 mm collider clearance before settling. This does not test terrain
+streaming, UI, networking, slope parking, hitch lifecycle or visual deformation.
+
+The pressure benchmark advances at fixed 120 Hz, settles for 600 steps before
+each measurement, then times 600 `PhysicsWorld::step` calls at each of 0.5,
+1.8 and 4 bar, parked and driving at 2 m/s with a 0.12 rad/s turn command.
+Controller execution and assertions are outside the timed section, matching
+the viewer's physics-step timing scope. It checks that increasing pressure
+reduces loaded deflection; timing remains a report, not a relaxed acceptance
+assertion. Reported p95/max include scheduling interference.
+
+The current dev/test-profile run (optimized dependency crates) measured:
+
+| Gauge bar | Parked median ms | Driving median ms |
+|---|---:|---:|
+| 0.5 | 1.052524 | 1.106688 |
+| 1.8 | 1.053823 | 1.101349 |
+| 4.0 | 1.048790 | 1.063924 |
+
+All six phases passed support/pressure/speed/radius checks. The under-1-ms gate
+is still unmet. These are not release-build timings or Rapier parity results.
+
+The replay test constructs two independent imported scenes, runs the same
+1,800-step pressure/drive/stop sequence and compares body poses/velocities
+and tyre pressure/load/grip/slip/deflection/footprint telemetry bit-for-bit every
+60 steps. It initially failed at the first checkpoint by
+5.36e-14; sorting only the fixture's placement order did not fix it (2.68e-13).
+Sorting production machine-body preparation makes mass recomputation and tyre
+mass accumulation deterministic, and the repeated imported replay now passes.
+This is one-machine CPU replay evidence, not all scene/lifecycle determinism.
+
+The profile-only trace test warms and drives the imported fixture, then records
+120 steps without renderer, network or user-input traffic. Inclusive per-substep
+means: collision 19.91 us, wheels 44.70 us, loops 51.60 us, Featherstone 44.68 us
+(including drive inertia 20.83 us). Mass matrices are still rebuilt in wheels,
+loops and motor inertia, roughly 5–6 us each. A traced whole step averaged
+1.401 ms; do not compare that directly with the untraced medians above.
+
+Reproduce from this isolated checkout with the explicit asset path. These
+targeted binary-test commands avoid the unrelated obsolete integration-test
+API failure in the broad native test recipe:
+
+```sh
+export GEARBOX_BENCH_ASSET=/absolute/path/to/kubota_tractor.usdz
+GEARBOX_PHYSICS=molla nix develop --impure -c cargo test -p gearbox-sim \
+  --bin gearbox controller::benchmark::imported_kubota_pressure \
+  -- --ignored --nocapture --test-threads=1
+GEARBOX_PHYSICS=molla GEARBOX_TRACE=/tmp/imported-solver.json \
+  nix develop --impure -c cargo test -p gearbox-sim --bin gearbox \
+  --features gearbox-sim/profile controller::benchmark::imported_kubota_solver_trace \
+  -- --ignored --nocapture --test-threads=1
+```
+
+Asset SHA-256 for the recorded runs:
+`8aa28ea5bb56c0af11ac233d884661d1d775a2a7ab2d6c860dd2af3effb77718`.
+Evidence: `/tmp/gearbox-imported-{bench,final,replay-before,replay-sorted-fixture,replay-sorted-runtime,replay-telemetry,unit-tests,rapier-tests,trace}.log`
+and `/tmp/molla-imported-solver{.json,-summary.txt}`. Both backend selections
+pass 84 binary tests with three ignored; the external-asset tests were run
+explicitly, not silently counted as ordinary suite coverage.
+
 ## Reproduction
 
 From the isolated checkout, build through its native recipes:

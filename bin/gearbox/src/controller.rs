@@ -31,6 +31,8 @@ use crate::physics::backend::{
 use usd_bevy::UsdPrimRef;
 
 mod traction;
+#[cfg(test)]
+mod benchmark;
 mod steering;
 pub(crate) mod wheel_forces;
 
@@ -2121,12 +2123,13 @@ fn prepare_machine_physics(
         let Some(root) = find_prim_entity(scene_root, &machine.prim_path, &prims, &parents) else {
             continue;
         };
-        let bodies: Vec<BodyId> = physics
+        let mut bodies: Vec<BodyId> = physics
             .entity_to_body
             .iter()
             .filter(|(e, _)| **e == root || is_descendant_of(**e, root, &parents))
             .map(|(_, h)| *h)
             .collect();
+        bodies.sort_unstable();
         if bodies.is_empty() {
             continue;
         }

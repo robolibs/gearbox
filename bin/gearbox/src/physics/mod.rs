@@ -12,6 +12,8 @@
 //! reference implementation; `molla` provides CPU Featherstone dynamics.
 
 mod attach;
+#[cfg(test)]
+pub(crate) mod benchmark;
 pub mod backend;
 mod bodies;
 mod colliders;
