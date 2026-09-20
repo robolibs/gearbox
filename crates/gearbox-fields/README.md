@@ -45,10 +45,10 @@ profile; only the sampled physical terrain receives bounded vegetation and wheel
 The mixed example deliberately crosses mesh/chunk boundaries.
 
 A field may also carry `"wear"`, nought to one, saying how far the wheels have taken it
-back to bare ground. It is the whole of a way's character: a green lane barely marked at a
+back to bare ground. It says how hard a way is used — a green lane barely marked at a
 quarter, two bare ruts with grass holding between them at a half, a road worn bare from side
-to side at one. Left out, the profile decides. One `track` profile therefore covers every
-kind of way:
+to side at one — while **Ways** below says where it runs and how wide. Left out, the profile
+decides. One `track` profile therefore covers every kind of way:
 
 ```json
 { "name": "green-lane", "profile": "track", "wear": 0.25, "min": [-60, -120], "max": [-54, 120] },
@@ -71,6 +71,7 @@ a layout's wear stayed for good while a driven mark evaporated, though both are 
 the same rule. Nothing outlasts the stamp clock itself, which spans an hour: a mark driven
 into a field lasts a working session, not for ever. A record that truly never fades wants a
 map of its own.
+
 `tracks.json` keeps a `drive-me` lane at positive coordinates, barely worn, to drive along
 and watch a wheel mark wear it bare:
 
