@@ -135,12 +135,6 @@ cut short. Both are the one budget: a way's points live in two matrices in the m
 vegetation uniforms. `layouts/junction.json` crosses a lane and a drove over grass and
 stubble, five points each.
 
-A way may also run straight **along** a boundary rather than through a field: each side wears
-its own half, the hollow sinks across both, and nothing seams down the middle —
-`layouts/boundary.json` lays one between a ploughed field and stubble. Where such a road is
-not fully worn, each half keeps a little of its own field's colour, so give it `wear: 1.0`
-if it should look the same all the way across.
-
 A road crossing open ground keeps most of its points, because the background outside the
 named fields is cut into a few large regions. So the budget is spent quickly by long roads:
 prefer as few points as the shape needs, and split a field if a warning says a road was cut.
@@ -151,8 +145,16 @@ so a triple crossing leaves a shallow grassy trough where the third road is not 
 reads as a disused track rather than as damage, but it is not what was asked for: keep to
 two ways over any one field, or cut the field so each crossing has its own.
 
-An authored way also **sinks the ground it runs over**, a little under a foot for a
-half-worn track, tapering out over a metre and a half either side. That is the terrain grid,
+A way may also run straight **along** a boundary rather than through a field: each side wears
+its own half, the hollow sinks across both, and nothing seams down the middle —
+`layouts/boundary.json` lays one between a ploughed field and stubble. Where such a road is
+not fully worn, each half keeps a little of its own field's colour, so give it `wear: 1.0`
+if it should look the same all the way across.
+
+An authored way also **sinks the ground it runs over** — a little under a foot for a
+half-worn farm track, tapering out over a metre and a half either side, and proportionately
+less for anything narrower, so a footpath wears a groove rather than a shallow valley wider
+than itself. That is the terrain grid,
 which carries the collider as well as the mesh, so the hollow is felt by the wheels and not
 only seen. A field carrying a `wear` but no way is not sunk: worn across its whole width
 means shading, not a trench dug down the middle of it.
