@@ -243,19 +243,6 @@ pub struct BareGround {
     pub reach: Vec4,
 }
 
-/// The wear of a road: two ruts a tractor's gauge apart, bare where the wheels
-/// run and progressively less so between them. `worn` dials the whole thing —
-/// nought for a green lane barely driven, one for a road bare across its width.
-fn tread_of(_bounds: crate::layout::FieldBounds, worn: f32) -> (Vec4, Vec4) {
-    if worn <= 0.0 {
-        return (Vec4::ZERO, Vec4::ZERO);
-    }
-    let extent = Vec4::ZERO;
-    // Half a tractor's gauge, and a rut a little wider than the tyre that cut
-    // it. Past halfway the ruts have spread far enough to meet in the middle.
-    (extent, crate::runtime::bare_tread(worn))
-}
-
 impl MaterialExtension for BareExtension {
     fn fragment_shader() -> ShaderRef {
         "embedded://gearbox_fields/bare/shaders/material.wgsl".into()
@@ -309,7 +296,7 @@ impl Plugin for BarePlugin {
                 wheel_response: response,
                 layers: standing(90.0, 900.0, 1400.0, 5.0, worn_clod),
                 ground,
-                tread: tread_of(crate::layout::FieldBounds { min: Vec2::ZERO, max: Vec2::ZERO }, worn).1,
+                tread: crate::runtime::bare_tread(worn),
                 soft_border: 0.8,
             });
         }
@@ -416,7 +403,7 @@ fn track(
     placed: crate::profile::Placed,
     worn: f32,
 ) -> Arc<dyn GroundSurface> {
-    let (extent, tread) = tread_of(placed.bounds, worn);
+    let tread = crate::runtime::bare_tread(worn);
     ground(
         world,
         trample,
@@ -427,7 +414,7 @@ fn track(
             tint: Vec4::new(0.108, 0.068, 0.038, 1.0),
             grain: Vec4::new(0.28, 0.42, 0.0, 1.6),
             grass: Vec4::new(0.033, 0.068, 0.023, 1.0),
-            extent,
+            extent: Vec4::ZERO,
             tread,
             // Hardcore: what a farm track wears down to, grey and gritty.
             stony: Vec4::new(0.126, 0.106, 0.082, 1.0),
