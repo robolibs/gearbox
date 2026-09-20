@@ -124,11 +124,16 @@ fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         return worn_along(place, against, abs(dot(span, across)) * 0.5, tread);
     }
     let along_first = way_offset(place, way, more, 0, first);
-    var most = worn_along(place, along_first, max(shape.y, 0.1), tread);
+    let down = worn_along(place, along_first, max(shape.y, 0.1), tread);
     let second = i32(shape.z);
-    if (second >= 2) {
-        let crossing = way_offset(place, way, more, first, second);
-        most = max(most, worn_along(place, crossing, max(shape.w, 0.1), tread));
+    if (second < 2) {
+        return down;
     }
-    return most;
+    let crossing = way_offset(place, way, more, first, second);
+    let across = worn_along(place, crossing, max(shape.w, 0.1), tread);
+    // Where two ways meet, the ground is worn worse than either takes alone:
+    // everything turning off one onto the other churns the same few metres. So
+    // the lesser adds to the greater instead of hiding under it, and a
+    // crossroads goes bare while the two roads either side of it keep their ruts.
+    return clamp(max(down, across) + min(down, across) * 0.6, 0.0, 1.0);
 }
