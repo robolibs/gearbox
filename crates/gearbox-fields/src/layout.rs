@@ -288,6 +288,32 @@ mod tests {
         assert!(!junction.reaches(chunk(32.0, -40.0)));
     }
 
+    // Two lines is all a way holds, so a third road over the same field is
+    // dropped from the *wear* — but `Hollows` knows nothing of that limit and
+    // sinks the ground along all three. A triple crossing therefore leaves a
+    // shallow grassy trough where the third road should have been painted.
+    #[test]
+    fn a_third_way_over_one_field_is_sunk_but_not_worn() {
+        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0);
+        let east = Way::bend(&[Vec2::new(-50.0, 0.0), Vec2::new(50.0, 0.0)], 3.0);
+        let slant = Way::bend(&[Vec2::new(-40.0, -40.0), Vec2::new(40.0, 40.0)], 3.0);
+        let three = north.crossing(east).crossing(slant);
+        // The third is refused, and refusing it leaves the first two whole.
+        assert_eq!(three, north.crossing(east));
+        assert_eq!(three.packed().2.x, 2.0);
+        assert_eq!(three.packed().2.z, 2.0);
+
+        let layout: FieldLayout = serde_json::from_str(
+            r#"{"default":"grassland","ways":[
+                {"name":"a","width":6,"wear":0.5,"points":[[0,-50],[0,50]]},
+                {"name":"b","width":6,"wear":0.5,"points":[[-50,0],[50,0]]},
+                {"name":"c","width":6,"wear":0.5,"points":[[-40,-40],[40,40]]}]}"#,
+        )
+        .unwrap();
+        // All three are sunk, so the ground dips where the wear will not paint.
+        assert!(Hollows::of(&layout).depth_at(30.0, 30.0) > 0.2, "the third way is not sunk");
+    }
+
     #[test]
     fn a_crossing_that_does_not_fit_is_left_out_whole() {
         let long: Vec<Vec2> = (0..10).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();

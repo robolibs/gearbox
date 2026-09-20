@@ -125,6 +125,12 @@ A road crossing open ground keeps most of its points, because the background out
 named fields is cut into a few large regions. So the budget is spent quickly by long roads:
 prefer as few points as the shape needs, and split a field if a warning says a road was cut.
 
+Two is also the most that can **wear** one field. A third road over the same ground is
+refused with a warning, but the hollow knows nothing of that limit and still sinks along it,
+so a triple crossing leaves a shallow grassy trough where the third road is not painted. It
+reads as a disused track rather than as damage, but it is not what was asked for: keep to
+two ways over any one field, or cut the field so each crossing has its own.
+
 An authored way also **sinks the ground it runs over**, a little under a foot for a
 half-worn track, tapering out over a metre and a half either side. That is the terrain grid,
 which carries the collider as well as the mesh, so the hollow is felt by the wheels and not
