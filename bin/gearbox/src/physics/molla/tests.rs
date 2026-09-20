@@ -6,6 +6,9 @@ mod nonwaking;
 #[path = "mass_wake_tests.rs"]
 mod mass_wake;
 
+#[path = "kind_wake_tests.rs"]
+mod kind_wake;
+
 #[path = "pose_wake_tests.rs"]
 mod pose_wake;
 

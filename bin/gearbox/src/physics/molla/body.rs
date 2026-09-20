@@ -132,12 +132,12 @@ impl BodyMut for BodyAccess {
         velocity.angular = angvel;
         apply(world.scene.set_body_velocity_with_wake(self.handle, velocity, wake));
     }
-    fn set_kind(&mut self, kind: BodyKind, _wake: bool) {
+    fn set_kind(&mut self, kind: BodyKind, wake: bool) {
         apply(
             self.shared
                 .world()
                 .scene
-                .set_body_kind(self.handle, convert::body_kind(kind)),
+                .set_body_kind_with_wake(self.handle, convert::body_kind(kind), wake),
         );
     }
     fn set_enabled(&mut self, enabled: bool) {
