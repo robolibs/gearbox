@@ -1057,6 +1057,29 @@ fn is_allowlisted(executable: &Path, allowlist_dirs: &[std::path::PathBuf]) -> b
 /// First builtin controller: consume `cmd_vel`, bind authored wheel/steer joint
 /// relationships to Rapier impulse-joint motors where possible, publish
 /// chassis pose/velocity state, and keep a conservative body-force fallback for
+/// How soft a machine's tyres are standing, nought at their authored maximum
+/// pressure and one at their minimum. Averaged over every tyre that reports a
+/// pressure, because the steering is resisted by all of them and not only by
+/// the pair that turns.
+fn machine_tyre_softness(values: &crate::services::LinkValues, machine: &MachineInstanceSpec) -> f64 {
+    let mut sum = 0.0;
+    let mut count = 0.0;
+    for link in &machine.links.links {
+        let pressure = values.get(&machine.id, &link.name, "tyre_pressure_bar");
+        let low = values.get(&machine.id, &link.name, "tyre_min_pressure_bar");
+        let high = values.get(&machine.id, &link.name, "tyre_max_pressure_bar");
+        let (Some(pressure), Some(low), Some(high)) = (pressure, low, high) else {
+            continue;
+        };
+        if !(high > low) || !pressure.is_finite() {
+            continue;
+        }
+        sum += 1.0 - ((pressure - low) / (high - low)).clamp(0.0, 1.0);
+        count += 1.0;
+    }
+    if count > 0.0 { sum / count } else { 0.0 }
+}
+
 /// joint shapes that are not externally addressable yet.
 fn apply_builtin_ackermann_cmd_vel(
     inventory: Res<ControllerInventory>,
@@ -1074,6 +1097,7 @@ fn apply_builtin_ackermann_cmd_vel(
     )>,
     parents: Query<&ChildOf>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
+    link_values: Res<crate::services::LinkValues>,
     mut steering_log_at: Local<f32>,
     // Where the steering actually stands, machine by machine. A command names
     // the angle the wheels are *wanted* at; they arrive at it over a couple of
@@ -1115,6 +1139,7 @@ fn apply_builtin_ackermann_cmd_vel(
                 .map(machine_heading_rad)
                 .unwrap_or(0.0);
 
+            let rolling_mps;
             {
                 let Some(body) = physics.body_mut(body_handle) else {
                     continue;
@@ -1140,6 +1165,7 @@ fn apply_builtin_ackermann_cmd_vel(
                         wheel_encoders: Vec::new(),
                     },
                 );
+                rolling_mps = body.linvel().length();
             }
 
             let wheel_radius_m = controller.wheel_radius.unwrap_or(0.45) as f64;
@@ -1162,11 +1188,28 @@ fn apply_builtin_ackermann_cmd_vel(
                     cmd.linear_mps, cmd.angular_rps, wheel_base_m, max_steer_deg,
                 ));
             // Lock to lock in `STEER_SWEEP_S`, so full lock one way from full
-            // lock the other takes twice that.
+            // lock the other takes twice that. That is the best case: hard
+            // tyres, machine rolling. What resists the ram is the contact patch
+            // twisting against the ground, so a soft tyre — which lays down
+            // more of it — and a machine standing still — which has to scrub
+            // the patch round on the spot rather than roll it round — both
+            // take longer. Dry steering a loaded machine on soft tyres is the
+            // slowest thing a steering box does, and it was instant here.
             const STEER_SWEEP_S: f64 = 1.0;
+            /// Lock to lock on the softest tyre, against the hardest.
+            const STEER_SOFT_FACTOR: f64 = 1.9;
+            /// Lock to lock standing still, against rolling freely.
+            const STEER_STILL_FACTOR: f64 = 2.4;
+            /// Above this the wheels are rolling enough to steer freely.
+            const STEER_FREE_MPS: f64 = 1.5;
+            let softness = machine_tyre_softness(&link_values, machine);
+            let rolling = (rolling_mps.abs() / STEER_FREE_MPS).clamp(0.0, 1.0);
+            let sweep_s = STEER_SWEEP_S
+                * (1.0 + softness * (STEER_SOFT_FACTOR - 1.0))
+                * (1.0 + (1.0 - rolling) * (STEER_STILL_FACTOR - 1.0));
             let steer_target_rad = {
                 let full = (max_steer_deg as f64).to_radians().max(1e-3);
-                let step = full / STEER_SWEEP_S * time.delta_secs_f64();
+                let step = full / sweep_s * time.delta_secs_f64();
                 let held = steer_held.entry(key.clone()).or_insert(0.0);
                 let wanted = steer_wanted.clamp(-full, full);
                 *held += (wanted - *held).clamp(-step, step);
@@ -1535,15 +1578,14 @@ fn stable_cmd_vel(
         .get(key)
         .copied()
         .unwrap_or_default();
-    // Speeding up is immediate (traction control guards the tyres); slowing
-    // down, a stop included, brakes at a comfortable rate so a zero command
-    // at speed does not slam the parking hold on.
+    // A command names the speed the machine is wanted at; it gets there under
+    // its own driveline and brakes, and neither is instant on this mass.
     let braking = requested.linear_mps.abs() < previous.linear_mps.abs()
         || requested.linear_mps * previous.linear_mps < 0.0;
     let rate = if braking { CMD_BRAKE_MPS2 } else { CMD_ACCEL_MPS2 };
     let next = CmdVel {
         linear_mps: slew(previous.linear_mps, requested.linear_mps, rate * dt),
-        angular_rps: slew(previous.angular_rps, requested.angular_rps, 6.0 * dt),
+        angular_rps: slew(previous.angular_rps, requested.angular_rps, CMD_YAW_RPS2 * dt),
     };
     runtime.applied_cmd_vel.insert(key.clone(), next);
     next
@@ -1669,12 +1711,19 @@ const WHEEL_GRIP_USE: f64 = 0.9;
 const WHEEL_FULL_TORQUE_ERROR_RAD_S: f64 = 0.1;
 /// The same for a parked machine holding a slope.
 const WHEEL_HOLD_ERROR_RAD_S: f64 = 0.005;
-/// Commanded speed changes at most this fast (m/s²): effectively at once.
-/// Traction control keeps the wheels from spinning; a gentle ramp here
-/// swallowed short commands, such as a planner's brief reverse.
-const CMD_ACCEL_MPS2: f32 = 80.0;
-/// Commanded speed falls at most this fast (m/s²): a firm, smooth brake.
-const CMD_BRAKE_MPS2: f32 = 3.0;
+/// What a loaded machine can pull away at (m/s²). Twenty tonnes on soft
+/// ground takes seconds to reach working speed, not a frame: set high enough
+/// to answer a command at once, a harvester left the line like a go-kart.
+/// A short command now gets the speed such a command really reaches.
+const CMD_ACCEL_MPS2: f32 = 0.9;
+/// What it can shed on the brakes (m/s²). Firmer than pulling away, because
+/// brakes outrank a driveline, but nothing like a car: run too hard the mass
+/// pitches onto the front axle every time a command goes to zero, which is
+/// the lurch that made a stop look like a stumble.
+const CMD_BRAKE_MPS2: f32 = 1.6;
+/// How fast the commanded yaw may change (rad/s²). The steering itself is
+/// swept by `STEER_SWEEP_S`; this keeps the command feeding it civil.
+const CMD_YAW_RPS2: f32 = 1.5;
 /// Traction control band around a wheel's own ground speed: a share of it
 /// plus a floor (m/s), so a lightly loaded wheel cannot spin up or lock.
 const WHEEL_SLIP_SHARE: f64 = 0.08;
