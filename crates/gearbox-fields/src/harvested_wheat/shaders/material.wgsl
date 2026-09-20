@@ -8,7 +8,7 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
 }
 
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
 #import "embedded://gearbox_fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
@@ -346,13 +346,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         + vec3<f32>(print.y, 0.0, print.z));
     pbr_input.world_normal = normal;
     var color = terrain_color(in.world_position.xz);
-    let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x;
+    let edge = wheel_edge(tracks, wheels, in.world_position.xz);
+    let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x * edge;
     color = vec4<f32>(color.rgb * (1.0 - wheels.darkening * pressed), 1.0);
     // A way worn across the stubble: the rows go and the earth under them shows.
     // One walk of the way for the wear and the rut both.
     let read = way_read(in.world_position.xz, worn_ground.extent, worn_ground.tread,
         worn_ground.way, worn_ground.way_more, worn_ground.way_shape);
-    let bared = max(read.x, wheel_scar(tracks, wheels, in.world_position.xz) * 0.6);
+    let bared = max(read.x, wheel_scar(tracks, wheels, in.world_position.xz) * edge * 0.6);
     let grit = fbm(in.world_position.xz * 1.6);
     let pool = vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, lattice(in.world_position.xz, 7.5) * 0.62 + lattice(in.world_position.xz + 29.0, 1.9) * 0.38), read.w);
     let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(read.x)) * (0.8 + grit * 0.5)

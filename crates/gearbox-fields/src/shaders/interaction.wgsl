@@ -160,3 +160,22 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
     return WheelMark(press, f32(texel.g & 15u) / 15.0, along / TREAD_PITCH_M, across / half_width,
         vec2<f32>(along, across), roll);
 }
+
+// How much of a tyre's width covers this point: one in the middle of it, nought
+// past its shoulder. Taken from the smooth offset across the tyre and never
+// from how far the stamp reached — the stamp is whole texels of an eighth of a
+// metre, and its edge gains one as a machine drifts sideways against that grid,
+// then loses it and gains one on the other side metres later. That is a track
+// forever getting a hand's breadth wider down one side and then the other, and
+// it shows in a pressed sward as plainly as in a tread. Everything a wheel does
+// to the ground is held inside this, so none of it steps.
+//
+// One where the map carries no tread channels to ask with: such a ground has
+// only the stamp's own edge, and must live with it.
+fn wheel_edge(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>) -> f32 {
+    let mark = sample_wheel_mark(tex, params, world_xz);
+    if (mark.press <= 0.0) {
+        return 1.0;
+    }
+    return 1.0 - smoothstep(0.88, 1.02, abs(mark.across));
+}

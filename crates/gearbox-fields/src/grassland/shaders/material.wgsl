@@ -49,7 +49,7 @@ fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
         mat4x4<f32>(edges.west, edges.east, edges.south, edges.north), edges.reach);
 }
 
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var grass_albedo: texture_2d<f32>;
@@ -66,7 +66,10 @@ var trample: texture_2d<u32>;
 var<uniform> trample_params: WheelMapParams;
 
 fn trample_pressed(world_xz: vec2<f32>) -> f32 {
-    return sample_wheels(trample, trample_params, world_xz).x;
+    // Held inside the tyre's own width, or the flattened sward gains and loses
+    // a texel down its sides as the machine drifts against the map's grid.
+    return sample_wheels(trample, trample_params, world_xz).x
+        * wheel_edge(trample, trample_params, world_xz);
 }
 
 fn luma(c: vec4<f32>) -> f32 {
@@ -152,7 +155,8 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     // there, because one pass over turf presses the sward down into the soil
     // rather than stripping it — the blades are not culled for this, they lie
     // flattened over what shows through, which is what a fresh tyre mark is.
-    let scar = wheel_scar(trample, trample_params, world_xz);
+    let edge = wheel_edge(trample, trample_params, world_xz);
+    let scar = wheel_scar(trample, trample_params, world_xz) * edge;
     // One walk of the way for all of it, rather than one for the wear, one for
     // the same wear again and a third for the rut.
     let read = way_read(world_xz, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);

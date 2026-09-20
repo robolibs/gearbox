@@ -7,7 +7,7 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
 }
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, wheel_print}
 
@@ -268,7 +268,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
     // Where the wheels have worn the ground, no grass holds it — whether that
     // is a road laid out as worn, or a way beaten across a field by driving it.
-    let rolled_now = wheel_scar(tracks, wheels, place);
+    let edge = wheel_edge(tracks, wheels, place);
+    let rolled_now = wheel_scar(tracks, wheels, place) * edge;
     // One walk of the way answers all of it: how worn, how the wheels sweep it,
     // where water will stand and the print of the tyre bars.
     let read = way_read(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
@@ -345,7 +346,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     colour *= shade_of_clumps * mix(1.0, 0.74, verge_damp(bared)) * mix(1.0, 0.40, print.x) * (1.0 + print.w * 0.85);
 
     let pressed = sample_wheels(tracks, wheels, place);
-    let rolled = clamp(pressed.x, 0.0, 1.0);
+    let rolled = clamp(pressed.x * edge, 0.0, 1.0);
     colour *= 1.0 - rolled * wheels.darkening;
 
     // The normal from the height itself, stepped no finer than the pixel can

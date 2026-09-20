@@ -505,8 +505,19 @@ fn stamp_wheel_contacts(
             let roll = contact.direction.normalize_or(Vec2::X);
             let axle = roll.perp();
             let half_width = (contact.width * 0.5 * tpm).max(0.5);
-            let half_length = (field.footprint_length * 0.5 * tpm).max(0.5);
-            let reach = half_width.hypot(half_length);
+            // Stamped a texel wider than the tyre on each side, and a texel
+            // longer. Only whole texels can be written, so the stamped edge
+            // lands wherever the grid happens to fall relative to the wheel —
+            // and as a machine drifts sideways against that grid the band gains
+            // a texel down one side, then metres later down the other. An
+            // eighth of a metre, appearing and disappearing every few metres:
+            // it is what makes a pressed track look like it keeps changing
+            // width, in the grass as much as in the tread. Stamping past the
+            // tyre lets the shader cut the true edge from the smooth offset
+            // across the tyre instead, which no grid can step.
+            let laid_width = half_width + 1.0;
+            let half_length = (field.footprint_length * 0.5 * tpm).max(0.5) + 1.0;
+            let reach = laid_width.hypot(half_length);
             let z0 = ((centre.y - reach).ceil() as i32).clamp(0, height - 1);
             let z1 = ((centre.y + reach).floor() as i32).clamp(0, height - 1);
             let x_lo = ((centre.x - reach).ceil() as i32).clamp(0, width - 1);
@@ -514,7 +525,7 @@ fn stamp_wheel_contacts(
             for z in z0..=z1 {
                 let inside = |x: i32| {
                     let d = Vec2::new(x as f32, z as f32) - centre;
-                    d.dot(axle).abs() <= half_width && d.dot(roll).abs() <= half_length
+                    d.dot(axle).abs() <= laid_width && d.dot(roll).abs() <= half_length
                 };
                 let Some(x0) = (x_lo..=x_hi).find(|x| inside(*x)) else {
                     continue;

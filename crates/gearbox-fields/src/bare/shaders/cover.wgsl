@@ -306,12 +306,18 @@ fn tyre_bars(along: f32, across: f32, heading: vec2<f32>, across_dir: vec2<f32>,
     // broken chevron, one head after another rather than a row of arrowheads.
     let stagger = select(0.0, 3.1415927, across < 0.0);
     let phase = (along + abs(across) * bar.y) * turn + stagger;
+    // Staggering the two sides puts a half-pitch step in the pattern right down
+    // the tyre's middle, and a step is a line: the print reads as two treads
+    // laid side by side with a seam between them. A tyre has no seam there, it
+    // has a *gap* — the channel the two rows of lugs shed into — so nothing is
+    // printed across it and the step falls where there is nothing to step.
+    let centre_gap = smoothstep(0.0, 0.06, abs(across));
     // A raised cosine taken to a power: the higher the power the narrower what
     // is left standing, so one number turns the wide-voided ag lug into the
     // close blocks of a road tyre. And it differentiates in closed form, so the
     // slope costs no second walk of anything.
     let sharp = clamp(0.5 / max(bar.z, 0.04), 0.5, 8.0);
-    let raised = 0.5 - 0.5 * cos(phase);
+    let raised = (0.5 - 0.5 * cos(phase)) * centre_gap;
     let steepest = heading + across_dir * bar.y * select(-1.0, 1.0, across >= 0.0);
     let rise = sharp * pow(max(raised, 0.0), sharp - 1.0) * 0.5 * sin(phase);
     let slope = bar.w * rise * turn * printed;
@@ -594,7 +600,7 @@ fn wheel_print(along: f32, across: f32, share: f32, roll: vec2<f32>, bar: vec4<f
     // width either way. The cut is held inside even the narrowest of those, or
     // on the stretches where the stamp happens to fall short it is the stamp's
     // ragged edge that shows through rather than this one.
-    let within = 1.0 - smoothstep(0.62, 0.84, abs(share));
+    let within = 1.0 - smoothstep(0.88, 1.02, abs(share));
     // A fresh mark holds its print; an old one has had the weather on it.
     return tyre_bars(along, across, roll, axle, bar,
         smoothstep(0.04, 0.40, press) * within, footprint);
