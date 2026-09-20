@@ -200,6 +200,9 @@ use std::sync::Arc;
 
 const CHUNK_M: f32 = 16.0;
 const TRACK_TEXELS_PER_M: f32 = 8.0;
+/// The widest wheel-map texture asked of a device, in texels a side. Eight
+/// thousand is what the weakest target guarantees.
+const MOST_TRACK_TEXELS: u32 = 8192;
 
 pub struct RuntimeField {
     pub entity: Entity,
@@ -331,8 +334,24 @@ pub fn ensure_fields(world: &mut World) {
         let bounds = spec.bounds();
         let profile = profiles[&spec.profile].clone();
         let size = bounds.max - bounds.min;
-        let width = (size.x * TRACK_TEXELS_PER_M).ceil() as u32 + 1;
-        let height = (size.y * TRACK_TEXELS_PER_M).ceil() as u32 + 1;
+        // A wheel map is a texture and no device will make one wider than its
+        // limit, so a field too broad for eight texels to the metre gets fewer
+        // of them rather than no map at all. At the present 800 m of terrain
+        // this never bites; it is here so that widening the terrain coarsens
+        // the marks instead of failing to make the texture.
+        let across = size.x.max(size.y).max(1.0);
+        let per_metre = TRACK_TEXELS_PER_M.min((MOST_TRACK_TEXELS - 1) as f32 / across);
+        if per_metre < TRACK_TEXELS_PER_M {
+            warn!(
+                "field {} is {across:.0} m across, too broad for {TRACK_TEXELS_PER_M} texels \
+                 to the metre: its wheel map is coarsened to {per_metre:.2}",
+                spec.name
+            );
+        }
+        // Clamped as well as scaled: the scale alone lands exactly on the limit,
+        // and a rounding a hair the wrong way would put it one texel over.
+        let width = ((size.x * per_metre).ceil() as u32 + 1).min(MOST_TRACK_TEXELS);
+        let height = ((size.y * per_metre).ceil() as u32 + 1).min(MOST_TRACK_TEXELS);
         let trample = world
             .resource_mut::<Assets<Image>>()
             .add(track_image(width, height, profile.wheel_response.tread));
@@ -348,7 +367,7 @@ pub fn ensure_fields(world: &mut World) {
         }
         let wheels = WheelMapParams {
             origin: bounds.min,
-            texels_per_metre: TRACK_TEXELS_PER_M,
+            texels_per_metre: per_metre,
             width: width as f32,
             height: height as f32,
             recovery_seconds: response.recovery_seconds,
@@ -385,8 +404,9 @@ pub fn ensure_fields(world: &mut World) {
             },
         );
         info!(
-            "field {}: {} [{:?}..{:?}], independent {}x{} wheel map, way of {} points",
+            "field {}: {} [{:?}..{:?}], independent {}x{} wheel map ({:.0} MB), way of {} points",
             spec.name, profile.name, bounds.min, bounds.max, width, height,
+            (width as f64 * height as f64 * if response.tread { 8.0 } else { 4.0 }) / 1.0e6,
             placed.way.points()
         );
         // `placed` already settled what wears this field — its own `wear`, or a
