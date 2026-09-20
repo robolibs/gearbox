@@ -146,10 +146,36 @@ Layout and `EnvironmentSettings` are startup configuration, not live-editable se
 
 1. Create a sibling folder with `mod.rs`, `shaders/`, and `textures/`.
 2. Its plugin registers embedded assets and its typed Bevy material plugin.
-3. Register a `FieldProfile`: name, material factory, vegetation layers, wheel response.
+3. Register a `FieldProfile`: name, material factory, vegetation layers, wheel response,
+   and the `surface_tint` and `soft_border` by which its neighbours meet it.
 4. Each vegetation layer supplies a mesh template, shader, density, and radial fade distances.
    Use the shared vegetation uniform layout and wheel sampler; clip roots to field bounds.
 5. Add the plugin in `FieldsPlugin`, then reference its profile name in a layout.
+
+### What a new ground has to read
+
+A cover that skips any of these is not wrong anywhere a compiler can see; it is simply the
+one field in a layout that behaves unlike the rest, which is how the stubble went a long
+while washing towards nothing while its neighbours washed towards it.
+
+- **Everything in `Placed`.** The factory is handed where the field runs, what lies across
+  each of its four sides and how far, how worn it is, and the way through it. `extent` and
+  the four tints with `reach` feed `washed_into`; `wear` becomes a tread through
+  `runtime::bare_tread`; the way rides in as two matrices and a shape.
+- **`worn()` and `washed_into()` from `bare/shaders/cover.wgsl`.** Never a second copy: the
+  two grounds either side of a join must agree where it falls, and held apart they drift —
+  one edge ragged, one ruled.
+- **`bare::WAY_SOIL` and `bare::WAY_HARDCORE`** as what a way wears the cover down to, or a
+  road changes colour where it crosses onto it.
+- **The wheel press, folded in with `max`.** Driving and the layout are taken together and
+  the harder wins; a cover that reads only its layout never wears under a wheel.
+
+A cover that genuinely does not wear — a concrete yard — says so by leaving its tread at
+nought, which `worn()` answers on its first line. That is a decision, not an omission.
+
+Adding a field to `VegetationParams` means declaring it in **every** shader that names that
+struct, or the binding size stops matching what is written. The same goes for a material's
+own uniform: its Rust struct and its WGSL `struct` are one declaration kept in two files.
 
 No terrain-type switch, collision changes, or controller changes are required. The material
 factory receives that instance's wheel texture, sampling parameters and shared surface-height
