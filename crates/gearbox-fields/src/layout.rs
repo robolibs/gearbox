@@ -532,7 +532,16 @@ impl Way {
         if mine < 2 {
             return other;
         }
-        if self.lines[1].count > 0 || other.lines[1].count > 0 || mine + theirs > Self::MOST {
+        // Two reasons to refuse, and they want telling apart: one is answered by
+        // cutting the field so each crossing has its own, the other by spending
+        // fewer points on the roads. Reported as one, every third way over a
+        // field read as a point-budget problem and sent the reader to count
+        // points that were never the trouble.
+        if self.lines[1].count > 0 || other.lines[1].count > 0 {
+            warn!("a third way crosses here; a field wears along two, so this one is left out");
+            return self;
+        }
+        if mine + theirs > Self::MOST {
             warn!(
                 "two ways cross here needing {} points of {}; the second is left out",
                 mine + theirs,
