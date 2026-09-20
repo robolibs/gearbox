@@ -22,6 +22,7 @@ struct BareGround {
     grass: vec4<f32>,
     extent: vec4<f32>,
     tread: vec4<f32>,
+    stony: vec4<f32>,
     west: vec4<f32>,
     east: vec4<f32>,
     south: vec4<f32>,
@@ -345,21 +346,25 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let shade = comb(place, ground.grain.w, 128.0);
     let stripes_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
     let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
+    // Where the wheels have worn the ground, no grass holds it — whether that
+    // is a road laid out as worn, or a way beaten across a field by driving it.
+    let rolled_now = clamp(sample_wheels(tracks, wheels, place).x, 0.0, 1.0);
+    let bared = max(worn(place), rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
     // Ground changes over tens of metres as well as over inches — drainage,
     // the lie of the land, where the subsoil comes nearer the surface. Without
     // it a field is one flat tone however much crumb is drawn on it.
     let country = ground_fbm(place / 34.0 + vec2<f32>(7.0, -29.0), 3);
-    colour = ground.tint.rgb * mix(0.78, 1.24, country)
+    // A way is not simply its field with the grass off it. Driving takes the
+    // fines away and brings up what was under them, so the ground it wears to
+    // is a surface of its own.
+    let earth = mix(ground.tint.rgb, ground.stony.rgb, bared * ground.stony.w);
+    colour = earth * mix(0.78, 1.24, country)
         * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
         * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
 
     var grass_share = 0.0;
     var shade_of_clumps = 1.0;
-    // Where the wheels have worn the ground, no grass holds it — whether that
-    // is a road laid out as worn, or a way beaten across a field by driving it.
-    let rolled_now = clamp(sample_wheels(tracks, wheels, place).x, 0.0, 1.0);
-    let bared = max(worn(place), rolled_now * 0.8);
     if (ground.grass.w > 0.001) {
         let grown = taken(place);
         // On a driven surface the patches do not decide it: what is not worn

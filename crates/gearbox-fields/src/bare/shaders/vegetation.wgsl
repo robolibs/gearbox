@@ -231,7 +231,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // is ragged with stragglers rather than cut with a knife.
     let luck = rand(id, 12u);
     let grassy = smoothstep(0.42, 0.70, green);
-    if (is_lump && luck < grassy * 0.85) {
+    // Stones lie where the grass does not, and thickest where a wheel has
+    // taken the fines off them: a worn way is a stony one.
+    if (is_lump && luck < grassy * 0.85 * (1.0 - bared * 0.65)) {
         return culled_vertex();
     }
     if (is_tuft && luck > grassy) {

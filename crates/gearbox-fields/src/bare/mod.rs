@@ -230,6 +230,10 @@ pub struct BareGround {
     /// width of one rut, how bare the rut is, and how bare the rest of it is.
     /// All nought and the surface wears evenly, as a field does.
     pub tread: Vec4,
+    /// What the ground wears to where it is driven: the fines go and the stone
+    /// under them comes up, so a way is a surface of its own and not simply
+    /// its field with the grass taken off. The last of it says how far it goes.
+    pub stony: Vec4,
     /// What lies across each side, as that neighbour's own surface colour,
     /// and how far along each side the two wash into one another.
     pub west: Vec4,
@@ -340,6 +344,7 @@ fn ploughed_ground(
             grass: Vec4::new(0.033, 0.068, 0.023, 0.55),
             extent: Vec4::ZERO,
             tread: Vec4::ZERO,
+            stony: Vec4::ZERO,
             west: Vec4::ZERO,
             east: Vec4::ZERO,
             south: Vec4::ZERO,
@@ -370,6 +375,7 @@ fn dirt_ground(
             grass: Vec4::new(0.033, 0.068, 0.023, 0.9),
             extent: Vec4::ZERO,
             tread: Vec4::ZERO,
+            stony: Vec4::ZERO,
             west: Vec4::ZERO,
             east: Vec4::ZERO,
             south: Vec4::ZERO,
@@ -422,6 +428,8 @@ fn track(
             grass: Vec4::new(0.033, 0.068, 0.023, 1.0),
             extent,
             tread,
+            // Hardcore: what a farm track wears down to, grey and gritty.
+            stony: Vec4::new(0.126, 0.106, 0.082, 1.0),
             west: Vec4::ZERO,
             east: Vec4::ZERO,
             south: Vec4::ZERO,
@@ -452,6 +460,7 @@ fn sand_ground(
             grass: Vec4::new(0.06, 0.08, 0.03, 0.0),
             extent: Vec4::ZERO,
             tread: Vec4::ZERO,
+            stony: Vec4::ZERO,
             west: Vec4::ZERO,
             east: Vec4::ZERO,
             south: Vec4::ZERO,
