@@ -247,6 +247,7 @@ impl Plugin for HarvestedWheatPlugin {
                 super::clumps::nettle(share * 0.35, 30.0)],
                 ground: create_ground,
                 tread: Vec4::ZERO,
+                soft_border: 0.7,
             });
     }
 }

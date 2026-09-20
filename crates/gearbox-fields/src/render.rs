@@ -53,6 +53,8 @@ pub struct VegetationChunk {
     pub follow_grass: f32,
     /// The wear of this field's surface, as `BareGround::tread`.
     pub tread: Vec4,
+    /// How far this field's plants carry past its own edge, in metres.
+    pub soft_border: f32,
     /// Albedo of an asset clump layer; procedural layers bind the fallback.
     pub albedo: Option<Handle<Image>>,
     /// Index ranges of a clump mesh's variants, one draw each; empty draws it whole.
@@ -124,6 +126,8 @@ pub struct VegetationParams {
     /// How the wheels have worn this field: half the gauge between the ruts,
     /// half the width of one, how bare the rut is and how bare the rest is.
     pub tread: Vec4,
+    /// How far this field's plants carry past its own edge, in metres.
+    pub soft_border: f32,
 }
 
 /// Carries the environment's wind to every field's vegetation uniforms,
@@ -269,6 +273,7 @@ fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
         inverse_square_thinning: u32::from(draw.inverse_square_thinning),
         follow_grass: draw.follow_grass,
         tread: draw.tread,
+        soft_border: draw.soft_border,
         ..field.params
     }
 }

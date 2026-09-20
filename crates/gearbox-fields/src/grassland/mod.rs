@@ -150,6 +150,7 @@ impl Plugin for GrasslandPlugin {
                 ],
                 ground: create_ground,
                 tread: Vec4::ZERO,
+                soft_border: 1.3,
             });
     }
 }

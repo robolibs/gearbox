@@ -275,6 +275,7 @@ impl Plugin for BarePlugin {
             layers: standing(30.0, 2400.0, 440.0, 3.0, turned_clod),
             ground: ploughed_ground,
             tread: Vec4::ZERO,
+            soft_border: 0.8,
         });
         profiles.register(FieldProfile {
             name: "dirt",
@@ -282,6 +283,7 @@ impl Plugin for BarePlugin {
             layers: standing(130.0, 1600.0, 1900.0, 6.0, worn_clod),
             ground: dirt_ground,
             tread: Vec4::ZERO,
+            soft_border: 0.8,
         });
         for (name, ground, worn) in [
             ("green-lane", green_lane as GroundFactory, 0.3),
@@ -294,6 +296,7 @@ impl Plugin for BarePlugin {
                 layers: standing(90.0, 900.0, 1400.0, 5.0, worn_clod),
                 ground,
                 tread: tread_of(crate::layout::FieldBounds { min: Vec2::ZERO, max: Vec2::ZERO }, worn).1,
+                soft_border: 0.8,
             });
         }
         profiles.register(FieldProfile {
@@ -302,6 +305,7 @@ impl Plugin for BarePlugin {
             layers: standing(22.0, 120.0, 0.0, 0.8, blown_clod),
             ground: sand_ground,
             tread: Vec4::ZERO,
+            soft_border: 0.8,
         });
     }
 }

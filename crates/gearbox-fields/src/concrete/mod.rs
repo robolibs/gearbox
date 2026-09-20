@@ -109,6 +109,7 @@ impl Plugin for ConcretePlugin {
                 ],
                 ground: create_ground,
                 tread: Vec4::ZERO,
+                soft_border: 0.0,
             });
     }
 }

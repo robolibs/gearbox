@@ -101,6 +101,11 @@ pub struct FieldProfile {
     /// How this profile's surface is worn by wheels, as `BareGround::tread`:
     /// zero for a surface that wears evenly, which is most of them.
     pub tread: Vec4,
+    /// How far what grows in this field carries past its own edge, in metres.
+    /// A hedge line or a yard wall is a hard border and gets nought; a meadow
+    /// running into a track is a soft one, and the two interleave over this
+    /// distance instead of meeting along a ruled line.
+    pub soft_border: f32,
 }
 
 #[derive(Resource, Default)]

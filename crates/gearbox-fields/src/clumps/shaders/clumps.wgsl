@@ -24,6 +24,7 @@ struct VegetationParams {
     wind: vec4<f32>,
     follow_grass: f32,
     tread: vec4<f32>,
+    soft_border: f32,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -78,8 +79,26 @@ fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
     return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
+// A hash of a place, fine enough that neighbouring plants get unrelated rolls.
+fn edge_roll(p: vec2<f32>) -> f32 {
+    let q = vec2<i32>(floor(p * 97.0));
+    var h = u32(q.x) * 0x9E3779B9u ^ u32(q.y) * 0x85EBCA6Bu;
+    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
+    return f32(h) / 4294967295.0;
+}
+
+// A hard border ends a field along a ruled line. A soft one lets what grows
+// here carry past its own edge, thinning as it goes, so two fields interleave
+// over that distance instead of butting against one another.
 fn within_field(world_xz: vec2<f32>) -> bool {
-    return all(world_xz >= field.bounds.xy) && all(world_xz < field.bounds.zw);
+    let inside = min(
+        min(world_xz.x - field.bounds.x, field.bounds.z - world_xz.x),
+        min(world_xz.y - field.bounds.y, field.bounds.w - world_xz.y));
+    if (field.soft_border <= 0.0) {
+        return inside >= 0.0;
+    }
+    let past = max(-inside, 0.0);
+    return edge_roll(world_xz) < 1.0 - smoothstep(0.0, field.soft_border, past);
 }
 
 fn blade_fade_end(rank: f32) -> f32 {

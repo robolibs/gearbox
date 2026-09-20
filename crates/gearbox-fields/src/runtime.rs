@@ -575,6 +575,7 @@ pub fn stream_vegetation(
                     inverse_square_thinning: layer.inverse_square_thinning,
                     follow_grass: layer.follow_grass,
                     tread: field.profile.tread,
+                    soft_border: field.profile.soft_border,
                     albedo: layer.albedo.map(|path| assets.load(path)),
                     variants,
                 },
