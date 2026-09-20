@@ -191,7 +191,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         // Mostly grit, a few pebbles, and now and then a stone worth kicking:
         // the size is drawn from a tail, not from a range, and a tyre presses
         // what it rolls over half into the soil.
-        var size = mix(0.003, 0.085, pow(rand(id, 6u), 5.5)) * alive * (1.0 - flat * 0.35);
+        var size = mix(0.002, 0.048, pow(rand(id, 6u), 5.5)) * alive * (1.0 - flat * 0.35);
         var squat = mix(0.4, 0.72, rand(id, 7u));
         // A crumb of earth is smaller than a stone and sits flatter in the
         // ground, and a wheel crushes it outright rather than pressing it in.
