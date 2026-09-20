@@ -319,14 +319,20 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     // Cracks are cut into the ground, not laid on it, so they belong to the
     // height as much as to the colour. Only a ground that cracks, and only
     // where it has dried out.
+    // A way driven often is not just a different colour: the wheels press it
+    // into hollows and crush the clods flat in them, so it lies lower and
+    // smoother than the ground either side.
+    let pressed_in = worn(place);
+    let crushed = 1.0 - pressed_in * 0.55;
     return swell * 0.08
+        - pressed_in * 0.045
         // How deep a comb cuts goes with how far apart its teeth are: a plough
         // cuts a trench, the wind wrinkles.
         + combed * ground.grain.z * min(ground.grain.w * 0.5, 0.62) * combed_seen
-        + slabs * ground.grain.y * mix(0.04, 0.12, coarseness) * broken
-        + lumps * ground.grain.y * mix(0.12, 0.04, coarseness) * broken
-        + crumb * ground.grain.y * 0.05
-        + grit * ground.grain.y * 0.045;
+        + slabs * ground.grain.y * mix(0.04, 0.12, coarseness) * broken * crushed
+        + lumps * ground.grain.y * mix(0.12, 0.04, coarseness) * broken * crushed
+        + crumb * ground.grain.y * 0.05 * crushed
+        + grit * ground.grain.y * 0.045 * crushed;
 }
 
 @fragment
