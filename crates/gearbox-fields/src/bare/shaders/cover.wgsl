@@ -621,3 +621,11 @@ fn rut_of(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
     let dip = lattice(place, 7.5) * 0.62 + lattice(place + 29.0, 1.9) * 0.38;
     return vec3<f32>(read.swept, read.channel * smoothstep(0.46, 0.86, dip), read.tone);
 }
+
+// The line a wheel actually drove, as the covers read it.
+struct DrivenTrail {
+    bar: vec4<f32>,
+    count: vec4<f32>,
+    points: array<vec4<f32>, 256>,
+}
+

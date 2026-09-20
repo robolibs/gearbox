@@ -9,7 +9,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, wheel_print}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, tyre_bars, DrivenTrail}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -36,6 +36,100 @@ struct BareGround {
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var<uniform> ground: BareGround;
+@group(#{MATERIAL_BIND_GROUP}) @binding(110) var<uniform> driven: DrivenTrail;
+
+// How deep a wheel presses the ground it rolls over, at its worst. Shading and
+// not geometry, for the same reason the authored ways' ruts are.
+const RUT_DEEP_M: f32 = 0.022;
+
+// What a wheel left here: the tyre's bars, and the trough it pressed the
+// ground into. Both come off one walk of the line it drove.
+struct Driven {
+    // How much of a bar's print, its relief's slope in world x and z, and the
+    // shading of the bar's own edges.
+    bars: vec4<f32>,
+    // How deep the trough is here — nought outside it — and the slope of its
+    // sides in world x and z. A wheel does not paint a stripe, it presses a
+    // hollow and pushes what it displaces up into a shoulder either side, and
+    // without that the mark reads as a dark band laid on flat ground however
+    // well the tread on it is drawn.
+    rut: vec3<f32>,
+}
+
+// The print of a tyre on the line it drove, found by walking that line rather
+// than by reading a raster. Each point holds where the wheel's middle was, how
+// far along the line it lies, and half the tyre's width — negative where a run
+// begins, so a wheel set down somewhere new is not joined to where it was.
+//
+// This is what the whole tread rests on. Against a line, where a point stands
+// is exact: the nearest place on it gives the distance across, and that place's
+// own distance along gives the phase. Neither has a grid to step on, neither
+// needs four neighbours blended, and a turn is no different from a straight —
+// the line simply curves. What it replaced could do none of that.
+//
+// Walked here and not in the shared cover file: naga_oil cannot carry a pointer
+// into a uniform across a module boundary, and declaring the binding in the
+// shared file would force it on every shader that imports it — blades and
+// clumps included, which have no such binding.
+fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
+    // Only ground a wheel has actually been over pays for the walk, which is
+    // what lets the line be long enough to be worth keeping.
+    if (pressed <= 0.0) {
+        return Driven(vec4<f32>(0.0), vec3<f32>(0.0));
+    }
+    let count = i32(driven.count.x);
+    var best_gap = 1e30;
+    var best_across = 0.0;
+    var best_along = 0.0;
+    var best_half = 0.0;
+    var best_heading = vec2<f32>(1.0, 0.0);
+    for (var i = 1; i < count; i = i + 1) {
+        let to = driven.points[i];
+        // A run's first point begins a line rather than continuing one.
+        if (to.w < 0.0) {
+            continue;
+        }
+        let back = driven.points[i - 1];
+        let leg = to.xy - back.xy;
+        let length_of = max(length(leg), 1e-4);
+        let heading = leg / length_of;
+        let at = clamp(dot(place - back.xy, heading), 0.0, length_of);
+        let near = back.xy + heading * at;
+        let gap = distance(place, near);
+        if (gap < best_gap) {
+            best_gap = gap;
+            best_across = dot(place - near, vec2<f32>(-heading.y, heading.x));
+            best_along = abs(back.z) + at;
+            best_half = abs(to.w);
+            best_heading = heading;
+        }
+    }
+    if (best_gap > best_half * 1.8 || best_half <= 0.0) {
+        return Driven(vec4<f32>(0.0), vec3<f32>(0.0));
+    }
+    // Fading by how far out of the tyre's own width the point lies, so the
+    // print ends where the tyre did and not where any grid happened to fall.
+    let within = 1.0 - smoothstep(0.80, 1.0, abs(best_across) / best_half);
+    let bars = tyre_bars(best_along, best_across, best_heading,
+        vec2<f32>(-best_heading.y, best_heading.x), driven.bar, within, footprint);
+
+    // The trough, across the tyre: a rounded floor out to the shoulder, then
+    // the spoil standing proud just outside it. How deep goes with how hard the
+    // ground was worked here, so a wheel that merely passed leaves a crease and
+    // one that has been over a dozen times leaves a rut.
+    let axle = vec2<f32>(-best_heading.y, best_heading.x);
+    let share = best_across / best_half;
+    let deep = RUT_DEEP_M * clamp(pressed, 0.0, 1.0);
+    let floor_of = 1.0 - smoothstep(0.0, 1.0, abs(share));
+    let shoulder = (1.0 - smoothstep(0.0, 0.55, abs(abs(share) - 1.22))) * 0.42;
+    let depth = -deep * floor_of + deep * shoulder;
+    // The slope of that profile, taken in closed form and laid straight into
+    // the normal: the trough is a hand's breadth across and the terrain carries
+    // a metre to the cell, so it can never be dug into the mesh.
+    let falls = deep * 1.9 * share * (1.0 - smoothstep(0.7, 1.35, abs(share)));
+    return Driven(bars, vec3<f32>(depth, falls * axle.x / best_half, falls * axle.y / best_half));
+}
+
 
 // `fract(sin(dot(..)))` is not a hash at these coordinates: its own periods
 // beat against the lattice and draw whorls across the ground.
@@ -277,11 +371,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // relief before it is colour: the chevron is a shape the sun finds, so it
     // goes into the normal and takes only a little shade of its own for the
     // ground lying in the bottom of it.
-    // Only a wheel that has rolled here leaves one. A way the layout laid out
-    // is ground worn down by years of traffic, not one tyre's chevron held in it.
-    let mark = sample_wheel_mark(tracks, wheels, place);
-    let print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
-        wheels.bar, mark.press, pixel_m);
+    // Only a wheel that has actually rolled here leaves a chevron; a way the
+    // layout laid out is ground worn down by years of traffic. The tread comes
+    // off the line that wheel drove, not out of the wheel map.
+    let drove = trail_print(place, pixel_m, max(rolled_now, wheel_scar(tracks, wheels, place)));
+    let print = drove.bars;
     let laid = read.x;
     let bared = max(laid, rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
@@ -339,7 +433,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         grass_share = met.a;
     }
 
-    colour *= shade_of_clumps * mix(1.0, 0.74, verge_damp(bared)) * mix(1.0, 0.40, print.x) * (1.0 + print.w * 0.85);
+    colour *= shade_of_clumps * mix(1.0, 0.74, verge_damp(bared)) * mix(1.0, 0.72, print.x) * (1.0 + print.w * 0.40);
+    // The floor of a trough sees less of the sky than the ground beside it, and
+    // the spoil on its shoulders catches what the floor misses. Read off the
+    // depth itself, so it holds whatever the sun is doing — which is what makes
+    // the mark read as pressed into the ground rather than painted onto it.
+    colour *= clamp(1.0 + drove.rut.x * 3.2, 0.82, 1.09);
 
     let pressed = sample_wheels(tracks, wheels, place);
     let rolled = clamp(pressed.x * edge, 0.0, 1.0);
@@ -354,7 +453,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let north = made_relief(place + vec2<f32>(0.0, step), close, pixel_m) * pressed_down;
     let bumps = normalize(vec3<f32>((here - east) * 0.5, step, (here - north) * 0.5));
     let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0)
-        + vec3<f32>(print.y, 0.0, print.z));
+        + vec3<f32>(print.y + drove.rut.y, 0.0, print.z + drove.rut.z));
 
     let pit = clamp(0.82 + here * 1.1, 0.7, 1.22);
 

@@ -296,6 +296,42 @@ struct BareExtension {
     geometry: SurfaceGeometryParams,
     #[uniform(109)]
     ground: BareGround,
+    #[uniform(110)]
+    trail: DrivenTrail,
+}
+
+/// The lines the wheels have actually driven, for the cover to print the tread
+/// from. A line and not a raster: see `contacts::TrailPoint` for why.
+#[derive(ShaderType, Reflect, Debug, Clone, Copy)]
+pub struct DrivenTrail {
+    /// The tyre printing them — pitch, lean, duty, depth.
+    pub bar: Vec4,
+    /// How many points are in use, in `.x`; the rest is spare.
+    pub count: Vec4,
+    /// Each point: where the wheel's middle was, metres of line before it, and
+    /// half the tyre's width — negative where a run begins.
+    pub points: [Vec4; crate::contacts::TRAIL_POINTS],
+}
+
+impl Default for DrivenTrail {
+    fn default() -> Self {
+        Self {
+            bar: crate::layout::TyreTread::default().packed(),
+            count: Vec4::ZERO,
+            points: [Vec4::ZERO; crate::contacts::TRAIL_POINTS],
+        }
+    }
+}
+
+impl DrivenTrail {
+    pub fn of(trails: &crate::contacts::WheelTrails) -> Self {
+        let mut out = Self { bar: trails.bar, ..Default::default() };
+        for (slot, point) in out.points.iter_mut().zip(&trails.points) {
+            *slot = Vec4::new(point.at.x, point.at.y, point.along, point.half_width);
+        }
+        out.count.x = trails.points.len().min(crate::contacts::TRAIL_POINTS) as f32;
+        out
+    }
 }
 
 /// What kind of bare ground this is. Everything a profile cannot know — where
@@ -347,6 +383,23 @@ impl MaterialExtension for BareExtension {
     }
 }
 
+/// Hands every bare ground the lines the wheels have driven. The trail is one
+/// thing for the whole world but a material's bindings are its own, so it is
+/// written into each of them — a couple of kilobytes a field, once a frame, and
+/// only when there is anything to say.
+fn carry_trail_to_grounds(
+    trails: Res<crate::contacts::WheelTrails>,
+    mut materials: ResMut<Assets<BareMaterial>>,
+) {
+    if !trails.is_changed() {
+        return;
+    }
+    let laid = DrivenTrail::of(&trails);
+    for (_, material) in materials.iter_mut() {
+        material.extension.trail = laid;
+    }
+}
+
 pub(super) struct BarePlugin;
 
 impl Plugin for BarePlugin {
@@ -355,10 +408,11 @@ impl Plugin for BarePlugin {
         bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
         app.add_plugins(MaterialPlugin::<BareMaterial>::default());
+        app.add_systems(Update, carry_trail_to_grounds);
         // A worn track recovers slowly and marks deeply; sand holds a wheel
         // mark just as long but hardly darkens where it has been pressed.
         let response = WheelResponse {
-            recovery_seconds: 900.0,
+            recovery_seconds: 330.0,
             bend: 0.9,
             darkening: 0.3,
             footprint_length: 0.3,
@@ -581,6 +635,7 @@ fn ground(
         heightmap: geometry.heightmap,
         geometry: geometry.params,
         ground: bare,
+        trail: DrivenTrail::default(),
     };
     let material = world
         .resource_mut::<Assets<BareMaterial>>()

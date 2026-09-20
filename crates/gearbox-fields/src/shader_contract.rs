@@ -61,7 +61,10 @@ fn declared(source: &str) -> BTreeSet<String> {
         .lines()
         .filter_map(|line| {
             let line = line.trim_start();
-            let rest = line.strip_prefix("fn ").or_else(|| line.strip_prefix("const "))?;
+            let rest = line
+                .strip_prefix("fn ")
+                .or_else(|| line.strip_prefix("const "))
+                .or_else(|| line.strip_prefix("struct "))?;
             let name: String =
                 rest.chars().take_while(|it| it.is_alphanumeric() || *it == '_').collect();
             (!name.is_empty()).then_some(name)
@@ -239,7 +242,9 @@ fn the_tyre_bars_meet_at_the_centre_of_the_rut() {
 #[test]
 fn every_cover_that_prints_a_tyre_bar_tilts_its_normal_by_it() {
     for (name, source) in shaders() {
-        if name == COVER || !calls(&source, "wheel_print") {
+        // A cover prints a bar either from the wheel map or from the line the
+        // wheel drove; both end in the same relief and both owe the normal.
+        if name == COVER || !(calls(&source, "wheel_print") || calls(&source, "tyre_bars")) {
             continue;
         }
         assert!(

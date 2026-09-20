@@ -85,10 +85,13 @@ impl Plugin for FieldsPlugin {
             .init_resource::<runtime::VegetationChunks>()
             .init_resource::<runtime::CoverPending>()
             .init_resource::<contacts::WheelContacts>()
+            .init_resource::<contacts::WheelTrails>()
+            .init_resource::<contacts::TrailKeeper>()
             .init_resource::<CoverWind>()
             .init_resource::<CoverTerrainRoots>()
             .add_plugins(ExtractResourcePlugin::<contacts::WheelContacts>::default())
             .add_systems(First, contacts::begin_wheel_contacts)
+            .add_systems(bevy::prelude::PostUpdate, contacts::keep_wheel_trails)
             .add_systems(Update, (textures::prepare_textures, render::sync_wind))
             .add_plugins((
                 clumps::ClumpsPlugin,
