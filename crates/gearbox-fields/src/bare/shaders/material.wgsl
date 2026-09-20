@@ -278,7 +278,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // ploughed field — road metal where nothing had made a road.
     let pool = rut_of(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
     let earth = mix(ground.tint.rgb, ground.stony.rgb, settled(laid) * ground.stony.w)
-        * earth_mottle(place) * mix(1.0, 0.58, pool.y);
+        * earth_mottle(place) * mix(1.0, 0.58, pool.y)
+        * mix(1.0, pool.z, 1.0 - smoothstep(0.05, 0.22, pixel_m));
     colour = earth * mix(0.78, 1.24, country)
         * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
         * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);

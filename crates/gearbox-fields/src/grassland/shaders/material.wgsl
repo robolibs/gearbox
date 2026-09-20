@@ -173,7 +173,8 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     // band of colour laid over the field.
     let pool = rut_of(world_xz, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
     let earth = mix(edges.soil.rgb, edges.stony.rgb, settled(meadow_worn(world_xz))) * (0.74 + dirt_detail * 0.86)
-        * earth_mottle(world_xz) * mix(1.0, 0.58, pool.y);
+        * earth_mottle(world_xz) * mix(1.0, 0.58, pool.y)
+        * mix(1.0, pool.z, 1.0 - smoothstep(0.02, 0.10, footprint));
     // Not a fade between the two: each brings its own relief and the taller
     // takes the pixel, so the earth comes up first through the hollows of the
     // sward and the last of the grass holds on the high ground. A plain mix
