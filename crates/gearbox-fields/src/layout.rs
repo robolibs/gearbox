@@ -185,6 +185,32 @@ mod tests {
         assert!(a.depth_at(50.0, 0.0) > 0.3);
     }
 
+    // The colour and the ground must agree about a crossroads: `worn()` adds
+    // the lesser way to the greater there, and so must the hollow, or a
+    // junction reads as churned but sits no lower than the roads either side.
+    #[test]
+    fn a_crossroads_is_dug_deeper_than_either_way() {
+        let layout: FieldLayout = serde_json::from_str(
+            r#"{"default":"grassland","ways":[
+                {"name":"a","width":6.0,"wear":0.5,"points":[[-50,0],[50,0]]},
+                {"name":"b","width":6.0,"wear":0.5,"points":[[0,-50],[0,50]]}]}"#,
+        )
+        .unwrap();
+        let hollows = Hollows::of(&layout);
+        let alone = hollows.depth_at(40.0, 0.0);
+        let meeting = hollows.depth_at(0.0, 0.0);
+        assert!((alone - 0.255).abs() < 1e-5, "one way alone: {alone}");
+        assert!(meeting > alone * 1.5, "the crossing at {meeting} is no deeper");
+        // Still gentle enough to drive in and out of, even dug twice.
+        let slope = (0..80)
+            .map(|step| {
+                let at = step as f32 * 0.1;
+                (hollows.depth_at(at, 0.0) - hollows.depth_at(at + 0.1, 0.0)).abs() / 0.1
+            })
+            .fold(0.0f32, f32::max);
+        assert!(slope < 0.3, "sides of one in {:.0}", 1.0 / slope);
+    }
+
     #[test]
     fn a_field_with_no_way_of_its_own_sinks_nothing() {
         let plain: FieldLayout = serde_json::from_str(
@@ -654,7 +680,11 @@ impl Hollows {
                 nearest = nearest.min(place.distance(leg[0] + run / length * at));
             }
             let sides = 1.0 - smoothstep(hollow.half * 0.55, hollow.half + FADE_M, nearest);
-            deepest = deepest.max(hollow.sink * sides);
+            // Where two ways meet, the lesser adds to the greater rather than
+            // hiding under it — the same rule `worn()` uses for the colour, so
+            // a crossroads is dug out as well as worn bare.
+            let here = hollow.sink * sides;
+            deepest = deepest.max(here) + deepest.min(here) * 0.6;
         }
         deepest
     }
