@@ -486,13 +486,15 @@ fn stamp_wheel_contacts(
             // across the axle, a short contact patch along the roll. Texel
             // centres sit on integer coordinates; a texel is stamped only when
             // its centre lies inside that rectangle, row by row.
-            let centre = Vec2::new(
-                (contact.position.x - field.params.wheels.origin.x) * tpm,
-                (contact.position.z - field.params.wheels.origin.y) * tpm,
-            );
-            // The tread is measured across from the wheel's steadied line, not
-            // from where the contact happens to be sitting this frame.
+            // The whole mark — where it is stamped as much as what is measured
+            // across it — sits on the line this wheel runs down, not on where
+            // its contact happens to be this frame. Stamped at the contact and
+            // measured from the line, the two disagree: the band lands in one
+            // place and its tread is drawn as though it were in another, so
+            // each side of the machine lays two fat overlapping bands and a
+            // tractor leaves four tracks where it should leave two.
             let line = (contact.centreline - field.params.wheels.origin) * tpm;
+            let centre = line;
             let roll = contact.direction.normalize_or(Vec2::X);
             let axle = roll.perp();
             let half_width = (contact.width * 0.5 * tpm).max(0.5);
