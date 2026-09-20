@@ -4,6 +4,7 @@ pub(super) struct JointAccess {
     pub shared: Shared,
     pub handle: rt::JointHandle,
     pub bodies: (BodyId, BodyId),
+    pub wake_on_change: bool,
 }
 
 impl JointAccess {
@@ -19,7 +20,7 @@ impl JointAccess {
                     ..Default::default()
                 });
                 change(&mut motor);
-                world.scene.set_joint_motor(self.handle, axis, motor)
+                world.scene.set_joint_motor_with_wake(self.handle, axis, motor, self.wake_on_change)
             });
         apply(result);
     }

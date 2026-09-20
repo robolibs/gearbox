@@ -1286,8 +1286,8 @@ fn apply_builtin_ackermann_cmd_vel(
             if let Some(turn) = &turn {
                 turn.configure_servos(&mut physics, steer_cap);
             }
-            let applied = apply_joint_motors(&mut physics, &wheel_targets, &steer_targets, steer_cap);
-            runtime.parking.apply(&mut physics, &wheel_targets, cmd.linear_mps.abs() < 0.05);
+            let holds = runtime.parking.prepare(&physics, &wheel_targets, cmd.linear_mps.abs() < 0.05);
+            let applied = apply_joint_motors_with_holds(&mut physics, &wheel_targets, &steer_targets, steer_cap, &holds);
             if runtime.logged_steer.insert(key.clone()) {
                 info!(
                     "gearbox-control: {} steer joints={} applied={} wheel joints={} applied={}",
@@ -3434,13 +3434,24 @@ fn apply_joint_motors(
     steer_targets: &[JointPositionTarget],
     steer_cap: Option<f64>,
 ) -> MotorApplication {
+    apply_joint_motors_with_holds(physics, wheel_targets, steer_targets, steer_cap, &[])
+}
+
+fn apply_joint_motors_with_holds(
+    physics: &mut crate::physics::PhysicsWorld,
+    wheel_targets: &[JointVelocityTarget],
+    steer_targets: &[JointPositionTarget],
+    steer_cap: Option<f64>,
+    holds: &[parking::HoldTarget],
+) -> MotorApplication {
     let mut applied = MotorApplication::default();
-    if wheel_targets.is_empty() && steer_targets.is_empty() {
+    if wheel_targets.is_empty() && steer_targets.is_empty() && holds.is_empty() {
         return applied;
     }
 
     for target in wheel_targets {
         for id in physics.joints_between(target.pair.0, target.pair.1) {
+            if holds.iter().any(|hold| hold.joint == id) { continue; }
             let target = JointVelocityTarget {
                 velocity: target.velocity * physics.wheel_drive_sign(id),
                 ..*target
@@ -3464,6 +3475,7 @@ fn apply_joint_motors(
             }
         }
     }
+    applied.drive |= parking::apply_holds(physics, holds);
     applied
 }
 

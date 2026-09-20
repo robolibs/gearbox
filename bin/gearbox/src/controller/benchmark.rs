@@ -337,6 +337,7 @@ fn imported_kubota_explicit_sleep() {
     }
     samples.sort_by(f64::total_cmp);
     eprintln!("explicit imported sleep: sleeping_ticks={asleep}/240 median_ms={:.6} p95_ms={:.6} controllers=enabled", samples[120], samples[228]);
+    assert_eq!(asleep, 240);
     fixture.pressure(0.5);
     fixture.tick();
     assert!(!fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
@@ -345,6 +346,49 @@ fn imported_kubota_explicit_sleep() {
     let physics = fixture.app.world().resource::<PhysicsWorld>();
     assert!(physics.body(fixture.chassis).unwrap().linvel().length() > 1.8);
     assert!(physics.quarantined.is_empty());
+    fixture.verify(0.5, true);
+}
+
+#[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET; automatic sleep and pressure/drive wake"]
+fn imported_kubota_automatic_sleep() {
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    let mut fixture = Fixture::load(Path::new(&asset));
+    fixture.drive(0.0, 0.0);
+    let mut first_sleep = None;
+    for tick in 0..7200 {
+        fixture.tick();
+        if fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping() {
+            first_sleep.get_or_insert(tick);
+            break;
+        }
+    }
+    assert!(first_sleep.is_some(), "parked tractor never settled");
+    let mut samples = Vec::new();
+    for _ in 0..240 {
+        samples.push(fixture.tick().as_secs_f64() * 1000.0);
+        assert!(fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
+    }
+    samples.sort_by(f64::total_cmp);
+    eprintln!("automatic imported sleep: first_tick={} median_ms={:.6} p95_ms={:.6} controllers=enabled",
+        first_sleep.unwrap(), samples[120], samples[228]);
+    fixture.pressure(0.5);
+    fixture.tick();
+    assert!(!fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
+    let mut pressure_settle = None;
+    for tick in 0..7200 {
+        fixture.tick();
+        if fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping() {
+            pressure_settle = Some(tick);
+            break;
+        }
+    }
+    eprintln!("automatic pressure resettle: tick={pressure_settle:?}");
+    assert!(fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
+    fixture.drive(2.0, 0.12);
+    fixture.tick();
+    assert!(!fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
+    for _ in 0..1200 { fixture.tick(); }
     fixture.verify(0.5, true);
 }
 

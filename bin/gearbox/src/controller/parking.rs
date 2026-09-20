@@ -59,8 +59,8 @@ mod tests {
         target: JointVelocityTarget,
         parked: bool,
     ) {
-        apply_joint_motors(physics, &[target], &[], None);
-        brakes.apply(physics, &[target], parked);
+        let holds = brakes.prepare(physics, &[target], parked);
+        apply_joint_motors_with_holds(physics, &[target], &[], None, &holds);
         physics.step();
         assert!(physics.quarantined.is_empty());
     }
@@ -186,6 +186,26 @@ mod tests {
         assert_eq!(motor.stiffness, 0.0);
         assert_eq!(motor.damping, target.damping);
     }
+
+    #[test]
+    fn unchanged_hold_does_not_wake_and_releasing_it_resumes_rotation() {
+        let (mut physics, mut target, joint) = fixture(true);
+        let mut brakes = ParkingBrakes::default();
+        target.velocity = 0.0;
+        tick(&mut physics, &mut brakes, target, true);
+        physics.body_mut(target.pair.1).unwrap().sleep();
+        for _ in 0..20 {
+            tick(&mut physics, &mut brakes, target, true);
+            assert!(physics.body(target.pair.1).unwrap().is_sleeping());
+            assert_eq!(physics.joint(joint).unwrap().motor(JointAxis::AngX).unwrap().target_position, brakes.holds[&joint].target);
+        }
+        target.velocity = 2.0;
+        wake_vehicle_for_command(&mut physics, target.pair.1, &[target.pair],
+            CmdVel { linear_mps: 2.0, angular_rps: 0.0 }, 0.0);
+        tick(&mut physics, &mut brakes, target, false);
+        assert!(!physics.body(target.pair.1).unwrap().is_sleeping());
+        assert!(physics.body(target.pair.1).unwrap().angvel().z > 0.0);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -195,13 +215,25 @@ struct Hold {
 }
 
 impl ParkingBrakes {
-    /// Override freshly written velocity motors with bounded captured-angle holds.
+    #[cfg(test)]
     pub(super) fn apply(
         &mut self,
         physics: &mut crate::physics::PhysicsWorld,
         targets: &[JointVelocityTarget],
         parked: bool,
     ) {
+        let holds = self.prepare(physics, targets, parked);
+        apply_holds(physics, &holds);
+    }
+
+    /// Capture bounded position commands for eligible wheel joints.
+    pub(super) fn prepare(
+        &mut self,
+        physics: &crate::physics::PhysicsWorld,
+        targets: &[JointVelocityTarget],
+        parked: bool,
+    ) -> Vec<HoldTarget> {
+        let mut commands = Vec::new();
         self.holds.retain(|id, _| physics.joint(*id).is_some());
         for target in targets {
             for id in physics.joints_between(target.pair.0, target.pair.1) {
@@ -232,17 +264,29 @@ impl ParkingBrakes {
                 hold.target = hold
                     .target
                     .clamp(position - MAX_HOLD_ERROR_RAD, position + MAX_HOLD_ERROR_RAD);
-                if let Some(joint) = physics.joint_mut(id, false) {
-                    joint.set_motor_model(JointAxis::AngX, MotorModel::Force);
-                    joint.set_motor_position(
-                        JointAxis::AngX,
-                        hold.target,
-                        target.max_torque / HOLD_COMPLIANCE_RAD,
-                        target.max_torque / HOLD_DAMPING_SPEED_RAD_S,
-                    );
-                    joint.set_motor_max_force(JointAxis::AngX, target.max_torque);
-                }
+                commands.push(HoldTarget { joint: id, position: hold.target, max_torque: target.max_torque });
             }
         }
+        commands
     }
+}
+
+pub(super) struct HoldTarget {
+    pub joint: JointId,
+    position: f64,
+    max_torque: f64,
+}
+
+pub(super) fn apply_holds(physics: &mut crate::physics::PhysicsWorld, holds: &[HoldTarget]) -> bool {
+    let mut applied = false;
+    for hold in holds {
+        if let Some(joint) = physics.joint_mut(hold.joint, false) {
+            joint.set_motor_model(JointAxis::AngX, MotorModel::Force);
+            joint.set_motor_position(JointAxis::AngX, hold.position,
+                hold.max_torque / HOLD_COMPLIANCE_RAD, hold.max_torque / HOLD_DAMPING_SPEED_RAD_S);
+            joint.set_motor_max_force(JointAxis::AngX, hold.max_torque);
+            applied = true;
+        }
+    }
+    applied
 }

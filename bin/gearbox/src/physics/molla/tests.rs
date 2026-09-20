@@ -49,6 +49,10 @@ fn backend_sleep_and_motor_wake_cover_the_whole_tree() {
     backend.body_mut(b).unwrap().sleep();
     assert!(backend.body(a).unwrap().is_sleeping());
     assert!(backend.body(b).unwrap().is_sleeping());
+    backend.joint_mut(joint, false).unwrap().set_motor_velocity(JointAxis::AngX, 2.0, 5.0);
+    backend.step(&|_, _| false);
+    assert!(backend.body(a).unwrap().is_sleeping());
+    assert!(backend.body(b).unwrap().is_sleeping());
     backend.joint_mut(joint, true).unwrap().set_motor_velocity(JointAxis::AngX, 1.0, 5.0);
     assert!(!backend.body(a).unwrap().is_sleeping());
     assert!(!backend.body(b).unwrap().is_sleeping());

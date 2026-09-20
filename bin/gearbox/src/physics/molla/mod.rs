@@ -48,10 +48,11 @@ pub struct MollaBackend {
 
 impl Default for MollaBackend {
     fn default() -> Self {
+        let mut world = RigidWorld::new().expect("Molla world initialization");
+        world.set_sleep_settings(Some(molla_solvers::rigid_world::SleepSettings::default()))
+            .expect("Molla sleep settings");
         Self {
-            shared: Shared(Arc::new(Mutex::new(
-                RigidWorld::new().expect("Molla world initialization"),
-            ))),
+            shared: Shared(Arc::new(Mutex::new(world))),
             bodies: BTreeMap::new(),
             colliders: BTreeMap::new(),
             joints: BTreeMap::new(),
@@ -369,6 +370,7 @@ impl PhysicsBackend for MollaBackend {
             shared: self.shared.clone(),
             handle,
             bodies: (body1, body2),
+            wake_on_change: true,
         };
         for (axis, limits) in desc.limits {
             joint.set_limits(axis, limits);
@@ -412,8 +414,11 @@ impl PhysicsBackend for MollaBackend {
     fn joint(&self, id: JointId) -> Option<&dyn Joint> {
         self.joints.get(&id).map(|j| j as &dyn Joint)
     }
-    fn joint_mut(&mut self, id: JointId, _wake: bool) -> Option<&mut dyn JointMut> {
-        self.joints.get_mut(&id).map(|j| j as &mut dyn JointMut)
+    fn joint_mut(&mut self, id: JointId, wake: bool) -> Option<&mut dyn JointMut> {
+        self.joints.get_mut(&id).map(|joint| {
+            joint.wake_on_change = wake;
+            joint as &mut dyn JointMut
+        })
     }
     fn joint_bodies(&self, id: JointId) -> Option<(BodyId, BodyId)> {
         self.joints.get(&id).map(|j| j.bodies)
