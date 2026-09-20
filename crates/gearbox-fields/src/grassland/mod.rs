@@ -31,6 +31,21 @@ struct MeadowExtension {
     heightmap: Handle<Image>,
     #[uniform(107)]
     geometry: SurfaceGeometryParams,
+    #[uniform(108)]
+    edges: MeadowEdges,
+}
+
+/// Where this meadow sits and what lies across each of its sides, so it meets
+/// its neighbours in a wash rather than on a line — the same blend the bare
+/// grounds make, from the other side of it.
+#[derive(bevy::render::render_resource::ShaderType, Reflect, Debug, Clone, Copy, Default)]
+struct MeadowEdges {
+    extent: Vec4,
+    west: Vec4,
+    east: Vec4,
+    south: Vec4,
+    north: Vec4,
+    reach: Vec4,
 }
 
 impl MaterialExtension for MeadowExtension {
@@ -161,7 +176,7 @@ fn create_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
-    _placed: crate::profile::Placed,
+    placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let grass_albedo = assets
@@ -187,6 +202,16 @@ fn create_ground(
                 ..default()
             },
             extension: MeadowExtension {
+                edges: MeadowEdges {
+                    extent: Vec4::new(
+                        placed.bounds.min.x, placed.bounds.min.y,
+                        placed.bounds.max.x, placed.bounds.max.y),
+                    west: placed.tint[0],
+                    east: placed.tint[1],
+                    south: placed.tint[2],
+                    north: placed.tint[3],
+                    reach: Vec4::from_array(placed.reach),
+                },
                 grass_albedo,
                 dirt_albedo,
                 trample,

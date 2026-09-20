@@ -16,6 +16,35 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var surface_heightmap: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var<uniform> geometry: SurfaceGeometryParams;
 
+struct MeadowEdges {
+    extent: vec4<f32>,
+    west: vec4<f32>,
+    east: vec4<f32>,
+    south: vec4<f32>,
+    north: vec4<f32>,
+    reach: vec4<f32>,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(108) var<uniform> edges: MeadowEdges;
+
+// The sward washed into whatever lies across each side, so a meadow meets a
+// track from its own side too and the two blends meet in the middle.
+fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
+    var out = colour;
+    let past = vec4<f32>(
+        edges.extent.x - place.x, place.x - edges.extent.z,
+        edges.extent.y - place.y, place.y - edges.extent.w);
+    let sides = array<vec4<f32>, 4>(edges.west, edges.east, edges.south, edges.north);
+    for (var i = 0; i < 4; i = i + 1) {
+        let reach = edges.reach[i];
+        if (reach <= 0.0) {
+            continue;
+        }
+        let edge = past[i] / reach + 1.0;
+        out = mix(out, sides[i].rgb, clamp(edge, 0.0, 1.0) * 0.7);
+    }
+    return out;
+}
+
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -151,7 +180,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     let shaded = mix(0.72, 1.0, smoothstep(0.1, 0.7, sun_height));
     pbr_input.material.base_color = alpha_discard(pbr_input.material,
-        vec4<f32>(surface.color.rgb * shaded, surface.color.a));
+        vec4<f32>(washed(in.world_position.xz, surface.color.rgb) * shaded, surface.color.a));
     pbr_input.material.perceptual_roughness = surface.roughness;
     pbr_input.material.metallic = 0.0;
     pbr_input.material.reflectance = vec3<f32>(0.04);
