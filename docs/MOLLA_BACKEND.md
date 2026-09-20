@@ -4,6 +4,38 @@
 remains Rapier. Both implementations share Gearbox's existing body, collider,
 joint and world traits; the Molla adapter is in `bin/gearbox/src/physics/molla`.
 
+## Latest convex-support and towing validation (2026-09-20)
+
+Molla `c95b4c3` repairs a CPU GJK distance-reduction error that intermittently
+dropped penetrating trailer hull/ground contacts. This resolves the residual
+low-pressure Krampe rocking described in earlier checkpoints without changing
+tyre stiffness, damping, assets or acceptance bounds. The unchanged imported
+15 s support gate now reports 0.0000342/0.0000548/0.0000145 m/s at 0.5/1.8/4 bar.
+All six imported-machine gates pass. Both explicit-backend binary lanes pass
+87 tests with seven ignored, and native `oslo make build` passes.
+
+The Krampe fixture accepts `GEARBOX_BENCH_TRACE_SUPPORT=1` for once-per-second
+body energy, contact impulse contributions and tyre loads, plus initial
+body/collider identity. Per-contact `step_mean_force` is its impulse divided
+by the full step duration; substep contributions must be summed.
+
+Fresh live instances `molla-gjk-tow-low`, `molla-gjk-tow-high`, `rapier-gjk-tow`
+completed attachment, an eight-second 2 m/s / 0.4 rad/s command, detachment and
+empty attachment-list readback. Molla trailer readouts retained all four
+0.5/4-bar settings after detach. Final trailer pitches were
+-0.000223/+0.003044/+0.013473 rad respectively. No rejected-step, non-finite or
+quarantine diagnostics appeared. All owned viewers were explicitly stopped.
+Rear-view screenshots were inspected; calibrated pressure deformation and
+all-wheel contact are not proven by those views.
+
+Evidence: `/tmp/molla-gjk-all-imported.log`, `/tmp/molla-support-fixed-gjk.log`,
+`/tmp/molla-gjk-{low,high}-*-state.json`, `/tmp/rapier-gjk-*-state.json`,
+`/tmp/molla-gjk-{low,high}-detached.png`, `/tmp/rapier-gjk-detached.png`.
+The full plan remains incomplete: performance tails, fleet behavior, pressure
+save/reload and UI lifecycle, calibrated tyre/soil behavior and GPU parity
+still require their own gates. Sequential Kubota timing medians remain about
+0.96 ms; this is not a claim of Rapier performance parity.
+
 ## Current implementation
 
 - Stable handles, runtime body/collider/joint edits, re-rooting, mass/inertia

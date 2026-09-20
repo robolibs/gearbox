@@ -222,6 +222,44 @@ impl Fixture {
         }
         values
     }
+
+    fn trace_support(&self, step: usize) {
+        let physics = self.app.world().resource::<PhysicsWorld>();
+        let mut energy = 0.0;
+        let mut potential = 0.0;
+        for id in physics.bodies() {
+            let body = physics.body(id).unwrap();
+            if step == 120 {
+                let path = body.entity().and_then(|e| self.app.world().get::<UsdPrimRef>(e));
+                eprintln!("support body id={id:?} path={:?} mass={}", path.map(|p| &p.path), body.mass());
+                for collider in body.colliders() {
+                    let collider = physics.collider(collider).unwrap();
+                    eprintln!("support shape body={id:?} shape={:?} pose={:?} bounds={:?}", collider.shape(), collider.position(), collider.aabb());
+                }
+            }
+            let angular = body.rotation().inverse() * body.angvel();
+            energy += 0.5 * (body.mass() * body.linvel().length_squared()
+                + angular.dot(body.inertia_tensor() * angular));
+            potential += body.mass() * 9.81 * body.center_of_mass().y;
+        }
+        let body = physics.body(self.chassis).unwrap();
+        eprintln!("support trace step={step} backend={} kinetic={energy:.9} potential={potential:.9} chassis_y={:.9} velocity={:?} angular={:?}",
+            physics.name(), body.translation().y, body.linvel(), body.angvel());
+        for manifold in physics.contacts().into_iter().filter(|m| m.active) {
+            let parents = [manifold.collider1, manifold.collider2]
+                .map(|id| physics.collider(id).unwrap().parent());
+            for point in manifold.points.iter().filter(|p| p.solved) {
+                eprintln!("support contact step={step} parents={parents:?} normal={:?} step_mean_force={} depth={} point={:?}",
+                    manifold.normal, point.impulse / physics.dt(), -point.dist, point.point);
+            }
+        }
+        for wheel in &self.wheels {
+            let body = physics.body(*wheel).unwrap();
+            let out = physics.wheel_output(*wheel);
+            eprintln!("support wheel step={step} body={wheel:?} y={} vy={} load={:?}",
+                body.translation().y, body.linvel().y, out.map(|o| o.normal_force));
+        }
+    }
 }
 
 #[test]
@@ -373,11 +411,15 @@ fn imported_kubota_straight_turn_and_track_contacts() {
 #[ignore = "requires GEARBOX_BENCH_TRAILER pointing to real krampe_trailer.usdz"]
 fn imported_krampe_parking_support() {
     let asset = std::env::var_os("GEARBOX_BENCH_TRAILER").expect("set GEARBOX_BENCH_TRAILER");
+    let trace = std::env::var_os("GEARBOX_BENCH_TRACE_SUPPORT").is_some();
     let mut outcomes = Vec::new();
     for pressure in [None, Some(0.5), Some(1.8), Some(4.0)] {
         let mut fixture = Fixture::load_backend(Path::new(&asset), pressure.is_some());
         if let Some(bar) = pressure { fixture.pressure(bar); }
-        for _ in 0..1800 { fixture.tick(); }
+        for step in 0..1800 {
+            fixture.tick();
+            if trace && step % 120 == 119 { fixture.trace_support(step + 1); }
+        }
         let physics = fixture.app.world().resource::<PhysicsWorld>();
         let body = physics.body(fixture.chassis).unwrap();
         let (roll, pitch) = machine_roll_pitch_rad(body);
