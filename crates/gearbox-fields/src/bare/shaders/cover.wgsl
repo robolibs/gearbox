@@ -110,9 +110,14 @@ fn way_offset(place: vec2<f32>, way: mat4x4<f32>, more: mat4x4<f32>,
 // Wear from one line: `against` is where the point stands against it (nearest
 // point, across, distance) and `half` how wide the worn part of it is.
 fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>) -> f32 {
+    // The ruts run at a tractor's gauge, but a way narrower than that would
+    // carry them outside its own verge and show almost nothing. So on a narrow
+    // path they close towards its middle and meet as one worn strip, which is
+    // what a path too narrow for a tractor is worn into anyway.
+    let gauge = min(tread.x, max(half - tread.y, 0.0));
     // No driver holds a line to the centimetre, so the ruts wander along it.
     let sway = (lattice(against.xy, 23.0) - 0.5) * 1.1;
-    let rut = abs(abs(against.z + sway) - tread.x);
+    let rut = abs(abs(against.z + sway) - gauge);
     let wheel = 1.0 - smoothstep(tread.y * 0.55, tread.y * 1.6, rut);
     // Ragged by moving where the edge falls, not by scaling the wear: as a
     // multiplier it took a road bare across its width down to two thirds.

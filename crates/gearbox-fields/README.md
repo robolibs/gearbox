@@ -99,6 +99,12 @@ winds along inside. A field names its own with `way` (world XZ points, at most s
           [103, 17], [108, 52], [113, 86], [110, 120]] }
 ```
 
+The ruts themselves run at a tractor's gauge, a little under two metres apart, whatever the
+way is worn to: `wear` says how bare each rut and the ground between them is, not how far
+apart they sit. A way too narrow to hold them — a footpath, a quad track — closes them
+towards its middle instead, so it wears as one strip rather than as two ruts mostly outside
+its own verge. `layouts/narrow.json` puts 1.2 m, 2.4 m and 6 m ways side by side.
+
 A road that outlives one field goes in the layout's own `ways` instead, and wears every
 field it crosses — whatever that field grows:
 
