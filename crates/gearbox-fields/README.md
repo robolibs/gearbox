@@ -102,6 +102,12 @@ through. Beside the stone a way carries `way_litter` — crumbs and dried clods 
 a field on a tyre and dropped, which are the way's own colour and not the field's, because a
 track carrying nothing but gravel reads as gravel spread over a lawn.
 
+What a wheel displaces has to go somewhere, and it stands in a low **berm** just outside each
+rut, which drains and dries before the rut does and so reads paler than either the rut or the
+ground beside it. Drawn and not dug: the terrain carries a metre to the cell, so a ridge a
+hand's breadth across can never be sunk into it — the same reason the ruts themselves are
+shading while the trough the whole way sits in is real geometry.
+
 A rut's floor is not flat across it either. The tyre pushes material to one side and leaves a
 **channel** down the other; along that channel are dips, and in the dips is where water will
 stand. Nothing draws water yet — `rut_of(...).y` is the ground being ready for it — but it

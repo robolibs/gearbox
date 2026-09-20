@@ -297,6 +297,13 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     let along_way = normalize(vec2<f32>(-off_line.y, off_line.x) + vec2<f32>(1e-5, 0.0));
     let bar = sin((dot(against.xy, along_way) + off_middle) * 32.0);
     let lug = mix(0.88, 1.04, smoothstep(-0.35, 0.6, bar));
+    // The material a wheel displaces has to go somewhere, and it stands in a
+    // low ridge just outside each rut. That ridge drains and dries before the
+    // rut does, so it reads paler than either the rut or the ground beside it.
+    // Shading and not geometry: the terrain carries a metre to the cell, so a
+    // ridge a hand's breadth across can never be sunk into it — the same reason
+    // the ruts themselves are drawn rather than dug.
+    let berm = (1.0 - smoothstep(0.0, tread.y * 0.7, abs(rut - tread.y * 1.4))) * apart;
     // Ragged by moving where the edge falls, not by scaling the wear: as a
     // multiplier it took a road bare across its width down to two thirds. Both
     // how far the edge softens and how far it wanders are held within the way
@@ -310,7 +317,7 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>,
     // the first: the floor of a rut and a road worn bare across its width both
     // read as fully worn, but only one of them has a tyre going down it.
     return vec4<f32>(clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0), wheel * verge,
-        channel * verge, mix(1.0, lug, wheel * verge));
+        channel * verge, mix(1.0, lug, wheel * verge) * mix(1.0, 1.09, berm * verge));
 }
 
 // How far out from a way's own edge this point stands, in metres, taking the
