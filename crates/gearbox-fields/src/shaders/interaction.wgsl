@@ -119,7 +119,7 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
         + dot(near_out, vec2<f32>(-near_roll.y, near_roll.x));
     let near_width = max(f32(texel.a & 255u) * 0.005, 0.01);
     var closest = 1e9;
-    var across_sum = 0.0;
+    var centre_sum = vec2<f32>(0.0);
     var roll_sum = vec2<f32>(0.0);
     var width_sum = 0.0;
     let corner = clamp(vec2<i32>(floor(t)), vec2<i32>(0), last - vec2<i32>(1));
@@ -144,7 +144,17 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
             (f32(there.a >> 8u) - 128.0) * 0.005 + dot(out_by, its_axle), known);
         let its_width = select(near_width, max(f32(there.a & 255u) * 0.005, 0.01), known);
         closest = min(closest, abs(its_across) / max(its_width, 0.01));
-        across_sum = across_sum + share * its_across;
+        // What each texel is blended by is the point on the tyre's own middle
+        // that it implies — itself, stepped back across its own axle — and not
+        // its reading of how far off that middle this point lies. Through a
+        // turn the four were stamped with the axle pointing different ways, and
+        // averaging four readings taken in four different frames is what makes
+        // the middle wander: it is a mean of numbers that do not mean the same
+        // thing. The points they imply all lie on one line, curved or straight,
+        // so averaging *those* is sound however the frames differ.
+        let its_stamp = select(near_across, (f32(there.a >> 8u) - 128.0) * 0.005, known);
+        let its_place = params.origin + vec2<f32>(at) / params.texels_per_metre;
+        centre_sum = centre_sum + share * (its_place - its_stamp * its_axle);
         roll_sum = roll_sum + share * its_roll;
         width_sum = width_sum + share * its_width;
     }
@@ -166,10 +176,17 @@ fn sample_wheel_mark(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec
     // nearest texel's own direction is the honest answer.
     let blended = roll_sum / weight;
     let roll = select(near_roll, normalize(blended), length(blended) > 0.3);
-    let across = across_sum / weight;
     let half_width = width_sum / weight;
+    // How far off the middle, measured to the blended middle itself rather than
+    // averaged out of four different frames' answers.
+    let centre = centre_sum / weight;
+    let across = dot(world_xz - centre, vec2<f32>(-roll.y, roll.x));
+    // The mark is kept wherever *any* of the four says the tyre covers it, so a
+    // turn does not cut its own track away; the middle is the well-behaved
+    // reading above, so the two are taken together.
+    let inside = min(closest, abs(across) / max(half_width, 0.01));
     return WheelMark(press, f32(texel.g & 15u) / 15.0, along / TREAD_PITCH_M, across / half_width,
-        vec2<f32>(along, across), roll, closest);
+        vec2<f32>(along, across), roll, inside);
 }
 
 // How much of a tyre's width covers this point: one in the middle of it, nought
