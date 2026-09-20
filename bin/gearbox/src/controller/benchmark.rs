@@ -1,7 +1,7 @@
 //! Imported-machine CPU benchmark without rendering, network agents or wall-clock stepping.
 
 use super::*;
-use crate::physics::{MollaBackend, PhysicsWorld};
+use crate::physics::{MollaBackend, PhysicsWorld, RapierBackend};
 use crate::physics::backend::{ColliderDesc, ColliderId, DQuat, Pose, Shape};
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,10 @@ struct Fixture {
 
 impl Fixture {
     fn load(path: &Path) -> Self {
+        Self::load_backend(path, true)
+    }
+
+    fn load_backend(path: &Path, molla: bool) -> Self {
         let source = usd_bevy::UsdSource::from_file(path).expect("read benchmark asset");
         let stage = source.open_stage().expect("open benchmark stage");
         let mut machines = discover_machines_from_stage(&stage).unwrap();
@@ -35,7 +39,9 @@ impl Fixture {
             usd_bevy::UsdPlugin,
         ));
         app.init_asset::<Mesh>().init_asset::<StandardMaterial>().init_asset::<Image>();
-        app.insert_resource(PhysicsWorld::with_backend(Box::new(MollaBackend::default())));
+        app.insert_resource(PhysicsWorld::with_backend(if molla {
+            Box::new(MollaBackend::default())
+        } else { Box::new(RapierBackend::default()) }));
         app.finish();
         app.cleanup();
         let root = crate::physics::benchmark::project(&mut app, &stage);
@@ -47,6 +53,7 @@ impl Fixture {
             .init_resource::<MachineAgentKeys>()
             .init_resource::<UiDrive>()
             .init_resource::<crate::services::LinkValues>()
+            .init_resource::<gearbox_fields::WheelContacts>()
             .insert_resource(gearbox_api::PhysicsActive(true));
         app.world_mut().resource_mut::<ControllerInventory>().machines.push(machine.clone());
         app.world_mut().resource_mut::<MachineAgentKeys>().0.insert(
@@ -65,6 +72,7 @@ impl Fixture {
             wheel_forces::sync_machine_wheel_forces,
             apply_builtin_ackermann_cmd_vel,
             apply_builtin_diff_drive_cmd_vel,
+            record_wheel_tracks,
         ).chain());
         controllers.run(app.world_mut());
         let runtime = app.world().resource::<ControllerRuntimeState>();
@@ -78,7 +86,8 @@ impl Fixture {
         let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
         let chassis = physics.entity_to_body[&chassis_entity];
         let mass: f64 = bodies.iter().map(|id| physics.body(*id).unwrap().mass()).sum();
-        assert!((mass - 4917.0).abs() < 1.0, "imported mass {mass}");
+        let expected_mass = if molla { 4916.010223 } else { 4913.449268 };
+        assert!((mass - expected_mass).abs() < 0.001, "imported mass {mass}");
         let clearance = wheels.iter().flat_map(|id| physics.body(*id).unwrap().colliders())
             .map(|id| physics.collider(id).unwrap().aabb().mins.y).fold(f64::INFINITY, f64::min);
         for body in bodies {
@@ -119,6 +128,12 @@ impl Fixture {
 
     fn tick(&mut self) -> Duration {
         self.app.world_mut().resource_mut::<Time>().advance_by(Duration::from_secs_f64(1.0 / 120.0));
+        let now = self.app.world().resource::<Time>().elapsed_secs_wrapped();
+        {
+            let mut contacts = self.app.world_mut().resource_mut::<gearbox_fields::WheelContacts>();
+            contacts.contacts.clear();
+            contacts.now = now;
+        }
         self.controllers.run(self.app.world_mut());
         self.services.run(self.app.world_mut());
         let mut physics = self.app.world_mut().resource_mut::<PhysicsWorld>();
@@ -280,6 +295,70 @@ fn imported_kubota_slope_parking() {
         assert!(drift < 0.01 && speed < 0.001,
             "slope creep at {degrees} degrees, {bar} bar: {drift} m, {speed} m/s");
     }
+}
+
+#[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET pointing to real kubota_tractor.usdz; drive and track inputs"]
+fn imported_kubota_straight_turn_and_track_contacts() {
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    let mut reference_headings = [0.0; 3];
+    let mut reference_speeds = [0.0; 3];
+    let mut straight_footprints = Vec::new();
+    for pressure in [None, Some(0.5), Some(1.8), Some(4.0)] {
+        for (command, turn) in [0.0_f32, 0.4, -0.4].into_iter().enumerate() {
+            let mut fixture = Fixture::load_backend(Path::new(&asset), pressure.is_some());
+            if let Some(bar) = pressure { fixture.pressure(bar); }
+            for _ in 0..600 { fixture.tick(); }
+            let physics = fixture.app.world().resource::<PhysicsWorld>();
+            let start = physics.body(fixture.chassis).unwrap().translation();
+            let heading = machine_heading_rad(physics.body(fixture.chassis).unwrap());
+            fixture.drive(2.0, turn);
+            let mut samples = 0;
+            let mut footprints = Vec::new();
+            for step in 0..480 {
+                fixture.tick();
+                if step < 120 { continue; }
+                let contacts = fixture.app.world().resource::<gearbox_fields::WheelContacts>();
+                assert_eq!(contacts.contacts.len(), 4, "all supported wheels need track input");
+                for contact in &contacts.contacts {
+                    assert!(contact.position.is_finite() && contact.position.y.abs() < 0.02);
+                    assert!((contact.direction.length() - 1.0).abs() < 1e-5);
+                    assert!(contact.width.is_finite() && contact.width > 0.1);
+                    if pressure.is_some() {
+                        let length = contact.length.expect("pressure footprint length");
+                        assert!(length.is_finite() && length > 0.01);
+                        footprints.push(length);
+                    }
+                    samples += 1;
+                }
+            }
+            let physics = fixture.app.world().resource::<PhysicsWorld>();
+            let body = physics.body(fixture.chassis).unwrap();
+            let delta = machine_heading_rad(body) - heading;
+            let displacement = body.translation() - start;
+            let speed = body.linvel().length();
+            let patch_mean = footprints.iter().sum::<f32>() / footprints.len().max(1) as f32;
+            eprintln!("4s drive: backend={} pressure={pressure:?} command=(2,{turn}) heading_delta={delta:.9} displacement={displacement:?} speed={speed:.9} track_samples={samples} mean_patch_length={patch_mean}", physics.name());
+            if pressure.is_none() {
+                reference_headings[command] = delta;
+                reference_speeds[command] = speed;
+            } else {
+                assert!((delta - reference_headings[command]).abs() < 0.1, "turn diverged from same-scene Rapier");
+                assert!((speed - reference_speeds[command]).abs() < 0.1, "speed diverged from same-scene Rapier");
+                if turn == 0.0 { straight_footprints.push(patch_mean); }
+            }
+            assert!((speed - 2.0).abs() < 0.2, "drive speed {speed}");
+            assert!(displacement.length() > 5.0, "vehicle did not drive");
+            if turn == 0.0 {
+                assert!(delta.abs() < 0.02 && displacement.x.abs() < 0.1, "straight drive wandered");
+            } else {
+                assert!(delta * f64::from(turn.signum()) > 0.3 && delta.abs() < 1.8, "wrong turn response {delta}");
+                assert!(displacement.x * f64::from(turn.signum()) > 0.5);
+            }
+        }
+    }
+    assert_eq!(straight_footprints.len(), 3);
+    assert!(straight_footprints.windows(2).all(|pair| pair[0] > pair[1] + 0.02), "pressure must change track footprints: {straight_footprints:?}");
 }
 
 #[test]

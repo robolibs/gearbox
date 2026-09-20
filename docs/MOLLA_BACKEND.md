@@ -292,6 +292,67 @@ five ignored: the four imported-asset tests above and one Vulkan parity test.
 Earlier summaries describing every ignored test as external-asset-dependent
 were imprecise; Vulkan parity is a separate environment gate.
 
+### Straight driving, turning and track acceptance
+
+`controller::benchmark::imported_kubota_straight_turn_and_track_contacts`
+imports the real Kubota into both backends. Each fresh scene settles for 5 s,
+then drives at 2 m/s for 4 simulated seconds with yaw commands 0 and ±0.4 rad/s.
+Molla repeats at 0.5, 1.8 and 4 gauge bar. Production drive, hitch/PTO and
+`record_wheel_tracks` systems run; the fixture clears track inputs every tick.
+Every step checks finite, enabled bodies and no quarantine. The final 3 s
+require four finite, ground-level, normalized track inputs per tick.
+
+| Backend / pressure | Straight displacement (m) | Positive turn (rad) | Straight mean patch length (m) |
+| --- | ---: | ---: | ---: |
+| Rapier | 7.8084 | 1.49472 | geometric fallback |
+| Molla / 0.5 bar | 7.3399 | 1.47032 | 0.60443 |
+| Molla / 1.8 bar | 7.3020 | 1.46211 | 0.49442 |
+| Molla / 4 bar | 7.2920 | 1.46090 | 0.40880 |
+
+The gate requires final speed within 0.2 m/s of the command, displacement
+over 5 m, straight heading drift below 0.02 rad and lateral drift below 0.1 m,
+signed turning in both directions, and Molla heading/speed within 0.1 rad and
+0.1 m/s of the corresponding same-scene Rapier result. Straight footprint
+length must decrease by over 0.02 m between pressure levels. These are
+regression tolerances, not calibrated real-tyre reference data. The historical
+Rapier +0.60 rad figure in the plan is not reproduced by this current asset and
+controller: both backends turn approximately 1.5 rad over four simulated seconds.
+
+The imported mass snapshots differ: Molla 4916.010223 kg, Rapier 4913.449268 kg
+(2.561 kg, about 0.052%). Both are checked independently; mass equivalence is
+not claimed and the source of this difference remains to be audited.
+
+Run with the slope command's test filter replaced by the name above.
+`/tmp/gearbox-drive-track-final.log` records the strengthened gate passing;
+ordinary release suites pass 87 tests on each backend, with six ignored
+(five imported gates and one Vulkan gate). Logs:
+`/tmp/gearbox-drive-track-{molla,rapier}-regression.log`.
+
+Live CLI/render checks used the native debug viewer, the same Kubota, 1280×800,
+Wayland and `GEARBOX_TERRAIN=meadow` in assistant-owned instances
+`molla-field-track-gate` and `rapier-field-track-gate`. Both accepted
+`machine move kubota_tractor --forward 2 --turn 0.4 --for 4s`, then a straight
+4 s command, with visible tracks across grass and harvested wheat. Molla
+accepted 0.5 bar before turning and 4 bar before straight driving; fresh state
+subscriptions confirmed the applied values on all four wheels. Screenshots
+were captured through `instance screenshot` and visually inspected:
+
+- `/tmp/molla-field-before.png`, `/tmp/molla-field-low-after.png`,
+  `/tmp/molla-field-high-after.png`;
+- `/tmp/rapier-field-before.png`, `/tmp/rapier-field-after.png`,
+  `/tmp/rapier-field-straight.png`.
+
+The flat-ground preset retains a plain mesh without field cover/stamping; its
+no-track screenshot is not a failed field renderer. The meadow captures prove
+visible tracks, not a calibrated visual footprint-size comparison at matched
+load/camera. Live wall-clock commands, asynchronous telemetry and loading are
+not the deterministic four-simulated-second benchmark. The CLI move summary
+can lag; fresh subscriptions were used for end-state inspection. These runs
+are not performance-parity evidence. Startup still logs the pre-existing
+Vulkan loader and Bevy slab allocator diagnostics on both backends; no
+quarantine/non-finite diagnostics were found. All three assistant-owned viewers
+(including the initial flat probe `molla-track-gate`) were explicitly stopped.
+
 ### Commands
 
 Use the repository Nix environment; the host Rust compiler is too old for this
