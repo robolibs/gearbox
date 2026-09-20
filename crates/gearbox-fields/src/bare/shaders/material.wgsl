@@ -9,7 +9,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -240,6 +240,12 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let place = in.world_position.xz;
+    // A field owns the ground up to its *strayed* edge, not to the rectangle
+    // it was authored as. The mesh reaches past that edge so there is ground
+    // to own; this is what gives it back, and what the neighbour keeps.
+    if (inside_field(place, ground.extent, ground.reach) < 0.0) {
+        discard;
+    }
 
     let land = surface_geometry_normal(surface_heightmap, geometry, place, in.world_normal);
     let slope = vec2<f32>(land.x, land.z);

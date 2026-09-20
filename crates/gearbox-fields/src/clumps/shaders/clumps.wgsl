@@ -10,7 +10,7 @@
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean}
 // The patches a bare ground thins its own grass by, so a weed standing in
 // one comes up where that grass does and not in a patch of its own.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{taken, worn, way_beyond}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{taken, worn, way_beyond, inside_field}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -97,9 +97,7 @@ fn edge_roll(p: vec2<f32>) -> f32 {
 // here carry past its own edge, thinning as it goes, so two fields interleave
 // over that distance instead of butting against one another.
 fn within_field(world_xz: vec2<f32>) -> bool {
-    let inside = min(
-        min(world_xz.x - field.bounds.x, field.bounds.z - world_xz.x),
-        min(world_xz.y - field.bounds.y, field.bounds.w - world_xz.y));
+    let inside = inside_field(world_xz, field.bounds, vec4<f32>(field.soft_border));
     if (field.soft_border <= 0.0) {
         return inside >= 0.0;
     }

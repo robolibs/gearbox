@@ -111,17 +111,89 @@ fn height_blend(a: vec3<f32>, a_height: f32, a_share: f32,
 fn washed_into(place: vec2<f32>, colour: vec3<f32>, extent: vec4<f32>,
                sides: mat4x4<f32>, reach: vec4<f32>) -> vec3<f32> {
     var out = colour;
+    // The authored line is a tolerance, not a rule: the edge strays off it by
+    // up to `EDGE_STRAY_M` and the two fields either side stray *together*.
+    // West and south take the stray as given, east and north take it negated,
+    // because a shared line is one field's east and the other's west: added
+    // with one sign to both, the two would move apart and open a gap between
+    // them instead of the boundary moving.
     let past = vec4<f32>(
         extent.x - place.x, place.x - extent.z,
-        extent.y - place.y, place.y - extent.w);
+        extent.y - place.y, place.y - extent.w)
+        + vec4<f32>(
+            edge_stray(vec2<f32>(extent.x, place.y)),
+            -edge_stray(vec2<f32>(extent.z, place.y)),
+            edge_stray(vec2<f32>(place.x, extent.y)),
+            -edge_stray(vec2<f32>(place.x, extent.w)));
+    // West and east are held by the field's width, south and north by its depth.
+    let across = extent.zw - extent.xy;
+    let room = vec4<f32>(across.x, across.x, across.y, across.y);
+    // Ragged at two scales at once: a long wander that swings the join by
+    // metres and a short one that frays it. Drawn from the world and not from
+    // either field, so both sides see the same curve and the two halves of the
+    // join agree on where it falls.
+    let wander = (lattice(place, 13.0) - 0.5) * 0.8 + (lattice(place, 2.9) - 0.5) * 0.45;
     for (var i = 0; i < 4; i = i + 1) {
         if (reach[i] <= 0.0) {
             continue;
         }
-        let edge = past[i] / reach[i] + 1.0 + (lattice(place, 1.7) - 0.5) * 0.55;
-        out = mix(out, sides[i].rgb, clamp(edge, 0.0, 1.0) * 0.85);
+        // A blade of grass spills a step past its own field; the *soil* of two
+        // fields meets over a headland — scuffed, turned at the ends of the
+        // passes, and never on a ruled line. Reading one distance for both put
+        // the whole colour change inside a metre, which at any distance a field
+        // is looked at from is a line drawn on the ground. Held within the
+        // field as well, or a six-metre lane is washed from both sides until
+        // none of its own colour is left anywhere in it.
+        let span = max(min(reach[i] * GROUND_WASH, room[i] * 0.3), 0.05);
+        let edge = past[i] / span + 1.0 + wander;
+        // Half at the shared line and no more. Each side carries the other's
+        // colour the same amount there, so the two meet at one value; taken
+        // further, each field wears mostly its neighbour's and the join
+        // inverts — a swap across the line rather than a blend through it.
+        out = mix(out, sides[i].rgb, clamp(edge, 0.0, 1.0) * 0.5);
     }
     return out;
+}
+
+/// How much further the ground blends than what grows on it.
+const GROUND_WASH: f32 = 1.0;
+
+/// How far a field's edge may stray from the line it was authored on. No
+/// border in a landscape is straight: a hedge wanders, a headland is turned
+/// where the plough could reach, and a fence is put up where the ground let it
+/// go. So an authored border — a rectangle here, a ring of cadastral points
+/// from a GeoJSON later — is a line the edge must stay *within* half a metre
+/// of, not one it must lie on.
+const EDGE_STRAY_M: f32 = 0.5;
+
+/// Where an edge really falls, as metres off the line it was authored on.
+/// Taken from the line's own coordinate and how far along it this point lies,
+/// so every border strays differently and both fields sharing one read the
+/// same two numbers and so the same answer.
+fn edge_stray(on: vec2<f32>) -> f32 {
+    return ((lattice(on, 17.0) - 0.5) * 1.15
+        + (lattice(on + 53.0, 3.1) - 0.5) * 0.55) * EDGE_STRAY_M;
+}
+
+/// How far inside its own field a point lies, in metres, every edge taken where
+/// it really falls rather than where it was authored; negative outside. What
+/// grows in a field is cut on this and so is the wash under it, or the plants
+/// would stop on the ruled line while the soil changed on the crooked one.
+/// Shared, because the two fields either side of a border must place it
+/// identically: one reading the authored line and the other the strayed one
+/// leaves a bald strip between them, or two covers growing through one another.
+/// `soft` says, side by side, whether there is anything soft across it — a
+/// ground passes its neighbours' reach, what grows passes its own border. A
+/// side with nothing soft across it keeps the line it was authored on: a
+/// concrete yard ends where its slab ends, and the field beside one does not
+/// wander half a metre over it.
+fn inside_field(place: vec2<f32>, bounds: vec4<f32>, soft: vec4<f32>) -> f32 {
+    let on = step(vec4<f32>(0.0001), soft);
+    return min(
+        min(place.x - bounds.x - edge_stray(vec2<f32>(bounds.x, place.y)) * on.x,
+            bounds.z + edge_stray(vec2<f32>(bounds.z, place.y)) * on.y - place.x),
+        min(place.y - bounds.y - edge_stray(vec2<f32>(place.x, bounds.y)) * on.z,
+            bounds.w + edge_stray(vec2<f32>(place.x, bounds.w)) * on.w - place.y));
 }
 
 // One point of a way: sixteen of them live two to a column of two matrices,

@@ -10,6 +10,9 @@
 }
 
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{blade_leans}
+// A yard ends where its slab ends, but the *line* of that edge is no straighter
+// than any other field's, so it reads the same rule as everything else.
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{inside_field}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_fields/concrete/shaders/yard.wgsl"::{SLAB_M, JOINT_M, yard_noise, joint_distances, yard_weedy}
@@ -90,9 +93,7 @@ fn edge_roll(p: vec2<f32>) -> f32 {
 // here carry past its own edge, thinning as it goes, so two fields interleave
 // over that distance instead of butting against one another.
 fn within_field(world_xz: vec2<f32>) -> bool {
-    let inside = min(
-        min(world_xz.x - field.bounds.x, field.bounds.z - world_xz.x),
-        min(world_xz.y - field.bounds.y, field.bounds.w - world_xz.y));
+    let inside = inside_field(world_xz, field.bounds, vec4<f32>(field.soft_border));
     if (field.soft_border <= 0.0) {
         return inside >= 0.0;
     }

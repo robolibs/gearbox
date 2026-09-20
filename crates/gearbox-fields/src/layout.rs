@@ -472,7 +472,20 @@ impl FieldBounds {
     pub fn nearest_distance(&self, point: Vec2) -> f32 {
         point.distance(point.clamp(self.min, self.max))
     }
+
+    /// The same rectangle with `by` metres of margin on every side.
+    pub fn grown(&self, by: f32) -> Self {
+        Self { min: self.min - Vec2::splat(by), max: self.max + Vec2::splat(by) }
+    }
 }
+
+/// How far a field's edge may stray from the line it was authored on, and so
+/// how much ground each field must be given *past* that line. The shaders hold
+/// the same number as `EDGE_STRAY_M` in `bare/shaders/cover.wgsl` and cut the
+/// ground on the strayed edge; this is what makes sure there is ground there to
+/// cut. Short of it, a field ends before its own edge does and the terrain
+/// shows through; the margin is deliberately the larger of the two.
+pub const EDGE_MARGIN_M: f32 = 0.75;
 
 /// The line the wheels follow through a field, in world XZ. A field is always a
 /// rectangle, so without this a way can only run straight down one; with it the

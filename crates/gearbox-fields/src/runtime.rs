@@ -539,12 +539,23 @@ pub fn assign_surfaces(
         let mut parts = Vec::new();
         let mut new_meshes = Vec::new();
         for field in &active.fields {
-            if !field.bounds.overlaps(bounds) {
+            // Each field is given ground a little past its own edge, because
+            // that edge is not where it was authored: it strays within the
+            // margin and the material cuts it there. Clipped to the line
+            // instead, the *texture* changes on that line however the colour
+            // over it is blended — a field's ground is its own mesh, so the
+            // ruled edge of the clip is a ruled edge in the picture. Neighbours
+            // now overlap by the margin and each discards what the other keeps.
+            // A cover that meets its neighbours on a ruled line — a concrete
+            // yard — is not given the margin, because its edge never strays.
+            let soft = field.profile.soft_border > 0.0;
+            let held = field.bounds.grown(if soft { crate::layout::EDGE_MARGIN_M } else { 0.0 });
+            if !held.overlaps(bounds) {
                 continue;
             }
-            if field.bounds.contains(bounds.min) && field.bounds.contains(bounds.max) {
+            if held.contains(bounds.min) && held.contains(bounds.max) {
                 new_meshes.push((field, None));
-            } else if let Some(clipped) = clip_mesh(mesh, field.bounds) {
+            } else if let Some(clipped) = clip_mesh(mesh, held) {
                 new_meshes.push((field, Some(clipped)));
             }
         }

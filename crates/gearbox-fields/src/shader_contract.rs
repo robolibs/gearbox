@@ -44,9 +44,9 @@ const COVER: &str = "bare/shaders/cover.wgsl";
 /// way has worn, where two covers meet, which of two surfaces takes a pixel,
 /// and the patches a ground thins its own grass by. A second copy of any of
 /// these is the bug this file exists to catch.
-const MUST_AGREE: [&str; 9] = [
+const MUST_AGREE: [&str; 11] = [
     "worn", "washed_into", "height_blend", "settled", "verge_damp", "way_beyond", "taken",
-    "lattice", "clump_frame",
+    "lattice", "clump_frame", "edge_stray", "inside_field",
 ];
 
 /// `pcg` and `rand` are not rules, only hashing, and a cover that does not wear
