@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "oxbo/pressure.rs"]
+mod pressure;
+
 #[test]
 #[ignore = "requires GEARBOX_BENCH_OXBO; real six-wheel harvester settling"]
 fn imported_oxbo_settling() {
