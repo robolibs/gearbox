@@ -159,6 +159,40 @@ mod tests {
         assert!(Hollows::of(&FieldLayout::default()).depth_at(0.0, 0.0) >= 0.0);
     }
 
+    // The same track authored two ways — as a road over the layout, or as one
+    // field's own way — must sink the ground identically, or a lane changes
+    // depth depending on which file it happens to be written in.
+    #[test]
+    fn a_field_way_sinks_like_a_layout_road() {
+        let road: FieldLayout = serde_json::from_str(
+            r#"{"default":"grassland","ways":[{"name":"lane","width":6.0,"wear":0.7,
+                "points":[[0,0],[100,0]]}]}"#,
+        )
+        .unwrap();
+        let lane: FieldLayout = serde_json::from_str(
+            r#"{"default":"grassland","fields":[{"name":"lane","profile":"track",
+                "min":[0,-20],"max":[100,20],"wear":0.7,"way_width":6.0,
+                "way":[[0,0],[100,0]]}]}"#,
+        )
+        .unwrap();
+        let (a, b) = (Hollows::of(&road), Hollows::of(&lane));
+        for step in 0..30 {
+            let z = step as f32 * 0.3;
+            assert_eq!(a.depth_at(50.0, z), b.depth_at(50.0, z), "at z={z}");
+        }
+        assert!(a.depth_at(50.0, 0.0) > 0.3);
+    }
+
+    #[test]
+    fn a_field_with_no_way_of_its_own_sinks_nothing() {
+        let plain: FieldLayout = serde_json::from_str(
+            r#"{"default":"grassland","fields":[{"name":"plot","profile":"ploughed",
+                "min":[0,0],"max":[100,100]}]}"#,
+        )
+        .unwrap();
+        assert!(Hollows::of(&plain).is_empty());
+    }
+
     #[test]
     fn a_road_that_misses_a_field_clips_to_nothing() {
         let road = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0)];
@@ -359,11 +393,22 @@ impl FieldSpec {
     }
 
     pub fn way(&self) -> Way {
-        let bounds = self.bounds();
-        let span = bounds.max - bounds.min;
-        let across = if span.x < span.y { span.x } else { span.y };
-        let points: Vec<Vec2> = self.way.iter().copied().map(Vec2::from_array).collect();
-        Way::bend(&points, self.way_width.unwrap_or(across) * 0.5)
+        let (line, width, _) = self.laid_way();
+        Way::bend(&line, width * 0.5)
+    }
+
+    /// The line this field lays down for itself, how wide it is worn and how
+    /// hard — the same three things a layout's road carries, so the two sink
+    /// the ground alike. A field that names a way but no wear is taken as
+    /// half worn, since only its profile knows better and this does not.
+    fn laid_way(&self) -> (Vec<Vec2>, f32, f32) {
+        let span = self.bounds().max - self.bounds().min;
+        let across = span.x.min(span.y);
+        (
+            self.way.iter().copied().map(Vec2::from_array).collect(),
+            self.way_width.unwrap_or(across),
+            self.wear.unwrap_or(0.5),
+        )
     }
 }
 
@@ -400,6 +445,11 @@ impl WaySpec {
 /// colour on a flat field: this is what lets one break the skyline at a
 /// grazing angle, and what a wheel feels when it drops into one — the terrain
 /// grid carries the collider, so sinking it here sinks it for the physics too.
+///
+/// Only an authored line sinks anything. A field that merely carries a `wear`
+/// is worn across its whole width, and that is a shading of the ground, not a
+/// trench dug down the middle of it: guessing which wide fields were meant to
+/// be lanes would sink a ploughed plot along its long axis.
 #[derive(Clone, Debug, Default)]
 pub struct Hollows(Vec<Hollow>);
 
@@ -412,35 +462,37 @@ struct Hollow {
     max: Vec2,
 }
 
+impl Hollow {
+    fn new((line, width, wear): (Vec<Vec2>, f32, f32)) -> Option<Self> {
+        if line.len() < 2 || width <= 0.0 {
+            return None;
+        }
+        let half = width * 0.5;
+        let reach = Vec2::splat(half + FADE_M);
+        let fold = |pick: fn(Vec2, Vec2) -> Vec2| line.iter().copied().reduce(pick).unwrap();
+        Some(Self {
+            half,
+            // Barely marked where a lane is hardly worn, a proper sunken way
+            // where it is a road. Even at its deepest the sides are gentler
+            // than one in five, so a wheel rides in and out of it rather than
+            // catching on the lip.
+            sink: 0.08 + wear.clamp(0.0, 1.0) * 0.35,
+            min: fold(Vec2::min) - reach,
+            max: fold(Vec2::max) + reach,
+            line,
+        })
+    }
+}
+
 impl Hollows {
     /// A metre of cell means the ruts themselves can never be geometry; the
     /// trough the whole way sits in is several metres across and can.
     pub fn of(layout: &FieldLayout) -> Self {
-        let hollows = layout
-            .ways
-            .iter()
-            .filter(|way| way.points.len() >= 2 && way.width > 0.0)
-            .map(|way| {
-                let line = way.line();
-                let half = way.width * 0.5;
-                let reach = Vec2::splat(half + FADE_M);
-                let fold = |pick: fn(Vec2, Vec2) -> Vec2| {
-                    line.iter().copied().reduce(pick).unwrap_or(Vec2::ZERO)
-                };
-                Hollow {
-                    half,
-                    // Barely marked where a lane is hardly worn, a proper sunken
-                    // way where it is a road. Even at its deepest the sides are
-                    // gentler than one in six, so a wheel rides in and out of it
-                    // rather than catching on the lip.
-                    sink: 0.08 + way.wear.clamp(0.0, 1.0) * 0.35,
-                    min: fold(Vec2::min) - reach,
-                    max: fold(Vec2::max) + reach,
-                    line,
-                }
-            })
-            .collect();
-        Self(hollows)
+        // A road laid over the layout and a way a single field names for itself
+        // are the same thing authored at two scales; both sink what they cross.
+        let roads = layout.ways.iter().map(|way| (way.line(), way.width, way.wear));
+        let lanes = layout.fields.iter().map(FieldSpec::laid_way);
+        Self(roads.chain(lanes).filter_map(Hollow::new).collect())
     }
 
     pub fn is_empty(&self) -> bool {
