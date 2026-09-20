@@ -112,12 +112,12 @@ impl Body for BodyAccess {
 }
 
 impl BodyMut for BodyAccess {
-    fn set_position(&mut self, pose: Pose, _wake: bool) {
+    fn set_position(&mut self, pose: Pose, wake: bool) {
         apply(
             self.shared
                 .world()
                 .scene
-                .set_body_pose(self.handle, convert::transform(pose)),
+                .set_body_pose_with_wake(self.handle, convert::transform(pose), wake),
         );
     }
     fn set_linvel(&mut self, linvel: DVec3, wake: bool) {

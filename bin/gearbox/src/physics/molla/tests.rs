@@ -6,6 +6,9 @@ mod nonwaking;
 #[path = "mass_wake_tests.rs"]
 mod mass_wake;
 
+#[path = "pose_wake_tests.rs"]
+mod pose_wake;
+
 fn near(a: DVec3, b: DVec3) {
     assert!((a - b).length() < 1e-8, "{a:?} != {b:?}");
 }
