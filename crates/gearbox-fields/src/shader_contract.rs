@@ -239,7 +239,7 @@ fn the_tyre_bars_meet_at_the_centre_of_the_rut() {
 #[test]
 fn every_cover_that_prints_a_tyre_bar_tilts_its_normal_by_it() {
     for (name, source) in shaders() {
-        if name == COVER || !calls(&source, "way_print") {
+        if name == COVER || !calls(&source, "wheel_print") {
             continue;
         }
         assert!(

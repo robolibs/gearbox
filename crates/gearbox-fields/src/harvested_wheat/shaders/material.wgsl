@@ -39,7 +39,7 @@ struct WornStubble {
 
 // The same wear the bare grounds and the meadow read, so a road crossing from
 // one field to the next does not change shape or colour on the boundary.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, wheel_print, lattice}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, wheel_print, lattice}
 
 fn stubble_worn(place: vec2<f32>) -> f32 {
     return worn(place, worn_ground.extent, worn_ground.tread,
@@ -330,17 +330,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let normal = surface_geometry_normal(surface_heightmap, geometry, in.world_position.xz, in.world_normal);
     // The print of the tyre bars, tilting the normal rather than tinting the
     // ground: a chevron is a shape, and a shape wants the sun to find it.
-    // Two ways a tyre can have been here: a way the layout laid out, and a
-    // wheel that has just rolled over it. Whichever left the deeper print holds
-    // the ground — they are the same tyre, so they never want blending.
+    // Only a wheel that has rolled here leaves one. A way the layout laid out
+    // is ground worn down by years of traffic, not one tyre's chevron held in it.
     let footprint_here = surface_footprint(in.world_position.xz);
-    let laid_print = way_print(in.world_position.xz, worn_ground.extent, worn_ground.tread,
-        worn_ground.way, worn_ground.way_more, worn_ground.way_shape,
-        worn_ground.bar, worn_ground.bar_more, footprint_here);
     let mark = sample_wheel_mark(tracks, wheels, in.world_position.xz);
-    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
+    let print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
         wheels.bar, mark.press, footprint_here);
-    let print = select(rolled_print, laid_print, laid_print.x >= rolled_print.x);
     pbr_input.N = normalize(
         surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz))
         + vec3<f32>(print.y, 0.0, print.z));

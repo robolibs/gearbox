@@ -9,7 +9,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, wheel_print}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, wheel_print}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -277,15 +277,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // relief before it is colour: the chevron is a shape the sun finds, so it
     // goes into the normal and takes only a little shade of its own for the
     // ground lying in the bottom of it.
-    // Two ways a tyre can have been here: a way the layout laid out, and a
-    // wheel that has just rolled over it. Whichever left the deeper print holds
-    // the ground — they are the same tyre, so they never want blending.
-    let laid_print = way_print(place, ground.extent, ground.tread,
-        ground.way, ground.way_more, ground.way_shape, ground.bar, ground.bar_more, pixel_m);
+    // Only a wheel that has rolled here leaves one. A way the layout laid out
+    // is ground worn down by years of traffic, not one tyre's chevron held in it.
     let mark = sample_wheel_mark(tracks, wheels, place);
-    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
+    let print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
         wheels.bar, mark.press, pixel_m);
-    let print = select(rolled_print, laid_print, laid_print.x >= rolled_print.x);
     let laid = read.x;
     let bared = max(laid, rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
