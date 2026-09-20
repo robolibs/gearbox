@@ -262,7 +262,7 @@ impl Plugin for BarePlugin {
         profiles.register(FieldProfile {
             name: "sand",
             wheel_response: WheelResponse { darkening: 0.16, ..response },
-            layers: standing(55.0, 900.0, 0.0, 0.8, blown_clod),
+            layers: standing(55.0, 120.0, 0.0, 0.8, blown_clod),
             ground: sand_ground,
         });
     }
