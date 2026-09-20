@@ -175,11 +175,11 @@ impl BodyMut for BodyAccess {
             .linear_damping;
         apply(world.scene.set_body_damping(self.handle, linear, damping));
     }
-    fn set_additional_mass(&mut self, props: MassProps, _wake: bool) {
+    fn set_additional_mass(&mut self, props: MassProps, wake: bool) {
         apply(
             self.shared
                 .world()
-                .set_body_additional_mass(self.handle, convert::mass(props)),
+                .set_body_additional_mass_with_wake(self.handle, convert::mass(props), wake),
         );
     }
     fn add_force(&mut self, force: DVec3, wake: bool) {
