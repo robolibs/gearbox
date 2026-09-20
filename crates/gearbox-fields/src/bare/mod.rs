@@ -249,8 +249,7 @@ fn tread_of(_bounds: crate::layout::FieldBounds, worn: f32) -> (Vec4, Vec4) {
     let extent = Vec4::ZERO;
     // Half a tractor's gauge, and a rut a little wider than the tyre that cut
     // it. Past halfway the ruts have spread far enough to meet in the middle.
-    let tread = Vec4::new(0.9, 0.46, (0.55 + worn * 0.45).min(1.0), (worn - 0.35).max(0.0) / 0.65);
-    (extent, tread)
+    (extent, crate::runtime::bare_tread(worn))
 }
 
 impl MaterialExtension for BareExtension {
@@ -327,16 +326,14 @@ fn ploughed_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
-    bounds: crate::layout::FieldBounds,
-    near: crate::profile::Neighbours,
+    placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,
         trample,
         trample_params,
         geometry,
-        bounds,
-        near,
+        placed,
         BareGround {
             tint: Vec4::new(0.060, 0.034, 0.018, 1.0),
             grain: Vec4::new(0.34, 1.0, 1.0, 1.25),
@@ -359,16 +356,14 @@ fn dirt_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
-    bounds: crate::layout::FieldBounds,
-    near: crate::profile::Neighbours,
+    placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,
         trample,
         trample_params,
         geometry,
-        bounds,
-        near,
+        placed,
         BareGround {
             tint: Vec4::new(0.115, 0.070, 0.038, 1.0),
             grain: Vec4::new(0.3, 0.40, 0.0, 1.6),
@@ -389,18 +384,21 @@ fn dirt_ground(
 /// dial: a green lane barely marked, two bare ruts with grass still holding
 /// between them, or a road worn bare from side to side.
 fn green_lane(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    b: crate::layout::FieldBounds, n: crate::profile::Neighbours) -> Arc<dyn GroundSurface> {
-    track(w, t, p, g, b, n, 0.3)
+    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    // The layout may name a wear of its own; this is only the default.
+    track(w, t, p, g, placed, placed.wear.unwrap_or(0.3))
 }
 
 fn worn_track(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    b: crate::layout::FieldBounds, n: crate::profile::Neighbours) -> Arc<dyn GroundSurface> {
-    track(w, t, p, g, b, n, 0.6)
+    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    // The layout may name a wear of its own; this is only the default.
+    track(w, t, p, g, placed, placed.wear.unwrap_or(0.6))
 }
 
 fn bare_road(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    b: crate::layout::FieldBounds, n: crate::profile::Neighbours) -> Arc<dyn GroundSurface> {
-    track(w, t, p, g, b, n, 1.0)
+    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    // The layout may name a wear of its own; this is only the default.
+    track(w, t, p, g, placed, placed.wear.unwrap_or(1.0))
 }
 
 fn track(
@@ -408,18 +406,16 @@ fn track(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
-    bounds: crate::layout::FieldBounds,
-    near: crate::profile::Neighbours,
+    placed: crate::profile::Placed,
     worn: f32,
 ) -> Arc<dyn GroundSurface> {
-    let (extent, tread) = tread_of(bounds, worn);
+    let (extent, tread) = tread_of(placed.bounds, worn);
     ground(
         world,
         trample,
         trample_params,
         geometry,
-        bounds,
-        near,
+        placed,
         BareGround {
             tint: Vec4::new(0.108, 0.068, 0.038, 1.0),
             grain: Vec4::new(0.28, 0.42, 0.0, 1.6),
@@ -442,16 +438,14 @@ fn sand_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
-    bounds: crate::layout::FieldBounds,
-    near: crate::profile::Neighbours,
+    placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,
         trample,
         trample_params,
         geometry,
-        bounds,
-        near,
+        placed,
         BareGround {
             tint: Vec4::new(0.245, 0.182, 0.098, 1.0),
             grain: Vec4::new(0.16, 0.30, 1.0, 0.22),
@@ -473,21 +467,21 @@ fn ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
-    bounds: crate::layout::FieldBounds,
-    near: crate::profile::Neighbours,
+    placed: crate::profile::Placed,
     mut bare: BareGround,
     roughness: f32,
 ) -> Arc<dyn GroundSurface> {
     // Every bare ground needs to know its own rectangle, not just the worn
     // ones: without it there is no telling how near an edge a pixel is.
+    let bounds = placed.bounds;
     bare.extent = Vec4::new(bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y);
     // What lies across each side, so the ground washes into its neighbours
     // rather than stopping on a line.
-    bare.west = near.tint[0];
-    bare.east = near.tint[1];
-    bare.south = near.tint[2];
-    bare.north = near.tint[3];
-    bare.reach = Vec4::from_array(near.reach);
+    bare.west = placed.tint[0];
+    bare.east = placed.tint[1];
+    bare.south = placed.tint[2];
+    bare.north = placed.tint[3];
+    bare.reach = Vec4::from_array(placed.reach);
     let extension = BareExtension {
         trample,
         trample_params,

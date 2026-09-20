@@ -52,6 +52,12 @@ pub struct FieldBounds {
     pub max: Vec2,
 }
 
+impl Default for FieldBounds {
+    fn default() -> Self {
+        Self { min: Vec2::ZERO, max: Vec2::ZERO }
+    }
+}
+
 impl FieldBounds {
     pub fn contains(&self, point: Vec2) -> bool {
         point.cmpge(self.min).all() && point.cmple(self.max).all()
@@ -73,6 +79,11 @@ pub struct FieldSpec {
     pub profile: String,
     pub min: [f32; 2],
     pub max: [f32; 2],
+    /// How hard this field is worn, nought to one: a green lane barely marked,
+    /// two bare ruts with grass between them, or bare across its width. Left
+    /// out, the profile decides.
+    #[serde(default)]
+    pub wear: Option<f32>,
 }
 
 impl FieldSpec {
@@ -205,6 +216,7 @@ impl FieldLayout {
             profile: self.default.clone(),
             min: [x0, z0],
             max: [x1, z1],
+            wear: None,
         }
     }
 }

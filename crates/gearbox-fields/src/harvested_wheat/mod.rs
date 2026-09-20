@@ -258,8 +258,7 @@ fn create_ground(
     tracks: Handle<Image>,
     wheels: WheelMapParams,
     geometry: SurfaceGeometry,
-    _bounds: crate::layout::FieldBounds,
-    _near: crate::profile::Neighbours,
+    _placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = AntiRepeatTerrainExtension {

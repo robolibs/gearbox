@@ -116,6 +116,10 @@ pub struct RuntimeField {
     pub bounds: FieldBounds,
     pub profile: Arc<FieldProfile>,
     pub ground: Arc<dyn GroundSurface>,
+    /// How this field is worn, which the layout may set per field rather than
+    /// leaving it to the profile. What stands in the ground reads this, so the
+    /// grass stops where the ground material says the soil starts.
+    pub tread: Vec4,
 }
 
 #[derive(Resource)]
@@ -248,9 +252,9 @@ pub fn ensure_fields(world: &mut World) {
             bend: response.bend,
             darkening: response.darkening,
         };
-        let near = neighbours_of(&specs, &profiles, &spec);
+        let placed = placed_of(&specs, &profiles, &spec);
         let ground =
-            (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone(), bounds, near);
+            (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone(), placed);
         let entity = world
             .spawn((
                 Name::new(format!("Field {} ({})", spec.name, profile.name)),
@@ -281,12 +285,17 @@ pub fn ensure_fields(world: &mut World) {
             "field {}: {} [{:?}..{:?}], independent {}x{} wheel map",
             spec.name, profile.name, bounds.min, bounds.max, width, height
         );
+        let tread = match spec.wear {
+            Some(wear) => bare_tread(wear),
+            None => profile.tread,
+        };
         fields.push(RuntimeField {
             entity,
             name: spec.name,
             bounds,
             profile,
             ground,
+            tread,
         });
     }
     let background_track = world.resource_mut::<Assets<Image>>().add(track_image(2, 2, false));
@@ -302,8 +311,7 @@ pub fn ensure_fields(world: &mut World) {
             ..default()
         },
         surface_geometry,
-        domain,
-        crate::profile::Neighbours::default(),
+        crate::profile::Placed { bounds: domain, ..default() },
     );
     world.insert_resource(ActiveFields {
         terrain: root,
@@ -578,7 +586,7 @@ pub fn stream_vegetation(
                     fade_end: layer.fade_end,
                     inverse_square_thinning: layer.inverse_square_thinning,
                     follow_grass: layer.follow_grass,
-                    tread: field.profile.tread,
+                    tread: field.tread,
                     soft_border: field.profile.soft_border,
                     albedo: layer.albedo.map(|path| assets.load(path)),
                     variants,
@@ -589,17 +597,27 @@ pub fn stream_vegetation(
     }
 }
 
+/// The wear a layout's own `wear` means, in the terms the shaders read it in.
+/// Kept here rather than in the bare profile because the layout may set it for
+/// any field, and both the ground and what stands in it have to agree on it.
+pub fn bare_tread(worn: f32) -> Vec4 {
+    if worn <= 0.0 {
+        return Vec4::ZERO;
+    }
+    Vec4::new(0.9, 0.46, (0.55 + worn * 0.45).min(1.0), ((worn - 0.35).max(0.0)) / 0.65)
+}
+
 /// What lies across each of a field's four sides: west, east, south, north.
 /// A side is a neighbour's only if the two actually share a length of edge,
 /// and the two wash into one another by the softer of their two borders.
-fn neighbours_of(
+fn placed_of(
     specs: &[FieldSpec],
     profiles: &bevy::platform::collections::HashMap<String, Arc<FieldProfile>>,
     self_spec: &FieldSpec,
-) -> crate::profile::Neighbours {
+) -> crate::profile::Placed {
     let mine = self_spec.bounds();
     let own = profiles.get(&self_spec.profile);
-    let mut near = crate::profile::Neighbours::default();
+    let mut near = crate::profile::Placed { bounds: mine, wear: self_spec.wear, ..default() };
     for other in specs {
         if other.name == self_spec.name {
             continue;

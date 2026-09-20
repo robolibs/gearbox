@@ -85,22 +85,23 @@ pub struct SurfaceGeometry {
 /// Builds a field's ground. The bounds are the field's own rectangle: a
 /// surface that wears unevenly — a road with ruts down it — needs to know
 /// where the field runs before it can say which part of it is worn.
-pub type GroundFactory = fn(
-    &mut World,
-    Handle<Image>,
-    WheelMapParams,
-    SurfaceGeometry,
-    super::layout::FieldBounds,
-    Neighbours,
-) -> Arc<dyn GroundSurface>;
+pub type GroundFactory =
+    fn(&mut World, Handle<Image>, WheelMapParams, SurfaceGeometry, Placed) -> Arc<dyn GroundSurface>;
 
-/// What lies across each of a field's four sides, as the neighbour's own
-/// surface colour, and how far the two blend into one another. Order is
-/// west, east, south, north; a side with no soft neighbour blends nought.
+/// Where a field sits and what it is up against: everything a ground needs to
+/// know that its profile cannot say, because it differs field by field.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Neighbours {
+pub struct Placed {
+    /// The field's own rectangle.
+    pub bounds: super::layout::FieldBounds,
+    /// What lies across each side, as that neighbour's own surface colour, and
+    /// how far the two blend. Order is west, east, south, north; a side with no
+    /// soft neighbour blends nought.
     pub tint: [Vec4; 4],
     pub reach: [f32; 4],
+    /// How hard this particular field is worn, nought to one, when the layout
+    /// says so. `None` leaves it to the profile.
+    pub wear: Option<f32>,
 }
 
 pub struct FieldProfile {
