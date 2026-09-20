@@ -451,6 +451,12 @@ pub fn ensure_fields(world: &mut World) {
             way: placed.way,
         });
     }
+    // The backdrop is one mesh running from the ground square to the horizon,
+    // with nothing across any of its edges. A cover cuts itself on its own edge
+    // so a neighbour can keep what it drops; scenery has no neighbour, so the
+    // cut only opens a hole. Held to the square, the ground was textured on it
+    // and bare everywhere past it. Bounds are all this reaches: nothing is worn
+    // or washed on a backdrop, so no other rule reads them.
     let background_track = world.resource_mut::<Assets<Image>>().add(track_image(2, 2, false));
     let background = (profiles[&layout.default].ground)(
         world,
@@ -465,7 +471,7 @@ pub fn ensure_fields(world: &mut World) {
             ..default()
         },
         surface_geometry,
-        crate::profile::Placed { bounds: domain, ..default() },
+        crate::profile::Placed { bounds: domain.grown(BACKDROP_REACH_M), ..default() },
     );
     world.insert_resource(ActiveFields {
         terrain: root,
@@ -488,6 +494,11 @@ pub fn ensure_fields(world: &mut World) {
         world.entity_mut(entity).remove::<SurfaceParts>();
     }
 }
+
+/// How far past the ground square the horizon backdrop is taken to reach. Past
+/// the last ring of that mesh, so no part of it falls outside its own bounds
+/// and gets cut away.
+const BACKDROP_REACH_M: f32 = 64_000.0;
 
 /// Seconds a frame may spend matching surface meshes to fields.
 const SURFACE_BUDGET_S: f32 = 0.004;
