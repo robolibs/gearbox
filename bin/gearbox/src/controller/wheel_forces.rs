@@ -836,6 +836,23 @@ fn rolling_resistance(deflection_m: f64, radius_m: f64) -> f64 {
     ROLL_RESIST_BASE + ROLL_RESIST_FLEX * flex
 }
 
+/// Whether motion resistance is applied; `GEARBOX_ROLL_RESIST=1` turns it on.
+///
+/// Off by default, and the reason is worth keeping. Applied from out here it
+/// never reaches the machine: a driven wheel is held to a speed by its own
+/// motor, which cancels whatever is put on it, and the chassis is roped to the
+/// ground through those same motors, so shedding its speed is fought by every
+/// one of them. Measured, a loaded harvester would not pull away at all —
+/// 14.3 kN of drag against a drive worth 0.9 m/s² on 18.4 t. It belongs inside
+/// molla's tyre model, beside the forces it already solves: `molla-vehicle`
+/// carries a `rolling_resistance` term, and nothing has ever set it.
+pub(super) fn motion_resistance_wanted() -> bool {
+    matches!(
+        std::env::var("GEARBOX_ROLL_RESIST").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 /// Every tyre on the ground drags, and the machine is what it drags on.
 ///
 /// The drag is worked out tyre by tyre, from the load each one carries and how

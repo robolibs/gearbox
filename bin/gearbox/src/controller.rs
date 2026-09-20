@@ -278,7 +278,8 @@ impl Plugin for ControllerDiscoveryPlugin {
                     guard_chassis_inertia,
                     prepare_machine_physics,
                     wheel_forces::sync_machine_wheel_forces.after(crate::services::ServiceCommandSet),
-                    // wheel_forces::apply_motion_resistance,
+                    wheel_forces::apply_motion_resistance
+                        .run_if(wheel_forces::motion_resistance_wanted),
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,
                     record_wheel_tracks,
