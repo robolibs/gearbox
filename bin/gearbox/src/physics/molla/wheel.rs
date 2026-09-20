@@ -135,6 +135,7 @@ impl MollaBackend {
                 ..Default::default()
             });
         let mut impulse = 0.0;
+        let sleeping = world.is_sleeping(wheel);
         for sample in world
             .wheels
             .samples(&world.scene)
@@ -149,6 +150,14 @@ impl MollaBackend {
                 out.patch_width = pressure.patch_width;
                 out.patch_area = pressure.patch_area;
                 out.rolling_moment = pressure.rolling_moment;
+            }
+            if sleeping && sample.dt == 0.0 && sample.output.in_contact {
+                out.in_contact = true;
+                out.normal = sample.normal;
+                out.contact_point = DVec3::from_array(sample.output.contact_point);
+                out.normal_force = sample.output.fz.max(0.0);
+                out.grip_force = sample.pressure.as_ref().map_or(sample.friction * out.normal_force, |pressure| pressure.grip_force);
+                continue;
             }
             let normal_impulse = sample.output.fz.max(0.0) * sample.dt;
             if !sample.output.in_contact || normal_impulse <= 0.0 {

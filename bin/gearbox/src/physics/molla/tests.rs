@@ -15,6 +15,48 @@ fn dynamic() -> BodyDesc {
 }
 
 #[test]
+fn authored_sleep_and_explicit_wake_advance_the_real_backend() {
+    let mut backend = MollaBackend::default();
+    let mut desc = dynamic();
+    desc.sleeping = true;
+    desc.linvel = DVec3::X;
+    let body = backend.insert_body(desc);
+    assert!(backend.body(body).unwrap().is_sleeping());
+    near(backend.body(body).unwrap().linvel(), DVec3::ZERO);
+    let pose = backend.body(body).unwrap().position();
+    for _ in 0..20 { backend.step(&|_, _| false); }
+    assert_eq!(backend.body(body).unwrap().position(), pose);
+    backend.body_mut(body).unwrap().wake_up(true);
+    assert!(!backend.body(body).unwrap().is_sleeping());
+    backend.step(&|_, _| false);
+    assert!(backend.body(body).unwrap().linvel().y < 0.0);
+    backend.body_mut(body).unwrap().sleep();
+    assert!(backend.body(body).unwrap().is_sleeping());
+    backend.body_mut(body).unwrap().add_force(DVec3::X, true);
+    assert!(!backend.body(body).unwrap().is_sleeping());
+    backend.step(&|_, _| false);
+    assert!(backend.body(body).unwrap().linvel().x > 0.0);
+}
+
+#[test]
+fn backend_sleep_and_motor_wake_cover_the_whole_tree() {
+    let mut backend = MollaBackend::default();
+    let a = backend.insert_body(dynamic());
+    let b = backend.insert_body(dynamic());
+    let joint = backend.insert_joint(a, b, JointDesc::new(
+        JointKind::Revolute { axis: DVec3::Z }, Pose::IDENTITY, Pose::IDENTITY,
+    ));
+    backend.body_mut(b).unwrap().sleep();
+    assert!(backend.body(a).unwrap().is_sleeping());
+    assert!(backend.body(b).unwrap().is_sleeping());
+    backend.joint_mut(joint, true).unwrap().set_motor_velocity(JointAxis::AngX, 1.0, 5.0);
+    assert!(!backend.body(a).unwrap().is_sleeping());
+    assert!(!backend.body(b).unwrap().is_sleeping());
+    backend.step(&|_, _| false);
+    assert!(backend.body(b).unwrap().angvel().length() > 0.0);
+}
+
+#[test]
 fn authored_loop_closure_keeps_tree_and_joint_access() {
     let mut backend = MollaBackend::default();
     backend.set_gravity(DVec3::ZERO);
@@ -401,6 +443,28 @@ fn wheel_rig(axis: DVec3) -> (MollaBackend, BodyId, BodyId, JointId, ColliderId)
         })
         .unwrap();
     (backend, chassis, wheel, joint, ground)
+}
+
+#[test]
+fn sleeping_wheel_retains_pressure_visuals_and_static_support() {
+    let (mut backend, chassis, wheel, joint, _) = wheel_rig(-DVec3::Z);
+    backend.configure_wheel(WheelForceDesc {
+        body: wheel, joint, local_hub: DVec3::ZERO, forward: DVec3::X,
+        radius: 0.5, supported_mass: 100.0, tyre: Some(PressureTyreDesc::reference(0.3)),
+    }).unwrap();
+    backend.step(&|_, _| false);
+    let before = backend.wheel_output(wheel).unwrap();
+    backend.body_mut(chassis).unwrap().sleep();
+    for _ in 0..20 { backend.step(&|_, _| false); }
+    assert!(backend.body(chassis).unwrap().is_sleeping());
+    let after = backend.wheel_output(wheel).unwrap();
+    assert!(after.in_contact && after.normal_force > 0.0 && after.grip_force > 0.0);
+    assert!((after.normal_force - before.normal_force).abs() < 1e-8);
+    assert_eq!(after.pressure.unwrap().patch_area, before.pressure.unwrap().patch_area);
+    backend.set_wheel_pressures(&[(wheel, 220_000.0)]).unwrap();
+    assert!(!backend.body(chassis).unwrap().is_sleeping());
+    backend.step(&|_, _| false);
+    assert!(backend.wheel_output(wheel).unwrap().pressure.unwrap().pressure_pa > 180_000.0);
 }
 
 #[test]

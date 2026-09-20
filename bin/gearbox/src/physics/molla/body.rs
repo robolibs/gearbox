@@ -96,7 +96,7 @@ impl Body for BodyAccess {
             .enabled
     }
     fn is_sleeping(&self) -> bool {
-        false
+        self.shared.world().is_sleeping(self.handle)
     }
     fn colliders(&self) -> Vec<ColliderId> {
         self.shared
@@ -151,8 +151,12 @@ impl BodyMut for BodyAccess {
     fn enable_ccd(&mut self, enabled: bool) {
         apply(self.shared.world().scene.set_body_ccd(self.handle, enabled));
     }
-    fn wake_up(&mut self, _strong: bool) {}
-    fn sleep(&mut self) {}
+    fn wake_up(&mut self, _strong: bool) {
+        apply(self.shared.world().wake_body(self.handle));
+    }
+    fn sleep(&mut self) {
+        apply(self.shared.world().sleep_body(self.handle));
+    }
     fn set_linear_damping(&mut self, damping: f64) {
         let mut world = self.shared.world();
         let angular = world

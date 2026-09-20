@@ -321,6 +321,34 @@ fn imported_kubota_backend_timing() {
 }
 
 #[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET; explicit sleep and controller wake diagnostic"]
+fn imported_kubota_explicit_sleep() {
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    let mut fixture = Fixture::load(Path::new(&asset));
+    fixture.drive(0.0, 0.0);
+    for _ in 0..600 { fixture.tick(); }
+    fixture.app.world_mut().resource_mut::<PhysicsWorld>().body_mut(fixture.chassis).unwrap().sleep();
+    assert!(fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
+    let mut asleep = 0;
+    let mut samples = Vec::new();
+    for _ in 0..240 {
+        samples.push(fixture.tick().as_secs_f64() * 1000.0);
+        if fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping() { asleep += 1; }
+    }
+    samples.sort_by(f64::total_cmp);
+    eprintln!("explicit imported sleep: sleeping_ticks={asleep}/240 median_ms={:.6} p95_ms={:.6} controllers=enabled", samples[120], samples[228]);
+    fixture.pressure(0.5);
+    fixture.tick();
+    assert!(!fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
+    fixture.drive(2.0, 0.12);
+    for _ in 0..1200 { fixture.tick(); }
+    let physics = fixture.app.world().resource::<PhysicsWorld>();
+    assert!(physics.body(fixture.chassis).unwrap().linvel().length() > 1.8);
+    assert!(physics.quarantined.is_empty());
+    fixture.verify(0.5, true);
+}
+
+#[test]
 #[ignore = "requires GEARBOX_BENCH_ASSET pointing to real kubota_tractor.usdz; 60 s slope hold"]
 fn imported_kubota_slope_parking() {
     let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");

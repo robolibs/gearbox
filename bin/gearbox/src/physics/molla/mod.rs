@@ -182,6 +182,7 @@ impl PhysicsBackend for MollaBackend {
     }
     fn insert_body(&mut self, desc: BodyDesc) -> BodyId {
         let entity = desc.entity;
+        let sleeping = desc.sleeping;
         let mut body = rt::BodyDesc {
             kind: convert::body_kind(desc.kind),
             velocity: SpatialVector::new(desc.linvel, desc.angvel),
@@ -202,6 +203,9 @@ impl PhysicsBackend for MollaBackend {
             .scene
             .insert_body(body)
             .expect("invalid Molla body description");
+        if sleeping {
+            apply(self.shared.world().sleep_body(handle));
+        }
         let id = BodyId(handle.to_bits());
         self.bodies.insert(
             id,
