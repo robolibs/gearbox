@@ -200,6 +200,8 @@ pub(crate) struct LastLinearSpeed(HashMap<ControllerKey, (f64, f64)>);
 
 #[derive(Debug, Clone, Default)]
 pub struct ControllerState {
+    /// The datum the position is in, by its region of the physics world.
+    pub region: usize,
     pub position_m: [f64; 3],
     pub heading_rad: f64,
     pub roll_rad: f64,
@@ -1073,6 +1075,13 @@ fn apply_builtin_ackermann_cmd_vel(
     parents: Query<&ChildOf>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut steering_log_at: Local<f32>,
+    // Where the steering actually stands, machine by machine. A command names
+    // the angle the wheels are *wanted* at; they arrive at it over a couple of
+    // seconds, because a steering box is turned by hand or by a ram and neither
+    // goes lock to lock in a frame. Applied straight through, a machine snapped
+    // to full lock the instant it was asked to turn, which no machine does and
+    // which put a corner in its own tracks.
+    mut steer_held: Local<HashMap<ControllerKey, f64>>,
 ) {
     if !active.0 || inventory.machines.is_empty() {
         return;
@@ -1115,11 +1124,13 @@ fn apply_builtin_ackermann_cmd_vel(
                 // including when the command is zero. This lets the UI/API show
                 // that the controller is alive without needing movement.
                 let pos = body.translation();
+                let (region, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
                 let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
                 states.states.insert(
                     key.clone(),
                     ControllerState {
-                        position_m: [pos.x, pos.y, pos.z],
+                        region,
+                        position_m,
                         heading_rad: body_heading,
                         roll_rad,
                         pitch_rad,
@@ -1145,19 +1156,36 @@ fn apply_builtin_ackermann_cmd_vel(
             let max_steer_deg = controller.max_steer_deg.unwrap_or(45.0);
             let steering_input = ui_drive.steering.get(&key).copied()
                 .filter(|_| ui_drive.commands.contains_key(&key));
-            let steer_target_rad = steering_input
+            let steer_wanted = steering_input
                 .map(|input| input as f64 * (max_steer_deg as f64).to_radians())
                 .unwrap_or_else(|| steering_target_radians(
                     cmd.linear_mps, cmd.angular_rps, wheel_base_m, max_steer_deg,
                 ));
+            // Lock to lock in `STEER_SWEEP_S`, so full lock one way from full
+            // lock the other takes twice that.
+            const STEER_SWEEP_S: f64 = 1.0;
+            let steer_target_rad = {
+                let full = (max_steer_deg as f64).to_radians().max(1e-3);
+                let step = full / STEER_SWEEP_S * time.delta_secs_f64();
+                let held = steer_held.entry(key.clone()).or_insert(0.0);
+                let wanted = steer_wanted.clamp(-full, full);
+                *held += (wanted - *held).clamp(-step, step);
+                *held
+            };
             let geometry = controller
                 .steering_geometry
                 .as_deref()
                 .unwrap_or("ackermann");
+            // The geometry solver is given the steering as it *stands*, not as
+            // it was asked for, or it would swing the wheels to full lock while
+            // the fallback above was still winding them round.
+            let steering_now = steering_input.map(|_| {
+                (steer_target_rad / (max_steer_deg as f64).to_radians().max(1e-3)) as f32
+            });
             let turn = steering::solve(
                 scene_root, controller, machine, &joints, &parents, &physics,
                 body_handle, cmd,
-                steering_input,
+                steering_now,
             );
             let steer_targets = turn.as_ref().map(|turn| turn.targets())
                 .unwrap_or_else(|| steering_joint_targets(
@@ -1383,11 +1411,13 @@ fn apply_builtin_diff_drive_cmd_vel(
                 runtime.diff_drive_debug_ticks += 1;
 
                 let pos = body.translation();
+                let (region, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
                 let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
                 states.states.insert(
                     key.clone(),
                     ControllerState {
-                        position_m: [pos.x, pos.y, pos.z],
+                        region,
+                        position_m,
                         heading_rad: machine_heading_rad(body),
                         roll_rad,
                         pitch_rad,
@@ -2304,6 +2334,15 @@ fn authored_wheel_prevents_large_axle_becoming_an_extra_tyre() {
 /// stands still). Trailers and robots press the grass like tractors.
 fn record_wheel_tracks(
     inventory: Res<ControllerInventory>,
+    time: Res<Time>,
+    mut odometers: Local<HashMap<(String, String), f32>>,
+    // One rolled distance for the whole machine, beside each wheel's own. It is
+    // what places the tread along a track, and every wheel of one machine has
+    // to place it the same: a tractor puts two wheels down the same line, and
+    // with a distance each — different radii, different slip — the rear one's
+    // stamp lands on texels the front one wrote holding a number metres apart,
+    // and the chevrons break wherever the two overlap.
+    mut machine_odometers: Local<HashMap<String, (f32, f32, Vec2)>>,
     active: Res<gearbox_api::PhysicsActive>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
@@ -2372,7 +2411,20 @@ fn record_wheel_tracks(
                 (surface - ground) / ground.max(0.1)
             };
             values.set(&machine.id, &link.name, "slip", (slip * 1000.0).round() / 1000.0);
-            let p = body.translation();
+            // How hard the tyre works the ground: wheelspin, side-slip, and the
+            // contact patch twisting as the wheel yaws through a turn.
+            let scrub = (0.1
+                + 0.6 * (surface - ground).abs()
+                + 1.2 * body.linvel().dot(axle).abs()
+                + 1.4 * body.angvel().y.abs()) as f32;
+            // Metres this wheel has rolled, which places its tread along the track.
+            let now = time.elapsed_secs();
+            // Tracks are laid in the cover that is drawn: the view's site.
+            let (site, p) = crate::globe::site_local(body.translation().x, body.translation().y, body.translation().z);
+            if site != crate::globe::current_site() {
+                continue;
+            }
+            let p = DVec3::new(p[0], p[1], p[2]);
             let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
             let contact_point = if let Some(output) = tyre {
                 values.set(&machine.id, &link.name, "normal_force", output.normal_force);
@@ -2381,7 +2433,7 @@ fn record_wheel_tracks(
                     continue;
                 }
                 Vec3::new(
-                    output.contact_point.x as f32,
+                    (output.contact_point.x - gearbox_globe::physics_offset(site).x) as f32,
                     output.contact_point.y as f32,
                     output.contact_point.z as f32,
                 )
@@ -2398,11 +2450,49 @@ fn record_wheel_tracks(
             if roll.dot(travel) < 0.0 {
                 roll = -roll;
             }
+            // One place and one rolled distance per machine per frame, shared by
+            // every wheel of it, and the distance advanced by exactly how far
+            // that place moved along the heading. Not by the wheel's speed
+            // times the frame: the tread's phase is `travelled` minus the
+            // anchor projected on the heading, and that only stays put if the
+            // two advance by the same amount. Integrated from a speed it drifts
+            // a few millimetres a frame, which is a whole lug pitch every few
+            // seconds, and the print slides along the track as it is laid.
+            let here = Vec2::new(p.x as f32, p.z as f32);
+            let (travelled, anchor) = {
+                let rolled = machine_odometers
+                    .entry(machine.id.to_string())
+                    .or_insert((0.0, f32::NEG_INFINITY, here));
+                if rolled.1 != now {
+                    rolled.0 += (here - rolled.2).dot(roll);
+                    rolled.1 = now;
+                    rolled.2 = here;
+                }
+                (rolled.0, rolled.2)
+            };
+            // The wheel's offset from the machine's line is a fixed fact of the
+            // machine, so it is smoothed hard: what varies frame to frame there
+            // is the contact settling, not the tractor moving sideways. Along
+            // the track nothing is smoothed — a lag there would drag the tread
+            // behind the wheel.
+            let axle_of_roll = roll.perp();
+            let sideways = (here - anchor).dot(axle_of_roll);
+            let held = odometers
+                .entry((machine.id.to_string(), link.name.to_string()))
+                .or_insert(sideways);
+            *held += (sideways - *held) * 0.04;
+            let centreline = anchor
+                + axle_of_roll * *held
+                + roll * (here - anchor).dot(roll);
             contacts.contacts.push(gearbox_fields::WheelContact {
                 position: contact_point,
                 direction: roll,
                 width: tyre.and_then(|out| out.pressure).map_or(width, |p| p.patch_width) as f32,
                 length: tyre.and_then(|out| out.pressure).map(|p| p.patch_length as f32),
+                scrub: scrub.clamp(0.0, 1.0),
+                travelled,
+                anchor,
+                centreline,
             });
         }
     }
@@ -4753,11 +4843,12 @@ fn publish_machine_controller_states(
             })
             .and_then(|c| states.states.get(&key).map(|s| (c, s.clone())));
 
-        let (position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
+        let (region, position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
         {
             Some((controller, state)) => {
                 props.set("controller", &controller.instance);
                 (
+                    state.region,
                     state.position_m,
                     state.heading_rad,
                     state.roll_rad,
@@ -4786,6 +4877,8 @@ fn publish_machine_controller_states(
                     continue;
                 };
                 let p = body.position().translation;
+                let (region, p) = crate::globe::site_local(p.x, p.y, p.z);
+                let p = DVec3::new(p[0], p[1], p[2]);
                 let heading = body_forward_vector(body)
                     .map(|f| f.x.atan2(f.z))
                     .unwrap_or(0.0);
@@ -4793,6 +4886,7 @@ fn publish_machine_controller_states(
                 let v = body.linvel();
                 let speed = (v.x * v.x + v.z * v.z).sqrt();
                 (
+                    region,
                     [p.x, p.y, p.z],
                     heading,
                     roll,
@@ -4804,7 +4898,6 @@ fn publish_machine_controller_states(
             }
         };
 
-        let half = heading * 0.5;
         // World-frame position and orientation go out REP-103/Gazebo/Isaac
         // Sim style (Z up, X/Y the ground plane), not the sim's own internal
         // Bevy/Rapier frame (Y up, X/Z the ground plane). The remap is the
@@ -4817,7 +4910,29 @@ fn publish_machine_controller_states(
         // `roll_rad`, `pitch_rad`, and every body-frame twist/IMU field
         // below (already X-forward, Z-up-yaw) need no change at all — only
         // the world-frame point and quaternion do.
+        // What is reported is the pose in the machine's own fixed datum, worked out
+        // from where it truly is on Earth: the frame it is simulated in never shows.
+        let place = crate::globe::earth_place(region, position);
+        let own = crate::globe::machine_datum(&machine.id);
+        let (position, heading) = match (&place, &own) {
+            (Some(place), Some(own)) => {
+                let at = own.from_ecef(place.ecef);
+                let facing = bevy::math::DVec3::new(heading.sin(), 0.0, heading.cos());
+                let facing = own.rotation.inverse() * (place.datum.rotation * facing);
+                ([at.x, at.y, at.z], facing.x.atan2(facing.z))
+            }
+            _ => (position, heading),
+        };
         let ros_point = Point::new(position[2], position[0], position[1]);
+        if let Some(place) = &place {
+            props.set("lat", &format!("{:.9}", place.geodetic.latitude));
+            props.set("lon", &format!("{:.9}", place.geodetic.longitude));
+            props.set("alt", &format!("{:.3}", place.geodetic.altitude));
+            props.set("ecef", &format!("{:.3} {:.3} {:.3}", place.ecef.x, place.ecef.y, place.ecef.z));
+            let anchor = own.unwrap_or(place.datum);
+            props.set("datum", &format!("{:.9} {:.9}", anchor.latitude, anchor.longitude));
+        }
+        let half = heading * 0.5;
         let ros_rotation = Quaternion::new(half.cos(), 0.0, 0.0, half.sin());
         let wire = MachineState {
             odom: Odom {
@@ -4903,8 +5018,14 @@ fn publish_machine_controller_states(
         // convert `heading_rad` (0 = East, counter-clockwise) to a compass
         // bearing (0 = North, clockwise) since that's what a real GNSS
         // receiver's heading output means.
-        let enu = Enu::new(ros_point.x, ros_point.y, ros_point.z, WORLD_GEO_DATUM);
-        let fix = to_wgs_from_enu(enu);
+        let fix = match &place {
+            Some(place) => Geo {
+                latitude: place.geodetic.latitude,
+                longitude: place.geodetic.longitude,
+                altitude: place.geodetic.altitude,
+            },
+            None => to_wgs_from_enu(Enu::new(ros_point.x, ros_point.y, ros_point.z, WORLD_GEO_DATUM)),
+        };
         let bearing = (std::f64::consts::FRAC_PI_2 - heading).rem_euclid(std::f64::consts::TAU);
         agent.publish_gnss(&Gnss::new(fix, bearing));
     }

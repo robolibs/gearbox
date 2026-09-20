@@ -1,4 +1,4 @@
-//! Concrete yard profile: 10 m cast slabs of scanned concrete (Poly Haven
+//! Concrete yard profile: 3 m cast slabs of scanned concrete (Poly Haven
 //! `concrete_floor_worn_001` and the mossy `concrete_floor_02`, both CC0)
 //! with open joints, and the weeds that root in those joints.
 
@@ -74,12 +74,14 @@ impl Plugin for ConcretePlugin {
             .resource_mut::<FieldProfiles>()
             .register(FieldProfile {
                 name: "concrete",
-                // Tyres polish the slabs faintly and crush the joint weeds.
+                // Tyres print their tread where they scrub and crush the joint
+                // weeds; marks wear off in a few minutes.
                 wheel_response: WheelResponse {
-                    recovery_seconds: 90.0,
+                    recovery_seconds: 150.0,
                     bend: 0.85,
-                    darkening: 0.1,
+                    darkening: 0.2,
                     footprint_length: 0.25,
+                    tread: true,
                 },
                 layers: vec![
                     VegetationLayer {
@@ -89,6 +91,7 @@ impl Plugin for ConcretePlugin {
                         fade_start: 8.0,
                         fade_end: 60.0,
                         inverse_square_thinning: false,
+                        follow_grass: 0.0,
                         albedo: None,
                         lod_band: [0.0, 16.0],
                     },
@@ -99,11 +102,15 @@ impl Plugin for ConcretePlugin {
                         fade_start: 8.0,
                         fade_end: 60.0,
                         inverse_square_thinning: false,
+                        follow_grass: 0.0,
                         albedo: None,
                         lod_band: [16.0, 60.0],
                     },
                 ],
                 ground: create_ground,
+                tread: Vec4::ZERO,
+                soft_border: 0.0,
+                surface_tint: Vec4::new(0.118, 0.118, 0.112, 1.0),
             });
     }
 }
@@ -165,6 +172,7 @@ fn create_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
+    _placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = ConcreteExtension {

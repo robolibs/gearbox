@@ -1,22 +1,22 @@
 //! Copy solved world poses into local transforms, ancestors before descendants.
 
 use bevy::prelude::*;
-use bevy::transform::helper::TransformHelper;
 
-use super::convert::{quat_from_d, vec3_from_d};
+use super::convert::quat_from_d;
 use super::world::PhysicsWorld;
+use crate::globe::{Site, transform_in_site};
 
 pub(super) struct PublishedTransform {
     pub body: super::backend::BodyId,
     pub pose: super::backend::Pose,
     pub global: GlobalTransform,
 }
-
 pub fn writeback_transforms(
     mut world: ResMut<PhysicsWorld>,
     active: Res<super::PhysicsActive>,
     parents: Query<&ChildOf>,
-    mut transforms: ParamSet<(TransformHelper, Query<&mut Transform>)>,
+    sites: Query<&Site>,
+    mut transforms: ParamSet<(Query<&Transform>, Query<&mut Transform>)>,
 ) {
     let mut entities: Vec<_> = world.entity_to_body.keys().copied().collect();
     entities.sort_by_cached_key(|entity| parents.iter_ancestors(*entity).count());
@@ -38,28 +38,33 @@ pub fn writeback_transforms(
         {
             continue;
         }
-        let parent_world = if let Ok(parent) = parents.get(entity) {
-            let Ok(transform) = transforms.p0().compute_global_transform(parent.parent()) else {
-                continue;
-            };
-            transform
-        } else {
-            GlobalTransform::IDENTITY
+        let parent_world = match parents.get(entity) {
+            Ok(parent) if !sites.contains(parent.parent()) => {
+                transform_in_site(parent.parent(), &parents, &transforms.p0(), &sites)
+            }
+            _ => GlobalTransform::IDENTITY,
         };
+        // Physics steps at its own fixed rate, so a frame falls somewhere between
+        // two steps. What is drawn is the pose carried on by the time left over:
+        // drawn as stepped, a moving body would stutter against the frame rate.
+        let ahead = if active.0 && rb.is_dynamic() { world.accumulator } else { 0.0 };
+        let at = pose.translation + rb.linvel() * ahead;
+        let (_, local) = crate::globe::site_local(at.x, at.y, at.z);
         let translation = parent_world
             .affine()
             .inverse()
-            .transform_point3(vec3_from_d(pose.translation));
-        let rotation =
-            parent_world.compute_transform().rotation.inverse() * quat_from_d(pose.rotation);
+            .transform_point3(Vec3::new(local[0] as f32, local[1] as f32, local[2] as f32));
+        let turned = rb.angvel() * ahead;
+        let spin = Quat::from_scaled_axis(Vec3::new(turned.x as f32, turned.y as f32, turned.z as f32));
+        let rotation = parent_world.compute_transform().rotation.inverse()
+            * (spin * quat_from_d(pose.rotation));
         if let Ok(mut transform) = transforms.p1().get_mut(entity) {
             transform.translation = translation;
             transform.rotation = rotation;
             written.insert(entity);
         }
-        if written.contains(&entity)
-            && let Ok(global) = transforms.p0().compute_global_transform(entity)
-        {
+        if written.contains(&entity) {
+            let global = transform_in_site(entity, &parents, &transforms.p0(), &sites);
             world.published_transforms.insert(
                 entity,
                 PublishedTransform {
@@ -81,6 +86,7 @@ mod tests {
     use super::super::convert::{quat_to_d, vec3_to_d};
     use super::*;
     use crate::physics::backend::{BodyDesc, Pose};
+    use bevy::transform::helper::TransformHelper;
     use bevy::ecs::system::{RunSystemOnce, SystemState};
 
     #[test]

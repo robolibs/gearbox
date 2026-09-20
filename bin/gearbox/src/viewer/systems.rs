@@ -341,10 +341,9 @@ fn follow_target(
     states: Res<ControllerStates>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
-    mut camera: ParamSet<(
-        bevy::transform::helper::TransformHelper,
-        Query<(&mut ChaseCamera, &mut Transform)>,
-    )>,
+    sites: Query<&crate::globe::Site>,
+    toggles: Res<crate::viewer::overlays::DisplayToggles>,
+    mut camera: ParamSet<(Query<&Transform>, Query<(&mut ChaseCamera, &mut Transform)>)>,
 ) {
     let Some(root) = follow.entity else {
         return;
@@ -359,19 +358,26 @@ fn follow_target(
         return;
     }
     let body = machine_body_entity(root, &inventory, &prims, &parents);
-    let Ok(gt) = camera.p0().compute_global_transform(body) else {
+    // The pose in the machine's own datum, which the view shares while it follows.
+    if !camera.p0().contains(body) {
         follow.set(None);
         return;
-    };
+    }
+    let gt = crate::globe::transform_in_site(body, &parents, &camera.p0(), &sites);
     let current = gt.translation();
     let target_yaw = machine_heading(root, &gt, &inventory, &states) + std::f32::consts::PI;
     // Frame-rate independent exponential smoothing, same shape as the fly's
     // smoothstep-lerp but running every frame instead of over a fixed span.
     const CATCH_UP_RATE: f32 = 2.5;
     let s = 1.0 - (-CATCH_UP_RATE * time.delta_secs()).exp();
+    // Either the view is carried around behind the machine, or it holds the
+    // angle it was on and only travels with it.
+    let swing = toggles.follow_from_behind;
     for (mut cam, mut tr) in &mut camera.p1() {
         cam.focus = current;
-        cam.yaw = lerp_angle(cam.yaw, target_yaw, s);
+        if swing {
+            cam.yaw = lerp_angle(cam.yaw, target_yaw, s);
+        }
         apply_rig(&cam, &mut tr);
     }
 }

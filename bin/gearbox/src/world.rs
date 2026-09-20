@@ -24,9 +24,10 @@ use crate::physics::backend::{
 /// radius — vehicle wheel friction, camera fog distances, cloud
 /// altitude, and shadow cascades all assume ~6 371 km.
 const PLANET_RADIUS_M: f32 = 6_371_000.0;
-/// Keep the old planet/horizon helper below the hilly local terrain.
-/// Otherwise it reads as a flat plate under the terrain mesh.
-const PLANET_VISUAL_DROP_M: f32 = 40.0;
+/// The planet cap lies under the deepest valley of the distant land, with
+/// room for the meadow's own hollows; any shallower and it shows through the
+/// valleys as flat pale islands.
+const PLANET_VISUAL_DROP_M: f32 = 0.5 * crate::terrain::HORIZON_RELIEF_M + 30.0;
 const TERRAIN_FLAT_SPAWN_RADIUS_M: f32 = 24.0;
 const TERRAIN_FULL_RELIEF_RADIUS_M: f32 = 55.0;
 const TERRAIN_MIN_HEIGHT_M: f32 = -5.0;
@@ -35,8 +36,15 @@ const FLAT_GROUND_HALF_EXTENT_M: f64 = 10_000.0;
 const FLAT_GROUND_VISUAL_SIZE_M: f32 = 10_000.0;
 const USD_TERRAIN_ACTIVATION_WARN_FRAMES: u32 = 120;
 const CAMERA_HALF_SPAN_M: f32 = 5_000.0;
-const CAMERA_MAX_DISTANCE_M: f32 = 5_000.0;
-const CAMERA_MAX_HEIGHT_M: f32 = 3_000.0;
+const CAMERA_MAX_DISTANCE_M: f32 = 16_000.0;
+/// With the ceiling lifted: far enough for the whole planet to fit the view.
+const CAMERA_ORBIT_DISTANCE_M: f32 = 40_000_000.0;
+/// High enough to get above the weather. The cloud deck lies between 3.8 and
+/// 5.3 km, and the ceiling used to stand at 3 — below the cloud *base*, so the
+/// clouds could not be looked at from above at all without the unlimited-zoom
+/// toggle, which is not something anyone would think to reach for. Anything
+/// that changes the cloud heights should move this with them.
+const CAMERA_MAX_HEIGHT_M: f32 = 9_000.0;
 
 static USD_TERRAIN_LOADED: AtomicBool = AtomicBool::new(false);
 /// Set when the loaded USD terrain mesh is level; `terrain_height_m` then
@@ -258,23 +266,42 @@ const STATIC_PROP_FORCE_FREEZE_FRAMES: u32 = 45;
 const STATIC_PROP_SETTLED_LINEAR_SPEED_MPS: f64 = 0.12;
 const STATIC_PROP_SETTLED_ANGULAR_SPEED_RPS: f64 = 0.25;
 
-/// The part of the planet anyone can see: a spherical cap around the pole
-/// under the field, out to the horizon from the 5 km camera ceiling. Rings
-/// tighten towards the field, keeping the true curvature with ~12k vertices
-/// where a full 1024x512 sphere uploaded 29 MB at every launch.
-fn planet_cap_mesh(radius: f32) -> Mesh {
+/// The planet as a painted ball: fine rings in a cap around the field, coarse
+/// ones closing the globe for a camera in orbit. Every vertex carries the
+/// colour of the surface under it — sea, land, the belts of the country and
+/// the ice — because at planetary scale that layer is the only one that reads.
+fn planet_cap_mesh(radius: f32, datum: &gearbox_globe::Datum, land: &gearbox_globe::Terrain) -> Mesh {
     const CAP_RAD: f32 = 3.0 * std::f32::consts::PI / 180.0;
-    const RINGS: u32 = 48;
+    const CAP_RINGS: u32 = 48;
+    const GLOBE_RINGS: u32 = 90;
+    const RINGS: u32 = CAP_RINGS + GLOBE_RINGS;
     const SEGMENTS: u32 = 256;
+    // A direction out of the planet's middle, as the place on the ground it
+    // points at. `DVec3` is rapier's vector here; the globe speaks Bevy's.
+    let ground_at = |normal: [f32; 3]| -> bevy::math::DVec3 {
+        let out = bevy::math::DVec3::new(normal[0] as f64, normal[1] as f64, normal[2] as f64);
+        datum.to_ecef(bevy::math::DVec3::new(0.0, -(radius as f64), 0.0) + out * radius as f64)
+    };
+    let paint = |normal: [f32; 3]| -> [f32; 4] {
+        let colour = land.surface(ground_at(normal));
+        [colour.x, colour.y, colour.z, 1.0]
+    };
     let mut positions = vec![[0.0, radius, 0.0]];
     let mut normals = vec![[0.0, 1.0, 0.0]];
+    let mut colours = vec![paint([0.0, 1.0, 0.0])];
     for ring in 1..=RINGS {
-        let theta = CAP_RAD * (ring as f32 / RINGS as f32).powi(2);
+        let theta = if ring <= CAP_RINGS {
+            CAP_RAD * (ring as f32 / CAP_RINGS as f32).powi(2)
+        } else {
+            let t = (ring - CAP_RINGS) as f32 / (GLOBE_RINGS + 1) as f32;
+            CAP_RAD + (std::f32::consts::PI - CAP_RAD) * t
+        };
         for segment in 0..SEGMENTS {
             let phi = segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
             let normal = [theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin()];
             positions.push(normal.map(|c| c * radius));
             normals.push(normal);
+            colours.push(paint(normal));
         }
     }
     let at = |ring: u32, segment: u32| 1 + (ring - 1) * SEGMENTS + segment % SEGMENTS;
@@ -289,12 +316,21 @@ fn planet_cap_mesh(radius: f32) -> Mesh {
             indices.extend([a, b, c, b, d, c]);
         }
     }
+    // The far pole closes it.
+    let south = positions.len() as u32;
+    positions.push([0.0, -radius, 0.0]);
+    normals.push([0.0, -1.0, 0.0]);
+    colours.push(paint([0.0, -1.0, 0.0]));
+    for segment in 0..SEGMENTS {
+        indices.extend([south, at(RINGS, segment), at(RINGS, segment + 1)]);
+    }
     Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colours)
     .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
@@ -302,28 +338,74 @@ fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
+    mut terrain_materials: ResMut<Assets<gearbox_planet::planet::material::TerrainMaterial>>,
+    mut water_materials: ResMut<Assets<gearbox_planet::planet::material::WaterMaterial>>,
+    mut media: ResMut<Assets<bevy::light::atmosphere::ScatteringMedium>>,
     render_target: Option<Res<BevyViewportRenderTarget>>,
+    sites: Res<crate::globe::Sites>,
 ) {
     let radius = PLANET_RADIUS_M;
 
     // ── Planet ───────────────────────────────────────────────────────
-    // Warm sandy / tan ground colour, filling the horizon. It is lowered
-    // below the local terrain so it cannot appear as a second flat
-    // ground plate under the hilly field mesh.
-    let planet_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.62, 0.48, 0.33),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-    let planet_mesh = meshes.add(planet_cap_mesh(radius));
-    commands.spawn((
-        Name::new("Planet"),
-        Transform::from_xyz(0.0, -radius - PLANET_VISUAL_DROP_M, 0.0),
-        Mesh3d(planet_mesh),
-        MeshMaterial3d(planet_mat.clone()),
-        NotShadowCaster,
-        bevy::light::NotShadowReceiver,
-    ));
+    // Two of them, and `GEARBOX_PLANET=cdlod` picks the second: a painted ball
+    // whose vertices carry the surface, or a cube-sphere quadtree refined
+    // towards the camera with its heights baked on the GPU. The quadtree is
+    // the one that can carry real ground all the way down to the field; it is
+    // not yet seated well enough to be what anyone gets by default.
+    let home = sites.current().frame;
+    let land = gearbox_globe::Terrain::new(&home);
+    // The quadtree selector wants to know the grid whichever planet is drawn:
+    // with no planet in it, it has nothing to choose and does nothing.
+    commands.insert_resource(gearbox_planet::planet::RootGrid(sites.root));
+    if std::env::var("GEARBOX_PLANET").as_deref() != Ok("cdlod") {
+        commands.spawn((
+            Name::new("Planet"),
+            crate::globe::PlanetBall,
+            Transform::from_scale(Vec3::splat(1.0 - PLANET_VISUAL_DROP_M / radius)),
+            big_space::prelude::CellCoord::default(),
+            ChildOf(sites.root),
+            Mesh3d(meshes.add(planet_cap_mesh(radius, &home, &land))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                perceptual_roughness: 0.95,
+                ..default()
+            })),
+            NotShadowCaster,
+            bevy::light::NotShadowReceiver,
+        ));
+    } else {
+    // Its ground is displaced *outwards* from the sphere, so a planet built on
+    // the true radius stands its own relief above the datum and swallows the
+    // field. The sphere it is built on drops by the whole of that relief, and
+    // by the drop the painted ball used, so the highest ground the planet can
+    // raise still passes under the land that is simulated.
+    let mut planet = gearbox_planet::PlanetConfig::earth(radius);
+    planet.radius = radius - planet.height_amp - PLANET_VISUAL_DROP_M;
+    planet.atmosphere = None;
+    // Where the sphere's middle is: a radius straight down from the datum in
+    // view, so its surface comes up under the field. `seat_planet` does this
+    // again whenever the site changes, but it latches on its first run — which
+    // is before this planet exists — so the first seating is made here.
+    let centre = home.origin - home.up() * gearbox_globe::PLANET_RADIUS_M;
+    let planet = gearbox_planet::spawn_planet(
+        &mut commands,
+        sites.root,
+        planet,
+        centre,
+        &meshes.add(gearbox_planet::planet::mesh::build_grid_mesh()),
+        images.as_mut(),
+        buffers.as_mut(),
+        terrain_materials.as_mut(),
+        water_materials.as_mut(),
+        media.as_mut(),
+    );
+        // Where it goes afterwards is `seat_planet`'s business, as it was for
+        // the ball: the Earth is an ellipsoid and this is a sphere, so it is
+        // seated under whichever datum is being looked at.
+        commands.entity(planet).insert((Name::new("Planet"), crate::globe::PlanetBall));
+    }
 
     // ── Ground grid: off-looking flat grids make hilly terrain read as
     // floating over a plate, so keep it effectively invisible by
@@ -334,11 +416,27 @@ fn spawn_world(
     });
 
     // ── Camera ──────────────────────────────────────────────────────
+    // Scripted views: `GEARBOX_CAMERA_DISTANCE` (m), `GEARBOX_CAMERA_ELEVATION` (deg)
+    // and `GEARBOX_CAMERA_FOCUS` ("x,z" in m).
+    let view = |name: &str, fallback: f32| {
+        std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite()).unwrap_or(fallback)
+    };
     let chase = ChaseCamera {
-        focus: Vec3::new(0.0, 0.5, 0.0),
-        distance: 14.0,
-        elevation: 25_f32.to_radians(),
+        focus: std::env::var("GEARBOX_CAMERA_FOCUS")
+            .ok()
+            .and_then(|v| {
+                let (x, z) = v.split_once(',')?;
+                Some(Vec3::new(x.trim().parse().ok()?, 0.5, z.trim().parse().ok()?))
+            })
+            .unwrap_or(Vec3::new(0.0, 0.5, 0.0)),
+        distance: view("GEARBOX_CAMERA_DISTANCE", 14.0).clamp(1.0, CAMERA_ORBIT_DISTANCE_M),
+        elevation: view("GEARBOX_CAMERA_ELEVATION", 15.0).clamp(-10.0, 89.0).to_radians(),
         max_distance: CAMERA_MAX_DISTANCE_M,
+        // A gentler notch. The ground, its fields and the marks driven into it
+        // are all streamed in as the view reaches them, and a wheel notch that
+        // covers a decade of distance outruns that every time: the camera
+        // arrives somewhere before there is anything there to see.
+        zoom_step: 0.045,
         ..default()
     };
     let mut camera_transform = Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y);
@@ -354,10 +452,15 @@ fn spawn_world(
         camera_transform,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
-            far: 80_000.0,
+            // Only culling reads it (depth is reversed and unbounded): past the
+            // far side of the planet from the highest orbit.
+            far: 1.0e8,
             ..default()
         }),
         chase,
+        big_space::prelude::CellCoord::default(),
+        big_space::prelude::FloatingOrigin,
+        ChildOf(sites.home().entity),
     ));
     if let Some(target) = render_target {
         camera.insert(bevy::camera::RenderTarget::from(target.0.clone()));
@@ -430,12 +533,27 @@ const CAMERA_MIN_ELEVATION: f32 = 3.0_f32.to_radians();
 /// it clear.
 pub(crate) fn chase_camera_floor(
     keys: Res<ButtonInput<KeyCode>>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    toggles: Res<crate::viewer::overlays::DisplayToggles>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut Projection)>,
 ) {
+    let (ceiling, max_height) = if toggles.unlimited_zoom {
+        (CAMERA_ORBIT_DISTANCE_M, CAMERA_ORBIT_DISTANCE_M)
+    } else {
+        (CAMERA_MAX_DISTANCE_M, CAMERA_MAX_HEIGHT_M)
+    };
     let below_ground = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    for (mut cam, mut transform) in &mut cameras {
-        cam.max_distance = CAMERA_MAX_DISTANCE_M;
-        cam.distance = cam.distance.clamp(cam.min_distance, CAMERA_MAX_DISTANCE_M);
+    for (mut cam, mut transform, mut projection) in &mut cameras {
+        cam.max_distance = ceiling;
+        cam.distance = cam.distance.clamp(cam.min_distance, ceiling);
+        // Depth precision falls with the square of distance over the near
+        // plane, so the near plane backs off as the camera does; nothing is
+        // ever that close to a camera that far out.
+        let near = (cam.distance / 200.0).clamp(0.1, 100_000.0);
+        if let Projection::Perspective(lens) = projection.as_mut()
+            && (lens.near - near).abs() > near * 0.05
+        {
+            lens.near = near;
+        }
         cam.focus.x = cam.focus.x.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
         cam.focus.z = cam.focus.z.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
         if !below_ground {
@@ -451,13 +569,13 @@ pub(crate) fn chase_camera_floor(
                 .max(ground + CAMERA_TERRAIN_CLEARANCE_M - rise);
         }
         let rise = cam.distance * cam.elevation.sin().max(0.0);
-        if rise > CAMERA_MAX_HEIGHT_M {
-            cam.distance = CAMERA_MAX_HEIGHT_M / cam.elevation.sin();
+        if rise > max_height {
+            cam.distance = max_height / cam.elevation.sin();
         }
         cam.focus.y = cam
             .focus
             .y
-            .min(CAMERA_MAX_HEIGHT_M - cam.distance * cam.elevation.sin());
+            .min(max_height - cam.distance * cam.elevation.sin());
         apply_rig(&cam, &mut transform);
     }
 }
@@ -555,7 +673,10 @@ fn chase_camera_zoom(
     let log_target = target.max(0.1).ln();
     let log_diff = log_target - log_current;
     if log_diff.abs() > 1e-4 {
-        let new_log = log_current + log_diff * (6.0 * dt).min(0.9);
+        // Travelling to the new distance, not jumping to it. Slow enough that
+        // the terrain and the covers have frames in hand to come in before the
+        // view gets there — the whole reason the glide exists.
+        let new_log = log_current + log_diff * (1.7 * dt).min(0.9);
         cam.distance = new_log.exp() as f32;
         apply_rig(&cam, &mut transform);
     } else if log_diff.abs() > 1e-5 {

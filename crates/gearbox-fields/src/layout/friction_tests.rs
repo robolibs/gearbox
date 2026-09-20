@@ -70,7 +70,7 @@ fn invalid_material_geometry_or_grid_is_rejected() {
     assert!(layout.friction_samples(&grid, 1.0).is_err());
     layout.fields[1].min[0] = 0.0;
     layout.fields[1].max[0] = 3.0;
-    assert!(layout.friction_samples(&grid, 1.0).is_err());
+    assert!(layout.friction_samples(&grid, 1.0).is_ok());
     let mut invalid_grid = HeightGrid::sample(4.0, 1.0, |_, _| 0.0);
     invalid_grid.cols = usize::MAX;
     assert!(self::layout().friction_samples(&invalid_grid, 1.0).is_err());

@@ -22,7 +22,11 @@ profile = ["bevy/trace", "bevy/debug", "dep:tracing-chrome"]
 bevy.workspace = true
 gearbox-controls = { path = "../../crates/gearbox-controls" }
 gearbox-fields = { path = "../../crates/gearbox-fields" }
-bevy-volumetric-clouds = { path = "../../vendored/bevy-volumetric-clouds" }
+gearbox-globe = { path = "../../crates/gearbox-globe" }
+gearbox-planet = { path = "../../crates/gearbox-planet" }
+bevy_weather = { path = "../../crates/bevy_weather" }
+bevy_biomes = { path = "../../crates/bevy_biomes" }
+big_space.workspace = true
 
 # mara owns the window, ribbons and panes; Bevy renders into its viewport.
 mara.workspace = true

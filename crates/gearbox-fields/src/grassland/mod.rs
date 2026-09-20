@@ -31,6 +31,34 @@ struct MeadowExtension {
     heightmap: Handle<Image>,
     #[uniform(107)]
     geometry: SurfaceGeometryParams,
+    #[uniform(108)]
+    edges: MeadowEdges,
+}
+
+/// Where this meadow sits and what lies across each of its sides, so it meets
+/// its neighbours in a wash rather than on a line — the same blend the bare
+/// grounds make, from the other side of it. A way is a track worn across the
+/// meadow itself: wear is not a thing bare ground alone can have, or a road
+/// could never cross a field without the field being cut in three.
+#[derive(bevy::render::render_resource::ShaderType, Reflect, Debug, Clone, Copy, Default)]
+struct MeadowEdges {
+    extent: Vec4,
+    west: Vec4,
+    east: Vec4,
+    south: Vec4,
+    north: Vec4,
+    reach: Vec4,
+    tread: Vec4,
+    way: Mat4,
+    way_more: Mat4,
+    way_shape: Vec4,
+    /// The tyre that prints each of the two lines: pitch, lean, duty, depth.
+    bar: Vec4,
+    bar_more: Vec4,
+    /// What a way wears the meadow down to, shared with the bare grounds so a
+    /// track does not change colour where it leaves one field for the next.
+    soil: Vec4,
+    stony: Vec4,
 }
 
 impl MaterialExtension for MeadowExtension {
@@ -55,16 +83,22 @@ impl Plugin for GrasslandPlugin {
         let density = self.density;
         let share = density / 6000.0;
         // Near and mid meshes fold two blades from each root.
-        let blades = density / 2.0;
+        // Half the width apiece, so half again as many of them: a thinner
+        // blade shows more ground through the sward than a thick one does.
+        let blades = density / 2.0 * 1.5;
         app.world_mut()
             .resource_mut::<FieldProfiles>()
             .register(FieldProfile {
                 name: "grassland",
                 wheel_response: WheelResponse {
-                    recovery_seconds: 300.0,
+                    recovery_seconds: 150.0,
                     bend: 0.9,
                     darkening: 0.43,
                     footprint_length: 0.25,
+                    // A tyre prints its bars into a meadow's soil as surely as
+                    // into a track's, wherever the wheel has taken the sward
+                    // off it. It costs the wheel map its other two channels.
+                    tread: true,
                 },
                 layers: vec![
                     // One blade population at three levels of detail.
@@ -75,6 +109,7 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 8.0,
                         fade_end: 128.0,
                         inverse_square_thinning: true,
+                        follow_grass: 0.0,
                         albedo: None,
                         lod_band: GOT_NEAR_BAND,
                     },
@@ -85,6 +120,7 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 8.0,
                         fade_end: 128.0,
                         inverse_square_thinning: true,
+                        follow_grass: 0.0,
                         albedo: None,
                         lod_band: GOT_MID_BAND,
                     },
@@ -95,6 +131,7 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 8.0,
                         fade_end: 128.0,
                         inverse_square_thinning: true,
+                        follow_grass: 0.0,
                         albedo: None,
                         lod_band: GOT_FAR_BAND,
                     },
@@ -105,6 +142,7 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 32.0,
                         fade_end: 144.0,
                         inverse_square_thinning: true,
+                        follow_grass: 0.0,
                         albedo: None,
                         lod_band: [0.0, f32::MAX],
                     },
@@ -115,6 +153,7 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 6.0,
                         fade_end: 45.0,
                         inverse_square_thinning: true,
+                        follow_grass: 0.0,
                         albedo: None,
                         lod_band: [0.0, f32::MAX],
                     },
@@ -125,15 +164,29 @@ impl Plugin for GrasslandPlugin {
                         fade_start: 12.0,
                         fade_end: super::canopy::FADE_END_M,
                         inverse_square_thinning: true,
+                        follow_grass: 0.0,
                         albedo: None,
                         lod_band: [0.0, f32::MAX],
                     },
                     super::clumps::bermuda(share * 120.0, 40.0),
                     super::clumps::meadow_tufts(share * 50.0, 36.0),
                     super::clumps::sorrel(share * 30.0, 32.0),
+                    // Scanned plants, a few dozen in view against the sward's
+                    // millions of blades: they carry the detail the blades
+                    // cannot, and are rare enough that the eye never finds the
+                    // same one twice.
+                    super::clumps::dandelion(share * 2.5, 38.0),
+                    super::clumps::nettle(share * 0.8, 34.0),
                     super::clumps::celandine(share * 1.0, 40.0),
+                    // Chippings where a track crosses the meadow. A recoloured
+                    // ground is not a road; something has to lie loose on it.
+                    super::bare::way_grit(5200.0),
+                    super::bare::way_litter(2600.0),
                 ],
                 ground: create_ground,
+                tread: Vec4::ZERO,
+                soft_border: 1.3,
+                surface_tint: Vec4::new(0.055, 0.082, 0.030, 1.0),
             });
     }
 }
@@ -143,6 +196,7 @@ fn create_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
+    placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let grass_albedo = assets
@@ -168,6 +222,25 @@ fn create_ground(
                 ..default()
             },
             extension: MeadowExtension {
+                edges: MeadowEdges {
+                    extent: Vec4::new(
+                        placed.bounds.min.x, placed.bounds.min.y,
+                        placed.bounds.max.x, placed.bounds.max.y),
+                    west: placed.tint[0],
+                    east: placed.tint[1],
+                    south: placed.tint[2],
+                    north: placed.tint[3],
+                    reach: Vec4::from_array(placed.reach),
+                    tread: placed.tread(),
+                    way: placed.way.packed().0,
+                    way_more: placed.way.packed().1,
+                    way_shape: placed.way.packed().2,
+                    bar: placed.bars().0,
+                    bar_more: placed.bars().1,
+                    // Dark loam: what is under turf that has never been broken.
+                    soil: Vec4::new(0.072, 0.050, 0.030, 1.0),
+                    stony: crate::bare::WAY_HARDCORE,
+                },
                 grass_albedo,
                 dirt_albedo,
                 trample,

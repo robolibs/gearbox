@@ -1,0 +1,32 @@
+{
+  "default": "grassland",
+  "fields": [
+    {
+      "name": "footpath",
+      "profile": "grassland",
+      "min": [-120.0, -70.0],
+      "max": [-40.0, 50.0],
+      "way_width": 1.2,
+      "wear": 0.8,
+      "way": [[-110.0, -60.0], [-80.0, -10.0], [-50.0, 40.0]]
+    },
+    {
+      "name": "quad-track",
+      "profile": "grassland",
+      "min": [-40.0, -70.0],
+      "max": [40.0, 50.0],
+      "way_width": 2.4,
+      "wear": 0.8,
+      "way": [[-30.0, -60.0], [0.0, -10.0], [30.0, 40.0]]
+    },
+    {
+      "name": "farm-track",
+      "profile": "grassland",
+      "min": [40.0, -70.0],
+      "max": [120.0, 50.0],
+      "way_width": 6.0,
+      "wear": 0.8,
+      "way": [[50.0, -60.0], [80.0, -10.0], [110.0, 40.0]]
+    }
+  ]
+}

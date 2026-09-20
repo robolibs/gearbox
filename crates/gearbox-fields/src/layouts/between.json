@@ -1,0 +1,8 @@
+{
+  "default": "grassland",
+  "fields": [
+    { "name": "ploughed-west", "profile": "ploughed", "min": [-80.0, -100.0], "max": [-6.0, 100.0] },
+    { "name": "lane",          "profile": "track", "wear": 0.55, "min": [-6.0, -100.0], "max": [0.0, 100.0] },
+    { "name": "sand-east",     "profile": "sand", "min": [0.0, -100.0], "max": [74.0, 100.0] }
+  ]
+}

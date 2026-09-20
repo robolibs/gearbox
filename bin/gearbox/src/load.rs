@@ -247,7 +247,7 @@ fn queue_usd_load(
     activate_physics_after_sync: bool,
     variants: Vec<(String, String, String)>,
     tyres: gearbox_api::tyres::SavedTyres,
-) -> Result<(), String> {
+) -> Result<Entity, String> {
     let read_started = std::time::Instant::now();
     let source = std::fs::read(&path)
         .and_then(|bytes| usd_bevy::UsdSource::new(&path, bytes));
@@ -296,7 +296,7 @@ fn queue_usd_load(
         spawned: false,
         tyres,
     });
-    Ok(())
+    Ok(root)
 }
 
 fn snap_grounded_machine_to_terrain(transform: &mut Transform) {
@@ -500,9 +500,12 @@ fn sync_pending_machine_physics_to_scene_transforms(
     children: Query<&Children>,
     globals: Query<&GlobalTransform>,
     names: Query<&Name>,
+    parents: Query<&ChildOf>,
+    sites: Query<&crate::globe::Site>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
     for (root, mut root_transform, mut pending, name) in pending.iter_mut() {
+        let region = gearbox_globe::physics_offset(crate::globe::site_of(root, &parents, &sites));
         let descendants = collect_descendants(root, &children);
         let body_entities = descendants
             .iter().copied()
@@ -532,7 +535,7 @@ fn sync_pending_machine_physics_to_scene_transforms(
             Ok((handle,
                 Pose {
                     translation: DVec3::new(
-                        transform.translation.x as f64,
+                        transform.translation.x as f64 + region.x,
                         transform.translation.y as f64,
                         transform.translation.z as f64,
                     ),
@@ -680,7 +683,7 @@ fn max_terrain_height_under_aabb(min_x: f64, max_x: f64, min_z: f64, max_z: f64)
     ];
     samples
         .into_iter()
-        .map(|(x, z)| terrain_height_m(x as f32, z as f32) as f64)
+        .map(|(x, z)| crate::globe::ground_height_at_physics(x, z))
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
@@ -760,6 +763,7 @@ fn drain_machine_load_queue(
     physics: Res<crate::physics::PhysicsWorld>,
     mut pending: Query<&mut MachinePhysicsSyncPending>,
     mut bus: Option<ResMut<GearboxBus>>,
+    mut sites: ResMut<crate::globe::Sites>,
 ) {
     for req in queue.0.drain(..) {
         if req.remove() || req.delete() {
@@ -821,13 +825,26 @@ fn drain_machine_load_queue(
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| usd_path.clone())
             });
-        let mut transform = Transform {
-            translation: Vec3::new(req.x, req.y, req.z),
+        // `lat`/`lon`(/`alt`) props say where on Earth; else x, y, z are metres
+        // north, up and east of home. Either way the datum is found from the place.
+        let number = |key: &str| props.get(key).and_then(|v| v.parse::<f64>().ok());
+        let lla = number("lat").zip(number("lon")).map(|(lat, lon)| {
+            gearbox_globe::Geodetic::new(lat, lon, number("alt").unwrap_or(0.0))
+        });
+        let (datum, translation, put) = sites.place(&mut commands, lla, Vec3::new(req.x, req.y, req.z));
+        // `datum_lat`/`datum_lon` name the machine's own datum; else it is where it is put.
+        if let Some(id) = &machine_id {
+            let own = number("datum_lat")
+                .zip(number("datum_lon"))
+                .unwrap_or((put.latitude, put.longitude));
+            crate::globe::set_machine_datum(id, gearbox_globe::Datum::at(own.0, own.1));
+        }
+        let transform = Transform {
+            translation,
             rotation: Quat::from_rotation_y(req.yaw_deg.to_radians()),
             ..default()
         };
-        snap_grounded_machine_to_terrain(&mut transform);
-        if let Err(reason) = queue_usd_load(
+        let result = queue_usd_load(
             &mut commands,
             &mut scenes,
             &mut inflight,
@@ -838,8 +855,12 @@ fn drain_machine_load_queue(
             !keep_paused,
             req.variants(),
             tyres,
-        ) {
-            reject(&reason);
+        );
+        match result {
+            Ok(root) => {
+                commands.entity(root).insert(crate::globe::InDatum(datum));
+            }
+            Err(reason) => reject(&reason),
         }
     }
 }

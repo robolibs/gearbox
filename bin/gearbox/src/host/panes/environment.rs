@@ -5,8 +5,8 @@ use mara_core::pod::{Pod, PodResponse};
 use mara_core::vocab::Id as MaraId;
 use std::collections::HashMap;
 
-use super::{PaneCtx, button_clicked, cid, pid, pod_response};
-use crate::environment::EnvironmentSettings;
+use super::{PaneCtx, cid, pid};
+use crate::environment::WeatherSettings;
 use crate::host::PANE_ENVIRONMENT as P;
 
 const BEAUFORT_NAMES: [&str; 13] = [
@@ -15,7 +15,7 @@ const BEAUFORT_NAMES: [&str; 13] = [
 ];
 
 pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
-    let settings = world.resource::<EnvironmentSettings>();
+    let settings = world.resource::<WeatherSettings>();
     let calendar = settings.calendar;
     let weather = pid(P, "weather", 0);
     let sun = pid(P, "sun", 0);
@@ -82,13 +82,14 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         .with_readout("season", "Changes sunlight, not field crops")
         .with_button("Use calendar", ctx.accent);
     let wind = pid(P, "wind", 0);
-    let (speed, heading, gust) = (
+    let (speed, heading, gust, drift) = (
         settings.wind_speed_mps as f64,
         settings.wind_heading_deg as f64,
         settings.wind_gustiness as f64 * 100.0,
+        (settings.cloud_drift_mps as f64).clamp(0.0, 60.0),
     );
     let force = settings.beaufort();
-    for (i, value) in [speed, heading, gust].into_iter().enumerate() {
+    for (i, value) in [speed, heading, gust, drift].into_iter().enumerate() {
         ctx.set_slider(wind, i, value);
     }
     let wind_pod = Pod::new(wind)
@@ -96,20 +97,72 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         .with_slider("Speed", speed, 0.0..=20.0, 1, " m/s", ctx.accent)
         .with_slider("Towards", heading, 0.0..=360.0, 0, "°", ctx.accent)
         .with_slider("Gustiness", gust, 0.0..=100.0, 0, " %", ctx.accent)
+        .with_slider("Cloud drift", drift, 0.0..=60.0, 0, " m/s", ctx.accent)
         .with_button("Calm", ctx.accent)
         .with_button("Breeze", ctx.accent)
         .with_button("Gale", ctx.accent);
+
+    let air = pid(P, "air", 0);
+    // A slider asserts its value lies in its range; the settings reach wider.
+    let fov = (world.resource::<crate::environment::ViewerLens>().fov_deg as f64).clamp(35.0, 85.0);
+    let visibility = (settings.haze_visibility_km as f64).clamp(1.0, 40.0);
+    for (i, value) in [visibility, fov].into_iter().enumerate() {
+        ctx.set_slider(air, i, value);
+    }
+    let air_pod = Pod::new(air)
+        .with_readout("depth", "haze and lens")
+        .with_slider("Visibility", visibility, 1.0..=40.0, 1, " km", ctx.accent)
+        .with_slider("Field of view", fov, 35.0..=85.0, 0, "°", ctx.accent)
+        .with_button("Crisp", ctx.accent)
+        .with_button("Clear", ctx.accent)
+        .with_button("Hazy", ctx.accent);
 
     // Same order as the flat list was, so `apply`'s pod indices hold.
     Tab::new(cid(P, "env"), "Environment", "weather-sunny").containers(vec![
         TabContainer::new(cid(P, "weather"), "Weather", "weather-cloudy", vec![weather_pod]),
         TabContainer::new(cid(P, "sun"), "Sun", "weather-sunny", vec![sun_pod]),
         TabContainer::new(cid(P, "wind"), "Wind", "weather-squalls", vec![wind_pod]),
+        TabContainer::new(cid(P, "air"), "Air & lens", "weather-fog", vec![air_pod]),
     ])
 }
 
+// A collapsed section renders no pods, so positions in the tab's response
+// list shift with what is folded; a section is told apart by how many
+// sliders and buttons it has instead.
+fn section(
+    responses: &HashMap<MaraId, Vec<PodResponse>>,
+    sliders: usize,
+    buttons: usize,
+) -> Option<&PodResponse> {
+    responses
+        .get(&cid(P, "env"))?
+        .iter()
+        .find(|resp| resp.sliders.len() == sliders && resp.buttons.len() == buttons)
+}
+
 pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, _ctx: &PaneCtx) {
-    if let Some(resp) = pod_response(responses, cid(P, "env"), 2) {
+    if let Some(resp) = section(responses, 2, 3) {
+        let fov = resp.sliders.get(1).filter(|s| s.changed).map(|s| s.value as f32);
+        if let Some(fov) = fov {
+            world.resource_mut::<crate::environment::ViewerLens>().fov_deg = fov.clamp(20.0, 100.0);
+        }
+        let preset = [25.0, 6.0, 3.0]
+            .into_iter()
+            .enumerate()
+            .find(|(i, _)| resp.buttons.get(*i).is_some_and(|b| b.clicked))
+            .map(|(_, km)| km);
+        let mut settings = world.resource_mut::<WeatherSettings>();
+        if let Some(km) = preset {
+            settings.haze_visibility_km = km;
+        }
+        for (index, slider) in resp.sliders.iter().enumerate().filter(|(_, s)| s.changed) {
+            match index {
+                0 => settings.haze_visibility_km = (slider.value as f32).clamp(0.5, 80.0),
+                _ => {}
+            }
+        }
+    }
+    if let Some(resp) = section(responses, 4, 3) {
         let preset = [(1.0, 0.3), (5.0, 0.7), (15.0, 0.9)]
             .into_iter()
             .enumerate()
@@ -123,7 +176,7 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, _
             .map(|(i, s)| (i, s.value))
             .collect();
         if preset.is_some() || !moved.is_empty() {
-            let mut settings = world.resource_mut::<EnvironmentSettings>();
+            let mut settings = world.resource_mut::<WeatherSettings>();
             if let Some((speed, gust)) = preset {
                 settings.wind_speed_mps = speed;
                 settings.wind_gustiness = gust;
@@ -133,12 +186,13 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, _
                     0 => settings.wind_speed_mps = (value as f32).clamp(0.0, 30.0),
                     1 => settings.wind_heading_deg = (value as f32).rem_euclid(360.0),
                     2 => settings.wind_gustiness = (value as f32 / 100.0).clamp(0.0, 1.0),
+                    3 => settings.cloud_drift_mps = (value as f32).clamp(0.0, 100.0),
                     _ => {}
                 }
             }
         }
     }
-    if let Some(resp) = pod_response(responses, cid(P, "env"), 0) {
+    if let Some(resp) = section(responses, 1, 3) {
         let preset = [0.0, 0.55, 1.0]
             .into_iter()
             .enumerate()
@@ -152,16 +206,16 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, _
         });
         if let Some(value) = coverage {
             world
-                .resource_mut::<EnvironmentSettings>()
+                .resource_mut::<WeatherSettings>()
                 .clouds
                 .clouds_coverage = value;
         }
     }
-    if let Some(resp) = pod_response(responses, cid(P, "env"), 1)
+    if let Some(resp) = section(responses, 3, 1)
         && (resp.sliders.iter().any(|s| s.changed)
-            || button_clicked(responses, cid(P, "env"), 1, 0))
+            || resp.buttons.first().is_some_and(|b| b.clicked))
     {
-        let mut settings = world.resource_mut::<EnvironmentSettings>();
+        let mut settings = world.resource_mut::<WeatherSettings>();
         for (index, slider) in resp.sliders.iter().enumerate().filter(|(_, s)| s.changed) {
             match index {
                 0 => settings.calendar.hour = (slider.value as f32).clamp(0.0, 24.0),

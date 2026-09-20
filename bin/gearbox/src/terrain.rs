@@ -12,7 +12,8 @@ use gearbox_fields::HeightGrid;
 use crate::physics::backend::{ColliderDesc, ColliderId, DVec3, Shape};
 
 use crate::physics::PhysicsWorld;
-use crate::world::{FlatGround, TerrainCollision, fbm_world, remove_flat_ground, smooth_hill};
+use crate::globe::Sites;
+use crate::world::{FlatGround, TerrainCollision, remove_flat_ground};
 
 const SIZE_M: f32 = 800.0;
 /// Height grid, collider and near surface tiles; `GEARBOX_TERRAIN_CELL_M`
@@ -24,13 +25,75 @@ const TILE_FINE_RADIUS_M: f32 = 180.0;
 const TILE_COARSE_CELL_M: f32 = 4.0;
 const TILE_SKIRT_M: f32 = 2.0;
 const TILE_REBUILDS_PER_FRAME: usize = 2;
+/// Seconds a frame may spend making the meshes of tiles that have none yet.
+const TILE_BUDGET_S: f32 = 0.005;
+/// Entities of replaced ground taken down a frame.
+const DISMANTLE_PER_FRAME: usize = 120;
 const SPAWN_FLAT_RADIUS_M: f32 = 30.0;
 const SPAWN_RELIEF_RADIUS_M: f32 = 70.0;
 const SAFETY_FLOOR_Y_M: f64 = -40.0;
 const SAFETY_FLOOR_HALF_EXTENT_M: f64 = 10_000.0;
-const HORIZON_COLOR: Color = Color::srgb(0.46, 0.55, 0.30);
+/// The ground square moves once the view rests this far from its centre, to a
+/// centre on this grid, no farther from the spawn point than the reach: past
+/// that the flat land would part from the planet's curve.
+const FOLLOW_SLACK_M: f32 = 220.0;
+const FOLLOW_SNAP_M: f32 = 100.0;
+const FOLLOW_REACH_M: f32 = 25_000.0;
+/// How far down the view the ground is fetched from, at the least. From high
+/// up it is taken much farther — twice the eye's height — because that is
+/// where a camera looking down actually meets the ground, and the land has to
+/// be *there*, not under the camera.
+const FOLLOW_LOOK_AHEAD_M: f32 = 300.0;
+/// Ground that has been replaced stays drawn this long, while its successor
+/// uploads its maps unseen; then the two change places in one frame.
+const FOLLOW_HANDOVER_S: f32 = 1.0;
+/// Collider chunks: kept this far around a moving body, dropped past the
+/// farther distance so a body pacing a chunk edge does not churn them.
+const GROUND_CHUNK_M: f32 = 64.0;
+const GROUND_KEEP_M: f32 = 96.0;
+const GROUND_DROP_M: f32 = 224.0;
+const GROUND_CHUNKS_PER_FRAME: usize = 3;
+// Measured against the meadow backdrop it borders, from 60 km in clear air.
+const HORIZON_COLOR: Color = Color::linear_rgb(0.058, 0.108, 0.015);
+/// Peak-to-trough relief of the distant land around the meadow.
+pub(crate) const HORIZON_RELIEF_M: f32 = gearbox_globe::RELIEF_M;
 
 static HEIGHT_GRID: RwLock<Option<Arc<HeightGrid>>> = RwLock::new(None);
+static LAND: RwLock<Option<Land>> = RwLock::new(None);
+
+/// The planet's land as one site sees it.
+#[derive(Clone, Copy)]
+struct Land {
+    site: usize,
+    frame: gearbox_globe::Datum,
+    terrain: gearbox_globe::Terrain,
+}
+
+impl Land {
+    fn of(sites: &Sites, site: usize) -> Self {
+        Self { site, frame: sites.list[site].frame, terrain: sites.land }
+    }
+
+    fn height(&self, x: f32, z: f32) -> f32 {
+        self.terrain.local_height(&self.frame, x as f64, z as f64)
+    }
+
+    /// What the planet is made of at this place in the site's frame.
+    fn surface(&self, x: f32, z: f32) -> Vec3 {
+        let ground = self.ground_at(x, z);
+        self.terrain.surface(ground)
+    }
+
+    /// How broken up the land is here: the parish-scale patchwork.
+    fn patchwork(&self, x: f32, z: f32) -> f32 {
+        self.terrain.patchwork(self.ground_at(x, z))
+    }
+
+    fn ground_at(&self, x: f32, z: f32) -> bevy::math::DVec3 {
+        let flat = self.frame.geodetic(bevy::math::DVec3::new(x as f64, 0.0, z as f64));
+        gearbox_globe::Geodetic::new(flat.latitude, flat.longitude, 0.0).ecef()
+    }
+}
 
 pub struct TerrainPlugin;
 
@@ -39,16 +102,23 @@ pub struct TerrainUpdates;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PostStartup, spawn_procedural_terrain)
+        app.init_resource::<GroundColliders>()
+            .add_systems(PostStartup, spawn_procedural_terrain)
             .add_systems(
                 Update,
                 friction::publish
                     .after(gearbox_fields::CoverUpdates)
+                    .after(TerrainUpdates)
                     .before(crate::physics::step_physics),
             )
             .add_systems(
                 Update,
-                (retire_for_usd_terrain, update_terrain_tiles)
+                (
+                    retire_for_usd_terrain,
+                    follow_view,
+                    update_terrain_tiles,
+                    stream_ground_colliders,
+                )
                     .chain()
                     .in_set(TerrainUpdates),
             );
@@ -75,40 +145,23 @@ impl TerrainPreset {
 /// Height of the procedural ground, `None` when none is active or outside it.
 pub fn procedural_height_m(x: f32, z: f32) -> Option<f32> {
     let grid = HEIGHT_GRID.read().ok()?.clone()?;
-    grid.height_at(x, z)
-}
-
-fn meadow_height_raw(x: f32, z: f32) -> f32 {
-    let rolling = (fbm_world(x * 0.0045 + 3.1, z * 0.0045 - 7.7, 5) - 0.5) * 7.0;
-    let ripples = (fbm_world(x * 0.035 - 11.0, z * 0.035 + 5.0, 3) - 0.5) * 0.5;
-    let hills = smooth_hill(x, z, 140.0, 90.0, 70.0, 12.0)
-        + smooth_hill(x, z, -170.0, 120.0, 90.0, 9.0)
-        + smooth_hill(x, z, 60.0, -210.0, 110.0, 14.0)
-        + smooth_hill(x, z, -230.0, -160.0, 80.0, 7.0)
-        + smooth_hill(x, z, 280.0, -60.0, 60.0, -5.0)
-        + smooth_hill(x, z, -40.0, 300.0, 120.0, 10.0);
-    rolling + ripples + hills
-}
-
-/// The raw relief flattened to y=0 around the spawn point.
-fn meadow_height(x: f32, z: f32) -> f32 {
-    let origin = meadow_height_raw(0.0, 0.0);
-    let distance = (x * x + z * z).sqrt();
-    let t = ((distance - SPAWN_FLAT_RADIUS_M) / (SPAWN_RELIEF_RADIUS_M - SPAWN_FLAT_RADIUS_M))
-        .clamp(0.0, 1.0);
-    let fade = t * t * (3.0 - 2.0 * t);
-    (meadow_height_raw(x, z) - origin) * fade
+    let land = (*LAND.read().ok()?)?;
+    Some(grid.height_at(x, z).unwrap_or_else(|| land.height(x, z)))
 }
 
 /// The active procedural ground and everything that must go with it.
 #[derive(Resource)]
 pub struct ProceduralTerrain {
+    pub(crate) site: usize,
     pub(crate) entity: Entity,
-    collider: ColliderId,
     safety_floor: ColliderId,
     pub(crate) grid: Arc<HeightGrid>,
     fine_cell: f32,
     tiles: HashMap<(i32, i32), (Entity, f32)>,
+    /// Every tile of the square has its mesh.
+    complete: bool,
+    /// Built with the ground, for the cover to take.
+    heightmap: Option<Image>,
 }
 
 impl ProceduralTerrain {
@@ -149,37 +202,64 @@ pub(crate) struct TerrainSurfaceMesh;
 #[derive(Component)]
 pub(crate) struct TerrainBackdrop;
 
-fn spawn_procedural_terrain(
-    mut commands: Commands,
-    mut physics: ResMut<PhysicsWorld>,
-    flat: Option<Res<FlatGround>>,
-    mut standard: ResMut<Assets<StandardMaterial>>,
-    horizon: Query<(&Name, &MeshMaterial3d<StandardMaterial>)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
-    let preset = TerrainPreset::from_env();
-    if preset == TerrainPreset::Flat {
-        info!("terrain: GEARBOX_TERRAIN=flat, keeping the flat ground");
-        return;
-    }
-    let started = std::time::Instant::now();
-    let cell = std::env::var("GEARBOX_TERRAIN_CELL_M")
+/// Everything of a ground square that can be worked out off the main thread.
+struct GroundParts {
+    land: Land,
+    heightmap: Image,
+    center: Vec2,
+    cell: f32,
+    grid: HeightGrid,
+    horizon: Mesh,
+    far: Mesh,
+}
+
+fn cell_from_env(name: &str, fallback: f32) -> f32 {
+    std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<f32>().ok())
         .filter(|value| *value >= 0.5)
-        .unwrap_or(CELL_M);
-    let collider_cell = std::env::var("GEARBOX_TERRAIN_COLLIDER_CELL_M")
-        .ok()
-        .and_then(|value| value.parse::<f32>().ok())
-        .filter(|value| *value >= 0.5)
-        .unwrap_or(cell);
-    let grid = Arc::new(HeightGrid::sample(SIZE_M, cell, meadow_height));
-    let collider_grid = HeightGrid::sample(SIZE_M, collider_cell, meadow_height);
+        .unwrap_or(fallback)
+}
+
+/// Where the ground actually stands: the land, less whatever the ways of the
+/// layout have worn into it. **Every** surface a machine can touch is sampled
+/// from this and not from `land.height` alone — the mesh under the eye and the
+/// collider under the wheels are the same ground or they are a bug. The
+/// streamed chunk colliders were once built without it, and a tractor stood at
+/// field level with a sunken lane drawn half a metre beneath it.
+fn ground_height(land: &Land, hollows: &gearbox_fields::Hollows, x: f32, z: f32) -> f32 {
+    land.height(x, z) - hollows.depth_at(x, z)
+}
+
+/// The ways of the layout sink the ground they run over, so a track is a
+/// hollow the wheels drop into rather than a stripe painted on a flat field.
+fn build_ground(land: Land, center: Vec2, hollows: &gearbox_fields::Hollows) -> GroundParts {
+    let cell = cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M);
+    let lie = |x: f32, z: f32| ground_height(&land, hollows, x, z);
+    let grid = HeightGrid::sample_at(center, SIZE_M, cell, lie);
+    // The horizon is far enough off that no road shows on it.
+    let horizon = horizon_mesh(&grid, |x, z| land.height(x, z));
+    let far = far_land_mesh(&land, center);
+    let heightmap = gearbox_fields::heightmap_image(&grid);
+    GroundParts { land, heightmap, center, cell, grid, horizon, far }
+}
+
+fn install_ground(
+    commands: &mut Commands,
+    physics: &mut PhysicsWorld,
+    meshes: &mut Assets<Mesh>,
+    standard: &mut Assets<StandardMaterial>,
+    sites: &Sites,
+    parts: GroundParts,
+    visibility: Visibility,
+) -> ProceduralTerrain {
+    let grid = Arc::new(parts.grid);
     let entity = commands
         .spawn((
             Name::new("MeadowTerrain"),
             Transform::IDENTITY,
-            Visibility::default(),
+            visibility,
+            ChildOf(sites.list[parts.land.site].entity),
         ))
         .id();
     commands.spawn((
@@ -188,60 +268,94 @@ fn spawn_procedural_terrain(
         gearbox_fields::CoverBackdrop,
         ChildOf(entity),
         Transform::IDENTITY,
-        Mesh3d(meshes.add(horizon_mesh(&grid))),
+        Mesh3d(meshes.add(parts.horizon)),
         TerrainSurfaceMesh,
         gearbox_fields::CoverSurfaceMesh,
         bevy::light::NotShadowCaster,
     ));
-
-    let collider = physics
-        .insert_collider(
-            heightfield_collider(&collider_grid)
-                .friction(crate::world::ground_friction(1.4))
-                .restitution(0.0),
-        )
-        .expect("a height grid always makes a heightfield");
-    if let Err(error) = physics.register_wheel_ground(collider, None) {
-        warn!("terrain: tyre ground registration failed: {error}");
-    }
-    physics.entity_to_collider.insert(entity, collider);
-    let safety_floor = physics
-        .insert_collider(
-            ColliderDesc::new(Shape::Cuboid {
-                half_extents: DVec3::new(
-                    SAFETY_FLOOR_HALF_EXTENT_M,
-                    0.10,
-                    SAFETY_FLOOR_HALF_EXTENT_M,
-                ),
-            })
-            .translation(DVec3::new(0.0, SAFETY_FLOOR_Y_M, 0.0))
+    // Past the apron, the planet's own surface. It carries no cover, so its
+    // vertex colours reach the picture as they are.
+    commands.spawn((
+        Name::new("Planet surface"),
+        TerrainBackdrop,
+        ChildOf(entity),
+        Transform::IDENTITY,
+        Mesh3d(meshes.add(parts.far)),
+        MeshMaterial3d(standard.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.94,
+            ..default()
+        })),
+        bevy::light::NotShadowCaster,
+        bevy::light::NotShadowReceiver,
+    ));
+    let center = DVec3::new(
+        gearbox_globe::physics_offset(parts.land.site).x + parts.center.x as f64,
+        0.0, parts.center.y as f64,
+    );
+    let safety_floor = physics.insert_collider(
+        ColliderDesc::new(Shape::Cuboid {
+            half_extents: DVec3::new(SAFETY_FLOOR_HALF_EXTENT_M, 0.10, SAFETY_FLOOR_HALF_EXTENT_M),
+        })
+            .translation(center + DVec3::new(0.0, SAFETY_FLOOR_Y_M, 0.0))
             .friction(1.2)
             .restitution(0.0),
-        )
-        .expect("a cuboid always builds");
+    ).expect("a cuboid always builds");
+    if let Ok(mut slot) = HEIGHT_GRID.write() {
+        *slot = Some(grid.clone());
+    }
+    if let Ok(mut slot) = LAND.write() {
+        *slot = Some(parts.land);
+    }
+    ProceduralTerrain {
+        site: parts.land.site,
+        entity,
+        safety_floor,
+        grid,
+        fine_cell: parts.cell,
+        tiles: HashMap::default(),
+        complete: false,
+        heightmap: Some(parts.heightmap),
+    }
+}
+
+fn remove_ground(commands: &mut Commands, physics: &mut PhysicsWorld, terrain: &ProceduralTerrain) {
+    commands.entity(terrain.entity).despawn();
+    physics.remove_collider(terrain.safety_floor, true);
+}
+
+fn spawn_procedural_terrain(
+    mut commands: Commands,
+    mut physics: ResMut<PhysicsWorld>,
+    flat: Option<Res<FlatGround>>,
+    mut standard: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    sites: Res<Sites>,
+    layout: Res<gearbox_fields::FieldLayout>,
+) {
+    let preset = TerrainPreset::from_env();
+    if preset == TerrainPreset::Flat {
+        info!("terrain: GEARBOX_TERRAIN=flat, keeping the flat ground");
+        return;
+    }
+    let started = std::time::Instant::now();
+    let hollows = gearbox_fields::Hollows::of(&layout);
+    let parts = build_ground(Land::of(&sites, sites.current), Vec2::ZERO, &hollows);
+    let cell = parts.cell;
+    let terrain = install_ground(
+        &mut commands,
+        physics.as_mut(),
+        meshes.as_mut(),
+        standard.as_mut(),
+        &sites,
+        parts,
+        Visibility::default(),
+    );
     if let Some(flat) = flat.as_deref().copied() {
         remove_flat_ground(&mut commands, physics.as_mut(), flat);
         commands.remove_resource::<FlatGround>();
     }
-    if let Ok(mut slot) = HEIGHT_GRID.write() {
-        *slot = Some(grid.clone());
-    }
-    // The planet sphere fills the horizon past the terrain edge.
-    for (name, material) in &horizon {
-        if name.as_str() == "Planet"
-            && let Some(mut material) = standard.get_mut(&material.0)
-        {
-            material.base_color = HORIZON_COLOR;
-        }
-    }
-    commands.insert_resource(ProceduralTerrain {
-        entity,
-        collider,
-        safety_floor,
-        grid,
-        fine_cell: cell,
-        tiles: HashMap::default(),
-    });
+    commands.insert_resource(terrain);
     info!(
         "terrain: {preset:?} ground ready, {} m at {} m cells, in {:?}",
         SIZE_M,
@@ -250,22 +364,267 @@ fn spawn_procedural_terrain(
     );
 }
 
-fn horizon_height(x: f32, z: f32) -> f32 {
-    let edge = x.abs().max(z.abs());
-    let t = ((edge - SIZE_M * 0.5) / 1_600.0).clamp(0.0, 1.0);
-    let relief = (fbm_world(x * 0.00045 + 41.0, z * 0.00045 - 13.0, 4) - 0.5) * 220.0;
-    meadow_height(x, z) + relief * t * t * (3.0 - 2.0 * t)
+/// The ground square that is drawn follows where the view rests, so the meadow
+/// and its grass are wherever one looks. The new square is worked out on a
+/// background thread and swapped in whole; it waits while the view is too high
+/// to see grass. What machines stand on is `stream_ground_colliders`' business.
+fn follow_view(
+    mut commands: Commands,
+    terrain: Option<ResMut<ProceduralTerrain>>,
+    mut physics: ResMut<PhysicsWorld>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut standard: ResMut<Assets<StandardMaterial>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    sites: Res<Sites>,
+    time: Res<Time>,
+    mut pending: Local<Option<bevy::tasks::Task<GroundParts>>>,
+    mut retiring: Local<Option<(Entity, ColliderId, f32)>>,
+    mut settled: Local<u32>,
+    mut dismantling: Local<std::collections::VecDeque<Entity>>,
+    children: Query<&Children>,
+    cover_pending: Res<gearbox_fields::CoverPending>,
+    layout: Res<gearbox_fields::FieldLayout>,
+) {
+    let Some(mut terrain) = terrain else {
+        *pending = None;
+        return;
+    };
+    // The replaced ground bows out once its successor has had time to get ready.
+    if let Some((old, floor, left)) = retiring.as_mut() {
+        *left -= time.delta_secs();
+        // Its successor must be whole first: every tile meshed and under its cover.
+        *settled = if terrain.complete && cover_pending.0 == 0 { *settled + 1 } else { 0 };
+        if *left > 0.0 || *settled < 4 {
+            return;
+        }
+        *settled = 0;
+        // The two change places now; the old ground's thousands of entities are
+        // then taken down leaves first, a little each frame, not in one stall.
+        commands.entity(*old).insert(Visibility::Hidden);
+        commands.entity(terrain.entity).insert(Visibility::Inherited);
+        let physics = physics.as_mut();
+        physics.remove_collider(*floor, true);
+        let mut order = vec![*old];
+        let mut next = 0;
+        while next < order.len() {
+            if let Ok(kids) = children.get(order[next]) {
+                order.extend(kids.iter());
+            }
+            next += 1;
+        }
+        dismantling.extend(order.into_iter().rev());
+        *retiring = None;
+        return;
+    }
+    if !dismantling.is_empty() {
+        for _ in 0..DISMANTLE_PER_FRAME {
+            let Some(entity) = dismantling.pop_front() else {
+                break;
+            };
+            commands.entity(entity).try_despawn();
+        }
+        if !dismantling.is_empty() {
+            return;
+        }
+    }
+    if let Some(task) = pending.as_mut() {
+        let Some(parts) = bevy::tasks::block_on(bevy::tasks::poll_once(task)) else {
+            return;
+        };
+        *pending = None;
+        let started = std::time::Instant::now();
+        let center = parts.center;
+        // Unseen at first: the ground it replaces stays until the handover.
+        let next = install_ground(
+            &mut commands,
+            physics.as_mut(),
+            meshes.as_mut(),
+            standard.as_mut(),
+            &sites,
+            parts,
+            Visibility::Hidden,
+        );
+        let old = std::mem::replace(&mut *terrain, next);
+        *retiring = Some((old.entity, old.safety_floor, FOLLOW_HANDOVER_S));
+        info!("terrain: ground moved to {center}, swapped in {:?}", started.elapsed());
+        return;
+    }
+    let Some(camera) = cameras.iter().next() else {
+        return;
+    };
+    let eye = camera.translation();
+    let forward = camera.forward().as_vec3();
+    // The ground goes where the view meets it. This once gave up above a
+    // kilometre and a half, so climbing left the land behind: whatever height
+    // you reached, you were looking at a square of ground parked where you last
+    // were, with bare planet all round it. Height is no reason to stop.
+    let ahead = FOLLOW_LOOK_AHEAD_M.max(eye.y * 2.0).min(FOLLOW_REACH_M);
+    let reach = (eye.y.max(0.0) / (-forward.y).max(0.2)).min(ahead);
+    let focus = Vec2::new(eye.x + forward.x * reach, eye.z + forward.z * reach);
+    let center = terrain.grid.center();
+    let moved_site = terrain.site != sites.current
+        || LAND.read().ok().and_then(|land| *land).is_some_and(|land| land.frame != sites.current().frame);
+    // From high up the whole square is small on screen, so it is moved only
+    // when the view has left it well behind; near the ground it keeps step.
+    let slack = FOLLOW_SLACK_M.max(eye.y * 0.3);
+    if !moved_site && (focus - center).abs().max_element() < slack {
+        return;
+    }
+    let wanted = ((focus / FOLLOW_SNAP_M).round() * FOLLOW_SNAP_M).clamp_length_max(FOLLOW_REACH_M);
+    if !moved_site && wanted == center {
+        return;
+    }
+    let land = Land::of(&sites, sites.current);
+    let hollows = gearbox_fields::Hollows::of(&layout);
+    *pending = Some(
+        bevy::tasks::AsyncComputeTaskPool::get()
+            .spawn(async move { build_ground(land, wanted, &hollows) }),
+    );
+}
+
+/// The ground machines stand on, in chunks kept around every moving body
+/// wherever it is, seen or not. Chunks share the world's height function and
+/// lattice with the drawn ground, so both agree to the sample.
+#[derive(Resource, Default)]
+pub struct GroundColliders(HashMap<(usize, IVec2), GroundChunk>);
+
+struct GroundChunk {
+    collider: ColliderId,
+    grid: Arc<HeightGrid>,
+}
+
+fn ground_chunk(at: Vec2) -> IVec2 {
+    (at / GROUND_CHUNK_M).floor().as_ivec2()
+}
+
+fn ground_chunk_collider(
+    land: Land,
+    hollows: &gearbox_fields::Hollows,
+    chunk: IVec2,
+) -> (ColliderDesc, Arc<HeightGrid>) {
+    let cell = cell_from_env(
+        "GEARBOX_TERRAIN_COLLIDER_CELL_M",
+        cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M),
+    );
+    let center = (chunk.as_vec2() + Vec2::splat(0.5)) * GROUND_CHUNK_M;
+    let grid = Arc::new(
+        HeightGrid::sample_at(center, GROUND_CHUNK_M, cell, |x, z| ground_height(&land, hollows, x, z)),
+    );
+    let collider = heightfield_collider(&grid)
+        .translation(DVec3::new(
+            gearbox_globe::physics_offset(land.site).x + center.x as f64,
+            0.0,
+            center.y as f64,
+        ))
+        .friction(crate::world::ground_friction(1.4))
+        .restitution(0.0);
+    (collider, grid)
+}
+
+fn stream_ground_colliders(
+    terrain: Option<Res<ProceduralTerrain>>,
+    mut ground: ResMut<GroundColliders>,
+    mut physics: ResMut<PhysicsWorld>,
+    sites: Res<Sites>,
+    layout: Res<gearbox_fields::FieldLayout>,
+) {
+    let physics = physics.as_mut();
+    if terrain.is_none() {
+        for (_, chunk) in ground.0.drain() {
+            physics.remove_collider(chunk.collider, true);
+        }
+        return;
+    }
+    // Each body is in the region of its site: where it is there, and which site.
+    let sources: Vec<(usize, Vec2)> = physics
+        .bodies()
+        .into_iter()
+        .filter_map(|id| physics.body(id))
+        .filter(|body| body.is_dynamic())
+        .map(|body| {
+            let site = gearbox_globe::region_of_physics(body.translation().x);
+            let x = body.translation().x - gearbox_globe::physics_offset(site).x;
+            (site, Vec2::new(x as f32, body.translation().z as f32))
+        })
+        .filter(|(site, _)| *site < sites.list.len())
+        .collect();
+    // The chunk under a body is laid at once; the rest of its surroundings
+    // arrive a few a frame.
+    let mut budget = GROUND_CHUNKS_PER_FRAME;
+    let mut hollows: Option<gearbox_fields::Hollows> = None;
+    for &(site, source) in &sources {
+        let (low, high) = (
+            ground_chunk(source - Vec2::splat(GROUND_KEEP_M)),
+            ground_chunk(source + Vec2::splat(GROUND_KEEP_M)),
+        );
+        for z in low.y..=high.y {
+            for x in low.x..=high.x {
+                let chunk = IVec2::new(x, z);
+                let underfoot = chunk == ground_chunk(source);
+                if ground.0.contains_key(&(site, chunk)) || (!underfoot && budget == 0) {
+                    continue;
+                }
+                budget = budget.saturating_sub(1);
+                // Built only when a chunk is actually laid, so a frame that
+                // lays none walks no lines.
+                let hollows = hollows.get_or_insert_with(|| gearbox_fields::Hollows::of(&layout));
+                let (desc, grid) = ground_chunk_collider(Land::of(&sites, site), hollows, chunk);
+                if let Some(collider) = physics.insert_collider(desc) {
+                    if let Err(error) = physics.register_wheel_ground(collider, None) {
+                        warn!("terrain: tyre ground registration failed: {error}");
+                    }
+                    ground.0.insert((site, chunk), GroundChunk { collider, grid });
+                }
+            }
+        }
+    }
+    ground.0.retain(|(site, chunk), ground| {
+        let center = (chunk.as_vec2() + Vec2::splat(0.5)) * GROUND_CHUNK_M;
+        let kept = sources
+            .iter()
+            .any(|(at, source)| at == site && (*source - center).abs().max_element() < GROUND_DROP_M);
+        if !kept {
+            physics.remove_collider(ground.collider, true);
+        }
+        kept
+    });
 }
 
 /// Concentric terrain rings extend the meadow to a 64 km visual backdrop.
-fn horizon_mesh(grid: &HeightGrid) -> Mesh {
-    let radii = [
-        400.0, 404.0, 412.0, 424.0, 440.0, 464.0, 496.0, 540.0, 600.0, 700.0, 850.0, 1_050.0,
-        1_300.0, 1_600.0, 2_000.0, 2_500.0, 3_200.0, 4_000.0, 5_000.0, 6_400.0, 8_000.0, 10_000.0,
-        12_800.0, 16_000.0, 20_000.0, 25_600.0, 32_000.0,
-    ];
+/// How far the drawn land reaches. From the camera's nine-kilometre ceiling the
+/// true horizon is some three hundred and forty kilometres off, so anything
+/// nearer than that ends the world in an edge, whatever is drawn behind it.
+const HORIZON_REACH_M: f32 = 360_000.0;
+
+/// Where the field's own cover stops and the planet's surface takes over.
+///
+/// It is kept short. The plate reached thirty-two kilometres once, and looked
+/// right only because the air was thick enough to hide it: it carries the
+/// field's cover but none of its detail, so seen at any distance in clear air
+/// it is a flat sheet. Past this the land is the planet's own, which is
+/// broken up by its patchwork and shaded by its hills.
+const HORIZON_APRON_M: f32 = 3_000.0;
+
+/// The radii the land is drawn at, from the rim of the ground square out to the
+/// horizon. Each step is a quarter longer than the last, so the rings are metres
+/// apart where the ground square hands over and tens of kilometres apart at the
+/// skyline — a geometry clipmap's nested grids, as concentric rings.
+fn horizon_rings() -> Vec<f32> {
+    let mut radii = vec![SIZE_M / 2.0];
+    let mut step = 4.0;
+    while *radii.last().expect("the rim ring") < HORIZON_REACH_M {
+        radii.push(radii.last().expect("the ring before") + step);
+        step *= 1.25;
+    }
+    radii
+}
+
+fn horizon_mesh(grid: &HeightGrid, height: impl Fn(f32, f32) -> f32) -> Mesh {
+    let radii: Vec<f32> =
+        horizon_rings().into_iter().take_while(|radius| *radius <= HORIZON_APRON_M).collect();
     let steps = (SIZE_M / TILE_M) as usize * tile_segments(grid.cell);
     let ring_len = steps * 4;
+    let center = grid.center();
     let mut positions = Vec::with_capacity(radii.len() * ring_len);
     let mut normals = Vec::with_capacity(positions.capacity());
     let mut uvs = Vec::with_capacity(positions.capacity());
@@ -280,6 +639,7 @@ fn horizon_mesh(grid: &HeightGrid) -> Mesh {
                     2 => (radius, -t * radius),
                     _ => (-t * radius, -radius),
                 };
+                let (x, z) = (center.x + x, center.y + z);
                 let (y, normal) = if ring == 0 {
                     (
                         grid.height_at(x, z)
@@ -287,9 +647,9 @@ fn horizon_mesh(grid: &HeightGrid) -> Mesh {
                         grid.normal_at(x, z),
                     )
                 } else {
-                    let dx = horizon_height(x + 1.0, z) - horizon_height(x - 1.0, z);
-                    let dz = horizon_height(x, z + 1.0) - horizon_height(x, z - 1.0);
-                    (horizon_height(x, z), Vec3::new(-dx, 2.0, -dz).normalize())
+                    let dx = height(x + 1.0, z) - height(x - 1.0, z);
+                    let dz = height(x, z + 1.0) - height(x, z - 1.0);
+                    (height(x, z), Vec3::new(-dx, 2.0, -dz).normalize())
                 };
                 positions.push([x, y, z]);
                 normals.push(normal.to_array());
@@ -314,6 +674,83 @@ fn horizon_mesh(grid: &HeightGrid) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+/// How many steps a side of a far ring is cut into. The coast is the finest
+/// thing drawn out here and it is hundreds of kilometres long, so a ring needs
+/// no more than this however wide it is.
+const FAR_STEPS: usize = 96;
+
+/// How far past the apron the planet's own colour has fully taken over from
+/// the field's, so the handover is a gradient rather than a ring.
+const FAR_BLEND_M: f32 = 20_000.0;
+
+/// The land from the cover apron out to the horizon: the same heights, sampled
+/// coarsely, carrying the planet's surface — sea, soil and ice — in its vertex
+/// colours rather than under a cover material. The colour eases out of the
+/// apron's own green so the handover is not a ring you can see.
+fn far_land_mesh(land: &Land, center: Vec2) -> Mesh {
+    let radii: Vec<f32> =
+        horizon_rings().into_iter().filter(|radius| *radius >= HORIZON_APRON_M).collect();
+    let ring_len = FAR_STEPS * 4;
+    let near = LinearRgba::from(HORIZON_COLOR);
+    let mut positions = Vec::with_capacity(radii.len() * ring_len);
+    let mut normals = Vec::with_capacity(positions.capacity());
+    let mut colours = Vec::with_capacity(positions.capacity());
+    let mut indices = Vec::new();
+    for (ring, radius) in radii.iter().copied().enumerate() {
+        for side in 0..4 {
+            for step in 0..FAR_STEPS {
+                let t = step as f32 / FAR_STEPS as f32 * 2.0 - 1.0;
+                let (x, z) = match side {
+                    0 => (-radius, t * radius),
+                    1 => (t * radius, radius),
+                    2 => (radius, -t * radius),
+                    _ => (-t * radius, -radius),
+                };
+                let (x, z) = (center.x + x, center.y + z);
+                let reach = 200.0;
+                let dx = land.height(x + reach, z) - land.height(x - reach, z);
+                let dz = land.height(x, z + reach) - land.height(x, z - reach);
+                positions.push([x, land.height(x, z), z]);
+                // Flat colour over a whole country reads as a painted sheet
+                // however far it reaches, so the parish patchwork breaks it up
+                // and the hillsides carry their own shade: what is turned away
+                // from the light is darker, as it would be on any ground.
+                let normal = Vec3::new(-dx, 2.0 * reach, -dz).normalize();
+                let mottle = 0.80 + 0.40 * land.patchwork(x, z);
+                let shade = 1.0 - (1.0 - normal.y) * 2.2;
+                let far = land.surface(x, z) * (mottle * shade.clamp(0.55, 1.15));
+                normals.push(normal.to_array());
+                let out = ((radius - HORIZON_APRON_M) / FAR_BLEND_M).clamp(0.0, 1.0);
+                let blend = out * out * (3.0 - 2.0 * out);
+                colours.push([
+                    near.red + (far.x - near.red) * blend,
+                    near.green + (far.y - near.green) * blend,
+                    near.blue + (far.z - near.blue) * blend,
+                    1.0,
+                ]);
+            }
+        }
+        if ring > 0 {
+            for i in 0..ring_len {
+                let next = (i + 1) % ring_len;
+                let a = ((ring - 1) * ring_len + i) as u32;
+                let b = (ring * ring_len + i) as u32;
+                let c = ((ring - 1) * ring_len + next) as u32;
+                let d = (ring * ring_len + next) as u32;
+                indices.extend_from_slice(&[a, b, c, c, b, d]);
+            }
+        }
+    }
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colours)
     .with_inserted_indices(Indices::U32(indices))
 }
 
@@ -392,6 +829,10 @@ fn update_terrain_tiles(
     mut meshes: ResMut<Assets<Mesh>>,
     mut tiles: Query<&mut Mesh3d, With<TerrainTile>>,
 ) {
+    // A square's worth of tile meshes would stall the frame they were all made
+    // in, so a few milliseconds' worth are made a frame.
+    let started = std::time::Instant::now();
+    let mut missing = false;
     let Some(mut terrain) = terrain else {
         return;
     };
@@ -402,15 +843,19 @@ fn update_terrain_tiles(
     let eye_xz = Vec2::new(eye.x, eye.z);
     let half = terrain.grid.half_size();
     let span = (half / TILE_M).round() as i32;
+    let middle = (terrain.grid.center() / TILE_M).round().as_ivec2();
     let terrain = terrain.as_mut();
     let mut rebuilt = 0usize;
-    for tz in -span..span {
-        for tx in -span..span {
+    for tz in middle.y - span..middle.y + span {
+        for tx in middle.x - span..middle.x + span {
             let min = Vec2::new(tx as f32 * TILE_M, tz as f32 * TILE_M);
             let nearest = eye_xz
                 .clamp(min, min + Vec2::splat(TILE_M))
                 .distance(eye_xz);
-            let boundary = tx == -span || tz == -span || tx == span - 1 || tz == span - 1;
+            let boundary = tx == middle.x - span
+                || tz == middle.y - span
+                || tx == middle.x + span - 1
+                || tz == middle.y + span - 1;
             let cell = if boundary || nearest <= TILE_FINE_RADIUS_M {
                 terrain.fine_cell
             } else {
@@ -429,6 +874,10 @@ fn update_terrain_tiles(
                 }
                 Some(_) => {}
                 None => {
+                    if started.elapsed().as_secs_f32() > TILE_BUDGET_S {
+                        missing = true;
+                        continue;
+                    }
                     let entity = commands
                         .spawn((
                             Name::new(format!("Terrain[{tx},{tz}]")),
@@ -446,6 +895,7 @@ fn update_terrain_tiles(
             }
         }
     }
+    terrain.complete = !missing;
 }
 
 /// Rows run along Z and columns along X, centred on the origin like the grid.
@@ -468,7 +918,10 @@ fn heightfield_collider(grid: &HeightGrid) -> ColliderDesc {
 
 #[cfg(test)]
 pub(crate) fn benchmark_meadow_collider() -> ColliderDesc {
-    heightfield_collider(&HeightGrid::sample(SIZE_M, CELL_M, meadow_height))
+    let datum = gearbox_globe::Datum::at(52.370216, 4.895168);
+    let land = Land { site: 0, frame: datum, terrain: gearbox_globe::Terrain::new(&datum) };
+    let hollows = gearbox_fields::Hollows::of(&gearbox_fields::FieldLayout::default());
+    heightfield_collider(&HeightGrid::sample(SIZE_M, CELL_M, |x, z| ground_height(&land, &hollows, x, z)))
         .friction(1.4)
         .restitution(0.0)
 }
@@ -483,10 +936,7 @@ fn retire_for_usd_terrain(
     let (Some(_), Some(terrain)) = (usd_terrain, terrain) else {
         return;
     };
-    commands.entity(terrain.entity).despawn();
-    physics.entity_to_collider.remove(&terrain.entity);
-    physics.remove_collider(terrain.collider, true);
-    physics.remove_collider(terrain.safety_floor, true);
+    remove_ground(&mut commands, physics.as_mut(), &terrain);
     if let Ok(mut slot) = HEIGHT_GRID.write() {
         *slot = None;
     }
@@ -500,6 +950,40 @@ mod tests {
 
     fn bowl(x: f32, z: f32) -> f32 {
         0.002 * (x * x - z * z) + 0.05 * x
+    }
+
+    // The ground drawn under the eye and the ground held under the wheels are
+    // sampled by two different pieces of code — the square's own grid and the
+    // streamed collider chunks — and nothing but this says they agree. They did
+    // not: the chunks were built from `land.height` alone, so a machine stood
+    // at field level with a sunken lane drawn half a metre beneath it, and the
+    // hollow was seen and not felt. Pin the *rule*, since that is what drifted.
+    #[test]
+    fn every_ground_a_wheel_can_touch_is_sunk_by_the_ways() {
+        // Every height grid is a surface something stands on, so every one of
+        // them must be sampled through `ground_height`. Sampling `land.height`
+        // straight is right only for the horizon, which is scenery a hundred
+        // kilometres off and shows no road.
+        let source = include_str!("terrain.rs");
+        // The module's own code only: the tests below build grids of their own
+        // from bare functions, and this very loop names the call it looks for.
+        let code = source.split_once("#[cfg(test)]").map_or(source, |(above, _)| above);
+        let lines: Vec<&str> = code.lines().collect();
+        for (at, line) in lines.iter().enumerate() {
+            if !line.contains("HeightGrid::sample_at(") {
+                continue;
+            }
+            // The closure may be bound a few lines above the call rather than
+            // written into it, so read the neighbourhood and not the one line.
+            let near = lines[at.saturating_sub(4)..(at + 3).min(lines.len())].join(" ");
+            assert!(
+                near.contains("ground_height"),
+                "terrain.rs:{}: a height grid sampled without its hollows — \
+                 the ground would be drawn sunk and held level, and a machine \
+                 would stand in the air over its own road",
+                at + 1
+            );
+        }
     }
 
     #[test]
@@ -584,7 +1068,7 @@ mod tests {
     #[test]
     fn horizon_rim_matches_local_ground_without_overlap() {
         let grid = HeightGrid::sample(SIZE_M, 1.0, |x, z| 10.0 + x * 0.01 + z * 0.02);
-        let mesh = horizon_mesh(&grid);
+        let mesh = horizon_mesh(&grid, |x, z| 10.0 + x * 0.01 + z * 0.02);
         let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
@@ -613,17 +1097,25 @@ impl gearbox_fields::HeightSource for GroundHeights {
 /// Hands the active ground and the USD terrain roots to the field cover.
 pub fn publish_cover_terrain(
     mut commands: Commands,
-    terrain: Option<Res<ProceduralTerrain>>,
+    mut terrain: Option<ResMut<ProceduralTerrain>>,
     roots: Query<(Entity, &Name), With<usd_bevy::UsdSceneRoot>>,
     children: Query<&Children>,
     mut cover_roots: ResMut<gearbox_fields::CoverTerrainRoots>,
     mut published: Local<Option<Entity>>,
 ) {
-    match terrain.as_deref() {
+    match terrain.as_deref_mut() {
         Some(terrain) if *published != Some(terrain.entity) => {
+            let space = LAND.read().ok().and_then(|land| *land).map_or(0, |land| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                (land.site, land.frame.origin.to_array().map(f64::to_bits)).hash(&mut hasher);
+                hasher.finish()
+            });
             commands.insert_resource(gearbox_fields::CoverTerrain {
                 entity: terrain.entity,
                 grid: terrain.grid.clone(),
+                space,
+                heightmap: terrain.heightmap.take(),
             });
             commands.insert_resource(gearbox_fields::CoverHeights(Arc::new(GroundHeights)));
             *published = Some(terrain.entity);
@@ -644,5 +1136,68 @@ pub fn publish_cover_terrain(
         .collect();
     if found != cover_roots.0 {
         cover_roots.0 = found;
+    }
+}
+
+#[cfg(test)]
+mod horizon_tests {
+    use super::*;
+
+    #[test]
+    fn the_rings_start_at_the_ground_square_and_reach_the_horizon() {
+        let rings = horizon_rings();
+        assert_eq!(rings[0], SIZE_M / 2.0);
+        assert!(*rings.last().unwrap() >= HORIZON_REACH_M);
+        assert!(rings.len() < 60, "{} rings is too many to mesh", rings.len());
+    }
+
+    #[test]
+    fn no_ring_is_ever_narrower_than_the_one_inside_it() {
+        let rings = horizon_rings();
+        for pair in rings.windows(2) {
+            assert!(pair[1] > pair[0], "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn the_first_rings_are_fine_and_the_last_are_coarse() {
+        let rings = horizon_rings();
+        assert!(rings[1] - rings[0] < 10.0);
+        let last = rings.len() - 1;
+        assert!(rings[last] - rings[last - 1] > 10_000.0);
+    }
+
+    /// Where the ground square is fetched to, for an eye at `height` looking
+    /// down at `pitch` degrees — the rule `follow_view` applies.
+    fn focus_of(height: f32, pitch: f32) -> f32 {
+        let down = pitch.to_radians().sin();
+        let ahead = FOLLOW_LOOK_AHEAD_M.max(height * 2.0).min(FOLLOW_REACH_M);
+        (height / down.max(0.2)).min(ahead)
+    }
+
+    // The ground used to stop following above a kilometre and a half, so from
+    // any real height you looked at a square parked where you last were.
+    #[test]
+    fn the_ground_is_fetched_to_where_a_high_view_meets_it() {
+        assert!(focus_of(9_000.0, 30.0) > 5_000.0, "{}", focus_of(9_000.0, 30.0));
+        assert!(focus_of(4_000.0, 45.0) > 3_000.0);
+    }
+
+    #[test]
+    fn a_view_near_the_ground_still_fetches_just_ahead() {
+        assert!(focus_of(12.0, 15.0) < FOLLOW_LOOK_AHEAD_M);
+        assert!(focus_of(120.0, 40.0) <= FOLLOW_LOOK_AHEAD_M);
+    }
+
+    #[test]
+    fn the_ground_never_goes_past_where_the_flat_frame_holds() {
+        assert!(focus_of(500_000.0, 90.0) <= FOLLOW_REACH_M);
+    }
+
+    #[test]
+    fn the_apron_is_within_reach_of_the_rings() {
+        let rings = horizon_rings();
+        assert!(HORIZON_APRON_M > rings[0] && HORIZON_APRON_M < HORIZON_REACH_M);
+        assert!(rings.iter().any(|r| *r > HORIZON_APRON_M));
     }
 }

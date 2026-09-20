@@ -1,134 +1,133 @@
 use super::*;
 use crate::physics::backend::TerrainFrictionGrid;
-use gearbox_fields::{FieldBounds, FieldLayout, FieldProfiles};
+use gearbox_fields::{FieldLayout, FieldProfiles};
 
 struct Attempt {
-    entity: Entity,
-    collider: ColliderId,
     grid: Arc<HeightGrid>,
     fallback: f64,
     layout: FieldLayout,
 }
 
 #[derive(Default)]
-pub(super) struct Publication {
+struct ChunkPublication {
     attempt: Option<Attempt>,
-    published: Option<ColliderId>,
-    layout: Option<(Entity, FieldLayout)>,
+    layout: Option<FieldLayout>,
+    published: bool,
+}
+
+#[derive(Default)]
+pub(super) struct Publication {
+    chunks: HashMap<ColliderId, ChunkPublication>,
 }
 
 pub(super) fn publish(
     terrain: Option<Res<ProceduralTerrain>>,
+    ground: Option<Res<GroundColliders>>,
     layout: Option<Res<FieldLayout>>,
     profiles: Option<Res<FieldProfiles>>,
     mut physics: ResMut<PhysicsWorld>,
     mut state: Local<Publication>,
 ) {
-    let Some(terrain) = terrain else {
-        clear(&mut physics, &mut state);
-        state.attempt = None;
-        state.layout = None;
-        return;
-    };
-    let (Some(layout), Some(profiles)) = (layout, profiles) else {
-        clear(&mut physics, &mut state);
-        state.attempt = None;
-        return;
-    };
     if !physics.uses_wheel_forces() {
         return;
     }
-    let Some(collider) = physics.collider(terrain.collider) else {
-        return;
-    };
-    let fallback = collider.friction();
-    if state.attempt.as_ref().is_some_and(|last| {
-        last.entity == terrain.entity
-            && last.collider == terrain.collider
-            && Arc::ptr_eq(&last.grid, &terrain.grid)
-            && last.fallback == fallback
-            && (!layout.is_changed() || last.layout == *layout)
-    }) && !profiles.is_changed()
-    {
-        return;
-    }
-    state.attempt = Some(Attempt {
-        entity: terrain.entity,
-        collider: terrain.collider,
-        grid: terrain.grid.clone(),
-        fallback,
-        layout: layout.clone(),
-    });
-    if state
-        .layout
-        .as_ref()
-        .is_some_and(|(entity, last)| *entity == terrain.entity && !same_regions(last, &layout))
-    {
-        warn!("terrain: field region edits require reloading the terrain");
-        return;
-    }
-    let grid = &terrain.grid;
-    if grid.cols < 2 || grid.rows < 2 {
-        warn!("terrain: field friction requires at least two rows and columns");
-        return;
-    }
-    let domain = FieldBounds {
-        min: Vec2::new(grid.min_x, grid.min_z),
-        max: Vec2::new(
-            grid.min_x + (grid.cols - 1) as f32 * grid.cell,
-            grid.min_z + (grid.rows - 1) as f32 * grid.cell,
-        ),
-    };
-    let result = layout
-        .validate(&profiles, domain)
-        .and_then(|()| layout.friction_samples(grid, fallback));
-    let values = match result {
-        Ok(values) => values,
-        Err(error) => {
-            warn!("terrain: field friction rejected: {error}");
-            return;
+    if terrain.is_none() || ground.is_none() {
+        for (&collider, entry) in &mut state.chunks {
+            clear(&mut physics, collider, entry);
         }
-    };
-    let Some(values) = values else {
-        clear(&mut physics, &mut state);
-        state.layout = Some((terrain.entity, layout.clone()));
-        return;
-    };
-    let friction = TerrainFrictionGrid {
-        origin: [grid.min_x as f64, grid.min_z as f64],
-        cell_size: [grid.cell as f64; 2],
-        cols: grid.cols,
-        rows: grid.rows,
-        values,
-    };
-    if let Err(error) = physics.register_wheel_ground(terrain.collider, Some(friction)) {
-        state.attempt = None;
-        warn!("terrain: field friction registration failed: {error}");
+        state.chunks.clear();
         return;
     }
-    if state.published != Some(terrain.collider) {
-        clear(&mut physics, &mut state);
+    let ground = ground.unwrap();
+    state.chunks.retain(|collider, entry| {
+        let live = ground.0.values().any(|chunk| chunk.collider == *collider);
+        if !live {
+            clear(&mut physics, *collider, entry);
+        }
+        live
+    });
+    let (Some(layout), Some(profiles)) = (layout, profiles) else {
+        for (&collider, entry) in &mut state.chunks {
+            clear(&mut physics, collider, entry);
+            entry.attempt = None;
+        }
+        return;
+    };
+    for (&(site, _), chunk) in &ground.0 {
+        let Some(collider) = physics.collider(chunk.collider) else { continue };
+        let fallback = collider.friction();
+        let entry = state.chunks.entry(chunk.collider).or_default();
+        if entry.attempt.as_ref().is_some_and(|last| {
+            Arc::ptr_eq(&last.grid, &chunk.grid)
+                && last.fallback == fallback
+                && (!layout.is_changed() || last.layout == *layout)
+        }) && !profiles.is_changed() {
+            continue;
+        }
+        entry.attempt = Some(Attempt {
+            grid: chunk.grid.clone(), fallback, layout: layout.clone(),
+        });
+        if entry.layout.as_ref().is_some_and(|last| !same_regions(last, &layout)) {
+            warn!("terrain: field region edits require reloading the terrain");
+            continue;
+        }
+        let grid = &chunk.grid;
+        let result = layout.validate(&profiles)
+            .and_then(|()| layout.friction_samples(grid, fallback));
+        let values = match result {
+            Ok(values) => values,
+            Err(error) => {
+                warn!("terrain: field friction rejected: {error}");
+                continue;
+            }
+        };
+        let Some(values) = values else {
+            clear(&mut physics, chunk.collider, entry);
+            entry.layout = Some(layout.clone());
+            continue;
+        };
+        let friction = TerrainFrictionGrid {
+            origin: [
+                grid.min_x as f64 + gearbox_globe::physics_offset(site).x,
+                grid.min_z as f64,
+            ],
+            cell_size: [grid.cell as f64; 2],
+            cols: grid.cols,
+            rows: grid.rows,
+            values,
+        };
+        if let Err(error) = physics.register_wheel_ground(chunk.collider, Some(friction)) {
+            entry.attempt = None;
+            warn!("terrain: field friction registration failed: {error}");
+            continue;
+        }
+        entry.published = true;
+        entry.layout = Some(layout.clone());
     }
-    state.published = Some(terrain.collider);
-    state.layout = Some((terrain.entity, layout.clone()));
 }
 
 fn same_regions(a: &FieldLayout, b: &FieldLayout) -> bool {
     a.default == b.default
+        && a.ways == b.ways
         && a.fields.len() == b.fields.len()
         && a.fields.iter().zip(&b.fields).all(|(a, b)| {
             a.name == b.name && a.profile == b.profile && a.min == b.min && a.max == b.max
+                && a.wear == b.wear && a.way == b.way && a.way_width == b.way_width
+                && a.tyre == b.tyre
         })
 }
 
-fn clear(physics: &mut PhysicsWorld, state: &mut Publication) {
-    if let Some(collider) = state.published.take()
-        && physics.collider(collider).is_some()
+fn clear(physics: &mut PhysicsWorld, collider: ColliderId, state: &mut ChunkPublication) {
+    if !state.published {
+        return;
+    }
+    if physics.collider(collider).is_some()
         && let Err(error) = physics.register_wheel_ground(collider, None)
     {
-        state.published = Some(collider);
         warn!("terrain: field friction reset failed: {error}");
+        return;
     }
+    state.published = false;
 }
 
 #[cfg(test)]

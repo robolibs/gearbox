@@ -24,6 +24,10 @@ PACKS = {
     "shrub_sorrel_01": ([f"_{c}" for c in "ghijk"], 3.0, 0.05),
     "celandine_01": (["a_LOD0", "b_LOD0", "e_LOD0"], 4.0, 0.1),
     "weed_plant_02": (["c_LOD0", "d_LOD0", "e_LOD0"], 5.0, 0.3),
+    # The small dandelions and nettles only: a_LOD0 and b_LOD0 are 23k triangles
+    # apiece, which is a plant's worth of budget spent on one instance.
+    "dandelion_01": (["c_LOD0", "d_LOD0", "e_LOD0"], 6.0, 0.15),
+    "nettle_plant": (["small_a_LOD0", "small_b_LOD0", "medium_b_LOD0"], 7.0, 0.2),
 }
 # Albedo gain lifts each model's opaque texels towards this linear luma, the
 # brightness of the procedural sward, so clumps do not read as dark specks.

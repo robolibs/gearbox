@@ -20,12 +20,29 @@ pub struct Args {
 
 #[derive(ClapArgs, Debug, Clone, Default)]
 struct Place {
-    /// Position X Y Z (metres, Y up); two values mean X Z
+    /// Position X Y Z in metres north, up and east of home; two values mean X Z
     #[arg(long, num_args = 2..=3, value_name = "M")]
     at: Option<Vec<f32>>,
+    /// Place on Earth instead of `--at`: LAT LON [ALT], degrees and metres
+    /// above the ellipsoid; without ALT it stands on the ground
+    #[arg(long, num_args = 2..=3, value_name = "DEG", allow_negative_numbers = true, conflicts_with = "at")]
+    lla: Option<Vec<f64>>,
     /// Heading in degrees
     #[arg(long, default_value_t = 0.0)]
     yaw: f32,
+}
+
+impl Place {
+    // The host reads the place on Earth from the request's props.
+    fn on_earth(&self, mut req: UsdLoad) -> UsdLoad {
+        if let Some(lla) = &self.lla {
+            req = req.with_prop("lat", &lla[0].to_string()).with_prop("lon", &lla[1].to_string());
+            if let Some(alt) = lla.get(2) {
+                req = req.with_prop("alt", &alt.to_string());
+            }
+        }
+        req
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -134,6 +151,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 .yaw(place.yaw)
                 .category(category::MACHINE)
                 .with_prop("machine_id", &machine_id);
+            req = place.on_earth(req);
             for (n, chunk) in variant.chunks(3).enumerate() {
                 if let [prim, set, opt] = chunk {
                     req = req.with_prop(&format!("variant.{n}"), &format!("{prim}|{set}|{opt}"));

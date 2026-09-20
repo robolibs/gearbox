@@ -27,7 +27,7 @@ use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::render::view::ExtractedView;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
-use super::contacts::{WheelContacts, trample_texel};
+use super::contacts::{WheelContacts, trample_texel, tread_texel};
 use super::profile::WheelMapParams;
 use bevy::platform::collections::HashMap;
 use std::ops::Range;
@@ -48,6 +48,15 @@ pub struct VegetationChunk {
     pub fade_start: f32,
     pub fade_end: f32,
     pub inverse_square_thinning: bool,
+    /// Share of this layer allowed outside the ground's grass patches; nought
+    /// scatters it by its own reckoning instead.
+    pub follow_grass: f32,
+    /// The wear of this field's surface, as `BareGround::tread`.
+    pub tread: Vec4,
+    /// How far this field's plants carry past its own edge, in metres.
+    pub soft_border: f32,
+    /// The line the wheels follow through this field.
+    pub way: crate::layout::Way,
     /// Albedo of an asset clump layer; procedural layers bind the fallback.
     pub albedo: Option<Handle<Image>>,
     /// Index ranges of a clump mesh's variants, one draw each; empty draws it whole.
@@ -77,10 +86,20 @@ pub struct FieldGpu {
     pub trample: Handle<Image>,
     pub params: VegetationParams,
     pub footprint_length: f32,
+    /// The wheel map carries tread coordinates in two more channels.
+    pub tread: bool,
 }
 
 #[derive(Resource, ExtractResource, Clone, Default)]
-pub struct RenderFields(pub HashMap<Entity, FieldGpu>);
+pub struct RenderFields(pub HashMap<Entity, FieldGpu>, pub RetiredFields);
+
+/// The fields of the ground that was just replaced, kept a moment so the new
+/// fields can take over the wheel tracks where they overlap.
+#[derive(Clone, Default)]
+pub struct RetiredFields {
+    pub fields: Vec<FieldGpu>,
+    pub frames_left: u32,
+}
 
 #[derive(ShaderType, Clone, Copy, Debug, Default)]
 pub struct VegetationParams {
@@ -103,6 +122,20 @@ pub struct VegetationParams {
     pub wheels: WheelMapParams,
     /// Downwind direction (x, z), speed in m/s and gustiness, for every layer.
     pub wind: Vec4,
+    /// Nought to scatter by the layer's own reckoning; otherwise the share of
+    /// this layer allowed outside the ground's grass patches.
+    pub follow_grass: f32,
+    /// How the wheels have worn this field: half the gauge between the ruts,
+    /// half the width of one, how bare the rut is and how bare the rest is.
+    pub tread: Vec4,
+    /// How far this field's plants carry past its own edge, in metres.
+    pub soft_border: f32,
+    /// The line the wheels follow, as eight points two to a column, with
+    /// (how many, half the worn width) beside it. Fewer than two points and the
+    /// wear runs down the field's own long axis.
+    pub way: Mat4,
+    pub way_more: Mat4,
+    pub way_shape: Vec4,
 }
 
 /// Carries the environment's wind to every field's vegetation uniforms,
@@ -141,7 +174,9 @@ impl Plugin for VegetationPlugin {
                 (
                     queue_vegetation.in_set(RenderSystems::QueueMeshes),
                     prepare_vegetation_uniforms.in_set(RenderSystems::PrepareResources),
-                    stamp_wheel_contacts.in_set(RenderSystems::PrepareResources),
+                    (carry_wheel_tracks, stamp_wheel_contacts)
+                        .chain()
+                        .in_set(RenderSystems::PrepareResources),
                     prepare_vegetation_bind_group.in_set(RenderSystems::PrepareBindGroups),
                 ),
             );
@@ -237,13 +272,20 @@ struct VegetationUniforms {
 struct VegetationOffset(u32);
 
 fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
+    let (way, way_more, way_shape) = draw.way.packed();
     VegetationParams {
+        way,
+        way_more,
+        way_shape,
         corner: draw.corner,
         chunk_size: draw.size,
         blades_per_chunk: draw.capacity,
         fade_start: draw.fade_start,
         fade_end: draw.fade_end,
         inverse_square_thinning: u32::from(draw.inverse_square_thinning),
+        follow_grass: draw.follow_grass,
+        tread: draw.tread,
+        soft_border: draw.soft_border,
         ..field.params
     }
 }
@@ -424,14 +466,25 @@ fn stamp_wheel_contacts(
     images: Res<RenderAssets<GpuImage>>,
     render_queue: Res<RenderQueue>,
     mut stamped: Local<bevy::platform::collections::HashSet<Entity>>,
+    // What tread each texel already carries. A tractor's front and rear tyres
+    // are different tyres running on lines of their own, and through a turn
+    // they stop following one another, so each side's band becomes two passes
+    // contesting the same texels — and the print wavers along the seam where
+    // one gives way to the other. Only the widest tyre lays a tread; the others
+    // write back whatever is already there, so a wheel crossing an older mark
+    // leaves it exactly as it found it. Writing *nothing* there is what rubbed
+    // marks out before, and is why this is kept rather than skipped.
+    mut laid: Local<HashMap<(Entity, i32, i32), [u16; 2]>>,
 ) {
     stamped.retain(|entity| fields.0.contains_key(entity));
+    laid.retain(|(entity, _, _), _| fields.0.contains_key(entity));
     let Some(contacts) = contacts else {
         return;
     };
     if contacts.contacts.is_empty() {
         return;
     }
+    let widest = contacts.contacts.iter().fold(0.0f32, |most, c| most.max(c.width));
     for (&entity, field) in &fields.0 {
         let Some(trample) = images.get(&field.trample) else {
             continue;
@@ -448,32 +501,82 @@ fn stamp_wheel_contacts(
                 (contact.position.x - field.params.wheels.origin.x) * tpm,
                 (contact.position.z - field.params.wheels.origin.y) * tpm,
             );
+            // The tread is measured across from the wheel's steadied line, not
+            // from where the contact happens to be sitting this frame.
+            let line = (contact.centreline - field.params.wheels.origin) * tpm;
             let roll = contact.direction.normalize_or(Vec2::X);
             let axle = roll.perp();
             let half_width = (contact.width * 0.5 * tpm).max(0.5);
-            let half_length = (contact.footprint_length(field.footprint_length) * 0.5 * tpm).max(0.5);
-            let reach = half_width.hypot(half_length);
+            let laid_width = half_width + 1.0;
+            let half_length = (contact.footprint_length(field.footprint_length) * 0.5 * tpm).max(0.5) + 1.0;
+            let reach = laid_width.hypot(half_length);
             let z0 = ((centre.y - reach).ceil() as i32).clamp(0, height - 1);
             let z1 = ((centre.y + reach).floor() as i32).clamp(0, height - 1);
             let x_lo = ((centre.x - reach).ceil() as i32).clamp(0, width - 1);
             let x_hi = ((centre.x + reach).floor() as i32).clamp(0, width - 1);
-            let texel = trample_texel(contacts.now, roll);
             for z in z0..=z1 {
                 let inside = |x: i32| {
                     let d = Vec2::new(x as f32, z as f32) - centre;
-                    d.dot(axle).abs() <= half_width && d.dot(roll).abs() <= half_length
+                    d.dot(axle).abs() <= laid_width && d.dot(roll).abs() <= half_length
                 };
                 let Some(x0) = (x_lo..=x_hi).find(|x| inside(*x)) else {
                     continue;
                 };
                 let x1 = (x0..=x_hi).take_while(|x| inside(*x)).last().unwrap_or(x0);
                 let width = (x1 - x0 + 1) as u32;
-                let data: Vec<u16> = texel
-                    .iter()
-                    .copied()
-                    .cycle()
-                    .take((width * 2) as usize)
+                // A tread map also records, per texel, how far the wheel had
+                // rolled and where across the tyre the texel lies.
+                let data: Vec<u16> = (x0..=x1)
+                    .flat_map(|x| {
+                        let d = Vec2::new(x as f32, z as f32) - centre;
+                        let stamp = trample_texel(contacts.now, roll, d.dot(axle) / half_width, contact.scrub);
+                        // Every wheel lays its own tread, and none of them ever
+                        // writes the channels empty. A stamp replaces what was
+                        // there, so writing nothing *is* rubbing out: a tractor
+                        // steering one way and then the other sweeps its front
+                        // wheels across the tracks its rear wheels left, and a
+                        // narrow wheel told to lay no tread erased them at every
+                        // crossing. A wheel passing over an older mark lays its
+                        // own over the top, which is what happens on the ground.
+                        let lays_tread = contact.width >= widest * 0.9;
+                        let tread = field.tread.then(|| {
+                            // How far along the track, measured from the wheel
+                            // itself: the machine's rolled distance plus this
+                            // texel's own offset from the contact, which is
+                            // never more than a tyre's width.
+                            //
+                            // Never the texel's place projected on the heading,
+                            // however tempting that looks. A projection has a
+                            // lever arm — the distance to whatever it is
+                            // measured from — and multiplies every wobble of
+                            // the steering by it. Half a degree of correction
+                            // a hundred metres out from the origin slides the
+                            // whole tread sideways by several lug pitches,
+                            // along the ruled line where one stamp gives way to
+                            // the next. Rolled distance has no lever arm at all.
+                            if !lays_tread {
+                                // Whatever this texel already carries, put back
+                                // unchanged. Nothing there yet is nothing to
+                                // keep, and empty is then the truth rather than
+                                // an erasure.
+                                return laid
+                                    .get(&(entity, x, z))
+                                    .copied()
+                                    .unwrap_or([0u16, 0u16]);
+                            }
+                            let from_machine = Vec2::new(x as f32, z as f32)
+                                - (contact.anchor - field.params.wheels.origin) * tpm;
+                            let fresh = tread_texel(
+                                contact.travelled + from_machine.dot(roll) / tpm,
+                                (Vec2::new(x as f32, z as f32) - line).dot(axle) / tpm,
+                                half_width / tpm);
+                            laid.insert((entity, x, z), fresh);
+                            fresh
+                        });
+                        stamp.into_iter().chain(tread.into_iter().flatten())
+                    })
                     .collect();
+                let texel_bytes = if field.tread { 8 } else { 4 };
                 let mut target = trample.texture.as_image_copy();
                 target.origin = Origin3d {
                     x: x0 as u32,
@@ -485,7 +588,7 @@ fn stamp_wheel_contacts(
                     bytemuck::cast_slice(&data),
                     TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(width * 4),
+                        bytes_per_row: Some(width * texel_bytes),
                         rows_per_image: None,
                     },
                     Extent3d {
@@ -734,5 +837,73 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
             }
         }
         RenderCommandResult::Success
+    }
+}
+
+/// A new field takes the wheel tracks of the retired fields it overlaps: the
+/// shared part of each old map is copied into the new one, texel for texel.
+fn carry_wheel_tracks(
+    fields: Res<RenderFields>,
+    images: Res<RenderAssets<GpuImage>>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    mut carried: Local<bevy::platform::collections::HashSet<Entity>>,
+) {
+    carried.retain(|entity| fields.0.contains_key(entity));
+    if fields.1.fields.is_empty() {
+        return;
+    }
+    let mut encoder = render_device.create_command_encoder(&default());
+    let mut copied = false;
+    for (&entity, field) in &fields.0 {
+        let Some(new) = images.get(&field.trample) else {
+            continue;
+        };
+        if !carried.insert(entity) {
+            continue;
+        }
+        let tpm = field.params.wheels.texels_per_metre;
+        let bounds = field.params.bounds;
+        for old in fields
+            .1
+            .fields
+            .iter()
+            .filter(|old| old.tread == field.tread && old.trample.id() != field.trample.id())
+        {
+            let Some(source) = images.get(&old.trample) else {
+                continue;
+            };
+            let low = bounds.xy().max(old.params.bounds.xy());
+            let high = bounds.zw().min(old.params.bounds.zw());
+            if !low.cmplt(high).all() {
+                continue;
+            }
+            let from = ((low - old.params.wheels.origin) * tpm).round().as_uvec2();
+            let to = ((low - field.params.wheels.origin) * tpm).round().as_uvec2();
+            let room = |size: Vec2, at: UVec2| (size.as_uvec2()).saturating_sub(at);
+            let old_size = Vec2::new(old.params.wheels.width, old.params.wheels.height);
+            let new_size = Vec2::new(field.params.wheels.width, field.params.wheels.height);
+            let extent = ((high - low) * tpm)
+                .floor()
+                .as_uvec2()
+                .min(room(old_size, from))
+                .min(room(new_size, to));
+            if extent.x == 0 || extent.y == 0 {
+                continue;
+            }
+            let mut src = source.texture.as_image_copy();
+            src.origin = Origin3d { x: from.x, y: from.y, z: 0 };
+            let mut dst = new.texture.as_image_copy();
+            dst.origin = Origin3d { x: to.x, y: to.y, z: 0 };
+            encoder.copy_texture_to_texture(
+                src,
+                dst,
+                Extent3d { width: extent.x, height: extent.y, depth_or_array_layers: 1 },
+            );
+            copied = true;
+        }
+    }
+    if copied {
+        render_queue.submit([encoder.finish()]);
     }
 }

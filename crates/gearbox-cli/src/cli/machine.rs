@@ -451,8 +451,14 @@ fn state(ctx: &Ctx, machine: Option<String>, watch: bool, rate: f64) -> Result<(
 
 fn state_line(machine_id: &str, s: &MachineState) -> String {
     let p = s.position();
+    // Where on Earth, then the pose in the machine's own datum (east, north, up).
+    let props = s.props();
+    let earth = match (props.get("lat"), props.get("lon"), props.get("alt")) {
+        (Some(lat), Some(lon), Some(alt)) => format!("lla ({lat}, {lon}, {alt}) "),
+        _ => String::new(),
+    };
     format!(
-        "{machine_id}: pos ({:+.2}, {:+.2}, {:+.2}) heading {:+.2} rad speed {:.2} m/s yaw {:+.2} rad/s roll {:+.2} pitch {:+.2} session {}",
+        "{machine_id}: {earth}pos ({:+.2}, {:+.2}, {:+.2}) heading {:+.2} rad speed {:.2} m/s yaw {:+.2} rad/s roll {:+.2} pitch {:+.2} session {}",
         p[0],
         p[1],
         p[2],

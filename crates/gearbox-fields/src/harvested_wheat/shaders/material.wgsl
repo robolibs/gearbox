@@ -8,7 +8,7 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
 }
 
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
 #import "embedded://gearbox_fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
@@ -18,6 +18,42 @@
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var<uniform> wheels: WheelMapParams;
+
+struct WornStubble {
+    extent: vec4<f32>,
+    west: vec4<f32>,
+    east: vec4<f32>,
+    south: vec4<f32>,
+    north: vec4<f32>,
+    reach: vec4<f32>,
+    tread: vec4<f32>,
+    way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
+    way_shape: vec4<f32>,
+    bar: vec4<f32>,
+    bar_more: vec4<f32>,
+    soil: vec4<f32>,
+    stony: vec4<f32>,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(113) var<uniform> worn_ground: WornStubble;
+
+// The same wear the bare grounds and the meadow read, so a road crossing from
+// one field to the next does not change shape or colour on the boundary.
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, wheel_print, lattice}
+
+fn stubble_worn(place: vec2<f32>) -> f32 {
+    return worn(place, worn_ground.extent, worn_ground.tread,
+        worn_ground.way, worn_ground.way_more, worn_ground.way_shape);
+}
+
+// A stubble field meets its neighbours from its own side too. Without this the
+// blend was one-sided: the meadow next door washed towards the stubble's colour
+// and the stubble washed towards nothing, so the join fell on a line.
+fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
+    return washed_into(place, colour, worn_ground.extent,
+        mat4x4<f32>(worn_ground.west, worn_ground.east, worn_ground.south, worn_ground.north),
+        worn_ground.reach);
+}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var terrain_albedo: texture_2d<f32>;
@@ -287,13 +323,49 @@ fn terrain_color(world_xz: vec2<f32>) -> vec4<f32> {
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    if (inside_field(in.world_position.xz, worn_ground.extent, worn_ground.reach) < 0.0) {
+        discard;
+    }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let normal = surface_geometry_normal(surface_heightmap, geometry, in.world_position.xz, in.world_normal);
-    pbr_input.N = surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz));
+    // The print of the tyre bars, tilting the normal rather than tinting the
+    // ground: a chevron is a shape, and a shape wants the sun to find it.
+    // Two ways a tyre can have been here: a way the layout laid out, and a
+    // wheel that has just rolled over it. Whichever left the deeper print holds
+    // the ground — they are the same tyre, so they never want blending.
+    let footprint_here = surface_footprint(in.world_position.xz);
+    let laid_print = way_print(in.world_position.xz, worn_ground.extent, worn_ground.tread,
+        worn_ground.way, worn_ground.way_more, worn_ground.way_shape,
+        worn_ground.bar, worn_ground.bar_more, footprint_here);
+    let mark = sample_wheel_mark(tracks, wheels, in.world_position.xz);
+    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
+        wheels.bar, mark.press, footprint_here);
+    let print = select(rolled_print, laid_print, laid_print.x >= rolled_print.x);
+    pbr_input.N = normalize(
+        surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz))
+        + vec3<f32>(print.y, 0.0, print.z));
     pbr_input.world_normal = normal;
     var color = terrain_color(in.world_position.xz);
-    let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x;
+    let edge = wheel_edge(tracks, wheels, in.world_position.xz);
+    let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x * edge;
     color = vec4<f32>(color.rgb * (1.0 - wheels.darkening * pressed), 1.0);
+    // A way worn across the stubble: the rows go and the earth under them shows.
+    // One walk of the way for the wear and the rut both.
+    let read = way_read(in.world_position.xz, worn_ground.extent, worn_ground.tread,
+        worn_ground.way, worn_ground.way_more, worn_ground.way_shape);
+    let bared = max(read.x, wheel_scar(tracks, wheels, in.world_position.xz) * edge * 0.6);
+    let grit = fbm(in.world_position.xz * 1.6);
+    let pool = vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, lattice(in.world_position.xz, 7.5) * 0.62 + lattice(in.world_position.xz + 29.0, 1.9) * 0.38), read.w);
+    let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(read.x)) * (0.8 + grit * 0.5)
+        * earth_mottle(in.world_position.xz, surface_footprint(in.world_position.xz)) * mix(1.0, 0.58, pool.y)
+        * mix(1.0, pool.z, 1.0 - smoothstep(0.02, 0.10, surface_footprint(in.world_position.xz)));
+    // The taller of the two takes the pixel rather than the two being faded
+    // together: the earth rises through the stubble's own hollows instead of
+    // being washed over it, which is the difference between worn and painted.
+    let met = height_blend(color.rgb, saturate(dot(color.rgb, vec3<f32>(0.3, 0.59, 0.11))),
+        1.0 - bared, earth, grit, bared);
+    color = vec4<f32>(washed(in.world_position.xz,
+        met.rgb * mix(1.0, 0.74, verge_damp(bared)) * mix(1.0, 0.72, print.x) * (1.0 + print.w * 0.40)), 1.0);
 #ifdef VERTEX_COLORS
     color = color * in.color;
 #endif

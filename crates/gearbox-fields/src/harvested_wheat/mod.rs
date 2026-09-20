@@ -41,6 +41,56 @@ struct AntiRepeatTerrainExtension {
     heightmap: Option<Handle<Image>>,
     #[uniform(112)]
     geometry: SurfaceGeometryParams,
+    #[uniform(113)]
+    worn: WornStubble,
+}
+
+/// A way worn across the stubble. The same six numbers the meadow carries: what
+/// they mean lives in `Way::tread`, `WAY_HARDCORE` and `worn()`, so
+/// this is only how they travel.
+#[derive(bevy::render::render_resource::ShaderType, Reflect, Debug, Clone, Copy, Default)]
+struct WornStubble {
+    extent: Vec4,
+    west: Vec4,
+    east: Vec4,
+    south: Vec4,
+    north: Vec4,
+    reach: Vec4,
+    tread: Vec4,
+    way: Mat4,
+    way_more: Mat4,
+    way_shape: Vec4,
+    /// The tyre that prints each of the two lines: pitch, lean, duty, depth.
+    bar: Vec4,
+    bar_more: Vec4,
+    soil: Vec4,
+    stony: Vec4,
+}
+
+impl WornStubble {
+    fn of(placed: &crate::profile::Placed) -> Self {
+        let (way, way_more, way_shape) = placed.way.packed();
+        Self {
+            extent: Vec4::new(
+                placed.bounds.min.x, placed.bounds.min.y,
+                placed.bounds.max.x, placed.bounds.max.y),
+            west: placed.tint[0],
+            east: placed.tint[1],
+            south: placed.tint[2],
+            north: placed.tint[3],
+            reach: Vec4::from_array(placed.reach),
+            tread: placed.tread(),
+            way,
+            way_more,
+            way_shape,
+            bar: placed.bars().0,
+            bar_more: placed.bars().1,
+            // Worked ground: paler and drier than a meadow's, being ploughed
+            // every year and cropped of what held it together.
+            soil: Vec4::new(0.132, 0.099, 0.056, 1.0),
+            stony: crate::bare::WAY_HARDCORE,
+        }
+    }
 }
 
 impl MaterialExtension for AntiRepeatTerrainExtension {
@@ -132,6 +182,9 @@ fn apply_anti_repeat_material_to_usd_terrain(
                                 texels_per_metre: 1.0, width: 2.0, height: 2.0, recovery_seconds: 1800.0, ..default() },
                             heightmap: None,
                             geometry: SurfaceGeometryParams::default(),
+                            // A stubble authored in USD belongs to no field, so
+                            // no way crosses it: a zero tread wears nothing.
+                            worn: WornStubble::default(),
                         },
                     })
                 })
@@ -172,10 +225,13 @@ impl Plugin for HarvestedWheatPlugin {
             .register(FieldProfile {
                 name: "harvested_wheat",
                 wheel_response: WheelResponse {
-                    recovery_seconds: 1800.0,
+                    recovery_seconds: 480.0,
                     bend: 0.94,
                     darkening: 0.44,
                     footprint_length: 0.30,
+                    // Stubble is driven on more than anything else on a farm,
+                    // and the earth under it takes a print.
+                    tread: true,
                 },
                 // Stalks at three levels of detail, one root population.
                 layers: vec![VegetationLayer {
@@ -185,6 +241,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: STALK_NEAR_BAND,
                 }, VegetationLayer {
@@ -194,6 +251,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: STALK_MID_BAND,
                 }, VegetationLayer {
@@ -203,6 +261,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: STALK_FAR_BAND,
                 }, VegetationLayer {
@@ -212,6 +271,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 8.0,
                     fade_end: 48.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
@@ -221,6 +281,7 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 16.0,
                     fade_end: 80.0,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
@@ -230,11 +291,22 @@ impl Plugin for HarvestedWheatPlugin {
                     fade_start: 12.0,
                     fade_end: super::canopy::FADE_END_M,
                     inverse_square_thinning: true,
+                    follow_grass: 0.0,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, super::clumps::sorrel(share * 15.0, 32.0),
-                super::clumps::flat_weeds(share * 0.25, 30.0)],
+                super::clumps::flat_weeds(share * 0.25, 30.0),
+                // A stubble is the seed bank's own field: what the combine left
+                // comes up through it within the fortnight.
+                super::clumps::dandelion(share * 1.2, 34.0),
+                super::clumps::nettle(share * 0.35, 30.0),
+                // Chippings where a track crosses the stubble.
+                super::bare::way_grit(5200.0),
+                super::bare::way_litter(2600.0)],
                 ground: create_ground,
+                tread: Vec4::ZERO,
+                soft_border: 0.7,
+                surface_tint: Vec4::new(0.145, 0.120, 0.062, 1.0),
             });
     }
 }
@@ -244,6 +316,7 @@ fn create_ground(
     tracks: Handle<Image>,
     wheels: WheelMapParams,
     geometry: SurfaceGeometry,
+    placed: crate::profile::Placed,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = AntiRepeatTerrainExtension {
@@ -264,6 +337,7 @@ fn create_ground(
         wheels,
         heightmap: Some(geometry.heightmap),
         geometry: geometry.params,
+        worn: WornStubble::of(&placed),
     };
     let material = world
         .resource_mut::<Assets<AntiRepeatTerrainMaterial>>()

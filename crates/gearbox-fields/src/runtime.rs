@@ -3,6 +3,119 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plot(name: &str, profile: &str, min: [f32; 2], max: [f32; 2]) -> FieldSpec {
+        FieldSpec {
+            name: name.into(),
+            profile: profile.into(),
+            min,
+            max,
+            friction: None,
+            wear: None,
+            way: Vec::new(),
+            way_width: None,
+            tyre: None,
+        }
+    }
+
+    fn road(name: &str, points: Vec<[f32; 2]>, wear: f32) -> crate::layout::WaySpec {
+        crate::layout::WaySpec { name: name.into(), points, width: 6.0, wear, tyre: None }
+    }
+
+    // Which line wears a field is settled in one expression, and it has three
+    // jobs at once: a field's own way, a road laid over the layout, and both
+    // together where a road crosses a lane.
+    #[test]
+    fn a_field_takes_its_own_way_and_any_road_that_crosses_it() {
+        let profiles = bevy::platform::collections::HashMap::default();
+        let plain = plot("plain", "grassland", [0.0, 0.0], [100.0, 100.0]);
+        let mut laned = plain.clone();
+        laned.way = vec![[10.0, 0.0], [10.0, 100.0]];
+        laned.way_width = Some(5.0);
+        laned.wear = Some(0.9);
+        let across = road("across", vec![[0.0, 50.0], [100.0, 50.0]], 0.4);
+        let far = road("far", vec![[0.0, 900.0], [100.0, 900.0]], 0.4);
+
+        // Nothing named and nothing crossing: nothing wears it at all.
+        let bare = placed_of(&[plain.clone()], &profiles, &[], &plain);
+        assert_eq!(bare.way.points(), 0);
+        assert!(!bare.worn());
+
+        // A road crossing a plain field lends it both its line and its wear.
+        let crossed = placed_of(&[plain.clone()], &profiles, &[across.clone()], &plain);
+        assert_eq!(crossed.way.points(), 2);
+        assert_eq!(crossed.tread().z, 0.4);
+
+        // A road that misses it leaves it alone.
+        let missed = placed_of(&[plain.clone()], &profiles, &[far], &plain);
+        assert_eq!(missed.way.points(), 0);
+        assert!(!missed.worn());
+
+        // Its own way comes first and the road joins as the second line, each
+        // still worn its own amount: a faint track crossing a made road is two
+        // roads meeting, not one road that cannot make up its mind.
+        let both = placed_of(&[laned.clone()], &profiles, &[across], &laned);
+        assert_eq!(both.way.points(), 4);
+        assert_eq!(both.way.packed().2.y, 2.5, "its own half width leads");
+        assert_eq!((both.tread().z, both.tread().w), (0.9, 0.4));
+    }
+
+    // A field that says it is worn but bends no line through itself is worn all
+    // over — a yard, a gateway. One that bends a line is worn along that line
+    // only, so its own `wear` must not also wash the whole rectangle.
+    #[test]
+    fn a_field_wear_without_a_line_wears_the_whole_field() {
+        let profiles = bevy::platform::collections::HashMap::default();
+        let mut yard = plot("yard", "grassland", [0.0, 0.0], [40.0, 40.0]);
+        yard.wear = Some(0.7);
+        let all_over = placed_of(&[yard.clone()], &profiles, &[], &yard);
+        assert_eq!(all_over.way.points(), 0);
+        assert_eq!(all_over.tread().z, 0.7);
+
+        let mut lane = yard.clone();
+        lane.way = vec![[20.0, 0.0], [20.0, 40.0]];
+        let along = placed_of(&[lane.clone()], &profiles, &[], &lane);
+        assert_eq!(along.wear, None, "the line carries it now");
+        assert_eq!(along.tread().z, 0.7);
+    }
+
+    // The wash exists to hide the join between two different covers. Applied to
+    // a join between two of the same it does the opposite: both sides flatten
+    // their last metre towards one colour and the seam becomes visible. The
+    // background is cut into regions round every field, so this is the common
+    // case, not the rare one.
+    #[test]
+    fn the_same_cover_either_side_washes_nothing() {
+        let cover = |name: &str| match name {
+            "grassland" => Some((Vec4::new(0.1, 0.2, 0.05, 1.0), 1.3)),
+            "track" => Some((Vec4::new(0.11, 0.07, 0.04, 1.0), 0.8)),
+            _ => None,
+        };
+        let west = plot("west", "grassland", [-100.0, -50.0], [0.0, 50.0]);
+        let middle = plot("middle", "grassland", [0.0, -50.0], [40.0, 50.0]);
+        let east = plot("east", "track", [40.0, -50.0], [46.0, 50.0]);
+        let specs = [west, middle.clone(), east];
+
+        let (tint, reach) = neighbours_of(&specs, &middle, cover);
+        // West is more of the same meadow: nothing to blend towards.
+        assert_eq!(tint[0], Vec4::ZERO);
+        assert_eq!(reach[0], 0.0);
+        // East is a track, so that side washes by the softer of the two borders.
+        assert_eq!(tint[1], cover("track").unwrap().0);
+        assert_eq!(reach[1], 0.8);
+        // Nothing north or south of it at all.
+        assert_eq!((reach[2], reach[3]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_corner_touch_is_not_a_shared_side() {
+        let cover = |_: &str| Some((Vec4::ONE, 1.0));
+        let mine = plot("mine", "grassland", [0.0, 0.0], [10.0, 10.0]);
+        let corner = plot("corner", "track", [10.0, 10.0], [20.0, 20.0]);
+        let (_, reach) = neighbours_of(&[mine.clone(), corner], &mine, cover);
+        assert_eq!(reach, [0.0; 4]);
+    }
+
     const START: f32 = 4.0;
     const END: f32 = 32.0;
     fn density(distance: f32) -> f32 {
@@ -95,7 +208,7 @@ mod tests {
 }
 
 use super::geometry::{clip_mesh, mesh_bounds};
-use super::layout::{FieldBounds, FieldLayout};
+use super::layout::{FieldBounds, FieldLayout, FieldSpec};
 use super::profile::{FieldProfile, FieldProfiles, GroundSurface, VegetationLayer, WheelMapParams};
 use super::render::{FieldGpu, RenderFields, VegetationChunk, VegetationParams};
 use crate::heights::HeightGrid;
@@ -104,11 +217,14 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use std::sync::Arc;
 
 const CHUNK_M: f32 = 16.0;
 const TRACK_TEXELS_PER_M: f32 = 8.0;
+/// The widest wheel-map texture asked of a device, in texels a side. Eight
+/// thousand is what the weakest target guarantees.
+const MOST_TRACK_TEXELS: u32 = 8192;
 
 pub struct RuntimeField {
     pub entity: Entity,
@@ -116,11 +232,19 @@ pub struct RuntimeField {
     pub bounds: FieldBounds,
     pub profile: Arc<FieldProfile>,
     pub ground: Arc<dyn GroundSurface>,
+    /// How this field is worn, which the layout may set per field rather than
+    /// leaving it to the profile. What stands in the ground reads this, so the
+    /// grass stops where the ground material says the soil starts.
+    pub tread: Vec4,
+    /// The line the wheels follow through it, so what stands in the ground
+    /// thins along the same curve the ground material wears along.
+    pub way: crate::layout::Way,
 }
 
 #[derive(Resource)]
 pub struct ActiveFields {
     pub terrain: Entity,
+    pub space: u64,
     pub fields: Vec<RuntimeField>,
     pub background: Arc<dyn GroundSurface>,
 }
@@ -131,21 +255,29 @@ pub struct VegetationChunks(HashMap<(Entity, usize, i32, i32), Entity>);
 #[derive(Component)]
 pub struct SurfaceParts(Vec<Entity>);
 
-fn track_image(width: u32, height: u32) -> Image {
-    Image::new_fill(
+// Two channels for a wheel map, four where the cover prints tyre tread. The
+// map lives on the GPU alone, which hands it over zeroed: filled and uploaded
+// from here, its hundred-odd megabytes would stall the frame they are made in.
+fn track_image(width: u32, height: u32, tread: bool) -> Image {
+    let format = if tread { TextureFormat::Rgba16Uint } else { TextureFormat::Rg16Uint };
+    let mut image = Image::new_uninit(
         Extent3d {
             width,
             height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0u8; 4],
-        TextureFormat::Rg16Uint,
+        format,
         RenderAssetUsages::RENDER_WORLD,
-    )
+    );
+    image.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::COPY_SRC;
+    image
 }
 
-fn heightmap_image(grid: &HeightGrid) -> Image {
+/// The terrain as the cover shaders read it: height and normal per grid point.
+/// A host may build it ahead, off the main thread, and hand it over with the terrain.
+pub fn heightmap_image(grid: &HeightGrid) -> Image {
     let mut texels = Vec::<f32>::with_capacity(grid.cols * grid.rows * 4);
     for i in 0..grid.rows {
         for j in 0..grid.cols {
@@ -169,8 +301,8 @@ fn heightmap_image(grid: &HeightGrid) -> Image {
 pub fn ensure_fields(world: &mut World) {
     let terrain = world
         .get_resource::<CoverTerrain>()
-        .map(|terrain| (terrain.entity, terrain.grid.clone()));
-    let Some((root, grid)) = terrain else {
+        .map(|terrain| (terrain.entity, terrain.grid.clone(), terrain.space));
+    let Some((root, grid, space)) = terrain else {
         if world.remove_resource::<ActiveFields>().is_some() {
             world.resource_mut::<RenderFields>().0.clear();
             world.resource_mut::<VegetationChunks>().0.clear();
@@ -181,9 +313,21 @@ pub fn ensure_fields(world: &mut World) {
         .get_resource::<ActiveFields>()
         .is_some_and(|fields| fields.terrain == root)
     {
+        forget_despawned_fields(world);
         return;
     }
-    world.resource_mut::<RenderFields>().0.clear();
+    forget_despawned_fields(world);
+    let same_space = world
+        .get_resource::<ActiveFields>()
+        .is_some_and(|fields| fields.space == space);
+    // The fields of the ground being replaced stay as they are: the host keeps
+    // that ground drawn until this one is ready, and they go when it goes.
+    let mut render = world.resource_mut::<RenderFields>();
+    let retired: Vec<_> = render.0.values().cloned().collect();
+    render.1 = super::render::RetiredFields {
+        fields: if same_space { retired } else { Vec::new() },
+        frames_left: 240,
+    };
     world.resource_mut::<VegetationChunks>().0.clear();
     let domain = FieldBounds {
         min: Vec2::new(grid.min_x, grid.min_z),
@@ -191,12 +335,13 @@ pub fn ensure_fields(world: &mut World) {
     };
     let layout = world.resource::<FieldLayout>().clone();
     layout
-        .validate(world.resource::<FieldProfiles>(), domain)
+        .validate(world.resource::<FieldProfiles>())
         .expect("valid field layout");
     let profiles = world.resource::<FieldProfiles>().0.clone();
+    let ready = world.resource_mut::<CoverTerrain>().heightmap.take();
     let heightmap = world
         .resource_mut::<Assets<Image>>()
-        .add(heightmap_image(&grid));
+        .add(ready.unwrap_or_else(|| heightmap_image(&grid)));
     let surface_geometry = super::profile::SurfaceGeometry {
         heightmap: heightmap.clone(),
         params: super::profile::SurfaceGeometryParams {
@@ -206,26 +351,59 @@ pub fn ensure_fields(world: &mut World) {
         },
     };
     let mut fields = Vec::new();
-    for spec in layout.regions(domain) {
+    let specs = layout.regions(domain);
+    for spec in specs.clone() {
         let bounds = spec.bounds();
         let profile = profiles[&spec.profile].clone();
         let size = bounds.max - bounds.min;
-        let width = (size.x * TRACK_TEXELS_PER_M).ceil() as u32 + 1;
-        let height = (size.y * TRACK_TEXELS_PER_M).ceil() as u32 + 1;
+        // A wheel map is a texture and no device will make one wider than its
+        // limit, so a field too broad for eight texels to the metre gets fewer
+        // of them rather than no map at all. At the present 800 m of terrain
+        // this never bites; it is here so that widening the terrain coarsens
+        // the marks instead of failing to make the texture.
+        let across = size.x.max(size.y).max(1.0);
+        let per_metre = TRACK_TEXELS_PER_M.min((MOST_TRACK_TEXELS - 1) as f32 / across);
+        if per_metre < TRACK_TEXELS_PER_M {
+            warn!(
+                "field {} is {across:.0} m across, too broad for {TRACK_TEXELS_PER_M} texels \
+                 to the metre: its wheel map is coarsened to {per_metre:.2}",
+                spec.name
+            );
+        }
+        // Clamped as well as scaled: the scale alone lands exactly on the limit,
+        // and a rounding a hair the wrong way would put it one texel over.
+        let width = ((size.x * per_metre).ceil() as u32 + 1).min(MOST_TRACK_TEXELS);
+        let height = ((size.y * per_metre).ceil() as u32 + 1).min(MOST_TRACK_TEXELS);
         let trample = world
             .resource_mut::<Assets<Image>>()
-            .add(track_image(width, height));
+            .add(track_image(width, height, profile.wheel_response.tread));
         let response = profile.wheel_response;
+        // Past the stamp clock a mark wraps and reads as a fresh one, so a
+        // recovery longer than it never finishes: the mark would come back.
+        if response.recovery_seconds >= super::contacts::TRAMPLE_CLOCK_S {
+            warn!(
+                "{} recovers over {}s, longer than the {}s stamp clock; its wheel marks \
+                 will come back instead of fading",
+                profile.name, response.recovery_seconds, super::contacts::TRAMPLE_CLOCK_S
+            );
+        }
         let wheels = WheelMapParams {
             origin: bounds.min,
-            texels_per_metre: TRACK_TEXELS_PER_M,
+            texels_per_metre: per_metre,
             width: width as f32,
             height: height as f32,
             recovery_seconds: response.recovery_seconds,
             bend: response.bend,
             darkening: response.darkening,
+            // Whatever drives a field is taken to be shod like whatever drives
+            // its ways, so a tractor crossing open ground leaves the tread it
+            // would leave on the track. The field's own way names the tyre when
+            // it has one; otherwise the default, which is an ag lug.
+            bar: placed_of(&specs, &profiles, &layout.ways, &spec).bars().0,
         };
-        let ground = (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone());
+        let placed = placed_of(&specs, &profiles, &layout.ways, &spec);
+        let ground =
+            (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone(), placed);
         let entity = world
             .spawn((
                 Name::new(format!("Field {} ({})", spec.name, profile.name)),
@@ -240,6 +418,7 @@ pub fn ensure_fields(world: &mut World) {
                 heightmap: heightmap.clone(),
                 trample,
                 footprint_length: response.footprint_length,
+                tread: response.tread,
                 params: VegetationParams {
                     origin: Vec2::new(grid.min_x, grid.min_z),
                     texels_per_metre: 1.0 / grid.cell,
@@ -252,18 +431,28 @@ pub fn ensure_fields(world: &mut World) {
             },
         );
         info!(
-            "field {}: {} [{:?}..{:?}], independent {}x{} wheel map",
-            spec.name, profile.name, bounds.min, bounds.max, width, height
+            "field {}: {} [{:?}..{:?}], independent {}x{} wheel map ({:.0} MB), way of {} points",
+            spec.name, profile.name, bounds.min, bounds.max, width, height,
+            (width as f64 * height as f64 * if response.tread { 8.0 } else { 4.0 }) / 1.0e6,
+            placed.way.points()
         );
+        // `placed` already settled what wears this field — the lines crossing
+        // it, each with its own wear, or its own `wear` all over.
+        let tread = match placed.worn() {
+            true => placed.tread(),
+            false => profile.tread,
+        };
         fields.push(RuntimeField {
             entity,
             name: spec.name,
             bounds,
             profile,
             ground,
+            tread,
+            way: placed.way,
         });
     }
-    let background_track = world.resource_mut::<Assets<Image>>().add(track_image(2, 2));
+    let background_track = world.resource_mut::<Assets<Image>>().add(track_image(2, 2, false));
     let background = (profiles[&layout.default].ground)(
         world,
         background_track,
@@ -273,20 +462,47 @@ pub fn ensure_fields(world: &mut World) {
             height: 2.0,
             texels_per_metre: 1.0,
             recovery_seconds: 300.0,
+            bar: crate::layout::TyreTread::default().packed(),
             ..default()
         },
         surface_geometry,
+        crate::profile::Placed { bounds: domain, ..default() },
     );
     world.insert_resource(ActiveFields {
         terrain: root,
+        space,
         fields,
         background,
     });
+    // Surfaces matched against the fields before these are matched again.
+    let mut matched = world.query::<(Entity, &SurfaceParts)>();
+    let stale: Vec<(Entity, Vec<Entity>)> = matched
+        .iter(world)
+        .map(|(entity, parts)| (entity, parts.0.clone()))
+        .collect();
+    for (entity, parts) in stale {
+        for part in parts {
+            if let Ok(part) = world.get_entity_mut(part) {
+                part.despawn();
+            }
+        }
+        world.entity_mut(entity).remove::<SurfaceParts>();
+    }
 }
+
+/// Seconds a frame may spend matching surface meshes to fields.
+const SURFACE_BUDGET_S: f32 = 0.004;
+
+/// How many surface meshes of the active ground still wait for their cover.
+#[derive(Resource, Default)]
+pub struct CoverPending(pub usize);
+
 
 pub fn assign_surfaces(
     mut commands: Commands,
     active: Option<Res<ActiveFields>>,
+    parents: Query<&ChildOf>,
+    mut pending: ResMut<CoverPending>,
     mut meshes: ResMut<Assets<Mesh>>,
     sources: Query<
         (
@@ -304,7 +520,19 @@ pub fn assign_surfaces(
     let Some(active) = active else {
         return;
     };
+    // Clipping a ground's worth of meshes in one frame would stall it: a few
+    // milliseconds' worth are matched a frame, and the host is told how many wait.
+    let started = std::time::Instant::now();
+    let mut waiting = 0usize;
     for (entity, source, backdrop, previous) in &sources {
+        // Surfaces of ground that is not the active one belong to fields that are gone or not yet made.
+        if parents.get(entity).is_ok_and(|parent| parent.parent() != active.terrain) {
+            continue;
+        }
+        if started.elapsed().as_secs_f32() > SURFACE_BUDGET_S {
+            waiting += 1;
+            continue;
+        }
         if backdrop.is_some() {
             active.background.apply(&mut commands, entity);
             commands.entity(entity).insert(SurfaceParts(Vec::new()));
@@ -319,12 +547,23 @@ pub fn assign_surfaces(
         let mut parts = Vec::new();
         let mut new_meshes = Vec::new();
         for field in &active.fields {
-            if !field.bounds.overlaps(bounds) {
+            // Each field is given ground a little past its own edge, because
+            // that edge is not where it was authored: it strays within the
+            // margin and the material cuts it there. Clipped to the line
+            // instead, the *texture* changes on that line however the colour
+            // over it is blended — a field's ground is its own mesh, so the
+            // ruled edge of the clip is a ruled edge in the picture. Neighbours
+            // now overlap by the margin and each discards what the other keeps.
+            // A cover that meets its neighbours on a ruled line — a concrete
+            // yard — is not given the margin, because its edge never strays.
+            let soft = field.profile.soft_border > 0.0;
+            let held = field.bounds.grown(if soft { crate::layout::EDGE_MARGIN_M } else { 0.0 });
+            if !held.overlaps(bounds) {
                 continue;
             }
-            if field.bounds.contains(bounds.min) && field.bounds.contains(bounds.max) {
+            if held.contains(bounds.min) && held.contains(bounds.max) {
                 new_meshes.push((field, None));
-            } else if let Some(clipped) = clip_mesh(mesh, field.bounds) {
+            } else if let Some(clipped) = clip_mesh(mesh, held) {
                 new_meshes.push((field, Some(clipped)));
             }
         }
@@ -351,6 +590,7 @@ pub fn assign_surfaces(
         }
         commands.entity(entity).insert(SurfaceParts(parts));
     }
+    pending.0 = waiting;
 }
 
 pub fn instance_budget(
@@ -484,6 +724,11 @@ pub fn stream_vegetation(
             continue;
         }
         let corner = Vec2::new(key.2 as f32, key.3 as f32) * size;
+        // Searching a way costs a loop for every blade in the chunk. Most
+        // chunks are nowhere near the road, and a chunk with no tread leaves
+        // `worn` on its first line, so tell those ones they are not worn at all.
+        let reached = field.way.points() < 2
+            || field.way.reaches(FieldBounds { min: corner, max: corner + size });
         // One mesh per layer, built once: chunks only place its instances.
         let (mesh, variants) = layer_meshes
             .entry((field.profile.name, key.1))
@@ -511,11 +756,130 @@ pub fn stream_vegetation(
                     fade_start: layer.fade_start,
                     fade_end: layer.fade_end,
                     inverse_square_thinning: layer.inverse_square_thinning,
+                    follow_grass: layer.follow_grass,
+                    tread: if reached { field.tread } else { Vec4::ZERO },
+                    soft_border: field.profile.soft_border,
+                    way: field.way,
                     albedo: layer.albedo.map(|path| assets.load(path)),
                     variants,
                 },
             ))
             .id();
         chunks.0.insert(key, entity);
+    }
+}
+
+/// A surface worn evenly all over rather than along a line — a yard, a gateway,
+/// a profile that is a made track from edge to edge. Kept here rather than in
+/// the bare profile because the layout may set it for any field, and both the
+/// ground and what stands in it have to agree on it.
+pub fn plain_tread(worn: f32) -> Vec4 {
+    crate::layout::Way::straight().tread(Some(worn))
+}
+
+/// What lies across each of a field's four sides: west, east, south, north.
+/// A side is a neighbour's only if the two actually share a length of edge,
+/// and the two wash into one another by the softer of their two borders.
+fn placed_of(
+    specs: &[FieldSpec],
+    profiles: &bevy::platform::collections::HashMap<String, Arc<FieldProfile>>,
+    ways: &[crate::layout::WaySpec],
+    self_spec: &FieldSpec,
+) -> crate::profile::Placed {
+    let mine = self_spec.bounds();
+    // A road laid over the whole layout wears every field it crosses; a way the
+    // field names for itself is its own business and comes first. Where two of
+    // them cross the same field, both wear it and the harder wins.
+    let crossing: Vec<_> = ways.iter().filter_map(|way| Some((way, way.across(mine)?))).collect();
+    let mut roads = self_spec
+        .way()
+        .points()
+        .ge(&2)
+        .then(|| self_spec.way())
+        .into_iter()
+        .chain(crossing.iter().map(|(_, line)| *line));
+    let mut near = crate::profile::Placed {
+        bounds: mine,
+        // Each line carries its own wear, so this is only for a field that has
+        // no line at all: one that says it is worn is worn all over.
+        wear: self_spec.wear.filter(|_| self_spec.way.len() < 2),
+        way: roads.next().map_or_else(crate::layout::Way::straight, |first| {
+            roads.fold(first, crate::layout::Way::crossing)
+        }),
+        ..default()
+    };
+    (near.tint, near.reach) = neighbours_of(specs, self_spec, |name| {
+        profiles.get(name).map(|p| (p.surface_tint, p.soft_border))
+    });
+    near
+}
+
+/// What lies across each of a field's four sides, as that neighbour's distant
+/// colour and how far the two wash together: west, east, south, north. `cover`
+/// answers for a profile by name, which is all of one this needs.
+fn neighbours_of(
+    specs: &[FieldSpec],
+    self_spec: &FieldSpec,
+    cover: impl Fn(&str) -> Option<(Vec4, f32)>,
+) -> ([Vec4; 4], [f32; 4]) {
+    let (mut tint, mut reach) = ([Vec4::ZERO; 4], [0.0; 4]);
+    let mine = self_spec.bounds();
+    let Some((_, own_border)) = cover(&self_spec.profile) else {
+        return (tint, reach);
+    };
+    for other in specs {
+        if other.name == self_spec.name {
+            continue;
+        }
+        let theirs = other.bounds();
+        // Sides must overlap along their length, not merely touch at a corner.
+        let overlaps_z = theirs.min.y < mine.max.y && mine.min.y < theirs.max.y;
+        let overlaps_x = theirs.min.x < mine.max.x && mine.min.x < theirs.max.x;
+        let touch = 0.05;
+        let side = if overlaps_z && (theirs.max.x - mine.min.x).abs() < touch {
+            0
+        } else if overlaps_z && (theirs.min.x - mine.max.x).abs() < touch {
+            1
+        } else if overlaps_x && (theirs.max.y - mine.min.y).abs() < touch {
+            2
+        } else if overlaps_x && (theirs.min.y - mine.max.y).abs() < touch {
+            3
+        } else {
+            continue;
+        };
+        // Nothing to wash towards where the same cover lies both sides: the
+        // blend flattens the last metre of each towards one colour, so between
+        // two stretches of the same meadow it draws a seam instead of hiding
+        // one. The background is cut into regions round every field, so most
+        // boundaries in a layout are of this kind.
+        if other.profile == self_spec.profile {
+            continue;
+        }
+        let Some((their_tint, their_border)) = cover(&other.profile) else {
+            continue;
+        };
+        tint[side] = their_tint;
+        reach[side] = own_border.min(their_border);
+    }
+    (tint, reach)
+}
+
+/// Fields whose ground is gone stop being drawn and stamped; retired fields
+/// are held only until the new ones have taken their tracks.
+fn forget_despawned_fields(world: &mut World) {
+    let gone: Vec<Entity> = world
+        .resource::<RenderFields>()
+        .0
+        .keys()
+        .copied()
+        .filter(|entity| world.get_entity(*entity).is_err())
+        .collect();
+    let mut render = world.resource_mut::<RenderFields>();
+    for entity in gone {
+        render.0.remove(&entity);
+    }
+    render.1.frames_left = render.1.frames_left.saturating_sub(1);
+    if render.1.frames_left == 0 && !render.1.fields.is_empty() {
+        render.1.fields.clear();
     }
 }

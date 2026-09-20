@@ -58,7 +58,9 @@ impl Plugin for PhysicsPlugin {
         app.init_resource::<PhysicsWorld>()
             .init_resource::<PhysicsActive>()
             .init_resource::<ColliderDebugEnabled>()
-            .add_systems(First, world::plan_physics_steps)
+            // After the clock moves: planned before it, a frame's steps would be the
+            // last frame's time, and uneven frames would show as jerks.
+            .add_systems(First, world::plan_physics_steps.after(bevy::time::TimeSystems))
             .add_systems(
                 Update,
                 (
@@ -176,7 +178,7 @@ fn attach_projected_stages(world: &mut World) {
             prims.len()
         );
     }
-    world.insert_non_send_resource(instances);
+    world.insert_non_send(instances);
 }
 
 /// A prim entity whose physics markers were read; prims a variant swap adds
@@ -351,11 +353,14 @@ fn carry_onto_machine(
 
 /// World pose composed from local transforms, for entities spawned since
 /// propagation last ran.
+/// "World" is the entity's site: the chain stops at the site's grid.
 fn chain_world(world: &World, entity: Entity) -> GlobalTransform {
     let local = world.get::<Transform>(entity).copied().unwrap_or_default();
     match world.get::<ChildOf>(entity) {
-        Some(parent) => chain_world(world, parent.parent()) * local,
-        None => GlobalTransform::from(local),
+        Some(parent) if world.get::<crate::globe::Site>(parent.parent()).is_none() => {
+            chain_world(world, parent.parent()) * local
+        }
+        _ => GlobalTransform::from(local),
     }
 }
 
@@ -376,7 +381,9 @@ fn sync_bodies_to_transforms_on_resume(
     active: Res<PhysicsActive>,
     mut prev_active: Local<bool>,
     mut world: ResMut<PhysicsWorld>,
-    transforms: bevy::transform::helper::TransformHelper,
+    transforms: Query<&Transform>,
+    parents: Query<&ChildOf>,
+    sites: Query<&crate::globe::Site>,
 ) {
     let was = *prev_active;
     *prev_active = active.0;
@@ -388,13 +395,17 @@ fn sync_bodies_to_transforms_on_resume(
         if published.body != body {
             return None;
         }
-        let current = transforms.compute_global_transform(entity).ok()?;
+        if !transforms.contains(entity) { return None; }
+        let current = crate::globe::transform_in_site(entity, &parents, &transforms, &sites);
         if current.affine().abs_diff_eq(published.global.affine(), 1e-6) {
             return None;
         }
         let t = current.compute_transform();
+        let region = gearbox_globe::physics_offset(crate::globe::site_of(entity, &parents, &sites));
+        let mut translation = convert::vec3_to_d(t.translation);
+        translation.x += region.x;
         Some((body, backend::Pose {
-            translation: convert::vec3_to_d(t.translation),
+            translation,
             rotation: convert::quat_to_d(t.rotation),
         }))
     }).collect();

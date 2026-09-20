@@ -19,6 +19,8 @@ impl Plugin for ClumpsPlugin {
         bevy::asset::embedded_asset!(app, "textures/shrub_sorrel_01.png");
         bevy::asset::embedded_asset!(app, "textures/celandine_01.png");
         bevy::asset::embedded_asset!(app, "textures/weed_plant_02.png");
+        bevy::asset::embedded_asset!(app, "textures/dandelion_01.png");
+        bevy::asset::embedded_asset!(app, "textures/nettle_plant.png");
     }
 }
 
@@ -36,6 +38,7 @@ macro_rules! pack {
                 fade_start: fade_end * 0.5,
                 fade_end,
                 inverse_square_thinning: true,
+                follow_grass: 0.0,
                 albedo: Some(concat!(
                     "embedded://gearbox_fields/clumps/textures/",
                     $model,
@@ -52,6 +55,8 @@ pack!(meadow_tufts, "grass_medium_01");
 pack!(sorrel, "shrub_sorrel_01");
 pack!(celandine, "celandine_01");
 pack!(flat_weeds, "weed_plant_02");
+pack!(dandelion, "dandelion_01");
+pack!(nettle, "nettle_plant");
 
 /// Mesh from a VEG1 pack: position, normal, uv, colour per vertex, u32 indices.
 fn clump_mesh(bytes: &[u8]) -> Mesh {

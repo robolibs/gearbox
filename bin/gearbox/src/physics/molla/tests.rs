@@ -718,6 +718,27 @@ fn pressure_backend_preserves_targets_and_reports_brush_grip() {
 }
 
 #[test]
+fn removed_wheel_or_joint_clears_registration_without_a_step() {
+    for removed in ["wheel", "chassis", "joint"] {
+        let (mut backend, chassis, wheel, joint, _) = wheel_rig(-DVec3::Z);
+        backend.configure_wheel(WheelForceDesc {
+            body: wheel, joint, local_hub: DVec3::ZERO, forward: DVec3::X,
+            radius: 0.5, supported_mass: 100.0, tyre: Some(PressureTyreDesc::reference(0.3)),
+        }).unwrap();
+        let handle = backend.bodies[&wheel].handle;
+        assert!(backend.shared.world().wheels.descriptor(handle).is_some());
+        match removed {
+            "wheel" => backend.remove_body(wheel),
+            "chassis" => backend.remove_body(chassis),
+            _ => backend.remove_joint(joint),
+        }
+        assert!(backend.shared.world().wheels.descriptor(handle).is_none(), "{removed}");
+        assert!(backend.wheel_output(wheel).is_none(), "{removed}");
+        assert!(backend.set_wheel_pressures(&[(wheel, 220_000.0)]).is_err());
+    }
+}
+
+#[test]
 fn inflation_lifts_supported_body_and_keeps_final_envelope_on_ground() {
     let mut backend = MollaBackend::default();
     let ground = backend.insert_collider(ColliderDesc::new(Shape::Cuboid {

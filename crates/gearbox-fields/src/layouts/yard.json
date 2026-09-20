@@ -4,8 +4,8 @@
     {
       "name": "concrete-yard",
       "profile": "concrete",
-      "min": [-40.0, -40.0],
-      "max": [40.0, 40.0]
+      "min": [-39.0, -39.0],
+      "max": [39.0, 39.0]
     }
   ]
 }

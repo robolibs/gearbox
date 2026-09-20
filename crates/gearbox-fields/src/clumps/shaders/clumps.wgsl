@@ -8,6 +8,9 @@
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean}
+// The patches a bare ground thins its own grass by, so a weed standing in
+// one comes up where that grass does and not in a patch of its own.
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{taken, worn, way_beyond, inside_field}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -22,6 +25,12 @@ struct VegetationParams {
     bounds: vec4<f32>,
     wheels: WheelMapParams,
     wind: vec4<f32>,
+    follow_grass: f32,
+    tread: vec4<f32>,
+    soft_border: f32,
+    way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
+    way_shape: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -76,8 +85,24 @@ fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
     return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
+// A hash of a place, fine enough that neighbouring plants get unrelated rolls.
+fn edge_roll(p: vec2<f32>) -> f32 {
+    let q = vec2<i32>(floor(p * 97.0));
+    var h = u32(q.x) * 0x9E3779B9u ^ u32(q.y) * 0x85EBCA6Bu;
+    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
+    return f32(h) / 4294967295.0;
+}
+
+// A hard border ends a field along a ruled line. A soft one lets what grows
+// here carry past its own edge, thinning as it goes, so two fields interleave
+// over that distance instead of butting against one another.
 fn within_field(world_xz: vec2<f32>) -> bool {
-    return all(world_xz >= field.bounds.xy) && all(world_xz < field.bounds.zw);
+    let inside = inside_field(world_xz, field.bounds, vec4<f32>(field.soft_border));
+    if (field.soft_border <= 0.0) {
+        return inside >= 0.0;
+    }
+    let past = max(-inside, 0.0);
+    return edge_roll(world_xz) < 1.0 - smoothstep(0.0, field.soft_border, past);
 }
 
 fn blade_fade_end(rank: f32) -> f32 {
@@ -100,6 +125,9 @@ fn patch_noise(p: vec2<f32>) -> f32 {
         mix(rand(c, 31u), rand(d, 31u), blend.x), blend.y);
 }
 
+// The nine-metre grass patches of a bare ground, hashed exactly as that
+// ground's own shader hashes them. A different hash here would put the weeds
+// in patches of their own that have nothing to do with where the grass is.
 // A vertex of an instance culled before any shaping: outside the clip volume.
 fn culled_vertex() -> VertexOutput {
     var out: VertexOutput;
@@ -126,8 +154,25 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let end = blade_fade_end(f32(index) / max(field.blades_per_chunk, 1.0));
 
     // Thick inside this pack's patches, a sparse share of plants elsewhere.
-    let patchiness = smoothstep(0.55, 0.78, patch_noise(base * 0.08 + vec2<f32>(salt * 37.1, -salt * 19.7)));
-    let kept = rand(id, 9u) < mix(vertex.color.z, 1.0, patchiness);
+    var patchiness = smoothstep(0.55, 0.78, patch_noise(base * 0.08 + vec2<f32>(salt * 37.1, -salt * 19.7)));
+    var loose = vertex.color.z;
+    if (field.follow_grass > 0.0) {
+        // On bare ground a weed comes up where the grass has, not where this
+        // pack would have put it: the same nine-metre patches the tufts of that
+        // ground are thinned by, and only the given share out on the bare.
+        patchiness = smoothstep(0.42, 0.70, taken(base));
+        loose = field.follow_grass;
+    }
+    // Nothing broad-leaved survives where a way is worn. Its verge is the other
+    // way about and carries more than the field it borders: the ground there is
+    // disturbed, nothing crops it and nothing cuts it. Measured in metres out
+    // from the way's own edge and faded over two and a half of them, or the
+    // extra lands in the half metre where the wear happens to be fading and
+    // outlines the road in a ribbon of green instead of thickening beside it.
+    let bared = worn(base, field.bounds, field.tread, field.way, field.way_more, field.way_shape);
+    let beyond = way_beyond(base, field.tread, field.way, field.way_more, field.way_shape);
+    let verge = (1.0 - smoothstep(0.0, 2.5, beyond)) * (1.0 - bared);
+    let kept = rand(id, 9u) < mix(loose, 1.0, patchiness) * (1.0 - bared) + verge * 0.3;
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
     if (coverage <= 0.0) {
@@ -160,7 +205,12 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let settle = smoothstep(6.0, 30.0, distance) * 0.9;
     out.world_normal = normalize(mix(normal, ground_normal, max(flat * 0.7, settle)));
     out.uv = vertex.uv;
-    out.shade = vec3<f32>(0.85 + 0.3 * rand(id, 6u), flat, vertex.color.w);
+    // What of a plant is down among its own leaves and the sward around it
+    // sees little of the sky. Nothing here casts a shadow, so a plant that is
+    // lit as brightly at its root as at its crown reads as stuck on the ground
+    // rather than growing out of it.
+    let rooted = mix(0.42, 1.0, smoothstep(0.0, 0.2, rise));
+    out.shade = vec3<f32>((0.85 + 0.3 * rand(id, 6u)) * rooted, flat, vertex.color.w);
     out.ground_normal = ground_normal;
     return out;
 }
@@ -193,7 +243,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.world_position = in.world_position;
     pbr_input.world_normal = normalize(in.ground_normal);
     pbr_input.V = calculate_view(in.world_position, false);
-    pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
+    // A grass blade stands on edge, so its face points sideways and wants the
+    // flattening that keeps a sward from shimmering. A broad leaf is held out
+    // flat, its face points at the sky, and flattening it too leaves the plant
+    // reading as a paper cut-out. How far the face is from upright decides it.
+    let face = normalize(in.world_normal);
+    let lit = select(-face, face, dot(face, pbr_input.V) > 0.0);
+    pbr_input.N = normalize(mix(
+        foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V),
+        lit,
+        smoothstep(0.35, 0.8, abs(face.y))));
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
     var color = apply_pbr_lighting(pbr_input);
     color = main_pass_post_lighting_processing(pbr_input, color);

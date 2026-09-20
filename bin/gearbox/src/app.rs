@@ -16,11 +16,14 @@ use crate::{
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
 pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
-    group.set(AssetPlugin {
-        file_path: "/".to_string(),
-        unapproved_path_mode: UnapprovedPathMode::Allow,
-        ..default()
-    })
+    // big_space propagates transforms in the stock plugin's place.
+    group
+        .set(AssetPlugin {
+            file_path: "/".to_string(),
+            unapproved_path_mode: UnapprovedPathMode::Allow,
+            ..default()
+        })
+        .disable::<TransformPlugin>()
 }
 
 pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bool) {
@@ -57,8 +60,12 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(gearbox_api::UsdLoaderPlugin)
         .add_plugins(gearbox_api::UsdMarkerPlugin)
         // Simulator surface: planet world, machines, links, services.
+        .add_plugins(crate::globe::GlobePlugin)
+        .add_plugins(gearbox_planet::PlanetPlugin)
         .add_plugins(world::WorldPlugin)
-        .add_plugins(environment::EnvironmentPlugin)
+        .add_plugins(environment::WeatherPlugin)
+        .add_plugins(crate::biomes::WorldBiomesPlugin)
+        .init_resource::<environment::ViewerLens>()
         .add_plugins(gearbox_fields::FieldsPlugin::default())
         .add_plugins(terrain::TerrainPlugin)
         .configure_sets(
@@ -70,6 +77,8 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
             (
                 terrain::publish_cover_terrain.in_set(terrain::TerrainUpdates),
                 environment::sync_cover_wind,
+                environment::sync_lens,
+                environment::sync_camera_lens,
             ),
         )
         .add_systems(Startup, (log_render_adapter, use_cpu_light_clustering))

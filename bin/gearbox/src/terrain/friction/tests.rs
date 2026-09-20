@@ -55,23 +55,36 @@ fn fixture() -> (App, [BodyId; 2], ColliderId) {
     profiles.register(FieldProfile {
         name: "test",
         layers: vec![],
-        ground: |_, _, _, _| panic!("headless material factory"),
+        ground: |_, _, _, _, _| panic!("headless material factory"),
+        tread: Vec4::ZERO,
+        surface_tint: Vec4::ZERO,
+        soft_border: 0.0,
         wheel_response: WheelResponse {
             recovery_seconds: 1.0,
             bend: 0.0,
             darkening: 0.0,
             footprint_length: 0.3,
+            tread: false,
         },
     });
     app.insert_resource(PhysicsWorld::with_backend(Box::new(backend)))
         .insert_resource(ProceduralTerrain {
             entity,
-            collider,
+            site: 0,
             safety_floor: collider,
             grid: Arc::new(HeightGrid::sample(4.0, 0.1, |_, _| 0.0)),
             fine_cell: 0.1,
             tiles: HashMap::default(),
+            complete: true,
+            heightmap: None,
         })
+        .insert_resource(GroundColliders(HashMap::from_iter([(
+            (0, IVec2::ZERO),
+            GroundChunk {
+                collider,
+                grid: Arc::new(HeightGrid::sample(4.0, 0.1, |_, _| 0.0)),
+            },
+        )])))
         .insert_resource(profiles)
         .insert_resource(layout())
         .add_systems(Update, publish);
@@ -242,9 +255,15 @@ fn replacement_terrain_recovers_after_invalid_layout_and_preserves_pressure() {
     {
         let mut terrain = app.world_mut().resource_mut::<ProceduralTerrain>();
         terrain.entity = entity;
-        terrain.collider = ground;
         terrain.grid = Arc::new(HeightGrid::sample(4.0, 0.2, |_, _| 0.0));
     }
+    app.world_mut().resource_mut::<GroundColliders>().0.insert(
+        (0, IVec2::ZERO),
+        GroundChunk {
+            collider: ground,
+            grid: Arc::new(HeightGrid::sample(4.0, 0.2, |_, _| 0.0)),
+        },
+    );
     {
         let mut layout = app.world_mut().resource_mut::<FieldLayout>();
         layout.fields[0].max[0] = 0.25;
@@ -277,7 +296,7 @@ fn inherited_friction_updates_when_collider_material_changes() {
     let after = step(&mut app, wheels);
     assert_eq!(after[0].grip_force, 0.0);
     assert!((after[1].grip_force / before[1].grip_force - 2.0).abs() < 1e-6);
-    app.world_mut().resource_mut::<ProceduralTerrain>().grid =
+    app.world_mut().resource_mut::<GroundColliders>().0.get_mut(&(0, IVec2::ZERO)).unwrap().grid =
         Arc::new(HeightGrid::sample(4.0, 0.2, |_, _| 0.0));
     app.update();
     let regridded = step(&mut app, wheels);

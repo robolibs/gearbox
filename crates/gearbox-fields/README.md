@@ -44,6 +44,221 @@ Names starting with `__background/` are reserved. The distant visual ground uses
 profile; only the sampled physical terrain receives bounded vegetation and wheel maps.
 The mixed example deliberately crosses mesh/chunk boundaries.
 
+A field may also carry `"wear"`, nought to one, saying how far the wheels have taken it
+back to bare ground. It says how hard a way is used, while **Ways** below says where it runs
+and how wide. Left out, the profile decides. One `track` profile therefore covers every kind
+of way:
+
+```json
+{ "name": "green-lane", "profile": "track", "wear": 0.25, "min": [-60, -120], "max": [-54, 120] },
+{ "name": "bare-road",  "profile": "track", "wear": 1.0,  "min": [ 44, -120], "max": [ 50, 120] }
+```
+
+### The stages a way passes through
+
+Wear is one number, but a way does not change evenly along it. It passes through stages, and
+`cover.wgsl` holds where each gives way to the next so the ground, the grit lying on it and
+what still grows in it all turn together rather than each on its own schedule:
+
+| wear | what it reads as |
+| --- | --- |
+| below `WAY_BRUISED` (0.25) | the sward is crushed and darkened, no earth showing — a tractor that went over twice |
+| `WAY_BRUISED`..`WAY_METALLED` | earth through the ruts, grass holding down the middle — a soft farm track |
+| above `WAY_METALLED` (0.55) | stone comes up through the fines and the middle goes too — a made road |
+
+Nothing but `wear` chooses between them, so the same way authored twice at two numbers is
+the same road at two ages. `layouts/stages.json` lays all five side by side to be looked at
+at once.
+
+Every way also carries a **damp verge**: a narrow darker line at its outer edge, where water
+stands in the lip of the hollow and mud comes off the tyres. Without one a road meets the
+field on a clean line however well the two are blended, which is what reads as a road laid on
+top of a field rather than worn into it. It is deliberately narrow — widen it and it reaches
+the crown between the ruts, and a half-worn track flattens into one dark band instead of two
+ruts with grass up the middle.
+
+Beyond that the weeds **thicken** for a couple of metres: a verge carries more than the field
+it borders, because the ground there is disturbed and nothing crops or cuts it. That one is
+measured in metres out from the way's edge (`way_beyond` in `cover.wgsl`) rather than from
+the wear, because two metres out — where a verge still is one — the wear is already nought
+and reads the same as open field; keyed on the wear it outlines the road in a ribbon of green
+instead. So a way is four bands and not two: field, verge, damp edge, road. Only an authored
+way gets the thickening: a field worn across its whole width has no room inside itself for a
+verge, and the band would fall in its neighbour, which knows nothing of it.
+
+### What lies on a way, and where
+
+How worn a point is does not say whether a **wheel** goes over it: the floor of a rut and a
+road worn bare from side to side read alike, and only one has a tyre down it. `way_read` in
+`cover.wgsl` answers both in one walk of the line — the wear, how much the wheels sweep
+there, where water will stand, and the print of the tyre's bars — because a ground that asks
+for two of them should not pay twice for the same search.
+
+Where the wheels sweep decides where the stone is, and it is the *opposite* of where the
+ground is most worn. Traffic displaces the loose coarse material off the floor of a rut, out
+to the shoulder and in to the strip between the two, so the stones gather at the rut edges
+and the floor is left as fines. A made road keeps more of its own, being stone through and
+through. Beside the stone a way carries `way_litter` — crumbs and dried clods brought out of
+a field on a tyre and dropped, which are the way's own colour and not the field's, because a
+track carrying nothing but gravel reads as gravel spread over a lawn.
+
+Across the way itself the two ends of the ladder are shaped differently, and that is the one
+piece of it that is real geometry rather than shading. A worn track is a **trough** down its
+middle and traps the water that falls on it; a made road is **cambered** — four per cent of
+cross-fall from its middle to its shoulder, which is what unpaved roads are built to, and
+losing that camber is how a gravel road fails. `WAY_METALLED` decides which, and it is held in
+Rust as well as in the shader because the hollow is cut on the CPU and the colour on the GPU;
+`shader_contract` refuses to let the two drift apart. The camber is taken as a share of the
+way's own width, so a wide road and a narrow one are laid to the same slope — scaled by the
+*depth* instead, a road came out falling one in four, which is a ridge a wheel climbs rather
+than a fall it leans on.
+
+What a wheel displaces has to go somewhere, and it stands in a low **berm** just outside each
+rut, which drains and dries before the rut does and so reads paler than either the rut or the
+ground beside it. Drawn and not dug: the terrain carries a metre to the cell, so a ridge a
+hand's breadth across can never be sunk into it — the same reason the ruts themselves are
+shading while the trough the whole way sits in is real geometry.
+
+A rut's floor is not flat across it either. The tyre pushes material to one side and leaves a
+**channel** down the other; along that channel are dips, and in the dips is where water will
+stand. Nothing draws water yet — `rut_of(...).y` is the ground being ready for it — but it
+already earns its keep as the dark, damp, silted stretches of a used track, and the grit is
+swallowed there because silt covers it.
+
+A tyre's **tread** is deliberately not printed. It was tried as a tone laid on the rut floor
+— chevrons at the 45° every tyre maker has settled on — and drawn that way it is either
+invisible or wrong: at any strength that survives the loose stone already covering the rut it
+reads as hatching, and at a strength that does not shout it cannot be seen at all, even with
+the distance fade lifted. Bars a fifth of a metre apart are the wrong thing to draw *in
+colour* on a surface made of chippings. It wants the wheel map's own tread channels pressed
+into the **relief**, and until it is done that way it is better absent than half there.
+
+Under all of it, `earth_mottle` varies the ground at 0.85 m, 0.29 m and 0.10 m. The cover
+textures repeat at about two metres, so without it there was nothing below a metre at all and
+the ground went flat as soon as it was looked at closely.
+
+The wear is read by the ground material and by everything standing in it alike, so it
+decides the soil's colour as it wears down to the stone under it, whether grass holds,
+how thickly stones lie, and how far the wheels have pressed it. Driving over a field wears
+it the same way, whatever its layout says: the two are taken together, the harder winning.
+That holds on every cover that can wear — bare ground, meadow and stubble alike — though a
+wheel bares turf more gently than it bares soil, and the blades are not taken away for it:
+they lie flattened over what shows through, which is what a fresh tyre mark on grass is. A
+concrete yard is the exception and wears not at all.
+
+One map, two clocks. A flattened sward springs back over the profile's own
+`recovery_seconds` — five minutes for a meadow — but the bare scar a wheel presses in greens
+over far more slowly, so `wheel_scar` reads the same marks on a much longer one. Without it
+a layout's wear stayed for good while a driven mark evaporated, though both are meant to be
+the same rule. Nothing outlasts the stamp clock itself, which spans an hour: a mark driven
+into a field lasts a working session, not for ever. A record that truly never fades wants a
+map of its own.
+
+`tracks.json` keeps a `drive-me` lane at positive coordinates, barely worn, to drive along
+and watch a wheel mark wear it bare:
+
+```sh
+gearbox spawn machine bin/gearbox/assets/tractor.usd --machine tug --at 83 0
+gearbox scene play
+gearbox machine move tug --forward 3 --for 20s
+```
+
+See `layouts/tracks.json` for the range of wear, and `layouts/between.json` for a lane
+with a different field up each side: each of the four sides is washed towards its own
+neighbour, so the same lane is dark where it meets ploughed earth and pale where it meets
+sand.
+
+## Ways: a road that is not the shape of a field
+
+A field is always a rectangle, so on its own a `wear` can only run straight down one. A
+**way** is the line the wheels actually follow, and the field becomes merely the corridor it
+winds along inside. A field names its own with `way` (world XZ points, at most sixteen) and
+`way_width` (metres across the worn part; left out, as wide as the field):
+
+```json
+{ "name": "winding-lane", "profile": "track", "wear": 0.7,
+  "min": [96, -120], "max": [120, 120], "way_width": 6.0,
+  "way": [[112, -120], [115, -86], [110, -52], [104, -17],
+          [103, 17], [108, 52], [113, 86], [110, 120]] }
+```
+
+The ruts themselves run at a tractor's gauge, a little under two metres apart, whatever the
+way is worn to: `wear` says how bare each rut and the ground between them is, not how far
+apart they sit. A way too narrow to hold them — a footpath, a quad track — closes them
+towards its middle instead, so it wears as one strip rather than as two ruts mostly outside
+its own verge. `layouts/narrow.json` puts 1.2 m, 2.4 m and 6 m ways side by side.
+
+A road that outlives one field goes in the layout's own `ways` instead, and wears every
+field it crosses — whatever that field grows:
+
+```json
+"ways": [
+  { "name": "farm-track", "width": 5.5, "wear": 0.5,
+    "points": [[-160, -20], [-110, -26], [-60, -18], [-20, -6],
+               [20, 4], [70, 10], [120, 6], [170, -4]] }
+]
+```
+
+The bundled `mixed.json` carries exactly this lane, so it is in the scene on a plain launch,
+running out of the meadow and across the stubble field.
+
+Each field is given the stretch of the road it can see, cut from the same points and never
+resampled, so the two halves meet exactly on a boundary. The ruts take their wander from the
+nearest point of the line itself, which is a place in the world and so the same from either
+side, so nothing has to be told how far along the road it lies. A field that names no way of
+its own is worn down its long axis exactly as before.
+
+Where two roads cross the same field, both wear it and the harder of them wins, each keeping
+its own width **and its own wear** — a faint field track may join a metalled lane without
+either becoming the other, which is what `layouts/junction.json` crosses. The fields a way
+passes over have nothing to say about how used that way is: only a field that bends no line
+through itself may carry a `wear`, and that wears it all over.
+**Sixteen points are shared between the two**, so a junction fits when the two
+stretches a field can see come to sixteen points between them; beyond that the crossing road
+is left out whole, with a warning saying so. Trimming either line instead would leave two
+neighbouring fields describing the same road differently and it would kink between them. The
+same sixteen are the limit for a single road, and a field needing more of them is warned and
+cut short. Both are the one budget: a way's points live in two matrices in the material and
+vegetation uniforms. `layouts/junction.json` crosses a lane and a drove over grass and
+stubble, five points each.
+
+A road crossing open ground keeps most of its points, because the background outside the
+named fields is cut into a few large regions. So the budget is spent quickly by long roads:
+prefer as few points as the shape needs, and split a field if a warning says a road was cut.
+
+Two is also the most that can **wear** one field. A third road over the same ground is
+refused with a warning, but the hollow knows nothing of that limit and still sinks along it,
+so a triple crossing leaves a shallow grassy trough where the third road is not painted. It
+reads as a disused track rather than as damage, but it is not what was asked for: keep to
+two ways over any one field, or cut the field so each crossing has its own.
+
+A way may also run straight **along** a boundary rather than through a field: each side wears
+its own half, the hollow sinks across both, and nothing seams down the middle —
+`layouts/boundary.json` lays one between a ploughed field and stubble. The two halves wear to
+the same stone and reach it faster than the wear itself rises, so a made road matches across
+its width; only a faint one keeps a little of each field's own earth, which is all a faint
+mark is.
+
+An authored way also **sinks the ground it runs over** — a little under a foot for a
+half-worn farm track, tapering out over a metre and a half either side, and proportionately
+less for anything narrower, so a footpath wears a groove rather than a shallow valley wider
+than itself. That is the terrain grid,
+which carries the collider as well as the mesh, so the hollow is felt by the wheels and not
+only seen. A field carrying a `wear` but no way is not sunk: worn across its whole width
+means shading, not a trench dug down the middle of it.
+
+Every surface reads the wear the same way — meadow, stubble, ploughed and bare all wear down
+through the same stages to the same hardcore, so a made road does not change where it leaves
+one field for the next. Each keeps its own **subsoil**, though, which is what a soft track is
+mostly showing: a lane reads a shade darker crossing a meadow than crossing stubble, the way
+a real one carries the earth of the field it has just come off. `layouts/road.json` runs one
+lane across all three.
+
+Fields meet one another over the softer of their two `soft_border` widths: what grows in
+each carries that far past its own edge and thins as it goes, and the ground washes towards
+the neighbour's colour over the same distance. A yard's border is nought, so it ends on a
+line.
+
 Layout and `EnvironmentSettings` are startup configuration, not live-editable settings.
 
 ### Physical friction in the Molla worktree
@@ -91,10 +306,36 @@ calibrated pressure-dependent surface model.
 
 1. Create a sibling folder with `mod.rs`, `shaders/`, and `textures/`.
 2. Its plugin registers embedded assets and its typed Bevy material plugin.
-3. Register a `FieldProfile`: name, material factory, vegetation layers, wheel response.
+3. Register a `FieldProfile`: name, material factory, vegetation layers, wheel response,
+   and the `surface_tint` and `soft_border` by which its neighbours meet it.
 4. Each vegetation layer supplies a mesh template, shader, density, and radial fade distances.
    Use the shared vegetation uniform layout and wheel sampler; clip roots to field bounds.
 5. Add the plugin in `FieldsPlugin`, then reference its profile name in a layout.
+
+### What a new ground has to read
+
+A cover that skips any of these is not wrong anywhere a compiler can see; it is simply the
+one field in a layout that behaves unlike the rest, which is how the stubble went a long
+while washing towards nothing while its neighbours washed towards it.
+
+- **Everything in `Placed`.** The factory is handed where the field runs, what lies across
+  each of its four sides and how far, how worn it is, and the way through it. `extent` and
+  the four tints with `reach` feed `washed_into`; `Placed::tread` gives the tread, carrying
+  a wear for each of the two lines; the way rides in as two matrices and a shape.
+- **`worn()` and `washed_into()` from `bare/shaders/cover.wgsl`.** Never a second copy: the
+  two grounds either side of a join must agree where it falls, and held apart they drift —
+  one edge ragged, one ruled.
+- **`bare::WAY_SOIL` and `bare::WAY_HARDCORE`** as what a way wears the cover down to, or a
+  road changes colour where it crosses onto it.
+- **The wheel press, folded in with `max`.** Driving and the layout are taken together and
+  the harder wins; a cover that reads only its layout never wears under a wheel.
+
+A cover that genuinely does not wear — a concrete yard — says so by leaving its tread at
+nought, which `worn()` answers on its first line. That is a decision, not an omission.
+
+Adding a field to `VegetationParams` means declaring it in **every** shader that names that
+struct, or the binding size stops matching what is written. The same goes for a material's
+own uniform: its Rust struct and its WGSL `struct` are one declaration kept in two files.
 
 No terrain-type switch, collision changes, or controller changes are required. The material
 factory receives that instance's wheel texture, sampling parameters and shared surface-height

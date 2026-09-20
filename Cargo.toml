@@ -4,9 +4,12 @@ members = [
     "crates/gearbox-api",
     "crates/gearbox-controls",
     "crates/gearbox-fields",
+    "crates/gearbox-globe",
+    "crates/gearbox-planet",
+    "crates/bevy_weather",
+    "crates/bevy_biomes",
     "crates/gearbox-cli",
     "bin/gearbox",
-    "vendored/bevy-volumetric-clouds",
 ]
 
 # Shared metadata. Each member inherits with `version.workspace = true`.
@@ -16,6 +19,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+# Floating origin and nested high-precision grids: the planet frame and the
+# sites on it. Upstream's own Bevy 0.19 branch, pinned until it is released.
+big_space = { git = "https://github.com/aevyrie/big_space", rev = "5f255228e9b4ff30756347b80f92b19ebf7b5c56", features = ["i64", "bevy_camera"] }
 # Local sibling crate — spatial types the whole gearbox stack speaks.
 datapod = { git = "https://codeberg.org/robolibs/datapod.git", tag = "0.6.2" }
 # WGS84/ENU geodesy — local sim positions to real lat/lon/alt for GNSS.
@@ -68,6 +74,7 @@ bevy = { version = "0.19", default-features = false, features = [
     "x11",
     "wayland",
     "reflect_auto_register",
+    "pbr_light_textures",
 ] }
 # peerbus + agentio — the tool API transport. peerbus moves datapod
 # payloads between ed25519 ids over shared memory or QUIC; agentio adds
@@ -121,6 +128,9 @@ bevy_asset = { path = "../../OUSD/bevy_openusd/vendor/bevy_asset" }
 # Dependencies are optimised even in dev builds: unoptimised Bevy spends the
 # whole frame on the CPU. Our own crates stay at the dev defaults.
 [profile.dev.package."*"]
+opt-level = 3
+# Terrain noise is sampled a million times a square: never unoptimised.
+[profile.dev.package.gearbox-globe]
 opt-level = 3
 [profile.dev.package.usd_bevy]
 opt-level = 3

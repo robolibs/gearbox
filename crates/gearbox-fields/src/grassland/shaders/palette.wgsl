@@ -74,3 +74,50 @@ fn species_tint(species: vec2<f32>) -> vec3<f32> {
     return vec3<f32>(1.0) + species.x * vec3<f32>(-0.12, 0.02, 0.22)
         + species.y * vec3<f32>(-0.25, 0.18, -0.30);
 }
+
+// How damp the ground is, and what that does to the colour of what grows in
+// it. This mirrors `bevy_biomes`' own reading of the land, term for term, so
+// the blades, the soil and the motes in the air all agree on where the
+// country turns dry; change one and change the others.
+fn meadow_damp(place: vec2<f32>) -> f32 {
+    // Noise on a lattice shows its lattice: diamonds, and edges along the
+    // axes. Folding the place through a coarse reading of itself, and turning
+    // each finer reading against the last, leaves nothing straight to see.
+    let turn = mat2x2<f32>(0.80, 0.60, -0.60, 0.80);
+    let warp = vec2<f32>(noise(place / 610.0 + vec2<f32>(5.2, 1.3)),
+        noise(place / 610.0 + vec2<f32>(-3.1, 7.7))) - vec2<f32>(0.5);
+    let folded = place + warp * 260.0;
+    let broad = noise(folded / 430.0 + vec2<f32>(13.7, -4.1));
+    let middle = noise(turn * folded / 170.0 + vec2<f32>(-27.3, 8.9));
+    let fine = noise(turn * turn * folded / 68.0 + vec2<f32>(41.0, -9.3));
+    return clamp(broad * 0.54 + middle * 0.31 + fine * 0.15, 0.0, 1.0);
+}
+
+// How much of each land there is at a place: parched sand, dry grass, damp
+// meadow. These readings are `bevy_biomes`' own, and must move with them.
+fn land_shares(place: vec2<f32>) -> vec3<f32> {
+    let wet = meadow_damp(place);
+    let parched = 1.0 - smoothstep(0.395, 0.445, wet);
+    let meadow = smoothstep(0.505, 0.570, wet);
+    return vec3<f32>(parched, max(1.0 - parched - meadow, 0.0), meadow);
+}
+
+// How much of a place is damp meadow rather than parched country.
+fn meadow_share(place: vec2<f32>) -> f32 {
+    return land_shares(place).z;
+}
+
+// Parched ground is paler and yellower, dry ground a little so, and the
+// meadow keeps its own colour. Sand is not made by tinting grass: the
+// parched land will want a ground of its own before it can be desert.
+fn dry_country(place: vec2<f32>) -> vec3<f32> {
+    let lands = land_shares(place);
+    return lands.x * vec3<f32>(1.22, 1.12, 0.84)
+        + lands.y * vec3<f32>(1.10, 1.05, 0.91)
+        + lands.z * vec3<f32>(1.0, 1.0, 1.0);
+}
+
+// What grows in dry ground is shorter and thinner for want of water.
+fn dry_growth(place: vec2<f32>) -> f32 {
+    return dot(land_shares(place), vec3<f32>(0.55, 0.84, 1.0));
+}

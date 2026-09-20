@@ -11,6 +11,7 @@
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 #import "embedded://gearbox_fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, inside_field}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -25,6 +26,12 @@ struct VegetationParams {
     bounds: vec4<f32>,
     wheels: WheelMapParams,
     wind: vec4<f32>,
+    follow_grass: f32,
+    tread: vec4<f32>,
+    soft_border: f32,
+    way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
+    way_shape: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -36,8 +43,24 @@ fn sample_trample(world_xz: vec2<f32>) -> vec3<f32> {
     return sample_wheels(trample, field.wheels, world_xz);
 }
 
+// A hash of a place, fine enough that neighbouring plants get unrelated rolls.
+fn edge_roll(p: vec2<f32>) -> f32 {
+    let q = vec2<i32>(floor(p * 97.0));
+    var h = u32(q.x) * 0x9E3779B9u ^ u32(q.y) * 0x85EBCA6Bu;
+    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
+    return f32(h) / 4294967295.0;
+}
+
+// A hard border ends a field along a ruled line. A soft one lets what grows
+// here carry past its own edge, thinning as it goes, so two fields interleave
+// over that distance instead of butting against one another.
 fn within_field(world_xz: vec2<f32>) -> bool {
-    return all(world_xz >= field.bounds.xy) && all(world_xz < field.bounds.zw);
+    let inside = inside_field(world_xz, field.bounds, vec4<f32>(field.soft_border));
+    if (field.soft_border <= 0.0) {
+        return inside >= 0.0;
+    }
+    let past = max(-inside, 0.0);
+    return edge_roll(world_xz) < 1.0 - smoothstep(0.0, field.soft_border, past);
 }
 
 // The blade template: position.x is the side (-1, 0, 1), position.y the
@@ -106,6 +129,12 @@ fn blade_fade_end(rank: f32) -> f32 {
 
 // Clover and rosettes the cutter bar passed over: thick in regrowth
 // patches, scattered elsewhere. position.z selects the leaf.
+// How far a way has worn the stubble away here. Read by all three stalk paths
+// and by the stubble material, so nothing is left standing in the road.
+fn way_wear(place: vec2<f32>) -> f32 {
+    return worn(place, field.bounds, field.tread, field.way, field.way_more, field.way_shape);
+}
+
 fn stubble_detail(vertex: Vertex) -> VertexOutput {
     let chunk_seed = pcg(bitcast<u32>(i32(field.corner.x)) * 73856093u
         ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
@@ -117,7 +146,7 @@ fn stubble_detail(vertex: Vertex) -> VertexOutput {
     let distance = length(ground - view.world_position);
     let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
     let end = blade_fade_end(rank);
-    let kept = rand(id, 9u) < 0.10 + 0.90 * regrowth(base);
+    let kept = rand(id, 9u) < (0.10 + 0.90 * regrowth(base)) * (1.0 - way_wear(base));
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
     if (coverage <= 0.0) {
@@ -269,7 +298,7 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     let widen = max(1.0, 1.2 * pixel_m / BLADE_MAX_WIDTH);
     let alive = select(0.0, coverage, in_band && ground_normal.y >= DIRT_SLOPE_NORMAL_Y
         && within_field(base_xz) && rand(id, 19u) * widen < 1.0);
-    if (alive <= 0.0) {
+    if (alive <= 0.0 || rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base_xz))) {
         return culled_vertex();
     }
 
@@ -377,7 +406,7 @@ fn lying_straw(vertex: Vertex) -> VertexOutput {
     let end = blade_fade_end(f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0));
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
-    if (coverage <= 0.0) {
+    if (coverage <= 0.0 || rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base))) {
         return culled_vertex();
     }
     // Kept at least ~1.2 px wide, thinned by the same share, like the stalks.

@@ -9,14 +9,47 @@
     mesh_view_bindings::{globals, lights},
 }
 
-#import "embedded://gearbox_fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_canopy, meadow_tint, meadow_pocket_blend, grass_species, species_tint}
+#import "embedded://gearbox_fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_canopy, meadow_tint, meadow_pocket_blend, grass_species, species_tint, dry_country}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var surface_heightmap: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var<uniform> geometry: SurfaceGeometryParams;
 
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
+struct MeadowEdges {
+    extent: vec4<f32>,
+    west: vec4<f32>,
+    east: vec4<f32>,
+    south: vec4<f32>,
+    north: vec4<f32>,
+    reach: vec4<f32>,
+    tread: vec4<f32>,
+    way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
+    way_shape: vec4<f32>,
+    bar: vec4<f32>,
+    bar_more: vec4<f32>,
+    soil: vec4<f32>,
+    stony: vec4<f32>,
+};
+@group(#{MATERIAL_BIND_GROUP}) @binding(108) var<uniform> edges: MeadowEdges;
+
+// The same wear the bare grounds read, so a track crossing a meadow is worn by
+// one rule and not by a second one that has to be kept in step with it.
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, way_print, wheel_print, lattice}
+
+fn meadow_worn(place: vec2<f32>) -> f32 {
+    return worn(place, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
+}
+
+// The sward washed into whatever lies across each side, so a meadow meets a
+// track from its own side too and the two blends meet in the middle.
+fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
+    return washed_into(place, colour, edges.extent,
+        mat4x4<f32>(edges.west, edges.east, edges.south, edges.north), edges.reach);
+}
+
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var grass_albedo: texture_2d<f32>;
@@ -33,7 +66,10 @@ var trample: texture_2d<u32>;
 var<uniform> trample_params: WheelMapParams;
 
 fn trample_pressed(world_xz: vec2<f32>) -> f32 {
-    return sample_wheels(trample, trample_params, world_xz).x;
+    // Held inside the tyre's own width, or the flattened sward gains and loses
+    // a texel down its sides as the machine drifts against the map's grid.
+    return sample_wheels(trample, trample_params, world_xz).x
+        * wheel_edge(trample, trample_params, world_xz);
 }
 
 fn luma(c: vec4<f32>) -> f32 {
@@ -114,10 +150,33 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     let breakup = edge * 0.025 + (dirt_detail - grass_detail) * 0.06;
     let soil = meadow_pocket_blend(pattern.z + dry * 0.055 + breakup);
     let steep = 1.0 - saturate((normal.y - 0.80) / 0.12);
-    let exposed = max(soil, smoothstep(0.15, 0.8, steep + breakup));
+    // Driving bares a meadow as surely as a way laid across it: the two are
+    // taken together and the harder wins, as on the bare grounds. Gentler than
+    // there, because one pass over turf presses the sward down into the soil
+    // rather than stripping it — the blades are not culled for this, they lie
+    // flattened over what shows through, which is what a fresh tyre mark is.
+    let tyre_edge = wheel_edge(trample, trample_params, world_xz);
+    let scar = wheel_scar(trample, trample_params, world_xz) * tyre_edge;
+    // One walk of the way for all of it, rather than one for the wear, one for
+    // the same wear again and a third for the rut.
+    let read = way_read(world_xz, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
+    let driven = max(read.x, scar * 0.5);
+    let bared = clamp(driven + breakup * 1.6, 0.0, 1.0);
+    let exposed = max(max(soil, bared), smoothstep(0.15, 0.8, steep + breakup));
     let footprint = surface_footprint(world_xz);
     let texture_visibility = 1.0 - smoothstep(0.015, 0.12, footprint);
-    let texture_detail = mix(1.0, clamp(0.78 + mix(grass_detail, dirt_detail, exposed * 0.45) * 1.2, 0.8, 1.2), texture_visibility);
+    // A pixel covering metres cannot carry the fine texture without boiling,
+    // so it fades. Fading to *nothing* is what left the land a flat sheet
+    // wherever the ground square ended: the same material, with its texture
+    // switched off. A coarser pattern takes over as the fine one goes, at a
+    // scale a big pixel can still hold, so ground reads as ground however far
+    // off it is.
+    let coarse = lattice(world_xz, 26.0) * 0.58 + lattice(world_xz + 61.0, 7.0) * 0.42;
+    let texture_detail = mix(
+        0.84 + coarse * 0.30,
+        clamp(0.78 + mix(grass_detail, dirt_detail, exposed * 0.45) * 1.2, 0.8, 1.2),
+        texture_visibility,
+    );
     let tufts = filtered_clumps(world_xz, 0.55, footprint, 19.3);
     let litter = filtered_clumps(world_xz, 1.6, footprint, 61.7);
     let fine = fiber_stamp(world_xz, 0.10, 0.045, footprint, 11.7);
@@ -125,9 +184,23 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     let mat = fiber_stamp(world_xz, 0.27, 0.032, footprint, 83.6);
     var ground = meadow_canopy(pattern) * texture_detail
         * mix(0.72, 1.20, tufts) * mix(0.90, 1.08, litter);
-    let blade_color = mix(vec3<f32>(0.16, 0.27, 0.066), vec3<f32>(0.21, 0.24, 0.074), dry * 0.5) * meadow_tint(pattern);
-    ground = mix(ground, blade_color, clamp(fine * 0.55 + blades * 0.50 + mat * 0.30, 0.0, 0.8));
-    ground *= species_tint(grass_species(world_xz));
+    let blade_color = mix(vec3<f32>(0.16, 0.27, 0.066), vec3<f32>(0.21, 0.24, 0.074), dry * 0.5)
+        * meadow_tint(pattern) * dry_country(world_xz);
+    ground = mix(ground, blade_color,
+        clamp(fine * 0.55 + blades * 0.50 + mat * 0.30, 0.0, 0.8) * (1.0 - bared));
+    ground *= species_tint(grass_species(world_xz)) * dry_country(world_xz);
+    // The earth under the turf, lit by the dirt map so the way is not a flat
+    // band of colour laid over the field.
+    let pool = vec3<f32>(read.y, read.z * smoothstep(0.46, 0.86, lattice(world_xz, 7.5) * 0.62 + lattice(world_xz + 29.0, 1.9) * 0.38), read.w);
+    let earth = mix(edges.soil.rgb, edges.stony.rgb, settled(read.x)) * (0.74 + dirt_detail * 0.86)
+        * earth_mottle(world_xz, footprint) * mix(1.0, 0.58, pool.y)
+        * mix(1.0, pool.z, 1.0 - smoothstep(0.02, 0.10, footprint));
+    // Not a fade between the two: each brings its own relief and the taller
+    // takes the pixel, so the earth comes up first through the hollows of the
+    // sward and the last of the grass holds on the high ground. A plain mix
+    // here is what made a road look painted on rather than worn through.
+    ground = height_blend(ground, grass_detail, 1.0 - bared, earth, dirt_detail, bared).rgb;
+    ground *= mix(1.0, 0.74, verge_damp(driven));
     let pressed = trample_pressed(world_xz);
     return MeadowSurface(
         vec4<f32>(ground * (1.0 - trample_params.darkening * 1.2 * pressed), 1.0),
@@ -137,9 +210,26 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    if (inside_field(in.world_position.xz, edges.extent, edges.reach) < 0.0) {
+        discard;
+    }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let normal = surface_geometry_normal(surface_heightmap, geometry, in.world_position.xz, in.world_normal);
-    pbr_input.N = surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz));
+    // The print of the tyre bars, tilting the normal rather than tinting the
+    // ground: a chevron is a shape, and a shape wants the sun to find it.
+    // Two ways a tyre can have been here: a way the layout laid out, and a
+    // wheel that has just rolled over it. Whichever left the deeper print holds
+    // the ground — they are the same tyre, so they never want blending.
+    let footprint_here = surface_footprint(in.world_position.xz);
+    let laid_print = way_print(in.world_position.xz, edges.extent, edges.tread,
+        edges.way, edges.way_more, edges.way_shape, edges.bar, edges.bar_more, footprint_here);
+    let mark = sample_wheel_mark(trample, trample_params, in.world_position.xz);
+    let rolled_print = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
+        trample_params.bar, mark.press, footprint_here);
+    let print = select(rolled_print, laid_print, laid_print.x >= rolled_print.x);
+    pbr_input.N = normalize(
+        surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz))
+        + vec3<f32>(print.y, 0.0, print.z));
     pbr_input.world_normal = normal;
     let surface = meadow_surface(in.world_position.xz, normal);
     // A low sun is caught by the blades before it reaches the soil between
@@ -150,7 +240,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     let shaded = mix(0.72, 1.0, smoothstep(0.1, 0.7, sun_height));
     pbr_input.material.base_color = alpha_discard(pbr_input.material,
-        vec4<f32>(surface.color.rgb * shaded, surface.color.a));
+        vec4<f32>(washed(in.world_position.xz, surface.color.rgb) * shaded * mix(1.0, 0.72, print.x) * (1.0 + print.w * 0.40),
+            surface.color.a));
     pbr_input.material.perceptual_roughness = surface.roughness;
     pbr_input.material.metallic = 0.0;
     pbr_input.material.reflectance = vec3<f32>(0.04);

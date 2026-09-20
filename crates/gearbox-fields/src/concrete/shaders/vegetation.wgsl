@@ -10,6 +10,9 @@
 }
 
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{blade_leans}
+// A yard ends where its slab ends, but the *line* of that edge is no straighter
+// than any other field's, so it reads the same rule as everything else.
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{inside_field}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_fields/concrete/shaders/yard.wgsl"::{SLAB_M, JOINT_M, yard_noise, joint_distances, yard_weedy}
@@ -27,6 +30,12 @@ struct VegetationParams {
     bounds: vec4<f32>,
     wheels: WheelMapParams,
     wind: vec4<f32>,
+    follow_grass: f32,
+    tread: vec4<f32>,
+    soft_border: f32,
+    way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
+    way_shape: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -72,8 +81,24 @@ fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
     return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
+// A hash of a place, fine enough that neighbouring plants get unrelated rolls.
+fn edge_roll(p: vec2<f32>) -> f32 {
+    let q = vec2<i32>(floor(p * 97.0));
+    var h = u32(q.x) * 0x9E3779B9u ^ u32(q.y) * 0x85EBCA6Bu;
+    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
+    return f32(h) / 4294967295.0;
+}
+
+// A hard border ends a field along a ruled line. A soft one lets what grows
+// here carry past its own edge, thinning as it goes, so two fields interleave
+// over that distance instead of butting against one another.
 fn within_field(world_xz: vec2<f32>) -> bool {
-    return all(world_xz >= field.bounds.xy) && all(world_xz < field.bounds.zw);
+    let inside = inside_field(world_xz, field.bounds, vec4<f32>(field.soft_border));
+    if (field.soft_border <= 0.0) {
+        return inside >= 0.0;
+    }
+    let past = max(-inside, 0.0);
+    return edge_roll(world_xz) < 1.0 - smoothstep(0.0, field.soft_border, past);
 }
 
 fn culled_vertex() -> VertexOutput {

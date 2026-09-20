@@ -59,12 +59,17 @@ enum Cmd {
     },
     /// Move the viewer camera: `fly MACHINE` flies behind a machine like a
     /// double-click in the Agents pane, `follow MACHINE` pins the camera to
-    /// it, `unfollow` releases it
+    /// it, `unfollow` releases it, `goto LAT LON` takes the view to that
+    /// latitude and longitude, in degrees
     Camera {
-        /// fly | follow | unfollow
+        /// fly | follow | unfollow | goto
         action: String,
-        /// Machine id (`gearbox:machine:id`), needed by fly and follow
+        /// Machine id (`gearbox:machine:id`) for fly and follow; the latitude for goto
+        #[arg(allow_negative_numbers = true)]
         machine: Option<String>,
+        /// Longitude in degrees, for goto
+        #[arg(allow_negative_numbers = true)]
+        distance_km: Option<f64>,
         #[arg(long)]
         id: Option<String>,
     },
@@ -107,12 +112,19 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Camera {
             action,
             machine,
+            distance_km,
             id,
-        } => camera(ctx, id, &action, machine.as_deref()),
+        } => camera(ctx, id, &action, machine.as_deref(), distance_km),
     }
 }
 
-fn camera(ctx: &Ctx, id: Option<String>, action: &str, machine: Option<&str>) -> Result<()> {
+fn camera(
+    ctx: &Ctx,
+    id: Option<String>,
+    action: &str,
+    machine: Option<&str>,
+    distance_km: Option<f64>,
+) -> Result<()> {
     let ctx = with_target(ctx, id)?;
     let target = ctx.target()?.clone();
     if target.pid == 0 {
@@ -123,12 +135,20 @@ fn camera(ctx: &Ctx, id: Option<String>, action: &str, machine: Option<&str>) ->
     let line = match (action, machine) {
         ("fly", Some(m)) | ("follow", Some(m)) => format!("{action} {m}"),
         ("unfollow", _) => "unfollow".to_string(),
+        ("goto", Some(bearing)) => {
+            let bearing: f64 = bearing
+                .parse()
+                .map_err(|_| CliError::error("`goto` needs a latitude and a longitude in degrees"))?;
+            let distance = distance_km
+                .ok_or_else(|| CliError::error("`goto` needs a latitude and a longitude in degrees"))?;
+            format!("goto {bearing} {distance}")
+        }
         ("fly", None) | ("follow", None) => {
             return Err(CliError::error(format!("`{action}` needs a machine id")));
         }
         _ => {
             return Err(CliError::error(
-                "camera action must be fly, follow or unfollow",
+                "camera action must be fly, follow, unfollow or goto",
             ));
         }
     };

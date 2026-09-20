@@ -1,0 +1,50 @@
+{
+  "default": "grassland",
+  "fields": [
+    {
+      "name": "passed-twice",
+      "profile": "grassland",
+      "min": [-70.0, -30.0],
+      "max": [70.0, -18.0],
+      "way": [[-70.0, -24.0], [70.0, -24.0]],
+      "way_width": 4.0,
+      "wear": 0.12
+    },
+    {
+      "name": "bruised",
+      "profile": "grassland",
+      "min": [-70.0, -18.0],
+      "max": [70.0, -6.0],
+      "way": [[-70.0, -12.0], [70.0, -12.0]],
+      "way_width": 4.0,
+      "wear": 0.3
+    },
+    {
+      "name": "soft-track",
+      "profile": "grassland",
+      "min": [-70.0, -6.0],
+      "max": [70.0, 6.0],
+      "way": [[-70.0, 0.0], [70.0, 0.0]],
+      "way_width": 4.0,
+      "wear": 0.5
+    },
+    {
+      "name": "made-track",
+      "profile": "grassland",
+      "min": [-70.0, 6.0],
+      "max": [70.0, 18.0],
+      "way": [[-70.0, 12.0], [70.0, 12.0]],
+      "way_width": 4.0,
+      "wear": 0.75
+    },
+    {
+      "name": "metalled-road",
+      "profile": "grassland",
+      "min": [-70.0, 18.0],
+      "max": [70.0, 30.0],
+      "way": [[-70.0, 24.0], [70.0, 24.0]],
+      "way_width": 4.0,
+      "wear": 1.0
+    }
+  ]
+}

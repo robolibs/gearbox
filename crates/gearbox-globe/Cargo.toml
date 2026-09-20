@@ -1,0 +1,14 @@
+[package]
+name = "gearbox-globe"
+description = "A planet as tangent sites: double-precision site frames and one terrain height function over the whole globe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "gearbox_globe"
+path = "src/lib.rs"
+
+[dependencies]
+bevy.workspace = true
+concord.workspace = true

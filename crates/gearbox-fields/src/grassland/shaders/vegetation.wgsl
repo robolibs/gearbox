@@ -5,12 +5,13 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 
-#import "embedded://gearbox_fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint}
+#import "embedded://gearbox_fields/grassland/shaders/palette.wgsl"::{noise, meadow_pattern, meadow_tint, grass_species, species_tint, dry_country, dry_growth, meadow_share}
 #import "embedded://gearbox_fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean, blade_leans}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
 
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, inside_field}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -25,6 +26,12 @@ struct VegetationParams {
     bounds: vec4<f32>,
     wheels: WheelMapParams,
     wind: vec4<f32>,
+    follow_grass: f32,
+    tread: vec4<f32>,
+    soft_border: f32,
+    way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
+    way_shape: vec4<f32>,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -36,8 +43,24 @@ fn sample_trample(world_xz: vec2<f32>) -> vec3<f32> {
     return sample_wheels(trample, field.wheels, world_xz);
 }
 
+// A hash of a place, fine enough that neighbouring plants get unrelated rolls.
+fn edge_roll(p: vec2<f32>) -> f32 {
+    let q = vec2<i32>(floor(p * 97.0));
+    var h = u32(q.x) * 0x9E3779B9u ^ u32(q.y) * 0x85EBCA6Bu;
+    h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 12u);
+    return f32(h) / 4294967295.0;
+}
+
+// A hard border ends a field along a ruled line. A soft one lets what grows
+// here carry past its own edge, thinning as it goes, so two fields interleave
+// over that distance instead of butting against one another.
 fn within_field(world_xz: vec2<f32>) -> bool {
-    return all(world_xz >= field.bounds.xy) && all(world_xz < field.bounds.zw);
+    let inside = inside_field(world_xz, field.bounds, vec4<f32>(field.soft_border));
+    if (field.soft_border <= 0.0) {
+        return inside >= 0.0;
+    }
+    let past = max(-inside, 0.0);
+    return edge_roll(world_xz) < 1.0 - smoothstep(0.0, field.soft_border, past);
 }
 
 fn blade_fade_end(rank: f32) -> f32 {
@@ -103,6 +126,12 @@ fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
     return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
 }
 
+// How far a way has worn the sward away here. Read by both blade paths and by
+// the meadow material, so the grass stops exactly where the earth shows.
+fn way_wear(place: vec2<f32>) -> f32 {
+    return worn(place, field.bounds, field.tread, field.way, field.way_more, field.way_shape);
+}
+
 fn meadow_noise(p: vec2<f32>) -> f32 {
     let cell = vec2<i32>(floor(p));
     let f = fract(p);
@@ -131,6 +160,13 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
     if (coverage <= 0.0) {
         return culled_vertex();
     }
+    // Nothing stands in a road. A flat chance against the wear left a seventh
+    // of the sward upright in a fully worn track, which reads as grass dropped
+    // on a road rather than a road worn through grass; this clears it by the
+    // time the ground is half bare and thins the verge either side of that.
+    if (rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base))) {
+        return culled_vertex();
+    }
     let habitat = meadow_noise(base * 0.8 + vec2<f32>(7.2, 3.1));
     let clover = rand(id, 9u) < 0.18 + smoothstep(0.38, 0.70, habitat) * 0.62;
     let rosette = !clover && rand(id, 17u) < 0.14;
@@ -151,7 +187,7 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
         let forward = vec3<f32>(cos(angle), 0.0, sin(angle));
         let right = vec3<f32>(-sin(angle), 0.0, cos(angle));
         let size = 0.8 + 0.4 * rand(id, 11u + head);
-        let leaf_width = 0.022 * pow(max(sin(t * 3.14159265), 0.0), 0.65);
+        let leaf_width = 0.011 * pow(max(sin(t * 3.14159265), 0.0), 0.65);
         let cup = 0.003 * side * side * sin(t * 3.14159265);
         offset = stem_dir * 0.035 + vec3<f32>(0.0, 0.105 + 0.015 * f32(head), 0.0)
             + forward * (0.002 + t * 0.031 * size)
@@ -210,9 +246,10 @@ fn meadow_grass(base: vec2<f32>, ground: vec3<f32>, ground_normal: vec3<f32>, id
     let variety = rand(id, 10u);
     let fine = variety < 0.25 + 0.5 * species.x;
     let broad = !fine && variety > 0.8 - 0.5 * species.y;
-    let height = mix(0.12, 0.20, rand(id, 20u + leaf)) * select(1.0, 0.9, broad) * coverage;
+    let height = mix(0.12, 0.20, rand(id, 20u + leaf)) * select(1.0, 0.9, broad) * coverage
+        * dry_growth(base) * (1.0 - way_wear(base) * 0.55);
     let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
-    let base_w = mix(0.005, 0.008, rand(id, 30u + leaf)) * select(select(1.0, 1.8, broad), 0.6, fine);
+    let base_w = mix(0.0025, 0.004, rand(id, 30u + leaf)) * select(select(1.0, 1.8, broad), 0.6, fine);
     let width = base_w * max(1.0, 1.2 * pixel_m / base_w) * coverage;
     let arch = select(select(0.45, 0.7, broad), 0.3, fine) + 0.25 * rand(id, 40u + leaf);
 
@@ -279,8 +316,8 @@ fn meadow_grass(base: vec2<f32>, ground: vec3<f32>, ground_normal: vec3<f32>, id
 
 const GOT_MIN_HEIGHT: f32 = 0.04;
 const GOT_MAX_HEIGHT: f32 = 0.10;
-const GOT_MIN_WIDTH: f32 = 0.006;
-const GOT_MAX_WIDTH: f32 = 0.011;
+const GOT_MIN_WIDTH: f32 = 0.003;
+const GOT_MAX_WIDTH: f32 = 0.0055;
 const CLUMP_CELL_M: f32 = 0.45;
 const LOD_JITTER_M: f32 = 1.5;
 
@@ -371,13 +408,22 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
         return culled_vertex();
     }
 
+    // A way worn across the meadow takes the sward with it. A chance per blade
+    // rather than a shrinking of them all, so the track's edge is ragged with
+    // stragglers rather than mown to a line; what holds on near it is shorter.
+    let bared = way_wear(base_xz);
+    if (rand(id, 41u) < smoothstep(0.08, 0.45, bared)) {
+        return culled_vertex();
+    }
+
     let species = grass_species(base_xz);
     let pick = rand(id, 13u);
     let fescue = pick < species.x;
     let rye = !fescue && pick < species.x + species.y;
     let height = mix(GOT_MIN_HEIGHT, GOT_MAX_HEIGHT, rand(id, 6u))
         * mix(0.9, 1.1, rand(clump.id, 3u)) * select(1.0, 0.8, fescue)
-        * select(1.0, mix(0.75, 0.95, rand(id, 32u)), twin) * alive;
+        * select(1.0, mix(0.75, 0.95, rand(id, 32u)), twin) * alive * dry_growth(base_xz)
+        * (1.0 - bared * 0.55);
     let width = mix(GOT_MIN_WIDTH, GOT_MAX_WIDTH, rand(id, 7u))
         * select(select(1.0, 1.6, rye), 0.6, fescue) * widen * alive;
 
@@ -539,7 +585,9 @@ fn flower(vertex: Vertex) -> VertexOutput {
         noise(base * 0.04 + vec2<f32>(-7.7, 2.9))) - vec2<f32>(0.5);
     let cell = floor((base + warp * 24.0) / 14.0);
     let kind = pcg(bitcast<u32>(i32(cell.x)) * 2654435761u ^ bitcast<u32>(i32(cell.y)) * 40503u) % 7u;
-    let opening = smoothstep(0.52, 0.72, noise(base * 0.11 + cell * 3.7));
+    // Little blooms where the ground is parched.
+    let opening = smoothstep(0.52, 0.72, noise(base * 0.11 + cell * 3.7))
+        * mix(0.22, 1.0, meadow_share(base));
     let kept = rand(id, 3u) < opening + 0.004;
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
@@ -668,7 +716,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         out.world_normal = cluster.normal;
         out.ground_normal = ground_normal;
         out.canopy_uv = cluster.uv;
-        out.color = vec4<f32>(vec3<f32>(0.19, 0.31, 0.075) * species_tint(grass_species(base_xz))
+        out.color = vec4<f32>(vec3<f32>(0.19, 0.31, 0.075) * species_tint(grass_species(base_xz)) * dry_country(base_xz)
             * mix(0.88, 1.08, t)
             * (0.94 + seed * 0.12) * (1.0 - pressed.x * field.wheels.darkening), 1.0);
         return out;
