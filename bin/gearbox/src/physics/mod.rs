@@ -25,6 +25,8 @@ mod molla;
 #[cfg(test)]
 pub(crate) use molla::MollaBackend;
 mod rapier;
+#[cfg(test)]
+pub(crate) use rapier::RapierBackend;
 pub mod reader;
 mod scene;
 mod world;

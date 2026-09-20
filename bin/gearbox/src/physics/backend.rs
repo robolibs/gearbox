@@ -646,6 +646,8 @@ pub trait ColliderMut: Collider {
 
 /// Read access to one joint.
 pub trait Joint {
+    /// Current coordinate in motor-target space, or `None` when unavailable.
+    fn motor_position(&self, _axis: JointAxis) -> Option<f64> { None }
     fn frame1(&self) -> Pose;
     fn frame2(&self) -> Pose;
     fn locked_axes(&self) -> JointAxes;

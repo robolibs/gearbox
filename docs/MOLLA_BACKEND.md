@@ -145,7 +145,7 @@ comparison is still pending. This is an integration checkpoint, not full
 
 ## Build notes
 
-### Imported Kubota slope gate: currently failing
+### Imported Kubota slope gate
 
 The unattended `controller::benchmark::imported_kubota_slope_parking` test
 imports the real 26-body Kubota, rotates the machine and ground together by
@@ -207,6 +207,46 @@ That run measured full-machine CPU-step medians of 0.7423–0.7587 ms across
 parked/driving and 0.5/1.8/4 bar; p95 was 0.8522–1.1040 ms, maxima up to
 2.0531 ms. This is not rendered FPS, paired speedup evidence or proof of
 Rapier parity. The debug viewer was not rebuilt/launched for this checkpoint.
+
+#### Bounded parking hold: passing checkpoint
+
+The Ackermann controller now captures the current motor-space wheel coordinate
+when parking engages. Molla exposes unwrapped hard-revolute and prismatic
+coordinates; unsupported joints/backends report no coordinate, retaining the
+existing velocity brake. In particular, Rapier's brake behavior is unchanged.
+
+Parking uses a force-based position motor with the existing authored/shared
+torque budget. Reference gains are `torque / 0.01 rad` stiffness and
+`torque / (0.25 rad/s)` damping. Captured-target error is bounded to 0.25 rad
+under sustained slip, and discontinuous coordinate jumps rebase the hold.
+Driving releases the reference and normal velocity control clears stiffness.
+This is a compliant, torque-limited angular hold, not a body freeze or a
+calibrated dry-friction brake model.
+
+Both independent imported runs pass the unchanged gate, including all four
+pressure/slope combinations and their support/finite-state checks:
+
+| Slope | Pressure | Maximum 60 s drift | Maximum speed |
+| --- | --- | --- | --- |
+| -10 degrees | 0.5 bar | 0.000000393 m | 0.000002449 m/s |
+| -10 degrees | 4.0 bar | 0.000000489 m | 0.000002610 m/s |
+| +10 degrees | 0.5 bar | 0.000000207 m | 0.000001517 m/s |
+| +10 degrees | 4.0 bar | 0.000000250 m | 0.000001653 m/s |
+
+The final command also passes imported pressure/driving and exact replay:
+three tests passed, zero failures. Three focused brake tests cover multi-turn
+capture, loaded hold, release/re-engagement, zero budget, removed joints,
+overload slip with bounded reference, and Rapier's unchanged fallback.
+Ordinary release binary suites pass 87 tests each with explicit Molla and
+Rapier selection; four external-asset tests are ignored in those ordinary
+suites. Native `oslo make build` passes. The viewer is rebuilt, not launched.
+
+Final CPU-step medians are 0.7320–0.7448 ms; p95 0.7643–1.2219 ms and maxima
+up to 2.3572 ms on the shared host. No other assistant test/build overlapped
+those samples. These remain headless step samples, not hard real-time or
+Rapier-parity acceptance. Logs: `/tmp/gearbox-parking-{slope,imported,unit}.log`,
+`/tmp/gearbox-parking-{molla,rapier}-regression.log` and
+`/tmp/gearbox-parking-build.log`.
 
 ### Commands
 

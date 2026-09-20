@@ -31,6 +31,7 @@ use crate::physics::backend::{
 use usd_bevy::UsdPrimRef;
 
 mod traction;
+mod parking;
 #[cfg(test)]
 mod benchmark;
 mod steering;
@@ -167,6 +168,7 @@ pub struct DriveLimits {
 
 #[derive(Resource, Debug, Default, Clone)]
 pub(crate) struct ControllerRuntimeState {
+    parking: parking::ParkingBrakes,
     applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
     logged_empty_tire_pairs: HashSet<ControllerKey>,
     logged_steer: HashSet<ControllerKey>,
@@ -1285,6 +1287,7 @@ fn apply_builtin_ackermann_cmd_vel(
                 turn.configure_servos(&mut physics, steer_cap);
             }
             let applied = apply_joint_motors(&mut physics, &wheel_targets, &steer_targets, steer_cap);
+            runtime.parking.apply(&mut physics, &wheel_targets, cmd.linear_mps.abs() < 0.05);
             if runtime.logged_steer.insert(key.clone()) {
                 info!(
                     "gearbox-control: {} steer joints={} applied={} wheel joints={} applied={}",

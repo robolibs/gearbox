@@ -26,6 +26,26 @@ impl JointAccess {
 }
 
 impl Joint for JointAccess {
+    fn motor_position(&self, axis: JointAxis) -> Option<f64> {
+        let world = self.shared.world();
+        let index = world.scene.joint_index(self.handle)?.index();
+        let kind = world.scene.model().joint_type.host().ok()?[index];
+        if !((kind == sim::JointType::Revolute as u32 && axis == JointAxis::AngX)
+            || (kind == sim::JointType::Prismatic as u32 && axis == JointAxis::LinX))
+        {
+            return None;
+        }
+        let offset = world.scene.model().joint_coord_offset.host().ok()?[index] as usize;
+        world
+            .scene
+            .state()
+            .joint_q
+            .host()
+            .ok()?
+            .get(offset)
+            .copied()
+            .filter(|v| v.is_finite())
+    }
     fn frame1(&self) -> Pose {
         convert::pose(
             self.shared
