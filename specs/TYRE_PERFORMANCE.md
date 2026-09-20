@@ -115,6 +115,33 @@ also occurs in both earlier and latest runs, not only after the Gram change.
 Evidence: `/tmp/molla-gram-{paired,full-tests,drive,live}.log` and
 `/tmp/molla-gram-stages{.json,-summary.txt}`.
 
+### Selection/drive follow-up
+
+Headless Bevy tests reproduced a controller override: selecting a focused
+machine made the keyboard adapter publish zero every frame without a held key,
+overwriting remote commands after bus input. Keyboard driving now claims the
+selected machine only while WASD is held, emits one stop on release/focus loss,
+and yields to an armed gamepad. Idle selection leaves remote/slider commands
+alone. Six regression tests cover ownership, release, focus, selection changes,
+gamepad precedence and opposing held keys. Both backend binary test runs pass
+84 tests, one ignored; the native build passes.
+
+The selected real Kubota then sustained 2 m/s during a 30-second CLI drive;
+API selection readback and `/tmp/molla-control-selected.png` confirm selection.
+Telemetry shows four tyres at 1.8 bar. Steady live step samples remain about
+1.43–1.51 ms, so this fixes drive acceptance, not the remaining timing gap.
+A 0.5-bar selected-machine turn sustained approximately 2.02 m/s and 0.25 rad/s.
+The attempted mid-drive 4-bar edit was refused because `machine move` held the
+session. Do not use `--take` as proof of simultaneous pressure editing; session
+reuse without interrupting drive remains to implement and verify.
+
+Evidence: `/tmp/gearbox-keyboard-{before,molla-tests,rapier-tests,build}.log`,
+`/tmp/molla-control-check.log`, `/tmp/molla-control-drive.log`,
+`/tmp/molla-control-selected-state.json`, `/tmp/molla-control-low-state.json`,
+and `/tmp/molla-control-pressure-drive.log`. The files named
+`molla-control-high-state.json`/`molla-control-high.png` were captured after a
+refused request and still represent low pressure, not an accepted transition.
+
 ## Correctness and gates
 
 - Binary tests cover conservative bounds, both pressure directions, unchanged
