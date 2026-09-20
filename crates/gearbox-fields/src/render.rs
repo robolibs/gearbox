@@ -474,15 +474,6 @@ fn stamp_wheel_contacts(
     if contacts.contacts.is_empty() {
         return;
     }
-    // Only the widest tyres lay a tread. A tractor's front and rear wheels do
-    // not run on the same line, and the offset across the tyre is stamped from
-    // each wheel's *own* centreline, so where the rear one's stamp meets the
-    // front one's that offset steps by the difference between their tracks —
-    // and since the bars are placed from it, the whole print steps with it,
-    // along a line following the wheel map's grid. Letting one tyre own a track
-    // is also what happens on the ground: the rear is wider, comes second, and
-    // prints over whatever the front left.
-    let widest = contacts.contacts.iter().fold(0.0f32, |most, c| most.max(c.width));
     for (&entity, field) in &fields.0 {
         let Some(trample) = images.get(&field.trample) else {
             continue;
@@ -538,17 +529,15 @@ fn stamp_wheel_contacts(
                     .flat_map(|x| {
                         let d = Vec2::new(x as f32, z as f32) - centre;
                         let stamp = trample_texel(contacts.now, roll, d.dot(axle) / half_width, contact.scrub);
-                        // Always the same width of texel where a field carries
-                        // tread at all, or the upload's stride no longer
-                        // matches what is written. A wheel that lays none
-                        // writes the channels empty, which reads as no tread
-                        // and is what a narrow wheel crossing a track does to
-                        // it anyway.
-                        let lays_tread = contact.width >= widest * 0.9;
+                        // Every wheel lays its own tread, and none of them ever
+                        // writes the channels empty. A stamp replaces what was
+                        // there, so writing nothing *is* rubbing out: a tractor
+                        // steering one way and then the other sweeps its front
+                        // wheels across the tracks its rear wheels left, and a
+                        // narrow wheel told to lay no tread erased them at every
+                        // crossing. A wheel passing over an older mark lays its
+                        // own over the top, which is what happens on the ground.
                         let tread = field.tread.then(|| {
-                            if !lays_tread {
-                                return [0u16, 0u16];
-                            }
                             // How far along the track, measured from the wheel
                             // itself: the machine's rolled distance plus this
                             // texel's own offset from the contact, which is
