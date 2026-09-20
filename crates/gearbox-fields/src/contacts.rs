@@ -26,7 +26,12 @@ pub struct WheelContacts {
 }
 
 /// Wheel contacts are stamped into a wrapped-time clock with this period;
-/// it has to match `Time`'s wrap period.
+/// it has to match `Time`'s wrap period. It is also the ceiling on how long any
+/// mark can be read for: past it a stamp wraps and an old mark reads as a fresh
+/// one. `SCAR_SECONDS` in `shaders/interaction.wgsl`, the slow clock a wheel's
+/// bare scar greens over on, is held under this with room to spare for that
+/// reason — a scar wanting longer than an hour needs a map of its own, not a
+/// larger number here.
 pub const TRAMPLE_CLOCK_S: f32 = 3600.0;
 
 /// Encodes a stamp: time on the wrapped clock, then one channel packing the

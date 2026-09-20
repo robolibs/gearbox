@@ -337,6 +337,15 @@ pub fn ensure_fields(world: &mut World) {
             .resource_mut::<Assets<Image>>()
             .add(track_image(width, height, profile.wheel_response.tread));
         let response = profile.wheel_response;
+        // Past the stamp clock a mark wraps and reads as a fresh one, so a
+        // recovery longer than it never finishes: the mark would come back.
+        if response.recovery_seconds >= super::contacts::TRAMPLE_CLOCK_S {
+            warn!(
+                "{} recovers over {}s, longer than the {}s stamp clock; its wheel marks \
+                 will come back instead of fading",
+                profile.name, response.recovery_seconds, super::contacts::TRAMPLE_CLOCK_S
+            );
+        }
         let wheels = WheelMapParams {
             origin: bounds.min,
             texels_per_metre: TRACK_TEXELS_PER_M,
