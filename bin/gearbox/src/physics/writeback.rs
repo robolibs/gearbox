@@ -114,7 +114,7 @@ mod tests {
             }
             world.run_system_once(writeback_transforms).unwrap();
             let mut state = SystemState::<TransformHelper>::new(&mut world);
-            let helper = state.get(&world);
+            let helper = state.get(&world).expect("transform helper");
             for (entity, translation, rotation) in expected {
                 let actual = helper
                     .compute_global_transform(entity)
