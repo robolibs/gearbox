@@ -311,7 +311,14 @@ fn tyre_bars(along: f32, across: f32, heading: vec2<f32>, across_dir: vec2<f32>,
     // laid side by side with a seam between them. A tyre has no seam there, it
     // has a *gap* — the channel the two rows of lugs shed into — so nothing is
     // printed across it and the step falls where there is nothing to step.
-    let centre_gap = smoothstep(0.0, 0.06, abs(across));
+    // Wide enough to hold the swap even when the reading of it wobbles. Through
+    // a turn the four texels round a point were stamped with the axle pointing
+    // different ways, so where they say the tyre's middle is wanders by a few
+    // centimetres. Everywhere else that is invisible — it only moves the bars a
+    // little — but at the middle it decides *which half* a point belongs to,
+    // and a wandering line between two staggered halves is one side of the
+    // chevron going wavy. Inside a void nothing is drawn, so nothing waves.
+    let centre_gap = smoothstep(0.0, 0.12, abs(across));
     // A raised cosine taken to a power: the higher the power the narrower what
     // is left standing, so one number turns the wide-voided ag lug into the
     // close blocks of a road tyre. And it differentiates in closed form, so the
