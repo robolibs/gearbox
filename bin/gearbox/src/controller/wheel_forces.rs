@@ -1,6 +1,6 @@
 use super::*;
 use crate::physics::backend::{
-    JointAxes, JointId, PressureTyreDesc, PressureTyreOutput, WheelForceDesc,
+    JointAxes, JointId, PressureTyreDesc, PressureTyreOutput, WheelForceDesc, WheelForceOutput,
 };
 use bevy::math::Affine3A;
 use bevy::mesh::VertexAttributeValues;
@@ -193,12 +193,89 @@ fn pressure_readout(
     }
 }
 
+fn wheel_readout(
+    values: &mut crate::services::LinkValues,
+    machine: &str,
+    link: &str,
+    wheel: WheelForceOutput,
+) {
+    for (name, value) in [
+        ("tyre_in_contact", f64::from(wheel.in_contact)),
+        ("tyre_held_support", f64::from(wheel.held_support)),
+        ("tyre_normal_load_n", wheel.normal_force),
+        ("tyre_grip_budget_n", wheel.grip_force),
+        ("tyre_slip_ratio", wheel.slip_ratio),
+        ("tyre_slip_angle_rad", wheel.slip_angle),
+        ("tyre_force_world_x_n", wheel.force.x),
+        ("tyre_force_world_y_n", wheel.force.y),
+        ("tyre_force_world_z_n", wheel.force.z),
+        ("tyre_aligning_moment_world_x_nm", wheel.aligning_moment.x),
+        ("tyre_aligning_moment_world_y_nm", wheel.aligning_moment.y),
+        ("tyre_aligning_moment_world_z_nm", wheel.aligning_moment.z),
+    ] {
+        values.set(machine, link, name, value);
+    }
+    if let Some(tyre) = wheel.pressure {
+        pressure_readout(values, machine, link, tyre);
+        for (name, value) in [
+            ("tyre_rolling_moment_world_x_nm", tyre.rolling_moment.x),
+            ("tyre_rolling_moment_world_y_nm", tyre.rolling_moment.y),
+            ("tyre_rolling_moment_world_z_nm", tyre.rolling_moment.z),
+        ] {
+            values.set(machine, link, name, value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::physics::backend::{
         BodyDesc, ColliderDesc, DQuat, Inertia, JointDesc, JointKind, MassProps,
     };
+
+    #[test]
+    fn wheel_telemetry_preserves_signed_world_wrenches_and_units() {
+        let mut values = crate::services::LinkValues::default();
+        let output = WheelForceOutput {
+            in_contact: true,
+            held_support: true,
+            normal_force: 1234.0,
+            grip_force: 567.0,
+            force: DVec3::new(-12.0, 1234.0, 34.0),
+            aligning_moment: DVec3::new(1.0, -2.0, 3.0),
+            slip_ratio: -0.25,
+            slip_angle: -0.125,
+            pressure: Some(PressureTyreOutput {
+                pressure_pa: 180_000.0,
+                rolling_moment: DVec3::new(-3.0, 4.0, 0.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        wheel_readout(&mut values, "machine", "wheel", output);
+        for (name, expected) in [
+            ("tyre_in_contact", 1.0), ("tyre_held_support", 1.0),
+            ("tyre_normal_load_n", 1234.0), ("tyre_grip_budget_n", 567.0),
+            ("tyre_slip_ratio", -0.25), ("tyre_slip_angle_rad", -0.125),
+            ("tyre_force_world_x_n", -12.0), ("tyre_force_world_y_n", 1234.0),
+            ("tyre_force_world_z_n", 34.0),
+            ("tyre_aligning_moment_world_x_nm", 1.0),
+            ("tyre_aligning_moment_world_y_nm", -2.0),
+            ("tyre_aligning_moment_world_z_nm", 3.0),
+            ("tyre_pressure_bar", 1.8), ("tyre_rolling_moment_nm", 5.0),
+            ("tyre_rolling_moment_world_x_nm", -3.0),
+            ("tyre_rolling_moment_world_y_nm", 4.0),
+            ("tyre_rolling_moment_world_z_nm", 0.0),
+        ] {
+            assert_eq!(values.get("machine", "wheel", name), Some(expected), "{name}");
+        }
+        assert!(values.of_machine("other").is_empty());
+        wheel_readout(&mut values, "machine", "wheel", WheelForceOutput {
+            pressure: Some(PressureTyreOutput::default()), ..Default::default()
+        });
+        assert!(values.of_link("machine", "wheel").values().all(|v| *v == 0.0));
+    }
 
     #[test]
     fn reference_radius_uses_rubber_transforms_not_rims_or_axle_width() {
@@ -451,6 +528,18 @@ mod tests {
             assert_eq!(paused.pressure.unwrap().pressure_pa, initial_pressure);
             assert_eq!(paused.pressure.unwrap().radius, pressure.radius);
             assert!((paused.pressure.unwrap().target_pressure_pa - 220_000.0).abs() < 1e-8);
+            let values = app.world().resource::<crate::services::LinkValues>();
+            for (name, expected) in [
+                ("tyre_force_world_x_n", paused.force.x),
+                ("tyre_force_world_y_n", paused.force.y),
+                ("tyre_force_world_z_n", paused.force.z),
+                ("tyre_normal_load_n", paused.normal_force),
+                ("tyre_slip_ratio", paused.slip_ratio),
+                ("tyre_slip_angle_rad", paused.slip_angle),
+                ("tyre_rolling_moment_nm", paused.pressure.unwrap().rolling_moment.length()),
+            ] {
+                assert_eq!(values.get("test", "wheel", name), Some(expected), "{name}");
+            }
             app.world_mut()
                 .resource_mut::<crate::services::LinkValues>()
                 .set("test", "wheel", "tyre_target_pressure_bar", f64::NAN);
@@ -709,8 +798,8 @@ pub(super) fn sync_machine_wheel_forces(
             );
         }
         for (wheel, link) in readouts {
-            if let Some(tyre) = physics.wheel_output(wheel).and_then(|out| out.pressure) {
-                pressure_readout(&mut values, &machine.id, &link, tyre);
+            if let Some(output) = physics.wheel_output(wheel) {
+                wheel_readout(&mut values, &machine.id, &link, output);
             }
         }
     }

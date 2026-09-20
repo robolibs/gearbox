@@ -149,14 +149,19 @@ impl MollaBackend {
                 out.patch_length = pressure.patch_length;
                 out.patch_width = pressure.patch_width;
                 out.patch_area = pressure.patch_area;
-                out.rolling_moment = pressure.rolling_moment;
             }
             if sleeping && sample.dt == 0.0 && sample.output.in_contact {
                 out.in_contact = true;
+                out.held_support = true;
                 out.normal = sample.normal;
                 out.contact_point = DVec3::from_array(sample.output.contact_point);
                 out.normal_force = sample.output.fz.max(0.0);
                 out.grip_force = sample.pressure.as_ref().map_or(sample.friction * out.normal_force, |pressure| pressure.grip_force);
+                out.force = DVec3::from_array(sample.output.force);
+                out.aligning_moment = sample.normal * sample.output.aligning_moment;
+                if let (Some(tyre), Some(pressure)) = (&mut out.pressure, &sample.pressure) {
+                    tyre.rolling_moment = pressure.rolling_moment;
+                }
                 continue;
             }
             let normal_impulse = sample.output.fz.max(0.0) * sample.dt;
@@ -164,6 +169,11 @@ impl MollaBackend {
                 continue;
             }
             impulse += normal_impulse;
+            out.force += DVec3::from_array(sample.output.force) * sample.dt;
+            out.aligning_moment += sample.normal * sample.output.aligning_moment * sample.dt;
+            if let (Some(tyre), Some(pressure)) = (&mut out.pressure, &sample.pressure) {
+                tyre.rolling_moment += pressure.rolling_moment * sample.dt;
+            }
             out.normal += sample.normal * normal_impulse;
             out.contact_point += DVec3::from_array(sample.output.contact_point) * normal_impulse;
             out.grip_force += sample
@@ -183,6 +193,11 @@ impl MollaBackend {
             out.slip_angle /= impulse;
             out.normal_force = impulse / self.wheel_step_dt;
             out.grip_force /= self.wheel_step_dt;
+            out.force /= self.wheel_step_dt;
+            out.aligning_moment /= self.wheel_step_dt;
+            if let Some(tyre) = &mut out.pressure {
+                tyre.rolling_moment /= self.wheel_step_dt;
+            }
         }
         Some(out)
     }

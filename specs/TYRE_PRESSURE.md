@@ -128,6 +128,38 @@ the selected group. Other command publishers can use the controller-command
 property `tyre_pressure_scope=all|axle:N|wheel:LINK`, with `value` in gauge bar.
 An ordinary command acknowledgement only confirms queueing, not application.
 
+## Physical telemetry
+
+Machine state exposes the solver readout as `link.LINK.tyre_*` properties:
+
+| Suffix | Meaning / units |
+|---|---|
+| `in_contact`, `held_support` | Numeric booleans, 0 or 1 |
+| `normal_load_n`, `grip_budget_n` | Mean normal load and available grip, N |
+| `slip_ratio`, `slip_angle_rad` | Signed dimensionless ratio and angle in radians |
+| `force_world_{x,y,z}_n` | Resultant tyre force, N |
+| `aligning_moment_world_{x,y,z}_nm` | Aligning moment, N m |
+| `rolling_moment_world_{x,y,z}_nm` | Rolling-resistance moment, N m |
+| `rolling_moment_nm` | Magnitude of the rolling-resistance moment, N m |
+
+Vectors use the physics world frame (Y up), not the robotics odometry frame.
+Resultant force includes normal support and tangent traction; it excludes
+joint motor forces and obstacle contacts. Aligning and rolling moments exclude
+the contact-force lever arm about the wheel COM. Wrenches are taken from the
+actual post-limiter solver samples, not recomputed from slip or friction.
+
+Active force/moment readouts are duration-weighted over the last completed
+physics step, including zero contributions when contact is absent. Slip and
+contact-point readouts are weighted by normal impulse. Changing the configured
+timestep does not rescale the previous step's output. Applied/target pressure
+and hub geometry remain current-state readouts; footprint dimensions retain
+the last contact sample. Paused target edits do not advance inflation.
+
+`held_support=1` marks a sleeping tyre's retained reaction. It is not an
+impulse applied during that step; sleeping bodies are not integrated. Loss of
+contact or invalidation clears forces, moments and contact flags. Existing
+`normal_force`, `slip` and `slip_angle` track properties remain available.
+
 ## Axle identity
 
 `gearbox:value:tyre_axle` is an optional integer from 1 to 65535 on a wheel

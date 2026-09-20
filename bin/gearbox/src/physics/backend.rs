@@ -746,6 +746,7 @@ pub struct PressureTyreOutput {
     pub patch_length: f64,
     pub patch_width: f64,
     pub patch_area: f64,
+    /// Last-step mean rolling-resistance moment in world axes (N m).
     pub rolling_moment: DVec3,
 }
 
@@ -768,10 +769,16 @@ pub struct TerrainFrictionGrid {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WheelForceOutput {
     pub in_contact: bool,
+    /// A sleeping tyre's retained reaction, not a newly applied wrench.
+    pub held_support: bool,
     pub normal: DVec3,
     pub contact_point: DVec3,
     pub normal_force: f64,
     pub grip_force: f64,
+    /// Last-step mean resultant tyre force in world axes (N).
+    pub force: DVec3,
+    /// Last-step mean aligning moment in world axes (N m), excluding lever arm.
+    pub aligning_moment: DVec3,
     pub slip_ratio: f64,
     pub slip_angle: f64,
     pub pressure: Option<PressureTyreOutput>,

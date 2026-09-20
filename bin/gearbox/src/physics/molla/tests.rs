@@ -9,6 +9,9 @@ mod mass_wake;
 #[path = "pose_wake_tests.rs"]
 mod pose_wake;
 
+#[path = "wheel_readout_tests.rs"]
+mod wheel_readout;
+
 fn near(a: DVec3, b: DVec3) {
     assert!((a - b).length() < 1e-8, "{a:?} != {b:?}");
 }
