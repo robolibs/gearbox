@@ -73,6 +73,20 @@ fn settled(bared: f32) -> f32 {
     return smoothstep(0.0, 0.85, bared);
 }
 
+// The edge of a way is neither field nor road but the damp churned line
+// between: water stands in the lip of the hollow, mud comes off the tyres, and
+// nothing there dries. Without it the two meet cleanly however well they are
+// blended, which is what reads as a road laid on top of a field. Taken from the
+// wear the *way* has done and not the field's own mottle, or a meadow darkens
+// in patches nothing has driven over. Narrow on purpose: every way's wear
+// passes through this little range in a strip at its outer edge and nowhere
+// else, so widening it reaches the crown between the ruts instead, and a track
+// half worn flattens into one dark band rather than two ruts with grass up the
+// middle — which is the shape of a farm track and the thing worth keeping.
+fn verge_damp(worn_here: f32) -> f32 {
+    return smoothstep(0.01, 0.07, worn_here) * (1.0 - smoothstep(0.07, 0.20, worn_here));
+}
+
 // The taller of two surfaces wins the pixel outright, and they mix only within
 // a shallow band. Fading them instead leaves a grey halo round every patch —
 // and where a way meets a field, a plain fade is what makes a road read as

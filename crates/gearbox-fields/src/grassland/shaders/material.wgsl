@@ -34,7 +34,7 @@ struct MeadowEdges {
 
 // The same wear the bare grounds read, so a track crossing a meadow is worn by
 // one rule and not by a second one that has to be kept in step with it.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp}
 
 fn meadow_worn(place: vec2<f32>) -> f32 {
     return worn(place, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
@@ -151,7 +151,8 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     // rather than stripping it — the blades are not culled for this, they lie
     // flattened over what shows through, which is what a fresh tyre mark is.
     let scar = wheel_scar(trample, trample_params, world_xz);
-    let bared = clamp(max(meadow_worn(world_xz), scar * 0.5) + breakup * 1.6, 0.0, 1.0);
+    let driven = max(meadow_worn(world_xz), scar * 0.5);
+    let bared = clamp(driven + breakup * 1.6, 0.0, 1.0);
     let exposed = max(max(soil, bared), smoothstep(0.15, 0.8, steep + breakup));
     let footprint = surface_footprint(world_xz);
     let texture_visibility = 1.0 - smoothstep(0.015, 0.12, footprint);
@@ -176,6 +177,7 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     // sward and the last of the grass holds on the high ground. A plain mix
     // here is what made a road look painted on rather than worn through.
     ground = height_blend(ground, grass_detail, 1.0 - bared, earth, dirt_detail, bared).rgb;
+    ground *= mix(1.0, 0.74, verge_damp(driven));
     let pressed = trample_pressed(world_xz);
     return MeadowSurface(
         vec4<f32>(ground * (1.0 - trample_params.darkening * 1.2 * pressed), 1.0),

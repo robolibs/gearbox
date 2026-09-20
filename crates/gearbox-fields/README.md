@@ -70,6 +70,13 @@ Nothing but `wear` chooses between them, so the same way authored twice at two n
 the same road at two ages. `layouts/stages.json` lays all five side by side to be looked at
 at once.
 
+Every way also carries a **damp verge**: a narrow darker line at its outer edge, where water
+stands in the lip of the hollow and mud comes off the tyres. Without one a road meets the
+field on a clean line however well the two are blended, which is what reads as a road laid on
+top of a field rather than worn into it. It is deliberately narrow — widen it and it reaches
+the crown between the ruts, and a half-worn track flattens into one dark band instead of two
+ruts with grass up the middle.
+
 The wear is read by the ground material and by everything standing in it alike, so it
 decides the soil's colour as it wears down to the stone under it, whether grass holds,
 how thickly stones lie, and how far the wheels have pressed it. Driving over a field wears

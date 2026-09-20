@@ -37,7 +37,7 @@ struct WornStubble {
 
 // The same wear the bare grounds and the meadow read, so a road crossing from
 // one field to the next does not change shape or colour on the boundary.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp}
 
 fn stubble_worn(place: vec2<f32>) -> f32 {
     return worn(place, worn_ground.extent, worn_ground.tread,
@@ -340,7 +340,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // being washed over it, which is the difference between worn and painted.
     let met = height_blend(color.rgb, saturate(dot(color.rgb, vec3<f32>(0.3, 0.59, 0.11))),
         1.0 - bared, earth, grit, bared);
-    color = vec4<f32>(washed(in.world_position.xz, met.rgb), 1.0);
+    color = vec4<f32>(washed(in.world_position.xz, met.rgb * mix(1.0, 0.74, verge_damp(bared))), 1.0);
 #ifdef VERTEX_COLORS
     color = color * in.color;
 #endif
