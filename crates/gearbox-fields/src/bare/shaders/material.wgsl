@@ -125,7 +125,14 @@ struct Comb {
 };
 
 fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
-    let plot = floor(place / plot_m);
+    // One heading to a field, taken from the field itself. Hashing a grid of
+    // plots instead turns the furrows through a new angle wherever a field
+    // happens to cross a plot line, which no plough has ever done.
+    let field_span = ground.extent.zw - ground.extent.xy;
+    var plot = floor(place / plot_m);
+    if (field_span.x > 1.0 && field_span.y > 1.0) {
+        plot = floor(ground.extent.xy / 8.0);
+    }
     let heading = hash21(plot) * 3.1415927;
     let lean = vec2<f32>(cos(heading), sin(heading));
     let along = dot(place, lean);
