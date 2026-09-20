@@ -184,6 +184,30 @@ nix develop --impure -c cargo test --release -p gearbox-sim --bin gearbox \
 Logs: `/tmp/gearbox-slope-{initial,diagnostic}.log`. This fixture is Molla-only;
 it is not a Rapier slope result or a visual acceptance check.
 
+With Molla `73f50bf`, retained per-cell pressure-tyre shear is active in the
+Featherstone force path. The imported driving/pressure benchmark and exact
+replay pass, but the unchanged slope gate still fails:
+
+| Slope | Pressure | Maximum drift over 60 s | Maximum speed |
+| --- | --- | --- | --- |
+| -10 degrees | 0.5 bar | 3.944096269 m | 0.065777049 m/s |
+| -10 degrees | 4.0 bar | 4.485188503 m | 0.074782764 m/s |
+| +10 degrees | 0.5 bar | 3.836886247 m | 0.064224411 m/s |
+| +10 degrees | 4.0 bar | 4.418200279 m | 0.073664558 m/s |
+
+At +10 degrees/4 bar, slip magnitudes fell to about 0.00068–0.00213 while
+the wheels still rotate under the unchanged parking velocity motors. Parking
+hold remains unfinished; neither friction nor acceptance tolerances were
+increased to hide that. Source regressions cover retained shear, frame
+projection, airborne reset, unrelated rebuilds, rollback and teleport.
+The ordinary release binary suite passes 84 tests with four external-asset
+tests ignored. Final imported log: `/tmp/gearbox-shear-imported-final.log`.
+
+That run measured full-machine CPU-step medians of 0.7423–0.7587 ms across
+parked/driving and 0.5/1.8/4 bar; p95 was 0.8522–1.1040 ms, maxima up to
+2.0531 ms. This is not rendered FPS, paired speedup evidence or proof of
+Rapier parity. The debug viewer was not rebuilt/launched for this checkpoint.
+
 ### Commands
 
 Use the repository Nix environment; the host Rust compiler is too old for this
