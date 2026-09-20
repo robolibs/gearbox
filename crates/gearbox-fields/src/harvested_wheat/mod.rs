@@ -248,6 +248,7 @@ impl Plugin for HarvestedWheatPlugin {
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 0.7,
+                surface_tint: Vec4::new(0.145, 0.120, 0.062, 1.0),
             });
     }
 }
@@ -258,6 +259,7 @@ fn create_ground(
     wheels: WheelMapParams,
     geometry: SurfaceGeometry,
     _bounds: crate::layout::FieldBounds,
+    _near: crate::profile::Neighbours,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = AntiRepeatTerrainExtension {

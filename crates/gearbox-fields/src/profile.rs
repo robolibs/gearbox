@@ -91,7 +91,17 @@ pub type GroundFactory = fn(
     WheelMapParams,
     SurfaceGeometry,
     super::layout::FieldBounds,
+    Neighbours,
 ) -> Arc<dyn GroundSurface>;
+
+/// What lies across each of a field's four sides, as the neighbour's own
+/// surface colour, and how far the two blend into one another. Order is
+/// west, east, south, north; a side with no soft neighbour blends nought.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Neighbours {
+    pub tint: [Vec4; 4],
+    pub reach: [f32; 4],
+}
 
 pub struct FieldProfile {
     pub name: &'static str,
@@ -101,6 +111,10 @@ pub struct FieldProfile {
     /// How this profile's surface is worn by wheels, as `BareGround::tread`:
     /// zero for a surface that wears evenly, which is most of them.
     pub tread: Vec4,
+    /// What this profile's ground looks like from a distance, as a linear
+    /// colour. A neighbouring field blends its own ground towards this across
+    /// a soft border, so two surfaces meet in a wash rather than on a line.
+    pub surface_tint: Vec4,
     /// How far what grows in this field carries past its own edge, in metres.
     /// A hedge line or a yard wall is a hard border and gets nought; a meadow
     /// running into a track is a soft one, and the two interleave over this

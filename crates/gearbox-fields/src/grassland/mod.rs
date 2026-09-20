@@ -151,6 +151,7 @@ impl Plugin for GrasslandPlugin {
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 1.3,
+                surface_tint: Vec4::new(0.055, 0.082, 0.030, 1.0),
             });
     }
 }
@@ -161,6 +162,7 @@ fn create_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     _bounds: crate::layout::FieldBounds,
+    _near: crate::profile::Neighbours,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let grass_albedo = assets

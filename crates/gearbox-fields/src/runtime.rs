@@ -95,7 +95,7 @@ mod tests {
 }
 
 use super::geometry::{clip_mesh, mesh_bounds};
-use super::layout::{FieldBounds, FieldLayout};
+use super::layout::{FieldBounds, FieldLayout, FieldSpec};
 use super::profile::{FieldProfile, FieldProfiles, GroundSurface, VegetationLayer, WheelMapParams};
 use super::render::{FieldGpu, RenderFields, VegetationChunk, VegetationParams};
 use crate::heights::HeightGrid;
@@ -228,7 +228,8 @@ pub fn ensure_fields(world: &mut World) {
         },
     };
     let mut fields = Vec::new();
-    for spec in layout.regions(domain) {
+    let specs = layout.regions(domain);
+    for spec in specs.clone() {
         let bounds = spec.bounds();
         let profile = profiles[&spec.profile].clone();
         let size = bounds.max - bounds.min;
@@ -247,7 +248,9 @@ pub fn ensure_fields(world: &mut World) {
             bend: response.bend,
             darkening: response.darkening,
         };
-        let ground = (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone(), bounds);
+        let near = neighbours_of(&specs, &profiles, &spec);
+        let ground =
+            (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone(), bounds, near);
         let entity = world
             .spawn((
                 Name::new(format!("Field {} ({})", spec.name, profile.name)),
@@ -300,6 +303,7 @@ pub fn ensure_fields(world: &mut World) {
         },
         surface_geometry,
         domain,
+        crate::profile::Neighbours::default(),
     );
     world.insert_resource(ActiveFields {
         terrain: root,
@@ -583,6 +587,48 @@ pub fn stream_vegetation(
             .id();
         chunks.0.insert(key, entity);
     }
+}
+
+/// What lies across each of a field's four sides: west, east, south, north.
+/// A side is a neighbour's only if the two actually share a length of edge,
+/// and the two wash into one another by the softer of their two borders.
+fn neighbours_of(
+    specs: &[FieldSpec],
+    profiles: &bevy::platform::collections::HashMap<String, Arc<FieldProfile>>,
+    self_spec: &FieldSpec,
+) -> crate::profile::Neighbours {
+    let mine = self_spec.bounds();
+    let own = profiles.get(&self_spec.profile);
+    let mut near = crate::profile::Neighbours::default();
+    for other in specs {
+        if other.name == self_spec.name {
+            continue;
+        }
+        let theirs = other.bounds();
+        // Sides must overlap along their length, not merely touch at a corner.
+        let overlaps_z = theirs.min.y < mine.max.y && mine.min.y < theirs.max.y;
+        let overlaps_x = theirs.min.x < mine.max.x && mine.min.x < theirs.max.x;
+        let touch = 0.05;
+        let side = if overlaps_z && (theirs.max.x - mine.min.x).abs() < touch {
+            0
+        } else if overlaps_z && (theirs.min.x - mine.max.x).abs() < touch {
+            1
+        } else if overlaps_x && (theirs.max.y - mine.min.y).abs() < touch {
+            2
+        } else if overlaps_x && (theirs.min.y - mine.max.y).abs() < touch {
+            3
+        } else {
+            continue;
+        };
+        let Some(across) = profiles.get(&other.profile) else {
+            continue;
+        };
+        near.tint[side] = across.surface_tint;
+        near.reach[side] = own
+            .map(|own| own.soft_border.min(across.soft_border))
+            .unwrap_or(0.0);
+    }
+    near
 }
 
 /// Fields whose ground is gone stop being drawn and stamped; retired fields

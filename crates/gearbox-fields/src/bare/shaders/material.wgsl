@@ -22,6 +22,11 @@ struct BareGround {
     grass: vec4<f32>,
     extent: vec4<f32>,
     tread: vec4<f32>,
+    west: vec4<f32>,
+    east: vec4<f32>,
+    south: vec4<f32>,
+    north: vec4<f32>,
+    reach: vec4<f32>,
 };
 
 // Two surfaces met by their own heights: the taller wins the pixel outright,
@@ -102,6 +107,28 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     h = h ^ (h >> 15u); h = h * 0x2C1B3C6Du; h = h ^ (h >> 13u);
     let lie = f32(h) / 4294967295.0 * 3.1415927 + (seeded(seed, 32u) - 0.5) * 0.7;
     return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, seeded(seed, 33u)));
+}
+
+// The ground washed into whatever lies across each side. A field that stops
+// its own colour dead on its boundary shows a ruled line however softly the
+// plants either side interleave; over the last metre or so of it, the soil
+// takes on the colour of the ground it is running into.
+fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
+    var out = colour;
+    let past = vec4<f32>(
+        ground.extent.x - place.x, place.x - ground.extent.z,
+        ground.extent.y - place.y, place.y - ground.extent.w);
+    let sides = array<vec4<f32>, 4>(ground.west, ground.east, ground.south, ground.north);
+    for (var i = 0; i < 4; i = i + 1) {
+        let reach = ground.reach[i];
+        if (reach <= 0.0) {
+            continue;
+        }
+        // Ragged, not a clean ramp: a soil boundary is never ruled either.
+        let edge = past[i] / reach + 1.0 + (lattice(place, 1.7) - 0.5) * 0.55;
+        out = mix(out, sides[i].rgb, clamp(edge, 0.0, 1.0) * 0.85);
+    }
+    return out;
 }
 
 // Distance to the nearest clump, as a share of its reach along its own
@@ -378,7 +405,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     let pit = clamp(0.82 + here * 1.1, 0.7, 1.22);
 
-    pbr_input.material.base_color = vec4<f32>(colour * pit, 1.0);
+    pbr_input.material.base_color = vec4<f32>(washed(place, colour) * pit, 1.0);
     let glint = (ground_noise(place / (clod * 0.08)) - 0.5) * 0.18 * close;
     pbr_input.material.perceptual_roughness = clamp(mix(0.95, 0.78, rolled) + glint, 0.35, 1.0);
     // Left at the default, the sheen off the soil is worth more than the earth's
