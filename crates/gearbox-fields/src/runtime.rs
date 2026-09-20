@@ -565,6 +565,11 @@ pub fn stream_vegetation(
             continue;
         }
         let corner = Vec2::new(key.2 as f32, key.3 as f32) * size;
+        // Searching a way costs a loop for every blade in the chunk. Most
+        // chunks are nowhere near the road, and a chunk with no tread leaves
+        // `worn` on its first line, so tell those ones they are not worn at all.
+        let reached = field.way.points() < 2
+            || field.way.reaches(FieldBounds { min: corner, max: corner + size });
         // One mesh per layer, built once: chunks only place its instances.
         let (mesh, variants) = layer_meshes
             .entry((field.profile.name, key.1))
@@ -593,7 +598,7 @@ pub fn stream_vegetation(
                     fade_end: layer.fade_end,
                     inverse_square_thinning: layer.inverse_square_thinning,
                     follow_grass: layer.follow_grass,
-                    tread: field.tread,
+                    tread: if reached { field.tread } else { Vec4::ZERO },
                     soft_border: field.profile.soft_border,
                     way: field.way,
                     albedo: layer.albedo.map(|path| assets.load(path)),

@@ -100,6 +100,29 @@ mod tests {
         assert!(!shared.is_empty(), "the two fields must overlap on the road");
     }
 
+    // The chunk cull tells a chunk it is unworn when the way does not reach it.
+    // If that were ever stricter than the clip, wear would vanish from chunks
+    // that should have it and the road would break into dashes.
+    #[test]
+    fn a_way_reaches_exactly_where_it_clips() {
+        let road: Vec<Vec2> =
+            (0..6).map(|i| Vec2::new(i as f32 * 20.0, (i % 2) as f32 * 8.0)).collect();
+        let way = Way::bend(&road, 3.0);
+        for x in (-40..160).step_by(8) {
+            for z in (-40..60).step_by(8) {
+                let chunk = FieldBounds {
+                    min: Vec2::new(x as f32, z as f32),
+                    max: Vec2::new(x as f32 + 16.0, z as f32 + 16.0),
+                };
+                assert_eq!(
+                    way.reaches(chunk),
+                    Way::clipped(&road, 3.0, chunk).is_some(),
+                    "chunk at {x},{z}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_road_that_misses_a_field_clips_to_nothing() {
         let road = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0)];
@@ -219,6 +242,17 @@ impl Way {
             );
         }
         Some(Self { arc, ..Self::bend(kept, half_width) })
+    }
+
+    /// Whether this way comes near enough to `bounds` to wear any of it. The
+    /// shader's search costs a loop per blade and per pixel, so a chunk the
+    /// road never touches is told it has no wear at all and pays one compare.
+    pub fn reaches(&self, bounds: FieldBounds) -> bool {
+        let reach = Vec2::splat(self.half_width + 2.0);
+        let (min, max) = (bounds.min - reach, bounds.max + reach);
+        let count = self.count as usize;
+        (0..count.saturating_sub(1))
+            .any(|i| segment_meets(self.points[i], self.points[i + 1], min, max))
     }
 
     /// For a shader: the points two to a column, then how many, half the width,
