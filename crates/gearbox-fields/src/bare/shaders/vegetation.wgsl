@@ -198,8 +198,32 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         if (!is_stone) {
             size = mix(0.005, 0.05, pow(rand(id, 6u), 2.8)) * alive * (1.0 - flat * 0.8);
             squat = mix(0.3, 0.6, rand(id, 7u));
+        } else {
+            // Slabs as readily as blocks: one lump scaled the same every way is
+            // a round stone every time, however it is turned.
+            squat = mix(0.2, 0.8, rand(id, 7u));
         }
-        let local = vertex.position * vec3<f32>(size, size * squat, size);
+        var shape = vertex.position
+            * vec3<f32>(mix(0.55, 1.5, rand(id, 50u)), 1.0, mix(0.55, 1.5, rand(id, 51u)));
+        // Chipped, not turned: whatever stands past a cutting plane is pushed
+        // back onto it, and what is left is a flat face. Two or three of them
+        // make a stone that has been broken rather than rolled.
+        // Not all of them: a stone that has been in a river long enough is
+        // round again, and a ground of nothing but chips reads as rubble.
+        if (is_stone && rand(id, 49u) < 0.62) {
+            let cuts = 2u + u32(rand(id, 52u) * 1.99);
+            for (var cut = 0u; cut < cuts; cut = cut + 1u) {
+                let about = rand(id, 53u + cut) * 6.2831853;
+                let up = rand(id, 57u + cut) * 1.6 - 0.8;
+                let ring = sqrt(max(1.0 - up * up, 0.0));
+                let facet = vec3<f32>(cos(about) * ring, up, sin(about) * ring);
+                let over = dot(shape, facet) - mix(0.42, 0.85, rand(id, 61u + cut));
+                if (over > 0.0) {
+                    shape = shape - facet * over;
+                }
+            }
+        }
+        let local = shape * vec3<f32>(size, size * squat, size);
         let spun = turn * local.xz;
         // Well down into the soil: a stone sitting on top of the ground reads
         // as dropped there rather than turned up out of it.
@@ -332,7 +356,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         if (length(across) > 1e-12) {
             facet = normalize(across) * select(-1.0, 1.0, dot(across, rounded) > 0.0);
         }
-        pbr_input.world_normal = normalize(mix(rounded, facet, 0.6));
+        pbr_input.world_normal = normalize(mix(rounded, facet, 0.85));
         pbr_input.N = pbr_input.world_normal;
         // What of a stone is down in the soil sees little of the sky, which is
         // what stops it reading as a stone dropped on top of the ground.
