@@ -350,6 +350,35 @@ fn imported_kubota_explicit_sleep() {
 }
 
 #[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET; paired long-parked backend timing"]
+fn imported_kubota_parked_backend_timing() {
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    for run in 0..4 {
+        let molla = matches!(run, 1 | 2);
+        let mut fixture = Fixture::load_backend(Path::new(&asset), molla);
+        fixture.drive(0.0, 0.0);
+        for _ in 0..7200 { fixture.tick(); }
+        let mut samples = Vec::new();
+        for _ in 0..1200 {
+            samples.push(fixture.tick().as_secs_f64() * 1000.0);
+            if molla {
+                assert!(fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        let physics = fixture.app.world().resource::<PhysicsWorld>();
+        let bodies = physics.bodies();
+        let sleeping = bodies.iter().filter(|id| physics.body(**id).unwrap().is_sleeping()).count();
+        let speed = physics.body(fixture.chassis).unwrap().linvel().length();
+        assert!(speed < 0.05);
+        if molla { assert_eq!(sleeping, bodies.len()); }
+        eprintln!("parked backend timing run={run} backend={} sleeping={sleeping}/{} speed={speed:.9} median={:.6} p95={:.6} p99={:.6} max={:.6} ms/step; warmup=7200 samples=1200 hz=120 renderer=none controller=outside-timing",
+            physics.name(), bodies.len(), samples[600], samples[1140], samples[1188], samples[1199]);
+        if molla { fixture.verify(1.8, false); }
+    }
+}
+
+#[test]
 #[ignore = "requires GEARBOX_BENCH_ASSET; automatic sleep and pressure/drive wake"]
 fn imported_kubota_automatic_sleep() {
     let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
