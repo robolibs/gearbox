@@ -5549,6 +5549,7 @@ dependencies = [
  "molla-storage",
  "parry3d-f64",
  "rayon",
+ "tracing",
 ]
 
 [[package]]

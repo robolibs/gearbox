@@ -30,7 +30,7 @@ fn imported_kubota_meadow_trace() {
         .include_args(true)
         .build();
     let subscriber = tracing_subscriber::registry().with(layer.with_filter(
-        tracing_subscriber::EnvFilter::new("off,molla_solvers=debug"),
+        tracing_subscriber::EnvFilter::new("off,molla_solvers=debug,molla_geometry=debug"),
     ));
     let dispatch = tracing::Dispatch::new(subscriber);
     {
