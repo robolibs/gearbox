@@ -233,14 +233,18 @@ impl PhysicsBackend for MollaBackend {
                 apply(Err(error));
                 return;
             }
+            self.wheels.retain(|wheel, (joint, _)| {
+                let handle = self.bodies[wheel].handle;
+                let live = world.scene.body(handle).is_some()
+                    && self.joints.get(joint).is_some_and(|j| world.scene.joint(j.handle).is_some());
+                if !live { world.wheels.remove(handle); }
+                live
+            });
             self.bodies.remove(&id);
             self.colliders
                 .retain(|_, c| world.scene.collider(c.handle).is_some());
             self.joints
                 .retain(|_, j| world.scene.joint(j.handle).is_some());
-            self.wheels.retain(|body, (joint, _)| {
-                self.bodies.contains_key(body) && self.joints.contains_key(joint)
-            });
         }
     }
     fn body(&self, id: BodyId) -> Option<&dyn Body> {
@@ -403,12 +407,16 @@ impl PhysicsBackend for MollaBackend {
     }
     fn remove_joint(&mut self, id: JointId) {
         if let Some(joint) = self.joints.get(&id) {
-            if let Err(error) = self.shared.world().scene.remove_joint(joint.handle) {
+            let mut world = self.shared.world();
+            if let Err(error) = world.scene.remove_joint(joint.handle) {
                 apply(Err(error));
                 return;
             }
             self.joints.remove(&id);
-            self.wheels.retain(|_, (joint, _)| *joint != id);
+            self.wheels.retain(|body, (joint, _)| {
+                if *joint == id { world.wheels.remove(self.bodies[body].handle); }
+                *joint != id
+            });
         }
     }
     fn joint(&self, id: JointId) -> Option<&dyn Joint> {
