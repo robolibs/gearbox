@@ -15,3 +15,7 @@ pub mod screenshot;
 pub mod state;
 pub mod systems;
 pub mod tf_overlay;
+mod tyre_mesh;
+mod tyre_gpu;
+#[cfg(test)]
+mod tyre_gpu_test;

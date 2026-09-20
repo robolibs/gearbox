@@ -1,9 +1,8 @@
 use super::*;
-use rapier3d::prelude::GenericJoint;
 
 struct SteeredWheel {
-    pair: (RigidBodyHandle, RigidBodyHandle),
-    center: Vector,
+    pair: (BodyId, BodyId),
+    center: DVec3,
     sign: f64,
     lower: f64,
     upper: f64,
@@ -24,15 +23,9 @@ impl Turn {
     ) {
         for wheel in self.wheels.iter().filter(|wheel| !wheel.authored_drive) {
             let target = wheel.sign * angle(self.curvature, self.pivot_y, wheel.center);
-            if let Some(handle) = multibody_joint_handle(physics, wheel.pair)
-                && let Some((body, id)) = physics.multibody_joints.get_mut(handle)
-                && let Some(link) = body.link_mut(id)
-            {
-                configure_fallback_steer_motor(&mut link.joint.data, target, cap);
-            }
-            for (_, joint) in physics.impulse_joints.iter_mut() {
-                if rigid_body_pair_matches(wheel.pair, joint.body1, joint.body2) {
-                    configure_fallback_steer_motor(&mut joint.data, target, cap);
+            for id in physics.joints_between(wheel.pair.0, wheel.pair.1) {
+                if let Some(joint) = physics.joint_mut(id, false) {
+                    configure_fallback_steer_motor(joint, target, cap);
                 }
             }
         }
@@ -41,7 +34,7 @@ impl Turn {
     pub(super) fn trace(
         &self,
         physics: &crate::physics::PhysicsWorld,
-        chassis: RigidBodyHandle,
+        chassis: BodyId,
         machine: &str,
         drive: &[JointVelocityTarget],
     ) {
@@ -55,8 +48,8 @@ impl Turn {
                 } else {
                     wheel.pair.0
                 };
-                let a = physics.bodies.get(parent)?.rotation() * data.local_frame1.rotation;
-                let b = physics.bodies.get(child)?.rotation() * data.local_frame2.rotation;
+                let a = physics.body(parent)?.rotation() * data.frame1().rotation;
+                let b = physics.body(child)?.rotation() * data.frame2().rotation;
                 let actual = (a.inverse() * b).to_scaled_axis().x.to_degrees();
                 Some((
                     wheel.center.x,
@@ -70,14 +63,14 @@ impl Turn {
             .iter()
             .filter_map(|target| {
                 let wheel = wheel_body_of(physics, chassis, target.pair)?;
-                let body = physics.bodies.get(wheel)?;
+                let body = physics.body(wheel)?;
                 let parent = if wheel == target.pair.0 {
                     target.pair.1
                 } else {
                     target.pair.0
                 };
                 let (axis, _, radius) = body_tyre_geometry(physics, wheel)?;
-                let spin = (body.angvel() - physics.bodies.get(parent)?.angvel())
+                let spin = (body.angvel() - physics.body(parent)?.angvel())
                     .dot(body.rotation() * axis);
                 let center = wheel_local_center(physics, chassis, target.pair)?;
                 let support = traction::wheel_support(physics, chassis, wheel);
@@ -110,17 +103,17 @@ impl Turn {
             .collect()
     }
 
-    pub(super) fn speed(&self, linear: f64, center: Vector) -> f64 {
+    pub(super) fn speed(&self, linear: f64, center: DVec3) -> f64 {
         let (forward, lateral) = rolling_vector(self.curvature, self.pivot_y, center);
         linear * forward.hypot(lateral)
     }
 }
 
-fn rolling_vector(curvature: f64, pivot_y: f64, center: Vector) -> (f64, f64) {
+fn rolling_vector(curvature: f64, pivot_y: f64, center: DVec3) -> (f64, f64) {
     (1.0 - curvature * center.x, curvature * (pivot_y - center.y))
 }
 
-fn angle(curvature: f64, pivot_y: f64, center: Vector) -> f64 {
+fn angle(curvature: f64, pivot_y: f64, center: DVec3) -> f64 {
     let (forward, lateral) = rolling_vector(curvature, pivot_y, center);
     lateral.atan2(forward)
 }
@@ -147,20 +140,14 @@ fn limit_curvature(requested: f64, pivot_y: f64, wheels: &[SteeredWheel]) -> f64
     requested * low
 }
 
+/// The joint between a body pair and the body its first frame lives in.
 fn joint_data(
     physics: &crate::physics::PhysicsWorld,
-    pair: (RigidBodyHandle, RigidBodyHandle),
-) -> Option<(&GenericJoint, RigidBodyHandle)> {
-    if let Some(handle) = multibody_joint_handle(physics, pair)
-        && let Some((body, id)) = physics.multibody_joints.get(handle)
-        && let Some(link) = body.link(id)
-    {
-        return Some((&link.joint.data, pair.0));
-    }
-    physics.impulse_joints.iter().find_map(|(_, joint)| {
-        rigid_body_pair_matches(pair, joint.body1, joint.body2)
-            .then_some((&joint.data, joint.body1))
-    })
+    pair: (BodyId, BodyId),
+) -> Option<(&dyn Joint, BodyId)> {
+    let id = physics.joint_between(pair.0, pair.1)?;
+    let (parent, _) = physics.joint_bodies(id)?;
+    Some((physics.joint(id)?, parent))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -175,7 +162,7 @@ pub(super) fn solve(
     )>,
     parents: &Query<&ChildOf>,
     physics: &crate::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
+    chassis: BodyId,
     cmd: CmdVel,
     steering_input: Option<f32>,
 ) -> Option<Turn> {
@@ -189,7 +176,7 @@ pub(super) fn solve(
     ) {
         return None;
     }
-    let chassis_body = physics.bodies.get(chassis)?;
+    let chassis_body = physics.body(chassis)?;
     let inverse = chassis_body.rotation().inverse();
     let max_angle = (controller.max_steer_deg.unwrap_or(45.0) as f64)
         .abs()
@@ -216,17 +203,17 @@ pub(super) fn solve(
             continue;
         }
         let (data, parent) = joint_data(physics, pair)?;
-        let parent_body = physics.bodies.get(parent)?;
-        let axis = inverse * (parent_body.rotation() * (data.local_frame1.rotation * Vector::X));
+        let parent_body = physics.body(parent)?;
+        let axis = inverse * (parent_body.rotation() * (data.frame1().rotation * DVec3::X));
         if axis.z.abs() < 0.5 {
             return None;
         }
         let anchor =
-            parent_body.translation() + parent_body.rotation() * data.local_frame1.translation;
+            parent_body.translation() + parent_body.rotation() * data.frame1().translation;
         let center = inverse * (anchor - chassis_body.translation());
         let (lower, upper) = data
             .limits(JointAxis::AngX)
-            .map(|limits| (limits.min.max(-max_angle), limits.max.min(max_angle)))
+            .map(|[min, max]| (min.max(-max_angle), max.min(max_angle)))
             .unwrap_or((-max_angle, max_angle));
         if lower > 0.0 || upper < 0.0 {
             return None;
@@ -298,8 +285,8 @@ mod tests {
 
     fn wheel(x: f64, y: f64, limit: f64) -> SteeredWheel {
         SteeredWheel {
-            pair: (RigidBodyHandle::invalid(), RigidBodyHandle::invalid()),
-            center: Vector::new(x, y, 0.0),
+            pair: (BodyId(u64::MAX), BodyId(u64::MAX)),
+            center: DVec3::new(x, y, 0.0),
             sign: 1.0,
             lower: -limit.to_radians(),
             upper: limit.to_radians(),
@@ -336,12 +323,12 @@ mod tests {
         assert!(targets[2].position < 0.0);
         for y in [-2.5, -0.9, 2.36] {
             assert!(
-                turn.speed(2.0, Vector::new(-1.2, y, 0.0))
-                    > turn.speed(2.0, Vector::new(1.2, y, 0.0))
+                turn.speed(2.0, DVec3::new(-1.2, y, 0.0))
+                    > turn.speed(2.0, DVec3::new(1.2, y, 0.0))
             );
             assert_eq!(
-                turn.speed(-2.0, Vector::new(1.2, y, 0.0)),
-                -turn.speed(2.0, Vector::new(1.2, y, 0.0))
+                turn.speed(-2.0, DVec3::new(1.2, y, 0.0)),
+                -turn.speed(2.0, DVec3::new(1.2, y, 0.0))
             );
         }
     }

@@ -1,5 +1,7 @@
 //! Procedural terrain geometry, sampled heights, mesh LOD, and collision.
 
+mod friction;
+
 use std::sync::{Arc, RwLock};
 
 use bevy::asset::RenderAssetUsages;
@@ -7,8 +9,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use gearbox_fields::HeightGrid;
-use rapier3d::math::Vector as DVec3;
-use rapier3d::prelude::{ColliderBuilder, ColliderHandle};
+use crate::physics::backend::{ColliderDesc, ColliderId, DVec3, Shape};
 
 use crate::physics::PhysicsWorld;
 use crate::globe::Sites;
@@ -86,6 +87,12 @@ impl Plugin for TerrainPlugin {
             .add_systems(PostStartup, spawn_procedural_terrain)
             .add_systems(
                 Update,
+                friction::publish
+                    .after(gearbox_fields::CoverUpdates)
+                    .before(crate::physics::step_physics),
+            )
+            .add_systems(
+                Update,
                 (
                     retire_for_usd_terrain,
                     follow_view,
@@ -127,7 +134,7 @@ pub fn procedural_height_m(x: f32, z: f32) -> Option<f32> {
 pub struct ProceduralTerrain {
     pub(crate) site: usize,
     pub(crate) entity: Entity,
-    safety_floor: ColliderHandle,
+    safety_floor: ColliderId,
     pub(crate) grid: Arc<HeightGrid>,
     fine_cell: f32,
     tiles: HashMap<(i32, i32), (Entity, f32)>,
@@ -244,13 +251,20 @@ fn install_ground(
         bevy::light::NotShadowCaster,
     ));
     let center = DVec3::new(parts.center.x as f64, 0.0, parts.center.y as f64);
-    let safety_floor = physics.colliders.insert(
-        ColliderBuilder::cuboid(SAFETY_FLOOR_HALF_EXTENT_M, 0.10, SAFETY_FLOOR_HALF_EXTENT_M)
+    let safety_floor = physics
+        .insert_collider(
+            ColliderDesc::new(Shape::Cuboid {
+                half_extents: DVec3::new(
+                    SAFETY_FLOOR_HALF_EXTENT_M,
+                    0.10,
+                    SAFETY_FLOOR_HALF_EXTENT_M,
+                ),
+            })
             .translation(center + DVec3::new(0.0, SAFETY_FLOOR_Y_M, 0.0))
             .friction(1.2)
-            .restitution(0.0)
-            .build(),
-    );
+            .restitution(0.0),
+        )
+        .expect("a cuboid always builds");
     if let Ok(mut slot) = HEIGHT_GRID.write() {
         *slot = Some(grid.clone());
     }
@@ -271,7 +285,7 @@ fn install_ground(
 
 fn remove_ground(commands: &mut Commands, physics: &mut PhysicsWorld, terrain: &ProceduralTerrain) {
     commands.entity(terrain.entity).despawn();
-    physics.colliders.remove(terrain.safety_floor, &mut physics.islands, &mut physics.bodies, true);
+    physics.remove_collider(terrain.safety_floor, true);
 }
 
 fn spawn_procedural_terrain(
@@ -735,19 +749,29 @@ fn update_terrain_tiles(
     terrain.complete = !missing;
 }
 
-/// Rows run along Z and columns along X, centred on the origin like the
-/// grid; parry stores the matrix column-major.
-fn heightfield_collider(grid: &HeightGrid) -> ColliderBuilder {
-    let mut data = Vec::with_capacity(grid.rows * grid.cols);
-    for j in 0..grid.cols {
-        for i in 0..grid.rows {
-            data.push(grid.at(i, j) as f64);
+/// Rows run along Z and columns along X, centred on the origin like the grid.
+fn heightfield_collider(grid: &HeightGrid) -> ColliderDesc {
+    let mut heights = Vec::with_capacity(grid.rows * grid.cols);
+    for i in 0..grid.rows {
+        for j in 0..grid.cols {
+            heights.push(grid.at(i, j) as f64);
         }
     }
-    let heights = rapier3d::parry::utils::Array2::new(grid.rows, grid.cols, data);
     let size_x = ((grid.cols - 1) as f32 * grid.cell) as f64;
     let size_z = ((grid.rows - 1) as f32 * grid.cell) as f64;
-    ColliderBuilder::heightfield(heights, DVec3::new(size_x, 1.0, size_z))
+    ColliderDesc::new(Shape::Heightfield {
+        rows: grid.rows,
+        cols: grid.cols,
+        heights,
+        scale: DVec3::new(size_x, 1.0, size_z),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn benchmark_meadow_collider() -> ColliderDesc {
+    heightfield_collider(&HeightGrid::sample(SIZE_M, CELL_M, meadow_height))
+        .friction(1.4)
+        .restitution(0.0)
 }
 
 /// A USD terrain that reaches its collider takes over the ground.
@@ -771,7 +795,6 @@ fn retire_for_usd_terrain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapier3d::prelude::Ray;
 
     fn bowl(x: f32, z: f32) -> f32 {
         0.002 * (x * x - z * z) + 0.05 * x
@@ -814,7 +837,8 @@ mod tests {
     #[test]
     fn heightfield_collider_matches_height_grid() {
         let grid = HeightGrid::sample(64.0, 1.0, bowl);
-        let collider = heightfield_collider(&grid).build();
+        let mut physics = PhysicsWorld::default();
+        physics.insert_collider(heightfield_collider(&grid)).unwrap();
         for (x, z) in [
             (10.3, -20.7),
             (-25.5, 3.2),
@@ -823,13 +847,12 @@ mod tests {
             (-31.0, -12.4),
         ] {
             let expected = grid.height_at(x, z).unwrap();
-            let ray = Ray::new(
-                DVec3::new(x as f64, 100.0, z as f64),
-                DVec3::new(0.0, -1.0, 0.0),
-            );
-            let toi = collider
-                .shape()
-                .cast_local_ray(&ray, 1000.0, true)
+            let (_, toi) = physics
+                .cast_ray(
+                    DVec3::new(x as f64, 100.0, z as f64),
+                    DVec3::new(0.0, -1.0, 0.0),
+                    1000.0,
+                )
                 .expect("ray hits the heightfield");
             let hit = 100.0 - toi;
             assert!(

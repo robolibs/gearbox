@@ -32,6 +32,12 @@ enum Cmd {
     List,
     /// Everything a machine reports about itself
     Info { machine: Option<String> },
+    /// Save a paused standalone machine configuration, including applied/target tyre pressures
+    Save {
+        file: String,
+        #[arg(long)]
+        machine: Option<String>,
+    },
     /// Stream the machine's state
     State {
         machine: Option<String>,
@@ -124,6 +130,23 @@ enum Cmd {
         #[arg(long)]
         take: bool,
     },
+    /// Set gauge-bar tyre pressure atomically and wait for accepted target readback
+    TyrePressure {
+        bar: f64,
+        /// One-based axle id from machine state (inferred front to rear unless authored)
+        #[arg(long, conflicts_with = "wheel", value_parser = clap::value_parser!(u16).range(1..))]
+        axle: Option<u16>,
+        /// Link name; omit both selectors to change every tyre
+        #[arg(long)]
+        wheel: Option<String>,
+        #[arg(long)]
+        machine: Option<String>,
+        #[arg(long)]
+        take: bool,
+        /// Reuse this CLI identity's active drive session without claiming or releasing it
+        #[arg(long, conflicts_with = "take")]
+        reuse_session: bool,
+    },
     /// Attachments: what hangs on a machine, attach and detach slaves
     Tools {
         #[command(subcommand)]
@@ -171,6 +194,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     match args.cmd {
         Cmd::List => list(ctx),
         Cmd::Info { machine } => info(ctx, machine),
+        Cmd::Save { file, machine } => super::spawn::save_machine(ctx, &file, machine),
         Cmd::State {
             machine,
             watch,
@@ -213,6 +237,11 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             machine,
             take,
         } => set_value(ctx, machine, &link, &name, value, take),
+        Cmd::TyrePressure { bar, axle, wheel, machine, take, reuse_session } => {
+            let scope = axle.map(|a| format!("axle:{a}"))
+                .or_else(|| wheel.map(|w| format!("wheel:{w}"))).unwrap_or_else(|| "all".into());
+            set_tyre_pressure(ctx, machine, &scope, bar, take, reuse_session)
+        }
         Cmd::Tools { cmd } => tools(ctx, cmd),
     }
 }
@@ -1131,6 +1160,164 @@ fn session_for(ctx: &Ctx, mc: &MachineClient<'_>, machine_id: &str, take: bool) 
         ));
     }
     Ok(res.session)
+}
+
+enum PressureSession {
+    Claimed(u64),
+    Borrowed(u64),
+}
+
+#[cfg(test)]
+mod pressure_session_tests {
+    use super::*;
+    use clap::Parser;
+    use std::cell::RefCell;
+
+    fn held(holder: &str) -> gearbox_api::SessionInfo {
+        gearbox_api::SessionInfo {
+            session: 17, held: 1,
+            props: Props::from_pairs(&[("holder", holder)]).into_bytes(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pressure_session_reuse_flag_cannot_steal() {
+        assert!(crate::Cli::try_parse_from(["gearbox", "machine", "tyre-pressure", "1.8", "--reuse-session"]).is_ok());
+        assert!(crate::Cli::try_parse_from(["gearbox", "machine", "tyre-pressure", "1.8", "--reuse-session", "--take"]).is_err());
+    }
+
+    #[test]
+    fn borrowed_pressure_session_requires_active_matching_identity() {
+        assert!(PressureSession::borrowed(held("owner"), "owner").is_ok());
+        assert!(PressureSession::borrowed(held("owner"), "other").is_err());
+        assert!(PressureSession::borrowed(held(""), "").is_err());
+        let mut idle = held("owner");
+        idle.held = 0;
+        assert!(PressureSession::borrowed(idle, "owner").is_err());
+        let mut zero = held("owner");
+        zero.session = 0;
+        assert!(PressureSession::borrowed(zero, "owner").is_err());
+    }
+
+    #[test]
+    fn pressure_claim_rejections_do_not_produce_a_session() {
+        for code in [code::BUSY, code::REFUSED] {
+            assert!(PressureSession::claimed(ClaimResponse { code, session: 99, ..Default::default() }).is_err());
+        }
+        assert!(PressureSession::claimed(ClaimResponse::granted(0)).is_err());
+    }
+
+    #[test]
+    fn pressure_command_releases_only_claimed_sessions_even_on_error() {
+        for borrowed in [false, true] {
+            for outcome in 0..3 {
+                let events = RefCell::new(Vec::new());
+                let lease = if borrowed {
+                    PressureSession::borrowed(held("owner"), "owner").unwrap()
+                } else {
+                    PressureSession::claimed(ClaimResponse::granted(17)).unwrap()
+                };
+                let result = lease.command(|id| {
+                    events.borrow_mut().push(("send", id));
+                    match outcome {
+                        0 => Ok(gearbox_api::Status::ok()),
+                        1 => Ok(gearbox_api::Status::err(code::REFUSED, "expired session")),
+                        _ => Err(CliError::error("transport failure")),
+                    }
+                }, |id| events.borrow_mut().push(("release", id)));
+                let expected = if borrowed { vec![("send", 17)] } else { vec![("send", 17), ("release", 17)] };
+                assert_eq!(*events.borrow(), expected);
+                match outcome {
+                    0 => assert!(result.unwrap().is_ok()),
+                    1 => assert!(!result.unwrap().is_ok()),
+                    _ => assert!(result.is_err()),
+                }
+            }
+        }
+    }
+}
+
+impl PressureSession {
+    fn claimed(claim: ClaimResponse) -> Result<Self> {
+        if claim.code != code::OK {
+            return Err(CliError::new(
+                crate::error::exit_for_wire_code(claim.code),
+                Props::from_bytes(&claim.props).get("message")
+                    .unwrap_or_else(|| format!("pressure session claim refused: code {}", claim.code)),
+            ));
+        }
+        if claim.session == 0 {
+            return Err(CliError::error("pressure claim returned an invalid zero session"));
+        }
+        Ok(Self::Claimed(claim.session))
+    }
+
+    fn borrowed(info: gearbox_api::SessionInfo, requester: &str) -> Result<Self> {
+        if info.held == 0 || info.session == 0 {
+            return Err(CliError::busy("no active driving session to reuse"));
+        }
+        if requester.is_empty() || info.holder() != requester {
+            return Err(CliError::busy("active session belongs to another CLI identity; cannot reuse it"));
+        }
+        Ok(Self::Borrowed(info.session))
+    }
+
+    fn command(
+        self,
+        send: impl FnOnce(u64) -> Result<gearbox_api::Status>,
+        release: impl FnOnce(u64),
+    ) -> Result<gearbox_api::Status> {
+        let session = match self { Self::Claimed(id) | Self::Borrowed(id) => id };
+        let result = send(session);
+        if matches!(self, Self::Claimed(_)) {
+            release(session);
+        }
+        result
+    }
+}
+
+fn set_tyre_pressure(ctx: &Ctx, machine: Option<String>, scope: &str, bar: f64, take: bool, reuse_session: bool) -> Result<()> {
+    use gearbox_api::tyres::{from_props, targets};
+    if !bar.is_finite() || bar <= 0.0 {
+        return Err(CliError::usage("pressure must be finite positive gauge bar"));
+    }
+    let machine_id = ctx.machine_id(machine)?;
+    let client = ctx.client()?;
+    let mc = client.machine(&machine_id);
+    let mut sub = mc.state()?;
+    let state = next_sample::<MachineState>(&mut sub, ctx.timeout)?
+        .ok_or_else(|| CliError::timeout("no tyre telemetry before pressure edit"))?;
+    let tyres = from_props(&state.props()).map_err(CliError::usage)?;
+    let links = targets(&tyres, scope, bar).map_err(CliError::usage)?;
+    let session = if reuse_session {
+        PressureSession::borrowed(mc.session()?, &client.did())?
+    } else {
+        let claim = mc.claim(DEFAULT_HOLD_MS, take)?;
+        if claim.code == code::BUSY {
+            return Err(CliError::busy(format!("machine `{machine_id}` is held by {}; use --reuse-session for your active drive or --take to steal", claim.holder())));
+        }
+        PressureSession::claimed(claim)?
+    };
+    let response = session.command(|session| Ok(mc.command(&ControllerCommand {
+        session, value: bar, element: 0, _pad: 0,
+        props: Props::from_pairs(&[("tyre_pressure_scope", scope)]).into_bytes(),
+    })?), |session| { let _ = mc.release(session); });
+    check(response?, "set tyre pressure")?;
+    let deadline = Instant::now() + ctx.timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(CliError::timeout("pressure request queued but accepted targets were not confirmed")); }
+        let Some(state) = next_sample::<MachineState>(&mut sub, remaining)? else {
+            return Err(CliError::timeout("pressure request queued but accepted targets were not confirmed"));
+        };
+        let readings = from_props(&state.props()).map_err(CliError::error)?;
+        if links.iter().all(|link| readings.iter().any(|t| &t.link == link && (t.target - bar).abs() < 1e-6)) {
+            ctx.done(&machine_id, &format!("`{machine_id}` {scope}: accepted {bar} bar target on {} tyres (ramps while playing)", links.len()),
+                || json!({"machine_id": machine_id, "scope": scope, "target_bar": bar, "links": links, "accepted": true}));
+            return Ok(());
+        }
+    }
 }
 
 fn set_value(

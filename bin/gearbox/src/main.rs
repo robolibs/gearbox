@@ -37,7 +37,15 @@ use viewer::log::{LoaderLog, LoaderLogLayer};
 
 /// Trace, panics and backtraces are mirrored here so a crash that takes the
 /// window is still readable afterwards.
-const LOG_FILE: &str = "/tmp/gearbox-sim.log";
+fn log_file() -> &'static std::path::Path {
+    static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var_os("GEARBOX_LOG_FILE")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| "/tmp/gearbox-sim.log".into())
+    })
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -65,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log = LoaderLog::default();
     init_tracing(&log);
     install_panic_logger();
-    tracing::info!(target: "gearbox", "gearbox-sim starting — full log at {LOG_FILE}");
+    tracing::info!(target: "gearbox", "gearbox-sim starting — full log at {}", log_file().display());
     host::run(cli_paths, log)
 }
 
@@ -78,7 +86,7 @@ fn init_tracing(log: &LoaderLog) {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let _ = std::fs::write(LOG_FILE, "");
+    let _ = std::fs::write(log_file(), "");
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(
             "warn,gearbox=info,gearbox_api=info,usd_bevy=info,bevy_diagnostic=info,agentio=error",
@@ -88,7 +96,7 @@ fn init_tracing(log: &LoaderLog) {
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(LOG_FILE)
+            .open(log_file())
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap())
     };
     // A fresh layer per subscriber: its type depends on the layers under it.
@@ -140,7 +148,8 @@ where
     });
     // Rapier and parry trace every constraint; recording them costs more than solving.
     layer.with_filter(tracing_subscriber::EnvFilter::new(
-        "info,rapier3d_f64=warn,parry3d_f64=warn",
+        std::env::var("GEARBOX_TRACE_FILTER")
+            .unwrap_or_else(|_| "info,rapier3d_f64=warn,parry3d_f64=warn".into()),
     ))
 }
 
@@ -162,7 +171,7 @@ fn install_panic_logger() {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(LOG_FILE)
+            .open(log_file())
         {
             let _ = f.write_all(msg.as_bytes());
         }

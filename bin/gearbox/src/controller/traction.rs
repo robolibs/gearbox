@@ -1,47 +1,49 @@
 use crate::physics::PhysicsWorld;
-use rapier3d::prelude::{RigidBodyHandle, Vector};
+use crate::physics::backend::{BodyId, DVec3};
 
 pub(super) struct WheelSupport {
-    pub normal: Vector,
+    pub normal: DVec3,
     pub grip_force_n: f64,
 }
 
-/// Support normal and friction budget from the last solved wheel contacts.
+/// Support normal and friction budget from tyre output or solved wheel contacts.
 pub(super) fn wheel_support(
     physics: &PhysicsWorld,
-    chassis: RigidBodyHandle,
-    wheel: RigidBodyHandle,
+    chassis: BodyId,
+    wheel: BodyId,
 ) -> WheelSupport {
     let up = physics
-        .bodies
-        .get(chassis)
-        .map(|body| body.rotation() * Vector::Z)
-        .unwrap_or(Vector::Y);
-    let mut support = Vector::ZERO;
+        .body(chassis)
+        .map(|body| body.rotation() * DVec3::Z)
+        .unwrap_or(DVec3::Y);
+    let mut support = DVec3::ZERO;
     let mut grip_impulse = 0.0;
-    if let Some(body) = physics.bodies.get(wheel) {
-        for &collider in body.colliders() {
-            for pair in physics.narrow_phase.contact_pairs_with(collider) {
-                if !pair.has_any_active_contact() {
+    if let Some(output) = physics.wheel_output(wheel) {
+        return WheelSupport {
+            normal: if output.in_contact { output.normal } else { up },
+            grip_force_n: output.grip_force,
+        };
+    }
+    if let Some(body) = physics.body(wheel) {
+        for collider in body.colliders() {
+            for manifold in physics.contacts_with(collider) {
+                if !manifold.active {
                     continue;
                 }
-                for manifold in &pair.manifolds {
-                    let normal = manifold.data.normal
-                        * if pair.collider1 == collider {
-                            -1.0
-                        } else {
-                            1.0
-                        };
-                    if normal.dot(up) <= 0.1 {
-                        continue;
-                    }
-                    for contact in &manifold.data.solver_contacts {
-                        if let Some(point) = manifold.points.get(contact.contact_id[0] as usize) {
-                            let impulse = point.data.impulse.max(0.0);
-                            support += normal * impulse;
-                            grip_impulse += contact.friction.max(0.0) * impulse;
-                        }
-                    }
+                // Toward the wheel, whichever side of the pair it is on.
+                let normal = manifold.normal
+                    * if manifold.collider1 == collider {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                if normal.dot(up) <= 0.1 {
+                    continue;
+                }
+                for point in manifold.points.iter().filter(|p| p.solved) {
+                    let impulse = point.impulse.max(0.0);
+                    support += normal * impulse;
+                    grip_impulse += point.friction.max(0.0) * impulse;
                 }
             }
         }
@@ -52,6 +54,6 @@ pub(super) fn wheel_support(
         } else {
             up
         },
-        grip_force_n: grip_impulse / physics.integration_parameters.dt.max(1e-6),
+        grip_force_n: grip_impulse / physics.dt().max(1e-6),
     }
 }

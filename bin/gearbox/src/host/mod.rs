@@ -78,7 +78,7 @@ pub fn run(cli_paths: Vec<PathBuf>, log: LoaderLog) -> Result<(), Box<dyn std::e
         remembered.map_or((1400.0, 900.0), |g| (g.width, g.height))
     });
     let mut runner = mara::window::AppRunner::new()
-        .title("gearbox — robotics simulator")
+        .title(format!("gearbox — {}", std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into())))
         .size(width, height);
     if window_size().is_none()
         && let Some(g) = remembered
@@ -304,6 +304,7 @@ impl WindowApp for GearboxApp {
             palette.open = false;
         }
 
+        paint_instance_label(&egui, viewport, world);
         paint_tf_labels(&egui, viewport, world);
         gizmo.paint(&egui, viewport);
         machine_context.show(&egui, viewport.into(), world);
@@ -446,6 +447,18 @@ fn palette_action(id: &str, world: &mut World, outbox: &Outbox, shelf_state: &mu
         "clear_scene" => outbox.push(HostCommand::Clear),
         _ => {}
     }
+}
+
+fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) {
+    let rect: egui::Rect = viewport.into();
+    let name = std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into());
+    let backend = world.resource::<crate::physics::PhysicsWorld>().name();
+    let state = if world.resource::<gearbox_api::PhysicsActive>().0 { "PLAYING" } else { "PAUSED" };
+    let painter = egui.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("gearbox_instance_label")));
+    let galley = painter.layout_no_wrap(format!("{name}  |  {backend}  |  {state}"), egui::FontId::proportional(15.0), egui::Color32::WHITE);
+    let position = egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top() + 12.0);
+    painter.rect_filled(egui::Rect::from_min_size(position, galley.size()).expand(5.0), 4.0, egui::Color32::from_black_alpha(190));
+    painter.galley(position, galley, egui::Color32::WHITE);
 }
 
 /// TF link names over the viewport, where the Bevy side projected them.

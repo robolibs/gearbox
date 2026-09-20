@@ -507,7 +507,8 @@ fn stamp_wheel_contacts(
             // tyre lets the shader cut the true edge from the smooth offset
             // across the tyre instead, which no grid can step.
             let laid_width = half_width + 1.0;
-            let half_length = (field.footprint_length * 0.5 * tpm).max(0.5) + 1.0;
+            let footprint = contact.footprint_length(field.footprint_length);
+            let half_length = (footprint * 0.5 * tpm).max(0.5) + 1.0;
             let reach = laid_width.hypot(half_length);
             let z0 = ((centre.y - reach).ceil() as i32).clamp(0, height - 1);
             let z1 = ((centre.y + reach).floor() as i32).clamp(0, height - 1);

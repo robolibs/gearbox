@@ -10,10 +10,8 @@ use gearbox_api::{
     event_kind,
 };
 use peerbus::ReqReplyToken;
-use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
-use rapier3d::prelude::{
-    GenericJoint, GenericJointBuilder, ImpulseJointHandle, JointAxesMask, JointAxis,
-    MultibodyJointHandle, Pose, RigidBodyHandle, SpringCoefficients,
+use crate::physics::backend::{
+    BodyId, DQuat, DVec3, JointAxes, JointAxis, JointDesc, JointId, JointKind, Pose,
 };
 use usd_bevy::UsdPrimRef;
 
@@ -174,7 +172,7 @@ impl Scene<'_, '_> {
         machine: &MachineInstanceSpec,
         prim: &str,
         physics: &PhysicsWorld,
-    ) -> Option<RigidBodyHandle> {
+    ) -> Option<BodyId> {
         let entity = self.entity(machine, prim)?;
         physics.entity_to_body.get(&entity).copied()
     }
@@ -183,7 +181,7 @@ impl Scene<'_, '_> {
         &self,
         machine: &MachineInstanceSpec,
         physics: &PhysicsWorld,
-    ) -> Vec<RigidBodyHandle> {
+    ) -> Vec<BodyId> {
         machine
             .links
             .links
@@ -199,17 +197,17 @@ impl Scene<'_, '_> {
 /// is below the terrain.
 fn lift_tyres_out_of_terrain(
     physics: &mut PhysicsWorld,
-    bodies: &[RigidBodyHandle],
-    wheels: &[RigidBodyHandle],
+    bodies: &[BodyId],
+    wheels: &[BodyId],
     pivot: DVec3,
     axis: DVec3,
-) {
+) -> Result<(), String> {
     for _ in 0..3 {
         let deepest = wheels
             .iter()
             .filter_map(|w| {
                 let radius = crate::controller::body_max_collider_radius(physics, *w)?;
-                let p = physics.bodies.get(*w)?.position().translation;
+                let p = physics.body(*w)?.position().translation;
                 let ground = crate::globe::ground_height_at_physics(p.x, p.z);
                 let offset = p - pivot;
                 let reach = (offset - axis * offset.dot(axis)).length();
@@ -217,10 +215,10 @@ fn lift_tyres_out_of_terrain(
             })
             .max_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)));
         let Some((depth, reach, offset)) = deepest else {
-            return;
+            return Ok(());
         };
         if depth <= 0.005 {
-            return;
+            return Ok(());
         }
         let up = DQuat::from_axis_angle(axis, (depth / reach).atan());
         let turn = if (up * offset).y > offset.y {
@@ -228,17 +226,19 @@ fn lift_tyres_out_of_terrain(
         } else {
             up.inverse()
         };
-        for handle in bodies {
-            if let Some(body) = physics.bodies.get_mut(*handle) {
+        let poses: Vec<_> = bodies.iter().filter_map(|handle| {
+            physics.body(*handle).map(|body| {
                 let pose = body.position();
                 let moved = Pose {
                     translation: pivot + turn * (pose.translation - pivot),
                     rotation: turn * pose.rotation,
                 };
-                body.set_position(moved, true);
-            }
-        }
+                (*handle, moved)
+            })
+        }).collect();
+        physics.set_body_poses(&poses, true)?;
     }
+    Ok(())
 }
 
 /// The rigid-body link a (possibly body-less) link rides on.
@@ -315,29 +315,26 @@ fn pick_coupling<'a>(
     }
 }
 
-fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> GenericJoint {
-    let lin = JointAxesMask::LIN_X | JointAxesMask::LIN_Y | JointAxesMask::LIN_Z;
+fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> JointDesc {
+    let lin = JointAxes::LIN;
     let deg = |d: f64| d.to_radians();
     // Coupling frames are prim frames on bodies that keep the USD basis:
     // X right, Y back, Z up. So yaw is about Z, pitch about X, roll about Y.
-    let (mask, limits): (JointAxesMask, Vec<(JointAxis, f64)>) = match kind {
-        "three_point_mounted" | "chassis_mounted" | "loader_carriage" => (
-            lin | JointAxesMask::ANG_X | JointAxesMask::ANG_Y | JointAxesMask::ANG_Z,
-            vec![],
-        ),
+    let (mask, limits): (JointAxes, Vec<(JointAxis, f64)>) = match kind {
+        "three_point_mounted" | "chassis_mounted" | "loader_carriage" => (JointAxes::ALL, vec![]),
         // Pinned at the eye, pitch and yaw free, roll locked: the tractor
         // carries the trailer's nose.
-        "drawbar" => (lin | JointAxesMask::ANG_Y, vec![]),
+        "drawbar" => (lin.with(JointAxis::AngY), vec![]),
         "clevis" => (
-            lin | JointAxesMask::ANG_Y,
+            lin.with(JointAxis::AngY),
             vec![(JointAxis::AngX, deg(20.0))],
         ),
         "piton" | "fifth_wheel" => (
-            lin | JointAxesMask::ANG_Y,
+            lin.with(JointAxis::AngY),
             vec![(JointAxis::AngX, deg(15.0))],
         ),
         "pivot_wagon" | "three_point_semi_mounted" => {
-            (lin | JointAxesMask::ANG_X | JointAxesMask::ANG_Y, vec![])
+            (lin.with(JointAxis::AngX).with(JointAxis::AngY), vec![])
         }
         "hitch_hook" => (
             lin,
@@ -353,22 +350,20 @@ fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> GenericJoint {
         ),
         _ => (lin, vec![]),
     };
-    let mut b = GenericJointBuilder::new(mask)
-        .local_frame1(frame1)
-        .local_frame2(frame2)
-        .softness(SpringCoefficients::new(30.0, 1.0))
-        .contacts_enabled(false);
-    for (axis, limit) in limits {
-        b = b.limits(axis, [-limit, limit]);
-    }
-    b.build()
+    let mut desc = JointDesc::new(JointKind::Generic { locked: mask }, frame1, frame2);
+    desc.softness = Some((30.0, 1.0));
+    desc.limits = limits
+        .into_iter()
+        .map(|(axis, limit)| (axis, [-limit, limit]))
+        .collect();
+    desc
 }
 
 /// Suppress only the connected machines' body pairs; keep authored filters unchanged.
 fn set_cross_collisions(
     physics: &mut PhysicsWorld,
-    a: &[RigidBodyHandle],
-    b: &[RigidBodyHandle],
+    a: &[BodyId],
+    b: &[BodyId],
     enabled: bool,
 ) {
     for &a in a {
@@ -384,37 +379,22 @@ fn set_cross_collisions(
     }
 }
 
-/// The physical hitch. An impulse joint: merging the two Featherstone trees
-/// with a multibody joint blows up (NaN poses) and rapier only implements a
-/// few joint shapes there anyway.
-#[derive(Debug, Clone, Copy)]
-pub enum HitchJoint {
-    Multibody(MultibodyJointHandle),
-    Impulse(ImpulseJointHandle),
-}
+/// The physical hitch. A constraint joint (`reduced` stays off): merging the
+/// two machines' reduced-coordinate trees blows up (NaN poses), and few joint
+/// shapes exist there anyway.
+pub type HitchJoint = JointId;
 
 fn insert_hitch_joint(
     physics: &mut PhysicsWorld,
-    hitch_body: RigidBodyHandle,
-    coupler_body: RigidBodyHandle,
-    joint: GenericJoint,
+    hitch_body: BodyId,
+    coupler_body: BodyId,
+    joint: JointDesc,
 ) -> HitchJoint {
-    HitchJoint::Impulse(
-        physics
-            .impulse_joints
-            .insert(hitch_body, coupler_body, joint, true),
-    )
+    physics.insert_joint(hitch_body, coupler_body, joint)
 }
 
 fn remove_hitch_joint(physics: &mut PhysicsWorld, joint: HitchJoint) {
-    match joint {
-        HitchJoint::Multibody(handle) => {
-            physics.multibody_joints.remove(handle, true);
-        }
-        HitchJoint::Impulse(handle) => {
-            physics.impulse_joints.remove(handle, true);
-        }
-    }
+    physics.remove_joint(joint);
 }
 
 /// The prim a slave's coupler names as its parking stand.
@@ -449,13 +429,9 @@ fn set_stand(
         return;
     };
     if let Some(body) = scene.body(slave, stand, physics) {
-        let colliders: Vec<_> = physics
-            .bodies
-            .get(body)
-            .map(|b| b.colliders().to_vec())
-            .unwrap_or_default();
+        let colliders = physics.body(body).map(|b| b.colliders()).unwrap_or_default();
         for handle in colliders {
-            if let Some(c) = physics.colliders.get_mut(handle) {
+            if let Some(c) = physics.collider_mut(handle) {
                 c.set_enabled(!hitched);
             }
         }
@@ -611,16 +587,14 @@ fn try_attach(
         .frame(slave, &coupler_link.prim_path)
         .ok_or_else(|| refused("coupler prim has no transform yet"))?;
     let hitch_body_world = Frame::from_pose(
-        physics
-            .bodies
-            .get(hitch_body)
+        &physics
+            .body(hitch_body)
             .ok_or_else(|| refused("hitch body vanished"))?
             .position(),
     );
     let coupler_body_world = Frame::from_pose(
-        physics
-            .bodies
-            .get(coupler_body)
+        &physics
+            .body(coupler_body)
             .ok_or_else(|| refused("coupler body vanished"))?
             .position(),
     );
@@ -662,16 +636,15 @@ fn try_attach(
     let slave_bodies = scene.bodies(slave, physics);
     if req.teleport != 0 {
         let delta = target.then(&coupler_world.inverse());
-        for handle in &slave_bodies {
-            if let Some(body) = physics.bodies.get_mut(*handle) {
-                let cur = Frame::from_pose(body.position());
+        let poses: Vec<_> = slave_bodies.iter().filter_map(|handle| {
+            physics.body(*handle).map(|body| {
+                let cur = Frame::from_pose(&body.position());
                 let moved = delta.then(&cur);
-                body.set_position(moved.pose(), true);
-                body.set_linvel(DVec3::ZERO, true);
-                body.set_angvel(DVec3::ZERO, true);
-            }
-        }
-        let wheels: Vec<RigidBodyHandle> = slave
+                (*handle, moved.pose())
+            })
+        }).collect();
+        physics.set_body_poses(&poses, true).map_err(refused)?;
+        let wheels: Vec<BodyId> = slave
             .links
             .links
             .iter()
@@ -685,7 +658,7 @@ fn try_attach(
             &wheels,
             target.translation,
             target.rotation * DVec3::X,
-        );
+        ).map_err(refused)?;
     } else {
         let gap = (coupler_world.translation - target.translation).length();
         let turn = coupler_world.rotation.angle_between(target.rotation);
@@ -699,19 +672,21 @@ fn try_attach(
 
     let slave_mass_kg: f64 = slave_bodies
         .iter()
-        .filter_map(|h| physics.bodies.get(*h))
+        .filter_map(|h| physics.body(*h))
         .map(|b| b.mass())
         .sum();
-    let current_hitch = Frame::from_pose(physics.bodies[hitch_body].position()).then(&frame1);
-    let initial_frame2 = Frame::from_pose(physics.bodies[coupler_body].position())
-        .inverse()
-        .then(&current_hitch);
+    let (Some(hitch_pose), Some(coupler_pose)) = (
+        physics.body(hitch_body).map(|b| b.position()),
+        physics.body(coupler_body).map(|b| b.position()),
+    ) else {
+        return Err(refused("the hitch or the coupler has no physics body".to_string()));
+    };
+    let current_hitch = Frame::from_pose(&hitch_pose).then(&frame1);
+    let initial_frame2 = Frame::from_pose(&coupler_pose).inverse().then(&current_hitch);
     let mut joint = joint_for(&hitch.kind, frame1.pose(), initial_frame2.pose());
-    joint.softness = SpringCoefficients::new(8.0, 1.0);
+    joint.softness = Some((8.0, 1.0));
     let handle = insert_hitch_joint(physics, hitch_body, coupler_body, joint);
-    if let HitchJoint::Impulse(handle) = handle {
-        physics.capture_hitch(handle, frame2.pose());
-    }
+    physics.capture_hitch(handle, frame2.pose());
     let master_bodies = scene.bodies(master, physics);
     set_cross_collisions(physics, &master_bodies, &slave_bodies, false);
 
@@ -869,9 +844,10 @@ pub(crate) fn serve_attachments(
     }
     if attachments.0.len() != before {
         let physics = physics.as_mut();
+        let backend = &physics.backend;
         physics
             .attachment_filtered_pairs
-            .retain(|(a, b)| physics.bodies.contains(*a) && physics.bodies.contains(*b));
+            .retain(|(a, b)| backend.contains_body(*a) && backend.contains_body(*b));
     }
     let mut changed = attachments.0.len() != before;
 
@@ -902,7 +878,7 @@ pub(crate) fn serve_attachments(
                 .body
                 .as_deref()
                 .and_then(|p| scene.body(machine, p, &physics))
-                .and_then(|h| physics.bodies.get(h))
+                .and_then(|h| physics.body(h))
             else {
                 return false;
             };

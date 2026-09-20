@@ -89,6 +89,15 @@ make.recipe{
   end,
 }
 
+make.recipe{
+  name = "build-release-profile",
+  desc = "release binary with per-system Chrome tracing",
+  run = function()
+    sh.cargo("build", "--release", "-p", "gearbox-sim", "--bin", "gearbox",
+                       "--features", "gearbox-sim/profile")
+  end,
+}
+
 make.recipe{ name = "compile", desc = "clean, then build", deps = { "clean", "build" } }
 make.alias("c", "compile")
 

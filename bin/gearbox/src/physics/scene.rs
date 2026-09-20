@@ -15,15 +15,15 @@ pub fn sync_gravity_from_usd_scene(
     for scene in &scenes {
         if *applied {
             warn!(
-                "RapierAdapter: multiple UsdPhysicsScene prims; ignoring extras (gravity already applied)"
+                "gearbox-physics: multiple UsdPhysicsScene prims; ignoring extras (gravity already applied)"
             );
             continue;
         }
         let g = scene.gravity_direction.normalize_or_zero() * scene.gravity_magnitude;
-        world.gravity = DVec3::new(g.x as f64, g.y as f64, g.z as f64);
+        world.set_gravity(DVec3::new(g.x as f64, g.y as f64, g.z as f64));
         info!(
-            "RapierAdapter: gravity set to {:?} m/s² (from UsdPhysicsScene)",
-            world.gravity
+            "gearbox-physics: gravity set to {:?} m/s² (from UsdPhysicsScene)",
+            world.gravity()
         );
         *applied = true;
     }

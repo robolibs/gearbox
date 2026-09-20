@@ -16,9 +16,8 @@ use mara::ui::modules::bevy::{
     BevyViewportInput, BevyViewportRenderTarget, BevyViewportSet, ChaseCamera, GroundGrid,
     apply_rig,
 };
-use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
-use rapier3d::prelude::{
-    ColliderBuilder, ColliderHandle, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodyType,
+use crate::physics::backend::{
+    BodyDesc, BodyId, BodyKind, ColliderDesc, ColliderId, DQuat, DVec3, Pose, Shape,
 };
 
 /// Earth-radius planet sphere. The simulator was tuned for this
@@ -225,7 +224,7 @@ struct PendingUsdTerrainActivation {
 
 #[derive(Component, Debug, Clone, Copy)]
 struct StaticUsdPhysicsProp {
-    body: RigidBodyHandle,
+    body: BodyId,
     visual_top_offset_y: f32,
     frames_alive: u32,
 }
@@ -233,18 +232,18 @@ struct StaticUsdPhysicsProp {
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct FlatGround {
     entity: Entity,
-    collider: ColliderHandle,
+    collider: ColliderId,
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub(crate) struct TerrainCollision {
-    terrain: ColliderHandle,
-    safety_floor: ColliderHandle,
+    terrain: ColliderId,
+    safety_floor: ColliderId,
 }
 
 #[derive(Resource, Default)]
 struct StaticUsdPropBodies {
-    handles: HashMap<Entity, (RigidBodyHandle, ColliderHandle)>,
+    handles: HashMap<Entity, (BodyId, ColliderId)>,
 }
 
 /// Prop entities whose settled pose has already been published. Keyed by
@@ -649,14 +648,18 @@ fn spawn_flat_ground(
         ))
         .id();
 
-    let collider =
-        ColliderBuilder::cuboid(FLAT_GROUND_HALF_EXTENT_M, 0.02, FLAT_GROUND_HALF_EXTENT_M)
-            .translation(DVec3::new(0.0, -0.02, 0.0))
-            .friction(ground_friction(1.0))
-            .restitution(0.0)
-            .build();
-    let collider = physics.colliders.insert(collider);
+    let collider = physics
+        .insert_collider(
+            ground_slab(0.02)
+                .translation(DVec3::new(0.0, -0.02, 0.0))
+                .friction(ground_friction(1.0))
+                .restitution(0.0),
+        )
+        .expect("a cuboid always builds");
     commands.insert_resource(FlatGround { entity, collider });
+    if let Err(error) = physics.register_wheel_ground(collider, None) {
+        warn!("world: tyre ground registration failed: {error}");
+    }
 }
 
 fn mark_new_usd_terrain_roots(
@@ -772,32 +775,34 @@ fn attach_gearbox_terrain_trimesh(
         });
     set_usd_terrain_height_profile(min_y, max_y);
     set_usd_terrain_height_mesh(&vertices, &indices);
-    let Some(terrain) = ColliderBuilder::trimesh(vertices, indices).ok() else {
-        warn!("world: failed to build exact Rapier trimesh collider for USD terrain");
+    let Some(terrain) = physics.insert_collider(
+        ColliderDesc::new(Shape::TriMesh { vertices, indices })
+            .friction(ground_friction(1.4))
+            .restitution(0.0),
+    ) else {
+        warn!("world: failed to build exact trimesh collider for USD terrain");
         return None;
     };
-    let terrain = physics.colliders.insert(
-        terrain
-            .friction(ground_friction(1.4))
-            .restitution(0.0)
-            .build(),
-    );
     physics.entity_to_collider.insert(root, terrain);
+    if let Err(error) = physics.register_wheel_ground(terrain, None) {
+        warn!("world: tyre terrain registration failed: {error}");
+    }
 
     // Belt-and-braces catch floor below the lowest authored terrain. It
     // should never be contacted in normal use, but it prevents assets from
     // disappearing forever if a future USD terrain asset has a hole or loads
     // slower than its dynamic bodies.
     let safety_y = TERRAIN_MIN_HEIGHT_M as f64 - 1.0;
-    let safety_floor =
-        ColliderBuilder::cuboid(FLAT_GROUND_HALF_EXTENT_M, 0.10, FLAT_GROUND_HALF_EXTENT_M)
-            .translation(DVec3::new(0.0, safety_y, 0.0))
-            .friction(1.2)
-            .restitution(0.0)
-            .build();
-    let safety_floor = physics.colliders.insert(safety_floor);
+    let safety_floor = physics
+        .insert_collider(
+            ground_slab(0.10)
+                .translation(DVec3::new(0.0, safety_y, 0.0))
+                .friction(1.2)
+                .restitution(0.0),
+        )
+        .expect("a cuboid always builds");
 
-    info!("world: attached exact visible-mesh Rapier trimesh collider for USD terrain");
+    info!("world: attached exact visible-mesh trimesh collider for USD terrain");
     Some(TerrainCollision {
         terrain,
         safety_floor,
@@ -898,12 +903,16 @@ fn remove_terrain_descendant_colliders(
                 .map(|handle| (entity, handle))
         })
         .collect::<Vec<_>>();
-    let colliders = &mut physics.colliders;
-    let islands = &mut physics.islands;
-    let bodies = &mut physics.bodies;
     for (_entity, handle) in stale {
-        colliders.remove(handle, islands, bodies, true);
+        physics.remove_collider(handle, true);
     }
+}
+
+/// The flat ground and the safety floors: one wide slab, `half_height` thick.
+fn ground_slab(half_height: f64) -> ColliderDesc {
+    ColliderDesc::new(Shape::Cuboid {
+        half_extents: DVec3::new(FLAT_GROUND_HALF_EXTENT_M, half_height, FLAT_GROUND_HALF_EXTENT_M),
+    })
 }
 
 pub(crate) fn remove_flat_ground(
@@ -912,10 +921,7 @@ pub(crate) fn remove_flat_ground(
     flat: FlatGround,
 ) {
     commands.entity(flat.entity).despawn();
-    let colliders = &mut physics.colliders;
-    let islands = &mut physics.islands;
-    let bodies = &mut physics.bodies;
-    colliders.remove(flat.collider, islands, bodies, true);
+    physics.remove_collider(flat.collider, true);
 }
 
 fn snap_new_usd_roots_to_terrain(
@@ -1097,54 +1103,43 @@ fn attach_static_usd_prop_body(
     root_translation_before_adjustment: Vec3,
     extent: &WorldExtent,
     physics: &mut PhysicsWorld,
-) -> (RigidBodyHandle, ColliderHandle) {
+) -> (BodyId, ColliderId) {
     let center = (extent.min + extent.max) * 0.5;
     let root_pos = root_transform.translation;
     let local_center =
         root_transform.rotation.inverse() * (center - root_translation_before_adjustment);
     let size = extent.max - extent.min;
     let along_x = size.x >= size.z;
-    let body = RigidBodyBuilder::dynamic()
-        .pose(Pose {
-            translation: DVec3::new(root_pos.x as f64, root_pos.y as f64, root_pos.z as f64),
-            rotation: DQuat::from_xyzw(
-                root_transform.rotation.x as f64,
-                root_transform.rotation.y as f64,
-                root_transform.rotation.z as f64,
-                root_transform.rotation.w as f64,
-            ),
-        })
-        .linvel(DVec3::ZERO)
-        .angvel(DVec3::ZERO)
-        .linear_damping(4.0)
-        .angular_damping(8.0)
-        .can_sleep(true)
-        .build();
-    let body_handle = physics.bodies.insert(body);
-    let mut collider = if along_x {
-        ColliderBuilder::capsule_x(
-            extent.collider_half_length as f64,
-            extent.collider_radius as f64,
-        )
-    } else {
-        ColliderBuilder::capsule_z(
-            extent.collider_half_length as f64,
-            extent.collider_radius as f64,
-        )
-    };
-    collider = collider
-        .translation(DVec3::new(
-            local_center.x as f64,
-            local_center.y as f64,
-            local_center.z as f64,
-        ))
-        .density(80.0)
-        .friction(1.2)
-        .restitution(0.05);
-    let collider_handle =
-        physics
-            .colliders
-            .insert_with_parent(collider.build(), body_handle, &mut physics.bodies);
+    let mut body = BodyDesc::dynamic().pose(Pose {
+        translation: DVec3::new(root_pos.x as f64, root_pos.y as f64, root_pos.z as f64),
+        rotation: DQuat::from_xyzw(
+            root_transform.rotation.x as f64,
+            root_transform.rotation.y as f64,
+            root_transform.rotation.z as f64,
+            root_transform.rotation.w as f64,
+        ),
+    });
+    body.linear_damping = 4.0;
+    body.angular_damping = 8.0;
+    let body_handle = physics.insert_body(body);
+    let half = if along_x { DVec3::X } else { DVec3::Z } * extent.collider_half_length as f64;
+    let collider = ColliderDesc::new(Shape::Capsule {
+        a: -half,
+        b: half,
+        radius: extent.collider_radius as f64,
+    })
+    .translation(DVec3::new(
+        local_center.x as f64,
+        local_center.y as f64,
+        local_center.z as f64,
+    ))
+    .parent(body_handle)
+    .density(80.0)
+    .friction(1.2)
+    .restitution(0.05);
+    let collider_handle = physics
+        .insert_collider(collider)
+        .expect("a capsule always builds");
     physics.entity_to_body.insert(root, body_handle);
     physics.entity_to_collider.insert(root, collider_handle);
     (body_handle, collider_handle)
@@ -1182,8 +1177,7 @@ fn publish_loaded_usd_poses(
         // flips a settled body to `Fixed`, so a non-dynamic body means the
         // pose reported here is the final resting pose.
         let settled = physics
-            .bodies
-            .get(prop.body)
+            .body(prop.body)
             .is_some_and(|body| !body.is_dynamic());
         if !settled {
             continue;
@@ -1221,26 +1215,22 @@ fn harvest_bales_on_machine_contact(
             continue;
         };
         let hit_non_prop_body = physics
-            .narrow_phase
-            .contact_pairs_with(collider)
-            .filter(|pair| pair.has_any_active_contact())
-            .any(|pair| {
-                let other_collider = if pair.collider1 == collider {
-                    pair.collider2
+            .contacts_with(collider)
+            .iter()
+            .filter(|manifold| manifold.active)
+            .any(|manifold| {
+                let other_collider = if manifold.collider1 == collider {
+                    manifold.collider2
                 } else {
-                    pair.collider1
+                    manifold.collider1
                 };
                 physics
-                    .colliders
-                    .get(other_collider)
+                    .collider(other_collider)
                     .and_then(|collider| collider.parent())
                     .is_some_and(|body| {
                         body != prop.body
                             && !prop_body_handles.contains(&body)
-                            && physics
-                                .bodies
-                                .get(body)
-                                .is_some_and(|body| body.is_dynamic())
+                            && physics.body(body).is_some_and(|body| body.is_dynamic())
                     })
             });
         if hit_non_prop_body {
@@ -1280,7 +1270,7 @@ fn freeze_settled_static_usd_prop_bodies(
 ) {
     for (_entity, mut prop) in props.iter_mut() {
         prop.frames_alive = prop.frames_alive.saturating_add(1);
-        let Some(body) = physics.bodies.get_mut(prop.body) else {
+        let Some(body) = physics.body_mut(prop.body) else {
             continue;
         };
         if !body.is_dynamic() {
@@ -1298,7 +1288,7 @@ fn freeze_settled_static_usd_prop_bodies(
         if settled || timed_out {
             body.set_linvel(DVec3::ZERO, true);
             body.set_angvel(DVec3::ZERO, true);
-            body.set_body_type(RigidBodyType::Fixed, true);
+            body.set_kind(BodyKind::Fixed, true);
         }
     }
 }
@@ -1338,12 +1328,8 @@ fn cleanup_terrain_collision_without_usd_terrain(
     physics
         .entity_to_collider
         .retain(|_, handle| *handle != terrain_collision.terrain);
-    let physics = physics.as_mut();
-    let colliders = &mut physics.colliders;
-    let islands = &mut physics.islands;
-    let bodies = &mut physics.bodies;
-    colliders.remove(terrain_collision.terrain, islands, bodies, true);
-    colliders.remove(terrain_collision.safety_floor, islands, bodies, true);
+    physics.remove_collider(terrain_collision.terrain, true);
+    physics.remove_collider(terrain_collision.safety_floor, true);
     commands.remove_resource::<TerrainCollision>();
     USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
     clear_usd_terrain_height_profile();
@@ -1358,14 +1344,7 @@ fn remove_static_prop_body(
     if let Some((body, _collider)) = prop_bodies.handles.remove(&entity) {
         physics.entity_to_body.remove(&entity);
         physics.entity_to_collider.remove(&entity);
-        physics.bodies.remove(
-            body,
-            &mut physics.islands,
-            &mut physics.colliders,
-            &mut physics.impulse_joints,
-            &mut physics.multibody_joints,
-            true,
-        );
+        physics.remove_body(body);
     }
 }
 

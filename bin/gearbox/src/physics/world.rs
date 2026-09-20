@@ -1,41 +1,36 @@
-//! `PhysicsWorld` — the single resource that owns every Rapier set
-//! and the integration pipeline. Bevy talks to Rapier exclusively
-//! through this type; the rest of the adapter just populates it.
+//! `PhysicsWorld` — the one resource that owns the simulation. It holds a
+//! [`PhysicsBackend`] behind a box and the bookkeeping that is gearbox's
+//! own whatever engine runs: which entity is which body, which body pairs
+//! must not touch, the fixed-step clock, hitch captures.
 //!
-//! **f64 throughout.** Rapier's `Real` is `f64` because we depend on
-//! `rapier3d-f64`. Conversion happens at the Bevy boundary
+//! It derefs to the backend, so `physics.body(id)` reads straight through.
+//! **f64 throughout;** conversion happens at the Bevy boundary
 //! (`Transform`/`Vec3`/`Quat` are `f32`).
 
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 
 use bevy::prelude::*;
-use rapier3d::prelude::*;
 
-/// All Rapier state for the loaded USD scene. Exactly one of these
-/// in the world.
+use super::backend::{BodyId, ColliderId, JointId, PhysicsBackend, Pose, SolverSettings};
+use super::molla::MollaBackend;
+use super::rapier::RapierBackend;
+
+/// All physics state for the loaded scene. Exactly one of these in the world.
 #[derive(Resource)]
 pub struct PhysicsWorld {
-    pub gravity: Vector,
-    pub integration_parameters: IntegrationParameters,
-    pub physics_pipeline: PhysicsPipeline,
-    pub islands: IslandManager,
-    pub broad_phase: BroadPhaseBvh,
-    pub narrow_phase: NarrowPhase,
-    pub bodies: RigidBodySet,
-    pub colliders: ColliderSet,
-    pub impulse_joints: ImpulseJointSet,
-    pub multibody_joints: MultibodyJointSet,
-    pub ccd_solver: CCDSolver,
-    /// Bevy entity → Rapier rigid-body handle. Lets writeback look up
-    /// which body to copy into the entity's Transform each tick.
-    pub entity_to_body: HashMap<Entity, RigidBodyHandle>,
-    /// Bevy entity → Rapier collider handle.
-    pub entity_to_collider: HashMap<Entity, ColliderHandle>,
+    pub backend: Box<dyn PhysicsBackend>,
+    /// Bevy entity → body. Lets writeback look up which body to copy into
+    /// the entity's Transform each tick.
+    pub entity_to_body: HashMap<Entity, BodyId>,
+    pub(super) published_transforms: HashMap<Entity, super::writeback::PublishedTransform>,
+    /// Bevy entity → collider.
+    pub entity_to_collider: HashMap<Entity, ColliderId>,
     /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
     /// stored in both orders.
-    pub filtered_pairs: HashSet<(RigidBodyHandle, RigidBodyHandle)>,
-    pub attachment_filtered_pairs: HashSet<(RigidBodyHandle, RigidBodyHandle)>,
-    hitch_captures: HashMap<ImpulseJointHandle, HitchCapture>,
+    pub filtered_pairs: HashSet<(BodyId, BodyId)>,
+    pub attachment_filtered_pairs: HashSet<(BodyId, BodyId)>,
+    hitch_captures: HashMap<JointId, HitchCapture>,
     /// Entities whose bodies the last step disabled for non-finite state.
     pub quarantined: Vec<Entity>,
     /// Fixed physics rate; the frame's real time is spent in steps of it.
@@ -55,31 +50,62 @@ const MAX_STEPS_PER_FRAME: u32 = 12;
 
 impl Default for PhysicsWorld {
     fn default() -> Self {
-        let mut integration_parameters = IntegrationParameters::default();
-        // Soft `ImpulseJoint` constraints converge harder per tick;
-        // matters for vehicles whose front-axle joints fall back to
-        // impulse when the multibody solver can't take all of them.
-        integration_parameters.num_solver_iterations = 16;
-        integration_parameters.num_internal_pgs_iterations = 4;
+        Self::with_backend(backend_by_name(std::env::var("GEARBOX_PHYSICS").ok().as_deref()))
+    }
+}
+
+/// The engine `GEARBOX_PHYSICS` names; a second backend gets an arm here.
+fn backend_by_name(name: Option<&str>) -> Box<dyn PhysicsBackend> {
+    match name {
+        None | Some("rapier") => Box::new(RapierBackend::default()),
+        Some("molla") => Box::new(MollaBackend::default()),
+        Some(other) => {
+            warn!("gearbox-physics: no backend `{other}`; running on rapier");
+            Box::new(RapierBackend::default())
+        }
+    }
+}
+
+#[test]
+fn named_backends_select_the_requested_engine() {
+    assert_eq!(backend_by_name(Some("molla")).name(), "molla");
+    assert_eq!(backend_by_name(Some("rapier")).name(), "rapier");
+}
+
+impl Deref for PhysicsWorld {
+    type Target = dyn PhysicsBackend;
+    fn deref(&self) -> &Self::Target {
+        &*self.backend
+    }
+}
+
+impl DerefMut for PhysicsWorld {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.backend
+    }
+}
+
+impl PhysicsWorld {
+    /// Run gearbox on `backend`. This is the seam a second engine plugs into.
+    pub fn with_backend(mut backend: Box<dyn PhysicsBackend>) -> Self {
         let step_hz = std::env::var("GEARBOX_PHYSICS_HZ")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|hz| *hz >= 30.0)
             .unwrap_or(DEFAULT_STEP_HZ);
-        integration_parameters.dt = 1.0 / step_hz;
+        // Soft constraint joints converge harder per tick; matters for
+        // vehicles whose front-axle joints are not in reduced coordinates.
+        backend.set_settings(SolverSettings {
+            dt: 1.0 / step_hz,
+            solver_iterations: 16,
+            internal_iterations: 4,
+        });
+        backend.set_gravity(glam::DVec3::new(0.0, -9.81, 0.0));
+        info!("gearbox-physics: backend `{}` at {step_hz} Hz", backend.name());
         Self {
-            gravity: Vector::new(0.0, -9.81, 0.0),
-            integration_parameters,
-            physics_pipeline: PhysicsPipeline::new(),
-            islands: IslandManager::new(),
-            broad_phase: BroadPhaseBvh::new(),
-            narrow_phase: NarrowPhase::new(),
-            bodies: RigidBodySet::new(),
-            colliders: ColliderSet::new(),
-            impulse_joints: ImpulseJointSet::new(),
-            multibody_joints: MultibodyJointSet::new(),
-            ccd_solver: CCDSolver::new(),
+            backend,
             entity_to_body: HashMap::new(),
+            published_transforms: HashMap::new(),
             entity_to_collider: HashMap::new(),
             filtered_pairs: HashSet::new(),
             attachment_filtered_pairs: HashSet::new(),
@@ -90,59 +116,70 @@ impl Default for PhysicsWorld {
             pending_steps: 0,
         }
     }
-}
 
-impl PhysicsWorld {
-    /// One Rapier integration step using the resource's current
-    /// gravity + parameters. No event handlers.
+    /// Seconds one step advances.
+    pub fn dt(&self) -> f64 {
+        self.backend.settings().dt
+    }
+
+    /// One integration step with the current gravity and settings.
     pub fn step(&mut self) {
         self.quarantine_non_finite();
         self.advance_hitch_captures();
-        self.physics_pipeline.step(
-            self.gravity,
-            &self.integration_parameters,
-            &mut self.islands,
-            &mut self.broad_phase,
-            &mut self.narrow_phase,
-            &mut self.bodies,
-            &mut self.colliders,
-            &mut self.impulse_joints,
-            &mut self.multibody_joints,
-            &mut self.ccd_solver,
-            &PairFilter(&self.filtered_pairs, &self.attachment_filtered_pairs),
-            &(),
-        );
+        let (authored, attached) = (&self.filtered_pairs, &self.attachment_filtered_pairs);
+        self.backend
+            .step(&|a, b| authored.contains(&(a, b)) || attached.contains(&(a, b)));
+        for body in self.backend.quarantined_bodies() {
+            if let Some(entity) = self.backend.body(body).and_then(|body| body.entity()) {
+                if !self.quarantined.contains(&entity) {
+                    self.quarantined.push(entity);
+                }
+            }
+        }
     }
 
     /// A body whose pose or velocity went non-finite would take the broad
     /// phase down with an index panic; disable it and say which entity it
     /// was instead.
     fn quarantine_non_finite(&mut self) {
-        let mut bad: Vec<RigidBodyHandle> = Vec::new();
-        for (handle, body) in self.bodies.iter() {
+        for id in self.backend.bodies() {
+            let Some(body) = self.backend.body_mut(id) else {
+                continue;
+            };
             let pose = body.position();
             let finite = pose.translation.is_finite()
                 && pose.rotation.is_finite()
                 && body.linvel().is_finite()
                 && body.angvel().is_finite();
-            if !finite && body.is_enabled() {
-                bad.push(handle);
-            }
-        }
-        for handle in bad {
-            let Some(body) = self.bodies.get_mut(handle) else {
+            if finite || !body.is_enabled() {
                 continue;
-            };
+            }
             body.set_enabled(false);
-            self.quarantined
-                .push(Entity::from_bits(body.user_data as u64));
+            if let Some(entity) = body.entity() {
+                self.quarantined.push(entity);
+            }
         }
     }
 
     /// Drop every contact between two bodies, in either order.
-    pub fn filter_pair(&mut self, a: RigidBodyHandle, b: RigidBodyHandle) {
+    pub fn filter_pair(&mut self, a: BodyId, b: BodyId) {
         self.filtered_pairs.insert((a, b));
         self.filtered_pairs.insert((b, a));
+    }
+
+    /// Remove an entity's body (with its colliders and joints) and forget it.
+    pub fn remove_entity_body(&mut self, entity: Entity) {
+        self.published_transforms.remove(&entity);
+        if let Some(id) = self.entity_to_body.remove(&entity) {
+            self.backend.remove_body(id);
+        }
+    }
+
+    /// Remove an entity's collider and forget it.
+    pub fn remove_entity_collider(&mut self, entity: Entity, wake: bool) {
+        if let Some(id) = self.entity_to_collider.remove(&entity) {
+            self.backend.remove_collider(id, wake);
+        }
     }
 }
 
@@ -155,64 +192,47 @@ struct HitchCapture {
 
 impl PhysicsWorld {
     /// Move a hitch's second local frame to its authored anchor at fixed-step speed.
-    pub(crate) fn capture_hitch(&mut self, handle: ImpulseJointHandle, target: Pose) {
-        let Some(joint) = self.impulse_joints.get(handle) else {
+    pub(crate) fn capture_hitch(&mut self, joint: JointId, target: Pose) {
+        let Some(start) = self.backend.joint(joint).map(|j| j.frame2()) else {
             return;
         };
-        let start = joint.data.local_frame2;
         let distance = start.translation.distance(target.translation);
         let angle = start.rotation.angle_between(target.rotation);
         let duration = (1.5 * (distance / 0.2).max(angle / 0.2)).max(0.5);
         self.hitch_captures.insert(
-            handle,
-            HitchCapture {
-                start,
-                target,
-                elapsed: 0.0,
-                duration,
-            },
+            joint,
+            HitchCapture { start, target, elapsed: 0.0, duration },
         );
     }
 
     fn advance_hitch_captures(&mut self) {
-        let dt = self.integration_parameters.dt;
-        self.hitch_captures.retain(|handle, capture| {
-            let Some(joint) = self.impulse_joints.get_mut(*handle, true) else {
+        let dt = self.dt();
+        let backend = &mut self.backend;
+        self.hitch_captures.retain(|id, capture| {
+            let Some(bodies) = backend.joint_bodies(*id) else {
+                return false;
+            };
+            let Some(joint) = backend.joint_mut(*id, true) else {
                 return false;
             };
             capture.elapsed = (capture.elapsed + dt).min(capture.duration);
             let t = capture.elapsed / capture.duration;
             let s = t * t * (3.0 - 2.0 * t);
-            joint.data.local_frame2 = Pose {
+            joint.set_frame2(Pose {
                 translation: capture
                     .start
                     .translation
                     .lerp(capture.target.translation, s),
                 rotation: capture.start.rotation.slerp(capture.target.rotation, s),
-            };
-            joint.data.softness = SpringCoefficients::new(8.0 + 22.0 * s, 1.0);
-            for body in [joint.body1, joint.body2] {
-                if let Some(body) = self.bodies.get_mut(body) {
+            });
+            joint.set_softness(8.0 + 22.0 * s, 1.0);
+            for body in [bodies.0, bodies.1] {
+                if let Some(body) = backend.body_mut(body) {
                     body.wake_up(true);
                 }
             }
             t < 1.0
         });
-    }
-}
-
-/// Authored exclusions and runtime hitch exclusions remain independent.
-struct PairFilter<'a>(
-    &'a HashSet<(RigidBodyHandle, RigidBodyHandle)>,
-    &'a HashSet<(RigidBodyHandle, RigidBodyHandle)>,
-);
-
-impl PhysicsHooks for PairFilter<'_> {
-    fn filter_contact_pair(&self, context: &PairFilterContext) -> Option<SolverFlags> {
-        match (context.rigid_body1, context.rigid_body2) {
-            (Some(a), Some(b)) if self.0.contains(&(a, b)) || self.1.contains(&(a, b)) => None,
-            _ => Some(SolverFlags::COMPUTE_IMPULSES),
-        }
     }
 }
 

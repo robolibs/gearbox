@@ -1,22 +1,32 @@
-//! Rapier physics on top of usd_bevy's projected stage.
+//! Rigid-body physics on top of usd_bevy's projected stage.
 //!
 //! usd_bevy holds the composed stage live and projects prims into entities,
-//! but simulates nothing. This module owns the Rapier f64 world
-//! (`PhysicsWorld`), reads the UsdPhysics opinions of every projected stage
-//! itself (`reader`, `attach`) into marker components (`markers`), converts
-//! those into Rapier bodies, colliders and joints (`bodies`, `colliders`,
-//! `joints`, `rapier`), steps the world and writes poses back into
-//! `Transform`s. Values are SI; quaternions are Bevy order; `lower > upper`
-//! on a limit locks the DOF.
+//! but simulates nothing. This module owns the f64 world (`PhysicsWorld`),
+//! reads the UsdPhysics opinions of every projected stage itself (`reader`,
+//! `attach`) into marker components (`markers`), converts those into bodies,
+//! colliders and joints (`bodies`, `colliders`, `joints`), steps the world
+//! and writes poses back into `Transform`s. Values are SI; quaternions are
+//! Bevy order; `lower > upper` on a limit locks the DOF.
+//!
+//! The engine itself sits behind `backend::PhysicsBackend`; `rapier` is the
+//! reference implementation; `molla` provides CPU Featherstone dynamics.
 
 mod attach;
+#[cfg(test)]
+pub(crate) mod benchmark;
+pub mod backend;
 mod bodies;
 mod colliders;
 mod convert;
 mod debug;
 mod joints;
 pub mod markers;
+mod molla;
+#[cfg(test)]
+pub(crate) use molla::MollaBackend;
 mod rapier;
+#[cfg(test)]
+pub(crate) use rapier::RapierBackend;
 pub mod reader;
 mod scene;
 mod world;
@@ -38,12 +48,12 @@ pub use world::{PhysicsWorld, step_physics};
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PhysicsWriteback;
 
-/// Wires the Rapier world, every marker → Rapier conversion system and the
-/// writeback path. Adds `PhysicsWorld` and `ColliderDebugEnabled`;
+/// Wires the physics world, every marker → backend conversion system and
+/// the writeback path. Adds `PhysicsWorld` and `ColliderDebugEnabled`;
 /// `PhysicsActive` is gearbox-api's clock switch.
-pub struct RapierAdapterPlugin;
+pub struct PhysicsPlugin;
 
-impl Plugin for RapierAdapterPlugin {
+impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PhysicsWorld>()
             .init_resource::<PhysicsActive>()
@@ -71,7 +81,6 @@ impl Plugin for RapierAdapterPlugin {
             .add_systems(
                 PostUpdate,
                 writeback::writeback_transforms
-                    .run_if(physics_is_active)
                     .in_set(PhysicsWriteback)
                     .before(bevy::transform::TransformSystems::Propagate),
             )
@@ -272,25 +281,11 @@ fn drop_dead_physics(world: &mut World) {
         )
     };
     let mut physics = world.resource_mut::<PhysicsWorld>();
-    let physics = physics.as_mut();
     for entity in bodies {
-        if let Some(handle) = physics.entity_to_body.remove(&entity) {
-            let _ = physics.bodies.remove(
-                handle,
-                &mut physics.islands,
-                &mut physics.colliders,
-                &mut physics.impulse_joints,
-                &mut physics.multibody_joints,
-                true,
-            );
-        }
+        physics.remove_entity_body(entity);
     }
     for entity in colliders {
-        if let Some(handle) = physics.entity_to_collider.remove(&entity) {
-            physics
-                .colliders
-                .remove(handle, &mut physics.islands, &mut physics.bodies, false);
-        }
+        physics.remove_entity_collider(entity, false);
     }
 }
 
@@ -312,8 +307,8 @@ fn carry_onto_machine(
                 let body = physics
                     .entity_to_body
                     .get(entity)
-                    .and_then(|handle| physics.bodies.get(*handle))?;
-                Some((path.clone(), *entity, body.mass(), body.position().clone()))
+                    .and_then(|handle| physics.body(*handle))?;
+                Some((path.clone(), *entity, body.mass(), body.position()))
             })
             .max_by(|a, b| a.2.total_cmp(&b.2))
     };
@@ -381,9 +376,7 @@ fn rides_a_body(world: &World, entity: Entity) -> bool {
     false
 }
 
-/// On the OFF→ON edge of `PhysicsActive`, sync every body's pose to its
-/// entity's current `GlobalTransform` so a gizmo drag while paused is not
-/// undone by the first writeback.
+/// On resume, apply transforms edited since the last physics publication.
 fn sync_bodies_to_transforms_on_resume(
     active: Res<PhysicsActive>,
     mut prev_active: Local<bool>,
@@ -397,29 +390,26 @@ fn sync_bodies_to_transforms_on_resume(
     if !active.0 || was {
         return;
     }
-    use rapier3d::prelude::*;
-    let world = world.as_mut();
-    let pairs: Vec<(Entity, RigidBodyHandle)> =
-        world.entity_to_body.iter().map(|(e, h)| (*e, *h)).collect();
-    for (entity, handle) in pairs {
-        if !transforms.contains(entity) {
-            continue;
+    let poses: Vec<_> = world.entity_to_body.iter().filter_map(|(&entity, &body)| {
+        let published = world.published_transforms.get(&entity)?;
+        if published.body != body {
+            return None;
         }
-        let t = crate::globe::transform_in_site(entity, &parents, &transforms, &sites).compute_transform();
+        if !transforms.contains(entity) { return None; }
+        let current = crate::globe::transform_in_site(entity, &parents, &transforms, &sites);
+        if current.affine().abs_diff_eq(published.global.affine(), 1e-6) {
+            return None;
+        }
+        let t = current.compute_transform();
         let region = gearbox_globe::physics_offset(crate::globe::site_of(entity, &parents, &sites));
-        let Some(rb) = world.bodies.get_mut(handle) else {
-            continue;
-        };
         let mut translation = convert::vec3_to_d(t.translation);
         translation.x += region.x;
-        rb.set_position(
-            Pose {
-                translation,
-                rotation: convert::quat_to_d(t.rotation),
-            },
-            true,
-        );
-        rb.set_linvel(glam::DVec3::ZERO, true);
-        rb.set_angvel(glam::DVec3::ZERO, true);
+        Some((body, backend::Pose {
+            translation,
+            rotation: convert::quat_to_d(t.rotation),
+        }))
+    }).collect();
+    if let Err(error) = world.set_body_poses(&poses, true) {
+        warn!("gearbox-physics: paused transform edits rejected: {error}");
     }
 }

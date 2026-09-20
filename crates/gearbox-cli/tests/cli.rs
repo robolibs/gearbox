@@ -10,6 +10,46 @@ use gearbox_api::registry::{self, RegistryEntry};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+#[test]
+fn saved_configuration_rejects_invalid_pressure_before_loading() {
+    let env = Env::start(&[]);
+    let file = env.dir.join("invalid.toml");
+    for value in ["nan", "inf", "-1.0", "0.0"] {
+        std::fs::write(&file, format!("configuration_version=1\n[[spawn]]\nkind='machine'\npath='absent.usd'\nid='tractor'\n[spawn.tyres.left]\napplied_bar=1.8\ntarget_bar={value}\n")).unwrap();
+        let (code, _, err) = env.gearbox(&["spawn", "from", file.to_str().unwrap()]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("invalid saved tyre pressure"), "{err}");
+        assert!(!env.dir.join("state/gearbox/context.toml").exists());
+    }
+}
+
+#[test]
+fn machine_save_requires_a_paused_scene_without_creating_a_file() {
+    let env = Env::start(&["tractor"]);
+    let file = env.dir.join("tractor.toml");
+    let (code, _, err) = env.gearbox(&["machine", "save", file.to_str().unwrap(), "--machine", "tractor"]);
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("pause the scene"), "{err}");
+    assert!(!file.exists());
+}
+
+#[test]
+fn tyre_pressure_rejects_invalid_values_and_conflicting_selectors() {
+    let env = Env::start(&["tractor"]);
+    for bar in ["NaN", "inf", "0"] {
+        let (code, _, err) = env.gearbox(&["machine", "tyre-pressure", bar, "--machine", "tractor"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("finite positive"), "{err}");
+    }
+    for args in [
+        vec!["machine", "tyre-pressure", "1.8", "--axle", "0"],
+        vec!["machine", "tyre-pressure", "1.8", "--axle", "1", "--wheel", "left"],
+    ] {
+        let (code, _, err) = env.gearbox(&args);
+        assert_eq!(code, 2, "{err}");
+    }
+}
+
 struct Env {
     dir: PathBuf,
     _host: FakeHost,

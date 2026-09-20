@@ -26,6 +26,7 @@ pub use machine::{
 };
 pub use peerbus;
 pub use wire::*;
+pub mod tyres;
 
 #[cfg(feature = "bevy")]
 pub use plugin::{

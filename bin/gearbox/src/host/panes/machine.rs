@@ -38,6 +38,16 @@ fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
     if v.is_finite() { v.clamp(lo, hi) } else { lo }
 }
 
+fn tyre_pressure_status(playing: bool, mut pressures: impl Iterator<Item = (f64, f64)>) -> &'static str {
+    if !playing {
+        "paused — press Play"
+    } else if pressures.any(|(applied, target)| (applied - target).abs() > 0.005) {
+        "inflating / deflating"
+    } else {
+        "at target"
+    }
+}
+
 /// The link a service controller's joint moves, if any.
 fn service_link<'a>(machine: &'a MachineInstanceSpec, c: &'a ControllerSpec) -> Option<&'a LinkSpec> {
     controller_joints(machine, c)
@@ -189,6 +199,35 @@ struct Block {
     bin_link: Option<LinkSpec>,
 }
 
+struct TyreBlock {
+    pod: usize,
+    links: Vec<String>,
+}
+
+fn apply_tyre_targets(
+    responses: &HashMap<MaraId, Vec<PodResponse>>,
+    machine: &str,
+    blocks: &[TyreBlock],
+    values: &mut LinkValues,
+) {
+    for block in blocks {
+        if let Some(value) = pod_response(responses, cid(P, "machine"), block.pod)
+            .and_then(|r| r.sliders.first())
+            .filter(|s| s.changed)
+            .map(|s| s.value)
+        {
+            if !value.is_finite() || block.links.iter().any(|link| {
+                let low = values.get(machine, link, "tyre_min_pressure_bar");
+                let high = values.get(machine, link, "tyre_max_pressure_bar");
+                !low.zip(high).is_some_and(|(lo, hi)| (lo..=hi).contains(&value))
+            }) { continue; }
+            for link in &block.links {
+                values.set(machine, link, "tyre_target_pressure_bar", value);
+            }
+        }
+    }
+}
+
 /// Same-frame handoff from `container` to `apply`: rebuilding this from
 /// scratch in `apply` would mean keeping two copies of the per-controller
 /// switch below in sync, so it's built once and stashed here instead.
@@ -196,7 +235,7 @@ struct Block {
 struct MachineBuildCache(
     Option<(
         MachineList,
-        Option<(MachineInstanceSpec, Entity, usize, Vec<(String, String, Vec<String>)>, Vec<Block>)>,
+        Option<(MachineInstanceSpec, Entity, usize, Vec<(String, String, Vec<String>)>, Vec<Block>, Vec<TyreBlock>)>,
     )>,
 );
 
@@ -218,6 +257,8 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
     pods.push(
         Pod::new(pid(P, "head", 0))
             .with_readout("machine", machine.id.clone())
+            .with_readout("instance", std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into()))
+            .with_readout("physics", world.resource::<crate::physics::PhysicsWorld>().name())
             .with_readout("kind", machine.kind.as_deref().unwrap_or("—"))
             .with_readout("controllers", machine.controllers.len().to_string())
             .with_readout("links", machine.links.links.len().to_string()),
@@ -225,7 +266,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
 
     // Variants of the machine prim: a row per set, a button per option.
     let variants = machine_variants(world, scene_root, &machine.prim_path);
-    let variants_offset = pods.len();
+    let mut variants_offset = pods.len();
     if !variants.is_empty() {
         for (i, (set, selection, options)) in variants.iter().enumerate() {
             pods.push(options.iter().fold(
@@ -481,9 +522,102 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         containers.push(TabContainer::new(cid(P, &group), title, icon, group_pods));
     }
 
+    let tyres: Vec<_> = machine.links.links.iter().filter_map(|link| {
+        let current = values.get(&machine.id, &link.name, "tyre_pressure_bar")?;
+        let target = values.get(&machine.id, &link.name, "tyre_target_pressure_bar")?;
+        let low = values.get(&machine.id, &link.name, "tyre_min_pressure_bar")?;
+        let high = values.get(&machine.id, &link.name, "tyre_max_pressure_bar")?;
+        if [current, target, low, high].iter().all(|v| v.is_finite()) && low <= high {
+            Some((link, current, target, low, high))
+        } else {
+            None
+        }
+    }).collect();
+    let mut tyre_blocks = Vec::new();
+    let mut tyre_pods = Vec::new();
+    if !tyres.is_empty() {
+        let low = tyres.iter().map(|t| t.3).fold(f64::NEG_INFINITY, f64::max);
+        let high = tyres.iter().map(|t| t.4).fold(f64::INFINITY, f64::min);
+        if low <= high {
+            let target = tyres.iter().map(|t| t.2).sum::<f64>() / tyres.len() as f64;
+            ctx.sync_sliders(pid(P, "tyres-all", 0), &[clamp(target, low, high)]);
+            tyre_blocks.push(TyreBlock {
+                pod: tyre_pods.len(),
+                links: tyres.iter().map(|t| t.0.name.clone()).collect(),
+            });
+            let matched = tyres.iter().all(|t| (t.2 - target).abs() < 0.005);
+            let applied_low = tyres.iter().map(|t| t.1).fold(f64::INFINITY, f64::min);
+            let applied_high = tyres.iter().map(|t| t.1).fold(f64::NEG_INFINITY, f64::max);
+            tyre_pods.push(Pod::new(pid(P, "tyres-all", 0))
+                .with_readout("tyre pressure", "bar (gauge)")
+                .with_readout("changes", tyre_pressure_status(
+                    world.resource::<gearbox_api::PhysicsActive>().0,
+                    tyres.iter().map(|t| (t.1, t.2)),
+                ))
+                .with_readout("applied pressure", format!("{applied_low:.2}–{applied_high:.2} bar"))
+                .with_readout("targets", if matched { "matched" } else { "mixed" })
+                .with_slider("all tyres", clamp(target, low, high), low..=high, 2, " bar", accent));
+        }
+        let mut axles = std::collections::BTreeMap::<u16, Vec<usize>>::new();
+        for (i, tyre) in tyres.iter().enumerate() {
+            if let Some(axle) = values.get(&machine.id, &tyre.0.name, "tyre_axle")
+                && axle.is_finite() && axle >= 1.0 && axle <= u16::MAX as f64 && axle.fract() == 0.0
+            {
+                axles.entry(axle as u16).or_default().push(i);
+            }
+        }
+        for (axle, members) in axles {
+            let low = members.iter().map(|&i| tyres[i].3).fold(f64::NEG_INFINITY, f64::max);
+            let high = members.iter().map(|&i| tyres[i].4).fold(f64::INFINITY, f64::min);
+            if low > high { continue; }
+            let target = members.iter().map(|&i| tyres[i].2).sum::<f64>() / members.len() as f64;
+            let matched = members.iter().all(|&i| (tyres[i].2 - target).abs() < 0.005);
+            let applied_low = members.iter().map(|&i| tyres[i].1).fold(f64::INFINITY, f64::min);
+            let applied_high = members.iter().map(|&i| tyres[i].1).fold(f64::NEG_INFINITY, f64::max);
+            let pod = pid(P, "tyre-axle", usize::from(axle));
+            ctx.sync_sliders(pod, &[clamp(target, low, high)]);
+            tyre_blocks.push(TyreBlock {
+                pod: tyre_pods.len(), links: members.iter().map(|&i| tyres[i].0.name.clone()).collect(),
+            });
+            tyre_pods.push(Pod::new(pod)
+                .with_readout("axle", format!("{axle} · {} tyres", members.len()))
+                .with_readout("applied pressure", format!("{applied_low:.2}–{applied_high:.2} bar"))
+                .with_readout("targets", if matched { "matched" } else { "mixed" })
+                .with_slider("axle target", clamp(target, low, high), low..=high, 2, " bar", accent));
+        }
+        for (i, (link, current, target, low, high)) in tyres.iter().enumerate() {
+            let radius = values.get(&machine.id, &link.name, "tyre_loaded_radius_m").unwrap_or(0.0);
+            let deflection = values.get(&machine.id, &link.name, "tyre_deflection_m");
+            let area = values.get(&machine.id, &link.name, "tyre_tread_area_m2").unwrap_or(0.0);
+            ctx.sync_sliders(pid(P, "tyre", i), &[clamp(*target, *low, *high)]);
+            tyre_blocks.push(TyreBlock {
+                pod: tyre_pods.len(),
+                links: vec![link.name.clone()],
+            });
+            tyre_pods.push(Pod::new(pid(P, "tyre", i))
+                .with_readout("wheel", link.name.clone())
+                .with_readout("applied pressure", format!("{current:.2} bar"))
+                .with_readout("deflection", deflection.map_or_else(|| "—".into(), |m| format!("{:.1} mm", m * 1000.0)))
+                .with_readout("loaded radius", format!("{radius:.3} m"))
+                .with_readout("tread contact area", format!("{area:.4} m²"))
+                .with_slider("target pressure", clamp(*target, *low, *high), *low..=*high, 2, " bar", accent));
+        }
+    }
+
+    let tyre_offset = 2;
+    let tyre_count = tyre_pods.len();
+    for block in &mut tyre_blocks {
+        block.pod += tyre_offset;
+    }
+    for block in &mut blocks {
+        block.pod += tyre_count;
+    }
+    variants_offset += tyre_count;
+    pods.splice(tyre_offset..tyre_offset, tyre_pods);
+
     world.insert_resource(MachineBuildCache(Some((
         list,
-        Some((machine, scene_root, variants_offset, variants, blocks)),
+        Some((machine, scene_root, variants_offset, variants, blocks, tyre_blocks)),
     ))));
     let tab = Tab::new(cid(P, "machine"), "Machine", "vehicle-tractor")
         .pods(pods)
@@ -499,9 +633,15 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
         return;
     };
     handle_machine_list(responses, &list, ctx);
-    let Some((machine, scene_root, variants_offset, variants, blocks)) = selected else {
+    let Some((machine, scene_root, variants_offset, variants, blocks, tyre_blocks)) = selected else {
         return;
     };
+    apply_tyre_targets(
+        responses,
+        &machine.id,
+        &tyre_blocks,
+        &mut world.resource_mut::<LinkValues>(),
+    );
     for (i, (set, selection, options)) in variants.iter().enumerate() {
         let picked = options
             .iter()
@@ -636,5 +776,81 @@ fn set_service_value(
         world
             .resource_mut::<LinkValues>()
             .set(&machine.id, &l.name, name, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mara_core::pod::SliderResponse;
+
+    #[test]
+    fn tyre_status_distinguishes_paused_targets_from_applied_pressure() {
+        let status = |playing, pressures: &[(f64, f64)]| tyre_pressure_status(playing, pressures.iter().copied());
+        assert_eq!(status(false, &[(1.8, 0.5)]), "paused — press Play");
+        assert_eq!(status(true, &[(1.8, 0.5)]), "inflating / deflating");
+        assert_eq!(status(true, &[(0.5, 0.5), (1.8, 4.0)]), "inflating / deflating");
+        assert_eq!(status(true, &[(0.5, 0.5), (4.0, 4.0)]), "at target");
+    }
+
+    #[test]
+    fn sidebar_tyre_targets_use_top_level_pod_offsets() {
+        let blocks = [
+            TyreBlock { pod: 2, links: vec!["left".into(), "right".into()] },
+            TyreBlock { pod: 3, links: vec!["left".into()] },
+        ];
+        let response = |value, changed| PodResponse {
+            sliders: vec![SliderResponse { value, changed }],
+            ..Default::default()
+        };
+        let mut responses = HashMap::from([(cid(P, "machine"), vec![response(4.0, true)])]);
+        let mut values = LinkValues::default();
+        for link in ["left", "right"] {
+            values.set("tractor", link, "tyre_min_pressure_bar", 0.5);
+            values.set("tractor", link, "tyre_max_pressure_bar", 4.0);
+        }
+        apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
+        assert_eq!(values.get("tractor", "left", "tyre_target_pressure_bar"), None);
+        responses.insert(cid(P, "machine"), vec![
+            PodResponse::default(), PodResponse::default(),
+            response(2.2, true), response(1.8, false),
+        ]);
+        apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
+        for link in ["left", "right"] {
+            assert_eq!(values.get("tractor", link, "tyre_target_pressure_bar"), Some(2.2));
+        }
+        responses.insert(cid(P, "machine"), vec![
+            PodResponse::default(), PodResponse::default(),
+            response(2.2, false), response(1.0, true),
+        ]);
+        apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
+        assert_eq!(values.get("tractor", "left", "tyre_target_pressure_bar"), Some(1.0));
+        assert_eq!(values.get("tractor", "right", "tyre_target_pressure_bar"), Some(2.2));
+        let before = values.0.clone();
+        values.set("tractor", "right", "tyre_max_pressure_bar", 2.0);
+        responses.insert(cid(P, "machine"), vec![PodResponse::default(), PodResponse::default(), response(3.0, true)]);
+        apply_tyre_targets(&responses, "tractor", &blocks, &mut values);
+        for link in ["left", "right"] {
+            assert_eq!(values.get("tractor", link, "tyre_target_pressure_bar"), before.get(&("tractor".into(), link.into(), "tyre_target_pressure_bar".into())).copied());
+        }
+    }
+
+    #[test]
+    fn tyre_slider_memory_tracks_authoritative_values() {
+        use mara_core::memory::MaraMemoryCtx;
+        let egui = egui::Context::default();
+        let log = crate::viewer::log::LoaderLog::default();
+        let ctx = PaneCtx {
+            accent: mara_core::vocab::Color32::WHITE,
+            egui: &egui,
+            outbox: Default::default(),
+            log: &log,
+        };
+        let pod = pid(P, "tyre", 0);
+        ctx.sync_sliders(pod, &[2.2]);
+        ctx.sync_sliders(pod, &[1.8]);
+        let key = pod.with(("mara_pod_slider_val", 0usize));
+        let seam = mara::host::MaraHostCtx::ui_only(&egui, None).seam();
+        assert_eq!(MaraMemoryCtx::new(&seam).get_persisted::<f64>(key), Some(1.8));
     }
 }

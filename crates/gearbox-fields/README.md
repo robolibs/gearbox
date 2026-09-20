@@ -261,6 +261,47 @@ line.
 
 Layout and `EnvironmentSettings` are startup configuration, not live-editable settings.
 
+### Physical friction in the Molla worktree
+
+Layouts may set a dimensionless `default_friction`, and each field may override it
+with `friction`. Missing field values inherit `default_friction`; if that is also
+absent, they inherit the ground collider's friction. Zero is valid. Negative or
+non-finite values are rejected. Bundled layouts retain their existing collider
+friction; visual profile names do not imply calibrated physical coefficients.
+
+```json
+{
+  "default": "grassland",
+  "default_friction": 0.8,
+  "fields": [
+    {
+      "name": "test-strip", "profile": "harvested_wheat",
+      "min": [-20, -20], "max": [20, 20], "friction": 0.2
+    }
+  ]
+}
+```
+
+These example coefficients are test inputs, not calibrated grass/stubble data.
+The isolated Gearbox Molla backend samples this layout on the procedural terrain
+height grid and registers the result as collider-local XZ friction. The generated
+terrain collider has world-aligned XZ coordinates. Rectangle lower edges are
+inclusive and upper edges exclusive; sample values are bilinearly interpolated
+by the tyre model, so transitions have the grid's spatial resolution. Each tyre
+footprint cell samples that map. Pressure changes do not modify the ground map.
+
+Maps are rebuilt on relevant configuration/terrain changes, not per physics step.
+Unchanged layouts allocate no replacement map; completely unauthored friction
+uses the original scalar path. Programmatic changes to friction values are
+published before physics stepping, including while paused. Invalid changes keep
+the last valid map. Changing region bounds/profiles requires terrain reload;
+there is no layout-file watcher. Removing the override restores collider friction.
+
+This publication currently covers procedural terrain only. The material-only USD
+adapter and flat-ground preset do not publish field regions, and the Rapier path
+still uses its original collider friction. This is not soil deformation or a
+calibrated pressure-dependent surface model.
+
 ## Add a package
 
 1. Create a sibling folder with `mod.rs`, `shaders/`, and `textures/`.

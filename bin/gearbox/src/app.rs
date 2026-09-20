@@ -50,7 +50,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         // load; the loader logs it when a root becomes ready.
         .init_resource::<usd_bevy::asset::UsdSceneTimings>()
         .insert_resource(projection_budget_from_env())
-        .add_plugins(physics::RapierAdapterPlugin)
+        .add_plugins(physics::PhysicsPlugin)
         .insert_resource(gearbox_api::PhysicsActive(false))
         // Tool API: one host agent per process, one agent per machine.
         .add_plugins(gearbox_api::GearboxBusPlugin {
