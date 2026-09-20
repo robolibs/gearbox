@@ -152,7 +152,7 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
         let forward = vec3<f32>(cos(angle), 0.0, sin(angle));
         let right = vec3<f32>(-sin(angle), 0.0, cos(angle));
         let size = 0.8 + 0.4 * rand(id, 11u + head);
-        let leaf_width = 0.022 * pow(max(sin(t * 3.14159265), 0.0), 0.65);
+        let leaf_width = 0.011 * pow(max(sin(t * 3.14159265), 0.0), 0.65);
         let cup = 0.003 * side * side * sin(t * 3.14159265);
         offset = stem_dir * 0.035 + vec3<f32>(0.0, 0.105 + 0.015 * f32(head), 0.0)
             + forward * (0.002 + t * 0.031 * size)
@@ -214,7 +214,7 @@ fn meadow_grass(base: vec2<f32>, ground: vec3<f32>, ground_normal: vec3<f32>, id
     let height = mix(0.12, 0.20, rand(id, 20u + leaf)) * select(1.0, 0.9, broad) * coverage
         * dry_growth(base);
     let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
-    let base_w = mix(0.005, 0.008, rand(id, 30u + leaf)) * select(select(1.0, 1.8, broad), 0.6, fine);
+    let base_w = mix(0.0025, 0.004, rand(id, 30u + leaf)) * select(select(1.0, 1.8, broad), 0.6, fine);
     let width = base_w * max(1.0, 1.2 * pixel_m / base_w) * coverage;
     let arch = select(select(0.45, 0.7, broad), 0.3, fine) + 0.25 * rand(id, 40u + leaf);
 
@@ -281,8 +281,8 @@ fn meadow_grass(base: vec2<f32>, ground: vec3<f32>, ground_normal: vec3<f32>, id
 
 const GOT_MIN_HEIGHT: f32 = 0.04;
 const GOT_MAX_HEIGHT: f32 = 0.10;
-const GOT_MIN_WIDTH: f32 = 0.006;
-const GOT_MAX_WIDTH: f32 = 0.011;
+const GOT_MIN_WIDTH: f32 = 0.003;
+const GOT_MAX_WIDTH: f32 = 0.0055;
 const CLUMP_CELL_M: f32 = 0.45;
 const LOD_JITTER_M: f32 = 1.5;
 

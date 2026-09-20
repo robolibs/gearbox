@@ -55,7 +55,9 @@ impl Plugin for GrasslandPlugin {
         let density = self.density;
         let share = density / 6000.0;
         // Near and mid meshes fold two blades from each root.
-        let blades = density / 2.0;
+        // Half the width apiece, so half again as many of them: a thinner
+        // blade shows more ground through the sward than a thick one does.
+        let blades = density / 2.0 * 1.5;
         app.world_mut()
             .resource_mut::<FieldProfiles>()
             .register(FieldProfile {
