@@ -149,10 +149,12 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
     let within = abs(fract(place / plot_m) - vec2<f32>(0.5)) * 2.0;
     let edge = max(within.x, within.y);
     var comb: Comb;
-    // Nought at the line between one furrow and the next: a crest half way up
-    // there steps wherever two furrows differ in depth, and the step draws a
-    // hairline crack the length of the field.
-    comb.crest = 0.5 - 0.5 * cos(across * 6.2831853);
+    // A furrow is not a wave. The plough turns a slice over, so the ridge
+    // stands up sharply on the side it was laid from and falls away long and
+    // shallow on the other. Still nought at both edges, or the step between
+    // two furrows of different depth draws a hairline crack down the field.
+    let within_furrow = across - furrow;
+    comb.crest = sin(3.1415927 * pow(within_furrow, 0.68));
     let run = along / max(spacing * 18.0, 2.0);
     let stretch = floor(run);
     let into = smooth2(vec2<f32>(run - stretch)).x;
