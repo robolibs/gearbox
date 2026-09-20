@@ -279,7 +279,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let stripes_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
     let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
-    colour = ground.tint.rgb * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
+    // Ground changes over tens of metres as well as over inches — drainage,
+    // the lie of the land, where the subsoil comes nearer the surface. Without
+    // it a field is one flat tone however much crumb is drawn on it.
+    let country = ground_fbm(place / 34.0 + vec2<f32>(7.0, -29.0), 3);
+    colour = ground.tint.rgb * mix(0.78, 1.24, country)
+        * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
         * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
 
     var grass_share = 0.0;
