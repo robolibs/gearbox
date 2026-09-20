@@ -1,5 +1,10 @@
 use super::*;
 
+pub(crate) fn despawn(app: &mut App, root: Entity) {
+    app.world_mut().entity_mut(root).despawn();
+    drop_dead_physics(app.world_mut());
+}
+
 pub(crate) fn project(app: &mut App, stage: &openusd::usd::Stage) -> Entity {
     let root = app.world_mut().spawn(Transform::IDENTITY).id();
     let prims = usd_bevy::live::project_stage_under(app.world_mut(), stage, root);

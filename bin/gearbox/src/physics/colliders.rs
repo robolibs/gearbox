@@ -12,7 +12,7 @@
 //! `UsdGeomCylinder.axis` defaults to Z while backend cylinders run along
 //! Y; `compute_local_pose` folds the Y→authored-axis rotation into the pose.
 
-use super::backend::{ColliderDesc, CollisionGroups, Pose, Shape};
+use super::backend::{ColliderDesc, ColliderId, CollisionGroups, Pose, Shape};
 use super::markers::{
     UsdArticulationRoot, UsdCollider, UsdColliderShape, UsdCollisionApprox, UsdPhysicsMaterial,
     UsdRigidBody,
@@ -26,6 +26,17 @@ use super::world::PhysicsWorld;
 
 #[derive(Component)]
 pub(crate) struct ColliderAttached;
+
+#[derive(Component, PartialEq)]
+pub(crate) struct AppliedPhysicsMaterial {
+    collider: ColliderId,
+    material: Entity,
+    friction: f64,
+    restitution: Option<f64>,
+}
+
+#[cfg(test)]
+mod material_tests;
 
 pub fn convert_colliders(
     mut commands: Commands,
@@ -334,26 +345,35 @@ fn find_rigid_body_ancestor(
 }
 
 pub fn apply_physics_materials(
+    mut commands: Commands,
     mut world: ResMut<PhysicsWorld>,
-    colliders: Query<(Entity, &UsdCollider), With<ColliderAttached>>,
+    colliders: Query<(Entity, &UsdCollider, Option<&AppliedPhysicsMaterial>), With<ColliderAttached>>,
     materials: Query<&UsdPhysicsMaterial>,
 ) {
-    for (entity, col) in &colliders {
+    for (entity, col, applied) in &colliders {
         let Some(mat_e) = col.physics_material else {
+            if applied.is_some() { commands.entity(entity).remove::<AppliedPhysicsMaterial>(); }
             continue;
         };
         let Ok(mat) = materials.get(mat_e) else {
+            if applied.is_some() { commands.entity(entity).remove::<AppliedPhysicsMaterial>(); }
             continue;
         };
         let Some(handle) = world.entity_to_collider.get(&entity).copied() else {
             continue;
         };
         let friction_coef = mat.dynamic_friction.or(mat.static_friction).unwrap_or(0.5);
+        let authored = AppliedPhysicsMaterial {
+            collider: handle, material: mat_e, friction: f64::from(friction_coef),
+            restitution: mat.restitution.map(f64::from),
+        };
+        if applied == Some(&authored) { continue; }
         if let Some(c) = world.collider_mut(handle) {
             c.set_friction(friction_coef as f64);
             if let Some(r) = mat.restitution {
                 c.set_restitution(r as f64);
             }
+            commands.entity(entity).insert(authored);
         }
     }
 }

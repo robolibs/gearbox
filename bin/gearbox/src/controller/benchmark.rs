@@ -20,6 +20,9 @@ mod pressure_lifecycle;
 #[path = "benchmark/tyre_load.rs"]
 mod tyre_load;
 
+#[path = "benchmark/machine_lifecycle.rs"]
+mod machine_lifecycle;
+
 #[derive(Clone, Copy, PartialEq)]
 enum FixtureKind {
     Kubota,
