@@ -43,7 +43,7 @@ struct WornStubble {
 
 // The same wear the bare grounds and the meadow read, so a road crossing from
 // one field to the next does not change shape or colour on the boundary.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, tyre_bars, DrivenTrail, lattice}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, wheel_print, tyre_bars, DrivenTrail, lattice}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(114) var<uniform> driven: DrivenTrail;
 
@@ -436,7 +436,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // a lug is finer than a texel, so the raster could never hold it steady.
     let drove = trail_print(in.world_position.xz, footprint_here,
         wheel_scar(tracks, wheels, in.world_position.xz));
-    let print = drove.bars;
+    // Where the line has aged out the wheel map still holds the mark, so the
+    // tread goes on being drawn from that rather than simply disappearing.
+    let mark = sample_wheel_mark(tracks, wheels, in.world_position.xz);
+    let kept = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
+        wheels.bar, mark.press, footprint_here);
+    let print = select(kept, drove.bars, drove.bars.x > kept.x);
     pbr_input.N = normalize(
         surface_relief(in.world_position.xz, normal, surface_footprint(in.world_position.xz))
         + vec3<f32>(print.y, 0.0, print.z));

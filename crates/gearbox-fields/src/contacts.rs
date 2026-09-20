@@ -68,7 +68,7 @@ fn explicit_wheel_footprint_overrides_field_default() {
 /// How many points of driven line the covers can read. The tread is only drawn
 /// near to — it fades out by its own pitch against the pixel long before this
 /// runs out — so this is the *recent* line and not the whole day's driving.
-pub const TRAIL_POINTS: usize = 256;
+pub const TRAIL_POINTS: usize = 512;
 
 /// Metres between the points a trail is kept as. Close enough that a turn is a
 /// smooth curve rather than a polygon, far enough that a hundred and twenty
@@ -102,7 +102,18 @@ pub struct TrailPoint {
     /// wheel lifted and set down elsewhere does not join the two with a line it
     /// never drove.
     pub half_width: f32,
+    /// When the wheel was here. Kept on this side only — the covers are handed
+    /// the line, not the clock — and it is what a point is dropped on.
+    pub seen: f32,
 }
+
+/// How long a wheel's line is kept. A mark on the ground outlasts the machine
+/// that made it, so the tread is held by age and not by how far the machine has
+/// since driven: standing still or crawling, the line behind stays as long as
+/// it would at speed. `TRAIL_POINTS` is still the ceiling — a wheel at working
+/// speed fills its share before this runs out — so this governs the slow end,
+/// which is where the old rule dropped a line almost at once.
+pub const TRAIL_KEEP_S: f32 = 90.0;
 
 /// Every wheel's recent line, ready for the covers.
 #[derive(Resource, ExtractResource, Clone)]
@@ -174,20 +185,30 @@ impl TrailKeeper {
         // Each wheel keeps its own share of the room, so one wheel driving hard
         // cannot crowd the others' lines out of the picture. Counted before the
         // run is taken out, since taking it borrows the whole set.
-        let share = (TRAIL_POINTS / self.runs.len().max(1).max(1)).max(4);
+        let share = (TRAIL_POINTS / self.runs.len().max(1)).max(4);
         let run = self.runs.entry(wheel.to_owned()).or_default();
         if broken {
-            run.push(TrailPoint { at, along: 0.0, half_width: -half_width.abs() });
+            run.push(TrailPoint { at, along: 0.0, half_width: -half_width.abs(), seen: now });
         } else {
             let Some(last) = run.last().copied() else { return };
             let step = at.distance(last.at);
             if step < TRAIL_STEP_M {
                 return;
             }
-            run.push(TrailPoint { at, along: last.along + step, half_width: half_width.abs() });
+            run.push(TrailPoint {
+                at,
+                along: last.along + step,
+                half_width: half_width.abs(),
+                seen: now,
+            });
         }
-        if run.len() > share {
-            run.drain(..run.len() - share);
+        // Old points go first, then any still over the share; a run whose head
+        // is cut has to say so, or the covers join it to whatever precedes it.
+        let stale = run.iter().take_while(|point| now - point.seen > TRAIL_KEEP_S).count();
+        let over = run.len().saturating_sub(share);
+        let cut = stale.max(over);
+        if cut > 0 {
+            run.drain(..cut);
             if let Some(first) = run.first_mut() {
                 first.half_width = -first.half_width.abs();
             }
@@ -197,6 +218,18 @@ impl TrailKeeper {
     /// All the lines, flattened for the covers.
     pub fn flattened(&self) -> Vec<TrailPoint> {
         self.runs.values().flatten().copied().take(TRAIL_POINTS).collect()
+    }
+
+    /// Drops whole runs whose wheel has not been seen for `TRAIL_KEEP_S`, so a
+    /// machine driven away and deleted does not hold its room for ever.
+    pub fn forget_older_than(&mut self, now: f32) {
+        self.runs.retain(|wheel, run| {
+            run.retain(|point| now - point.seen <= TRAIL_KEEP_S);
+            if let Some(first) = run.first_mut() {
+                first.half_width = -first.half_width.abs();
+            }
+            !run.is_empty() && self.seen.get(wheel).is_some_and(|last| now - last <= TRAIL_KEEP_S)
+        });
     }
 }
 
@@ -237,5 +270,36 @@ pub(super) fn keep_wheel_trails(
             now,
         );
     }
+    keeper.forget_older_than(now);
     trails.points = keeper.flattened();
+}
+
+// A line is kept by age, so a machine that crawls or stands keeps the tread it
+// laid; held by count alone, a slow wheel's line was dropped almost at once
+// while a fast one's reached across the field.
+#[test]
+fn a_line_is_dropped_by_age_and_not_by_how_far_it_has_since_driven() {
+    let mut keeper = TrailKeeper::default();
+    for step in 0..40 {
+        let along = step as f32 * TRAIL_STEP_M;
+        keeper.saw("near", Vec2::new(along, 0.0), 0.3, step as f32);
+    }
+    let laid = keeper.flattened().len();
+    assert!(laid > 30, "kept only {laid} points of a line just driven");
+
+    // Ten seconds on and barely moved: nothing is dropped.
+    keeper.saw("near", Vec2::new(20.0, 0.0), 0.3, 49.0);
+    keeper.forget_older_than(49.0);
+    assert_eq!(keeper.flattened().len(), laid + 1, "a slow wheel lost its line");
+
+    // Past the keep, the head goes and what is left still says it is a head.
+    keeper.saw("near", Vec2::new(40.0, 0.0), 0.3, 40.0 + TRAIL_KEEP_S);
+    keeper.forget_older_than(40.0 + TRAIL_KEEP_S);
+    let left = keeper.flattened();
+    assert!(left.len() < laid, "nothing aged out after {TRAIL_KEEP_S}s");
+    assert!(!left.is_empty() && left[0].half_width < 0.0, "a cut head must say so");
+
+    // A wheel gone for good takes its room with it.
+    keeper.forget_older_than(40.0 + TRAIL_KEEP_S * 3.0);
+    assert!(keeper.flattened().is_empty(), "a wheel long gone still holds room");
 }

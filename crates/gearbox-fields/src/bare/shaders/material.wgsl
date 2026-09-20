@@ -9,7 +9,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, tyre_bars, DrivenTrail}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, wheel_print, tyre_bars, DrivenTrail}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -375,7 +375,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // layout laid out is ground worn down by years of traffic. The tread comes
     // off the line that wheel drove, not out of the wheel map.
     let drove = trail_print(place, pixel_m, max(rolled_now, wheel_scar(tracks, wheels, place)));
-    let print = drove.bars;
+    // The line holds only the recent driving — it is a rolling window, not a
+    // record of the field — so where it has aged out the wheel map still has
+    // the mark, and the tread goes on being drawn from that. Without this the
+    // chevron vanished off ground the machine had crossed a minute before
+    // while the scar it left sat there for another ten.
+    let mark = sample_wheel_mark(tracks, wheels, place);
+    let kept = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
+        wheels.bar, mark.press, pixel_m);
+    let print = select(kept, drove.bars, drove.bars.x > kept.x);
     let laid = read.x;
     let bared = max(laid, rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
