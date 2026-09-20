@@ -334,7 +334,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         wheel_scar(tracks, wheels, in.world_position.xz) * 0.6,
     );
     let grit = fbm(in.world_position.xz * 1.6);
-    let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(bared)) * (0.8 + grit * 0.5);
+    let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, settled(stubble_worn(in.world_position.xz))) * (0.8 + grit * 0.5);
     // The taller of the two takes the pixel rather than the two being faded
     // together: the earth rises through the stubble's own hollows instead of
     // being washed over it, which is the difference between worn and painted.

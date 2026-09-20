@@ -171,7 +171,7 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     ground *= species_tint(grass_species(world_xz)) * dry_country(world_xz);
     // The earth under the turf, lit by the dirt map so the way is not a flat
     // band of colour laid over the field.
-    let earth = mix(edges.soil.rgb, edges.stony.rgb, settled(bared)) * (0.74 + dirt_detail * 0.86);
+    let earth = mix(edges.soil.rgb, edges.stony.rgb, settled(meadow_worn(world_xz))) * (0.74 + dirt_detail * 0.86);
     // Not a fade between the two: each brings its own relief and the taller
     // takes the pixel, so the earth comes up first through the hollows of the
     // sward and the last of the grass holds on the high ground. A plain mix

@@ -256,10 +256,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Where the wheels have worn the ground, no grass holds it — whether that
     // is a road laid out as worn, or a way beaten across a field by driving it.
     let rolled_now = wheel_scar(tracks, wheels, place);
-    let bared = max(
-        worn(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape),
-        rolled_now * 0.8,
-    );
+    let laid = worn(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
+    let bared = max(laid, rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
     // Ground changes over tens of metres as well as over inches — drainage,
     // the lie of the land, where the subsoil comes nearer the surface. Without
@@ -268,7 +266,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // A way is not simply its field with the grass off it. Driving takes the
     // fines away and brings up what was under them, so the ground it wears to
     // is a surface of its own.
-    let earth = mix(ground.tint.rgb, ground.stony.rgb, settled(bared) * ground.stony.w);
+    // Only a *way* comes down to the stone under it. A wheel passing over a
+    // field presses its soil and takes what grows in it, and reaching for the
+    // hardcore by the press alone laid a pale grey pair of tracks across a
+    // ploughed field — road metal where nothing had made a road.
+    let earth = mix(ground.tint.rgb, ground.stony.rgb, settled(laid) * ground.stony.w);
     colour = earth * mix(0.78, 1.24, country)
         * mix(0.82, 1.12, patchy) * mix(0.74, 1.16, damp_patch) * mix(0.88, 1.14, speck)
         * mix(1.0, mix(0.72, 1.24, crest), ground.grain.z);
