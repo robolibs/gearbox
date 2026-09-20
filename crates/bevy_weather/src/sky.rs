@@ -78,7 +78,6 @@ fn spawn_daylight(mut commands: Commands, settings: Res<WeatherSettings>) {
 fn synchronize_daylight(
     settings: Res<WeatherSettings>,
     mut sky_light: ResMut<SkyLight>,
-    shadows: Option<Res<crate::clouds::CloudShadowMap>>,
     mut clouds: ResMut<CloudsConfig>,
     mut sun: Query<
         (
