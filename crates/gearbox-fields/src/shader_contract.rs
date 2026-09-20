@@ -200,6 +200,29 @@ fn nothing_imports_a_cover_rule_that_is_not_there() {
     }
 }
 
+/// One stage threshold is needed on the CPU as well: the hollow under a way is
+/// cut there, and whether a way is crowned like a road or troughed like a track
+/// has to be the same decision the colour makes. Two constants, one value.
+#[test]
+fn the_cpu_and_the_shader_agree_where_a_road_begins() {
+    let all = shaders();
+    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
+    let line = cover
+        .lines()
+        .find(|line| line.trim_start().starts_with("const WAY_METALLED"))
+        .expect("cover.wgsl declares WAY_METALLED");
+    let value: f32 = line
+        .rsplit_once('=')
+        .and_then(|(_, rest)| rest.trim().trim_end_matches(';').parse().ok())
+        .expect("a number");
+    assert_eq!(
+        value,
+        crate::layout::WAY_METALLED,
+        "cover.wgsl says a road begins at {value}, the hollow says {}",
+        crate::layout::WAY_METALLED
+    );
+}
+
 /// The stages a way passes through are shared so that the ground, the grit
 /// lying on it and what still grows in it turn together. A cover that hardcodes
 /// one of the thresholds instead has its own schedule, which is the drift this

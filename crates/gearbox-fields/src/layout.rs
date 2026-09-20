@@ -182,7 +182,50 @@ mod tests {
             let z = step as f32 * 0.3;
             assert_eq!(a.depth_at(50.0, z), b.depth_at(50.0, z), "at z={z}");
         }
-        assert!(a.depth_at(50.0, 0.0) > 0.3);
+        assert!(a.depth_at(50.0, 0.0) > 0.2);
+    }
+
+    // A track is a trough and traps its water; a made road is crowned and sheds
+    // it. Which one a way is goes by the same number that decides whether stone
+    // has come up through its fines, so the hollow and the colour cannot
+    // disagree about what they are looking at.
+    #[test]
+    fn a_track_is_troughed_and_a_road_is_crowned() {
+        let way = |wear: f32| {
+            Hollows::of(
+                &serde_json::from_str::<FieldLayout>(&format!(
+                    r#"{{"default":"grassland","ways":[{{"name":"w","width":6.0,"wear":{wear},
+                        "points":[[0,0],[100,0]]}}]}}"#
+                ))
+                .unwrap(),
+            )
+        };
+        let (middle, shoulder) = (0.0, 2.4);
+        let track = way(0.3);
+        assert!(
+            track.depth_at(50.0, middle) > track.depth_at(50.0, shoulder),
+            "a soft track lies deepest down its middle"
+        );
+        let road = way(1.0);
+        assert!(
+            road.depth_at(50.0, shoulder) > road.depth_at(50.0, middle),
+            "a made road lies deepest at its shoulders"
+        );
+        // Crowned or not, the whole way still sits below the field around it.
+        assert!(road.depth_at(50.0, middle) > 0.0);
+        assert_eq!(road.depth_at(50.0, 400.0), 0.0);
+        // And it is still a road. The terrain grid is what the collider is built
+        // from, so a camber that rose sharply would be a ridge a wheel climbs
+        // rather than a fall it leans on. Measured across the running surface
+        // only — past that the hollow's own sides take over, and those are as
+        // steep as the way is deep whether it is cambered or not.
+        let steepest = (0..15)
+            .map(|step| {
+                let at = step as f32 * 0.1;
+                (road.depth_at(50.0, at) - road.depth_at(50.0, at + 0.1)).abs() / 0.1
+            })
+            .fold(0.0f32, f32::max);
+        assert!(steepest < 0.10, "a road's camber falls one in {:.0}", 1.0 / steepest);
     }
 
     // The colour and the ground must agree about a crossroads: `worn()` adds
@@ -218,7 +261,7 @@ mod tests {
     fn a_narrow_way_sinks_a_narrow_hollow() {
         let of = |width: f32| {
             let json = format!(
-                r#"{{"default":"grassland","ways":[{{"name":"w","width":{width},"wear":0.8,
+                r#"{{"default":"grassland","ways":[{{"name":"w","width":{width},"wear":0.4,
                     "points":[[0,0],[100,0]]}}]}}"#
             );
             Hollows::of(&serde_json::from_str::<FieldLayout>(&json).unwrap())
@@ -232,8 +275,9 @@ mod tests {
         assert!(reaches(&narrow) < reaches(&wide) * 0.5);
         // And not as deep, either: a groove, not a sunken lane.
         assert!(narrow.depth_at(50.0, 0.0) < wide.depth_at(50.0, 0.0) * 0.6);
-        // The wide one is untouched by any of that.
-        assert!((wide.depth_at(50.0, 0.0) - 0.36).abs() < 1e-5);
+        // The wide one is untouched by any of that: 0.08 + 0.4 * 0.35, the sink
+        // a soft track settles to, and no crown at that wear to lift its middle.
+        assert!((wide.depth_at(50.0, 0.0) - 0.22).abs() < 1e-5);
         assert!(reaches(&wide) > 4.0);
     }
 
@@ -827,6 +871,7 @@ struct Hollow {
     line: Vec<Vec2>,
     half: f32,
     sink: f32,
+    camber: f32,
     fade: f32,
     min: Vec2,
     max: Vec2,
@@ -850,10 +895,22 @@ impl Hollow {
             half,
             fade,
             // Barely marked where a lane is hardly worn, a proper sunken way
-            // where it is a road. Even at its deepest the sides are gentler
-            // than one in five, so a wheel rides in and out of it rather than
-            // catching on the lip.
+            // where it is a road. The sides stay about one in five even at its
+            // deepest, so a wheel rides in and out of it rather than catching
+            // on the lip.
             sink: (0.08 + wear.clamp(0.0, 1.0) * 0.35) * slight,
+            // A worn track is a trough down its middle and traps the water that
+            // falls on it; a *made* road is cambered so it sheds it to the
+            // shoulder, and losing that camber is how a gravel road fails. The
+            // same number decides both, because it is the same number that
+            // decides whether stone has come up through the fines.
+            //
+            // Four per cent of cross-fall, which is what an unpaved road is
+            // built to, taken as a share of the way's own width because a wide
+            // road and a narrow one are laid to the same slope. Scaled by the
+            // *sink* instead it came out at one in four — a ridge a wheel
+            // climbs rather than a camber it leans on.
+            camber: 0.04 * half * smoothstep(WAY_METALLED, 0.95, wear.clamp(0.0, 1.0)),
             min: fold(Vec2::min) - reach,
             max: fold(Vec2::max) + reach,
             line,
@@ -894,15 +951,28 @@ impl Hollows {
                 nearest = nearest.min(place.distance(leg[0] + run / length * at));
             }
             let sides = 1.0 - smoothstep(hollow.half * 0.55, hollow.half + hollow.fade, nearest);
+            // Across the way itself: a worn track lies deepest down its middle,
+            // a made road stands proud there and lies deepest at its shoulders,
+            // which is the 4 to 6 per cent of cross-slope that sheds the water
+            // off it rather than holding it.
+            let out_by = (nearest / hollow.half.max(0.05)).min(1.0);
+            let crown = hollow.camber * (1.0 - smoothstep(0.0, 0.9, out_by));
             // Where two ways meet, the lesser adds to the greater rather than
             // hiding under it — the same rule `worn()` uses for the colour, so
             // a crossroads is dug out as well as worn bare.
-            let here = hollow.sink * sides;
+            let here = (hollow.sink - crown) * sides;
             deepest = deepest.max(here) + deepest.min(here) * 0.6;
         }
         deepest
     }
 }
+
+/// Where stone begins to come up through the fines: the point a way stops
+/// being a soft track and becomes a made road. Held here as well as in
+/// `bare/shaders/cover.wgsl`, because the hollow is cut on the CPU and the
+/// colour on the GPU and the two must agree on which a way is;
+/// `shader_contract` refuses to let the two drift apart.
+pub const WAY_METALLED: f32 = 0.55;
 
 /// How far out a hollow's sides run past the worn part of the way.
 const FADE_M: f32 = 1.6;

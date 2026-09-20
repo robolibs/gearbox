@@ -102,6 +102,17 @@ through. Beside the stone a way carries `way_litter` — crumbs and dried clods 
 a field on a tyre and dropped, which are the way's own colour and not the field's, because a
 track carrying nothing but gravel reads as gravel spread over a lawn.
 
+Across the way itself the two ends of the ladder are shaped differently, and that is the one
+piece of it that is real geometry rather than shading. A worn track is a **trough** down its
+middle and traps the water that falls on it; a made road is **cambered** — four per cent of
+cross-fall from its middle to its shoulder, which is what unpaved roads are built to, and
+losing that camber is how a gravel road fails. `WAY_METALLED` decides which, and it is held in
+Rust as well as in the shader because the hollow is cut on the CPU and the colour on the GPU;
+`shader_contract` refuses to let the two drift apart. The camber is taken as a share of the
+way's own width, so a wide road and a narrow one are laid to the same slope — scaled by the
+*depth* instead, a road came out falling one in four, which is a ridge a wheel climbs rather
+than a fall it leans on.
+
 What a wheel displaces has to go somewhere, and it stands in a low **berm** just outside each
 rut, which drains and dries before the rut does and so reads paler than either the rut or the
 ground beside it. Drawn and not dug: the terrain carries a metre to the cell, so a ridge a
