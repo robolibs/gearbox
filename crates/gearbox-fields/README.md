@@ -179,9 +179,12 @@ which carries the collider as well as the mesh, so the hollow is felt by the whe
 only seen. A field carrying a `wear` but no way is not sunk: worn across its whole width
 means shading, not a trench dug down the middle of it.
 
-Every surface reads the wear the same way — meadow, stubble, ploughed and bare all wear to
-the same soil and the same hardcore under it, so a track does not change colour where it
-leaves one field for the next. `layouts/road.json` runs one lane across all three.
+Every surface reads the wear the same way — meadow, stubble, ploughed and bare all wear down
+through the same stages to the same hardcore, so a made road does not change where it leaves
+one field for the next. Each keeps its own **subsoil**, though, which is what a soft track is
+mostly showing: a lane reads a shade darker crossing a meadow than crossing stubble, the way
+a real one carries the earth of the field it has just come off. `layouts/road.json` runs one
+lane across all three.
 
 Fields meet one another over the softer of their two `soft_border` widths: what grows in
 each carries that far past its own edge and thins as it goes, and the ground washes towards
