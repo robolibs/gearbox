@@ -34,12 +34,17 @@ pub fn convert_rigid_bodies(
         ),
         (Added<UsdRigidBody>, Without<BodyAttached>),
     >,
+    parents: Query<&ChildOf>,
+    sites: Query<&crate::globe::Site>,
 ) {
     for (entity, rb, mass, gt) in &bodies {
+        let region = gearbox_globe::physics_offset(crate::globe::site_of(entity, &parents, &sites));
         let pose = match gt {
             Some(g) => {
                 let t = g.compute_transform();
-                Pose::new(vec3_to_d(t.translation), quat_to_d(t.rotation))
+                let mut translation = vec3_to_d(t.translation);
+                translation.x += region.x;
+                Pose::new(translation, quat_to_d(t.rotation))
             }
             None => Pose::IDENTITY,
         };
