@@ -371,15 +371,25 @@ mod tests {
 
     #[test]
     fn pressure_changes_private_rubber_in_both_directions() {
-        pressure_changes_rubber(false);
+        rubber_responds_to_pressure_or_load(false, false);
     }
 
     #[test]
     fn gpu_pressure_changes_uniforms_without_mutating_meshes() {
-        pressure_changes_rubber(true);
+        rubber_responds_to_pressure_or_load(true, false);
     }
 
-    fn pressure_changes_rubber(gpu: bool) {
+    #[test]
+    fn load_changes_private_rubber_at_fixed_pressure() {
+        rubber_responds_to_pressure_or_load(false, true);
+    }
+
+    #[test]
+    fn load_changes_gpu_uniforms_at_fixed_pressure() {
+        rubber_responds_to_pressure_or_load(true, true);
+    }
+
+    fn rubber_responds_to_pressure_or_load(gpu: bool, vary_load: bool) {
         let mut backend = MollaBackend::default();
         let ground = backend.insert_collider(ColliderDesc::new(Shape::Cuboid {
             half_extents: DVec3::new(5.0, 0.1, 5.0),
@@ -431,15 +441,24 @@ mod tests {
         if let Some(material) = &material {
             app.world_mut().entity_mut(rubber).insert(MeshMaterial3d(material.clone()));
         }
-        let sample = |app: &mut App, target| {
-            let hub = {
+        let sample = |app: &mut App, target, mass| {
+            let pressure = {
                 let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
+                if vary_load {
+                    physics.body_mut(chassis).unwrap().set_additional_mass(MassProps {
+                        local_com: DVec3::ZERO, mass, inertia: Inertia::Principal(DVec3::ONE),
+                    }, true);
+                }
                 physics.set_wheel_pressures(&[(wheel, target)]).unwrap();
                 for _ in 0..steps { physics.backend.step(&|_, _| false); }
-                let pressure = physics.wheel_output(wheel).unwrap().pressure.unwrap();
+                let output = physics.wheel_output(wheel).unwrap();
+                let pressure = output.pressure.unwrap();
                 assert_eq!(pressure.pressure_pa, target);
-                pressure.hub
+                let weight = (mass + 1.0) * 9.81;
+                assert!((output.normal_force - weight).abs() < weight * 0.01);
+                pressure
             };
+            let hub = pressure.hub;
             let global = GlobalTransform::from_translation(Vec3::from_array(hub.to_array().map(|v| v as f32)));
             for entity in [body, rubber] {
                 *app.world_mut().get_mut::<GlobalTransform>(entity).unwrap() = global;
@@ -463,12 +482,25 @@ mod tests {
                 reference_positions(meshes.get(handle).unwrap()).unwrap()
             };
             assert!((f64::from(positions[0][1]) + hub.y).abs() < 1e-6);
-            positions
+            eprintln!("tyre rubber gpu={gpu} mass_kg={} pressure_Pa={target} deflection_m={} loaded_radius_m={} patch_m2={}",
+                mass + 1.0, pressure.deflection, pressure.loaded_radius, pressure.patch_area);
+            (positions, pressure)
         };
-        let low = sample(&mut app, 50_000.0);
-        let high = sample(&mut app, 400_000.0);
-        assert!(high[0][1] < low[0][1] - 0.005);
-        let returned = sample(&mut app, 50_000.0);
+        let reference_pressure = if vary_load { 180_000.0 } else { 50_000.0 };
+        let (low, low_state) = sample(&mut app, reference_pressure, 100.0);
+        let (high, high_state) = sample(&mut app,
+            if vary_load { reference_pressure } else { 400_000.0 },
+            if vary_load { 400.0 } else { 100.0 });
+        if vary_load {
+            assert!(high[0][1] > low[0][1] + 0.005);
+            assert!(high_state.deflection > low_state.deflection + 0.005);
+            assert!(high_state.loaded_radius < low_state.loaded_radius - 0.005);
+            assert!(high_state.patch_area > low_state.patch_area);
+        } else {
+            assert!(high[0][1] < low[0][1] - 0.005);
+        }
+        let (returned, returned_state) = sample(&mut app, reference_pressure, 100.0);
+        assert!((returned_state.deflection - low_state.deflection).abs() < 1e-5);
         for (a, b) in returned.iter().flatten().zip(low.iter().flatten()) {
             assert!((a - b).abs() < 1e-5);
         }
