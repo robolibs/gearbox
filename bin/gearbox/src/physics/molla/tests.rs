@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "nonwaking_tests.rs"]
+mod nonwaking;
+
 fn near(a: DVec3, b: DVec3) {
     assert!((a - b).length() < 1e-8, "{a:?} != {b:?}");
 }

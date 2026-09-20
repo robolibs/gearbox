@@ -120,17 +120,17 @@ impl BodyMut for BodyAccess {
                 .set_body_pose(self.handle, convert::transform(pose)),
         );
     }
-    fn set_linvel(&mut self, linvel: DVec3, _wake: bool) {
+    fn set_linvel(&mut self, linvel: DVec3, wake: bool) {
         let mut world = self.shared.world();
         let mut velocity = world.scene.body_velocity(self.handle).expect("body handle");
         velocity.linear = linvel;
-        apply(world.scene.set_body_velocity(self.handle, velocity));
+        apply(world.scene.set_body_velocity_with_wake(self.handle, velocity, wake));
     }
-    fn set_angvel(&mut self, angvel: DVec3, _wake: bool) {
+    fn set_angvel(&mut self, angvel: DVec3, wake: bool) {
         let mut world = self.shared.world();
         let mut velocity = world.scene.body_velocity(self.handle).expect("body handle");
         velocity.angular = angvel;
-        apply(world.scene.set_body_velocity(self.handle, velocity));
+        apply(world.scene.set_body_velocity_with_wake(self.handle, velocity, wake));
     }
     fn set_kind(&mut self, kind: BodyKind, _wake: bool) {
         apply(
@@ -182,24 +182,24 @@ impl BodyMut for BodyAccess {
                 .set_body_additional_mass(self.handle, convert::mass(props)),
         );
     }
-    fn add_force(&mut self, force: DVec3, _wake: bool) {
+    fn add_force(&mut self, force: DVec3, wake: bool) {
         apply(
             self.shared
                 .world()
                 .scene
-                .add_body_wrench(self.handle, SpatialVector::new(force, DVec3::ZERO)),
+                .add_body_wrench_with_wake(self.handle, SpatialVector::new(force, DVec3::ZERO), wake),
         );
     }
-    fn add_torque(&mut self, torque: DVec3, _wake: bool) {
+    fn add_torque(&mut self, torque: DVec3, wake: bool) {
         apply(
             self.shared
                 .world()
                 .scene
-                .add_body_wrench(self.handle, SpatialVector::new(DVec3::ZERO, torque)),
+                .add_body_wrench_with_wake(self.handle, SpatialVector::new(DVec3::ZERO, torque), wake),
         );
     }
-    fn reset_forces(&mut self, _wake: bool) {
-        apply(self.shared.world().scene.reset_body_forces(self.handle));
+    fn reset_forces(&mut self, wake: bool) {
+        apply(self.shared.world().scene.reset_body_forces_with_wake(self.handle, wake));
     }
     fn apply_impulse(&mut self, impulse: DVec3, _wake: bool) {
         apply(
