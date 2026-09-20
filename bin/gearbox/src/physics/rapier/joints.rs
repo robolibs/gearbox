@@ -113,6 +113,26 @@ fn insert_axis_joint(
     local_rot0: DQuat,
     local_rot1: DQuat,
 ) -> Result<Option<MultibodyJointHandle>> {
+    let generic = axis_joint(j, local_pos0, local_pos1, local_rot0, local_rot1);
+    Ok(insert_generic(
+        multibody_joints,
+        impulse_joints,
+        body0,
+        body1,
+        generic,
+        use_multibody,
+    ))
+}
+
+/// The joint itself, apart from inserting it, so that what the two bases
+/// decide can be asserted without a physics world to put it in.
+fn axis_joint(
+    j: &ReadJoint,
+    local_pos0: DVec3,
+    local_pos1: DVec3,
+    local_rot0: DQuat,
+    local_rot1: DQuat,
+) -> GenericJoint {
     let axis_str = j.axis.as_deref().unwrap_or("X");
     let axis = match axis_str {
         "Y" => DVec3::Y,
@@ -126,7 +146,7 @@ fn insert_axis_joint(
     // converts via `Into<GenericJoint>` and Rapier's `JointSet::insert`
     // accepts either, so we don't need a wrapper enum like
     // bevy_rapier3d's `TypedJoint`.
-    let generic: GenericJoint = if same_basis {
+    if same_basis {
         match j.kind {
             JointKind::Revolute => {
                 let mut b = RevoluteJointBuilder::new(world_axis)
@@ -189,6 +209,13 @@ fn insert_axis_joint(
             _ => dof_matches_prismatic,
         };
         if let Some(d) = j.drives.iter().find(|d| dof_match(d.dof)) {
+            // The same stiffness and damping the typed path is given, meaning
+            // the same thing. Left at Rapier's default the generic motor is
+            // acceleration-based, so an authored stiffness is divided by the
+            // body's mass and the few joints that land here — on this machine
+            // the unloading conveyor and both spreaders — answer their drives
+            // quite differently from every other joint on the same machine.
+            b = b.motor_model(motor_axis, MotorModel::ForceBased);
             if let Some(target) = d.target_position {
                 b = b.motor_position(
                     motor_axis,
@@ -206,16 +233,7 @@ fn insert_axis_joint(
         let mut joint = b.build();
         joint.set_contacts_enabled(false);
         joint
-    };
-
-    Ok(insert_generic(
-        multibody_joints,
-        impulse_joints,
-        body0,
-        body1,
-        generic,
-        use_multibody,
-    ))
+    }
 }
 
 fn insert_generic(
@@ -280,4 +298,96 @@ fn vec3_array_to_d(v: [f32; 3]) -> DVec3 {
 fn quat_wxyz_to_d(q: [f32; 4]) -> DQuat {
     // USD authors as (w, x, y, z); glam DQuat::from_xyzw expects (x, y, z, w).
     DQuat::from_xyzw(q[1] as f64, q[2] as f64, q[3] as f64, q[0] as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::reader::DriveType;
+
+    fn driven(kind: JointKind, rot0: [f32; 4], rot1: [f32; 4]) -> ReadJoint {
+        ReadJoint {
+            path: "/robot/Joints/test".into(),
+            kind,
+            body0: None,
+            body1: None,
+            local_pos0: [0.0; 3],
+            local_rot0: rot0,
+            local_pos1: [0.0; 3],
+            local_rot1: rot1,
+            axis: Some("X".into()),
+            lower_limit: Some(-1.0),
+            upper_limit: Some(1.0),
+            collision_enabled: false,
+            joint_enabled: true,
+            exclude_from_articulation: false,
+            break_force: None,
+            break_torque: None,
+            min_distance: None,
+            max_distance: None,
+            cone_angle_0: None,
+            cone_angle_1: None,
+            limits: Vec::new(),
+            drives: vec![ReadDrive {
+                dof: Dof::Angular,
+                drive_type: DriveType::Force,
+                target_position: Some(0.5),
+                target_velocity: None,
+                damping: 4000.0,
+                stiffness: 40000.0,
+                max_force: Some(200000.0),
+            }],
+        }
+    }
+
+    fn built(joint: &ReadJoint) -> GenericJoint {
+        axis_joint(
+            joint,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            quat_wxyz_to_d(joint.local_rot0),
+            quat_wxyz_to_d(joint.local_rot1),
+        )
+    }
+
+    /// A joint whose two bodies hold the axis in different frames takes a
+    /// different code path from one whose bodies agree, and an authored
+    /// stiffness has to mean the same thing down both of them. Rapier's
+    /// generic motor defaults to acceleration-based, where the gain is divided
+    /// by the body's mass; the typed one is asked for force-based. Left
+    /// unequal, the three joints on a harvester that happen to differ — the
+    /// unloading conveyor and the two spreaders — answered their drives
+    /// unlike every other joint on the same machine.
+    #[test]
+    fn both_bases_drive_a_joint_the_same_way() {
+        let square = [1.0, 0.0, 0.0, 0.0];
+        let turned = [0.7071068, 0.0, 0.0, 0.7071068];
+        let agreed = built(&driven(JointKind::Revolute, square, square));
+        let differing = built(&driven(JointKind::Revolute, square, turned));
+        let model = |joint: &GenericJoint| {
+            joint.motor(JointAxis::AngX).map(|motor| motor.model).expect("a driven joint")
+        };
+        assert_eq!(
+            model(&agreed),
+            model(&differing),
+            "the same drive is applied under two different motor models"
+        );
+        assert_eq!(model(&differing), MotorModel::ForceBased);
+    }
+
+    /// Whichever path it takes, the joint's free axis is the authored one,
+    /// expressed in the frame the asset holds it in — not the raw token.
+    #[test]
+    fn the_authored_frame_turns_the_axis() {
+        let mut joint = driven(JointKind::Revolute, [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]);
+        joint.axis = Some("Z".into());
+        // A quarter turn about Y carries Z onto X.
+        let quarter = DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
+        let turned = axis_joint(&joint, DVec3::ZERO, DVec3::ZERO, quarter, quarter);
+        let free = turned.local_frame1.rotation * DVec3::X;
+        assert!(
+            free.abs_diff_eq(quarter * DVec3::Z, 1e-6),
+            "the joint's free axis is {free}, not the authored Z in its own frame"
+        );
+    }
 }
