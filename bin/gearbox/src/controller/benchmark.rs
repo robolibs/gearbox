@@ -46,6 +46,14 @@ impl Fixture {
         app.insert_resource(PhysicsWorld::with_backend(if molla {
             Box::new(MollaBackend::default())
         } else { Box::new(RapierBackend::default()) }));
+        if molla && let Some(value) = std::env::var_os("GEARBOX_BENCH_MOLLA_INTERNAL_ITERATIONS") {
+            let iterations: usize = value.to_str().unwrap().parse().expect("invalid benchmark iterations");
+            assert!((1..=64).contains(&iterations));
+            let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
+            let mut settings = physics.settings();
+            settings.internal_iterations = iterations;
+            physics.set_settings(settings);
+        }
         app.finish();
         app.cleanup();
         let root = crate::physics::benchmark::project(&mut app, &stage);
@@ -108,8 +116,8 @@ impl Fixture {
             half_extents: DVec3::new(10_000.0, 0.02, 10_000.0),
         }).translation(DVec3::new(0.0, -0.02, 0.0)).friction(1.0).restitution(0.0)).unwrap();
         physics.register_wheel_ground(ground, None).unwrap();
-        eprintln!("imported fixture: bodies={} joints={} colliders={} tyres={} mass={mass} dt={}",
-            physics.bodies().len(), physics.joints().len(), physics.colliders().len(), wheels.len(), physics.dt());
+        eprintln!("imported fixture: bodies={} joints={} colliders={} tyres={} mass={mass} settings={:?}",
+            physics.bodies().len(), physics.joints().len(), physics.colliders().len(), wheels.len(), physics.settings());
         assert_eq!(physics.joints().len(), if kubota { 31 } else { 14 });
         assert_eq!(physics.colliders().len(), if kubota { 18 } else { 19 });
         assert!((physics.dt() - 1.0 / 120.0).abs() < 1e-15, "benchmark requires 120 Hz");
@@ -283,6 +291,31 @@ fn imported_kubota_pressure_benchmark() {
             samples.sort_by(f64::total_cmp);
             eprintln!("full imported Kubota physics pressure={pressure} driving={driving}: median={:.6} p95={:.6} max={:.6} ms/step; samples={} hz=120 renderer=none controller=outside-timing",
                 samples[300], samples[570], samples[599], samples.len());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET pointing to real kubota_tractor.usdz; paired CPU timing"]
+fn imported_kubota_backend_timing() {
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    for (run, molla) in [false, true, true, false].into_iter().enumerate() {
+        let mut fixture = Fixture::load_backend(Path::new(&asset), molla);
+        for driving in [false, true] {
+            fixture.drive(if driving { 2.0 } else { 0.0 }, if driving { 0.12 } else { 0.0 });
+            for _ in 0..600 { fixture.tick(); }
+            let mut samples: Vec<_> = (0..1200)
+                .map(|_| fixture.tick().as_secs_f64() * 1000.0).collect();
+            samples.sort_by(f64::total_cmp);
+            let physics = fixture.app.world().resource::<PhysicsWorld>();
+            let speed = physics.body(fixture.chassis).unwrap().linvel().length();
+            if driving { assert!((speed - 2.0).abs() < 0.2, "{} driving speed={speed}", physics.name()); }
+            else { assert!(speed < 0.05, "{} parked speed={speed}", physics.name()); }
+            let bodies = physics.bodies();
+            let sleeping = bodies.iter().filter(|id| physics.body(**id).unwrap().is_sleeping()).count();
+            eprintln!("paired backend timing run={run} backend={} driving={driving} speed={speed:.6} sleeping={sleeping}/{} median={:.6} p95={:.6} p99={:.6} max={:.6} ms/step; samples={} hz=120 renderer=none controller=outside-timing settings={:?}",
+                physics.name(), bodies.len(), samples[600], samples[1140], samples[1188], samples[1199], samples.len(), physics.settings());
+            if molla { fixture.verify(1.8, driving); }
         }
     }
 }

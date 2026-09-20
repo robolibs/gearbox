@@ -4,6 +4,41 @@
 remains Rapier. Both implementations share Gearbox's existing body, collider,
 joint and world traits; the Molla adapter is in `bin/gearbox/src/physics/molla`.
 
+## Paired performance baseline (2026-09-20)
+
+`imported_kubota_backend_timing` is an ignored headless benchmark using fresh
+real Kubota fixtures in Rapier/Molla/Molla/Rapier order. Both use 120 Hz and
+their production-default settings, with all five controllers outside the
+physics-step timer. Molla pressure tyres are enabled at 1.8 bar; Rapier uses
+its reference collider tyre behavior. Each parked/driving case has 600 warmup
+and 1,200 timed steps. Finite-state/speed checks are assertions; timing output
+alone does not certify performance acceptance.
+
+Measured default medians: **Rapier 0.2256–0.2324 ms, Molla 0.9420–0.9487 ms**,
+about **4.1x slower**. All 26 bodies were awake on both backends. Molla's
+sub-ms median is not Rapier parity or a guarantee about latency spikes.
+
+The test-only `GEARBOX_BENCH_MOLLA_INTERNAL_ITERATIONS` override accepts 1–64
+and logs effective settings. Values 1/2 produce 2/4 Featherstone substeps;
+the production default remains 4 (eight substeps). Two substeps measured
+about 0.25 ms but failed trailer support, hitch tracking, slope and turning
+gates. Four measured about 0.48 ms but failed slope and turning gates. Neither
+configuration is accepted for production; no thresholds were relaxed.
+
+The existing `imported_kubota_solver_trace` test runs with
+`--features gearbox-sim/profile`, `GEARBOX_BENCH_ASSET` and `GEARBOX_TRACE`.
+Its instrumented profile shows costs concentrated in Featherstone, joint-loop
+responses and tyre forces. The 39-DOF/22-row loop system uses Cholesky, not a
+spectral fallback. Traced timings include overhead and must not replace the
+uninstrumented comparison.
+
+Molla `9d91efd` also corrects box-face contact midpoints without changing
+penetration depths. Final default-settings validation: seven imported tests
+pass; both ordinary backend lanes pass 87 tests with eight ignored.
+Logs: `/tmp/molla-paired-backend-baseline.log`,
+`/tmp/molla-{two,four}-substep-experiment.log`,
+`/tmp/molla-current-cpu-profile.tsv`, `/tmp/molla-midpoint-default-imported.log`.
+
 ## Latest convex-support and towing validation (2026-09-20)
 
 Molla `c95b4c3` repairs a CPU GJK distance-reduction error that intermittently
