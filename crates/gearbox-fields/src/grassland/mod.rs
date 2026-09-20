@@ -50,6 +50,7 @@ struct MeadowEdges {
     reach: Vec4,
     tread: Vec4,
     way: Mat4,
+    way_more: Mat4,
     way_shape: Vec4,
     /// What a way wears the meadow down to, shared with the bare grounds so a
     /// track does not change colour where it leaves one field for the next.
@@ -222,7 +223,8 @@ fn create_ground(
                     reach: Vec4::from_array(placed.reach),
                     tread: placed.wear.map(crate::runtime::bare_tread).unwrap_or_default(),
                     way: placed.way.packed().0,
-                    way_shape: placed.way.packed().1,
+                    way_more: placed.way.packed().1,
+                    way_shape: placed.way.packed().2,
                     soil: crate::bare::WAY_SOIL,
                     stony: crate::bare::WAY_HARDCORE,
                 },

@@ -134,6 +134,7 @@ pub struct VegetationParams {
     /// (how many, half the worn width) beside it. Fewer than two points and the
     /// wear runs down the field's own long axis.
     pub way: Mat4,
+    pub way_more: Mat4,
     pub way_shape: Vec4,
 }
 
@@ -271,9 +272,10 @@ struct VegetationUniforms {
 struct VegetationOffset(u32);
 
 fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
-    let (way, way_shape) = draw.way.packed();
+    let (way, way_more, way_shape) = draw.way.packed();
     VegetationParams {
         way,
+        way_more,
         way_shape,
         corner: draw.corner,
         chunk_size: draw.size,

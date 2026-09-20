@@ -77,7 +77,7 @@ sand.
 
 A field is always a rectangle, so on its own a `wear` can only run straight down one. A
 **way** is the line the wheels actually follow, and the field becomes merely the corridor it
-winds along inside. A field names its own with `way` (world XZ points, at most eight) and
+winds along inside. A field names its own with `way` (world XZ points, at most sixteen) and
 `way_width` (metres across the worn part; left out, as wide as the field):
 
 ```json
@@ -108,14 +108,18 @@ side, so nothing has to be told how far along the road it lies. A field that nam
 its own is worn down its long axis exactly as before.
 
 Where two roads cross the same field, both wear it and the harder of them wins, each keeping
-its own width. **Eight points are shared between the two**, so a junction fits only when the
-two stretches a field can see come to eight points between them; beyond that the crossing
-road is left out whole, with a warning saying so. Trimming either line instead would leave
-two neighbouring fields describing the same road differently and it would kink between them.
-The same eight are the limit for a single road, and a field needing more of them is warned
-and cut short. Both are the one budget: a way's points live in a single matrix in the
-material and vegetation uniforms. `layouts/junction.json` crosses a lane and a drove over
-grass and stubble, each road three points — two five-point roads would not have fitted.
+its own width. **Sixteen points are shared between the two**, so a junction fits when the two
+stretches a field can see come to sixteen points between them; beyond that the crossing road
+is left out whole, with a warning saying so. Trimming either line instead would leave two
+neighbouring fields describing the same road differently and it would kink between them. The
+same sixteen are the limit for a single road, and a field needing more of them is warned and
+cut short. Both are the one budget: a way's points live in two matrices in the material and
+vegetation uniforms. `layouts/junction.json` crosses a lane and a drove over grass and
+stubble, five points each.
+
+A road crossing open ground keeps most of its points, because the background outside the
+named fields is cut into a few large regions. So the budget is spent quickly by long roads:
+prefer as few points as the shape needs, and split a field if a warning says a road was cut.
 
 An authored way also **sinks the ground it runs over**, a little under a foot for a
 half-worn track, tapering out over a metre and a half either side. That is the terrain grid,

@@ -29,6 +29,7 @@ struct VegetationParams {
     tread: vec4<f32>,
     soft_border: f32,
     way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
 };
 
@@ -166,7 +167,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     }
     // Nothing broad-leaved survives where a way is worn; a few stragglers hold
     // on at its edge, which is where the wear is already fading.
-    let bared = worn(base, field.bounds, field.tread, field.way, field.way_shape);
+    let bared = worn(base, field.bounds, field.tread, field.way, field.way_more, field.way_shape);
     let kept = rand(id, 9u) < mix(loose, 1.0, patchiness) * (1.0 - bared);
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - FADE_M), end, distance))
         * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));

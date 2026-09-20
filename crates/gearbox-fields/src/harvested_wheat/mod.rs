@@ -53,6 +53,7 @@ struct WornStubble {
     extent: Vec4,
     tread: Vec4,
     way: Mat4,
+    way_more: Mat4,
     way_shape: Vec4,
     soil: Vec4,
     stony: Vec4,
@@ -60,13 +61,14 @@ struct WornStubble {
 
 impl WornStubble {
     fn of(placed: &crate::profile::Placed) -> Self {
-        let (way, way_shape) = placed.way.packed();
+        let (way, way_more, way_shape) = placed.way.packed();
         Self {
             extent: Vec4::new(
                 placed.bounds.min.x, placed.bounds.min.y,
                 placed.bounds.max.x, placed.bounds.max.y),
             tread: placed.wear.map(crate::runtime::bare_tread).unwrap_or_default(),
             way,
+            way_more,
             way_shape,
             soil: crate::bare::WAY_SOIL,
             stony: crate::bare::WAY_HARDCORE,

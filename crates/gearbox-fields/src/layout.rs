@@ -41,38 +41,41 @@ mod tests {
         assert!(regions.iter().any(|field| field.profile == "harvested_wheat"));
     }
 
+    // One point read back exactly as the shader's `way_point` reads it: two to
+    // a column, the first eight from one matrix and the rest from the second.
+    fn point_of(way: &Way, i: usize) -> Vec2 {
+        let (first, more, _) = way.packed();
+        let column = if i >= 8 { more.col((i - 8) / 2) } else { first.col(i / 2) };
+        if i % 2 == 0 { column.xy() } else { column.zw() }
+    }
+
     // The shader reads the points by position out of the matrix columns, so the
     // packing is a contract between two files and not an implementation detail.
     #[test]
-    fn a_way_packs_two_points_to_a_column() {
-        let points: Vec<Vec2> = (0..8).map(|i| Vec2::new(i as f32, 10.0 + i as f32)).collect();
-        let (matrix, shape) = Way::bend(&points, 2.5).packed();
-        assert_eq!(shape.x, 8.0);
+    fn a_way_packs_two_points_to_a_column_of_two_matrices() {
+        let points: Vec<Vec2> =
+            (0..Way::MOST).map(|i| Vec2::new(i as f32, 10.0 + i as f32)).collect();
+        let way = Way::bend(&points, 2.5);
+        let (_, _, shape) = way.packed();
+        assert_eq!(shape.x, Way::MOST as f32);
         assert_eq!(shape.y, 2.5);
         for (i, point) in points.iter().enumerate() {
-            let column = matrix.col(i / 2);
-            let packed = if i % 2 == 0 { column.xy() } else { column.zw() };
-            assert_eq!(packed, *point);
+            assert_eq!(point_of(&way, i), *point, "point {i}");
         }
     }
 
     #[test]
-    fn a_way_needs_two_points_and_keeps_at_most_eight() {
+    fn a_way_needs_two_points_and_keeps_at_most_sixteen() {
         assert_eq!(Way::bend(&[Vec2::ZERO], 1.0).points(), 0);
         assert_eq!(Way::straight().points(), 0);
-        let many: Vec<Vec2> = (0..12).map(|i| Vec2::splat(i as f32)).collect();
+        let many: Vec<Vec2> = (0..20).map(|i| Vec2::splat(i as f32)).collect();
         assert_eq!(Way::bend(&many, 1.0).points(), Way::MOST as u32);
     }
 
     // Points of a way, in order, read back the way a shader reads them.
     fn line_of(way: &Way) -> Vec<Vec2> {
-        let (points, shape) = way.packed();
-        (0..shape.x as usize)
-            .map(|i| {
-                let column = points.col(i / 2);
-                if i % 2 == 0 { column.xy() } else { column.zw() }
-            })
-            .collect()
+        let (_, _, shape) = way.packed();
+        (0..shape.x as usize).map(|i| point_of(way, i)).collect()
     }
 
     // The whole point of clipping rather than resampling: two fields either
@@ -192,22 +195,36 @@ mod tests {
         assert!(Hollows::of(&plain).is_empty());
     }
 
-    // Two roads crossing one field share the eight points end to end, each
+    // Two roads crossing one field share the sixteen points end to end, each
     // keeping its own width; the shader walks them as two separate lines.
     #[test]
     fn two_crossing_ways_share_the_points() {
         let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0);
         let east = Way::bend(&[Vec2::new(-50.0, 0.0), Vec2::new(0.0, 4.0), Vec2::new(50.0, 0.0)], 2.0);
         let junction = north.crossing(east);
-        let (points, shape) = junction.packed();
+        let (_, _, shape) = junction.packed();
         assert_eq!((shape.x, shape.y), (2.0, 3.0));
         assert_eq!((shape.z, shape.w), (3.0, 2.0));
         assert_eq!(junction.points(), 5);
         // The first line's two points, then the second line's three after them.
-        assert_eq!(points.col(0).xy(), Vec2::new(0.0, -50.0));
-        assert_eq!(points.col(0).zw(), Vec2::new(0.0, 50.0));
-        assert_eq!(points.col(1).xy(), Vec2::new(-50.0, 0.0));
-        assert_eq!(points.col(2).xy(), Vec2::new(50.0, 0.0));
+        assert_eq!(point_of(&junction, 0), Vec2::new(0.0, -50.0));
+        assert_eq!(point_of(&junction, 1), Vec2::new(0.0, 50.0));
+        assert_eq!(point_of(&junction, 2), Vec2::new(-50.0, 0.0));
+        assert_eq!(point_of(&junction, 4), Vec2::new(50.0, 0.0));
+    }
+
+    // A junction that spans both matrices: the second line must still be read
+    // back correctly once its points run past the eighth.
+    #[test]
+    fn a_crossing_may_run_into_the_second_matrix() {
+        let long: Vec<Vec2> = (0..7).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
+        let other: Vec<Vec2> = (0..6).map(|i| Vec2::new(30.0, i as f32 * 10.0 - 30.0)).collect();
+        let junction = Way::bend(&long, 3.0).crossing(Way::bend(&other, 2.0));
+        let (_, _, shape) = junction.packed();
+        assert_eq!((shape.x, shape.z), (7.0, 6.0));
+        for (i, point) in long.iter().chain(other.iter()).enumerate() {
+            assert_eq!(point_of(&junction, i), *point, "point {i}");
+        }
     }
 
     // Trimming either line to make room would leave two neighbouring fields
@@ -224,7 +241,7 @@ mod tests {
         assert_eq!(nothing.crossing(real), real);
         assert_eq!(real.crossing(nothing), real);
         assert_eq!(nothing.crossing(nothing), nothing);
-        assert_eq!(real.crossing(nothing).packed().1.x, 2.0);
+        assert_eq!(real.crossing(nothing).packed().2.x, 2.0);
     }
 
     #[test]
@@ -247,12 +264,12 @@ mod tests {
 
     #[test]
     fn a_crossing_that_does_not_fit_is_left_out_whole() {
-        let long: Vec<Vec2> = (0..6).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
-        let other: Vec<Vec2> = (0..5).map(|i| Vec2::new(20.0, i as f32 * 10.0 - 20.0)).collect();
+        let long: Vec<Vec2> = (0..10).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
+        let other: Vec<Vec2> = (0..9).map(|i| Vec2::new(20.0, i as f32 * 10.0 - 40.0)).collect();
         let first = Way::bend(&long, 3.0);
         let joined = first.crossing(Way::bend(&other, 2.0));
         assert_eq!(joined, first);
-        assert_eq!(joined.packed().1.z, 0.0);
+        assert_eq!(joined.packed().2.z, 0.0);
     }
 
     #[test]
@@ -269,7 +286,7 @@ mod tests {
                 "way":[[5,0],[5,100]]}"#,
         )
         .unwrap();
-        assert_eq!(spec.way().packed().1.y, 5.0);
+        assert_eq!(spec.way().packed().2.y, 5.0);
     }
 }
 
@@ -307,8 +324,8 @@ impl FieldBounds {
 /// rectangle, so without this a way can only run straight down one; with it the
 /// field is merely the corridor a track winds along inside.
 ///
-/// Eight points hold up to two lines, laid end to end: where two roads cross a
-/// field, the ground is worn by whichever of them has taken more of it. The
+/// Sixteen points hold up to two lines, laid end to end: where two roads cross
+/// a field, the ground is worn by whichever of them has taken more of it. The
 /// second is empty for the ordinary case of one road.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Way {
@@ -324,7 +341,10 @@ struct Line {
 }
 
 impl Way {
-    pub const MOST: usize = 8;
+    /// Sixteen points, two to a column of two matrices. Eight was one matrix
+    /// and too few: a road crossing a background region keeps most of its
+    /// points, so two five-point roads already overflowed a junction.
+    pub const MOST: usize = 16;
 
     /// Nothing, for a field whose wear runs down its own long axis.
     pub fn straight() -> Self {
@@ -432,15 +452,20 @@ impl Way {
         })
     }
 
-    /// For a shader: the points two to a column, then how many of them each
-    /// line takes and how wide it is worn.
-    pub fn packed(&self) -> (Mat4, Vec4) {
+    /// For a shader: the points two to a column of two matrices, the first
+    /// eight then the rest, and how many of them each line takes with how wide
+    /// it is worn.
+    pub fn packed(&self) -> (Mat4, Mat4, Vec4) {
         let pair = |i: usize| {
             let (a, b) = (self.points[i * 2], self.points[i * 2 + 1]);
             Vec4::new(a.x, a.y, b.x, b.y)
         };
+        let matrix = |from: usize| {
+            Mat4::from_cols(pair(from), pair(from + 1), pair(from + 2), pair(from + 3))
+        };
         (
-            Mat4::from_cols(pair(0), pair(1), pair(2), pair(3)),
+            matrix(0),
+            matrix(4),
             Vec4::new(
                 self.lines[0].count as f32,
                 self.lines[0].half_width,

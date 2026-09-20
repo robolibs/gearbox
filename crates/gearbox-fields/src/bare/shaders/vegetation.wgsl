@@ -30,6 +30,7 @@ struct VegetationParams {
     tread: vec4<f32>,
     soft_border: f32,
     way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
 };
 
@@ -150,7 +151,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // way, and grass holds only what is left. The same reading the ground
     // material makes, so the two agree.
     let bared = max(
-        worn(base, field.bounds, field.tread, field.way, field.way_shape),
+        worn(base, field.bounds, field.tread, field.way, field.way_more, field.way_shape),
         flat * 0.8,
     );
     let patchy_cover = taken(base);

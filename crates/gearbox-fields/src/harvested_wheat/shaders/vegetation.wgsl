@@ -30,6 +30,7 @@ struct VegetationParams {
     tread: vec4<f32>,
     soft_border: f32,
     way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
 };
 
@@ -133,7 +134,7 @@ fn blade_fade_end(rank: f32) -> f32 {
 // How far a way has worn the stubble away here. Read by all three stalk paths
 // and by the stubble material, so nothing is left standing in the road.
 fn way_wear(place: vec2<f32>) -> f32 {
-    return worn(place, field.bounds, field.tread, field.way, field.way_shape);
+    return worn(place, field.bounds, field.tread, field.way, field.way_more, field.way_shape);
 }
 
 fn stubble_detail(vertex: Vertex) -> VertexOutput {

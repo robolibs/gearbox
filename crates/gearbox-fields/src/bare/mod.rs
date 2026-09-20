@@ -259,6 +259,7 @@ pub struct BareGround {
     /// (how many, half the worn width) beside it. Fewer than two points and the
     /// wear runs down the field's own long axis, which is every straight way.
     pub way: Mat4,
+    pub way_more: Mat4,
     pub way_shape: Vec4,
 }
 
@@ -471,7 +472,7 @@ fn ground(
     bare.south = placed.tint[2];
     bare.north = placed.tint[3];
     bare.reach = Vec4::from_array(placed.reach);
-    (bare.way, bare.way_shape) = placed.way.packed();
+    (bare.way, bare.way_more, bare.way_shape) = placed.way.packed();
     // A road laid across the layout wears whatever it crosses, so a ploughed or
     // sandy field is worn along it too — not only the profiles that are ways in
     // themselves and set a tread of their own.

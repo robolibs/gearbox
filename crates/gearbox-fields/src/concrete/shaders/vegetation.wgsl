@@ -31,6 +31,7 @@ struct VegetationParams {
     tread: vec4<f32>,
     soft_border: f32,
     way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
 };
 

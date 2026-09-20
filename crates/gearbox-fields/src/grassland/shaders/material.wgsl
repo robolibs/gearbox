@@ -25,6 +25,7 @@ struct MeadowEdges {
     reach: vec4<f32>,
     tread: vec4<f32>,
     way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
     soil: vec4<f32>,
     stony: vec4<f32>,
@@ -36,7 +37,7 @@ struct MeadowEdges {
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn}
 
 fn meadow_worn(place: vec2<f32>) -> f32 {
-    return worn(place, edges.extent, edges.tread, edges.way, edges.way_shape);
+    return worn(place, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
 }
 
 // The sward washed into whatever lies across each side, so a meadow meets a

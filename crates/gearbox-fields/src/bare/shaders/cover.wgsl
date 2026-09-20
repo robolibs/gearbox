@@ -49,10 +49,14 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, rand(seed, 33u)));
 }
 
-// One point of a way: eight of them live two to a column of the matrix, which
-// spares both uniforms an array and the shared file a struct to import.
-fn way_point(way: mat4x4<f32>, i: i32) -> vec2<f32> {
-    let pair = way[i / 2];
+// One point of a way: sixteen of them live two to a column of two matrices,
+// which spares both uniforms an array and the shared file a struct to import.
+// The column is worked out before either matrix is read, so neither is ever
+// indexed past its fourth column.
+fn way_point(way: mat4x4<f32>, more: mat4x4<f32>, i: i32) -> vec2<f32> {
+    let late = i >= 8;
+    let column = select(i, i - 8, late) / 2;
+    let pair = select(way[column], more[column], late);
     return select(pair.xy, pair.zw, (i & 1) == 1);
 }
 
@@ -64,11 +68,12 @@ fn way_point(way: mat4x4<f32>, i: i32) -> vec2<f32> {
 // is what the wander is drawn from: it is a place in the world, the same from
 // either side of a field boundary, so no part of the road has to be told how
 // far along it lies.
-fn way_offset(place: vec2<f32>, way: mat4x4<f32>, begin: i32, count: i32) -> vec4<f32> {
+fn way_offset(place: vec2<f32>, way: mat4x4<f32>, more: mat4x4<f32>,
+              begin: i32, count: i32) -> vec4<f32> {
     var found = vec4<f32>(0.0, 0.0, 0.0, 1e30);
     for (var i = begin; i < begin + count - 1; i = i + 1) {
-        let a = way_point(way, i);
-        let leg = way_point(way, i + 1) - a;
+        let a = way_point(way, more, i);
+        let leg = way_point(way, more, i + 1) - a;
         let length_of = max(length(leg), 1e-4);
         let heading = leg / length_of;
         let at = clamp(dot(place - a, heading), 0.0, length_of);
@@ -103,7 +108,7 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>)
 // first and the wear runs down the field's own long axis, which is every
 // straight way.
 fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
-        way: mat4x4<f32>, shape: vec4<f32>) -> f32 {
+        way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> f32 {
     if (tread.z <= 0.0) {
         return 0.0;
     }
@@ -118,10 +123,11 @@ fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         let against = vec4<f32>(middle + vec2<f32>(-across.y, across.x) * along, off, abs(off));
         return worn_along(place, against, abs(dot(span, across)) * 0.5, tread);
     }
-    var most = worn_along(place, way_offset(place, way, 0, first), max(shape.y, 0.1), tread);
+    let along_first = way_offset(place, way, more, 0, first);
+    var most = worn_along(place, along_first, max(shape.y, 0.1), tread);
     let second = i32(shape.z);
     if (second >= 2) {
-        let crossing = way_offset(place, way, first, second);
+        let crossing = way_offset(place, way, more, first, second);
         most = max(most, worn_along(place, crossing, max(shape.w, 0.1), tread));
     }
     return most;

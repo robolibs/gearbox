@@ -30,6 +30,7 @@ struct VegetationParams {
     tread: vec4<f32>,
     soft_border: f32,
     way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
 };
 
@@ -130,7 +131,7 @@ fn sample_field(world_xz: vec2<f32>) -> vec3<f32> {
 // How far a way has worn the sward away here. Read by both blade paths and by
 // the meadow material, so the grass stops exactly where the earth shows.
 fn way_wear(place: vec2<f32>) -> f32 {
-    return worn(place, field.bounds, field.tread, field.way, field.way_shape);
+    return worn(place, field.bounds, field.tread, field.way, field.way_more, field.way_shape);
 }
 
 fn meadow_noise(p: vec2<f32>) -> f32 {

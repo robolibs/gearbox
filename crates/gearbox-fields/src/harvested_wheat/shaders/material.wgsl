@@ -23,6 +23,7 @@ struct WornStubble {
     extent: vec4<f32>,
     tread: vec4<f32>,
     way: mat4x4<f32>,
+    way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
     soil: vec4<f32>,
     stony: vec4<f32>,
@@ -35,7 +36,7 @@ struct WornStubble {
 
 fn stubble_worn(place: vec2<f32>) -> f32 {
     return worn(place, worn_ground.extent, worn_ground.tread,
-        worn_ground.way, worn_ground.way_shape);
+        worn_ground.way, worn_ground.way_more, worn_ground.way_shape);
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
