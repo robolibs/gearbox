@@ -381,7 +381,7 @@ fn imported_krampe_parking_support() {
         let physics = fixture.app.world().resource::<PhysicsWorld>();
         let body = physics.body(fixture.chassis).unwrap();
         let (roll, pitch) = machine_roll_pitch_rad(body);
-        eprintln!("parked trailer: backend={} pressure={pressure:?} roll={roll} pitch={pitch} speed={} position={:?}", physics.name(), body.linvel().length(), body.translation());
+        eprintln!("parked trailer: backend={} pressure={pressure:?} roll={roll} pitch={pitch} speed={} velocity={:?} angular={:?} position={:?}", physics.name(), body.linvel().length(), body.linvel(), body.angvel(), body.translation());
         for wheel in &fixture.wheels {
             let output = physics.wheel_output(*wheel);
             eprintln!("wheel {wheel:?}: position={:?} normal_force={:?} pressure={:?}", physics.body(*wheel).unwrap().translation(), output.map(|out| out.normal_force), output.and_then(|out| out.pressure).map(|p| (p.pressure_pa, p.deflection)));

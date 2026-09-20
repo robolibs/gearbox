@@ -417,6 +417,49 @@ Next: isolate the uncoupled support dynamics against the same-scene reference,
 fix the underlying fault, then repeat all towing/pressure/detach gates and
 deterministic replay. These debug runs do not establish performance parity.
 
+### Scalar stop reaction correction (Molla `1a1cf89`)
+
+The nose-up failure above exposed a Featherstone joint-limit bug: scalar
+coordinate clamping discarded relative motion without transmitting the stop's
+reaction through the other connected bodies. A minimal free two-body slider
+lost the entire expected -0.8 kg m/s momentum under a -8 N, 0.1 s load.
+Molla now solves unilateral stop reactions with the articulation mass matrix
+before the existing integration phase. Coupled active-set validation replaces
+an initial fixed-iteration projection that failed a 1000:1:1000 mass test.
+The fix does not freeze bodies or change assets, tyre parameters or collisions.
+
+The final CPU suite passes 382 tests (five ignored). Tests cover force and
+torque momentum transfer at lower/upper scalar stops, release, coupled impact
+energy loss, translation invariance and large mass ratios. Ball/D6 multi-axis
+limits and GPU joint-limit parity are not covered by this scalar CPU change.
+
+With the final solver, all five imported Kubota gates pass. The Krampe's gross
+nose-up tip is gone, but its unchanged parking gate **still fails**:
+
+| Pressure | Pitch (rad) | Speed (m/s) | Vertical velocity (m/s) |
+| --- | ---: | ---: | ---: |
+| 0.5 bar | +0.13173 | 0.07754 | +0.07430 |
+| 1.8 bar | +0.13663 | 0.04966 | -0.04925 |
+| 4 bar | +0.13286 | 0.00296 | -0.00258 |
+
+The low-pressure failure is mostly vertical rocking, not the previous gross
+tip. It remains to be fixed against the existing <0.05 m/s requirement. Logs:
+`/tmp/molla-limit-active-full.log`, `/tmp/gearbox-limit-active-imported.log`.
+Ordinary selected-backend binary suites pass 87 tests each, seven ignored;
+`/tmp/gearbox-limit-active-{molla,rapier}-regression.log`.
+
+Native build passed and a fresh standalone Krampe viewer at 0.5 bar was
+observed for 20 s. Final pitch +0.11513 rad, with no rejected/quarantined/
+non-finite log diagnostics. The rear-view screenshot was inspected; it is
+not a matched side-view comparison or tow/detach validation. Owned instance
+`molla-limit-fixed` was explicitly stopped. Evidence:
+`/tmp/molla-limit-fixed{.log,.png,-state.jsonl}`.
+
+The mixed functional run's CPU-step medians were 1.018–1.056 ms. They exceed
+the target, and overlapping build/test/viewer work prevents a controlled
+comparison. Profile/reuse the added mass solve and repeat isolated timings;
+do not claim performance parity or completed trailer acceptance from this fix.
+
 ### Commands
 
 Use the repository Nix environment; the host Rust compiler is too old for this
