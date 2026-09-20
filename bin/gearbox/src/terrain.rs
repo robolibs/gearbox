@@ -458,6 +458,13 @@ fn heightfield_collider(grid: &HeightGrid) -> ColliderDesc {
     })
 }
 
+#[cfg(test)]
+pub(crate) fn benchmark_meadow_collider() -> ColliderDesc {
+    heightfield_collider(&HeightGrid::sample(SIZE_M, CELL_M, meadow_height))
+        .friction(1.4)
+        .restitution(0.0)
+}
+
 /// A USD terrain that reaches its collider takes over the ground.
 fn retire_for_usd_terrain(
     mut commands: Commands,

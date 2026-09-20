@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 #[path = "benchmark/fleet.rs"]
 mod fleet;
 
+#[path = "benchmark/terrain.rs"]
+mod terrain;
+
 #[derive(Clone)]
 struct FleetMachine {
     chassis: BodyId,
