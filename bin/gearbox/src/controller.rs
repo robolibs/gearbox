@@ -1075,6 +1075,13 @@ fn apply_builtin_ackermann_cmd_vel(
     parents: Query<&ChildOf>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut steering_log_at: Local<f32>,
+    // Where the steering actually stands, machine by machine. A command names
+    // the angle the wheels are *wanted* at; they arrive at it over a couple of
+    // seconds, because a steering box is turned by hand or by a ram and neither
+    // goes lock to lock in a frame. Applied straight through, a machine snapped
+    // to full lock the instant it was asked to turn, which no machine does and
+    // which put a corner in its own tracks.
+    mut steer_held: Local<HashMap<ControllerKey, f64>>,
 ) {
     if !active.0 || inventory.machines.is_empty() {
         return;
@@ -1149,19 +1156,36 @@ fn apply_builtin_ackermann_cmd_vel(
             let max_steer_deg = controller.max_steer_deg.unwrap_or(45.0);
             let steering_input = ui_drive.steering.get(&key).copied()
                 .filter(|_| ui_drive.commands.contains_key(&key));
-            let steer_target_rad = steering_input
+            let steer_wanted = steering_input
                 .map(|input| input as f64 * (max_steer_deg as f64).to_radians())
                 .unwrap_or_else(|| steering_target_radians(
                     cmd.linear_mps, cmd.angular_rps, wheel_base_m, max_steer_deg,
                 ));
+            // Lock to lock in `STEER_SWEEP_S`, so full lock one way from full
+            // lock the other takes twice that.
+            const STEER_SWEEP_S: f64 = 1.0;
+            let steer_target_rad = {
+                let full = (max_steer_deg as f64).to_radians().max(1e-3);
+                let step = full / STEER_SWEEP_S * time.delta_secs_f64();
+                let held = steer_held.entry(key.clone()).or_insert(0.0);
+                let wanted = steer_wanted.clamp(-full, full);
+                *held += (wanted - *held).clamp(-step, step);
+                *held
+            };
             let geometry = controller
                 .steering_geometry
                 .as_deref()
                 .unwrap_or("ackermann");
+            // The geometry solver is given the steering as it *stands*, not as
+            // it was asked for, or it would swing the wheels to full lock while
+            // the fallback above was still winding them round.
+            let steering_now = steering_input.map(|_| {
+                (steer_target_rad / (max_steer_deg as f64).to_radians().max(1e-3)) as f32
+            });
             let turn = steering::solve(
                 scene_root, controller, machine, &joints, &parents, &physics,
                 body_handle, cmd,
-                steering_input,
+                steering_now,
             );
             let steer_targets = turn.as_ref().map(|turn| turn.targets())
                 .unwrap_or_else(|| steering_joint_targets(
@@ -2400,7 +2424,7 @@ fn record_wheel_tracks(
             if site != crate::globe::current_site() {
                 continue;
             }
-            let p = rapier3d::math::Vector::new(p[0], p[1], p[2]);
+            let p = DVec3::new(p[0], p[1], p[2]);
             let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
             let contact_point = if let Some(output) = tyre {
                 values.set(&machine.id, &link.name, "normal_force", output.normal_force);
@@ -2409,7 +2433,7 @@ fn record_wheel_tracks(
                     continue;
                 }
                 Vec3::new(
-                    output.contact_point.x as f32,
+                    (output.contact_point.x - gearbox_globe::physics_offset(site).x) as f32,
                     output.contact_point.y as f32,
                     output.contact_point.z as f32,
                 )
@@ -2464,11 +2488,11 @@ fn record_wheel_tracks(
                 position: contact_point,
                 direction: roll,
                 width: tyre.and_then(|out| out.pressure).map_or(width, |p| p.patch_width) as f32,
+                length: tyre.and_then(|out| out.pressure).map(|p| p.patch_length as f32),
                 scrub: scrub.clamp(0.0, 1.0),
                 travelled,
                 anchor,
                 centreline,
-                length: tyre.and_then(|out| out.pressure).map(|p| p.patch_length as f32),
             });
         }
     }
@@ -4854,7 +4878,7 @@ fn publish_machine_controller_states(
                 };
                 let p = body.position().translation;
                 let (region, p) = crate::globe::site_local(p.x, p.y, p.z);
-                let p = rapier3d::math::Vector::new(p[0], p[1], p[2]);
+                let p = DVec3::new(p[0], p[1], p[2]);
                 let heading = body_forward_vector(body)
                     .map(|f| f.x.atan2(f.z))
                     .unwrap_or(0.0);

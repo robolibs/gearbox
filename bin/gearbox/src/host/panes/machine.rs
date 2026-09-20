@@ -48,6 +48,26 @@ fn tyre_pressure_status(playing: bool, mut pressures: impl Iterator<Item = (f64,
     }
 }
 
+/// What a pod in a shared container calls itself. The link name is left out
+/// when it only repeats the controller's, which on an authored machine it
+/// usually does.
+fn named(pod: Pod, controller: &ControllerSpec, link: Option<&LinkSpec>) -> Pod {
+    let pod = pod.with_readout("controller", controller.instance.clone());
+    match link.filter(|l| l.name != controller.instance) {
+        Some(l) => pod.with_readout("link", l.name.clone()),
+        None => pod,
+    }
+}
+
+/// A gauge reading, as one figure when every tyre in the group agrees.
+fn applied_range(low: f64, high: f64) -> String {
+    if (high - low).abs() < 0.005 {
+        format!("{low:.2} bar")
+    } else {
+        format!("{low:.2}–{high:.2} bar")
+    }
+}
+
 /// The link a service controller's joint moves, if any.
 fn service_link<'a>(machine: &'a MachineInstanceSpec, c: &'a ControllerSpec) -> Option<&'a LinkSpec> {
     controller_joints(machine, c)
@@ -266,7 +286,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
 
     // Variants of the machine prim: a row per set, a button per option.
     let variants = machine_variants(world, scene_root, &machine.prim_path);
-    let mut variants_offset = pods.len();
+    let variants_offset = pods.len();
     if !variants.is_empty() {
         for (i, (set, selection, options)) in variants.iter().enumerate() {
             pods.push(options.iter().fold(
@@ -293,7 +313,8 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         t if DRIVE_TYPES.contains(&t) => 0,
         "builtin:hitch" => 1,
         "builtin:pto" => 2,
-        _ => 3,
+        "builtin:joint_position" | "builtin:joint_velocity" => 3,
+        _ => 4,
     });
 
     for controller in ordered {
@@ -305,6 +326,12 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         let (group, title, icon) = match ty {
             "builtin:hitch" => ("hitches".to_string(), "Hitches".to_string(), "arrow-up"),
             "builtin:pto" => ("pto".to_string(), "PTO".to_string(), "arrow-sync"),
+            // Every joint under one header. A harvester authors a dozen of
+            // them — doors, hoods, rotors — and one collapsible each buried
+            // the rest of the machine under a column of near-identical headers.
+            "builtin:joint_position" | "builtin:joint_velocity" => {
+                ("joints".to_string(), "Joints".to_string(), "options")
+            }
             t if DRIVE_TYPES.contains(&t) => {
                 (format!("c:{}", controller.instance), own_title, "vehicle-tractor")
             }
@@ -387,10 +414,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
             match ty {
                 "builtin:hitch" | "builtin:joint_position" => {
                     let position = link_value(values, &machine, link, "position").unwrap_or(0.0);
-                    pod = pod.with_readout("controller", controller.instance.clone());
-                    if let Some(l) = link {
-                        pod = pod.with_readout("link", l.name.clone());
-                    }
+                    pod = named(pod, controller, link);
                     if let Some(r) = link_value(values, &machine, link, "range") {
                         pod = pod.with_readout("range", format!("{r:.3} rad"));
                     }
@@ -400,16 +424,14 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                     let rpm = link_value(values, &machine, link, "rpm").unwrap_or(540.0);
                     let engaged = link_value(values, &machine, link, "engaged").unwrap_or(0.0) > 0.5;
                     ctx.sync_toggles(pod_id, &[engaged]);
-                    pod = pod.with_readout("controller", controller.instance.clone());
-                    if let Some(l) = link {
-                        pod = pod.with_readout("link", l.name.clone());
-                    }
+                    pod = named(pod, controller, link);
                     pod = pod
                         .with_readout("rpm", format!("{:.0}", rpm.clamp(0.0, 1200.0)))
                         .with_toggle_initial("engaged", accent, engaged);
                 }
                 "builtin:joint_velocity" => {
                     let vel = link_value(values, &machine, link, "velocity").unwrap_or(0.0);
+                    pod = named(pod, controller, link);
                     pod = pod.with_slider("velocity", clamp(vel, -120.0, 120.0), -120.0..=120.0, 1, " rad/s", accent);
                 }
                 "builtin:hydraulic_valve" => {
@@ -507,21 +529,6 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         }
     }
 
-    // Container pod responses follow the tab's own pods, in order.
-    let mut blocks: Vec<Block> = Vec::new();
-    let mut containers: Vec<TabContainer> = Vec::new();
-    let mut next = pods.len();
-    for (group, title, icon, members) in groups {
-        let mut group_pods = Vec::with_capacity(members.len());
-        for (pod, mut block) in members {
-            block.pod = next;
-            next += 1;
-            group_pods.push(pod);
-            blocks.push(block);
-        }
-        containers.push(TabContainer::new(cid(P, &group), title, icon, group_pods));
-    }
-
     let tyres: Vec<_> = machine.links.links.iter().filter_map(|link| {
         let current = values.get(&machine.id, &link.name, "tyre_pressure_bar")?;
         let target = values.get(&machine.id, &link.name, "tyre_target_pressure_bar")?;
@@ -549,14 +556,13 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
             let applied_low = tyres.iter().map(|t| t.1).fold(f64::INFINITY, f64::min);
             let applied_high = tyres.iter().map(|t| t.1).fold(f64::NEG_INFINITY, f64::max);
             tyre_pods.push(Pod::new(pid(P, "tyres-all", 0))
-                .with_readout("tyre pressure", "bar (gauge)")
+                .with_readout("gauge", applied_range(applied_low, applied_high))
                 .with_readout("changes", tyre_pressure_status(
                     world.resource::<gearbox_api::PhysicsActive>().0,
                     tyres.iter().map(|t| (t.1, t.2)),
                 ))
-                .with_readout("applied pressure", format!("{applied_low:.2}–{applied_high:.2} bar"))
-                .with_readout("targets", if matched { "matched" } else { "mixed" })
-                .with_slider("all tyres", clamp(target, low, high), low..=high, 2, " bar", accent));
+                .with_readout("targets", if matched { "all one" } else { "mixed" })
+                .with_slider("every tyre", clamp(target, low, high), low..=high, 2, " bar", accent));
         }
         let mut axles = std::collections::BTreeMap::<u16, Vec<usize>>::new();
         for (i, tyre) in tyres.iter().enumerate() {
@@ -571,7 +577,6 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
             let high = members.iter().map(|&i| tyres[i].4).fold(f64::INFINITY, f64::min);
             if low > high { continue; }
             let target = members.iter().map(|&i| tyres[i].2).sum::<f64>() / members.len() as f64;
-            let matched = members.iter().all(|&i| (tyres[i].2 - target).abs() < 0.005);
             let applied_low = members.iter().map(|&i| tyres[i].1).fold(f64::INFINITY, f64::min);
             let applied_high = members.iter().map(|&i| tyres[i].1).fold(f64::NEG_INFINITY, f64::max);
             let pod = pid(P, "tyre-axle", usize::from(axle));
@@ -580,10 +585,9 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 pod: tyre_pods.len(), links: members.iter().map(|&i| tyres[i].0.name.clone()).collect(),
             });
             tyre_pods.push(Pod::new(pod)
-                .with_readout("axle", format!("{axle} · {} tyres", members.len()))
-                .with_readout("applied pressure", format!("{applied_low:.2}–{applied_high:.2} bar"))
-                .with_readout("targets", if matched { "matched" } else { "mixed" })
-                .with_slider("axle target", clamp(target, low, high), low..=high, 2, " bar", accent));
+                .with_readout(format!("axle {axle}"), format!("{} tyres", members.len()))
+                .with_readout("gauge", applied_range(applied_low, applied_high))
+                .with_slider("axle", clamp(target, low, high), low..=high, 2, " bar", accent));
         }
         for (i, (link, current, target, low, high)) in tyres.iter().enumerate() {
             let radius = values.get(&machine.id, &link.name, "tyre_loaded_radius_m").unwrap_or(0.0);
@@ -595,25 +599,35 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                 links: vec![link.name.clone()],
             });
             tyre_pods.push(Pod::new(pid(P, "tyre", i))
-                .with_readout("wheel", link.name.clone())
-                .with_readout("applied pressure", format!("{current:.2} bar"))
+                .with_readout(link.name.clone(), format!("{current:.2} bar"))
                 .with_readout("deflection", deflection.map_or_else(|| "—".into(), |m| format!("{:.1} mm", m * 1000.0)))
-                .with_readout("loaded radius", format!("{radius:.3} m"))
-                .with_readout("tread contact area", format!("{area:.4} m²"))
-                .with_slider("target pressure", clamp(*target, *low, *high), *low..=*high, 2, " bar", accent));
+                .with_readout("loaded radius / patch", format!("{radius:.3} m · {area:.4} m²"))
+                .with_slider("target", clamp(*target, *low, *high), *low..=*high, 2, " bar", accent));
         }
     }
 
-    let tyre_offset = 2;
-    let tyre_count = tyre_pods.len();
-    for block in &mut tyre_blocks {
-        block.pod += tyre_offset;
+    // Container pod responses follow the tab's own pods, in the order the
+    // containers are listed, so the tyres are numbered where they are shown.
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut containers: Vec<TabContainer> = Vec::new();
+    let mut next = pods.len();
+    if !tyre_pods.is_empty() {
+        for block in &mut tyre_blocks {
+            block.pod += next;
+        }
+        next += tyre_pods.len();
+        containers.push(TabContainer::new(cid(P, "tyres"), "Tyres", "circle", tyre_pods));
     }
-    for block in &mut blocks {
-        block.pod += tyre_count;
+    for (group, title, icon, members) in groups {
+        let mut group_pods = Vec::with_capacity(members.len());
+        for (pod, mut block) in members {
+            block.pod = next;
+            next += 1;
+            group_pods.push(pod);
+            blocks.push(block);
+        }
+        containers.push(TabContainer::new(cid(P, &group), title, icon, group_pods));
     }
-    variants_offset += tyre_count;
-    pods.splice(tyre_offset..tyre_offset, tyre_pods);
 
     world.insert_resource(MachineBuildCache(Some((
         list,
