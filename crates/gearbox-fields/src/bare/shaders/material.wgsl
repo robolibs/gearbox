@@ -124,15 +124,13 @@ struct Comb {
     worked: f32,
 };
 
-fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
+fn comb(place: vec2<f32>, spacing: f32) -> Comb {
     // One heading to a field, taken from the field itself. Hashing a grid of
     // plots instead turns the furrows through a new angle wherever a field
     // happens to cross a plot line, which no plough has ever done.
-    let field_span = ground.extent.zw - ground.extent.xy;
-    var plot = floor(place / plot_m);
-    if (field_span.x > 1.0 && field_span.y > 1.0) {
-        plot = floor(ground.extent.xy / 8.0);
-    }
+    let span = ground.extent.zw - ground.extent.xy;
+    let worked_field = span.x > 1.0 && span.y > 1.0;
+    let plot = select(floor(place / 128.0), floor(ground.extent.xy / 8.0), worked_field);
     let heading = hash21(plot) * 3.1415927;
     let lean = vec2<f32>(cos(heading), sin(heading));
     let along = dot(place, lean);
@@ -146,8 +144,6 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
         + sin(along * 0.0143 + hash21(plot + 11.0) * 6.28) * 0.5) * strays;
     let across = dot(place, vec2<f32>(-lean.y, lean.x)) / max(spacing, 0.05) + wander;
     let furrow = floor(across);
-    let within = abs(fract(place / plot_m) - vec2<f32>(0.5)) * 2.0;
-    let edge = max(within.x, within.y);
     var comb: Comb;
     // A furrow is not a wave. The plough turns a slice over, so the ridge
     // stands up sharply on the side it was laid from and falls away long and
@@ -164,20 +160,18 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
         into);
     comb.depth = mix(0.72, 1.28, hash21(vec2<f32>(furrow, plot.x + plot.y * 7.0)))
         * mix(0.45, 1.2, strength);
-    // A plough turns on the headland — a strip round the edge of the field
-    // worked over rather than drawn through — and the field's own boundary is
-    // as much an edge as a plot line is. Without this the furrows run at full
-    // depth into whatever is next door and stop mid-stride on the line.
-    let span = ground.extent.zw - ground.extent.xy;
+    // A plough turns on the headland: a strip round the edge of the field
+    // worked over rather than drawn through. Without it the furrows run at
+    // full depth into whatever is next door and stop mid-stride on the line.
     var boundary = 1.0;
-    if (span.x > 1.0 && span.y > 1.0) {
+    if (worked_field) {
         let to_edge = min(
             min(place.x - ground.extent.x, ground.extent.z - place.x),
             min(place.y - ground.extent.y, ground.extent.w - place.y));
         // A headland is about a machine's width, and it is not ruled either.
         boundary = smoothstep(0.0, 5.5, to_edge + (lattice(place, 7.0) - 0.5) * 2.2);
     }
-    comb.worked = (1.0 - smoothstep(0.86, 0.99, edge)) * boundary;
+    comb.worked = boundary;
     return comb;
 }
 
@@ -262,7 +256,7 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
     let lumps = clods(place / (clod * 0.9) + vec2<f32>(17.0, 4.0));
     let crumb = mix(0.5, ground_fbm(place / (clod * 0.22), 2), close);
     let grit = mix(0.5, clods(place / (clod * 0.25) + vec2<f32>(3.0, 29.0)), close);
-    let drawn = comb(place, ground.grain.w, 128.0);
+    let drawn = comb(place, ground.grain.w);
     let combed = drawn.crest * drawn.depth * drawn.worked;
     let broken = 1.0 + (1.0 - drawn.worked) * 1.4;
     // Cracks are cut into the ground, not laid on it, so they belong to the
@@ -299,7 +293,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let clod = max(ground.grain.x, 0.05);
     let patchy = ground_fbm(place / 7.0 + vec2<f32>(3.3, 8.8), 3);
     let speck = mix(0.5, ground_fbm(place / (clod * 0.3), 2), close);
-    let shade = comb(place, ground.grain.w, 128.0);
+    let shade = comb(place, ground.grain.w);
     let stripes_seen = 1.0 - smoothstep(ground.grain.w * 0.18, ground.grain.w * 0.9, pixel_m);
     let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
     // Where the wheels have worn the ground, no grass holds it — whether that
