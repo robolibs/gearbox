@@ -29,7 +29,7 @@ fn wheel_texel(tex: texture_2d<u32>, index: vec2<i32>, recovery: f32) -> vec3<f3
 // back in minutes — that is what `recovery_seconds` is for — but the ground it
 // was pressed into stays showing far longer, so one map is read on two clocks.
 // Nothing can outlast the stamp clock itself, which spans an hour.
-const SCAR_SECONDS: f32 = 3000.0;
+const SCAR_SECONDS: f32 = 720.0;
 
 fn sample_wheels_over(tex: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>,
                       recovery: f32) -> vec3<f32> {
