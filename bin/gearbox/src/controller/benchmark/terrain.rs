@@ -1,5 +1,48 @@
 use super::*;
 
+#[cfg(feature = "profile")]
+#[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET and GEARBOX_TRACE; Molla meadow trace"]
+fn imported_kubota_meadow_trace() {
+    use tracing_subscriber::prelude::*;
+
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    let path = std::env::var_os("GEARBOX_TRACE").expect("set GEARBOX_TRACE");
+    let mut fixture = Fixture::load_backend(Path::new(&asset), true);
+    let meadow = crate::terrain::benchmark_meadow_collider();
+    {
+        let mut physics = fixture.app.world_mut().resource_mut::<PhysicsWorld>();
+        let ground = physics.collider_mut(fixture.ground).unwrap();
+        ground.set_shape(meadow.shape);
+        ground.set_position(meadow.pose);
+        ground.set_friction(meadow.friction.unwrap());
+    }
+    for _ in 0..600 {
+        fixture.tick();
+    }
+    fixture.drive(2.0, 0.12);
+    for _ in 0..600 {
+        fixture.tick();
+    }
+    fixture.verify(1.8, true);
+    let (layer, flush) = tracing_chrome::ChromeLayerBuilder::new()
+        .file(path)
+        .include_args(true)
+        .build();
+    let subscriber = tracing_subscriber::registry().with(layer.with_filter(
+        tracing_subscriber::EnvFilter::new("off,molla_solvers=debug"),
+    ));
+    let dispatch = tracing::Dispatch::new(subscriber);
+    {
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        for _ in 0..120 {
+            fixture.tick();
+        }
+    }
+    drop(flush);
+    fixture.verify(1.8, true);
+}
+
 #[test]
 #[ignore = "requires GEARBOX_BENCH_ASSET; full-resolution viewer terrain timing"]
 fn imported_kubota_meadow_timing() {
