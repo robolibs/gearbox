@@ -240,7 +240,11 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, super::clumps::sorrel(share * 15.0, 32.0),
-                super::clumps::flat_weeds(share * 0.25, 30.0)],
+                super::clumps::flat_weeds(share * 0.25, 30.0),
+                // A stubble is the seed bank's own field: what the combine left
+                // comes up through it within the fortnight.
+                super::clumps::dandelion(share * 1.2, 34.0),
+                super::clumps::nettle(share * 0.35, 30.0)],
                 ground: create_ground,
             });
     }
