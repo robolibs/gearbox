@@ -73,6 +73,50 @@ with a different field up each side: each of the four sides is washed towards it
 neighbour, so the same lane is dark where it meets ploughed earth and pale where it meets
 sand.
 
+## Ways: a road that is not the shape of a field
+
+A field is always a rectangle, so on its own a `wear` can only run straight down one. A
+**way** is the line the wheels actually follow, and the field becomes merely the corridor it
+winds along inside. A field names its own with `way` (world XZ points, at most eight) and
+`way_width` (metres across the worn part; left out, as wide as the field):
+
+```json
+{ "name": "winding-lane", "profile": "track", "wear": 0.7,
+  "min": [96, -120], "max": [120, 120], "way_width": 6.0,
+  "way": [[112, -120], [115, -86], [110, -52], [104, -17],
+          [103, 17], [108, 52], [113, 86], [110, 120]] }
+```
+
+A road that outlives one field goes in the layout's own `ways` instead, and wears every
+field it crosses — whatever that field grows:
+
+```json
+"ways": [
+  { "name": "farm-track", "width": 5.5, "wear": 0.5,
+    "points": [[-160, -20], [-110, -26], [-60, -18], [-20, -6],
+               [20, 4], [70, 10], [120, 6], [170, -4]] }
+]
+```
+
+The bundled `mixed.json` carries exactly this lane, so it is in the scene on a plain launch,
+running out of the meadow and across the stubble field.
+
+Each field is given the stretch of the road it can see, cut from the same points and never
+resampled, so the two halves meet exactly on a boundary; the ruts' wander is measured along
+the whole road, so it does not step sideways there either. A field may name at most eight
+points, which is a warning rather than an error — split the field or straighten the line.
+A field that names no way of its own is worn down its long axis exactly as before.
+
+An authored way also **sinks the ground it runs over**, a little under a foot for a
+half-worn track, tapering out over a metre and a half either side. That is the terrain grid,
+which carries the collider as well as the mesh, so the hollow is felt by the wheels and not
+only seen. A field carrying a `wear` but no way is not sunk: worn across its whole width
+means shading, not a trench dug down the middle of it.
+
+Every surface reads the wear the same way — meadow, stubble, ploughed and bare all wear to
+the same soil and the same hardcore under it, so a track does not change colour where it
+leaves one field for the next. `layouts/road.json` runs one lane across all three.
+
 Fields meet one another over the softer of their two `soft_border` widths: what grows in
 each carries that far past its own edge and thins as it goes, and the ground washes towards
 the neighbour's colour over the same distance. A yard's border is nought, so it ends on a

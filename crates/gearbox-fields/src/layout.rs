@@ -270,11 +270,19 @@ impl Way {
         self.count
     }
 
-    /// Fewer than two points is no way at all; beyond `MOST` the tail is cut.
+    /// Fewer than two points is no way at all; beyond `MOST` the tail is cut,
+    /// which is said out loud rather than authored points going quietly missing.
     pub fn bend(points: &[Vec2], half_width: f32) -> Self {
         let mut way = Self { half_width, ..Self::default() };
         if points.len() < 2 {
             return way;
+        }
+        if points.len() > Self::MOST {
+            warn!(
+                "a way of {} points keeps only its first {}; the rest of it is cut",
+                points.len(),
+                Self::MOST
+            );
         }
         let taken = points.len().min(Self::MOST);
         way.points[..taken].copy_from_slice(&points[..taken]);
