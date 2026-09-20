@@ -59,6 +59,10 @@ The wear is read by the ground material and by everything standing in it alike, 
 decides the soil's colour as it wears down to the stone under it, whether grass holds,
 how thickly stones lie, and how far the wheels have pressed it. Driving over a field wears
 it the same way, whatever its layout says: the two are taken together, the harder winning.
+That holds on every cover that can wear — bare ground, meadow and stubble alike — though a
+wheel bares turf more gently than it bares soil, and the blades are not taken away for it:
+they lie flattened over what shows through, which is what a fresh tyre mark on grass is. A
+concrete yard is the exception and wears not at all.
 `tracks.json` keeps a `drive-me` lane at positive coordinates, barely worn, to drive along
 and watch a wheel mark wear it bare:
 

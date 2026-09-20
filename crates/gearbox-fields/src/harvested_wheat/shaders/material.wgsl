@@ -315,7 +315,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let pressed = sample_wheels(tracks, wheels, in.world_position.xz).x;
     color = vec4<f32>(color.rgb * (1.0 - wheels.darkening * pressed), 1.0);
     // A way worn across the stubble: the rows go and the earth under them shows.
-    let bared = stubble_worn(in.world_position.xz);
+    let bared = max(stubble_worn(in.world_position.xz), pressed * 0.6);
     let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, bared)
         * (0.8 + fbm(in.world_position.xz * 1.6) * 0.5);
     color = vec4<f32>(mix(color.rgb, earth, bared), 1.0);
