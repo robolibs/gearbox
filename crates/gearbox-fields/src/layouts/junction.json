@@ -1,0 +1,39 @@
+{
+  "default": "grassland",
+  "fields": [
+    {
+      "name": "north-stubble",
+      "profile": "harvested_wheat",
+      "min": [
+        -120.0,
+        10.0
+      ],
+      "max": [
+        120.0,
+        150.0
+      ]
+    }
+  ],
+  "ways": [
+    {
+      "name": "the-lane",
+      "width": 6.0,
+      "wear": 0.65,
+      "points": [
+        [-120.0, -40.0],
+        [0.0, -10.0],
+        [120.0, 20.0]
+      ]
+    },
+    {
+      "name": "the-drove",
+      "width": 4.5,
+      "wear": 0.45,
+      "points": [
+        [-20.0, -120.0],
+        [-2.0, -10.0],
+        [14.0, 140.0]
+      ]
+    }
+  ]
+}

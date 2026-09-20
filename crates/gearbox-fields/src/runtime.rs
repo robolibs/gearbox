@@ -632,16 +632,22 @@ fn placed_of(
     let mine = self_spec.bounds();
     let own = profiles.get(&self_spec.profile);
     // A road laid over the whole layout wears every field it crosses; a way the
-    // field names for itself is its own business and comes first.
-    let road = ways.iter().find_map(|way| way.across(mine).map(|line| (way, line)));
+    // field names for itself is its own business and comes first. Where two of
+    // them cross the same field, both wear it and the harder wins.
+    let crossing: Vec<_> = ways.iter().filter_map(|way| Some((way, way.across(mine)?))).collect();
+    let mut roads = self_spec
+        .way()
+        .points()
+        .ge(&2)
+        .then(|| self_spec.way())
+        .into_iter()
+        .chain(crossing.iter().map(|(_, line)| *line));
     let mut near = crate::profile::Placed {
         bounds: mine,
-        wear: self_spec.wear.or(road.as_ref().map(|(spec, _)| spec.wear)),
-        way: match (self_spec.way().points() >= 2, road) {
-            (true, _) => self_spec.way(),
-            (false, Some((_, line))) => line,
-            (false, None) => crate::layout::Way::straight(),
-        },
+        wear: self_spec.wear.or(crossing.first().map(|(spec, _)| spec.wear)),
+        way: roads.next().map_or_else(crate::layout::Way::straight, |first| {
+            roads.fold(first, crate::layout::Way::crossing)
+        }),
         ..default()
     };
     for other in specs {

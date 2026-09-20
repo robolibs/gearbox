@@ -77,8 +77,9 @@ mod tests {
 
     // The whole point of clipping rather than resampling: two fields either
     // side of a boundary must describe the road with the *same* points, or it
-    // kinks where they meet. The arc offset has to be right too, or the ruts
-    // restart their wander on the boundary and step sideways there.
+    // kinks where they meet. Nothing has to be told how far along the road it
+    // lies — the ruts take their wander from the nearest point of the line,
+    // which is a place in the world and so the same from either side.
     #[test]
     fn two_fields_clip_one_road_to_the_same_line() {
         let road: Vec<Vec2> = (0..12).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
@@ -90,8 +91,6 @@ mod tests {
             // A contiguous run of the road itself — nothing moved or resampled.
             let at = road.iter().position(|p| *p == kept[0]).unwrap();
             assert_eq!(kept, road[at..at + kept.len()]);
-            // The road runs along x from the origin, so arc length is just x.
-            assert_eq!(way.packed().1.z, kept[0].x);
         }
         let west_line = line_of(&Way::clipped(&road, 3.0, west).unwrap());
         let east_line = line_of(&Way::clipped(&road, 3.0, east).unwrap());
@@ -193,6 +192,36 @@ mod tests {
         assert!(Hollows::of(&plain).is_empty());
     }
 
+    // Two roads crossing one field share the eight points end to end, each
+    // keeping its own width; the shader walks them as two separate lines.
+    #[test]
+    fn two_crossing_ways_share_the_points() {
+        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0);
+        let east = Way::bend(&[Vec2::new(-50.0, 0.0), Vec2::new(0.0, 4.0), Vec2::new(50.0, 0.0)], 2.0);
+        let junction = north.crossing(east);
+        let (points, shape) = junction.packed();
+        assert_eq!((shape.x, shape.y), (2.0, 3.0));
+        assert_eq!((shape.z, shape.w), (3.0, 2.0));
+        assert_eq!(junction.points(), 5);
+        // The first line's two points, then the second line's three after them.
+        assert_eq!(points.col(0).xy(), Vec2::new(0.0, -50.0));
+        assert_eq!(points.col(0).zw(), Vec2::new(0.0, 50.0));
+        assert_eq!(points.col(1).xy(), Vec2::new(-50.0, 0.0));
+        assert_eq!(points.col(2).xy(), Vec2::new(50.0, 0.0));
+    }
+
+    // Trimming either line to make room would leave two neighbouring fields
+    // describing the same road differently, and it would kink between them.
+    #[test]
+    fn a_crossing_that_does_not_fit_is_left_out_whole() {
+        let long: Vec<Vec2> = (0..6).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
+        let other: Vec<Vec2> = (0..5).map(|i| Vec2::new(20.0, i as f32 * 10.0 - 20.0)).collect();
+        let first = Way::bend(&long, 3.0);
+        let joined = first.crossing(Way::bend(&other, 2.0));
+        assert_eq!(joined, first);
+        assert_eq!(joined.packed().1.z, 0.0);
+    }
+
     #[test]
     fn a_road_that_misses_a_field_clips_to_nothing() {
         let road = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0)];
@@ -245,16 +274,20 @@ impl FieldBounds {
 /// rectangle, so without this a way can only run straight down one; with it the
 /// field is merely the corridor a track winds along inside.
 ///
-/// A road longer than one field is clipped to each field it crosses, and `arc`
-/// is how far along the whole road the first kept point lies. The shader adds
-/// it back, so the ruts wander by one noise down the road's whole length rather
-/// than restarting at every boundary and stepping sideways there.
+/// Eight points hold up to two lines, laid end to end: where two roads cross a
+/// field, the ground is worn by whichever of them has taken more of it. The
+/// second is empty for the ordinary case of one road.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Way {
     points: [Vec2; Way::MOST],
+    lines: [Line; 2],
+}
+
+/// One line's share of the points: how many of them, and how wide it is worn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Line {
     count: u32,
     half_width: f32,
-    arc: f32,
 }
 
 impl Way {
@@ -267,13 +300,34 @@ impl Way {
 
     /// How many points bend it; fewer than two is no way at all.
     pub fn points(&self) -> u32 {
-        self.count
+        self.lines[0].count + self.lines[1].count
+    }
+
+    /// The two of them joined, if their points fit in the eight there are. The
+    /// crossing road is dropped when they do not, because trimming either line
+    /// would leave two neighbouring fields describing it differently and the
+    /// road would kink on the boundary between them.
+    pub fn crossing(self, other: Self) -> Self {
+        let (mine, theirs) = (self.lines[0].count as usize, other.lines[0].count as usize);
+        if self.lines[1].count > 0 || other.lines[1].count > 0 || mine + theirs > Self::MOST {
+            warn!(
+                "two ways cross here needing {} points of {}; the second is left out",
+                mine + theirs,
+                Self::MOST
+            );
+            return self;
+        }
+        let mut joined = self;
+        joined.points[mine..mine + theirs].copy_from_slice(&other.points[..theirs]);
+        joined.lines[1] = other.lines[0];
+        joined
     }
 
     /// Fewer than two points is no way at all; beyond `MOST` the tail is cut,
     /// which is said out loud rather than authored points going quietly missing.
     pub fn bend(points: &[Vec2], half_width: f32) -> Self {
-        let mut way = Self { half_width, ..Self::default() };
+        let mut way = Self::default();
+        way.lines[0].half_width = half_width;
         if points.len() < 2 {
             return way;
         }
@@ -286,7 +340,7 @@ impl Way {
         }
         let taken = points.len().min(Self::MOST);
         way.points[..taken].copy_from_slice(&points[..taken]);
-        way.count = taken as u32;
+        way.lines[0].count = taken as u32;
         way
     }
 
@@ -311,7 +365,6 @@ impl Way {
         let start = first.saturating_sub(1);
         let end = (last + 2).min(points.len() - 1);
         let kept = &points[start..=end];
-        let arc = points[..=start].windows(2).map(|p| p[0].distance(p[1])).sum();
         if kept.len() > Self::MOST {
             warn!(
                 "way of {} points needs {} of them over [{:?}..{:?}]; only {} fit, so the \
@@ -319,22 +372,26 @@ impl Way {
                 points.len(), kept.len(), bounds.min, bounds.max, Self::MOST
             );
         }
-        Some(Self { arc, ..Self::bend(kept, half_width) })
+        Some(Self::bend(kept, half_width))
     }
 
-    /// Whether this way comes near enough to `bounds` to wear any of it. The
+    /// Whether either line comes near enough to `bounds` to wear any of it. The
     /// shader's search costs a loop per blade and per pixel, so a chunk the
     /// road never touches is told it has no wear at all and pays one compare.
     pub fn reaches(&self, bounds: FieldBounds) -> bool {
-        let reach = Vec2::splat(self.half_width + 2.0);
-        let (min, max) = (bounds.min - reach, bounds.max + reach);
-        let count = self.count as usize;
-        (0..count.saturating_sub(1))
-            .any(|i| segment_meets(self.points[i], self.points[i + 1], min, max))
+        let mut at = 0;
+        self.lines.iter().any(|line| {
+            let from = at;
+            at += line.count as usize;
+            let reach = Vec2::splat(line.half_width + 2.0);
+            let (min, max) = (bounds.min - reach, bounds.max + reach);
+            (from..at.saturating_sub(1))
+                .any(|i| segment_meets(self.points[i], self.points[i + 1], min, max))
+        })
     }
 
-    /// For a shader: the points two to a column, then how many, half the width,
-    /// and how far along the whole road the first of them lies.
+    /// For a shader: the points two to a column, then how many of them each
+    /// line takes and how wide it is worn.
     pub fn packed(&self) -> (Mat4, Vec4) {
         let pair = |i: usize| {
             let (a, b) = (self.points[i * 2], self.points[i * 2 + 1]);
@@ -342,7 +399,12 @@ impl Way {
         };
         (
             Mat4::from_cols(pair(0), pair(1), pair(2), pair(3)),
-            Vec4::new(self.count as f32, self.half_width, self.arc, 0.0),
+            Vec4::new(
+                self.lines[0].count as f32,
+                self.lines[0].half_width,
+                self.lines[1].count as f32,
+                self.lines[1].half_width,
+            ),
         )
     }
 }

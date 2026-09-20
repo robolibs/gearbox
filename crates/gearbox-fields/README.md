@@ -102,10 +102,20 @@ The bundled `mixed.json` carries exactly this lane, so it is in the scene on a p
 running out of the meadow and across the stubble field.
 
 Each field is given the stretch of the road it can see, cut from the same points and never
-resampled, so the two halves meet exactly on a boundary; the ruts' wander is measured along
-the whole road, so it does not step sideways there either. A field may name at most eight
-points, which is a warning rather than an error — split the field or straighten the line.
-A field that names no way of its own is worn down its long axis exactly as before.
+resampled, so the two halves meet exactly on a boundary. The ruts take their wander from the
+nearest point of the line itself, which is a place in the world and so the same from either
+side, so nothing has to be told how far along the road it lies. A field that names no way of
+its own is worn down its long axis exactly as before.
+
+Where two roads cross the same field, both wear it and the harder of them wins, each keeping
+its own width. **Eight points are shared between the two**, so a junction fits only when the
+two stretches a field can see come to eight points between them; beyond that the crossing
+road is left out whole, with a warning saying so. Trimming either line instead would leave
+two neighbouring fields describing the same road differently and it would kink between them.
+The same eight are the limit for a single road, and a field needing more of them is warned
+and cut short. Both are the one budget: a way's points live in a single matrix in the
+material and vegetation uniforms. `layouts/junction.json` crosses a lane and a drove over
+grass and stubble, each road three points — two five-point roads would not have fitted.
 
 An authored way also **sinks the ground it runs over**, a little under a foot for a
 half-worn track, tapering out over a metre and a half either side. That is the terrain grid,
