@@ -108,6 +108,8 @@ Real-machine acceptance remains open. Concurrent release builds disturbed
 timings. The final `molla-gram-perf` drive reached 2 m/s, later stopped around
 x=8.82 m, and the window closed before final telemetry could be collected.
 A selection event was logged during the run; the stop's cause is not proven.
+The user subsequently confirmed interacting with that test window. It was not
+an unattended run; this does not establish who closed the window or why.
 Do not count the CLI's completed-duration acknowledgement as successful
 continuous driving. Reproduce with controlled inputs/headless import before
 claiming that regression gate. A pre-load renderer slab use-after-free error
@@ -177,6 +179,44 @@ Evidence: `/tmp/gearbox-pressure-session-{tests,build}.log`,
 `/tmp/molla-reuse-invalid.log`, and `/tmp/molla-reuse-scoped.png`.
 
 ## Correctness and gates
+
+### Quadratic response follow-up
+
+Molla commit `ea44db3` removes redundant inverse reconstruction from cached
+tyre quadratic responses and full-rank motor inverse diagonals. Cholesky uses
+a forward solve followed by a squared norm; singular tyre responses use
+retained eigenbasis projections. RHS square-root mass scaling keeps finite
+extreme-scale responses from overflowing or underflowing during squaring.
+Mass matrices still refresh at each substep; no physical update frequency,
+tyre model, loop constraint or substep count was reduced.
+
+Release CPU solver validation passes 374 tests, zero failures and five ignored
+across 87 binaries. Tests cover analytic full/singular rank, nullspaces, zero and
+invalid RHS, extreme scales and motor inertia against full inverse columns.
+The isolated Molla binary's 84 tests pass, one ignored; its native build passes.
+Paired cached-response microbenchmarks at 39 DOFs measured 0.326–0.358 us
+versus 0.791–1.053 us for full solve plus dot product, and singular responses
+0.400–0.402 us versus 0.992–1.201 us. These numbers exclude factorization and
+are not whole-machine speedup claims.
+
+The rebuilt selected Kubota continued its 2 m/s, 0.12 rad/s drive through a
+0.5-to-4-bar transition. Fresh telemetry at 4 bar reported 2.004 m/s with front
+deflections 34.60/35.66 mm and rear 36.94/38.29 mm. Early warmed live samples
+were 1.40–1.48 ms/step, later reaching 2.01 ms: the under-1-ms target is still
+unmet. Concurrent user workloads prevent treating these samples as a controlled
+before/after ratio. The 60-second drive completed and released normally.
+A return-to-0.5-bar request was accepted during driving, but subsequent fresh
+telemetry failed to resolve `/gearbox/info`, including a retry with a longer
+timeout. The viewer process and physics logs remained live; this is a CLI
+reachability failure, not evidence of a physics crash. Do not count that empty
+`molla-quadratic-return-low.json` file as completed deflation verification.
+
+Evidence: `/tmp/molla-quadratic-{unit-tests,full-tests,timings}.log`,
+`/tmp/gearbox-quadratic-{tests,build}.log`, `/tmp/molla-quadratic-live.log`,
+`/tmp/molla-quadratic-drive.log`, `/tmp/molla-quadratic-{low,high}.json`,
+and `/tmp/molla-quadratic-high.png`.
+
+### Remaining validation
 
 - Binary tests cover conservative bounds, both pressure directions, unchanged
   source meshes, material edits/reassignment/restoration, stable buffer/material
