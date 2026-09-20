@@ -11,7 +11,7 @@
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{blade_leans}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, wheel_scar}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, WAY_METALLED}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -165,7 +165,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // Road metal lies on a way and nowhere else: a cover that is not a track in
     // itself carries it so that a track crossing it has chippings underfoot,
     // and off the way every one of them goes before it costs anything.
-    if (vertex.uv.y > 1.5 && luck > smoothstep(0.25, 0.6, bared)) {
+    let metalled = smoothstep(WAY_METALLED, 0.95, bared);
+    if (vertex.uv.y > 1.5 && luck > metalled) {
         return culled_vertex();
     }
     // Stones lie where the grass does not, and thickest where a wheel has
@@ -184,7 +185,13 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     if (is_lump) {
         // A tail, not a range: mostly grit, and a tyre presses what it
         // rolls over half into the soil.
-        var size = mix(0.002, 0.048, pow(rand(id, 6u), 5.5)) * alive * (1.0 - flat * 0.35);
+        // Road metal comes up small and coarsens as the fines go. The tail
+        // flattens as well as the size rising, or a road stays sand with a few
+        // pebbles on it however hard it is used.
+        let metal_grade = select(1.0, mix(0.4, 1.0, metalled), vertex.uv.y > 1.5);
+        let graded = select(5.5, mix(5.5, 2.6, metalled), vertex.uv.y > 1.5);
+        var size = mix(0.002, 0.048, pow(rand(id, 6u), graded))
+            * alive * (1.0 - flat * 0.35) * metal_grade;
         var squat = mix(0.4, 0.72, rand(id, 7u));
         // A crumb of earth is smaller than a stone and sits flatter in the
         // ground, and a wheel crushes it outright rather than pressing it in.
@@ -236,6 +243,13 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         if (vertex.uv.y > 0.5) {
             rock = mix(vec3<f32>(0.262, 0.216, 0.150), vec3<f32>(0.178, 0.152, 0.114), kind);
             spread_of_tone = vec2<f32>(0.82, 1.14);
+        }
+        // Road metal is crushed stone: grey, and every tone from a fresh
+        // fracture to one long bleached. Without a branch of its own it took
+        // the sand's, and a made road came out the colour of a shingle bank.
+        if (vertex.uv.y > 1.5) {
+            rock = mix(vec3<f32>(0.171, 0.163, 0.152), vec3<f32>(0.106, 0.094, 0.079), kind);
+            spread_of_tone = vec2<f32>(0.52, 1.30);
         }
         var lump = rock * mix(spread_of_tone.x, spread_of_tone.y, rand(id, 9u));
         // A crumb is not a stone: it is a piece of the ground it lies on, so

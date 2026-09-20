@@ -99,11 +99,25 @@ pub struct Placed {
     /// soft neighbour blends nought.
     pub tint: [Vec4; 4],
     pub reach: [f32; 4],
-    /// How hard this particular field is worn, nought to one, when the layout
-    /// says so. `None` leaves it to the profile.
+    /// How hard this whole field is worn, nought to one, when the layout says
+    /// so and bends no line through it. `None` leaves it to the profile.
     pub wear: Option<f32>,
-    /// The line the wheels follow through it, when the layout bends one.
+    /// The lines the wheels follow through it, each worn its own amount, when
+    /// the layout bends any.
     pub way: super::layout::Way,
+}
+
+impl Placed {
+    /// Whether the layout wears this field at all, rather than leaving it to
+    /// whatever its profile is.
+    pub fn worn(&self) -> bool {
+        self.wear.is_some() || self.way.points() >= 2
+    }
+
+    /// What the shaders read wear from, for however many lines cross it.
+    pub fn tread(&self) -> Vec4 {
+        self.way.tread(self.wear)
+    }
 }
 
 pub struct FieldProfile {

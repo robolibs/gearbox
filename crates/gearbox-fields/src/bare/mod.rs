@@ -348,7 +348,7 @@ impl Plugin for BarePlugin {
                 wheel_response: response,
                 layers: standing(90.0, 900.0, 1400.0, 5.0, worn_clod, pebble),
                 ground,
-                tread: crate::runtime::bare_tread(worn),
+                tread: crate::runtime::plain_tread(worn),
                 soft_border: 0.8,
             });
         }
@@ -441,7 +441,7 @@ fn track(
     placed: crate::profile::Placed,
     worn: f32,
 ) -> Arc<dyn GroundSurface> {
-    let tread = crate::runtime::bare_tread(worn);
+    let tread = crate::runtime::plain_tread(worn);
     ground(
         world,
         trample,
@@ -508,8 +508,8 @@ fn ground(
     // A road laid across the layout wears whatever it crosses, so a ploughed or
     // sandy field is worn along it too — not only the profiles that are ways in
     // themselves and set a tread of their own.
-    if let Some(wear) = placed.wear {
-        bare.tread = crate::runtime::bare_tread(wear);
+    if placed.worn() {
+        bare.tread = placed.tread();
         // What it wears down to, for the profiles that are not ways themselves
         // and so have never had to say: the same hardcore a track comes to, or
         // a road over a ploughed field is only its own soil flattened.

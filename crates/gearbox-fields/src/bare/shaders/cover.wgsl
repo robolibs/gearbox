@@ -49,6 +49,20 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, rand(seed, 33u)));
 }
 
+// A way is not one thing with a dial on it. As it is used harder it passes
+// through stages, and these are where one gives way to the next — shared, so
+// the ground, the grit lying on it and what still grows in it all change
+// together rather than each on its own schedule.
+//
+//   below BRUISED   the sward is only crushed and darkened; no earth shows
+//   BRUISED..METALLED   earth comes through, still a soft track
+//   above METALLED  stone comes up through the fines: a made road
+//
+// A tractor that has been over a field twice leaves the first; a lane the
+// milk lorry uses leaves the last. Nothing but `wear` chooses between them.
+const WAY_BRUISED: f32 = 0.25;
+const WAY_METALLED: f32 = 0.55;
+
 // The taller of two surfaces wins the pixel outright, and they mix only within
 // a shallow band. Fading them instead leaves a grey halo round every patch —
 // and where a way meets a field, a plain fade is what makes a road read as
@@ -124,8 +138,22 @@ fn way_offset(place: vec2<f32>, way: mat4x4<f32>, more: mat4x4<f32>,
 }
 
 // Wear from one line: `against` is where the point stands against it (nearest
-// point, across, distance) and `half` how wide the worn part of it is.
-fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>) -> f32 {
+// point, across, distance), `half` how wide the worn part of it is and `wear`
+// how hard this line in particular is used. Two lines crossing a field each
+// bring their own, so a farm track may join a metalled road.
+fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>, wear: f32) -> f32 {
+    // No stretch of a way is worn quite like the next, and without that a road
+    // is one flat tone end to end, which is what reads as paint at a distance.
+    // Drawn from the nearest point of the line, so both sides of a boundary see
+    // the same stretch; widest in the middle of the range, since neither an
+    // untouched field nor a made road has much room to vary.
+    let along = (lattice(against.xy, 11.0) - 0.5) * 0.44 * wear * (1.0 - wear * 0.55);
+    let used = clamp(wear + along, 0.0, 1.0);
+    // The ruts go bare long before the crown does, and never quite let it catch
+    // up: at one the two meet and a made road goes flat across its width,
+    // losing the wheel lines that say it is driven.
+    let in_rut = min(0.55 + used * 0.45, 1.0);
+    let between = max(used - 0.35, 0.0) / 0.65 * 0.9;
     // The ruts run at a tractor's gauge, but a way narrower than that would
     // carry them outside its own verge and show almost nothing. So on a narrow
     // path they close towards its middle and meet as one worn strip, which is
@@ -145,20 +173,20 @@ fn worn_along(place: vec2<f32>, against: vec4<f32>, half: f32, tread: vec4<f32>)
     let soften = min(1.15, half * 0.9);
     let wander = (lattice(place, 4.0) - 0.5) * min(0.9, half * 0.6);
     let verge = smoothstep(0.0, soften, half - against.w + wander);
-    return clamp(mix(tread.w, tread.z, wheel) * verge, 0.0, 1.0);
+    return clamp(mix(between, in_rut, wheel) * verge, 0.0, 1.0);
 }
 
 // How far the wheels have worn a ground back to bare earth. `tread` is half the
-// gauge between the ruts, half a rut's width, how bare the rut is and how bare
-// the rest is; all nought for a ground that wears evenly. `shape` is how many
+// gauge between the ruts, half a rut's width, then how hard each of the two
+// ways is worn; all nought for a ground nothing has worn. `shape` is how many
 // points the first way has and half its width, then the same for a second way
-// sharing the rest of the eight points: where two roads cross, the ground is
+// sharing the rest of the sixteen points: where two roads cross, the ground is
 // worn by whichever of them has taken more of it. Fewer than two points in the
 // first and the wear runs down the field's own long axis, which is every
 // straight way.
 fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> f32 {
-    if (tread.z <= 0.0) {
+    if (max(tread.z, tread.w) <= 0.0) {
         return 0.0;
     }
     let first = i32(shape.x);
@@ -170,16 +198,16 @@ fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         let off = dot(place - middle, across);
         let along = dot(place - middle, vec2<f32>(-across.y, across.x));
         let against = vec4<f32>(middle + vec2<f32>(-across.y, across.x) * along, off, abs(off));
-        return worn_along(place, against, abs(dot(span, across)) * 0.5, tread);
+        return worn_along(place, against, abs(dot(span, across)) * 0.5, tread, tread.z);
     }
     let along_first = way_offset(place, way, more, 0, first);
-    let down = worn_along(place, along_first, max(shape.y, 0.1), tread);
+    let down = worn_along(place, along_first, max(shape.y, 0.1), tread, tread.z);
     let second = i32(shape.z);
     if (second < 2) {
         return down;
     }
     let crossing = way_offset(place, way, more, first, second);
-    let across = worn_along(place, crossing, max(shape.w, 0.1), tread);
+    let across = worn_along(place, crossing, max(shape.w, 0.1), tread, tread.w);
     // Where two ways meet, the ground is worn worse than either takes alone:
     // everything turning off one onto the other churns the same few metres. So
     // the lesser adds to the greater instead of hiding under it, and a

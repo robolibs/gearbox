@@ -224,7 +224,7 @@ fn create_ground(
                     south: placed.tint[2],
                     north: placed.tint[3],
                     reach: Vec4::from_array(placed.reach),
-                    tread: placed.wear.map(crate::runtime::bare_tread).unwrap_or_default(),
+                    tread: placed.tread(),
                     way: placed.way.packed().0,
                     way_more: placed.way.packed().1,
                     way_shape: placed.way.packed().2,

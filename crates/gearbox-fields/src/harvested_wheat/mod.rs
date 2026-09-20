@@ -46,7 +46,7 @@ struct AntiRepeatTerrainExtension {
 }
 
 /// A way worn across the stubble. The same six numbers the meadow carries: what
-/// they mean lives in `bare_tread`, `WAY_HARDCORE` and `worn()`, so
+/// they mean lives in `Way::tread`, `WAY_HARDCORE` and `worn()`, so
 /// this is only how they travel.
 #[derive(bevy::render::render_resource::ShaderType, Reflect, Debug, Clone, Copy, Default)]
 struct WornStubble {
@@ -76,7 +76,7 @@ impl WornStubble {
             south: placed.tint[2],
             north: placed.tint[3],
             reach: Vec4::from_array(placed.reach),
-            tread: placed.wear.map(crate::runtime::bare_tread).unwrap_or_default(),
+            tread: placed.tread(),
             way,
             way_more,
             way_shape,

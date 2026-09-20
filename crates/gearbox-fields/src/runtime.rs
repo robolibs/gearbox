@@ -34,27 +34,47 @@ mod tests {
         let across = road("across", vec![[0.0, 50.0], [100.0, 50.0]], 0.4);
         let far = road("far", vec![[0.0, 900.0], [100.0, 900.0]], 0.4);
 
-        // Nothing named and nothing crossing: the wear runs down the long axis.
+        // Nothing named and nothing crossing: nothing wears it at all.
         let bare = placed_of(&[plain.clone()], &profiles, &[], &plain);
         assert_eq!(bare.way.points(), 0);
-        assert_eq!(bare.wear, None);
+        assert!(!bare.worn());
 
         // A road crossing a plain field lends it both its line and its wear.
         let crossed = placed_of(&[plain.clone()], &profiles, &[across.clone()], &plain);
         assert_eq!(crossed.way.points(), 2);
-        assert_eq!(crossed.wear, Some(0.4));
+        assert_eq!(crossed.tread().z, 0.4);
 
         // A road that misses it leaves it alone.
         let missed = placed_of(&[plain.clone()], &profiles, &[far], &plain);
         assert_eq!(missed.way.points(), 0);
-        assert_eq!(missed.wear, None);
+        assert!(!missed.worn());
 
-        // Its own way comes first, and the road joins as the second line; the
-        // field's own wear wins, because it said so itself.
+        // Its own way comes first and the road joins as the second line, each
+        // still worn its own amount: a faint track crossing a made road is two
+        // roads meeting, not one road that cannot make up its mind.
         let both = placed_of(&[laned.clone()], &profiles, &[across], &laned);
         assert_eq!(both.way.points(), 4);
         assert_eq!(both.way.packed().2.y, 2.5, "its own half width leads");
-        assert_eq!(both.wear, Some(0.9));
+        assert_eq!((both.tread().z, both.tread().w), (0.9, 0.4));
+    }
+
+    // A field that says it is worn but bends no line through itself is worn all
+    // over — a yard, a gateway. One that bends a line is worn along that line
+    // only, so its own `wear` must not also wash the whole rectangle.
+    #[test]
+    fn a_field_wear_without_a_line_wears_the_whole_field() {
+        let profiles = bevy::platform::collections::HashMap::default();
+        let mut yard = plot("yard", "grassland", [0.0, 0.0], [40.0, 40.0]);
+        yard.wear = Some(0.7);
+        let all_over = placed_of(&[yard.clone()], &profiles, &[], &yard);
+        assert_eq!(all_over.way.points(), 0);
+        assert_eq!(all_over.tread().z, 0.7);
+
+        let mut lane = yard.clone();
+        lane.way = vec![[20.0, 0.0], [20.0, 40.0]];
+        let along = placed_of(&[lane.clone()], &profiles, &[], &lane);
+        assert_eq!(along.wear, None, "the line carries it now");
+        assert_eq!(along.tread().z, 0.7);
     }
 
     // The wash exists to hide the join between two different covers. Applied to
@@ -409,11 +429,11 @@ pub fn ensure_fields(world: &mut World) {
             (width as f64 * height as f64 * if response.tread { 8.0 } else { 4.0 }) / 1.0e6,
             placed.way.points()
         );
-        // `placed` already settled what wears this field — its own `wear`, or a
-        // road laid across the layout that happens to cross it.
-        let tread = match placed.wear {
-            Some(wear) => bare_tread(wear),
-            None => profile.tread,
+        // `placed` already settled what wears this field — the lines crossing
+        // it, each with its own wear, or its own `wear` all over.
+        let tread = match placed.worn() {
+            true => placed.tread(),
+            false => profile.tread,
         };
         fields.push(RuntimeField {
             entity,
@@ -730,14 +750,12 @@ pub fn stream_vegetation(
     }
 }
 
-/// The wear a layout's own `wear` means, in the terms the shaders read it in.
-/// Kept here rather than in the bare profile because the layout may set it for
-/// any field, and both the ground and what stands in it have to agree on it.
-pub fn bare_tread(worn: f32) -> Vec4 {
-    if worn <= 0.0 {
-        return Vec4::ZERO;
-    }
-    Vec4::new(0.9, 0.46, (0.55 + worn * 0.45).min(1.0), ((worn - 0.35).max(0.0)) / 0.65)
+/// A surface worn evenly all over rather than along a line — a yard, a gateway,
+/// a profile that is a made track from edge to edge. Kept here rather than in
+/// the bare profile because the layout may set it for any field, and both the
+/// ground and what stands in it have to agree on it.
+pub fn plain_tread(worn: f32) -> Vec4 {
+    crate::layout::Way::straight().tread(Some(worn))
 }
 
 /// What lies across each of a field's four sides: west, east, south, north.
@@ -763,7 +781,9 @@ fn placed_of(
         .chain(crossing.iter().map(|(_, line)| *line));
     let mut near = crate::profile::Placed {
         bounds: mine,
-        wear: self_spec.wear.or(crossing.first().map(|(spec, _)| spec.wear)),
+        // Each line carries its own wear, so this is only for a field that has
+        // no line at all: one that says it is worn is worn all over.
+        wear: self_spec.wear.filter(|_| self_spec.way.len() < 2),
         way: roads.next().map_or_else(crate::layout::Way::straight, |first| {
             roads.fold(first, crate::layout::Way::crossing)
         }),

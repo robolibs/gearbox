@@ -45,15 +45,30 @@ profile; only the sampled physical terrain receives bounded vegetation and wheel
 The mixed example deliberately crosses mesh/chunk boundaries.
 
 A field may also carry `"wear"`, nought to one, saying how far the wheels have taken it
-back to bare ground. It says how hard a way is used — a green lane barely marked at a
-quarter, two bare ruts with grass holding between them at a half, a road worn bare from side
-to side at one — while **Ways** below says where it runs and how wide. Left out, the profile
-decides. One `track` profile therefore covers every kind of way:
+back to bare ground. It says how hard a way is used, while **Ways** below says where it runs
+and how wide. Left out, the profile decides. One `track` profile therefore covers every kind
+of way:
 
 ```json
 { "name": "green-lane", "profile": "track", "wear": 0.25, "min": [-60, -120], "max": [-54, 120] },
 { "name": "bare-road",  "profile": "track", "wear": 1.0,  "min": [ 44, -120], "max": [ 50, 120] }
 ```
+
+### The stages a way passes through
+
+Wear is one number, but a way does not change evenly along it. It passes through stages, and
+`cover.wgsl` holds where each gives way to the next so the ground, the grit lying on it and
+what still grows in it all turn together rather than each on its own schedule:
+
+| wear | what it reads as |
+| --- | --- |
+| below `WAY_BRUISED` (0.25) | the sward is crushed and darkened, no earth showing — a tractor that went over twice |
+| `WAY_BRUISED`..`WAY_METALLED` | earth through the ruts, grass holding down the middle — a soft farm track |
+| above `WAY_METALLED` (0.55) | stone comes up through the fines and the middle goes too — a made road |
+
+Nothing but `wear` chooses between them, so the same way authored twice at two numbers is
+the same road at two ages. `layouts/stages.json` lays all five side by side to be looked at
+at once.
 
 The wear is read by the ground material and by everything standing in it alike, so it
 decides the soil's colour as it wears down to the stone under it, whether grass holds,
@@ -127,7 +142,11 @@ side, so nothing has to be told how far along the road it lies. A field that nam
 its own is worn down its long axis exactly as before.
 
 Where two roads cross the same field, both wear it and the harder of them wins, each keeping
-its own width. **Sixteen points are shared between the two**, so a junction fits when the two
+its own width **and its own wear** — a faint field track may join a metalled lane without
+either becoming the other, which is what `layouts/junction.json` crosses. The fields a way
+passes over have nothing to say about how used that way is: only a field that bends no line
+through itself may carry a `wear`, and that wears it all over.
+**Sixteen points are shared between the two**, so a junction fits when the two
 stretches a field can see come to sixteen points between them; beyond that the crossing road
 is left out whole, with a warning saying so. Trimming either line instead would leave two
 neighbouring fields describing the same road differently and it would kink between them. The
@@ -189,8 +208,8 @@ while washing towards nothing while its neighbours washed towards it.
 
 - **Everything in `Placed`.** The factory is handed where the field runs, what lies across
   each of its four sides and how far, how worn it is, and the way through it. `extent` and
-  the four tints with `reach` feed `washed_into`; `wear` becomes a tread through
-  `runtime::bare_tread`; the way rides in as two matrices and a shape.
+  the four tints with `reach` feed `washed_into`; `Placed::tread` gives the tread, carrying
+  a wear for each of the two lines; the way rides in as two matrices and a shape.
 - **`worn()` and `washed_into()` from `bare/shaders/cover.wgsl`.** Never a second copy: the
   two grounds either side of a join must agree where it falls, and held apart they drift —
   one edge ragged, one ruled.

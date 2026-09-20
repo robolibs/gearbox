@@ -55,7 +55,7 @@ mod tests {
     fn a_way_packs_two_points_to_a_column_of_two_matrices() {
         let points: Vec<Vec2> =
             (0..Way::MOST).map(|i| Vec2::new(i as f32, 10.0 + i as f32)).collect();
-        let way = Way::bend(&points, 2.5);
+        let way = Way::bend(&points, 2.5, 0.5);
         let (_, _, shape) = way.packed();
         assert_eq!(shape.x, Way::MOST as f32);
         assert_eq!(shape.y, 2.5);
@@ -66,10 +66,10 @@ mod tests {
 
     #[test]
     fn a_way_needs_two_points_and_keeps_at_most_sixteen() {
-        assert_eq!(Way::bend(&[Vec2::ZERO], 1.0).points(), 0);
+        assert_eq!(Way::bend(&[Vec2::ZERO], 1.0, 0.5).points(), 0);
         assert_eq!(Way::straight().points(), 0);
         let many: Vec<Vec2> = (0..20).map(|i| Vec2::splat(i as f32)).collect();
-        assert_eq!(Way::bend(&many, 1.0).points(), Way::MOST as u32);
+        assert_eq!(Way::bend(&many, 1.0, 0.5).points(), Way::MOST as u32);
     }
 
     // Points of a way, in order, read back the way a shader reads them.
@@ -89,14 +89,14 @@ mod tests {
         let west = FieldBounds { min: Vec2::new(0.0, -20.0), max: Vec2::new(50.0, 20.0) };
         let east = FieldBounds { min: Vec2::new(50.0, -20.0), max: Vec2::new(110.0, 20.0) };
         for bounds in [west, east] {
-            let way = Way::clipped(&road, 3.0, bounds).unwrap();
+            let way = Way::clipped(&road, 3.0, 0.5, bounds).unwrap();
             let kept = line_of(&way);
             // A contiguous run of the road itself — nothing moved or resampled.
             let at = road.iter().position(|p| *p == kept[0]).unwrap();
             assert_eq!(kept, road[at..at + kept.len()]);
         }
-        let west_line = line_of(&Way::clipped(&road, 3.0, west).unwrap());
-        let east_line = line_of(&Way::clipped(&road, 3.0, east).unwrap());
+        let west_line = line_of(&Way::clipped(&road, 3.0, 0.5, west).unwrap());
+        let east_line = line_of(&Way::clipped(&road, 3.0, 0.5, east).unwrap());
         let shared: Vec<Vec2> =
             west_line.iter().copied().filter(|p| east_line.contains(p)).collect();
         assert!(!shared.is_empty(), "the two fields must overlap on the road");
@@ -109,7 +109,7 @@ mod tests {
     fn a_way_reaches_exactly_where_it_clips() {
         let road: Vec<Vec2> =
             (0..6).map(|i| Vec2::new(i as f32 * 20.0, (i % 2) as f32 * 8.0)).collect();
-        let way = Way::bend(&road, 3.0);
+        let way = Way::bend(&road, 3.0, 0.5);
         for x in (-40..160).step_by(8) {
             for z in (-40..60).step_by(8) {
                 let chunk = FieldBounds {
@@ -118,7 +118,7 @@ mod tests {
                 };
                 assert_eq!(
                     way.reaches(chunk),
-                    Way::clipped(&road, 3.0, chunk).is_some(),
+                    Way::clipped(&road, 3.0, 0.5, chunk).is_some(),
                     "chunk at {x},{z}"
                 );
             }
@@ -251,8 +251,8 @@ mod tests {
     // keeping its own width; the shader walks them as two separate lines.
     #[test]
     fn two_crossing_ways_share_the_points() {
-        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0);
-        let east = Way::bend(&[Vec2::new(-50.0, 0.0), Vec2::new(0.0, 4.0), Vec2::new(50.0, 0.0)], 2.0);
+        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0, 0.5);
+        let east = Way::bend(&[Vec2::new(-50.0, 0.0), Vec2::new(0.0, 4.0), Vec2::new(50.0, 0.0)], 2.0, 0.5);
         let junction = north.crossing(east);
         let (_, _, shape) = junction.packed();
         assert_eq!((shape.x, shape.y), (2.0, 3.0));
@@ -271,7 +271,7 @@ mod tests {
     fn a_crossing_may_run_into_the_second_matrix() {
         let long: Vec<Vec2> = (0..7).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
         let other: Vec<Vec2> = (0..6).map(|i| Vec2::new(30.0, i as f32 * 10.0 - 30.0)).collect();
-        let junction = Way::bend(&long, 3.0).crossing(Way::bend(&other, 2.0));
+        let junction = Way::bend(&long, 3.0, 0.5).crossing(Way::bend(&other, 2.0, 0.5));
         let (_, _, shape) = junction.packed();
         assert_eq!((shape.x, shape.z), (7.0, 6.0));
         for (i, point) in long.iter().chain(other.iter()).enumerate() {
@@ -288,7 +288,7 @@ mod tests {
     // the whole field worn down its long axis — the loudest failure there is.
     #[test]
     fn an_empty_way_never_leads_a_pair() {
-        let real = Way::bend(&[Vec2::new(0.0, 0.0), Vec2::new(50.0, 0.0)], 3.0);
+        let real = Way::bend(&[Vec2::new(0.0, 0.0), Vec2::new(50.0, 0.0)], 3.0, 0.5);
         let nothing = Way::straight();
         assert_eq!(nothing.crossing(real), real);
         assert_eq!(real.crossing(nothing), real);
@@ -298,8 +298,8 @@ mod tests {
 
     #[test]
     fn a_crossing_way_reaches_its_own_chunks() {
-        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0);
-        let east = Way::bend(&[Vec2::new(-50.0, 30.0), Vec2::new(50.0, 30.0)], 2.0);
+        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0, 0.5);
+        let east = Way::bend(&[Vec2::new(-50.0, 30.0), Vec2::new(50.0, 30.0)], 2.0, 0.5);
         let junction = north.crossing(east);
         let chunk = |x: f32, z: f32| FieldBounds {
             min: Vec2::new(x, z),
@@ -320,9 +320,9 @@ mod tests {
     // shallow grassy trough where the third road should have been painted.
     #[test]
     fn a_third_way_over_one_field_is_sunk_but_not_worn() {
-        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0);
-        let east = Way::bend(&[Vec2::new(-50.0, 0.0), Vec2::new(50.0, 0.0)], 3.0);
-        let slant = Way::bend(&[Vec2::new(-40.0, -40.0), Vec2::new(40.0, 40.0)], 3.0);
+        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0, 0.5);
+        let east = Way::bend(&[Vec2::new(-50.0, 0.0), Vec2::new(50.0, 0.0)], 3.0, 0.5);
+        let slant = Way::bend(&[Vec2::new(-40.0, -40.0), Vec2::new(40.0, 40.0)], 3.0, 0.5);
         let three = north.crossing(east).crossing(slant);
         // The third is refused, and refusing it leaves the first two whole.
         assert_eq!(three, north.crossing(east));
@@ -344,8 +344,8 @@ mod tests {
     fn a_crossing_that_does_not_fit_is_left_out_whole() {
         let long: Vec<Vec2> = (0..10).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
         let other: Vec<Vec2> = (0..9).map(|i| Vec2::new(20.0, i as f32 * 10.0 - 40.0)).collect();
-        let first = Way::bend(&long, 3.0);
-        let joined = first.crossing(Way::bend(&other, 2.0));
+        let first = Way::bend(&long, 3.0, 0.5);
+        let joined = first.crossing(Way::bend(&other, 2.0, 0.5));
         assert_eq!(joined, first);
         assert_eq!(joined.packed().2.z, 0.0);
     }
@@ -430,7 +430,7 @@ mod tests {
     fn a_road_that_misses_a_field_clips_to_nothing() {
         let road = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0)];
         let away = FieldBounds { min: Vec2::new(0.0, 60.0), max: Vec2::new(100.0, 90.0) };
-        assert!(Way::clipped(&road, 3.0, away).is_none());
+        assert!(Way::clipped(&road, 3.0, 0.5, away).is_none());
     }
 
     #[test]
@@ -478,20 +478,27 @@ impl FieldBounds {
 /// rectangle, so without this a way can only run straight down one; with it the
 /// field is merely the corridor a track winds along inside.
 ///
-/// Sixteen points hold up to two lines, laid end to end: where two roads cross
-/// a field, the ground is worn by whichever of them has taken more of it. The
-/// second is empty for the ordinary case of one road.
+/// Sixteen points hold up to two lines, laid end to end, each with its own
+/// width and its own wear: where two roads cross a field, the ground is worn by
+/// whichever of them has taken more of it, and a faint track may join a made
+/// road without either becoming the other. The second is empty for the ordinary
+/// case of one road.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Way {
     points: [Vec2; Way::MOST],
     lines: [Line; 2],
 }
 
-/// One line's share of the points: how many of them, and how wide it is worn.
+/// One line's share of the points: how many of them, how wide it is worn and
+/// how hard. The wear belongs to the line and not to the field, or a farm track
+/// crossing a metalled lane would take that lane's wear and the pair of them
+/// read as one road — the fields a way crosses have nothing to say about how
+/// used that way is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Line {
     count: u32,
     half_width: f32,
+    wear: f32,
 }
 
 impl Way {
@@ -541,9 +548,10 @@ impl Way {
 
     /// Fewer than two points is no way at all; beyond `MOST` the tail is cut,
     /// which is said out loud rather than authored points going quietly missing.
-    pub fn bend(points: &[Vec2], half_width: f32) -> Self {
+    pub fn bend(points: &[Vec2], half_width: f32, wear: f32) -> Self {
         let mut way = Self::default();
         way.lines[0].half_width = half_width;
+        way.lines[0].wear = wear.clamp(0.0, 1.0);
         if points.len() < 2 {
             return way;
         }
@@ -564,7 +572,7 @@ impl Way {
     /// road does not come near this field at all. Both sides of a boundary clip
     /// the *same* points, so the two halves of a road meet exactly; only the
     /// ends are cut, never moved, and nothing is resampled.
-    pub fn clipped(points: &[Vec2], half_width: f32, bounds: FieldBounds) -> Option<Self> {
+    pub fn clipped(points: &[Vec2], half_width: f32, wear: f32, bounds: FieldBounds) -> Option<Self> {
         if points.len() < 2 {
             return None;
         }
@@ -588,7 +596,7 @@ impl Way {
                 points.len(), kept.len(), bounds.min, bounds.max, Self::MOST
             );
         }
-        Some(Self::bend(kept, half_width))
+        Some(Self::bend(kept, half_width, wear))
     }
 
     /// Whether either line comes near enough to `bounds` to wear any of it. The
@@ -628,7 +636,29 @@ impl Way {
             ),
         )
     }
+
+    /// What the shaders read wear from: the gauge a tractor's wheels sit at and
+    /// how wide one rut is, then how hard each of the two lines is worn. A
+    /// field with no line of its own falls back to `plain`, which wears it
+    /// evenly down its long axis; with no line and no `plain` it is not worn.
+    pub fn tread(&self, plain: Option<f32>) -> Vec4 {
+        let second = match self.lines[1].count >= 2 {
+            true => self.lines[1].wear,
+            false => 0.0,
+        };
+        let first = match self.lines[0].count >= 2 {
+            true => self.lines[0].wear,
+            false => plain.unwrap_or(0.0),
+        };
+        Vec4::new(HALF_GAUGE_M, HALF_RUT_M, first, second)
+    }
 }
+
+/// Half the gauge a tractor's wheels sit at, and half the width of one rut.
+/// Shared by every way: the machines are the same whatever they are driving on,
+/// so only how hard a way is worn tells one from another.
+const HALF_GAUGE_M: f32 = 0.9;
+const HALF_RUT_M: f32 = 0.46;
 
 /// What every way must be, whether a field names it or the layout lays it over
 /// them all: real points, a width to wear and a wear between nothing and bare.
@@ -710,8 +740,8 @@ impl FieldSpec {
     }
 
     pub fn way(&self) -> Way {
-        let (line, width, _) = self.laid_way();
-        Way::bend(&line, width * 0.5)
+        let (line, width, wear) = self.laid_way();
+        Way::bend(&line, width * 0.5, wear)
     }
 
     /// The line this field lays down for itself, how wide it is worn and how
@@ -753,7 +783,7 @@ impl WaySpec {
 
     /// The stretch of this road a field can see, if it crosses that field.
     pub fn across(&self, bounds: FieldBounds) -> Option<Way> {
-        Way::clipped(&self.line(), self.width * 0.5, bounds)
+        Way::clipped(&self.line(), self.width * 0.5, self.wear, bounds)
     }
 }
 
