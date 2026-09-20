@@ -51,6 +51,11 @@ struct AntiRepeatTerrainExtension {
 #[derive(bevy::render::render_resource::ShaderType, Reflect, Debug, Clone, Copy, Default)]
 struct WornStubble {
     extent: Vec4,
+    west: Vec4,
+    east: Vec4,
+    south: Vec4,
+    north: Vec4,
+    reach: Vec4,
     tread: Vec4,
     way: Mat4,
     way_more: Mat4,
@@ -66,6 +71,11 @@ impl WornStubble {
             extent: Vec4::new(
                 placed.bounds.min.x, placed.bounds.min.y,
                 placed.bounds.max.x, placed.bounds.max.y),
+            west: placed.tint[0],
+            east: placed.tint[1],
+            south: placed.tint[2],
+            north: placed.tint[3],
+            reach: Vec4::from_array(placed.reach),
             tread: placed.wear.map(crate::runtime::bare_tread).unwrap_or_default(),
             way,
             way_more,

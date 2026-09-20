@@ -34,7 +34,7 @@ struct MeadowEdges {
 
 // The same wear the bare grounds read, so a track crossing a meadow is worn by
 // one rule and not by a second one that has to be kept in step with it.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into}
 
 fn meadow_worn(place: vec2<f32>) -> f32 {
     return worn(place, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
@@ -43,20 +43,8 @@ fn meadow_worn(place: vec2<f32>) -> f32 {
 // The sward washed into whatever lies across each side, so a meadow meets a
 // track from its own side too and the two blends meet in the middle.
 fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
-    var out = colour;
-    let past = vec4<f32>(
-        edges.extent.x - place.x, place.x - edges.extent.z,
-        edges.extent.y - place.y, place.y - edges.extent.w);
-    let sides = array<vec4<f32>, 4>(edges.west, edges.east, edges.south, edges.north);
-    for (var i = 0; i < 4; i = i + 1) {
-        let reach = edges.reach[i];
-        if (reach <= 0.0) {
-            continue;
-        }
-        let edge = past[i] / reach + 1.0;
-        out = mix(out, sides[i].rgb, clamp(edge, 0.0, 1.0) * 0.7);
-    }
-    return out;
+    return washed_into(place, colour, edges.extent,
+        mat4x4<f32>(edges.west, edges.east, edges.south, edges.north), edges.reach);
 }
 
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}

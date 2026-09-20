@@ -21,6 +21,11 @@
 
 struct WornStubble {
     extent: vec4<f32>,
+    west: vec4<f32>,
+    east: vec4<f32>,
+    south: vec4<f32>,
+    north: vec4<f32>,
+    reach: vec4<f32>,
     tread: vec4<f32>,
     way: mat4x4<f32>,
     way_more: mat4x4<f32>,
@@ -32,11 +37,20 @@ struct WornStubble {
 
 // The same wear the bare grounds and the meadow read, so a road crossing from
 // one field to the next does not change shape or colour on the boundary.
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, washed_into}
 
 fn stubble_worn(place: vec2<f32>) -> f32 {
     return worn(place, worn_ground.extent, worn_ground.tread,
         worn_ground.way, worn_ground.way_more, worn_ground.way_shape);
+}
+
+// A stubble field meets its neighbours from its own side too. Without this the
+// blend was one-sided: the meadow next door washed towards the stubble's colour
+// and the stubble washed towards nothing, so the join fell on a line.
+fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
+    return washed_into(place, colour, worn_ground.extent,
+        mat4x4<f32>(worn_ground.west, worn_ground.east, worn_ground.south, worn_ground.north),
+        worn_ground.reach);
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -318,7 +332,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let bared = max(stubble_worn(in.world_position.xz), pressed * 0.6);
     let earth = mix(worn_ground.soil.rgb, worn_ground.stony.rgb, bared)
         * (0.8 + fbm(in.world_position.xz * 1.6) * 0.5);
-    color = vec4<f32>(mix(color.rgb, earth, bared), 1.0);
+    color = vec4<f32>(washed(in.world_position.xz, mix(color.rgb, earth, bared)), 1.0);
 #ifdef VERTEX_COLORS
     color = color * in.color;
 #endif

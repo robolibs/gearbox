@@ -9,7 +9,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -68,20 +68,8 @@ fn smooth2(v: vec2<f32>) -> vec2<f32> {
 // own colour dead on its boundary shows a ruled line however softly the plants
 // either side interleave.
 fn washed(place: vec2<f32>, colour: vec3<f32>) -> vec3<f32> {
-    var out = colour;
-    let past = vec4<f32>(
-        ground.extent.x - place.x, place.x - ground.extent.z,
-        ground.extent.y - place.y, place.y - ground.extent.w);
-    let sides = array<vec4<f32>, 4>(ground.west, ground.east, ground.south, ground.north);
-    for (var i = 0; i < 4; i = i + 1) {
-        let reach = ground.reach[i];
-        if (reach <= 0.0) {
-            continue;
-        }
-        let edge = past[i] / reach + 1.0 + (lattice(place, 1.7) - 0.5) * 0.55;
-        out = mix(out, sides[i].rgb, clamp(edge, 0.0, 1.0) * 0.85);
-    }
-    return out;
+    return washed_into(place, colour, ground.extent,
+        mat4x4<f32>(ground.west, ground.east, ground.south, ground.north), ground.reach);
 }
 
 // Distance to the nearest clump as a share of its own reach: under one is

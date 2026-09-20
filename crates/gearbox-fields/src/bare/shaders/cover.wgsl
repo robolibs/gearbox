@@ -49,6 +49,27 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, rand(seed, 33u)));
 }
 
+// A ground washed into whatever lies across each of its sides, so two covers
+// meet in a blend and not on a line. `sides` holds the four neighbours' colours
+// a column each — west, east, south, north — and `reach` how far each carries.
+// Shared, because both grounds either side of a join have to agree where it
+// falls: held as two copies they drifted, one edge ragged and one ruled.
+fn washed_into(place: vec2<f32>, colour: vec3<f32>, extent: vec4<f32>,
+               sides: mat4x4<f32>, reach: vec4<f32>) -> vec3<f32> {
+    var out = colour;
+    let past = vec4<f32>(
+        extent.x - place.x, place.x - extent.z,
+        extent.y - place.y, place.y - extent.w);
+    for (var i = 0; i < 4; i = i + 1) {
+        if (reach[i] <= 0.0) {
+            continue;
+        }
+        let edge = past[i] / reach[i] + 1.0 + (lattice(place, 1.7) - 0.5) * 0.55;
+        out = mix(out, sides[i].rgb, clamp(edge, 0.0, 1.0) * 0.85);
+    }
+    return out;
+}
+
 // One point of a way: sixteen of them live two to a column of two matrices,
 // which spares both uniforms an array and the shared file a struct to import.
 // The column is worked out before either matrix is read, so neither is ever
