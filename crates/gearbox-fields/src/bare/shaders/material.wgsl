@@ -9,7 +9,7 @@
 }
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -32,18 +32,6 @@ struct BareGround {
     way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
 };
-
-// The taller of two surfaces wins the pixel outright, and they mix only within
-// a shallow band. Fading them instead leaves a grey halo round every patch.
-fn height_blend(a: vec3<f32>, a_height: f32, a_share: f32,
-    b: vec3<f32>, b_height: f32, b_share: f32) -> vec4<f32> {
-    let band = 0.2;
-    let tallest = max(a_height + a_share, b_height + b_share) - band;
-    let weight_a = max(a_height + a_share - tallest, 0.0);
-    let weight_b = max(b_height + b_share - tallest, 0.0);
-    let total = max(weight_a + weight_b, 0.0001);
-    return vec4<f32>((a * weight_a + b * weight_b) / total, weight_b / total);
-}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var<uniform> ground: BareGround;
 

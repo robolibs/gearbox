@@ -49,6 +49,22 @@ fn clump_frame(cell: vec2<f32>, cell_m: f32, seed: u32) -> vec3<f32> {
     return vec3<f32>(cos(lie), sin(lie), mix(1.0, 2.8, rand(seed, 33u)));
 }
 
+// The taller of two surfaces wins the pixel outright, and they mix only within
+// a shallow band. Fading them instead leaves a grey halo round every patch —
+// and where a way meets a field, a plain fade is what makes a road read as
+// paint laid on the ground rather than as ground the cover has come off. Each
+// side brings its own micro-relief, so the earth shows first through the
+// hollows of the sward and the sward holds last on the high ground.
+fn height_blend(a: vec3<f32>, a_height: f32, a_share: f32,
+    b: vec3<f32>, b_height: f32, b_share: f32) -> vec4<f32> {
+    let band = 0.2;
+    let tallest = max(a_height + a_share, b_height + b_share) - band;
+    let weight_a = max(a_height + a_share - tallest, 0.0);
+    let weight_b = max(b_height + b_share - tallest, 0.0);
+    let total = max(weight_a + weight_b, 0.0001);
+    return vec4<f32>((a * weight_a + b * weight_b) / total, weight_b / total);
+}
+
 // A ground washed into whatever lies across each of its sides, so two covers
 // meet in a blend and not on a line. `sides` holds the four neighbours' colours
 // a column each — west, east, south, north — and `reach` how far each carries.
