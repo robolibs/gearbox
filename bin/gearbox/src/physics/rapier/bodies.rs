@@ -77,7 +77,7 @@ pub fn build_rigid_body(
     };
 
     let mut builder = RigidBodyBuilder::new(body_type)
-        .position(Pose {
+        .pose(Pose {
             translation: op.world_translation,
             rotation: op.world_rotation,
         })

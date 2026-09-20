@@ -169,7 +169,7 @@ fn attach_projected_stages(world: &mut World) {
             prims.len()
         );
     }
-    world.insert_non_send_resource(instances);
+    world.insert_non_send(instances);
 }
 
 /// A prim entity whose physics markers were read; prims a variant swap adds
