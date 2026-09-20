@@ -170,9 +170,15 @@ const EDGE_STRAY_M: f32 = 0.5;
 /// Taken from the line's own coordinate and how far along it this point lies,
 /// so every border strays differently and both fields sharing one read the
 /// same two numbers and so the same answer.
+/// Three scales, and the finest is the one that shows. Half a metre spent on a
+/// long smooth wander is a *straight line* at any distance a field is looked at
+/// from — the eye reads the trend, not the deviation. The same half metre spent
+/// on a fray a hand's breadth across reads as one ground interlocking with the
+/// next, which is what the edge of a crop actually is.
 fn edge_stray(on: vec2<f32>) -> f32 {
-    return ((lattice(on, 17.0) - 0.5) * 1.15
-        + (lattice(on + 53.0, 3.1) - 0.5) * 0.55) * EDGE_STRAY_M;
+    return ((lattice(on, 17.0) - 0.5) * 0.7
+        + (lattice(on + 53.0, 3.1) - 0.5) * 0.7
+        + (lattice(on + 131.0, 0.55) - 0.5) * 0.85) * EDGE_STRAY_M;
 }
 
 /// How far inside its own field a point lies, in metres, every edge taken where
