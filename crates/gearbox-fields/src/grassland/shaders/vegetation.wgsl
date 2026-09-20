@@ -162,11 +162,11 @@ fn meadow_detail(vertex: Vertex) -> VertexOutput {
     if (coverage <= 0.0) {
         return culled_vertex();
     }
-    // A way worn across the meadow takes the sward with it. A chance per blade
-    // rather than a shrinking of them all, so the edge of the track is ragged
-    // with stragglers instead of being mown to a line; what survives near it is
-    // shorter. The same reading the meadow material makes, so the two agree.
-    if (rand(id, 41u) < way_wear(base)) {
+    // Nothing stands in a road. A flat chance against the wear left a seventh
+    // of the sward upright in a fully worn track, which reads as grass dropped
+    // on a road rather than a road worn through grass; this clears it by the
+    // time the ground is half bare and thins the verge either side of that.
+    if (rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base))) {
         return culled_vertex();
     }
     let habitat = meadow_noise(base * 0.8 + vec2<f32>(7.2, 3.1));
@@ -414,7 +414,7 @@ fn got_blade(vertex: Vertex) -> VertexOutput {
     // rather than a shrinking of them all, so the track's edge is ragged with
     // stragglers rather than mown to a line; what holds on near it is shorter.
     let bared = way_wear(base_xz);
-    if (rand(id, 41u) < bared) {
+    if (rand(id, 41u) < smoothstep(0.08, 0.45, bared)) {
         return culled_vertex();
     }
 

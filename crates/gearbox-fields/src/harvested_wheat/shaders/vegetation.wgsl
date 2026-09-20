@@ -300,7 +300,7 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     let widen = max(1.0, 1.2 * pixel_m / BLADE_MAX_WIDTH);
     let alive = select(0.0, coverage, in_band && ground_normal.y >= DIRT_SLOPE_NORMAL_Y
         && within_field(base_xz) && rand(id, 19u) * widen < 1.0);
-    if (alive <= 0.0 || rand(id, 41u) < way_wear(base_xz)) {
+    if (alive <= 0.0 || rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base_xz))) {
         return culled_vertex();
     }
 
@@ -408,7 +408,7 @@ fn lying_straw(vertex: Vertex) -> VertexOutput {
     let end = blade_fade_end(f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0));
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
-    if (coverage <= 0.0 || rand(id, 41u) < way_wear(base)) {
+    if (coverage <= 0.0 || rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base))) {
         return culled_vertex();
     }
     // Kept at least ~1.2 px wide, thinned by the same share, like the stalks.

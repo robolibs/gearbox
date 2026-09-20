@@ -172,6 +172,9 @@ impl Plugin for GrasslandPlugin {
                     super::clumps::dandelion(share * 2.5, 38.0),
                     super::clumps::nettle(share * 0.8, 34.0),
                     super::clumps::celandine(share * 1.0, 40.0),
+                    // Chippings where a track crosses the meadow. A recoloured
+                    // ground is not a road; something has to lie loose on it.
+                    super::bare::way_grit(2800.0),
                 ],
                 ground: create_ground,
                 tread: Vec4::ZERO,
@@ -225,7 +228,8 @@ fn create_ground(
                     way: placed.way.packed().0,
                     way_more: placed.way.packed().1,
                     way_shape: placed.way.packed().2,
-                    soil: crate::bare::WAY_SOIL,
+                    // Dark loam: what is under turf that has never been broken.
+                    soil: Vec4::new(0.072, 0.050, 0.030, 1.0),
                     stony: crate::bare::WAY_HARDCORE,
                 },
                 grass_albedo,

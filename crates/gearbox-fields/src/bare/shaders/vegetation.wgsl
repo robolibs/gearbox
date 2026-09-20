@@ -162,9 +162,15 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // A chance weighted by the patch, so its edge is ragged with stragglers.
     let luck = rand(id, 12u);
     let grassy = smoothstep(0.42, 0.70, green);
+    // Road metal lies on a way and nowhere else: a cover that is not a track in
+    // itself carries it so that a track crossing it has chippings underfoot,
+    // and off the way every one of them goes before it costs anything.
+    if (vertex.uv.y > 1.5 && luck > smoothstep(0.25, 0.6, bared)) {
+        return culled_vertex();
+    }
     // Stones lie where the grass does not, and thickest where a wheel has
     // taken the fines off them: a worn way is a stony one.
-    if (is_lump && luck < grassy * 0.85 * (1.0 - bared * 0.65)) {
+    if (vertex.uv.y < 1.5 && is_lump && luck < grassy * 0.85 * (1.0 - bared * 0.65)) {
         return culled_vertex();
     }
     if (is_tuft && luck > grassy) {

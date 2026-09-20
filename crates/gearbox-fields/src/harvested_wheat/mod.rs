@@ -46,7 +46,7 @@ struct AntiRepeatTerrainExtension {
 }
 
 /// A way worn across the stubble. The same six numbers the meadow carries: what
-/// they mean lives in `bare_tread`, `WAY_SOIL`/`WAY_HARDCORE` and `worn()`, so
+/// they mean lives in `bare_tread`, `WAY_HARDCORE` and `worn()`, so
 /// this is only how they travel.
 #[derive(bevy::render::render_resource::ShaderType, Reflect, Debug, Clone, Copy, Default)]
 struct WornStubble {
@@ -80,7 +80,9 @@ impl WornStubble {
             way,
             way_more,
             way_shape,
-            soil: crate::bare::WAY_SOIL,
+            // Worked ground: paler and drier than a meadow's, being ploughed
+            // every year and cropped of what held it together.
+            soil: Vec4::new(0.132, 0.099, 0.056, 1.0),
             stony: crate::bare::WAY_HARDCORE,
         }
     }
@@ -290,7 +292,9 @@ impl Plugin for HarvestedWheatPlugin {
                 // A stubble is the seed bank's own field: what the combine left
                 // comes up through it within the fortnight.
                 super::clumps::dandelion(share * 1.2, 34.0),
-                super::clumps::nettle(share * 0.35, 30.0)],
+                super::clumps::nettle(share * 0.35, 30.0),
+                // Chippings where a track crosses the stubble.
+                super::bare::way_grit(2800.0)],
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 0.7,

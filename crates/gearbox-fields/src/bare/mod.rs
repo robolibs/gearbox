@@ -52,11 +52,39 @@ fn blown_clod() -> Mesh {
     lump_mesh(CLOD, 0.5, 5, 3)
 }
 
+/// Road metal: the chippings and grit that lie loose on a worn way, which no
+/// field grows and no amount of recolouring the ground stands in for. Marked in
+/// the second channel so the shader keeps it *only* where a way has worn, which
+/// is what lets a meadow or a stubble field carry it without it appearing all
+/// over the rest of them.
+fn way_grit_stone() -> Mesh {
+    lump_mesh(STONE, WAY_GRIT, 9, 5)
+}
+
 /// What the first channel of a lump's texture coordinate marks it as. A tuft
 /// carries one; a stone's own coordinates run the whole way round it, so they
 /// cannot be used to say.
 const STONE: f32 = 0.0;
 const CLOD: f32 = 0.35;
+/// Second channel past this and the lump lies only on a worn way.
+pub const WAY_GRIT: f32 = 2.0;
+
+/// Chippings for a cover that is not a way itself but may have one crossing it.
+/// Everywhere the way has not worn, every one of these is culled before it
+/// costs anything, so the density buys detail on the road alone.
+pub fn way_grit(density: f32) -> VegetationLayer {
+    VegetationLayer {
+        shader: "embedded://gearbox_fields/bare/shaders/vegetation.wgsl",
+        template: way_grit_stone,
+        density,
+        fade_start: 5.0,
+        fade_end: 38.0,
+        inverse_square_thinning: true,
+        follow_grass: 0.0,
+        albedo: None,
+        lod_band: [0.0, f32::MAX],
+    }
+}
 
 fn lump_mesh(kind: f32, mark: f32, around: u32, rings: u32) -> Mesh {
     let mut positions = Vec::new();
@@ -202,11 +230,15 @@ fn standing(
     layers
 }
 
-/// The soil a way is worn down to, and the hardcore under that — grey and
-/// gritty. Any surface a way crosses wears to these, so a track reads the same
-/// whether the field it runs over is a lane or a meadow.
-pub const WAY_SOIL: Vec4 = Vec4::new(0.108, 0.068, 0.038, 1.0);
+/// The hardcore a way is finally worn down to — grey and gritty, and the *same*
+/// under every cover, so the heart of a road does not change colour where it
+/// crosses from a meadow onto stubble. What a cover wears through on the way
+/// there is its own: its subsoil shows at the verge, where the wheels have only
+/// grazed it, and gives out to this in the ruts.
 pub const WAY_HARDCORE: Vec4 = Vec4::new(0.126, 0.106, 0.082, 1.0);
+
+/// The subsoil under a made track — what a lane's own surface wears through.
+pub const WAY_SOIL: Vec4 = Vec4::new(0.108, 0.068, 0.038, 1.0);
 
 type BareMaterial = ExtendedMaterial<StandardMaterial, BareExtension>;
 
