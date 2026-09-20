@@ -155,8 +155,8 @@ fn meadow_surface(world_xz: vec2<f32>, normal: vec3<f32>) -> MeadowSurface {
     // there, because one pass over turf presses the sward down into the soil
     // rather than stripping it — the blades are not culled for this, they lie
     // flattened over what shows through, which is what a fresh tyre mark is.
-    let edge = wheel_edge(trample, trample_params, world_xz);
-    let scar = wheel_scar(trample, trample_params, world_xz) * edge;
+    let held = wheel_edge(trample, trample_params, world_xz);
+    let scar = wheel_scar(trample, trample_params, world_xz) * held;
     // One walk of the way for all of it, rather than one for the wear, one for
     // the same wear again and a third for the rut.
     let read = way_read(world_xz, edges.extent, edges.tread, edges.way, edges.way_more, edges.way_shape);
