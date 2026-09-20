@@ -86,6 +86,38 @@ instead. So a way is four bands and not two: field, verge, damp edge, road. Only
 way gets the thickening: a field worn across its whole width has no room inside itself for a
 verge, and the band would fall in its neighbour, which knows nothing of it.
 
+### What lies on a way, and where
+
+How worn a point is does not say whether a **wheel** goes over it: the floor of a rut and a
+road worn bare from side to side read alike, and only one has a tyre down it. `way_read` in
+`cover.wgsl` answers both in one walk of the line — the wear, how much the wheels sweep
+there, where water will stand, and the print of the tyre's bars — because a ground that asks
+for two of them should not pay twice for the same search.
+
+Where the wheels sweep decides where the stone is, and it is the *opposite* of where the
+ground is most worn. Traffic displaces the loose coarse material off the floor of a rut, out
+to the shoulder and in to the strip between the two, so the stones gather at the rut edges
+and the floor is left as fines. A made road keeps more of its own, being stone through and
+through. Beside the stone a way carries `way_litter` — crumbs and dried clods brought out of
+a field on a tyre and dropped, which are the way's own colour and not the field's, because a
+track carrying nothing but gravel reads as gravel spread over a lawn.
+
+A rut's floor is not flat across it either. The tyre pushes material to one side and leaves a
+**channel** down the other; along that channel are dips, and in the dips is where water will
+stand. Nothing draws water yet — `rut_of(...).y` is the ground being ready for it — but it
+already earns its keep as the dark, damp, silted stretches of a used track, and the grit is
+swallowed there because silt covers it.
+
+The bars of an agricultural tyre stand at 45°, which every maker has settled on, spaced wide
+enough to shed mud each turn. They print into the rut floor and nowhere else. That is a
+20 cm detail, so each ground fades it out by its own pixel footprint; it cannot be faded
+inside the shared rule, because `worn()` is called from vertex shaders too and `fwidth` does
+not exist there.
+
+Under all of it, `earth_mottle` varies the ground at 0.85 m, 0.29 m and 0.10 m. The cover
+textures repeat at about two metres, so without it there was nothing below a metre at all and
+the ground went flat as soon as it was looked at closely.
+
 The wear is read by the ground material and by everything standing in it alike, so it
 decides the soil's colour as it wears down to the stone under it, whether grass holds,
 how thickly stones lie, and how far the wheels have pressed it. Driving over a field wears
