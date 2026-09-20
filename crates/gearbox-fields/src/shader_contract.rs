@@ -44,9 +44,10 @@ const COVER: &str = "bare/shaders/cover.wgsl";
 /// way has worn, where two covers meet, which of two surfaces takes a pixel,
 /// and the patches a ground thins its own grass by. A second copy of any of
 /// these is the bug this file exists to catch.
-const MUST_AGREE: [&str; 14] = [
+const MUST_AGREE: [&str; 16] = [
     "worn", "washed_into", "height_blend", "settled", "verge_damp", "way_beyond", "taken",
     "lattice", "clump_frame", "edge_stray", "inside_field", "rut_of", "way_read", "earth_mottle",
+    "way_walk", "way_print",
 ];
 
 /// `pcg` and `rand` are not rules, only hashing, and a cover that does not wear
@@ -180,6 +181,72 @@ fn the_hash_every_shader_carries_is_the_same_hash() {
             assert_eq!(own, theirs, "{name} carries a different `{helper}` from cover.wgsl");
         }
         assert!(carried > 0, "nothing carries `{helper}` any more; drop it from MAY_BE_CARRIED");
+    }
+}
+
+/// Naming the same rule twice in one import list is not a harmless repetition:
+/// naga_oil rejects the whole file with "Ambiguous import path for item", and
+/// since a cover whose shader will not build simply leaves the plain terrain
+/// showing through, the field looks untextured rather than broken. The bare
+/// ground imported `lattice` twice for long enough that every ploughed, dirt and
+/// sand field rendered as flat terrain, with the reason only in the log.
+#[test]
+fn no_shader_imports_the_same_rule_twice() {
+    for (name, source) in shaders() {
+        for line in source.lines().filter(|line| line.contains("cover.wgsl\"::")) {
+            let Some((_, rest)) = line.split_once('{') else { continue };
+            let Some((names, _)) = rest.split_once('}') else { continue };
+            let mut seen = BTreeSet::new();
+            for wanted in names.split(',').map(str::trim).filter(|it| !it.is_empty()) {
+                assert!(
+                    seen.insert(wanted.to_owned()),
+                    "{name} imports `{wanted}` twice from cover.wgsl; naga_oil calls that \
+                     ambiguous and drops the whole shader"
+                );
+            }
+        }
+    }
+}
+
+/// A tyre's bars meet at its own centreline, and the print is a chevron because
+/// of it. Taken from the *signed* offset instead, each rut prints parallel
+/// diagonals — and since the offset is measured outward from the middle of the
+/// way, the slope runs opposite ways in the two ruts, so one wheel leans one way
+/// and the other the other. That is what the first attempt at this looked like,
+/// and nothing about the picture says which of the two mistakes it is.
+#[test]
+fn the_tyre_bars_meet_at_the_centre_of_the_rut() {
+    let all = shaders();
+    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
+    let body = body_of(cover, "worn_along").expect("cover.wgsl wears a way along a line");
+    let phase = body
+        .split("let phase = ")
+        .nth(1)
+        .and_then(|it| it.split_once(';'))
+        .map(|(it, _)| it.to_owned())
+        .expect("the print has a phase");
+    assert!(
+        phase.contains("abs(off_middle)"),
+        "the bars are placed from `{phase}`; taken from the signed offset they are \
+         diagonals, and mirrored between the two ruts"
+    );
+}
+
+/// The print is relief and not paint: a cover that reads it must put it into the
+/// normal it shades with. Tinting alone is the thing that was tried and thrown
+/// away — at any strength that survives the stone lying on a rut it reads as
+/// hatching, and at one that does not shout it cannot be seen at all.
+#[test]
+fn every_cover_that_prints_a_tyre_bar_tilts_its_normal_by_it() {
+    for (name, source) in shaders() {
+        if name == COVER || !calls(&source, "way_print") {
+            continue;
+        }
+        assert!(
+            source.contains("print.y") && source.contains("print.z"),
+            "{name} reads the tyre print but never tilts a normal by it; drawn as a \
+             tone alone it reads as hatching"
+        );
     }
 }
 
