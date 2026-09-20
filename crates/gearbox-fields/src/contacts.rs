@@ -12,8 +12,26 @@ pub struct WheelContact {
     /// How hard the tyre works the ground, 0..1: faint rolling straight,
     /// strong when it spins, slides sideways or twists through a turn.
     pub scrub: f32,
-    /// Metres this wheel has rolled; it places the tread along the track.
+    /// Metres the *machine* has rolled; it places the tread along the track.
     pub travelled: f32,
+    /// Where the machine was when it had rolled that far, in the same metres as
+    /// `position`. The tread is measured from here and not from the wheel,
+    /// because a tractor's wheels reach the same ground at different moments —
+    /// the rear one a wheelbase later — and measured from each wheel they stamp
+    /// phases a wheelbase apart onto the same texels. Measured from one place
+    /// that moves with the machine, every wheel writes the same number for the
+    /// same ground. The arm is short, a wheelbase at most, which matters: it
+    /// multiplies any wobble of the heading, and from a far-off origin a half
+    /// degree of steering correction would slide the whole tread by pitches.
+    pub anchor: Vec2,
+    /// The line this wheel runs down, as a place on it, with the frame-to-frame
+    /// jitter of the contact taken out of it sideways. What the tread is
+    /// measured across from, and it has to be steady: the contact itself moves
+    /// a centimetre or two each frame as the physics settles, every texel keeps
+    /// whichever frame last touched it, and since the bars are placed from the
+    /// distance off the tyre's middle, the whole pattern steps sideways along
+    /// the line where one frame's stamp meets the next's.
+    pub centreline: Vec2,
 }
 
 /// Wheel contacts collected by the controllers during one frame, stamped

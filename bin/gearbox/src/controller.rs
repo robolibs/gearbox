@@ -2266,6 +2266,13 @@ fn record_wheel_tracks(
     inventory: Res<ControllerInventory>,
     time: Res<Time>,
     mut odometers: Local<HashMap<(String, String), f32>>,
+    // One rolled distance for the whole machine, beside each wheel's own. It is
+    // what places the tread along a track, and every wheel of one machine has
+    // to place it the same: a tractor puts two wheels down the same line, and
+    // with a distance each — different radii, different slip — the rear one's
+    // stamp lands on texels the front one wrote holding a number metres apart,
+    // and the chevrons break wherever the two overlap.
+    mut machine_odometers: Local<HashMap<String, (f32, f32, Vec2)>>,
     active: Res<gearbox_api::PhysicsActive>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
@@ -2338,11 +2345,7 @@ fn record_wheel_tracks(
                 + 1.2 * body.linvel().dot(axle).abs()
                 + 1.4 * body.angvel().y.abs()) as f32;
             // Metres this wheel has rolled, which places its tread along the track.
-            let odometer = odometers
-                .entry((machine.id.to_string(), link.name.to_string()))
-                .or_insert(0.0);
-            *odometer += ground as f32 * time.delta_secs();
-            let travelled = *odometer;
+            let now = time.elapsed_secs();
             // Tracks are laid in the cover that is drawn: the view's site.
             let (site, p) = crate::globe::site_local(body.translation().x, body.translation().y, body.translation().z);
             if site != crate::globe::current_site() {
@@ -2361,12 +2364,48 @@ fn record_wheel_tracks(
             if roll.dot(travel) < 0.0 {
                 roll = -roll;
             }
+            // One place and one rolled distance per machine per frame, shared by
+            // every wheel of it, and the distance advanced by exactly how far
+            // that place moved along the heading. Not by the wheel's speed
+            // times the frame: the tread's phase is `travelled` minus the
+            // anchor projected on the heading, and that only stays put if the
+            // two advance by the same amount. Integrated from a speed it drifts
+            // a few millimetres a frame, which is a whole lug pitch every few
+            // seconds, and the print slides along the track as it is laid.
+            let here = Vec2::new(p.x as f32, p.z as f32);
+            let (travelled, anchor) = {
+                let rolled = machine_odometers
+                    .entry(machine.id.to_string())
+                    .or_insert((0.0, f32::NEG_INFINITY, here));
+                if rolled.1 != now {
+                    rolled.0 += (here - rolled.2).dot(roll);
+                    rolled.1 = now;
+                    rolled.2 = here;
+                }
+                (rolled.0, rolled.2)
+            };
+            // The wheel's offset from the machine's line is a fixed fact of the
+            // machine, so it is smoothed hard: what varies frame to frame there
+            // is the contact settling, not the tractor moving sideways. Along
+            // the track nothing is smoothed — a lag there would drag the tread
+            // behind the wheel.
+            let axle_of_roll = roll.perp();
+            let sideways = (here - anchor).dot(axle_of_roll);
+            let held = odometers
+                .entry((machine.id.to_string(), link.name.to_string()))
+                .or_insert(sideways);
+            *held += (sideways - *held) * 0.04;
+            let centreline = anchor
+                + axle_of_roll * *held
+                + roll * (here - anchor).dot(roll);
             contacts.contacts.push(gearbox_fields::WheelContact {
                 position: Vec3::new(p.x as f32, ground, p.z as f32),
                 direction: roll,
                 width: width as f32,
                 scrub: scrub.clamp(0.0, 1.0),
                 travelled,
+                anchor,
+                centreline,
             });
         }
     }
