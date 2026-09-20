@@ -5,6 +5,17 @@ use crate::physics::{MollaBackend, PhysicsWorld, RapierBackend};
 use crate::physics::backend::{ColliderDesc, ColliderId, DQuat, Pose, Shape};
 use std::time::{Duration, Instant};
 
+#[path = "benchmark/fleet.rs"]
+mod fleet;
+
+#[derive(Clone)]
+struct FleetMachine {
+    chassis: BodyId,
+    bodies: Vec<BodyId>,
+    wheels: Vec<BodyId>,
+    machine: MachineInstanceSpec,
+}
+
 struct Fixture {
     app: App,
     controllers: bevy::ecs::schedule::Schedule,
@@ -13,6 +24,7 @@ struct Fixture {
     ground: ColliderId,
     wheels: Vec<BodyId>,
     machine: MachineInstanceSpec,
+    fleet: Vec<FleetMachine>,
 }
 
 impl Fixture {
@@ -23,14 +35,19 @@ impl Fixture {
     fn load_backend(path: &Path, molla: bool) -> Self {
         let source = usd_bevy::UsdSource::from_file(path).expect("read benchmark asset");
         let stage = source.open_stage().expect("open benchmark stage");
-        let mut machines = discover_machines_from_stage(&stage).unwrap();
-        assert_eq!(machines.len(), 1, "benchmark requires one machine");
-        let mut machine = machines.remove(0);
         let kubota = match path.file_name().unwrap().to_str().unwrap() {
             "kubota_tractor.usdz" => true,
             "krampe_trailer.usdz" => false,
             _ => panic!("benchmark requires the real Kubota or Krampe asset"),
         };
+        Self::from_stage(&stage, molla, kubota, 1)
+    }
+
+    fn from_stage(stage: &openusd::usd::Stage, molla: bool, kubota: bool, count: usize) -> Self {
+        let mut machines = discover_machines_from_stage(stage).unwrap();
+        machines.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(machines.len(), count);
+        assert_eq!(machines.iter().map(|machine| &machine.id).collect::<std::collections::BTreeSet<_>>().len(), count);
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins,
@@ -56,8 +73,8 @@ impl Fixture {
         }
         app.finish();
         app.cleanup();
-        let root = crate::physics::benchmark::project(&mut app, &stage);
-        machine.scene_root = Some(root);
+        let root = crate::physics::benchmark::project(&mut app, stage);
+        for machine in &mut machines { machine.scene_root = Some(root); }
         app.init_resource::<ControllerInventory>()
             .init_resource::<ControllerCommands>()
             .init_resource::<ControllerRuntimeState>()
@@ -67,14 +84,17 @@ impl Fixture {
             .init_resource::<crate::services::LinkValues>()
             .init_resource::<gearbox_fields::WheelContacts>()
             .insert_resource(gearbox_api::PhysicsActive(true));
-        app.world_mut().resource_mut::<ControllerInventory>().machines.push(machine.clone());
-        app.world_mut().resource_mut::<MachineAgentKeys>().0.insert(
-            "benchmark".into(), ControllerKey::new(root, &machine.id, "drive"),
-        );
-        for link in &machine.links.links {
-            for (name, value) in &link.values {
-                app.world_mut().resource_mut::<crate::services::LinkValues>()
-                    .set(&machine.id, &link.name, name, *value);
+        app.world_mut().resource_mut::<ControllerInventory>().machines = machines.clone();
+        for (index, machine) in machines.iter().enumerate() {
+            app.world_mut().resource_mut::<MachineAgentKeys>().0.insert(
+                if index == 0 { "benchmark".into() } else { format!("benchmark_{index}") },
+                ControllerKey::new(root, &machine.id, "drive"),
+            );
+            for link in &machine.links.links {
+                for (name, value) in &link.values {
+                    app.world_mut().resource_mut::<crate::services::LinkValues>()
+                        .set(&machine.id, &link.name, name, *value);
+                }
             }
         }
         let mut controllers = bevy::ecs::schedule::Schedule::default();
@@ -87,42 +107,51 @@ impl Fixture {
             record_wheel_tracks,
         ).chain());
         controllers.run(app.world_mut());
-        let runtime = app.world().resource::<ControllerRuntimeState>();
-        let mut bodies = runtime.machine_bodies[&machine.id].clone();
-        bodies.sort();
-        let wheels = runtime.machine_wheels[&machine.id].clone();
-        assert_eq!(bodies.len(), if kubota { 26 } else { 15 });
-        assert_eq!(wheels.len(), 4);
-        let chassis_entity = app.world_mut().query::<(Entity, &UsdPrimRef)>()
-            .iter(app.world()).find(|(_, prim)| Some(&prim.path) == machine.body.as_ref()).unwrap().0;
+        let mut fleet = Vec::new();
+        for machine in machines {
+            let runtime = app.world().resource::<ControllerRuntimeState>();
+            let mut bodies = runtime.machine_bodies[&machine.id].clone();
+            bodies.sort();
+            let wheels = runtime.machine_wheels[&machine.id].clone();
+            assert_eq!(bodies.len(), if kubota { 26 } else { 15 });
+            assert_eq!(wheels.len(), 4);
+            let chassis_entity = app.world_mut().query::<(Entity, &UsdPrimRef)>()
+                .iter(app.world()).find(|(_, prim)| Some(&prim.path) == machine.body.as_ref()).unwrap().0;
+            let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
+            let chassis = physics.entity_to_body[&chassis_entity];
+            let mass: f64 = bodies.iter().map(|id| physics.body(*id).unwrap().mass()).sum();
+            if kubota {
+                let expected_mass = if molla { 4916.010223 } else { 4913.449268 };
+                assert!((mass - expected_mass).abs() < 0.001, "imported mass {mass}");
+            } else {
+                assert!((6500.0..7000.0).contains(&mass), "imported trailer mass {mass}");
+            }
+            let clearance = wheels.iter().flat_map(|id| physics.body(*id).unwrap().colliders())
+                .map(|id| physics.collider(id).unwrap().aabb().mins.y).fold(f64::INFINITY, f64::min);
+            for &body in &bodies {
+                let body = physics.body_mut(body).unwrap();
+                let mut pose = body.position();
+                pose.translation.y += 0.03 - clearance;
+                body.set_position(pose, true);
+            }
+            fleet.push(FleetMachine { chassis, bodies, wheels, machine });
+        }
         let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
-        let chassis = physics.entity_to_body[&chassis_entity];
-        let mass: f64 = bodies.iter().map(|id| physics.body(*id).unwrap().mass()).sum();
-        if kubota {
-            let expected_mass = if molla { 4916.010223 } else { 4913.449268 };
-            assert!((mass - expected_mass).abs() < 0.001, "imported mass {mass}");
-        } else {
-            assert!((6500.0..7000.0).contains(&mass), "imported trailer mass {mass}");
-        }
-        let clearance = wheels.iter().flat_map(|id| physics.body(*id).unwrap().colliders())
-            .map(|id| physics.collider(id).unwrap().aabb().mins.y).fold(f64::INFINITY, f64::min);
-        for body in bodies {
-            let body = physics.body_mut(body).unwrap();
-            let mut pose = body.position();
-            pose.translation.y += 0.03 - clearance;
-            body.set_position(pose, true);
-        }
         let ground = physics.insert_collider(ColliderDesc::new(Shape::Cuboid {
             half_extents: DVec3::new(10_000.0, 0.02, 10_000.0),
         }).translation(DVec3::new(0.0, -0.02, 0.0)).friction(1.0).restitution(0.0)).unwrap();
         physics.register_wheel_ground(ground, None).unwrap();
-        eprintln!("imported fixture: bodies={} joints={} colliders={} tyres={} mass={mass} settings={:?}",
-            physics.bodies().len(), physics.joints().len(), physics.colliders().len(), wheels.len(), physics.settings());
-        assert_eq!(physics.joints().len(), if kubota { 31 } else { 14 });
-        assert_eq!(physics.colliders().len(), if kubota { 18 } else { 19 });
+        let mass: f64 = fleet.iter().flat_map(|m| &m.bodies).map(|&id| physics.body(id).unwrap().mass()).sum();
+        eprintln!("imported fixture: machines={count} bodies={} joints={} colliders={} tyres={} mass={mass} settings={:?}",
+            physics.bodies().len(), physics.joints().len(), physics.colliders().len(), count * 4, physics.settings());
+        assert_eq!(physics.bodies().len(), count * if kubota { 26 } else { 15 });
+        assert_eq!(physics.joints().len(), count * if kubota { 31 } else { 14 });
+        assert_eq!(physics.colliders().len(), count * if kubota { 17 } else { 18 } + 1);
         assert!((physics.dt() - 1.0 / 120.0).abs() < 1e-15, "benchmark requires 120 Hz");
         let services = crate::services::benchmark_schedule(&mut app);
-        Self { app, controllers, services, chassis, ground, wheels, machine }
+        let first = fleet[0].clone();
+        Self { app, controllers, services, chassis: first.chassis, ground,
+            wheels: first.wheels, machine: first.machine, fleet }
     }
 
     fn incline(&mut self, radians: f64) -> DVec3 {
@@ -179,15 +208,19 @@ impl Fixture {
     }
 
     fn verify(&self, bar: f64, driving: bool) -> f64 {
+        self.verify_machine(self.chassis, &self.wheels, bar, driving)
+    }
+
+    fn verify_machine(&self, chassis: BodyId, wheels: &[BodyId], bar: f64, driving: bool) -> f64 {
         let physics = self.app.world().resource::<PhysicsWorld>();
-        let chassis = physics.body(self.chassis).unwrap();
+        let chassis = physics.body(chassis).unwrap();
         let speed = chassis.linvel().length();
         if driving { assert!((speed - 2.0).abs() < 0.15, "driving speed {speed}"); }
         else { assert!(speed < 0.05, "parked speed {speed}"); }
         let mut radii = Vec::new();
         let mut deflections = Vec::new();
         let mut load = 0.0;
-        for wheel in &self.wheels {
+        for wheel in wheels {
             let out = physics.wheel_output(*wheel).expect("registered wheel output");
             let pressure = out.pressure.expect("pressure mechanics enabled");
             assert!(out.in_contact && out.normal_force > 100.0, "unsupported wheel {wheel:?}");
