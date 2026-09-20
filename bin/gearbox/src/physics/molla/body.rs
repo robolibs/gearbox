@@ -201,25 +201,25 @@ impl BodyMut for BodyAccess {
     fn reset_forces(&mut self, wake: bool) {
         apply(self.shared.world().scene.reset_body_forces_with_wake(self.handle, wake));
     }
-    fn apply_impulse(&mut self, impulse: DVec3, _wake: bool) {
+    fn apply_impulse(&mut self, impulse: DVec3, wake: bool) {
         apply(
             self.shared
                 .world()
-                .apply_body_impulse(self.handle, SpatialVector::new(impulse, DVec3::ZERO)),
+                .apply_body_impulse_with_wake(self.handle, SpatialVector::new(impulse, DVec3::ZERO), wake),
         );
     }
-    fn apply_torque_impulse(&mut self, impulse: DVec3, _wake: bool) {
+    fn apply_torque_impulse(&mut self, impulse: DVec3, wake: bool) {
         apply(
             self.shared
                 .world()
-                .apply_body_impulse(self.handle, SpatialVector::new(DVec3::ZERO, impulse)),
+                .apply_body_impulse_with_wake(self.handle, SpatialVector::new(DVec3::ZERO, impulse), wake),
         );
     }
-    fn apply_impulse_at_point(&mut self, impulse: DVec3, point: DVec3, _wake: bool) {
+    fn apply_impulse_at_point(&mut self, impulse: DVec3, point: DVec3, wake: bool) {
         apply(
             self.shared
                 .world()
-                .apply_body_impulse_at_point(self.handle, impulse, point),
+                .apply_body_impulse_at_point_with_wake(self.handle, impulse, point, wake),
         );
     }
 }
