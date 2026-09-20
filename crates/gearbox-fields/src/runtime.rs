@@ -670,6 +670,14 @@ fn placed_of(
         } else {
             continue;
         };
+        // Nothing to wash towards where the same cover lies both sides: the
+        // blend flattens the last metre of each towards one colour, so between
+        // two stretches of the same meadow it draws a seam instead of hiding
+        // one. The background is cut into regions round every field, so most
+        // boundaries in a layout are of this kind.
+        if other.profile == self_spec.profile {
+            continue;
+        }
         let Some(across) = profiles.get(&other.profile) else {
             continue;
         };
