@@ -157,7 +157,20 @@ fn comb(place: vec2<f32>, spacing: f32, plot_m: f32) -> Comb {
         into);
     comb.depth = mix(0.72, 1.28, hash21(vec2<f32>(furrow, plot.x + plot.y * 7.0)))
         * mix(0.45, 1.2, strength);
-    comb.worked = 1.0 - smoothstep(0.86, 0.99, edge);
+    // A plough turns on the headland — a strip round the edge of the field
+    // worked over rather than drawn through — and the field's own boundary is
+    // as much an edge as a plot line is. Without this the furrows run at full
+    // depth into whatever is next door and stop mid-stride on the line.
+    let span = ground.extent.zw - ground.extent.xy;
+    var boundary = 1.0;
+    if (span.x > 1.0 && span.y > 1.0) {
+        let to_edge = min(
+            min(place.x - ground.extent.x, ground.extent.z - place.x),
+            min(place.y - ground.extent.y, ground.extent.w - place.y));
+        // A headland is about a machine's width, and it is not ruled either.
+        boundary = smoothstep(0.0, 5.5, to_edge + (lattice(place, 7.0) - 0.5) * 2.2);
+    }
+    comb.worked = (1.0 - smoothstep(0.86, 0.99, edge)) * boundary;
     return comb;
 }
 
