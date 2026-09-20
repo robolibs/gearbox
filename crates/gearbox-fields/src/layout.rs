@@ -211,6 +211,32 @@ mod tests {
         assert!(slope < 0.3, "sides of one in {:.0}", 1.0 / slope);
     }
 
+    // A hollow has to belong to the way that made it. Sides of a fixed width
+    // and a depth of a fixed depth turn a footpath into a broad shallow valley
+    // several times its own width, which is not what a footpath wears.
+    #[test]
+    fn a_narrow_way_sinks_a_narrow_hollow() {
+        let of = |width: f32| {
+            let json = format!(
+                r#"{{"default":"grassland","ways":[{{"name":"w","width":{width},"wear":0.8,
+                    "points":[[0,0],[100,0]]}}]}}"#
+            );
+            Hollows::of(&serde_json::from_str::<FieldLayout>(&json).unwrap())
+        };
+        let reaches = |hollows: &Hollows| {
+            (0..200).map(|s| s as f32 * 0.05).find(|z| hollows.depth_at(50.0, *z) <= 0.0).unwrap()
+        };
+        let (narrow, wide) = (of(1.2), of(6.0));
+        // A foot-wide path must not dig wider than a lane does.
+        assert!(reaches(&narrow) < 1.6, "a 1.2 m path sinks {} m out", reaches(&narrow));
+        assert!(reaches(&narrow) < reaches(&wide) * 0.5);
+        // And not as deep, either: a groove, not a sunken lane.
+        assert!(narrow.depth_at(50.0, 0.0) < wide.depth_at(50.0, 0.0) * 0.6);
+        // The wide one is untouched by any of that.
+        assert!((wide.depth_at(50.0, 0.0) - 0.36).abs() < 1e-5);
+        assert!(reaches(&wide) > 4.0);
+    }
+
     #[test]
     fn a_field_with_no_way_of_its_own_sinks_nothing() {
         let plain: FieldLayout = serde_json::from_str(
@@ -749,6 +775,7 @@ struct Hollow {
     line: Vec<Vec2>,
     half: f32,
     sink: f32,
+    fade: f32,
     min: Vec2,
     max: Vec2,
 }
@@ -759,15 +786,22 @@ impl Hollow {
             return None;
         }
         let half = width * 0.5;
-        let reach = Vec2::splat(half + FADE_M);
+        // A hollow belongs to the way that made it: a footpath wears a groove,
+        // not a broad shallow valley several times its own width. Both the
+        // sides and the depth are held back for a way too narrow to carry them,
+        // and neither is touched for anything a tractor fits down.
+        let fade = FADE_M.min(half * 0.8);
+        let slight = (half / 1.5).min(1.0);
+        let reach = Vec2::splat(half + fade);
         let fold = |pick: fn(Vec2, Vec2) -> Vec2| line.iter().copied().reduce(pick).unwrap();
         Some(Self {
             half,
+            fade,
             // Barely marked where a lane is hardly worn, a proper sunken way
             // where it is a road. Even at its deepest the sides are gentler
             // than one in five, so a wheel rides in and out of it rather than
             // catching on the lip.
-            sink: 0.08 + wear.clamp(0.0, 1.0) * 0.35,
+            sink: (0.08 + wear.clamp(0.0, 1.0) * 0.35) * slight,
             min: fold(Vec2::min) - reach,
             max: fold(Vec2::max) + reach,
             line,
@@ -807,7 +841,7 @@ impl Hollows {
                 let at = (place - leg[0]).dot(run / length).clamp(0.0, length);
                 nearest = nearest.min(place.distance(leg[0] + run / length * at));
             }
-            let sides = 1.0 - smoothstep(hollow.half * 0.55, hollow.half + FADE_M, nearest);
+            let sides = 1.0 - smoothstep(hollow.half * 0.55, hollow.half + hollow.fade, nearest);
             // Where two ways meet, the lesser adds to the greater rather than
             // hiding under it — the same rule `worn()` uses for the colour, so
             // a crossroads is dug out as well as worn bare.
