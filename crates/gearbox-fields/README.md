@@ -59,7 +59,10 @@ The wear is read by the ground material and by everything standing in it alike, 
 decides the soil's colour as it wears down to the stone under it, whether grass holds,
 how thickly stones lie, and how far the wheels have pressed it. Driving over a field wears
 it the same way, whatever its layout says: the two are taken together, the harder winning.
-See `layouts/tracks.json`.
+See `layouts/tracks.json` for the range of wear, and `layouts/between.json` for a lane
+with a different field up each side: each of the four sides is washed towards its own
+neighbour, so the same lane is dark where it meets ploughed earth and pale where it meets
+sand.
 
 Fields meet one another over the softer of their two `soft_border` widths: what grows in
 each carries that far past its own edge and thins as it goes, and the ground washes towards
