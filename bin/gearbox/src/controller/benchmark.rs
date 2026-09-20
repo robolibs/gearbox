@@ -2,13 +2,14 @@
 
 use super::*;
 use crate::physics::{MollaBackend, PhysicsWorld};
-use crate::physics::backend::{ColliderDesc, Shape};
+use crate::physics::backend::{ColliderDesc, ColliderId, DQuat, Pose, Shape};
 use std::time::{Duration, Instant};
 
 struct Fixture {
     app: App,
     controllers: bevy::ecs::schedule::Schedule,
     chassis: BodyId,
+    ground: ColliderId,
     wheels: Vec<BodyId>,
     machine: MachineInstanceSpec,
 }
@@ -94,7 +95,24 @@ impl Fixture {
         assert_eq!(physics.joints().len(), 31);
         assert_eq!(physics.colliders().len(), 18);
         assert!((physics.dt() - 1.0 / 120.0).abs() < 1e-15, "benchmark requires 120 Hz");
-        Self { app, controllers, chassis, wheels, machine }
+        Self { app, controllers, chassis, ground, wheels, machine }
+    }
+
+    fn incline(&mut self, radians: f64) -> DVec3 {
+        let rotation = DQuat::from_rotation_x(radians);
+        let mut physics = self.app.world_mut().resource_mut::<PhysicsWorld>();
+        let mut bodies = physics.bodies();
+        bodies.sort();
+        let poses: Vec<_> = bodies.into_iter().map(|id| (id, physics.body(id).unwrap().position())).collect();
+        for (id, pose) in poses {
+            physics.body_mut(id).unwrap().set_position(
+                Pose::new(rotation * pose.translation, rotation * pose.rotation), true,
+            );
+        }
+        physics.collider_mut(self.ground).unwrap().set_position(
+            Pose::new(rotation * DVec3::new(0.0, -0.02, 0.0), rotation),
+        );
+        rotation * DVec3::Y
     }
 
     fn tick(&mut self) -> Duration {
@@ -202,6 +220,62 @@ fn imported_kubota_pressure_benchmark() {
             eprintln!("full imported Kubota physics pressure={pressure} driving={driving}: median={:.6} p95={:.6} max={:.6} ms/step; samples={} hz=120 renderer=none controller=outside-timing",
                 samples[300], samples[570], samples[599], samples.len());
         }
+    }
+}
+
+#[test]
+#[ignore = "requires GEARBOX_BENCH_ASSET pointing to real kubota_tractor.usdz; 60 s slope hold"]
+fn imported_kubota_slope_parking() {
+    let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
+    let mut results = Vec::new();
+    for degrees in [-10.0_f64, 10.0] {
+        for bar in [0.5, 4.0] {
+            let mut fixture = Fixture::load(Path::new(&asset));
+            let normal = fixture.incline(degrees.to_radians());
+            fixture.pressure(bar);
+            fixture.drive(0.0, 0.0);
+            for _ in 0..1200 { fixture.tick(); }
+            let physics = fixture.app.world().resource::<PhysicsWorld>();
+            let start = physics.body(fixture.chassis).unwrap().translation();
+            let mut max_drift = 0.0_f64;
+            let mut max_speed = 0.0_f64;
+            for step in 0..7200 {
+                fixture.tick();
+                let physics = fixture.app.world().resource::<PhysicsWorld>();
+                let body = physics.body(fixture.chassis).unwrap();
+                let displacement = body.translation() - start;
+                max_drift = max_drift.max((displacement - normal * displacement.dot(normal)).length());
+                max_speed = max_speed.max(body.linvel().length());
+                if step % 120 == 119 {
+                    let mut load = 0.0;
+                    for wheel in &fixture.wheels {
+                        let output = physics.wheel_output(*wheel).unwrap();
+                        assert!(output.in_contact && output.normal_force > 100.0);
+                        let pressure = output.pressure.unwrap();
+                        assert!((pressure.pressure_pa / 1e5 - bar).abs() < 1e-8);
+                        assert!(pressure.ground.unwrap().normal.dot(normal) > 1.0 - 1e-10);
+                        load += output.normal_force;
+                    }
+                    assert!((load - 4916.0 * 9.81 * normal.y).abs() < 500.0, "slope support {load}");
+                }
+            }
+            let physics = fixture.app.world().resource::<PhysicsWorld>();
+            for wheel in &fixture.wheels {
+                let output = physics.wheel_output(*wheel).unwrap();
+                let body = physics.body(*wheel).unwrap();
+                let (axis, _, _) = body_tyre_geometry(physics, *wheel).unwrap();
+                let spin = (body.angvel() - physics.body(fixture.chassis).unwrap().angvel())
+                    .dot(body.rotation() * axis);
+                eprintln!("slope wheel: id={wheel:?} spin_rad_s={spin:.9} slip_ratio={:.9} normal_force={:.3} grip_force={:.3}",
+                    output.slip_ratio, output.normal_force, output.grip_force);
+            }
+            eprintln!("slope parking: degrees={degrees} bar={bar} duration=60s max_drift_m={max_drift:.9} max_speed_mps={max_speed:.9}");
+            results.push((degrees, bar, max_drift, max_speed));
+        }
+    }
+    for (degrees, bar, drift, speed) in results {
+        assert!(drift < 0.01 && speed < 0.001,
+            "slope creep at {degrees} degrees, {bar} bar: {drift} m, {speed} m/s");
     }
 }
 

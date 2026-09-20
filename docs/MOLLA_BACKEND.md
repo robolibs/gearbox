@@ -145,6 +145,47 @@ comparison is still pending. This is an integration checkpoint, not full
 
 ## Build notes
 
+### Imported Kubota slope gate: currently failing
+
+The unattended `controller::benchmark::imported_kubota_slope_parking` test
+imports the real 26-body Kubota, rotates the machine and ground together by
+both -10 and +10 degrees, commands zero drive, and tests 0.5 and 4.0 bar.
+After 10 simulated seconds for placement/pressure settling, it measures 60
+seconds at 120 Hz. The gate requires less than 10 mm maximum ground-tangent
+displacement and 1 mm/s maximum chassis speed throughout that interval.
+Each step checks finite, enabled bodies and no quarantine; each simulated
+second checks four supported wheels, applied pressure, the sloped ground
+normal and total normal load within 500 N of `mass * g * cos(10 degrees)`.
+
+At Molla `b6d8f27`, two runs reproduced these failures:
+
+| Slope | Pressure | Maximum drift over 60 s | Maximum speed |
+| --- | --- | --- | --- |
+| -10 degrees | 0.5 bar | 7.998699257 m | 0.133314298 m/s |
+| -10 degrees | 4.0 bar | 9.031795585 m | 0.150532806 m/s |
+| +10 degrees | 0.5 bar | 7.973623087 m | 0.133080483 m/s |
+| +10 degrees | 4.0 bar | 9.042705112 m | 0.149730977 m/s |
+
+The support/pressure/normal/finite-state checks passed. Diagnostic output
+shows nonzero wheel rotation and slip ratios with magnitudes about 0.19–0.22.
+This is a reproduced parking failure, not an interaction or window-lifecycle
+inference. No production physics, gains, brakes or tolerance were changed to
+make this test pass; it remains explicitly failing when invoked. Its ignore
+attribute is for the external asset requirement, not acceptance exemption.
+
+```sh
+GEARBOX_PHYSICS=molla \
+GEARBOX_BENCH_ASSET=/home/bresilla/data/code/OUSD/machines/usd/kubota_tractor.usdz \
+nix develop --impure -c cargo test --release -p gearbox-sim --bin gearbox \
+  controller::benchmark::imported_kubota_slope_parking \
+  -- --ignored --nocapture --test-threads=1
+```
+
+Logs: `/tmp/gearbox-slope-{initial,diagnostic}.log`. This fixture is Molla-only;
+it is not a Rapier slope result or a visual acceptance check.
+
+### Commands
+
 Use the repository Nix environment; the host Rust compiler is too old for this
 Gearbox checkout. `nix develop --impure -c oslo make check` reaches the binary
 but currently fails in the unchanged `tests/oxbo_transforms.rs` integration test,
