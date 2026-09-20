@@ -212,6 +212,39 @@ mod tests {
 
     // Trimming either line to make room would leave two neighbouring fields
     // describing the same road differently, and it would kink between them.
+    // The chunk cull asks `reaches`, and a chunk it says no to is told it has
+    // no wear at all. Were that wrong for the *second* line, the crossing road
+    // would keep its grass while the ground under it went bare.
+    // An empty first line would read to a shader as no way at all, which means
+    // the whole field worn down its long axis — the loudest failure there is.
+    #[test]
+    fn an_empty_way_never_leads_a_pair() {
+        let real = Way::bend(&[Vec2::new(0.0, 0.0), Vec2::new(50.0, 0.0)], 3.0);
+        let nothing = Way::straight();
+        assert_eq!(nothing.crossing(real), real);
+        assert_eq!(real.crossing(nothing), real);
+        assert_eq!(nothing.crossing(nothing), nothing);
+        assert_eq!(real.crossing(nothing).packed().1.x, 2.0);
+    }
+
+    #[test]
+    fn a_crossing_way_reaches_its_own_chunks() {
+        let north = Way::bend(&[Vec2::new(0.0, -50.0), Vec2::new(0.0, 50.0)], 3.0);
+        let east = Way::bend(&[Vec2::new(-50.0, 30.0), Vec2::new(50.0, 30.0)], 2.0);
+        let junction = north.crossing(east);
+        let chunk = |x: f32, z: f32| FieldBounds {
+            min: Vec2::new(x, z),
+            max: Vec2::new(x + 16.0, z + 16.0),
+        };
+        // Only the second line passes here, well away from the first.
+        assert!(!north.reaches(chunk(32.0, 24.0)));
+        assert!(junction.reaches(chunk(32.0, 24.0)));
+        // Only the first line passes here.
+        assert!(junction.reaches(chunk(-8.0, -40.0)));
+        // Neither does here.
+        assert!(!junction.reaches(chunk(32.0, -40.0)));
+    }
+
     #[test]
     fn a_crossing_that_does_not_fit_is_left_out_whole() {
         let long: Vec<Vec2> = (0..6).map(|i| Vec2::new(i as f32 * 10.0, 0.0)).collect();
@@ -309,6 +342,15 @@ impl Way {
     /// road would kink on the boundary between them.
     pub fn crossing(self, other: Self) -> Self {
         let (mine, theirs) = (self.lines[0].count as usize, other.lines[0].count as usize);
+        // A way whose *first* line is empty reads to a shader as no way at all,
+        // and it falls back to wearing the whole field down its long axis. So
+        // an empty one never becomes the first of a pair.
+        if theirs < 2 {
+            return self;
+        }
+        if mine < 2 {
+            return other;
+        }
         if self.lines[1].count > 0 || other.lines[1].count > 0 || mine + theirs > Self::MOST {
             warn!(
                 "two ways cross here needing {} points of {}; the second is left out",
