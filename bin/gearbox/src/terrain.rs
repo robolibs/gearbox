@@ -193,12 +193,21 @@ fn cell_from_env(name: &str, fallback: f32) -> f32 {
         .unwrap_or(fallback)
 }
 
+/// Where the ground actually stands: the land, less whatever the ways of the
+/// layout have worn into it. **Every** surface a machine can touch is sampled
+/// from this and not from `land.height` alone — the mesh under the eye and the
+/// collider under the wheels are the same ground or they are a bug. The
+/// streamed chunk colliders were once built without it, and a tractor stood at
+/// field level with a sunken lane drawn half a metre beneath it.
+fn ground_height(land: &Land, hollows: &gearbox_fields::Hollows, x: f32, z: f32) -> f32 {
+    land.height(x, z) - hollows.depth_at(x, z)
+}
+
 /// The ways of the layout sink the ground they run over, so a track is a
 /// hollow the wheels drop into rather than a stripe painted on a flat field.
-/// The grid is what the collider is built from, so this is felt as well as seen.
 fn build_ground(land: Land, center: Vec2, hollows: &gearbox_fields::Hollows) -> GroundParts {
     let cell = cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M);
-    let lie = |x: f32, z: f32| land.height(x, z) - hollows.depth_at(x, z);
+    let lie = |x: f32, z: f32| ground_height(&land, hollows, x, z);
     let grid = HeightGrid::sample_at(center, SIZE_M, cell, lie);
     // The horizon is far enough off that no road shows on it.
     let horizon = horizon_mesh(&grid, |x, z| land.height(x, z));
@@ -434,13 +443,18 @@ fn ground_chunk(at: Vec2) -> IVec2 {
     (at / GROUND_CHUNK_M).floor().as_ivec2()
 }
 
-fn ground_chunk_collider(land: Land, chunk: IVec2) -> rapier3d::prelude::Collider {
+fn ground_chunk_collider(
+    land: Land,
+    hollows: &gearbox_fields::Hollows,
+    chunk: IVec2,
+) -> rapier3d::prelude::Collider {
     let cell = cell_from_env(
         "GEARBOX_TERRAIN_COLLIDER_CELL_M",
         cell_from_env("GEARBOX_TERRAIN_CELL_M", CELL_M),
     );
     let center = (chunk.as_vec2() + Vec2::splat(0.5)) * GROUND_CHUNK_M;
-    let grid = HeightGrid::sample_at(center, GROUND_CHUNK_M, cell, |x, z| land.height(x, z));
+    let grid =
+        HeightGrid::sample_at(center, GROUND_CHUNK_M, cell, |x, z| ground_height(&land, hollows, x, z));
     heightfield_collider(&grid)
         .translation(DVec3::new(
             gearbox_globe::physics_offset(land.site).x + center.x as f64,
@@ -457,6 +471,7 @@ fn stream_ground_colliders(
     mut ground: ResMut<GroundColliders>,
     mut physics: ResMut<PhysicsWorld>,
     sites: Res<Sites>,
+    layout: Res<gearbox_fields::FieldLayout>,
 ) {
     let physics = physics.as_mut();
     if terrain.is_none() {
@@ -480,6 +495,7 @@ fn stream_ground_colliders(
     // The chunk under a body is laid at once; the rest of its surroundings
     // arrive a few a frame.
     let mut budget = GROUND_CHUNKS_PER_FRAME;
+    let mut hollows: Option<gearbox_fields::Hollows> = None;
     for &(site, source) in &sources {
         let (low, high) = (
             ground_chunk(source - Vec2::splat(GROUND_KEEP_M)),
@@ -493,7 +509,10 @@ fn stream_ground_colliders(
                     continue;
                 }
                 budget = budget.saturating_sub(1);
-                let collider = ground_chunk_collider(Land::of(&sites, site), chunk);
+                // Built only when a chunk is actually laid, so a frame that
+                // lays none walks no lines.
+                let hollows = hollows.get_or_insert_with(|| gearbox_fields::Hollows::of(&layout));
+                let collider = ground_chunk_collider(Land::of(&sites, site), hollows, chunk);
                 ground.0.insert((site, chunk), physics.colliders.insert(collider));
             }
         }
@@ -756,6 +775,40 @@ mod tests {
 
     fn bowl(x: f32, z: f32) -> f32 {
         0.002 * (x * x - z * z) + 0.05 * x
+    }
+
+    // The ground drawn under the eye and the ground held under the wheels are
+    // sampled by two different pieces of code — the square's own grid and the
+    // streamed collider chunks — and nothing but this says they agree. They did
+    // not: the chunks were built from `land.height` alone, so a machine stood
+    // at field level with a sunken lane drawn half a metre beneath it, and the
+    // hollow was seen and not felt. Pin the *rule*, since that is what drifted.
+    #[test]
+    fn every_ground_a_wheel_can_touch_is_sunk_by_the_ways() {
+        // Every height grid is a surface something stands on, so every one of
+        // them must be sampled through `ground_height`. Sampling `land.height`
+        // straight is right only for the horizon, which is scenery a hundred
+        // kilometres off and shows no road.
+        let source = include_str!("terrain.rs");
+        // The module's own code only: the tests below build grids of their own
+        // from bare functions, and this very loop names the call it looks for.
+        let code = source.split_once("#[cfg(test)]").map_or(source, |(above, _)| above);
+        let lines: Vec<&str> = code.lines().collect();
+        for (at, line) in lines.iter().enumerate() {
+            if !line.contains("HeightGrid::sample_at(") {
+                continue;
+            }
+            // The closure may be bound a few lines above the call rather than
+            // written into it, so read the neighbourhood and not the one line.
+            let near = lines[at.saturating_sub(4)..(at + 3).min(lines.len())].join(" ");
+            assert!(
+                near.contains("ground_height"),
+                "terrain.rs:{}: a height grid sampled without its hollows — \
+                 the ground would be drawn sunk and held level, and a machine \
+                 would stand in the air over its own road",
+                at + 1
+            );
+        }
     }
 
     #[test]
