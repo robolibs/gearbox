@@ -1,5 +1,8 @@
 //! Field surfaces layered independently over a host's terrain geometry.
 
+#[cfg(test)]
+mod shader_contract;
+
 mod canopy;
 mod clumps;
 mod bare;
