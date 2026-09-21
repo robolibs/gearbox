@@ -534,6 +534,17 @@ fn update(@builtin(global_invocation_id) id: vec3u) {
 // with it, and it takes the clouds' extinction as it is (Beer-Lambert): a
 // cloud that hides the sun casts a full shadow and a gap casts none. Opacity
 // is the artist's hand, applied after the physics.
+// The clouds' shadow as the sun sees it, for the sun's light texture. Each
+// texel is one sun ray through a square that faces the sun and follows the
+// camera, laid out as a directional light reads its texture. It marches the
+// density the sky is drawn from, so a shadow lies under its cloud and drifts
+// with it, and it takes the clouds' extinction as it is (Beer-Lambert): a
+// cloud that hides the sun casts a full shadow and a gap casts none. Opacity
+// is the artist's hand, applied after the physics.
+//
+// Nothing here treats the map's edges. The light reads the texture wrapped, so
+// it repeats — but the map is sized to reach past the horizon, and a repeat on
+// ground nobody can see needs no hiding.
 @compute @workgroup_size(8, 8, 1)
 fn ground_shadow(@builtin(global_invocation_id) id: vec3u) {
     let size = textureDimensions(ground_shadow_texture);
@@ -556,9 +567,6 @@ fn ground_shadow(@builtin(global_invocation_id) id: vec3u) {
             optical_depth += get_cloud_map_density(pos, get_normalized_height(pos), span) * span;
         }
     }
-    // Towards the map's rim the shadows fade to full sun: past it the texture
-    // repeats, and a shadow cut off at the seam would draw a straight line.
-    let rim = smoothstep(0.0, 0.1, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)));
-    let shadow = 1.0 - config.shadow_opacity * rim * (1.0 - exp(-optical_depth));
+    let shadow = 1.0 - config.shadow_opacity * (1.0 - exp(-optical_depth));
     textureStore(ground_shadow_texture, vec2i(id.xy), vec4f(shadow, 0.0, 0.0, 1.0));
 }

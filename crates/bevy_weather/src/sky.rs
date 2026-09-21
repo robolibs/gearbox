@@ -289,10 +289,21 @@ fn follow_with_cloud_shadows(
         return;
     };
     let (eye, forward) = (camera.translation(), camera.forward().as_vec3());
-    // From height more land is in view; the reach doubles in half-steps.
-    let wanted = (shadows.half_extent + 1.6 * eye.y.max(0.0)) / shadows.half_extent;
-    // Beyond a few tens of kilometres single cloud shadows are below a pixel.
-    let half = (shadows.half_extent * 2f32.powf((wanted.log2() * 2.0).ceil() / 2.0)).min(32_000.0);
+    // The map reaches past the horizon, so its repeat falls on ground that
+    // cannot be seen from here. That is the whole of the seam problem: the map
+    // is the sun's light texture and the light reads it wrapped, so wherever a
+    // repeat lands in view it draws a line — and every way of dressing that
+    // line up only changes what kind of line it is. Put the repeat beyond the
+    // horizon and there is nothing to dress.
+    //
+    // The horizon on a sphere is sqrt(2Rh); the margin covers hills standing
+    // past it and a low sun, whose square falls obliquely on the ground and so
+    // reaches less far along its own azimuth than across it. It still grows in
+    // half-steps, so the map is rebuilt on a change of scale rather than
+    // continuously, and its texels stay put between times.
+    let horizon = (2.0 * clouds.planet_radius * eye.y.max(1.0)).sqrt();
+    let wanted = (horizon * 2.0).max(4_000.0) / shadows.half_extent;
+    let half = shadows.half_extent * 2f32.powf((wanted.log2() * 2.0).ceil() / 2.0);
     // The ground in the middle of the view, or a way ahead when the view
     // never meets it.
     let ahead = if forward.y < -0.05 { eye.y.max(0.0) / -forward.y } else { f32::MAX };
