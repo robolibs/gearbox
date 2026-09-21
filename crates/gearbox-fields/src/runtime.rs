@@ -498,8 +498,9 @@ pub fn ensure_fields(world: &mut World) {
 
 /// How far past the ground square the horizon backdrop is taken to reach. Past
 /// the last ring of that mesh, so no part of it falls outside its own bounds
-/// and gets cut away.
-const BACKDROP_REACH_M: f32 = 64_000.0;
+/// and gets cut away — short of it, the cover stops before the mesh does and
+/// the ground goes untextured from there out.
+const BACKDROP_REACH_M: f32 = 500_000.0;
 
 /// Seconds a frame may spend matching surface meshes to fields.
 const SURFACE_BUDGET_S: f32 = 0.004;
@@ -653,7 +654,9 @@ pub fn stream_vegetation(
     mut draws: Query<&mut VegetationChunk>,
     mut layer_meshes: Local<HashMap<(&'static str, usize), (Handle<Mesh>, Vec<std::ops::Range<u32>>)>>,
     mut heights: Local<HashMap<(i32, i32, u32), (f32, f32)>>,
+    mut measured_in: Local<u64>,
     ground: Option<Res<CoverHeights>>,
+    terrain: Option<Res<CoverTerrain>>,
 ) {
     let Some(active) = active else {
         return;
@@ -661,6 +664,17 @@ pub fn stream_vegetation(
     let Some(ground) = ground else {
         return;
     };
+    // The height spans below are remembered by chunk, and a chunk is named by
+    // where it sits in its own site. Travel to another site and those names
+    // come round again over different ground, so the spans have to go with the
+    // site that measured them. A stale span misplaces a chunk against its
+    // detail band and the blades never sow — which only ever showed on the
+    // dense layers, since a clump's band is wide open and cannot reject one.
+    let space = terrain.as_ref().map_or(0, |terrain| terrain.space);
+    if *measured_in != space {
+        *measured_in = space;
+        heights.clear();
+    }
     let Some((camera, frustum)) = cameras.iter().next() else {
         return;
     };
