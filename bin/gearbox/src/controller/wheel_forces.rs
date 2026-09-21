@@ -419,6 +419,7 @@ mod tests {
             ..Default::default()
         };
         let machine = MachineInstanceSpec {
+            tracks: Vec::new(),
             scene_root: Some(root),
             asset_label: "test".into(),
             source_path: String::new(),
@@ -616,6 +617,7 @@ pub(super) fn sync_machine_wheel_forces(
         .invalid_axles
         .retain(|machine| inventory.machines.iter().any(|m| &m.id == machine));
     for machine in &inventory.machines {
+        if !machine.tracks.is_empty() { continue; }
         let Some(root) = machine.scene_root else {
             continue;
         };

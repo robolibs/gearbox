@@ -35,6 +35,7 @@ mod parking;
 #[cfg(test)]
 mod benchmark;
 mod steering;
+pub(crate) mod tracked;
 pub(crate) mod wheel_forces;
 
 /// All USD-authored machine/controller specs discovered from loaded assets.
@@ -282,11 +283,16 @@ impl Plugin for ControllerDiscoveryPlugin {
                         .run_if(wheel_forces::motion_resistance_wanted),
                     apply_builtin_ackermann_cmd_vel,
                     apply_builtin_diff_drive_cmd_vel,
+                    tracked::apply,
                     record_wheel_tracks,
                     dump_joints_periodically,
                 )
                     .chain()
                     .before(crate::physics::step_physics),
+            )
+            .add_systems(
+                PostUpdate,
+                tracked::animate.before(bevy::transform::TransformSystems::Propagate),
             )
             .add_systems(
                 PostUpdate,
@@ -342,6 +348,7 @@ pub struct RejectedMachines(pub std::collections::HashSet<String>);
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct MachineInstanceSpec {
+    pub tracks: Vec<tracked::TrackSpec>,
     /// Filled by the Bevy loader: entity that owns the `SceneRoot`.
     pub scene_root: Option<Entity>,
     /// Human label of the loaded USD asset that produced this discovery.
@@ -476,8 +483,13 @@ pub fn discover_machines_from_stage(
         );
         let body = read_rel_first(&stage, &prim, "gearbox:machine:body")
             .map(|p| rebase_asset_root_target(machine_prim, &p));
-        let links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
+        let mut links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
+        let tracks = match tracked::discover(stage, prim) {
+            Ok(tracks) => tracks,
+            Err(error) => { links.errors.push(error); Vec::new() }
+        };
         machines.push(MachineInstanceSpec {
+            tracks,
             links,
             grants: read_token_array(&stage, &prim, "gearbox:machine:grants"),
             scene_root: None,
@@ -626,6 +638,7 @@ fn append_isaac_compat_machines(
         let id = derive_machine_id(prim_path);
 
         machines.push(MachineInstanceSpec {
+            tracks: Vec::new(),
             scene_root: None,
             asset_label: String::new(),
             source_path: String::new(),
@@ -2295,6 +2308,7 @@ fn prepare_machine_physics(
         }
         let mut tyres = 0;
         for &handle in &wheels {
+            if !machine.tracks.is_empty() { continue; }
             let Some(body) = physics.body_mut(handle) else {
                 continue;
             };
@@ -2322,7 +2336,9 @@ fn prepare_machine_physics(
                 tyres += 1;
             }
         }
-        warn_low_colliders(physics, &machine.id, &bodies, &wheels, &prims);
+        if machine.tracks.is_empty() {
+            warn_low_colliders(physics, &machine.id, &bodies, &wheels, &prims);
+        }
         runtime.machine_wheels.insert(machine.id.clone(), wheels.clone());
 
         info!(

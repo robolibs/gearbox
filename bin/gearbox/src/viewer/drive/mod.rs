@@ -111,4 +111,4 @@ impl ControlSettings {
     }
 }
 
-pub const DRIVE_TYPES: [&str; 2] = ["builtin:ackermann_cmd_vel", "builtin:diff_drive_cmd_vel"];
+pub const DRIVE_TYPES: [&str; 3] = ["builtin:ackermann_cmd_vel", "builtin:diff_drive_cmd_vel", "builtin:tracked_cmd_vel"];
