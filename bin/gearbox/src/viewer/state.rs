@@ -6,6 +6,7 @@
 //! top-level entity selection.
 
 use bevy::prelude::{Entity, Resource, Vec3};
+use mara::ui::modules::bevy::ChaseCamera;
 use std::path::PathBuf;
 
 /// The currently-focused loaded USD entity. Drives every panel that
@@ -86,6 +87,79 @@ pub struct FlyTo {
     pub target_elevation: Option<f32>,
 }
 
+/// Scripted "fly to behind the machine" move, started from the agent tree.
+/// Phase A pins the camera in place and turns it toward the machine; phase
+/// B pulls back to the apex, orbits to behind the machine and settles at
+/// `distance` with the elevation the user had.
+#[derive(Clone, Copy, Debug)]
+pub struct FlyTarget {
+    pub root: Entity,
+    pub body: Entity,
+    pub distance: f32,
+    pub duration: f32,
+    pub elapsed: f32,
+    pub start_focus: Vec3,
+    pub start_cam_world: Vec3,
+    pub start_elevation: f32,
+    pub apex_distance: f32,
+    pub last_target_pos: Option<Vec3>,
+}
+
+impl FlyTarget {
+    pub const APEX_DISTANCE: f32 = 45.0;
+    pub const PHASE_A_END: f32 = 0.30;
+    pub const FINAL_DISTANCE: f32 = 18.0;
+    pub const DURATION: f32 = 3.0;
+
+    pub fn new(root: Entity, body: Entity, cam: &ChaseCamera) -> Self {
+        let horizontal = cam.distance * cam.elevation.cos();
+        let vertical = cam.distance * cam.elevation.sin();
+        let offset = Vec3::new(
+            horizontal * cam.yaw.sin(),
+            vertical,
+            horizontal * cam.yaw.cos(),
+        );
+        Self {
+            root,
+            body,
+            distance: Self::FINAL_DISTANCE,
+            duration: Self::DURATION,
+            elapsed: 0.0,
+            start_focus: cam.focus,
+            start_cam_world: cam.focus + offset,
+            start_elevation: cam.elevation,
+            apex_distance: Self::APEX_DISTANCE,
+            last_target_pos: None,
+        }
+    }
+}
+
+/// The fly in flight, if any.
+#[derive(Resource, Default, Debug)]
+pub struct ChaseCameraFly {
+    pub target: Option<FlyTarget>,
+}
+
+/// Camera focus locked to a machine body, independent of its drive source.
+#[derive(Resource, Default, Debug)]
+pub struct FollowTarget {
+    pub entity: Option<Entity>,
+}
+
+impl FollowTarget {
+    pub fn set(&mut self, entity: Option<Entity>) {
+        self.entity = entity;
+    }
+
+    pub fn toggle(&mut self, entity: Entity) {
+        if self.entity == Some(entity) {
+            self.set(None);
+        } else {
+            self.set(Some(entity));
+        }
+    }
+}
+
 /// Saved camera viewpoints — `Cameras` panel.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct CameraBookmarks {
@@ -125,18 +199,32 @@ pub struct LoaderTuning {
 }
 
 impl LoaderTuning {
-    pub fn to_variant_selections(&self) -> Vec<usd_bevy::VariantSelection> {
+    /// `(prim, set, selection)` triples in the shape `UsdInstanceOverrides`
+    /// takes.
+    pub fn to_variant_selections(&self) -> Vec<(String, String, String)> {
         self.variants
             .iter()
-            .map(
-                |((prim_path, set_name), option)| usd_bevy::VariantSelection {
-                    prim_path: prim_path.clone(),
-                    set_name: set_name.clone(),
-                    option: option.clone(),
-                },
-            )
+            .map(|((prim_path, set_name), option)| {
+                (prim_path.clone(), set_name.clone(), option.clone())
+            })
             .collect()
     }
+}
+
+/// One variant set on one prim of the active stage.
+#[derive(Debug, Clone, Default)]
+pub struct VariantEntry {
+    pub prim: String,
+    pub name: String,
+    pub selection: Option<String>,
+    pub options: Vec<String>,
+}
+
+/// Variant sets of the active stage, read when the active stage changes.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ActiveVariants {
+    pub root: Option<Entity>,
+    pub entries: Vec<VariantEntry>,
 }
 
 #[derive(Debug, Clone, Copy)]

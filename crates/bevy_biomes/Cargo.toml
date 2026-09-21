@@ -1,0 +1,13 @@
+[package]
+name = "bevy_biomes"
+description = "Biomes for Bevy: what covers the ground somewhere, how two covers meet, and what drifts in the air above them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "bevy_biomes"
+path = "src/lib.rs"
+
+[dependencies]
+bevy.workspace = true

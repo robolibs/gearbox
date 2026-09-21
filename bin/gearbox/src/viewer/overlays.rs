@@ -6,7 +6,7 @@
 //! light-intensity / wireframe glue.
 
 use bevy::prelude::*;
-use bevy_mara::GroundGrid;
+use mara::ui::modules::bevy::GroundGrid;
 use usd_bevy::UsdPrimRef;
 
 pub struct OverlaysPlugin;
@@ -20,7 +20,7 @@ impl Plugin for OverlaysPlugin {
                 (
                     compute_extent,
                     capture_original_light_levels,
-                    apply_light_intensity_scale,
+                    apply_light_intensity_scale.after(crate::environment::DaylightUpdate),
                     apply_wireframe_toggle,
                     sync_ground_grid_visibility,
                     sync_collider_debug_visibility,
@@ -30,8 +30,7 @@ impl Plugin for OverlaysPlugin {
     }
 }
 
-#[derive(Component, Debug, Copy, Clone)]
-pub struct OriginalIlluminance(pub f32);
+pub use bevy_weather::OriginalIlluminance;
 
 #[derive(Component, Debug, Copy, Clone)]
 pub struct OriginalLightIntensity(pub f32);
@@ -75,13 +74,18 @@ fn apply_light_intensity_scale(
 }
 
 fn apply_wireframe_toggle(
-    toggles: Res<DisplayToggles>,
+    mut toggles: ResMut<DisplayToggles>,
+    available: Res<WireframeAvailable>,
     mut cfg: ResMut<bevy::pbr::wireframe::WireframeConfig>,
 ) {
+    if !available.0 { toggles.wireframe = false; }
     if cfg.global != toggles.wireframe {
         cfg.global = toggles.wireframe;
     }
 }
+
+#[derive(Resource)]
+pub(crate) struct WireframeAvailable(pub bool);
 
 fn sync_ground_grid_visibility(toggles: Res<DisplayToggles>, mut grid: ResMut<GroundGrid>) {
     if grid.visible != toggles.show_world_grid {
@@ -91,7 +95,7 @@ fn sync_ground_grid_visibility(toggles: Res<DisplayToggles>, mut grid: ResMut<Gr
 
 fn sync_collider_debug_visibility(
     toggles: Res<DisplayToggles>,
-    mut enabled: ResMut<usd_bevy::physics::ColliderDebugEnabled>,
+    mut enabled: ResMut<crate::physics::ColliderDebugEnabled>,
 ) {
     if enabled.0 != toggles.show_colliders {
         enabled.0 = toggles.show_colliders;
@@ -108,7 +112,16 @@ pub struct DisplayToggles {
     pub show_physics: bool,
     pub wireframe: bool,
     pub show_colliders: bool,
+    /// Lifts the camera's 5 km zoom ceiling, out to where the whole planet fits.
+    pub unlimited_zoom: bool,
+    /// Following a machine swings the view around behind it. Off, the view
+    /// keeps whatever angle it was on and only travels with the machine.
+    pub follow_from_behind: bool,
     pub light_intensity_scale: f32,
+    pub show_tf_frames: bool,
+    pub show_tf_names: bool,
+    pub show_tf_links: bool,
+    pub tf_wheels_only: bool,
 }
 
 impl Default for DisplayToggles {
@@ -122,9 +135,24 @@ impl Default for DisplayToggles {
             show_physics: false,
             wireframe: false,
             show_colliders: false,
+            unlimited_zoom: std::env::var("GEARBOX_UNLIMITED_ZOOM").is_ok_and(|v| v == "1"),
+            follow_from_behind: true,
             light_intensity_scale: 1.0,
+            show_tf_frames: tf_env("frames"),
+            show_tf_names: tf_env("names"),
+            show_tf_links: tf_env("links"),
+            tf_wheels_only: std::env::var("GEARBOX_TF_OVERLAY")
+                .is_ok_and(|v| v.split(',').any(|t| t.trim() == "wheels")),
         }
     }
+}
+
+/// `GEARBOX_TF_OVERLAY=frames,names,links` (or `all`) switches TF overlay
+/// toggles on at start, for scripted runs and screenshots.
+fn tf_env(which: &str) -> bool {
+    std::env::var("GEARBOX_TF_OVERLAY")
+        .map(|v| v.split(',').any(|t| t.trim() == which || t.trim() == "all"))
+        .unwrap_or(false)
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
@@ -163,33 +191,14 @@ impl SceneExtent {
 }
 
 fn compute_extent(
-    prims: Query<
-        (
-            &GlobalTransform,
-            Option<&usd_bevy::UsdLocalExtent>,
-            Option<&bevy::camera::primitives::Aabb>,
-        ),
-        With<UsdPrimRef>,
-    >,
+    prims: Query<(&GlobalTransform, Option<&bevy::camera::primitives::Aabb>), With<UsdPrimRef>>,
     mut extent: ResMut<SceneExtent>,
 ) {
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
     let mut count = 0u32;
-    for (gt, local, aabb) in prims.iter() {
-        if let Some(le) = local {
-            let m = gt.to_matrix();
-            for i in 0..8 {
-                let c = Vec3::new(
-                    if i & 1 == 0 { le.min[0] } else { le.max[0] },
-                    if i & 2 == 0 { le.min[1] } else { le.max[1] },
-                    if i & 4 == 0 { le.min[2] } else { le.max[2] },
-                );
-                let w = m.transform_point3(c);
-                min = min.min(w);
-                max = max.max(w);
-            }
-        } else if let Some(aabb) = aabb {
+    for (gt, aabb) in prims.iter() {
+        if let Some(aabb) = aabb {
             let m = gt.to_matrix();
             let center = Vec3::from(aabb.center);
             let half = Vec3::from(aabb.half_extents);

@@ -1,0 +1,44 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "gearbox yard: a tractor with a trailer already on its drawbar"
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# Two machines from their own assets and one static attachment between
+# them. Load it as a machine-category USD (`gearbox spawn machine
+# world/yard.usda --ns yard --no-wait`); both machines are discovered under
+# the `yard_` namespace prefix and the runtime attaches the trailer to the
+# tractor's rear drawbar once both agents are up.
+def Xform "World"
+{
+    def Xform "Tractor_01" (
+        prepend references = @../tractor.usd@</robot>
+    )
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "Trailer_01" (
+        prepend references = @../trailer.usd@</robot>
+    )
+    {
+        double3 xformOp:translate = (0, 4.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "Attachments"
+    {
+        def "tractor_trailer" (
+            prepend apiSchemas = ["GearboxAttachmentAPI"]
+        )
+        {
+            rel gearbox:attachment:hitch = </World/Tractor_01/chassis/rear_hitch>
+            rel gearbox:attachment:coupler = </World/Trailer_01/chassis/drawbar_eye>
+        }
+    }
+}

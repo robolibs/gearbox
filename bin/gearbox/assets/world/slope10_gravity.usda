@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    doc = """A 10 degree slope without geometry: gravity tilted 10 degrees against
+    a machine driving forward (+Z in the viewport). Load it before any machine
+    that carries its own PhysicsScene; the first scene sets gravity."""
+    defaultPrim = "Slope"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Slope"
+{
+    def PhysicsScene "physicsScene"
+    {
+        vector3f physics:gravityDirection = (0, 0.17365, -0.98481)
+        float physics:gravityMagnitude = 9.81
+    }
+}

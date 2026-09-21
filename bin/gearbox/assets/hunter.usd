@@ -1,0 +1,403 @@
+#usda 1.0
+(
+    defaultPrim = "robot"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+    customLayerData = {
+        string creator = "AgileX Hunter 2.0 — Ackermann, built from urdf_collection/agri/hunter"
+    }
+)
+
+# AgileX Hunter 2.0. Every number below is measured from the source URDF and
+# its STL meshes at OUSD/urdf_collection/agri/hunter, not from a datasheet:
+#
+#   body            0.964 x 0.644 x 0.268 m   (base_link.STL bounds)
+#   wheel           0.1641 m radius, 0.142 m wide
+#   wheelbase       0.651 m   (front joint +0.37142, rear -0.28000)
+#   front track     0.584 m   (+0.29199 / -0.29201)
+#   rear track      0.585 m   (+0.29249 / -0.29251)
+#
+# The pre-converted usd_collection copy of this robot is not usable — every
+# file in that collection reads as zero prims on USD 25.8 and 26.8, and fails
+# `primChildren` validation at layer level. So this is authored from the URDF
+# instead of referencing it.
+#
+# The two steer-knuckle meshes are not drawn. front_steer_left_link.STL is
+# malformed in the source (a stray blob out to x = -0.711) and both are
+# duplicate wheel discs, so drawing them would put a second wheel inside each
+# wheel. The knuckles remain as physics bodies; they just have no visual.
+#
+# Geometry is the real thing: hunter_geom.usdc, built from the source STLs by
+# scripts/build_hunter_geom.py — 335k triangles welded down to 165k points,
+# 2.7 MB. Collision is primitives regardless (a box hull and four cylinders),
+# because a mesh that size is for looking at, not for the solver to test
+# contacts against sixty times a second.
+#
+# The link placement is baked into hunter_geom.usdc rather than expressed as
+# xformOps on the referencing prims. A transform on a typeless `def` carrying
+# a reference is one more thing that can be dropped between the file and the
+# renderer; geometry already in the right place cannot be.
+#
+# Frame follows tractor.usd: +x is left, +y is astern, +z is up, so the
+# machine drives towards -y. Ground sits at z = 0, which puts the wheel
+# centres at z = 0.1641 — their own radius.
+#
+# Front wheels are SIBLINGS of their steer links, not children. tractor.usd
+# carries the same note: nesting a rigid body inside another hits transform
+# writeback ordering and the wheels drift off the machine each frame.
+
+def Xform "robot" (
+    prepend apiSchemas = [
+        "GearboxMachineAPI",
+        "GearboxControllerAPI:drive"
+    ]
+)
+{
+    # =================== GEARBOX MACHINE / CONTROLLER METADATA ===================
+    token gearbox:machine:interfaceVersion = "0.1"
+    token gearbox:machine:kind = "hunter"
+    token gearbox:machine:idPolicy = "prim_path"
+    token gearbox:machine:upAxis = "Z"
+    rel gearbox:machine:body = </robot/chassis>
+    rel gearbox:machine:role:poweredWheelJoints = [
+        </robot/Joints/rev_back_left>,
+        </robot/Joints/rev_back_right>
+    ]
+    rel gearbox:machine:role:passiveWheelJoints = [
+        </robot/Joints/rev_front_left>,
+        </robot/Joints/rev_front_right>
+    ]
+    rel gearbox:machine:role:steeringJoints = [
+        </robot/Joints/steer_front_left>,
+        </robot/Joints/steer_front_right>
+    ]
+
+    bool gearbox:controller:drive:enabled = true
+    token gearbox:controller:drive:type = "builtin:ackermann_cmd_vel"
+    float gearbox:controller:drive:updateRateHz = 60
+    token gearbox:controller:drive:namespacePolicy = "machine_id"
+    token gearbox:controller:drive:commandInterface = "cmd_vel"
+    token[] gearbox:controller:drive:stateInterfaces = ["pose", "velocity", "joint_state"]
+    token gearbox:controller:drive:frameConvention = "usd_z_up"
+    float gearbox:controller:drive:wheelBase = 0.65142
+    float gearbox:controller:drive:wheelRadius = 0.1641
+    float gearbox:controller:drive:trackWidth = 0.585
+    float gearbox:controller:drive:frontTrackWidth = 0.584
+    float gearbox:controller:drive:rearTrackWidth = 0.585
+    # The URDF's revolute limits are both 0.0 — a SolidWorks export artefact,
+    # so there is no steering angle in the source to take. This is the Hunter
+    # 2.0 figure; it is one edit if the real machine differs.
+    float gearbox:controller:drive:maxSteerDeg = 27
+    token gearbox:controller:drive:steeringGeometry = "parallel"
+    token[] gearbox:controller:drive:usesRoles = [
+        "poweredWheelJoints",
+        "steeringJoints"
+    ]
+    rel gearbox:controller:drive:target = </robot>
+    rel gearbox:controller:drive:body = </robot/chassis>
+
+    # =================== CHASSIS ===================
+    def Xform "chassis" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 50.0
+        vector3f physics:diagonalInertia = (3.2, 4.6, 5.4)
+        # The body sits where its own collider does. Leaving the origin on the
+        # ground and the collider a quarter of a metre up inside it is what
+        # made the machine hover by exactly that offset.
+        double3 xformOp:translate = (0.0, -0.0439, 0.2425)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        # Three meshes, not one: the dark body, the orange rocker arms and
+        # bumpers, and the aluminium rail hardware along the top deck.
+        def "visual_body" (
+            prepend references = @./hunter_geom.usdc@</geom/chassis_body>
+        )
+        {
+        }
+
+        def "visual_accent" (
+            prepend references = @./hunter_geom.usdc@</geom/chassis_accent>
+        )
+        {
+        }
+
+        def "visual_alloy" (
+            prepend references = @./hunter_geom.usdc@</geom/chassis_alloy>
+        )
+        {
+        }
+
+        # The hull the body collides with. A 335k-triangle mesh is for looking
+        # at, not for the solver to test contacts against every step.
+        #
+        # Written out as eight points rather than a `Cube` with a scale: the
+        # loader builds a Cube collider from `size` alone and drops the prim's
+        # own `xformOp:scale`, so a scaled unit cube becomes a 1 m box that
+        # reaches below the tyres and holds the machine a quarter of a metre
+        # off the ground. tractor.usd carries convex hulls for the same reason.
+        def Mesh "body_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            uniform token physics:approximation = "convexHull"
+            uniform token subdivisionScheme = "none"
+            point3f[] points = [
+                (-0.322, -0.482, -0.134), (0.322, -0.482, -0.134),
+                (0.322, 0.482, -0.134), (-0.322, 0.482, -0.134),
+                (-0.322, -0.482, 0.134), (0.322, -0.482, 0.134),
+                (0.322, 0.482, 0.134), (-0.322, 0.482, 0.134)
+            ]
+            # Triangles, not quads: the collider builder reads the mesh's
+            # index buffer three at a time, and a quad that reaches it
+            # untriangulated walks off the end of the vertex list and takes
+            # parry's BVH build down with it.
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [
+                0, 3, 2,  0, 2, 1,
+                4, 5, 6,  4, 6, 7,
+                0, 1, 5,  0, 5, 4,
+                2, 3, 7,  2, 7, 6,
+                1, 2, 6,  1, 6, 5,
+                3, 0, 4,  3, 4, 7
+            ]
+            float3[] extent = [(-0.322, -0.482, -0.134), (0.322, 0.482, 0.134)]
+        }
+    }
+
+    # =================== STEER KNUCKLES ===================
+    # Light bodies: they carry the steering angle, not the machine's weight.
+    def Xform "steer_front_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 1.0
+        vector3f physics:diagonalInertia = (0.01, 0.01, 0.01)
+        double3 xformOp:translate = (0.29199, -0.37142, 0.1641)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    }
+
+    def Xform "steer_front_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 1.0
+        vector3f physics:diagonalInertia = (0.01, 0.01, 0.01)
+        double3 xformOp:translate = (-0.29201, -0.37142, 0.1641)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    }
+
+    # =================== WHEELS ===================
+    def Xform "wheel_front_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 2.0
+        vector3f physics:diagonalInertia = (0.03, 0.02, 0.02)
+        double3 xformOp:translate = (0.29199, -0.37142, 0.1641)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def "visual_tyre" (
+            prepend references = @./hunter_geom.usdc@</geom/wheel_front_left_tyre>
+        )
+        {
+        }
+
+        def "visual_hub" (
+            prepend references = @./hunter_geom.usdc@</geom/wheel_front_left_hub>
+        )
+        {
+        }
+
+        def Cylinder "tire_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.1641
+            double height = 0.142
+        }
+    }
+
+    def Xform "wheel_front_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 2.0
+        vector3f physics:diagonalInertia = (0.03, 0.02, 0.02)
+        double3 xformOp:translate = (-0.29201, -0.37142, 0.1641)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def "visual_tyre" (
+            prepend references = @./hunter_geom.usdc@</geom/wheel_front_right_tyre>
+        )
+        {
+        }
+
+        def "visual_hub" (
+            prepend references = @./hunter_geom.usdc@</geom/wheel_front_right_hub>
+        )
+        {
+        }
+
+        def Cylinder "tire_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.1641
+            double height = 0.142
+        }
+    }
+
+    def Xform "wheel_back_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 2.0
+        vector3f physics:diagonalInertia = (0.03, 0.02, 0.02)
+        double3 xformOp:translate = (0.29249, 0.28, 0.16402)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def "visual_tyre" (
+            prepend references = @./hunter_geom.usdc@</geom/wheel_back_left_tyre>
+        )
+        {
+        }
+
+        def "visual_hub" (
+            prepend references = @./hunter_geom.usdc@</geom/wheel_back_left_hub>
+        )
+        {
+        }
+
+        def Cylinder "tire_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.1641
+            double height = 0.142
+        }
+    }
+
+    def Xform "wheel_back_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        float physics:mass = 2.0
+        vector3f physics:diagonalInertia = (0.03, 0.02, 0.02)
+        double3 xformOp:translate = (-0.29251, 0.28018, 0.16402)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def "visual_tyre" (
+            prepend references = @./hunter_geom.usdc@</geom/wheel_back_right_tyre>
+        )
+        {
+        }
+
+        def "visual_hub" (
+            prepend references = @./hunter_geom.usdc@</geom/wheel_back_right_hub>
+        )
+        {
+        }
+
+        def Cylinder "tire_collider" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            token visibility = "invisible"
+            uniform token axis = "X"
+            double radius = 0.1641
+            double height = 0.142
+        }
+    }
+
+    # =================== JOINTS ===================
+    # Ordinary revolute joints rather than a multibody, matching tractor.usd:
+    # its note records that the multibody path let wheels spin without pushing
+    # the chassis across the heightfield.
+    def Scope "Joints"
+    {
+        # ---- REAR: chassis <-> wheel, axle X, driven ----
+        def PhysicsRevoluteJoint "rev_back_left"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/wheel_back_left>
+            point3f physics:localPos0 = (0.29249, 0.3239, -0.07848)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+
+        def PhysicsRevoluteJoint "rev_back_right"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/wheel_back_right>
+            point3f physics:localPos0 = (-0.29251, 0.32408, -0.07848)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+
+        # ---- FRONT LEFT: chassis <-> knuckle (Z, steered), knuckle <-> wheel (X) ----
+        def PhysicsRevoluteJoint "steer_front_left"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/steer_front_left>
+            point3f physics:localPos0 = (0.29199, -0.32752, -0.0784)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -27.0
+            float physics:upperLimit = 27.0
+        }
+
+        def PhysicsRevoluteJoint "rev_front_left"
+        {
+            rel physics:body0 = </robot/steer_front_left>
+            rel physics:body1 = </robot/wheel_front_left>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+
+        # ---- FRONT RIGHT ----
+        def PhysicsRevoluteJoint "steer_front_right"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/steer_front_right>
+            point3f physics:localPos0 = (-0.29201, -0.32752, -0.0784)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -27.0
+            float physics:upperLimit = 27.0
+        }
+
+        def PhysicsRevoluteJoint "rev_front_right"
+        {
+            rel physics:body0 = </robot/steer_front_right>
+            rel physics:body1 = </robot/wheel_front_right>
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+            uniform token physics:axis = "X"
+        }
+    }
+}

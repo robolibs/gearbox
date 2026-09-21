@@ -1,0 +1,45 @@
+{
+  "default": "grassland",
+  "fields": [
+    {
+      "name": "ag-lug",
+      "profile": "grassland",
+      "min": [-70.0, -18.0],
+      "max": [70.0, -6.0],
+      "way": [[-70.0, -12.0], [70.0, -12.0]],
+      "way_width": 4.0,
+      "wear": 0.45,
+      "tyre": "ag"
+    },
+    {
+      "name": "lorry",
+      "profile": "grassland",
+      "min": [-70.0, -6.0],
+      "max": [70.0, 6.0],
+      "way": [[-70.0, 0.0], [70.0, 0.0]],
+      "way_width": 4.0,
+      "wear": 0.45,
+      "tyre": "road"
+    },
+    {
+      "name": "bald",
+      "profile": "grassland",
+      "min": [-70.0, 6.0],
+      "max": [70.0, 18.0],
+      "way": [[-70.0, 12.0], [70.0, 12.0]],
+      "way_width": 4.0,
+      "wear": 0.45,
+      "tyre": "smooth"
+    },
+    {
+      "name": "one-nobody-named",
+      "profile": "grassland",
+      "min": [-70.0, 18.0],
+      "max": [70.0, 30.0],
+      "way": [[-70.0, 24.0], [70.0, 24.0]],
+      "way_width": 4.0,
+      "wear": 0.45,
+      "tyre": { "pitch": 0.34, "lean": 0.55, "duty": 0.5, "depth": 0.03 }
+    }
+  ]
+}

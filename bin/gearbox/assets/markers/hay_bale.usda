@@ -1,0 +1,17 @@
+#usda 1.0
+(
+    defaultPrim = "hay_bale"
+    metersPerUnit = 1
+    upAxis = "Y"
+    doc = """The Poly Haven round hay bale in metres. bale.usdz is authored in
+    centimetres and the projection does not apply metersPerUnit, so it drew
+    100 times too big; this wrapper scales it once."""
+)
+
+def Xform "hay_bale" (
+    prepend references = @./bale.usdz@
+)
+{
+    float3 xformOp:scale = (0.01, 0.01, 0.01)
+    uniform token[] xformOpOrder = ["xformOp:scale"]
+}

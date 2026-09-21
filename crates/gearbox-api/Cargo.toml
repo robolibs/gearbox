@@ -1,20 +1,23 @@
 [package]
 name = "gearbox-api"
-description = "Zenoh-based USD tool API for gearbox."
+description = "Gearbox tool API on agentio: wire types, topics, host and machine agents."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [features]
 default = ["bevy"]
-# Bevy plugin layer — USD load / marker / reset systems.
+# Bevy plugin layer — host agent, USD load / marker / reset systems.
 bevy = ["dep:bevy", "dep:usd_bevy"]
 
 [dependencies]
 datapod.workspace = true
-zenoh.workspace = true
-serde = { version = "1", features = ["derive"] }
-ciborium = "0.2"
+peerbus.workspace = true
+agentio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+postcard = { version = "1.0", default-features = false, features = ["use-std"] }
 
 bevy = { workspace = true, optional = true }
 usd_bevy = { workspace = true, optional = true }
+

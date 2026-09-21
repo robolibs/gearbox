@@ -10,21 +10,32 @@
 //! stable USD-joint-to-Rapier-handle index.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::process::{Child, Command};
-use std::sync::{Arc, Mutex};
 
+use crate::usd_ext::StageExt;
 use bevy::prelude::*;
-use openusd::sdf::{Path as SdfPath, Value};
-use rapier3d::control::{DynamicRayCastVehicleController, WheelTuning};
-use rapier3d::pipeline::QueryFilter;
-use rapier3d::prelude::{
-    CoefficientCombineRule, JointAxis, MultibodyJointHandle, RigidBodyHandle, Vector,
+use concord::{Enu, to_wgs_from_enu};
+use gearbox_api::datapod::robot::{Gnss, Imu, Odom, Twist, TurnRadius, WheelEncoder, WheelEncoders};
+use gearbox_api::datapod::{Acceleration, Geo, Point, Quaternion, Velocity};
+use gearbox_api::{
+    ControllerDesc, GearboxBus, MachineAgent, MachineConfig, MachineState, Props, SceneEvent,
+    clear_scope, event_kind,
 };
-use serde::{Deserialize, Serialize};
+use openusd::sdf::{Path as SdfPath, Value};
+
+use crate::physics::backend::{
+    Body, BodyId, CombineRule, DVec3, Inertia, Joint, JointAxis, JointMut, MassProps, MotorModel,
+    Pose, Shape, ShapeView,
+};
 use usd_bevy::UsdPrimRef;
-use zenoh::Wait;
+
+mod traction;
+mod parking;
+#[cfg(test)]
+mod benchmark;
+mod steering;
+pub(crate) mod wheel_forces;
 
 /// All USD-authored machine/controller specs discovered from loaded assets.
 #[derive(Resource, Debug, Default, Clone)]
@@ -52,10 +63,59 @@ impl ControllerInventory {
 }
 
 /// Internal command buffer keyed by discovered controller instance.
-/// UI/keyboard/zenoh bridges write here; builtin controllers consume it.
+/// UI/keyboard/agent bridges write here; builtin controllers consume it.
 #[derive(Resource, Debug, Default, Clone)]
 pub struct ControllerCommands {
     pub cmd_vel: HashMap<ControllerKey, CmdVel>,
+}
+
+/// Local drive commands and one-shot stops, applied after bus input.
+#[derive(Resource, Default)]
+pub struct UiDrive {
+    pub commands: HashMap<ControllerKey, CmdVel>,
+    pub steering: HashMap<ControllerKey, f32>,
+    pub inhibited: HashSet<ControllerKey>,
+    release_after_stop: HashSet<ControllerKey>,
+}
+
+impl UiDrive {
+    pub fn drive(&mut self, key: &ControllerKey, command: CmdVel, steering: Option<f32>) {
+        self.release_after_stop.remove(key);
+        self.inhibited.remove(key);
+        self.commands.insert(key.clone(), command);
+        if let Some(steering) = steering {
+            self.steering.insert(key.clone(), steering);
+        } else {
+            self.steering.remove(key);
+        }
+    }
+
+    pub fn stop_once(&mut self, key: &ControllerKey) {
+        self.commands.insert(key.clone(), CmdVel::default());
+        self.steering.remove(key);
+        self.inhibited.insert(key.clone());
+        self.release_after_stop.insert(key.clone());
+    }
+}
+
+pub(crate) fn apply_ui_drive(
+    mut ui: ResMut<UiDrive>,
+    mut commands: ResMut<ControllerCommands>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+) {
+    for (key, cmd) in &ui.commands {
+        commands.cmd_vel.insert(key.clone(), *cmd);
+    }
+    for key in &ui.inhibited {
+        commands.cmd_vel.insert(key.clone(), CmdVel::default());
+        runtime.applied_cmd_vel.insert(key.clone(), CmdVel::default());
+        runtime.speed_trim.remove(key);
+    }
+    for key in std::mem::take(&mut ui.release_after_stop) {
+        ui.commands.remove(&key);
+        ui.steering.remove(&key);
+        ui.inhibited.remove(&key);
+    }
 }
 
 /// Runtime policy for USD-authored `external:process` controllers.
@@ -94,20 +154,63 @@ pub struct ExternalControllerProcesses {
 #[derive(Resource, Debug, Default, Clone)]
 pub struct ControllerStates {
     pub states: HashMap<ControllerKey, ControllerState>,
+    pub drive_limits: HashMap<ControllerKey, DriveLimits>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DriveLimits {
+    pub driven_wheels: usize,
+    pub supported_wheels: usize,
+    pub torque_nm: f64,
+    pub power_scale: f64,
+    pub parked: bool,
 }
 
 #[derive(Resource, Debug, Default, Clone)]
-struct ControllerRuntimeState {
+pub(crate) struct ControllerRuntimeState {
+    parking: parking::ParkingBrakes,
     applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
     logged_empty_tire_pairs: HashSet<ControllerKey>,
+    logged_steer: HashSet<ControllerKey>,
+    inertia_guarded: HashSet<ControllerKey>,
+    machines_prepared: HashSet<ControllerKey>,
+    /// Integral wheel-speed trim per controller under contact traction.
+    speed_trim: HashMap<ControllerKey, f64>,
+    /// Rigid bodies per machine id for steering loads and diagnostics.
+    machine_bodies: HashMap<String, Vec<BodyId>>,
+    /// Wheel bodies per machine id for tyre setup and contact diagnostics.
+    machine_wheels: HashMap<String, Vec<BodyId>>,
+    diff_drive_debug_ticks: u64,
+    /// Cumulative wheel spin angle (radians), integrated from measured
+    /// angular velocity each tick — nothing else here tracks it, so an
+    /// encoder reading has to keep its own running total.
+    wheel_spin_angles: HashMap<ControllerKey, Vec<f64>>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+/// Forward speed as of the last publish tick, per machine — the only history
+/// an IMU's longitudinal acceleration needs. Kept separate from
+/// `ControllerRuntimeState` because it's read and written by the publish
+/// system, not the command-application one. `(speed, accel)`: physics steps
+/// on a fixed accumulator, not every render frame, so a frame with no new
+/// step reuses the last computed acceleration instead of dividing an
+/// unchanged (or, worse, just-changed-by-several-steps) speed by this
+/// frame's render `dt`, which is a different, unrelated time base.
+#[derive(Resource, Debug, Default, Clone)]
+pub(crate) struct LastLinearSpeed(HashMap<ControllerKey, (f64, f64)>);
+
+#[derive(Debug, Clone, Default)]
 pub struct ControllerState {
+    /// The datum the position is in, by its region of the physics world.
+    pub region: usize,
     pub position_m: [f64; 3],
     pub heading_rad: f64,
+    pub roll_rad: f64,
+    pub pitch_rad: f64,
     pub linear_speed_mps: f64,
     pub yaw_rate_rps: f64,
+    /// One `(angle_rad, velocity_rad_s)` pair per driven wheel, indexed the
+    /// same as `wheel_targets` was when they were measured.
+    pub wheel_encoders: Vec<(f64, f64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -159,28 +262,37 @@ impl Plugin for ControllerDiscoveryPlugin {
             .init_resource::<ExternalControllerProcesses>()
             .init_resource::<ControllerStates>()
             .init_resource::<ControllerRuntimeState>()
+            .init_resource::<LastLinearSpeed>()
+            .init_resource::<MachineAgentKeys>()
+            .init_resource::<RejectedMachines>()
+            .init_resource::<UiDrive>()
+            .add_systems(Update, rediscover_swapped_machines.before(prepare_machine_physics))
             .add_systems(
                 Update,
                 (
                     clear_controller_state_on_reset,
-                    sync_machine_controller_api_topics,
+                    sync_machine_agents,
                     reconcile_external_process_controllers,
-                    apply_machine_controller_api_commands,
+                    apply_machine_agent_commands,
+                    apply_ui_drive,
+                    guard_chassis_inertia,
+                    prepare_machine_physics,
+                    wheel_forces::sync_machine_wheel_forces.after(crate::services::ServiceCommandSet),
+                    wheel_forces::apply_motion_resistance
+                        .run_if(wheel_forces::motion_resistance_wanted),
                     apply_builtin_ackermann_cmd_vel,
+                    apply_builtin_diff_drive_cmd_vel,
+                    record_wheel_tracks,
+                    dump_joints_periodically,
                 )
-                    .chain(),
+                    .chain()
+                    .before(crate::physics::step_physics),
             )
-            .add_systems(PostUpdate, publish_machine_controller_states);
-
-        match MachineControllerApi::open() {
-            Ok(api) => {
-                app.insert_resource(api);
-                info!("gearbox-control: machine controller zenoh API ready");
-            }
-            Err(err) => {
-                warn!("gearbox-control: machine controller zenoh API disabled: {err}");
-            }
-        }
+            .add_systems(
+                PostUpdate,
+                (publish_machine_controller_states, publish_link_poses)
+                    .after(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 
@@ -190,221 +302,41 @@ fn clear_controller_state_on_reset(
     mut commands: ResMut<ControllerCommands>,
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
-    api: Option<Res<MachineControllerApi>>,
+    mut keys: ResMut<MachineAgentKeys>,
+    mut last_speed: ResMut<LastLinearSpeed>,
+    bus: Option<ResMut<GearboxBus>>,
 ) {
     let Some(mut messages) = messages else { return };
-    if messages.read().count() == 0 {
+    let clears_machines = messages
+        .read()
+        .any(|m| matches!(m.scope, clear_scope::ALL | clear_scope::MACHINES));
+    if !clears_machines {
         return;
     }
     inventory.machines.clear();
     commands.cmd_vel.clear();
     runtime.applied_cmd_vel.clear();
     runtime.logged_empty_tire_pairs.clear();
+    runtime.logged_steer.clear();
+    runtime.inertia_guarded.clear();
+    runtime.wheel_spin_angles.clear();
+    last_speed.0.clear();
     states.states.clear();
-    if let Some(api) = api {
-        api.clear_pending_cmd_vel();
+    keys.0.clear();
+    if let Some(mut bus) = bus {
+        bus.machines.clear();
     }
     info!("gearbox-control: cleared controller inventory/state");
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MachineCmdVelWire {
-    pub linear: [f64; 3],
-    pub angular: [f64; 3],
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
+/// Namespace of each live machine agent → the controller it drives.
+#[derive(Resource, Default)]
+pub struct MachineAgentKeys(pub HashMap<String, ControllerKey>);
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MachineSessionWire {
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MachineStateWire {
-    pub machine_id: String,
-    pub controller: String,
-    pub position: [f64; 3],
-    pub heading_rad: f64,
-    pub linear_speed_mps: f64,
-    pub yaw_rate_rps: f64,
-}
-
-#[derive(Resource)]
-pub struct MachineControllerApi {
-    session: Arc<zenoh::Session>,
-    subscribers: Mutex<HashMap<ControllerKey, zenoh::pubsub::Subscriber<()>>>,
-    session_subscribers: Mutex<HashMap<ControllerKey, zenoh::pubsub::Subscriber<()>>>,
-    pending_cmd_vel: Arc<Mutex<HashMap<ControllerKey, MachineCmdVelWire>>>,
-    active_sessions: Arc<Mutex<HashMap<ControllerKey, String>>>,
-}
-
-impl MachineControllerApi {
-    fn open() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let session = Arc::new(zenoh::open(zenoh::Config::default()).wait()?);
-        Ok(Self {
-            session,
-            subscribers: Mutex::new(HashMap::new()),
-            session_subscribers: Mutex::new(HashMap::new()),
-            pending_cmd_vel: Arc::new(Mutex::new(HashMap::new())),
-            active_sessions: Arc::new(Mutex::new(HashMap::new())),
-        })
-    }
-
-    fn register_cmd_vel(&self, key: ControllerKey, namespace: &str) {
-        self.register_session_claim(key.clone(), namespace);
-
-        let Ok(mut subscribers) = self.subscribers.lock() else {
-            return;
-        };
-        if subscribers.contains_key(&key) {
-            return;
-        }
-        let topic = format!("gearbox/machines/{namespace}/cmd_vel");
-        let topic_for_cb = topic.clone();
-        let pending = Arc::clone(&self.pending_cmd_vel);
-        let active_sessions = Arc::clone(&self.active_sessions);
-        let key_for_cb = key.clone();
-        let result = self
-            .session
-            .declare_subscriber(topic.clone())
-            .callback(move |sample| {
-                let bytes = sample.payload().to_bytes();
-                match decode::<MachineCmdVelWire>(bytes.as_ref()) {
-                    Ok(cmd) => {
-                        if !command_session_is_active(&active_sessions, &key_for_cb, &cmd) {
-                            return;
-                        }
-                        if let Ok(mut q) = pending.lock() {
-                            q.insert(key_for_cb.clone(), cmd);
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("gearbox-control: bad cmd_vel payload on {topic_for_cb}: {err}");
-                    }
-                }
-            })
-            .wait();
-        match result {
-            Ok(sub) => {
-                subscribers.insert(key, sub);
-            }
-            Err(err) => {
-                warn!("gearbox-control: failed to subscribe {topic}: {err}");
-            }
-        }
-    }
-
-    fn register_session_claim(&self, key: ControllerKey, namespace: &str) {
-        let Ok(mut subscribers) = self.session_subscribers.lock() else {
-            return;
-        };
-        if subscribers.contains_key(&key) {
-            return;
-        }
-        let topic = format!("gearbox/machines/{namespace}/session");
-        let topic_for_cb = topic.clone();
-        let pending = Arc::clone(&self.pending_cmd_vel);
-        let active_sessions = Arc::clone(&self.active_sessions);
-        let key_for_cb = key.clone();
-        let result = self
-            .session
-            .declare_subscriber(topic.clone())
-            .callback(move |sample| {
-                let bytes = sample.payload().to_bytes();
-                match decode::<MachineSessionWire>(bytes.as_ref()) {
-                    Ok(claim) if !claim.session_id.is_empty() => {
-                        if let Ok(mut sessions) = active_sessions.lock() {
-                            sessions.insert(key_for_cb.clone(), claim.session_id.clone());
-                        }
-                        if let Ok(mut q) = pending.lock() {
-                            q.insert(
-                                key_for_cb.clone(),
-                                MachineCmdVelWire {
-                                    linear: [0.0, 0.0, 0.0],
-                                    angular: [0.0, 0.0, 0.0],
-                                    session_id: Some(claim.session_id),
-                                },
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        eprintln!("gearbox-control: empty session_id payload on {topic_for_cb}");
-                    }
-                    Err(err) => {
-                        eprintln!(
-                            "gearbox-control: bad session claim payload on {topic_for_cb}: {err}"
-                        );
-                    }
-                }
-            })
-            .wait();
-        match result {
-            Ok(sub) => {
-                subscribers.insert(key, sub);
-            }
-            Err(err) => {
-                warn!("gearbox-control: failed to subscribe {topic}: {err}");
-            }
-        }
-    }
-
-    fn snapshot_cmd_vel(&self) -> HashMap<ControllerKey, MachineCmdVelWire> {
-        self.pending_cmd_vel
-            .lock()
-            .map(|q| q.clone())
-            .unwrap_or_default()
-    }
-
-    fn clear_pending_cmd_vel(&self) {
-        if let Ok(mut q) = self.pending_cmd_vel.lock() {
-            q.clear();
-        }
-    }
-
-    fn publish_state(&self, namespace: &str, state: &MachineStateWire) {
-        let Ok(bytes) = encode(state) else {
-            return;
-        };
-        let topic = format!("gearbox/machines/{namespace}/state");
-        if let Err(err) = self.session.put(topic.clone(), bytes).wait() {
-            warn!("gearbox-control: failed to publish {topic}: {err}");
-        }
-    }
-}
-
-fn command_session_is_active(
-    active_sessions: &Mutex<HashMap<ControllerKey, String>>,
-    key: &ControllerKey,
-    cmd: &MachineCmdVelWire,
-) -> bool {
-    let Ok(mut sessions) = active_sessions.lock() else {
-        return false;
-    };
-    match cmd.session_id.as_deref() {
-        Some(session_id) if session_id.is_empty() => false,
-        Some(session_id) => match sessions.get(key) {
-            Some(active_session) => active_session == session_id,
-            None => {
-                sessions.insert(key.clone(), session_id.to_string());
-                true
-            }
-        },
-        None => !sessions.contains_key(key),
-    }
-}
-
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf)?;
-    Ok(buf)
-}
-
-fn decode<T: serde::de::DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, ciborium::de::Error<std::io::Error>> {
-    ciborium::from_reader(bytes)
-}
+/// Machines whose link tree failed validation, so the rejection is logged
+/// and published once rather than every frame.
+#[derive(Resource, Debug, Default)]
+pub struct RejectedMachines(pub std::collections::HashSet<String>);
 
 /// A single composed machine prim plus all controller instances authored on it.
 #[derive(Debug, Clone)]
@@ -433,8 +365,14 @@ pub struct MachineInstanceSpec {
     pub passive_wheel_joints: Vec<String>,
     pub steering_joints: Vec<String>,
     pub brake_joints: Vec<String>,
+    /// Prismatic spring joints the runtime leaves alone (`role:suspensionJoints`).
+    pub suspension_joints: Vec<String>,
     pub tool_joints: Vec<String>,
     pub controllers: Vec<ControllerSpec>,
+    /// Link tree per CONTROLLER_SPEC §7; `errors` non-empty means no agent.
+    pub links: crate::links::LinkTree,
+    /// Master functions this machine grants to attached slaves (`gearbox:machine:grants`).
+    pub grants: Vec<String>,
 }
 
 /// One `GearboxControllerAPI:<instance>` application.
@@ -444,7 +382,7 @@ pub struct ControllerSpec {
     pub instance: String,
     pub enabled: bool,
     pub controller_type: String,
-    pub namespace: String,
+    pub machine_id: String,
     pub namespace_policy: String,
     pub update_rate_hz: f32,
     pub command_interface: Option<String>,
@@ -470,6 +408,13 @@ pub struct ControllerSpec {
     pub rear_track_width: Option<f32>,
     pub max_steer_deg: Option<f32>,
     pub steering_geometry: Option<String>,
+
+    /// Per-wheel drive torque limit (N·m) on top of the grip cap.
+    pub max_wheel_torque_nm: Option<f32>,
+    /// Machine drive power (kW), shared over the driven wheels as `τ ≤ P / ω`.
+    pub max_power_kw: Option<f32>,
+    /// Keep each driven wheel near its ground speed; on unless set false.
+    pub traction_control: Option<bool>,
     pub front_steer_multiplier: Option<f32>,
     pub middle_steer_multiplier: Option<f32>,
     pub rear_steer_multiplier: Option<f32>,
@@ -481,11 +426,21 @@ pub struct ControllerSpec {
     pub executable: Option<String>,
     pub args: Vec<String>,
     pub transport: Option<String>,
+    /// Master functions this controller asks for when its machine is a slave.
+    pub requests: Vec<String>,
 }
 
 /// Reopen `usd_path` and discover gearbox machine/controller metadata.
 pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstanceSpec>, String> {
     let stage = open_stage_for_discovery(usd_path)?;
+    discover_machines_from_stage(&stage)
+}
+
+/// The machines authored in an already-open stage; the loader hands over the
+/// stage usd_bevy projected so the file is not parsed a second time.
+pub fn discover_machines_from_stage(
+    stage: &openusd::usd::Stage,
+) -> Result<Vec<MachineInstanceSpec>, String> {
     let mut prims = Vec::new();
     let scan_root = stage
         .default_prim()
@@ -495,7 +450,7 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
 
     let mut machines = Vec::new();
     for prim in &prims {
-        let api_schemas = stage.api_schemas(&prim).unwrap_or_default();
+        let api_schemas = stage.api_schemas(prim).unwrap_or_default();
         let is_machine = api_schemas.iter().any(|api| api == "GearboxMachineAPI")
             || read_token(&stage, &prim, "gearbox:machine:kind").is_some()
             || read_token(&stage, &prim, "gearbox:machine:idPolicy").is_some()
@@ -509,17 +464,22 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
             .unwrap_or_else(|| "prim_path".to_string());
         let id = read_token(&stage, &prim, "gearbox:machine:id")
             .unwrap_or_else(|| derive_machine_id(&prim_path));
-        let namespace_default = id.clone();
+        let machine_id_default = id.clone();
 
         let machine_prim = prim.as_str();
         let controllers = discover_controllers(
             &stage,
             &prim,
             &api_schemas,
-            &namespace_default,
+            &machine_id_default,
             machine_prim,
         );
+        let body = read_rel_first(&stage, &prim, "gearbox:machine:body")
+            .map(|p| rebase_asset_root_target(machine_prim, &p));
+        let links = crate::links::discover_link_tree(&stage, &prim, body.as_deref(), &prims);
         machines.push(MachineInstanceSpec {
+            links,
+            grants: read_token_array(&stage, &prim, "gearbox:machine:grants"),
             scene_root: None,
             asset_label: String::new(),
             source_path: String::new(),
@@ -573,6 +533,12 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
                 "gearbox:machine:role:brakeJoints",
                 machine_prim,
             ),
+            suspension_joints: read_rel_targets_rebased(
+                &stage,
+                &prim,
+                "gearbox:machine:role:suspensionJoints",
+                machine_prim,
+            ),
             tool_joints: read_rel_targets_rebased(
                 &stage,
                 &prim,
@@ -583,76 +549,20 @@ pub fn discover_machines_from_usd(usd_path: &Path) -> Result<Vec<MachineInstance
         });
     }
 
-    append_isaac_compat_machines(&stage, &prims, &mut machines);
+    append_isaac_compat_machines(stage, &prims, &mut machines);
 
     Ok(machines)
 }
 
-fn open_stage_for_discovery(usd_path: &Path) -> Result<openusd::Stage, String> {
-    let bytes = std::fs::read(usd_path).map_err(|e| e.to_string())?;
-    let ext = usd_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("usd");
-    let is_text_usd = ext.eq_ignore_ascii_case("usda")
-        || (ext.eq_ignore_ascii_case("usd") && is_text_usd(&bytes));
-
-    // Match usd_bevy's tolerance for USDA files that contain metadata tokens
-    // openusd-rs cannot parse directly yet. We only need authored gearbox
-    // control metadata from the root layer, so a stripped temp layer is enough.
-    let open_path = if is_text_usd {
-        let final_bytes =
-            usd_schema::third_party::strip_metadata::strip_unsupported_prim_metadata(&bytes);
-        let tmp = discovery_temp_path(usd_path, ext);
-        std::fs::write(&tmp, final_bytes).map_err(|e| e.to_string())?;
-        tmp
-    } else {
-        usd_path.to_path_buf()
-    };
-
-    let mut search = Vec::new();
-    if let Some(parent) = usd_path.parent() {
-        search.push(parent.to_path_buf());
-    }
-    if let Some(parent) = open_path.parent() {
-        search.push(parent.to_path_buf());
-    }
-
-    let open_str = open_path
+fn open_stage_for_discovery(usd_path: &Path) -> Result<openusd::usd::Stage, String> {
+    let open_str = usd_path
         .to_str()
         .ok_or_else(|| "non-UTF-8 USD discovery path".to_string())?;
-    openusd::Stage::builder()
-        .resolver(
-            usd_schema::third_party::resolver::StripMetadataResolver::with_search_paths(search),
-        )
-        .on_error(|err| {
-            bevy::log::warn!("gearbox-control USD composition: {err}");
-            Ok(())
-        })
-        .open(open_str)
-        .map_err(|e| e.to_string())
-}
-
-fn discovery_temp_path(usd_path: &Path, ext: &str) -> std::path::PathBuf {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    usd_path.hash(&mut hasher);
-    std::env::temp_dir().join(format!(
-        ".gearbox_control_scan_{:016x}.{}",
-        hasher.finish(),
-        ext
-    ))
-}
-
-fn is_text_usd(bytes: &[u8]) -> bool {
-    let start = bytes
-        .iter()
-        .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n' | 0xEF | 0xBB | 0xBF))
-        .unwrap_or(bytes.len());
-    bytes[start..].starts_with(b"#usda")
+    openusd::usd::Stage::open(open_str).map_err(|e| e.to_string())
 }
 
 fn append_isaac_compat_machines(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prims: &[SdfPath],
     machines: &mut Vec<MachineInstanceSpec>,
 ) {
@@ -721,6 +631,8 @@ fn append_isaac_compat_machines(
             source_path: String::new(),
             prim_path: prim_path.to_string(),
             id: id.clone(),
+            links: Default::default(),
+            grants: Vec::new(),
             kind: Some("isaac_articulation".to_string()),
             interface_version: Some("isaac_compat:v0".to_string()),
             id_policy: "prim_path".to_string(),
@@ -733,12 +645,13 @@ fn append_isaac_compat_machines(
             passive_wheel_joints: passive_wheel_joints.clone(),
             steering_joints: steer_joints.clone(),
             brake_joints: Vec::new(),
+            suspension_joints: Vec::new(),
             tool_joints: Vec::new(),
             controllers: vec![ControllerSpec {
                 instance: "drive".to_string(),
                 enabled: true,
                 controller_type: "builtin:ackermann_cmd_vel".to_string(),
-                namespace: id,
+                machine_id: id,
                 namespace_policy: "machine_id".to_string(),
                 update_rate_hz: 60.0,
                 command_interface: Some("cmd_vel".to_string()),
@@ -768,6 +681,10 @@ fn append_isaac_compat_machines(
                 rear_track_width: None,
                 max_steer_deg: Some(45.0),
                 steering_geometry: Some("ackermann".to_string()),
+
+                max_wheel_torque_nm: None,
+                max_power_kw: None,
+                traction_control: None,
                 front_steer_multiplier: None,
                 middle_steer_multiplier: None,
                 rear_steer_multiplier: None,
@@ -782,6 +699,7 @@ fn append_isaac_compat_machines(
                 executable: None,
                 args: Vec::new(),
                 transport: None,
+                requests: Vec::new(),
             }],
         });
     }
@@ -793,10 +711,10 @@ struct IsaacJointGroups {
     drive: Vec<String>,
 }
 
-fn discover_isaac_joint_groups(stage: &openusd::Stage, prims: &[SdfPath]) -> IsaacJointGroups {
+fn discover_isaac_joint_groups(stage: &openusd::usd::Stage, prims: &[SdfPath]) -> IsaacJointGroups {
     let mut groups = IsaacJointGroups::default();
     for prim in prims {
-        let prop_names = stage.prim_properties(prim.clone()).unwrap_or_default();
+        let prop_names = stage.prim_properties(prim).unwrap_or_default();
         if prop_names.is_empty() {
             continue;
         }
@@ -835,7 +753,11 @@ fn discover_isaac_joint_groups(stage: &openusd::Stage, prims: &[SdfPath]) -> Isa
     groups
 }
 
-fn physics_joint_paths_under(stage: &openusd::Stage, prims: &[SdfPath], root: &str) -> Vec<String> {
+fn physics_joint_paths_under(
+    stage: &openusd::usd::Stage,
+    prims: &[SdfPath],
+    root: &str,
+) -> Vec<String> {
     prims
         .iter()
         .filter(|prim| path_is_under(prim.as_str(), root))
@@ -850,7 +772,11 @@ fn physics_joint_paths_under(stage: &openusd::Stage, prims: &[SdfPath], root: &s
         .collect()
 }
 
-fn first_rigid_body_under(stage: &openusd::Stage, prims: &[SdfPath], root: &str) -> Option<String> {
+fn first_rigid_body_under(
+    stage: &openusd::usd::Stage,
+    prims: &[SdfPath],
+    root: &str,
+) -> Option<String> {
     prims
         .iter()
         .filter(|prim| path_is_under(prim.as_str(), root))
@@ -916,17 +842,19 @@ fn steering_side_targets(steer_joints: &[String]) -> (Option<String>, Option<Str
     (left, right)
 }
 
-fn read_name_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
-    match read_attr(stage, prim, name) {
-        Some(Value::TokenVec(v)) | Some(Value::StringVec(v)) => v,
-        Some(Value::Token(v)) | Some(Value::String(v)) => v
-            .split([',', ' '])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
+fn read_name_array(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+    let text = match read_attr(stage, prim, name) {
+        Some(Value::TokenVec(v)) => return v.iter().map(|t| t.as_str().to_string()).collect(),
+        Some(Value::StringVec(v)) => return v,
+        Some(Value::Token(v)) => v.as_str().to_string(),
+        Some(Value::String(v)) => v,
+        _ => return Vec::new(),
+    };
+    text.split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn looks_like_joint_names_attr(name: &str) -> bool {
@@ -957,25 +885,21 @@ fn prim_leaf_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn type_name(stage: &openusd::Stage, prim: &SdfPath) -> Option<String> {
-    stage
-        .field::<String>(prim.clone(), "typeName")
-        .ok()
-        .flatten()
+pub(crate) fn type_name(stage: &openusd::usd::Stage, prim: &SdfPath) -> Option<String> {
+    StageExt::type_name(stage, prim).ok().flatten()
 }
 
 fn append_value_context(context: &mut String, value: &Value) {
+    let mut push = |s: &str| {
+        context.push(' ');
+        context.push_str(&s.to_ascii_lowercase());
+    };
     match value {
-        Value::String(v) | Value::Token(v) | Value::AssetPath(v) => {
-            context.push(' ');
-            context.push_str(&v.to_ascii_lowercase());
-        }
-        Value::StringVec(v) | Value::TokenVec(v) => {
-            for item in v {
-                context.push(' ');
-                context.push_str(&item.to_ascii_lowercase());
-            }
-        }
+        Value::String(v) => push(v),
+        Value::Token(v) => push(v.as_str()),
+        Value::AssetPath(v) => push(v.as_str()),
+        Value::StringVec(v) => v.iter().for_each(|item| push(item)),
+        Value::TokenVec(v) => v.iter().for_each(|item| push(item.as_str())),
         _ => {}
     }
 }
@@ -1001,109 +925,15 @@ pub fn log_discovered_machines(label: &str, machines: &[MachineInstanceSpec]) {
         );
         for controller in &machine.controllers {
             info!(
-                "gearbox-control:   controller:{} type={} enabled={} ns={} target={:?} powered_wheel_joints={} steering_joints={} drive_wheel_overrides={}",
+                "gearbox-control:   controller:{} type={} enabled={} machine_id={} target={:?} powered_wheel_joints={} steering_joints={} drive_wheel_overrides={}",
                 controller.instance,
                 controller.controller_type,
                 controller.enabled,
-                controller.namespace,
+                controller.machine_id,
                 controller.target,
                 machine.powered_wheel_joints.len(),
                 machine.steering_joints.len(),
                 controller.drive_wheel_joints.len(),
-            );
-        }
-    }
-}
-
-fn sync_machine_controller_api_topics(
-    inventory: Res<ControllerInventory>,
-    api: Option<Res<MachineControllerApi>>,
-) {
-    let Some(api) = api else {
-        return;
-    };
-    for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        for controller in &machine.controllers {
-            if !controller.enabled || controller.command_interface.as_deref() != Some("cmd_vel") {
-                continue;
-            }
-            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
-            api.register_cmd_vel(key, &controller.namespace);
-        }
-    }
-}
-
-fn apply_machine_controller_api_commands(
-    api: Option<Res<MachineControllerApi>>,
-    mut commands: ResMut<ControllerCommands>,
-) {
-    let Some(api) = api else {
-        return;
-    };
-    for (key, wire) in api.snapshot_cmd_vel() {
-        commands.cmd_vel.insert(
-            key,
-            CmdVel {
-                linear_mps: wire.linear[0] as f32,
-                angular_rps: cmd_vel_yaw_rate(&wire),
-            },
-        );
-    }
-}
-
-fn cmd_vel_yaw_rate(wire: &MachineCmdVelWire) -> f32 {
-    // Public cmd_vel follows ROS/base_link convention: yaw is angular.z.
-    // Bevy/Rapier internals are Y-up, and during manual debugging it is easy
-    // to publish angular.y instead. Accept angular.y as a fallback when
-    // angular.z is zero so either convention turns the tractor.
-    let yaw_z = wire.angular[2] as f32;
-    if yaw_z.abs() > 1e-9 {
-        yaw_z
-    } else {
-        wire.angular[1] as f32
-    }
-}
-
-fn publish_machine_controller_states(
-    inventory: Res<ControllerInventory>,
-    states: Res<ControllerStates>,
-    api: Option<Res<MachineControllerApi>>,
-) {
-    let Some(api) = api else {
-        return;
-    };
-    if states.states.is_empty() {
-        return;
-    }
-    for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        for controller in &machine.controllers {
-            if !controller
-                .state_interfaces
-                .iter()
-                .any(|iface| iface == "pose" || iface == "velocity")
-            {
-                continue;
-            }
-            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
-            let Some(state) = states.states.get(&key) else {
-                continue;
-            };
-            api.publish_state(
-                &controller.namespace,
-                &MachineStateWire {
-                    machine_id: machine.id.clone(),
-                    controller: controller.instance.clone(),
-                    position: state.position_m,
-                    heading_rad: state.heading_rad,
-                    linear_speed_mps: state.linear_speed_mps,
-                    yaw_rate_rps: state.yaw_rate_rps,
-                },
             );
         }
     }
@@ -1180,10 +1010,9 @@ fn reconcile_external_process_controllers(
             cmd.args(&controller.args)
                 .env("GEARBOX_MACHINE_ID", &machine.id)
                 .env("GEARBOX_CONTROLLER", &controller.instance)
-                .env("GEARBOX_NAMESPACE", &controller.namespace)
                 .env(
                     "GEARBOX_TRANSPORT",
-                    controller.transport.as_deref().unwrap_or("zenoh"),
+                    controller.transport.as_deref().unwrap_or("agentio"),
                 );
             match cmd.spawn() {
                 Ok(child) => {
@@ -1230,18 +1059,55 @@ fn is_allowlisted(executable: &Path, allowlist_dirs: &[std::path::PathBuf]) -> b
 /// First builtin controller: consume `cmd_vel`, bind authored wheel/steer joint
 /// relationships to Rapier impulse-joint motors where possible, publish
 /// chassis pose/velocity state, and keep a conservative body-force fallback for
+/// How soft a machine's tyres are standing, nought at their authored maximum
+/// pressure and one at their minimum. Averaged over every tyre that reports a
+/// pressure, because the steering is resisted by all of them and not only by
+/// the pair that turns.
+fn machine_tyre_softness(values: &crate::services::LinkValues, machine: &MachineInstanceSpec) -> f64 {
+    let mut sum = 0.0;
+    let mut count = 0.0;
+    for link in &machine.links.links {
+        let pressure = values.get(&machine.id, &link.name, "tyre_pressure_bar");
+        let low = values.get(&machine.id, &link.name, "tyre_min_pressure_bar");
+        let high = values.get(&machine.id, &link.name, "tyre_max_pressure_bar");
+        let (Some(pressure), Some(low), Some(high)) = (pressure, low, high) else {
+            continue;
+        };
+        if !(high > low) || !pressure.is_finite() {
+            continue;
+        }
+        sum += 1.0 - ((pressure - low) / (high - low)).clamp(0.0, 1.0);
+        count += 1.0;
+    }
+    if count > 0.0 { sum / count } else { 0.0 }
+}
+
 /// joint shapes that are not externally addressable yet.
 fn apply_builtin_ackermann_cmd_vel(
     inventory: Res<ControllerInventory>,
     commands: Res<ControllerCommands>,
+    ui_drive: Res<UiDrive>,
     time: Res<Time>,
     mut runtime: ResMut<ControllerRuntimeState>,
     mut states: ResMut<ControllerStates>,
-    active: Res<usd_bevy::physics::PhysicsActive>,
+    active: Res<gearbox_api::PhysicsActive>,
     prims: Query<(Entity, &UsdPrimRef)>,
-    joints: Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: Query<&ChildOf>,
-    mut physics: ResMut<usd_bevy::physics::PhysicsWorld>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
+    link_values: Res<crate::services::LinkValues>,
+    mut steering_log_at: Local<f32>,
+    // Where the steering actually stands, machine by machine. A command names
+    // the angle the wheels are *wanted* at; they arrive at it over a couple of
+    // seconds, because a steering box is turned by hand or by a ram and neither
+    // goes lock to lock in a frame. Applied straight through, a machine snapped
+    // to full lock the instant it was asked to turn, which no machine does and
+    // which put a corner in its own tracks.
+    mut steer_held: Local<HashMap<ControllerKey, f64>>,
 ) {
     if !active.0 || inventory.machines.is_empty() {
         return;
@@ -1271,13 +1137,13 @@ fn apply_builtin_ackermann_cmd_vel(
             };
 
             let body_heading = physics
-                .bodies
-                .get(body_handle)
+                .body(body_handle)
                 .map(machine_heading_rad)
                 .unwrap_or(0.0);
 
+            let rolling_mps;
             {
-                let Some(body) = physics.bodies.get_mut(body_handle) else {
+                let Some(body) = physics.body_mut(body_handle) else {
                     continue;
                 };
 
@@ -1285,51 +1151,127 @@ fn apply_builtin_ackermann_cmd_vel(
                 // including when the command is zero. This lets the UI/API show
                 // that the controller is alive without needing movement.
                 let pos = body.translation();
+                let (region, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
+                let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
                 states.states.insert(
                     key.clone(),
                     ControllerState {
-                        position_m: [pos.x, pos.y, pos.z],
+                        region,
+                        position_m,
                         heading_rad: body_heading,
+                        roll_rad,
+                        pitch_rad,
                         linear_speed_mps: body.linvel().length(),
                         yaw_rate_rps: body.angvel().y,
+                        // Filled in below, once wheel_targets exists.
+                        wheel_encoders: Vec::new(),
                     },
                 );
+                rolling_mps = body.linvel().length();
             }
 
             let wheel_radius_m = controller.wheel_radius.unwrap_or(0.45) as f64;
-            let wheel_base_m = controller.wheel_base.unwrap_or(2.37);
+            let wheel_base_m = controller
+                .wheel_base
+                .or_else(|| {
+                    derived_wheel_base(scene_root, controller, machine, &joints, &parents, &physics, body_handle)
+                })
+                .unwrap_or(2.37);
             let track_width_m = controller
                 .front_track_width
                 .or(controller.track_width)
                 .unwrap_or(1.5675);
             let max_steer_deg = controller.max_steer_deg.unwrap_or(45.0);
-            let steer_target_rad = steering_target_radians(
-                cmd.linear_mps,
-                cmd.angular_rps,
-                wheel_base_m,
-                max_steer_deg,
-            );
+            let steering_input = ui_drive.steering.get(&key).copied()
+                .filter(|_| ui_drive.commands.contains_key(&key));
+            let steer_wanted = steering_input
+                .map(|input| input as f64 * (max_steer_deg as f64).to_radians())
+                .unwrap_or_else(|| steering_target_radians(
+                    cmd.linear_mps, cmd.angular_rps, wheel_base_m, max_steer_deg,
+                ));
+            // Lock to lock in `STEER_SWEEP_S`, so full lock one way from full
+            // lock the other takes twice that. That is the best case: hard
+            // tyres, machine rolling. What resists the ram is the contact patch
+            // twisting against the ground, so a soft tyre — which lays down
+            // more of it — and a machine standing still — which has to scrub
+            // the patch round on the spot rather than roll it round — both
+            // take longer. Dry steering a loaded machine on soft tyres is the
+            // slowest thing a steering box does, and it was instant here.
+            const STEER_SWEEP_S: f64 = 1.0;
+            /// Lock to lock on the softest tyre, against the hardest.
+            const STEER_SOFT_FACTOR: f64 = 1.9;
+            /// Lock to lock standing still, against rolling freely.
+            const STEER_STILL_FACTOR: f64 = 2.4;
+            /// Above this the wheels are rolling enough to steer freely.
+            const STEER_FREE_MPS: f64 = 1.5;
+            let softness = machine_tyre_softness(&link_values, machine);
+            let rolling = (rolling_mps.abs() / STEER_FREE_MPS).clamp(0.0, 1.0);
+            let sweep_s = STEER_SWEEP_S
+                * (1.0 + softness * (STEER_SOFT_FACTOR - 1.0))
+                * (1.0 + (1.0 - rolling) * (STEER_STILL_FACTOR - 1.0));
+            let steer_target_rad = {
+                let full = (max_steer_deg as f64).to_radians().max(1e-3);
+                let step = full / sweep_s * time.delta_secs_f64();
+                let held = steer_held.entry(key.clone()).or_insert(0.0);
+                let wanted = steer_wanted.clamp(-full, full);
+                *held += (wanted - *held).clamp(-step, step);
+                *held
+            };
             let geometry = controller
                 .steering_geometry
                 .as_deref()
                 .unwrap_or("ackermann");
-            let steer_targets = steering_joint_targets(
-                scene_root,
-                controller,
-                machine,
-                &joints,
-                &parents,
-                &physics,
-                geometry,
-                steer_target_rad,
-                wheel_base_m,
-                track_width_m,
-                max_steer_deg,
+            // The geometry solver is given the steering as it *stands*, not as
+            // it was asked for, or it would swing the wheels to full lock while
+            // the fallback above was still winding them round.
+            let steering_now = steering_input.map(|_| {
+                (steer_target_rad / (max_steer_deg as f64).to_radians().max(1e-3)) as f32
+            });
+            let turn = steering::solve(
+                scene_root, controller, machine, &joints, &parents, &physics,
+                body_handle, cmd,
+                steering_now,
             );
+            let steer_targets = turn.as_ref().map(|turn| turn.targets())
+                .unwrap_or_else(|| steering_joint_targets(
+                    scene_root, controller, machine, &joints, &parents, &physics,
+                    geometry, steer_target_rad, wheel_base_m, track_width_m, max_steer_deg,
+                ));
             let traction_track_width_m = controller
                 .rear_track_width
                 .or(controller.track_width)
                 .unwrap_or(track_width_m);
+            let forward_mps = physics
+                .body(body_handle)
+                .and_then(|b| body_forward_vector(b).map(|f| b.linvel().dot(f)))
+                .unwrap_or(0.0);
+            // Nothing asked for is neutral, not a stop: the machine carries on
+            // under its own momentum and only the ground slows it. Asking for
+            // the opposite direction is the brake, and it goes on through zero
+            // into that direction, which is how a hydrostat is driven. Held to
+            // a speed of zero instead, a released pedal stopped the machine
+            // dead, which no mass does.
+            let neutral = requested.linear_mps.abs() < COAST_DEADBAND_MPS
+                && requested.angular_rps.abs() < COAST_DEADBAND_RPS;
+            let rolling = forward_mps.abs() > PARKED_MPS;
+            let coasting = neutral && rolling;
+            // Only a machine that has actually come to rest is held; held while
+            // it still rolls, the hold is a handbrake slammed on at speed.
+            let parked = neutral && !rolling;
+            if coasting {
+                // The command follows the machine, so pressing again picks up
+                // from the speed it really has rather than jumping to it.
+                runtime.applied_cmd_vel.insert(key.clone(), CmdVel {
+                    linear_mps: forward_mps as f32,
+                    angular_rps: cmd.angular_rps,
+                });
+            }
+            if std::env::var_os("GEARBOX_DRIVE_DEBUG").is_some() {
+                info!("drive {}: asked {:.2} cmd {:.2} actual {:.2} n={neutral} c={coasting} p={parked}",
+                    machine.id, requested.linear_mps, cmd.linear_mps, forward_mps);
+            }
+            let wheel_speed_mps =
+                trimmed_wheel_speed(&mut runtime, &key, cmd.linear_mps as f64, forward_mps, dt as f64);
             let mut wheel_targets = wheel_joint_targets(
                 scene_root,
                 controller,
@@ -1339,66 +1281,105 @@ fn apply_builtin_ackermann_cmd_vel(
                 &physics,
                 body_handle,
                 geometry,
-                cmd.linear_mps as f64,
+                wheel_speed_mps,
                 steer_target_rad,
                 wheel_base_m,
                 traction_track_width_m,
                 wheel_radius_m,
+                turn.as_ref(),
             );
-            if cmd.linear_mps.abs() < 0.05 {
-                wheel_targets.extend(parking_brake_wheel_targets(
-                    scene_root, controller, machine, &joints, &parents, &physics,
-                ));
+            let driven = wheel_targets.len();
+            if time.elapsed_secs() >= *steering_log_at
+                && std::env::var_os("GEARBOX_STEERING_DEBUG").is_some()
+                && let Some(turn) = &turn
+            {
+                *steering_log_at = time.elapsed_secs() + 1.0;
+                turn.trace(&physics, body_handle, &machine.id, &wheel_targets);
+            }
+            // Real per-wheel encoder readings: angular velocity is the same
+            // wheel-spin-around-its-axle measurement `turn.trace` above logs
+            // for debugging, taken every tick instead of only when
+            // GEARBOX_STEERING_DEBUG is set. Angle is that velocity
+            // integrated — nothing else in this simulator tracks cumulative
+            // wheel rotation, so an encoder has to keep its own running total.
+            {
+                let angles = runtime.wheel_spin_angles.entry(key.clone()).or_default();
+                angles.resize(wheel_targets.len(), 0.0);
+                let mut readings = Vec::with_capacity(wheel_targets.len());
+                for (i, target) in wheel_targets.iter().enumerate() {
+                    let velocity_rad_s = wheel_body_of(&physics, body_handle, target.pair)
+                        .and_then(|wheel| {
+                            let wheel_body = physics.body(wheel)?;
+                            let chassis_body = physics.body(body_handle)?;
+                            let (axis, _, _) = body_tyre_geometry(&physics, wheel)?;
+                            Some(
+                                (wheel_body.angvel() - chassis_body.angvel())
+                                    .dot(wheel_body.rotation() * axis),
+                            )
+                        })
+                        .unwrap_or(0.0);
+                    angles[i] += velocity_rad_s * dt as f64;
+                    readings.push((angles[i], velocity_rad_s));
+                }
+                if let Some(state) = states.states.get_mut(&key) {
+                    state.wheel_encoders = readings;
+                }
+            }
+            let passive =
+                parking_brake_wheel_targets(scene_root, controller, machine, &joints, &parents, &physics);
+            let wheels = runtime
+                .machine_wheels
+                .get(&machine.id)
+                .map(Vec::len)
+                .unwrap_or(wheel_targets.len() + passive.len());
+            let mut idle = Vec::new();
+            if parked {
+                wheel_targets.extend(passive);
+            } else {
+                idle = passive;
+            }
+            // In neutral every wheel free-wheels: the driven ones join the
+            // passive ones and are merely rolled to match the ground, so no
+            // motor pushes or holds and the momentum is the machine's own.
+            if coasting {
+                idle.append(&mut wheel_targets);
             }
             let tire_pairs =
                 tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics);
-            let raycast_specs = raycast_vehicle_wheel_specs_for_controller(
-                scene_root,
-                controller,
-                machine,
-                &joints,
-                &parents,
-                &physics,
-                body_handle,
-                wheel_radius_m,
-            );
             if tire_pairs.is_empty() && runtime.logged_empty_tire_pairs.insert(key.clone()) {
                 warn!(
-                    "gearbox-control: no wheel joint pairs found for machine={} controller={}; raycast vehicle cannot drive",
+                    "gearbox-control: no wheel joint pairs found for machine={} controller={}; it cannot drive",
                     machine.id, controller.instance
                 );
             }
-            ensure_tire_grip(&mut physics, body_handle, &tire_pairs);
-            // Drive physics with the same Bullet/Rapier raycast vehicle model
-            // that the old working `main` tractor used. USD joints/colliders
-            // are kept for visuals/body collisions; tire traction/suspension is
-            // controller-owned, not raw cylinder-contact-owned.
-            let using_raycast_vehicle = apply_rapier_raycast_vehicle_controller(
-                &mut physics,
-                body_handle,
-                &tire_pairs,
-                &raycast_specs,
-                cmd,
-                steer_target_rad,
-            );
-            if using_raycast_vehicle {
-                // Raycast traction moves the chassis; the USD wheel rigid
-                // bodies are visual only. Therefore their spin must be derived
-                // from the actual chassis motion at each wheel, not from the
-                // requested cmd_vel. If the tractor is still accelerating,
-                // braking, turning, or briefly sliding, command-based wheel
-                // spin makes the tyres look like they are slipping on ice.
-                wheel_targets = visual_wheel_spin_targets(
-                    scene_root,
-                    controller,
-                    machine,
-                    &joints,
-                    &parents,
+            // The solid tyres carry the machine; the wheel motors are its
+            // engine and brake, capped at what the tyre can grip.
+            let steer_cap = {
+                let mass = runtime.machine_bodies.get(&machine.id).map(|bodies| {
+                    bodies
+                        .iter()
+                        .filter_map(|h| physics.body(*h))
+                        .map(|b| b.mass())
+                        .sum::<f64>()
+                });
+                let mut limits = cap_wheel_torque(
                     &physics,
                     body_handle,
+                    controller,
+                    &mut wheel_targets,
                     wheel_radius_m,
+                    parked,
                 );
-            }
+                limits.driven_wheels = driven;
+                states.drive_limits.insert(key.clone(), limits);
+                if traction_control_enabled(controller) {
+                    limit_wheel_slip(&physics, body_handle, &mut wheel_targets);
+                }
+                roll_idle_wheels(&physics, body_handle, &mut wheel_targets, idle, forward_mps, wheel_radius_m);
+                steer_torque_cap(
+                    scene_root, controller, machine, &joints, &parents, &physics, body_handle, mass, wheels,
+                )
+            };
             wake_vehicle_for_command(
                 &mut physics,
                 body_handle,
@@ -1406,11 +1387,214 @@ fn apply_builtin_ackermann_cmd_vel(
                 cmd,
                 steer_target_rad,
             );
-            apply_articulation_or_impulse_joint_motors(
+            if let Some(turn) = &turn {
+                turn.configure_servos(&mut physics, steer_cap);
+            }
+            let holds = runtime.parking.prepare(&physics, &wheel_targets, parked);
+            let applied = apply_joint_motors_with_holds(&mut physics, &wheel_targets, &steer_targets, steer_cap, &holds);
+            if runtime.logged_steer.insert(key.clone()) {
+                info!(
+                    "gearbox-control: {} steer joints={} applied={} wheel joints={} applied={}",
+                    machine.id,
+                    steer_targets.len(),
+                    applied.steer,
+                    wheel_targets.len(),
+                    applied.drive
+                );
+            }
+        }
+    }
+}
+
+/// Second builtin controller, for differential-drive machines: casters plus
+/// two driven wheels, turning on the spot. There is no steering geometry and
+/// no traction model to run — the commanded twist is written straight onto
+/// the chassis body as its horizontal velocity and yaw rate, leaving gravity
+/// and ground contact to the solver. The wheel bodies are visual and spin
+/// from the chassis motion at their own side, so the outer wheel turns faster
+/// through a curve and they counter-rotate on the spot.
+fn apply_builtin_diff_drive_cmd_vel(
+    inventory: Res<ControllerInventory>,
+    commands: Res<ControllerCommands>,
+    time: Res<Time>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    mut states: ResMut<ControllerStates>,
+    active: Res<gearbox_api::PhysicsActive>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    joints: Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: Query<&ChildOf>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
+) {
+    if !active.0 || inventory.machines.is_empty() {
+        return;
+    }
+    let dt = time.delta_secs().clamp(1.0 / 240.0, 1.0 / 20.0);
+
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        for controller in &machine.controllers {
+            if !controller.enabled || controller.controller_type != "builtin:diff_drive_cmd_vel" {
+                continue;
+            }
+            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            let requested = commands.cmd_vel.get(&key).copied().unwrap_or_default();
+            let cmd = stable_cmd_vel(&key, requested, dt, &mut runtime);
+            let Some(body_path) = controller.body.as_ref().or(machine.body.as_ref()) else {
+                continue;
+            };
+            let Some(body_entity) = find_prim_entity(scene_root, body_path, &prims, &parents)
+            else {
+                continue;
+            };
+            let Some(body_handle) = physics.entity_to_body.get(&body_entity).copied() else {
+                continue;
+            };
+
+            {
+                let Some(body) = physics.body_mut(body_handle) else {
+                    continue;
+                };
+                let Some(forward) = body_forward_vector(body) else {
+                    continue;
+                };
+                let mut linvel = body.linvel();
+                linvel.x = forward.x * cmd.linear_mps as f64;
+                linvel.z = forward.z * cmd.linear_mps as f64;
+                let mut angvel = body.angvel();
+                angvel.y = cmd.angular_rps as f64;
+                let moving = cmd.linear_mps.abs() > 0.0 || cmd.angular_rps.abs() > 0.0;
+                body.set_linvel(linvel, moving);
+                body.set_angvel(angvel, moving);
+                if moving && runtime.diff_drive_debug_ticks % 60 == 0 {
+                    info!(
+                        "gearbox-control[diff] {}: requested v={:.2} w={:.2} applied v={:.2} w={:.2} body_type={:?} sleeping={} linvel={:?}",
+                        machine.id,
+                        requested.linear_mps,
+                        requested.angular_rps,
+                        cmd.linear_mps,
+                        cmd.angular_rps,
+                        body.kind(),
+                        body.is_sleeping(),
+                        body.linvel()
+                    );
+                }
+                runtime.diff_drive_debug_ticks += 1;
+
+                let pos = body.translation();
+                let (region, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
+                let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
+                states.states.insert(
+                    key.clone(),
+                    ControllerState {
+                        region,
+                        position_m,
+                        heading_rad: machine_heading_rad(body),
+                        roll_rad,
+                        pitch_rad,
+                        linear_speed_mps: body.linvel().length(),
+                        yaw_rate_rps: body.angvel().y,
+                        // Differential-drive path: no wheel_targets computed
+                        // here, so no measured encoder readings yet either.
+                        wheel_encoders: Vec::new(),
+                    },
+                );
+            }
+
+            // The tyres are along for the ride: with the chassis velocity
+            // written directly, four gripping wheels only fight the commanded
+            // spin, and a turn on the spot comes out at a third of the rate.
+            // Let them slide; the visual spin below still follows the ground.
+            let tire_pairs =
+                tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &physics);
+            set_wheel_colliders_friction(
                 &mut physics,
-                &wheel_targets,
-                &steer_targets,
+                body_handle,
+                &tire_pairs,
+                DIFF_DRIVE_TIRE_FRICTION,
             );
+            // And carry the wheels along at the velocity a rigid body would
+            // give them. Written on the chassis alone, the solver spends each
+            // step dragging it back towards wheels that were left behind, and
+            // the machine lurches forward at a third of the commanded speed.
+            carry_wheels_with_chassis(&mut physics, body_handle, &tire_pairs);
+
+            let wheel_targets = visual_wheel_spin_targets(
+                scene_root,
+                controller,
+                machine,
+                &joints,
+                &parents,
+                &physics,
+                body_handle,
+                controller.wheel_radius.unwrap_or(0.1) as f64,
+            );
+            apply_articulation_or_impulse_joint_motors(&mut physics, &wheel_targets, &[]);
+        }
+    }
+}
+
+/// Tyre friction under the differential controller, which drives the chassis
+/// by velocity rather than through the tyres.
+const DIFF_DRIVE_TIRE_FRICTION: f64 = 0.05;
+
+/// Give every wheel body the velocity its place on the chassis implies —
+/// `v + ω × r` — keeping its own spin about the axle and its own vertical
+/// motion, so gravity still seats it.
+fn carry_wheels_with_chassis(
+    physics: &mut crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    tire_pairs: &[(BodyId, BodyId)],
+) {
+    let Some(body) = physics.body(chassis) else {
+        return;
+    };
+    let (origin, linvel, angvel) = (body.translation(), body.linvel(), body.angvel());
+    let wheels: Vec<BodyId> = tire_pairs
+        .iter()
+        .filter_map(|pair| wheel_body_of(physics, chassis, *pair))
+        .collect();
+    for wheel in wheels {
+        let Some(wheel_body) = physics.body_mut(wheel) else {
+            continue;
+        };
+        let carried = linvel + angvel.cross(wheel_body.translation() - origin);
+        let mut wheel_linvel = wheel_body.linvel();
+        wheel_linvel.x = carried.x;
+        wheel_linvel.z = carried.z;
+        wheel_body.set_linvel(wheel_linvel, true);
+        let mut wheel_angvel = wheel_body.angvel();
+        wheel_angvel.y = angvel.y;
+        wheel_body.set_angvel(wheel_angvel, true);
+    }
+}
+
+fn set_wheel_colliders_friction(
+    physics: &mut crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    tire_pairs: &[(BodyId, BodyId)],
+    friction: f64,
+) {
+    for pair in tire_pairs {
+        let Some(wheel) = wheel_body_of(physics, chassis, *pair) else {
+            continue;
+        };
+        let handles = physics
+            .body(wheel)
+            .map(|b| b.colliders())
+            .unwrap_or_default();
+        for ch in handles {
+            if let Some(col) = physics.collider_mut(ch)
+                && (col.friction() - friction).abs() > 1e-6
+            {
+                col.set_friction(friction);
+                col.set_friction_combine_rule(CombineRule::Min);
+            }
         }
     }
 }
@@ -1427,15 +1611,20 @@ fn stable_cmd_vel(
         .get(key)
         .copied()
         .unwrap_or_default();
+    // A command names the speed the machine is wanted at; it gets there under
+    // its own driveline and brakes, and neither is instant on this mass.
+    let braking = requested.linear_mps.abs() < previous.linear_mps.abs()
+        || requested.linear_mps * previous.linear_mps < 0.0;
+    let rate = if braking { CMD_BRAKE_MPS2 } else { CMD_ACCEL_MPS2 };
     let next = CmdVel {
-        linear_mps: slew(previous.linear_mps, requested.linear_mps, 20.0 * dt),
-        angular_rps: slew(previous.angular_rps, requested.angular_rps, 1.5 * dt),
+        linear_mps: slew(previous.linear_mps, requested.linear_mps, rate * dt),
+        angular_rps: slew(previous.angular_rps, requested.angular_rps, CMD_YAW_RPS2 * dt),
     };
     runtime.applied_cmd_vel.insert(key.clone(), next);
     next
 }
 
-fn machine_heading_rad(body: &rapier3d::prelude::RigidBody) -> f64 {
+fn machine_heading_rad(body: &dyn Body) -> f64 {
     // Rapier/Bevy runs Y-up, so the drive plane is X/Z and yaw is around +Y.
     // The USD stage is Z-up and `usd_bevy` converts vectors with -90° about X:
     // (usd X, usd Y, usd Z) -> (bevy X, bevy Y=usd Z, bevy Z=-usd Y).
@@ -1451,16 +1640,29 @@ fn machine_heading_rad(body: &rapier3d::prelude::RigidBody) -> f64 {
     forward.x.atan2(forward.z)
 }
 
-fn body_forward_vector(body: &rapier3d::prelude::RigidBody) -> Option<Vector> {
-    let mut forward = body.rotation() * Vector::new(0.0, -1.0, 0.0);
+/// REP-103 roll and pitch of a chassis, from how far its forward and left
+/// axes have tilted out of the horizontal. The chassis keeps the USD basis —
+/// forward -Y, left +X, up +Z — and the world is Y-up, so a tilt is the
+/// world-y component of each axis: nose down is positive pitch, right side
+/// down is positive roll.
+fn machine_roll_pitch_rad(body: &dyn Body) -> (f64, f64) {
+    let forward = body.rotation() * DVec3::new(0.0, -1.0, 0.0);
+    let left = body.rotation() * DVec3::new(1.0, 0.0, 0.0);
+    let pitch = (-forward.y).clamp(-1.0, 1.0).asin();
+    let roll = left.y.clamp(-1.0, 1.0).asin();
+    (roll, pitch)
+}
+
+pub(crate) fn body_forward_vector(body: &dyn Body) -> Option<DVec3> {
+    let mut forward = body.rotation() * DVec3::new(0.0, -1.0, 0.0);
     forward.y = 0.0;
     (forward.length_squared() > 1e-9).then(|| forward.normalize())
 }
 
 fn sanitize_cmd_vel(cmd: CmdVel) -> CmdVel {
     CmdVel {
-        linear_mps: deadband(cmd.linear_mps, 0.03).clamp(-4.0, 4.0),
-        angular_rps: deadband(cmd.angular_rps, 0.02).clamp(-1.2, 1.2),
+        linear_mps: deadband(cmd.linear_mps, 0.03).clamp(-16.0, 16.0),
+        angular_rps: deadband(cmd.angular_rps, 0.02).clamp(-4.8, 4.8),
     }
 }
 
@@ -1479,19 +1681,16 @@ fn steering_target_radians(
     wheel_base_m: f32,
     max_steer_deg: f32,
 ) -> f64 {
-    // Isaac's Ackermann controller takes steeringAngle and speed as separate
-    // inputs. When we adapt cmd_vel, steering is defined relative to the
-    // vehicle's forward frame, so reverse must not flip the visual steering
-    // direction. Only wheel/base speed changes sign. Also: steering angle is
-    // allowed to move while stopped; at zero speed cmd_vel's yaw-rate field is
-    // treated as a steering request against a nominal walking-speed reference
-    // instead of forcing the wheels straight.
-    const STOPPED_STEERING_REFERENCE_SPEED_MPS: f32 = 2.4;
+    const STOPPED_STEERING_REFERENCE_SPEED_MPS: f32 = 0.8;
 
     if angular_rps.abs() < 1e-3 {
         return 0.0;
     }
-    let speed_for_steering = linear_mps.abs().max(STOPPED_STEERING_REFERENCE_SPEED_MPS);
+    let speed_for_steering = if linear_mps.abs() < STOPPED_STEERING_REFERENCE_SPEED_MPS {
+        STOPPED_STEERING_REFERENCE_SPEED_MPS.copysign(if linear_mps == 0.0 { 1.0 } else { linear_mps })
+    } else {
+        linear_mps
+    };
     let max = max_steer_deg.to_radians() as f64;
     ((wheel_base_m as f64 * angular_rps as f64) / speed_for_steering as f64)
         .atan()
@@ -1500,18 +1699,17 @@ fn steering_target_radians(
 
 fn ackermann_steering_angles(
     center_steer_rad: f64,
-    _wheel_base_m: f32,
-    _track_width_m: f32,
+    wheel_base_m: f32,
+    track_width_m: f32,
     max_steer_deg: f32,
 ) -> (f64, f64) {
     let max = max_steer_deg.to_radians() as f64;
-    let angle = center_steer_rad.clamp(-max, max);
-    // The current USD tractor has mechanically tied front steering. Do NOT
-    // command separate inner/outer Ackermann angles here: with the present
-    // joint/collider setup that made the two front wheels toe inward/outward
-    // and scrub instead of rolling. Both steering links are locked to the exact
-    // same target angle.
-    (angle, angle)
+    let length = (wheel_base_m as f64).abs().max(0.01);
+    let half_track = (track_width_m as f64).abs() * 0.5;
+    let curvature_limit = max.tan() / (length + half_track * max.tan());
+    let curvature = (center_steer_rad.tan() / length).clamp(-curvature_limit, curvature_limit);
+    ((length * curvature).atan2(1.0 - curvature * half_track),
+     (length * curvature).atan2(1.0 + curvature * half_track))
 }
 
 /// Drive-motor damping for the wheel velocity motor.
@@ -1523,41 +1721,637 @@ const WHEEL_DRIVE_DAMPING: f64 = 240.0;
 /// exactly what makes a driven wheel "run on ice". Lower = grippier
 /// (and gentler acceleration); raise only if the tractor feels weak.
 const WHEEL_DRIVE_MAX_TORQUE: f64 = 6000.0;
-/// Raycast mode already moves the chassis; the USD wheel joints are only
-/// visual tyres. Keep these visual motors deliberately soft so they don't feed
-/// big reaction torques back into the chassis and make the tractor look like it
-/// is fighting invisible contact wheels.
+/// Soft motors for wheels that only spin for show (the diff drive).
 const WHEEL_VISUAL_DAMPING: f64 = 60.0;
 const WHEEL_VISUAL_MAX_TORQUE: f64 = 350.0;
-/// Steering position-motor gains + torque cap (N·m). Stiffer than the
-/// old values so the steered wheels hold their angle against the tyre
-/// scrub forces that now actually turn the vehicle.
-const STEER_STIFFNESS: f64 = 300.0;
-const STEER_DAMPING: f64 = 90.0;
-const STEER_MAX_TORQUE: f64 = 1200.0;
+/// Fallback steering-servo error and velocity at its torque ceiling.
+const STEER_LOAD_ERROR_RAD: f64 = 0.5 * std::f64::consts::PI / 180.0;
+const STEER_SERVO_RATE_RPS: f64 = 30.0 * std::f64::consts::PI / 180.0;
+const STEER_MAX_TORQUE: f64 = 100_000.0;
 /// Friction coefficient forced onto wheel colliders. Imported USD
 /// colliders default to 0.5 when the asset authors no physics material
 /// — far too slippery for a driven tyre. Applied with a `Max` combine
 /// rule so the *grippier* of (tyre, ground) wins, guaranteeing a high
 /// effective friction whatever the ground collider is authored at.
-const TIRE_FRICTION: f64 = 2.4;
+const TIRE_FRICTION: f64 = 1.1;
+/// Rounded tyre edge as a fraction of the radius: a sharp cylinder rim on
+/// the ground is what makes contacts twitch.
+const TIRE_EDGE_FRACTION: f64 = 0.05;
+/// Share of the grip limit the drive motor may use.
+const WHEEL_GRIP_USE: f64 = 0.9;
+/// Wheel speed error (rad/s) at which the contact drive motor gives its
+/// full, grip-capped torque.
+const WHEEL_FULL_TORQUE_ERROR_RAD_S: f64 = 0.1;
+/// The same for a parked machine holding a slope.
+const WHEEL_HOLD_ERROR_RAD_S: f64 = 0.005;
+/// Below this a lever is at rest and the machine is in neutral.
+const COAST_DEADBAND_MPS: f32 = 0.05;
+const COAST_DEADBAND_RPS: f32 = 0.02;
+/// Below this the machine has stopped and may be held.
+const PARKED_MPS: f64 = 0.25;
 
-const RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL: f64 = 3_500.0;
-const RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL: f64 = 8_500.0;
-const RAYCAST_BRAKE_IMPULSE: f64 = 1_800.0;
-const RAYCAST_SUSPENSION_REST_LENGTH: f64 = 0.22;
+/// What a loaded machine can pull away at (m/s²). Twenty tonnes on soft
+/// ground takes seconds to reach working speed, not a frame: set high enough
+/// to answer a command at once, a harvester left the line like a go-kart.
+/// A short command now gets the speed such a command really reaches.
+const CMD_ACCEL_MPS2: f32 = 1.2;
+/// What it can shed on the brakes (m/s²). Firmer than pulling away, because
+/// brakes outrank a driveline, but nothing like a car: run too hard the mass
+/// pitches onto the front axle every time a command goes to zero, which is
+/// the lurch that made a stop look like a stumble.
+const CMD_BRAKE_MPS2: f32 = 1.6;
+/// How fast the commanded yaw may change (rad/s²). The steering itself is
+/// swept by `STEER_SWEEP_S`; this keeps the command feeding it civil.
+const CMD_YAW_RPS2: f32 = 1.5;
+/// Traction control band around a wheel's own ground speed: a share of it
+/// plus a floor (m/s), so a lightly loaded wheel cannot spin up or lock.
+const WHEEL_SLIP_SHARE: f64 = 0.08;
+const WHEEL_SLIP_FLOOR_MPS: f64 = 0.15;
 
-/// Largest collider half-extent of a body — a wheel's tyre radius, a
-/// chassis's bounding half-size. `None` if the body has no collider.
-fn body_max_collider_radius(
-    physics: &usd_bevy::physics::PhysicsWorld,
-    body: RigidBodyHandle,
+/// Ground speed along a wheel's rolling direction, forward positive, and
+/// its tyre radius.
+fn wheel_ground_speed(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    pair: (BodyId, BodyId),
+) -> Option<(f64, f64)> {
+    let forward = physics.body(chassis).and_then(body_forward_vector)?;
+    let wheel = wheel_body_of(physics, chassis, pair)?;
+    let body = physics.body(wheel)?;
+    let (axle_local, _, radius) = body_tyre_geometry(physics, wheel)?;
+    let normal = traction::wheel_support(physics, chassis, wheel).normal;
+    let mut roll = (body.rotation() * axle_local).cross(normal).normalize_or_zero();
+    if roll.dot(forward) < 0.0 {
+        roll = -roll;
+    }
+    Some((body.linvel().dot(roll), effective_wheel_radius(physics, wheel).unwrap_or(radius)))
+}
+
+/// Below this wheel speed the power limit holds at its value here: the
+/// gearbox, not the engine, limits torque when crawling.
+const WHEEL_POWER_MIN_OMEGA_RAD_S: f64 = 0.5;
+const UNLOADED_WHEEL_ACCEL_RAD_S2: f64 = 4.0;
+
+/// One wheel's drive torque cap: the lowest of its grip limit, the authored
+/// per-wheel torque and its share of the machine's power at its speed.
+fn wheel_torque_cap(
+    grip_nm: f64,
+    max_torque_nm: Option<f64>,
+    power_w_per_wheel: Option<f64>,
+    omega_rad_s: f64,
+) -> f64 {
+    let mut cap = grip_nm;
+    if let Some(max) = max_torque_nm {
+        cap = cap.min(max.max(0.0));
+    }
+    if let Some(power) = power_w_per_wheel {
+        cap = cap.min(power / omega_rad_s.abs().max(WHEEL_POWER_MIN_OMEGA_RAD_S));
+    }
+    cap
+}
+
+/// Traction control stays on unless the controller or
+/// `GEARBOX_TRACTION_CONTROL=0` turns it off.
+fn traction_control_enabled(controller: &ControllerSpec) -> bool {
+    static ENV: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let env = ENV.get_or_init(|| {
+        std::env::var("GEARBOX_TRACTION_CONTROL")
+            .ok()
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "off"))
+    });
+    controller.traction_control.or(*env).unwrap_or(true)
+}
+
+/// Steering scrub budget from supported tyre loads, bounded by the fallback ceiling.
+#[allow(clippy::too_many_arguments)]
+fn steer_torque_cap(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: &Query<&ChildOf>,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    machine_mass: Option<f64>,
+    wheels: usize,
 ) -> Option<f64> {
-    let body = physics.bodies.get(body)?;
+    let mass = machine_mass?;
+    let knuckles = steering_knuckles(scene_root, controller, machine, joints, parents, physics);
+    let loads: Vec<(f64, f64)> = tire_joint_pairs(scene_root, controller, machine, joints, parents, physics)
+        .into_iter()
+        .filter(|p| knuckles.contains(&p.0) || knuckles.contains(&p.1))
+        .filter_map(|p| wheel_body_of(physics, chassis, p))
+        .filter_map(|wheel| {
+            let (_, width, _) = body_tyre_geometry(physics, wheel)?;
+            Some((width, traction::wheel_support(physics, chassis, wheel).grip_force_n))
+        })
+        .collect();
+    if loads.is_empty() {
+        return None;
+    }
+    let width = loads.iter().map(|(width, _)| width).sum::<f64>() / loads.len() as f64;
+    let nominal = TIRE_FRICTION * mass * 9.81 / wheels.max(1) as f64 * width / 2.0;
+    let loaded = loads.iter().map(|(width, grip)| width * grip / 2.0).fold(0.0, f64::max);
+    Some((1.25 * nominal.max(loaded)).min(STEER_MAX_TORQUE))
+}
+
+/// Traction control and ABS in one: each driven wheel's target stays within
+/// the slip band of the ground speed under that wheel. The grip cap assumes
+/// an even load; a light front wheel would otherwise spin at twice its speed.
+fn limit_wheel_slip(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    targets: &mut [JointVelocityTarget],
+) {
+    for target in targets.iter_mut().filter(|t| t.force_based && t.damping > 0.0) {
+        if wheel_body_of(physics, chassis, target.pair)
+            .is_some_and(|wheel| traction::wheel_support(physics, chassis, wheel).grip_force_n <= 0.0)
+        {
+            continue;
+        }
+        let Some((ground, radius)) = wheel_ground_speed(physics, chassis, target.pair) else {
+            continue;
+        };
+        let band = WHEEL_SLIP_SHARE * ground.abs() + WHEEL_SLIP_FLOOR_MPS;
+        let requested = target.velocity;
+        let limited = requested.clamp((ground - band) / radius, (ground + band) / radius);
+        target.velocity = if requested > 0.0 {
+            limited.max(0.0)
+        } else if requested < 0.0 {
+            limited.min(0.0)
+        } else {
+            0.0
+        };
+    }
+}
+
+/// Every 5 s, the joints of the machine named by `GEARBOX_JOINT_DUMP`.
+fn dump_joints_periodically(
+    time: Res<Time>,
+    mut next: Local<f64>,
+    runtime: Res<ControllerRuntimeState>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    physics: Res<crate::physics::PhysicsWorld>,
+) {
+    static MACHINE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(machine) = MACHINE.get_or_init(|| std::env::var("GEARBOX_JOINT_DUMP").ok()) else {
+        return;
+    };
+    if time.elapsed_secs_f64() < *next {
+        return;
+    }
+    *next = time.elapsed_secs_f64() + 5.0;
+    if let Some(bodies) = runtime.machine_bodies.get(machine) {
+        dump_machine_joints(&physics, bodies, &prims);
+        if let Some(wheels) = runtime.machine_wheels.get(machine) {
+            warn_low_colliders(&physics, machine, bodies, wheels, &prims);
+        }
+    }
+}
+
+/// Every impulse joint inside one machine with its locked axes and AngX
+/// motor, for `GEARBOX_JOINT_DUMP=<machine id>`.
+fn dump_machine_joints(
+    physics: &crate::physics::PhysicsWorld,
+    bodies: &[BodyId],
+    prims: &Query<(Entity, &UsdPrimRef)>,
+) {
+    let name = |h: BodyId| {
+        physics
+            .body(h)
+            .and_then(|b| prims.get(b.entity()?).ok())
+            .map(|(_, p)| p.path.to_string())
+            .unwrap_or_default()
+    };
+    for id in physics.joints() {
+        if physics.joint_is_reduced(id) {
+            continue;
+        }
+        let (Some((body1, body2)), Some(joint)) = (physics.joint_bodies(id), physics.joint(id))
+        else {
+            continue;
+        };
+        if !bodies.contains(&body1) || !bodies.contains(&body2) {
+            continue;
+        }
+        info!(
+            "gearbox-joints: {} -> {} locked {:?} motor {:?} enabled {:?}",
+            name(body1),
+            name(body2),
+            joint.locked_axes(),
+            joint.motor(JointAxis::AngX),
+            joint.is_enabled()
+        );
+    }
+    for handle in bodies.iter().filter(|h| name(**h).contains("wheel")) {
+        let Some(body) = physics.body(*handle) else {
+            continue;
+        };
+        for c in body.colliders().iter().filter_map(|c| physics.collider(*c)) {
+            let aabb = c.aabb();
+            info!(
+                "gearbox-joints: collider of {} {:?} sensor {} enabled {} groups {:?} friction {:.2} y {:.3}..{:.3}",
+                name(*handle),
+                c.shape(),
+                c.is_sensor(),
+                c.is_enabled(),
+                c.groups(),
+                c.friction(),
+                aabb.mins.y,
+                aabb.maxs.y
+            );
+        }
+    }
+}
+
+/// Share of a driven wheel's torque cap a passive wheel's idle motor gets.
+const WHEEL_IDLE_TORQUE_SHARE: f64 = 0.02;
+
+/// Passive wheels while driving: a light motor at ground speed, replacing
+/// the parking brake's. A loaded tyre rolls by friction anyway; an unloaded
+/// one (a three-axle machine rests on two) would stand still and look like
+/// it skids.
+fn roll_idle_wheels(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    targets: &mut Vec<JointVelocityTarget>,
+    idle: Vec<JointVelocityTarget>,
+    forward_mps: f64,
+    radius_fallback_m: f64,
+) {
+    let cap = targets
+        .iter()
+        .filter(|t| t.force_based)
+        .map(|t| t.max_torque)
+        .fold(0.0, f64::max)
+        * WHEEL_IDLE_TORQUE_SHARE;
+    for target in idle {
+        let velocity = wheel_ground_speed(physics, chassis, target.pair)
+            .map(|(ground, radius)| ground / radius)
+            .unwrap_or_else(|| {
+                let radius = wheel_body_of(physics, chassis, target.pair)
+                    .and_then(|wheel| effective_wheel_radius(physics, wheel))
+                    .unwrap_or(radius_fallback_m);
+                forward_mps / radius
+            });
+        targets.push(JointVelocityTarget {
+            velocity,
+            damping: cap / WHEEL_FULL_TORQUE_ERROR_RAD_S,
+            max_torque: cap,
+            force_based: true,
+            ..target
+        });
+    }
+}
+
+/// Integral gain (1/s) of the wheel-speed trim.
+const SPEED_TRIM_GAIN: f64 = 1.5;
+/// A collider this close above the tyres' contact plane touches the ground.
+const LOW_COLLIDER_CLEARANCE_M: f64 = 0.03;
+
+/// The wheel motors lag their target by the solver's rolling resistance; an
+/// integral trim, run only near steady speed, holds the commanded speed.
+fn trimmed_wheel_speed(
+    runtime: &mut ControllerRuntimeState,
+    key: &ControllerKey,
+    cmd_mps: f64,
+    forward_mps: f64,
+    dt: f64,
+) -> f64 {
+    let trim = runtime.speed_trim.entry(key.clone()).or_insert(0.0);
+    if cmd_mps.abs() < 0.05 {
+        *trim = 0.0;
+        return cmd_mps;
+    }
+    let error = cmd_mps - forward_mps;
+    if error.abs() < 0.4 * cmd_mps.abs() {
+        let limit = 0.1 * cmd_mps.abs() + 0.05;
+        *trim = (*trim + error * dt * SPEED_TRIM_GAIN).clamp(-limit, limit);
+    }
+    cmd_mps + *trim
+}
+
+/// Name every non-wheel collider hanging near the tyres' contact plane: on
+/// contact traction it drags on the ground or props the machine up.
+fn warn_low_colliders(
+    physics: &crate::physics::PhysicsWorld,
+    machine: &str,
+    bodies: &[BodyId],
+    wheels: &[BodyId],
+    prims: &Query<(Entity, &UsdPrimRef)>,
+) {
+    let Some(ground) = wheels
+        .iter()
+        .filter_map(|h| {
+            let (_, _, radius) = body_tyre_geometry(physics, *h)?;
+            Some(physics.body(*h)?.translation().y - radius)
+        })
+        .reduce(f64::min)
+    else {
+        return;
+    };
+    for handle in bodies.iter().filter(|h| !wheels.contains(h)) {
+        let Some(body) = physics.body(*handle) else {
+            continue;
+        };
+        let low = body
+            .colliders()
+            .iter()
+            .filter_map(|c| physics.collider(*c))
+            .filter(|c| !c.is_sensor())
+            .map(|c| c.aabb().mins.y)
+            .reduce(f64::min);
+        if let Some(low) = low
+            && low < ground + LOW_COLLIDER_CLEARANCE_M
+        {
+            let path = body
+                .entity()
+                .and_then(|entity| prims.get(entity).ok())
+                .map(|(_, p)| p.path.to_string())
+                .unwrap_or_default();
+            warn!(
+                "gearbox-control: {machine}: `{path}` sits {:.2} m above the tyre contact plane; it drags on the ground unless it is a parking stand",
+                low - ground
+            );
+        }
+    }
+}
+
+/// Limit driven torque by solved tyre loads, authored wheel torque and shared power.
+fn cap_wheel_torque(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    controller: &ControllerSpec,
+    targets: &mut [JointVelocityTarget],
+    radius_fallback_m: f64,
+    parked: bool,
+) -> DriveLimits {
+    // Parked, the wheels hold a slope: full torque at a tiny speed error, so
+    // the velocity motor creeps millimetres instead of centimetres.
+    let full_torque_error = if parked {
+        WHEEL_HOLD_ERROR_RAD_S
+    } else {
+        WHEEL_FULL_TORQUE_ERROR_RAD_S
+    };
+    let mut budgets = Vec::new();
+    let mut supported_wheels = 0;
+    for (index, target) in targets.iter().enumerate().filter(|(_, t)| t.damping > 0.0) {
+        let Some(wheel) = wheel_body_of(physics, chassis, target.pair) else { continue; };
+        let radius = effective_wheel_radius(physics, wheel).unwrap_or(radius_fallback_m);
+        let support = traction::wheel_support(physics, chassis, wheel);
+        supported_wheels += usize::from(support.grip_force_n > 0.0);
+        let omega = body_tyre_geometry(physics, wheel)
+            .and_then(|(axis, _, _)| physics.body(wheel).map(|body| {
+                let parent = if wheel == target.pair.0 { target.pair.1 } else { target.pair.0 };
+                let parent_spin = physics.body(parent).map(|p| p.angvel()).unwrap_or(DVec3::ZERO);
+                (body.angvel() - parent_spin).dot(body.rotation() * axis).abs()
+            })).unwrap_or(0.0);
+        let shaft_budget = if parked {
+            controller.max_wheel_torque_nm.map(f64::from).unwrap_or(WHEEL_DRIVE_MAX_TORQUE)
+        } else if support.grip_force_n <= 0.0 {
+            physics.body(wheel)
+                .map(|body| body.mass() * radius * radius * UNLOADED_WHEEL_ACCEL_RAD_S2)
+                .unwrap_or(0.0)
+        } else {
+            WHEEL_GRIP_USE * support.grip_force_n * radius
+        };
+        let torque = wheel_torque_cap(
+            shaft_budget,
+            controller.max_wheel_torque_nm.map(f64::from),
+            None,
+            omega,
+        );
+        budgets.push((index, torque, omega.max(WHEEL_POWER_MIN_OMEGA_RAD_S)));
+    }
+    let demand: f64 = budgets.iter().map(|(_, torque, omega)| torque * omega).sum();
+    let power_scale = if parked { 1.0 } else {
+        controller.max_power_kw.map(|kw| (f64::from(kw).max(0.0) * 1000.0 / demand.max(1e-6)).min(1.0))
+            .unwrap_or(1.0)
+    };
+    let mut limits = DriveLimits {
+        supported_wheels,
+        power_scale,
+        parked,
+        ..Default::default()
+    };
+    for (index, torque, _) in budgets {
+        let target = &mut targets[index];
+        target.max_torque = torque * power_scale;
+        target.damping = target.max_torque / full_torque_error;
+        target.force_based = true;
+        limits.torque_nm += target.max_torque;
+    }
+    limits
+}
+
+/// Once per machine: its bodies stop colliding with each other, and every
+/// wheel link gets a rounded, grippy tyre with CCD that carries load.
+/// After a variant swap the machine's controllers and links are read again
+/// from its recomposed stage, keeping the ids its load gave it; its physics
+/// is prepared again on the next pass.
+fn rediscover_swapped_machines(
+    mut commands: Commands,
+    swapped: Query<Entity, With<crate::physics::SwappedStage>>,
+    instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
+    mut inventory: ResMut<ControllerInventory>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    mut seeded: Option<ResMut<crate::services::SeededLinkValues>>,
+) {
+    for root in &swapped {
+        commands.entity(root).remove::<crate::physics::SwappedStage>();
+        let Some(stage) = instances.as_ref().and_then(|instances| instances.stage(root)) else {
+            continue;
+        };
+        let started = std::time::Instant::now();
+        let mut machines = match discover_machines_from_stage(stage) {
+            Ok(machines) => machines,
+            Err(error) => {
+                warn!("gearbox-control: rescanning {root:?} after a variant swap: {error}");
+                continue;
+            }
+        };
+        let old: Vec<MachineInstanceSpec> = inventory
+            .machines
+            .iter()
+            .filter(|m| m.scene_root == Some(root))
+            .cloned()
+            .collect();
+        let Some(first) = old.first() else {
+            continue;
+        };
+        // A runtime rename gave the machine a chosen id at load; keep it.
+        for machine in &mut machines {
+            if let Some(before) = old.iter().find(|m| m.prim_path == machine.prim_path)
+                && before.id != machine.id
+            {
+                machine.id = before.id.clone();
+                for controller in &mut machine.controllers {
+                    controller.machine_id = before.id.clone();
+                }
+            }
+        }
+        // New links carry authored values (a loader's range) to seed; live
+        // values already set are kept.
+        for machine in &old {
+            runtime.machine_bodies.remove(&machine.id);
+            runtime.machine_wheels.remove(&machine.id);
+            if let Some(seeded) = seeded.as_mut() {
+                seeded.0.remove(&machine.id);
+            }
+        }
+        runtime.machines_prepared.retain(|key| key.scene_root != root);
+        inventory.machines.retain(|m| m.scene_root != Some(root));
+        let (label, path) = (first.asset_label.clone(), first.source_path.clone());
+        let controllers: usize = machines.iter().map(|m| m.controllers.len()).sum();
+        info!(
+            "gearbox-control: `{label}` rescanned after a variant swap: {controllers} controller(s) in {:?}",
+            started.elapsed()
+        );
+        inventory.push_loaded_asset(root, label, path, machines);
+    }
+}
+
+fn prepare_machine_physics(
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    joints: Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: Query<&ChildOf>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
+) {
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let key = ControllerKey::new(scene_root, &machine.id, "physics");
+        if runtime.machines_prepared.contains(&key)
+            || !keys
+                .0
+                .values()
+                .any(|k| k.scene_root == scene_root && k.machine_id == machine.id)
+        {
+            continue;
+        }
+        let Some(root) = find_prim_entity(scene_root, &machine.prim_path, &prims, &parents) else {
+            continue;
+        };
+        let mut bodies: Vec<BodyId> = physics
+            .entity_to_body
+            .iter()
+            .filter(|(e, _)| **e == root || is_descendant_of(**e, root, &parents))
+            .map(|(_, h)| *h)
+            .collect();
+        bodies.sort_unstable();
+        if bodies.is_empty() {
+            continue;
+        }
+        runtime.machines_prepared.insert(key);
+        for (i, a) in bodies.iter().enumerate() {
+            for b in &bodies[i + 1..] {
+                physics.filter_pair(*a, *b);
+            }
+        }
+        let physics = physics.as_mut();
+        let mut mass = 0.0;
+        for handle in &bodies {
+            physics.recompute_mass(*handle);
+            if let Some(body) = physics.body(*handle) {
+                mass += body.mass();
+            }
+        }
+        runtime.machine_bodies.insert(machine.id.clone(), bodies.clone());
+
+        // Wheels: `wheel` links, plus the wheel side of every controller's
+        // wheel joints, so derived link trees count too.
+        let mut wheels: Vec<BodyId> = machine
+            .links
+            .links
+            .iter()
+            .filter(|l| l.role == crate::links::LinkRole::Wheel)
+            .filter_map(|l| l.body_prim.as_deref())
+            .filter_map(|p| find_prim_entity(scene_root, p, &prims, &parents))
+            .filter_map(|e| physics.entity_to_body.get(&e).copied())
+            .collect();
+        let chassis = machine
+            .body
+            .as_deref()
+            .and_then(|p| find_prim_entity(scene_root, p, &prims, &parents))
+            .and_then(|e| physics.entity_to_body.get(&e).copied());
+        if let Some(chassis) = chassis {
+            for controller in &machine.controllers {
+                for pair in tire_joint_pairs(scene_root, controller, machine, &joints, &parents, &*physics) {
+                    include_wheel_pair(&mut wheels, &*physics, chassis, pair);
+                }
+            }
+        }
+        let mut tyres = 0;
+        for &handle in &wheels {
+            let Some(body) = physics.body_mut(handle) else {
+                continue;
+            };
+            body.enable_ccd(true);
+            let colliders = body.colliders();
+            for ch in colliders {
+                let Some(col) = physics.collider_mut(ch) else {
+                    continue;
+                };
+                if let ShapeView::Cylinder { half_height, radius } = col.shape() {
+                    let edge = TIRE_EDGE_FRACTION * radius;
+                    col.set_shape(Shape::RoundCylinder {
+                        half_height: (half_height - edge).max(edge),
+                        radius: radius - edge,
+                        border_radius: edge,
+                    });
+                }
+                if col.friction() < TIRE_FRICTION {
+                    col.set_friction(TIRE_FRICTION);
+                }
+                // The lower friction governs, so the ground's material decides
+                // how slippery it is.
+                col.set_friction_combine_rule(CombineRule::Min);
+                col.set_restitution(0.0);
+                tyres += 1;
+            }
+        }
+        warn_low_colliders(physics, &machine.id, &bodies, &wheels, &prims);
+        runtime.machine_wheels.insert(machine.id.clone(), wheels.clone());
+
+        info!(
+            "gearbox-control: {} physics: {} bodies, {:.0} kg, {} tyres rounded, self-collision off",
+            machine.id,
+            bodies.len(),
+            mass,
+            tyres
+        );
+    }
+}
+
+/// Current loaded tyre radius, falling back to collider geometry.
+fn effective_wheel_radius(physics: &crate::physics::PhysicsWorld, wheel: BodyId) -> Option<f64> {
+    physics.wheel_output(wheel).and_then(|out| out.pressure)
+        .map(|p| p.loaded_radius).filter(|r| r.is_finite() && *r > 1e-6)
+        .or_else(|| body_max_collider_radius(physics, wheel))
+}
+
+/// Largest collider half-extent of a body, or `None` without colliders.
+pub(crate) fn body_max_collider_radius(
+    physics: &crate::physics::PhysicsWorld,
+    body: BodyId,
+) -> Option<f64> {
+    let body = physics.body(body)?;
     body.colliders()
         .iter()
-        .filter_map(|ch| physics.colliders.get(*ch))
-        .map(|c| c.compute_aabb().half_extents().max_element())
+        .filter_map(|ch| physics.collider(*ch))
+        .map(|c| c.aabb().half_extents().max_element())
         .fold(None, |acc: Option<f64>, r| {
             Some(acc.map_or(r, |a| a.max(r)))
         })
@@ -1567,10 +2361,10 @@ fn body_max_collider_radius(
 /// isn't the chassis, or — for a knuckle↔wheel joint where neither is
 /// the chassis — the larger-collider body (the tyre, not the knuckle).
 fn wheel_body_of(
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    pair: (RigidBodyHandle, RigidBodyHandle),
-) -> Option<RigidBodyHandle> {
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    pair: (BodyId, BodyId),
+) -> Option<BodyId> {
     let (a, b) = pair;
     if a == chassis {
         return Some(b);
@@ -1589,275 +2383,244 @@ fn wheel_body_of(
     }
 }
 
-/// Measure a wheel's rolling radius from its collider. Returns `None`
-/// when no usable collider is found, so callers can fall back.
-///
-/// The wheel-speed command is `linear_speed / radius`: a wrong radius
-/// makes the tyres spin at the wrong rate and slip against the ground.
-/// Condition every wheel collider so the tyres can actually hold the
-/// ground: grippy friction, and zero restitution so a hard contact load
-/// doesn't bounce the wheel (and hop the whole tractor). This applies to
-/// powered and passive tyres; passive front tyres still need grip to
-/// steer instead of sliding sideways. Idempotent.
-fn ensure_tire_grip(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+fn include_wheel_pair(
+    wheels: &mut Vec<BodyId>,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    pair: (BodyId, BodyId),
 ) {
-    for pair in tire_pairs {
-        let Some(wheel) = wheel_body_of(physics, chassis, *pair) else {
+    if wheels.contains(&pair.0) || wheels.contains(&pair.1) {
+        return;
+    }
+    if let Some(wheel) = wheel_body_of(physics, chassis, pair) {
+        wheels.push(wheel);
+    }
+}
+
+#[test]
+fn authored_wheel_prevents_large_axle_becoming_an_extra_tyre() {
+    let mut physics = crate::physics::PhysicsWorld::default();
+    let chassis = physics.insert_body(crate::physics::backend::BodyDesc::dynamic());
+    let axle = physics.insert_body(crate::physics::backend::BodyDesc::dynamic());
+    let wheel = physics.insert_body(crate::physics::backend::BodyDesc::dynamic());
+    physics.insert_collider(crate::physics::backend::ColliderDesc::new(Shape::Cuboid {
+        half_extents: DVec3::new(1.5, 0.1, 0.1),
+    }).parent(axle)).unwrap();
+    physics.insert_collider(crate::physics::backend::ColliderDesc::new(Shape::Cylinder {
+        half_height: 0.2, radius: 0.6,
+    }).parent(wheel)).unwrap();
+    assert_eq!(wheel_body_of(&physics, chassis, (axle, wheel)), Some(axle));
+    let mut wheels = vec![wheel];
+    include_wheel_pair(&mut wheels, &physics, chassis, (axle, wheel));
+    include_wheel_pair(&mut wheels, &physics, chassis, (wheel, axle));
+    assert_eq!(wheels, vec![wheel]);
+}
+
+/// Every wheel of every machine, every frame, for the grass trample map:
+/// each wheel link of the link tree that touches the ground, oriented along
+/// its own axle and rolling the way it moves (the chassis heading when it
+/// stands still). Trailers and robots press the grass like tractors.
+fn record_wheel_tracks(
+    inventory: Res<ControllerInventory>,
+    time: Res<Time>,
+    mut odometers: Local<HashMap<(String, String), f32>>,
+    // One rolled distance for the whole machine, beside each wheel's own. It is
+    // what places the tread along a track, and every wheel of one machine has
+    // to place it the same: a tractor puts two wheels down the same line, and
+    // with a distance each — different radii, different slip — the rear one's
+    // stamp lands on texels the front one wrote holding a number metres apart,
+    // and the chevrons break wherever the two overlap.
+    mut machine_odometers: Local<HashMap<String, (f32, f32, Vec2)>>,
+    active: Res<gearbox_api::PhysicsActive>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    parents: Query<&ChildOf>,
+    physics: Res<crate::physics::PhysicsWorld>,
+    mut contacts: ResMut<gearbox_fields::WheelContacts>,
+    mut values: ResMut<crate::services::LinkValues>,
+    runtime: Res<ControllerRuntimeState>,
+) {
+    if !active.0 {
+        return;
+    }
+    let body_of = |scene_root: Entity, prim: &str| {
+        let entity = find_prim_entity(scene_root, prim, &prims, &parents)?;
+        let handle = physics.entity_to_body.get(&entity).copied()?;
+        Some(handle)
+    };
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
             continue;
         };
-        let handles = physics
-            .bodies
-            .get(wheel)
-            .map(|b| b.colliders().to_vec())
-            .unwrap_or_default();
-        for ch in handles {
-            if let Some(col) = physics.colliders.get_mut(ch) {
-                if col.friction() < TIRE_FRICTION {
-                    col.set_friction(TIRE_FRICTION);
+        let heading = machine
+            .body
+            .as_deref()
+            .and_then(|p| body_of(scene_root, p))
+            .and_then(|h| physics.body(h))
+            .map(|b| {
+                let f = b.rotation() * DVec3::new(0.0, -1.0, 0.0);
+                Vec2::new(f.x as f32, f.z as f32)
+            });
+        let wheels = runtime.machine_wheels.get(&machine.id);
+        for link in &machine.links.links {
+            let Some(handle) = link.body_prim.as_deref().and_then(|p| body_of(scene_root, p))
+            else {
+                continue;
+            };
+            if link.role != crate::links::LinkRole::Wheel
+                && !wheels.is_some_and(|w| w.contains(&handle))
+            {
+                continue;
+            }
+            let Some(body) = physics.body(handle) else {
+                continue;
+            };
+            let Some((axle_local, width, radius)) = body_tyre_geometry(&physics, handle) else {
+                continue;
+            };
+            // Slip: tyre surface speed against ground speed, `link.<wheel>.slip`.
+            let parent_spin = link
+                .parent
+                .as_deref()
+                .and_then(|p| machine.links.get(p))
+                .and_then(|l| l.body_prim.as_deref())
+                .and_then(|p| body_of(scene_root, p))
+                .and_then(|h| physics.body(h))
+                .map(|b| b.angvel())
+                .unwrap_or(DVec3::ZERO);
+            let axle = body.rotation() * axle_local;
+            let surface = (body.angvel() - parent_spin).dot(axle).abs() * radius;
+            let ground = (body.linvel() - axle * body.linvel().dot(axle)).length();
+            let tyre = physics.wheel_output(handle);
+            let slip = if let Some(output) = tyre {
+                output.slip_ratio
+            } else if surface.max(ground) < 0.05 {
+                0.0
+            } else {
+                (surface - ground) / ground.max(0.1)
+            };
+            values.set(&machine.id, &link.name, "slip", (slip * 1000.0).round() / 1000.0);
+            // How hard the tyre works the ground: wheelspin, side-slip, and the
+            // contact patch twisting as the wheel yaws through a turn.
+            let scrub = (0.1
+                + 0.6 * (surface - ground).abs()
+                + 1.2 * body.linvel().dot(axle).abs()
+                + 1.4 * body.angvel().y.abs()) as f32;
+            // Metres this wheel has rolled, which places its tread along the track.
+            let now = time.elapsed_secs();
+            // Tracks are laid in the cover that is drawn: the view's site.
+            let (site, p) = crate::globe::site_local(body.translation().x, body.translation().y, body.translation().z);
+            if site != crate::globe::current_site() {
+                continue;
+            }
+            let p = DVec3::new(p[0], p[1], p[2]);
+            let ground = crate::world::terrain_height_m(p.x as f32, p.z as f32);
+            let contact_point = if let Some(output) = tyre {
+                values.set(&machine.id, &link.name, "normal_force", output.normal_force);
+                values.set(&machine.id, &link.name, "slip_angle", output.slip_angle);
+                if !output.in_contact {
+                    continue;
                 }
-                // "Stickiest wins" — the tyre's high friction holds
-                // regardless of what the ground collider is authored at.
-                col.set_friction_combine_rule(CoefficientCombineRule::Max);
-                col.set_restitution(0.0);
+                Vec3::new(
+                    (output.contact_point.x - gearbox_globe::physics_offset(site).x) as f32,
+                    output.contact_point.y as f32,
+                    output.contact_point.z as f32,
+                )
+            } else if p.y as f32 - radius as f32 > ground + WHEEL_TRACK_CONTACT_SLACK_M {
+                continue;
+            } else {
+                Vec3::new(p.x as f32, ground, p.z as f32)
+            };
+            let axle_world = body.rotation() * axle_local;
+            let axle = Vec2::new(axle_world.x as f32, axle_world.z as f32).normalize_or(Vec2::X);
+            let mut roll = axle.perp();
+            let velocity = Vec2::new(body.linvel().x as f32, body.linvel().z as f32);
+            let travel = if velocity.length() > 0.05 { velocity } else { heading.unwrap_or(roll) };
+            if roll.dot(travel) < 0.0 {
+                roll = -roll;
             }
+            // One place and one rolled distance per machine per frame, shared by
+            // every wheel of it, and the distance advanced by exactly how far
+            // that place moved along the heading. Not by the wheel's speed
+            // times the frame: the tread's phase is `travelled` minus the
+            // anchor projected on the heading, and that only stays put if the
+            // two advance by the same amount. Integrated from a speed it drifts
+            // a few millimetres a frame, which is a whole lug pitch every few
+            // seconds, and the print slides along the track as it is laid.
+            let here = Vec2::new(p.x as f32, p.z as f32);
+            let (travelled, anchor) = {
+                let rolled = machine_odometers
+                    .entry(machine.id.to_string())
+                    .or_insert((0.0, f32::NEG_INFINITY, here));
+                if rolled.1 != now {
+                    rolled.0 += (here - rolled.2).dot(roll);
+                    rolled.1 = now;
+                    rolled.2 = here;
+                }
+                (rolled.0, rolled.2)
+            };
+            // The wheel's offset from the machine's line is a fixed fact of the
+            // machine, so it is smoothed hard: what varies frame to frame there
+            // is the contact settling, not the tractor moving sideways. Along
+            // the track nothing is smoothed — a lag there would drag the tread
+            // behind the wheel.
+            let axle_of_roll = roll.perp();
+            let sideways = (here - anchor).dot(axle_of_roll);
+            let held = odometers
+                .entry((machine.id.to_string(), link.name.to_string()))
+                .or_insert(sideways);
+            *held += (sideways - *held) * 0.04;
+            let centreline = anchor
+                + axle_of_roll * *held
+                + roll * (here - anchor).dot(roll);
+            contacts.contacts.push(gearbox_fields::WheelContact {
+                position: contact_point,
+                direction: roll,
+                width: tyre.and_then(|out| out.pressure).map_or(width, |p| p.patch_width) as f32,
+                length: tyre.and_then(|out| out.pressure).map(|p| p.patch_length as f32),
+                scrub: scrub.clamp(0.0, 1.0),
+                travelled,
+                anchor,
+                centreline,
+            });
         }
     }
 }
 
-fn set_wheel_colliders_sensor(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
-    sensor: bool,
-) {
-    for pair in tire_pairs {
-        let Some(wheel) = wheel_body_of(physics, chassis, *pair) else {
-            continue;
-        };
-        let handles = physics
-            .bodies
-            .get(wheel)
-            .map(|b| b.colliders().to_vec())
-            .unwrap_or_default();
-        for ch in handles {
-            if let Some(col) = physics.colliders.get_mut(ch) {
-                col.set_sensor(sensor);
-            }
-        }
-    }
-}
+/// A wheel counts as on the ground while its lowest point is this close.
+const WHEEL_TRACK_CONTACT_SLACK_M: f32 = 0.08;
 
-fn apply_rapier_raycast_vehicle_controller(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
-    wheel_specs: &[RaycastVehicleWheelSpec],
-    cmd: CmdVel,
-    steer_target_rad: f64,
-) -> bool {
-    if tire_pairs.is_empty() || wheel_specs.is_empty() {
-        return false;
-    }
-
-    set_wheel_colliders_sensor(physics, chassis, tire_pairs, true);
-
-    let (current_speed, force_per_rear) = {
-        let Some(body) = physics.bodies.get(chassis) else {
-            return false;
-        };
-        let Some(forward) = body_forward_vector(body) else {
-            return false;
-        };
-        let current_speed = body.linvel().dot(forward);
-        let target_speed = cmd.linear_mps as f64;
-        let speed_error = target_speed - current_speed;
-        let force = if target_speed.abs() < 0.05 && speed_error.abs() < 0.05 {
-            0.0
-        } else {
-            // On hills the old fixed 2.5 kN/wheel force could be smaller
-            // than gravity's component along the slope for this ~2.7 t
-            // tractor, so it would just sit and spin/slide. Use a proper
-            // speed servo plus feed-forward slope compensation in the chassis
-            // forward axis. This keeps flat-ground behavior smooth while
-            // giving enough push to climb modest field rolls.
-            let forward_3d = body.rotation() * Vector::new(0.0, -1.0, 0.0);
-            let slope_compensation_per_rear = body.mass() * 9.81 * forward_3d.y / 2.0;
-            speed_error * RAYCAST_ENGINE_FORCE_GAIN_PER_REAR_WHEEL + slope_compensation_per_rear
-        };
-        (
-            current_speed,
-            force.clamp(
-                -RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL,
-                RAYCAST_ENGINE_FORCE_MAX_PER_REAR_WHEEL,
-            ),
-        )
+/// The tyre's axle in the wheel body's frame, its width and its radius:
+/// the thinnest and the largest axis of the largest collider's local box.
+pub(crate) fn body_tyre_geometry(
+    physics: &crate::physics::PhysicsWorld,
+    body: BodyId,
+) -> Option<(DVec3, f64, f64)> {
+    let body = physics.body(body)?;
+    let collider = body
+        .colliders()
+        .iter()
+        .filter_map(|ch| physics.collider(*ch))
+        .max_by(|a, b| {
+            let extent = |c: &dyn crate::physics::backend::Collider| {
+                c.local_aabb().half_extents().max_element()
+            };
+            extent(*a).total_cmp(&extent(*b))
+        })?;
+    let half = collider.local_aabb().half_extents();
+    let (axis, width) = if half.x <= half.y && half.x <= half.z {
+        (DVec3::new(1.0, 0.0, 0.0), half.x * 2.0)
+    } else if half.y <= half.z {
+        (DVec3::new(0.0, 1.0, 0.0), half.y * 2.0)
+    } else {
+        (DVec3::new(0.0, 0.0, 1.0), half.z * 2.0)
     };
-
-    let mut tuning = WheelTuning::default();
-    tuning.suspension_stiffness = 90.0;
-    tuning.suspension_compression = 7.0;
-    tuning.suspension_damping = 7.0;
-    tuning.max_suspension_travel = 0.5;
-    tuning.side_friction_stiffness = 1.0;
-    tuning.friction_slip = 24.0;
-    tuning.max_suspension_force = 30_000.0;
-
-    let mut vehicle = DynamicRayCastVehicleController::new(chassis);
-    vehicle.index_up_axis = 2;
-    vehicle.index_forward_axis = 1;
-
-    let suspension = Vector::new(0.0, 0.0, -1.0);
-    // In the chassis/USD local basis the wheel axle is X and suspension is Z.
-    // Use -X so normal.cross(axle) points along the tractor's local -Y front
-    // after the loader rotates the body into Bevy's Y-up world.
-    let axle = Vector::new(-1.0, 0.0, 0.0);
-
-    // Adapted from the old working `main` tractor preset. Those hard-points
-    // were authored in Bevy's Y-up body frame. This USD chassis rigid body
-    // keeps USD's local frame instead: X = right, Y = back, Z = up. Therefore
-    // the front/rear hard-points use the authored USD Y coordinates directly,
-    // and their local Z is picked so the raycast wheel bottoms sit on terrain
-    // at body height 0:
-    //
-    //   connection_z - rest_length - radius == 0
-    //
-    // Feeding Bevy-local Y-up points here makes the rays cast sideways/upward,
-    // so the controller never supports or drives the chassis.
-    for spec in wheel_specs {
-        let wheel = vehicle.add_wheel(
-            spec.chassis_connection,
-            suspension,
-            axle,
-            RAYCAST_SUSPENSION_REST_LENGTH,
-            spec.radius,
-            &tuning,
-        );
-        if spec.steering_multiplier.abs() > f64::EPSILON {
-            wheel.steering = steer_target_rad * spec.steering_multiplier;
-        }
-        if spec.driven {
-            wheel.engine_force = force_per_rear
-                * turn_speed_ratio(
-                    cmd.linear_mps as f64,
-                    cmd.angular_rps as f64,
-                    spec.chassis_connection.x,
-                );
-        }
-    }
-
-    if cmd.linear_mps.abs() < 0.05 {
-        let brake = (current_speed.abs() * 900.0).clamp(0.0, RAYCAST_BRAKE_IMPULSE);
-        for wheel in vehicle.wheels_mut() {
-            wheel.engine_force = 0.0;
-            wheel.brake = brake;
-        }
-    }
-
-    let filter = QueryFilter::new()
-        .exclude_rigid_body(chassis)
-        .exclude_sensors();
-    let queries = physics.broad_phase.as_query_pipeline_mut(
-        physics.narrow_phase.query_dispatcher(),
-        &mut physics.bodies,
-        &mut physics.colliders,
-        filter,
-    );
-    vehicle.update_vehicle(physics.integration_parameters.dt as f64, queries);
-    true
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RaycastVehicleWheelSpec {
-    chassis_connection: Vector,
-    radius: f64,
-    driven: bool,
-    steered: bool,
-    steering_multiplier: f64,
-}
-
-fn raycast_vehicle_wheel_specs() -> [RaycastVehicleWheelSpec; 4] {
-    [
-        RaycastVehicleWheelSpec {
-            chassis_connection: Vector::new(0.79, -1.23, RAYCAST_SUSPENSION_REST_LENGTH + 0.525),
-            radius: 0.525,
-            driven: false,
-            steered: true,
-            steering_multiplier: 1.0,
-        },
-        RaycastVehicleWheelSpec {
-            chassis_connection: Vector::new(-0.79, -1.23, RAYCAST_SUSPENSION_REST_LENGTH + 0.525),
-            radius: 0.525,
-            driven: false,
-            steered: true,
-            steering_multiplier: 1.0,
-        },
-        RaycastVehicleWheelSpec {
-            chassis_connection: Vector::new(0.8475, 1.14, RAYCAST_SUSPENSION_REST_LENGTH + 0.755),
-            radius: 0.755,
-            driven: true,
-            steered: false,
-            steering_multiplier: 0.0,
-        },
-        RaycastVehicleWheelSpec {
-            chassis_connection: Vector::new(-0.8475, 1.14, RAYCAST_SUSPENSION_REST_LENGTH + 0.755),
-            radius: 0.755,
-            driven: true,
-            steered: false,
-            steering_multiplier: 0.0,
-        },
-    ]
-}
-
-#[allow(clippy::too_many_arguments)]
-fn raycast_vehicle_wheel_specs_for_controller(
-    scene_root: Entity,
-    controller: &ControllerSpec,
-    machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
-    parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    wheel_radius_fallback_m: f64,
-) -> Vec<RaycastVehicleWheelSpec> {
-    let Some(chassis_body) = physics.bodies.get(chassis) else {
-        return Vec::new();
+    let axis = match collider.position_wrt_parent() {
+        Some(pose) => pose.rotation * axis,
+        None => axis,
     };
-
-    let powered_paths = powered_wheel_joint_paths(machine, controller);
-    let mut specs = Vec::new();
-    for path in all_wheel_joint_paths(machine, controller) {
-        let Some(pair) = joint_pair(scene_root, &path, joints, parents, physics) else {
-            continue;
-        };
-        let Some(wheel) = wheel_body_of(physics, chassis, pair) else {
-            continue;
-        };
-        let Some(wheel_body) = physics.bodies.get(wheel) else {
-            continue;
-        };
-        let radius = body_max_collider_radius(physics, wheel)
-            .filter(|r| *r > 0.05)
-            .unwrap_or(wheel_radius_fallback_m);
-        let world_offset = wheel_body.translation() - chassis_body.translation();
-        let local_center = chassis_body.rotation().inverse() * world_offset;
-        let steering_multiplier = steering_multiplier_for_wheel_path(&path, machine, controller);
-        specs.push(RaycastVehicleWheelSpec {
-            chassis_connection: Vector::new(
-                local_center.x,
-                local_center.y,
-                local_center.z + RAYCAST_SUSPENSION_REST_LENGTH,
-            ),
-            radius,
-            driven: powered_paths.contains(&path),
-            steered: steering_multiplier.abs() > f64::EPSILON,
-            steering_multiplier,
-        });
-    }
-    specs
+    Some((axis, width, half.max_element()))
 }
+
 
 fn all_wheel_joint_paths(
     machine: &MachineInstanceSpec,
@@ -2013,30 +2776,10 @@ fn is_rear_path(path: &str) -> bool {
     axle_hint(path) == Some(AxleHint::Rear)
 }
 
-fn raycast_wheel_spec_for_path(path: &str) -> Option<RaycastVehicleWheelSpec> {
-    let lower = path.to_ascii_lowercase();
-    let specs = raycast_vehicle_wheel_specs();
-    if lower.contains("front") && lower.contains("left") {
-        Some(specs[0])
-    } else if lower.contains("front") && lower.contains("right") {
-        Some(specs[1])
-    } else if lower.contains("back") && lower.contains("left")
-        || lower.contains("rear") && lower.contains("left")
-    {
-        Some(specs[2])
-    } else if lower.contains("back") && lower.contains("right")
-        || lower.contains("rear") && lower.contains("right")
-    {
-        Some(specs[3])
-    } else {
-        None
-    }
-}
-
 fn wake_vehicle_for_command(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    tire_pairs: &[(RigidBodyHandle, RigidBodyHandle)],
+    physics: &mut crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    tire_pairs: &[(BodyId, BodyId)],
     cmd: CmdVel,
     steer_target_rad: f64,
 ) {
@@ -2045,14 +2788,14 @@ fn wake_vehicle_for_command(
         return;
     }
 
-    if let Some(body) = physics.bodies.get_mut(chassis) {
+    if let Some(body) = physics.body_mut(chassis) {
         body.wake_up(true);
     }
     for pair in tire_pairs {
-        if let Some(body) = physics.bodies.get_mut(pair.0) {
+        if let Some(body) = physics.body_mut(pair.0) {
             body.wake_up(true);
         }
-        if let Some(body) = physics.bodies.get_mut(pair.1) {
+        if let Some(body) = physics.body_mut(pair.1) {
             body.wake_up(true);
         }
     }
@@ -2062,10 +2805,14 @@ fn tire_joint_pairs(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
-) -> Vec<(RigidBodyHandle, RigidBodyHandle)> {
+    physics: &crate::physics::PhysicsWorld,
+) -> Vec<(BodyId, BodyId)> {
     let mut pairs = Vec::new();
     for path in machine
         .powered_wheel_joints
@@ -2096,8 +2843,8 @@ fn tire_joint_pairs(
 }
 
 fn push_unique_pair(
-    pairs: &mut Vec<(RigidBodyHandle, RigidBodyHandle)>,
-    pair: (RigidBodyHandle, RigidBodyHandle),
+    pairs: &mut Vec<(BodyId, BodyId)>,
+    pair: (BodyId, BodyId),
 ) {
     if !pairs
         .iter()
@@ -2109,20 +2856,22 @@ fn push_unique_pair(
 
 #[derive(Debug, Clone, Copy)]
 struct JointPositionTarget {
-    pair: (RigidBodyHandle, RigidBodyHandle),
+    pair: (BodyId, BodyId),
     position: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct JointVelocityTarget {
-    pair: (RigidBodyHandle, RigidBodyHandle),
+    pair: (BodyId, BodyId),
     velocity: f64,
     damping: f64,
     max_torque: f64,
+    /// Damping in N·m·s/rad instead of scaled by the joint's inertia.
+    force_based: bool,
 }
 
 fn drive_wheel_velocity_target(
-    pair: (RigidBodyHandle, RigidBodyHandle),
+    pair: (BodyId, BodyId),
     velocity: f64,
 ) -> JointVelocityTarget {
     JointVelocityTarget {
@@ -2130,11 +2879,12 @@ fn drive_wheel_velocity_target(
         velocity,
         damping: WHEEL_DRIVE_DAMPING,
         max_torque: WHEEL_DRIVE_MAX_TORQUE,
+        force_based: false,
     }
 }
 
 fn visual_wheel_velocity_target(
-    pair: (RigidBodyHandle, RigidBodyHandle),
+    pair: (BodyId, BodyId),
     velocity: f64,
 ) -> JointVelocityTarget {
     JointVelocityTarget {
@@ -2142,6 +2892,7 @@ fn visual_wheel_velocity_target(
         velocity,
         damping: WHEEL_VISUAL_DAMPING,
         max_torque: WHEEL_VISUAL_MAX_TORQUE,
+        force_based: false,
     }
 }
 
@@ -2150,9 +2901,13 @@ fn steering_joint_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     geometry: &str,
     center_steer_rad: f64,
     wheel_base_m: f32,
@@ -2239,9 +2994,13 @@ fn steering_joint_targets(
 fn explicit_steering_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     left_position: f64,
     right_position: f64,
 ) -> Vec<JointPositionTarget> {
@@ -2274,9 +3033,13 @@ fn all_role_steering_targets(
     scene_root: Entity,
     machine: &MachineInstanceSpec,
     controller: &ControllerSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     center_position: f64,
     max_steer_deg: f32,
 ) -> Vec<JointPositionTarget> {
@@ -2348,7 +3111,8 @@ fn turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64) -> f64
     if linear_mps.abs() < 0.05 || yaw_rate_rps.abs() < 1e-5 {
         return 1.0;
     }
-    ((linear_mps + yaw_rate_rps * lateral_x_m) / linear_mps).clamp(0.25, 1.75)
+    // Body X points left, so a left turn (positive yaw) slows the left side.
+    ((linear_mps - yaw_rate_rps * lateral_x_m) / linear_mps).clamp(0.25, 1.75)
 }
 
 const VISUAL_TURN_SPEED_BOOST: f64 = 1.45;
@@ -2364,25 +3128,125 @@ fn visual_turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64)
 }
 
 fn wheel_lateral_offset(
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    pair: (RigidBodyHandle, RigidBodyHandle),
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    pair: (BodyId, BodyId),
 ) -> Option<f64> {
-    let chassis_body = physics.bodies.get(chassis)?;
+    wheel_local_center(physics, chassis, pair).map(|c| c.x)
+}
+
+/// Chassis-frame Y (back) of the unsteered axle line, the mean of the
+/// wheels no steer joint turns, and of the frontmost steered wheel.
+fn steer_axle_lines(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: &Query<&ChildOf>,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+) -> Option<(f64, f64)> {
+    let knuckles = steering_knuckles(scene_root, controller, machine, joints, parents, physics);
+    let (mut fixed, mut front) = (Vec::new(), f64::MAX);
+    for pair in tire_joint_pairs(scene_root, controller, machine, joints, parents, physics) {
+        let Some(center) = wheel_local_center(physics, chassis, pair) else {
+            continue;
+        };
+        if knuckles.contains(&pair.0) || knuckles.contains(&pair.1) {
+            front = front.min(center.y);
+        } else {
+            fixed.push(center.y);
+        }
+    }
+    if fixed.is_empty() {
+        return None;
+    }
+    Some((fixed.iter().sum::<f64>() / fixed.len() as f64, front))
+}
+
+/// The bodies the machine's steer joints turn.
+fn steering_knuckles(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: &Query<&ChildOf>,
+    physics: &crate::physics::PhysicsWorld,
+) -> Vec<BodyId> {
+    machine
+        .steering_joints
+        .iter()
+        .chain(controller.steer_joints.iter())
+        .chain(controller.steer_left_joint.iter())
+        .chain(controller.steer_right_joint.iter())
+        .filter_map(|p| joint_pair(scene_root, p, joints, parents, physics))
+        .map(|(_, knuckle)| knuckle)
+        .collect()
+}
+
+/// Steering wheelbase when none is authored: how far the front steered
+/// axle sits ahead of the unsteered one, over the front steer multiplier.
+/// The Oxbo turns about its fixed middle axle, not its rear one.
+fn derived_wheel_base(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
+    parents: &Query<&ChildOf>,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+) -> Option<f32> {
+    let (fixed_y, front_y) =
+        steer_axle_lines(scene_root, controller, machine, joints, parents, physics, chassis)?;
+    let ahead = fixed_y - front_y;
+    if !(0.3..20.0).contains(&ahead) {
+        return None;
+    }
+    let multiplier = controller
+        .front_steer_multiplier
+        .map(f64::from)
+        .unwrap_or(1.0)
+        .abs()
+        .max(0.1);
+    Some((ahead / multiplier) as f32)
+}
+
+/// A wheel's centre in the chassis body frame (X left, Y back, Z up).
+fn wheel_local_center(
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    pair: (BodyId, BodyId),
+) -> Option<DVec3> {
+    let chassis_body = physics.body(chassis)?;
     let wheel = wheel_body_of(physics, chassis, pair)?;
-    let wheel_body = physics.bodies.get(wheel)?;
+    let wheel_body = physics.body(wheel)?;
     let world_offset = wheel_body.translation() - chassis_body.translation();
-    let local_center = chassis_body.rotation().inverse() * world_offset;
-    Some(local_center.x)
+    Some(chassis_body.rotation().inverse() * world_offset)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn role_steering_targets(
     scene_root: Entity,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
     left_position: f64,
     right_position: f64,
 ) -> Vec<JointPositionTarget> {
@@ -2424,16 +3288,21 @@ fn wheel_joint_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
     geometry: &str,
     linear_mps: f64,
     center_steer_rad: f64,
     wheel_base_m: f32,
     traction_track_width_m: f32,
     wheel_radius_fallback_m: f64,
+    turn: Option<&steering::Turn>,
 ) -> Vec<JointVelocityTarget> {
     // Wheel angular-velocity target for one joint pair. The spin rate is
     // `ground_speed / wheel_radius`, using the wheel's *actual* collider
@@ -2442,23 +3311,34 @@ fn wheel_joint_targets(
     // Apply a simple differential: while turning, each wheel target uses the
     // forward speed at its lateral offset from the chassis center. The outside
     // side therefore spins faster and the inside side slower.
-    let target = |path: &str, pair: (RigidBodyHandle, RigidBodyHandle)| {
+    // The machine turns about a point on the line of its unsteered axle: a
+    // wheel ahead of or behind that line runs the longer arc.
+    let pivot_y = (!matches!(geometry, "crab" | "parallel"))
+        .then(|| steer_axle_lines(scene_root, controller, machine, joints, parents, physics, chassis))
+        .flatten()
+        .map(|(fixed_y, _)| fixed_y);
+    let yaw_rate = steering_yaw_rate_for_differential(linear_mps, center_steer_rad, wheel_base_m);
+    let target = |path: &str, pair: (BodyId, BodyId)| {
         let radius = wheel_body_of(physics, chassis, pair)
-            .and_then(|wheel| body_max_collider_radius(physics, wheel))
+            .and_then(|wheel| effective_wheel_radius(physics, wheel))
             .filter(|r| *r > 0.05)
             .unwrap_or(wheel_radius_fallback_m);
+        if let Some(turn) = turn
+            && let Some(center) = wheel_local_center(physics, chassis, pair)
+        {
+            return drive_wheel_velocity_target(pair, turn.speed(linear_mps, center) / radius);
+        }
         let lateral_x =
             wheel_lateral_offset(physics, chassis, pair).unwrap_or_else(|| match side_hint(path) {
                 Some(SideHint::Left) => traction_track_width_m as f64 * 0.5,
                 Some(SideHint::Right) => -traction_track_width_m as f64 * 0.5,
                 None => 0.0,
             });
-        let ground_speed = linear_mps
-            * turn_speed_ratio(
-                linear_mps,
-                steering_yaw_rate_for_differential(linear_mps, center_steer_rad, wheel_base_m),
-                lateral_x,
-            );
+        let mut ground_speed = linear_mps * turn_speed_ratio(linear_mps, yaw_rate, lateral_x);
+        if let (Some(pivot_y), Some(center)) = (pivot_y, wheel_local_center(physics, chassis, pair)) {
+            let ahead = (pivot_y - center.y).abs();
+            ground_speed = ground_speed.signum() * ground_speed.hypot(yaw_rate * ahead);
+        }
         drive_wheel_velocity_target(pair, ground_speed / radius)
     };
 
@@ -2518,9 +3398,13 @@ fn parking_brake_wheel_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
+    physics: &crate::physics::PhysicsWorld,
 ) -> Vec<JointVelocityTarget> {
     let mut targets = Vec::new();
     for path in machine
@@ -2547,10 +3431,14 @@ fn visual_wheel_spin_targets(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
     wheel_radius_fallback_m: f64,
 ) -> Vec<JointVelocityTarget> {
     let mut targets = Vec::new();
@@ -2601,10 +3489,14 @@ fn push_visual_wheel_spin_target(
     targets: &mut Vec<JointVelocityTarget>,
     scene_root: Entity,
     path: &str,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
     wheel_radius_fallback_m: f64,
 ) {
     let Some(pair) = joint_pair(scene_root, path, joints, parents, physics) else {
@@ -2618,7 +3510,7 @@ fn push_visual_wheel_spin_target(
     }
 
     let radius = visual_wheel_radius(physics, chassis, pair, path, wheel_radius_fallback_m);
-    // The raycast vehicle moves the chassis, while the USD wheel bodies are
+    // The diff drive moves the chassis, while the USD wheel bodies are
     // visual-only. Do not use each wheel body's full point velocity projected
     // through its own steering angle here: on a three-axle Oxbo that makes
     // front/middle/rear wheels on the same side spin at very different rates
@@ -2630,54 +3522,49 @@ fn push_visual_wheel_spin_target(
 }
 
 fn visual_wheel_radius(
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    pair: (RigidBodyHandle, RigidBodyHandle),
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    pair: (BodyId, BodyId),
     path: &str,
     fallback: f64,
 ) -> f64 {
-    raycast_wheel_spec_for_path(path)
-        .map(|spec| spec.radius)
-        .or_else(|| {
-            wheel_body_of(physics, chassis, pair)
-                .and_then(|wheel| body_max_collider_radius(physics, wheel))
-                .filter(|r| *r > 0.05)
-        })
-        .unwrap_or(fallback)
+    let measured = wheel_body_of(physics, chassis, pair)
+        .and_then(|wheel| effective_wheel_radius(physics, wheel))
+        .filter(|r| *r > 0.05);
+    let _ = path;
+    measured.unwrap_or(fallback)
 }
 
 fn chassis_forward_speed(
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
 ) -> Option<f64> {
-    let body = physics.bodies.get(chassis)?;
+    let body = physics.body(chassis)?;
     let forward = body_forward_vector(body)?;
     Some(body.linvel().dot(forward))
 }
 
 fn visual_wheel_side_ground_speed(
-    physics: &usd_bevy::physics::PhysicsWorld,
-    chassis: RigidBodyHandle,
-    pair: (RigidBodyHandle, RigidBodyHandle),
+    physics: &crate::physics::PhysicsWorld,
+    chassis: BodyId,
+    pair: (BodyId, BodyId),
     path: &str,
 ) -> Option<f64> {
-    let body = physics.bodies.get(chassis)?;
+    let body = physics.body(chassis)?;
     let forward = body_forward_vector(body)?;
     let forward_speed = body.linvel().dot(forward);
     let yaw_rate = body
         .angvel()
-        .dot(body.rotation() * Vector::new(0.0, 0.0, 1.0));
+        .dot(body.rotation() * DVec3::new(0.0, 0.0, 1.0));
     let measured_lateral_x = wheel_lateral_offset(physics, chassis, pair).unwrap_or(0.0);
     let lateral_x = visual_spin_lateral_x(side_hint(path), measured_lateral_x);
     Some(forward_speed * visual_side_turn_speed_ratio(forward_speed, yaw_rate, lateral_x))
 }
 
 fn visual_side_turn_speed_ratio(linear_mps: f64, yaw_rate_rps: f64, lateral_x_m: f64) -> f64 {
-    // Rapier's chassis angular velocity sign is opposite the USD/Gearbox
-    // visual side convention used for named left/right wheels. The physics
-    // drive path keeps the controller convention, but visual spin needs this
-    // sign flip so the outside wheels, not the inside wheels, read faster.
-    visual_turn_speed_ratio(linear_mps, -yaw_rate_rps, lateral_x_m)
+    // `turn_speed_ratio` already slows the +X (left) side in a left turn,
+    // so the observed yaw goes in unchanged.
+    visual_turn_speed_ratio(linear_mps, yaw_rate_rps, lateral_x_m)
 }
 
 fn visual_spin_lateral_x(side: Option<SideHint>, measured_lateral_x: f64) -> f64 {
@@ -2691,10 +3578,14 @@ fn visual_spin_lateral_x(side: Option<SideHint>, measured_lateral_x: f64) -> f64
 fn joint_pair(
     scene_root: Entity,
     path: &str,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
-) -> Option<(RigidBodyHandle, RigidBodyHandle)> {
+    physics: &crate::physics::PhysicsWorld,
+) -> Option<(BodyId, BodyId)> {
     let (_, _, body0, body1) = find_joint_body_pair(scene_root, path, joints, parents, physics)?;
     Some((body0, body1))
 }
@@ -2706,109 +3597,136 @@ struct MotorApplication {
 }
 
 fn apply_articulation_or_impulse_joint_motors(
-    physics: &mut usd_bevy::physics::PhysicsWorld,
+    physics: &mut crate::physics::PhysicsWorld,
     wheel_targets: &[JointVelocityTarget],
     steer_targets: &[JointPositionTarget],
 ) -> MotorApplication {
+    apply_joint_motors(physics, wheel_targets, steer_targets, None)
+}
+
+/// Write the wheel and steer motors; `steer_cap` limits the torque of steer
+/// joints without an authored drive.
+fn apply_joint_motors(
+    physics: &mut crate::physics::PhysicsWorld,
+    wheel_targets: &[JointVelocityTarget],
+    steer_targets: &[JointPositionTarget],
+    steer_cap: Option<f64>,
+) -> MotorApplication {
+    apply_joint_motors_with_holds(physics, wheel_targets, steer_targets, steer_cap, &[])
+}
+
+fn apply_joint_motors_with_holds(
+    physics: &mut crate::physics::PhysicsWorld,
+    wheel_targets: &[JointVelocityTarget],
+    steer_targets: &[JointPositionTarget],
+    steer_cap: Option<f64>,
+    holds: &[parking::HoldTarget],
+) -> MotorApplication {
     let mut applied = MotorApplication::default();
-    if wheel_targets.is_empty() && steer_targets.is_empty() {
+    if wheel_targets.is_empty() && steer_targets.is_empty() && holds.is_empty() {
         return applied;
     }
 
     for target in wheel_targets {
-        if let Some(handle) = multibody_joint_handle(physics, target.pair) {
-            if let Some((multibody, link_id)) = physics.multibody_joints.get_mut(handle) {
-                if let Some(link) = multibody.link_mut(link_id) {
-                    link.joint
-                        .data
-                        .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
-                        .set_motor_max_force(JointAxis::AngX, target.max_torque);
-                    applied.drive = true;
-                }
+        for id in physics.joints_between(target.pair.0, target.pair.1) {
+            if holds.iter().any(|hold| hold.joint == id) { continue; }
+            let target = JointVelocityTarget {
+                velocity: target.velocity * physics.wheel_drive_sign(id),
+                ..*target
+            };
+            if let Some(joint) = physics.joint_mut(id, false) {
+                set_wheel_motor(joint, &target);
+                applied.drive = true;
             }
         }
     }
 
+    // A revolute joint's motor is always its AngX: the authored USD axis
+    // ("Z" for the tractor steering joints) is baked into the joint frames
+    // when the joint is built. Driving AngZ fights a locked axis and can
+    // flip the vehicle.
     for target in steer_targets {
-        if let Some(handle) = multibody_joint_handle(physics, target.pair) {
-            if let Some((multibody, link_id)) = physics.multibody_joints.get_mut(handle) {
-                if let Some(link) = multibody.link_mut(link_id) {
-                    link.joint
-                        .data
-                        .set_motor_position(
-                            JointAxis::AngX,
-                            target.position,
-                            STEER_STIFFNESS,
-                            STEER_DAMPING,
-                        )
-                        .set_motor_max_force(JointAxis::AngX, STEER_MAX_TORQUE);
-                    applied.steer = true;
-                }
+        for id in physics.joints_between(target.pair.0, target.pair.1) {
+            if let Some(joint) = physics.joint_mut(id, false) {
+                set_steer_motor(joint, target.position, steer_cap);
+                applied.steer = true;
             }
         }
     }
-
-    for (_, joint) in physics.impulse_joints.iter_mut() {
-        if let Some(target) = wheel_targets
-            .iter()
-            .find(|target| rigid_body_pair_matches(target.pair, joint.body1, joint.body2))
-        {
-            joint
-                .data
-                .set_motor_velocity(JointAxis::AngX, target.velocity, target.damping)
-                .set_motor_max_force(JointAxis::AngX, target.max_torque);
-            applied.drive = true;
-        }
-        if let Some(target) = steer_targets
-            .iter()
-            .find(|target| rigid_body_pair_matches(target.pair, joint.body1, joint.body2))
-        {
-            // Rapier's RevoluteJoint motor is always exposed as AngX: the
-            // authored USD axis ("Z" for the tractor steering joints) is
-            // baked into the joint local axis when usd_rapier builds the
-            // revolute joint. Driving AngZ fights a locked axis and can
-            // explode/flip the vehicle.
-            joint
-                .data
-                .set_motor_position(
-                    JointAxis::AngX,
-                    target.position,
-                    STEER_STIFFNESS,
-                    STEER_DAMPING,
-                )
-                .set_motor_max_force(JointAxis::AngX, STEER_MAX_TORQUE);
-            applied.steer = true;
-        }
-    }
+    applied.drive |= parking::apply_holds(physics, holds);
     applied
 }
 
-fn multibody_joint_handle(
-    physics: &usd_bevy::physics::PhysicsWorld,
-    pair: (RigidBodyHandle, RigidBodyHandle),
-) -> Option<MultibodyJointHandle> {
-    physics
-        .multibody_joints
-        .joint_between(pair.0, pair.1)
-        .map(|(handle, _, _)| handle)
+/// Write a wheel velocity motor. Acceleration-based gains scale with the
+/// joint's inertia, which is tiny on a light steering knuckle.
+fn set_wheel_motor(data: &mut dyn JointMut, target: &JointVelocityTarget) {
+    let model = if target.force_based {
+        MotorModel::Force
+    } else {
+        MotorModel::Acceleration
+    };
+    data.set_motor_model(JointAxis::AngX, model);
+    data.set_motor_velocity(JointAxis::AngX, target.velocity, target.damping);
+    data.set_motor_max_force(JointAxis::AngX, target.max_torque);
+}
+
+/// Drive a steer joint to `position` with its authored USD drive, else with
+/// force-based gains like the ones the assets author.
+fn set_steer_motor(
+    data: &mut dyn JointMut,
+    position: f64,
+    max_torque: Option<f64>,
+) {
+    let authored = data
+        .motor(JointAxis::AngX)
+        .filter(|m| matches!(m.model, MotorModel::Force) && m.stiffness > 0.0)
+        .map(|m| (m.stiffness, m.damping));
+    match authored {
+        Some((stiffness, damping)) => {
+            data.set_motor_position(JointAxis::AngX, position, stiffness, damping);
+        }
+        None => {
+            configure_fallback_steer_motor(data, position, max_torque);
+        }
+    }
+}
+
+fn configure_fallback_steer_motor(
+    data: &mut dyn JointMut,
+    position: f64,
+    max_torque: Option<f64>,
+) {
+    let torque = max_torque.unwrap_or(STEER_MAX_TORQUE).max(0.0);
+    data.set_motor_model(JointAxis::AngX, MotorModel::Force);
+    data.set_motor_position(
+        JointAxis::AngX,
+        position,
+        torque / STEER_LOAD_ERROR_RAD,
+        torque / STEER_SERVO_RATE_RPS,
+    );
+    data.set_motor_max_force(JointAxis::AngX, torque);
 }
 
 fn rigid_body_pair_matches(
-    authored: (RigidBodyHandle, RigidBodyHandle),
-    actual_a: RigidBodyHandle,
-    actual_b: RigidBodyHandle,
+    authored: (BodyId, BodyId),
+    actual_a: BodyId,
+    actual_b: BodyId,
 ) -> bool {
     (authored.0 == actual_a && authored.1 == actual_b)
         || (authored.0 == actual_b && authored.1 == actual_a)
 }
 
-fn find_joint_body_pair(
+pub(crate) fn find_joint_body_pair(
     scene_root: Entity,
     prim_path: &str,
-    joints: &Query<(Entity, &UsdPrimRef, &usd_bevy::UsdPhysicsJoint)>,
+    joints: &Query<(
+        Entity,
+        &UsdPrimRef,
+        &crate::physics::markers::UsdPhysicsJoint,
+    )>,
     parents: &Query<&ChildOf>,
-    physics: &usd_bevy::physics::PhysicsWorld,
-) -> Option<(Entity, Entity, RigidBodyHandle, RigidBodyHandle)> {
+    physics: &crate::physics::PhysicsWorld,
+) -> Option<(Entity, Entity, BodyId, BodyId)> {
     let (_, _, joint) = joints.iter().find(|(entity, prim, _)| {
         prim.path == prim_path && is_descendant_of(*entity, scene_root, parents)
     })?;
@@ -2819,7 +3737,7 @@ fn find_joint_body_pair(
     Some((body0_entity, body1_entity, body0, body1))
 }
 
-fn find_prim_entity(
+pub(crate) fn find_prim_entity(
     scene_root: Entity,
     prim_path: &str,
     prims: &Query<(Entity, &UsdPrimRef)>,
@@ -2833,7 +3751,7 @@ fn find_prim_entity(
         .map(|(entity, _)| entity)
 }
 
-fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&ChildOf>) -> bool {
+pub(crate) fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&ChildOf>) -> bool {
     let mut current = entity;
     for _ in 0..64 {
         if current == root {
@@ -2848,10 +3766,10 @@ fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&ChildOf>) -> 
 }
 
 fn discover_controllers(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prim: &SdfPath,
     api_schemas: &[String],
-    namespace_default: &str,
+    machine_id_default: &str,
     machine_prim: &str,
 ) -> Vec<ControllerSpec> {
     let mut instances = HashSet::new();
@@ -2877,14 +3795,14 @@ fn discover_controllers(
             let prefix = format!("gearbox:controller:{instance}:");
             let namespace_policy = read_token(stage, prim, &(prefix.clone() + "namespacePolicy"))
                 .unwrap_or_else(|| "machine_id".to_string());
-            let namespace = read_string(stage, prim, &(prefix.clone() + "namespace"))
-                .unwrap_or_else(|| namespace_default.to_string());
+            let machine_id = read_string(stage, prim, &(prefix.clone() + "namespace"))
+                .unwrap_or_else(|| machine_id_default.to_string());
             ControllerSpec {
                 instance,
                 enabled: read_bool(stage, prim, &(prefix.clone() + "enabled")).unwrap_or(true),
                 controller_type: read_token(stage, prim, &(prefix.clone() + "type"))
                     .unwrap_or_else(|| "builtin:unknown".to_string()),
-                namespace,
+                machine_id,
                 namespace_policy,
                 update_rate_hz: read_float(stage, prim, &(prefix.clone() + "updateRateHz"))
                     .unwrap_or(60.0),
@@ -2968,6 +3886,10 @@ fn discover_controllers(
                 wheel_radius: read_float(stage, prim, &(prefix.clone() + "wheelRadius")),
                 max_steer_deg: read_float(stage, prim, &(prefix.clone() + "maxSteerDeg")),
                 steering_geometry: read_token(stage, prim, &(prefix.clone() + "steeringGeometry")),
+
+                max_wheel_torque_nm: read_float(stage, prim, &(prefix.clone() + "maxWheelTorqueNm")),
+                max_power_kw: read_float(stage, prim, &(prefix.clone() + "maxPowerKw")),
+                traction_control: read_bool(stage, prim, &(prefix.clone() + "tractionControl")),
                 front_steer_multiplier: read_float(
                     stage,
                     prim,
@@ -3007,6 +3929,7 @@ fn discover_controllers(
                 executable: read_string(stage, prim, &(prefix.clone() + "executable")),
                 args: read_string_array(stage, prim, &(prefix.clone() + "args")),
                 transport: read_token(stage, prim, &(prefix.clone() + "transport")),
+                requests: read_token_array(stage, prim, &(prefix.clone() + "requests")),
             }
         })
         .collect();
@@ -3014,11 +3937,11 @@ fn discover_controllers(
     out
 }
 
-fn walk_stage(stage: &openusd::Stage, path: SdfPath, out: &mut Vec<SdfPath>) {
+fn walk_stage(stage: &openusd::usd::Stage, path: SdfPath, out: &mut Vec<SdfPath>) {
     if path.as_str() != "/" {
         out.push(path.clone());
     }
-    for child_name in stage.prim_children(path.clone()).unwrap_or_default() {
+    for child_name in stage.prim_children(&path).unwrap_or_default() {
         let Ok(child_path) = path.append_path(child_name.as_str()) else {
             continue;
         };
@@ -3043,19 +3966,18 @@ fn derive_machine_id(prim_path: &str) -> String {
     }
 }
 
-fn read_attr(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<Value> {
-    let attr = prim.append_property(name).ok()?;
-    stage.field::<Value>(attr, "default").ok().flatten()
+pub(crate) fn read_attr(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<Value> {
+    crate::usd_ext::authored_value(stage, prim, name)
 }
 
-fn read_bool(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<bool> {
+pub(crate) fn read_bool(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<bool> {
     match read_attr(stage, prim, name)? {
         Value::Bool(v) => Some(v),
         _ => None,
     }
 }
 
-fn read_float(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<f32> {
+pub(crate) fn read_float(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<f32> {
     match read_attr(stage, prim, name)? {
         Value::Float(v) => Some(v),
         Value::Double(v) => Some(v as f32),
@@ -3065,46 +3987,55 @@ fn read_float(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<f32>
     }
 }
 
-fn read_string(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
+fn read_string(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
     match read_attr(stage, prim, name)? {
-        Value::String(v) | Value::Token(v) | Value::AssetPath(v) => Some(v),
+        Value::String(v) => Some(v),
+        Value::Token(v) => Some(v.as_str().to_string()),
+        Value::AssetPath(v) => Some(v.as_str().to_string()),
         _ => None,
     }
 }
 
-fn read_token(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Option<String> {
+pub(crate) fn read_token(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    name: &str,
+) -> Option<String> {
     read_string(stage, prim, name)
 }
 
-fn read_token_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+pub(crate) fn read_token_array(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    name: &str,
+) -> Vec<String> {
     match read_attr(stage, prim, name) {
-        Some(Value::TokenVec(v)) | Some(Value::StringVec(v)) => v,
+        Some(Value::TokenVec(v)) => v.iter().map(|t| t.as_str().to_string()).collect(),
+        Some(Value::StringVec(v)) => v,
         _ => Vec::new(),
     }
 }
 
-fn read_string_array(stage: &openusd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
+fn read_string_array(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Vec<String> {
     read_token_array(stage, prim, name)
 }
 
-fn read_rel_targets(stage: &openusd::Stage, prim: &SdfPath, rel_name: &str) -> Vec<String> {
-    let Some(raw) = prim
-        .append_property(rel_name)
-        .ok()
-        .and_then(|rel| stage.field::<Value>(rel, "targetPaths").ok().flatten())
-    else {
+pub(crate) fn read_rel_targets(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    rel_name: &str,
+) -> Vec<String> {
+    let Ok(prim) = stage.prim(prim.clone()) else {
         return Vec::new();
     };
-    let paths = match raw {
-        Value::PathListOp(op) => op.flatten(),
-        Value::PathVec(v) => v,
-        _ => return Vec::new(),
-    };
-    paths.into_iter().map(|p| p.as_str().to_string()).collect()
+    prim.relationship(rel_name)
+        .targets()
+        .map(|paths| paths.into_iter().map(|p| p.as_str().to_string()).collect())
+        .unwrap_or_default()
 }
 
 fn read_rel_targets_rebased(
-    stage: &openusd::Stage,
+    stage: &openusd::usd::Stage,
     prim: &SdfPath,
     rel_name: &str,
     machine_prim: &str,
@@ -3115,11 +4046,15 @@ fn read_rel_targets_rebased(
         .collect()
 }
 
-fn read_rel_first(stage: &openusd::Stage, prim: &SdfPath, rel_name: &str) -> Option<String> {
+pub(crate) fn read_rel_first(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    rel_name: &str,
+) -> Option<String> {
     read_rel_targets(stage, prim, rel_name).into_iter().next()
 }
 
-fn rebase_asset_root_target(machine_prim: &str, target: &str) -> String {
+pub(crate) fn rebase_asset_root_target(machine_prim: &str, target: &str) -> String {
     const ASSET_ROOT: &str = "/robot";
     if machine_prim == ASSET_ROOT {
         return target.to_string();
@@ -3176,7 +4111,7 @@ mod tests {
             .expect("tractor should author a drive controller");
         assert!(drive.enabled);
         assert_eq!(drive.controller_type, "builtin:ackermann_cmd_vel");
-        assert_eq!(drive.namespace, "robot");
+        assert_eq!(drive.machine_id, "robot");
         assert_eq!(drive.command_interface.as_deref(), Some("cmd_vel"));
         assert_eq!(drive.steering_geometry.as_deref(), Some("parallel"));
         assert_eq!(
@@ -3422,17 +4357,19 @@ def Xform "Leatherback" (
         let target = steering_target_radians(2.0, 10.0, 2.4, 30.0);
         assert!((target - 30_f64.to_radians()).abs() < 1e-6);
         let reverse = steering_target_radians(-2.0, 1.0, 2.4, 45.0);
-        assert!(reverse > 0.0);
-        assert_eq!(reverse, steering_target_radians(2.0, 1.0, 2.4, 45.0));
-        assert_eq!(reverse, steering_target_radians(0.0, 1.0, 2.4, 45.0));
+        assert!(reverse < 0.0);
+        assert_eq!(reverse, -steering_target_radians(2.0, 1.0, 2.4, 45.0));
     }
 
     #[test]
-    fn ackermann_outputs_parallel_steering_for_tied_front_axle() {
+    fn ackermann_inner_wheel_turns_more_than_outer() {
         let center = 0.25;
         let (left, right) = ackermann_steering_angles(center, 2.37, 1.5675, 45.0);
-        assert_eq!(left, center);
-        assert_eq!(right, center);
+        assert!(left > center);
+        assert!(right < center);
+        let (reverse_left, reverse_right) = ackermann_steering_angles(-center, 2.37, 1.5675, 45.0);
+        assert_eq!(reverse_left, -right);
+        assert_eq!(reverse_right, -left);
     }
 
     #[test]
@@ -3480,11 +4417,11 @@ def Xform "Leatherback" (
         );
         assert_eq!(
             sanitize_cmd_vel(CmdVel {
-                linear_mps: 10.0,
+                linear_mps: 40.0,
                 angular_rps: 5.0
             })
             .linear_mps,
-            4.0
+            16.0
         );
         assert_eq!(
             sanitize_cmd_vel(CmdVel {
@@ -3492,7 +4429,7 @@ def Xform "Leatherback" (
                 angular_rps: 5.0
             })
             .angular_rps,
-            1.2
+            4.8
         );
         assert!((slew(0.0, 4.0, 0.25) - 0.25).abs() < 1e-6);
     }
@@ -3506,14 +4443,23 @@ def Xform "Leatherback" (
 
     #[test]
     fn ackermann_differential_speeds_outside_wheels_up() {
-        // Gearbox heading convention: positive yaw turns toward +X. In the
-        // authored machines, named left wheels sit at positive local X and
-        // named right wheels at negative local X.
-        assert!(turn_speed_ratio(2.0, 0.5, 1.4) > 1.0);
-        assert!(turn_speed_ratio(2.0, 0.5, -1.4) < 1.0);
+        // Positive yaw turns toward +X, the left, where the named left wheels
+        // sit: they run the inside arc, the right wheels (-X) the outside.
+        assert!(turn_speed_ratio(2.0, 0.5, 1.4) < 1.0);
+        assert!(turn_speed_ratio(2.0, 0.5, -1.4) > 1.0);
 
-        assert!(turn_speed_ratio(2.0, -0.5, -1.4) > 1.0);
-        assert!(turn_speed_ratio(2.0, -0.5, 1.4) < 1.0);
+        assert!(turn_speed_ratio(2.0, -0.5, -1.4) < 1.0);
+        assert!(turn_speed_ratio(2.0, -0.5, 1.4) > 1.0);
+    }
+
+    #[test]
+    fn wheel_torque_cap_takes_the_lowest_limit() {
+        assert_eq!(wheel_torque_cap(8000.0, None, None, 3.0), 8000.0);
+        assert_eq!(wheel_torque_cap(8000.0, Some(5000.0), None, 3.0), 5000.0);
+        // 60 kW on one wheel at 10 rad/s: 6 kN·m.
+        assert_eq!(wheel_torque_cap(8000.0, None, Some(60_000.0), 10.0), 6000.0);
+        // Crawling, the power term holds at the minimum wheel speed.
+        assert_eq!(wheel_torque_cap(8000.0, None, Some(60_000.0), 0.0), 8000.0);
     }
 
     #[test]
@@ -3526,8 +4472,8 @@ def Xform "Leatherback" (
 
     #[test]
     fn visual_turn_ratio_makes_outside_wheels_read_faster() {
-        assert!(visual_turn_speed_ratio(2.0, 0.5, 1.4) > turn_speed_ratio(2.0, 0.5, 1.4));
-        assert!(visual_turn_speed_ratio(2.0, 0.5, -1.4) < turn_speed_ratio(2.0, 0.5, -1.4));
+        assert!(visual_turn_speed_ratio(2.0, 0.5, -1.4) > turn_speed_ratio(2.0, 0.5, -1.4));
+        assert!(visual_turn_speed_ratio(2.0, 0.5, 1.4) < turn_speed_ratio(2.0, 0.5, 1.4));
     }
 
     #[test]
@@ -3541,26 +4487,8 @@ def Xform "Leatherback" (
 
     #[test]
     fn impulse_joint_motors_bind_authored_body_pairs() {
-        use rapier3d::prelude::{RevoluteJointBuilder, RigidBodyBuilder, Vector};
-
-        let mut physics = usd_bevy::physics::PhysicsWorld::default();
-        let chassis = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-        let wheel = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-        let steer = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-        let steer_link = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-
-        physics.impulse_joints.insert(
-            chassis,
-            wheel,
-            RevoluteJointBuilder::new(Vector::new(1.0, 0.0, 0.0)),
-            true,
-        );
-        physics.impulse_joints.insert(
-            steer,
-            steer_link,
-            RevoluteJointBuilder::new(Vector::new(0.0, 0.0, 1.0)),
-            true,
-        );
+        let mut physics = crate::physics::PhysicsWorld::default();
+        let [chassis, wheel, steer, steer_link] = revolute_pairs(&mut physics, false);
 
         let applied = apply_articulation_or_impulse_joint_motors(
             &mut physics,
@@ -3569,6 +4497,7 @@ def Xform "Leatherback" (
                 velocity: 7.5,
                 damping: WHEEL_DRIVE_DAMPING,
                 max_torque: WHEEL_DRIVE_MAX_TORQUE,
+                force_based: false,
             }],
             &[JointPositionTarget {
                 pair: (steer, steer_link),
@@ -3578,48 +4507,36 @@ def Xform "Leatherback" (
         assert!(applied.drive);
         assert!(applied.steer);
 
-        let mut saw_drive = false;
-        let mut saw_steer = false;
-        for (_, joint) in physics.impulse_joints.iter() {
-            if rigid_body_pair_matches((chassis, wheel), joint.body1, joint.body2) {
-                let motor = joint.data.motor(JointAxis::AngX).expect("drive motor");
-                assert!((motor.target_vel - 7.5).abs() < 1e-9);
-                assert_eq!(motor.max_force, WHEEL_DRIVE_MAX_TORQUE);
-                saw_drive = true;
-            }
-            if rigid_body_pair_matches((steer, steer_link), joint.body1, joint.body2) {
-                let motor = joint.data.motor(JointAxis::AngX).expect("steer motor");
-                assert!((motor.target_pos - 0.25).abs() < 1e-9);
-                assert_eq!(motor.stiffness, STEER_STIFFNESS);
-                saw_steer = true;
-            }
+        let drive = physics.joint_between(chassis, wheel).expect("drive joint");
+        assert_eq!(physics.joint_is_reduced(drive), physics.name() == "molla");
+        let motor = physics.joint(drive).unwrap().motor(JointAxis::AngX).expect("drive motor");
+        assert!((motor.target_velocity - 7.5).abs() < 1e-9);
+        assert_eq!(motor.max_force, WHEEL_DRIVE_MAX_TORQUE);
+
+        let steer = physics.joint_between(steer, steer_link).expect("steer joint");
+        let motor = physics.joint(steer).unwrap().motor(JointAxis::AngX).expect("steer motor");
+        assert!((motor.target_position - 0.25).abs() < 1e-9);
+        assert_eq!(motor.stiffness, STEER_MAX_TORQUE / STEER_LOAD_ERROR_RAD);
+    }
+
+    /// Chassis↔wheel about X and steer↔steer_link about Z, as constraint or
+    /// reduced-coordinate joints.
+    fn revolute_pairs(physics: &mut crate::physics::PhysicsWorld, reduced: bool) -> [BodyId; 4] {
+        use crate::physics::backend::{BodyDesc, JointDesc, JointKind};
+        let bodies = [(); 4].map(|_| physics.insert_body(BodyDesc::dynamic()));
+        for (a, b, axis) in [(0, 1, DVec3::X), (2, 3, DVec3::Z)] {
+            let mut desc =
+                JointDesc::new(JointKind::Revolute { axis }, Pose::IDENTITY, Pose::IDENTITY);
+            desc.reduced = reduced;
+            physics.insert_joint(bodies[a], bodies[b], desc);
         }
-        assert!(saw_drive);
-        assert!(saw_steer);
+        bodies
     }
 
     #[test]
     fn multibody_joint_motors_bind_authored_body_pairs() {
-        use rapier3d::prelude::{RevoluteJointBuilder, RigidBodyBuilder, Vector};
-
-        let mut physics = usd_bevy::physics::PhysicsWorld::default();
-        let chassis = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-        let wheel = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-        let steer = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-        let steer_link = physics.bodies.insert(RigidBodyBuilder::dynamic().build());
-
-        physics.multibody_joints.insert(
-            chassis,
-            wheel,
-            RevoluteJointBuilder::new(Vector::new(1.0, 0.0, 0.0)),
-            true,
-        );
-        physics.multibody_joints.insert(
-            steer,
-            steer_link,
-            RevoluteJointBuilder::new(Vector::new(0.0, 0.0, 1.0)),
-            true,
-        );
+        let mut physics = crate::physics::PhysicsWorld::default();
+        let [chassis, wheel, steer, steer_link] = revolute_pairs(&mut physics, true);
 
         let applied = apply_articulation_or_impulse_joint_motors(
             &mut physics,
@@ -3628,6 +4545,7 @@ def Xform "Leatherback" (
                 velocity: 3.5,
                 damping: WHEEL_DRIVE_DAMPING,
                 max_torque: WHEEL_DRIVE_MAX_TORQUE,
+                force_based: false,
             }],
             &[JointPositionTarget {
                 pair: (steer, steer_link),
@@ -3637,39 +4555,15 @@ def Xform "Leatherback" (
         assert!(applied.drive);
         assert!(applied.steer);
 
-        let (drive_handle, _, _) = physics
-            .multibody_joints
-            .joint_between(chassis, wheel)
-            .expect("drive multibody joint");
-        let (multibody, link_id) = physics
-            .multibody_joints
-            .get(drive_handle)
-            .expect("drive multibody link");
-        let motor = multibody
-            .link(link_id)
-            .expect("drive link")
-            .joint
-            .data
-            .motor(JointAxis::AngX)
-            .expect("drive motor");
-        assert!((motor.target_vel - 3.5).abs() < 1e-9);
+        let drive = physics.joint_between(chassis, wheel).expect("drive joint");
+        assert!(physics.joint_is_reduced(drive));
+        let motor = physics.joint(drive).unwrap().motor(JointAxis::AngX).expect("drive motor");
+        assert!((motor.target_velocity - 3.5).abs() < 1e-9);
 
-        let (steer_handle, _, _) = physics
-            .multibody_joints
-            .joint_between(steer, steer_link)
-            .expect("steer multibody joint");
-        let (multibody, link_id) = physics
-            .multibody_joints
-            .get(steer_handle)
-            .expect("steer multibody link");
-        let motor = multibody
-            .link(link_id)
-            .expect("steer link")
-            .joint
-            .data
-            .motor(JointAxis::AngX)
-            .expect("steer motor");
-        assert!((motor.target_pos - 0.15).abs() < 1e-9);
+        let steer = physics.joint_between(steer, steer_link).expect("steer joint");
+        assert!(physics.joint_is_reduced(steer));
+        let motor = physics.joint(steer).unwrap().motor(JointAxis::AngX).expect("steer motor");
+        assert!((motor.target_position - 0.15).abs() < 1e-9);
     }
 
     #[test]
@@ -3724,7 +4618,7 @@ def Xform "World"
             let id = format!("tractor_{idx:02}");
             let root = format!("/World/Tractor_{idx:02}");
             assert_eq!(machine.id, id);
-            assert_eq!(machine.controllers[0].namespace, id);
+            assert_eq!(machine.controllers[0].machine_id, id);
             assert_eq!(machine.controllers[0].instance, "drive");
             assert!(
                 machine
@@ -3741,5 +4635,671 @@ def Xform "World"
         }
 
         let _ = std::fs::remove_file(world_path);
+    }
+}
+
+/// One agent per discovered machine that exposes `cmd_vel`. Created when
+/// the machine appears in the inventory, dropped when it leaves.
+fn sync_machine_agents(
+    inventory: Res<ControllerInventory>,
+    bus: Option<ResMut<GearboxBus>>,
+    mut keys: ResMut<MachineAgentKeys>,
+    mut rejected: ResMut<RejectedMachines>,
+) {
+    let Some(mut bus) = bus else { return };
+    let mut wanted: HashMap<String, (ControllerKey, MachineConfig)> = HashMap::new();
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        // Every valid machine gets an agent; without a cmd_vel controller it
+        // still answers info, links and attachments and publishes its pose.
+        let drive = machine
+            .controllers
+            .iter()
+            .find(|c| c.enabled && c.command_interface.as_deref() == Some("cmd_vel"));
+        let machine_id = drive
+            .map(|d| d.machine_id.clone())
+            .or_else(|| machine.controllers.first().map(|c| c.machine_id.clone()))
+            .unwrap_or_else(|| machine.id.clone());
+        let instance = drive.map(|d| d.instance.clone()).unwrap_or_default();
+        if !machine.links.is_valid() {
+            if rejected.0.insert(machine.id.clone()) {
+                for reason in &machine.links.errors {
+                    warn!(
+                        "gearbox-control: machine `{}` rejected: {reason}",
+                        machine.id
+                    );
+                }
+                let mut event = SceneEvent::new(event_kind::MACHINE_REJECTED, &machine_id)
+                    .with_prop("machine_id", &machine.id);
+                for (n, reason) in machine.links.errors.iter().enumerate() {
+                    event = event.with_prop(&format!("reason.{n}"), reason);
+                }
+                bus.publish_event(event);
+            }
+            continue;
+        }
+        for warning in &machine.links.warnings {
+            if rejected.0.insert(format!("{}:warned", machine.id)) {
+                warn!("gearbox-control: machine `{}`: {warning}", machine.id);
+            }
+        }
+        let host = &bus.host.config;
+        let mut config = MachineConfig::new(&host.instance, &machine_id);
+        config.kind = machine.kind.clone().unwrap_or_default();
+        config.links = link_descs(&machine.links);
+        config.links_derived = machine.links.derived;
+        config.ephemeral = host.ephemeral;
+        config.allow = host.allow.clone();
+        config.allow_any = host.allow_any;
+        config.relay = host.relay;
+        config.controllers = machine
+            .controllers
+            .iter()
+            .map(|c| ControllerDesc {
+                instance: c.instance.clone(),
+                controller_type: c.controller_type.clone(),
+                command_interface: c.command_interface.clone(),
+                state_interfaces: c.state_interfaces.clone(),
+            })
+            .collect();
+        let key = ControllerKey::new(scene_root, &machine.id, &instance);
+        wanted.insert(machine_id.clone(), (key, config));
+    }
+
+    let stale: Vec<String> = bus
+        .machines
+        .keys()
+        .filter(|machine_id| !wanted.contains_key(*machine_id))
+        .cloned()
+        .collect();
+    for machine_id in stale {
+        bus.machines.remove(&machine_id);
+        keys.0.remove(&machine_id);
+        info!("gearbox-control: machine agent `{machine_id}` withdrawn");
+    }
+
+    let host_id = bus.host.endpoint_id();
+    for (machine_id, (key, config)) in wanted {
+        if let Some(agent) = bus.machines.get_mut(&machine_id) {
+            // A variant swap changes a live machine's links and controllers.
+            agent.config.kind = config.kind;
+            agent.config.links = config.links;
+            agent.config.links_derived = config.links_derived;
+            agent.config.controllers = config.controllers;
+            keys.0.insert(machine_id, key);
+            continue;
+        }
+        match MachineAgent::new(config, host_id) {
+            Ok(agent) => {
+                let did = agent.did();
+                info!("gearbox-control: machine agent `{machine_id}` ready as {did}");
+                let event = SceneEvent::new(event_kind::MACHINE_READY, &machine_id)
+                    .with_prop("did", &did)
+                    .with_prop("machine_id", &key.machine_id);
+                bus.machines.insert(machine_id.clone(), agent);
+                keys.0.insert(machine_id, key);
+                bus.publish_event(event);
+            }
+            Err(err) => warn!("gearbox-control: machine agent `{machine_id}` failed: {err}"),
+        }
+    }
+}
+
+/// Copy each agent's current twist into the internal command buffer.
+fn apply_machine_agent_commands(
+    bus: Option<Res<GearboxBus>>,
+    keys: Res<MachineAgentKeys>,
+    tim: Res<crate::services::TimRequests>,
+    mut commands: ResMut<ControllerCommands>,
+) {
+    let Some(bus) = bus else { return };
+    for (machine_id, agent) in &bus.machines {
+        let Some(key) = keys.0.get(machine_id) else { continue };
+        if key.controller_instance.is_empty() {
+            continue;
+        }
+        let twist = agent.twist();
+        let mut cmd = CmdVel {
+            linear_mps: twist.linear.vx as f32,
+            angular_rps: yaw_rate_of(&twist),
+        };
+        // A quiet session lets a granted slave request drive the master.
+        if cmd.linear_mps.abs() < 1e-6
+            && cmd.angular_rps.abs() < 1e-6
+            && let Some(requested) = tim.0.get(&key.machine_id)
+        {
+            cmd = *requested;
+        }
+        commands.cmd_vel.insert(key.clone(), cmd);
+    }
+}
+
+/// Public cmd_vel follows ROS convention: yaw is angular z. Accept angular
+/// y as a fallback so a Y-up client still turns the machine.
+fn yaw_rate_of(twist: &Twist) -> f32 {
+    if twist.angular.vz.abs() > 1e-9 {
+        twist.angular.vz as f32
+    } else {
+        twist.angular.vy as f32
+    }
+}
+
+/// World poses of every link, for machines whose agent has `tf` switched on.
+fn publish_link_poses(
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    bus: Option<ResMut<GearboxBus>>,
+    time: Res<Time>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    parents: Query<&ChildOf>,
+    transforms: Query<&GlobalTransform>,
+) {
+    let Some(mut bus) = bus else { return };
+    let stamp_ms = (time.elapsed_secs_f64() * 1000.0) as u32;
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let Some(machine_id) = keys
+            .0
+            .iter()
+            .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
+            .map(|(machine_id, _)| machine_id.clone())
+        else {
+            continue;
+        };
+        let Some(agent) = bus.machines.get_mut(&machine_id) else {
+            continue;
+        };
+        if !agent.tf_enabled() {
+            continue;
+        }
+        for (index, link) in machine.links.links.iter().enumerate() {
+            let Some(entity) = find_prim_entity(scene_root, &link.prim_path, &prims, &parents)
+            else {
+                continue;
+            };
+            let Ok(gt) = transforms.get(entity) else {
+                continue;
+            };
+            let (_, rot, tr) = gt.to_scale_rotation_translation();
+            agent.publish_link_pose(&gearbox_api::LinkPose {
+                x: tr.x as f64,
+                y: tr.y as f64,
+                z: tr.z as f64,
+                qw: rot.w as f64,
+                qx: rot.x as f64,
+                qy: rot.y as f64,
+                qz: rot.z as f64,
+                index: index as u32,
+                stamp_ms,
+                props: Props::from_pairs(&[("name", link.name.as_str())]).into_bytes(),
+            });
+        }
+    }
+}
+
+/// Lat/lon/alt the world's local origin sits at. The sim has no notion of
+/// where on Earth it is, so GNSS needs a fixed datum to project the local
+/// ENU-style world frame (see the REP-103 remap above: world +X/+Y/+Z is
+/// already East/North/Up by construction) onto real WGS84 coordinates.
+/// Amsterdam, matching the default used elsewhere in this workspace for a
+/// stand-in geo reference.
+const WORLD_GEO_DATUM: Geo = Geo {
+    latitude: 52.370216,
+    longitude: 4.895168,
+    altitude: 0.0,
+};
+
+/// Publish each machine's state: from its drive controller when it has one,
+/// else straight from its body pose, so trailers report where they are.
+fn publish_machine_controller_states(
+    inventory: Res<ControllerInventory>,
+    states: Res<ControllerStates>,
+    keys: Res<MachineAgentKeys>,
+    bus: Option<ResMut<GearboxBus>>,
+    physics: Res<crate::physics::PhysicsWorld>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    parents: Query<&ChildOf>,
+    link_values: Res<crate::services::LinkValues>,
+    service: Res<crate::services::ServiceCommands>,
+    attachments: Res<crate::attach::Attachments>,
+    mut last_speed: ResMut<LastLinearSpeed>,
+) {
+    let Some(mut bus) = bus else { return };
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let Some((machine_id, key)) = keys
+            .0
+            .iter()
+            .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
+            .map(|(machine_id, k)| (machine_id.clone(), k.clone()))
+        else {
+            continue;
+        };
+        let Some(agent) = bus.machines.get_mut(&machine_id) else {
+            continue;
+        };
+        let mut props = Props::from_pairs(&[("machine_id", machine.id.as_str())]);
+        if let Some(master) = agent.attached_to() {
+            props.set("attached_to", master);
+        }
+        let tools: Vec<&str> = agent.tools().iter().map(|t| t.slave.as_str()).collect();
+        if !tools.is_empty() {
+            props.set("tools", &tools.join(","));
+        }
+        // Process data of this machine and the commanded state of every
+        // attached slave's service controllers (TOOLS_SPEC §5.1, §7.4).
+        for (link, key, value) in link_values.of_machine(&machine.id) {
+            props.set(&format!("link.{link}.{key}"), &format!("{value}"));
+        }
+        for a in attachments.0.iter().filter(|a| a.master_id == machine_id) {
+            let Some(slave_key) = keys.0.get(&a.slave_id) else {
+                continue;
+            };
+            for (key, values) in service.0.iter() {
+                if key.scene_root != slave_key.scene_root || key.machine_id != slave_key.machine_id
+                {
+                    continue;
+                }
+                let mut sorted: Vec<(&String, &String)> = values.iter().collect();
+                sorted.sort();
+                for (k, v) in sorted {
+                    props.set(
+                        &format!(
+                            "tool.{}.controller.{}.{k}",
+                            a.slave_id, key.controller_instance
+                        ),
+                        v,
+                    );
+                }
+            }
+        }
+
+        let from_controller = machine
+            .controllers
+            .iter()
+            .find(|c| {
+                c.instance == key.controller_instance
+                    && c.state_interfaces
+                        .iter()
+                        .any(|iface| iface == "pose" || iface == "velocity")
+            })
+            .and_then(|c| states.states.get(&key).map(|s| (c, s.clone())));
+
+        let (region, position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
+        {
+            Some((controller, state)) => {
+                props.set("controller", &controller.instance);
+                (
+                    state.region,
+                    state.position_m,
+                    state.heading_rad,
+                    state.roll_rad,
+                    state.pitch_rad,
+                    state.linear_speed_mps,
+                    state.yaw_rate_rps,
+                    state.wheel_encoders,
+                )
+            }
+            None => {
+                let Some(body_prim) = machine
+                    .body
+                    .as_deref()
+                    .or_else(|| machine.links.base().and_then(|b| b.body_prim.as_deref()))
+                else {
+                    continue;
+                };
+                let Some(entity) = find_prim_entity(scene_root, body_prim, &prims, &parents) else {
+                    continue;
+                };
+                let Some(body) = physics
+                    .entity_to_body
+                    .get(&entity)
+                    .and_then(|h| physics.body(*h))
+                else {
+                    continue;
+                };
+                let p = body.position().translation;
+                let (region, p) = crate::globe::site_local(p.x, p.y, p.z);
+                let p = DVec3::new(p[0], p[1], p[2]);
+                let heading = body_forward_vector(body)
+                    .map(|f| f.x.atan2(f.z))
+                    .unwrap_or(0.0);
+                let (roll, pitch) = machine_roll_pitch_rad(body);
+                let v = body.linvel();
+                let speed = (v.x * v.x + v.z * v.z).sqrt();
+                (
+                    region,
+                    [p.x, p.y, p.z],
+                    heading,
+                    roll,
+                    pitch,
+                    speed,
+                    body.angvel().y,
+                    Vec::new(),
+                )
+            }
+        };
+
+        // World-frame position and orientation go out REP-103/Gazebo/Isaac
+        // Sim style (Z up, X/Y the ground plane), not the sim's own internal
+        // Bevy/Rapier frame (Y up, X/Z the ground plane). The remap is the
+        // axis permutation (ros_x, ros_y, ros_z) = (sim_z, sim_x, sim_y): it's
+        // right-handed (verified: ros_x × ros_y = ros_z), and it lines up
+        // `heading_rad` with standard ROS yaw for free — heading 0 already
+        // means "facing +sim_z", which under this permutation is "facing
+        // +ros_x", and a positive heading rotates a (cos,sin,0) vector in
+        // ros_x/ros_y exactly like a standard yaw does. So `heading_rad`,
+        // `roll_rad`, `pitch_rad`, and every body-frame twist/IMU field
+        // below (already X-forward, Z-up-yaw) need no change at all — only
+        // the world-frame point and quaternion do.
+        // What is reported is the pose in the machine's own fixed datum, worked out
+        // from where it truly is on Earth: the frame it is simulated in never shows.
+        let place = crate::globe::earth_place(region, position);
+        let own = crate::globe::machine_datum(&machine.id);
+        let (position, heading) = match (&place, &own) {
+            (Some(place), Some(own)) => {
+                let at = own.from_ecef(place.ecef);
+                let facing = bevy::math::DVec3::new(heading.sin(), 0.0, heading.cos());
+                let facing = own.rotation.inverse() * (place.datum.rotation * facing);
+                ([at.x, at.y, at.z], facing.x.atan2(facing.z))
+            }
+            _ => (position, heading),
+        };
+        let ros_point = Point::new(position[2], position[0], position[1]);
+        if let Some(place) = &place {
+            props.set("lat", &format!("{:.9}", place.geodetic.latitude));
+            props.set("lon", &format!("{:.9}", place.geodetic.longitude));
+            props.set("alt", &format!("{:.3}", place.geodetic.altitude));
+            props.set("ecef", &format!("{:.3} {:.3} {:.3}", place.ecef.x, place.ecef.y, place.ecef.z));
+            let anchor = own.unwrap_or(place.datum);
+            props.set("datum", &format!("{:.9} {:.9}", anchor.latitude, anchor.longitude));
+        }
+        let half = heading * 0.5;
+        let ros_rotation = Quaternion::new(half.cos(), 0.0, 0.0, half.sin());
+        let wire = MachineState {
+            odom: Odom {
+                pose: gearbox_api::datapod::Pose {
+                    point: ros_point,
+                    rotation: ros_rotation,
+                },
+                twist: Twist::from_components(speed, 0.0, 0.0, 0.0, 0.0, yaw_rate),
+            },
+            heading_rad: heading,
+            roll_rad: roll,
+            pitch_rad: pitch,
+            session: 0,
+            props: props.into_bytes(),
+        };
+        agent.publish_state(wire);
+
+        if !wheel_encoders.is_empty() {
+            agent.publish_encoders(&WheelEncoders::new(
+                wheel_encoders
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (angle_rad, velocity_rad_s))| {
+                        WheelEncoder::new(i as u64, *angle_rad, *velocity_rad_s)
+                    })
+                    .collect(),
+            ));
+        }
+
+        // Turn radius from the same kinematic relationship every differential
+        // or Ackermann-steered machine obeys (R = v / omega), rather than a
+        // geometric formula that would only hold for one steering layout.
+        // `omega` still carries real tire/suspension noise on a dead-straight
+        // line (observed up to ~0.02 rad/s), and dividing by that noise
+        // swings the radius by thousands of metres; only treat the machine
+        // as actually turning meaningfully above it.
+        const MIN_YAW_RATE_FOR_TURN_RADIUS: f64 = 0.05;
+        let turn_radius = if yaw_rate.abs() > MIN_YAW_RATE_FOR_TURN_RADIUS {
+            TurnRadius::new(speed / yaw_rate)
+        } else {
+            TurnRadius::straight()
+        };
+        agent.publish_turn_radius(&turn_radius);
+
+        // Longitudinal acceleration from the change in forward speed since
+        // the last physics step, over the simulated time that step actually
+        // covers — not this render frame's `dt`, which runs on its own
+        // clock and only sometimes lines up with a physics step landing.
+        // Zero on the first sample; on a frame with no new step, hold the
+        // last computed value instead of dividing a same-as-before speed
+        // (or, on the step frame right after, several steps' worth of
+        // change) by an unrelated render `dt`. Lateral/vertical
+        // acceleration aren't derived yet.
+        let forward_accel = if physics.pending_steps > 0 {
+            let step_dt = physics.pending_steps as f64 / physics.step_hz;
+            let accel = last_speed
+                .0
+                .get(&key)
+                .map(|(prev, _)| (speed - prev) / step_dt)
+                .unwrap_or(0.0);
+            last_speed.0.insert(key.clone(), (speed, accel));
+            accel
+        } else {
+            last_speed.0.get(&key).map(|(_, accel)| *accel).unwrap_or(0.0)
+        };
+        agent.publish_imu(&Imu::new(
+            // Z is yaw here, matching `Odom.twist.angular.vz` right above —
+            // not Y, which is what this used to (wrongly) carry it on.
+            Velocity {
+                vx: 0.0,
+                vy: 0.0,
+                vz: yaw_rate,
+            },
+            Acceleration {
+                ax: forward_accel,
+                ay: 0.0,
+                az: 0.0,
+            },
+            ros_rotation,
+        ));
+
+        // GNSS: project the world-frame ENU point onto the fixed datum, and
+        // convert `heading_rad` (0 = East, counter-clockwise) to a compass
+        // bearing (0 = North, clockwise) since that's what a real GNSS
+        // receiver's heading output means.
+        let fix = match &place {
+            Some(place) => Geo {
+                latitude: place.geodetic.latitude,
+                longitude: place.geodetic.longitude,
+                altitude: place.geodetic.altitude,
+            },
+            None => to_wgs_from_enu(Enu::new(ros_point.x, ros_point.y, ros_point.z, WORLD_GEO_DATUM)),
+        };
+        let bearing = (std::f64::consts::FRAC_PI_2 - heading).rem_euclid(std::f64::consts::TAU);
+        agent.publish_gnss(&Gnss::new(fix, bearing));
+    }
+}
+
+/// The discovered tree as the machine agent answers it.
+pub(crate) fn link_descs(tree: &crate::links::LinkTree) -> Vec<gearbox_api::LinkDesc> {
+    tree.links
+        .iter()
+        .map(|l| {
+            let off = l.static_offset.unwrap_or_default();
+            gearbox_api::LinkDesc {
+                name: l.name.clone(),
+                parent: l.parent.clone(),
+                role: l.role.as_str().to_string(),
+                prim: l.prim_path.clone(),
+                joint: l.joint_prim.clone(),
+                body: l.body_prim.clone(),
+                offset: [
+                    off.translation.x,
+                    off.translation.y,
+                    off.translation.z,
+                    off.rotation.w,
+                    off.rotation.x,
+                    off.rotation.y,
+                    off.rotation.z,
+                ],
+                coupling: l
+                    .coupling
+                    .as_ref()
+                    .map(|c| format!("{}|{}|{}", c.side.as_str(), c.kind, c.name)),
+                element: l.element.as_ref().map(|e| e.kind.clone()),
+                number: l.element.as_ref().and_then(|e| e.number),
+                designator: l.element.as_ref().map(|e| e.designator.clone()),
+                values: l.values.clone(),
+            }
+        })
+        .collect()
+}
+
+/// `GearboxAttachmentAPI` prims in a loaded USD: (hitch prim, coupler prim)
+/// pairs the runtime joins once both machines have agents.
+pub fn discover_static_attachments_from_usd(usd_path: &Path) -> Vec<(String, String)> {
+    let Ok(stage) = open_stage_for_discovery(usd_path) else {
+        return Vec::new();
+    };
+    discover_static_attachments_from_stage(&stage)
+}
+
+/// The static attachments authored in an already-open stage.
+pub fn discover_static_attachments_from_stage(stage: &openusd::usd::Stage) -> Vec<(String, String)> {
+    let mut prims = Vec::new();
+    let scan_root = stage
+        .default_prim()
+        .and_then(|name| openusd::sdf::path(&format!("/{name}")).ok())
+        .unwrap_or_else(SdfPath::abs_root);
+    walk_stage(&stage, scan_root, &mut prims);
+    let mut out = Vec::new();
+    for prim in &prims {
+        let schemas = stage.api_schemas(prim).unwrap_or_default();
+        let hitch = read_rel_first(&stage, prim, "gearbox:attachment:hitch");
+        let coupler = read_rel_first(&stage, prim, "gearbox:attachment:coupler");
+        if !schemas.iter().any(|s| s == "GearboxAttachmentAPI") && hitch.is_none() {
+            continue;
+        }
+        match (hitch, coupler) {
+            (Some(h), Some(c)) => out.push((h, c)),
+            _ => warn!(
+                "gearbox-control: attachment {} needs both gearbox:attachment:hitch and :coupler",
+                prim.as_str()
+            ),
+        }
+    }
+    out
+}
+
+/// Authored inertia below this fraction of the box estimate from the
+/// chassis collider bounds is replaced by the estimate.
+const INERTIA_PLAUSIBLE_FRACTION: f64 = 0.25;
+
+/// A chassis whose `physics:diagonalInertia` is far too small for its mass
+/// spins on every suspension impulse. Substitute a box estimate from the
+/// collider bounds, once per machine, and say so.
+fn guard_chassis_inertia(
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    mut runtime: ResMut<ControllerRuntimeState>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    parents: Query<&ChildOf>,
+    mut physics: ResMut<crate::physics::PhysicsWorld>,
+) {
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else {
+            continue;
+        };
+        let key = ControllerKey::new(scene_root, &machine.id, "chassis");
+        if runtime.inertia_guarded.contains(&key) {
+            continue;
+        }
+        // Only once the machine is fully up: agent created, bodies and
+        // colliders materialised, authored mass in place.
+        if !keys
+            .0
+            .values()
+            .any(|k| k.scene_root == scene_root && k.machine_id == machine.id)
+        {
+            continue;
+        }
+        let Some(body_path) = machine.body.as_deref() else {
+            continue;
+        };
+        let Some(entity) = find_prim_entity(scene_root, body_path, &prims, &parents) else {
+            continue;
+        };
+        let Some(handle) = physics.entity_to_body.get(&entity).copied() else {
+            continue;
+        };
+        let Some(body) = physics.body(handle) else {
+            continue;
+        };
+        if body.colliders().is_empty() {
+            continue;
+        }
+        let mut lo = DVec3::new(f64::MAX, f64::MAX, f64::MAX);
+        let mut hi = DVec3::new(f64::MIN, f64::MIN, f64::MIN);
+        for ch in body.colliders() {
+            if let Some(col) = physics.collider(ch) {
+                let aabb = col.aabb_at(col.position_wrt_parent().unwrap_or(Pose::IDENTITY));
+                lo = lo.min(aabb.mins);
+                hi = hi.max(aabb.maxs);
+            }
+        }
+        let mass = body.mass();
+        if mass < 100.0 {
+            continue;
+        }
+        runtime.inertia_guarded.insert(key);
+        let ext = hi - lo;
+        if ext.x <= 0.0 || ext.y <= 0.0 || ext.z <= 0.0 {
+            continue;
+        }
+        let estimate = DVec3::new(
+            mass / 12.0 * (ext.y * ext.y + ext.z * ext.z),
+            mass / 12.0 * (ext.x * ext.x + ext.z * ext.z),
+            mass / 12.0 * (ext.x * ext.x + ext.y * ext.y),
+        );
+        // Compare in the body frame, where the box estimate lives: principal
+        // values are sorted into their own frame and do not line up with
+        // the collider axes.
+        let com = body.local_center_of_mass();
+        let mut tensor = body.inertia_tensor();
+        let authored = DVec3::new(tensor.x_axis.x, tensor.y_axis.y, tensor.z_axis.z);
+        let too_small = |a: f64, e: f64| a < e * INERTIA_PLAUSIBLE_FRACTION;
+        if !too_small(authored.x, estimate.x)
+            && !too_small(authored.y, estimate.y)
+            && !too_small(authored.z, estimate.z)
+        {
+            continue;
+        }
+        let estimate = DVec3::new(
+            if too_small(authored.x, estimate.x) { estimate.x } else { authored.x },
+            if too_small(authored.y, estimate.y) { estimate.y } else { authored.y },
+            if too_small(authored.z, estimate.z) { estimate.z } else { authored.z },
+        );
+        tensor.x_axis.x = estimate.x;
+        tensor.y_axis.y = estimate.y;
+        tensor.z_axis.z = estimate.z;
+        warn!(
+            "gearbox-control: {} chassis inertia ({:.0}, {:.0}, {:.0}) is implausible for {:.0} kg over {:.1}x{:.1}x{:.1} m; using ({:.0}, {:.0}, {:.0})",
+            machine.id,
+            authored.x,
+            authored.y,
+            authored.z,
+            mass,
+            ext.x,
+            ext.y,
+            ext.z,
+            estimate.x,
+            estimate.y,
+            estimate.z
+        );
+        if let Some(body) = physics.body_mut(handle) {
+            body.set_additional_mass(
+                MassProps { local_com: com, mass, inertia: Inertia::Tensor(tensor) },
+                true,
+            );
+        }
     }
 }

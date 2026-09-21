@@ -2,8 +2,12 @@
 resolver = "2"
 members = [
     "crates/gearbox-api",
-    "crates/gearbox-link",
-    "crates/gearbox-world",
+    "crates/gearbox-controls",
+    "crates/gearbox-fields",
+    "crates/gearbox-globe",
+    "crates/bevy_weather",
+    "crates/bevy_biomes",
+    "crates/gearbox-cli",
     "bin/gearbox",
 ]
 
@@ -14,8 +18,13 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+# Floating origin and nested high-precision grids: the planet frame and the
+# sites on it. Upstream's own Bevy 0.19 branch, pinned until it is released.
+big_space = { git = "https://github.com/aevyrie/big_space", rev = "5f255228e9b4ff30756347b80f92b19ebf7b5c56", features = ["i64", "bevy_camera"] }
 # Local sibling crate — spatial types the whole gearbox stack speaks.
-datapod = { git = "https://codeberg.org/robolibs/datapod" }
+datapod = { git = "https://codeberg.org/robolibs/datapod.git", tag = "0.6.2" }
+# WGS84/ENU geodesy — local sim positions to real lat/lon/alt for GNSS.
+concord = { git = "https://codeberg.org/robolibs/concord.git", tag = "0.1.5" }
 
 # Physics backend — f64 variant of rapier3d. Matches datapod's f64
 # spatial types, so every boundary crossing stops needing a lossy
@@ -35,6 +44,7 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_window",
     "bevy_winit",
     "bevy_input_focus",
+    "bevy_gilrs",
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_pbr",
@@ -63,35 +73,81 @@ bevy = { version = "0.19", default-features = false, features = [
     "x11",
     "wayland",
     "reflect_auto_register",
+    "pbr_light_textures",
 ] }
-bevy_egui = { version = "0.40.1", default-features = false, features = [
-    "default_fonts",
-    "render",
-] }
-# Zenoh — pub/sub + query/reply transport for the **tool API**
-# (external robots / CLIs / scripting agents). Server-side only;
-# does not cross the simulator ↔ renderer boundary (zenoh doesn't
-# target wasm32).
-zenoh = "1"
+# peerbus + agentio — the tool API transport. peerbus moves datapod
+# payloads between ed25519 ids over shared memory or QUIC; agentio adds
+# persistent identity, `did:key`, and the signed topic directory. The
+# peerbus rev is the one agentio pins; using its head alone splits
+# authbox into two versions.
+peerbus = { git = "https://codeberg.org/robolibs/peerbus.git", rev = "be28fad1f02be631cc6703ce73caa54c5005cb7f" }
+agentio = { git = "https://github.com/robolibs/agentio", rev = "41d7032a8ee31941be61e930516cf55839f0882a" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.6"
+toml = "1"
+libc = "0.2"
 
-# aeronet — transport-agnostic Bevy networking, used for the
-# **simulator ↔ renderer** link when those two layers are split
-# across processes (e.g. headless sim + wasm browser renderer).
-# Pure Rust on both ends, wasm-friendly WebSocket IO layer.
-aeronet = "0.21"
-# WebTransport IO for aeronet — QUIC-based, no HOL blocking, unreliable
-# datagrams available. Declared with no default features so
-# `gearbox-link` can opt in to `client` / `server` / `dangerous-
-# configuration` independently; you want only one side per build
-# target (headless sim = server; wasm renderer = client).
-aeronet_webtransport = { version = "0.21", default-features = false }
+gearbox-api     = { path = "crates/gearbox-api", default-features = false }
+gearbox-cli     = { path = "crates/gearbox-cli" }
+mara            = { git = "https://github.com/bresilla/mara", branch = "develop", package = "mara", default-features = false, features = ["window", "bevy"] }
+egui            = { version = "0.34", default-features = false }
+tracing         = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# bevy_openusd v0.1.0: the live stage editor. openusd is the copy vendored
+# and patched inside that repository, so both sides speak the same `Stage`.
+usd_bevy        = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0" }
+openusd         = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0" }
+openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0", features = ["geom", "shade", "physics"] }
 
-gearbox-api     = { path = "crates/gearbox-api" }
-gearbox-link    = { path = "crates/gearbox-link" }
-mara            = { git = "https://github.com/bresilla/mara", branch = "develop", package = "mara", default-features = false }
-bevy_mara       = { git = "https://github.com/bresilla/mara", branch = "develop", package = "bevy_mara", default-features = false }
-# Vendored from bevy_openusd because upstream still pins older Bevy
-# APIs. Keep the local copy on the same Bevy major as gearbox.
-usd_bevy        = { path = "vendor/bevy_openusd/crates/usd_bevy" }
-usd_schema      = { path = "vendor/bevy_openusd/crates/usd_schema" }
-openusd         = { git = "https://github.com/mxpv/openusd", rev = "fe92b73224c611831be244afac9cf7654b5ef51e" }
+# Local peerbus carries the per-handle request-id seed fix; every crate in
+# the graph (agentio included) must see the same peerbus, so patch the
+# git source rather than depend on the path directly.
+[patch."https://codeberg.org/robolibs/peerbus.git"]
+peerbus = { path = "../peerbus" }
+
+# bevy_openusd work in progress (physics markers, incremental projection,
+# variant options) comes from the sibling checkout until it is tagged.
+# mara 0.4.1 (window host + embedded Bevy viewport) comes from the sibling
+# checkout until that branch is pushed.
+[patch."https://github.com/bresilla/mara"]
+mara = { path = "../../OUSD/mara-bevy-host/mara" }
+
+[patch."https://github.com/bresilla/bevy_openusd"]
+usd_bevy        = { path = "../../OUSD/bevy_openusd/crates/usd_bevy" }
+openusd         = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openusd" }
+openusd-schemas = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openusd-schemas" }
+
+# bevy_openusd's bevy_asset serialises loads of one source so an older
+# snapshot cannot land after a newer one; the patch has to cover the graph.
+[patch.crates-io]
+bevy_asset = { path = "../../OUSD/bevy_openusd/vendor/bevy_asset" }
+
+# Dependencies are optimised even in dev builds: unoptimised Bevy spends the
+# whole frame on the CPU. Our own crates stay at the dev defaults.
+[profile.dev.package."*"]
+opt-level = 3
+# Terrain noise is sampled a million times a square: never unoptimised.
+[profile.dev.package.gearbox-globe]
+opt-level = 3
+[profile.dev.package.usd_bevy]
+opt-level = 3
+[profile.dev.package.openusd]
+opt-level = 3
+[profile.dev.package.openusd-schemas]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.zip]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.bevy_mesh]
+opt-level = 3
+[profile.dev.package.bevy_mikktspace]
+opt-level = 3

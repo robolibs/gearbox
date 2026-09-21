@@ -1,46 +1,33 @@
-//! The persistent world: horizon/background helpers, cloud shell,
-//! atmospheric DistanceFog, sun with a single tight shadow cascade,
-//! ChaseCamera configuration, and world-event publishing. The local
-//! terrain surface itself is now a USD scene loaded by `load.rs`.
+//! Persistent scene lifecycle, camera controls, USD terrain collision,
+//! object placement, and world-event publishing.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
 
-use bevy::asset::RenderAssetUsages;
+use crate::physics::PhysicsWorld;
 use bevy::ecs::entity::Entities;
-use bevy::image::Image;
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
-use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster};
+use bevy::light::NotShadowCaster;
 use bevy::mesh::VertexAttributeValues;
-use bevy::pbr::{
-    DistanceFog, ExtendedMaterial, FogFalloff, MaterialExtension, MaterialPlugin, StandardMaterial,
-};
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
-use bevy::window::PrimaryWindow;
-use bevy_mara::{ChaseCamera, GroundGrid, apply_rig};
-use rapier3d::math::{Rotation as DQuat, Vector as DVec3};
-use rapier3d::prelude::{
-    ColliderBuilder, ColliderHandle, Pose, RigidBodyBuilder, RigidBodyHandle, RigidBodyType,
+use gearbox_api::{GearboxBus, SceneEvent, event_kind};
+use mara::ui::modules::bevy::{
+    BevyViewportInput, BevyViewportRenderTarget, BevyViewportSet, ChaseCamera, GroundGrid,
+    apply_rig,
 };
-use serde::Serialize;
-use usd_bevy::physics::PhysicsWorld;
-use zenoh::Wait;
+use crate::physics::backend::{
+    BodyDesc, BodyId, BodyKind, ColliderDesc, ColliderId, DQuat, DVec3, Pose, Shape,
+};
 
 /// Earth-radius planet sphere. The simulator was tuned for this
 /// radius — vehicle wheel friction, camera fog distances, cloud
 /// altitude, and shadow cascades all assume ~6 371 km.
 const PLANET_RADIUS_M: f32 = 6_371_000.0;
-/// Keep the old planet/horizon helper below the hilly local terrain.
-/// Otherwise it reads as a flat plate under the terrain mesh.
-const PLANET_VISUAL_DROP_M: f32 = 40.0;
-/// Cloud deck height above the planet surface. ~4 km gives visible
-/// separation from the terrain when zoomed out.
-const CLOUD_ALTITUDE_M: f64 = 4_000.0;
+/// The planet cap lies under the deepest valley of the distant land, with
+/// room for the meadow's own hollows; any shallower and it shows through the
+/// valleys as flat pale islands.
+const PLANET_VISUAL_DROP_M: f32 = 0.5 * crate::terrain::HORIZON_RELIEF_M + 30.0;
 const TERRAIN_FLAT_SPAWN_RADIUS_M: f32 = 24.0;
 const TERRAIN_FULL_RELIEF_RADIUS_M: f32 = 55.0;
 const TERRAIN_MIN_HEIGHT_M: f32 = -5.0;
@@ -48,28 +35,166 @@ const TERRAIN_MAX_HEIGHT_M: f32 = 10.0;
 const FLAT_GROUND_HALF_EXTENT_M: f64 = 10_000.0;
 const FLAT_GROUND_VISUAL_SIZE_M: f32 = 10_000.0;
 const USD_TERRAIN_ACTIVATION_WARN_FRAMES: u32 = 120;
+const CAMERA_HALF_SPAN_M: f32 = 5_000.0;
+const CAMERA_MAX_DISTANCE_M: f32 = 5_000.0;
+/// With the ceiling lifted: far enough for the whole planet to fit the view.
+const CAMERA_ORBIT_DISTANCE_M: f32 = 40_000_000.0;
+const CAMERA_MAX_HEIGHT_M: f32 = 3_000.0;
 
 static USD_TERRAIN_LOADED: AtomicBool = AtomicBool::new(false);
+/// Set when the loaded USD terrain mesh is level; `terrain_height_m` then
+/// returns its height instead of the procedural hill formula.
+static USD_TERRAIN_IS_FLAT: AtomicBool = AtomicBool::new(false);
+static USD_TERRAIN_FLAT_Y_BITS: AtomicU32 = AtomicU32::new(0);
+const USD_TERRAIN_FLAT_TOLERANCE_M: f32 = 0.05;
+/// The loaded terrain's exact surface, so placement uses the same shape the
+/// collider has rather than the procedural formula it approximates.
+static USD_TERRAIN_MESH: RwLock<Option<Arc<TerrainHeightMesh>>> = RwLock::new(None);
+const TERRAIN_HEIGHT_BINS: f32 = 512.0;
+
+struct TerrainHeightMesh {
+    vertices: Vec<[f32; 3]>,
+    triangles: Vec<[u32; 3]>,
+    min_x: f32,
+    min_z: f32,
+    cell: f32,
+    cols: usize,
+    rows: usize,
+    bins: Vec<Vec<u32>>,
+}
+
+impl TerrainHeightMesh {
+    fn build(vertices: &[DVec3], triangles: &[[u32; 3]]) -> Option<Self> {
+        let vertices: Vec<[f32; 3]> = vertices
+            .iter()
+            .map(|v| [v.x as f32, v.y as f32, v.z as f32])
+            .collect();
+        let triangles: Vec<[u32; 3]> = triangles
+            .iter()
+            .copied()
+            .filter(|t| t.iter().all(|&i| (i as usize) < vertices.len()))
+            .collect();
+        if vertices.is_empty() || triangles.is_empty() {
+            return None;
+        }
+        let (mut min_x, mut min_z, mut max_x, mut max_z) = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
+        for v in &vertices {
+            min_x = min_x.min(v[0]);
+            max_x = max_x.max(v[0]);
+            min_z = min_z.min(v[2]);
+            max_z = max_z.max(v[2]);
+        }
+        let span = (max_x - min_x).max(max_z - min_z);
+        if !(span > 0.0) {
+            return None;
+        }
+        let cell = (span / TERRAIN_HEIGHT_BINS).max(1.0);
+        let cols = ((max_x - min_x) / cell).floor() as usize + 1;
+        let rows = ((max_z - min_z) / cell).floor() as usize + 1;
+        let mut bins = vec![Vec::new(); cols * rows];
+        for (t, tri) in triangles.iter().enumerate() {
+            let pts = tri.map(|i| vertices[i as usize]);
+            let lo_x = pts.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+            let hi_x = pts.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+            let lo_z = pts.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+            let hi_z = pts.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max);
+            let c0 = ((lo_x - min_x) / cell).floor() as usize;
+            let c1 = (((hi_x - min_x) / cell).floor() as usize).min(cols - 1);
+            let r0 = ((lo_z - min_z) / cell).floor() as usize;
+            let r1 = (((hi_z - min_z) / cell).floor() as usize).min(rows - 1);
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    bins[r * cols + c].push(t as u32);
+                }
+            }
+        }
+        Some(Self {
+            vertices,
+            triangles,
+            min_x,
+            min_z,
+            cell,
+            cols,
+            rows,
+            bins,
+        })
+    }
+
+    fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        let c = ((x - self.min_x) / self.cell).floor();
+        let r = ((z - self.min_z) / self.cell).floor();
+        if c < 0.0 || r < 0.0 || c as usize >= self.cols || r as usize >= self.rows {
+            return None;
+        }
+        let mut best: Option<f32> = None;
+        for &t in &self.bins[r as usize * self.cols + c as usize] {
+            let [a, b, c] = self.triangles[t as usize].map(|i| self.vertices[i as usize]);
+            if let Some(y) = triangle_height_at(a, b, c, x, z) {
+                best = Some(best.map_or(y, |h| h.max(y)));
+            }
+        }
+        best
+    }
+}
+
+fn triangle_height_at(a: [f32; 3], b: [f32; 3], c: [f32; 3], x: f32, z: f32) -> Option<f32> {
+    let det = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / det;
+    let l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / det;
+    let l3 = 1.0 - l1 - l2;
+    let eps = -1e-4;
+    if l1 < eps || l2 < eps || l3 < eps {
+        return None;
+    }
+    Some(l1 * a[1] + l2 * b[1] + l3 * c[1])
+}
+
+fn set_usd_terrain_height_profile(min_y: f32, max_y: f32) {
+    let flat = max_y - min_y <= USD_TERRAIN_FLAT_TOLERANCE_M;
+    USD_TERRAIN_FLAT_Y_BITS.store(max_y.to_bits(), Ordering::Relaxed);
+    USD_TERRAIN_IS_FLAT.store(flat, Ordering::Relaxed);
+}
+
+fn set_usd_terrain_height_mesh(vertices: &[DVec3], triangles: &[[u32; 3]]) {
+    if let Ok(mut slot) = USD_TERRAIN_MESH.write() {
+        *slot = TerrainHeightMesh::build(vertices, triangles).map(Arc::new);
+    }
+}
+
+fn clear_usd_terrain_height_profile() {
+    USD_TERRAIN_IS_FLAT.store(false, Ordering::Relaxed);
+    if let Ok(mut slot) = USD_TERRAIN_MESH.write() {
+        *slot = None;
+    }
+}
 
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "../assets/shaders/terrain_material.wgsl");
-        app.insert_resource(ClearColor(Color::srgb(0.55, 0.70, 0.86)))
-            // 8 k shadow map (4× Bevy's 2048 default). One cascade has
-            // to cover the whole ~100 m vehicle neighbourhood, so the
-            // extra texels go directly into shadow sharpness.
-            .insert_resource(DirectionalLightShadowMap { size: 8192 })
-            .init_resource::<StaticUsdPropBodies>()
+        app.init_resource::<StaticUsdPropBodies>()
             .init_resource::<PublishedUsdPoses>()
-            .add_plugins(MaterialPlugin::<AntiRepeatTerrainMaterial>::default())
-            .add_systems(Startup, open_world_event_publisher)
-            .add_systems(Startup, (spawn_world, spawn_flat_ground))
+            .add_systems(
+                Startup,
+                (
+                    spawn_world.after(BevyViewportSet::SetupTarget),
+                    spawn_flat_ground,
+                ),
+            )
             .add_systems(Update, mark_new_usd_terrain_roots)
-            .add_systems(Update, (chase_camera_control, chase_camera_zoom))
+            .add_systems(
+                Update,
+                (chase_camera_control, chase_camera_zoom, chase_camera_keys).chain(),
+            )
             .add_systems(Update, snap_new_usd_roots_to_terrain)
-            .add_systems(Update, apply_anti_repeat_material_to_usd_terrain)
             .add_systems(Update, freeze_settled_static_usd_prop_bodies)
             .add_systems(Update, publish_loaded_usd_poses)
             .add_systems(Update, harvest_bales_on_machine_contact)
@@ -78,6 +203,7 @@ impl Plugin for WorldPlugin {
             .add_systems(
                 PostUpdate,
                 (
+                    chase_camera_floor.before(TransformSystems::Propagate),
                     activate_usd_terrain_when_collider_ready.after(TransformSystems::Propagate),
                     align_new_grounded_usd_bounds_to_terrain
                         .after(activate_usd_terrain_when_collider_ready),
@@ -85,33 +211,6 @@ impl Plugin for WorldPlugin {
             );
     }
 }
-
-type AntiRepeatTerrainMaterial = ExtendedMaterial<StandardMaterial, AntiRepeatTerrainExtension>;
-
-#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
-struct AntiRepeatTerrainExtension {
-    #[texture(100)]
-    #[sampler(101)]
-    terrain_albedo: Handle<Image>,
-    #[texture(102)]
-    #[sampler(103)]
-    terrain_height: Handle<Image>,
-    #[texture(104)]
-    #[sampler(105)]
-    terrain_detail_albedo: Handle<Image>,
-    #[texture(106)]
-    #[sampler(107)]
-    terrain_detail_height: Handle<Image>,
-}
-
-impl MaterialExtension for AntiRepeatTerrainExtension {
-    fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox/../assets/shaders/terrain_material.wgsl".into()
-    }
-}
-
-#[derive(Component, Debug, Clone, Copy)]
-struct AntiRepeatTerrainMaterialApplied;
 
 #[derive(Component, Debug, Clone, Copy)]
 struct TerrainBoundsSnapPending {
@@ -125,53 +224,26 @@ struct PendingUsdTerrainActivation {
 
 #[derive(Component, Debug, Clone, Copy)]
 struct StaticUsdPhysicsProp {
-    body: RigidBodyHandle,
+    body: BodyId,
     visual_top_offset_y: f32,
     frames_alive: u32,
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
-struct FlatGround {
+pub(crate) struct FlatGround {
     entity: Entity,
-    collider: ColliderHandle,
+    collider: ColliderId,
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
-struct TerrainCollision {
-    terrain: ColliderHandle,
-    safety_floor: ColliderHandle,
+pub(crate) struct TerrainCollision {
+    terrain: ColliderId,
+    safety_floor: ColliderId,
 }
 
 #[derive(Resource, Default)]
 struct StaticUsdPropBodies {
-    handles: HashMap<Entity, (RigidBodyHandle, ColliderHandle)>,
-}
-
-#[derive(Resource, Clone)]
-struct WorldEventPublisher {
-    session: Arc<zenoh::Session>,
-}
-
-#[derive(Debug, Serialize)]
-struct UsdHarvestedWire {
-    id: String,
-    bale_id: Option<u32>,
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-/// Settled world pose of a loader-spawned static USD. Published once the prop
-/// body freezes, so scripts read the *real* terrain-snapped + physics-settled
-/// position instead of guessing. `top_y` is the world Y of the asset's visual
-/// top — a caller can drop a marker right above it with no terrain math.
-#[derive(Debug, Serialize)]
-struct UsdPoseWire {
-    id: String,
-    x: f32,
-    y: f32,
-    z: f32,
-    top_y: f32,
+    handles: HashMap<Entity, (BodyId, ColliderId)>,
 }
 
 /// Prop entities whose settled pose has already been published. Keyed by
@@ -189,35 +261,72 @@ const STATIC_PROP_FORCE_FREEZE_FRAMES: u32 = 45;
 const STATIC_PROP_SETTLED_LINEAR_SPEED_MPS: f64 = 0.12;
 const STATIC_PROP_SETTLED_ANGULAR_SPEED_RPS: f64 = 0.25;
 
-fn open_world_event_publisher(mut commands: Commands) {
-    match zenoh::open(zenoh::Config::default()).wait() {
-        Ok(session) => {
-            commands.insert_resource(WorldEventPublisher {
-                session: Arc::new(session),
-            });
-            info!(
-                "world: USD world events ready \
-                 (gearbox/usd/harvested/<id>, gearbox/usd/pose/<id>)"
-            );
-        }
-        Err(err) => {
-            warn!("world: USD world events disabled: {err}");
+/// The planet: fine rings in a cap around the pole under the field, where it is
+/// seen from near, and coarse ones round the rest for a camera in orbit. Rings
+/// tighten towards the field, keeping the true curvature with ~35k vertices
+/// where a full 1024x512 sphere uploaded 29 MB at every launch.
+fn planet_cap_mesh(radius: f32) -> Mesh {
+    const CAP_RAD: f32 = 3.0 * std::f32::consts::PI / 180.0;
+    const CAP_RINGS: u32 = 48;
+    // Past the cap, coarse rings close the globe for a camera in orbit.
+    const GLOBE_RINGS: u32 = 90;
+    const RINGS: u32 = CAP_RINGS + GLOBE_RINGS;
+    const SEGMENTS: u32 = 256;
+    let mut positions = vec![[0.0, radius, 0.0]];
+    let mut normals = vec![[0.0, 1.0, 0.0]];
+    for ring in 1..=RINGS {
+        let theta = if ring <= CAP_RINGS {
+            CAP_RAD * (ring as f32 / CAP_RINGS as f32).powi(2)
+        } else {
+            let t = (ring - CAP_RINGS) as f32 / (GLOBE_RINGS + 1) as f32;
+            CAP_RAD + (std::f32::consts::PI - CAP_RAD) * t
+        };
+        for segment in 0..SEGMENTS {
+            let phi = segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            let normal = [theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin()];
+            positions.push(normal.map(|c| c * radius));
+            normals.push(normal);
         }
     }
+    let at = |ring: u32, segment: u32| 1 + (ring - 1) * SEGMENTS + segment % SEGMENTS;
+    let mut indices = Vec::new();
+    for segment in 0..SEGMENTS {
+        indices.extend([0, at(1, segment + 1), at(1, segment)]);
+    }
+    for ring in 1..RINGS {
+        for segment in 0..SEGMENTS {
+            let (a, b) = (at(ring, segment), at(ring, segment + 1));
+            let (c, d) = (at(ring + 1, segment), at(ring + 1, segment + 1));
+            indices.extend([a, b, c, b, d, c]);
+        }
+    }
+    // The far pole closes it.
+    let south = positions.len() as u32;
+    positions.push([0.0, -radius, 0.0]);
+    normals.push([0.0, -1.0, 0.0]);
+    for segment in 0..SEGMENTS {
+        indices.extend([south, at(RINGS, segment), at(RINGS, segment + 1)]);
+    }
+    Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_indices(bevy::mesh::Indices::U32(indices))
 }
 
 fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    render_target: Option<Res<BevyViewportRenderTarget>>,
+    sites: Res<crate::globe::Sites>,
 ) {
     let radius = PLANET_RADIUS_M;
-    let radius_f64 = PLANET_RADIUS_M as f64;
 
-    // ── Planet sphere ────────────────────────────────────────────────
-    // Warm sandy / tan ground colour. Higher UV resolution than a
-    // toy sphere because this fills the whole horizon. It is lowered
+    // ── Planet ───────────────────────────────────────────────────────
+    // Warm sandy / tan ground colour, filling the horizon. It is lowered
     // below the local terrain so it cannot appear as a second flat
     // ground plate under the hilly field mesh.
     let planet_mat = materials.add(StandardMaterial {
@@ -225,10 +334,14 @@ fn spawn_world(
         perceptual_roughness: 0.95,
         ..default()
     });
-    let planet_mesh = meshes.add(Sphere::new(radius).mesh().uv(1024, 512));
+    let planet_mesh = meshes.add(planet_cap_mesh(radius));
     commands.spawn((
         Name::new("Planet"),
-        Transform::from_xyz(0.0, -radius - PLANET_VISUAL_DROP_M, 0.0),
+        crate::globe::PlanetBall,
+        // At the centre of its own frame, shrunk to sit under the land everywhere.
+        Transform::from_scale(Vec3::splat(1.0 - PLANET_VISUAL_DROP_M / radius)),
+        big_space::prelude::CellCoord::default(),
+        ChildOf(sites.root),
         Mesh3d(planet_mesh),
         MeshMaterial3d(planet_mat.clone()),
         NotShadowCaster,
@@ -243,131 +356,77 @@ fn spawn_world(
         ..GroundGrid::default()
     });
 
-    // ── Cloud shell ──────────────────────────────────────────────────
-    spawn_cloud_shell(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &mut images,
-        radius_f64,
-    );
-
-    // ── Sun + tight cascade ──────────────────────────────────────────
-    // Single 100 m cascade so all texels land on the vehicle
-    // neighbourhood. Steep angle for a clear horizontal direction.
-    let sun_shadow = CascadeShadowConfigBuilder {
-        num_cascades: 1,
-        minimum_distance: 0.1,
-        maximum_distance: 100.0,
-        first_cascade_far_bound: 100.0,
-        overlap_proportion: 0.0,
-    }
-    .build();
-    commands.spawn((
-        Name::new("Sun"),
-        Transform::from_xyz(5.0, 50.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-        DirectionalLight {
-            illuminance: 10_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        sun_shadow,
-    ));
-
-    // ── Atmospheric fog ──────────────────────────────────────────────
-    let fog = DistanceFog {
-        color: Color::srgb(0.55, 0.70, 0.86),
-        falloff: FogFalloff::Atmospheric {
-            extinction: Vec3::new(0.00008, 0.00012, 0.00020),
-            inscattering: Vec3::new(0.00010, 0.00015, 0.00025),
-        },
-        ..default()
-    };
-
     // ── Camera ──────────────────────────────────────────────────────
+    // Scripted views: `GEARBOX_CAMERA_DISTANCE` (m), `GEARBOX_CAMERA_ELEVATION` (deg)
+    // and `GEARBOX_CAMERA_FOCUS` ("x,z" in m).
+    let view = |name: &str, fallback: f32| {
+        std::env::var(name).ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite()).unwrap_or(fallback)
+    };
     let chase = ChaseCamera {
-        focus: Vec3::new(0.0, 0.5, 0.0),
-        distance: 14.0,
-        elevation: 25_f32.to_radians(),
-        max_distance: radius * 3.0,
+        focus: std::env::var("GEARBOX_CAMERA_FOCUS")
+            .ok()
+            .and_then(|v| {
+                let (x, z) = v.split_once(',')?;
+                Some(Vec3::new(x.trim().parse().ok()?, 0.5, z.trim().parse().ok()?))
+            })
+            .unwrap_or(Vec3::new(0.0, 0.5, 0.0)),
+        distance: view("GEARBOX_CAMERA_DISTANCE", 14.0).clamp(1.0, CAMERA_ORBIT_DISTANCE_M),
+        elevation: view("GEARBOX_CAMERA_ELEVATION", 15.0).clamp(-10.0, 89.0).to_radians(),
+        max_distance: CAMERA_MAX_DISTANCE_M,
         ..default()
     };
     let mut camera_transform = Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y);
     apply_rig(&chase, &mut camera_transform);
 
-    commands.spawn((
+    let mut camera = commands.spawn((
         Name::new("Camera"),
         Camera3d::default(),
+        bevy::render::view::NoIndirectDrawing,
+        // Sunlight only: no point or spot lights to cluster, and building
+        // the (empty) clusters cost ~18 ms a frame.
+        bevy::light::cluster::ClusterConfig::None,
         camera_transform,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
-            far: radius * 2.5,
+            // Only culling reads it (depth is reversed and unbounded): past the
+            // far side of the planet from the highest orbit.
+            far: 1.0e8,
             ..default()
         }),
-        fog,
-        AmbientLight {
-            color: Color::WHITE,
-            brightness: 120.0,
-            ..default()
-        },
         chase,
+        big_space::prelude::CellCoord::default(),
+        big_space::prelude::FloatingOrigin,
+        ChildOf(sites.home().entity),
     ));
+    if let Some(target) = render_target {
+        camera.insert(bevy::camera::RenderTarget::from(target.0.clone()));
+    }
 }
 
+/// Pointer input arrives from the mara viewport in render-target pixels:
+/// a primary drag orbits, a middle drag pans, Shift with a middle drag
+/// lifts the focus instead.
 fn chase_camera_control(
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    primary_window: Query<&Window, With<PrimaryWindow>>,
-    mut pan_anchor: Local<Option<Vec2>>,
-    mut lift_anchor: Local<Option<Vec2>>,
-    mut orbit_anchor: Local<Option<Vec2>>,
+    input: Res<BevyViewportInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    grab: Res<crate::viewer::systems::GizmoGrab>,
+    context: Res<crate::viewer::machine_context::MachineHover>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
-    let middle_pressed = mouse_buttons.pressed(MouseButton::Middle);
-    let left_pressed = mouse_buttons.pressed(MouseButton::Left);
-    let right_pressed = mouse_buttons.pressed(MouseButton::Right);
-
-    let lift_active = middle_pressed && (left_pressed || right_pressed);
-    let pan_active = middle_pressed && !lift_active;
-    let orbit_active = left_pressed && right_pressed && !middle_pressed;
-
-    if !pan_active {
-        *pan_anchor = None;
+    if context.captures_pointer {
+        return;
     }
-    if !lift_active {
-        *lift_anchor = None;
-    }
-    if !orbit_active {
-        *orbit_anchor = None;
-    }
-
-    let cursor_position = primary_window
-        .single()
-        .ok()
-        .and_then(|w| w.cursor_position());
-    let mut pan_delta = Vec2::ZERO;
-    if pan_active && let Some(pos) = cursor_position {
-        if let Some(anchor) = *pan_anchor {
-            pan_delta = pos - anchor;
-        }
-        *pan_anchor = Some(pos);
-    }
-
-    let mut lift_delta = 0.0_f32;
-    if lift_active && let Some(pos) = cursor_position {
-        if let Some(anchor) = *lift_anchor {
-            lift_delta = (pos - anchor).y;
-        }
-        *lift_anchor = Some(pos);
-    }
-
-    let mut orbit_delta = Vec2::ZERO;
-    if orbit_active && let Some(pos) = cursor_position {
-        if let Some(anchor) = *orbit_anchor {
-            orbit_delta = pos - anchor;
-        }
-        *orbit_anchor = Some(pos);
-    }
-
+    let orbit_delta = if grab.0 {
+        Vec2::ZERO
+    } else {
+        Vec2::from(input.drag_delta)
+    };
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let (pan_delta, lift_delta) = if shift {
+        (Vec2::ZERO, input.pan_delta[1])
+    } else {
+        (Vec2::from(input.pan_delta), 0.0)
+    };
     if pan_delta == Vec2::ZERO && lift_delta == 0.0 && orbit_delta == Vec2::ZERO {
         return;
     }
@@ -391,29 +450,152 @@ fn chase_camera_control(
     }
 }
 
+/// How much of the view distance a second of a held key moves the view.
+const KEY_PAN_PER_SEC: f32 = 0.4;
+
+/// How far above the actual terrain surface (hills included, not just
+/// `y=0`) the camera's eye is kept. Three degrees above level keeps the
+/// camera itself above a focus that is on the ground, whatever the distance.
+const CAMERA_TERRAIN_CLEARANCE_M: f32 = 0.5;
+const CAMERA_MIN_ELEVATION: f32 = 3.0_f32.to_radians();
+
+/// Bounds the camera after controls and fly-to updates; Alt bypasses only the
+/// floor. The floor tracks the terrain surface under the camera's eye (not
+/// `focus`, and not a flat `y=0`), so flying over a hill rises with it and
+/// looking straight down stops right at the ground instead of clipping
+/// through — `apply_rig` puts the eye at `focus + distance` along
+/// `yaw`/`elevation`, so the same offset is used here to find what's
+/// actually under the eye before solving back for the `focus.y` that keeps
+/// it clear.
+pub(crate) fn chase_camera_floor(
+    keys: Res<ButtonInput<KeyCode>>,
+    toggles: Res<crate::viewer::overlays::DisplayToggles>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut Projection)>,
+) {
+    let (ceiling, max_height) = if toggles.unlimited_zoom {
+        (CAMERA_ORBIT_DISTANCE_M, CAMERA_ORBIT_DISTANCE_M)
+    } else {
+        (CAMERA_MAX_DISTANCE_M, CAMERA_MAX_HEIGHT_M)
+    };
+    let below_ground = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+    for (mut cam, mut transform, mut projection) in &mut cameras {
+        cam.max_distance = ceiling;
+        cam.distance = cam.distance.clamp(cam.min_distance, ceiling);
+        // Depth precision falls with the square of distance over the near
+        // plane, so the near plane backs off as the camera does; nothing is
+        // ever that close to a camera that far out.
+        let near = (cam.distance / 200.0).clamp(0.1, 100_000.0);
+        if let Projection::Perspective(lens) = projection.as_mut()
+            && (lens.near - near).abs() > near * 0.05
+        {
+            lens.near = near;
+        }
+        cam.focus.x = cam.focus.x.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
+        cam.focus.z = cam.focus.z.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
+        if !below_ground {
+            cam.elevation = cam.elevation.max(CAMERA_MIN_ELEVATION);
+            let horizontal = cam.elevation.cos();
+            let rise = cam.distance * cam.elevation.sin();
+            let eye_x = cam.focus.x + cam.distance * cam.yaw.sin() * horizontal;
+            let eye_z = cam.focus.z + cam.distance * cam.yaw.cos() * horizontal;
+            let ground = terrain_height_m(eye_x, eye_z);
+            cam.focus.y = cam
+                .focus
+                .y
+                .max(ground + CAMERA_TERRAIN_CLEARANCE_M - rise);
+        }
+        let rise = cam.distance * cam.elevation.sin().max(0.0);
+        if rise > max_height {
+            cam.distance = max_height / cam.elevation.sin();
+        }
+        cam.focus.y = cam
+            .focus
+            .y
+            .min(max_height - cam.distance * cam.elevation.sin());
+        apply_rig(&cam, &mut transform);
+    }
+}
+
+/// W/S fly the camera forward/back along its view, translating it rather
+/// than zooming — distance to focus is untouched, so this never changes
+/// perspective, only position. A/D slide over the ground, Q/E go down and
+/// up, Shift speeds all of it. W/S drop any follow, since a followed
+/// target's position would otherwise fight the translation every frame.
+/// Yields WASD to `viewer::drive::keyboard` while it's driving the selected
+/// machine, so the keys don't do both at once.
+fn chase_camera_keys(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    panel: Res<crate::viewer::drive::MachinePanel>,
+    mut follow: ResMut<crate::viewer::state::FollowTarget>,
+    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+) {
+    if panel.keyboard.is_some() {
+        return;
+    }
+    let axis =
+        |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i8 - keys.pressed(neg) as i8) as f32;
+    // `forward` below points from the focus back to the camera, so W is the
+    // negative direction along it.
+    let ahead = axis(KeyCode::KeyW, KeyCode::KeyS);
+    let aside = axis(KeyCode::KeyA, KeyCode::KeyD);
+    let up = axis(KeyCode::KeyQ, KeyCode::KeyE);
+    if ahead == 0.0 && aside == 0.0 && up == 0.0 {
+        return;
+    }
+    let boost = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+        3.0
+    } else {
+        1.0
+    };
+    if ahead != 0.0 {
+        follow.set(None);
+    }
+    for (mut cam, mut transform) in &mut cameras {
+        let forward = Vec3::new(cam.yaw.sin(), 0.0, cam.yaw.cos());
+        let right = Vec3::new(forward.z, 0.0, -forward.x);
+        let offset = Vec3::new(
+            forward.x * cam.elevation.cos(),
+            cam.elevation.sin(),
+            forward.z * cam.elevation.cos(),
+        );
+        let speed = cam.distance.max(2.0) * KEY_PAN_PER_SEC * boost * time.delta_secs();
+        cam.focus += offset * ahead * speed + (right * aside + Vec3::Y * up) * speed;
+        apply_rig(&cam, &mut transform);
+    }
+}
+
+/// The viewport reports scroll in 120-point units; one wheel notch is 50
+/// points in egui, so this brings it back to notches.
+const SCROLL_NOTCHES_PER_UNIT: f64 = 120.0 / 50.0;
+
 fn chase_camera_zoom(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut wheel: MessageReader<MouseWheel>,
+    input: Res<BevyViewportInput>,
+    context: Res<crate::viewer::machine_context::MachineHover>,
     mut zoom_target: Local<Option<f64>>,
+    mut last_written: Local<Option<f32>>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
 ) {
     if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
-        wheel.read().for_each(drop);
         return;
     }
-    let mut scroll_delta = 0.0_f64;
-    for event in wheel.read() {
-        scroll_delta += match event.unit {
-            MouseScrollUnit::Line => event.y as f64,
-            MouseScrollUnit::Pixel => event.y as f64 / 32.0,
-        };
-    }
+    let scroll_delta = if context.captures_pointer {
+        0.0
+    } else {
+        input.scroll_delta as f64 * SCROLL_NOTCHES_PER_UNIT
+    };
 
     let Ok((mut cam, mut transform)) = cameras.single_mut() else {
         return;
     };
     let target = zoom_target.get_or_insert(cam.distance as f64);
+    // A distance set elsewhere (fly, fit) becomes the new zoom target instead
+    // of being pulled back to the last scrolled one.
+    if last_written.is_some_and(|d| (d - cam.distance).abs() > 1e-4) {
+        *target = cam.distance as f64;
+    }
     if scroll_delta != 0.0 {
         let log_target = target.max(0.1).log10();
         let new_log = log_target - scroll_delta * cam.zoom_step;
@@ -434,6 +616,7 @@ fn chase_camera_zoom(
         cam.distance = *target as f32;
         apply_rig(&cam, &mut transform);
     }
+    *last_written = Some(cam.distance);
 }
 
 fn spawn_flat_ground(
@@ -443,6 +626,7 @@ fn spawn_flat_ground(
     mut physics: ResMut<PhysicsWorld>,
 ) {
     USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
+    clear_usd_terrain_height_profile();
 
     let material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.48, 0.42, 0.30),
@@ -464,14 +648,18 @@ fn spawn_flat_ground(
         ))
         .id();
 
-    let collider =
-        ColliderBuilder::cuboid(FLAT_GROUND_HALF_EXTENT_M, 0.02, FLAT_GROUND_HALF_EXTENT_M)
-            .translation(DVec3::new(0.0, -0.02, 0.0))
-            .friction(1.0)
-            .restitution(0.0)
-            .build();
-    let collider = physics.colliders.insert(collider);
+    let collider = physics
+        .insert_collider(
+            ground_slab(0.02)
+                .translation(DVec3::new(0.0, -0.02, 0.0))
+                .friction(ground_friction(1.0))
+                .restitution(0.0),
+        )
+        .expect("a cuboid always builds");
     commands.insert_resource(FlatGround { entity, collider });
+    if let Err(error) = physics.register_wheel_ground(collider, None) {
+        warn!("world: tyre ground registration failed: {error}");
+    }
 }
 
 fn mark_new_usd_terrain_roots(
@@ -552,78 +740,15 @@ fn activate_usd_terrain_when_collider_ready(
     }
 }
 
-fn is_usd_terrain_root_name(name: &str) -> bool {
+pub(crate) fn is_usd_terrain_root_name(name: &str) -> bool {
     name == "WorldTerrain" || name.to_ascii_lowercase().contains("terrain")
 }
 
-fn is_usd_terrain_scene_instantiated(root: Entity, children: &Query<&Children>) -> bool {
+pub(crate) fn is_usd_terrain_scene_instantiated(root: Entity, children: &Query<&Children>) -> bool {
     collect_descendants(root, children).len() > 1
 }
 
-fn apply_anti_repeat_material_to_usd_terrain(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<AntiRepeatTerrainMaterial>>,
-    terrain_roots: Query<(Entity, &Name), With<usd_bevy::UsdSceneRoot>>,
-    children: Query<&Children>,
-    terrain_meshes: Query<Entity, (With<Mesh3d>, Without<AntiRepeatTerrainMaterialApplied>)>,
-    mut material_handle: Local<Option<Handle<AntiRepeatTerrainMaterial>>>,
-) {
-    let handle = material_handle
-        .get_or_insert_with(|| {
-            materials.add(ExtendedMaterial {
-                base: StandardMaterial {
-                    double_sided: true,
-                    cull_mode: None,
-                    perceptual_roughness: 0.98,
-                    metallic: 0.0,
-                    ..default()
-                },
-                extension: AntiRepeatTerrainExtension {
-                    terrain_albedo: asset_server.load(asset_path(
-                        "textures/terrain/Ground001/Ground001_1K-JPG_Color.jpg",
-                    )),
-                    terrain_height: asset_server.load(asset_path(
-                        "textures/terrain/Ground001/Ground001_1K-JPG_Displacement.jpg",
-                    )),
-                    terrain_detail_albedo: asset_server.load(asset_path(
-                        "textures/terrain/Ground003/Ground003_1K-JPG_Color.jpg",
-                    )),
-                    terrain_detail_height: asset_server.load(asset_path(
-                        "textures/terrain/Ground003/Ground003_1K-JPG_Displacement.jpg",
-                    )),
-                },
-            })
-        })
-        .clone();
-
-    let mut applied = 0usize;
-    for (root, name) in terrain_roots.iter() {
-        if !is_usd_terrain_root_name(name.as_str())
-            || !is_usd_terrain_scene_instantiated(root, &children)
-        {
-            continue;
-        }
-        for entity in collect_descendants(root, &children) {
-            if terrain_meshes.get(entity).is_err() {
-                continue;
-            }
-            commands
-                .entity(entity)
-                .remove::<MeshMaterial3d<StandardMaterial>>()
-                .insert((
-                    MeshMaterial3d(handle.clone()),
-                    AntiRepeatTerrainMaterialApplied,
-                ));
-            applied += 1;
-        }
-    }
-    if applied > 0 {
-        info!("world: applied anti-repeating terrain material to {applied} USD terrain mesh(es)");
-    }
-}
-
-fn asset_path(relative: &str) -> String {
+pub(crate) fn asset_path(relative: &str) -> String {
     crate::load::default_asset_root()
         .join(relative)
         .to_string_lossy()
@@ -643,29 +768,41 @@ fn attach_gearbox_terrain_trimesh(
         return None;
     };
     remove_terrain_descendant_colliders(root, children, physics);
-    let Some(terrain) = ColliderBuilder::trimesh(vertices, indices).ok() else {
-        warn!("world: failed to build exact Rapier trimesh collider for USD terrain");
+    let (min_y, max_y) = vertices
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v.y as f32), hi.max(v.y as f32))
+        });
+    set_usd_terrain_height_profile(min_y, max_y);
+    set_usd_terrain_height_mesh(&vertices, &indices);
+    let Some(terrain) = physics.insert_collider(
+        ColliderDesc::new(Shape::TriMesh { vertices, indices })
+            .friction(ground_friction(1.4))
+            .restitution(0.0),
+    ) else {
+        warn!("world: failed to build exact trimesh collider for USD terrain");
         return None;
     };
-    let terrain = physics
-        .colliders
-        .insert(terrain.friction(1.4).restitution(0.0).build());
     physics.entity_to_collider.insert(root, terrain);
+    if let Err(error) = physics.register_wheel_ground(terrain, None) {
+        warn!("world: tyre terrain registration failed: {error}");
+    }
 
     // Belt-and-braces catch floor below the lowest authored terrain. It
     // should never be contacted in normal use, but it prevents assets from
     // disappearing forever if a future USD terrain asset has a hole or loads
     // slower than its dynamic bodies.
     let safety_y = TERRAIN_MIN_HEIGHT_M as f64 - 1.0;
-    let safety_floor =
-        ColliderBuilder::cuboid(FLAT_GROUND_HALF_EXTENT_M, 0.10, FLAT_GROUND_HALF_EXTENT_M)
-            .translation(DVec3::new(0.0, safety_y, 0.0))
-            .friction(1.2)
-            .restitution(0.0)
-            .build();
-    let safety_floor = physics.colliders.insert(safety_floor);
+    let safety_floor = physics
+        .insert_collider(
+            ground_slab(0.10)
+                .translation(DVec3::new(0.0, safety_y, 0.0))
+                .friction(1.2)
+                .restitution(0.0),
+        )
+        .expect("a cuboid always builds");
 
-    info!("world: attached exact visible-mesh Rapier trimesh collider for USD terrain");
+    info!("world: attached exact visible-mesh trimesh collider for USD terrain");
     Some(TerrainCollision {
         terrain,
         safety_floor,
@@ -766,20 +903,25 @@ fn remove_terrain_descendant_colliders(
                 .map(|handle| (entity, handle))
         })
         .collect::<Vec<_>>();
-    let colliders = &mut physics.colliders;
-    let islands = &mut physics.islands;
-    let bodies = &mut physics.bodies;
     for (_entity, handle) in stale {
-        colliders.remove(handle, islands, bodies, true);
+        physics.remove_collider(handle, true);
     }
 }
 
-fn remove_flat_ground(commands: &mut Commands, physics: &mut PhysicsWorld, flat: FlatGround) {
+/// The flat ground and the safety floors: one wide slab, `half_height` thick.
+fn ground_slab(half_height: f64) -> ColliderDesc {
+    ColliderDesc::new(Shape::Cuboid {
+        half_extents: DVec3::new(FLAT_GROUND_HALF_EXTENT_M, half_height, FLAT_GROUND_HALF_EXTENT_M),
+    })
+}
+
+pub(crate) fn remove_flat_ground(
+    commands: &mut Commands,
+    physics: &mut PhysicsWorld,
+    flat: FlatGround,
+) {
     commands.entity(flat.entity).despawn();
-    let colliders = &mut physics.colliders;
-    let islands = &mut physics.islands;
-    let bodies = &mut physics.bodies;
-    colliders.remove(flat.collider, islands, bodies, true);
+    physics.remove_collider(flat.collider, true);
 }
 
 fn snap_new_usd_roots_to_terrain(
@@ -822,7 +964,6 @@ fn align_new_grounded_usd_bounds_to_terrain(
         Option<&usd_bevy::UsdSceneRoot>,
         Option<&StaticUsdPhysicsProp>,
         Option<&Mesh3d>,
-        Option<&usd_bevy::UsdLocalExtent>,
         Option<&bevy::camera::primitives::Aabb>,
     )>,
 ) {
@@ -897,7 +1038,6 @@ fn loaded_usd_world_extent(
         Option<&usd_bevy::UsdSceneRoot>,
         Option<&StaticUsdPhysicsProp>,
         Option<&Mesh3d>,
-        Option<&usd_bevy::UsdLocalExtent>,
         Option<&bevy::camera::primitives::Aabb>,
     )>,
 ) -> Option<WorldExtent> {
@@ -908,7 +1048,7 @@ fn loaded_usd_world_extent(
     let mut has_scene_root = false;
     let mut has_static_prop_body = false;
     for entity in collect_descendants(root, children) {
-        let Ok((gt, scene_root, prop_body, mesh3d, local_extent, aabb)) = bounds.get(entity) else {
+        let Ok((gt, scene_root, prop_body, mesh3d, aabb)) = bounds.get(entity) else {
             continue;
         };
         has_scene_root |= scene_root.is_some();
@@ -933,24 +1073,6 @@ fn loaded_usd_world_extent(
             let half = Vec3::from(aabb.half_extents);
             let (box_min, box_max, box_clearance) =
                 local_box_world_bounds_and_terrain_clearance(gt, center - half, center + half);
-            min = min.min(box_min);
-            max = max.max(box_max);
-            min_terrain_clearance = min_terrain_clearance.min(box_clearance);
-            count += 1;
-        } else if let Some(local_extent) = local_extent {
-            let (box_min, box_max, box_clearance) = local_box_world_bounds_and_terrain_clearance(
-                gt,
-                Vec3::new(
-                    local_extent.min[0],
-                    local_extent.min[1],
-                    local_extent.min[2],
-                ),
-                Vec3::new(
-                    local_extent.max[0],
-                    local_extent.max[1],
-                    local_extent.max[2],
-                ),
-            );
             min = min.min(box_min);
             max = max.max(box_max);
             min_terrain_clearance = min_terrain_clearance.min(box_clearance);
@@ -981,54 +1103,43 @@ fn attach_static_usd_prop_body(
     root_translation_before_adjustment: Vec3,
     extent: &WorldExtent,
     physics: &mut PhysicsWorld,
-) -> (RigidBodyHandle, ColliderHandle) {
+) -> (BodyId, ColliderId) {
     let center = (extent.min + extent.max) * 0.5;
     let root_pos = root_transform.translation;
     let local_center =
         root_transform.rotation.inverse() * (center - root_translation_before_adjustment);
     let size = extent.max - extent.min;
     let along_x = size.x >= size.z;
-    let body = RigidBodyBuilder::dynamic()
-        .pose(Pose {
-            translation: DVec3::new(root_pos.x as f64, root_pos.y as f64, root_pos.z as f64),
-            rotation: DQuat::from_xyzw(
-                root_transform.rotation.x as f64,
-                root_transform.rotation.y as f64,
-                root_transform.rotation.z as f64,
-                root_transform.rotation.w as f64,
-            ),
-        })
-        .linvel(DVec3::ZERO)
-        .angvel(DVec3::ZERO)
-        .linear_damping(4.0)
-        .angular_damping(8.0)
-        .can_sleep(true)
-        .build();
-    let body_handle = physics.bodies.insert(body);
-    let mut collider = if along_x {
-        ColliderBuilder::capsule_x(
-            extent.collider_half_length as f64,
-            extent.collider_radius as f64,
-        )
-    } else {
-        ColliderBuilder::capsule_z(
-            extent.collider_half_length as f64,
-            extent.collider_radius as f64,
-        )
-    };
-    collider = collider
-        .translation(DVec3::new(
-            local_center.x as f64,
-            local_center.y as f64,
-            local_center.z as f64,
-        ))
-        .density(80.0)
-        .friction(1.2)
-        .restitution(0.05);
-    let collider_handle =
-        physics
-            .colliders
-            .insert_with_parent(collider.build(), body_handle, &mut physics.bodies);
+    let mut body = BodyDesc::dynamic().pose(Pose {
+        translation: DVec3::new(root_pos.x as f64, root_pos.y as f64, root_pos.z as f64),
+        rotation: DQuat::from_xyzw(
+            root_transform.rotation.x as f64,
+            root_transform.rotation.y as f64,
+            root_transform.rotation.z as f64,
+            root_transform.rotation.w as f64,
+        ),
+    });
+    body.linear_damping = 4.0;
+    body.angular_damping = 8.0;
+    let body_handle = physics.insert_body(body);
+    let half = if along_x { DVec3::X } else { DVec3::Z } * extent.collider_half_length as f64;
+    let collider = ColliderDesc::new(Shape::Capsule {
+        a: -half,
+        b: half,
+        radius: extent.collider_radius as f64,
+    })
+    .translation(DVec3::new(
+        local_center.x as f64,
+        local_center.y as f64,
+        local_center.z as f64,
+    ))
+    .parent(body_handle)
+    .density(80.0)
+    .friction(1.2)
+    .restitution(0.05);
+    let collider_handle = physics
+        .insert_collider(collider)
+        .expect("a capsule always builds");
     physics.entity_to_body.insert(root, body_handle);
     physics.entity_to_collider.insert(root, collider_handle);
     (body_handle, collider_handle)
@@ -1042,11 +1153,11 @@ fn attach_static_usd_prop_body(
 /// things *are*; it never decides what anything targets.
 fn publish_loaded_usd_poses(
     physics: Res<PhysicsWorld>,
-    publisher: Option<Res<WorldEventPublisher>>,
+    bus: Option<ResMut<GearboxBus>>,
     mut published: ResMut<PublishedUsdPoses>,
     props: Query<(Entity, &Name, &Transform, &StaticUsdPhysicsProp)>,
 ) {
-    let Some(publisher) = publisher.as_deref() else {
+    let Some(mut bus) = bus else {
         return;
     };
     // Forget props that no longer exist (harvested / unloaded). A later load
@@ -1066,15 +1177,18 @@ fn publish_loaded_usd_poses(
         // flips a settled body to `Fixed`, so a non-dynamic body means the
         // pose reported here is the final resting pose.
         let settled = physics
-            .bodies
-            .get(prop.body)
+            .body(prop.body)
             .is_some_and(|body| !body.is_dynamic());
         if !settled {
             continue;
         }
         let pos = tr.translation;
         let top_y = pos.y + prop.visual_top_offset_y;
-        publisher.publish_loaded_usd_pose(id, pos, top_y);
+        bus.publish_event(
+            SceneEvent::new(event_kind::POSE, id)
+                .at(pos.x, pos.y, pos.z)
+                .with_top(top_y),
+        );
         published.published.insert(entity);
     }
 }
@@ -1083,9 +1197,10 @@ fn harvest_bales_on_machine_contact(
     mut commands: Commands,
     mut physics: ResMut<PhysicsWorld>,
     mut prop_bodies: ResMut<StaticUsdPropBodies>,
-    publisher: Option<Res<WorldEventPublisher>>,
+    bus: Option<ResMut<GearboxBus>>,
     bales: Query<(Entity, &Name, &Transform, &StaticUsdPhysicsProp)>,
 ) {
+    let mut bus = bus;
     let prop_body_handles = prop_bodies
         .handles
         .values()
@@ -1100,26 +1215,22 @@ fn harvest_bales_on_machine_contact(
             continue;
         };
         let hit_non_prop_body = physics
-            .narrow_phase
-            .contact_pairs_with(collider)
-            .filter(|pair| pair.has_any_active_contact())
-            .any(|pair| {
-                let other_collider = if pair.collider1 == collider {
-                    pair.collider2
+            .contacts_with(collider)
+            .iter()
+            .filter(|manifold| manifold.active)
+            .any(|manifold| {
+                let other_collider = if manifold.collider1 == collider {
+                    manifold.collider2
                 } else {
-                    pair.collider1
+                    manifold.collider1
                 };
                 physics
-                    .colliders
-                    .get(other_collider)
+                    .collider(other_collider)
                     .and_then(|collider| collider.parent())
                     .is_some_and(|body| {
                         body != prop.body
                             && !prop_body_handles.contains(&body)
-                            && physics
-                                .bodies
-                                .get(body)
-                                .is_some_and(|body| body.is_dynamic())
+                            && physics.body(body).is_some_and(|body| body.is_dynamic())
                     })
             });
         if hit_non_prop_body {
@@ -1130,8 +1241,12 @@ fn harvest_bales_on_machine_contact(
     for (entity, bale_id, pos) in touched {
         remove_static_prop_body(entity, physics.as_mut(), prop_bodies.as_mut());
         commands.entity(entity).despawn();
-        if let Some(publisher) = publisher.as_deref() {
-            publisher.publish_bale_harvested(&bale_id, pos);
+        if let Some(bus) = bus.as_deref_mut() {
+            bus.publish_event(
+                SceneEvent::new(event_kind::HARVESTED, &format!("bale_{bale_id}"))
+                    .at(pos.x, pos.y, pos.z)
+                    .with_prop("bale_id", &bale_id),
+            );
         }
     }
 }
@@ -1149,73 +1264,13 @@ fn parse_loaded_usd_id(name: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-impl WorldEventPublisher {
-    fn publish_bale_harvested(&self, bale_id: &str, pos: Vec3) {
-        let id = format!("bale_{bale_id}");
-        let event = UsdHarvestedWire {
-            id: id.clone(),
-            bale_id: bale_id.parse::<u32>().ok(),
-            x: pos.x,
-            y: pos.y,
-            z: pos.z,
-        };
-        let Ok(bytes) = encode(&event) else {
-            return;
-        };
-        let topic = format!("gearbox/usd/harvested/{id}");
-        // BLOCK congestion control: a dropped harvest event would leave the
-        // controlling script unaware that a bale was collected, so its tractor
-        // would keep targeting a bale that no longer exists. Harvest events
-        // are infrequent, so blocking briefly here costs nothing.
-        if let Err(err) = self
-            .session
-            .put(topic.clone(), bytes)
-            .congestion_control(zenoh::qos::CongestionControl::Block)
-            .wait()
-        {
-            warn!("world: failed to publish {topic}: {err}");
-        }
-    }
-
-    fn publish_loaded_usd_pose(&self, id: &str, pos: Vec3, top_y: f32) {
-        let event = UsdPoseWire {
-            id: id.to_string(),
-            x: pos.x,
-            y: pos.y,
-            z: pos.z,
-            top_y,
-        };
-        let Ok(bytes) = encode(&event) else {
-            return;
-        };
-        let topic = format!("gearbox/usd/pose/{id}");
-        // BLOCK congestion control: a dropped pose would leave a script with
-        // no position for that object — it could never be targeted. Each prop
-        // publishes its pose exactly once, so blocking briefly is free.
-        if let Err(err) = self
-            .session
-            .put(topic.clone(), bytes)
-            .congestion_control(zenoh::qos::CongestionControl::Block)
-            .wait()
-        {
-            warn!("world: failed to publish {topic}: {err}");
-        }
-    }
-}
-
-fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
-    let mut buf = Vec::new();
-    ciborium::into_writer(value, &mut buf)?;
-    Ok(buf)
-}
-
 fn freeze_settled_static_usd_prop_bodies(
     mut props: Query<(Entity, &mut StaticUsdPhysicsProp)>,
     mut physics: ResMut<PhysicsWorld>,
 ) {
     for (_entity, mut prop) in props.iter_mut() {
         prop.frames_alive = prop.frames_alive.saturating_add(1);
-        let Some(body) = physics.bodies.get_mut(prop.body) else {
+        let Some(body) = physics.body_mut(prop.body) else {
             continue;
         };
         if !body.is_dynamic() {
@@ -1233,7 +1288,7 @@ fn freeze_settled_static_usd_prop_bodies(
         if settled || timed_out {
             body.set_linvel(DVec3::ZERO, true);
             body.set_angvel(DVec3::ZERO, true);
-            body.set_body_type(RigidBodyType::Fixed, true);
+            body.set_kind(BodyKind::Fixed, true);
         }
     }
 }
@@ -1273,14 +1328,11 @@ fn cleanup_terrain_collision_without_usd_terrain(
     physics
         .entity_to_collider
         .retain(|_, handle| *handle != terrain_collision.terrain);
-    let physics = physics.as_mut();
-    let colliders = &mut physics.colliders;
-    let islands = &mut physics.islands;
-    let bodies = &mut physics.bodies;
-    colliders.remove(terrain_collision.terrain, islands, bodies, true);
-    colliders.remove(terrain_collision.safety_floor, islands, bodies, true);
+    physics.remove_collider(terrain_collision.terrain, true);
+    physics.remove_collider(terrain_collision.safety_floor, true);
     commands.remove_resource::<TerrainCollision>();
     USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
+    clear_usd_terrain_height_profile();
     info!("world: removed terrain collision because USD terrain is no longer loaded");
 }
 
@@ -1292,14 +1344,7 @@ fn remove_static_prop_body(
     if let Some((body, _collider)) = prop_bodies.handles.remove(&entity) {
         physics.entity_to_body.remove(&entity);
         physics.entity_to_collider.remove(&entity);
-        physics.bodies.remove(
-            body,
-            &mut physics.islands,
-            &mut physics.colliders,
-            &mut physics.impulse_joints,
-            &mut physics.multibody_joints,
-            true,
-        );
+        physics.remove_body(body);
     }
 }
 
@@ -1351,7 +1396,7 @@ fn local_box_world_bounds_and_terrain_clearance(
     (min, max, min_clearance)
 }
 
-fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity> {
+pub(crate) fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity> {
     let mut out = vec![root];
     let mut cursor = 0usize;
     while cursor < out.len() {
@@ -1365,8 +1410,18 @@ fn collect_descendants(root: Entity, children: &Query<&Children>) -> Vec<Entity>
 }
 
 pub fn terrain_height_m(x: f32, z: f32) -> f32 {
+    if let Some(h) = crate::terrain::procedural_height_m(x, z) {
+        return h;
+    }
     if !USD_TERRAIN_LOADED.load(Ordering::Relaxed) {
         return 0.0;
+    }
+    if USD_TERRAIN_IS_FLAT.load(Ordering::Relaxed) {
+        return f32::from_bits(USD_TERRAIN_FLAT_Y_BITS.load(Ordering::Relaxed));
+    }
+    let mesh = USD_TERRAIN_MESH.read().ok().and_then(|slot| slot.clone());
+    if let Some(h) = mesh.and_then(|m| m.height_at(x, z)) {
+        return h;
     }
     terrain_height_formula_m(x, z)
 }
@@ -1427,94 +1482,14 @@ fn smoothstep_range(edge0: f32, edge1: f32, value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn smooth_hill(x: f32, z: f32, cx: f32, cz: f32, radius: f32, height: f32) -> f32 {
+pub(crate) fn smooth_hill(x: f32, z: f32, cx: f32, cz: f32, radius: f32, height: f32) -> f32 {
     let dx = x - cx;
     let dz = z - cz;
     let d2 = dx * dx + dz * dz;
     height * (-d2 / (2.0 * radius * radius)).exp()
 }
 
-/// Translucent cloud shell — a UV sphere at `planet_radius + 4 km`,
-/// double-sided so it reads from inside (ground level overcast) and
-/// outside (orbital cloud bands), `NotShadowCaster` so it doesn't
-/// blow up the directional cascade.
-fn spawn_cloud_shell(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    planet_radius: f64,
-) {
-    let shell_radius = planet_radius + CLOUD_ALTITUDE_M;
-    let mesh = meshes.add(Sphere::new(shell_radius as f32).mesh().uv(256, 128));
-    let cloud_tex = images.add(make_cloud_texture());
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 1.0, 1.0, 0.92),
-        base_color_texture: Some(cloud_tex),
-        alpha_mode: AlphaMode::Blend,
-        unlit: false,
-        double_sided: true,
-        cull_mode: None,
-        perceptual_roughness: 1.0,
-        metallic: 0.0,
-        ..default()
-    });
-    commands.spawn((
-        Name::new("CloudShell"),
-        Transform::from_xyz(0.0, -planet_radius as f32, 0.0),
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        NotShadowCaster,
-    ));
-}
-
-fn make_cloud_texture() -> Image {
-    const W: u32 = 1024;
-    const H: u32 = 512;
-    let mut data = Vec::with_capacity((W * H * 4) as usize);
-    let coverage: f32 = 0.55;
-    let max_alpha: f32 = 0.92;
-    for y in 0..H {
-        for x in 0..W {
-            let u = x as f32 / W as f32;
-            let v = y as f32 / H as f32;
-            let n = fbm_tileable(u, v);
-            let t = ((n - (1.0 - coverage)) / coverage).clamp(0.0, 1.0);
-            let a = (t * t * (3.0 - 2.0 * t)) * max_alpha;
-            data.extend_from_slice(&[255, 255, 255, (a * 255.0) as u8]);
-        }
-    }
-    Image::new(
-        Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8Unorm,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    )
-}
-
-fn fbm_tileable(u: f32, v: f32) -> f32 {
-    use std::f32::consts::TAU;
-    let mut sum = 0.0;
-    let mut amp = 0.5;
-    let mut freq: f32 = 3.0;
-    let mut phase = 0.0;
-    for _ in 0..5 {
-        let fu = u * TAU * freq;
-        let fv = v * std::f32::consts::PI * freq;
-        sum += amp * ((fu + phase).sin() * fv.sin());
-        amp *= 0.55;
-        freq *= 2.07;
-        phase += 1.73;
-    }
-    (sum * 0.5 + 0.5).clamp(0.0, 1.0)
-}
-
-fn fbm_world(x: f32, z: f32, octaves: u32) -> f32 {
+pub(crate) fn fbm_world(x: f32, z: f32, octaves: u32) -> f32 {
     let mut sum = 0.0;
     let mut amp = 0.5;
     let mut freq = 1.0;
@@ -1569,6 +1544,23 @@ mod tests {
     static TERRAIN_FLAG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn terrain_mesh_heights_interpolate_the_loaded_surface() {
+        use super::{DVec3, TerrainHeightMesh};
+        let vertices = [
+            DVec3::new(-10.0, 0.0, -10.0),
+            DVec3::new(10.0, 4.0, -10.0),
+            DVec3::new(10.0, 8.0, 10.0),
+            DVec3::new(-10.0, 4.0, 10.0),
+        ];
+        let triangles = [[0, 1, 2], [0, 2, 3]];
+        let mesh = TerrainHeightMesh::build(&vertices, &triangles).expect("mesh");
+        assert!((mesh.height_at(0.0, 0.0).unwrap() - 4.0).abs() < 1e-3);
+        assert!((mesh.height_at(9.9, -9.9).unwrap() - 4.0).abs() < 0.05);
+        assert!((mesh.height_at(5.0, 5.0).unwrap() - 6.0).abs() < 1e-3);
+        assert!(mesh.height_at(50.0, 0.0).is_none());
+    }
+
+    #[test]
     fn terrain_height_is_flat_until_usd_terrain_is_active() {
         let _lock = TERRAIN_FLAG_TEST_LOCK.lock().unwrap();
         USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
@@ -1612,4 +1604,14 @@ mod tests {
         );
         USD_TERRAIN_LOADED.store(false, Ordering::Relaxed);
     }
+}
+
+/// Friction of the generated grounds; `GEARBOX_GROUND_FRICTION` overrides
+/// it to test slippery surfaces.
+pub fn ground_friction(default: f64) -> f64 {
+    std::env::var("GEARBOX_GROUND_FRICTION")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|f| *f >= 0.0)
+        .unwrap_or(default)
 }

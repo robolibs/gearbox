@@ -1,12 +1,21 @@
-//! Viewer UI ported from `bevy_openusd::*`. Provides the full panel
-//! set (Selection / Tree / Info / Variants / Cameras / Materials /
-//! Overlays / Timeline / Keys / Log) on top of the gearbox simulator's
-//! existing world / multi-USD loader / transform-gizmo / play button.
+//! The Bevy side of the viewer: state resources, per-frame systems and
+//! overlays. The panes that show and drive this state are drawn by the mara
+//! host (`crate::host`), which reaches the world directly and through
+//! `commands::HostCommands`.
 
-pub mod keyboard;
-pub mod log_panel;
-pub mod mara_ui;
+pub mod camera_requests;
+pub mod commands;
+pub mod drive;
+pub mod log;
+pub mod machine_context;
 pub mod overlays;
 pub mod physics_overlay;
+pub mod recorder;
+pub mod screenshot;
 pub mod state;
-pub mod ui;
+pub mod systems;
+pub mod tf_overlay;
+mod tyre_mesh;
+mod tyre_gpu;
+#[cfg(test)]
+mod tyre_gpu_test;

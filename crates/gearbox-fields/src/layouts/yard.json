@@ -1,0 +1,11 @@
+{
+  "default": "grassland",
+  "fields": [
+    {
+      "name": "concrete-yard",
+      "profile": "concrete",
+      "min": [-39.0, -39.0],
+      "max": [39.0, 39.0]
+    }
+  ]
+}

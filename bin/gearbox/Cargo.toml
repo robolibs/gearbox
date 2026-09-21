@@ -1,6 +1,6 @@
 [package]
-name = "gearbox"
-description = "gearbox — clean-slate USD simulator. Multi-USD loading, click-to-select, planet world, Mara UI. No legacy editor / viz / api crates."
+name = "gearbox-sim"
+description = "gearbox — the USD simulator window and its command-line front door in one binary: no arguments (or `launch`) opens the window, any other argument is a CLI command."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,39 +10,71 @@ name = "gearbox"
 path = "src/main.rs"
 
 [lib]
+name = "gearbox"
 path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]
 
 [features]
 python = ["dep:pyo3"]
+profile = ["bevy/trace", "bevy/debug", "dep:tracing-chrome"]
 
 [dependencies]
 bevy.workspace = true
-bevy_egui.workspace = true
+gearbox-controls = { path = "../../crates/gearbox-controls" }
+gearbox-fields = { path = "../../crates/gearbox-fields" }
+gearbox-globe = { path = "../../crates/gearbox-globe" }
+bevy_weather = { path = "../../crates/bevy_weather" }
+bevy_biomes = { path = "../../crates/bevy_biomes" }
+big_space.workspace = true
 
-# UI/scene helpers for this USD-only binary.
+# mara owns the window, ribbons and panes; Bevy renders into its viewport.
 mara.workspace = true
-bevy_mara.workspace = true
+half = "2.7"
 
 # USD asset pipeline + rapier physics + animation playback. These
 # are the bevy_openusd workspace's plugins; the gearbox binary just
 # wires them together with a minimal world / UI on top.
 usd_bevy.workspace = true
 
-usd_schema.workspace = true
+openusd-schemas.workspace = true
 openusd.workspace = true
-zenoh.workspace = true
-serde = { version = "1", features = ["derive"] }
-ciborium = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+agentio.workspace = true
+peerbus.workspace = true
+datapod.workspace = true
+concord.workspace = true
 gearbox-api = { workspace = true, features = ["bevy"] }
+# CLI dispatch, statically linked in: no arguments (or `launch`) boots the
+# sim directly in this same process; anything else goes to `gearbox_cli::run()`.
+gearbox-cli.workspace = true
 
-# rapier3d-f64 — needed to spawn the static ground collider directly
-# into `usd_bevy::physics::PhysicsWorld`.
-rapier3d.workspace = true
+# Rigid-body engines used by the physics backend adapters.
+rapier3d = { workspace = true, features = ["enhanced-determinism"] }
+molla-core = { path = "../../../../OUSD/molla/crates/molla-core", default-features = false }
+molla-math = { path = "../../../../OUSD/molla/crates/molla-math" }
+molla-sim = { path = "../../../../OUSD/molla/crates/molla-sim", default-features = false }
+molla-geometry = { path = "../../../../OUSD/molla/crates/molla-geometry", default-features = false }
+molla-solvers = { path = "../../../../OUSD/molla/crates/molla-solvers", default-features = false }
+molla-vehicle = { path = "../../../../OUSD/molla/crates/molla-vehicle" }
+bytemuck = "1"
+glam = "0.30"
+egui.workspace = true
+# Move and yaw handles on the selected object while paused.
+transform-gizmo = "0.11"
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-chrome = { version = "0.7", optional = true }
+anyhow = "1"
 
 # Native file picker for the "📂 Load USD…" button.
 rfd = "0.15"
+png = "0.18"
 pyo3 = { version = "0.23", optional = true, features = [
     "abi3-py39",
     "extension-module",
 ] }
+
+[dev-dependencies]
+pollster = "0.4"
+wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }

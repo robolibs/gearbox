@@ -1,0 +1,59 @@
+{
+  "default": "grassland",
+  "fields": [
+    {
+      "name": "west-meadow",
+      "profile": "grassland",
+      "min": [
+        -120.0,
+        -120.0
+      ],
+      "max": [
+        -40.0,
+        120.0
+      ]
+    },
+    {
+      "name": "middle-stubble",
+      "profile": "harvested_wheat",
+      "min": [
+        -40.0,
+        -120.0
+      ],
+      "max": [
+        30.0,
+        120.0
+      ]
+    },
+    {
+      "name": "east-plough",
+      "profile": "ploughed",
+      "min": [
+        30.0,
+        -120.0
+      ],
+      "max": [
+        120.0,
+        120.0
+      ]
+    }
+  ],
+  "ways": [
+    {
+      "name": "the-lane",
+      "width": 6.0,
+      "wear": 0.55,
+      "points": [
+        [-118.0, -70.0],
+        [-80.0, -58.0],
+        [-44.0, -40.0],
+        [-12.0, -18.0],
+        [14.0, 6.0],
+        [38.0, 26.0],
+        [66.0, 40.0],
+        [92.0, 46.0],
+        [118.0, 44.0]
+      ]
+    }
+  ]
+}

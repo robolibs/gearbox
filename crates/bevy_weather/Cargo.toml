@@ -1,0 +1,14 @@
+[package]
+name = "bevy_weather"
+description = "Weather for Bevy: sun by calendar and hour, daylight colour, atmospheric haze, volumetric clouds and wind."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "bevy_weather"
+path = "src/lib.rs"
+
+[dependencies]
+bevy.workspace = true
+half = "2.7"

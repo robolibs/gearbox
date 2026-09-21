@@ -1,0 +1,40 @@
+{
+  "default": "grassland",
+  "fields": [
+    {
+      "name": "plough-north",
+      "profile": "ploughed",
+      "min": [
+        -120.0,
+        0.0
+      ],
+      "max": [
+        120.0,
+        120.0
+      ]
+    },
+    {
+      "name": "stubble-south",
+      "profile": "harvested_wheat",
+      "min": [
+        -120.0,
+        -120.0
+      ],
+      "max": [
+        120.0,
+        0.0
+      ]
+    }
+  ],
+  "ways": [
+    {
+      "name": "the-boundary-road",
+      "width": 6.0,
+      "wear": 0.7,
+      "points": [
+        [-120.0, 0.0],
+        [120.0, 0.0]
+      ]
+    }
+  ]
+}
