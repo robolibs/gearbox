@@ -83,7 +83,12 @@ impl Default for WeatherSettings {
             exposure_ev100: 13.5,
             bloom_intensity: 0.035,
             fog_color: Color::srgb(0.55, 0.70, 0.86),
-            haze_visibility_km: angle("GEARBOX_HAZE_KM", 6.0).clamp(0.5, 80.0),
+            // Six kilometres is a humid, hazy day, and it washed every acre
+            // past the near field into flat sky-blue long before the horizon —
+            // the ground kept its texture only as far as the next farm. Clear
+            // air is the ordinary case for looking at land, and it is what the
+            // distant backdrop's own colour was measured against.
+            haze_visibility_km: angle("GEARBOX_HAZE_KM", 45.0).clamp(0.5, 200.0),
             clouds: CloudsConfig {
                 clouds_raymarch_steps_count: 96,
                 clouds_coverage: angle("GEARBOX_CLOUD_COVER", 0.55).clamp(0.0, 1.0),

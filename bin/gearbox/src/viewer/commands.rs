@@ -77,6 +77,8 @@ pub(crate) struct CommandState<'w> {
     materials: ResMut<'w, Assets<StandardMaterial>>,
     inventory: Res<'w, ControllerInventory>,
     controls: Res<'w, crate::viewer::drive::ControlSettings>,
+    view: ResMut<'w, crate::viewer::camera::View>,
+    sites: Res<'w, crate::globe::Sites>,
     reset: MessageWriter<'w, gearbox_api::SimResetRequest>,
 }
 
@@ -123,41 +125,38 @@ pub(crate) fn apply_host_commands(
             }
             HostCommand::FlyToPrim(prim) => {
                 s.selected.0 = Some(prim);
-                if let (Ok(gt), Ok((cam, _))) = (q.globals.get(prim), q.cameras.single()) {
-                    let distance = (cam.distance * 0.25).clamp(0.2, 40.0);
-                    start_fly_to(&mut s.fly, cam, gt.translation(), distance);
+                if let Ok(gt) = q.globals.get(prim) {
+                    let distance = (s.view.distance_m * 0.25).clamp(0.2, 40.0);
+                    let at = s.sites.place_of(gt.translation());
+                    start_fly_to(&mut s.fly, &s.view, at, distance);
                 }
             }
             HostCommand::FitPrim(prim) => {
+                let (focus, distance) = fit_params_for_entity(
+                    prim,
+                    &q.globals,
+                    &q.aabbs,
+                    &q.children,
+                    s.view.distance_m as f32,
+                );
                 s.selected.0 = Some(prim);
-                if let Ok((cam, _)) = q.cameras.single() {
-                    let (focus, distance) = fit_params_for_entity(
-                        prim,
-                        &q.globals,
-                        &q.aabbs,
-                        &q.children,
-                        cam.distance,
-                    );
-                    start_fly_to(&mut s.fly, cam, focus, distance);
-                }
+                let at = s.sites.place_of(focus);
+                start_fly_to(&mut s.fly, &s.view, at, distance as f64);
             }
             HostCommand::FlyToMachine(root) => {
-                if let Ok((mut cam, mut transform)) = q.cameras.single_mut() {
-                    let body = crate::viewer::systems::machine_body_entity(
-                        root,
-                        &s.inventory,
-                        &q.prims,
-                        &q.parents,
-                    );
-                    s.fly.remaining = 0.0;
-                    if s.controls.cinematic_transitions {
-                        s.machine_fly.target = Some(FlyTarget::new(root, body, &cam));
-                    } else {
-                        s.machine_fly.target = None;
-                        if let Ok(gt) = q.globals.get(body) {
-                            cam.focus = gt.translation();
-                            mara::ui::modules::bevy::apply_rig(&cam, &mut transform);
-                        }
+                let body = crate::viewer::systems::machine_body_entity(
+                    root,
+                    &s.inventory,
+                    &q.prims,
+                    &q.parents,
+                );
+                s.fly.remaining = 0.0;
+                if s.controls.cinematic_transitions {
+                    s.machine_fly.target = Some(FlyTarget::new(root, body, &s.view));
+                } else {
+                    s.machine_fly.target = None;
+                    if let Ok(gt) = q.globals.get(body) {
+                        s.view.at = s.sites.place_of(gt.translation());
                     }
                 }
             }
@@ -223,30 +222,15 @@ pub(crate) fn apply_host_commands(
                 }
             }
             HostCommand::SaveBookmark => {
-                if let Ok((cam, _)) = q.cameras.single() {
-                    s.bookmarks.next_seq += 1;
-                    let name = format!("View {}", s.bookmarks.next_seq);
-                    s.bookmarks.items.push(CameraBookmark {
-                        name,
-                        focus: cam.focus,
-                        distance: cam.distance,
-                        yaw: cam.yaw,
-                        elevation: cam.elevation,
-                    });
-                }
+                s.bookmarks.next_seq += 1;
+                let name = format!("View {}", s.bookmarks.next_seq);
+                s.bookmarks.items.push(CameraBookmark { name, view: *s.view });
             }
             HostCommand::RecallBookmark(index) => {
-                if let (Some(b), Ok((cam, _))) =
-                    (s.bookmarks.items.get(index), q.cameras.single())
-                {
-                    s.fly.start_focus = cam.focus;
-                    s.fly.start_distance = cam.distance;
-                    s.fly.target_focus = b.focus;
-                    s.fly.target_distance = b.distance;
-                    s.fly.start_yaw = Some(cam.yaw);
-                    s.fly.target_yaw = Some(b.yaw);
-                    s.fly.start_elevation = Some(cam.elevation);
-                    s.fly.target_elevation = Some(b.elevation);
+                if let Some(bookmark) = s.bookmarks.items.get(index) {
+                    s.fly.from = *s.view;
+                    s.fly.to = bookmark.view;
+                    s.fly.turn = true;
                     s.fly.duration = 0.6;
                     s.fly.remaining = 0.6;
                 }

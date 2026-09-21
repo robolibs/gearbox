@@ -5,8 +5,8 @@
 //! `SelectedPrim` for prim-tree clicks vs. gearbox's existing
 //! top-level entity selection.
 
-use bevy::prelude::{Entity, Resource, Vec3};
-use mara::ui::modules::bevy::ChaseCamera;
+use bevy::prelude::{Entity, Resource};
+
 use std::path::PathBuf;
 
 /// The currently-focused loaded USD entity. Drives every panel that
@@ -75,16 +75,12 @@ pub struct SelectedPrim(pub Option<Entity>);
 /// In-flight camera tween. Identical semantics to the viewer.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct FlyTo {
-    pub target_focus: Vec3,
-    pub target_distance: f32,
+    pub from: crate::viewer::camera::View,
+    pub to: crate::viewer::camera::View,
     pub remaining: f32,
     pub duration: f32,
-    pub start_focus: Vec3,
-    pub start_distance: f32,
-    pub start_yaw: Option<f32>,
-    pub target_yaw: Option<f32>,
-    pub start_elevation: Option<f32>,
-    pub target_elevation: Option<f32>,
+    /// Whether the move swings the view round as well as carrying it.
+    pub turn: bool,
 }
 
 /// Scripted "fly to behind the machine" move, started from the agent tree.
@@ -95,41 +91,25 @@ pub struct FlyTo {
 pub struct FlyTarget {
     pub root: Entity,
     pub body: Entity,
-    pub distance: f32,
     pub duration: f32,
     pub elapsed: f32,
-    pub start_focus: Vec3,
-    pub start_cam_world: Vec3,
-    pub start_elevation: f32,
-    pub apex_distance: f32,
-    pub last_target_pos: Option<Vec3>,
+    /// The view the move set out from.
+    pub from: crate::viewer::camera::View,
 }
 
 impl FlyTarget {
-    pub const APEX_DISTANCE: f32 = 45.0;
+    pub const APEX_DISTANCE: f64 = 45.0;
     pub const PHASE_A_END: f32 = 0.30;
-    pub const FINAL_DISTANCE: f32 = 18.0;
+    pub const FINAL_DISTANCE: f64 = 18.0;
     pub const DURATION: f32 = 3.0;
 
-    pub fn new(root: Entity, body: Entity, cam: &ChaseCamera) -> Self {
-        let horizontal = cam.distance * cam.elevation.cos();
-        let vertical = cam.distance * cam.elevation.sin();
-        let offset = Vec3::new(
-            horizontal * cam.yaw.sin(),
-            vertical,
-            horizontal * cam.yaw.cos(),
-        );
+    pub fn new(root: Entity, body: Entity, view: &crate::viewer::camera::View) -> Self {
         Self {
             root,
             body,
-            distance: Self::FINAL_DISTANCE,
             duration: Self::DURATION,
             elapsed: 0.0,
-            start_focus: cam.focus,
-            start_cam_world: cam.focus + offset,
-            start_elevation: cam.elevation,
-            apex_distance: Self::APEX_DISTANCE,
-            last_target_pos: None,
+            from: *view,
         }
     }
 }
@@ -170,10 +150,9 @@ pub struct CameraBookmarks {
 #[derive(Debug, Clone)]
 pub struct CameraBookmark {
     pub name: String,
-    pub focus: Vec3,
-    pub distance: f32,
-    pub yaw: f32,
-    pub elevation: f32,
+    /// A bookmark is a place on the planet, so it still finds its way home
+    /// after the ground under it has been re-anchored.
+    pub view: crate::viewer::camera::View,
 }
 
 /// Camera mount mode. Mounted-USD-camera support is currently a stub

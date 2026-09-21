@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use gearbox_controls::{Frame, Input, Layer, Router, cycle_index};
-use mara::ui::modules::bevy::{ChaseCamera, apply_rig};
 
 use super::{DRIVE_TYPES, MachinePanel};
 use crate::controller::{CmdVel, ControllerInventory, ControllerKey, UiDrive};
@@ -188,7 +187,7 @@ pub(super) fn camera(
     follow: Res<FollowTarget>,
     mut fly: ResMut<FlyTo>,
     mut machine_fly: ResMut<ChaseCameraFly>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    mut view: ResMut<crate::viewer::camera::View>,
     mut log_at: Local<f32>,
 ) {
     let input = state
@@ -204,23 +203,21 @@ pub(super) fn camera(
     }
     fly.remaining = 0.0;
     machine_fly.target = None;
-    let dt = time.delta_secs().min(0.1);
-    for (mut cam, mut transform) in &mut cameras {
-        cam.yaw -= input.orbit[0] * 1.6 * dt;
-        cam.elevation =
-            (cam.elevation - input.orbit[1] * 1.2 * dt).clamp(cam.min_elevation, cam.max_elevation);
-        let right = Vec3::new(cam.yaw.cos(), 0.0, -cam.yaw.sin());
-        let forward = Vec3::new(-cam.yaw.sin(), 0.0, -cam.yaw.cos());
-        let speed = (cam.distance * 0.6).clamp(2.0, 200.0);
-        cam.focus +=
-            (right * input.pan + forward * input.forward + Vec3::Y * input.lift) * speed * dt;
-        apply_rig(&cam, &mut transform);
-        if std::env::var_os("GEARBOX_CONTROLS_DEBUG").is_some() && time.elapsed_secs() >= *log_at {
-            *log_at = time.elapsed_secs() + 1.0;
-            info!(
-                "gearbox-pad camera: input={input:?} yaw={:.2} elevation={:.2} distance={:.2}",
-                cam.yaw, cam.elevation, cam.distance
-            );
-        }
+    let dt = time.delta_secs().min(0.1) as f64;
+    view.bearing_deg += input.orbit[0] as f64 * 90.0 * dt;
+    view.pitch_deg += input.orbit[1] as f64 * 70.0 * dt;
+    // The pad walks the view over the ground, like the keys, and at the same
+    // share of how high it stands.
+    let pace = (view.eye_height_m() * 0.6).clamp(2.0, 200.0) * dt;
+    let look = view.bearing_deg + 180.0;
+    view.walk(look, input.forward as f64 * pace);
+    view.walk(look + 90.0, input.pan as f64 * pace);
+    view.at.altitude = (view.at.altitude + input.lift as f64 * pace).max(0.0);
+    if std::env::var_os("GEARBOX_CONTROLS_DEBUG").is_some() && time.elapsed_secs() >= *log_at {
+        *log_at = time.elapsed_secs() + 1.0;
+        info!(
+            "gearbox-pad camera: input={input:?} bearing={:.1} pitch={:.1} distance={:.1}",
+            view.bearing_deg, view.pitch_deg, view.distance_m
+        );
     }
 }

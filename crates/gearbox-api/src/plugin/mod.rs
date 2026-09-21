@@ -170,6 +170,7 @@ fn serve_host_core(
         ("allowed", &allowed),
         ("allow_any", &allow_any),
         ("log", bus.host.config.log.as_deref().unwrap_or("")),
+        ("camera", &crate::view::view_place_prop()),
     ]);
     bus.host.serve_info(|_| HostInfo {
         uptime_ms: uptime,

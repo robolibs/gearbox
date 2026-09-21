@@ -2,7 +2,7 @@
 //! `<registry dir>/<name>.camera`; this does what the Agents pane rows do.
 
 use bevy::prelude::*;
-use mara::ui::modules::bevy::ChaseCamera;
+
 use usd_bevy::UsdPrimRef;
 
 use crate::controller::ControllerInventory;
@@ -29,7 +29,7 @@ fn serve_camera_requests(
     mut fly: ResMut<ChaseCameraFly>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
-    cameras: Query<&ChaseCamera>,
+    view: Res<crate::viewer::camera::View>,
     mut goto: ResMut<crate::globe::Goto>,
 ) {
     if !poll.0.tick(time.delta()).just_finished() {
@@ -53,19 +53,22 @@ fn serve_camera_requests(
     info!("gearbox-viewer: camera request `{}`", text.trim());
     match (action, root) {
         ("fly", Some(root)) => {
-            if let Ok(cam) = cameras.single() {
-                let body = machine_body_entity(root, &inventory, &prims, &parents);
-                fly.target = Some(FlyTarget::new(root, body, cam));
-            }
+            let body = machine_body_entity(root, &inventory, &prims, &parents);
+            fly.target = Some(FlyTarget::new(root, body, &view));
         }
         ("follow", Some(root)) => follow.set(Some(root)),
         ("unfollow", _) => follow.set(None),
-        // `goto LAT LON`: a place on Earth, in degrees.
+        // `goto LAT LON [HEIGHT_M]`: a place on Earth, in degrees, and how far
+        // above its ground to stand.
         ("goto", _) => {
             let mut numbers = text.split_whitespace().skip(1).filter_map(|w| w.parse::<f64>().ok());
-            if let (Some(bearing), Some(distance)) = (numbers.next(), numbers.next()) {
+            if let (Some(latitude), Some(longitude)) = (numbers.next(), numbers.next()) {
                 follow.set(None);
-                goto.0 = Some((bearing, distance));
+                goto.0 = Some(crate::globe::Jump {
+                    latitude,
+                    longitude,
+                    height_m: numbers.next(),
+                });
             }
         }
         _ => warn!(

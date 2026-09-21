@@ -11,6 +11,7 @@ pub mod host;
 pub mod machine;
 pub mod registry;
 pub mod topics;
+pub mod view;
 pub mod wire;
 
 #[cfg(feature = "bevy")]
@@ -25,6 +26,7 @@ pub use machine::{
     ControllerDesc, LinkDesc, MachineAgent, MachineConfig, ToolDesc, link_records_for,
 };
 pub use peerbus;
+pub use view::{ViewPlace, set_view_place, view_place};
 pub use wire::*;
 pub mod tyres;
 

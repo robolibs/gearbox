@@ -3,6 +3,7 @@
 //! host (`crate::host`), which reaches the world directly and through
 //! `commands::HostCommands`.
 
+pub(crate) mod camera;
 pub mod camera_requests;
 pub mod commands;
 pub mod drive;

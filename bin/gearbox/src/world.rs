@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use gearbox_api::{GearboxBus, SceneEvent, event_kind};
 use mara::ui::modules::bevy::{
-    BevyViewportInput, BevyViewportRenderTarget, BevyViewportSet, ChaseCamera, GroundGrid,
+    BevyViewportRenderTarget, BevyViewportSet, ChaseCamera, GroundGrid,
     apply_rig,
 };
 use crate::physics::backend::{
@@ -23,7 +23,7 @@ use crate::physics::backend::{
 /// Earth-radius planet sphere. The simulator was tuned for this
 /// radius — vehicle wheel friction, camera fog distances, cloud
 /// altitude, and shadow cascades all assume ~6 371 km.
-const PLANET_RADIUS_M: f32 = 6_371_000.0;
+pub(crate) const PLANET_RADIUS_M: f32 = 6_371_000.0;
 /// The planet cap lies under the deepest valley of the distant land, with
 /// room for the meadow's own hollows; any shallower and it shows through the
 /// valleys as flat pale islands.
@@ -35,11 +35,6 @@ const TERRAIN_MAX_HEIGHT_M: f32 = 10.0;
 const FLAT_GROUND_HALF_EXTENT_M: f64 = 10_000.0;
 const FLAT_GROUND_VISUAL_SIZE_M: f32 = 10_000.0;
 const USD_TERRAIN_ACTIVATION_WARN_FRAMES: u32 = 120;
-const CAMERA_HALF_SPAN_M: f32 = 5_000.0;
-const CAMERA_MAX_DISTANCE_M: f32 = 5_000.0;
-/// With the ceiling lifted: far enough for the whole planet to fit the view.
-const CAMERA_ORBIT_DISTANCE_M: f32 = 40_000_000.0;
-const CAMERA_MAX_HEIGHT_M: f32 = 3_000.0;
 
 static USD_TERRAIN_LOADED: AtomicBool = AtomicBool::new(false);
 /// Set when the loaded USD terrain mesh is level; `terrain_height_m` then
@@ -190,10 +185,7 @@ impl Plugin for WorldPlugin {
                 ),
             )
             .add_systems(Update, mark_new_usd_terrain_roots)
-            .add_systems(
-                Update,
-                (chase_camera_control, chase_camera_zoom, chase_camera_keys).chain(),
-            )
+            .add_plugins(crate::viewer::camera::CameraPlugin)
             .add_systems(Update, snap_new_usd_roots_to_terrain)
             .add_systems(Update, freeze_settled_static_usd_prop_bodies)
             .add_systems(Update, publish_loaded_usd_poses)
@@ -203,7 +195,7 @@ impl Plugin for WorldPlugin {
             .add_systems(
                 PostUpdate,
                 (
-                    chase_camera_floor.before(TransformSystems::Propagate),
+                    crate::viewer::camera::place.before(TransformSystems::Propagate),
                     activate_usd_terrain_when_collider_ready.after(TransformSystems::Propagate),
                     align_new_grounded_usd_bounds_to_terrain
                         .after(activate_usd_terrain_when_collider_ready),
@@ -334,6 +326,12 @@ fn spawn_world(
         perceptual_roughness: 0.95,
         ..default()
     });
+    // The globe itself: a cube-sphere quadtree refined towards the camera with
+    // its heights baked on the GPU. It replaces the painted cap that used to
+    // stand in for it, so the planet carries real ground from orbit down to
+    // the field rather than being a coloured ball behind the one square that
+    // is simulated.
+    commands.queue(spawn_cdlod_planet);
     let planet_mesh = meshes.add(planet_cap_mesh(radius));
     commands.spawn((
         Name::new("Planet"),
@@ -346,6 +344,9 @@ fn spawn_world(
         MeshMaterial3d(planet_mat.clone()),
         NotShadowCaster,
         bevy::light::NotShadowReceiver,
+        // Kept spawned for the things that look it up by name, but never
+        // drawn: it would be a second surface a few metres under the globe.
+        Visibility::Hidden,
     ));
 
     // ── Ground grid: off-looking flat grids make hilly terrain read as
@@ -370,9 +371,8 @@ fn spawn_world(
                 Some(Vec3::new(x.trim().parse().ok()?, 0.5, z.trim().parse().ok()?))
             })
             .unwrap_or(Vec3::new(0.0, 0.5, 0.0)),
-        distance: view("GEARBOX_CAMERA_DISTANCE", 14.0).clamp(1.0, CAMERA_ORBIT_DISTANCE_M),
+        distance: view("GEARBOX_CAMERA_DISTANCE", 14.0).max(0.4),
         elevation: view("GEARBOX_CAMERA_ELEVATION", 15.0).clamp(-10.0, 89.0).to_radians(),
-        max_distance: CAMERA_MAX_DISTANCE_M,
         ..default()
     };
     let mut camera_transform = Transform::from_xyz(0.0, 8.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y);
@@ -403,221 +403,24 @@ fn spawn_world(
     }
 }
 
-/// Pointer input arrives from the mara viewport in render-target pixels:
-/// a primary drag orbits, a middle drag pans, Shift with a middle drag
-/// lifts the focus instead.
-fn chase_camera_control(
-    input: Res<BevyViewportInput>,
-    keys: Res<ButtonInput<KeyCode>>,
-    grab: Res<crate::viewer::systems::GizmoGrab>,
-    context: Res<crate::viewer::machine_context::MachineHover>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
-) {
-    if context.captures_pointer {
-        return;
-    }
-    let orbit_delta = if grab.0 {
-        Vec2::ZERO
-    } else {
-        Vec2::from(input.drag_delta)
-    };
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let (pan_delta, lift_delta) = if shift {
-        (Vec2::ZERO, input.pan_delta[1])
-    } else {
-        (Vec2::from(input.pan_delta), 0.0)
-    };
-    if pan_delta == Vec2::ZERO && lift_delta == 0.0 && orbit_delta == Vec2::ZERO {
-        return;
-    }
-
-    for (mut cam, mut transform) in &mut cameras {
-        if pan_delta != Vec2::ZERO {
-            let pan_speed = cam.distance * cam.pan_sensitivity;
-            let forward = Vec3::new(cam.yaw.sin(), 0.0, cam.yaw.cos());
-            let right = Vec3::new(forward.z, 0.0, -forward.x);
-            cam.focus += (-right * pan_delta.x - forward * pan_delta.y) * pan_speed;
-        }
-        if lift_delta != 0.0 {
-            cam.focus.y += lift_delta * cam.distance * cam.pan_sensitivity;
-        }
-        if orbit_delta != Vec2::ZERO {
-            cam.yaw -= orbit_delta.x * cam.orbit_speed;
-            cam.elevation += orbit_delta.y * cam.orbit_speed;
-            cam.elevation = cam.elevation.clamp(cam.min_elevation, cam.max_elevation);
-        }
-        apply_rig(&cam, &mut transform);
-    }
-}
-
-/// How much of the view distance a second of a held key moves the view.
-const KEY_PAN_PER_SEC: f32 = 0.4;
-
 /// How far above the actual terrain surface (hills included, not just
 /// `y=0`) the camera's eye is kept. Three degrees above level keeps the
 /// camera itself above a focus that is on the ground, whatever the distance.
-const CAMERA_TERRAIN_CLEARANCE_M: f32 = 0.5;
-const CAMERA_MIN_ELEVATION: f32 = 3.0_f32.to_radians();
-
-/// Bounds the camera after controls and fly-to updates; Alt bypasses only the
-/// floor. The floor tracks the terrain surface under the camera's eye (not
-/// `focus`, and not a flat `y=0`), so flying over a hill rises with it and
-/// looking straight down stops right at the ground instead of clipping
-/// through — `apply_rig` puts the eye at `focus + distance` along
-/// `yaw`/`elevation`, so the same offset is used here to find what's
-/// actually under the eye before solving back for the `focus.y` that keeps
-/// it clear.
-pub(crate) fn chase_camera_floor(
-    keys: Res<ButtonInput<KeyCode>>,
-    toggles: Res<crate::viewer::overlays::DisplayToggles>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut Projection)>,
-) {
-    let (ceiling, max_height) = if toggles.unlimited_zoom {
-        (CAMERA_ORBIT_DISTANCE_M, CAMERA_ORBIT_DISTANCE_M)
-    } else {
-        (CAMERA_MAX_DISTANCE_M, CAMERA_MAX_HEIGHT_M)
-    };
-    let below_ground = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    for (mut cam, mut transform, mut projection) in &mut cameras {
-        cam.max_distance = ceiling;
-        cam.distance = cam.distance.clamp(cam.min_distance, ceiling);
-        // Depth precision falls with the square of distance over the near
-        // plane, so the near plane backs off as the camera does; nothing is
-        // ever that close to a camera that far out.
-        let near = (cam.distance / 200.0).clamp(0.1, 100_000.0);
-        if let Projection::Perspective(lens) = projection.as_mut()
-            && (lens.near - near).abs() > near * 0.05
-        {
-            lens.near = near;
-        }
-        cam.focus.x = cam.focus.x.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
-        cam.focus.z = cam.focus.z.clamp(-CAMERA_HALF_SPAN_M, CAMERA_HALF_SPAN_M);
-        if !below_ground {
-            cam.elevation = cam.elevation.max(CAMERA_MIN_ELEVATION);
-            let horizontal = cam.elevation.cos();
-            let rise = cam.distance * cam.elevation.sin();
-            let eye_x = cam.focus.x + cam.distance * cam.yaw.sin() * horizontal;
-            let eye_z = cam.focus.z + cam.distance * cam.yaw.cos() * horizontal;
-            let ground = terrain_height_m(eye_x, eye_z);
-            cam.focus.y = cam
-                .focus
-                .y
-                .max(ground + CAMERA_TERRAIN_CLEARANCE_M - rise);
-        }
-        let rise = cam.distance * cam.elevation.sin().max(0.0);
-        if rise > max_height {
-            cam.distance = max_height / cam.elevation.sin();
-        }
-        cam.focus.y = cam
-            .focus
-            .y
-            .min(max_height - cam.distance * cam.elevation.sin());
-        apply_rig(&cam, &mut transform);
-    }
-}
-
-/// W/S fly the camera forward/back along its view, translating it rather
-/// than zooming — distance to focus is untouched, so this never changes
-/// perspective, only position. A/D slide over the ground, Q/E go down and
-/// up, Shift speeds all of it. W/S drop any follow, since a followed
-/// target's position would otherwise fight the translation every frame.
-/// Yields WASD to `viewer::drive::keyboard` while it's driving the selected
-/// machine, so the keys don't do both at once.
-fn chase_camera_keys(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    panel: Res<crate::viewer::drive::MachinePanel>,
-    mut follow: ResMut<crate::viewer::state::FollowTarget>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
-) {
-    if panel.keyboard.is_some() {
-        return;
-    }
-    let axis =
-        |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i8 - keys.pressed(neg) as i8) as f32;
-    // `forward` below points from the focus back to the camera, so W is the
-    // negative direction along it.
-    let ahead = axis(KeyCode::KeyW, KeyCode::KeyS);
-    let aside = axis(KeyCode::KeyA, KeyCode::KeyD);
-    let up = axis(KeyCode::KeyQ, KeyCode::KeyE);
-    if ahead == 0.0 && aside == 0.0 && up == 0.0 {
-        return;
-    }
-    let boost = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
-        3.0
-    } else {
-        1.0
-    };
-    if ahead != 0.0 {
-        follow.set(None);
-    }
-    for (mut cam, mut transform) in &mut cameras {
-        let forward = Vec3::new(cam.yaw.sin(), 0.0, cam.yaw.cos());
-        let right = Vec3::new(forward.z, 0.0, -forward.x);
-        let offset = Vec3::new(
-            forward.x * cam.elevation.cos(),
-            cam.elevation.sin(),
-            forward.z * cam.elevation.cos(),
-        );
-        let speed = cam.distance.max(2.0) * KEY_PAN_PER_SEC * boost * time.delta_secs();
-        cam.focus += offset * ahead * speed + (right * aside + Vec3::Y * up) * speed;
-        apply_rig(&cam, &mut transform);
-    }
-}
 
 /// The viewport reports scroll in 120-point units; one wheel notch is 50
 /// points in egui, so this brings it back to notches.
-const SCROLL_NOTCHES_PER_UNIT: f64 = 120.0 / 50.0;
 
-fn chase_camera_zoom(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    input: Res<BevyViewportInput>,
-    context: Res<crate::viewer::machine_context::MachineHover>,
-    mut zoom_target: Local<Option<f64>>,
-    mut last_written: Local<Option<f32>>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
-) {
-    if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
-        return;
-    }
-    let scroll_delta = if context.captures_pointer {
-        0.0
-    } else {
-        input.scroll_delta as f64 * SCROLL_NOTCHES_PER_UNIT
-    };
-
-    let Ok((mut cam, mut transform)) = cameras.single_mut() else {
-        return;
-    };
-    let target = zoom_target.get_or_insert(cam.distance as f64);
-    // A distance set elsewhere (fly, fit) becomes the new zoom target instead
-    // of being pulled back to the last scrolled one.
-    if last_written.is_some_and(|d| (d - cam.distance).abs() > 1e-4) {
-        *target = cam.distance as f64;
-    }
-    if scroll_delta != 0.0 {
-        let log_target = target.max(0.1).log10();
-        let new_log = log_target - scroll_delta * cam.zoom_step;
-        *target = 10f64
-            .powf(new_log)
-            .clamp(cam.min_distance as f64, cam.max_distance as f64);
-    }
-
-    let dt = time.delta_secs_f64();
-    let log_current = (cam.distance as f64).max(0.1).ln();
-    let log_target = target.max(0.1).ln();
-    let log_diff = log_target - log_current;
-    if log_diff.abs() > 1e-4 {
-        let new_log = log_current + log_diff * (6.0 * dt).min(0.9);
-        cam.distance = new_log.exp() as f32;
-        apply_rig(&cam, &mut transform);
-    } else if log_diff.abs() > 1e-5 {
-        cam.distance = *target as f32;
-        apply_rig(&cam, &mut transform);
-    }
-    *last_written = Some(cam.distance);
-}
+/// What one notch of the wheel is worth, against what it used to be. The globe
+/// bakes its ground as the camera moves, and a notch that crosses a decade of
+/// height asks it for a hemisphere at once — which reads as ground popping in
+/// late, and far enough out is more than it can hold at all. Smaller notches
+/// let the land arrive as it is flown over.
+const ZOOM_NOTCH_SHARE: f64 = 0.45;
+/// How fast the view settles onto the distance it was asked for, as a share of
+/// the remaining log distance per second. Slower than an empty scene wants,
+/// and about right for one whose ground has to be baked before it can be seen:
+/// flown in or out faster than this, the tiles are always a step behind.
+const ZOOM_GLIDE_PER_S: f64 = 2.2;
 
 fn spawn_flat_ground(
     mut commands: Commands,
@@ -1615,3 +1418,44 @@ pub fn ground_friction(default: f64) -> f64 {
         .filter(|f| *f >= 0.0)
         .unwrap_or(default)
 }
+
+/// Stands the CDLOD globe at the centre of the planet frame, where the painted
+/// cap stood. One world, Earth-sized, in the grid the sites already live in.
+fn spawn_cdlod_planet(world: &mut World) {
+    use gearbox_planet::{PlanetConfig, spawn_planet};
+    // The planet frame's origin is the planet's centre, and its cells are the
+    // size the globe renderer works its own cells out in, so the planet is
+    // seated there at nought. Where the *camera* is has to be handed over
+    // separately: it lives inside a site's grid, whose cells are a hundred
+    // thousand times larger, and read against this frame it came out a
+    // hundred thousand radii away — far enough that the globe switched itself
+    // off as too distant to draw. See `crate::globe::tell_planet_where_we_are`.
+    let Some(root) = world.get_resource::<crate::globe::Sites>().map(|sites| sites.root) else {
+        return;
+    };
+    let grid = world.resource_mut::<Assets<Mesh>>().add(gearbox_planet::planet::mesh::build_grid_mesh());
+    world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+        world.resource_scope(|world, mut buffers: Mut<Assets<bevy::render::storage::ShaderBuffer>>| {
+            world.resource_scope(|world, mut terrain: Mut<Assets<gearbox_planet::planet::material::TerrainMaterial>>| {
+                world.resource_scope(|world, mut water: Mut<Assets<gearbox_planet::planet::material::WaterMaterial>>| {
+                    world.resource_scope(|world, mut media: Mut<Assets<bevy::light::atmosphere::ScatteringMedium>>| {
+                        let mut commands = world.commands();
+                        spawn_planet(
+                            &mut commands,
+                            root,
+                            PlanetConfig::earth(PLANET_RADIUS_M),
+                            bevy::math::DVec3::ZERO,
+                            &grid,
+                            &mut images,
+                            &mut buffers,
+                            &mut terrain,
+                            &mut water,
+                            &mut media,
+                        );
+                    });
+                });
+            });
+        });
+    });
+}
+

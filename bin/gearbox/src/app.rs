@@ -61,6 +61,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(gearbox_api::UsdMarkerPlugin)
         // Simulator surface: planet world, machines, links, services.
         .add_plugins(crate::globe::GlobePlugin)
+        .add_plugins(gearbox_planet::PlanetPlugin)
         .add_plugins(world::WorldPlugin)
         .add_plugins(environment::WeatherPlugin)
         .add_plugins(crate::biomes::WorldBiomesPlugin)

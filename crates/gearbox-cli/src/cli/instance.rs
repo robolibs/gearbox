@@ -21,7 +21,7 @@ pub struct Args {
 enum Cmd {
     /// Registry entries with liveness; the default is marked
     List,
-    /// `/gearbox/info` of an instance
+    /// `/gearbox/info` of an instance, camera included
     Info { id: Option<String> },
     /// Make an instance the default for later commands
     Use { id: String },
@@ -59,10 +59,11 @@ enum Cmd {
     },
     /// Move the viewer camera: `fly MACHINE` flies behind a machine like a
     /// double-click in the Agents pane, `follow MACHINE` pins the camera to
-    /// it, `unfollow` releases it, `goto LAT LON` takes the view to that
-    /// latitude and longitude, in degrees
+    /// it, `unfollow` releases it, `goto LAT LON [HEIGHT_M]` jumps the view to
+    /// that latitude and longitude, in degrees, standing HEIGHT_M above the
+    /// ground there, and `where` says where the view is now
     Camera {
-        /// fly | follow | unfollow | goto
+        /// fly | follow | unfollow | goto | where
         action: String,
         /// Machine id (`gearbox:machine:id`) for fly and follow; the latitude for goto
         #[arg(allow_negative_numbers = true)]
@@ -70,12 +71,17 @@ enum Cmd {
         /// Longitude in degrees, for goto
         #[arg(allow_negative_numbers = true)]
         distance_km: Option<f64>,
+        /// Metres above the ground to stand once there, for goto; left out, the
+        /// view keeps the height it had
+        #[arg(allow_negative_numbers = true)]
+        height_m: Option<f64>,
         #[arg(long)]
         id: Option<String>,
     },
     /// Drive the window with scripted input, one step per argument or per
-    /// `;`-separated part: `move X Y`, `down X Y`, `up X Y`, `click X Y`,
-    /// `scroll DX DY`, `text …`, `key NAME`, `wait MS`
+    /// `;`-separated part: `move X Y`, `down X Y [BUTTON]`, `up X Y [BUTTON]`,
+    /// `click X Y [BUTTON]`, `scroll DX DY`, `text …`, `key NAME`, `wait MS`.
+    /// BUTTON is `primary` (the default), `middle` or `secondary`.
     Ui {
         steps: Vec<String>,
         #[arg(long)]
@@ -113,8 +119,9 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             action,
             machine,
             distance_km,
+            height_m,
             id,
-        } => camera(ctx, id, &action, machine.as_deref(), distance_km),
+        } => camera(ctx, id, &action, machine.as_deref(), distance_km, height_m),
     }
 }
 
@@ -124,8 +131,12 @@ fn camera(
     action: &str,
     machine: Option<&str>,
     distance_km: Option<f64>,
+    height_m: Option<f64>,
 ) -> Result<()> {
     let ctx = with_target(ctx, id)?;
+    if action == "where" {
+        return camera_where(&ctx);
+    }
     let target = ctx.target()?.clone();
     if target.pid == 0 {
         return Err(CliError::error(
@@ -135,20 +146,23 @@ fn camera(
     let line = match (action, machine) {
         ("fly", Some(m)) | ("follow", Some(m)) => format!("{action} {m}"),
         ("unfollow", _) => "unfollow".to_string(),
-        ("goto", Some(bearing)) => {
-            let bearing: f64 = bearing
+        ("goto", Some(latitude)) => {
+            let latitude: f64 = latitude
                 .parse()
                 .map_err(|_| CliError::error("`goto` needs a latitude and a longitude in degrees"))?;
-            let distance = distance_km
+            let longitude = distance_km
                 .ok_or_else(|| CliError::error("`goto` needs a latitude and a longitude in degrees"))?;
-            format!("goto {bearing} {distance}")
+            match height_m {
+                Some(height) => format!("goto {latitude} {longitude} {height}"),
+                None => format!("goto {latitude} {longitude}"),
+            }
         }
         ("fly", None) | ("follow", None) => {
             return Err(CliError::error(format!("`{action}` needs a machine id")));
         }
         _ => {
             return Err(CliError::error(
-                "camera action must be fly, follow, unfollow or goto",
+                "camera action must be fly, follow, unfollow, goto or where",
             ));
         }
     };
@@ -158,6 +172,40 @@ fn camera(
         &line,
         &format!("camera request `{line}` sent to `{}`", target.name),
         || json!({ "instance": target.name, "request": line }),
+    );
+    Ok(())
+}
+
+/// Where the view stands, as the running instance last said in `/gearbox/info`.
+fn camera_where(ctx: &Ctx) -> Result<()> {
+    let target = ctx.target()?.clone();
+    let info = ctx.client()?.info()?;
+    let place = gearbox_api::view::parse_view_place(&info.props().get("camera").unwrap_or_default())
+        .ok_or_else(|| {
+            CliError::error(format!(
+                "instance `{}` has not said where its view is yet",
+                target.name
+            ))
+        })?;
+    ctx.emit(
+        || {
+            json!({
+                "instance": target.name,
+                "latitude": place.latitude,
+                "longitude": place.longitude,
+                "height_m": place.height_m,
+                "distance_m": place.distance_m,
+            })
+        },
+        || {
+            out::kv(&[
+                ("instance", target.name.clone()),
+                ("latitude", format!("{:.6}", place.latitude)),
+                ("longitude", format!("{:.6}", place.longitude)),
+                ("height", format!("{:.1} m above ground", place.height_m)),
+                ("distance", format!("{:.1} m", place.distance_m)),
+            ]);
+        },
     );
     Ok(())
 }

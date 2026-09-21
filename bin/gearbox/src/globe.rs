@@ -28,7 +28,15 @@ impl Plugin for GlobePlugin {
             .add_systems(PreUpdate, adopt_loaded_roots)
             .add_systems(
                 Update,
-                (reanchor_machines, join_watched_site, travel, orient_sky, seat_planet)
+                (
+                    reanchor_machines,
+                    join_watched_site,
+                    travel,
+                    orient_sky,
+                    seat_planet,
+                    tell_planet_where_we_are,
+                    publish_view_place,
+                )
                     .chain()
                     .before(crate::terrain::TerrainUpdates),
             );
@@ -69,6 +77,14 @@ impl Sites {
     /// Height of the land in site `index`'s frame.
     pub fn height(&self, index: usize, x: f32, z: f32) -> f32 {
         self.land.local_height(&self.list[index].frame, x as f64, z as f64)
+    }
+
+    /// A place in the current site's frame, said as a place on the planet with
+    /// its height measured from the ground rather than the ellipsoid.
+    pub fn place_of(&self, local: Vec3) -> Geodetic {
+        let mut place = self.current().frame.geodetic(local.as_dvec3());
+        place.altitude = (local.y - self.height(self.current, local.x, local.z)).max(0.0) as f64;
+        place
     }
 }
 
@@ -116,6 +132,9 @@ fn spawn_globe(mut commands: Commands) {
         spare: Vec::new(),
     };
     publish_frames(&sites);
+    // The globe renderer refines its quadtree against the grid the sites hang
+    // in, and its selector reads this whether or not a planet is drawn.
+    commands.insert_resource(gearbox_planet::planet::RootGrid(root));
     commands.insert_resource(sites);
 }
 
@@ -162,6 +181,41 @@ pub fn transform_in_site(
     chain
 }
 
+/// Tells the globe renderer where the camera is, in the planet's own frame.
+///
+/// The camera lives inside a site's grid, whose cells are 1e9 m, while the
+/// planet frame's are 10 km. Read against the planet frame the camera's own
+/// cell means something else entirely, and the globe put itself a hundred
+/// thousand radii away and switched off as too far to draw. A site knows its
+/// own place on Earth, so the answer is exact rather than inferred: the
+/// camera's place in the site, carried out to ECEF, which is the planet
+/// frame's origin and axes.
+fn tell_planet_where_we_are(
+    mut commands: Commands,
+    sites: Res<Sites>,
+    camera: Query<(&Transform, &CellCoord, &ChildOf), With<Camera3d>>,
+    site_of: Query<&Site>,
+) {
+    let Ok((transform, cell, parent)) = camera.single() else {
+        return;
+    };
+    let Ok(site) = site_of.get(parent.parent()) else {
+        return;
+    };
+    let Some(entry) = sites.list.get(site.0) else {
+        return;
+    };
+    let local = DVec3::new(
+        cell.x as f64 * f64::from(SITE_CELL_M) + f64::from(transform.translation.x),
+        cell.y as f64 * f64::from(SITE_CELL_M) + f64::from(transform.translation.y),
+        cell.z as f64 * f64::from(SITE_CELL_M) + f64::from(transform.translation.z),
+    );
+    commands.insert_resource(gearbox_planet::planet::CameraAt {
+        position: entry.frame.to_ecef(local),
+        rotation: (entry.frame.rotation * transform.rotation.as_dquat()).as_quat(),
+    });
+}
+
 /// A loaded root joins the datum it was placed in, or the one in view if it was
 /// placed nowhere in particular.
 fn adopt_loaded_roots(
@@ -201,76 +255,89 @@ impl Sites {
     }
 }
 
-/// A place the view is asked to go: latitude and longitude in degrees.
+/// A place the view is asked to go: latitude and longitude in degrees, and how
+/// far above the ground to stand once there. No height keeps the one it had.
 #[derive(Resource, Default)]
-pub struct Goto(pub Option<(f64, f64)>);
+pub struct Goto(pub Option<Jump>);
 
-/// `GEARBOX_CAMERA_LLA="lat,lon"`: where a scripted view starts.
-fn scripted_site() -> Option<(f64, f64)> {
-    let value = std::env::var("GEARBOX_CAMERA_LLA").ok()?;
-    let (bearing, distance) = value.split_once(',')?;
-    Some((bearing.trim().parse().ok()?, distance.trim().parse().ok()?))
+/// Where the view is told to jump to.
+#[derive(Clone, Copy, Debug)]
+pub struct Jump {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub height_m: Option<f64>,
 }
 
-/// The view moves over the planet from site to site. Where it rests too far
-/// from its site it joins the site already there, or takes its own site along
-/// if nothing stands in it, or founds a new one. Its focus and heading carry
-/// over through the planet frame, so the view itself does not jump.
+/// Says where the view is, in latitude and longitude, once a frame, so that
+/// `/gearbox/info` — and through it `gearbox instance camera where` — can
+/// answer without reaching into the ECS.
+fn publish_view_place(view: Res<crate::viewer::camera::View>) {
+    gearbox_api::set_view_place(gearbox_api::ViewPlace {
+        latitude: view.at.latitude,
+        longitude: view.at.longitude,
+        height_m: view.eye_height_m(),
+        distance_m: view.distance_m,
+    });
+}
+
+/// `GEARBOX_CAMERA_LLA="lat,lon"`: where a scripted view starts.
+fn scripted_site() -> Option<Jump> {
+    let value = std::env::var("GEARBOX_CAMERA_LLA").ok()?;
+    let mut parts = value.split(',').map(str::trim);
+    Some(Jump {
+        latitude: parts.next()?.parse().ok()?,
+        longitude: parts.next()?.parse().ok()?,
+        height_m: parts.next().and_then(|height| height.parse().ok()),
+    })
+}
+
+/// Keeps the ground anchored under the view. The view itself is a place on the
+/// planet and never moves because of anything here: this only decides which
+/// datum serves it, founding one or reusing a spare when the view has wandered
+/// past what the current one can hold flat. A jump asked for over the wire is
+/// applied to the view first, and then the datum follows it like any other
+/// move.
 fn travel(
     mut commands: Commands,
     mut sites: ResMut<Sites>,
     physics: Res<crate::physics::PhysicsWorld>,
-    mut cameras: Query<(Entity, &mut mara::ui::modules::bevy::ChaseCamera)>,
+    cameras: Query<Entity, With<mara::ui::modules::bevy::ChaseCamera>>,
     layout: Res<gearbox_fields::FieldLayout>,
-    follow: Res<crate::viewer::state::FollowTarget>,
-    fly: Res<crate::viewer::state::ChaseCameraFly>,
+    mut view: ResMut<crate::viewer::camera::View>,
     mut goto: ResMut<Goto>,
     mut started: Local<bool>,
 ) {
-    let Ok((camera, mut chase)) = cameras.single_mut() else {
+    let Ok(camera) = cameras.single() else {
         return;
     };
-    let from = sites.current().frame;
     let asked = goto.0.take().or_else(|| if *started { None } else { scripted_site() });
     *started = true;
-    let scripted = asked.map(|(bearing, distance)| {
-        // The pair is latitude and longitude.
-        Geodetic::new(bearing, distance, 0.0).ecef()
-    });
-    let focus = chase.focus.as_dvec3();
-    // A view held on a machine stays in the machine's site.
-    let held = follow.entity.is_some() || fly.target.is_some();
-    let destination = match scripted {
-        Some(up) => up,
-        None if !held && focus.x.hypot(focus.z) > (0.8 * reach()) => {
-            let under = from.geodetic(DVec3::new(focus.x, 0.0, focus.z));
-            Geodetic::new(under.latitude, under.longitude, 0.0).ecef()
+    if let Some(jump) = asked {
+        view.at = Geodetic::new(jump.latitude, jump.longitude, 0.0);
+        if let Some(height) = jump.height_m {
+            view.set_eye_height_m(height);
         }
-        None => return,
-    };
+    }
     let here = sites.current;
+    let under = Geodetic::new(view.at.latitude, view.at.longitude, 0.0).ecef();
+    // While the view is still within reach of the datum it has, nothing to do:
+    // founding a new one every time it drifts a metre would rebuild the ground
+    // for nothing.
+    if asked.is_none() && sites.list[here].frame.ground_distance(under) <= 0.8 * reach() {
+        return;
+    }
     let occupied = physics.bodies().into_iter().any(|id| {
         physics.body(id).is_some_and(|body| {
             body.is_dynamic() && gearbox_globe::region_of_physics(body.translation().x) == here
         })
     });
-    let to = sites.datum_for(&mut commands, destination);
+    let to = sites.datum_for(&mut commands, under);
     if to == here {
         return;
     }
     if here != 0 && !occupied && !sites.spare.contains(&here) {
         sites.spare.push(here);
     }
-    let into = sites.list[to].frame;
-    // The focus lands on the ground of the new site; a scripted view starts at its middle.
-    let carried = into.from_ecef(destination);
-    let heading = from.rotation * DVec3::new(chase.yaw.sin() as f64, 0.0, chase.yaw.cos() as f64);
-    let heading = into.rotation.inverse() * heading;
-    // It keeps its height above the ground, not its height.
-    let above = chase.focus.y - sites.height(here, chase.focus.x, chase.focus.z);
-    let (x, z) = if scripted.is_some() { (0.0, 0.0) } else { (carried.x as f32, carried.z as f32) };
-    chase.focus = Vec3::new(x, sites.height(to, x, z) + above, z);
-    chase.yaw = heading.x.atan2(heading.z) as f32;
     enter_site(&mut commands, &mut sites, &layout, camera, to);
 }
 
@@ -344,7 +411,8 @@ fn join_watched_site(
     layout: Res<gearbox_fields::FieldLayout>,
     follow: Res<crate::viewer::state::FollowTarget>,
     mut fly: ResMut<crate::viewer::state::ChaseCameraFly>,
-    mut cameras: Query<(Entity, &mut mara::ui::modules::bevy::ChaseCamera)>,
+    mut view: ResMut<crate::viewer::camera::View>,
+    cameras: Query<Entity, With<mara::ui::modules::bevy::ChaseCamera>>,
     parents: Query<&ChildOf>,
     transforms: Query<&Transform>,
     grids: Query<&Site>,
@@ -353,7 +421,7 @@ fn join_watched_site(
         return;
     };
     let to = site_of(watched, &parents, &grids);
-    let Ok((camera, mut chase)) = cameras.single_mut() else {
+    let Ok(camera) = cameras.single() else {
         return;
     };
     if to == sites.current || to >= sites.list.len() {
@@ -361,7 +429,11 @@ fn join_watched_site(
     }
     // Across the planet there is no path worth flying: the view cuts over.
     fly.target = None;
-    chase.focus = transform_in_site(watched, &parents, &transforms, &grids).translation();
+    let here = transform_in_site(watched, &parents, &transforms, &grids).translation();
+    let on_earth = sites.list[to].frame.geodetic(here.as_dvec3());
+    view.at.latitude = on_earth.latitude;
+    view.at.longitude = on_earth.longitude;
+    view.at.altitude = (here.y - sites.height(to, here.x, here.z)).max(0.0) as f64;
     enter_site(&mut commands, &mut sites, &layout, camera, to);
 }
 

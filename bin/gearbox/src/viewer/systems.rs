@@ -6,7 +6,7 @@
 
 use bevy::ecs::hierarchy::Children;
 use bevy::prelude::*;
-use mara::ui::modules::bevy::{BevyViewportInput, ChaseCamera, apply_rig};
+use mara::ui::modules::bevy::{BevyViewportInput, ChaseCamera};
 use usd_bevy::UsdPrimRef;
 use usd_bevy::instance::UsdInstances;
 
@@ -71,11 +71,10 @@ impl Plugin for ViewerSystemsPlugin {
             .init_resource::<ChaseCameraFly>()
             .init_resource::<HostCommands>()
             .add_systems(
-                PostUpdate,
+                Update,
                 follow_target
                     .after(crate::physics::PhysicsWriteback)
-                    .after(crate::world::chase_camera_floor)
-                    .before(bevy::transform::TransformSystems::Propagate),
+                    .in_set(crate::viewer::camera::MoveView),
             )
             .add_systems(
                 Update,
@@ -343,7 +342,9 @@ fn follow_target(
     parents: Query<&ChildOf>,
     sites: Query<&crate::globe::Site>,
     toggles: Res<crate::viewer::overlays::DisplayToggles>,
-    mut camera: ParamSet<(Query<&Transform>, Query<(&mut ChaseCamera, &mut Transform)>)>,
+    places: Res<crate::globe::Sites>,
+    mut view: ResMut<crate::viewer::camera::View>,
+    transforms: Query<&Transform>,
 ) {
     let Some(root) = follow.entity else {
         return;
@@ -358,27 +359,43 @@ fn follow_target(
         return;
     }
     let body = machine_body_entity(root, &inventory, &prims, &parents);
-    // The pose in the machine's own datum, which the view shares while it follows.
-    if !camera.p0().contains(body) {
+    if !transforms.contains(body) {
         follow.set(None);
         return;
     }
-    let gt = crate::globe::transform_in_site(body, &parents, &camera.p0(), &sites);
-    let current = gt.translation();
-    let target_yaw = machine_heading(root, &gt, &inventory, &states) + std::f32::consts::PI;
+    // The pose in the machine's own site, said as a place on the planet, which
+    // is the only language the view speaks.
+    let site = crate::globe::site_of(body, &parents, &sites);
+    let Some(frame) = places.list.get(site).map(|entry| entry.frame) else {
+        return;
+    };
+    let gt = crate::globe::transform_in_site(body, &parents, &transforms, &sites);
+    let here = gt.translation();
+    let on_earth = frame.geodetic(here.as_dvec3());
+    view.at.latitude = on_earth.latitude;
+    view.at.longitude = on_earth.longitude;
+    view.at.altitude = (here.y - places.height(site, here.x, here.z)).max(0.0) as f64;
     // Frame-rate independent exponential smoothing, same shape as the fly's
     // smoothstep-lerp but running every frame instead of over a fixed span.
     const CATCH_UP_RATE: f32 = 2.5;
     let s = 1.0 - (-CATCH_UP_RATE * time.delta_secs()).exp();
     // Either the view is carried around behind the machine, or it holds the
-    // angle it was on and only travels with it.
-    let swing = toggles.follow_from_behind;
-    for (mut cam, mut tr) in &mut camera.p1() {
-        cam.focus = current;
-        if swing {
-            cam.yaw = lerp_angle(cam.yaw, target_yaw, s);
-        }
-        apply_rig(&cam, &mut tr);
+    // bearing it was on and only travels with it. The machine's heading is an
+    // angle in its own site, and a bearing is an angle on the planet, so it
+    // goes out through the site's north before it means anything to the view.
+    if toggles.follow_from_behind {
+        let heading = machine_heading(root, &gt, &inventory, &states) + std::f32::consts::PI;
+        let north = frame.rotation
+            * bevy::math::DVec3::new(heading.sin() as f64, 0.0, heading.cos() as f64);
+        let at = gearbox_globe::Datum::at(on_earth.latitude, on_earth.longitude);
+        let local = at.rotation.inverse() * north;
+        let bearing = local.z.atan2(local.x).to_degrees();
+        view.bearing_deg = lerp_angle(
+            view.bearing_deg.to_radians() as f32,
+            bearing.to_radians() as f32,
+            s,
+        )
+        .to_degrees() as f64;
     }
 }
 
@@ -528,14 +545,11 @@ fn apply_reload_request(
 fn apply_fly_to(
     time: Res<Time>,
     mut fly: ResMut<FlyTo>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    mut view: ResMut<crate::viewer::camera::View>,
 ) {
     if fly.remaining <= 0.0 {
         return;
     }
-    let Ok((mut cam, mut transform)) = cameras.single_mut() else {
-        return;
-    };
     let dt = time.delta_secs().min(1.0 / 30.0);
     fly.remaining = (fly.remaining - dt).max(0.0);
     let progress = if fly.duration > 0.0 {
@@ -543,21 +557,8 @@ fn apply_fly_to(
     } else {
         1.0
     };
-    let eased = 1.0 - ((1.0 - progress) * core::f32::consts::FRAC_PI_2).cos();
-
-    cam.focus = fly.start_focus.lerp(fly.target_focus, eased);
-    cam.distance = fly
-        .start_distance
-        .lerp(fly.target_distance, eased)
-        .max(cam.min_distance);
-
-    if let (Some(sy), Some(ty)) = (fly.start_yaw, fly.target_yaw) {
-        cam.yaw = lerp_angle(sy, ty, eased);
-    }
-    if let (Some(se), Some(te)) = (fly.start_elevation, fly.target_elevation) {
-        cam.elevation = se + (te - se) * eased;
-    }
-    apply_rig(&cam, &mut transform);
+    let eased = (1.0 - ((1.0 - progress) * core::f32::consts::FRAC_PI_2).cos()) as f64;
+    *view = crate::viewer::camera::View::between(&fly.from, &fly.to, eased, fly.turn);
 }
 
 /// The chassis prim entity of the machine rooted at `root`, or the root
@@ -833,18 +834,23 @@ pub(crate) fn pick_on_click(
 
 // ─── Fly behind a machine (agent tree double-click) ────────────────
 
-/// Two phases over `FlyTarget::duration`: A (0–30 %) keeps the camera where
-/// it is and turns it toward the machine; B pulls back to the apex, arcs the
-/// yaw to behind the machine and comes in to the final distance while the
-/// elevation eases back to what the user had. Any camera input cancels it.
+/// Two phases over `FlyTarget::duration`: A (0–30 %) carries the view over to
+/// the machine on the bearing it already had, B swings round to behind the
+/// machine and settles in from the apex. The machine is read afresh every
+/// frame, so one that drives off is still arrived at. Any camera input cancels
+/// the move.
 fn chase_camera_fly(
     time: Res<Time>,
     input: Res<BevyViewportInput>,
     mut fly: ResMut<ChaseCameraFly>,
     inventory: Res<ControllerInventory>,
     states: Res<ControllerStates>,
+    sites: Res<crate::globe::Sites>,
+    parents: Query<&ChildOf>,
+    grids: Query<&crate::globe::Site>,
     transforms: Query<&GlobalTransform>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    locals: Query<&Transform>,
+    mut view: ResMut<crate::viewer::camera::View>,
 ) {
     let Some(mut target) = fly.target else {
         return;
@@ -858,85 +864,59 @@ fn chase_camera_fly(
         fly.target = None;
         return;
     };
-    let Ok((mut cam, mut tr)) = cameras.single_mut() else {
-        return;
-    };
-
     target.elapsed += time.delta_secs();
     let t = (target.elapsed / target.duration).clamp(0.0, 1.0);
 
-    let target_focus = gt.translation();
-    let target_cam_yaw =
-        machine_heading(target.root, gt, &inventory, &states) + std::f32::consts::PI;
+    // Where the machine is now, as a place on the planet, and which way it
+    // faces there.
+    let here = crate::globe::transform_in_site(target.body, &parents, &locals, &grids);
+    let at = sites.place_of(gt.translation());
+    let heading = machine_heading(target.root, &here, &inventory, &states) + std::f32::consts::PI;
+    let north = sites.current().frame.rotation
+        * bevy::math::DVec3::new(heading.sin() as f64, 0.0, heading.cos() as f64);
+    let local = gearbox_globe::Datum::at(at.latitude, at.longitude).rotation.inverse() * north;
+    let behind = local.z.atan2(local.x).to_degrees();
 
-    // Slide the start references with the machine so a driving target does
-    // not shift the geometry under the interpolation.
-    if let Some(last) = target.last_target_pos {
-        let delta = target_focus - last;
-        target.start_focus += delta;
-        target.start_cam_world += delta;
-    }
-    target.last_target_pos = Some(target_focus);
-
-    let phase_a_end = FlyTarget::PHASE_A_END;
-    if t < phase_a_end {
-        let s = smoothstep((t / phase_a_end).clamp(0.0, 1.0));
-        let focus = target.start_focus.lerp(target_focus, s);
-        let off = target.start_cam_world - focus;
-        let dist = off.length().max(0.1);
-        cam.focus = focus;
-        cam.distance = dist;
-        cam.yaw = off.x.atan2(off.z);
-        cam.elevation = (off.y / dist).clamp(-1.0, 1.0).asin();
+    // Standing over the machine on the bearing the view came in on, pulled
+    // back to the apex; then the same place seen from behind, close in.
+    let over = crate::viewer::camera::View {
+        at,
+        distance_m: FlyTarget::APEX_DISTANCE,
+        ..target.from
+    };
+    let settled = crate::viewer::camera::View {
+        bearing_deg: behind,
+        distance_m: FlyTarget::FINAL_DISTANCE,
+        ..over
+    };
+    *view = if t < FlyTarget::PHASE_A_END {
+        let a = (t / FlyTarget::PHASE_A_END).clamp(0.0, 1.0) as f64;
+        crate::viewer::camera::View::between(&target.from, &over, a, false)
     } else {
-        let tb = ((t - phase_a_end) / (1.0 - phase_a_end)).clamp(0.0, 1.0);
-        let off = target.start_cam_world - target_focus;
-        let dist_b_start = off.length().max(0.1);
-        let yaw_b_start = off.x.atan2(off.z);
-        let elev_b_start = (off.y / dist_b_start).clamp(-1.0, 1.0).asin();
-
-        let distance = if tb < 0.5 {
-            let s = smoothstep(sub_progress(tb, 0.0, 0.5));
-            dist_b_start + (target.apex_distance - dist_b_start) * s
-        } else {
-            let s = smoothstep(sub_progress(tb, 0.5, 1.0));
-            target.apex_distance + (target.distance - target.apex_distance) * s
-        };
-        let yaw = lerp_angle(
-            yaw_b_start,
-            target_cam_yaw,
-            smoothstep(sub_progress(tb, 0.0, 0.85)),
-        );
-        let elevation = elev_b_start + (target.start_elevation - elev_b_start) * smoothstep(tb);
-
-        cam.focus = target_focus;
-        cam.yaw = yaw;
-        cam.distance = distance;
-        cam.elevation = elevation;
-    }
+        let b = ((t - FlyTarget::PHASE_A_END) / (1.0 - FlyTarget::PHASE_A_END)).clamp(0.0, 1.0);
+        crate::viewer::camera::View::between(&over, &settled, b as f64, true)
+    };
 
     if t >= 1.0 {
-        cam.focus = target_focus;
-        cam.yaw = target_cam_yaw;
-        cam.distance = target.distance;
-        cam.elevation = target.start_elevation;
+        *view = settled;
         fly.target = None;
     } else {
         fly.target = Some(target);
     }
-    apply_rig(&cam, &mut tr);
 }
 
 /// Start a short fly of the chase camera to `focus` at `distance`.
-pub(crate) fn start_fly_to(fly: &mut FlyTo, cam: &ChaseCamera, focus: Vec3, distance: f32) {
-    fly.start_focus = cam.focus;
-    fly.start_distance = cam.distance;
-    fly.target_focus = focus;
-    fly.target_distance = distance;
-    fly.start_yaw = None;
-    fly.target_yaw = None;
-    fly.start_elevation = None;
-    fly.target_elevation = None;
+/// Starts a short move of the view to a place on the planet, keeping the
+/// bearing and pitch it already had.
+pub(crate) fn start_fly_to(
+    fly: &mut FlyTo,
+    view: &crate::viewer::camera::View,
+    at: gearbox_globe::Geodetic,
+    distance: f64,
+) {
+    fly.from = *view;
+    fly.to = crate::viewer::camera::View { at, distance_m: distance, ..*view };
+    fly.turn = false;
     fly.duration = 0.4;
     fly.remaining = 0.4;
 }

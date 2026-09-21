@@ -77,7 +77,7 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
     if !bookmarks.items.is_empty() {
         let rows: Vec<String> = bookmarks.items.iter().map(|b| b.name.clone()).collect();
         let trailing: Vec<String> =
-            bookmarks.items.iter().map(|b| format!("{:.1} m", b.distance)).collect();
+            bookmarks.items.iter().map(|b| format!("{:.1} m", b.view.distance_m)).collect();
         camera_pods.push(
             Pod::new(pid(P, "cameras", 1)).with_select_list(rows, Some(trailing), accent),
         );
