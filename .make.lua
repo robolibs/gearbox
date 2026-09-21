@@ -1,7 +1,7 @@
 -- gearbox's build, as recipes. This replaced the Makefile; there is no other.
 --
 --   make            the recipes, with what each of them says it does
---   make build      everything in the workspace (debug)
+--   make build      everything in the workspace (release)
 --   make run        the simulator, through the CLI
 --   make test       the suite
 --
@@ -64,20 +64,15 @@ end
 
 local NAME = project_name()
 
+-- One build, and it is the one `run`, `sim` and `cli` launch. There used to be
+-- a second recipe for the release binary, which meant `make build` could leave
+-- the binary on PATH untouched and hours old while everything looked rebuilt.
 make.recipe{
   name = "build",
-  desc = "everything in the workspace (debug) — every crate, lib and bin",
-  run = function() sh.cargo("build") end,
+  desc = "everything in the workspace (release) — every crate, lib and bin",
+  run = function() sh.cargo("build", "--release") end,
 }
 make.alias("b", "build")
-
-make.recipe{
-  name = "build-release-bin",
-  desc = "the merged gearbox binary (release)",
-  run = function()
-    sh.cargo("build", "--release", "-p", "gearbox-sim", "--bin", "gearbox")
-  end,
-}
 
 -- Debug sim with per-system Chrome tracing; run it with GEARBOX_TRACE=file.json.
 make.recipe{
@@ -108,7 +103,7 @@ make.recipe{
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/debug/gearbox run %s"):format(a.args or "")))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/release/gearbox run %s"):format(a.args or "")))
   end,
 }
 make.alias("r", "run")
@@ -120,7 +115,7 @@ make.recipe{
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/debug/gearbox launch %s"):format(a.args or "")))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/release/gearbox launch %s"):format(a.args or "")))
   end,
 }
 
@@ -130,7 +125,7 @@ make.recipe{
   params = { { "--args", desc = "arguments passed through to the CLI" } },
   deps = { "build" },
   run = function(a)
-    sh.sh("-c", ("target/debug/gearbox %s"):format(a.args or ""))
+    sh.sh("-c", ("target/release/gearbox %s"):format(a.args or ""))
   end,
 }
 
