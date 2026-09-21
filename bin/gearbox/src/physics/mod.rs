@@ -29,6 +29,8 @@ mod rapier;
 pub(crate) use rapier::RapierBackend;
 pub mod reader;
 mod scene;
+#[cfg(test)]
+mod tracks;
 mod world;
 mod writeback;
 

@@ -689,6 +689,33 @@ pub struct SolverSettings {
 /// Decides which body pairs the step must not let touch.
 pub type PairExcluded<'a> = &'a (dyn Fn(BodyId, BodyId) -> bool + Send + Sync);
 
+#[derive(Clone, Debug)]
+pub struct TrackForceDesc {
+    pub carrier: BodyId,
+    pub sprocket: BodyId,
+    pub joint: JointId,
+    pub contact_colliders: Vec<ColliderId>,
+    pub local_axle: DVec3,
+    pub local_forward: DVec3,
+    pub pitch_radius: f64,
+    pub longitudinal_friction: f64,
+    pub lateral_friction: f64,
+    pub slip_damping: f64,
+    pub max_torque: f64,
+    pub max_power: f64,
+    pub speed_gain: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TrackForceOutput {
+    pub angular_velocity: f64,
+    pub travel: f64,
+    pub motor_torque: f64,
+    pub longitudinal_force: f64,
+    pub normal_load: f64,
+    pub contacts: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct WheelForceDesc {
     pub body: BodyId,
@@ -788,6 +815,15 @@ pub struct WheelForceOutput {
 pub trait PhysicsBackend: Send + Sync {
     /// Short name, for logs.
     fn name(&self) -> &'static str;
+
+    fn configure_track(&mut self, _desc: TrackForceDesc) -> Result<(), String> {
+        Err("track force elements are not supported".into())
+    }
+    fn set_track_speed(&mut self, _sprocket: BodyId, _speed: f64) -> Result<(), String> {
+        Err("track force elements are not supported".into())
+    }
+    fn track_output(&self, _sprocket: BodyId) -> Option<TrackForceOutput> { None }
+    fn remove_track(&mut self, _sprocket: BodyId) {}
 
     fn uses_wheel_forces(&self) -> bool {
         false

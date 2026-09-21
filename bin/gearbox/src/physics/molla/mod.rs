@@ -7,6 +7,7 @@ mod joint;
 #[cfg(test)]
 mod tests;
 mod wheel;
+mod track;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -68,6 +69,31 @@ impl Default for MollaBackend {
 }
 
 impl PhysicsBackend for MollaBackend {
+    fn configure_track(&mut self, desc: TrackForceDesc) -> Result<(), String> {
+        self.configure_track_force(desc)
+    }
+
+    fn set_track_speed(&mut self, sprocket: BodyId, speed: f64) -> Result<(), String> {
+        let handle = self.bodies.get(&sprocket).ok_or("unknown track sprocket")?.handle;
+        self.shared.world().tracks.set_speed(handle, speed).map_err(|e| e.to_string())
+    }
+
+    fn track_output(&self, sprocket: BodyId) -> Option<TrackForceOutput> {
+        let handle = self.bodies.get(&sprocket)?.handle;
+        let world = self.shared.world();
+        let s = world.tracks.sample(&world.scene, handle)?;
+        Some(TrackForceOutput {
+            angular_velocity: s.angular_velocity, travel: s.travel, motor_torque: s.motor_torque,
+            longitudinal_force: s.longitudinal_force, normal_load: s.normal_load, contacts: s.contacts,
+        })
+    }
+
+    fn remove_track(&mut self, sprocket: BodyId) {
+        if let Some(body) = self.bodies.get(&sprocket) {
+            self.shared.world().tracks.remove(body.handle);
+        }
+    }
+
     fn uses_wheel_forces(&self) -> bool {
         true
     }

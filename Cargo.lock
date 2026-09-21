@@ -5575,6 +5575,7 @@ dependencies = [
 [[package]]
 name = "molla-actuators"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/molla?rev=d5476026bf8484333b9ef421b4bdf24bf25fc2ed#d5476026bf8484333b9ef421b4bdf24bf25fc2ed"
 dependencies = [
  "molla-core",
  "molla-math",
@@ -5584,6 +5585,7 @@ dependencies = [
 [[package]]
 name = "molla-core"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/molla?rev=d5476026bf8484333b9ef421b4bdf24bf25fc2ed#d5476026bf8484333b9ef421b4bdf24bf25fc2ed"
 dependencies = [
  "glam 0.30.10",
  "thiserror 2.0.20",
@@ -5592,6 +5594,7 @@ dependencies = [
 [[package]]
 name = "molla-geometry"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/molla?rev=d5476026bf8484333b9ef421b4bdf24bf25fc2ed#d5476026bf8484333b9ef421b4bdf24bf25fc2ed"
 dependencies = [
  "bytemuck",
  "molla-core",
@@ -5606,6 +5609,7 @@ dependencies = [
 [[package]]
 name = "molla-math"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/molla?rev=d5476026bf8484333b9ef421b4bdf24bf25fc2ed#d5476026bf8484333b9ef421b4bdf24bf25fc2ed"
 dependencies = [
  "bytemuck",
  "glam 0.30.10",
@@ -5615,6 +5619,7 @@ dependencies = [
 [[package]]
 name = "molla-sim"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/molla?rev=d5476026bf8484333b9ef421b4bdf24bf25fc2ed#d5476026bf8484333b9ef421b4bdf24bf25fc2ed"
 dependencies = [
  "bytemuck",
  "molla-core",
@@ -5626,6 +5631,7 @@ dependencies = [
 [[package]]
 name = "molla-solvers"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/molla?rev=d5476026bf8484333b9ef421b4bdf24bf25fc2ed#d5476026bf8484333b9ef421b4bdf24bf25fc2ed"
 dependencies = [
  "bytemuck",
  "glam 0.30.10",
@@ -5642,6 +5648,7 @@ dependencies = [
 [[package]]
 name = "molla-storage"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/molla?rev=d5476026bf8484333b9ef421b4bdf24bf25fc2ed#d5476026bf8484333b9ef421b4bdf24bf25fc2ed"
 dependencies = [
  "bytemuck",
  "glam 0.30.10",
@@ -5652,6 +5659,7 @@ dependencies = [
 [[package]]
 name = "molla-vehicle"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/molla?rev=d5476026bf8484333b9ef421b4bdf24bf25fc2ed#d5476026bf8484333b9ef421b4bdf24bf25fc2ed"
 
 [[package]]
 name = "moxcms"
