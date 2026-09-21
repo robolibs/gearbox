@@ -340,6 +340,28 @@ impl Selector<'_> {
         ) {
             return;
         }
+        // Horizon cull: a planet hides its own far side, and the frustum has
+        // no idea. Standing on the surface, twelve thousand kilometres of the
+        // far hemisphere sit inside the frustum, directly overhead. Their
+        // ground faces away and is culled, but the skirts that close the
+        // cracks between tiles face inward and are not — so they drew a grid
+        // across the whole sky, and the same tiles laid its shadow on the
+        // ground when seen from above.
+        //
+        // A point is over the horizon for an eye at `cam` when its dot with
+        // the eye, both from the planet's centre, falls below the occluding
+        // radius squared. Taking the most favourable point of the node's ball
+        // and the lowest ground there can be keeps it conservative: nothing
+        // that could be seen is ever dropped. In f64, because the radius
+        // squared is 4e13 and an f32 cannot tell two of those apart.
+        if beyond_horizon(
+            self.cam,
+            center,
+            chord + cfg.height_amp * 1.65,
+            cfg.radius - cfg.height_amp,
+        ) {
+            return;
+        }
         // LOD distance: cap the height term at the node's own size so small
         // nodes don't all read as "distance zero" near the surface.
         let lod_radius = chord + (cfg.height_amp * 1.5).min(id.world_size(cfg));
@@ -519,9 +541,11 @@ pub fn select_and_sync(
         stats.resident_tiles = cache.resident_count();
         if std::env::var_os("GEARBOX_PLANET_DEBUG").is_some() {
             bevy::log::info!(
-                "select: {} nodes, dropped {}, starved {}, resident {}, baked {}",
+                "select: {} nodes, dropped {}, starved {}, resident {}, baked {}, eye {:.0} m from the centre ({:.0} m up)",
                 stats.selected, stats.dropped, stats.starved, stats.resident_tiles,
-                stats.bakes_requested
+                stats.bakes_requested,
+                view.local_cam.length(),
+                view.local_cam.length() - cfg.radius
             );
         }
 
@@ -618,5 +642,82 @@ pub fn select_and_sync(
                 *vis = Visibility::Visible;
             }
         }
+    }
+}
+
+/// Whether every point of a node's ball is over the horizon from `eye`, all
+/// measured from the planet's centre.
+///
+/// A point `x` on a sphere of radius `r` is over the horizon for an eye at
+/// `e` when `dot(x, e) < r²`: that plane is where the tangent from the eye
+/// touches. The most favourable point of a ball of radius `reach` about
+/// `centre` adds `reach * |e|` to the dot, and `floor` is the lowest ground
+/// there can be, so the answer is conservative — nothing that could be seen is
+/// ever called hidden.
+///
+/// In f64 throughout: `r²` is 4e13 for Earth, and an f32 cannot tell two of
+/// those apart, which is the whole quantity being compared.
+fn beyond_horizon(eye: Vec3, centre: Vec3, reach: f32, floor: f32) -> bool {
+    let floor = floor.max(1.0) as f64;
+    let eye = eye.as_dvec3();
+    let far = eye.length();
+    // An eye below the lowest ground has no horizon to speak of.
+    if far <= floor {
+        return false;
+    }
+    eye.dot(centre.as_dvec3()) + (reach as f64) * far < floor * floor
+}
+
+#[cfg(test)]
+mod horizon_tests {
+    use super::*;
+
+    const R: f32 = 6_371_000.0;
+    const RELIEF: f32 = 9_000.0;
+
+    /// Standing on the surface, the far side of the planet is hidden by the
+    /// planet. Left drawn, its tiles' edge skirts face inward and rule a grid
+    /// across the whole sky.
+    #[test]
+    fn the_far_side_is_hidden_from_someone_standing_on_the_near_side() {
+        let eye = Vec3::new(0.0, R + 6.0, 0.0);
+        for reach in [1.0, 1_000.0, 100_000.0] {
+            let antipode = Vec3::new(0.0, -R, 0.0);
+            assert!(
+                beyond_horizon(eye, antipode, reach, R - RELIEF),
+                "a node of reach {reach} m at the antipode was left visible"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ground_underfoot_is_never_hidden() {
+        let eye = Vec3::new(0.0, R + 6.0, 0.0);
+        assert!(!beyond_horizon(eye, Vec3::new(0.0, R, 0.0), 10.0, R - RELIEF));
+        // Nor is ground a few kilometres away, still inside the horizon.
+        assert!(!beyond_horizon(eye, Vec3::new(3_000.0, R, 0.0), 10.0, R - RELIEF));
+    }
+
+    /// From far out the visible cap grows but never reaches the silhouette:
+    /// at four radii the horizon stands 75 degrees from the point underneath,
+    /// so ground well inside that is kept and the far side still goes.
+    #[test]
+    fn from_orbit_the_cap_in_view_is_kept_and_the_rest_goes() {
+        let eye = Vec3::new(0.0, R * 4.0, 0.0);
+        let at = |degrees: f32| {
+            let (s, c) = degrees.to_radians().sin_cos();
+            Vec3::new(R * s, R * c, 0.0)
+        };
+        assert!(!beyond_horizon(eye, at(60.0), 1_000.0, R - RELIEF), "60 deg is in view");
+        assert!(beyond_horizon(eye, at(120.0), 1_000.0, R - RELIEF), "120 deg is round the back");
+        assert!(beyond_horizon(eye, Vec3::new(0.0, -R, 0.0), 1_000.0, R - RELIEF));
+    }
+
+    /// An eye under the lowest ground is inside the sphere, where the horizon
+    /// test means nothing; it must not start hiding everything.
+    #[test]
+    fn an_eye_below_the_ground_hides_nothing() {
+        let eye = Vec3::new(0.0, R - RELIEF - 100.0, 0.0);
+        assert!(!beyond_horizon(eye, Vec3::new(0.0, -R, 0.0), 1.0, R - RELIEF));
     }
 }

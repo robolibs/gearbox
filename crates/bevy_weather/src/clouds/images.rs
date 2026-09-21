@@ -1,7 +1,7 @@
 use super::uniforms::CloudsImage;
 use bevy::{
     asset::RenderAssetUsages,
-    image::ImageSampler,
+    image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
 };
@@ -14,6 +14,23 @@ pub(crate) const GLOBE_WEATHER_SIZE: UVec2 = UVec2::new(2048, 1024);
 
 pub(crate) fn cloud_image(size: Extent3d, dimension: TextureDimension) -> Image {
     filled_image(size, dimension, &[0, 0, 0, 0, 0, 0, 0, 0x3c])
+}
+
+/// The shadow map is the sun's light texture and is used *tiled*: the land
+/// past its edge repeats the shadows rather than losing its sun. A tiled
+/// texture has to be sampled tiled too — left clamped, every repeat is a seam
+/// where the filter runs off the edge, and those seams draw a grid one map
+/// wide across the ground and through the air the sun lights, in perspective,
+/// as if the sky had a ceiling.
+fn repeating_image(size: Extent3d, dimension: TextureDimension, texel: &[u8; 8]) -> Image {
+    let mut image = filled_image(size, dimension, texel);
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        address_mode_w: ImageAddressMode::Repeat,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
 }
 
 // `texel` is one RGBA pixel of half floats; 0x3c00 is 1.0.
@@ -61,7 +78,7 @@ pub(crate) fn build_images(images: &mut Assets<Image>, resolution: UVec2) -> Clo
         )),
         // Full sun until the pass first writes it: a sun that waited on its
         // cloud shadows would leave the land dark whenever they were late.
-        ground_shadow_image: images.add(filled_image(
+        ground_shadow_image: images.add(repeating_image(
             Extent3d {
                 width: GROUND_SHADOW_SIZE,
                 height: GROUND_SHADOW_SIZE,

@@ -18,6 +18,16 @@ pub use terrain::{RELIEF_M, Terrain};
 
 /// Radius of the sphere drawn for the planet and its sky.
 pub const PLANET_RADIUS_M: f64 = 6_371_000.0;
+/// The largest sphere that fits inside WGS84: its semi-minor axis, the
+/// geocentric radius at the poles.
+///
+/// Sites stand on the ellipsoid, and anything drawn as a *sphere* under them
+/// has to fit inside it or it comes up through the ground. The mean radius
+/// does not: above about 35 degrees of latitude the ellipsoid is inside a
+/// 6 371 km sphere — five kilometres inside it at Paris — so a globe of that
+/// size arched overhead like a ceiling and ruled its tile edges across the
+/// sky, with their shadow on the ground beneath.
+pub const INSCRIBED_RADIUS_M: f64 = 6_356_752.314_245;
 /// A datum serves the land this far around it; past that its flat frame
 /// leans too far from the true vertical.
 pub const DATUM_REACH_M: f64 = 25_000.0;

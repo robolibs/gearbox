@@ -1443,7 +1443,9 @@ fn spawn_cdlod_planet(world: &mut World) {
                         spawn_planet(
                             &mut commands,
                             root,
-                            PlanetConfig::earth(PLANET_RADIUS_M),
+                            // Inscribed in the ellipsoid the sites stand on, so
+                            // the globe is never above the ground anywhere.
+                            PlanetConfig::earth(gearbox_globe::INSCRIBED_RADIUS_M as f32),
                             bevy::math::DVec3::ZERO,
                             &grid,
                             &mut images,
