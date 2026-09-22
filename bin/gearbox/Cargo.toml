@@ -52,12 +52,13 @@ gearbox-cli.workspace = true
 
 # Rigid-body engines used by the physics backend adapters.
 rapier3d = { workspace = true, features = ["enhanced-determinism"] }
-molla-core = { git = "https://github.com/bresilla/molla", rev = "d5476026bf8484333b9ef421b4bdf24bf25fc2ed", default-features = false }
-molla-math = { git = "https://github.com/bresilla/molla", rev = "d5476026bf8484333b9ef421b4bdf24bf25fc2ed" }
-molla-sim = { git = "https://github.com/bresilla/molla", rev = "d5476026bf8484333b9ef421b4bdf24bf25fc2ed", default-features = false }
-molla-geometry = { git = "https://github.com/bresilla/molla", rev = "d5476026bf8484333b9ef421b4bdf24bf25fc2ed", default-features = false }
-molla-solvers = { git = "https://github.com/bresilla/molla", rev = "d5476026bf8484333b9ef421b4bdf24bf25fc2ed", default-features = false }
-molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "d5476026bf8484333b9ef421b4bdf24bf25fc2ed" }
+molla-core = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99", default-features = false }
+molla-math = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99" }
+molla-sim = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99", default-features = false }
+molla-geometry = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99", default-features = false }
+molla-solvers = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99", default-features = false, features = ["gpu"] }
+molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99" }
+wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
 bytemuck = "1"
 glam = "0.30"
 egui.workspace = true
@@ -78,4 +79,3 @@ pyo3 = { version = "0.23", optional = true, features = [
 
 [dev-dependencies]
 pollster = "0.4"
-wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
