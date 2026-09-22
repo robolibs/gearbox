@@ -61,16 +61,8 @@ fn authored_ceol_teeth_drive_rubber_without_friction() {
                 .collect();
             measurements.push((carrier, path, track.nodes.clone(), phases));
         }
-        let shapes = contacts
-            .shapes
-            .iter()
-            .filter(|s| teeth || !drive_bodies.contains(&s.ids[1]))
-            .map(|s| {
-                let mut s = *s;
-                s.data[3] = 0.0;
-                s
-            })
-            .collect();
+        let shapes =
+            contact_control_test::frictionless_drive_contacts(&contacts, &drive_bodies, teeth);
         let mut island = FemGpuIsland::with_ball_joints(
             &device,
             &queue,
@@ -162,7 +154,7 @@ fn authored_ceol_teeth_drive_rubber_without_friction() {
             .map(|&dof| velocity[dof][0] as f64)
             .collect();
         eprintln!(
-            "drive outcome effort={effort}, teeth={teeth}, friction=0, gravity=0: travel={travel:?}, sprocket_speed={speeds:?}, minJ={:?}",
+            "drive outcome effort={effort}, teeth={teeth}, supports=retained, friction=0, gravity=0: travel={travel:?}, sprocket_speed={speeds:?}, minJ={:?}",
             island.minimum_j
         );
         outcomes.push((travel, speeds));

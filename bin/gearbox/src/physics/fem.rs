@@ -13,6 +13,8 @@ mod machine_gpu_test;
 mod drive_gpu_test;
 #[cfg(test)]
 mod traction_gpu_test;
+#[cfg(test)]
+mod contact_control_test;
 pub(crate) mod machine;
 pub(crate) mod rigid_machine;
 pub(crate) mod track_mesh;

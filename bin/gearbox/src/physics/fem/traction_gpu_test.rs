@@ -145,16 +145,8 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
                     as usize
             })
             .collect::<Vec<_>>();
-        let mut shapes = contacts
-            .shapes
-            .iter()
-            .filter(|s| teeth || !drive_bodies.contains(&s.ids[1]))
-            .map(|s| {
-                let mut s = *s;
-                s.data[3] = 0.0;
-                s
-            })
-            .collect::<Vec<_>>();
+        let mut shapes =
+            contact_control_test::frictionless_drive_contacts(&contacts, &drive_bodies, teeth);
         shapes.push(SoftRigidShapeGpu {
             position: [
                 if ground { 0.0 } else { 100.0 },
@@ -318,6 +310,7 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
         let trace = serde_json::json!({
             "asset":std::env::var("GEARBOX_TRACK_ASSET").unwrap(),
             "frame":"island-y-up", "effort":effort, "ground":ground, "teeth":teeth,
+            "drive_contact_control":"tooth boxes only; all smooth sprocket supports retained",
             "time":island.completed_seconds(), "minimum_j":island.minimum_j, "outcome":outcome,
             "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
             "positions":positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
@@ -405,5 +398,19 @@ fn authored_ceol_airborne_momentum_diagnostic() {
     assert!(
         outcomes[0].com_travel.abs() < 1e-5,
         "airborne horizontal COM drift: {outcomes:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires tread-complete GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
+fn authored_ceol_toothless_ground_retention_diagnostic() {
+    let outcomes = run_cases(&[(100.0, true, false)], false);
+    assert!(
+        outcomes[0].retention < 0.020,
+        "toothless retention failed: {outcomes:?}"
+    );
+    assert!(
+        outcomes[0].penetration < 0.002,
+        "toothless ground penetration: {outcomes:?}"
     );
 }
