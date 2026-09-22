@@ -121,6 +121,16 @@ fn rigid_prediction_momentum(remove_stops: bool, remove_drives: bool) {
                     continue;
                 }
                 let (poses, velocities) = if gpu {
+                    let status = machine_gpu_test::read_floats::<1>(
+                        &render_device,
+                        &render_queue,
+                        solver.gpu_status_buffer().unwrap(),
+                    );
+                    assert_eq!(
+                        status[0][0].to_bits(),
+                        0,
+                        "rigid solver failed at step {step}"
+                    );
                     let poses = machine_gpu_test::read_floats::<8>(
                         &render_device,
                         &render_queue,
