@@ -12,10 +12,22 @@ use mara::ui::modules::bevy::{
     BevyViewportWgpuResources, CapturedBevyFrame,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Resource, Clone, Default)]
+struct RenderReadiness(Arc<AtomicUsize>);
 
 fn capture(renderer: &mut BevyViewportRenderer) -> CapturedBevyFrame {
     let mut latest = None;
-    for _ in 0..40 {
+    let readiness = renderer.world_mut().resource::<RenderReadiness>().clone();
+    let mut last = readiness.0.load(Ordering::Acquire);
+    let mut ready_frames = 0;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while ready_frames < 40 || latest.is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "native render pipelines/capture did not become ready"
+        );
         if let Some(frame) = renderer.render_next() {
             latest = Some(frame);
         }
@@ -25,6 +37,14 @@ fn capture(renderer: &mut BevyViewportRenderer) -> CapturedBevyFrame {
             .wgpu_device()
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
+        let count = readiness.0.load(Ordering::Acquire);
+        if count < last {
+            ready_frames = count;
+        } else {
+            ready_frames += count - last;
+        }
+        last = count;
+        std::thread::yield_now();
     }
     latest.expect("native renderer produced no captured image")
 }
@@ -190,9 +210,13 @@ fn render_surface(pipelined: bool, inverted: bool) {
             app.insert_resource(RenderErrorHandler(|error, _, _| {
                 panic!("native FEM rendering error: {error:?}");
             }));
+            let readiness = RenderReadiness::default();
+            app.insert_resource(readiness.clone());
+            app.sub_app_mut(bevy::render::RenderApp)
+                .insert_resource(readiness);
             app.sub_app_mut(bevy::render::RenderApp).add_systems(
                 bevy::render::Render,
-                (|cache: Res<PipelineCache>| {
+                (|cache: Res<PipelineCache>, readiness: Res<RenderReadiness>| {
                     for pipeline in cache.pipelines() {
                         if let CachedPipelineState::Err(error) = &pipeline.state {
                             match error {
@@ -201,6 +225,16 @@ fn render_surface(pipelined: bool, inverted: bool) {
                                 _ => panic!("native FEM pipeline error: {error:?}"),
                             }
                         }
+                    }
+                    if cache.pipelines().next().is_some()
+                        && cache
+                            .pipelines()
+                            .all(|p| matches!(&p.state, CachedPipelineState::Ok(_)))
+                        && cache.waiting_pipelines().next().is_none()
+                    {
+                        readiness.0.fetch_add(1, Ordering::Release);
+                    } else {
+                        readiness.0.store(0, Ordering::Release);
                     }
                 })
                 .after(bevy::render::RenderSystems::Render),
