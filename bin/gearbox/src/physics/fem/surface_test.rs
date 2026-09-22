@@ -1,7 +1,7 @@
+use super::frames::{FemSurfaceBinding, FemSurfaceFrames};
 use super::*;
 use crate::physics::fem::FemRigidConfig;
 use crate::physics::fem::{FemGpuIsland, tests::moving_scene};
-use bevy::camera::visibility::NoFrustumCulling;
 use bevy::core_pipeline::prepass::{DepthPrepass, MotionVectorPrepass, NormalPrepass};
 use bevy::render::error_handler::RenderErrorHandler;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
@@ -64,6 +64,16 @@ fn save(frame: &CapturedBevyFrame, name: &str) {
 #[test]
 #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
 fn native_surface_follows_gpu_nodes_with_static_cpu_mesh() {
+    render_surface(false);
+}
+
+#[test]
+#[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+fn native_surface_snapshots_with_pipelined_rendering() {
+    render_surface(true);
+}
+
+fn render_surface(pipelined: bool) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let mut descriptor = wgpu::DeviceDescriptor::default();
@@ -75,12 +85,21 @@ fn native_surface_follows_gpu_nodes_with_static_cpu_mesh() {
     let mut renderer = BevyViewportRenderer::new(
         BevyViewportTexture::new(256, 192),
         Some(BevyViewportWgpuResources::new(device, queue, adapter)),
-        Some(Arc::new(|plugins| {
-            plugins.disable::<PipelinedRenderingPlugin>()
+        Some(Arc::new(move |plugins| {
+            if pipelined {
+                plugins
+            } else {
+                plugins.disable::<PipelinedRenderingPlugin>()
+            }
         })),
         Some(Arc::new(|app| {
-            app.add_plugins(bevy::log::LogPlugin::default());
+            static LOGGING: std::sync::Once = std::sync::Once::new();
+            LOGGING.call_once(|| {
+                app.add_plugins(bevy::log::LogPlugin::default());
+            });
             app.add_plugins(FemSurfacePlugin);
+            app.insert_resource(gearbox_api::PhysicsActive(false));
+            app.add_systems(Update, crate::physics::fem::advance_islands);
             app.add_systems(
                 Startup,
                 (|target: Res<BevyViewportRenderTarget>,
@@ -116,7 +135,7 @@ fn native_surface_follows_gpu_nodes_with_static_cpu_mesh() {
     let device = world.resource::<RenderDevice>().clone();
     let queue = world.resource::<RenderQueue>().clone();
     let h = 1.0 / 4096.0;
-    let mut island = FemGpuIsland::new(
+    let island = FemGpuIsland::new(
         &device,
         &queue,
         moving_scene(),
@@ -136,24 +155,21 @@ fn native_surface_follows_gpu_nodes_with_static_cpu_mesh() {
         )
         .unwrap(),
     );
-    let material = world
-        .resource_mut::<Assets<FemMaterial>>()
-        .add(FemMaterial {
-            base: StandardMaterial {
-                base_color: Color::srgb(1.0, 0.0, 0.0),
-                unlit: true,
-                ..Default::default()
-            },
-            extension: FemExtension {
-                positions: island.positions().clone().into(),
-                previous_positions: island.positions().clone().into(),
-            },
-        });
-    world.spawn((
-        Mesh3d(mesh.clone()),
-        MeshMaterial3d(material.clone()),
-        NoFrustumCulling,
-    ));
+    let frames = FemSurfaceFrames::new(&device, &queue, &island);
+    let entity = world.spawn_empty().id();
+    let binding = FemSurfaceBinding::new(
+        entity,
+        &frames,
+        &mut world.resource_mut::<Assets<FemMaterial>>(),
+        StandardMaterial {
+            base_color: Color::srgb(1.0, 0.0, 0.0),
+            unlit: true,
+            ..Default::default()
+        },
+    );
+    let material = binding.material();
+    world.entity_mut(entity).insert((island, frames));
+    world.spawn((Mesh3d(mesh.clone()), material, binding));
     world.spawn((
         Camera3d::default(),
         Projection::Orthographic(OrthographicProjection {
@@ -168,18 +184,31 @@ fn native_surface_follows_gpu_nodes_with_static_cpu_mesh() {
         MotionVectorPrepass,
     ));
     let before = capture(&mut renderer);
-    save(&before, "before.png");
-    island.system.step(512.0 * h).unwrap();
-    assert!(island.system.soft_state().particle_q.host().is_err());
-    renderer
-        .world_mut()
-        .resource_mut::<Assets<FemMaterial>>()
-        .get_mut(&material)
-        .unwrap()
-        .extension
-        .positions = island.positions().clone().into();
+    save(
+        &before,
+        if pipelined {
+            "pipelined-before.png"
+        } else {
+            "before.png"
+        },
+    );
+    {
+        let mut island = renderer
+            .world_mut()
+            .get_mut::<FemGpuIsland>(entity)
+            .unwrap();
+        island.system.step(512.0 * h).unwrap();
+        assert!(island.system.soft_state().particle_q.host().is_err());
+    }
     let after = capture(&mut renderer);
-    save(&after, "after.png");
+    save(
+        &after,
+        if pipelined {
+            "pipelined-after.png"
+        } else {
+            "after.png"
+        },
+    );
     let movement = centroid(&after) - centroid(&before);
     assert!(
         (24.0..34.0).contains(&movement),
@@ -187,10 +216,49 @@ fn native_surface_follows_gpu_nodes_with_static_cpu_mesh() {
     );
     let paused = capture(&mut renderer);
     assert_eq!(after.rgba, paused.rgba, "paused GPU geometry changed");
+    if pipelined {
+        renderer
+            .world_mut()
+            .resource_mut::<gearbox_api::PhysicsActive>()
+            .0 = true;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            renderer.render_next();
+            let island = renderer.world_mut().get::<FemGpuIsland>(entity).unwrap();
+            assert!(island.failure().is_none(), "{:?}", island.failure());
+            if island.completed_seconds() >= 128.0 * h {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pipelined FEM stalled"
+            );
+            std::thread::yield_now();
+        }
+        renderer
+            .world_mut()
+            .resource_mut::<gearbox_api::PhysicsActive>()
+            .0 = false;
+        let moving = capture(&mut renderer);
+        let delta = centroid(&moving) - centroid(&after);
+        assert!((6.0..10.0).contains(&delta), "pipelined movement: {delta}");
+        let settled = capture(&mut renderer);
+        assert_eq!(moving.rgba, settled.rgba, "pipelined pause did not settle");
+        save(&moving, "pipelined-streaming.png");
+    }
     let assets = renderer.world_mut().resource::<Assets<Mesh>>();
     assert!(
         matches!(assets.get(&mesh).unwrap().attribute(Mesh::ATTRIBUTE_POSITION),
         Some(VertexAttributeValues::Float32x3(v)) if v == &reference)
+    );
+    renderer.world_mut().despawn(entity);
+    let removed = capture(&mut renderer);
+    assert!(
+        removed
+            .rgba
+            .chunks_exact(4)
+            .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0),
+        "orphan FEM surface remained visible"
     );
     eprintln!("native FEM surface moved {movement:.3} pixels with unchanged CPU mesh");
 }

@@ -184,7 +184,7 @@ mod tests {
         }
     }
 
-    fn gpu_island() -> (RenderDevice, RenderQueue, FemGpuIsland) {
+    pub(super) fn gpu_island() -> (RenderDevice, RenderQueue, FemGpuIsland) {
         use bevy::render::renderer::WgpuWrapper;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();

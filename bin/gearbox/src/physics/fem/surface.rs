@@ -10,6 +10,8 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
+pub(crate) mod frames;
+
 const NODES: MeshVertexAttribute =
     MeshVertexAttribute::new("FemTriangleNodes", 0x46454d01, VertexFormat::Uint32x3);
 const NEIGHBOR_UVS: MeshVertexAttribute =
@@ -65,6 +67,7 @@ impl Plugin for FemSurfacePlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "surface.wgsl");
         app.add_plugins(MaterialPlugin::<FemMaterial>::default());
+        app.add_systems(Update, frames::capture_surfaces.after(super::advance_islands));
     }
 }
 
