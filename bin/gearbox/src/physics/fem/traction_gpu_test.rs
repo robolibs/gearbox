@@ -25,7 +25,7 @@ struct Outcome {
     penetration: f64,
 }
 
-fn run_cases(cases: &[(f64, bool, bool)]) -> Vec<Outcome> {
+fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome> {
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
     assert!(
         spec.tracks
@@ -193,6 +193,9 @@ fn run_cases(cases: &[(f64, bool, bool)]) -> Vec<Outcome> {
             &loops,
         )
         .unwrap();
+        if monitor_momentum {
+            island.system.enable_momentum_diagnostics();
+        }
         for dof in dofs {
             island.system.set_drive_effort(dof, effort).unwrap();
         }
@@ -230,6 +233,15 @@ fn run_cases(cases: &[(f64, bool, bool)]) -> Vec<Outcome> {
             .map(|q| DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64))
             .collect::<Vec<_>>();
         let body_poses = body_poses.into_iter().map(pose).collect::<Vec<_>>();
+        let momentum = island.system.momentum_diagnostics_buffer().map(|buffer| {
+            let values = machine_gpu_test::read_floats::<4>(&device, &queue, buffer);
+            assert_eq!(values.len(), 20);
+            assert!(values.iter().flatten().all(|v| v.is_finite()));
+            let along = |v: [f32; 4]| DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64).dot(forward);
+            let phase_deltas = (1..=4).map(|i| along(values[10 + i * 2]) + along(values[11 + i * 2])).collect::<Vec<_>>();
+            eprintln!("cumulative forward momentum deltas (FEM, rigid, contact, drift)={phase_deltas:?} kg m/s; final={} kg m/s", along(values[8]) + along(values[9]));
+            values
+        });
         let final_first = body_poses
             .iter()
             .enumerate()
@@ -311,6 +323,7 @@ fn run_cases(cases: &[(f64, bool, bool)]) -> Vec<Outcome> {
             "positions":positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
             "triangles":triangles, "initial_poses":poses(&initial_poses), "poses":poses(&body_poses),
             "shapes":shape_trace, "regions":regions, "retention_errors":errors, "worst":worst,
+            "momentum_phase_pairs_then_cumulative_deltas":momentum,
         });
         let path = directory.join(format!("effort{effort}_ground{ground}_teeth{teeth}.json"));
         std::fs::write(&path, serde_json::to_vec(&trace).unwrap()).unwrap();
@@ -323,7 +336,7 @@ fn run_cases(cases: &[(f64, bool, bool)]) -> Vec<Outcome> {
 #[test]
 #[ignore = "requires tread-complete GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
 fn authored_ceol_passive_ground_retention_diagnostic() {
-    let outcomes = run_cases(&[(0.0, true, true)]);
+    let outcomes = run_cases(&[(0.0, true, true)], false);
     assert!(
         outcomes[0].retention < 0.020,
         "passive retention failed: {outcomes:?}"
@@ -337,13 +350,16 @@ fn authored_ceol_passive_ground_retention_diagnostic() {
 #[test]
 #[ignore = "requires tread-complete GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
 fn authored_ceol_powered_ground_coupling_has_causal_controls() {
-    let outcomes = run_cases(&[
-        (0.0, true, true),
-        (100.0, false, true),
-        (100.0, true, false),
-        (100.0, true, true),
-        (-100.0, true, true),
-    ]);
+    let outcomes = run_cases(
+        &[
+            (0.0, true, true),
+            (100.0, false, true),
+            (100.0, true, false),
+            (100.0, true, true),
+            (-100.0, true, true),
+        ],
+        false,
+    );
     for outcome in &outcomes {
         assert!(
             outcome.retention < 0.020,
@@ -375,5 +391,19 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
         outcomes[3].chassis_travel > outcomes[0].chassis_travel + 5e-5
             && outcomes[4].chassis_travel < outcomes[0].chassis_travel - 5e-5,
         "ground traction did not move chassis: {outcomes:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires tread-complete GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
+fn authored_ceol_airborne_momentum_diagnostic() {
+    let outcomes = run_cases(&[(100.0, false, true)], true);
+    assert!(
+        outcomes[0].retention < 0.020,
+        "airborne retention failed: {outcomes:?}"
+    );
+    assert!(
+        outcomes[0].com_travel.abs() < 1e-5,
+        "airborne horizontal COM drift: {outcomes:?}"
     );
 }
