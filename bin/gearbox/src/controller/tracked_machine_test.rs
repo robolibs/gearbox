@@ -3,6 +3,53 @@ use crate::physics::{MollaBackend, PhysicsWorld};
 use crate::physics::backend::ColliderDesc;
 
 #[test]
+#[ignore = "requires GEARBOX_TRACK_ASSET through oslo make test-fem-machine"]
+fn ceol_fem_machine_binding() {
+    use crate::physics::fem::machine::FemMachineLayout;
+    use crate::physics::markers::UsdPhysicsJoint;
+    let path = std::env::var("GEARBOX_TRACK_ASSET").expect("GEARBOX_TRACK_ASSET");
+    let source = usd_bevy::UsdSource::from_file(Path::new(&path)).unwrap();
+    let stage = source.open_stage().unwrap();
+    let mut machine = discover_machines_from_stage(&stage).unwrap().remove(0);
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, bevy::transform::TransformPlugin,
+        bevy::asset::AssetPlugin { file_path: "/".into(), unapproved_path_mode: bevy::asset::UnapprovedPathMode::Allow, ..default() },
+        usd_bevy::UsdPlugin));
+    app.init_asset::<Mesh>().init_asset::<StandardMaterial>().init_asset::<Image>();
+    app.insert_resource(PhysicsWorld::with_backend(Box::new(MollaBackend::default())));
+    app.finish(); app.cleanup();
+    let first_root = crate::physics::benchmark::project(&mut app, &stage);
+    machine.scene_root = Some(first_root);
+    let layout = FemMachineLayout::inspect(app.world_mut(), &machine).unwrap();
+    assert!(layout.bodies.len() > 13);
+    assert_eq!(layout.tree_joints.len() + 1, layout.bodies.len());
+    assert_eq!(layout.loop_joints.len(), 2, "hitch closure constraints were dropped");
+    assert_eq!(layout.tracks.len(), 2);
+    assert_eq!(layout.tracks.iter().map(|t| t.passive_joints.len()).sum::<usize>(), 10);
+    for track in &layout.tracks {
+        assert!(layout.bodies.contains(&track.carrier));
+        assert!(layout.bodies.contains(&track.sprocket));
+        assert!(layout.tree_joints.contains(&track.drive_joint));
+        assert_eq!(track.treads.len(), 56);
+        assert_eq!(track.contact_patches.len(), 6);
+    }
+    let second_root = crate::physics::benchmark::project(&mut app, &stage);
+    machine.scene_root = Some(second_root);
+    let second = FemMachineLayout::inspect(app.world_mut(), &machine).unwrap();
+    assert!(layout.bodies.iter().all(|e| !second.bodies.contains(e)));
+    assert_ne!(layout.chassis, second.chassis);
+    let joint = second.loop_joints[0];
+    let original = app.world().get::<UsdPhysicsJoint>(joint).unwrap().clone();
+    app.world_mut().get_mut::<UsdPhysicsJoint>(joint).unwrap().body1 = Some(layout.chassis);
+    assert!(FemMachineLayout::inspect(app.world_mut(), &machine).unwrap_err().contains("foreign"));
+    app.world_mut().entity_mut(joint).insert(original);
+    machine.tracks[0].sprocket = "/foreign/sprocket".into();
+    assert!(FemMachineLayout::inspect(app.world_mut(), &machine).unwrap_err().contains("outside"));
+    eprintln!("actual CEOL binding: {} bodies, {} tree joints, {} closed-loop joints, 2 isolated instances",
+        layout.bodies.len(), layout.tree_joints.len(), layout.loop_joints.len());
+}
+
+#[test]
 #[ignore = "requires GEARBOX_TRACK_ASSET pointing to a tracked machine USDZ"]
 fn real_tracked_machine() {
     let path = std::env::var("GEARBOX_TRACK_ASSET").expect("GEARBOX_TRACK_ASSET");

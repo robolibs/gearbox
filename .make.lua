@@ -138,6 +138,8 @@ make.recipe{ name = "test-tracked-machine", desc = "test the imported GEARBOX_TR
              run = function() sh.cargo("test", "-p", "gearbox-sim", "real_tracked_machine", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-fem", desc = "test native FEM scheduling",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "physics::fem") end }
+make.recipe{ name = "test-fem-machine", desc = "validate FEM binding against GEARBOX_TRACK_ASSET",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "ceol_fem_machine_binding", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-fem-gpu", desc = "test native FEM scheduling on a real GPU",
              run = function() sh.nixVulkan("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", "physics::fem", "--", "--ignored", "--nocapture", "--test-threads=1") end }
 
