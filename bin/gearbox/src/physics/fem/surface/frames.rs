@@ -9,6 +9,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 #[derive(Component)]
 pub(crate) struct FemSurfaceFrames {
     positions: [Buffer; 3],
+    validity: [Buffer; 3],
     current: usize,
 }
 
@@ -25,13 +26,23 @@ impl FemSurfaceFrames {
                 mapped_at_creation: false,
             })
         });
+        let validity = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("FEM render frame validity"),
+                size: 12,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
         let mut encoder = device.create_command_encoder(&Default::default());
-        for destination in &positions {
+        for (destination, diagnostic) in positions.iter().zip(&validity) {
             encoder.copy_buffer_to_buffer(source, 0, destination, 0, source.size());
+            copy_validity(&mut encoder, island, diagnostic);
         }
         queue.submit([encoder.finish()]);
         Self {
             positions,
+            validity,
             current: 0,
         }
     }
@@ -42,6 +53,7 @@ impl FemSurfaceFrames {
         assert_eq!(source.size(), self.positions[next].size());
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(source, 0, &self.positions[next], 0, source.size());
+        copy_validity(&mut encoder, island, &self.validity[next]);
         queue.submit([encoder.finish()]);
         self.current = next;
     }
@@ -50,8 +62,20 @@ impl FemSurfaceFrames {
         FemExtension {
             positions: self.positions[slot].clone(),
             previous_positions: self.positions[(slot + 2) % 3].clone(),
+            validity: self.validity[slot].clone(),
         }
     }
+}
+
+fn copy_validity(encoder: &mut wgpu::CommandEncoder, island: &FemGpuIsland, destination: &Buffer) {
+    encoder.copy_buffer_to_buffer(island.status(), 0, destination, 0, 4);
+    encoder.copy_buffer_to_buffer(
+        island.system.volume_diagnostics_buffer(),
+        0,
+        destination,
+        4,
+        8,
+    );
 }
 
 /// Surface materials with immutable buffer bindings for each frame slot.

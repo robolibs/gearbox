@@ -64,16 +64,90 @@ fn save(frame: &CapturedBevyFrame, name: &str) {
 #[test]
 #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
 fn native_surface_follows_gpu_nodes_with_static_cpu_mesh() {
-    render_surface(false);
+    render_surface(false, false);
 }
 
 #[test]
 #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
 fn native_surface_snapshots_with_pipelined_rendering() {
-    render_surface(true);
+    render_surface(true, false);
 }
 
-fn render_surface(pipelined: bool) {
+#[test]
+#[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+fn native_surface_rejects_gpu_invalidity_while_paused() {
+    render_surface(true, true);
+}
+
+fn black(frame: &CapturedBevyFrame) -> bool {
+    frame
+        .rgba
+        .chunks_exact(4)
+        .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
+}
+
+fn inject_validity(
+    device: &RenderDevice,
+    queue: &RenderQueue,
+    island: &FemGpuIsland,
+    words: [u32; 3],
+) {
+    let shader = device
+        .wgpu_device()
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("FEM renderer validity fault injection"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "@group(0) @binding(0) var<storage, read_write> status: u32;
+             @group(0) @binding(1) var<storage, read_write> volume: array<u32>;
+             @compute @workgroup_size(1) fn main() {{
+                 status = {}u; volume[0] = {}u; volume[1] = {}u;
+             }}",
+                    words[0], words[1], words[2]
+                )
+                .into(),
+            ),
+        });
+    let pipeline = device
+        .wgpu_device()
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let group = device
+        .wgpu_device()
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: island.status().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: island
+                        .system
+                        .volume_diagnostics_buffer()
+                        .as_entire_binding(),
+                },
+            ],
+        });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    queue.submit([encoder.finish()]);
+}
+
+fn render_surface(pipelined: bool, inverted: bool) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let mut descriptor = wgpu::DeviceDescriptor::default();
@@ -92,14 +166,16 @@ fn render_surface(pipelined: bool) {
                 plugins.disable::<PipelinedRenderingPlugin>()
             }
         })),
-        Some(Arc::new(|app| {
+        Some(Arc::new(move |app| {
             static LOGGING: std::sync::Once = std::sync::Once::new();
             LOGGING.call_once(|| {
                 app.add_plugins(bevy::log::LogPlugin::default());
             });
             app.add_plugins(FemSurfacePlugin);
             app.insert_resource(gearbox_api::PhysicsActive(false));
-            app.add_systems(Update, crate::physics::fem::advance_islands);
+            if !inverted {
+                app.add_systems(Update, crate::physics::fem::advance_islands);
+            }
             app.add_systems(
                 Startup,
                 (|target: Res<BevyViewportRenderTarget>,
@@ -135,10 +211,14 @@ fn render_surface(pipelined: bool) {
     let device = world.resource::<RenderDevice>().clone();
     let queue = world.resource::<RenderQueue>().clone();
     let h = 1.0 / 4096.0;
+    let mut scene = moving_scene();
+    if inverted {
+        scene.soft_state.particle_q.host_mut().unwrap()[3].z = -0.1;
+    }
     let island = FemGpuIsland::new(
         &device,
         &queue,
-        moving_scene(),
+        scene,
         FemRigidConfig {
             max_substep: h,
             elastic_iterations: 4,
@@ -184,6 +264,29 @@ fn render_surface(pipelined: bool) {
         MotionVectorPrepass,
     ));
     let before = capture(&mut renderer);
+    if inverted {
+        assert!(black(&before), "initial inverted mesh was rendered");
+        let mut faults = vec![[0, 1.0_f32.to_bits(), 0]];
+        faults.extend([1, 2, 4, 8, 16, u32::MAX].map(|s| [s, 1.0_f32.to_bits(), u32::MAX]));
+        faults.extend(
+            [f32::NAN, f32::INFINITY, -1.0, 0.0, 0.49, 0.5].map(|j| [0, j.to_bits(), u32::MAX]),
+        );
+        for words in faults {
+            let island = renderer.world_mut().get::<FemGpuIsland>(entity).unwrap();
+            inject_validity(&device, &queue, island, words);
+            assert!(
+                black(&capture(&mut renderer)),
+                "invalid GPU diagnostics rendered: {words:?}"
+            );
+        }
+        let island = renderer.world_mut().get::<FemGpuIsland>(entity).unwrap();
+        assert!(island.failure().is_none());
+        assert_eq!(island.completed_seconds(), 0.0);
+        assert!(!island.pending());
+        inject_validity(&device, &queue, island, [0, 1.0_f32.to_bits(), u32::MAX]);
+        assert!(centroid(&capture(&mut renderer)).is_finite());
+        return;
+    }
     save(
         &before,
         if pipelined {
@@ -253,12 +356,6 @@ fn render_surface(pipelined: bool) {
     );
     renderer.world_mut().despawn(entity);
     let removed = capture(&mut renderer);
-    assert!(
-        removed
-            .rgba
-            .chunks_exact(4)
-            .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0),
-        "orphan FEM surface remained visible"
-    );
+    assert!(black(&removed), "orphan FEM surface remained visible");
     eprintln!("native FEM surface moved {movement:.3} pixels with unchanged CPU mesh");
 }

@@ -32,6 +32,8 @@ pub(crate) struct FemExtension {
     /// Node positions for the preceding render frame, in mesh-local coordinates.
     #[storage(101, read_only, buffer)]
     pub(crate) previous_positions: Buffer,
+    #[storage(102, read_only, buffer)]
+    pub(crate) validity: Buffer,
 }
 
 impl MaterialExtension for FemExtension {
@@ -67,7 +69,10 @@ impl Plugin for FemSurfacePlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "surface.wgsl");
         app.add_plugins(MaterialPlugin::<FemMaterial>::default());
-        app.add_systems(Update, frames::capture_surfaces.after(super::advance_islands));
+        app.add_systems(
+            Update,
+            frames::capture_surfaces.after(super::advance_islands),
+        );
     }
 }
 

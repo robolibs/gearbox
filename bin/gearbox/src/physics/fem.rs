@@ -58,6 +58,8 @@ impl FemGpuIsland {
             scene,
             config,
         )?;
+        let mut diagnostics = diagnostics::Diagnostics::new(device.wgpu_device());
+        diagnostics.submit(device.wgpu_device(), queue, &system);
         Ok(Self {
             system,
             clock: IslandClock::default(),
@@ -65,7 +67,7 @@ impl FemGpuIsland {
             failure: None,
             device: device.wgpu_device().clone(),
             queue: (**queue.0).clone(),
-            diagnostics: diagnostics::Diagnostics::new(device.wgpu_device()),
+            diagnostics,
             minimum_j: None,
         })
     }
@@ -99,7 +101,7 @@ impl FemGpuIsland {
     }
 
     fn advance(&mut self, active: bool) -> molla_core::Result<()> {
-        if self.clock.pending() {
+        if self.diagnostics.pending() {
             self.device.poll(wgpu::PollType::Poll).map_err(|error| {
                 molla_core::Error::Gpu(format!("FEM diagnostic poll failed: {error}"))
             })?;
@@ -108,7 +110,11 @@ impl FemGpuIsland {
             self.minimum_j = Some(minimum_j);
             self.clock.complete();
         }
-        if active && !self.clock.pending() && self.system.try_step_substep(self.substep)? {
+        if active
+            && self.minimum_j.is_some()
+            && !self.clock.pending()
+            && self.system.try_step_substep(self.substep)?
+        {
             self.clock.submit();
             self.diagnostics
                 .submit(&self.device, &self.queue, &self.system);
@@ -213,6 +219,44 @@ mod tests {
 
     #[test]
     #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+    fn native_fem_rejects_initial_inversion_without_advancing() {
+        let (device, queue, _) = gpu_island();
+        for active in [false, true] {
+            let mut scene = moving_scene();
+            scene.soft_state.particle_q.host_mut().unwrap()[3].z = -0.1;
+            let island = FemGpuIsland::new(
+                &device,
+                &queue,
+                scene,
+                FemRigidConfig {
+                    max_substep: 1.0 / 4096.0,
+                    elastic_iterations: 4,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut app = App::new();
+            app.insert_resource(PhysicsActive(active))
+                .add_systems(Update, advance_islands);
+            let entity = app.world_mut().spawn(island).id();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                app.update();
+                let island = app.world().get::<FemGpuIsland>(entity).unwrap();
+                assert_eq!(island.clock.submitted, 0);
+                assert_eq!(island.completed_seconds(), 0.0);
+                if let Some(error) = island.failure() {
+                    assert!(error.contains("status=0x8"), "{error}");
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
     fn native_fem_pacing_honors_pause_and_completed_time() {
         let (device, queue, island) = gpu_island();
         let h = 1.0 / 4096.0;
@@ -220,7 +264,25 @@ mod tests {
         app.insert_resource(PhysicsActive(false))
             .add_systems(Update, advance_islands);
         let entity = app.world_mut().spawn(island).id();
-        app.update();
+        let initial_deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while app
+            .world()
+            .get::<FemGpuIsland>(entity)
+            .unwrap()
+            .minimum_j
+            .is_none()
+        {
+            assert!(std::time::Instant::now() < initial_deadline);
+            app.update();
+            assert!(
+                app.world()
+                    .get::<FemGpuIsland>(entity)
+                    .unwrap()
+                    .failure()
+                    .is_none()
+            );
+            std::thread::yield_now();
+        }
         assert_eq!(
             app.world()
                 .get::<FemGpuIsland>(entity)

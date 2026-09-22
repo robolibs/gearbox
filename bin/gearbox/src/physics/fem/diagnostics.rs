@@ -13,6 +13,10 @@ pub(super) struct Diagnostics {
 }
 
 impl Diagnostics {
+    pub(super) fn pending(&self) -> bool {
+        self.pending
+    }
+
     pub(super) fn new(device: &wgpu::Device) -> Self {
         Self {
             staging: device.create_buffer(&wgpu::BufferDescriptor {

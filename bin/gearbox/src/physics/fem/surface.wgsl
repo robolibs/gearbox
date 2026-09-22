@@ -8,6 +8,13 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<storage, read> positions: array<vec4<f32>>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var<storage, read> previous_positions: array<vec4<f32>>;
 
+struct Validity {
+    status: u32,
+    minimum_j: f32,
+    invalid_tet: u32,
+}
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var<storage, read> validity: Validity;
+
 struct Input {
     @builtin(instance_index) instance_index: u32,
     @location(0) reference: vec3<f32>,
@@ -18,6 +25,12 @@ struct Input {
 
 @vertex
 fn vertex(input: Input) -> VertexOutput {
+    var out: VertexOutput;
+    if validity.status != 0u || validity.invalid_tet != 0xffffffffu
+        || !(validity.minimum_j > 0.5 && validity.minimum_j <= 3.402823466e+38) {
+        out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
     let p = positions[input.nodes.x].xyz;
     let edge1 = positions[input.nodes.y].xyz - p;
     let edge2 = positions[input.nodes.z].xyz - p;
@@ -33,7 +46,6 @@ fn vertex(input: Input) -> VertexOutput {
         handedness = select(-1.0, 1.0, dot(cross(normal, tangent), bitangent) >= 0.0);
     }
     let world = mesh_functions::get_world_from_local(input.instance_index);
-    var out: VertexOutput;
     out.world_position = mesh_functions::mesh_position_local_to_world(world, vec4<f32>(p, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
