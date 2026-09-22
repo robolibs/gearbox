@@ -84,19 +84,31 @@ fn save(frame: &CapturedBevyFrame, name: &str) {
 #[test]
 #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
 fn native_surface_follows_gpu_nodes_with_static_cpu_mesh() {
-    render_surface(false, false);
+    render_surface(false, false, false);
 }
 
 #[test]
 #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
 fn native_surface_snapshots_with_pipelined_rendering() {
-    render_surface(true, false);
+    render_surface(true, false, false);
 }
 
 #[test]
 #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
 fn native_surface_rejects_gpu_invalidity_while_paused() {
-    render_surface(true, true);
+    render_surface(true, true, false);
+}
+
+#[test]
+#[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+fn native_rigid_surface_follows_gpu_poses_with_static_cpu_transform() {
+    render_surface(true, false, true);
+}
+
+#[test]
+#[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+fn native_rigid_surface_rejects_gpu_invalidity_while_paused() {
+    render_surface(true, true, true);
 }
 
 fn black(frame: &CapturedBevyFrame) -> bool {
@@ -167,7 +179,7 @@ fn inject_validity(
     queue.submit([encoder.finish()]);
 }
 
-fn render_surface(pipelined: bool, inverted: bool) {
+fn render_surface(pipelined: bool, inverted: bool, rigid: bool) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let mut descriptor = wgpu::DeviceDescriptor::default();
@@ -246,6 +258,26 @@ fn render_surface(pipelined: bool, inverted: bool) {
     let queue = world.resource::<RenderQueue>().clone();
     let h = 1.0 / 4096.0;
     let mut scene = moving_scene();
+    if rigid {
+        use molla_core::{BodyId, WorldId};
+        use molla_math::{Transform as Pose, Vec3 as Vector};
+        use molla_sim::{BodyParams, ModelBuilder};
+        let mut builder = ModelBuilder::new();
+        builder.set_world_gravity(WorldId(0), Vector::ZERO);
+        builder.begin_articulation();
+        let base = builder.add_body(BodyParams::new());
+        builder
+            .add_joint_fixed(BodyId::NONE, base, Pose::IDENTITY, Pose::IDENTITY)
+            .unwrap();
+        let body = builder.add_body(BodyParams::new());
+        builder
+            .add_joint_prismatic(base, body, Pose::IDENTITY, Pose::IDENTITY, Vector::X)
+            .unwrap();
+        scene.rigid_model = builder.build().unwrap();
+        scene.rigid_state = scene.rigid_model.state().unwrap();
+        scene.rigid_state.joint_qd.host_mut().unwrap()[0] = 0.3;
+        scene.control = scene.rigid_model.control();
+    }
     if inverted {
         scene.soft_state.particle_q.host_mut().unwrap()[3].z = -0.1;
     }
@@ -271,19 +303,37 @@ fn render_surface(pipelined: bool, inverted: bool) {
     );
     let frames = FemSurfaceFrames::new(&device, &queue, &island);
     let entity = world.spawn_empty().id();
-    let binding = FemSurfaceBinding::new(
-        entity,
-        &frames,
-        &mut world.resource_mut::<Assets<FemMaterial>>(),
-        StandardMaterial {
-            base_color: Color::srgb(1.0, 0.0, 0.0),
-            unlit: true,
-            ..Default::default()
-        },
-    );
-    let material = binding.material();
+    let base = StandardMaterial {
+        base_color: Color::srgb(1.0, 0.0, 0.0),
+        unlit: true,
+        ..Default::default()
+    };
+    let surface_entity = if rigid {
+        let binding = super::rigid::FemRigidBinding::new(
+            entity,
+            &frames,
+            &mut world.resource_mut::<Assets<super::rigid::RigidMaterial>>(),
+            base,
+            1,
+            Vec3::X * 0.02,
+            Mat4::from_translation(Vec3::X * 0.01),
+        )
+        .unwrap();
+        world
+            .spawn((Mesh3d(mesh.clone()), binding.material(), binding))
+            .id()
+    } else {
+        let binding = FemSurfaceBinding::new(
+            entity,
+            &frames,
+            &mut world.resource_mut::<Assets<FemMaterial>>(),
+            base,
+        );
+        world
+            .spawn((Mesh3d(mesh.clone()), binding.material(), binding))
+            .id()
+    };
     world.entity_mut(entity).insert((island, frames));
-    world.spawn((Mesh3d(mesh.clone()), material, binding));
     world.spawn((
         Camera3d::default(),
         Projection::Orthographic(OrthographicProjection {
@@ -323,11 +373,15 @@ fn render_surface(pipelined: bool, inverted: bool) {
     }
     save(
         &before,
-        if pipelined {
-            "pipelined-before.png"
-        } else {
-            "before.png"
-        },
+        &format!(
+            "{}{}",
+            if rigid { "rigid-" } else { "" },
+            if pipelined {
+                "pipelined-before.png"
+            } else {
+                "before.png"
+            }
+        ),
     );
     {
         let mut island = renderer
@@ -336,15 +390,20 @@ fn render_surface(pipelined: bool, inverted: bool) {
             .unwrap();
         island.system.step(512.0 * h).unwrap();
         assert!(island.system.soft_state().particle_q.host().is_err());
+        assert!(island.system.rigid_state().body_q.host().is_err());
     }
     let after = capture(&mut renderer);
     save(
         &after,
-        if pipelined {
-            "pipelined-after.png"
-        } else {
-            "after.png"
-        },
+        &format!(
+            "{}{}",
+            if rigid { "rigid-" } else { "" },
+            if pipelined {
+                "pipelined-after.png"
+            } else {
+                "after.png"
+            }
+        ),
     );
     let movement = centroid(&after) - centroid(&before);
     assert!(
@@ -368,7 +427,11 @@ fn render_surface(pipelined: bool, inverted: bool) {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "pipelined FEM stalled"
+                "pipelined FEM stalled: submitted={}, completed={}, pending={}, accepted={}s",
+                island.clock.submitted,
+                island.clock.completed,
+                island.pending(),
+                island.completed_seconds()
             );
             std::thread::yield_now();
         }
@@ -381,8 +444,22 @@ fn render_surface(pipelined: bool, inverted: bool) {
         assert!((6.0..10.0).contains(&delta), "pipelined movement: {delta}");
         let settled = capture(&mut renderer);
         assert_eq!(moving.rgba, settled.rgba, "pipelined pause did not settle");
-        save(&moving, "pipelined-streaming.png");
+        save(
+            &moving,
+            if rigid {
+                "rigid-pipelined-streaming.png"
+            } else {
+                "pipelined-streaming.png"
+            },
+        );
     }
+    assert_eq!(
+        renderer
+            .world_mut()
+            .get::<Transform>(surface_entity)
+            .unwrap(),
+        &Transform::IDENTITY
+    );
     let assets = renderer.world_mut().resource::<Assets<Mesh>>();
     assert!(
         matches!(assets.get(&mesh).unwrap().attribute(Mesh::ATTRIBUTE_POSITION),

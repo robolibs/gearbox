@@ -9,6 +9,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 #[derive(Component)]
 pub(crate) struct FemSurfaceFrames {
     positions: [Buffer; 3],
+    pub(super) body_poses: [Buffer; 3],
     validity: [Buffer; 3],
     current: usize,
 }
@@ -34,7 +35,21 @@ impl FemSurfaceFrames {
                 mapped_at_creation: false,
             })
         });
+        let body_source = island.rigid_poses();
+        let body_poses = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("FEM render frame rigid poses"),
+                size: body_source.size(),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
+        });
         let mut encoder = device.create_command_encoder(&Default::default());
+        for destination in &body_poses {
+            encoder.copy_buffer_to_buffer(body_source, 0, destination, 0, body_source.size());
+        }
         for (destination, diagnostic) in positions.iter().zip(&validity) {
             encoder.copy_buffer_to_buffer(source, 0, destination, 0, source.size());
             copy_validity(&mut encoder, island, diagnostic);
@@ -42,6 +57,7 @@ impl FemSurfaceFrames {
         queue.submit([encoder.finish()]);
         Self {
             positions,
+            body_poses,
             validity,
             current: 0,
         }
@@ -53,6 +69,15 @@ impl FemSurfaceFrames {
         assert_eq!(source.size(), self.positions[next].size());
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(source, 0, &self.positions[next], 0, source.size());
+        let body_source = island.rigid_poses();
+        assert_eq!(body_source.size(), self.body_poses[next].size());
+        encoder.copy_buffer_to_buffer(
+            body_source,
+            0,
+            &self.body_poses[next],
+            0,
+            body_source.size(),
+        );
         copy_validity(&mut encoder, island, &self.validity[next]);
         queue.submit([encoder.finish()]);
         self.current = next;
@@ -63,6 +88,19 @@ impl FemSurfaceFrames {
             positions: self.positions[slot].clone(),
             previous_positions: self.positions[(slot + 2) % 3].clone(),
             validity: self.validity[slot].clone(),
+        }
+    }
+
+    pub(super) fn rigid_extension(
+        &self,
+        slot: usize,
+        bind: super::rigid::RigidBind,
+    ) -> super::rigid::RigidExtension {
+        super::rigid::RigidExtension {
+            poses: self.body_poses[slot].clone(),
+            previous_poses: self.body_poses[(slot + 2) % 3].clone(),
+            validity: self.validity[slot].clone(),
+            bind,
         }
     }
 }
@@ -120,6 +158,14 @@ pub(super) fn capture_surfaces(
         &mut MeshMaterial3d<FemMaterial>,
         &mut Visibility,
     )>,
+    mut rigid_surfaces: Query<
+        (
+            &super::rigid::FemRigidBinding,
+            &mut MeshMaterial3d<super::rigid::RigidMaterial>,
+            &mut Visibility,
+        ),
+        Without<FemSurfaceBinding>,
+    >,
 ) {
     for (island, mut frames) in &mut islands {
         if island.failure().is_none() {
@@ -130,6 +176,17 @@ pub(super) fn capture_surfaces(
         match islands.get(binding.island) {
             Ok((island, frames))
                 if island.failure().is_none() && frames.positions[0].id() == binding.generation =>
+            {
+                material.0 = binding.materials[frames.current].clone();
+            }
+            _ => *visibility = Visibility::Hidden,
+        }
+    }
+    for (binding, mut material, mut visibility) in &mut rigid_surfaces {
+        match islands.get(binding.island) {
+            Ok((island, frames))
+                if island.failure().is_none()
+                    && frames.body_poses[0].id() == binding.generation =>
             {
                 material.0 = binding.materials[frames.current].clone();
             }
