@@ -52,9 +52,46 @@ fn export_ceol_fem_mass_properties() {
                 * m;
         }
         assert!((mass - track.mass).abs() < 1e-10);
+        let geometry = authored.fem.as_ref().unwrap();
+        let stride = geometry.width_stations.len() * (geometry.thickness_cells + 1);
+        let indices = track
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| (n, i))
+            .collect::<HashMap<_, _>>();
+        let mut tension = vec![0.0; authored.treads.len() * geometry.segments_per_pitch];
+        let mut strains = Vec::new();
+        for i in 0..belts.model.spring_count {
+            let a = belts.model.spring_a.host().unwrap()[i];
+            let Some(&local) = indices.get(&a) else {
+                continue;
+            };
+            let b = belts.model.spring_b.host().unwrap()[i];
+            assert!(indices.contains_key(&b));
+            let q = belts.state.particle_q.host().unwrap();
+            let rest = belts.model.spring_rest_length.host().unwrap()[i];
+            let extension = (q[b as usize] - q[a as usize]).length() - rest;
+            strains.push(extension / rest);
+            tension[local / stride] += extension / belts.model.spring_compliance.host().unwrap()[i];
+        }
+        assert_eq!(strains.len(), tension.len() * geometry.width_stations.len());
+        let range = |values: &[f64]| {
+            [
+                values.iter().copied().fold(f64::INFINITY, f64::min),
+                values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            ]
+        };
+        let strain_range = range(&strains);
+        let tension_range = range(&tension);
+        eprintln!(
+            "{} installed cord strain={strain_range:?}, span tension={tension_range:?} N; estimated constitutive data",
+            authored.carrier
+        );
         result.push(serde_json::json!({"carrier":authored.carrier,"fem":authored.fem,"path":authored.path,
             "combined_mass":rigid.model.body_mass.host().unwrap()[body],"belt_mass":mass,
-            "belt_first_moment":first.to_array(),"belt_inertia_origin_columns":inertia.to_cols_array()}));
+            "belt_first_moment":first.to_array(),"belt_inertia_origin_columns":inertia.to_cols_array(),
+            "installed_cord_strain_range":strain_range,"installed_cord_span_tension_range":tension_range}));
     }
     let json = serde_json::json!({"version":1,"calibration":"estimated","tracks":result});
     std::fs::write(&output, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
