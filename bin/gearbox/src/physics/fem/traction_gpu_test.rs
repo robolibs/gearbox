@@ -33,6 +33,14 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
             .all(|t| t.fem.as_ref().unwrap().version == 2)
     );
     let (device, queue, _) = tests::gpu_island();
+    let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lost_signal = device_lost.clone();
+    device
+        .wgpu_device()
+        .set_device_lost_callback(move |reason, message| {
+            eprintln!("FEM diagnostic device loss: {reason:?}: {message}");
+            lost_signal.store(true, std::sync::atomic::Ordering::Release);
+        });
     let mut outcomes = Vec::new();
     for &(effort, ground, teeth) in cases {
         let mut rigid = rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
@@ -198,20 +206,34 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
         let mut heartbeat = started;
         while island.clock.completed < 512 {
             assert!(
+                !device_lost.load(std::sync::atomic::Ordering::Acquire),
+                "FEM device lost"
+            );
+            assert!(
                 started.elapsed().as_secs() < 1800,
                 "ground coupling timeout: effort={effort}, ground={ground}, teeth={teeth}, completed={}",
                 island.clock.completed
             );
             island.advance(island.clock.submitted < 512).unwrap();
             if heartbeat.elapsed().as_secs() >= 15 {
+                let queue_complete = island.system.poll_completion().unwrap();
                 eprintln!(
-                    "FEM heartbeat: submitted={}, completed={}, diagnostics_pending={}, queued={}, elapsed={:?}",
+                    "FEM heartbeat: submitted={}, completed={}, diagnostics_pending={}, queued={}, queue_complete={queue_complete}, phases={:?}, contacts={:?}, elapsed={:?}",
                     island.clock.submitted,
                     island.clock.completed,
                     island.diagnostics.pending(),
                     island.system.queued_substeps(),
+                    island.system.completed_momentum_phases(),
+                    island.system.completed_contact_passes(),
                     started.elapsed()
                 );
+                if std::env::var_os("GEARBOX_FEM_DIAG_WAIT").is_some() {
+                    let result = device.wgpu_device().poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: Some(std::time::Duration::from_secs(1)),
+                    });
+                    eprintln!("FEM bounded diagnostic wait: {result:?}");
+                }
                 heartbeat = std::time::Instant::now();
             }
             if island.clock.completed >= reported + 64 {
