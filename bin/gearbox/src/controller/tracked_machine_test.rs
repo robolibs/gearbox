@@ -51,7 +51,7 @@ fn ceol_fem_machine_binding() {
     let layout = FemMachineLayout::inspect(app.world_mut(), &machine).unwrap();
     let prepared = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
     let wheel_contacts = crate::physics::fem::track_contacts::FemTrackContacts::prepare(app.world(), &machine, &layout, &prepared).unwrap();
-    assert_eq!(wheel_contacts.shapes.len(), 66);
+    assert_eq!(wheel_contacts.shapes.len(), machine.tracks.iter().map(|t| 21+t.fem.as_ref().unwrap().sprocket_teeth).sum::<usize>());
     assert_eq!(prepared.model.body_count, layout.bodies.len());
     assert_eq!(prepared.model.joint_count, layout.tree_joints.len() + 1);
     assert_eq!(prepared.loops.len(), layout.loop_joints.len());
@@ -84,11 +84,16 @@ fn ceol_fem_machine_binding() {
         contact_features * 4 * 3 * prepared.model.joint_dof_total * 4
     );
     let points = belts.state.particle_q.host().unwrap();
-    for track in &belts.tracks {
+    for (track, spec) in belts.tracks.iter().zip(&machine.tracks) {
         assert!(track.minimum_j > 0.5);
-        assert!((track.neutral_length - 3.1887).abs() < 0.001);
+        let (length, radius_error) = match spec.fem.as_ref().unwrap().sprocket_teeth {
+            12 => (3.188767467482, 0.002251760321),
+            14 => (3.195525621892, 0.0),
+            n => panic!("unexpected CEOL drive fixture: {n} teeth"),
+        };
+        assert!((track.neutral_length - length).abs() < 1e-6);
         assert!(track.mass > 10.0 && track.mass < 20.0);
-        assert!(track.pitch_radius_difference > 0.002 && track.pitch_radius_difference < 0.003);
+        assert!((track.pitch_radius_difference - radius_error).abs() < 1e-6);
         assert!(track.surface.iter().flatten().all(|node| track.nodes.contains(node)));
         let body = prepared.bodies[&track.carrier];
         let pose = prepared.state.body_q.host().unwrap()[body.index()];

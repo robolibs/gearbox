@@ -2,7 +2,7 @@ use super::*;
 use crate::physics::{MollaBackend, PhysicsWorld};
 use std::path::Path;
 
-fn read_floats<const N: usize>(
+pub(super) fn read_floats<const N: usize>(
     device: &RenderDevice,
     queue: &RenderQueue,
     source: &wgpu::Buffer,
@@ -330,9 +330,12 @@ fn authored_ceol_ground_contact_uses_bounded_gpu_storage() {
     );
 }
 
-#[test]
-#[ignore = "requires GPU and GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
-fn authored_ceol_wheel_contacts_have_clearance_and_run_on_gpu() {
+pub(super) fn checked_wheel_contacts() -> (
+    App,
+    crate::controller::MachineInstanceSpec,
+    machine::FemMachineLayout,
+    track_contacts::FemTrackContacts,
+) {
     use molla_math::{Quat as DQuat, Vec3 as DVec3};
     use std::collections::BTreeSet;
 
@@ -341,7 +344,12 @@ fn authored_ceol_wheel_contacts_have_clearance_and_run_on_gpu() {
     let belts = track_mesh::FemTrackMeshes::prepare(app.world(), &spec, &layout, &rigid).unwrap();
     let contacts =
         track_contacts::FemTrackContacts::prepare(app.world(), &spec, &layout, &rigid).unwrap();
-    assert_eq!(contacts.shapes.len(), 66);
+    let expected: usize = spec
+        .tracks
+        .iter()
+        .map(|t| 21 + t.fem.as_ref().unwrap().sprocket_teeth)
+        .sum();
+    assert_eq!(contacts.shapes.len(), expected);
     let saved = spec.tracks[0].fem_contacts.clone();
     let sprocket = spec.tracks[0].sprocket.clone();
     for fault in 0..4 {
@@ -432,6 +440,19 @@ fn authored_ceol_wheel_contacts_have_clearance_and_run_on_gpu() {
         worst.0 < 0.0005,
         "wheel geometry intersects installed belt: {worst:?}"
     );
+    (app, spec, layout, contacts)
+}
+
+#[test]
+#[ignore = "requires GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
+fn authored_ceol_wheel_clearance() {
+    drop(checked_wheel_contacts());
+}
+
+#[test]
+#[ignore = "requires GPU and GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
+fn authored_ceol_wheel_contacts_have_clearance_and_run_on_gpu() {
+    let (app, spec, layout, contacts) = checked_wheel_contacts();
     let (device, queue, _) = tests::gpu_island();
     let mut responses = Vec::new();
     let steps = 512;
