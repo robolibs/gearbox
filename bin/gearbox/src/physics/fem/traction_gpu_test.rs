@@ -17,7 +17,7 @@ fn radial(path: &BeltPath, mut point: DVec3) -> f64 {
     (point - frame.position).dot(frame.outward)
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 struct Outcome {
     com_travel: f64,
     chassis_travel: f64,
@@ -25,9 +25,7 @@ struct Outcome {
     penetration: f64,
 }
 
-#[test]
-#[ignore = "requires tread-complete GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
-fn authored_ceol_powered_ground_coupling_has_causal_controls() {
+fn run_cases(cases: &[(f64, bool, bool)]) -> Vec<Outcome> {
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
     assert!(
         spec.tracks
@@ -36,13 +34,7 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
     );
     let (device, queue, _) = tests::gpu_island();
     let mut outcomes = Vec::new();
-    for (effort, ground, teeth) in [
-        (0.0, true, true),
-        (100.0, false, true),
-        (100.0, true, false),
-        (100.0, true, true),
-        (-100.0, true, true),
-    ] {
+    for &(effort, ground, teeth) in cases {
         let mut rigid = rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
         let belts =
             track_mesh::FemTrackMeshes::prepare(app.world(), &spec, &layout, &rigid).unwrap();
@@ -57,6 +49,13 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
         let body_mass = rigid.model.body_mass.host().unwrap().to_vec();
         let body_com = rigid.model.body_com.host().unwrap().to_vec();
         let masses = belts.model.particle_mass.host().unwrap().to_vec();
+        let initial_positions = belts.state.particle_q.host().unwrap().to_vec();
+        let initial_poses = rigid.state.body_q.host().unwrap().to_vec();
+        let triangles = belts
+            .tracks
+            .iter()
+            .flat_map(|t| t.surface.iter().copied())
+            .collect::<Vec<_>>();
         let total_mass = body_mass.iter().chain(&masses).sum::<f64>();
         assert!((total_mass - 750.0).abs() < 1e-5);
         let initial_first = rigid
@@ -167,6 +166,14 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
             data: [5.0, 0.5, 5.0, 0.85],
             ids: [1, u32::MAX, 0, 0],
         });
+        let shape_trace = shapes
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "position":s.position, "rotation":s.rotation, "dimensions":s.data, "ids":s.ids,
+                })
+            })
+            .collect::<Vec<_>>();
         let mut island = FemGpuIsland::with_ball_joints(
             &device,
             &queue,
@@ -235,6 +242,8 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
                 .sum::<DVec3>();
         let mut departure = 0.0_f64;
         let mut region_departures = [0.0_f64; 4];
+        let mut regions = vec![u32::MAX; positions.len()];
+        let mut errors = vec![0.0; positions.len()];
         let mut worst = String::new();
         for (body, path, nodes, reference, base_nodes, guide_end, thickness_cells) in retention {
             let inverse = body_poses[body].inverse();
@@ -255,6 +264,8 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
                     3
                 };
                 region_departures[region] = region_departures[region].max(error);
+                regions[node as usize] = region as u32;
+                errors[node as usize] = error;
                 if error > departure {
                     departure = error;
                     worst = format!(
@@ -278,8 +289,61 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
             island.completed_seconds(),
             island.minimum_j
         );
+        let directory = std::env::var_os("GEARBOX_FEM_CAPTURE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("gearbox-fem-traction"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let poses = |values: &[Pose]| {
+            values
+                .iter()
+                .map(|q| {
+                    let p = q.position.to_array();
+                    let r = q.rotation.to_array();
+                    [p[0], p[1], p[2], r[0], r[1], r[2], r[3]]
+                })
+                .collect::<Vec<_>>()
+        };
+        let trace = serde_json::json!({
+            "asset":std::env::var("GEARBOX_TRACK_ASSET").unwrap(),
+            "frame":"island-y-up", "effort":effort, "ground":ground, "teeth":teeth,
+            "time":island.completed_seconds(), "minimum_j":island.minimum_j, "outcome":outcome,
+            "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+            "positions":positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+            "triangles":triangles, "initial_poses":poses(&initial_poses), "poses":poses(&body_poses),
+            "shapes":shape_trace, "regions":regions, "retention_errors":errors, "worst":worst,
+        });
+        let path = directory.join(format!("effort{effort}_ground{ground}_teeth{teeth}.json"));
+        std::fs::write(&path, serde_json::to_vec(&trace).unwrap()).unwrap();
+        eprintln!("ground diagnostic snapshot: {}", path.display());
         outcomes.push(outcome);
     }
+    outcomes
+}
+
+#[test]
+#[ignore = "requires tread-complete GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
+fn authored_ceol_passive_ground_retention_diagnostic() {
+    let outcomes = run_cases(&[(0.0, true, true)]);
+    assert!(
+        outcomes[0].retention < 0.020,
+        "passive retention failed: {outcomes:?}"
+    );
+    assert!(
+        outcomes[0].penetration < 0.002,
+        "passive ground penetration: {outcomes:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires tread-complete GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
+fn authored_ceol_powered_ground_coupling_has_causal_controls() {
+    let outcomes = run_cases(&[
+        (0.0, true, true),
+        (100.0, false, true),
+        (100.0, true, false),
+        (100.0, true, true),
+        (-100.0, true, true),
+    ]);
     for outcome in &outcomes {
         assert!(
             outcome.retention < 0.020,
