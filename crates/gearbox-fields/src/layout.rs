@@ -521,12 +521,22 @@ mod tests {
             refuses(&with(r#"{"name":"a","width":0,"wear":0.5,"points":[[0,0],[9,0]]}"#))
                 .contains("0 m wide")
         );
-        // JSON cannot write NaN, but it can write a number too big to hold,
-        // which arrives as an infinity and would sink the terrain to nothing.
-        assert!(
-            refuses(&with(r#"{"name":"a","width":6,"wear":0.5,"points":[[1e40,0],[9,0]]}"#))
-                .contains("not a number")
-        );
+        let overflow = with(r#"{"name":"a","width":6,"wear":0.5,"points":[[1e40,0],[9,0]]}"#);
+        match serde_json::from_str::<FieldLayout>(&overflow) {
+            Ok(layout) => assert!(layout
+                .validate(&profiles, FieldBounds { min: Vec2::splat(-400.0), max: Vec2::splat(400.0) })
+                .unwrap_err()
+                .contains("not a number")),
+            Err(error) => assert!(error.to_string().contains("number out of range")),
+        }
+        for nonfinite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut layout: FieldLayout = serde_json::from_str(sound).unwrap();
+            layout.ways[0].points[0][0] = nonfinite;
+            assert!(layout
+                .validate(&profiles, FieldBounds { min: Vec2::splat(-400.0), max: Vec2::splat(400.0) })
+                .unwrap_err()
+                .contains("not a number"));
+        }
         assert!(
             refuses(&with(r#"{"name":"a","width":6,"wear":4,"points":[[0,0],[9,0]]}"#))
                 .contains("not nought to one")
