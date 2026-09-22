@@ -8,6 +8,7 @@ use molla_solvers::fem_rigid_gpu::{FemRigidGpuScene, FemRigidGpuSystem};
 
 mod diagnostics;
 pub(super) mod render_health;
+pub(crate) mod surface;
 
 #[derive(Default)]
 struct IslandClock {
@@ -140,7 +141,7 @@ pub(super) fn advance_islands(
 mod tests {
     use super::*;
 
-    fn moving_scene() -> FemRigidGpuScene {
+    pub(super) fn moving_scene() -> FemRigidGpuScene {
         use molla_core::{BodyId, WorldId};
         use molla_math::{Transform, Vec3};
         use molla_sim::{BodyParams, ModelBuilder};
