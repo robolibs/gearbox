@@ -17,6 +17,8 @@ mod traction_gpu_test;
 mod contact_control_test;
 #[cfg(test)]
 mod rigid_momentum_gpu_test;
+#[cfg(test)]
+mod contact_prepare_gpu_test;
 pub(crate) mod machine;
 pub(crate) mod rigid_machine;
 pub(crate) mod track_mesh;
@@ -220,6 +222,7 @@ mod tests {
         use bevy::render::renderer::WgpuWrapper;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        eprintln!("FEM test adapter: {:?}", adapter.get_info());
         let mut descriptor = wgpu::DeviceDescriptor::default();
         <crate::host::GearboxApp as mara::window::WindowApp>::configure_gpu_limits(
             &adapter.limits(),
