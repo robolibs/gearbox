@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn rejects_sticky_flags_invalid_tets_and_volume_failures() {
-        for status in [1, 2, 4, 8, 16, u32::MAX] {
+        for status in [1, 2, 4, 8, 16, 32, u32::MAX] {
             assert!(validate([status, 1.0_f32.to_bits(), u32::MAX]).is_err());
         }
         assert!(validate([0, 1.0_f32.to_bits(), 0]).is_err());

@@ -166,6 +166,7 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
                 })
             })
             .collect::<Vec<_>>();
+        eprintln!("constructing full FEM island: effort={effort}, ground={ground}, teeth={teeth}");
         let mut island = FemGpuIsland::with_ball_joints(
             &device,
             &queue,
@@ -185,6 +186,7 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
             &loops,
         )
         .unwrap();
+        eprintln!("full FEM island ready: effort={effort}, ground={ground}, teeth={teeth}");
         if monitor_momentum {
             island.system.enable_momentum_diagnostics();
         }
@@ -193,6 +195,7 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
         }
         let started = std::time::Instant::now();
         let mut reported = 0;
+        let mut heartbeat = started;
         while island.clock.completed < 512 {
             assert!(
                 started.elapsed().as_secs() < 1800,
@@ -200,6 +203,17 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
                 island.clock.completed
             );
             island.advance(island.clock.submitted < 512).unwrap();
+            if heartbeat.elapsed().as_secs() >= 15 {
+                eprintln!(
+                    "FEM heartbeat: submitted={}, completed={}, diagnostics_pending={}, queued={}, elapsed={:?}",
+                    island.clock.submitted,
+                    island.clock.completed,
+                    island.diagnostics.pending(),
+                    island.system.queued_substeps(),
+                    started.elapsed()
+                );
+                heartbeat = std::time::Instant::now();
+            }
             if island.clock.completed >= reported + 64 {
                 reported = island.clock.completed;
                 eprintln!(
