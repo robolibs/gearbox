@@ -4,9 +4,11 @@ use bevy::prelude::*;
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use gearbox_api::PhysicsActive;
 use molla_solvers::fem_rigid::FemRigidConfig;
-use molla_solvers::fem_rigid_gpu::{FemRigidGpuScene, FemRigidGpuSystem};
+use molla_solvers::fem_rigid_gpu::{FemRigidGpuScene, FemRigidGpuSystem, SoftRigidBallJoint};
 
 mod diagnostics;
+#[cfg(test)]
+mod machine_gpu_test;
 pub(crate) mod machine;
 pub(crate) mod rigid_machine;
 pub(super) mod render_health;
@@ -53,12 +55,23 @@ impl FemGpuIsland {
         scene: FemRigidGpuScene,
         config: FemRigidConfig,
     ) -> molla_core::Result<Self> {
+        Self::with_ball_joints(device, queue, scene, config, &[])
+    }
+
+    pub(crate) fn with_ball_joints(
+        device: &RenderDevice,
+        queue: &RenderQueue,
+        scene: FemRigidGpuScene,
+        config: FemRigidConfig,
+        joints: &[SoftRigidBallJoint],
+    ) -> molla_core::Result<Self> {
         let substep = config.max_substep;
-        let system = FemRigidGpuSystem::new_surface_sampled_on_device(
+        let system = FemRigidGpuSystem::new_surface_sampled_with_ball_joints_on_device(
             Arc::new(device.wgpu_device().clone()),
             Arc::new((**queue.0).clone()),
             scene,
             config,
+            joints,
         )?;
         let mut diagnostics = diagnostics::Diagnostics::new(device.wgpu_device());
         diagnostics.submit(device.wgpu_device(), queue, &system);

@@ -6,6 +6,7 @@ use bevy::prelude::{Entity, GlobalTransform, World};
 use molla_core::{BodyId, Error, JointId, Result, WorldId};
 use molla_math::{Mat3, Quat, Transform, Vec3};
 use molla_sim::{BodyParams, Control, JointTargetMode, Model, ModelBuilder, State, eval_fk};
+use molla_solvers::fem_rigid_gpu::SoftRigidBallJoint;
 use std::collections::HashMap;
 
 pub(crate) struct LoopConstraint {
@@ -90,6 +91,26 @@ fn drive_axis(joint: &UsdPhysicsJoint, dof: UsdDof) -> bool {
 }
 
 impl FemRigidMachine {
+    pub(crate) fn ball_joints(&self) -> Result<Vec<SoftRigidBallJoint>> {
+        let count =
+            u32::try_from(self.model.body_count).map_err(|_| invalid("too many loop bodies"))?;
+        self.loops
+            .iter()
+            .map(|closure| {
+                let joint = SoftRigidBallJoint {
+                    body_a: u32::try_from(closure.parent.index())
+                        .map_err(|_| invalid("invalid loop parent"))?,
+                    body_b: u32::try_from(closure.child.index())
+                        .map_err(|_| invalid("invalid loop child"))?,
+                    anchor_a: closure.joint.local_pos0.to_array(),
+                    anchor_b: closure.joint.local_pos1.to_array(),
+                };
+                joint.row(count)?;
+                Ok(joint)
+            })
+            .collect()
+    }
+
     pub(crate) fn prepare(world: &World, layout: &FemMachineLayout) -> Result<Self> {
         let origin = pose(world, layout.chassis)?.position;
         let mut builder = ModelBuilder::new();
