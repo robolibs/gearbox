@@ -89,6 +89,7 @@ impl Plugin for PhysicsPlugin {
             )
             .add_systems(Last, debug::draw_collider_gizmos);
         app.add_systems(Update, fem::advance_islands.after(world::step_physics));
+        app.add_systems(Startup, fem::render_health::install);
         if std::env::var_os("GEARBOX_TF_DEBUG").is_some() {
             app.add_systems(
                 PostUpdate,

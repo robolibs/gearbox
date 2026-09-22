@@ -6,6 +6,9 @@ use gearbox_api::PhysicsActive;
 use molla_solvers::fem_rigid::FemRigidConfig;
 use molla_solvers::fem_rigid_gpu::{FemRigidGpuScene, FemRigidGpuSystem};
 
+mod diagnostics;
+pub(super) mod render_health;
+
 #[derive(Default)]
 struct IslandClock {
     submitted: u64,
@@ -34,6 +37,10 @@ pub(crate) struct FemGpuIsland {
     clock: IslandClock,
     substep: f64,
     failure: Option<String>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    diagnostics: diagnostics::Diagnostics,
+    minimum_j: Option<f32>,
 }
 
 impl FemGpuIsland {
@@ -55,6 +62,10 @@ impl FemGpuIsland {
             clock: IslandClock::default(),
             substep,
             failure: None,
+            device: device.wgpu_device().clone(),
+            queue: (**queue.0).clone(),
+            diagnostics: diagnostics::Diagnostics::new(device.wgpu_device()),
+            minimum_j: None,
         })
     }
 
@@ -87,19 +98,35 @@ impl FemGpuIsland {
     }
 
     fn advance(&mut self, active: bool) -> molla_core::Result<()> {
-        if self.system.poll_completion()? {
+        if self.clock.pending() {
+            self.device.poll(wgpu::PollType::Poll).map_err(|error| {
+                molla_core::Error::Gpu(format!("FEM diagnostic poll failed: {error}"))
+            })?;
+        }
+        if let Some(minimum_j) = self.diagnostics.take_ready()? {
+            self.minimum_j = Some(minimum_j);
             self.clock.complete();
         }
         if active && !self.clock.pending() && self.system.try_step_substep(self.substep)? {
             self.clock.submit();
+            self.diagnostics
+                .submit(&self.device, &self.queue, &self.system);
         }
         Ok(())
     }
 }
 
-pub(super) fn advance_islands(active: Res<PhysicsActive>, mut islands: Query<&mut FemGpuIsland>) {
+pub(super) fn advance_islands(
+    active: Res<PhysicsActive>,
+    renderer_fault: Option<Res<render_health::RendererFault>>,
+    mut islands: Query<&mut FemGpuIsland>,
+) {
     for mut island in &mut islands {
         if island.failure.is_some() {
+            continue;
+        }
+        if let Some(fault) = renderer_fault.as_ref() {
+            island.failure = Some(fault.0.clone());
             continue;
         }
         if let Err(error) = island.advance(active.0) {
@@ -156,9 +183,7 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
-    fn native_fem_pacing_honors_pause_and_completed_time() {
+    fn gpu_island() -> (RenderDevice, RenderQueue, FemGpuIsland) {
         use bevy::render::renderer::WgpuWrapper;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
@@ -182,6 +207,14 @@ mod tests {
             },
         )
         .unwrap();
+        (device, queue, island)
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+    fn native_fem_pacing_honors_pause_and_completed_time() {
+        let (device, queue, island) = gpu_island();
+        let h = 1.0 / 4096.0;
         let mut app = App::new();
         app.insert_resource(PhysicsActive(false))
             .add_systems(Update, advance_islands);
@@ -205,6 +238,8 @@ mod tests {
         while app.world().get::<FemGpuIsland>(entity).unwrap().pending() {
             assert!(std::time::Instant::now() < deadline);
             app.update();
+            let island = app.world().get::<FemGpuIsland>(entity).unwrap();
+            assert!(island.failure().is_none(), "{:?}", island.failure());
             std::thread::yield_now();
         }
         for _ in 0..3 {
@@ -213,6 +248,7 @@ mod tests {
         let island = app.world().get::<FemGpuIsland>(entity).unwrap();
         assert_eq!(island.completed_seconds(), h);
         assert_eq!(island.clock.submitted, 1);
+        assert!(island.minimum_j.is_some_and(|j| j > 0.5));
         assert!(island.system.soft_state().particle_q.host().is_err());
         app.world_mut().resource_mut::<PhysicsActive>().0 = true;
         let mut previous = 1;
@@ -263,6 +299,90 @@ mod tests {
         assert!(x.is_finite() && x > 0.0001, "node did not advance: {x}");
         drop(bytes);
         output.unmap();
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+    fn native_fem_stops_on_gpu_status_without_accepting_time() {
+        let (device, queue, island) = gpu_island();
+        let device = device.wgpu_device();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("FEM status fault injection"),
+            source: wgpu::ShaderSource::Wgsl(
+                "@group(0) @binding(0) var<storage, read_write> status: atomic<u32>;
+                 @compute @workgroup_size(1) fn main() { atomicOr(&status, 8u); }"
+                    .into(),
+            ),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: island.status().as_entire_binding(),
+            }],
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        queue.submit([encoder.finish()]);
+        let mut app = App::new();
+        app.insert_resource(PhysicsActive(true))
+            .add_systems(Update, advance_islands);
+        let entity = app.world_mut().spawn(island).id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while app
+            .world()
+            .get::<FemGpuIsland>(entity)
+            .unwrap()
+            .failure()
+            .is_none()
+        {
+            assert!(std::time::Instant::now() < deadline);
+            app.update();
+            std::thread::yield_now();
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+        let island = app.world().get::<FemGpuIsland>(entity).unwrap();
+        assert!(island.failure().unwrap().contains("status=0x8"));
+        assert_eq!(island.clock.submitted, 1);
+        assert_eq!(island.completed_seconds(), 0.0);
+        assert!(island.system.soft_state().particle_q.host().is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+    fn native_fem_latches_renderer_fault_before_any_new_work() {
+        let (_, _, island) = gpu_island();
+        let mut app = App::new();
+        app.insert_resource(PhysicsActive(true))
+            .insert_resource(render_health::RendererFault("test renderer lost".into()))
+            .add_systems(Update, advance_islands);
+        let entity = app.world_mut().spawn(island).id();
+        app.update();
+        app.world_mut()
+            .remove_resource::<render_health::RendererFault>();
+        for _ in 0..3 {
+            app.update();
+        }
+        let island = app.world().get::<FemGpuIsland>(entity).unwrap();
+        assert_eq!(island.failure(), Some("test renderer lost"));
+        assert_eq!(island.clock.submitted, 0);
+        assert_eq!(island.completed_seconds(), 0.0);
     }
 
     #[test]
