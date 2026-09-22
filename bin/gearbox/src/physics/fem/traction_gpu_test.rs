@@ -108,7 +108,30 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
                     (p.x, radial(&path, p))
                 })
                 .collect::<Vec<_>>();
-            retention.push((body, path, track.nodes.clone(), reference));
+            let geometry = authored.fem.as_ref().unwrap();
+            let base_nodes = authored.treads.len()
+                * geometry.segments_per_pitch
+                * geometry.width_stations.len()
+                * (geometry.thickness_cells + 1);
+            let guide_nodes = geometry
+                .guide_rows
+                .iter()
+                .map(|g| {
+                    authored.treads.len()
+                        * (g.segment_span + 1)
+                        * (g.width_cells + 1)
+                        * g.depth_cells
+                })
+                .sum::<usize>();
+            retention.push((
+                body,
+                path,
+                track.nodes.clone(),
+                reference,
+                base_nodes,
+                base_nodes + guide_nodes,
+                geometry.thickness_cells,
+            ));
         }
         let drive_bodies = layout
             .tracks
@@ -211,13 +234,33 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
                 .map(|(q, m)| *q * *m)
                 .sum::<DVec3>();
         let mut departure = 0.0_f64;
-        for (body, path, nodes, reference) in retention {
+        let mut region_departures = [0.0_f64; 4];
+        let mut worst = String::new();
+        for (body, path, nodes, reference, base_nodes, guide_end, thickness_cells) in retention {
             let inverse = body_poses[body].inverse();
-            for (node, (x, offset)) in nodes.into_iter().zip(reference) {
+            for (index, (node, (x, offset))) in nodes.into_iter().zip(reference).enumerate() {
                 let p = inverse.transform_point(positions[node as usize]);
-                departure = departure
-                    .max((p.x - x).abs())
-                    .max((radial(&path, p) - offset).abs());
+                let lateral = (p.x - x).abs();
+                let radial = (radial(&path, p) - offset).abs();
+                let error = lateral.max(radial);
+                let region = if index < base_nodes {
+                    if index % (thickness_cells + 1) == thickness_cells / 2 {
+                        0
+                    } else {
+                        1
+                    }
+                } else if index < guide_end {
+                    2
+                } else {
+                    3
+                };
+                region_departures[region] = region_departures[region].max(error);
+                if error > departure {
+                    departure = error;
+                    worst = format!(
+                        "body={body}, node={node}, local_index={index}, region={region}, local={p:?}, initial_x={x}, initial_radial={offset}, lateral_error={lateral}, radial_error={radial}"
+                    );
+                }
             }
         }
         let outcome = Outcome {
@@ -231,8 +274,9 @@ fn authored_ceol_powered_ground_coupling_has_causal_controls() {
             },
         };
         eprintln!(
-            "ground outcome effort={effort}, ground={ground}, teeth={teeth}: {outcome:?}; accepted={}s; short coupling gate, not sustained driving acceptance",
-            island.completed_seconds()
+            "ground outcome effort={effort}, ground={ground}, teeth={teeth}: {outcome:?}; accepted={}s; minJ={:?}; region_departures(cord,carcass,guide,tread)={region_departures:?}; worst={worst}; short coupling gate, not sustained driving acceptance",
+            island.completed_seconds(),
+            island.minimum_j
         );
         outcomes.push(outcome);
     }
