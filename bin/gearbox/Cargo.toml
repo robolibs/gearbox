@@ -52,12 +52,12 @@ gearbox-cli.workspace = true
 
 # Rigid-body engines used by the physics backend adapters.
 rapier3d = { workspace = true, features = ["enhanced-determinism"] }
-molla-core = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99", default-features = false }
-molla-math = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99" }
-molla-sim = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99", default-features = false }
-molla-geometry = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99", default-features = false }
-molla-solvers = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99", default-features = false, features = ["gpu"] }
-molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "7620c1511c28f6f301f9ef32630c86120968dc99" }
+molla-core = { git = "https://github.com/bresilla/molla", rev = "fc264c4415c642553a22f0f0e0ccd2ecf519d6c8", default-features = false }
+molla-math = { git = "https://github.com/bresilla/molla", rev = "fc264c4415c642553a22f0f0e0ccd2ecf519d6c8" }
+molla-sim = { git = "https://github.com/bresilla/molla", rev = "fc264c4415c642553a22f0f0e0ccd2ecf519d6c8", default-features = false }
+molla-geometry = { git = "https://github.com/bresilla/molla", rev = "fc264c4415c642553a22f0f0e0ccd2ecf519d6c8", default-features = false }
+molla-solvers = { git = "https://github.com/bresilla/molla", rev = "fc264c4415c642553a22f0f0e0ccd2ecf519d6c8", default-features = false, features = ["gpu"] }
+molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "fc264c4415c642553a22f0f0e0ccd2ecf519d6c8" }
 wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
 bytemuck = "1"
 glam = "0.30"

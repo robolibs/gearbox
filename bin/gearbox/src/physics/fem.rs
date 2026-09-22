@@ -1,0 +1,293 @@
+use std::sync::Arc;
+
+use bevy::prelude::*;
+use bevy::render::renderer::{RenderDevice, RenderQueue};
+use gearbox_api::PhysicsActive;
+use molla_solvers::fem_rigid::FemRigidConfig;
+use molla_solvers::fem_rigid_gpu::{FemRigidGpuScene, FemRigidGpuSystem};
+
+#[derive(Default)]
+struct IslandClock {
+    submitted: u64,
+    completed: u64,
+}
+
+impl IslandClock {
+    fn pending(&self) -> bool {
+        self.submitted != self.completed
+    }
+
+    fn submit(&mut self) {
+        assert!(!self.pending());
+        self.submitted += 1;
+    }
+
+    fn complete(&mut self) {
+        self.completed = self.submitted;
+    }
+}
+
+/// One GPU-owned articulation and its coupled deformable meshes.
+#[derive(Component)]
+pub(crate) struct FemGpuIsland {
+    system: FemRigidGpuSystem,
+    clock: IslandClock,
+    substep: f64,
+    failure: Option<String>,
+}
+
+impl FemGpuIsland {
+    pub(crate) fn new(
+        device: &RenderDevice,
+        queue: &RenderQueue,
+        scene: FemRigidGpuScene,
+        config: FemRigidConfig,
+    ) -> molla_core::Result<Self> {
+        let substep = config.max_substep;
+        let system = FemRigidGpuSystem::new_surface_sampled_on_device(
+            Arc::new(device.wgpu_device().clone()),
+            Arc::new((**queue.0).clone()),
+            scene,
+            config,
+        )?;
+        Ok(Self {
+            system,
+            clock: IslandClock::default(),
+            substep,
+            failure: None,
+        })
+    }
+
+    pub(crate) fn completed_seconds(&self) -> f64 {
+        self.clock.completed as f64 * self.substep
+    }
+
+    pub(crate) fn pending(&self) -> bool {
+        self.clock.pending()
+    }
+
+    pub(crate) fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    pub(crate) fn positions(&self) -> &wgpu::Buffer {
+        self.system.soft_state().particle_q.device_buffer().unwrap()
+    }
+
+    pub(crate) fn rigid_poses(&self) -> &wgpu::Buffer {
+        self.system.rigid_state().body_q.device_buffer().unwrap()
+    }
+
+    pub(crate) fn status(&self) -> &wgpu::Buffer {
+        self.system.status_buffer()
+    }
+
+    pub(crate) fn set_drive_velocity(&mut self, dof: usize, target: f64) -> molla_core::Result<()> {
+        self.system.set_drive_velocity(dof, target)
+    }
+
+    fn advance(&mut self, active: bool) -> molla_core::Result<()> {
+        if self.system.poll_completion()? {
+            self.clock.complete();
+        }
+        if active && !self.clock.pending() && self.system.try_step_substep(self.substep)? {
+            self.clock.submit();
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn advance_islands(active: Res<PhysicsActive>, mut islands: Query<&mut FemGpuIsland>) {
+    for mut island in &mut islands {
+        if island.failure.is_some() {
+            continue;
+        }
+        if let Err(error) = island.advance(active.0) {
+            error!("FEM island stopped: {error}");
+            island.failure = Some(error.to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn moving_scene() -> FemRigidGpuScene {
+        use molla_core::{BodyId, WorldId};
+        use molla_math::{Transform, Vec3};
+        use molla_sim::{BodyParams, ModelBuilder};
+        let mut soft = ModelBuilder::new();
+        soft.set_world_gravity(WorldId(0), Vec3::ZERO);
+        for point in [Vec3::ZERO, Vec3::X * 0.1, Vec3::Y * 0.1, Vec3::Z * 0.1] {
+            soft.add_particle(point, 0.1, 0.0, WorldId(0));
+        }
+        soft.add_tet_mesh(&[[0, 1, 2, 3]], 2e6, 0.45, None).unwrap();
+        let soft_model = soft.build().unwrap();
+        let mut soft_state = soft_model.state().unwrap();
+        soft_state
+            .particle_qd
+            .host_mut()
+            .unwrap()
+            .fill(Vec3::X * 0.3);
+        let mut rigid = ModelBuilder::new();
+        rigid.set_world_gravity(WorldId(0), Vec3::ZERO);
+        rigid.begin_articulation();
+        let body = rigid.add_body(BodyParams::new());
+        rigid
+            .add_joint_revolute(
+                BodyId::NONE,
+                body,
+                Transform::IDENTITY,
+                Transform::IDENTITY,
+                Vec3::X,
+            )
+            .unwrap();
+        let rigid_model = rigid.build().unwrap();
+        let rigid_state = rigid_model.state().unwrap();
+        let control = rigid_model.control();
+        FemRigidGpuScene {
+            soft_model,
+            soft_state,
+            rigid_model,
+            rigid_state,
+            control,
+            shapes: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
+    fn native_fem_pacing_honors_pause_and_completed_time() {
+        use bevy::render::renderer::WgpuWrapper;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let mut descriptor = wgpu::DeviceDescriptor::default();
+        <crate::host::GearboxApp as mara::window::WindowApp>::configure_gpu_limits(
+            &adapter.limits(),
+            &mut descriptor.required_limits,
+        );
+        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).unwrap();
+        let device = RenderDevice::from(device);
+        let queue = RenderQueue(Arc::new(WgpuWrapper::new(queue)));
+        let h = 1.0 / 4096.0;
+        let island = FemGpuIsland::new(
+            &device,
+            &queue,
+            moving_scene(),
+            FemRigidConfig {
+                max_substep: h,
+                elastic_iterations: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.insert_resource(PhysicsActive(false))
+            .add_systems(Update, advance_islands);
+        let entity = app.world_mut().spawn(island).id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<FemGpuIsland>(entity)
+                .unwrap()
+                .completed_seconds(),
+            0.0
+        );
+        app.world_mut().resource_mut::<PhysicsActive>().0 = true;
+        app.update();
+        let island = app.world().get::<FemGpuIsland>(entity).unwrap();
+        assert!(island.failure().is_none(), "{:?}", island.failure());
+        assert!(island.pending());
+        assert_eq!(island.completed_seconds(), 0.0);
+        app.world_mut().resource_mut::<PhysicsActive>().0 = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while app.world().get::<FemGpuIsland>(entity).unwrap().pending() {
+            assert!(std::time::Instant::now() < deadline);
+            app.update();
+            std::thread::yield_now();
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+        let island = app.world().get::<FemGpuIsland>(entity).unwrap();
+        assert_eq!(island.completed_seconds(), h);
+        assert_eq!(island.clock.submitted, 1);
+        assert!(island.system.soft_state().particle_q.host().is_err());
+        app.world_mut().resource_mut::<PhysicsActive>().0 = true;
+        let mut previous = 1;
+        while app
+            .world()
+            .get::<FemGpuIsland>(entity)
+            .unwrap()
+            .clock
+            .completed
+            < 4
+        {
+            assert!(std::time::Instant::now() < deadline);
+            app.update();
+            let island = app.world().get::<FemGpuIsland>(entity).unwrap();
+            assert!(island.failure().is_none(), "{:?}", island.failure());
+            assert!(island.clock.submitted - previous <= 1);
+            assert!(island.clock.submitted - island.clock.completed <= 1);
+            previous = island.clock.submitted;
+            std::thread::yield_now();
+        }
+        let island = app.world().get::<FemGpuIsland>(entity).unwrap();
+        let output = device.wgpu_device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("FEM scheduling acceptance snapshot"),
+            size: 32,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device
+            .wgpu_device()
+            .create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(island.status(), 0, &output, 0, 4);
+        encoder.copy_buffer_to_buffer(island.positions(), 0, &output, 16, 16);
+        queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        output
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                tx.send(result).unwrap();
+            });
+        device
+            .wgpu_device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+        let bytes = output.slice(..).get_mapped_range();
+        assert_eq!(&bytes[..4], &[0; 4]);
+        let x = f32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        assert!(x.is_finite() && x > 0.0001, "node did not advance: {x}");
+        drop(bytes);
+        output.unmap();
+    }
+
+    #[test]
+    fn fem_clock_advances_only_completed_submissions() {
+        let mut clock = IslandClock::default();
+        clock.complete();
+        assert_eq!(clock.completed, 0);
+        for expected in 1..=65 {
+            assert!(!clock.pending());
+            clock.submit();
+            assert!(clock.pending());
+            assert_eq!(clock.completed, expected - 1);
+            clock.complete();
+            assert!(!clock.pending());
+            assert_eq!(clock.completed, expected);
+            clock.complete();
+            assert_eq!(clock.completed, expected);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn fem_clock_rejects_duplicate_pending_work() {
+        let mut clock = IslandClock::default();
+        clock.submit();
+        clock.submit();
+    }
+}

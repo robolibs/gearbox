@@ -136,12 +136,19 @@ make.recipe{ name = "test", desc = "run all tests",
 make.alias("t", "test")
 make.recipe{ name = "test-tracked-machine", desc = "test the imported GEARBOX_TRACK_ASSET through native tracked control",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "real_tracked_machine", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-fem", desc = "test native FEM scheduling",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "physics::fem::tests") end }
+make.recipe{ name = "test-fem-gpu", desc = "test native FEM scheduling on a real GPU",
+             run = function() sh.nixVulkan("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", "physics::fem::tests", "--", "--ignored", "--nocapture", "--test-threads=1") end }
 
 make.recipe{ name = "check", desc = "cargo check on all targets",
              run = function() sh.cargo("check", "--all-targets") end }
 
 make.recipe{ name = "fmt", desc = "format the workspace",
              run = function() sh.cargo("fmt", "--all") end }
+make.recipe{ name = "fmt-file", desc = "format one Rust source file",
+             params = { { "--file", desc = "Rust source path" } },
+             run = function(a) assert(a.file, "--file is required"); sh.rustfmt("--edition", "2024", a.file) end }
 
 make.recipe{ name = "clean", desc = "remove Cargo build artifacts",
              run = function() sh.cargo("clean") end }
