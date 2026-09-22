@@ -50,6 +50,8 @@ fn ceol_fem_machine_binding() {
     machine.scene_root = Some(first_root);
     let layout = FemMachineLayout::inspect(app.world_mut(), &machine).unwrap();
     let prepared = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
+    let wheel_contacts = crate::physics::fem::track_contacts::FemTrackContacts::prepare(app.world(), &machine, &layout, &prepared).unwrap();
+    assert_eq!(wheel_contacts.shapes.len(), 66);
     assert_eq!(prepared.model.body_count, layout.bodies.len());
     assert_eq!(prepared.model.joint_count, layout.tree_joints.len() + 1);
     assert_eq!(prepared.loops.len(), layout.loop_joints.len());
@@ -160,6 +162,12 @@ fn ceol_fem_machine_binding() {
     assert!((relocated.origin - prepared.origin).length() > 10.0);
     assert_eq!(relocated.model.body_mass.host().unwrap(), prepared.model.body_mass.host().unwrap());
     let relocated_belts=crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(),&machine,&second,&relocated).unwrap();
+    let relocated_contacts=crate::physics::fem::track_contacts::FemTrackContacts::prepare(app.world(),&machine,&second,&relocated).unwrap();
+    for (a,b) in wheel_contacts.shapes.iter().zip(&relocated_contacts.shapes) {
+        assert_eq!(a.position,b.position); assert_eq!(a.rotation,b.rotation);
+        assert_eq!(a.data,b.data); assert_eq!(a.ids,b.ids);
+    }
+    assert!(crate::physics::fem::track_contacts::FemTrackContacts::prepare(app.world(),&machine,&second,&prepared).is_err());
     let original_properties=fem_mass_properties(&relocated,None);
     let mut relocated_partition=relocated;
     relocated_partition.partition_belt_mass(&relocated_belts).unwrap();

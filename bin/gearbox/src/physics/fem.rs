@@ -12,6 +12,7 @@ mod machine_gpu_test;
 pub(crate) mod machine;
 pub(crate) mod rigid_machine;
 pub(crate) mod track_mesh;
+pub(crate) mod track_contacts;
 pub(super) mod render_health;
 pub(crate) mod surface;
 

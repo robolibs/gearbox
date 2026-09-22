@@ -18,6 +18,8 @@ pub struct TrackSpec {
     pub treads: Vec<String>,
     #[serde(default)]
     pub fem: Option<crate::physics::fem::track_mesh::TrackFemSpec>,
+    #[serde(default)]
+    pub fem_contacts: Option<crate::physics::fem::track_contacts::TrackContactSpec>,
 }
 
 pub(super) fn discover(stage: &openusd::usd::Stage, prim: &SdfPath) -> Result<Vec<TrackSpec>, String> {
@@ -49,6 +51,14 @@ pub(super) fn discover(stage: &openusd::usd::Stage, prim: &SdfPath) -> Result<Ve
         }
         for path in std::iter::once(&track.sprocket).chain(&track.contacts).chain(&track.treads) {
             if !owned.insert(path.clone()) { return Err("duplicate track ownership".into()); }
+        }
+        if let Some(contacts) = &mut track.fem_contacts {
+            for shape in &mut contacts.shapes {
+                shape.body = rebase_asset_root_target(prim.as_str(), &shape.body);
+                if !shape.body.starts_with(&format!("{}/", prim.as_str())) {
+                    return Err("FEM contact target is outside its machine".into());
+                }
+            }
         }
     }
     Ok(tracks)

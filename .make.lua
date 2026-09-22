@@ -143,7 +143,8 @@ make.recipe{ name = "test-fem-machine", desc = "validate FEM binding against GEA
 make.recipe{ name = "export-fem-mass", desc = "export GEARBOX_TRACK_ASSET nodal properties to GEARBOX_FEM_MASS_EXPORT",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "export_ceol_fem_mass_properties", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-fem-gpu", desc = "test native FEM on a GPU with GEARBOX_TRACK_ASSET",
-             run = function() sh.nixVulkan("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", "physics::fem", "--", "--ignored", "--nocapture", "--test-threads=1") end }
+             params = { { "--filter", desc = "test name filter (default: physics::fem)" } },
+             run = function(a) sh.nixVulkan("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", a.filter or "physics::fem", "--", "--ignored", "--nocapture", "--test-threads=1") end }
 
 make.recipe{ name = "check", desc = "cargo check on all targets",
              run = function() sh.cargo("check", "--all-targets") end }
