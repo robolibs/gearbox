@@ -8,6 +8,7 @@ use molla_solvers::fem_rigid_gpu::{FemRigidGpuScene, FemRigidGpuSystem};
 
 mod diagnostics;
 pub(crate) mod machine;
+pub(crate) mod rigid_machine;
 pub(super) mod render_health;
 pub(crate) mod surface;
 

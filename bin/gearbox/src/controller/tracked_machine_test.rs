@@ -21,6 +21,13 @@ fn ceol_fem_machine_binding() {
     let first_root = crate::physics::benchmark::project(&mut app, &stage);
     machine.scene_root = Some(first_root);
     let layout = FemMachineLayout::inspect(app.world_mut(), &machine).unwrap();
+    let prepared = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
+    assert_eq!(prepared.model.body_count, layout.bodies.len());
+    assert_eq!(prepared.model.joint_count, layout.tree_joints.len() + 1);
+    assert_eq!(prepared.loops.len(), layout.loop_joints.len());
+    let mass: f64 = prepared.model.body_mass.host().unwrap().iter().sum();
+    assert!((mass - 750.0).abs() < 1e-5, "authored CEOL mass: {mass}");
+    assert!(prepared.control.joint_motor_max_force.host().unwrap().iter().any(|&f| f == 20000.0));
     assert!(layout.bodies.len() > 13);
     assert_eq!(layout.tree_joints.len() + 1, layout.bodies.len());
     assert_eq!(layout.loop_joints.len(), 2, "hitch closure constraints were dropped");
@@ -36,6 +43,12 @@ fn ceol_fem_machine_binding() {
     let second_root = crate::physics::benchmark::project(&mut app, &stage);
     machine.scene_root = Some(second_root);
     let second = FemMachineLayout::inspect(app.world_mut(), &machine).unwrap();
+    app.world_mut().get_mut::<Transform>(second_root).unwrap().translation = Vec3::new(10.0, 2.0, -4.0);
+    app.world_mut().get_mut::<Transform>(second_root).unwrap().rotation = Quat::from_rotation_y(0.3);
+    app.update();
+    let relocated = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &second).unwrap();
+    assert!((relocated.origin - prepared.origin).length() > 10.0);
+    assert_eq!(relocated.model.body_mass.host().unwrap(), prepared.model.body_mass.host().unwrap());
     assert!(layout.bodies.iter().all(|e| !second.bodies.contains(e)));
     assert_ne!(layout.chassis, second.chassis);
     let joint = second.loop_joints[0];
@@ -43,10 +56,21 @@ fn ceol_fem_machine_binding() {
     app.world_mut().get_mut::<UsdPhysicsJoint>(joint).unwrap().body1 = Some(layout.chassis);
     assert!(FemMachineLayout::inspect(app.world_mut(), &machine).unwrap_err().contains("foreign"));
     app.world_mut().entity_mut(joint).insert(original);
+    let saved = app.world().get::<UsdPhysicsJoint>(joint).unwrap().clone();
+    app.world_mut().get_mut::<UsdPhysicsJoint>(joint).unwrap().local_pos1.x += 0.01;
+    assert!(crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &second)
+        .err().unwrap().to_string().contains("loop anchors"));
+    app.world_mut().entity_mut(joint).insert(saved);
+    let saved_mass = app.world().get::<crate::physics::markers::UsdMass>(second.chassis).unwrap().clone();
+    app.world_mut().get_mut::<crate::physics::markers::UsdMass>(second.chassis).unwrap().mass = Some(f32::NAN);
+    assert!(crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &second).is_err());
+    app.world_mut().entity_mut(second.chassis).insert(saved_mass);
     machine.tracks[0].sprocket = "/foreign/sprocket".into();
     assert!(FemMachineLayout::inspect(app.world_mut(), &machine).unwrap_err().contains("outside"));
     eprintln!("actual CEOL binding: {} bodies, {} tree joints, {} closed-loop joints, 2 isolated instances",
         layout.bodies.len(), layout.tree_joints.len(), layout.loop_joints.len());
+    eprintln!("prepared CEOL: mass={mass} kg, {} DOFs, {} retained loops",
+        prepared.model.joint_dof_total, prepared.loops.len());
 }
 
 #[test]
