@@ -19,6 +19,7 @@ pub(crate) mod track_mesh;
 pub(crate) mod track_contacts;
 pub(super) mod render_health;
 pub(crate) mod surface;
+pub(crate) mod visuals;
 
 #[derive(Default)]
 struct IslandClock {

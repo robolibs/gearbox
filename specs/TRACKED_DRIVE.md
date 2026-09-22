@@ -32,6 +32,23 @@ distribute normal load. Belt colliders supply normal support; Molla owns
 their longitudinal/lateral friction forces. Pneumatic tyre registration and
 tyre collider preparation are skipped for tracked machines.
 
+## GPU FEM visual preparation
+
+The optional `fem_visuals` object in each track definition declares `version: 1`,
+`deformable` (prim roots replaced by the FEM surface), and `material` (one of those
+roots supplying the rubber StandardMaterial). Include the continuous carcass and
+every animated tread, not the carrier, wheel links or contact colliders. Paths
+are rebased with the owning machine and resolved within its scene instance.
+
+`FemMachineVisuals::prepare` validates these targets without changing physics
+ownership or displayed materials. It prepares two soft surfaces from FEM node
+indices and immutable mesh-to-body bindings for the remaining rigid meshes,
+preserving source material handles. Missing, shared, overlapping or ambiguous
+targets fail rather than leaving part of the belt frozen. The corresponding CPU
+asset gate is `GEARBOX_TRACK_ASSET=/absolute/machine.usdz oslo make test-fem-visuals`.
+This preparation API does not yet activate FEM in the simulator menu or synchronize
+CPU TF consumers with GPU poses.
+
 ## Telemetry and validation
 
 Carrier link values publish `track_travel_m`, `track_speed_mps`,

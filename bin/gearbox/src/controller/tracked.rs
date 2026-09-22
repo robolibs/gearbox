@@ -20,6 +20,8 @@ pub struct TrackSpec {
     pub fem: Option<crate::physics::fem::track_mesh::TrackFemSpec>,
     #[serde(default)]
     pub fem_contacts: Option<crate::physics::fem::track_contacts::TrackContactSpec>,
+    #[serde(default)]
+    pub fem_visuals: Option<crate::physics::fem::visuals::TrackVisualSpec>,
 }
 
 pub(super) fn discover(stage: &openusd::usd::Stage, prim: &SdfPath) -> Result<Vec<TrackSpec>, String> {
@@ -57,6 +59,14 @@ pub(super) fn discover(stage: &openusd::usd::Stage, prim: &SdfPath) -> Result<Ve
                 shape.body = rebase_asset_root_target(prim.as_str(), &shape.body);
                 if !shape.body.starts_with(&format!("{}/", prim.as_str())) {
                     return Err("FEM contact target is outside its machine".into());
+                }
+            }
+        }
+        if let Some(visuals) = &mut track.fem_visuals {
+            for path in visuals.deformable.iter_mut().chain(std::iter::once(&mut visuals.material)) {
+                *path = rebase_asset_root_target(prim.as_str(), path);
+                if !path.starts_with(&format!("{}/", prim.as_str())) {
+                    return Err("FEM visual target is outside its machine".into());
                 }
             }
         }

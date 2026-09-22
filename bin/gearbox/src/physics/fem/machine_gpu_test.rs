@@ -33,7 +33,7 @@ pub(super) fn read_floats<const N: usize>(
         .collect()
 }
 
-fn asset() -> (
+pub(super) fn asset() -> (
     App,
     crate::controller::MachineInstanceSpec,
     machine::FemMachineLayout,

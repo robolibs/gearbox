@@ -140,6 +140,8 @@ make.recipe{ name = "test-fem", desc = "test native FEM scheduling",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "physics::fem") end }
 make.recipe{ name = "test-fem-machine", desc = "validate FEM binding against GEARBOX_TRACK_ASSET",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "ceol_fem_machine_binding", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-fem-visuals", desc = "validate CPU-prepared GPU visual bindings against GEARBOX_TRACK_ASSET",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "ceol_fem_visual_binding", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "export-fem-mass", desc = "export GEARBOX_TRACK_ASSET nodal properties to GEARBOX_FEM_MASS_EXPORT",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "export_ceol_fem_mass_properties", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-fem-gpu", desc = "test native FEM on a GPU with GEARBOX_TRACK_ASSET",
