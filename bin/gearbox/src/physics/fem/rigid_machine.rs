@@ -25,6 +25,7 @@ pub(crate) struct FemRigidMachine {
     pub joints: HashMap<Entity, JointId>,
     pub loops: Vec<LoopConstraint>,
     pub origin: Vec3,
+    mass_partitioned: bool,
 }
 
 fn invalid(message: &str) -> Error {
@@ -91,6 +92,104 @@ fn drive_axis(joint: &UsdPhysicsJoint, dof: UsdDof) -> bool {
 }
 
 impl FemRigidMachine {
+    pub(crate) fn partition_belt_mass(
+        &mut self,
+        belts: &super::track_mesh::FemTrackMeshes,
+    ) -> Result<()> {
+        if self.mass_partitioned
+            || self.model.body_mass.device_buffer().is_some()
+            || self.state.joint_qd.host()?.iter().any(|v| *v != 0.0)
+        {
+            return Err(invalid(
+                "mass partition requires an unpartitioned host model",
+            ));
+        }
+        let point_inertia = |mass: f64, point: Vec3| {
+            (Mat3::IDENTITY * point.length_squared()
+                - Mat3::from_cols(point * point.x, point * point.y, point * point.z))
+                * mass
+        };
+        let positive = |matrix: Mat3| {
+            matrix.is_finite()
+                && matrix.x_axis.x > 0.0
+                && matrix.x_axis.x * matrix.y_axis.y - matrix.y_axis.x * matrix.x_axis.y > 0.0
+                && matrix.determinant() > 0.0
+        };
+        let mut updates = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut nodes = std::collections::HashSet::new();
+        for track in &belts.tracks {
+            let body = *self
+                .bodies
+                .get(&track.carrier)
+                .ok_or_else(|| invalid("foreign belt carrier"))?;
+            if !seen.insert(body.index()) {
+                return Err(invalid("duplicate belt mass partition"));
+            }
+            let index = body.index();
+            let old_mass = self.model.body_mass.host()?[index];
+            let old_com = self.model.body_com.host()?[index];
+            let mut first = old_com * old_mass;
+            let mut inertia =
+                self.model.body_inertia.host()?[index] + point_inertia(old_mass, old_com);
+            let mut mass = old_mass;
+            let inverse = self.state.body_q.host()?[index].inverse();
+            for &node in &track.nodes {
+                if !nodes.insert(node) {
+                    return Err(invalid("duplicate belt mass node"));
+                }
+                let m = *belts
+                    .model
+                    .particle_mass
+                    .host()?
+                    .get(node as usize)
+                    .ok_or_else(|| invalid("invalid belt mass node"))?;
+                let p = inverse.transform_point(
+                    *belts
+                        .state
+                        .particle_q
+                        .host()?
+                        .get(node as usize)
+                        .ok_or_else(|| invalid("invalid belt position node"))?,
+                );
+                if !m.is_finite() || m <= 0.0 || !p.is_finite() {
+                    return Err(invalid("invalid belt mass distribution"));
+                }
+                mass -= m;
+                first -= p * m;
+                inertia -= point_inertia(m, p);
+            }
+            if !mass.is_finite() || mass <= 0.0 {
+                return Err(invalid("belt exceeds authored carrier mass"));
+            }
+            let com = first / mass;
+            inertia -= point_inertia(mass, com);
+            let covariance =
+                Mat3::IDENTITY * (inertia.x_axis.x + inertia.y_axis.y + inertia.z_axis.z) * 0.5
+                    - inertia;
+            if !com.is_finite() || !positive(inertia) || !positive(covariance) {
+                return Err(invalid(&format!(
+                    "belt exceeds authored carrier inertia budget: body={index}, mass={mass}, com={com:?}, inertia={:?}, covariance={:?}",
+                    inertia.to_cols_array(),
+                    covariance.to_cols_array()
+                )));
+            }
+            updates.push((index, mass, com, inertia));
+        }
+        if nodes.len() != belts.model.particle_count {
+            return Err(invalid("unassigned belt mass node"));
+        }
+        for (body, mass, com, inertia) in updates {
+            self.model.body_mass.host_mut()?[body] = mass;
+            self.model.body_inv_mass.host_mut()?[body] = 1.0 / mass;
+            self.model.body_com.host_mut()?[body] = com;
+            self.model.body_inertia.host_mut()?[body] = inertia;
+            self.model.body_inv_inertia.host_mut()?[body] = inertia.inverse();
+        }
+        self.mass_partitioned = true;
+        Ok(())
+    }
+
     pub(crate) fn ball_joints(&self) -> Result<Vec<SoftRigidBallJoint>> {
         let count =
             u32::try_from(self.model.body_count).map_err(|_| invalid("too many loop bodies"))?;
@@ -307,6 +406,7 @@ impl FemRigidMachine {
             joints,
             loops,
             origin,
+            mass_partitioned: false,
         })
     }
 }

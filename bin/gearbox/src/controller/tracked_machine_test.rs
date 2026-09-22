@@ -1,6 +1,34 @@
 use super::*;
 use crate::physics::{MollaBackend, PhysicsWorld};
 use crate::physics::backend::ColliderDesc;
+#[path = "tracked_mass_export.rs"]
+mod mass_export;
+
+fn fem_mass_properties(rigid: &crate::physics::fem::rigid_machine::FemRigidMachine, belts: Option<&crate::physics::fem::track_mesh::FemTrackMeshes>) -> (f64,molla_math::Vec3,molla_math::Mat3) {
+    use molla_math::{Mat3,Vec3 as Vector};
+    let point_inertia = |m: f64,p: Vector| (Mat3::IDENTITY*p.length_squared()-Mat3::from_cols(p*p.x,p*p.y,p*p.z))*m;
+    let mut mass=0.0; let mut first=Vector::ZERO; let mut inertia=Mat3::ZERO;
+    for body in 0..rigid.model.body_count {
+        let m=rigid.model.body_mass.host().unwrap()[body];
+        let pose=rigid.state.body_q.host().unwrap()[body];
+        let p=pose.transform_point(rigid.model.body_com.host().unwrap()[body]);
+        let r=Mat3::from_quat(pose.rotation);
+        mass+=m; first+=m*p;
+        inertia+=r*rigid.model.body_inertia.host().unwrap()[body]*r.transpose()+point_inertia(m,p);
+    }
+    if let Some(belts)=belts {
+        for (&m,&p) in belts.model.particle_mass.host().unwrap().iter().zip(belts.state.particle_q.host().unwrap()) {
+            mass+=m; first+=m*p; inertia+=point_inertia(m,p);
+        }
+    }
+    (mass,first,inertia)
+}
+
+fn assert_fem_mass_conserved(a: (f64,molla_math::Vec3,molla_math::Mat3),b: (f64,molla_math::Vec3,molla_math::Mat3)) {
+    assert!((a.0-b.0).abs()<1e-8);
+    assert!((a.1-b.1).length()<1e-8);
+    assert!((a.2-b.2).to_cols_array().iter().all(|v| v.abs()<1e-8));
+}
 
 #[test]
 #[ignore = "requires GEARBOX_TRACK_ASSET through oslo make test-fem-machine"]
@@ -25,6 +53,64 @@ fn ceol_fem_machine_binding() {
     assert_eq!(prepared.model.body_count, layout.bodies.len());
     assert_eq!(prepared.model.joint_count, layout.tree_joints.len() + 1);
     assert_eq!(prepared.loops.len(), layout.loop_joints.len());
+    let belts = crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).unwrap();
+    assert_eq!(belts.tracks.len(), 2);
+    assert_eq!(belts.model.particle_count, 10752);
+    assert_eq!(belts.model.tet_count, 32256);
+    let points = belts.state.particle_q.host().unwrap();
+    for track in &belts.tracks {
+        assert!(track.minimum_j > 0.5);
+        assert!((track.neutral_length - 3.1887).abs() < 0.001);
+        assert!(track.mass > 10.0 && track.mass < 20.0);
+        assert!(track.pitch_radius_difference > 0.002 && track.pitch_radius_difference < 0.003);
+        assert!(track.surface.iter().flatten().all(|node| track.nodes.contains(node)));
+        let body = prepared.bodies[&track.carrier];
+        let pose = prepared.state.body_q.host().unwrap()[body.index()];
+        let local = track.nodes.iter().map(|&node| pose.inverse().transform_point(points[node as usize])).collect::<Vec<_>>();
+        assert!(local.iter().all(|p| p.x.abs() <= 0.090001));
+        eprintln!("authored belt: nodes={} tets={} mass={} kg neutral={} m minJ={} pitch-radius mismatch={} m",
+            track.nodes.len(), belts.model.tet_count/2, track.mass, track.neutral_length, track.minimum_j, track.pitch_radius_difference);
+    }
+    assert!(belts.tracks[0].nodes.iter().all(|node| !belts.tracks[1].nodes.contains(node)));
+    let saved_fem = machine.tracks[0].fem.take();
+    assert!(crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).is_err());
+    machine.tracks[0].fem = saved_fem;
+    let mut partitioned = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
+    partitioned.partition_belt_mass(&belts).unwrap();
+    let combined_mass = partitioned.model.body_mass.host().unwrap().iter().sum::<f64>() + belts.model.particle_mass.host().unwrap().iter().sum::<f64>();
+    assert!((combined_mass - 750.0).abs() < 1e-5);
+    assert_fem_mass_conserved(fem_mass_properties(&prepared,None),fem_mass_properties(&partitioned,Some(&belts)));
+    for (authored,track) in machine.tracks.iter().zip(&belts.tracks) {
+        use molla_math::{Vec3 as Vector,Mat3};
+        let path=openusd::sdf::path(&authored.carrier).unwrap();
+        let report: serde_json::Value=serde_json::from_str(&read_string(&stage,&path,"ceol:femMassComposition").unwrap()).unwrap();
+        let mut m=0.0; let mut first=Vector::ZERO; let mut inertia=Mat3::ZERO;
+        let outer=|v: Vector| Mat3::IDENTITY*v.length_squared()-Mat3::from_cols(v*v.x,v*v.y,v*v.z);
+        for part in report["rigid_components"].as_array().unwrap() {
+            let mass=part["mass"].as_f64().unwrap();
+            let vec=|key: &str| Vector::from_array(std::array::from_fn(|i| part[key][i].as_f64().unwrap()));
+            let center=vec("center"); let size=vec("size");
+            m+=mass; first+=mass*center;
+            inertia+=Mat3::from_diagonal((Vector::splat(size.length_squared())-size*size)*(mass/12.0))+outer(center)*mass;
+        }
+        let center=first/m;
+        inertia-=outer(center)*m;
+        let body=partitioned.bodies[&track.carrier].index();
+        assert!((partitioned.model.body_mass.host().unwrap()[body]-m).abs()<1e-8);
+        assert!((partitioned.model.body_com.host().unwrap()[body]-center).length()<1e-6);
+        assert!((partitioned.model.body_inertia.host().unwrap()[body]-inertia).to_cols_array().iter().all(|v| v.abs()<1e-5));
+    }
+    assert!(partitioned.partition_belt_mass(&belts).is_err());
+    let mut invalid_partition = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
+    let last_carrier=invalid_partition.bodies[&belts.tracks[1].carrier].index();
+    invalid_partition.model.body_mass.host_mut().unwrap()[last_carrier]=1.0;
+    let saved_masses=invalid_partition.model.body_mass.host().unwrap().to_vec();
+    let saved_com=invalid_partition.model.body_com.host().unwrap().to_vec();
+    let saved_inertia=invalid_partition.model.body_inertia.host().unwrap().to_vec();
+    assert!(invalid_partition.partition_belt_mass(&belts).is_err());
+    assert_eq!(invalid_partition.model.body_mass.host().unwrap(),saved_masses);
+    assert_eq!(invalid_partition.model.body_com.host().unwrap(),saved_com);
+    assert_eq!(invalid_partition.model.body_inertia.host().unwrap(),saved_inertia);
     let mass: f64 = prepared.model.body_mass.host().unwrap().iter().sum();
     assert!((mass - 750.0).abs() < 1e-5, "authored CEOL mass: {mass}");
     assert!(prepared.control.joint_motor_max_force.host().unwrap().iter().any(|&f| f == 20000.0));
@@ -49,6 +135,11 @@ fn ceol_fem_machine_binding() {
     let relocated = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &second).unwrap();
     assert!((relocated.origin - prepared.origin).length() > 10.0);
     assert_eq!(relocated.model.body_mass.host().unwrap(), prepared.model.body_mass.host().unwrap());
+    let relocated_belts=crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(),&machine,&second,&relocated).unwrap();
+    let original_properties=fem_mass_properties(&relocated,None);
+    let mut relocated_partition=relocated;
+    relocated_partition.partition_belt_mass(&relocated_belts).unwrap();
+    assert_fem_mass_conserved(original_properties,fem_mass_properties(&relocated_partition,Some(&relocated_belts)));
     assert!(layout.bodies.iter().all(|e| !second.bodies.contains(e)));
     assert_ne!(layout.chassis, second.chassis);
     let joint = second.loop_joints[0];

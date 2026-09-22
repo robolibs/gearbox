@@ -16,6 +16,8 @@ pub struct TrackSpec {
     pub forward: [f64; 3],
     pub path: Vec<[f32; 3]>,
     pub treads: Vec<String>,
+    #[serde(default)]
+    pub fem: Option<crate::physics::fem::track_mesh::TrackFemSpec>,
 }
 
 pub(super) fn discover(stage: &openusd::usd::Stage, prim: &SdfPath) -> Result<Vec<TrackSpec>, String> {
