@@ -40,7 +40,7 @@ usd_bevy.workspace = true
 openusd-schemas.workspace = true
 openusd.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 agentio.workspace = true
 peerbus.workspace = true
 datapod.workspace = true
@@ -52,12 +52,12 @@ gearbox-cli.workspace = true
 
 # Rigid-body engines used by the physics backend adapters.
 rapier3d = { workspace = true, features = ["enhanced-determinism"] }
-molla-core = { git = "https://github.com/bresilla/molla", rev = "786a001c7febf67114e9020e8cf6f01f110ff3ae", default-features = false }
-molla-math = { git = "https://github.com/bresilla/molla", rev = "786a001c7febf67114e9020e8cf6f01f110ff3ae" }
-molla-sim = { git = "https://github.com/bresilla/molla", rev = "786a001c7febf67114e9020e8cf6f01f110ff3ae", default-features = false }
-molla-geometry = { git = "https://github.com/bresilla/molla", rev = "786a001c7febf67114e9020e8cf6f01f110ff3ae", default-features = false }
-molla-solvers = { git = "https://github.com/bresilla/molla", rev = "786a001c7febf67114e9020e8cf6f01f110ff3ae", default-features = false, features = ["gpu"] }
-molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "786a001c7febf67114e9020e8cf6f01f110ff3ae" }
+molla-core = { git = "https://github.com/bresilla/molla", rev = "68a2da06aedd13e6f8b77d45a396086f158738e9", default-features = false }
+molla-math = { git = "https://github.com/bresilla/molla", rev = "68a2da06aedd13e6f8b77d45a396086f158738e9" }
+molla-sim = { git = "https://github.com/bresilla/molla", rev = "68a2da06aedd13e6f8b77d45a396086f158738e9", default-features = false }
+molla-geometry = { git = "https://github.com/bresilla/molla", rev = "68a2da06aedd13e6f8b77d45a396086f158738e9", default-features = false }
+molla-solvers = { git = "https://github.com/bresilla/molla", rev = "68a2da06aedd13e6f8b77d45a396086f158738e9", default-features = false, features = ["gpu"] }
+molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "68a2da06aedd13e6f8b77d45a396086f158738e9" }
 wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
 bytemuck = "1"
 glam = "0.30"

@@ -57,8 +57,9 @@ fn ceol_fem_machine_binding() {
     assert_eq!(prepared.loops.len(), layout.loop_joints.len());
     let belts = crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).unwrap();
     assert_eq!(belts.tracks.len(), 2);
-    assert_eq!(belts.model.particle_count, 10752);
-    assert_eq!(belts.model.tet_count, 32256);
+    let outer_treads = machine.tracks.iter().all(|t| t.fem.as_ref().unwrap().version == 2);
+    assert_eq!(belts.model.particle_count, if outer_treads { 29568 } else { 10752 });
+    assert_eq!(belts.model.tet_count, if outer_treads { 102144 } else { 32256 });
     let mut contact_features = 0usize;
     for track in &belts.tracks {
         let vertices = track
@@ -106,6 +107,21 @@ fn ceol_fem_machine_binding() {
     let saved_fem = machine.tracks[0].fem.take();
     assert!(crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).is_err());
     machine.tracks[0].fem = saved_fem;
+    let original_fem = machine.tracks[0].fem.clone().unwrap();
+    machine.tracks[0].fem.as_mut().unwrap().guide_rows.clear();
+    assert!(crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).is_err());
+    machine.tracks[0].fem = Some(original_fem.clone());
+    if outer_treads {
+        machine.tracks[0].fem.as_mut().unwrap().outer_rows.clear();
+        assert!(crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).is_err());
+        machine.tracks[0].fem = Some(original_fem.clone());
+        machine.tracks[0].fem.as_mut().unwrap().outer_phase_offsets[0] = f64::NAN;
+        assert!(crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).is_err());
+        machine.tracks[0].fem = Some(original_fem.clone());
+        machine.tracks[0].fem.as_mut().unwrap().version = 1;
+        assert!(crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).is_err());
+        machine.tracks[0].fem = Some(original_fem);
+    }
     let mut partitioned = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
     partitioned.partition_belt_mass(&belts).unwrap();
     let combined_mass = partitioned.model.body_mass.host().unwrap().iter().sum::<f64>() + belts.model.particle_mass.host().unwrap().iter().sum::<f64>();

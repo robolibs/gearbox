@@ -24,6 +24,10 @@ pub struct TrackFemSpec {
     pub cord_linear_density: f64,
     pub cord_prestrain: f64,
     pub guide_rows: Vec<GuideRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outer_rows: Vec<GuideRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outer_phase_offsets: Vec<f64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -57,6 +61,17 @@ fn invalid(message: &str) -> Error {
     Error::Build(format!("FEM track: {message}"))
 }
 
+#[test]
+fn fem_geometry_json_preserves_exact_phase_offsets() {
+    let values = [-0.009265739383448171_f64, 0.0037342606165518266];
+    let encoded = serde_json::to_string(&values).unwrap();
+    let decoded: Vec<f64> = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        values.map(f64::to_bits).as_slice(),
+        decoded.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+}
+
 impl FemTrackMeshes {
     pub(crate) fn prepare(
         world: &World,
@@ -83,7 +98,7 @@ impl FemTrackMeshes {
                 .fem
                 .as_ref()
                 .ok_or_else(|| invalid("missing explicit FEM material and geometry"))?;
-            if p.version != 1
+            if !matches!(p.version, 1 | 2)
                 || !matches!(p.calibration.as_str(), "estimated" | "measured")
                 || p.path_reference != "outer_surface"
                 || p.width_stations.len() < 2
@@ -91,6 +106,10 @@ impl FemTrackMeshes {
                 || p.segments_per_pitch < 2
                 || p.thickness_cells == 0
                 || p.thickness_cells % 2 != 0
+                || p.guide_rows.is_empty()
+                || (p.version == 1
+                    && (!p.outer_rows.is_empty() || !p.outer_phase_offsets.is_empty()))
+                || (p.version == 2 && (p.outer_rows.is_empty() || p.outer_phase_offsets.is_empty()))
             {
                 return Err(invalid(
                     "unsupported geometry version, reference or resolution",
@@ -118,21 +137,26 @@ impl FemTrackMeshes {
                 youngs_modulus: p.youngs_modulus,
                 poisson_ratio: p.poisson_ratio,
             };
-            let guides = p
-                .guide_rows
-                .iter()
-                .map(|g| RubberLugParams {
-                    count: authored.treads.len(),
-                    segment_span: g.segment_span,
-                    width_start: g.width_start,
-                    width_cells: g.width_cells,
-                    depth: g.depth,
-                    depth_cells: g.depth_cells,
-                })
-                .collect::<Vec<_>>();
-            let mesh = RubberBeltMesh::circular(params)?
-                .with_width_stations(&p.width_stations)?
-                .with_drive_lug_rows(&guides)?;
+            let lug_rows = |rows: &[GuideRow]| {
+                rows.iter()
+                    .map(|g| RubberLugParams {
+                        count: authored.treads.len(),
+                        segment_span: g.segment_span,
+                        width_start: g.width_start,
+                        width_cells: g.width_cells,
+                        depth: g.depth,
+                        depth_cells: g.depth_cells,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut mesh =
+                RubberBeltMesh::circular(params)?.with_width_stations(&p.width_stations)?;
+            if p.version == 2 {
+                mesh =
+                    mesh.with_outer_phase_offsets(authored.treads.len(), &p.outer_phase_offsets)?;
+            }
+            let mesh =
+                mesh.with_surface_lug_rows(&lug_rows(&p.guide_rows), &lug_rows(&p.outer_rows))?;
             let phase =
                 -0.5 * p.guide_rows[0].segment_span as f64 * path.length() / segments as f64;
             if p.guide_rows

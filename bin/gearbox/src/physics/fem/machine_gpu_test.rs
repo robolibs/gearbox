@@ -284,7 +284,18 @@ fn authored_ceol_ground_contact_uses_bounded_gpu_storage() {
             &loops,
         )
         .unwrap();
-        assert_eq!(island.system.contact_row_count(), 53_760 * 4 + 2);
+        let outer_treads = spec
+            .tracks
+            .iter()
+            .all(|t| t.fem.as_ref().unwrap().version == 2);
+        assert_eq!(
+            island.system.contact_row_count(),
+            if outer_treads {
+                128 * 1024 * 1024 / (3 * 29 * 4)
+            } else {
+                53_760 * 4 + 2
+            }
+        );
         let response_bytes = u64::from(island.system.contact_row_count()) * 3 * 29 * 4;
         assert!(response_bytes < 128 * 1024 * 1024);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
@@ -391,7 +402,18 @@ pub(super) fn checked_wheel_contacts() -> (
             .iter()
             .map(|t| (points[t[0] as usize] + points[t[1] as usize] + points[t[2] as usize]) / 3.0),
     );
-    assert_eq!(samples.len(), 53_760);
+    assert_eq!(
+        samples.len(),
+        if spec
+            .tracks
+            .iter()
+            .all(|t| t.fem.as_ref().unwrap().version == 2)
+        {
+            134_400
+        } else {
+            53_760
+        }
+    );
     let mut worst = (0.0_f64, String::new());
     for (shape, name) in contacts.shapes.iter().zip(&contacts.names) {
         let body = rigid.state.body_q.host().unwrap()[shape.ids[1] as usize].inverse();
