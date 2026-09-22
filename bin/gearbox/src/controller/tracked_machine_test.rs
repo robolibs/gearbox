@@ -57,6 +57,30 @@ fn ceol_fem_machine_binding() {
     assert_eq!(belts.tracks.len(), 2);
     assert_eq!(belts.model.particle_count, 10752);
     assert_eq!(belts.model.tet_count, 32256);
+    let mut contact_features = 0usize;
+    for track in &belts.tracks {
+        let vertices = track
+            .surface
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        let edges = track
+            .surface
+            .iter()
+            .flat_map(|t| [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]])
+            .map(|mut edge| {
+                edge.sort();
+                edge
+            })
+            .collect::<HashSet<_>>();
+        contact_features += vertices.len() + edges.len() + track.surface.len();
+    }
+    eprintln!(
+        "authored FEM contact budget: features={contact_features}, 13-shape dense response={} bytes, four-contacts-per-feature response={} bytes",
+        contact_features * 13 * 3 * prepared.model.joint_dof_total * 4,
+        contact_features * 4 * 3 * prepared.model.joint_dof_total * 4
+    );
     let points = belts.state.particle_q.host().unwrap();
     for track in &belts.tracks {
         assert!(track.minimum_j > 0.5);

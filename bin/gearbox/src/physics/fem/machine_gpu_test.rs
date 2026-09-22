@@ -220,3 +220,112 @@ fn authored_ceol_belts_relax_on_shared_gpu_without_contacts() {
         displacement
     );
 }
+
+#[test]
+#[ignore = "requires GPU and GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
+fn authored_ceol_ground_contact_uses_bounded_gpu_storage() {
+    let (app, spec, layout) = asset();
+    let (device, queue, _) = tests::gpu_island();
+    let mut momenta = Vec::new();
+    for ground_enabled in [false, true] {
+        let mut rigid = rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
+        let mut belts =
+            track_mesh::FemTrackMeshes::prepare(app.world(), &spec, &layout, &rigid).unwrap();
+        rigid.partition_belt_mass(&belts).unwrap();
+        let loops = rigid.ball_joints().unwrap();
+        let masses = belts.model.particle_mass.host().unwrap().to_vec();
+        let floor = belts
+            .state
+            .particle_q
+            .host()
+            .unwrap()
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::INFINITY, f64::min);
+        belts
+            .state
+            .particle_qd
+            .host_mut()
+            .unwrap()
+            .fill(-molla_math::Vec3::Y * 0.2);
+        let shapes = (0..13)
+            .map(|i| molla_solvers::fem_rigid_gpu::SoftRigidShapeGpu {
+                position: [
+                    if i == 0 && ground_enabled {
+                        0.0
+                    } else {
+                        100.0 + i as f32 * 20.0
+                    },
+                    floor as f32 - 0.5,
+                    0.0,
+                    0.0,
+                ],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                data: [5.0, 0.5, 5.0, 0.6],
+                ids: [1, u32::MAX, 0, 0],
+            })
+            .collect();
+        let mut island = FemGpuIsland::with_ball_joints(
+            &device,
+            &queue,
+            FemRigidGpuScene {
+                soft_model: belts.model,
+                soft_state: belts.state,
+                rigid_model: rigid.model,
+                rigid_state: rigid.state,
+                control: rigid.control,
+                shapes,
+            },
+            FemRigidConfig {
+                max_substep: 1.0 / 19200.0,
+                elastic_iterations: 128,
+                ..default()
+            },
+            &loops,
+        )
+        .unwrap();
+        assert_eq!(island.system.contact_row_count(), 53_760 * 4 + 2);
+        let response_bytes = u64::from(island.system.contact_row_count()) * 3 * 29 * 4;
+        assert!(response_bytes < 128 * 1024 * 1024);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while island.clock.completed < 8 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "authored ground contact timed out"
+            );
+            island.advance(island.clock.submitted < 8).unwrap();
+            std::thread::yield_now();
+        }
+        assert!(island.system.soft_state().particle_q.host().is_err());
+        assert!(island.system.rigid_state().body_q.host().is_err());
+        let velocities = read_floats::<4>(
+            &device,
+            &queue,
+            island
+                .system
+                .soft_state()
+                .particle_qd
+                .device_buffer()
+                .unwrap(),
+        );
+        let momentum = velocities
+            .iter()
+            .zip(&masses)
+            .map(|(v, m)| {
+                assert!(v.iter().all(|x| x.is_finite()));
+                v[1] as f64 * m
+            })
+            .sum::<f64>();
+        assert!(island.minimum_j.unwrap() > 0.5);
+        eprintln!(
+            "authored CEOL ground={ground_enabled}: momentum_y={momentum}, response_bytes={response_bytes}, minJ={}, accepted={}s; no rollers or propulsion",
+            island.minimum_j.unwrap(),
+            island.completed_seconds()
+        );
+        momenta.push(momentum);
+    }
+    assert!(
+        momenta[1] > momenta[0] + 0.01,
+        "ground produced no upward response: {momenta:?}"
+    );
+}
