@@ -98,6 +98,12 @@ fn run_trajectory_coupled(
         assert!(material_contact.is_some());
         solver_settings["material_reuse_iterations"] = serde_json::json!(iterations);
     }
+    let contact_sweeps = std::env::var("GEARBOX_FEM_CONTACT_CONTINUATION_SWEEPS").ok()
+        .map(|v| v.parse::<u32>().expect("invalid contact continuation sweep count"));
+    if let Some(sweeps) = contact_sweeps {
+        assert!(material_contact.is_some());
+        solver_settings["contact_continuation_sweeps"] = serde_json::json!(sweeps);
+    }
     assert!(
         spec.tracks
             .iter()
@@ -289,6 +295,7 @@ fn run_trajectory_coupled(
         if let Some(config) = material_contact {
             island.system.configure_material_contact(Some(config)).unwrap();
             island.system.configure_material_contact_reuse(reuse_iterations).unwrap();
+            island.system.configure_material_contact_sweeps(contact_sweeps).unwrap();
         }
         if std::env::var("GEARBOX_FEM_GPU_TIMING").as_deref() == Ok("1") {
             island.system.configure_gpu_timing(true).unwrap();
@@ -694,6 +701,15 @@ fn authored_ceol_retained_material_512_step_probe() {
     run_trajectory_coupled(&[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
         Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
             iterations: 512, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
+        }), Some(8));
+}
+
+#[test]
+#[ignore = "test-only retained material refinement, not settling or traction acceptance"]
+fn authored_ceol_retained_material_1024_step_probe() {
+    run_trajectory_coupled(&[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
         }), Some(8));
 }
 
