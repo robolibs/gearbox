@@ -810,6 +810,17 @@ fn authored_ceol_full_friction_eight_step_probe() {
 }
 
 #[test]
+#[ignore = "test-only authored friction transient, not settling or traction acceptance"]
+fn authored_ceol_full_friction_64_step_probe() {
+    run_trajectory_contacts(
+        &[(0.0, true, true)], true, true, 64, true, 256, 1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
+        }), Some(8), true,
+    );
+}
+
+#[test]
 #[ignore = "test-only retained material refinement, not settling or traction acceptance"]
 fn authored_ceol_retained_material_2048_step_probe() {
     run_trajectory_coupled(&[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
