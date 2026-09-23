@@ -46,6 +46,18 @@ fn run_trajectory(
     steps: u64,
     monitor_settling: bool,
 ) -> Vec<Outcome> {
+    run_trajectory_configured(cases, monitor_momentum, capture_samples, steps, monitor_settling, 128, 1.0 / 19200.0)
+}
+
+fn run_trajectory_configured(
+    cases: &[(f64, bool, bool)],
+    monitor_momentum: bool,
+    capture_samples: bool,
+    steps: u64,
+    monitor_settling: bool,
+    elastic_iterations: usize,
+    substep: f64,
+) -> Vec<Outcome> {
     assert!(steps > 0 && steps % 64 == 0);
     assert!(!monitor_settling || (monitor_momentum && capture_samples));
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
@@ -63,6 +75,7 @@ fn run_trajectory(
     });
     let molla_dependency = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .lines().find(|line| line.starts_with("molla-solvers =")).unwrap();
+    let solver_settings = serde_json::json!({"elastic_iterations":elastic_iterations, "substep_seconds":substep});
     assert!(
         spec.tracks
             .iter()
@@ -94,6 +107,12 @@ fn run_trajectory(
         let body_com = rigid.model.body_com.host().unwrap().to_vec();
         let masses = belts.model.particle_mass.host().unwrap().to_vec();
         let initial_positions = belts.state.particle_q.host().unwrap().to_vec();
+        let failure_reference = monitor_settling.then(|| serde_json::json!({
+            "positions":belts.model.initial_particle_q.host().unwrap().iter().map(|q| q.to_array()).collect::<Vec<_>>(),
+            "tet_indices":belts.model.tet_indices.host().unwrap(),
+            "inverse_rest":belts.model.tet_dm_inv.host().unwrap().iter().map(|m| m.to_cols_array()).collect::<Vec<_>>(),
+            "rest_volumes":belts.model.tet_rest_volume.host().unwrap(),
+        }));
         let initial_poses = rigid.state.body_q.host().unwrap().to_vec();
         let triangles = belts
             .tracks
@@ -129,6 +148,7 @@ fn run_trajectory(
             .map(|p| p.y)
             .fold(f64::INFINITY, f64::min);
         let mut retention = Vec::new();
+        let mut regions = vec![u32::MAX; initial_positions.len()];
         for (track, authored) in belts.tracks.iter().zip(&spec.tracks) {
             let points = authored
                 .path
@@ -166,14 +186,16 @@ fn run_trajectory(
                         * g.depth_cells
                 })
                 .sum::<usize>();
+            for (index, &node) in track.nodes.iter().enumerate() {
+                regions[node as usize] = if index < base_nodes {
+                    if index % (geometry.thickness_cells + 1) == geometry.thickness_cells / 2 { 0 } else { 1 }
+                } else if index < base_nodes + guide_nodes { 2 } else { 3 };
+            }
             retention.push((
                 body,
                 path,
                 track.nodes.clone(),
                 reference,
-                base_nodes,
-                base_nodes + guide_nodes,
-                geometry.thickness_cells,
             ));
         }
         let drive_bodies = layout
@@ -223,8 +245,8 @@ fn run_trajectory(
                 shapes,
             },
             FemRigidConfig {
-                max_substep: 1.0 / 19200.0,
-                elastic_iterations: 128,
+                max_substep: substep,
+                elastic_iterations,
                 ..default()
             },
             &loops,
@@ -263,7 +285,30 @@ fn run_trajectory(
                 island.clock.completed
             );
             let boundary = if capture_samples { next_sample } else { steps };
-            island.advance(island.clock.submitted < boundary).unwrap();
+            if let Err(error) = island.advance(island.clock.submitted < boundary) {
+                if monitor_settling {
+                    let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
+                    let v = machine_gpu_test::read_floats::<4>(&device, &queue, island.system.soft_state().particle_qd.device_buffer().unwrap());
+                    let diagnostics = machine_gpu_test::read_floats::<1>(&device, &queue, island.system.volume_diagnostics_buffer());
+                    let failure = serde_json::json!({
+                        "error":error.to_string(), "accepted_steps":island.clock.completed,
+                        "submitted_steps":island.clock.submitted, "rejected_time":island.clock.submitted as f64 * substep,
+                        "elapsed_wall_seconds":started.elapsed().as_secs_f64(),
+                        "minimum_j":diagnostics[0][0], "invalid_tet":diagnostics[1][0].to_bits(),
+                        "tet_materials":material_metadata, "molla_dependency":molla_dependency,
+                        "solver_settings":solver_settings, "reference":failure_reference,
+                        "positions":p, "velocities":v, "regions":regions,
+                        "shapes":shape_trace,
+                        "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+                        "particle_masses":masses,
+                        "poses":machine_gpu_test::read_floats::<8>(&device, &queue, island.rigid_poses()),
+                    });
+                    let path = sample_directory.join("rejected.json");
+                    std::fs::write(&path, serde_json::to_vec(&failure).unwrap()).unwrap();
+                    eprintln!("rejected FEM state: {}", path.display());
+                }
+                panic!("FEM trajectory rejected: {error}");
+            }
             if capture_samples && island.clock.completed == next_sample && !island.pending() {
                 let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
                 let q = machine_gpu_test::read_floats::<8>(&device, &queue, island.rigid_poses());
@@ -369,6 +414,7 @@ fn run_trajectory(
                     "body_velocities":body_velocities, "equilibrium":equilibrium,
                     "stable_motor_feedback":true,
                     "tet_materials":material_metadata, "molla_dependency":molla_dependency,
+                    "solver_settings":solver_settings,
                 });
                 std::fs::write(
                     sample_directory.join(format!("step{next_sample:04}.json")),
@@ -444,29 +490,17 @@ fn run_trajectory(
                 .sum::<DVec3>();
         let mut departure = 0.0_f64;
         let mut region_departures = [0.0_f64; 4];
-        let mut regions = vec![u32::MAX; positions.len()];
         let mut errors = vec![0.0; positions.len()];
         let mut worst = String::new();
-        for (body, path, nodes, reference, base_nodes, guide_end, thickness_cells) in retention {
+        for (body, path, nodes, reference) in retention {
             let inverse = body_poses[body].inverse();
             for (index, (node, (x, offset))) in nodes.into_iter().zip(reference).enumerate() {
                 let p = inverse.transform_point(positions[node as usize]);
                 let lateral = (p.x - x).abs();
                 let radial = (radial(&path, p) - offset).abs();
                 let error = lateral.max(radial);
-                let region = if index < base_nodes {
-                    if index % (thickness_cells + 1) == thickness_cells / 2 {
-                        0
-                    } else {
-                        1
-                    }
-                } else if index < guide_end {
-                    2
-                } else {
-                    3
-                };
+                let region = regions[node as usize] as usize;
                 region_departures[region] = region_departures[region].max(error);
-                regions[node as usize] = region as u32;
                 errors[node as usize] = error;
                 if error > departure {
                     departure = error;
@@ -507,6 +541,7 @@ fn run_trajectory(
             "frame":"island-y-up", "effort":effort, "ground":ground, "teeth":teeth,
             "stable_motor_feedback":true,
             "tet_materials":material_metadata, "molla_dependency":molla_dependency,
+            "solver_settings":solver_settings,
             "drive_contact_control":"tooth boxes only; all smooth sprocket supports retained",
             "time":island.completed_seconds(), "minimum_j":island.minimum_j, "outcome":outcome,
             "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
@@ -540,6 +575,24 @@ fn authored_ceol_passive_equilibrium_probe() {
         outcome.equilibrium.as_ref().unwrap().sustained,
         "not in passive equilibrium: {outcomes:?}"
     );
+}
+
+#[test]
+#[ignore = "test-only short iteration-convergence probe, not settled acceptance"]
+fn authored_ceol_viscosity_iteration_probe() {
+    run_trajectory_configured(&[(0.0, true, true)], true, true, 256, true, 256, 1.0 / 19200.0);
+}
+
+#[test]
+#[ignore = "test-only short timestep-convergence probe, not settled acceptance"]
+fn authored_ceol_viscosity_half_step_probe() {
+    run_trajectory_configured(&[(0.0, true, true)], true, true, 512, true, 256, 1.0 / 38400.0);
+}
+
+#[test]
+#[ignore = "test-only short timestep-convergence probe, not settled acceptance"]
+fn authored_ceol_viscosity_quarter_step_probe() {
+    run_trajectory_configured(&[(0.0, true, true)], true, true, 1024, true, 256, 1.0 / 76800.0);
 }
 
 #[test]
