@@ -74,7 +74,24 @@ fn run_trajectory_coupled(
     material_contact: Option<molla_solvers::fem_rigid_gpu::MaterialContactConfig>,
     reuse_iterations: Option<u32>,
 ) -> Vec<Outcome> {
+    run_trajectory_contacts(cases, monitor_momentum, capture_samples, steps, monitor_settling,
+        elastic_iterations, substep, material_contact, reuse_iterations, false)
+}
+
+fn run_trajectory_contacts(
+    cases: &[(f64, bool, bool)],
+    monitor_momentum: bool,
+    capture_samples: bool,
+    steps: u64,
+    monitor_settling: bool,
+    elastic_iterations: usize,
+    substep: f64,
+    material_contact: Option<molla_solvers::fem_rigid_gpu::MaterialContactConfig>,
+    reuse_iterations: Option<u32>,
+    authored_friction: bool,
+) -> Vec<Outcome> {
     assert!(steps > 0);
+    assert!(!authored_friction || cases.iter().all(|case| case.2));
     assert!(!monitor_settling || (monitor_momentum && capture_samples));
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
     let material_metadata = serde_json::json!({
@@ -94,6 +111,10 @@ fn run_trajectory_coupled(
     let mut solver_settings = serde_json::json!({"elastic_iterations":elastic_iterations, "substep_seconds":substep,
         "material_contact":material_contact.map(|c| serde_json::json!({"iterations":c.iterations,
             "linear_tolerance_m_s":c.linear_tolerance, "angular_tolerance_rad_s":c.angular_tolerance}))});
+    if authored_friction {
+        solver_settings["contact_profile"] = serde_json::json!("authored_wheel_friction");
+        assert!(contacts.shapes.iter().any(|shape| shape.data[3] > 0.0));
+    }
     if let Some(iterations) = reuse_iterations {
         assert!(material_contact.is_some());
         solver_settings["material_reuse_iterations"] = serde_json::json!(iterations);
@@ -250,8 +271,11 @@ fn run_trajectory_coupled(
                     as usize
             })
             .collect::<Vec<_>>();
-        let mut shapes =
-            contact_control_test::frictionless_drive_contacts(&contacts, &drive_bodies, teeth);
+        let mut shapes = if authored_friction {
+            contacts.shapes.clone()
+        } else {
+            contact_control_test::frictionless_drive_contacts(&contacts, &drive_bodies, teeth)
+        };
         shapes.push(SoftRigidShapeGpu {
             position: [
                 if ground { 0.0 } else { 100.0 },
@@ -761,6 +785,28 @@ fn authored_ceol_retained_material_1024_step_probe() {
         Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
             iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
         }), Some(8));
+}
+
+#[test]
+#[ignore = "test-only authored wheel friction, not settling or traction acceptance"]
+fn authored_ceol_full_friction_single_step_probe() {
+    run_trajectory_contacts(
+        &[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
+        }), Some(8), true,
+    );
+}
+
+#[test]
+#[ignore = "test-only authored friction sequence, not settling or traction acceptance"]
+fn authored_ceol_full_friction_eight_step_probe() {
+    run_trajectory_contacts(
+        &[(0.0, true, true)], true, true, 8, true, 256, 1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
+        }), Some(8), true,
+    );
 }
 
 #[test]
