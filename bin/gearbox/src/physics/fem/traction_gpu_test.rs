@@ -469,7 +469,7 @@ fn authored_ceol_loaded_drive_trajectory_diagnostic() {
 #[test]
 #[ignore = "requires tread-complete GEARBOX_TRACK_ASSET through oslo make test-fem-gpu"]
 fn authored_ceol_passive_ground_retention_diagnostic() {
-    let outcomes = run_cases(&[(0.0, true, true)], false);
+    let outcomes = run_cases_with_samples(&[(0.0, true, true)], true, true);
     assert!(
         outcomes[0].retention < 0.020,
         "passive retention failed: {outcomes:?}"
