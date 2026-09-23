@@ -353,6 +353,7 @@ fn run_trajectory(
                     "velocities":v, "poses":poses, "joint_velocities":qd,
                     "momentum_phase_pairs_then_cumulative_deltas":momentum,
                     "body_velocities":body_velocities, "equilibrium":equilibrium,
+                    "stable_motor_feedback":true,
                 });
                 std::fs::write(
                     sample_directory.join(format!("step{next_sample:04}.json")),
@@ -489,6 +490,7 @@ fn run_trajectory(
         let trace = serde_json::json!({
             "asset":std::env::var("GEARBOX_TRACK_ASSET").unwrap(),
             "frame":"island-y-up", "effort":effort, "ground":ground, "teeth":teeth,
+            "stable_motor_feedback":true,
             "drive_contact_control":"tooth boxes only; all smooth sprocket supports retained",
             "time":island.completed_seconds(), "minimum_j":island.minimum_j, "outcome":outcome,
             "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),

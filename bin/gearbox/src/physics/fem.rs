@@ -89,7 +89,8 @@ impl FemGpuIsland {
             scene,
             config,
             joints,
-        )?;
+        )?
+        .with_stable_motor_feedback(true);
         let mut diagnostics = diagnostics::Diagnostics::new(device.wgpu_device());
         diagnostics.submit(device.wgpu_device(), queue, &system);
         Ok(Self {
