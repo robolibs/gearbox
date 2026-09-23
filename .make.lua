@@ -144,6 +144,8 @@ make.recipe{ name = "test-fem-visuals", desc = "validate CPU-prepared GPU visual
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "ceol_fem_visual_binding", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "export-fem-mass", desc = "export GEARBOX_TRACK_ASSET nodal properties to GEARBOX_FEM_MASS_EXPORT",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "export_ceol_fem_mass_properties", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "export-fem-energy", desc = "export CPU FEM inertia reference to GEARBOX_FEM_ENERGY_EXPORT",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "export_ceol_fem_energy_reference", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-fem-gpu", desc = "test native FEM on a GPU with GEARBOX_TRACK_ASSET",
              params = { { "--filter", desc = "test name filter (default: physics::fem)" } },
              run = function(a) sh.nixVulkan("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", a.filter or "physics::fem", "--", "--ignored", "--nocapture", "--test-threads=1") end }
