@@ -300,6 +300,12 @@ fn run_trajectory_coupled(
         if std::env::var("GEARBOX_FEM_GPU_TIMING").as_deref() == Ok("1") {
             island.system.configure_gpu_timing(true).unwrap();
         }
+        let snapshot_directory = std::env::var_os("GEARBOX_FEM_CONTACT_SNAPSHOT_DIR")
+            .map(std::path::PathBuf::from);
+        if snapshot_directory.is_some() {
+            assert!(capture_samples, "contact snapshots require sampled trajectories");
+            island.system.configure_contact_snapshot(true).unwrap();
+        }
         if monitor_momentum {
             island.system.enable_momentum_diagnostics();
         }
@@ -378,6 +384,38 @@ fn run_trajectory_coupled(
                 panic!("FEM trajectory rejected: {error}");
             }
             if capture_samples && island.clock.completed == next_sample && !island.pending() {
+                if let Some(root) = &snapshot_directory {
+                    let case = root.join(format!("effort{effort}_ground{ground}_teeth{teeth}"));
+                    std::fs::create_dir_all(&case).unwrap();
+                    let path = case.join(format!("step{next_sample:04}"));
+                    std::fs::create_dir(&path).expect("snapshot directory must not already exist");
+                    let snapshot = island.system.contact_snapshot().unwrap();
+                    let settings = snapshot.settings().unwrap();
+                    let mut sizes = std::collections::BTreeMap::new();
+                    for (name, buffer) in snapshot.buffers() {
+                        sizes.insert(name, buffer.size());
+                        std::fs::write(path.join(format!("{name}.bin")),
+                            machine_gpu_test::read_bytes(&device, &queue, buffer)).unwrap();
+                    }
+                    let metadata = serde_json::json!({
+                        "schema":"molla_first_contact_inputs_v1",
+                        "boundary":"after_predictor_before_first_contact_solve",
+                        "step":island.clock.completed, "molla_dependency":molla_dependency,
+                        "particles":sizes["positions"] / 16,
+                        "bodies":sizes["body_poses"] / 32,
+                        "dofs":sizes["rigid_velocities"] / 4,
+                        "rows":sizes["contacts"] / 80,
+                        "buffer_bytes":sizes,
+                        "dt":settings.dt, "iterations":settings.iterations,
+                        "penetration_recovery":settings.penetration_recovery,
+                        "max_recovery_speed":settings.max_recovery_speed,
+                        "active_contact_count":machine_gpu_test::read_floats::<1>(
+                            &device, &queue, island.system.active_contact_rows())[0][0].to_bits(),
+                    });
+                    std::fs::write(path.join("dimensions.json"),
+                        serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
+                    eprintln!("contact input snapshot: {}", path.display());
+                }
                 let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
                 let q = machine_gpu_test::read_floats::<8>(&device, &queue, island.rigid_poses());
                 let v = machine_gpu_test::read_floats::<4>(

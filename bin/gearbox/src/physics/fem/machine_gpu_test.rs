@@ -2,7 +2,7 @@ use super::*;
 use crate::physics::{MollaBackend, PhysicsWorld};
 use std::path::Path;
 
-fn read_bytes(device: &RenderDevice, queue: &RenderQueue, source: &wgpu::Buffer) -> Vec<u8> {
+pub(super) fn read_bytes(device: &RenderDevice, queue: &RenderQueue, source: &wgpu::Buffer) -> Vec<u8> {
     let gpu = device.wgpu_device();
     let staging = gpu.create_buffer(&wgpu::BufferDescriptor {
         label: Some("CEOL hitch acceptance"),
