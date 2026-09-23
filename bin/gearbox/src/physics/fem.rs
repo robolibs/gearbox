@@ -14,6 +14,8 @@ mod drive_gpu_test;
 #[cfg(test)]
 mod traction_gpu_test;
 #[cfg(test)]
+mod settling_test;
+#[cfg(test)]
 mod contact_control_test;
 #[cfg(test)]
 mod rigid_momentum_gpu_test;

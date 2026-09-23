@@ -23,6 +23,8 @@ struct Outcome {
     chassis_travel: f64,
     retention: f64,
     penetration: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    equilibrium: Option<settling_test::Report>,
 }
 
 fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome> {
@@ -34,6 +36,18 @@ fn run_cases_with_samples(
     monitor_momentum: bool,
     capture_samples: bool,
 ) -> Vec<Outcome> {
+    run_trajectory(cases, monitor_momentum, capture_samples, 512, false)
+}
+
+fn run_trajectory(
+    cases: &[(f64, bool, bool)],
+    monitor_momentum: bool,
+    capture_samples: bool,
+    steps: u64,
+    monitor_settling: bool,
+) -> Vec<Outcome> {
+    assert!(steps > 0 && steps % 64 == 0);
+    assert!(!monitor_settling || (monitor_momentum && capture_samples));
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
     assert!(
         spec.tracks
@@ -219,20 +233,22 @@ fn run_cases_with_samples(
             std::fs::create_dir_all(&sample_directory).unwrap();
         }
         let mut next_sample = 64;
+        let mut settling = settling_test::Monitor::new(total_mass, DVec3::NEG_Y * 9.81);
+        let mut equilibrium = None;
         let started = std::time::Instant::now();
         let mut reported = 0;
         let mut heartbeat = started;
-        while island.clock.completed < 512 {
+        while island.clock.completed < steps {
             assert!(
                 !device_lost.load(std::sync::atomic::Ordering::Acquire),
                 "FEM device lost"
             );
             assert!(
-                started.elapsed().as_secs() < 1800,
+                started.elapsed().as_secs() < if monitor_settling { 7200 } else { 1800 },
                 "ground coupling timeout: effort={effort}, ground={ground}, teeth={teeth}, completed={}",
                 island.clock.completed
             );
-            let boundary = if capture_samples { next_sample } else { 512 };
+            let boundary = if capture_samples { next_sample } else { steps };
             island.advance(island.clock.submitted < boundary).unwrap();
             if capture_samples && island.clock.completed == next_sample && !island.pending() {
                 let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
@@ -261,6 +277,44 @@ fn run_cases_with_samples(
                     .system
                     .momentum_diagnostics_buffer()
                     .map(|buffer| machine_gpu_test::read_floats::<4>(&device, &queue, buffer));
+                let body_velocities = monitor_settling.then(|| {
+                    machine_gpu_test::read_floats::<8>(
+                        &device,
+                        &queue,
+                        island.system.rigid_state().body_qd.device_buffer().unwrap(),
+                    )
+                });
+                if let Some(body_velocities) = &body_velocities {
+                    let momentum = momentum.as_ref().unwrap();
+                    assert_eq!(momentum.len(), 20);
+                    assert!(
+                        momentum
+                            .iter()
+                            .flatten()
+                            .chain(body_velocities.iter().flatten())
+                            .all(|v| v.is_finite())
+                    );
+                    let vector = |v: &[f32]| DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64);
+                    let report = settling.observe(settling_test::Sample {
+                        time: island.completed_seconds(),
+                        momentum: vector(&momentum[8]) + vector(&momentum[9]),
+                        contact_impulse: vector(&momentum[16]) + vector(&momentum[17]),
+                        max_particle_speed: v
+                            .iter()
+                            .map(|v| vector(v).length())
+                            .fold(0.0, f64::max),
+                        max_body_speed: body_velocities
+                            .iter()
+                            .map(|v| vector(v).length())
+                            .fold(0.0, f64::max),
+                        max_body_angular_speed: body_velocities
+                            .iter()
+                            .map(|v| vector(&v[4..]).length())
+                            .fold(0.0, f64::max),
+                    });
+                    eprintln!("passive equilibrium: {report:?}");
+                    equilibrium = Some(report);
+                }
                 assert!(
                     p.iter()
                         .flatten()
@@ -298,6 +352,7 @@ fn run_cases_with_samples(
                     "positions":p.iter().map(|v| [v[0],v[1],v[2]]).collect::<Vec<_>>(),
                     "velocities":v, "poses":poses, "joint_velocities":qd,
                     "momentum_phase_pairs_then_cumulative_deltas":momentum,
+                    "body_velocities":body_velocities, "equilibrium":equilibrium,
                 });
                 std::fs::write(
                     sample_directory.join(format!("step{next_sample:04}.json")),
@@ -330,7 +385,7 @@ fn run_cases_with_samples(
             if island.clock.completed >= reported + 64 {
                 reported = island.clock.completed;
                 eprintln!(
-                    "ground effort={effort}, ground={ground}, teeth={teeth}: {reported}/512 in {:?}",
+                    "ground effort={effort}, ground={ground}, teeth={teeth}: {reported}/{steps} in {:?}",
                     started.elapsed()
                 );
             }
@@ -414,6 +469,7 @@ fn run_cases_with_samples(
             } else {
                 0.0
             },
+            equilibrium,
         };
         eprintln!(
             "ground outcome effort={effort}, ground={ground}, teeth={teeth}: {outcome:?}; accepted={}s; minJ={:?}; region_departures(cord,carcass,guide,tread)={region_departures:?}; worst={worst}; short coupling gate, not sustained driving acceptance",
@@ -450,6 +506,22 @@ fn run_cases_with_samples(
         outcomes.push(outcome);
     }
     outcomes
+}
+
+#[test]
+#[ignore = "test-only equilibrium readback through oslo make test-fem-gpu"]
+fn authored_ceol_passive_equilibrium_probe() {
+    let outcomes = run_trajectory(&[(0.0, true, true)], true, true, 2048, true);
+    let outcome = &outcomes[0];
+    assert!(outcome.retention < 0.020, "passive retention: {outcomes:?}");
+    assert!(
+        outcome.penetration < 0.002,
+        "passive penetration: {outcomes:?}"
+    );
+    assert!(
+        outcome.equilibrium.as_ref().unwrap().sustained,
+        "not in passive equilibrium: {outcomes:?}"
+    );
 }
 
 #[test]
