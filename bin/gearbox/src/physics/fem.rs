@@ -20,6 +20,8 @@ mod contact_control_test;
 #[cfg(test)]
 mod rigid_momentum_gpu_test;
 #[cfg(test)]
+mod rigid_servo_gpu_test;
+#[cfg(test)]
 mod contact_prepare_gpu_test;
 pub(crate) mod machine;
 pub(crate) mod rigid_machine;
