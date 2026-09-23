@@ -351,6 +351,8 @@ fn run_trajectory_coupled(
                         "solver_settings":solver_settings, "reference":failure_reference,
                         "gpu_phase_ticks":island.system.gpu_timing_ticks().map(|buffer|
                             machine_gpu_test::read_ticks(&device, &queue, buffer)),
+                        "gpu_contact_ticks":island.system.gpu_contact_timing_ticks().map(|buffer|
+                            machine_gpu_test::read_ticks(&device, &queue, buffer)),
                         "gpu_timestamp_period_ns":queue.get_timestamp_period(),
                         "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
                             machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
@@ -484,6 +486,8 @@ fn run_trajectory_coupled(
                     "tet_materials":material_metadata, "molla_dependency":molla_dependency,
                     "solver_settings":solver_settings,
                     "gpu_phase_ticks":island.system.gpu_timing_ticks().map(|buffer|
+                        machine_gpu_test::read_ticks(&device, &queue, buffer)),
+                    "gpu_contact_ticks":island.system.gpu_contact_timing_ticks().map(|buffer|
                         machine_gpu_test::read_ticks(&device, &queue, buffer)),
                     "gpu_timestamp_period_ns":queue.get_timestamp_period(),
                     "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
