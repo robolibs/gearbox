@@ -320,6 +320,8 @@ fn run_trajectory_coupled(
                         "solver_settings":solver_settings, "reference":failure_reference,
                         "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
                             machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
+                        "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
+                            machine_gpu_test::read_floats::<1>(&device, &queue, buffer)[0][0]),
                         "positions":p, "velocities":v, "regions":regions,
                         "shapes":shape_trace,
                         "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
@@ -440,6 +442,8 @@ fn run_trajectory_coupled(
                     "solver_settings":solver_settings,
                     "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
                         machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
+                    "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
+                        machine_gpu_test::read_floats::<1>(&device, &queue, buffer)[0][0]),
                 });
                 std::fs::write(
                     sample_directory.join(format!("step{next_sample:04}.json")),
