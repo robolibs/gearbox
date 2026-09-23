@@ -2,11 +2,7 @@ use super::*;
 use crate::physics::{MollaBackend, PhysicsWorld};
 use std::path::Path;
 
-pub(super) fn read_floats<const N: usize>(
-    device: &RenderDevice,
-    queue: &RenderQueue,
-    source: &wgpu::Buffer,
-) -> Vec<[f32; N]> {
+fn read_bytes(device: &RenderDevice, queue: &RenderQueue, source: &wgpu::Buffer) -> Vec<u8> {
     let gpu = device.wgpu_device();
     let staging = gpu.create_buffer(&wgpu::BufferDescriptor {
         label: Some("CEOL hitch acceptance"),
@@ -23,13 +19,30 @@ pub(super) fn read_floats<const N: usize>(
         .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
     gpu.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     rx.recv().unwrap().unwrap();
-    staging
-        .slice(..)
-        .get_mapped_range()
+    staging.slice(..).get_mapped_range().to_vec()
+}
+
+pub(super) fn read_floats<const N: usize>(
+    device: &RenderDevice,
+    queue: &RenderQueue,
+    source: &wgpu::Buffer,
+) -> Vec<[f32; N]> {
+    read_bytes(device, queue, source)
         .chunks_exact(N * 4)
         .map(|bytes| {
             std::array::from_fn(|i| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
         })
+        .collect()
+}
+
+pub(super) fn read_ticks(
+    device: &RenderDevice,
+    queue: &RenderQueue,
+    source: &wgpu::Buffer,
+) -> Vec<u64> {
+    read_bytes(device, queue, source)
+        .chunks_exact(8)
+        .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
         .collect()
 }
 

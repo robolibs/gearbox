@@ -229,6 +229,10 @@ mod tests {
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
         eprintln!("FEM test adapter: {:?}", adapter.get_info());
         let mut descriptor = wgpu::DeviceDescriptor::default();
+        if std::env::var("GEARBOX_FEM_GPU_TIMING").as_deref() == Ok("1") {
+            assert!(adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY));
+            descriptor.required_features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
         <crate::host::GearboxApp as mara::window::WindowApp>::configure_gpu_limits(
             &adapter.limits(),
             &mut descriptor.required_limits,

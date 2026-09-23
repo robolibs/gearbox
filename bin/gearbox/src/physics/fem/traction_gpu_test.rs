@@ -290,6 +290,9 @@ fn run_trajectory_coupled(
             island.system.configure_material_contact(Some(config)).unwrap();
             island.system.configure_material_contact_reuse(reuse_iterations).unwrap();
         }
+        if std::env::var("GEARBOX_FEM_GPU_TIMING").as_deref() == Ok("1") {
+            island.system.configure_gpu_timing(true).unwrap();
+        }
         if monitor_momentum {
             island.system.enable_momentum_diagnostics();
         }
@@ -335,6 +338,9 @@ fn run_trajectory_coupled(
                         "device_status":machine_gpu_test::read_floats::<1>(&device, &queue, island.system.status_buffer())[0][0].to_bits(),
                         "tet_materials":material_metadata, "molla_dependency":molla_dependency,
                         "solver_settings":solver_settings, "reference":failure_reference,
+                        "gpu_phase_ticks":island.system.gpu_timing_ticks().map(|buffer|
+                            machine_gpu_test::read_ticks(&device, &queue, buffer)),
+                        "gpu_timestamp_period_ns":queue.get_timestamp_period(),
                         "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
                             machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                         "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
@@ -466,6 +472,9 @@ fn run_trajectory_coupled(
                     "stable_motor_feedback":true,
                     "tet_materials":material_metadata, "molla_dependency":molla_dependency,
                     "solver_settings":solver_settings,
+                    "gpu_phase_ticks":island.system.gpu_timing_ticks().map(|buffer|
+                        machine_gpu_test::read_ticks(&device, &queue, buffer)),
+                    "gpu_timestamp_period_ns":queue.get_timestamp_period(),
                     "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
                         machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                     "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
