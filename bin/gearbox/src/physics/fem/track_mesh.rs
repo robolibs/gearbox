@@ -5,7 +5,7 @@ use molla_core::{Error, Result, WorldId};
 use molla_math::Vec3;
 use molla_sim::soft_belt::path::BeltPath;
 use molla_sim::soft_belt::{RubberBeltMesh, RubberBeltParams, RubberCordParams, RubberLugParams};
-use molla_sim::{Model, ModelBuilder, State, compute_tet_surface_triangles};
+use molla_sim::{Model, ModelBuilder, State, TetViscosity, compute_tet_surface_triangles};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct TrackFemSpec {
@@ -20,6 +20,12 @@ pub struct TrackFemSpec {
     pub density: f64,
     pub youngs_modulus: f64,
     pub poisson_ratio: f64,
+    /// Total Green-strain shear viscosity (Pa s).
+    #[serde(default)]
+    pub shear_viscosity: f64,
+    /// Total Green-strain bulk viscosity (Pa s).
+    #[serde(default)]
+    pub bulk_viscosity: f64,
     pub cord_axial_rigidity: f64,
     pub cord_linear_density: f64,
     pub cord_prestrain: f64,
@@ -72,6 +78,24 @@ fn fem_geometry_json_preserves_exact_phase_offsets() {
     );
 }
 
+#[test]
+fn fem_material_json_defaults_viscosity_to_zero_and_round_trips() {
+    let legacy = serde_json::json!({
+        "version":1, "path_reference":"outer_surface", "calibration":"estimated",
+        "width_stations":[-0.09,0.09], "thickness":0.021, "thickness_cells":2,
+        "segments_per_pitch":4, "sprocket_teeth":14, "density":1100.0,
+        "youngs_modulus":2e6, "poisson_ratio":0.45, "cord_axial_rigidity":2e5,
+        "cord_linear_density":0.1, "cord_prestrain":0.005, "guide_rows":[],
+    });
+    let mut parsed: TrackFemSpec = serde_json::from_value(legacy).unwrap();
+    assert_eq!([parsed.shear_viscosity, parsed.bulk_viscosity], [0.0; 2]);
+    parsed.shear_viscosity = 1379.3103448275863;
+    parsed.bulk_viscosity = 13333.333333333336;
+    let round_trip: TrackFemSpec = serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+    assert_eq!(parsed.shear_viscosity.to_bits(), round_trip.shear_viscosity.to_bits());
+    assert_eq!(parsed.bulk_viscosity.to_bits(), round_trip.bulk_viscosity.to_bits());
+}
+
 impl FemTrackMeshes {
     pub(crate) fn prepare(
         world: &World,
@@ -98,6 +122,8 @@ impl FemTrackMeshes {
                 .fem
                 .as_ref()
                 .ok_or_else(|| invalid("missing explicit FEM material and geometry"))?;
+            let viscosity = TetViscosity { shear: p.shear_viscosity, bulk: p.bulk_viscosity };
+            viscosity.validate()?;
             if !matches!(p.version, 1 | 2)
                 || !matches!(p.calibration.as_str(), "estimated" | "measured")
                 || p.path_reference != "outer_surface"
@@ -189,6 +215,7 @@ impl FemTrackMeshes {
                     prestrain: p.cord_prestrain,
                 },
             )?;
+            builder.set_tet_mesh_viscosity(handles.mesh, viscosity)?;
             let surface = compute_tet_surface_triangles(&mesh.tets)
                 .into_iter()
                 .map(|tri| tri.map(|n| handles.nodes[n as usize]))

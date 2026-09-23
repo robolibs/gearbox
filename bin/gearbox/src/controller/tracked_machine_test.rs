@@ -104,6 +104,28 @@ fn ceol_fem_machine_binding() {
             track.nodes.len(), belts.model.tet_count/2, track.mass, track.neutral_length, track.minimum_j, track.pitch_radius_difference);
     }
     assert!(belts.tracks[0].nodes.iter().all(|node| !belts.tracks[1].nodes.contains(node)));
+    let original_materials = machine.tracks.iter().map(|t| t.fem.clone()).collect::<Vec<_>>();
+    for (track, shear, bulk) in [(0, 123.0, 0.0), (1, 0.0, 456.0)] {
+        let material = machine.tracks[track].fem.as_mut().unwrap();
+        material.shear_viscosity = shear;
+        material.bulk_viscosity = bulk;
+    }
+    let viscous = crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).unwrap();
+    assert_eq!(viscous.model.particle_mass.host().unwrap(), belts.model.particle_mass.host().unwrap());
+    assert_eq!(viscous.state.particle_q.host().unwrap(), belts.state.particle_q.host().unwrap());
+    assert_eq!(viscous.model.tet_indices.host().unwrap(), belts.model.tet_indices.host().unwrap());
+    assert_eq!(viscous.model.spring_rest_length.host().unwrap(), belts.model.spring_rest_length.host().unwrap());
+    for (track, pair) in [[123.0, 0.0], [0.0, 456.0]].into_iter().enumerate() {
+        let offsets = viscous.model.tet_mesh_offsets.host().unwrap();
+        let material = &viscous.model.tet_viscosity.host().unwrap()[offsets[track] as usize..offsets[track+1] as usize];
+        assert!(!material.is_empty());
+        assert!(material.iter().all(|v| [v.shear, v.bulk] == pair));
+    }
+    for value in [-1.0, f64::NAN, f64::INFINITY, f64::MAX, 1e-40] {
+        machine.tracks[0].fem.as_mut().unwrap().shear_viscosity = value;
+        assert!(crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).is_err());
+    }
+    for (track, original) in machine.tracks.iter_mut().zip(original_materials) { track.fem = original; }
     let saved_fem = machine.tracks[0].fem.take();
     assert!(crate::physics::fem::track_mesh::FemTrackMeshes::prepare(app.world(), &machine, &layout, &prepared).is_err());
     machine.tracks[0].fem = saved_fem;

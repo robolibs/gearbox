@@ -49,6 +49,20 @@ fn run_trajectory(
     assert!(steps > 0 && steps % 64 == 0);
     assert!(!monitor_settling || (monitor_momentum && capture_samples));
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
+    let material_metadata = serde_json::json!({
+        "law":"finite_step_green_strain_kelvin_voigt_v1",
+        "tracks":spec.tracks.iter().map(|t| {
+            let material = t.fem.as_ref().unwrap();
+            serde_json::json!({
+                "carrier":t.carrier, "calibration":material.calibration,
+                "youngs_modulus_Pa":material.youngs_modulus, "poisson_ratio":material.poisson_ratio,
+                "shear_viscosity_Pa_s":material.shear_viscosity,
+                "bulk_viscosity_Pa_s":material.bulk_viscosity,
+            })
+        }).collect::<Vec<_>>(),
+    });
+    let molla_dependency = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .lines().find(|line| line.starts_with("molla-solvers =")).unwrap();
     assert!(
         spec.tracks
             .iter()
@@ -354,6 +368,7 @@ fn run_trajectory(
                     "momentum_phase_pairs_then_cumulative_deltas":momentum,
                     "body_velocities":body_velocities, "equilibrium":equilibrium,
                     "stable_motor_feedback":true,
+                    "tet_materials":material_metadata, "molla_dependency":molla_dependency,
                 });
                 std::fs::write(
                     sample_directory.join(format!("step{next_sample:04}.json")),
@@ -491,6 +506,7 @@ fn run_trajectory(
             "asset":std::env::var("GEARBOX_TRACK_ASSET").unwrap(),
             "frame":"island-y-up", "effort":effort, "ground":ground, "teeth":teeth,
             "stable_motor_feedback":true,
+            "tet_materials":material_metadata, "molla_dependency":molla_dependency,
             "drive_contact_control":"tooth boxes only; all smooth sprocket supports retained",
             "time":island.completed_seconds(), "minimum_j":island.minimum_j, "outcome":outcome,
             "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
