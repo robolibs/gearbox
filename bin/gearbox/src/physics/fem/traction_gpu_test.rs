@@ -315,7 +315,11 @@ fn run_trajectory_coupled(
         if capture_samples {
             std::fs::create_dir_all(&sample_directory).unwrap();
         }
-        let mut next_sample = 64.min(steps);
+        let sample_interval = std::env::var("GEARBOX_FEM_SAMPLE_INTERVAL")
+            .map(|value| value.parse::<u64>().expect("positive FEM sample interval"))
+            .unwrap_or(64);
+        assert!(sample_interval > 0, "FEM sample interval must be positive");
+        let mut next_sample = sample_interval.min(steps);
         let mut settling = settling_test::Monitor::new(total_mass, DVec3::NEG_Y * 9.81);
         let mut equilibrium = None;
         let started = std::time::Instant::now();
@@ -497,7 +501,7 @@ fn run_trajectory_coupled(
                     serde_json::to_vec(&sample).unwrap(),
                 )
                 .unwrap();
-                next_sample += 64;
+                next_sample += sample_interval;
             }
             if heartbeat.elapsed().as_secs() >= 15 {
                 let queue_complete = island.system.poll_completion().unwrap();
@@ -719,6 +723,15 @@ fn authored_ceol_retained_material_2048_step_probe() {
     run_trajectory_coupled(&[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
         Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
             iterations: 2048, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
+        }), Some(8));
+}
+
+#[test]
+#[ignore = "test-only consecutive coupled steps, not settling or traction acceptance"]
+fn authored_ceol_incremental_cord_four_step_probe() {
+    run_trajectory_coupled(&[(0.0, true, true)], true, true, 4, true, 256, 1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
         }), Some(8));
 }
 
