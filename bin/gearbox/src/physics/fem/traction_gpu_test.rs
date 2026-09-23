@@ -596,6 +596,12 @@ fn authored_ceol_viscosity_quarter_step_probe() {
 }
 
 #[test]
+#[ignore = "test-only short timestep-convergence probe, not settled acceptance"]
+fn authored_ceol_viscosity_eighth_step_probe() {
+    run_trajectory_configured(&[(0.0, true, true)], true, true, 2048, true, 256, 1.0 / 153600.0);
+}
+
+#[test]
 #[ignore = "test-only trajectory readback through oslo make test-fem-gpu"]
 fn authored_ceol_loaded_drive_trajectory_diagnostic() {
     let outcomes = run_cases_with_samples(&[(100.0, true, true)], true, true);
