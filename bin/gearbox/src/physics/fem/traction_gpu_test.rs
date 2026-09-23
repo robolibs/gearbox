@@ -403,6 +403,13 @@ fn run_trajectory_contacts(
                             island.system.active_contact_rows())[0][0].to_bits(),
                         "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
                             machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
+                        "pre_polish_diagnostics_words":island.system.material_pre_polish_diagnostics().map(|buffer|
+                            machine_gpu_test::read_bytes(&device, &queue, buffer).chunks_exact(4)
+                                .map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect::<Vec<_>>()),
+                        "contact_row_diagnostics":machine_gpu_test::read_floats::<8>(
+                            &device, &queue, island.system.contact_row_diagnostics()),
+                        "joint_velocities":machine_gpu_test::read_floats::<1>(
+                            &device, &queue, island.system.rigid_state().joint_qd.device_buffer().unwrap()),
                         "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
                             machine_gpu_test::read_floats::<1>(&device, &queue, buffer)[0][0]),
                         "material_force_samples":island.system.material_force_samples().map(|buffer|
@@ -419,6 +426,29 @@ fn run_trajectory_contacts(
                     let path = sample_directory.join("rejected.json");
                     std::fs::write(&path, serde_json::to_vec(&failure).unwrap()).unwrap();
                     eprintln!("rejected FEM state: {}", path.display());
+                    if let Some(snapshot) = island.system.contact_snapshot() {
+                        let path = sample_directory.join("rejected-contact-inputs");
+                        std::fs::create_dir(&path).expect("rejected input directory must not already exist");
+                        let mut sizes = std::collections::BTreeMap::new();
+                        for (name, buffer) in snapshot.buffers() {
+                            sizes.insert(name, buffer.size());
+                            std::fs::write(path.join(format!("{name}.bin")),
+                                machine_gpu_test::read_bytes(&device, &queue, buffer)).unwrap();
+                        }
+                        let settings = snapshot.settings().unwrap();
+                        let metadata = serde_json::json!({
+                            "schema":"molla_first_contact_inputs_v1",
+                            "boundary":"after_predictor_before_first_contact_solve",
+                            "step":island.clock.submitted, "accepted":false, "molla_dependency":molla_dependency,
+                            "particles":sizes["positions"] / 16, "bodies":sizes["body_poses"] / 32,
+                            "dofs":sizes["rigid_velocities"] / 4, "rows":sizes["contacts"] / 80,
+                            "buffer_bytes":sizes, "dt":settings.dt, "iterations":settings.iterations,
+                            "penetration_recovery":settings.penetration_recovery,
+                            "max_recovery_speed":settings.max_recovery_speed,
+                        });
+                        std::fs::write(path.join("dimensions.json"),
+                            serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
+                    }
                 }
                 panic!("FEM trajectory rejected: {error}");
             }
