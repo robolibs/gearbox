@@ -59,6 +59,21 @@ fn run_trajectory_configured(
     substep: f64,
 ) -> Vec<Outcome> {
     assert!(steps > 0 && steps % 64 == 0);
+    run_trajectory_coupled(cases, monitor_momentum, capture_samples, steps, monitor_settling,
+        elastic_iterations, substep, None)
+}
+
+fn run_trajectory_coupled(
+    cases: &[(f64, bool, bool)],
+    monitor_momentum: bool,
+    capture_samples: bool,
+    steps: u64,
+    monitor_settling: bool,
+    elastic_iterations: usize,
+    substep: f64,
+    material_contact: Option<molla_solvers::fem_rigid_gpu::MaterialContactConfig>,
+) -> Vec<Outcome> {
+    assert!(steps > 0);
     assert!(!monitor_settling || (monitor_momentum && capture_samples));
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
     let material_metadata = serde_json::json!({
@@ -75,7 +90,9 @@ fn run_trajectory_configured(
     });
     let molla_dependency = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .lines().find(|line| line.starts_with("molla-solvers =")).unwrap();
-    let solver_settings = serde_json::json!({"elastic_iterations":elastic_iterations, "substep_seconds":substep});
+    let solver_settings = serde_json::json!({"elastic_iterations":elastic_iterations, "substep_seconds":substep,
+        "material_contact":material_contact.map(|c| serde_json::json!({"iterations":c.iterations,
+            "linear_tolerance_m_s":c.linear_tolerance, "angular_tolerance_rad_s":c.angular_tolerance}))});
     assert!(
         spec.tracks
             .iter()
@@ -253,6 +270,9 @@ fn run_trajectory_configured(
         )
         .unwrap();
         eprintln!("full FEM island ready: effort={effort}, ground={ground}, teeth={teeth}");
+        if let Some(config) = material_contact {
+            island.system.configure_material_contact(Some(config)).unwrap();
+        }
         if monitor_momentum {
             island.system.enable_momentum_diagnostics();
         }
@@ -268,7 +288,7 @@ fn run_trajectory_configured(
         if capture_samples {
             std::fs::create_dir_all(&sample_directory).unwrap();
         }
-        let mut next_sample = 64;
+        let mut next_sample = 64.min(steps);
         let mut settling = settling_test::Monitor::new(total_mass, DVec3::NEG_Y * 9.81);
         let mut equilibrium = None;
         let started = std::time::Instant::now();
@@ -284,7 +304,7 @@ fn run_trajectory_configured(
                 "ground coupling timeout: effort={effort}, ground={ground}, teeth={teeth}, completed={}",
                 island.clock.completed
             );
-            let boundary = if capture_samples { next_sample } else { steps };
+            let boundary = if capture_samples { next_sample.min(steps) } else { steps };
             if let Err(error) = island.advance(island.clock.submitted < boundary) {
                 if monitor_settling {
                     let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
@@ -295,8 +315,11 @@ fn run_trajectory_configured(
                         "submitted_steps":island.clock.submitted, "rejected_time":island.clock.submitted as f64 * substep,
                         "elapsed_wall_seconds":started.elapsed().as_secs_f64(),
                         "minimum_j":diagnostics[0][0], "invalid_tet":diagnostics[1][0].to_bits(),
+                        "device_status":machine_gpu_test::read_floats::<1>(&device, &queue, island.system.status_buffer())[0][0].to_bits(),
                         "tet_materials":material_metadata, "molla_dependency":molla_dependency,
                         "solver_settings":solver_settings, "reference":failure_reference,
+                        "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
+                            machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                         "positions":p, "velocities":v, "regions":regions,
                         "shapes":shape_trace,
                         "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
@@ -415,6 +438,8 @@ fn run_trajectory_configured(
                     "stable_motor_feedback":true,
                     "tet_materials":material_metadata, "molla_dependency":molla_dependency,
                     "solver_settings":solver_settings,
+                    "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
+                        machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                 });
                 std::fs::write(
                     sample_directory.join(format!("step{next_sample:04}.json")),
@@ -599,6 +624,15 @@ fn authored_ceol_viscosity_quarter_step_probe() {
 #[ignore = "test-only short timestep-convergence probe, not settled acceptance"]
 fn authored_ceol_viscosity_eighth_step_probe() {
     run_trajectory_configured(&[(0.0, true, true)], true, true, 2048, true, 256, 1.0 / 153600.0);
+}
+
+#[test]
+#[ignore = "test-only single coupled substep, not settling or traction acceptance"]
+fn authored_ceol_material_contact_single_step_probe() {
+    run_trajectory_coupled(&[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 256, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
+        }));
 }
 
 #[test]
