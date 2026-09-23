@@ -134,6 +134,16 @@ fn run_trajectory_coupled(
             "tet_indices":belts.model.tet_indices.host().unwrap(),
             "inverse_rest":belts.model.tet_dm_inv.host().unwrap().iter().map(|m| m.to_cols_array()).collect::<Vec<_>>(),
             "rest_volumes":belts.model.tet_rest_volume.host().unwrap(),
+            "particle_inv_mass":belts.model.particle_inv_mass.host().unwrap(),
+            "tet_mu":belts.model.tet_mu.host().unwrap(),
+            "tet_lambda":belts.model.tet_lambda.host().unwrap(),
+            "tet_viscosity":belts.model.tet_viscosity.host().unwrap().iter().map(|v| [v.shear,v.bulk]).collect::<Vec<_>>(),
+            "tet_yield":belts.model.tet_yield_stress.host().unwrap(),
+            "spring_a":belts.model.spring_a.host().unwrap(),
+            "spring_b":belts.model.spring_b.host().unwrap(),
+            "spring_rest_length":belts.model.spring_rest_length.host().unwrap(),
+            "spring_tension_only":belts.model.spring_tension_only.host().unwrap(),
+            "cable_bending_entries":belts.model.vertex_cable_bending_entries.host().unwrap(),
         }));
         let initial_poses = rigid.state.body_q.host().unwrap().to_vec();
         let triangles = belts
@@ -328,6 +338,11 @@ fn run_trajectory_coupled(
                             machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                         "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
                             machine_gpu_test::read_floats::<1>(&device, &queue, buffer)[0][0]),
+                        "material_force_samples":island.system.material_force_samples().map(|buffer|
+                            machine_gpu_test::read_floats::<4>(&device, &queue, buffer)),
+                        "material_spring_stiffness":island.system.material_spring_stiffness().map(|buffer|
+                            machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
+                        "plastic_history":machine_gpu_test::read_floats::<12>(&device, &queue, island.system.soft_state().tet_f_plastic.device_buffer().unwrap()),
                         "positions":p, "velocities":v, "regions":regions,
                         "shapes":shape_trace,
                         "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
