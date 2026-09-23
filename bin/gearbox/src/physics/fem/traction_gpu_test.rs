@@ -60,7 +60,7 @@ fn run_trajectory_configured(
 ) -> Vec<Outcome> {
     assert!(steps > 0 && steps % 64 == 0);
     run_trajectory_coupled(cases, monitor_momentum, capture_samples, steps, monitor_settling,
-        elastic_iterations, substep, None)
+        elastic_iterations, substep, None, None)
 }
 
 fn run_trajectory_coupled(
@@ -72,6 +72,7 @@ fn run_trajectory_coupled(
     elastic_iterations: usize,
     substep: f64,
     material_contact: Option<molla_solvers::fem_rigid_gpu::MaterialContactConfig>,
+    reuse_iterations: Option<u32>,
 ) -> Vec<Outcome> {
     assert!(steps > 0);
     assert!(!monitor_settling || (monitor_momentum && capture_samples));
@@ -90,9 +91,13 @@ fn run_trajectory_coupled(
     });
     let molla_dependency = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .lines().find(|line| line.starts_with("molla-solvers =")).unwrap();
-    let solver_settings = serde_json::json!({"elastic_iterations":elastic_iterations, "substep_seconds":substep,
+    let mut solver_settings = serde_json::json!({"elastic_iterations":elastic_iterations, "substep_seconds":substep,
         "material_contact":material_contact.map(|c| serde_json::json!({"iterations":c.iterations,
             "linear_tolerance_m_s":c.linear_tolerance, "angular_tolerance_rad_s":c.angular_tolerance}))});
+    if let Some(iterations) = reuse_iterations {
+        assert!(material_contact.is_some());
+        solver_settings["material_reuse_iterations"] = serde_json::json!(iterations);
+    }
     assert!(
         spec.tracks
             .iter()
@@ -272,6 +277,7 @@ fn run_trajectory_coupled(
         eprintln!("full FEM island ready: effort={effort}, ground={ground}, teeth={teeth}");
         if let Some(config) = material_contact {
             island.system.configure_material_contact(Some(config)).unwrap();
+            island.system.configure_material_contact_reuse(reuse_iterations).unwrap();
         }
         if monitor_momentum {
             island.system.enable_momentum_diagnostics();
@@ -636,7 +642,25 @@ fn authored_ceol_material_contact_single_step_probe() {
     run_trajectory_coupled(&[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
         Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
             iterations: 256, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
-        }));
+        }), None);
+}
+
+#[test]
+#[ignore = "test-only retained material substep, not settling or traction acceptance"]
+fn authored_ceol_retained_material_single_step_probe() {
+    run_trajectory_coupled(&[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 256, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
+        }), Some(8));
+}
+
+#[test]
+#[ignore = "test-only retained material refinement, not settling or traction acceptance"]
+fn authored_ceol_retained_material_512_step_probe() {
+    run_trajectory_coupled(&[(0.0, true, true)], true, true, 1, true, 256, 1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 512, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
+        }), Some(8));
 }
 
 #[test]
