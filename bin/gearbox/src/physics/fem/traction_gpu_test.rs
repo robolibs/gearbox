@@ -125,6 +125,13 @@ fn run_trajectory_contacts(
         assert!(material_contact.is_some());
         solver_settings["contact_continuation_sweeps"] = serde_json::json!(sweeps);
     }
+    let polish_sweeps = std::env::var("GEARBOX_FEM_MATERIAL_POLISH_SWEEPS").ok()
+        .map(|v| v.parse::<u32>().expect("invalid material polish sweep count"));
+    if let Some(sweeps) = polish_sweeps {
+        assert!(material_contact.is_some() && reuse_iterations.is_some());
+        assert!((1..=4096).contains(&sweeps));
+        solver_settings["material_polish_iterations"] = serde_json::json!(sweeps);
+    }
     assert!(
         spec.tracks
             .iter()
@@ -320,6 +327,7 @@ fn run_trajectory_contacts(
             island.system.configure_material_contact(Some(config)).unwrap();
             island.system.configure_material_contact_reuse(reuse_iterations).unwrap();
             island.system.configure_material_contact_sweeps(contact_sweeps).unwrap();
+            island.system.configure_material_contact_polish(polish_sweeps).unwrap();
         }
         if std::env::var("GEARBOX_FEM_GPU_TIMING").as_deref() == Ok("1") {
             island.system.configure_gpu_timing(true).unwrap();
@@ -345,6 +353,13 @@ fn run_trajectory_contacts(
         if capture_samples {
             std::fs::create_dir_all(&sample_directory).unwrap();
         }
+        let energy_directory = std::env::var_os("GEARBOX_FEM_ENERGY_STATE_DIR").map(|root| {
+            assert!(capture_samples && monitor_settling, "energy states require complete sampled trajectories");
+            let path = std::path::PathBuf::from(root)
+                .join(format!("effort{effort}_ground{ground}_teeth{teeth}"));
+            std::fs::create_dir_all(&path).unwrap();
+            path
+        });
         let sample_interval = std::env::var("GEARBOX_FEM_SAMPLE_INTERVAL")
             .map(|value| value.parse::<u64>().expect("positive FEM sample interval"))
             .unwrap_or(64);
@@ -571,6 +586,22 @@ fn run_trajectory_contacts(
                     serde_json::to_vec(&sample).unwrap(),
                 )
                 .unwrap();
+                if let Some(directory) = &energy_directory {
+                    use std::io::Write;
+                    let coordinates = machine_gpu_test::read_floats::<1>(
+                        &device, &queue, island.system.rigid_state().joint_q.device_buffer().unwrap(),
+                    );
+                    assert!(coordinates.iter().flatten().all(|value| value.is_finite()));
+                    let state = serde_json::json!({
+                        "schema":"gearbox_fem_energy_state_v1", "step":next_sample,
+                        "time":island.completed_seconds(), "molla_dependency":molla_dependency,
+                        "joint_positions":coordinates.into_iter().flatten().collect::<Vec<_>>(),
+                    });
+                    let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+                        .open(directory.join(format!("step{next_sample:04}.json")))
+                        .expect("energy state must not already exist");
+                    file.write_all(&serde_json::to_vec(&state).unwrap()).unwrap();
+                }
                 next_sample += sample_interval;
             }
             if heartbeat.elapsed().as_secs() >= 15 {
