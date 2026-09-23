@@ -139,6 +139,7 @@ fn run_trajectory_coupled(
             "tet_lambda":belts.model.tet_lambda.host().unwrap(),
             "tet_viscosity":belts.model.tet_viscosity.host().unwrap().iter().map(|v| [v.shear,v.bulk]).collect::<Vec<_>>(),
             "tet_yield":belts.model.tet_yield_stress.host().unwrap(),
+            "elastic_only":belts.model.tet_yield_stress.host().unwrap().iter().all(|v| *v > 1e29),
             "spring_a":belts.model.spring_a.host().unwrap(),
             "spring_b":belts.model.spring_b.host().unwrap(),
             "spring_rest_length":belts.model.spring_rest_length.host().unwrap(),
@@ -453,6 +454,10 @@ fn run_trajectory_coupled(
                     .collect::<Vec<_>>();
                 let sample = serde_json::json!({
                     "step":next_sample, "time":island.completed_seconds(),
+                    "accepted_steps":island.clock.completed, "submitted_steps":island.clock.submitted,
+                    "device_status":machine_gpu_test::read_floats::<1>(&device, &queue, island.system.status_buffer())[0][0].to_bits(),
+                    "reference":failure_reference, "regions":regions,
+                    "initial_positions":initial_positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
                     "com_travel":com_travel, "drive_speeds":speeds,
                     "positions":p.iter().map(|v| [v[0],v[1],v[2]]).collect::<Vec<_>>(),
                     "velocities":v, "poses":poses, "joint_velocities":qd,
@@ -465,6 +470,11 @@ fn run_trajectory_coupled(
                         machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                     "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
                         machine_gpu_test::read_floats::<1>(&device, &queue, buffer)[0][0]),
+                    "material_force_samples":island.system.material_force_samples().map(|buffer|
+                        machine_gpu_test::read_floats::<4>(&device, &queue, buffer)),
+                    "material_spring_stiffness":island.system.material_spring_stiffness().map(|buffer|
+                        machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
+                    "plastic_history":machine_gpu_test::read_floats::<12>(&device, &queue, island.system.soft_state().tet_f_plastic.device_buffer().unwrap()),
                 });
                 std::fs::write(
                     sample_directory.join(format!("step{next_sample:04}.json")),
