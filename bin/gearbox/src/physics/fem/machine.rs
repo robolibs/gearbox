@@ -36,6 +36,46 @@ fn beneath(world: &World, mut entity: Entity, root: Entity) -> bool {
     }
 }
 
+fn reject_external_joints(
+    world: &mut World,
+    bodies: &HashSet<Entity>,
+    joints: &HashSet<Entity>,
+) -> Result<(), String> {
+    for (entity, joint) in world.query::<(Entity, &UsdPhysicsJoint)>().iter(world) {
+        if joint.joint_enabled
+            && joint
+                .body0
+                .into_iter()
+                .chain(joint.body1)
+                .any(|body| bodies.contains(&body))
+            && !joints.contains(&entity)
+        {
+            return Err(format!(
+                "FEM body is connected to an external joint: {entity:?}"
+            ));
+        }
+    }
+    if let Some(physics) = world.get_resource::<crate::physics::PhysicsWorld>() {
+        let owned: HashSet<_> = bodies
+            .iter()
+            .filter_map(|e| physics.entity_to_body.get(e).copied())
+            .collect();
+        for id in physics.joints() {
+            let Some((a, b)) = physics.joint_bodies(id) else {
+                continue;
+            };
+            if owned.contains(&a) != owned.contains(&b)
+                && physics.joint(id).is_some_and(|joint| joint.is_enabled())
+            {
+                return Err(format!(
+                    "FEM body is connected to an external backend joint: {id:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl FemMachineLayout {
     pub(crate) fn inspect(
         world: &mut World,
@@ -122,6 +162,11 @@ impl FemMachineLayout {
         if visited != body_set {
             return Err("FEM machine has disconnected bodies".into());
         }
+        reject_external_joints(
+            world,
+            &body_set,
+            &tree_joints.iter().chain(&loop_joints).copied().collect(),
+        )?;
         if machine.tracks.len() != 2
             || machine.tracks[0].side * machine.tracks[1].side != -1.0
             || machine.tracks.iter().any(|t| t.side.abs() != 1.0)
@@ -221,5 +266,110 @@ impl FemMachineLayout {
             loop_joints,
             tracks,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fem_boundary_rejects_runtime_hitches_without_usd_components() {
+        use crate::physics::backend::{BodyDesc, JointDesc, JointKind, PhysicsBackend, Pose};
+        use crate::physics::{MollaBackend, PhysicsWorld};
+        for backend in [
+            Box::new(MollaBackend::default()) as Box<dyn PhysicsBackend>,
+            Box::new(crate::physics::rapier::RapierBackend::default()),
+        ] {
+            let mut world = World::new();
+            let entity = world.spawn_empty().id();
+            let mut physics = PhysicsWorld::with_backend(backend);
+            let own = physics.insert_body(BodyDesc::dynamic().entity(entity));
+            let foreign = physics.insert_body(BodyDesc::dynamic());
+            physics.entity_to_body.insert(entity, own);
+            let joint = physics.insert_joint(
+                own,
+                foreign,
+                JointDesc::new(JointKind::Fixed, Pose::IDENTITY, Pose::IDENTITY),
+            );
+            world.insert_resource(physics);
+            let bodies = HashSet::from([entity]);
+            assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_err());
+            world.resource_mut::<PhysicsWorld>().remove_joint(joint);
+            assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_ok());
+        }
+    }
+
+    #[test]
+    fn fem_boundary_rejects_foreign_and_world_anchored_joints() {
+        let mut world = World::new();
+        let body = world.spawn_empty().id();
+        let foreign = world.spawn_empty().id();
+        for (body0, body1) in [
+            (Some(body), Some(foreign)),
+            (Some(foreign), Some(body)),
+            (None, Some(body)),
+            (Some(body), None),
+        ] {
+            let joint = world
+                .spawn(UsdPhysicsJoint {
+                    body0,
+                    body1,
+                    joint_enabled: true,
+                    ..default()
+                })
+                .id();
+            assert!(
+                reject_external_joints(&mut world, &HashSet::from([body]), &HashSet::new())
+                    .is_err()
+            );
+            world.despawn(joint);
+        }
+    }
+
+    #[test]
+    fn fem_boundary_requires_ownership_of_internal_loop_joints() {
+        let mut world = World::new();
+        let a = world.spawn_empty().id();
+        let b = world.spawn_empty().id();
+        let joint = world
+            .spawn(UsdPhysicsJoint {
+                body0: Some(a),
+                body1: Some(b),
+                joint_enabled: true,
+                exclude_from_articulation: true,
+                ..default()
+            })
+            .id();
+        let bodies = HashSet::from([a, b]);
+        assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_err());
+        assert!(reject_external_joints(&mut world, &bodies, &HashSet::from([joint])).is_ok());
+    }
+
+    #[test]
+    fn fem_boundary_ignores_disabled_and_unrelated_joints() {
+        let mut world = World::new();
+        let body = world.spawn_empty().id();
+        let foreign = world.spawn_empty().id();
+        world.spawn(UsdPhysicsJoint {
+            body0: Some(foreign),
+            joint_enabled: true,
+            ..default()
+        });
+        let disabled = world
+            .spawn(UsdPhysicsJoint {
+                body0: Some(body),
+                body1: Some(foreign),
+                joint_enabled: false,
+                ..default()
+            })
+            .id();
+        let bodies = HashSet::from([body]);
+        assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_ok());
+        world
+            .get_mut::<UsdPhysicsJoint>(disabled)
+            .unwrap()
+            .joint_enabled = true;
+        assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_err());
     }
 }

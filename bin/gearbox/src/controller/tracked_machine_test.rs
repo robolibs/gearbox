@@ -195,6 +195,14 @@ fn ceol_fem_machine_binding() {
     assert_fem_mass_conserved(original_properties,fem_mass_properties(&relocated_partition,Some(&relocated_belts)));
     assert!(layout.bodies.iter().all(|e| !second.bodies.contains(e)));
     assert_ne!(layout.chassis, second.chassis);
+    let external = app.world_mut().spawn(UsdPhysicsJoint {
+        body0: Some(layout.chassis), body1: Some(second.chassis),
+        joint_enabled: true, ..default()
+    }).id();
+    assert!(FemMachineLayout::inspect(app.world_mut(), &machine).unwrap_err().contains("external joint"));
+    app.world_mut().get_mut::<UsdPhysicsJoint>(external).unwrap().joint_enabled = false;
+    assert!(FemMachineLayout::inspect(app.world_mut(), &machine).is_ok());
+    app.world_mut().despawn(external);
     let joint = second.loop_joints[0];
     let original = app.world().get::<UsdPhysicsJoint>(joint).unwrap().clone();
     app.world_mut().get_mut::<UsdPhysicsJoint>(joint).unwrap().body1 = Some(layout.chassis);
