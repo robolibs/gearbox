@@ -26,6 +26,14 @@ struct Outcome {
 }
 
 fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome> {
+    run_cases_with_samples(cases, monitor_momentum, false)
+}
+
+fn run_cases_with_samples(
+    cases: &[(f64, bool, bool)],
+    monitor_momentum: bool,
+    capture_samples: bool,
+) -> Vec<Outcome> {
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
     assert!(
         spec.tracks
@@ -198,9 +206,19 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
         if monitor_momentum {
             island.system.enable_momentum_diagnostics();
         }
-        for dof in dofs {
+        for &dof in &dofs {
             island.system.set_drive_effort(dof, effort).unwrap();
         }
+        let directory = std::env::var_os("GEARBOX_FEM_CAPTURE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("gearbox-fem-traction"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let sample_directory =
+            directory.join(format!("effort{effort}_ground{ground}_teeth{teeth}"));
+        if capture_samples {
+            std::fs::create_dir_all(&sample_directory).unwrap();
+        }
+        let mut next_sample = 64;
         let started = std::time::Instant::now();
         let mut reported = 0;
         let mut heartbeat = started;
@@ -214,7 +232,80 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
                 "ground coupling timeout: effort={effort}, ground={ground}, teeth={teeth}, completed={}",
                 island.clock.completed
             );
-            island.advance(island.clock.submitted < 512).unwrap();
+            let boundary = if capture_samples { next_sample } else { 512 };
+            island.advance(island.clock.submitted < boundary).unwrap();
+            if capture_samples && island.clock.completed == next_sample && !island.pending() {
+                let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
+                let q = machine_gpu_test::read_floats::<8>(&device, &queue, island.rigid_poses());
+                let v = machine_gpu_test::read_floats::<4>(
+                    &device,
+                    &queue,
+                    island
+                        .system
+                        .soft_state()
+                        .particle_qd
+                        .device_buffer()
+                        .unwrap(),
+                );
+                let qd = machine_gpu_test::read_floats::<1>(
+                    &device,
+                    &queue,
+                    island
+                        .system
+                        .rigid_state()
+                        .joint_qd
+                        .device_buffer()
+                        .unwrap(),
+                );
+                let momentum = island
+                    .system
+                    .momentum_diagnostics_buffer()
+                    .map(|buffer| machine_gpu_test::read_floats::<4>(&device, &queue, buffer));
+                assert!(
+                    p.iter()
+                        .flatten()
+                        .chain(q.iter().flatten())
+                        .chain(v.iter().flatten())
+                        .chain(qd.iter().flatten())
+                        .all(|v| v.is_finite())
+                );
+                let body_poses = q.into_iter().map(pose).collect::<Vec<_>>();
+                let first = body_poses
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| q.transform_point(body_com[i]) * body_mass[i])
+                    .sum::<DVec3>()
+                    + p.iter()
+                        .zip(&masses)
+                        .map(|(p, m)| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64) * *m)
+                        .sum::<DVec3>();
+                let com_travel = ((first - initial_first) / total_mass).dot(forward);
+                let speeds = dofs.iter().map(|&d| qd[d][0]).collect::<Vec<_>>();
+                eprintln!(
+                    "ground trajectory: step={next_sample}, com_travel={com_travel}m, drive_speeds={speeds:?}rad/s"
+                );
+                let poses = body_poses
+                    .iter()
+                    .map(|q| {
+                        let p = q.position.to_array();
+                        let r = q.rotation.to_array();
+                        [p[0], p[1], p[2], r[0], r[1], r[2], r[3]]
+                    })
+                    .collect::<Vec<_>>();
+                let sample = serde_json::json!({
+                    "step":next_sample, "time":island.completed_seconds(),
+                    "com_travel":com_travel, "drive_speeds":speeds,
+                    "positions":p.iter().map(|v| [v[0],v[1],v[2]]).collect::<Vec<_>>(),
+                    "velocities":v, "poses":poses, "joint_velocities":qd,
+                    "momentum_phase_pairs_then_cumulative_deltas":momentum,
+                });
+                std::fs::write(
+                    sample_directory.join(format!("step{next_sample:04}.json")),
+                    serde_json::to_vec(&sample).unwrap(),
+                )
+                .unwrap();
+                next_sample += 64;
+            }
             if heartbeat.elapsed().as_secs() >= 15 {
                 let queue_complete = island.system.poll_completion().unwrap();
                 eprintln!(
@@ -329,10 +420,6 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
             island.completed_seconds(),
             island.minimum_j
         );
-        let directory = std::env::var_os("GEARBOX_FEM_CAPTURE_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("gearbox-fem-traction"));
-        std::fs::create_dir_all(&directory).unwrap();
         let poses = |values: &[Pose]| {
             values
                 .iter()
@@ -352,6 +439,9 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
             "positions":positions.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
             "triangles":triangles, "initial_poses":poses(&initial_poses), "poses":poses(&body_poses),
             "shapes":shape_trace, "regions":regions, "retention_errors":errors, "worst":worst,
+            "particle_masses":masses, "body_masses":body_mass,
+            "body_com":body_com.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+            "forward":forward.to_array(), "drive_bodies":drive_bodies, "drive_dofs":dofs,
             "momentum_phase_pairs_then_cumulative_deltas":momentum,
         });
         let path = directory.join(format!("effort{effort}_ground{ground}_teeth{teeth}.json"));
@@ -360,6 +450,20 @@ fn run_cases(cases: &[(f64, bool, bool)], monitor_momentum: bool) -> Vec<Outcome
         outcomes.push(outcome);
     }
     outcomes
+}
+
+#[test]
+#[ignore = "test-only trajectory readback through oslo make test-fem-gpu"]
+fn authored_ceol_loaded_drive_trajectory_diagnostic() {
+    let outcomes = run_cases_with_samples(&[(100.0, true, true)], true, true);
+    assert!(
+        outcomes[0].retention < 0.020,
+        "loaded retention: {outcomes:?}"
+    );
+    assert!(
+        outcomes[0].penetration < 0.002,
+        "loaded penetration: {outcomes:?}"
+    );
 }
 
 #[test]
