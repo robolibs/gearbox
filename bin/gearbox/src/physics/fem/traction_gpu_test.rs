@@ -354,6 +354,8 @@ fn run_trajectory_coupled(
                         "gpu_contact_ticks":island.system.gpu_contact_timing_ticks().map(|buffer|
                             machine_gpu_test::read_ticks(&device, &queue, buffer)),
                         "gpu_timestamp_period_ns":queue.get_timestamp_period(),
+                        "active_contact_count":machine_gpu_test::read_floats::<1>(&device, &queue,
+                            island.system.active_contact_rows())[0][0].to_bits(),
                         "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
                             machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                         "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
@@ -490,6 +492,8 @@ fn run_trajectory_coupled(
                     "gpu_contact_ticks":island.system.gpu_contact_timing_ticks().map(|buffer|
                         machine_gpu_test::read_ticks(&device, &queue, buffer)),
                     "gpu_timestamp_period_ns":queue.get_timestamp_period(),
+                    "active_contact_count":machine_gpu_test::read_floats::<1>(&device, &queue,
+                        island.system.active_contact_rows())[0][0].to_bits(),
                     "material_contact_residuals":island.system.material_contact_diagnostics().map(|buffer|
                         machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                     "material_force_residual":island.system.material_force_diagnostics().map(|buffer|
