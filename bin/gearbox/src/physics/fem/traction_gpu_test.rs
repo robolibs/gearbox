@@ -736,6 +736,26 @@ fn authored_ceol_incremental_cord_four_step_probe() {
 }
 
 #[test]
+#[ignore = "test-only consecutive coupled steps, not settling or traction acceptance"]
+fn authored_ceol_specialized_contact_eight_step_probe() {
+    run_trajectory_coupled(
+        &[(0.0, true, true)],
+        true,
+        true,
+        8,
+        true,
+        256,
+        1.0 / 19200.0,
+        Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
+            iterations: 1024,
+            linear_tolerance: 1e-4,
+            angular_tolerance: 1e-4,
+        }),
+        Some(8),
+    );
+}
+
+#[test]
 #[ignore = "test-only trajectory readback through oslo make test-fem-gpu"]
 fn authored_ceol_loaded_drive_trajectory_diagnostic() {
     let outcomes = run_cases_with_samples(&[(100.0, true, true)], true, true);
