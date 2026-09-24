@@ -5576,7 +5576,7 @@ dependencies = [
 [[package]]
 name = "molla-actuators"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "molla-compute",
  "molla-core",
@@ -5590,7 +5590,7 @@ dependencies = [
 [[package]]
 name = "molla-autograd"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "molla-math",
 ]
@@ -5598,7 +5598,7 @@ dependencies = [
 [[package]]
 name = "molla-compute"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "molla-core",
  "pollster",
@@ -5608,7 +5608,7 @@ dependencies = [
 [[package]]
 name = "molla-compute-primitives"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "bytemuck",
  "molla-core",
@@ -5619,7 +5619,7 @@ dependencies = [
 [[package]]
 name = "molla-core"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "glam 0.30.10",
  "thiserror 2.0.20",
@@ -5628,7 +5628,7 @@ dependencies = [
 [[package]]
 name = "molla-geometry"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "bytemuck",
  "molla-compute",
@@ -5646,7 +5646,7 @@ dependencies = [
 [[package]]
 name = "molla-kernels"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "bytemuck",
  "molla-autograd",
@@ -5666,7 +5666,7 @@ dependencies = [
 [[package]]
 name = "molla-math"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "bytemuck",
  "glam 0.30.10",
@@ -5676,7 +5676,7 @@ dependencies = [
 [[package]]
 name = "molla-optim"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "molla-math",
 ]
@@ -5684,7 +5684,7 @@ dependencies = [
 [[package]]
 name = "molla-sim"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "bytemuck",
  "molla-core",
@@ -5697,7 +5697,7 @@ dependencies = [
 [[package]]
 name = "molla-solvers"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "bytemuck",
  "glam 0.30.10",
@@ -5717,7 +5717,7 @@ dependencies = [
 [[package]]
 name = "molla-storage"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 dependencies = [
  "bytemuck",
  "glam 0.30.10",
@@ -5729,7 +5729,7 @@ dependencies = [
 [[package]]
 name = "molla-vehicle"
 version = "0.0.1"
-source = "git+https://github.com/bresilla/molla?rev=6ac3451c2881df39278fc733a8d7d23e8d960b72#6ac3451c2881df39278fc733a8d7d23e8d960b72"
+source = "git+https://github.com/bresilla/molla?rev=85250e25899115095fb0be449c2d5aaa8c8734fb#85250e25899115095fb0be449c2d5aaa8c8734fb"
 
 [[package]]
 name = "moxcms"

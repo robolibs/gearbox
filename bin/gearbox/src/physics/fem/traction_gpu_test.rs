@@ -146,6 +146,13 @@ fn run_trajectory_contacts(
         assert!(polish_sweeps.is_some() && (1..=4096).contains(&cycles));
         solver_settings["material_polish_cycles"] = serde_json::json!(cycles);
     }
+    let polish_contact_sweeps = std::env::var("GEARBOX_FEM_MATERIAL_POLISH_CONTACT_SWEEPS")
+        .ok()
+        .map(|v| v.parse::<u32>().expect("invalid polish contact sweep count"));
+    if let Some(sweeps) = polish_contact_sweeps {
+        assert!(polish_sweeps.is_some() && (1..=4096).contains(&sweeps));
+        solver_settings["material_polish_contact_sweeps"] = serde_json::json!(sweeps);
+    }
     assert!(
         spec.tracks
             .iter()
@@ -331,6 +338,12 @@ fn run_trajectory_contacts(
             island.system.configure_material_contact_polish(polish_sweeps).unwrap();
             if let Some(cycles) = polish_cycles {
                 island.system.configure_material_contact_polish_cycles(cycles).unwrap();
+            }
+            if polish_contact_sweeps.is_some() {
+                island
+                    .system
+                    .configure_material_contact_polish_contact_sweeps(polish_contact_sweeps)
+                    .unwrap();
             }
         }
         if std::env::var("GEARBOX_FEM_GPU_TIMING").as_deref() == Ok("1") {
