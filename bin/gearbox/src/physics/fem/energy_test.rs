@@ -65,6 +65,12 @@ fn export_ceol_fem_energy_reference() {
         "joint_types":model.joint_type.host().unwrap(),
         "joint_coord_offsets":model.joint_coord_offset.host().unwrap(),
         "joint_dof_offsets":model.joint_dof_offset.host().unwrap(),
+        "joint_limit_lower":model.joint_limit_lower.host().unwrap().iter()
+            .map(|v| v.is_finite().then_some(*v)).collect::<Vec<_>>(),
+        "joint_limit_upper":model.joint_limit_upper.host().unwrap().iter()
+            .map(|v| v.is_finite().then_some(*v)).collect::<Vec<_>>(),
+        "joint_velocity_limits":model.joint_velocity_limit.host().unwrap().iter()
+            .map(|v| v.is_finite().then_some(*v)).collect::<Vec<_>>(),
         "initial_joint_positions":rigid.state.joint_q.host().unwrap(),
         "joint_target_modes_before_drive_release":rigid.control.joint_target_mode.host().unwrap(),
         "joint_target_positions_before_drive_release":rigid.control.joint_target_pos.host().unwrap(),
