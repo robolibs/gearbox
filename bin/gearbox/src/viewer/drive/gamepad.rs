@@ -184,16 +184,12 @@ pub(super) fn camera(
     time: Res<Time>,
     state: Res<GamepadState>,
     settings: Res<super::ControlSettings>,
-    follow: Res<FollowTarget>,
     mut fly: ResMut<FlyTo>,
     mut machine_fly: ResMut<ChaseCameraFly>,
     mut view: ResMut<crate::viewer::camera::View>,
     mut log_at: Local<f32>,
 ) {
-    let input = state
-        .frame
-        .camera
-        .for_view(settings.invert_look_y, follow.entity.is_some());
+    let input = state.frame.camera.for_view(settings.invert_look_y);
     if state.frame.toggle_follow || (settings.is_changed() && !settings.cinematic_transitions) {
         fly.remaining = 0.0;
         machine_fly.target = None;

@@ -23,7 +23,7 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         .with_readout(
             "camera",
             if locked {
-                "Follow locked · ↑ to release"
+                "Following · ↑ to release"
             } else {
                 "Free · ↑ to follow selection"
             },

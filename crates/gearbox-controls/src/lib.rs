@@ -35,14 +35,9 @@ pub struct CameraInput {
 }
 
 impl CameraInput {
-    pub fn for_view(mut self, invert_y: bool, follow_locked: bool) -> Self {
+    pub fn for_view(mut self, invert_y: bool) -> Self {
         if invert_y {
             self.orbit[1] = -self.orbit[1];
-        }
-        if follow_locked {
-            self.pan = 0.0;
-            self.forward = 0.0;
-            self.lift = 0.0;
         }
         self
     }
@@ -161,7 +156,7 @@ mod tests {
         assert_eq!(camera.orbit, [1.0, -1.0]);
         assert_eq!(camera.pan, -1.0);
         assert_eq!(camera.forward, 1.0);
-        let inverted = camera.for_view(true, false);
+        let inverted = camera.for_view(true);
         assert_eq!(inverted.orbit, [1.0, 1.0]);
         assert_eq!(inverted.pan, -1.0);
         assert_eq!(inverted.forward, 1.0);
@@ -173,20 +168,19 @@ mod tests {
     }
 
     #[test]
-    fn follow_lock_allows_only_orbit_and_inverts_only_vertical() {
+    fn inverting_turns_only_vertical_look() {
         let input = CameraInput {
             orbit: [0.4, -0.8],
             pan: 0.5,
             forward: 1.0,
             lift: 0.7,
         };
-        assert_eq!(input.for_view(false, false), input);
-        let locked = input.for_view(true, true);
-        assert_eq!(locked.orbit, [0.4, 0.8]);
-        assert_eq!(locked.pan, 0.0);
-        assert_eq!(locked.forward, 0.0);
-        assert_eq!(locked.lift, 0.0);
-        assert!(locked.active());
+        assert_eq!(input.for_view(false), input);
+        let inverted = input.for_view(true);
+        assert_eq!(inverted.orbit, [0.4, 0.8]);
+        assert_eq!(inverted.pan, 0.5);
+        assert_eq!(inverted.forward, 1.0);
+        assert_eq!(inverted.lift, 0.7);
     }
 
     #[test]
@@ -358,8 +352,7 @@ mod tests {
         assert_eq!(up.layer, Layer::Camera);
         assert_eq!(up.camera.lift, 1.0);
         assert!(up.camera.active());
-        assert!(!up.camera.for_view(false, true).active());
-        assert_eq!(up.camera.for_view(true, false).lift, 1.0);
+        assert_eq!(up.camera.for_view(true).lift, 1.0);
         assert_eq!(
             router.update(Input { l2: 1.0, ..neutral }).camera.lift,
             -1.0
