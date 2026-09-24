@@ -6,6 +6,7 @@ use std::io::Write;
 fn export_ceol_fem_energy_reference() {
     let (app, spec, layout) = machine_gpu_test::asset();
     let mut rigid = rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
+    let authored_mass = rigid.model.body_mass.host().unwrap().iter().sum::<f64>();
     let belts = track_mesh::FemTrackMeshes::prepare(app.world(), &spec, &layout, &rigid).unwrap();
     rigid.partition_belt_mass(&belts).unwrap();
     let model = &rigid.model;
@@ -15,7 +16,8 @@ fn export_ceol_fem_energy_reference() {
     assert_eq!(gravity.len(), 1);
     let masses = model.body_mass.host().unwrap();
     let particle_masses = soft.particle_mass.host().unwrap();
-    assert!((masses.iter().chain(particle_masses).sum::<f64>() - 750.0).abs() < 1e-5);
+    assert!(authored_mass.is_finite() && authored_mass > 0.0);
+    assert!((masses.iter().chain(particle_masses).sum::<f64>() - authored_mass).abs() < 1e-5);
     let drive_dofs = layout
         .tracks
         .iter()
@@ -48,6 +50,7 @@ fn export_ceol_fem_energy_reference() {
             .map(|v| v.to_array()).collect::<Vec<_>>(),
         "rest_positions":soft.initial_particle_q.host().unwrap().iter()
             .map(|v| v.to_array()).collect::<Vec<_>>(),
+        "material_reference":material_reference(soft),
         "tet_indices":soft.tet_indices.host().unwrap(),
         "spring_a":soft.spring_a.host().unwrap(), "spring_b":soft.spring_b.host().unwrap(),
         "spring_rest_length":soft.spring_rest_length.host().unwrap(),
@@ -76,4 +79,24 @@ fn export_ceol_fem_energy_reference() {
         .write_all(&serde_json::to_vec(&result).unwrap())
         .unwrap();
     eprintln!("CPU-only FEM energy reference: {path}; not dynamics acceptance");
+}
+
+pub(super) fn material_reference(model: &molla_sim::Model) -> serde_json::Value {
+    serde_json::json!({
+        "positions":model.initial_particle_q.host().unwrap().iter().map(|q| q.to_array()).collect::<Vec<_>>(),
+        "tet_indices":model.tet_indices.host().unwrap(),
+        "inverse_rest":model.tet_dm_inv.host().unwrap().iter().map(|m| m.to_cols_array()).collect::<Vec<_>>(),
+        "rest_volumes":model.tet_rest_volume.host().unwrap(),
+        "particle_inv_mass":model.particle_inv_mass.host().unwrap(),
+        "tet_mu":model.tet_mu.host().unwrap(),
+        "tet_lambda":model.tet_lambda.host().unwrap(),
+        "tet_viscosity":model.tet_viscosity.host().unwrap().iter().map(|v| [v.shear,v.bulk]).collect::<Vec<_>>(),
+        "tet_yield":model.tet_yield_stress.host().unwrap(),
+        "elastic_only":model.tet_yield_stress.host().unwrap().iter().all(|v| *v > 1e29),
+        "spring_a":model.spring_a.host().unwrap(),
+        "spring_b":model.spring_b.host().unwrap(),
+        "spring_rest_length":model.spring_rest_length.host().unwrap(),
+        "spring_tension_only":model.spring_tension_only.host().unwrap(),
+        "cable_bending_entries":model.vertex_cable_bending_entries.host().unwrap(),
+    })
 }

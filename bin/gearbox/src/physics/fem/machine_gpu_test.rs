@@ -2,7 +2,11 @@ use super::*;
 use crate::physics::{MollaBackend, PhysicsWorld};
 use std::path::Path;
 
-pub(super) fn read_bytes(device: &RenderDevice, queue: &RenderQueue, source: &wgpu::Buffer) -> Vec<u8> {
+pub(super) fn read_bytes(
+    device: &RenderDevice,
+    queue: &RenderQueue,
+    source: &wgpu::Buffer,
+) -> Vec<u8> {
     let gpu = device.wgpu_device();
     let staging = gpu.create_buffer(&wgpu::BufferDescriptor {
         label: Some("CEOL hitch acceptance"),
@@ -371,7 +375,10 @@ pub(super) fn checked_wheel_contacts() -> (
     let expected: usize = spec
         .tracks
         .iter()
-        .map(|t| 21 + t.fem.as_ref().unwrap().sprocket_teeth)
+        .zip(&layout.tracks)
+        .map(|(track, links)| {
+            3 * links.passive_joints.len() + 6 + track.fem.as_ref().unwrap().sprocket_teeth
+        })
         .sum();
     assert_eq!(contacts.shapes.len(), expected);
     let saved = spec.tracks[0].fem_contacts.clone();
@@ -395,6 +402,30 @@ pub(super) fn checked_wheel_contacts() -> (
         .iter()
         .flat_map(|t| t.surface.iter().copied())
         .collect();
+    if let Ok(path) = std::env::var("GEARBOX_FEM_CLEARANCE_EXPORT") {
+        use std::io::Write;
+        let data = serde_json::json!({
+            "initial_positions": points.iter().map(|p| p.to_array()).collect::<Vec<_>>(),
+            "triangles": triangles,
+            "initial_poses": rigid.state.body_q.host().unwrap().iter().map(|q| {
+                let p = q.position.to_array();
+                let r = q.rotation.to_array();
+                [p[0], p[1], p[2], r[0], r[1], r[2], r[3]]
+            }).collect::<Vec<_>>(),
+            "shapes": contacts.shapes.iter().zip(&contacts.names).map(|(s, name)| {
+                serde_json::json!({"name":name, "ids":s.ids, "position":s.position,
+                    "rotation":s.rotation, "dimensions":s.data})
+            }).collect::<Vec<_>>(),
+        });
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .unwrap();
+        output
+            .write_all(&serde_json::to_vec(&data).unwrap())
+            .unwrap();
+    }
     let vertices: BTreeSet<_> = triangles.iter().flatten().copied().collect();
     let edges: BTreeSet<_> = triangles
         .iter()
@@ -444,6 +475,7 @@ pub(super) fn checked_wheel_contacts() -> (
             shape.position[2] as f64,
         );
         let mut penetration = 0.0_f64;
+        let mut deepest_local = DVec3::ZERO;
         for point in &samples {
             let p = rotation * (body.transform_point(*point) - center);
             let distance = if shape.ids[0] == 1 {
@@ -459,7 +491,15 @@ pub(super) fn checked_wheel_contacts() -> (
                 let axial = p.y.abs() - shape.data[1] as f64;
                 radial.max(0.0).hypot(axial.max(0.0)) + radial.max(axial).min(0.0)
             };
-            penetration = penetration.max(-distance);
+            if -distance > penetration {
+                penetration = -distance;
+                deepest_local = p;
+            }
+        }
+        if penetration >= 0.0005 {
+            eprintln!(
+                "wheel clearance violation: {name}, penetration={penetration}, shape_local={deepest_local:?}"
+            );
         }
         if penetration > worst.0 {
             worst = (penetration, name.clone());

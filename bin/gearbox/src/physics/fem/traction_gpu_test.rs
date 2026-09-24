@@ -155,6 +155,7 @@ fn run_trajectory_contacts(
     let mut outcomes = Vec::new();
     for &(effort, ground, teeth) in cases {
         let mut rigid = rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
+        let authored_mass = rigid.model.body_mass.host().unwrap().iter().sum::<f64>();
         let belts =
             track_mesh::FemTrackMeshes::prepare(app.world(), &spec, &layout, &rigid).unwrap();
         rigid.partition_belt_mass(&belts).unwrap();
@@ -169,23 +170,7 @@ fn run_trajectory_contacts(
         let body_com = rigid.model.body_com.host().unwrap().to_vec();
         let masses = belts.model.particle_mass.host().unwrap().to_vec();
         let initial_positions = belts.state.particle_q.host().unwrap().to_vec();
-        let failure_reference = monitor_settling.then(|| serde_json::json!({
-            "positions":belts.model.initial_particle_q.host().unwrap().iter().map(|q| q.to_array()).collect::<Vec<_>>(),
-            "tet_indices":belts.model.tet_indices.host().unwrap(),
-            "inverse_rest":belts.model.tet_dm_inv.host().unwrap().iter().map(|m| m.to_cols_array()).collect::<Vec<_>>(),
-            "rest_volumes":belts.model.tet_rest_volume.host().unwrap(),
-            "particle_inv_mass":belts.model.particle_inv_mass.host().unwrap(),
-            "tet_mu":belts.model.tet_mu.host().unwrap(),
-            "tet_lambda":belts.model.tet_lambda.host().unwrap(),
-            "tet_viscosity":belts.model.tet_viscosity.host().unwrap().iter().map(|v| [v.shear,v.bulk]).collect::<Vec<_>>(),
-            "tet_yield":belts.model.tet_yield_stress.host().unwrap(),
-            "elastic_only":belts.model.tet_yield_stress.host().unwrap().iter().all(|v| *v > 1e29),
-            "spring_a":belts.model.spring_a.host().unwrap(),
-            "spring_b":belts.model.spring_b.host().unwrap(),
-            "spring_rest_length":belts.model.spring_rest_length.host().unwrap(),
-            "spring_tension_only":belts.model.spring_tension_only.host().unwrap(),
-            "cable_bending_entries":belts.model.vertex_cable_bending_entries.host().unwrap(),
-        }));
+        let failure_reference = monitor_settling.then(|| energy_test::material_reference(&belts.model));
         let initial_poses = rigid.state.body_q.host().unwrap().to_vec();
         let triangles = belts
             .tracks
@@ -193,7 +178,8 @@ fn run_trajectory_contacts(
             .flat_map(|t| t.surface.iter().copied())
             .collect::<Vec<_>>();
         let total_mass = body_mass.iter().chain(&masses).sum::<f64>();
-        assert!((total_mass - 750.0).abs() < 1e-5);
+        assert!(authored_mass.is_finite() && authored_mass > 0.0);
+        assert!((total_mass - authored_mass).abs() < 1e-5);
         let initial_first = rigid
             .state
             .body_q
