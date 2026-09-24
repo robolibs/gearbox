@@ -52,12 +52,12 @@ gearbox-cli.workspace = true
 
 # Rigid-body engines used by the physics backend adapters.
 rapier3d = { workspace = true, features = ["enhanced-determinism"] }
-molla-core = { git = "https://github.com/bresilla/molla", rev = "9a546a597f50f343f8a8431fc982825b1e3dc0e5", default-features = false }
-molla-math = { git = "https://github.com/bresilla/molla", rev = "9a546a597f50f343f8a8431fc982825b1e3dc0e5" }
-molla-sim = { git = "https://github.com/bresilla/molla", rev = "9a546a597f50f343f8a8431fc982825b1e3dc0e5", default-features = false }
-molla-geometry = { git = "https://github.com/bresilla/molla", rev = "9a546a597f50f343f8a8431fc982825b1e3dc0e5", default-features = false }
-molla-solvers = { git = "https://github.com/bresilla/molla", rev = "9a546a597f50f343f8a8431fc982825b1e3dc0e5", default-features = false, features = ["gpu"] }
-molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "9a546a597f50f343f8a8431fc982825b1e3dc0e5" }
+molla-core = { git = "https://github.com/bresilla/molla", rev = "3179452f53a7024a63f307fc983639d3c02c7a7d", default-features = false }
+molla-math = { git = "https://github.com/bresilla/molla", rev = "3179452f53a7024a63f307fc983639d3c02c7a7d" }
+molla-sim = { git = "https://github.com/bresilla/molla", rev = "3179452f53a7024a63f307fc983639d3c02c7a7d", default-features = false }
+molla-geometry = { git = "https://github.com/bresilla/molla", rev = "3179452f53a7024a63f307fc983639d3c02c7a7d", default-features = false }
+molla-solvers = { git = "https://github.com/bresilla/molla", rev = "3179452f53a7024a63f307fc983639d3c02c7a7d", default-features = false, features = ["gpu"] }
+molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "3179452f53a7024a63f307fc983639d3c02c7a7d" }
 wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
 bytemuck = "1"
 glam = "0.30"
@@ -79,4 +79,4 @@ pyo3 = { version = "0.23", optional = true, features = [
 
 [dev-dependencies]
 pollster = "0.4"
-molla-kernels = { git = "https://github.com/bresilla/molla", rev = "9a546a597f50f343f8a8431fc982825b1e3dc0e5" }
+molla-kernels = { git = "https://github.com/bresilla/molla", rev = "3179452f53a7024a63f307fc983639d3c02c7a7d" }
