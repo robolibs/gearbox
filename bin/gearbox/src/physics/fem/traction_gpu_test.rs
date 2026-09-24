@@ -3,6 +3,42 @@ use molla_math::{Quat as DQuat, Transform as Pose, Vec3 as DVec3};
 use molla_sim::soft_belt::path::BeltPath;
 use molla_solvers::fem_rigid_gpu::SoftRigidShapeGpu;
 
+fn with_material_budget(
+    mut config: Option<molla_solvers::fem_rigid_gpu::MaterialContactConfig>,
+    budget: Option<&str>,
+) -> Option<molla_solvers::fem_rigid_gpu::MaterialContactConfig> {
+    if let Some(value) = budget {
+        let iterations = value.parse::<u32>().expect("invalid material coupling budget");
+        assert!((2..=4096).contains(&iterations), "material coupling budget outside 2..=4096");
+        config.as_mut().expect("material budget requires material coupling").iterations = iterations;
+    }
+    config
+}
+
+#[test]
+fn material_budget_preserves_physical_tolerances() {
+    use molla_solvers::fem_rigid_gpu::MaterialContactConfig;
+    let config = MaterialContactConfig { iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 2e-4 };
+    assert!(with_material_budget(None, None).is_none());
+    assert_eq!(with_material_budget(Some(config), None).unwrap().iterations, 1024);
+    for value in ["2", "128", "4096"] {
+        let changed = with_material_budget(Some(config), Some(value)).unwrap();
+        assert_eq!(changed.iterations, value.parse::<u32>().unwrap());
+        assert_eq!(changed.linear_tolerance.to_bits(), config.linear_tolerance.to_bits());
+        assert_eq!(changed.angular_tolerance.to_bits(), config.angular_tolerance.to_bits());
+    }
+}
+
+#[test]
+fn material_budget_rejects_invalid_or_uncoupled_requests() {
+    use molla_solvers::fem_rigid_gpu::MaterialContactConfig;
+    let config = MaterialContactConfig { iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4 };
+    for value in ["", "0", "1", "4097", "-2", "NaN", "1.5"] {
+        assert!(std::panic::catch_unwind(|| with_material_budget(Some(config), Some(value))).is_err());
+    }
+    assert!(std::panic::catch_unwind(|| with_material_budget(None, Some("128"))).is_err());
+}
+
 fn pose(q: [f32; 8]) -> Pose {
     Pose {
         position: DVec3::new(q[0] as f64, q[1] as f64, q[2] as f64),
@@ -91,6 +127,12 @@ fn run_trajectory_contacts(
     authored_friction: bool,
 ) -> Vec<Outcome> {
     assert!(steps > 0);
+    let budget = match std::env::var("GEARBOX_FEM_MATERIAL_CONTACT_ITERATIONS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("invalid material coupling budget environment: {error}"),
+    };
+    let material_contact = with_material_budget(material_contact, budget.as_deref());
     assert!(!authored_friction || cases.iter().all(|case| case.2));
     assert!(!monitor_settling || (monitor_momentum && capture_samples));
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
