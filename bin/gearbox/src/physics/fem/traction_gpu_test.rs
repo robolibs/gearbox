@@ -945,9 +945,9 @@ fn authored_ceol_full_friction_32_double_step_probe() {
     );
 }
 
-fn full_friction_powered_short(effort: f64) {
+fn full_friction_powered_steps(effort: f64, steps: u64) {
     run_trajectory_contacts(
-        &[(effort, true, true)], true, true, 8, true, 256, 1.0 / 9600.0,
+        &[(effort, true, true)], true, true, steps, true, 256, 1.0 / 9600.0,
         Some(molla_solvers::fem_rigid_gpu::MaterialContactConfig {
             iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
         }), Some(8), true,
@@ -957,13 +957,25 @@ fn full_friction_powered_short(effort: f64) {
 #[test]
 #[ignore = "test-only motor-loaded transient, not sustained propulsion acceptance"]
 fn authored_ceol_full_friction_powered_short_forward_probe() {
-    full_friction_powered_short(100.0);
+    full_friction_powered_steps(100.0, 8);
 }
 
 #[test]
 #[ignore = "test-only motor-loaded transient, not sustained propulsion acceptance"]
 fn authored_ceol_full_friction_powered_short_reverse_probe() {
-    full_friction_powered_short(-100.0);
+    full_friction_powered_steps(-100.0, 8);
+}
+
+#[test]
+#[ignore = "test-only motor engagement transient, not sustained propulsion acceptance"]
+fn authored_ceol_full_friction_powered_transient_forward_probe() {
+    full_friction_powered_steps(100.0, 32);
+}
+
+#[test]
+#[ignore = "test-only motor engagement transient, not sustained propulsion acceptance"]
+fn authored_ceol_full_friction_powered_transient_reverse_probe() {
+    full_friction_powered_steps(-100.0, 32);
 }
 
 #[test]
