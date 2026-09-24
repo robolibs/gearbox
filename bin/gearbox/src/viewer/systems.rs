@@ -15,7 +15,7 @@ use crate::load::{LoadQueue, LoadedAsset};
 use crate::viewer::commands::{HostCommands, apply_host_commands};
 use crate::viewer::state::{
     ActiveStage, ActiveVariants, CameraBookmarks, CameraMount, ChaseCameraFly, FlyTarget, FlyTo,
-    FollowTarget, LoadRequest, LoaderTuning, ReloadRequest, SelectedPrim, StageInfo,
+    FollowAnchor, FollowTarget, LoadRequest, LoaderTuning, ReloadRequest, SelectedPrim, StageInfo,
     UsdStageTime, VariantEntry,
 };
 
@@ -71,10 +71,10 @@ impl Plugin for ViewerSystemsPlugin {
             .init_resource::<ChaseCameraFly>()
             .init_resource::<HostCommands>()
             .add_systems(
-                Update,
+                PostUpdate,
                 follow_target
                     .after(crate::physics::PhysicsWriteback)
-                    .in_set(crate::viewer::camera::MoveView),
+                    .before(crate::viewer::camera::place),
             )
             .add_systems(
                 Update,
@@ -324,20 +324,17 @@ pub(crate) fn asset_bounds(
     Some(((wmin + wmax) * 0.5, (wmax - wmin).length() * 0.5))
 }
 
-/// Pin the camera focus to the current body position without overriding
-/// zoom, and slew the orbit yaw toward "behind the machine" as it turns —
-/// otherwise `chase_camera_fly`'s one-shot yaw alignment (on double-click)
-/// is the only place yaw ever tracks heading, and it freezes the moment
-/// that cinematic ends, so a machine that turns afterward drifts out from
-/// in front of the camera instead of staying chased.
+/// Carries the view with a followed machine as if bolted to it: whatever the
+/// body moved and turned since the last frame, the view moves and turns with
+/// it, so the angle it is seen from holds while orbit, zoom and pan still
+/// change it. Tying on moves nothing; a flight in progress owns the view and
+/// the tie picks up from wherever it lands.
 fn follow_target(
     mut follow: ResMut<FollowTarget>,
     commands: Res<HostCommands>,
     fly: Res<FlyTo>,
     agent_fly: Res<ChaseCameraFly>,
-    time: Res<Time>,
     inventory: Res<ControllerInventory>,
-    states: Res<ControllerStates>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     sites: Query<&crate::globe::Site>,
@@ -356,6 +353,7 @@ fn follow_target(
                 crate::viewer::commands::HostCommand::FlyToMachine(target) if *target == root)
         })
     {
+        follow.anchor = None;
         return;
     }
     let body = machine_body_entity(root, &inventory, &prims, &parents);
@@ -363,40 +361,64 @@ fn follow_target(
         follow.set(None);
         return;
     }
-    // The pose in the machine's own site, said as a place on the planet, which
-    // is the only language the view speaks.
     let site = crate::globe::site_of(body, &parents, &sites);
     let Some(frame) = places.list.get(site).map(|entry| entry.frame) else {
         return;
     };
-    let gt = crate::globe::transform_in_site(body, &parents, &transforms, &sites);
-    let here = gt.translation();
-    let on_earth = frame.geodetic(here.as_dvec3());
-    view.at.latitude = on_earth.latitude;
-    view.at.longitude = on_earth.longitude;
-    view.at.altitude = (here.y - places.height(site, here.x, here.z)).max(0.0) as f64;
-    // Frame-rate independent exponential smoothing, same shape as the fly's
-    // smoothstep-lerp but running every frame instead of over a fixed span.
-    const CATCH_UP_RATE: f32 = 2.5;
-    let s = 1.0 - (-CATCH_UP_RATE * time.delta_secs()).exp();
-    // Either the view is carried around behind the machine, or it holds the
-    // bearing it was on and only travels with it. The machine's heading is an
-    // angle in its own site, and a bearing is an angle on the planet, so it
-    // goes out through the site's north before it means anything to the view.
-    if toggles.follow_from_behind {
-        let heading = machine_heading(root, &gt, &inventory, &states) + std::f32::consts::PI;
-        let north = frame.rotation
-            * bevy::math::DVec3::new(heading.sin() as f64, 0.0, heading.cos() as f64);
-        let at = gearbox_globe::Datum::at(on_earth.latitude, on_earth.longitude);
-        let local = at.rotation.inverse() * north;
-        let bearing = local.z.atan2(local.x).to_degrees();
-        view.bearing_deg = lerp_angle(
-            view.bearing_deg.to_radians() as f32,
-            bearing.to_radians() as f32,
-            s,
-        )
-        .to_degrees() as f64;
+    let pose = crate::globe::transform_in_site(body, &parents, &transforms, &sites);
+    let here = pose.translation();
+    let now = FollowAnchor {
+        site,
+        at: here.as_dvec3(),
+        clearance: (here.y - places.height(site, here.x, here.z)) as f64,
+        yaw: yaw_about_up(pose.rotation()),
+    };
+    let Some(last) = follow.anchor.replace(now) else {
+        return;
+    };
+    if last.site != now.site {
+        return;
     }
+    let turn = match toggles.follow_turns {
+        true => (now.yaw - last.yaw + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI,
+        false => 0.0,
+    };
+    carry_view(&mut view, &frame, &last, &now, turn);
+}
+
+/// Moves the view's focus as if it were rigidly attached to a body that went
+/// from `last` to `now` and turned by `turn` radians about up, in the body's
+/// site frame, and turns the bearing with it.
+fn carry_view(
+    view: &mut crate::viewer::camera::View,
+    frame: &gearbox_globe::Datum,
+    last: &FollowAnchor,
+    now: &FollowAnchor,
+    turn: f64,
+) {
+    let focus = frame.from_ecef(
+        gearbox_globe::Geodetic::new(view.at.latitude, view.at.longitude, 0.0).ecef(),
+    );
+    let (dx, dz) = (focus.x - last.at.x, focus.z - last.at.z);
+    let (sin, cos) = turn.sin_cos();
+    let moved = bevy::math::DVec3::new(
+        now.at.x + dx * cos + dz * sin,
+        focus.y,
+        now.at.z + dz * cos - dx * sin,
+    );
+    let place = frame.geodetic(moved);
+    view.at.latitude = place.latitude;
+    view.at.longitude = place.longitude;
+    view.at.altitude = (view.at.altitude + now.clearance - last.clearance).max(0.0);
+    // Yaw grows from east toward north, a bearing from north toward east.
+    view.bearing_deg -= turn.to_degrees();
+}
+
+/// Rotation about the vertical, from the twist part of `rotation`: the angle
+/// +Z has turned toward +X, like `machine_heading`.
+fn yaw_about_up(rotation: Quat) -> f64 {
+    2.0 * (rotation.y as f64).atan2(rotation.w as f64)
 }
 
 /// On the ON→OFF edge of `PhysicsActive`, rebase each LoadedAsset's
@@ -954,5 +976,72 @@ fn mirror_api_selection(
     if let Some(root) = root {
         selection.0 = Some(root);
         active.0 = Some(root);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::DVec3;
+    use gearbox_globe::{Datum, Geodetic};
+
+    fn anchor(at: DVec3, yaw: f64) -> FollowAnchor {
+        FollowAnchor { site: 0, at, clearance: 0.5, yaw }
+    }
+
+    fn view_over(frame: &Datum, local: DVec3, bearing_deg: f64) -> crate::viewer::camera::View {
+        let place = frame.geodetic(local);
+        crate::viewer::camera::View {
+            at: Geodetic::new(place.latitude, place.longitude, 0.5),
+            bearing_deg,
+            ..Default::default()
+        }
+    }
+
+    fn focus_of(frame: &Datum, view: &crate::viewer::camera::View) -> DVec3 {
+        frame.local(Geodetic::new(view.at.latitude, view.at.longitude, 0.0))
+    }
+
+    #[test]
+    fn a_tied_view_travels_with_the_machine() {
+        let frame = Datum::at(52.37, 4.895);
+        let mut view = view_over(&frame, DVec3::ZERO, 30.0);
+        carry_view(&mut view, &frame, &anchor(DVec3::ZERO, 0.0), &anchor(DVec3::new(10.0, 0.0, 0.0), 0.0), 0.0);
+        let focus = focus_of(&frame, &view);
+        assert!((focus.x - 10.0).abs() < 1.0e-3 && focus.z.abs() < 1.0e-3, "focus at {focus:?}");
+        assert!((view.bearing_deg - 30.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn a_tied_view_turns_with_the_machine() {
+        let frame = Datum::at(52.37, 4.895);
+        // Looking at a spot five metres east of the machine, from the south.
+        let mut view = view_over(&frame, DVec3::new(0.0, 0.0, 5.0), 180.0);
+        let turn = std::f64::consts::FRAC_PI_2;
+        carry_view(&mut view, &frame, &anchor(DVec3::ZERO, 0.0), &anchor(DVec3::ZERO, turn), turn);
+        let focus = focus_of(&frame, &view);
+        assert!((focus.x - 5.0).abs() < 1.0e-3 && focus.z.abs() < 1.0e-3, "focus at {focus:?}");
+        assert!((view.bearing_deg - 90.0).abs() < 1.0e-9, "bearing {}", view.bearing_deg);
+    }
+
+    #[test]
+    fn a_tied_view_keeps_its_height_over_the_machine() {
+        let frame = Datum::at(52.37, 4.895);
+        let mut view = view_over(&frame, DVec3::ZERO, 0.0);
+        let last = anchor(DVec3::ZERO, 0.0);
+        let now = FollowAnchor { clearance: 0.8, ..last };
+        carry_view(&mut view, &frame, &last, &now, 0.0);
+        assert!((view.at.altitude - 0.8).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn yaw_reads_through_an_up_axis_fix() {
+        let fix = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        for yaw in [-2.5_f32, -0.3, 0.0, 0.7, 3.0] {
+            let got = yaw_about_up(Quat::from_rotation_y(yaw) * fix);
+            let off = (got - yaw as f64 + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                - std::f64::consts::PI;
+            assert!(off.abs() < 1.0e-5, "yaw {yaw} read as {got}");
+        }
     }
 }

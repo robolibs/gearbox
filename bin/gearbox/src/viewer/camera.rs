@@ -210,7 +210,6 @@ fn pan(
     input: Res<BevyViewportInput>,
     keys: Res<ButtonInput<KeyCode>>,
     context: Res<crate::viewer::machine_context::MachineHover>,
-    mut follow: ResMut<crate::viewer::state::FollowTarget>,
     mut view: ResMut<View>,
     cameras: Query<(&Projection, &Camera)>,
 ) {
@@ -223,9 +222,6 @@ fn pan(
     };
     let across_px = camera.physical_target_size().map(|size| size.x as f32).unwrap_or(0.0);
     let pace = pan_pace(&view, lens, across_px);
-    // Going somewhere of one's own lets a followed machine go, or the follow
-    // would write the view back onto it before the drag is ever drawn.
-    follow.set(None);
     if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
         view.at.altitude = (view.at.altitude + delta.y as f64 * pace).max(0.0);
         view.tidy();
@@ -271,7 +267,6 @@ fn fly(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     panel: Res<crate::viewer::drive::MachinePanel>,
-    mut follow: ResMut<crate::viewer::state::FollowTarget>,
     mut view: ResMut<View>,
 ) {
     if panel.keyboard.is_some() {
@@ -289,7 +284,6 @@ fn fly(
         false => 1.0,
     };
     let pace = (view.eye_height_m() * FLY_PER_S).max(FLY_FLOOR_MPS) * boost * time.delta_secs_f64();
-    follow.set(None);
     // Forward is where the eye is looking, which is opposite where it stands.
     let look = view.bearing_deg + 180.0;
     view.walk(look, ahead * pace);

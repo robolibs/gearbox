@@ -120,23 +120,31 @@ pub struct ChaseCameraFly {
     pub target: Option<FlyTarget>,
 }
 
-/// Camera focus locked to a machine body, independent of its drive source.
+/// The view tied to a machine body, independent of its drive source: each
+/// frame the view is carried by what the body did since the last one.
 #[derive(Resource, Default, Debug)]
 pub struct FollowTarget {
     pub entity: Option<Entity>,
+    /// The body's pose when the view was last carried.
+    pub anchor: Option<FollowAnchor>,
+}
+
+/// A body pose in its own site's frame: position and yaw about up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FollowAnchor {
+    pub site: usize,
+    pub at: bevy::math::DVec3,
+    /// Metres above the ground under the body.
+    pub clearance: f64,
+    pub yaw: f64,
 }
 
 impl FollowTarget {
     pub fn set(&mut self, entity: Option<Entity>) {
-        self.entity = entity;
-    }
-
-    pub fn toggle(&mut self, entity: Entity) {
-        if self.entity == Some(entity) {
-            self.set(None);
-        } else {
-            self.set(Some(entity));
+        if self.entity != entity {
+            self.anchor = None;
         }
+        self.entity = entity;
     }
 }
 

@@ -31,7 +31,8 @@ pub enum HostCommand {
     FlyToPrim(Entity),
     FitPrim(Entity),
     FlyToMachine(Entity),
-    ToggleFollow(Entity),
+    /// Tie the view to a machine, or untie it.
+    Follow(Option<Entity>),
     SetVisibility(Entity, bool),
     Despawn(Entity),
     Reload,
@@ -151,6 +152,9 @@ pub(crate) fn apply_host_commands(
                     &q.parents,
                 );
                 s.fly.remaining = 0.0;
+                if s.follow.entity.is_some() {
+                    s.follow.set(Some(root));
+                }
                 if s.controls.cinematic_transitions {
                     s.machine_fly.target = Some(FlyTarget::new(root, body, &s.view));
                 } else {
@@ -160,9 +164,9 @@ pub(crate) fn apply_host_commands(
                     }
                 }
             }
-            HostCommand::ToggleFollow(root) => {
-                s.follow.toggle(root);
-                debug!("gearbox-viewer: follow toggled -> {:?}", s.follow.entity);
+            HostCommand::Follow(root) => {
+                s.follow.set(root);
+                debug!("gearbox-viewer: follow -> {:?}", s.follow.entity);
             }
             HostCommand::SetVisibility(entity, visible) => {
                 if let Ok(mut v) = q.visibility.get_mut(entity) {

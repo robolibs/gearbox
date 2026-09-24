@@ -201,10 +201,9 @@ fn handle_machine_list(
         ctx.send(HostCommand::SelectRoot(Some(*root)));
         ctx.send(HostCommand::FlyToMachine(*root));
     }
-    if let Some(i) = rows.radio_clicked
-        && let Some((root, _)) = list.rows.get(i)
-    {
-        ctx.send(HostCommand::ToggleFollow(*root));
+    if rows.radio_clicked.is_some() {
+        let pinned = rows.pinned.and_then(|i| list.rows.get(i)).map(|(root, _)| *root);
+        ctx.send(HostCommand::Follow(pinned));
     }
 }
 

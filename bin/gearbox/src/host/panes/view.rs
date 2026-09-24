@@ -26,7 +26,7 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
             toggles.show_physics,
             toggles.show_colliders,
             toggles.unlimited_zoom,
-            toggles.follow_from_behind,
+            toggles.follow_turns,
         ],
     );
     let overlays_pod_built = Pod::new(overlays_pod)
@@ -35,7 +35,7 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         .with_toggle_initial("Physics", accent, toggles.show_physics)
         .with_toggle_initial("Colliders", accent, toggles.show_colliders)
         .with_toggle_initial("Unlimited zoom", accent, toggles.unlimited_zoom)
-        .with_toggle_initial("Follow from behind", accent, toggles.follow_from_behind);
+        .with_toggle_initial("Follow turns with machine", accent, toggles.follow_turns);
 
     let tf_pod = pid(P, "tf", 0);
     ctx.sync_toggles(
@@ -110,7 +110,7 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
         set_toggle(&mut toggles.show_physics, resp, 2);
         set_toggle(&mut toggles.show_colliders, resp, 3);
         set_toggle(&mut toggles.unlimited_zoom, resp, 4);
-        set_toggle(&mut toggles.follow_from_behind, resp, 5);
+        set_toggle(&mut toggles.follow_turns, resp, 5);
     }
     if let Some(resp) = pod_response(responses, view_id, 1) {
         set_toggle(&mut toggles.show_tf_frames, resp, 0);
