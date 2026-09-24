@@ -114,6 +114,8 @@ impl WindowApp for GearboxApp {
     fn configure_gpu_limits(supported: &wgpu::Limits, requested: &mut wgpu::Limits) {
         if let Err(error) = molla_solvers::fem_rigid_gpu::request_fem_device_limits(requested, supported) {
             tracing::warn!("FEM unavailable on this adapter: {error}");
+        } else if let Err(error) = molla_solvers::fem_rigid_gpu::request_material_contact_patch_device_limits(requested, supported) {
+            tracing::warn!("Coupled FEM patches unavailable on this adapter: {error}");
         }
     }
 

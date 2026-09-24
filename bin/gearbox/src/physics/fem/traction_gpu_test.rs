@@ -153,6 +153,16 @@ fn run_trajectory_contacts(
         assert!(polish_sweeps.is_some() && (1..=4096).contains(&sweeps));
         solver_settings["material_polish_contact_sweeps"] = serde_json::json!(sweeps);
     }
+    let material_patch = match std::env::var("GEARBOX_FEM_MATERIAL_CONTACT_PATCH").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => false,
+        Ok("1") => true,
+        other => panic!("invalid material contact patch setting: {other:?}"),
+    };
+    if material_patch {
+        assert!(contact_blocks && polish_cycles.is_some_and(|cycles| cycles >= 2));
+        assert!(material_contact.is_some() && reuse_iterations.is_some() && polish_sweeps.is_some());
+    }
+    solver_settings["material_contact_patch"] = serde_json::json!(material_patch);
     assert!(
         spec.tracks
             .iter()
@@ -346,6 +356,9 @@ fn run_trajectory_contacts(
                     .unwrap();
             }
         }
+        if material_patch {
+            island.system.configure_material_contact_patch(true).unwrap();
+        }
         if std::env::var("GEARBOX_FEM_GPU_TIMING").as_deref() == Ok("1") {
             island.system.configure_gpu_timing(true).unwrap();
         }
@@ -411,6 +424,8 @@ fn run_trajectory_contacts(
                         "device_status":machine_gpu_test::read_floats::<1>(&device, &queue, island.system.status_buffer())[0][0].to_bits(),
                         "tet_materials":material_metadata, "molla_dependency":molla_dependency,
                         "solver_settings":solver_settings, "reference":failure_reference,
+                        "material_contact_patch_diagnostics":island.system.material_contact_patch_diagnostics().map(|buffer|
+                            machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                         "gpu_phase_ticks":island.system.gpu_timing_ticks().map(|buffer|
                             machine_gpu_test::read_ticks(&device, &queue, buffer)),
                         "gpu_contact_ticks":island.system.gpu_contact_timing_ticks().map(|buffer|
@@ -618,6 +633,8 @@ fn run_trajectory_contacts(
                     "stable_motor_feedback":true,
                     "tet_materials":material_metadata, "molla_dependency":molla_dependency,
                     "solver_settings":solver_settings,
+                    "material_contact_patch_diagnostics":island.system.material_contact_patch_diagnostics().map(|buffer|
+                        machine_gpu_test::read_floats::<1>(&device, &queue, buffer).into_iter().flatten().collect::<Vec<_>>()),
                     "gpu_phase_ticks":island.system.gpu_timing_ticks().map(|buffer|
                         machine_gpu_test::read_ticks(&device, &queue, buffer)),
                     "gpu_contact_ticks":island.system.gpu_contact_timing_ticks().map(|buffer|
