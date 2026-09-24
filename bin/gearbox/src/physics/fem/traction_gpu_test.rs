@@ -111,6 +111,14 @@ fn run_trajectory_contacts(
     let mut solver_settings = serde_json::json!({"elastic_iterations":elastic_iterations, "substep_seconds":substep,
         "material_contact":material_contact.map(|c| serde_json::json!({"iterations":c.iterations,
             "linear_tolerance_m_s":c.linear_tolerance, "angular_tolerance_rad_s":c.angular_tolerance}))});
+    let contact_solver = std::env::var("GEARBOX_FEM_CONTACT_SOLVER")
+        .unwrap_or_else(|_| "ordered".into());
+    let contact_blocks = match contact_solver.as_str() {
+        "ordered" => false,
+        "point_edge_blocks" => true,
+        _ => panic!("invalid FEM contact solver: {contact_solver}"),
+    };
+    solver_settings["contact_solver"] = serde_json::json!(contact_solver);
     if authored_friction {
         solver_settings["contact_profile"] = serde_json::json!("authored_wheel_friction");
         assert!(contacts.shapes.iter().any(|shape| shape.data[3] > 0.0));
@@ -295,7 +303,7 @@ fn run_trajectory_contacts(
             })
             .collect::<Vec<_>>();
         eprintln!("constructing full FEM island: effort={effort}, ground={ground}, teeth={teeth}");
-        let mut island = FemGpuIsland::with_ball_joints(
+        let mut island = FemGpuIsland::with_contact_solver(
             &device,
             &queue,
             FemRigidGpuScene {
@@ -312,6 +320,7 @@ fn run_trajectory_contacts(
                 ..default()
             },
             &loops,
+            contact_blocks,
         )
         .unwrap();
         eprintln!("full FEM island ready: effort={effort}, ground={ground}, teeth={teeth}");
@@ -461,10 +470,15 @@ fn run_trajectory_contacts(
                         std::fs::write(path.join(format!("{name}.bin")),
                             machine_gpu_test::read_bytes(&device, &queue, buffer)).unwrap();
                     }
+                    let final_rows = island.system.contact_row_diagnostics();
+                    std::fs::write(path.join("final_contact_rows.bin"),
+                        machine_gpu_test::read_bytes(&device, &queue, final_rows)).unwrap();
                     let metadata = serde_json::json!({
                         "schema":"molla_first_contact_inputs_v1",
                         "boundary":"after_predictor_before_first_contact_solve",
                         "step":island.clock.completed, "molla_dependency":molla_dependency,
+                        "accepted":true, "contact_solver":contact_solver,
+                        "final_contact_rows_bytes":final_rows.size(),
                         "particles":sizes["positions"] / 16,
                         "bodies":sizes["body_poses"] / 32,
                         "dofs":sizes["rigid_velocities"] / 4,

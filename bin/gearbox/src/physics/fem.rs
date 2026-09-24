@@ -84,14 +84,29 @@ impl FemGpuIsland {
         config: FemRigidConfig,
         joints: &[SoftRigidBallJoint],
     ) -> molla_core::Result<Self> {
+        Self::with_contact_solver(device, queue, scene, config, joints, false)
+    }
+
+    pub(crate) fn with_contact_solver(
+        device: &RenderDevice,
+        queue: &RenderQueue,
+        scene: FemRigidGpuScene,
+        config: FemRigidConfig,
+        joints: &[SoftRigidBallJoint],
+        contact_blocks: bool,
+    ) -> molla_core::Result<Self> {
         let substep = config.max_substep;
-        let system = FemRigidGpuSystem::new_surface_sampled_with_ball_joints_on_device(
-            Arc::new(device.wgpu_device().clone()),
-            Arc::new((**queue.0).clone()),
-            scene,
-            config,
-            joints,
-        )?
+        let gpu_device = Arc::new(device.wgpu_device().clone());
+        let gpu_queue = Arc::new((**queue.0).clone());
+        let system = if contact_blocks {
+            FemRigidGpuSystem::new_surface_sampled_with_contact_blocks_on_device(
+                gpu_device, gpu_queue, scene, config, joints, None,
+            )
+        } else {
+            FemRigidGpuSystem::new_surface_sampled_with_ball_joints_on_device(
+                gpu_device, gpu_queue, scene, config, joints,
+            )
+        }?
         .with_stable_motor_feedback(true);
         let mut diagnostics = diagnostics::Diagnostics::new(device.wgpu_device());
         diagnostics.submit(device.wgpu_device(), queue, &system);
@@ -261,10 +276,10 @@ mod tests {
     #[ignore = "requires a real GPU through oslo make test-fem-gpu"]
     fn native_fem_rejects_initial_inversion_without_advancing() {
         let (device, queue, _) = gpu_island();
-        for active in [false, true] {
+        for (active, contact_blocks) in [(false, false), (true, false), (false, true), (true, true)] {
             let mut scene = moving_scene();
             scene.soft_state.particle_q.host_mut().unwrap()[3].z = -0.1;
-            let island = FemGpuIsland::new(
+            let island = FemGpuIsland::with_contact_solver(
                 &device,
                 &queue,
                 scene,
@@ -273,6 +288,8 @@ mod tests {
                     elastic_iterations: 4,
                     ..Default::default()
                 },
+                &[],
+                contact_blocks,
             )
             .unwrap();
             let mut app = App::new();
