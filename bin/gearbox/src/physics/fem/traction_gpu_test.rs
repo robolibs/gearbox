@@ -205,6 +205,12 @@ fn run_trajectory_contacts(
         assert!(material_contact.is_some() && reuse_iterations.is_some() && polish_sweeps.is_some());
     }
     solver_settings["material_contact_patch"] = serde_json::json!(material_patch);
+    let global_newton = std::env::var("GEARBOX_FEM_GLOBAL_NEWTON").as_deref() == Ok("1");
+    solver_settings["global_newton"] = serde_json::json!(global_newton);
+    if global_newton {
+        assert!(!material_patch && material_contact.is_some());
+        solver_settings["experimental_molla_path"] = serde_json::json!("/home/bresilla/.cache/ceol-global-newton");
+    }
     assert!(
         spec.tracks
             .iter()
@@ -401,6 +407,23 @@ fn run_trajectory_contacts(
         if material_patch {
             island.system.configure_material_contact_patch(true).unwrap();
         }
+        if global_newton {
+            let mut config = molla_solvers::fem_rigid_gpu::GlobalNewtonConfig::default();
+            if let Ok(value) = std::env::var("GEARBOX_FEM_GLOBAL_ITERATIONS") {
+                config.solve.iterations = value.parse().unwrap();
+            }
+            if let Ok(value) = std::env::var("GEARBOX_FEM_GLOBAL_CYCLES") {
+                config.solve.linear.cycles = value.parse().unwrap();
+            }
+            if let Ok(value) = std::env::var("GEARBOX_FEM_GLOBAL_RESTART") {
+                config.restart = value.parse().unwrap();
+            }
+            solver_settings["global_settings"] = serde_json::json!({
+                "iterations":config.solve.iterations, "restart":config.restart,
+                "cycles":config.solve.linear.cycles, "tolerance":config.solve.absolute_tolerance,
+            });
+            island.system.configure_global_newton(Some(config)).unwrap();
+        }
         if std::env::var("GEARBOX_FEM_GPU_TIMING").as_deref() == Ok("1") {
             island.system.configure_gpu_timing(true).unwrap();
         }
@@ -454,6 +477,10 @@ fn run_trajectory_contacts(
             );
             let boundary = if capture_samples { next_sample.min(steps) } else { steps };
             if let Err(error) = island.advance(island.clock.submitted < boundary) {
+                if let Some(buffer) = island.system.global_newton_diagnostics() {
+                    let words = machine_gpu_test::read_floats::<1>(&device, &queue, buffer);
+                    eprintln!("GLOBAL NEWTON failed: words={words:?}; bits={:?}", words.iter().map(|v| v[0].to_bits()).collect::<Vec<_>>());
+                }
                 if monitor_settling {
                     let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
                     let v = machine_gpu_test::read_floats::<4>(&device, &queue, island.system.soft_state().particle_qd.device_buffer().unwrap());
@@ -528,6 +555,10 @@ fn run_trajectory_contacts(
                 panic!("FEM trajectory rejected: {error}");
             }
             if capture_samples && island.clock.completed == next_sample && !island.pending() {
+                if let Some(buffer) = island.system.global_newton_diagnostics() {
+                    let words = machine_gpu_test::read_floats::<1>(&device, &queue, buffer);
+                    eprintln!("GLOBAL NEWTON accepted: step={next_sample} words={words:?}; bits={:?}", words.iter().map(|v| v[0].to_bits()).collect::<Vec<_>>());
+                }
                 if let Some(root) = &snapshot_directory {
                     let case = root.join(format!("effort{effort}_ground{ground}_teeth{teeth}"));
                     std::fs::create_dir_all(&case).unwrap();
@@ -1024,6 +1055,13 @@ fn full_friction_powered_steps(effort: f64, steps: u64) {
             iterations: 1024, linear_tolerance: 1e-4, angular_tolerance: 1e-4,
         }), Some(8), true,
     );
+}
+
+#[test]
+#[ignore = "native global Newton integration probe, not sustained traction acceptance"]
+fn authored_ceol_global_newton_first_step_probe() {
+    assert_eq!(std::env::var("GEARBOX_FEM_GLOBAL_NEWTON").as_deref(), Ok("1"));
+    full_friction_powered_steps(-100.0, 1);
 }
 
 #[test]
