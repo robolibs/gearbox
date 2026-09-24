@@ -418,9 +418,14 @@ fn run_trajectory_contacts(
             if let Ok(value) = std::env::var("GEARBOX_FEM_GLOBAL_RESTART") {
                 config.restart = value.parse().unwrap();
             }
+            if let Ok(value) = std::env::var("GEARBOX_FEM_GLOBAL_LINEAR_RTOL") {
+                config.solve.linear.relative_tolerance = value.parse().unwrap();
+            }
             solver_settings["global_settings"] = serde_json::json!({
                 "iterations":config.solve.iterations, "restart":config.restart,
                 "cycles":config.solve.linear.cycles, "tolerance":config.solve.absolute_tolerance,
+                "linear_relative_tolerance":config.solve.linear.relative_tolerance,
+                "block_maximum":config.solve.block_maximum,
             });
             island.system.configure_global_newton(Some(config)).unwrap();
         }
@@ -483,10 +488,15 @@ fn run_trajectory_contacts(
                 }
                 if let Some(buffer) = island.system.global_newton_iteration_history() {
                     let words = machine_gpu_test::read_floats::<1>(&device, &queue, buffer);
-                    for (iteration, state) in words.chunks_exact(16).enumerate().filter(|(_, state)| state[4][0] > 0.0) {
-                        eprintln!("GLOBAL history iteration={iteration} fault={} accepted={} residual={} trial={} alpha={} linear={} linear_residual={} linear_converged={} linear_faults={}",
-                            state[0][0].to_bits(),state[2][0].to_bits(),state[5][0],state[9][0],state[8][0],state[12][0].to_bits(),state[13][0],state[14][0].to_bits(),state[15][0].to_bits());
+                    for (iteration, state) in words.chunks_exact(20).enumerate().filter(|(_, state)| state[4][0] > 0.0) {
+                        eprintln!("GLOBAL history iteration={iteration} fault={} accepted={} residual={} trial={} alpha={} linear={} linear_residual={} linear_converged={} linear_faults={} maximum_norm={}",
+                            state[0][0].to_bits(),state[2][0].to_bits(),state[5][0],state[9][0],state[8][0],state[12][0].to_bits(),state[13][0],state[14][0].to_bits(),state[15][0].to_bits(),state[16][0]);
                     }
+                }
+                if let Some(buffer) = island.system.global_newton_residual_rhs() {
+                    let words = machine_gpu_test::read_floats::<1>(&device, &queue, buffer);
+                    let maximum = words.iter().map(|v| v[0].abs()).fold(0.0_f32, f32::max);
+                    eprintln!("GLOBAL residual maximum_scalar={maximum}");
                 }
                 if monitor_settling {
                     let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
