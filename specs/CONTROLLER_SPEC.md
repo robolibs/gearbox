@@ -137,6 +137,8 @@ properties below live on the machine prim with the prefix
 | `maxWheelTorqueNm` | float | optional | none | Per-wheel drive torque limit, applied on top of the grip cap. |
 | `maxPowerKw` | float | optional | none | Total drive power: grip/torque-limited wheel budgets are scaled together so `Σ τ·max(abs(ω),0.5) ≤ P`; wheel speed is relative to its parent body. Parking brakes are not engine-power-limited. |
 | `tractionControl` | bool | optional | `true` | Keeps each driven wheel within 8 % + 0.15 m/s of its ground speed. `GEARBOX_TRACTION_CONTROL=0` sets the default off. |
+| `driveMode` | token | optional | `chassis` | Differential drive only. `chassis` writes the twist onto the body with slippery tyres. `wheels` drives each powered wheel's velocity motor at `(v − ω·x)/r` under `maxWheelTorqueNm` and `maxPowerKw`, with normal tyre grip, bounded yaw feedback for skid scrub, and a full-torque hold at rest. |
+| `zeroCommand` | token | optional | `coast` | Ackermann only. `coast` free-wheels a rolling machine on a zero command until it is below 0.25 m/s, then parks. `brake` drives the wheels to rest at the command brake rate (1.6 m/s²) first, as a geared servo drive does. |
 | `driveWheels`, `target` | rel | IGNORED | | |
 | `updateRateHz` | float | IGNORED | `60` | Controllers run every Update frame. |
 | `frameConvention` | token | IGNORED | | Author `usd_z_up`; the runtime assumes it anyway. |

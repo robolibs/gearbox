@@ -557,6 +557,47 @@ fn way_walk(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
 const NO_TYRE: vec4<f32> = vec4<f32>(0.2, 0.0, 0.0, 0.0);
 const NO_PIXEL: f32 = 1e9;
 
+// How much of a tyre's print the covers show. The map and the driven line both
+// carry the full mark; this is the hand on it. One number, applied to the
+// whole print at once, so the tread's shadow, its shine and the tilt it puts
+// in the normal all come down together — turn only the darkening down and the
+// relief stays deep, and the tread reads as a decal laid over the field
+// instead of something pressed into it.
+const TREAD_SHOW: f32 = 0.6;
+
+// What a tread already on the ground keeps when another is driven across it.
+// A wheel does not sweep the field clean behind it: the older mark is pressed
+// over, not erased, so it goes on showing wherever the new lugs leave it
+// uncovered.
+const UNDER_SHOW: f32 = 0.45;
+
+// How far apart along their own runs two stretches of line have to be before
+// they count as separate passes, in metres.
+//
+// The odometer tells them apart and the heading does not. Two legs a metre
+// apart on the same run are the same wheel still rolling, and adding that to
+// itself fills the gaps between the lugs and flattens the chevron into a band.
+// A wheel coming back over ground it crossed earlier is metres further along
+// its run whichever way it is pointing — so this catches a track driven over
+// at any angle, including one driven straight back along itself, which an
+// angle between headings never could.
+const SEPARATE_M: f32 = 2.0;
+
+// Draws each pass as a checkerboard in its own along/across instead of its
+// lugs, so what one covers — and exactly where it gives way to another — can
+// be read off the ground at a glance. A chevron hides all of that: its own
+// gaps look like the gaps between passes. Off in anything shipped.
+const TREAD_DEBUG: bool = false;
+
+fn tread_checker(along: f32, across: f32) -> f32 {
+    let cell = 0.22;
+    let a = i32(floor(along / cell));
+    let b = i32(floor(across / cell));
+    // `&` and not `%`: the latter keeps the sign of its left side, so behind
+    // the origin every other square would come out the wrong colour.
+    return select(0.12, 1.0, ((a + b) & 1) == 0);
+}
+
 fn worn(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
         way: mat4x4<f32>, more: mat4x4<f32>, shape: vec4<f32>) -> f32 {
     return way_walk(place, extent, tread, way, more, shape, NO_TYRE, NO_TYRE, NO_PIXEL).wear;
@@ -623,9 +664,28 @@ fn rut_of(place: vec2<f32>, extent: vec4<f32>, tread: vec4<f32>,
 }
 
 // The line a wheel actually drove, as the covers read it.
+//
+// The length is `contacts::TRAIL_POINTS` and has to stay that, exactly. Held at
+// half of it once, while the count sent over was the full number: the walk ran
+// off the end of the array, every point past the last read as the last one, and
+// whichever wheels happened to fall in the tail of the flatten lost their line
+// and dropped back to the wheel map's blocky edge. Which wheels those were came
+// down to the order a HashMap iterated, so a machine had some wheels drawn from
+// the line and some from the raster, with nothing to say why. There is a test
+// that fails if these two numbers ever part company again.
 struct DrivenTrail {
     bar: vec4<f32>,
     count: vec4<f32>,
-    points: array<vec4<f32>, 256>,
+    points: array<vec4<f32>, 512>,
+    // How hard the tyre bore on the ground at each of those points, in
+    // kilopascals, in `.x`; a column each and the rest spare.
+    //
+    // Four to a column would be a quarter of the room, and was — but reading
+    // one then needs `hard[i / 4u][i % 4u]`, which picks a *vector component*
+    // by a value only known while running. That is the sort of thing that
+    // compiles without a word and then does not read what was written. A whole
+    // column each costs eight kilobytes and is indexed by nothing but a plain
+    // array subscript and a fixed component.
+    hard: array<vec4<f32>, 512>,
 }
 

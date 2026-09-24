@@ -21,7 +21,7 @@ pub struct Args {
 #[derive(ClapArgs, Debug, Clone, Default)]
 struct Place {
     /// Position X Y Z in metres north, up and east of home; two values mean X Z
-    #[arg(long, num_args = 2..=3, value_name = "M")]
+    #[arg(long, num_args = 2..=3, value_name = "M", allow_negative_numbers = true)]
     at: Option<Vec<f32>>,
     /// Place on Earth instead of `--at`: LAT LON [ALT], degrees and metres
     /// above the ellipsoid; without ALT it stands on the ground
@@ -87,7 +87,7 @@ enum Cmd {
     /// Place a marker
     Marker {
         id: String,
-        #[arg(long, num_args = 2..=3, value_name = "M", required = true)]
+        #[arg(long, num_args = 2..=3, value_name = "M", required = true, allow_negative_numbers = true)]
         at: Vec<f32>,
     },
     /// Apply a TOML manifest of spawns in order

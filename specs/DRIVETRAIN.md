@@ -32,6 +32,8 @@ List driven rolling joints in `gearbox:machine:role:poweredWheelJoints`, not ste
 Keep free-rolling wheels in `passiveWheelJoints`; a wheel must not be in both roles. Author
 torque and power on the drive controller. Without these values, the legacy grip-only limit
 remains, so a realistic power rating must be supplied for a calibrated towing vehicle.
+A zero command coasts by default; servo-geared robots author `zeroCommand = "brake"` so the
+wheel motors stop the machine before the parking hold takes over.
 
 Use wheel-output torque, not engine-shaft torque. Torque multiplication, gearing efficiency
 and power available after auxiliary loads are authoring inputs in this model. Engine RPM,

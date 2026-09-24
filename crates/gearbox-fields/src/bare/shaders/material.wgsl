@@ -7,9 +7,9 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
 }
-#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar, sample_wheel_mark, wheel_edge}
+#import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
-#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, wheel_print, tyre_bars, DrivenTrail}
+#import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, tyre_bars, DrivenTrail, TREAD_SHOW, UNDER_SHOW, SEPARATE_M, TREAD_DEBUG, tread_checker}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var<uniform> wheels: WheelMapParams;
@@ -42,6 +42,11 @@ struct BareGround {
 // not geometry, for the same reason the authored ways' ruts are.
 const RUT_DEEP_M: f32 = 0.022;
 
+// The ground pressure a rut of `RUT_DEEP_M` belongs to: what a field tyre at
+// working pressure bears, about a bar. Heavier or narrower than that and the
+// wheel digs in further; lighter or wider and it hardly marks.
+const RUT_AT_KPA: f32 = 100.0;
+
 // What a wheel left here: the tyre's bars, and the trough it pressed the
 // ground into. Both come off one walk of the line it drove.
 struct Driven {
@@ -54,6 +59,17 @@ struct Driven {
     // without that the mark reads as a dark band laid on flat ground however
     // well the tread on it is drawn.
     rut: vec3<f32>,
+    // How much of the tyre's width covers this point, straight off the line:
+    // one under the middle of it, nought past its shoulder, and softened by
+    // no more than the pixel can see. The map cannot answer this without a
+    // staircase — it is a grid, and a wheel goes where it likes.
+    cover: f32,
+    // Whether a line runs near enough here for its word to stand over the
+    // wheel map's. Inside this the map is not consulted at all: its stamp is
+    // a rectangle of whole texels that overruns the tyre, and taken together
+    // with the line by whichever is the greater, that overrun survives as a
+    // blocky fringe outside the clean edge the line drew.
+    near: f32,
 }
 
 // The print of a tyre on the line it drove, found by walking that line rather
@@ -75,7 +91,7 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
     // Only ground a wheel has actually been over pays for the walk, which is
     // what lets the line be long enough to be worth keeping.
     if (pressed <= 0.0) {
-        return Driven(vec4<f32>(0.0), vec3<f32>(0.0));
+        return Driven(vec4<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
     }
     let count = i32(driven.count.x);
     var best_gap = 1e30;
@@ -83,6 +99,16 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
     var best_along = 0.0;
     var best_half = 0.0;
     var best_heading = vec2<f32>(1.0, 0.0);
+    var best_hard = 0.0;
+    var best_fade = 1.0;
+    // The nearest line that *crosses* the nearest one, kept apart from it so
+    // that where two sets of wheelings meet both are drawn — the older pressed
+    // over rather than wiped out.
+    var under_gap = 1e30;
+    var under_across = 0.0;
+    var under_along = 0.0;
+    var under_half = 0.0;
+    var under_heading = vec2<f32>(1.0, 0.0);
     for (var i = 1; i < count; i = i + 1) {
         let to = driven.points[i];
         // A run's first point begins a line rather than continuing one.
@@ -96,22 +122,65 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
         let at = clamp(dot(place - back.xy, heading), 0.0, length_of);
         let near = back.xy + heading * at;
         let gap = distance(place, near);
+        let across = dot(place - near, vec2<f32>(-heading.y, heading.x));
+        let along = abs(back.z) + at;
+        // A different pass, told apart by how far along its own run it is.
+        let crosses = abs(along - best_along) > SEPARATE_M;
         if (gap < best_gap) {
+            // What was nearest drops underneath, if it runs across this one.
+            if (crosses && best_gap < under_gap) {
+                under_gap = best_gap;
+                under_across = best_across;
+                under_along = best_along;
+                under_half = best_half;
+                under_heading = best_heading;
+            }
             best_gap = gap;
-            best_across = dot(place - near, vec2<f32>(-heading.y, heading.x));
-            best_along = abs(back.z) + at;
+            best_across = across;
+            best_along = along;
             best_half = abs(to.w);
             best_heading = heading;
+            best_hard = driven.hard[i].x;
+            best_fade = driven.hard[i].y;
+        } else if (crosses && gap < under_gap) {
+            under_gap = gap;
+            under_across = across;
+            under_along = along;
+            under_half = abs(to.w);
+            under_heading = heading;
         }
     }
-    if (best_gap > best_half * 1.8 || best_half <= 0.0) {
-        return Driven(vec4<f32>(0.0), vec3<f32>(0.0));
+    if (best_half <= 0.0 || best_gap > best_half * 3.0) {
+        return Driven(vec4<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+    }
+    // Near enough to speak for this ground, even where it says the tyre did
+    // not reach: that nought is an answer, and a better one than the map's.
+    if (best_gap > best_half * 1.8) {
+        return Driven(vec4<f32>(0.0), vec3<f32>(0.0), 0.0, 1.0);
     }
     // Fading by how far out of the tyre's own width the point lies, so the
     // print ends where the tyre did and not where any grid happened to fall.
     let within = 1.0 - smoothstep(0.80, 1.0, abs(best_across) / best_half);
-    let bars = tyre_bars(best_along, best_across, best_heading,
+    var top = tyre_bars(best_along, best_across, best_heading,
         vec2<f32>(-best_heading.y, best_heading.x), driven.bar, within, footprint);
+    if (TREAD_DEBUG) {
+        top = vec4<f32>(tread_checker(best_along, best_across) * within, 0.0, 0.0, 0.0);
+    }
+    // The line already here keeps its share of the print, and what the new
+    // lugs do not cover of it still shows through. Driving over a track does
+    // not sweep it away.
+    var bars = top * best_fade;
+    var under_rut = 0.0;
+    if (under_half > 0.0 && under_gap <= under_half * 1.8) {
+        let under_within = 1.0 - smoothstep(0.80, 1.0, abs(under_across) / under_half);
+        var older = tyre_bars(under_along, under_across, under_heading,
+            vec2<f32>(-under_heading.y, under_heading.x), driven.bar, under_within, footprint);
+        if (TREAD_DEBUG) {
+            older = vec4<f32>(tread_checker(under_along + 0.11, under_across + 0.11) * under_within, 0.0, 0.0, 0.0);
+        }
+        bars = top + older * UNDER_SHOW * (1.0 - top.x);
+        under_rut = UNDER_SHOW;
+    }
 
     // The trough, across the tyre: a rounded floor out to the shoulder, then
     // the spoil standing proud just outside it. How deep goes with how hard the
@@ -119,7 +188,15 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
     // one that has been over a dozen times leaves a rut.
     let axle = vec2<f32>(-best_heading.y, best_heading.x);
     let share = best_across / best_half;
-    let deep = RUT_DEEP_M * clamp(pressed, 0.0, 1.0);
+    // How deep the wheel pressed goes with how hard it bore on the ground —
+    // the load it carried over the patch it carried it on — and not with how
+    // lately it came past, which is what `pressed` is and says nothing about
+    // weight. A laden trailer on narrow tyres cuts in where an empty tractor
+    // on flotation tyres barely marks. `RUT_AT_KPA` is what a field tyre at
+    // working pressure does, so that case is unchanged and everything heavier
+    // or narrower now tells itself apart from it.
+    let bearing = clamp(best_hard / RUT_AT_KPA, 0.0, 2.5);
+    let deep = RUT_DEEP_M * clamp(pressed, 0.0, 1.0) * bearing;
     let floor_of = 1.0 - smoothstep(0.0, 1.0, abs(share));
     let shoulder = (1.0 - smoothstep(0.0, 0.55, abs(abs(share) - 1.22))) * 0.42;
     let depth = -deep * floor_of + deep * shoulder;
@@ -127,7 +204,27 @@ fn trail_print(place: vec2<f32>, footprint: f32, pressed: f32) -> Driven {
     // the normal: the trough is a hand's breadth across and the terrain carries
     // a metre to the cell, so it can never be dug into the mesh.
     let falls = deep * 1.9 * share * (1.0 - smoothstep(0.7, 1.35, abs(share)));
-    return Driven(bars, vec3<f32>(depth, falls * axle.x / best_half, falls * axle.y / best_half));
+    var rut = vec3<f32>(depth, falls * axle.x / best_half, falls * axle.y / best_half);
+    // The crossing line's trough is pressed in as well, so ground driven over
+    // twice is dug a little deeper rather than having one of its ruts filled
+    // back in.
+    if (under_rut > 0.0) {
+        let under_axle = vec2<f32>(-under_heading.y, under_heading.x);
+        let under_share = under_across / under_half;
+        let under_floor = 1.0 - smoothstep(0.0, 1.0, abs(under_share));
+        let under_shoulder = (1.0 - smoothstep(0.0, 0.55, abs(abs(under_share) - 1.22))) * 0.42;
+        let under_depth = -deep * under_floor + deep * under_shoulder;
+        let under_falls = deep * 1.9 * under_share * (1.0 - smoothstep(0.7, 1.35, abs(under_share)));
+        rut += vec3<f32>(under_depth,
+            under_falls * under_axle.x / under_half,
+            under_falls * under_axle.y / under_half) * under_rut;
+    }
+    // Soft by a pixel's width, so the edge is smooth however close the eye
+    // gets and however the track lies against the world's axes.
+    let soft = clamp(footprint / max(best_half, 0.01), 0.02, 0.5);
+    let cover = (1.0 - smoothstep(1.0 - soft, 1.0 + soft, abs(best_across) / best_half))
+        * clamp(bearing, 0.35, 1.0) * best_fade;
+    return Driven(bars, rut, cover, 1.0);
 }
 
 
@@ -362,8 +459,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let crest = mix(0.5, shade.crest * shade.worked, stripes_seen);
     // Where the wheels have worn the ground, no grass holds it — whether that
     // is a road laid out as worn, or a way beaten across a field by driving it.
-    let edge = wheel_edge(tracks, wheels, place);
-    let rolled_now = wheel_scar(tracks, wheels, place) * edge;
+    // The map answers one question only: has anything been over here at all,
+    // so that walking the line is worth paying for. It never draws.
+    let rolled_now = wheel_scar(tracks, wheels, place);
     // One walk of the way answers all of it: how worn, how the wheels sweep it,
     // where water will stand and the print of the tyre bars.
     let read = way_read(place, ground.extent, ground.tread, ground.way, ground.way_more, ground.way_shape);
@@ -380,10 +478,26 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // the mark, and the tread goes on being drawn from that. Without this the
     // chevron vanished off ground the machine had crossed a minute before
     // while the scar it left sat there for another ten.
-    let mark = sample_wheel_mark(tracks, wheels, place);
-    let kept = wheel_print(mark.metres.x, mark.metres.y, mark.inside, mark.roll,
-        wheels.bar, mark.press, pixel_m);
-    let print = select(kept, drove.bars, drove.bars.x > kept.x);
+    // The map holds what the line has let go of, and the line holds what is
+    // freshest. Neither cancels the other: the fresher print goes on top and
+    // the other shows through wherever it leaves the ground uncovered.
+    // The tread is the line's alone. The wheel map can hold that a wheel was
+    // here and how hard, but it cannot hold a lug: it is a grid of an eighth
+    // of a metre and a lug is a fifth of one. Drawn from it anyway, the trail
+    // behind a machine did not fade as the line let go of it — it *changed*,
+    // from the walked drawing to a coarse one, somewhere back down the field.
+    // Now the line eases its own tread out along its oldest stretch and there
+    // is nothing waiting to take it over.
+    let fresh = drove.bars;
+    let older = vec4<f32>(0.0);
+    let print = fresh * TREAD_SHOW;
+    // The same composite, undimmed, for the debug view: black is ground no
+    // wheel has touched, and every pass is its own checkerboard over it.
+    // Coverage, not the tread: how much of the tyre's width is on this point.
+    // Black is ground no wheel has touched. This is the thing to look at for
+    // borders, seams and stairsteps; the lugs fade with distance by design and
+    // hide all of it.
+    let shown = clamp(drove.cover, 0.0, 1.0);
     let laid = read.x;
     let bared = max(laid, rolled_now * 0.8);
     let damp_patch = ground_fbm(place / 2.7 + vec2<f32>(-13.0, 41.0), 3);
@@ -449,7 +563,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     colour *= clamp(1.0 + drove.rut.x * 3.2, 0.82, 1.09);
 
     let pressed = sample_wheels(tracks, wheels, place);
-    let rolled = clamp(pressed.x * edge, 0.0, 1.0);
+    // One drawing of a trail and one only: the line the wheel drove. The
+    // wheel map is not consulted for it at all. Two drawings of the same mark
+    // means a handoff, and a handoff means the trail behind a machine stops
+    // being what it was and becomes something coarser, somewhere back down the
+    // field. It eases out with the line that holds it and then it is gone.
+    let rolled = clamp(drove.cover, 0.0, 1.0);
     colour *= 1.0 - rolled * wheels.darkening;
 
     // The normal from the height itself, stepped no finer than the pixel can
@@ -461,7 +580,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let north = made_relief(place + vec2<f32>(0.0, step), close, pixel_m) * pressed_down;
     let bumps = normalize(vec3<f32>((here - east) * 0.5, step, (here - north) * 0.5));
     let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0)
-        + vec3<f32>(print.y + drove.rut.y, 0.0, print.z + drove.rut.z));
+        + vec3<f32>(print.y + drove.rut.y * TREAD_SHOW, 0.0,
+            print.z + drove.rut.z * TREAD_SHOW));
 
     let pit = clamp(0.82 + here * 1.1, 0.7, 1.22);
 
@@ -478,5 +598,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+    if (TREAD_DEBUG) {
+        out.color = vec4<f32>(vec3<f32>(shown), 1.0);
+    }
     return out;
 }

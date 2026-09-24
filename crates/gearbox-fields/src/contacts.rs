@@ -34,6 +34,13 @@ pub struct WheelContact {
     pub centreline: Vec2,
     /// Physical rolling-direction footprint length; None uses the field default.
     pub length: Option<f32>,
+    /// How hard the tyre bears on the ground, in kilopascals: the load it
+    /// carries divided by the patch it carries it on. This is the quantity
+    /// that decides how deep a wheel presses and how fast it wears the cover
+    /// through — not how wide the tyre is and not how recently it passed. A
+    /// laden trailer on narrow tyres cuts in where an empty tractor on flotation
+    /// tyres barely marks, and only this tells the two apart.
+    pub ground_kpa: f32,
 }
 
 impl WheelContact {
@@ -51,6 +58,7 @@ fn explicit_wheel_footprint_overrides_field_default() {
         direction: Vec2::X,
         width: 0.4,
         scrub: 0.0,
+        ground_kpa: 100.0,
         travelled: 0.0,
         anchor: Vec2::ZERO,
         centreline: Vec2::ZERO,
@@ -105,6 +113,16 @@ pub struct TrailPoint {
     /// When the wheel was here. Kept on this side only — the covers are handed
     /// the line, not the clock — and it is what a point is dropped on.
     pub seen: f32,
+    /// How hard the tyre bore on the ground here, in kilopascals.
+    pub ground_kpa: f32,
+    /// How much of this point is still drawn: one for most of the run, easing
+    /// to nought over its oldest stretch. A point that simply stopped being
+    /// drawn would not stop being *seen* — the wheel map still holds the mark
+    /// and would take it over, and the map is a raster where the line is not,
+    /// so the trail behind a machine changed from one drawing to a coarser
+    /// one rather than fading out. Set when the line is handed over, because
+    /// only then is it known how near the front of its run a point is.
+    pub fade: f32,
 }
 
 /// How long a wheel's line is kept. A mark on the ground outlasts the machine
@@ -114,6 +132,11 @@ pub struct TrailPoint {
 /// speed fills its share before this runs out — so this governs the slow end,
 /// which is where the old rule dropped a line almost at once.
 pub const TRAIL_KEEP_S: f32 = 90.0;
+
+/// How long a mark holds at full strength before it starts to go. The rest of
+/// its life is spent easing out, so nothing ever pops: by `TRAIL_KEEP_S`, when
+/// the point is dropped, there is nothing left of it to drop.
+pub const TRAIL_HOLD_S: f32 = 35.0;
 
 /// Every wheel's recent line, ready for the covers.
 #[derive(Resource, ExtractResource, Clone)]
@@ -179,7 +202,7 @@ impl TrailKeeper {
     /// One wheel's place this frame. `now` is the clock the gaps are judged on:
     /// a wheel unseen for a moment starts a new run rather than joining across
     /// wherever it went in between.
-    pub fn saw(&mut self, wheel: &str, at: Vec2, half_width: f32, now: f32) {
+    pub fn saw(&mut self, wheel: &str, at: Vec2, half_width: f32, ground_kpa: f32, now: f32) {
         let broken = self.seen.get(wheel).is_none_or(|last| now - last > 0.5);
         self.seen.insert(wheel.to_owned(), now);
         // Each wheel keeps its own share of the room, so one wheel driving hard
@@ -188,7 +211,14 @@ impl TrailKeeper {
         let share = (TRAIL_POINTS / self.runs.len().max(1)).max(4);
         let run = self.runs.entry(wheel.to_owned()).or_default();
         if broken {
-            run.push(TrailPoint { at, along: 0.0, half_width: -half_width.abs(), seen: now });
+            run.push(TrailPoint {
+                at,
+                along: 0.0,
+                half_width: -half_width.abs(),
+                seen: now,
+                ground_kpa,
+                fade: 1.0,
+            });
         } else {
             let Some(last) = run.last().copied() else { return };
             let step = at.distance(last.at);
@@ -200,24 +230,90 @@ impl TrailKeeper {
                 along: last.along + step,
                 half_width: half_width.abs(),
                 seen: now,
+                ground_kpa,
+                fade: 1.0,
             });
         }
-        // Old points go first, then any still over the share; a run whose head
-        // is cut has to say so, or the covers join it to whatever precedes it.
+        // A point leaves for one reason only: it is older than `TRAIL_KEEP_S`.
+        // A run whose head is cut has to say so, or the covers join it to
+        // whatever precedes it.
         let stale = run.iter().take_while(|point| now - point.seen > TRAIL_KEEP_S).count();
-        let over = run.len().saturating_sub(share);
-        let cut = stale.max(over);
-        if cut > 0 {
-            run.drain(..cut);
+        if stale > 0 {
+            run.drain(..stale);
             if let Some(first) = run.first_mut() {
                 first.half_width = -first.half_width.abs();
             }
         }
+        // Over its share, the older half is *thinned* rather than cut off, so
+        // what the line runs out of is detail and never time. Dropping the tail
+        // instead made the trail end at a distance behind the machine — a
+        // minute's driving at walking pace, seconds at speed — and no fade on
+        // the clock could reach it, because it was gone before it was old.
+        if run.len() > share {
+            Self::thin_the_old(run);
+        }
     }
 
+/// How far the line may be allowed to move when a point is taken out of it.
+/// A twentieth of a tyre's width: nothing anyone can see, on a mark that is
+/// half faded by the time it is thinned at all.
+const TRAIL_STRAIGHT_M: f32 = 0.03;
+
+/// Makes room in a run's older half by dropping the points that were not
+/// saying anything — the ones whose neighbours already describe where the line
+/// goes. A straight can lose nearly all of them and stay exactly where it was;
+/// a bend loses none, because every point on it is holding the curve up.
+///
+/// Dropping every *other* point instead is what turned driving into geometry:
+/// the chords doubled each time a run was thinned, and a curve came back as
+/// straight lines with corners between them.
+fn thin_the_old(run: &mut Vec<TrailPoint>) {
+    let half = run.len() / 2;
+    let mut kept: Vec<TrailPoint> = Vec::with_capacity(run.len());
+    for (index, point) in run.iter().enumerate() {
+        // The head, the newer half, and the last point are never candidates.
+        let last = index + 1 == run.len();
+        if index == 0 || index >= half || last {
+            kept.push(*point);
+            continue;
+        }
+        let before = kept.last().map(|held: &TrailPoint| held.at).unwrap_or(point.at);
+        if Self::off_the_chord(point.at, before, run[index + 1].at) >= Self::TRAIL_STRAIGHT_M {
+            kept.push(*point);
+        }
+    }
+    if let Some(first) = kept.first_mut() {
+        first.half_width = -first.half_width.abs();
+    }
+    *run = kept;
+}
+
+/// How far `point` stands off the straight line from `before` to `after`.
+fn off_the_chord(point: Vec2, before: Vec2, after: Vec2) -> f32 {
+    let chord = after - before;
+    let length = chord.length();
+    if length < 1.0e-4 {
+        return point.distance(before);
+    }
+    ((point - before).perp_dot(chord) / length).abs()
+}
+
     /// All the lines, flattened for the covers.
-    pub fn flattened(&self) -> Vec<TrailPoint> {
-        self.runs.values().flatten().copied().take(TRAIL_POINTS).collect()
+    pub fn flattened(&self, now: f32) -> Vec<TrailPoint> {
+        let mut out = Vec::with_capacity(TRAIL_POINTS);
+        for run in self.runs.values() {
+            for point in run {
+                // How much of a mark is left is a question about the clock and
+                // nothing else: it holds while it is fresh, eases off through
+                // its later life and is gone by the time it is dropped. How far
+                // behind the machine it lies has no bearing on it.
+                let age = (now - point.seen).max(0.0);
+                let going = ((age - TRAIL_HOLD_S) / (TRAIL_KEEP_S - TRAIL_HOLD_S)).clamp(0.0, 1.0);
+                out.push(TrailPoint { fade: 1.0 - going * going * (3.0 - 2.0 * going), ..*point });
+            }
+        }
+        out.truncate(TRAIL_POINTS);
+        out
     }
 
     /// Drops whole runs whose wheel has not been seen for `TRAIL_KEEP_S`, so a
@@ -267,11 +363,12 @@ pub(super) fn keep_wheel_trails(
             &index.to_string(),
             Vec2::new(contact.position.x, contact.position.z),
             contact.width * 0.5,
+            contact.ground_kpa,
             now,
         );
     }
     keeper.forget_older_than(now);
-    trails.points = keeper.flattened();
+    trails.points = keeper.flattened(now);
 }
 
 // A line is kept by age, so a machine that crawls or stands keeps the tread it
@@ -282,24 +379,135 @@ fn a_line_is_dropped_by_age_and_not_by_how_far_it_has_since_driven() {
     let mut keeper = TrailKeeper::default();
     for step in 0..40 {
         let along = step as f32 * TRAIL_STEP_M;
-        keeper.saw("near", Vec2::new(along, 0.0), 0.3, step as f32);
+        keeper.saw("near", Vec2::new(along, 0.0), 0.3, 120.0, step as f32);
     }
-    let laid = keeper.flattened().len();
+    let laid = keeper.flattened(39.0).len();
     assert!(laid > 30, "kept only {laid} points of a line just driven");
 
     // Ten seconds on and barely moved: nothing is dropped.
-    keeper.saw("near", Vec2::new(20.0, 0.0), 0.3, 49.0);
+    keeper.saw("near", Vec2::new(20.0, 0.0), 0.3, 120.0, 49.0);
     keeper.forget_older_than(49.0);
-    assert_eq!(keeper.flattened().len(), laid + 1, "a slow wheel lost its line");
+    assert_eq!(keeper.flattened(49.0).len(), laid + 1, "a slow wheel lost its line");
 
     // Past the keep, the head goes and what is left still says it is a head.
-    keeper.saw("near", Vec2::new(40.0, 0.0), 0.3, 40.0 + TRAIL_KEEP_S);
+    keeper.saw("near", Vec2::new(40.0, 0.0), 0.3, 120.0, 40.0 + TRAIL_KEEP_S);
     keeper.forget_older_than(40.0 + TRAIL_KEEP_S);
-    let left = keeper.flattened();
+    let left = keeper.flattened(40.0 + TRAIL_KEEP_S);
     assert!(left.len() < laid, "nothing aged out after {TRAIL_KEEP_S}s");
     assert!(!left.is_empty() && left[0].half_width < 0.0, "a cut head must say so");
 
     // A wheel gone for good takes its room with it.
     keeper.forget_older_than(40.0 + TRAIL_KEEP_S * 3.0);
-    assert!(keeper.flattened().is_empty(), "a wheel long gone still holds room");
+    assert!(keeper.flattened(40.0 + TRAIL_KEEP_S * 3.0).is_empty(), "a wheel long gone still holds room");
+}
+
+/// The covers read the driven line out of a uniform whose length is fixed in
+/// the shader source, while the count of points sent over comes from here. Let
+/// the two part company and the walk runs off the end of the array: every point
+/// past the last reads as the last one, and whichever wheels fell in the tail
+/// of the flatten lose their line and fall back to the wheel map's blocky edge.
+/// Which wheels those were came down to the order a `HashMap` iterated, so one
+/// machine had some wheels drawn from the line and some from the raster.
+#[test]
+fn the_shader_holds_exactly_as_many_points_as_are_sent_to_it() {
+    let source = include_str!("bare/shaders/cover.wgsl");
+    let declared = source
+        .split_once("points: array<vec4<f32>,")
+        .and_then(|(_, rest)| rest.split_once('>'))
+        .map(|(size, _)| size.trim().to_owned())
+        .expect("cover.wgsl declares the driven line's points");
+    assert_eq!(
+        declared.parse::<usize>().ok(),
+        Some(TRAIL_POINTS),
+        "the shader holds {declared} points and {TRAIL_POINTS} are sent"
+    );
+}
+
+/// A mark goes by the clock and by nothing else. Driving on does not shorten
+/// the trail behind: what the line runs out of when a wheel works hard is
+/// detail down its older stretch, never the stretch itself.
+#[test]
+fn a_fast_wheel_keeps_as_long_a_line_as_a_slow_one() {
+    let span = |metres_per_second: f32| {
+        let mut keeper = TrailKeeper::default();
+        let mut now = 0.0;
+        // A minute of driving, a tenth of a second at a time.
+        while now < 60.0 {
+            keeper.saw("wheel", Vec2::new(now * metres_per_second, 0.0), 0.3, 120.0, now);
+            now += 0.1;
+        }
+        let line = keeper.flattened(now);
+        let oldest = line.iter().fold(f32::MAX, |first, point| first.min(point.seen));
+        now - oldest
+    };
+    let crawling = span(0.5);
+    let working = span(4.0);
+    assert!(crawling > 50.0, "a crawling wheel held only {crawling:.0}s of line");
+    assert!(
+        working > 50.0,
+        "a wheel at 4 m/s held {working:.0}s of line where one at 0.5 m/s held {crawling:.0}s"
+    );
+}
+
+/// Nothing pops: a mark is at full strength while it is fresh, part gone in
+/// its later life, and nothing at all by the time it is dropped.
+#[test]
+fn a_mark_is_all_but_gone_before_it_is_dropped() {
+    let mut keeper = TrailKeeper::default();
+    keeper.saw("wheel", Vec2::ZERO, 0.3, 120.0, 0.0);
+    keeper.saw("wheel", Vec2::new(TRAIL_STEP_M, 0.0), 0.3, 120.0, 0.1);
+    let fade_at = |now: f32| keeper.flattened(now).first().map(|point| point.fade).unwrap_or(0.0);
+    assert!(fade_at(1.0) > 0.99, "a fresh mark is not at full strength");
+    assert!(fade_at(TRAIL_HOLD_S - 1.0) > 0.99, "a mark faded before its hold was out");
+    let halfway = fade_at((TRAIL_HOLD_S + TRAIL_KEEP_S) * 0.5);
+    assert!((0.2..0.8).contains(&halfway), "halfway through going, it is {halfway:.2}");
+    assert!(fade_at(TRAIL_KEEP_S - 0.5) < 0.02, "a mark still shows as it is dropped");
+}
+
+/// Thinning a run must not change the shape of it. A curve driven is a curve
+/// kept: dropping every other point instead doubled the chords each time a run
+/// filled, and a bend came back as straight lines with corners between them.
+#[test]
+fn a_curve_stays_a_curve_however_long_it_is_kept() {
+    let mut keeper = TrailKeeper::default();
+    let mut now = 0.0;
+    // Two minutes driving a steady circle of ten metres, a tenth of a second
+    // at a time: long enough that the run is thinned over and over.
+    let radius: f32 = 10.0;
+    while now < 120.0 {
+        let angle: f32 = now * 0.25;
+        // Four wheels, as a tractor has: each gets a quarter of the room, so
+        // the run outgrows its share and is thinned over and over.
+        for wheel in 0..4 {
+            keeper.saw(
+                &wheel.to_string(),
+                Vec2::new(radius * angle.cos(), radius * angle.sin()),
+                0.3,
+                120.0,
+                now,
+            );
+        }
+        now += 0.1;
+    }
+    // Every point the line still holds is on the circle it was driven on, and
+    // so is the middle of every chord between neighbours — which is what goes
+    // wrong when a curve is thinned blindly.
+    let line = keeper.flattened(now);
+    assert!(line.len() > 8, "only {} points left of a circle", line.len());
+    assert!(
+        line.len() < 4 * 90 * 5,
+        "the run was never thinned, so this proves nothing about thinning"
+    );
+    for pair in line.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        if to.half_width < 0.0 {
+            continue;
+        }
+        let middle = (from.at + to.at) * 0.5;
+        let sag = radius - middle.length();
+        assert!(
+            sag < 0.35,
+            "a chord cut {sag:.2} m off a {radius} m circle: the curve came back straight"
+        );
+    }
 }

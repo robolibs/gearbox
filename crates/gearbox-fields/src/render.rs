@@ -466,25 +466,14 @@ fn stamp_wheel_contacts(
     images: Res<RenderAssets<GpuImage>>,
     render_queue: Res<RenderQueue>,
     mut stamped: Local<bevy::platform::collections::HashSet<Entity>>,
-    // What tread each texel already carries. A tractor's front and rear tyres
-    // are different tyres running on lines of their own, and through a turn
-    // they stop following one another, so each side's band becomes two passes
-    // contesting the same texels — and the print wavers along the seam where
-    // one gives way to the other. Only the widest tyre lays a tread; the others
-    // write back whatever is already there, so a wheel crossing an older mark
-    // leaves it exactly as it found it. Writing *nothing* there is what rubbed
-    // marks out before, and is why this is kept rather than skipped.
-    mut laid: Local<bevy::platform::collections::HashMap<(Entity, i32, i32), [u16; 2]>>,
 ) {
     stamped.retain(|entity| fields.0.contains_key(entity));
-    laid.retain(|(entity, _, _), _| fields.0.contains_key(entity));
     let Some(contacts) = contacts else {
         return;
     };
     if contacts.contacts.is_empty() {
         return;
     }
-    let widest = contacts.contacts.iter().fold(0.0f32, |most, c| most.max(c.width));
     for (&entity, field) in &fields.0 {
         let Some(trample) = images.get(&field.trample) else {
             continue;
@@ -549,7 +538,6 @@ fn stamp_wheel_contacts(
                         // narrow wheel told to lay no tread erased them at every
                         // crossing. A wheel passing over an older mark lays its
                         // own over the top, which is what happens on the ground.
-                        let lays_tread = contact.width >= widest * 0.9;
                         let tread = field.tread.then(|| {
                             // How far along the track, measured from the wheel
                             // itself: the machine's rolled distance plus this
@@ -565,21 +553,12 @@ fn stamp_wheel_contacts(
                             // whole tread sideways by several lug pitches,
                             // along the ruled line where one stamp gives way to
                             // the next. Rolled distance has no lever arm at all.
-                            if !lays_tread {
-                                // Whatever this texel already carries, put back
-                                // unchanged. Nothing there yet is nothing to
-                                // keep, and empty is then the truth rather than
-                                // an erasure.
-                                return laid.get(&(entity, x, z)).copied().unwrap_or([0u16, 0u16]);
-                            }
                             let from_machine = Vec2::new(x as f32, z as f32)
                                 - (contact.anchor - field.params.wheels.origin) * tpm;
-                            let fresh = tread_texel(
+                            tread_texel(
                                 contact.travelled + from_machine.dot(roll) / tpm,
                                 (Vec2::new(x as f32, z as f32) - line).dot(axle) / tpm,
-                                half_width / tpm);
-                            laid.insert((entity, x, z), fresh);
-                            fresh
+                                half_width / tpm)
                         });
                         stamp.into_iter().chain(tread.into_iter().flatten())
                     })

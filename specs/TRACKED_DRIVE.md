@@ -6,6 +6,9 @@ The controller shares authored `maxPowerKw` equally between two motors and
 uses `maxWheelTorqueNm` as each motor's torque ceiling. Bounded yaw feedback
 compensates for skid-steering slip while ground contacts exist. Feedback
 clears at zero yaw or loss of support. Belt target speeds are limited to 3 m/s.
+Carrier link values `track_speed_gain` (N·m per rad/s, default 120) and
+`track_slip_damping` (N·s/m, default 8000) set the motor response and belt grip;
+scale both with machine mass.
 
 ## Asset binding
 

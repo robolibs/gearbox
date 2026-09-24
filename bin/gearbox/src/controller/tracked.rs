@@ -166,7 +166,7 @@ pub(super) fn apply(
                             local_axle: DVec3::from_array(spec.axle), local_forward: DVec3::from_array(spec.forward),
                             pitch_radius: spec.radius, longitudinal_friction: material("track_friction_long", 0.85), lateral_friction: material("track_friction_lateral", 0.65),
                             slip_damping: material("track_slip_damping", 8000.0), max_torque: controller.max_wheel_torque_nm.unwrap_or(300.0) as f64,
-                            max_power: controller.max_power_kw.unwrap_or(10.0) as f64 * 500.0, speed_gain: 120.0,
+                            max_power: controller.max_power_kw.unwrap_or(10.0) as f64 * 500.0, speed_gain: material("track_speed_gain", 120.0),
                         })?;
                     }
                     physics.set_track_speed(sprocket, speeds[usize::from(spec.side < 0.0)])?;

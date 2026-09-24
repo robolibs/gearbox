@@ -311,6 +311,11 @@ pub struct DrivenTrail {
     /// Each point: where the wheel's middle was, metres of line before it, and
     /// half the tyre's width — negative where a run begins.
     pub points: [Vec4; crate::contacts::TRAIL_POINTS],
+    /// How hard the tyre bore on the ground at each of those points, in
+    /// kilopascals, four to a column. Packed rather than given a column each
+    /// because a uniform pads a lone float out to four, and this is a long
+    /// array.
+    pub hard: [Vec4; crate::contacts::TRAIL_POINTS],
 }
 
 impl Default for DrivenTrail {
@@ -319,6 +324,7 @@ impl Default for DrivenTrail {
             bar: crate::layout::TyreTread::default().packed(),
             count: Vec4::ZERO,
             points: [Vec4::ZERO; crate::contacts::TRAIL_POINTS],
+            hard: [Vec4::ZERO; crate::contacts::TRAIL_POINTS],
         }
     }
 }
@@ -328,6 +334,10 @@ impl DrivenTrail {
         let mut out = Self { bar: trails.bar, ..Default::default() };
         for (slot, point) in out.points.iter_mut().zip(&trails.points) {
             *slot = Vec4::new(point.at.x, point.at.y, point.along, point.half_width);
+        }
+        for (slot, point) in trails.points.iter().take(crate::contacts::TRAIL_POINTS).enumerate() {
+            out.hard[slot].x = point.ground_kpa;
+            out.hard[slot].y = point.fade;
         }
         out.count.x = trails.points.len().min(crate::contacts::TRAIL_POINTS) as f32;
         out

@@ -182,6 +182,8 @@ pub(crate) struct ControllerRuntimeState {
     /// Wheel bodies per machine id for tyre setup and contact diagnostics.
     machine_wheels: HashMap<String, Vec<BodyId>>,
     diff_drive_debug_ticks: u64,
+    /// Integral yaw trim per wheel-driven differential controller.
+    diff_yaw_trim: HashMap<ControllerKey, f64>,
     /// Cumulative wheel spin angle (radians), integrated from measured
     /// angular velocity each tick — nothing else here tracks it, so an
     /// encoder reading has to keep its own running total.
@@ -422,6 +424,10 @@ pub struct ControllerSpec {
     pub max_power_kw: Option<f32>,
     /// Keep each driven wheel near its ground speed; on unless set false.
     pub traction_control: Option<bool>,
+    /// What a zero command does while rolling: `coast` (default) or `brake`.
+    pub zero_command: Option<String>,
+    /// Differential drive: `chassis` (default) sets the body velocity, `wheels` drives wheel motors.
+    pub drive_mode: Option<String>,
     pub front_steer_multiplier: Option<f32>,
     pub middle_steer_multiplier: Option<f32>,
     pub rear_steer_multiplier: Option<f32>,
@@ -698,6 +704,8 @@ fn append_isaac_compat_machines(
                 max_wheel_torque_nm: None,
                 max_power_kw: None,
                 traction_control: None,
+                zero_command: None,
+                drive_mode: None,
                 front_steer_multiplier: None,
                 middle_steer_multiplier: None,
                 rear_steer_multiplier: None,
@@ -1267,7 +1275,8 @@ fn apply_builtin_ackermann_cmd_vel(
             let neutral = requested.linear_mps.abs() < COAST_DEADBAND_MPS
                 && requested.angular_rps.abs() < COAST_DEADBAND_RPS;
             let rolling = forward_mps.abs() > PARKED_MPS;
-            let coasting = neutral && rolling;
+            // A servo-driven machine brakes to rest on a zero command instead.
+            let coasting = neutral && rolling && controller.zero_command.as_deref() != Some("brake");
             // Only a machine that has actually come to rest is held; held while
             // it still rolls, the hold is a handbrake slammed on at speed.
             let parked = neutral && !rolling;
@@ -1469,6 +1478,29 @@ fn apply_builtin_diff_drive_cmd_vel(
                 continue;
             };
 
+            if controller.drive_mode.as_deref() == Some("wheels") {
+                drive_differential_wheels(
+                    scene_root, controller, machine, &key, cmd, body_handle, &joints, &parents,
+                    &mut physics, &mut runtime, dt as f64,
+                );
+                if let Some(body) = physics.body(body_handle) {
+                    let pos = body.translation();
+                    let (region, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
+                    let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
+                    states.states.insert(key.clone(), ControllerState {
+                        region,
+                        position_m,
+                        heading_rad: machine_heading_rad(body),
+                        roll_rad,
+                        pitch_rad,
+                        linear_speed_mps: body.linvel().length(),
+                        yaw_rate_rps: body.angvel().y,
+                        wheel_encoders: Vec::new(),
+                    });
+                }
+                continue;
+            }
+
             {
                 let Some(body) = physics.body_mut(body_handle) else {
                     continue;
@@ -1555,6 +1587,73 @@ fn apply_builtin_diff_drive_cmd_vel(
 /// Tyre friction under the differential controller, which drives the chassis
 /// by velocity rather than through the tyres.
 const DIFF_DRIVE_TIRE_FRICTION: f64 = 0.05;
+/// Yaw feedback for wheel-driven skid steer: proportional gain, integral gain
+/// (1/s), and the ceiling on trim and corrected yaw command (rad/s).
+const DIFF_YAW_GAIN: f64 = 1.5;
+const DIFF_YAW_TRIM_GAIN: f64 = 3.0;
+const DIFF_YAW_LIMIT_RPS: f64 = 4.0;
+
+/// Wheel-driven differential drive: each wheel's velocity motor runs at the
+/// side speed `v − ω·x` over its radius, capped by wheel torque and shared
+/// drive power, so the tyres push the chassis and hold it at rest.
+#[allow(clippy::too_many_arguments)]
+fn drive_differential_wheels(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    key: &ControllerKey,
+    cmd: CmdVel,
+    chassis: BodyId,
+    joints: &Query<(Entity, &UsdPrimRef, &crate::physics::markers::UsdPhysicsJoint)>,
+    parents: &Query<&ChildOf>,
+    physics: &mut crate::physics::PhysicsWorld,
+    runtime: &mut ControllerRuntimeState,
+    dt: f64,
+) {
+    let Some(body) = physics.body(chassis) else { return; };
+    let yaw_now = body.angvel().dot(body.rotation() * DVec3::new(0.0, 0.0, 1.0));
+    let mut yaw = cmd.angular_rps as f64;
+    let trim = runtime.diff_yaw_trim.entry(key.clone()).or_default();
+    if yaw.abs() < 0.001 {
+        *trim = 0.0;
+    } else {
+        let error = yaw - yaw_now;
+        *trim = (*trim + DIFF_YAW_TRIM_GAIN * error * dt).clamp(-DIFF_YAW_LIMIT_RPS, DIFF_YAW_LIMIT_RPS);
+        yaw = (yaw + DIFF_YAW_GAIN * error + *trim).clamp(-DIFF_YAW_LIMIT_RPS, DIFF_YAW_LIMIT_RPS);
+    }
+    let parked = cmd.linear_mps.abs() < COAST_DEADBAND_MPS && cmd.angular_rps.abs() < COAST_DEADBAND_RPS;
+    let cap = controller.max_wheel_torque_nm.map(f64::from).unwrap_or(WHEEL_DRIVE_MAX_TORQUE);
+    let fallback = controller.wheel_radius.unwrap_or(0.1) as f64;
+    let mut targets: Vec<JointVelocityTarget> = Vec::new();
+    for path in machine.powered_wheel_joints.iter().chain(controller.drive_wheel_joints.iter()) {
+        let Some(pair) = joint_pair(scene_root, path, joints, parents, physics) else { continue; };
+        if targets.iter().any(|t| rigid_body_pair_matches(t.pair, pair.0, pair.1)) {
+            continue;
+        }
+        let radius = visual_wheel_radius(physics, chassis, pair, path, fallback);
+        let x = visual_spin_lateral_x(side_hint(path), wheel_lateral_offset(physics, chassis, pair).unwrap_or(0.0));
+        targets.push(JointVelocityTarget {
+            pair,
+            velocity: (cmd.linear_mps as f64 - yaw * x) / radius,
+            damping: 0.0,
+            max_torque: cap,
+            force_based: true,
+        });
+    }
+    let demand: f64 = targets.iter().map(|t| cap * t.velocity.abs().max(WHEEL_POWER_MIN_OMEGA_RAD_S)).sum();
+    let scale = match controller.max_power_kw {
+        Some(kw) if !parked => (f64::from(kw).max(0.0) * 1000.0 / demand.max(1e-6)).min(1.0),
+        _ => 1.0,
+    };
+    let full_torque_error = if parked { WHEEL_HOLD_ERROR_RAD_S } else { WHEEL_FULL_TORQUE_ERROR_RAD_S };
+    for target in &mut targets {
+        target.max_torque *= scale;
+        target.damping = target.max_torque / full_torque_error;
+    }
+    let pairs: Vec<_> = targets.iter().map(|target| target.pair).collect();
+    wake_vehicle_for_command(physics, chassis, &pairs, cmd, 0.0);
+    apply_articulation_or_impulse_joint_motors(physics, &targets, &[]);
+}
 
 /// Give every wheel body the velocity its place on the chassis implies —
 /// `v + ω × r` — keeping its own spin about the axle and its own vertical
@@ -2593,6 +2692,7 @@ fn record_wheel_tracks(
                 direction: roll,
                 width: tyre.and_then(|out| out.pressure).map_or(width, |p| p.patch_width) as f32,
                 length: tyre.and_then(|out| out.pressure).map(|p| p.patch_length as f32),
+                ground_kpa: ground_kpa(tyre.as_ref()),
                 scrub: scrub.clamp(0.0, 1.0),
                 travelled,
                 anchor,
@@ -3906,6 +4006,8 @@ fn discover_controllers(
                 max_wheel_torque_nm: read_float(stage, prim, &(prefix.clone() + "maxWheelTorqueNm")),
                 max_power_kw: read_float(stage, prim, &(prefix.clone() + "maxPowerKw")),
                 traction_control: read_bool(stage, prim, &(prefix.clone() + "tractionControl")),
+                zero_command: read_token(stage, prim, &(prefix.clone() + "zeroCommand")),
+                drive_mode: read_token(stage, prim, &(prefix.clone() + "driveMode")),
                 front_steer_multiplier: read_float(
                     stage,
                     prim,
@@ -5318,4 +5420,31 @@ fn guard_chassis_inertia(
             );
         }
     }
+}
+
+/// How hard a tyre bears on the ground, in kilopascals: the load it carries
+/// over the patch it carries it on.
+///
+/// This is what decides how deep a wheel presses and how fast it wears the
+/// cover through. Width alone cannot say it — a wide tyre run soft and a narrow
+/// one run hard can carry the same weight and leave quite different marks — and
+/// how *recently* a wheel passed, which is what the covers used to read, says
+/// nothing about it at all.
+///
+/// Without a tyre model there is no patch to divide by, so it falls back to
+/// what a field tyre at working pressure does, which is about a bar.
+fn ground_kpa(tyre: Option<&crate::physics::backend::WheelForceOutput>) -> f32 {
+    const TYPICAL_KPA: f32 = 100.0;
+    let Some(out) = tyre else {
+        return TYPICAL_KPA;
+    };
+    let Some(patch) = out.pressure.as_ref() else {
+        return TYPICAL_KPA;
+    };
+    if !(patch.patch_area > 1.0e-4) || !out.normal_force.is_finite() {
+        return TYPICAL_KPA;
+    }
+    // Capped well above anything a field tyre does, so a spike out of the
+    // solver on a frame where a wheel lands cannot gouge the ground.
+    ((out.normal_force / patch.patch_area) as f32 / 1000.0).clamp(0.0, 800.0)
 }
