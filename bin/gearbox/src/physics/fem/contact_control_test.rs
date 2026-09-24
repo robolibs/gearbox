@@ -19,7 +19,7 @@ pub(super) fn frictionless_drive_contacts(
                 .unwrap()
                 .starts_with("tooth_envelope_");
             if is_tooth {
-                assert_eq!(shape.ids[0], 1);
+                assert!(matches!(shape.ids[0], 1 | 3));
                 removed[index] += 1;
             } else {
                 assert_eq!(
@@ -47,6 +47,12 @@ pub(super) fn frictionless_drive_contacts(
 
 #[test]
 fn toothless_control_retains_smooth_and_passive_geometry() {
+    for kind in [1, 3] {
+        check_toothless_control(kind);
+    }
+}
+
+fn check_toothless_control(kind: u32) {
     let support = SoftRigidShapeGpu {
         position: [0.04, 0.0, 0.0, 0.0],
         rotation: [
@@ -59,7 +65,7 @@ fn toothless_control_retains_smooth_and_passive_geometry() {
         ids: [2, 7, 0, 0],
     };
     let tooth = SoftRigidShapeGpu {
-        ids: [1, 7, 0, 0],
+        ids: [kind, 7, 0, 0],
         ..support
     };
     let passive = SoftRigidShapeGpu {
@@ -111,7 +117,7 @@ fn ceol_fem_machine_binding_toothless_contact_control() {
         assert_eq!(control.iter().filter(|s| s.ids[1] == body).count(), 6);
     }
     eprintln!(
-        "CEOL toothless control: {} shapes retained, {teeth} tooth boxes removed, all smooth supports retained",
+        "CEOL toothless control: {} shapes retained, {teeth} tooth shapes removed, all smooth supports retained",
         control.len()
     );
 }

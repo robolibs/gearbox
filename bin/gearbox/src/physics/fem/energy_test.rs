@@ -8,6 +8,8 @@ fn export_ceol_fem_energy_reference() {
     let mut rigid = rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
     let authored_mass = rigid.model.body_mass.host().unwrap().iter().sum::<f64>();
     let belts = track_mesh::FemTrackMeshes::prepare(app.world(), &spec, &layout, &rigid).unwrap();
+    let contacts =
+        track_contacts::FemTrackContacts::prepare(app.world(), &spec, &layout, &rigid).unwrap();
     rigid.partition_belt_mass(&belts).unwrap();
     let model = &rigid.model;
     let soft = &belts.model;
@@ -51,6 +53,9 @@ fn export_ceol_fem_energy_reference() {
         "rest_positions":soft.initial_particle_q.host().unwrap().iter()
             .map(|v| v.to_array()).collect::<Vec<_>>(),
         "material_reference":material_reference(soft),
+        "authored_shapes":contacts.shapes.iter().map(|s| serde_json::json!({
+            "position":s.position, "rotation":s.rotation, "dimensions":s.data, "ids":s.ids,
+        })).collect::<Vec<_>>(),
         "tet_indices":soft.tet_indices.host().unwrap(),
         "spring_a":soft.spring_a.host().unwrap(), "spring_b":soft.spring_b.host().unwrap(),
         "spring_rest_length":soft.spring_rest_length.host().unwrap(),

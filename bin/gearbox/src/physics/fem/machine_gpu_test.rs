@@ -358,6 +358,42 @@ fn authored_ceol_ground_contact_uses_bounded_gpu_storage() {
     );
 }
 
+fn trapezoid_distance(p: molla_math::Vec3, data: &[f32; 4], top: f64) -> f64 {
+    let (axial, bottom, height) = (data[0] as f64, data[1] as f64, data[2] as f64);
+    let corners = [
+        [-bottom, -height],
+        [bottom, -height],
+        [top, height],
+        [-top, height],
+    ];
+    let mut distance = f64::INFINITY;
+    let mut inside = true;
+    for i in 0..4 {
+        let a = corners[i];
+        let b = corners[(i + 1) % 4];
+        let edge = [b[0] - a[0], b[1] - a[1]];
+        let q = [p.y - a[0], p.z - a[1]];
+        inside &= edge[0] * q[1] - edge[1] * q[0] >= 0.0;
+        let t = ((q[0] * edge[0] + q[1] * edge[1]) / (edge[0] * edge[0] + edge[1] * edge[1]))
+            .clamp(0.0, 1.0);
+        distance = distance.min((q[0] - t * edge[0]).hypot(q[1] - t * edge[1]));
+    }
+    let planar = if inside { -distance } else { distance };
+    let cap = p.x.abs() - axial;
+    cap.max(0.0).hypot(planar.max(0.0)) + cap.max(planar).min(0.0)
+}
+
+#[test]
+fn tooth_clearance_includes_wide_root_flanks() {
+    use molla_math::Vec3;
+    let dimensions = [0.025, 0.013, 0.013, 0.6];
+    assert!(trapezoid_distance(Vec3::new(0.0, 0.008, 0.0), &dimensions, 0.005) < 0.0);
+    assert!(trapezoid_distance(Vec3::new(0.0, 0.014, 0.0), &dimensions, 0.005) > 0.0);
+    assert!(
+        (trapezoid_distance(Vec3::new(0.027, 0.0, 0.0), &dimensions, 0.005) - 0.002).abs() < 1e-8
+    );
+}
+
 pub(super) fn checked_wheel_contacts() -> (
     App,
     crate::controller::MachineInstanceSpec,
@@ -486,7 +522,10 @@ pub(super) fn checked_wheel_contacts() -> (
                         shape.data[2] as f64,
                     );
                 d.max(DVec3::ZERO).length() + d.max_element().min(0.0)
+            } else if shape.ids[0] == 3 {
+                trapezoid_distance(p, &shape.data, shape.position[3] as f64)
             } else {
+                assert_eq!(shape.ids[0], 2);
                 let radial = p.x.hypot(p.z) - shape.data[0] as f64;
                 let axial = p.y.abs() - shape.data[1] as f64;
                 radial.max(0.0).hypot(axial.max(0.0)) + radial.max(axial).min(0.0)

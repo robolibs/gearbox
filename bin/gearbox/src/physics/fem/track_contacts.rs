@@ -20,7 +20,54 @@ pub struct TrackContactShape {
     pub position: [f64; 3],
     pub rotation: [f64; 4],
     pub dimensions: [f64; 3],
+    #[serde(default)]
+    pub top_half_width: Option<f64>,
     pub friction: f64,
+}
+
+impl TrackContactShape {
+    fn gpu_descriptor(&self, body: u32, body_count: usize) -> Result<SoftRigidShapeGpu> {
+        let kind = match self.kind.as_str() {
+            "box" => 1,
+            "cylinder" => 2,
+            "trapezoid" => 3,
+            _ => return Err(invalid("unsupported contact primitive")),
+        };
+        let norm = self.rotation.iter().map(|v| v * v).sum::<f64>();
+        if self.name.is_empty()
+            || self.friction < 0.0
+            || (kind == 3) != self.top_half_width.is_some()
+            || self
+                .position
+                .iter()
+                .chain(&self.rotation)
+                .chain(&self.dimensions)
+                .chain(self.top_half_width.iter())
+                .chain(std::iter::once(&self.friction))
+                .any(|v| !v.is_finite() || !(*v as f32).is_finite())
+            || (norm - 1.0).abs() > 1e-6
+        {
+            return Err(invalid("invalid primitive descriptor"));
+        }
+        let shape = SoftRigidShapeGpu {
+            position: [
+                self.position[0] as f32,
+                self.position[1] as f32,
+                self.position[2] as f32,
+                self.top_half_width.unwrap_or(0.0) as f32,
+            ],
+            rotation: self.rotation.map(|v| v as f32),
+            data: [
+                self.dimensions[0] as f32,
+                self.dimensions[1] as f32,
+                self.dimensions[2] as f32,
+                self.friction as f32,
+            ],
+            ids: [kind, body, 0, 0],
+        };
+        shape.validate(body_count)?;
+        Ok(shape)
+    }
 }
 
 pub(crate) struct FemTrackContacts {
@@ -76,52 +123,61 @@ impl FemTrackContacts {
                     .bodies
                     .get(&entity)
                     .ok_or_else(|| invalid("contact body absent from articulation"))?;
-                let kind = match shape.kind.as_str() {
-                    "box" => 1,
-                    "cylinder" => 2,
-                    _ => return Err(invalid("unsupported contact primitive")),
-                };
-                let norm = shape.rotation.iter().map(|v| v * v).sum::<f64>();
-                if shape.name.is_empty()
-                    || !unique.insert((shape.body.clone(), shape.name.clone()))
-                    || shape
-                        .position
-                        .iter()
-                        .chain(&shape.rotation)
-                        .chain(&shape.dimensions)
-                        .chain(std::iter::once(&shape.friction))
-                        .any(|v| !v.is_finite() || !(*v as f32).is_finite())
-                    || (norm - 1.0).abs() > 1e-6
-                    || shape.friction < 0.0
-                    || shape.dimensions[0] <= 0.0
-                    || shape.dimensions[1] <= 0.0
-                    || (kind == 1 && shape.dimensions[2] <= 0.0)
-                {
-                    return Err(invalid("invalid or duplicate primitive"));
+                if !unique.insert((shape.body.clone(), shape.name.clone())) {
+                    return Err(invalid("duplicate primitive"));
                 }
+                let descriptor =
+                    shape.gpu_descriptor(body.index() as u32, rigid.model.body_count)?;
                 covered.insert(entity);
                 names.push(format!("{}:{}", shape.body, shape.name));
-                shapes.push(SoftRigidShapeGpu {
-                    position: [
-                        shape.position[0] as f32,
-                        shape.position[1] as f32,
-                        shape.position[2] as f32,
-                        0.0,
-                    ],
-                    rotation: shape.rotation.map(|v| v as f32),
-                    data: [
-                        shape.dimensions[0] as f32,
-                        shape.dimensions[1] as f32,
-                        shape.dimensions[2] as f32,
-                        shape.friction as f32,
-                    ],
-                    ids: [kind, body.index() as u32, 0, 0],
-                });
+                shapes.push(descriptor);
             }
             if covered.len() != allowed.len() {
                 return Err(invalid("wheel is missing FEM contact geometry"));
             }
         }
         Ok(Self { shapes, names })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TrackContactShape;
+
+    fn shape(kind: &str) -> TrackContactShape {
+        serde_json::from_value(serde_json::json!({"name":"tooth", "body":"/wheel",
+            "kind":kind, "position":[0,0,0], "rotation":[0,0,0,1],
+            "dimensions":[0.025,0.013,0.013], "friction":0.6}))
+        .unwrap()
+    }
+
+    #[test]
+    fn trapezoid_requires_explicit_valid_top_width() {
+        let mut tooth = shape("trapezoid");
+        assert!(tooth.gpu_descriptor(0, 1).is_err());
+        tooth.top_half_width = Some(0.005);
+        let gpu = tooth.gpu_descriptor(0, 1).unwrap();
+        assert_eq!(gpu.ids, [3, 0, 0, 0]);
+        assert_eq!(gpu.position[3], 0.005);
+        assert_eq!(gpu.data, [0.025, 0.013, 0.013, 0.6]);
+        for value in [0.0, -0.1, 1e-30, 1e30, f64::NAN, f64::INFINITY] {
+            tooth.top_half_width = Some(value);
+            assert!(tooth.gpu_descriptor(0, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_shapes_reject_ignored_profile_metadata() {
+        for kind in ["box", "cylinder"] {
+            let mut primitive = shape(kind);
+            assert!(primitive.gpu_descriptor(0, 1).is_ok());
+            primitive.top_half_width = Some(0.005);
+            assert!(primitive.gpu_descriptor(0, 1).is_err());
+        }
+        assert!(shape("unknown").gpu_descriptor(0, 1).is_err());
+        assert!(shape("box").gpu_descriptor(1, 1).is_err());
+        let mut primitive = shape("box");
+        primitive.friction = -1e-50;
+        assert!(primitive.gpu_descriptor(0, 1).is_err());
     }
 }
