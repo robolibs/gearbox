@@ -51,7 +51,11 @@ fn ceol_fem_machine_binding() {
     let layout = FemMachineLayout::inspect(app.world_mut(), &machine).unwrap();
     let prepared = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
     let wheel_contacts = crate::physics::fem::track_contacts::FemTrackContacts::prepare(app.world(), &machine, &layout, &prepared).unwrap();
-    assert_eq!(wheel_contacts.shapes.len(), machine.tracks.iter().map(|t| 21+t.fem.as_ref().unwrap().sprocket_teeth).sum::<usize>());
+    let compact_drive = machine.tracks.iter().all(|t| t.fem.as_ref().unwrap().sprocket_teeth == 16);
+    let expected_mass = if compact_drive { 744.0 } else { 750.0 };
+    let expected_passive_joints = if compact_drive { 8 } else { 10 };
+    assert_eq!(wheel_contacts.shapes.len(), machine.tracks.iter().zip(&layout.tracks)
+        .map(|(t,l)| 3*l.passive_joints.len()+6+t.fem.as_ref().unwrap().sprocket_teeth).sum::<usize>());
     assert_eq!(prepared.model.body_count, layout.bodies.len());
     assert_eq!(prepared.model.joint_count, layout.tree_joints.len() + 1);
     assert_eq!(prepared.loops.len(), layout.loop_joints.len());
@@ -90,6 +94,7 @@ fn ceol_fem_machine_binding() {
         let (length, radius_error) = match spec.fem.as_ref().unwrap().sprocket_teeth {
             12 => (3.188767467482, 0.002251760321),
             14 => (3.195525621892, 0.0),
+            16 => (2.789381630227, 0.0),
             n => panic!("unexpected CEOL drive fixture: {n} teeth"),
         };
         assert!((track.neutral_length - length).abs() < 1e-6);
@@ -147,7 +152,7 @@ fn ceol_fem_machine_binding() {
     let mut partitioned = crate::physics::fem::rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
     partitioned.partition_belt_mass(&belts).unwrap();
     let combined_mass = partitioned.model.body_mass.host().unwrap().iter().sum::<f64>() + belts.model.particle_mass.host().unwrap().iter().sum::<f64>();
-    assert!((combined_mass - 750.0).abs() < 1e-5);
+    assert!((combined_mass - expected_mass).abs() < 1e-5);
     assert_fem_mass_conserved(fem_mass_properties(&prepared,None),fem_mass_properties(&partitioned,Some(&belts)));
     for (authored,track) in machine.tracks.iter().zip(&belts.tracks) {
         use molla_math::{Vec3 as Vector,Mat3};
@@ -181,13 +186,13 @@ fn ceol_fem_machine_binding() {
     assert_eq!(invalid_partition.model.body_com.host().unwrap(),saved_com);
     assert_eq!(invalid_partition.model.body_inertia.host().unwrap(),saved_inertia);
     let mass: f64 = prepared.model.body_mass.host().unwrap().iter().sum();
-    assert!((mass - 750.0).abs() < 1e-5, "authored CEOL mass: {mass}");
+    assert!((mass - expected_mass).abs() < 1e-5, "authored CEOL mass: {mass}");
     assert!(prepared.control.joint_motor_max_force.host().unwrap().iter().any(|&f| f == 20000.0));
     assert!(layout.bodies.len() > 13);
     assert_eq!(layout.tree_joints.len() + 1, layout.bodies.len());
     assert_eq!(layout.loop_joints.len(), 2, "hitch closure constraints were dropped");
     assert_eq!(layout.tracks.len(), 2);
-    assert_eq!(layout.tracks.iter().map(|t| t.passive_joints.len()).sum::<usize>(), 10);
+    assert_eq!(layout.tracks.iter().map(|t| t.passive_joints.len()).sum::<usize>(), expected_passive_joints);
     for track in &layout.tracks {
         assert!(layout.bodies.contains(&track.carrier));
         assert!(layout.bodies.contains(&track.sprocket));
