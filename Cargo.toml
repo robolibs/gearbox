@@ -105,6 +105,21 @@ openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.
 # Local peerbus carries the per-handle request-id seed fix; every crate in
 # the graph (agentio included) must see the same peerbus, so patch the
 # git source rather than depend on the path directly.
+[patch."https://github.com/bresilla/molla"]
+molla-actuators = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-actuators" }
+molla-autograd = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-autograd" }
+molla-compute = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-compute" }
+molla-compute-primitives = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-compute-primitives" }
+molla-core = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-core" }
+molla-geometry = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-geometry" }
+molla-kernels = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-kernels" }
+molla-math = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-math" }
+molla-optim = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-optim" }
+molla-sim = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-sim" }
+molla-solvers = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-solvers" }
+molla-storage = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-storage" }
+molla-vehicle = { path = "/home/bresilla/.cache/ceol-global-newton/crates/molla-vehicle" }
+
 [patch."https://codeberg.org/robolibs/peerbus.git"]
 peerbus = { path = "../peerbus" }
 
