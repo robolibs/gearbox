@@ -434,7 +434,7 @@ fn run_trajectory_contacts(
                         let path = sample_directory.join("rejected-contact-inputs");
                         std::fs::create_dir(&path).expect("rejected input directory must not already exist");
                         let mut sizes = std::collections::BTreeMap::new();
-                        for (name, buffer) in snapshot.buffers() {
+                        for (name, buffer) in snapshot.buffers().chain(snapshot.solved_buffers()) {
                             sizes.insert(name, buffer.size());
                             std::fs::write(path.join(format!("{name}.bin")),
                                 machine_gpu_test::read_bytes(&device, &queue, buffer)).unwrap();
@@ -444,6 +444,7 @@ fn run_trajectory_contacts(
                             "schema":"molla_first_contact_inputs_v1",
                             "boundary":"after_predictor_before_first_contact_solve",
                             "step":island.clock.submitted, "accepted":false, "molla_dependency":molla_dependency,
+                            "solved_boundary":"after_final_contact_check_before_drift",
                             "particles":sizes["positions"] / 16, "bodies":sizes["body_poses"] / 32,
                             "dofs":sizes["rigid_velocities"] / 4, "rows":sizes["contacts"] / 80,
                             "buffer_bytes":sizes, "dt":settings.dt, "iterations":settings.iterations,
@@ -465,7 +466,7 @@ fn run_trajectory_contacts(
                     let snapshot = island.system.contact_snapshot().unwrap();
                     let settings = snapshot.settings().unwrap();
                     let mut sizes = std::collections::BTreeMap::new();
-                    for (name, buffer) in snapshot.buffers() {
+                    for (name, buffer) in snapshot.buffers().chain(snapshot.solved_buffers()) {
                         sizes.insert(name, buffer.size());
                         std::fs::write(path.join(format!("{name}.bin")),
                             machine_gpu_test::read_bytes(&device, &queue, buffer)).unwrap();
@@ -478,6 +479,7 @@ fn run_trajectory_contacts(
                         "boundary":"after_predictor_before_first_contact_solve",
                         "step":island.clock.completed, "molla_dependency":molla_dependency,
                         "accepted":true, "contact_solver":contact_solver,
+                        "solved_boundary":"after_final_contact_check_before_drift",
                         "final_contact_rows_bytes":final_rows.size(),
                         "particles":sizes["positions"] / 16,
                         "bodies":sizes["body_poses"] / 32,
