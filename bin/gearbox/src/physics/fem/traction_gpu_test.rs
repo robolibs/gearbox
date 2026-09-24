@@ -481,6 +481,13 @@ fn run_trajectory_contacts(
                     let words = machine_gpu_test::read_floats::<1>(&device, &queue, buffer);
                     eprintln!("GLOBAL NEWTON failed: words={words:?}; bits={:?}", words.iter().map(|v| v[0].to_bits()).collect::<Vec<_>>());
                 }
+                if let Some(buffer) = island.system.global_newton_iteration_history() {
+                    let words = machine_gpu_test::read_floats::<1>(&device, &queue, buffer);
+                    for (iteration, state) in words.chunks_exact(16).enumerate().filter(|(_, state)| state[4][0] > 0.0) {
+                        eprintln!("GLOBAL history iteration={iteration} fault={} accepted={} residual={} trial={} alpha={} linear={} linear_residual={} linear_converged={} linear_faults={}",
+                            state[0][0].to_bits(),state[2][0].to_bits(),state[5][0],state[9][0],state[8][0],state[12][0].to_bits(),state[13][0],state[14][0].to_bits(),state[15][0].to_bits());
+                    }
+                }
                 if monitor_settling {
                     let p = machine_gpu_test::read_floats::<4>(&device, &queue, island.positions());
                     let v = machine_gpu_test::read_floats::<4>(&device, &queue, island.system.soft_state().particle_qd.device_buffer().unwrap());
