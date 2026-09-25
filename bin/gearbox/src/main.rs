@@ -28,6 +28,8 @@ mod load;
 mod physics;
 mod physics_debug;
 mod sensor_cameras;
+mod sensor_generic;
+mod sensor_radio;
 mod sensors;
 mod services;
 mod terrain;

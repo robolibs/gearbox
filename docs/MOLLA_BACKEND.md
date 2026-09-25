@@ -828,3 +828,78 @@ from sensor cameras would stop the world casting shadows. Removing the cost
 needs a small Bevy change (a per-camera "no directional shadows" marker in
 `bevy_light` cascades and `bevy_pbr` light preparation) or globally cheaper
 shadows. Neither is applied.
+
+### Generic sensor links: the Webots set (2026-09-25)
+
+Every device in the Webots sensor guide now has a sensor-link kind
+(`specs/CONTROLLER_SPEC.md` §7.6):
+- accelerometer, gyro, inertial unit, compass and GPS;
+- distance (laser, infra-red or sonar), light, position and radar;
+- range finder, touch (bumper, force or force-3d), receiver and emitter;
+- camera recognition.
+
+Molla (`molla-sensors`, pinned at `61ff952`) computes every reading. Gearbox
+supplies only what the environment knows:
+- the site frame (north +X, up +Y, east +Z);
+- each site's datum on the planet, for GPS;
+- the sun and sky of the weather, for light;
+- this step's contact forces, for touch;
+- the emitted packets, for radio.
+
+Readings stream as `gearbox.measurement.v1`. Controllers send packets as
+`gearbox.emit_request.v1` on `/machines/<id>/emit`.
+
+- `bin/gearbox/src/sensor_generic.rs` samples the generic kinds.
+  - Distance, light and radar rays are cast on the CPU (`RigidRays`) against
+    the live rigid scene. The first live run cast them with Molla's synchronous
+    GPU raycaster. That made the first rig of each frame wait for the renderer's
+    queued work: 77–128 ms per sample against 1.3 ms for the next rig, at
+    7–9 fps. On the CPU the same rigs take 2.8 and 0.4 ms, at 12–13 fps.
+  - Light uses the weather's own split. The beam is the clear-sky sun dimmed by
+    `SkyLight::mean_direct`. Sky light is `0.25 × beam × sin(elevation) ×
+    diffuse_gain`, a fifth of the global light under a clear sky.
+- `bin/gearbox/src/sensor_radio.rs` puts every machine's receivers and emitters
+  on one Molla `RadioMedium`. Infra-red line of sight uses the backend's new
+  `cast_ray_filtered`, which skips both end bodies. Rapier and Molla implement
+  it.
+- Recognition adds a shape-index channel to the camera trace. Objects are rigid
+  bodies other than the machine's own. Labels are `<machine>:<body prim>`.
+- `contact_forces` resolves collider bodies before taking the Molla scene lock.
+  Doing it under the lock deadlocked the first GPU test.
+
+Verification, RTX 4080, release, Molla backend at 120 Hz:
+- `sensors::tests::imu_and_lidar_sample_the_molla_scene` (`oslo make
+  test-fem-gpu --filter=imu_and_lidar`) now also covers accelerometer, gyro,
+  inertial unit, compass, distance, light, radar, touch, position and
+  recognition. It checks each against the fixture's geometry.
+- Unit tests cover:
+  - `sensor_generic::tests`: GPS against the site datum, the daylight split,
+    recognition records;
+  - `sensor_radio::tests`: radio versus infra-red behind a wall, and range;
+  - `links::tests::generic_sensor_links_parse_their_attributes`;
+  - the `wire_json` measurement round trip.
+- Live, `world/sensor_suite.usda` spawned as `ss`, with a second copy 20 m
+  ahead:
+  - **At rest:** the inertial unit's roll 0.01787 and pitch −0.00787 give
+    gravity `(0.0772, 0.1753, 9.808)` in the link frame, equal to the
+    accelerometer. Yaw 89.55° matches odom's 89.5° and the compass heading of
+    0.45°. GPS sits 0.5 m behind odom, as authored, with zero speed.
+  - **Radar:** sees the other tractor's rear wheels at 16.0 and 16.8 m and its
+    chassis at 17.9 m. While driving at 1.5 m/s it reads −1.43 to −1.51 m/s
+    radial speed, down to 2.4 m.
+  - **Recognition:** lists `ss2:/World/Tractor_01/chassis` and both rear
+    wheels at about 17 m.
+  - **Radio:** a packet from `ss2`'s emitter reaches `ss` at strength 0.00289
+    (18.6 m) from straight ahead, and `ss2`'s own receiver at 0.8 m.
+  - **Bumper:** driven into the other machine 0.9 m off-centre, the chassis
+    bumper reads 16 contacts and 10.5 kN pushing back along −X. Head-on, the
+    two tractors' wheels meet first: the rear tyres stick out 0.3 m past the
+    hull, so the bumper stays clear.
+  - **Position:** the rear-wheel sensor follows the wheel angle, 25.9 rad
+    after a 17.6 m roll.
+
+Tyre–ground forces come from the tyre model, not contact manifolds. A touch
+sensor on a wheel therefore reports only collisions with other bodies. A
+sensor mounted inside its own body's collider sees that collider first. The
+radar in the first draft of the suite sat on the hull's front face and saw
+nothing.

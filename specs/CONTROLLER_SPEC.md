@@ -602,8 +602,8 @@ Readings are in the link's own frame, so author the link with REP-103 axes:
 
 | Property | Type | Status | Default | Notes |
 |---|---|---|---|---|
-| `gearbox:sensor:kind` | token | SHOULD | from the name | `imu`, `lidar` or `camera`. Without it, a name starting with `imu`, `lidar`/`laser` or `camera`/`cam_` implies the kind; any other sensor link is not simulated (warning). Unknown kinds are validation errors. |
-| `gearbox:sensor:rate_hz` | float | optional | 100 (imu), 10 (lidar), 5 (camera) | Samples per simulated second, `(0, 10000]`. |
+| `gearbox:sensor:kind` | token | SHOULD | from the name | `imu`, `lidar`, `camera`, `range_finder` (a depth-only `geometry` camera), `accelerometer`, `gyro`, `inertial_unit`, `compass`, `gps`, `distance`, `light`, `position`, `radar`, `touch`, `receiver` or `emitter`. Without it, a name starting with a kind, `laser`, `cam_` or `gnss` implies the kind; any other sensor link is not simulated (warning). Unknown kinds are validation errors. |
+| `gearbox:sensor:rate_hz` | float | optional | 100 (imu, accelerometer, gyro, inertial_unit, position, touch), 20 (compass, distance, radar), 10 (lidar, gps, light), 5 (camera) | Samples per simulated second, `(0, 10000]`. Receivers publish each packet as it arrives. |
 | `gearbox:sensor:columns` | int | optional | 360 | LiDAR azimuth columns, `1..=8192`. |
 | `gearbox:sensor:rows` | int | optional | 16 | LiDAR zenith rows, `1..=512`; `columns × rows ≤ 1048576`. |
 | `gearbox:sensor:hfov_deg` | float | optional | 360 | LiDAR horizontal field of view centred on +X, `(0, 360]`. A full circle does not repeat its first column. |
@@ -612,6 +612,14 @@ Readings are in the link's own frame, so author the link with REP-103 axes:
 | `gearbox:sensor:width` / `height` | int | optional | 128 / 96 | Camera image size in pixels, `1..=4096` each. |
 | `gearbox:sensor:render` | token | optional | `optimized` | Camera colour source: `optimized` (Bevy render of the visual scene without grass, clouds, bloom or multisampling), `full` (Bevy render with grass, bloom and multisampling) or `geometry` (Molla trace of the collision shapes with flat per-shape colour). |
 | `gearbox:sensor:channels` | token | optional | `color_depth` | Camera channels to publish: `color`, `depth` or `color_depth`. Depth always comes from the Molla trace of the collision shapes. |
+| `gearbox:sensor:recognition` | bool | optional | false | Camera also streams the objects it sees (below). |
+| `gearbox:sensor:type` | token | optional | `laser`, `bumper`, `radio` | Distance: `laser`, `infra_red` or `sonar`. Touch: `bumper`, `force` or `force3d`. Receiver and emitter: `radio`, `infrared` or `serial`. Any other pairing is a validation error. |
+| `gearbox:sensor:range_m` (generic) | float | optional | 10 (distance), 50 (radar), infinite (radio) | Distance and radar maximum range, `> 0`; radio range, where a negative value means unlimited. |
+| `gearbox:sensor:rays` | float | optional | 1 | Distance-sensor rays, whole `1..=64`: the axis, then a ring at half the aperture. |
+| `gearbox:sensor:aperture_deg` | float | optional | 0 (distance), 90 (radio) | Full cone of a distance sensor's rays, or of an infra-red link, `[0, 360]`. |
+| `gearbox:sensor:hfov_deg` / `vfov_deg` (radar) | float | optional | 45 / 10 | Radar field of view about +X, `(0, 360]`. |
+| `gearbox:sensor:min_range_m` | float | optional | 1 | Radar minimum range, `[0, range_m)`. |
+| `gearbox:sensor:channel` | float | optional | 0 | Radio channel, whole `>= -1`; `-1` hears and reaches every channel. |
 
 An `imu` link streams `datapod.imu.v1`: specific force and angular velocity in
 the link frame, and the link's orientation in the same remapped world frame as
@@ -629,6 +637,32 @@ the Molla depth of the same sample carry the same `sample` and simulated time
 but arrive separately. Bevy-rendered cameras render only on frames where a
 sample is due, and sample at most once per rendered frame. Out-of-range values
 are validation errors, not clamped. Sensor links on the Rapier backend are discovered but not sampled.
+
+Every other kind streams `gearbox.measurement.v1`: `kind` names the sensor,
+`count` records of a fixed width in `values`, vectors in the link's axes.
+Molla computes every reading; Gearbox only supplies the environment: its site
+frame (north +X, up +Y, east +Z), where each site sits on the planet, the sun
+and sky of the weather, this step's contact forces and the radio packets.
+
+| Kind | One record |
+|---|---|
+| `accelerometer` / `gyro` | `[x, y, z]` specific force (m/s²) / angular velocity (rad/s) |
+| `inertial_unit` | `[roll, pitch, yaw, qx, qy, qz, qw]` in east-north-up; yaw zero facing east, counter-clockwise |
+| `compass` | `[nx, ny, nz, heading]`: north in link axes, clockwise angle from north to +X |
+| `gps` | `[latitude°, longitude°, altitude m, east, north, up, speed, v_east, v_north, v_up]` (WGS84; east-north-up from the site origin) |
+| `distance` | `[distance m (infinite for none), value]` |
+| `light` | `[irradiance, direct, sky (W/m²), visible sources, value]` facing +X |
+| `position` | `[position (rad or m), velocity]` of the joint between the link's body and the body above |
+| `radar` | per target `[distance, azimuth, elevation, radial speed, received power dBm]`, nearest first; dynamic bodies of other machines and the world are targets |
+| `touch` | `[touching 0/1, contacts, force N, fx, fy, fz]` on the link's body |
+| `receiver` | one packet `[channel, signal strength, dx, dy, dz]` (unit direction to the emitter); payload in `data`, emitter `<machine>/<link>` in props `from` |
+| `recognition` | per object `[id, pixels, left, top, right, bottom, x, y, z, sx, sy, sz]` in camera axes (-Z forward, +Y up); labels in props `names`, one per line |
+
+A controller sends a packet with a `gearbox.emit_request.v1` request to
+`/machines/<machine_id>/emit`: props `link` names the emitter link, `data`
+is the payload. Radio reaches receivers on its channel within range;
+infra-red also needs each end inside the other's aperture and a clear line of
+sight; serial reaches every serial receiver on its channel.
 
 ```usda
 def Xform "lidar_link" (prepend apiSchemas = ["GearboxLinkAPI"])

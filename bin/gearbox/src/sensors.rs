@@ -20,6 +20,7 @@ use gearbox_api::datapod::robot::Imu;
 use gearbox_api::datapod::{Acceleration, Quaternion, Velocity};
 use gearbox_api::{
     CAMERA_COLOR, CAMERA_DEPTH, CameraFrame, GearboxBus, LIDAR_CHUNK_PULSES, LidarScan, Props,
+    measurement_kind,
 };
 use molla_compute::{AdapterInfo, Engine};
 use molla_core::BodyId as MollaBodyId;
@@ -37,6 +38,10 @@ use usd_bevy::UsdPrimRef;
 
 use crate::controller::{ControllerInventory, MachineAgentKeys, find_prim_entity};
 use crate::links::{LinkSpec, LinkTree, SensorKind, SensorSpec};
+use crate::sensor_radio::RadioLink;
+use crate::sensor_generic::{
+    GenericSample, GenericSensors, SensorEnvironment, is_generic, measurement, recognition,
+};
 use crate::physics::backend::{BodyId, PhysicsBackend};
 use crate::physics::{PhysicsActive, PhysicsWorld};
 
@@ -198,6 +203,9 @@ pub struct ResolvedMount {
     pub body: BodyId,
     /// The link prim's entity, which Bevy-rendered cameras are parented to.
     pub entity: Option<Entity>,
+    /// A position sensor's joint: the one between its rigid body and the
+    /// rigid body above.
+    pub joint: Option<crate::physics::backend::JointId>,
     /// Sensor frame in the body frame.
     pub local: MTransform,
 }
@@ -207,6 +215,7 @@ pub enum SensorReading<'a> {
     Imu(&'a Imu),
     Lidar(&'a LidarScan),
     Camera(&'a CameraFrame),
+    Measurement(&'a gearbox_api::Measurement),
 }
 
 /// Per-rig cost counters, reported every ten seconds.
@@ -262,6 +271,12 @@ pub struct Rig {
     ring: ReadbackRing,
     pending: Vec<Pending>,
     render_requests: Vec<RenderRequest>,
+    generic: GenericSensors,
+    /// Generic readings awaiting publication.
+    ready: Vec<(usize, gearbox_api::Measurement)>,
+    /// Recognition object of each scene shape, and each object's label.
+    objects: Vec<Option<u32>>,
+    object_labels: Vec<String>,
     pub stats: RigStats,
     last_report: f64,
 }
@@ -277,6 +292,20 @@ pub struct RenderRequest {
 /// Whether the Molla trace of a camera link produces its colour channel.
 fn molla_color(spec: &SensorSpec) -> bool {
     spec.color && !spec.render.is_bevy()
+}
+
+/// Channels the Molla trace of a camera link reads back, in order:
+/// recognition needs depth and shape indices.
+fn camera_channels(spec: &SensorSpec) -> Vec<CameraChannels> {
+    [
+        (molla_color(spec), CameraChannels::COLOR),
+        (spec.depth || spec.recognition, CameraChannels::DEPTH),
+        (spec.recognition, CameraChannels::SHAPE_INDEX),
+    ]
+    .into_iter()
+    .filter(|(wanted, _)| *wanted)
+    .map(|(_, channel)| channel)
+    .collect()
 }
 
 /// Splits one four-byte-per-pixel channel of a row-major camera image into
@@ -360,6 +389,7 @@ pub(crate) fn run_machine_sensors(
     transforms: Query<&GlobalTransform>,
     visuals: VisualColors,
     mut renders: ResMut<crate::sensor_cameras::SensorRenderQueue>,
+    daylight: crate::sensor_generic::Daylight,
 ) {
     renders.live.clear();
     let Some(mut bus) = bus else { return };
@@ -369,6 +399,21 @@ pub(crate) fn run_machine_sensors(
     rigs.failed.retain(|id, _| live.contains(id.as_str()));
     let stamp_ms = (time.elapsed_secs_f64() * 1000.0) as u32;
     let sim_time = physics.simulated_seconds;
+    let touch = inventory.machines.iter().any(|m| {
+        m.links
+            .links
+            .iter()
+            .any(|l| l.sensor.is_some_and(|s| s.kind == SensorKind::Touch))
+    });
+    let mut carriers = Vec::new();
+    let environment = SensorEnvironment {
+        light: daylight.light(),
+        contacts: if touch {
+            crate::sensor_generic::contact_forces(&**physics)
+        } else {
+            Vec::new()
+        },
+    };
 
     for machine in &inventory.machines {
         if !machine.links.links.iter().any(|l| l.sensor.is_some()) {
@@ -441,9 +486,34 @@ pub(crate) fn run_machine_sensors(
                 continue;
             }
             rigs.rigs.remove(&machine.id);
-            match Rig::build(engine, &**physics, resolved, revision, sim_time, &|entity| {
-                visuals.color(entity)
-            }) {
+            let own: Vec<BodyId> = machine
+                .links
+                .links
+                .iter()
+                .filter_map(|l| l.body_prim.as_deref())
+                .filter_map(|prim| find_prim_entity(scene_root, prim, &prims, &parents))
+                .filter_map(|entity| physics.entity_to_body.get(&entity).copied())
+                .collect();
+            // `<machine>:<body prim>` for machine parts, the body prim otherwise.
+            let label = |entity: Entity| {
+                let lineage = || std::iter::once(entity).chain(parents.iter_ancestors(entity));
+                let body = lineage().find(|e| physics.entity_to_body.contains_key(e)).unwrap_or(entity);
+                let path = prims.get(body).ok()?.1.path.to_string();
+                let machine = lineage().find_map(|e| {
+                    inventory.machines.iter().find(|m| m.scene_root == Some(e)).map(|m| m.id.as_str())
+                });
+                Some(machine.map_or_else(|| path.clone(), |id| format!("{id}:{path}")))
+            };
+            match Rig::build(
+                engine,
+                &**physics,
+                resolved,
+                revision,
+                sim_time,
+                &|entity| visuals.color(entity),
+                &label,
+                &own,
+            ) {
                 Ok(rig) => {
                     info!(
                         "gearbox-sensors: `{}` samples {} sensor link(s) on scene revision {revision}",
@@ -461,9 +531,10 @@ pub(crate) fn run_machine_sensors(
             }
         }
         let rig = rigs.rigs.get_mut(&machine.id).expect("rig just built");
+        carriers.push((machine.id.clone(), machine_id.clone()));
         if active.0 {
             let started = std::time::Instant::now();
-            if let Err(error) = rig.sample(engine, &**physics, sim_time) {
+            if let Err(error) = rig.sample(engine, &**physics, sim_time, &environment) {
                 warn!("gearbox-sensors: `{}` sample failed: {error}", machine.id);
             }
             rig.stats.sample_seconds += started.elapsed().as_secs_f64();
@@ -473,6 +544,7 @@ pub(crate) fn run_machine_sensors(
             SensorReading::Imu(imu) => agent.publish_sensor_imu(link, imu),
             SensorReading::Lidar(scan) => agent.publish_sensor_lidar(link, scan),
             SensorReading::Camera(frame) => agent.publish_sensor_camera(link, frame),
+            SensorReading::Measurement(reading) => agent.publish_sensor_measurement(link, reading),
         });
         rig.stats.collect_seconds += started.elapsed().as_secs_f64();
         for camera in rig.bevy_cameras() {
@@ -516,6 +588,69 @@ pub(crate) fn run_machine_sensors(
             rig.stats = RigStats::default();
             rig.last_report = now;
         }
+    }
+    exchange_packets(rigs, &mut bus, &carriers, &**physics, sim_time, stamp_ms);
+}
+
+/// Carries this frame's emitter requests of every machine to the receiver
+/// links that hear them; requests naming no emitter link are dropped.
+fn exchange_packets(
+    rigs: &mut MachineSensorRigs,
+    bus: &mut GearboxBus,
+    carriers: &[(String, String)],
+    physics: &dyn PhysicsBackend,
+    sim_time: f64,
+    stamp_ms: u32,
+) {
+    let (mut emitters, mut receivers) = (Vec::new(), Vec::new());
+    for (id, key) in carriers {
+        let Some(rig) = rigs.rigs.get(id) else { continue };
+        for (mount, resolved) in rig.radio_mounts() {
+            let Some(world) = crate::sensor_radio::world_pose(physics, resolved.body, &resolved.local) else {
+                continue;
+            };
+            let link = RadioLink {
+                machine: key.clone(),
+                mount,
+                name: resolved.name.clone(),
+                link_index: resolved.link as u32,
+                body: resolved.body,
+                world,
+                endpoint: crate::sensor_radio::endpoint(&resolved.spec),
+            };
+            if resolved.spec.kind == SensorKind::Emitter {
+                emitters.push(link);
+            } else {
+                receivers.push(link);
+            }
+        }
+    }
+    let mut sent = Vec::new();
+    for (key, agent) in &mut bus.machines {
+        for request in agent.emits.drain(..) {
+            let name = request.link();
+            match emitters.iter().position(|e| &e.machine == key && e.name == name) {
+                Some(emitter) => sent.push((emitter, request.data)),
+                None => debug!("gearbox-sensors: `{key}` has no emitter link `{name}`; packet dropped"),
+            }
+        }
+    }
+    if sent.is_empty() || receivers.is_empty() {
+        return;
+    }
+    let rig_of: HashMap<&str, &str> = carriers.iter().map(|(id, key)| (key.as_str(), id.as_str())).collect();
+    for (receiver, mut reading) in crate::sensor_radio::exchange(physics, &emitters, &receivers, sent, sim_time) {
+        let link = &receivers[receiver];
+        let Some(rig) = rig_of.get(link.machine.as_str()).and_then(|id| rigs.rigs.get_mut(*id)) else {
+            continue;
+        };
+        reading.stamp_ms = stamp_ms;
+        reading.sample = rig.packets(link.mount) as u32;
+        let delivered = bus
+            .machines
+            .get_mut(&link.machine)
+            .is_some_and(|agent| agent.publish_sensor_measurement(&link.name, &reading));
+        rig.record(link.mount, delivered);
     }
 }
 
@@ -567,12 +702,26 @@ fn resolve_mounts(
                 link.name
             ));
         }
+        let joint = (spec.kind == SensorKind::Position)
+            .then(|| {
+                let body_link = links.links.iter().find(|l| l.body_prim.as_deref() == Some(body_prim))?;
+                let parent_link = links.get(body_link.parent.as_deref()?)?;
+                let parent_prim = rigid_body_prim(links, parent_link)?;
+                let parent_entity = find_prim_entity(scene_root, parent_prim, prims, parents)?;
+                let parent_body = *physics.entity_to_body.get(&parent_entity)?;
+                physics.joint_between(parent_body, body)
+            })
+            .flatten();
+        if spec.kind == SensorKind::Position && joint.is_none() {
+            return Err(format!("position sensor `{}` has no joint above it", link.name));
+        }
         mounts.push(ResolvedMount {
             link: index,
             name: link.name.clone(),
             spec,
             body,
             entity: Some(sensor_entity),
+            joint,
             local: MTransform::new(
                 MVec3::new(
                     translation.x as f64,
@@ -620,7 +769,10 @@ fn rigid_body_prim<'a>(links: &'a LinkTree, link: &'a LinkSpec) -> Option<&'a st
 
 impl Rig {
     /// Snapshots the Molla scene and creates the GPU sensors of `mounts`;
-    /// `colors` gives a collider entity's display colour for the cameras.
+    /// `colors` gives a collider entity's display colour for the cameras,
+    /// `labels` its object name for recognition, and `own_bodies` the
+    /// machine's bodies, which its radars and recognition ignore.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         engine: &Engine,
         physics: &dyn PhysicsBackend,
@@ -628,6 +780,8 @@ impl Rig {
         revision: u64,
         sim_time: f64,
         colors: &dyn Fn(Entity) -> Option<[f32; 3]>,
+        labels: &dyn Fn(Entity) -> Option<String>,
+        own_bodies: &[BodyId],
     ) -> Result<Self, String> {
         let device = engine.device().ok_or("sensor engine has no device")?;
         let queue = engine.queue().ok_or("sensor engine has no queue")?;
@@ -645,6 +799,38 @@ impl Rig {
         });
         let (scene, imu_model, mut state, bodies) =
             snapshot.ok_or("physics backend is not molla")??;
+        let own: HashSet<u64> = own_bodies
+            .iter()
+            .filter_map(|&b| physics.molla_body_handle(b))
+            .map(|h| h.to_bits())
+            .collect();
+        let (mut joints, mut targets) = (HashMap::new(), Vec::new());
+        let recognition = mounts.iter().any(|m| m.spec.kind == SensorKind::Camera && m.spec.recognition);
+        let (mut objects, mut object_labels) = (Vec::new(), Vec::new());
+        physics.with_molla_scene(&mut |rigid| {
+            if recognition {
+                (objects, object_labels) = shape_objects(rigid, &own, labels);
+            }
+            for (i, mount) in mounts.iter().enumerate() {
+                let Some(joint) = mount.joint else { continue };
+                if let Some(index) = rigid
+                    .joints()
+                    .find(|(h, _)| h.to_bits() == joint.0)
+                    .and_then(|(h, _)| rigid.joint_index(h))
+                {
+                    joints.insert(i, index.index());
+                }
+            }
+            targets = rigid
+                .bodies()
+                .filter(|(h, desc)| {
+                    desc.kind == molla_sim::runtime::BodyKind::Dynamic && !own.contains(&h.to_bits())
+                })
+                .filter_map(|(h, _)| rigid.body_index(h))
+                .collect();
+        });
+        let specs: Vec<SensorSpec> = mounts.iter().map(|m| m.spec).collect();
+        let generic = GenericSensors::build(&specs, joints, targets)?;
         state
             .upload_to_device(device, queue)
             .map_err(|e| format!("sensor state upload: {e}"))?;
@@ -688,7 +874,7 @@ impl Rig {
         let imu_mounts: Vec<usize> = mounts
             .iter()
             .enumerate()
-            .filter(|(_, m)| m.resolved.spec.kind == SensorKind::Imu)
+            .filter(|(_, m)| m.resolved.spec.kind.uses_imu())
             .map(|(i, _)| i)
             .collect();
         let imu = if imu_mounts.is_empty() {
@@ -723,22 +909,25 @@ impl Rig {
         let mut camera_bytes = 0u64;
         for (i, mount) in mounts.iter().enumerate() {
             let spec = mount.resolved.spec;
-            if spec.kind != SensorKind::Camera || !(molla_color(&spec) || spec.depth) {
+            let traced = camera_channels(&spec);
+            if spec.kind != SensorKind::Camera || traced.is_empty() {
                 continue;
             }
-            let color = if molla_color(&spec) { CameraChannels::COLOR.0 } else { 0 };
-            let depth = if spec.depth { CameraChannels::DEPTH.0 } else { 0 };
             let config = TiledCameraConfig {
                 width: spec.width,
                 height: spec.height,
                 fov_y_radians: spec.vfov,
-                channels: CameraChannels(color | depth),
+                channels: CameraChannels(traced.iter().fold(0, |all, c| all | c.0)),
                 max_distance: spec.range_m,
                 ..Default::default()
             };
             let camera = TiledCamera::new(engine, config, 1)
                 .map_err(|e| format!("camera `{}`: {e}", mount.name))?;
-            camera_bytes = camera_bytes.max(u64::from(spec.width) * u64::from(spec.height) * 8);
+            let texel: u64 = traced
+                .iter()
+                .map(|&c| if c == CameraChannels::DEPTH { 8 } else { 4 })
+                .sum();
+            camera_bytes = camera_bytes.max(u64::from(spec.width) * u64::from(spec.height) * texel);
             cameras.push((i, camera));
         }
         let bytes_per_slot = (imu_mounts.len() as u64 * 32)
@@ -771,6 +960,10 @@ impl Rig {
             ring,
             pending: Vec::new(),
             render_requests: Vec::new(),
+            generic,
+            ready: Vec::new(),
+            objects,
+            object_labels,
             stats: RigStats::default(),
             last_report: 0.0,
         })
@@ -785,6 +978,26 @@ impl Rig {
         &self.mounts[index].resolved
     }
 
+    /// Receiver and emitter links by mount index.
+    pub fn radio_mounts(&self) -> impl Iterator<Item = (usize, &ResolvedMount)> {
+        self.mounts
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i, &m.resolved))
+            .filter(|(_, r)| matches!(r.spec.kind, SensorKind::Receiver | SensorKind::Emitter))
+    }
+
+    /// Packets a receiver link has been handed so far.
+    pub fn packets(&self, mount: usize) -> u64 {
+        let m = &self.mounts[mount];
+        m.published + m.undelivered
+    }
+
+    /// Counts a receiver packet as published or dropped.
+    pub fn record(&mut self, mount: usize, delivered: bool) {
+        self.mounts[mount].record(delivered, 1);
+    }
+
     /// Camera links whose colour Bevy renders.
     pub fn bevy_cameras(&self) -> impl Iterator<Item = &ResolvedMount> {
         self.mounts
@@ -793,12 +1006,14 @@ impl Rig {
             .filter(|r| r.spec.kind == SensorKind::Camera && r.spec.color && r.spec.render.is_bevy())
     }
 
-    /// Issues every sample due at `sim_time` without waiting on the GPU.
+    /// Issues every sample due at `sim_time` without waiting on the GPU
+    /// (generic ray sensors cast synchronously).
     pub fn sample(
         &mut self,
         engine: &Engine,
         physics: &dyn PhysicsBackend,
         sim_time: f64,
+        environment: &SensorEnvironment,
     ) -> Result<(), String> {
         let due: Vec<ScheduledSample> = self
             .scheduler
@@ -829,7 +1044,7 @@ impl Rig {
         let imu_due: Vec<(usize, MQuat)> = due
             .iter()
             .map(|s| s.sensor_id as usize)
-            .filter(|&i| self.mounts[i].resolved.spec.kind == SensorKind::Imu)
+            .filter(|&i| self.mounts[i].resolved.spec.kind.uses_imu())
             .map(|i| (i, world_pose(&self.mounts[i]).rotation))
             .collect();
         if let (Some(imu), false) = (self.imu.as_mut(), imu_due.is_empty()) {
@@ -981,14 +1196,9 @@ impl Rig {
                 .dispatch_scene(engine, &self.scene, &self.state)
                 .map_err(|e| format!("camera dispatch: {e}"))?;
             let pixels = spec.width as usize * spec.height as usize;
-            let channels = [
-                (molla_color(&spec), CameraChannels::COLOR),
-                (spec.depth, CameraChannels::DEPTH),
-            ];
-            let sources = channels
+            let sources = camera_channels(&spec)
                 .into_iter()
-                .filter(|(wanted, _)| *wanted)
-                .map(|(_, channel)| camera.readback_source(channel, 0..pixels))
+                .map(|channel| camera.readback_source(channel, 0..pixels))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| e.to_string())?;
             let stamp = ReadbackStamp {
@@ -1010,6 +1220,32 @@ impl Rig {
                 None => self.stats.dropped += 1,
             }
         }
+
+        let generic_due: Vec<GenericSample<'_>> = due
+            .iter()
+            .filter(|s| is_generic(self.mounts[s.sensor_id as usize].resolved.spec.kind))
+            .map(|s| {
+                let m = &self.mounts[s.sensor_id as usize];
+                GenericSample {
+                    mount: s.sensor_id as usize,
+                    name: &m.name,
+                    link_index: m.resolved.link as u32,
+                    spec: m.resolved.spec,
+                    body: m.body,
+                    world: world_pose(m),
+                    sample: s.sample_id,
+                }
+            })
+            .collect();
+        if !generic_due.is_empty() {
+            let generic = &mut self.generic;
+            let mut result = None;
+            physics.with_molla_scene(&mut |rigid| {
+                result = Some(generic.sample(rigid, environment, &generic_due, sim_time));
+            });
+            let readings = result.ok_or("physics backend is not molla")??;
+            self.ready.extend(readings);
+        }
         self.stats.samples += 1;
         self.stats.upload_bytes += (self.state.body_q.len() * 64) as u64;
         Ok(())
@@ -1021,6 +1257,13 @@ impl Rig {
         stamp_ms: u32,
         sink: &mut dyn FnMut(&str, SensorReading<'_>) -> bool,
     ) {
+        for (mount, mut reading) in self.ready.drain(..) {
+            reading.stamp_ms = stamp_ms;
+            let m = &mut self.mounts[mount];
+            let delivered = sink(&m.name, SensorReading::Measurement(&reading));
+            self.stats.frames += 1;
+            m.record(delivered, reading.count.max(1));
+        }
         if let Err(error) = self.ring.poll_releases() {
             warn!("gearbox-sensors: readback: {error}");
             self.pending.clear();
@@ -1047,17 +1290,18 @@ impl Rig {
                     let spec = m.resolved.spec;
                     let pixels = (spec.width * spec.height) as usize;
                     let color = molla_color(&spec);
-                    let colors: Vec<u32> = if color {
-                        frame.channel(0).unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-                    let depths: Vec<f64> = if spec.depth {
-                        frame.channel(usize::from(color)).unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-                    if (color && colors.len() != pixels) || (spec.depth && depths.len() != pixels) {
+                    let traced = camera_channels(&spec);
+                    let slot = |c: CameraChannels| traced.iter().position(|&t| t == c);
+                    let colors: Vec<u32> = slot(CameraChannels::COLOR)
+                        .map_or_else(Vec::new, |i| frame.channel(i).unwrap_or_default());
+                    let depths: Vec<f64> = slot(CameraChannels::DEPTH)
+                        .map_or_else(Vec::new, |i| frame.channel(i).unwrap_or_default());
+                    let shapes: Vec<u32> = slot(CameraChannels::SHAPE_INDEX)
+                        .map_or_else(Vec::new, |i| frame.channel(i).unwrap_or_default());
+                    if (color && colors.len() != pixels)
+                        || (spec.depth && depths.len() != pixels)
+                        || (spec.recognition && shapes.len() != pixels)
+                    {
                         warn!(
                             "gearbox-sensors: camera `{}` returned {} colors and {} depths for {}x{}",
                             m.name,
@@ -1096,6 +1340,21 @@ impl Rig {
                             CAMERA_DEPTH, &bytes, &mut send,
                         );
                     }
+                    if spec.recognition {
+                        let objects = &self.objects;
+                        let seen = molla_sensors::recognize(
+                            spec.width,
+                            spec.height,
+                            spec.vfov as f64,
+                            &depths,
+                            &shapes,
+                            &|shape| objects.get(shape as usize).copied().flatten().map(u64::from),
+                            1,
+                        );
+                        let mut reading = recognition(&name, link_index, pending.sim_time, sample, &seen, &self.object_labels);
+                        reading.stamp_ms = stamp_ms;
+                        delivered &= sink(&name, SensorReading::Measurement(&reading));
+                    }
                     self.stats.frames += 1;
                     m.record(delivered, 1);
                 }
@@ -1109,6 +1368,26 @@ impl Rig {
                         let (Some(a), Some(g)) = (accel.get(slot), gyro.get(slot)) else {
                             continue;
                         };
+                        let channel = match self.mounts[mount].resolved.spec.kind {
+                            SensorKind::Accelerometer => Some((measurement_kind::ACCELEROMETER, *a)),
+                            SensorKind::Gyro => Some((measurement_kind::GYRO, *g)),
+                            _ => None,
+                        };
+                        if let Some((kind, v)) = channel {
+                            let m = &mut self.mounts[mount];
+                            let mut reading = measurement(
+                                &m.name,
+                                m.resolved.link as u32,
+                                kind,
+                                pending.sim_time,
+                                0,
+                                vec![v.x, v.y, v.z],
+                            );
+                            reading.stamp_ms = stamp_ms;
+                            let delivered = sink(&m.name, SensorReading::Measurement(&reading));
+                            m.record(delivered, 1);
+                            continue;
+                        }
                         let q = (SIM_TO_ROS * orientation).normalize();
                         let reading = Imu::new(
                             Velocity {
@@ -1223,6 +1502,50 @@ fn shape_colors(scene: &RigidScene, colors: &dyn Fn(Entity) -> Option<[f32; 3]>)
     shapes
 }
 
+/// Recognisable objects: each rigid body not in `own` is one, labelled by
+/// its first collider `label` names. Returns each shape's object and the
+/// labels; heightfields and bodiless untagged ground are no object.
+fn shape_objects(
+    scene: &RigidScene,
+    own: &HashSet<u64>,
+    label: &dyn Fn(Entity) -> Option<String>,
+) -> (Vec<Option<u32>>, Vec<String>) {
+    let mut shapes = vec![None; scene.model().shape_count];
+    let (mut ids, mut labels) = (HashMap::new(), Vec::<String>::new());
+    for (handle, collider) in scene.colliders() {
+        let ground = collider.user_tag == 0 && collider.parent.is_none();
+        if ground || matches!(collider.geometry, ColliderGeometry::Heightfield(_)) {
+            continue;
+        }
+        let key = collider.parent.map_or(handle.to_bits() | 1 << 63, |b| b.to_bits());
+        if own.contains(&key) {
+            continue;
+        }
+        let id = *ids.entry(key).or_insert_with(|| {
+            labels.push(String::new());
+            labels.len() as u32 - 1
+        });
+        let slot = &mut labels[id as usize];
+        if slot.is_empty()
+            && collider.user_tag != 0
+            && let Some(name) = label(Entity::from_bits(collider.user_tag))
+        {
+            *slot = name;
+        }
+        for shape in scene.collider_indices(handle).unwrap_or(&[]) {
+            if let Some(slot) = shapes.get_mut(shape.index()) {
+                *slot = Some(id);
+            }
+        }
+    }
+    for (id, slot) in labels.iter_mut().enumerate() {
+        if slot.is_empty() {
+            *slot = format!("object{id}");
+        }
+    }
+    (shapes, labels)
+}
+
 /// Geometry, the IMU's body model and a state copy, taken under the physics lock.
 fn snapshot_scene(
     engine: &Engine,
@@ -1321,7 +1644,7 @@ fn scan_metadata(spec: &SensorSpec, world: &MTransform) -> ScanMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::backend::{BodyDesc, ColliderDesc, DVec3, Shape};
+    use crate::physics::backend::{BodyDesc, ColliderDesc, DVec3, JointDesc, JointKind, Pose, Shape};
     use crate::physics::molla::MollaBackend;
 
     #[test]
@@ -1349,6 +1672,12 @@ mod tests {
             render: crate::links::CameraRender::Geometry,
             color: true,
             depth: true,
+            recognition: false,
+            variant: crate::links::SensorVariant::Default,
+            rays: 1,
+            aperture: 0.0,
+            min_range_m: 1.0,
+            channel: 0,
         };
         let world = MTransform::new(MVec3::new(1.0, 2.0, 3.0), MQuat::IDENTITY);
         let meta = scan_metadata(&spec, &world);
@@ -1399,7 +1728,9 @@ mod tests {
     /// A fixed sensor body 1 m over a ground slab with a wall 4.5 m ahead of
     /// the links, which are yawed so that their +Z is the sim +Y up axis: the
     /// IMU reads the reaction to gravity along its +Z and the horizontal LiDAR
-    /// ranges the wall in front while missing everywhere else.
+    /// ranges the wall in front while missing everywhere else. The generic
+    /// sensors face north under a sun 45° up ahead, a crate rests in radar
+    /// view and a hinged arm swings down.
     #[test]
     #[ignore = "requires a GPU adapter"]
     fn imu_and_lidar_sample_the_molla_scene() {
@@ -1426,8 +1757,44 @@ mod tests {
             )
             .unwrap();
         let mut sensor_body = BodyDesc::fixed();
-        sensor_body.pose = crate::physics::backend::Pose::from_translation(DVec3::Y);
+        sensor_body.pose = Pose::from_translation(DVec3::Y);
         let carrier = world.insert_body(sensor_body);
+        let cube = |world: &mut PhysicsWorld, body, half: f64| {
+            world
+                .insert_collider(
+                    ColliderDesc::new(Shape::Cuboid {
+                        half_extents: DVec3::splat(half),
+                    })
+                    .density(1000.0)
+                    .parent(body),
+                )
+                .unwrap();
+        };
+        let crate_body =
+            world.insert_body(BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(3.0, 0.25, -0.5))));
+        let crate_entity = Entity::from_raw_u32(42).unwrap();
+        world
+            .insert_collider(
+                ColliderDesc::new(Shape::Cuboid {
+                    half_extents: DVec3::splat(0.25),
+                })
+                .density(1000.0)
+                .parent(crate_body)
+                .entity(crate_entity),
+            )
+            .unwrap();
+        let base = world.insert_body(BodyDesc::fixed().pose(Pose::from_translation(DVec3::new(-10.0, 3.0, 0.0))));
+        let arm = world.insert_body(BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(-9.0, 3.0, 0.0))));
+        cube(&mut world, arm, 0.1);
+        let hinge = world.backend.insert_joint(
+            base,
+            arm,
+            JointDesc::new(
+                JointKind::Revolute { axis: DVec3::Z },
+                Pose::IDENTITY,
+                Pose::from_translation(DVec3::NEG_X),
+            ),
+        );
         let mount = MTransform::new(MVec3::ZERO, MQuat::from_rotation_x(-FRAC_PI_2));
         let lidar_spec = SensorSpec {
             kind: SensorKind::Lidar,
@@ -1442,6 +1809,12 @@ mod tests {
             render: crate::links::CameraRender::Geometry,
             color: true,
             depth: true,
+            recognition: false,
+            variant: crate::links::SensorVariant::Default,
+            rays: 1,
+            aperture: 0.0,
+            min_range_m: 1.0,
+            channel: 0,
         };
         let mounts = vec![
             ResolvedMount {
@@ -1454,6 +1827,7 @@ mod tests {
                 },
                 body: carrier,
                 entity: None,
+                joint: None,
                 local: mount,
             },
             ResolvedMount {
@@ -1462,6 +1836,7 @@ mod tests {
                 spec: lidar_spec,
                 body: carrier,
                 entity: None,
+                joint: None,
                 local: mount,
             },
             ResolvedMount {
@@ -1477,20 +1852,80 @@ mod tests {
                 },
                 body: carrier,
                 entity: None,
+                joint: None,
                 local: mount,
             },
         ];
+        let generic = |link: usize, name: &str, kind, body, joint, local, spec: SensorSpec| ResolvedMount {
+            link,
+            name: name.into(),
+            spec: SensorSpec {
+                kind,
+                rate_hz: 50.0,
+                ..spec
+            },
+            body,
+            entity: None,
+            joint,
+            local,
+        };
+        let radar = SensorSpec {
+            hfov: 90f32.to_radians(),
+            vfov: 40f32.to_radians(),
+            ..lidar_spec
+        };
+        let force = SensorSpec {
+            variant: crate::links::SensorVariant::Force3d,
+            ..lidar_spec
+        };
+        let seer = SensorSpec {
+            vfov: 60f32.to_radians(),
+            width: 32,
+            height: 24,
+            color: false,
+            depth: false,
+            recognition: true,
+            ..lidar_spec
+        };
+        let at_rest = MTransform::IDENTITY;
+        let mut mounts = mounts;
+        mounts.extend([
+            generic(4, "accel_link", SensorKind::Accelerometer, carrier, None, mount, lidar_spec),
+            generic(5, "gyro_link", SensorKind::Gyro, carrier, None, mount, lidar_spec),
+            generic(6, "inertial_link", SensorKind::InertialUnit, carrier, None, mount, lidar_spec),
+            generic(7, "compass_link", SensorKind::Compass, carrier, None, mount, lidar_spec),
+            generic(8, "distance_link", SensorKind::Distance, carrier, None, mount, lidar_spec),
+            generic(9, "light_link", SensorKind::Light, carrier, None, mount, lidar_spec),
+            generic(10, "radar_link", SensorKind::Radar, carrier, None, mount, radar),
+            generic(11, "touch_link", SensorKind::Touch, crate_body, None, at_rest, force),
+            generic(12, "hinge_link", SensorKind::Position, arm, Some(hinge), at_rest, lidar_spec),
+            generic(13, "seer_link", SensorKind::Camera, carrier, None, mount, seer),
+        ]);
         let mut revision = 0;
         world.with_molla_scene(&mut |scene| revision = scene.revision());
+        let label = |entity| (entity == crate_entity).then(|| "crate".to_string());
         let mut rig =
-            Rig::build(&engine, &*world.backend, mounts, revision, 0.0, &|_| None).unwrap();
+            Rig::build(&engine, &*world.backend, mounts, revision, 0.0, &|_| None, &label, &[]).unwrap();
         let mut imu = None;
         let mut lidar = None;
         let mut depth = None;
         let mut color = None;
+        let mut measured: HashMap<String, gearbox_api::Measurement> = HashMap::new();
+        let sun = molla_sensors::LightSource::Directional {
+            towards: MVec3::new(1.0, 1.0, 0.0).normalize(),
+            irradiance: 500.0,
+        };
         for _ in 0..12 {
             world.step();
-            rig.sample(&engine, &*world.backend, world.simulated_seconds)
+            let environment = SensorEnvironment {
+                light: molla_sensors::LightEnvironment {
+                    sources: vec![sun.clone()],
+                    sky: 50.0,
+                    up: MVec3::Y,
+                },
+                contacts: crate::sensor_generic::contact_forces(&*world.backend),
+            };
+            rig.sample(&engine, &*world.backend, world.simulated_seconds, &environment)
                 .unwrap();
             engine
                 .device()
@@ -1522,10 +1957,48 @@ mod tests {
                             color = Some(frame.colors());
                         }
                     }
+                    SensorReading::Measurement(m) => {
+                        assert_eq!(m.name(), link);
+                        measured.insert(link.to_string(), m.clone());
+                    }
                 }
                 true
             });
         }
+        let values = |link: &str| measured.get(link).unwrap_or_else(|| panic!("no {link}")).values.clone();
+        let near = |a: f64, b: f64, tol: f64| (a - b).abs() < tol;
+        let accel = values("accel_link");
+        assert!(near(accel[2], 9.81, 0.05) && near(accel[0], 0.0, 1e-3), "{accel:?}");
+        assert!(values("gyro_link").iter().all(|v| v.abs() < 1e-6));
+        let attitude = values("inertial_link");
+        assert!(near(attitude[0], 0.0, 1e-9) && near(attitude[1], 0.0, 1e-9), "{attitude:?}");
+        assert!(near(attitude[2], std::f64::consts::FRAC_PI_2, 1e-9), "{attitude:?}");
+        let heading = values("compass_link");
+        assert!(near(heading[0], 1.0, 1e-9) && near(heading[3], 0.0, 1e-9), "{heading:?}");
+        let range = values("distance_link");
+        assert!(near(range[0], 4.5, 1e-3), "{range:?}");
+        let light = values("light_link");
+        let direct = 500.0 * std::f64::consts::FRAC_1_SQRT_2;
+        assert!(near(light[1], direct, 1e-6) && near(light[2], 25.0, 1e-9), "{light:?}");
+        assert_eq!(light[3], 1.0);
+        let radar = values("radar_link");
+        assert_eq!(radar.len(), 5, "only the crate is a target in view: {radar:?}");
+        assert!(near(radar[0], 9.8125f64.sqrt(), 0.05), "{radar:?}");
+        assert!(near(radar[1], 0.5f64.atan2(3.0), 0.02), "{radar:?}");
+        assert!(near(radar[2], (-0.75f64).atan2(9.25f64.sqrt()), 0.02), "{radar:?}");
+        assert!(radar[3].abs() < 0.2, "{radar:?}");
+        let touch = values("touch_link");
+        assert!(touch[0] == 1.0 && touch[1] >= 1.0 && touch[2] > 0.0, "{touch:?}");
+        assert!(touch[4] > 0.9 * touch[2], "the ground pushes the crate up: {touch:?}");
+        let hinge = values("hinge_link");
+        assert!(hinge[0].abs() > 1e-3 && hinge[1].abs() > 1e-3, "the arm swings down: {hinge:?}");
+        let seen = &measured["seer_link"];
+        let names: Vec<String> = seen.props().get("names").unwrap_or_default().lines().map(String::from).collect();
+        let at = names.iter().position(|n| n == "crate").expect("the crate is recognised");
+        let object: Vec<f64> = seen.records().nth(at).unwrap().to_vec();
+        let (x, y, z) = (object[6], object[7], object[8]);
+        assert!(object[1] >= 1.0 && object[4] < 32.0 && object[5] < 24.0, "{object:?}");
+        assert!((-0.75..-0.25).contains(&x) && (-1.0..-0.5).contains(&y) && (-3.25..-2.7).contains(&z), "{object:?}");
         let depth = depth.expect("a depth frame");
         let color = color.expect("a color frame");
         assert_eq!((depth.len(), color.len()), (768, 768));
