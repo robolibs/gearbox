@@ -51,15 +51,15 @@ gearbox-api = { workspace = true, features = ["bevy"] }
 gearbox-cli.workspace = true
 
 # Molla: the physics engine.
-molla-core = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false }
-molla-math = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd" }
-molla-sim = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false }
-molla-geometry = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false }
-molla-solvers = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false, features = ["gpu"] }
-molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd" }
-molla-compute = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false, features = ["gpu"] }
-molla-sensors = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false, features = ["gpu"] }
-molla-storage = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false, features = ["gpu"] }
+molla-core = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636", default-features = false }
+molla-math = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636" }
+molla-sim = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636", default-features = false }
+molla-geometry = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636", default-features = false }
+molla-solvers = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636", default-features = false, features = ["gpu"] }
+molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636" }
+molla-compute = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636", default-features = false, features = ["gpu"] }
+molla-sensors = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636", default-features = false, features = ["gpu"] }
+molla-storage = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636", default-features = false, features = ["gpu"] }
 wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
 bytemuck = "1"
 glam = "0.30"
@@ -81,4 +81,4 @@ pyo3 = { version = "0.23", optional = true, features = [
 
 [dev-dependencies]
 pollster = "0.4"
-molla-kernels = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd" }
+molla-kernels = { git = "https://github.com/bresilla/molla", rev = "8ec96e86a5716e432465f4c098a4117ff924e636" }
