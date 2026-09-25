@@ -31,9 +31,16 @@ pub const MACHINE_TURN_RADIUS: &str = "turn_radius";
 pub const MACHINE_TOOLS: &str = "tools";
 pub const MACHINE_TOOLS_ATTACH: &str = "tools/attach";
 pub const MACHINE_TOOLS_DETACH: &str = "tools/detach";
+/// Prefix of the per-link simulated sensor streams, `sensors/<link>`.
+pub const MACHINE_SENSORS: &str = "sensors";
 
 /// Topics hosted by a machine's own agent, unique per machine so the
 /// host directory holds one owner per topic.
 pub fn machine_topic(machine_id: &str, leaf: &str) -> String {
     format!("/machines/{machine_id}/{leaf}")
+}
+
+/// Stream of one authored sensor link: `/machines/<machine_id>/sensors/<link>`.
+pub fn machine_sensor_topic(machine_id: &str, link: &str) -> String {
+    format!("/machines/{machine_id}/{MACHINE_SENSORS}/{link}")
 }

@@ -1,0 +1,117 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "World"
+{
+    def Xform "Tractor_01" (
+        prepend references = @../tractor.usd@</robot>
+    )
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        over "chassis"
+        {
+            def Xform "cam_front" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "camera"
+                float gearbox:sensor:rate_hz = 15
+                int gearbox:sensor:width = 640
+                int gearbox:sensor:height = 480
+                float gearbox:sensor:vfov_deg = 60
+                float gearbox:sensor:range_m = 80
+                token gearbox:sensor:render = "optimized"
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, -1.2, 2.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+            def Xform "cam_rear" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "camera"
+                float gearbox:sensor:rate_hz = 15
+                int gearbox:sensor:width = 640
+                int gearbox:sensor:height = 480
+                float gearbox:sensor:vfov_deg = 60
+                float gearbox:sensor:range_m = 80
+                token gearbox:sensor:render = "optimized"
+                float3 xformOp:rotateXYZ = (0, 0, 90)
+                double3 xformOp:translate = (0, 1.6, 2.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+            def Xform "cam_left" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "camera"
+                float gearbox:sensor:rate_hz = 15
+                int gearbox:sensor:width = 640
+                int gearbox:sensor:height = 480
+                float gearbox:sensor:vfov_deg = 60
+                float gearbox:sensor:range_m = 80
+                token gearbox:sensor:render = "optimized"
+                float3 xformOp:rotateXYZ = (0, 0, 0)
+                double3 xformOp:translate = (0.9, 0, 2.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+            def Xform "cam_right" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "camera"
+                float gearbox:sensor:rate_hz = 15
+                int gearbox:sensor:width = 640
+                int gearbox:sensor:height = 480
+                float gearbox:sensor:vfov_deg = 60
+                float gearbox:sensor:range_m = 80
+                token gearbox:sensor:render = "optimized"
+                float3 xformOp:rotateXYZ = (0, 0, 180)
+                double3 xformOp:translate = (-0.9, 0, 2.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+            def Xform "cam_front_down" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "camera"
+                float gearbox:sensor:rate_hz = 15
+                int gearbox:sensor:width = 640
+                int gearbox:sensor:height = 480
+                float gearbox:sensor:vfov_deg = 60
+                float gearbox:sensor:range_m = 80
+                token gearbox:sensor:render = "optimized"
+                float3 xformOp:rotateXYZ = (0, 30, -90)
+                double3 xformOp:translate = (0, -1.6, 2.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+            def Xform "cam_rear_down" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "camera"
+                float gearbox:sensor:rate_hz = 15
+                int gearbox:sensor:width = 640
+                int gearbox:sensor:height = 480
+                float gearbox:sensor:vfov_deg = 60
+                float gearbox:sensor:range_m = 80
+                token gearbox:sensor:render = "optimized"
+                float3 xformOp:rotateXYZ = (0, 30, 90)
+                double3 xformOp:translate = (0, 1.8, 2.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+        }
+    }
+}

@@ -279,6 +279,155 @@ impl LinkPose {
     }
 }
 
+/// One chunk of a LiDAR sweep of an authored `role = "sensor"` link, streamed
+/// on `/machines/<machine_id>/sensors/<link>`. A sweep is `rows` zenith rows
+/// of `cols` azimuth columns in row-major pulse order, zenith measured from
+/// the link's +Z and azimuth from its +X towards +Y; this chunk carries the
+/// `pulse_count` pulses from `pulse_offset`, and every chunk of one sweep
+/// shares `sample`. Each pulse has one f32 range and one f32 xyz point in the
+/// link's own frame; a miss has an infinite range and NaN coordinates.
+#[datapod::datapod(name = "gearbox.lidar_scan.v1")]
+#[derive(Default)]
+pub struct LidarScan {
+    pub sim_time_s: f64,
+    pub theta_min: f64,
+    pub theta_max: f64,
+    pub phi_min: f64,
+    pub phi_max: f64,
+    pub max_range_m: f64,
+    pub link_index: u32,
+    pub rows: u32,
+    pub cols: u32,
+    pub pulse_offset: u32,
+    pub pulse_count: u32,
+    pub hits: u32,
+    pub stamp_ms: u32,
+    pub sample: u32,
+    #[dp(bytes, section = "ranges")]
+    pub ranges: Vec<f32>,
+    #[dp(bytes, section = "points")]
+    pub points: Vec<f32>,
+    #[dp(bytes, section = "props")]
+    pub props: Vec<u8>,
+}
+
+/// Pulses per chunk so that ranges, points and the header stay under
+/// [`crate::host::MAX_PAYLOAD_BYTES`].
+pub const LIDAR_CHUNK_PULSES: usize = 900;
+
+/// One row band of one channel of a camera frame from an authored
+/// `role = "sensor"` link, streamed on `/machines/<machine_id>/sensors/<link>`.
+/// The image is `width` × `height` pixels, row-major from the top-left; this
+/// chunk carries `rows` rows from `row_offset`, and every chunk of one frame
+/// shares `sample`. `channel` is [`CAMERA_COLOR`] (packed RGBA8 per pixel) or
+/// [`CAMERA_DEPTH`] (little-endian f32 metres along the pixel ray, infinite
+/// for a miss). The camera looks along the link's +X with +Z up.
+#[datapod::datapod(name = "gearbox.camera_frame.v1")]
+#[derive(Default)]
+pub struct CameraFrame {
+    pub sim_time_s: f64,
+    pub fov_y_rad: f64,
+    pub max_range_m: f64,
+    pub link_index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub row_offset: u32,
+    pub rows: u32,
+    pub channel: u32,
+    pub stamp_ms: u32,
+    pub sample: u32,
+    #[dp(bytes, section = "data")]
+    pub data: Vec<u8>,
+    #[dp(bytes, section = "props")]
+    pub props: Vec<u8>,
+}
+
+pub const CAMERA_COLOR: u32 = 0;
+pub const CAMERA_DEPTH: u32 = 1;
+
+/// Bytes of pixel data per chunk, under [`crate::host::MAX_PAYLOAD_BYTES`]
+/// with the header and props.
+pub const CAMERA_CHUNK_BYTES: usize = 12 * 1024;
+
+impl CameraFrame {
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn name(&self) -> String {
+        self.props().get("name").unwrap_or_default()
+    }
+
+    pub fn is_last(&self) -> bool {
+        self.row_offset + self.rows >= self.height
+    }
+
+    /// Rows per chunk for an image of `width` pixels at four bytes each.
+    pub fn chunk_rows(width: u32) -> u32 {
+        (CAMERA_CHUNK_BYTES / (width.max(1) as usize * 4)).max(1) as u32
+    }
+
+    /// Depth chunk pixels in metres; empty for a color chunk.
+    pub fn depths(&self) -> Vec<f32> {
+        if self.channel != CAMERA_DEPTH {
+            return Vec::new();
+        }
+        self.data
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    }
+
+    /// Color chunk pixels as packed RGBA8; empty for a depth chunk.
+    pub fn colors(&self) -> Vec<u32> {
+        if self.channel != CAMERA_COLOR {
+            return Vec::new();
+        }
+        self.data
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    }
+}
+
+impl LidarScan {
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn name(&self) -> String {
+        self.props().get("name").unwrap_or_default()
+    }
+
+    /// Pulses of the whole sweep.
+    pub fn sweep_pulses(&self) -> usize {
+        self.rows as usize * self.cols as usize
+    }
+
+    /// Whether this chunk ends its sweep.
+    pub fn is_last(&self) -> bool {
+        self.pulse_offset as usize + self.pulse_count as usize >= self.sweep_pulses()
+    }
+
+    /// Row and column of a pulse index of the sweep.
+    pub fn row_col(&self, pulse: usize) -> (u32, u32) {
+        let cols = self.cols.max(1) as usize;
+        ((pulse / cols) as u32, (pulse % cols) as u32)
+    }
+
+    /// Point of every pulse in the link frame, row-major; NaN for a miss.
+    pub fn points(&self) -> Vec<[f32; 3]> {
+        self.points
+            .chunks_exact(3)
+            .map(|p| [p[0], p[1], p[2]])
+            .collect()
+    }
+
+    pub fn set_points(&mut self, points: &[[f32; 3]]) {
+        self.points = points.iter().flatten().copied().collect();
+    }
+}
+
 /// Attach a slave to one of this machine's hitches
 /// (`/machines/<master>/tools/attach`). Props: `slave`, `hitch`, `coupler`.
 #[datapod::datapod(name = "gearbox.attach_request.v1")]

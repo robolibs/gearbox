@@ -816,6 +816,16 @@ pub trait PhysicsBackend: Send + Sync {
     /// Short name, for logs.
     fn name(&self) -> &'static str;
 
+    /// Runs `f` on the Molla runtime scene behind this backend, holding its
+    /// lock only for the call; `false` when this engine is not Molla.
+    fn with_molla_scene(&self, _f: &mut dyn FnMut(&molla_sim::runtime::RigidScene)) -> bool {
+        false
+    }
+    /// Molla handle of a body, for lookups inside `with_molla_scene`.
+    fn molla_body_handle(&self, _body: BodyId) -> Option<molla_sim::runtime::BodyHandle> {
+        None
+    }
+
     fn configure_track(&mut self, _desc: TrackForceDesc) -> Result<(), String> {
         Err("track force elements are not supported".into())
     }

@@ -160,7 +160,7 @@ fn show_overlays(mut commands: Commands, cameras: Query<Entity, Added<ChaseCamer
     for camera in &cameras {
         commands
             .entity(camera)
-            .insert(RenderLayers::from_layers(&[0, OVERLAY_LAYER]));
+            .insert(RenderLayers::from_layers(&[0, OVERLAY_LAYER, bevy_weather::SKY_LAYER]));
     }
 }
 
@@ -218,7 +218,7 @@ fn drive_recorder(
                     Err(error) => warn!("gearbox-capture: cannot start ffmpeg: {error}"),
                 }
             } else if std::mem::take(&mut recorder.still_requested) {
-                commands.entity(view).insert(RenderLayers::layer(0));
+                commands.entity(view).insert(RenderLayers::from_layers(&[0, bevy_weather::SKY_LAYER]));
                 next = Some(Mode::Still {
                     stem: capture_path(recorder.folder.as_deref(), "Pictures", "png")
                         .with_extension(""),
@@ -280,7 +280,7 @@ fn begin_capture(
     let handle = images.add(image);
     commands
         .entity(view)
-        .insert((CaptureInto(handle.clone()), RenderLayers::layer(0)));
+        .insert((CaptureInto(handle.clone()), RenderLayers::from_layers(&[0, bevy_weather::SKY_LAYER])));
     commands.spawn(Readback::texture(handle)).observe(receive_frame).id()
 }
 
@@ -288,7 +288,7 @@ fn end_capture(commands: &mut Commands, view: Entity, reader: Entity) {
     commands
         .entity(view)
         .remove::<CaptureInto>()
-        .insert(RenderLayers::from_layers(&[0, OVERLAY_LAYER]));
+        .insert(RenderLayers::from_layers(&[0, OVERLAY_LAYER, bevy_weather::SKY_LAYER]));
     commands.entity(reader).despawn();
 }
 

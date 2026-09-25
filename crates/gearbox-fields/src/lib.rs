@@ -27,6 +27,7 @@ pub use host::{
     HeightSource,
 };
 pub use layout::{FieldBounds, FieldLayout, Hollows};
+pub use render::NoVegetation;
 pub use runtime::{CoverPending, heightmap_image};
 pub use profile::{
     FieldProfile, FieldProfiles, GroundSurface, MaterialSurface, SurfaceGeometry,

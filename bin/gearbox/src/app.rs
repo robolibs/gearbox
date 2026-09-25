@@ -10,8 +10,8 @@ use bevy::prelude::*;
 use mara::ui::modules::bevy::BevyViewportInput;
 
 use crate::{
-    attach, controller, environment, load, physics, physics_debug, services, terrain, viewer,
-    world,
+    attach, controller, environment, load, physics, physics_debug, sensors, services, terrain,
+    viewer, world,
 };
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
@@ -33,6 +33,11 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
     } else {
         app.init_resource::<bevy::pbr::wireframe::WireframeConfig>();
         warn!("wireframe unavailable: shared GPU device lacks line mode or 16-byte immediates");
+    }
+    // Per-pass CPU and GPU render times in the same log, for profiling
+    // (GPU times need MARA_GPU_TIMESTAMPS=1 as well).
+    if std::env::var_os("GEARBOX_RENDER_DIAGNOSTICS").is_some() {
+        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
     }
     app.init_resource::<BevyViewportInput>()
         // Frame time and fps land in the log every ten seconds.
@@ -86,6 +91,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(controller::ControllerDiscoveryPlugin)
         .add_plugins(attach::AttachPlugin)
         .add_plugins(services::ServicesPlugin)
+        .add_plugins(sensors::SensorsPlugin)
         .add_plugins(physics_debug::PhysicsDebugPlugin)
         .add_plugins(load::LoadPlugin { cli_paths })
         // Viewer state the mara panes read and drive.

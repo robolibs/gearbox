@@ -61,7 +61,7 @@ fn spawn_daylight(mut commands: Commands, settings: Res<WeatherSettings>) {
         DirectionalLight {
             illuminance: settings.illuminance,
             color: settings.sun_color,
-            shadow_maps_enabled: true,
+            shadow_maps_enabled: sun_shadows(),
             ..default()
         },
         CascadeShadowConfigBuilder {
@@ -93,9 +93,9 @@ fn synchronize_daylight(
             &mut AmbientLight,
             &mut EnvironmentMapLight,
         ),
-        With<CloudsCamera>,
+        With<WeatherLook>,
     >,
-    added: Query<Entity, Added<CloudsCamera>>,
+    added: Query<Entity, Added<WeatherLook>>,
     mut images: ResMut<Assets<Image>>,
     mut clear: ResMut<ClearColor>,
     mut sky_map: Local<Option<Handle<Image>>>,
@@ -119,7 +119,7 @@ fn synchronize_daylight(
         light.color = daylight.direct_color;
         light.illuminance = settings.illuminance * daylight.direct_strength;
         original.0 = light.illuminance;
-        light.shadow_maps_enabled = daylight.direct_strength > 0.0;
+        light.shadow_maps_enabled = daylight.direct_strength > 0.0 && sun_shadows();
     }
     let (resolution, center, extent) =
         (clouds.render_resolution, clouds.cloud_shadow_center, clouds.cloud_shadow_extent);
@@ -212,36 +212,60 @@ fn haze_falloff(visibility_km: f32) -> FogFalloff {
     )
 }
 
+/// A camera that sets up its own look: the weather gives it no clouds or sky
+/// planes (e.g. an offscreen sensor camera, which adds [`camera_look`] itself).
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WeatherOptOut;
+
 fn configure_cameras(
     mut commands: Commands,
-    cameras: Query<Entity, Added<Camera3d>>,
+    cameras: Query<Entity, (Added<Camera3d>, Without<WeatherOptOut>)>,
     settings: Res<WeatherSettings>,
 ) {
     for entity in &cameras {
-        commands.entity(entity).insert((
-            Hdr,
-            CloudsCamera,
-            Exposure {
-                ev100: settings.exposure_ev100,
-            },
-            Tonemapping::AgX,
+        let mut camera = commands.entity(entity);
+        camera.insert(CloudsCamera);
+        camera_look(&mut camera, &settings, false);
+    }
+}
+
+/// A camera whose haze, ambient and environment light follow the daylight.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WeatherLook;
+
+/// Gives a camera the exposure, tonemapping, haze and ambient light that
+/// match the weather, kept in step with the daylight. `lean` leaves out
+/// bloom and multisampling.
+pub fn camera_look(camera: &mut EntityCommands, settings: &WeatherSettings, lean: bool) {
+    camera.insert((
+        WeatherLook,
+        Hdr,
+        Exposure {
+            ev100: settings.exposure_ev100,
+        },
+        Tonemapping::AgX,
+        DistanceFog {
+            color: settings.fog_color,
+            falloff: haze_falloff(settings.haze_visibility_km),
+            directional_light_exponent: 24.0,
+            ..default()
+        },
+        AmbientLight {
+            color: Color::srgb(0.80, 0.88, 1.0),
+            brightness: 50.0,
+            ..default()
+        },
+        EnvironmentMapLight::default(),
+    ));
+    if lean {
+        camera.insert(Msaa::Off);
+    } else {
+        camera.insert((
+            Msaa::Sample4,
             Bloom {
                 intensity: settings.bloom_intensity,
                 ..Bloom::NATURAL
             },
-            Msaa::Sample4,
-            DistanceFog {
-                color: settings.fog_color,
-                falloff: haze_falloff(settings.haze_visibility_km),
-                directional_light_exponent: 24.0,
-                ..default()
-            },
-            AmbientLight {
-                color: Color::srgb(0.80, 0.88, 1.0),
-                brightness: 50.0,
-                ..default()
-            },
-            EnvironmentMapLight::default(),
         ));
     }
 }
@@ -360,4 +384,10 @@ fn thin_air_with_height(
     let daylight = Daylight::from_settings(&settings);
     clouds.sky_zenith_color = daylight.zenith * sky;
     clouds.sky_horizon_color = daylight.horizon * sky;
+}
+
+/// Sun shadow maps, unless `GEARBOX_NO_SUN_SHADOWS` switches them off for
+/// profiling.
+fn sun_shadows() -> bool {
+    std::env::var_os("GEARBOX_NO_SUN_SHADOWS").is_none()
 }

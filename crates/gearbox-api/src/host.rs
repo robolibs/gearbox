@@ -283,16 +283,22 @@ impl Drop for HostBus {
 
 /// Shared-memory limits for every gearbox agent: many local clients and
 /// watchers per topic, small messages, and a ring deep enough to absorb a
-/// burst (a field of props settling at once) while a script sleeps.
+/// burst (a field of props settling at once) while a script sleeps. A
+/// machine agent registers seven telemetry publishers plus one per
+/// simulated sensor link.
 pub fn shm_limits() -> agentio::LocalConfig {
     agentio::LocalConfig {
-        max_publishers: 8,
+        max_publishers: 24,
         max_subscribers: 16,
         subscriber_buffer: 512,
         history_depth: 1,
-        max_payload_bytes: 16 * 1024,
+        max_payload_bytes: MAX_PAYLOAD_BYTES,
     }
 }
+
+/// Largest wire payload any gearbox topic carries; a message this large
+/// occupies one shared-memory slot.
+pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
 
 /// Drain every pending request on a req/res server, answering each with
 /// the closure. Undecodable requests are dropped.

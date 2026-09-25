@@ -180,6 +180,13 @@ impl PhysicsBackend for MollaBackend {
     fn name(&self) -> &'static str {
         "molla"
     }
+    fn with_molla_scene(&self, f: &mut dyn FnMut(&rt::RigidScene)) -> bool {
+        f(&self.shared.world().scene);
+        true
+    }
+    fn molla_body_handle(&self, body: BodyId) -> Option<rt::BodyHandle> {
+        self.bodies.get(&body).map(|body| body.handle)
+    }
     fn gravity(&self) -> DVec3 {
         self.shared.world().scene.gravity()
     }

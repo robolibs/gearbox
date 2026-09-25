@@ -129,7 +129,107 @@ pub struct LinkSpec {
     pub element: Option<ElementInfo>,
     /// Named values authored on the link (`gearbox:value:<Name>`).
     pub values: Vec<(String, f64)>,
+    /// Simulated sensor on a `role = "sensor"` link (`gearbox:sensor:*`).
+    pub sensor: Option<SensorSpec>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorKind {
+    Imu,
+    Lidar,
+    Camera,
+}
+
+impl SensorKind {
+    pub fn parse(token: &str) -> Option<Self> {
+        Some(match token {
+            "imu" => Self::Imu,
+            "lidar" => Self::Lidar,
+            "camera" => Self::Camera,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Imu => "imu",
+            Self::Lidar => "lidar",
+            Self::Camera => "camera",
+        }
+    }
+
+    /// The kind a sensor link's name implies when no kind is authored.
+    fn from_link_name(name: &str) -> Option<Self> {
+        if name.starts_with("imu") {
+            Some(Self::Imu)
+        } else if name.starts_with("lidar") || name.starts_with("laser") {
+            Some(Self::Lidar)
+        } else if name.starts_with("camera") || name.starts_with("cam_") {
+            Some(Self::Camera)
+        } else {
+            None
+        }
+    }
+}
+
+/// A simulated sensor sampled by the Molla GPU sensors on the link's frame:
+/// IMU readings are in the link frame; LiDAR sweeps look along the link's
+/// +X with +Z as zenith and azimuth turning towards +Y.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SensorSpec {
+    pub kind: SensorKind,
+    /// Samples per simulated second.
+    pub rate_hz: f32,
+    /// LiDAR azimuth columns and zenith rows.
+    pub columns: u32,
+    pub rows: u32,
+    /// LiDAR horizontal and vertical field of view (rad), centred on +X.
+    pub hfov: f32,
+    pub vfov: f32,
+    /// LiDAR and camera maximum range (m).
+    pub range_m: f32,
+    /// Camera image size in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// How a camera link produces its colour image.
+    pub render: CameraRender,
+    /// Camera channels to publish.
+    pub color: bool,
+    pub depth: bool,
+}
+
+/// Source of a camera link's colour image (`gearbox:sensor:render`). Depth
+/// always comes from the Molla trace of the collision scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraRender {
+    /// Molla ray trace of the collision shapes with flat per-shape albedo.
+    Geometry,
+    /// Bevy render of the visual scene without grass, weather, shadows or
+    /// post-processing.
+    Optimized,
+    /// Bevy render through the same pipeline as the viewer window.
+    Full,
+}
+
+impl CameraRender {
+    pub fn parse(token: &str) -> Option<Self> {
+        Some(match token {
+            "geometry" => Self::Geometry,
+            "optimized" | "optimised" => Self::Optimized,
+            "full" => Self::Full,
+            _ => return None,
+        })
+    }
+
+    /// Whether Bevy renders the colour channel.
+    pub fn is_bevy(self) -> bool {
+        self != Self::Geometry
+    }
+}
+
+pub const MAX_LIDAR_PULSES: u32 = 1 << 20;
+/// Largest camera image side in pixels.
+pub const MAX_CAMERA_SIDE: u32 = 4096;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LinkTree {
@@ -339,6 +439,9 @@ pub fn discover_link_tree(
             .contains(prim)
             .then(|| read_coupling(stage, &sdf, root, &mut tree.errors))
             .flatten();
+        let sensor = (role == LinkRole::Sensor)
+            .then(|| read_sensor(stage, &sdf, &name, &mut tree.warnings, &mut tree.errors))
+            .flatten();
         links.push(LinkSpec {
             name,
             prim_path: prim.clone(),
@@ -350,6 +453,7 @@ pub fn discover_link_tree(
             coupling,
             element: read_element(stage, &sdf, &mut tree.errors),
             values: read_values(stage, &sdf),
+            sensor,
         });
     }
 
@@ -822,6 +926,134 @@ def Xform "robot" (
     }
 
     #[test]
+    fn sensor_links_parse_kinds_defaults_and_ranges() {
+        let imu = discover(&machine_with(CHASSIS_AND_WHEEL, WHEEL_JOINT));
+        let spec = imu
+            .get("imu")
+            .unwrap()
+            .sensor
+            .expect("imu inferred from its name");
+        assert_eq!(spec.kind, SensorKind::Imu);
+        assert_eq!(spec.rate_hz, 100.0);
+
+        let lidar = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "lidar"
+            float gearbox:sensor:rate_hz = 20
+            int gearbox:sensor:columns = 180
+            int gearbox:sensor:rows = 1
+            float gearbox:sensor:hfov_deg = 270
+            float gearbox:sensor:vfov_deg = 0
+            float gearbox:sensor:range_m = 25"#,
+        );
+        let tree = discover(&machine_with(&lidar, WHEEL_JOINT));
+        assert!(tree.is_valid(), "{:?}", tree.errors);
+        let spec = tree.get("imu").unwrap().sensor.unwrap();
+        assert_eq!(spec.kind, SensorKind::Lidar);
+        assert_eq!(
+            (spec.rate_hz, spec.columns, spec.rows, spec.range_m),
+            (20.0, 180, 1, 25.0)
+        );
+        assert!((spec.hfov - 270f32.to_radians()).abs() < 1e-6);
+        assert_eq!(spec.vfov, 0.0);
+
+        let camera = CHASSIS_AND_WHEEL.replace(r#"def Xform "imu""#, r#"def Xform "camera_link""#);
+        let tree = discover(&machine_with(&camera, WHEEL_JOINT));
+        assert!(tree.is_valid(), "{:?}", tree.errors);
+        let spec = tree.get("camera_link").unwrap().sensor.unwrap();
+        assert_eq!(
+            (spec.kind, spec.rate_hz, spec.width, spec.height),
+            (SensorKind::Camera, 5.0, 128, 96)
+        );
+        assert!((spec.vfov - 60f32.to_radians()).abs() < 1e-6);
+        assert_eq!(
+            (spec.render, spec.color, spec.depth),
+            (CameraRender::Optimized, true, true)
+        );
+
+        for (render, channels, expected) in [
+            ("geometry", "depth", (CameraRender::Geometry, false, true)),
+            ("full", "color", (CameraRender::Full, true, false)),
+            ("optimized", "color_depth", (CameraRender::Optimized, true, true)),
+        ] {
+            let camera = CHASSIS_AND_WHEEL.replace(
+                r#"token gearbox:link:role = "sensor""#,
+                &format!(
+                    r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            int gearbox:sensor:width = 4096
+            token gearbox:sensor:render = "{render}"
+            token gearbox:sensor:channels = "{channels}""#
+                ),
+            );
+            let tree = discover(&machine_with(&camera, WHEEL_JOINT));
+            assert!(tree.is_valid(), "{:?}", tree.errors);
+            let spec = tree.get("imu").unwrap().sensor.unwrap();
+            assert_eq!((spec.render, spec.color, spec.depth), expected);
+            assert_eq!(spec.width, MAX_CAMERA_SIDE);
+        }
+        let bad = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            int gearbox:sensor:height = 4097
+            token gearbox:sensor:render = "raytraced"
+            token gearbox:sensor:channels = "infrared""#,
+        );
+        let tree = discover(&machine_with(&bad, WHEEL_JOINT));
+        for what in ["height", "render", "channels"] {
+            assert!(
+                tree.errors.iter().any(|e| e.contains(&format!("gearbox:sensor:{what}"))),
+                "{what}: {:?}",
+                tree.errors
+            );
+        }
+
+        let camera = CHASSIS_AND_WHEEL.replace(r#"def Xform "imu""#, r#"def Xform "gps_link""#);
+        let tree = discover(&machine_with(&camera, WHEEL_JOINT));
+        assert!(tree.is_valid(), "{:?}", tree.errors);
+        assert!(tree.get("gps_link").unwrap().sensor.is_none());
+        assert!(
+            tree.warnings
+                .iter()
+                .any(|w| w.contains("gearbox:sensor:kind"))
+        );
+
+        let bad = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "lidar"
+            int gearbox:sensor:rows = 4
+            float gearbox:sensor:vfov_deg = 0
+            float gearbox:sensor:rate_hz = -1"#,
+        );
+        let tree = discover(&machine_with(&bad, WHEEL_JOINT));
+        assert!(
+            tree.errors.iter().any(|e| e.contains("rate_hz")),
+            "{:?}",
+            tree.errors
+        );
+        assert!(
+            tree.errors.iter().any(|e| e.contains("vfov_deg")),
+            "{:?}",
+            tree.errors
+        );
+
+        let unknown = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "radar""#,
+        );
+        let tree = discover(&machine_with(&unknown, WHEEL_JOINT));
+        assert!(
+            tree.errors.iter().any(|e| e.contains("radar")),
+            "{:?}",
+            tree.errors
+        );
+    }
+
+    #[test]
     fn strict_tree_with_sensor_offset() {
         let tree = discover(&machine_with(CHASSIS_AND_WHEEL, WHEEL_JOINT));
         assert!(tree.is_valid(), "{:?}", tree.errors);
@@ -1187,6 +1419,160 @@ fn read_element(
         number,
         designator,
     })
+}
+
+/// The `gearbox:sensor:*` attributes of a sensor link. An unrecognised kind
+/// is an error; a link whose name implies no kind is a warning and is not
+/// simulated. Out-of-range values are errors rather than clamped.
+fn read_sensor(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    name: &str,
+    warnings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) -> Option<SensorSpec> {
+    let kind = match read_token(stage, prim, "gearbox:sensor:kind") {
+        Some(token) => match SensorKind::parse(&token) {
+            Some(kind) => kind,
+            None => {
+                errors.push(format!(
+                    "{prim}: unknown gearbox:sensor:kind `{token}` (imu, lidar)"
+                ));
+                return None;
+            }
+        },
+        None => match SensorKind::from_link_name(name) {
+            Some(kind) => kind,
+            None => {
+                warnings.push(format!(
+                    "{prim}: sensor link `{name}` names no supported sensor; author gearbox:sensor:kind (imu, lidar) to simulate it"
+                ));
+                return None;
+            }
+        },
+    };
+    let mut spec = SensorSpec {
+        kind,
+        rate_hz: match kind {
+            SensorKind::Imu => 100.0,
+            SensorKind::Lidar => 10.0,
+            SensorKind::Camera => 5.0,
+        },
+        columns: 360,
+        rows: 16,
+        hfov: std::f32::consts::TAU,
+        vfov: match kind {
+            SensorKind::Camera => 60f32.to_radians(),
+            _ => 30f32.to_radians(),
+        },
+        range_m: 100.0,
+        width: 128,
+        height: 96,
+        render: CameraRender::Optimized,
+        color: true,
+        depth: true,
+    };
+    fn bad(errors: &mut Vec<String>, prim: &SdfPath, what: &str, value: f32) {
+        errors.push(format!(
+            "{prim}: gearbox:sensor:{what} = {value} is out of range"
+        ));
+    }
+    if let Some(rate) = read_float(stage, prim, "gearbox:sensor:rate_hz") {
+        if rate.is_finite() && rate > 0.0 && rate <= 10_000.0 {
+            spec.rate_hz = rate;
+        } else {
+            bad(errors, prim, "rate_hz", rate);
+        }
+    }
+    if kind == SensorKind::Lidar {
+        if let Some(columns) = read_float(stage, prim, "gearbox:sensor:columns") {
+            if columns >= 1.0 && columns <= 8192.0 && columns.fract() == 0.0 {
+                spec.columns = columns as u32;
+            } else {
+                bad(errors, prim, "columns", columns);
+            }
+        }
+        if let Some(rows) = read_float(stage, prim, "gearbox:sensor:rows") {
+            if rows >= 1.0 && rows <= 512.0 && rows.fract() == 0.0 {
+                spec.rows = rows as u32;
+            } else {
+                bad(errors, prim, "rows", rows);
+            }
+        }
+        if let Some(hfov) = read_float(stage, prim, "gearbox:sensor:hfov_deg") {
+            if hfov > 0.0 && hfov <= 360.0 {
+                spec.hfov = hfov.to_radians();
+            } else {
+                bad(errors, prim, "hfov_deg", hfov);
+            }
+        }
+        if let Some(vfov) = read_float(stage, prim, "gearbox:sensor:vfov_deg") {
+            if vfov >= 0.0 && vfov < 180.0 && (vfov > 0.0 || spec.rows == 1) {
+                spec.vfov = vfov.to_radians();
+            } else {
+                bad(errors, prim, "vfov_deg", vfov);
+            }
+        }
+        if let Some(range) = read_float(stage, prim, "gearbox:sensor:range_m") {
+            if range.is_finite() && range > 0.0 {
+                spec.range_m = range;
+            } else {
+                bad(errors, prim, "range_m", range);
+            }
+        }
+        if spec.rows > 1 && spec.vfov <= 0.0 {
+            bad(errors, prim, "vfov_deg", 0.0);
+        }
+        if spec.columns.saturating_mul(spec.rows) > MAX_LIDAR_PULSES {
+            errors.push(format!(
+                "{prim}: gearbox:sensor columns × rows exceeds {MAX_LIDAR_PULSES} pulses"
+            ));
+        }
+    }
+    if kind == SensorKind::Camera {
+        for (what, field) in [("width", &mut spec.width), ("height", &mut spec.height)] {
+            if let Some(value) = read_float(stage, prim, &format!("gearbox:sensor:{what}")) {
+                if (1.0..=MAX_CAMERA_SIDE as f32).contains(&value) && value.fract() == 0.0 {
+                    *field = value as u32;
+                } else {
+                    bad(errors, prim, what, value);
+                }
+            }
+        }
+        if let Some(vfov) = read_float(stage, prim, "gearbox:sensor:vfov_deg") {
+            if vfov > 0.0 && vfov < 180.0 {
+                spec.vfov = vfov.to_radians();
+            } else {
+                bad(errors, prim, "vfov_deg", vfov);
+            }
+        }
+        if let Some(range) = read_float(stage, prim, "gearbox:sensor:range_m") {
+            if range.is_finite() && range > 0.0 {
+                spec.range_m = range;
+            } else {
+                bad(errors, prim, "range_m", range);
+            }
+        }
+        if let Some(token) = read_token(stage, prim, "gearbox:sensor:render") {
+            match CameraRender::parse(&token) {
+                Some(render) => spec.render = render,
+                None => errors.push(format!(
+                    "{prim}: gearbox:sensor:render = `{token}` is not geometry, optimized or full"
+                )),
+            }
+        }
+        if let Some(token) = read_token(stage, prim, "gearbox:sensor:channels") {
+            match token.as_str() {
+                "color" | "colour" => (spec.color, spec.depth) = (true, false),
+                "depth" => (spec.color, spec.depth) = (false, true),
+                "color_depth" | "colour_depth" => (spec.color, spec.depth) = (true, true),
+                _ => errors.push(format!(
+                    "{prim}: gearbox:sensor:channels = `{token}` is not color, depth or color_depth"
+                )),
+            }
+        }
+    }
+    Some(spec)
 }
 
 /// Every `gearbox:value:*` attribute on a prim, sorted by name.

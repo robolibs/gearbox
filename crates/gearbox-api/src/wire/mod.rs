@@ -14,5 +14,7 @@ pub use host::{
 };
 pub use machine::{
     AttachRequest, AttachmentRecord, ClaimRequest, ClaimResponse, ControllerCommand, DetachRequest,
-    LinkPose, LinkRecord, MachineInfo, MachineState, SessionInfo, SessionRef, TwistCmd,
+    CAMERA_CHUNK_BYTES, CAMERA_COLOR, CAMERA_DEPTH, CameraFrame, LIDAR_CHUNK_PULSES, LidarScan,
+    LinkPose, LinkRecord, MachineInfo, MachineState, SessionInfo,
+    SessionRef, TwistCmd,
 };

@@ -591,6 +591,61 @@ the joint between them is not a revolute, or when a `steer` link's joint
 axis is not the up axis; it rejects a `wheel` link that has more than one
 joint to its parent.
 
+### 7.6 Simulated sensor links
+
+A `role = "sensor"` link can carry a simulated sensor. The runtime samples it
+with Molla's GPU sensors from the Molla physics backend and streams it on
+`/machines/<machine_id>/sensors/<link name>` at its own simulated-time rate,
+separate from the exact `odom`/`imu` telemetry every driven machine publishes.
+Readings are in the link's own frame, so author the link with REP-103 axes:
++X forward, +Y left, +Z up.
+
+| Property | Type | Status | Default | Notes |
+|---|---|---|---|---|
+| `gearbox:sensor:kind` | token | SHOULD | from the name | `imu`, `lidar` or `camera`. Without it, a name starting with `imu`, `lidar`/`laser` or `camera`/`cam_` implies the kind; any other sensor link is not simulated (warning). Unknown kinds are validation errors. |
+| `gearbox:sensor:rate_hz` | float | optional | 100 (imu), 10 (lidar), 5 (camera) | Samples per simulated second, `(0, 10000]`. |
+| `gearbox:sensor:columns` | int | optional | 360 | LiDAR azimuth columns, `1..=8192`. |
+| `gearbox:sensor:rows` | int | optional | 16 | LiDAR zenith rows, `1..=512`; `columns × rows ≤ 1048576`. |
+| `gearbox:sensor:hfov_deg` | float | optional | 360 | LiDAR horizontal field of view centred on +X, `(0, 360]`. A full circle does not repeat its first column. |
+| `gearbox:sensor:vfov_deg` | float | optional | 30 (lidar), 60 (camera) | Vertical field of view centred on the XY plane, `[0, 180)`; `0` only for a one-row LiDAR. |
+| `gearbox:sensor:range_m` | float | optional | 100 | LiDAR and camera maximum range; misses report an infinite range or depth. |
+| `gearbox:sensor:width` / `height` | int | optional | 128 / 96 | Camera image size in pixels, `1..=4096` each. |
+| `gearbox:sensor:render` | token | optional | `optimized` | Camera colour source: `optimized` (Bevy render of the visual scene without grass, clouds, bloom or multisampling), `full` (Bevy render with grass, bloom and multisampling) or `geometry` (Molla trace of the collision shapes with flat per-shape colour). |
+| `gearbox:sensor:channels` | token | optional | `color_depth` | Camera channels to publish: `color`, `depth` or `color_depth`. Depth always comes from the Molla trace of the collision shapes. |
+
+An `imu` link streams `datapod.imu.v1`: specific force and angular velocity in
+the link frame, and the link's orientation in the same remapped world frame as
+`odom`. A `lidar` link streams `gearbox.lidar_scan.v1`: a row-major sweep of
+ranges and link-frame points (zenith from +Z, azimuth from +X towards +Y),
+with `NaN` points and infinite ranges for misses. A sweep arrives as
+consecutive chunks of at most 900 pulses (`pulse_offset`, `pulse_count`)
+that share one `sample` number, so every message fits the shared-memory
+payload limit; reassemble by pulse index. A `camera` link streams
+`gearbox.camera_frame.v1`: a pinhole camera looking along +X with +Z up,
+delivered per frame as row bands of a packed-RGBA8 color channel and an f32
+depth channel (metres along the pixel ray, infinite for a miss), every band of
+one channel of a frame sharing its `sample`; a Bevy-rendered colour frame and
+the Molla depth of the same sample carry the same `sample` and simulated time
+but arrive separately. Bevy-rendered cameras render only on frames where a
+sample is due, and sample at most once per rendered frame. Out-of-range values
+are validation errors, not clamped. Sensor links on the Rapier backend are discovered but not sampled.
+
+```usda
+def Xform "lidar_link" (prepend apiSchemas = ["GearboxLinkAPI"])
+{
+    token gearbox:link:role = "sensor"
+    token gearbox:sensor:kind = "lidar"
+    float gearbox:sensor:rate_hz = 10
+    int gearbox:sensor:columns = 360
+    int gearbox:sensor:rows = 16
+    float gearbox:sensor:hfov_deg = 360
+    float gearbox:sensor:vfov_deg = 30
+    float gearbox:sensor:range_m = 60
+    double3 xformOp:translate = (0.6, 0.0, 2.4)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+}
+```
+
 ## 8. Fixed conventions the runtime assumes
 
 These are not configurable today. An asset that violates them drives wrong

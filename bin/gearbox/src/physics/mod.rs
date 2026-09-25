@@ -22,7 +22,7 @@ mod debug;
 pub(crate) mod fem;
 mod joints;
 pub mod markers;
-mod molla;
+pub(crate) mod molla;
 #[cfg(test)]
 pub(crate) use molla::MollaBackend;
 mod rapier;

@@ -379,7 +379,7 @@ fn follow_view(
     terrain: Option<ResMut<ProceduralTerrain>>,
     mut physics: ResMut<PhysicsWorld>,
     mut meshes: ResMut<Assets<Mesh>>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<&GlobalTransform, (With<Camera3d>, Without<crate::sensor_cameras::SensorCamera>)>,
     sites: Res<Sites>,
     time: Res<Time>,
     mut pending: Local<Option<bevy::tasks::Task<GroundParts>>>,
@@ -741,7 +741,7 @@ fn tile_mesh(grid: &HeightGrid, tx: i32, tz: i32, cell: f32) -> Mesh {
 fn update_terrain_tiles(
     mut commands: Commands,
     terrain: Option<ResMut<ProceduralTerrain>>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<&GlobalTransform, (With<Camera3d>, Without<crate::sensor_cameras::SensorCamera>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut tiles: Query<&mut Mesh3d, With<TerrainTile>>,
 ) {

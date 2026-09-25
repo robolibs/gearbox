@@ -77,6 +77,24 @@ impl ExtractComponent for VegetationChunk {
     }
 }
 
+/// Keeps vegetation out of a camera's view, e.g. a lean sensor camera.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct NoVegetation;
+
+impl SyncComponent for NoVegetation {
+    type Target = Self;
+}
+
+impl ExtractComponent for NoVegetation {
+    type QueryData = &'static NoVegetation;
+    type QueryFilter = ();
+    type Out = Self;
+
+    fn extract_component(_: QueryItem<'_, '_, Self::QueryData>) -> Option<Self> {
+        Some(NoVegetation)
+    }
+}
+
 /// The terrain heightmap (RGBA32F: height, normal x, normal z), the trample
 /// map wheels write into (RG16Uint: press time, roll direction), and the
 /// numbers the shader needs to place blades on them.
@@ -159,6 +177,7 @@ impl Plugin for VegetationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             ExtractComponentPlugin::<VegetationChunk>::default(),
+            ExtractComponentPlugin::<NoVegetation>::default(),
             ExtractResourcePlugin::<RenderFields>::default(),
         ));
         app.sub_app_mut(RenderApp)
@@ -192,7 +211,7 @@ fn queue_vegetation(
     meshes: Res<RenderAssets<RenderMesh>>,
     chunks: Query<(Entity, &MainEntity, &VegetationChunk)>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-    views: Query<&ExtractedView>,
+    views: Query<&ExtractedView, Without<NoVegetation>>,
     view_key_cache: Res<ViewKeyCache>,
     fields: Res<RenderFields>,
     mut warned: Local<bool>,

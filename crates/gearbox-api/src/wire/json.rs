@@ -65,6 +65,8 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(MachineState, machine_state_json, machine_state_from),
         desc!(LinkRecord, link_record_json, link_record_from),
         desc!(LinkPose, link_pose_json, link_pose_from),
+        desc!(LidarScan, lidar_scan_json, lidar_scan_from),
+        desc!(CameraFrame, camera_frame_json, camera_frame_from),
         desc!(AttachRequest, attach_request_json, attach_request_from),
         desc!(DetachRequest, detach_request_json, detach_request_from),
         desc!(AttachmentRecord, attachment_json, attachment_from),
@@ -651,6 +653,170 @@ fn link_pose_json(l: &LinkPose) -> Value {
     })
 }
 
+fn lidar_scan_json(s: &LidarScan) -> Value {
+    let ranges: Vec<Value> = s
+        .ranges
+        .iter()
+        .map(|r| {
+            if r.is_finite() {
+                json!(*r as f64)
+            } else {
+                Value::Null
+            }
+        })
+        .collect();
+    let points: Vec<Value> = s
+        .points()
+        .iter()
+        .filter(|p| p.iter().all(|c| c.is_finite()))
+        .map(|p| json!([p[0] as f64, p[1] as f64, p[2] as f64]))
+        .collect();
+    json!({
+        "link_index": s.link_index, "rows": s.rows, "cols": s.cols,
+        "pulse_offset": s.pulse_offset, "pulse_count": s.pulse_count, "hits": s.hits,
+        "stamp_ms": s.stamp_ms, "sample": s.sample, "sim_time_s": s.sim_time_s,
+        "theta": [s.theta_min, s.theta_max], "phi": [s.phi_min, s.phi_max],
+        "max_range_m": s.max_range_m,
+        "ranges": ranges, "points": points,
+        "props": props_json(&s.props),
+    })
+}
+
+fn lidar_scan_from(v: &Value) -> Result<LidarScan, String> {
+    let pair = |key: &str| {
+        let a = v.get(key).and_then(Value::as_array);
+        let at = |i: usize| {
+            a.and_then(|a| a.get(i))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+        };
+        (at(0), at(1))
+    };
+    let (theta_min, theta_max) = pair("theta");
+    let (phi_min, phi_max) = pair("phi");
+    let mut scan = LidarScan {
+        sim_time_s: num(v, "sim_time_s"),
+        theta_min,
+        theta_max,
+        phi_min,
+        phi_max,
+        max_range_m: num(v, "max_range_m"),
+        link_index: uint(v, "link_index") as u32,
+        rows: uint(v, "rows") as u32,
+        cols: uint(v, "cols") as u32,
+        pulse_offset: uint(v, "pulse_offset") as u32,
+        pulse_count: uint(v, "pulse_count") as u32,
+        hits: uint(v, "hits") as u32,
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        sample: uint(v, "sample") as u32,
+        ranges: Vec::new(),
+        points: Vec::new(),
+        props: props_from(
+            v,
+            &[
+                "link_index",
+                "rows",
+                "cols",
+                "pulse_offset",
+                "pulse_count",
+                "hits",
+                "stamp_ms",
+                "sample",
+                "sim_time_s",
+                "theta",
+                "phi",
+                "max_range_m",
+                "ranges",
+                "points",
+            ],
+        ),
+    };
+    let ranges: Vec<f32> = v
+        .get("ranges")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|r| r.as_f64().map_or(f32::INFINITY, |r| r as f32))
+                .collect()
+        })
+        .unwrap_or_default();
+    scan.ranges = ranges;
+    let points: Vec<[f32; 3]> = v
+        .get("points")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    let c = |i: usize| {
+                        p.get(i)
+                            .and_then(Value::as_f64)
+                            .map_or(f32::NAN, |c| c as f32)
+                    };
+                    [c(0), c(1), c(2)]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    scan.set_points(&points);
+    Ok(scan)
+}
+
+fn camera_frame_json(f: &CameraFrame) -> Value {
+    let mut out = json!({
+        "link_index": f.link_index, "width": f.width, "height": f.height,
+        "row_offset": f.row_offset, "rows": f.rows, "channel": f.channel,
+        "stamp_ms": f.stamp_ms, "sample": f.sample, "sim_time_s": f.sim_time_s,
+        "fov_y_rad": f.fov_y_rad, "max_range_m": f.max_range_m,
+        "data_len": f.data.len(),
+        "props": props_json(&f.props),
+    });
+    if f.channel == CAMERA_DEPTH {
+        let depths = f.depths();
+        let finite: Vec<f32> = depths.iter().copied().filter(|d| d.is_finite()).collect();
+        out["depth"] = json!({
+            "finite": finite.len(),
+            "min": finite.iter().copied().fold(f32::INFINITY, f32::min),
+            "max": finite.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        });
+    }
+    out
+}
+
+fn camera_frame_from(v: &Value) -> Result<CameraFrame, String> {
+    Ok(CameraFrame {
+        sim_time_s: num(v, "sim_time_s"),
+        fov_y_rad: num(v, "fov_y_rad"),
+        max_range_m: num(v, "max_range_m"),
+        link_index: uint(v, "link_index") as u32,
+        width: uint(v, "width") as u32,
+        height: uint(v, "height") as u32,
+        row_offset: uint(v, "row_offset") as u32,
+        rows: uint(v, "rows") as u32,
+        channel: uint(v, "channel") as u32,
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        sample: uint(v, "sample") as u32,
+        data: Vec::new(),
+        props: props_from(
+            v,
+            &[
+                "link_index",
+                "width",
+                "height",
+                "row_offset",
+                "rows",
+                "channel",
+                "stamp_ms",
+                "sample",
+                "sim_time_s",
+                "fov_y_rad",
+                "max_range_m",
+                "data_len",
+                "depth",
+            ],
+        ),
+    })
+}
+
 fn link_pose_from(v: &Value) -> Result<LinkPose, String> {
     let p = v.get("pose").cloned().unwrap_or(Value::Null);
     Ok(LinkPose {
@@ -701,4 +867,55 @@ fn attachment_from(v: &Value) -> Result<AttachmentRecord, String> {
         depth: uint(v, "depth") as u32,
         props: props_from(v, &["controlled", "depth"]),
     })
+}
+
+#[cfg(test)]
+mod lidar_scan_tests {
+    use super::*;
+    use crate::wire::pack;
+
+    fn scan() -> LidarScan {
+        let mut scan = LidarScan {
+            sim_time_s: 1.25,
+            theta_min: 1.4,
+            theta_max: 1.7,
+            phi_min: -3.0,
+            phi_max: 3.0,
+            max_range_m: 60.0,
+            link_index: 2,
+            rows: 1,
+            cols: 3,
+            pulse_offset: 0,
+            pulse_count: 3,
+            hits: 2,
+            stamp_ms: 77,
+            sample: 9,
+            ranges: vec![4.5, f32::INFINITY, 2.0],
+            points: Vec::new(),
+            props: Props::from_pairs(&[("name", "lidar_link")]).into_bytes(),
+        };
+        scan.set_points(&[[4.5, 0.0, 0.0], [f32::NAN; 3], [0.0, 2.0, 0.0]]);
+        scan
+    }
+
+    #[test]
+    fn lidar_scan_survives_wire_and_json() {
+        let scan = scan();
+        let wire: LidarScan = pack(&scan).to_datapod().unwrap();
+        assert_eq!(wire.ranges, scan.ranges);
+        assert_eq!(wire.points()[0], [4.5, 0.0, 0.0]);
+        assert!(wire.points()[1][0].is_nan());
+        assert_eq!(wire.name(), "lidar_link");
+        assert_eq!((wire.rows, wire.cols, wire.hits, wire.sample), (1, 3, 2, 9));
+
+        let json = lidar_scan_json(&scan);
+        assert_eq!(json["ranges"][1], Value::Null);
+        assert_eq!(json["points"].as_array().unwrap().len(), 2);
+        let back = lidar_scan_from(&json).unwrap();
+        assert_eq!(back.ranges[0], 4.5);
+        assert!(back.ranges[1].is_infinite());
+        assert_eq!(back.max_range_m, 60.0);
+        assert_eq!((back.link_index, back.stamp_ms), (2, 77));
+        assert_eq!(back.name(), "lidar_link");
+    }
 }

@@ -58,6 +58,9 @@ molla-sim = { git = "https://github.com/bresilla/molla", rev = "ef25106815e493d2
 molla-geometry = { git = "https://github.com/bresilla/molla", rev = "ef25106815e493d216a7e7acff3b2c17bbcc34f9", default-features = false }
 molla-solvers = { git = "https://github.com/bresilla/molla", rev = "ef25106815e493d216a7e7acff3b2c17bbcc34f9", default-features = false, features = ["gpu"] }
 molla-vehicle = { git = "https://github.com/bresilla/molla", rev = "ef25106815e493d216a7e7acff3b2c17bbcc34f9" }
+molla-compute = { git = "https://github.com/bresilla/molla", rev = "ef25106815e493d216a7e7acff3b2c17bbcc34f9", default-features = false, features = ["gpu"] }
+molla-sensors = { git = "https://github.com/bresilla/molla", rev = "ef25106815e493d216a7e7acff3b2c17bbcc34f9", default-features = false, features = ["gpu"] }
+molla-storage = { git = "https://github.com/bresilla/molla", rev = "ef25106815e493d216a7e7acff3b2c17bbcc34f9", default-features = false, features = ["gpu"] }
 wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
 bytemuck = "1"
 glam = "0.30"

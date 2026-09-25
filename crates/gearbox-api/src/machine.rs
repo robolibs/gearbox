@@ -1,6 +1,7 @@
 //! A machine agent: one agentio `Agent` per simulated machine, hosting the
 //! control and telemetry topics for that machine under its own identity.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
@@ -8,7 +9,7 @@ use datapod::robot::{Gnss, Imu, Twist, TurnRadius, WheelEncoders};
 use peerbus::{AnsServer, EndpointId, Publisher, ReqReplyToken, ReqServer};
 
 use crate::host::{serve_que, serve_req};
-use crate::topics::{self, machine_topic};
+use crate::topics::{self, machine_sensor_topic, machine_topic};
 use crate::wire::*;
 
 #[derive(Debug, Clone, Default)]
@@ -147,6 +148,8 @@ pub struct MachineAgent {
     tf_enabled: bool,
     encoders_pub: Registered<Publisher<Env>>,
     imu_pub: Registered<Publisher<Env>>,
+    /// Simulated sensor streams by link name, registered on first publish.
+    sensor_pubs: HashMap<String, Registered<Publisher<Env>>>,
     gnss_pub: Registered<Publisher<Env>>,
     turn_radius_pub: Registered<Publisher<Env>>,
     attach: Registered<ReqServer<Env, Env>>,
@@ -205,6 +208,7 @@ impl MachineAgent {
             tf_enabled: false,
             encoders_pub: agent.publish(&t(topics::MACHINE_ENCODERS))?,
             imu_pub: agent.publish(&t(topics::MACHINE_IMU))?,
+            sensor_pubs: HashMap::new(),
             gnss_pub: agent.publish(&t(topics::MACHINE_GNSS))?,
             turn_radius_pub: agent.publish(&t(topics::MACHINE_TURN_RADIUS))?,
             attach: agent.req_server(&t(topics::MACHINE_TOOLS_ATTACH))?,
@@ -537,6 +541,42 @@ impl MachineAgent {
 
     pub fn publish_imu(&mut self, imu: &Imu) {
         let _ = self.imu_pub.send(&pack(imu));
+    }
+
+    fn sensor_pub(&mut self, link: &str) -> Option<&mut Registered<Publisher<Env>>> {
+        if !self.sensor_pubs.contains_key(link) {
+            let topic = machine_sensor_topic(&self.config.machine_id, link);
+            let publisher = self.agent.publish(&topic).ok()?;
+            self.sensor_pubs.insert(link.to_string(), publisher);
+        }
+        self.sensor_pubs.get_mut(link)
+    }
+
+    /// A simulated IMU reading of the named sensor link (`datapod.imu.v1`);
+    /// `false` when the link's publisher could not be registered or the
+    /// send was refused.
+    pub fn publish_sensor_imu(&mut self, link: &str, imu: &Imu) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(imu)).is_ok())
+    }
+
+    /// One chunk of a simulated LiDAR sweep of the named sensor link.
+    pub fn publish_sensor_lidar(&mut self, link: &str, scan: &LidarScan) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(scan)).is_ok())
+    }
+
+    /// One row band of a simulated camera frame of the named sensor link.
+    pub fn publish_sensor_camera(&mut self, link: &str, frame: &CameraFrame) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(frame)).is_ok())
+    }
+
+    /// Links whose sensor stream has been registered so far.
+    pub fn sensor_links(&self) -> Vec<String> {
+        let mut links: Vec<String> = self.sensor_pubs.keys().cloned().collect();
+        links.sort();
+        links
     }
 
     pub fn publish_gnss(&mut self, gnss: &Gnss) {

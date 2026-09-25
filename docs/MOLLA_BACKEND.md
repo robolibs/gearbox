@@ -612,3 +612,219 @@ Local path dependencies currently expect Molla at `../../OUSD/molla` relative
 to the Gearbox worktree root. No dependency versions were refreshed. Rapier's
 `enhanced-determinism` feature must match the shared Parry feature enabled by
 Molla; otherwise Rapier selects incompatible hash-set drain calls.
+
+## Simulated sensors on sensor links (2026-09-25)
+
+`bin/gearbox/src/sensors.rs` samples authored `role = "sensor"` links
+(`specs/CONTROLLER_SPEC.md` §7.6) with Molla's GPU sensors and streams them on
+`/machines/<id>/sensors/<link>`: `datapod.imu.v1` for `imu` links, chunked
+`gearbox.lidar_scan.v1` sweeps for `lidar` links and row-banded
+`gearbox.camera_frame.v1` color/depth frames for `camera` links. The exact
+`odom`/`imu` controller telemetry is unchanged and stays on its own topics.
+
+- The Molla crates now resolve through a `[patch."https://github.com/bresilla/molla"]`
+  section to the sibling checkout (`../../OUSD/molla`), which adds
+  `molla-sensors`, `molla-compute` and `molla-storage`; the git `rev` pins are
+  retained for when that tree is pushed.
+- The sensors adopt Bevy's render device through `molla_compute::Engine::from_device`;
+  Bevy 0.19.1 and Molla share wgpu 29.0.4, so no second device or copy exists.
+  The FEM islands already use the same device this way.
+- `PhysicsBackend::with_molla_scene`/`molla_body_handle` expose the Molla runtime
+  scene; the rig snapshots collider geometry once per scene revision
+  (`SensorScene`, convex hulls and round cylinders included) and copies body
+  poses/twists at each sample under the physics lock, never across a GPU wait.
+  Results are collected through a readback ring on later frames, so no frame
+  blocks on the GPU. Rigs rebuild on scene revision or mount changes and drop
+  with their machine; a paused clock issues no samples.
+- Sensor rates run on `PhysicsWorld::simulated_seconds`, not render frames.
+- The machine agent's shared-memory config now allows 24 publishers; every
+  message must fit `MAX_PAYLOAD_BYTES` (16 KiB), so LiDAR sweeps are split into
+  `LIDAR_CHUNK_PULSES` (900) pulse chunks sharing one `sample`.
+- `bin/gearbox/assets/world/sensor_yard.usda` is the tractor with an
+  `imu_link` (100 Hz) and a 360×16 roof `lidar_link` (10 Hz, 60 m).
+
+Verification, RTX 4080/Vulkan, release build, Molla backend at 120 Hz:
+
+- `nixVulkan cargo test -p gearbox-sim --bin gearbox imu_and_lidar -- --ignored`:
+  the headless GPU fixture (fixed carrier over a slab with a 10 m wall 4.5 m
+  ahead) reads 9.81 m/s² along the link +Z, zero gyro, ROS-remapped
+  orientation, and ranges `[inf, inf, inf, 6.364, 4.5, 6.364, inf, inf]`
+  with three hits. `links::tests::sensor_links_parse_kinds_defaults_and_ranges`,
+  `sensors::tests::*` and `wire::json::lidar_scan_tests` cover parsing, frames
+  and the wire type.
+- Live `sensors-gate` instance with `sensor_yard.usda` spawned as `sy`:
+  `peer sub /machines/sy/sensors/imu_link` parked reads
+  `az 9.80, ax 0.30, ay -0.12` (meadow tilt) and zero gyro; during
+  `machine move sy --forward 2 --turn 0.3 --for 5s` it reads
+  `gyro.vz 0.25–0.38 rad/s`, `ax 1.0–1.4 m/s²` while accelerating and
+  `ay 0.3–1.0 m/s²` centripetal, matching the commanded left turn and the
+  `odom` yaw rate. `peer sub /machines/sy/sensors/lidar_link -n 8` delivers a
+  full sweep as seven chunks of one `sample`: the eight upward rows miss, the
+  lower rows hit terrain and the tractor's own body from 0.48 m to 59.9 m.
+- Pausing the clock froze both streams (the same LiDAR `sample` 1819 for
+  4 s); `scene play` resumed them (1918); `clear machines` dropped the rig
+  without diagnostics. Frame rate stayed 8–12 fps with and without the
+  machine, so the sensors are not the render bottleneck; physics steps stayed
+  0.15–0.44 ms.
+- Screenshot after the drive: `/tmp/claude-1000/.../scratchpad/logs/sensor_yard.png`
+  (copied to `/tmp/gearbox-sensor-yard.png`).
+
+Camera links (`gearbox:sensor:kind = "camera"`, 160×120 at 5 Hz in the yard)
+stream row-banded color and depth frames; the live centre rows read the
+terrain at 13–80 m and the bottom rows the hood at 4.5–6 m. A second tractor
+spawned 20.3 m from `sy` shows in the LiDAR horizon rows at 18.7–19.3 m over
+a 36° sector and, after `machine move other --forward 2 --for 4s`, at
+22.9–25 m about 27 columns further round, consistent with its 8 m move
+(`/tmp/gearbox-sensor-sweep-{before,after}.json`,
+`/tmp/gearbox-sensor-yard-two.png`). The simulator log reports each rig every
+ten seconds: with IMU, LiDAR and camera together, 0.3–0.7 ms sample + 0.1–0.4 ms
+collect per sample, 1 KB uploaded and 139–191 KB read back per sample, 150
+frames per 10 s and zero dropped samples at 15 fps.
+
+Not covered: the first launch of this checkout ran on `llvmpipe` because
+`NVIDIA_VERSION` was unset when the dev shell was entered (see `.env.lua`);
+set it before `nix develop`. SDF colliders stay invisible to sensors; sensor
+noise models remain future work (`PLAN_SENSORS.md`).
+
+### Camera colours, the live viewer and multi-camera cost (2026-09-25)
+
+Camera links trace the Molla collision scene, not Bevy's visual meshes. Every
+shape used to shade as white, so frames were grey Lambert silhouettes. Rig
+builds now call `SensorScene::set_shape_colors` with one albedo per collider:
+
+- the size-weighted mean `StandardMaterial` colour of the visible meshes under
+  the collider entity, or under its nearest ancestor that has any (up to three
+  levels), times the mean texel of CPU-resident RGBA8 base-colour textures;
+- `GROUND_COLOR` for heightfields and entity-less colliders;
+- `NEUTRAL_COLOR` otherwise.
+
+The log line `collider colours: N from visuals, M ground, K neutral` reports
+the split. `sensors::tests::collider_colours_follow_visuals_with_ground_and_neutral_fallbacks`
+covers the mapping. This does **not** make camera links representative of the
+rendered scene: terrain textures, grass and meshes without colliders never
+reach the collision scene. That is now the `geometry` render mode; see below.
+
+`bin/gearbox/examples/camera_view.rs` subscribes to camera links and shows the
+colour (or depth) of each stream with its delivered rate and bandwidth. Run it
+as `camera_view <machine> [link ...]`. It connects as the named identity
+`gearbox-camera-view`: `camera_view --did` prints the did for `gearbox run
+--allow <did>`. Misses (alpha 0) draw as sky, and `CAMERA_VIEW_SNAPSHOTS=<dir>`
+writes each stream's latest colour frame as a PNG every three seconds.
+`world/tractor_cameras.usda` mounts six 640×480, 15 Hz cameras (front, rear,
+left, right, front-down, rear-down) on the tractor.
+
+Measured on RTX 4080 (release, default meadow world, 32-second windows, fps
+from `LogDiagnosticsPlugin`):
+
+| Setup | Sim fps | Rig cost per rendered frame | Readback per frame | Dropped camera frames |
+|---|---|---|---|---|
+| No machine | ~12 (noisy, 6–50) | – | – | – |
+| Tractor, no cameras | 11.9–12.2 | – | – | – |
+| One camera | 11.3–12.3 | 0.7 ms sample + 6.3 ms collect | 2.4 MB | 0 |
+| One camera, viewer subscribed | 10.8–11.0 | 0.3 ms + 2.8 ms | 2.4 MB | 0 |
+| Six cameras | 6.8–11.8 | 2.9 ms + 16.3 ms | 12.6 MB | 76–120 per 10 s |
+| Six cameras, viewer subscribed | 6.8–8.3 | 1.3 ms + 10.6–12.1 ms | 12.7–13.4 MB | 39–77 per 10 s |
+
+Before any machine is loaded, Bevy's own rendering already keeps the board at
+100% and about 12 fps, so the cameras' GPU trace is small by comparison. Host
+work dominates: map, `f64` conversion, row-band chunking and publishing. Samples
+are taken at most once per rendered frame, so a 15 Hz camera delivers about
+12 Hz here. Dropped frames are readback-ring backpressure. 1280×720 links were
+rejected: link parsing caps width and height at 1024.
+
+### Bevy-rendered camera links (2026-09-25)
+
+`gearbox:sensor:render` picks where a camera link's colour comes from. The
+default is `optimized`; `full` and `geometry` are the alternatives.
+`gearbox:sensor:channels` picks `color`, `depth` or `color_depth`.
+
+`bin/gearbox/src/sensor_cameras.rs` gives each `optimized`/`full` link a
+render-to-texture `Camera3d`:
+
+- **Placement:** a child of the link prim, looking along +X with +Z up, with
+  the link's vertical FOV and range as far plane.
+- **When it renders:** it stays inactive until the link's rig issues a sample.
+  That frame it renders once and a `Readback` copies its RGBA8 image back.
+- **What it publishes:** row padding is stripped and the colour goes out
+  through the same row-band chunker as Molla frames. Colour carries the
+  sample number and simulated time of the rig's sample, so it pairs with the
+  Molla depth.
+- **Depth-only trace:** the Molla trace then runs only for depth, and not at
+  all for `channels = "color"`.
+- **Order:** sensor cameras order before the viewer (`order ≤ -1000`).
+- **Always off by default:** each frame starts with every sensor camera
+  inactive, because mara switches every camera on before each update.
+
+What each mode draws:
+
+- **Both modes:** the weather's exposure, AgX tonemapping, haze, ambient and
+  environment light, following the daylight via `bevy_weather::camera_look`
+  and `WeatherLook`.
+- **`optimized` omits:** bloom, MSAA and vegetation (`gearbox_fields::NoVegetation`).
+- **`full` adds:** Bloom and 4× MSAA, and draws vegetation.
+- **Neither draws:** the cloud skybox, which now sits on
+  `bevy_weather::SKY_LAYER` because it is rendered from the viewer's own cloud
+  image. Sensor cameras clear to a flat sky colour instead.
+- **Shadows:** both pay the sun's four shadow cascades; a camera cannot opt
+  out without losing the sun.
+
+Making a second `Camera3d` safe required changes to several systems:
+
+- **Opting out of the weather:** `bevy_weather::configure_cameras` skips
+  cameras with `WeatherOptOut`.
+- **Following the viewer:** terrain and biome lookups exclude `SensorCamera`.
+  Vegetation streaming and motes follow the highest-order camera instead of an
+  arbitrary or single one.
+- **Already safe:** planet tile selection and the globe require `CellCoord`,
+  so only the viewer drives them.
+- **Keeping the sky:** the recorder's layer sets include `SKY_LAYER`, so the
+  viewer and its recordings keep the sky.
+
+Measured on RTX 4080, release, default meadow world, six 640×480 links at a
+requested 15 Hz, no subscriber. Without a machine the sim renders about 11 fps.
+
+| Links | Sim fps | Delivered colour |
+|---|---|---|
+| 6 × `geometry` | 10.6–11.0 | ~10 Hz each; 15–17 ms host collect per frame, 12.8 MB read back, ~70 drops per 10 s |
+| 1 × `optimized` | 10.2–10.6 | ~10 Hz; 1.2 MB read back per render, no drops |
+| 6 × `optimized` | 7.8–8.3 | ~8 Hz each; all renders published |
+| 6 × `full` | ~1.9 | ~4 Hz each |
+
+Samples are taken at most once per rendered frame, so delivered rates are
+capped by the sim frame rate. In `full` mode vegetation streams only around
+the viewer camera, so it thins out beyond the viewer's range in sensor images.
+
+One run with six `optimized` links hit NVIDIA Xid 32 (invalid push buffer)
+about 36 s in, after a click in the window, and the device was lost. It did
+not reproduce across the four-mode measurement that followed; the cause is
+unknown.
+
+### Where the camera cost goes (profiled 2026-09-25)
+
+Profiling switches:
+- `GEARBOX_RENDER_DIAGNOSTICS=1` adds Bevy's per-pass render diagnostics to the 10 s log.
+- `MARA_GPU_TIMESTAMPS=1` makes mara request timestamp queries so those passes get GPU times.
+- `GEARBOX_TRACE` in the `profile` build writes a Chrome trace.
+- `GEARBOX_NO_SUN_SHADOWS=1` switches sun shadow maps off, for profiling only.
+
+Findings on the RTX 4080, release, default meadow, tractor with camera links:
+
+- **GPU-bound.** In the Chrome trace the main thread is busy only 56 → 85 ms per
+  second of wall time (no cameras → six optimized), and the render thread's
+  `Core3d` 22 → 40 ms per second, while frames take 80–160 ms.
+- **Grass dominates the base cost.** The viewer's transparent pass, which draws
+  the vegetation, takes most of each frame's GPU time. This is why the sim sits
+  near 12 fps before any camera exists.
+- **Sensor cameras pay per view, not per pixel.** Six optimized cameras at
+  160×120 cost as much as at 640×480 (8.5–9.3 against 9.0–9.4 fps, from 12.2).
+- **Sun shadows are that per-view cost.** Bevy builds the sun's four 4096²
+  cascades, out to 800 m, for every active camera, whatever its range. With sun
+  shadows off, six 160×120 cameras hold 11.7–11.9 fps against 12.7 with none,
+  and deliver 714 rather than about 550 renders per 10 s.
+
+Bevy 0.19 has no per-camera opt-out for directional shadows. A light's
+`RenderLayers` also filter which entities cast into its maps, so hiding the sun
+from sensor cameras would stop the world casting shadows. Removing the cost
+needs a small Bevy change (a per-camera "no directional shadows" marker in
+`bevy_light` cascades and `bevy_pbr` light preparation) or globally cheaper
+shadows. Neither is applied.

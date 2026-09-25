@@ -415,6 +415,7 @@ mod tests {
                 coupling: None,
                 element: None,
                 values: Vec::new(),
+                sensor: None,
             }],
             ..Default::default()
         };

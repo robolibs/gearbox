@@ -8,6 +8,11 @@ mod daylight;
 mod sky;
 
 pub use calendar::SolarCalendar;
+pub use sky::{WeatherOptOut, camera_look};
+
+/// Render layer of the cloud skybox planes. They are drawn from the clouds
+/// camera's own cloud image, so only that camera should include this layer.
+pub const SKY_LAYER: usize = 2;
 
 use bevy::prelude::*;
 use clouds::config::CloudsConfig;

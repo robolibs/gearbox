@@ -40,6 +40,8 @@ pub struct PhysicsWorld {
     /// Steps this frame runs, planned in `First` so controllers can scale
     /// per-frame impulses by the time they cover.
     pub pending_steps: u32,
+    /// Simulated seconds advanced by every step so far; never rewinds.
+    pub simulated_seconds: f64,
 }
 
 /// Default physics rate; `GEARBOX_PHYSICS_HZ` overrides it.
@@ -119,6 +121,7 @@ impl PhysicsWorld {
             step_hz,
             accumulator: 0.0,
             pending_steps: 0,
+            simulated_seconds: 0.0,
         }
     }
 
@@ -134,6 +137,7 @@ impl PhysicsWorld {
         let (authored, attached) = (&self.filtered_pairs, &self.attachment_filtered_pairs);
         self.backend
             .step(&|a, b| authored.contains(&(a, b)) || attached.contains(&(a, b)));
+        self.simulated_seconds += self.dt();
         for body in self.backend.quarantined_bodies() {
             if let Some(entity) = self.backend.body(body).and_then(|body| body.entity()) {
                 if !self.quarantined.contains(&entity) {

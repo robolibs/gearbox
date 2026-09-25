@@ -27,6 +27,8 @@ mod links;
 mod load;
 mod physics;
 mod physics_debug;
+mod sensor_cameras;
+mod sensors;
 mod services;
 mod terrain;
 mod usd_ext;

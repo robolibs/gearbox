@@ -119,7 +119,7 @@ const HOST_TOPICS: [(&str, &str, &str, &str); 12] = [
     ),
 ];
 
-const MACHINE_TOPICS: [(&str, &str, &str, &str); 8] = [
+const MACHINE_TOPICS: [(&str, &str, &str, &str); 11] = [
     (
         topics::MACHINE_INFO,
         "req/res",
@@ -163,6 +163,19 @@ const MACHINE_TOPICS: [(&str, &str, &str, &str); 8] = [
         "",
     ),
     (topics::MACHINE_ODOM, "pub/sub", "datapod.odom.v1", ""),
+    ("sensors/<imu link>", "pub/sub", "datapod.imu.v1", ""),
+    (
+        "sensors/<lidar link>",
+        "pub/sub",
+        "gearbox.lidar_scan.v1",
+        "",
+    ),
+    (
+        "sensors/<camera link>",
+        "pub/sub",
+        "gearbox.camera_frame.v1",
+        "",
+    ),
 ];
 
 /// The request type a topic takes, for host and machine topics alike.

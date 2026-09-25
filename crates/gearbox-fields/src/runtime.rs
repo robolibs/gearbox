@@ -647,7 +647,7 @@ fn chunk_height_span(corner: Vec2, size: f32, ground: &dyn HeightSource) -> (f32
 pub fn stream_vegetation(
     mut commands: Commands,
     active: Option<Res<ActiveFields>>,
-    cameras: Query<(&GlobalTransform, &Frustum), With<Camera3d>>,
+    cameras: Query<(&GlobalTransform, &Frustum, &Camera), With<Camera3d>>,
     mut chunks: ResMut<VegetationChunks>,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<AssetServer>,
@@ -675,7 +675,10 @@ pub fn stream_vegetation(
         *measured_in = space;
         heights.clear();
     }
-    let Some((camera, frustum)) = cameras.iter().next() else {
+    // Streaming follows the last-drawn camera (the viewer); offscreen sensor
+    // cameras order themselves before it.
+    let Some((camera, frustum, _)) = cameras.iter().max_by_key(|(_, _, camera)| camera.order)
+    else {
         return;
     };
     let eye = camera.translation().xz();

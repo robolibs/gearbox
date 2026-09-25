@@ -234,10 +234,13 @@ fn carry_mote_fields(
     budget: Res<MoteBudget>,
     wind: Res<AmbientWind>,
     mut materials: ResMut<Assets<MoteMaterial>>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     mut fields: Query<(&MoteFieldOf, &MeshMaterial3d<MoteMaterial>, &mut Transform)>,
 ) {
-    let (Some(biomes), Ok(camera)) = (biomes, cameras.single()) else {
+    // Motes ride with the last-drawn camera (the viewer); offscreen sensor
+    // cameras order themselves before it.
+    let viewer = cameras.iter().max_by_key(|(_, camera)| camera.order);
+    let (Some(biomes), Some((camera, _))) = (biomes, viewer) else {
         return;
     };
     let heading = wind.heading_deg.to_radians();
