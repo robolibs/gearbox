@@ -1,61 +1,65 @@
-# Gearbox attachments, trailers, and tools specification
+# Gearbox attachments, trailers and tools
 
-How one machine attaches to another in Gearbox: a tractor towing a trailer,
-a trailer towing a second trailer, an implement mounted on a hitch, a bucket
-on a loader. This builds on `CONTROLLER_SPEC.md` (machines, controllers,
-link tree) and is **entirely PROPOSED**: the current runtime knows one machine
-per loaded USD and cannot join two of them. Assets SHOULD author it now.
+How one machine attaches to another: a tractor towing a trailer, a trailer
+towing a second trailer, an implement on a three-point hitch, a bucket on a
+loader. Machines, controllers and the link tree are defined in
+[MACHINE_SPEC.md](MACHINE_SPEC.md) and [CONTROLLER_SPEC.md](CONTROLLER_SPEC.md).
+
+| Code | Covers |
+|---|---|
+| `bin/gearbox/src/links.rs` | Coupling and element attributes, link-tree validation |
+| `bin/gearbox/src/attach.rs` | Attach and detach, hitch joints, stands, composite `/links`, `tool` routing |
+| `bin/gearbox/src/services.rs` | Service and work controllers, master ↔ slave exchange, link values |
+| `bin/gearbox/src/controller.rs` | Static attachments (`discover_static_attachments_from_stage`) |
+
+Anything marked **not implemented** is parsed or planned and has no runtime
+effect.
 
 Terms:
 
-- **master** — the machine that carries or tows. Root of a composite.
-- **slave** — a machine attached to a master. Its link tree hangs under the
-  master's. Slaves can themselves be masters of further slaves.
-- **composite** — master plus every slave reachable from it. One `base_link`,
-  one command session, one tree.
-- **coupling** — an authored attachment point. A **hitch** is the towing side,
+- **master**: the machine that carries or tows. Root of a composite.
+- **slave**: a machine attached to a master. It can itself be the master of
+  further slaves.
+- **composite**: a master plus every slave reachable from it.
+- **coupling**: an authored attachment point. A **hitch** is the towing side,
   a **coupler** the towed side. One hitch holds one coupler.
-- **carried** slave — has no controllers. It moves because it is attached.
-- **controlled** slave — has controllers. Commands reach it through the
-  master.
+- **carried** slave: has no controllers. **controlled** slave: has
+  controllers.
 
-External conventions this spec binds to:
+Conventions this spec follows:
 
-- The working-part hierarchy every implement is described by: one device,
-  the connector that locates the coupling, then functions, sections, units,
-  bins and a navigation reference in a parent/child tree, each with named
-  values. Gearbox keeps that tree as its link tree (§7.3) and nothing else.
-- ISO 11783-9 tractor ECU classes: class 1 and 2 broadcast tractor state to
-  the implement, class 3 also executes implement commands. AEF TIM is the
-  cross-vendor form of class 3: the implement commands speed, steering, PTO,
-  hitch, and remote valves, and the tractor confirms by status.
-- SDF composition: a joint in an outer model may connect links of two
-  included models by scoped name (`arm::mount`, `gripper::mount_point`).
-- Gazebo `DetachableJoint`: fixed joint between links of two models, attach
-  and detach by topic, no kinematic loops, no reattach while in contact.
-- Isaac Sim Robot Assembler: an attach point prim on each asset, the attached
-  asset is moved onto the base's attach point, a fixed joint is created, and
-  the attached articulation root is removed so one articulation remains.
+- ISO 11783 working-part tree: device, connector, functions, sections,
+  units, bins and a navigation reference, each with named values. Gearbox
+  keeps that tree as its link tree (§7.3).
+- ISO 11783-9 tractor ECU classes and AEF TIM: the tractor broadcasts its
+  state to the implement (class 1 and 2) and executes granted implement
+  requests for speed, steering, PTO, hitch and valves (class 3, §5.3).
+- Gazebo `DetachableJoint`: attach and detach by topic, no kinematic loops.
+- Isaac Sim Robot Assembler: the attached asset is moved onto the base's
+  attach point, a joint is created, and both form one articulation.
 
 ## 1. Machine roles
 
-Roles are not authored. They follow from what a machine has:
+Roles are not authored. They follow from the couplings a machine has:
 
 | Has hitches | Has couplers | Can be |
 |---|---|---|
 | yes | no | master only (tractor, self-propelled sprayer) |
 | no | yes | slave only (mounted implement, single-axle trailer) |
 | yes | yes | either (tandem trailer, front loader carrying a bucket) |
-| no | no | standalone, cannot join a composite |
+| no | no | standalone |
 
-A machine is a **slave** at runtime the moment one of its couplers is
-attached. Until then it is an independent machine with its own namespace and
-session exactly as `CONTROLLER_SPEC.md` describes.
+A machine is a slave from the moment one of its couplers is attached. Until
+then it is an independent machine with its own id and session.
 
 ## 2. Coupling points
 
-A coupling is a link (§7 of `CONTROLLER_SPEC.md`) that also carries
-`GearboxCouplingAPI`:
+A prim is a coupling when it applies `GearboxCouplingAPI` or authors
+`gearbox:coupling:side`. In a strict link tree (any prim of the machine is
+marked as a link) the coupling prim must also be a link, otherwise the machine
+is rejected. In a derived tree it becomes a link automatically. An unmarked
+coupling link gets role `tool`. The coupling rides on its own rigid body or on
+the nearest ancestor link that has one; attach refuses a coupling with none.
 
 ```usda
 def Xform "rear_hitch" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"])
@@ -64,291 +68,467 @@ def Xform "rear_hitch" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCoupling
     token gearbox:coupling:side = "hitch"
     token gearbox:coupling:type = "drawbar"
     token gearbox:coupling:name = "rear_drawbar"
-    double3 xformOp:translate = (-1.9, 0.0, 0.45)
+    double3 xformOp:translate = (0.0, 1.9, 0.45)
     uniform token[] xformOpOrder = ["xformOp:translate"]
 }
 ```
 
-| Property | Type | Status | Default | Notes |
-|---|---|---|---|---|
-| `gearbox:coupling:side` | token | MUST | | `hitch` (towing side) or `coupler` (towed side). |
-| `gearbox:coupling:type` | token | MUST | | One of §2.1. Hitch and coupler MUST have the same type to attach. |
-| `gearbox:coupling:name` | token | SHOULD | prim name | Unique among this machine's couplings. Used in attach requests. |
-| `gearbox:coupling:isoCategory` | int | optional | | ISO 730 category 0..4 for three-point types. Mismatch is a warning, not a refusal. |
-| `gearbox:coupling:capacityKg` | float | optional | | Vertical load limit. Exceeding it is a warning. |
-| `gearbox:coupling:services` | token[] | optional | `[]` | Service couplings offered or required here: `pto`, `hydraulic`, `electrical`, `isobus`. |
-| `gearbox:coupling:lift` | rel | optional | | Hitch side, three-point types only: the master joint that raises the lower links. |
+| Attribute | Type | Default | Effect |
+|---|---|---|---|
+| `gearbox:coupling:side` | token | required | `hitch` or `coupler`. Missing or any other value is a link-tree error; the machine is rejected. |
+| `gearbox:coupling:type` | token | required | One of §2.1. Missing or unknown is a link-tree error. Hitch and coupler must have the same type to attach. |
+| `gearbox:coupling:name` | token | prim leaf, lower-cased, `[a-z0-9_]` | Names the coupling in attach requests and records. Uniqueness is not validated; a duplicated name makes a request that names it fail with `USAGE`. |
+| `gearbox:coupling:ptoJoint` | rel | none | Coupler side: the slave joint that follows the master's PTO (§6.3). |
+| `gearbox:coupling:valveJoints` | rel[] | `[]` | Coupler side: slave joints that follow the master's hydraulic valves, in valve order (§6.3). |
+| `gearbox:coupling:stand` | rel | none | Coupler side: the slave's parking-stand rigid body (§3.4). |
+| `gearbox:coupling:topLink` | rel | none | `three_point_mounted` only. Hitch side: the free end of the master's top link. Coupler side: the implement's upper hitch point. With both, the implement hangs on the lower-link pins and the top link holds it (§2.1). The target rides on its own rigid body or the nearest ancestor's. |
+| `gearbox:coupling:variantSet` | token | none | Hitch side: a variant set on the machine prim that this hitch selects by reach (§3.6). Needs `variantNear` and `variantFar`; one without the others is a link-tree error. |
+| `gearbox:coupling:variantNear` | token | none | The selection while a coupler of the hitch's type is within reach, or attached. |
+| `gearbox:coupling:variantFar` | token | none | The selection otherwise. |
+| `gearbox:coupling:isoCategory` | int | none | Parsed (clamped 0–4). **Not implemented.** |
+| `gearbox:coupling:capacityKg` | float | none | Parsed. **Not implemented.** |
+| `gearbox:coupling:services` | token[] | `[]` | Parsed. **Not implemented.** |
+| `gearbox:coupling:lift` | rel | none | Parsed. **Not implemented.** |
+| `gearbox:coupling:excludes` | token[] | `[]` | Parsed. **Not implemented**: two hitches whose prims overlap can both be occupied. |
 
-### 2.1 Coupling types and the joint they imply
+Relationship targets are rebased with the machine like every other machine
+relationship.
 
-Each type names a mechanical coupling and implies the joint below.
+### 2.1 Coupling types and the hitch joint
 
-| `type` | Standard | Joint created between hitch link and coupler link |
-|---|---|---|
-| `drawbar` | ISO 6489-3 | revolute about Z, pitch free ±20°, roll free ±10° |
-| `three_point_semi_mounted` | ISO 730 | revolute about Z at the lower links, lift via `lift` |
-| `three_point_mounted` | ISO 730 | fixed, lift via `lift` |
-| `hitch_hook` | ISO 6489-1 | spherical, cone limit 25° |
-| `clevis` | ISO 6489-2 | revolute about Z, pitch free ±20° |
-| `piton` | ISO 6489-4 | revolute about Z, pitch free ±15° |
-| `cuna` | ISO 6489-5 | spherical, cone limit 20° |
-| `ball` | ISO 24347 | spherical, cone limit 30° |
-| `chassis_mounted` | — | fixed. Self-propelled machine carrying its own implement. |
-| `pivot_wagon` | ISO 5692-2 | revolute about Z |
-| `fifth_wheel` | — | revolute about Z, pitch free ±15° |
-| `loader_carriage` | — | fixed. Front-loader tool carrier, quick-attach frames. |
+Attaching creates a joint from the hitch's rigid body to the coupler's rigid
+body (`attach.rs` `joint_for`). It is a tree joint: the slave's articulation
+joins the master's. All three linear axes are locked. Rotation axes are the
+hitch body's axes: pitch about X (lateral), roll about Y (longitudinal), yaw
+about Z (up). Limits are symmetric per-axis joint limits, not cone limits and
+not motors. A free axis without a limit is unlimited.
 
-"Free" ranges are joint limits, not motors. Collision between the two coupled
-links, and between the slave's coupler link and the master's hitch link only,
-is disabled while attached. Everything else keeps colliding.
+| `type` | Standard | Locked rotation | Free rotation |
+|---|---|---|---|
+| `three_point_mounted` with both `topLink` pins | ISO 730 | roll, yaw | pitch, held by the top link |
+| `three_point_mounted` | ISO 730 | pitch, roll, yaw | none |
+| `chassis_mounted` | | pitch, roll, yaw | none |
+| `loader_carriage` | | pitch, roll, yaw | none |
+| `drawbar` | ISO 6489-3 | roll | pitch, yaw |
+| `clevis` | ISO 6489-2 | roll | pitch ±20°, yaw |
+| `piton` | ISO 6489-4 | roll | pitch ±15°, yaw |
+| `fifth_wheel` | | roll | pitch ±15°, yaw |
+| `pivot_wagon` | ISO 5692-2 | pitch, roll | yaw |
+| `three_point_semi_mounted` | ISO 730 | pitch, roll | yaw |
+| `hitch_hook` | ISO 6489-1 | none | pitch ±25°, roll ±25°, yaw |
+| `cuna` | ISO 6489-5 | none | pitch ±20°, roll ±20°, yaw |
+| `ball` | ISO 24347 | none | pitch ±30°, roll ±30°, yaw |
+
+A carried implement (the first four rows) hangs rigidly once captured (§3.3):
+a revolute pin about the hitch body's X axis, or a fixed joint. The towed
+types stay a compliant D6: 8 Hz while the joint is captured, rising to 30 Hz,
+damping ratio 1.
+
+**Top link.** A `three_point_mounted` hitch and coupler that both author
+`gearbox:coupling:topLink` close the three-point linkage: besides the pin at
+the lower links, a loop joint ties the master's top-link end to the
+implement's upper point, all linear axes locked, rotations free. The
+implement then pitches as the lower links, the top link and its own mast
+let it, the way a real top link of fixed length does. A loop joint cannot be
+rigid; the top link is held at 120 Hz, which keeps it within millimetres
+under an implement's weight. Without both pins the implement is fixed to
+the lower link and tilts with it.
+
+The lift should drive a joint on the path that carries the implement: the
+lower link the hitch coupling rides on. A lift driven through loop joints
+(a rockshaft pulling lift rods) carries the load through compliant joints
+and stretches under it.
+
+While attached, every rigid body of the master is filtered against every
+rigid body of the slave (all link bodies of both machines). Detach restores
+those pairs. The two bodies joined by the hitch joint never collide. In a
+nested composite only directly attached pairs are filtered: a tractor still
+collides with the second trailer.
 
 ### 2.2 Coupling frame
 
-The coupling prim's origin is the physical attachment point. Its axes follow
-REP-103 relative to the machine it belongs to: +X toward that machine's
-front, +Z up. Attaching places the coupler frame coincident with the hitch
-frame and rotated 180° about Z, so the slave faces the same way as the
-master.
+Only the coupling prims' **positions** are used; their rotations are
+ignored. The joint frames sit at the hitch and coupler prim positions with
+the orientation of the hitch body and the coupler body. Attaching aligns the
+coupler body with the hitch body's orientation, so the slave faces the same
+way as the master only when both bodies use the chassis frame of
+[MACHINE_SPEC.md](MACHINE_SPEC.md) (forward −Y, left +X, up +Z). A rear
+hitch therefore sits at +Y on the tractor and a drawbar eye at −Y on the
+trailer.
 
 ## 3. Attaching
 
 ### 3.1 Static, in a world layer
 
-A world USD that references both machines MAY author the attachment. Both
-machines are still discovered separately by their own `GearboxMachineAPI`
-prims, as discovery already supports several machines under one loaded
-asset.
+A USD that references several machines may author attachments:
 
 ```usda
-def Xform "Tractor_01" (prepend references = @tractor.usd@</robot>) {}
-def Xform "Trailer_01" (prepend references = @trailer.usd@</robot>) {}
-
-def Scope "Attachments"
+def Xform "World"
 {
-    def "tractor_trailer" (prepend apiSchemas = ["GearboxAttachmentAPI"])
+    def Xform "Tractor_01" (prepend references = @tractor.usd@</robot>) {}
+    def Xform "Trailer_01" (prepend references = @trailer.usd@</robot>) {}
+
+    def Scope "Attachments"
     {
-        rel gearbox:attachment:hitch = </World/Tractor_01/rear_hitch>
-        rel gearbox:attachment:coupler = </World/Trailer_01/drawbar_eye>
+        def "tractor_trailer" (prepend apiSchemas = ["GearboxAttachmentAPI"])
+        {
+            rel gearbox:attachment:hitch = </World/Tractor_01/chassis/rear_hitch>
+            rel gearbox:attachment:coupler = </World/Trailer_01/frame/drawbar_eye>
+        }
     }
 }
 ```
 
-The runtime creates the §2.1 joint at load, before physics activates, after
-moving the slave so its coupler frame meets the hitch frame.
+| Attribute | Type | Default | Effect |
+|---|---|---|---|
+| `gearbox:attachment:hitch` | rel | required | The master's hitch coupling prim. |
+| `gearbox:attachment:coupler` | rel | required | The slave's coupler coupling prim. |
 
-### 3.2 Runtime, over the machine agent
+- A prim is an attachment when it applies `GearboxAttachmentAPI` or authors
+  `gearbox:attachment:hitch`. One missing relationship is a warning; the
+  attachment is skipped.
+- Only the `defaultPrim` subtree of the loaded USD is scanned (the whole stage
+  when there is no default prim). Both machines must come from the same
+  loaded USD.
+- Targets are stage paths and are not rebased.
+- Once both machines have agents, the runtime issues a teleport attach with
+  session 0 (§3.2). Targets that are not couplings give a warning. An
+  attachment whose two machines do not both have agents within 1200 frames
+  is dropped with a warning.
 
-The master's agent hosts the attachment topics (`bin/gearbox/src/attach.rs`
-serves them):
+### 3.2 Runtime, over the master's agent
 
-| Topic | Mode | Request → Response |
+| Topic | Mode | Request → response |
 |---|---|---|
-| `/machines/<master_ns>/tools/attach` | req/res | `gearbox.attach_request.v1` (`session`, `teleport`, props `slave`, `hitch`, `coupler`) → `gearbox.status.v1` |
-| `/machines/<master_ns>/tools/detach` | req/res | `gearbox.detach_request.v1` (`session`, props `slave`) → `gearbox.status.v1` |
-| `/machines/<master_ns>/tools` | que/ans | `gearbox.ping.v1` → `gearbox.attachment.v1` × N, depth-first (`controlled`, `depth`, props `master`, `slave`, `hitch`, `coupler`, `type`) |
+| `/machines/<master>/tools/attach` | req/res | `gearbox.attach_request.v1` (`session`, `teleport`, props `slave`, `hitch`, `coupler`) → `gearbox.status.v1` (prop `slave` on success) |
+| `/machines/<master>/tools/detach` | req/res | `gearbox.detach_request.v1` (`session`, prop `slave`) → `gearbox.status.v1` |
+| `/machines/<master>/tools` | que/ans | `gearbox.ping.v1` → one `gearbox.attachment.v1` per attachment below the master, depth-first (`controlled`, `depth`, props `master`, `slave`, `hitch`, `coupler`, `type`, `denied`) |
 
-`hitch` and `coupler` MAY be omitted when exactly one free pair of matching
-type exists. Every change is also a `attached` / `detached` scene event on
-`/gearbox/scene/events`.
+Every attach and detach is also a `gearbox.scene_event.v1` of kind `attached`
+or `detached` on `/gearbox/scene/events` with props `master`, `slave`,
+`hitch`, `coupler`; `attached` adds `type` and `denied`.
 
-Rules, taken from Gazebo's `DetachableJoint` and Isaac's assembler:
+Choosing the couplings:
 
-- The request MUST carry the master's session id (0 while nobody holds it).
-- `hitch` and `coupler` MUST have the same `type` and be free.
-- With `teleport = false` the coupler frame MUST lie within 0.5 m and 30° of
-  the hitch frame or the request is refused. With `teleport = true` the slave
-  is moved onto the hitch first. Teleport is refused while the slave's bodies
-  are in contact with anything but the ground.
-- Attaching MUST NOT create a loop: the slave's composite MUST NOT already
-  contain the master.
-- A machine cannot attach to itself, and a coupler attaches to one hitch.
-- Detach removes the joint, restores collisions, and leaves the slave where
-  it is with zero velocity commanded.
-- `/tools` answers late joiners; every change is also an `attached` or
-  `detached` scene event.
+- `hitch` names a hitch of the master. Without it, the only free hitch
+  matching the type of the named coupler is used (any type when no coupler
+  is named).
+- `coupler` names a coupler of the slave. Without it, the only coupler with
+  the hitch's type is used.
+- No candidate answers `UNSUPPORTED`, several answer `USAGE`, an unknown
+  name answers `NOT_FOUND` with the available couplings.
 
-### 3.3 Tolerances and safety
+Attach checks, in order:
 
-The master's wheel torque cap comes from its own mass and tyre grip
-(`CONTROLLER_SPEC.md` §4). An attached slave rolls on its own tyres and
-pulls on the master only through the coupling joint, so a heavy trailer
-slows or stalls the tractor physically; nothing adds its mass to the
-master's force law.
+| Check | Refusal |
+|---|---|
+| `slave` is given | `USAGE` |
+| The slave is not the master | `REFUSED` |
+| `session` equals the master's session id (0 while nobody holds it) | `REFUSED` |
+| The slave is not already attached | `REFUSED` |
+| The master does not already hang below the slave (no loop) | `REFUSED` |
+| The hitch is free | `BUSY` |
+| Hitch and coupler types match | `REFUSED` |
+| Both couplings ride on rigid bodies that exist in physics | `REFUSED` |
+| `teleport = 0`: the coupler prim is within 0.5 m of the hitch prim and the coupler body within 30° of the hitch body's orientation | `REFUSED` |
 
-## 4. Effect on the link tree
+With `teleport ≠ 0` every slave body is moved so the coupler lands on the
+hitch with the hitch body's orientation. The slave is then pitched about the
+hitch's lateral axis, up to three passes, until no `role = "wheel"` body more
+than 0.5 m from the hitch sits more than 5 mm below the terrain.
 
-The slave keeps the whole link tree it authored. Only its root changes
-parent:
+Detach requires the master's session id (`REFUSED`) and an attachment of that
+slave to that master (`NOT_FOUND`). It removes the hitch joint, restores
+collisions between the two machines and sets the stand back to parked. The
+slave stays where it is. Removing a machine from the scene removes its
+attachments the same way.
+
+```sh
+gearbox machine tools list tractor_1
+gearbox machine tools couplings tractor_1
+gearbox machine tools attach trailer_1 --machine tractor_1 --hitch rear_drawbar --coupler drawbar_eye --teleport
+gearbox machine tools detach trailer_1 --machine tractor_1
+```
+
+The viewer's machine context offers **Connect** when a free hitch and a
+coupler of the same type on another machine are within reach (3 m), and
+**Disconnect** for an existing attachment. Both need both machines unheld
+(session 0) and nearly still (below 0.3 m/s and 0.2 rad/s). Connect does not
+teleport.
+
+### 3.3 Hitch capture
+
+The hitch joint is created with its coupler frame where the coupler currently
+is, so nothing jumps. The frame then moves to the authored coupler position
+along a smoothstep over `max(0.5 s, 1.5 s × max(gap / 0.2 m, angle / 0.2 rad))`
+while the joint's stiffness rises from 8 Hz. When the frames meet, a carried
+implement's joint turns rigid and a towed one holds at 30 Hz.
+
+The top link is captured the same way: caught where the master's top link
+hangs, drawn onto the implement's upper point, stiffening from 8 Hz to
+120 Hz. The top link swings up to meet it.
+
+### 3.4 Parking stand
+
+When the attached coupler authors `gearbox:coupling:stand`:
+
+| Event | Stand body colliders | Slave machine prim variant set `coupling` |
+|---|---|---|
+| attach | disabled | `hitched` |
+| detach | enabled | `parked` |
+
+Without `stand`, no collider or variant is touched. The `coupling` variant set
+is optional; author it with `hitched` and `parked` to swap stand geometry.
+
+### 3.5 Loads
+
+The master's wheel torque cap comes from its own tyres' solved loads
+([DRIVETRAIN.md](DRIVETRAIN.md)), which include the load the hitch transfers.
+An attached slave rolls on its own tyres and acts on the master only through
+the hitch joint. Nothing adds the slave's mass to the master's force law.
+
+A carried implement hangs its whole weight behind the rear axle. A master
+too light at the front rears up instead of lifting it, and a lift too weak
+for the implement's moment stalls part way, as a real tractor does; the
+asset's masses, front ballast and lift rating decide which.
+
+### 3.6 Hitch variants by reach
+
+A hitch that authors `gearbox:coupling:variantSet`, `variantNear` and
+`variantFar` (§2) shows its `near` selection of that variant set on the
+master's machine prim while
+
+- it holds an attached coupler, or
+- a coupler of the hitch's type on another machine, not attached anywhere,
+  is within reach: 3 m, the same reach the viewer offers **Connect** at;
+
+and its `far` selection otherwise. A hitch showing `near` returns to `far`
+only once every such coupler is beyond 3.5 m, so it does not flicker at the
+edge. The switch is an ordinary variant swap: the stage recomposes, prims the
+selection activates join physics where the machine stands, and the machine's
+controllers and links are read again.
+
+A tractor whose `hitchRear` set hides the top link in `bare` and shows it in
+`linked` authors on its rear three-point hitch:
+
+```usda
+over "rear_three_point"
+{
+    custom token gearbox:coupling:variantSet = "hitchRear"
+    custom token gearbox:coupling:variantNear = "linked"
+    custom token gearbox:coupling:variantFar = "bare"
+    custom rel gearbox:coupling:topLink = </robot/hitch_top_link/HITCH_3POINT_upper>
+}
+```
+
+The top-link end that `topLink` names may exist only in the `near`
+selection. Attaching before the swap has landed finds no pin and fixes the
+implement to the lower link instead.
+
+## 4. Composite link tree
+
+The master's `/links` answers its own links followed by the links of every
+slave below it, depth-first:
+
+- slave link names are prefixed with the slave id path:
+  `trailer_1/base_link`, `trailer_1/trailer_2/base_link`;
+- each slave's root link is re-parented under the link carrying the hitch
+  coupling and reported with role `link`, so the composite has one `base`;
+- the slave's own `/links` does not change;
+- the composite is not validated.
 
 ```
-tractor_1/base_link
-└── tractor_1/chassis
-    └── tractor_1/rear_hitch                (hitch link)
-        └── [drawbar joint]
-            └── tractor_1/trailer_1/base_link   (slave root, re-parented)
-                ├── tractor_1/trailer_1/drawbar_eye
-                ├── tractor_1/trailer_1/axle_front
-                └── tractor_1/trailer_1/rear_hitch
-                    └── [drawbar joint]
-                        └── tractor_1/trailer_1/trailer_2/base_link
+base_link                                  tractor_1
+└── rear_hitch                             hitch link
+    └── trailer_1/base_link                slave root, role link
+        ├── trailer_1/drawbar_eye
+        ├── trailer_1/axle_front
+        └── trailer_1/rear_hitch
+            └── trailer_1/trailer_2/base_link
 ```
-
-- The slave's link names are prefixed with the master prefix plus the
-  slave's runtime namespace, so two identical trailers never collide.
-- The composite has exactly one `base_link`, the master's. The slave's
-  `base_link` is still a link in the tree. It is no longer a root.
-- Tree validation (`CONTROLLER_SPEC.md` §7.3) runs on the composite after
-  every attach and detach.
-- On detach the slave's tree is restored under its own namespace.
 
 ## 5. Command routing
 
 ### 5.1 Session
 
-A composite has one command session, the master's. While attached:
+While a slave is attached:
 
-- the slave's own `/machines/<slave_ns>/claim` and `cmd_vel` answer
-  `REFUSED` with an `attached_to` prop naming the master. Its `/info`,
-  `/state`, `/links` and `/tf` keep working, since watchers still want them.
-- a slave controller is commanded through the master's `/cmd` with a `tool`
-  prop naming the slave (`tool = "trailer_1"`, nested `"trailer_1/trailer_2"`);
-  the sim routes the command to that slave's controller.
-- the master's `/state` props gain `tools = <slave>,<slave>…`, and its
-  `/links` answers the composite tree of §4.
+- its session is cleared, and its `claim` and `cmd_vel` answer `REFUSED` with
+  props `attached_to` and `message`. Its `info`, `state`, `links`, `tf` and
+  `cmd` keep working; `cmd` accepts session 0.
+- a command on the master's `/cmd` with a `tool` prop is moved to the slave
+  named by the last segment of `tool` (`trailer_1`, `trailer_1/trailer_2`),
+  with `tool` removed. A `tool` naming no attached slave is dropped with a
+  warning.
+- the master's `info` and `state` carry `tools = <slave>,…` (the whole
+  composite); the slave's carry `attached_to`.
+- the master's `state` carries `tool.<slave>.controller.<instance>.<key>`:
+  the latest command props of each directly attached slave's service
+  controllers.
 
-This is the ISOBUS shape: the implement is on the tractor's bus, and the task
-controller talks to it through that bus, not around it.
-
-### 5.2 Master to slave (ISO 11783-9 class 1 and 2)
-
-The master publishes its tractor state to every attached slave controller
-each step, in the slave's `base_link` frame. It mirrors the ISO 11783-7
-broadcasts an implement relies on:
-
-| Field | ISO source |
-|---|---|
-| `ground_speed_mps`, `distance_m`, `direction` | PGN 65097 ground speed and distance |
-| `hitch.<name>.position` (0..1), `.in_work` | PGN 65093 rear hitch status |
-| `pto.<name>.rpm`, `.engaged` | PGN 65091 rear PTO status |
-| `aux_valve.<n>.flow` (−1..1) | auxiliary valve status |
-| `heading_rad`, `roll_rad`, `pitch_rad` | tractor pose |
-
-A slave controller reads it from its `ControllerInputs`. Section control,
-rate control, and bin accounting need speed and work state and nothing else.
-
-### 5.3 Slave to master (ISO 11783-9 class 3, AEF TIM)
-
-A controlled slave MAY request master functions. It declares what it needs:
-
-```usda
-token[] gearbox:controller:baler:requests = ["speed", "hitch:rear_lift", "pto:rear"]
+```sh
+gearbox machine cmd tip position=1 --machine tractor_1 --tool trailer_1
 ```
 
-The master declares what it grants:
+### 5.2 Master to slave
+
+Each frame, every attached slave gets an internal `MasterState` from its
+master. It is not published.
+
+| Field | Source on the master |
+|---|---|
+| ground speed, heading, roll, pitch | the state of the master's `cmd_vel` controller |
+| hitch position per `builtin:hitch` instance | its last commanded `position` (or `value`), default 0 |
+| PTO rpm and engaged per `builtin:pto` instance | its commanded `rpm` (540, clamped 0–1200) and `engaged` (false) |
+| valve flows | each `builtin:hydraulic_valve`'s commanded `flow` (or `value`), in controller order |
+
+Only `/cmd` props and granted requests feed the hitch, PTO and valve fields;
+link values set on the master do not. A nested slave inherits its master's
+inherited PTO set when its master has no PTO, and its ground speed when its
+master reports zero.
+
+Readers: `builtin:trailer_steer` automatic steering, the bound PTO and valve
+joints (§6.3), `builtin:brake`'s default level (§6.2), and the work
+controllers' ground speed (§7.4).
+
+### 5.3 Slave to master
+
+| Attribute | Prim | Type | Default | Effect |
+|---|---|---|---|---|
+| `gearbox:controller:<n>:requests` | slave machine | token[] | `[]` | What the slave will ask for. At attach, entries the master does not grant are reported as `denied` in the attachment record and event, and logged. Attach succeeds regardless. |
+| `gearbox:machine:grants` | master machine | token[] | `[]` | Requests the master executes. |
 
 ```usda
-token[] gearbox:machine:grants = ["speed", "hitch:rear_lift", "pto:rear", "aux_valve:1"]
+token[] gearbox:controller:baler:requests = ["speed", "hitch:hitch_rear", "pto:pto_rear"]
+token[] gearbox:machine:grants = ["speed", "hitch:hitch_rear", "pto:pto_rear", "aux_valve:0"]
 ```
 
-Attach succeeds regardless; a request that is not granted is reported in
-`attachments` as `"denied": [...]` and ignored, matching TIM where a tractor
-without a valid certificate simply does not execute. Granted requests are
-written as commands onto the master's own controllers each step:
+A request is a `/cmd` on the **slave** with props `request=<token>` and
+`value` (or the command's `value` field). It acts only while the slave is
+attached and the master's `grants` contain that exact token. The slave's own
+`requests` list is not consulted. Anything else is dropped with a one-time
+warning.
 
-| Request | Master controller written |
+| Request | Effect on the master |
 |---|---|
-| `speed` | the drive controller's `cmd_vel.linear` |
-| `steering` | the drive controller's `cmd_vel.angular` |
-| `hitch:<name>` | the `builtin:hitch` instance of that name (§6.2) |
-| `pto:<name>` | the `builtin:pto` instance of that name |
-| `aux_valve:<n>` | the `builtin:hydraulic_valve` instance `n` |
+| `speed` | Linear speed (m/s) of the master's drive command while its session twist is zero. |
+| `steering` | Yaw rate (rad/s), same condition. |
+| `hitch:<instance>` | `position` of the master's `builtin:hitch` controller `<instance>`. |
+| `pto:<instance>` | `rpm = abs(value)` and `engaged = value > 0` on `builtin:pto` controller `<instance>`. |
+| `aux_valve:<n>` | `flow` of the n-th `builtin:hydraulic_valve` of the master, 0-based, in controller order. |
 
-The external session still owns the composite. A slave request never
-overrides a command the session sent in the same step.
+A nonzero session twist always overrides `speed` and `steering`. Requested
+values stay in effect until another request replaces them.
 
-Over the bus a slave (or a script acting for it) sends a request as
-`/machines/<slave_ns>/cmd` with props `request = speed | steering` and a
-`value`; the runtime honours it only while the slave is attached and the
-master grants that request, and the attachment record lists the rest under
-`denied`. Only `speed` and `steering` act on the master today.
-
-## 6. What a master must author
-
-A tractor that wants to tow or carry MUST author, in addition to
-`CONTROLLER_SPEC.md`:
+## 6. What a master authors
 
 ### 6.1 Couplings
 
-At least one `hitch` coupling (§2). Typical set for a tractor:
+At least one `hitch` coupling (§2). A typical tractor:
 
-| Name | Type | Notes |
-|---|---|---|
-| `rear_three_point` | `three_point_mounted` | `lift` targets the lower-link lift joint. |
-| `rear_drawbar` | `drawbar` | Same neighbourhood, different prim. |
-| `front_three_point` | `three_point_mounted` | optional |
-| `pickup_hitch` | `hitch_hook` | optional |
-
-Only one of `rear_three_point` and `rear_drawbar` can be occupied at a time
-if their prims overlap; author `gearbox:coupling:excludes = [<other>]` to say
-so.
+| Name | Type |
+|---|---|
+| `rear_three_point` | `three_point_mounted` |
+| `rear_drawbar` | `drawbar` |
+| `front_three_point` | `three_point_mounted` |
+| `pickup_hitch` | `hitch_hook` |
 
 ### 6.2 Service controllers
 
-Service couplings need a controller on the master that does the work:
+Service controllers are `gearbox:controller:<n>:*` instances (see
+[CONTROLLER_SPEC.md](CONTROLLER_SPEC.md)) of these types. They run on masters
+and slaves alike.
 
-| Controller type | Drives | Command payload |
+| Type | Joint(s) driven |
+|---|---|
+| `builtin:joint_position`, `builtin:hitch`, `builtin:joint_velocity`, `builtin:pto`, `builtin:hydraulic_valve` | `:target`, else the machine's first `role:toolJoints` entry |
+| `builtin:brake` | `:wheelJoints`, else `role:brakeJoints`, else `role:poweredWheelJoints` + `role:passiveWheelJoints` |
+| `builtin:trailer_steer` | `:steerJoints`, else `role:steeringJoints` |
+
+A controller with no joint logs a warning once. Positions are in rad
+(revolute) or m (prismatic), velocities in rad/s or m/s.
+
+**Actuation** (`services.rs` `actuate`):
+
+- A joint with a `gearbox:motor:*` device takes position and velocity
+  commands through that device; the device's own limits apply and the caps
+  below do not.
+- Otherwise the runtime writes an Acceleration-model servo on the joint each
+  frame (gains per unit of joint inertia): position stiffness 4000, damping
+  400, cap 50 000; velocity damping 200, cap per type below.
+- `builtin:brake` always writes the runtime servo: velocity 0, damping
+  `400 × level`, cap `50 000 × level`. A motor device on the same joint
+  replaces it every step.
+
+| Type | Props (default) | Command |
 |---|---|---|
-| `builtin:hitch` | the `lift` joint: position 0..1, `float` mode, `draft` target | `{ "position": 0.3 }` or `{ "float": true }` |
-| `builtin:pto` | a revolute joint at the PTO stub, velocity in rpm, engaged flag | `{ "rpm": 540, "engaged": true }` |
-| `builtin:hydraulic_valve` | a named slave joint, flow −1..1 mapped to joint velocity | `{ "flow": 0.5 }` |
+| `builtin:joint_position` | `position` or `value` (0), clamped 0–1; `range` (1) | position `position × range` |
+| `builtin:hitch` | same as `builtin:joint_position` | position `position × range` |
+| `builtin:joint_velocity` | `velocity` | velocity `velocity`; without it, the master's first engaged PTO speed if this joint is the slave's bound `ptoJoint`, else 0. Cap 2000. |
+| `builtin:pto` | `rpm` (540), clamped 0–1200; `engaged` (false) | velocity `rpm × 2π / 60` when engaged, else 0. Cap 150. |
+| `builtin:hydraulic_valve` | `flow` or `value` (0), clamped −1–1; `rate` (0.5) | velocity `flow × rate`. Cap 50 000. |
+| `builtin:brake` | `level` or `value`, clamped 0–1; default 1 while the machine is not attached as a slave, 0 while attached | brake servo |
+| `builtin:trailer_steer` | `angle_rad`; `:maxSteerDeg` (35) | position `angle_rad`; without it, `−(master heading − trailer heading)` wrapped to ±π while attached, else 0. Clamped to ±`maxSteerDeg`. |
 
-When a slave attaches, the master's PTO joint is coupled to the slave joint
-named in the slave's `pto` service coupling with a fixed-ratio motor, and
-each hydraulic valve is bound to the slave joint the slave names for that
-valve. These are runtime joints like the coupling joint and go away on
-detach.
+Commands are `/cmd` with `controller=<instance>` and props. Props merge over
+time: the last value per key stays. Numeric props (and `true`/`on`/`yes` as
+1, `false`/`off`/`no` as 0) are also written to the live values of the link
+the joint moves. Each frame the live values of that link override the props,
+so `set-value <link> position 0.8` moves the joint too (§7.4). Flags read
+`1`, `true`, `on` and `yes` as true.
 
-The slave names the joints on its `coupler` coupling:
-`rel gearbox:coupling:ptoJoint` is the shaft the master's PTO spins and
-`rel gearbox:coupling:valveJoints` lists, in valve order, the joints the
-master's `builtin:hydraulic_valve` controllers move. The runtime sets the
-slave joint's motor to the master's PTO speed or valve flow each step; a
-`builtin:joint_velocity` on the same joint follows the PTO too unless it was
-commanded a velocity directly.
+`builtin:hitch` has no `float` or `draft` mode; that is **not implemented**.
 
-## 7. What a slave must author
+### 6.3 PTO and valve binding
+
+A slave names the joints the master's services drive on its coupler
+coupling: `gearbox:coupling:ptoJoint` and `gearbox:coupling:valveJoints`.
+While the slave is attached, each frame:
+
+| Slave joint | Command | Cap |
+|---|---|---|
+| `ptoJoint` | velocity = the master's first engaged PTO speed (rad/s), else 0 | 150 |
+| `valveJoints[n]` | velocity = master valve n's flow × 0.5 | 50 000 |
+
+A joint named by one of the slave's own controllers is skipped; a
+`builtin:joint_velocity` on the PTO joint follows the PTO itself unless it is
+commanded a `velocity`. Commands go through the joint's motor device when it
+has one (§6.2). No joint is created between the machines. The binding is read
+from the slave's first coupler coupling.
+
+## 7. What a slave authors
 
 ### 7.1 Every slave
 
-- A full `CONTROLLER_SPEC.md` machine: `GearboxMachineAPI`, body, link tree
-  with its own `base_link`. A trailer is a machine even when carried.
-- At least one `coupler` coupling (§2). Its frame is where the master's hitch lands.
-- `gearbox:machine:kind` SHOULD name the implement class: `trailer`,
-  `sprayer`, `seeder`, `baler`, `mower`, `spreader`, `loader_tool`.
+- A complete machine ([MACHINE_SPEC.md](MACHINE_SPEC.md)). A carried trailer
+  is a machine too.
+- At least one `coupler` coupling (§2).
+- `gearbox:machine:kind` should name the implement class: `trailer`,
+  `sprayer`, `seeder`, `baler`, `mower`, `spreader`, `loader_tool`. It is
+  informational.
 
 ### 7.2 Trailers
 
-Trailers are wheeled, so they author wheel joints as passive under the
-machine roles. A trailer with a steered axle, brakes, or a tipping body is a
-controlled slave and authors controllers for those:
+A machine without controllers gets pressure tyres only on links with
+`gearbox:link:role = "wheel"` ([TYRE_PRESSURE.md](TYRE_PRESSURE.md)), so mark
+every trailer wheel link `wheel`. Controllers for a steered axle, brakes or a
+tipping body:
 
-| Controller type | Purpose |
+| Type | Purpose |
 |---|---|
-| `builtin:trailer_steer` | steered axle: follows the hitch angle, or takes `angle_rad` when commanded |
-| `builtin:brake` | `{ "level": 0..1 }` on the wheel joints |
-| `builtin:joint_position` | tipping body, tailgate, unloading auger: `{ "position": 0..1 }` |
+| `builtin:trailer_steer` | steered axle: follows the articulation, or `angle_rad` when commanded |
+| `builtin:brake` | wheel brake, `level` 0–1; fully applied while the trailer is not attached |
+| `builtin:joint_position` | tipping body, tailgate, unloading auger |
 
-A tandem trailer authors a `hitch` coupling on its rear as well. Nesting
-depth is not limited by this spec; the loop rule in §3.2 is the only guard.
+A tandem trailer also authors a `hitch` coupling on its rear. Nesting depth is
+not limited; the loop check in §3.2 is the only guard.
 
-### 7.3 Working parts as links of the tree
+### 7.3 Working parts as links
 
-A controlled implement MUST describe its working parts as links of its link
-tree (`CONTROLLER_SPEC.md` §7). A working part is an ordinary link that also
-carries `GearboxElementAPI`, which names what kind of part it is; the parent
-part is the nearest ancestor link. One tree answers every question: where a
-part is (`/tf`), what it is (`element`), what it holds (`value.<Name>`) and
-how to move it (`set-value`).
+A working part is a link that also applies `GearboxElementAPI` or authors
+`gearbox:element:type`. Its parent part is its parent link. A prim with an
+element type but no link marker is still made a link, with role `tool`, so it
+has a frame in `/tf`.
 
 ```usda
 def Xform "boom" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxElementAPI"])
@@ -375,62 +555,51 @@ def Xform "tank" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxElementAPI"])
 }
 ```
 
-| Property | Type | Status | Notes |
+| Attribute | Type | Default | Effect |
 |---|---|---|---|
-| `gearbox:element:type` | token | MUST | `device`, `function`, `bin`, `section`, `unit`, `connector`, `navigation`. |
-| `gearbox:element:number` | int | optional | A stable number for tools that want one; unique in the machine when given. |
-| `gearbox:element:designator` | string | SHOULD | prim name | Human label. |
-| `gearbox:value:<Name>` | float or int | optional | One named value per attribute. Every value is settable; controllers read the ones they know. |
-
-A prim with `GearboxElementAPI` but no `GearboxLinkAPI` is still made a link
-(role `tool`) so it has a frame in `/tf`. The tree constraints are the ones
-of §7 of `CONTROLLER_SPEC.md`; element kinds add none.
+| `gearbox:element:type` | token | none | `device`, `function`, `bin`, `section`, `unit`, `connector` or `navigation`. Any other value is a link-tree error. |
+| `gearbox:element:number` | int ≥ 0 or uint | none | Published on `/links` as `number`. Uniqueness is **not validated**. |
+| `gearbox:element:designator` | string or token | prim leaf | Label, published on `/links` as `designator`. |
+| `gearbox:value:<Name>` | float, double, int, uint or bool | none | A named value of the link (§7.4). |
 
 ### 7.4 Values on links, and the controllers that read them
 
-Every link has a set of named values. They start from `gearbox:value:*` and
-change through `/cmd` with `link` and `name` props:
+- Every `gearbox:value:<Name>` on a link prim becomes a live value once, when
+  the machine gets its agent.
+- `/cmd` with props `link`, `name` and `value` sets a live value on a link of
+  that machine. Address a slave's link on the slave's own `/cmd`, or on the
+  master's with `tool`. An unknown link is dropped with a warning.
+- Live values are published on `/state` as `link.<link>.<Name>`. `/links`
+  carries the authored values as `value.<Name>`.
 
+```sh
+gearbox machine set-value boom position 0.8 --machine sprayer_1
 ```
-gearbox machine set-value boom position 0.8 --ns sprayer
-```
 
-Two kinds of controller read them:
+A service controller (§6.2) reads the live values of the link its joint
+moves. A work controller acts on links by element type. Work controllers use
+the master's ground speed (§5.2); a slave that is not attached has speed 0.
 
-- A **service controller** (§6.2) that drives a joint overlays the values of
-  the link that joint moves onto its own command props. Setting `position`
-  on the boom link moves the boom; nobody has to know the controller's name.
-- A **work controller** acts on links by element kind:
-
-| Controller type | Acts on | Behaviour |
+| Type | Acts on | Each frame |
 |---|---|---|
-| `builtin:section_control` | `section` links under a `function` link | `SetpointWorkState` per section sets `ActualWorkState`; `SectionControlState` on the parent function; totals `TotalArea` from speed × active width. |
-| `builtin:rate_control` | a `bin` link | `SetpointVolumePerAreaApplicationRate` → `ActualVolumePerAreaApplicationRate`; drains `ActualVolumeContent` from speed × active width × rate. |
-| `builtin:joint_position` | a joint | folding, lifting, unloading. |
-| `builtin:joint_velocity` | a joint | augers, rotors, conveyors. Coupled to the master's PTO when a `pto` service is bound. |
-
-Work state and rate need ground speed. They read it from §5.2, so an
-implement that is not attached, or is attached to a master that publishes no
-speed, reports `ActualWorkState = 0`.
-
-Values are published twice: on `/links` as `value.<Name>` props of each
-link, and on the machine's `/state` as `link.<link>.<Name>`.
+| `builtin:section_control` | the `function` link named by `:target`, else the first `function` link, and its direct `section` children | Section `ActualWorkState` = function `SectionControlState` (1) > 0.5 and section `SetpointWorkState` (0) > 0.5 and speed > 0.05 m/s. Function `ActualWorkState` = any section working. Function `TotalArea` (ha) += speed × working width × dt / 10 000; `EffectiveTotalDistance` (m) += speed × dt while any section works. Working width is the sum of the working sections' `ActualWorkingWidth`. |
+| `builtin:rate_control` | the `bin` link named by `:target`, else the first `bin` link | Applies while the working width of all working sections > 0, `ActualVolumeContent` > 0 and speed > 0.05 m/s. `ActualVolumePerAreaApplicationRate` = `SetpointVolumePerAreaApplicationRate` while applying, else 0. `ActualVolumeContent` (l) −= rate (l/ha) × speed × width × dt / 10 000, floored at 0. |
 
 ## 8. Validation
 
-In addition to `CONTROLLER_SPEC.md` §7.3, the runtime MUST refuse:
+Link-tree errors reject the machine:
 
-- a coupling prim that is not a link;
-- a `hitch` and `coupler` attach request with different `type`;
-- a three-point `hitch` whose `lift` is not a joint of the same machine;
-- an attach that would create a loop or a second parent for a slave root;
-- a `gearbox:element:type` outside the seven kinds of §7.3;
-- duplicate `gearbox:element:number` in one machine, when numbers are
-  authored.
+- a coupling prim that is not a link in a strict tree;
+- a missing or unknown `gearbox:coupling:side` or `gearbox:coupling:type`;
+- a `gearbox:element:type` outside the seven kinds.
 
-Warnings, not refusals: ISO category mismatch, capacity exceeded, a slave
-requesting a function the master does not grant, an implement attached to a
-master with no `speed` in its state.
+Attach refusals are listed in §3.2. Warnings: slave requests the master does
+not grant, a `request` from a machine that is not attached, a granted request
+the master has no controller for.
+
+**Not implemented:** the three-point `lift` check, element-number uniqueness,
+coupling-name uniqueness, ISO category and capacity warnings, and a warning
+for an implement attached to a master that reports no speed.
 
 ## 9. Examples
 
@@ -439,6 +608,8 @@ master with no `speed` in its state.
 ```usda
 def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
 {
+    token gearbox:link:name = "base_link"
+    token gearbox:link:role = "base"
     def Xform "lower_links" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "GearboxLinkAPI"])
     {
         token gearbox:link:role = "tool"
@@ -446,25 +617,21 @@ def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAP
         {
             token gearbox:coupling:side = "hitch"
             token gearbox:coupling:type = "three_point_mounted"
-            int gearbox:coupling:isoCategory = 2
-            token[] gearbox:coupling:services = ["pto", "hydraulic"]
-            rel gearbox:coupling:lift = </robot/Joints/rear_lift>
         }
     }
     def Xform "rear_drawbar" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"])
     {
         token gearbox:coupling:side = "hitch"
         token gearbox:coupling:type = "drawbar"
-        token[] gearbox:coupling:excludes = ["rear_three_point"]
     }
     def Xform "pto_stub" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "GearboxLinkAPI"]) {}
 }
 # On the machine prim:
 #   apiSchemas += GearboxControllerAPI:hitch_rear, GearboxControllerAPI:pto_rear
 #   token gearbox:controller:hitch_rear:type = "builtin:hitch"
-#   rel   gearbox:controller:hitch_rear:joint = </robot/Joints/rear_lift>
+#   rel   gearbox:controller:hitch_rear:target = </robot/Joints/rear_lift>
 #   token gearbox:controller:pto_rear:type = "builtin:pto"
-#   rel   gearbox:controller:pto_rear:joint = </robot/Joints/pto>
+#   rel   gearbox:controller:pto_rear:target = </robot/Joints/pto>
 #   token[] gearbox:machine:grants = ["speed", "hitch:hitch_rear", "pto:pto_rear"]
 ```
 
@@ -477,8 +644,7 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxController
     rel gearbox:machine:body = </robot/frame>
     rel gearbox:machine:role:passiveWheelJoints = [</robot/Joints/rev_left>, </robot/Joints/rev_right>]
     token gearbox:controller:tip:type = "builtin:joint_position"
-    rel gearbox:controller:tip:joint = </robot/Joints/tip>
-    token gearbox:controller:tip:commandInterface = "position"
+    rel gearbox:controller:tip:target = </robot/Joints/tip>
 
     def Xform "frame" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
     {
@@ -488,41 +654,39 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxController
         {
             token gearbox:coupling:side = "coupler"
             token gearbox:coupling:type = "drawbar"
-            double3 xformOp:translate = (2.6, 0.0, 0.45)
+            double3 xformOp:translate = (0.0, -2.6, 0.45)
             uniform token[] xformOpOrder = ["xformOp:translate"]
         }
     }
     def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "GearboxLinkAPI"]) {}
-    # wheels, joints ...
+    # wheel links with gearbox:link:role = "wheel", joints ...
 }
 ```
 
-Attach over zenoh after loading both:
+Attach and tip after loading both:
 
-```python
-s.put("gearbox/machines/tractor_1/attach", cbor2.dumps({
-    "slave": "trailer_1", "hitch": "rear_drawbar", "coupler": "drawbar_eye",
-    "teleport": True, "session_id": "demo"}))
-s.put("gearbox/machines/tractor_1/tools/trailer_1/tip/cmd", cbor2.dumps({
-    "element": 0, "ddi": "SetpointWorkState", "value": 1, "session_id": "demo"}))
+```sh
+gearbox machine tools attach trailer_1 --machine tractor_1 --hitch rear_drawbar --coupler drawbar_eye --teleport
+gearbox machine cmd tip position=1 --machine tractor_1 --tool trailer_1
 ```
 
 ### 9.3 Mounted sprayer
 
-Coupler of type `three_point_mounted` on `base_link`; `boom` function with
-sections as in §7.3; `tank` bin; controllers `sections`
+A `three_point_mounted` coupler on `base_link`; a `boom` function link with
+`section` children as in §7.3; a `tank` bin link; controllers `sections`
 (`builtin:section_control`) and `rate` (`builtin:rate_control`);
 `requests = ["speed", "hitch:hitch_rear"]` so it can lift itself at the
-headland. Attached, it is commanded at
-`gearbox/machines/tractor_1/tools/sprayer_1/sections/cmd`.
+headland. Attached, its sections are switched with
+`gearbox machine set-value section_0 SetpointWorkState 1 --machine sprayer_1`.
 
-## 10. Not covered
+## 10. Not implemented
 
-- Physical hitching by driving into the coupler. Attach is a request, not a
-  contact event.
-- Load transfer through the three-point linkage (draft sensing) beyond the
-  `float` and `draft` modes of `builtin:hitch`.
-- ISOBUS or CAN transport of any kind, and any device-description export
-  or import. The link tree is the only description of a machine.
-- Detaching by breaking force. `physics:breakForce` on the coupling joint
-  is honoured if authored on the hitch, and reported as a detach.
+- Hitching by driving into the coupler. Attach is always a request.
+- `builtin:hitch` `float` and `draft` modes, and draft sensing.
+- `gearbox:coupling:lift`, `excludes`, `services`, `isoCategory` and
+  `capacityKg`.
+- Detaching by breaking force: `physics:breakForce` is not honoured on hitch
+  joints.
+- Validation of the composite link tree.
+- ISOBUS or CAN transport, and device-description export or import. The link
+  tree is the only description of a machine.

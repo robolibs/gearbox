@@ -1,5 +1,12 @@
 # Gearbox USD machine/controller metadata
 
+> Historical design notes, superseded by
+> [specs/MACHINE_SPEC.md](../specs/MACHINE_SPEC.md) and
+> [specs/CONTROLLER_SPEC.md](../specs/CONTROLLER_SPEC.md). The tool API is
+> peerbus/agentio, not zenoh: topic names are in
+> `crates/gearbox-api/src/topics.rs` and payloads are datapod wire types. The
+> JSON payloads below show the old field layout only.
+
 This is **not** an OpenUSD generated schema/plugin.
 
 This file documents the plain USD attributes and relationships that Gearbox
@@ -16,11 +23,12 @@ Gearbox's external loader topic is intentionally USD-first, not
 marker-specific:
 
 ```text
-gearbox/usd/load/<runtime_id>
+/gearbox/usd/load
 ```
 
-The payload contains a `usd_path`, a placement transform, and a lightweight
-`category` string. Current base categories are:
+The request is a `gearbox.usd_load.v1`: placement `x`, `y`, `z`, `yaw_deg`, a
+`category`, and props `id`, `path`, `machine_id` and `variant.<n>`. Base
+categories are:
 
 - `machine` / `robot` — load a USD that may contain Gearbox machine/controller
   metadata and expose per-instance controller topics.
@@ -61,7 +69,7 @@ Example machine load:
 {
   "category": "machine",
   "usd_path": "machines/tractor.usd",
-  "namespace": "tractor_01",
+  "machine_id": "tractor_01",
   "x": 0.0,
   "z": 0.0
 }
@@ -77,7 +85,7 @@ place (no despawn/respawn); a different asset replaces it.
 ## Object pose feedback
 
 ```text
-gearbox/usd/pose/<runtime_id>
+/gearbox/scene/events   (gearbox.scene_event.v1, kind "pose")
 ```
 
 Gearbox is the source of truth for *where loaded things actually are*: a static
@@ -95,11 +103,11 @@ Gearbox publishes its settled pose once:
 }
 ```
 
-Tools subscribe to `gearbox/usd/pose/**` and drive off these authoritative
+Tools subscribe to `/gearbox/scene/events` and drive off these authoritative
 positions instead of assuming a load request landed where it was asked to.
 `top_y` lets a caller place a marker directly above an object with no terrain
-math. A contact-harvested object is reported once more on
-`gearbox/usd/harvested/<id>` and then stops appearing.
+math. A contact-harvested object is reported once more as a `harvested` event
+and then stops appearing.
 
 ## Design direction: Gearbox Robot Description API
 
@@ -350,8 +358,10 @@ Wheel-joint roles are intentionally separate:
 
 - `gearbox:machine:role:poweredWheelJoints` = joints that may receive wheel
   motor velocity/force from drive controllers.
-- `gearbox:machine:role:passiveWheelJoints` = rolling joints that controllers
-  must leave free.
+- `gearbox:machine:role:passiveWheelJoints` = rolling joints that get no drive
+  torque. While driving, the drive controller rolls them at ground speed with
+  a light motor (2 % of the largest driven torque cap); parked, it holds them
+  like the driven wheels.
 - `gearbox:machine:role:steeringJoints` = joints that may receive steering
   position targets.
 
@@ -372,9 +382,9 @@ preferred for new assets and authoring plugins.
 `steeringGeometry = "ackermann"` follows the Isaac Sim Leatherback pattern: the
 controller computes individual left/right steering position targets. In true
 Ackermann, the front steering wheels are **not** the same angle; the inner wheel
-steers sharper than the outer wheel. Wheel velocity targets are only applied to
-`poweredWheelJoints`; passive rolling joints are not motorized by the
-controller.
+steers sharper than the outer wheel. Drive targets are applied to
+`poweredWheelJoints`; passive rolling joints only get the light ground-speed
+motor while driving and the parking hold at rest.
 
 `steeringGeometry = "parallel"` is still supported for machines that
 intentionally want both steering joints to receive the same steering position
@@ -479,7 +489,7 @@ one like this:
 token gearbox:controller:drive:type = "external:process"
 string gearbox:controller:drive:executable = "/path/to/controller"
 string[] gearbox:controller:drive:args = ["--some-arg"]
-token gearbox:controller:drive:transport = "zenoh"
+token gearbox:controller:drive:transport = "agentio"   # the default
 ```
 
 But Gearbox will not execute it unless the runtime explicitly allows it:

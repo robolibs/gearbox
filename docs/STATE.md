@@ -1,5 +1,13 @@
 # gearbox — state of play
 
+> Historical design notes, superseded by
+> [specs/MACHINE_SPEC.md](../specs/MACHINE_SPEC.md) and
+> [specs/CONTROLLER_SPEC.md](../specs/CONTROLLER_SPEC.md). The tool API is
+> peerbus + agentio in `crates/gearbox-api` (topic names in
+> `crates/gearbox-api/src/topics.rs`, datapod wire types), not zenoh. There
+> is no aeronet sim ↔ renderer link, and the crate table and zenoh topic
+> examples below are out of date.
+
 Where we are, what we have, and what's still needed to finish the
 split-deployment + browser-renderer story.
 
@@ -20,7 +28,7 @@ remember what to pick up next.
     │  ┌──────┴───────┐                 ┌───────┴────────┐     │
     │  │  Tool API    │                 │  Sim↔Renderer  │     │
     │  │  gearbox-api │                 │  gearbox-link  │     │
-    │  │  (zenoh)     │                 │  (aeronet WT)  │     │
+    │  │  (peerbus)   │                 │  (aeronet WT)  │     │
     │  └──────┬───────┘                 └───────┬────────┘     │
     └─────────┼─────────────────────────────────┼──────────────┘
               │                                 │
@@ -33,7 +41,7 @@ remember what to pick up next.
 |---|---|---|
 | **Simulator** | Owns the Molla physics world and steps it. **Molla lives strictly here.** | no |
 | **Renderer** | Draws the state. Reads from `SceneState` (a physics-free mirror) — **never** touches the physics directly. | no |
-| **Tool API** | Network surface for *external tools* | **yes** — zenoh server lives here |
+| **Tool API** | Network surface for *external tools* | **yes** — the peerbus/agentio host lives here |
 
 Between Simulator and Renderer sits a renderer-facing state mirror,
 [`SceneState`](crates/gearbox-viz/src/scene.rs). A
@@ -57,7 +65,7 @@ renderer.
 | `gearbox-viz` | Bevy visualization layer; owns `GearboxSim` + `SceneState` | `GearboxSim`, `SceneState`, `ChaseCamera`, `SimClock`, `FollowTarget` | yes |
 | `gearbox-editor` | Gearbox-specific egui panels (inspector, properties, spawn library, etc.) | `Selection`, `HeadingArrows`, `EditorPlugin` | yes |
 | `bevy_frost` | **Project-agnostic** glass-themed editor UI kit | `FrostPlugin`, `AccentColor`, `GlassOpacity`, `style::*`, `widgets::*`, `float::*`, `gizmo_material::*` | yes |
-| `gearbox-api` | **Tool API** over zenoh | `ApiBroker`, `ClockWire`, `ClockCommand` | optional feature |
+| `gearbox-api` | **Tool API** over peerbus + agentio | `HostBus`, `MachineAgent`, `Client`, `GearboxBus` | optional feature |
 | `gearbox-link` | **Simulator ↔ Renderer** transport via aeronet / WebTransport | `SimToRenderer`, `RendererToSim`, plugins | yes |
 | `bin/gearbox` | The one binary | — | yes |
 
@@ -78,9 +86,9 @@ registry) stays in `gearbox-editor`.
 | | **Tool API** | **Sim ↔ Renderer link** |
 |---|---|---|
 | **Crate** | `gearbox-api` | `gearbox-link` |
-| **Transport** | zenoh 1.x (pub/sub/query/reply) | aeronet 0.20 + `aeronet_webtransport` (QUIC) |
+| **Transport** | peerbus (shared memory or QUIC) + agentio identities | aeronet 0.20 + `aeronet_webtransport` (QUIC) |
 | **Wasm-capable?** | **no** — zenoh Rust doesn't target wasm | **yes** — WebTransport is wasm-first |
-| **Encoding** | CBOR (`ciborium`) | CBOR (`ciborium`) |
+| **Encoding** | datapod wire types | CBOR (`ciborium`) |
 | **Purpose** | Expose the sim to *other tools* | Split sim off a Bevy renderer process |
 | **Who speaks it** | Server-side only (native). External robot teleop, CLIs, scripting agents | Both sides; either can be native or wasm |
 | **Bevy integration** | Plugin wraps the broker | Plugin feeds Bevy `Message` events in/out |

@@ -31,20 +31,26 @@ Decorative wheels must be distinguishable from load-bearing ones.
 
 ### Existing fields and implementation gaps
 
-The isolated adapter already consumes these numeric wheel-link attributes:
+The runtime reads these numeric values from the wheel link's authored
+attributes when it registers the tyre (`controller/wheel_forces.rs`
+`tyre_properties`). Changing them at runtime has no effect; only the target
+pressure is live (§Controls).
 
-| Attribute | Units |
-|---|---|
-| `gearbox:value:tyre_axle` | Positive integer axle id |
-| `gearbox:value:tyre_pressure_bar` | Initial gauge bar |
-| `gearbox:value:tyre_min_pressure_bar` | Gauge bar |
-| `gearbox:value:tyre_max_pressure_bar` | Gauge bar |
-| `gearbox:value:tyre_pressure_rate_bar_s` | Bar per simulated second |
-| `gearbox:value:tyre_width_m` | Metres |
-| `gearbox:value:tyre_carcass_stiffness_pa_m` | Pa/m |
-| `gearbox:value:tyre_tread_stiffness_n_m3` | N/m³ |
-| `gearbox:value:tyre_damping_ratio` | Dimensionless |
-| `gearbox:value:tyre_hysteresis_fraction` | Dimensionless |
+| Attribute | Units | Default | Notes |
+|---|---|---|---|
+| `gearbox:value:tyre_axle` | integer 1–65535 | inferred | See §Axle identity. |
+| `gearbox:value:tyre_pressure_bar` | initial gauge bar | 1.8 | |
+| `gearbox:value:tyre_min_pressure_bar` | gauge bar | 0.5 | |
+| `gearbox:value:tyre_max_pressure_bar` | gauge bar | 4.0 | |
+| `gearbox:value:tyre_pressure_rate_bar_s` | bar per simulated second | 1.0 | |
+| `gearbox:value:tyre_width_m` | m | from the largest collider (§Tyre registration) | |
+| `gearbox:value:tyre_carcass_stiffness_pa_m` | Pa/m | 400 000 | |
+| `gearbox:value:tyre_tread_stiffness_n_m3` | N/m³ | 2 600 000 | |
+| `gearbox:value:tyre_damping_ratio` | dimensionless | 0.7 | |
+| `gearbox:value:tyre_hysteresis_fraction` | dimensionless | 0.1 | |
+
+Molla validates the resulting configuration; an invalid one rejects that
+wheel's registration with a warning.
 
 Explicit contact-type, rubber/rigid mesh-binding and reference-geometry
 schema fields are not yet defined/consumed. They must be implemented before
@@ -60,8 +66,6 @@ correction. It must detect unresolved/cross-wheel mesh bindings, conflicting
 rigid/rubber membership, missing rolling joints, inconsistent geometry,
 non-finite/non-positive dimensions and rates, and invalid pressure ranges.
 Legacy preview loading may continue with a clear degraded-status report.
-An unsupported backend must report the missing capability, not silently
-present rigid tyres as pressure-compatible behaviour.
 
 Each machine's acceptance test must demonstrate:
 
@@ -80,6 +84,63 @@ Each machine's acceptance test must demonstrate:
 These are required gates, not a claim that every gate or machine has already
 passed. Current live visual coverage is the Kubota; Krampe naming recognition
 alone does not establish trailer compatibility.
+
+## Tyre registration
+
+Every registered wheel is a pressure tyre. There is no solid-wheel model:
+powered, passive, trailer and diff-drive wheels all get the same Molla
+pressure tyre (`controller/wheel_forces.rs` `sync_machine_wheel_forces`,
+`physics/molla/wheel.rs`).
+
+**Wheels.** A machine's wheels are the bodies of its links with
+`gearbox:link:role = "wheel"`, plus, for every controller of the machine, the
+wheel side of each tyre joint pair: machine `role:poweredWheelJoints` and
+`role:passiveWheelJoints`, and the controller's `driveWheelJoints`,
+`passiveWheelJoints`, `wheelJoints` and four corner joints. The wheel side is
+the body that is not the chassis, or the one with the larger collider for a
+knuckle-to-wheel joint. Joint pairs count only when `gearbox:machine:body`
+resolves, so a machine without controllers gets tyres only on `wheel` links.
+
+**Requirements.** Each frame, a wheel is registered when:
+
+- the machine has no `gearbox:machine:tracks` and `gearbox:machine:body`
+  resolves;
+- the wheel body has a collider and a joint whose only free axis is its
+  rotation (a revolute spin joint). The tyre is active only while that joint
+  is a tree joint; an `excludeFromArticulation` spin joint gives no tyre;
+- the spin axis, taken from the joint in its parent body's frame, gives a
+  rolling direction `axle × world up` within about 84° of chassis forward
+  (|rolling · forward| ≥ 0.1);
+- the machine's axle metadata is valid (§Axle identity).
+
+**Geometry.**
+
+| Quantity | Source |
+|---|---|
+| Largest collider | The wheel collider with the largest local half-extent. |
+| Hub | Centre of the largest non-sensor collider's local bounds, in the wheel body frame. |
+| Collider axle, width, radius | A cylinder (or rounded cylinder) gives its own axis, length and radius. Any other shape gives its thinnest local axis, the full extent along it, and its largest local half-extent. |
+| Reference radius | Fixed at first registration: the largest radial extent, about the hub and collider axle, of the wheel's undeformed rubber meshes; else the collider radius. |
+| Width | `tyre_width_m`, else the collider width. |
+| Supported mass | `max(machine mass / wheel count, wheel body mass, 1 kg)`; machine mass is the sum of the machine's bodies. |
+
+Rubber meshes are mesh descendants of the wheel whose prim path or name
+contains `tyre`, `tire`, `tread`, `mould_line` or `bkt_fl630`, with nothing
+between them and the wheel body named `rim`, `hub`, `collision` or
+`collider`.
+
+**Ground.** The tyre looks straight down from the hub for colliders
+registered as wheel ground: the generated terrain chunks, the flat ground slab
+and loaded USD terrain meshes. On those grounds the wheel's own collider
+contacts are masked and the tyre model supplies normal load, grip and slip.
+Friction comes from the **ground collider** (or its field friction grid), not
+from the tyre collider. Obstacles and props still touch the wheel colliders,
+which get friction ≥ 1.1 with the `min` combine rule, 5 % rounded edges on
+cylinders, restitution 0 and CCD.
+
+**Spin.** The tyre reads the wheel body's own angular velocity about its
+axle, not the spin joint's rate, so a wheel on a rocking bogie or axle sees
+the parent's rotation too.
 
 ## Controls
 
@@ -175,12 +236,15 @@ Grouping is cached until wheel membership or authored ids change, so steering
 and driving do not renumber the axles. Closely spaced, unusual or articulated
 axle layouts should author explicit ids instead of relying on inference.
 
+Axle metadata is checked per machine. A `tyre_axle` that is not an integer
+from 1 to 65535 on any wheel, or an ambiguous row, is logged once and
+registers **no tyre on that machine**: its wheels then meet the ground as
+plain rigid colliders.
+
 ## Model and limits
 
-Defaults are inspectable, uncalibrated simulation values: 1.8 gauge bar,
-0.5–4.0 bar bounds, and 1.0 bar per simulated second. Authored
-`gearbox:value:tyre_pressure_rate_bar_s` overrides the default. These are not tyre
-manufacturer specifications or real-machine inflation advice.
+Defaults (§Existing fields) are inspectable, uncalibrated simulation values,
+not tyre manufacturer specifications or real-machine inflation advice.
 
 Molla uses Pa internally. Pressure-dependent brush support supplies normal
 load, loaded radius, footprint and grip. Imported rubber deformation follows

@@ -1,5 +1,7 @@
 # Tyre rendering performance checkpoint — 2026-09-20
 
+> Dated performance log. Its Rapier comparisons and `GEARBOX_PHYSICS` settings are historical: Rapier has been removed and Molla is the only engine.
+
 This is a measured improvement, not a general Rapier-parity acceptance result.
 Only the isolated `gearbox-physics` checkout was changed. The original Gearbox
 checkout, build and active user instance were not modified or stopped.

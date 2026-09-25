@@ -1,10 +1,34 @@
 # FEM track contact descriptors
 
-`fem_contacts` version 1 describes collision primitives attached to the tracked
-machine's articulated sprocket and passive wheel bodies. Each shape has a unique
-`(body, name)` pair, body-local `position` in metres, unit XYZW `rotation`,
-`dimensions`, and nonnegative finite `friction`. Every wheel requires geometry;
-references to foreign or non-wheel bodies are rejected.
+`fem_contacts` is an optional object inside a track definition of
+`gearbox:machine:tracks` ([TRACKED_DRIVE.md](TRACKED_DRIVE.md)). It describes
+collision primitives attached to the tracked machine's articulated sprocket
+and passive wheel bodies for the experimental FEM track
+(`bin/gearbox/src/physics/fem/track_contacts.rs`).
+
+```json
+{
+  "version": 1,
+  "calibration": "estimated",
+  "shapes": [ ... ]
+}
+```
+
+| Field | Type | Contract |
+|---|---|---|
+| `version` | integer | Required. Must be `1`. |
+| `calibration` | string | Required. `"estimated"` or `"measured"`. |
+| `shapes` | array | Required. The primitives below. |
+
+A missing field makes the tracks JSON invalid and rejects the machine at
+load. A `version` other than 1 or another `calibration` value fails FEM
+preparation. Shape `body` paths are rebased with the machine and must lie
+under it.
+
+Each shape has a unique `(body, name)` pair, a non-empty `name`, body-local
+`position` in metres, unit XYZW `rotation`, `dimensions`, and nonnegative
+finite `friction`. Every sprocket and passive wheel of each track requires
+geometry; references to foreign or non-wheel bodies are rejected.
 
 | `kind` | `dimensions` (metres) | Extra field |
 | --- | --- | --- |
