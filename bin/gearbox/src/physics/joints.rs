@@ -87,7 +87,8 @@ pub fn convert_joints(
                 && articulated(body0_e)
                 && articulated(body1_e)
                 && !joint.exclude_from_articulation;
-            world.insert_joint(body0, body1, desc);
+            let id = world.insert_joint(body0, body1, desc);
+            world.entity_to_joint.insert(joint_entity, id);
         }
         commands.entity(joint_entity).insert(JointAttached);
     }

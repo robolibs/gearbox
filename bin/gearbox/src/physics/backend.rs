@@ -716,6 +716,166 @@ pub struct TrackForceOutput {
     pub contacts: usize,
 }
 
+// ── Actuator devices ────────────────────────────────────────────────────
+
+/// A propeller, belt or connector the backend steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceId(pub u64);
+
+/// What a motor or belt is told to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DeviceCommand {
+    /// Reach a position (rad or m).
+    Position(f64),
+    /// Run at a velocity (rad/s or m/s).
+    Velocity(f64),
+    /// Apply a force or torque (N or N·m).
+    Force(f64),
+}
+
+/// Speed limit, acceleration, PID gains on the position error and soft
+/// position limits of a motor controller.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeviceLimits {
+    pub max_velocity: f64,
+    pub acceleration: Option<f64>,
+    pub pid: [f64; 3],
+    pub position_limits: Option<[f64; 2]>,
+}
+
+impl Default for DeviceLimits {
+    fn default() -> Self {
+        Self {
+            max_velocity: 10.0,
+            acceleration: None,
+            pid: [10.0, 0.0, 0.0],
+            position_limits: None,
+        }
+    }
+}
+
+/// A motor or belt setting besides its command.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DeviceSetting {
+    /// Speed position control runs at.
+    Speed(f64),
+    Acceleration(Option<f64>),
+    Pid([f64; 3]),
+    /// Force or torque available to a motor.
+    MaxForce(f64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotorOutput {
+    pub position: f64,
+    pub velocity: f64,
+    pub command: DeviceCommand,
+    pub commanded_velocity: f64,
+    /// Force or torque the motor applied over the last step.
+    pub force: f64,
+    pub brake_damping: f64,
+    pub brake_force: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropellerDesc {
+    pub body: BodyId,
+    /// Shaft frame in the body frame: +X the shaft, origin the centre of thrust.
+    pub frame: Pose,
+    /// `[t1, t2]` of `T = t1·|ω|·ω − t2·|ω|·V`.
+    pub thrust: [f64; 2],
+    /// `[q1, q2]` of `Q = q1·|ω|·ω − q2·|ω|·V`; the body takes `−Q`.
+    pub torque: [f64; 2],
+    pub limits: DeviceLimits,
+    pub max_torque: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PropellerOutput {
+    pub omega: f64,
+    pub thrust: f64,
+    pub torque: f64,
+    pub advance: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeltDesc {
+    /// Colliders forming the running surface.
+    pub colliders: Vec<ColliderId>,
+    /// Running direction in each collider's frame.
+    pub direction: DVec3,
+    pub limits: DeviceLimits,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BeltOutput {
+    pub position: f64,
+    pub velocity: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ConnectorKind {
+    #[default]
+    Symmetric,
+    Active,
+    Passive,
+}
+
+/// A docking face (Webots `Connector`); `body` `None` fixes it to the world.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectorDesc {
+    pub body: Option<BodyId>,
+    /// Docking frame in the body frame (world for none); +X out of the face.
+    pub frame: Pose,
+    pub model: String,
+    pub kind: ConnectorKind,
+    pub auto_lock: bool,
+    pub unilateral_lock: bool,
+    pub unilateral_unlock: bool,
+    pub distance_tolerance: f64,
+    pub axis_tolerance: f64,
+    pub rotation_tolerance: f64,
+    pub rotations: u32,
+    pub snap: bool,
+    pub tensile_strength: Option<f64>,
+    pub shear_strength: Option<f64>,
+    /// Natural frequency (Hz) of the link.
+    pub stiffness: f64,
+}
+
+impl Default for ConnectorDesc {
+    fn default() -> Self {
+        Self {
+            body: None,
+            frame: Pose::IDENTITY,
+            model: String::new(),
+            kind: ConnectorKind::Symmetric,
+            auto_lock: false,
+            unilateral_lock: true,
+            unilateral_unlock: true,
+            distance_tolerance: 0.01,
+            axis_tolerance: 0.2,
+            rotation_tolerance: 0.2,
+            rotations: 4,
+            snap: true,
+            tensile_strength: None,
+            shear_strength: None,
+            stiffness: 30.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ConnectorOutput {
+    pub presence: Option<DeviceId>,
+    pub locked: bool,
+    pub linked: Option<DeviceId>,
+    pub tensile: f64,
+    pub shear: f64,
+}
+
+const NO_DEVICES: &str = "actuator devices are not supported by this backend";
+
 #[derive(Clone, Copy, Debug)]
 pub struct WheelForceDesc {
     pub body: BodyId,
@@ -834,6 +994,51 @@ pub trait PhysicsBackend: Send + Sync {
     }
     fn track_output(&self, _sprocket: BodyId) -> Option<TrackForceOutput> { None }
     fn remove_track(&mut self, _sprocket: BodyId) {}
+
+    /// A motor on a revolute or prismatic joint, holding its position.
+    fn insert_motor(&mut self, _joint: JointId, _limits: DeviceLimits, _max_force: f64) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    fn remove_motor(&mut self, _joint: JointId) {}
+    fn command_motor(&mut self, _joint: JointId, _command: DeviceCommand) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    fn configure_motor(&mut self, _joint: JointId, _setting: DeviceSetting) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    /// Brake damping on a revolute or prismatic joint; zero releases it.
+    fn set_joint_brake(&mut self, _joint: JointId, _damping: f64) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    /// The motor or brake of `joint` over the last step.
+    fn motor_output(&self, _joint: JointId) -> Option<MotorOutput> { None }
+    fn insert_propeller(&mut self, _desc: PropellerDesc) -> Result<DeviceId, String> {
+        Err(NO_DEVICES.into())
+    }
+    fn set_propeller_speed(&mut self, _id: DeviceId, _omega: f64) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    fn propeller_output(&self, _id: DeviceId) -> Option<PropellerOutput> { None }
+    fn insert_belt(&mut self, _desc: BeltDesc) -> Result<DeviceId, String> {
+        Err(NO_DEVICES.into())
+    }
+    fn command_belt(&mut self, _id: DeviceId, _command: DeviceCommand) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    fn configure_belt(&mut self, _id: DeviceId, _setting: DeviceSetting) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    fn belt_output(&self, _id: DeviceId) -> Option<BeltOutput> { None }
+    fn insert_connector(&mut self, _desc: ConnectorDesc) -> Result<DeviceId, String> {
+        Err(NO_DEVICES.into())
+    }
+    /// Latches or unlatches a connector.
+    fn lock_connector(&mut self, _id: DeviceId, _lock: bool) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    fn connector_output(&self, _id: DeviceId) -> Option<ConnectorOutput> { None }
+    /// Removes a propeller, belt or connector.
+    fn remove_device(&mut self, _id: DeviceId) {}
 
     fn uses_wheel_forces(&self) -> bool {
         false

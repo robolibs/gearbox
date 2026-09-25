@@ -26,6 +26,8 @@ pub struct PhysicsWorld {
     pub(super) published_transforms: HashMap<Entity, super::writeback::PublishedTransform>,
     /// Bevy entity → collider.
     pub entity_to_collider: HashMap<Entity, ColliderId>,
+    /// USD joint prim entity → joint.
+    pub entity_to_joint: HashMap<Entity, JointId>,
     /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
     /// stored in both orders.
     pub filtered_pairs: HashSet<(BodyId, BodyId)>,
@@ -114,6 +116,7 @@ impl PhysicsWorld {
             entity_to_body: HashMap::new(),
             published_transforms: HashMap::new(),
             entity_to_collider: HashMap::new(),
+            entity_to_joint: HashMap::new(),
             filtered_pairs: HashSet::new(),
             attachment_filtered_pairs: HashSet::new(),
             hitch_captures: HashMap::new(),

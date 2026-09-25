@@ -3,6 +3,7 @@
 mod body;
 mod collider;
 mod convert;
+mod device;
 mod joint;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,8 @@ pub struct MollaBackend {
     settings: SolverSettings,
     wheels: BTreeMap<BodyId, (JointId, f64)>,
     wheel_step_dt: f64,
+    devices: BTreeMap<DeviceId, device::MollaDevice>,
+    next_device: u64,
 }
 
 impl Default for MollaBackend {
@@ -59,6 +62,8 @@ impl Default for MollaBackend {
             joints: BTreeMap::new(),
             wheels: BTreeMap::new(),
             wheel_step_dt: 1.0 / 120.0,
+            devices: BTreeMap::new(),
+            next_device: 0,
             settings: SolverSettings {
                 dt: 1.0 / 120.0,
                 solver_iterations: 16,
@@ -92,6 +97,58 @@ impl PhysicsBackend for MollaBackend {
         if let Some(body) = self.bodies.get(&sprocket) {
             self.shared.world().tracks.remove(body.handle);
         }
+    }
+
+    fn insert_motor(&mut self, joint: JointId, limits: DeviceLimits, max_force: f64) -> Result<(), String> {
+        self.device_insert_motor(joint, limits, max_force)
+    }
+    fn remove_motor(&mut self, joint: JointId) {
+        self.device_remove_motor(joint);
+    }
+    fn command_motor(&mut self, joint: JointId, command: DeviceCommand) -> Result<(), String> {
+        self.device_command_motor(joint, command)
+    }
+    fn configure_motor(&mut self, joint: JointId, setting: DeviceSetting) -> Result<(), String> {
+        self.device_configure_motor(joint, setting)
+    }
+    fn set_joint_brake(&mut self, joint: JointId, damping: f64) -> Result<(), String> {
+        self.device_set_brake(joint, damping)
+    }
+    fn motor_output(&self, joint: JointId) -> Option<MotorOutput> {
+        self.device_motor_output(joint)
+    }
+    fn insert_propeller(&mut self, desc: PropellerDesc) -> Result<DeviceId, String> {
+        self.device_insert_propeller(desc)
+    }
+    fn set_propeller_speed(&mut self, id: DeviceId, omega: f64) -> Result<(), String> {
+        self.device_set_propeller_speed(id, omega)
+    }
+    fn propeller_output(&self, id: DeviceId) -> Option<PropellerOutput> {
+        self.device_propeller_output(id)
+    }
+    fn insert_belt(&mut self, desc: BeltDesc) -> Result<DeviceId, String> {
+        self.device_insert_belt(desc)
+    }
+    fn command_belt(&mut self, id: DeviceId, command: DeviceCommand) -> Result<(), String> {
+        self.device_command_belt(id, command)
+    }
+    fn configure_belt(&mut self, id: DeviceId, setting: DeviceSetting) -> Result<(), String> {
+        self.device_configure_belt(id, setting)
+    }
+    fn belt_output(&self, id: DeviceId) -> Option<BeltOutput> {
+        self.device_belt_output(id)
+    }
+    fn insert_connector(&mut self, desc: ConnectorDesc) -> Result<DeviceId, String> {
+        self.device_insert_connector(desc)
+    }
+    fn lock_connector(&mut self, id: DeviceId, lock: bool) -> Result<(), String> {
+        self.device_lock_connector(id, lock)
+    }
+    fn connector_output(&self, id: DeviceId) -> Option<ConnectorOutput> {
+        self.device_connector_output(id)
+    }
+    fn remove_device(&mut self, id: DeviceId) {
+        self.device_remove(id);
     }
 
     fn uses_wheel_forces(&self) -> bool {
