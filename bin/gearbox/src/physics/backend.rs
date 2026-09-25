@@ -874,6 +874,90 @@ pub struct ConnectorOutput {
     pub shear: f64,
 }
 
+/// What a copter (multirotor) controller holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CopterCommand {
+    /// Rotors stopped.
+    Off,
+    /// Heading-frame velocity (forward, left, up; m/s) and yaw rate (rad/s).
+    Velocity { forward: f64, left: f64, up: f64, yaw_rate: f64 },
+    /// Roll (right side down), pitch (nose down), yaw rate and climb rate.
+    Attitude { roll: f64, pitch: f64, yaw_rate: f64, climb: f64 },
+}
+
+/// Limits and loop gains of a copter controller.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CopterLimits {
+    pub max_tilt: f64,
+    pub max_speed: f64,
+    pub max_climb: f64,
+    pub max_yaw_rate: f64,
+    pub velocity_gain: f64,
+    /// Time constant (s) of the wind and payload disturbance observer.
+    pub disturbance_time: f64,
+    pub attitude_frequency: f64,
+    pub yaw_gain: f64,
+}
+
+impl Default for CopterLimits {
+    fn default() -> Self {
+        Self {
+            max_tilt: 0.5,
+            max_speed: 10.0,
+            max_climb: 3.0,
+            max_yaw_rate: 1.5,
+            velocity_gain: 1.5,
+            disturbance_time: 0.5,
+            attitude_frequency: 6.0,
+            yaw_gain: 4.0,
+        }
+    }
+}
+
+/// A copter controller flying `body` on `propellers`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CopterDesc {
+    pub body: BodyId,
+    /// Flight frame in the body frame: +X forward, +Y left, +Z up.
+    pub frame: Pose,
+    pub propellers: Vec<DeviceId>,
+    pub limits: CopterLimits,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CopterOutput {
+    pub command: CopterCommand,
+    pub roll: f64,
+    pub pitch: f64,
+    /// Heading-frame velocity: forward, left, up.
+    pub velocity: [f64; 3],
+    pub yaw_rate: f64,
+    pub thrust: f64,
+    pub saturated: bool,
+}
+
+/// Aerodynamic drag on a body: `CdA` along each axis of a frame whose origin
+/// is the centre of pressure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DragDesc {
+    pub body: BodyId,
+    pub frame: Pose,
+    /// Drag coefficient times area along the frame's X, Y and Z (m²).
+    pub area: DVec3,
+    /// Air density (kg/m³).
+    pub density: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DragOutput {
+    /// Airspeed of the centre of pressure in the drag frame (m/s).
+    pub airspeed: DVec3,
+    /// Drag force in world axes (N), averaged over the last step.
+    pub force: DVec3,
+    /// Wind at the body (m/s, world).
+    pub wind: DVec3,
+}
+
 const NO_DEVICES: &str = "actuator devices are not supported by this backend";
 
 #[derive(Clone, Copy, Debug)]
@@ -1037,7 +1121,24 @@ pub trait PhysicsBackend: Send + Sync {
         Err(NO_DEVICES.into())
     }
     fn connector_output(&self, _id: DeviceId) -> Option<ConnectorOutput> { None }
-    /// Removes a propeller, belt or connector.
+    /// A copter (multirotor) controller over propellers already inserted.
+    fn insert_copter(&mut self, _desc: CopterDesc) -> Result<DeviceId, String> {
+        Err(NO_DEVICES.into())
+    }
+    fn command_copter(&mut self, _id: DeviceId, _command: CopterCommand) -> Result<(), String> {
+        Err(NO_DEVICES.into())
+    }
+    fn copter_output(&self, _id: DeviceId) -> Option<CopterOutput> { None }
+    /// Aerodynamic drag on a body.
+    fn insert_drag(&mut self, _desc: DragDesc) -> Result<DeviceId, String> {
+        Err(NO_DEVICES.into())
+    }
+    fn drag_output(&self, _id: DeviceId) -> Option<DragOutput> { None }
+    /// The wind everywhere (m/s, world).
+    fn set_wind(&mut self, _wind: DVec3) {}
+    /// The wind one body flies in; `None` returns it to the world's.
+    fn set_body_wind(&mut self, _body: BodyId, _wind: Option<DVec3>) {}
+    /// Removes a propeller, belt, connector, copter or drag element.
     fn remove_device(&mut self, _id: DeviceId) {}
 
     fn uses_wheel_forces(&self) -> bool {

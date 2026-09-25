@@ -1,0 +1,291 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "gearbox spray drone: a 25 kg X-layout quadcopter"
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# A 25 kg agricultural quadcopter that flies on four propeller devices and a
+# copter device (`specs/CONTROLLER_SPEC.md` §7.7). Spawn it as a machine
+# (`gearbox spawn machine world/spray_drone.usda --machine drone`) and fly it:
+#   gearbox machine move drone --up 1.5 --for 4s          # take off
+#   gearbox machine move drone --forward 3 --for 5s       # fly forward
+#   gearbox machine move drone --turn 0.5 --for 3s        # yaw
+#   gearbox machine move drone --up -1 --for 5s           # land
+# or command `/machines/drone/actuate` with `device=copter` (`mode`, `forward`,
+# `left`, `up`, `yaw_rate`; `roll`, `pitch`, `climb`; `mode=off`).
+#
+# Its drag device puts it in the weather's gusting wind; the copter leans
+# into it and holds its ground.
+#
+# The body frame is +X forward, +Y left, +Z up. Diagonal rotor pairs spin
+# opposite ways: a negative thrust constant runs its rotor backwards.
+def Xform "World"
+{
+    def Xform "SprayDrone" (
+        prepend apiSchemas = ["GearboxMachineAPI"]
+    )
+    {
+        token gearbox:machine:interfaceVersion = "0.1"
+        token gearbox:machine:kind = "drone"
+        token gearbox:machine:idPolicy = "prim_path"
+        rel gearbox:machine:body = </World/SprayDrone/body>
+
+        def Xform "body" (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+        )
+        {
+            token gearbox:link:name = "base_link"
+            token gearbox:link:role = "base"
+            float physics:mass = 25
+            float3 physics:diagonalInertia = (2, 2, 3.5)
+            point3f physics:centerOfMass = (0, 0, 0)
+            double3 xformOp:translate = (0, 0, 0.5)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Cube "hub" (
+                prepend apiSchemas = ["PhysicsCollisionAPI"]
+            )
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.92, 0.92, 0.9)]
+                float3 xformOp:scale = (0.6, 0.6, 0.25)
+                uniform token[] xformOpOrder = ["xformOp:scale"]
+            }
+
+            def Cylinder "tank"
+            {
+                double radius = 0.22
+                double height = 0.35
+                color3f[] primvars:displayColor = [(0.2, 0.45, 0.85)]
+                double3 xformOp:translate = (0, 0, -0.28)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+
+            def Cube "arm_a" (
+                prepend apiSchemas = ["PhysicsCollisionAPI"]
+            )
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.15, 0.15, 0.15)]
+                float3 xformOp:rotateXYZ = (0, 0, 45)
+                float3 xformOp:scale = (1.9, 0.08, 0.06)
+                double3 xformOp:translate = (0, 0, 0.12)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cube "arm_b" (
+                prepend apiSchemas = ["PhysicsCollisionAPI"]
+            )
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.15, 0.15, 0.15)]
+                float3 xformOp:rotateXYZ = (0, 0, -45)
+                float3 xformOp:scale = (1.9, 0.08, 0.06)
+                double3 xformOp:translate = (0, 0, 0.12)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+            }
+
+            def Cube "skid_left" (
+                prepend apiSchemas = ["PhysicsCollisionAPI"]
+            )
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.15, 0.15, 0.15)]
+                float3 xformOp:scale = (1.1, 0.06, 0.06)
+                double3 xformOp:translate = (0, 0.35, -0.45)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "skid_right" (
+                prepend apiSchemas = ["PhysicsCollisionAPI"]
+            )
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.15, 0.15, 0.15)]
+                float3 xformOp:scale = (1.1, 0.06, 0.06)
+                double3 xformOp:translate = (0, -0.35, -0.45)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "strut_left"
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.15, 0.15, 0.15)]
+                float3 xformOp:scale = (0.05, 0.05, 0.4)
+                double3 xformOp:translate = (0, 0.3, -0.25)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Cube "strut_right"
+            {
+                double size = 1
+                color3f[] primvars:displayColor = [(0.15, 0.15, 0.15)]
+                float3 xformOp:scale = (0.05, 0.05, 0.4)
+                double3 xformOp:translate = (0, -0.3, -0.25)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Xform "rotor_front_left"
+            {
+                double2 gearbox:propeller:thrustConstants = (0.0027, 0)
+                double2 gearbox:propeller:torqueConstants = (0.00008, 0)
+                float gearbox:propeller:maxVelocity = 300
+                float3 xformOp:rotateXYZ = (0, -90, 0)
+                double3 xformOp:translate = (0.64, 0.64, 0.22)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+                def Cylinder "blades"
+                {
+                    uniform token axis = "X"
+                    double radius = 0.45
+                    double height = 0.015
+                    color3f[] primvars:displayColor = [(0.1, 0.1, 0.1)]
+                    float3 xformOp:scale = (1, 1, 0.12)
+                    uniform token[] xformOpOrder = ["xformOp:scale"]
+                }
+
+                def Cylinder "motor"
+                {
+                    uniform token axis = "X"
+                    double radius = 0.07
+                    double height = 0.12
+                    color3f[] primvars:displayColor = [(0.8, 0.3, 0.1)]
+                    double3 xformOp:translate = (-0.06, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "rotor_front_right"
+            {
+                double2 gearbox:propeller:thrustConstants = (-0.0027, 0)
+                double2 gearbox:propeller:torqueConstants = (0.00008, 0)
+                float gearbox:propeller:maxVelocity = 300
+                float3 xformOp:rotateXYZ = (0, -90, 0)
+                double3 xformOp:translate = (0.64, -0.64, 0.22)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+                def Cylinder "blades"
+                {
+                    uniform token axis = "X"
+                    double radius = 0.45
+                    double height = 0.015
+                    color3f[] primvars:displayColor = [(0.1, 0.1, 0.1)]
+                    float3 xformOp:scale = (1, 1, 0.12)
+                    uniform token[] xformOpOrder = ["xformOp:scale"]
+                }
+
+                def Cylinder "motor"
+                {
+                    uniform token axis = "X"
+                    double radius = 0.07
+                    double height = 0.12
+                    color3f[] primvars:displayColor = [(0.8, 0.3, 0.1)]
+                    double3 xformOp:translate = (-0.06, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "rotor_rear_right"
+            {
+                double2 gearbox:propeller:thrustConstants = (0.0027, 0)
+                double2 gearbox:propeller:torqueConstants = (0.00008, 0)
+                float gearbox:propeller:maxVelocity = 300
+                float3 xformOp:rotateXYZ = (0, -90, 0)
+                double3 xformOp:translate = (-0.64, -0.64, 0.22)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+                def Cylinder "blades"
+                {
+                    uniform token axis = "X"
+                    double radius = 0.45
+                    double height = 0.015
+                    color3f[] primvars:displayColor = [(0.1, 0.1, 0.1)]
+                    float3 xformOp:scale = (1, 1, 0.12)
+                    uniform token[] xformOpOrder = ["xformOp:scale"]
+                }
+
+                def Cylinder "motor"
+                {
+                    uniform token axis = "X"
+                    double radius = 0.07
+                    double height = 0.12
+                    color3f[] primvars:displayColor = [(0.8, 0.3, 0.1)]
+                    double3 xformOp:translate = (-0.06, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "rotor_rear_left"
+            {
+                double2 gearbox:propeller:thrustConstants = (-0.0027, 0)
+                double2 gearbox:propeller:torqueConstants = (0.00008, 0)
+                float gearbox:propeller:maxVelocity = 300
+                float3 xformOp:rotateXYZ = (0, -90, 0)
+                double3 xformOp:translate = (-0.64, 0.64, 0.22)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+
+                def Cylinder "blades"
+                {
+                    uniform token axis = "X"
+                    double radius = 0.45
+                    double height = 0.015
+                    color3f[] primvars:displayColor = [(0.1, 0.1, 0.1)]
+                    float3 xformOp:scale = (1, 1, 0.12)
+                    uniform token[] xformOpOrder = ["xformOp:scale"]
+                }
+
+                def Cylinder "motor"
+                {
+                    uniform token axis = "X"
+                    double radius = 0.07
+                    double height = 0.12
+                    color3f[] primvars:displayColor = [(0.8, 0.3, 0.1)]
+                    double3 xformOp:translate = (-0.06, 0, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "copter"
+            {
+                float gearbox:copter:maxTiltDeg = 25
+                float gearbox:copter:maxSpeed = 8
+                float gearbox:copter:maxClimb = 3
+            }
+
+            def Xform "drag"
+            {
+                float3 gearbox:drag:area = (0.4, 0.4, 0.8)
+            }
+
+            def Xform "imu_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "imu"
+            }
+
+            def Xform "gps_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "gps"
+                double3 xformOp:translate = (0, 0, 0.2)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+
+            def Xform "attitude_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "inertial_unit"
+            }
+        }
+    }
+}

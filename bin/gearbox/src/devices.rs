@@ -1,5 +1,7 @@
 //! Actuator devices of machines, after Webots: motors and brakes on joints,
-//! propellers, belts (conveyors, tank tracks) and connectors.
+//! propellers, belts (conveyors, tank tracks) and connectors, plus copters
+//! (a multirotor flown on its propellers) and aerodynamic drag in the
+//! weather's gusting wind.
 //!
 //! The physics backend steps every device inside its step. Gearbox reads
 //! them from the machine's USD, registers them once the physics objects
@@ -7,17 +9,19 @@
 //! `/machines/<id>/actuate`, and publishes each device's reading on
 //! `/machines/<id>/actuators/<device>`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
+use bevy_weather::WeatherSettings;
 use gearbox_api::{ActuatorCommand, GearboxBus, Measurement, Props, measurement_kind as kind};
+use gearbox_fields::wind_map::Gusts;
 use openusd::sdf::{Path as SdfPath, Value};
 use usd_bevy::UsdPrimRef;
 
 use crate::controller::{ControllerInventory, MachineAgentKeys, find_prim_entity, read_attr, read_bool, read_float, read_token, type_name};
 use crate::physics::backend::{
-    BeltDesc, ConnectorDesc, ConnectorKind, DVec3, DeviceCommand, DeviceId, DeviceLimits, DeviceSetting, JointId,
-    PhysicsBackend, Pose, PropellerDesc,
+    BeltDesc, ConnectorDesc, ConnectorKind, DVec3, DeviceCommand, DeviceId, DeviceLimits, DeviceSetting,
+    BodyId, CopterCommand, CopterDesc, CopterLimits, DragDesc, JointId, PhysicsBackend, Pose, PropellerDesc,
 };
 use crate::physics::PhysicsWorld;
 use crate::usd_ext::StageExt;
@@ -27,8 +31,11 @@ pub struct DevicesPlugin;
 impl Plugin for DevicesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MachineDevices>()
+            .init_resource::<RotorSpin>()
             .add_systems(Update, drive_devices.before(crate::physics::step_physics))
-            .add_systems(PostUpdate, publish_devices);
+            .add_systems(Update, blow_wind.after(drive_devices).before(crate::physics::step_physics))
+            .add_systems(PostUpdate, publish_devices)
+            .add_systems(PostUpdate, spin_rotors.before(bevy::transform::TransformSystems::Propagate));
     }
 }
 
@@ -54,6 +61,12 @@ pub enum DeviceKind {
     /// `desc.body` and `desc.frame` are filled at registration; `locked`
     /// latches it from the start.
     Connector { desc: ConnectorDesc, locked: bool },
+    /// Flies the machine's propellers on the prim's body; the prim's frame
+    /// is +X forward, +Z up.
+    Copter { limits: CopterLimits },
+    /// Drag on the prim's body: `CdA` (m²) along the prim's axes, whose
+    /// origin is the centre of pressure, in air of `density`.
+    Drag { area: [f64; 3], density: f64 },
 }
 
 /// An authored device of a machine.
@@ -93,6 +106,9 @@ fn limits(stage: &openusd::usd::Stage, prim: &SdfPath, ns: &str, default_speed: 
         position_limits,
     }
 }
+
+/// Sea-level air (kg/m³).
+const AIR_DENSITY: f64 = 1.225;
 
 fn has_namespace(names: &[String], ns: &str) -> bool {
     let prefix = format!("gearbox:{ns}:");
@@ -180,6 +196,31 @@ pub fn discover(
                 },
                 locked: flag("isLocked", false),
             }
+        } else if has_namespace(&names, "copter") {
+            let value = |key: &str| float(&format!("gearbox:copter:{key}")).filter(|v| *v > 0.0);
+            let base = CopterLimits::default();
+            DeviceKind::Copter {
+                limits: CopterLimits {
+                    max_tilt: value("maxTiltDeg").map_or(base.max_tilt, f64::to_radians),
+                    max_speed: value("maxSpeed").unwrap_or(base.max_speed),
+                    max_climb: value("maxClimb").unwrap_or(base.max_climb),
+                    max_yaw_rate: value("maxYawRate").unwrap_or(base.max_yaw_rate),
+                    velocity_gain: value("velocityGain").unwrap_or(base.velocity_gain),
+                    disturbance_time: value("disturbanceTime").unwrap_or(base.disturbance_time),
+                    attitude_frequency: value("attitudeFrequency").unwrap_or(base.attitude_frequency),
+                    yaw_gain: value("yawGain").unwrap_or(base.yaw_gain),
+                },
+            }
+        } else if has_namespace(&names, "drag") {
+            let Some(area) = floats(stage, prim, "gearbox:drag:area").filter(|v| v.len() == 3 && v.iter().all(|a| *a >= 0.0))
+            else {
+                errors.push(format!("{}: drag needs a non-negative float3 gearbox:drag:area", prim.as_str()));
+                continue;
+            };
+            DeviceKind::Drag {
+                area: [area[0], area[1], area[2]],
+                density: float("gearbox:drag:density").filter(|d| *d > 0.0).unwrap_or(AIR_DENSITY),
+            }
         } else {
             continue;
         };
@@ -201,11 +242,15 @@ enum Live {
     Propeller(DeviceId),
     Belt(DeviceId),
     Connector(DeviceId),
+    Copter(DeviceId),
+    Drag { id: DeviceId, body: BodyId },
 }
 
 struct Registered {
     spec: DeviceSpec,
     live: Live,
+    /// The device prim's entity; propellers spin it.
+    entity: Entity,
 }
 
 /// Devices registered per machine id.
@@ -213,6 +258,8 @@ struct Registered {
 pub struct MachineDevices {
     machines: HashMap<String, Vec<Registered>>,
     failed: HashMap<String, String>,
+    /// Machines whose copter followed a `/cmd_vel` session.
+    flown: HashSet<String>,
 }
 
 impl MachineDevices {
@@ -247,19 +294,35 @@ fn relative_pose(parent: &GlobalTransform, child: &GlobalTransform) -> Option<Po
 }
 
 /// Registers one device with the backend; `Ok(None)` until its physics
-/// objects exist.
+/// objects exist. A copter flies `propellers`.
+#[allow(clippy::too_many_arguments)]
 fn register(
     spec: &DeviceSpec,
     scene_root: Entity,
+    propellers: &[DeviceId],
     physics: &mut PhysicsWorld,
     prims: &Query<(Entity, &UsdPrimRef)>,
     parents: &Query<&ChildOf>,
     children: &Query<&Children>,
     transforms: &Query<&GlobalTransform>,
-) -> Result<Option<Live>, String> {
+) -> Result<Option<(Live, Entity)>, String> {
     let Some(entity) = find_prim_entity(scene_root, &spec.prim, prims, parents) else {
         return Ok(None);
     };
+    let live = register_at(spec, entity, propellers, physics, parents, children, transforms)?;
+    Ok(live.map(|live| (live, entity)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_at(
+    spec: &DeviceSpec,
+    entity: Entity,
+    propellers: &[DeviceId],
+    physics: &mut PhysicsWorld,
+    parents: &Query<&ChildOf>,
+    children: &Query<&Children>,
+    transforms: &Query<&GlobalTransform>,
+) -> Result<Option<Live>, String> {
     let placed = |physics: &PhysicsWorld| -> Option<(crate::physics::backend::BodyId, Pose)> {
         let body = body_entity(entity, physics, parents)?;
         let frame = relative_pose(transforms.get(body).ok()?, transforms.get(entity).ok()?)?;
@@ -315,6 +378,22 @@ fn register(
                 physics.lock_connector(id, true)?;
             }
             Ok(Some(Live::Connector(id)))
+        }
+        DeviceKind::Copter { limits } => {
+            let Some((body, frame)) = placed(physics) else { return Ok(None) };
+            let id = physics.insert_copter(CopterDesc {
+                body,
+                frame,
+                propellers: propellers.to_vec(),
+                limits: *limits,
+            })?;
+            Ok(Some(Live::Copter(id)))
+        }
+        DeviceKind::Drag { area, density } => {
+            let Some((body, frame)) = placed(physics) else { return Ok(None) };
+            let area = DVec3::from_array(*area);
+            let id = physics.insert_drag(DragDesc { body, frame, area, density: *density })?;
+            Ok(Some(Live::Drag { id, body }))
         }
     }
 }
@@ -379,6 +458,44 @@ fn apply(physics: &mut dyn PhysicsBackend, device: &Registered, command: &Actuat
             let lock = flag("lock").or(flag("unlock").map(|u| !u)).ok_or("connectors take lock or unlock")?;
             physics.lock_connector(id, lock)
         }
+        Live::Copter(id) => {
+            let get = |key: &str| number(&props, key).unwrap_or(0.0);
+            let attitude = ["roll", "pitch", "climb"].iter().any(|k| has(k));
+            let tilt = || CopterCommand::Attitude {
+                roll: get("roll"),
+                pitch: get("pitch"),
+                yaw_rate: get("yaw_rate"),
+                climb: get("climb"),
+            };
+            let velocity = || CopterCommand::Velocity {
+                forward: get("forward"),
+                left: get("left"),
+                up: get("up"),
+                yaw_rate: get("yaw_rate"),
+            };
+            let command = match props.get("mode").as_deref().map(str::trim) {
+                Some("off") => CopterCommand::Off,
+                Some("attitude") => tilt(),
+                Some("velocity") | Some("hover") => velocity(),
+                None if attitude => tilt(),
+                None => velocity(),
+                Some(other) => return Err(format!("copter mode `{other}` is not off, hover, velocity or attitude")),
+            };
+            physics.command_copter(id, command)
+        }
+        Live::Drag { .. } => Err("drag takes no commands; the weather sets the wind".into()),
+    }
+}
+
+/// Removes a registered device from the backend.
+fn unregister(physics: &mut PhysicsWorld, live: Live) {
+    match live {
+        Live::Joint(joint) => physics.remove_motor(joint),
+        Live::Propeller(id) | Live::Belt(id) | Live::Connector(id) | Live::Copter(id) => physics.remove_device(id),
+        Live::Drag { id, body } => {
+            physics.remove_device(id);
+            physics.set_body_wind(body, None);
+        }
     }
 }
 
@@ -400,11 +517,9 @@ fn drive_devices(
     let live: Vec<&str> = inventory.machines.iter().map(|m| m.id.as_str()).collect();
     let gone: Vec<String> = registry.machines.keys().filter(|id| !live.contains(&id.as_str())).cloned().collect();
     for id in gone {
+        registry.flown.remove(&id);
         for device in registry.machines.remove(&id).unwrap_or_default() {
-            match device.live {
-                Live::Joint(joint) => physics.remove_motor(joint),
-                Live::Propeller(id) | Live::Belt(id) | Live::Connector(id) => physics.remove_device(id),
-            }
+            unregister(&mut physics, device.live);
         }
     }
     for machine in &inventory.machines {
@@ -412,11 +527,21 @@ fn drive_devices(
             continue;
         }
         let Some(scene_root) = machine.scene_root else { continue };
-        let mut registered = Vec::new();
+        let mut registered: Vec<Registered> = Vec::new();
         let mut ready = true;
-        for spec in &machine.devices {
-            match register(spec, scene_root, &mut physics, &prims, &parents, &children, &transforms) {
-                Ok(Some(live)) => registered.push(Registered { spec: spec.clone(), live }),
+        // Copters go last: they fly the propellers registered before them.
+        let (copters, others): (Vec<_>, Vec<_>) =
+            machine.devices.iter().partition(|d| matches!(d.kind, DeviceKind::Copter { .. }));
+        for spec in others.into_iter().chain(copters) {
+            let propellers: Vec<DeviceId> = registered
+                .iter()
+                .filter_map(|d| match d.live {
+                    Live::Propeller(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            match register(spec, scene_root, &propellers, &mut physics, &prims, &parents, &children, &transforms) {
+                Ok(Some((live, entity))) => registered.push(Registered { spec: spec.clone(), live, entity }),
                 Ok(None) => ready = false,
                 Err(error) => {
                     if registry.failed.insert(format!("{}/{}", machine.id, spec.name), error.clone()).is_none() {
@@ -430,10 +555,7 @@ fn drive_devices(
             registry.machines.insert(machine.id.clone(), registered);
         } else {
             for device in registered {
-                match device.live {
-                    Live::Joint(joint) => physics.remove_motor(joint),
-                    Live::Propeller(id) | Live::Belt(id) | Live::Connector(id) => physics.remove_device(id),
-                }
+                unregister(&mut physics, device.live);
             }
         }
     }
@@ -454,6 +576,96 @@ fn drive_devices(
                 warn!("gearbox-devices: `{}` device `{name}`: {error}", machine.id);
             }
         }
+        // A claimed `/cmd_vel` session flies the machine; letting go hovers.
+        let Some(copter) = devices.iter().find_map(|d| match d.live {
+            Live::Copter(id) => Some(id),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let command = if agent.session_id() != 0 {
+            let t = agent.twist();
+            registry.flown.insert(machine.id.clone());
+            Some(CopterCommand::Velocity {
+                forward: t.linear.vx,
+                left: t.linear.vy,
+                up: t.linear.vz,
+                yaw_rate: t.angular.vz,
+            })
+        } else if registry.flown.remove(&machine.id) {
+            Some(CopterCommand::Velocity { forward: 0.0, left: 0.0, up: 0.0, yaw_rate: 0.0 })
+        } else {
+            None
+        };
+        if let Some(command) = command
+            && let Err(error) = physics.command_copter(copter, command)
+        {
+            warn!("gearbox-devices: `{}` copter: {error}", machine.id);
+        }
+    }
+}
+
+/// The weather's wind as physics feels it: steady everywhere, and gusting
+/// at each body with drag, read from the vegetation's gust map where the
+/// body is.
+fn blow_wind(
+    registry: Res<MachineDevices>,
+    weather: Option<Res<WeatherSettings>>,
+    mut physics: ResMut<PhysicsWorld>,
+    mut gusts: Local<Option<Gusts>>,
+) {
+    let wind = weather.map_or([1.0, 0.0, 0.0, 0.0], |w| w.wind_vector().to_array());
+    let [dx, dz, speed, _] = wind.map(f64::from);
+    physics.set_wind(DVec3::new(dx * speed, 0.0, dz * speed));
+    let bodies: HashSet<BodyId> = registry
+        .machines
+        .values()
+        .flatten()
+        .filter_map(|d| match d.live {
+            Live::Drag { body, .. } => Some(body),
+            _ => None,
+        })
+        .collect();
+    if bodies.is_empty() {
+        return;
+    }
+    let gusts = gusts.get_or_insert_with(Gusts::default);
+    let time = physics.simulated_seconds as f32;
+    for body in bodies {
+        let Some(at) = physics.body(body).map(|b| b.translation()) else { continue };
+        let [x, z] = gusts.at([at.x as f32, at.z as f32], time, wind);
+        physics.set_body_wind(body, Some(DVec3::new(x as f64, 0.0, z as f64)));
+    }
+}
+
+/// Visual spin of each propeller prim, capped so frames do not alias it.
+#[derive(Resource, Default)]
+struct RotorSpin {
+    base: HashMap<Entity, Quat>,
+    angle: HashMap<Entity, f32>,
+}
+
+/// Largest visual rotor speed (rad/s): faster spins alias at frame rate.
+const MAX_VISUAL_SPIN: f32 = 25.0;
+
+/// Turns each propeller prim about its shaft (+X) with its rotor speed.
+fn spin_rotors(
+    registry: Res<MachineDevices>,
+    physics: Res<PhysicsWorld>,
+    time: Res<Time>,
+    mut spin: ResMut<RotorSpin>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let dt = time.delta_secs();
+    for device in registry.machines.values().flatten() {
+        let Live::Propeller(id) = device.live else { continue };
+        let Some(output) = physics.propeller_output(id) else { continue };
+        let Ok(mut transform) = transforms.get_mut(device.entity) else { continue };
+        let base = *spin.base.entry(device.entity).or_insert(transform.rotation);
+        let rate = (output.omega as f32).clamp(-MAX_VISUAL_SPIN, MAX_VISUAL_SPIN);
+        let angle = spin.angle.entry(device.entity).or_insert(0.0);
+        *angle = (*angle + rate * dt) % std::f32::consts::TAU;
+        transform.rotation = base * Quat::from_rotation_x(*angle);
     }
 }
 
@@ -532,6 +744,22 @@ fn reading(physics: &dyn PhysicsBackend, device: &Registered, registry: &Machine
             let values = vec![bit(c.presence.is_some()), bit(c.locked), bit(c.linked.is_some()), c.tensile, c.shear];
             (kind::CONNECTOR, values, peer)
         }
+        Live::Copter(id) => {
+            let f = physics.copter_output(id)?;
+            let mode = match f.command {
+                CopterCommand::Off => 0.0,
+                CopterCommand::Velocity { .. } => 1.0,
+                CopterCommand::Attitude { .. } => 2.0,
+            };
+            let [forward, left, up] = f.velocity;
+            let values = vec![f.roll, f.pitch, forward, left, up, f.yaw_rate, f.thrust, f64::from(u8::from(f.saturated)), mode];
+            (kind::COPTER, values, None)
+        }
+        Live::Drag { id, .. } => {
+            let d = physics.drag_output(id)?;
+            let values = [d.airspeed, d.force, d.wind].iter().flat_map(|v| v.to_array()).collect();
+            (kind::DRAG, values, None)
+        }
     })
 }
 
@@ -572,6 +800,15 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
             bool gearbox:connector:isLocked = true
             float gearbox:connector:tensileStrength = 5000
             float gearbox:connector:numberOfRotations = 1
+        }
+        def Xform "copter"
+        {
+            float gearbox:copter:maxTiltDeg = 30
+            float gearbox:copter:disturbanceTime = 0.25
+        }
+        def Xform "drag"
+        {
+            float3 gearbox:drag:area = (0.5, 0.25, 1)
         }
     }
     def Xform "boom" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
@@ -621,7 +858,11 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
         let DeviceKind::Connector { desc, locked } = by("nose") else { panic!() };
         assert!(locked && desc.auto_lock && desc.kind == ConnectorKind::Active);
         assert_eq!((desc.model.as_str(), desc.tensile_strength, desc.rotations), ("hitch", Some(5000.0), 1));
-        assert_eq!(machine.devices.len(), 5);
+        let DeviceKind::Copter { limits } = by("copter") else { panic!() };
+        assert!((limits.max_tilt - 30f64.to_radians()).abs() < 1e-6, "{limits:?}");
+        assert_eq!((limits.disturbance_time, limits.max_speed), (0.25, CopterLimits::default().max_speed));
+        assert_eq!(by("drag"), DeviceKind::Drag { area: [0.5, 0.25, 1.0], density: AIR_DENSITY });
+        assert_eq!(machine.devices.len(), 7);
     }
 
     fn body(world: &mut PhysicsWorld, desc: BodyDesc, at: DVec3) -> crate::physics::backend::BodyId {
@@ -688,5 +929,27 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
         assert!(world.body(drone).unwrap().linvel().x > 0.0);
         let docked = world.connector_output(dock).unwrap();
         assert_eq!((docked.linked, world.connector_output(plug).unwrap().linked), (Some(plug), Some(dock)));
+    }
+
+    #[test]
+    fn the_molla_backend_blows_drag_bodies_along_in_their_own_wind() {
+        let mut world = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        world.set_gravity(DVec3::ZERO);
+        let (still, blown) = (
+            body(&mut world, BodyDesc::dynamic(), DVec3::ZERO),
+            body(&mut world, BodyDesc::dynamic(), DVec3::X * 5.0),
+        );
+        let desc = DragDesc { body: still, frame: Pose::IDENTITY, area: DVec3::splat(0.2), density: AIR_DENSITY };
+        let calm = world.insert_drag(desc).unwrap();
+        let gusty = world.insert_drag(DragDesc { body: blown, ..desc }).unwrap();
+        world.set_wind(DVec3::Z * 3.0);
+        world.set_body_wind(blown, Some(DVec3::NEG_X * 6.0));
+        world.step();
+        let (a, b) = (world.drag_output(calm).unwrap(), world.drag_output(gusty).unwrap());
+        assert_eq!((a.wind, b.wind), (DVec3::Z * 3.0, DVec3::NEG_X * 6.0));
+        assert!(a.force.z > 0.0 && b.force.x < 0.0, "{a:?} {b:?}");
+        let push = |w: f64| 0.5 * AIR_DENSITY * 0.2 * w * w;
+        assert!((a.force.z - push(3.0)).abs() < 0.02 * push(3.0), "{a:?}");
+        assert!((b.force.x + push(6.0)).abs() < 0.02 * push(6.0), "{b:?}");
     }
 }

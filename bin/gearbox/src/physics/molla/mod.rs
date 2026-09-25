@@ -147,6 +147,27 @@ impl PhysicsBackend for MollaBackend {
     fn connector_output(&self, id: DeviceId) -> Option<ConnectorOutput> {
         self.device_connector_output(id)
     }
+    fn insert_copter(&mut self, desc: CopterDesc) -> Result<DeviceId, String> {
+        self.device_insert_copter(desc)
+    }
+    fn command_copter(&mut self, id: DeviceId, command: CopterCommand) -> Result<(), String> {
+        self.device_command_copter(id, command)
+    }
+    fn copter_output(&self, id: DeviceId) -> Option<CopterOutput> {
+        self.device_copter_output(id)
+    }
+    fn insert_drag(&mut self, desc: DragDesc) -> Result<DeviceId, String> {
+        self.device_insert_drag(desc)
+    }
+    fn drag_output(&self, id: DeviceId) -> Option<DragOutput> {
+        self.device_drag_output(id)
+    }
+    fn set_wind(&mut self, wind: DVec3) {
+        self.device_set_wind(wind);
+    }
+    fn set_body_wind(&mut self, body: BodyId, wind: Option<DVec3>) {
+        self.device_set_body_wind(body, wind);
+    }
     fn remove_device(&mut self, id: DeviceId) {
         self.device_remove(id);
     }

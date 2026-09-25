@@ -4828,6 +4828,19 @@ fn sync_machine_agents(
                 state_interfaces: c.state_interfaces.clone(),
             })
             .collect();
+        // A copter device takes the machine's `/cmd_vel`.
+        config.controllers.extend(
+            machine
+                .devices
+                .iter()
+                .filter(|d| matches!(d.kind, crate::devices::DeviceKind::Copter { .. }))
+                .map(|d| ControllerDesc {
+                    instance: d.name.clone(),
+                    controller_type: "builtin:copter".into(),
+                    command_interface: Some("cmd_vel".into()),
+                    state_interfaces: vec!["pose".into(), "velocity".into()],
+                }),
+        );
         let key = ControllerKey::new(scene_root, &machine.id, &instance);
         wanted.insert(machine_id.clone(), (key, config));
     }

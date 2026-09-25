@@ -13,6 +13,40 @@ pub(super) enum MollaDevice {
     Propeller(md::PropellerId),
     Belt(md::BeltId),
     Connector(md::ConnectorId),
+    Copter(md::CopterId),
+    Drag(md::DragId),
+}
+
+fn copter_command(c: CopterCommand) -> md::CopterCommand {
+    match c {
+        CopterCommand::Off => md::CopterCommand::Off,
+        CopterCommand::Velocity { forward, left, up, yaw_rate } => {
+            md::CopterCommand::Velocity { forward, left, up, yaw_rate }
+        }
+        CopterCommand::Attitude { roll, pitch, yaw_rate, climb } => {
+            md::CopterCommand::Attitude { roll, pitch, yaw_rate, climb }
+        }
+    }
+}
+
+fn copter_command_back(c: md::CopterCommand) -> CopterCommand {
+    match c {
+        md::CopterCommand::Off => CopterCommand::Off,
+        md::CopterCommand::Velocity { forward, left, up, yaw_rate } => {
+            CopterCommand::Velocity { forward, left, up, yaw_rate }
+        }
+        md::CopterCommand::Attitude { roll, pitch, yaw_rate, climb } => {
+            CopterCommand::Attitude { roll, pitch, yaw_rate, climb }
+        }
+    }
+}
+
+fn vec(v: DVec3) -> molla_math::Vec3 {
+    molla_math::Vec3::new(v.x, v.y, v.z)
+}
+
+fn dvec(v: molla_math::Vec3) -> DVec3 {
+    DVec3::new(v.x, v.y, v.z)
 }
 
 fn limits(l: DeviceLimits) -> md::MotorLimits {
@@ -160,7 +194,7 @@ impl MollaBackend {
             .collect::<Result<Vec<_>, _>>()?;
         let spec = md::BeltSpec {
             colliders,
-            direction: molla_math::Vec3::new(desc.direction.x, desc.direction.y, desc.direction.z),
+            direction: vec(desc.direction),
             limits: limits(desc.limits),
         };
         let id = {
@@ -255,6 +289,92 @@ impl MollaBackend {
         })
     }
 
+    pub(super) fn device_insert_copter(&mut self, desc: CopterDesc) -> Result<DeviceId, String> {
+        let body = self.bodies.get(&desc.body).ok_or("unknown copter body")?.handle;
+        let propellers = desc
+            .propellers
+            .iter()
+            .map(|&id| match self.device(id)? {
+                MollaDevice::Propeller(p) => Ok(p),
+                _ => Err("copters fly propellers".to_string()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let l = desc.limits;
+        let spec = md::CopterSpec {
+            body,
+            frame: convert::transform(desc.frame),
+            propellers,
+            limits: md::CopterLimits {
+                max_tilt: l.max_tilt,
+                max_speed: l.max_speed,
+                max_climb: l.max_climb,
+                max_yaw_rate: l.max_yaw_rate,
+                velocity_gain: l.velocity_gain,
+                disturbance_time: l.disturbance_time,
+                attitude_frequency: l.attitude_frequency,
+                yaw_gain: l.yaw_gain,
+            },
+        };
+        let id = {
+            let mut world = self.shared.world();
+            let RigidWorld { scene, devices, .. } = &mut *world;
+            devices.copters.insert(scene, &devices.propellers, spec).map_err(error)?
+        };
+        Ok(self.add_device(MollaDevice::Copter(id)))
+    }
+
+    pub(super) fn device_command_copter(&mut self, id: DeviceId, c: CopterCommand) -> Result<(), String> {
+        let MollaDevice::Copter(f) = self.device(id)? else {
+            return Err("device is not a copter".into());
+        };
+        self.shared.world().devices.copters.command(f, copter_command(c)).map_err(error)
+    }
+
+    pub(super) fn device_insert_drag(&mut self, desc: DragDesc) -> Result<DeviceId, String> {
+        let body = self.bodies.get(&desc.body).ok_or("unknown drag body")?.handle;
+        let spec = md::DragSpec {
+            body,
+            frame: convert::transform(desc.frame),
+            area: vec(desc.area),
+            density: desc.density,
+        };
+        let id = {
+            let mut world = self.shared.world();
+            let RigidWorld { scene, devices, .. } = &mut *world;
+            devices.aero.insert(scene, spec).map_err(error)?
+        };
+        Ok(self.add_device(MollaDevice::Drag(id)))
+    }
+
+    pub(super) fn device_drag_output(&self, id: DeviceId) -> Option<DragOutput> {
+        let MollaDevice::Drag(d) = self.device(id).ok()? else { return None };
+        let r = self.shared.world().devices.aero.reading(d)?;
+        Some(DragOutput { airspeed: dvec(r.airspeed), force: dvec(r.force), wind: dvec(r.wind) })
+    }
+
+    pub(super) fn device_set_wind(&mut self, wind: DVec3) {
+        super::apply(self.shared.world().devices.aero.set_wind(vec(wind)));
+    }
+
+    pub(super) fn device_set_body_wind(&mut self, body: BodyId, wind: Option<DVec3>) {
+        let Some(handle) = self.bodies.get(&body).map(|b| b.handle) else { return };
+        super::apply(self.shared.world().devices.aero.set_body_wind(handle, wind.map(vec)));
+    }
+
+    pub(super) fn device_copter_output(&self, id: DeviceId) -> Option<CopterOutput> {
+        let MollaDevice::Copter(f) = self.device(id).ok()? else { return None };
+        let r = self.shared.world().devices.copters.reading(f)?;
+        Some(CopterOutput {
+            command: copter_command_back(r.command),
+            roll: r.roll,
+            pitch: r.pitch,
+            velocity: r.velocity,
+            yaw_rate: r.yaw_rate,
+            thrust: r.thrust,
+            saturated: r.saturated,
+        })
+    }
+
     pub(super) fn device_remove(&mut self, id: DeviceId) {
         let Some(device) = self.devices.remove(&id) else { return };
         let mut world = self.shared.world();
@@ -265,6 +385,12 @@ impl MollaBackend {
             }
             MollaDevice::Belt(b) => super::apply(devices.belts.remove(scene, b).map(|_| ())),
             MollaDevice::Connector(c) => super::apply(devices.connectors.remove(scene, c).map(|_| ())),
+            MollaDevice::Copter(f) => {
+                devices.copters.remove(f);
+            }
+            MollaDevice::Drag(d) => {
+                devices.aero.remove(d);
+            }
         }
     }
 }
