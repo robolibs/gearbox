@@ -13,8 +13,8 @@ pub use host::{
     clear_scope, clock_op, event_kind, load_flag, object_kind,
 };
 pub use machine::{
-    AttachRequest, AttachmentRecord, ClaimRequest, ClaimResponse, ControllerCommand, DetachRequest,
-    CAMERA_CHUNK_BYTES, CAMERA_COLOR, CAMERA_DEPTH, CameraFrame, EmitRequest, LIDAR_CHUNK_PULSES,
+    ActuatorCommand, AttachRequest, AttachmentRecord, ClaimRequest, ClaimResponse,
+    ControllerCommand, DetachRequest, CAMERA_CHUNK_BYTES, CAMERA_COLOR, CAMERA_DEPTH, CameraFrame, EmitRequest, LIDAR_CHUNK_PULSES,
     LidarScan, Measurement, measurement_kind,
     LinkPose, LinkRecord, MachineInfo, MachineState, SessionInfo,
     SessionRef, TwistCmd,

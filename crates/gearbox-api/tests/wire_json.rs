@@ -101,3 +101,33 @@ fn measurements_and_emit_requests_round_trip_through_json() {
     let emit: EmitRequest = gearbox_api::unpack(emit.type_hash(), emit.wire()).expect("decode");
     assert_eq!((emit.link().as_str(), emit.data.as_slice()), ("emitter_link", &b"hello"[..]));
 }
+
+#[test]
+fn actuator_commands_and_readings_round_trip_through_json() {
+    use gearbox_api::{ActuatorCommand, Measurement, Props, measurement_kind};
+    let command = env_from_json("gearbox.actuator_command.v1", &json!({ "device": "boom", "position": "0.8", "pid": "4,0,0" }))
+        .expect("actuator command from json");
+    let command: ActuatorCommand = gearbox_api::unpack(command.type_hash(), command.wire()).expect("decode");
+    assert_eq!(command.device(), "boom");
+    assert_eq!(command.props().get("position").as_deref(), Some("0.8"));
+    assert_eq!(command.props().get("pid").as_deref(), Some("4,0,0"));
+
+    let motor = Measurement {
+        kind: measurement_kind::MOTOR,
+        count: 1,
+        values: vec![0.4, 0.0, 0.0, 19.6, 300.0, -1.5, 0.0, 0.4],
+        props: Props::from_pairs(&[("name", "boom")]).into_bytes(),
+        ..Default::default()
+    };
+    let value = env_to_json(&pack(&motor)).expect("motor to json");
+    assert_eq!(value["kind"], "motor");
+    assert_eq!(value["records"][0][3], 19.6);
+    for (kind, width) in [
+        (measurement_kind::MOTOR, 8),
+        (measurement_kind::PROPELLER, 4),
+        (measurement_kind::BELT, 2),
+        (measurement_kind::CONNECTOR, 5),
+    ] {
+        assert_eq!(measurement_kind::width(kind), width, "{}", measurement_kind::name(kind));
+    }
+}

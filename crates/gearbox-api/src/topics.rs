@@ -35,6 +35,10 @@ pub const MACHINE_TOOLS_DETACH: &str = "tools/detach";
 pub const MACHINE_SENSORS: &str = "sensors";
 /// Req/res: a packet for one of the machine's emitter sensor links.
 pub const MACHINE_EMIT: &str = "emit";
+/// Req/res: a command for one of the machine's actuator devices.
+pub const MACHINE_ACTUATE: &str = "actuate";
+/// Prefix of the per-device actuator streams, `actuators/<device>`.
+pub const MACHINE_ACTUATORS: &str = "actuators";
 
 /// Topics hosted by a machine's own agent, unique per machine so the
 /// host directory holds one owner per topic.
@@ -45,4 +49,9 @@ pub fn machine_topic(machine_id: &str, leaf: &str) -> String {
 /// Stream of one authored sensor link: `/machines/<machine_id>/sensors/<link>`.
 pub fn machine_sensor_topic(machine_id: &str, link: &str) -> String {
     format!("/machines/{machine_id}/{MACHINE_SENSORS}/{link}")
+}
+
+/// Stream of one actuator device: `/machines/<machine_id>/actuators/<device>`.
+pub fn machine_actuator_topic(machine_id: &str, device: &str) -> String {
+    format!("/machines/{machine_id}/{MACHINE_ACTUATORS}/{device}")
 }

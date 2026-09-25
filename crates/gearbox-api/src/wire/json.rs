@@ -69,6 +69,7 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(CameraFrame, camera_frame_json, camera_frame_from),
         desc!(Measurement, measurement_json, measurement_from),
         desc!(EmitRequest, emit_request_json, emit_request_from),
+        desc!(ActuatorCommand, actuator_command_json, actuator_command_from),
         desc!(AttachRequest, attach_request_json, attach_request_from),
         desc!(DetachRequest, detach_request_json, detach_request_from),
         desc!(AttachmentRecord, attachment_json, attachment_from),
@@ -816,6 +817,18 @@ fn measurement_from(v: &Value) -> Result<Measurement, String> {
                 "records", "data", "data_len",
             ],
         ),
+    })
+}
+
+fn actuator_command_json(c: &ActuatorCommand) -> Value {
+    json!({ "stamp_ms": c.stamp_ms, "props": props_json(&c.props) })
+}
+
+fn actuator_command_from(v: &Value) -> Result<ActuatorCommand, String> {
+    Ok(ActuatorCommand {
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        _pad: 0,
+        props: props_from(v, &["stamp_ms"]),
     })
 }
 

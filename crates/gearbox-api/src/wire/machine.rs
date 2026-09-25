@@ -446,18 +446,30 @@ pub mod measurement_kind {
     /// Per object `[id, pixels, left, top, right, bottom, x, y, z, sx, sy,
     /// sz]` in camera axes (-Z forward, +Y up).
     pub const RECOGNITION: u32 = 12;
+    /// Actuator: `[position, velocity, commanded velocity, force, brake
+    /// damping, brake force, mode, target]` of a motor or brake (rad or m;
+    /// force N·m or N; mode 0 position, 1 velocity, 2 force).
+    pub const MOTOR: u32 = 13;
+    /// Actuator: `[rotor speed rad/s, thrust N, torque N·m, advance m/s]`.
+    pub const PROPELLER: u32 = 14;
+    /// Actuator: `[travel m, speed m/s]` of a belt.
+    pub const BELT: u32 = 15;
+    /// Actuator: `[presence 0|1, locked 0|1, linked 0|1, tensile N, shear
+    /// N]`; the present or linked peer in props `peer`.
+    pub const CONNECTOR: u32 = 16;
 
     /// Values per record.
     pub fn width(kind: u32) -> usize {
         match kind {
             ACCELEROMETER | GYRO => 3,
             INERTIAL_UNIT => 7,
-            COMPASS => 4,
+            COMPASS | PROPELLER => 4,
             GPS => 10,
-            DISTANCE | POSITION => 2,
-            LIGHT | RADAR | RECEIVER => 5,
+            DISTANCE | POSITION | BELT => 2,
+            LIGHT | RADAR | RECEIVER | CONNECTOR => 5,
             TOUCH => 6,
             RECOGNITION => 12,
+            MOTOR => 8,
             _ => 0,
         }
     }
@@ -476,6 +488,10 @@ pub mod measurement_kind {
             TOUCH => "touch",
             RECEIVER => "receiver",
             RECOGNITION => "recognition",
+            MOTOR => "motor",
+            PROPELLER => "propeller",
+            BELT => "belt",
+            CONNECTOR => "connector",
             _ => "unknown",
         }
     }
@@ -517,6 +533,29 @@ impl EmitRequest {
 
     pub fn link(&self) -> String {
         self.props().get("link").unwrap_or_default()
+    }
+}
+
+/// A command for an actuator device of a machine, sent to
+/// `/machines/<machine_id>/actuate`. Props: `device` names it; the other
+/// props are its settings (`position`, `velocity`, `force`, `speed`,
+/// `acceleration`, `max_force`, `pid`, `brake`, `lock`).
+#[datapod::datapod(name = "gearbox.actuator_command.v1")]
+#[derive(Default)]
+pub struct ActuatorCommand {
+    pub stamp_ms: u32,
+    pub _pad: u32,
+    #[dp(bytes, section = "props")]
+    pub props: Vec<u8>,
+}
+
+impl ActuatorCommand {
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn device(&self) -> String {
+        self.props().get("device").unwrap_or_default()
     }
 }
 

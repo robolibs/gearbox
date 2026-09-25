@@ -172,6 +172,11 @@ pub struct MachineAgent {
     emit: Registered<ReqServer<Env, Env>>,
     /// Emitter packets received since the last drain.
     pub emits: Vec<EmitRequest>,
+    actuate: Registered<ReqServer<Env, Env>>,
+    /// Actuator commands received since the last drain.
+    pub actuations: Vec<ActuatorCommand>,
+    /// Actuator streams by device name, registered on first publish.
+    actuator_pubs: HashMap<String, Registered<Publisher<Env>>>,
 }
 
 impl MachineAgent {
@@ -198,6 +203,7 @@ impl MachineAgent {
         let machine_id = config.machine_id.clone();
         let t = |leaf: &str| machine_topic(&machine_id, leaf);
         let agent_emit = agent.req_server(&t(topics::MACHINE_EMIT))?;
+        let agent_actuate = agent.req_server(&t(topics::MACHINE_ACTUATE))?;
         Ok(Self {
             info: agent.req_server(&t(topics::MACHINE_INFO))?,
             claim: agent.req_server(&t(topics::MACHINE_CLAIM))?,
@@ -231,6 +237,9 @@ impl MachineAgent {
             commands: Vec::new(),
             emit: agent_emit,
             emits: Vec::new(),
+            actuate: agent_actuate,
+            actuations: Vec::new(),
+            actuator_pubs: HashMap::new(),
         })
     }
 
@@ -473,6 +482,16 @@ impl MachineAgent {
         });
         self.emits = emits;
 
+        let mut actuations = std::mem::take(&mut self.actuations);
+        serve_req(&mut self.actuate, |req: ActuatorCommand| {
+            if req.device().is_empty() {
+                return Status::err(code::REFUSED, "actuator command names no device");
+            }
+            actuations.push(req);
+            Status::ok()
+        });
+        self.actuations = actuations;
+
         if let Some(held) = &session {
             let idle = now.duration_since(held.last_cmd);
             if idle > AUTO_RELEASE {
@@ -591,6 +610,20 @@ impl MachineAgent {
     /// One reading of a generic sensor link.
     pub fn publish_sensor_measurement(&mut self, link: &str, reading: &Measurement) -> bool {
         self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(reading)).is_ok())
+    }
+
+    /// One reading of an actuator device on `actuators/<device>`.
+    pub fn publish_actuator_measurement(&mut self, device: &str, reading: &Measurement) -> bool {
+        if !self.actuator_pubs.contains_key(device) {
+            let topic = topics::machine_actuator_topic(&self.config.machine_id, device);
+            let Ok(publisher) = self.agent.publish(&topic) else {
+                return false;
+            };
+            self.actuator_pubs.insert(device.to_string(), publisher);
+        }
+        self.actuator_pubs
+            .get_mut(device)
             .is_some_and(|publisher| publisher.send(&pack(reading)).is_ok())
     }
 
