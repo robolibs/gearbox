@@ -152,18 +152,3 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.bevy_mikktspace]
 opt-level = 3
-
-# Molla GPU sensors (Engine::from_device, molla-sensors) come from the sibling
-# checkout until they are pushed; every Molla crate must resolve to that one
-# tree so the physics and sensor layers share their sim/storage types.
-[patch."https://github.com/bresilla/molla"]
-molla-core     = { path = "../../OUSD/molla/crates/molla-core" }
-molla-math     = { path = "../../OUSD/molla/crates/molla-math" }
-molla-sim      = { path = "../../OUSD/molla/crates/molla-sim" }
-molla-geometry = { path = "../../OUSD/molla/crates/molla-geometry" }
-molla-solvers  = { path = "../../OUSD/molla/crates/molla-solvers" }
-molla-vehicle  = { path = "../../OUSD/molla/crates/molla-vehicle" }
-molla-kernels  = { path = "../../OUSD/molla/crates/molla-kernels" }
-molla-compute  = { path = "../../OUSD/molla/crates/molla-compute" }
-molla-sensors  = { path = "../../OUSD/molla/crates/molla-sensors" }
-molla-storage  = { path = "../../OUSD/molla/crates/molla-storage" }
