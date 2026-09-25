@@ -110,6 +110,10 @@ impl MollaBackend {
         super::apply(devices.motors.remove(scene, handle));
     }
 
+    pub(super) fn device_has_motor(&self, joint: JointId) -> bool {
+        self.joint_handle(joint).is_ok_and(|handle| self.shared.world().devices.motors.contains(handle))
+    }
+
     pub(super) fn device_command_motor(&mut self, joint: JointId, c: DeviceCommand) -> Result<(), String> {
         let handle = self.joint_handle(joint)?;
         self.shared.world().devices.motors.command(handle, command(c)).map_err(error)

@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
 use gearbox_api::GearboxBus;
-use crate::physics::backend::{BodyId, JointAxis, JointMut, MotorModel};
+use crate::physics::backend::{BodyId, DeviceCommand, JointAxis, JointId, JointMut, MotorModel};
 use usd_bevy::UsdPrimRef;
 
 use crate::attach::Attachments;
@@ -420,22 +420,60 @@ fn resolve_joint(
     Some(JointRef { body0, body1, axis })
 }
 
-/// Apply `f` to the joint between two bodies; a constraint joint wins over
-/// a reduced-coordinate one when both exist.
-fn with_joint(physics: &mut PhysicsWorld, j: &JointRef, f: impl FnOnce(&mut dyn JointMut)) -> bool {
+/// What a service controller asks of its joint.
+#[derive(Clone, Copy, Debug)]
+enum Actuation {
+    /// Hold a position (rad or m).
+    Position(f64),
+    /// Run at a velocity (rad/s or m/s); `max_force` caps the runtime's own
+    /// servo, a motor device keeps its own limit.
+    Velocity { target: f64, max_force: f64 },
+    /// Brake damping (N·m·s/rad or N·s/m).
+    Brake(f64),
+}
+
+/// The joint between two bodies; a constraint joint wins over a
+/// reduced-coordinate one when both exist.
+fn joint_between(physics: &PhysicsWorld, j: &JointRef) -> Option<JointId> {
     let between = physics.joints_between(j.body0, j.body1);
-    let Some(id) = between
+    between
         .iter()
         .copied()
         .find(|id| !physics.joint_is_reduced(*id))
         .or(between.first().copied())
-    else {
+}
+
+/// Drives a joint through its motor device when it has one, otherwise with
+/// the runtime's own servo. Brakes go through the joint's brake channel,
+/// which the drive's motors leave alone.
+fn actuate(physics: &mut PhysicsWorld, j: &JointRef, act: Actuation) -> bool {
+    let Some(id) = joint_between(physics, j) else {
         return false;
     };
+    let device = physics.has_motor(id);
+    match act {
+        Actuation::Brake(damping) => physics.set_joint_brake(id, damping).is_ok(),
+        Actuation::Position(target) if device => physics.command_motor(id, DeviceCommand::Position(target)).is_ok(),
+        Actuation::Velocity { target, .. } if device => {
+            physics.command_motor(id, DeviceCommand::Velocity(target)).is_ok()
+        }
+        Actuation::Position(target) => servo(physics, id, j.axis, |g| {
+            g.set_motor_position(j.axis, target, POSITION_STIFFNESS, POSITION_DAMPING);
+            g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
+        }),
+        Actuation::Velocity { target, max_force } => servo(physics, id, j.axis, |g| {
+            g.set_motor_velocity(j.axis, target, VELOCITY_FACTOR);
+            g.set_motor_max_force(j.axis, max_force);
+        }),
+    }
+}
+
+/// The runtime's servo on a joint without a motor device.
+fn servo(physics: &mut PhysicsWorld, id: JointId, axis: JointAxis, f: impl FnOnce(&mut dyn JointMut)) -> bool {
     let Some(joint) = physics.joint_mut(id, true) else {
         return false;
     };
-    joint.set_motor_model(j.axis, MotorModel::Acceleration);
+    joint.set_motor_model(axis, MotorModel::Acceleration);
     f(joint);
     true
 }
@@ -444,7 +482,9 @@ const POSITION_STIFFNESS: f64 = 4_000.0;
 const POSITION_DAMPING: f64 = 400.0;
 const MOTOR_MAX_FORCE: f64 = 50_000.0;
 const VELOCITY_FACTOR: f64 = 200.0;
-const BRAKE_FACTOR: f64 = 400.0;
+/// Brake damping at full level when the joint's brake authors no
+/// `maxDamping` (N·m·s/rad).
+const BRAKE_DAMPING: f64 = 1.0e6;
 const DEFAULT_PTO_RPM: f64 = 540.0;
 const MAX_PTO_RPM: f64 = 1200.0;
 /// A PTO stub weighs a few kilograms; the hitch torque cap would throw the
@@ -576,15 +616,7 @@ fn apply_service_controllers(
                             .unwrap_or(0.0)
                             .clamp(0.0, 1.0);
                         let range = num(props, "range").unwrap_or(1.0);
-                        with_joint(&mut physics, &j, |g| {
-                            g.set_motor_position(
-                                j.axis,
-                                position * range,
-                                POSITION_STIFFNESS,
-                                POSITION_DAMPING,
-                            );
-                            g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
-                        })
+                        actuate(&mut physics, &j, Actuation::Position(position * range))
                     }
                     "builtin:joint_velocity" => {
                         let bound = bound_pto.as_deref() == Some(prim);
@@ -593,10 +625,8 @@ fn apply_service_controllers(
                             (None, true, Some(m)) => m.pto_rad_s(),
                             _ => 0.0,
                         };
-                        with_joint(&mut physics, &j, |g| {
-                            g.set_motor_velocity(j.axis, vel, VELOCITY_FACTOR);
-                            g.set_motor_max_force(j.axis, JOINT_VELOCITY_MAX_TORQUE);
-                        })
+                        let act = Actuation::Velocity { target: vel, max_force: JOINT_VELOCITY_MAX_TORQUE };
+                        actuate(&mut physics, &j, act)
                     }
                     "builtin:pto" => {
                         let rpm = num(props, "rpm")
@@ -608,10 +638,7 @@ fn apply_service_controllers(
                         } else {
                             0.0
                         };
-                        with_joint(&mut physics, &j, |g| {
-                            g.set_motor_velocity(j.axis, vel, VELOCITY_FACTOR);
-                            g.set_motor_max_force(j.axis, PTO_MAX_TORQUE);
-                        })
+                        actuate(&mut physics, &j, Actuation::Velocity { target: vel, max_force: PTO_MAX_TORQUE })
                     }
                     "builtin:hydraulic_valve" => {
                         let flow = num(props, "flow")
@@ -619,10 +646,8 @@ fn apply_service_controllers(
                             .unwrap_or(0.0)
                             .clamp(-1.0, 1.0);
                         let rate = num(props, "rate").unwrap_or(DEFAULT_VALVE_RATE);
-                        with_joint(&mut physics, &j, |g| {
-                            g.set_motor_velocity(j.axis, flow * rate, VELOCITY_FACTOR);
-                            g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
-                        })
+                        let act = Actuation::Velocity { target: flow * rate, max_force: MOTOR_MAX_FORCE };
+                        actuate(&mut physics, &j, act)
                     }
                     "builtin:brake" => {
                         // Uncoupled and uncommanded, a trailer holds itself
@@ -632,10 +657,8 @@ fn apply_service_controllers(
                             .or_else(|| num(props, "value"))
                             .unwrap_or(parked)
                             .clamp(0.0, 1.0);
-                        with_joint(&mut physics, &j, |g| {
-                            g.set_motor_velocity(j.axis, 0.0, level * BRAKE_FACTOR);
-                            g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE * level);
-                        })
+                        let full = crate::devices::brake_capacity(machine, prim).unwrap_or(BRAKE_DAMPING);
+                        actuate(&mut physics, &j, Actuation::Brake(level * full))
                     }
                     "builtin:trailer_steer" => {
                         let max = controller
@@ -651,15 +674,7 @@ fn apply_service_controllers(
                             .unwrap_or(0.0),
                         }
                         .clamp(-max, max);
-                        with_joint(&mut physics, &j, |g| {
-                            g.set_motor_position(
-                                j.axis,
-                                angle,
-                                POSITION_STIFFNESS,
-                                POSITION_DAMPING,
-                            );
-                            g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
-                        })
+                        actuate(&mut physics, &j, Actuation::Position(angle))
                     }
                     _ => true,
                 };
@@ -690,11 +705,7 @@ fn apply_service_controllers(
             && !controlled.contains(pto)
             && let Some(j) = resolve_joint(scene_root, pto, &joints, &parents, &physics)
         {
-            let vel = m.pto_rad_s();
-            with_joint(&mut physics, &j, |g| {
-                g.set_motor_velocity(j.axis, vel, VELOCITY_FACTOR);
-                g.set_motor_max_force(j.axis, PTO_MAX_TORQUE);
-            });
+            actuate(&mut physics, &j, Actuation::Velocity { target: m.pto_rad_s(), max_force: PTO_MAX_TORQUE });
         }
         for (n, valve_joint) in bound_valves.iter().enumerate() {
             if controlled.contains(valve_joint.as_str()) {
@@ -702,10 +713,8 @@ fn apply_service_controllers(
             }
             let flow = m.valves.get(n).copied().unwrap_or(0.0);
             if let Some(j) = resolve_joint(scene_root, valve_joint, &joints, &parents, &physics) {
-                with_joint(&mut physics, &j, |g| {
-                    g.set_motor_velocity(j.axis, flow * DEFAULT_VALVE_RATE, VELOCITY_FACTOR);
-                    g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
-                });
+                let act = Actuation::Velocity { target: flow * DEFAULT_VALVE_RATE, max_force: MOTOR_MAX_FORCE };
+                actuate(&mut physics, &j, act);
             }
         }
     }
@@ -945,5 +954,60 @@ fn feed_master_inputs(
             }
         }
         inputs.0.insert(slave.id.clone(), state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::backend::{BodyDesc, ColliderDesc, DVec3, DeviceLimits, JointDesc, JointKind, Pose, Shape};
+
+    /// An arm on a revolute joint to a fixed post, in zero gravity.
+    fn arm() -> (PhysicsWorld, JointRef, JointId) {
+        let mut world = PhysicsWorld::default();
+        world.set_gravity(DVec3::ZERO);
+        let mut body = |desc: BodyDesc, at: DVec3| {
+            let id = world.insert_body(desc.pose(Pose::from_translation(at)));
+            world.insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.1 }).density(1000.0).parent(id)).unwrap();
+            id
+        };
+        let (post, arm) = (body(BodyDesc::fixed(), DVec3::ZERO), body(BodyDesc::dynamic(), DVec3::X));
+        let desc = JointDesc::new(JointKind::Revolute { axis: DVec3::Y }, Pose::IDENTITY, Pose::from_translation(DVec3::NEG_X));
+        let joint = world.backend.insert_joint(post, arm, desc);
+        (world, JointRef { body0: post, body1: arm, axis: JointAxis::AngX }, joint)
+    }
+
+    #[test]
+    fn service_commands_go_to_the_joints_motor_device() {
+        let (mut world, j, joint) = arm();
+        let limits = DeviceLimits { max_velocity: 0.5, ..Default::default() };
+        world.insert_motor(joint, limits, 500.0).unwrap();
+        assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
+        world.step();
+        let motor = world.motor_output(joint).unwrap();
+        assert_eq!(motor.command, DeviceCommand::Position(0.3));
+        assert!((motor.commanded_velocity - 0.5).abs() < 1e-9, "{motor:?}");
+        for _ in 0..240 {
+            world.step();
+        }
+        assert!((world.motor_output(joint).unwrap().position - 0.3).abs() < 1e-3);
+        assert!(actuate(&mut world, &j, Actuation::Velocity { target: -0.2, max_force: 1.0 }));
+        world.step();
+        assert_eq!(world.motor_output(joint).unwrap().command, DeviceCommand::Velocity(-0.2));
+    }
+
+    #[test]
+    fn joints_without_a_device_keep_the_runtime_servo_and_brakes_use_damping() {
+        let (mut world, j, joint) = arm();
+        assert!(!world.has_motor(joint));
+        assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
+        for _ in 0..600 {
+            world.step();
+        }
+        let angle = world.joint(joint).unwrap().motor_position(JointAxis::AngX).unwrap();
+        assert!((angle - 0.3).abs() < 1e-2, "{angle}");
+        assert!(actuate(&mut world, &j, Actuation::Brake(250.0)));
+        world.step();
+        assert_eq!(world.motor_output(joint).unwrap().brake_damping, 250.0);
     }
 }

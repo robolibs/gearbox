@@ -1067,6 +1067,8 @@ pub trait PhysicsBackend: Send + Sync {
     /// A motor on a revolute or prismatic joint, holding its position.
     fn insert_motor(&mut self, joint: JointId, limits: DeviceLimits, max_force: f64) -> Result<(), String>;
     fn remove_motor(&mut self, joint: JointId);
+    /// Whether a motor device drives `joint`.
+    fn has_motor(&self, joint: JointId) -> bool;
     fn command_motor(&mut self, joint: JointId, command: DeviceCommand) -> Result<(), String>;
     fn configure_motor(&mut self, joint: JointId, setting: DeviceSetting) -> Result<(), String>;
     /// Brake damping on a revolute or prismatic joint; zero releases it.

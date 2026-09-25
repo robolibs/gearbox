@@ -370,7 +370,7 @@ pub fn discover_link_tree(
     let mut couplings: Vec<String> = Vec::new();
     let mut elements: Vec<String> = Vec::new();
     let mut joints: Vec<JointRecord> = Vec::new();
-    let mut prismatic: Vec<String> = Vec::new();
+    let mut sprung: Vec<String> = Vec::new();
     for prim in &inside {
         let schemas = stage.api_schemas(prim).unwrap_or_default();
         let path = prim.as_str().to_string();
@@ -394,8 +394,8 @@ pub fn discover_link_tree(
             elements.push(path.clone());
         }
         let ty = type_name(stage, prim).unwrap_or_default();
-        if ty == "PhysicsPrismaticJoint" {
-            prismatic.push(path.clone());
+        if ty == "PhysicsPrismaticJoint" || ty == "PhysicsRevoluteJoint" {
+            sprung.push(path.clone());
         }
         if ty.starts_with("Physics") && ty.ends_with("Joint") {
             joints.push(JointRecord {
@@ -415,13 +415,14 @@ pub fn discover_link_tree(
         ..Default::default()
     };
 
-    // Suspension joints are springs the runtime leaves alone; only a
-    // prismatic joint can be one.
+    // Suspension joints are springs and pivots the runtime leaves alone: a
+    // prismatic strut or a revolute axle or bogie.
     for joint in read_rel_targets(stage, machine_prim, "gearbox:machine:role:suspensionJoints") {
         let joint = rebase_asset_root_target(root, &joint);
-        if !prismatic.contains(&joint) {
-            tree.warnings
-                .push(format!("suspension joint {joint} is not a PhysicsPrismaticJoint"));
+        if !sprung.contains(&joint) {
+            tree.warnings.push(format!(
+                "suspension joint {joint} is not a PhysicsPrismaticJoint or PhysicsRevoluteJoint"
+            ));
         }
     }
 

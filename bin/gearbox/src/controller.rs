@@ -568,6 +568,9 @@ pub fn discover_machines_from_stage(
             ),
             controllers,
         });
+        let machine = machines.last_mut().expect("just pushed");
+        let owned = crate::devices::ownership_errors(machine);
+        machine.links.errors.extend(owned);
     }
 
     append_isaac_compat_machines(stage, &prims, &mut machines);

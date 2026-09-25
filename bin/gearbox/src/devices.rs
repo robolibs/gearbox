@@ -44,11 +44,10 @@ impl Plugin for DevicesPlugin {
 /// What a device prim authors.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeviceKind {
-    /// A joint's motor and/or brake: the motor's limits and available force,
-    /// the brake's initial damping.
+    /// A joint's motor and/or brake: the motor's limits and available force.
     Joint {
         motor: Option<(DeviceLimits, f64)>,
-        brake: Option<f64>,
+        brake: Option<BrakeSpec>,
     },
     Propeller {
         thrust: [f64; 2],
@@ -67,6 +66,14 @@ pub enum DeviceKind {
     /// Drag on the prim's body: `CdA` (m²) along the prim's axes, whose
     /// origin is the centre of pressure, in air of `density`.
     Drag { area: [f64; 3], density: f64 },
+}
+
+/// A joint brake's damping at spawn and at full application (N·m·s/rad or
+/// N·s/m); `builtin:brake` scales the full one by its level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrakeSpec {
+    pub damping: f64,
+    pub max_damping: Option<f64>,
 }
 
 /// An authored device of a machine.
@@ -142,7 +149,10 @@ pub fn discover(
                 motor: motor.then(|| {
                     (limits(stage, prim, "motor", 10.0), float("gearbox:motor:maxForce").unwrap_or(10.0).abs())
                 }),
-                brake: brake.then(|| float("gearbox:brake:damping").unwrap_or(0.0).max(0.0)),
+                brake: brake.then(|| BrakeSpec {
+                    damping: float("gearbox:brake:damping").unwrap_or(0.0).max(0.0),
+                    max_damping: float("gearbox:brake:maxDamping").filter(|d| *d > 0.0),
+                }),
             }
         } else if has_namespace(&names, "propeller") {
             let pair = |key: &str| {
@@ -231,6 +241,61 @@ pub fn discover(
         devices.push(DeviceSpec { name, prim: prim.as_str().to_string(), kind });
     }
     (devices, errors)
+}
+
+/// Controllers that own the wheel and steering joints they drive.
+const DRIVE_TYPES: [&str; 3] = ["builtin:ackermann_cmd_vel", "builtin:diff_drive_cmd_vel", "builtin:tracked_cmd_vel"];
+
+/// A motor device replaces its joint's drive every step, so one on a joint
+/// the drive controller or the suspension owns would silently take it over.
+pub fn ownership_errors(machine: &crate::controller::MachineInstanceSpec) -> Vec<String> {
+    let mut owned: HashMap<&str, &str> =
+        machine.suspension_joints.iter().map(|j| (j.as_str(), "the suspension")).collect();
+    for drive in machine
+        .controllers
+        .iter()
+        .filter(|c| c.enabled && DRIVE_TYPES.contains(&c.controller_type.as_str()))
+    {
+        let singles = [
+            &drive.steer_left_joint,
+            &drive.steer_right_joint,
+            &drive.front_left_wheel_joint,
+            &drive.front_right_wheel_joint,
+            &drive.rear_left_wheel_joint,
+            &drive.rear_right_wheel_joint,
+        ];
+        let joints = machine
+            .powered_wheel_joints
+            .iter()
+            .chain(&machine.passive_wheel_joints)
+            .chain(&machine.steering_joints)
+            .chain(&drive.drive_wheel_joints)
+            .chain(&drive.passive_wheel_joints)
+            .chain(&drive.wheel_joints)
+            .chain(&drive.steer_joints)
+            .chain(singles.into_iter().flatten());
+        for joint in joints {
+            owned.entry(joint.as_str()).or_insert("the drive controller");
+        }
+    }
+    machine
+        .devices
+        .iter()
+        .filter(|d| matches!(d.kind, DeviceKind::Joint { motor: Some(_), .. }))
+        .filter_map(|d| {
+            owned
+                .get(d.prim.as_str())
+                .map(|owner| format!("{}: motor device `{}` would take this joint from {owner}", d.prim, d.name))
+        })
+        .collect()
+}
+
+/// Full-application damping of the brake device on `joint`, if authored.
+pub fn brake_capacity(machine: &crate::controller::MachineInstanceSpec, joint: &str) -> Option<f64> {
+    machine.devices.iter().find_map(|d| match d.kind {
+        DeviceKind::Joint { brake: Some(b), .. } if d.prim == joint => b.max_damping,
+        _ => None,
+    })
 }
 
 // ── Runtime ────────────────────────────────────────────────────────────────
@@ -336,8 +401,8 @@ fn register_at(
             if let Some((limits, max_force)) = motor {
                 physics.insert_motor(joint, *limits, *max_force)?;
             }
-            if let Some(damping) = brake {
-                physics.set_joint_brake(joint, *damping)?;
+            if let Some(b) = brake {
+                physics.set_joint_brake(joint, b.damping)?;
             }
             Ok(Some(Live::Joint(joint)))
         }
@@ -825,6 +890,7 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
             float gearbox:motor:minPosition = -0.25
             float gearbox:motor:maxPosition = 1.25
             float gearbox:brake:damping = 300
+            float gearbox:brake:maxDamping = 9000
         }
         def PhysicsRevoluteJoint "hinge"
         {
@@ -848,9 +914,10 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
         let DeviceKind::Joint { motor: Some((limits, max_force)), brake: Some(brake) } = by("boom_lift") else {
             panic!("{:?}", by("boom_lift"));
         };
-        assert_eq!((max_force, brake, limits.max_velocity), (5000.0, 300.0, 0.5));
+        assert_eq!((max_force, brake.damping, brake.max_damping, limits.max_velocity), (5000.0, 300.0, Some(9000.0), 0.5));
         assert_eq!((limits.pid, limits.position_limits), ([4.0, 0.25, 0.0], Some([-0.25, 1.25])));
-        assert!(matches!(by("hinge"), DeviceKind::Joint { motor: None, brake: Some(0.0) }));
+        let hinge = BrakeSpec { damping: 0.0, max_damping: None };
+        assert_eq!(by("hinge"), DeviceKind::Joint { motor: None, brake: Some(hinge) });
         let DeviceKind::Propeller { thrust, torque, limits, .. } = by("fan") else { panic!() };
         assert_eq!((thrust, torque, limits.max_velocity), ([0.2, 0.01], [0.02, 0.0], 150.0));
         let DeviceKind::Belt { direction, limits } = by("roof") else { panic!() };
@@ -863,6 +930,55 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
         assert_eq!((limits.disturbance_time, limits.max_speed), (0.25, CopterLimits::default().max_speed));
         assert_eq!(by("drag"), DeviceKind::Drag { area: [0.5, 0.25, 1.0], density: AIR_DENSITY });
         assert_eq!(machine.devices.len(), 7);
+    }
+
+    #[test]
+    fn a_motor_on_a_drive_or_suspension_joint_rejects_the_machine() {
+        let usda = r#"#usda 1.0
+(
+    defaultPrim = "robot"
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+
+def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"])
+{
+    token gearbox:machine:kind = "test"
+    rel gearbox:machine:body = </robot/chassis>
+    rel gearbox:machine:role:poweredWheelJoints = [</robot/Joints/roll>]
+    rel gearbox:machine:role:suspensionJoints = [</robot/Joints/strut>]
+    token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"
+    def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
+    def Xform "carrier" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
+    def Xform "wheel" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
+    def Scope "Joints"
+    {
+        def PhysicsPrismaticJoint "strut"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/carrier>
+            float gearbox:motor:maxForce = 100
+        }
+        def PhysicsRevoluteJoint "roll"
+        {
+            rel physics:body0 = </robot/carrier>
+            rel physics:body1 = </robot/wheel>
+            float gearbox:motor:maxForce = 100
+            float gearbox:brake:maxDamping = 500
+        }
+    }
+}
+"#;
+        let path = std::env::temp_dir().join(format!("gearbox-owned-{}.usda", std::process::id()));
+        std::fs::write(&path, usda).unwrap();
+        let machines = crate::controller::discover_machines_from_usd(&path).expect("scan");
+        let _ = std::fs::remove_file(&path);
+        let machine = &machines[0];
+        let owned: Vec<&String> = machine.links.errors.iter().filter(|e| e.contains("would take this joint")).collect();
+        assert_eq!(owned.len(), 2, "{:?}", machine.links.errors);
+        assert!(owned.iter().any(|e| e.contains("strut") && e.contains("the suspension")));
+        assert!(owned.iter().any(|e| e.contains("roll") && e.contains("the drive controller")));
+        assert_eq!(brake_capacity(machine, "/robot/Joints/roll"), Some(500.0));
     }
 
     fn body(world: &mut PhysicsWorld, desc: BodyDesc, at: DVec3) -> crate::physics::backend::BodyId {

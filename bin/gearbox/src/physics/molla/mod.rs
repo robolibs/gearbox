@@ -105,6 +105,9 @@ impl PhysicsBackend for MollaBackend {
     fn remove_motor(&mut self, joint: JointId) {
         self.device_remove_motor(joint);
     }
+    fn has_motor(&self, joint: JointId) -> bool {
+        self.device_has_motor(joint)
+    }
     fn command_motor(&mut self, joint: JointId, command: DeviceCommand) -> Result<(), String> {
         self.device_command_motor(joint, command)
     }
