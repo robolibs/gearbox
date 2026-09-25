@@ -72,3 +72,32 @@ fn sensor_types_reflect_generically_with_no_hand_written_desc() {
     assert_eq!(wheels[0]["angle_rad"], 1.5);
     assert_eq!(wheels[1]["velocity_rad_s"], 0.42);
 }
+
+#[test]
+fn measurements_and_emit_requests_round_trip_through_json() {
+    use gearbox_api::{EmitRequest, Measurement, Props, measurement_kind};
+    let radar = Measurement {
+        sim_time_s: 2.5,
+        link_index: 4,
+        kind: measurement_kind::RADAR,
+        stamp_ms: 10,
+        sample: 7,
+        count: 2,
+        values: vec![3.0, 0.1, -0.2, 0.0, -60.0, f64::INFINITY, 0.0, 0.0, 1.5, -70.0],
+        props: Props::from_pairs(&[("name", "radar_link")]).into_bytes(),
+        ..Default::default()
+    };
+    let value = env_to_json(&pack(&radar)).expect("measurement to json");
+    assert_eq!(value["kind"], "radar");
+    assert_eq!(value["records"][0][0], 3.0);
+    assert!(value["records"][1][0].is_null());
+    let back = env_from_json("gearbox.measurement.v1", &value).expect("measurement from json");
+    let back: Measurement = gearbox_api::unpack(back.type_hash(), back.wire()).expect("decode");
+    assert_eq!((back.kind, back.count, back.sample, back.name()), (radar.kind, 2, 7, "radar_link".into()));
+    assert!(back.values[5].is_infinite() && back.values[9] == -70.0);
+
+    let emit = env_from_json("gearbox.emit_request.v1", &json!({ "data": "hello", "link": "emitter_link" }))
+        .expect("emit from json");
+    let emit: EmitRequest = gearbox_api::unpack(emit.type_hash(), emit.wire()).expect("decode");
+    assert_eq!((emit.link().as_str(), emit.data.as_slice()), ("emitter_link", &b"hello"[..]));
+}

@@ -33,6 +33,8 @@ pub const MACHINE_TOOLS_ATTACH: &str = "tools/attach";
 pub const MACHINE_TOOLS_DETACH: &str = "tools/detach";
 /// Prefix of the per-link simulated sensor streams, `sensors/<link>`.
 pub const MACHINE_SENSORS: &str = "sensors";
+/// Req/res: a packet for one of the machine's emitter sensor links.
+pub const MACHINE_EMIT: &str = "emit";
 
 /// Topics hosted by a machine's own agent, unique per machine so the
 /// host directory holds one owner per topic.

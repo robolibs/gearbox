@@ -169,6 +169,9 @@ pub struct MachineAgent {
     twist: Twist,
     /// Controller commands received since the last drain.
     pub commands: Vec<ControllerCommand>,
+    emit: Registered<ReqServer<Env, Env>>,
+    /// Emitter packets received since the last drain.
+    pub emits: Vec<EmitRequest>,
 }
 
 impl MachineAgent {
@@ -194,6 +197,7 @@ impl MachineAgent {
         let agent = builder.build()?;
         let machine_id = config.machine_id.clone();
         let t = |leaf: &str| machine_topic(&machine_id, leaf);
+        let agent_emit = agent.req_server(&t(topics::MACHINE_EMIT))?;
         Ok(Self {
             info: agent.req_server(&t(topics::MACHINE_INFO))?,
             claim: agent.req_server(&t(topics::MACHINE_CLAIM))?,
@@ -225,6 +229,8 @@ impl MachineAgent {
             next_session: 1,
             twist: Twist::zero(),
             commands: Vec::new(),
+            emit: agent_emit,
+            emits: Vec::new(),
         })
     }
 
@@ -457,6 +463,16 @@ impl MachineAgent {
         self.commands = commands;
         self.tf_enabled = tf_enabled;
 
+        let mut emits = std::mem::take(&mut self.emits);
+        serve_req(&mut self.emit, |req: EmitRequest| {
+            if req.link().is_empty() {
+                return Status::err(code::REFUSED, "emit request names no link");
+            }
+            emits.push(req);
+            Status::ok()
+        });
+        self.emits = emits;
+
         if let Some(held) = &session {
             let idle = now.duration_since(held.last_cmd);
             if idle > AUTO_RELEASE {
@@ -570,6 +586,12 @@ impl MachineAgent {
     pub fn publish_sensor_camera(&mut self, link: &str, frame: &CameraFrame) -> bool {
         self.sensor_pub(link)
             .is_some_and(|publisher| publisher.send(&pack(frame)).is_ok())
+    }
+
+    /// One reading of a generic sensor link.
+    pub fn publish_sensor_measurement(&mut self, link: &str, reading: &Measurement) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(reading)).is_ok())
     }
 
     /// Links whose sensor stream has been registered so far.

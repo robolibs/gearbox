@@ -119,7 +119,7 @@ const HOST_TOPICS: [(&str, &str, &str, &str); 12] = [
     ),
 ];
 
-const MACHINE_TOPICS: [(&str, &str, &str, &str); 11] = [
+const MACHINE_TOPICS: [(&str, &str, &str, &str); 13] = [
     (
         topics::MACHINE_INFO,
         "req/res",
@@ -175,6 +175,18 @@ const MACHINE_TOPICS: [(&str, &str, &str, &str); 11] = [
         "pub/sub",
         "gearbox.camera_frame.v1",
         "",
+    ),
+    (
+        "sensors/<other sensor link>",
+        "pub/sub",
+        "gearbox.measurement.v1",
+        "",
+    ),
+    (
+        topics::MACHINE_EMIT,
+        "req/res",
+        "gearbox.emit_request.v1",
+        "gearbox.status.v1",
     ),
 ];
 

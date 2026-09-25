@@ -390,6 +390,136 @@ impl CameraFrame {
     }
 }
 
+/// A reading of a generic sensor link (the Webots sensor set beyond IMU,
+/// LiDAR and camera), streamed on `/machines/<machine_id>/sensors/<link>`.
+/// `values` holds `count` records laid out per [`measurement_kind`]; `data`
+/// carries a receiver's packet; `props` names the link (`name`) and, per
+/// kind, the emitter (`from`) or recognised objects (`names`, one per line).
+#[datapod::datapod(name = "gearbox.measurement.v1")]
+#[derive(Default)]
+pub struct Measurement {
+    pub sim_time_s: f64,
+    pub link_index: u32,
+    pub kind: u32,
+    pub stamp_ms: u32,
+    pub sample: u32,
+    pub count: u32,
+    pub _pad: u32,
+    #[dp(bytes, section = "values")]
+    pub values: Vec<f64>,
+    #[dp(bytes, section = "data")]
+    pub data: Vec<u8>,
+    #[dp(bytes, section = "props")]
+    pub props: Vec<u8>,
+}
+
+/// [`Measurement`] kinds and the layout of one record of `values`. Vectors
+/// are in the link's axes (+X forward, +Z up) unless noted.
+pub mod measurement_kind {
+    /// `[ax, ay, az]` specific force (m/s²).
+    pub const ACCELEROMETER: u32 = 1;
+    /// `[wx, wy, wz]` angular velocity (rad/s).
+    pub const GYRO: u32 = 2;
+    /// `[roll, pitch, yaw, qx, qy, qz, qw]`: attitude in east-north-up (rad;
+    /// yaw zero facing east, counter-clockwise positive).
+    pub const INERTIAL_UNIT: u32 = 3;
+    /// `[nx, ny, nz, heading]`: north in link axes, and the clockwise angle
+    /// from north to the link's +X (rad).
+    pub const COMPASS: u32 = 4;
+    /// `[latitude°, longitude°, altitude m, east, north, up, speed,
+    /// v_east, v_north, v_up]` (m, m/s; east-north-up from the site origin).
+    pub const GPS: u32 = 5;
+    /// `[distance m (infinite for none), value]`.
+    pub const DISTANCE: u32 = 6;
+    /// `[irradiance, direct, sky (W/m²), visible sources, value]`.
+    pub const LIGHT: u32 = 7;
+    /// `[position (rad or m), velocity]` of the link's joint.
+    pub const POSITION: u32 = 8;
+    /// Per target `[distance m, azimuth, elevation (rad), radial speed m/s,
+    /// received power dBm]`, nearest first.
+    pub const RADAR: u32 = 9;
+    /// `[touching 0|1, contacts, force N, fx, fy, fz]`.
+    pub const TOUCH: u32 = 10;
+    /// One packet `[channel, signal strength, dx, dy, dz]` (direction to the
+    /// emitter); payload in `data`, emitter link in props `from`.
+    pub const RECEIVER: u32 = 11;
+    /// Per object `[id, pixels, left, top, right, bottom, x, y, z, sx, sy,
+    /// sz]` in camera axes (-Z forward, +Y up).
+    pub const RECOGNITION: u32 = 12;
+
+    /// Values per record.
+    pub fn width(kind: u32) -> usize {
+        match kind {
+            ACCELEROMETER | GYRO => 3,
+            INERTIAL_UNIT => 7,
+            COMPASS => 4,
+            GPS => 10,
+            DISTANCE | POSITION => 2,
+            LIGHT | RADAR | RECEIVER => 5,
+            TOUCH => 6,
+            RECOGNITION => 12,
+            _ => 0,
+        }
+    }
+
+    pub fn name(kind: u32) -> &'static str {
+        match kind {
+            ACCELEROMETER => "accelerometer",
+            GYRO => "gyro",
+            INERTIAL_UNIT => "inertial_unit",
+            COMPASS => "compass",
+            GPS => "gps",
+            DISTANCE => "distance",
+            LIGHT => "light",
+            POSITION => "position",
+            RADAR => "radar",
+            TOUCH => "touch",
+            RECEIVER => "receiver",
+            RECOGNITION => "recognition",
+            _ => "unknown",
+        }
+    }
+}
+
+impl Measurement {
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn name(&self) -> String {
+        self.props().get("name").unwrap_or_default()
+    }
+
+    /// The `count` records of `values`.
+    pub fn records(&self) -> impl Iterator<Item = &[f64]> {
+        let width = measurement_kind::width(self.kind).max(1);
+        self.values.chunks_exact(width).take(self.count as usize)
+    }
+}
+
+/// A packet for an emitter link of a machine, sent to
+/// `/machines/<machine_id>/emit`. Props: `link` names the emitter link.
+#[datapod::datapod(name = "gearbox.emit_request.v1")]
+#[derive(Default)]
+pub struct EmitRequest {
+    pub stamp_ms: u32,
+    pub _pad: u32,
+    #[dp(bytes, section = "data")]
+    pub data: Vec<u8>,
+    #[dp(bytes, section = "props")]
+    pub props: Vec<u8>,
+}
+
+impl EmitRequest {
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+
+    pub fn link(&self) -> String {
+        self.props().get("link").unwrap_or_default()
+    }
+}
+
 impl LidarScan {
     pub fn props(&self) -> Props {
         Props::from_bytes(&self.props)

@@ -14,7 +14,8 @@ pub use host::{
 };
 pub use machine::{
     AttachRequest, AttachmentRecord, ClaimRequest, ClaimResponse, ControllerCommand, DetachRequest,
-    CAMERA_CHUNK_BYTES, CAMERA_COLOR, CAMERA_DEPTH, CameraFrame, LIDAR_CHUNK_PULSES, LidarScan,
+    CAMERA_CHUNK_BYTES, CAMERA_COLOR, CAMERA_DEPTH, CameraFrame, EmitRequest, LIDAR_CHUNK_PULSES,
+    LidarScan, Measurement, measurement_kind,
     LinkPose, LinkRecord, MachineInfo, MachineState, SessionInfo,
     SessionRef, TwistCmd,
 };

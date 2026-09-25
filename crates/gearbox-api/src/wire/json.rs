@@ -67,6 +67,8 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(LinkPose, link_pose_json, link_pose_from),
         desc!(LidarScan, lidar_scan_json, lidar_scan_from),
         desc!(CameraFrame, camera_frame_json, camera_frame_from),
+        desc!(Measurement, measurement_json, measurement_from),
+        desc!(EmitRequest, emit_request_json, emit_request_from),
         desc!(AttachRequest, attach_request_json, attach_request_from),
         desc!(DetachRequest, detach_request_json, detach_request_from),
         desc!(AttachmentRecord, attachment_json, attachment_from),
@@ -759,6 +761,83 @@ fn lidar_scan_from(v: &Value) -> Result<LidarScan, String> {
         .unwrap_or_default();
     scan.set_points(&points);
     Ok(scan)
+}
+
+/// Non-finite values (e.g. an infinite distance for no echo) become null.
+fn finite_or_null(value: f64) -> Value {
+    if value.is_finite() {
+        json!(value)
+    } else {
+        Value::Null
+    }
+}
+
+fn measurement_json(m: &Measurement) -> Value {
+    let records: Vec<Value> = m
+        .records()
+        .map(|r| Value::Array(r.iter().copied().map(finite_or_null).collect()))
+        .collect();
+    json!({
+        "kind": measurement_kind::name(m.kind), "kind_id": m.kind,
+        "link_index": m.link_index, "stamp_ms": m.stamp_ms, "sample": m.sample,
+        "sim_time_s": m.sim_time_s, "count": m.count, "records": records,
+        "data": String::from_utf8_lossy(&m.data), "data_len": m.data.len(),
+        "props": props_json(&m.props),
+    })
+}
+
+fn measurement_from(v: &Value) -> Result<Measurement, String> {
+    let records = v.get("records").and_then(Value::as_array);
+    let values: Vec<f64> = records
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        .flatten()
+        .map(|x| x.as_f64().unwrap_or(f64::INFINITY))
+        .collect();
+    Ok(Measurement {
+        sim_time_s: num(v, "sim_time_s"),
+        link_index: uint(v, "link_index") as u32,
+        kind: uint(v, "kind_id") as u32,
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        sample: uint(v, "sample") as u32,
+        count: records.map_or(0, Vec::len) as u32,
+        _pad: 0,
+        values,
+        data: v
+            .get("data")
+            .and_then(Value::as_str)
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default(),
+        props: props_from(
+            v,
+            &[
+                "kind", "kind_id", "link_index", "stamp_ms", "sample", "sim_time_s", "count",
+                "records", "data", "data_len",
+            ],
+        ),
+    })
+}
+
+fn emit_request_json(e: &EmitRequest) -> Value {
+    json!({
+        "stamp_ms": e.stamp_ms,
+        "data": String::from_utf8_lossy(&e.data),
+        "props": props_json(&e.props),
+    })
+}
+
+fn emit_request_from(v: &Value) -> Result<EmitRequest, String> {
+    Ok(EmitRequest {
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        _pad: 0,
+        data: v
+            .get("data")
+            .and_then(Value::as_str)
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default(),
+        props: props_from(v, &["stamp_ms", "data"]),
+    })
 }
 
 fn camera_frame_json(f: &CameraFrame) -> Value {
