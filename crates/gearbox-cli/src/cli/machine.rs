@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use clap::{Args as ClapArgs, Subcommand};
 use gearbox_api::wire::json as wire_json;
 use gearbox_api::{
-    ClaimResponse, ControllerCommand, MachineClient, MachineInfo, MachineState, Props, code,
-    next_sample, pack,
+    ClaimResponse, ControllerCommand, MachineClient, MachineInfo, MachineState, Props, TwistCmd,
+    code, next_sample, pack,
 };
 use serde_json::json;
 
@@ -51,11 +51,17 @@ enum Cmd {
     /// Drive with a constant twist for a while, then stop
     Move {
         machine: Option<String>,
-        /// Forward speed in m/s (negative reverses)
-        #[arg(long, default_value_t = 1.0)]
-        forward: f64,
+        /// Forward speed in m/s (negative reverses); 1 unless --left or --up is given
+        #[arg(long, allow_hyphen_values = true)]
+        forward: Option<f64>,
+        /// Sideways speed in m/s, positive to the left (flying machines)
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        left: f64,
+        /// Climb rate in m/s, negative descends (flying machines)
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        up: f64,
         /// Yaw rate in rad/s (positive turns left)
-        #[arg(long, default_value_t = 0.0)]
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         turn: f64,
         /// Duration such as 3s, 500ms, 1m
         #[arg(long = "for", default_value = "3s")]
@@ -203,11 +209,16 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Move {
             machine,
             forward,
+            left,
+            up,
             turn,
             duration,
             hold,
             take,
-        } => move_for(ctx, machine, forward, turn, &duration, hold, take),
+        } => {
+            let forward = forward.unwrap_or(if left == 0.0 && up == 0.0 { 1.0 } else { 0.0 });
+            move_for(ctx, machine, [forward, left, up], turn, &duration, hold, take)
+        }
         Cmd::Stop { machine, take } => stop(ctx, machine, take),
         Cmd::Drive {
             machine,
@@ -515,7 +526,7 @@ fn claim(ctx: &Ctx, mc: &MachineClient<'_>, machine_id: &str, take: bool) -> Res
 fn move_for(
     ctx: &Ctx,
     machine: Option<String>,
-    forward: f64,
+    [forward, left, up]: [f64; 3],
     turn: f64,
     duration: &str,
     hold: bool,
@@ -535,7 +546,8 @@ fn move_for(
     while (hold || Instant::now() < deadline)
         && !stop_flag.load(std::sync::atomic::Ordering::Relaxed)
     {
-        check(mc.cmd_vel(session, forward, turn)?, "cmd_vel")?;
+        let twist = TwistCmd::with_lateral(session, forward, left, up, turn);
+        check(mc.cmd_twist(&twist)?, "cmd_vel")?;
         if let Some(sub) = sub.as_mut()
             && let Ok(Some(s)) = next_sample::<MachineState>(sub, Duration::from_millis(5))
         {
@@ -560,13 +572,13 @@ fn move_for(
     ctx.done(
         &machine_id,
         &format!(
-            "drove `{machine_id}` forward {forward} m/s turn {turn} rad/s for {:.1}s; now at ({:.2}, {:.2}, {:.2}); released",
+            "drove `{machine_id}` forward {forward} left {left} up {up} m/s turn {turn} rad/s for {:.1}s; now at ({:.2}, {:.2}, {:.2}); released",
             dur.as_secs_f64(),
             pos[0],
             pos[1],
             pos[2]
         ),
-        || json!({ "machine_id": machine_id, "forward": forward, "turn": turn, "seconds": dur.as_secs_f64(), "x": pos[0], "y": pos[1], "z": pos[2] }),
+        || json!({ "machine_id": machine_id, "forward": forward, "left": left, "up": up, "turn": turn, "seconds": dur.as_secs_f64(), "x": pos[0], "y": pos[1], "z": pos[2] }),
     );
     Ok(())
 }
