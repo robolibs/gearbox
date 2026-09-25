@@ -213,6 +213,9 @@ impl JointMut for JointAccess {
             }),
         ));
     }
+    fn set_rigid(&mut self) {
+        apply(self.shared.world().scene.set_joint_softness(self.handle, None));
+    }
     fn set_contacts_enabled(&mut self, enabled: bool) {
         let mut world = self.shared.world();
         let mut settings = world

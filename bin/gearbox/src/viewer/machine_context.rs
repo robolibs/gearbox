@@ -225,7 +225,7 @@ fn publish_cards(
         }) {
             let (master, slave) = (&cards.0[hitch.machine], &cards.0[coupler.machine]);
             let gap = hitch.position.distance(coupler.position) as f64;
-            if gap > 3.0
+            if gap > crate::attach::COUPLING_REACH_M
                 || attachments.0.iter().any(|a| {
                     a.slave_id == slave.machine_id || (a.master_id == master.machine_id && a.hitch == hitch.name)
                 })

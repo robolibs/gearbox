@@ -3,7 +3,7 @@
 //! master's agent answers the requests, the slave's agent refuses commands
 //! while attached, and the master's `/links` grows the slave's tree.
 
-use crate::physics::PhysicsWorld;
+use crate::physics::{HitchHold, PhysicsWorld};
 use bevy::prelude::*;
 use gearbox_api::{
     AttachRequest, DetachRequest, GearboxBus, LinkDesc, SceneEvent, Status, ToolDesc, code,
@@ -23,6 +23,14 @@ use crate::links::{CouplingSide, LinkSpec, LinkTree};
 /// Without teleport the coupler must already be this close to the hitch.
 pub(crate) const SNAP_DISTANCE_M: f64 = 0.5;
 pub(crate) const SNAP_ANGLE_RAD: f64 = 30.0_f64.to_radians();
+/// A coupler this close to a hitch of its type is offered for connecting,
+/// and the hitch shows its `near` variant.
+pub(crate) const COUPLING_REACH_M: f64 = 3.0;
+/// A hitch in its `near` variant goes back to `far` only beyond this.
+const COUPLING_LEAVE_M: f64 = 3.5;
+/// The top link closes a loop, so it stays compliant; stiff enough that
+/// carrying an implement does not stretch it by more than millimetres.
+const TOP_LINK_HZ: f64 = 120.0;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum LocalAttachmentAction {
@@ -59,6 +67,9 @@ pub struct Attachment {
     pub coupler: String,
     pub kind: String,
     pub joint: HitchJoint,
+    /// The top link from the master's top-link pin to the implement's upper
+    /// hitch point, closing the three-point linkage.
+    pub top_link: Option<HitchJoint>,
     pub slave_mass_kg: f64,
     pub controlled: bool,
     /// Slave requests the master does not grant (`TOOLS_SPEC.md` §5.3).
@@ -93,7 +104,74 @@ impl Plugin for AttachPlugin {
         app.init_resource::<Attachments>()
             .init_resource::<LocalAttachments>()
             .init_resource::<PendingStaticAttachments>()
-            .add_systems(Update, serve_attachments);
+            .add_systems(Update, (serve_attachments, select_hitch_variants));
+    }
+}
+
+/// Each hitch with a variant shows `near` while it holds a coupler, or while a
+/// free coupler of its type on another machine is within reach; `far`
+/// otherwise.
+fn select_hitch_variants(
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    attachments: Res<Attachments>,
+    prims: Query<(Entity, &'static UsdPrimRef)>,
+    parents: Query<&'static ChildOf>,
+    transforms: Query<&'static GlobalTransform>,
+    instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
+    mut overrides: Query<&mut usd_bevy::instance::UsdInstanceOverrides>,
+    swapping: Query<(), With<crate::physics::VariantSwapRequested>>,
+    mut commands: Commands,
+) {
+    let Some(instances) = instances else { return };
+    let scene = Scene {
+        inventory: &inventory,
+        keys: &keys,
+        prims: &prims,
+        parents: &parents,
+        transforms: &transforms,
+    };
+    let mut couplers: Vec<(&str, &str, DVec3)> = Vec::new();
+    for id in keys.0.keys() {
+        if attachments.0.iter().any(|a| &a.slave_id == id) {
+            continue;
+        }
+        let Some(machine) = scene.machine(id) else { continue };
+        for (link, coupling) in machine.links.couplings() {
+            if coupling.side == CouplingSide::Coupler
+                && let Some(at) = scene.frame(machine, &link.prim_path)
+            {
+                couplers.push((id, &coupling.kind, at.translation));
+            }
+        }
+    }
+    for (id, key) in &keys.0 {
+        let Some(machine) = scene.machine(id) else { continue };
+        if swapping.contains(key.scene_root) {
+            continue;
+        }
+        let (Some(stage), Ok(path)) = (instances.stage(key.scene_root), openusd::sdf::path(&machine.prim_path)) else {
+            continue;
+        };
+        for (link, hitch) in machine.links.couplings() {
+            let Some(variant) = hitch.variant.as_ref() else { continue };
+            let Some(at) = scene.frame(machine, &link.prim_path) else { continue };
+            let current = usd_bevy::read::variants::variant_selection(stage, &path, &variant.set);
+            let reach = if current.as_deref() == Some(&variant.near) { COUPLING_LEAVE_M } else { COUPLING_REACH_M };
+            let near = attachments.0.iter().any(|a| &a.master_id == id && a.hitch == hitch.name)
+                || couplers.iter().any(|(owner, kind, p)| {
+                    owner != id && *kind == hitch.kind && p.distance(at.translation) <= reach
+                });
+            let wanted = if near { &variant.near } else { &variant.far };
+            if current.as_ref() == Some(wanted) {
+                continue;
+            }
+            let Ok(mut o) = overrides.get_mut(key.scene_root) else { continue };
+            info!("gearbox-attach: `{id}` hitch {} selects {} {wanted}", hitch.name, variant.set);
+            o.variants.retain(|(p, s, _)| !(p == &machine.prim_path && s == &variant.set));
+            o.variants.push((machine.prim_path.clone(), variant.set.clone(), wanted.clone()));
+            commands.entity(key.scene_root).insert(crate::physics::VariantSwapRequested);
+        }
     }
 }
 
@@ -141,6 +219,25 @@ impl Frame {
     }
 }
 
+/// The rigid body a prim entity rides on (its own or the nearest
+/// ancestor's) and the prim's position in that body's frame.
+pub(crate) fn pin(
+    entity: Entity,
+    parents: &Query<&'static ChildOf>,
+    transforms: &Query<&'static GlobalTransform>,
+    physics: &PhysicsWorld,
+) -> Option<(BodyId, DVec3)> {
+    let prim_world = Frame::from_global(transforms.get(entity).ok()?);
+    let mut current = entity;
+    loop {
+        if let Some(&body) = physics.entity_to_body.get(&current) {
+            let body_world = Frame::from_global(transforms.get(current).ok()?);
+            return Some((body, body_world.inverse().then(&prim_world).translation));
+        }
+        current = parents.get(current).ok()?.parent();
+    }
+}
+
 struct Scene<'w, 's> {
     inventory: &'w ControllerInventory,
     keys: &'w MachineAgentKeys,
@@ -177,6 +274,15 @@ impl Scene<'_, '_> {
         physics.entity_to_body.get(&entity).copied()
     }
 
+    fn pin(
+        &self,
+        machine: &MachineInstanceSpec,
+        prim: &str,
+        physics: &PhysicsWorld,
+    ) -> Option<(BodyId, DVec3)> {
+        pin(self.entity(machine, prim)?, self.parents, self.transforms, physics)
+    }
+
     fn bodies(
         &self,
         machine: &MachineInstanceSpec,
@@ -206,7 +312,7 @@ fn lift_tyres_out_of_terrain(
         let deepest = wheels
             .iter()
             .filter_map(|w| {
-                let radius = crate::controller::body_max_collider_radius(physics, *w)?;
+                let (_, _, radius) = crate::controller::body_tyre_geometry(physics, *w)?;
                 let p = physics.body(*w)?.position().translation;
                 let ground = crate::globe::ground_height_at_physics(p.x, p.z);
                 let offset = p - pivot;
@@ -315,13 +421,24 @@ fn pick_coupling<'a>(
     }
 }
 
-fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> JointDesc {
+fn joint_for(kind: &str, top_link: bool, frame1: Pose, frame2: Pose) -> (JointDesc, HitchHold) {
     let lin = JointAxes::LIN;
     let deg = |d: f64| d.to_radians();
     // Coupling frames are prim frames on bodies that keep the USD basis:
     // X right, Y back, Z up. So yaw is about Z, pitch about X, roll about Y.
+    // A carried implement hangs rigidly: on the lower-link pins, pitching
+    // as the top link lets it, or fixed.
+    let carried = match kind {
+        "three_point_mounted" if top_link => Some(JointKind::Revolute { axis: DVec3::X }),
+        "three_point_mounted" | "chassis_mounted" | "loader_carriage" => Some(JointKind::Fixed),
+        _ => None,
+    };
+    if let Some(joint) = carried {
+        let mut desc = JointDesc::new(joint, frame1, frame2);
+        desc.softness = Some((30.0, 1.0));
+        return (desc, HitchHold::Rigid);
+    }
     let (mask, limits): (JointAxes, Vec<(JointAxis, f64)>) = match kind {
-        "three_point_mounted" | "chassis_mounted" | "loader_carriage" => (JointAxes::ALL, vec![]),
         // Pinned at the eye, pitch and yaw free, roll locked: the tractor
         // carries the trailer's nose.
         "drawbar" => (lin.with(JointAxis::AngY), vec![]),
@@ -356,7 +473,7 @@ fn joint_for(kind: &str, frame1: Pose, frame2: Pose) -> JointDesc {
         .into_iter()
         .map(|(axis, limit)| (axis, [-limit, limit]))
         .collect();
-    desc
+    (desc, HitchHold::Soft(30.0))
 }
 
 /// Suppress only the connected machines' body pairs; keep authored filters unchanged.
@@ -392,8 +509,49 @@ fn insert_hitch_joint(
     physics.insert_joint(hitch_body, coupler_body, joint)
 }
 
-fn remove_hitch_joint(physics: &mut PhysicsWorld, joint: HitchJoint) {
-    physics.remove_joint(joint);
+/// Joins a coupler to a hitch, each given as a body and the coupling's
+/// frame in it, and, with both top-link pins, closes the three-point loop.
+/// Both joints are caught where the bodies are now and drawn together.
+pub(crate) fn join_hitch(
+    physics: &mut PhysicsWorld,
+    kind: &str,
+    (hitch_body, hitch): (BodyId, Pose),
+    (coupler_body, coupler): (BodyId, Pose),
+    top_pins: Option<((BodyId, DVec3), (BodyId, DVec3))>,
+) -> Option<(HitchJoint, Option<HitchJoint>)> {
+    let hitch_pose = physics.body(hitch_body)?.position();
+    let coupler_pose = physics.body(coupler_body)?.position();
+    let current_hitch = Frame::from_pose(&hitch_pose).then(&Frame::from_pose(&hitch));
+    let initial = Frame::from_pose(&coupler_pose).inverse().then(&current_hitch);
+    let (mut joint, hold) = joint_for(kind, top_pins.is_some(), hitch, initial.pose());
+    joint.softness = Some((8.0, 1.0));
+    let handle = insert_hitch_joint(physics, hitch_body, coupler_body, joint);
+    physics.capture_hitch(handle, coupler, hold);
+    let top_link = top_pins.and_then(|((link, end), (implement, mast))| {
+        let (link_pose, implement_pose) = (physics.body(link)?.position(), physics.body(implement)?.position());
+        // Caught where the link's end hangs now, then drawn onto the mast.
+        let reach = implement_pose.rotation.inverse()
+            * (link_pose.translation + link_pose.rotation * end - implement_pose.translation);
+        let mut desc = JointDesc::new(
+            JointKind::Generic { locked: JointAxes::LIN },
+            Pose::new(end, DQuat::IDENTITY),
+            Pose::new(reach, DQuat::IDENTITY),
+        );
+        desc.softness = Some((8.0, 1.0));
+        desc.loop_closure = true;
+        let joint = insert_hitch_joint(physics, link, implement, desc);
+        physics.capture_hitch(joint, Pose::new(mast, DQuat::IDENTITY), HitchHold::Soft(TOP_LINK_HZ));
+        Some(joint)
+    });
+    Some((handle, top_link))
+}
+
+/// Removes the top link, then the hitch joint it closes a loop over.
+fn remove_hitch_joints(physics: &mut PhysicsWorld, attachment: &Attachment) {
+    if let Some(top_link) = attachment.top_link {
+        physics.remove_joint(top_link);
+    }
+    physics.remove_joint(attachment.joint);
 }
 
 /// The prim a slave's coupler names as its parking stand.
@@ -674,18 +832,22 @@ fn try_attach(
         .filter_map(|h| physics.body(*h))
         .map(|b| b.mass())
         .sum();
-    let (Some(hitch_pose), Some(coupler_pose)) = (
-        physics.body(hitch_body).map(|b| b.position()),
-        physics.body(coupler_body).map(|b| b.position()),
-    ) else {
-        return Err(refused("the hitch or the coupler has no physics body".to_string()));
+    // A three-point implement hangs on the lower-link pins; the top link
+    // runs from the master's top-link pin to the implement's upper point.
+    let top_pins = match (hitch.top_link.as_deref(), coupler.top_link.as_deref()) {
+        (Some(end), Some(mast)) if hitch.kind == "three_point_mounted" => {
+            scene.pin(master, end, physics).zip(scene.pin(slave, mast, physics))
+        }
+        _ => None,
     };
-    let current_hitch = Frame::from_pose(&hitch_pose).then(&frame1);
-    let initial_frame2 = Frame::from_pose(&coupler_pose).inverse().then(&current_hitch);
-    let mut joint = joint_for(&hitch.kind, frame1.pose(), initial_frame2.pose());
-    joint.softness = Some((8.0, 1.0));
-    let handle = insert_hitch_joint(physics, hitch_body, coupler_body, joint);
-    physics.capture_hitch(handle, frame2.pose());
+    let (handle, top_link) = join_hitch(
+        physics,
+        &hitch.kind,
+        (hitch_body, frame1.pose()),
+        (coupler_body, frame2.pose()),
+        top_pins,
+    )
+    .ok_or_else(|| refused("the hitch or the coupler has no physics body"))?;
     let master_bodies = scene.bodies(master, physics);
     set_cross_collisions(physics, &master_bodies, &slave_bodies, false);
 
@@ -720,6 +882,7 @@ fn try_attach(
             coupler: coupler.name.clone(),
             kind: hitch.kind.clone(),
             joint: handle,
+            top_link,
             slave_mass_kg,
             controlled: !slave.controllers.is_empty(),
             denied,
@@ -836,7 +999,7 @@ pub(crate) fn serve_attachments(
         alive
     });
     for a in dropped {
-        remove_hitch_joint(physics.as_mut(), a.joint);
+        remove_hitch_joints(physics.as_mut(), &a);
         if let Some(slave) = bus.machines.get_mut(&a.slave_id) {
             slave.set_attached_to(None);
         }
@@ -1059,7 +1222,7 @@ pub(crate) fn serve_attachments(
                 None => not_found(format!("`{slave_id}` is not attached to `{master_id}`")),
                 Some(i) => {
                     let a = attachments.0.remove(i);
-                    remove_hitch_joint(physics.as_mut(), a.joint);
+                    remove_hitch_joints(physics.as_mut(), &a);
                     if let (Some(m), Some(s)) =
                         (scene.machine(&master_id), scene.machine(&slave_id))
                     {

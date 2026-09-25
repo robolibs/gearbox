@@ -171,16 +171,30 @@ impl PhysicsWorld {
     }
 }
 
+/// A captured hitch joint starts this soft, so nothing jumps.
+const CAPTURE_HZ: f64 = 8.0;
+
 struct HitchCapture {
     start: Pose,
     target: Pose,
     elapsed: f64,
     duration: f64,
+    hold: HitchHold,
+}
+
+/// How a captured joint holds once its frames meet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum HitchHold {
+    /// Exactly, without compliance: a tree joint.
+    Rigid,
+    /// Compliant at this natural frequency (Hz): a loop joint, which
+    /// cannot be rigid.
+    Soft(f64),
 }
 
 impl PhysicsWorld {
     /// Move a hitch's second local frame to its authored anchor at fixed-step speed.
-    pub(crate) fn capture_hitch(&mut self, joint: JointId, target: Pose) {
+    pub(crate) fn capture_hitch(&mut self, joint: JointId, target: Pose, hold: HitchHold) {
         let Some(start) = self.backend.joint(joint).map(|j| j.frame2()) else {
             return;
         };
@@ -189,7 +203,7 @@ impl PhysicsWorld {
         let duration = (1.5 * (distance / 0.2).max(angle / 0.2)).max(0.5);
         self.hitch_captures.insert(
             joint,
-            HitchCapture { start, target, elapsed: 0.0, duration },
+            HitchCapture { start, target, elapsed: 0.0, duration, hold },
         );
     }
 
@@ -213,7 +227,11 @@ impl PhysicsWorld {
                     .lerp(capture.target.translation, s),
                 rotation: capture.start.rotation.slerp(capture.target.rotation, s),
             });
-            joint.set_softness(8.0 + 22.0 * s, 1.0);
+            match (capture.hold, t < 1.0) {
+                (HitchHold::Rigid, false) => joint.set_rigid(),
+                (HitchHold::Rigid, true) => joint.set_softness(CAPTURE_HZ + (30.0 - CAPTURE_HZ) * s, 1.0),
+                (HitchHold::Soft(hz), _) => joint.set_softness(CAPTURE_HZ + (hz - CAPTURE_HZ) * s, 1.0),
+            }
             for body in [bodies.0, bodies.1] {
                 if let Some(body) = backend.body_mut(body) {
                     body.wake_up(true);

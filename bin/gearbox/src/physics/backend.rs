@@ -670,6 +670,8 @@ pub trait JointMut: Joint {
     );
     fn set_motor_max_force(&mut self, axis: JointAxis, max_force: f64);
     fn set_softness(&mut self, natural_frequency: f64, damping_ratio: f64);
+    /// Drops the joint's compliance: its locked axes hold exactly.
+    fn set_rigid(&mut self);
     fn set_contacts_enabled(&mut self, enabled: bool);
 }
 

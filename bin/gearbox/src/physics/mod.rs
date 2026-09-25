@@ -44,6 +44,7 @@ use convert::{quat_from_d, vec3_from_d};
 pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
 pub use world::{PhysicsWorld, step_physics};
+pub(crate) use world::HitchHold;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PhysicsWriteback;

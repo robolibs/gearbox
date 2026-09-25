@@ -430,7 +430,7 @@ fn physics_world_hitch_capture_uses_live_softness() {
     );
     desc.softness = Some((8.0, 1.0));
     let j = world.insert_joint(fixed, moving, desc);
-    world.capture_hitch(j, Pose::IDENTITY);
+    world.capture_hitch(j, Pose::IDENTITY, crate::physics::HitchHold::Rigid);
     for _ in 0..240 {
         let before = world.body(moving).unwrap().position().translation;
         world.step();

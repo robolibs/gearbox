@@ -98,6 +98,20 @@ pub struct CouplingSpec {
     /// Coupler side: slave joints bound to the master's hydraulic valves, in
     /// valve order.
     pub valve_joints: Vec<String>,
+    /// The top-link pin: on a hitch, the free end of the machine's top link;
+    /// on a coupler, the implement's upper hitch point.
+    pub top_link: Option<String>,
+    /// Hitch side: the machine's variant this hitch selects by reach.
+    pub variant: Option<CouplingVariant>,
+}
+
+/// A hitch's look by reach: `near` while a coupler of its type is within
+/// reach or attached, `far` otherwise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CouplingVariant {
+    pub set: String,
+    pub near: String,
+    pub far: String,
 }
 
 pub const COUPLING_TYPES: [&str; 12] = [
@@ -765,6 +779,22 @@ fn read_coupling(
         Some(Value::Uint(v)) => Some(v.min(4) as u8),
         _ => None,
     };
+    let variant = match (
+        read_token(stage, prim, "gearbox:coupling:variantSet"),
+        read_token(stage, prim, "gearbox:coupling:variantNear"),
+        read_token(stage, prim, "gearbox:coupling:variantFar"),
+    ) {
+        (Some(set), Some(near), Some(far)) if side == CouplingSide::Hitch => {
+            Some(CouplingVariant { set, near, far })
+        }
+        (None, None, None) => None,
+        _ => {
+            errors.push(format!(
+                "{path}: a hitch's variant needs gearbox:coupling:variantSet, variantNear and variantFar"
+            ));
+            return None;
+        }
+    };
     Some(CouplingSpec {
         name: read_token(stage, prim, "gearbox:coupling:name")
             .unwrap_or_else(|| sanitize_link_name(leaf(path))),
@@ -786,6 +816,9 @@ fn read_coupling(
         .into_iter()
         .map(|t| rebase_asset_root_target(root, &t))
         .collect(),
+        top_link: read_rel_first(stage, prim, "gearbox:coupling:topLink")
+            .map(|t| rebase_asset_root_target(root, &t)),
+        variant,
     })
 }
 
@@ -1326,6 +1359,38 @@ def Xform "robot" (
                 .any(|e| e.contains("/robot/hitch") && e.contains("not connected"))
         );
         assert!(tree.errors.iter().any(|e| e.contains("rope")));
+    }
+
+    #[test]
+    fn a_three_point_hitch_names_its_variant_by_reach_and_its_top_link() {
+        let links = format!(
+            r#"{CHASSIS_AND_WHEEL}
+    def Xform "rear_three_point" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"])
+    {{
+        token gearbox:link:role = "tool"
+        token gearbox:coupling:side = "hitch"
+        token gearbox:coupling:type = "three_point_mounted"
+        token gearbox:coupling:variantSet = "hitchRear"
+        token gearbox:coupling:variantNear = "linked"
+        token gearbox:coupling:variantFar = "bare"
+        rel gearbox:coupling:topLink = </robot/chassis/top_link_end>
+    }}
+    def Xform "half" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"])
+    {{
+        token gearbox:coupling:side = "hitch"
+        token gearbox:coupling:type = "drawbar"
+        token gearbox:coupling:variantSet = "hitchRear"
+    }}
+"#
+        );
+        let tree = discover(&machine_with(&links, WHEEL_JOINT));
+        let (_, hitch) = tree.couplings().find(|(_, c)| c.name == "rear_three_point").unwrap();
+        assert_eq!(
+            hitch.variant,
+            Some(CouplingVariant { set: "hitchRear".into(), near: "linked".into(), far: "bare".into() })
+        );
+        assert_eq!(hitch.top_link.as_deref(), Some("/robot/chassis/top_link_end"));
+        assert!(tree.errors.iter().any(|e| e.contains("/robot/half") && e.contains("variantNear")));
     }
 
     #[test]
