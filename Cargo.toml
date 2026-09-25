@@ -27,11 +27,6 @@ datapod = { git = "https://codeberg.org/robolibs/datapod.git", tag = "0.6.2" }
 # WGS84/ENU geodesy — local sim positions to real lat/lon/alt for GNSS.
 concord = { git = "https://codeberg.org/robolibs/concord.git", tag = "0.1.5" }
 
-# Physics backend — f64 variant of rapier3d. Matches datapod's f64
-# spatial types, so every boundary crossing stops needing a lossy
-# precision downcast.
-rapier3d = { version = "0.32", package = "rapier3d-f64" }
-
 # Bevy + ecosystem. Declared once here with their full feature sets so
 # every crate that needs Bevy pulls the SAME build (otherwise cargo
 # would see distinct feature unions and rebuild bevy twice).

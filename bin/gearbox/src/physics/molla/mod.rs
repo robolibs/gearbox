@@ -172,10 +172,6 @@ impl PhysicsBackend for MollaBackend {
         self.device_remove(id);
     }
 
-    fn uses_wheel_forces(&self) -> bool {
-        true
-    }
-
     fn configure_wheel(&mut self, desc: WheelForceDesc) -> Result<(), String> {
         self.configure_wheel_force(desc)
     }
@@ -258,9 +254,8 @@ impl PhysicsBackend for MollaBackend {
     fn name(&self) -> &'static str {
         "molla"
     }
-    fn with_molla_scene(&self, f: &mut dyn FnMut(&rt::RigidScene)) -> bool {
+    fn with_molla_scene(&self, f: &mut dyn FnMut(&rt::RigidScene)) {
         f(&self.shared.world().scene);
-        true
     }
     fn molla_body_handle(&self, body: BodyId) -> Option<rt::BodyHandle> {
         self.bodies.get(&body).map(|body| body.handle)

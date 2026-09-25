@@ -1,4 +1,4 @@
-//! UsdPhysics vocabulary shared by the rapier builders: joint kinds, DOFs,
+//! UsdPhysics vocabulary shared by the physics builders: joint kinds, DOFs,
 //! drive types and collision approximations, plus the decoded records the
 //! builders take. Reading the stage is usd_bevy's job now.
 

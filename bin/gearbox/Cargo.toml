@@ -32,7 +32,7 @@ big_space.workspace = true
 mara.workspace = true
 half = "2.7"
 
-# USD asset pipeline + rapier physics + animation playback. These
+# USD asset pipeline + animation playback. These
 # are the bevy_openusd workspace's plugins; the gearbox binary just
 # wires them together with a minimal world / UI on top.
 usd_bevy.workspace = true
@@ -50,8 +50,7 @@ gearbox-api = { workspace = true, features = ["bevy"] }
 # sim directly in this same process; anything else goes to `gearbox_cli::run()`.
 gearbox-cli.workspace = true
 
-# Rigid-body engines used by the physics backend adapters.
-rapier3d = { workspace = true, features = ["enhanced-determinism"] }
+# Molla: the physics engine.
 molla-core = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false }
 molla-math = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd" }
 molla-sim = { git = "https://github.com/bresilla/molla", rev = "850bd411066d96e599095e78e2be73a4905b28dd", default-features = false }

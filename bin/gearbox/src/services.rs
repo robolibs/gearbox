@@ -669,7 +669,7 @@ fn apply_service_controllers(
                         .insert(format!("{}:{}:{prim}", machine.id, controller.instance))
                 {
                     warn!(
-                        "gearbox-services: no rapier joint for {prim} on `{}`; `{}` cannot drive it",
+                        "gearbox-services: no physics joint for {prim} on `{}`; `{}` cannot drive it",
                         machine.id, controller.instance
                     );
                 }

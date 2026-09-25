@@ -1,10 +1,8 @@
-//! Backend-neutral UsdPhysics marker components.
+//! UsdPhysics marker components.
 //!
 //! The projection layer translates `usd_schema::physics::*` data into
-//! these components, one per affected prim entity. Adapter crates
-//! (`bevy_openusd_rapier`, future `bevy_openusd_avian`) read them and
-//! insert their engine's components in turn — `bevy_openusd` itself
-//! never depends on a physics engine.
+//! these components, one per affected prim entity. The physics module
+//! reads them and builds the Molla bodies, colliders and joints.
 //!
 //! ## Conventions
 //! - **Units**: SI throughout (m, kg, m/s, rad/s, N, N·m). The
@@ -70,9 +68,7 @@ pub struct UsdRigidBody {
 
 /// `PhysicsMassAPI`. Kept separate from `UsdRigidBody` because USD allows
 /// `MassAPI` on plain colliders to seed the parent body's mass via
-/// aggregation. Adapters that prefer the body-only model can ignore mass
-/// authored on non-body prims; adapters that aggregate (matches PhysX /
-/// Rapier behaviour) walk descendants and sum.
+/// aggregation, as PhysX does.
 #[derive(Component, Reflect, Debug, Clone, Default)]
 #[reflect(Component, Default)]
 pub struct UsdMass {
@@ -168,9 +164,8 @@ pub struct UsdPhysicsMaterial {
 // ── ArticulationRoot ────────────────────────────────────────────────────
 
 /// `PhysicsArticulationRootAPI` marker. No attributes; presence is the
-/// signal. The Rapier adapter realises this as a `MultibodyJoint`
-/// subtree (reduced-coordinate solve); the future Avian adapter
-/// degrades to chained constraints with a warning.
+/// signal. Molla solves every joint tree in reduced coordinates; the
+/// colliders under one root never touch each other.
 ///
 /// `joints` is populated by the projection post-pass with every
 /// `UsdPhysicsJoint` entity in this articulation's subtree (filtered by

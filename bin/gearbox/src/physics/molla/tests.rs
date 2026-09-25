@@ -54,21 +54,9 @@ fn authored_sleep_and_explicit_wake_advance_the_real_backend() {
 }
 
 #[test]
-fn weak_and_strong_wakes_match_rapier_sleep_eligibility() {
-    let backends: [Box<dyn PhysicsBackend>; 2] = [
-        Box::new(MollaBackend::default()),
-        Box::new(crate::physics::rapier::RapierBackend::default()),
-    ];
-    for mut backend in backends {
-        check_wake_strength(&mut *backend, false);
-    }
+fn weak_and_strong_wakes_set_sleep_eligibility() {
+    check_wake_strength(&mut MollaBackend::default(), false);
     check_wake_strength(&mut MollaBackend::default(), true);
-}
-
-#[test]
-#[ignore = "Rapier 0.32 panics when explicitly sleeping a mixed-wake active island"]
-fn rapier_explicit_sleep_mixed_wake_regression() {
-    check_wake_strength(&mut crate::physics::rapier::RapierBackend::default(), true);
 }
 
 fn check_wake_strength(backend: &mut dyn PhysicsBackend, explicit: bool) {
@@ -192,39 +180,36 @@ fn backend_is_send_sync_and_preserves_body_mass_and_tags() {
 }
 
 #[test]
-fn both_joint_requests_run_actual_reduced_motors_with_caps() {
-    for reduced in [false, true] {
-        let mut backend = MollaBackend::default();
-        backend.set_gravity(DVec3::ZERO);
-        let fixed = backend.insert_body(BodyDesc::fixed());
-        let moving = backend.insert_body(dynamic());
-        let mut desc = JointDesc::new(
-            JointKind::Revolute { axis: DVec3::Z },
-            Pose::IDENTITY,
-            Pose::IDENTITY,
-        );
-        desc.reduced = reduced;
-        let joint = backend.insert_joint(fixed, moving, desc);
-        let motor = backend.joint_mut(joint, true).unwrap();
-        motor.set_motor_model(JointAxis::AngX, MotorModel::Force);
-        motor.set_motor_velocity(JointAxis::AngX, 5.0, 4.0);
-        motor.set_motor_max_force(JointAxis::AngX, 2.0);
-        for _ in 0..120 {
-            backend.step(&|_, _| false);
-        }
-        assert!(backend.joint_is_reduced(joint));
-        near(backend.body(moving).unwrap().angvel(), DVec3::Z);
-        assert!(backend.body(moving).unwrap().rotation().z > 0.0);
-        assert_eq!(
-            backend
-                .joint(joint)
-                .unwrap()
-                .motor(JointAxis::AngX)
-                .unwrap()
-                .max_force,
-            2.0
-        );
+fn joints_run_reduced_motors_with_caps() {
+    let mut backend = MollaBackend::default();
+    backend.set_gravity(DVec3::ZERO);
+    let fixed = backend.insert_body(BodyDesc::fixed());
+    let moving = backend.insert_body(dynamic());
+    let desc = JointDesc::new(
+        JointKind::Revolute { axis: DVec3::Z },
+        Pose::IDENTITY,
+        Pose::IDENTITY,
+    );
+    let joint = backend.insert_joint(fixed, moving, desc);
+    let motor = backend.joint_mut(joint, true).unwrap();
+    motor.set_motor_model(JointAxis::AngX, MotorModel::Force);
+    motor.set_motor_velocity(JointAxis::AngX, 5.0, 4.0);
+    motor.set_motor_max_force(JointAxis::AngX, 2.0);
+    for _ in 0..120 {
+        backend.step(&|_, _| false);
     }
+    assert!(backend.joint_is_reduced(joint));
+    near(backend.body(moving).unwrap().angvel(), DVec3::Z);
+    assert!(backend.body(moving).unwrap().rotation().z > 0.0);
+    assert_eq!(
+        backend
+            .joint(joint)
+            .unwrap()
+            .motor(JointAxis::AngX)
+            .unwrap()
+            .max_force,
+        2.0
+    );
 }
 
 #[test]

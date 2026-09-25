@@ -42,7 +42,7 @@ impl Default for SelectionRing {
     }
 }
 
-/// LoadedAsset roots to despawn with their rapier bodies; drained each frame.
+/// LoadedAsset roots to despawn with their physics bodies; drained each frame.
 #[derive(Resource, Default)]
 pub struct PendingDespawn(pub Vec<Entity>);
 
@@ -537,7 +537,7 @@ fn apply_load_request(mut req: ResMut<LoadRequest>, mut queue: ResMut<LoadQueue>
     queue.0.push(path);
 }
 
-/// Hot-reload: despawn the active LoadedAsset (with rapier cleanup)
+/// Hot-reload: despawn the active LoadedAsset (with physics cleanup)
 /// and re-push its path through `LoadQueue` so the loader pipeline
 /// re-runs and remounts a fresh entity.
 fn apply_reload_request(

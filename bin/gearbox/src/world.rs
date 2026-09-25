@@ -1244,7 +1244,7 @@ fn terrain_height_formula_m(x: f32, z: f32) -> f32 {
 
 fn terrain_hills_raw_m(x: f32, z: f32) -> f32 {
     // Visible crop-field rolls. Keep this CPU-side so the visible mesh
-    // and Rapier heightfield collider are exactly the same shape.
+    // and the Molla heightfield collider are exactly the same shape.
     //
     // The first attempt used 3-6 m hills over hundreds of metres; on an
     // 8 km field from the default camera that reads basically flat. Use

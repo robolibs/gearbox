@@ -169,7 +169,6 @@ pub struct MachineSensorRigs {
     rigs: HashMap<String, Rig>,
     /// Scene revision at which a machine's rig build last failed.
     failed: HashMap<String, u64>,
-    warned_backend: bool,
 }
 
 impl MachineSensorRigs {
@@ -450,18 +449,7 @@ pub(crate) fn run_machine_sensors(
         }
         let engine = rigs.engine.as_ref().expect("sensor engine");
 
-        let mut revision = None;
-        physics.with_molla_scene(&mut |scene| revision = Some(scene.revision()));
-        let Some(revision) = revision else {
-            if !rigs.warned_backend {
-                warn!(
-                    "gearbox-sensors: `{}` authors sensor links, but only the molla physics backend samples them",
-                    machine.id
-                );
-                rigs.warned_backend = true;
-            }
-            continue;
-        };
+        let revision = physics.molla(|scene| scene.revision());
         let resolved = match resolve_mounts(
             &physics,
             &machine.links,
@@ -790,15 +778,11 @@ impl Rig {
             .map(|m| {
                 physics
                     .molla_body_handle(m.body)
-                    .ok_or_else(|| format!("sensor link `{}`: body is not a molla body", m.name))
+                    .ok_or_else(|| format!("sensor link `{}`: unknown body", m.name))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut snapshot = None;
-        physics.with_molla_scene(&mut |scene| {
-            snapshot = Some(snapshot_scene(engine, scene, &handles, colors));
-        });
         let (scene, imu_model, mut state, bodies) =
-            snapshot.ok_or("physics backend is not molla")??;
+            physics.molla(|scene| snapshot_scene(engine, scene, &handles, colors))?;
         let own: HashSet<u64> = own_bodies
             .iter()
             .filter_map(|&b| physics.molla_body_handle(b))
@@ -1023,10 +1007,8 @@ impl Rig {
         if due.is_empty() {
             return Ok(());
         }
-        let mut copied = Err("physics backend is not molla".to_string());
         let state = &mut self.state;
-        physics.with_molla_scene(&mut |scene| copied = copy_state(scene.state(), state));
-        copied?;
+        physics.molla(|scene| copy_state(scene.state(), state))?;
         let queue = engine.queue().ok_or("sensor engine has no queue")?;
         self.state.body_q.upload(queue).map_err(|e| e.to_string())?;
         self.state
@@ -1239,11 +1221,7 @@ impl Rig {
             .collect();
         if !generic_due.is_empty() {
             let generic = &mut self.generic;
-            let mut result = None;
-            physics.with_molla_scene(&mut |rigid| {
-                result = Some(generic.sample(rigid, environment, &generic_due, sim_time));
-            });
-            let readings = result.ok_or("physics backend is not molla")??;
+            let readings = physics.molla(|rigid| generic.sample(rigid, environment, &generic_due, sim_time))?;
             self.ready.extend(readings);
         }
         self.stats.samples += 1;

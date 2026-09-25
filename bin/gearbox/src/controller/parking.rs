@@ -14,14 +14,13 @@ pub(super) struct ParkingBrakes {
 mod tests {
     use super::*;
     use crate::physics::backend::{BodyDesc, JointDesc, JointKind};
-    use crate::physics::{MollaBackend, PhysicsWorld, RapierBackend};
+    use crate::physics::PhysicsWorld;
 
-    fn fixture(molla: bool) -> (PhysicsWorld, JointVelocityTarget, JointId) {
-        let mut physics = PhysicsWorld::with_backend(if molla {
-            Box::new(MollaBackend::default())
-        } else {
-            Box::new(RapierBackend::default())
-        });
+    /// A wheel on a revolute joint to a fixed parent. With `looped` the
+    /// wheel already hangs from the parent through a hub, so the wheel joint
+    /// is a loop closure and has no joint coordinate.
+    fn fixture(looped: bool) -> (PhysicsWorld, JointVelocityTarget, JointId) {
+        let mut physics = PhysicsWorld::default();
         physics.set_gravity(DVec3::ZERO);
         let parent = physics.insert_body(BodyDesc::fixed());
         let mut desc = BodyDesc::dynamic();
@@ -30,16 +29,16 @@ mod tests {
             local_com: DVec3::ZERO,
             inertia: Inertia::Principal(DVec3::splat(2.0)),
         });
-        let wheel = physics.insert_body(desc);
-        let joint = physics.insert_joint(
-            parent,
-            wheel,
-            JointDesc::new(
-                JointKind::Revolute { axis: DVec3::Z },
-                Pose::IDENTITY,
-                Pose::IDENTITY,
-            ),
-        );
+        let wheel = physics.insert_body(desc.clone());
+        let spin = || JointDesc::new(JointKind::Revolute { axis: DVec3::Z }, Pose::IDENTITY, Pose::IDENTITY);
+        if looped {
+            let hub = physics.insert_body(desc);
+            physics.insert_joint(parent, hub, spin());
+            physics.insert_joint(hub, wheel, spin());
+        }
+        let mut wheel_joint = spin();
+        wheel_joint.loop_closure = looped;
+        let joint = physics.insert_joint(parent, wheel, wheel_joint);
         (
             physics,
             JointVelocityTarget {
@@ -67,7 +66,7 @@ mod tests {
 
     #[test]
     fn hold_captures_unwrapped_angle_resists_load_and_releases() {
-        let (mut physics, mut target, joint) = fixture(true);
+        let (mut physics, mut target, joint) = fixture(false);
         let mut brakes = ParkingBrakes::default();
         for _ in 0..360 {
             tick(&mut physics, &mut brakes, target, false);
@@ -138,7 +137,7 @@ mod tests {
 
     #[test]
     fn overload_slips_with_bounded_reference_instead_of_locking() {
-        let (mut physics, mut target, joint) = fixture(true);
+        let (mut physics, mut target, joint) = fixture(false);
         let mut brakes = ParkingBrakes::default();
         target.velocity = 0.0;
         physics
@@ -173,7 +172,7 @@ mod tests {
 
     #[test]
     fn unavailable_coordinate_keeps_existing_velocity_brake() {
-        let (mut physics, mut target, joint) = fixture(false);
+        let (mut physics, mut target, joint) = fixture(true);
         let mut brakes = ParkingBrakes::default();
         target.velocity = 0.0;
         tick(&mut physics, &mut brakes, target, true);
@@ -189,7 +188,7 @@ mod tests {
 
     #[test]
     fn unchanged_hold_does_not_wake_and_releasing_it_resumes_rotation() {
-        let (mut physics, mut target, joint) = fixture(true);
+        let (mut physics, mut target, joint) = fixture(false);
         let mut brakes = ParkingBrakes::default();
         target.velocity = 0.0;
         tick(&mut physics, &mut brakes, target, true);

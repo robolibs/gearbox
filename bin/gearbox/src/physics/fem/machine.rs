@@ -275,29 +275,24 @@ mod tests {
 
     #[test]
     fn fem_boundary_rejects_runtime_hitches_without_usd_components() {
-        use crate::physics::backend::{BodyDesc, JointDesc, JointKind, PhysicsBackend, Pose};
-        use crate::physics::{MollaBackend, PhysicsWorld};
-        for backend in [
-            Box::new(MollaBackend::default()) as Box<dyn PhysicsBackend>,
-            Box::new(crate::physics::rapier::RapierBackend::default()),
-        ] {
-            let mut world = World::new();
-            let entity = world.spawn_empty().id();
-            let mut physics = PhysicsWorld::with_backend(backend);
-            let own = physics.insert_body(BodyDesc::dynamic().entity(entity));
-            let foreign = physics.insert_body(BodyDesc::dynamic());
-            physics.entity_to_body.insert(entity, own);
-            let joint = physics.insert_joint(
-                own,
-                foreign,
-                JointDesc::new(JointKind::Fixed, Pose::IDENTITY, Pose::IDENTITY),
-            );
-            world.insert_resource(physics);
-            let bodies = HashSet::from([entity]);
-            assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_err());
-            world.resource_mut::<PhysicsWorld>().remove_joint(joint);
-            assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_ok());
-        }
+        use crate::physics::backend::{BodyDesc, JointDesc, JointKind, Pose};
+        use crate::physics::PhysicsWorld;
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        let mut physics = PhysicsWorld::default();
+        let own = physics.insert_body(BodyDesc::dynamic().entity(entity));
+        let foreign = physics.insert_body(BodyDesc::dynamic());
+        physics.entity_to_body.insert(entity, own);
+        let joint = physics.insert_joint(
+            own,
+            foreign,
+            JointDesc::new(JointKind::Fixed, Pose::IDENTITY, Pose::IDENTITY),
+        );
+        world.insert_resource(physics);
+        let bodies = HashSet::from([entity]);
+        assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_err());
+        world.resource_mut::<PhysicsWorld>().remove_joint(joint);
+        assert!(reject_external_joints(&mut world, &bodies, &HashSet::new()).is_ok());
     }
 
     #[test]

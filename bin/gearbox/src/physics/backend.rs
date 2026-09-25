@@ -1,10 +1,9 @@
 //! The physics engine, as gearbox sees it.
 //!
-//! Everything outside `physics::rapier` talks to the simulation through
+//! Everything outside `physics::molla` talks to Molla through
 //! [`PhysicsBackend`] and the small accessor traits [`Body`], [`Collider`]
-//! and [`Joint`]. Values are SI, f64, glam; handles are opaque ids the
-//! backend hands out. A second engine is one more `impl PhysicsBackend`
-//! handed to `PhysicsWorld::with_backend`.
+//! and [`Joint`]. Values are SI, f64, glam; handles are opaque ids Molla
+//! hands out.
 
 use bevy::prelude::Entity;
 pub use glam::{DMat3, DQuat, DVec3};
@@ -477,9 +476,6 @@ pub struct JointDesc {
     pub softness: Option<(f64, f64)>,
     /// Whether the two jointed bodies still collide with each other.
     pub contacts_enabled: bool,
-    /// Ask for a reduced-coordinate joint; the backend falls back to a
-    /// constraint joint where it cannot (loop closures, no such solver).
-    pub reduced: bool,
     /// Close an articulation loop without adding a reduced-coordinate edge.
     pub loop_closure: bool,
 }
@@ -494,7 +490,6 @@ impl JointDesc {
             motors: Vec::new(),
             softness: None,
             contacts_enabled: false,
-            reduced: false,
             loop_closure: false,
         }
     }
@@ -958,8 +953,6 @@ pub struct DragOutput {
     pub wind: DVec3,
 }
 
-const NO_DEVICES: &str = "actuator devices are not supported by this backend";
-
 #[derive(Clone, Copy, Debug)]
 pub struct WheelForceDesc {
     pub body: BodyId,
@@ -1055,114 +1048,65 @@ pub struct WheelForceOutput {
     pub pressure: Option<PressureTyreOutput>,
 }
 
-/// A rigid-body engine gearbox can run on.
+/// Molla, as gearbox drives it.
 pub trait PhysicsBackend: Send + Sync {
     /// Short name, for logs.
     fn name(&self) -> &'static str;
 
-    /// Runs `f` on the Molla runtime scene behind this backend, holding its
-    /// lock only for the call; `false` when this engine is not Molla.
-    fn with_molla_scene(&self, _f: &mut dyn FnMut(&molla_sim::runtime::RigidScene)) -> bool {
-        false
-    }
+    /// Runs `f` on the Molla runtime scene, holding its lock only for the
+    /// call.
+    fn with_molla_scene(&self, f: &mut dyn FnMut(&molla_sim::runtime::RigidScene));
     /// Molla handle of a body, for lookups inside `with_molla_scene`.
-    fn molla_body_handle(&self, _body: BodyId) -> Option<molla_sim::runtime::BodyHandle> {
-        None
-    }
+    fn molla_body_handle(&self, body: BodyId) -> Option<molla_sim::runtime::BodyHandle>;
 
-    fn configure_track(&mut self, _desc: TrackForceDesc) -> Result<(), String> {
-        Err("track force elements are not supported".into())
-    }
-    fn set_track_speed(&mut self, _sprocket: BodyId, _speed: f64) -> Result<(), String> {
-        Err("track force elements are not supported".into())
-    }
-    fn track_output(&self, _sprocket: BodyId) -> Option<TrackForceOutput> { None }
-    fn remove_track(&mut self, _sprocket: BodyId) {}
+    fn configure_track(&mut self, desc: TrackForceDesc) -> Result<(), String>;
+    fn set_track_speed(&mut self, sprocket: BodyId, speed: f64) -> Result<(), String>;
+    fn track_output(&self, sprocket: BodyId) -> Option<TrackForceOutput>;
+    fn remove_track(&mut self, sprocket: BodyId);
 
     /// A motor on a revolute or prismatic joint, holding its position.
-    fn insert_motor(&mut self, _joint: JointId, _limits: DeviceLimits, _max_force: f64) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
-    fn remove_motor(&mut self, _joint: JointId) {}
-    fn command_motor(&mut self, _joint: JointId, _command: DeviceCommand) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
-    fn configure_motor(&mut self, _joint: JointId, _setting: DeviceSetting) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
+    fn insert_motor(&mut self, joint: JointId, limits: DeviceLimits, max_force: f64) -> Result<(), String>;
+    fn remove_motor(&mut self, joint: JointId);
+    fn command_motor(&mut self, joint: JointId, command: DeviceCommand) -> Result<(), String>;
+    fn configure_motor(&mut self, joint: JointId, setting: DeviceSetting) -> Result<(), String>;
     /// Brake damping on a revolute or prismatic joint; zero releases it.
-    fn set_joint_brake(&mut self, _joint: JointId, _damping: f64) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
+    fn set_joint_brake(&mut self, joint: JointId, damping: f64) -> Result<(), String>;
     /// The motor or brake of `joint` over the last step.
-    fn motor_output(&self, _joint: JointId) -> Option<MotorOutput> { None }
-    fn insert_propeller(&mut self, _desc: PropellerDesc) -> Result<DeviceId, String> {
-        Err(NO_DEVICES.into())
-    }
-    fn set_propeller_speed(&mut self, _id: DeviceId, _omega: f64) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
-    fn propeller_output(&self, _id: DeviceId) -> Option<PropellerOutput> { None }
-    fn insert_belt(&mut self, _desc: BeltDesc) -> Result<DeviceId, String> {
-        Err(NO_DEVICES.into())
-    }
-    fn command_belt(&mut self, _id: DeviceId, _command: DeviceCommand) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
-    fn configure_belt(&mut self, _id: DeviceId, _setting: DeviceSetting) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
-    fn belt_output(&self, _id: DeviceId) -> Option<BeltOutput> { None }
-    fn insert_connector(&mut self, _desc: ConnectorDesc) -> Result<DeviceId, String> {
-        Err(NO_DEVICES.into())
-    }
+    fn motor_output(&self, joint: JointId) -> Option<MotorOutput>;
+    fn insert_propeller(&mut self, desc: PropellerDesc) -> Result<DeviceId, String>;
+    fn set_propeller_speed(&mut self, id: DeviceId, omega: f64) -> Result<(), String>;
+    fn propeller_output(&self, id: DeviceId) -> Option<PropellerOutput>;
+    fn insert_belt(&mut self, desc: BeltDesc) -> Result<DeviceId, String>;
+    fn command_belt(&mut self, id: DeviceId, command: DeviceCommand) -> Result<(), String>;
+    fn configure_belt(&mut self, id: DeviceId, setting: DeviceSetting) -> Result<(), String>;
+    fn belt_output(&self, id: DeviceId) -> Option<BeltOutput>;
+    fn insert_connector(&mut self, desc: ConnectorDesc) -> Result<DeviceId, String>;
     /// Latches or unlatches a connector.
-    fn lock_connector(&mut self, _id: DeviceId, _lock: bool) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
-    fn connector_output(&self, _id: DeviceId) -> Option<ConnectorOutput> { None }
+    fn lock_connector(&mut self, id: DeviceId, lock: bool) -> Result<(), String>;
+    fn connector_output(&self, id: DeviceId) -> Option<ConnectorOutput>;
     /// A copter (multirotor) controller over propellers already inserted.
-    fn insert_copter(&mut self, _desc: CopterDesc) -> Result<DeviceId, String> {
-        Err(NO_DEVICES.into())
-    }
-    fn command_copter(&mut self, _id: DeviceId, _command: CopterCommand) -> Result<(), String> {
-        Err(NO_DEVICES.into())
-    }
-    fn copter_output(&self, _id: DeviceId) -> Option<CopterOutput> { None }
+    fn insert_copter(&mut self, desc: CopterDesc) -> Result<DeviceId, String>;
+    fn command_copter(&mut self, id: DeviceId, command: CopterCommand) -> Result<(), String>;
+    fn copter_output(&self, id: DeviceId) -> Option<CopterOutput>;
     /// Aerodynamic drag on a body.
-    fn insert_drag(&mut self, _desc: DragDesc) -> Result<DeviceId, String> {
-        Err(NO_DEVICES.into())
-    }
-    fn drag_output(&self, _id: DeviceId) -> Option<DragOutput> { None }
+    fn insert_drag(&mut self, desc: DragDesc) -> Result<DeviceId, String>;
+    fn drag_output(&self, id: DeviceId) -> Option<DragOutput>;
     /// The wind everywhere (m/s, world).
-    fn set_wind(&mut self, _wind: DVec3) {}
+    fn set_wind(&mut self, wind: DVec3);
     /// The wind one body flies in; `None` returns it to the world's.
-    fn set_body_wind(&mut self, _body: BodyId, _wind: Option<DVec3>) {}
+    fn set_body_wind(&mut self, body: BodyId, wind: Option<DVec3>);
     /// Removes a propeller, belt, connector, copter or drag element.
-    fn remove_device(&mut self, _id: DeviceId) {}
+    fn remove_device(&mut self, id: DeviceId);
 
-    fn uses_wheel_forces(&self) -> bool {
-        false
-    }
-    fn configure_wheel(&mut self, _desc: WheelForceDesc) -> Result<(), String> {
-        Err("wheel force elements are not supported".into())
-    }
+    fn configure_wheel(&mut self, desc: WheelForceDesc) -> Result<(), String>;
     fn register_wheel_ground(
         &mut self,
-        _collider: ColliderId,
-        _friction: Option<TerrainFrictionGrid>,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-    fn wheel_output(&self, _body: BodyId) -> Option<WheelForceOutput> {
-        None
-    }
-    fn set_wheel_pressures(&mut self, _targets: &[(BodyId, f64)]) -> Result<(), String> {
-        Err("pressure-dependent tyres are not supported".into())
-    }
-    fn wheel_drive_sign(&self, _joint: JointId) -> f64 {
-        1.0
-    }
+        collider: ColliderId,
+        friction: Option<TerrainFrictionGrid>,
+    ) -> Result<(), String>;
+    fn wheel_output(&self, body: BodyId) -> Option<WheelForceOutput>;
+    fn set_wheel_pressures(&mut self, targets: &[(BodyId, f64)]) -> Result<(), String>;
+    fn wheel_drive_sign(&self, joint: JointId) -> f64;
 
     fn gravity(&self) -> DVec3;
     fn set_gravity(&mut self, gravity: DVec3);
@@ -1172,9 +1116,7 @@ pub trait PhysicsBackend: Send + Sync {
     fn step(&mut self, excluded: PairExcluded<'_>);
 
     /// Bodies isolated internally during the latest step attempt.
-    fn quarantined_bodies(&self) -> Vec<BodyId> {
-        Vec::new()
-    }
+    fn quarantined_bodies(&self) -> Vec<BodyId>;
 
     fn insert_body(&mut self, desc: BodyDesc) -> BodyId;
     /// Takes the body's colliders and joints with it.
@@ -1187,29 +1129,7 @@ pub trait PhysicsBackend: Send + Sync {
         &mut self,
         poses: &[(BodyId, Pose)],
         reset_velocity: bool,
-    ) -> Result<(), String> {
-        let mut seen = std::collections::HashSet::new();
-        for (body, pose) in poses {
-            if !seen.insert(*body) || !self.contains_body(*body) {
-                return Err("unknown or duplicate body in pose batch".into());
-            }
-            if !pose.translation.is_finite()
-                || !pose.rotation.is_finite()
-                || (pose.rotation.length_squared() - 1.0).abs() > 1e-6
-            {
-                return Err("pose must be finite with a unit quaternion".into());
-            }
-        }
-        for &(body, pose) in poses {
-            let body = self.body_mut(body).expect("validated body");
-            body.set_position(pose, true);
-            if reset_velocity {
-                body.set_linvel(DVec3::ZERO, true);
-                body.set_angvel(DVec3::ZERO, true);
-            }
-        }
-        Ok(())
-    }
+    ) -> Result<(), String>;
     fn contains_body(&self, id: BodyId) -> bool {
         self.body(id).is_some()
     }
@@ -1278,4 +1198,13 @@ pub trait PhysicsBackend: Send + Sync {
     fn contacts_with(&self, collider: ColliderId) -> Vec<ContactManifold>;
     /// Every manifold of the last step.
     fn contacts(&self) -> Vec<ContactManifold>;
+}
+
+impl<'a> dyn PhysicsBackend + 'a {
+    /// `f` on the Molla runtime scene, under its lock.
+    pub fn molla<R>(&self, f: impl FnOnce(&molla_sim::runtime::RigidScene) -> R) -> R {
+        let (mut f, mut out) = (Some(f), None);
+        self.with_molla_scene(&mut |scene| out = f.take().map(|f| f(scene)));
+        out.expect("with_molla_scene runs its closure once")
+    }
 }

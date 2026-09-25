@@ -1,5 +1,5 @@
 //! Runtime attachments (`specs/TOOLS_SPEC.md`): a slave's coupler hangs on
-//! a master's hitch through a rapier joint shaped by the coupling type. The
+//! a master's hitch through a Molla joint shaped by the coupling type. The
 //! master's agent answers the requests, the slave's agent refuses commands
 //! while attached, and the master's `/links` grows the slave's tree.
 
@@ -379,9 +379,8 @@ fn set_cross_collisions(
     }
 }
 
-/// The physical hitch. A constraint joint (`reduced` stays off): merging the
-/// two machines' reduced-coordinate trees blows up (NaN poses), and few joint
-/// shapes exist there anyway.
+/// The physical hitch: a joint from the master's hitch body to the slave's
+/// coupler.
 pub type HitchJoint = JointId;
 
 fn insert_hitch_joint(

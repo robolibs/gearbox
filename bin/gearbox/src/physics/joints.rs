@@ -6,7 +6,7 @@
 
 use super::backend::{JointAxis, JointDesc, JointKind, MotorDesc, MotorModel, MotorTarget, Pose};
 use super::convert::{quat_to_d, vec3_to_d};
-use super::markers::{UsdArticulationRoot, UsdDof, UsdJointDrive, UsdJointKind, UsdPhysicsJoint};
+use super::markers::{UsdDof, UsdJointDrive, UsdJointKind, UsdPhysicsJoint};
 use bevy::prelude::*;
 use glam::DVec3;
 
@@ -20,28 +20,7 @@ pub fn convert_joints(
     mut commands: Commands,
     mut world: ResMut<PhysicsWorld>,
     joints: Query<(Entity, &UsdPhysicsJoint), Without<JointAttached>>,
-    articulation_roots: Query<(), With<UsdArticulationRoot>>,
-    parents: Query<&ChildOf>,
 ) {
-    if joints.is_empty() {
-        return;
-    }
-    // Reduced-coordinate joints are opt-in (`GEARBOX_MULTIBODY=1`): rapier
-    // 0.32 indexes past its Jacobian table when a multibody is assembled
-    // over several frames, and has no two-axis joint there. With it on, a
-    // joint joins one only when its own bodies sit under an articulation
-    // root, so one articulated machine cannot convert everyone else's.
-    let multibody = std::env::var_os("GEARBOX_MULTIBODY").is_some_and(|v| v == "1");
-    let articulated = |e: Entity| {
-        crate::physics::colliders::find_articulation_root_ancestor(
-            e,
-            parents.get(e).ok(),
-            &articulation_roots,
-            &parents,
-        )
-        .is_some()
-    };
-
     for (joint_entity, joint) in &joints {
         if !joint.joint_enabled {
             commands.entity(joint_entity).insert(JointAttached);
@@ -83,10 +62,6 @@ pub fn convert_joints(
 
         if let Some(mut desc) = joint_desc(joint) {
             desc.loop_closure = joint.exclude_from_articulation;
-            desc.reduced = multibody
-                && articulated(body0_e)
-                && articulated(body1_e)
-                && !joint.exclude_from_articulation;
             let id = world.insert_joint(body0, body1, desc);
             world.entity_to_joint.insert(joint_entity, id);
         }

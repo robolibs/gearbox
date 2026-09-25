@@ -3,11 +3,9 @@
 //! This is the first runtime slice of `PLAN.md`: after a USD file is loaded,
 //! reopen the composed stage, find prims annotated with the prototype
 //! `GearboxMachineAPI` / `GearboxControllerAPI:<name>` vocabulary, resolve the
-//! authored relationships, and store/log a typed discovery snapshot. The first
-//! builtin controller path is intentionally conservative: it binds authored
-//! wheel/steer joint relationships when Rapier exposes those joints as impulse
-//! joints, and keeps a body-force fallback while the upstream adapter grows a
-//! stable USD-joint-to-Rapier-handle index.
+//! authored relationships, and store/log a typed discovery snapshot. The
+//! builtin controllers bind authored wheel/steer joint relationships to Molla
+//! joint motors.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -1083,9 +1081,6 @@ fn is_allowlisted(executable: &Path, allowlist_dirs: &[std::path::PathBuf]) -> b
     })
 }
 
-/// First builtin controller: consume `cmd_vel`, bind authored wheel/steer joint
-/// relationships to Rapier impulse-joint motors where possible, publish
-/// chassis pose/velocity state, and keep a conservative body-force fallback for
 /// How soft a machine's tyres are standing, nought at their authored maximum
 /// pressure and one at their minimum. Averaged over every tyre that reports a
 /// pressure, because the steering is resisted by all of them and not only by
@@ -1585,7 +1580,7 @@ fn apply_builtin_diff_drive_cmd_vel(
                 body_handle,
                 controller.wheel_radius.unwrap_or(0.1) as f64,
             );
-            apply_articulation_or_impulse_joint_motors(&mut physics, &wheel_targets, &[]);
+            apply_joint_motors(&mut physics, &wheel_targets, &[], None);
         }
     }
 }
@@ -1658,7 +1653,7 @@ fn drive_differential_wheels(
     }
     let pairs: Vec<_> = targets.iter().map(|target| target.pair).collect();
     wake_vehicle_for_command(physics, chassis, &pairs, cmd, 0.0);
-    apply_articulation_or_impulse_joint_motors(physics, &targets, &[]);
+    apply_joint_motors(physics, &targets, &[], None);
 }
 
 /// Give every wheel body the velocity its place on the chassis implies —
@@ -1743,7 +1738,7 @@ fn stable_cmd_vel(
 }
 
 fn machine_heading_rad(body: &dyn Body) -> f64 {
-    // Rapier/Bevy runs Y-up, so the drive plane is X/Z and yaw is around +Y.
+    // The sim runs Y-up, so the drive plane is X/Z and yaw is around +Y.
     // The USD stage is Z-up and `usd_bevy` converts vectors with -90° about X:
     // (usd X, usd Y, usd Z) -> (bevy X, bevy Y=usd Z, bevy Z=-usd Y).
     // The chassis rigid body keeps the USD-authored local basis. In that basis
@@ -2031,7 +2026,7 @@ fn dump_joints_periodically(
     }
 }
 
-/// Every impulse joint inside one machine with its locked axes and AngX
+/// Every joint inside one machine with its locked axes and AngX
 /// motor, for `GEARBOX_JOINT_DUMP=<machine id>`.
 fn dump_machine_joints(
     physics: &crate::physics::PhysicsWorld,
@@ -3718,14 +3713,6 @@ struct MotorApplication {
     steer: bool,
 }
 
-fn apply_articulation_or_impulse_joint_motors(
-    physics: &mut crate::physics::PhysicsWorld,
-    wheel_targets: &[JointVelocityTarget],
-    steer_targets: &[JointPositionTarget],
-) -> MotorApplication {
-    apply_joint_motors(physics, wheel_targets, steer_targets, None)
-}
-
 /// Write the wheel and steer motors; `steer_cap` limits the torque of steer
 /// joints without an authored drive.
 fn apply_joint_motors(
@@ -4610,11 +4597,11 @@ def Xform "Leatherback" (
     }
 
     #[test]
-    fn impulse_joint_motors_bind_authored_body_pairs() {
+    fn joint_motors_bind_authored_body_pairs() {
         let mut physics = crate::physics::PhysicsWorld::default();
-        let [chassis, wheel, steer, steer_link] = revolute_pairs(&mut physics, false);
+        let [chassis, wheel, steer, steer_link] = revolute_pairs(&mut physics);
 
-        let applied = apply_articulation_or_impulse_joint_motors(
+        let applied = apply_joint_motors(
             &mut physics,
             &[JointVelocityTarget {
                 pair: (wheel, chassis),
@@ -4627,54 +4614,7 @@ def Xform "Leatherback" (
                 pair: (steer, steer_link),
                 position: 0.25,
             }],
-        );
-        assert!(applied.drive);
-        assert!(applied.steer);
-
-        let drive = physics.joint_between(chassis, wheel).expect("drive joint");
-        assert_eq!(physics.joint_is_reduced(drive), physics.name() == "molla");
-        let motor = physics.joint(drive).unwrap().motor(JointAxis::AngX).expect("drive motor");
-        assert!((motor.target_velocity - 7.5).abs() < 1e-9);
-        assert_eq!(motor.max_force, WHEEL_DRIVE_MAX_TORQUE);
-
-        let steer = physics.joint_between(steer, steer_link).expect("steer joint");
-        let motor = physics.joint(steer).unwrap().motor(JointAxis::AngX).expect("steer motor");
-        assert!((motor.target_position - 0.25).abs() < 1e-9);
-        assert_eq!(motor.stiffness, STEER_MAX_TORQUE / STEER_LOAD_ERROR_RAD);
-    }
-
-    /// Chassis↔wheel about X and steer↔steer_link about Z, as constraint or
-    /// reduced-coordinate joints.
-    fn revolute_pairs(physics: &mut crate::physics::PhysicsWorld, reduced: bool) -> [BodyId; 4] {
-        use crate::physics::backend::{BodyDesc, JointDesc, JointKind};
-        let bodies = [(); 4].map(|_| physics.insert_body(BodyDesc::dynamic()));
-        for (a, b, axis) in [(0, 1, DVec3::X), (2, 3, DVec3::Z)] {
-            let mut desc =
-                JointDesc::new(JointKind::Revolute { axis }, Pose::IDENTITY, Pose::IDENTITY);
-            desc.reduced = reduced;
-            physics.insert_joint(bodies[a], bodies[b], desc);
-        }
-        bodies
-    }
-
-    #[test]
-    fn multibody_joint_motors_bind_authored_body_pairs() {
-        let mut physics = crate::physics::PhysicsWorld::default();
-        let [chassis, wheel, steer, steer_link] = revolute_pairs(&mut physics, true);
-
-        let applied = apply_articulation_or_impulse_joint_motors(
-            &mut physics,
-            &[JointVelocityTarget {
-                pair: (wheel, chassis),
-                velocity: 3.5,
-                damping: WHEEL_DRIVE_DAMPING,
-                max_torque: WHEEL_DRIVE_MAX_TORQUE,
-                force_based: false,
-            }],
-            &[JointPositionTarget {
-                pair: (steer, steer_link),
-                position: 0.15,
-            }],
+            None,
         );
         assert!(applied.drive);
         assert!(applied.steer);
@@ -4682,12 +4622,25 @@ def Xform "Leatherback" (
         let drive = physics.joint_between(chassis, wheel).expect("drive joint");
         assert!(physics.joint_is_reduced(drive));
         let motor = physics.joint(drive).unwrap().motor(JointAxis::AngX).expect("drive motor");
-        assert!((motor.target_velocity - 3.5).abs() < 1e-9);
+        assert!((motor.target_velocity - 7.5).abs() < 1e-9);
+        assert_eq!(motor.max_force, WHEEL_DRIVE_MAX_TORQUE);
 
         let steer = physics.joint_between(steer, steer_link).expect("steer joint");
         assert!(physics.joint_is_reduced(steer));
         let motor = physics.joint(steer).unwrap().motor(JointAxis::AngX).expect("steer motor");
-        assert!((motor.target_position - 0.15).abs() < 1e-9);
+        assert!((motor.target_position - 0.25).abs() < 1e-9);
+        assert_eq!(motor.stiffness, STEER_MAX_TORQUE / STEER_LOAD_ERROR_RAD);
+    }
+
+    /// Chassis↔wheel about X and steer↔steer_link about Z.
+    fn revolute_pairs(physics: &mut crate::physics::PhysicsWorld) -> [BodyId; 4] {
+        use crate::physics::backend::{BodyDesc, JointDesc, JointKind};
+        let bodies = [(); 4].map(|_| physics.insert_body(BodyDesc::dynamic()));
+        for (a, b, axis) in [(0, 1, DVec3::X), (2, 3, DVec3::Z)] {
+            let desc = JointDesc::new(JointKind::Revolute { axis }, Pose::IDENTITY, Pose::IDENTITY);
+            physics.insert_joint(bodies[a], bodies[b], desc);
+        }
+        bodies
     }
 
     #[test]
@@ -5125,7 +5078,7 @@ fn publish_machine_controller_states(
 
         // World-frame position and orientation go out REP-103/Gazebo/Isaac
         // Sim style (Z up, X/Y the ground plane), not the sim's own internal
-        // Bevy/Rapier frame (Y up, X/Z the ground plane). The remap is the
+        // Bevy frame (Y up, X/Z the ground plane). The remap is the
         // axis permutation (ros_x, ros_y, ros_z) = (sim_z, sim_x, sim_y): it's
         // right-handed (verified: ros_x × ros_y = ros_z), and it lines up
         // `heading_rad` with standard ROS yaw for free — heading 0 already

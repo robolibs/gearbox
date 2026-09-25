@@ -1,7 +1,7 @@
 //! In-app log capture for the Log pane. The mara host owns the tracing
 //! subscriber (the embedded Bevy app runs without a `LogPlugin`), so the
 //! layer is built there and its buffer is shared with the pane. Filters on
-//! usd_bevy / usd_schema / usd_rapier / gearbox targets so the buffer does
+//! usd_bevy / usd_schema / gearbox targets so the buffer does
 //! not fill with framework noise.
 
 use std::collections::VecDeque;
@@ -86,7 +86,6 @@ where
         let target = event.metadata().target();
         if !(target.starts_with("usd_bevy")
             || target.starts_with("usd_schema")
-            || target.starts_with("usd_rapier")
             || target.starts_with("gearbox"))
         {
             return;

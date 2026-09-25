@@ -151,10 +151,10 @@ where
         std::thread::sleep(std::time::Duration::from_secs(seconds));
         drop(guard);
     });
-    // Rapier and parry trace every constraint; recording them costs more than solving.
+    // Parry, under Molla's geometry, traces every query; recording them costs more than solving.
     layer.with_filter(tracing_subscriber::EnvFilter::new(
         std::env::var("GEARBOX_TRACE_FILTER")
-            .unwrap_or_else(|_| "info,rapier3d_f64=warn,parry3d_f64=warn".into()),
+            .unwrap_or_else(|_| "info,parry3d_f64=warn".into()),
     ))
 }
 

@@ -71,7 +71,7 @@ pub fn convert_colliders(
             Some(body_entity) => {
                 let Some(handle) = world.entity_to_body.get(&body_entity).copied() else {
                     // This collider belongs to a rigid body, but the body
-                    // adapter has not inserted the Rapier body yet. Do not
+                    // adapter has not inserted the Molla body yet. Do not
                     // attach it as a standalone world collider; that leaves
                     // the dynamic body collider-less and it falls through the
                     // terrain. Try again next frame while `ColliderAttached`

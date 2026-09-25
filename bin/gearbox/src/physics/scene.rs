@@ -1,5 +1,5 @@
 //! `UsdPhysicsScene` → `PhysicsWorld.gravity`. First scene wins;
-//! subsequent ones warn (Rapier currently runs one world).
+//! subsequent ones warn (the sim runs one world).
 
 use super::markers::UsdPhysicsScene;
 use bevy::prelude::*;

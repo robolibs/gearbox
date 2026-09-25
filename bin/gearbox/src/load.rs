@@ -750,7 +750,6 @@ fn drain_machine_load_queue(
     mut sites: ResMut<crate::globe::Sites>,
     inventory: Res<ControllerInventory>,
     loaded: Query<&LoadedAsset>,
-    physics: Res<crate::physics::PhysicsWorld>,
     mut pending: Query<&mut MachinePhysicsSyncPending>,
     mut bus: Option<ResMut<GearboxBus>>,
 ) {
@@ -784,9 +783,6 @@ fn drain_machine_load_queue(
         }
         if !tyres.is_empty() && req.machine_id().is_none_or(|id| id.trim().is_empty()) {
             reject("pressure snapshot requires an explicit machine id"); continue;
-        }
-        if !tyres.is_empty() && !physics.uses_wheel_forces() {
-            reject("this backend does not support pressure snapshots"); continue;
         }
         if !tyres.is_empty() && (inventory.machines.iter().any(|m| Some(m.id.clone()) == req.machine_id())
             || inflight.0.iter().any(|e| e.machine_id == req.machine_id() && (!e.spawned || loaded.get(e.root).is_ok())))
@@ -908,7 +904,6 @@ fn refresh_scene_objects(
     mut objects: ResMut<SceneObjects>,
     overrides: Query<&usd_bevy::instance::UsdInstanceOverrides>,
     attachments: Res<crate::attach::Attachments>,
-    physics: Res<crate::physics::PhysicsWorld>,
 ) {
     let mut out = Vec::new();
     for (entity, asset, transform) in loaded.iter() {
@@ -925,8 +920,7 @@ fn refresh_scene_objects(
         let kind = match machine {
             Some(m) => {
                 props.set("machine_id", &m.id);
-                if physics.uses_wheel_forces()
-                    && inventory.machines.iter().filter(|m| m.scene_root == Some(entity)).count() == 1
+                if inventory.machines.iter().filter(|m| m.scene_root == Some(entity)).count() == 1
                     && !attachments.0.iter().any(|a| a.master_id == m.id || a.slave_id == m.id)
                     && let Ok(opinions) = overrides.get(entity)
                     && opinions.attributes.is_empty()

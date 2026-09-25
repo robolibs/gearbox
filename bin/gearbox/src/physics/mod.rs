@@ -8,8 +8,8 @@
 //! and writes poses back into `Transform`s. Values are SI; quaternions are
 //! Bevy order; `lower > upper` on a limit locks the DOF.
 //!
-//! The engine itself sits behind `backend::PhysicsBackend`; `rapier` is the
-//! reference implementation; `molla` provides CPU Featherstone dynamics.
+//! Molla is the engine: `molla` implements `backend::PhysicsBackend`, the
+//! interface the rest of gearbox steps and reads it through.
 
 mod attach;
 #[cfg(test)]
@@ -25,9 +25,6 @@ pub mod markers;
 pub(crate) mod molla;
 #[cfg(test)]
 pub(crate) use molla::MollaBackend;
-mod rapier;
-#[cfg(test)]
-pub(crate) use rapier::RapierBackend;
 pub mod reader;
 mod scene;
 #[cfg(test)]
@@ -274,7 +271,7 @@ fn refresh_swapped_stages(world: &mut World) {
     world.insert_non_send(instances);
 }
 
-/// Removes the rapier bodies and colliders of entities that no longer
+/// Removes the bodies and colliders of entities that no longer
 /// exist; a removed body takes its joints with it.
 fn drop_dead_physics(world: &mut World) {
     let (bodies, colliders): (Vec<Entity>, Vec<Entity>) = {

@@ -48,7 +48,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
                 ..default()
             },
         ))
-        // USD pipeline (live stage projection) + gearbox's rapier world.
+        // USD pipeline (live stage projection) + gearbox's Molla world.
         .add_plugins(usd_bevy::UsdPlugin)
         .add_plugins(usd_bevy::asset::UsdAssetPlugin)
         // Accumulates open / override / validation / projection time per

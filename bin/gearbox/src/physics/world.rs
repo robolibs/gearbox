@@ -1,7 +1,7 @@
-//! `PhysicsWorld` — the one resource that owns the simulation. It holds a
-//! [`PhysicsBackend`] behind a box and the bookkeeping that is gearbox's
-//! own whatever engine runs: which entity is which body, which body pairs
-//! must not touch, the fixed-step clock, hitch captures.
+//! `PhysicsWorld` — the one resource that owns the simulation. It holds the
+//! Molla world behind [`PhysicsBackend`] and gearbox's own bookkeeping:
+//! which entity is which body, which body pairs must not touch, the
+//! fixed-step clock, hitch captures.
 //!
 //! It derefs to the backend, so `physics.body(id)` reads straight through.
 //! **f64 throughout;** conversion happens at the Bevy boundary
@@ -14,7 +14,6 @@ use bevy::prelude::*;
 
 use super::backend::{BodyId, ColliderId, JointId, PhysicsBackend, Pose, SolverSettings};
 use super::molla::MollaBackend;
-use super::rapier::RapierBackend;
 
 /// All physics state for the loaded scene. Exactly one of these in the world.
 #[derive(Resource)]
@@ -54,31 +53,8 @@ const MAX_STEPS_PER_FRAME: u32 = 12;
 
 impl Default for PhysicsWorld {
     fn default() -> Self {
-        Self::with_backend(backend_by_name(std::env::var("GEARBOX_PHYSICS").ok().as_deref()))
+        Self::with_backend(Box::new(MollaBackend::default()))
     }
-}
-
-/// The engine `GEARBOX_PHYSICS` names; a second backend gets an arm here.
-/// Molla runs the machines: it is the one that carries pressure tyres, wheel
-/// forces and authored joint loops. Rapier stays reachable by name, because
-/// the paired benchmarks measure one against the other.
-fn backend_by_name(name: Option<&str>) -> Box<dyn PhysicsBackend> {
-    match name {
-        None | Some("molla") => Box::new(MollaBackend::default()),
-        Some("rapier") => Box::new(RapierBackend::default()),
-        Some(other) => {
-            warn!("gearbox-physics: no backend `{other}`; running on molla");
-            Box::new(MollaBackend::default())
-        }
-    }
-}
-
-#[test]
-fn named_backends_select_the_requested_engine() {
-    assert_eq!(backend_by_name(Some("molla")).name(), "molla");
-    assert_eq!(backend_by_name(Some("rapier")).name(), "rapier");
-    assert_eq!(backend_by_name(None).name(), "molla");
-    assert_eq!(backend_by_name(Some("nonesuch")).name(), "molla");
 }
 
 impl Deref for PhysicsWorld {

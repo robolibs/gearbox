@@ -93,150 +93,145 @@ mod tests {
 
     #[test]
     fn paused_teleports_publish_and_resume_only_applies_external_edits() {
-        use crate::physics::backend::{DQuat, DVec3, JointDesc, JointKind, PhysicsBackend};
-        for backend in [
-            Box::new(crate::physics::molla::MollaBackend::default()) as Box<dyn PhysicsBackend>,
-            Box::new(crate::physics::rapier::RapierBackend::default()),
-        ] {
-            let mut app = App::new();
-            let root = app.world_mut().spawn(Transform::IDENTITY).id();
-            let chassis = app
-                .world_mut()
-                .spawn((Transform::IDENTITY, ChildOf(root)))
-                .id();
-            let wheel = app
-                .world_mut()
-                .spawn((Transform::from_xyz(1.0, 0.0, 0.0), ChildOf(chassis)))
-                .id();
-            let mut physics = PhysicsWorld::with_backend(backend);
-            let a = physics.insert_body(BodyDesc::dynamic().entity(chassis));
-            let b = physics.insert_body(
-                BodyDesc::dynamic()
-                    .entity(wheel)
-                    .pose(Pose::from_translation(DVec3::X)),
-            );
-            let extra = physics.insert_body(BodyDesc::dynamic());
-            physics.entity_to_body.insert(chassis, a);
-            physics.entity_to_body.insert(wheel, b);
-            physics.insert_joint(
-                a,
-                b,
-                JointDesc::new(
-                    JointKind::Revolute { axis: DVec3::X },
-                    Pose::from_translation(DVec3::X),
-                    Pose::IDENTITY,
-                ),
-            );
-            physics.body_mut(extra).unwrap().set_linvel(DVec3::Z, true);
-            app.insert_resource(physics)
-                .insert_resource(super::super::PhysicsActive(false))
-                .add_systems(Update, super::super::sync_bodies_to_transforms_on_resume)
-                .add_systems(PostUpdate, writeback_transforms);
-            app.update();
+        use crate::physics::backend::{DQuat, DVec3, JointDesc, JointKind};
+        let mut app = App::new();
+        let root = app.world_mut().spawn(Transform::IDENTITY).id();
+        let chassis = app
+            .world_mut()
+            .spawn((Transform::IDENTITY, ChildOf(root)))
+            .id();
+        let wheel = app
+            .world_mut()
+            .spawn((Transform::from_xyz(1.0, 0.0, 0.0), ChildOf(chassis)))
+            .id();
+        let mut physics = PhysicsWorld::default();
+        let a = physics.insert_body(BodyDesc::dynamic().entity(chassis));
+        let b = physics.insert_body(
+            BodyDesc::dynamic()
+                .entity(wheel)
+                .pose(Pose::from_translation(DVec3::X)),
+        );
+        let extra = physics.insert_body(BodyDesc::dynamic());
+        physics.entity_to_body.insert(chassis, a);
+        physics.entity_to_body.insert(wheel, b);
+        physics.insert_joint(
+            a,
+            b,
+            JointDesc::new(
+                JointKind::Revolute { axis: DVec3::X },
+                Pose::from_translation(DVec3::X),
+                Pose::IDENTITY,
+            ),
+        );
+        physics.body_mut(extra).unwrap().set_linvel(DVec3::Z, true);
+        app.insert_resource(physics)
+            .insert_resource(super::super::PhysicsActive(false))
+            .add_systems(Update, super::super::sync_bodies_to_transforms_on_resume)
+            .add_systems(PostUpdate, writeback_transforms);
+        app.update();
 
-            let rotation = DQuat::from_rotation_y(0.4);
-            let target = Pose::new(DVec3::new(4.0, 2.0, -3.0), rotation);
-            let wheel_target = Pose::new(target.transform_point(DVec3::X), rotation);
-            app.world_mut()
-                .resource_mut::<PhysicsWorld>()
-                .set_body_poses(&[(b, wheel_target), (a, target)], true)
-                .unwrap();
-            app.update();
-            let mut state = SystemState::<TransformHelper>::new(app.world_mut());
-            for (entity, pose) in [(chassis, target), (wheel, wheel_target)] {
-                let gt = state
-                    .get(app.world())
-                    .unwrap()
-                    .compute_global_transform(entity)
-                    .unwrap();
-                assert!((vec3_to_d(gt.translation()) - pose.translation).length() < 1e-5);
-            }
-
-            app.world_mut()
-                .resource_mut::<PhysicsWorld>()
-                .body_mut(a)
+        let rotation = DQuat::from_rotation_y(0.4);
+        let target = Pose::new(DVec3::new(4.0, 2.0, -3.0), rotation);
+        let wheel_target = Pose::new(target.transform_point(DVec3::X), rotation);
+        app.world_mut()
+            .resource_mut::<PhysicsWorld>()
+            .set_body_poses(&[(b, wheel_target), (a, target)], true)
+            .unwrap();
+        app.update();
+        let mut state = SystemState::<TransformHelper>::new(app.world_mut());
+        for (entity, pose) in [(chassis, target), (wheel, wheel_target)] {
+            let gt = state
+                .get(app.world())
                 .unwrap()
-                .set_linvel(DVec3::X * 2.0, true);
-            app.world_mut()
-                .resource_mut::<super::super::PhysicsActive>()
-                .0 = true;
-            app.update();
-            let physics = app.world().resource::<PhysicsWorld>();
-            assert!(
-                (physics.body(a).unwrap().position().translation - target.translation).length()
-                    < 1e-8
-            );
-            assert!((physics.body(a).unwrap().linvel() - DVec3::X * 2.0).length() < 1e-8);
-
-            app.world_mut()
-                .resource_mut::<super::super::PhysicsActive>()
-                .0 = false;
-            app.update();
-            app.world_mut()
-                .get_mut::<Transform>(root)
-                .unwrap()
-                .translation
-                .z += 5.0;
-            app.update();
-            assert!(
-                (app.world()
-                    .resource::<PhysicsWorld>()
-                    .body(a)
-                    .unwrap()
-                    .position()
-                    .translation
-                    - target.translation)
-                    .length()
-                    < 1e-8
-            );
-            app.world_mut()
-                .resource_mut::<super::super::PhysicsActive>()
-                .0 = true;
-            app.update();
-            let physics = app.world().resource::<PhysicsWorld>();
-            for (id, pose) in [(a, target), (b, wheel_target)] {
-                assert!(
-                    (physics.body(id).unwrap().position().translation
-                        - pose.translation
-                        - DVec3::Z * 5.0)
-                        .length()
-                        < 1e-5
-                );
-                assert!(physics.body(id).unwrap().linvel().length() < 1e-8);
-            }
-            assert_eq!(physics.body(extra).unwrap().linvel(), DVec3::Z);
-
-            app.world_mut()
-                .resource_mut::<super::super::PhysicsActive>()
-                .0 = false;
-            app.update();
-            let newest = Pose::from_translation(DVec3::new(-8.0, 4.0, 2.0));
-            app.world_mut()
-                .resource_mut::<PhysicsWorld>()
-                .set_body_poses(
-                    &[
-                        (a, newest),
-                        (b, Pose::from_translation(newest.translation + DVec3::X)),
-                    ],
-                    true,
-                )
+                .compute_global_transform(entity)
                 .unwrap();
-            app.world_mut()
-                .resource_mut::<super::super::PhysicsActive>()
-                .0 = true;
-            app.update();
-            assert!(
-                (app.world()
-                    .resource::<PhysicsWorld>()
-                    .body(a)
-                    .unwrap()
-                    .position()
-                    .translation
-                    - newest.translation)
-                    .length()
-                    < 1e-8
-            );
+            assert!((vec3_to_d(gt.translation()) - pose.translation).length() < 1e-5);
         }
+
+        app.world_mut()
+            .resource_mut::<PhysicsWorld>()
+            .body_mut(a)
+            .unwrap()
+            .set_linvel(DVec3::X * 2.0, true);
+        app.world_mut()
+            .resource_mut::<super::super::PhysicsActive>()
+            .0 = true;
+        app.update();
+        let physics = app.world().resource::<PhysicsWorld>();
+        assert!(
+            (physics.body(a).unwrap().position().translation - target.translation).length()
+                < 1e-8
+        );
+        assert!((physics.body(a).unwrap().linvel() - DVec3::X * 2.0).length() < 1e-8);
+
+        app.world_mut()
+            .resource_mut::<super::super::PhysicsActive>()
+            .0 = false;
+        app.update();
+        app.world_mut()
+            .get_mut::<Transform>(root)
+            .unwrap()
+            .translation
+            .z += 5.0;
+        app.update();
+        assert!(
+            (app.world()
+                .resource::<PhysicsWorld>()
+                .body(a)
+                .unwrap()
+                .position()
+                .translation
+                - target.translation)
+                .length()
+                < 1e-8
+        );
+        app.world_mut()
+            .resource_mut::<super::super::PhysicsActive>()
+            .0 = true;
+        app.update();
+        let physics = app.world().resource::<PhysicsWorld>();
+        for (id, pose) in [(a, target), (b, wheel_target)] {
+            assert!(
+                (physics.body(id).unwrap().position().translation
+                    - pose.translation
+                    - DVec3::Z * 5.0)
+                    .length()
+                    < 1e-5
+            );
+            assert!(physics.body(id).unwrap().linvel().length() < 1e-8);
+        }
+        assert_eq!(physics.body(extra).unwrap().linvel(), DVec3::Z);
+
+        app.world_mut()
+            .resource_mut::<super::super::PhysicsActive>()
+            .0 = false;
+        app.update();
+        let newest = Pose::from_translation(DVec3::new(-8.0, 4.0, 2.0));
+        app.world_mut()
+            .resource_mut::<PhysicsWorld>()
+            .set_body_poses(
+                &[
+                    (a, newest),
+                    (b, Pose::from_translation(newest.translation + DVec3::X)),
+                ],
+                true,
+            )
+            .unwrap();
+        app.world_mut()
+            .resource_mut::<super::super::PhysicsActive>()
+            .0 = true;
+        app.update();
+        assert!(
+            (app.world()
+                .resource::<PhysicsWorld>()
+                .body(a)
+                .unwrap()
+                .position()
+                .translation
+                - newest.translation)
+                .length()
+                < 1e-8
+        );
     }
 
     #[test]

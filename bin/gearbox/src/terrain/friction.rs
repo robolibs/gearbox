@@ -39,9 +39,6 @@ pub(super) fn publish(
         state.attempt = None;
         return;
     };
-    if !physics.uses_wheel_forces() {
-        return;
-    }
     let mut colliders: Vec<ColliderId> = ground.0.values().copied().collect();
     colliders.sort();
     let Some(fallback) = colliders
