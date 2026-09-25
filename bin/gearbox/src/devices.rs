@@ -39,15 +39,34 @@ impl Plugin for DevicesPlugin {
     }
 }
 
+/// Device registration and commands for the headless imported-machine
+/// benchmarks.
+#[cfg(test)]
+pub(crate) fn benchmark_schedule(app: &mut App) -> bevy::ecs::schedule::Schedule {
+    app.init_resource::<MachineDevices>();
+    let mut schedule = bevy::ecs::schedule::Schedule::default();
+    schedule.add_systems(drive_devices);
+    schedule
+}
+
+#[cfg(test)]
+impl MachineDevices {
+    /// Devices registered for `machine`.
+    pub(crate) fn count(&self, machine: &str) -> usize {
+        self.machines.get(machine).map_or(0, Vec::len)
+    }
+}
+
 // ── Authoring ──────────────────────────────────────────────────────────────
 
 /// What a device prim authors.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeviceKind {
-    /// A joint's motor and/or brake: the motor's limits and available force.
+    /// A joint's motor and/or brake: the motor's limits and available force,
+    /// the brake's initial damping.
     Joint {
         motor: Option<(DeviceLimits, f64)>,
-        brake: Option<BrakeSpec>,
+        brake: Option<f64>,
     },
     Propeller {
         thrust: [f64; 2],
@@ -66,14 +85,6 @@ pub enum DeviceKind {
     /// Drag on the prim's body: `CdA` (m²) along the prim's axes, whose
     /// origin is the centre of pressure, in air of `density`.
     Drag { area: [f64; 3], density: f64 },
-}
-
-/// A joint brake's damping at spawn and at full application (N·m·s/rad or
-/// N·s/m); `builtin:brake` scales the full one by its level.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BrakeSpec {
-    pub damping: f64,
-    pub max_damping: Option<f64>,
 }
 
 /// An authored device of a machine.
@@ -149,10 +160,7 @@ pub fn discover(
                 motor: motor.then(|| {
                     (limits(stage, prim, "motor", 10.0), float("gearbox:motor:maxForce").unwrap_or(10.0).abs())
                 }),
-                brake: brake.then(|| BrakeSpec {
-                    damping: float("gearbox:brake:damping").unwrap_or(0.0).max(0.0),
-                    max_damping: float("gearbox:brake:maxDamping").filter(|d| *d > 0.0),
-                }),
+                brake: brake.then(|| float("gearbox:brake:damping").unwrap_or(0.0).max(0.0)),
             }
         } else if has_namespace(&names, "propeller") {
             let pair = |key: &str| {
@@ -290,14 +298,6 @@ pub fn ownership_errors(machine: &crate::controller::MachineInstanceSpec) -> Vec
         .collect()
 }
 
-/// Full-application damping of the brake device on `joint`, if authored.
-pub fn brake_capacity(machine: &crate::controller::MachineInstanceSpec, joint: &str) -> Option<f64> {
-    machine.devices.iter().find_map(|d| match d.kind {
-        DeviceKind::Joint { brake: Some(b), .. } if d.prim == joint => b.max_damping,
-        _ => None,
-    })
-}
-
 // ── Runtime ────────────────────────────────────────────────────────────────
 
 /// A registered device and the backend object behind it.
@@ -401,8 +401,8 @@ fn register_at(
             if let Some((limits, max_force)) = motor {
                 physics.insert_motor(joint, *limits, *max_force)?;
             }
-            if let Some(b) = brake {
-                physics.set_joint_brake(joint, b.damping)?;
+            if let Some(damping) = brake {
+                physics.set_joint_brake(joint, *damping)?;
             }
             Ok(Some(Live::Joint(joint)))
         }
@@ -890,7 +890,6 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
             float gearbox:motor:minPosition = -0.25
             float gearbox:motor:maxPosition = 1.25
             float gearbox:brake:damping = 300
-            float gearbox:brake:maxDamping = 9000
         }
         def PhysicsRevoluteJoint "hinge"
         {
@@ -914,10 +913,9 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
         let DeviceKind::Joint { motor: Some((limits, max_force)), brake: Some(brake) } = by("boom_lift") else {
             panic!("{:?}", by("boom_lift"));
         };
-        assert_eq!((max_force, brake.damping, brake.max_damping, limits.max_velocity), (5000.0, 300.0, Some(9000.0), 0.5));
+        assert_eq!((max_force, brake, limits.max_velocity), (5000.0, 300.0, 0.5));
         assert_eq!((limits.pid, limits.position_limits), ([4.0, 0.25, 0.0], Some([-0.25, 1.25])));
-        let hinge = BrakeSpec { damping: 0.0, max_damping: None };
-        assert_eq!(by("hinge"), DeviceKind::Joint { motor: None, brake: Some(hinge) });
+        assert!(matches!(by("hinge"), DeviceKind::Joint { motor: None, brake: Some(0.0) }));
         let DeviceKind::Propeller { thrust, torque, limits, .. } = by("fan") else { panic!() };
         assert_eq!((thrust, torque, limits.max_velocity), ([0.2, 0.01], [0.02, 0.0], 150.0));
         let DeviceKind::Belt { direction, limits } = by("roof") else { panic!() };
@@ -964,7 +962,6 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxController
             rel physics:body0 = </robot/carrier>
             rel physics:body1 = </robot/wheel>
             float gearbox:motor:maxForce = 100
-            float gearbox:brake:maxDamping = 500
         }
     }
 }
@@ -978,7 +975,6 @@ def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxController
         assert_eq!(owned.len(), 2, "{:?}", machine.links.errors);
         assert!(owned.iter().any(|e| e.contains("strut") && e.contains("the suspension")));
         assert!(owned.iter().any(|e| e.contains("roll") && e.contains("the drive controller")));
-        assert_eq!(brake_capacity(machine, "/robot/Joints/roll"), Some(500.0));
     }
 
     fn body(world: &mut PhysicsWorld, desc: BodyDesc, at: DVec3) -> crate::physics::backend::BodyId {

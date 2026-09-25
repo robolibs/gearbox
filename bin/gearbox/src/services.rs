@@ -428,7 +428,7 @@ enum Actuation {
     /// Run at a velocity (rad/s or m/s); `max_force` caps the runtime's own
     /// servo, a motor device keeps its own limit.
     Velocity { target: f64, max_force: f64 },
-    /// Brake damping (N·m·s/rad or N·s/m).
+    /// Hold the joint still with this share (0..1) of the brake servo.
     Brake(f64),
 }
 
@@ -444,15 +444,19 @@ fn joint_between(physics: &PhysicsWorld, j: &JointRef) -> Option<JointId> {
 }
 
 /// Drives a joint through its motor device when it has one, otherwise with
-/// the runtime's own servo. Brakes go through the joint's brake channel,
-/// which the drive's motors leave alone.
+/// the runtime's own servo. A brake is a capped zero-velocity servo: Molla's
+/// joint damping on a tyred wheel whose axle rocks on a bogie feeds energy
+/// into the trailer, so it is not used for parking.
 fn actuate(physics: &mut PhysicsWorld, j: &JointRef, act: Actuation) -> bool {
     let Some(id) = joint_between(physics, j) else {
         return false;
     };
     let device = physics.has_motor(id);
     match act {
-        Actuation::Brake(damping) => physics.set_joint_brake(id, damping).is_ok(),
+        Actuation::Brake(level) => servo(physics, id, j.axis, |g| {
+            g.set_motor_velocity(j.axis, 0.0, level * BRAKE_FACTOR);
+            g.set_motor_max_force(j.axis, level * MOTOR_MAX_FORCE);
+        }),
         Actuation::Position(target) if device => physics.command_motor(id, DeviceCommand::Position(target)).is_ok(),
         Actuation::Velocity { target, .. } if device => {
             physics.command_motor(id, DeviceCommand::Velocity(target)).is_ok()
@@ -482,9 +486,7 @@ const POSITION_STIFFNESS: f64 = 4_000.0;
 const POSITION_DAMPING: f64 = 400.0;
 const MOTOR_MAX_FORCE: f64 = 50_000.0;
 const VELOCITY_FACTOR: f64 = 200.0;
-/// Brake damping at full level when the joint's brake authors no
-/// `maxDamping` (N·m·s/rad).
-const BRAKE_DAMPING: f64 = 1.0e6;
+const BRAKE_FACTOR: f64 = 400.0;
 const DEFAULT_PTO_RPM: f64 = 540.0;
 const MAX_PTO_RPM: f64 = 1200.0;
 /// A PTO stub weighs a few kilograms; the hitch torque cap would throw the
@@ -657,8 +659,7 @@ fn apply_service_controllers(
                             .or_else(|| num(props, "value"))
                             .unwrap_or(parked)
                             .clamp(0.0, 1.0);
-                        let full = crate::devices::brake_capacity(machine, prim).unwrap_or(BRAKE_DAMPING);
-                        actuate(&mut physics, &j, Actuation::Brake(level * full))
+                        actuate(&mut physics, &j, Actuation::Brake(level))
                     }
                     "builtin:trailer_steer" => {
                         let max = controller
@@ -997,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn joints_without_a_device_keep_the_runtime_servo_and_brakes_use_damping() {
+    fn joints_without_a_device_keep_the_runtime_servo_and_brakes_hold_them() {
         let (mut world, j, joint) = arm();
         assert!(!world.has_motor(joint));
         assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
@@ -1006,8 +1007,14 @@ mod tests {
         }
         let angle = world.joint(joint).unwrap().motor_position(JointAxis::AngX).unwrap();
         assert!((angle - 0.3).abs() < 1e-2, "{angle}");
-        assert!(actuate(&mut world, &j, Actuation::Brake(250.0)));
+        world.joint_mut(joint, true).unwrap().set_motor_velocity(JointAxis::AngX, 1.0, 1.0e6);
         world.step();
-        assert_eq!(world.motor_output(joint).unwrap().brake_damping, 250.0);
+        assert!(actuate(&mut world, &j, Actuation::Brake(1.0)));
+        for _ in 0..120 {
+            world.step();
+        }
+        let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
+        assert_eq!((motor.target_velocity, motor.max_force), (0.0, MOTOR_MAX_FORCE));
+        assert!(world.body(j.body1).unwrap().angvel().length() < 1e-3);
     }
 }
