@@ -888,11 +888,12 @@ impl PhysicsBackend for RapierBackend {
 
     // Every collider is tested: gearbox casts rays in tests and tools, not
     // per frame.
-    fn cast_ray(
+    fn cast_ray_filtered(
         &self,
         origin: DVec3,
         direction: DVec3,
         max_distance: f64,
+        include: &dyn Fn(ColliderId) -> bool,
     ) -> Option<(ColliderId, f64)> {
         let length = direction.length();
         if length <= 0.0 {
@@ -901,7 +902,7 @@ impl PhysicsBackend for RapierBackend {
         let ray = r::Ray::new(origin, direction / length);
         self.colliders
             .iter()
-            .filter(|(_, collider)| collider.is_enabled())
+            .filter(|(handle, collider)| collider.is_enabled() && include(collider_id(*handle)))
             .filter_map(|(handle, collider)| {
                 let toi =
                     collider

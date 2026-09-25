@@ -470,15 +470,16 @@ impl PhysicsBackend for MollaBackend {
     fn joint_is_reduced(&self, id: JointId) -> bool {
         self.joints.contains_key(&id)
     }
-    fn cast_ray(
+    fn cast_ray_filtered(
         &self,
         origin: DVec3,
         direction: DVec3,
         max_distance: f64,
+        include: &dyn Fn(ColliderId) -> bool,
     ) -> Option<(ColliderId, f64)> {
         self.shared
             .world()
-            .cast_ray(origin, direction, max_distance)
+            .cast_ray_filtered(origin, direction, max_distance, |h| include(ColliderId(h.to_bits())))
             .ok()
             .flatten()
             .map(|h| (ColliderId(h.collider.to_bits()), h.distance))

@@ -955,6 +955,17 @@ pub trait PhysicsBackend: Send + Sync {
         origin: DVec3,
         direction: DVec3,
         max_distance: f64,
+    ) -> Option<(ColliderId, f64)> {
+        self.cast_ray_filtered(origin, direction, max_distance, &|_| true)
+    }
+
+    /// [`Self::cast_ray`] against the colliders `include` accepts.
+    fn cast_ray_filtered(
+        &self,
+        origin: DVec3,
+        direction: DVec3,
+        max_distance: f64,
+        include: &dyn Fn(ColliderId) -> bool,
     ) -> Option<(ColliderId, f64)>;
 
     /// Manifolds of the last step that involve `collider`.
