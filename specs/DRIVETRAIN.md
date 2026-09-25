@@ -54,8 +54,8 @@ Geometry and articulation are unchanged. The Blender source is unchanged; export
 requires reapplying this drivetrain metadata. The package remains self-contained and is
 repacked with OpenUSD's `usdzip`, not a generic compressed ZIP writer.
 
-The contact-load calculation uses Rapier's solver contact friction and stored normal impulses:
-[Rapier contact graph](https://rapier.rs/docs/user_guides/rust/advanced_collision_detection/).
+The contact load of a wheel with a tyre element is Molla's tyre output: its normal load and grip
+force. Other wheels read the normal impulses of their Molla contact manifolds.
 This is a simulation model; no real-machine safe slope or towing rating is claimed.
 
 ## Rear-wheel observation

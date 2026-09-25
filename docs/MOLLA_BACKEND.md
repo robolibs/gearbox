@@ -1,8 +1,10 @@
 # Molla backend integration
 
-`GEARBOX_PHYSICS=molla` selects the CPU Featherstone backend. The default
-remains Rapier. Both implementations share Gearbox's existing body, collider,
-joint and world traits; the Molla adapter is in `bin/gearbox/src/physics/molla`.
+Molla is Gearbox's only physics engine. Its adapter is in
+`bin/gearbox/src/physics/molla`, behind Gearbox's body, collider, joint and
+world traits. The Rapier backend was removed on 2026-09-25; the dated sections
+below keep their Rapier comparisons and `GEARBOX_PHYSICS` settings as they were
+measured.
 
 ## Paired performance baseline (2026-09-20)
 
@@ -84,15 +86,15 @@ still require their own gates. Sequential Kubota timing medians remain about
   combine rules and per-contact impulse readout map through the existing trait.
 - Internal state quarantine is exposed through backend body IDs and forwarded
   to `PhysicsWorld`'s entity report after each step.
-- All Molla joints are reduced-coordinate joints, including requests that would
-  select Rapier constraint joints. `joint_is_reduced` reports this truthfully.
+- Tree joints are reduced-coordinate; authored `excludeFromArticulation` edges
+  are compliant loop joints (below). `joint_is_reduced` reports which.
 - Soft joints lower to D6 spring freedoms while retaining their logical kind,
   authored frames and semantic motor axes. Runtime frame edits preserve live
   body kinematics and change the spring rest frame. Hitch capture's 8-to-30 Hz
   updates drive real Featherstone forces rather than retaining rigid locks.
 - `internal_iterations` maps to twice that many Featherstone substeps, bounded
-  to 2–128. Featherstone's direct articulated solve does not use Rapier's outer
-  iteration count. Requested settings remain readable.
+  to 2–128. Featherstone's direct articulated solve has no outer iteration
+  count. Requested settings remain readable.
 - Scene wheel metadata registers stable wheel and spin-joint handles with the
   articulated tyre-force layer. Rolling direction follows the bearing/knuckle,
   not the spinning wheel; opposing authored axles receive opposing signed motor
@@ -103,7 +105,7 @@ still require their own gates. Sequential Kubota timing medians remain about
   current scene builders supply their existing scalar ground/material friction.
 - Traction budgets consume mean tyre normal/friction loads. Wheel stamping uses
   tyre contact points and contact state, while link values expose tyre slip,
-  slip angle and normal force. Rapier keeps its contact-based path.
+  slip angle and normal force.
 
 ## Not yet accepted
 
@@ -142,7 +144,7 @@ hardening before final acceptance.
 ## Pressure-dependent tyres
 
 The Molla wheel path now enables the core pressure brush model for discovered
-machine wheels. Rapier keeps its existing contact path. Width and unloaded
+machine wheels. Width and unloaded
 radius come from wheel collider geometry; these optional link values override
 the uncalibrated reference configuration:
 

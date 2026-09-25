@@ -173,7 +173,7 @@ topics. Deny by default. The runtime MUST be launched with
 `GEARBOX_TRANSPORT` (default `agentio`) in its environment. Blocked reasons are
 recorded per controller and shown in the Machine controllers pane.
 
-**Service controllers** drive one joint each with a rapier motor and are
+**Service controllers** drive one joint each with a joint motor and are
 commanded through `/machines/<ns>/cmd` (`controller = <instance>` plus the
 keys below; `gearbox machine cmd <instance> key=val`). The joint is
 `gearbox:controller:<n>:target`, or the machine's first `toolJoints` entry.
@@ -238,7 +238,7 @@ including while parked. Its dead zone is rescaled continuously to avoid an input
 
 The controller's `body` (or the machine `body`) MUST point at a prim that:
 
-- carries `PhysicsRigidBodyAPI`, so `usd_bevy` creates a rapier body for it;
+- carries `PhysicsRigidBodyAPI`, so it becomes a physics body;
 - has a collider somewhere in the machine, so terrain alignment can finish
   (`load.rs` waits for both bodies and colliders and warns after 120 frames);
 - SHOULD carry `PhysicsMassAPI` with `physics:mass` and
@@ -254,13 +254,13 @@ The controller's `body` (or the machine `body`) MUST point at a prim that:
   the machine usable.
 
 If the body relationship is missing, the prim is not found under the loaded
-scene root, or it has no rapier body, the controller silently does nothing
+scene root, or it has no physics body, the controller silently does nothing
 every frame. No log line is emitted.
 
 ### 4.1 Self-collision
 
 `PhysicsFilteredPairsAPI` on a body is honoured: every contact between that
-body and each listed body is dropped by a rapier pair filter. Linkages that
+body and each listed body is dropped by a pair filter. Linkages that
 run inside the chassis hull (three-point hitch rods, cylinders, stabilisers)
 MUST list the chassis and each other, or their hulls fight the chassis every
 step. Contacts between two bodies joined by a joint are always off. Once a
@@ -272,7 +272,7 @@ machines stop colliding with each other until they detach.
 
 Each wheel joint path MUST resolve to a prim that `usd_bevy` turned into a
 `UsdPhysicsJoint` with both `physics:body0` and `physics:body1` mapping to
-rapier bodies. In USD terms:
+physics bodies. In USD terms:
 
 - a `PhysicsRevoluteJoint` (or another `UsdPhysics` joint type) prim;
 - `rel physics:body0` = chassis or steering knuckle, `rel physics:body1` = wheel,
@@ -317,7 +317,7 @@ motor torque budget and whether the power ceiling is active. The budget is not m
 
 Steering joints follow the same rule: each path in `role:steeringJoints`,
 `steerJoints`, `steerLeftJoint`, or `steerRightJoint` MUST resolve to a
-`UsdPhysicsJoint` between two rapier bodies, typically chassis and a steering
+`UsdPhysicsJoint` between two physics bodies, typically chassis and a steering
 knuckle body. The knuckle then carries the wheel joint as `physics:body0`;
 §7.5 fixes that chain.
 The geometric Ackermann solver merges explicit and role steering joints. Assets
@@ -351,7 +351,6 @@ wheels are not required to invent tyres or pressure controls.
 rubber by names and derives missing dimensions/default properties. Those are
 legacy import fallbacks, not evidence of full compatibility. Explicit contact-
 type/mesh-binding schema and loader validation still need implementation.
-Rapier currently provides rigid wheel behaviour, not pressure-tyre capability.
 
 ## 6. Tool interface (agentio over peerbus)
 
@@ -636,7 +635,7 @@ one channel of a frame sharing its `sample`; a Bevy-rendered colour frame and
 the Molla depth of the same sample carry the same `sample` and simulated time
 but arrive separately. Bevy-rendered cameras render only on frames where a
 sample is due, and sample at most once per rendered frame. Out-of-range values
-are validation errors, not clamped. Sensor links on the Rapier backend are discovered but not sampled.
+are validation errors, not clamped.
 
 Every other kind streams `gearbox.measurement.v1`: `kind` names the sensor,
 `count` records of a fixed width in `values`, vectors in the link's axes.
@@ -682,9 +681,8 @@ def Xform "lidar_link" (prepend apiSchemas = ["GearboxLinkAPI"])
 
 ### 7.7 Actuator devices
 
-A machine can carry the actuators of the Webots actuator guide. The physics
-backend runs them inside its step: Molla's device layer on the Molla
-backend; the Rapier backend has none. A prim becomes a device by authoring
+A machine can carry the actuators of the Webots actuator guide. Molla's
+device layer runs them inside its step. A prim becomes a device by authoring
 attributes in its namespace. `gearbox:device:name` overrides the name,
 which is otherwise the prim's; names must be unique per machine.
 

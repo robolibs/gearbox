@@ -1,11 +1,8 @@
-# Pressure tyres in the isolated Molla backend
-
-Run this worktree with `GEARBOX_PHYSICS=molla`. Rapier retains rigid tyres;
-it does not implement these pressure mechanics.
+# Pressure tyres
 
 Procedural field layouts can author `default_friction` and per-region `friction`
 for footprint sampling. Missing values retain collider friction; no coefficients
-are inferred from visual profile names. See the [field friction contract](../crates/gearbox-fields/README.md#physical-friction-in-the-molla-worktree)
+are inferred from visual profile names. See the [field friction contract](../crates/gearbox-fields/README.md#physical-friction)
 for schema, interpolation, update semantics and current terrain/backend limits.
 
 ## Required machine asset contract
@@ -99,14 +96,14 @@ Only loaded rubber flattens and bulges; a pressure target is not immediate
 whole-wheel scaling. At low frame rates the simulation clock, and therefore
 inflation/deflation, can run slower than wall time.
 
-Launch this isolated build separately from the original Gearbox:
+Launch a named instance:
 
 ```sh
-GEARBOX_PHYSICS=molla nix develop --impure -c oslo make run '--args=--name molla-tyres --ephemeral'
+nix develop --impure -c oslo make run '--args=--name molla-tyres --ephemeral'
 ```
 
 Use `-i molla-tyres` for its CLI controls; do not rely on the default instance
-when the original Gearbox is also running.
+when another Gearbox is also running.
 
 ```sh
 gearbox -i INSTANCE machine tyre-pressure 1.0 --axle 1 --machine tractor

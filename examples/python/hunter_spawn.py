@@ -38,9 +38,8 @@ MACHINE_USD_PATH = f"bin/gearbox/assets/{MACHINE}.usd"
 
 DEFAULT_COUNT = 3
 DEFAULT_SPACING_M = 3.0
-# Loading the next machine while the last one is still being wired into the
-# physics world takes Gearbox down inside Rapier's broad-phase, so each spawn
-# waits for its agent to answer before the next request goes out.
+# Each spawn waits for its agent to answer before the next request goes out,
+# so no machine loads while the last is still being wired into the physics.
 SPAWN_TIMEOUT_S = 10.0
 
 

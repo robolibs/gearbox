@@ -31,8 +31,8 @@ remember what to pick up next.
 
 | Layer | Role | "Server/Client" terminology? |
 |---|---|---|
-| **Simulator** | Owns `Sim` (rapier-f64 physics world) and steps it. **Rapier lives strictly here.** | no |
-| **Renderer** | Draws the state. Reads from `SceneState` (a rapier-free mirror) — **never** touches `Sim` / rapier directly. | no |
+| **Simulator** | Owns the Molla physics world and steps it. **Molla lives strictly here.** | no |
+| **Renderer** | Draws the state. Reads from `SceneState` (a physics-free mirror) — **never** touches the physics directly. | no |
 | **Tool API** | Network surface for *external tools* | **yes** — zenoh server lives here |
 
 Between Simulator and Renderer sits a renderer-facing state mirror,
@@ -53,7 +53,7 @@ renderer.
 | Crate | Role | Key types | Bevy? |
 |---|---|---|---|
 | `gearbox-core` | Shared spec / data types (no physics, no Bevy) | `VehicleSpec`, `ControlInput`, `DriveMode`, `PartSpec` | no |
-| `gearbox-physics` | Rapier-f64 wrapper + drive controllers | `Sim` | no |
+| `gearbox-physics` | Molla wrapper + drive controllers | `Sim` | no |
 | `gearbox-viz` | Bevy visualization layer; owns `GearboxSim` + `SceneState` | `GearboxSim`, `SceneState`, `ChaseCamera`, `SimClock`, `FollowTarget` | yes |
 | `gearbox-editor` | Gearbox-specific egui panels (inspector, properties, spawn library, etc.) | `Selection`, `HeadingArrows`, `EditorPlugin` | yes |
 | `bevy_frost` | **Project-agnostic** glass-themed editor UI kit | `FrostPlugin`, `AccentColor`, `GlassOpacity`, `style::*`, `widgets::*`, `float::*`, `gizmo_material::*` | yes |
@@ -203,7 +203,7 @@ server", the Tool API axis has leaked into the wrong conversation.
 
 - **One desktop binary** (`bin/gearbox`). Simulator, renderer, tool
   API — all in one process.
-- **Simulator**: rapier-f64 physics world, fixed-dt 60 Hz, pause /
+- **Simulator**: Molla f64 physics world, fixed-dt 60 Hz, pause /
   speed control from the transport bar, monotonic `sim_frame` +
   `sim_time_s` counters on `SimClock`.
 - **Renderer**: Bevy 0.18 + egui, chase camera, ground grid, sky +
@@ -213,7 +213,7 @@ server", the Tool API axis has leaked into the wrong conversation.
   sim clock and command pause / speed.
 - **`SceneState` abstraction**: declared, registered, mirrored
   from `SimClock` every `PostUpdate`. Renderer has an explicit
-  rapier-free reading surface.
+  physics-free reading surface.
 - **`bevy_frost`** extracted: `FrostPlugin`, `AccentColor` /
   `GlassOpacity` resources, widgets, floating docks, gizmo
   material — all moved out of `gearbox-editor` into a
@@ -338,7 +338,7 @@ means the renderer-migration happens only once.
 
 ## Why these choices
 
-- **rapier3d-f64**: double-precision physics so planet-scale
+- **Molla (f64)**: double-precision physics so planet-scale
   simulations don't lose precision far from origin. Propagates all
   the way through — spec types in `gearbox-core` are `f64`, sibling
   `datapod` crate ships f64 spatial types.
