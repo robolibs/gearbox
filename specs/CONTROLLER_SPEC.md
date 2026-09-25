@@ -695,8 +695,10 @@ which is otherwise the prim's; names must be unique per machine.
 | Propeller | an `Xform` under a rigid body; +X is the shaft, the origin the centre of thrust | `gearbox:propeller:thrustConstants` (required) and `torqueConstants` (0, 0) as `double2`, `maxVelocity` (100), `acceleration`, `maxTorque` (unlimited) |
 | Belt (conveyor or track) | a collider, or a prim with colliders under it | `float3 gearbox:belt:direction` in the prim frame (1, 0, 0), `maxVelocity` (10), `acceleration`, `controlPID` |
 | Connector | an `Xform` under a rigid body; +X points out of the docking face | `gearbox:connector:model`, `type` symmetric/active/passive, `isLocked`, `autoLock`, `unilateralLock` / `unilateralUnlock` (true), `distanceTolerance` (0.01), `axisTolerance` / `rotationTolerance` (0.2), `numberOfRotations` (4), `snap` (true), `tensileStrength` / `shearStrength` N (unbreakable), `stiffness` Hz (30) |
+| Copter (multirotor) | an `Xform` under the rigid body the machine's propellers push; +X forward, +Z up | `gearbox:copter:maxTiltDeg` (28.6), `maxSpeed` m/s (10), `maxClimb` m/s (3), `maxYawRate` rad/s (1.5), `velocityGain` 1/s (1.5), `disturbanceTime` s (0.5), `attitudeFrequency` rad/s (6), `yawGain` 1/s (4) |
+| Drag | an `Xform` under a rigid body; its origin is the centre of pressure | `float3 gearbox:drag:area` `CdA` m² along the prim's X, Y, Z (required), `density` kg/m³ (1.225) |
 
-Behaviour follows Webots.
+Behaviour follows Webots, with copters and drag added.
 
 - **Motors:**
   - A new motor holds its joint's position.
@@ -718,6 +720,25 @@ Behaviour follows Webots.
   - Unlatching unlinks it.
   - The link breaks when the load pulling the faces apart or sliding them
     exceeds the summed strength of the latched sides.
+- **Copters:**
+  - A copter sets the speed of every propeller of its machine each step. It
+    holds a velocity (forward, left, up, yaw rate in the heading frame) or
+    an attitude (roll right side down, pitch nose down, yaw rate, climb).
+  - A disturbance observer learns the steady push of wind, drag or payload
+    and leans into it.
+  - Rotors spin opposite ways by the sign of their thrust constant.
+  - A copter device advertises a `builtin:copter` controller on `cmd_vel`.
+    A claimed `/cmd_vel` session flies it with `vx` forward, `vy` left, `vz`
+    up and `wz` yaw rate, and letting go hovers. `gearbox machine move
+    <machine> --forward/--left/--up/--turn` drives it.
+- **Drag and wind:**
+  - Each axis of a drag frame takes `−½·ρ·CdA·|a|·a`, with `a` the frame
+    origin's airspeed: body velocity minus wind.
+  - The wind is the environment's (heading, speed, gustiness). At a drag
+    body it gusts as the vegetation shows it: the same gust map, scrolled
+    downwind, sampled at the body. Between gusts it drops to `1 − gustiness`
+    of its speed.
+  - Propellers on a body take their speed of advance from its airspeed.
 
 Controllers command a device with `gearbox.actuator_command.v1` on
 `/machines/<machine_id>/actuate`. Props: `device` names it, and any of
@@ -730,6 +751,9 @@ these apply:
 | Propeller | `velocity` (rad/s) |
 | Belt | `position` (travel, m), `velocity`, `speed`, `acceleration` |
 | Connector | `lock` or `unlock` (`1`/`true`) |
+| Copter | `mode` `off`, `hover`, `velocity` or `attitude`; `forward`, `left`, `up`, `yaw_rate`; `roll`, `pitch`, `climb` (these alone mean attitude) |
+
+Drag takes no commands.
 
 Every device streams `gearbox.measurement.v1` on
 `/machines/<machine_id>/actuators/<device>` each frame:
@@ -740,6 +764,8 @@ Every device streams `gearbox.measurement.v1` on
 | `propeller` | `[rotor speed, thrust N, torque N·m, speed of advance m/s]` |
 | `belt` | `[travel m, speed m/s]` |
 | `connector` | `[presence, locked, linked, tensile N, shear N]`; props `peer` names the present or linked `<machine>/<device>` |
+| `copter` | `[roll, pitch, v forward, v left, v up, yaw rate, thrust N, saturated, mode (0 off, 1 velocity, 2 attitude)]` |
+| `drag` | `[airspeed x, y, z (drag frame), force x, y, z N (world), wind x, y, z m/s (world)]` |
 
 ```usda
 over "Joints"

@@ -975,3 +975,59 @@ Found on the way:
   conveyor test uses a 50 kg crate.
 - The ackermann controller did not reverse `lead` on `--forward=-1`. That is
   unrelated to the devices and not investigated.
+
+### Copters, wind and drag (2026-09-25)
+
+Molla `850bd41` adds a multirotor controller and air to the rigid world's
+devices (Molla book, *Rigid-world devices*):
+- `devices.copters` flies a body on its propellers:
+  - a velocity loop with a disturbance observer;
+  - a geometric attitude loop on SO(3);
+  - a least-norm mixer over the rotors' thrust and torque columns.
+- `devices.aero` holds the wind, a per-body wind, and quadratic drag
+  elements. Propellers take their speed of advance from airspeed.
+
+The device is called `copter`, not `heli` or `flight`: it needs fixed-pitch
+rotors that can make any torque. Planes and rockets would be devices of
+their own.
+
+Gearbox:
+- **Backend trait:** `insert_copter`, `command_copter`, `copter_output`,
+  `insert_drag`, `drag_output`, `set_wind` and `set_body_wind`.
+- **`devices.rs`:**
+  - discovers `gearbox:copter:*` and `gearbox:drag:*`;
+  - registers copters after the machine's propellers;
+  - maps a claimed `/cmd_vel` session to the copter's velocity command.
+- **`blow_wind`:**
+  - Each frame it sets the environment's steady wind.
+  - At every drag body it sets the gusting wind, from
+    `gearbox_fields::wind_map::Gusts`: a CPU copy of the vegetation's
+    `wind_at` over the same baked gust map, at simulated time.
+- **Asset:** `world/spray_drone.usda` is a 25 kg quad with a copter device
+  and `CdA` (0.4, 0.4, 0.8) m².
+
+The wind stays on the CPU. It costs a few flops per body per substep, and a
+GPU round trip each substep would wait behind rendering as the sensor
+raycasts did.
+
+Verification, RTX 4080, release, drone spawned alone:
+- **Calm (before drag):**
+  - Takeoff at 1.5 m/s, then hover on 246 N with the rotors at ±150 rad/s
+    (61 N each, diagonals counter-rotating).
+  - Forward at 3 m/s pitches 0.016 rad nose down.
+  - Yaw at 0.54 rad/s.
+- **Default weather (4 m/s at 36.87°, gustiness 0.7):**
+  - The drag device read 0.9–4.1 m/s gusts over 20 s, from 29° to 58°
+    (the slow turn field allows ±26°).
+  - At 4 m/s airspeed the drag was 3.1 N, and the copter pitched 0.012 rad
+    into it: `atan(3.1/245)` is 0.0128.
+  - The hover velocity stayed within 0.016 m/s. The drone drifted 4 cm in
+    20 s of gusts.
+- **Through the wind:**
+  - 5 s forward at 3 m/s covered 14.3 m, with 0.24 m cross-track.
+  - 4 s right at 2 m/s covered 7.6 m.
+- **Tests:**
+  - `devices::tests` covers copter and drag discovery, and a drag body in
+    the world wind next to one in its own.
+  - `wind_map::tests` checks the gust range: between `1 − gustiness` and
+    full speed, never more than 90° off downwind.
