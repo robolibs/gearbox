@@ -2458,7 +2458,7 @@ fn prepare_machine_physics(
 fn effective_wheel_radius(physics: &crate::physics::PhysicsWorld, wheel: BodyId) -> Option<f64> {
     physics.wheel_output(wheel).and_then(|out| out.pressure)
         .map(|p| p.loaded_radius).filter(|r| r.is_finite() && *r > 1e-6)
-        .or_else(|| body_max_collider_radius(physics, wheel))
+        .or_else(|| body_tyre_geometry(physics, wheel).map(|(_, _, radius)| radius))
 }
 
 /// Largest collider half-extent of a body, or `None` without colliders.
@@ -2533,6 +2533,19 @@ fn authored_wheel_prevents_large_axle_becoming_an_extra_tyre() {
     include_wheel_pair(&mut wheels, &physics, chassis, (axle, wheel));
     include_wheel_pair(&mut wheels, &physics, chassis, (wheel, axle));
     assert_eq!(wheels, vec![wheel]);
+}
+
+#[test]
+fn a_roller_wider_than_tall_rolls_about_its_cylinder_axis() {
+    use crate::physics::backend::{BodyDesc, ColliderDesc, DQuat};
+    let mut physics = crate::physics::PhysicsWorld::default();
+    let roller = physics.insert_body(BodyDesc::dynamic());
+    let along_x = DQuat::from_rotation_arc(DVec3::Y, DVec3::X);
+    physics.insert_collider(ColliderDesc::new(Shape::Cylinder { half_height: 1.5, radius: 0.27 })
+        .pose(Pose::new(DVec3::ZERO, along_x)).parent(roller)).unwrap();
+    let (axle, width, radius) = body_tyre_geometry(&physics, roller).unwrap();
+    assert!(axle.abs().abs_diff_eq(DVec3::X, 1e-9), "axle {axle}");
+    assert!((width - 3.0).abs() < 1e-9 && (radius - 0.27).abs() < 1e-9, "width {width} radius {radius}");
 }
 
 /// Every wheel of every machine, every frame, for the grass trample map:
@@ -2709,8 +2722,10 @@ fn record_wheel_tracks(
 /// A wheel counts as on the ground while its lowest point is this close.
 const WHEEL_TRACK_CONTACT_SLACK_M: f32 = 0.08;
 
-/// The tyre's axle in the wheel body's frame, its width and its radius:
-/// the thinnest and the largest axis of the largest collider's local box.
+/// The tyre's axle in the wheel body's frame, its width and its radius. A
+/// cylinder collider gives them directly, so a roller wider than it is tall
+/// still rolls about its own axis; any other shape falls back to the
+/// thinnest and the largest axis of the largest collider's local box.
 pub(crate) fn body_tyre_geometry(
     physics: &crate::physics::PhysicsWorld,
     body: BodyId,
@@ -2727,18 +2742,20 @@ pub(crate) fn body_tyre_geometry(
             extent(*a).total_cmp(&extent(*b))
         })?;
     let half = collider.local_aabb().half_extents();
-    let (axis, width) = if half.x <= half.y && half.x <= half.z {
-        (DVec3::new(1.0, 0.0, 0.0), half.x * 2.0)
-    } else if half.y <= half.z {
-        (DVec3::new(0.0, 1.0, 0.0), half.y * 2.0)
-    } else {
-        (DVec3::new(0.0, 0.0, 1.0), half.z * 2.0)
+    let (axis, width, radius) = match collider.shape() {
+        ShapeView::Cylinder { half_height, radius } => (DVec3::Y, half_height * 2.0, radius),
+        ShapeView::RoundCylinder { half_height, radius, border_radius } => {
+            (DVec3::Y, (half_height + border_radius) * 2.0, radius + border_radius)
+        }
+        _ if half.x <= half.y && half.x <= half.z => (DVec3::X, half.x * 2.0, half.max_element()),
+        _ if half.y <= half.z => (DVec3::Y, half.y * 2.0, half.max_element()),
+        _ => (DVec3::Z, half.z * 2.0, half.max_element()),
     };
     let axis = match collider.position_wrt_parent() {
         Some(pose) => pose.rotation * axis,
         None => axis,
     };
-    Some((axis, width, half.max_element()))
+    Some((axis, width, radius))
 }
 
 
