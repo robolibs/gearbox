@@ -356,6 +356,11 @@ impl MachineClient<'_> {
         forward_mps: f64,
         yaw_rps: f64,
     ) -> agentio::Result<Status> {
+        self.cmd_twist(&TwistCmd::new(session, forward_mps, yaw_rps))
+    }
+
+    /// A full twist command (forward, left, up, yaw rate).
+    pub fn cmd_twist(&mut self, command: &TwistCmd) -> agentio::Result<Status> {
         if self.cmd_vel.is_none() {
             let topic = self.topic(topics::MACHINE_CMD_VEL);
             self.cmd_vel = Some(match self.direct_peer {
@@ -364,7 +369,7 @@ impl MachineClient<'_> {
             });
         }
         let client = self.cmd_vel.as_mut().expect("cached above");
-        call_with(client, &TwistCmd::new(session, forward_mps, yaw_rps))
+        call_with(client, command)
     }
 
     pub fn command(&self, cmd: &ControllerCommand) -> agentio::Result<Status> {

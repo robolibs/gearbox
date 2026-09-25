@@ -139,6 +139,15 @@ impl TwistCmd {
             twist: Twist::from_components(forward_mps, 0.0, 0.0, 0.0, 0.0, yaw_rps),
         }
     }
+
+    /// Forward, left and up (m/s) with a yaw rate (rad/s), as flying
+    /// machines take them.
+    pub fn with_lateral(session: u64, forward_mps: f64, left_mps: f64, up_mps: f64, yaw_rps: f64) -> Self {
+        Self {
+            session,
+            twist: Twist::from_components(forward_mps, left_mps, up_mps, 0.0, 0.0, yaw_rps),
+        }
+    }
 }
 
 #[datapod::datapod(name = "gearbox.controller_command.v1")]
@@ -457,6 +466,14 @@ pub mod measurement_kind {
     /// Actuator: `[presence 0|1, locked 0|1, linked 0|1, tensile N, shear
     /// N]`; the present or linked peer in props `peer`.
     pub const CONNECTOR: u32 = 16;
+    /// Actuator: `[roll, pitch, v_forward, v_left, v_up, yaw rate, thrust N,
+    /// saturated 0|1, mode]` of a copter (rad, m/s, rad/s; mode 0
+    /// off, 1 velocity, 2 attitude).
+    pub const COPTER: u32 = 17;
+    /// Actuator: `[airspeed x, y, z, force x, y, z, wind x, y, z]` of a drag
+    /// element: airspeed in its frame (m/s), force and wind in world axes (N,
+    /// m/s).
+    pub const DRAG: u32 = 18;
 
     /// Values per record.
     pub fn width(kind: u32) -> usize {
@@ -470,6 +487,7 @@ pub mod measurement_kind {
             TOUCH => 6,
             RECOGNITION => 12,
             MOTOR => 8,
+            COPTER | DRAG => 9,
             _ => 0,
         }
     }
@@ -492,6 +510,8 @@ pub mod measurement_kind {
             PROPELLER => "propeller",
             BELT => "belt",
             CONNECTOR => "connector",
+            COPTER => "copter",
+            DRAG => "drag",
             _ => "unknown",
         }
     }
