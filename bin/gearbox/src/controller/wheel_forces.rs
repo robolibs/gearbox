@@ -421,6 +421,7 @@ mod tests {
         };
         let machine = MachineInstanceSpec {
             tracks: Vec::new(),
+            devices: Vec::new(),
             scene_root: Some(root),
             asset_label: "test".into(),
             source_path: String::new(),

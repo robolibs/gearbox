@@ -903,3 +903,75 @@ sensor on a wheel therefore reports only collisions with other bodies. A
 sensor mounted inside its own body's collider sees that collider first. The
 radar in the first draft of the suite sat on the hull's front face and saw
 nothing.
+
+### Actuator devices: the Webots set (2026-09-25)
+
+The Webots actuators, less pen, LED, display, speaker and muscle, now run
+inside Molla's rigid step (`molla_solvers::devices`, pinned at `030b965`):
+- motors (rotational and linear) and brakes on revolute and prismatic joints;
+- propellers;
+- belts, as conveyors or tank tracks;
+- connectors.
+
+The emitter came with the radio work. Gearbox only authors, commands and
+reads them (`specs/CONTROLLER_SPEC.md` §7.7).
+
+Molla core:
+- **Brakes:** `Control::joint_damping` is solved backward-Euler together
+  with the drive on its DOF.
+- **Effort readback:** `FeatherstoneSolver::joint_efforts()` gives every DOF's
+  drive and brake effort, averaged over the step. That is motor torque
+  feedback.
+- **Loop reactions:** `loop_forces` returns each loop joint's reaction on its
+  child. Connectors break on it.
+- **Belts:** `ColliderDesc::surface_velocity` makes penalty friction drag
+  contacts along a running surface.
+- **Motors:** a velocity drive under Webots' P-controller, or a direct effort.
+- **Propellers:** thrust and reaction torque added each substep.
+- **Connectors:** link through compliant fixed loop joints.
+- **Tests:** `molla-solvers --test devices`; each device checked against an
+  analytic answer.
+
+Gearbox:
+- **Backend trait:** `PhysicsBackend` gains an engine-agnostic device API.
+  Its defaults are "unsupported", so Rapier is untouched. `MollaBackend`
+  maps it in `physics/molla/device.rs`.
+- **Joints:** `PhysicsWorld::entity_to_joint` resolves authored joint prims.
+- **`devices.rs`:**
+  - discovers devices with the machine;
+  - registers them once their bodies, joints and colliders exist;
+  - applies `/actuate` commands before the physics steps;
+  - publishes `actuators/<device>` after.
+
+Verification, RTX 4080, release, `world/device_yard.usda` spawned twice as
+`lead` and `tow`:
+- Both machines register all 7 devices.
+- **PTO motor:**
+  - Velocity 30 rad/s runs at 29.98 rad/s on 0.30 N·m.
+  - Position 200 rad from 594 rad turns at exactly −5 rad/s, the commanded
+    speed.
+  - 20 N·m of torque spins the free stub up without bound (1143 rad/s),
+    Webots' documented force-control behaviour.
+- **Propeller:** ω 60 rad/s gives thrust 1800 N (0.5·60²) and a reaction
+  torque of 36 N·m (0.01·60²).
+- **Roof belt:** 1.5 m/s, with its travel integrating.
+- **Rear-wheel brakes:** 5000 N·m·s/rad while driving hold the wheels to
+  −0.004 rad/s. Released brakes report zero damping.
+- **Connectors:**
+  - `tow`'s latched, auto-locking nose docks with `lead`'s passive tail at
+    spawn. Both report the peer by name.
+  - Driving `lead` loads the link to a steady 11.1 kN tensile: `tow` is parked
+    on its own wheel motors, so it holds.
+  - `unlock` releases the link while the peer is still present. `lead` then
+    drives 3 m away and presence clears.
+  - Re-latching links again as the tractors come back within tolerance.
+- Full `oslo make test` passes. The only Molla failure,
+  `joint_control::scalar_equality_limits_resist_effort_and_preserve_authored_motor`,
+  fails identically on the previous pin.
+
+Found on the way:
+- A 1 kg box on Molla's default penalty contact chatters. Its four contact
+  points' explicit damping gives `c·dt/m ≈ 4` at the 1/960 s substep, so the
+  conveyor test uses a 50 kg crate.
+- The ackermann controller did not reverse `lead` on `--forward=-1`. That is
+  unrelated to the devices and not investigated.

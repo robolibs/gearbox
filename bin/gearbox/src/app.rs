@@ -92,6 +92,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(attach::AttachPlugin)
         .add_plugins(services::ServicesPlugin)
         .add_plugins(sensors::SensorsPlugin)
+        .add_plugins(crate::devices::DevicesPlugin)
         .add_plugins(physics_debug::PhysicsDebugPlugin)
         .add_plugins(load::LoadPlugin { cli_paths })
         // Viewer state the mara panes read and drive.

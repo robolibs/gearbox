@@ -351,6 +351,8 @@ pub struct RejectedMachines(pub std::collections::HashSet<String>);
 #[allow(dead_code)]
 pub struct MachineInstanceSpec {
     pub tracks: Vec<tracked::TrackSpec>,
+    /// Authored actuator devices (motors, brakes, propellers, belts, connectors).
+    pub devices: Vec<crate::devices::DeviceSpec>,
     /// Filled by the Bevy loader: entity that owns the `SceneRoot`.
     pub scene_root: Option<Entity>,
     /// Human label of the loaded USD asset that produced this discovery.
@@ -494,8 +496,11 @@ pub fn discover_machines_from_stage(
             Ok(tracks) => tracks,
             Err(error) => { links.errors.push(error); Vec::new() }
         };
+        let (devices, device_errors) = crate::devices::discover(stage, prim, &prims);
+        links.errors.extend(device_errors);
         machines.push(MachineInstanceSpec {
             tracks,
+            devices,
             links,
             grants: read_token_array(&stage, &prim, "gearbox:machine:grants"),
             scene_root: None,
@@ -645,6 +650,7 @@ fn append_isaac_compat_machines(
 
         machines.push(MachineInstanceSpec {
             tracks: Vec::new(),
+            devices: Vec::new(),
             scene_root: None,
             asset_label: String::new(),
             source_path: String::new(),

@@ -680,6 +680,79 @@ def Xform "lidar_link" (prepend apiSchemas = ["GearboxLinkAPI"])
 }
 ```
 
+### 7.7 Actuator devices
+
+A machine can carry the actuators of the Webots actuator guide. The physics
+backend runs them inside its step: Molla's device layer on the Molla
+backend; the Rapier backend has none. A prim becomes a device by authoring
+attributes in its namespace. `gearbox:device:name` overrides the name,
+which is otherwise the prim's; names must be unique per machine.
+
+| Device | Prim | Attributes (defaults) |
+|---|---|---|
+| Motor (rotational or linear) | a revolute or prismatic `PhysicsJoint` | `gearbox:motor:maxForce` N·m or N (10), `maxVelocity` (10), `acceleration` (unlimited), `float3 controlPID` (10, 0, 0), `minPosition` / `maxPosition` (none) |
+| Brake | a revolute or prismatic `PhysicsJoint` | `gearbox:brake:damping` N·m·s/rad or N·s/m (0) |
+| Propeller | an `Xform` under a rigid body; +X is the shaft, the origin the centre of thrust | `gearbox:propeller:thrustConstants` (required) and `torqueConstants` (0, 0) as `double2`, `maxVelocity` (100), `acceleration`, `maxTorque` (unlimited) |
+| Belt (conveyor or track) | a collider, or a prim with colliders under it | `float3 gearbox:belt:direction` in the prim frame (1, 0, 0), `maxVelocity` (10), `acceleration`, `controlPID` |
+| Connector | an `Xform` under a rigid body; +X points out of the docking face | `gearbox:connector:model`, `type` symmetric/active/passive, `isLocked`, `autoLock`, `unilateralLock` / `unilateralUnlock` (true), `distanceTolerance` (0.01), `axisTolerance` / `rotationTolerance` (0.2), `numberOfRotations` (4), `snap` (true), `tensileStrength` / `shearStrength` N (unbreakable), `stiffness` Hz (30) |
+
+Behaviour follows Webots.
+
+- **Motors:**
+  - A new motor holds its joint's position.
+  - `position` runs the PID on the position error. The resulting speed is
+    capped by `speed` (default `maxVelocity`) and ramped by `acceleration`;
+    the drive then applies up to `maxForce`.
+  - `velocity` runs at that speed.
+  - `force` / `torque` applies an effort directly.
+- **Propellers:** the rotor speed follows its command. The body takes the
+  thrust `t1·|ω|·ω − t2·|ω|·V` at the centre of thrust, and `−Q`, with
+  `Q = q1·|ω|·ω − q2·|ω|·V`.
+- **Belts:** drag whatever touches their surface along their direction by
+  friction.
+- **Connectors:**
+  - A connector links to a compatible peer lined up within its tolerances:
+    same model, symmetric–symmetric or active–passive.
+  - It links when it is latched, either right away or, with `autoLock`, as
+    the peer arrives.
+  - Unlatching unlinks it.
+  - The link breaks when the load pulling the faces apart or sliding them
+    exceeds the summed strength of the latched sides.
+
+Controllers command a device with `gearbox.actuator_command.v1` on
+`/machines/<machine_id>/actuate`. Props: `device` names it, and any of
+these apply:
+
+| Device | Props |
+|---|---|
+| Motor | `position`, `velocity`, `force` or `torque`; `speed`, `acceleration` (≤ 0 unlimited), `max_force` or `max_torque`, `pid` (`p,i,d`), `brake` |
+| Brake | `brake` |
+| Propeller | `velocity` (rad/s) |
+| Belt | `position` (travel, m), `velocity`, `speed`, `acceleration` |
+| Connector | `lock` or `unlock` (`1`/`true`) |
+
+Every device streams `gearbox.measurement.v1` on
+`/machines/<machine_id>/actuators/<device>` each frame:
+
+| Kind | Record |
+|---|---|
+| `motor` (joints with a motor or brake) | `[position, velocity, commanded velocity, force/torque, brake damping, brake force/torque, mode (0 position, 1 velocity, 2 force), target]` |
+| `propeller` | `[rotor speed, thrust N, torque N·m, speed of advance m/s]` |
+| `belt` | `[travel m, speed m/s]` |
+| `connector` | `[presence, locked, linked, tensile N, shear N]`; props `peer` names the present or linked `<machine>/<device>` |
+
+```usda
+over "Joints"
+{
+    over "boom_lift"
+    {
+        float gearbox:motor:maxForce = 20000
+        float gearbox:motor:maxVelocity = 0.5
+        float gearbox:brake:damping = 0
+    }
+}
+```
+
 ## 8. Fixed conventions the runtime assumes
 
 These are not configurable today. An asset that violates them drives wrong
