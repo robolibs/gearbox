@@ -597,6 +597,38 @@ fn imported_kubota_straight_turn_and_track_contacts() {
 }
 
 #[test]
+#[ignore = "requires GEARBOX_BENCH_TRAILER pointing to a krampe_trailer.usdz with actuator devices"]
+fn imported_krampe_parked_with_devices_stays_put() {
+    let asset = std::env::var_os("GEARBOX_BENCH_TRAILER").expect("set GEARBOX_BENCH_TRAILER");
+    let mut fixture = Fixture::load(Path::new(&asset));
+    let mut devices = crate::devices::benchmark_schedule(&mut fixture.app);
+    let mut tick = |fixture: &mut Fixture| {
+        devices.run(fixture.app.world_mut());
+        fixture.tick();
+    };
+    // Settle onto the tyres and the stand first.
+    for _ in 0..360 {
+        tick(&mut fixture);
+    }
+    let machine = fixture.machine.id.clone();
+    let registered = fixture.app.world().resource::<crate::devices::MachineDevices>().count(&machine);
+    let start = fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().translation();
+    for step in 1..=7200 {
+        tick(&mut fixture);
+        if step % 600 == 0 {
+            let physics = fixture.app.world().resource::<PhysicsWorld>();
+            let body = physics.body(fixture.chassis).unwrap();
+            eprintln!("t={:.0}s drift={:.4} m speed={:.4} devices={registered}",
+                step as f64 / 120.0, (body.translation() - start).length(), body.linvel().length());
+        }
+    }
+    let physics = fixture.app.world().resource::<PhysicsWorld>();
+    let body = physics.body(fixture.chassis).unwrap();
+    assert!((body.translation() - start).length() < 0.05, "parked trailer drove off: {:?}", body.translation() - start);
+    assert!(body.linvel().length() < 0.01, "parked trailer moving: {}", body.linvel().length());
+}
+
+#[test]
 #[ignore = "requires GEARBOX_BENCH_TRAILER pointing to real krampe_trailer.usdz"]
 fn imported_krampe_parking_support() {
     let asset = std::env::var_os("GEARBOX_BENCH_TRAILER").expect("set GEARBOX_BENCH_TRAILER");
