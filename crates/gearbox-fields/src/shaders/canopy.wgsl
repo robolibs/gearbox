@@ -2,6 +2,9 @@
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean}
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::wheel_roll
 
+// Cards grow in from this distance; nearer they have no size.
+const CANOPY_NEAR_M: f32 = 8.0;
+
 struct CanopyVertex {
     position: vec3<f32>,
     normal: vec3<f32>,
@@ -14,7 +17,7 @@ fn canopy_vertex(local: vec3<f32>, ground: vec3<f32>, normal: vec3<f32>, seed: f
     let yaw = seed * 6.2831853 + (local.z + 1.0) * 1.5707963;
     let right = vec3<f32>(cos(yaw), 0.0, sin(yaw));
     let grazing = smoothstep(0.4, 0.9, length(direction) / max(distance, 0.001));
-    let growth = smoothstep(8.0, 20.0, distance) * alive * select(1.0, grazing, straw);
+    let growth = smoothstep(CANOPY_NEAR_M, 20.0, distance) * alive * select(1.0, grazing, straw);
     let width = mix(0.10, 0.17, seed) * mix(1.0, 1.5, smoothstep(20.0, 96.0, distance));
     let height = select(mix(0.065, 0.105, seed), mix(0.08, 0.14, seed), straw);
     let flat = clamp(pressed.x, 0.0, 1.0);

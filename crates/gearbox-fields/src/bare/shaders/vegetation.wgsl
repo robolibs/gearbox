@@ -9,7 +9,7 @@
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing, calculate_view},
 }
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{blade_leans}
-#import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
+#import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{foliage_normal, plant_lighting}
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, wheel_scar}
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, WAY_METALLED, inside_field, rut_of}
 
@@ -38,6 +38,11 @@ struct VegetationParams {
 @group(3) @binding(1) var heightmap_sampler: sampler;
 @group(3) @binding(2) var<uniform> field: VegetationParams;
 @group(3) @binding(3) var trample: texture_2d<u32>;
+
+#ifdef VEGETATION_SIEVED
+// The chunk's candidates that passed the sieve, by candidate index.
+@group(2) @binding(0) var<storage, read> sieve: array<u32>;
+#endif
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -100,9 +105,14 @@ fn culled_vertex() -> VertexOutput {
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
+#ifdef VEGETATION_SIEVED
+    let index = sieve[vertex.instance_index];
+#else
+    let index = vertex.instance_index;
+#endif
     let chunk_seed = pcg(bitcast<u32>(i32(field.corner.x)) * 73856093u
         ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
-    let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x51EDu);
+    let id = pcg(index ^ chunk_seed ^ 0x51EDu);
     var base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
     // What the first coordinate marks this instance as: a stone, a crumb of
     // the ground's own earth, a weed, or a tuft of grass. Only tufts clump.
@@ -129,12 +139,29 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         base = middle + along * inside.x * frame.z + vec2<f32>(-along.y, along.x) * inside.y;
         out_of_clump = clamp(out_by, 0.0, 1.0);
     }
+    let rank = f32(index) / max(field.blades_per_chunk, 1.0);
+    let end = mix(field.fade_end, field.fade_start, sqrt(rank));
+    if (length(base - view.world_position.xz) >= end) {
+        return culled_vertex();
+    }
+
+    // A way beaten by driving wears the ground as surely as one laid out that
+    // way, and grass holds only what is left. The same reading the ground
+    // material makes, so the two agree.
+    let bared = max(
+        worn(base, field.bounds, field.tread, field.way, field.way_more, field.way_shape),
+        wheel_scar(trample, field.wheels, base) * 0.8,
+    );
+    let luck = rand(id, 12u);
+    let metalled = smoothstep(WAY_METALLED, 0.95, bared);
+    if (vertex.uv.y > 1.5 && luck > metalled) {
+        return culled_vertex();
+    }
+
     let sampled = sample_field(base);
     let ground = vec3<f32>(base.x, sampled.x, base.y);
     let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
     let distance = length(ground - view.world_position);
-    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
-    let end = mix(field.fade_end, field.fade_start, sqrt(rank));
     var alive = 1.0 - smoothstep(max(field.fade_start, end - 4.0), end, distance);
     if (!within_field(base)) {
         alive = 0.0;
@@ -145,25 +172,13 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
     let pressed = sample_wheels(trample, field.wheels, base);
     let flat = clamp(pressed.x, 0.0, 1.0);
-    // A way beaten by driving wears the ground as surely as one laid out that
-    // way, and grass holds only what is left. The same reading the ground
-    // material makes, so the two agree.
-    let bared = max(
-        worn(base, field.bounds, field.tread, field.way, field.way_more, field.way_shape),
-        wheel_scar(trample, field.wheels, base) * 0.8,
-    );
     let patchy_cover = taken(base);
     // Matches the ground material: a driven surface is green wherever it is
     // not worn, rather than wherever the patches fall.
     let green = select(patchy_cover, mix(patchy_cover, 1.0, 0.85), field.tread.z > 0.0)
         * (1.0 - bared);
     // A chance weighted by the patch, so its edge is ragged with stragglers.
-    let luck = rand(id, 12u);
     let grassy = smoothstep(0.42, 0.70, green);
-    // Road metal lies on a way and nowhere else: a cover that is not a track in
-    // itself carries it so that a track crossing it has chippings underfoot,
-    // and off the way every one of them goes before it costs anything.
-    let metalled = smoothstep(WAY_METALLED, 0.95, bared);
     // And on a way it does not lie evenly. Traffic shoves the loose coarse
     // material off the floor of the rut — out to the shoulder and in to the
     // strip between the two — so the stones gather at the rut edges and the
@@ -325,15 +340,20 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+#ifdef VEGETATION_FLAT
+    return vec4<f32>(in.color.rgb, 1.0);
+#endif
     // A grass blade is tapered in its shape already; its edges are only
     // softened so it does not end in a hard line of pixels. A stone is solid.
     var alpha = 1.0;
+#ifdef VEGETATION_CUTOUT
     if (in.shape.x > 0.5) {
         alpha = 1.0 - smoothstep(0.72, 1.0, abs(in.shape.z));
     }
     if (alpha < 0.02) {
         discard;
     }
+#endif
     var pbr_input = pbr_input_new();
     pbr_input.material.base_color = in.color;
     pbr_input.material.perceptual_roughness = select(0.94, 0.9, in.shape.x > 0.5);
@@ -375,8 +395,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         pbr_input.diffuse_occlusion = vec3<f32>(mix(0.55, 1.0, smoothstep(-1.0, 0.25, in.shape.y)));
     }
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
-    var colour = apply_pbr_lighting(pbr_input);
-    colour = main_pass_post_lighting_processing(pbr_input, colour);
+    var colour = plant_lighting(pbr_input);
     colour.a = alpha;
     return colour;
 }

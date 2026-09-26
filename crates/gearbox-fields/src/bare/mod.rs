@@ -99,6 +99,10 @@ fn way_lying(template: fn() -> Mesh, density: f32) -> VegetationLayer {
         fade_end: 38.0,
         inverse_square_thinning: true,
         follow_grass: 0.0,
+        cutout: false,
+        way_only: true,
+        blade: None,
+        sieve: Some("embedded://gearbox_fields/bare/shaders/grit_sieve.wgsl"),
         albedo: None,
         lod_band: [0.0, f32::MAX],
     }
@@ -205,6 +209,10 @@ fn standing(
             fade_end: 42.0,
             inverse_square_thinning: true,
             follow_grass: 0.0,
+            cutout: false,
+            way_only: false,
+            blade: None,
+            sieve: None,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         },
@@ -219,6 +227,10 @@ fn standing(
             fade_end: 26.0,
             inverse_square_thinning: true,
             follow_grass: 0.0,
+            cutout: false,
+            way_only: false,
+            blade: None,
+            sieve: None,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         },
@@ -232,6 +244,10 @@ fn standing(
             fade_end: 34.0,
             inverse_square_thinning: true,
             follow_grass: 0.0,
+            cutout: true,
+            way_only: false,
+            blade: None,
+            sieve: None,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         });
@@ -417,6 +433,7 @@ impl Plugin for BarePlugin {
         bevy::asset::embedded_asset!(app, "shaders/cover.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/grit_sieve.wgsl");
         app.add_plugins(MaterialPlugin::<BareMaterial>::default());
         app.add_systems(Update, carry_trail_to_grounds);
         // A worn track recovers slowly and marks deeply; sand holds a wheel

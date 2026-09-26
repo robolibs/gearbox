@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod shader_contract;
 
+mod blades;
 mod canopy;
 mod clumps;
 mod bare;
@@ -17,6 +18,7 @@ mod layout;
 mod profile;
 mod render;
 mod runtime;
+mod sieve;
 mod textures;
 pub mod wind_map;
 
@@ -101,6 +103,8 @@ impl Plugin for FieldsPlugin {
                 harvested_wheat::HarvestedWheatPlugin { density: self.stubble_density },
                 concrete::ConcretePlugin { weed_density: self.concrete_weed_density },
                 render::VegetationPlugin,
+                blades::BladePlugin,
+                sieve::SievePlugin,
             ))
             .add_systems(
                 Update,

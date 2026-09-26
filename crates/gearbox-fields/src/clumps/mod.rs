@@ -39,6 +39,10 @@ macro_rules! pack {
                 fade_end,
                 inverse_square_thinning: true,
                 follow_grass: 0.0,
+                cutout: true,
+                way_only: false,
+                blade: None,
+                sieve: None,
                 albedo: Some(concat!(
                     "embedded://gearbox_fields/clumps/textures/",
                     $model,

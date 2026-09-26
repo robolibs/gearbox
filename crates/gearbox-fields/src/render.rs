@@ -51,6 +51,14 @@ pub struct VegetationChunk {
     /// Share of this layer allowed outside the ground's grass patches; nought
     /// scatters it by its own reckoning instead.
     pub follow_grass: f32,
+    /// Drawn by the cut-out pipeline (alpha-to-coverage, may discard).
+    pub cutout: bool,
+    /// Camera distance band this layer draws in.
+    pub band: Vec2,
+    /// Sown into blade records by a compute pass rather than drawn per chunk.
+    pub blade: Option<crate::profile::BladeLayer>,
+    /// Compute shader that sieves this chunk's candidates before its draw.
+    pub sieve: Option<Handle<Shader>>,
     /// The wear of this field's surface, as `BareGround::tread`.
     pub tread: Vec4,
     /// How far this field's plants carry past its own edge, in metres.
@@ -202,6 +210,9 @@ impl Plugin for VegetationPlugin {
     }
 }
 
+/// Transparent3d sort offset placing vegetation before every blended item.
+pub(crate) const OPAQUE_FIRST: f32 = -1.0e6;
+
 #[allow(clippy::too_many_arguments)]
 fn queue_vegetation(
     draw_functions: Res<DrawFunctions<Transparent3d>>,
@@ -227,8 +238,9 @@ fn queue_vegetation(
         let Some(&view_key) = view_key_cache.get(&view.retained_view_entity) else {
             continue;
         };
+        let view_from_world = view.world_from_view.affine().inverse();
         for (entity, main_entity, draw) in &chunks {
-            if !fields.0.contains_key(&draw.field_id) || draw.instances == 0 {
+            if !fields.0.contains_key(&draw.field_id) || draw.instances == 0 || draw.blade.is_some() {
                 continue;
             }
             let Some(mesh) = meshes.get(draw.mesh.id()) else {
@@ -242,7 +254,7 @@ fn queue_vegetation(
             let pipeline = match pipelines.specialize(
                 &pipeline_cache,
                 &vegetation_pipeline,
-                (key, draw.shader.clone()),
+                (key, draw.shader.clone(), draw.cutout, draw.sieve.is_some()),
                 &mesh.layout,
             ) {
                 Ok(pipeline) => pipeline,
@@ -257,10 +269,13 @@ fn queue_vegetation(
 
             let half = draw.size * 0.5;
             let mesh_center = Vec3::new(draw.corner.x + half, 0.0, draw.corner.y + half);
+            // Sort key `OPAQUE_FIRST - view z`: every chunk ahead of the blended
+            // items, nearest chunk first.
+            let view_z = view_from_world.transform_point3(mesh_center).z;
             phase.add_retained(Transparent3d {
                 sorting_info: TransparentSortingInfo3d::Sorted {
                     mesh_center,
-                    depth_bias: 0.0,
+                    depth_bias: OPAQUE_FIRST - 2.0 * view_z,
                 },
                 entity: (entity, *main_entity),
                 pipeline,
@@ -279,7 +294,7 @@ fn queue_vegetation(
 /// grows or the fields are rebuilt. Rewriting every chunk each frame cost
 /// ~25-35 ms in uploads.
 #[derive(Resource, Default)]
-struct VegetationUniforms {
+pub(crate) struct VegetationUniforms {
     buffer: Option<Buffer>,
     capacity: u32,
     next: u32,
@@ -288,7 +303,7 @@ struct VegetationUniforms {
 }
 
 #[derive(Component)]
-struct VegetationOffset(u32);
+pub(crate) struct VegetationOffset(pub(crate) u32);
 
 fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
     let (way, way_more, way_shape) = draw.way.packed();
@@ -405,15 +420,15 @@ fn prepare_vegetation_uniforms(
 /// Field bindings per field and albedo, and the empty group bound where the
 /// mesh pipeline expects per-mesh data the vegetation shaders never read.
 #[derive(Resource)]
-struct FieldBindGroups {
-    fields: HashMap<(Entity, Option<AssetId<Image>>), BindGroup>,
-    empty: BindGroup,
+pub(crate) struct FieldBindGroups {
+    pub(crate) fields: HashMap<(Entity, Option<AssetId<Image>>), BindGroup>,
+    pub(crate) empty: BindGroup,
 }
 
 /// Field bindings rebuilt against the current dynamic uniform buffer, one per
 /// field and albedo in use.
 #[allow(clippy::too_many_arguments)]
-fn prepare_vegetation_bind_group(
+pub(crate) fn prepare_vegetation_bind_group(
     mut commands: Commands,
     fields: Res<RenderFields>,
     chunks: Query<&VegetationChunk>,
@@ -615,16 +630,18 @@ fn stamp_wheel_contacts(
 }
 
 #[derive(Resource)]
-struct VegetationPipeline {
+pub(crate) struct VegetationPipeline {
     mesh_pipeline: MeshPipeline,
-    field_layout: BindGroupLayoutDescriptor,
-    empty_layout: BindGroupLayoutDescriptor,
+    pub(crate) field_layout: BindGroupLayoutDescriptor,
+    pub(crate) empty_layout: BindGroupLayoutDescriptor,
+    /// A sieved chunk's surviving candidates, at the chunk's own offset.
+    pub(crate) sieve_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     wind_map: TextureView,
     wind_sampler: Sampler,
 }
 
-fn init_vegetation_pipeline(
+pub(crate) fn init_vegetation_pipeline(
     mut commands: Commands,
     mesh_pipeline: Res<MeshPipeline>,
     render_device: Res<RenderDevice>,
@@ -633,7 +650,7 @@ fn init_vegetation_pipeline(
     let field_layout = BindGroupLayoutDescriptor::new(
         "vegetation field layout",
         &BindGroupLayoutEntries::sequential(
-            ShaderStages::VERTEX_FRAGMENT,
+            ShaderStages::VERTEX_FRAGMENT | ShaderStages::COMPUTE,
             (
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 sampler(SamplerBindingType::NonFiltering),
@@ -687,36 +704,60 @@ fn init_vegetation_pipeline(
         mesh_pipeline: mesh_pipeline.clone(),
         field_layout,
         empty_layout: BindGroupLayoutDescriptor::new("vegetation empty layout", &[]),
+        sieve_layout: BindGroupLayoutDescriptor::new(
+            "vegetation sieve layout",
+            &BindGroupLayoutEntries::single(
+                ShaderStages::VERTEX,
+                binding_types::storage_buffer_read_only_sized(true, None),
+            ),
+        ),
         sampler,
         wind_map,
         wind_sampler,
     });
 }
 
+/// Light through leaves from behind: Bevy's diffuse transmission, or with
+/// `GEARBOX_GRASS_BACKLIGHT=cheap` one view-dependent lobe instead.
+pub(crate) fn back_light_defs(defs: &mut Vec<bevy::shader::ShaderDefVal>) {
+    if std::env::var("GEARBOX_GRASS_BACKLIGHT").is_ok_and(|value| value == "cheap") {
+        defs.push("GRASS_CHEAP_BACKLIGHT".into());
+    } else {
+        defs.push("STANDARD_MATERIAL_DIFFUSE_TRANSMISSION".into());
+        defs.push("STANDARD_MATERIAL_DIFFUSE_OR_SPECULAR_TRANSMISSION".into());
+    }
+}
+
 impl SpecializedMeshPipeline for VegetationPipeline {
-    type Key = (MeshPipelineKey, Handle<Shader>);
+    /// Mesh key, shader, whether the layer is cut out, and whether sieved.
+    type Key = (MeshPipelineKey, Handle<Shader>, bool, bool);
 
     fn specialize(
         &self,
-        key: Self::Key,
+        (mesh_key, shader, cutout, sieved): Self::Key,
         layout: &MeshVertexBufferLayoutRef,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
-        let mut descriptor = self.mesh_pipeline.specialize(key.0, layout)?;
-        descriptor.vertex.shader = key.1.clone();
+        let mut descriptor = self.mesh_pipeline.specialize(mesh_key, layout)?;
+        descriptor.vertex.shader = shader.clone();
         let fragment = descriptor.fragment.as_mut().unwrap();
-        fragment.shader = key.1;
-        fragment
-            .shader_defs
-            .push("STANDARD_MATERIAL_DIFFUSE_TRANSMISSION".into());
-        fragment
-            .shader_defs
-            .push("STANDARD_MATERIAL_DIFFUSE_OR_SPECULAR_TRANSMISSION".into());
+        fragment.shader = shader;
+        back_light_defs(&mut fragment.shader_defs);
+        if cutout {
+            descriptor.vertex.shader_defs.push("VEGETATION_CUTOUT".into());
+            fragment.shader_defs.push("VEGETATION_CUTOUT".into());
+        }
+        if std::env::var_os("GEARBOX_VEG_FLAT").is_some() {
+            fragment.shader_defs.push("VEGETATION_FLAT".into());
+        }
+        if sieved {
+            descriptor.vertex.shader_defs.push("VEGETATION_SIEVED".into());
+        }
         if let Some(mesh_group) = descriptor.layout.get_mut(2) {
-            *mesh_group = self.empty_layout.clone();
+            *mesh_group = if sieved { self.sieve_layout.clone() } else { self.empty_layout.clone() };
         }
         descriptor.layout.push(self.field_layout.clone());
         descriptor.primitive.cull_mode = None;
-        descriptor.multisample.alpha_to_coverage_enabled = descriptor.multisample.count > 1;
+        descriptor.multisample.alpha_to_coverage_enabled = cutout && descriptor.multisample.count > 1;
         Ok(descriptor)
     }
 }
@@ -725,12 +766,43 @@ type DrawVegetation = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
     SetMeshViewBindingArrayBindGroup<1>,
-    SetEmptyBindGroup<2>,
+    SetSieveBindGroup<2>,
     SetFieldBindGroup<3>,
     DrawBlades,
 );
 
-struct SetEmptyBindGroup<const I: usize>;
+/// A sieved chunk's survivors at its own offset, or the empty group.
+struct SetSieveBindGroup<const I: usize>;
+
+impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetSieveBindGroup<I> {
+    type Param = (Option<SRes<FieldBindGroups>>, SRes<super::sieve::SieveViews>);
+    type ViewQuery = Entity;
+    type ItemQuery = Read<VegetationChunk>;
+
+    #[inline]
+    fn render<'w>(
+        item: &P,
+        view: Entity,
+        draw: Option<&'w VegetationChunk>,
+        (groups, sieves): SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let (Some(groups), Some(draw)) = (groups, draw) else {
+            return RenderCommandResult::Skip;
+        };
+        if draw.sieve.is_none() {
+            pass.set_bind_group(I, &groups.into_inner().empty, &[]);
+            return RenderCommandResult::Success;
+        }
+        let Some((group, slot)) = sieves.into_inner().slot(view, item.entity()) else {
+            return RenderCommandResult::Skip;
+        };
+        pass.set_bind_group(I, group, &[slot.region]);
+        RenderCommandResult::Success
+    }
+}
+
+pub(crate) struct SetEmptyBindGroup<const I: usize>;
 
 impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetEmptyBindGroup<I> {
     type Param = Option<SRes<FieldBindGroups>>;
@@ -783,16 +855,20 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetFieldBindGroup<I> {
 struct DrawBlades;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
-    type Param = (SRes<RenderAssets<RenderMesh>>, SRes<MeshAllocator>);
-    type ViewQuery = ();
+    type Param = (
+        SRes<RenderAssets<RenderMesh>>,
+        SRes<MeshAllocator>,
+        SRes<super::sieve::SieveViews>,
+    );
+    type ViewQuery = Entity;
     type ItemQuery = Read<VegetationChunk>;
 
     #[inline]
     fn render<'w>(
-        _item: &P,
-        _view: (),
+        item: &P,
+        view: Entity,
         draw: Option<&'w VegetationChunk>,
-        (meshes, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
+        (meshes, mesh_allocator, sieves): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let mesh_allocator = mesh_allocator.into_inner();
@@ -817,6 +893,13 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
                 };
                 pass.set_index_buffer(index_slice.buffer.slice(..), *index_format);
                 let start = index_slice.range.start;
+                if draw.sieve.is_some() {
+                    let Some(args) = sieves.into_inner().args(view, item.entity()) else {
+                        return RenderCommandResult::Skip;
+                    };
+                    pass.draw_indexed_indirect(args.0, args.1);
+                    return RenderCommandResult::Success;
+                }
                 if draw.variants.is_empty() {
                     pass.draw_indexed(
                         start..(start + count),

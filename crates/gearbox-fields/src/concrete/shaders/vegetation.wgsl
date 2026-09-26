@@ -13,7 +13,7 @@
 // A yard ends where its slab ends, but the *line* of that edge is no straighter
 // than any other field's, so it reads the same rule as everything else.
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{inside_field}
-#import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
+#import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{foliage_normal, plant_lighting}
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
 #import "embedded://gearbox_fields/concrete/shaders/yard.wgsl"::{SLAB_M, JOINT_M, yard_noise, joint_distances, yard_weedy}
 
@@ -185,6 +185,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+#ifdef VEGETATION_FLAT
+    return vec4<f32>(in.color.rgb, 1.0);
+#endif
     var pbr_input = pbr_input_new();
     let rib = mix(1.0, 0.86, smoothstep(0.1, 0.9, abs(in.canopy_uv.x)));
     pbr_input.material.base_color = vec4<f32>(in.color.rgb * rib, 1.0);
@@ -204,8 +207,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
 
-    var color = apply_pbr_lighting(pbr_input);
-    color = main_pass_post_lighting_processing(pbr_input, color);
+    var color = plant_lighting(pbr_input);
     color.a = 1.0;
     return color;
 }

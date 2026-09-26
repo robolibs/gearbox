@@ -63,6 +63,41 @@ pub struct VegetationLayer {
     /// follows the grass patches of the ground it stands on, and this is the
     /// share of it that is still allowed out on the bare between them.
     pub follow_grass: f32,
+    /// Drawn with alpha-to-coverage and a fragment shader that may discard;
+    /// otherwise opaque, without either.
+    pub cutout: bool,
+    /// Grows only where a way wears the ground: chunks no way reaches issue none.
+    pub way_only: bool,
+    /// Sown on the GPU into blade records and drawn from them, instead of
+    /// drawn per chunk from `template`.
+    pub blade: Option<BladeLayer>,
+    /// Compute shader that sieves each chunk's candidates before it is drawn,
+    /// so the vertex shader runs only for those that may show.
+    pub sieve: Option<&'static str>,
+}
+
+/// One kind of GPU-sown blade: a compute shader that culls and shapes each
+/// blade into a record, and a draw shader that bends a strip from it.
+#[derive(Debug)]
+pub struct BladeKind {
+    pub cull: &'static str,
+    pub draw: &'static str,
+    /// The strip every record bends, at the finest detail level.
+    pub template: fn() -> Mesh,
+    /// Words (u32) per record.
+    pub stride: u32,
+    /// Records one view holds.
+    pub capacity: u32,
+}
+
+/// A detail level of a GPU-sown blade population.
+#[derive(Clone, Copy, Debug)]
+pub struct BladeLayer {
+    pub kind: &'static BladeKind,
+    /// Blades rooted at each instance.
+    pub twins: u32,
+    /// Segments a blade has at this detail level.
+    pub segments: u32,
 }
 
 impl VegetationLayer {
@@ -154,12 +189,38 @@ pub struct FieldProfile {
 pub struct FieldProfiles(pub HashMap<String, Arc<FieldProfile>>);
 
 impl FieldProfiles {
-    pub fn register(&mut self, profile: FieldProfile) {
+    /// Registers a profile, its vegetation distances scaled by
+    /// `GEARBOX_VEGETATION_RANGE` (1 when unset).
+    pub fn register(&mut self, mut profile: FieldProfile) {
         assert!(
             !self.0.contains_key(profile.name),
             "duplicate field profile: {}",
             profile.name
         );
+        let range = vegetation_range();
+        for layer in &mut profile.layers {
+            layer.scale_range(range);
+        }
         self.0.insert(profile.name.to_owned(), Arc::new(profile));
+    }
+}
+
+/// `GEARBOX_VEGETATION_RANGE`: how far vegetation reaches, as a share of the
+/// authored distances.
+pub fn vegetation_range() -> f32 {
+    std::env::var("GEARBOX_VEGETATION_RANGE")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0)
+}
+
+impl VegetationLayer {
+    /// Every distance of the layer multiplied by `range`: the fade and the
+    /// inner and outer edges of its detail band.
+    pub fn scale_range(&mut self, range: f32) {
+        self.fade_start *= range;
+        self.fade_end *= range;
+        self.lod_band = self.lod_band.map(|edge| if edge >= f32::MAX / 2.0 { edge } else { edge * range });
     }
 }

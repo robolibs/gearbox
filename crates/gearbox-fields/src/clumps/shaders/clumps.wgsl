@@ -6,7 +6,7 @@
 }
 
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
-#import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::foliage_normal
+#import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{foliage_normal, plant_lighting}
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean}
 // The patches a bare ground thins its own grass by, so a weed standing in
 // one comes up where that grass does and not in a patch of its own.
@@ -147,11 +147,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let salt = vertex.color.y;
     let id = pcg(index ^ chunk_seed ^ (u32(salt) * 0x68E31DA4u));
     let base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
-    let sampled = sample_field(base);
-    let ground = vec3<f32>(base.x, sampled.x, base.y);
-    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
-    let distance = length(ground - view.world_position);
     let end = blade_fade_end(f32(index) / max(field.blades_per_chunk, 1.0));
+    if (length(base - view.world_position.xz) >= end) {
+        return culled_vertex();
+    }
 
     // Thick inside this pack's patches, a sparse share of plants elsewhere.
     var patchiness = smoothstep(0.55, 0.78, patch_noise(base * 0.08 + vec2<f32>(salt * 37.1, -salt * 19.7)));
@@ -173,8 +172,15 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let beyond = way_beyond(base, field.tread, field.way, field.way_more, field.way_shape);
     let verge = (1.0 - smoothstep(0.0, 2.5, beyond)) * (1.0 - bared);
     let kept = rand(id, 9u) < mix(loose, 1.0, patchiness) * (1.0 - bared) + verge * 0.3;
+    if (!kept) {
+        return culled_vertex();
+    }
+    let sampled = sample_field(base);
+    let ground = vec3<f32>(base.x, sampled.x, base.y);
+    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
+    let distance = length(ground - view.world_position);
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - FADE_M), end, distance))
-        * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+        * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
     if (coverage <= 0.0) {
         return culled_vertex();
     }
@@ -217,6 +223,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+#ifdef VEGETATION_FLAT
+    return vec4<f32>(0.1, 0.2, 0.05, 1.0);
+#endif
     // Cut-out alpha from a mip no coarser than 1, boosted by the true mip so
     // thin blades keep their coverage at a distance instead of dissolving.
     let size = vec2<f32>(textureDimensions(albedo));
@@ -226,7 +235,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = textureSample(albedo, albedo_sampler, in.uv);
     let cutout = textureSampleLevel(albedo, albedo_sampler, in.uv, min(lod, 1.0)).a
         * (1.0 + max(lod - 1.0, 0.0) * 0.35);
+#ifdef VEGETATION_CUTOUT
     if (cutout < 0.5) { discard; }
+#endif
     var pbr_input = pbr_input_new();
     pbr_input.material.base_color = vec4<f32>(
         texel.rgb * in.shade.x * in.shade.z * (1.0 - field.wheels.darkening * in.shade.y), 1.0);
@@ -254,8 +265,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         lit,
         smoothstep(0.35, 0.8, abs(face.y))));
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
-    var color = apply_pbr_lighting(pbr_input);
-    color = main_pass_post_lighting_processing(pbr_input, color);
+    var color = plant_lighting(pbr_input);
     color.a = 1.0;
     return color;
 }

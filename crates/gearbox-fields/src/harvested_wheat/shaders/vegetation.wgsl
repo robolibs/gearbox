@@ -7,9 +7,9 @@
 
 
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
-#import "embedded://gearbox_fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha}
+#import "embedded://gearbox_fields/shaders/canopy.wgsl"::{canopy_vertex, canopy_alpha, CANOPY_NEAR_M}
 #import "embedded://gearbox_fields/shaders/wind.wgsl"::{plant_lean}
-#import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_lighting, foliage_normal}
+#import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{canopy_lighting, plant_lighting, foliage_normal}
 #import "embedded://gearbox_fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, inside_field}
 
@@ -140,15 +140,21 @@ fn stubble_detail(vertex: Vertex) -> VertexOutput {
         ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
     let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x8DA6B343u);
     let base = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
+    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
+    let end = blade_fade_end(rank);
+    if (length(base - view.world_position.xz) >= end) {
+        return culled_vertex();
+    }
+    let kept = rand(id, 9u) < (0.10 + 0.90 * regrowth(base)) * (1.0 - way_wear(base));
+    if (!kept) {
+        return culled_vertex();
+    }
     let sampled = sample_field(base);
     let ground = vec3<f32>(base.x, sampled.x, base.y);
     let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
     let distance = length(ground - view.world_position);
-    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
-    let end = blade_fade_end(rank);
-    let kept = rand(id, 9u) < (0.10 + 0.90 * regrowth(base)) * (1.0 - way_wear(base));
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
-        * select(0.0, 1.0, kept && ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+        * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
     if (coverage <= 0.0) {
         return culled_vertex();
     }
@@ -280,18 +286,25 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     if (twin) {
         base_xz += vec2<f32>(cos(own_yaw), sin(own_yaw)) * mix(0.006, 0.015, rand(id, 31u));
     }
-    let clump = clump_of(base_xz);
-    let sampled = sample_field(base_xz);
-    let root = vec3<f32>(base_xz.x, sampled.x, base_xz.y);
-    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
-    let distance = length(root - view.world_position);
-
     // Density fades by rank; each stalk swaps detail level at a jittered
     // band edge; stalks under ~1.2 px wide are widened and thinned alike.
     let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
     let blade_end = blade_fade_end(rank);
-    let coverage = 1.0 - smoothstep(max(field.fade_start, blade_end - BLADE_FADE_M), blade_end, distance);
     let jitter = (rand(id, 23u) - 0.5) * 2.0 * LOD_JITTER_M;
+
+    // The same tests at the ground distance, a lower bound of the true one.
+    let across = length(base_xz - view.world_position.xz);
+    let across_px = across * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
+    if (across >= blade_end || across >= vertex.uv.y + jitter
+        || rand(id, 19u) * max(1.0, 1.2 * across_px / BLADE_MAX_WIDTH) >= 1.0) {
+        return culled_vertex();
+    }
+
+    let sampled = sample_field(base_xz);
+    let root = vec3<f32>(base_xz.x, sampled.x, base_xz.y);
+    let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
+    let distance = length(root - view.world_position);
+    let coverage = 1.0 - smoothstep(max(field.fade_start, blade_end - BLADE_FADE_M), blade_end, distance);
     let in_band = (vertex.uv.x <= 0.0 || distance >= vertex.uv.x + jitter)
         && distance < vertex.uv.y + jitter;
     let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
@@ -301,6 +314,7 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     if (alive <= 0.0 || rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base_xz))) {
         return culled_vertex();
     }
+    let clump = clump_of(base_xz);
 
     let height = mix(BLADE_MIN_HEIGHT, BLADE_MAX_HEIGHT, rand(id, 6u))
         * mix(0.8, 1.2, rand(plant_id, 3u)) * select(1.0, 0.0, rand(plant_id, 7u) < 0.12) * mix(0.85, 1.15, rand(clump.id, 3u))
@@ -399,11 +413,14 @@ fn lying_straw(vertex: Vertex) -> VertexOutput {
         ^ bitcast<u32>(i32(field.corner.y)) * 19349663u);
     let id = pcg(vertex.instance_index ^ chunk_seed ^ 0x5A17C3E1u);
     let base = field.corner + r2(vertex.instance_index, chunk_seed ^ 0x5A17C3E1u) * field.chunk_size;
+    let end = blade_fade_end(f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0));
+    if (length(base - view.world_position.xz) >= end) {
+        return culled_vertex();
+    }
     let sampled = sample_field(base);
     let ground = vec3<f32>(base.x, sampled.x, base.y);
     let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
     let distance = length(ground - view.world_position);
-    let end = blade_fade_end(f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0));
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - BLADE_FADE_M), end, distance))
         * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
     if (coverage <= 0.0 || rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base))) {
@@ -481,18 +498,24 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let seed = rand(id, 3u);
     let local_xz = vec2<f32>(r0, r1) * field.chunk_size;
     let base_xz = corner + local_xz;
+
+    // Instance rank sets each blade's radial fade interval.
+    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
+    let blade_end = blade_fade_end(rank);
+    if (length(base_xz - view.world_position.xz) >= blade_end) {
+        return culled_vertex();
+    }
     let sampled = sample_field(base_xz);
     let ground_y = sampled.x;
     let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
-
-    // Instance rank sets each blade's radial fade interval.
     let distance = length(vec3<f32>(base_xz.x, ground_y, base_xz.y) - view.world_position);
-    let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
-    let blade_end = blade_fade_end(rank);
     let fade_span = select(BLADE_FADE_M, max(BLADE_FADE_M, blade_end * 0.12), vertex.position.z < -0.5);
     let blade_start = max(field.fade_start, blade_end - fade_span);
     let coverage = 1.0 - smoothstep(blade_start, blade_end, distance);
     let alive = select(0.0, coverage, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base_xz));
+    if (alive <= 0.0 || distance <= CANOPY_NEAR_M) {
+        return culled_vertex();
+    }
 
     let t = vertex.position.y;
     let side = vertex.position.x;
@@ -519,8 +542,15 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+#ifdef VEGETATION_FLAT
+    return vec4<f32>(in.color.rgb, 1.0);
+#endif
+#ifdef VEGETATION_CUTOUT
     let alpha = select(1.0, canopy_alpha(in.canopy_uv, true), in.canopy_uv.z > 0.5);
     if (alpha < 0.001) { discard; }
+#else
+    let alpha = 1.0;
+#endif
     var pbr_input = pbr_input_new();
     // Stalks and straw: matte, edges darker than the midrib, little
     // translucency.
@@ -544,11 +574,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     pbr_input.N = foliage_normal(in.world_normal, pbr_input.world_normal, pbr_input.V);
     pbr_input.flags = MESH_FLAGS_SHADOW_RECEIVER_BIT;
 
-    var color = apply_pbr_lighting(pbr_input);
-    if (in.canopy_uv.z > 0.5) {
-        color = surface_lighting(pbr_input, 0.45);
-    }
-    color = main_pass_post_lighting_processing(pbr_input, color);
+#ifdef VEGETATION_CUTOUT
+    var color = canopy_lighting(pbr_input, 0.45);
+#else
+    var color = plant_lighting(pbr_input);
+#endif
     color.a = alpha;
     return color;
 }

@@ -177,6 +177,54 @@ mod tests {
         assert_eq!(instance_budget(1024.0, 16.0, 8.0, 24.0, true), 64);
     }
 
+    fn far_blades() -> VegetationLayer {
+        VegetationLayer {
+            shader: "",
+            template: || Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, RenderAssetUsages::default()),
+            density: 4500.0,
+            fade_start: 8.0,
+            fade_end: 128.0,
+            inverse_square_thinning: true,
+            albedo: None,
+            lod_band: [32.0, 1.0e9],
+            follow_grass: 0.0,
+            cutout: false,
+            way_only: false,
+            blade: None,
+            sieve: None,
+        }
+    }
+
+    #[test]
+    fn a_chunk_inside_a_band_issues_only_what_the_band_draws() {
+        let layer = far_blades();
+        let capacity = 16.0 * 16.0 * layer.density;
+        let inside = band_budget(capacity, 0.0, &layer);
+        assert_eq!(inside, band_budget(capacity, 32.0 - BAND_MARGIN_M, &layer));
+        assert!(inside * 20 < budget_of(capacity, 0.0));
+        for step in 0..=400 {
+            let distance = 32.0 - BAND_MARGIN_M + step as f32 * 0.25;
+            assert!(inside >= budget_of(capacity, distance), "drops blades drawn at {distance} m");
+        }
+        assert_eq!(band_budget(capacity, 50.0, &layer), budget_of(capacity, 50.0));
+    }
+
+    #[test]
+    fn a_range_scales_the_fade_and_the_band_but_not_an_open_band_edge() {
+        let mut layer = far_blades();
+        layer.scale_range(0.5);
+        assert_eq!((layer.fade_start, layer.fade_end), (4.0, 64.0));
+        assert_eq!(layer.lod_band[0], 16.0);
+        let mut open = far_blades();
+        open.lod_band = [0.0, f32::MAX];
+        open.scale_range(0.5);
+        assert_eq!(open.lod_band, [0.0, f32::MAX]);
+    }
+
+    fn budget_of(capacity: f32, distance: f32) -> u32 {
+        instance_budget(capacity, distance, 8.0, 128.0, true)
+    }
+
     #[test]
     fn chunk_budget_distance_is_conservative_across_boundaries_and_heights() {
         for eye in [
@@ -621,6 +669,29 @@ pub fn instance_budget(
     (capacity * (fade * projected).powi(2)).ceil() as u32
 }
 
+/// The field's wear as a chunk sees it: none where no way line reaches the chunk,
+/// so `worn` returns on its first line for every plant in it.
+fn chunk_tread(field: &RuntimeField, corner: Vec2, size: f32) -> Vec4 {
+    let reached = field.way.points() < 2
+        || field.way.reaches(FieldBounds { min: corner, max: corner + size });
+    if reached { field.tread } else { Vec4::ZERO }
+}
+
+/// Slack on a detail band's edges, wider than the shaders' per-blade band jitter.
+const BAND_MARGIN_M: f32 = 2.0;
+
+/// Instances a chunk issues for a layer, counted from the nearer of the chunk's
+/// nearest point and the inner edge of the layer's band.
+fn band_budget(capacity: f32, nearest: f32, layer: &VegetationLayer) -> u32 {
+    instance_budget(
+        capacity,
+        nearest.max(layer.lod_band[0] - BAND_MARGIN_M),
+        layer.fade_start,
+        layer.fade_end,
+        layer.inverse_square_thinning,
+    )
+}
+
 /// Chunk side for a layer: detail levels near the camera stream in small
 /// chunks so their density follows distance instead of the whole chunk.
 fn chunk_m(layer: &VegetationLayer) -> f32 {
@@ -683,9 +754,15 @@ pub fn stream_vegetation(
     };
     let eye = camera.translation().xz();
     let eye_y = camera.translation().y;
+    let only: Option<Vec<usize>> = std::env::var("GEARBOX_VEG_LAYERS")
+        .ok()
+        .map(|list| list.split(',').filter_map(|index| index.trim().parse().ok()).collect());
     let mut wanted: HashMap<_, _> = HashMap::default();
     for field in &active.fields {
         for (layer_index, layer) in field.profile.layers.iter().enumerate() {
+            if only.as_ref().is_some_and(|only| !only.contains(&layer_index)) {
+                continue;
+            }
             if layer.density <= 0.0 || field.bounds.nearest_distance(eye) >= layer.fade_end {
                 continue;
             }
@@ -710,17 +787,14 @@ pub fn stream_vegetation(
                     let nearest = bounds.nearest_distance(eye).hypot(lift);
                     let farthest = farthest_distance(&bounds, eye).hypot((eye_y - low).abs().max((eye_y - high).abs()));
                     // Beyond this detail level's band the next mesh takes over.
-                    if nearest > layer.lod_band[1] + 2.0 || farthest < layer.lod_band[0] - 2.0 {
+                    if nearest > layer.lod_band[1] + BAND_MARGIN_M || farthest < layer.lod_band[0] - BAND_MARGIN_M {
+                        continue;
+                    }
+                    if layer.way_only && chunk_tread(field, corner, size) == Vec4::ZERO {
                         continue;
                     }
                     let capacity = size * size * layer.density;
-                    let instances = instance_budget(
-                        capacity,
-                        nearest,
-                        layer.fade_start,
-                        layer.fade_end,
-                        layer.inverse_square_thinning,
-                    );
+                    let instances = band_budget(capacity, nearest, layer);
                     if instances == 0 {
                         continue;
                     }
@@ -752,11 +826,6 @@ pub fn stream_vegetation(
             continue;
         }
         let corner = Vec2::new(key.2 as f32, key.3 as f32) * size;
-        // Searching a way costs a loop for every blade in the chunk. Most
-        // chunks are nowhere near the road, and a chunk with no tread leaves
-        // `worn` on its first line, so tell those ones they are not worn at all.
-        let reached = field.way.points() < 2
-            || field.way.reaches(FieldBounds { min: corner, max: corner + size });
         // One mesh per layer, built once: chunks only place its instances.
         let (mesh, variants) = layer_meshes
             .entry((field.profile.name, key.1))
@@ -785,7 +854,11 @@ pub fn stream_vegetation(
                     fade_end: layer.fade_end,
                     inverse_square_thinning: layer.inverse_square_thinning,
                     follow_grass: layer.follow_grass,
-                    tread: if reached { field.tread } else { Vec4::ZERO },
+                    cutout: layer.cutout,
+                    band: Vec2::from_array(layer.lod_band),
+                    blade: layer.blade,
+                    sieve: layer.sieve.map(|path| assets.load(path)),
+                    tread: chunk_tread(field, corner, size),
                     soft_border: field.profile.soft_border,
                     way: field.way,
                     albedo: layer.albedo.map(|path| assets.load(path)),
