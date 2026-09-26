@@ -14,6 +14,11 @@ pub use sky::{WeatherOptOut, camera_look};
 /// camera's own cloud image, so only that camera should include this layer.
 pub const SKY_LAYER: usize = 2;
 
+/// Render layer of lean views (sensor cameras): a shadowless twin of the sun
+/// lights them, so the sun's shadow cascades are drawn for the main views
+/// only. Every mesh that authors no layers of its own is drawn on it too.
+pub const LEAN_LAYER: usize = 3;
+
 use bevy::prelude::*;
 use clouds::config::CloudsConfig;
 

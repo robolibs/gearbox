@@ -4,6 +4,7 @@ use super::daylight::Daylight;
 use super::{DaylightUpdate, SkyLight, WeatherSettings};
 use crate::OriginalIlluminance;
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::{
@@ -21,6 +22,10 @@ use crate::clouds::{CloudsCamera, CloudsPlugin};
 
 #[derive(Component)]
 struct Sun;
+
+/// The sun as lean views see it: the same light, without shadow maps.
+#[derive(Component)]
+struct LeanSun;
 
 pub(super) struct SkyPlugin;
 
@@ -44,10 +49,47 @@ impl Plugin for SkyPlugin {
                     synchronize_daylight,
                     follow_with_cloud_shadows,
                     thin_air_with_height,
+                    mirror_lean_sun,
+                    draw_meshes_for_lean_views,
                 )
                     .chain()
                     .in_set(DaylightUpdate),
             );
+    }
+}
+
+/// Lean views draw every mesh that authors no layers of its own.
+fn draw_meshes_for_lean_views(
+    mut commands: Commands,
+    meshes: Query<Entity, (Added<Mesh3d>, Without<RenderLayers>)>,
+) {
+    for mesh in &meshes {
+        commands
+            .entity(mesh)
+            .insert(RenderLayers::from_layers(&[0, crate::LEAN_LAYER]));
+    }
+}
+
+/// The lean sun follows the sun: direction, colour, strength and the cloud
+/// shadow it carries.
+fn mirror_lean_sun(
+    mut commands: Commands,
+    suns: Query<(&Transform, &DirectionalLight, Option<&DirectionalLightTexture>), With<Sun>>,
+    mut lean: Query<
+        (Entity, &mut Transform, &mut DirectionalLight, Option<&DirectionalLightTexture>),
+        (With<LeanSun>, Without<Sun>),
+    >,
+) {
+    let Some((transform, light, texture)) = suns.iter().next() else {
+        return;
+    };
+    for (entity, mut lean_transform, mut lean_light, lean_texture) in &mut lean {
+        *lean_transform = *transform;
+        lean_light.color = light.color;
+        lean_light.illuminance = light.illuminance;
+        if let (Some(texture), None) = (texture, lean_texture) {
+            commands.entity(entity).insert(texture.clone());
+        }
     }
 }
 
@@ -72,6 +114,18 @@ fn spawn_daylight(mut commands: Commands, settings: Res<WeatherSettings>) {
             overlap_proportion: 0.2,
         }
         .build(),
+    ));
+    commands.spawn((
+        LeanSun,
+        Name::new("Lean sun"),
+        Transform::default(),
+        DirectionalLight {
+            illuminance: settings.illuminance,
+            color: settings.sun_color,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        RenderLayers::layer(crate::LEAN_LAYER),
     ));
 }
 
@@ -258,7 +312,7 @@ pub fn camera_look(camera: &mut EntityCommands, settings: &WeatherSettings, lean
         EnvironmentMapLight::default(),
     ));
     if lean {
-        camera.insert(Msaa::Off);
+        camera.insert((Msaa::Off, RenderLayers::layer(crate::LEAN_LAYER)));
     } else {
         camera.insert((
             Msaa::Sample4,
