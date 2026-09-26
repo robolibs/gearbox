@@ -462,8 +462,13 @@ fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, 
     let name = std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into());
     let backend = world.resource::<crate::physics::PhysicsWorld>().name();
     let state = if world.resource::<gearbox_api::PhysicsActive>().0 { "PLAYING" } else { "PAUSED" };
+    let rate = world
+        .get_resource::<bevy::diagnostic::DiagnosticsStore>()
+        .and_then(|store| store.get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS))
+        .and_then(|fps| fps.smoothed())
+        .map_or_else(|| "-- fps".to_owned(), |fps| format!("{fps:.0} fps  {:.1} ms", 1000.0 / fps.max(1e-3)));
     let painter = egui.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("gearbox_instance_label")));
-    let galley = painter.layout_no_wrap(format!("{name}  |  {backend}  |  {state}"), egui::FontId::proportional(15.0), egui::Color32::WHITE);
+    let galley = painter.layout_no_wrap(format!("{name}  |  {backend}  |  {state}  |  {rate}"), egui::FontId::proportional(15.0), egui::Color32::WHITE);
     let position = egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top() + 12.0);
     painter.rect_filled(egui::Rect::from_min_size(position, galley.size()).expand(5.0), 4.0, egui::Color32::from_black_alpha(190));
     painter.galley(position, galley, egui::Color32::WHITE);
