@@ -409,8 +409,8 @@ group. Work controllers still use only the first target.
 
 | Request | Joint with a motor device (M§12) | Joint without |
 |---|---|---|
-| position | device `Position` command: the device's PID, speed, acceleration, limits and `maxForce` apply | the target of the joint's authored position drive (`PhysicsDriveAPI` with stiffness > 0) with its gains, `maxForce` and type; without one, an Acceleration-model position servo: stiffness 4000, damping 400, max force 50 kN |
-| velocity | device `Velocity` command, clipped to the device's `maxVelocity`, up to its `maxForce` | Acceleration-model velocity servo: damping 200, max force per type (below) |
+| position | device `Position` command: the device's speed, acceleration and limits move the target of the joint's authored drive, whose gains, `maxForce` and type apply; without a drive, the device's PID, speed, acceleration, limits and `maxForce` | the target of the joint's authored position drive (`PhysicsDriveAPI` with stiffness > 0) with its gains, `maxForce` and type; without one, an Acceleration-model position servo: stiffness 4000, damping 400, max force 50 kN |
+| velocity | device `Velocity` command, clipped to the device's `maxVelocity` and ramped by its `acceleration`, up to the drive's `maxForce` (the device's without a drive) | the target of the joint's authored velocity drive (stiffness 0, damping > 0) with its damping, type and `maxForce` (the type's cap below when unauthored); without one, an Acceleration-model velocity servo: damping 200, max force per type (below) |
 | brake | the servo is written and the device replaces it every step: no effect | Acceleration-model zero-velocity servo: damping 400 × level, max force 50 kN × level |
 
 Acceleration-model gains act per unit of joint inertia. `builtin:brake` does
@@ -769,8 +769,9 @@ Every registered device streams `gearbox.measurement.v1` on
   `set-value` move the master's own joints but do not reach its slaves.
 - `builtin:brake` and drive controllers race on shared wheel joints (§5.6);
   `builtin:brake` has no effect on a joint with a motor device.
-- Service controllers commanding a motor device use the device's own
-  `maxForce` (default 10 N·m); their own force caps do not apply.
+- Service controllers commanding a motor device use the joint drive's
+  `maxForce`, else the device's own (default 10 N·m); their own force caps
+  do not apply.
 - A twist sent with session 0 never times out (§9.4).
 - `GEARBOX_MACHINE_ID` of an `external:process` child is the machine id, not
   the agent name when a `namespace` is authored. An exiting child is

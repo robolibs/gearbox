@@ -21,7 +21,7 @@ use usd_bevy::UsdPrimRef;
 use crate::controller::{ControllerInventory, MachineAgentKeys, find_prim_entity, read_attr, read_bool, read_float, read_token, type_name};
 use crate::physics::backend::{
     BeltDesc, ConnectorDesc, ConnectorKind, DVec3, DeviceCommand, DeviceId, DeviceLimits, DeviceSetting,
-    BodyId, CopterCommand, CopterDesc, CopterLimits, DragDesc, JointId, PhysicsBackend, Pose, PropellerDesc,
+    BodyId, CopterCommand, CopterDesc, CopterLimits, DragDesc, JointId, Pose, PropellerDesc,
 };
 use crate::physics::PhysicsWorld;
 use crate::usd_ext::StageExt;
@@ -254,7 +254,7 @@ pub fn discover(
 /// Controllers that own the wheel and steering joints they drive.
 const DRIVE_TYPES: [&str; 3] = ["builtin:ackermann_cmd_vel", "builtin:diff_drive_cmd_vel", "builtin:tracked_cmd_vel"];
 
-/// A motor device replaces its joint's drive every step, so one on a joint
+/// A motor device commands its joint's drive every step, so one on a joint
 /// the drive controller or the suspension owns would silently take it over.
 pub fn ownership_errors(machine: &crate::controller::MachineInstanceSpec) -> Vec<String> {
     let mut owned: HashMap<&str, &str> =
@@ -468,7 +468,7 @@ fn number(props: &Props, key: &str) -> Option<f64> {
 }
 
 /// Applies one command to a registered device.
-fn apply(physics: &mut dyn PhysicsBackend, device: &Registered, command: &ActuatorCommand) -> Result<(), String> {
+fn apply(physics: &mut PhysicsWorld, device: &Registered, command: &ActuatorCommand) -> Result<(), String> {
     let props = command.props();
     let has = |key: &str| props.get(key).is_some();
     let flag = |key: &str| props.get(key).map(|v| matches!(v.trim(), "1" | "true" | "on" | "yes"));
@@ -637,7 +637,7 @@ fn drive_devices(
                 warn!("gearbox-devices: `{}` has no device `{name}`", machine.id);
                 continue;
             };
-            if let Err(error) = apply(&mut **physics, device, &command) {
+            if let Err(error) = apply(&mut physics, device, &command) {
                 warn!("gearbox-devices: `{}` device `{name}`: {error}", machine.id);
             }
         }
@@ -760,7 +760,7 @@ fn publish_devices(
             continue;
         };
         for device in devices {
-            let Some((measurement_kind, values, peer)) = reading(&**physics, device, &registry) else {
+            let Some((measurement_kind, values, peer)) = reading(&physics, device, &registry) else {
                 continue;
             };
             let mut pairs = vec![("name", device.spec.name.as_str())];
@@ -782,7 +782,7 @@ fn publish_devices(
 }
 
 /// A device's measurement kind, record and peer name.
-fn reading(physics: &dyn PhysicsBackend, device: &Registered, registry: &MachineDevices) -> Option<(u32, Vec<f64>, Option<String>)> {
+fn reading(physics: &PhysicsWorld, device: &Registered, registry: &MachineDevices) -> Option<(u32, Vec<f64>, Option<String>)> {
     Some(match device.live {
         Live::Joint(joint) => {
             let m = physics.motor_output(joint)?;

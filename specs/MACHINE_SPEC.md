@@ -75,8 +75,9 @@ machine prim when the machine prim is not `/robot`.
 | `gearbox:machine:grants` | token[] | [] | Slave requests this machine accepts when it is a master: `speed`, `steering`, `hitch:<instance>`, `pto:<instance>`, `aux_valve:<n>` (n counts the `builtin:hydraulic_valve` controllers from 0 in instance-name order). CONTROLLER_SPEC §8. |
 | `gearbox:machine:tracks` | string (JSON) | none | Tracked drive definition, §11. |
 | `gearbox:machine:interfaceVersion` | token | none | Parsed, unused. |
-| `gearbox:machine:upAxis` | token | none | Parsed, unused; the stage `upAxis` applies. |
-| `gearbox:machine:visuals`, `:colliders`, `:sensors` | rel[] | [] | Parsed, unused. |
+| `gearbox:machine:upAxis` | token | none | Not read; the stage `upAxis` applies. |
+| `gearbox:machine:visuals`, `:colliders` | rel[] | [] | Not read; colliders are the prims with `PhysicsCollisionAPI`. |
+| `gearbox:machine:sensors` | rel[] | [] | Parsed, unused. |
 | `gearbox:controller:<n>:*` | | | Controller instances, CONTROLLER_SPEC §2. |
 
 Derived id: the composed prim path, lower-cased, every run of
@@ -349,8 +350,8 @@ the applied schema are not found.
   (within 1e-4); otherwise it is an **Acceleration**-model drive whose gains
   act per unit of joint inertia. Keep both frame rotations equal on every
   driven joint.
-- A `gearbox:motor:*` device on the joint replaces its drive every physics
-  step (§12.3).
+- A `gearbox:motor:*` device on the joint moves the drive's targets every
+  physics step (§12.3).
 
 ## 7. Joint roles
 
@@ -556,7 +557,7 @@ Vector attributes accept `float2/3`, `double2/3`, `float[]` or `double[]`.
 
 | Device | Prim | Attributes (default) |
 |---|---|---|
-| Motor | a revolute or prismatic tree joint | `gearbox:motor:maxForce` N·m or N (10), `maxVelocity` rad/s or m/s (10), `acceleration` (unlimited; ≤ 0 means unlimited), `controlPID` 3 values (10, 0, 0), `minPosition`/`maxPosition` in rad or m (none; used only when both are authored and min < max) |
+| Motor | a revolute or prismatic tree joint | `gearbox:motor:maxForce` N·m or N (the joint drive's `maxForce`, else 10), `maxVelocity` rad/s or m/s (10), `acceleration` (unlimited; ≤ 0 means unlimited), `controlPID` 3 values (10, 0, 0), `minPosition`/`maxPosition` in rad or m (none; used only when both are authored and min < max) |
 | Brake | a revolute or prismatic tree joint | `gearbox:brake:damping` N·m·s/rad or N·s/m (0; negative → 0) |
 | Propeller | a prim at or below a body; +X is the shaft, the origin the centre of thrust | `gearbox:propeller:thrustConstants` 2 values (**required**), `torqueConstants` 2 values (0, 0), `maxVelocity` rad/s (100), `acceleration` (unlimited), `maxTorque` N·m (unlimited). `controlPID`, `minPosition`, `maxPosition` are parsed and have no effect. |
 | Belt (conveyor, tank track) | a collider, or a prim with colliders below it | `gearbox:belt:direction` 3 values in the prim frame (1, 0, 0), `maxVelocity` m/s (10), `acceleration`, `controlPID`, `minPosition`/`maxPosition` |
@@ -571,17 +572,35 @@ frame is the prim's pose relative to its body when registered.
 
 - **Motors**
   - A new motor holds the joint position it finds.
-  - Position control: a PID on the position error gives a speed, capped by
-    the speed setting (default `maxVelocity`) and ramped by
-    `acceleration`; position targets are clipped to
-    `minPosition`/`maxPosition`.
-  - Velocity control: runs at the commanded speed, clipped to
-    ±`maxVelocity`.
+  - On a joint with an authored `PhysicsDriveAPI` (§6) the motor moves that
+    drive's targets and the drive moves the joint, as in any UsdPhysics
+    simulator:
+    - Position control with a spring drive (stiffness > 0): the target
+      position travels to the command at the speed setting (default
+      `maxVelocity`), ramped by `acceleration` and braking to stop on it;
+      the target velocity is that travel speed.
+    - Position control with a damper drive: a PID on the position error
+      gives the target velocity, capped by the speed setting and ramped by
+      `acceleration`.
+    - Velocity control: the target velocity follows the command, clipped to
+      ±`maxVelocity` and ramped by `acceleration`; a spring drive's target
+      position runs along with it, within `maxForce / stiffness` of the
+      joint.
+    - The drive's stiffness, damping, `drive:type` and `maxForce` apply;
+      `gearbox:motor:maxForce` only stands in for an unauthored `maxForce`.
+  - On a joint without one the motor is the backend's own:
+    - Position control: a PID on the position error gives a speed, capped
+      by the speed setting (default `maxVelocity`) and ramped by
+      `acceleration`.
+    - Velocity control: runs at the commanded speed, clipped to
+      ±`maxVelocity`.
+    - The drive is a Force-model velocity drive with effort up to
+      `gearbox:motor:maxForce`.
+  - Position targets are clipped to `minPosition`/`maxPosition`.
   - Force control applies an effort clipped to ±`maxForce`.
-  - The drive is a Force-model velocity drive with effort up to
-    `maxForce`. It **replaces the joint's whole motor at the start of every
-    physics step**: the joint's USD drive and any runtime write to its motor
-    (drive, steering, parking, service servo, track roller) are lost.
+  - The motor **writes the joint's whole motor at the start of every physics
+    step**: any runtime write to it (drive, steering, parking, service
+    servo, track roller) is lost.
 - **Brakes** add viscous damping `−c·ω` on the joint through a channel
   separate from the motor; it stays until changed with an `/actuate`
   `brake` prop. `builtin:brake` does not use it.
@@ -619,7 +638,7 @@ Commands and readings: CONTROLLER_SPEC §9.8.
 
 ### 12.4 Ownership rule
 
-A `gearbox:motor:*` device replaces its joint's motor every step, so it may
+A `gearbox:motor:*` device writes its joint's motor every step, so it may
 not sit on a joint something else drives. Discovery rejects the machine
 when a motor device's joint is:
 
@@ -638,15 +657,17 @@ joints.
 
 A service controller whose joint has a motor device commands the device
 (`Position` or `Velocity`) instead of writing its own servo: the device's
-PID, speed, acceleration, limits and `maxForce` apply and the controller's
-force caps do not. Author `maxForce` for the load; the default 10 N·m moves
+PID, speed, acceleration and limits and the joint drive's gains and
+`maxForce` apply, and the controller's force caps do not. Author the drive's
+`maxForce` for the load; without a drive the device's default 10 N·m moves
 almost nothing. Details in CONTROLLER_SPEC §5.2.
 
-A motor holds its commanded speed against everything the step puts on its
-joint (gravity, what hangs on it through soft and loop joints, the other
-motors) up to `maxForce`; beyond that it stalls at `maxForce`. Rate it like
-the machine's own actuator: a hitch lift at the tractor's rated lift
-capacity, on the joint that carries the implement (TOOLS_SPEC §2.1).
+A motor's drive holds against everything the step puts on its joint
+(gravity, what hangs on it through soft and loop joints, the other motors)
+up to `maxForce`; beyond that it stalls at `maxForce`. A spring drive gives
+way by load / stiffness. Rate it like the machine's own actuator: a hitch
+lift at the tractor's rated lift capacity, on the joint that carries the
+implement (TOOLS_SPEC §2.1).
 
 ## 13. Sensor links
 

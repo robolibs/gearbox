@@ -105,7 +105,7 @@ references, not motion limits.
 
 The authored drive is kept as loaded, whatever the joint frames: Force model
 for `drive:type = "force"`, Acceleration otherwise. A `gearbox:motor:*` device
-on a steer joint replaces these writes every physics step.
+on a steer joint writes the drive in their place every physics step.
 
 ## Diagnostics
 

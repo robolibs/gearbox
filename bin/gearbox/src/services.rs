@@ -426,7 +426,8 @@ enum Actuation {
     /// Hold a position (rad or m).
     Position(f64),
     /// Run at a velocity (rad/s or m/s); `max_force` caps the runtime's own
-    /// servo, a motor device keeps its own limit.
+    /// servo and an authored drive without a force limit, a motor device
+    /// keeps its own limit.
     Velocity { target: f64, max_force: f64 },
     /// Hold the joint still with this share (0..1) of the brake servo.
     Brake(f64),
@@ -443,17 +444,21 @@ fn joint_between(physics: &PhysicsWorld, j: &JointRef) -> Option<JointId> {
         .or(between.first().copied())
 }
 
-/// Drives a joint through its motor device when it has one, else a position
-/// target through its authored position drive, otherwise with the runtime's
-/// own servo. A brake is a capped zero-velocity servo: Molla's joint damping
-/// on a tyred wheel whose axle rocks on a bogie feeds energy into the
-/// trailer, so it is not used for parking.
+/// Drives a joint through its motor device when it has one (which moves the
+/// joint's authored drive when there is one), else a position target through
+/// its authored position drive or a velocity target through its authored
+/// velocity drive, otherwise with the runtime's own servo. A brake is a
+/// capped zero-velocity servo: Molla's joint damping on a tyred wheel whose
+/// axle rocks on a bogie feeds energy into the trailer, so it is not used for
+/// parking.
 fn actuate(physics: &mut PhysicsWorld, j: &JointRef, act: Actuation) -> bool {
     let Some(id) = joint_between(physics, j) else {
         return false;
     };
     let device = physics.has_motor(id);
-    let drive = physics.authored_drives.get(&id).copied().filter(|d| d.stiffness > 0.0);
+    let drive = physics.authored_drives.get(&id).copied();
+    let spring = drive.filter(|d| d.stiffness > 0.0);
+    let damper = drive.filter(|d| d.stiffness == 0.0 && d.damping > 0.0);
     match act {
         Actuation::Brake(level) => servo(physics, id, j.axis, |g| {
             g.set_motor_velocity(j.axis, 0.0, level * BRAKE_FACTOR);
@@ -463,8 +468,8 @@ fn actuate(physics: &mut PhysicsWorld, j: &JointRef, act: Actuation) -> bool {
         Actuation::Velocity { target, .. } if device => {
             physics.command_motor(id, DeviceCommand::Velocity(target)).is_ok()
         }
-        Actuation::Position(target) if drive.is_some() => {
-            let d = drive.unwrap();
+        Actuation::Position(target) if spring.is_some() => {
+            let d = spring.unwrap();
             let Some(joint) = physics.joint_mut(id, true) else {
                 return false;
             };
@@ -473,6 +478,16 @@ fn actuate(physics: &mut PhysicsWorld, j: &JointRef, act: Actuation) -> bool {
             if let Some(force) = d.max_force {
                 joint.set_motor_max_force(j.axis, force);
             }
+            true
+        }
+        Actuation::Velocity { target, max_force } if damper.is_some() => {
+            let d = damper.unwrap();
+            let Some(joint) = physics.joint_mut(id, true) else {
+                return false;
+            };
+            joint.set_motor_model(j.axis, if d.force { MotorModel::Force } else { MotorModel::Acceleration });
+            joint.set_motor_velocity(j.axis, target, d.damping);
+            joint.set_motor_max_force(j.axis, d.max_force.unwrap_or(max_force));
             true
         }
         Actuation::Position(target) => servo(physics, id, j.axis, |g| {
@@ -1069,5 +1084,55 @@ mod tests {
         }
         let angle = world.joint(joint).unwrap().motor_position(JointAxis::AngX).unwrap();
         assert!((angle - 0.3).abs() < 1e-2, "{angle}");
+    }
+
+    #[test]
+    fn a_motor_device_moves_the_target_of_the_joints_authored_drive() {
+        let (mut world, j, joint) = arm();
+        let drive = crate::physics::AuthoredDrive { stiffness: 900.0, damping: 60.0, max_force: Some(700.0), force: true };
+        world.authored_drives.insert(joint, drive);
+        let limits = DeviceLimits { max_velocity: 0.5, ..Default::default() };
+        world.insert_motor(joint, limits, 50.0).unwrap();
+        assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
+        world.step();
+        let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
+        assert!((motor.target_position - 0.5 * world.dt()).abs() < 1e-12, "{motor:?}");
+        assert_eq!((motor.target_velocity, motor.stiffness, motor.damping, motor.max_force), (0.5, 900.0, 60.0, 700.0));
+        for _ in 0..240 {
+            world.step();
+        }
+        let output = world.motor_output(joint).unwrap();
+        assert_eq!(output.command, DeviceCommand::Position(0.3));
+        assert!((output.position - 0.3).abs() < 1e-2, "{output:?}");
+        assert_eq!(world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap().target_position, 0.3);
+    }
+
+    #[test]
+    fn a_motor_device_ramps_the_velocity_of_the_joints_authored_drive() {
+        let (mut world, j, joint) = arm();
+        let drive = crate::physics::AuthoredDrive { stiffness: 0.0, damping: 400.0, max_force: None, force: true };
+        world.authored_drives.insert(joint, drive);
+        let limits = DeviceLimits { max_velocity: 20.0, acceleration: Some(10.0), ..Default::default() };
+        world.insert_motor(joint, limits, 300.0).unwrap();
+        assert!(actuate(&mut world, &j, Actuation::Velocity { target: 5.0, max_force: 1.0 }));
+        world.step();
+        let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
+        assert!((motor.target_velocity - 10.0 * world.dt()).abs() < 1e-12, "{motor:?}");
+        assert_eq!((motor.stiffness, motor.damping, motor.max_force), (0.0, 400.0, 300.0));
+        for _ in 0..120 {
+            world.step();
+        }
+        let output = world.motor_output(joint).unwrap();
+        assert!((output.velocity - 5.0).abs() < 0.1, "{output:?}");
+    }
+
+    #[test]
+    fn velocity_commands_run_an_authored_velocity_drive() {
+        let (mut world, j, joint) = arm();
+        let drive = crate::physics::AuthoredDrive { stiffness: 0.0, damping: 400.0, max_force: Some(300.0), force: true };
+        world.authored_drives.insert(joint, drive);
+        assert!(actuate(&mut world, &j, Actuation::Velocity { target: 2.0, max_force: 1.0 }));
+        let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
+        assert_eq!((motor.target_velocity, motor.damping, motor.max_force), (2.0, 400.0, 300.0));
     }
 }

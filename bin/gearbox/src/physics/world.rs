@@ -12,7 +12,11 @@ use std::ops::{Deref, DerefMut};
 
 use bevy::prelude::*;
 
-use super::backend::{BodyId, ColliderId, JointAxis, JointId, MotorModel, PhysicsBackend, Pose, SolverSettings};
+use super::backend::{
+    BodyId, ColliderId, DeviceCommand, DeviceLimits, DeviceSetting, JointAxis, JointId, MotorModel, MotorOutput,
+    PhysicsBackend, Pose, SolverSettings,
+};
+use super::drive_motor::DriveMotor;
 use super::molla::MollaBackend;
 
 /// All physics state for the loaded scene. Exactly one of these in the world.
@@ -30,6 +34,8 @@ pub struct PhysicsWorld {
     /// USD joint → its authored `PhysicsDriveAPI`, kept while controllers
     /// rewrite the joint's motor every step.
     pub authored_drives: HashMap<JointId, AuthoredDrive>,
+    /// Motor devices that move their joint's authored drive.
+    drive_motors: HashMap<JointId, DriveMotor>,
     /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
     /// stored in both orders.
     pub filtered_pairs: HashSet<(BodyId, BodyId)>,
@@ -110,6 +116,7 @@ impl PhysicsWorld {
             entity_to_collider: HashMap::new(),
             entity_to_joint: HashMap::new(),
             authored_drives: HashMap::new(),
+            drive_motors: HashMap::new(),
             filtered_pairs: HashSet::new(),
             attachment_filtered_pairs: HashSet::new(),
             hitch_captures: HashMap::new(),
@@ -134,15 +141,86 @@ impl PhysicsWorld {
         self.advance_hitch_captures();
         self.advance_hitch_sliders();
         self.apply_joint_frictions();
+        self.advance_drive_motors();
         let (authored, attached) = (&self.filtered_pairs, &self.attachment_filtered_pairs);
         self.backend
             .step(&|a, b| authored.contains(&(a, b)) || attached.contains(&(a, b)));
+        self.observe_drive_motors();
         self.simulated_seconds += self.dt();
         for body in self.backend.quarantined_bodies() {
             if let Some(entity) = self.backend.body(body).and_then(|body| body.entity()) {
                 if !self.quarantined.contains(&entity) {
                     self.quarantined.push(entity);
                 }
+            }
+        }
+    }
+
+    /// Puts a motor device on `joint`. On a joint with an authored drive the
+    /// motor moves that drive; elsewhere it is the backend's own.
+    pub fn insert_motor(&mut self, joint: JointId, limits: DeviceLimits, max_force: f64) -> Result<(), String> {
+        let coordinate = self.backend.joint(joint).and_then(|j| {
+            [JointAxis::AngX, JointAxis::LinX].into_iter().find_map(|axis| j.motor_position(axis).map(|q| (axis, q)))
+        });
+        match (self.authored_drives.get(&joint), coordinate) {
+            (Some(drive), Some((axis, position))) => {
+                let motor = DriveMotor::new(axis, *drive, limits, max_force, position)?;
+                self.drive_motors.insert(joint, motor);
+                Ok(())
+            }
+            _ => self.backend.insert_motor(joint, limits, max_force),
+        }
+    }
+
+    pub fn remove_motor(&mut self, joint: JointId) {
+        if self.drive_motors.remove(&joint).is_none() {
+            self.backend.remove_motor(joint);
+        }
+    }
+
+    pub fn has_motor(&self, joint: JointId) -> bool {
+        self.drive_motors.contains_key(&joint) || self.backend.has_motor(joint)
+    }
+
+    pub fn command_motor(&mut self, joint: JointId, command: DeviceCommand) -> Result<(), String> {
+        match self.drive_motors.get_mut(&joint) {
+            Some(motor) => motor.command(command),
+            None => self.backend.command_motor(joint, command),
+        }
+    }
+
+    pub fn configure_motor(&mut self, joint: JointId, setting: DeviceSetting) -> Result<(), String> {
+        match self.drive_motors.get_mut(&joint) {
+            Some(motor) => motor.configure(setting),
+            None => self.backend.configure_motor(joint, setting),
+        }
+    }
+
+    pub fn motor_output(&self, joint: JointId) -> Option<MotorOutput> {
+        match self.drive_motors.get(&joint) {
+            Some(motor) => Some(motor.output(self.backend.motor_output(joint))),
+            None => self.backend.motor_output(joint),
+        }
+    }
+
+    fn advance_drive_motors(&mut self) {
+        let dt = self.dt();
+        let backend = &mut self.backend;
+        self.drive_motors.retain(|id, motor| {
+            let changed = motor.advance(dt);
+            let Some(joint) = backend.joint_mut(*id, changed) else {
+                return false;
+            };
+            motor.write(joint);
+            true
+        });
+    }
+
+    fn observe_drive_motors(&mut self) {
+        let dt = self.dt();
+        for (id, motor) in &mut self.drive_motors {
+            if let Some(position) = self.backend.joint(*id).and_then(|j| j.motor_position(motor.axis)) {
+                motor.observe(position, dt);
             }
         }
     }

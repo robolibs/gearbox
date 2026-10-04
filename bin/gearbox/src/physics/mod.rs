@@ -19,6 +19,7 @@ mod bodies;
 mod colliders;
 mod convert;
 mod debug;
+mod drive_motor;
 pub(crate) mod fem;
 mod joints;
 pub mod markers;

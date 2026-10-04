@@ -461,6 +461,9 @@ A controller with no joint logs a warning once. Positions are in rad
 - A joint with a `gearbox:motor:*` device takes position and velocity
   commands through that device; the device's own limits apply and the caps
   below do not.
+- Otherwise an authored position drive (stiffness > 0) takes position
+  commands and an authored velocity drive (stiffness 0, damping > 0) takes
+  velocity commands, with their own gains and `maxForce`.
 - Otherwise the runtime writes an Acceleration-model servo on the joint each
   frame (gains per unit of joint inertia): position stiffness 4000, damping
   400, cap 50 000; velocity damping 200, cap per type below.
