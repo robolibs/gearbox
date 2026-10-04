@@ -173,8 +173,6 @@ For a better API, keep durable physical structure in normal USD/UsdPhysics and
 move only robot semantics to machine-level roles:
 
 ```usda
-rel gearbox:machine:visuals = [...]
-rel gearbox:machine:colliders = [...]
 rel gearbox:machine:sensors = [...]
 
 rel gearbox:machine:role:poweredWheelJoints = [...]
