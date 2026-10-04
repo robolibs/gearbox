@@ -32,7 +32,7 @@ Read from the layer metadata (`physics/attach.rs`).
 | `metersPerUnit` | **0.01** when unauthored; env `BEVY_OPENUSD_METERS_PER_UNIT` overrides | Scales positions, joint frames, prismatic limits, linear drive gains and targets, velocities, centre of mass and inertia. An asset authored in metres without this key loads at 1/100 scale. Author `1`. |
 | `kilogramsPerUnit` | 1 | Scales mass, density and inertia. |
 | `upAxis` | any value other than `"Z"` is Y-up | `"Z"` rotates the stage −90° about X into the Y-up world. The drive controllers read the chassis frame of §18, which only lies flat in a Z-up stage. Author `"Z"`. |
-| `defaultPrim` | none | When set, only its subtree is scanned for machines and static attachments; otherwise the whole stage is scanned. |
+| `defaultPrim` | none | When set, only its subtree is scanned for machines and static attachments; otherwise the whole stage is scanned. The scan skips inactive prims and their subtrees. |
 
 A `PhysicsScene` prim sets world gravity: the first one loaded wins for the
 whole simulation, `physics:gravityMagnitude` defaults to 9.81 and is not
@@ -319,6 +319,11 @@ whose name contains `tire`, `tyre` or `wheel` sits 0.03 m above the terrain
 | `PhysicsLimitAPI:<dof>` | Only meaningful on generic joints, which are skipped. |
 
 ### 6.3 Limits
+
+`gearbox:joint:frequencyHz` optionally sets constraint compliance, with
+`gearbox:joint:dampingRatio` defaulting to 1. Frequency must be finite and
+positive; damping must be finite and nonnegative. Invalid values retain the
+backend default. Unauthored loop closures retain 30 Hz compliance.
 
 `physics:lowerLimit` and `physics:upperLimit` apply to revolute (degrees) and
 prismatic (scene units) joints, and **both must be authored**; one alone is

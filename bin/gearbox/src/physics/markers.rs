@@ -272,8 +272,16 @@ pub struct UsdPhysicsJoint {
     /// the two attached bodies).
     pub collision_enabled: bool,
     pub exclude_from_articulation: bool,
+    pub softness: Option<(f64, f64)>,
     pub break_force: Option<f32>,
     pub break_torque: Option<f32>,
+    /// `gearbox:joint:frictionTorque`: Coulomb friction on the free axis
+    /// (N·m or N), the torque the joint holds before it turns.
+    pub friction: Option<f64>,
+    /// `gearbox:joint:rollingResistance` and `gearbox:joint:rollingRadius`
+    /// (m): friction that grows with the ground load on the part the joint
+    /// turns, `coefficient × load × radius`.
+    pub rolling: Option<(f64, f64)>,
     /// Built-in single-DOF limits (revolute / prismatic). Revolute is
     /// rad, prismatic is m. `None` when unauthored or unlimited.
     pub built_in_limit: Option<(f32, f32)>,

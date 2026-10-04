@@ -100,14 +100,12 @@ references, not motion limits.
 
 | Steer joint | Motor written |
 |---|---|
-| Geometric path, no `PhysicsDriveAPI` authored on the joint | fallback servo with the current cap, every frame |
-| Current AngX motor is Force-model with stiffness > 0 | target only; its gains are kept |
-| Anything else | fallback servo |
+| Authored `PhysicsDriveAPI:angular` with stiffness > 0 | the target angle with the authored stiffness, damping and `maxForce` |
+| Anything else | fallback servo with the current cap, every frame |
 
-An authored `PhysicsDriveAPI:angular` becomes a Force-model motor only when
-`physics:localRot0` equals `physics:localRot1`, so only then are its gains
-kept. A `gearbox:motor:*` device on a steer joint replaces these writes every
-physics step.
+The authored drive is kept as loaded, whatever the joint frames: Force model
+for `drive:type = "force"`, Acceleration otherwise. A `gearbox:motor:*` device
+on a steer joint replaces these writes every physics step.
 
 ## Diagnostics
 

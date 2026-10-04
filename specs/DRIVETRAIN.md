@@ -30,6 +30,14 @@ lowest of:
   reaches the tractor through the joints; its mass is not added to the
   tractor's tyre loads.
 
+A driven wheel joint that authors a velocity `PhysicsDriveAPI:angular`
+(stiffness 0, damping > 0) is driven by that drive. Its `maxForce` is the
+per-wheel ceiling in place of `maxWheelTorqueNm` (also the parking cap and a
+track's motor cap), and its damping is the motor gain in place of
+`cap / 0.1 rad/s`. The controller only sets the speed target; grip, power and
+idling can lower the torque below `maxForce`, never raise it. A wheel freed by
+the controller (damping 0) keeps the controller's motor.
+
 An unloaded wheel still turns through its own joint toward its speed target;
 nothing invents a ground contact or chassis force for it. Power limits torque
 at speed; low-speed pulling is bounded by wheel torque and grip.

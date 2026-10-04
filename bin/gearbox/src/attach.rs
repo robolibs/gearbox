@@ -509,9 +509,78 @@ fn insert_hitch_joint(
     physics.insert_joint(hitch_body, coupler_body, joint)
 }
 
+/// The body a top-link rod slides on: the parent of a prismatic joint whose
+/// child is `rod`.
+fn slide_carrier(physics: &PhysicsWorld, rod: BodyId) -> Option<BodyId> {
+    let slide = JointAxes::ALL.without(JointAxis::LinX);
+    physics.joints().into_iter().find_map(|id| {
+        let (parent, child) = physics.joint_bodies(id)?;
+        (child == rod && physics.joint(id)?.locked_axes() == slide).then_some(parent)
+    })
+}
+
+/// Most an implement swings about its lower-link pins to meet its top link.
+const TOP_LINK_SWING_RAD: f64 = 0.26;
+const TOP_LINK_SWING_STEPS: i32 = 26;
+/// Slack on the top link's length and on its hinge's travel.
+const TOP_LINK_SLACK_M: f64 = 0.02;
+const TOP_LINK_SLACK_RAD: f64 = 0.02;
+
+/// Whether a top link reaches the implement's upper point: swung up to
+/// [`TOP_LINK_SWING_RAD`] about the lower-link pins (`pins`, axis X), the mast
+/// must lie within the top link's length, its rod's travel included, and
+/// within its pitch hinge's limits.
+fn top_link_reaches(physics: &PhysicsWorld, pins: &Pose, ((link, end), (implement, mast)): ((BodyId, DVec3), (BodyId, DVec3))) -> bool {
+    let at = |body: BodyId, point: DVec3| physics.body(body).map(|b| b.position()).map(|p| p.translation + p.rotation * point);
+    let child_of = |child: BodyId, free: JointAxis| {
+        physics.joints().into_iter().find(|id| {
+            physics.joint_bodies(*id).is_some_and(|(_, c)| c == child)
+                && physics.joint(*id).is_some_and(|j| j.locked_axes() == JointAxes::ALL.without(free))
+        })
+    };
+    let barrel = slide_carrier(physics, link).unwrap_or(link);
+    let (Some(pin), Some(mast), Some(hinge)) = (at(link, end), at(implement, mast), child_of(barrel, JointAxis::AngX)) else {
+        return false;
+    };
+    let (Some((parent, _)), Some(joint)) = (physics.joint_bodies(hinge), physics.joint(hinge)) else {
+        return false;
+    };
+    let Some(parent) = physics.body(parent).map(|b| b.position()) else {
+        return false;
+    };
+    let frame = joint.frame1();
+    let origin = parent.translation + parent.rotation * frame.translation;
+    let axis = parent.rotation * frame.rotation * DVec3::X;
+    let flat = |p: DVec3| (p - origin) - axis * (p - origin).dot(axis);
+    let reach = flat(pin);
+    let (shorter, longer) = (link != barrel)
+        .then(|| child_of(link, JointAxis::LinX))
+        .flatten()
+        .and_then(|id| {
+            let slide = physics.joint(id)?;
+            Some((slide.motor_position(JointAxis::LinX)?, slide.limits(JointAxis::LinX)?))
+        })
+        .map_or((0.0, 0.0), |(now, [lo, hi])| (now - lo, hi - now));
+    let length = reach.length() - shorter - TOP_LINK_SLACK_M..=reach.length() + longer + TOP_LINK_SLACK_M;
+    let angle = joint.motor_position(JointAxis::AngX).unwrap_or(0.0);
+    let limits = joint.limits(JointAxis::AngX);
+    let swing_axis = pins.rotation * DVec3::X;
+    (-TOP_LINK_SWING_STEPS..=TOP_LINK_SWING_STEPS).any(|i| {
+        let swing = DQuat::from_axis_angle(swing_axis, TOP_LINK_SWING_RAD * i as f64 / TOP_LINK_SWING_STEPS as f64);
+        let to = flat(pins.translation + swing * (mast - pins.translation));
+        let turn = axis.dot(reach.cross(to)).atan2(reach.dot(to));
+        length.contains(&to.length())
+            && limits.is_none_or(|[lo, hi]| (lo - TOP_LINK_SLACK_RAD..=hi + TOP_LINK_SLACK_RAD).contains(&(angle + turn)))
+    })
+}
+
 /// Joins a coupler to a hitch, each given as a body and the coupling's
 /// frame in it, and, with both top-link pins, closes the three-point loop.
 /// Both joints are caught where the bodies are now and drawn together.
+/// A top-link pin on a rod that slides on the top link loads the top link at
+/// the rod's pin: the hydraulic cylinder holds, the rod sets the length.
+/// A top link that cannot reach the implement's upper point is left off and
+/// the implement is fixed to the lower link.
 pub(crate) fn join_hitch(
     physics: &mut PhysicsWorld,
     kind: &str,
@@ -522,25 +591,32 @@ pub(crate) fn join_hitch(
     let hitch_pose = physics.body(hitch_body)?.position();
     let coupler_pose = physics.body(coupler_body)?.position();
     let current_hitch = Frame::from_pose(&hitch_pose).then(&Frame::from_pose(&hitch));
+    let top_pins = top_pins.filter(|pins| top_link_reaches(physics, &current_hitch.pose(), *pins));
     let initial = Frame::from_pose(&coupler_pose).inverse().then(&current_hitch);
     let (mut joint, hold) = joint_for(kind, top_pins.is_some(), hitch, initial.pose());
     joint.softness = Some((8.0, 1.0));
     let handle = insert_hitch_joint(physics, hitch_body, coupler_body, joint);
     physics.capture_hitch(handle, coupler, hold);
     let top_link = top_pins.and_then(|((link, end), (implement, mast))| {
-        let (link_pose, implement_pose) = (physics.body(link)?.position(), physics.body(implement)?.position());
+        let carrier = slide_carrier(physics, link);
+        let body = carrier.unwrap_or(link);
+        let (body_pose, link_pose, implement_pose) =
+            (physics.body(body)?.position(), physics.body(link)?.position(), physics.body(implement)?.position());
         // Caught where the link's end hangs now, then drawn onto the mast.
-        let reach = implement_pose.rotation.inverse()
-            * (link_pose.translation + link_pose.rotation * end - implement_pose.translation);
+        let pin = link_pose.translation + link_pose.rotation * end;
+        let reach = implement_pose.rotation.inverse() * (pin - implement_pose.translation);
         let mut desc = JointDesc::new(
             JointKind::Generic { locked: JointAxes::LIN },
-            Pose::new(end, DQuat::IDENTITY),
+            Pose::new(body_pose.rotation.inverse() * (pin - body_pose.translation), DQuat::IDENTITY),
             Pose::new(reach, DQuat::IDENTITY),
         );
         desc.softness = Some((8.0, 1.0));
         desc.loop_closure = true;
-        let joint = insert_hitch_joint(physics, link, implement, desc);
+        let joint = insert_hitch_joint(physics, body, implement, desc);
         physics.capture_hitch(joint, Pose::new(mast, DQuat::IDENTITY), HitchHold::Soft(TOP_LINK_HZ));
+        if let Some(carrier) = carrier {
+            physics.slide_hitch(joint, carrier, link, end);
+        }
         Some(joint)
     });
     Some((handle, top_link))
@@ -848,6 +924,11 @@ fn try_attach(
         top_pins,
     )
     .ok_or_else(|| refused("the hitch or the coupler has no physics body"))?;
+    if top_pins.is_some() && top_link.is_none() {
+        warn!(
+            "gearbox-attach: `{master_id}` top link cannot reach `{slave_id}`'s upper point; the implement rides on the lower links"
+        );
+    }
     let master_bodies = scene.bodies(master, physics);
     set_cross_collisions(physics, &master_bodies, &slave_bodies, false);
 
@@ -1316,5 +1397,78 @@ pub(crate) fn serve_attachments(
                 warn!("gearbox-attach: `{machine_id}` has no attached tool `{tool}`; command dropped");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::backend::{BodyDesc, ColliderDesc, MotorDesc, MotorModel, MotorTarget, Shape};
+
+    fn hold(axis: JointAxis) -> MotorDesc {
+        MotorDesc {
+            axis,
+            target: Some(MotorTarget::Position { target: 0.0, stiffness: 1e5, damping: 1e3 }),
+            max_force: Some(1e5),
+            model: Some(MotorModel::Force),
+        }
+    }
+
+    /// A hydraulic top link on a post in zero gravity: a barrel on a held
+    /// pitch hinge about X, a rod sliding ±0.1 m along Y with its pin 1 m
+    /// from the hinge, and a free implement on a lower pin 0.5 m below that
+    /// pin, its mast `mast` above the implement's origin at the top pin.
+    fn hitched(mast: f64) -> (PhysicsWorld, [BodyId; 3], JointId, Option<JointId>) {
+        let mut world = PhysicsWorld::default();
+        world.set_gravity(DVec3::ZERO);
+        let mut body = |desc: BodyDesc, at: DVec3| {
+            let id = world.insert_body(desc.pose(Pose::from_translation(at)));
+            world.insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.05 }).density(1000.0).parent(id)).unwrap();
+            id
+        };
+        let (post, barrel, rod) = (body(BodyDesc::fixed(), DVec3::ZERO), body(BodyDesc::dynamic(), DVec3::ZERO), body(BodyDesc::dynamic(), DVec3::ZERO));
+        let implement = body(BodyDesc::dynamic(), DVec3::Y);
+        let mut hinge = JointDesc::new(JointKind::Revolute { axis: DVec3::X }, Pose::IDENTITY, Pose::IDENTITY);
+        hinge.limits = vec![(JointAxis::AngX, [-0.5, 0.5])];
+        hinge.motors.push(hold(JointAxis::AngX));
+        world.backend.insert_joint(post, barrel, hinge);
+        let mut slide = JointDesc::new(JointKind::Prismatic { axis: DVec3::Y }, Pose::IDENTITY, Pose::IDENTITY);
+        slide.limits = vec![(JointAxis::LinX, [-0.1, 0.1])];
+        slide.motors.push(hold(JointAxis::LinX));
+        let slide = world.backend.insert_joint(barrel, rod, slide);
+        let (_, top) = join_hitch(
+            &mut world,
+            "three_point_mounted",
+            (post, Pose::from_translation(DVec3::new(0.0, 1.0, -0.5))),
+            (implement, Pose::from_translation(DVec3::new(0.0, 0.0, -0.5))),
+            Some(((rod, DVec3::Y), (implement, DVec3::new(0.0, 0.0, mast)))),
+        )
+        .unwrap();
+        (world, [barrel, rod, implement], slide, top)
+    }
+
+    /// The barrel carries the top link, the rod lengthens it and the
+    /// implement pitches back.
+    #[test]
+    fn a_sliding_top_link_rod_moves_the_pin_its_barrel_carries() {
+        let (mut world, [barrel, _, implement], slide, top) = hitched(0.0);
+        let top = top.unwrap();
+        assert_eq!(world.joint_bodies(top), Some((barrel, implement)));
+        world.joint_mut(slide, true).unwrap().set_motor_position(JointAxis::LinX, 0.1, 1e5, 1e3);
+        for _ in 0..480 {
+            world.step();
+        }
+        let barrel_pose = world.body(barrel).unwrap().position();
+        let pin = barrel_pose.translation + barrel_pose.rotation * world.joint(top).unwrap().frame1().translation;
+        assert!((pin.length() - 1.1).abs() < 1e-2, "{pin}");
+        let pitch = world.body(implement).unwrap().position().rotation.to_euler(glam::EulerRot::XYZ).0;
+        assert!(pitch < -0.05, "{pitch}");
+    }
+
+    /// A mast 2 m above the top link's reach leaves the top link off.
+    #[test]
+    fn a_top_link_that_cannot_reach_the_mast_is_left_off() {
+        assert!(hitched(0.0).3.is_some());
+        assert!(hitched(2.0).3.is_none());
     }
 }

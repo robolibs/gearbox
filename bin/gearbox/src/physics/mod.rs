@@ -11,7 +11,7 @@
 //! Molla is the engine: `molla` implements `backend::PhysicsBackend`, the
 //! interface the rest of gearbox steps and reads it through.
 
-mod attach;
+pub(crate) mod attach;
 #[cfg(test)]
 pub(crate) mod benchmark;
 pub mod backend;
@@ -43,7 +43,7 @@ use convert::{quat_from_d, vec3_from_d};
 
 pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
-pub use world::{PhysicsWorld, step_physics};
+pub use world::{AuthoredDrive, PhysicsWorld, step_physics};
 pub(crate) use world::HitchHold;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -171,6 +171,7 @@ fn attach_projected_stages(world: &mut World) {
                     .insert(Name::new(name.to_string()));
             }
             attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
+            attach::attach_joint_softness(world, *entity, stage, path);
             world.entity_mut(*entity).insert(PhysicsScanned);
         }
         attach::resolve_pending_physics(world, &pending, &by_path);
@@ -254,6 +255,7 @@ fn refresh_swapped_stages(world: &mut World) {
                     .insert(Name::new(name.to_string()));
             }
             attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
+            attach::attach_joint_softness(world, *entity, stage, path);
             world.entity_mut(*entity).insert(PhysicsScanned);
         }
         attach::resolve_pending_physics(world, &pending, &by_path);

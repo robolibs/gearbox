@@ -102,11 +102,33 @@ fn belt_speeds(cmd: CmdVel, width: f64) -> [f64; 2] {
     speeds.map(|v| v / scale)
 }
 
+/// A released lever eases a hydrostatic track drive to rest (m/s²), softer
+/// than the brake an opposite command applies.
+const TRACK_EASE_MPS2: f32 = 0.8;
+
+/// The command the belts follow: it reaches the requested speed at the
+/// driveline's rate, sheds it on the brake when the opposite direction is
+/// asked, and eases to rest when nothing is.
+fn ramped(previous: CmdVel, requested: CmdVel, dt: f32) -> CmdVel {
+    let rate = if requested.linear_mps * previous.linear_mps < 0.0 {
+        CMD_BRAKE_MPS2
+    } else if requested.linear_mps.abs() < COAST_DEADBAND_MPS {
+        TRACK_EASE_MPS2
+    } else {
+        CMD_ACCEL_MPS2
+    };
+    CmdVel {
+        linear_mps: slew(previous.linear_mps, requested.linear_mps, rate * dt),
+        angular_rps: slew(previous.angular_rps, requested.angular_rps, CMD_YAW_RPS2 * dt),
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Bindings {
     tracks: HashMap<ControllerKey, Vec<BodyId>>,
     failures: HashMap<ControllerKey, String>,
     yaw_trim: HashMap<ControllerKey, f64>,
+    applied: HashMap<ControllerKey, CmdVel>,
 }
 
 fn body_id(root: Entity, path: &str, prims: &Query<(Entity, &UsdPrimRef)>, parents: &Query<&ChildOf>, physics: &crate::physics::PhysicsWorld) -> Option<BodyId> {
@@ -137,6 +159,9 @@ pub(super) fn apply(
                 let mut cmd = commands.cmd_vel.get(&key).copied().unwrap_or_default();
                 if !cmd.linear_mps.is_finite() || !cmd.angular_rps.is_finite() { cmd = CmdVel::default(); }
                 cmd.angular_rps = cmd.angular_rps.clamp(-2.0, 2.0);
+                let dt = (physics.pending_steps as f64 / physics.step_hz) as f32;
+                cmd = ramped(bindings.applied.get(&key).copied().unwrap_or_default(), cmd, dt);
+                bindings.applied.insert(key.clone(), cmd);
                 let grounded = machine.tracks.iter().all(|spec| body_id(root, &spec.sprocket, &prims, &parents, &physics)
                     .and_then(|id| physics.track_output(id)).is_some_and(|s| s.contacts > 0));
                 let trim = bindings.yaw_trim.entry(key.clone()).or_default();
@@ -161,13 +186,20 @@ pub(super) fn apply(
                             let entity = find_prim_entity(root, path, &prims, &parents).ok_or("belt collider not loaded")?;
                             physics.entity_to_collider.get(&entity).copied().ok_or("belt collider not registered")
                         }).collect::<Result<Vec<_>, _>>()?;
+                        let max_torque = physics.authored_drives.get(&joint).and_then(|d| d.max_force)
+                            .unwrap_or(controller.max_wheel_torque_nm.unwrap_or(300.0) as f64);
                         physics.configure_track(TrackForceDesc {
                             carrier, sprocket, joint, contact_colliders,
                             local_axle: DVec3::from_array(spec.axle), local_forward: DVec3::from_array(spec.forward),
                             pitch_radius: spec.radius, longitudinal_friction: material("track_friction_long", 0.85), lateral_friction: material("track_friction_lateral", 0.65),
-                            slip_damping: material("track_slip_damping", 8000.0), max_torque: controller.max_wheel_torque_nm.unwrap_or(300.0) as f64,
+                            slip_damping: material("track_slip_damping", 8000.0), max_torque,
                             max_power: controller.max_power_kw.unwrap_or(10.0) as f64 * 500.0, speed_gain: material("track_speed_gain", 120.0),
                         })?;
+                        // The track motor turns the sprocket; the joint's authored drive would brake it.
+                        if let Some(j) = physics.joint_mut(joint, true) {
+                            j.set_motor_velocity(JointAxis::AngX, 0.0, 0.0);
+                            j.set_motor_max_force(JointAxis::AngX, 0.0);
+                        }
                     }
                     physics.set_track_speed(sprocket, speeds[usize::from(spec.side < 0.0)])?;
                     rotors.push(sprocket);
@@ -219,6 +251,7 @@ pub(super) fn apply(
                     bindings.failures.insert(key.clone(), error);
                     bindings.tracks.remove(&key);
                     bindings.yaw_trim.remove(&key);
+                    bindings.applied.remove(&key);
                     states.states.remove(&key);
                 }
             }
@@ -233,6 +266,7 @@ pub(super) fn apply(
     });
     bindings.failures.retain(|key, _| live.contains(key));
     bindings.yaw_trim.retain(|key, _| live.contains(key));
+    bindings.applied.retain(|key, _| live.contains(key));
 }
 
 pub(super) fn animate(
@@ -260,6 +294,14 @@ pub(super) fn animate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn belts_pull_away_ease_off_and_brake_at_their_rates() {
+        let at = |v: f32| CmdVel { linear_mps: v, angular_rps: 0.0 };
+        assert_eq!(ramped(at(0.0), at(3.0), 1.0).linear_mps, CMD_ACCEL_MPS2);
+        assert_eq!(ramped(at(3.0), at(0.0), 1.0).linear_mps, 3.0 - TRACK_EASE_MPS2);
+        assert_eq!(ramped(at(3.0), at(-1.0), 1.0).linear_mps, 3.0 - CMD_BRAKE_MPS2);
+        assert_eq!(ramped(at(0.5), at(0.0), 1.0).linear_mps, 0.0);
+    }
     #[test]
     fn differential_mix_and_invalid_command_stop() {
         assert_eq!(belt_speeds(CmdVel { linear_mps: 1.0, angular_rps: 0.0 }, 0.8), [1.0, 1.0]);

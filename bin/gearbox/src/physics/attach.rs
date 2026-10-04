@@ -274,6 +274,9 @@ pub fn attach_physics_to_entity(
             joint_enabled: joint.enabled,
             collision_enabled: joint.collision_enabled,
             exclude_from_articulation: joint.exclude_from_articulation,
+            softness: None,
+            friction: None,
+            rolling: None,
             break_force: joint.break_force,
             break_torque: joint.break_torque,
             built_in_limit,
@@ -421,6 +424,23 @@ fn dof_is_rotational(d: UsdDof) -> bool {
         d,
         UsdDof::RotX | UsdDof::RotY | UsdDof::RotZ | UsdDof::Angular
     )
+}
+
+pub fn attach_joint_softness(world: &mut World, entity: Entity, stage: &Stage, path: &str) {
+    let Some(mut joint) = world.get_mut::<UsdPhysicsJoint>(entity) else { return; };
+    let Ok(prim) = openusd::sdf::path(path) else { return; };
+    let read = |name| crate::controller::read_float(stage, &prim, name).map(f64::from);
+    let frequency = read("gearbox:joint:frequencyHz");
+    let ratio = read("gearbox:joint:dampingRatio").unwrap_or(1.0);
+    if let Some(frequency) = frequency.filter(|v| v.is_finite() && *v > 0.0)
+        && ratio.is_finite() && ratio >= 0.0
+    {
+        joint.softness = Some((frequency, ratio));
+    }
+    joint.friction = read("gearbox:joint:frictionTorque").filter(|v| v.is_finite() && *v > 0.0);
+    joint.rolling = read("gearbox:joint:rollingResistance")
+        .zip(read("gearbox:joint:rollingRadius"))
+        .filter(|(c, r)| c.is_finite() && r.is_finite() && *c > 0.0 && *r > 0.0);
 }
 
 fn convert_limit(l: &up::UsdLimit, meta: &StageMeta) -> UsdJointLimit {

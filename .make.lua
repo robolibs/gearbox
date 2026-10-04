@@ -134,6 +134,8 @@ make.recipe{
 make.recipe{ name = "test", desc = "run all tests",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
+make.recipe{ name = "test-hitch", desc = "test grouped hitch control and joint compliance",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "services::") end }
 make.recipe{ name = "test-tracked-machine", desc = "test the imported GEARBOX_TRACK_ASSET through native tracked control",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "real_tracked_machine", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-fem", desc = "test native FEM scheduling",

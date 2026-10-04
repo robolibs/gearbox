@@ -2,7 +2,10 @@
 
 `builtin:tracked_cmd_vel` (`bin/gearbox/src/controller/tracked.rs`) takes
 forward m/s and left-positive yaw rad/s and commands two Molla track motors on
-the sprocket joints. It never sets chassis pose or velocity.
+the sprocket joints. It never sets chassis pose or velocity. The track motor
+turns the sprocket: once a track is registered, the sprocket joint's own motor,
+an authored `PhysicsDriveAPI` drive included, is released so it cannot brake
+the belt.
 
 ## Controller
 
@@ -17,13 +20,18 @@ Each frame:
 
 1. A non-finite command becomes zero. Forward speed is clamped to ±3 m/s and
    yaw to ±2 rad/s.
-2. Yaw feedback runs while both sprockets report ground contacts and the yaw
+2. The command the belts follow moves toward the request at 1.2 m/s² when
+   pulling away, 0.8 m/s² when the request is zero (a released lever eases
+   the drive to rest) and 1.6 m/s² when the opposite direction is asked (the
+   brake); yaw moves at 1.5 rad/s². A step to zero stops the machine without
+   pitching it onto its track ends.
+3. Yaw feedback runs while both sprockets report ground contacts and the yaw
    command is at least 0.001 rad/s: `error = commanded yaw − measured yaw`,
    `trim += 3 × error × dt` (clamped ±6), and the yaw command becomes
    `yaw + 2 × error + trim`. Otherwise the trim resets to 0.
-3. Belt speeds are `v − ω·trackWidth/2` (left, `side = +1`) and
+4. Belt speeds are `v − ω·trackWidth/2` (left, `side = +1`) and
    `v + ω·trackWidth/2` (right), scaled together so neither exceeds 3 m/s.
-4. Rollers (below) follow the measured belt speed; telemetry and wheel
+5. Rollers (below) follow the measured belt speed; telemetry and wheel
    encoders are updated.
 
 When the controller is disabled, removed, or fails (missing track definitions,

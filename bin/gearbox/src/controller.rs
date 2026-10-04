@@ -26,6 +26,7 @@ use crate::physics::backend::{
     Body, BodyId, CombineRule, DVec3, Inertia, Joint, JointAxis, JointMut, MassProps, MotorModel,
     Pose, Shape, ShapeView,
 };
+use crate::physics::AuthoredDrive;
 use usd_bevy::UsdPrimRef;
 
 mod traction;
@@ -398,6 +399,7 @@ pub struct ControllerSpec {
     pub state_interfaces: Vec<String>,
     pub frame_convention: Option<String>,
     pub target: Option<String>,
+    pub target_joints: Vec<String>,
     pub body: Option<String>,
     pub drive_wheels: Vec<String>,
     pub steer_joints: Vec<String>,
@@ -688,6 +690,7 @@ fn append_isaac_compat_machines(
                 ],
                 frame_convention: Some("usd_z_up".to_string()),
                 target: Some(prim_path.to_string()),
+                target_joints: Vec::new(),
                 body,
                 drive_wheels: Vec::new(),
                 steer_joints,
@@ -1626,7 +1629,6 @@ fn drive_differential_wheels(
         yaw = (yaw + DIFF_YAW_GAIN * error + *trim).clamp(-DIFF_YAW_LIMIT_RPS, DIFF_YAW_LIMIT_RPS);
     }
     let parked = cmd.linear_mps.abs() < COAST_DEADBAND_MPS && cmd.angular_rps.abs() < COAST_DEADBAND_RPS;
-    let cap = controller.max_wheel_torque_nm.map(f64::from).unwrap_or(WHEEL_DRIVE_MAX_TORQUE);
     let fallback = controller.wheel_radius.unwrap_or(0.1) as f64;
     let mut targets: Vec<JointVelocityTarget> = Vec::new();
     for path in machine.powered_wheel_joints.iter().chain(controller.drive_wheel_joints.iter()) {
@@ -1640,11 +1642,11 @@ fn drive_differential_wheels(
             pair,
             velocity: (cmd.linear_mps as f64 - yaw * x) / radius,
             damping: 0.0,
-            max_torque: cap,
+            max_torque: wheel_torque_ceiling(physics, controller, pair),
             force_based: true,
         });
     }
-    let demand: f64 = targets.iter().map(|t| cap * t.velocity.abs().max(WHEEL_POWER_MIN_OMEGA_RAD_S)).sum();
+    let demand: f64 = targets.iter().map(|t| t.max_torque * t.velocity.abs().max(WHEEL_POWER_MIN_OMEGA_RAD_S)).sum();
     let scale = match controller.max_power_kw {
         Some(kw) if !parked => (f64::from(kw).max(0.0) * 1000.0 / demand.max(1e-6)).min(1.0),
         _ => 1.0,
@@ -2226,8 +2228,9 @@ fn cap_wheel_torque(
                 let parent_spin = physics.body(parent).map(|p| p.angvel()).unwrap_or(DVec3::ZERO);
                 (body.angvel() - parent_spin).dot(body.rotation() * axis).abs()
             })).unwrap_or(0.0);
+        let ceiling = wheel_torque_ceiling(physics, controller, target.pair);
         let shaft_budget = if parked {
-            controller.max_wheel_torque_nm.map(f64::from).unwrap_or(WHEEL_DRIVE_MAX_TORQUE)
+            ceiling
         } else if support.grip_force_n <= 0.0 {
             physics.body(wheel)
                 .map(|body| body.mass() * radius * radius * UNLOADED_WHEEL_ACCEL_RAD_S2)
@@ -2235,12 +2238,7 @@ fn cap_wheel_torque(
         } else {
             WHEEL_GRIP_USE * support.grip_force_n * radius
         };
-        let torque = wheel_torque_cap(
-            shaft_budget,
-            controller.max_wheel_torque_nm.map(f64::from),
-            None,
-            omega,
-        );
+        let torque = wheel_torque_cap(shaft_budget, Some(ceiling), None, omega);
         budgets.push((index, torque, omega.max(WHEEL_POWER_MIN_OMEGA_RAD_S)));
     }
     let demand: f64 = budgets.iter().map(|(_, torque, omega)| torque * omega).sum();
@@ -2444,12 +2442,19 @@ fn prepare_machine_physics(
         }
         runtime.machine_wheels.insert(machine.id.clone(), wheels.clone());
 
+        let drives = physics
+            .joints()
+            .into_iter()
+            .filter(|id| physics.authored_drives.contains_key(id))
+            .filter(|id| physics.joint_bodies(*id).is_some_and(|(a, b)| bodies.contains(&a) && bodies.contains(&b)))
+            .count();
         info!(
-            "gearbox-control: {} physics: {} bodies, {:.0} kg, {} tyres rounded, self-collision off",
+            "gearbox-control: {} physics: {} bodies, {:.0} kg, {} tyres rounded, {} authored drives, self-collision off",
             machine.id,
             bodies.len(),
             mass,
-            tyres
+            tyres,
+            drives
         );
     }
 }
@@ -3761,7 +3766,7 @@ fn apply_joint_motors_with_holds(
             if holds.iter().any(|hold| hold.joint == id) { continue; }
             let target = JointVelocityTarget {
                 velocity: target.velocity * physics.wheel_drive_sign(id),
-                ..*target
+                ..with_authored_drive(target, physics.authored_drives.get(&id))
             };
             if let Some(joint) = physics.joint_mut(id, false) {
                 set_wheel_motor(joint, &target);
@@ -3776,8 +3781,9 @@ fn apply_joint_motors_with_holds(
     // flip the vehicle.
     for target in steer_targets {
         for id in physics.joints_between(target.pair.0, target.pair.1) {
+            let authored = physics.authored_drives.get(&id).copied();
             if let Some(joint) = physics.joint_mut(id, false) {
-                set_steer_motor(joint, target.position, steer_cap);
+                set_steer_motor(joint, target.position, authored, steer_cap);
                 applied.steer = true;
             }
         }
@@ -3799,24 +3805,58 @@ fn set_wheel_motor(data: &mut dyn JointMut, target: &JointVelocityTarget) {
     data.set_motor_max_force(JointAxis::AngX, target.max_torque);
 }
 
-/// Drive a steer joint to `position` with its authored USD drive, else with
-/// force-based gains like the ones the assets author.
+/// The joint's authored velocity drive is the wheel motor: its damping is the
+/// gain, its maxForce the most torque. The controller sets the speed and may
+/// only lower the torque (grip, power, idling); a freed or visual-only wheel
+/// keeps the controller's motor.
+fn with_authored_drive(target: &JointVelocityTarget, drive: Option<&AuthoredDrive>) -> JointVelocityTarget {
+    match drive {
+        Some(d) if d.damping > 0.0 && d.stiffness == 0.0 && target.force_based && target.damping > 0.0 => {
+            JointVelocityTarget {
+                damping: d.damping,
+                max_torque: d.max_force.map_or(target.max_torque, |force| target.max_torque.min(force)),
+                force_based: d.force,
+                ..*target
+            }
+        }
+        _ => *target,
+    }
+}
+
+/// The authored drive of the joint between a body pair.
+fn authored_drive(physics: &crate::physics::PhysicsWorld, pair: (BodyId, BodyId)) -> Option<AuthoredDrive> {
+    physics
+        .joints_between(pair.0, pair.1)
+        .into_iter()
+        .find_map(|id| physics.authored_drives.get(&id).copied())
+}
+
+/// A driven wheel's torque ceiling: its authored drive's maxForce, else the
+/// controller's maxWheelTorqueNm.
+fn wheel_torque_ceiling(physics: &crate::physics::PhysicsWorld, controller: &ControllerSpec, pair: (BodyId, BodyId)) -> f64 {
+    authored_drive(physics, pair)
+        .and_then(|d| d.max_force)
+        .or(controller.max_wheel_torque_nm.map(f64::from))
+        .unwrap_or(WHEEL_DRIVE_MAX_TORQUE)
+}
+
+/// Drive a steer joint to `position` with its authored USD position drive
+/// (gains and maxForce as authored), else with load-based fallback gains.
 fn set_steer_motor(
     data: &mut dyn JointMut,
     position: f64,
+    authored: Option<AuthoredDrive>,
     max_torque: Option<f64>,
 ) {
-    let authored = data
-        .motor(JointAxis::AngX)
-        .filter(|m| matches!(m.model, MotorModel::Force) && m.stiffness > 0.0)
-        .map(|m| (m.stiffness, m.damping));
-    match authored {
-        Some((stiffness, damping)) => {
-            data.set_motor_position(JointAxis::AngX, position, stiffness, damping);
+    match authored.filter(|d| d.stiffness > 0.0) {
+        Some(d) => {
+            data.set_motor_model(JointAxis::AngX, if d.force { MotorModel::Force } else { MotorModel::Acceleration });
+            data.set_motor_position(JointAxis::AngX, position, d.stiffness, d.damping);
+            if let Some(force) = d.max_force {
+                data.set_motor_max_force(JointAxis::AngX, force);
+            }
         }
-        None => {
-            configure_fallback_steer_motor(data, position, max_torque);
-        }
+        None => configure_fallback_steer_motor(data, position, max_torque),
     }
 }
 
@@ -3944,6 +3984,7 @@ fn discover_controllers(
                 frame_convention: read_token(stage, prim, &(prefix.clone() + "frameConvention")),
                 target: read_rel_first(stage, prim, &(prefix.clone() + "target"))
                     .map(|p| rebase_asset_root_target(machine_prim, &p)),
+                target_joints: read_rel_targets_rebased(stage, prim, &(prefix.clone() + "target"), machine_prim),
                 body: read_rel_first(stage, prim, &(prefix.clone() + "body"))
                     .map(|p| rebase_asset_root_target(machine_prim, &p)),
                 drive_wheels: read_rel_targets_rebased(
@@ -4068,8 +4109,12 @@ fn discover_controllers(
     out
 }
 
+/// Every active prim below `path`; an inactive prim hides its subtree.
 fn walk_stage(stage: &openusd::usd::Stage, path: SdfPath, out: &mut Vec<SdfPath>) {
     if path.as_str() != "/" {
+        if !stage.prim(&path).ok().and_then(|p| p.is_active().ok()).unwrap_or(true) {
+            return;
+        }
         out.push(path.clone());
     }
     for child_name in stage.prim_children(&path).unwrap_or_default() {
@@ -4650,6 +4695,34 @@ def Xform "Leatherback" (
         let motor = physics.joint(steer).unwrap().motor(JointAxis::AngX).expect("steer motor");
         assert!((motor.target_position - 0.25).abs() < 1e-9);
         assert_eq!(motor.stiffness, STEER_MAX_TORQUE / STEER_LOAD_ERROR_RAD);
+    }
+
+    #[test]
+    fn joint_motors_use_authored_drives() {
+        let mut physics = crate::physics::PhysicsWorld::default();
+        let [chassis, wheel, steer, steer_link] = revolute_pairs(&mut physics);
+        let drive = physics.joint_between(chassis, wheel).expect("drive joint");
+        let steering = physics.joint_between(steer, steer_link).expect("steer joint");
+        physics.authored_drives.insert(drive, AuthoredDrive { stiffness: 0.0, damping: 900.0, max_force: Some(1500.0), force: true });
+        physics.authored_drives.insert(steering, AuthoredDrive { stiffness: 5000.0, damping: 80.0, max_force: Some(2800.0), force: true });
+        let wheel_target = |max_torque| JointVelocityTarget {
+            pair: (wheel, chassis),
+            velocity: 2.0,
+            damping: max_torque / WHEEL_FULL_TORQUE_ERROR_RAD_S,
+            max_torque,
+            force_based: true,
+        };
+
+        apply_joint_motors(&mut physics, &[wheel_target(4000.0)], &[JointPositionTarget { pair: (steer, steer_link), position: 0.25 }], None);
+        let motor = physics.joint(drive).unwrap().motor(JointAxis::AngX).expect("drive motor");
+        assert_eq!((motor.damping, motor.max_force), (900.0, 1500.0));
+        let motor = physics.joint(steering).unwrap().motor(JointAxis::AngX).expect("steer motor");
+        assert_eq!((motor.stiffness, motor.damping, motor.max_force), (5000.0, 80.0, 2800.0));
+        assert!((motor.target_position - 0.25).abs() < 1e-9);
+
+        apply_joint_motors(&mut physics, &[wheel_target(600.0)], &[], None);
+        let motor = physics.joint(drive).unwrap().motor(JointAxis::AngX).expect("drive motor");
+        assert_eq!((motor.damping, motor.max_force), (900.0, 600.0));
     }
 
     /// Chassis↔wheel about X and steer↔steer_link about Z.

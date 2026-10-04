@@ -84,7 +84,7 @@ Attributes every type reads:
 | `stateInterfaces` | token[] | [] | With `pose` or `velocity` on the `cmd_vel` controller, `/state` reports that controller's state (with wheel encoders); otherwise the body pose (§9.6). Also listed in `MachineInfo`. |
 | `namespace` | string or token | machine id | Agent name when this is the `cmd_vel` controller (§1). A `machine_id` load prop replaces it. |
 | `body` | rel | `gearbox:machine:body` | Chassis for the drive controllers. |
-| `target` | rel | none | Joint of a service controller (§5.1); function or bin link of a work controller (§6). |
+| `target` | rel | none | Joint(s) of a service controller (§5.1); function or bin link of a work controller (§6). |
 | `requests` | token[] | [] | Master functions this controller wants when its machine is a slave (§8). |
 | `namespacePolicy`, `updateRateHz`, `frameConvention`, `usesRoles`, `driveWheels` | | | Parsed, unused (§10). |
 
@@ -192,6 +192,9 @@ Per driven wheel, and per passive wheel while parked:
 | unsupported (tyre reports no grip) | `wheel mass × r² × 4 rad/s²`, at most `maxWheelTorqueNm` |
 | supported | `0.9 × tyre grip force × r`, at most `maxWheelTorqueNm` |
 
+- A wheel joint with an authored velocity `PhysicsDriveAPI:angular` uses its
+  `maxForce` in place of `maxWheelTorqueNm` and its damping as the motor gain;
+  the budgets below can only lower the torque (DRIVETRAIN.md).
 - `maxPowerKw`: all budgets are scaled by one factor so that
   `Σ τ · max(|ω_rel|, 0.5 rad/s) ≤ P`, with `ω_rel` the wheel's spin relative
   to the body it is jointed to. Not applied while parked.
@@ -282,9 +285,9 @@ bus commands reach the solver as a curvature directly.
 
 **Servos**: every joint between a steered pair gets a position target.
 
-- A joint whose motor is a Force-model drive with stiffness > 0 keeps its
-  gains. That is an authored `PhysicsDriveAPI:angular` with `targetPosition`
-  and `localRot0 == localRot1` (M§6.4).
+- A joint with an authored `PhysicsDriveAPI:angular` of stiffness > 0 is
+  driven with the authored stiffness, damping and `maxForce`, whatever its
+  frames (Force model for `drive:type = "force"`).
 - Otherwise the runtime servo: Force model, stiffness `cap / 0.5°`, damping
   `cap / (30°/s)`, max force `cap`, with
   `cap = min(1.25 × max(1.1·m·g/N · w̄/2, max(w·grip/2)), 100 kN·m)` over the
@@ -397,11 +400,16 @@ join two bodies. When a constraint joint and a tree joint join the same two
 bodies, the constraint joint is driven. Service controllers run every frame
 for machines that have an agent.
 
+Position and hitch controllers may target multiple joints. The first target
+is the command leader: its normalized position drives all targets, each using
+its own link range and motor limits. The panel exposes one control for the
+group. Work controllers still use only the first target.
+
 ### 5.2 Actuation
 
 | Request | Joint with a motor device (M§12) | Joint without |
 |---|---|---|
-| position | device `Position` command: the device's PID, speed, acceleration, limits and `maxForce` apply | Acceleration-model position servo: stiffness 4000, damping 400, max force 50 kN |
+| position | device `Position` command: the device's PID, speed, acceleration, limits and `maxForce` apply | the target of the joint's authored position drive (`PhysicsDriveAPI` with stiffness > 0) with its gains, `maxForce` and type; without one, an Acceleration-model position servo: stiffness 4000, damping 400, max force 50 kN |
 | velocity | device `Velocity` command, clipped to the device's `maxVelocity`, up to its `maxForce` | Acceleration-model velocity servo: damping 200, max force per type (below) |
 | brake | the servo is written and the device replaces it every step: no effect | Acceleration-model zero-velocity servo: damping 400 × level, max force 50 kN × level |
 

@@ -299,6 +299,10 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         let mut pads = world.query::<&Gamepad>();
         pads.iter(world).next().is_some()
     };
+    let joint_units: HashMap<String, &str> = world.query::<(&usd_bevy::UsdPrimRef, &crate::physics::markers::UsdPhysicsJoint)>()
+        .iter(world).map(|(prim, joint)| (prim.path.clone(),
+            if matches!(joint.kind, crate::physics::markers::UsdJointKind::Prismatic) { "m" } else { "rad" }))
+        .collect();
     let states = world.resource::<ControllerStates>();
     let values = world.resource::<LinkValues>();
     let ui_drive = world.resource::<UiDrive>();
@@ -415,7 +419,9 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                     let position = link_value(values, &machine, link, "position").unwrap_or(0.0);
                     pod = named(pod, controller, link);
                     if let Some(r) = link_value(values, &machine, link, "range") {
-                        pod = pod.with_readout("range", format!("{r:.3} rad"));
+                        let unit = controller_joints(&machine, controller).first()
+                            .and_then(|p| joint_units.get(*p)).copied().unwrap_or("");
+                        pod = pod.with_readout("range", format!("{r:.3} {unit}"));
                     }
                     pod = pod.with_slider("position", clamp(position, 0.0, 1.0), 0.0..=1.0, 2, "", accent);
                 }

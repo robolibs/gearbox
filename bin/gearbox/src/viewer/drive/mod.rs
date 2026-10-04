@@ -20,6 +20,8 @@ impl Plugin for DrivePlugin {
                 (gamepad::route, keyboard::route, gamepad::camera)
                     .chain()
                     .before(crate::controller::apply_ui_drive)
+                    // The view only flies on keys no selected machine has claimed.
+                    .before(crate::viewer::camera::MoveView)
                     .after(crate::viewer::systems::pick_on_click),
             );
     }

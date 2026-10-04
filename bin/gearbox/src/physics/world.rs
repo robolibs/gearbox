@@ -12,7 +12,7 @@ use std::ops::{Deref, DerefMut};
 
 use bevy::prelude::*;
 
-use super::backend::{BodyId, ColliderId, JointId, PhysicsBackend, Pose, SolverSettings};
+use super::backend::{BodyId, ColliderId, JointAxis, JointId, MotorModel, PhysicsBackend, Pose, SolverSettings};
 use super::molla::MollaBackend;
 
 /// All physics state for the loaded scene. Exactly one of these in the world.
@@ -27,11 +27,16 @@ pub struct PhysicsWorld {
     pub entity_to_collider: HashMap<Entity, ColliderId>,
     /// USD joint prim entity → joint.
     pub entity_to_joint: HashMap<Entity, JointId>,
+    /// USD joint → its authored `PhysicsDriveAPI`, kept while controllers
+    /// rewrite the joint's motor every step.
+    pub authored_drives: HashMap<JointId, AuthoredDrive>,
     /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
     /// stored in both orders.
     pub filtered_pairs: HashSet<(BodyId, BodyId)>,
     pub attachment_filtered_pairs: HashSet<(BodyId, BodyId)>,
     hitch_captures: HashMap<JointId, HitchCapture>,
+    hitch_sliders: HashMap<JointId, HitchSlider>,
+    joint_frictions: HashMap<JointId, JointFriction>,
     /// Entities whose bodies the last step disabled for non-finite state.
     pub quarantined: Vec<Entity>,
     /// Fixed physics rate; the frame's real time is spent in steps of it.
@@ -43,6 +48,17 @@ pub struct PhysicsWorld {
     pub pending_steps: u32,
     /// Simulated seconds advanced by every step so far; never rewinds.
     pub simulated_seconds: f64,
+}
+
+/// The drive a USD joint authors on its free axis, in SI units: stiffness per
+/// radian or metre, damping per radian or metre per second, force or torque.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AuthoredDrive {
+    pub stiffness: f64,
+    pub damping: f64,
+    pub max_force: Option<f64>,
+    /// `drive:type` is `force`; otherwise the gains scale with inertia.
+    pub force: bool,
 }
 
 /// Default physics rate; `GEARBOX_PHYSICS_HZ` overrides it.
@@ -93,9 +109,12 @@ impl PhysicsWorld {
             published_transforms: HashMap::new(),
             entity_to_collider: HashMap::new(),
             entity_to_joint: HashMap::new(),
+            authored_drives: HashMap::new(),
             filtered_pairs: HashSet::new(),
             attachment_filtered_pairs: HashSet::new(),
             hitch_captures: HashMap::new(),
+            hitch_sliders: HashMap::new(),
+            joint_frictions: HashMap::new(),
             quarantined: Vec::new(),
             step_hz,
             accumulator: 0.0,
@@ -113,6 +132,8 @@ impl PhysicsWorld {
     pub fn step(&mut self) {
         self.quarantine_non_finite();
         self.advance_hitch_captures();
+        self.advance_hitch_sliders();
+        self.apply_joint_frictions();
         let (authored, attached) = (&self.filtered_pairs, &self.attachment_filtered_pairs);
         self.backend
             .step(&|a, b| authored.contains(&(a, b)) || attached.contains(&(a, b)));
@@ -182,6 +203,47 @@ struct HitchCapture {
     hold: HitchHold,
 }
 
+/// A hitch joint carried by one body at a point that rides on another: a
+/// hydraulic top link's barrel holds the load at its rod's pin.
+struct HitchSlider {
+    carrier: BodyId,
+    rod: BodyId,
+    end: glam::DVec3,
+}
+
+/// Coulomb friction on a joint's free axis: a capped hold at an anchor that
+/// follows the joint once it slides past it. The cap is a fixed torque plus,
+/// for a rolling part, `coefficient × ground load × radius`.
+struct JointFriction {
+    axis: JointAxis,
+    torque: f64,
+    rolling: Option<(f64, f64)>,
+    anchor: Option<f64>,
+}
+
+/// The ground's solved normal load on a body (N): its contacts whose normal
+/// points up.
+fn ground_load(backend: &dyn PhysicsBackend, body: BodyId) -> f64 {
+    let Some(colliders) = backend.body(body).map(|b| b.colliders()) else {
+        return 0.0;
+    };
+    let mut impulse = 0.0;
+    for collider in colliders {
+        for manifold in backend.contacts_with(collider).into_iter().filter(|m| m.active) {
+            let normal = manifold.normal * if manifold.collider1 == collider { -1.0 } else { 1.0 };
+            if normal.y > 0.1 {
+                impulse += manifold.points.iter().filter(|p| p.solved).map(|p| p.impulse.max(0.0) * normal.y).sum::<f64>();
+            }
+        }
+    }
+    impulse / backend.settings().dt.max(1e-6)
+}
+
+/// How far a sticking joint gives before it slides (rad or m).
+const FRICTION_STICK: f64 = 0.01;
+/// Slip rate at which a joint meets its full friction (rad/s or m/s).
+const FRICTION_RATE: f64 = 0.05;
+
 /// How a captured joint holds once its frames meet.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum HitchHold {
@@ -240,6 +302,67 @@ impl PhysicsWorld {
             t < 1.0
         });
     }
+
+    /// Hold a joint's free axis against up to `torque` of load, plus
+    /// `rolling` (coefficient, radius m) times the ground load on the part it
+    /// turns, then let it turn against that: the drag of a bearing and the soil.
+    pub(crate) fn add_joint_friction(&mut self, joint: JointId, axis: JointAxis, torque: f64, rolling: Option<(f64, f64)>) {
+        self.joint_frictions.insert(joint, JointFriction { axis, torque, rolling, anchor: None });
+    }
+
+    /// A joint a motor device or an authored drive turns is left to it.
+    fn apply_joint_frictions(&mut self) {
+        let (backend, drives) = (&mut self.backend, &self.authored_drives);
+        self.joint_frictions.retain(|id, friction| {
+            let (Some(position), Some((_, part))) =
+                (backend.joint(*id).map(|j| j.motor_position(friction.axis)), backend.joint_bodies(*id))
+            else {
+                return false;
+            };
+            if backend.has_motor(*id) || drives.contains_key(id) {
+                return true;
+            }
+            let Some(position) = position else {
+                return true;
+            };
+            let torque = friction.torque
+                + friction.rolling.map_or(0.0, |(coefficient, radius)| coefficient * ground_load(&**backend, part) * radius);
+            let anchor = friction.anchor.get_or_insert(position);
+            *anchor = position + (*anchor - position).clamp(-FRICTION_STICK, FRICTION_STICK);
+            if torque <= 0.0 {
+                *anchor = position;
+            }
+            if let Some(joint) = backend.joint_mut(*id, false) {
+                joint.set_motor_model(friction.axis, MotorModel::Force);
+                joint.set_motor_position(friction.axis, *anchor, torque / FRICTION_STICK, torque / FRICTION_RATE);
+                joint.set_motor_max_force(friction.axis, torque);
+            }
+            true
+        });
+    }
+
+    /// Keep a hitch joint's first frame on `carrier` at the point `end` of
+    /// `rod`, wherever the rod has slid.
+    pub(crate) fn slide_hitch(&mut self, joint: JointId, carrier: BodyId, rod: BodyId, end: glam::DVec3) {
+        self.hitch_sliders.insert(joint, HitchSlider { carrier, rod, end });
+    }
+
+    fn advance_hitch_sliders(&mut self) {
+        let backend = &mut self.backend;
+        self.hitch_sliders.retain(|id, slider| {
+            let poses = backend.body(slider.carrier).map(|b| b.position()).zip(backend.body(slider.rod).map(|b| b.position()));
+            let (Some((carrier, rod)), Some(frame)) = (poses, backend.joint(*id).map(|j| j.frame1())) else {
+                return false;
+            };
+            let end = carrier.rotation.inverse() * (rod.translation + rod.rotation * slider.end - carrier.translation);
+            if end.distance(frame.translation) > 1e-6 {
+                if let Some(joint) = backend.joint_mut(*id, true) {
+                    joint.set_frame1(Pose { translation: end, rotation: frame.rotation });
+                }
+            }
+            true
+        });
+    }
 }
 
 pub use gearbox_api::PhysicsActive;
@@ -292,5 +415,58 @@ pub fn step_physics(
             );
         }
         *stats = (0.0, 0, now + 10.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::backend::{BodyDesc, ColliderDesc, JointDesc, JointKind, Shape};
+    use glam::DVec3;
+
+    /// A 4.2 kg arm 1 m out on a horizontal hinge: 41 N·m of gravity.
+    fn arm(friction: f64) -> (PhysicsWorld, JointId) {
+        let mut world = PhysicsWorld::default();
+        let mut body = |desc: BodyDesc, at: DVec3| {
+            let id = world.insert_body(desc.pose(Pose::from_translation(at)));
+            world.insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.1 }).density(1000.0).parent(id)).unwrap();
+            id
+        };
+        let (post, arm) = (body(BodyDesc::fixed(), DVec3::ZERO), body(BodyDesc::dynamic(), DVec3::X));
+        let hinge = JointDesc::new(JointKind::Revolute { axis: DVec3::Z }, Pose::IDENTITY, Pose::from_translation(DVec3::NEG_X));
+        let joint = world.backend.insert_joint(post, arm, hinge);
+        world.add_joint_friction(joint, JointAxis::AngX, friction, None);
+        (world, joint)
+    }
+
+    fn swing(friction: f64) -> f64 {
+        let (mut world, joint) = arm(friction);
+        for _ in 0..240 {
+            world.step();
+        }
+        world.joint(joint).unwrap().motor_position(JointAxis::AngX).unwrap().abs()
+    }
+
+    #[test]
+    fn joint_friction_holds_below_its_torque_and_slides_above() {
+        assert!(swing(60.0) < 0.02, "{}", swing(60.0));
+        assert!(swing(20.0) > 0.3, "{}", swing(20.0));
+    }
+
+    /// The ground load a rolling part's friction scales with is its weight
+    /// when it rests on the ground.
+    #[test]
+    fn a_resting_ball_carries_its_weight_on_the_ground() {
+        let mut world = PhysicsWorld::default();
+        let ground = world.insert_body(BodyDesc::fixed());
+        world.insert_collider(ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(5.0, 0.5, 5.0) }).parent(ground)).unwrap();
+        let ball = world.insert_body(BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(0.0, 0.8, 0.0))));
+        world.insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.3 }).density(1000.0).parent(ball)).unwrap();
+        for _ in 0..240 {
+            world.step();
+        }
+        let weight = world.body(ball).unwrap().mass() * 9.81;
+        let load = ground_load(&*world.backend, ball);
+        assert!((load - weight).abs() < 0.05 * weight, "load {load} weight {weight}");
     }
 }

@@ -6,12 +6,12 @@
 
 use super::backend::{JointAxis, JointDesc, JointKind, MotorDesc, MotorModel, MotorTarget, Pose};
 use super::convert::{quat_to_d, vec3_to_d};
-use super::markers::{UsdDof, UsdJointDrive, UsdJointKind, UsdPhysicsJoint};
+use super::markers::{UsdDof, UsdDriveType, UsdJointDrive, UsdJointKind, UsdPhysicsJoint};
 use bevy::prelude::*;
 use glam::DVec3;
 
 use super::backend::BodyKind;
-use super::world::PhysicsWorld;
+use super::world::{AuthoredDrive, PhysicsWorld};
 
 #[derive(Component)]
 pub(crate) struct JointAttached;
@@ -62,8 +62,20 @@ pub fn convert_joints(
 
         if let Some(mut desc) = joint_desc(joint) {
             desc.loop_closure = joint.exclude_from_articulation;
+            desc.softness = joint.softness;
             let id = world.insert_joint(body0, body1, desc);
             world.entity_to_joint.insert(joint_entity, id);
+            if let Some(drive) = authored_drive(joint) {
+                world.authored_drives.insert(id, drive);
+            }
+            let axis = match joint.kind {
+                UsdJointKind::Revolute => Some(JointAxis::AngX),
+                UsdJointKind::Prismatic => Some(JointAxis::LinX),
+                _ => None,
+            };
+            if let Some(axis) = axis.filter(|_| joint.friction.is_some() || joint.rolling.is_some()) {
+                world.add_joint_friction(id, axis, joint.friction.unwrap_or(0.0), joint.rolling);
+            }
         }
         commands.entity(joint_entity).insert(JointAttached);
     }
@@ -123,6 +135,22 @@ fn joint_desc(j: &UsdPhysicsJoint) -> Option<JointDesc> {
         desc.motors.push(motor_desc(motor_axis, drive, same_basis));
     }
     Some(desc)
+}
+
+/// The drive on a revolute or prismatic joint's free axis.
+fn authored_drive(j: &UsdPhysicsJoint) -> Option<AuthoredDrive> {
+    let free_axis: fn(UsdDof) -> bool = match j.kind {
+        UsdJointKind::Revolute => dof_is_angular,
+        UsdJointKind::Prismatic => dof_is_linear,
+        _ => return None,
+    };
+    let d = j.drives.iter().find(|d| free_axis(d.dof))?;
+    Some(AuthoredDrive {
+        stiffness: d.stiffness as f64,
+        damping: d.damping as f64,
+        max_force: d.max_force.map(|f| f as f64).filter(|f| f.is_finite()),
+        force: matches!(d.drive_type, UsdDriveType::Force),
+    })
 }
 
 fn motor_desc(axis: JointAxis, d: &UsdJointDrive, force_based: bool) -> MotorDesc {

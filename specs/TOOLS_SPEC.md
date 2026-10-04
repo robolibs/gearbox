@@ -134,6 +134,14 @@ rigid; the top link is held at 120 Hz, which keeps it within millimetres
 under an implement's weight. Without both pins the implement is fixed to
 the lower link and tilts with it.
 
+A hydraulic top link is a rod on a prismatic joint whose parent is the
+pitched top link; the master's pin sits on the rod. The loop joint then
+hangs on the top link, at the rod's pin wherever the rod has slid, updated
+every step: the cylinder holds the load, the rod's drive or device only sets
+the length, and a `builtin:joint_position` controller on the prismatic joint
+levels the implement. A light rod held by its drive cannot carry the loop
+itself; the implement would throw it.
+
 The lift should drive a joint on the path that carries the implement: the
 lower link the hitch coupling rides on. A lift driven through loop joints
 (a rockshaft pulling lift rods) carries the load through compliant joints
