@@ -14,6 +14,8 @@ struct Hitched {
     implement: BodyId,
     /// The rear hitch, the top link's end, the headstock and its mast.
     pins: [Pin; 4],
+    /// The link the rear hitch controller lifts.
+    lift: String,
 }
 
 impl Hitched {
@@ -134,7 +136,11 @@ def Xform "World" {{
                 .and_then(|e| physics.entity_to_body.get(&e.id()).copied()).unwrap()
         };
         let (tractor, implement) = (chassis("tractor"), chassis("implement"));
-        Self { app, schedules: [controllers, devices, services], tractor, implement, pins }
+        let machine = machines.iter().find(|m| m.id == "tractor").unwrap();
+        let controller = machine.controllers.iter().find(|c| c.instance == "hitch_rear").unwrap();
+        let joint = crate::services::controller_joints(machine, controller)[0];
+        let lift = crate::services::moved_link(&machine.links, joint).unwrap().name.clone();
+        Self { app, schedules: [controllers, devices, services], tractor, implement, pins, lift }
     }
 
     /// The three-point hitch as a Connect makes it; the top link.
@@ -168,7 +174,7 @@ def Xform "World" {{
 
     fn hitch(&mut self, position: f64, seconds: f64) {
         self.app.world_mut().resource_mut::<crate::services::LinkValues>()
-            .set("tractor", "hitch_lower_left", "position", position);
+            .set("tractor", &self.lift, "position", position);
         for _ in 0..(seconds * 120.0) as usize {
             self.tick();
         }
