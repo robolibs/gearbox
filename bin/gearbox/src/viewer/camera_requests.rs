@@ -1,12 +1,13 @@
-//! `gearbox instance camera …` drops `fly ID`, `follow ID` or `unfollow` in
-//! `<registry dir>/<name>.camera`; this does what the Agents pane rows do.
+//! `gearbox instance camera …` drops `fly ID`, `follow ID`, `unfollow`,
+//! `goto …` or `look …` in `<registry dir>/<name>.camera`; this does what the
+//! Agents pane rows do, and sets exact views for scripted captures.
 
 use bevy::prelude::*;
 
 use usd_bevy::UsdPrimRef;
 
 use crate::controller::ControllerInventory;
-use crate::viewer::state::{ChaseCameraFly, FlyTarget, FollowTarget};
+use crate::viewer::state::{ChaseCameraFly, FlyTarget, FollowTarget, LookAround};
 use crate::viewer::systems::machine_body_entity;
 
 pub struct CameraRequestsPlugin;
@@ -29,7 +30,7 @@ fn serve_camera_requests(
     mut fly: ResMut<ChaseCameraFly>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
-    view: Res<crate::viewer::camera::View>,
+    mut view: ResMut<crate::viewer::camera::View>,
     mut goto: ResMut<crate::globe::Goto>,
 ) {
     if !poll.0.tick(time.delta()).just_finished() {
@@ -71,9 +72,40 @@ fn serve_camera_requests(
                 });
             }
         }
+        // `look [ID] bearing=DEG pitch=DEG distance=M`: an exact view, around
+        // the machine when one is named, its bearing counted from behind it.
+        ("look", Some(root)) => {
+            let body = machine_body_entity(root, &inventory, &prims, &parents);
+            fly.target = Some(FlyTarget::looking(root, body, &view, look_around(&text)));
+        }
+        ("look", None) if text.split_whitespace().nth(1).is_none_or(|word| word.contains('=')) => {
+            let look = look_around(&text);
+            fly.target = None;
+            view.bearing_deg = look.bearing_deg.unwrap_or(view.bearing_deg);
+            view.pitch_deg = look.pitch_deg.unwrap_or(view.pitch_deg);
+            view.distance_m = look.distance_m.unwrap_or(view.distance_m);
+            view.tidy();
+        }
         _ => warn!(
             "gearbox-viewer: camera request `{}` not understood",
             text.trim()
         ),
     }
+}
+
+/// The `bearing=`, `pitch=` and `distance=` values of a `look` request.
+fn look_around(text: &str) -> LookAround {
+    let mut look = LookAround::default();
+    for (key, value) in text.split_whitespace().filter_map(|word| word.split_once('=')) {
+        let Ok(value) = value.parse::<f64>() else {
+            continue;
+        };
+        match key {
+            "bearing" => look.bearing_deg = Some(value),
+            "pitch" => look.pitch_deg = Some(value),
+            "distance" => look.distance_m = Some(value),
+            _ => {}
+        }
+    }
+    look
 }

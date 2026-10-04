@@ -61,11 +61,13 @@ enum Cmd {
     /// double-click in the Agents pane, `follow MACHINE` pins the camera to
     /// it, `unfollow` releases it, `goto LAT LON [HEIGHT_M]` jumps the view to
     /// that latitude and longitude, in degrees, standing HEIGHT_M above the
-    /// ground there, and `where` says where the view is now
+    /// ground there, `look [MACHINE]` sets the view to an exact `--bearing`,
+    /// `--pitch` and `--distance` (around MACHINE when given, its bearing
+    /// counted from behind the machine), and `where` says where the view is now
     Camera {
-        /// fly | follow | unfollow | goto | where
+        /// fly | follow | unfollow | goto | look | where
         action: String,
-        /// Machine id (`gearbox:machine:id`) for fly and follow; the latitude for goto
+        /// Machine id (`gearbox:machine:id`) for fly, follow and look; the latitude for goto
         #[arg(allow_negative_numbers = true)]
         machine: Option<String>,
         /// Longitude in degrees, for goto
@@ -75,6 +77,17 @@ enum Cmd {
         /// view keeps the height it had
         #[arg(allow_negative_numbers = true)]
         height_m: Option<f64>,
+        /// For look: degrees clockwise, seen from above, from behind MACHINE
+        /// (90 is its left side) or, without one, the compass bearing from the
+        /// place looked at out to the eye
+        #[arg(long, allow_negative_numbers = true)]
+        bearing: Option<f64>,
+        /// For look: degrees above the horizon, 2 to 88
+        #[arg(long, allow_negative_numbers = true)]
+        pitch: Option<f64>,
+        /// For look: metres from the eye to what it looks at
+        #[arg(long)]
+        distance: Option<f64>,
         #[arg(long)]
         id: Option<String>,
     },
@@ -120,8 +133,19 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             machine,
             distance_km,
             height_m,
+            bearing,
+            pitch,
+            distance,
             id,
-        } => camera(ctx, id, &action, machine.as_deref(), distance_km, height_m),
+        } => camera(
+            ctx,
+            id,
+            &action,
+            machine.as_deref(),
+            distance_km,
+            height_m,
+            [("bearing", bearing), ("pitch", pitch), ("distance", distance)],
+        ),
     }
 }
 
@@ -132,6 +156,7 @@ fn camera(
     machine: Option<&str>,
     distance_km: Option<f64>,
     height_m: Option<f64>,
+    look: [(&str, Option<f64>); 3],
 ) -> Result<()> {
     let ctx = with_target(ctx, id)?;
     if action == "where" {
@@ -157,12 +182,24 @@ fn camera(
                 None => format!("goto {latitude} {longitude}"),
             }
         }
+        ("look", machine) => {
+            let mut line = String::from("look");
+            if let Some(m) = machine {
+                line.push_str(&format!(" {m}"));
+            }
+            for (key, value) in look {
+                if let Some(value) = value {
+                    line.push_str(&format!(" {key}={value}"));
+                }
+            }
+            line
+        }
         ("fly", None) | ("follow", None) => {
             return Err(CliError::error(format!("`{action}` needs a machine id")));
         }
         _ => {
             return Err(CliError::error(
-                "camera action must be fly, follow, unfollow, goto or where",
+                "camera action must be fly, follow, unfollow, goto, look or where",
             ));
         }
     };

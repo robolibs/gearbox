@@ -148,7 +148,9 @@ impl View {
         )
     }
 
-    fn tidy(&mut self) {
+    /// Keeps the view within what it can stand at: the place on the planet,
+    /// pitch off both poles, distance within reach.
+    pub(crate) fn tidy(&mut self) {
         if !self.at.latitude.is_finite() || !self.at.longitude.is_finite() {
             self.at = Self::default().at;
         }

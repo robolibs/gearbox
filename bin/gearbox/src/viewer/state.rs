@@ -95,6 +95,17 @@ pub struct FlyTarget {
     pub elapsed: f32,
     /// The view the move set out from.
     pub from: crate::viewer::camera::View,
+    /// Where to settle instead of the default view from behind.
+    pub look: Option<LookAround>,
+}
+
+/// A view around a machine: degrees clockwise from behind it seen from above,
+/// pitch and distance, each left as the default when `None`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LookAround {
+    pub bearing_deg: Option<f64>,
+    pub pitch_deg: Option<f64>,
+    pub distance_m: Option<f64>,
 }
 
 impl FlyTarget {
@@ -110,6 +121,16 @@ impl FlyTarget {
             duration: Self::DURATION,
             elapsed: 0.0,
             from: *view,
+            look: None,
+        }
+    }
+
+    /// Settles straight onto `look` around the machine, with no flight.
+    pub fn looking(root: Entity, body: Entity, view: &crate::viewer::camera::View, look: LookAround) -> Self {
+        Self {
+            duration: f32::EPSILON,
+            look: Some(look),
+            ..Self::new(root, body, view)
         }
     }
 }

@@ -900,17 +900,21 @@ fn chase_camera_fly(
     let behind = local.z.atan2(local.x).to_degrees();
 
     // Standing over the machine on the bearing the view came in on, pulled
-    // back to the apex; then the same place seen from behind, close in.
+    // back to the apex; then the same place seen from behind, close in, or
+    // from where a `look` request asked.
     let over = crate::viewer::camera::View {
         at,
         distance_m: FlyTarget::APEX_DISTANCE,
         ..target.from
     };
-    let settled = crate::viewer::camera::View {
-        bearing_deg: behind,
-        distance_m: FlyTarget::FINAL_DISTANCE,
+    let look = target.look.unwrap_or_default();
+    let mut settled = crate::viewer::camera::View {
+        bearing_deg: behind + look.bearing_deg.unwrap_or(0.0),
+        pitch_deg: look.pitch_deg.unwrap_or(over.pitch_deg),
+        distance_m: look.distance_m.unwrap_or(FlyTarget::FINAL_DISTANCE),
         ..over
     };
+    settled.tidy();
     *view = if t < FlyTarget::PHASE_A_END {
         let a = (t / FlyTarget::PHASE_A_END).clamp(0.0, 1.0) as f64;
         crate::viewer::camera::View::between(&target.from, &over, a, false)
