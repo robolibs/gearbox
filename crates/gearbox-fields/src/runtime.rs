@@ -975,6 +975,10 @@ fn forget_despawned_fields(world: &mut World) {
         .copied()
         .filter(|entity| world.get_entity(*entity).is_err())
         .collect();
+    // Untouched, so the render world keeps its chunk uniforms.
+    if gone.is_empty() && world.resource::<RenderFields>().1.frames_left == 0 {
+        return;
+    }
     let mut render = world.resource_mut::<RenderFields>();
     for entity in gone {
         render.0.remove(&entity);
