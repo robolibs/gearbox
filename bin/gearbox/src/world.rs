@@ -33,6 +33,9 @@ const TERRAIN_FULL_RELIEF_RADIUS_M: f32 = 55.0;
 const TERRAIN_MIN_HEIGHT_M: f32 = -5.0;
 const TERRAIN_MAX_HEIGHT_M: f32 = 10.0;
 const FLAT_GROUND_HALF_EXTENT_M: f64 = 10_000.0;
+/// Deep enough that nothing pressed into the ground nears its underside,
+/// where a contact would push down instead of up.
+const FLAT_GROUND_HALF_HEIGHT_M: f64 = 1.0;
 const FLAT_GROUND_VISUAL_SIZE_M: f32 = 10_000.0;
 const USD_TERRAIN_ACTIVATION_WARN_FRAMES: u32 = 120;
 
@@ -453,8 +456,8 @@ fn spawn_flat_ground(
 
     let collider = physics
         .insert_collider(
-            ground_slab(0.02)
-                .translation(DVec3::new(0.0, -0.02, 0.0))
+            ground_slab(FLAT_GROUND_HALF_HEIGHT_M)
+                .translation(DVec3::new(0.0, -FLAT_GROUND_HALF_HEIGHT_M, 0.0))
                 .friction(ground_friction(1.0))
                 .restitution(0.0),
         )
