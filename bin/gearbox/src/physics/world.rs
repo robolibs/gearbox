@@ -41,7 +41,6 @@ pub struct PhysicsWorld {
     pub filtered_pairs: HashSet<(BodyId, BodyId)>,
     pub attachment_filtered_pairs: HashSet<(BodyId, BodyId)>,
     hitch_captures: HashMap<JointId, HitchCapture>,
-    hitch_sliders: HashMap<JointId, HitchSlider>,
     joint_frictions: HashMap<JointId, JointFriction>,
     /// Entities whose bodies the last step disabled for non-finite state.
     pub quarantined: Vec<Entity>,
@@ -123,7 +122,6 @@ impl PhysicsWorld {
             filtered_pairs: HashSet::new(),
             attachment_filtered_pairs: HashSet::new(),
             hitch_captures: HashMap::new(),
-            hitch_sliders: HashMap::new(),
             joint_frictions: HashMap::new(),
             quarantined: Vec::new(),
             step_hz,
@@ -142,7 +140,6 @@ impl PhysicsWorld {
     pub fn step(&mut self) {
         self.quarantine_non_finite();
         self.advance_hitch_captures();
-        self.advance_hitch_sliders();
         self.apply_joint_frictions();
         self.advance_drive_motors();
         let (authored, attached) = (&self.filtered_pairs, &self.attachment_filtered_pairs);
@@ -284,14 +281,6 @@ struct HitchCapture {
     hold: HitchHold,
 }
 
-/// A hitch joint carried by one body at a point that rides on another: a
-/// hydraulic top link's barrel holds the load at its rod's pin.
-struct HitchSlider {
-    carrier: BodyId,
-    rod: BodyId,
-    end: glam::DVec3,
-}
-
 /// Coulomb friction on a joint's free axis: a capped hold at an anchor that
 /// follows the joint once it slides past it. The cap is a fixed torque plus,
 /// for a rolling part, `coefficient × ground load × radius`.
@@ -417,29 +406,6 @@ impl PhysicsWorld {
                 joint.set_motor_model(friction.axis, MotorModel::Force);
                 joint.set_motor_position(friction.axis, *anchor, torque / FRICTION_STICK, torque / FRICTION_RATE);
                 joint.set_motor_max_force(friction.axis, torque);
-            }
-            true
-        });
-    }
-
-    /// Keep a hitch joint's first frame on `carrier` at the point `end` of
-    /// `rod`, wherever the rod has slid.
-    pub(crate) fn slide_hitch(&mut self, joint: JointId, carrier: BodyId, rod: BodyId, end: glam::DVec3) {
-        self.hitch_sliders.insert(joint, HitchSlider { carrier, rod, end });
-    }
-
-    fn advance_hitch_sliders(&mut self) {
-        let backend = &mut self.backend;
-        self.hitch_sliders.retain(|id, slider| {
-            let poses = backend.body(slider.carrier).map(|b| b.position()).zip(backend.body(slider.rod).map(|b| b.position()));
-            let (Some((carrier, rod)), Some(frame)) = (poses, backend.joint(*id).map(|j| j.frame1())) else {
-                return false;
-            };
-            let end = carrier.rotation.inverse() * (rod.translation + rod.rotation * slider.end - carrier.translation);
-            if end.distance(frame.translation) > 1e-6 {
-                if let Some(joint) = backend.joint_mut(*id, true) {
-                    joint.set_frame1(Pose { translation: end, rotation: frame.rotation });
-                }
             }
             true
         });

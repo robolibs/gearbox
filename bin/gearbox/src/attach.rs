@@ -30,7 +30,7 @@ pub(crate) const COUPLING_REACH_M: f64 = 3.0;
 const COUPLING_LEAVE_M: f64 = 3.5;
 /// The top link closes a loop, so it stays compliant; stiff enough that
 /// carrying an implement does not stretch it by more than millimetres.
-const TOP_LINK_HZ: f64 = 120.0;
+const TOP_LINK_HZ: f64 = 400.0;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum LocalAttachmentAction {
@@ -598,25 +598,19 @@ pub(crate) fn join_hitch(
     let handle = insert_hitch_joint(physics, hitch_body, coupler_body, joint);
     physics.capture_hitch(handle, coupler, hold);
     let top_link = top_pins.and_then(|((link, end), (implement, mast))| {
-        let carrier = slide_carrier(physics, link);
-        let body = carrier.unwrap_or(link);
-        let (body_pose, link_pose, implement_pose) =
-            (physics.body(body)?.position(), physics.body(link)?.position(), physics.body(implement)?.position());
+        let (link_pose, implement_pose) = (physics.body(link)?.position(), physics.body(implement)?.position());
         // Caught where the link's end hangs now, then drawn onto the mast.
         let pin = link_pose.translation + link_pose.rotation * end;
         let reach = implement_pose.rotation.inverse() * (pin - implement_pose.translation);
         let mut desc = JointDesc::new(
             JointKind::Generic { locked: JointAxes::LIN },
-            Pose::new(body_pose.rotation.inverse() * (pin - body_pose.translation), DQuat::IDENTITY),
+            Pose::new(end, DQuat::IDENTITY),
             Pose::new(reach, DQuat::IDENTITY),
         );
         desc.softness = Some((8.0, 1.0));
         desc.loop_closure = true;
-        let joint = insert_hitch_joint(physics, body, implement, desc);
+        let joint = insert_hitch_joint(physics, link, implement, desc);
         physics.capture_hitch(joint, Pose::new(mast, DQuat::IDENTITY), HitchHold::Soft(TOP_LINK_HZ));
-        if let Some(carrier) = carrier {
-            physics.slide_hitch(joint, carrier, link, end);
-        }
         Some(joint)
     });
     Some((handle, top_link))
@@ -1447,19 +1441,19 @@ mod tests {
         (world, [barrel, rod, implement], slide, top)
     }
 
-    /// The barrel carries the top link, the rod lengthens it and the
-    /// implement pitches back.
+    /// The rod carries the top link and lengthens it, and the implement
+    /// pitches back.
     #[test]
-    fn a_sliding_top_link_rod_moves_the_pin_its_barrel_carries() {
-        let (mut world, [barrel, _, implement], slide, top) = hitched(0.0);
+    fn a_sliding_top_link_rod_carries_the_pin() {
+        let (mut world, [_, rod, implement], slide, top) = hitched(0.0);
         let top = top.unwrap();
-        assert_eq!(world.joint_bodies(top), Some((barrel, implement)));
+        assert_eq!(world.joint_bodies(top), Some((rod, implement)));
         world.joint_mut(slide, true).unwrap().set_motor_position(JointAxis::LinX, 0.1, 1e5, 1e3);
         for _ in 0..480 {
             world.step();
         }
-        let barrel_pose = world.body(barrel).unwrap().position();
-        let pin = barrel_pose.translation + barrel_pose.rotation * world.joint(top).unwrap().frame1().translation;
+        let rod_pose = world.body(rod).unwrap().position();
+        let pin = rod_pose.translation + rod_pose.rotation * world.joint(top).unwrap().frame1().translation;
         assert!((pin.length() - 1.1).abs() < 1e-2, "{pin}");
         let pitch = world.body(implement).unwrap().position().rotation.to_euler(glam::EulerRot::XYZ).0;
         assert!(pitch < -0.05, "{pitch}");
