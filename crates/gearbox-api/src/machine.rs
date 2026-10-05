@@ -264,49 +264,13 @@ impl MachineAgent {
     }
 
     pub fn info(&self) -> MachineInfo {
-        let mut props = Props::from_pairs(&[
-            ("machine_id", self.config.machine_id.as_str()),
-            ("kind", self.config.kind.as_str()),
-            ("did", &self.did()),
-            ("addr", &self.addr_hex()),
-            ("link_count", &self.config.links.len().to_string()),
-            ("links_derived", &self.config.links_derived.to_string()),
-            ("attached_to", self.attached_to.as_deref().unwrap_or("")),
-            (
-                "tools",
-                &self
-                    .tools
-                    .iter()
-                    .map(|t| t.slave.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ),
-            (
-                "base_link",
-                self.config
-                    .links
-                    .iter()
-                    .find(|l| l.role == "base")
-                    .map(|l| l.prim.as_str())
-                    .unwrap_or(""),
-            ),
-        ]);
-        for (n, c) in self.config.controllers.iter().enumerate() {
-            props.set(&format!("controller.{n}.instance"), &c.instance);
-            props.set(&format!("controller.{n}.type"), &c.controller_type);
-            if let Some(cmd) = &c.command_interface {
-                props.set(&format!("controller.{n}.command_interface"), cmd);
-            }
-            props.set(
-                &format!("controller.{n}.state_interfaces"),
-                &c.state_interfaces.join(","),
-            );
-        }
-        MachineInfo {
-            controller_count: self.config.controllers.len() as u32,
-            held: self.session.is_some() as u32,
-            props: props.into_bytes(),
-        }
+        machine_info(
+            &self.agent,
+            &self.config,
+            self.attached_to.as_deref(),
+            &self.tools,
+            self.session.is_some(),
+        )
     }
 
     pub fn session(&self) -> Option<&Session> {
@@ -325,16 +289,23 @@ impl MachineAgent {
 
     /// Answer every pending request and apply silence rules.
     pub fn poll(&mut self) {
-        let info = self.info();
-        serve_req(&mut self.info, |_: Ping| info.clone_for_response());
-        let all_links: Vec<LinkDesc> = self
-            .config
-            .links
-            .iter()
-            .chain(self.tool_links.iter())
-            .cloned()
-            .collect();
-        serve_que(&mut self.links, |_: Ping| link_records_for(&all_links));
+        // Built only for a request that asks for them.
+        let (agent, config, attached, tool_descs, held) = (
+            &self.agent,
+            &self.config,
+            self.attached_to.as_deref(),
+            &self.tools,
+            self.session.is_some(),
+        );
+        serve_req(&mut self.info, |_: Ping| {
+            machine_info(agent, config, attached, tool_descs, held)
+        });
+        let tool_links = &self.tool_links;
+        serve_que(&mut self.links, |_: Ping| {
+            let all_links: Vec<LinkDesc> =
+                config.links.iter().chain(tool_links.iter()).cloned().collect();
+            link_records_for(&all_links)
+        });
         let master = self.config.machine_id.clone();
         let tools = &self.tools;
         serve_que(&mut self.tools_q, |_: Ping| {
@@ -652,16 +623,6 @@ trait CloneForResponse {
     fn clone_for_response(&self) -> Self;
 }
 
-impl CloneForResponse for MachineInfo {
-    fn clone_for_response(&self) -> Self {
-        Self {
-            controller_count: self.controller_count,
-            held: self.held,
-            props: self.props.clone(),
-        }
-    }
-}
-
 impl CloneForResponse for SessionInfo {
     fn clone_for_response(&self) -> Self {
         Self {
@@ -707,6 +668,57 @@ impl ToolDesc {
 }
 
 /// Records for a link list, parents resolved by name within the list.
+fn machine_info(
+    agent: &Agent,
+    config: &MachineConfig,
+    attached_to: Option<&str>,
+    tools: &[ToolDesc],
+    held: bool,
+) -> MachineInfo {
+    let mut props = Props::from_pairs(&[
+        ("machine_id", config.machine_id.as_str()),
+        ("kind", config.kind.as_str()),
+        ("did", &agent.did_key().unwrap_or_default()),
+        ("addr", &crate::registry::endpoint_addr_hex(&agent.endpoint_addr())),
+        ("link_count", &config.links.len().to_string()),
+        ("links_derived", &config.links_derived.to_string()),
+        ("attached_to", attached_to.unwrap_or("")),
+        (
+            "tools",
+            &tools
+                .iter()
+                .map(|t| t.slave.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        (
+            "base_link",
+            config
+                .links
+                .iter()
+                .find(|l| l.role == "base")
+                .map(|l| l.prim.as_str())
+                .unwrap_or(""),
+        ),
+    ]);
+    for (n, c) in config.controllers.iter().enumerate() {
+        props.set(&format!("controller.{n}.instance"), &c.instance);
+        props.set(&format!("controller.{n}.type"), &c.controller_type);
+        if let Some(cmd) = &c.command_interface {
+            props.set(&format!("controller.{n}.command_interface"), cmd);
+        }
+        props.set(
+            &format!("controller.{n}.state_interfaces"),
+            &c.state_interfaces.join(","),
+        );
+    }
+    MachineInfo {
+        controller_count: config.controllers.len() as u32,
+        held: held as u32,
+        props: props.into_bytes(),
+    }
+}
+
 pub fn link_records_for(links: &[LinkDesc]) -> Vec<LinkRecord> {
     let index_of = |name: &str| {
         links
