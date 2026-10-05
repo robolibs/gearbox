@@ -95,14 +95,8 @@ fn joint_desc(j: &UsdPhysicsJoint) -> Option<JointDesc> {
     let (kind, free_axis): (JointKind, fn(UsdDof) -> bool) = match j.kind {
         UsdJointKind::Revolute => (JointKind::Revolute { axis }, dof_is_angular),
         UsdJointKind::Prismatic => (JointKind::Prismatic { axis }, dof_is_linear),
-        // Anchors only: fixed and spherical joints ignore the authored
-        // frame rotations.
         UsdJointKind::Fixed => {
-            return Some(JointDesc::new(
-                JointKind::Fixed,
-                Pose::from_translation(frame1.translation),
-                Pose::from_translation(frame2.translation),
-            ));
+            return Some(JointDesc::new(JointKind::Fixed, frame1, frame2));
         }
         UsdJointKind::Spherical => {
             return Some(JointDesc::new(JointKind::Spherical, frame1, frame2));
@@ -186,4 +180,18 @@ fn dof_is_linear(dof: UsdDof) -> bool {
         dof,
         UsdDof::Linear | UsdDof::TransX | UsdDof::TransY | UsdDof::TransZ
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fixed_joint_keeps_the_rotation_of_its_authored_frames() {
+        let turn = Quat::from_rotation_x(2.64);
+        let joint = UsdPhysicsJoint { kind: UsdJointKind::Fixed, local_rot0: turn, ..Default::default() };
+        let desc = joint_desc(&joint).unwrap();
+        assert!(desc.frame1.rotation.abs_diff_eq(quat_to_d(turn), 1e-9), "{:?}", desc.frame1);
+        assert!(desc.frame2.rotation.abs_diff_eq(glam::DQuat::IDENTITY, 1e-9), "{:?}", desc.frame2);
+    }
 }
