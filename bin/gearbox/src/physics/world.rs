@@ -58,13 +58,16 @@ pub struct PhysicsWorld {
 
 /// The drive a USD joint authors on its free axis, in SI units: stiffness per
 /// radian or metre, damping per radian or metre per second, force or torque.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct AuthoredDrive {
     pub stiffness: f64,
     pub damping: f64,
     pub max_force: Option<f64>,
     /// `drive:type` is `force`; otherwise the gains scale with inertia.
     pub force: bool,
+    /// The authored targets, radians or metres and per second.
+    pub target_position: Option<f64>,
+    pub target_velocity: Option<f64>,
 }
 
 /// Default physics rate; `GEARBOX_PHYSICS_HZ` overrides it.

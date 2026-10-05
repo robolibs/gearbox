@@ -4684,8 +4684,8 @@ def Xform "Leatherback" (
         let [chassis, wheel, steer, steer_link] = revolute_pairs(&mut physics);
         let drive = physics.joint_between(chassis, wheel).expect("drive joint");
         let steering = physics.joint_between(steer, steer_link).expect("steer joint");
-        physics.authored_drives.insert(drive, AuthoredDrive { stiffness: 0.0, damping: 900.0, max_force: Some(1500.0), force: true });
-        physics.authored_drives.insert(steering, AuthoredDrive { stiffness: 5000.0, damping: 80.0, max_force: Some(2800.0), force: true });
+        physics.authored_drives.insert(drive, AuthoredDrive { stiffness: 0.0, damping: 900.0, max_force: Some(1500.0), force: true, ..Default::default() });
+        physics.authored_drives.insert(steering, AuthoredDrive { stiffness: 5000.0, damping: 80.0, max_force: Some(2800.0), force: true, ..Default::default() });
         let wheel_target = |max_torque| JointVelocityTarget {
             pair: (wheel, chassis),
             velocity: 2.0,

@@ -1071,7 +1071,7 @@ mod tests {
     #[test]
     fn position_commands_set_the_target_of_an_authored_drive() {
         let (mut world, j, joint) = arm();
-        let drive = crate::physics::AuthoredDrive { stiffness: 900.0, damping: 60.0, max_force: Some(700.0), force: true };
+        let drive = crate::physics::AuthoredDrive { stiffness: 900.0, damping: 60.0, max_force: Some(700.0), force: true, ..Default::default() };
         world.authored_drives.insert(joint, drive);
         assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
         let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn a_motor_device_moves_the_target_of_the_joints_authored_drive() {
         let (mut world, j, joint) = arm();
-        let drive = crate::physics::AuthoredDrive { stiffness: 900.0, damping: 60.0, max_force: Some(700.0), force: true };
+        let drive = crate::physics::AuthoredDrive { stiffness: 900.0, damping: 60.0, max_force: Some(700.0), force: true, ..Default::default() };
         world.authored_drives.insert(joint, drive);
         let limits = DeviceLimits { max_velocity: 0.5, ..Default::default() };
         world.insert_motor(joint, limits, 50.0).unwrap();
@@ -1110,7 +1110,7 @@ mod tests {
     #[test]
     fn a_motor_device_ramps_the_velocity_of_the_joints_authored_drive() {
         let (mut world, j, joint) = arm();
-        let drive = crate::physics::AuthoredDrive { stiffness: 0.0, damping: 400.0, max_force: None, force: true };
+        let drive = crate::physics::AuthoredDrive { stiffness: 0.0, damping: 400.0, max_force: None, force: true, ..Default::default() };
         world.authored_drives.insert(joint, drive);
         let limits = DeviceLimits { max_velocity: 20.0, acceleration: Some(10.0), ..Default::default() };
         world.insert_motor(joint, limits, 300.0).unwrap();
@@ -1129,10 +1129,45 @@ mod tests {
     #[test]
     fn velocity_commands_run_an_authored_velocity_drive() {
         let (mut world, j, joint) = arm();
-        let drive = crate::physics::AuthoredDrive { stiffness: 0.0, damping: 400.0, max_force: Some(300.0), force: true };
+        let drive = crate::physics::AuthoredDrive { stiffness: 0.0, damping: 400.0, max_force: Some(300.0), force: true, ..Default::default() };
         world.authored_drives.insert(joint, drive);
         assert!(actuate(&mut world, &j, Actuation::Velocity { target: 2.0, max_force: 1.0 }));
         let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
         assert_eq!((motor.target_velocity, motor.damping, motor.max_force), (2.0, 400.0, 300.0));
+    }
+
+    #[test]
+    fn a_motor_device_heads_for_the_authored_target_of_its_drive() {
+        let (mut world, _, joint) = arm();
+        let drive = crate::physics::AuthoredDrive {
+            stiffness: 900.0,
+            damping: 60.0,
+            max_force: Some(700.0),
+            force: true,
+            target_position: Some(0.3),
+            ..Default::default()
+        };
+        world.authored_drives.insert(joint, drive);
+        world.insert_motor(joint, DeviceLimits { max_velocity: 0.5, ..Default::default() }, 50.0).unwrap();
+        for _ in 0..240 {
+            world.step();
+        }
+        let output = world.motor_output(joint).unwrap();
+        assert_eq!(output.command, DeviceCommand::Position(0.3));
+        assert!((output.position - 0.3).abs() < 1e-2, "{output:?}");
+    }
+
+    #[test]
+    fn a_motor_device_runs_at_the_authored_velocity_of_its_damper() {
+        let (mut world, _, joint) = arm();
+        let drive = crate::physics::AuthoredDrive { damping: 400.0, force: true, target_velocity: Some(2.0), ..Default::default() };
+        world.authored_drives.insert(joint, drive);
+        world.insert_motor(joint, DeviceLimits { max_velocity: 20.0, ..Default::default() }, 300.0).unwrap();
+        for _ in 0..120 {
+            world.step();
+        }
+        let output = world.motor_output(joint).unwrap();
+        assert_eq!(output.command, DeviceCommand::Velocity(2.0));
+        assert!((output.velocity - 2.0).abs() < 0.05, "{output:?}");
     }
 }

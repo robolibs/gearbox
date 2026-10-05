@@ -345,11 +345,9 @@ the applied schema are not found.
 - Units: rotational stiffness and damping are per degree in USD and × 180/π
   here; linear ones are ÷ `metersPerUnit`. Targets: degrees → radians, or ×
   `metersPerUnit`. `maxForce` is not scaled; unauthored means unlimited.
-- `drive:<dof>:physics:type` (`force`/`acceleration`) is **ignored**. The
-  drive is a **Force**-model drive only when `localRot0` equals `localRot1`
-  (within 1e-4); otherwise it is an **Acceleration**-model drive whose gains
-  act per unit of joint inertia. Keep both frame rotations equal on every
-  driven joint.
+- `drive:<dof>:physics:type` picks the model: `force` (the default) is a
+  **Force**-model drive, `acceleration` an **Acceleration**-model drive whose
+  gains act per unit of joint inertia.
 - A `gearbox:motor:*` device on the joint moves the drive's targets every
   physics step (§12.3).
 
@@ -571,7 +569,10 @@ frame is the prim's pose relative to its body when registered.
 ### 12.3 Behaviour
 
 - **Motors**
-  - A new motor holds the joint position it finds.
+  - A new motor on a joint with an authored drive heads for that drive's
+    authored target: a spring drive's `targetPosition`, a damper drive's
+    `targetVelocity`; unauthored, it holds the position it finds or rests.
+    A new motor without a drive holds the joint position it finds.
   - On a joint with an authored `PhysicsDriveAPI` (§6) the motor moves that
     drive's targets and the drive moves the joint, as in any UsdPhysics
     simulator:

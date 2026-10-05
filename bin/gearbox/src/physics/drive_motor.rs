@@ -31,7 +31,9 @@ pub(crate) struct DriveMotor {
 }
 
 impl DriveMotor {
-    /// A motor holding the joint at `position`; the drive's force limit, else
+    /// A motor on the joint at `position`, heading for its drive's authored
+    /// target: a spring's target position (else `position`), a damper's
+    /// target velocity (else rest). The drive's force limit, else
     /// `max_force`, caps it.
     pub(crate) fn new(
         axis: JointAxis,
@@ -44,7 +46,7 @@ impl DriveMotor {
         if !(0.0..).contains(&max_force) || !(0.0..).contains(&limits.max_velocity) {
             return Err("motor force and velocity limits must be nonnegative".into());
         }
-        Ok(Self {
+        let mut motor = Self {
             axis,
             drive,
             limits,
@@ -57,7 +59,13 @@ impl DriveMotor {
             previous_error: None,
             position,
             rate: 0.0,
-        })
+        };
+        motor.command(if drive.stiffness > 0.0 {
+            DeviceCommand::Position(drive.target_position.unwrap_or(position))
+        } else {
+            DeviceCommand::Velocity(drive.target_velocity.unwrap_or(0.0))
+        })?;
+        Ok(motor)
     }
 
     pub(crate) fn command(&mut self, command: DeviceCommand) -> Result<(), String> {

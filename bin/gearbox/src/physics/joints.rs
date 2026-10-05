@@ -123,10 +123,7 @@ fn joint_desc(j: &UsdPhysicsJoint) -> Option<JointDesc> {
         desc.limits.push((motor_axis, [lo as f64, hi as f64]));
     }
     if let Some(drive) = j.drives.iter().find(|d| free_axis(d.dof)) {
-        // Joints whose frames share a basis have always run force-based
-        // drives; the differing-basis path kept the backend's default.
-        let same_basis = frame1.rotation.abs_diff_eq(frame2.rotation, 1e-4);
-        desc.motors.push(motor_desc(motor_axis, drive, same_basis));
+        desc.motors.push(motor_desc(motor_axis, drive));
     }
     Some(desc)
 }
@@ -144,10 +141,12 @@ fn authored_drive(j: &UsdPhysicsJoint) -> Option<AuthoredDrive> {
         damping: d.damping as f64,
         max_force: d.max_force.map(|f| f as f64).filter(|f| f.is_finite()),
         force: matches!(d.drive_type, UsdDriveType::Force),
+        target_position: d.target_position.map(f64::from),
+        target_velocity: d.target_velocity.map(f64::from),
     })
 }
 
-fn motor_desc(axis: JointAxis, d: &UsdJointDrive, force_based: bool) -> MotorDesc {
+fn motor_desc(axis: JointAxis, d: &UsdJointDrive) -> MotorDesc {
     let target = if let Some(target) = d.target_position {
         Some(MotorTarget::Position {
             target: target as f64,
@@ -164,7 +163,10 @@ fn motor_desc(axis: JointAxis, d: &UsdJointDrive, force_based: bool) -> MotorDes
         axis,
         target,
         max_force: d.max_force.map(|f| f as f64),
-        model: force_based.then_some(MotorModel::Force),
+        model: Some(match d.drive_type {
+            UsdDriveType::Force => MotorModel::Force,
+            UsdDriveType::Acceleration => MotorModel::Acceleration,
+        }),
     }
 }
 
@@ -193,5 +195,19 @@ mod tests {
         let desc = joint_desc(&joint).unwrap();
         assert!(desc.frame1.rotation.abs_diff_eq(quat_to_d(turn), 1e-9), "{:?}", desc.frame1);
         assert!(desc.frame2.rotation.abs_diff_eq(glam::DQuat::IDENTITY, 1e-9), "{:?}", desc.frame2);
+    }
+
+    #[test]
+    fn a_joint_drive_runs_on_its_authored_model_whatever_its_frames() {
+        for (kind, model) in [(UsdDriveType::Force, MotorModel::Force), (UsdDriveType::Acceleration, MotorModel::Acceleration)] {
+            let drive = UsdJointDrive { dof: UsdDof::RotX, drive_type: kind, stiffness: 10.0, target_position: Some(0.0), ..Default::default() };
+            let joint = UsdPhysicsJoint {
+                kind: UsdJointKind::Revolute,
+                local_rot0: Quat::from_rotation_x(0.3),
+                drives: vec![drive],
+                ..Default::default()
+            };
+            assert_eq!(joint_desc(&joint).unwrap().motors[0].model, Some(model));
+        }
     }
 }
