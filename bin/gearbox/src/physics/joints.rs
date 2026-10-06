@@ -4,7 +4,7 @@
 //! authored axis rides in `JointKind`, so motors and limits always address
 //! `AngX` / `LinX` whatever the USD axis token was.
 
-use super::backend::{JointAxis, JointDesc, JointKind, MotorDesc, MotorModel, MotorTarget, Pose};
+use super::backend::{JointAxes, JointAxis, JointDesc, JointKind, MotorDesc, MotorModel, MotorTarget, Pose};
 use super::convert::{quat_to_d, vec3_to_d};
 use super::markers::{UsdDof, UsdDriveType, UsdJointDrive, UsdJointKind, UsdPhysicsJoint};
 use bevy::prelude::*;
@@ -92,40 +92,81 @@ fn joint_desc(j: &UsdPhysicsJoint) -> Option<JointDesc> {
     } else {
         DVec3::X
     };
-    let (kind, free_axis): (JointKind, fn(UsdDof) -> bool) = match j.kind {
-        UsdJointKind::Revolute => (JointKind::Revolute { axis }, dof_is_angular),
-        UsdJointKind::Prismatic => (JointKind::Prismatic { axis }, dof_is_linear),
-        UsdJointKind::Fixed => {
-            return Some(JointDesc::new(JointKind::Fixed, frame1, frame2));
+    let mut desc = match j.kind {
+        UsdJointKind::Revolute | UsdJointKind::Prismatic => {
+            let (kind, free_axis, motor_axis): (JointKind, fn(UsdDof) -> bool, JointAxis) =
+                if j.kind == UsdJointKind::Revolute {
+                    (JointKind::Revolute { axis }, dof_is_angular, JointAxis::AngX)
+                } else {
+                    (JointKind::Prismatic { axis }, dof_is_linear, JointAxis::LinX)
+                };
+            let mut desc = JointDesc::new(kind, frame1, frame2);
+            if let Some(range) = j.built_in_limit.and_then(|(lo, hi)| finite_range(lo, hi)) {
+                desc.limits.push((motor_axis, range));
+            }
+            if let Some(drive) = j.drives.iter().find(|d| free_axis(d.dof)) {
+                desc.motors.push(motor_desc(motor_axis, drive));
+            }
+            desc
         }
-        UsdJointKind::Spherical => {
-            return Some(JointDesc::new(JointKind::Spherical, frame1, frame2));
-        }
+        UsdJointKind::Fixed => JointDesc::new(JointKind::Fixed, frame1, frame2),
+        UsdJointKind::Spherical => JointDesc::new(JointKind::Spherical, frame1, frame2),
         UsdJointKind::Distance => {
-            warn!("gearbox-physics: PhysicsDistanceJoint not yet supported; skipping");
+            warn!("gearbox-physics: PhysicsDistanceJoint needs Molla's distance limits; skipping");
             return None;
         }
-        UsdJointKind::Generic => {
-            warn!(
-                "gearbox-physics: generic D6 joint not yet implemented; skipping ({} limits, {} drives)",
-                j.limits.len(),
-                j.drives.len()
-            );
-            return None;
-        }
+        UsdJointKind::Generic => generic_desc(j, frame1, frame2),
     };
-    let motor_axis = match kind {
-        JointKind::Prismatic { .. } => JointAxis::LinX,
-        _ => JointAxis::AngX,
-    };
-    let mut desc = JointDesc::new(kind, frame1, frame2);
-    if let Some((lo, hi)) = j.built_in_limit {
-        desc.limits.push((motor_axis, [lo as f64, hi as f64]));
-    }
-    if let Some(drive) = j.drives.iter().find(|d| free_axis(d.dof)) {
-        desc.motors.push(motor_desc(motor_axis, drive));
-    }
+    desc.contacts_enabled = j.collision_enabled;
     Some(desc)
+}
+
+/// A `PhysicsJoint` (D6): each axis of the joint frame is free, limited by
+/// its `PhysicsLimitAPI:<axis>`, or locked when that limit's low passes its
+/// high; a `PhysicsDriveAPI:<axis>` drives a free or limited axis.
+fn generic_desc(j: &UsdPhysicsJoint, frame1: Pose, frame2: Pose) -> JointDesc {
+    let mut locked = JointAxes::NONE;
+    let mut limits = Vec::new();
+    for limit in &j.limits {
+        let Some(axis) = frame_axis(limit.dof) else {
+            warn!("gearbox-physics: D6 limit on {:?} has no frame axis; ignored", limit.dof);
+            continue;
+        };
+        if limit.low > limit.high {
+            locked = locked.with(axis);
+        } else if let Some(range) = finite_range(limit.low, limit.high) {
+            limits.push((axis, range));
+        }
+    }
+    let mut desc = JointDesc::new(JointKind::Generic { locked }, frame1, frame2);
+    desc.limits = limits;
+    desc.motors = j
+        .drives
+        .iter()
+        .filter_map(|d| frame_axis(d.dof).filter(|axis| !locked.contains(*axis)).map(|axis| motor_desc(axis, d)))
+        .collect();
+    desc
+}
+
+/// The joint-frame axis a six-axis USD DOF token names.
+fn frame_axis(dof: UsdDof) -> Option<JointAxis> {
+    Some(match dof {
+        UsdDof::TransX => JointAxis::LinX,
+        UsdDof::TransY => JointAxis::LinY,
+        UsdDof::TransZ => JointAxis::LinZ,
+        UsdDof::RotX => JointAxis::AngX,
+        UsdDof::RotY => JointAxis::AngY,
+        UsdDof::RotZ => JointAxis::AngZ,
+        UsdDof::Linear | UsdDof::Angular | UsdDof::Distance => return None,
+    })
+}
+
+/// Molla takes finite limits only: an open side stands far out, and a
+/// range open on both sides is no limit at all.
+fn finite_range(low: f32, high: f32) -> Option<[f64; 2]> {
+    const OPEN: f64 = 1.0e6;
+    let (low, high) = (low as f64, high as f64);
+    (low.is_finite() || high.is_finite()).then(|| [low.max(-OPEN), high.min(OPEN)])
 }
 
 /// The drive on a revolute or prismatic joint's free axis.
@@ -186,6 +227,8 @@ fn dof_is_linear(dof: UsdDof) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::backend::{BodyDesc, Inertia, MassProps};
+    use super::super::markers::UsdJointLimit;
     use super::*;
 
     #[test]
@@ -209,5 +252,68 @@ mod tests {
             };
             assert_eq!(joint_desc(&joint).unwrap().motors[0].model, Some(model));
         }
+    }
+
+    fn limit(dof: UsdDof, low: f32, high: f32) -> UsdJointLimit {
+        UsdJointLimit { dof, low, high }
+    }
+
+    /// The translations locked, Z limited to ±0.5 rad, Y open below 0.25 rad.
+    fn d6_hinge() -> UsdPhysicsJoint {
+        UsdPhysicsJoint {
+            kind: UsdJointKind::Generic,
+            local_pos1: Vec3::new(-1.0, 0.0, 0.0),
+            limits: vec![
+                limit(UsdDof::TransX, 1.0, -1.0),
+                limit(UsdDof::TransY, 1.0, -1.0),
+                limit(UsdDof::TransZ, 1.0, -1.0),
+                limit(UsdDof::RotX, 1.0, -1.0),
+                limit(UsdDof::RotY, f32::NEG_INFINITY, 0.25),
+                limit(UsdDof::RotZ, -0.5, 0.5),
+            ],
+            drives: vec![
+                UsdJointDrive { dof: UsdDof::RotZ, damping: 2.0, target_velocity: Some(0.0), ..Default::default() },
+                UsdJointDrive { dof: UsdDof::TransX, stiffness: 5.0, target_position: Some(0.0), ..Default::default() },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_d6_joint_locks_limits_and_drives_its_authored_axes() {
+        let d6 = joint_desc(&d6_hinge()).unwrap();
+        assert_eq!(d6.kind, JointKind::Generic { locked: JointAxes::LIN.with(JointAxis::AngX) });
+        assert_eq!(d6.limits, vec![(JointAxis::AngY, [-1.0e6, 0.25]), (JointAxis::AngZ, [-0.5, 0.5])]);
+        assert_eq!(d6.motors.iter().map(|m| m.axis).collect::<Vec<_>>(), vec![JointAxis::AngZ]);
+    }
+
+    #[test]
+    fn a_joint_lets_its_bodies_collide_only_when_authored() {
+        let mut pin = UsdPhysicsJoint { kind: UsdJointKind::Fixed, ..Default::default() };
+        assert!(!joint_desc(&pin).unwrap().contacts_enabled);
+        pin.collision_enabled = true;
+        assert!(joint_desc(&pin).unwrap().contacts_enabled);
+    }
+
+    /// A 1 m arm on the D6 hinge falls under gravity to its −0.5 rad stop.
+    #[test]
+    fn a_d6_hinge_swings_down_to_its_limit() {
+        let mut world = PhysicsWorld::default();
+        let anchor = world.insert_body(BodyDesc::fixed());
+        let mut arm = BodyDesc::dynamic().pose(Pose::from_translation(DVec3::X));
+        arm.additional_mass = Some(MassProps {
+            mass: 1.0,
+            local_com: DVec3::ZERO,
+            inertia: Inertia::Principal(DVec3::splat(0.01)),
+        });
+        let arm = world.insert_body(arm);
+        world.insert_joint(anchor, arm, joint_desc(&d6_hinge()).unwrap());
+        for _ in 0..480 {
+            world.step();
+        }
+        let pose = world.body(arm).unwrap().position();
+        let angle = 2.0 * pose.rotation.z.atan2(pose.rotation.w);
+        assert!((angle + 0.5).abs() < 0.02, "{angle}");
+        assert!(pose.translation.distance(DVec3::new(0.5_f64.cos(), -(0.5_f64.sin()), 0.0)) < 0.02, "{pose:?}");
     }
 }

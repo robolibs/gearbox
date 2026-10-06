@@ -187,6 +187,7 @@ pub fn convert_colliders(
             .pose(compute_local_pose(parent_entity, &globals, gt, &col.shape))
             .entity(entity);
         desc.parent = parent_handle;
+        desc.enabled = col.enabled;
         // Colliders of one articulation never touch each other.
         desc.groups = find_articulation_root_ancestor(
             entity,

@@ -59,6 +59,7 @@ pub fn convert_rigid_bodies(
         let authored_mass = mass.and_then(|m| m.mass).map(|m| m as f64);
         let center_of_mass = mass.and_then(|m| m.center_of_mass).map(vec3_to_d);
         let diagonal_inertia = mass.and_then(|m| m.diagonal_inertia).map(vec3_to_d);
+        let principal_axes = mass.and_then(|m| m.principal_axes).map(quat_to_d);
 
         let mut desc = BodyDesc::new(kind).pose(pose).entity(entity);
         desc.linvel = vec3_to_d(rb.velocity);
@@ -76,8 +77,9 @@ pub fn convert_rigid_bodies(
             Some(mass_kg) => Some(MassProps {
                 local_com: center_of_mass.unwrap_or(DVec3::ZERO),
                 mass: mass_kg,
-                inertia: Inertia::Principal(
+                inertia: inertia(
                     diagonal_inertia.unwrap_or(DVec3::splat(0.4 * mass_kg * 0.01)),
+                    principal_axes,
                 ),
             }),
             None if kind == BodyKind::Dynamic => Some(MassProps {
@@ -97,5 +99,33 @@ pub fn convert_rigid_bodies(
         let handle = world.insert_body(desc);
         world.entity_to_body.insert(entity, handle);
         commands.entity(entity).insert(BodyAttached);
+    }
+}
+
+/// The body-frame inertia: the principal moments turned by
+/// `physics:principalAxes`, or left on the body axes when those are unturned.
+fn inertia(moments: DVec3, axes: Option<glam::DQuat>) -> Inertia {
+    match axes.filter(|q| q.angle_between(glam::DQuat::IDENTITY) > 1e-6) {
+        Some(q) => {
+            let r = glam::DMat3::from_quat(q.normalize());
+            Inertia::Tensor(r * glam::DMat3::from_diagonal(moments) * r.transpose())
+        }
+        None => Inertia::Principal(moments),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A disc spinning about X, its axes turned 90° about Z, spins about Y.
+    #[test]
+    fn principal_axes_turn_the_moments_into_the_body_frame() {
+        let moments = DVec3::new(0.5, 0.25, 0.25);
+        let turned = inertia(moments, Some(glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2)));
+        let Inertia::Tensor(tensor) = turned else { panic!("{turned:?}") };
+        assert!(tensor.abs_diff_eq(glam::DMat3::from_diagonal(DVec3::new(0.25, 0.5, 0.25)), 1e-12), "{tensor:?}");
+        assert_eq!(inertia(moments, Some(glam::DQuat::IDENTITY)), Inertia::Principal(moments));
+        assert_eq!(inertia(moments, None), Inertia::Principal(moments));
     }
 }

@@ -239,7 +239,7 @@ Dynamic bodies get fixed damping: linear 0.1, angular 0.5.
 | `physics:mass` | none: a dynamic body gets 0.001 kg | Body mass, × `kilogramsPerUnit` for kg. |
 | `physics:centerOfMass` | (0, 0, 0) | Body frame, scene units. |
 | `physics:diagonalInertia` | `0.4 · m · 0.01` on every axis | Principal inertia. The default is far too small; always author it. |
-| `physics:principalAxes` | | Ignored (rigid bodies). |
+| `physics:principalAxes` | identity | Turns the principal inertia into the body frame. |
 | `physics:density` | | Ignored, as is material density. |
 
 Every collider also adds its volume × **1 kg/m³** to its body, whatever is
@@ -274,7 +274,8 @@ body at or above it.
 | `convexHull`, `boundingSphere`, `boundingCube` | convex hull | convex hull |
 | `convexDecomposition` | convex decomposition (needs an indexed mesh) | convex decomposition |
 
-- `physics:collisionEnabled = false` is **ignored**: every collider is built.
+- `physics:collisionEnabled = false` builds the collider without collisions;
+  it adds no mass to its body either.
 - Defaults: friction 0.5, restitution 0, friction combine Average.
 - Physics material: `material:binding:physics`, else `material:binding`.
   Friction is `physics:dynamicFriction`, else `physics:staticFriction`, else
@@ -285,8 +286,9 @@ body at or above it.
   derived from the root's entity id and never touch each other. Two roots can
   hash to the same group; their machines then never collide with each other.
 - `PhysicsCollisionGroup` prims are parsed and not used.
-- Jointed bodies never collide with each other. Once a machine has an agent,
-  every pair of its own bodies is filtered, so it touches only the ground and
+- Jointed bodies collide with each other only when the joint authors
+  `physics:collisionEnabled = true`. Once a machine has an agent, every pair
+  of its own bodies is filtered anyway, so it touches only the ground and
   other machines. While attached, every master × slave body pair is filtered.
 
 Spawn alignment moves a loaded machine up or down so its lowest collider
@@ -301,9 +303,10 @@ whose name contains `tire`, `tyre` or `wheel` sits 0.03 m above the terrain
 |---|---|
 | `PhysicsRevoluteJoint` | Hinge about `physics:axis`. Limits and drives (§6.3, §6.4). |
 | `PhysicsPrismaticJoint` | Slider along `physics:axis`. Limits and drives. |
-| `PhysicsFixedJoint` | Keeps the frame **translations only**: `localRot0/1` are ignored and the child is locked in the parent body's orientation. |
+| `PhysicsFixedJoint` | Locks both frames together, translations and rotations. |
 | `PhysicsSphericalJoint` | Ball joint with both frames; cone limits unused. |
-| `PhysicsDistanceJoint`, `PhysicsJoint` (D6) | **Skipped** with a warning: no constraint is built. They still define link-tree parents. |
+| `PhysicsJoint` (D6) | Each axis of the joint frame (`transX`…`rotZ`) is free, limited by its `PhysicsLimitAPI:<axis>`, or locked when that limit's low exceeds its high. A `PhysicsDriveAPI:<axis>` drives a free or limited axis. |
+| `PhysicsDistanceJoint` | **Skipped** with a warning: no constraint is built. It still defines a link-tree parent. |
 
 ### 6.2 Common attributes
 
@@ -314,10 +317,10 @@ whose name contains `tire`, `tyre` or `wheel` sits 0.03 m above the terrain
 | `physics:axis` | `"X"` (default), `"Y"`, anything else is Z. |
 | `physics:jointEnabled = false` | Joint skipped. |
 | `physics:excludeFromArticulation = true` | Loop-closure joint: a soft constraint (30 Hz, damping ratio 1) outside the reduced-coordinate tree. Motor and brake devices refuse it, tyres need a tree spin joint (§8), and the parking hold falls back to a velocity brake on it. A body that is `body1` of two joints without this flag is a link-tree error (§3.4); a closed loop of such joints also makes Molla refuse the joint and the simulator panics (CONTROLLER_SPEC §11). |
-| `physics:collisionEnabled` | Ignored; jointed bodies never collide. |
+| `physics:collisionEnabled` | `true` lets the two bodies collide; default `false`. The filtering in §5 still applies. |
 | `physics:breakForce`, `physics:breakTorque` | Ignored by rigid joints (read only by FEM validation). |
 | `physics:coneAngle0Limit/1Limit`, `physics:minDistance/maxDistance` | Parsed; not used by rigid joints. |
-| `PhysicsLimitAPI:<dof>` | Only meaningful on generic joints, which are skipped. |
+| `PhysicsLimitAPI:<dof>` | Per axis on D6 joints (§6.1); `rot*` limits in degrees. |
 
 ### 6.3 Limits
 
@@ -328,7 +331,8 @@ backend default. Unauthored loop closures retain 30 Hz compliance.
 
 `physics:lowerLimit` and `physics:upperLimit` apply to revolute (degrees) and
 prismatic (scene units) joints, and **both must be authored**; one alone is
-ignored.
+ignored. An infinite side stands at ±10⁶ (m or rad), and a range infinite on
+both sides is no limit; the same holds for D6 axis limits.
 
 ### 6.4 Drives
 

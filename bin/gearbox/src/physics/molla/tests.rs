@@ -772,3 +772,25 @@ fn inflation_lifts_supported_body_and_keeps_final_envelope_on_ground() {
     assert!((backend.body(chassis).unwrap().translation().y - low).abs() < 1e-5);
     assert!(backend.quarantined_bodies().is_empty());
 }
+
+/// A ball whose collider is disabled falls through the ground it would
+/// otherwise rest on.
+#[test]
+fn a_disabled_collider_does_not_collide() {
+    let rest = |enabled: bool| {
+        let mut backend = MollaBackend::default();
+        backend
+            .insert_collider(ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(5.0, 0.5, 5.0) }).translation(-DVec3::Y * 0.5))
+            .unwrap();
+        let ball = backend.insert_body(dynamic().pose(Pose::from_translation(DVec3::Y * 0.5)));
+        let mut collider = ColliderDesc::new(Shape::Ball { radius: 0.5 }).parent(ball);
+        collider.enabled = enabled;
+        backend.insert_collider(collider).unwrap();
+        for _ in 0..120 {
+            backend.step(&|_, _| false);
+        }
+        backend.body(ball).unwrap().position().translation.y
+    };
+    assert!(rest(true) > 0.4, "{}", rest(true));
+    assert!(rest(false) < -1.0, "{}", rest(false));
+}

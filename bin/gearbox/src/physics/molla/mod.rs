@@ -387,6 +387,7 @@ impl PhysicsBackend for MollaBackend {
         collider.memberships = groups.memberships;
         collider.filter = groups.filter;
         collider.user_tag = desc.entity.map_or(0, Entity::to_bits);
+        collider.enabled = desc.enabled;
         let parent = collider.parent;
         let mut world = self.shared.world();
         let handle = world.scene.insert_collider(collider).ok()?;

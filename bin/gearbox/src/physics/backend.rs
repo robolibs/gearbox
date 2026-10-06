@@ -289,6 +289,8 @@ pub struct ColliderDesc {
     pub density: Option<f64>,
     pub groups: Option<CollisionGroups>,
     pub entity: Option<Entity>,
+    /// Whether it collides at all; a disabled collider adds no mass either.
+    pub enabled: bool,
 }
 
 impl ColliderDesc {
@@ -303,6 +305,7 @@ impl ColliderDesc {
             density: None,
             groups: None,
             entity: None,
+            enabled: true,
         }
     }
 
