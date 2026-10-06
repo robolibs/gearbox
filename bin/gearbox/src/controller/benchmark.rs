@@ -837,6 +837,10 @@ fn imported_harrow_discs_and_rollers_roll_when_pulled() {
     let physics = fixture.app.world().resource::<PhysicsWorld>();
     let (mut discs, mut rollers) = (Vec::new(), Vec::new());
     for id in physics.joints() {
+        // The discs welded to their gang's first disc do not turn on their own.
+        if physics.joint(id).unwrap().locked_axes() == crate::physics::backend::JointAxes::ALL {
+            continue;
+        }
         let (carrier, spinner) = physics.joint_bodies(id).unwrap();
         let spinning = physics.body(spinner).unwrap();
         let axle = spinning.rotation() * physics.joint(id).unwrap().frame2().rotation * DVec3::X;
@@ -847,9 +851,9 @@ fn imported_harrow_discs_and_rollers_roll_when_pulled() {
             _ => {}
         }
     }
-    assert_eq!((discs.len(), rollers.len()), (48, 2));
+    assert_eq!((discs.len(), rollers.len()), (8, 2));
     // Rolling at 2 m/s: 2 / 0.27 rad/s for a roller spinning up under light load,
-    // 2 cos 17° / 0.285 for a disc at its gang angle; a few edge discs ride clear.
+    // 2 / 0.285 for a disc gang rolling on its discs' rims.
     assert!(rollers.iter().all(|w| *w > 0.7 * 2.0 / 0.27 && *w < 2.0 / 0.27 + 0.5), "rollers {rollers:?}");
-    assert!(discs.iter().filter(|w| (5.5..7.5).contains(*w)).count() >= 40, "discs {discs:?}");
+    assert!(discs.iter().all(|w| (5.5..7.5).contains(w)), "disc gangs {discs:?}");
 }

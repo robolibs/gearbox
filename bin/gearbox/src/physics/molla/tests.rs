@@ -794,3 +794,73 @@ fn a_disabled_collider_does_not_collide() {
     assert!(rest(true) > 0.4, "{}", rest(true));
     assert!(rest(false) < -1.0, "{}", rest(false));
 }
+
+/// A 1 kg point-like bob hanging `length` below a fixed anchor.
+fn bob(backend: &mut MollaBackend, length: f64, angvel: DVec3) -> (BodyId, BodyId) {
+    let anchor = backend.insert_body(BodyDesc::fixed());
+    let mut desc = BodyDesc::dynamic().pose(Pose::from_translation(-DVec3::Y * length));
+    desc.angvel = angvel;
+    desc.additional_mass = Some(MassProps {
+        mass: 1.0,
+        local_com: DVec3::ZERO,
+        inertia: Inertia::Principal(DVec3::splat(0.01)),
+    });
+    (anchor, backend.insert_body(desc))
+}
+
+/// A pendulum pushed to swing 0.6 rad stays inside a 0.3 rad cone.
+#[test]
+fn a_cone_limit_holds_a_ball_joint_inside_its_cone() {
+    let swing = |cone: Option<f64>| {
+        let mut backend = MollaBackend::default();
+        let (anchor, bob) = bob(&mut backend, 1.0, DVec3::Z * 2.0);
+        let mut desc = JointDesc::new(JointKind::Spherical { axis: DVec3::Y }, Pose::IDENTITY, Pose::from_translation(DVec3::Y));
+        desc.cone_limits = [cone, cone];
+        backend.insert_joint(anchor, bob, desc);
+        let mut widest = 0.0_f64;
+        for _ in 0..240 {
+            backend.step(&|_, _| false);
+            widest = widest.max(backend.body(bob).unwrap().position().rotation.angle_between(DQuat::IDENTITY));
+        }
+        widest
+    };
+    assert!(swing(None) > 0.5, "{}", swing(None));
+    assert!(swing(Some(0.3)) < 0.33, "{}", swing(Some(0.3)));
+}
+
+/// A body dropped on a 1 m distance joint is caught at 1 m.
+#[test]
+fn a_distance_joint_catches_a_falling_body_at_its_max() {
+    let fall = |max: Option<f64>| {
+        let mut backend = MollaBackend::default();
+        let (anchor, bob) = bob(&mut backend, 0.5, DVec3::ZERO);
+        let mut desc = JointDesc::new(JointKind::Distance, Pose::IDENTITY, Pose::IDENTITY);
+        desc.distance_limits = [None, max];
+        backend.insert_joint(anchor, bob, desc);
+        for _ in 0..240 {
+            backend.step(&|_, _| false);
+        }
+        -backend.body(bob).unwrap().position().translation.y
+    };
+    assert!(fall(None) > 5.0, "{}", fall(None));
+    assert!((fall(Some(1.0)) - 1.0).abs() < 0.02, "{}", fall(Some(1.0)));
+}
+
+/// A 1 kg bob on a fixed joint breaks free under a 5 N limit and hangs
+/// on under a 50 N one.
+#[test]
+fn a_joint_breaks_past_its_break_force() {
+    let drop = |force: f64| {
+        let mut backend = MollaBackend::default();
+        let (anchor, bob) = bob(&mut backend, 1.0, DVec3::ZERO);
+        let mut desc = JointDesc::new(JointKind::Fixed, Pose::IDENTITY, Pose::from_translation(DVec3::Y));
+        desc.break_limits = [Some(force), None];
+        backend.insert_joint(anchor, bob, desc);
+        for _ in 0..120 {
+            backend.step(&|_, _| false);
+        }
+        -1.0 - backend.body(bob).unwrap().position().translation.y
+    };
+    assert!(drop(5.0) > 1.0, "{}", drop(5.0));
+    assert!(drop(50.0).abs() < 0.01, "{}", drop(50.0));
+}

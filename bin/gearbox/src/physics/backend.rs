@@ -459,7 +459,13 @@ pub enum JointKind {
         axis: DVec3,
     },
     Fixed,
-    Spherical,
+    /// Free rotation; a cone limit opens around `axis` of the first frame.
+    Spherical {
+        axis: DVec3,
+    },
+    /// Keeps the two anchors within `distance_limits`; outside the
+    /// reduced-coordinate tree.
+    Distance,
     /// Exactly the `locked` axes are held; the joint's X is frame X.
     Generic {
         locked: JointAxes,
@@ -481,6 +487,13 @@ pub struct JointDesc {
     pub contacts_enabled: bool,
     /// Close an articulation loop without adding a reduced-coordinate edge.
     pub loop_closure: bool,
+    /// Spherical swing half-angles (rad) toward the next two axes after
+    /// the cone axis; `None` swings freely.
+    pub cone_limits: [Option<f64>; 2],
+    /// Distance joint bounds between the anchors (m).
+    pub distance_limits: [Option<f64>; 2],
+    /// Force (N) and torque (N·m) that break the joint.
+    pub break_limits: [Option<f64>; 2],
 }
 
 impl JointDesc {
@@ -494,6 +507,9 @@ impl JointDesc {
             softness: None,
             contacts_enabled: false,
             loop_closure: false,
+            cone_limits: [None; 2],
+            distance_limits: [None; 2],
+            break_limits: [None; 2],
         }
     }
 }

@@ -10,7 +10,7 @@ mod tests;
 mod wheel;
 mod track;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bevy::prelude::Entity;
@@ -48,11 +48,19 @@ pub struct MollaBackend {
     wheel_step_dt: f64,
     devices: BTreeMap<DeviceId, device::MollaDevice>,
     next_device: u64,
+    /// Joints with break limits that have not broken yet.
+    breakable: BTreeSet<JointId>,
 }
 
 impl Default for MollaBackend {
     fn default() -> Self {
         let mut world = RigidWorld::new().expect("Molla world initialization");
+        // Contacts stay penalty forces with regularized friction, with no
+        // impact arrest at onset, and corrected rates are not re-solved for
+        // world momentum.
+        world.solver.regularized_friction = true;
+        world.solver.contact_impacts = false;
+        world.solver.momentum_transport = false;
         world.set_sleep_settings(Some(molla_solvers::rigid_world::SleepSettings::default()))
             .expect("Molla sleep settings");
         Self {
@@ -64,6 +72,7 @@ impl Default for MollaBackend {
             wheel_step_dt: 1.0 / 120.0,
             devices: BTreeMap::new(),
             next_device: 0,
+            breakable: BTreeSet::new(),
             settings: SolverSettings {
                 dt: 1.0 / 120.0,
                 solver_iterations: 16,
@@ -289,6 +298,17 @@ impl PhysicsBackend for MollaBackend {
         if let Err(error) = result {
             bevy::log::error!("molla: step rejected: {error}");
         }
+        if !self.breakable.is_empty() {
+            let world = self.shared.world();
+            let joints = &self.joints;
+            self.breakable.retain(|id| {
+                let broken = joints.get(id).is_some_and(|j| world.scene.joint_broken(j.handle).unwrap_or(false));
+                if broken {
+                    bevy::log::warn!("molla: joint {id:?} broke past its break limits");
+                }
+                !broken
+            });
+        }
     }
     fn insert_body(&mut self, desc: BodyDesc) -> BodyId {
         let entity = desc.entity;
@@ -437,7 +457,8 @@ impl PhysicsBackend for MollaBackend {
             JointKind::Revolute { axis } => (sim::JointType::Revolute, axis),
             JointKind::Prismatic { axis } => (sim::JointType::Prismatic, axis),
             JointKind::Fixed => (sim::JointType::Fixed, DVec3::X),
-            JointKind::Spherical => (sim::JointType::Ball, DVec3::X),
+            JointKind::Spherical { axis } => (sim::JointType::Ball, axis),
+            JointKind::Distance => (sim::JointType::Distance, DVec3::X),
             JointKind::Generic { .. } => (sim::JointType::D6, DVec3::X),
         };
         let handle = {
@@ -450,7 +471,8 @@ impl PhysicsBackend for MollaBackend {
                 frame_parent: convert::transform(desc.frame1),
                 frame_child: convert::transform(desc.frame2),
             };
-            let handle = if desc.loop_closure {
+            // A distance joint is always outside the tree and has no compliance.
+            let handle = if desc.loop_closure && desc.kind != JointKind::Distance {
                 let (natural_frequency, damping_ratio) = desc.softness.unwrap_or((30.0, 1.0));
                 world.scene.insert_loop_joint(
                     runtime,
@@ -477,8 +499,23 @@ impl PhysicsBackend for MollaBackend {
                     contacts_enabled: desc.contacts_enabled,
                 },
             ));
+            let [angle0, angle1] = desc.cone_limits;
+            if angle0.or(angle1).is_some() {
+                apply(world.scene.set_cone_limits(handle, jc::SphericalConeLimits { angle0, angle1 }));
+            }
+            let [min, max] = desc.distance_limits;
+            if desc.kind == JointKind::Distance {
+                apply(world.scene.set_distance_limits(handle, jc::DistanceLimits { min, max }));
+            }
+            let [force, torque] = desc.break_limits;
+            if force.or(torque).is_some() {
+                apply(world.scene.set_joint_break_limits(handle, jc::JointBreakLimits { force, torque }));
+            }
             handle
         };
+        if desc.break_limits.iter().any(Option::is_some) {
+            self.breakable.insert(JointId(handle.to_bits()));
+        }
         let id = JointId(handle.to_bits());
         let mut joint = JointAccess {
             shared: self.shared.clone(),
@@ -523,6 +560,7 @@ impl PhysicsBackend for MollaBackend {
                 return;
             }
             self.joints.remove(&id);
+            self.breakable.remove(&id);
             self.wheels.retain(|body, (joint, _)| {
                 if *joint == id { world.wheels.remove(self.bodies[body].handle); }
                 *joint != id

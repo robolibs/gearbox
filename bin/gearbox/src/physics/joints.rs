@@ -81,7 +81,7 @@ pub fn convert_joints(
     }
 }
 
-/// `None` for the joint kinds no backend path exists for yet.
+/// Every UsdPhysics joint kind has a backend path.
 fn joint_desc(j: &UsdPhysicsJoint) -> Option<JointDesc> {
     let frame1 = Pose::new(vec3_to_d(j.local_pos0), quat_to_d(j.local_rot0));
     let frame2 = Pose::new(vec3_to_d(j.local_pos1), quat_to_d(j.local_rot1));
@@ -110,14 +110,25 @@ fn joint_desc(j: &UsdPhysicsJoint) -> Option<JointDesc> {
             desc
         }
         UsdJointKind::Fixed => JointDesc::new(JointKind::Fixed, frame1, frame2),
-        UsdJointKind::Spherical => JointDesc::new(JointKind::Spherical, frame1, frame2),
+        UsdJointKind::Spherical => {
+            let mut desc = JointDesc::new(JointKind::Spherical { axis }, frame1, frame2);
+            if let Some((angle0, angle1)) = j.cone_limit {
+                desc.cone_limits = [angle0, angle1].map(|a| (a >= 0.0).then(|| (a as f64).min(std::f64::consts::PI)));
+            }
+            desc
+        }
         UsdJointKind::Distance => {
-            warn!("gearbox-physics: PhysicsDistanceJoint needs Molla's distance limits; skipping");
-            return None;
+            let mut desc = JointDesc::new(JointKind::Distance, frame1, frame2);
+            if let Some((min, max)) = j.distance_limit {
+                desc.distance_limits = [min, max].map(|d| (d >= 0.0).then_some(d as f64));
+            }
+            desc
         }
         UsdJointKind::Generic => generic_desc(j, frame1, frame2),
     };
     desc.contacts_enabled = j.collision_enabled;
+    desc.break_limits = [j.break_force, j.break_torque]
+        .map(|limit| limit.filter(|v| *v >= 0.0 && *v < f32::MAX).map(f64::from));
     Some(desc)
 }
 
@@ -293,6 +304,20 @@ mod tests {
         assert!(!joint_desc(&pin).unwrap().contacts_enabled);
         pin.collision_enabled = true;
         assert!(joint_desc(&pin).unwrap().contacts_enabled);
+    }
+
+    #[test]
+    fn ball_distance_and_break_limits_carry_their_authored_sides() {
+        let ball = UsdPhysicsJoint { kind: UsdJointKind::Spherical, axis: Vec3::Y, cone_limit: Some((0.25, -1.0)), ..Default::default() };
+        let ball = joint_desc(&ball).unwrap();
+        assert_eq!(ball.kind, JointKind::Spherical { axis: DVec3::Y });
+        assert_eq!(ball.cone_limits, [Some(0.25), None]);
+
+        let rope = UsdPhysicsJoint { kind: UsdJointKind::Distance, distance_limit: Some((-1.0, 2.0)), ..Default::default() };
+        assert_eq!(joint_desc(&rope).unwrap().distance_limits, [None, Some(2.0)]);
+
+        let pin = UsdPhysicsJoint { kind: UsdJointKind::Fixed, break_force: Some(100.0), break_torque: Some(f32::MAX), ..Default::default() };
+        assert_eq!(joint_desc(&pin).unwrap().break_limits, [Some(100.0), None]);
     }
 
     /// A 1 m arm on the D6 hinge falls under gravity to its −0.5 rad stop.

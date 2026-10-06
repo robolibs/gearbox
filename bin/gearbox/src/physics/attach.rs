@@ -246,14 +246,17 @@ pub fn attach_physics_to_entity(
             }
             _ => None,
         };
-        let cone_limit = match (joint.cone_angle0, joint.cone_angle1) {
-            (Some(a), Some(b)) => Some((a.to_radians(), b.to_radians())),
-            _ => None,
-        };
-        let distance_limit = match (joint.min_distance, joint.max_distance) {
-            (Some(lo), Some(hi)) => Some((lo * meta.meters_per_unit, hi * meta.meters_per_unit)),
-            _ => None,
-        };
+        // A side left unauthored keeps USD's -1: no limit there.
+        let open = |side: Option<f32>, scale: f32| side.map_or(-1.0, |v| if v < 0.0 { v } else { v * scale });
+        let cone_limit = (joint.cone_angle0.is_some() || joint.cone_angle1.is_some()).then(|| {
+            let radians = std::f32::consts::PI / 180.0;
+            (open(joint.cone_angle0, radians), open(joint.cone_angle1, radians))
+        });
+        let distance_limit = (joint.min_distance.is_some() || joint.max_distance.is_some()).then(|| {
+            (open(joint.min_distance, meta.meters_per_unit), open(joint.max_distance, meta.meters_per_unit))
+        });
+        // Force is mass × distance / time², torque one distance more.
+        let force_unit = meta.kilograms_per_unit * meta.meters_per_unit;
         let limits = world
             .get::<up::UsdLimits>(entity)
             .map(|l| l.0.iter().map(|l| convert_limit(l, meta)).collect())
@@ -277,8 +280,8 @@ pub fn attach_physics_to_entity(
             softness: None,
             friction: None,
             rolling: None,
-            break_force: joint.break_force,
-            break_torque: joint.break_torque,
+            break_force: joint.break_force.map(|f| f * force_unit),
+            break_torque: joint.break_torque.map(|t| t * force_unit * meta.meters_per_unit),
             built_in_limit,
             cone_limit,
             distance_limit,
