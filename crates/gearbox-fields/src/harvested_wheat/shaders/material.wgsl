@@ -581,8 +581,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // The taller of the two takes the pixel rather than the two being faded
     // together: the earth rises through the stubble's own hollows instead of
     // being washed over it, which is the difference between worn and painted.
-    let met = height_blend(color.rgb, saturate(dot(color.rgb, vec3<f32>(0.3, 0.59, 0.11))),
-        1.0 - bared, earth, grit, bared);
+    // The stubble stands level, not as tall as its drill rows are bright: cut
+    // on the rows, a way crossing them at a slant ended a row at a time.
+    let met = height_blend(color.rgb, 0.5, 1.0 - bared, earth, grit, bared);
     color = vec4<f32>(washed(in.world_position.xz,
         met.rgb * mix(1.0, 0.74, verge_damp(bared)) * mix(1.0, 0.40, print.x) * (1.0 + print.w * 0.85)), 1.0);
 #ifdef VERTEX_COLORS
