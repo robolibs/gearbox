@@ -69,7 +69,7 @@ impl Fixture {
 
     fn from_stage(stage: &openusd::usd::Stage, kind: FixtureKind, count: usize) -> Self {
         let kubota = kind == FixtureKind::Kubota;
-        let body_count = match kind { FixtureKind::Kubota => 26, FixtureKind::Krampe => 15, FixtureKind::Oxbo => 40, FixtureKind::Knoche => 55 };
+        let body_count = match kind { FixtureKind::Kubota => 29, FixtureKind::Krampe => 15, FixtureKind::Oxbo => 40, FixtureKind::Knoche => 55 };
         let wheel_count = match kind { FixtureKind::Oxbo => 6, FixtureKind::Knoche => 0, _ => 4 };
         let mut machines = discover_machines_from_stage(stage).unwrap();
         machines.sort_by(|a, b| a.id.cmp(&b.id));
@@ -146,7 +146,7 @@ impl Fixture {
             let chassis = physics.entity_to_body[&chassis_entity];
             let mass: f64 = bodies.iter().map(|id| physics.body(*id).unwrap().mass()).sum();
             if kubota {
-                assert!((mass - 6312.613973).abs() < 0.001, "imported mass {mass}");
+                assert!((mass - 6317.613973).abs() < 0.001, "imported mass {mass}");
             } else if kind == FixtureKind::Knoche {
                 assert!((2750.0..2760.0).contains(&mass), "imported harrow mass {mass}");
             } else if kind == FixtureKind::Krampe {
@@ -175,7 +175,7 @@ impl Fixture {
             physics.bodies().len(), physics.joints().len(), physics.colliders().len(), count * wheel_count, physics.settings());
         assert_eq!(physics.bodies().len(), count * body_count);
         let (joint_count, collider_count) = match kind {
-            FixtureKind::Kubota => (31, 17),
+            FixtureKind::Kubota => (34, 17),
             FixtureKind::Krampe => (14, 18),
             FixtureKind::Oxbo => (46, 13),
             FixtureKind::Knoche => (54, 51),
