@@ -242,6 +242,8 @@ pub(super) fn record_soil_work(
         // Each part in the soil works from where it was last frame to where
         // it is now, and as far again as its disc cuts.
         let mut in_soil = HashMap::new();
+        let first = contacts.contacts.len();
+        let mut edges = Vec2::new(f32::MAX, f32::MIN);
         for (index, (_, collider)) in track.parts.iter().enumerate() {
             let place = places[index];
             let Some(bottom) = physics.collider(*collider).map(|collider| collider.aabb().mins.y as f32) else {
@@ -260,15 +262,21 @@ pub(super) fn record_soil_work(
             let (low, high) = bands[index];
             let side = (high - low) * 0.5;
             let centre = place - heading * back * 0.5 + axle * side;
+            edges = Vec2::new(edges.x.min(across[index] - low), edges.y.max(across[index] + high));
             contacts.contacts.push(ToolContact {
                 kind,
                 position: Vec3::new(centre.x, ground, centre.y),
                 direction: heading,
                 across: across[index] + side,
                 width: low + high,
+                edges: Vec2::ZERO,
                 length: back + CUT_M * 2.0,
                 depth: DISC_DEPTH_M,
             });
+        }
+        // The strip's edges are those of the outermost parts in the soil.
+        for contact in &mut contacts.contacts[first..] {
+            contact.edges = edges;
         }
         track.in_soil = in_soil;
     }

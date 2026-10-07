@@ -324,8 +324,9 @@ fn track_image(width: u32, height: u32, tread: bool) -> Image {
     image
 }
 
-// A work map: the tool, its heading and depth, then where across it a texel
-// lay. On the GPU alone and handed over zeroed, which reads as unworked.
+// A work map: the tool, its heading and depth, where across it a texel lay,
+// then how far inside the strip's edge. On the GPU alone and handed over
+// zeroed, which reads as unworked.
 fn work_image(width: u32, height: u32) -> Image {
     let mut image = Image::new_uninit(
         Extent3d {
@@ -334,7 +335,7 @@ fn work_image(width: u32, height: u32) -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        TextureFormat::Rg16Uint,
+        TextureFormat::Rgba16Uint,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;

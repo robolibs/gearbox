@@ -2,8 +2,9 @@
 //!
 //! A tool working a field stamps a work map, one per field that can be
 //! worked, in the same texels as the field's wheel map. A worked texel keeps
-//! which tool cut it, the way it was going and where across the tool's width
-//! it lay, and keeps it for good: unlike a wheel mark, worked soil does not
+//! which tool cut it, the way it was going, where across the tool's width
+//! it lay and how far inside the strip's edge, and keeps it for good: unlike
+//! a wheel mark, worked soil does not
 //! spring back. The cover reads the map to bury what stood on the ground, and
 //! a relief layer streamed round the camera raises the worked soil itself —
 //! loosened, ridged by the discs and broken into clods — as real geometry,
@@ -55,6 +56,9 @@ pub struct ToolContact {
     pub across: f32,
     /// Working width across the way it goes.
     pub width: f32,
+    /// The whole tool's outer edges, measured as `across` is, along the
+    /// direction turned a quarter clockwise.
+    pub edges: Vec2,
     /// How much of the way it goes the strip covers this frame.
     pub length: f32,
     /// How deep the tool works, in metres.
@@ -111,6 +115,16 @@ pub const WORK_ACROSS_STEP_M: f32 = 0.005;
 const WORK_ACROSS_BIAS: f32 = 32768.0;
 /// Working depth is kept in sixteen steps up to this.
 pub const WORK_DEPTH_MAX_M: f32 = 0.30;
+/// How far inside the strip's edge a texel lies, in these steps and biased
+/// like the across offset; nought is a texel nothing stamped.
+pub const WORK_EDGE_STEP_M: f32 = 0.001;
+/// Texels past a strip's sides that still take its edge distance.
+pub const WORK_FRINGE_TEXELS: f32 = 2.0;
+
+/// Encodes how far inside the strip's edge a texel lies, negative outside.
+pub fn work_edge(inside_m: f32) -> u16 {
+    (inside_m / WORK_EDGE_STEP_M + WORK_ACROSS_BIAS).round().clamp(1.0, 65535.0) as u16
+}
 
 /// Encodes a worked texel: the tool (4 bits), the way it went (8 bits) and
 /// its working depth (4 bits), then where across the tool the texel lay.
@@ -120,6 +134,63 @@ pub fn work_texel(kind: ToolKind, direction: Vec2, across_m: f32, depth_m: f32) 
     let depth = ((depth_m / WORK_DEPTH_MAX_M).clamp(0.0, 1.0) * 15.0).round() as u16;
     let across = (across_m / WORK_ACROSS_STEP_M + WORK_ACROSS_BIAS).round().clamp(0.0, 65535.0) as u16;
     [kind.code() << 12 | angle << 4 | depth, across]
+}
+
+/// Where a work map lies: its first texel's world XZ, its resolution and size.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WorkMap {
+    pub origin: Vec2,
+    pub texels_per_metre: f32,
+    pub size: IVec2,
+}
+
+impl WorkMap {
+    /// The texels a patch and its fringe can reach, if any fall on the map.
+    pub fn reach(&self, contact: &ToolContact) -> Option<(IVec2, IVec2)> {
+        let tpm = self.texels_per_metre;
+        let centre = (Vec2::new(contact.position.x, contact.position.z) - self.origin) * tpm;
+        let half = Vec2::new(contact.width * 0.5 * tpm, (contact.length * 0.5 * tpm).max(0.5));
+        let reach = (half + Vec2::X * WORK_FRINGE_TEXELS).length();
+        let low = (centre - Vec2::splat(reach)).ceil().as_ivec2().max(IVec2::ZERO);
+        let high = (centre + Vec2::splat(reach)).floor().as_ivec2().min(self.size - IVec2::ONE);
+        low.cmple(high).all().then_some((low, high))
+    }
+
+    /// Stamps a patch into the map's texels; the texels it wrote, low and high.
+    /// Inside takes the newest pass. The edge distance keeps the furthest in,
+    /// so passes union and a fringe never cuts into worked ground.
+    pub fn stamp(&self, texels: &mut [[u16; 4]], contact: &ToolContact) -> Option<(IVec2, IVec2)> {
+        let (low, high) = self.reach(contact)?;
+        let tpm = self.texels_per_metre;
+        let centre = (Vec2::new(contact.position.x, contact.position.z) - self.origin) * tpm;
+        let along = contact.direction.normalize_or(Vec2::X);
+        let axle = along.perp();
+        let half = Vec2::new(contact.width * 0.5 * tpm, (contact.length * 0.5 * tpm).max(0.5));
+        let mut dirty: Option<(IVec2, IVec2)> = None;
+        for z in low.y..=high.y {
+            for x in low.x..=high.x {
+                let d = Vec2::new(x as f32, z as f32) - centre;
+                let past = d.dot(axle).abs() - half.x;
+                if past > WORK_FRINGE_TEXELS || d.dot(along).abs() > half.y {
+                    continue;
+                }
+                let across = contact.across + d.dot(axle) / tpm;
+                // The edges are measured the way the contact measures its across.
+                let offset = contact.across - d.dot(axle) / tpm;
+                let inside = (offset - contact.edges.x).min(contact.edges.y - offset);
+                let texel = &mut texels[(z * self.size.x + x) as usize];
+                if past <= 0.0 {
+                    let [state, across] = work_texel(contact.kind, along, across, contact.depth);
+                    *texel = [state, across, texel[2].max(work_edge(inside)), 0];
+                } else {
+                    texel[2] = texel[2].max(work_edge(inside.min(-past / tpm)));
+                }
+                let at = IVec2::new(x, z);
+                dirty = Some(dirty.map_or((at, at), |(l, h)| (l.min(at), h.max(at))));
+            }
+        }
+        dirty
+    }
 }
 
 /// Draw bands of the two relief meshes, metres from the camera.
@@ -220,6 +291,84 @@ mod tests {
         assert_ne!(state, 0);
     }
 
+    // The worked amount at a point, read as `work_at` reads it.
+    fn amount_at(map: &WorkMap, texels: &[[u16; 4]], place: Vec2) -> f32 {
+        let t = (place - map.origin) * map.texels_per_metre;
+        let (i, f) = (t.floor().as_ivec2(), t - t.floor());
+        let at = |dx: i32, dy: i32| texels[((i.y + dy) * map.size.x + i.x + dx) as usize];
+        let [a, b, c, d] = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
+        let mix = |x: f32, y: f32, s: f32| x + (y - x) * s;
+        if [a, b, c, d].iter().all(|texel| texel[2] != 0) {
+            let edge = |texel: [u16; 4]| (texel[2] as f32 - WORK_ACROSS_BIAS) * WORK_EDGE_STEP_M;
+            let inside = mix(mix(edge(a), edge(b), f.x), mix(edge(c), edge(d), f.x), f.y);
+            return (inside * map.texels_per_metre + 0.5).clamp(0.0, 1.0);
+        }
+        let worked = |texel: [u16; 4]| if texel[0] >> 12 != 0 { 1.0 } else { 0.0 };
+        mix(mix(worked(a), worked(b), f.x), mix(worked(c), worked(d), f.x), f.y)
+    }
+
+    // A strip 3 m wide driven 4° off the grid in 0.15 m strides, by `parts`
+    // side by side; how far its cut edges stray from the true ones, and the
+    // least worked amount down its middle.
+    fn driven_strip(parts: usize) -> (f32, f32) {
+        let map = WorkMap { origin: Vec2::ZERO, texels_per_metre: 8.0, size: IVec2::new(240, 240) };
+        let mut texels = vec![[0u16; 4]; (map.size.x * map.size.y) as usize];
+        let heading = Vec2::from_angle(4f32.to_radians()).rotate(Vec2::Y);
+        // The producer measures across along the heading turned clockwise.
+        let across_dir = -heading.perp();
+        let (start, width) = (Vec2::new(15.0, 2.0), 3.0);
+        let part = width / parts as f32;
+        for step in 0..160 {
+            let middle = start + heading * (step as f32 * 0.15);
+            for index in 0..parts {
+                let across = -width * 0.5 + part * (index as f32 + 0.5);
+                let at = middle + across_dir * across;
+                map.stamp(&mut texels, &ToolContact {
+                    kind: ToolKind::DiscHarrow,
+                    position: Vec3::new(at.x, 0.0, at.y),
+                    direction: heading,
+                    across,
+                    width: part,
+                    edges: Vec2::new(-width * 0.5, width * 0.5),
+                    length: 0.25,
+                    depth: 0.1,
+                });
+            }
+        }
+        let (mut stray, mut middle_least) = (0.0f32, 1.0f32);
+        for k in 0..200 {
+            let on = start + heading * (3.0 + k as f32 * 0.08);
+            middle_least = middle_least.min(amount_at(&map, &texels, on));
+            for side in [-1.0f32, 1.0] {
+                let (mut inner, mut outer) = (0.0f32, 0.5f32);
+                for _ in 0..30 {
+                    let mid = (inner + outer) * 0.5;
+                    let place = on + across_dir * side * (width * 0.5 - 0.25 + mid);
+                    if amount_at(&map, &texels, place) >= 0.5 { inner = mid } else { outer = mid }
+                }
+                stray = stray.max((inner - 0.25).abs());
+            }
+        }
+        (stray, middle_least)
+    }
+
+    #[test]
+    fn a_strip_off_the_grid_keeps_straight_edges_and_no_seam_between_its_parts() {
+        for parts in [1, 2, 12] {
+            let (stray, middle) = driven_strip(parts);
+            assert!(stray < 0.01, "{parts} parts: the edge strays {stray} m");
+            assert!(middle > 0.99, "{parts} parts: the middle is only {middle} worked");
+        }
+    }
+
+    #[test]
+    fn an_edge_distance_keeps_its_order_and_is_never_nought() {
+        assert!(work_edge(-0.2) < work_edge(0.0) && work_edge(0.0) < work_edge(0.05));
+        assert_ne!(work_edge(-1000.0), 0);
+        let back = (work_edge(-0.123) as f32 - WORK_ACROSS_BIAS) * WORK_EDGE_STEP_M;
+        assert!((back + 0.123).abs() < 1.0e-6, "{back}");
+    }
+
     #[test]
     fn worked_cells_cover_the_whole_strip() {
         let mut cells = WorkedCells::default();
@@ -231,6 +380,7 @@ mod tests {
                 direction: Vec2::X,
                 across: 0.0,
                 width: 6.0,
+                edges: Vec2::new(-3.0, 3.0),
                 length: 1.0,
                 depth: 0.1,
             }],

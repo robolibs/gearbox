@@ -647,7 +647,7 @@ fn stamp_tool_contacts(
     contacts: Option<Res<super::tillage::ToolContacts>>,
     images: Res<RenderAssets<GpuImage>>,
     render_queue: Res<RenderQueue>,
-    mut mirrors: Local<HashMap<AssetId<Image>, Vec<[u16; 2]>>>,
+    mut mirrors: Local<HashMap<AssetId<Image>, Vec<[u16; 4]>>>,
 ) {
     mirrors.retain(|id, _| fields.0.values().any(|field| field.work.id() == *id));
     let Some(contacts) = contacts else {
@@ -661,51 +661,30 @@ fn stamp_tool_contacts(
             continue;
         };
         let wheels = field.params.wheels;
-        let tpm = wheels.texels_per_metre;
-        let (width, height) = (wheels.width as i32, wheels.height as i32);
-        // Each patch in texels: its middle, its axes and half sizes, and the
-        // texels it can reach, for the patches that fall on this field.
-        let patches: Vec<_> = contacts
-            .contacts
-            .iter()
-            .filter_map(|contact| {
-                let centre = (Vec2::new(contact.position.x, contact.position.z) - wheels.origin) * tpm;
-                let along = contact.direction.normalize_or(Vec2::X);
-                let half = Vec2::new(contact.width * 0.5 * tpm, (contact.length * 0.5 * tpm).max(0.5));
-                let reach = half.length();
-                let low = (centre - Vec2::splat(reach)).ceil().as_ivec2().max(IVec2::ZERO);
-                let high = (centre + Vec2::splat(reach)).floor().as_ivec2().min(IVec2::new(width - 1, height - 1));
-                (low.cmple(high).all()).then_some((contact, centre, along, half, low, high))
-            })
-            .collect();
-        if patches.is_empty() {
+        let map = super::tillage::WorkMap {
+            origin: wheels.origin,
+            texels_per_metre: wheels.texels_per_metre,
+            size: IVec2::new(wheels.width as i32, wheels.height as i32),
+        };
+        let width = map.size.x;
+        if !contacts.contacts.iter().any(|contact| map.reach(contact).is_some()) {
             continue;
         }
         let texels = mirrors
             .entry(field.work.id())
-            .or_insert_with(|| vec![[0; 2]; (width * height) as usize]);
+            .or_insert_with(|| vec![[0; 4]; (map.size.x * map.size.y) as usize]);
         let (mut dirty_low, mut dirty_high) = (IVec2::MAX, IVec2::MIN);
-        for (contact, centre, along, half, low, high) in patches {
-            let axle = along.perp();
-            for z in low.y..=high.y {
-                for x in low.x..=high.x {
-                    let d = Vec2::new(x as f32, z as f32) - centre;
-                    if d.dot(axle).abs() > half.x || d.dot(along).abs() > half.y {
-                        continue;
-                    }
-                    let across = contact.across + d.dot(axle) / tpm;
-                    texels[(z * width + x) as usize] =
-                        super::tillage::work_texel(contact.kind, along, across, contact.depth);
-                    dirty_low = dirty_low.min(IVec2::new(x, z));
-                    dirty_high = dirty_high.max(IVec2::new(x, z));
-                }
+        for contact in &contacts.contacts {
+            if let Some((low, high)) = map.stamp(texels, contact) {
+                dirty_low = dirty_low.min(low);
+                dirty_high = dirty_high.max(high);
             }
         }
         if dirty_low.cmpgt(dirty_high).any() {
             continue;
         }
         let size = dirty_high - dirty_low + IVec2::ONE;
-        let data: Vec<[u16; 2]> = (dirty_low.y..=dirty_high.y)
+        let data: Vec<[u16; 4]> = (dirty_low.y..=dirty_high.y)
             .flat_map(|z| {
                 let row = (z * width) as usize;
                 texels[row + dirty_low.x as usize..=row + dirty_high.x as usize].iter().copied()
@@ -718,7 +697,7 @@ fn stamp_tool_contacts(
             bytemuck::cast_slice(&data),
             TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(size.x as u32 * 4),
+                bytes_per_row: Some(size.x as u32 * 8),
                 rows_per_image: Some(size.y as u32),
             },
             Extent3d { width: size.x as u32, height: size.y as u32, depth_or_array_layers: 1 },

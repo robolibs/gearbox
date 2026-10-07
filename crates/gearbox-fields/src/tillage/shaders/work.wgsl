@@ -7,8 +7,8 @@
 
 // What the work map says of one point.
 struct Work {
-    // How much of this point is worked, nought to one, blended across texels:
-    // the edge of a pass runs smooth rather than in texel steps.
+    // How much of this point is worked, nought to one: a half at the strip's
+    // edge, half a texel either side of it nought and one.
     amount: f32,
     // The tool that cut it: nought for none, one for a disc harrow.
     kind: u32,
@@ -23,10 +23,16 @@ struct Work {
 const WORK_ACROSS_STEP_M: f32 = 0.005;
 const WORK_ACROSS_BIAS: f32 = 32768.0;
 const WORK_DEPTH_MAX_M: f32 = 0.30;
+const WORK_EDGE_STEP_M: f32 = 0.001;
 const WORK_TAU: f32 = 6.28318530718;
 
 fn worked_texel(state: u32) -> f32 {
     return select(0.0, 1.0, (state >> 12u) != 0u);
+}
+
+// How far inside the strip's edge a texel lies, in metres.
+fn work_edge(code: u32) -> f32 {
+    return (f32(code) - WORK_ACROSS_BIAS) * WORK_EDGE_STEP_M;
 }
 
 // The work map at a world point. Which tool, which way and where across come
@@ -50,24 +56,32 @@ fn work_at(map: texture_2d<u32>, params: WheelMapParams, world_xz: vec2<f32>) ->
     }
     let i = clamp(vec2<i32>(floor(t)), vec2<i32>(0), max(last - vec2<i32>(1), vec2<i32>(0)));
     let f = clamp(t - vec2<f32>(i), vec2<f32>(0.0), vec2<f32>(1.0));
-    let a = textureLoad(map, i, 0).xy;
-    let b = textureLoad(map, i + vec2<i32>(1, 0), 0).xy;
-    let c = textureLoad(map, i + vec2<i32>(0, 1), 0).xy;
-    let d = textureLoad(map, i + vec2<i32>(1, 1), 0).xy;
+    let a = textureLoad(map, i, 0).xyz;
+    let b = textureLoad(map, i + vec2<i32>(1, 0), 0).xyz;
+    let c = textureLoad(map, i + vec2<i32>(0, 1), 0).xyz;
+    let d = textureLoad(map, i + vec2<i32>(1, 1), 0).xyz;
     let wa = (1.0 - f.x) * (1.0 - f.y) * worked_texel(a.x);
     let wb = f.x * (1.0 - f.y) * worked_texel(b.x);
     let wc = (1.0 - f.x) * f.y * worked_texel(c.x);
     let wd = f.x * f.y * worked_texel(d.x);
     out.amount = wa + wb + wc + wd;
-    if (out.amount <= 0.0) {
+    // Where all four texels know the strip's edge, it is cut where their
+    // blended distance to it is nought: straight at any angle to the grid.
+    if (a.z != 0u && b.z != 0u && c.z != 0u && d.z != 0u) {
+        let inside = mix(mix(work_edge(a.z), work_edge(b.z), f.x), mix(work_edge(c.z), work_edge(d.z), f.x), f.y);
+        out.amount = clamp(inside * params.texels_per_metre + 0.5, 0.0, 1.0);
+    }
+    let any_worked = worked_texel(a.x) + worked_texel(b.x) + worked_texel(c.x) + worked_texel(d.x);
+    if (out.amount <= 0.0 || any_worked <= 0.0) {
+        out.amount = 0.0;
         return out;
     }
     var best = a;
     var best_at = i;
-    var best_weight = wa;
-    if (wb > best_weight) { best = b; best_at = i + vec2<i32>(1, 0); best_weight = wb; }
-    if (wc > best_weight) { best = c; best_at = i + vec2<i32>(0, 1); best_weight = wc; }
-    if (wd > best_weight) { best = d; best_at = i + vec2<i32>(1, 1); best_weight = wd; }
+    var best_weight = wa + worked_texel(a.x) * 1.0e-4;
+    if (wb + worked_texel(b.x) * 1.0e-4 > best_weight) { best = b; best_at = i + vec2<i32>(1, 0); best_weight = wb + 1.0e-4; }
+    if (wc + worked_texel(c.x) * 1.0e-4 > best_weight) { best = c; best_at = i + vec2<i32>(0, 1); best_weight = wc + 1.0e-4; }
+    if (wd + worked_texel(d.x) * 1.0e-4 > best_weight) { best = d; best_at = i + vec2<i32>(1, 1); best_weight = wd + 1.0e-4; }
     out.kind = best.x >> 12u;
     let angle = f32((best.x >> 4u) & 255u) / 255.0 * WORK_TAU - WORK_TAU * 0.5;
     out.along = vec2<f32>(cos(angle), sin(angle));
