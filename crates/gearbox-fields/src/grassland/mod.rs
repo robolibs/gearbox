@@ -131,6 +131,7 @@ impl Plugin for GrasslandPlugin {
                         follow_grass: 0.0,
                         cutout: false,
                         way_only: false,
+                        worked_only: false,
                         blade: Some(BladeLayer { kind: &GRASS_BLADES, twins: 2, segments: 4 }),
                         sieve: None,
                         albedo: None,
@@ -146,6 +147,7 @@ impl Plugin for GrasslandPlugin {
                         follow_grass: 0.0,
                         cutout: false,
                         way_only: false,
+                        worked_only: false,
                         blade: Some(BladeLayer { kind: &GRASS_BLADES, twins: 2, segments: 2 }),
                         sieve: None,
                         albedo: None,
@@ -161,6 +163,7 @@ impl Plugin for GrasslandPlugin {
                         follow_grass: 0.0,
                         cutout: false,
                         way_only: false,
+                        worked_only: false,
                         blade: Some(BladeLayer { kind: &GRASS_BLADES, twins: 1, segments: 1 }),
                         sieve: None,
                         albedo: None,
@@ -176,6 +179,7 @@ impl Plugin for GrasslandPlugin {
                         follow_grass: 0.0,
                         cutout: false,
                         way_only: false,
+                        worked_only: false,
                         blade: None,
                         sieve: None,
                         albedo: None,
@@ -191,6 +195,7 @@ impl Plugin for GrasslandPlugin {
                         follow_grass: 0.0,
                         cutout: false,
                         way_only: false,
+                        worked_only: false,
                         blade: None,
                         sieve: None,
                         albedo: None,
@@ -206,6 +211,7 @@ impl Plugin for GrasslandPlugin {
                         follow_grass: 0.0,
                         cutout: true,
                         way_only: false,
+                        worked_only: false,
                         blade: None,
                         sieve: None,
                         albedo: None,
@@ -229,6 +235,7 @@ impl Plugin for GrasslandPlugin {
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 1.3,
+                workable: false,
                 surface_tint: Vec4::new(0.055, 0.082, 0.030, 1.0),
             });
     }
@@ -240,6 +247,7 @@ fn create_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let grass_albedo = assets

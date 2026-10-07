@@ -41,6 +41,7 @@ macro_rules! pack {
                 follow_grass: 0.0,
                 cutout: true,
                 way_only: false,
+                worked_only: false,
                 blade: None,
                 sieve: None,
                 albedo: Some(concat!(

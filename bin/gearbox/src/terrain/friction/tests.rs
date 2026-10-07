@@ -55,7 +55,7 @@ fn fixture() -> (App, [BodyId; 2], ColliderId) {
     profiles.register(FieldProfile {
         name: "test",
         layers: vec![],
-        ground: |_, _, _, _, _| panic!("headless material factory"),
+        ground: |_, _, _, _, _, _| panic!("headless material factory"),
         wheel_response: WheelResponse {
             recovery_seconds: 1.0,
             bend: 0.0,
@@ -66,6 +66,7 @@ fn fixture() -> (App, [BodyId; 2], ColliderId) {
         tread: Vec4::ZERO,
         surface_tint: Vec4::ONE,
         soft_border: 0.0,
+        workable: false,
     });
     app.insert_resource(PhysicsWorld::with_backend(Box::new(backend)))
         .insert_resource(ProceduralTerrain {

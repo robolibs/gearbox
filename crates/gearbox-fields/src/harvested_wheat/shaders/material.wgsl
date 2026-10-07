@@ -12,12 +12,15 @@
 #import "embedded://gearbox_fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{surface_footprint, filtered_clumps, fiber_stamp}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal, surface_relief, surface_lighting}
+#import "embedded://gearbox_fields/tillage/shaders/work.wgsl"::{work_at, soil_relief, soil_colour, ridge_slope}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(111) var surface_heightmap: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(112) var<uniform> geometry: SurfaceGeometryParams;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var tracks: texture_2d<u32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var<uniform> wheels: WheelMapParams;
+// Where a tool has worked the stubble into soil, on the wheel map's grid.
+@group(#{MATERIAL_BIND_GROUP}) @binding(115) var work_map: texture_2d<u32>;
 
 struct WornStubble {
     extent: vec4<f32>,
@@ -585,6 +588,23 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 #ifdef VERTEX_COLORS
     color = color * in.color;
 #endif
+    // Where a tool has worked the stubble it is soil, cut and ridged. Near to
+    // the relief layer stands over this as geometry; further off this is all
+    // that is seen of it, in the same colour and with the ridges in its light.
+    let soil_uv = in.world_position.xz / 1.5;
+    let soil_base = mix(
+        textureSample(terrain_albedo, terrain_albedo_sampler, soil_uv).rgb,
+        textureSample(terrain_albedo, terrain_albedo_sampler, vec2<f32>(-soil_uv.y, soil_uv.x) * 0.61 + 0.37).rgb,
+        0.4);
+    let work = work_at(work_map, wheels, in.world_position.xz);
+    let worked = smoothstep(0.0, 0.6, work.amount);
+    if (work.amount > 0.0) {
+        let xz = in.world_position.xz;
+        let relief = soil_relief(work, xz);
+        color = vec4<f32>(mix(color.rgb, soil_colour(soil_base, work, xz, relief), worked), 1.0);
+        let slope = ridge_slope(work);
+        pbr_input.N = normalize(mix(pbr_input.N, normalize(normal + vec3<f32>(-slope.x, 0.0, -slope.y)), worked));
+    }
     pbr_input.material.base_color = alpha_discard(pbr_input.material, color);
     pbr_input.material.perceptual_roughness = 0.98;
     pbr_input.material.reflectance = vec3<f32>(0.04);
@@ -592,7 +612,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.material.metallic = 0.0;
 
     var out: FragmentOutput;
-    out.color = surface_lighting(pbr_input, 0.45 * (1.0 - pressed));
+    // Worked soil has no straw canopy left to catch the light.
+    out.color = surface_lighting(pbr_input, 0.45 * (1.0 - pressed) * (1.0 - worked));
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     if (TREAD_DEBUG) {
         out.color = vec4<f32>(vec3<f32>(shown), 1.0);

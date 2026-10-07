@@ -36,6 +36,7 @@ mod benchmark;
 mod steering;
 pub(crate) mod tracked;
 pub(crate) mod wheel_forces;
+mod soil_work;
 
 /// All USD-authored machine/controller specs discovered from loaded assets.
 #[derive(Resource, Debug, Default, Clone)]
@@ -286,6 +287,7 @@ impl Plugin for ControllerDiscoveryPlugin {
                     apply_builtin_diff_drive_cmd_vel,
                     tracked::apply,
                     record_wheel_tracks,
+                    soil_work::record_soil_work,
                     dump_joints_periodically,
                 )
                     .chain()

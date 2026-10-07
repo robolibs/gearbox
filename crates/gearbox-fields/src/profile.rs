@@ -68,6 +68,9 @@ pub struct VegetationLayer {
     pub cutout: bool,
     /// Grows only where a way wears the ground: chunks no way reaches issue none.
     pub way_only: bool,
+    /// Drawn only where a tool has worked the ground: chunks no worked cell
+    /// touches issue none.
+    pub worked_only: bool,
     /// Sown on the GPU into blade records and drawn from them, instead of
     /// drawn per chunk from `template`.
     pub blade: Option<BladeLayer>,
@@ -124,8 +127,17 @@ pub struct SurfaceGeometry {
 /// Builds a field's ground. The bounds are the field's own rectangle: a
 /// surface that wears unevenly — a road with ruts down it — needs to know
 /// where the field runs before it can say which part of it is worn.
-pub type GroundFactory =
-    fn(&mut World, Handle<Image>, WheelMapParams, SurfaceGeometry, Placed) -> Arc<dyn GroundSurface>;
+///
+/// The last image is the field's work map, as `tillage` stamps it; a field no
+/// tool can work is handed an empty one.
+pub type GroundFactory = fn(
+    &mut World,
+    Handle<Image>,
+    WheelMapParams,
+    SurfaceGeometry,
+    Placed,
+    Handle<Image>,
+) -> Arc<dyn GroundSurface>;
 
 /// Where a field sits and what it is up against: everything a ground needs to
 /// know that its profile cannot say, because it differs field by field.
@@ -183,6 +195,9 @@ pub struct FieldProfile {
     /// running into a track is a soft one, and the two interleave over this
     /// distance instead of meeting along a ruled line.
     pub soft_border: f32,
+    /// Whether a tool can work this ground: it gets a work map, and its cover
+    /// turns to worked soil where one has. A meadow or a yard cannot be.
+    pub workable: bool,
 }
 
 #[derive(Resource, Default)]

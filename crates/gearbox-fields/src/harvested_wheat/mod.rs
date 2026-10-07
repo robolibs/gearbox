@@ -45,6 +45,9 @@ struct AntiRepeatTerrainExtension {
     worn: WornStubble,
     #[uniform(114)]
     trail: crate::bare::DrivenTrail,
+    /// Where a tool has worked this stubble into soil, as `tillage` stamps it.
+    #[texture(115, sample_type = "u_int")]
+    work: Handle<Image>,
 }
 
 /// A way worn across the stubble. The same six numbers the meadow carries: what
@@ -188,6 +191,7 @@ fn apply_anti_repeat_material_to_usd_terrain(
                             // A stubble authored in USD belongs to no field, so
                             // no way crosses it: a zero tread wears nothing.
                             worn: WornStubble::default(),
+                            work: inactive.clone(),
                         },
                     })
                 })
@@ -262,6 +266,7 @@ impl Plugin for HarvestedWheatPlugin {
                     follow_grass: 0.0,
                     cutout: false,
                     way_only: false,
+                    worked_only: false,
                     blade: None,
                     sieve: None,
                     albedo: None,
@@ -276,6 +281,7 @@ impl Plugin for HarvestedWheatPlugin {
                     follow_grass: 0.0,
                     cutout: false,
                     way_only: false,
+                    worked_only: false,
                     blade: None,
                     sieve: None,
                     albedo: None,
@@ -290,6 +296,7 @@ impl Plugin for HarvestedWheatPlugin {
                     follow_grass: 0.0,
                     cutout: false,
                     way_only: false,
+                    worked_only: false,
                     blade: None,
                     sieve: None,
                     albedo: None,
@@ -304,6 +311,7 @@ impl Plugin for HarvestedWheatPlugin {
                     follow_grass: 0.0,
                     cutout: false,
                     way_only: false,
+                    worked_only: false,
                     blade: None,
                     sieve: None,
                     albedo: None,
@@ -318,6 +326,7 @@ impl Plugin for HarvestedWheatPlugin {
                     follow_grass: 0.0,
                     cutout: false,
                     way_only: false,
+                    worked_only: false,
                     blade: None,
                     sieve: None,
                     albedo: None,
@@ -332,6 +341,7 @@ impl Plugin for HarvestedWheatPlugin {
                     follow_grass: 0.0,
                     cutout: true,
                     way_only: false,
+                    worked_only: false,
                     blade: None,
                     sieve: None,
                     albedo: None,
@@ -344,10 +354,14 @@ impl Plugin for HarvestedWheatPlugin {
                 super::clumps::nettle(share * 0.35, 30.0),
                 // Chippings where a track crosses the stubble.
                 super::bare::way_grit(5200.0),
-                super::bare::way_litter(2600.0)],
+                super::bare::way_litter(2600.0)]
+                    .into_iter()
+                    .chain(super::tillage::relief_layers())
+                    .collect(),
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 0.7,
+                workable: true,
                 surface_tint: Vec4::new(0.145, 0.120, 0.062, 1.0),
             });
     }
@@ -359,6 +373,7 @@ fn create_ground(
     wheels: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = AntiRepeatTerrainExtension {
@@ -381,6 +396,7 @@ fn create_ground(
         heightmap: Some(geometry.heightmap),
         geometry: geometry.params,
         worn: WornStubble::of(&placed),
+        work,
     };
     let material = world
         .resource_mut::<Assets<AntiRepeatTerrainMaterial>>()

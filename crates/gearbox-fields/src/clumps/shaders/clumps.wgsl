@@ -11,6 +11,7 @@
 // The patches a bare ground thins its own grass by, so a weed standing in
 // one comes up where that grass does and not in a patch of its own.
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{taken, worn, way_beyond, inside_field}
+#import "embedded://gearbox_fields/tillage/shaders/work.wgsl"::work_at
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -39,6 +40,8 @@ struct VegetationParams {
 @group(3) @binding(3) var trample: texture_2d<u32>;
 @group(3) @binding(4) var albedo: texture_2d<f32>;
 @group(3) @binding(5) var albedo_sampler: sampler;
+// Where a tool has worked the ground: the weeds there are turned in.
+@group(3) @binding(8) var work_map: texture_2d<u32>;
 
 // A packed clump vertex; colour is (variant, patch salt, sparse share, gain).
 struct Vertex {
@@ -180,7 +183,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));
     let distance = length(ground - view.world_position);
     let coverage = (1.0 - smoothstep(max(field.fade_start, end - FADE_M), end, distance))
-        * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base));
+        * select(0.0, 1.0, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base)
+            && work_at(work_map, field.wheels, base).amount < 0.5);
     if (coverage <= 0.0) {
         return culled_vertex();
     }

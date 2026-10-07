@@ -101,6 +101,7 @@ fn way_lying(template: fn() -> Mesh, density: f32) -> VegetationLayer {
         follow_grass: 0.0,
         cutout: false,
         way_only: true,
+        worked_only: false,
         blade: None,
         sieve: Some("embedded://gearbox_fields/bare/shaders/grit_sieve.wgsl"),
         albedo: None,
@@ -211,6 +212,7 @@ fn standing(
             follow_grass: 0.0,
             cutout: false,
             way_only: false,
+            worked_only: false,
             blade: None,
             sieve: None,
             albedo: None,
@@ -229,6 +231,7 @@ fn standing(
             follow_grass: 0.0,
             cutout: false,
             way_only: false,
+            worked_only: false,
             blade: None,
             sieve: None,
             albedo: None,
@@ -246,6 +249,7 @@ fn standing(
             follow_grass: 0.0,
             cutout: true,
             way_only: false,
+            worked_only: false,
             blade: None,
             sieve: None,
             albedo: None,
@@ -454,6 +458,7 @@ impl Plugin for BarePlugin {
             ground: ploughed_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
+            workable: false,
         });
         profiles.register(FieldProfile {
             name: "dirt",
@@ -463,6 +468,7 @@ impl Plugin for BarePlugin {
             ground: dirt_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
+            workable: false,
         });
         for (name, ground, worn) in [
             ("green-lane", green_lane as GroundFactory, 0.3),
@@ -477,6 +483,7 @@ impl Plugin for BarePlugin {
                 ground,
                 tread: crate::runtime::plain_tread(worn),
                 soft_border: 0.8,
+                workable: false,
             });
         }
         profiles.register(FieldProfile {
@@ -487,6 +494,7 @@ impl Plugin for BarePlugin {
             ground: sand_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
+            workable: false,
         });
     }
 }
@@ -498,6 +506,7 @@ fn ploughed_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,
@@ -526,6 +535,7 @@ fn dirt_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,
@@ -549,19 +559,19 @@ fn dirt_ground(
 /// dial: a green lane barely marked, two bare ruts with grass still holding
 /// between them, or a road worn bare from side to side.
 fn green_lane(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
     // The layout may name a wear of its own; this is only the default.
     track(w, t, p, g, placed, placed.wear.unwrap_or(0.3))
 }
 
 fn worn_track(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
     // The layout may name a wear of its own; this is only the default.
     track(w, t, p, g, placed, placed.wear.unwrap_or(0.6))
 }
 
 fn bare_road(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
     // The layout may name a wear of its own; this is only the default.
     track(w, t, p, g, placed, placed.wear.unwrap_or(1.0))
 }
@@ -600,6 +610,7 @@ fn sand_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,

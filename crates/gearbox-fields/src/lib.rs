@@ -20,9 +20,11 @@ mod render;
 mod runtime;
 mod sieve;
 mod textures;
+pub mod tillage;
 pub mod wind_map;
 
 pub use contacts::{WheelContact, WheelContacts};
+pub use tillage::{ToolContact, ToolContacts, ToolKind};
 pub use heights::HeightGrid;
 pub use host::{
     CoverBackdrop, CoverHeights, CoverSurfaceMesh, CoverTerrain, CoverTerrainRoots, CoverWind,
@@ -92,8 +94,11 @@ impl Plugin for FieldsPlugin {
             .init_resource::<contacts::TrailKeeper>()
             .init_resource::<CoverWind>()
             .init_resource::<CoverTerrainRoots>()
+            .init_resource::<tillage::ToolContacts>()
+            .init_resource::<tillage::WorkedCells>()
             .add_plugins(ExtractResourcePlugin::<contacts::WheelContacts>::default())
-            .add_systems(First, contacts::begin_wheel_contacts)
+            .add_plugins(ExtractResourcePlugin::<tillage::ToolContacts>::default())
+            .add_systems(First, (contacts::begin_wheel_contacts, tillage::begin_tool_contacts))
             .add_systems(bevy::prelude::PostUpdate, contacts::keep_wheel_trails)
             .add_systems(Update, (textures::prepare_textures, render::sync_wind))
             .add_plugins((
@@ -102,6 +107,7 @@ impl Plugin for FieldsPlugin {
                 bare::BarePlugin,
                 harvested_wheat::HarvestedWheatPlugin { density: self.stubble_density },
                 concrete::ConcretePlugin { weed_density: self.concrete_weed_density },
+                tillage::TillagePlugin,
                 render::VegetationPlugin,
                 blades::BladePlugin,
                 sieve::SievePlugin,
@@ -114,7 +120,8 @@ impl Plugin for FieldsPlugin {
             )
             .add_systems(
                 PostUpdate,
-                runtime::stream_vegetation
+                (tillage::keep_worked_cells, runtime::stream_vegetation)
+                    .chain()
                     .after(bevy::transform::TransformSystems::Propagate)
                     .after(bevy::camera::visibility::VisibilitySystems::UpdateFrusta)
                     .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),

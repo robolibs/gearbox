@@ -12,6 +12,7 @@
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{canopy_lighting, plant_lighting, foliage_normal}
 #import "embedded://gearbox_fields/harvested_wheat/shaders/patches.wgsl"::{regrowth, row_drift, row_wobble, plant_jog}
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{worn, inside_field}
+#import "embedded://gearbox_fields/tillage/shaders/work.wgsl"::work_at
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -38,9 +39,16 @@ struct VegetationParams {
 @group(3) @binding(1) var heightmap_sampler: sampler;
 @group(3) @binding(2) var<uniform> field: VegetationParams;
 @group(3) @binding(3) var trample: texture_2d<u32>;
+@group(3) @binding(8) var work_map: texture_2d<u32>;
 
 fn sample_trample(world_xz: vec2<f32>) -> vec3<f32> {
     return sample_wheels(trample, field.wheels, world_xz);
+}
+
+// How far a tool has worked the ground under a point. The discs cut the
+// stalks and turn them in with the soil; only some straw is left on top.
+fn tilled(place: vec2<f32>) -> f32 {
+    return work_at(work_map, field.wheels, place).amount;
 }
 
 // A hash of a place, fine enough that neighbouring plants get unrelated rolls.
@@ -143,6 +151,9 @@ fn stubble_detail(vertex: Vertex) -> VertexOutput {
     let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
     let end = blade_fade_end(rank);
     if (length(base - view.world_position.xz) >= end) {
+        return culled_vertex();
+    }
+    if (tilled(base) >= 0.5) {
         return culled_vertex();
     }
     let kept = rand(id, 9u) < (0.10 + 0.90 * regrowth(base)) * (1.0 - way_wear(base));
@@ -291,6 +302,9 @@ fn got_stalk(vertex: Vertex) -> VertexOutput {
     let rank = f32(vertex.instance_index) / max(field.blades_per_chunk, 1.0);
     let blade_end = blade_fade_end(rank);
     let jitter = (rand(id, 23u) - 0.5) * 2.0 * LOD_JITTER_M;
+    if (tilled(base_xz) >= 0.5) {
+        return culled_vertex();
+    }
 
     // The same tests at the ground distance, a lower bound of the true one.
     let across = length(base_xz - view.world_position.xz);
@@ -426,6 +440,12 @@ fn lying_straw(vertex: Vertex) -> VertexOutput {
     if (coverage <= 0.0 || rand(id, 41u) < smoothstep(0.08, 0.45, way_wear(base))) {
         return culled_vertex();
     }
+    // A disc harrow turns most of the straw in and leaves some of it showing
+    // in the loosened soil rather than lying on the stubble.
+    let worked = step(0.5, tilled(base));
+    if (worked > 0.0 && rand(id, 43u) > 0.2) {
+        return culled_vertex();
+    }
     // Kept at least ~1.2 px wide, thinned by the same share, like the stalks.
     let pixel_m = distance * 2.0 / (view.clip_from_view[1][1] * view.viewport.w);
     let width = mix(0.003, 0.005, rand(id, 7u));
@@ -438,7 +458,7 @@ fn lying_straw(vertex: Vertex) -> VertexOutput {
     let along = vec3<f32>(cos(yaw), 0.0, sin(yaw));
     let across = vec3<f32>(-sin(yaw), 0.0, cos(yaw));
     let piece = mix(0.05, 0.18, rand(id, 6u));
-    let lift = rand(id, 8u) * 0.25;
+    let lift = rand(id, 8u) * 0.25 * (1.0 - worked * 0.75);
     let t = vertex.position.y - 0.5;
     let side = vertex.position.x;
     // At a grazing view a lying piece tips its near edge up towards the
@@ -446,27 +466,43 @@ fn lying_straw(vertex: Vertex) -> VertexOutput {
     let to_eye = normalize(view.world_position - ground);
     let grazing = 1.0 - abs(dot(ground_normal, to_eye));
     let half_w = width * widen * 0.5;
-    let offset = along * (t * piece)
+    // Most of what the discs leave showing sticks out of the soil: one end
+    // caught under a clod, the rest of the piece standing up out of it at a
+    // slant, never upright.
+    let sticks = worked * step(rand(id, 44u), 0.75);
+    let slant = mix(0.35, 1.05, rand(id, 45u));
+    let stub = piece * mix(1.0, 1.4, sticks);
+    let lying_up = 0.008 + max(t, 0.0) * piece * lift;
+    let sticking_up = (t + 0.5) * stub * sin(slant) - stub * 0.3 * sin(slant);
+    let offset = along * (t * mix(piece, stub * cos(slant), sticks))
         + across * (side * half_w)
-        + ground_normal * (0.008 + max(t, 0.0) * piece * lift + side * half_w * grazing);
+        + ground_normal * (mix(lying_up, sticking_up, sticks) + side * half_w * grazing);
     let flat = clamp(sample_trample(base).x, 0.0, 1.0);
     // A straw is a tube: normals roll across it, leaning to the sky.
     let rounded = normalize(ground_normal + across * side * 0.9);
     let sky = normalize(mix(ground_normal, rounded, 0.45));
-    // Where a piece rests on the stubble it sits in shade.
-    let contact = mix(0.7, 1.0, smoothstep(0.0, 0.02, max(t, 0.0) * piece * lift));
+    // Where a piece rests on the stubble, or comes up out of the soil, it
+    // sits in shade.
+    let contact = mix(
+        mix(0.7, 1.0, smoothstep(0.0, 0.02, max(t, 0.0) * piece * lift)),
+        mix(0.45, 1.0, smoothstep(-0.2, 0.4, t)),
+        sticks);
     let tone = 0.75 + 0.45 * rand(id, 5u);
     let fresh = mix(vec3<f32>(0.62, 0.46, 0.20), vec3<f32>(0.80, 0.66, 0.36), rand(id, 9u)) * tone * contact;
     // Far off a piece settles onto the stubble's straw tone so pale pieces
     // under a pixel do not sparkle.
     let color = mix(fresh, vec3<f32>(0.55, 0.42, 0.19), smoothstep(6.0, 30.0, distance));
     var out: VertexOutput;
-    out.world_position = vec4<f32>(ground + offset * coverage * kept, 1.0);
+    // On worked ground the straw rests on the loosened soil standing proud.
+    let raised = vec3<f32>(0.0, worked * 0.055, 0.0);
+    out.world_position = vec4<f32>(ground + raised + offset * coverage * kept, 1.0);
     out.clip_position = view.clip_from_world * out.world_position;
     out.world_normal = sky;
     out.ground_normal = ground_normal;
     out.canopy_uv = vec3<f32>(vertex.position.x, vertex.position.y, 0.0);
-    out.color = vec4<f32>(color * (1.0 - field.wheels.darkening * flat), 1.0);
+    // Straw the discs left on top is half buried and soiled.
+    let soiled = mix(color, vec3<f32>(0.15, 0.11, 0.065), worked * 0.6);
+    out.color = vec4<f32>(soiled * (1.0 - field.wheels.darkening * flat), 1.0);
     return out;
 }
 
@@ -512,7 +548,8 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let fade_span = select(BLADE_FADE_M, max(BLADE_FADE_M, blade_end * 0.12), vertex.position.z < -0.5);
     let blade_start = max(field.fade_start, blade_end - fade_span);
     let coverage = 1.0 - smoothstep(blade_start, blade_end, distance);
-    let alive = select(0.0, coverage, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base_xz));
+    let alive = select(0.0, coverage, ground_normal.y >= DIRT_SLOPE_NORMAL_Y && within_field(base_xz)
+        && tilled(base_xz) < 0.5);
     if (alive <= 0.0 || distance <= CANOPY_NEAR_M) {
         return culled_vertex();
     }

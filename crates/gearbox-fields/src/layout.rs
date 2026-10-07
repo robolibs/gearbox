@@ -478,6 +478,7 @@ mod tests {
             _: crate::profile::WheelMapParams,
             _: crate::profile::SurfaceGeometry,
             _: crate::profile::Placed,
+            _: bevy::prelude::Handle<bevy::prelude::Image>,
         ) -> std::sync::Arc<dyn crate::profile::GroundSurface> {
             std::sync::Arc::new(NoGround)
         }
@@ -496,6 +497,7 @@ mod tests {
             tread: Vec4::ZERO,
             surface_tint: Vec4::ONE,
             soft_border: 1.0,
+            workable: false,
         });
         let refuses = |json: &str| {
             serde_json::from_str::<FieldLayout>(json)

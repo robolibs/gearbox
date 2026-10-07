@@ -110,6 +110,10 @@ impl ExtractComponent for NoVegetation {
 pub struct FieldGpu {
     pub heightmap: Handle<Image>,
     pub trample: Handle<Image>,
+    /// Where tools have worked the ground (RG16Uint), on the wheel map's grid.
+    pub work: Handle<Image>,
+    /// Whether a tool can work this field; others share an empty work map.
+    pub workable: bool,
     pub params: VegetationParams,
     pub footprint_length: f32,
     /// The wheel map carries tread coordinates in two more channels.
@@ -201,7 +205,7 @@ impl Plugin for VegetationPlugin {
                 (
                     queue_vegetation.in_set(RenderSystems::QueueMeshes),
                     prepare_vegetation_uniforms.in_set(RenderSystems::PrepareResources),
-                    (carry_wheel_tracks, stamp_wheel_contacts)
+                    (carry_wheel_tracks, stamp_wheel_contacts, stamp_tool_contacts)
                         .chain()
                         .in_set(RenderSystems::PrepareResources),
                     prepare_vegetation_bind_group.in_set(RenderSystems::PrepareBindGroups),
@@ -459,9 +463,12 @@ pub(crate) fn prepare_vegetation_bind_group(
                 Some(id) => images.get(id),
                 None => Some(&fallback.d2),
             };
-            let (Some(image), Some(trample), Some(albedo)) =
-                (images.get(&field.heightmap), images.get(&field.trample), albedo)
-            else {
+            let (Some(image), Some(trample), Some(work), Some(albedo)) = (
+                images.get(&field.heightmap),
+                images.get(&field.trample),
+                images.get(&field.work),
+                albedo,
+            ) else {
                 continue;
             };
             let group = render_device.create_bind_group(
@@ -476,6 +483,7 @@ pub(crate) fn prepare_vegetation_bind_group(
                     &albedo.sampler,
                     &pipeline.wind_map,
                     &pipeline.wind_sampler,
+                    &work.texture_view,
                 )),
             );
             groups.insert(key, group);
@@ -629,6 +637,95 @@ fn stamp_wheel_contacts(
     }
 }
 
+/// Writes the patches tools are working into the work maps of the fields
+/// that can be worked. A worked texel keeps the newest pass over it: the
+/// tool, the way it went, and where across its width the texel lay, so the
+/// ridges a pass leaves run unbroken down it. Each map is mirrored here, so a
+/// frame's patches go up as one rectangle however many parts made them.
+fn stamp_tool_contacts(
+    fields: Res<RenderFields>,
+    contacts: Option<Res<super::tillage::ToolContacts>>,
+    images: Res<RenderAssets<GpuImage>>,
+    render_queue: Res<RenderQueue>,
+    mut mirrors: Local<HashMap<AssetId<Image>, Vec<[u16; 2]>>>,
+) {
+    mirrors.retain(|id, _| fields.0.values().any(|field| field.work.id() == *id));
+    let Some(contacts) = contacts else {
+        return;
+    };
+    if contacts.contacts.is_empty() {
+        return;
+    }
+    for field in fields.0.values().filter(|field| field.workable) {
+        let Some(work) = images.get(&field.work) else {
+            continue;
+        };
+        let wheels = field.params.wheels;
+        let tpm = wheels.texels_per_metre;
+        let (width, height) = (wheels.width as i32, wheels.height as i32);
+        // Each patch in texels: its middle, its axes and half sizes, and the
+        // texels it can reach, for the patches that fall on this field.
+        let patches: Vec<_> = contacts
+            .contacts
+            .iter()
+            .filter_map(|contact| {
+                let centre = (Vec2::new(contact.position.x, contact.position.z) - wheels.origin) * tpm;
+                let along = contact.direction.normalize_or(Vec2::X);
+                let half = Vec2::new(contact.width * 0.5 * tpm, (contact.length * 0.5 * tpm).max(0.5));
+                let reach = half.length();
+                let low = (centre - Vec2::splat(reach)).ceil().as_ivec2().max(IVec2::ZERO);
+                let high = (centre + Vec2::splat(reach)).floor().as_ivec2().min(IVec2::new(width - 1, height - 1));
+                (low.cmple(high).all()).then_some((contact, centre, along, half, low, high))
+            })
+            .collect();
+        if patches.is_empty() {
+            continue;
+        }
+        let texels = mirrors
+            .entry(field.work.id())
+            .or_insert_with(|| vec![[0; 2]; (width * height) as usize]);
+        let (mut dirty_low, mut dirty_high) = (IVec2::MAX, IVec2::MIN);
+        for (contact, centre, along, half, low, high) in patches {
+            let axle = along.perp();
+            for z in low.y..=high.y {
+                for x in low.x..=high.x {
+                    let d = Vec2::new(x as f32, z as f32) - centre;
+                    if d.dot(axle).abs() > half.x || d.dot(along).abs() > half.y {
+                        continue;
+                    }
+                    let across = contact.across + d.dot(axle) / tpm;
+                    texels[(z * width + x) as usize] =
+                        super::tillage::work_texel(contact.kind, along, across, contact.depth);
+                    dirty_low = dirty_low.min(IVec2::new(x, z));
+                    dirty_high = dirty_high.max(IVec2::new(x, z));
+                }
+            }
+        }
+        if dirty_low.cmpgt(dirty_high).any() {
+            continue;
+        }
+        let size = dirty_high - dirty_low + IVec2::ONE;
+        let data: Vec<[u16; 2]> = (dirty_low.y..=dirty_high.y)
+            .flat_map(|z| {
+                let row = (z * width) as usize;
+                texels[row + dirty_low.x as usize..=row + dirty_high.x as usize].iter().copied()
+            })
+            .collect();
+        let mut target = work.texture.as_image_copy();
+        target.origin = Origin3d { x: dirty_low.x as u32, y: dirty_low.y as u32, z: 0 };
+        render_queue.write_texture(
+            target,
+            bytemuck::cast_slice(&data),
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.x as u32 * 4),
+                rows_per_image: Some(size.y as u32),
+            },
+            Extent3d { width: size.x as u32, height: size.y as u32, depth_or_array_layers: 1 },
+        );
+    }
+}
+
 #[derive(Resource)]
 pub(crate) struct VegetationPipeline {
     mesh_pipeline: MeshPipeline,
@@ -660,6 +757,8 @@ pub(crate) fn init_vegetation_pipeline(
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
+                // Where tools have worked the ground, at binding 8.
+                texture_2d(TextureSampleType::Uint),
             ),
         ),
     );

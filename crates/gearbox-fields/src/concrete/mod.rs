@@ -94,6 +94,7 @@ impl Plugin for ConcretePlugin {
                         follow_grass: 0.0,
                         cutout: false,
                         way_only: false,
+                        worked_only: false,
                         blade: None,
                         sieve: None,
                         albedo: None,
@@ -109,6 +110,7 @@ impl Plugin for ConcretePlugin {
                         follow_grass: 0.0,
                         cutout: false,
                         way_only: false,
+                        worked_only: false,
                         blade: None,
                         sieve: None,
                         albedo: None,
@@ -118,6 +120,7 @@ impl Plugin for ConcretePlugin {
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 0.0,
+                workable: false,
                 surface_tint: Vec4::new(0.118, 0.118, 0.112, 1.0),
             });
     }
@@ -181,6 +184,7 @@ fn create_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     _placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = ConcreteExtension {

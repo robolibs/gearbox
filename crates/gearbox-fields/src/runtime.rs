@@ -190,6 +190,7 @@ mod tests {
             follow_grass: 0.0,
             cutout: false,
             way_only: false,
+            worked_only: false,
             blade: None,
             sieve: None,
         }
@@ -323,6 +324,23 @@ fn track_image(width: u32, height: u32, tread: bool) -> Image {
     image
 }
 
+// A work map: the tool, its heading and depth, then where across it a texel
+// lay. On the GPU alone and handed over zeroed, which reads as unworked.
+fn work_image(width: u32, height: u32) -> Image {
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rg16Uint,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image
+}
+
 /// The terrain as the cover shaders read it: height and normal per grid point.
 /// A host may build it ahead, off the main thread, and hand it over with the terrain.
 pub fn heightmap_image(grid: &HeightGrid) -> Image {
@@ -399,6 +417,9 @@ pub fn ensure_fields(world: &mut World) {
         },
     };
     let mut fields = Vec::new();
+    // Ground no tool can work shares one empty map, so every cover and every
+    // vegetation draw has a work map bound and reads it as unworked.
+    let unworked = world.resource_mut::<Assets<Image>>().add(work_image(2, 2));
     let specs = layout.regions(domain);
     for spec in specs.clone() {
         let bounds = spec.bounds();
@@ -450,8 +471,21 @@ pub fn ensure_fields(world: &mut World) {
             bar: placed_of(&specs, &profiles, &layout.ways, &spec).bars().0,
         };
         let placed = placed_of(&specs, &profiles, &layout.ways, &spec);
-        let ground =
-            (profile.ground)(world, trample.clone(), wheels, surface_geometry.clone(), placed);
+        // Worked texels sit on the wheel map's own grid, so the two are read
+        // with the same numbers.
+        let work = if profile.workable {
+            world.resource_mut::<Assets<Image>>().add(work_image(width, height))
+        } else {
+            unworked.clone()
+        };
+        let ground = (profile.ground)(
+            world,
+            trample.clone(),
+            wheels,
+            surface_geometry.clone(),
+            placed,
+            work.clone(),
+        );
         let entity = world
             .spawn((
                 Name::new(format!("Field {} ({})", spec.name, profile.name)),
@@ -465,6 +499,8 @@ pub fn ensure_fields(world: &mut World) {
             FieldGpu {
                 heightmap: heightmap.clone(),
                 trample,
+                work,
+                workable: profile.workable,
                 footprint_length: response.footprint_length,
                 tread: response.tread,
                 params: VegetationParams {
@@ -521,6 +557,7 @@ pub fn ensure_fields(world: &mut World) {
         },
         surface_geometry,
         crate::profile::Placed { bounds: domain.grown(BACKDROP_REACH_M), ..default() },
+        unworked,
     );
     world.insert_resource(ActiveFields {
         terrain: root,
@@ -728,6 +765,7 @@ pub fn stream_vegetation(
     mut measured_in: Local<u64>,
     ground: Option<Res<CoverHeights>>,
     terrain: Option<Res<CoverTerrain>>,
+    worked: Option<Res<crate::tillage::WorkedCells>>,
 ) {
     let Some(active) = active else {
         return;
@@ -791,6 +829,9 @@ pub fn stream_vegetation(
                         continue;
                     }
                     if layer.way_only && chunk_tread(field, corner, size) == Vec4::ZERO {
+                        continue;
+                    }
+                    if layer.worked_only && !worked.as_ref().is_some_and(|cells| cells.touches(bounds)) {
                         continue;
                     }
                     let capacity = size * size * layer.density;
