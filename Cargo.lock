@@ -9647,6 +9647,7 @@ dependencies = [
  "glam 0.30.10",
  "half",
  "log",
+ "miniz_oxide 0.8.9",
  "openusd",
  "openusd-schemas",
  "tempfile",
