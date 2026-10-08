@@ -88,8 +88,42 @@ enum Cmd {
         /// For look: metres from the eye to what it looks at
         #[arg(long)]
         distance: Option<f64>,
+        /// For look around MACHINE: glide there over this many seconds of sim
+        /// time, eased at both ends, and stay on the machine as it moves until
+        /// the next request, `unfollow` or a drag
+        #[arg(long)]
+        over: Option<f64>,
         #[arg(long)]
         id: Option<String>,
+    },
+    /// Switch a viewport overlay as the View pane does: `tf` (link frames,
+    /// names and parent links, which recordings keep), `colliders`, `grid`
+    /// or `axes`, to `on`, `off` or `toggle`
+    Overlay {
+        /// tf | colliders | grid | axes
+        name: String,
+        /// on | off | toggle
+        state: String,
+        #[arg(long)]
+        id: Option<String>,
+        /// Seconds to wait for the instance to take the request
+        #[arg(long, default_value_t = 10.0)]
+        timeout: f64,
+    },
+    /// Record the 3D viewport as shown, without the panes, to H.264 video:
+    /// `start [OUT]` begins (OUT, or a file in the capture folder), `stop`
+    /// ends it. While recording the clock steps a sixtieth of a second a
+    /// frame, so the video plays smooth however slowly the window draws
+    Record {
+        /// start | stop
+        action: String,
+        /// Where `start` writes the video (.mp4)
+        out: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        /// Seconds to wait for the instance to take the request
+        #[arg(long, default_value_t = 10.0)]
+        timeout: f64,
     },
     /// Drive the window with scripted input, one step per argument or per
     /// `;`-separated part: `move X Y`, `down X Y [BUTTON]`, `up X Y [BUTTON]`,
@@ -127,6 +161,18 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             viewport,
             timeout,
         } => screenshot(ctx, id, &out, viewport, timeout),
+        Cmd::Record {
+            action,
+            out,
+            id,
+            timeout,
+        } => record(ctx, id, &action, out.as_deref(), timeout),
+        Cmd::Overlay {
+            name,
+            state,
+            id,
+            timeout,
+        } => overlay(ctx, id, &name, &state, timeout),
         Cmd::Ui { steps, id } => ui(ctx, id, &steps),
         Cmd::Camera {
             action,
@@ -136,6 +182,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             bearing,
             pitch,
             distance,
+            over,
             id,
         } => camera(
             ctx,
@@ -144,7 +191,12 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             machine.as_deref(),
             distance_km,
             height_m,
-            [("bearing", bearing), ("pitch", pitch), ("distance", distance)],
+            [
+                ("bearing", bearing),
+                ("pitch", pitch),
+                ("distance", distance),
+                ("over", over),
+            ],
         ),
     }
 }
@@ -156,7 +208,7 @@ fn camera(
     machine: Option<&str>,
     distance_km: Option<f64>,
     height_m: Option<f64>,
-    look: [(&str, Option<f64>); 3],
+    look: [(&str, Option<f64>); 4],
 ) -> Result<()> {
     let ctx = with_target(ctx, id)?;
     if action == "where" {
@@ -578,6 +630,66 @@ fn screenshot(
         &out.to_string_lossy(),
         &format!("saved screenshot of `{}` to {}", target.name, out.display()),
         || json!({ "instance": target.name, "path": out.to_string_lossy() }),
+    );
+    Ok(())
+}
+
+fn overlay(ctx: &Ctx, id: Option<String>, name: &str, state: &str, timeout: f64) -> Result<()> {
+    if !matches!(name, "tf" | "colliders" | "grid" | "axes") {
+        return Err(CliError::error(
+            "overlay must be tf, colliders, grid or axes",
+        ));
+    }
+    if !matches!(state, "on" | "off" | "toggle") {
+        return Err(CliError::error("overlay state must be on, off or toggle"));
+    }
+    send_request(ctx, id, "overlay", &format!("{name} {state}"), timeout)
+}
+
+fn record(
+    ctx: &Ctx,
+    id: Option<String>,
+    action: &str,
+    out: Option<&str>,
+    timeout: f64,
+) -> Result<()> {
+    let line = match (action, out) {
+        ("start", Some(out)) => format!("start {}", std::path::absolute(out)?.display()),
+        ("start", None) => "start".to_string(),
+        ("stop", None) => "stop".to_string(),
+        ("stop", Some(_)) => return Err(CliError::error("`stop` takes no path")),
+        _ => return Err(CliError::error("record action must be start or stop")),
+    };
+    send_request(ctx, id, "record", &line, timeout)
+}
+
+/// Drops `line` in `<registry dir>/<name>.<kind>` and waits for the instance
+/// to take it.
+fn send_request(ctx: &Ctx, id: Option<String>, kind: &str, line: &str, timeout: f64) -> Result<()> {
+    let ctx = with_target(ctx, id)?;
+    let target = ctx.target()?.clone();
+    if target.pid == 0 {
+        return Err(CliError::error(format!(
+            "instance addressed by did only; {kind} needs a registry entry"
+        )));
+    }
+    let request = registry::registry_dir().join(format!("{}.{kind}", target.name));
+    std::fs::write(&request, line.as_bytes())?;
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout);
+    while request.exists() {
+        if Instant::now() >= deadline {
+            let _ = std::fs::remove_file(&request);
+            return Err(CliError::timeout(format!(
+                "instance `{}` did not take `{line}` within {timeout}s",
+                target.name
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ctx.done(
+        line,
+        &format!("{kind} request `{line}` taken by `{}`", target.name),
+        || json!({ "instance": target.name, "request": line }),
     );
     Ok(())
 }

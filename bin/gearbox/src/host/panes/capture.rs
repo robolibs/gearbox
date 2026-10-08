@@ -28,7 +28,7 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
             .with_readout("status", status)
             .with_readout("last", last)
             .with_readout("folder", folder)
-            .with_readout("formats", "EXR + PNG, HDR10 HEVC video")
+            .with_readout("formats", "EXR + PNG, H.264 video as shown")
             .with_button("Screenshot", ctx.accent)
             .with_button(if recording { "Stop recording" } else { "Record video" }, ctx.accent)
             .with_button("Choose folder…", ctx.accent)

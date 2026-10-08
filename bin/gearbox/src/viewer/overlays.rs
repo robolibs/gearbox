@@ -26,7 +26,70 @@ impl Plugin for OverlaysPlugin {
                     sync_collider_debug_visibility,
                 )
                     .chain(),
-            );
+            )
+            .add_systems(Update, serve_overlay_requests.before(compute_extent));
+    }
+}
+
+/// `gearbox instance overlay NAME on|off|toggle` drops `NAME STATE` in
+/// `<registry dir>/<name>.overlay`; this switches that overlay as the View
+/// pane does. NAME is `tf`, `colliders`, `grid` or `axes`.
+fn serve_overlay_requests(
+    time: Res<Time>,
+    mut poll: Local<Option<Timer>>,
+    mut toggles: ResMut<DisplayToggles>,
+) {
+    let poll = poll.get_or_insert_with(|| Timer::from_seconds(0.25, TimerMode::Repeating));
+    if !poll.tick(time.delta()).just_finished() {
+        return;
+    }
+    let request = crate::viewer::screenshot::request_path("overlay");
+    let Ok(text) = std::fs::read_to_string(&request) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&request);
+    let mut words = text.split_whitespace();
+    let (Some(name), Some(state)) = (words.next(), words.next()) else {
+        warn!(
+            "gearbox-viewer: overlay request `{}` not understood",
+            text.trim()
+        );
+        return;
+    };
+    let current = match name {
+        "tf" => toggles.show_tf_frames || toggles.show_tf_links,
+        "colliders" => toggles.show_colliders,
+        "grid" => toggles.show_world_grid,
+        "axes" => toggles.show_world_axes,
+        _ => {
+            warn!("gearbox-viewer: no overlay `{name}`");
+            return;
+        }
+    };
+    let on = match state {
+        "on" => true,
+        "off" => false,
+        "toggle" => !current,
+        _ => {
+            warn!("gearbox-viewer: overlay `{name}` cannot be `{state}`");
+            return;
+        }
+    };
+    info!(
+        "gearbox-viewer: overlay {name} {}",
+        if on { "on" } else { "off" }
+    );
+    match name {
+        "tf" => {
+            (
+                toggles.show_tf_frames,
+                toggles.show_tf_names,
+                toggles.show_tf_links,
+            ) = (on, on, on)
+        }
+        "colliders" => toggles.show_colliders = on,
+        "grid" => toggles.show_world_grid = on,
+        _ => toggles.show_world_axes = on,
     }
 }
 

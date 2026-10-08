@@ -1,8 +1,9 @@
-//! Clean HDR captures of the viewport. Frames are copied from the camera's
-//! HDR target after bloom and before tonemapping, so panels never reach
-//! them; gizmos, the selection band and machine cards sit on an overlay
-//! render layer the camera drops while capturing. Stills save an OpenEXR
-//! frame beside the tonemapped PNG; recordings stream HDR10 HEVC to ffmpeg.
+//! Clean captures of the viewport, taken from the camera's own target so
+//! panels never reach them; gizmos, the selection band and machine cards sit
+//! on an overlay render layer the camera drops while capturing, all but the
+//! TF tree, which is shown on purpose. Stills save an OpenEXR of the HDR
+//! image tonemapping read beside the PNG; recordings stream the frame as it
+//! is shown, tonemapped, to H.264.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,6 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::core_pipeline::tonemapping::tonemapping;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::gizmos::config::GizmoConfigStore;
-use bevy::post_process::bloom::bloom;
 use bevy::prelude::*;
 use bevy::render::RenderApp;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
@@ -32,14 +32,26 @@ use mara::ui::modules::bevy::ChaseCamera;
 
 /// Render layer of viewer overlays; the camera sees it except while capturing.
 pub const OVERLAY_LAYER: usize = 1;
+/// Render layer of overlays a capture keeps: the TF tree, switched on to be
+/// seen. Sensor cameras never draw it.
+pub const RECORDED_OVERLAY_LAYER: usize = 4;
+/// What the camera sees, while capturing and otherwise.
+const CAPTURED: [usize; 3] = [0, bevy_weather::SKY_LAYER, RECORDED_OVERLAY_LAYER];
+const VIEWED: [usize; 4] = [
+    0,
+    OVERLAY_LAYER,
+    bevy_weather::SKY_LAYER,
+    RECORDED_OVERLAY_LAYER,
+];
 const FRAME_RATE: u32 = 60;
 /// Frames the overlays take to leave the view before a still is taken.
 const SETTLE_FRAMES: u8 = 2;
 /// Frames that may wait for ffmpeg before the app waits with them.
 const QUEUED_FRAMES: usize = 8;
-/// Scene-linear BT.709 to HDR10: 1.0 is 203 nit reference white.
-const HDR10_FILTER: &str = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=gbrpf32le,\
-    zscale=tin=linear:pin=bt709:min=gbr:npl=203:t=smpte2084:p=bt2020:m=bt2020nc:r=tv,format=p010le";
+/// The tonemapped frame, linear as tonemapping leaves it, encoded with the
+/// sRGB curve the window shows it through: the video looks as the view does.
+const SDR_FILTER: &str = "crop=trunc(iw/2)*2:trunc(ih/2)*2,format=gbrpf32le,\
+    zscale=tin=linear:pin=bt709:min=gbr:t=iec61966-2-1:p=bt709:m=bt709:r=tv,format=yuv420p";
 
 pub struct RecorderPlugin;
 
@@ -49,15 +61,23 @@ impl Plugin for RecorderPlugin {
             .add_plugins(ExtractComponentPlugin::<CaptureInto>::default())
             .add_systems(
                 Update,
-                (show_overlays, keep_gizmos_on_overlay_layer, drive_recorder).chain(),
+                (
+                    show_overlays,
+                    keep_gizmos_on_overlay_layer,
+                    serve_record_requests,
+                    drive_recorder,
+                )
+                    .chain(),
             );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            // After tonemapping, whose source is the finished HDR image: a copy
+            // taken any earlier races the lens effects, unordered against it,
+            // and catches some frames with them and some without.
             render_app.add_systems(
                 Core3d,
                 copy_hdr_frame
                     .in_set(Core3dSystems::PostProcess)
-                    .after(bloom)
-                    .before(tonemapping),
+                    .after(tonemapping),
             );
         }
     }
@@ -72,6 +92,8 @@ pub struct Recorder {
     mode: Mode,
     last: Option<PathBuf>,
     folder: Option<PathBuf>,
+    /// Where the next recording goes instead of the capture folder.
+    out: Option<PathBuf>,
 }
 
 impl Default for Recorder {
@@ -83,6 +105,7 @@ impl Default for Recorder {
             mode: Mode::Idle,
             last: None,
             folder: load_folder(),
+            out: None,
         }
     }
 }
@@ -152,28 +175,71 @@ enum Mode {
     },
 }
 
-/// The HDR image a capturing camera copies its frame into.
+/// The image a capturing camera copies its frame into, and whether that is
+/// the frame as shown — tonemapped — rather than the HDR image beneath it.
 #[derive(Component, ExtractComponent, Clone)]
-pub struct CaptureInto(pub Handle<Image>);
+pub struct CaptureInto(pub Handle<Image>, pub bool);
 
 fn show_overlays(mut commands: Commands, cameras: Query<Entity, Added<ChaseCamera>>) {
     for camera in &cameras {
         commands
             .entity(camera)
-            .insert(RenderLayers::from_layers(&[0, OVERLAY_LAYER, bevy_weather::SKY_LAYER]));
+            .insert(RenderLayers::from_layers(&VIEWED));
     }
 }
 
+/// Gizmos draw on the overlay layer, the TF tree on the one captures keep.
 fn keep_gizmos_on_overlay_layer(store: Option<ResMut<GizmoConfigStore>>) {
     let Some(mut store) = store else {
         return;
     };
-    let overlay = RenderLayers::layer(OVERLAY_LAYER);
-    if store.iter().all(|(_, config, _)| config.render_layers == overlay) {
+    let tf = std::any::TypeId::of::<crate::viewer::tf_overlay::TfGizmos>();
+    let layer = |group: &std::any::TypeId| {
+        RenderLayers::layer(if *group == tf {
+            RECORDED_OVERLAY_LAYER
+        } else {
+            OVERLAY_LAYER
+        })
+    };
+    if store
+        .iter()
+        .all(|(group, config, _)| config.render_layers == layer(group))
+    {
         return;
     }
-    for (_, config, _) in store.iter_mut() {
-        config.render_layers = overlay.clone();
+    for (group, config, _) in store.iter_mut() {
+        config.render_layers = layer(group);
+    }
+}
+
+/// `gearbox instance record start [OUT]` and `… stop` drop `start [OUT]` or
+/// `stop` in `<registry dir>/<name>.record`; this does what the pane's
+/// button does, writing to OUT when one is given.
+fn serve_record_requests(
+    time: Res<Time>,
+    mut poll: Local<Option<Timer>>,
+    mut recorder: ResMut<Recorder>,
+) {
+    let poll = poll.get_or_insert_with(|| Timer::from_seconds(0.25, TimerMode::Repeating));
+    if !poll.tick(time.delta()).just_finished() {
+        return;
+    }
+    let request = crate::viewer::screenshot::request_path("record");
+    let Ok(text) = std::fs::read_to_string(&request) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&request);
+    let (action, out) = text.trim().split_once(' ').unwrap_or((text.trim(), ""));
+    match action {
+        "start" if !recorder.is_recording() => {
+            recorder.out = (!out.trim().is_empty()).then(|| PathBuf::from(out.trim()));
+            recorder.start_requested = true;
+        }
+        "stop" if recorder.is_recording() => recorder.stop_requested = true,
+        _ => warn!(
+            "gearbox-capture: record request `{}` not taken",
+            text.trim()
+        ),
     }
 }
 
@@ -195,20 +261,46 @@ fn drive_recorder(
                 return;
             };
             if std::mem::take(&mut recorder.start_requested) {
-                let path = capture_path(recorder.folder.as_deref(), "Videos", "mp4");
+                let path = recorder
+                    .out
+                    .take()
+                    .unwrap_or_else(|| capture_path(recorder.folder.as_deref(), "Videos", "mp4"));
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
                 let mut args = raw_input(size);
                 args.extend(
                     [
-                        "-vf", HDR10_FILTER, "-c:v", "hevc_nvenc", "-profile:v", "main10",
-                        "-preset", "p5", "-rc", "vbr", "-cq", "16", "-b:v", "0",
-                        "-color_primaries", "bt2020", "-color_trc", "smpte2084",
-                        "-colorspace", "bt2020nc", "-color_range", "tv", "-tag:v", "hvc1",
+                        "-vf",
+                        SDR_FILTER,
+                        "-c:v",
+                        "h264_nvenc",
+                        "-profile:v",
+                        "high",
+                        "-preset",
+                        "p5",
+                        "-rc",
+                        "vbr",
+                        "-cq",
+                        "17",
+                        "-b:v",
+                        "0",
+                        "-color_primaries",
+                        "bt709",
+                        "-color_trc",
+                        "bt709",
+                        "-colorspace",
+                        "bt709",
+                        "-color_range",
+                        "tv",
+                        "-movflags",
+                        "+faststart",
                     ]
                     .map(String::from),
                 );
                 match Encoder::spawn(&args, &path) {
                     Ok(encoder) => {
-                        let reader = begin_capture(&mut commands, &mut images, view, size);
+                        let reader = begin_capture(&mut commands, &mut images, view, size, true);
                         *clock = TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
                             1.0 / f64::from(FRAME_RATE),
                         ));
@@ -218,7 +310,9 @@ fn drive_recorder(
                     Err(error) => warn!("gearbox-capture: cannot start ffmpeg: {error}"),
                 }
             } else if std::mem::take(&mut recorder.still_requested) {
-                commands.entity(view).insert(RenderLayers::from_layers(&[0, bevy_weather::SKY_LAYER]));
+                commands
+                    .entity(view)
+                    .insert(RenderLayers::from_layers(&CAPTURED));
                 next = Some(Mode::Still {
                     stem: capture_path(recorder.folder.as_deref(), "Pictures", "png")
                         .with_extension(""),
@@ -243,7 +337,13 @@ fn drive_recorder(
                 commands
                     .spawn(Screenshot(target.clone()))
                     .observe(save_to_disk(stem.with_extension("png")));
-                *reader = Some(begin_capture(&mut commands, &mut images, view, *size));
+                *reader = Some(begin_capture(
+                    &mut commands,
+                    &mut images,
+                    view,
+                    *size,
+                    false,
+                ));
             }
         }
         Mode::Recording { reader, .. } => {
@@ -263,12 +363,14 @@ fn drive_recorder(
     }
 }
 
-/// Points the camera at a fresh HDR image and reads it back every frame.
+/// Points the camera at a fresh image and reads it back every frame: the
+/// frame as shown when `shown`, else the HDR image beneath it.
 fn begin_capture(
     commands: &mut Commands,
     images: &mut Assets<Image>,
     view: Entity,
     size: UVec2,
+    shown: bool,
 ) -> Entity {
     let mut image = Image::new_uninit(
         Extent3d { width: size.x, height: size.y, depth_or_array_layers: 1 },
@@ -278,9 +380,10 @@ fn begin_capture(
     );
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC | TextureUsages::COPY_DST;
     let handle = images.add(image);
-    commands
-        .entity(view)
-        .insert((CaptureInto(handle.clone()), RenderLayers::from_layers(&[0, bevy_weather::SKY_LAYER])));
+    commands.entity(view).insert((
+        CaptureInto(handle.clone(), shown),
+        RenderLayers::from_layers(&CAPTURED),
+    ));
     commands.spawn(Readback::texture(handle)).observe(receive_frame).id()
 }
 
@@ -288,7 +391,7 @@ fn end_capture(commands: &mut Commands, view: Entity, reader: Entity) {
     commands
         .entity(view)
         .remove::<CaptureInto>()
-        .insert(RenderLayers::from_layers(&[0, OVERLAY_LAYER, bevy_weather::SKY_LAYER]));
+        .insert(RenderLayers::from_layers(&VIEWED));
     commands.entity(reader).despawn();
 }
 
@@ -321,7 +424,9 @@ fn receive_frame(frame: On<ReadbackComplete>, mut recorder: ResMut<Recorder>) {
     }
 }
 
-/// Copies the HDR frame, bloom included, before tonemapping takes it.
+/// Copies the frame once tonemapping has run: tonemapping writes the other
+/// main texture — the frame as shown — and leaves its source, the HDR image
+/// with bloom and lens effects on it, as it was.
 fn copy_hdr_frame(
     view: ViewQuery<(&ViewTarget, &CaptureInto)>,
     images: Res<RenderAssets<GpuImage>>,
@@ -331,7 +436,11 @@ fn copy_hdr_frame(
     let Some(image) = images.get(&capture.0) else {
         return;
     };
-    let source = target.main_texture();
+    let source = if capture.1 {
+        target.main_texture()
+    } else {
+        target.main_texture_other()
+    };
     if source.size() != image.texture.size()
         || source.format() != image.texture.format()
         || source.sample_count() != 1
