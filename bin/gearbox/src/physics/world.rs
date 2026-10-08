@@ -42,6 +42,10 @@ pub struct PhysicsWorld {
     pub attachment_filtered_pairs: HashSet<(BodyId, BodyId)>,
     hitch_captures: HashMap<JointId, HitchCapture>,
     joint_frictions: HashMap<JointId, JointFriction>,
+    /// Rolling joints the soil turns: the rate the ground going by would turn
+    /// them at (rad/s) and the most torque the soil's grip puts on them. A
+    /// disc cutting the ground is dragged round by the soil it cuts.
+    pub(crate) soil_grips: HashMap<JointId, (f64, f64)>,
     /// Entities whose bodies the last step disabled for non-finite state.
     pub quarantined: Vec<Entity>,
     /// Fixed physics rate; the frame's real time is spent in steps of it.
@@ -123,6 +127,7 @@ impl PhysicsWorld {
             attachment_filtered_pairs: HashSet::new(),
             hitch_captures: HashMap::new(),
             joint_frictions: HashMap::new(),
+            soil_grips: HashMap::new(),
             quarantined: Vec::new(),
             step_hz,
             accumulator: 0.0,
@@ -380,9 +385,24 @@ impl PhysicsWorld {
         self.joint_frictions.insert(joint, JointFriction { axis, torque, rolling, anchor: None });
     }
 
-    /// A joint a motor device or an authored drive turns is left to it.
+    /// The rolling joint that turns `part`, if it has one.
+    pub(crate) fn rolling_joint(&self, part: BodyId) -> Option<(JointId, JointAxis)> {
+        self.joint_frictions
+            .iter()
+            .find(|(id, friction)| {
+                friction.rolling.is_some()
+                    && self
+                        .backend
+                        .joint_bodies(**id)
+                        .is_some_and(|(_, turned)| turned == part)
+            })
+            .map(|(id, friction)| (*id, friction.axis))
+    }
+
+    /// A joint a motor device or an authored drive turns is left to it; one
+    /// the soil grips turns with the ground, as far as the grip holds.
     fn apply_joint_frictions(&mut self) {
-        let (backend, drives) = (&mut self.backend, &self.authored_drives);
+        let (backend, drives, grips) = (&mut self.backend, &self.authored_drives, &self.soil_grips);
         self.joint_frictions.retain(|id, friction| {
             let (Some(position), Some((_, part))) =
                 (backend.joint(*id).map(|j| j.motor_position(friction.axis)), backend.joint_bodies(*id))
@@ -395,6 +415,15 @@ impl PhysicsWorld {
             let Some(position) = position else {
                 return true;
             };
+            if let Some(&(rate, grip)) = grips.get(id) {
+                friction.anchor = Some(position);
+                if let Some(joint) = backend.joint_mut(*id, false) {
+                    joint.set_motor_model(friction.axis, MotorModel::Force);
+                    joint.set_motor_velocity(friction.axis, rate, grip / FRICTION_RATE);
+                    joint.set_motor_max_force(friction.axis, grip);
+                }
+                return true;
+            }
             let torque = friction.torque
                 + friction.rolling.map_or(0.0, |(coefficient, radius)| coefficient * ground_load(&**backend, part) * radius);
             let anchor = friction.anchor.get_or_insert(position);

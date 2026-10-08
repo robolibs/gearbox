@@ -18,7 +18,7 @@ use usd_bevy::UsdPrimRef;
 
 use super::ControllerInventory;
 use crate::physics::PhysicsWorld;
-use crate::physics::backend::ColliderId;
+use crate::physics::backend::{ColliderId, DVec3, JointAxis, JointId, Shape, ShapeView};
 
 /// Slower than this along the ground and the tool is taken as standing.
 const MOVING_M_S: f32 = 0.15;
@@ -35,6 +35,15 @@ const JUMP_M: f32 = 1.0;
 const DISC_DEPTH_M: f32 = 0.10;
 /// A part's collider this close to the ground is still in it.
 const TOUCH_M: f32 = 0.05;
+/// Discs in the ground cut into it: their colliders give up this much reach,
+/// so the frame settles onto what rides on the surface — the packer roller —
+/// while the discs still bear on the soil they cut. Lifted this far clear,
+/// they have their whole reach back.
+const SINK_M: f32 = 0.025;
+/// The most torque the soil a disc cuts can put on it, N·m: its share of the
+/// frame's weight bearing on its rim through the soil's friction.
+const SOIL_GRIP_NM: f64 = 150.0;
+const LIFTED_M: f32 = 0.2;
 /// How far along the ground a disc cuts either side of its middle.
 const CUT_M: f32 = 0.15;
 /// How far across a part works at most, either side of itself.
@@ -55,6 +64,13 @@ const STEADY_SIDEWAYS: f32 = 0.9;
 pub(super) struct ToolTrack {
     parts: Vec<(Entity, ColliderId)>,
     in_soil: HashMap<ColliderId, Vec2>,
+    /// Discs sunk into the soil, with the reach they had above it.
+    sunk: HashMap<ColliderId, f64>,
+    /// The discs that turn on a rolling joint: the joint, its free axis in
+    /// the joint's frame, and the disc's radius.
+    rolling: HashMap<ColliderId, (JointId, DVec3, f64)>,
+    /// The packer rollers riding the soil behind the discs, likewise.
+    rollers: Vec<(ColliderId, (JointId, DVec3, f64))>,
     middle: Option<Vec2>,
     stride: Option<(Vec2, f32)>,
     moving: bool,
@@ -65,6 +81,26 @@ pub(super) struct ToolTrack {
 fn works_soil(prim_path: &str) -> bool {
     let leaf = prim_path.rsplit('/').next().unwrap_or(prim_path).to_ascii_lowercase();
     leaf.contains("disc") || leaf.contains("tine") || leaf.contains("share")
+}
+
+/// The rate a part turning on `joint` about `axis` (in the joint's frame)
+/// would roll at on the ground going by under it: (up × velocity) / radius,
+/// about its axle.
+fn rolling_rate(physics: &PhysicsWorld, joint: JointId, axis: DVec3, radius: f64) -> Option<f64> {
+    let frame = physics.joint(joint)?.frame1();
+    let (parent, part) = physics.joint_bodies(joint)?;
+    let axle = physics.body(parent)?.rotation() * frame.rotation * axis;
+    Some(DVec3::Y.cross(physics.body(part)?.linvel()).dot(axle) / radius.max(0.05))
+}
+
+/// The names a part riding the worked soil goes by: the packer roller.
+fn rides_soil(prim_path: &str) -> bool {
+    let leaf = prim_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(prim_path)
+        .to_ascii_lowercase();
+    leaf.contains("roller") || leaf.contains("packer")
 }
 
 /// Every descendant of `root`, the root included.
@@ -143,7 +179,7 @@ fn bands(across: &[f32], along: &[f32]) -> Vec<(f32, f32)> {
 pub(super) fn record_soil_work(
     inventory: Res<ControllerInventory>,
     active: Res<gearbox_api::PhysicsActive>,
-    physics: Res<PhysicsWorld>,
+    mut physics: ResMut<PhysicsWorld>,
     time: Res<Time>,
     prims: Query<&UsdPrimRef>,
     children: Query<&Children>,
@@ -163,6 +199,7 @@ pub(super) fn record_soil_work(
         return;
     }
     let mut seen = Vec::new();
+    let mut grips = HashMap::new();
     for machine in &inventory.machines {
         let (Some(scene_root), Some(kind)) = (
             machine.scene_root,
@@ -186,8 +223,39 @@ pub(super) fn record_soil_work(
                 .collect();
             parts.sort_unstable_by_key(|(entity, _)| *entity);
             parts.dedup();
+            let turning = |collider: ColliderId| {
+                let part = physics.collider(collider)?;
+                let radius = match part.shape() {
+                    ShapeView::Ball { radius } | ShapeView::Cylinder { radius, .. } => radius,
+                    _ => return None,
+                };
+                let (joint, axis) = physics.rolling_joint(part.parent()?)?;
+                let axis = match axis {
+                    JointAxis::AngY => DVec3::Y,
+                    JointAxis::AngZ => DVec3::Z,
+                    _ => DVec3::X,
+                };
+                Some((joint, axis, radius))
+            };
+            track.rolling = parts
+                .iter()
+                .filter_map(|(_, collider)| Some((*collider, turning(*collider)?)))
+                .collect();
+            track.rollers = descendants(scene_root, &children)
+                .into_iter()
+                .filter(|entity| {
+                    prims.get(*entity).is_ok_and(|prim| {
+                        prim.path.starts_with(&machine.prim_path) && rides_soil(&prim.path)
+                    })
+                })
+                .flat_map(|part| descendants(part, &children))
+                .filter_map(|entity| physics.entity_to_collider.get(&entity).copied())
+                .filter_map(|collider| Some((collider, turning(collider)?)))
+                .collect();
+            track.rollers.dedup_by_key(|(collider, _)| *collider);
             track.parts = parts;
             track.in_soil.clear();
+            track.sunk.clear();
         }
         let places: Vec<Vec2> = track
             .parts
@@ -197,6 +265,46 @@ pub(super) fn record_soil_work(
             .collect();
         if places.len() != track.parts.len() || places.is_empty() {
             continue;
+        }
+        // The discs sink into the soil together once the tool is down, so its
+        // frame settles level onto the roller; lifted clear, they all come
+        // back to their whole reach.
+        let gaps: Vec<Option<f32>> = track
+            .parts
+            .iter()
+            .zip(&places)
+            .map(|((_, collider), place)| {
+                let bottom = physics.collider(*collider)?.aabb().mins.y as f32;
+                Some(bottom - heights.0.height(place.x, place.y))
+            })
+            .collect();
+        let down = track.parts.iter().zip(&gaps).any(|((_, collider), gap)| {
+            gap.is_some_and(|gap| gap <= TOUCH_M) || on_ground(&physics, *collider)
+        });
+        let lifted = gaps.iter().flatten().all(|gap| *gap > LIFTED_M)
+            && !track
+                .parts
+                .iter()
+                .any(|(_, collider)| on_ground(&physics, *collider));
+        for (_, collider) in &track.parts {
+            let shape = physics.collider(*collider).map(|c| c.shape());
+            match (track.sunk.get(collider).copied(), shape) {
+                (None, Some(ShapeView::Ball { radius })) if down => {
+                    if let Some(disc) = physics.collider_mut(*collider) {
+                        disc.set_shape(Shape::Ball {
+                            radius: radius - f64::from(SINK_M),
+                        });
+                        track.sunk.insert(*collider, radius);
+                    }
+                }
+                (Some(radius), _) if lifted => {
+                    if let Some(disc) = physics.collider_mut(*collider) {
+                        disc.set_shape(Shape::Ball { radius });
+                    }
+                    track.sunk.remove(collider);
+                }
+                _ => {}
+            }
         }
         let middle = places.iter().sum::<Vec2>() / places.len() as f32;
         let Some(mut axle) = spread(&places, middle, track.axle) else {
@@ -254,6 +362,11 @@ pub(super) fn record_soil_work(
                 continue;
             }
             in_soil.insert(*collider, place);
+            if let Some(&(joint, axis, radius)) = track.rolling.get(collider)
+                && let Some(rate) = rolling_rate(&physics, joint, axis, radius)
+            {
+                grips.insert(joint, (rate, SOIL_GRIP_NM));
+            }
             let back = track
                 .in_soil
                 .get(collider)
@@ -278,9 +391,23 @@ pub(super) fn record_soil_work(
         for contact in &mut contacts.contacts[first..] {
             contact.edges = edges;
         }
+        // The packer rollers on the soil are turned by it as the discs are.
+        for (collider, (joint, axis, radius)) in &track.rollers {
+            let Some(bounds) = physics.collider(*collider).map(|c| c.aabb()) else {
+                continue;
+            };
+            let middle = ((bounds.mins + bounds.maxs) * 0.5).as_vec3();
+            let gap = bounds.mins.y as f32 - heights.0.height(middle.x, middle.z);
+            if (gap <= TOUCH_M || on_ground(&physics, *collider))
+                && let Some(rate) = rolling_rate(&physics, *joint, *axis, *radius)
+            {
+                grips.insert(*joint, (rate, SOIL_GRIP_NM));
+            }
+        }
         track.in_soil = in_soil;
     }
     tracks.retain(|id, _| seen.contains(id));
+    physics.soil_grips = grips;
 }
 
 #[cfg(test)]
