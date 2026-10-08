@@ -87,6 +87,14 @@ impl DriveMotor {
             self.integral = 0.0;
             self.previous_error = None;
         }
+        // Out of a force, a spring takes up from where the joint went, not
+        // from the target it held before.
+        if matches!(self.command, DeviceCommand::Force(_))
+            && !matches!(command, DeviceCommand::Force(_))
+        {
+            self.target = self.position;
+            self.velocity = 0.0;
+        }
         self.command = command;
         Ok(())
     }

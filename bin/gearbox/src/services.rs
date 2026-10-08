@@ -431,6 +431,9 @@ enum Actuation {
     Velocity { target: f64, max_force: f64 },
     /// Hold the joint still with this share (0..1) of the brake servo.
     Brake(f64),
+    /// Hold no position: the joint swings free, only damped, so what hangs
+    /// on it rests its own weight on whatever is under it.
+    Float,
 }
 
 /// The joint between two bodies; a constraint joint wins over a
@@ -464,10 +467,28 @@ fn actuate(physics: &mut PhysicsWorld, j: &JointRef, act: Actuation) -> bool {
             g.set_motor_velocity(j.axis, 0.0, level * BRAKE_FACTOR);
             g.set_motor_max_force(j.axis, level * MOTOR_MAX_FORCE);
         }),
-        Actuation::Position(target) if device => physics.command_motor(id, DeviceCommand::Position(target)).is_ok(),
-        Actuation::Velocity { target, .. } if device => {
-            physics.command_motor(id, DeviceCommand::Velocity(target)).is_ok()
+        // A motor device rewrites its joint every step: it floats by pushing
+        // with no force at all.
+        Actuation::Float if device => physics.command_motor(id, DeviceCommand::Force(0.0)).is_ok(),
+        Actuation::Float => {
+            let damping = drive.map_or(POSITION_DAMPING, |d| d.damping);
+            let Some(joint) = physics.joint_mut(id, true) else {
+                return false;
+            };
+            joint.set_motor_model(j.axis, MotorModel::Force);
+            joint.set_motor_velocity(j.axis, 0.0, damping);
+            joint.set_motor_max_force(
+                j.axis,
+                drive.and_then(|d| d.max_force).unwrap_or(MOTOR_MAX_FORCE),
+            );
+            true
         }
+        Actuation::Position(target) if device => physics
+            .command_motor(id, DeviceCommand::Position(target))
+            .is_ok(),
+        Actuation::Velocity { target, .. } if device => physics
+            .command_motor(id, DeviceCommand::Velocity(target))
+            .is_ok(),
         Actuation::Position(target) if spring.is_some() => {
             let d = spring.unwrap();
             let Some(joint) = physics.joint_mut(id, true) else {
@@ -523,6 +544,10 @@ const MAX_PTO_RPM: f64 = 1200.0;
 const PTO_MAX_TORQUE: f64 = 150.0;
 const JOINT_VELOCITY_MAX_TORQUE: f64 = 2_000.0;
 const DEFAULT_VALVE_RATE: f64 = 0.5;
+/// Seconds a hitch takes over its whole stroke unless `rate=` (of the
+/// stroke a second) says otherwise: it lifts and lowers at the pace of a
+/// tractor's hydraulics, not in a jump.
+const HITCH_STROKE_S: f64 = 5.0;
 const DEFAULT_TRAILER_STEER_DEG: f64 = 35.0;
 
 pub(crate) fn controller_joints<'a>(
@@ -602,10 +627,13 @@ fn apply_service_controllers(
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     mut warned: ResMut<WarnedOnce>,
+    time: Option<Res<Time>>,
+    mut strokes: Local<HashMap<String, f64>>,
 ) {
     if !active.0 {
         return;
     }
+    let dt = time.map_or(0.0, |time| f64::from(time.delta_secs()));
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {
             continue;
@@ -664,7 +692,38 @@ fn apply_service_controllers(
                             .unwrap_or(0.0)
                             .clamp(0.0, 1.0);
                         let range = num(props, "range").unwrap_or(1.0);
-                        actuate(&mut physics, &j, Actuation::Position(position * range))
+                        let hitch = controller.controller_type == "builtin:hitch";
+                        let now = joint_between(&physics, &j)
+                            .and_then(|id| physics.joint(id))
+                            .and_then(|joint| joint.motor_position(j.axis));
+                        // A hitch moves over its stroke at its pace, from
+                        // where its arms are when first asked.
+                        let position = if hitch {
+                            let rate = num(props, "rate").unwrap_or(1.0 / HITCH_STROKE_S).abs();
+                            let stroke = strokes
+                                .entry(format!("{}/{}/{prim}", machine.id, controller.instance))
+                                .or_insert_with(|| {
+                                    now.filter(|_| range != 0.0)
+                                        .map_or(position, |now| (now / range).clamp(0.0, 1.0))
+                                });
+                            *stroke += (position - *stroke).clamp(-rate * dt, rate * dt);
+                            *stroke
+                        } else {
+                            position
+                        };
+                        let target = position * range;
+                        // A hitch in float lifts but never presses: above its
+                        // position it hangs free and the implement's weight
+                        // rests on the ground; only below it does it hold.
+                        let floating = hitch
+                            && flag(props, "float").unwrap_or(false)
+                            && now.is_some_and(|now| (now - target) * range.signum() > 0.0);
+                        let act = if floating {
+                            Actuation::Float
+                        } else {
+                            Actuation::Position(target)
+                        };
+                        actuate(&mut physics, &j, act)
                     }
                     "builtin:joint_velocity" => {
                         let bound = bound_pto.as_deref() == Some(prim);
