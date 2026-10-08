@@ -91,11 +91,11 @@ mara            = { git = "https://github.com/bresilla/mara", rev = "5d50aeb6240
 egui            = { version = "0.34", default-features = false }
 tracing         = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# bevy_openusd v0.1.0: the live stage editor. openusd is the copy vendored
+# bevy_openusd v0.3.0: the live stage editor. openusd is the copy vendored
 # and patched inside that repository, so both sides speak the same `Stage`.
-usd_bevy        = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0" }
-openusd         = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0" }
-openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.1.0", features = ["geom", "shade", "physics"] }
+usd_bevy        = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.3.0" }
+openusd         = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.3.0" }
+openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.3.0", features = ["geom", "shade", "physics"] }
 
 # Local peerbus carries the per-handle request-id seed fix; every crate in
 # the graph (agentio included) must see the same peerbus, so patch the
