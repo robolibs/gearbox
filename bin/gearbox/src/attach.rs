@@ -347,6 +347,35 @@ fn lift_tyres_out_of_terrain(
     Ok(())
 }
 
+/// A slave unhitched at working depth has its parked stand under the
+/// ground, and turned back on there the stand throws the machine. Raise the
+/// slave until the stand's lowest collider stands on the terrain.
+fn stand_out_of_terrain(physics: &mut PhysicsWorld, bodies: &[BodyId], stand: BodyId) -> Result<(), String> {
+    let colliders = physics.body(stand).map(|b| b.colliders()).unwrap_or_default();
+    let depth = colliders
+        .iter()
+        .filter_map(|c| physics.collider(*c).map(|c| c.aabb()))
+        .map(|bounds| {
+            let middle = (bounds.mins + bounds.maxs) * 0.5;
+            crate::globe::ground_height_at_physics(middle.x, middle.z) - bounds.mins.y
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    if depth <= 0.0 {
+        return Ok(());
+    }
+    let poses: Vec<_> = bodies
+        .iter()
+        .filter_map(|handle| {
+            physics.body(*handle).map(|body| {
+                let mut pose = body.position();
+                pose.translation.y += depth + 0.01;
+                (*handle, pose)
+            })
+        })
+        .collect();
+    physics.set_body_poses(&poses, true)
+}
+
 /// The rigid-body link a (possibly body-less) link rides on.
 pub(crate) fn body_link<'a>(tree: &'a LinkTree, link: &'a LinkSpec) -> Option<&'a LinkSpec> {
     let mut cur = link;
@@ -1311,6 +1340,14 @@ pub(crate) fn serve_attachments(
                         set_cross_collisions(physics.as_mut(), &mb, &sb, true);
                     }
                     if let Some(stand) = a.stand.as_deref() {
+                        if let Some(slave) = scene.machine(&slave_id)
+                            && let Some(body) = scene.body(slave, stand, &physics)
+                        {
+                            let bodies = scene.bodies(slave, &physics);
+                            if let Err(error) = stand_out_of_terrain(physics.as_mut(), &bodies, body) {
+                                warn!("gearbox-attach: `{slave_id}` stand not lifted out of the ground: {error}");
+                            }
+                        }
                         set_stand(
                             &scene,
                             physics.as_mut(),
@@ -1483,5 +1520,23 @@ mod tests {
     fn a_top_link_reaches_an_implement_parked_short_of_the_hitch() {
         assert!(hitched_from(0.0, DVec3::new(0.0, 0.3, 0.15)).3.is_some());
         assert!(hitched_from(2.0, DVec3::new(0.0, 0.3, 0.15)).3.is_none());
+    }
+
+    /// A stand left under the ground comes up onto it, and the rest of the
+    /// slave with it.
+    #[test]
+    fn an_unhitched_stand_is_lifted_onto_the_ground() {
+        let mut world = PhysicsWorld::default();
+        let mut body = |at: f64| {
+            let id = world.insert_body(BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(0.0, at, 0.0))));
+            world.insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.05 }).density(1000.0).parent(id)).unwrap();
+            id
+        };
+        let (stand, chassis) = (body(-0.3), body(0.5));
+        stand_out_of_terrain(&mut world, &[stand, chassis], stand).unwrap();
+        let ground = crate::globe::ground_height_at_physics(0.0, 0.0);
+        let lifted = world.body(stand).unwrap().position().translation.y;
+        assert!((lifted - 0.05 - 0.01 - ground).abs() < 1e-6, "{lifted}");
+        assert!((world.body(chassis).unwrap().position().translation.y - (lifted + 0.8)).abs() < 1e-6);
     }
 }
