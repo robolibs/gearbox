@@ -97,6 +97,16 @@ pub struct FlyTarget {
     pub from: crate::viewer::camera::View,
     /// Where to settle instead of the default view from behind.
     pub look: Option<LookAround>,
+    /// Glide straight onto `look` and hold it there, tracking the machine,
+    /// instead of flying in and letting go: a camera rig for scripted shots.
+    pub hold: bool,
+    /// The machine as a held view tracks it — where it is and the bearing
+    /// from behind it — steadied, so its bounce over the ground stays out of
+    /// the shot.
+    pub anchor: Option<(gearbox_globe::Geodetic, f64)>,
+    /// The view a glide set out from, as offsets from the anchor, so it is
+    /// carried along with the machine while the glide leaves it.
+    pub offset: Option<crate::viewer::camera::View>,
 }
 
 /// A view around a machine: degrees clockwise from behind it seen from above,
@@ -122,6 +132,9 @@ impl FlyTarget {
             elapsed: 0.0,
             from: *view,
             look: None,
+            hold: false,
+            anchor: None,
+            offset: None,
         }
     }
 
@@ -130,6 +143,23 @@ impl FlyTarget {
         Self {
             duration: f32::EPSILON,
             look: Some(look),
+            ..Self::new(root, body, view)
+        }
+    }
+
+    /// Glides onto `look` around the machine over `seconds`, eased at both
+    /// ends, and holds it there until something else moves the view.
+    pub fn gliding(
+        root: Entity,
+        body: Entity,
+        view: &crate::viewer::camera::View,
+        look: LookAround,
+        seconds: f32,
+    ) -> Self {
+        Self {
+            duration: seconds.max(f32::EPSILON),
+            look: Some(look),
+            hold: true,
             ..Self::new(root, body, view)
         }
     }

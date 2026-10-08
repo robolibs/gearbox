@@ -58,7 +58,12 @@ fn serve_camera_requests(
             fly.target = Some(FlyTarget::new(root, body, &view));
         }
         ("follow", Some(root)) => follow.set(Some(root)),
-        ("unfollow", _) => follow.set(None),
+        ("unfollow", _) => {
+            follow.set(None);
+            if fly.target.is_some_and(|target| target.hold) {
+                fly.target = None;
+            }
+        }
         // `goto LAT LON [HEIGHT_M]`: a place on Earth, in degrees, and how far
         // above its ground to stand.
         ("goto", _) => {
@@ -72,11 +77,17 @@ fn serve_camera_requests(
                 });
             }
         }
-        // `look [ID] bearing=DEG pitch=DEG distance=M`: an exact view, around
-        // the machine when one is named, its bearing counted from behind it.
+        // `look [ID] bearing=DEG pitch=DEG distance=M [over=S]`: an exact
+        // view, around the machine when one is named, its bearing counted
+        // from behind it. With `over`, the view glides there over S seconds
+        // and holds it, tracking the machine, until something else moves it.
         ("look", Some(root)) => {
             let body = machine_body_entity(root, &inventory, &prims, &parents);
-            fly.target = Some(FlyTarget::looking(root, body, &view, look_around(&text)));
+            let look = look_around(&text);
+            fly.target = Some(match glide_seconds(&text) {
+                Some(seconds) => FlyTarget::gliding(root, body, &view, look, seconds),
+                None => FlyTarget::looking(root, body, &view, look),
+            });
         }
         ("look", None) if text.split_whitespace().nth(1).is_none_or(|word| word.contains('=')) => {
             let look = look_around(&text);
@@ -91,6 +102,14 @@ fn serve_camera_requests(
             text.trim()
         ),
     }
+}
+
+/// The `over=` of a `look` request: how long its glide takes, in seconds.
+fn glide_seconds(text: &str) -> Option<f32> {
+    text.split_whitespace()
+        .filter_map(|word| word.strip_prefix("over="))
+        .find_map(|value| value.parse::<f32>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
 }
 
 /// The `bearing=`, `pitch=` and `distance=` values of a `look` request.

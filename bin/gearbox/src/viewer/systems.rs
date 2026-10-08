@@ -899,6 +899,12 @@ fn chase_camera_fly(
     let local = gearbox_globe::Datum::at(at.latitude, at.longitude).rotation.inverse() * north;
     let behind = local.z.atan2(local.x).to_degrees();
 
+    if target.hold {
+        hold_shot(&mut target, at, behind, t, time.delta_secs_f64(), &mut view);
+        fly.target = Some(target);
+        return;
+    }
+
     // Standing over the machine on the bearing the view came in on, pulled
     // back to the apex; then the same place seen from behind, close in, or
     // from where a `look` request asked.
@@ -929,6 +935,65 @@ fn chase_camera_fly(
     } else {
         fly.target = Some(target);
     }
+}
+
+/// How long the machine a held shot tracks takes to be followed, seconds:
+/// long enough to ride out its bounce, short enough to keep it framed.
+const HOLD_STEADY_S: f64 = 0.3;
+
+/// A held shot: the machine's place and the bearing from behind it, steadied,
+/// carry both the view the glide set out from and the one it settles on, and
+/// the view eases from one to the other over the glide, then stays.
+fn hold_shot(
+    target: &mut FlyTarget,
+    at: gearbox_globe::Geodetic,
+    behind: f64,
+    t: f32,
+    dt: f64,
+    view: &mut crate::viewer::camera::View,
+) {
+    let steady = 1.0 - (-dt / HOLD_STEADY_S).exp();
+    let (at, behind) = match target.anchor {
+        Some((held, held_behind)) => (
+            gearbox_globe::Geodetic::new(
+                held.latitude + (at.latitude - held.latitude) * steady,
+                held.longitude + (at.longitude - held.longitude) * steady,
+                held.altitude + (at.altitude - held.altitude) * steady,
+            ),
+            held_behind + ((behind - held_behind + 540.0).rem_euclid(360.0) - 180.0) * steady,
+        ),
+        None => (at, behind),
+    };
+    target.anchor = Some((at, behind));
+    let from = target.from;
+    let offset = *target.offset.get_or_insert(crate::viewer::camera::View {
+        at: gearbox_globe::Geodetic::new(
+            from.at.latitude - at.latitude,
+            from.at.longitude - at.longitude,
+            from.at.altitude - at.altitude,
+        ),
+        bearing_deg: from.bearing_deg - behind,
+        ..from
+    });
+    let start = crate::viewer::camera::View {
+        at: gearbox_globe::Geodetic::new(
+            at.latitude + offset.at.latitude,
+            at.longitude + offset.at.longitude,
+            at.altitude + offset.at.altitude,
+        ),
+        bearing_deg: behind + offset.bearing_deg,
+        ..offset
+    };
+    let look = target.look.unwrap_or_default();
+    let mut shot = crate::viewer::camera::View {
+        at,
+        bearing_deg: behind + look.bearing_deg.unwrap_or(0.0),
+        pitch_deg: look.pitch_deg.unwrap_or(offset.pitch_deg),
+        distance_m: look.distance_m.unwrap_or(FlyTarget::FINAL_DISTANCE),
+    };
+    shot.tidy();
+    let eased = f64::from(t * t * (3.0 - 2.0 * t));
+    *view = crate::viewer::camera::View::between(&start, &shot, eased, true);
 }
 
 /// Start a short fly of the chase camera to `focus` at `distance`.
