@@ -66,9 +66,34 @@ enum Cmd {
         /// Duration such as 3s, 500ms, 1m
         #[arg(long = "for", default_value = "3s")]
         duration: String,
+        /// Stop once this many metres from where the move began, over the
+        /// ground, instead of after --for
+        #[arg(long, conflicts_with = "hold")]
+        distance: Option<f64>,
         /// Keep streaming until Ctrl-C
         #[arg(long)]
         hold: bool,
+        /// Steal the session from its holder
+        #[arg(long)]
+        take: bool,
+    },
+    /// Drive a route in one go: legs one after another with no stop between
+    /// them, each `forward=M/S turn=RAD/S` held until `distance=M` or
+    /// `angle=DEG` (heading turned either way). A leg without a turn steers
+    /// along a line: the one the route starts on, or `offset=M` to its right,
+    /// in the course the turns so far have set. `do=CONTROLLER:KEY=VAL[,…]`
+    /// sends a controller command as the leg begins. A line is printed as
+    /// each leg ends, and the machine brakes to a stand after the last
+    Route {
+        machine: String,
+        /// Legs such as `forward=3 distance=150 do=hitch_rear:position=0.1`,
+        /// `forward=1.5 turn=-0.5 angle=180` or `forward=3 offset=6 distance=80`
+        #[arg(required = true)]
+        legs: Vec<String>,
+        /// The line straight legs steer along, as another route printed it
+        /// (`X,Y,HEADING`), instead of the one this route starts on
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+        line: Option<Vec<f64>>,
         /// Steal the session from its holder
         #[arg(long)]
         take: bool,
@@ -213,12 +238,24 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             up,
             turn,
             duration,
+            distance,
             hold,
             take,
         } => {
             let forward = forward.unwrap_or(if left == 0.0 && up == 0.0 { 1.0 } else { 0.0 });
-            move_for(ctx, machine, [forward, left, up], turn, &duration, hold, take)
+            let until = match distance {
+                Some(metres) => Until::Distance(metres),
+                None if hold => Until::Interrupted,
+                None => Until::Elapsed(duration),
+            };
+            move_for(ctx, machine, [forward, left, up], turn, until, take)
         }
+        Cmd::Route {
+            machine,
+            legs,
+            line,
+            take,
+        } => route(ctx, machine, &legs, line.as_deref(), take),
         Cmd::Stop { machine, take } => stop(ctx, machine, take),
         Cmd::Drive {
             machine,
@@ -523,13 +560,302 @@ fn claim(ctx: &Ctx, mc: &MachineClient<'_>, machine_id: &str, take: bool) -> Res
     Ok(res)
 }
 
+type StateFeed = Option<gearbox_api::peerbus::Subscriber<gearbox_api::Env>>;
+
+/// The newest state on the feed, the backlog skipped, so what is judged on it
+/// is where the machine is now.
+fn newest_state(feed: &mut StateFeed, last: &mut Option<MachineState>) {
+    if let Some(sub) = feed.as_mut() {
+        let mut wait = Duration::from_millis(5);
+        while let Ok(Some(s)) = next_sample::<MachineState>(sub, wait) {
+            *last = Some(s);
+            wait = Duration::ZERO;
+        }
+    }
+}
+
+/// Holds a zero twist until the machine stands: one released at speed rolls on.
+fn brake_to_stand(
+    mc: &mut MachineClient<'_>,
+    session: u64,
+    feed: &mut StateFeed,
+    last: &mut Option<MachineState>,
+    stop_flag: &std::sync::atomic::AtomicBool,
+) -> Result<()> {
+    let braking = Instant::now();
+    while braking.elapsed() < Duration::from_secs(30)
+        && !stop_flag.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        check(
+            mc.cmd_twist(&TwistCmd::with_lateral(session, 0.0, 0.0, 0.0, 0.0))?,
+            "cmd_vel",
+        )?;
+        newest_state(feed, last);
+        if last.as_ref().is_some_and(|s| s.linear_speed().abs() < 0.05) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs_f64(1.0 / STREAM_HZ));
+    }
+    Ok(())
+}
+
+/// One leg of a route: a twist held until the machine has gone so far over
+/// the ground or turned so far either way, and the controller commands sent
+/// as it begins. A leg that does not turn steers itself along a line.
+#[derive(Debug, Clone, PartialEq)]
+struct Leg {
+    forward: f64,
+    turn: f64,
+    end: LegEnd,
+    /// Metres to the right of the route's first line the line lies, kept
+    /// for the legs after until another says otherwise.
+    offset: Option<f64>,
+    /// `(controller, [(key, value)])`, sent through the route's own session.
+    commands: Vec<(String, Vec<(String, String)>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum LegEnd {
+    Metres(f64),
+    Radians(f64),
+}
+
+/// `forward=M/S turn=RAD/S`, one of `distance=M` or `angle=DEG`, and any of
+/// `offset=M` and `do=CONTROLLER:KEY=VAL[,KEY=VAL]`.
+fn parse_leg(text: &str) -> Result<Leg> {
+    let mut leg = Leg {
+        forward: 0.0,
+        turn: 0.0,
+        end: LegEnd::Metres(0.0),
+        offset: None,
+        commands: Vec::new(),
+    };
+    let mut ends = false;
+    for word in text.split_whitespace() {
+        let (key, value) = word
+            .split_once('=')
+            .ok_or_else(|| CliError::error(format!("leg `{text}`: `{word}` is not KEY=VALUE")))?;
+        if key == "do" {
+            let (controller, pairs) = value.split_once(':').ok_or_else(|| {
+                CliError::error(format!(
+                    "leg `{text}`: `do={value}` needs CONTROLLER:KEY=VAL"
+                ))
+            })?;
+            let pairs = pairs
+                .split(',')
+                .map(|pair| {
+                    pair.split_once('=')
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .ok_or_else(|| {
+                            CliError::error(format!("leg `{text}`: `{pair}` is not KEY=VAL"))
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            leg.commands.push((controller.to_string(), pairs));
+            continue;
+        }
+        let number: f64 = value
+            .parse()
+            .map_err(|_| CliError::error(format!("leg `{text}`: `{value}` is not a number")))?;
+        match key {
+            "forward" => leg.forward = number,
+            "turn" => leg.turn = number,
+            "offset" => leg.offset = Some(number),
+            "distance" => (leg.end, ends) = (LegEnd::Metres(number.abs()), true),
+            "angle" => (leg.end, ends) = (LegEnd::Radians(number.abs().to_radians()), true),
+            _ => {
+                return Err(CliError::error(format!(
+                    "leg `{text}`: unknown key `{key}`"
+                )));
+            }
+        }
+    }
+    if !ends {
+        return Err(CliError::error(format!(
+            "leg `{text}` needs distance= or angle="
+        )));
+    }
+    Ok(leg)
+}
+
+/// How hard a straight leg turns back onto its line: toward the heading that
+/// closes the gap, and onto that heading.
+const LINE_GAIN: f64 = 0.6;
+const HEADING_GAIN: f64 = 1.5;
+const LINE_TURN_MAX: f64 = 0.4;
+
+fn wrap_angle(angle: f64) -> f64 {
+    (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+}
+
+/// The turn that brings a machine at `at` heading `heading` onto the line
+/// `offset` metres right of the one through `origin` along `first`, driving
+/// it along `course` (the first line's way, or back down it).
+fn line_turn(
+    at: [f64; 3],
+    heading: f64,
+    origin: [f64; 3],
+    first: f64,
+    course: f64,
+    offset: f64,
+    forward: f64,
+) -> f64 {
+    let right = (first.sin(), -first.cos());
+    let gap = (at[0] - origin[0]) * right.0 + (at[1] - origin[1]) * right.1 - offset;
+    let way = (course - first).cos().signum();
+    let aim = course + way * (LINE_GAIN * gap).atan2(forward.abs().max(0.5));
+    (HEADING_GAIN * wrap_angle(aim - heading)).clamp(-LINE_TURN_MAX, LINE_TURN_MAX)
+}
+
+fn route(
+    ctx: &Ctx,
+    machine: String,
+    legs: &[String],
+    line: Option<&[f64]>,
+    take: bool,
+) -> Result<()> {
+    let legs = legs
+        .iter()
+        .map(|leg| parse_leg(leg))
+        .collect::<Result<Vec<_>>>()?;
+    let line = match line {
+        Some(&[x, y, heading]) => Some(([x, y, 0.0], heading)),
+        Some(_) => return Err(CliError::usage("--line takes X,Y,HEADING")),
+        None => None,
+    };
+    let machine_id = ctx.machine_id(Some(machine))?;
+    let client = ctx.client()?;
+    let mut mc = client.machine(&machine_id);
+    let session = claim(ctx, &mc, &machine_id, take)?.session;
+    let period = Duration::from_secs_f64(1.0 / STREAM_HZ);
+    let mut feed = mc.state().ok();
+    let mut last: Option<MachineState> = None;
+    let stop_flag = install_ctrlc();
+    // The first line runs from where the route starts the way the machine
+    // faces, unless `--line` names one, which is then driven whichever way
+    // along it the machine faces; each turning leg turns the course by its
+    // angle. The line is printed so a later route can drive on from it.
+    while last.is_none() && !stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        newest_state(&mut feed, &mut last);
+    }
+    let Some(start) = &last else {
+        return Ok(());
+    };
+    let (line_origin, first) = line.unwrap_or((start.position(), start.heading_rad));
+    let facing = wrap_angle(start.heading_rad - first).abs() > std::f64::consts::FRAC_PI_2;
+    let mut course = if facing {
+        wrap_angle(first + std::f64::consts::PI)
+    } else {
+        first
+    };
+    let mut offset = 0.0;
+    println!("line {},{},{}", line_origin[0], line_origin[1], first);
+    let _ = std::io::stdout().flush();
+    // Each leg starts from where the last one ended; the twist never lapses
+    // between them, so the machine drives the route in one go.
+    'legs: for (index, leg) in legs.iter().enumerate() {
+        for (controller, pairs) in &leg.commands {
+            let mut props = Props::from_pairs(&[("controller", controller.as_str())]);
+            for (key, value) in pairs {
+                props.set(key, value);
+            }
+            let command = ControllerCommand {
+                session,
+                value: 0.0,
+                element: 0,
+                _pad: 0,
+                props: props.into_bytes(),
+            };
+            check(mc.command(&command)?, "controller command")?;
+        }
+        offset = leg.offset.unwrap_or(offset);
+        let mut origin: Option<[f64; 3]> = None;
+        let mut heading: Option<f64> = None;
+        let mut turned = 0.0_f64;
+        loop {
+            if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                break 'legs;
+            }
+            newest_state(&mut feed, &mut last);
+            let turn = match (&last, leg.turn) {
+                (Some(s), turn) if turn == 0.0 => line_turn(
+                    s.position(),
+                    s.heading_rad,
+                    line_origin,
+                    first,
+                    course,
+                    offset,
+                    leg.forward,
+                ),
+                (_, turn) => turn,
+            };
+            // A sim slow to answer one twist is sent the next; a route is
+            // not given up for a reply that came late.
+            match mc.cmd_twist(&TwistCmd::with_lateral(
+                session,
+                leg.forward,
+                0.0,
+                0.0,
+                turn,
+            )) {
+                Ok(response) => {
+                    check(response, "cmd_vel")?;
+                }
+                Err(error) => eprintln!("gearbox: leg {}: {error}; sending again", index + 1),
+            }
+            if let Some(s) = &last {
+                let at = s.position();
+                let from = *origin.get_or_insert(at);
+                if let Some(before) = heading.replace(s.heading_rad) {
+                    turned += wrap_angle(s.heading_rad - before);
+                }
+                let done = match leg.end {
+                    LegEnd::Metres(metres) => (at[0] - from[0]).hypot(at[1] - from[1]) >= metres,
+                    LegEnd::Radians(radians) => turned.abs() >= radians,
+                };
+                if done && let LegEnd::Radians(radians) = leg.end {
+                    course = wrap_angle(course + radians.copysign(leg.turn));
+                }
+                if done {
+                    let line = format!(
+                        "leg {} done at ({:.2}, {:.2}) heading {:.3}",
+                        index + 1,
+                        at[0],
+                        at[1],
+                        s.heading_rad
+                    );
+                    println!("{line}");
+                    let _ = std::io::stdout().flush();
+                    break;
+                }
+            }
+            std::thread::sleep(period);
+        }
+    }
+    brake_to_stand(&mut mc, session, &mut feed, &mut last, &stop_flag)?;
+    let _ = mc.cmd_vel(session, 0.0, 0.0);
+    let _ = mc.release(session);
+    ctx.done(
+        &machine_id,
+        &format!("drove `{machine_id}` along {} legs; released", legs.len()),
+        || json!({ "machine_id": machine_id, "legs": legs.len() }),
+    );
+    Ok(())
+}
+
+/// When a move ends.
+enum Until {
+    Elapsed(String),
+    Distance(f64),
+    Interrupted,
+}
+
 fn move_for(
     ctx: &Ctx,
     machine: Option<String>,
     [forward, left, up]: [f64; 3],
     turn: f64,
-    duration: &str,
-    hold: bool,
+    until: Until,
     take: bool,
 ) -> Result<()> {
     let machine_id = ctx.machine_id(machine)?;
@@ -537,21 +863,28 @@ fn move_for(
     let mut mc = client.machine(&machine_id);
     let session = claim(ctx, &mc, &machine_id, take)?.session;
     let period = Duration::from_secs_f64(1.0 / STREAM_HZ);
-    let dur = parse_duration(duration)?;
-    let deadline = Instant::now() + dur;
+    let started = Instant::now();
+    let deadline = match &until {
+        Until::Elapsed(duration) => Some(started + parse_duration(duration)?),
+        _ => None,
+    };
     let mut sub = mc.state().ok();
     let mut last_state: Option<MachineState> = None;
+    let mut origin: Option<[f64; 3]> = None;
     let mut last_print = Instant::now();
     let stop_flag = install_ctrlc();
-    while (hold || Instant::now() < deadline)
+    while deadline.is_none_or(|deadline| Instant::now() < deadline)
         && !stop_flag.load(std::sync::atomic::Ordering::Relaxed)
     {
         let twist = TwistCmd::with_lateral(session, forward, left, up, turn);
         check(mc.cmd_twist(&twist)?, "cmd_vel")?;
-        if let Some(sub) = sub.as_mut()
-            && let Ok(Some(s)) = next_sample::<MachineState>(sub, Duration::from_millis(5))
-        {
-            last_state = Some(s);
+        newest_state(&mut sub, &mut last_state);
+        if let (Until::Distance(metres), Some(s)) = (&until, &last_state) {
+            let at = s.position();
+            let from = *origin.get_or_insert(at);
+            if (at[0] - from[0]).hypot(at[1] - from[1]) >= *metres {
+                break;
+            }
         }
         if !ctx.json
             && !ctx.quiet
@@ -563,22 +896,26 @@ fn move_for(
         }
         std::thread::sleep(period);
     }
+    // A move that ends at a distance stops there.
+    if matches!(until, Until::Distance(_)) {
+        brake_to_stand(&mut mc, session, &mut sub, &mut last_state, &stop_flag)?;
+    }
     let _ = mc.cmd_vel(session, 0.0, 0.0);
     let _ = mc.release(session);
     let pos = last_state
         .as_ref()
         .map(|s| s.position())
         .unwrap_or([0.0; 3]);
+    let seconds = started.elapsed().as_secs_f64();
     ctx.done(
         &machine_id,
         &format!(
-            "drove `{machine_id}` forward {forward} left {left} up {up} m/s turn {turn} rad/s for {:.1}s; now at ({:.2}, {:.2}, {:.2}); released",
-            dur.as_secs_f64(),
+            "drove `{machine_id}` forward {forward} left {left} up {up} m/s turn {turn} rad/s for {seconds:.1}s; now at ({:.2}, {:.2}, {:.2}); released",
             pos[0],
             pos[1],
             pos[2]
         ),
-        || json!({ "machine_id": machine_id, "forward": forward, "left": left, "up": up, "turn": turn, "seconds": dur.as_secs_f64(), "x": pos[0], "y": pos[1], "z": pos[2] }),
+        || json!({ "machine_id": machine_id, "forward": forward, "left": left, "up": up, "turn": turn, "seconds": seconds, "x": pos[0], "y": pos[1], "z": pos[2] }),
     );
     Ok(())
 }
@@ -1371,4 +1708,70 @@ fn set_value(
         || json!({ "machine_id": machine_id, "link": link, "name": name, "value": value }),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LegEnd, line_turn, parse_leg};
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    #[test]
+    fn a_leg_reads_its_twist_its_end_its_line_and_its_commands() {
+        let leg = parse_leg("forward=3 distance=12 offset=6 do=hitch_rear:position=0.1").unwrap();
+        assert_eq!(
+            (leg.forward, leg.turn, leg.end, leg.offset),
+            (3.0, 0.0, LegEnd::Metres(12.0), Some(6.0))
+        );
+        assert_eq!(
+            leg.commands,
+            vec![(
+                "hitch_rear".to_string(),
+                vec![("position".to_string(), "0.1".to_string())]
+            )]
+        );
+        assert!(parse_leg("forward=3").is_err(), "a leg needs an end");
+    }
+
+    #[test]
+    fn a_straight_leg_steers_back_onto_its_line_either_way_along_it() {
+        // Driving north, a metre right of the line: turn left.
+        assert!(
+            line_turn(
+                [1.0, 10.0, 0.0],
+                FRAC_PI_2,
+                [0.0; 3],
+                FRAC_PI_2,
+                FRAC_PI_2,
+                0.0,
+                3.0
+            ) > 0.0
+        );
+        // Driving back south toward the line six metres right, still west
+        // of it: turn left, which heads east.
+        assert!(
+            line_turn(
+                [1.0, 10.0, 0.0],
+                -FRAC_PI_2,
+                [0.0; 3],
+                FRAC_PI_2,
+                FRAC_PI_2 - PI,
+                6.0,
+                3.0
+            ) > 0.0
+        );
+        // On the line and on course: no turn.
+        assert!(
+            line_turn(
+                [6.0, 10.0, 0.0],
+                -FRAC_PI_2,
+                [0.0; 3],
+                FRAC_PI_2,
+                FRAC_PI_2 - PI,
+                6.0,
+                3.0
+            )
+            .abs()
+                < 1.0e-9
+        );
+    }
 }
