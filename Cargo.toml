@@ -25,7 +25,7 @@ big_space = { git = "https://github.com/aevyrie/big_space", rev = "5f255228e9b4f
 # Local sibling crate — spatial types the whole gearbox stack speaks.
 datapod = { git = "https://github.com/robolibs/datapod", tag = "0.6.2" }
 # WGS84/ENU geodesy — local sim positions to real lat/lon/alt for GNSS.
-concord = { git = "https://github.com/robolibs/concord", tag = "0.1.5" }
+concord = { git = "https://github.com/robolibs/concord", tag = "v0.1.6" }
 
 # Bevy + ecosystem. Declared once here with their full feature sets so
 # every crate that needs Bevy pulls the SAME build (otherwise cargo
@@ -76,8 +76,8 @@ bevy = { version = "0.19", default-features = false, features = [
 # persistent identity, `did:key`, and the signed topic directory. The
 # peerbus rev is the one agentio pins; using its head alone splits
 # authbox into two versions.
-peerbus = { git = "https://github.com/robolibs/peerbus", rev = "be28fad1f02be631cc6703ce73caa54c5005cb7f" }
-agentio = { git = "https://github.com/robolibs/agentio", rev = "41d7032a8ee31941be61e930516cf55839f0882a" }
+peerbus = { git = "https://github.com/robolibs/peerbus", rev = "eb44b44a26ad1f323dca78d25d6095a44927c3bd" }
+agentio = { git = "https://github.com/robolibs/agentio", rev = "a0e520195cb7415f267f005fb79c9b153c7ba19e" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
@@ -98,27 +98,10 @@ openusd         = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.
 openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.3.0", features = ["geom", "shade", "physics"] }
 
 # Local peerbus carries the per-handle request-id seed fix; every crate in
-# the graph must see the same peerbus, so patch the git sources rather than
-# depend on the path directly. agentio still names the Codeberg one.
+# the graph (agentio included) must see the same peerbus, so patch the
+# git source rather than depend on the path directly.
 [patch."https://github.com/robolibs/peerbus"]
 peerbus = { path = "../peerbus" }
-
-[patch."https://codeberg.org/robolibs/peerbus.git"]
-peerbus = { path = "../peerbus" }
-
-# Dependencies still name robolibs crates on Codeberg; fetch the same tags
-# from GitHub instead.
-[patch."https://codeberg.org/robolibs/datapod.git"]
-datapod = { git = "https://github.com/robolibs/datapod", tag = "0.6.2" }
-
-[patch."https://codeberg.org/robolibs/authbox.git"]
-authbox = { git = "https://github.com/robolibs/authbox", tag = "0.1.1" }
-
-[patch."https://codeberg.org/robolibs/keylock.git"]
-keylock = { git = "https://github.com/robolibs/keylock", tag = "0.1.1" }
-
-[patch."https://codeberg.org/robolibs/graphix.git"]
-graphix = { git = "https://github.com/robolibs/graphix", tag = "0.1.5" }
 
 # bevy_openusd work in progress (physics markers, incremental projection,
 # variant options) comes from the sibling checkout until it is tagged.
