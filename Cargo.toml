@@ -76,7 +76,7 @@ bevy = { version = "0.19", default-features = false, features = [
 # persistent identity, `did:key`, and the signed topic directory. The
 # peerbus rev is the one agentio pins; using its head alone splits
 # authbox into two versions.
-peerbus = { git = "https://codeberg.org/robolibs/peerbus.git", rev = "be28fad1f02be631cc6703ce73caa54c5005cb7f" }
+peerbus = { git = "https://github.com/robolibs/peerbus", rev = "be28fad1f02be631cc6703ce73caa54c5005cb7f" }
 agentio = { git = "https://github.com/robolibs/agentio", rev = "41d7032a8ee31941be61e930516cf55839f0882a" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -98,8 +98,11 @@ openusd         = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.
 openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.3.0", features = ["geom", "shade", "physics"] }
 
 # Local peerbus carries the per-handle request-id seed fix; every crate in
-# the graph (agentio included) must see the same peerbus, so patch the
-# git source rather than depend on the path directly.
+# the graph must see the same peerbus, so patch the git sources rather than
+# depend on the path directly. agentio still names the Codeberg one.
+[patch."https://github.com/robolibs/peerbus"]
+peerbus = { path = "../peerbus" }
+
 [patch."https://codeberg.org/robolibs/peerbus.git"]
 peerbus = { path = "../peerbus" }
 
