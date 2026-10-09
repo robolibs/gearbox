@@ -23,9 +23,9 @@ license = "MIT"
 # sites on it. Upstream's own Bevy 0.19 branch, pinned until it is released.
 big_space = { git = "https://github.com/aevyrie/big_space", rev = "5f255228e9b4ff30756347b80f92b19ebf7b5c56", features = ["i64", "bevy_camera"] }
 # Local sibling crate — spatial types the whole gearbox stack speaks.
-datapod = { git = "https://codeberg.org/robolibs/datapod.git", tag = "0.6.2" }
+datapod = { git = "https://github.com/robolibs/datapod", tag = "0.6.2" }
 # WGS84/ENU geodesy — local sim positions to real lat/lon/alt for GNSS.
-concord = { git = "https://codeberg.org/robolibs/concord.git", tag = "0.1.5" }
+concord = { git = "https://github.com/robolibs/concord", tag = "0.1.5" }
 
 # Bevy + ecosystem. Declared once here with their full feature sets so
 # every crate that needs Bevy pulls the SAME build (otherwise cargo
@@ -105,6 +105,20 @@ peerbus = { path = "../peerbus" }
 
 [patch."https://codeberg.org/robolibs/peerbus.git"]
 peerbus = { path = "../peerbus" }
+
+# Dependencies still name robolibs crates on Codeberg; fetch the same tags
+# from GitHub instead.
+[patch."https://codeberg.org/robolibs/datapod.git"]
+datapod = { git = "https://github.com/robolibs/datapod", tag = "0.6.2" }
+
+[patch."https://codeberg.org/robolibs/authbox.git"]
+authbox = { git = "https://github.com/robolibs/authbox", tag = "0.1.1" }
+
+[patch."https://codeberg.org/robolibs/keylock.git"]
+keylock = { git = "https://github.com/robolibs/keylock", tag = "0.1.1" }
+
+[patch."https://codeberg.org/robolibs/graphix.git"]
+graphix = { git = "https://github.com/robolibs/graphix", tag = "0.1.5" }
 
 # bevy_openusd work in progress (physics markers, incremental projection,
 # variant options) comes from the sibling checkout until it is tagged.

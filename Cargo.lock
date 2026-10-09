@@ -581,7 +581,7 @@ dependencies = [
 [[package]]
 name = "authbox"
 version = "0.1.1"
-source = "git+https://codeberg.org/robolibs/authbox.git?tag=0.1.1#b22094a1f9742072542f523608ca226969a702f1"
+source = "git+https://github.com/robolibs/authbox?tag=0.1.1#b22094a1f9742072542f523608ca226969a702f1"
 dependencies = [
  "base64ct",
  "bs58",
@@ -2304,7 +2304,7 @@ dependencies = [
 [[package]]
 name = "concord"
 version = "0.1.2"
-source = "git+https://codeberg.org/robolibs/concord.git?tag=0.1.5#828a4895f135a9b2a92c1c868a8b3854c7d6927d"
+source = "git+https://github.com/robolibs/concord?tag=0.1.5#828a4895f135a9b2a92c1c868a8b3854c7d6927d"
 dependencies = [
  "datapod",
  "graphix",
@@ -2734,7 +2734,7 @@ dependencies = [
 [[package]]
 name = "datapod"
 version = "0.6.2"
-source = "git+https://codeberg.org/robolibs/datapod.git?tag=0.6.2#f4aded9d7cac9e2762fff7a99eeb96026a2d0841"
+source = "git+https://github.com/robolibs/datapod?tag=0.6.2#f4aded9d7cac9e2762fff7a99eeb96026a2d0841"
 dependencies = [
  "bytemuck",
  "datapod-macros",
@@ -2743,7 +2743,7 @@ dependencies = [
 [[package]]
 name = "datapod-macros"
 version = "0.0.1"
-source = "git+https://codeberg.org/robolibs/datapod.git?tag=0.6.2#f4aded9d7cac9e2762fff7a99eeb96026a2d0841"
+source = "git+https://github.com/robolibs/datapod?tag=0.6.2#f4aded9d7cac9e2762fff7a99eeb96026a2d0841"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4079,7 +4079,7 @@ dependencies = [
 [[package]]
 name = "graphix"
 version = "0.1.2"
-source = "git+https://codeberg.org/robolibs/graphix.git?tag=0.1.5#4d66881c3b015eb53eaf0f8b4e9806c645e72196"
+source = "git+https://github.com/robolibs/graphix?tag=0.1.5#4d66881c3b015eb53eaf0f8b4e9806c645e72196"
 dependencies = [
  "datapod",
  "glam 0.33.7",
@@ -5062,7 +5062,7 @@ dependencies = [
 [[package]]
 name = "keylock"
 version = "0.1.1"
-source = "git+https://codeberg.org/robolibs/keylock.git?tag=0.1.1#998cfac26b8e307280f7f30f62dfe9c0e465b5d2"
+source = "git+https://github.com/robolibs/keylock?tag=0.1.1#998cfac26b8e307280f7f30f62dfe9c0e465b5d2"
 dependencies = [
  "aes",
  "aes-gcm",
