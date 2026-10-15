@@ -166,6 +166,8 @@ pub struct VegetationParams {
     pub way: Mat4,
     pub way_more: Mat4,
     pub way_shape: Vec4,
+    /// Radians the field's pattern is turned about the vertical.
+    pub yaw: f32,
 }
 
 /// Carries the environment's wind to every field's vegetation uniforms,

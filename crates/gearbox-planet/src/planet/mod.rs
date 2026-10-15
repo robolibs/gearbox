@@ -154,12 +154,14 @@ pub fn spawn_planet(
         base: StandardMaterial {
             perceptual_roughness: 0.95,
             metallic: 0.0,
+            fog_enabled: cfg.surface_kind == 0,
             ..default()
         },
         extension: TerrainExtension {
             globals: TerrainGlobals {
                 radius: cfg.radius,
                 height_amp: cfg.height_amp,
+                surface_kind: cfg.surface_kind,
                 ..default()
             },
             heightmaps: atlas.clone(),
@@ -184,6 +186,7 @@ pub fn spawn_planet(
             globals: TerrainGlobals {
                 radius: cfg.radius,
                 height_amp: cfg.height_amp,
+                surface_kind: cfg.surface_kind,
                 ..default()
             },
             heightmaps: atlas.clone(),
@@ -239,6 +242,7 @@ pub fn spawn_planet(
     let planet = commands
         .spawn((
             cfg.clone(),
+            material::TerrainCoverage::default(),
             cell,
             Transform::from_translation(offset),
             Visibility::Visible,

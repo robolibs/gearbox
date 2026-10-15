@@ -15,7 +15,7 @@
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{inside_field}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{foliage_normal, plant_lighting}
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_roll, scatter_roll}
-#import "embedded://gearbox_fields/concrete/shaders/yard.wgsl"::{SLAB_M, JOINT_M, yard_noise, joint_distances, yard_weedy}
+#import "embedded://gearbox_fields/concrete/shaders/yard.wgsl"::{SLAB_M, JOINT_M, yard_noise, joint_distances, yard_weedy, yard_place, yard_to_world}
 
 struct VegetationParams {
     corner: vec2<f32>,
@@ -36,6 +36,7 @@ struct VegetationParams {
     way: mat4x4<f32>,
     way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
+    yaw: f32,
 };
 
 @group(3) @binding(0) var heightmap: texture_2d<f32>;
@@ -115,14 +116,16 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let scattered = field.corner + vec2<f32>(rand(id, 1u), rand(id, 2u)) * field.chunk_size;
 
     // Onto the nearest joint line, a little off its centre.
-    let reach = joint_distances(scattered);
-    let line = round(scattered / SLAB_M) * SLAB_M;
+    let in_yard = yard_place(scattered, field.yaw);
+    let reach = joint_distances(in_yard);
+    let line = round(in_yard / SLAB_M) * SLAB_M;
     let off = (rand(id, 3u) - 0.5) * JOINT_M * 0.7;
-    let base = select(vec2<f32>(scattered.x, line.y + off), vec2<f32>(line.x + off, scattered.y), reach.x < reach.y);
+    let on_joint = select(vec2<f32>(in_yard.x, line.y + off), vec2<f32>(line.x + off, in_yard.y), reach.x < reach.y);
+    let base = yard_to_world(on_joint, field.yaw);
 
     // Weeds come in runs along a joint, with bare stretches between.
-    let run = smoothstep(0.35, 0.65, yard_noise(base * 1.3 + vec2<f32>(3.0, 8.0)));
-    let kept = rand(id, 4u) < yard_weedy(base) * run;
+    let run = smoothstep(0.35, 0.65, yard_noise(on_joint * 1.3 + vec2<f32>(3.0, 8.0)));
+    let kept = rand(id, 4u) < yard_weedy(on_joint) * run;
     let sampled = sample_field(base);
     let ground = vec3<f32>(base.x, sampled.x, base.y);
     let ground_normal = normalize(vec3<f32>(sampled.y, 1.0, sampled.z));

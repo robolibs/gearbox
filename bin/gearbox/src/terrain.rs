@@ -34,6 +34,7 @@ const TILE_M: f32 = 50.0;
 const TILE_FINE_RADIUS_M: f32 = 180.0;
 const TILE_COARSE_CELL_M: f32 = 4.0;
 const TILE_SKIRT_M: f32 = 2.0;
+const PLANET_JOIN_OVERLAP_M: f32 = 2.0;
 const TILE_REBUILDS_PER_FRAME: usize = 2;
 /// Seconds a frame may spend making the meshes of tiles that have none yet.
 const TILE_BUDGET_S: f32 = 0.005;
@@ -110,6 +111,12 @@ impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GroundColliders>()
             .add_systems(PostStartup, spawn_procedural_terrain)
+            .add_systems(PostUpdate, publish_planet_surface_frame
+                .after(bevy::transform::TransformSystems::Propagate)
+                .before(gearbox_fields::PlanetSurfaceUpdates))
+            .add_systems(PostUpdate, publish_render_coverage
+                .after(bevy::transform::TransformSystems::Propagate)
+                .before(gearbox_planet::planet::quadtree::select_and_sync))
             .add_systems(
                 Update,
                 friction::publish
@@ -123,6 +130,7 @@ impl Plugin for TerrainPlugin {
                     follow_view,
                     update_terrain_tiles,
                     stream_ground_colliders,
+                    publish_planet_coverage,
                 )
                     .chain()
                     .in_set(TerrainUpdates),
@@ -214,7 +222,7 @@ struct GroundParts {
     center: Vec2,
     cell: f32,
     grid: HeightGrid,
-    horizon: Mesh,
+    horizon: Option<Mesh>,
 }
 
 /// How wide the ground square is this run.
@@ -251,7 +259,8 @@ fn build_ground(land: Land, center: Vec2, hollows: &gearbox_fields::Hollows) -> 
     let lie = |x: f32, z: f32| ground_height(&land, hollows, x, z);
     let grid = HeightGrid::sample_at(center, ground_size_m(), cell, lie);
     // The horizon is far enough off that no road shows on it.
-    let horizon = horizon_mesh(&grid, |x, z| land.height(x, z));
+    let horizon = (land.terrain.body() == gearbox_globe::Body::Earth)
+        .then(|| horizon_mesh(&grid, |x, z| land.height(x, z)));
     let heightmap = gearbox_fields::heightmap_image(&grid);
     GroundParts { land, heightmap, center, cell, grid, horizon }
 }
@@ -273,17 +282,17 @@ fn install_ground(
             ChildOf(sites.list[parts.land.site].entity),
         ))
         .id();
-    commands.spawn((
+    if let Some(horizon) = parts.horizon { commands.spawn((
         Name::new("Distant meadow landscape"),
         TerrainBackdrop,
         gearbox_fields::CoverBackdrop,
         ChildOf(entity),
         Transform::IDENTITY,
-        Mesh3d(meshes.add(parts.horizon)),
+        Mesh3d(meshes.add(horizon)),
         TerrainSurfaceMesh,
         gearbox_fields::CoverSurfaceMesh,
         bevy::light::NotShadowCaster,
-    ));
+    )); }
     let center = DVec3::new(parts.center.x as f64, 0.0, parts.center.y as f64);
     let safety_floor = physics
         .insert_collider(
@@ -294,7 +303,7 @@ fn install_ground(
                     SAFETY_FLOOR_HALF_EXTENT_M,
                 ),
             })
-            .translation(center + DVec3::new(0.0, SAFETY_FLOOR_Y_M, 0.0))
+            .translation(center + DVec3::new(0.0, if sites.land.body() == gearbox_globe::Body::Earth { SAFETY_FLOOR_Y_M } else { -10_000.0 }, 0.0))
             .friction(1.2)
             .restitution(0.0),
         )
@@ -389,7 +398,13 @@ fn follow_view(
     children: Query<&Children>,
     cover_pending: Res<gearbox_fields::CoverPending>,
     layout: Res<gearbox_fields::FieldLayout>,
+    mut relaid: Local<(bool, bool)>,
 ) {
+    // A new field layout builds the ground again where it stands.
+    if relaid.0 && layout.is_changed() {
+        relaid.1 = true;
+    }
+    relaid.0 = true;
     let Some(mut terrain) = terrain else {
         *pending = None;
         return;
@@ -407,6 +422,7 @@ fn follow_view(
         // then taken down leaves first, a little each frame, not in one stall.
         commands.entity(*old).insert(Visibility::Hidden);
         commands.entity(terrain.entity).insert(Visibility::Inherited);
+        info!("terrain: surface visible at site {} centre {}", terrain.site, terrain.grid.center());
         physics.remove_collider(*floor, true);
         let mut order = vec![*old];
         let mut next = 0;
@@ -473,7 +489,8 @@ fn follow_view(
     let reach = (eye.y.max(0.0) / (-forward.y).max(0.2)).min(ahead);
     let focus = Vec2::new(eye.x + forward.x * reach, eye.z + forward.z * reach);
     let center = terrain.grid.center();
-    let moved_site = terrain.site != sites.current
+    let moved_site = relaid.1
+        || terrain.site != sites.current
         || LAND.read().ok().and_then(|land| *land).is_some_and(|land| land.frame != sites.current().frame);
     // Slack widens with height: close to the ground a couple of hundred metres
     // is a long way, and from altitude it is nothing, so a fixed figure either
@@ -488,6 +505,7 @@ fn follow_view(
     }
     let land = Land::of(&sites, sites.current);
     let hollows = gearbox_fields::Hollows::of(&layout);
+    relaid.1 = false;
     *pending = Some(
         bevy::tasks::AsyncComputeTaskPool::get()
             .spawn(async move { build_ground(land, wanted, &hollows) }),
@@ -532,8 +550,15 @@ fn stream_ground_colliders(
     mut physics: ResMut<PhysicsWorld>,
     sites: Res<Sites>,
     layout: Res<gearbox_fields::FieldLayout>,
+    mut seen: Local<bool>,
 ) {
     let physics = physics.as_mut();
+    // A new layout lays every ground collider again.
+    if std::mem::replace(&mut *seen, true) && layout.is_changed() {
+        for (_, collider) in ground.0.drain() {
+            physics.remove_collider(collider, true);
+        }
+    }
     if terrain.is_none() {
         for (_, collider) in ground.0.drain() {
             physics.remove_collider(collider, true);
@@ -608,13 +633,7 @@ fn horizon_mesh(grid: &HeightGrid, height: impl Fn(f32, f32) -> f32) -> Mesh {
     // geometrically from there — close together where the join has to be
     // invisible, further apart as they run out to the horizon.
     let half = ground_size_m() * 0.5;
-    let mut radii = vec![half];
-    let mut step = half * 0.01;
-    while radii.last().copied().unwrap_or(half) < HORIZON_REACH_M {
-        let next = radii.last().copied().unwrap_or(half) + step;
-        radii.push(next);
-        step *= 1.25;
-    }
+    let radii = horizon_radii(half);
     let steps = (ground_size_m() / TILE_M) as usize * tile_segments(grid.cell);
     let ring_len = steps * 4;
     let center = grid.center();
@@ -672,6 +691,71 @@ fn horizon_mesh(grid: &HeightGrid, height: impl Fn(f32, f32) -> f32) -> Mesh {
 
 fn tile_segments(cell: f32) -> usize {
     (TILE_M / cell).ceil().max(1.0) as usize
+}
+
+fn horizon_radii(half: f32) -> Vec<f32> {
+    let mut radii = vec![half];
+    let mut step = half * 0.01;
+    while *radii.last().unwrap() < HORIZON_REACH_M {
+        radii.push(radii.last().unwrap() + step);
+        step *= 1.25;
+    }
+    radii
+}
+
+fn publish_planet_surface_frame(
+    planets: Query<(&gearbox_planet::PlanetConfig, &GlobalTransform)>,
+    mut frame: ResMut<gearbox_fields::PlanetSurfaceFrame>,
+) {
+    for (planet, transform) in &planets {
+        if planet.surface_kind != 0 {
+            let next = transform.to_matrix().inverse();
+            if frame.0 != next { frame.0 = next; }
+        }
+    }
+}
+
+fn publish_planet_coverage(
+    terrain: Option<Res<ProceduralTerrain>>, sites: Res<Sites>,
+    visibility: Query<&Visibility>, pending: Res<gearbox_fields::CoverPending>,
+    mut planets: Query<&mut gearbox_planet::PlanetConfig>,
+) {
+    if sites.land.body() == gearbox_globe::Body::Earth { return; }
+    let Some(terrain) = terrain else {
+        for mut planet in &mut planets { planet.cover_origin = Vec4::ZERO; }
+        return;
+    };
+    if !terrain.complete || pending.0 != 0 || visibility.get(terrain.entity).is_ok_and(|v| *v == Visibility::Hidden) { return; }
+    let frame = sites.list[terrain.site].frame;
+    let centre = terrain.grid.center();
+    let origin = frame.to_ecef(bevy::math::DVec3::new(centre.x as f64,0.0,centre.y as f64)).as_vec3();
+    let extent = (terrain.grid.half_size() - PLANET_JOIN_OVERLAP_M).max(0.0);
+    let north = (frame.rotation * bevy::math::DVec3::X).as_vec3().extend(0.0);
+    let east = (frame.rotation * bevy::math::DVec3::Z).as_vec3().extend(0.0);
+    for mut planet in &mut planets {
+        if planet.cover_origin != origin.extend(extent) || planet.cover_north != north || planet.cover_east != east {
+            planet.cover_origin = origin.extend(extent); planet.cover_north = north; planet.cover_east = east;
+        }
+    }
+}
+
+fn publish_render_coverage(
+    terrain: Option<Res<ProceduralTerrain>>,
+    pending: Res<gearbox_fields::CoverPending>,
+    transforms: Query<(&GlobalTransform, &Visibility)>,
+    mut planets: Query<(&gearbox_planet::PlanetConfig, &mut gearbox_planet::planet::material::TerrainCoverage)>,
+) {
+    use gearbox_planet::planet::material::TerrainCoverage;
+    let coverage = terrain.as_ref().filter(|t| t.complete && pending.0 == 0)
+        .and_then(|t| transforms.get(t.entity).ok().map(|frame| (t, frame)))
+        .filter(|(_, (_, visibility))| **visibility != Visibility::Hidden)
+        .map(|(t, (frame, _))| TerrainCoverage::from_frame(frame, t.grid.center(),
+            (t.grid.half_size() - PLANET_JOIN_OVERLAP_M).max(0.0)))
+        .unwrap_or_default();
+    for (planet, mut render_coverage) in &mut planets {
+        let next = if planet.surface_kind == 0 { TerrainCoverage::default() } else { coverage };
+        if *render_coverage != next { *render_coverage = next; }
+    }
 }
 
 /// One surface tile with spacing at most `cell`, and a skirt below its rim so

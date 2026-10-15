@@ -4,6 +4,26 @@
 mod tests {
     use super::*;
 
+    #[test]
+    fn replacement_preserves_surface_parts_of_retiring_terrain() {
+        let mut world = World::new();
+        let old_root = world.spawn_empty().id();
+        let new_root = world.spawn_empty().id();
+        let old_tile = world.spawn(ChildOf(old_root)).id();
+        let new_tile = world.spawn(ChildOf(new_root)).id();
+        let old_part = world.spawn(ChildOf(old_tile)).id();
+        let new_part = world.spawn(ChildOf(new_tile)).id();
+        world.entity_mut(old_tile).insert(SurfaceParts(vec![old_part]));
+        world.entity_mut(new_tile).insert(SurfaceParts(vec![new_part]));
+        invalidate_surface_parts(&mut world, new_root);
+        assert!(world.get_entity(old_part).is_ok());
+        assert_eq!(world.get::<SurfaceParts>(old_tile).unwrap().0, vec![old_part]);
+        assert!(world.get_entity(new_part).is_err());
+        assert!(world.get::<SurfaceParts>(new_tile).is_none());
+        world.entity_mut(old_root).despawn();
+        assert!(world.get_entity(old_part).is_err());
+    }
+
     fn plot(name: &str, profile: &str, min: [f32; 2], max: [f32; 2]) -> FieldSpec {
         FieldSpec {
             name: name.into(),
@@ -15,6 +35,7 @@ mod tests {
             way_width: None,
             tyre: None,
             friction: None,
+            yaw: 0.0,
         }
     }
 
@@ -511,6 +532,7 @@ pub fn ensure_fields(world: &mut World) {
                     texel_count: grid.cols as f32,
                     bounds: Vec4::new(bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y),
                     wheels,
+                    yaw: spec.yaw.to_radians(),
                     ..default()
                 },
             },
@@ -566,11 +588,15 @@ pub fn ensure_fields(world: &mut World) {
         fields,
         background,
     });
-    // Surfaces matched against the fields before these are matched again.
-    let mut matched = world.query::<(Entity, &SurfaceParts)>();
+    invalidate_surface_parts(world, root);
+}
+
+fn invalidate_surface_parts(world: &mut World, root: Entity) {
+    let mut matched = world.query::<(Entity, &SurfaceParts, &ChildOf)>();
     let stale: Vec<(Entity, Vec<Entity>)> = matched
         .iter(world)
-        .map(|(entity, parts)| (entity, parts.0.clone()))
+        .filter(|(_, _, parent)| parent.parent() == root)
+        .map(|(entity, parts, _)| (entity, parts.0.clone()))
         .collect();
     for (entity, parts) in stale {
         for part in parts {
@@ -949,6 +975,7 @@ fn placed_of(
         way: roads.next().map_or_else(crate::layout::Way::straight, |first| {
             roads.fold(first, crate::layout::Way::crossing)
         }),
+        yaw: self_spec.yaw.to_radians(),
         ..default()
     };
     (near.tint, near.reach) = neighbours_of(specs, self_spec, |name| {

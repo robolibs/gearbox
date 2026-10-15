@@ -1955,7 +1955,7 @@ fn steer_torque_cap(
         return None;
     }
     let width = loads.iter().map(|(width, _)| width).sum::<f64>() / loads.len() as f64;
-    let nominal = TIRE_FRICTION * mass * 9.81 / wheels.max(1) as f64 * width / 2.0;
+    let nominal = TIRE_FRICTION * mass * physics.gravity().length() / wheels.max(1) as f64 * width / 2.0;
     let loaded = loads.iter().map(|(width, grip)| width * grip / 2.0).fold(0.0, f64::max);
     Some((1.25 * nominal.max(loaded)).min(STEER_MAX_TORQUE))
 }

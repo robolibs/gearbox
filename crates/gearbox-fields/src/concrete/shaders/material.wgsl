@@ -16,7 +16,7 @@
 
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheel_mark}
-#import "embedded://gearbox_fields/concrete/shaders/yard.wgsl"::{SLAB_M, JOINT_M, slab_rand, yard_noise, slab_cell, joint_distances, yard_weedy}
+#import "embedded://gearbox_fields/concrete/shaders/yard.wgsl"::{SLAB_M, JOINT_M, slab_rand, yard_noise, slab_cell, joint_distances, yard_weedy, yard_place, yard_to_world}
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var clean_albedo: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var yard_sampler: sampler;
@@ -29,6 +29,7 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var moss_albedo: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var moss_normal: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var moss_arm: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(111) var<uniform> yard_turn: vec4<f32>;
 
 // Ground the scans cover: the clean floor is 3 m across, the mossy one 2 m.
 const CLEAN_M: f32 = 3.0;
@@ -48,20 +49,21 @@ fn turn(v: vec2<f32>, quarter: u32) -> vec2<f32> {
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     let world_xz = in.world_position.xz;
+    let yard_xz = yard_place(world_xz, yard_turn.x);
     let ground = surface_geometry_normal(surface_heightmap, geometry, world_xz, in.world_normal);
 
     // This slab's pour: the scan turned and shifted, gradients kept
     // continuous so mips do not seam at the slab edge.
-    let cell = slab_cell(world_xz);
+    let cell = slab_cell(yard_xz);
     let quarter = u32(slab_rand(cell, 1u) * 4.0);
     let shift = vec2<f32>(slab_rand(cell, 2u), slab_rand(cell, 3u));
-    let local = turn(world_xz - (vec2<f32>(cell) + vec2<f32>(0.5)) * SLAB_M, quarter);
+    let local = turn(yard_xz - (vec2<f32>(cell) + vec2<f32>(0.5)) * SLAB_M, quarter);
     // Once a pixel spans several texels, read one mip coarser and flatten the
     // relief: sub-pixel bumps lit by a raking sun are grain, not texture.
-    let footprint = max(length(dpdx(world_xz)), length(dpdy(world_xz)));
+    let footprint = max(length(dpdx(yard_xz)), length(dpdy(yard_xz)));
     let coarse = smoothstep(0.003, 0.012, footprint);
-    let ddx = turn(dpdx(world_xz), quarter) * mix(1.0, 1.8, coarse);
-    let ddy = turn(dpdy(world_xz), quarter) * mix(1.0, 1.8, coarse);
+    let ddx = turn(dpdx(yard_xz), quarter) * mix(1.0, 1.8, coarse);
+    let ddy = turn(dpdy(yard_xz), quarter) * mix(1.0, 1.8, coarse);
     var sun_height = 1.0;
     if (lights.n_directional_lights > 0u) {
         sun_height = max(lights.directional_lights[0].direction_to_light.y, 0.0);
@@ -72,23 +74,23 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // A second, larger reading of the same scan breaks the repeat inside
     // one slab.
     let uv_wide = local / (CLEAN_M * 2.3) + shift.yx;
-    let wide = smoothstep(0.3, 0.7, yard_noise(world_xz * 0.45));
+    let wide = smoothstep(0.3, 0.7, yard_noise(yard_xz * 0.45));
     var albedo = mix(textureSampleGrad(clean_albedo, yard_sampler, uv, ddx / CLEAN_M, ddy / CLEAN_M).rgb,
         textureSampleGrad(clean_albedo, yard_sampler, uv_wide, ddx / (CLEAN_M * 2.3), ddy / (CLEAN_M * 2.3)).rgb, wide * 0.6);
     var bump = textureSampleGrad(clean_normal, yard_sampler, uv, ddx / CLEAN_M, ddy / CLEAN_M).xyz * 2.0 - 1.0;
     var arm = textureSampleGrad(clean_arm, yard_sampler, uv, ddx / CLEAN_M, ddy / CLEAN_M).rgb;
 
     // Joints: the open gap, and how near this point is to one.
-    let reach = joint_distances(world_xz);
+    let reach = joint_distances(yard_xz);
     let to_joint = min(reach.x, reach.y);
     let soft = max(fwidth(to_joint), 0.001);
     let gap = 1.0 - smoothstep(JOINT_M * 0.5 - soft, JOINT_M * 0.5 + soft, to_joint);
 
     // Moss and staining where the yard is weedy: patches on the slab,
     // thickest along the joints it spreads from.
-    let weedy = yard_weedy(world_xz);
-    let patches = smoothstep(0.45, 0.75, yard_noise(world_xz * 0.6 + vec2<f32>(5.0, 11.0)));
-    let creep = (1.0 - smoothstep(0.0, 0.5, to_joint)) * smoothstep(0.25, 0.6, yard_noise(world_xz * 1.7));
+    let weedy = yard_weedy(yard_xz);
+    let patches = smoothstep(0.45, 0.75, yard_noise(yard_xz * 0.6 + vec2<f32>(5.0, 11.0)));
+    let creep = (1.0 - smoothstep(0.0, 0.5, to_joint)) * smoothstep(0.25, 0.6, yard_noise(yard_xz * 1.7));
     let moss = clamp(weedy * max(patches * 0.8, creep), 0.0, 1.0);
     if (moss > 0.004) {
         let uv_moss = local / MOSS_M + shift.yx * 3.0;
@@ -104,7 +106,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     // The gap itself: dark sealant where kept, soil where weeds root.
     let fill = mix(vec3<f32>(0.035, 0.035, 0.036), vec3<f32>(0.075, 0.058, 0.04), weedy)
-        * mix(0.7, 1.2, yard_noise(world_xz * 23.0));
+        * mix(0.7, 1.2, yard_noise(yard_xz * 23.0));
     albedo = mix(albedo, fill, gap);
 
     // Tyres print their tread in rubber and dust: barely rolling straight,
@@ -125,9 +127,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let relief = turn(bump.xy, (4u - (quarter & 3u)) & 3u);
     let settle = (vec2<f32>(slab_rand(cell, 8u), slab_rand(cell, 9u)) - vec2<f32>(0.5)) * 0.02;
     let toward = select(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), reach.x < reach.y)
-        * sign(fract(world_xz / SLAB_M) - vec2<f32>(0.5));
+        * sign(fract(yard_xz / SLAB_M) - vec2<f32>(0.5));
     let chamfer = (1.0 - smoothstep(JOINT_M * 0.5, JOINT_M * 0.5 + 0.012, to_joint)) * (1.0 - gap);
-    let lean = (relief * relief_strength + settle) * (1.0 - gap) + toward * chamfer * 0.7;
+    let lean = yard_to_world((relief * relief_strength + settle) * (1.0 - gap) + toward * chamfer * 0.7, yard_turn.x);
     let normal = normalize(tangent * lean.x + bitangent * lean.y + ground * max(bump.z, 0.2));
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material, vec4<f32>(albedo, 1.0));

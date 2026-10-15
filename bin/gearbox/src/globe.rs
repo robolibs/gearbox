@@ -36,6 +36,7 @@ impl Plugin for GlobePlugin {
                     seat_planet,
                     tell_planet_where_we_are,
                     publish_view_place,
+                    take_fields_layout,
                 )
                     .chain()
                     .before(crate::terrain::TerrainUpdates),
@@ -111,7 +112,7 @@ pub(crate) fn home_datum() -> Datum {
         let (lat, lon) = value.split_once(',')?;
         Some((lat.trim().parse::<f64>().ok()?, lon.trim().parse::<f64>().ok()?))
     });
-    let (latitude, longitude) = given.unwrap_or((52.370216, 4.895168));
+    let (latitude, longitude) = given.unwrap_or(gearbox_globe::Body::active().home());
     Datum::at(latitude, longitude)
 }
 
@@ -123,6 +124,7 @@ fn spawn_globe(mut commands: Commands) {
         ))
         .id();
     let frame = home_datum();
+    gearbox_api::set_home_place(frame.latitude, frame.longitude);
     let entity = commands.spawn(site_bundle(0, "home", &frame, root)).id();
     let sites = Sites {
         root,
@@ -217,15 +219,19 @@ fn tell_planet_where_we_are(
 }
 
 /// A loaded root joins the datum it was placed in, or the one in view if it was
-/// placed nowhere in particular.
+/// placed nowhere in particular. A root the tool API loaded joins home.
 fn adopt_loaded_roots(
     mut commands: Commands,
     sites: Res<Sites>,
     roots: Query<(Entity, Option<&InDatum>), (Added<crate::load::LoadedAsset>, Without<ChildOf>)>,
+    api_roots: Query<Entity, (Added<gearbox_api::plugin::PendingLoadedUsd>, Without<ChildOf>)>,
 ) {
     for (root, placed) in &roots {
         let datum = placed.map_or(sites.current, |placed| placed.0.min(sites.list.len() - 1));
         commands.entity(root).insert(ChildOf(sites.list[datum].entity));
+    }
+    for root in &api_roots {
+        commands.entity(root).insert(ChildOf(sites.list[0].entity));
     }
 }
 
@@ -369,6 +375,48 @@ pub fn ground_height_at_physics(x: f64, z: f64) -> f64 {
 #[derive(Resource, Clone)]
 struct HomeLayout(gearbox_fields::FieldLayout);
 
+/// A field layout sent over the wire takes over at home, the last of a frame's
+/// requests winning; a site away from home keeps only its default cover. One
+/// that does not parse or validate is refused with a warning and changes nothing.
+fn take_fields_layout(
+    mut commands: Commands,
+    mut requests: MessageReader<gearbox_api::FieldsLayoutRequest>,
+    sites: Res<Sites>,
+    profiles: Res<gearbox_fields::FieldProfiles>,
+) {
+    let Some(request) = requests.read().last() else {
+        return;
+    };
+    let layout: gearbox_fields::FieldLayout = match serde_json::from_str(&request.0) {
+        Ok(layout) => layout,
+        Err(error) => {
+            warn!("fields: layout refused, it does not parse: {error}");
+            return;
+        }
+    };
+    let anywhere = gearbox_fields::FieldBounds { min: Vec2::splat(-1.0e7), max: Vec2::splat(1.0e7) };
+    if let Err(error) = layout.validate(&profiles, anywhere) {
+        warn!("fields: layout refused: {error}");
+        return;
+    }
+    info!(
+        "fields: new layout at home, default {}, {} fields, {} ways",
+        layout.default,
+        layout.fields.len(),
+        layout.ways.len()
+    );
+    commands.insert_resource(HomeLayout(layout.clone()));
+    if sites.current == 0 {
+        commands.insert_resource(layout);
+    } else {
+        commands.insert_resource(gearbox_fields::FieldLayout {
+            fields: Vec::new(),
+            ways: Vec::new(),
+            ..layout
+        });
+    }
+}
+
 fn enter_site(
     commands: &mut Commands,
     sites: &mut Sites,
@@ -462,7 +510,7 @@ fn seat_planet(
     if *seated == Some(datum.origin) {
         return;
     }
-    let centre = datum.origin - datum.up() * gearbox_globe::PLANET_RADIUS_M;
+    let centre = datum.origin - datum.up() * datum.body.radius_m();
     for (mut transform, mut cell) in &mut balls {
         let (new_cell, local) = Grid::new(PLANET_CELL_M, 0.0).translation_to_grid(centre);
         *cell = new_cell;

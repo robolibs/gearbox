@@ -43,6 +43,24 @@ pub fn view_place_prop() -> String {
     }
 }
 
+static HOME: RwLock<Option<(f64, f64)>> = RwLock::new(None);
+
+/// Says where home is: the latitude and longitude, in degrees, that x, y, z of
+/// a load are measured north, up and east of.
+pub fn set_home_place(latitude: f64, longitude: f64) {
+    if let Ok(mut slot) = HOME.write() {
+        *slot = Some((latitude, longitude));
+    }
+}
+
+/// Home as it travels in `/gearbox/info`: latitude and longitude in degrees.
+pub fn home_place_prop() -> String {
+    match HOME.read().ok().and_then(|slot| *slot) {
+        Some((latitude, longitude)) => format!("{latitude:.9} {longitude:.9}"),
+        None => String::new(),
+    }
+}
+
 /// Reads back what [`view_place_prop`] wrote.
 pub fn parse_view_place(text: &str) -> Option<ViewPlace> {
     let mut numbers = text.split_whitespace().map(str::parse::<f64>);

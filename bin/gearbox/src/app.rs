@@ -69,11 +69,12 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(crate::globe::GlobePlugin)
         .add_plugins(gearbox_planet::PlanetPlugin)
         .add_plugins(world::WorldPlugin)
+        .insert_resource(environment::planetary_weather())
         .add_plugins(environment::WeatherPlugin)
-        .add_plugins(crate::biomes::WorldBiomesPlugin)
         .init_resource::<environment::ViewerLens>()
-        .add_plugins(gearbox_fields::FieldsPlugin::default())
+        .add_plugins(environment::planetary_fields())
         .add_plugins(terrain::TerrainPlugin)
+        .add_plugins(crate::planet_rocks::PlanetRocksPlugin)
         .configure_sets(
             Update,
             gearbox_fields::CoverUpdates.after(terrain::TerrainUpdates),
@@ -104,6 +105,9 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(viewer::recorder::RecorderPlugin)
         .add_plugins(viewer::overlays::OverlaysPlugin)
         .add_plugins(viewer::physics_overlay::PhysicsOverlayPlugin);
+    if gearbox_globe::Body::active() == gearbox_globe::Body::Earth {
+        app.add_plugins(crate::biomes::WorldBiomesPlugin);
+    }
 }
 
 /// How much of a frame the loader may spend projecting prims:

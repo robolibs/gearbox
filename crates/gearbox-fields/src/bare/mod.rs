@@ -304,6 +304,25 @@ pub const WAY_SOIL: Vec4 = Vec4::new(0.108, 0.068, 0.038, 1.0);
 
 type BareMaterial = ExtendedMaterial<StandardMaterial, BareExtension>;
 
+#[derive(Resource, Default)]
+pub struct PlanetSurfaceFrame(pub Mat4);
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlanetSurfaceUpdates;
+
+fn carry_planet_frame(
+    frame: Res<PlanetSurfaceFrame>,
+    mut materials: ResMut<Assets<BareMaterial>>,
+) {
+    let changed: Vec<_> = materials.iter().filter_map(|(id, material)| {
+        let ground = &material.extension.ground;
+        (ground.planet.x != 0.0 && ground.world_to_planet != frame.0).then_some(id)
+    }).collect();
+    for id in changed {
+        materials.get_mut(id).unwrap().extension.ground.world_to_planet = frame.0;
+    }
+}
+
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 struct BareExtension {
     #[texture(105, sample_type = "u_int")]
@@ -369,6 +388,9 @@ impl DrivenTrail {
 /// here and filled in by `ground` from the field's `Placed`.
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, Default)]
 pub struct BareGround {
+    /// Surface kind in x: zero terrestrial, one Mars, two Moon.
+    pub planet: Vec4,
+    pub world_to_planet: Mat4,
     /// Multiplies the soil's own colour.
     pub tint: Vec4,
     /// Metres across the clods, how deep they sit, how much the wind has
@@ -434,11 +456,16 @@ pub(super) struct BarePlugin;
 
 impl Plugin for BarePlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<gearbox_globe::surface::PlanetSurfaceShaderPlugin>() {
+            app.add_plugins(gearbox_globe::surface::PlanetSurfaceShaderPlugin);
+        }
         bevy::asset::embedded_asset!(app, "shaders/cover.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/grit_sieve.wgsl");
         app.add_plugins(MaterialPlugin::<BareMaterial>::default());
+        app.init_resource::<PlanetSurfaceFrame>()
+            .add_systems(PostUpdate, carry_planet_frame.in_set(PlanetSurfaceUpdates));
         app.add_systems(Update, carry_trail_to_grounds);
         // A worn track recovers slowly and marks deeply; sand holds a wheel
         // mark just as long but hardly darkens where it has been pressed.
@@ -496,7 +523,36 @@ impl Plugin for BarePlugin {
             soft_border: 0.8,
             workable: false,
         });
+        for (name, tint, factory) in [
+            ("mars", Vec4::new(0.24, 0.105, 0.047, 1.0), mars_ground as GroundFactory),
+            ("moon", Vec4::new(0.115, 0.112, 0.108, 1.0), moon_ground as GroundFactory),
+        ] {
+            profiles.register(FieldProfile {
+                name, surface_tint: tint,
+                wheel_response: WheelResponse { recovery_seconds: 1_800.0, darkening: 0.18, ..response },
+                layers: standing(32.0, 0.0, 0.0, 0.0, blown_clod, pebble),
+                ground: factory, tread: Vec4::ZERO, soft_border: 0.0, workable: false,
+            });
+        }
     }
+}
+
+fn mars_ground(world: &mut World, tracks: Handle<Image>, wheels: WheelMapParams,
+    geometry: SurfaceGeometry, placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
+    ground(world, tracks, wheels, geometry, placed, BareGround {
+        planet: Vec4::X,
+        tint: Vec4::new(0.24, 0.105, 0.047, 1.0),
+        grain: Vec4::new(0.08, 0.18, 0.0, 0.35), grass: Vec4::ZERO, ..default()
+    }, 0.95)
+}
+
+fn moon_ground(world: &mut World, tracks: Handle<Image>, wheels: WheelMapParams,
+    geometry: SurfaceGeometry, placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
+    ground(world, tracks, wheels, geometry, placed, BareGround {
+        planet: Vec4::new(2.0, 0.0, 0.0, 0.0),
+        tint: Vec4::new(0.115, 0.112, 0.108, 1.0),
+        grain: Vec4::new(0.045, 0.14, 0.0, 0.3), grass: Vec4::ZERO, ..default()
+    }, 1.0)
 }
 
 /// Turned earth: dark, coarse and clodded, with the plough's own combing.
@@ -679,6 +735,7 @@ fn ground(
         .resource_mut::<Assets<BareMaterial>>()
         .add(ExtendedMaterial {
             base: StandardMaterial {
+                fog_enabled: bare.planet.x == 0.0,
                 perceptual_roughness: roughness,
                 metallic: 0.0,
                 ..default()

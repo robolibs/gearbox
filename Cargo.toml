@@ -10,6 +10,7 @@ members = [
     "crates/bevy_biomes",
     "crates/gearbox-cli",
     "bin/gearbox",
+    "vendor/bevy_render",
 ]
 
 # Shared metadata. Each member inherits with `version.workspace = true`.
@@ -113,6 +114,7 @@ openusd-schemas = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openus
 # bevy_openusd's bevy_asset serialises loads of one source so an older
 # snapshot cannot land after a newer one; the patch has to cover the graph.
 [patch.crates-io]
+bevy_render = { path = "vendor/bevy_render" }
 bevy_asset = { path = "../../OUSD/bevy_openusd/vendor/bevy_asset" }
 
 # Dependencies are optimised even in dev builds: unoptimised Bevy spends the

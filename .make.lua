@@ -64,6 +64,12 @@ end
 
 local NAME = project_name()
 
+local function forwarded_args(a)
+  assert(a.args == nil or type(a.args) == "string",
+    "use --args='--planet mars --load /path/to/rover.usdz' (with = before dash-prefixed arguments)")
+  return a.args or ""
+end
+
 -- One build, and it is the one `run`, `sim` and `cli` launch. There used to be
 -- a second recipe for the release binary, which meant `make build` could leave
 -- the binary on PATH untouched and hours old while everything looked rebuilt.
@@ -101,11 +107,11 @@ make.alias("c", "compile")
 make.recipe{
   name = "run",
   desc = "launch the simulator through the CLI (fresh Wayland detection, nixVulkan wrapper)",
-  params = { { "--args", desc = "passed through to `gearbox run`, e.g. a USD scene path" } },
+  params = { { "--args", desc = "gearbox run arguments; use --args='--planet mars ...'" } },
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/release/gearbox run %s"):format(a.args or "")))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/release/gearbox run %s"):format(forwarded_args(a))))
   end,
 }
 make.alias("r", "run")
@@ -117,7 +123,7 @@ make.recipe{
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/release/gearbox launch %s"):format(a.args or "")))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/release/gearbox launch %s"):format(forwarded_args(a))))
   end,
 }
 
@@ -127,13 +133,33 @@ make.recipe{
   params = { { "--args", desc = "arguments passed through to the CLI" } },
   deps = { "build" },
   run = function(a)
-    sh.sh("-c", ("target/release/gearbox %s"):format(a.args or ""))
+    sh.sh("-c", ("target/release/gearbox %s"):format(forwarded_args(a)))
   end,
 }
 
 make.recipe{ name = "test", desc = "run all tests",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
+make.recipe{ name = "test-launch-args", desc = "check Oslo launch argument forwarding without starting a simulator",
+             run = function() sh.bash("scripts/test-launch-args.sh") end }
+make.recipe{ name = "test-planets", desc = "test planetary frames and terrain",
+             run = function()
+               sh.cargo("test", "-p", "gearbox-globe")
+               sh.cargo("test", "-p", "bevy_weather")
+               sh.cargo("test", "-p", "gearbox-fields", "--lib")
+               sh.cargo("test", "-p", "gearbox-cli", "planet_tests")
+               sh.cargo("test", "-p", "gearbox-planet", "--lib")
+               sh.cargo("test", "-p", "gearbox-planet", "--test", "surface_handoff")
+               sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "planet_tests")
+             end }
+make.recipe{ name = "test-planet-gpu", desc = "compare production globe shader heights with local terrain on Vulkan",
+             run = function() sh.nixVulkan("cargo", "test", "-p", "gearbox-planet", "--test", "regolith_gpu", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-planet-geometry", desc = "check global and local planetary geometry",
+             run = function() sh.cargo("test", "-p", "gearbox-globe") end }
+make.recipe{ name = "test-render-pages", desc = "test sparse GPU buffer page boundaries",
+             run = function() sh.cargo("test", "-p", "bevy_render", "planet_sparse_page_tests") end }
+make.recipe{ name = "test-planet-gravity", desc = "measure native gravity after imported USD scenes on each planet",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "planet_gravity_all_bodies", "--", "--nocapture") end }
 make.recipe{ name = "test-hitch", desc = "test grouped hitch control and joint compliance",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "services::") end }
 make.recipe{ name = "test-tracked-machine", desc = "test the imported GEARBOX_TRACK_ASSET through native tracked control",

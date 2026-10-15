@@ -318,7 +318,7 @@ fn spawn_world(
     render_target: Option<Res<BevyViewportRenderTarget>>,
     sites: Res<crate::globe::Sites>,
 ) {
-    let radius = PLANET_RADIUS_M;
+    let radius = gearbox_globe::Body::active().radius_m() as f32;
 
     // ── Planet ───────────────────────────────────────────────────────
     // Warm sandy / tan ground colour, filling the horizon. It is lowered
@@ -1436,6 +1436,7 @@ fn spawn_cdlod_planet(world: &mut World) {
     let Some(root) = world.get_resource::<crate::globe::Sites>().map(|sites| sites.root) else {
         return;
     };
+    let terrain_home = Vec4::from_array(world.resource::<crate::globe::Sites>().land.bake_home());
     let grid = world.resource_mut::<Assets<Mesh>>().add(gearbox_planet::planet::mesh::build_grid_mesh());
     world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
         world.resource_scope(|world, mut buffers: Mut<Assets<bevy::render::storage::ShaderBuffer>>| {
@@ -1448,7 +1449,10 @@ fn spawn_cdlod_planet(world: &mut World) {
                             root,
                             // Inscribed in the ellipsoid the sites stand on, so
                             // the globe is never above the ground anywhere.
-                            PlanetConfig::earth(gearbox_globe::INSCRIBED_RADIUS_M as f32),
+                            match gearbox_globe::Body::active() {
+                                gearbox_globe::Body::Earth => PlanetConfig::earth(gearbox_globe::INSCRIBED_RADIUS_M as f32),
+                                body => PlanetConfig { terrain_home, ..PlanetConfig::barren(body.radius_m() as f32, body as u32) },
+                            },
                             bevy::math::DVec3::ZERO,
                             &grid,
                             &mut images,

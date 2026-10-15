@@ -28,6 +28,7 @@ struct VegetationParams {
     way: mat4x4<f32>,
     way_more: mat4x4<f32>,
     way_shape: vec4<f32>,
+    yaw: f32,
 };
 
 struct BladeDispatch {

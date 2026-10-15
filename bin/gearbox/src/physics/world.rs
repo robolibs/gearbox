@@ -113,7 +113,7 @@ impl PhysicsWorld {
             solver_iterations: 16,
             internal_iterations: 4,
         });
-        backend.set_gravity(glam::DVec3::new(0.0, -9.81, 0.0));
+        backend.set_gravity(glam::DVec3::new(0.0, -gearbox_globe::Body::active().gravity_mps2(), 0.0));
         info!("gearbox-physics: backend `{}` at {step_hz} Hz", backend.name());
         Self {
             backend,

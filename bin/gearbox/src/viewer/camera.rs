@@ -71,8 +71,9 @@ pub struct View {
 
 impl Default for View {
     fn default() -> Self {
+        let home = crate::globe::home_datum();
         Self {
-            at: Geodetic::new(52.370216, 4.895168, 0.0),
+            at: Geodetic::new(home.latitude, home.longitude, 0.0),
             bearing_deg: 205.0,
             pitch_deg: 20.0,
             distance_m: 14.0,

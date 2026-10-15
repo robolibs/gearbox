@@ -450,6 +450,25 @@ impl MarkerRef {
     }
 }
 
+/// A field layout for the ground at home, as the JSON a `GEARBOX_FIELD_LAYOUT`
+/// file holds.
+#[datapod::datapod(name = "gearbox.fields_layout.v1")]
+#[derive(Default)]
+pub struct FieldsLayout {
+    #[dp(bytes)]
+    pub layout: Vec<u8>,
+}
+
+impl FieldsLayout {
+    pub fn new(json: &str) -> Self {
+        Self { layout: json.as_bytes().to_vec() }
+    }
+
+    pub fn json(&self) -> String {
+        String::from_utf8_lossy(&self.layout).into_owned()
+    }
+}
+
 #[datapod::datapod(name = "gearbox.selection.v1")]
 #[derive(Default)]
 pub struct Selection {

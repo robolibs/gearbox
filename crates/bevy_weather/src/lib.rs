@@ -24,6 +24,7 @@ use clouds::config::CloudsConfig;
 
 #[derive(Resource, Clone)]
 pub struct WeatherSettings {
+    pub sky_kind: SkyKind,
     pub calendar: SolarCalendar,
     pub sun_override: bool,
     pub sun_position: Vec3,
@@ -84,6 +85,7 @@ impl Default for WeatherSettings {
             sun_position = calendar.sun_direction();
         }
         Self {
+            sky_kind: SkyKind::Earth,
             calendar,
             sun_override,
             sun_position,
@@ -141,6 +143,14 @@ impl WeatherSettings {
 }
 
 pub struct WeatherPlugin;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SkyKind {
+    #[default]
+    Earth,
+    Dust,
+    Airless,
+}
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DaylightUpdate;

@@ -22,6 +22,11 @@ pub struct SimResetRequest {
     pub scope: u32,
 }
 
+/// A new field layout for the ground at home, as its JSON. Written by the API,
+/// read by the simulator, which owns the fields.
+#[derive(Message, Default, Debug, Clone)]
+pub struct FieldsLayoutRequest(pub String);
+
 #[derive(Resource, Debug, Clone)]
 pub struct UsdAssetRoot(pub std::path::PathBuf);
 
@@ -100,6 +105,7 @@ pub struct GearboxBusPlugin {
 impl Plugin for GearboxBusPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SimResetRequest>()
+            .add_message::<FieldsLayoutRequest>()
             .init_resource::<SceneObjects>()
             .init_resource::<SelectionState>();
         match HostBus::new(self.config.clone()) {
@@ -137,6 +143,7 @@ fn serve_host_core(
     objects: Res<SceneObjects>,
     mut selection: ResMut<SelectionState>,
     mut reset: MessageWriter<SimResetRequest>,
+    mut layouts: MessageWriter<FieldsLayoutRequest>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if physics.0 {
@@ -171,6 +178,7 @@ fn serve_host_core(
         ("allow_any", &allow_any),
         ("log", bus.host.config.log.as_deref().unwrap_or("")),
         ("camera", &crate::view::view_place_prop()),
+        ("home", &crate::view::home_place_prop()),
     ]);
     bus.host.serve_info(|_| HostInfo {
         uptime_ms: uptime,
@@ -263,6 +271,15 @@ fn serve_host_core(
                 props: r.props.clone(),
             })
             .collect()
+    });
+
+    bus.host.serve_fields_layout(|req| {
+        let json = req.json();
+        if json.trim().is_empty() {
+            return Status::err(code::USAGE, "empty field layout");
+        }
+        layouts.write(FieldsLayoutRequest(json));
+        Status::ok()
     });
 
     let mut granted = Vec::new();

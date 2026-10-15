@@ -980,6 +980,11 @@ pub struct FieldSpec {
     /// Dimensionless ground friction; absent values inherit the layout default.
     #[serde(default)]
     pub friction: Option<f64>,
+    /// Degrees the field's pattern — a concrete yard's slab grid — is turned
+    /// about the vertical, counter-clockwise seen from above, as a load's
+    /// `yaw_deg`.
+    #[serde(default)]
+    pub yaw: f32,
 }
 
 impl FieldSpec {
@@ -1399,6 +1404,7 @@ impl FieldLayout {
             way_width: None,
             tyre: None,
             friction: self.default_friction,
+            yaw: 0.0,
         }
     }
 }

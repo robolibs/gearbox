@@ -107,7 +107,7 @@ impl FemTrackMeshes {
             return Err(invalid("track layout does not match specification"));
         }
         let mut builder = ModelBuilder::new();
-        builder.set_world_gravity(WorldId(0), -Vec3::Y * 9.81);
+        builder.set_world_gravity(WorldId(0), -Vec3::Y * gearbox_globe::Body::active().gravity_mps2());
         builder.set_linear_damping(0.0);
         let mut tracks = Vec::new();
         let mut installations = Vec::new();

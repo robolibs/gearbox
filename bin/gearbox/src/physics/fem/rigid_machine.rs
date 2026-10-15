@@ -214,7 +214,7 @@ impl FemRigidMachine {
         let origin = pose(world, layout.chassis)?.position;
         let mut builder = ModelBuilder::new();
         builder.begin_articulation();
-        builder.set_world_gravity(WorldId(0), -Vec3::Y * 9.81);
+        builder.set_world_gravity(WorldId(0), -Vec3::Y * gearbox_globe::Body::active().gravity_mps2());
         let mut bodies = HashMap::new();
         let mut reference = Vec::new();
         for &entity in &layout.bodies {

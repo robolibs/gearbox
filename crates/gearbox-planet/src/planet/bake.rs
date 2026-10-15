@@ -38,6 +38,10 @@ pub struct TileBakeRequest {
     pub layer: u32,
     /// Per-planet noise domain frequency.
     pub freq: f32,
+    pub radius: f32,
+    pub height_amp: f32,
+    pub surface_kind: u32,
+    pub terrain_home: Vec4,
 }
 
 /// Filled by the quadtree in the main world, cloned into the render world each

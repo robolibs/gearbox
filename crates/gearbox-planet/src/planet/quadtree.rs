@@ -16,7 +16,7 @@ use crate::config::*;
 use crate::debug::DebugSettings;
 use super::bake::{TileBakeQueue, TileBakeRequest};
 use super::cube_sphere::face_uv_to_dir;
-use super::material::{TerrainGlobals, TerrainMaterial, TerrainNodeGpu, WaterMaterial};
+use super::material::{TerrainCoverage, TerrainGlobals, TerrainMaterial, TerrainNodeGpu, WaterMaterial};
 use super::RootGrid;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -100,6 +100,10 @@ pub struct BakeCtx {
     pub atlas: AssetId<Image>,
     pub seed: Vec3,
     pub freq: f32,
+    pub radius: f32,
+    pub height_amp: f32,
+    pub surface_kind: u32,
+    pub terrain_home: Vec4,
 }
 
 /// Which heightmap tiles live in which atlas layer (one per planet).
@@ -179,6 +183,10 @@ impl TileCache {
                 seed: ctx.seed,
                 layer,
                 freq: ctx.freq,
+                radius: ctx.radius,
+                height_amp: ctx.height_amp,
+                surface_kind: ctx.surface_kind,
+                terrain_home: ctx.terrain_home,
             },
         ));
         false
@@ -264,6 +272,10 @@ impl PlanetRenderer {
             atlas: self.atlas.id(),
             seed: cfg.seed,
             freq: cfg.noise_freq,
+            radius: cfg.radius,
+            height_amp: cfg.height_amp,
+            surface_kind: cfg.surface_kind,
+            terrain_home: cfg.terrain_home,
         }
     }
 }
@@ -301,6 +313,7 @@ pub struct TerrainStats {
     pub bakes_requested: usize,
     /// Nodes dropped because selection hit MAX_VISIBLE (should stay 0).
     pub dropped: usize,
+    pub budget_coarsened: usize,
     /// Atlas allocation failures this frame (should stay 0 once settled).
     pub starved: u32,
 }
@@ -316,18 +329,22 @@ struct Selector<'a> {
     queue: &'a mut TileBakeQueue,
     budget: usize,
     dropped: usize,
+    budget_coarsened: usize,
     out: Vec<(NodeId, u32)>, // (node, atlas layer)
 }
 
 impl Selector<'_> {
-    fn select(&mut self, id: NodeId) {
-        if self.out.len() >= MAX_VISIBLE {
+    fn select(&mut self, id: NodeId, limit: usize) {
+        if self.out.len() >= limit {
             self.dropped += 1;
             return;
         }
         let cfg = self.cfg;
         let lod = id.lod(cfg);
         let (center, chord) = id.bounding_sphere(cfg);
+        if fully_covered(cfg, center, chord) {
+            return;
+        }
         // Frustum cull with the fully height-inflated radius (skip far plane;
         // margin softens edge popping during fast rotation). Culled subtrees
         // are skipped entirely — they re-refine when back in view.
@@ -386,11 +403,14 @@ impl Selector<'_> {
                     self.cache
                         .ensure(*c, self.queue, &mut self.budget, false, &self.ctx);
             }
-            if want_split && all_resident {
-                for c in kids {
-                    self.select(c);
+            if want_split && all_resident && split_fits(self.out.len(), limit) {
+                for (i, c) in kids.into_iter().enumerate() {
+                    self.select(c, sibling_limit(limit, i, 4));
                 }
                 return;
+            }
+            if want_split && all_resident && !split_fits(self.out.len(), limit) {
+                self.budget_coarsened += 1;
             }
         }
         // Emit self. Walk invariant: we only get here if our parent verified
@@ -414,7 +434,7 @@ impl Selector<'_> {
 /// per-planet selection, node buffer upload, pool sync, material globals.
 pub fn select_and_sync(
     camera: Single<(&Transform, &CellCoord, &Projection), With<Camera3d>>,
-    mut planets: Query<(Entity, &PlanetConfig, &mut PlanetRenderer, &CellCoord, &Transform)>,
+    mut planets: Query<(Entity, &PlanetConfig, &TerrainCoverage, &mut PlanetRenderer, &CellCoord, &Transform)>,
     grids: Grids,
     root: Res<RootGrid>,
     mut queue: ResMut<TileBakeQueue>,
@@ -441,7 +461,7 @@ pub fn select_and_sync(
         .unwrap_or_else(|| grid.grid_position_double(cam_cell, cam_tf));
     let cam_rot = told.map_or(cam_tf.rotation, |at| at.rotation);
 
-    for (planet, cfg, mut renderer, planet_cell, planet_tf) in &mut planets {
+    for (planet, cfg, coverage, mut renderer, planet_cell, planet_tf) in &mut planets {
         // Skip planets that are too far to contribute pixels. Hysteresis
         // (hide beyond 3000 radii, show inside 2000) keeps a planet near the
         // threshold from blinking; sub-pixel size is reached well before
@@ -528,21 +548,23 @@ pub fn select_and_sync(
             queue: &mut queue,
             budget: MAX_BAKES_PER_FRAME,
             dropped: 0,
+            budget_coarsened: 0,
             out: Vec::with_capacity(MAX_VISIBLE),
         };
         for face in 0..6u8 {
-            selector.select(NodeId::root(face));
+            selector.select(NodeId::root(face), sibling_limit(MAX_VISIBLE, face as usize, 6));
         }
         let selected = selector.out;
         stats.selected = selected.len();
         stats.bakes_requested = MAX_BAKES_PER_FRAME - selector.budget.min(MAX_BAKES_PER_FRAME);
         stats.dropped = selector.dropped;
+        stats.budget_coarsened = selector.budget_coarsened;
         stats.starved = cache.starved;
         stats.resident_tiles = cache.resident_count();
         if std::env::var_os("GEARBOX_PLANET_DEBUG").is_some() {
             bevy::log::info!(
-                "select: {} nodes, dropped {}, starved {}, resident {}, baked {}, eye {:.0} m from the centre ({:.0} m up)",
-                stats.selected, stats.dropped, stats.starved, stats.resident_tiles,
+                "select: {} nodes, dropped {}, coarsened {}, starved {}, resident {}, baked {}, eye {:.0} m from the centre ({:.0} m up)",
+                stats.selected, stats.dropped, stats.budget_coarsened, stats.starved, stats.resident_tiles,
                 stats.bakes_requested,
                 view.local_cam.length(),
                 view.local_cam.length() - cfg.radius
@@ -620,13 +642,21 @@ pub fn select_and_sync(
         }
         // Touch the material assets only when the debug flags change; per-frame
         // camera/time data comes from the built-in view/globals bindings.
-        if *last_flags != Some(flags) {
+        let cover_changed = materials.get(&*material).is_some_and(|m| {
+            m.extension.globals.cover_origin != coverage.origin
+                || m.extension.globals.cover_north != coverage.north
+                || m.extension.globals.cover_east != coverage.east
+        });
+        if *last_flags != Some(flags) || cover_changed {
             *last_flags = Some(flags);
             let globals = TerrainGlobals {
                 radius: cfg.radius,
                 height_amp: cfg.height_amp,
                 debug_flags: flags,
-                _pad: 0,
+                surface_kind: cfg.surface_kind,
+                cover_origin: coverage.origin,
+                cover_north: coverage.north,
+                cover_east: coverage.east,
             };
             if let Some(mut mat) = materials.get_mut(&*material) {
                 mat.extension.globals = globals;
@@ -668,12 +698,79 @@ fn beyond_horizon(eye: Vec3, centre: Vec3, reach: f32, floor: f32) -> bool {
     eye.dot(centre.as_dvec3()) + (reach as f64) * far < floor * floor
 }
 
+fn sibling_limit(limit: usize, index: usize, count: usize) -> usize {
+    limit - (count - index - 1)
+}
+
+fn split_fits(used: usize, limit: usize) -> bool {
+    used + 4 <= limit
+}
+
+fn fully_covered(cfg: &PlanetConfig, centre: Vec3, chord: f32) -> bool {
+    let origin = cfg.cover_origin.truncate();
+    if cfg.surface_kind == 0 || cfg.cover_origin.w <= 0.0 || centre.dot(origin) <= 0.0 {
+        return false;
+    }
+    let radial = centre / cfg.radius;
+    [cfg.cover_north.truncate(), cfg.cover_east.truncate()].into_iter().all(|axis| {
+        let relief = cfg.height_amp * 1.65 * (radial.dot(axis).abs() + chord / cfg.radius);
+        (centre - origin).dot(axis).abs() + chord + relief + 1.0 < cfg.cover_origin.w
+    })
+}
+
 #[cfg(test)]
 mod horizon_tests {
     use super::*;
 
     const R: f32 = 6_371_000.0;
     const RELIEF: f32 = 9_000.0;
+
+    #[test]
+    fn budget_refinement_preserves_all_six_faces() {
+        fn visit(used: &mut usize, limit: usize, depth: u32, area: f64) -> f64 {
+            assert!(*used < limit);
+            if depth > 0 && split_fits(*used, limit) {
+                (0..4).map(|i| visit(used, sibling_limit(limit,i,4), depth-1, area/4.0)).sum()
+            } else {
+                *used += 1;
+                area
+            }
+        }
+        for budget in [6, 7, 16, 64, MAX_VISIBLE] {
+            let mut used = 0;
+            for face in 0..6 {
+                assert_eq!(visit(&mut used,sibling_limit(budget,face,6),8,1.0),1.0);
+            }
+            assert!(used <= budget);
+        }
+    }
+
+    #[test]
+    fn covered_tiles_preserve_edges_relief_and_antipodes() {
+        let mut cfg = PlanetConfig::barren(1_737_400.0, 2);
+        cfg.cover_origin = Vec3::Y.extend(0.0) * cfg.radius;
+        cfg.cover_origin.w = 600.0;
+        cfg.cover_north = Vec3::Z.extend(0.0);
+        cfg.cover_east = Vec3::X.extend(0.0);
+        let origin = cfg.cover_origin.truncate();
+        assert!(fully_covered(&cfg, origin, 100.0));
+        assert!(!fully_covered(&cfg, -origin, 100.0));
+        assert!(!fully_covered(&cfg, origin + Vec3::X*550.0, 60.0));
+        for x in [-500.0, 0.0, 500.0] {
+            let centre = (origin + Vec3::X*x).normalize()*cfg.radius;
+            let chord = 60.0;
+            if !fully_covered(&cfg,centre,chord) { continue; }
+            for h in [-cfg.height_amp*1.65,0.0,cfg.height_amp*1.65] {
+                for dx in [-chord,0.0,chord] {
+                    for dz in [-chord,0.0,chord] {
+                        let delta = Vec3::new(dx,0.0,dz).clamp_length_max(chord);
+                        let point = (centre+delta)*(1.0+h/cfg.radius)-origin;
+                        assert!(point.x.abs() < 600.0 && point.z.abs() < 600.0);
+                    }
+                }
+            }
+        }
+    }
 
     /// Standing on the surface, the far side of the planet is hidden by the
     /// planet. Left drawn, its tiles' edge skirts face inward and rule a grid

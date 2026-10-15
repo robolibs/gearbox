@@ -26,12 +26,12 @@ pub use machine::{
     ControllerDesc, LinkDesc, MachineAgent, MachineConfig, ToolDesc, link_records_for,
 };
 pub use peerbus;
-pub use view::{ViewPlace, set_view_place, view_place};
+pub use view::{ViewPlace, set_home_place, set_view_place, view_place};
 pub use wire::*;
 pub mod tyres;
 
 #[cfg(feature = "bevy")]
 pub use plugin::{
-    GearboxBus, GearboxBusPlugin, MachineDeleteQueue, MachineLoadQueue, PhysicsActive, SceneObjects,
+    FieldsLayoutRequest, GearboxBus, GearboxBusPlugin, MachineDeleteQueue, MachineLoadQueue, PhysicsActive, SceneObjects,
     SelectionState, SimResetRequest, UsdAssetRoot, UsdLoaderPlugin, UsdMarkerPlugin,
 };

@@ -18,6 +18,9 @@ use crate::paths;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
+    /// Procedural planet; independent of an optional world USD
+    #[arg(long, env = "GEARBOX_PLANET", default_value = "earth", value_parser = ["earth", "mars", "moon"])]
+    planet: String,
     /// Instance name; also the persistent identity
     #[arg(long, default_value = "gearbox")]
     name: String,
@@ -50,6 +53,23 @@ pub struct Args {
     sim_args: Vec<String>,
 }
 
+#[cfg(test)]
+mod planet_tests {
+    use clap::Parser;
+    use crate::{Cli, Command};
+
+    #[test]
+    fn accepts_each_planet_without_consuming_world_asset() {
+        for planet in ["earth", "mars", "moon"] {
+            let cli = Cli::try_parse_from(["gearbox", "run", "--planet", planet, "--world", "site.usdz"]).unwrap();
+            let Command::Run(args) = cli.command else { panic!("expected run"); };
+            assert_eq!(args.planet, planet);
+            assert_eq!(args.world.as_deref(), Some("site.usdz"));
+        }
+        assert!(Cli::try_parse_from(["gearbox", "run", "--planet", "marz"]).is_err());
+    }
+}
+
 pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     let sim = find_sim(ctx, args.sim.as_deref())?;
     if let Some(live) = registry::find(&args.name) {
@@ -70,6 +90,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     cmd.arg("launch")
         .args(&args.sim_args)
         .env("GEARBOX_NAME", &args.name)
+        .env("GEARBOX_PLANET", &args.planet)
         .env("GEARBOX_ALLOW", allow.join(","));
     if args.ephemeral {
         cmd.env("GEARBOX_EPHEMERAL", "1");

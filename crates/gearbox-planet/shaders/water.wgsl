@@ -16,7 +16,10 @@ struct TerrainGlobals {
     radius: f32,
     height_amp: f32,
     debug_flags: u32,
-    _pad: u32,
+    surface_kind: u32,
+    cover_origin: vec4<f32>,
+    cover_north: vec4<f32>,
+    cover_east: vec4<f32>,
 }
 
 struct TerrainNode {
@@ -30,7 +33,6 @@ struct TerrainNode {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> tg: TerrainGlobals;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var heightmaps: texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var heightmap_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var<storage, read> nodes: array<TerrainNode>;
 
 const DEBUG_STATIC_TIME: u32 = 8u;
@@ -65,8 +67,15 @@ fn face_dir(basis: mat3x3<f32>, uv: vec2<f32>) -> vec3<f32> {
 }
 
 fn sample_height(layer: u32, g: vec2<f32>) -> f32 {
-    let uv = (g + BORDER + 0.5) / TILE_TEXELS;
-    return textureSampleLevel(heightmaps, heightmap_sampler, uv, layer, 0.0).r;
+    let p = clamp(g + BORDER, vec2(0.0), vec2(TILE_TEXELS - 1.0));
+    let lo = vec2<i32>(floor(p));
+    let hi = min(lo + vec2<i32>(1), vec2<i32>(i32(TILE_TEXELS) - 1));
+    let f = fract(p);
+    let a = textureLoad(heightmaps, lo, i32(layer), 0).r;
+    let b = textureLoad(heightmaps, vec2(hi.x, lo.y), i32(layer), 0).r;
+    let c = textureLoad(heightmaps, vec2(lo.x, hi.y), i32(layer), 0).r;
+    let d = textureLoad(heightmaps, hi, i32(layer), 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 fn hash21(p: vec2<f32>) -> f32 {
@@ -102,7 +111,9 @@ fn vertex(in: Vertex) -> VertexOutput {
     let uv_f = node.origin + (g / GRID_F) * node.scale;
     let dir_f = face_dir(basis, uv_f);
     let p_f = dir_f * tg.radius;
-    let dist = distance(view.world_position, p_f);
+    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    let p_world = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(p_f, 1.0));
+    let dist = distance(view.world_position, p_world.xyz);
     let morph = max(
         clamp((dist - node.morph_consts.x) * node.morph_consts.y, 0.0, 1.0),
         node.morph_floor,
@@ -114,7 +125,6 @@ fn vertex(in: Vertex) -> VertexOutput {
     let p = dir * tg.radius;
 
     var out: VertexOutput;
-    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(p, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
     out.world_normal = mesh_functions::mesh_normal_local_to_world(dir, in.instance_index);

@@ -11,5 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 bevy.workspace = true
+gearbox-globe = { path = "../gearbox-globe" }
 big_space.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+wgpu = "29"
+pollster = "0.4"

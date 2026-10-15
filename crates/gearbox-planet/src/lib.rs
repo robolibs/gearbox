@@ -33,6 +33,9 @@ pub struct PlanetPlugin;
 
 impl Plugin for PlanetPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<gearbox_globe::surface::PlanetSurfaceShaderPlugin>() {
+            app.add_plugins(gearbox_globe::surface::PlanetSurfaceShaderPlugin);
+        }
         embedded_asset!(app, "../shaders/terrain.wgsl");
         embedded_asset!(app, "../shaders/tile_bake.wgsl");
         embedded_asset!(app, "../shaders/water.wgsl");

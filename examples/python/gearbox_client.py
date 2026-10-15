@@ -28,7 +28,7 @@ from pathlib import Path
 
 # The peerbus, datapod and ondrive wheels live in the repo's
 # .python-packages; outside `nix develop` nothing puts them on the path.
-_PACKAGES = Path(__file__).resolve().parent.parent / ".python-packages"
+_PACKAGES = Path(__file__).resolve().parents[2] / ".python-packages"
 if _PACKAGES.is_dir() and str(_PACKAGES) not in sys.path:
     sys.path.insert(0, str(_PACKAGES))
 
@@ -232,6 +232,11 @@ class MarkerRef:
     props: bytes = b""
 
 
+@_pod("gearbox.fields_layout.v1", "<", (), payload="layout")
+class FieldsLayout:
+    layout: bytes = b""
+
+
 @_pod("gearbox.selection.v1", "<II", ("kind", "query"), payload="props")
 class Selection:
     kind: int = 0
@@ -417,6 +422,7 @@ HOST = {
     "marker_delete": "/gearbox/marker/delete",
     "select": "/gearbox/select",
     "machines": "/gearbox/machines/list",
+    "fields_layout": "/gearbox/fields/layout",
 }
 
 
@@ -501,6 +507,17 @@ class Gearbox:
         self._machines.clear()
         return status
 
+    def set_fields(self, layout: dict) -> Status:
+        """Lay the ground at home out anew: a field layout as a
+        `GEARBOX_FIELD_LAYOUT` file holds it, `{"default": ..., "fields": [...]}`."""
+        return self.call(self.addr, HOST["fields_layout"], FieldsLayout(layout=json.dumps(layout).encode()), Status)
+
+    def home(self) -> tuple[float, float] | None:
+        """Latitude and longitude of home, what x, y, z of a load are measured from."""
+        text = unpack_map(self.info().props).get("home", "")
+        parts = text.split()
+        return (float(parts[0]), float(parts[1])) if len(parts) == 2 else None
+
     def list(self, kind: str = "any") -> list[dict]:
         out = []
         for o in self.query(self.addr, HOST["list"], ListQuery(kind=OBJECT_KIND[kind]), SceneObject):
@@ -523,10 +540,14 @@ class Gearbox:
         label: str | None = None,
         nonce: str | None = None,
         variants: list[tuple[str, str, str]] | None = None,
+        extra: dict[str, object] | None = None,
     ) -> Status:
-        props = {"id": id, "path": path}
+        """x, y, z are metres north, up and east of home. `extra` carries more
+        props, e.g. `lat`/`lon` to place on Earth or `datum_lat`/`datum_lon`
+        for the frame a machine reports its pose in."""
+        props = {"id": id, "path": path, **{k: str(v) for k, v in (extra or {}).items()}}
         if namespace:
-            props["namespace"] = namespace
+            props["machine_id"] = namespace
         if label:
             props["label"] = label
         if nonce:
@@ -573,7 +594,7 @@ class Gearbox:
         deadline = time.time() + timeout
         while True:
             for m in self.machines():
-                if m.get("namespace") == namespace and m.get("addr"):
+                if m.get("machine_id") == namespace and m.get("addr"):
                     machine = Machine(self, namespace, m["addr"], m.get("did", ""))
                     self._machines[namespace] = machine
                     return machine

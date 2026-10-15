@@ -13,6 +13,10 @@ struct TileBakeParams {
     seed: vec3<f32>,   // per-planet noise domain offset
     layer: u32,
     freq: f32,         // per-planet noise domain frequency
+    radius: f32,
+    height_amp: f32,
+    surface_kind: u32,
+    terrain_home: vec4<f32>,
 }
 
 @group(0) @binding(0) var atlas: texture_storage_2d_array<r32float, write>;
@@ -110,11 +114,93 @@ fn ridged(p: vec3<f32>, octaves: i32) -> f32 {
 // IMPORTANT: octave counts are constant across all LODs — that is what makes
 // tiles of different LODs agree at shared texels.
 fn terrain_height(dir: vec3<f32>, seed: vec3<f32>, freq: f32) -> f32 {
-    // One ground everywhere. The globe carries no continents, no sea and no
-    // mountains of its own: it is the same surface the field stands on, all
-    // the way round. What the ground actually looks like is the covers' job,
-    // and terrain belongs to whatever authors it later.
-    return 0.0;
+    if params.surface_kind == 0u { return 0.0; }
+    let p = dir * params.radius;
+    let fade = smoothstep(6.0, 22.0, distance(p, params.terrain_home.xyz));
+    return (regolith_height(p, params.surface_kind) - params.terrain_home.w) * fade / params.height_amp;
+}
+
+fn regolith_hash(cell: vec3<i32>) -> f32 {
+    let c = bitcast<vec3<u32>>(cell);
+    var h = (c.x * 1597334677u) ^ (c.y * 3812015801u) ^ (c.z * 2798796415u);
+    h ^= h >> 16u;
+    h *= 2246822519u;
+    h ^= h >> 13u;
+    h *= 3266489917u;
+    h ^= h >> 16u;
+    return f32(h >> 8u) / 16777216.0;
+}
+
+fn regolith_noise(p: vec3<f32>) -> f32 {
+    let i = vec3<i32>(floor(p));
+    let f = fract(p);
+    let u = f*f*f*(f*(f*6.0-15.0)+10.0);
+    let x00 = mix(regolith_hash(i), regolith_hash(i+vec3(1,0,0)), u.x);
+    let x10 = mix(regolith_hash(i+vec3(0,1,0)), regolith_hash(i+vec3(1,1,0)), u.x);
+    let x01 = mix(regolith_hash(i+vec3(0,0,1)), regolith_hash(i+vec3(1,0,1)), u.x);
+    let x11 = mix(regolith_hash(i+vec3(0,1,1)), regolith_hash(i+vec3(1,1,1)), u.x);
+    return mix(mix(x00,x10,u.y),mix(x01,x11,u.y),u.z);
+}
+
+fn regolith_fbm(p: vec3<f32>, octaves: u32) -> f32 {
+    var sum = 0.0;
+    var amp = 0.5;
+    var total = 0.0;
+    var q = p;
+    for (var n = 0u; n < octaves; n++) {
+        sum += amp * regolith_noise(q);
+        total += amp;
+        amp *= 0.5;
+        q = q * 2.03 + vec3(17.13,3.71,9.27);
+    }
+    return sum / total;
+}
+
+fn crater_profile(q: f32) -> f32 {
+    if q >= 1.6 { return 0.0; }
+    let bowl = select(0.0, -0.19 * (1.0-q*q)*(1.0-q*q), q < 1.0);
+    let crest = (q-1.0)/0.14;
+    let rim = 0.048 * exp(-crest*crest);
+    let t = clamp((1.6-q)/0.25, 0.0, 1.0);
+    return bowl + rim*t*t*(3.0-2.0*t);
+}
+
+fn regolith_craters(p: vec3<f32>, cell_m: f32, density: f32) -> f32 {
+    let cell = vec3<i32>(floor(p / cell_m));
+    let radius = length(p);
+    var height = 0.0;
+    for (var x = -1; x <= 1; x++) {
+        for (var y = -1; y <= 1; y++) {
+            for (var z = -1; z <= 1; z++) {
+                let c = cell + vec3(x,y,z);
+                let seed = regolith_hash(c);
+                if seed > density { continue; }
+                let jitter = vec3(seed, regolith_hash(c+vec3(913,0,0)), regolith_hash(c+vec3(0,719,0)));
+                let raw_centre = (vec3<f32>(c)+jitter*0.7+vec3(0.15))*cell_m;
+                if abs(length(raw_centre)-radius) > cell_m*0.45 { continue; }
+                let centre = normalize(raw_centre)*radius;
+                let r = cell_m*(0.12+0.20*regolith_hash(c+vec3(0,0,331)));
+                height += crater_profile(distance(p,centre)/r)*r;
+            }
+        }
+    }
+    return height;
+}
+
+fn regolith_height(p: vec3<f32>, kind: u32) -> f32 {
+    let broad = (regolith_fbm(p*0.000055,4u)-0.5)*420.0;
+    let hills = (regolith_fbm(p*0.0013+vec3(71.0),4u)-0.5)*28.0;
+    let grit = (regolith_fbm(p*0.06,3u)-0.5)*0.18;
+    if kind == 1u {
+        let wind = dot(p,vec3(0.53,0.21,0.82));
+        let dunes = sin(wind*0.30+2.0*regolith_noise(p*0.02))*0.32;
+        return broad+hills+grit+dunes+regolith_craters(p,95.0,0.35)+regolith_craters(p,700.0,0.55)+regolith_craters(p,9000.0,0.6)
+            +regolith_craters(p,180000.0,0.55)*0.25+regolith_craters(p,900000.0,0.4)*0.1
+            +(regolith_fbm(p*0.000001,4u)-0.5)*3600.0;
+    }
+    return broad*0.75+hills*0.55+grit+regolith_craters(p,65.0,0.8)+regolith_craters(p,450.0,0.9)+regolith_craters(p,6500.0,0.95)
+        +regolith_craters(p,120000.0,0.85)*0.7+regolith_craters(p,550000.0,0.75)*0.3
+        +(regolith_fbm(p*0.0000016,4u)-0.5)*1200.0;
 }
 
 @compute @workgroup_size(8, 8, 1)

@@ -7,6 +7,11 @@ use bevy::prelude::*;
 /// tile pools are its children and are driven through `PlanetRenderer`.
 #[derive(Component, Clone, Debug)]
 pub struct PlanetConfig {
+    pub surface_kind: u32,
+    pub terrain_home: Vec4,
+    pub cover_origin: Vec4,
+    pub cover_north: Vec4,
+    pub cover_east: Vec4,
     pub radius: f32,
     pub height_amp: f32,
     /// Quadtree leaf depth (lod = max_depth - depth).
@@ -30,6 +35,9 @@ pub struct PlanetConfig {
 impl Default for PlanetConfig {
     fn default() -> Self {
         Self {
+            surface_kind: 0,
+            terrain_home: Vec4::ZERO,
+            cover_origin: Vec4::ZERO, cover_north: Vec4::ZERO, cover_east: Vec4::ZERO,
             radius: PLANET_RADIUS,
             height_amp: HEIGHT_AMP,
             max_depth: MAX_DEPTH,
@@ -92,6 +100,9 @@ impl PlanetConfig {
         // resolve one field.
         const DEPTH: u8 = 12;
         Self {
+            surface_kind: 0,
+            terrain_home: Vec4::ZERO,
+            cover_origin: Vec4::ZERO, cover_north: Vec4::ZERO, cover_east: Vec4::ZERO,
             radius,
             // Sea level to summit, over the whole planet.
             height_amp: 2_400.0,
@@ -112,6 +123,7 @@ impl PlanetConfig {
     /// thicker than Earth's (1.6% of R) so mountains stay inside it and the
     /// sky band is visible at flying altitudes on 4-50 km worlds.
     pub fn atmosphere_shell(&self) -> f32 {
+        if self.surface_kind == 1 { return 80_000.0; }
         (self.height_amp * 4.0).max(self.radius * 0.2)
     }
 
@@ -125,6 +137,18 @@ impl PlanetConfig {
         // Earth-air blue-channel extinction length is ~1/33e-6 = 30 km; keep
         // haze-free viewing out to ~R by scaling density with 30 km / R.
         30_000.0 / self.radius
+    }
+
+    pub fn barren(radius: f32, surface_kind: u32) -> Self {
+        let max_depth = (radius * 1.57 / 128.0).log2().ceil() as u8;
+        Self {
+            surface_kind,
+            max_depth,
+            lod0_range: leaf_size(radius, max_depth) * 8.0,
+            height_amp: 16_000.0,
+            atmosphere: if surface_kind == 2 { None } else { Some(Vec3::new(18.0e-6, 10.0e-6, 5.0e-6)) },
+            ..Self::earth(radius)
+        }
     }
 }
 
@@ -165,10 +189,8 @@ pub const TILE_TEXELS: u32 = 132;
 /// `max_texture_array_layers` limit bump in main.rs (wgpu default is 256).
 pub const ATLAS_LAYERS: u32 = 2048;
 
-/// Pool of renderable node entities == slots in the per-node storage buffer.
-/// Selection drops nodes beyond this (counted in the overlay as "drop", which
-/// must stay 0 — drops are visible holes). Underwater scenes are the peak:
-/// seabed + surface refine together to ~830 nodes, so 512 breaks the ocean.
+/// Renderable node slots. Selection retains coarser parents when children
+/// cannot fit alongside the remaining siblings and face roots.
 pub const MAX_VISIBLE: usize = 1024;
 
 /// Tiles of quadtree depth <= PIN_DEPTH (6 + 24 + 96 = 126 tiles) are baked at

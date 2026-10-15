@@ -28,6 +28,7 @@ mod links;
 mod load;
 mod physics;
 mod physics_debug;
+mod planet_rocks;
 mod sensor_cameras;
 mod sensor_generic;
 mod sensor_radio;
@@ -64,6 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !args.is_empty() {
         args.remove(0);
     }
+    let (planet, args) = launch_planet(args)?;
+    unsafe { std::env::set_var("GEARBOX_PLANET", planet.name()); }
     let cli_paths: Vec<std::path::PathBuf> = args
         .iter()
         .map(|s| {
@@ -79,7 +82,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing(&log);
     install_panic_logger();
     tracing::info!(target: "gearbox", "gearbox-sim starting — full log at {}", log_file().display());
+    tracing::info!("planet: {} radius={} m gravity={} m/s²", planet.name(), planet.radius_m(), planet.gravity_mps2());
     host::run(cli_paths, log)
+}
+
+fn launch_planet(args: Vec<String>) -> Result<(gearbox_globe::Body, Vec<String>), String> {
+    parse_launch_planet(args, gearbox_globe::Body::from_env)
+}
+
+fn parse_launch_planet(args: Vec<String>, fallback: impl FnOnce() -> Result<gearbox_globe::Body, String>) -> Result<(gearbox_globe::Body, Vec<String>), String> {
+    let mut body = None;
+    let mut paths = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            paths.extend(args);
+            break;
+        } else if arg == "--planet" {
+            body = Some(args.next().ok_or("--planet requires earth, mars or moon")?.parse()?);
+        } else if let Some(value) = arg.strip_prefix("--planet=") {
+            body = Some(value.parse()?);
+        } else if arg.starts_with('-') {
+            return Err(format!("unknown launch option {arg:?}; use --planet earth|mars|moon [USD ...]"));
+        } else {
+            paths.push(arg);
+        }
+    }
+    Ok((body.map(Ok).unwrap_or_else(fallback)?, paths))
+}
+
+#[cfg(test)]
+mod planet_tests {
+    use super::*;
+    use gearbox_globe::Body;
+
+    #[test]
+    fn direct_planet_flag_overrides_environment_and_preserves_paths() {
+        let (body, paths) = parse_launch_planet(vec!["--planet=mars".into(),"rover.usdz".into(),"--".into(),"--asset.usd".into()], || Err("invalid inherited planet".into())).unwrap();
+        assert_eq!(body, Body::Mars);
+        assert_eq!(paths, ["rover.usdz","--asset.usd"]);
+        assert_eq!(parse_launch_planet(vec![], || Ok(Body::Earth)).unwrap().0, Body::Earth);
+        assert_eq!(parse_launch_planet(vec![], || Ok(Body::Moon)).unwrap().0, Body::Moon);
+        assert!(parse_launch_planet(vec![], || Err("bad env".into())).is_err());
+        assert!(parse_launch_planet(vec!["--planet".into()], || Ok(Body::Earth)).is_err());
+        assert!(parse_launch_planet(vec!["--planet=marz".into()], || Ok(Body::Earth)).is_err());
+    }
 }
 
 /// Tracing to stderr, the log file and the Log pane. The embedded Bevy app

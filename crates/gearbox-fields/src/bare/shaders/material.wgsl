@@ -7,6 +7,7 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
 }
+#import gearbox_globe::surface::planet_albedo
 #import "embedded://gearbox_fields/shaders/interaction.wgsl"::{WheelMapParams, sample_wheels, wheel_scar}
 #import "embedded://gearbox_fields/shaders/surface_detail.wgsl"::{SurfaceGeometryParams, surface_geometry_normal}
 #import "embedded://gearbox_fields/bare/shaders/cover.wgsl"::{pcg, rand, lattice, taken, clump_edge, clump_frame, worn, washed_into, height_blend, settled, verge_damp, inside_field, rut_of, earth_mottle, way_read, tyre_bars, DrivenTrail, TREAD_SHOW, UNDER_SHOW, SEPARATE_M, TREAD_DEBUG, tread_checker}
@@ -17,6 +18,8 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var<uniform> geometry: SurfaceGeometryParams;
 
 struct BareGround {
+    planet: vec4<f32>,
+    world_to_planet: mat4x4<f32>,
     tint: vec4<f32>,
     grain: vec4<f32>,
     grass: vec4<f32>,
@@ -434,6 +437,28 @@ fn made_relief(place: vec2<f32>, close: f32, pixel_m: f32) -> f32 {
         + grit * ground.grain.y * 0.045 * crushed;
 }
 
+fn planetary_height(p: vec2<f32>) -> f32 {
+    let grid = clamp((p - geometry.origin) * geometry.texels_per_metre,
+        vec2(0.0), vec2(geometry.texel_count - 1.0));
+    let lo = min(vec2<i32>(floor(grid)), vec2<i32>(i32(geometry.texel_count) - 2));
+    let f = grid - vec2<f32>(lo);
+    let a = textureLoad(surface_heightmap, lo, 0).x;
+    let b = textureLoad(surface_heightmap, lo + vec2<i32>(1, 0), 0).x;
+    let c = textureLoad(surface_heightmap, lo + vec2<i32>(0, 1), 0).x;
+    let d = textureLoad(surface_heightmap, lo + vec2<i32>(1, 1), 0).x;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+fn planetary_normal(p: vec2<f32>, pixel_m: f32) -> vec3<f32> {
+    let step = max(1.0 / geometry.texels_per_metre, pixel_m * 0.7);
+    let high = geometry.origin + vec2((geometry.texel_count - 1.0) / geometry.texels_per_metre);
+    let lo = max(p - vec2(step), geometry.origin);
+    let hi = min(p + vec2(step), high);
+    let dx = (planetary_height(vec2(lo.x, p.y)) - planetary_height(vec2(hi.x, p.y))) / max(hi.x-lo.x, 0.001);
+    let dz = (planetary_height(vec2(p.x, lo.y)) - planetary_height(vec2(p.x, hi.y))) / max(hi.y-lo.y, 0.001);
+    return normalize(vec3(dx, 1.0, dz));
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
@@ -445,11 +470,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         discard;
     }
 
-    let land = surface_geometry_normal(surface_heightmap, geometry, place, in.world_normal);
+    let pixel_m = max(fwidth(place.x), fwidth(place.y));
+    var land = surface_geometry_normal(surface_heightmap, geometry, place, in.world_normal);
+    if ground.planet.x > 0.0 && geometry.texel_count >= 2.0 && geometry.texels_per_metre > 0.0 {
+        land = planetary_normal(place, pixel_m);
+    }
     let slope = vec2<f32>(land.x, land.z);
 
     var colour = vec3<f32>(0.0);
-    let pixel_m = max(fwidth(place.x), fwidth(place.y));
     let close = 1.0 - smoothstep(0.09, 0.42, pixel_m);
     let clod = max(ground.grain.x, 0.05);
     let patchy = ground_fbm(place / 7.0 + vec2<f32>(3.3, 8.8), 3);
@@ -579,7 +607,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let east = made_relief(place + vec2<f32>(step, 0.0), close, pixel_m) * pressed_down;
     let north = made_relief(place + vec2<f32>(0.0, step), close, pixel_m) * pressed_down;
     let bumps = normalize(vec3<f32>((here - east) * 0.5, step, (here - north) * 0.5));
-    let shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0)
+    var shaped = normalize(land + bumps - vec3<f32>(0.0, 1.0, 0.0)
         + vec3<f32>(print.y + drove.rut.y * TREAD_SHOW, 0.0,
             print.z + drove.rut.z * TREAD_SHOW));
 
@@ -588,6 +616,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.material.base_color = vec4<f32>(washed(place, colour) * pit, 1.0);
     let glint = (ground_noise(place / (clod * 0.08)) - 0.5) * 0.18 * close;
     pbr_input.material.perceptual_roughness = clamp(mix(0.95, 0.78, rolled) + glint, 0.35, 1.0);
+    if ground.planet.x > 0.0 {
+        let dir = normalize((ground.world_to_planet * in.world_position).xyz);
+        let regional = planet_albedo(dir, u32(ground.planet.x));
+        let normal = normalize((ground.world_to_planet * vec4<f32>(land, 0.0)).xyz);
+        let distant = regional * (0.7 + 0.3 * max(dot(normal, dir), 0.0));
+        let resolved = smoothstep(0.15, 0.9, pixel_m);
+        let detailed = pbr_input.material.base_color.rgb * regional / max(ground.tint.rgb, vec3<f32>(0.001));
+        pbr_input.material.base_color = vec4<f32>(mix(detailed, distant, resolved), 1.0);
+        pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.95, resolved);
+        shaped = normalize(mix(shaped, land, resolved));
+    }
     // Left at the default, the sheen off the soil is worth more than the earth's
     // own colour and the ground comes out grey whatever it is tinted.
     pbr_input.material.reflectance = vec3<f32>(0.03);

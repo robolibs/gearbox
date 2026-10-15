@@ -44,6 +44,9 @@ struct ConcreteExtension {
     moss_normal: Handle<Image>,
     #[texture(110)]
     moss_arm: Handle<Image>,
+    /// Radians the slab grid is turned about the vertical, in x.
+    #[uniform(111)]
+    yard_turn: Vec4,
 }
 
 impl MaterialExtension for ConcreteExtension {
@@ -183,7 +186,7 @@ fn create_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
-    _placed: crate::profile::Placed,
+    placed: crate::profile::Placed,
     _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
@@ -198,6 +201,7 @@ fn create_ground(
         moss_albedo: load_scan(assets, "concrete_floor_02_diff", true),
         moss_normal: load_scan(assets, "concrete_floor_02_nor_gl", false),
         moss_arm: load_scan(assets, "concrete_floor_02_arm", false),
+        yard_turn: Vec4::new(placed.yaw, 0.0, 0.0, 0.0),
     };
     let material = world
         .resource_mut::<Assets<ConcreteMaterial>>()

@@ -24,6 +24,7 @@ pub mod tillage;
 pub mod wind_map;
 
 pub use contacts::{WheelContact, WheelContacts};
+pub use bare::{PlanetSurfaceFrame, PlanetSurfaceUpdates};
 pub use tillage::{ToolContact, ToolContacts, ToolKind};
 pub use heights::HeightGrid;
 pub use host::{

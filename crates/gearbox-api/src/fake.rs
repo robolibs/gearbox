@@ -372,6 +372,8 @@ fn serve_once(
             .collect()
     });
 
+    host.serve_fields_layout(|_| Status::ok());
+
     let mut granted = Vec::new();
     host.serve_access_grant(|req| match agentio::did_key::did_key_to_endpoint(&req.did()) {
         Ok(peer) => {

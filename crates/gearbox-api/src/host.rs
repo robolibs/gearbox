@@ -109,6 +109,7 @@ pub struct HostBus {
     select: Registered<ReqServer<Env, Env>>,
     machines: Registered<AnsServer<Env, Env>>,
     access_grant: Registered<ReqServer<Env, Env>>,
+    fields_layout: Registered<ReqServer<Env, Env>>,
 }
 
 impl HostBus {
@@ -146,6 +147,7 @@ impl HostBus {
             select: agent.req_server(topics::SELECT)?,
             machines: agent.que_server(topics::MACHINES_LIST)?,
             access_grant: agent.req_server(topics::ACCESS_GRANT)?,
+            fields_layout: agent.req_server(topics::FIELDS_LAYOUT)?,
             agent,
             config,
             started: Instant::now(),
@@ -256,6 +258,10 @@ impl HostBus {
 
     pub fn serve_machines(&mut self, f: impl FnMut(Ping) -> Vec<MachineRef>) -> usize {
         serve_que(&mut self.machines, f)
+    }
+
+    pub fn serve_fields_layout(&mut self, f: impl FnMut(FieldsLayout) -> Status) -> usize {
+        serve_req(&mut self.fields_layout, f)
     }
 
     pub fn serve_access_grant(&mut self, f: impl FnMut(GrantRequest) -> Status) -> usize {

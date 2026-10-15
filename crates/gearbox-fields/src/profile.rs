@@ -156,6 +156,8 @@ pub struct Placed {
     /// The lines the wheels follow through it, each worn its own amount, when
     /// the layout bends any.
     pub way: super::layout::Way,
+    /// Radians its pattern is turned about the vertical, as the layout's `yaw`.
+    pub yaw: f32,
 }
 
 impl Placed {

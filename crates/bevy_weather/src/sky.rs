@@ -218,7 +218,7 @@ fn synchronize_daylight(
     };
     for (mut fog, mut ambient, mut environment) in &mut cameras {
         fog.color = daylight.fog;
-        fog.falloff = haze_falloff(settings.haze_visibility_km);
+        fog.falloff = body_haze(&settings, settings.haze_visibility_km);
         // Haze toward the sun takes its colour: the glow that gives a low sun depth.
         fog.directional_light_color = daylight.direct_color.with_alpha(0.45);
         ambient.color = daylight.ambient;
@@ -266,6 +266,14 @@ fn haze_falloff(visibility_km: f32) -> FogFalloff {
     )
 }
 
+fn body_haze(settings: &WeatherSettings, visibility_km: f32) -> FogFalloff {
+    match settings.sky_kind {
+        super::SkyKind::Earth => haze_falloff(visibility_km),
+        super::SkyKind::Dust => FogFalloff::Exponential { density: 3.912 / (visibility_km * 1000.0) },
+        super::SkyKind::Airless => FogFalloff::Exponential { density: 0.0 },
+    }
+}
+
 /// A camera that sets up its own look: the weather gives it no clouds or sky
 /// planes (e.g. an offscreen sensor camera, which adds [`camera_look`] itself).
 #[derive(Component, Clone, Copy, Debug, Default)]
@@ -300,7 +308,7 @@ pub fn camera_look(camera: &mut EntityCommands, settings: &WeatherSettings, lean
         Tonemapping::AgX,
         DistanceFog {
             color: settings.fog_color,
-            falloff: haze_falloff(settings.haze_visibility_km),
+            falloff: body_haze(settings, settings.haze_visibility_km),
             directional_light_exponent: 24.0,
             ..default()
         },
@@ -432,9 +440,10 @@ fn thin_air_with_height(
     }
     *applied = Some(haze);
     for (_, mut fog) in &mut cameras {
-        fog.falloff = haze_falloff(settings.haze_visibility_km / haze);
+        fog.falloff = body_haze(&settings, settings.haze_visibility_km / haze);
     }
-    let sky = (-height / SKY_SCALE_HEIGHT_M).exp();
+    let scale_height = if settings.sky_kind == super::SkyKind::Dust { 11_100.0 } else { SKY_SCALE_HEIGHT_M };
+    let sky = (-height / scale_height).exp();
     let daylight = Daylight::from_settings(&settings);
     clouds.sky_zenith_color = daylight.zenith * sky;
     clouds.sky_horizon_color = daylight.horizon * sky;

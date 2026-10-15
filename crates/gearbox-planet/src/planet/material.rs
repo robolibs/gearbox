@@ -34,7 +34,29 @@ pub struct TerrainGlobals {
     pub radius: f32,
     pub height_amp: f32,
     pub debug_flags: u32,
-    pub _pad: u32,
+    pub surface_kind: u32,
+    pub cover_origin: Vec4,
+    pub cover_north: Vec4,
+    pub cover_east: Vec4,
+}
+
+/// Installed local terrain footprint in floating-origin render coordinates.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct TerrainCoverage {
+    pub origin: Vec4,
+    pub north: Vec4,
+    pub east: Vec4,
+}
+
+impl TerrainCoverage {
+    pub fn from_frame(frame: &GlobalTransform, centre: Vec2, half_size: f32) -> Self {
+        let transform = frame.affine();
+        Self {
+            origin: transform.transform_point3(Vec3::new(centre.x, 0.0, centre.y)).extend(half_size),
+            north: transform.transform_vector3(Vec3::X).normalize().extend(0.0),
+            east: transform.transform_vector3(Vec3::Z).normalize().extend(0.0),
+        }
+    }
 }
 
 /// 32-byte per-node record, one slot per pool entity. Mirrors `TerrainNode`
@@ -62,8 +84,7 @@ pub struct TerrainNodeGpu {
 pub struct TerrainExtension {
     #[uniform(100)]
     pub globals: TerrainGlobals,
-    #[texture(101, dimension = "2d_array", sample_type = "float")]
-    #[sampler(102)]
+    #[texture(101, dimension = "2d_array", sample_type = "float", filterable = false)]
     pub heightmaps: Handle<Image>,
     #[storage(103, read_only)]
     pub nodes: Handle<ShaderBuffer>,
@@ -90,8 +111,7 @@ pub const WATER_SHADER_PATH: &str = "embedded://gearbox_planet/../shaders/water.
 pub struct WaterExtension {
     #[uniform(100)]
     pub globals: TerrainGlobals,
-    #[texture(101, dimension = "2d_array", sample_type = "float")]
-    #[sampler(102)]
+    #[texture(101, dimension = "2d_array", sample_type = "float", filterable = false)]
     pub heightmaps: Handle<Image>,
     #[storage(103, read_only)]
     pub nodes: Handle<ShaderBuffer>,

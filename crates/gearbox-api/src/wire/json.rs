@@ -49,6 +49,7 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(UsdRef, usd_ref_json, usd_ref_from),
         desc!(MarkerSet, marker_set_json, marker_set_from),
         desc!(MarkerRef, marker_ref_json, marker_ref_from),
+        desc!(FieldsLayout, fields_layout_json, fields_layout_from),
         desc!(Selection, selection_json, selection_from),
         desc!(MachineRef, machine_ref_json, machine_ref_from),
         desc!(MachineInfo, machine_info_json, machine_info_from),
@@ -470,6 +471,19 @@ fn marker_ref_from(v: &Value) -> Result<MarkerRef, String> {
     Ok(MarkerRef {
         props: props_from(v, &[]),
     })
+}
+
+fn fields_layout_json(f: &FieldsLayout) -> Value {
+    let text = f.json();
+    json!({ "layout": serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)) })
+}
+
+fn fields_layout_from(v: &Value) -> Result<FieldsLayout, String> {
+    match v.get("layout") {
+        Some(Value::String(text)) => Ok(FieldsLayout::new(text)),
+        Some(layout) => Ok(FieldsLayout::new(&layout.to_string())),
+        None => Ok(FieldsLayout::new("")),
+    }
 }
 
 fn selection_json(s: &Selection) -> Value {

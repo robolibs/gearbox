@@ -393,7 +393,9 @@ fn get_sky_color(ray_dir: vec3f) -> vec3f {
     let height = clamp(ray_dir.y, 0.0, 1.0);
     let horizon = pow(1.0 - height, 4.0);
     var col = mix(config.sky_zenith_color.rgb, config.sky_horizon_color.rgb, horizon);
-    col += config.sun_color.rgb * (0.08 * pow(mu, 6.0) + 0.15 * pow(mu, 64.0) + 0.25 * pow(mu, 512.0));
+    if config.sky_zenith_color.w > 0.0 {
+        col += config.sun_color.rgb * (0.08 * pow(mu, 6.0) + 0.15 * pow(mu, 64.0) + 0.25 * pow(mu, 512.0));
+    }
     return col;
 }
 

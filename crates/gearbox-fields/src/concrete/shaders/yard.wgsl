@@ -40,3 +40,18 @@ fn yard_weedy(world_xz: vec2<f32>) -> f32 {
     let broad = yard_noise(world_xz * 0.028) * 0.7 + yard_noise(world_xz * 0.085 + vec2<f32>(17.0, -9.0)) * 0.3;
     return smoothstep(0.44, 0.6, broad);
 }
+
+// A world X/Z point in the yard's own frame, its slab grid turned `yaw`
+// radians about the vertical.
+fn yard_place(world_xz: vec2<f32>, yaw: f32) -> vec2<f32> {
+    let c = cos(yaw);
+    let s = sin(yaw);
+    return vec2<f32>(world_xz.x * c - world_xz.y * s, world_xz.x * s + world_xz.y * c);
+}
+
+// A vector in the yard's own frame, back in world X/Z.
+fn yard_to_world(v: vec2<f32>, yaw: f32) -> vec2<f32> {
+    let c = cos(yaw);
+    let s = sin(yaw);
+    return vec2<f32>(v.x * c + v.y * s, -v.x * s + v.y * c);
+}

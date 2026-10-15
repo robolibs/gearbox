@@ -6,6 +6,74 @@ pub use bevy_weather::{DaylightUpdate, WeatherPlugin, WeatherSettings};
 use bevy::prelude::*;
 use bevy_weather::clouds::CloudsCamera;
 
+pub fn planetary_weather() -> WeatherSettings {
+    weather_for(gearbox_globe::Body::active())
+}
+
+fn weather_for(body: gearbox_globe::Body) -> WeatherSettings {
+    let mut settings = WeatherSettings::default();
+    if body == gearbox_globe::Body::Earth { return settings; }
+    let moon = body == gearbox_globe::Body::Moon;
+    settings.sky_kind = if moon { bevy_weather::SkyKind::Airless } else { bevy_weather::SkyKind::Dust };
+    settings.clouds.planet_radius = body.radius_m() as f32;
+    settings.clouds.clouds_coverage = 0.0;
+    settings.clouds.cloud_shadow_opacity = 0.0;
+    settings.cloud_drift_mps = 0.0;
+    settings.wind_speed_mps = if moon { 0.0 } else { 3.0 };
+    settings.wind_gustiness = if moon { 0.0 } else { 0.25 };
+    if !settings.sun_override {
+        settings.sun_position = Vec3::new(-0.65, if moon { 0.35 } else { 0.65 }, 0.45).normalize();
+    }
+    settings.sun_override = true;
+    settings.sun_color = if moon { Color::WHITE } else { Color::srgb(1.0, 0.94, 0.85) };
+    settings.illuminance = if moon { 127_000.0 } else { 58_000.0 };
+    settings.indirect_intensity = if moon { 450.0 } else { 2_200.0 };
+    settings.haze_visibility_km = if moon { 1.0e9 } else { 18.0 };
+    settings.fog_color = if moon { Color::BLACK } else { Color::srgb(0.74, 0.55, 0.40) };
+    settings.exposure_ev100 = if moon { 14.0 } else { 13.0 };
+    settings
+}
+
+pub fn planetary_fields() -> gearbox_fields::FieldsPlugin {
+    fields_for(gearbox_globe::Body::active())
+}
+
+fn fields_for(body: gearbox_globe::Body) -> gearbox_fields::FieldsPlugin {
+    if body == gearbox_globe::Body::Earth { return gearbox_fields::FieldsPlugin::default(); }
+    gearbox_fields::FieldsPlugin {
+        layout: gearbox_fields::FieldLayout {
+            default: body.name().into(), default_friction: Some(0.75), fields: Vec::new(), ways: Vec::new(),
+        },
+        grass_density: 0.0, stubble_density: 0.0, concrete_weed_density: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod planet_tests {
+    use super::*;
+    use gearbox_globe::Body;
+
+    #[test]
+    fn planet_skies_and_surfaces_are_distinct_and_barren() {
+        assert_eq!(weather_for(Body::Earth).sky_kind, bevy_weather::SkyKind::Earth);
+        assert_eq!(weather_for(Body::Mars).sky_kind, bevy_weather::SkyKind::Dust);
+        let moon = weather_for(Body::Moon);
+        assert_eq!(moon.sky_kind, bevy_weather::SkyKind::Airless);
+        assert_eq!(moon.wind_speed_mps, 0.0);
+        assert_eq!(moon.fog_color, Color::BLACK);
+        for body in [Body::Mars, Body::Moon] {
+            let weather = weather_for(body);
+            assert_eq!(weather.clouds.clouds_coverage, 0.0);
+            assert_eq!(weather.clouds.cloud_shadow_opacity, 0.0);
+            assert_eq!(weather.clouds.planet_radius, body.radius_m() as f32);
+            let fields = fields_for(body);
+            assert_eq!(fields.layout.default, body.name());
+            assert!(fields.layout.fields.is_empty() && fields.layout.ways.is_empty());
+            assert_eq!(fields.grass_density + fields.stubble_density + fields.concrete_weed_density, 0.0);
+        }
+    }
+}
+
 /// Vertical field of view of the viewer's lens, in degrees.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ViewerLens {

@@ -10,12 +10,16 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
 }
+#import gearbox_globe::surface::planet_albedo
 
 struct TerrainGlobals {
     radius: f32,
     height_amp: f32,
     debug_flags: u32,
-    _pad: u32,
+    surface_kind: u32,
+    cover_origin: vec4<f32>,
+    cover_north: vec4<f32>,
+    cover_east: vec4<f32>,
 }
 
 struct TerrainNode {
@@ -29,7 +33,6 @@ struct TerrainNode {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> tg: TerrainGlobals;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var heightmaps: texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var heightmap_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var<storage, read> nodes: array<TerrainNode>;
 
 const GRID_F: f32 = 128.0;
@@ -69,8 +72,15 @@ fn face_dir(basis: mat3x3<f32>, uv: vec2<f32>) -> vec3<f32> {
 // Grid coord (0..128, fractional ok) -> atlas uv. Texel centers coincide with
 // integer grid coords, so integer g fetches exact baked values.
 fn sample_height(layer: u32, g: vec2<f32>) -> f32 {
-    let uv = (g + BORDER + 0.5) / TILE_TEXELS;
-    return textureSampleLevel(heightmaps, heightmap_sampler, uv, layer, 0.0).r;
+    let p = clamp(g + BORDER, vec2(0.0), vec2(TILE_TEXELS - 1.0));
+    let lo = vec2<i32>(floor(p));
+    let hi = min(lo + vec2<i32>(1), vec2<i32>(i32(TILE_TEXELS) - 1));
+    let f = fract(p);
+    let a = textureLoad(heightmaps, lo, i32(layer), 0).r;
+    let b = textureLoad(heightmaps, vec2(hi.x, lo.y), i32(layer), 0).r;
+    let c = textureLoad(heightmaps, vec2(lo.x, hi.y), i32(layer), 0).r;
+    let d = textureLoad(heightmaps, hi, i32(layer), 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 // Height -> displaced world position. Negative heights are real seabed;
@@ -112,7 +122,9 @@ fn vertex(in: Vertex) -> VertexOutput {
     let dir_f = face_dir(basis, uv_f);
     let h_f = sample_height(node.atlas_layer, g);
     let p_f = terrain_pos(dir_f, h_f);
-    let dist = distance(view.world_position, p_f);
+    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
+    let p_world = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(p_f, 1.0));
+    let dist = distance(view.world_position, p_world.xyz);
     let morph = max(
         clamp((dist - node.morph_consts.x) * node.morph_consts.y, 0.0, 1.0),
         node.morph_floor,
@@ -134,7 +146,6 @@ fn vertex(in: Vertex) -> VertexOutput {
     p -= dir * skirt * min(tg.radius * node.scale * 0.05 + 2.0, 15.0);
 
     var out: VertexOutput;
-    let world_from_local = mesh_functions::get_world_from_local(in.instance_index);
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(p, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
     // `dir` is planet-local; lighting needs it in world space (planets rotate
@@ -148,7 +159,6 @@ fn vertex(in: Vertex) -> VertexOutput {
 #endif
     return out;
 }
-
 fn lod_tint(lod: u32) -> vec3<f32> {
     let t = f32(lod) * 0.61803;
     return 0.55 + 0.45 * cos(6.2831 * (vec3(t, t, t) + vec3(0.0, 0.33, 0.67)));
@@ -169,17 +179,27 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let g = in.uv * GRID_F;
     let layer = node.atlas_layer;
 
-    // Finite-difference normal (1-texel step; border texels exist for edges).
+    // Central differences use the atlas border at tile edges.
     let h_c = sample_height(layer, g);
     let h_x = sample_height(layer, g + vec2(1.0, 0.0));
     let h_y = sample_height(layer, g + vec2(0.0, 1.0));
+    let h_x0 = sample_height(layer, g - vec2(1.0, 0.0));
+    let h_y0 = sample_height(layer, g - vec2(0.0, 1.0));
     let uv_c = node.origin + (g / GRID_F) * node.scale;
     let step = node.scale / GRID_F;
     let dir_c = face_dir(basis, uv_c);
     let p_c = terrain_pos(dir_c, h_c);
-    let p_x = terrain_pos(face_dir(basis, uv_c + vec2(step, 0.0)), h_x);
-    let p_y = terrain_pos(face_dir(basis, uv_c + vec2(0.0, step)), h_y);
-    var n_local = normalize(cross(p_x - p_c, p_y - p_c));
+    let covered = in.world_position.xyz - tg.cover_origin.xyz;
+    if tg.cover_origin.w > 0.0 && length(covered) < tg.radius && max(abs(dot(covered,tg.cover_north.xyz)),abs(dot(covered,tg.cover_east.xyz))) < tg.cover_origin.w {
+        discard;
+    }
+    let metric = (tg.radius + h_c * tg.height_amp) * step
+        / length(basis[2] + uv_c.x * basis[0] + uv_c.y * basis[1]);
+    let dx = metric * (basis[0] - dir_c * dot(dir_c, basis[0]))
+        + dir_c * ((h_x - h_x0) * 0.5 * tg.height_amp);
+    let dy = metric * (basis[1] - dir_c * dot(dir_c, basis[1]))
+        + dir_c * ((h_y - h_y0) * 0.5 * tg.height_amp);
+    var n_local = normalize(cross(dx, dy));
     if dot(n_local, dir_c) < 0.0 {
         n_local = -n_local;
     }
@@ -216,7 +236,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // land running into bare soil at the join. Linear, in the range the covers
     // work in: set from an sRGB swatch it was three times too bright and every
     // lit face clipped to white.
-    var color = vec3<f32>(0.058, 0.108, 0.015);
+    var color = planet_albedo(dir_c, tg.surface_kind);
+    if tg.surface_kind != 0u {
+        color *= 0.7 + 0.3*slope;
+        pbr_input.material.reflectance = vec3<f32>(0.03);
+    }
 
     // Debug overlays.
     if (tg.debug_flags & DEBUG_LOD_TINT) != 0u {
@@ -241,7 +265,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // What the sun does not reach, the sky still does. Out here there is no air
     // between the eye and the ground to fill a shadow in, so a cloud's shadow
     // fell to nothing and read as a hole cut in the planet.
-    out.color = apply_pbr_lighting(pbr_input) + vec4<f32>(color * SKY_FILL, 0.0);
+    let fill = select(SKY_FILL, 0.0, tg.surface_kind != 0u);
+    out.color = apply_pbr_lighting(pbr_input) + vec4<f32>(color * fill, 0.0);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }
