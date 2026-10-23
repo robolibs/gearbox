@@ -84,11 +84,14 @@ def Xform "World" {{
             }
         }
         app.world_mut().resource_mut::<ControllerInventory>().machines = machines.clone();
+        app.init_resource::<crate::joint_control::runtime::ControlClock>().init_resource::<crate::joint_control::runtime::BindingWaits>();
         let mut controllers = bevy::ecs::schedule::Schedule::default();
         controllers.add_systems((
             guard_chassis_inertia,
             prepare_machine_physics,
+            crate::joint_control::runtime::bind_accepted_machines,
             wheel_forces::sync_machine_wheel_forces,
+            crate::joint_control::runtime::advance_control_clock,
             apply_builtin_ackermann_cmd_vel,
         ).chain());
         controllers.run(app.world_mut());

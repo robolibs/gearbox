@@ -16,7 +16,11 @@ pub(crate) mod attach;
 pub(crate) mod benchmark;
 pub mod backend;
 mod bodies;
+pub mod chassis;
 mod colliders;
+#[cfg(test)]
+mod commit_tests;
+pub(crate) mod commit;
 mod convert;
 mod debug;
 mod drive_motor;
@@ -41,10 +45,13 @@ use usd_bevy::instance::UsdInstances;
 use usd_bevy::{UsdSceneInstance, UsdSceneRoot, UsdSceneState};
 
 use convert::{quat_from_d, vec3_from_d};
+use markers::ModelMember;
 
 pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
-pub use world::{AuthoredDrive, PhysicsWorld, step_physics};
+pub use world::{AuthoredDrive, ControlTick, PhysicsWorld, step_physics};
+#[cfg(test)]
+pub use world::plan_physics_steps;
 pub(crate) use world::HitchHold;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -57,6 +64,7 @@ pub struct PhysicsPlugin;
 
 impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
+        app.init_schedule(world::ControlTick);
         app.init_resource::<PhysicsWorld>()
             .init_resource::<PhysicsActive>()
             .init_resource::<ColliderDebugEnabled>()
@@ -177,13 +185,75 @@ fn attach_projected_stages(world: &mut World) {
         }
         attach::resolve_pending_physics(world, &pending, &by_path);
         attach::populate_articulation_joints(world, &pending.articulation_roots);
-        world.entity_mut(root).insert(PhysicsAttached);
+        let model = compile_loaded_model(world, stage, root);
+        mark_model_members(world, &model, &by_path);
+        world.entity_mut(root).insert((PhysicsAttached, LoadedModel(model)));
         info!(
             "gearbox-physics: attached markers to {} prim(s) of {root:?}",
             prims.len()
         );
     }
     world.insert_non_send(instances);
+}
+
+/// The compiled machines of a loaded stage; activation, discovery and the
+/// v2 endpoints read this one result.
+#[derive(Component, Clone)]
+pub struct LoadedModel(pub std::sync::Arc<crate::machine_model::CompileResult>);
+
+/// Generation counter shared by every compiled load.
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn compile_loaded_model(world: &World, stage: &openusd::usd::Stage, root: Entity) -> std::sync::Arc<crate::machine_model::CompileResult> {
+    let options = crate::machine_model::CompileOptions {
+        selection: crate::machine_model::Selection::Asset { entry: None },
+        load_instance: format!("{root}"),
+        generation: next_generation(),
+        meters_per_unit_override: std::env::var("BEVY_OPENUSD_METERS_PER_UNIT").ok().and_then(|s| s.parse().ok()),
+        physics_rate_hz: world.get_resource::<PhysicsWorld>().map_or(120.0, |w| w.step_hz),
+    };
+    let result = crate::machine_model::compile(stage, &options);
+    for machine in &result.machines {
+        for d in machine.errors() {
+            warn!("gearbox-model: {} rejected: {d}", machine.root);
+        }
+    }
+    std::sync::Arc::new(result)
+}
+
+/// Tag every body and joint entity with the machine that owns it, so body,
+/// collider and joint insertion follow its profile and validation.
+fn mark_model_members(world: &mut World, model: &crate::machine_model::CompileResult, by_path: &HashMap<String, Entity>) {
+    for machine in &model.machines {
+        let rejected = !machine.accepted();
+        let strict = machine.profile.strict();
+        for body in &machine.bodies {
+            if let Some(&entity) = by_path.get(&body.path) {
+                world.entity_mut(entity).insert(ModelMember {
+                    machine_root: machine.root.clone(),
+                    strict,
+                    rejected,
+                    explicit_mass: body.mass.mass.is_some(),
+                    damping: Some((body.linear_damping.value, body.angular_damping.value)),
+                });
+            }
+        }
+        for joint in &machine.joints {
+            if let Some(&entity) = by_path.get(&joint.path) {
+                world.entity_mut(entity).insert(ModelMember {
+                    machine_root: machine.root.clone(),
+                    strict,
+                    rejected,
+                    explicit_mass: false,
+                    damping: None,
+                });
+            }
+        }
+    }
 }
 
 /// A prim entity whose physics markers were read; prims a variant swap adds
@@ -240,6 +310,9 @@ fn refresh_swapped_stages(world: &mut World) {
             .filter(|(path, entity)| path != "/" && world.get::<PhysicsScanned>(*entity).is_none())
             .cloned()
             .collect();
+        let model = compile_loaded_model(world, stage, root);
+        mark_model_members(world, &model, &prims.iter().cloned().collect());
+        world.entity_mut(root).insert(LoadedModel(model));
         if fresh.is_empty() {
             continue;
         }

@@ -35,6 +35,11 @@ pub struct UsdAssetRoot(pub std::path::PathBuf);
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct PhysicsActive(pub bool);
 
+/// Physics ticks still to run before the clock pauses again: a `STEP` clock
+/// command counts simulation ticks, not rendered frames.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct PhysicsStepBudget(pub Option<u32>);
+
 /// Objects the host reports on `/gearbox/scene/list`. Each owner refreshes
 /// its own list: the binary for loaded assets, the loader plugin for props,
 /// the marker plugin for markers.
@@ -76,8 +81,6 @@ pub struct GearboxBus {
     pub host: HostBus,
     pub machines: HashMap<String, MachineAgent>,
     pub physics_steps: u64,
-    /// Frames left to run before a `step` request pauses the clock again.
-    step_budget: u32,
     shutdown: bool,
     last_clock: Option<ClockState>,
 }
@@ -107,7 +110,8 @@ impl Plugin for GearboxBusPlugin {
         app.add_message::<SimResetRequest>()
             .add_message::<FieldsLayoutRequest>()
             .init_resource::<SceneObjects>()
-            .init_resource::<SelectionState>();
+            .init_resource::<SelectionState>()
+            .init_resource::<PhysicsStepBudget>();
         match HostBus::new(self.config.clone()) {
             Ok(host) => {
                 info!("{}", host.banner());
@@ -115,7 +119,6 @@ impl Plugin for GearboxBusPlugin {
                     host,
                     machines: HashMap::new(),
                     physics_steps: 0,
-                    step_budget: 0,
                     shutdown: false,
                     last_clock: None,
                 });
@@ -145,17 +148,12 @@ fn serve_host_core(
     mut reset: MessageWriter<SimResetRequest>,
     mut layouts: MessageWriter<FieldsLayoutRequest>,
     mut exit: MessageWriter<AppExit>,
+    mut budget: ResMut<PhysicsStepBudget>,
 ) {
     if physics.0 {
         bus.physics_steps += 1;
     }
     let bus = bus.as_mut();
-    if bus.step_budget > 0 {
-        bus.step_budget -= 1;
-        if bus.step_budget == 0 {
-            physics.0 = false;
-        }
-    }
     let uptime = bus.host.uptime_ms();
     let paused = !physics.0;
     let steps = bus.physics_steps;
@@ -191,22 +189,22 @@ fn serve_host_core(
 
     let mut active = physics.0;
     let mut shutdown = bus.shutdown;
-    let mut step_budget = bus.step_budget;
+    let mut step_budget = budget.0;
     bus.host.serve_clock(|cmd| {
         match cmd.op {
             clock_op::PAUSE => {
                 active = false;
-                step_budget = 0;
+                step_budget = None;
             }
             clock_op::PLAY => {
                 active = true;
-                step_budget = 0;
+                step_budget = None;
             }
             clock_op::TOGGLE => active = !active,
             clock_op::SHUTDOWN => shutdown = true,
             clock_op::STEP => {
                 active = true;
-                step_budget = cmd.steps.max(1);
+                step_budget = Some(cmd.steps.max(1));
             }
             _ => {}
         }
@@ -230,7 +228,7 @@ fn serve_host_core(
         exit.write(AppExit::Success);
     }
     bus.shutdown = shutdown;
-    bus.step_budget = step_budget;
+    budget.0 = step_budget;
     if active != physics.0 {
         physics.0 = active;
     }

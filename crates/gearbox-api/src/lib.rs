@@ -32,6 +32,6 @@ pub mod tyres;
 
 #[cfg(feature = "bevy")]
 pub use plugin::{
-    FieldsLayoutRequest, GearboxBus, GearboxBusPlugin, MachineDeleteQueue, MachineLoadQueue, PhysicsActive, SceneObjects,
+    FieldsLayoutRequest, GearboxBus, GearboxBusPlugin, MachineDeleteQueue, MachineLoadQueue, PhysicsActive, PhysicsStepBudget, SceneObjects,
     SelectionState, SimResetRequest, UsdAssetRoot, UsdLoaderPlugin, UsdMarkerPlugin,
 };

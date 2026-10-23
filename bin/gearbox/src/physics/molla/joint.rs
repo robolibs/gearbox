@@ -204,6 +204,25 @@ impl JointMut for JointAccess {
     fn set_motor_max_force(&mut self, axis: JointAxis, max_force: f64) {
         self.edit_motor(axis, |m| m.max_force = max_force);
     }
+    fn set_motor_effort(&mut self, axis: JointAxis, effort: f64, max_force: f64) {
+        self.edit_motor(axis, |m| {
+            m.mode = sim::JointTargetMode::Effort;
+            m.model = jc::MotorModel::Force;
+            m.target_position = effort.clamp(-max_force, max_force);
+            m.target_velocity = 0.0;
+            m.stiffness = 0.0;
+            m.damping = 0.0;
+            m.max_force = max_force;
+        });
+    }
+    fn clear_motor(&mut self, axis: JointAxis) {
+        self.edit_motor(axis, |m| {
+            m.mode = sim::JointTargetMode::None;
+            m.stiffness = 0.0;
+            m.damping = 0.0;
+            m.max_force = 0.0;
+        });
+    }
     fn set_softness(&mut self, natural_frequency: f64, damping_ratio: f64) {
         apply(self.shared.world().scene.set_joint_softness(
             self.handle,

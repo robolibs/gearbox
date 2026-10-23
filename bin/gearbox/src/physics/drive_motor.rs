@@ -6,11 +6,6 @@
 use super::backend::{DeviceCommand, DeviceLimits, DeviceSetting, JointAxis, JointMut, MotorModel, MotorOutput};
 use super::world::AuthoredDrive;
 
-/// A force command runs the drive toward this speed with this damping, so
-/// its force limit is the force applied.
-const FORCE_COMMAND_VELOCITY: f64 = 1.0e6;
-const FORCE_COMMAND_DAMPING: f64 = 1.0e10;
-
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DriveMotor {
     pub axis: JointAxis,
@@ -66,6 +61,16 @@ impl DriveMotor {
             DeviceCommand::Velocity(drive.target_velocity.unwrap_or(0.0))
         })?;
         Ok(motor)
+    }
+
+    /// The command the motor starts with: the authored target, or holding
+    /// where it stands.
+    pub(crate) fn rest_command(&self) -> DeviceCommand {
+        if self.drive.stiffness > 0.0 {
+            DeviceCommand::Position(self.drive.target_position.unwrap_or(self.position))
+        } else {
+            DeviceCommand::Velocity(self.drive.target_velocity.unwrap_or(0.0))
+        }
     }
 
     pub(crate) fn command(&mut self, command: DeviceCommand) -> Result<(), String> {
@@ -168,9 +173,7 @@ impl DriveMotor {
     pub(crate) fn write(&self, joint: &mut dyn JointMut) {
         let (stiffness, damping) = (self.drive.stiffness, self.drive.damping);
         if let DeviceCommand::Force(force) = self.command {
-            joint.set_motor_model(self.axis, MotorModel::Force);
-            joint.set_motor_velocity(self.axis, FORCE_COMMAND_VELOCITY.copysign(force), FORCE_COMMAND_DAMPING);
-            joint.set_motor_max_force(self.axis, force.abs().min(self.max_force));
+            joint.set_motor_effort(self.axis, force.clamp(-self.max_force, self.max_force), self.max_force);
             return;
         }
         let model = if self.drive.force { MotorModel::Force } else { MotorModel::Acceleration };

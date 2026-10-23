@@ -22,6 +22,9 @@ pub(crate) fn project(app: &mut App, stage: &openusd::usd::Stage) -> Entity {
     let paths = prims.iter().map(|(path, entity)| (path.to_string(), entity)).collect();
     attach::resolve_pending_physics(app.world_mut(), &pending, &paths);
     attach::populate_articulation_joints(app.world_mut(), &pending.articulation_roots);
+    let model = compile_loaded_model(app.world(), stage, root);
+    mark_model_members(app.world_mut(), &model, &paths);
+    app.world_mut().entity_mut(root).insert(LoadedModel(model));
     app.update();
     let mut convert = bevy::ecs::schedule::Schedule::default();
     convert.add_systems((

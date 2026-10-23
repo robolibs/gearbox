@@ -271,6 +271,7 @@ fn real_tracked_machine() {
     let root = crate::physics::benchmark::project(&mut app, &stage);
     machine.scene_root = Some(root);
     app.init_resource::<ControllerInventory>().init_resource::<ControllerCommands>()
+        .init_resource::<crate::joint_control::runtime::ControlClock>().init_resource::<crate::joint_control::runtime::BindingWaits>()
         .init_resource::<ControllerRuntimeState>().init_resource::<ControllerStates>()
         .init_resource::<MachineAgentKeys>().init_resource::<crate::services::LinkValues>()
         .insert_resource(gearbox_api::PhysicsActive(true));
@@ -278,7 +279,7 @@ fn real_tracked_machine() {
     let key = ControllerKey::new(root, &machine.id, "drive");
     app.world_mut().resource_mut::<MachineAgentKeys>().0.insert("tracked-test".into(), key.clone());
     let mut controllers = bevy::ecs::schedule::Schedule::default();
-    controllers.add_systems((prepare_machine_physics, apply).chain());
+    controllers.add_systems((prepare_machine_physics, crate::joint_control::runtime::bind_accepted_machines, crate::joint_control::runtime::advance_control_clock, apply).chain());
     let mut visuals = bevy::ecs::schedule::Schedule::default();
     visuals.add_systems(animate);
     controllers.run(app.world_mut());

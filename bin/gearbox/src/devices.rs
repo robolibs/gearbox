@@ -19,6 +19,7 @@ use openusd::sdf::{Path as SdfPath, Value};
 use usd_bevy::UsdPrimRef;
 
 use crate::controller::{ControllerInventory, MachineAgentKeys, find_prim_entity, read_attr, read_bool, read_float, read_token, type_name};
+use crate::physics::backend::JointAxis;
 use crate::physics::backend::{
     BeltDesc, ConnectorDesc, ConnectorKind, DVec3, DeviceCommand, DeviceId, DeviceLimits, DeviceSetting,
     BodyId, CopterCommand, CopterDesc, CopterLimits, DragDesc, JointId, Pose, PropellerDesc,
@@ -467,8 +468,14 @@ fn number(props: &Props, key: &str) -> Option<f64> {
     props.get(key).and_then(|v| v.trim().parse::<f64>().ok())
 }
 
-/// Applies one command to a registered device.
-fn apply(physics: &mut PhysicsWorld, device: &Registered, command: &ActuatorCommand) -> Result<(), String> {
+/// The motor device `name` of `machine` as a DOF owner.
+pub(crate) fn device_owner(machine: &str, name: &str) -> crate::joint_control::OwnerId {
+    crate::joint_control::OwnerId::new(crate::joint_control::OwnerClass::Device, machine, &format!("device:{name}"))
+}
+
+/// Applies one command to a registered device. A joint device's command and
+/// force cap go through its DOF's owner: rejected when a service owns it.
+fn apply(physics: &mut PhysicsWorld, machine: &str, device: &Registered, command: &ActuatorCommand) -> Result<(), String> {
     let props = command.props();
     let has = |key: &str| props.get(key).is_some();
     let flag = |key: &str| props.get(key).map(|v| matches!(v.trim(), "1" | "true" | "on" | "yes"));
@@ -482,7 +489,6 @@ fn apply(physics: &mut PhysicsWorld, device: &Registered, command: &ActuatorComm
                 has("acceleration").then(|| {
                     DeviceSetting::Acceleration(number(&props, "acceleration").filter(|a| *a > 0.0))
                 }),
-                number(&props, "max_force").or(number(&props, "max_torque")).map(DeviceSetting::MaxForce),
                 props.get("pid").and_then(|v| {
                     let gains: Vec<f64> = v.split(',').filter_map(|g| g.trim().parse().ok()).collect();
                     (gains.len() == 3).then(|| DeviceSetting::Pid([gains[0], gains[1], gains[2]]))
@@ -491,12 +497,16 @@ fn apply(physics: &mut PhysicsWorld, device: &Registered, command: &ActuatorComm
             for setting in settings.into_iter().flatten() {
                 physics.configure_motor(joint, setting)?;
             }
-            let command = number(&props, "position")
-                .map(DeviceCommand::Position)
-                .or(number(&props, "velocity").map(DeviceCommand::Velocity))
-                .or(number(&props, "force").or(number(&props, "torque")).map(DeviceCommand::Force));
-            if let Some(command) = command {
-                physics.command_motor(joint, command)?;
+            let owner = device_owner(machine, &device.spec.name);
+            let axis = physics.motor_axis(joint).unwrap_or(JointAxis::AngX);
+            let cap = number(&props, "max_force").or(number(&props, "max_torque"));
+            let setpoint = number(&props, "position")
+                .map(|q| crate::joint_control::Setpoint::Position { q, qdot: None })
+                .or(number(&props, "velocity").map(|qdot| crate::joint_control::Setpoint::Velocity { qdot }))
+                .or(number(&props, "force").or(number(&props, "torque")).map(|force| crate::joint_control::Setpoint::Effort { force }))
+                .or_else(|| cap.and_then(|_| physics.requested_setpoint(joint, axis)));
+            if let Some(setpoint) = setpoint {
+                physics.submit(&owner, joint, axis, setpoint, cap).map_err(|e| e.to_string())?;
             }
             Ok(())
         }
@@ -567,7 +577,7 @@ fn unregister(physics: &mut PhysicsWorld, live: Live) {
 /// Registers the devices of loaded machines, drops those of removed ones,
 /// and applies this frame's actuator commands before the physics steps.
 #[allow(clippy::too_many_arguments)]
-fn drive_devices(
+pub(crate) fn drive_devices(
     mut registry: ResMut<MachineDevices>,
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
@@ -579,7 +589,7 @@ fn drive_devices(
     transforms: Query<&GlobalTransform>,
 ) {
     let registry = &mut *registry;
-    let live: Vec<&str> = inventory.machines.iter().map(|m| m.id.as_str()).collect();
+    let live: Vec<&str> = inventory.machines.iter().filter(|m| m.accepted()).map(|m| m.id.as_str()).collect();
     let gone: Vec<String> = registry.machines.keys().filter(|id| !live.contains(&id.as_str())).cloned().collect();
     for id in gone {
         registry.flown.remove(&id);
@@ -588,7 +598,7 @@ fn drive_devices(
         }
     }
     for machine in &inventory.machines {
-        if machine.devices.is_empty() || registry.machines.contains_key(&machine.id) {
+        if !machine.accepted() || machine.devices.is_empty() || registry.machines.contains_key(&machine.id) {
             continue;
         }
         let Some(scene_root) = machine.scene_root else { continue };
@@ -637,7 +647,7 @@ fn drive_devices(
                 warn!("gearbox-devices: `{}` has no device `{name}`", machine.id);
                 continue;
             };
-            if let Err(error) = apply(&mut physics, device, &command) {
+            if let Err(error) = apply(&mut physics, &machine.id, device, &command) {
                 warn!("gearbox-devices: `{}` device `{name}`: {error}", machine.id);
             }
         }

@@ -175,6 +175,7 @@ fn select_hitch_variants(
     }
 }
 
+#[derive(Clone, Copy)]
 struct Frame {
     translation: DVec3,
     rotation: DQuat,
@@ -876,22 +877,23 @@ fn try_attach(
     let hitch_world = hitch_body_world.then(&hitch_scene_body.inverse().then(&hitch_world));
     let coupler_world = coupler_body_world.then(&coupler_scene_body.inverse().then(&coupler_world));
 
-    // Only the prims' positions count. Every body keeps the USD basis (X
+    // Between two schemaVersion 2 machines the coupling frames are whole
+    // frames: the coupler frame is brought onto the hitch frame. Otherwise
+    // only the prims' positions count: every body keeps the USD basis (X
     // right, Y back, Z up), so aligning the two bodies puts the slave behind
-    // the master facing the same way; an authored prim rotation would tip
+    // the master facing the same way, and an authored prim rotation would tip
     // the whole slave over on teleport.
-    let hitch_world = Frame {
-        translation: hitch_world.translation,
-        rotation: hitch_body_world.rotation,
+    let v2 = |m: &MachineInstanceSpec| m.model.as_ref().is_some_and(|m| m.profile == crate::machine_model::ProfileKind::GearboxV2);
+    let full_frames = v2(master) && v2(slave);
+    let (hitch_world, coupler_world) = if full_frames {
+        (hitch_world, coupler_world)
+    } else {
+        (
+            Frame { translation: hitch_world.translation, rotation: hitch_body_world.rotation },
+            Frame { translation: coupler_world.translation, rotation: coupler_body_world.rotation },
+        )
     };
-    let coupler_world = Frame {
-        translation: coupler_world.translation,
-        rotation: coupler_body_world.rotation,
-    };
-    let target = Frame {
-        translation: hitch_world.translation,
-        rotation: hitch_body_world.rotation,
-    };
+    let target = hitch_world;
     let frame1 = hitch_body_world.inverse().then(&hitch_world);
     let frame2 = coupler_body_world.inverse().then(&coupler_world);
 

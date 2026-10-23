@@ -41,6 +41,16 @@ pub const MACHINE_EMIT: &str = "emit";
 pub const MACHINE_ACTUATE: &str = "actuate";
 /// Prefix of the per-device actuator streams, `actuators/<device>`.
 pub const MACHINE_ACTUATORS: &str = "actuators";
+/// Req/res: the machine generation's manifest (`MachineDescriptionV2`).
+pub const MACHINE_DESCRIPTION_V2: &str = "description_v2";
+/// Req/res: a joint command batch under a direct lease (`JointCommandV2`).
+pub const MACHINE_JOINT_COMMAND_V2: &str = "joint_command_v2";
+/// Req/res: acquire or release a direct lease over DOFs (`ControlRequestV2`).
+pub const MACHINE_CONTROL_V2: &str = "control_v2";
+/// Stream: measured and commanded joint state, once per rendered frame after its physics steps.
+pub const MACHINE_JOINT_STATE_V2: &str = "joint_state_v2";
+/// Stream: parent-relative frame transforms in a right-handed Z-up world.
+pub const MACHINE_TF_V2: &str = "tf_v2";
 
 /// Topics hosted by a machine's own agent, unique per machine so the
 /// host directory holds one owner per topic.

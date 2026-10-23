@@ -419,6 +419,48 @@ impl MachineClient<'_> {
         self.query(&self.topic(topics::MACHINE_LINKS), &Ping::default())
     }
 
+    /// The machine generation's manifest: DOF names, units, interfaces.
+    pub fn description_v2(&self) -> agentio::Result<MachineDescriptionV2> {
+        self.call(&self.topic(topics::MACHINE_DESCRIPTION_V2), &Ping::default())
+    }
+
+    /// A direct lease over `dofs` under a claimed `session`.
+    pub fn acquire_v2(&self, session: u64, generation: u64, dofs: &[&str]) -> agentio::Result<ControlResponseV2> {
+        let req = ControlRequestV2 {
+            session,
+            generation,
+            op: control_op::ACQUIRE,
+            names: names_to_bytes(dofs),
+            ..Default::default()
+        };
+        self.call(&self.topic(topics::MACHINE_CONTROL_V2), &req)
+    }
+
+    /// End the lease of `epoch`; `resume` gives the DOFs back to their owner.
+    pub fn release_v2(&self, session: u64, generation: u64, epoch: u64, resume: bool) -> agentio::Result<ControlResponseV2> {
+        let req = ControlRequestV2 { session, generation, epoch, op: control_op::RELEASE, resume: resume as u32, ..Default::default() };
+        self.call(&self.topic(topics::MACHINE_CONTROL_V2), &req)
+    }
+
+    /// Reset the machine's control: every lease and command cleared, each
+    /// DOF back to its default owner and load-time actuator.
+    pub fn reset_v2(&self, session: u64, generation: u64) -> agentio::Result<ControlResponseV2> {
+        let req = ControlRequestV2 { session, generation, op: control_op::RESET, ..Default::default() };
+        self.call(&self.topic(topics::MACHINE_CONTROL_V2), &req)
+    }
+
+    pub fn joint_command_v2(&self, command: &JointCommandV2) -> agentio::Result<JointCommandAckV2> {
+        self.call(&self.topic(topics::MACHINE_JOINT_COMMAND_V2), command)
+    }
+
+    pub fn joint_state_v2(&self) -> agentio::Result<Subscriber<Env>> {
+        self.subscribe(&self.topic(topics::MACHINE_JOINT_STATE_V2))
+    }
+
+    pub fn tf_v2(&self) -> agentio::Result<Subscriber<Env>> {
+        self.subscribe(&self.topic(topics::MACHINE_TF_V2))
+    }
+
     pub fn next_odom(
         &self,
         sub: &mut Subscriber<Env>,

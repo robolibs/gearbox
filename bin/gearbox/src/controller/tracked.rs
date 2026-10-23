@@ -24,7 +24,7 @@ pub struct TrackSpec {
     pub fem_visuals: Option<crate::physics::fem::visuals::TrackVisualSpec>,
 }
 
-pub(super) fn discover(stage: &openusd::usd::Stage, prim: &SdfPath) -> Result<Vec<TrackSpec>, String> {
+pub(crate) fn discover(stage: &openusd::usd::Stage, prim: &SdfPath) -> Result<Vec<TrackSpec>, String> {
     let Some(json) = read_string(stage, prim, "gearbox:machine:tracks") else { return Ok(Vec::new()) };
     let mut tracks: Vec<TrackSpec> = serde_json::from_str(&json).map_err(|e| format!("invalid tracks: {e}"))?;
     if tracks.len() != 2 || tracks[0].side * tracks[1].side != -1.0 {
@@ -138,6 +138,7 @@ fn body_id(root: Entity, path: &str, prims: &Query<(Entity, &UsdPrimRef)>, paren
 pub(super) fn apply(
     inventory: Res<ControllerInventory>, commands: Res<ControllerCommands>,
     active: Res<gearbox_api::PhysicsActive>,
+    clock: Res<crate::joint_control::runtime::ControlClock>,
     prims: Query<(Entity, &UsdPrimRef)>, parents: Query<&ChildOf>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut states: ResMut<ControllerStates>, mut values: ResMut<crate::services::LinkValues>,
@@ -147,10 +148,11 @@ pub(super) fn apply(
     for machine in &inventory.machines {
         let Some(root) = machine.scene_root else { continue };
         for controller in &machine.controllers {
-            if !controller.enabled || controller.controller_type != "builtin:tracked_cmd_vel" { continue; }
+            if !machine.accepted() || !controller.enabled || controller.controller_type != "builtin:tracked_cmd_vel" { continue; }
             let key = ControllerKey::new(root, &machine.id, &controller.instance);
             live.insert(key.clone());
             if !active.0 { continue; }
+            let Some(tick_dt) = clock.due(&machine.id, &controller.instance) else { continue };
             let result = (|| -> Result<Vec<BodyId>, String> {
                 if machine.tracks.len() != 2 { return Err("missing two authored track definitions".into()); }
                 let width = f64::from(controller.track_width.ok_or("missing trackWidth")?);
@@ -159,7 +161,7 @@ pub(super) fn apply(
                 let mut cmd = commands.cmd_vel.get(&key).copied().unwrap_or_default();
                 if !cmd.linear_mps.is_finite() || !cmd.angular_rps.is_finite() { cmd = CmdVel::default(); }
                 cmd.angular_rps = cmd.angular_rps.clamp(-2.0, 2.0);
-                let dt = (physics.pending_steps as f64 / physics.step_hz) as f32;
+                let dt = tick_dt as f32;
                 cmd = ramped(bindings.applied.get(&key).copied().unwrap_or_default(), cmd, dt);
                 bindings.applied.insert(key.clone(), cmd);
                 let grounded = machine.tracks.iter().all(|spec| body_id(root, &spec.sprocket, &prims, &parents, &physics)
@@ -167,8 +169,8 @@ pub(super) fn apply(
                 let trim = bindings.yaw_trim.entry(key.clone()).or_default();
                 if !grounded || cmd.angular_rps.abs() < 0.001 { *trim = 0.0; }
                 else {
-                    let error = cmd.angular_rps as f64 - physics.body(chassis).ok_or("missing chassis")?.angvel().y;
-                    let dt = physics.pending_steps as f64 / physics.step_hz;
+                    let error = cmd.angular_rps as f64 - physics.chassis(chassis).ok_or("missing chassis")?.angvel().y;
+                    let dt = tick_dt;
                     *trim = (*trim + 3.0 * error * dt).clamp(-6.0, 6.0);
                     cmd.angular_rps += (2.0 * error + *trim) as f32;
                 }
@@ -195,12 +197,10 @@ pub(super) fn apply(
                             slip_damping: material("track_slip_damping", 8000.0), max_torque,
                             max_power: controller.max_power_kw.unwrap_or(10.0) as f64 * 500.0, speed_gain: material("track_speed_gain", 120.0),
                         })?;
-                        // The track motor turns the sprocket; the joint's authored drive would brake it.
-                        if let Some(j) = physics.joint_mut(joint, true) {
-                            j.set_motor_velocity(JointAxis::AngX, 0.0, 0.0);
-                            j.set_motor_max_force(JointAxis::AngX, 0.0);
-                        }
                     }
+                    // The track motor turns the sprocket; the joint's authored drive would brake it.
+                    let owner = controller_owner(&machine.id, &controller.instance);
+                    let _ = physics.submit(&owner, joint, JointAxis::AngX, crate::joint_control::Setpoint::Free, None);
                     physics.set_track_speed(sprocket, speeds[usize::from(spec.side < 0.0)])?;
                     rotors.push(sprocket);
                     if let Some(output) = physics.track_output(sprocket) {
@@ -218,21 +218,24 @@ pub(super) fn apply(
                                 (radius > 0.0).then_some((physics.joint_between(carrier, body)?, radius))
                             }).collect();
                         for (joint, radius) in rollers {
-                            if let Some(j) = physics.joint_mut(joint, true) {
-                                j.set_motor_model(JointAxis::AngX, MotorModel::Force);
-                                j.set_motor_velocity(JointAxis::AngX, output.angular_velocity * spec.radius / radius, 1.0);
-                                j.set_motor_max_force(JointAxis::AngX, 2.0);
-                            }
+                            let setpoint = crate::joint_control::Setpoint::Servo {
+                                q: None,
+                                qdot: output.angular_velocity * spec.radius / radius,
+                                stiffness: 0.0,
+                                damping: 1.0,
+                                drive: crate::machine_model::DriveType::Force,
+                            };
+                            let _ = physics.submit(&owner, joint, JointAxis::AngX, setpoint, Some(2.0));
                         }
                     }
                 }
-                let body = physics.body(chassis).ok_or("missing chassis state")?;
+                let body = physics.chassis(chassis).ok_or("missing chassis state")?;
                 let pos = body.translation();
                 let (region, position_m) = crate::globe::site_local(pos.x, pos.y, pos.z);
-                let (roll_rad, pitch_rad) = machine_roll_pitch_rad(body);
+                let (roll_rad, pitch_rad) = machine_roll_pitch_rad(&body);
                 states.states.insert(key.clone(), ControllerState {
-                    region, position_m, heading_rad: machine_heading_rad(body), roll_rad, pitch_rad,
-                    linear_speed_mps: body_forward_vector(body).map_or(0.0, |f| body.linvel().dot(f)),
+                    region, position_m, heading_rad: machine_heading_rad(&body), roll_rad, pitch_rad,
+                    linear_speed_mps: body_forward_vector(&body).map_or(0.0, |f| body.linvel().dot(f)),
                     yaw_rate_rps: body.angvel().y, wheel_encoders: encoders,
                 });
                 Ok(rotors)

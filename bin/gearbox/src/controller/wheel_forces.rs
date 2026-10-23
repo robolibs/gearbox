@@ -440,6 +440,7 @@ mod tests {
             controllers: Vec::new(),
             links,
             grants: Vec::new(),
+            model: None,
         };
         let mut runtime = ControllerRuntimeState::default();
         runtime
@@ -630,7 +631,7 @@ pub(super) fn sync_machine_wheel_forces(
         else {
             continue;
         };
-        let Some(forward) = physics.body(chassis).and_then(body_forward_vector) else {
+        let Some(forward) = physics.chassis(chassis).and_then(|b| body_forward_vector(&b)) else {
             continue;
         };
         let mut axle_geometry = Vec::new();
@@ -917,7 +918,7 @@ pub(super) fn apply_motion_resistance(
         if !(drag > 0.0) || !drag.is_finite() {
             continue;
         }
-        let Some(body) = physics.body(chassis) else {
+        let Some(body) = physics.chassis(chassis) else {
             continue;
         };
         // Only the travel over the ground is resisted, and it fades out with

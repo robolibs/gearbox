@@ -5,6 +5,7 @@ pub mod common;
 pub mod host;
 pub mod json;
 pub mod machine;
+pub mod machine_v2;
 
 pub use common::{Env, Ping, Props, SENT_AT, Status, code, decode, now_unix_ms, pack, unpack};
 pub use host::{
@@ -18,4 +19,8 @@ pub use machine::{
     LidarScan, Measurement, measurement_kind,
     LinkPose, LinkRecord, MachineInfo, MachineState, SessionInfo,
     SessionRef, TwistCmd,
+};
+pub use machine_v2::{
+    ControlRequestV2, ControlResponseV2, JointCommandAckV2, JointCommandV2, JointStateV2, MachineDescriptionV2, TfV2,
+    command_status, control_op, joint_mode, names_from_bytes, names_to_bytes,
 };

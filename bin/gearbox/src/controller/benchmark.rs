@@ -57,11 +57,12 @@ impl Fixture {
     fn load(path: &Path) -> Self {
         let source = usd_bevy::UsdSource::from_file(path).expect("read benchmark asset");
         let stage = source.open_stage().expect("open benchmark stage");
-        let kind = match path.file_name().unwrap().to_str().unwrap() {
-            "kubota_tractor.usdz" => FixtureKind::Kubota,
-            "krampe_trailer.usdz" => FixtureKind::Krampe,
-            "oxbo_harvester.usdz" => FixtureKind::Oxbo,
-            "knoche_disc_harrow.usdz" => FixtureKind::Knoche,
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let kind = match () {
+            _ if name.starts_with("kubota_tractor") => FixtureKind::Kubota,
+            _ if name.starts_with("krampe_trailer") => FixtureKind::Krampe,
+            _ if name.starts_with("oxbo_harvester") => FixtureKind::Oxbo,
+            _ if name.starts_with("knoche_disc_harrow") => FixtureKind::Knoche,
             _ => panic!("benchmark requires the real Kubota, Krampe, Oxbo or Knoche asset"),
         };
         Self::from_stage(&stage, kind, 1)
@@ -122,11 +123,14 @@ impl Fixture {
                 }
             }
         }
+        app.init_resource::<crate::joint_control::runtime::ControlClock>().init_resource::<crate::joint_control::runtime::BindingWaits>();
         let mut controllers = bevy::ecs::schedule::Schedule::default();
         controllers.add_systems((
             guard_chassis_inertia,
             prepare_machine_physics,
+            crate::joint_control::runtime::bind_accepted_machines,
             wheel_forces::sync_machine_wheel_forces,
+            crate::joint_control::runtime::advance_control_clock,
             apply_builtin_ackermann_cmd_vel,
             apply_builtin_diff_drive_cmd_vel,
             record_wheel_tracks,
@@ -145,8 +149,10 @@ impl Fixture {
             let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
             let chassis = physics.entity_to_body[&chassis_entity];
             let mass: f64 = bodies.iter().map(|id| physics.body(*id).unwrap().mass()).sum();
+            let strict = machine.model.as_ref().is_some_and(|m| m.profile.strict());
             if kubota {
-                assert!((mass - 6317.613973).abs() < 0.001, "imported mass {mass}");
+                let authored = if strict { 6311.0 } else { 6317.613973 };
+                assert!((mass - authored).abs() < 0.001, "imported mass {mass}");
             } else if kind == FixtureKind::Knoche {
                 assert!((2750.0..2760.0).contains(&mass), "imported harrow mass {mass}");
             } else if kind == FixtureKind::Krampe {

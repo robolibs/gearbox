@@ -58,6 +58,7 @@ pub fn convert_colliders(
     globals: Query<&GlobalTransform>,
     parents: Query<&ChildOf>,
     articulation_roots: Query<(), With<UsdArticulationRoot>>,
+    members: Query<&super::markers::ModelMember>,
     meshes: Res<Assets<Mesh>>,
 ) {
     for (entity, col, rb_opt, mesh3d, gt, children, child_of) in &colliders {
@@ -188,6 +189,10 @@ pub fn convert_colliders(
             .entity(entity);
         desc.parent = parent_handle;
         desc.enabled = col.enabled;
+        // A strict machine's authored body mass is the whole mass.
+        if parent_entity.and_then(|e| members.get(e).ok()).is_some_and(|m| m.strict && m.explicit_mass) {
+            desc.density = Some(0.0);
+        }
         // Colliders of one articulation never touch each other.
         desc.groups = find_articulation_root_ancestor(
             entity,

@@ -19,14 +19,14 @@ impl Turn {
     pub(super) fn configure_servos(
         &self,
         physics: &mut crate::physics::PhysicsWorld,
+        owner: &crate::joint_control::OwnerId,
         cap: Option<f64>,
     ) {
         for wheel in self.wheels.iter().filter(|wheel| !wheel.authored_drive) {
             let target = wheel.sign * angle(self.curvature, self.pivot_y, wheel.center);
-            for id in physics.joints_between(wheel.pair.0, wheel.pair.1) {
-                if let Some(joint) = physics.joint_mut(id, false) {
-                    configure_fallback_steer_motor(joint, target, cap);
-                }
+            for id in physics.owned_joints_between(owner, wheel.pair.0, wheel.pair.1, JointAxis::AngX) {
+                let (setpoint, cap) = steer_setpoint(target, None, cap);
+                let _ = physics.submit(owner, id, JointAxis::AngX, setpoint, cap);
             }
         }
     }
@@ -176,7 +176,7 @@ pub(super) fn solve(
     ) {
         return None;
     }
-    let chassis_body = physics.body(chassis)?;
+    let chassis_body = physics.chassis(chassis)?;
     let inverse = chassis_body.rotation().inverse();
     let max_angle = (controller.max_steer_deg.unwrap_or(45.0) as f64)
         .abs()

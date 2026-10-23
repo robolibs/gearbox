@@ -318,3 +318,50 @@ pub struct UsdCollisionFilter {
     #[entities]
     pub filtered: Vec<Entity>,
 }
+
+/// What a joint's `physics:body0`/`body1` relationship reached.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EndpointMark {
+    /// Nothing authored: the world.
+    Absent,
+    /// The prim entity the target names.
+    Resolved(Entity),
+    /// An authored target with no prim in the projection.
+    Unresolved(String),
+}
+
+/// A joint's endpoints as authored, kept apart from its body entities so a
+/// missing target is never mistaken for the world.
+#[derive(Component, Debug, Clone)]
+pub struct JointEndpoints {
+    pub path: String,
+    pub body0: EndpointMark,
+    pub body1: EndpointMark,
+    /// The stage's `/` entity: its frame is the stage's world frame.
+    pub stage_root: Option<Entity>,
+}
+
+/// The compiled machine a body or joint belongs to.
+#[derive(Component, Debug, Clone)]
+pub struct ModelMember {
+    pub machine_root: String,
+    pub strict: bool,
+    /// The machine failed validation: it stays as a non-simulating preview.
+    pub rejected: bool,
+    /// Body with an authored `physics:mass`: its colliders add no mass under a strict profile.
+    pub explicit_mass: bool,
+    /// Body velocity damping (linear, angular) in 1/s; `None` on joints.
+    pub damping: Option<(f64, f64)>,
+}
+
+/// The fixed body a world-anchored joint holds on to.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WorldAnchorBody {
+    pub joint: Entity,
+}
+
+/// A joint that will never be built: an invalid endpoint or a rejected machine.
+#[derive(Component, Debug, Clone)]
+pub struct JointNotBuilt {
+    pub reason: String,
+}

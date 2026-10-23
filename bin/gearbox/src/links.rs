@@ -625,7 +625,8 @@ pub fn discover_link_tree(
         if !j.excluded {
             *child_joint_count.entry(i1).or_default() += 1;
         }
-        if links[i1].parent.is_none() && links[i1].role != LinkRole::Base {
+        // A loop-closure joint stays physical but never parents a link.
+        if !j.excluded && links[i1].parent.is_none() && links[i1].role != LinkRole::Base {
             links[i1].parent = Some(links[i0].name.clone());
             links[i1].joint_prim = Some(j.prim.clone());
         }
@@ -871,27 +872,20 @@ fn nearest_ancestor_link(
     None
 }
 
-/// Composed local transform of `descendant` in `ancestor`'s frame.
+/// The rigid transform of `child` in `parent`'s frame from both composed
+/// world matrices, whether or not one is the other's namespace ancestor;
+/// pivots, `!resetXformStack!` and every op type count, scale is dropped.
 pub(crate) fn local_offset_between(
     stage: &openusd::usd::Stage,
-    ancestor: &str,
-    descendant: &str,
+    parent: &str,
+    child: &str,
 ) -> StaticOffset {
-    let Some(rel) = descendant.strip_prefix(ancestor) else {
-        return StaticOffset::default();
-    };
-    let mut m = DMat4::IDENTITY;
-    let mut cur = ancestor.to_string();
-    for part in rel.split('/').filter(|s| !s.is_empty()) {
-        cur = format!("{cur}/{part}");
-        if let Ok(p) = openusd::sdf::path(&cur) {
-            m *= prim_local_matrix(stage, &p);
-        }
-    }
-    let (_, rotation, translation) = m.to_scale_rotation_translation();
+    use crate::machine_model::xform::{decompose, world_matrix};
+    let rigid = |path: &str| decompose(&world_matrix(stage, path).0).rigid;
+    let relative = rigid(parent).inverse().mul(&rigid(child));
     StaticOffset {
-        translation,
-        rotation: rotation.normalize(),
+        translation: relative.translation,
+        rotation: relative.rotation.normalize(),
     }
 }
 

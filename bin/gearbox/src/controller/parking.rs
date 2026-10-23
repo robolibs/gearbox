@@ -59,7 +59,7 @@ mod tests {
         parked: bool,
     ) {
         let holds = brakes.prepare(physics, &[target], parked);
-        apply_joint_motors_with_holds(physics, &[target], &[], None, &holds);
+        apply_joint_motors_with_holds(physics, &controller_owner("parking", "drive"), &[target], &[], None, &holds);
         physics.step();
         assert!(physics.quarantined.is_empty());
     }
@@ -222,7 +222,7 @@ impl ParkingBrakes {
         parked: bool,
     ) {
         let holds = self.prepare(physics, targets, parked);
-        apply_holds(physics, &holds);
+        apply_holds(physics, &controller_owner("parking", "drive"), &holds);
     }
 
     /// Capture bounded position commands for eligible wheel joints.
@@ -276,16 +276,17 @@ pub(super) struct HoldTarget {
     max_torque: f64,
 }
 
-pub(super) fn apply_holds(physics: &mut crate::physics::PhysicsWorld, holds: &[HoldTarget]) -> bool {
+pub(super) fn apply_holds(physics: &mut crate::physics::PhysicsWorld, owner: &crate::joint_control::OwnerId, holds: &[HoldTarget]) -> bool {
     let mut applied = false;
     for hold in holds {
-        if let Some(joint) = physics.joint_mut(hold.joint, false) {
-            joint.set_motor_model(JointAxis::AngX, MotorModel::Force);
-            joint.set_motor_position(JointAxis::AngX, hold.position,
-                hold.max_torque / HOLD_COMPLIANCE_RAD, hold.max_torque / HOLD_DAMPING_SPEED_RAD_S);
-            joint.set_motor_max_force(JointAxis::AngX, hold.max_torque);
-            applied = true;
-        }
+        let setpoint = crate::joint_control::Setpoint::Servo {
+            q: Some(hold.position),
+            qdot: 0.0,
+            stiffness: hold.max_torque / HOLD_COMPLIANCE_RAD,
+            damping: hold.max_torque / HOLD_DAMPING_SPEED_RAD_S,
+            drive: crate::machine_model::DriveType::Force,
+        };
+        applied |= physics.submit(owner, hold.joint, JointAxis::AngX, setpoint, Some(hold.max_torque)).is_ok();
     }
     applied
 }

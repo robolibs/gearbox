@@ -335,6 +335,7 @@ fn spawn_when_loaded(
     mut values: ResMut<crate::services::LinkValues>,
     mut seeded: ResMut<crate::services::SeededLinkValues>,
     mut rejected: ResMut<RejectedLoads>,
+    models: Query<&crate::physics::LoadedModel>,
 ) {
     for entry in inflight.0.iter_mut() {
         if entry.spawned {
@@ -364,11 +365,16 @@ fn spawn_when_loaded(
         }
         let discovery_started = std::time::Instant::now();
         // The projected stage is already open; scanning it beats parsing
-        // the file again.
+        // the file again. Physics attach compiles its machine model first.
         let projected = instances.as_deref().and_then(|i| i.stage(scene_root));
-        let scanned = match projected {
-            Some(stage) => crate::controller::discover_machines_from_stage(stage),
-            None => discover_machines_from_usd(&entry.path),
+        let model = models.get(scene_root).ok();
+        if projected.is_some() && model.is_none() {
+            continue;
+        }
+        let scanned = match (projected, model) {
+            (Some(stage), Some(model)) => crate::controller::discover_machines_with_model(stage, &model.0),
+            (Some(stage), None) => crate::controller::discover_machines_from_stage(stage),
+            (None, _) => discover_machines_from_usd(&entry.path),
         };
         let mut discovered_machines = match scanned {
             Ok(machines) => Some(machines),

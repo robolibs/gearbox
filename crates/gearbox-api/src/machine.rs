@@ -177,6 +177,17 @@ pub struct MachineAgent {
     pub actuations: Vec<ActuatorCommand>,
     /// Actuator streams by device name, registered on first publish.
     actuator_pubs: HashMap<String, Registered<Publisher<Env>>>,
+    description_v2: Registered<ReqServer<Env, Env>>,
+    joint_command_v2: Registered<ReqServer<Env, Env>>,
+    control_v2: Registered<ReqServer<Env, Env>>,
+    joint_state_v2: Registered<Publisher<Env>>,
+    tf_v2: Registered<Publisher<Env>>,
+    /// The manifest `description_v2` answers with.
+    pub description: MachineDescriptionV2,
+    /// Joint command batches waiting for the sim to validate and answer.
+    pub pending_joint_commands: Vec<(JointCommandV2, ReqReplyToken)>,
+    /// Lease requests waiting for the sim to grant, refuse or release.
+    pub pending_control: Vec<(ControlRequestV2, ReqReplyToken)>,
 }
 
 impl MachineAgent {
@@ -204,7 +215,20 @@ impl MachineAgent {
         let t = |leaf: &str| machine_topic(&machine_id, leaf);
         let agent_emit = agent.req_server(&t(topics::MACHINE_EMIT))?;
         let agent_actuate = agent.req_server(&t(topics::MACHINE_ACTUATE))?;
+        let description_v2 = agent.req_server(&t(topics::MACHINE_DESCRIPTION_V2))?;
+        let joint_command_v2 = agent.req_server(&t(topics::MACHINE_JOINT_COMMAND_V2))?;
+        let control_v2 = agent.req_server(&t(topics::MACHINE_CONTROL_V2))?;
+        let joint_state_v2 = agent.publish(&t(topics::MACHINE_JOINT_STATE_V2))?;
+        let tf_v2 = agent.publish(&t(topics::MACHINE_TF_V2))?;
         Ok(Self {
+            description_v2,
+            joint_command_v2,
+            control_v2,
+            joint_state_v2,
+            tf_v2,
+            description: MachineDescriptionV2::default(),
+            pending_joint_commands: Vec::new(),
+            pending_control: Vec::new(),
             info: agent.req_server(&t(topics::MACHINE_INFO))?,
             claim: agent.req_server(&t(topics::MACHINE_CLAIM))?,
             release: agent.req_server(&t(topics::MACHINE_RELEASE))?,
@@ -330,6 +354,40 @@ impl MachineAgent {
                     let _ = self
                         .detach
                         .respond_pending(token, &pack(&Status::err(code::USAGE, &err.to_string())));
+                }
+            }
+        }
+        let description = &self.description;
+        serve_req(&mut self.description_v2, |_: Ping| MachineDescriptionV2 {
+            generation: description.generation,
+            manifest: description.manifest.clone(),
+        });
+        while let Ok(Some(pending)) = self.joint_command_v2.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<JointCommandV2>(sample.header().type_hash, sample.payload()) {
+                Ok(req) => self.pending_joint_commands.push((req, token)),
+                Err(err) => {
+                    let ack = JointCommandAckV2 {
+                        status: command_status::REJECTED,
+                        code: code::USAGE,
+                        message: err.to_string().into_bytes(),
+                        ..Default::default()
+                    };
+                    let _ = self.joint_command_v2.respond_pending(token, &pack(&ack));
+                }
+            }
+        }
+        while let Ok(Some(pending)) = self.control_v2.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<ControlRequestV2>(sample.header().type_hash, sample.payload()) {
+                Ok(req) => self.pending_control.push((req, token)),
+                Err(err) => {
+                    let response = ControlResponseV2 {
+                        code: code::USAGE,
+                        props: Props::from_pairs(&[("message", err.to_string().as_str())]).into_bytes(),
+                        ..Default::default()
+                    };
+                    let _ = self.control_v2.respond_pending(token, &pack(&response));
                 }
             }
         }
@@ -525,6 +583,22 @@ impl MachineAgent {
     pub fn set_tools(&mut self, tools: Vec<ToolDesc>, tool_links: Vec<LinkDesc>) {
         self.tools = tools;
         self.tool_links = tool_links;
+    }
+
+    pub fn respond_joint_command(&mut self, token: ReqReplyToken, ack: &JointCommandAckV2) {
+        let _ = self.joint_command_v2.respond_pending(token, &pack(ack));
+    }
+
+    pub fn respond_control(&mut self, token: ReqReplyToken, response: &ControlResponseV2) {
+        let _ = self.control_v2.respond_pending(token, &pack(response));
+    }
+
+    pub fn publish_joint_state_v2(&mut self, state: &JointStateV2) {
+        let _ = self.joint_state_v2.send(&pack(state));
+    }
+
+    pub fn publish_tf_v2(&mut self, tf: &TfV2) {
+        let _ = self.tf_v2.send(&pack(tf));
     }
 
     pub fn respond_attach(&mut self, token: ReqReplyToken, status: &Status) {

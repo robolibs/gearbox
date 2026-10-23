@@ -26,6 +26,8 @@ mod globe;
 mod host;
 mod links;
 mod load;
+mod joint_control;
+mod machine_model;
 mod physics;
 mod physics_debug;
 mod planet_rocks;
@@ -58,6 +60,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // No arguments, or an explicit `launch`, boots the sim; anything else is
     // a CLI command handled by `gearbox_cli::run()` in this same process —
     // there is no separate CLI binary any more.
+    match args.first().map(String::as_str) {
+        Some("audit-machines") => std::process::exit(machine_model::audit::main(&args[1..])),
+        Some("describe-machines") => std::process::exit(machine_model::audit::describe_main(&args[1..])),
+        _ => {}
+    }
     let launching = args.is_empty() || args.first().map(String::as_str) == Some("launch");
     if !launching {
         std::process::exit(gearbox_cli::run());

@@ -31,11 +31,21 @@ pub struct PhysicsWorld {
     pub entity_to_collider: HashMap<Entity, ColliderId>,
     /// USD joint prim entity → joint.
     pub entity_to_joint: HashMap<Entity, JointId>,
+    /// Joint → its USD joint prim entity: the exact identity commands bind to.
+    pub joint_entities: HashMap<JointId, Entity>,
+    /// World-anchored joint entity → the fixed anchor entity and body it holds on to.
+    pub anchor_bodies: HashMap<Entity, (Entity, BodyId)>,
+    /// Control body → the turn from its axes to the drive controllers' chassis axes.
+    pub chassis_turns: HashMap<BodyId, glam::DQuat>,
     /// USD joint → its authored `PhysicsDriveAPI`, kept while controllers
     /// rewrite the joint's motor every step.
     pub authored_drives: HashMap<JointId, AuthoredDrive>,
+    /// D6 joint axis → its authored drive.
+    pub authored_axis_drives: HashMap<(JointId, JointAxis), AuthoredDrive>,
     /// Motor devices that move their joint's authored drive.
-    drive_motors: HashMap<JointId, DriveMotor>,
+    pub(super) drive_motors: HashMap<JointId, DriveMotor>,
+    /// Exact DOF bindings, owners and the per-tick commit.
+    pub control: super::commit::Control,
     /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
     /// stored in both orders.
     pub filtered_pairs: HashSet<(BodyId, BodyId)>,
@@ -57,6 +67,10 @@ pub struct PhysicsWorld {
     pub pending_steps: u32,
     /// Simulated seconds advanced by every step so far; never rewinds.
     pub simulated_seconds: f64,
+    /// A step budget ran out this frame: pause once its steps ran.
+    pub pause_after_steps: bool,
+    /// Physics ticks run so far.
+    pub ticks: u64,
 }
 
 /// The drive a USD joint authors on its free axis, in SI units: stiffness per
@@ -121,8 +135,13 @@ impl PhysicsWorld {
             published_transforms: HashMap::new(),
             entity_to_collider: HashMap::new(),
             entity_to_joint: HashMap::new(),
+            joint_entities: HashMap::new(),
+            anchor_bodies: HashMap::new(),
+            chassis_turns: HashMap::new(),
             authored_drives: HashMap::new(),
+            authored_axis_drives: HashMap::new(),
             drive_motors: HashMap::new(),
+            control: Default::default(),
             filtered_pairs: HashSet::new(),
             attachment_filtered_pairs: HashSet::new(),
             hitch_captures: HashMap::new(),
@@ -133,6 +152,8 @@ impl PhysicsWorld {
             accumulator: 0.0,
             pending_steps: 0,
             simulated_seconds: 0.0,
+            pause_after_steps: false,
+            ticks: 0,
         }
     }
 
@@ -145,13 +166,14 @@ impl PhysicsWorld {
     pub fn step(&mut self) {
         self.quarantine_non_finite();
         self.advance_hitch_captures();
+        self.commit_actuators();
         self.apply_joint_frictions();
-        self.advance_drive_motors();
         let (authored, attached) = (&self.filtered_pairs, &self.attachment_filtered_pairs);
         self.backend
             .step(&|a, b| authored.contains(&(a, b)) || attached.contains(&(a, b)));
         self.observe_drive_motors();
         self.simulated_seconds += self.dt();
+        self.ticks += 1;
         for body in self.backend.quarantined_bodies() {
             if let Some(entity) = self.backend.body(body).and_then(|body| body.entity()) {
                 if !self.quarantined.contains(&entity) {
@@ -206,19 +228,6 @@ impl PhysicsWorld {
             Some(motor) => Some(motor.output(self.backend.motor_output(joint))),
             None => self.backend.motor_output(joint),
         }
-    }
-
-    fn advance_drive_motors(&mut self) {
-        let dt = self.dt();
-        let backend = &mut self.backend;
-        self.drive_motors.retain(|id, motor| {
-            let changed = motor.advance(dt);
-            let Some(joint) = backend.joint_mut(*id, changed) else {
-                return false;
-            };
-            motor.write(joint);
-            true
-        });
     }
 
     fn observe_drive_motors(&mut self) {
@@ -403,13 +412,14 @@ impl PhysicsWorld {
     /// the soil grips turns with the ground, as far as the grip holds.
     fn apply_joint_frictions(&mut self) {
         let (backend, drives, grips) = (&mut self.backend, &self.authored_drives, &self.soil_grips);
+        let committed = &self.control.committed;
         self.joint_frictions.retain(|id, friction| {
             let (Some(position), Some((_, part))) =
                 (backend.joint(*id).map(|j| j.motor_position(friction.axis)), backend.joint_bodies(*id))
             else {
                 return false;
             };
-            if backend.has_motor(*id) || drives.contains_key(id) {
+            if backend.has_motor(*id) || drives.contains_key(id) || committed.contains_key(&(*id, friction.axis)) {
                 return true;
             }
             let Some(position) = position else {
@@ -443,15 +453,32 @@ impl PhysicsWorld {
 
 pub use gearbox_api::PhysicsActive;
 
-/// Turn the frame's real time into a whole number of fixed steps.
+/// Run once per physics tick, just before its step: due controllers and
+/// services produce the setpoints of exactly that tick.
+#[derive(bevy::ecs::schedule::ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ControlTick;
+
+/// Turn the frame's real time into a whole number of fixed steps; a step
+/// budget runs exactly its ticks and then pauses.
 pub fn plan_physics_steps(
     time: Res<Time>,
     active: Res<PhysicsActive>,
+    budget: Option<ResMut<gearbox_api::PhysicsStepBudget>>,
     mut world: ResMut<PhysicsWorld>,
 ) {
     if !active.0 {
         world.accumulator = 0.0;
         world.pending_steps = 0;
+        return;
+    }
+    if let Some(mut budget) = budget
+        && let Some(left) = budget.0
+    {
+        let steps = left.min(MAX_STEPS_PER_FRAME);
+        budget.0 = (left > steps).then_some(left - steps);
+        world.pause_after_steps = budget.0.is_none();
+        world.accumulator = 0.0;
+        world.pending_steps = steps;
         return;
     }
     let dt = 1.0 / world.step_hz;
@@ -464,24 +491,24 @@ pub fn plan_physics_steps(
     world.pending_steps = steps;
 }
 
-/// Run the steps `plan_physics_steps` planned for this frame, and log the
-/// cost per step every 10 s.
-pub fn step_physics(
-    active: Res<PhysicsActive>,
-    time: Res<Time>,
-    mut world: ResMut<PhysicsWorld>,
-    mut stats: Local<(f64, u32, f64)>,
-) {
-    if !active.0 {
+/// Run the steps `plan_physics_steps` planned for this frame, each after
+/// its `ControlTick`, and log the cost per step every 10 s.
+pub fn step_physics(world: &mut World, mut stats: Local<(f64, u32, f64)>) {
+    if !world.get_resource::<PhysicsActive>().is_some_and(|a| a.0) {
         return;
     }
+    let steps = world.resource::<PhysicsWorld>().pending_steps;
     let start = std::time::Instant::now();
-    for _ in 0..world.pending_steps {
-        world.step();
+    for _ in 0..steps {
+        let _ = world.try_run_schedule(ControlTick);
+        world.resource_mut::<PhysicsWorld>().step();
+    }
+    if std::mem::take(&mut world.resource_mut::<PhysicsWorld>().pause_after_steps) {
+        world.resource_mut::<PhysicsActive>().0 = false;
     }
     stats.0 += start.elapsed().as_secs_f64();
-    stats.1 += world.pending_steps;
-    let now = time.elapsed_secs_f64();
+    stats.1 += steps;
+    let now = world.get_resource::<Time>().map_or(0.0, |t| t.elapsed_secs_f64());
     if now >= stats.2 {
         if stats.1 > 0 {
             info!(

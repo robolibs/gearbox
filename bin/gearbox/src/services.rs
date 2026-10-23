@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::physics::PhysicsWorld;
 use bevy::prelude::*;
 use gearbox_api::GearboxBus;
-use crate::physics::backend::{BodyId, DeviceCommand, JointAxis, JointId, JointMut, MotorModel};
+use crate::physics::backend::{BodyId, JointAxis, JointId};
 use usd_bevy::UsdPrimRef;
 
 use crate::attach::Attachments;
@@ -123,7 +123,8 @@ pub struct ServicesPlugin;
 
 #[cfg(test)]
 pub(crate) fn benchmark_schedule(app: &mut App) -> bevy::ecs::schedule::Schedule {
-    app.init_resource::<MasterInputs>().init_resource::<ServiceCommands>().init_resource::<WarnedOnce>();
+    app.init_resource::<MasterInputs>().init_resource::<ServiceCommands>().init_resource::<WarnedOnce>()
+        .init_resource::<crate::joint_control::runtime::ControlClock>();
     let mut schedule = bevy::ecs::schedule::Schedule::default();
     schedule.add_systems(apply_service_controllers);
     schedule
@@ -145,10 +146,13 @@ impl Plugin for ServicesPlugin {
                 (
                     seed_link_values,
                     drain_service_commands.after(crate::attach::serve_attachments).in_set(ServiceCommandSet),
-                    apply_service_controllers,
                     apply_process_controllers,
                 )
                     .chain(),
+            )
+            .add_systems(
+                crate::physics::ControlTick,
+                apply_service_controllers.in_set(crate::joint_control::runtime::ControlSet::Services),
             )
             .add_systems(PostUpdate, feed_master_inputs);
     }
@@ -390,8 +394,10 @@ fn numeric(v: &str) -> Option<f64> {
     }
 }
 
-/// The joint a controller drives: the bodies it connects and its kind.
+/// The joint a controller drives: the exact physics joint of its prim, the
+/// bodies it connects and its axis.
 struct JointRef {
+    joint: Option<JointId>,
     body0: BodyId,
     body1: BodyId,
     axis: JointAxis,
@@ -408,16 +414,19 @@ fn resolve_joint(
     parents: &Query<&ChildOf>,
     physics: &PhysicsWorld,
 ) -> Option<JointRef> {
-    let (_, _, joint) = joints.iter().find(|(entity, prim, _)| {
+    let (entity, _, joint) = joints.iter().find(|(entity, prim, _)| {
         prim.path == prim_path && crate::controller::is_descendant_of(*entity, scene_root, parents)
     })?;
-    let body0 = physics.entity_to_body.get(&joint.body0?).copied()?;
-    let body1 = physics.entity_to_body.get(&joint.body1?).copied()?;
+    let id = physics.entity_to_joint.get(&entity).copied();
+    let (body0, body1) = match id.and_then(|id| physics.joint_bodies(id)) {
+        Some(bodies) => bodies,
+        None => (physics.entity_to_body.get(&joint.body0?).copied()?, physics.entity_to_body.get(&joint.body1?).copied()?),
+    };
     let axis = match joint.kind {
         crate::physics::markers::UsdJointKind::Prismatic => JointAxis::LinX,
         _ => JointAxis::AngX,
     };
-    Some(JointRef { body0, body1, axis })
+    Some(JointRef { joint: id, body0, body1, axis })
 }
 
 /// What a service controller asks of its joint.
@@ -436,25 +445,29 @@ enum Actuation {
     Float,
 }
 
-/// The joint between two bodies; a constraint joint wins over a
-/// reduced-coordinate one when both exist.
+/// The joint of the controller's prim; without one, the joint between its
+/// two bodies, a constraint joint winning over a reduced-coordinate one.
+/// The named joint itself; a joint that was not built drives nothing.
 fn joint_between(physics: &PhysicsWorld, j: &JointRef) -> Option<JointId> {
-    let between = physics.joints_between(j.body0, j.body1);
-    between
-        .iter()
-        .copied()
-        .find(|id| !physics.joint_is_reduced(*id))
-        .or(between.first().copied())
+    j.joint.filter(|id| physics.joint(*id).is_some())
 }
 
-/// Drives a joint through its motor device when it has one (which moves the
-/// joint's authored drive when there is one), else a position target through
-/// its authored position drive or a velocity target through its authored
-/// velocity drive, otherwise with the runtime's own servo. A brake is a
-/// capped zero-velocity servo: Molla's joint damping on a tyred wheel whose
-/// axle rocks on a bogie feeds energy into the trailer, so it is not used for
-/// parking.
-fn actuate(physics: &mut PhysicsWorld, j: &JointRef, act: Actuation) -> bool {
+/// The service controller `instance` of `machine` as a DOF owner; joints a
+/// coupler binds to the master belong to its `coupling` owner.
+pub(crate) fn service_owner(machine: &str, instance: &str) -> crate::joint_control::OwnerId {
+    crate::joint_control::OwnerId::new(crate::joint_control::OwnerClass::Service, machine, instance)
+}
+
+/// A service controller's setpoint for its joint: through its motor device
+/// when it has one (which moves the joint's authored drive when there is
+/// one), else a position target through its authored position drive or a
+/// velocity target through its authored velocity drive, otherwise the
+/// runtime's own servo. A brake is a capped zero-velocity servo: Molla's
+/// joint damping on a tyred wheel whose axle rocks on a bogie feeds energy
+/// into the trailer, so it is not used for parking.
+fn actuate(physics: &mut PhysicsWorld, owner: &crate::joint_control::OwnerId, j: &JointRef, act: Actuation) -> bool {
+    use crate::joint_control::Setpoint;
+    use crate::machine_model::DriveType;
     let Some(id) = joint_between(physics, j) else {
         return false;
     };
@@ -462,74 +475,33 @@ fn actuate(physics: &mut PhysicsWorld, j: &JointRef, act: Actuation) -> bool {
     let drive = physics.authored_drives.get(&id).copied();
     let spring = drive.filter(|d| d.stiffness > 0.0);
     let damper = drive.filter(|d| d.stiffness == 0.0 && d.damping > 0.0);
-    match act {
-        Actuation::Brake(level) => servo(physics, id, j.axis, |g| {
-            g.set_motor_velocity(j.axis, 0.0, level * BRAKE_FACTOR);
-            g.set_motor_max_force(j.axis, level * MOTOR_MAX_FORCE);
-        }),
+    let model = |force: bool| if force { DriveType::Force } else { DriveType::Acceleration };
+    let servo = |q: Option<f64>, qdot: f64, stiffness: f64, damping: f64, drive: DriveType| Setpoint::Servo { q, qdot, stiffness, damping, drive };
+    let (setpoint, cap) = match act {
+        Actuation::Brake(level) => (servo(None, 0.0, 0.0, level * BRAKE_FACTOR, DriveType::Acceleration), Some(level * MOTOR_MAX_FORCE)),
         // A motor device rewrites its joint every step: it floats by pushing
         // with no force at all.
-        Actuation::Float if device => physics.command_motor(id, DeviceCommand::Force(0.0)).is_ok(),
-        Actuation::Float => {
-            let damping = drive.map_or(POSITION_DAMPING, |d| d.damping);
-            let Some(joint) = physics.joint_mut(id, true) else {
-                return false;
-            };
-            joint.set_motor_model(j.axis, MotorModel::Force);
-            joint.set_motor_velocity(j.axis, 0.0, damping);
-            joint.set_motor_max_force(
-                j.axis,
-                drive.and_then(|d| d.max_force).unwrap_or(MOTOR_MAX_FORCE),
-            );
-            true
-        }
-        Actuation::Position(target) if device => physics
-            .command_motor(id, DeviceCommand::Position(target))
-            .is_ok(),
-        Actuation::Velocity { target, .. } if device => physics
-            .command_motor(id, DeviceCommand::Velocity(target))
-            .is_ok(),
+        Actuation::Float if device => (Setpoint::Effort { force: 0.0 }, None),
+        Actuation::Float => (
+            servo(None, 0.0, 0.0, drive.map_or(POSITION_DAMPING, |d| d.damping), DriveType::Force),
+            Some(drive.and_then(|d| d.max_force).unwrap_or(MOTOR_MAX_FORCE)),
+        ),
+        Actuation::Position(target) if device => (Setpoint::Position { q: target, qdot: None }, None),
+        Actuation::Velocity { target, .. } if device => (Setpoint::Velocity { qdot: target }, None),
         Actuation::Position(target) if spring.is_some() => {
             let d = spring.unwrap();
-            let Some(joint) = physics.joint_mut(id, true) else {
-                return false;
-            };
-            joint.set_motor_model(j.axis, if d.force { MotorModel::Force } else { MotorModel::Acceleration });
-            joint.set_motor_position(j.axis, target, d.stiffness, d.damping);
-            if let Some(force) = d.max_force {
-                joint.set_motor_max_force(j.axis, force);
-            }
-            true
+            (servo(Some(target), 0.0, d.stiffness, d.damping, model(d.force)), d.max_force)
         }
         Actuation::Velocity { target, max_force } if damper.is_some() => {
             let d = damper.unwrap();
-            let Some(joint) = physics.joint_mut(id, true) else {
-                return false;
-            };
-            joint.set_motor_model(j.axis, if d.force { MotorModel::Force } else { MotorModel::Acceleration });
-            joint.set_motor_velocity(j.axis, target, d.damping);
-            joint.set_motor_max_force(j.axis, d.max_force.unwrap_or(max_force));
-            true
+            (servo(None, target, 0.0, d.damping, model(d.force)), Some(d.max_force.unwrap_or(max_force)))
         }
-        Actuation::Position(target) => servo(physics, id, j.axis, |g| {
-            g.set_motor_position(j.axis, target, POSITION_STIFFNESS, POSITION_DAMPING);
-            g.set_motor_max_force(j.axis, MOTOR_MAX_FORCE);
-        }),
-        Actuation::Velocity { target, max_force } => servo(physics, id, j.axis, |g| {
-            g.set_motor_velocity(j.axis, target, VELOCITY_FACTOR);
-            g.set_motor_max_force(j.axis, max_force);
-        }),
-    }
-}
-
-/// The runtime's servo on a joint without a motor device.
-fn servo(physics: &mut PhysicsWorld, id: JointId, axis: JointAxis, f: impl FnOnce(&mut dyn JointMut)) -> bool {
-    let Some(joint) = physics.joint_mut(id, true) else {
-        return false;
+        Actuation::Position(target) => {
+            (servo(Some(target), 0.0, POSITION_STIFFNESS, POSITION_DAMPING, DriveType::Acceleration), Some(MOTOR_MAX_FORCE))
+        }
+        Actuation::Velocity { target, max_force } => (servo(None, target, 0.0, VELOCITY_FACTOR, DriveType::Acceleration), Some(max_force)),
     };
-    joint.set_motor_model(axis, MotorModel::Acceleration);
-    f(joint);
-    true
+    physics.submit(owner, id, j.axis, setpoint, cap).is_ok()
 }
 
 const POSITION_STIFFNESS: f64 = 4_000.0;
@@ -627,18 +599,22 @@ fn apply_service_controllers(
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
     mut warned: ResMut<WarnedOnce>,
-    time: Option<Res<Time>>,
+    clock: Res<crate::joint_control::runtime::ControlClock>,
     mut strokes: Local<HashMap<String, f64>>,
+    mut mastered: Local<HashSet<String>>,
 ) {
     if !active.0 {
         return;
     }
-    let dt = time.map_or(0.0, |time| f64::from(time.delta_secs()));
+    let live = |id: &str| inventory.machines.iter().any(|m| m.id == id);
+    strokes.retain(|key, _| key.split('/').next().is_some_and(live));
+    mastered.retain(|id| live(id));
+
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {
             continue;
         };
-        if !has_agent(&keys, machine) {
+        if !machine.accepted() || !has_agent(&keys, machine) {
             continue;
         }
         let master = inputs.0.get(&machine.id);
@@ -652,6 +628,10 @@ fn apply_service_controllers(
                 continue;
             }
             let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            let owner = service_owner(&machine.id, &controller.instance);
+            let Some(dt) = clock.due(&machine.id, &controller.instance) else {
+                continue;
+            };
             let joint_prims = controller_joints(machine, controller);
             if joint_prims.is_empty() {
                 if warned
@@ -723,7 +703,7 @@ fn apply_service_controllers(
                         } else {
                             Actuation::Position(target)
                         };
-                        actuate(&mut physics, &j, act)
+                        actuate(&mut physics, &owner, &j, act)
                     }
                     "builtin:joint_velocity" => {
                         let bound = bound_pto.as_deref() == Some(prim);
@@ -733,7 +713,7 @@ fn apply_service_controllers(
                             _ => 0.0,
                         };
                         let act = Actuation::Velocity { target: vel, max_force: JOINT_VELOCITY_MAX_TORQUE };
-                        actuate(&mut physics, &j, act)
+                        actuate(&mut physics, &owner, &j, act)
                     }
                     "builtin:pto" => {
                         let rpm = num(props, "rpm")
@@ -745,7 +725,7 @@ fn apply_service_controllers(
                         } else {
                             0.0
                         };
-                        actuate(&mut physics, &j, Actuation::Velocity { target: vel, max_force: PTO_MAX_TORQUE })
+                        actuate(&mut physics, &owner, &j, Actuation::Velocity { target: vel, max_force: PTO_MAX_TORQUE })
                     }
                     "builtin:hydraulic_valve" => {
                         let flow = num(props, "flow")
@@ -754,7 +734,7 @@ fn apply_service_controllers(
                             .clamp(-1.0, 1.0);
                         let rate = num(props, "rate").unwrap_or(DEFAULT_VALVE_RATE);
                         let act = Actuation::Velocity { target: flow * rate, max_force: MOTOR_MAX_FORCE };
-                        actuate(&mut physics, &j, act)
+                        actuate(&mut physics, &owner, &j, act)
                     }
                     "builtin:brake" => {
                         // Uncoupled and uncommanded, a trailer holds itself
@@ -764,7 +744,7 @@ fn apply_service_controllers(
                             .or_else(|| num(props, "value"))
                             .unwrap_or(parked)
                             .clamp(0.0, 1.0);
-                        actuate(&mut physics, &j, Actuation::Brake(level))
+                        actuate(&mut physics, &owner, &j, Actuation::Brake(level))
                     }
                     "builtin:trailer_steer" => {
                         let max = controller
@@ -780,7 +760,7 @@ fn apply_service_controllers(
                             .unwrap_or(0.0),
                         }
                         .clamp(-max, max);
-                        actuate(&mut physics, &j, Actuation::Position(angle))
+                        actuate(&mut physics, &owner, &j, Actuation::Position(angle))
                     }
                     _ => true,
                 };
@@ -799,9 +779,14 @@ fn apply_service_controllers(
 
         // Bound joints with no controller of their own follow the master's
         // services directly (§6.2): the PTO stub spins, valve joints move.
+        // Without a master they stop where they are.
         let Some(m) = master else {
+            if mastered.remove(&machine.id) {
+                physics.control.arbiter.quiesce(&service_owner(&machine.id, "coupling"));
+            }
             continue;
         };
+        mastered.insert(machine.id.clone());
         let controlled: HashSet<&str> = machine
             .controllers
             .iter()
@@ -811,7 +796,7 @@ fn apply_service_controllers(
             && !controlled.contains(pto)
             && let Some(j) = resolve_joint(scene_root, pto, &joints, &parents, &physics)
         {
-            actuate(&mut physics, &j, Actuation::Velocity { target: m.pto_rad_s(), max_force: PTO_MAX_TORQUE });
+            actuate(&mut physics, &service_owner(&machine.id, "coupling"), &j, Actuation::Velocity { target: m.pto_rad_s(), max_force: PTO_MAX_TORQUE });
         }
         for (n, valve_joint) in bound_valves.iter().enumerate() {
             if controlled.contains(valve_joint.as_str()) {
@@ -820,7 +805,7 @@ fn apply_service_controllers(
             let flow = m.valves.get(n).copied().unwrap_or(0.0);
             if let Some(j) = resolve_joint(scene_root, valve_joint, &joints, &parents, &physics) {
                 let act = Actuation::Velocity { target: flow * DEFAULT_VALVE_RATE, max_force: MOTOR_MAX_FORCE };
-                actuate(&mut physics, &j, act);
+                actuate(&mut physics, &service_owner(&machine.id, "coupling"), &j, act);
             }
         }
     }
@@ -1070,7 +1055,7 @@ mod hitch_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::backend::{BodyDesc, ColliderDesc, DVec3, DeviceLimits, JointDesc, JointKind, Pose, Shape};
+    use crate::physics::backend::{BodyDesc, ColliderDesc, DVec3, DeviceCommand, DeviceLimits, JointDesc, JointKind, MotorModel, Pose, Shape};
 
     /// An arm on a revolute joint to a fixed post, in zero gravity.
     fn arm() -> (PhysicsWorld, JointRef, JointId) {
@@ -1084,7 +1069,7 @@ mod tests {
         let (post, arm) = (body(BodyDesc::fixed(), DVec3::ZERO), body(BodyDesc::dynamic(), DVec3::X));
         let desc = JointDesc::new(JointKind::Revolute { axis: DVec3::Y }, Pose::IDENTITY, Pose::from_translation(DVec3::NEG_X));
         let joint = world.backend.insert_joint(post, arm, desc);
-        (world, JointRef { body0: post, body1: arm, axis: JointAxis::AngX }, joint)
+        (world, JointRef { joint: Some(joint), body0: post, body1: arm, axis: JointAxis::AngX }, joint)
     }
 
     #[test]
@@ -1092,7 +1077,7 @@ mod tests {
         let (mut world, j, joint) = arm();
         let limits = DeviceLimits { max_velocity: 0.5, ..Default::default() };
         world.insert_motor(joint, limits, 500.0).unwrap();
-        assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
+        assert!(actuate(&mut world, &service_owner("arm", "service"), &j, Actuation::Position(0.3)));
         world.step();
         let motor = world.motor_output(joint).unwrap();
         assert_eq!(motor.command, DeviceCommand::Position(0.3));
@@ -1101,7 +1086,7 @@ mod tests {
             world.step();
         }
         assert!((world.motor_output(joint).unwrap().position - 0.3).abs() < 1e-3);
-        assert!(actuate(&mut world, &j, Actuation::Velocity { target: -0.2, max_force: 1.0 }));
+        assert!(actuate(&mut world, &service_owner("arm", "service"), &j, Actuation::Velocity { target: -0.2, max_force: 1.0 }));
         world.step();
         assert_eq!(world.motor_output(joint).unwrap().command, DeviceCommand::Velocity(-0.2));
     }
@@ -1110,7 +1095,7 @@ mod tests {
     fn joints_without_a_device_keep_the_runtime_servo_and_brakes_hold_them() {
         let (mut world, j, joint) = arm();
         assert!(!world.has_motor(joint));
-        assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
+        assert!(actuate(&mut world, &service_owner("arm", "service"), &j, Actuation::Position(0.3)));
         for _ in 0..600 {
             world.step();
         }
@@ -1118,7 +1103,7 @@ mod tests {
         assert!((angle - 0.3).abs() < 1e-2, "{angle}");
         world.joint_mut(joint, true).unwrap().set_motor_velocity(JointAxis::AngX, 1.0, 1.0e6);
         world.step();
-        assert!(actuate(&mut world, &j, Actuation::Brake(1.0)));
+        assert!(actuate(&mut world, &service_owner("arm", "service"), &j, Actuation::Brake(1.0)));
         for _ in 0..120 {
             world.step();
         }
@@ -1132,7 +1117,8 @@ mod tests {
         let (mut world, j, joint) = arm();
         let drive = crate::physics::AuthoredDrive { stiffness: 900.0, damping: 60.0, max_force: Some(700.0), force: true, ..Default::default() };
         world.authored_drives.insert(joint, drive);
-        assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
+        assert!(actuate(&mut world, &service_owner("arm", "service"), &j, Actuation::Position(0.3)));
+        world.commit_pending();
         let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
         assert_eq!(
             (motor.target_position, motor.stiffness, motor.damping, motor.max_force, motor.model),
@@ -1152,7 +1138,7 @@ mod tests {
         world.authored_drives.insert(joint, drive);
         let limits = DeviceLimits { max_velocity: 0.5, ..Default::default() };
         world.insert_motor(joint, limits, 50.0).unwrap();
-        assert!(actuate(&mut world, &j, Actuation::Position(0.3)));
+        assert!(actuate(&mut world, &service_owner("arm", "service"), &j, Actuation::Position(0.3)));
         world.step();
         let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
         assert!((motor.target_position - 0.5 * world.dt()).abs() < 1e-12, "{motor:?}");
@@ -1173,7 +1159,7 @@ mod tests {
         world.authored_drives.insert(joint, drive);
         let limits = DeviceLimits { max_velocity: 20.0, acceleration: Some(10.0), ..Default::default() };
         world.insert_motor(joint, limits, 300.0).unwrap();
-        assert!(actuate(&mut world, &j, Actuation::Velocity { target: 5.0, max_force: 1.0 }));
+        assert!(actuate(&mut world, &service_owner("arm", "service"), &j, Actuation::Velocity { target: 5.0, max_force: 1.0 }));
         world.step();
         let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
         assert!((motor.target_velocity - 10.0 * world.dt()).abs() < 1e-12, "{motor:?}");
@@ -1190,7 +1176,8 @@ mod tests {
         let (mut world, j, joint) = arm();
         let drive = crate::physics::AuthoredDrive { stiffness: 0.0, damping: 400.0, max_force: Some(300.0), force: true, ..Default::default() };
         world.authored_drives.insert(joint, drive);
-        assert!(actuate(&mut world, &j, Actuation::Velocity { target: 2.0, max_force: 1.0 }));
+        assert!(actuate(&mut world, &service_owner("arm", "service"), &j, Actuation::Velocity { target: 2.0, max_force: 1.0 }));
+        world.commit_pending();
         let motor = world.joint(joint).unwrap().motor(JointAxis::AngX).unwrap();
         assert_eq!((motor.target_velocity, motor.damping, motor.max_force), (2.0, 400.0, 300.0));
     }
