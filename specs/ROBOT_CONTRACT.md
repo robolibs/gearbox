@@ -415,6 +415,13 @@ Machine topics under `/machines/<id>/`:
   `.blend` → package for every package and that edits made in Blender
   (moves, renames, deletions, added meshes and materials, vertex edits) reach
   the export.
+- In Blender the same add-on checks a machine with this compiler: CHECK runs
+  `gearbox describe-machines` on the export and shows its diagnostics, DOFs
+  and owners; the TF overlay draws its reporting tree (§7) on the objects;
+  EXPORT writes only an accepted machine unless told otherwise. Native-
+  verified on the Husky by `test-blender-roundtrip` (a body, a driven
+  revolute joint with command interfaces and a tool site authored through
+  the add-on, accepted and exported).
 - `oslo make audit-machine-assets --asset-root=machines/usd` accepts every
   machine of the 24 packages under the `gearbox` profile, and the Kubota,
   Knoche and weed unit scenarios of `test-real-machines` run on them.
