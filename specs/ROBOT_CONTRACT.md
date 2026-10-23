@@ -404,10 +404,17 @@ Machine topics under `/machines/<id>/`:
 - Each package under `machines/usd` is one stored, 64-byte aligned USDZ whose
   first entry is its only root layer, `<name>.usda` or `<name>.usdc`, holding
   the whole machine: bodies, joints, the declared control frame, command
-  interfaces and unique names. Its other entries are textures and the
-  layers the root references.
-- An export from the Blender pipeline authors this schema directly; there is
-  no overlay layer and no later conversion step.
+  interfaces and unique names. Its other entries are its textures.
+- Each package is exported from `machines/blender/<name>.blend` by one tool,
+  `machines/scripts/gearbox_usd` (a Blender 5.2 extension and command line):
+  `oslo make blender-export --blend=…` writes it, `oslo make blender-import
+  --package=…` reads a package into a `.blend`. There is no overlay layer and
+  no later conversion step. `oslo make test-blender-export` checks that every
+  `.blend` exports to exactly its committed package (same specs, files and
+  compiled machines); `oslo make test-blender-roundtrip` checks package →
+  `.blend` → package for every package and that edits made in Blender
+  (moves, renames, deletions, added meshes and materials, vertex edits) reach
+  the export.
 - `oslo make audit-machine-assets --asset-root=machines/usd` accepts every
   machine of the 24 packages under the `gearbox` profile, and the Kubota,
   Knoche and weed unit scenarios of `test-real-machines` run on them.
@@ -453,6 +460,8 @@ three rows are harness results (§14).
 | `oslo make test-isaac-contract` | the above, then each schedule in headless Isaac Sim, compared |
 | `oslo make test-real-machines` | Kubota tractor lifting the Knoche harrow, Kubota driving under pressure changes, weed unit ball_tip and tool_tip following their tool bodies; `--tractor`, `--implement`, `--weedunit` pick other packages |
 | `oslo make audit-machine-assets --asset-root=DIR` | every package under DIR compiles and every machine is accepted |
+| `oslo make test-blender-export [--machine=NAME]` | every `machines/blender` file exports to exactly its committed package |
+| `oslo make test-blender-roundtrip [--machine=NAME]` | every package through Blender and back, and edits made in Blender reaching the export |
 | `oslo make verify-robot-contract` | machine contract, joint control, control lifecycle, hitch and services, the Isaac contract with native conformance, the asset audit of `machines/usd`, real machines; prints which passed |
 
 - **Isaac runs** go through the Nix launcher (`isaacsim --no-window --no-ros-env

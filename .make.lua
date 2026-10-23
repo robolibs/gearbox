@@ -430,6 +430,122 @@ make.recipe{
   end,
 }
 
+-- Machine packages to and from Blender (machines/scripts/gearbox_usd), in the Blender flatpak.
+local function blender(log, blend, ...)
+  local pwd = oslo.sys.pwd()
+  local words = { "flatpak", "run", "--filesystem=" .. pwd, "org.blender.Blender", "--background" }
+  words[#words + 1] = blend or "--factory-startup"
+  for _, w in ipairs({ "--python", pwd .. "/machines/scripts/gearbox_usd/cli.py", "--", ... }) do words[#words + 1] = w end
+  local quoted = {}
+  for i, w in ipairs(words) do quoted[i] = ("%q"):format(w) end
+  local r = oslo.run{ "sh", "-c", table.concat(quoted, " ") .. (" > %q 2>&1"):format(log) }
+  for line in (oslo.fs.read(log) or ""):gmatch("[^\n]+") do
+    if line:find("gearbox_usd:", 1, true) or line:find("Error", 1, true) then print(line) end
+  end
+  return r.ok
+end
+
+local function machine_names(a)
+  if a.machine then return { a.machine } end
+  local names = {}
+  local listed = oslo.run{ "sh", "-c", "ls machines/usd/*.usdz", capture = true }
+  for path in (listed.out or ""):gmatch("[^\n]+") do names[#names + 1] = path:match("([^/]+)%.usdz$") end
+  return names
+end
+
+-- Same compiled machines in two packages, by `gearbox describe-machines`.
+local function same_model(a, b, dir)
+  local described = {}
+  for i, file in ipairs({ a, b }) do
+    described[i] = ("%s/%s.%d.json"):format(dir, file:match("([^/]+)%.usdz$"), i)
+    oslo.run{ "sh", "-c", ("target/debug/gearbox describe-machines %q > %q 2>/dev/null || true"):format(file, described[i]) }
+  end
+  local check = [[
+import json, sys
+a, b = (json.load(open(p))["machines"] for p in sys.argv[1:3])
+for m in a + b:
+    m.pop("load_instance", None)
+sys.exit(0 if a == b and a else 1)
+]]
+  return oslo.run{ "python3", "-I", "-c", check, described[1], described[2] }.ok
+end
+
+make.recipe{
+  name = "blender-import",
+  desc = "load a machine package into a .blend: --package=PATH [--blend=PATH, default machines/blender/<name>.blend]",
+  params = { { "--package", desc = "machine package (.usdz)" }, { "--blend", desc = ".blend to write" } },
+  run = function(a)
+    assert(type(a.package) == "string", "--package=PATH is required")
+    local blend = a.blend or ("machines/blender/" .. a.package:match("([^/]+)%.usdz$") .. ".blend")
+    assert(oslo.run{ "mkdir", "-p", "target/blender" }.ok)
+    assert(blender("target/blender/import.log", nil, "import", a.package, blend), "blender-import failed; see target/blender/import.log")
+  end,
+}
+
+make.recipe{
+  name = "blender-export",
+  desc = "write a .blend's machine as a package: --blend=PATH [--package=PATH, default machines/usd/<name>.usdz]",
+  params = { { "--blend", desc = ".blend to export" }, { "--package", desc = "machine package (.usdz) to write" } },
+  run = function(a)
+    assert(type(a.blend) == "string", "--blend=PATH is required")
+    local out = a.package or ("machines/usd/" .. a.blend:match("([^/]+)%.blend$") .. ".usdz")
+    assert(oslo.run{ "mkdir", "-p", "target/blender" }.ok)
+    assert(blender("target/blender/export.log", a.blend, "export", out), "blender-export failed; see target/blender/export.log")
+  end,
+}
+
+make.recipe{
+  name = "test-blender-roundtrip",
+  desc = "every package (or --machine=NAME) through Blender and back: same specs, files and compiled machines",
+  params = { { "--machine", desc = "one package name, e.g. kubota_tractor" } },
+  run = function(a)
+    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
+    local dir = oslo.sys.pwd() .. "/target/blender/roundtrip"
+    assert(oslo.run{ "mkdir", "-p", dir }.ok)
+    local failed = {}
+    for _, name in ipairs(machine_names(a)) do
+      local package = oslo.sys.pwd() .. "/machines/usd/" .. name .. ".usdz"
+      local ok = blender(dir .. "/" .. name .. ".log", nil, "roundtrip", package, dir)
+      ok = ok and same_model(package, dir .. "/" .. name .. ".usdz", dir)
+      print(("blender roundtrip: %-26s %s"):format(name, ok and "pass" or "FAIL"))
+      if not ok then failed[#failed + 1] = name end
+    end
+    local husky = oslo.sys.pwd() .. "/machines/usd/clearpath_husky.usdz"
+    local edited = dir .. "/clearpath_husky.edited.usdz"
+    local accepted = [[
+import json, sys
+sys.exit(0 if all(m["accepted"] for m in json.load(open(sys.argv[1]))["machines"]) else 1)
+]]
+    local ok = blender(dir .. "/edits.log", nil, "edits", husky, edited)
+    oslo.run{ "sh", "-c", ("target/debug/gearbox describe-machines %q > %q 2>/dev/null || true"):format(edited, edited .. ".json") }
+    ok = ok and oslo.run{ "python3", "-I", "-c", accepted, edited .. ".json" }.ok
+    print(("blender roundtrip: %-26s %s"):format("edits in Blender", ok and "pass" or "FAIL"))
+    if not ok then failed[#failed + 1] = "edits" end
+    assert(#failed == 0, "blender roundtrip failed: " .. table.concat(failed, ", "))
+  end,
+}
+
+make.recipe{
+  name = "test-blender-export",
+  desc = "export every machines/blender .blend (or --machine=NAME) and check it equals its committed package",
+  params = { { "--machine", desc = "one machine name, e.g. kubota_tractor" } },
+  run = function(a)
+    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
+    local pwd = oslo.sys.pwd()
+    local dir = pwd .. "/target/blender/export"
+    assert(oslo.run{ "mkdir", "-p", dir }.ok)
+    local failed = {}
+    for _, name in ipairs(machine_names(a)) do
+      local blend, package, out = pwd .. "/machines/blender/" .. name .. ".blend", pwd .. "/machines/usd/" .. name .. ".usdz", dir .. "/" .. name .. ".usdz"
+      local ok = oslo.fs.read(blend) ~= nil and blender(dir .. "/" .. name .. ".log", blend, "export", out)
+      ok = ok and blender(dir .. "/" .. name .. ".compare.log", nil, "compare", package, out) and same_model(package, out, dir)
+      print(("blender export: %-26s %s"):format(name, ok and "pass" or "FAIL"))
+      if not ok then failed[#failed + 1] = name end
+    end
+    assert(#failed == 0, "blender export differs from the package: " .. table.concat(failed, ", "))
+  end,
+}
+
 make.recipe{ name = "check", desc = "cargo check on all targets",
              run = function() sh.cargo("check", "--all-targets") end }
 
