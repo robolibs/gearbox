@@ -1,0 +1,65 @@
+#usda 1.0
+(
+    defaultPrim = "rig"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "rig" (prepend apiSchemas = ["GearboxMachineAPI"])
+{
+    int gearbox:machine:schemaVersion = 2
+    rel gearbox:machine:body = </rig/base>
+
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 1
+        float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+
+        def Xform "pivoted" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            double3 xformOp:translate = (1, 0, 0)
+            double3 xformOp:translate:pivot = (0.5, 0, 0)
+            float xformOp:rotateZ = 90
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:translate:pivot", "xformOp:rotateZ", "!invert!xformOp:translate:pivot"]
+        }
+        def Xform "offset"
+        {
+            double3 xformOp:translate = (10, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Xform "reset" (prepend apiSchemas = ["GearboxLinkAPI"])
+            {
+                double3 xformOp:translate = (0, 0, 1)
+                uniform token[] xformOpOrder = ["!resetXformStack!", "xformOp:translate"]
+            }
+        }
+        def Xform "matrix" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            matrix4d xformOp:transform = ( (0, 1, 0, 0), (-1, 0, 0, 0), (0, 0, 1, 0), (3, 4, 5, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+    def Xform "arm" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 1
+        float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        double3 xformOp:translate = (2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Scope "sites"
+    {
+        def Xform "tip" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            rel gearbox:link:parent = </rig/arm>
+            double3 xformOp:translate = (2.5, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+    def PhysicsRevoluteJoint "hinge"
+    {
+        rel physics:body0 = </rig/base>
+        rel physics:body1 = </rig/arm>
+        point3f physics:localPos0 = (2, 0, 0)
+    }
+}

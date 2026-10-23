@@ -1,0 +1,28 @@
+#usda 1.0
+(
+    defaultPrim = "cart"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "cart" (prepend apiSchemas = ["GearboxMachineAPI"])
+{
+    int gearbox:machine:schemaVersion = 2
+    rel gearbox:machine:body = </cart/chassis>
+    rel gearbox:machine:controlFrame = </cart/chassis/forward>
+
+    def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 20
+        float3 physics:diagonalInertia = (1, 1, 1)
+        float xformOp:rotateZ = 30
+        uniform token[] xformOpOrder = ["xformOp:rotateZ"]
+
+        def Xform "forward"
+        {
+            float xformOp:rotateZ = 90
+            uniform token[] xformOpOrder = ["xformOp:rotateZ"]
+        }
+    }
+}

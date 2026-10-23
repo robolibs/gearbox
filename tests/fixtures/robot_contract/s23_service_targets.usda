@@ -1,0 +1,106 @@
+#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "World"
+{
+    def Xform "Trailer" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:brakes"])
+    {
+        int gearbox:machine:schemaVersion = 2
+        rel gearbox:machine:body = </World/Trailer/chassis>
+        token gearbox:controller:brakes:type = "builtin:brake"
+        rel gearbox:controller:brakes:wheelJoints = [</World/Trailer/left_axle>, </World/Trailer/right_axle>]
+        def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+        }
+        def Xform "left" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 0.8, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "right" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, -0.8, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsRevoluteJoint "left_axle"
+        {
+            rel physics:body0 = </World/Trailer/chassis>
+            rel physics:body1 = </World/Trailer/left>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (0, 0.8, 0)
+        }
+        def PhysicsRevoluteJoint "right_axle"
+        {
+            rel physics:body0 = </World/Trailer/chassis>
+            rel physics:body1 = </World/Trailer/right>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (0, -0.8, 0)
+        }
+    }
+    def Xform "Steered" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"])
+    {
+        int gearbox:machine:schemaVersion = 2
+        rel gearbox:machine:body = </World/Steered/chassis>
+        rel gearbox:machine:role:steeringJoints = [</World/Steered/steer_a>, </World/Steered/steer_b>]
+        token gearbox:controller:drive:type = "builtin:ackermann_cmd_vel"
+        rel gearbox:controller:drive:steerJoints = [</World/Steered/steer_a>]
+        def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (10, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "knuckle_a" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (10, 0.8, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "knuckle_b" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (10, -0.8, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsRevoluteJoint "steer_a"
+        {
+            rel physics:body0 = </World/Steered/chassis>
+            rel physics:body1 = </World/Steered/knuckle_a>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (0, 0.8, 0)
+        }
+        def PhysicsRevoluteJoint "steer_b"
+        {
+            rel physics:body0 = </World/Steered/chassis>
+            rel physics:body1 = </World/Steered/knuckle_b>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (0, -0.8, 0)
+        }
+    }
+    def Xform "Cart" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive", "GearboxControllerAPI:brakes"])
+    {
+        int gearbox:machine:schemaVersion = 2
+        rel gearbox:machine:body = </World/Cart/chassis>
+        rel gearbox:machine:role:poweredWheelJoints = [</World/Cart/axle>]
+        token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"
+        token gearbox:controller:brakes:type = "builtin:brake"
+        def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (5, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "wheel" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (5, 0.8, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsRevoluteJoint "axle"
+        {
+            rel physics:body0 = </World/Cart/chassis>
+            rel physics:body1 = </World/Cart/wheel>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (0, 0.8, 0)
+        }
+    }
+}

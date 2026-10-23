@@ -1,0 +1,97 @@
+#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "World"
+{
+    def Xform "FourBar" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "ground" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+        }
+        def Xform "crank" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 0, 0.5)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "coupler" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (1, 0, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "rocker" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (2, 0, 0.5)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsRevoluteJoint "a_closure" (doc = "sorts first")
+        {
+            rel physics:body0 = </World/FourBar/rocker>
+            rel physics:body1 = </World/FourBar/ground>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (0, 0, -0.5)
+            point3f physics:localPos1 = (2, 0, 0)
+            bool physics:excludeFromArticulation = 1
+        }
+        def PhysicsRevoluteJoint "b_crank"
+        {
+            rel physics:body0 = </World/FourBar/ground>
+            rel physics:body1 = </World/FourBar/crank>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos1 = (0, 0, -0.5)
+        }
+        def PhysicsRevoluteJoint "c_coupler"
+        {
+            rel physics:body0 = </World/FourBar/crank>
+            rel physics:body1 = </World/FourBar/coupler>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (0, 0, 0.5)
+            point3f physics:localPos1 = (-1, 0, 0)
+        }
+        def PhysicsRevoluteJoint "d_rocker"
+        {
+            rel physics:body0 = </World/FourBar/coupler>
+            rel physics:body1 = </World/FourBar/rocker>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (1, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0.5)
+        }
+    }
+
+    def Xform "Unexcluded" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "a" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 5, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "b" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (1, 5, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "c" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0.5, 6, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsRevoluteJoint "ab"
+        {
+            rel physics:body0 = </World/Unexcluded/a>
+            rel physics:body1 = </World/Unexcluded/b>
+        }
+        def PhysicsRevoluteJoint "bc"
+        {
+            rel physics:body0 = </World/Unexcluded/b>
+            rel physics:body1 = </World/Unexcluded/c>
+        }
+        def PhysicsRevoluteJoint "ca"
+        {
+            rel physics:body0 = </World/Unexcluded/c>
+            rel physics:body1 = </World/Unexcluded/a>
+        }
+    }
+}

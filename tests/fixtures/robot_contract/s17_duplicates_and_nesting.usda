@@ -1,0 +1,75 @@
+#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "World"
+{
+    def Xform "dup" (prepend apiSchemas = ["GearboxMachineAPI"])
+    {
+        int gearbox:machine:schemaVersion = 2
+        rel gearbox:machine:body = </World/dup/base>
+        def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+        {
+            float physics:mass = 1
+            float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+            def Xform "tip" (prepend apiSchemas = ["GearboxLinkAPI"])
+            {
+                token gearbox:link:name = "tip"
+            }
+        }
+        def Xform "a" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+        {
+            float physics:mass = 1
+            float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+            def Xform "tip2" (prepend apiSchemas = ["GearboxLinkAPI"])
+            {
+                token gearbox:link:name = "tip"
+            }
+        }
+        def Xform "b" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+        {
+            float physics:mass = 1
+            float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        }
+        def Scope "left"
+        {
+            def PhysicsRevoluteJoint "hinge"
+            {
+                rel physics:body0 = </World/dup/base>
+                rel physics:body1 = </World/dup/a>
+            }
+        }
+        def Scope "right"
+        {
+            def PhysicsRevoluteJoint "hinge"
+            {
+                rel physics:body0 = </World/dup/base>
+                rel physics:body1 = </World/dup/b>
+            }
+        }
+    }
+
+    def Xform "outer" (prepend apiSchemas = ["GearboxMachineAPI"])
+    {
+        int gearbox:machine:schemaVersion = 2
+        rel gearbox:machine:body = </World/outer/hull>
+        def Xform "hull" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+        {
+            float physics:mass = 1
+            float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        }
+        def Xform "inner" (prepend apiSchemas = ["GearboxMachineAPI"])
+        {
+            int gearbox:machine:schemaVersion = 2
+            rel gearbox:machine:body = </World/outer/inner/core>
+            def Xform "core" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+            {
+                float physics:mass = 1
+                float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+            }
+        }
+    }
+}

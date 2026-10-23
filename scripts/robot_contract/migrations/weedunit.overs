@@ -1,0 +1,28 @@
+    over "left"
+    {
+        over "Joints"
+        {
+            over "carriage_x" { string isaac:NameOverride = "left_carriage_x" }
+            over "front_left_steer" { string isaac:NameOverride = "left_front_left_steer" }
+            over "front_left_wheel" { string isaac:NameOverride = "left_front_left_wheel" }
+            over "gantry_y" { string isaac:NameOverride = "left_gantry_y" }
+            over "rear_left_steer" { string isaac:NameOverride = "left_rear_left_steer" }
+            over "rear_left_wheel" { string isaac:NameOverride = "left_rear_left_wheel" }
+            over "rear_rocker" { string isaac:NameOverride = "left_rear_rocker" }
+            over "tool_z" { string isaac:NameOverride = "left_tool_z" }
+        }
+    }
+    over "right"
+    {
+        over "Joints"
+        {
+            over "carriage_x" { string isaac:NameOverride = "right_carriage_x" }
+            over "front_right_steer" { string isaac:NameOverride = "right_front_right_steer" }
+            over "front_right_wheel" { string isaac:NameOverride = "right_front_right_wheel" }
+            over "gantry_y" { string isaac:NameOverride = "right_gantry_y" }
+            over "rear_right_steer" { string isaac:NameOverride = "right_rear_right_steer" }
+            over "rear_right_wheel" { string isaac:NameOverride = "right_rear_right_wheel" }
+            over "rear_rocker" { string isaac:NameOverride = "right_rear_rocker" }
+            over "tool_z" { string isaac:NameOverride = "right_tool_z" }
+        }
+    }

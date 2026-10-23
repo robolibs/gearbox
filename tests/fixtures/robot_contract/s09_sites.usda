@@ -1,0 +1,83 @@
+#usda 1.0
+(
+    defaultPrim = "weeder"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "weeder" (prepend apiSchemas = ["GearboxMachineAPI"])
+{
+    int gearbox:machine:schemaVersion = 2
+    rel gearbox:machine:body = </weeder/chassis>
+
+    def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 100
+        float3 physics:diagonalInertia = (10, 10, 10)
+        double3 xformOp:translate = (0, 0, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Xform "camera_link" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            double3 xformOp:translate = (0.8, 0, 0.5)
+            float xformOp:rotateY = 20
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+        }
+        def Xform "rear_hitch" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"])
+        {
+            token gearbox:coupling:side = "hitch"
+            token gearbox:coupling:type = "drawbar"
+            double3 xformOp:translate = (-1, 0, -0.5)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+    def Xform "arm" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 5
+        float3 physics:diagonalInertia = (0.5, 0.5, 0.1)
+        double3 xformOp:translate = (1, 0, 0.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Xform "tool_tip" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "tool"
+            double3 xformOp:translate = (0.3, 0, -0.2)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+    def Xform "probe" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 1
+        float3 physics:diagonalInertia = (0.01, 0.01, 0.01)
+        double3 xformOp:translate = (1.3, 0, 0.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Xform "ball_tip" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "tool"
+            double3 xformOp:translate = (0, 0, -0.15)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+    def PhysicsRevoluteJoint "arm_pitch"
+    {
+        rel physics:body0 = </weeder/chassis>
+        rel physics:body1 = </weeder/arm>
+        uniform token physics:axis = "Y"
+        point3f physics:localPos0 = (1, 0, -0.4)
+        point3f physics:localPos1 = (0, 0, 0)
+    }
+    def PhysicsPrismaticJoint "probe_slide"
+    {
+        rel physics:body0 = </weeder/arm>
+        rel physics:body1 = </weeder/probe>
+        uniform token physics:axis = "Z"
+        point3f physics:localPos0 = (0.3, 0, -0.4)
+        point3f physics:localPos1 = (0, 0, 0)
+        float physics:lowerLimit = -0.3
+        float physics:upperLimit = 0
+    }
+}

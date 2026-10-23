@@ -1,0 +1,56 @@
+{
+  "mapping": true,
+  "physics_hz": 120,
+  "settle_ticks": 480,
+  "notes": "speed_reference is the chassis-frame point the commanded speed is defined at (the unsteered axle centre); the chassis is held on the no-slip twist about it so closed-loop trims rest at zero",
+  "cases": [
+    {
+      "name": "ackermann_left",
+      "fixture": "e03_ackermann_cart.usda",
+      "controller": "ackermann",
+      "speed_reference": [0, 1.0, 0],
+      "cmd": { "linear_mps": 1.5, "angular_rps": 0.3 },
+      "parameters": { "wheel_base": 2.0, "track_width": 1.6, "wheel_radius": 0.4, "max_steer_deg": 45 },
+      "dofs": {
+        "steer_left": "/cart/Joints/steer_front_left",
+        "steer_right": "/cart/Joints/steer_front_right",
+        "wheel_front_left": "/cart/Joints/rev_front_left",
+        "wheel_front_right": "/cart/Joints/rev_front_right",
+        "wheel_back_left": "/cart/Joints/rev_back_left",
+        "wheel_back_right": "/cart/Joints/rev_back_right"
+      }
+    },
+    {
+      "name": "ackermann_right",
+      "fixture": "e03_ackermann_cart.usda",
+      "controller": "ackermann",
+      "speed_reference": [0, 1.0, 0],
+      "cmd": { "linear_mps": 1.0, "angular_rps": -0.25 },
+      "parameters": { "wheel_base": 2.0, "track_width": 1.6, "wheel_radius": 0.4, "max_steer_deg": 45 },
+      "dofs": {
+        "steer_left": "/cart/Joints/steer_front_left",
+        "steer_right": "/cart/Joints/steer_front_right",
+        "wheel_front_left": "/cart/Joints/rev_front_left",
+        "wheel_front_right": "/cart/Joints/rev_front_right",
+        "wheel_back_left": "/cart/Joints/rev_back_left",
+        "wheel_back_right": "/cart/Joints/rev_back_right"
+      }
+    },
+    {
+      "name": "differential_arc",
+      "fixture": "e03_diff_cart.usda",
+      "controller": "differential",
+      "speed_reference": [0, 0, 0],
+      "cmd": { "linear_mps": 0.8, "angular_rps": 0.5 },
+      "parameters": { "wheel_base": 1.2, "wheel_radius": 0.3 },
+      "dofs": {
+        "wheel_left": "/rover/Joints/wheel_left",
+        "wheel_right": "/rover/Joints/wheel_right"
+      }
+    }
+  ],
+  "tolerances": {
+    "steer_angle_rad": 0.001,
+    "wheel_velocity_relative": 0.005
+  }
+}

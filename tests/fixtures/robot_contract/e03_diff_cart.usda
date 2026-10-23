@@ -1,0 +1,98 @@
+#usda 1.0
+(
+    defaultPrim = "rover"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def PhysicsScene "physicsScene"
+{
+    vector3f physics:gravityDirection = (0, 0, -1)
+    float physics:gravityMagnitude = 0
+}
+
+def Xform "rover" (
+    prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"]
+)
+{
+    rel gearbox:machine:body = </rover/chassis>
+    rel gearbox:machine:role:poweredWheelJoints = [</rover/Joints/wheel_left>, </rover/Joints/wheel_right>]
+    token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"
+    token gearbox:controller:drive:commandInterface = "cmd_vel"
+    bool gearbox:controller:drive:enabled = 1
+    rel gearbox:controller:drive:body = </rover/chassis>
+    token gearbox:controller:drive:driveMode = "wheels"
+    token[] gearbox:controller:drive:usesRoles = ["poweredWheelJoints"]
+    float gearbox:controller:drive:wheelRadius = 0.3
+    float gearbox:controller:drive:trackWidth = 1.2
+    float gearbox:controller:drive:updateRateHz = 60
+
+    def Xform "chassis" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:role = "base"
+        float physics:mass = 80
+        float3 physics:diagonalInertia = (8, 6, 10)
+        rel physics:filteredPairs = [</rover/left>, </rover/right>]
+        double3 xformOp:translate = (0, 0, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "hull" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            double size = 1
+            double3 xformOp:scale = (0.8, 1.0, 0.3)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+        }
+    }
+
+    def Xform "left" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        float physics:mass = 5
+        float3 physics:diagonalInertia = (0.225, 0.13, 0.13)
+        double3 xformOp:translate = (0.6, 0, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cylinder "tyre" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            uniform token axis = "X"
+            double radius = 0.3
+            double height = 0.1
+        }
+    }
+    def Xform "right" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        float physics:mass = 5
+        float3 physics:diagonalInertia = (0.225, 0.13, 0.13)
+        double3 xformOp:translate = (-0.6, 0, 0.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cylinder "tyre" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            uniform token axis = "X"
+            double radius = 0.3
+            double height = 0.1
+        }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "wheel_left"
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </rover/chassis>
+            rel physics:body1 = </rover/left>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (0.6, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+        }
+        def PhysicsRevoluteJoint "wheel_right"
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </rover/chassis>
+            rel physics:body1 = </rover/right>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (-0.6, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+        }
+    }
+}

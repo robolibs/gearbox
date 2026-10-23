@@ -1,0 +1,9 @@
+#usda 1.0
+
+over "World"
+{
+    over "R2"
+    {
+        token gearbox:machine:id = "second"
+    }
+}

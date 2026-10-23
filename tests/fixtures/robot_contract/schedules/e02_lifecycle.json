@@ -1,0 +1,29 @@
+{
+  "fixture": "e01_arm.usda",
+  "overlay": "e01_arm_gearbox.usda",
+  "root": "/arm",
+  "tool": "/arm/carriage/tool_tip",
+  "physics_hz": 120,
+  "ticks": 480,
+  "commands": [
+    { "tick": 0, "dof": "shoulder", "mode": "effort", "value": 1.0 },
+    { "tick": 0, "dof": "slide", "mode": "position", "value": 0.4 }
+  ],
+  "events": [
+    { "tick": 120, "event": "pause", "frames": 60 },
+    { "tick": 240, "event": "reset" }
+  ],
+  "load_time_targets": { "shoulder": 0.0, "slide": 0.0 },
+  "notes": "pause: rendered frames with physics inactive; reset: every command of the machine cleared, each DOF back to its load-time actuator (here the authored drives with their schema-default target 0), no body moved",
+  "tolerances": {
+    "structure_length_m": 1e-6,
+    "structure_angle_rad": 1e-6,
+    "structure_scalar_relative": 1e-5,
+    "target_absolute": 1e-9,
+    "position_settle_rad_or_m": 0.02,
+    "velocity_relative": 0.05,
+    "effort_acceleration_relative": 0.1,
+    "hold_drift_rad_or_m": 0.01,
+    "reset_return_rad_or_m": 0.02
+  }
+}

@@ -1,0 +1,184 @@
+#usda 1.0
+(
+    defaultPrim = "cart"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def PhysicsScene "physicsScene"
+{
+    vector3f physics:gravityDirection = (0, 0, -1)
+    float physics:gravityMagnitude = 0
+}
+
+def Xform "cart" (
+    prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"]
+)
+{
+    rel gearbox:machine:body = </cart/chassis>
+    token gearbox:machine:kind = "tractor"
+    rel gearbox:machine:role:poweredWheelJoints = [</cart/Joints/rev_back_left>, </cart/Joints/rev_back_right>]
+    rel gearbox:machine:role:passiveWheelJoints = [</cart/Joints/rev_front_left>, </cart/Joints/rev_front_right>]
+    rel gearbox:machine:role:steeringJoints = [</cart/Joints/steer_front_left>, </cart/Joints/steer_front_right>]
+    token gearbox:controller:drive:type = "builtin:ackermann_cmd_vel"
+    token gearbox:controller:drive:commandInterface = "cmd_vel"
+    bool gearbox:controller:drive:enabled = 1
+    rel gearbox:controller:drive:body = </cart/chassis>
+    token gearbox:controller:drive:steeringGeometry = "ackermann"
+    token[] gearbox:controller:drive:usesRoles = ["poweredWheelJoints", "steeringJoints"]
+    float gearbox:controller:drive:wheelBase = 2
+    float gearbox:controller:drive:trackWidth = 1.6
+    float gearbox:controller:drive:wheelRadius = 0.4
+    float gearbox:controller:drive:maxSteerDeg = 45
+    float gearbox:controller:drive:updateRateHz = 60
+
+    def Xform "chassis" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:role = "base"
+        float physics:mass = 500
+        float3 physics:diagonalInertia = (200, 100, 250)
+        rel physics:filteredPairs = [</cart/wheel_front_left>, </cart/wheel_front_right>, </cart/wheel_back_left>, </cart/wheel_back_right>, </cart/knuckle_front_left>, </cart/knuckle_front_right>]
+        double3 xformOp:translate = (0, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cube "hull" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            double size = 1
+            double3 xformOp:scale = (0.8, 2.6, 0.3)
+            uniform token[] xformOpOrder = ["xformOp:scale"]
+        }
+    }
+
+    def Xform "knuckle_front_left" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        float physics:mass = 5
+        float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        double3 xformOp:translate = (0.8, -1, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Xform "knuckle_front_right" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        float physics:mass = 5
+        float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        double3 xformOp:translate = (-0.8, -1, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "wheel_front_left" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        float physics:mass = 20
+        float3 physics:diagonalInertia = (1.6, 0.95, 0.95)
+        double3 xformOp:translate = (0.8, -1, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cylinder "tyre" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            uniform token axis = "X"
+            double radius = 0.4
+            double height = 0.3
+        }
+    }
+    def Xform "wheel_front_right" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        float physics:mass = 20
+        float3 physics:diagonalInertia = (1.6, 0.95, 0.95)
+        double3 xformOp:translate = (-0.8, -1, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cylinder "tyre" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            uniform token axis = "X"
+            double radius = 0.4
+            double height = 0.3
+        }
+    }
+    def Xform "wheel_back_left" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        float physics:mass = 20
+        float3 physics:diagonalInertia = (1.6, 0.95, 0.95)
+        double3 xformOp:translate = (0.8, 1, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cylinder "tyre" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            uniform token axis = "X"
+            double radius = 0.4
+            double height = 0.3
+        }
+    }
+    def Xform "wheel_back_right" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        float physics:mass = 20
+        float3 physics:diagonalInertia = (1.6, 0.95, 0.95)
+        double3 xformOp:translate = (-0.8, 1, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cylinder "tyre" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            uniform token axis = "X"
+            double radius = 0.4
+            double height = 0.3
+        }
+    }
+
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "steer_front_left"
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </cart/chassis>
+            rel physics:body1 = </cart/knuckle_front_left>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (0.8, -1, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            float physics:lowerLimit = -45
+            float physics:upperLimit = 45
+        }
+        def PhysicsRevoluteJoint "steer_front_right"
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </cart/chassis>
+            rel physics:body1 = </cart/knuckle_front_right>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (-0.8, -1, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+            float physics:lowerLimit = -45
+            float physics:upperLimit = 45
+        }
+        def PhysicsRevoluteJoint "rev_front_left"
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </cart/knuckle_front_left>
+            rel physics:body1 = </cart/wheel_front_left>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+        }
+        def PhysicsRevoluteJoint "rev_front_right"
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </cart/knuckle_front_right>
+            rel physics:body1 = </cart/wheel_front_right>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+        }
+        def PhysicsRevoluteJoint "rev_back_left"
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </cart/chassis>
+            rel physics:body1 = </cart/wheel_back_left>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (0.8, 1, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+        }
+        def PhysicsRevoluteJoint "rev_back_right"
+        {
+            uniform token physics:axis = "X"
+            rel physics:body0 = </cart/chassis>
+            rel physics:body1 = </cart/wheel_back_right>
+            bool physics:collisionEnabled = 0
+            point3f physics:localPos0 = (-0.8, 1, 0)
+            point3f physics:localPos1 = (0, 0, 0)
+        }
+    }
+}

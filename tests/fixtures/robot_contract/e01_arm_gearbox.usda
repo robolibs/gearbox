@@ -1,0 +1,33 @@
+#usda 1.0
+(
+    defaultPrim = "arm"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+    subLayers = [@./e01_arm.usda@]
+)
+
+over "arm" (prepend apiSchemas = ["GearboxMachineAPI"])
+{
+    int gearbox:machine:schemaVersion = 2
+    rel gearbox:machine:body = </arm/base>
+
+    over "carriage"
+    {
+        over "tool_tip" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "tool"
+        }
+    }
+    over "joints"
+    {
+        over "shoulder"
+        {
+            uniform token[] gearbox:joint:angular:commandInterfaces = ["position", "velocity", "effort"]
+        }
+        over "slide"
+        {
+            uniform token[] gearbox:joint:linear:commandInterfaces = ["position", "velocity", "effort"]
+        }
+    }
+}

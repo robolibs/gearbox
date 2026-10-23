@@ -1,0 +1,630 @@
+{
+  "diagnostics": [],
+  "machines": [
+    {
+      "accepted": true,
+      "articulations": [
+        {
+          "bodies": [
+            "/World/Robot/arm",
+            "/World/Robot/base",
+            "/World/Robot/slider"
+          ],
+          "fixed_base": false,
+          "joints": [
+            "/World/Robot/hinge",
+            "/World/Robot/slide"
+          ],
+          "markers": [
+            "/World/Robot"
+          ]
+        }
+      ],
+      "base_frame": "base",
+      "bodies": [
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.00999999977648,
+              0.00999999977648,
+              0.00999999977648
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              1.0,
+              0.0,
+              0.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 1.0
+          },
+          "mode": "dynamic",
+          "name": "arm",
+          "path": "/World/Robot/arm",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "authored",
+            "value": [
+              0.10000000149,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.10000000149,
+              0.20000000298,
+              0.300000011921
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "authored",
+            "value": [
+              0.0,
+              0.0,
+              1.57079632679
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "authored",
+            "value": [
+              1.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 2.0
+          },
+          "mode": "dynamic",
+          "name": "base",
+          "path": "/World/Robot/base",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.0010000000475,
+              0.0010000000475,
+              0.0010000000475
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              2.0,
+              0.0,
+              0.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 0.5
+          },
+          "mode": "dynamic",
+          "name": "slider",
+          "path": "/World/Robot/slider",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        }
+      ],
+      "capabilities": [
+        {
+          "evidence": [
+            "force_drive_gains_follow_their_dimensions",
+            "s13_units_are_equivalent_across_stages"
+          ],
+          "feature": "drive.force",
+          "reason": "spring-damper force drive with gains and cap in SI (2 uses)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/World/Robot/hinge"
+        },
+        {
+          "evidence": [
+            "s16_joint_type_capabilities",
+            "c01_revolute_and_prismatic_commands_move_their_joints"
+          ],
+          "feature": "joint.prismatic",
+          "reason": "slider along the authored axis with limits and drives (1 use)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/World/Robot/slide"
+        },
+        {
+          "evidence": [
+            "s01_floating_fixed_and_branched",
+            "c01_revolute_and_prismatic_commands_move_their_joints"
+          ],
+          "feature": "joint.revolute",
+          "reason": "hinge about the authored axis with limits and drives (1 use)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/World/Robot/hinge"
+        }
+      ],
+      "command_validity_ms": 500,
+      "control_body": "/World/Robot/base",
+      "control_frame": null,
+      "controllers": [],
+      "convention": "right_handed_z_up_si",
+      "diagnostics": [],
+      "dofs": [
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": {
+            "damping": {
+              "source": "authored",
+              "value": 9.99999970909
+            },
+            "max_force": {
+              "source": "authored",
+              "value": 50.0
+            },
+            "stiffness": {
+              "source": "authored",
+              "value": 100.000000506
+            },
+            "target_position": {
+              "source": "authored",
+              "value": 0.523598775598
+            },
+            "target_velocity": {
+              "source": "authored",
+              "value": 0.157079632679
+            },
+            "type": {
+              "source": "schema_default",
+              "value": "force"
+            }
+          },
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/World/Robot/hinge",
+          "limit": {
+            "lower": -0.785398163397,
+            "source": "authored",
+            "upper": 0.785398163397
+          },
+          "name": "hinge",
+          "passive": "spring",
+          "token": "angular",
+          "unit": "rad"
+        },
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": {
+            "damping": {
+              "source": "authored",
+              "value": 100.0
+            },
+            "max_force": {
+              "source": "authored",
+              "value": 200.0
+            },
+            "stiffness": {
+              "source": "authored",
+              "value": 1000.0
+            },
+            "target_position": {
+              "source": "authored",
+              "value": 0.25
+            },
+            "target_velocity": {
+              "source": "authored",
+              "value": 0.10000000149
+            },
+            "type": {
+              "source": "schema_default",
+              "value": "force"
+            }
+          },
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/World/Robot/slide",
+          "limit": {
+            "lower": -0.5,
+            "source": "authored",
+            "upper": 0.5
+          },
+          "name": "slide",
+          "passive": "spring",
+          "token": "linear",
+          "unit": "m"
+        }
+      ],
+      "frames": [
+        {
+          "name": "arm",
+          "owner": {
+            "body": "/World/Robot/arm"
+          },
+          "path": "/World/Robot/arm",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "base",
+          "owner": {
+            "body": "/World/Robot/base"
+          },
+          "path": "/World/Robot/base",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "slider",
+          "owner": {
+            "body": "/World/Robot/slider"
+          },
+          "path": "/World/Robot/slider",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      "generation": 1,
+      "isaac": false,
+      "joints": [
+        {
+          "axis": "Z",
+          "body0": {
+            "authored": "/World/Robot/base",
+            "resolved": {
+              "body": "/World/Robot/base",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/World/Robot/arm",
+            "resolved": {
+              "body": "/World/Robot/arm",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "hinge"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "revolute",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              -0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "name": "hinge",
+          "path": "/World/Robot/hinge"
+        },
+        {
+          "axis": "X",
+          "body0": {
+            "authored": "/World/Robot/arm",
+            "resolved": {
+              "body": "/World/Robot/arm",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/World/Robot/slider",
+            "resolved": {
+              "body": "/World/Robot/slider",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "slide"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "prismatic",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              -0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "name": "slide",
+          "path": "/World/Robot/slide"
+        }
+      ],
+      "kind": null,
+      "load_instance": "load",
+      "machine_id": "world_robot",
+      "manifest_version": "gearbox.robot_manifest.v1",
+      "owners": [],
+      "profile": "standard",
+      "reporting": null,
+      "root": "/World/Robot",
+      "schema_version": null,
+      "tree": [
+        {
+          "child": "arm",
+          "joint": "/World/Robot/hinge",
+          "parent": "base",
+          "reversed": false
+        },
+        {
+          "child": "slider",
+          "joint": "/World/Robot/slide",
+          "parent": "arm",
+          "reversed": false
+        }
+      ],
+      "units": {
+        "kilograms_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "meters_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "up_axis": {
+          "source": "authored",
+          "value": "Z"
+        }
+      }
+    }
+  ],
+  "manifest_version": "gearbox.robot_manifest.v1",
+  "scan_root": "/"
+}

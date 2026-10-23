@@ -1,0 +1,18 @@
+#usda 1.0
+(
+    upAxis = "X"
+    metersPerUnit = -1
+    kilogramsPerUnit = 1
+)
+
+def Xform "World"
+{
+    def Xform "Cart" (prepend apiSchemas = ["GearboxMachineAPI"])
+    {
+        int gearbox:machine:schemaVersion = 2
+        rel gearbox:machine:body = </World/Cart/body>
+        def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+        }
+    }
+}

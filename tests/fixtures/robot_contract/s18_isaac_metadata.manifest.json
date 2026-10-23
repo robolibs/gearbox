@@ -1,0 +1,790 @@
+{
+  "diagnostics": [],
+  "machines": [
+    {
+      "accepted": true,
+      "articulations": [
+        {
+          "bodies": [
+            "/bot/base",
+            "/bot/link1",
+            "/bot/link2",
+            "/bot/link3"
+          ],
+          "fixed_base": false,
+          "joints": [
+            "/bot/joints/j1",
+            "/bot/joints/j2",
+            "/bot/joints/j3"
+          ],
+          "markers": [
+            "/bot"
+          ]
+        }
+      ],
+      "base_frame": "chassis_link",
+      "bodies": [
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": null,
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": null,
+          "mode": "dynamic",
+          "name": "chassis_link",
+          "path": "/bot/base",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": null,
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              1.0,
+              0.0,
+              0.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": null,
+          "mode": "dynamic",
+          "name": "link1",
+          "path": "/bot/link1",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": null,
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              2.0,
+              0.0,
+              0.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": null,
+          "mode": "dynamic",
+          "name": "link2",
+          "path": "/bot/link2",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": null,
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              3.0,
+              0.0,
+              0.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": null,
+          "mode": "dynamic",
+          "name": "link3",
+          "path": "/bot/link3",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        }
+      ],
+      "capabilities": [
+        {
+          "evidence": [
+            "s16_joint_type_capabilities",
+            "a_d6_hinge_swings_down_to_its_limit"
+          ],
+          "feature": "joint.d6",
+          "reason": "each axis free, limited, locked (low > high) or driven (1 use)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/bot/joints/j3"
+        },
+        {
+          "evidence": [
+            "s01_floating_fixed_and_branched",
+            "c01_revolute_and_prismatic_commands_move_their_joints"
+          ],
+          "feature": "joint.revolute",
+          "reason": "hinge about the authored axis with limits and drives (2 uses)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/bot/joints/j1"
+        }
+      ],
+      "command_validity_ms": 500,
+      "control_body": "/bot/base",
+      "control_frame": null,
+      "controllers": [],
+      "convention": "right_handed_z_up_si",
+      "diagnostics": [],
+      "dofs": [
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": true,
+          "joint": "/bot/joints/j1",
+          "limit": {
+            "lower": null,
+            "source": "schema_default",
+            "upper": null
+          },
+          "name": "shoulder",
+          "passive": "no_drive",
+          "token": "angular",
+          "unit": "rad"
+        },
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": false,
+          "joint": "/bot/joints/j2",
+          "limit": {
+            "lower": null,
+            "source": "schema_default",
+            "upper": null
+          },
+          "name": "j2",
+          "passive": "no_drive",
+          "token": "angular",
+          "unit": "rad"
+        },
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": false,
+          "joint": "/bot/joints/j3",
+          "limit": {
+            "lower": null,
+            "source": "schema_default",
+            "upper": null
+          },
+          "name": "j3:rotX",
+          "passive": "no_drive",
+          "token": "rotX",
+          "unit": "rad"
+        },
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": true,
+          "joint": "/bot/joints/j3",
+          "limit": {
+            "lower": null,
+            "source": "schema_default",
+            "upper": null
+          },
+          "name": "j3:rotZ",
+          "passive": "no_drive",
+          "token": "rotZ",
+          "unit": "rad"
+        }
+      ],
+      "frames": [
+        {
+          "name": "chassis_link",
+          "owner": {
+            "body": "/bot/base"
+          },
+          "path": "/bot/base",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "link1",
+          "owner": {
+            "body": "/bot/link1"
+          },
+          "path": "/bot/link1",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "link2",
+          "owner": {
+            "body": "/bot/link2"
+          },
+          "path": "/bot/link2",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "link3",
+          "owner": {
+            "body": "/bot/link3"
+          },
+          "path": "/bot/link3",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "tcp",
+          "owner": {
+            "body": "/bot/link2"
+          },
+          "path": "/bot/link2/tcp",
+          "publish": true,
+          "role": "site",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.2,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      "generation": 1,
+      "isaac": true,
+      "joints": [
+        {
+          "axis": "X",
+          "body0": {
+            "authored": "/bot/base",
+            "resolved": {
+              "body": "/bot/base",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/bot/link1",
+            "resolved": {
+              "body": "/bot/link1",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "shoulder"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "revolute",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              -0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "name": "shoulder",
+          "path": "/bot/joints/j1"
+        },
+        {
+          "axis": "X",
+          "body0": {
+            "authored": "/bot/link1",
+            "resolved": {
+              "body": "/bot/link1",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/bot/link2",
+            "resolved": {
+              "body": "/bot/link2",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "j2"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "revolute",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              -0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "name": "j2",
+          "path": "/bot/joints/j2"
+        },
+        {
+          "axis": null,
+          "body0": {
+            "authored": "/bot/link2",
+            "resolved": {
+              "body": "/bot/link2",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/bot/link3",
+            "resolved": {
+              "body": "/bot/link3",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "j3:rotX",
+            "j3:rotZ"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "d6",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              -0.5,
+              0.0,
+              0.0
+            ]
+          },
+          "name": "j3",
+          "path": "/bot/joints/j3"
+        }
+      ],
+      "kind": null,
+      "load_instance": "load",
+      "machine_id": "bot",
+      "manifest_version": "gearbox.robot_manifest.v1",
+      "owners": [],
+      "profile": "standard",
+      "reporting": {
+        "joints": [
+          "/bot/joints/j2",
+          "/bot/joints/j1"
+        ],
+        "links": [
+          "/bot/base",
+          "/bot/link1"
+        ]
+      },
+      "root": "/bot",
+      "schema_version": null,
+      "tree": [
+        {
+          "child": "link1",
+          "joint": "/bot/joints/j1",
+          "parent": "chassis_link",
+          "reversed": false
+        },
+        {
+          "child": "link2",
+          "joint": "/bot/joints/j2",
+          "parent": "link1",
+          "reversed": false
+        },
+        {
+          "child": "link3",
+          "joint": "/bot/joints/j3",
+          "parent": "link2",
+          "reversed": false
+        },
+        {
+          "child": "tcp",
+          "joint": null,
+          "parent": "link2",
+          "reversed": false
+        }
+      ],
+      "units": {
+        "kilograms_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "meters_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "up_axis": {
+          "source": "authored",
+          "value": "Z"
+        }
+      }
+    }
+  ],
+  "manifest_version": "gearbox.robot_manifest.v1",
+  "scan_root": "/bot"
+}

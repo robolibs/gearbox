@@ -1,0 +1,1540 @@
+{
+  "diagnostics": [],
+  "machines": [
+    {
+      "accepted": true,
+      "articulations": [
+        {
+          "bodies": [
+            "/World/Arm/base",
+            "/World/Arm/link1",
+            "/World/Arm/link2"
+          ],
+          "fixed_base": true,
+          "joints": [
+            "/World/Arm/anchor",
+            "/World/Arm/elbow",
+            "/World/Arm/shoulder"
+          ],
+          "markers": [
+            "/World/Arm"
+          ]
+        }
+      ],
+      "base_frame": "base",
+      "bodies": [
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.20000000298,
+              0.20000000298,
+              0.20000000298
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 5.0
+          },
+          "mode": "dynamic",
+          "name": "base",
+          "path": "/World/Arm/base",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.0500000007451,
+              0.0500000007451,
+              0.00999999977648
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 1.0
+          },
+          "mode": "dynamic",
+          "name": "link1",
+          "path": "/World/Arm/link1",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.0500000007451,
+              0.0500000007451,
+              0.00999999977648
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              2.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 1.0
+          },
+          "mode": "dynamic",
+          "name": "link2",
+          "path": "/World/Arm/link2",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        }
+      ],
+      "capabilities": [
+        {
+          "evidence": [
+            "s16_joint_type_capabilities",
+            "a_fixed_joint_keeps_the_rotation_of_its_authored_frames"
+          ],
+          "feature": "joint.fixed",
+          "reason": "both frames locked (1 use)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/World/Arm/anchor"
+        },
+        {
+          "evidence": [
+            "s01_floating_fixed_and_branched",
+            "c01_revolute_and_prismatic_commands_move_their_joints"
+          ],
+          "feature": "joint.revolute",
+          "reason": "hinge about the authored axis with limits and drives (2 uses)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/World/Arm/elbow"
+        },
+        {
+          "evidence": [
+            "s03_world_endpoint_on_either_side",
+            "a_world_revolute_joint_keeps_its_degree_of_freedom"
+          ],
+          "feature": "joint.world_anchor",
+          "reason": "a world-anchored joint keeps its DOFs against a fixed anchor body (1 use)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/World/Arm/anchor"
+        }
+      ],
+      "command_validity_ms": 500,
+      "control_body": "/World/Arm/base",
+      "control_frame": null,
+      "controllers": [],
+      "convention": "right_handed_z_up_si",
+      "diagnostics": [],
+      "dofs": [
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/World/Arm/elbow",
+          "limit": {
+            "lower": null,
+            "source": "schema_default",
+            "upper": null
+          },
+          "name": "elbow",
+          "passive": "no_drive",
+          "token": "angular",
+          "unit": "rad"
+        },
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/World/Arm/shoulder",
+          "limit": {
+            "lower": -1.57079632679,
+            "source": "authored",
+            "upper": 1.57079632679
+          },
+          "name": "shoulder",
+          "passive": "no_drive",
+          "token": "angular",
+          "unit": "rad"
+        }
+      ],
+      "frames": [
+        {
+          "name": "base",
+          "owner": {
+            "body": "/World/Arm/base"
+          },
+          "path": "/World/Arm/base",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "link1",
+          "owner": {
+            "body": "/World/Arm/link1"
+          },
+          "path": "/World/Arm/link1",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "link2",
+          "owner": {
+            "body": "/World/Arm/link2"
+          },
+          "path": "/World/Arm/link2",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      "generation": 1,
+      "isaac": false,
+      "joints": [
+        {
+          "axis": null,
+          "body0": {
+            "authored": null,
+            "resolved": {
+              "kind": "world"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/World/Arm/base",
+            "resolved": {
+              "body": "/World/Arm/base",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "world_anchor",
+          "collision_enabled": false,
+          "dofs": [],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "fixed",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "name": "anchor",
+          "path": "/World/Arm/anchor"
+        },
+        {
+          "axis": "Y",
+          "body0": {
+            "authored": "/World/Arm/link1",
+            "resolved": {
+              "body": "/World/Arm/link1",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/World/Arm/link2",
+            "resolved": {
+              "body": "/World/Arm/link2",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "elbow"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "revolute",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.5
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              -0.5
+            ]
+          },
+          "name": "elbow",
+          "path": "/World/Arm/elbow"
+        },
+        {
+          "axis": "Y",
+          "body0": {
+            "authored": "/World/Arm/base",
+            "resolved": {
+              "body": "/World/Arm/base",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/World/Arm/link1",
+            "resolved": {
+              "body": "/World/Arm/link1",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "shoulder"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "revolute",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.5
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              -0.5
+            ]
+          },
+          "name": "shoulder",
+          "path": "/World/Arm/shoulder"
+        }
+      ],
+      "kind": null,
+      "load_instance": "load",
+      "machine_id": "world_arm",
+      "manifest_version": "gearbox.robot_manifest.v1",
+      "owners": [],
+      "profile": "standard",
+      "reporting": null,
+      "root": "/World/Arm",
+      "schema_version": null,
+      "tree": [
+        {
+          "child": "link1",
+          "joint": "/World/Arm/shoulder",
+          "parent": "base",
+          "reversed": false
+        },
+        {
+          "child": "link2",
+          "joint": "/World/Arm/elbow",
+          "parent": "link1",
+          "reversed": false
+        }
+      ],
+      "units": {
+        "kilograms_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "meters_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "up_axis": {
+          "source": "authored",
+          "value": "Z"
+        }
+      }
+    },
+    {
+      "accepted": true,
+      "articulations": [
+        {
+          "bodies": [
+            "/World/Branch/finger",
+            "/World/Branch/left",
+            "/World/Branch/right",
+            "/World/Branch/torso"
+          ],
+          "fixed_base": false,
+          "joints": [
+            "/World/Branch/grip",
+            "/World/Branch/left_shoulder",
+            "/World/Branch/right_shoulder"
+          ],
+          "markers": [
+            "/World/Branch"
+          ]
+        }
+      ],
+      "base_frame": "torso",
+      "bodies": [
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.00999999977648,
+              0.00999999977648,
+              0.00999999977648
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              5.0,
+              1.5,
+              1.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 0.20000000298
+          },
+          "mode": "dynamic",
+          "name": "finger",
+          "path": "/World/Branch/finger",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.0500000007451,
+              0.0500000007451,
+              0.0500000007451
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              5.0,
+              1.0,
+              1.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 1.0
+          },
+          "mode": "dynamic",
+          "name": "left",
+          "path": "/World/Branch/left",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.0500000007451,
+              0.0500000007451,
+              0.0500000007451
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              5.0,
+              -1.0,
+              1.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 1.0
+          },
+          "mode": "dynamic",
+          "name": "right",
+          "path": "/World/Branch/right",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              5.0,
+              0.0,
+              1.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 10.0
+          },
+          "mode": "dynamic",
+          "name": "torso",
+          "path": "/World/Branch/torso",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        }
+      ],
+      "capabilities": [
+        {
+          "evidence": [
+            "s16_joint_type_capabilities",
+            "c01_revolute_and_prismatic_commands_move_their_joints"
+          ],
+          "feature": "joint.prismatic",
+          "reason": "slider along the authored axis with limits and drives (1 use)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/World/Branch/grip"
+        },
+        {
+          "evidence": [
+            "s01_floating_fixed_and_branched",
+            "c01_revolute_and_prismatic_commands_move_their_joints"
+          ],
+          "feature": "joint.revolute",
+          "reason": "hinge about the authored axis with limits and drives (2 uses)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/World/Branch/left_shoulder"
+        }
+      ],
+      "command_validity_ms": 500,
+      "control_body": "/World/Branch/torso",
+      "control_frame": null,
+      "controllers": [],
+      "convention": "right_handed_z_up_si",
+      "diagnostics": [],
+      "dofs": [
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/World/Branch/grip",
+          "limit": {
+            "lower": 0.0,
+            "source": "authored",
+            "upper": 0.10000000149
+          },
+          "name": "grip",
+          "passive": "no_drive",
+          "token": "linear",
+          "unit": "m"
+        },
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/World/Branch/left_shoulder",
+          "limit": {
+            "lower": null,
+            "source": "schema_default",
+            "upper": null
+          },
+          "name": "left_shoulder",
+          "passive": "no_drive",
+          "token": "angular",
+          "unit": "rad"
+        },
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/World/Branch/right_shoulder",
+          "limit": {
+            "lower": null,
+            "source": "schema_default",
+            "upper": null
+          },
+          "name": "right_shoulder",
+          "passive": "no_drive",
+          "token": "angular",
+          "unit": "rad"
+        }
+      ],
+      "frames": [
+        {
+          "name": "finger",
+          "owner": {
+            "body": "/World/Branch/finger"
+          },
+          "path": "/World/Branch/finger",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "left",
+          "owner": {
+            "body": "/World/Branch/left"
+          },
+          "path": "/World/Branch/left",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "right",
+          "owner": {
+            "body": "/World/Branch/right"
+          },
+          "path": "/World/Branch/right",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "torso",
+          "owner": {
+            "body": "/World/Branch/torso"
+          },
+          "path": "/World/Branch/torso",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      "generation": 1,
+      "isaac": false,
+      "joints": [
+        {
+          "axis": "Y",
+          "body0": {
+            "authored": "/World/Branch/left",
+            "resolved": {
+              "body": "/World/Branch/left",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/World/Branch/finger",
+            "resolved": {
+              "body": "/World/Branch/finger",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "grip"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "prismatic",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.25,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              -0.25,
+              0.0
+            ]
+          },
+          "name": "grip",
+          "path": "/World/Branch/grip"
+        },
+        {
+          "axis": "X",
+          "body0": {
+            "authored": "/World/Branch/torso",
+            "resolved": {
+              "body": "/World/Branch/torso",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/World/Branch/left",
+            "resolved": {
+              "body": "/World/Branch/left",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "left_shoulder"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "revolute",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.5,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              -0.5,
+              0.0
+            ]
+          },
+          "name": "left_shoulder",
+          "path": "/World/Branch/left_shoulder"
+        },
+        {
+          "axis": "X",
+          "body0": {
+            "authored": "/World/Branch/torso",
+            "resolved": {
+              "body": "/World/Branch/torso",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/World/Branch/right",
+            "resolved": {
+              "body": "/World/Branch/right",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "right_shoulder"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "revolute",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              -0.5,
+              0.0
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.5,
+              0.0
+            ]
+          },
+          "name": "right_shoulder",
+          "path": "/World/Branch/right_shoulder"
+        }
+      ],
+      "kind": null,
+      "load_instance": "load",
+      "machine_id": "world_branch",
+      "manifest_version": "gearbox.robot_manifest.v1",
+      "owners": [],
+      "profile": "standard",
+      "reporting": null,
+      "root": "/World/Branch",
+      "schema_version": null,
+      "tree": [
+        {
+          "child": "left",
+          "joint": "/World/Branch/left_shoulder",
+          "parent": "torso",
+          "reversed": false
+        },
+        {
+          "child": "right",
+          "joint": "/World/Branch/right_shoulder",
+          "parent": "torso",
+          "reversed": false
+        },
+        {
+          "child": "finger",
+          "joint": "/World/Branch/grip",
+          "parent": "left",
+          "reversed": false
+        }
+      ],
+      "units": {
+        "kilograms_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "meters_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "up_axis": {
+          "source": "authored",
+          "value": "Z"
+        }
+      }
+    },
+    {
+      "accepted": true,
+      "articulations": [
+        {
+          "bodies": [
+            "/World/Floater"
+          ],
+          "fixed_base": false,
+          "joints": [],
+          "markers": [
+            "/World/Floater"
+          ]
+        }
+      ],
+      "base_frame": "Floater",
+      "bodies": [
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.10000000149,
+              0.10000000149,
+              0.10000000149
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              3.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 2.0
+          },
+          "mode": "dynamic",
+          "name": "Floater",
+          "path": "/World/Floater",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        }
+      ],
+      "capabilities": [],
+      "command_validity_ms": 500,
+      "control_body": "/World/Floater",
+      "control_frame": null,
+      "controllers": [],
+      "convention": "right_handed_z_up_si",
+      "diagnostics": [],
+      "dofs": [],
+      "frames": [
+        {
+          "name": "Floater",
+          "owner": {
+            "body": "/World/Floater"
+          },
+          "path": "/World/Floater",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ],
+      "generation": 1,
+      "isaac": false,
+      "joints": [],
+      "kind": null,
+      "load_instance": "load",
+      "machine_id": "world_floater",
+      "manifest_version": "gearbox.robot_manifest.v1",
+      "owners": [],
+      "profile": "standard",
+      "reporting": null,
+      "root": "/World/Floater",
+      "schema_version": null,
+      "tree": [],
+      "units": {
+        "kilograms_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "meters_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "up_axis": {
+          "source": "authored",
+          "value": "Z"
+        }
+      }
+    }
+  ],
+  "manifest_version": "gearbox.robot_manifest.v1",
+  "scan_root": "/"
+}

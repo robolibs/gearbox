@@ -1,0 +1,682 @@
+{
+  "diagnostics": [],
+  "machines": [
+    {
+      "accepted": true,
+      "articulations": [
+        {
+          "bodies": [
+            "/weeder/arm",
+            "/weeder/chassis",
+            "/weeder/probe"
+          ],
+          "fixed_base": false,
+          "joints": [
+            "/weeder/arm_pitch",
+            "/weeder/probe_slide"
+          ],
+          "markers": []
+        }
+      ],
+      "base_frame": "chassis",
+      "bodies": [
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.5,
+              0.5,
+              0.10000000149
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              1.0,
+              0.0,
+              0.6
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 5.0
+          },
+          "mode": "dynamic",
+          "name": "arm",
+          "path": "/weeder/arm",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              10.0,
+              10.0,
+              10.0
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              1.0
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 100.0
+          },
+          "mode": "dynamic",
+          "name": "chassis",
+          "path": "/weeder/chassis",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        },
+        {
+          "angular_damping": {
+            "source": "schema_default",
+            "value": 0.05
+          },
+          "center_of_mass": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "colliders": [],
+          "density": null,
+          "diagonal_inertia": {
+            "source": "authored",
+            "value": [
+              0.00999999977648,
+              0.00999999977648,
+              0.00999999977648
+            ]
+          },
+          "initial_angular_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_linear_velocity": {
+            "source": "schema_default",
+            "value": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "initial_pose": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              1.3,
+              0.0,
+              0.2
+            ]
+          },
+          "linear_damping": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "mass": {
+            "source": "authored",
+            "value": 1.0
+          },
+          "mode": "dynamic",
+          "name": "probe",
+          "path": "/weeder/probe",
+          "principal_axes": {
+            "source": "schema_default",
+            "value": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "scale": 1.0
+        }
+      ],
+      "capabilities": [
+        {
+          "evidence": [
+            "s16_joint_type_capabilities",
+            "c01_revolute_and_prismatic_commands_move_their_joints"
+          ],
+          "feature": "joint.prismatic",
+          "reason": "slider along the authored axis with limits and drives (1 use)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/weeder/probe_slide"
+        },
+        {
+          "evidence": [
+            "s01_floating_fixed_and_branched",
+            "c01_revolute_and_prismatic_commands_move_their_joints"
+          ],
+          "feature": "joint.revolute",
+          "reason": "hinge about the authored axis with limits and drives (1 use)",
+          "source_property": null,
+          "status": "supported_exact",
+          "subject": "/weeder/arm_pitch"
+        }
+      ],
+      "command_validity_ms": 500,
+      "control_body": "/weeder/chassis",
+      "control_frame": {
+        "frame": "chassis",
+        "source": "profile_default"
+      },
+      "controllers": [],
+      "convention": "right_handed_z_up_si",
+      "diagnostics": [],
+      "dofs": [
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 0.0
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/weeder/arm_pitch",
+          "limit": {
+            "lower": null,
+            "source": "schema_default",
+            "upper": null
+          },
+          "name": "arm_pitch",
+          "passive": "no_drive",
+          "token": "angular",
+          "unit": "rad"
+        },
+        {
+          "coordinate": "body1 joint frame relative to body0 joint frame",
+          "default_mode": {
+            "source": "profile_default",
+            "value": "disabled"
+          },
+          "drive": null,
+          "initial_position": {
+            "source": "derived",
+            "value": 5.96046451085e-9
+          },
+          "initial_velocity": {
+            "source": "schema_default",
+            "value": 0.0
+          },
+          "interfaces": {
+            "source": "profile_default",
+            "value": []
+          },
+          "isaac_actuator": null,
+          "joint": "/weeder/probe_slide",
+          "limit": {
+            "lower": -0.300000011921,
+            "source": "authored",
+            "upper": 0.0
+          },
+          "name": "probe_slide",
+          "passive": "no_drive",
+          "token": "linear",
+          "unit": "m"
+        }
+      ],
+      "frames": [
+        {
+          "name": "arm",
+          "owner": {
+            "body": "/weeder/arm"
+          },
+          "path": "/weeder/arm",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "chassis",
+          "owner": {
+            "body": "/weeder/chassis"
+          },
+          "path": "/weeder/chassis",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "probe",
+          "owner": {
+            "body": "/weeder/probe"
+          },
+          "path": "/weeder/probe",
+          "publish": true,
+          "role": "body",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "name": "camera_link",
+          "owner": {
+            "body": "/weeder/chassis"
+          },
+          "path": "/weeder/chassis/camera_link",
+          "publish": true,
+          "role": "sensor",
+          "transform": {
+            "rotation_wxyz": [
+              0.984807753012,
+              0.0,
+              0.173648177667,
+              0.0
+            ],
+            "translation": [
+              0.8,
+              0.0,
+              0.5
+            ]
+          }
+        },
+        {
+          "name": "rear_hitch",
+          "owner": {
+            "body": "/weeder/chassis"
+          },
+          "path": "/weeder/chassis/rear_hitch",
+          "publish": true,
+          "role": "coupling",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              -1.0,
+              0.0,
+              -0.5
+            ]
+          }
+        },
+        {
+          "name": "tool_tip",
+          "owner": {
+            "body": "/weeder/arm"
+          },
+          "path": "/weeder/arm/tool_tip",
+          "publish": true,
+          "role": "tool",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.3,
+              0.0,
+              -0.2
+            ]
+          }
+        },
+        {
+          "name": "ball_tip",
+          "owner": {
+            "body": "/weeder/probe"
+          },
+          "path": "/weeder/probe/ball_tip",
+          "publish": true,
+          "role": "tool",
+          "transform": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              -0.15
+            ]
+          }
+        }
+      ],
+      "generation": 1,
+      "isaac": false,
+      "joints": [
+        {
+          "axis": "Y",
+          "body0": {
+            "authored": "/weeder/chassis",
+            "resolved": {
+              "body": "/weeder/chassis",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/weeder/arm",
+            "resolved": {
+              "body": "/weeder/arm",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "arm_pitch"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "revolute",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              1.0,
+              0.0,
+              -0.40000000596
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "name": "arm_pitch",
+          "path": "/weeder/arm_pitch"
+        },
+        {
+          "axis": "Z",
+          "body0": {
+            "authored": "/weeder/arm",
+            "resolved": {
+              "body": "/weeder/arm",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "body1": {
+            "authored": "/weeder/probe",
+            "resolved": {
+              "body": "/weeder/probe",
+              "kind": "body"
+            },
+            "via": null
+          },
+          "break_force": null,
+          "break_torque": null,
+          "class": "tree",
+          "collision_enabled": false,
+          "dofs": [
+            "probe_slide"
+          ],
+          "enabled": true,
+          "exclude_from_articulation": false,
+          "kind": "prismatic",
+          "local0": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.300000011921,
+              0.0,
+              -0.40000000596
+            ]
+          },
+          "local1": {
+            "rotation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "translation": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "name": "probe_slide",
+          "path": "/weeder/probe_slide"
+        }
+      ],
+      "kind": null,
+      "load_instance": "load",
+      "machine_id": "weeder",
+      "manifest_version": "gearbox.robot_manifest.v1",
+      "owners": [],
+      "profile": "gearbox_v2",
+      "reporting": null,
+      "root": "/weeder",
+      "schema_version": 2,
+      "tree": [
+        {
+          "child": "arm",
+          "joint": "/weeder/arm_pitch",
+          "parent": "chassis",
+          "reversed": false
+        },
+        {
+          "child": "probe",
+          "joint": "/weeder/probe_slide",
+          "parent": "arm",
+          "reversed": false
+        },
+        {
+          "child": "camera_link",
+          "joint": null,
+          "parent": "chassis",
+          "reversed": false
+        },
+        {
+          "child": "rear_hitch",
+          "joint": null,
+          "parent": "chassis",
+          "reversed": false
+        },
+        {
+          "child": "tool_tip",
+          "joint": null,
+          "parent": "arm",
+          "reversed": false
+        },
+        {
+          "child": "ball_tip",
+          "joint": null,
+          "parent": "probe",
+          "reversed": false
+        }
+      ],
+      "units": {
+        "kilograms_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "meters_per_unit": {
+          "source": "authored",
+          "value": 1.0
+        },
+        "up_axis": {
+          "source": "authored",
+          "value": "Z"
+        }
+      }
+    }
+  ],
+  "manifest_version": "gearbox.robot_manifest.v1",
+  "scan_root": "/weeder"
+}

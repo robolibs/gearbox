@@ -1,0 +1,38 @@
+#usda 1.0
+(
+    defaultPrim = "rig"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "rig" (prepend apiSchemas = ["GearboxMachineAPI"])
+{
+    int gearbox:machine:schemaVersion = 2
+    rel gearbox:machine:body = </rig/base>
+
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 5
+        float3 physics:diagonalInertia = (1, 1, 1)
+    }
+    def Xform "arm" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 1
+        float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        double3 xformOp:translate = (1, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def PhysicsRevoluteJoint "shoulder" (prepend apiSchemas = ["PhysicsDriveAPI:angular"])
+    {
+        rel physics:body0 = </rig/base>
+        rel physics:body1 = </rig/arm>
+        uniform token physics:axis = "Z"
+        point3f physics:localPos0 = (0.5, 0, 0)
+        point3f physics:localPos1 = (-0.5, 0, 0)
+        float drive:angular:physics:stiffness = 17.453292519943295
+        float drive:angular:physics:damping = 1.7453292519943295
+        float drive:angular:physics:maxForce = 30
+        uniform token[] gearbox:joint:angular:commandInterfaces = ["position", "velocity", "effort"]
+    }
+}

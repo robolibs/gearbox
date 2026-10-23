@@ -1,0 +1,50 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "World"
+{
+    def Xform "legacy" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"])
+    {
+        rel gearbox:machine:body = </World/legacy/chassis>
+        token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"
+        token gearbox:controller:drive:commandInterface = "cmd_vel"
+
+        def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+        {
+            float physics:mass = 20
+            float3 physics:diagonalInertia = (2, 1, 2)
+            double3 xformOp:translate = (0, 0, 0.5)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            def Cube "hull" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+            {
+                double size = 0.5
+            }
+        }
+    }
+
+    def Xform "modern" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"])
+    {
+        int gearbox:machine:schemaVersion = 2
+        rel gearbox:machine:body = </World/modern/chassis>
+        rel gearbox:machine:controlFrame = </World/modern/chassis>
+        token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"
+        token gearbox:controller:drive:commandInterface = "cmd_vel"
+
+        def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+        {
+            float physics:mass = 20
+            float3 physics:diagonalInertia = (1, 2, 2)
+            double3 xformOp:translate = (5, 0, 0.5)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            def Cube "hull" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+            {
+                double size = 0.5
+            }
+        }
+    }
+}

@@ -1,0 +1,66 @@
+#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "World"
+{
+    def Xform "Drives" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+        }
+        def Xform "a" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "b" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (-1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "c" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "d" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, -1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsRevoluteJoint "defaults_only" (prepend apiSchemas = ["PhysicsDriveAPI:angular"])
+        {
+            rel physics:body0 = </World/Drives/base>
+            rel physics:body1 = </World/Drives/a>
+            point3f physics:localPos0 = (1, 0, 0)
+        }
+        def PhysicsRevoluteJoint "no_drive"
+        {
+            rel physics:body0 = </World/Drives/base>
+            rel physics:body1 = </World/Drives/b>
+            point3f physics:localPos0 = (-1, 0, 0)
+        }
+        def PhysicsRevoluteJoint "zero_gain" (prepend apiSchemas = ["PhysicsDriveAPI:angular"])
+        {
+            rel physics:body0 = </World/Drives/base>
+            rel physics:body1 = </World/Drives/c>
+            point3f physics:localPos0 = (0, 1, 0)
+            float drive:angular:physics:stiffness = 0
+            float drive:angular:physics:damping = 0
+            float drive:angular:physics:targetPosition = 0
+        }
+        def PhysicsRevoluteJoint "spring" (prepend apiSchemas = ["PhysicsDriveAPI:angular"])
+        {
+            rel physics:body0 = </World/Drives/base>
+            rel physics:body1 = </World/Drives/d>
+            point3f physics:localPos0 = (0, -1, 0)
+            float drive:angular:physics:stiffness = 2
+            float drive:angular:physics:damping = 0.1
+            token drive:angular:physics:type = "acceleration"
+        }
+    }
+}
