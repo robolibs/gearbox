@@ -10,11 +10,11 @@ The repository launch recipe forwards the selection:
 
 ```sh
 oslo make run
-oslo make run --args='--planet mars --load /home/bresilla/data/code/OUSD/machines/usd/perseverance_nasa.usdz'
-oslo make run --args='--planet moon --load /home/bresilla/data/code/OUSD/machines/usd/perseverance_nasa.usdz'
+oslo make run --args='--planet mars --load machines/usd/perseverance_nasa.usdz'
+oslo make run --args='--planet moon --load machines/usd/perseverance_nasa.usdz'
 ```
 
-Use `--args='...'` with the equals sign: Oslo treats a separate dash-prefixed value as another flag. Paths are resolved from the Gearbox working directory; the sibling machines asset is `../../OUSD/machines/usd/perseverance_nasa.usdz`, not `../OUSD/...`. Substitute your own asset path on another checkout.
+Use `--args='...'` with the equals sign: Oslo treats a separate dash-prefixed value as another flag. Paths are resolved from the Gearbox working directory; the machine packages are in the `machines` submodule.
 
 Different instances can select different planets. Selection is fixed for each process; changing the entire planet at runtime is not part of the launch contract. Perseverance on the Moon is a simulation scenario, not a reconstruction of a lunar mission.
 
