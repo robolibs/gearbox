@@ -13,10 +13,14 @@ agents, state), `controller/steering.rs`, `controller/parking.rs`,
 master/slave exchange), `devices.rs`, `sensors.rs`, `load.rs`, `attach.rs`,
 `crates/gearbox-api` (wire types and agents).
 
-Drive, service and work controllers run every frame in the Bevy `Update`
-schedule before the physics step, only while physics is active. Rates,
-forces and speeds are SI; angles are radians unless an attribute name says
-`Deg`.
+The drive controllers (Ackermann, diff drive, tracked) and the service
+controllers run in the `ControlTick` schedule, once per physics step and
+before its actuator commit, on the ticks their `updateRateHz` makes due;
+work controllers and the copter run every frame in `Update`. Nothing runs
+while physics is paused. Every actuator command goes through the arbiter as a
+command on an exact DOF by the DOF's owner ([ROBOT_CONTRACT.md](ROBOT_CONTRACT.md)
+§8–§9; §8.3 lists what else acts on joints). Rates, forces and speeds are SI;
+angles are radians unless an attribute name says `Deg`.
 
 ## 1. Loading and discovery
 
@@ -86,7 +90,8 @@ Attributes every type reads:
 | `body` | rel | `gearbox:machine:body` | Chassis for the drive controllers. |
 | `target` | rel | none | Joint(s) of a service controller (§5.1); function or bin link of a work controller (§6). |
 | `requests` | token[] | [] | Master functions this controller wants when its machine is a slave (§8). |
-| `namespacePolicy`, `updateRateHz`, `frameConvention`, `usesRoles`, `driveWheels` | | | Parsed, unused (§10). |
+| `updateRateHz` | float | physics rate | Ticks the controller runs on, by a simulation-time phase accumulator; its `dt` is the time since its last run. Non-positive is an error, above the physics rate is clamped (an error under strict profiles): `invalid_controller_rate` (ROBOT_CONTRACT §9). |
+| `namespacePolicy`, `frameConvention`, `usesRoles`, `driveWheels` | | | Parsed, unused (§10). |
 
 ## 3. Controller types
 
@@ -396,9 +401,9 @@ Each drives joints with a motor and is commanded with `/cmd` (§5.4).
 | `builtin:trailer_steer` | the controller's `steerJoints`, else `role:steeringJoints` |
 
 A controller without a joint warns once and does nothing. A joint prim must
-join two bodies. When a constraint joint and a tree joint join the same two
-bodies, the constraint joint is driven. Service controllers run every frame
-for machines that have an agent.
+join two bodies. Targets are exact joints: two joints between the same two
+bodies are two targets, and only the joint named is driven. Service
+controllers run in `ControlTick` for accepted machines that have an agent.
 
 Position and hitch controllers may target multiple joints. The first target
 is the command leader: its normalized position drives all targets, each using
@@ -458,12 +463,13 @@ Motor devices on those joints are commanded as in §5.2.
 
 ### 5.6 Conflicts
 
-- `builtin:brake` and a drive controller on the same wheel joints both write
-  the joint motor each frame with no defined order; the result is undefined.
-  With its default level 1 when unattached, `builtin:brake` on a machine with
-  its own drive holds that machine's wheels. Use it on trailers.
+- Every DOF has one owner (ROBOT_CONTRACT §8.1). `builtin:brake` does not
+  own a wheel a drive controller owns: its writes there are refused, and the
+  drive's own parking hold brakes the machine. Use it on trailers.
+- Two service controllers on one joint are `duplicate_owner` and reject the
+  machine; so is any other service controller on a drive controller's joint.
 - The ownership rule (M§12.4) keeps motor devices off drive and suspension
-  joints; nothing keeps service controllers off them.
+  joints.
 
 ## 6. Work controllers
 
@@ -747,28 +753,25 @@ Every registered device streams `gearbox.measurement.v1` on
 | Attribute | Where |
 |---|---|
 | `gearbox:machine:interfaceVersion`, `:upAxis`, `:visuals`, `:colliders`, `:sensors`, `:idPolicy` (except for detection) | machine prim |
-| `gearbox:controller:<n>:namespacePolicy`, `:updateRateHz`, `:frameConvention`, `:usesRoles`, `:driveWheels` | controllers |
+| `gearbox:controller:<n>:namespacePolicy`, `:frameConvention`, `:usesRoles`, `:driveWheels` | controllers |
 | `gearbox:coupling:isoCategory`, `:capacityKg`, `:services`, `:lift`, `:excludes` | couplings |
 | `gearbox:propeller:controlPID`, `:minPosition`, `:maxPosition` | propellers |
 | `controller_command.element` | `/cmd` |
-| `physics:collisionEnabled`, `drive:<dof>:physics:type`, `physics:breakForce/breakTorque`, `physics:principalAxes`, `physics:density`, `physics:simulationOwner`, `PhysicsCollisionGroup` | UsdPhysics (M§4–M§6) |
+| `physics:simulationOwner`, `PhysicsCollisionGroup` | UsdPhysics (M§4–M§6) |
 
 ## 11. Known gaps and surprising behaviour
 
-- **Rejected machines still move.** They stay in the inventory, and the
-  Ackermann, diff and tracked controllers do not check for an agent: a
-  rejected Ackermann machine is parked by zero commands, a rejected diff
-  machine in `chassis` mode has its horizontal velocity zeroed every frame,
-  its devices register and hold their joints, and its `external:process`
-  children start.
+- Rejected machines stay in the inventory as fixed previews; their drive
+  controllers, services, devices and `external:process` children do not run
+  (M§16, ROBOT_CONTRACT §3).
 - A granted `speed`/`steering` request is never cleared: after the slave
   detaches, the master keeps driving at the last requested twist whenever its
   own twist is zero.
 - The master state sent to slaves reads hitch, PTO and valve settings from
   `/cmd controller=…` props only. Values set on the master's links with
   `set-value` move the master's own joints but do not reach its slaves.
-- `builtin:brake` and drive controllers race on shared wheel joints (§5.6);
-  `builtin:brake` has no effect on a joint with a motor device.
+- `builtin:brake` has no effect on a wheel a drive controller owns (§5.6)
+  or on a joint with a motor device.
 - Service controllers commanding a motor device use the joint drive's
   `maxForce`, else the device's own (default 10 N·m); their own force caps
   do not apply.
@@ -776,12 +779,11 @@ Every registered device streams `gearbox.measurement.v1` on
 - `GEARBOX_MACHINE_ID` of an `external:process` child is the machine id, not
   the agent name when a `namespace` is authored. An exiting child is
   respawned every frame.
-- Two machines with one id: only one gets an agent, silently.
+- Two machines with one id on one stage are `duplicate_machine_id`: a warning under legacy (only one gets an agent), an error that rejects each machine of the two under a strict profile (ROBOT_CONTRACT §3).
 - The odometry speed is unsigned except for tracks.
-- A closed kinematic loop of joints without `excludeFromArticulation` is a
-  link-tree error, but physics conversion does not wait for validation: Molla
-  refuses the joint (`runtime joint cycle`) and the adapter panics
-  (`invalid Molla joint topology`) instead of the machine being rejected.
+- A closed kinematic loop of joints without `excludeFromArticulation` is an
+  `unclassified_cycle` error: the machine is rejected and its joints are not
+  built (ROBOT_CONTRACT §5).
 - One bad sensor link (no rigid-body ancestor, a position sensor without a
   joint) stops every sensor of the machine; one device that never registers
   stops every device of the machine (M§12.1).

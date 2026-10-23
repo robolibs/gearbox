@@ -4,6 +4,12 @@ What a USD file must author for Gearbox to load it as a machine, and what the
 runtime does with each authored value. Controllers, their behaviour and the
 bus API are in [CONTROLLER_SPEC.md](CONTROLLER_SPEC.md). Physics is Molla.
 
+The shared machine model is specified in [ROBOT_CONTRACT.md](ROBOT_CONTRACT.md):
+profiles and `gearbox:machine:schemaVersion`, scope and activation, typed
+joint endpoints, unit conversion, frames and the control frame, DOF identity
+and the joint command contract. It takes precedence over this file; the
+sections below that it changes point to it.
+
 Terms:
 
 - **rejected**: the machine gets no agent (no topics, no commands from the
@@ -14,8 +20,9 @@ Terms:
   (CONTROLLER_SPEC §1).
 - **scene units**: the stage's own length unit, converted with
   `metersPerUnit` (§1).
-- Chassis frame: the machine body's local axes. Forward is **−Y**, left is
-  **+X**, up is **+Z** (§18).
+- Chassis frame: the machine body's local axes. On a legacy (v1) machine
+  forward is **−Y**, left is **+X**, up is **+Z** (§18); a v2 machine declares
+  its control frame, +X forward (ROBOT_CONTRACT §7).
 
 Source files: `controller.rs` (machine and controller discovery), `links.rs`
 (link tree, sensors, couplings, elements), `devices.rs` (actuator devices),
@@ -29,9 +36,9 @@ Read from the layer metadata (`physics/attach.rs`).
 
 | Key | Default | Effect |
 |---|---|---|
-| `metersPerUnit` | **0.01** when unauthored; env `BEVY_OPENUSD_METERS_PER_UNIT` overrides | Scales positions, joint frames, prismatic limits, linear drive gains and targets, velocities, centre of mass and inertia. An asset authored in metres without this key loads at 1/100 scale. Author `1`. |
-| `kilogramsPerUnit` | 1 | Scales mass, density and inertia. |
-| `upAxis` | any value other than `"Z"` is Y-up | `"Z"` rotates the stage −90° about X into the Y-up world. The drive controllers read the chassis frame of §18, which only lies flat in a Z-up stage. Author `"Z"`. |
+| `metersPerUnit` | **0.01** when unauthored; env `BEVY_OPENUSD_METERS_PER_UNIT` overrides | Scales lengths and every quantity with a length dimension: positions, joint frames, prismatic limits and targets, velocities, centre of mass, inertia, efforts and angular force-drive gains (ROBOT_CONTRACT §4). An asset authored in metres without this key loads at 1/100 scale. Author `1`. |
+| `kilogramsPerUnit` | 1 | Scales mass, density, inertia, efforts, `maxForce` and force-drive gains (ROBOT_CONTRACT §4). |
+| `upAxis` | Y when unauthored; a token other than `"Y"` or `"Z"` is `invalid_units` and rejects every machine on the stage, as do a `metersPerUnit` or `kilogramsPerUnit` that is not finite and positive | `"Z"` rotates the stage −90° about X into the Y-up world. The drive controllers read the chassis frame of §18, which only lies flat in a Z-up stage. Author `"Z"`. |
 | `defaultPrim` | none | When set, only its subtree is scanned for machines and static attachments; otherwise the whole stage is scanned. The scan skips inactive prims and their subtrees. |
 
 A `PhysicsScene` prim sets world gravity: the first one loaded wins for the
@@ -49,15 +56,15 @@ authored on it:
 - `gearbox:machine:kind`
 - `gearbox:machine:idPolicy`
 - a target on `rel gearbox:machine:body`
+- `int gearbox:machine:schemaVersion`
 
 Author the API schema. Several machines may sit side by side in one file (a
 yard with a tractor and a trailer). Machine prims must not nest: every scan
 (link tree, devices) covers all prims under a machine prim, including those
 of a machine inside it.
 
-A prim with `PhysicsArticulationRootAPI` that is not itself a Gearbox machine
-prim and has UsdPhysics joints (with both bodies) below it can become an
-Isaac Sim compatibility machine (§2.4).
+A prim with `PhysicsArticulationRootAPI` or `IsaacRobotAPI` outside any
+Gearbox machine prim is a `standard` machine (§2.4), even a lone body.
 
 ### 2.2 Attributes
 
@@ -104,26 +111,15 @@ A machine without it gets no tyres: its wheels are plain rigid colliders.
 
 ### 2.4 Isaac Sim compatibility
 
-For an articulation root (including one inside a Gearbox machine, such as a
-chassis carrying `PhysicsArticulationRootAPI`) with UsdPhysics joints below
-it, some of them identified as wheel or steering joints (below), the runtime
-synthesises a machine with `kind = "isaac_articulation"`, `interfaceVersion =
-"isaac_compat:v0"`, an empty link tree (never rejected) and one enabled
-`drive` controller of type `builtin:ackermann_cmd_vel` (`commandInterface =
-cmd_vel`, `stateInterfaces = [pose, velocity, joint_state]`,
-`steeringGeometry = ackermann`, `maxSteerDeg = 45`).
-
-- Joint roles come from any property whose name contains `jointNames`,
-  `joint_names`, `dofNames` or `dof_names`, anywhere in the stage. When the
-  prim path, type, property names or string values contain `steer` or
-  `position`, those names are steering joints; `wheel`, `velocity` or `drive`
-  make them driven wheel joints.
-- Without such arrays: joints whose path contains `wheel` are driven; paths
-  containing `steer`, `knuckle` or `upright` are steering joints.
-- The body is the shallowest rigid body under the root, avoiding paths that
-  look like wheels or steering.
-
-This is best effort; mislabels are expected on unfamiliar exports.
+An articulation root outside any `GearboxMachineAPI` prim compiles under the
+`standard` profile (ROBOT_CONTRACT §2): bodies, joints, DOFs, frames and
+command interfaces, validated strictly, and **no drive controller**. Isaac
+reporting metadata (name overrides, DOF order arrays, sites) is read and
+checked (`isaac_array_length`, `isaac_unknown_target`, `isaac_outside_scope`).
+No role or controller is made up from joint names; a role a drive controller
+would need is reported as a `suggested_role` diagnostic for the author to
+declare. An articulation root inside a Gearbox machine (a chassis carrying
+`PhysicsArticulationRootAPI`) belongs to that machine.
 
 ## 3. Link tree
 
@@ -187,8 +183,8 @@ In this order:
    and no joint, even if a joint names it as `body1`.
 2. A joint: for every prim of a `Physics*Joint` type under the machine with
    both bodies authored, `physics:body1` is a child of `physics:body0`. The
-   first such joint in prim order wins, including one marked
-   `physics:excludeFromArticulation` and joint types physics skips (§6.1).
+   first such joint in prim order wins; a joint marked
+   `physics:excludeFromArticulation` is a loop closure and never a parent.
    Author `body0` on the parent side.
 3. The nearest ancestor prim that is a link, with a static offset composed
    from the `xformOp`s in between (`translate`, `orient`, `rotateXYZ`,
@@ -226,11 +222,14 @@ A body is a prim with `PhysicsRigidBodyAPI` applied.
 | `physics:rigidBodyEnabled = false` | Fixed body. |
 | `physics:kinematicEnabled = true` | Kinematic body. |
 | `physics:startsAsleep` | Honoured. |
-| `physics:velocity` | Initial velocity, scaled by `metersPerUnit`. |
-| `physics:angularVelocity` | Initial angular velocity, deg/s → rad/s (not rotated into the world basis). |
+| `physics:velocity` | Initial velocity in the parent's frame, scaled by `metersPerUnit` and turned into the world basis. |
+| `physics:angularVelocity` | Initial angular velocity, deg/s → rad/s, turned into the world basis by the parent's rotation like `physics:velocity`. |
 | `physics:simulationOwner` | Ignored. |
 
-Dynamic bodies get fixed damping: linear 0.1, angular 0.5.
+Dynamic bodies take `physxRigidBody:linearDamping` and `angularDamping` when
+authored. Unauthored, legacy machines and bodies outside any machine get
+linear 0.1 and angular 0.5; strict profiles get the PhysX fallbacks, 0 and
+0.05 (ROBOT_CONTRACT §4).
 
 `PhysicsMassAPI` on the body prim (on collider prims it is ignored):
 
@@ -243,11 +242,13 @@ Dynamic bodies get fixed damping: linear 0.1, angular 0.5.
 | `physics:density` | | Ignored, as is material density. |
 
 Every collider also adds its volume × **1 kg/m³** to its body, whatever is
-authored. This is negligible except for very large hulls.
+authored. This is negligible except for very large hulls. Under a strict
+profile (ROBOT_CONTRACT §2) a body with an authored `physics:mass` takes no
+collider mass.
 
 Nested rigid bodies (a body prim under another body prim) are supported.
 
-**Chassis inertia guard.** Once the machine has an agent, if the machine
+**Chassis inertia guard** (legacy machines only). Once the machine has an agent, if the machine
 body weighs at least 100 kg and any diagonal component of its inertia is
 below 25 % of a box estimate from its collider bounds
 (`m/12 · (b² + c²)`), that component is replaced by the estimate and a
@@ -304,22 +305,24 @@ whose name contains `tire`, `tyre` or `wheel` sits 0.03 m above the terrain
 | `PhysicsRevoluteJoint` | Hinge about `physics:axis`. Limits and drives (§6.3, §6.4). |
 | `PhysicsPrismaticJoint` | Slider along `physics:axis`. Limits and drives. |
 | `PhysicsFixedJoint` | Locks both frames together, translations and rotations. |
-| `PhysicsSphericalJoint` | Ball joint with both frames; cone limits unused. |
-| `PhysicsJoint` (D6) | Each axis of the joint frame (`transX`…`rotZ`) is free, limited by its `PhysicsLimitAPI:<axis>`, or locked when that limit's low exceeds its high. A `PhysicsDriveAPI:<axis>` drives a free or limited axis. |
-| `PhysicsDistanceJoint` | **Skipped** with a warning: no constraint is built. It still defines a link-tree parent. |
+| `PhysicsSphericalJoint` | Ball joint with both frames; cone limits are converted and act softly. |
+| `PhysicsJoint` (D6) | Each axis of the joint frame (`transX`…`rotZ`) is free, limited by its `PhysicsLimitAPI:<axis>`, or locked when that limit's low exceeds its high. A side with no limit is open. A `PhysicsDriveAPI:<axis>` drives a free or limited axis. |
+| `PhysicsDistanceJoint` | Keeps the bodies between `physics:minDistance` and `physics:maxDistance`. It takes no commands. |
+
+Support levels of each type are in ROBOT_CONTRACT §13.
 
 ### 6.2 Common attributes
 
 | Attribute | Effect |
 |---|---|
-| `physics:body0`, `physics:body1` | body0 is the parent. With only one body authored, that body is made Fixed (anchored to the world). A body that never resolves leaves the joint pending. |
+| `physics:body0`, `physics:body1` | body0 is the parent. An empty side is the world: the joint is built against a fixed anchor at its authored world frame and keeps its DOFs. A target that is not a body resolves to its rigid-body ancestor or a static world frame, with a diagnostic; a target that does not resolve leaves the joint unbuilt and never fixes the other body (ROBOT_CONTRACT §5). |
 | `physics:localPos0/1`, `physics:localRot0/1` | Joint frames in each body; positions scaled by `metersPerUnit`. |
-| `physics:axis` | `"X"` (default), `"Y"`, anything else is Z. |
+| `physics:axis` | `"X"` (default), `"Y"` or `"Z"`; any other token is an `invalid_numeric` error on a joint of a machine (ROBOT_CONTRACT §5). |
 | `physics:jointEnabled = false` | Joint skipped. |
-| `physics:excludeFromArticulation = true` | Loop-closure joint: a soft constraint (30 Hz, damping ratio 1) outside the reduced-coordinate tree. Motor and brake devices refuse it, tyres need a tree spin joint (§8), and the parking hold falls back to a velocity brake on it. A body that is `body1` of two joints without this flag is a link-tree error (§3.4); a closed loop of such joints also makes Molla refuse the joint and the simulator panics (CONTROLLER_SPEC §11). |
+| `physics:excludeFromArticulation = true` | Loop-closure joint: a soft constraint (30 Hz, damping ratio 1) outside the reduced-coordinate tree. Motor and brake devices refuse it, tyres need a tree spin joint (§8), and the parking hold falls back to a velocity brake on it. A body that is `body1` of two joints without this flag is a link-tree error (§3.4); a closed loop of such joints is an `unclassified_cycle`: the machine is rejected and its joints are not built (ROBOT_CONTRACT §5). |
 | `physics:collisionEnabled` | `true` lets the two bodies collide; default `false`. The filtering in §5 still applies. |
-| `physics:breakForce`, `physics:breakTorque` | Ignored by rigid joints (read only by FEM validation). |
-| `physics:coneAngle0Limit/1Limit`, `physics:minDistance/maxDistance` | Parsed; not used by rigid joints. |
+| `physics:breakForce`, `physics:breakTorque` | Converted to N and N·m; the joint breaks when the backend's effort estimate exceeds them. |
+| `physics:coneAngle0Limit/1Limit`, `physics:minDistance/maxDistance` | Spherical cone limits and distance bounds (§6.1). |
 | `PhysicsLimitAPI:<dof>` | Per axis on D6 joints (§6.1); `rot*` limits in degrees. |
 
 ### 6.3 Limits
@@ -330,9 +333,9 @@ positive; damping must be finite and nonnegative. Invalid values retain the
 backend default. Unauthored loop closures retain 30 Hz compliance.
 
 `physics:lowerLimit` and `physics:upperLimit` apply to revolute (degrees) and
-prismatic (scene units) joints, and **both must be authored**; one alone is
-ignored. An infinite side stands at ±10⁶ (m or rad), and a range infinite on
-both sides is no limit; the same holds for D6 axis limits.
+prismatic (scene units) joints. Each side is independent: an absent or
+infinite side is unbounded, and a range unbounded on both sides is no limit;
+the same holds for D6 axis limits.
 
 ### 6.4 Drives
 
@@ -341,19 +344,30 @@ the applied schema are not found.
 
 - The first applied drive whose dof fits the joint is used: `angular`,
   `rotX`, `rotY`, `rotZ` for revolute; `linear`, `transX`, `transY`,
-  `transZ` for prismatic.
+  `transZ` for prismatic. The D6 tokens on a revolute or prismatic joint are
+  `nonstandard_drive_token`, and a drive naming no free DOF of its joint is
+  `invalid_drive`: errors under strict profiles, warnings under legacy. An
+  unknown `drive:<dof>:physics:type` is an `invalid_drive` error.
 - `drive:<dof>:physics:targetPosition` authored: a position drive with
   `stiffness` and `damping`. Otherwise `targetVelocity` authored: a velocity
-  drive with `damping`. **Neither authored: no drive mode is set**, only
-  `maxForce`. Author `targetPosition = 0` for a spring at rest.
-- Units: rotational stiffness and damping are per degree in USD and × 180/π
-  here; linear ones are ÷ `metersPerUnit`. Targets: degrees → radians, or ×
-  `metersPerUnit`. `maxForce` is not scaled; unauthored means unlimited.
+  drive with `damping`. **Neither authored: on a legacy machine no drive
+  mode is set**, only `maxForce`; author `targetPosition = 0` for a spring at
+  rest. Under a strict profile the UsdPhysics fallback applies: target
+  position 0 (ROBOT_CONTRACT §5).
+- Units (ROBOT_CONTRACT §4): force-drive gains × M (linear) or × M·L²·180/π
+  (angular); acceleration-drive gains × 1 (linear) or × 180/π (angular).
+  Targets: degrees → radians, or × `metersPerUnit`. `maxForce` × M·L (linear)
+  or × M·L² (angular); unauthored means unlimited.
 - `drive:<dof>:physics:type` picks the model: `force` (the default) is a
   **Force**-model drive, `acceleration` an **Acceleration**-model drive whose
   gains act per unit of joint inertia.
-- A `gearbox:motor:*` device on the joint moves the drive's targets every
-  physics step (§12.3).
+- `uniform token[] gearbox:joint:<dof>:commandInterfaces` (`position`,
+  `velocity`, `effort`) lists what external owners may command;
+  `gearbox:joint:<dof>:defaultMode` is `disabled`, `position`, `velocity` or `effort`, reported only
+  (ROBOT_CONTRACT §6).
+- A `gearbox:motor:*` device on the joint is that DOF's device owner and
+  moves the drive's targets through the arbiter every physics step (§12.3,
+  ROBOT_CONTRACT §8).
 
 ## 7. Joint roles
 
@@ -643,9 +657,9 @@ Commands and readings: CONTROLLER_SPEC §9.8.
 
 ### 12.4 Ownership rule
 
-A `gearbox:motor:*` device writes its joint's motor every step, so it may
-not sit on a joint something else drives. Discovery rejects the machine
-when a motor device's joint is:
+Every DOF has one owner (ROBOT_CONTRACT §8). A `gearbox:motor:*` device is
+its joint's device owner, so it may not sit on a joint something else
+drives. Discovery rejects the machine when a motor device's joint is:
 
 - listed in `gearbox:machine:role:suspensionJoints`, or
 - owned by an **enabled** drive controller (`builtin:ackermann_cmd_vel`,
@@ -654,9 +668,12 @@ when a motor device's joint is:
   `driveWheelJoints`, `passiveWheelJoints`, `wheelJoints`, `steerJoints`,
   `steerLeftJoint`, `steerRightJoint` and the four corner wheel joints.
 
-Brake-only devices are allowed on any joint. Not covered by the rule: track
-sprocket and roller joints, `builtin:brake` and `builtin:trailer_steer`
-joints.
+Brake-only devices are allowed on any joint. The compiler applies the rule
+to every drive controller (ROBOT_CONTRACT §8.1): a motor device on a joint an
+enabled drive controller claims, including the sprockets and rollers of
+`builtin:tracked_cmd_vel`, is `duplicate_owner` and rejects the machine. On
+a service controller's joint the device realizes that service's commands
+(§12.5).
 
 ### 12.5 Devices and service controllers
 
@@ -850,7 +867,18 @@ The machine is rejected (no agent, `machine_rejected` event with
 - sensor errors: unknown kind, a `type` that does not apply, any out-of-range
   or unknown attribute value (§13);
 - device errors, including the ownership rule (§12.1, §12.4);
-- an invalid `gearbox:machine:tracks` definition (§11).
+- an invalid `gearbox:machine:tracks` definition (§11);
+- any error of the machine compiler (ROBOT_CONTRACT §3–§7): an unsupported
+  `schemaVersion`, an invalid joint endpoint, an unclassified joint cycle,
+  invalid numbers or units, two owners of one DOF, and the structural errors
+  of a strict profile.
+
+A machine the compiler rejects is a fixed preview: its bodies do not
+simulate, none of its joints is built, and no controller, service, device,
+external process or DOF binding is registered. A machine only the rules
+above reject (link tree, couplings, elements, sensors, devices, tracks) gets
+no agent, controller, service, device or process either, but its physics is
+built and simulates as passive bodies and joints.
 
 Warnings do not reject: a derived tree, a suspension joint of another type,
 a sensor link that implies no kind.
@@ -872,16 +900,22 @@ The runtime still reads meaning from names in these places:
 | Collider names containing `tire`, `tyre`, `wheel` | spawn alignment | Which colliders set the ground clearance. |
 | Mesh names (§8.3) | tyre radius, rubber rendering | Which meshes are rubber. |
 | Link name prefix | sensors | Sensor kind (§13.1). |
-| Isaac joint names (§2.4) | Isaac compatibility | Roles. |
 
 Spell out `left` and `right` in joint names and keep `_l`/`_r` out of prim
 paths of machines that use diff drive.
 
+None of these picks a controller, an owner or a command key: commands bind
+to exact DOFs (ROBOT_CONTRACT §8), and a `standard` machine gets no
+controller from names (§2.4). The side and axle hints still shape the
+geometry of the legacy drive controllers on every profile that has them.
+
 ## 18. Fixed conventions
 
-- Chassis frame: forward −Y, left +X, up +Z, in a Z-up stage. The drive
-  controllers, heading, roll, pitch and wheel geometry all assume it, whatever
-  `base_link` or its axes say.
+- Chassis frame of a legacy machine: forward −Y, left +X, up +Z, in a Z-up
+  stage. The drive controllers, heading, roll, pitch and wheel geometry read
+  it as the control frame +X forward, +Y left, +Z up turned −90° about Z. A v2
+  machine declares its control frame with `gearbox:machine:controlFrame`
+  (ROBOT_CONTRACT §7).
 - Wheel joints rotate about the wheel's axle. The drive sign of a registered
   tyre comes from its joint axis (§8.3); an unregistered wheel is driven
   with sign +1.
