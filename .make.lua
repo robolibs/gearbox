@@ -365,11 +365,25 @@ local function isaac_contract(dir)
     local out = dir .. "/isaac/" .. name
     local schedule = pwd .. "/tests/fixtures/robot_contract/schedules/" .. name .. ".json"
     assert(oslo.run{ "mkdir", "-p", out }.ok)
-    local probe = oslo.run{ "sh", "-c", ("PROBE_SCHEDULE=%q PROBE_OUT=%q PROBE_TIMEOUT=240 timeout --kill-after=15 300 "
-      .. "%q --no-window --no-ros-env --exec %q > %q 2>&1"):format(schedule, out, launcher,
-      pwd .. "/scripts/robot_contract/isaac_probe.py", out .. "/kit.log") }
+    -- One Kit child per attempt; its exit status lands beside its log. Only a Kit that
+    -- never started the probe is tried again, once, and the first attempt's log is kept.
+    local function launch(log)
+      return oslo.run{ "sh", "-c", ("PROBE_SCHEDULE=%q PROBE_OUT=%q PROBE_TIMEOUT=240 timeout --kill-after=15 300 "
+        .. "%q --no-window --no-ros-env --exec %q > %q 2>&1; echo $? > %q.exit"):format(schedule, out, launcher,
+        pwd .. "/scripts/robot_contract/isaac_probe.py", log, log) }
+    end
+    launch(out .. "/kit.log")
+    if not oslo.fs.read(out .. "/status.json") then
+      local exit = (oslo.fs.read(out .. "/kit.log.exit") or "?"):gsub("%s+$", "")
+      assert(oslo.run{ "mv", out .. "/kit.log", out .. "/kit-startup-failure.log" }.ok)
+      assert(oslo.run{ "mv", out .. "/kit.log.exit", out .. "/kit-startup-failure.log.exit" }.ok)
+      print(("isaac contract: Kit exited %s before running the probe for %s; trying once more (log kept as kit-startup-failure.log)"):format(exit, name))
+      launch(out .. "/kit.log")
+    end
+    local exit = (oslo.fs.read(out .. "/kit.log.exit") or "?"):gsub("%s+$", "")
+    local probe = { ok = exit == "0" }
     local status = oslo.fs.read(out .. "/status.json")
-    assert(status, ("isaac contract: Kit ran no probe for %s (startup failure or --exec syntax); see %s/kit.log"):format(name, out))
+    assert(status, ("isaac contract: Kit exited %s and ran no probe for %s (startup failure or --exec syntax); see %s/kit.log"):format(exit, name, out))
     assert(probe.ok, ("isaac contract: probe %s did not complete: %s"):format(name, status))
     local compared = oslo.run{ "python3", pwd .. "/scripts/robot_contract/compare.py", "--schedule", schedule,
       "--native", dir .. "/native/" .. name, "--isaac", out, "--out", dir .. "/compare-" .. name .. ".json" }

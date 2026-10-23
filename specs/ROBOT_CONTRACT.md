@@ -521,7 +521,11 @@ three rows are harness results (§14).
   --exec scripts/robot_contract/isaac_probe.py`), one Kit child per schedule
   under `timeout --kill-after=15 300` and the probe's own 240 s watchdog. The
   launcher's bubblewrap dies with that child; no other Kit process is
-  touched. A missing launcher or `VERSION` fails the gate as not run.
+  touched. A missing launcher or `VERSION` fails the gate as not run. Each
+  child's exit status is kept beside its log (`kit.log.exit`). A child that
+  exits before starting the probe is tried once more, its log kept as
+  `kit-startup-failure.log`; a second such failure fails the gate. A probe
+  that ran is never retried, so a mismatch always fails.
 - The probe exits 0 completed, 2 startup failure, 3 absent feature,
   4 rejected asset, 5 runtime error, 6 timeout, and writes `preflight.json`
   (Isaac, Kit, USD, enabled physics and core extensions), `overlay.json`
