@@ -7,7 +7,7 @@ pub mod clouds;
 mod daylight;
 mod sky;
 
-pub use calendar::SolarCalendar;
+pub use calendar::{Planet, SolarCalendar};
 pub use sky::{WeatherOptOut, camera_look};
 
 /// Render layer of the cloud skybox planes. They are drawn from the clouds
@@ -21,6 +21,10 @@ pub const LEAN_LAYER: usize = 3;
 
 use bevy::prelude::*;
 use clouds::config::CloudsConfig;
+
+/// Smallest turn of the sun, about a twentieth of its own width, that
+/// rebuilds the daylight.
+const SUN_STEP_RAD: f32 = 3.5e-4;
 
 #[derive(Resource, Clone)]
 pub struct WeatherSettings {
@@ -126,6 +130,22 @@ impl WeatherSettings {
     pub fn apply_calendar(&mut self) {
         self.sun_override = false;
         self.sun_position = self.calendar.sun_direction();
+    }
+
+    /// Moves the calendar on by `seconds` of world time. The sun follows it
+    /// unless a startup override holds it still, and only once it has moved
+    /// far enough to show, so the daylight is not rebuilt every frame.
+    pub fn advance_clock(&mut self, seconds: f64) -> bool {
+        self.calendar.advance(seconds);
+        if self.sun_override {
+            return false;
+        }
+        let sun = self.calendar.sun_direction();
+        let moved = sun.angle_between(self.sun_position.normalize_or_zero()) > SUN_STEP_RAD;
+        if moved {
+            self.sun_position = sun;
+        }
+        moved
     }
 
     /// The wind as the vegetation shaders read it: downwind x and z, speed in

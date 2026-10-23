@@ -258,9 +258,10 @@ fn serve_once(
             _ => {}
         }
         ClockState {
-            step: 0,
             paused: paused as u32,
-            _pad: 0,
+            rate: 1.0,
+            day_s: 86_400.0,
+            ..Default::default()
         }
     });
     s.paused = paused;

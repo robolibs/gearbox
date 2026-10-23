@@ -40,6 +40,47 @@ pub struct PhysicsActive(pub bool);
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct PhysicsStepBudget(pub Option<u32>);
 
+/// World time. The sun, the air and whatever grows keep it, running `rate`
+/// world seconds to each simulated second, while machines keep the physics
+/// clock. A skip jumps it forward a slice a frame. The simulator advances it
+/// and keeps the calendar fields; the clock topic reports it.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct WorldClock {
+    /// World seconds since the instance started.
+    pub seconds: f64,
+    pub rate: f64,
+    /// World seconds still to jump.
+    pub skip: f64,
+    /// The planet's solar day, seconds.
+    pub day_s: f64,
+    /// Local solar hour at home.
+    pub hour: f64,
+    /// Day (sol) of the year at home.
+    pub day: u32,
+}
+
+impl Default for WorldClock {
+    fn default() -> Self {
+        Self { seconds: 0.0, rate: 1.0, skip: 0.0, day_s: 86_400.0, hour: 12.0, day: 1 }
+    }
+}
+
+impl WorldClock {
+    fn state(&self, step: u64, paused: bool) -> ClockState {
+        ClockState {
+            step,
+            paused: paused as u32,
+            world_s: self.seconds,
+            rate: self.rate,
+            day_s: self.day_s,
+            skip_s: self.skip,
+            hour: self.hour,
+            day: self.day,
+            ..default()
+        }
+    }
+}
+
 /// Objects the host reports on `/gearbox/scene/list`. Each owner refreshes
 /// its own list: the binary for loaded assets, the loader plugin for props,
 /// the marker plugin for markers.
@@ -111,7 +152,8 @@ impl Plugin for GearboxBusPlugin {
             .add_message::<FieldsLayoutRequest>()
             .init_resource::<SceneObjects>()
             .init_resource::<SelectionState>()
-            .init_resource::<PhysicsStepBudget>();
+            .init_resource::<PhysicsStepBudget>()
+            .init_resource::<WorldClock>();
         match HostBus::new(self.config.clone()) {
             Ok(host) => {
                 info!("{}", host.banner());
@@ -149,6 +191,7 @@ fn serve_host_core(
     mut layouts: MessageWriter<FieldsLayoutRequest>,
     mut exit: MessageWriter<AppExit>,
     mut budget: ResMut<PhysicsStepBudget>,
+    mut world_clock: ResMut<WorldClock>,
 ) {
     if physics.0 {
         bus.physics_steps += 1;
@@ -206,13 +249,13 @@ fn serve_host_core(
                 active = true;
                 step_budget = Some(cmd.steps.max(1));
             }
+            clock_op::SPEED if cmd.value.is_finite() => {
+                world_clock.rate = cmd.value.clamp(0.0, clock_op::MAX_RATE);
+            }
+            clock_op::SKIP if cmd.value.is_finite() => world_clock.skip += cmd.value.max(0.0),
             _ => {}
         }
-        ClockState {
-            step: steps,
-            paused: (!active) as u32,
-            _pad: 0,
-        }
+        world_clock.state(steps, !active)
     });
     bus.host.serve_clear(|req| {
         reset.write(SimResetRequest {
@@ -308,16 +351,12 @@ fn poll_machine_agents(mut bus: ResMut<GearboxBus>) {
     }
 }
 
-fn publish_clock(mut bus: ResMut<GearboxBus>, physics: Res<PhysicsActive>) {
-    let state = ClockState {
-        step: bus.physics_steps,
-        paused: (!physics.0) as u32,
-        _pad: 0,
-    };
+fn publish_clock(mut bus: ResMut<GearboxBus>, physics: Res<PhysicsActive>, world_clock: Res<WorldClock>) {
+    let state = world_clock.state(bus.physics_steps, !physics.0);
     let changed = bus
         .last_clock
         .as_ref()
-        .map(|last| last.paused != state.paused)
+        .map(|last| last.paused != state.paused || last.rate != state.rate || (last.skip_s > 0.0) != (state.skip_s > 0.0))
         .unwrap_or(true);
     if changed {
         bus.host.publish_clock(&state);

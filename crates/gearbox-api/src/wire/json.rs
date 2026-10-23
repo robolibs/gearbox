@@ -304,7 +304,7 @@ fn host_info_from(v: &Value) -> Result<HostInfo, String> {
 }
 
 fn clock_command_json(c: &ClockCommand) -> Value {
-    json!({ "op": c.op, "op_name": clock_op::name(c.op), "steps": c.steps })
+    json!({ "op": c.op, "op_name": clock_op::name(c.op), "steps": c.steps, "value": c.value })
 }
 
 fn clock_command_from(v: &Value) -> Result<ClockCommand, String> {
@@ -317,18 +317,28 @@ fn clock_command_from(v: &Value) -> Result<ClockCommand, String> {
     Ok(ClockCommand {
         op,
         steps: uint(v, "steps") as u32,
+        value: num(v, "value"),
     })
 }
 
 fn clock_state_json(c: &ClockState) -> Value {
-    json!({ "step": c.step, "paused": c.paused != 0 })
+    json!({
+        "step": c.step, "paused": c.paused != 0, "world_s": c.world_s, "rate": c.rate,
+        "day_s": c.day_s, "skip_s": c.skip_s, "hour": c.hour, "day": c.day,
+    })
 }
 
 fn clock_state_from(v: &Value) -> Result<ClockState, String> {
     Ok(ClockState {
         step: uint(v, "step"),
         paused: uint(v, "paused") as u32,
-        _pad: 0,
+        world_s: num(v, "world_s"),
+        rate: num(v, "rate"),
+        day_s: num(v, "day_s"),
+        skip_s: num(v, "skip_s"),
+        hour: num(v, "hour"),
+        day: uint(v, "day") as u32,
+        ..Default::default()
     })
 }
 

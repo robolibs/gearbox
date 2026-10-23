@@ -187,7 +187,17 @@ impl Client {
     }
 
     pub fn clock(&self, op: u32) -> agentio::Result<ClockState> {
-        self.call(topics::SCENE_CLOCK, &ClockCommand { op, steps: 0 })
+        self.call(topics::SCENE_CLOCK, &ClockCommand { op, ..Default::default() })
+    }
+
+    /// World seconds per simulated second.
+    pub fn speed(&self, rate: f64) -> agentio::Result<ClockState> {
+        self.call(topics::SCENE_CLOCK, &ClockCommand { op: clock_op::SPEED, value: rate, ..Default::default() })
+    }
+
+    /// Jump world time forward by `seconds`.
+    pub fn skip(&self, seconds: f64) -> agentio::Result<ClockState> {
+        self.call(topics::SCENE_CLOCK, &ClockCommand { op: clock_op::SKIP, value: seconds, ..Default::default() })
     }
 
     pub fn clear(&self, scope: u32) -> agentio::Result<Status> {

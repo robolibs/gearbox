@@ -10,8 +10,81 @@ pub fn planetary_weather() -> WeatherSettings {
     weather_for(gearbox_globe::Body::active())
 }
 
+/// The calendar a body keeps.
+pub fn planet_of(body: gearbox_globe::Body) -> bevy_weather::Planet {
+    match body {
+        gearbox_globe::Body::Earth => bevy_weather::Planet::Earth,
+        gearbox_globe::Body::Mars => bevy_weather::Planet::Mars,
+        gearbox_globe::Body::Moon => bevy_weather::Planet::Moon,
+    }
+}
+
+/// World time for the active body, its day as long as the body's own.
+pub fn world_clock() -> gearbox_api::WorldClock {
+    let calendar = planetary_weather().calendar;
+    gearbox_api::WorldClock {
+        day_s: calendar.planet.solar_day_s(),
+        hour: calendar.hour,
+        day: calendar.day as u32,
+        ..default()
+    }
+}
+
+/// How much world time one frame of a skip may jump: a twelfth of a day,
+/// so anything that integrates over it still gets its hours one by one.
+const SKIP_SLICES_PER_DAY: f64 = 12.0;
+
+/// The systems that move world time on; whatever runs on world time runs after them.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorldTime;
+
+/// World seconds this frame moved on by.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct WorldStep {
+    pub seconds: f64,
+}
+
+/// World time runs `rate` times the physics clock, plus a slice of any skip.
+pub fn advance_world_clock(
+    physics: Res<crate::physics::PhysicsWorld>,
+    mut clock: ResMut<gearbox_api::WorldClock>,
+    mut step: ResMut<WorldStep>,
+    mut last: Local<Option<f64>>,
+) {
+    let simulated = physics.simulated_seconds;
+    let ran = last.map_or(0.0, |was| (simulated - was).max(0.0));
+    *last = Some(simulated);
+    let slice = clock.skip.min(clock.day_s / SKIP_SLICES_PER_DAY);
+    clock.skip -= slice;
+    step.seconds = ran * clock.rate + slice;
+    clock.seconds += step.seconds;
+}
+
+/// The calendar follows world time, and the clock reports where it stands.
+pub fn advance_sun(
+    step: Res<WorldStep>,
+    mut settings: ResMut<WeatherSettings>,
+    mut clock: ResMut<gearbox_api::WorldClock>,
+) {
+    if step.seconds > 0.0 && settings.bypass_change_detection().advance_clock(step.seconds) {
+        settings.set_changed();
+    }
+    clock.hour = settings.calendar.hour;
+    clock.day = settings.calendar.day as u32;
+}
+
 fn weather_for(body: gearbox_globe::Body) -> WeatherSettings {
     let mut settings = WeatherSettings::default();
+    settings.calendar.planet = planet_of(body);
+    settings.calendar.latitude = body.home().0 as f32;
+    if body != gearbox_globe::Body::Earth {
+        // A clear northern-spring morning: Mars at Ls 72°, the Moon a quarter-day after sunrise.
+        (settings.calendar.day, settings.calendar.hour) =
+            if body == gearbox_globe::Body::Mars { (150, 10.0) } else { (1, 9.0) };
+    }
+    if !settings.sun_override {
+        settings.sun_position = settings.calendar.sun_direction();
+    }
     if body == gearbox_globe::Body::Earth { return settings; }
     let moon = body == gearbox_globe::Body::Moon;
     settings.sky_kind = if moon { bevy_weather::SkyKind::Airless } else { bevy_weather::SkyKind::Dust };
@@ -21,10 +94,6 @@ fn weather_for(body: gearbox_globe::Body) -> WeatherSettings {
     settings.cloud_drift_mps = 0.0;
     settings.wind_speed_mps = if moon { 0.0 } else { 3.0 };
     settings.wind_gustiness = if moon { 0.0 } else { 0.25 };
-    if !settings.sun_override {
-        settings.sun_position = Vec3::new(-0.65, if moon { 0.35 } else { 0.65 }, 0.45).normalize();
-    }
-    settings.sun_override = true;
     settings.sun_color = if moon { Color::WHITE } else { Color::srgb(1.0, 0.94, 0.85) };
     settings.illuminance = if moon { 127_000.0 } else { 58_000.0 };
     settings.indirect_intensity = if moon { 450.0 } else { 2_200.0 };
@@ -71,6 +140,35 @@ mod planet_tests {
             assert!(fields.layout.fields.is_empty() && fields.layout.ways.is_empty());
             assert_eq!(fields.grass_density + fields.stubble_density + fields.concrete_weed_density, 0.0);
         }
+    }
+
+    #[test]
+    fn every_planet_keeps_its_own_calendar_at_home() {
+        for body in [Body::Earth, Body::Mars, Body::Moon] {
+            let weather = weather_for(body);
+            assert_eq!(weather.calendar.planet, planet_of(body));
+            assert_eq!(weather.calendar.latitude, body.home().0 as f32);
+            assert!(!weather.sun_override || std::env::var_os("GEARBOX_SUN_ELEVATION").is_some());
+            assert!(weather.sun_position.y > 0.3, "{body:?} starts in daylight");
+        }
+        assert_eq!(world_clock().day_s, planet_of(Body::active()).solar_day_s());
+    }
+
+    #[test]
+    fn a_skip_jumps_a_slice_a_frame_and_rate_scales_physics_time() {
+        let mut app = App::new();
+        app.insert_resource(crate::physics::PhysicsWorld::default())
+            .insert_resource(gearbox_api::WorldClock { rate: 60.0, skip: 3.0 * 86_400.0, ..default() })
+            .init_resource::<WorldStep>()
+            .add_systems(Update, advance_world_clock);
+        app.update();
+        app.world_mut().resource_mut::<crate::physics::PhysicsWorld>().simulated_seconds += 0.5;
+        app.update();
+        let clock = *app.world().resource::<gearbox_api::WorldClock>();
+        let slice = 86_400.0 / SKIP_SLICES_PER_DAY;
+        assert!((app.world().resource::<WorldStep>().seconds - (30.0 + slice)).abs() < 1e-9);
+        assert!((clock.seconds - (30.0 + 2.0 * slice)).abs() < 1e-9);
+        assert!((clock.skip - (3.0 * 86_400.0 - 2.0 * slice)).abs() < 1e-6);
     }
 }
 

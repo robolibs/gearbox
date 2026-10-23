@@ -39,6 +39,13 @@ pub mod clock_op {
     pub const SHUTDOWN: u32 = 4;
     /// Run `steps` physics frames, then pause again.
     pub const STEP: u32 = 5;
+    /// World seconds per simulated second: `value`. The sun, the air and
+    /// whatever grows keep world time; machines keep the physics clock.
+    pub const SPEED: u32 = 6;
+    /// Jump world time forward by `value` seconds.
+    pub const SKIP: u32 = 7;
+    /// Fastest world time may run against simulated time: a Mars year a minute.
+    pub const MAX_RATE: f64 = 1.0e6;
 
     pub fn name(value: u32) -> &'static str {
         match value {
@@ -47,6 +54,8 @@ pub mod clock_op {
             TOGGLE => "toggle",
             SHUTDOWN => "shutdown",
             STEP => "step",
+            SPEED => "speed",
+            SKIP => "skip",
             _ => "get",
         }
     }
@@ -59,6 +68,8 @@ pub mod clock_op {
             "toggle" => Some(TOGGLE),
             "shutdown" | "stop" => Some(SHUTDOWN),
             "step" => Some(STEP),
+            "speed" => Some(SPEED),
+            "skip" => Some(SKIP),
             _ => None,
         }
     }
@@ -173,6 +184,8 @@ impl HostInfo {
 pub struct ClockCommand {
     pub op: u32,
     pub steps: u32,
+    /// Rate for `SPEED`, seconds for `SKIP`.
+    pub value: f64,
 }
 
 #[datapod::datapod(name = "gearbox.clock_state.v1")]
@@ -181,6 +194,19 @@ pub struct ClockState {
     pub step: u64,
     pub paused: u32,
     pub _pad: u32,
+    /// World seconds since the instance started.
+    pub world_s: f64,
+    /// World seconds per simulated second.
+    pub rate: f64,
+    /// Length of the planet's solar day, seconds.
+    pub day_s: f64,
+    /// World seconds a skip still has to jump.
+    pub skip_s: f64,
+    /// Local solar hour at home, 0 to 24.
+    pub hour: f64,
+    /// Day (sol) of the year at home, from 1.
+    pub day: u32,
+    pub _pad2: u32,
 }
 
 #[datapod::datapod(name = "gearbox.clear_request.v1")]

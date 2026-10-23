@@ -70,6 +70,8 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(gearbox_planet::PlanetPlugin)
         .add_plugins(world::WorldPlugin)
         .insert_resource(environment::planetary_weather())
+        .insert_resource(environment::world_clock())
+        .init_resource::<environment::WorldStep>()
         .add_plugins(environment::WeatherPlugin)
         .init_resource::<environment::ViewerLens>()
         .add_plugins(environment::planetary_fields())
@@ -86,6 +88,11 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
                 environment::sync_cover_wind,
                 environment::sync_lens,
                 environment::sync_camera_lens,
+                (environment::advance_world_clock, environment::advance_sun)
+                    .chain()
+                    .in_set(environment::WorldTime)
+                    .after(physics::step_physics)
+                    .before(environment::DaylightUpdate),
             ),
         )
         .add_systems(Startup, (log_render_adapter, use_cpu_light_clustering))

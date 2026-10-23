@@ -171,7 +171,8 @@ fn synchronize_daylight(
             scale: transform.scale,
         };
         light.color = daylight.direct_color;
-        light.illuminance = settings.illuminance * daylight.direct_strength;
+        light.illuminance =
+            settings.illuminance * daylight.direct_strength * settings.calendar.irradiance_scale();
         original.0 = light.illuminance;
         light.shadow_maps_enabled = daylight.direct_strength > 0.0 && sun_shadows();
     }

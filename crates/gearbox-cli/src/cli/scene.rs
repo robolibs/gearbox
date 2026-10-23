@@ -36,8 +36,10 @@ enum Cmd {
         #[arg(default_value_t = 1)]
         n: u32,
     },
-    /// Time scale (not supported by the sim yet)
+    /// World seconds per simulated second: the sun, the air and crops run this much faster than machines
     Speed { factor: f64 },
+    /// Jump world time forward, e.g. 6h, 2d, 30sol (sol is the planet's solar day)
+    Skip { span: String },
     /// Objects in the scene
     List {
         /// machine, prop, marker, terrain
@@ -69,13 +71,23 @@ enum Cmd {
 pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     match args.cmd {
         Cmd::Status => status(ctx),
-        Cmd::Play => clock(ctx, clock_op::PLAY, 0),
-        Cmd::Pause => clock(ctx, clock_op::PAUSE, 0),
-        Cmd::Toggle => clock(ctx, clock_op::TOGGLE, 0),
-        Cmd::Step { n } => clock(ctx, clock_op::STEP, n),
-        Cmd::Speed { factor } => Err(CliError::unsupported(format!(
-            "the sim has no time scale yet (asked for {factor}); use `scene step` or `scene pause`"
-        ))),
+        Cmd::Play => clock(ctx, clock_op::PLAY, 0, 0.0),
+        Cmd::Pause => clock(ctx, clock_op::PAUSE, 0, 0.0),
+        Cmd::Toggle => clock(ctx, clock_op::TOGGLE, 0, 0.0),
+        Cmd::Step { n } => clock(ctx, clock_op::STEP, n, 0.0),
+        Cmd::Speed { factor } => {
+            if !factor.is_finite() || !(0.0..=clock_op::MAX_RATE).contains(&factor) {
+                return Err(CliError::usage(format!(
+                    "speed must be 0 to {}",
+                    clock_op::MAX_RATE
+                )));
+            }
+            clock(ctx, clock_op::SPEED, 0, factor)
+        }
+        Cmd::Skip { span } => {
+            let day_s = ctx.client()?.clock(clock_op::GET)?.day_s;
+            clock(ctx, clock_op::SKIP, 0, world_span(&span, day_s)?)
+        }
         Cmd::List { kind } => list(ctx, kind),
         Cmd::Pose { id, watch } => pose(ctx, &id, watch),
         Cmd::Events { kind, count } => events(ctx, kind, count),
@@ -95,6 +107,7 @@ fn status(ctx: &Ctx) -> Result<()> {
             json!({
                 "instance": target.name, "paused": clock.paused != 0, "step": clock.step,
                 "machines": info.machine_count, "objects": info.object_count, "world": world,
+                "world_s": clock.world_s, "rate": clock.rate, "day": clock.day, "hour": clock.hour,
             })
         },
         || {
@@ -109,6 +122,7 @@ fn status(ctx: &Ctx) -> Result<()> {
                     },
                 ),
                 ("step", clock.step.to_string()),
+                ("world time", world_time(&clock)),
                 ("machines", info.machine_count.to_string()),
                 ("objects", info.object_count.to_string()),
                 ("world", world.clone()),
@@ -118,12 +132,40 @@ fn status(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn clock(ctx: &Ctx, op: u32, steps: u32) -> Result<()> {
+/// Day of the year, local solar time and how fast world time runs.
+fn world_time(state: &gearbox_api::ClockState) -> String {
+    let minutes = (state.hour * 60.0).round() as u32 % 1440;
+    let skipping = if state.skip_s > 0.0 { format!(", skipping {:.0} s", state.skip_s) } else { String::new() };
+    format!("day {} {:02}:{:02}, ×{}{skipping}", state.day, minutes / 60, minutes % 60, state.rate)
+}
+
+/// A span of world time: `s`, `m`, `h`, `d` (Earth days) or `sol` (the
+/// planet's own solar day, `day_s` long).
+fn world_span(text: &str, day_s: f64) -> Result<f64> {
+    let t = text.trim();
+    let (number, unit) = t.find(|c: char| c.is_ascii_alphabetic()).map(|i| t.split_at(i)).unwrap_or((t, "s"));
+    let value: f64 = number.trim().parse().map_err(|_| CliError::usage(format!("bad span `{text}`")))?;
+    let scale = match unit.trim() {
+        "s" | "" => 1.0,
+        "m" | "min" => 60.0,
+        "h" => 3600.0,
+        "d" | "day" | "days" => 86_400.0,
+        "sol" | "sols" => day_s,
+        other => return Err(CliError::usage(format!("bad span unit `{other}`; use s, m, h, d or sol"))),
+    };
+    let seconds = value * scale;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(CliError::usage(format!("bad span `{text}`")));
+    }
+    Ok(seconds)
+}
+
+fn clock(ctx: &Ctx, op: u32, steps: u32, value: f64) -> Result<()> {
     let client = ctx.client()?;
     let state = client
         .call_env(
             gearbox_api::topics::SCENE_CLOCK,
-            &pack(&ClockCommand { op, steps }),
+            &pack(&ClockCommand { op, steps, value }),
         )
         .and_then(|env| {
             gearbox_api::unpack::<gearbox_api::ClockState>(env.type_hash(), env.wire())
@@ -133,17 +175,39 @@ fn clock(ctx: &Ctx, op: u32, steps: u32) -> Result<()> {
     ctx.done(
         name,
         &format!(
-            "clock {} (step {})",
+            "clock {} (step {}; world {})",
             if state.paused != 0 {
                 "paused"
             } else {
                 "running"
             },
-            state.step
+            state.step,
+            world_time(&state)
         ),
-        || json!({ "op": name, "paused": state.paused != 0, "step": state.step }),
+        || {
+            json!({
+                "op": name, "paused": state.paused != 0, "step": state.step,
+                "world_s": state.world_s, "rate": state.rate, "skip_s": state.skip_s,
+                "day": state.day, "hour": state.hour,
+            })
+        },
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::world_span;
+
+    #[test]
+    fn spans_take_the_planets_own_sol() {
+        assert_eq!(world_span("90", 88_775.0).unwrap(), 90.0);
+        assert_eq!(world_span("6h", 88_775.0).unwrap(), 21_600.0);
+        assert_eq!(world_span("2d", 88_775.0).unwrap(), 172_800.0);
+        assert_eq!(world_span("30sol", 88_775.0).unwrap(), 30.0 * 88_775.0);
+        assert!(world_span("-1h", 86_400.0).is_err());
+        assert!(world_span("3 weeks", 86_400.0).is_err());
+    }
 }
 
 fn list(ctx: &Ctx, kind: Option<String>) -> Result<()> {
