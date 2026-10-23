@@ -13,7 +13,7 @@ pub(super) struct ParkingBrakes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::backend::{BodyDesc, JointDesc, JointKind};
+    use crate::physics::backend::{BodyDesc, Inertia, JointDesc, JointKind, MassProps, Pose};
     use crate::physics::PhysicsWorld;
 
     /// A wheel on a revolute joint to a fixed parent. With `looped` the

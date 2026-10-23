@@ -65,7 +65,6 @@ pub fn types() -> Vec<TypeDesc> {
         ),
         desc!(MachineState, machine_state_json, machine_state_from),
         desc!(LinkRecord, link_record_json, link_record_from),
-        desc!(LinkPose, link_pose_json, link_pose_from),
         desc!(LidarScan, lidar_scan_json, lidar_scan_from),
         desc!(CameraFrame, camera_frame_json, camera_frame_from),
         desc!(Measurement, measurement_json, measurement_from),
@@ -662,14 +661,6 @@ fn link_record_from(v: &Value) -> Result<LinkRecord, String> {
     })
 }
 
-fn link_pose_json(l: &LinkPose) -> Value {
-    json!({
-        "index": l.index, "stamp_ms": l.stamp_ms,
-        "pose": { "x": l.x, "y": l.y, "z": l.z, "qw": l.qw, "qx": l.qx, "qy": l.qy, "qz": l.qz },
-        "props": props_json(&l.props),
-    })
-}
-
 fn lidar_scan_json(s: &LidarScan) -> Value {
     let ranges: Vec<Value> = s
         .ranges
@@ -920,22 +911,6 @@ fn camera_frame_from(v: &Value) -> Result<CameraFrame, String> {
                 "depth",
             ],
         ),
-    })
-}
-
-fn link_pose_from(v: &Value) -> Result<LinkPose, String> {
-    let p = v.get("pose").cloned().unwrap_or(Value::Null);
-    Ok(LinkPose {
-        x: num(&p, "x"),
-        y: num(&p, "y"),
-        z: num(&p, "z"),
-        qw: p.get("qw").and_then(Value::as_f64).unwrap_or(1.0),
-        qx: num(&p, "qx"),
-        qy: num(&p, "qy"),
-        qz: num(&p, "qz"),
-        index: uint(v, "index") as u32,
-        stamp_ms: uint(v, "stamp_ms") as u32,
-        props: props_from(v, &["index", "stamp_ms", "pose"]),
     })
 }
 

@@ -64,7 +64,6 @@ pub(super) fn is_explicit_root(scene: &Scene, path: &str) -> bool {
         || read::token(scene, path, "gearbox:machine:kind").is_some()
         || read::token(scene, path, "gearbox:machine:idPolicy").is_some()
         || read::first_target(scene, path, "gearbox:machine:body").is_some()
-        || read::value(scene, path, "gearbox:machine:schemaVersion").is_some()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -304,10 +303,8 @@ pub fn compile(stage: &Stage, options: &CompileOptions) -> CompileResult {
         for &i in indices {
             let others: Vec<String> = indices.iter().filter(|&&j| j != i).map(|&j| machines[j].root.clone()).collect();
             let m = &mut machines[i];
-            let severity = if m.profile.strict() { Severity::Error } else { Severity::Warning };
-            m.diagnostics.push(Diagnostic::new(
+            m.diagnostics.push(Diagnostic::error(
                 Code::DuplicateMachineId,
-                severity,
                 Some(&m.root),
                 format!("machine id `{}` is also used by {}", m.machine_id, others.join(", ")),
             ));
@@ -354,32 +351,12 @@ pub(super) struct Builder<'s, 'a> {
 }
 
 impl Builder<'_, '_> {
-    /// Error under the strict profiles, warning under legacy decoding.
-    pub fn strict_or_warn(&mut self, code: Code, path: Option<&str>, message: impl Into<String>) {
-        let severity = if self.profile.strict() { Severity::Error } else { Severity::Warning };
-        self.machine.diagnostics.push(Diagnostic::new(code, severity, path, message));
+    pub fn error(&mut self, code: Code, path: Option<&str>, message: impl Into<String>) {
+        self.machine.diagnostics.push(Diagnostic::error(code, path, message));
     }
 
     pub fn push(&mut self, diagnostic: Diagnostic) {
         self.machine.diagnostics.push(diagnostic);
-    }
-
-    /// A relationship target as composed; legacy decoding also tries the
-    /// `/robot/` asset-root rebase when the composed target is missing.
-    pub fn resolve_target(&mut self, target: &str) -> String {
-        if self.scene.defined(target) || self.profile != ProfileKind::GearboxLegacy {
-            return target.to_string();
-        }
-        let rebased = crate::controller::rebase_asset_root_target(&self.scope.root, target);
-        if rebased != target && self.scene.defined(&rebased) {
-            self.machine.diagnostics.push(Diagnostic::info(
-                Code::LegacyInference,
-                Some(target),
-                format!("target rebased from the /robot asset root onto {rebased}"),
-            ));
-            return rebased;
-        }
-        target.to_string()
     }
 
     fn check_numeric(&mut self, path: &str, what: &str, v: f64) -> bool {
@@ -399,38 +376,9 @@ impl Builder<'_, '_> {
     }
 }
 
-fn read_profile(scene: &Scene, scope: &Scope, diagnostics: &mut Vec<Diagnostic>) -> (ProfileKind, Option<i64>) {
-    if !scope.explicit {
-        return (ProfileKind::Standard, None);
-    }
-    match read::int(scene, &scope.root, "gearbox:machine:schemaVersion") {
-        None => (ProfileKind::GearboxLegacy, None),
-        Some(Ok(1)) => (ProfileKind::GearboxLegacy, Some(1)),
-        Some(Ok(2)) if SCHEMA_VERSION_CURRENT >= 2 => (ProfileKind::GearboxV2, Some(2)),
-        Some(Ok(v)) => {
-            diagnostics.push(Diagnostic::error(
-                Code::UnknownSchemaVersion,
-                Some(&scope.root),
-                format!(
-                    "gearbox:machine:schemaVersion = {v}; this runtime reads versions up to {SCHEMA_VERSION_CURRENT}; update gearbox or author a supported version"
-                ),
-            ));
-            (ProfileKind::GearboxV2, Some(v))
-        }
-        Some(Err(found)) => {
-            diagnostics.push(Diagnostic::error(
-                Code::InvalidSchemaVersion,
-                Some(&scope.root),
-                format!("gearbox:machine:schemaVersion must be an int, found {found}"),
-            ));
-            (ProfileKind::GearboxV2, None)
-        }
-    }
-}
-
 fn build_machine(scene: &Scene, mut scope: Scope, options: &CompileOptions) -> MachineDescription {
-    let mut diagnostics = std::mem::take(&mut scope.diagnostics);
-    let (profile, schema_version) = read_profile(scene, &scope, &mut diagnostics);
+    let diagnostics = std::mem::take(&mut scope.diagnostics);
+    let profile = if scope.explicit { ProfileKind::Gearbox } else { ProfileKind::Standard };
     let machine_id = if scope.explicit {
         read::token(scene, &scope.root, "gearbox:machine:id").unwrap_or_else(|| derive_machine_id(&scope.root))
     } else {
@@ -443,7 +391,6 @@ fn build_machine(scene: &Scene, mut scope: Scope, options: &CompileOptions) -> M
         machine_id,
         generation: options.generation,
         profile,
-        schema_version,
         kind,
         isaac: scope.isaac,
         units: scene.units.clone(),
@@ -495,15 +442,15 @@ fn read_body(b: &mut Builder, path: &str) -> BodyDescription {
     };
     let d = scene.decomposed(path);
     if d.shear {
-        b.strict_or_warn(Code::ShearTransform, Some(path), "rigid body transform is sheared; physics cannot represent it");
+        b.error(Code::ShearTransform, Some(path), "rigid body transform is sheared; physics cannot represent it");
     }
     if d.reflection {
-        b.strict_or_warn(Code::ReflectionTransform, Some(path), "rigid body transform mirrors its axes; physics cannot represent it");
+        b.error(Code::ReflectionTransform, Some(path), "rigid body transform mirrors its axes; physics cannot represent it");
     }
     let scale = match d.uniform_scale() {
         Some(s) => s,
         None => {
-            b.strict_or_warn(
+            b.error(
                 Code::NonUniformScale,
                 Some(path),
                 format!("rigid body has nonuniform scale {:?}; author the scale on its meshes instead", d.scale),
@@ -550,7 +497,7 @@ fn read_body(b: &mut Builder, path: &str) -> BodyDescription {
         }
         None => Valued::schema(DQuat::IDENTITY),
     };
-    if b.profile.strict() && mass_value.is_some() && inertia.is_none() {
+    if mass_value.is_some() && inertia.is_none() {
         b.push(Diagnostic::warning(
             Code::MissingInertia,
             Some(path),
@@ -574,17 +521,16 @@ fn read_body(b: &mut Builder, path: &str) -> BodyDescription {
         None => Valued::schema(DVec3::ZERO),
     };
 
-    let mut damping = |attr: &str, schema: f64, legacy: f64| match read::float(scene, path, attr) {
+    let mut damping = |attr: &str, schema: f64| match read::float(scene, path, attr) {
         Some(v) if v.is_finite() && v >= 0.0 => Valued::authored(v),
         Some(v) => {
             b.push(Diagnostic::error(Code::InvalidNumeric, Some(path), format!("{attr} = {v} must be nonnegative and finite")));
             Valued::schema(schema)
         }
-        None if b.profile.strict() => Valued::schema(schema),
-        None => Valued::new(legacy, Provenance::ProfileDefault),
+        None => Valued::schema(schema),
     };
-    let linear_damping = damping("physxRigidBody:linearDamping", SCHEMA_LINEAR_DAMPING, LEGACY_LINEAR_DAMPING);
-    let angular_damping = damping("physxRigidBody:angularDamping", SCHEMA_ANGULAR_DAMPING, LEGACY_ANGULAR_DAMPING);
+    let linear_damping = damping("physxRigidBody:linearDamping", SCHEMA_LINEAR_DAMPING);
+    let angular_damping = damping("physxRigidBody:angularDamping", SCHEMA_ANGULAR_DAMPING);
 
     let colliders = read_colliders(scene, path);
     let name = read::token(scene, path, "gearbox:link:name")
@@ -639,7 +585,7 @@ fn resolve_endpoint(b: &mut Builder, joint: &str, rel: &str) -> (EndpointRecord,
     let Some(authored) = read::first_target(b.scene, joint, rel) else {
         return (EndpointRecord { authored: None, endpoint: Endpoint::World, via: None }, Some((Space::World, None)));
     };
-    let target = b.resolve_target(&authored);
+    let target = authored.clone();
     let invalid = |reason: &str| EndpointRecord {
         authored: Some(authored.clone()),
         endpoint: Endpoint::Invalid { target: target.clone(), reason: reason.to_string() },
@@ -662,7 +608,7 @@ fn resolve_endpoint(b: &mut Builder, joint: &str, rel: &str) -> (EndpointRecord,
                 (EndpointRecord { authored: Some(authored), endpoint: Endpoint::Body(i), via }, Some((Space::Body(i, body), frame_prim)))
             }
             None => {
-                b.strict_or_warn(Code::CrossMachineJoint, Some(joint), format!("{rel} -> {target}: body {body} is outside machine {}", b.scope.root));
+                b.error(Code::CrossMachineJoint, Some(joint), format!("{rel} -> {target}: body {body} is outside machine {}", b.scope.root));
                 (invalid("body outside this machine"), None)
             }
         },
@@ -704,7 +650,7 @@ fn read_joint(b: &mut Builder, path: &str) {
     let type_name = scene.info(path).map(|p| p.type_name.clone()).unwrap_or_default();
     let Some(kind) = JointKind::from_type_name(&type_name) else { return };
     if let JointKind::Unknown(name) = &kind {
-        b.strict_or_warn(Code::UnsupportedJointType, Some(path), format!("joint type {name} is not a UsdPhysics joint"));
+        b.error(Code::UnsupportedJointType, Some(path), format!("joint type {name} is not a UsdPhysics joint"));
     }
     let enabled = read::boolean(scene, path, "physics:jointEnabled").unwrap_or(true);
     let (body0, space0) = resolve_endpoint(b, path, "physics:body0");
@@ -817,7 +763,7 @@ fn read_joint(b: &mut Builder, path: &str) {
     for applied in scene.schema_instances(path, "PhysicsDriveAPI") {
         let used = joint.dofs.iter().any(|&d| b.machine.dofs[d].drive.is_some() && drive_token_for(&b.machine.dofs[d], &applied));
         if !used {
-            b.strict_or_warn(
+            b.error(
                 Code::InvalidDrive,
                 Some(path),
                 format!("PhysicsDriveAPI:{applied} names no free DOF of this {} joint", joint.kind.as_str()),
@@ -859,7 +805,7 @@ fn read_limit(b: &mut Builder, path: &str, token: DofToken, joint_kind: &JointKi
     let (lower, upper) = (convert(low), convert(high));
     let locked = matches!(joint_kind, JointKind::D6) && matches!((lower, upper), (Some(l), Some(h)) if l > h);
     if !locked && let (Some(l), Some(h)) = (lower, upper) && l > h {
-        b.strict_or_warn(Code::InvalidLimit, Some(path), format!("{low_name} {l} exceeds {high_name} {h}"));
+        b.error(Code::InvalidLimit, Some(path), format!("{low_name} {l} exceeds {high_name} {h}"));
     }
     Limit { lower, upper, locked, source: Provenance::Authored }
 }
@@ -876,7 +822,7 @@ fn read_drive(b: &mut Builder, path: &str, token: DofToken) -> Option<DriveDescr
             _ => &[],
         };
         let alt = applied.iter().find(|a| alternates.contains(&a.as_str()))?.clone();
-        b.strict_or_warn(
+        b.error(
             Code::NonStandardDriveToken,
             Some(path),
             format!("PhysicsDriveAPI:{alt} on a {} DOF; author PhysicsDriveAPI:{}", token.as_str(), token.as_str()),

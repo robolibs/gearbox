@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use gearbox_api::{
-    ControlRequestV2, ControlResponseV2, GearboxBus, JointCommandAckV2, JointCommandV2, JointStateV2, Props, TfV2, code, command_status,
+    ControlRequest, ControlResponse, GearboxBus, JointCommandAck, JointCommand, JointState, Props, Tf, code, command_status,
     control_op, joint_mode, names_from_bytes, names_to_bytes,
 };
 
@@ -40,17 +40,17 @@ fn dof_keys(model: &MachineDescription, machine_id: &str, names: &[String]) -> R
         .collect()
 }
 
-fn refuse(code: u32, message: &str) -> ControlResponseV2 {
-    ControlResponseV2 { code, props: Props::from_pairs(&[("message", message)]).into_bytes(), ..Default::default() }
+fn refuse(code: u32, message: &str) -> ControlResponse {
+    ControlResponse { code, props: Props::from_pairs(&[("message", message)]).into_bytes(), ..Default::default() }
 }
 
-fn ack(status: u32, code: u32, command: &JointCommandV2, tick: u64, message: &str) -> JointCommandAckV2 {
-    JointCommandAckV2 { sequence: command.sequence, generation: command.generation, tick, status, code, message: message.as_bytes().to_vec() }
+fn ack(status: u32, code: u32, command: &JointCommand, tick: u64, message: &str) -> JointCommandAck {
+    JointCommandAck { sequence: command.sequence, generation: command.generation, tick, status, code, message: message.as_bytes().to_vec() }
 }
 
-/// A v2 command batch as the arbiter's batch under `grant`, or the wire
+/// A command batch as the arbiter's batch under `grant`, or the wire
 /// error code and message that rejects it whole.
-pub fn batch_from_command(model: &MachineDescription, machine_id: &str, grant: &Grant, command: &JointCommandV2) -> Result<Batch, (u32, String)> {
+pub fn batch_from_command(model: &MachineDescription, machine_id: &str, grant: &Grant, command: &JointCommand) -> Result<Batch, (u32, String)> {
     if command.generation != model.generation {
         return Err((code::REFUSED, format!("generation {} is stale; the machine is at {}", command.generation, model.generation)));
     }
@@ -88,7 +88,7 @@ pub fn batch_from_command(model: &MachineDescription, machine_id: &str, grant: &
     })
 }
 
-pub fn serve_v2(
+pub fn serve(
     bus: Option<ResMut<GearboxBus>>,
     keys: Res<MachineAgentKeys>,
     inventory: Res<ControllerInventory>,
@@ -145,7 +145,7 @@ pub fn revoke_lapsed(physics: &mut PhysicsWorld, leases: &mut DirectLeases, mach
     }
 }
 
-/// One `control_v2` request from the agent's current claimed `session`.
+/// One `control` request from the agent's current claimed `session`.
 pub fn handle_control(
     physics: &mut PhysicsWorld,
     leases: &mut DirectLeases,
@@ -153,10 +153,10 @@ pub fn handle_control(
     machine: &str,
     session: u64,
     holder: &str,
-    request: &ControlRequestV2,
-) -> ControlResponseV2 {
+    request: &ControlRequest,
+) -> ControlResponse {
     let key = (machine.to_string(), session);
-    let done = |epoch: u64, tick: u64| ControlResponseV2 { epoch, generation: model.generation, tick, ..Default::default() };
+    let done = |epoch: u64, tick: u64| ControlResponse { epoch, generation: model.generation, tick, ..Default::default() };
     if request.session == 0 || request.session != session {
         return refuse(code::REFUSED, "claim the machine first; the lease is bound to that session");
     }
@@ -174,7 +174,7 @@ pub fn handle_control(
             }
             match physics.control.arbiter.acquire(holder, machine, &dofs) {
                 Ok(grant) => {
-                    let response = ControlResponseV2 {
+                    let response = ControlResponse {
                         props: Props::from_pairs(&[("owner", grant.owner.to_string().as_str())]).into_bytes(),
                         ..done(grant.epoch, physics.ticks + 1)
                     };
@@ -202,23 +202,23 @@ pub fn handle_control(
     }
 }
 
-/// One `joint_command_v2` batch from the agent's current claimed `session`.
+/// One `joint_command` batch from the agent's current claimed `session`.
 pub fn handle_joint_command(
     physics: &mut PhysicsWorld,
     leases: &DirectLeases,
     model: &MachineDescription,
     machine: &str,
     session: u64,
-    command: &JointCommandV2,
+    command: &JointCommand,
     now: Instant,
-) -> JointCommandAckV2 {
+) -> JointCommandAck {
     let tick = physics.ticks;
     let reply = (|| -> Result<(), (u32, String)> {
         if command.session == 0 || command.session != session {
             return Err((code::REFUSED, "claim the machine first".into()));
         }
         let Some((_, grant)) = leases.0.get(&(machine.to_string(), session)) else {
-            return Err((code::REFUSED, "no lease: acquire the DOFs on control_v2 first".into()));
+            return Err((code::REFUSED, "no lease: acquire the DOFs on control first".into()));
         };
         let batch = batch_from_command(model, machine, grant, command)?;
         physics.submit_batch(batch, now).map_err(|e| (code::REFUSED, e.to_string()))
@@ -289,14 +289,14 @@ pub fn sample_joint_state(
     model: &MachineDescription,
     physics: &PhysicsWorld,
     last: &mut HashMap<(String, String), (f64, u64)>,
-) -> JointStateV2 {
+) -> JointState {
     let tick = physics.ticks;
     let dt = physics.dt();
     let order: Vec<usize> = match &model.reporting {
         Some(r) if !r.joints.is_empty() => r.joints.iter().flat_map(|&j| model.joints[j].dofs.clone()).collect(),
         _ => (0..model.dofs.len()).collect(),
     };
-    let mut state = JointStateV2 { generation: model.generation, tick, sim_time_s: physics.simulated_seconds, valid: 1, ..Default::default() };
+    let mut state = JointState { generation: model.generation, tick, sim_time_s: physics.simulated_seconds, valid: 1, ..Default::default() };
     let mut names = Vec::new();
     for index in order {
         let dof = &model.dofs[index];
@@ -328,7 +328,7 @@ pub fn sample_joint_state(
 }
 
 /// Joint state and frames after the physics steps of the frame.
-pub fn publish_v2_state(
+pub fn publish_state(
     bus: Option<ResMut<GearboxBus>>,
     keys: Res<MachineAgentKeys>,
     inventory: Res<ControllerInventory>,
@@ -343,11 +343,11 @@ pub fn publish_v2_state(
         let Some(machine) = machine_of(&inventory, &keys, agent_name) else { continue };
         let Some(model) = machine.model.as_ref().filter(|_| machine.accepted()) else { continue };
         let state = sample_joint_state(&machine.id, model, &physics, &mut sampled.last);
-        agent.publish_joint_state_v2(&state);
+        agent.publish_joint_state(&state);
 
         let bodies = body_poses(machine, model, &physics, &prims, &parents);
         let edges = tf_edges(model, &bodies);
-        let mut tf = TfV2 { generation: model.generation, tick, sim_time_s: physics.simulated_seconds, ..Default::default() };
+        let mut tf = Tf { generation: model.generation, tick, sim_time_s: physics.simulated_seconds, ..Default::default() };
         let (mut parent_names, mut child_names) = (Vec::new(), Vec::new());
         for (parent, child, pose) in edges {
             tf.translation.extend([pose.translation.x, pose.translation.y, pose.translation.z]);
@@ -370,6 +370,6 @@ pub fn publish_v2_state(
         tf.children = names_to_bytes(&child_names);
         let pairs: Vec<(&str, &str)> = props.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         tf.props = Props::from_pairs(&pairs).into_bytes();
-        agent.publish_tf_v2(&tf);
+        agent.publish_tf(&tf);
     }
 }

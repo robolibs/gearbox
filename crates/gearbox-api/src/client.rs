@@ -384,19 +384,6 @@ impl MachineClient<'_> {
         self.subscribe(&self.topic(topics::MACHINE_ODOM))
     }
 
-    /// Link poses, once `set_tf(true)` has switched the stream on.
-    pub fn tf(&self) -> agentio::Result<Subscriber<Env>> {
-        self.subscribe(&self.topic(topics::MACHINE_TF))
-    }
-
-    pub fn set_tf(&self, on: bool) -> agentio::Result<Status> {
-        let cmd = ControllerCommand {
-            props: Props::from_pairs(&[("tf", if on { "on" } else { "off" })]).into_bytes(),
-            ..Default::default()
-        };
-        self.command(&cmd)
-    }
-
     /// Hang `slave` on one of this machine's hitches.
     pub fn attach(&self, req: &AttachRequest) -> agentio::Result<Status> {
         self.call(&self.topic(topics::MACHINE_TOOLS_ATTACH), req)
@@ -420,45 +407,46 @@ impl MachineClient<'_> {
     }
 
     /// The machine generation's manifest: DOF names, units, interfaces.
-    pub fn description_v2(&self) -> agentio::Result<MachineDescriptionV2> {
-        self.call(&self.topic(topics::MACHINE_DESCRIPTION_V2), &Ping::default())
+    pub fn description(&self) -> agentio::Result<MachineDescription> {
+        self.call(&self.topic(topics::MACHINE_DESCRIPTION), &Ping::default())
     }
 
     /// A direct lease over `dofs` under a claimed `session`.
-    pub fn acquire_v2(&self, session: u64, generation: u64, dofs: &[&str]) -> agentio::Result<ControlResponseV2> {
-        let req = ControlRequestV2 {
+    pub fn acquire_lease(&self, session: u64, generation: u64, dofs: &[&str]) -> agentio::Result<ControlResponse> {
+        let req = ControlRequest {
             session,
             generation,
             op: control_op::ACQUIRE,
             names: names_to_bytes(dofs),
             ..Default::default()
         };
-        self.call(&self.topic(topics::MACHINE_CONTROL_V2), &req)
+        self.call(&self.topic(topics::MACHINE_CONTROL), &req)
     }
 
     /// End the lease of `epoch`; `resume` gives the DOFs back to their owner.
-    pub fn release_v2(&self, session: u64, generation: u64, epoch: u64, resume: bool) -> agentio::Result<ControlResponseV2> {
-        let req = ControlRequestV2 { session, generation, epoch, op: control_op::RELEASE, resume: resume as u32, ..Default::default() };
-        self.call(&self.topic(topics::MACHINE_CONTROL_V2), &req)
+    pub fn release_lease(&self, session: u64, generation: u64, epoch: u64, resume: bool) -> agentio::Result<ControlResponse> {
+        let req = ControlRequest { session, generation, epoch, op: control_op::RELEASE, resume: resume as u32, ..Default::default() };
+        self.call(&self.topic(topics::MACHINE_CONTROL), &req)
     }
 
     /// Reset the machine's control: every lease and command cleared, each
     /// DOF back to its default owner and load-time actuator.
-    pub fn reset_v2(&self, session: u64, generation: u64) -> agentio::Result<ControlResponseV2> {
-        let req = ControlRequestV2 { session, generation, op: control_op::RESET, ..Default::default() };
-        self.call(&self.topic(topics::MACHINE_CONTROL_V2), &req)
+    pub fn reset_control(&self, session: u64, generation: u64) -> agentio::Result<ControlResponse> {
+        let req = ControlRequest { session, generation, op: control_op::RESET, ..Default::default() };
+        self.call(&self.topic(topics::MACHINE_CONTROL), &req)
     }
 
-    pub fn joint_command_v2(&self, command: &JointCommandV2) -> agentio::Result<JointCommandAckV2> {
-        self.call(&self.topic(topics::MACHINE_JOINT_COMMAND_V2), command)
+    pub fn joint_command(&self, command: &JointCommand) -> agentio::Result<JointCommandAck> {
+        self.call(&self.topic(topics::MACHINE_JOINT_COMMAND), command)
     }
 
-    pub fn joint_state_v2(&self) -> agentio::Result<Subscriber<Env>> {
-        self.subscribe(&self.topic(topics::MACHINE_JOINT_STATE_V2))
+    pub fn joint_state(&self) -> agentio::Result<Subscriber<Env>> {
+        self.subscribe(&self.topic(topics::MACHINE_JOINT_STATE))
     }
 
-    pub fn tf_v2(&self) -> agentio::Result<Subscriber<Env>> {
-        self.subscribe(&self.topic(topics::MACHINE_TF_V2))
+    /// Parent-relative transforms of the reporting tree (`Tf`).
+    pub fn tf(&self) -> agentio::Result<Subscriber<Env>> {
+        self.subscribe(&self.topic(topics::MACHINE_TF))
     }
 
     pub fn next_odom(

@@ -9,10 +9,10 @@ This is differential speed allocation, not a mechanical differential or a tyre
 slip-angle model; steering transients and terrain still produce slip.
 
 All geometry below follows the machine's control frame
-([ROBOT_CONTRACT.md](ROBOT_CONTRACT.md) §7), written in the legacy chassis
-basis (X left, Y back, Z up): a legacy machine's chassis frame is that basis;
-a v2 machine's declared frame (+X forward, +Y left) is turned into it before
-the solver reads wheel positions. The commanded speed is the
+([ROBOT_CONTRACT.md](ROBOT_CONTRACT.md) §7), written in the controllers'
+chassis basis (X left, Y back, Z up): the declared frame (+X forward, +Y
+left) is turned into it before the solver reads wheel positions. The
+commanded speed is the
 speed of the pivot line's centre (the unsteered axle), as in Isaac Sim's
 `AckermannController`; the steer angles and wheel rates it gives for a held
 command match that controller (`e03_mapping`, ROBOT_CONTRACT §14). Steer and

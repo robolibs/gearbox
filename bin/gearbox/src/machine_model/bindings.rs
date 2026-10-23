@@ -39,36 +39,24 @@ const MACHINE_ROLES: [(&str, &str); 6] = [
 fn resolve_dofs(b: &mut Builder, source: &str, targets: Vec<String>, enabled: bool) -> Vec<DofRef> {
     let mut out = Vec::new();
     for target in targets {
-        let path = b.resolve_target(&target);
-        match b.machine.dof(&path, None) {
+        match b.machine.dof(&target, None) {
             Some(dof) => {
                 if !out.contains(&dof) {
                     out.push(dof);
                 }
             }
             None => {
-                let why = if b.machine.joint_index(&path).is_some() { "is not a single-DOF joint" } else { "is not a joint of this machine" };
+                let why = if b.machine.joint_index(&target).is_some() { "is not a single-DOF joint" } else { "is not a joint of this machine" };
                 let message = format!("{source}: {target} {why}");
                 if enabled {
-                    b.strict_or_warn(Code::UnresolvedControllerJoint, Some(&path), message);
+                    b.error(Code::UnresolvedControllerJoint, Some(&target), message);
                 } else {
-                    b.push(Diagnostic::warning(Code::UnresolvedControllerJoint, Some(&path), format!("{message} (controller disabled)")));
+                    b.push(Diagnostic::warning(Code::UnresolvedControllerJoint, Some(&target), format!("{message} (controller disabled)")));
                 }
             }
         }
     }
     out
-}
-
-fn interfaces_for(controller_type: &str, role: &str) -> Vec<Interface> {
-    match (controller_type, role) {
-        (t, "steer" | "steering") if DRIVE_TYPES.contains(&t) => vec![Interface::Position],
-        (t, _) if DRIVE_TYPES.contains(&t) => vec![Interface::Velocity],
-        ("builtin:hitch" | "builtin:joint_position" | "builtin:trailer_steer", _) => vec![Interface::Position],
-        ("builtin:pto" | "builtin:hydraulic_valve" | "builtin:joint_velocity", _) => vec![Interface::Velocity],
-        ("device", _) => Interface::ALL.to_vec(),
-        _ => Vec::new(),
-    }
 }
 
 pub(super) fn build(b: &mut Builder, physics_rate_hz: f64) {
@@ -122,7 +110,7 @@ pub(super) fn build(b: &mut Builder, physics_rate_hz: f64) {
                 let entry = roles.entry(own.to_string()).or_default();
                 if entry.is_empty() {
                     b.push(Diagnostic::info(
-                        Code::LegacyInference,
+                        Code::RoleInference,
                         Some(&root),
                         format!("controller `{}` {own} taken from gearbox:machine:role", spec.instance),
                     ));
@@ -154,7 +142,7 @@ pub(super) fn build(b: &mut Builder, physics_rate_hz: f64) {
                 roles.insert("target".to_string(), dofs);
                 if inferred {
                     b.push(Diagnostic::info(
-                        Code::LegacyInference,
+                        Code::RoleInference,
                         Some(&root),
                         format!("controller `{}` target taken from gearbox:machine:role", spec.instance),
                     ));
@@ -165,7 +153,7 @@ pub(super) fn build(b: &mut Builder, physics_rate_hz: f64) {
             if let Some(dofs) = fallback.filter(|d| !d.is_empty()) {
                 roles.insert("target".to_string(), dofs);
                 b.push(Diagnostic::info(
-                    Code::LegacyInference,
+                    Code::RoleInference,
                     Some(&root),
                     format!("controller `{}` target taken from gearbox:machine:role", spec.instance),
                 ));
@@ -186,7 +174,7 @@ pub(super) fn build(b: &mut Builder, physics_rate_hz: f64) {
                 Valued::authored(physics_rate_hz)
             }
             Some(rate) if rate > physics_rate_hz + 1e-9 => {
-                b.strict_or_warn(
+                b.error(
                     Code::InvalidControllerRate,
                     Some(&root),
                     format!("{rate_name} = {rate} exceeds the {physics_rate_hz} Hz physics rate"),
@@ -231,8 +219,8 @@ fn track_dofs(b: &mut Builder, root: &openusd::sdf::Path) -> Vec<DofRef> {
     let Ok(tracks) = crate::controller::tracked::discover(b.scene.stage, root) else { return Vec::new() };
     let mut out = Vec::new();
     for track in tracks {
-        let carrier = b.resolve_target(&track.carrier);
-        let sprocket = b.resolve_target(&track.sprocket);
+        let carrier = &track.carrier;
+        let sprocket = &track.sprocket;
         let (Some(carrier), Some(sprocket)) = (b.machine.body_index(&carrier), b.machine.body_index(&sprocket)) else { continue };
         for (j, joint) in b.machine.joints.iter().enumerate() {
             let other = match joint.bodies() {
@@ -259,19 +247,17 @@ fn track_dofs(b: &mut Builder, root: &openusd::sdf::Path) -> Vec<DofRef> {
 struct Claims {
     owners: BTreeMap<usize, DofOwner>,
     conflicts: Vec<(usize, String, String)>,
-    interfaces: BTreeMap<usize, Vec<Interface>>,
 }
 
 impl Claims {
-    fn claim(&mut self, dof: usize, owner: DofOwner, granted: Vec<Interface>) {
+    fn claim(&mut self, dof: usize, owner: DofOwner) {
         match self.owners.get(&dof) {
             Some(existing) if existing.owner != owner.owner => {
                 self.conflicts.push((dof, existing.owner.clone(), owner.owner.clone()))
             }
-            Some(_) => self.interfaces.entry(dof).or_default().extend(granted),
+            Some(_) => {}
             None => {
                 self.owners.insert(dof, owner);
-                self.interfaces.entry(dof).or_default().extend(granted);
             }
         }
     }
@@ -283,10 +269,10 @@ fn assign_owners(b: &mut Builder, machine_roles: &BTreeMap<String, Vec<DofRef>>)
 
     let controllers = b.machine.controllers.clone();
     for c in controllers.iter().filter(|c| c.enabled && DRIVE_TYPES.contains(&c.controller_type.as_str())) {
-        for (role, dofs) in &c.roles {
+        for dofs in c.roles.values() {
             for d in dofs {
                 let owner = DofOwner { owner: c.instance.clone(), kind: OwnerKind::Controller, device: None };
-                claims.claim(d.dof, owner, interfaces_for(&c.controller_type, role));
+                claims.claim(d.dof, owner);
             }
         }
     }
@@ -297,7 +283,7 @@ fn assign_owners(b: &mut Builder, machine_roles: &BTreeMap<String, Vec<DofRef>>)
                 continue;
             }
             let owner = DofOwner { owner: c.instance.clone(), kind: OwnerKind::Service, device: None };
-            claims.claim(d.dof, owner, interfaces_for(&c.controller_type, "target"));
+            claims.claim(d.dof, owner);
         }
     }
 
@@ -313,12 +299,11 @@ fn assign_owners(b: &mut Builder, machine_roles: &BTreeMap<String, Vec<DofRef>>)
         let mut bound: Vec<String> = read::targets(b.scene, &coupler, "gearbox:coupling:ptoJoint").unwrap_or_default();
         bound.extend(read::targets(b.scene, &coupler, "gearbox:coupling:valveJoints").unwrap_or_default());
         for target in bound {
-            let path = b.resolve_target(&target);
-            if let Some(dof) = b.machine.dof(&path, None)
+            if let Some(dof) = b.machine.dof(&target, None)
                 && !claims.owners.contains_key(&dof.dof)
             {
                 let owner = DofOwner { owner: "coupling".to_string(), kind: OwnerKind::Service, device: None };
-                claims.claim(dof.dof, owner, vec![Interface::Velocity]);
+                claims.claim(dof.dof, owner);
             }
         }
     }
@@ -329,7 +314,7 @@ fn assign_owners(b: &mut Builder, machine_roles: &BTreeMap<String, Vec<DofRef>>)
         None => (Vec::new(), Vec::new()),
     };
     for error in device_errors {
-        b.strict_or_warn(Code::LegacyDevice, Some(&root), error);
+        b.error(Code::InvalidDevice, Some(&root), error);
     }
     let suspension: Vec<usize> = machine_roles.get("suspension").into_iter().flatten().map(|d| d.dof).collect();
     for device in devices {
@@ -351,11 +336,11 @@ fn assign_owners(b: &mut Builder, machine_roles: &BTreeMap<String, Vec<DofRef>>)
             }
             None => {
                 let owner = DofOwner { owner: format!("device:{}", device.name), kind: OwnerKind::Device, device: Some(device.name.clone()) };
-                claims.claim(dof.dof, owner, interfaces_for("device", ""));
+                claims.claim(dof.dof, owner);
             }
         }
     }
-    let Claims { owners, conflicts, interfaces } = claims;
+    let Claims { owners, conflicts } = claims;
     for (dof, first, second) in conflicts {
         let path = b.machine.joints[b.machine.dofs[dof].joint].path.clone();
         b.push(Diagnostic::error(
@@ -363,16 +348,6 @@ fn assign_owners(b: &mut Builder, machine_roles: &BTreeMap<String, Vec<DofRef>>)
             Some(&path),
             format!("DOF `{}` has two default owners: `{first}` and `{second}`", b.machine.dofs[dof].name),
         ));
-    }
-    for (dof, granted) in interfaces {
-        let strict = b.profile.strict();
-        let entry = &mut b.machine.dofs[dof].interfaces;
-        if entry.source != Provenance::Authored && !strict {
-            let mut granted = granted;
-            granted.sort();
-            granted.dedup();
-            *entry = Valued::legacy(granted);
-        }
     }
     b.machine.owners = owners;
 }

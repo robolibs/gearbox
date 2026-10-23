@@ -33,11 +33,17 @@ def Xform "World"
         token gearbox:machine:kind = "drone"
         token gearbox:machine:idPolicy = "prim_path"
         rel gearbox:machine:body = </World/SprayDrone/body>
+        rel gearbox:machine:controlFrame = </World/SprayDrone/body/control_frame>
 
         def Xform "body" (
             prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
         )
         {
+            def Xform "control_frame"
+            {
+                quatd xformOp:orient = (0.7071067811865476, 0, 0, -0.7071067811865476)
+                uniform token[] xformOpOrder = ["xformOp:orient"]
+            }
             token gearbox:link:name = "base_link"
             token gearbox:link:role = "base"
             float physics:mass = 25

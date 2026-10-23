@@ -81,7 +81,7 @@ pub fn convert_joints(
     sites: Query<&crate::globe::Site>,
 ) {
     for (joint_entity, joint, endpoints, member) in &joints {
-        let joint = with_schema_targets(joint, member.is_some_and(|m| m.strict));
+        let joint = with_schema_targets(joint);
         let joint = joint.as_ref();
         if !joint.joint_enabled {
             commands.entity(joint_entity).insert(JointAttached);
@@ -284,12 +284,10 @@ fn finite_range(low: f32, high: f32) -> Option<[f64; 2]> {
     (low.is_finite() || high.is_finite()).then(|| [low.max(-OPEN), high.min(OPEN)])
 }
 
-/// The drive on a revolute or prismatic joint's free axis.
-/// Under a strict profile a drive with neither target authored takes the
-/// UsdPhysics fallback, position 0: a stiff drive springs to 0, a damper
-/// holds the joint still. Legacy machines keep a drive without targets idle.
-fn with_schema_targets(joint: &UsdPhysicsJoint, strict: bool) -> std::borrow::Cow<'_, UsdPhysicsJoint> {
-    if !strict || joint.drives.iter().all(|d| d.target_position.is_some() || d.target_velocity.is_some()) {
+/// A drive with neither target authored takes the UsdPhysics fallback,
+/// position 0: a stiff drive springs to 0, a damper holds the joint still.
+fn with_schema_targets(joint: &UsdPhysicsJoint) -> std::borrow::Cow<'_, UsdPhysicsJoint> {
+    if joint.drives.iter().all(|d| d.target_position.is_some() || d.target_velocity.is_some()) {
         return std::borrow::Cow::Borrowed(joint);
     }
     let mut joint = joint.clone();

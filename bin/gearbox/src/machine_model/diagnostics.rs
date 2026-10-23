@@ -40,8 +40,6 @@ macro_rules! codes {
 }
 
 codes! {
-    UnknownSchemaVersion => "unknown_schema_version",
-    InvalidSchemaVersion => "invalid_schema_version",
     NestedMachineRoot => "nested_machine_root",
     DuplicateMachineId => "duplicate_machine_id",
     DuplicateArticulationMarker => "duplicate_articulation_marker",
@@ -85,12 +83,11 @@ codes! {
     InvalidControllerRate => "invalid_controller_rate",
     DuplicateOwner => "duplicate_owner",
     SuggestedRole => "suggested_role",
-    LegacyInference => "legacy_inference",
+    RoleInference => "role_inference",
     PayloadUnloaded => "payload_unloaded",
     InstanceProxy => "instance_proxy",
     CompositionError => "composition_error",
-    LegacyLinkTree => "legacy_link_tree",
-    LegacyDevice => "legacy_device",
+    InvalidDevice => "invalid_device",
     NoMachines => "no_machines",
 }
 

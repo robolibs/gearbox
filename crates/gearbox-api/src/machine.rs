@@ -145,7 +145,6 @@ pub struct MachineAgent {
     odom_pub: Registered<Publisher<Env>>,
     links: Registered<AnsServer<Env, Env>>,
     tf_pub: Registered<Publisher<Env>>,
-    tf_enabled: bool,
     encoders_pub: Registered<Publisher<Env>>,
     imu_pub: Registered<Publisher<Env>>,
     /// Simulated sensor streams by link name, registered on first publish.
@@ -177,17 +176,16 @@ pub struct MachineAgent {
     pub actuations: Vec<ActuatorCommand>,
     /// Actuator streams by device name, registered on first publish.
     actuator_pubs: HashMap<String, Registered<Publisher<Env>>>,
-    description_v2: Registered<ReqServer<Env, Env>>,
-    joint_command_v2: Registered<ReqServer<Env, Env>>,
-    control_v2: Registered<ReqServer<Env, Env>>,
-    joint_state_v2: Registered<Publisher<Env>>,
-    tf_v2: Registered<Publisher<Env>>,
-    /// The manifest `description_v2` answers with.
-    pub description: MachineDescriptionV2,
+    describe: Registered<ReqServer<Env, Env>>,
+    joint_command: Registered<ReqServer<Env, Env>>,
+    control: Registered<ReqServer<Env, Env>>,
+    joint_state_pub: Registered<Publisher<Env>>,
+    /// The manifest `description` answers with.
+    pub description: MachineDescription,
     /// Joint command batches waiting for the sim to validate and answer.
-    pub pending_joint_commands: Vec<(JointCommandV2, ReqReplyToken)>,
+    pub pending_joint_commands: Vec<(JointCommand, ReqReplyToken)>,
     /// Lease requests waiting for the sim to grant, refuse or release.
-    pub pending_control: Vec<(ControlRequestV2, ReqReplyToken)>,
+    pub pending_control: Vec<(ControlRequest, ReqReplyToken)>,
 }
 
 impl MachineAgent {
@@ -215,18 +213,16 @@ impl MachineAgent {
         let t = |leaf: &str| machine_topic(&machine_id, leaf);
         let agent_emit = agent.req_server(&t(topics::MACHINE_EMIT))?;
         let agent_actuate = agent.req_server(&t(topics::MACHINE_ACTUATE))?;
-        let description_v2 = agent.req_server(&t(topics::MACHINE_DESCRIPTION_V2))?;
-        let joint_command_v2 = agent.req_server(&t(topics::MACHINE_JOINT_COMMAND_V2))?;
-        let control_v2 = agent.req_server(&t(topics::MACHINE_CONTROL_V2))?;
-        let joint_state_v2 = agent.publish(&t(topics::MACHINE_JOINT_STATE_V2))?;
-        let tf_v2 = agent.publish(&t(topics::MACHINE_TF_V2))?;
+        let describe = agent.req_server(&t(topics::MACHINE_DESCRIPTION))?;
+        let joint_command = agent.req_server(&t(topics::MACHINE_JOINT_COMMAND))?;
+        let control = agent.req_server(&t(topics::MACHINE_CONTROL))?;
+        let joint_state_pub = agent.publish(&t(topics::MACHINE_JOINT_STATE))?;
         Ok(Self {
-            description_v2,
-            joint_command_v2,
-            control_v2,
-            joint_state_v2,
-            tf_v2,
-            description: MachineDescriptionV2::default(),
+            describe,
+            joint_command,
+            control,
+            joint_state_pub,
+            description: MachineDescription::default(),
             pending_joint_commands: Vec::new(),
             pending_control: Vec::new(),
             info: agent.req_server(&t(topics::MACHINE_INFO))?,
@@ -239,7 +235,6 @@ impl MachineAgent {
             odom_pub: agent.publish(&t(topics::MACHINE_ODOM))?,
             links: agent.que_server(&t(topics::MACHINE_LINKS))?,
             tf_pub: agent.publish(&t(topics::MACHINE_TF))?,
-            tf_enabled: false,
             encoders_pub: agent.publish(&t(topics::MACHINE_ENCODERS))?,
             imu_pub: agent.publish(&t(topics::MACHINE_IMU))?,
             sensor_pubs: HashMap::new(),
@@ -358,36 +353,36 @@ impl MachineAgent {
             }
         }
         let description = &self.description;
-        serve_req(&mut self.description_v2, |_: Ping| MachineDescriptionV2 {
+        serve_req(&mut self.describe, |_: Ping| MachineDescription {
             generation: description.generation,
             manifest: description.manifest.clone(),
         });
-        while let Ok(Some(pending)) = self.joint_command_v2.take_message() {
+        while let Ok(Some(pending)) = self.joint_command.take_message() {
             let (sample, token) = pending.into_parts();
-            match unpack::<JointCommandV2>(sample.header().type_hash, sample.payload()) {
+            match unpack::<JointCommand>(sample.header().type_hash, sample.payload()) {
                 Ok(req) => self.pending_joint_commands.push((req, token)),
                 Err(err) => {
-                    let ack = JointCommandAckV2 {
+                    let ack = JointCommandAck {
                         status: command_status::REJECTED,
                         code: code::USAGE,
                         message: err.to_string().into_bytes(),
                         ..Default::default()
                     };
-                    let _ = self.joint_command_v2.respond_pending(token, &pack(&ack));
+                    let _ = self.joint_command.respond_pending(token, &pack(&ack));
                 }
             }
         }
-        while let Ok(Some(pending)) = self.control_v2.take_message() {
+        while let Ok(Some(pending)) = self.control.take_message() {
             let (sample, token) = pending.into_parts();
-            match unpack::<ControlRequestV2>(sample.header().type_hash, sample.payload()) {
+            match unpack::<ControlRequest>(sample.header().type_hash, sample.payload()) {
                 Ok(req) => self.pending_control.push((req, token)),
                 Err(err) => {
-                    let response = ControlResponseV2 {
+                    let response = ControlResponse {
                         code: code::USAGE,
                         props: Props::from_pairs(&[("message", err.to_string().as_str())]).into_bytes(),
                         ..Default::default()
                     };
-                    let _ = self.control_v2.respond_pending(token, &pack(&response));
+                    let _ = self.control.respond_pending(token, &pack(&response));
                 }
             }
         }
@@ -479,13 +474,7 @@ impl MachineAgent {
         });
 
         let mut commands = std::mem::take(&mut self.commands);
-        let mut tf_enabled = self.tf_enabled;
         serve_req(&mut self.cmd, |req: ControllerCommand| {
-            // Switching the tf stream is a read-only concern; no session needed.
-            if let Some(flag) = req.props().get("tf") {
-                tf_enabled = matches!(flag.as_str(), "on" | "1" | "true");
-                return Status::ok();
-            }
             match &session {
                 Some(held) if held.id == req.session => {
                     commands.push(req);
@@ -499,7 +488,6 @@ impl MachineAgent {
             }
         });
         self.commands = commands;
-        self.tf_enabled = tf_enabled;
 
         let mut emits = std::mem::take(&mut self.emits);
         serve_req(&mut self.emit, |req: EmitRequest| {
@@ -555,14 +543,6 @@ impl MachineAgent {
         self.twist = twist;
     }
 
-    pub fn tf_enabled(&self) -> bool {
-        self.tf_enabled
-    }
-
-    pub fn publish_link_pose(&mut self, pose: &LinkPose) {
-        let _ = self.tf_pub.send(&pack(pose));
-    }
-
     pub fn attached_to(&self) -> Option<&str> {
         self.attached_to.as_deref()
     }
@@ -585,20 +565,20 @@ impl MachineAgent {
         self.tool_links = tool_links;
     }
 
-    pub fn respond_joint_command(&mut self, token: ReqReplyToken, ack: &JointCommandAckV2) {
-        let _ = self.joint_command_v2.respond_pending(token, &pack(ack));
+    pub fn respond_joint_command(&mut self, token: ReqReplyToken, ack: &JointCommandAck) {
+        let _ = self.joint_command.respond_pending(token, &pack(ack));
     }
 
-    pub fn respond_control(&mut self, token: ReqReplyToken, response: &ControlResponseV2) {
-        let _ = self.control_v2.respond_pending(token, &pack(response));
+    pub fn respond_control(&mut self, token: ReqReplyToken, response: &ControlResponse) {
+        let _ = self.control.respond_pending(token, &pack(response));
     }
 
-    pub fn publish_joint_state_v2(&mut self, state: &JointStateV2) {
-        let _ = self.joint_state_v2.send(&pack(state));
+    pub fn publish_joint_state(&mut self, state: &JointState) {
+        let _ = self.joint_state_pub.send(&pack(state));
     }
 
-    pub fn publish_tf_v2(&mut self, tf: &TfV2) {
-        let _ = self.tf_v2.send(&pack(tf));
+    pub fn publish_tf(&mut self, tf: &Tf) {
+        let _ = self.tf_pub.send(&pack(tf));
     }
 
     pub fn respond_attach(&mut self, token: ReqReplyToken, status: &Status) {

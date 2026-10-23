@@ -200,7 +200,7 @@ pub(crate) fn s08() {
     let r = compile_fixture("s08_base_frame.usda", Selection::Asset { entry: None });
     let m = machine(&r, "/rover");
     assert!(m.accepted(), "{:?}", m.diagnostics);
-    assert_eq!(m.profile, ProfileKind::GearboxV2);
+    assert_eq!(m.profile, ProfileKind::Gearbox);
     let base = m.base_frame.unwrap();
     assert_eq!(m.frames[base].path, "/rover/chassis/base_footprint");
     assert_eq!(m.frames[base].role, FrameRole::Base);
@@ -493,19 +493,11 @@ pub(crate) fn s21() {
 
 pub(crate) fn s22() {
     let r = world("s22_invalid_values.usda");
-    let future = machine(&r, "/World/Future");
-    assert!(!future.accepted());
-    assert!(has(future, Code::UnknownSchemaVersion, "/World/Future"));
-    let explicit = machine(&r, "/World/Explicit");
-    assert_eq!((explicit.profile, explicit.schema_version), (ProfileKind::GearboxLegacy, Some(1)));
-    assert!(!error_codes(explicit).iter().any(|c| c.contains("schema_version")), "{:?}", explicit.diagnostics);
     let welded = machine(&r, "/World/Welded");
     assert!(welded.accepted(), "a disabled controller on a welded joint only warns: {:?}", welded.diagnostics);
     assert!(welded.diagnostics.iter().any(|d| d.code == Code::UnresolvedControllerJoint && d.severity == diagnostics::Severity::Warning));
     let live = machine(&r, "/World/Live");
     assert!(!live.accepted() && has(live, Code::UnresolvedControllerJoint, "/World/Live/weld"));
-    let wordy = machine(&r, "/World/Wordy");
-    assert!(has(wordy, Code::InvalidSchemaVersion, "/World/Wordy"));
     let numbers = machine(&r, "/World/Numbers");
     assert!(!numbers.accepted());
     let codes = error_codes(numbers);
@@ -666,7 +658,7 @@ fn s21_one_sided_and_unbounded_limits() {
     s21()
 }
 #[test]
-fn s22_unknown_versions_and_invalid_numbers() {
+fn s22_invalid_values() {
     s22()
 }
 

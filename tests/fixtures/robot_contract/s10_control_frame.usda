@@ -8,7 +8,6 @@
 
 def Xform "cart" (prepend apiSchemas = ["GearboxMachineAPI"])
 {
-    int gearbox:machine:schemaVersion = 2
     rel gearbox:machine:body = </cart/chassis>
     rel gearbox:machine:controlFrame = </cart/chassis/forward>
 

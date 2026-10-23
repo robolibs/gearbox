@@ -37,7 +37,7 @@ fn rig(prismatic: bool, inertia: f64, drive: Option<DriveSpec>, joint_name: &str
     let axis = if prismatic { JointAxis::LinX } else { JointAxis::AngX };
     let key = DofKey { machine: "rig".into(), generation: 1, joint: joint_name.into(), dof: if prismatic { DofToken::Linear } else { DofToken::Angular } };
     world.bind_dof(
-        DofSpec { key: key.clone(), interfaces: Interface::ALL.to_vec(), lower: None, upper: None, drive, hardware_cap: None, default_owner: None, legacy_caps: false },
+        DofSpec { key: key.clone(), interfaces: Interface::ALL.to_vec(), lower: None, upper: None, drive, hardware_cap: None, default_owner: None },
         joint,
         axis,
     );
@@ -179,7 +179,7 @@ pub(crate) fn c04() {
     let (driven, _) = arm(&mut world, None);
     let key = DofKey { machine: "rig".into(), generation: 1, joint: "/driven".into(), dof: DofToken::Angular };
     world.bind_dof(
-        DofSpec { key: key.clone(), interfaces: vec![Interface::Effort], lower: None, upper: None, drive: None, hardware_cap: None, default_owner: None, legacy_caps: false },
+        DofSpec { key: key.clone(), interfaces: vec![Interface::Effort], lower: None, upper: None, drive: None, hardware_cap: None, default_owner: None },
         driven,
         JointAxis::AngX,
     );
@@ -219,7 +219,6 @@ pub(crate) fn c05() {
                 drive: None,
                 hardware_cap: None,
                 default_owner: owned.then(|| owner.clone()),
-                legacy_caps: true,
             },
             joint,
             JointAxis::AngX,
@@ -249,7 +248,6 @@ pub(crate) fn c06_commit() {
             drive: servo_drive(400.0, 80.0, DriveType::Force),
             hardware_cap: None,
             default_owner: Some(owner.clone()),
-            legacy_caps: true,
         },
         rig.joint,
         rig.axis,

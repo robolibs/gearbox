@@ -5,7 +5,7 @@ runtime does with each authored value. Controllers, their behaviour and the
 bus API are in [CONTROLLER_SPEC.md](CONTROLLER_SPEC.md). Physics is Molla.
 
 The shared machine model is specified in [ROBOT_CONTRACT.md](ROBOT_CONTRACT.md):
-profiles and `gearbox:machine:schemaVersion`, scope and activation, typed
+profiles, scope and activation, typed
 joint endpoints, unit conversion, frames and the control frame, DOF identity
 and the joint command contract. It takes precedence over this file; the
 sections below that it changes point to it.
@@ -20,9 +20,9 @@ Terms:
   (CONTROLLER_SPEC §1).
 - **scene units**: the stage's own length unit, converted with
   `metersPerUnit` (§1).
-- Chassis frame: the machine body's local axes. On a legacy (v1) machine
-  forward is **−Y**, left is **+X**, up is **+Z** (§18); a v2 machine declares
-  its control frame, +X forward (ROBOT_CONTRACT §7).
+- Chassis frame: the machine body's local axes. Forward, left and up come
+  from the declared control frame, +X forward, +Y left, +Z up (§18,
+  ROBOT_CONTRACT §7).
 
 Source files: `controller.rs` (machine and controller discovery), `links.rs`
 (link tree, sensors, couplings, elements), `devices.rs` (actuator devices),
@@ -56,7 +56,6 @@ authored on it:
 - `gearbox:machine:kind`
 - `gearbox:machine:idPolicy`
 - a target on `rel gearbox:machine:body`
-- `int gearbox:machine:schemaVersion`
 
 Author the API schema. Several machines may sit side by side in one file (a
 yard with a tractor and a trailer). Machine prims must not nest: every scan
@@ -227,9 +226,7 @@ A body is a prim with `PhysicsRigidBodyAPI` applied.
 | `physics:simulationOwner` | Ignored. |
 
 Dynamic bodies take `physxRigidBody:linearDamping` and `angularDamping` when
-authored. Unauthored, legacy machines and bodies outside any machine get
-linear 0.1 and angular 0.5; strict profiles get the PhysX fallbacks, 0 and
-0.05 (ROBOT_CONTRACT §4).
+authored, else the PhysX fallbacks, 0 and 0.05 (ROBOT_CONTRACT §4).
 
 `PhysicsMassAPI` on the body prim (on collider prims it is ignored):
 
@@ -241,18 +238,14 @@ linear 0.1 and angular 0.5; strict profiles get the PhysX fallbacks, 0 and
 | `physics:principalAxes` | identity | Turns the principal inertia into the body frame. |
 | `physics:density` | | Ignored, as is material density. |
 
-Every collider also adds its volume × **1 kg/m³** to its body, whatever is
-authored. This is negligible except for very large hulls. Under a strict
-profile (ROBOT_CONTRACT §2) a body with an authored `physics:mass` takes no
-collider mass.
+A body with an authored `physics:mass` takes that mass and its colliders add
+none. Otherwise every collider adds its volume × **1 kg/m³** to its body,
+negligible except for very large hulls.
 
 Nested rigid bodies (a body prim under another body prim) are supported.
 
-**Chassis inertia guard** (legacy machines only). Once the machine has an agent, if the machine
-body weighs at least 100 kg and any diagonal component of its inertia is
-below 25 % of a box estimate from its collider bounds
-(`m/12 · (b² + c²)`), that component is replaced by the estimate and a
-warning names the machine. Fix the asset; the guard only keeps it usable.
+Authored inertia is used as authored; an implausible chassis inertia must be
+fixed in the asset.
 
 ## 5. Colliders and materials
 
@@ -346,14 +339,12 @@ the applied schema are not found.
   `rotX`, `rotY`, `rotZ` for revolute; `linear`, `transX`, `transY`,
   `transZ` for prismatic. The D6 tokens on a revolute or prismatic joint are
   `nonstandard_drive_token`, and a drive naming no free DOF of its joint is
-  `invalid_drive`: errors under strict profiles, warnings under legacy. An
-  unknown `drive:<dof>:physics:type` is an `invalid_drive` error.
+  `invalid_drive`; both are errors. An unknown `drive:<dof>:physics:type` is
+  an `invalid_drive` error.
 - `drive:<dof>:physics:targetPosition` authored: a position drive with
   `stiffness` and `damping`. Otherwise `targetVelocity` authored: a velocity
-  drive with `damping`. **Neither authored: on a legacy machine no drive
-  mode is set**, only `maxForce`; author `targetPosition = 0` for a spring at
-  rest. Under a strict profile the UsdPhysics fallback applies: target
-  position 0 (ROBOT_CONTRACT §5).
+  drive with `damping`. Neither authored: the UsdPhysics fallback applies,
+  target position 0 (ROBOT_CONTRACT §5).
 - Units (ROBOT_CONTRACT §4): force-drive gains × M (linear) or × M·L²·180/π
   (angular); acceleration-drive gains × 1 (linear) or × 180/π (angular).
   Targets: degrees → radians, or × `metersPerUnit`. `maxForce` × M·L (linear)
@@ -868,10 +859,9 @@ The machine is rejected (no agent, `machine_rejected` event with
   or unknown attribute value (§13);
 - device errors, including the ownership rule (§12.1, §12.4);
 - an invalid `gearbox:machine:tracks` definition (§11);
-- any error of the machine compiler (ROBOT_CONTRACT §3–§7): an unsupported
-  `schemaVersion`, an invalid joint endpoint, an unclassified joint cycle,
-  invalid numbers or units, two owners of one DOF, and the structural errors
-  of a strict profile.
+- any error of the machine compiler (ROBOT_CONTRACT §3–§7): an invalid joint
+  endpoint, an unclassified joint cycle, invalid numbers or units, two
+  owners of one DOF, and every other structural error.
 
 A machine the compiler rejects is a fixed preview: its bodies do not
 simulate, none of its joints is built, and no controller, service, device,
@@ -906,16 +896,16 @@ paths of machines that use diff drive.
 
 None of these picks a controller, an owner or a command key: commands bind
 to exact DOFs (ROBOT_CONTRACT §8), and a `standard` machine gets no
-controller from names (§2.4). The side and axle hints still shape the
-geometry of the legacy drive controllers on every profile that has them.
+controller from names (§2.4). The side and axle hints still shape the drive
+controllers' wheel geometry and their legacy steering mapping (STEERING.md).
 
 ## 18. Fixed conventions
 
-- Chassis frame of a legacy machine: forward −Y, left +X, up +Z, in a Z-up
-  stage. The drive controllers, heading, roll, pitch and wheel geometry read
-  it as the control frame +X forward, +Y left, +Z up turned −90° about Z. A v2
-  machine declares its control frame with `gearbox:machine:controlFrame`
-  (ROBOT_CONTRACT §7).
+- A machine declares its control frame with `gearbox:machine:controlFrame`,
+  +X forward, +Y left, +Z up; without one the base frame is the control
+  frame (ROBOT_CONTRACT §7). An asset whose chassis faces −Y declares a frame
+  on the chassis turned −90° about Z. The drive controllers, heading, roll,
+  pitch and wheel geometry read the chassis through it.
 - Wheel joints rotate about the wheel's axle. The drive sign of a registered
   tyre comes from its joint axis (§8.3); an unregistered wheel is driven
   with sign +1.

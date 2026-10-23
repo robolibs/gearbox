@@ -8,7 +8,6 @@
 
 def Xform "rover" (prepend apiSchemas = ["GearboxMachineAPI"])
 {
-    int gearbox:machine:schemaVersion = 2
     rel gearbox:machine:body = </rover/chassis>
     rel gearbox:machine:baseFrame = </rover/chassis/base_footprint>
     rel gearbox:machine:controlFrame = </rover/chassis/control>

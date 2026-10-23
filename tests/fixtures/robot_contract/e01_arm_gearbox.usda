@@ -9,7 +9,6 @@
 
 over "arm" (prepend apiSchemas = ["GearboxMachineAPI"])
 {
-    int gearbox:machine:schemaVersion = 2
     rel gearbox:machine:body = </arm/base>
 
     over "carriage"

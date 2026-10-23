@@ -242,7 +242,7 @@ pub fn run(fixture: &Path, schedule: &Schedule) -> Run {
         "engine": app.world().resource::<PhysicsWorld>().name(),
         "owner": driver.to_string(),
         "validity": "latched, simulation ticks",
-        "overlay": "e01_arm_gearbox.usda adds GearboxMachineAPI, schemaVersion 2, control body, tool_tip link, command interfaces",
+        "overlay": "e01_arm_gearbox.usda adds GearboxMachineAPI, control body, tool_tip link, command interfaces",
     });
     Run { model, trace, run }
 }
@@ -344,7 +344,7 @@ fn native_acceleration_drive_follows_the_degree_convention() {
 /// A real weed unit (default `machines/usd/weedunit.usdz`, or
 /// GEARBOX_TIP_ASSET): each tool_z joint is driven through a direct lease,
 /// and every ball_tip and tool_tip site rides its tool body at its own
-/// offset, published through the TF v2 edges.
+/// offset, published through the TF edges.
 #[test]
 #[ignore]
 fn real_weedunit_tips_follow_their_tool_bodies() {

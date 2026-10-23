@@ -153,19 +153,11 @@ collides with the second trailer.
 
 ### 2.2 Coupling frame
 
-**Between two v2 machines** (`gearbox:machine:schemaVersion = 2` on both)
-the coupling prims' full frames are used: the joint frames are the hitch and
+The coupling prims' full frames are used: the joint frames are the hitch and
 coupler prims' composed positions and rotations, and attaching aligns the
 coupler frame with the hitch frame ([ROBOT_CONTRACT.md](ROBOT_CONTRACT.md) §11).
-
-**Any other pair** keeps the v1 rule: only the coupling prims' **positions**
-are used; their rotations are ignored. The joint frames sit at the hitch and
-coupler prim positions with the orientation of the hitch body and the
-coupler body. Attaching aligns the coupler body with the hitch body's
-orientation, so the slave faces the same way as the master only when both
-bodies use the legacy chassis frame of [MACHINE_SPEC.md](MACHINE_SPEC.md)
-(forward −Y, left +X, up +Z). A rear hitch therefore sits at +Y on the
-tractor and a drawbar eye at −Y on the trailer.
+Author the hitch and coupler prims so their frames meet the way the slave
+should hang.
 
 On detach, the coupler joints the master drove on the slave through its
 `coupling` owner (the PTO and valves no slave controller claims) take their

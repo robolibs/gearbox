@@ -5,8 +5,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use bevy::math::DQuat;
-
 use super::compile::{Builder, leaf};
 use super::diagnostics::{Code, Diagnostic};
 use super::model::*;
@@ -59,11 +57,10 @@ fn pick_control_body(b: &mut Builder) -> Option<usize> {
     if b.scope.explicit {
         let authored = read::first_target(b.scene, &b.scope.root, "gearbox:machine:body");
         if let Some(target) = authored {
-            let target = b.resolve_target(&target);
             return match b.machine.body_index(&target) {
                 Some(i) => Some(i),
                 None => {
-                    b.strict_or_warn(
+                    b.error(
                         Code::InvalidControlBody,
                         Some(&b.scope.root.clone()),
                         format!("gearbox:machine:body -> {target} is not a rigid body of this machine"),
@@ -72,11 +69,9 @@ fn pick_control_body(b: &mut Builder) -> Option<usize> {
                 }
             };
         }
-        if b.profile == ProfileKind::GearboxV2 {
-            let root = b.scope.root.clone();
-            b.push(Diagnostic::error(Code::MissingControlBody, Some(&root), "schemaVersion 2 requires gearbox:machine:body"));
-            return None;
-        }
+        let root = b.scope.root.clone();
+        b.push(Diagnostic::error(Code::MissingControlBody, Some(&root), "a Gearbox machine requires gearbox:machine:body"));
+        return None;
     }
     if let Some(i) = b.scope.markers.iter().find_map(|m| b.machine.body_index(m)) {
         return Some(i);
@@ -116,12 +111,7 @@ fn pick_control_body(b: &mut Builder) -> Option<usize> {
         })
         .collect();
     let roots: Vec<usize> = (0..b.machine.bodies.len()).filter(|i| !children.contains(i)).collect();
-    let pick = anchored.first().copied().or_else(|| (roots.len() == 1).then(|| roots[0])).or_else(|| roots.first().copied());
-    if b.scope.explicit && pick.is_some() {
-        let root = b.scope.root.clone();
-        b.push(Diagnostic::info(Code::LegacyInference, Some(&root), "control body derived: no gearbox:machine:body"));
-    }
-    pick
+    anchored.first().copied().or_else(|| (roots.len() == 1).then(|| roots[0])).or_else(|| roots.first().copied())
 }
 
 /// A frame prim authored by relationship on the machine root: existing frame,
@@ -208,13 +198,13 @@ pub(super) fn build(b: &mut Builder) {
     let mut owners: HashMap<usize, FrameOwner> = HashMap::new();
     for index in first_site..b.machine.frames.len() {
         let path = b.machine.frames[index].path.clone();
-        let parent = read::first_target(b.scene, &path, "gearbox:link:parent").map(|t| b.resolve_target(&t));
+        let parent = read::first_target(b.scene, &path, "gearbox:link:parent");
         let owner = match parent {
             Some(target) => match (b.machine.body_index(&target), b.machine.frame_index(&target)) {
                 (Some(i), _) => Some(FrameOwner::Body(i)),
                 (None, Some(i)) if i != index => Some(FrameOwner::Frame(i)),
                 _ => {
-                    b.strict_or_warn(Code::ConflictingParent, Some(&path), format!("gearbox:link:parent -> {target} is not a body or frame of this machine"));
+                    b.error(Code::ConflictingParent, Some(&path), format!("gearbox:link:parent -> {target} is not a body or frame of this machine"));
                     owner_of(b, &path, Some(index))
                 }
             },
@@ -250,7 +240,7 @@ pub(super) fn build(b: &mut Builder) {
     for index in first_site..b.machine.frames.len() {
         if b.machine.frame_body(index).is_none() {
             let path = b.machine.frames[index].path.clone();
-            b.strict_or_warn(Code::ConflictingParent, Some(&path), "frame parents form a cycle");
+            b.error(Code::ConflictingParent, Some(&path), "frame parents form a cycle");
             if let Some(control) = control {
                 b.machine.frames[index].owner = FrameOwner::Body(control);
             }
@@ -273,7 +263,7 @@ fn base_and_control_frames(b: &mut Builder, control: Option<usize>) {
     let rides_control = |b: &Builder, frame: usize| b.machine.frame_body(frame) == Some(control);
 
     let base = match (b.profile, read::first_target(b.scene, &root, "gearbox:machine:baseFrame")) {
-        (ProfileKind::GearboxV2, Some(target)) => match frame_for_target(b, &target, FrameRole::Base) {
+        (ProfileKind::Gearbox, Some(target)) => match frame_for_target(b, &target, FrameRole::Base) {
             Ok(i) if rides_control(b, i) => Some(i),
             Ok(_) => {
                 b.push(Diagnostic::error(Code::InvalidBaseFrame, Some(&root), format!("gearbox:machine:baseFrame -> {target} does not ride the control body")));
@@ -294,7 +284,7 @@ fn base_and_control_frames(b: &mut Builder, control: Option<usize>) {
     }
 
     b.machine.control_frame = match b.profile {
-        ProfileKind::GearboxV2 => match read::first_target(b.scene, &root, "gearbox:machine:controlFrame") {
+        ProfileKind::Gearbox => match read::first_target(b.scene, &root, "gearbox:machine:controlFrame") {
             Some(target) => match frame_for_target(b, &target, FrameRole::Control) {
                 Ok(i) if rides_control(b, i) => Some(ControlFrame { frame: i, source: Provenance::Authored }),
                 Ok(_) => {
@@ -308,23 +298,6 @@ fn base_and_control_frames(b: &mut Builder, control: Option<usize>) {
             },
             None => b.machine.base_frame.map(|frame| ControlFrame { frame, source: Provenance::ProfileDefault }),
         },
-        ProfileKind::GearboxLegacy => {
-            let body = &b.machine.bodies[control];
-            b.machine.frames.push(FrameDescription {
-                path: format!("{}.gearbox:controlFrame", body.path),
-                name: "control_frame".to_string(),
-                owner: FrameOwner::Body(control),
-                transform: RigidTransform::new(bevy::math::DVec3::ZERO, DQuat::from_rotation_z(-std::f64::consts::FRAC_PI_2)),
-                role: FrameRole::Control,
-                publish: false,
-            });
-            b.push(Diagnostic::info(
-                Code::LegacyInference,
-                Some(&root),
-                "control frame derived from the legacy chassis convention: forward -Y, left +X, up +Z",
-            ));
-            Some(ControlFrame { frame: b.machine.frames.len() - 1, source: Provenance::LegacyDerived })
-        }
         ProfileKind::Standard => None,
     };
 }
@@ -344,6 +317,6 @@ pub(super) fn check_names(b: &mut Builder) {
     check("joint", b.machine.joints.iter().map(|j| (j.name.clone(), j.path.clone())).collect());
     check("dof", b.machine.dofs.iter().map(|d| (d.name.clone(), b.machine.joints[d.joint].path.clone())).collect());
     for (path, message) in dupes {
-        b.strict_or_warn(Code::DuplicateName, Some(&path), message);
+        b.error(Code::DuplicateName, Some(&path), message);
     }
 }

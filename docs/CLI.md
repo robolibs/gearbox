@@ -106,7 +106,7 @@ Inspect and drive machines
 | `cmd [OPTIONS] <CONTROLLER> [KEY=VAL]...` | Generic controller command: KEY=VAL pairs, `value=` and `element=` are numeric |
 | `controllers [MACHINE]` | Controller table with types and interfaces |
 | `links [OPTIONS] [MACHINE]` | The link tree: names, roles, parents, static offsets |
-| `tf [OPTIONS] [MACHINE]` | Stream link poses: switches the machine's tf on, prints, switches it off |
+| `tf [OPTIONS] [MACHINE]` | Stream the machine's TF edges: parent-relative transforms, Z up |
 | `set-value [OPTIONS] <LINK> <NAME> <VALUE>` | Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8) |
 | `tools <COMMAND>` | Attachments: what hangs on a machine, attach and detach slaves |
 

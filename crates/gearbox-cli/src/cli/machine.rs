@@ -138,7 +138,7 @@ enum Cmd {
         #[arg(long)]
         flat: bool,
     },
-    /// Stream link poses: switches the machine's tf on, prints, switches it off
+    /// Stream the machine's TF edges: parent-relative transforms, Z up
     Tf {
         machine: Option<String>,
         /// Only this link
@@ -147,7 +147,7 @@ enum Cmd {
         /// Prints per second
         #[arg(long, default_value_t = 5.0)]
         rate: f64,
-        /// Stop after this many poses
+        /// Stop after this many edges
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
@@ -1263,61 +1263,56 @@ fn tf(
     let client = ctx.client()?;
     let mc = client.machine(&machine_id);
     let mut sub = mc.tf()?;
-    check(mc.set_tf(true)?, "tf on")?;
     let stop_flag = install_ctrlc();
     let period = Duration::from_secs_f64(1.0 / rate.max(0.1));
     let mut last_print: std::collections::HashMap<String, Instant> = Default::default();
     let mut seen = 0usize;
     let started = Instant::now();
-    let result = loop {
+    loop {
         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            break Ok(());
+            return Ok(());
         }
-        let pose = match next_sample::<gearbox_api::LinkPose>(&mut sub, Duration::from_millis(200))
-        {
-            Ok(Some(p)) => p,
+        let tf = match next_sample::<gearbox_api::Tf>(&mut sub, Duration::from_millis(200)) {
+            Ok(Some(tf)) => tf,
             Ok(None) => {
                 if seen == 0 && started.elapsed() > ctx.timeout {
-                    break Err(CliError::timeout(format!(
-                        "no link poses from `{machine_id}` within {:.1}s; is the clock running?",
+                    return Err(CliError::timeout(format!(
+                        "no tf from `{machine_id}` within {:.1}s; is the clock running?",
                         ctx.timeout.as_secs_f64()
                     )));
                 }
                 continue;
             }
-            Err(err) => break Err(err.into()),
+            Err(err) => return Err(err.into()),
         };
-        let name = pose.name();
-        if link.as_deref().is_some_and(|l| l != name) {
-            continue;
+        for (i, (parent, child)) in tf.parents().into_iter().zip(tf.children()).enumerate() {
+            if link.as_deref().is_some_and(|l| l != child) {
+                continue;
+            }
+            if last_print.get(&child).is_some_and(|t| t.elapsed() < period) {
+                continue;
+            }
+            last_print.insert(child.clone(), Instant::now());
+            let t = tf.translation.get(3 * i..3 * i + 3).unwrap_or(&[0.0; 3]);
+            let q = tf.rotation.get(4 * i..4 * i + 4).unwrap_or(&[1.0, 0.0, 0.0, 0.0]);
+            if ctx.json {
+                let edge = json!({
+                    "parent": parent, "child": child, "translation": t, "rotation_wxyz": q,
+                    "tick": tf.tick, "sim_time_s": tf.sim_time_s,
+                });
+                println!("{edge}");
+            } else {
+                println!(
+                    "{:<20} -> {:<24} ({:+8.3}, {:+8.3}, {:+8.3})  q({:+.3}, {:+.3}, {:+.3}, {:+.3})  tick={}",
+                    parent, child, t[0], t[1], t[2], q[0], q[1], q[2], q[3], tf.tick
+                );
+            }
+            seen += 1;
+            if count.is_some_and(|n| seen >= n) {
+                return Ok(());
+            }
         }
-        let due = last_print
-            .get(&name)
-            .map(|t| t.elapsed() >= period)
-            .unwrap_or(true);
-        if !due {
-            continue;
-        }
-        last_print.insert(name.clone(), Instant::now());
-        if ctx.json {
-            println!(
-                "{}",
-                serde_json::to_string(&wire_json::env_to_json(&pack(&pose)).unwrap_or(json!({})))
-                    .unwrap_or_default()
-            );
-        } else {
-            println!(
-                "{:<24} ({:+8.3}, {:+8.3}, {:+8.3})  q({:+.3}, {:+.3}, {:+.3}, {:+.3})  t={}ms",
-                name, pose.x, pose.y, pose.z, pose.qw, pose.qx, pose.qy, pose.qz, pose.stamp_ms
-            );
-        }
-        seen += 1;
-        if count.is_some_and(|n| seen >= n) {
-            break Ok(());
-        }
-    };
-    let _ = mc.set_tf(false);
-    result
+    }
 }
 
 fn tools(ctx: &Ctx, cmd: ToolsCmd) -> Result<()> {

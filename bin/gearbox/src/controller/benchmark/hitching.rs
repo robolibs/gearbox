@@ -87,7 +87,6 @@ def Xform "World" {{
         app.init_resource::<crate::joint_control::runtime::ControlClock>().init_resource::<crate::joint_control::runtime::BindingWaits>();
         let mut controllers = bevy::ecs::schedule::Schedule::default();
         controllers.add_systems((
-            guard_chassis_inertia,
             prepare_machine_physics,
             crate::joint_control::runtime::bind_accepted_machines,
             wheel_forces::sync_machine_wheel_forces,

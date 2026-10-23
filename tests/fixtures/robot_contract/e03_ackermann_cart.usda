@@ -17,6 +17,7 @@ def Xform "cart" (
 )
 {
     rel gearbox:machine:body = </cart/chassis>
+    rel gearbox:machine:controlFrame = </cart/chassis/control_frame>
     token gearbox:machine:kind = "tractor"
     rel gearbox:machine:role:poweredWheelJoints = [</cart/Joints/rev_back_left>, </cart/Joints/rev_back_right>]
     rel gearbox:machine:role:passiveWheelJoints = [</cart/Joints/rev_front_left>, </cart/Joints/rev_front_right>]
@@ -37,6 +38,11 @@ def Xform "cart" (
         prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI", "GearboxLinkAPI"]
     )
     {
+        def Xform "control_frame"
+        {
+            quatd xformOp:orient = (0.7071067811865476, 0, 0, -0.7071067811865476)
+            uniform token[] xformOpOrder = ["xformOp:orient"]
+        }
         token gearbox:link:role = "base"
         float physics:mass = 500
         float3 physics:diagonalInertia = (200, 100, 250)

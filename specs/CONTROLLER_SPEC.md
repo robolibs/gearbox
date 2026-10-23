@@ -600,7 +600,11 @@ Under `/machines/<agent name>/`:
 | `encoders` | pub/sub | datapod `WheelEncoders` |
 | `turn_radius` | pub/sub | datapod `TurnRadius` |
 | `links` | que/ans | `ping` → `link_record`… |
-| `tf` | pub/sub | `link_pose` |
+| `tf` | pub/sub | `tf`: parent-relative transforms of the reporting tree (ROBOT_CONTRACT §7, §10) |
+| `description` | req/res | `ping` → `machine_description` (ROBOT_CONTRACT §10) |
+| `control` | req/res | `control_request` → `control_response` (ROBOT_CONTRACT §10) |
+| `joint_command` | req/res | `joint_command` → `joint_command_ack` (ROBOT_CONTRACT §10) |
+| `joint_state` | pub/sub | `joint_state` (ROBOT_CONTRACT §10) |
 | `tools` | que/ans | `ping` → `attachment`… |
 | `tools/attach`, `tools/detach` | req/res | `attach_request` / `detach_request` → `status` |
 | `sensors/<link>` | pub/sub | per sensor kind (§9.7) |
@@ -619,8 +623,7 @@ Sensor and actuator topics register on their first publish.
 - `cmd_vel` is accepted with the holder's session id, or with session 0 while
   nobody holds the machine. Another id while held: `BUSY`; a non-zero id
   while nobody holds it: `REFUSED`.
-- `cmd` is accepted under the same rule. A `cmd` with a `tf` prop needs no
-  session.
+- `cmd` is accepted under the same rule.
 - `emit` and `actuate` need no session.
 - With a session, silence longer than `hold_ms` zeroes the twist and 60 s of
   silence releases the session. A twist sent with session 0 has no timeout:
@@ -632,7 +635,6 @@ Sensor and actuator topics register on their first publish.
 
 | Props | Effect |
 |---|---|
-| `tf=on` / `off` (or `1`, `true`) | Starts or stops `/tf`. |
 | `tool=<slave id>` + anything | Forwarded to that attached slave (§8). |
 | `tyre_pressure_scope=all` / `axle:<n>` / `wheel:<link>` + `value` | Sets target tyre pressure in gauge bar (TYRE_PRESSURE.md). |
 | `request=<token>` + `value` | Slave request (§8). |
@@ -676,9 +678,10 @@ Published every frame for every machine with an agent.
 of attached slaves: name, parent, role, prim, joint, body, static offset to
 the parent (translation and quaternion w, x, y, z, asset Z-up axes; zero for
 joint-connected links), coupling `side|type|name`, element kind, number and
-designator, and authored values. `tf` streams each link's world pose
-(simulator world axes, Y up) every frame while switched on. `gearbox machine
-links` and `gearbox machine tf` print both; `GEARBOX_TF_OVERLAY` (`frames`,
+designator, and authored values. `tf` streams every edge of the reporting
+tree as a parent-relative transform in a right-handed Z-up world, once per
+rendered frame (ROBOT_CONTRACT §7). `gearbox machine links` and `gearbox
+machine tf` print both; `GEARBOX_TF_OVERLAY` (`frames`,
 `names`, `links`, `wheels`, `all`) turns the viewer's TF overlay on at start.
 
 ### 9.7 Sensor streams
@@ -779,7 +782,7 @@ Every registered device streams `gearbox.measurement.v1` on
 - `GEARBOX_MACHINE_ID` of an `external:process` child is the machine id, not
   the agent name when a `namespace` is authored. An exiting child is
   respawned every frame.
-- Two machines with one id on one stage are `duplicate_machine_id`: a warning under legacy (only one gets an agent), an error that rejects each machine of the two under a strict profile (ROBOT_CONTRACT §3).
+- Two machines with one id on one stage are `duplicate_machine_id`, an error that rejects both (ROBOT_CONTRACT §3).
 - The odometry speed is unsigned except for tracks.
 - A closed kinematic loop of joints without `excludeFromArticulation` is an
   `unclassified_cycle` error: the machine is rejected and its joints are not

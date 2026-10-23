@@ -231,7 +231,7 @@ fn wheel_readout(
 mod tests {
     use super::*;
     use crate::physics::backend::{
-        BodyDesc, ColliderDesc, DQuat, Inertia, JointDesc, JointKind, MassProps,
+        BodyDesc, ColliderDesc, DQuat, Inertia, JointDesc, JointKind, MassProps, Pose,
     };
 
     #[test]

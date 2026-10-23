@@ -21,7 +21,6 @@ fn spec(machine: &str, joint: &str, owner: Option<OwnerId>) -> DofSpec {
         drive: Some(DriveSpec { stiffness: 100.0, damping: 10.0, drive: DriveType::Force, max_force: Some(100.0) }),
         hardware_cap: None,
         default_owner: owner,
-        legacy_caps: false,
     }
 }
 
@@ -100,8 +99,6 @@ pub(crate) fn c08() {
     assert_eq!(reversed.coordinate(2.0), reversed.coordinate(1.0));
     assert_eq!(reversed.coordinate(-1.0), reversed.coordinate(0.0));
     assert_eq!(reversed.coordinate(f64::NAN), reversed.coordinate(0.0));
-    let legacy = NormalizedRange::legacy(1.2);
-    assert!((legacy.coordinate(0.5) - 0.6).abs() < 1e-12, "v1 u x range is preserved");
 }
 
 pub(crate) fn c09() {
@@ -165,8 +162,6 @@ pub(crate) fn c11() {
     for (policy, expected) in cases {
         assert_eq!(policy.effective(), expected, "{policy:?}");
     }
-    let legacy = CapPolicy { authored: Some(100.0), requested: Some(1000.0), safety: Some(500.0), ..Default::default() };
-    assert_eq!(legacy.effective_legacy(), Some(500.0), "legacy may exceed authored, never safety");
 
     let mut arbiter = Arbiter::new();
     let owner = OwnerId::new(OwnerClass::TestDriver, "m", "replay");

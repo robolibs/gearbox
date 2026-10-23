@@ -1,6 +1,7 @@
 //! Read-only audit of every USD package under an asset root: what the
 //! compiler makes of each machine, which profile it uses, its variant
-//! selections and the layers it depends on. Never writes to the root.
+//! selections and the layers it depends on. Every machine must be accepted.
+//! Never writes to the root.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -10,26 +11,15 @@ use serde_json::{Value, json};
 use super::compile::{CompileOptions, Selection};
 use super::diagnostics::Severity;
 use super::manifest;
-use super::model::ProfileKind;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Requirement {
-    /// Machines that declare a schemaVersion must be accepted.
-    Declared,
-    /// Every machine must be a schemaVersion 2 machine and accepted.
-    V2,
-}
 
 pub struct AuditArgs {
     pub asset_root: PathBuf,
     pub out: Option<PathBuf>,
-    pub requirement: Requirement,
 }
 
 pub fn parse_args(args: &[String]) -> Result<AuditArgs, String> {
     let mut root = None;
     let mut out = None;
-    let mut requirement = Requirement::Declared;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let (key, inline) = match arg.split_once('=') {
@@ -40,13 +30,6 @@ pub fn parse_args(args: &[String]) -> Result<AuditArgs, String> {
         match key {
             "--asset-root" => root = Some(PathBuf::from(value()?)),
             "--out" => out = Some(PathBuf::from(value()?)),
-            "--require" => {
-                requirement = match value()?.as_str() {
-                    "declared" => Requirement::Declared,
-                    "v2" => Requirement::V2,
-                    other => return Err(format!("--require {other}: expected declared or v2")),
-                }
-            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -54,7 +37,7 @@ pub fn parse_args(args: &[String]) -> Result<AuditArgs, String> {
     if !asset_root.is_dir() {
         return Err(format!("{} is not a directory", asset_root.display()));
     }
-    Ok(AuditArgs { asset_root, out, requirement })
+    Ok(AuditArgs { asset_root, out })
 }
 
 fn packages(root: &Path) -> Vec<PathBuf> {
@@ -101,7 +84,6 @@ fn dependencies(stage: &openusd::usd::Stage, root: &Path, package: &Path) -> Val
 
 pub fn audit(args: &AuditArgs) -> (Value, bool) {
     let mut assets = Vec::new();
-    let mut versions: BTreeMap<String, usize> = BTreeMap::new();
     let mut profiles: BTreeMap<String, usize> = BTreeMap::new();
     let mut codes: BTreeMap<String, usize> = BTreeMap::new();
     let mut failures = Vec::new();
@@ -120,16 +102,11 @@ pub fn audit(args: &AuditArgs) -> (Value, bool) {
         let result = super::compile(&stage, &options);
         let mut machines = Vec::new();
         for m in &result.machines {
-            *versions.entry(m.schema_version.map_or("none".to_string(), |v| v.to_string())).or_default() += 1;
             *profiles.entry(m.profile.as_str().to_string()).or_default() += 1;
             for d in m.diagnostics.iter().filter(|d| d.severity != Severity::Info) {
                 *codes.entry(format!("{}:{}", d.severity.as_str(), d.code.as_str())).or_default() += 1;
             }
-            let required = match args.requirement {
-                Requirement::Declared => m.schema_version.is_some(),
-                Requirement::V2 => true,
-            };
-            if required && (!m.accepted() || (args.requirement == Requirement::V2 && m.profile != ProfileKind::GearboxV2)) {
+            if !m.accepted() {
                 failures.push(format!("{relative}{}: {} ({} errors)", m.root, m.profile.as_str(), m.errors().count()));
             }
             let errors: Vec<Value> = m.errors().map(manifest::diagnostic).collect();
@@ -138,7 +115,6 @@ pub fn audit(args: &AuditArgs) -> (Value, bool) {
                 "root": m.root,
                 "machine_id": m.machine_id,
                 "profile": m.profile.as_str(),
-                "schema_version": m.schema_version,
                 "kind": m.kind,
                 "accepted": m.accepted(),
                 "bodies": m.bodies.len(),
@@ -170,8 +146,6 @@ pub fn audit(args: &AuditArgs) -> (Value, bool) {
     let report = json!({
         "manifest_version": super::model::MANIFEST_VERSION,
         "asset_root": args.asset_root.to_string_lossy(),
-        "requirement": match args.requirement { Requirement::Declared => "declared", Requirement::V2 => "v2" },
-        "schema_versions": versions,
         "profiles": profiles,
         "diagnostic_counts": codes,
         "failures": failures,
@@ -221,7 +195,7 @@ pub fn describe_main(args: &[String]) -> i32 {
     }
 }
 
-/// `gearbox audit-machines --asset-root DIR [--out FILE] [--require declared|v2]`.
+/// `gearbox audit-machines --asset-root DIR [--out FILE]`.
 pub fn main(args: &[String]) -> i32 {
     let args = match parse_args(args) {
         Ok(args) => args,
@@ -246,13 +220,8 @@ pub fn main(args: &[String]) -> i32 {
         None => print!("{text}"),
     }
     for failure in report["failures"].as_array().into_iter().flatten() {
-        eprintln!("audit-machines: requirement failed: {}", failure.as_str().unwrap_or_default());
+        eprintln!("audit-machines: rejected: {}", failure.as_str().unwrap_or_default());
     }
-    println!(
-        "audit-machines: {} packages, profiles {}, schema versions {}",
-        report["assets"].as_array().map_or(0, Vec::len),
-        report["profiles"],
-        report["schema_versions"]
-    );
+    println!("audit-machines: {} packages, profiles {}", report["assets"].as_array().map_or(0, Vec::len), report["profiles"]);
     if ok { 0 } else { 1 }
 }

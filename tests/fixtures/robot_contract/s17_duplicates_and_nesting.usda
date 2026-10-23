@@ -9,7 +9,6 @@ def Xform "World"
 {
     def Xform "dup" (prepend apiSchemas = ["GearboxMachineAPI"])
     {
-        int gearbox:machine:schemaVersion = 2
         rel gearbox:machine:body = </World/dup/base>
         def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
         {
@@ -54,7 +53,6 @@ def Xform "World"
 
     def Xform "outer" (prepend apiSchemas = ["GearboxMachineAPI"])
     {
-        int gearbox:machine:schemaVersion = 2
         rel gearbox:machine:body = </World/outer/hull>
         def Xform "hull" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
         {
@@ -63,7 +61,6 @@ def Xform "World"
         }
         def Xform "inner" (prepend apiSchemas = ["GearboxMachineAPI"])
         {
-            int gearbox:machine:schemaVersion = 2
             rel gearbox:machine:body = </World/outer/inner/core>
             def Xform "core" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
             {

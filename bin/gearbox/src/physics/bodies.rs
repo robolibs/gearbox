@@ -78,11 +78,11 @@ pub fn convert_rigid_bodies(
             desc.angvel = parent_rotation * vec3_to_d(rb.angular_velocity);
         }
         desc.sleeping = rb.starts_asleep;
-        // Body damping from the compiled model; legacy values otherwise.
+        // Body damping from the compiled model; the PhysX fallbacks otherwise.
         if kind == BodyKind::Dynamic {
-            use crate::machine_model::{LEGACY_ANGULAR_DAMPING, LEGACY_LINEAR_DAMPING};
+            use crate::machine_model::{SCHEMA_ANGULAR_DAMPING, SCHEMA_LINEAR_DAMPING};
             (desc.linear_damping, desc.angular_damping) =
-                member.and_then(|m| m.damping).unwrap_or((LEGACY_LINEAR_DAMPING, LEGACY_ANGULAR_DAMPING));
+                member.and_then(|m| m.damping).unwrap_or((SCHEMA_LINEAR_DAMPING, SCHEMA_ANGULAR_DAMPING));
         }
         desc.additional_mass = match authored_mass {
             Some(mass_kg) => Some(MassProps {
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn a_rejected_machine_body_is_a_fixed_preview() {
         let mut app = bodies_app();
-        let member = ModelMember { machine_root: "/m".into(), strict: true, rejected: true, explicit_mass: true, damping: None };
+        let member = ModelMember { machine_root: "/m".into(), rejected: true, damping: None };
         let entity = spawn_body(&mut app, Some(member), Quat::IDENTITY);
         app.update();
         let world = app.world().resource::<PhysicsWorld>();

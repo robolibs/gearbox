@@ -186,7 +186,7 @@ impl PhysicsWorld {
     }
 
     /// The joints between two bodies whose `axis` DOF `owner` holds. When no
-    /// machine bound any of them, all of them: the unbound legacy path.
+    /// machine bound any of them, all of them.
     pub fn owned_joints_between(&self, owner: &OwnerId, a: super::backend::BodyId, b: super::backend::BodyId, axis: JointAxis) -> Vec<JointId> {
         let between = self.backend.joints_between(a, b);
         let bound: Vec<JointId> = between.iter().copied().filter(|j| self.control.by_joint.contains_key(&(*j, axis))).collect();
@@ -244,7 +244,6 @@ impl PhysicsWorld {
                     drive,
                     hardware_cap: None,
                     default_owner: Some(owner.clone()),
-                    legacy_caps: true,
                 });
                 self.control.by_joint.insert((joint, axis), key.clone());
                 self.control.bindings.insert(key.clone(), (joint, axis));

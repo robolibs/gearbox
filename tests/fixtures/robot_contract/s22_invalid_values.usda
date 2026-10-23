@@ -7,27 +7,8 @@
 
 def Xform "World"
 {
-    def Xform "Future" (prepend apiSchemas = ["GearboxMachineAPI"])
-    {
-        int gearbox:machine:schemaVersion = 3
-        rel gearbox:machine:body = </World/Future/body>
-        def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
-        {
-        }
-    }
-    def Xform "Explicit" (prepend apiSchemas = ["GearboxMachineAPI"])
-    {
-        int gearbox:machine:schemaVersion = 1
-        rel gearbox:machine:body = </World/Explicit/body>
-        def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "GearboxLinkAPI"])
-        {
-            double3 xformOp:translate = (0, 6, 0)
-            uniform token[] xformOpOrder = ["xformOp:translate"]
-        }
-    }
     def Xform "Welded" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:roller"])
     {
-        int gearbox:machine:schemaVersion = 2
         rel gearbox:machine:body = </World/Welded/body>
         token gearbox:controller:roller:type = "builtin:joint_velocity"
         bool gearbox:controller:roller:enabled = 0
@@ -51,7 +32,6 @@ def Xform "World"
     }
     def Xform "Live" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:roller"])
     {
-        int gearbox:machine:schemaVersion = 2
         rel gearbox:machine:body = </World/Live/body>
         token gearbox:controller:roller:type = "builtin:joint_velocity"
         bool gearbox:controller:roller:enabled = 1
@@ -71,16 +51,6 @@ def Xform "World"
             rel physics:body0 = </World/Live/body>
             rel physics:body1 = </World/Live/roller>
             point3f physics:localPos0 = (0.5, 0, 0)
-        }
-    }
-    def Xform "Wordy" (prepend apiSchemas = ["GearboxMachineAPI"])
-    {
-        string gearbox:machine:schemaVersion = "two"
-        rel gearbox:machine:body = </World/Wordy/body>
-        def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
-        {
-            double3 xformOp:translate = (0, 3, 0)
-            uniform token[] xformOpOrder = ["xformOp:translate"]
         }
     }
     def Xform "Numbers" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])

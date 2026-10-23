@@ -594,7 +594,6 @@
       "profile": "standard",
       "reporting": null,
       "root": "/World/Robot",
-      "schema_version": null,
       "tree": [
         {
           "child": "arm",

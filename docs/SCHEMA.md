@@ -3,9 +3,8 @@
 > Historical design notes, superseded by
 > [specs/MACHINE_SPEC.md](../specs/MACHINE_SPEC.md),
 > [specs/CONTROLLER_SPEC.md](../specs/CONTROLLER_SPEC.md) and
-> [specs/ROBOT_CONTRACT.md](../specs/ROBOT_CONTRACT.md). The asset version is
-> `int gearbox:machine:schemaVersion` (absent or 1: legacy, 2: v2), not
-> `gearbox:machine:interfaceVersion`, which is parsed and unused. The
+> [specs/ROBOT_CONTRACT.md](../specs/ROBOT_CONTRACT.md). Assets carry no
+> schema version; `gearbox:machine:interfaceVersion` is parsed and unused. The
 > machine/controller wizard described below is future work. The tool API is
 > peerbus/agentio, not zenoh: topic names are in
 > `crates/gearbox-api/src/topics.rs` and payloads are datapod wire types. The

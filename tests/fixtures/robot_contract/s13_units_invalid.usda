@@ -9,7 +9,6 @@ def Xform "World"
 {
     def Xform "Cart" (prepend apiSchemas = ["GearboxMachineAPI"])
     {
-        int gearbox:machine:schemaVersion = 2
         rel gearbox:machine:body = </World/Cart/body>
         def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
         {

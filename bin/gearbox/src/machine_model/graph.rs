@@ -112,7 +112,7 @@ fn reporting_tree(b: &mut Builder) {
         let Some(child) = edges.iter().find(|e| e.joint == Some(index)).map(|e| e.child) else { continue };
         let path = b.machine.bodies[child].path.clone();
         if read::first_target(b.scene, &path, "gearbox:link:parent").is_some() {
-            b.strict_or_warn(
+            b.error(
                 Code::ConflictingParent,
                 Some(&path),
                 format!("gearbox:link:parent declares a static parent for a body joint {} moves", joint.path),

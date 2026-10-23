@@ -39,6 +39,7 @@ def Xform "robot" (
     token gearbox:machine:idPolicy = "prim_path"
     token gearbox:machine:upAxis = "Z"
     rel gearbox:machine:body = </robot/chassis>
+    rel gearbox:machine:controlFrame = </robot/chassis/control_frame>
     rel gearbox:machine:role:poweredWheelJoints = [
         </robot/Joints/rev_left>,
         </robot/Joints/rev_right>
@@ -63,6 +64,11 @@ def Xform "robot" (
         prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
     )
     {
+        def Xform "control_frame"
+        {
+            quatd xformOp:orient = (0.7071067811865476, 0, 0, -0.7071067811865476)
+            uniform token[] xformOpOrder = ["xformOp:orient"]
+        }
         float physics:mass = 22.0
         vector3f physics:diagonalInertia = (0.9, 0.7, 1.4)
         # The URDF origin, lifted so the casters and tyres touch z = 0.

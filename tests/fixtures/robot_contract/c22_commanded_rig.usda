@@ -8,7 +8,6 @@
 
 def Xform "rig" (prepend apiSchemas = ["GearboxMachineAPI"])
 {
-    int gearbox:machine:schemaVersion = 2
     rel gearbox:machine:body = </rig/base>
 
     def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])

@@ -8,9 +8,6 @@ use bevy::math::{DQuat, DVec3};
 
 use super::diagnostics::{Diagnostic, Severity};
 
-/// Highest `gearbox:machine:schemaVersion` this runtime understands; the
-/// `schema-v1-only` rollback build reads only legacy assets.
-pub const SCHEMA_VERSION_CURRENT: i64 = if cfg!(feature = "schema-v1-only") { 1 } else { 2 };
 /// Version tag of the serialized manifest.
 pub const MANIFEST_VERSION: &str = "gearbox.robot_manifest.v1";
 /// Convention every pose and vector of the manifest is expressed in.
@@ -19,12 +16,9 @@ pub const WORLD_CONVENTION: &str = "right_handed_z_up_si";
 pub const DEFAULT_COMMAND_VALIDITY_MS: u64 = 500;
 /// Longest validity a live command may ask for (ms).
 pub const MAX_COMMAND_VALIDITY_MS: u64 = 10_000;
-/// `PhysxRigidBodyAPI` fallback body damping (1/s): strict profiles.
+/// `PhysxRigidBodyAPI` fallback body damping (1/s).
 pub const SCHEMA_LINEAR_DAMPING: f64 = 0.0;
 pub const SCHEMA_ANGULAR_DAMPING: f64 = 0.05;
-/// Gearbox v1 body damping (1/s): legacy machines and bodies outside any machine.
-pub const LEGACY_LINEAR_DAMPING: f64 = 0.1;
-pub const LEGACY_ANGULAR_DAMPING: f64 = 0.5;
 
 /// Where a value came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,8 +27,6 @@ pub enum Provenance {
     Authored,
     /// The schema's fallback for an attribute nobody authored.
     SchemaDefault,
-    /// Filled by the legacy (v1) decoder from conventions or names.
-    LegacyDerived,
     /// The profile's documented default.
     ProfileDefault,
     /// Computed from other values (poses, graph, units).
@@ -46,7 +38,6 @@ impl Provenance {
         match self {
             Self::Authored => "authored",
             Self::SchemaDefault => "schema_default",
-            Self::LegacyDerived => "legacy_derived",
             Self::ProfileDefault => "profile_default",
             Self::Derived => "derived",
         }
@@ -75,9 +66,6 @@ impl<T> Valued<T> {
     pub fn profile(value: T) -> Self {
         Self::new(value, Provenance::ProfileDefault)
     }
-    pub fn legacy(value: T) -> Self {
-        Self::new(value, Provenance::LegacyDerived)
-    }
 }
 
 /// Which decoder read the machine.
@@ -86,23 +74,16 @@ pub enum ProfileKind {
     /// Bare UsdPhysics (optionally Isaac metadata): structure only, no
     /// guessed controllers or command interfaces.
     Standard,
-    /// Gearbox metadata without `schemaVersion`: legacy v1 decoding.
-    GearboxLegacy,
-    /// `gearbox:machine:schemaVersion = 2`.
-    GearboxV2,
+    /// A Gearbox machine root.
+    Gearbox,
 }
 
 impl ProfileKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Standard => "standard",
-            Self::GearboxLegacy => "gearbox_v1_legacy",
-            Self::GearboxV2 => "gearbox_v2",
+            Self::Gearbox => "gearbox",
         }
-    }
-
-    pub fn strict(self) -> bool {
-        matches!(self, Self::GearboxV2 | Self::Standard)
     }
 }
 
@@ -690,7 +671,6 @@ pub struct MachineDescription {
     pub machine_id: String,
     pub generation: u64,
     pub profile: ProfileKind,
-    pub schema_version: Option<i64>,
     pub kind: Option<String>,
     pub isaac: bool,
     pub units: StageUnits,

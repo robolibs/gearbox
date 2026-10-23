@@ -9,7 +9,6 @@ def Xform "World"
 {
     def Xform "Trailer" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:brakes"])
     {
-        int gearbox:machine:schemaVersion = 2
         rel gearbox:machine:body = </World/Trailer/chassis>
         token gearbox:controller:brakes:type = "builtin:brake"
         rel gearbox:controller:brakes:wheelJoints = [</World/Trailer/left_axle>, </World/Trailer/right_axle>]
@@ -43,7 +42,6 @@ def Xform "World"
     }
     def Xform "Steered" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"])
     {
-        int gearbox:machine:schemaVersion = 2
         rel gearbox:machine:body = </World/Steered/chassis>
         rel gearbox:machine:role:steeringJoints = [</World/Steered/steer_a>, </World/Steered/steer_b>]
         token gearbox:controller:drive:type = "builtin:ackermann_cmd_vel"
@@ -80,7 +78,6 @@ def Xform "World"
     }
     def Xform "Cart" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive", "GearboxControllerAPI:brakes"])
     {
-        int gearbox:machine:schemaVersion = 2
         rel gearbox:machine:body = </World/Cart/chassis>
         rel gearbox:machine:role:poweredWheelJoints = [</World/Cart/axle>]
         token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"

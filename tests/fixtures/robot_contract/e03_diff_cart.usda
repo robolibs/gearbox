@@ -17,6 +17,7 @@ def Xform "rover" (
 )
 {
     rel gearbox:machine:body = </rover/chassis>
+    rel gearbox:machine:controlFrame = </rover/chassis/control_frame>
     rel gearbox:machine:role:poweredWheelJoints = [</rover/Joints/wheel_left>, </rover/Joints/wheel_right>]
     token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"
     token gearbox:controller:drive:commandInterface = "cmd_vel"
@@ -32,6 +33,11 @@ def Xform "rover" (
         prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI", "GearboxLinkAPI"]
     )
     {
+        def Xform "control_frame"
+        {
+            quatd xformOp:orient = (0.7071067811865476, 0, 0, -0.7071067811865476)
+            uniform token[] xformOpOrder = ["xformOp:orient"]
+        }
         token gearbox:link:role = "base"
         float physics:mass = 80
         float3 physics:diagonalInertia = (8, 6, 10)

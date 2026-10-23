@@ -26,7 +26,7 @@ pub use arbiter::{Arbiter, Batch, DofSpec, DriveSpec, Grant};
 pub use policy::Cadence;
 pub use types::*;
 
-use crate::machine_model::{MachineDescription, OwnerKind, Provenance};
+use crate::machine_model::{MachineDescription, OwnerKind};
 
 pub fn owner_of(machine_id: &str, owner: &crate::machine_model::DofOwner) -> OwnerId {
     let class = match owner.kind {
@@ -39,7 +39,6 @@ pub fn owner_of(machine_id: &str, owner: &crate::machine_model::DofOwner) -> Own
 
 /// The DOFs of an accepted machine as the arbiter registers them.
 pub fn dof_specs(machine_id: &str, model: &MachineDescription) -> Vec<DofSpec> {
-    let legacy = model.profile == crate::machine_model::ProfileKind::GearboxLegacy;
     model
         .dofs
         .iter()
@@ -52,7 +51,7 @@ pub fn dof_specs(machine_id: &str, model: &MachineDescription) -> Vec<DofSpec> {
                 joint: model.joints[d.joint].path.clone(),
                 dof: d.token,
             },
-            interfaces: if d.interfaces.source == Provenance::Authored || legacy { d.interfaces.value.clone() } else { Vec::new() },
+            interfaces: d.interfaces.value.clone(),
             lower: d.limit.lower,
             upper: d.limit.upper,
             drive: d.drive.as_ref().map(|drive| DriveSpec {
@@ -63,7 +62,6 @@ pub fn dof_specs(machine_id: &str, model: &MachineDescription) -> Vec<DofSpec> {
             }),
             hardware_cap: None,
             default_owner: model.owners.get(&index).map(|o| owner_of(machine_id, o)),
-            legacy_caps: legacy,
         })
         .collect()
 }

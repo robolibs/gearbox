@@ -23,8 +23,7 @@ use gearbox_api::{
 use openusd::sdf::{Path as SdfPath, Value};
 
 use crate::physics::backend::{
-    Body, BodyId, CombineRule, DVec3, Inertia, Joint, JointAxis, MassProps,
-    Pose, Shape, ShapeView,
+    Body, BodyId, CombineRule, DVec3, Joint, JointAxis, Shape, ShapeView,
 };
 use crate::physics::AuthoredDrive;
 use usd_bevy::UsdPrimRef;
@@ -177,7 +176,6 @@ pub(crate) struct ControllerRuntimeState {
     applied_cmd_vel: HashMap<ControllerKey, CmdVel>,
     logged_empty_tire_pairs: HashSet<ControllerKey>,
     logged_steer: HashSet<ControllerKey>,
-    inertia_guarded: HashSet<ControllerKey>,
     machines_prepared: HashSet<ControllerKey>,
     /// Integral wheel-speed trim per controller under contact traction.
     speed_trim: HashMap<ControllerKey, f64>,
@@ -303,9 +301,8 @@ impl Plugin for ControllerDiscoveryPlugin {
                     sync_machine_agents,
                     reconcile_external_process_controllers,
                     apply_machine_agent_commands,
-                    crate::joint_control::api::serve_v2,
+                    crate::joint_control::api::serve,
                     apply_ui_drive,
-                    guard_chassis_inertia,
                     prepare_machine_physics,
                     crate::joint_control::runtime::bind_accepted_machines,
                     wheel_forces::sync_machine_wheel_forces.after(crate::services::ServiceCommandSet),
@@ -324,7 +321,7 @@ impl Plugin for ControllerDiscoveryPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (publish_machine_controller_states, publish_link_poses, crate::joint_control::api::publish_v2_state)
+                (publish_machine_controller_states, crate::joint_control::api::publish_state)
                     .after(bevy::transform::TransformSystems::Propagate),
             );
     }
@@ -352,7 +349,6 @@ fn clear_controller_state_on_reset(
     runtime.applied_cmd_vel.clear();
     runtime.logged_empty_tire_pairs.clear();
     runtime.logged_steer.clear();
-    runtime.inertia_guarded.clear();
     runtime.wheel_spin_angles.clear();
     last_speed.0.clear();
     states.states.clear();
@@ -495,7 +491,7 @@ pub fn discover_machines_from_stage(
 }
 
 /// The machines of `stage` as `model` compiled them: Gearbox machines keep
-/// their legacy controller and link readers, every machine carries its
+/// their controller and link readers, every machine carries its
 /// compiled description, and its compile errors reject it.
 pub fn discover_machines_with_model(
     stage: &openusd::usd::Stage,
@@ -514,8 +510,7 @@ pub fn discover_machines_with_model(
         let is_machine = api_schemas.iter().any(|api| api == "GearboxMachineAPI")
             || read_token(&stage, &prim, "gearbox:machine:kind").is_some()
             || read_token(&stage, &prim, "gearbox:machine:idPolicy").is_some()
-            || read_rel_first(&stage, &prim, "gearbox:machine:body").is_some()
-            || read_attr(&stage, &prim, "gearbox:machine:schemaVersion").is_some();
+            || read_rel_first(&stage, &prim, "gearbox:machine:body").is_some();
         if !is_machine {
             continue;
         }
@@ -624,8 +619,8 @@ pub fn discover_machines_with_model(
 }
 
 /// A machine without Gearbox metadata: its bodies, joints and frames, no
-/// controller and no guessed roles. Its legacy link tree is derived and
-/// only informs `/links`; the compiled model decides rejection.
+/// controller and no guessed roles. Its link tree is derived and only
+/// informs `/links`; the compiled model decides rejection.
 fn standard_machine(
     stage: &openusd::usd::Stage,
     prims: &[SdfPath],
@@ -636,8 +631,8 @@ fn standard_machine(
     let mut links = openusd::sdf::path(&model.root)
         .map(|root| crate::links::discover_link_tree(stage, &root, body.as_deref(), prims))
         .unwrap_or_default();
-    let legacy = std::mem::take(&mut links.errors);
-    links.warnings.extend(legacy.into_iter().map(|e| format!("derived /links: {e}")));
+    let derived = std::mem::take(&mut links.errors);
+    links.warnings.extend(derived.into_iter().map(|e| format!("derived /links: {e}")));
     links.errors = errors;
     MachineInstanceSpec {
         tracks: Vec::new(),
@@ -2332,7 +2327,7 @@ fn a_roller_wider_than_tall_rolls_about_its_cylinder_axis() {
     let roller = physics.insert_body(BodyDesc::dynamic());
     let along_x = DQuat::from_rotation_arc(DVec3::Y, DVec3::X);
     physics.insert_collider(ColliderDesc::new(Shape::Cylinder { half_height: 1.5, radius: 0.27 })
-        .pose(Pose::new(DVec3::ZERO, along_x)).parent(roller)).unwrap();
+        .pose(crate::physics::backend::Pose::new(DVec3::ZERO, along_x)).parent(roller)).unwrap();
     let (axle, width, radius) = body_tyre_geometry(&physics, roller).unwrap();
     assert!(axle.abs().abs_diff_eq(DVec3::X, 1e-9), "axle {axle}");
     assert!((width - 3.0).abs() < 1e-9 && (radius - 0.27).abs() < 1e-9, "width {width} radius {radius}");
@@ -4036,6 +4031,7 @@ pub(crate) fn rebase_asset_root_target(machine_prim: &str, target: &str) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::backend::Pose;
 
     #[test]
     fn discovers_tractor_drive_controller_metadata() {
@@ -4748,61 +4744,6 @@ fn yaw_rate_of(twist: &Twist) -> f32 {
     }
 }
 
-/// World poses of every link, for machines whose agent has `tf` switched on.
-fn publish_link_poses(
-    inventory: Res<ControllerInventory>,
-    keys: Res<MachineAgentKeys>,
-    bus: Option<ResMut<GearboxBus>>,
-    time: Res<Time>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
-    transforms: Query<&GlobalTransform>,
-) {
-    let Some(mut bus) = bus else { return };
-    let stamp_ms = (time.elapsed_secs_f64() * 1000.0) as u32;
-    for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        let Some(machine_id) = keys
-            .0
-            .iter()
-            .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
-            .map(|(machine_id, _)| machine_id.clone())
-        else {
-            continue;
-        };
-        let Some(agent) = bus.machines.get_mut(&machine_id) else {
-            continue;
-        };
-        if !agent.tf_enabled() {
-            continue;
-        }
-        for (index, link) in machine.links.links.iter().enumerate() {
-            let Some(entity) = find_prim_entity(scene_root, &link.prim_path, &prims, &parents)
-            else {
-                continue;
-            };
-            let Ok(gt) = transforms.get(entity) else {
-                continue;
-            };
-            let (_, rot, tr) = gt.to_scale_rotation_translation();
-            agent.publish_link_pose(&gearbox_api::LinkPose {
-                x: tr.x as f64,
-                y: tr.y as f64,
-                z: tr.z as f64,
-                qw: rot.w as f64,
-                qx: rot.x as f64,
-                qy: rot.y as f64,
-                qz: rot.z as f64,
-                index: index as u32,
-                stamp_ms,
-                props: Props::from_pairs(&[("name", link.name.as_str())]).into_bytes(),
-            });
-        }
-    }
-}
-
 /// Lat/lon/alt the world's local origin sits at. The sim has no notion of
 /// where on Earth it is, so GNSS needs a fixed datum to project the local
 /// ENU-style world frame (see the REP-103 remap above: world +X/+Y/+Z is
@@ -5150,124 +5091,6 @@ pub fn discover_static_attachments_from_stage(stage: &openusd::usd::Stage) -> Ve
         }
     }
     out
-}
-
-/// Authored inertia below this fraction of the box estimate from the
-/// chassis collider bounds is replaced by the estimate.
-const INERTIA_PLAUSIBLE_FRACTION: f64 = 0.25;
-
-/// A chassis whose `physics:diagonalInertia` is far too small for its mass
-/// spins on every suspension impulse. Substitute a box estimate from the
-/// collider bounds, once per machine, and say so.
-fn guard_chassis_inertia(
-    inventory: Res<ControllerInventory>,
-    keys: Res<MachineAgentKeys>,
-    mut runtime: ResMut<ControllerRuntimeState>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
-    mut physics: ResMut<crate::physics::PhysicsWorld>,
-) {
-    for machine in &inventory.machines {
-        let Some(scene_root) = machine.scene_root else {
-            continue;
-        };
-        let key = ControllerKey::new(scene_root, &machine.id, "chassis");
-        if runtime.inertia_guarded.contains(&key) {
-            continue;
-        }
-        // A strict machine's authored inertia is used as authored.
-        if machine.model.as_ref().is_some_and(|m| m.profile.strict()) {
-            continue;
-        }
-        // Only once the machine is fully up: agent created, bodies and
-        // colliders materialised, authored mass in place.
-        if !keys
-            .0
-            .values()
-            .any(|k| k.scene_root == scene_root && k.machine_id == machine.id)
-        {
-            continue;
-        }
-        let Some(body_path) = machine.body.as_deref() else {
-            continue;
-        };
-        let Some(entity) = find_prim_entity(scene_root, body_path, &prims, &parents) else {
-            continue;
-        };
-        let Some(handle) = physics.entity_to_body.get(&entity).copied() else {
-            continue;
-        };
-        let Some(body) = physics.body(handle) else {
-            continue;
-        };
-        if body.colliders().is_empty() {
-            continue;
-        }
-        let mut lo = DVec3::new(f64::MAX, f64::MAX, f64::MAX);
-        let mut hi = DVec3::new(f64::MIN, f64::MIN, f64::MIN);
-        for ch in body.colliders() {
-            if let Some(col) = physics.collider(ch) {
-                let aabb = col.aabb_at(col.position_wrt_parent().unwrap_or(Pose::IDENTITY));
-                lo = lo.min(aabb.mins);
-                hi = hi.max(aabb.maxs);
-            }
-        }
-        let mass = body.mass();
-        if mass < 100.0 {
-            continue;
-        }
-        runtime.inertia_guarded.insert(key);
-        let ext = hi - lo;
-        if ext.x <= 0.0 || ext.y <= 0.0 || ext.z <= 0.0 {
-            continue;
-        }
-        let estimate = DVec3::new(
-            mass / 12.0 * (ext.y * ext.y + ext.z * ext.z),
-            mass / 12.0 * (ext.x * ext.x + ext.z * ext.z),
-            mass / 12.0 * (ext.x * ext.x + ext.y * ext.y),
-        );
-        // Compare in the body frame, where the box estimate lives: principal
-        // values are sorted into their own frame and do not line up with
-        // the collider axes.
-        let com = body.local_center_of_mass();
-        let mut tensor = body.inertia_tensor();
-        let authored = DVec3::new(tensor.x_axis.x, tensor.y_axis.y, tensor.z_axis.z);
-        let too_small = |a: f64, e: f64| a < e * INERTIA_PLAUSIBLE_FRACTION;
-        if !too_small(authored.x, estimate.x)
-            && !too_small(authored.y, estimate.y)
-            && !too_small(authored.z, estimate.z)
-        {
-            continue;
-        }
-        let estimate = DVec3::new(
-            if too_small(authored.x, estimate.x) { estimate.x } else { authored.x },
-            if too_small(authored.y, estimate.y) { estimate.y } else { authored.y },
-            if too_small(authored.z, estimate.z) { estimate.z } else { authored.z },
-        );
-        tensor.x_axis.x = estimate.x;
-        tensor.y_axis.y = estimate.y;
-        tensor.z_axis.z = estimate.z;
-        warn!(
-            "gearbox-control: {} chassis inertia ({:.0}, {:.0}, {:.0}) is implausible for {:.0} kg over {:.1}x{:.1}x{:.1} m; using ({:.0}, {:.0}, {:.0})",
-            machine.id,
-            authored.x,
-            authored.y,
-            authored.z,
-            mass,
-            ext.x,
-            ext.y,
-            ext.z,
-            estimate.x,
-            estimate.y,
-            estimate.z
-        );
-        if let Some(body) = physics.body_mut(handle) {
-            body.set_additional_mass(
-                MassProps { local_com: com, mass, inertia: Inertia::Tensor(tensor) },
-                true,
-            );
-        }
-    }
 }
 
 /// How hard a tyre bears on the ground, in kilopascals: the load it carries

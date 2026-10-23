@@ -206,7 +206,7 @@ pub(super) fn evaluate(b: &mut Builder) {
         let capability = lookup(feature);
         if capability.status == CapabilityStatus::Unsupported {
             for path in &paths {
-                b.strict_or_warn(Code::UnsupportedCapability, Some(path), format!("{feature}: {}", capability.reason));
+                b.error(Code::UnsupportedCapability, Some(path), format!("{feature}: {}", capability.reason));
             }
         }
         b.machine.capabilities.push(CapabilityResult {

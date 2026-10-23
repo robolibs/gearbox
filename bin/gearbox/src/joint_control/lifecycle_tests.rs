@@ -1,12 +1,12 @@
 //! Lifecycle cases of plan 001 §9.2: a rejected machine activates nothing,
-//! detached joints stop, v2 commands are validated before the arbiter, state
+//! detached joints stop, API commands are validated before the arbiter, state
 //! never reports a commanded effort as measured, and a failed activation
 //! leaves no binding behind.
 
 use std::time::Instant;
 
 use bevy::prelude::*;
-use gearbox_api::{JointCommandV2, code, joint_mode, names_to_bytes};
+use gearbox_api::{JointCommand, code, joint_mode, names_to_bytes};
 use glam::DVec3;
 
 use super::api::{batch_from_command, sample_joint_state};
@@ -77,7 +77,6 @@ pub(crate) fn c20() {
         drive: None,
         hardware_cap: None,
         default_owner: Some(coupling.clone()),
-        legacy_caps: true,
     }])
     .unwrap();
     let batch = Batch { owner: coupling.clone(), epoch: 0, sequence: 1, commands: vec![(key.clone(), Setpoint::Velocity { qdot: 56.5 })], validity: Validity::Latched, requested_cap: None };
@@ -104,12 +103,12 @@ fn rig_model() -> crate::machine_model::MachineDescription {
     model
 }
 
-/// v2 commands convert whole or not at all; unknown modes, names and stale
+/// API commands convert whole or not at all; unknown modes, names and stale
 /// generations are rejected with their code.
 pub(crate) fn c22() {
     let model = rig_model();
     let grant = Grant { owner: OwnerId::new(OwnerClass::Direct, "rig", "client#1"), epoch: 1, dofs: vec![] };
-    let command = |modes: Vec<u8>, names: &[&str], generation: u64| JointCommandV2 {
+    let command = |modes: Vec<u8>, names: &[&str], generation: u64| JointCommand {
         session: 1,
         epoch: 1,
         sequence: 1,
@@ -125,7 +124,7 @@ pub(crate) fn c22() {
     let ok = batch_from_command(&model, "rig", &grant, &command(vec![joint_mode::POSITION], &["shoulder"], model.generation)).unwrap();
     assert_eq!(ok.commands[0].1, Setpoint::Position { q: 0.25, qdot: None });
     assert_eq!(ok.validity, Validity::WallMs(model.command_validity_ms));
-    let reject = |c: JointCommandV2| batch_from_command(&model, "rig", &grant, &c).unwrap_err().0;
+    let reject = |c: JointCommand| batch_from_command(&model, "rig", &grant, &c).unwrap_err().0;
     assert_eq!(reject(command(vec![9], &["shoulder"], model.generation)), code::UNSUPPORTED);
     assert_eq!(reject(command(vec![joint_mode::EFFORT], &["elbow"], model.generation)), code::NOT_FOUND);
     assert_eq!(reject(command(vec![joint_mode::EFFORT], &["shoulder"], model.generation + 1)), code::REFUSED);
@@ -161,12 +160,12 @@ pub(crate) fn c23() {
     assert!(first.velocity[0].is_nan() && state.velocity[0] > 0.0, "rates need two samples");
 }
 
-/// The v2 server: a lease belongs to its claimed session and generation, a
+/// The control server: a lease belongs to its claimed session and generation, a
 /// command needs it, a new session revokes it, a reset clears every lease
 /// and command, and an overlong validity is refused.
 pub(crate) fn c21() {
     use super::api::{DirectLeases, handle_control, handle_joint_command};
-    use gearbox_api::{ControlRequestV2, command_status, control_op};
+    use gearbox_api::{ControlRequest, command_status, control_op};
     let model = rig_model();
     let mut world = PhysicsWorld::default();
     world.set_gravity(DVec3::ZERO);
@@ -178,8 +177,8 @@ pub(crate) fn c21() {
     world.bind_machine("rig", &model, |_| Some(joint)).unwrap();
     let mut leases = DirectLeases::default();
     let key = DofKey { machine: "rig".into(), generation: model.generation, joint: "/rig/shoulder".into(), dof: DofToken::Angular };
-    let control = |op, session, generation, epoch| ControlRequestV2 { session, generation, epoch, op, resume: 0, names: names_to_bytes(&["shoulder"]) };
-    let command = |session, epoch, sequence, validity_ms| JointCommandV2 {
+    let control = |op, session, generation, epoch| ControlRequest { session, generation, epoch, op, resume: 0, names: names_to_bytes(&["shoulder"]) };
+    let command = |session, epoch, sequence, validity_ms| JointCommand {
         session,
         epoch,
         sequence,
@@ -258,7 +257,7 @@ fn c20_detached_joints_stop_and_keep_their_owner() {
     c20()
 }
 #[test]
-fn c22_v2_commands_are_validated_whole() {
+fn c22_api_commands_are_validated_whole() {
     c22()
 }
 #[test]
@@ -270,10 +269,10 @@ fn c24_a_failed_activation_binds_nothing() {
     c24()
 }
 
-/// TF v2 edges follow moving bodies: ball_tip rides the probe, tool_tip the
+/// TF edges follow moving bodies: ball_tip rides the probe, tool_tip the
 /// arm, and composing the edges from the root gives each site's world pose.
 #[test]
-fn tf_v2_sites_follow_their_moving_bodies() {
+fn tf_sites_follow_their_moving_bodies() {
     use crate::machine_model::RigidTransform;
     use bevy::math::{DQuat, DVec3};
     let result = crate::machine_model::compile_file(&fixture("s09_sites.usda"), &CompileOptions::default()).unwrap();
@@ -306,6 +305,6 @@ fn tf_v2_sites_follow_their_moving_bodies() {
     assert!((tool.translation - ball.translation).length() > 0.05, "two distinct sites");
 }
 #[test]
-fn c21_v2_leases_follow_the_session_and_a_reset_clears_them() {
+fn c21_leases_follow_the_session_and_a_reset_clears_them() {
     c21()
 }

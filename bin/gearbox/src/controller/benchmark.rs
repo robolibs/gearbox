@@ -126,7 +126,6 @@ impl Fixture {
         app.init_resource::<crate::joint_control::runtime::ControlClock>().init_resource::<crate::joint_control::runtime::BindingWaits>();
         let mut controllers = bevy::ecs::schedule::Schedule::default();
         controllers.add_systems((
-            guard_chassis_inertia,
             prepare_machine_physics,
             crate::joint_control::runtime::bind_accepted_machines,
             wheel_forces::sync_machine_wheel_forces,
@@ -149,10 +148,8 @@ impl Fixture {
             let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
             let chassis = physics.entity_to_body[&chassis_entity];
             let mass: f64 = bodies.iter().map(|id| physics.body(*id).unwrap().mass()).sum();
-            let strict = machine.model.as_ref().is_some_and(|m| m.profile.strict());
             if kubota {
-                let authored = if strict { 6311.0 } else { 6317.613973 };
-                assert!((mass - authored).abs() < 0.001, "imported mass {mass}");
+                assert!((mass - 6311.0).abs() < 0.001, "imported mass {mass}");
             } else if kind == FixtureKind::Knoche {
                 assert!((2750.0..2760.0).contains(&mass), "imported harrow mass {mass}");
             } else if kind == FixtureKind::Krampe {

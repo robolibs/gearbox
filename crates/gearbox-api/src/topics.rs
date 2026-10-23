@@ -25,6 +25,7 @@ pub const MACHINE_CMD: &str = "cmd";
 pub const MACHINE_STATE: &str = "state";
 pub const MACHINE_ODOM: &str = "odom";
 pub const MACHINE_LINKS: &str = "links";
+/// Stream: parent-relative frame transforms in a right-handed Z-up world (`Tf`).
 pub const MACHINE_TF: &str = "tf";
 pub const MACHINE_ENCODERS: &str = "encoders";
 pub const MACHINE_IMU: &str = "imu";
@@ -41,16 +42,14 @@ pub const MACHINE_EMIT: &str = "emit";
 pub const MACHINE_ACTUATE: &str = "actuate";
 /// Prefix of the per-device actuator streams, `actuators/<device>`.
 pub const MACHINE_ACTUATORS: &str = "actuators";
-/// Req/res: the machine generation's manifest (`MachineDescriptionV2`).
-pub const MACHINE_DESCRIPTION_V2: &str = "description_v2";
-/// Req/res: a joint command batch under a direct lease (`JointCommandV2`).
-pub const MACHINE_JOINT_COMMAND_V2: &str = "joint_command_v2";
-/// Req/res: acquire or release a direct lease over DOFs (`ControlRequestV2`).
-pub const MACHINE_CONTROL_V2: &str = "control_v2";
+/// Req/res: the machine generation's manifest (`MachineDescription`).
+pub const MACHINE_DESCRIPTION: &str = "description";
+/// Req/res: a joint command batch under a direct lease (`JointCommand`).
+pub const MACHINE_JOINT_COMMAND: &str = "joint_command";
+/// Req/res: acquire, release or reset direct leases over DOFs (`ControlRequest`).
+pub const MACHINE_CONTROL: &str = "control";
 /// Stream: measured and commanded joint state, once per rendered frame after its physics steps.
-pub const MACHINE_JOINT_STATE_V2: &str = "joint_state_v2";
-/// Stream: parent-relative frame transforms in a right-handed Z-up world.
-pub const MACHINE_TF_V2: &str = "tf_v2";
+pub const MACHINE_JOINT_STATE: &str = "joint_state";
 
 /// Topics hosted by a machine's own agent, unique per machine so the
 /// host directory holds one owner per topic.

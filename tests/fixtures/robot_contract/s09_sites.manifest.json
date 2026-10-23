@@ -619,10 +619,9 @@
       "machine_id": "weeder",
       "manifest_version": "gearbox.robot_manifest.v1",
       "owners": [],
-      "profile": "gearbox_v2",
+      "profile": "gearbox",
       "reporting": null,
       "root": "/weeder",
-      "schema_version": 2,
       "tree": [
         {
           "child": "arm",

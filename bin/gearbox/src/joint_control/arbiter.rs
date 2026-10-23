@@ -34,8 +34,6 @@ pub struct DofSpec {
     pub hardware_cap: Option<f64>,
     /// The owner that holds the DOF from activation.
     pub default_owner: Option<OwnerId>,
-    /// Legacy caps may exceed the authored drive cap (v1 decoding).
-    pub legacy_caps: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -407,7 +405,7 @@ impl Arbiter {
                 requested: command.requested_cap,
                 safety,
             };
-            let cap = if state.spec.legacy_caps { caps.effective_legacy() } else { caps.effective() };
+            let cap = caps.effective();
             let drive = state.spec.drive;
             // Without an authored drive the targets still reach a motor device
             // that realizes them; a bare joint gets no gain.

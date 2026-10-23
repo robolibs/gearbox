@@ -65,7 +65,6 @@ fn app(rate_hz: f64, physics_hz: f64) -> App {
             drive: None,
             hardware_cap: None,
             default_owner: Some(owner),
-            legacy_caps: true,
         },
         joint,
         JointAxis::AngX,

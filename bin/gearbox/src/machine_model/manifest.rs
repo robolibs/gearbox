@@ -228,7 +228,6 @@ pub fn machine(m: &MachineDescription) -> Value {
         "machine_id": m.machine_id,
         "generation": m.generation,
         "profile": m.profile.as_str(),
-        "schema_version": m.schema_version,
         "kind": m.kind,
         "isaac": m.isaac,
         "accepted": m.accepted(),

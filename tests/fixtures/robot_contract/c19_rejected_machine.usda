@@ -8,7 +8,6 @@
 
 def Xform "broken" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:brain"])
 {
-    int gearbox:machine:schemaVersion = 2
     rel gearbox:machine:body = </broken/base>
     token gearbox:controller:brain:type = "external:process"
     string gearbox:controller:brain:executable = "/bin/sh"

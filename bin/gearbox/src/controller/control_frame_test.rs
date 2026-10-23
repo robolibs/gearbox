@@ -1,6 +1,6 @@
-//! Rotated-equivalent machines drive the same way in their own axes: a
-//! legacy chassis forward along −Y, a schemaVersion 2 chassis forward along
-//! the +X of its declared control frame.
+//! Rotated-equivalent machines drive the same way in their own axes: each
+//! chassis forward along the +X of its declared control frame, one turned
+//! −90° about Z (forward −Y), one not.
 
 use super::*;
 use crate::physics::PhysicsWorld;
@@ -61,9 +61,9 @@ fn the_declared_control_frame_sets_the_drive_direction() {
         let entity = prims.iter(world).find(|(_, p)| p.path == format!("/World/{name}/chassis")).unwrap().0;
         world.resource::<PhysicsWorld>().entity_to_body[&entity]
     };
-    let (legacy, modern) = (chassis(&mut app, "legacy"), chassis(&mut app, "modern"));
+    let (turned, plain) = (chassis(&mut app, "turned"), chassis(&mut app, "plain"));
     let start = |app: &App, id| app.world().resource::<PhysicsWorld>().body(id).unwrap().translation();
-    let (legacy0, modern0) = (start(&app, legacy), start(&app, modern));
+    let (turned0, plain0) = (start(&app, turned), start(&app, plain));
     for _ in 0..240 {
         tick.run(app.world_mut());
         app.world_mut().resource_mut::<PhysicsWorld>().step();
@@ -72,12 +72,12 @@ fn the_declared_control_frame_sets_the_drive_direction() {
         let d = start(app, id) - from;
         glam::DVec3::new(d.x, 0.0, d.z)
     };
-    let (dl, dm) = (moved(&app, legacy, legacy0), moved(&app, modern, modern0));
+    let (dt, dp) = (moved(&app, turned, turned0), moved(&app, plain, plain0));
     // USD −Y is Bevy +Z; USD +X is Bevy +X.
-    assert!(dl.length() > 1.0 && dl.normalize().dot(glam::DVec3::Z) > 0.99, "legacy cart moved {dl:?}");
-    assert!(dm.length() > 1.0 && dm.normalize().dot(glam::DVec3::X) > 0.99, "v2 cart moved {dm:?}");
+    assert!(dt.length() > 1.0 && dt.normalize().dot(glam::DVec3::Z) > 0.99, "turned cart moved {dt:?}");
+    assert!(dp.length() > 1.0 && dp.normalize().dot(glam::DVec3::X) > 0.99, "plain cart moved {dp:?}");
     let states = app.world().resource::<ControllerStates>();
     let heading = |id: &str| states.states[&ControllerKey::new(root, id, "drive")].heading_rad;
-    assert!((heading("world_legacy") - 0.0).abs() < 1e-3, "legacy heading {}", heading("world_legacy"));
-    assert!((heading("world_modern") - std::f64::consts::FRAC_PI_2).abs() < 1e-3, "v2 heading {}", heading("world_modern"));
+    assert!((heading("world_turned") - 0.0).abs() < 1e-3, "turned heading {}", heading("world_turned"));
+    assert!((heading("world_plain") - std::f64::consts::FRAC_PI_2).abs() < 1e-3, "plain heading {}", heading("world_plain"));
 }

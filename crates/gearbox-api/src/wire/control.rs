@@ -1,21 +1,21 @@
-//! Versioned machine messages of the robot contract (`*_v2` leaves under
-//! `/machines/<id>/`). SI units: rad or m, rad/s or m/s, N·m or N. DOFs are
-//! named by their public names from `description_v2`; a name list is UTF-8
-//! with one name per line.
+//! Machine description, joint control and TF messages of the robot contract
+//! (leaves under `/machines/<id>/`). SI units: rad or m, rad/s or m/s, N·m or
+//! N. DOFs are named by their public names from `description`; a name list is
+//! UTF-8 with one name per line.
 
 use super::common::Props;
 
 /// The canonical JSON manifest of a machine generation: bodies, joints,
 /// DOFs with units and interfaces, frames, owners and capabilities.
-#[datapod::datapod(name = "gearbox.machine_description.v2")]
+#[datapod::datapod(name = "gearbox.machine_description.v1")]
 #[derive(Default)]
-pub struct MachineDescriptionV2 {
+pub struct MachineDescription {
     pub generation: u64,
     #[dp(bytes)]
     pub manifest: Vec<u8>,
 }
 
-impl MachineDescriptionV2 {
+impl MachineDescription {
     pub fn manifest_json(&self) -> String {
         String::from_utf8_lossy(&self.manifest).into_owned()
     }
@@ -29,7 +29,7 @@ pub fn names_from_bytes(bytes: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(bytes).lines().filter(|l| !l.is_empty()).map(str::to_string).collect()
 }
 
-/// Per-DOF mode of a [`JointCommandV2`].
+/// Per-DOF mode of a [`JointCommand`].
 pub mod joint_mode {
     pub const POSITION: u8 = 0;
     pub const VELOCITY: u8 = 1;
@@ -53,9 +53,9 @@ pub mod joint_mode {
 /// `values[i]` is the position, velocity or effort of `names[i]` by
 /// `modes[i]`; `feedforward[i]` is a position command's velocity, NaN for
 /// none. `validity_ms` 0 asks for the machine's default validity.
-#[datapod::datapod(name = "gearbox.joint_command.v2")]
+#[datapod::datapod(name = "gearbox.joint_command.v1")]
 #[derive(Default)]
-pub struct JointCommandV2 {
+pub struct JointCommand {
     pub session: u64,
     pub epoch: u64,
     pub sequence: u64,
@@ -74,7 +74,7 @@ pub struct JointCommandV2 {
     pub names: Vec<u8>,
 }
 
-impl JointCommandV2 {
+impl JointCommand {
     pub fn names(&self) -> Vec<String> {
         names_from_bytes(&self.names)
     }
@@ -88,11 +88,11 @@ pub mod command_status {
     pub const APPLIED: u32 = 3;
 }
 
-/// The answer to a [`JointCommandV2`]: accepted for the next physics tick,
+/// The answer to a [`JointCommand`]: accepted for the next physics tick,
 /// or rejected with the exact binding or authority error.
-#[datapod::datapod(name = "gearbox.joint_command_ack.v2")]
+#[datapod::datapod(name = "gearbox.joint_command_ack.v1")]
 #[derive(Default)]
-pub struct JointCommandAckV2 {
+pub struct JointCommandAck {
     pub sequence: u64,
     pub generation: u64,
     /// Physics tick at acceptance; the command applies from the next one.
@@ -103,7 +103,7 @@ pub struct JointCommandAckV2 {
     pub message: Vec<u8>,
 }
 
-impl JointCommandAckV2 {
+impl JointCommandAck {
     pub fn message(&self) -> String {
         String::from_utf8_lossy(&self.message).into_owned()
     }
@@ -119,9 +119,9 @@ pub mod control_op {
 
 /// Request or release direct authority over a set of DOFs under the
 /// caller's validated machine session.
-#[datapod::datapod(name = "gearbox.control_request.v2")]
+#[datapod::datapod(name = "gearbox.control_request.v1")]
 #[derive(Default)]
-pub struct ControlRequestV2 {
+pub struct ControlRequest {
     pub session: u64,
     pub generation: u64,
     /// The epoch being released.
@@ -134,9 +134,9 @@ pub struct ControlRequestV2 {
 }
 
 /// The server-issued lease: the epoch every command of it carries.
-#[datapod::datapod(name = "gearbox.control_response.v2")]
+#[datapod::datapod(name = "gearbox.control_response.v1")]
 #[derive(Default)]
-pub struct ControlResponseV2 {
+pub struct ControlResponse {
     pub epoch: u64,
     pub generation: u64,
     /// Physics tick the transfer takes effect at.
@@ -147,7 +147,7 @@ pub struct ControlResponseV2 {
     pub props: Vec<u8>,
 }
 
-impl ControlResponseV2 {
+impl ControlResponse {
     pub fn props(&self) -> Props {
         Props::from_bytes(&self.props)
     }
@@ -164,9 +164,9 @@ impl ControlResponseV2 {
 /// Measured joint state after a physics step, with what was commanded.
 /// `measured_effort[i]` is NaN when the backend cannot measure it; a
 /// commanded effort is never reported as measured.
-#[datapod::datapod(name = "gearbox.joint_state.v2")]
+#[datapod::datapod(name = "gearbox.joint_state.v1")]
 #[derive(Default)]
-pub struct JointStateV2 {
+pub struct JointState {
     pub generation: u64,
     pub tick: u64,
     pub sim_time_s: f64,
@@ -187,7 +187,7 @@ pub struct JointStateV2 {
     pub names: Vec<u8>,
 }
 
-impl JointStateV2 {
+impl JointState {
     pub fn names(&self) -> Vec<String> {
         names_from_bytes(&self.names)
     }
@@ -197,9 +197,9 @@ impl JointStateV2 {
 /// right-handed Z-up world (`props.convention`), with the world root pose of
 /// the tree's root. Edge `i` places `children[i]` in `parents[i]`:
 /// `translation[3i..3i+3]` m and `rotation[4i..4i+4]` as w, x, y, z.
-#[datapod::datapod(name = "gearbox.tf.v2")]
+#[datapod::datapod(name = "gearbox.tf.v1")]
 #[derive(Default)]
-pub struct TfV2 {
+pub struct Tf {
     pub generation: u64,
     pub tick: u64,
     pub sim_time_s: f64,
@@ -215,7 +215,7 @@ pub struct TfV2 {
     pub props: Vec<u8>,
 }
 
-impl TfV2 {
+impl Tf {
     pub fn parents(&self) -> Vec<String> {
         names_from_bytes(&self.parents)
     }

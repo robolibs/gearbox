@@ -22,13 +22,6 @@ impl CapPolicy {
             .map(|v| v.max(0.0))
             .reduce(f64::min)
     }
-
-    /// A legacy operating cap may exceed the authored one, never the
-    /// hardware or safety cap.
-    pub fn effective_legacy(&self) -> Option<f64> {
-        let requested = self.requested.or(self.authored);
-        [requested, self.hardware, self.safety].into_iter().flatten().map(|v| v.max(0.0)).reduce(f64::min)
-    }
 }
 
 /// `q(u) = q0 + u (q1 - q0)`, `u` clamped to [0, 1].
@@ -42,11 +35,6 @@ impl NormalizedRange {
     pub fn coordinate(&self, u: f64) -> f64 {
         let u = if u.is_finite() { u.clamp(0.0, 1.0) } else { 0.0 };
         self.at_zero + u * (self.at_one - self.at_zero)
-    }
-
-    /// v1 decoding: `u × range` from zero.
-    pub fn legacy(range: f64) -> Self {
-        Self { at_zero: 0.0, at_one: range }
     }
 }
 

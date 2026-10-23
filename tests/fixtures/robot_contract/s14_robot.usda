@@ -8,7 +8,6 @@
 
 def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:boom"])
 {
-    int gearbox:machine:schemaVersion = 2
     rel gearbox:machine:body = </robot/chassis>
     token gearbox:controller:boom:type = "builtin:joint_position"
     rel gearbox:controller:boom:target = </robot/Joints/lift>

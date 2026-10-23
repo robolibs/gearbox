@@ -298,7 +298,7 @@ pub struct UsdPhysicsJoint {
 /// `PhysicsCollisionGroup` prim. `members` and `filtered` are resolved
 /// to entity references at projection time. `members` is the raw
 /// `collection:colliders:includes` list — full UsdCollectionAPI rule
-/// evaluation is a v2 follow-up.
+/// evaluation is not implemented.
 #[derive(Component, Reflect, Debug, Clone, Default)]
 #[reflect(Component, Default)]
 pub struct UsdCollisionGroup {
@@ -345,11 +345,8 @@ pub struct JointEndpoints {
 #[derive(Component, Debug, Clone)]
 pub struct ModelMember {
     pub machine_root: String,
-    pub strict: bool,
     /// The machine failed validation: it stays as a non-simulating preview.
     pub rejected: bool,
-    /// Body with an authored `physics:mass`: its colliders add no mass under a strict profile.
-    pub explicit_mass: bool,
     /// Body velocity damping (linear, angular) in 1/s; `None` on joints.
     pub damping: Option<(f64, f64)>,
 }

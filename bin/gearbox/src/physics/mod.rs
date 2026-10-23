@@ -197,7 +197,7 @@ fn attach_projected_stages(world: &mut World) {
 }
 
 /// The compiled machines of a loaded stage; activation, discovery and the
-/// v2 endpoints read this one result.
+/// API endpoints read this one result.
 #[derive(Component, Clone)]
 pub struct LoadedModel(pub std::sync::Arc<crate::machine_model::CompileResult>);
 
@@ -226,18 +226,15 @@ fn compile_loaded_model(world: &World, stage: &openusd::usd::Stage, root: Entity
 }
 
 /// Tag every body and joint entity with the machine that owns it, so body,
-/// collider and joint insertion follow its profile and validation.
+/// collider and joint insertion follow its validation.
 fn mark_model_members(world: &mut World, model: &crate::machine_model::CompileResult, by_path: &HashMap<String, Entity>) {
     for machine in &model.machines {
         let rejected = !machine.accepted();
-        let strict = machine.profile.strict();
         for body in &machine.bodies {
             if let Some(&entity) = by_path.get(&body.path) {
                 world.entity_mut(entity).insert(ModelMember {
                     machine_root: machine.root.clone(),
-                    strict,
                     rejected,
-                    explicit_mass: body.mass.mass.is_some(),
                     damping: Some((body.linear_damping.value, body.angular_damping.value)),
                 });
             }
@@ -246,9 +243,7 @@ fn mark_model_members(world: &mut World, model: &crate::machine_model::CompileRe
             if let Some(&entity) = by_path.get(&joint.path) {
                 world.entity_mut(entity).insert(ModelMember {
                     machine_root: machine.root.clone(),
-                    strict,
                     rejected,
-                    explicit_mass: false,
                     damping: None,
                 });
             }

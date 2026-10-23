@@ -8,7 +8,6 @@
 
 def Xform "weeder" (prepend apiSchemas = ["GearboxMachineAPI"])
 {
-    int gearbox:machine:schemaVersion = 2
     rel gearbox:machine:body = </weeder/chassis>
 
     def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])

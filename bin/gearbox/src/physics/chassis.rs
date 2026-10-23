@@ -10,14 +10,14 @@ use super::world::PhysicsWorld;
 
 /// The chassis axes the drive controllers read, in the control frame's axes:
 /// control +X (forward) is chassis −Y, control +Y (left) is chassis +X.
-pub fn legacy_basis() -> DQuat {
+pub fn controller_basis() -> DQuat {
     DQuat::from_rotation_z(-std::f64::consts::FRAC_PI_2)
 }
 
 /// The turn from a body's own axes to the controllers' chassis axes when its
 /// control frame sits at `control` in the body.
 pub fn chassis_turn(control: DQuat) -> DQuat {
-    (control * legacy_basis().inverse()).normalize()
+    (control * controller_basis().inverse()).normalize()
 }
 
 pub struct ChassisBody<'a> {
@@ -81,7 +81,7 @@ impl PhysicsWorld {
         Some(ChassisBody { body: self.body(id)?, turn: self.chassis_turn(id) })
     }
 
-    /// The turn into chassis axes of a control body; identity for the legacy basis.
+    /// The turn into chassis axes of a control body; identity without a control frame.
     pub fn chassis_turn(&self, id: BodyId) -> DQuat {
         self.chassis_turns.get(&id).copied().unwrap_or(DQuat::IDENTITY)
     }
@@ -93,7 +93,7 @@ mod tests {
     use crate::physics::backend::BodyDesc;
 
     /// A chassis authored with +X forward and an identity control frame
-    /// heads where its +X points; a legacy chassis where its −Y points.
+    /// heads where its +X points; with no turn, where the controllers' −Y points.
     #[test]
     fn the_control_frame_sets_the_chassis_forward() {
         let mut world = PhysicsWorld::default();
@@ -101,11 +101,11 @@ mod tests {
         let z_up = DQuat::from_rotation_x(-std::f64::consts::FRAC_PI_2);
         let body = world.insert_body(BodyDesc::dynamic().pose(Pose::new(DVec3::ZERO, yaw * z_up)));
         let level = |v: DVec3| DVec3::new(v.x, 0.0, v.z).normalize();
-        let legacy = crate::controller::body_forward_vector(&world.chassis(body).unwrap()).unwrap();
-        assert!((legacy - level(yaw * z_up * DVec3::NEG_Y)).length() < 1e-9, "{legacy:?}");
+        let unturned = crate::controller::body_forward_vector(&world.chassis(body).unwrap()).unwrap();
+        assert!((unturned - level(yaw * z_up * DVec3::NEG_Y)).length() < 1e-9, "{unturned:?}");
         world.chassis_turns.insert(body, chassis_turn(DQuat::IDENTITY));
         let forward = crate::controller::body_forward_vector(&world.chassis(body).unwrap()).unwrap();
         assert!((forward - level(yaw * DVec3::X)).length() < 1e-9, "{forward:?}");
-        assert!(chassis_turn(legacy_basis()).angle_between(DQuat::IDENTITY) < 1e-12);
+        assert!(chassis_turn(controller_basis()).angle_between(DQuat::IDENTITY) < 1e-12);
     }
 }
