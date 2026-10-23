@@ -104,14 +104,23 @@ make.recipe{
 make.recipe{ name = "compile", desc = "clean, then build", deps = { "clean", "build" } }
 make.alias("c", "compile")
 
+-- Vulkan comes from the system driver on NixOS (/run/opengl-driver), elsewhere from nixGL.
+local SYSTEM_VULKAN = #oslo.fs.glob("/run/opengl-driver/lib/*") > 0
+local VULKAN = SYSTEM_VULKAN and "" or "nixVulkan "
+
+local function gpu(cmd, ...)
+  if SYSTEM_VULKAN then return sh[cmd](...) end
+  return sh.nixVulkan(cmd, ...)
+end
+
 make.recipe{
   name = "run",
-  desc = "launch the simulator through the CLI (fresh Wayland detection, nixVulkan wrapper)",
+  desc = "launch the simulator through the CLI (fresh Wayland detection; nixVulkan off NixOS)",
   params = { { "--args", desc = "gearbox run arguments; use --args='--planet mars ...'" } },
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/release/gearbox run %s"):format(forwarded_args(a))))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend %starget/release/gearbox run %s"):format(VULKAN, forwarded_args(a))))
   end,
 }
 make.alias("r", "run")
@@ -123,7 +132,7 @@ make.recipe{
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/release/gearbox launch %s"):format(forwarded_args(a))))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend %starget/release/gearbox launch %s"):format(VULKAN, forwarded_args(a))))
   end,
 }
 
@@ -153,7 +162,7 @@ make.recipe{ name = "test-planets", desc = "test planetary frames and terrain",
                sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "planet_tests")
              end }
 make.recipe{ name = "test-planet-gpu", desc = "compare production globe shader heights with local terrain on Vulkan",
-             run = function() sh.nixVulkan("cargo", "test", "-p", "gearbox-planet", "--test", "regolith_gpu", "--", "--ignored", "--nocapture") end }
+             run = function() gpu("cargo", "test", "-p", "gearbox-planet", "--test", "regolith_gpu", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-planet-geometry", desc = "check global and local planetary geometry",
              run = function() sh.cargo("test", "-p", "gearbox-globe") end }
 make.recipe{ name = "test-render-pages", desc = "test sparse GPU buffer page boundaries",
@@ -182,7 +191,7 @@ make.recipe{ name = "export-fem-energy", desc = "export CPU FEM inertia referenc
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "export_ceol_fem_energy_reference", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-fem-gpu", desc = "test native FEM on a GPU with GEARBOX_TRACK_ASSET",
              params = { { "--filter", desc = "test name filter (default: physics::fem)" } },
-             run = function(a) sh.nixVulkan("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", a.filter or "physics::fem", "--", "--ignored", "--nocapture", "--test-threads=1") end }
+             run = function(a) gpu("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", a.filter or "physics::fem", "--", "--ignored", "--nocapture", "--test-threads=1") end }
 
 -- Robot structure and control contract (plans/001). Each gate prints cargo's output, fails on a
 -- failing run, and fails a run that selected fewer tests than its inventory names.
@@ -433,7 +442,7 @@ make.recipe{
 -- Machine packages to and from Blender (machines/scripts/gearbox_usd), in the Blender flatpak.
 local function blender(log, blend, ...)
   local pwd = oslo.sys.pwd()
-  local words = { "flatpak", "run", "--filesystem=" .. pwd, "org.blender.Blender", "--background" }
+  local words = { "flatpak", "run", "--filesystem=" .. pwd, "--talk-name=org.freedesktop.Flatpak", "org.blender.Blender", "--background" }
   words[#words + 1] = blend or "--factory-startup"
   for _, w in ipairs({ "--python", pwd .. "/machines/scripts/gearbox_usd/cli.py", "--", ... }) do words[#words + 1] = w end
   local quoted = {}
@@ -521,6 +530,10 @@ sys.exit(0 if all(m["accepted"] for m in json.load(open(sys.argv[1]))["machines"
     ok = ok and oslo.run{ "python3", "-I", "-c", accepted, edited .. ".json" }.ok
     print(("blender roundtrip: %-26s %s"):format("edits in Blender", ok and "pass" or "FAIL"))
     if not ok then failed[#failed + 1] = "edits" end
+    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
+    local addon = blender(dir .. "/addon.log", nil, "addon-check", oslo.sys.pwd() .. "/machines/blender/clearpath_husky.blend", dir .. "/clearpath_husky.addon.usdz")
+    print(("blender roundtrip: %-26s %s"):format("add-on with Gearbox check", addon and "pass" or "FAIL"))
+    if not addon then failed[#failed + 1] = "add-on" end
     assert(#failed == 0, "blender roundtrip failed: " .. table.concat(failed, ", "))
   end,
 }
