@@ -67,6 +67,17 @@ ROADS = [
 ]
 
 
+PIPES_TANKS = [(-92.0, -6.0, 0), (-88.0, 4.0, 0), (-88.0, 16.0, 0), (-92.0, 18.0, 0)]
+PIPES_BASE = [(-88.0, -10.0, 0), (-62.0, -16.0, 0), (-48.0, -36.0, 0), (-30.0, -50.0, 0)]
+REACTOR_CABLE = [(-37.0, 196.0, 0), (-30.0, 150.0, 0), (6.0, 116.0, 0), (18.0, 68.0, 0)]
+POWER_TRAY = [(16.0, 52.0, 0), (16.0, 16.0, 0), (30.0, 4.0, 0)]
+CONTAINERS = [
+    ((-84.0, -26.0, 0), 0.2, "container_orange"), ((-84.0, -30.0, 0), 0.25, "container_white"),
+    ((-176.0, -112.0, 0), 1.0, "container_white"), ((-179.0, -117.0, 0), 1.1, "container_orange"),
+    ((-36.0, -26.0, 0), 1.5, "container_blue"), ((40.0, 66.0, 0), 0.0, "container_orange"),
+]
+
+
 def toward(a, b):
     d = b - a
     return math.atan2(d.y, d.x)
@@ -87,9 +98,10 @@ def kind(built, name):
     return built
 
 
-def build(looks):
+def build(looks, strewn=False):
     """Builds the base; returns its root and every building with places.
-    A building's `kind` names the module file it is exported to."""
+    A building's `kind` names the module file it is exported to; with
+    `strewn`, rocks lie round it (see `strew`)."""
     base = Building("MarsBase")
     base.finish()
     m = mats(looks)
@@ -147,8 +159,8 @@ def build(looks):
     for k, at in enumerate(REACTORS):
         add(kind(power.kilopower(looks, f"Fission{k + 1}", tuple(at), 0.0, base), "kilopower"))
     add(power.berm(looks, "ReactorBerm", (-37.0, 200.0, 0.0), 34.0, math.radians(-160), math.radians(-20), 3.0, base))
-    add(power.ground_cable(looks, "ReactorCable", [(-37.0, 196.0, 0), (-30.0, 150.0, 0), (6.0, 116.0, 0), (18.0, 68.0, 0)], base))
-    add(power.cable_tray(looks, "PowerTray", [(16.0, 52.0, 0), (16.0, 16.0, 0), (30.0, 4.0, 0)], 1.4, base))
+    add(power.ground_cable(looks, "ReactorCable", REACTOR_CABLE, base))
+    add(power.cable_tray(looks, "PowerTray", POWER_TRAY, 1.4, base))
 
     # ISRU.
     for k, at in enumerate(ISRU):
@@ -156,8 +168,8 @@ def build(looks):
     add(industry.propellant_tanks(looks, "Tanks", tuple(TANKS), 0.0, base))
     add(industry.drill_rig(looks, "IceWell", tuple(DRILL), 0.3, base))
     add(industry.regolith_works(looks, "RegolithWorks", tuple(WORKS), 0.0, base))
-    add(industry.pipe_run(looks, "PipesTanks", [(-92.0, -6.0, 0), (-88.0, 4.0, 0), (-88.0, 16.0, 0), (-92.0, 18.0, 0)], base))
-    add(industry.pipe_run(looks, "PipesBase", [(-88.0, -10.0, 0), (-62.0, -16.0, 0), (-48.0, -36.0, 0), (-30.0, -50.0, 0)], base, ("pipe_white", "pipe_blue")))
+    add(industry.pipe_run(looks, "PipesTanks", PIPES_TANKS, base))
+    add(industry.pipe_run(looks, "PipesBase", PIPES_BASE, base, ("pipe_white", "pipe_blue")))
 
     # The landing zone.
     add(spaceport.landing_pad(looks, "PadShip", 32.0, tuple(PAD_SHIP), base))
@@ -175,11 +187,7 @@ def build(looks):
         add(props.tracks(looks, f"Road{k}", path, 7.0 if k < 3 else 5.5, base))
     yard = Building("Yard", base)
     props.marker_poles(yard, m, ROADS[2], 16.0)
-    for at, yaw, skin in (
-        ((-84.0, -26.0, 0), 0.2, "container_orange"), ((-84.0, -30.0, 0), 0.25, "container_white"),
-        ((-176.0, -112.0, 0), 1.0, "container_white"), ((-179.0, -117.0, 0), 1.1, "container_orange"),
-        ((-36.0, -26.0, 0), 1.5, "container_blue"), ((40.0, 66.0, 0), 0.0, "container_orange"),
-    ):
+    for at, yaw, skin in CONTAINERS:
         props.container(yard, m, at, yaw, skin)
     props.crates(yard, m, (6.0, 30.0, 0), 0.1, 1)
     props.crates(yard, m, (-28.0, 4.0, 0), 1.2, 2)
@@ -199,8 +207,41 @@ def build(looks):
     ):
         path = os.path.abspath(os.path.join(NASA, file))
         if os.path.exists(path):
-            add(props.nasa_model(path, name, base, at, yaw, height, looks.textures, solid))
+            add(props.nasa_model(path, name, base, at, yaw, height, looks.out, solid))
+
+    if strewn:
+        strew(base, out, looks)
     return base, out
+
+
+def footprint(building, margin):
+    """A building's box on the ground in the base frame, grown by `margin`."""
+    pts = [o.matrix_world @ Vector(c) for o in building.collection.objects if o.type == "MESH" for c in o.bound_box]
+    if not pts:
+        return None
+    return (min(p.x for p in pts) - margin, min(p.y for p in pts) - margin, max(p.x for p in pts) + margin, max(p.y for p in pts) + margin)
+
+
+def strew(base, out, looks):
+    """Rocks round the base: each scan a module of its own, and where they
+    lie kept on the base as a `rocks` place, clear of buildings, roads,
+    pipes, cables and the yard's cargo."""
+    import rocks
+    linear = ("Road", "Pipes", "ReactorCable", "PowerTray", "Yard")
+    keep_out = [f for b in out if not b.name.startswith(linear) and (f := footprint(b, 3.0))]
+    for at, _, _ in CONTAINERS:
+        keep_out.append((at[0] - 5, at[1] - 5, at[0] + 5, at[1] + 5))
+    for x, y in ((6.0, 30.0), (-28.0, 4.0), (-82.0, 14.0), (-80.0, 20.0), (26.0, 48.0), (34.4, 72.0)):
+        keep_out.append((x - 5, y - 5, x + 5, y + 5))
+    lines = [(path, (7.0 if k < 3 else 5.5) / 2 + 1.5) for k, path in enumerate(ROADS)]
+    lines += [(path, 2.0) for path in (PIPES_TANKS, PIPES_BASE, REACTOR_CABLE, POWER_TRAY)]
+    sizes = {}
+    for scan in rocks.SCANS:
+        b, _, size = rocks.rock(scan, base, looks.out)
+        b.prototype = True
+        out.append(b)
+        sizes[scan] = size
+    base.places.append(("rocks", rocks.scatter(sizes, keep_out, lines, 300.0)))
 
 
 def fleet_places(eden_rail, arch_rail, dome_anchor):

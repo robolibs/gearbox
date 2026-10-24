@@ -7,6 +7,7 @@ faces the sky and on what rides low where wheels throw it, darkens what the
 sky cannot reach, and turns the tyres to rubber; dust roughens and dulls
 whatever it lies on.
 """
+import math
 import os
 
 import bpy
@@ -216,13 +217,154 @@ def bake(obj, mat, ground_z, out_dir, name, size=4096, maps_size=2048):
         obj.data.materials.append(m)
     bpy.data.materials.remove(work)
 
+    return baked_look(name, baked["colour"], baked["rough"], baked["metal"], normal)
+
+
+def baked_look(name, colour, rough, metal, normal, uv=None):
+    """A material showing baked colour, roughness and metal over a normal map,
+    read through the UV map `uv` (the mesh's active one when None)."""
     look = bpy.data.materials.new(name)
     look.use_nodes = True
     lg = Graph(look)
     bsdf = next(n for n in lg.nodes if n.type == "BSDF_PRINCIPLED")
-    lg.put(bsdf.inputs["Base Color"], lg.node("ShaderNodeTexImage", _image=baked["colour"]).outputs["Color"])
-    lg.put(bsdf.inputs["Roughness"], lg.node("ShaderNodeTexImage", _image=baked["rough"]).outputs["Color"])
-    lg.put(bsdf.inputs["Metallic"], lg.node("ShaderNodeTexImage", _image=baked["metal"]).outputs["Color"])
-    normal_tex = lg.node("ShaderNodeTexImage", _image=normal)
-    lg.put(bsdf.inputs["Normal"], lg.node("ShaderNodeNormalMap", Color=normal_tex.outputs["Color"]).outputs["Normal"])
+    coords = lg.node("ShaderNodeUVMap", _uv_map=uv).outputs["UV"] if uv else None
+    texture = lambda image: lg.node("ShaderNodeTexImage", _image=image, **({"Vector": coords} if coords else {})).outputs["Color"]
+    lg.put(bsdf.inputs["Base Color"], texture(colour))
+    lg.put(bsdf.inputs["Roughness"], texture(rough))
+    lg.put(bsdf.inputs["Metallic"], texture(metal))
+    if normal is not None:
+        lg.put(bsdf.inputs["Normal"], lg.node("ShaderNodeNormalMap", Color=texture(normal), **({"_uv_map": uv} if uv else {})).outputs["Normal"])
     return look
+
+
+def keeps_own(mat):
+    """Lit and see-through materials stay as they are, unbaked."""
+    if mat is None or not mat.use_nodes:
+        return True
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if bsdf is None:
+        return True
+    lit = bsdf.inputs["Emission Strength"].default_value > 0.0 and any(c > 0.0 for c in bsdf.inputs["Emission Color"].default_value[:3])
+    return lit or bsdf.inputs["Alpha"].default_value < 1.0 or mat.surface_render_method == "BLENDED"
+
+
+def source(g, mat, socket, uv):
+    """What a material's Principled `socket` reads, rebuilt in graph `g`: its
+    image through the `st` UV map, or its constant."""
+    bsdf = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
+    inp = bsdf.inputs[socket]
+    if inp.links and inp.links[0].from_node.type == "TEX_IMAGE":
+        return g.node("ShaderNodeTexImage", Vector=uv, _image=inp.links[0].from_node.image).outputs["Color"]
+    value = inp.default_value
+    return tuple(value[:3]) if hasattr(value, "__len__") else float(value)
+
+
+def surface_area(objs):
+    return sum(sum(p.area for p in o.data.polygons) * abs(o.matrix_world.to_3x3().determinant()) ** (2 / 3) for o in objs)
+
+
+def bake_module(objs, out_dir, name, ground_z=0.0, density=0.02, sizes=(512, 4096), samples=8):
+    """Bakes a building's looks with Mars wear into one atlas: the parts that
+    are not lit or see-through take a `bake` UV packed together, their colour
+    (dust and grime over each material's own texture), roughness, metal and
+    normals are baked into it at about `density` metres a texel, and they are
+    joined into one object showing the bake. Returns that object, or None."""
+    parts = [o for o in objs if o.type == "MESH" and not keeps_own(o.active_material)]
+    if not parts:
+        return None
+    side = surface_area(parts) ** 0.5 / density
+    size = int(min(max(2 ** math.ceil(math.log2(max(side, 1.0))), sizes[0]), sizes[1]))
+    view = bpy.context.view_layer
+    for o in view.objects:
+        o.select_set(False)
+    for o in parts:
+        o.hide_viewport = o.hide_render = False
+        o.data.uv_layers.new(name="bake")
+        o.data.uv_layers.active = o.data.uv_layers["bake"]
+        o.select_set(True)
+    view.objects.active = parts[0]
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.uv.smart_project(angle_limit=math.radians(60), island_margin=0.004, scale_to_bounds=False)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    images = {}
+    for key, srgb in (("colour", True), ("rough", False), ("metal", False), ("normal", False)):
+        image = bpy.data.images.new(f"{name}_{key}", size if key in ("colour", "normal") else size // 2, size if key in ("colour", "normal") else size // 2, alpha=False)
+        image.colorspace_settings.name = "sRGB" if srgb else "Non-Color"
+        images[key] = image
+    graphs = {}
+    for o in parts:
+        mat = o.active_material
+        if mat.name in graphs:
+            continue
+        work = mat.copy()
+        work.name = f"{mat.name}_bake"
+        g = Graph(work)
+        st = g.node("ShaderNodeUVMap", _uv_map="st").outputs["UV"]
+        dust, ao, tread, _ = masks(g, ground_z)
+        col = source(g, mat, "Base Color", st)
+        r0 = source(g, mat, "Roughness", st)
+        m0 = source(g, mat, "Metallic", st)
+        shaded = g.node("ShaderNodeMix", _data_type="RGBA", _blend_type="MULTIPLY", Factor=1.0)
+        g.put(shaded.inputs[6], col)
+        grime = g.math("ADD", 0.5, g.math("MULTIPLY", ao, 0.5))
+        g.put(shaded.inputs[7], g.node("ShaderNodeCombineColor", Red=grime, Green=grime, Blue=grime).outputs[0])
+        albedo = g.mix(shaded.outputs[2], DUST, dust)
+        rough = g.mix(r0, 0.95, dust, "FLOAT")
+        metal = g.math("MULTIPLY", m0, g.math("SUBTRACT", 1.0, dust))
+        emit = g.node("ShaderNodeEmission", Strength=1.0)
+        target = g.node("ShaderNodeTexImage")
+        bsdf = next(n for n in g.nodes if n.type == "BSDF_PRINCIPLED")
+        output = next(n for n in g.nodes if n.type == "OUTPUT_MATERIAL")
+        graphs[mat.name] = (work, g, {"colour": albedo, "rough": rough, "metal": metal}, emit, target, bsdf, output)
+    originals = {o.name: o.active_material for o in parts}
+    for o in parts:
+        o.active_material = graphs[originals[o.name].name][0]
+
+    scene = bpy.context.scene
+    engine = scene.render.engine
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = samples
+    scene.render.bake.margin = 6
+    for key, image in images.items():
+        for work, g, outputs, emit, target, bsdf, output in graphs.values():
+            target.image = image
+            g.nodes.active = target
+            if key == "normal":
+                g.links.new(bsdf.outputs[0], output.inputs["Surface"])
+                continue
+            value = outputs[key]
+            if value.type != "RGBA":
+                value = g.node("ShaderNodeCombineColor", Red=value, Green=value, Blue=value).outputs[0]
+            g.links.new(value, emit.inputs["Color"])
+            g.links.new(emit.outputs[0], output.inputs["Surface"])
+        if key == "normal":
+            bpy.ops.object.bake(type="NORMAL", normal_space="TANGENT")
+        else:
+            bpy.ops.object.bake(type="EMIT")
+        image.filepath_raw = os.path.join(out_dir, f"{name}_{key}.{'png' if key == 'normal' else 'jpg'}")
+        image.file_format = "PNG" if key == "normal" else "JPEG"
+        scene.render.image_settings.quality = 88
+        image.save()
+    scene.render.engine = engine
+
+    look = baked_look(f"{name}_look", images["colour"], images["rough"], images["metal"], images["normal"])
+    for o in parts:
+        o.active_material = look
+        st = o.data.uv_layers.get("st")
+        if st is not None:
+            o.data.uv_layers.remove(st)
+    for work, *_ in graphs.values():
+        bpy.data.materials.remove(work)
+    for o in view.objects:
+        o.select_set(False)
+    for o in parts:
+        o.select_set(True)
+    view.objects.active = parts[0]
+    bpy.ops.object.join()
+    joined = view.objects.active
+    joined.name = f"{name}_look"
+    joined.data.materials.clear()
+    joined.data.materials.append(look)
+    return joined

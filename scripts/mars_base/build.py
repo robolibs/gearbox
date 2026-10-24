@@ -1,8 +1,10 @@
 """Builds the Mars base in Blender and writes it out:
 
-    assets/mars_base/modules/<kind>.usdc   each kind of structure, about its
-                                           own origin, textured, its shells
-                                           marked to collide
+    assets/mars_base/modules/<kind>.usdc   each kind of structure, a component
+                                           model about its own origin, its
+                                           shells marked to collide
+    assets/mars_base/modules/textures/     each module's looks baked with Mars
+                                           wear (weathering.bake_module)
     assets/mars_base/textures/             Poly Haven CC0 sets, baked and
                                            procedural maps, NASA's images
     machines/usd/<robot>.usdz              the robots that tend the crops
@@ -15,14 +17,14 @@ Run in the open Blender (`exec(open(".../scripts/mars_base/build.py").read())`)
 or headless: `blender --background --python scripts/mars_base/build.py`.
 kit, buildings, habitat, power, industry, spaceport and props build the
 structures; layout places them; eden is the EDEN module's inside; robots
-writes the machines.
+writes the machines; preview.sh renders one module or spot headless.
 """
 import math
 import os
 import sys
 
 import bpy
-from mathutils import Matrix, Vector
+from mathutils import Euler, Matrix, Vector
 
 ROOT = "/home/bresilla/data/code/robolibs/gearbox"
 HERE = os.path.join(ROOT, "scripts", "mars_base")
@@ -36,10 +38,12 @@ import usda  # noqa: E402
 import eden  # noqa: E402
 import robots  # noqa: E402
 import vehicles  # noqa: E402
+import weathering  # noqa: E402
 import layout  # noqa: E402
 
 ASSETS = os.path.join(ROOT, "assets", "mars_base")
 MODULES = os.path.join(ASSETS, "modules")
+MODULE_TEXTURES = os.path.join(MODULES, "textures")
 TEXTURES = os.path.join(ASSETS, "textures")
 WORLD_DIR = os.path.join(ROOT, "bin", "gearbox", "assets", "world")
 MACHINES = os.path.join(ROOT, "machines", "usd")
@@ -68,9 +72,14 @@ def relative(path, start):
     return os.path.relpath(path, start).replace(os.sep, "/")
 
 
-def export_module(building, path):
-    """Writes one building's collection about its own origin, its shells
-    marked to collide; returns how many collide."""
+def export_module(building, path, weather=True):
+    """Writes one building's collection about its own origin as a component
+    model, its shells marked to collide; with `weather` its looks are first
+    baked with Mars wear into textures of its own. Returns how many collide."""
+    if weather and not getattr(building, "natural", False):
+        os.makedirs(MODULE_TEXTURES, exist_ok=True)
+        looks = [o for o in building.collection.objects if o.type == "MESH" and not o.get("gearbox_hidden")]
+        weathering.bake_module(looks, MODULE_TEXTURES, building.kind)
     root = building.root
     at, turn = root.location.copy(), root.rotation_euler.copy()
     root.location, root.rotation_euler = (0, 0, 0), (0, 0, 0)
@@ -87,11 +96,16 @@ def export_module(building, path):
         )
     finally:
         root.location, root.rotation_euler = at, turn
-    from pxr import Usd, UsdGeom, UsdPhysics
+    from pxr import Kind, Sdf, Usd, UsdGeom, UsdPhysics
     stage = Usd.Stage.Open(path)
-    stage.SetDefaultPrim(stage.GetPrimAtPath(prim))
+    top = stage.GetPrimAtPath(prim)
+    stage.SetDefaultPrim(top)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    model = Usd.ModelAPI(top)
+    model.SetKind(Kind.Tokens.component)
+    model.SetAssetName(building.kind)
+    model.SetAssetIdentifier(Sdf.AssetPath(f"./{building.kind}.usdc"))
     marked = 0
     for p in stage.Traverse():
         flag = p.GetAttribute("userProperties:gearbox_collide")
@@ -125,17 +139,59 @@ def header(u, creator, default):
     u.emit(0, "# Generated: edit scripts/mars_base and build again.")
 
 
-def world_layer(path, built):
-    """The world file: every module placed, and the greenhouse gearbox runs."""
+def rocks_layer(u, placed):
+    """The rocks round the base: each boulder a reference of its scan's
+    module, the stones drawn through one point instancer of the stone scans."""
+    module = lambda scan: relative(os.path.join(MODULES, f"rock_{scan}.usdc"), WORLD_DIR)
+    u.emit(1, 'def Xform "Rocks" (kind = "group")')
+    u.emit(1, "{")
+    for k, (scan, at, turn, scale) in enumerate(placed["boulder"]):
+        u.emit(2, f'def Xform "Boulder{k:03d}" (')
+        u.emit(3, f"prepend references = @{module(scan)}@")
+        u.emit(2, ")")
+        u.emit(2, "{")
+        u.emit(3, f"double3 xformOp:translate = {usda.fmt(at)}")
+        u.emit(3, f"float3 xformOp:rotateXYZ = {usda.fmt(turn)}")
+        u.emit(3, f"float3 xformOp:scale = ({scale}, {scale}, {scale})")
+        u.emit(3, 'uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]')
+        u.emit(2, "}")
+    stones = placed["stone"]
+    scans = sorted({scan for scan, *_ in stones})
+    quat = lambda turn: Euler(tuple(math.radians(a) for a in turn), "XYZ").to_quaternion()
+    u.emit(2, 'def PointInstancer "Stones"')
+    u.emit(2, "{")
+    u.emit(3, "rel prototypes = [" + ", ".join(f"</MarsBase/Rocks/Stones/Prototypes/{scan}>" for scan in scans) + "]")
+    u.emit(3, "int[] protoIndices = [" + ", ".join(str(scans.index(scan)) for scan, *_ in stones) + "]")
+    u.emit(3, "point3f[] positions = [" + ", ".join(usda.fmt(at) for _, at, _, _ in stones) + "]")
+    u.emit(3, "quath[] orientations = [" + ", ".join(usda.fmt(tuple(quat(turn))) for _, _, turn, _ in stones) + "]")
+    u.emit(3, "float3[] scales = [" + ", ".join(f"({s}, {s}, {s})" for *_, s in stones) + "]")
+    u.emit(3, 'def Scope "Prototypes"')
+    u.emit(3, "{")
+    for scan in scans:
+        u.emit(4, f'def Xform "{scan}" (')
+        u.emit(5, f"prepend references = @{module(scan)}@")
+        u.emit(4, ")")
+        u.emit(4, "{")
+        u.emit(4, "}")
+    u.emit(3, "}")
+    u.emit(2, "}")
+    u.emit(1, "}")
+
+
+def world_layer(path, built, base=None):
+    """The world file: every module placed, the rocks strewn round them, and
+    the greenhouse gearbox runs."""
     u = usda.Usda(LOOKS)
     header(u, "scripts/mars_base/build.py: a Mars base that grows its food", "MarsBase")
     u.emit(0, "# Load it: `gearbox run --planet mars --world bin/gearbox/assets/world/mars_base.usda`; then spawn the")
     u.emit(0, "# robots with `gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base`.")
-    u.emit(0, 'def Xform "MarsBase"')
+    u.emit(0, 'def Xform "MarsBase" (kind = "assembly")')
     u.emit(0, "{")
-    u.emit(1, 'def Scope "Modules"')
+    u.emit(1, 'def Xform "Modules" (kind = "group")')
     u.emit(1, "{")
     for b in built:
+        if getattr(b, "prototype", False):
+            continue
         at, yaw = world_of(b)
         u.emit(2, f'def Xform "{b.name}" (')
         u.emit(3, f"prepend references = @{relative(os.path.join(MODULES, b.kind + '.usdc'), WORLD_DIR)}@")
@@ -147,6 +203,9 @@ def world_layer(path, built):
         u.emit(3, 'uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]')
         u.emit(2, "}")
     u.emit(1, "}")
+    placed = next((p for kind, p in base.places if kind == "rocks"), None) if base else None
+    if placed:
+        rocks_layer(u, placed)
     usda.materials(u, 1, eden.EDEN_LOOKS)
     usda.xform(u, 1, "Greenhouse", (0, 0, 0))
     eden.module(u, 2, tuple(layout.EDEN))
@@ -257,22 +316,24 @@ def write_fleet(path):
     return len(places)
 
 
-def main(export=True):
+def main(export=True, weather=True):
     reset()
     looks = kit.Looks(TEXTURES)
-    base, built = layout.build(looks)
+    base, built = layout.build(looks, strewn=True)
     report = {"buildings": len(built), "kinds": len({b.kind for b in built}), "objects": len(bpy.data.objects)}
     if export:
-        os.makedirs(MODULES, exist_ok=True)
-        for old in os.listdir(MODULES):
-            os.remove(os.path.join(MODULES, old))
+        for folder in (MODULES, MODULE_TEXTURES):
+            os.makedirs(folder, exist_ok=True)
+            for old in os.listdir(folder):
+                if os.path.isfile(os.path.join(folder, old)):
+                    os.remove(os.path.join(folder, old))
         done, colliders = set(), 0
         for b in built:
             if b.kind not in done:
-                colliders += export_module(b, os.path.join(MODULES, f"{b.kind}.usdc"))
+                colliders += export_module(b, os.path.join(MODULES, f"{b.kind}.usdc"), weather)
                 done.add(b.kind)
         report["colliders"] = colliders
-        report["rooms"], report["trays"], report["lights"] = world_layer(os.path.join(WORLD_DIR, "mars_base.usda"), built)
+        report["rooms"], report["trays"], report["lights"] = world_layer(os.path.join(WORLD_DIR, "mars_base.usda"), built, base)
         report["machines"] = write_machines()
         report["robots"] = write_fleet(os.path.join(WORLD_DIR, "mars_base_fleet.usda"))
     return report
