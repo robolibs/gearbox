@@ -62,11 +62,14 @@ Physical references: [NASA Mars facts](https://science.nasa.gov/mars/facts/), [E
   `AtmosphereEnvironmentMapLight`. `dust_tau` (default 0.4, up to 12) thickens
   the dust over the preset's 0.146: butterscotch by day, a
   red-brown storm at 4. `gearbox scene weather dust_tau=4` sets it live.
-- **Pad.** Off Earth, home is level within 30 m and back to full relief at
-  60 m; no rocks stand on it, so an outpost world can be laid on it.
-- **Greenhouses.** `--world bin/gearbox/assets/world/mars_greenhouse.usda`
-  loads an EDEN ISS-like growth module on the pad; see
-  `specs/GREENHOUSE_SPEC.md`.
+- **Pad.** Off Earth, home is a prepared plain, level within 320 m and back
+  to full relief at 480 m; no rocks stand on it, so a base and its landing
+  zone can be laid on it.
+- **The Mars base.** `--world bin/gearbox/assets/world/mars_base.usda` loads
+  a base that grows its food, its structures referenced from
+  `assets/mars_base/modules/`; `gearbox spawn machine
+  bin/gearbox/assets/world/mars_base_fleet.usda --machine base` brings its
+  tending robots and rovers. See `specs/GREENHOUSE_SPEC.md`.
 
 ## Acceptance gates
 

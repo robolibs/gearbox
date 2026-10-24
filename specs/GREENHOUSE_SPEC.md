@@ -1,20 +1,29 @@
 # Greenhouses
 
-A world USD can hold a plant growth chamber: rooms of air, trays of crops
-under LED lamps, nutrient tanks and a power bus. `gearbox-greenhouse` steps
-them on world time; the sim draws the crops, lights the rooms, lets sensors
-see the plants and serves the whole house on the tool API.
+A world USD can hold plant growth chambers: rooms of air, trays of crops
+under LED lamps or glass, nutrient tanks and a power bus. `gearbox-greenhouse`
+steps them on world time; the sim draws the crops, lights the rooms, lets
+sensors see the plants and serves the whole house on the tool API.
 
 ```sh
-gearbox run --planet mars --world bin/gearbox/assets/world/mars_greenhouse.usda
-gearbox spawn machine bin/gearbox/assets/world/greenhouse_gantry.usda --machine eve --at 12.51 2.74 0
+gearbox run --planet mars --world bin/gearbox/assets/world/mars_base.usda
+gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base
 ```
 
-`scripts/greenhouse/build_mars_greenhouse.py` writes both files: an EDEN
-ISS-like module (porch, service room, a 5.7 m growth room with four racks a
-side, a regolith bed, a solar array and a 10 kW reactor on the pad) and the
-rail robot that runs under its ceiling. Edit the script and run it again
-rather than the USDA.
+The Mars base is sized to what a few cargo landers could bring. It grows
+food in three kinds of house: two 24 m glazed domes of terraced rings lit by
+the sun, three 30 m inflated arch greenhouses of tables under LED bars, and
+an EDEN ISS-like container module with its regolith bed. Around them stand
+a habitat cluster, an inflatable hab, a printed regolith tower, a rover
+hangar, solar arrays and four 10 kWe fission units, two container-sized
+ISRU units with their tanks and an ice well, and a landing zone. The fleet
+file places six tending robots and two pressurised rovers.
+
+`scripts/mars_base/` builds everything in Blender (see `build.py`): each
+kind of structure goes to `assets/mars_base/modules/<kind>.usdc` with its
+textures in `assets/mars_base/textures/`, the robots go to
+`machines/usd/*.usdz`, and the world and fleet files place them. Edit the
+scripts and build again rather than the USD.
 
 ## 1. USD schema
 
@@ -33,6 +42,7 @@ first, so trays and service spots can name them. Attributes default as listed.
 | `gearbox:zone:ec` | float | 2.5 | Target conductivity of the tank, mS/cm. |
 | `gearbox:zone:centre`, `size` | float3 | centre of a cube of the volume | The box of air in the prim's frame (Z up); climate sensors inside it read the room. |
 | `gearbox:zone:workLight` | float | 0 | White work light on the floor, lux. |
+| `gearbox:zone:glazing` | float | 0 | Share of daylight the room's glazing lets in to its crops; a glazed room is lit by the sky for cameras too. |
 
 Heating and cooling (6 kW each), dehumidifying, CO2 feed, makeup gas, fans,
 wall conductance (22 W/K) and heat capacity (6 MJ/K) are fixed per room.
@@ -53,7 +63,8 @@ wall conductance (22 W/K) and heat capacity (6 MJ/K) are fixed per room.
 | `gearbox:tray:sownDays` | float | 0 | Days since sowing at load; 0 leaves the tray empty. |
 
 The lamp is the child prim `lamp`, its emissive face `lamp/face`. Plants
-stand at the centres of the places, in the tray prim's frame.
+stand at the centres of the places, in the tray prim's frame. A tray under
+glass may have no lamp prim and a `ppfd` of 0: it grows by daylight alone.
 
 ### 1.3 Power (`GearboxPowerAPI`)
 
@@ -86,6 +97,11 @@ spot's origin.
   in steps of at most 300 s. Mars sunlight on the panels falls with the
   weather's `dust_tau` and the sun's height; dust settles on the panels at
   0.2 % a sol.
+- Daylight reaches the crops of a glazed room: the sunlight on open ground,
+  at 2.06 µmol of PAR a joule (45 % PAR at 4.57 µmol/J), times the room's
+  glazing, on top of its lamps. Crops develop by the daytime mean, which
+  follows the weather over two days, and are lit for the sunlit half of the
+  day; trays sown at load grow by the same light.
 
 ## 3. Tool API
 
@@ -133,9 +149,11 @@ The CLI wraps all of it: `gearbox greenhouse plants [--ripe] [--tray T]
 
 ## 4. Sensing
 
-- Each plant carries a convex hull of its prefab at its stage, rebuilt when
-  its look changes. Hulls collide with nothing; depth, LiDAR and recognition
-  rays meet them, and recognition names them `plant:TRAY/SLOT`.
+- The plants of a tray within 8 m of a machine's sensor carry a convex hull
+  of their prefab at their stage, rebuilt when their look changes, and lose
+  it past 12 m. Hulls collide with nothing; depth, LiDAR and recognition rays
+  meet them, and recognition names them `plant:TRAY/SLOT`. A house of
+  thousands of plants so costs the physics world only what robots look at.
 - Light sensors count every point and spot light, faded by its range and
   cone, in watts per square metre at daylight's 93 lm/W, and lose the sky
   term when anything stands above them.
@@ -144,18 +162,33 @@ The CLI wraps all of it: `gearbox greenhouse plants [--ripe] [--tray T]
   planet's air (Mars: 95 % CO2, 0.17 % O2, 0.64 kPa, the sol's temperature
   swing).
 
-## 5. The rail robot
+## 5. The tending robots
 
-`greenhouse_gantry.usda` is a machine fixed to the world: a rail body held by
-a fixed joint, a trolley on the rail (`travel`, 5.0 m), a mast below it
-(`lift`, 1.25 m down), a turret at its foot (`turn`, 180° from the S racks
-to the N racks) and an arm reaching over a rack (`reach`, 0.65 m). Each
-joint has a motor and a `builtin:joint_position` controller of the same
-name, so `gearbox machine set-value trolley position 0.5 --machine eve` moves
-it half way. The head carries `camera_link` (down, recognition),
-`light_link` (up) and `climate_link`. Terrain alignment leaves a machine
-with a world joint where it is placed. Retract the arm before travelling:
-an arm out over a rack catches its uprights.
+Each house has a robot fixed to the world by a joint with an empty body,
+which terrain alignment leaves where it is placed. That joint's frame is in
+the stage's frame, not the robot's, so a file placing several robots sets
+each `Joints/anchor` `localPos0`/`localRot0` where its robot stands (the
+fleet file does). Every joint has a motor
+and a `builtin:joint_position` controller of its name, taking a position
+0..1 of its range: `gearbox machine set-value <joint> position 0.5 --machine
+<id>`. Every head carries `camera_link` (down, recognition), `light_link`
+(up) and `climate_link`.
+
+| Robot | Machine | Joints |
+|---|---|---|
+| EDEN's rail robot, after DLR's EVE | `machines/usd/eden_gantry.usdz` | `travel` 5.0 m along the ceiling rail, `lift` 1.25 m down, `turn` 180° from one rack row to the other, `reach` 0.65 m over a rack |
+| An arch's ridge robot | `machines/usd/arch_gantry.usdz` | `travel` 25.6 m along the ridge rail, `lift` 0.65 m, `turn` 180°, `reach` 2.4 m: the turret sweeps the aisle under the lamps, the arm telescopes over either row of tables |
+| A dome's polar gantry | `machines/usd/dome_gantry.usdz` | `slew` 360° on the cistern, `travel` 5.6 m out along the boom over the three rings, `lift` 2.2 m down to the canopy; its outer leg runs on the floor rail |
+
+The fleet spawns them as `base_fleet_eve`, `base_fleet_arch{a,b,c}bot` and
+`base_fleet_dome{a,b}bot`. Retract an arm before travelling: one out over a
+rack catches its uprights. A `by` reach is measured from the parts under the
+named robot's own prim.
+
+The fleet's `base_fleet_rover1` and `rover2` are NASA's Space Exploration
+Vehicle (`machines/usd/sev_rover.usdz`): its mesh cut into a chassis and six
+pairs of wheels on revolute axles, driven by a skid-steer `cmd_vel`
+controller (`gearbox machine move` or `drive`).
 
 ## 6. Scenarios
 
