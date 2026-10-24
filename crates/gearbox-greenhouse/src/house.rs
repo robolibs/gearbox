@@ -16,6 +16,11 @@ use crate::water::{Medium, Tank};
 
 /// Longest step the house takes in one go, seconds.
 const SUBSTEP_S: f64 = 300.0;
+/// Photosynthetic photons in a joule of sunlight: 45 % of it is PAR, at
+/// 4.57 µmol/J (McCree 1972).
+pub const PAR_PER_W: f64 = 0.45 * 4.57;
+/// How long the daytime mean of the daylight takes to follow a change, seconds.
+const DAYLIGHT_MEMORY_S: f64 = 2.0 * 86_400.0;
 /// Share of a lamp's power its cooling loop carries away while the room's
 /// cooling works; the rest heats the air (EDEN ISS's lamps were water-cooled).
 const LAMP_COOLED: f64 = 0.6;
@@ -36,6 +41,8 @@ pub struct Room {
     pub makeup_failed: bool,
     /// A breach to the outside: share of the gas lost per second at full pressure difference.
     pub leak_per_s: f64,
+    /// Share of the daylight its glazing lets in to the crops, 0 for a closed room.
+    pub glazing: f64,
     /// What the equipment drew over the last step, W.
     pub draw_w: f64,
     pub last: Upkeep,
@@ -53,6 +60,7 @@ impl Room {
             dehumidifier_failed: false,
             makeup_failed: false,
             leak_per_s: 0.0,
+            glazing: 0.0,
             draw_w: CONTROLS_W + climate.fan_w,
             last: Upkeep::default(),
         }
@@ -171,11 +179,21 @@ pub struct House {
     pub cycle_hours: f64,
     /// Share of the lamps' demand the bus met over the last step.
     pub lamp_power: f64,
+    /// Photosynthetic daylight on open ground now, and its mean while the sun
+    /// is up, µmol/m²/s.
+    pub daylight_ppfd: f64,
+    pub daylight_mean: f64,
 }
 
 impl House {
     pub fn new(cycle_hours: f64) -> Self {
         Self { cycle_hours, lamp_power: 1.0, ..Default::default() }
+    }
+
+    /// Whether the sun is up at a local hour, on a day of `cycle_hours`.
+    pub fn sunlit(&self, hour: f64) -> bool {
+        let day = self.cycle_hours.max(1.0);
+        (day * 0.25..day * 0.75).contains(&hour.rem_euclid(day))
     }
 
     pub fn plant(&self, id: PlantId) -> Option<&Plant> {
@@ -189,12 +207,23 @@ impl House {
         })
     }
 
-    /// Photon flux on a tray now, and while lit, µmol/m²/s.
+    /// Photon flux on a tray now, and while lit, µmol/m²/s: its lamps', and
+    /// the daylight its room's glazing lets in.
     pub fn tray_light(&self, tray: usize, hour: f64) -> (f64, f64) {
         let Some(t) = self.trays.get(tray) else { return (0.0, 0.0) };
-        let now = t.lamps.iter().map(|&l| self.lamps[l].ppfd(hour, self.cycle_hours, self.lamp_power)).sum();
-        let lit = t.lamps.iter().map(|&l| self.lamps[l].lit_ppfd()).sum();
-        (now, lit)
+        let glazing = self.rooms.get(t.room).map_or(0.0, |r| r.glazing);
+        let now: f64 = t.lamps.iter().map(|&l| self.lamps[l].ppfd(hour, self.cycle_hours, self.lamp_power)).sum();
+        let lit: f64 = t.lamps.iter().map(|&l| self.lamps[l].lit_ppfd()).sum();
+        (now + glazing * self.daylight_ppfd, lit + glazing * self.daylight_mean)
+    }
+
+    /// Hours a tray is lit each day: its lamps' photoperiod, or the day's
+    /// sunlit half under glass, whichever is longer.
+    pub fn lit_hours(&self, tray: usize) -> f64 {
+        let Some(t) = self.trays.get(tray) else { return 0.0 };
+        let lamps = t.lamps.iter().filter(|&&l| self.lamps[l].lit_ppfd() > 0.0).map(|&l| self.lamps[l].lit_hours).fold(0.0, f64::max);
+        let glazed = self.rooms.get(t.room).is_some_and(|r| r.glazing > 0.0);
+        if glazed { lamps.max(self.cycle_hours * 0.5) } else { lamps }
     }
 
     /// The surroundings a tray's plants stand in now.
@@ -203,7 +232,7 @@ impl House {
         let room = &self.rooms[t.room];
         let tank = &self.tanks[t.tank];
         let (ppf, lit_ppf) = self.tray_light(tray, hour);
-        let lit_hours = t.lamps.first().map_or(0.0, |&l| self.lamps[l].lit_hours);
+        let lit_hours = self.lit_hours(tray);
         let powered = !self.power.cut;
         let airflow = powered && !room.fans_failed;
         // Still air keeps the water leaves give off around them: without the
@@ -227,8 +256,13 @@ impl House {
     }
 
     /// Runs the house `seconds` on from local hour `hour`, with `outside`
-    /// beyond the walls and `solar_w_m2` on the panels.
+    /// beyond the walls and `solar_w_m2` on the panels and the ground.
     pub fn step(&mut self, seconds: f64, hour: f64, outside: &Outside, solar_w_m2: f64) -> Vec<Event> {
+        self.daylight_ppfd = PAR_PER_W * solar_w_m2.max(0.0);
+        if self.daylight_ppfd > 1.0 {
+            let follow = (seconds / DAYLIGHT_MEMORY_S).min(1.0);
+            self.daylight_mean += (self.daylight_ppfd - self.daylight_mean) * follow;
+        }
         let mut events = Vec::new();
         let mut done = 0.0;
         while done < seconds {
@@ -471,6 +505,28 @@ mod tests {
         assert!((0.08..0.35).contains(&harvest.fresh_kg), "a head of {} kg", harvest.fresh_kg);
         assert!(house.plant(id).is_none());
         assert!(house.rooms[0].air.temperature_c > 18.0 && house.rooms[0].air.temperature_c < 24.0);
+    }
+
+    #[test]
+    fn under_glass_lettuce_grows_by_daylight_alone() {
+        let grown = |glazing: f64| {
+            let mut house = chamber(1);
+            house.lamps[0].ppfd_max = 0.0;
+            house.rooms[0].glazing = glazing;
+            house.daylight_mean = 700.0;
+            sow_all(&mut house, &LETTUCE);
+            for _ in 0..20 {
+                for hour in 0..24 {
+                    // A clear Martian day: the sun up from six to six, 450 W/m² at noon.
+                    let sun = 450.0 * (std::f64::consts::PI * (hour as f64 - 6.0) / 12.0).sin().max(0.0);
+                    house.step(3600.0, hour as f64, &Outside::mars(hour as f64), sun);
+                }
+            }
+            house.plants().map(|(_, p)| p.biomass_g).sum::<f64>()
+        };
+        let (glass, closed) = (grown(0.7), grown(0.0));
+        assert!(glass > 5.0 && closed < 0.5, "under glass {glass} g, in a closed room {closed} g");
+        assert!(House { cycle_hours: 24.0, ..House::default() }.sunlit(12.0) && !House { cycle_hours: 24.0, ..House::default() }.sunlit(2.0));
     }
 
     #[test]

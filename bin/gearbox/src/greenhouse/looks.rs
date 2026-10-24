@@ -323,7 +323,7 @@ pub fn expose_indoors(
         return;
     }
     for (eye, mut exposure, environment, generated) in &mut cameras {
-        let inside = greenhouse.rooms.iter().find(|place| {
+        let inside = greenhouse.rooms.iter().filter(|place| !place.glazed).find(|place| {
             let Ok(frame) = rooms.get(place.parent) else { return false };
             let local = frame.affine().inverse().transform_point3(eye.translation()) - place.centre;
             (local.abs() * 2.0).cmple(place.size).all()

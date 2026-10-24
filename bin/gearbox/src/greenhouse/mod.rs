@@ -102,6 +102,8 @@ pub struct RoomPlace {
     pub work_light: Option<Entity>,
     /// Mean illuminance over the room from its lamps and work light, lux.
     pub lux: f32,
+    /// Glazed: the sky lights it, as it does outside.
+    pub glazed: bool,
 }
 
 /// Every greenhouse in the scene as one house.
@@ -239,9 +241,11 @@ fn discover_greenhouses(world: &mut World) {
         if found.is_empty() {
             continue;
         }
+        let daylight = typical_daylight(world.resource::<WeatherSettings>());
         let mut greenhouse = world.resource_mut::<Greenhouse>();
         if greenhouse.house.cycle_hours <= 0.0 {
             greenhouse.house = House::new(cycle_hours);
+            greenhouse.house.daylight_mean = daylight;
         }
         let first_room = greenhouse.house.rooms.len();
         let mut room_names = Vec::new();
@@ -258,7 +262,8 @@ fn discover_greenhouses(world: &mut World) {
                 };
                 let volume = float("gearbox:zone:volume").unwrap_or(30.0).max(1.0);
                 let house = &mut greenhouse.house;
-                house.rooms.push(Room::new(&name, volume, climate));
+                let glazing = float("gearbox:zone:glazing").unwrap_or(0.0).clamp(0.0, 1.0);
+                house.rooms.push(Room { glazing, ..Room::new(&name, volume, climate) });
                 house.tanks.push(Tank::new(&name, float("gearbox:zone:tank").unwrap_or(300.0), float("gearbox:zone:ec").unwrap_or(2.5)));
                 room_names.push(name.clone());
                 let room = greenhouse.house.rooms.len() - 1;
@@ -271,6 +276,7 @@ fn discover_greenhouses(world: &mut World) {
                     work_lux: float("gearbox:zone:workLight").unwrap_or(0.0) as f32,
                     work_light: None,
                     lux: 0.0,
+                    glazed: glazing > 0.0,
                 });
                 info!("greenhouse: room `{name}` {volume:.1} m³ at {path}");
             }
@@ -352,9 +358,9 @@ fn discover_greenhouses(world: &mut World) {
             greenhouse.house.plants().count(),
             greenhouse.services.len()
         );
-        if lamps < greenhouse.trays.len()
-            && let Some(tray) = greenhouse.trays.iter().find(|t| t.lamp.is_none())
-        {
+        let house = &greenhouse.house;
+        let lamplit = |index: usize| house.trays[index].lamps.iter().any(|&l| house.lamps[l].ppfd_max > 0.0);
+        if let Some(tray) = greenhouse.trays.iter().enumerate().find(|(i, t)| t.lamp.is_none() && lamplit(*i)).map(|(_, t)| t) {
             let near: Vec<&str> = prims.iter().map(|(p, _)| p.as_str()).filter(|p| p.contains(tray.path.rsplit('/').next().unwrap_or("-"))).take(4).collect();
             warn!("greenhouse: no lamp prim under `{}`; its prims: {near:?}", tray.path);
         }
@@ -362,12 +368,26 @@ fn discover_greenhouses(world: &mut World) {
     world.insert_non_send(instances);
 }
 
-/// Sows a tray `days` ago and grows it to now at its lamp's nominal light,
-/// each place a little apart so the crop is not one clone.
+/// Photosynthetic daylight on open ground through a typical day, µmol/m²/s:
+/// the sun 40° up under the weather's dust.
+fn typical_daylight(weather: &WeatherSettings) -> f64 {
+    let (top, tau, _) = outside(weather);
+    let ground = gearbox_greenhouse::power::surface_irradiance(top * weather.calendar.irradiance_scale() as f64, 40f64.to_radians(), tau);
+    gearbox_greenhouse::house::PAR_PER_W * ground
+}
+
+/// Sows a tray `days` ago and grows it to now at its nominal light, its
+/// lamps' and the daylight under glass, each place a little apart so the
+/// crop is not one clone.
 fn pre_grow(house: &mut House, tray: usize, species: &'static Species, days: f64) {
     let slots = house.trays[tray].slots.len();
     let lamp = house.trays[tray].lamps[0];
     let cycle = house.cycle_hours;
+    let glazed = house.rooms[house.trays[tray].room].glazing > 0.0;
+    // Which hours of the day are lit, by the lamps or by the sun under glass.
+    let day: Vec<bool> = (0..cycle.ceil().max(1.0) as usize)
+        .map(|h| house.lamps[lamp].scheduled(h as f64, cycle) || (glazed && house.sunlit(h as f64)))
+        .collect();
     for slot in 0..slots {
         let id = PlantId { tray, slot };
         if house.sow(id, species).is_err() {
@@ -379,8 +399,7 @@ fn pre_grow(house: &mut House, tray: usize, species: &'static Species, days: f64
         let hours = (age * 24.0).round() as usize;
         let plant = house.trays[tray].slots[slot].as_mut().expect("just sown");
         for h in 0..hours {
-            let hour = (h as f64).rem_euclid(cycle);
-            let lit = house.lamps[lamp].scheduled(hour, cycle);
+            let lit = day[((h as f64).rem_euclid(cycle) as usize).min(day.len() - 1)];
             let here = Surroundings { ppf: if lit { around.lit_ppf } else { 0.0 }, ..around };
             plant.grow(3600.0, &here);
         }
