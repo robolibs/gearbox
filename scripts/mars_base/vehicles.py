@@ -1,11 +1,13 @@
-"""Drivable vehicles made from NASA's public-domain models: the model's
-wheels are cut out of its mesh as their own bodies on revolute axles, the
-rest is the chassis, and a skid-steer drive controller takes `cmd_vel`.
+"""Drivable rovers made from NASA's public-domain models, cut into the
+bodies they move as: the chassis, and on each wheel module a suspension arm
+hinged on the chassis, an upright steering on the arm's end and a pair of
+twin wheels turning on the upright. An ackermann controller steers every
+module and drives every wheel from `cmd_vel`.
 
 Frame, as the other wheeled machines: +X left, +Y astern, +Z up, the
 machine driving toward -Y, the tyres touching Z = 0.
 
-Runs inside Blender: it imports the glTF, splits it, exports the parts as a
+Runs inside Blender: it imports the glTF, cuts it, exports the parts as a
 geometry layer, and writes the machine beside it.
 """
 import os
@@ -13,33 +15,52 @@ from dataclasses import dataclass
 
 import bmesh
 import bpy
+import numpy as np
 from mathutils import Vector
 
+import weathering
 from usda import Usda, fmt, schemas
+
+POS = ("front", "middle", "rear")
+SIDES = (("left", 1.0), ("right", -1.0))
 
 
 @dataclass
-class Vehicle:
-    """What a NASA model needs to drive: its axles along Y, the hubs of the
-    wheels on each side across X, their radius and tread, and masses."""
+class Rover:
+    """Where a NASA model's wheel modules are, in the model's own frame: the
+    hub Y of each, front first, the hub's |X| and Z (its steering axis stands
+    through it), the |X| faces of each of the twin wheels, where the arms
+    hinge on the chassis, and the box an upright's parts stand in. Masses in kg."""
     source: str
     kind: str
     note: str
     axles: tuple
-    hubs: tuple
-    hub_z: float
+    hub: tuple
+    span: tuple
     radius: float
-    tread: float
-    chassis_kg: float
-    wheel_kg: float
+    pivot: tuple
+    upright_x: float
+    top_z: float
+    arm_top: float
+    rim: float
+    masses: tuple
     body: tuple
+    steer_deg: float = 60.0
+    travel_deg: float = 12.0
 
 
-SEV = Vehicle(
-    source="SEV.glb", kind="sev_rover", note="NASA's Space Exploration Vehicle, a pressurised rover on six pairs of wheels",
-    axles=(-0.83, 0.87, 2.57), hubs=(-1.9, -1.45, 1.45, 1.9), hub_z=-1.86, radius=0.385, tread=0.2,
-    chassis_kg=2600.0, wheel_kg=60.0, body=((-2.0, -2.5, -1.4), (2.0, 3.3, 1.7)),
+SEV = Rover(
+    source="SEV_full.glb", kind="sev_rover",
+    note="NASA's Space Exploration Vehicle, a pressurised rover on six steered, sprung pairs of wheels",
+    axles=(-0.83, 0.87, 2.57), hub=(1.70, -1.86), span=((1.38, 1.60), (1.80, 2.02)), radius=0.38,
+    pivot=(0.69, -1.25), upright_x=1.45, top_z=-0.75, arm_top=-0.9, rim=0.30,
+    masses=(2400.0, 25.0, 40.0, 60.0), body=((-1.55, -2.5, -1.4), (1.55, 3.3, 1.7)),
 )
+
+
+def modules(v):
+    """Each wheel module: its name, side sign, hub Y."""
+    return [(f"{POS[k]}_{side}", s, y) for k, y in enumerate(v.axles) for side, s in SIDES]
 
 
 def loose_parts(bm):
@@ -62,59 +83,110 @@ def loose_parts(bm):
     return parts
 
 
+def label(v, lo, hi):
+    """Which body a loose piece with bounds `lo`..`hi` moves with."""
+    c = (lo + hi) / 2
+    s = 1.0 if c.x > 0 else -1.0
+    near, far = sorted((s * lo.x, s * hi.x))
+    for name, side, y in modules(v):
+        if side != s:
+            continue
+        # A wheel's pieces are rings round its hub, or lie inside its tyre, within one wheel's width.
+        ring = abs(c.y - y) < 0.06 and abs(c.z - v.hub[1]) < 0.08
+        reach = max((yy - y) ** 2 + (zz - v.hub[1]) ** 2 for yy in (lo.y, hi.y) for zz in (lo.z, hi.z)) ** 0.5
+        if (ring or reach <= v.radius + 0.02) and any(a - 0.02 <= near and far <= b + 0.02 for a, b in v.span):
+            return f"wheel_{name}"
+        if abs(c.y - y) < 0.45 and near >= v.upright_x and hi.z <= v.top_z and lo.z >= v.hub[1] - v.radius:
+            return f"upright_{name}"
+        if abs(c.y - y) < 0.35 and near >= v.pivot[0] - 0.05 and far <= v.upright_x + 0.15 and lo.z >= v.hub[1] - 0.1 and hi.z <= v.arm_top:
+            return f"arm_{name}"
+    return "chassis"
+
+
 def split(v, obj):
-    """The model's faces, sorted into the chassis and each side's wheel pair
-    of every axle, by where each loose piece's centre lies."""
+    """The model's faces sorted into the bodies, by each loose piece's bounds."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     bm.transform(obj.matrix_world)
     bm.verts.ensure_lookup_table()
-    pairs = [(sum(v.hubs[:2]) / 2, v.hubs[:2]), (sum(v.hubs[2:]) / 2, v.hubs[2:])]
     owner = {}
     for part in loose_parts(bm):
-        c = sum((bm.verts[i].co for i in part), Vector()) / len(part)
-        label = "chassis"
-        for k, y in enumerate(v.axles):
-            for side, (x, hubs) in enumerate(pairs):
-                across = min(hubs) - v.tread <= c.x <= max(hubs) + v.tread
-                round_ = (c.y - y) ** 2 + (c.z - v.hub_z) ** 2 <= (v.radius * 1.1) ** 2
-                if across and round_:
-                    label = f"wheel_{k}_{'left' if x > 0 else 'right'}"
+        cos = [bm.verts[i].co for i in part]
+        lo = Vector((min(c.x for c in cos), min(c.y for c in cos), min(c.z for c in cos)))
+        hi = Vector((max(c.x for c in cos), max(c.y for c in cos), max(c.z for c in cos)))
+        name = label(v, lo, hi)
         for i in part:
-            owner[i] = label
+            owner[i] = name
     return bm, owner
 
 
-def piece(bm, owner, label, offset):
-    """One labelled piece as its own mesh, moved by `offset`."""
+def mark_wheels(v, obj, bm, owner):
+    """`wheel` and `tread` attributes on the model: 1 on the wheels, and on
+    the tyres' rubber, their vertices out past the rims."""
+    hubs = {name: y for name, _, y in modules(v)}
+    wheel = np.zeros(len(bm.verts), dtype=np.float32)
+    tread = np.zeros(len(bm.verts), dtype=np.float32)
+    for vert in bm.verts:
+        name = owner.get(vert.index, "")
+        if name.startswith("wheel_"):
+            y = hubs[name[len("wheel_"):]]
+            wheel[vert.index] = 1.0
+            tread[vert.index] = ((vert.co.y - y) ** 2 + (vert.co.z - v.hub[1]) ** 2) ** 0.5 >= v.rim
+    obj.data.attributes.new("wheel", "FLOAT", "POINT").data.foreach_set("value", wheel)
+    obj.data.attributes.new("tread", "FLOAT", "POINT").data.foreach_set("value", tread)
+
+
+def piece(bm, owner, name, origin):
+    """One body's faces as its own mesh, about the body's origin."""
     sub = bm.copy()
     sub.verts.ensure_lookup_table()
-    drop = [vert for vert in sub.verts if owner.get(vert.index) != label]
-    bmesh.ops.delete(sub, geom=drop, context="VERTS")
-    bmesh.ops.translate(sub, vec=offset, verts=sub.verts)
-    mesh = bpy.data.meshes.new(label)
+    bmesh.ops.delete(sub, geom=[vert for vert in sub.verts if owner.get(vert.index) != name], context="VERTS")
+    bmesh.ops.translate(sub, vec=-origin, verts=sub.verts)
+    mesh = bpy.data.meshes.new(name)
     sub.to_mesh(mesh)
     sub.free()
     return mesh
 
 
+def origins(v):
+    """Each body's origin in the model's frame: arms at their hinge, uprights
+    and wheels at the hub, the chassis on the ground under its middle."""
+    out = {"chassis": Vector((0.0, 0.0, v.hub[1] - v.radius))}
+    for name, s, y in modules(v):
+        out[f"arm_{name}"] = Vector((s * v.pivot[0], y, v.pivot[1]))
+        out[f"upright_{name}"] = Vector((s * v.hub[0], y, v.hub[1]))
+        out[f"wheel_{name}"] = Vector((s * v.hub[0], y, v.hub[1]))
+    return out
+
+
+def bindings(geom):
+    """Each part's material binding, and its subsets', as (part, child path, material name)."""
+    from pxr import Usd, UsdShade
+    stage = Usd.Stage.Open(geom)
+    found = []
+    for part in stage.GetPrimAtPath("/geom").GetChildren():
+        for prim in [part, *part.GetChildren()]:
+            target = UsdShade.MaterialBindingAPI(prim).GetDirectBinding().GetMaterialPath()
+            if not target.isEmpty:
+                found.append((part.GetName(), "" if prim == part else prim.GetName(), target.name))
+    return found
+
+
 def build(v, nasa_dir, out_dir, work_dir):
     """Writes `<kind>_geom.usdc` and `<kind>.usda` into `work_dir`; returns the machine layer's path."""
     before = set(bpy.data.objects)
+    kept = (set(bpy.data.materials), set(bpy.data.images))
     bpy.ops.import_scene.gltf(filepath=os.path.join(nasa_dir, v.source))
     new = [o for o in bpy.data.objects if o not in before]
     model = next(o for o in new if o.type == "MESH")
     bm, owner = split(v, model)
-    lift = v.radius - v.hub_z
+    mark_wheels(v, model, bm, owner)
+    look = weathering.bake(model, model.data.materials[0], v.hub[1] - v.radius, os.path.join(work_dir, "bake"), v.kind)
     scene = bpy.data.collections.new(f"{v.kind}_geom")
     bpy.context.scene.collection.children.link(scene)
-    meshes = {"chassis": piece(bm, owner, "chassis", Vector((0, 0, lift)))}
-    hub_x = {"left": sum(v.hubs[2:]) / 2, "right": sum(v.hubs[:2]) / 2}
-    for side, x in hub_x.items():
-        meshes[f"wheel_{side}"] = piece(bm, owner, f"wheel_0_{side}", Vector((-x, -v.axles[0], -v.hub_z)))
-    for name, mesh in meshes.items():
-        for mat in model.data.materials:
-            mesh.materials.append(mat)
+    for name, origin in origins(v).items():
+        mesh = piece(bm, owner, name, origin)
+        mesh.materials.append(look)
         scene.objects.link(bpy.data.objects.new(name, mesh))
     bm.free()
     os.makedirs(work_dir, exist_ok=True)
@@ -131,22 +203,119 @@ def build(v, nasa_dir, out_dir, work_dir):
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
     stage.GetRootLayer().Save()
-    for obj in list(scene.objects):
+    del stage
+    bound = bindings(geom)
+    meshes = [obj.data for obj in [*scene.objects, *new] if obj.type == "MESH"]
+    for obj in [*scene.objects, *new]:
         bpy.data.objects.remove(obj)
     bpy.data.collections.remove(scene)
-    for obj in new:
-        bpy.data.objects.remove(obj)
+    for mesh in meshes:
+        bpy.data.meshes.remove(mesh)
+    for mat in set(bpy.data.materials) - kept[0]:
+        bpy.data.materials.remove(mat)
+    for image in set(bpy.data.images) - kept[1]:
+        bpy.data.images.remove(image)
     path = os.path.join(work_dir, f"{v.kind}.usda")
     with open(path, "w") as f:
-        f.write(machine(v, hub_x, lift))
+        f.write(machine(v, bound))
     return path
 
 
-def machine(v, hub_x, lift):
-    """The machine layer: chassis and wheel bodies, axles, and the drive."""
+def box_inertia(mass, size):
+    x, y, z = size
+    return (mass * (y * y + z * z) / 12, mass * (x * x + z * z) / 12, mass * (x * x + y * y) / 12)
+
+
+def drive(u, d, kind, stiffness, damping, max_force=None):
+    """A joint's angular drive; gains per degree, as USD physics authors them."""
+    u.emit(d, 'uniform token drive:angular:physics:type = "force"')
+    u.emit(d, f"float drive:angular:physics:stiffness = {stiffness}")
+    u.emit(d, f"float drive:angular:physics:damping = {damping}")
+    if max_force:
+        u.emit(d, f"float drive:angular:physics:maxForce = {max_force}")
+    if kind == "position":
+        u.emit(d, "float drive:angular:physics:targetPosition = 0")
+    else:
+        u.emit(d, "float drive:angular:physics:targetVelocity = 0")
+
+
+def joint(u, d, name, body0, body1, at, axis, limit, drive_args):
+    u.emit(d, f'def PhysicsRevoluteJoint "{name}" (')
+    u.emit(d + 1, 'prepend apiSchemas = ["PhysicsDriveAPI:angular"]')
+    u.emit(d, ")")
+    u.emit(d, "{")
+    u.emit(d + 1, f"rel physics:body0 = </robot/{body0}>")
+    u.emit(d + 1, f"rel physics:body1 = </robot/{body1}>")
+    u.emit(d + 1, f'uniform token physics:axis = "{axis}"')
+    u.emit(d + 1, f"point3f physics:localPos0 = {fmt(at)}")
+    u.emit(d + 1, "point3f physics:localPos1 = (0, 0, 0)")
+    u.emit(d + 1, "quatf physics:localRot0 = (1, 0, 0, 0)")
+    u.emit(d + 1, "quatf physics:localRot1 = (1, 0, 0, 0)")
+    if limit is not None:
+        u.emit(d + 1, f"float physics:lowerLimit = {-limit}")
+        u.emit(d + 1, f"float physics:upperLimit = {limit}")
+    drive(u, d + 1, *drive_args)
+    u.emit(d, "}")
+
+
+def visual(u, d, kind, part, bound):
+    """A body's look: its part of the geometry layer, bound to the machine's own copy of the materials."""
+    u.emit(d, 'def "visual" (')
+    u.emit(d + 1, f"prepend references = @./{kind}_geom.usdc@</geom/{part}>")
+    u.emit(d, ")")
+    u.emit(d, "{")
+    for owner, child, material in bound:
+        if owner != part:
+            continue
+        if child:
+            u.emit(d + 1, f'over "{child}"')
+            u.emit(d + 1, "{")
+            u.emit(d + 2, f"rel material:binding = </robot/Looks/{material}>")
+            u.emit(d + 1, "}")
+        else:
+            u.emit(d + 1, f"rel material:binding = </robot/Looks/{material}>")
+    u.emit(d, "}")
+
+
+def rigid(u, name, at, mass, inertia, link, role, extra=()):
+    u.emit(1, f'def Xform "{name}" (')
+    u.emit(2, 'prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]')
+    u.emit(1, ")")
+    u.emit(1, "{")
+    u.emit(2, f'token gearbox:link:name = "{link}"')
+    u.emit(2, f'token gearbox:link:role = "{role}"')
+    u.emit(2, f"float physics:mass = {mass}")
+    u.emit(2, f"vector3f physics:diagonalInertia = {fmt(inertia)}")
+    for line in extra:
+        u.emit(2, line)
+    u.emit(2, f"double3 xformOp:translate = {fmt(at)}")
+    u.emit(2, 'uniform token[] xformOpOrder = ["xformOp:translate"]')
+
+
+def sensor(u, name, kind, at, rotate, attrs):
+    u.emit(2, f'def Xform "{name}" (prepend apiSchemas = ["GearboxLinkAPI"])')
+    u.emit(2, "{")
+    u.emit(3, 'token gearbox:link:role = "sensor"')
+    u.emit(3, f'token gearbox:sensor:kind = "{kind}"')
+    for attr in attrs:
+        u.emit(3, attr)
+    u.emit(3, f"double3 xformOp:translate = {fmt(at)}")
+    u.emit(3, f"float3 xformOp:rotateXYZ = {fmt(rotate)}")
+    u.emit(3, 'uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]')
+    u.emit(2, "}")
+
+
+def machine(v, bound):
+    """The machine layer: the bodies, their joints, drives and the controller."""
     u = Usda("")
-    wheels = [(f"wheel_{k}_{side}", side, x, y) for k, y in enumerate(v.axles) for side, x in hub_x.items()]
-    track = hub_x["left"] - hub_x["right"]
+    o = origins(v)
+    ground = o["chassis"]
+    at = {name: p - ground for name, p in o.items()}
+    chassis_kg, arm_kg, upright_kg, wheel_kg = v.masses
+    mods = modules(v)
+    joints = lambda prefix: ", ".join(f"</robot/Joints/{prefix}_{name}>" for name, _, _ in mods)
+    spin, steer, arm = joints("spin"), joints("steer"), joints("arm")
+    track = 2 * v.hub[0]
     base = max(v.axles) - min(v.axles)
     u.emit(0, "#usda 1.0")
     u.emit(0, "(")
@@ -171,9 +340,20 @@ def machine(v, hub_x, lift):
     u.emit(1, 'token gearbox:machine:upAxis = "Z"')
     u.emit(1, "rel gearbox:machine:body = </robot/chassis>")
     u.emit(1, "rel gearbox:machine:controlFrame = </robot/chassis/control_frame>")
-    u.emit(1, "rel gearbox:machine:role:poweredWheelJoints = [" + ", ".join(f"</robot/Joints/axle_{n[6:]}>" for n, *_ in wheels) + "]")
+    u.emit(1, f"rel gearbox:machine:role:poweredWheelJoints = [{spin}]")
+    u.emit(1, f"rel gearbox:machine:role:brakeJoints = [{spin}]")
+    u.emit(1, f"rel gearbox:machine:role:steeringJoints = [{steer}]")
+    u.emit(1, f"rel gearbox:machine:role:suspensionJoints = [{arm}]")
     u.emit(1, "bool gearbox:controller:drive:enabled = true")
-    u.emit(1, 'token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"')
+    u.emit(1, 'token gearbox:controller:drive:type = "builtin:ackermann_cmd_vel"')
+    u.emit(1, 'token gearbox:controller:drive:steeringGeometry = "six_wheel_ackermann"')
+    u.emit(1, "float gearbox:controller:drive:frontSteerMultiplier = 1")
+    u.emit(1, "float gearbox:controller:drive:middleSteerMultiplier = 0")
+    u.emit(1, "float gearbox:controller:drive:rearSteerMultiplier = -1")
+    u.emit(1, "float gearbox:controller:drive:maxSteerDeg = 45")
+    u.emit(1, "float gearbox:controller:drive:maxWheelTorqueNm = 800")
+    u.emit(1, "float gearbox:controller:drive:maxPowerKw = 30")
+    u.emit(1, 'token gearbox:controller:drive:zeroCommand = "brake"')
     u.emit(1, "float gearbox:controller:drive:updateRateHz = 60")
     u.emit(1, 'token gearbox:controller:drive:namespacePolicy = "machine_id"')
     u.emit(1, 'token gearbox:controller:drive:commandInterface = "cmd_vel"')
@@ -181,30 +361,29 @@ def machine(v, hub_x, lift):
     u.emit(1, 'token gearbox:controller:drive:frameConvention = "usd_z_up"')
     u.emit(1, f"float gearbox:controller:drive:wheelRadius = {v.radius}")
     u.emit(1, f"float gearbox:controller:drive:trackWidth = {track:.4f}")
+    u.emit(1, f"float gearbox:controller:drive:frontTrackWidth = {track:.4f}")
+    u.emit(1, f"float gearbox:controller:drive:rearTrackWidth = {track:.4f}")
     u.emit(1, f"float gearbox:controller:drive:wheelBase = {base:.4f}")
-    u.emit(1, 'token[] gearbox:controller:drive:usesRoles = ["poweredWheelJoints"]')
+    u.emit(1, f"rel gearbox:controller:drive:driveWheelJoints = [{spin}]")
+    u.emit(1, f"rel gearbox:controller:drive:steerJoints = [{steer}]")
     u.emit(1, "rel gearbox:controller:drive:target = </robot>")
     u.emit(1, "rel gearbox:controller:drive:body = </robot/chassis>")
-    (x0, y0, z0), (x1, y1, z1) = v.body
-    z0, z1 = z0 + lift, z1 + lift
-    u.emit(1, 'def Xform "chassis" (')
-    u.emit(2, 'prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]')
+    u.emit(1, 'def "Looks" (')
+    u.emit(2, f"prepend references = @./{v.kind}_geom.usdc@</geom/_materials>")
     u.emit(1, ")")
     u.emit(1, "{")
+    u.emit(1, "}")
+
+    (x0, y0, z0), (x1, y1, z1) = v.body
+    z0, z1 = z0 - ground.z, z1 - ground.z
+    rigid(u, "chassis", (0, 0, 0), chassis_kg, box_inertia(chassis_kg, (x1 - x0, y1 - y0, z1 - z0)), "base_link", "base")
     # The control frame's +X is where the machine drives: the chassis's -Y.
     u.emit(2, 'def Xform "control_frame"')
     u.emit(2, "{")
     u.emit(3, "quatd xformOp:orient = (0.7071067811865476, 0, 0, -0.7071067811865476)")
     u.emit(3, 'uniform token[] xformOpOrder = ["xformOp:orient"]')
     u.emit(2, "}")
-    u.emit(2, f"float physics:mass = {v.chassis_kg}")
-    sx, sy, sz = x1 - x0, y1 - y0, z1 - z0
-    u.emit(2, f"vector3f physics:diagonalInertia = {fmt((v.chassis_kg * (sy * sy + sz * sz) / 12, v.chassis_kg * (sx * sx + sz * sz) / 12, v.chassis_kg * (sx * sx + sy * sy) / 12))}")
-    u.emit(2, 'def "visual" (')
-    u.emit(3, f"prepend references = @./{v.kind}_geom.usdc@</geom/chassis>")
-    u.emit(2, ")")
-    u.emit(2, "{")
-    u.emit(2, "}")
+    visual(u, 2, v.kind, "chassis", bound)
     u.emit(2, 'def Mesh "body_collider" (')
     u.emit(3, 'prepend apiSchemas = ["PhysicsCollisionAPI", "PhysicsMeshCollisionAPI"]')
     u.emit(2, ")")
@@ -218,47 +397,57 @@ def machine(v, hub_x, lift):
     u.emit(3, "int[] faceVertexIndices = [0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4, 2, 3, 7, 6, 1, 2, 6, 5, 3, 0, 4, 7]")
     u.emit(3, f"float3[] extent = [{fmt((x0, y0, z0))}, {fmt((x1, y1, z1))}]")
     u.emit(2, "}")
+    nose = (0.0, y0 + 0.1, 2.2)
+    sensor(u, "imu_link", "imu", (0, 0, 1.2), (0, 0, 0), ["float gearbox:sensor:rate_hz = 100"])
+    sensor(u, "front_camera", "camera", nose, (0, 10, -90), [
+        'token gearbox:sensor:channels = "color_depth"',
+        "int gearbox:sensor:width = 320",
+        "int gearbox:sensor:height = 240",
+        "float gearbox:sensor:vfov_deg = 60",
+        "float gearbox:sensor:range_m = 40",
+        "float gearbox:sensor:rate_hz = 10",
+    ])
+    sensor(u, "lidar", "lidar", (0.0, y0 + 0.9, z1 + 0.05), (0, 0, -90), [
+        "int gearbox:sensor:rows = 16",
+        "int gearbox:sensor:columns = 360",
+        "float gearbox:sensor:hfov_deg = 360",
+        "float gearbox:sensor:vfov_deg = 30",
+        "float gearbox:sensor:range_m = 60",
+        "float gearbox:sensor:rate_hz = 10",
+    ])
     u.emit(1, "}")
-    inertia_axle = v.wheel_kg * v.radius * v.radius / 2
-    inertia_side = v.wheel_kg * (3 * v.radius * v.radius + v.tread * v.tread) / 12
-    width = max(v.hubs) - min(h for h in v.hubs if h > 0) + v.tread
-    for name, side, x, y in wheels:
-        u.emit(1, f'def Xform "{name}" (')
-        u.emit(2, 'prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]')
-        u.emit(1, ")")
-        u.emit(1, "{")
-        u.emit(2, f"float physics:mass = {v.wheel_kg}")
-        u.emit(2, f"vector3f physics:diagonalInertia = {fmt((inertia_axle, inertia_side, inertia_side))}")
-        u.emit(2, f"double3 xformOp:translate = {fmt((x, y, v.radius))}")
-        u.emit(2, 'uniform token[] xformOpOrder = ["xformOp:translate"]')
-        u.emit(2, 'def "visual" (')
-        u.emit(3, f"prepend references = @./{v.kind}_geom.usdc@</geom/wheel_{side}>")
-        u.emit(2, ")")
-        u.emit(2, "{")
-        u.emit(2, "}")
+
+    width = v.span[-1][1] - v.span[0][0]
+    for name, s, y in mods:
+        rigid(u, f"arm_{name}", at[f"arm_{name}"], arm_kg, box_inertia(arm_kg, (0.9, 0.45, 0.5)), f"arm_{name}", "link")
+        visual(u, 2, v.kind, f"arm_{name}", bound)
+        u.emit(1, "}")
+        rigid(u, f"upright_{name}", at[f"upright_{name}"], upright_kg, box_inertia(upright_kg, (0.45, 0.45, 0.9)), f"upright_{name}", "steer")
+        visual(u, 2, v.kind, f"upright_{name}", bound)
+        u.emit(1, "}")
+        r = v.radius
+        rigid(u, f"wheel_{name}", at[f"wheel_{name}"], wheel_kg,
+              (wheel_kg * r * r / 2, wheel_kg * (3 * r * r + width * width) / 12, wheel_kg * (3 * r * r + width * width) / 12),
+              f"wheel_{name}", "wheel", [f"float gearbox:value:tyre_width_m = {width:.3f}"])
+        visual(u, 2, v.kind, f"wheel_{name}", bound)
         u.emit(2, 'def Cylinder "tire_collider" (')
         u.emit(3, 'prepend apiSchemas = ["PhysicsCollisionAPI"]')
         u.emit(2, ")")
         u.emit(2, "{")
         u.emit(3, 'token visibility = "invisible"')
         u.emit(3, 'uniform token axis = "X"')
-        u.emit(3, f"double radius = {v.radius}")
+        u.emit(3, f"double radius = {r}")
         u.emit(3, f"double height = {width:.3f}")
         u.emit(2, "}")
         u.emit(1, "}")
+
     u.emit(1, 'def Scope "Joints"')
     u.emit(1, "{")
-    for name, side, x, y in wheels:
-        u.emit(2, f'def PhysicsRevoluteJoint "axle_{name[6:]}"')
-        u.emit(2, "{")
-        u.emit(3, "rel physics:body0 = </robot/chassis>")
-        u.emit(3, f"rel physics:body1 = </robot/{name}>")
-        u.emit(3, f"point3f physics:localPos0 = {fmt((x, y, v.radius))}")
-        u.emit(3, "point3f physics:localPos1 = (0, 0, 0)")
-        u.emit(3, "quatf physics:localRot0 = (1, 0, 0, 0)")
-        u.emit(3, "quatf physics:localRot1 = (1, 0, 0, 0)")
-        u.emit(3, 'uniform token physics:axis = "X"')
-        u.emit(2, "}")
+    for name, s, y in mods:
+        joint(u, 2, f"arm_{name}", "chassis", f"arm_{name}", at[f"arm_{name}"], "Y", v.travel_deg, ("position", 1000, 60))
+        joint(u, 2, f"steer_{name}", f"arm_{name}", f"upright_{name}", at[f"upright_{name}"] - at[f"arm_{name}"], "Z",
+              v.steer_deg, ("position", 1500, 60, 4000))
+        joint(u, 2, f"spin_{name}", f"upright_{name}", f"wheel_{name}", (0, 0, 0), "X", None, ("velocity", 0, 60, 800))
     u.emit(1, "}")
     u.emit(0, "}")
     return u.text()
