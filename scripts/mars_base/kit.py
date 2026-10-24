@@ -32,8 +32,10 @@ class Looks:
     material's colour map is its texture's detail, luminance over its mean,
     times the material's colour, baked to `textures/<name>.jpg`."""
 
-    def __init__(self, textures):
+    def __init__(self, textures, out=None):
         self.textures = textures
+        self.out = out or textures
+        os.makedirs(self.out, exist_ok=True)
         self.made = {}
 
     def image(self, path, colour_data):
@@ -48,7 +50,7 @@ class Looks:
         if array.ndim == 2:
             array = np.repeat(array[..., None], 3, axis=-1)
         alpha = array.shape[-1] == 4
-        out = os.path.join(self.textures, f"{name}.{'png' if alpha else 'jpg'}")
+        out = os.path.join(self.out, f"{name}.{'png' if alpha else 'jpg'}")
         h, w = array.shape[:2]
         rgb = np.clip(array[..., :3], 0.0, 1.0)
         rgb = linear_to_srgb(rgb) if srgb else rgb
