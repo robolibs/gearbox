@@ -17,7 +17,7 @@ an EDEN ISS-like container module with its regolith bed. Around them stand
 a habitat cluster, an inflatable hab, a printed regolith tower, a rover
 hangar, solar arrays and four 10 kWe fission units, two container-sized
 ISRU units with their tanks and an ice well, and a landing zone. The fleet
-file places six tending robots and two pressurised rovers.
+file places six tending robots, two pressurised rovers and Perseverance.
 
 `scripts/mars_base/` builds everything in Blender (see `build.py`): each
 kind of structure goes to `assets/mars_base/modules/<kind>.usdc` with its
@@ -186,9 +186,19 @@ rack catches its uprights. A `by` reach is measured from the parts under the
 named robot's own prim.
 
 The fleet's `base_fleet_rover1` and `rover2` are NASA's Space Exploration
-Vehicle (`machines/usd/sev_rover.usdz`): its mesh cut into a chassis and six
-pairs of wheels on revolute axles, driven by a skid-steer `cmd_vel`
-controller (`gearbox machine move` or `drive`).
+Vehicle (`machines/usd/sev_rover.usdz`), its full-detail mesh cut into the
+chassis and six wheel modules. Each module is an arm sprung on the chassis
+(`arm_*`, ±12°), an upright steering on it (`steer_*`, ±60°) and a pair of
+twin wheels (`spin_*`). A six-wheel ackermann `cmd_vel` controller turns the
+front and rear modules opposite each other about the middle axle
+(`gearbox machine move` or `drive`). Its textures carry baked Mars wear
+(`scripts/mars_base/weathering.py`): dust settled on what faces up and
+thrown up by the wheels, grime where the sky cannot reach, rubber treads,
+and roughness and metal read from NASA's colour and specular maps. It has
+a front camera, a roof LiDAR and an IMU.
+
+`base_fleet_percy` is NASA's Perseverance (`machines/usd/perseverance_nasa.usdz`),
+working the ground south-east of the base: the base stands in Jezero crater.
 
 ## 6. Scenarios
 

@@ -279,7 +279,7 @@ def fleet(placed, machines_dir):
     u.emit(0, "{")
     for name, file, at, yaw, anchor in placed:
         u.emit(1, f'def Xform "{name}" (')
-        u.emit(2, f"prepend references = @{machines_dir}/{file}@</robot>")
+        u.emit(2, f"prepend references = @{machines_dir}/{file}@")
         u.emit(1, ")")
         u.emit(1, "{")
         u.emit(2, f"double3 xformOp:translate = {fmt(at)}")

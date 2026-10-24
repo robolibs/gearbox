@@ -215,6 +215,8 @@ def fleet_places(eden_rail, arch_rail, dome_anchor):
     # The rovers drive toward their -Y: a yaw of pi/2 points one north.
     places.append(("Rover1", "sev_rover.usdz", (-16.0, -9.0, 0.0), math.pi, None))
     places.append(("Rover2", "sev_rover.usdz", (-22.0, 38.0, 0.0), math.pi / 2, None))
+    # The base stands in Jezero crater, where Perseverance works the delta.
+    places.append(("Percy", "perseverance_nasa.usdz", (-44.0, -128.0, 0.0), math.radians(140), None))
     return places
 
 

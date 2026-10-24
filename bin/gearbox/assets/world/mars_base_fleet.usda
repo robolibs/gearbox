@@ -13,7 +13,7 @@
 def Xform "Fleet"
 {
     def Xform "Eve" (
-        prepend references = @../../../../machines/usd/eden_gantry.usdz@</robot>
+        prepend references = @../../../../machines/usd/eden_gantry.usdz@
     )
     {
         double3 xformOp:translate = (20.51, 22, 2.74)
@@ -29,7 +29,7 @@ def Xform "Fleet"
         }
     }
     def Xform "ArchABot" (
-        prepend references = @../../../../machines/usd/arch_gantry.usdz@</robot>
+        prepend references = @../../../../machines/usd/arch_gantry.usdz@
     )
     {
         double3 xformOp:translate = (16, -62, 5)
@@ -45,7 +45,7 @@ def Xform "Fleet"
         }
     }
     def Xform "ArchBBot" (
-        prepend references = @../../../../machines/usd/arch_gantry.usdz@</robot>
+        prepend references = @../../../../machines/usd/arch_gantry.usdz@
     )
     {
         double3 xformOp:translate = (16, -77, 5)
@@ -61,7 +61,7 @@ def Xform "Fleet"
         }
     }
     def Xform "ArchCBot" (
-        prepend references = @../../../../machines/usd/arch_gantry.usdz@</robot>
+        prepend references = @../../../../machines/usd/arch_gantry.usdz@
     )
     {
         double3 xformOp:translate = (16, -92, 5)
@@ -77,7 +77,7 @@ def Xform "Fleet"
         }
     }
     def Xform "DomeABot" (
-        prepend references = @../../../../machines/usd/dome_gantry.usdz@</robot>
+        prepend references = @../../../../machines/usd/dome_gantry.usdz@
     )
     {
         double3 xformOp:translate = (62, -20, 0)
@@ -93,7 +93,7 @@ def Xform "Fleet"
         }
     }
     def Xform "DomeBBot" (
-        prepend references = @../../../../machines/usd/dome_gantry.usdz@</robot>
+        prepend references = @../../../../machines/usd/dome_gantry.usdz@
     )
     {
         double3 xformOp:translate = (62, 20, 0)
@@ -109,7 +109,7 @@ def Xform "Fleet"
         }
     }
     def Xform "Rover1" (
-        prepend references = @../../../../machines/usd/sev_rover.usdz@</robot>
+        prepend references = @../../../../machines/usd/sev_rover.usdz@
     )
     {
         double3 xformOp:translate = (-16, -9, 0)
@@ -117,11 +117,19 @@ def Xform "Fleet"
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
     def Xform "Rover2" (
-        prepend references = @../../../../machines/usd/sev_rover.usdz@</robot>
+        prepend references = @../../../../machines/usd/sev_rover.usdz@
     )
     {
         double3 xformOp:translate = (-22, 38, 0)
         float3 xformOp:rotateXYZ = (0, 0, 90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "Percy" (
+        prepend references = @../../../../machines/usd/perseverance_nasa.usdz@
+    )
+    {
+        double3 xformOp:translate = (-44, -128, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 140.0000)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }
