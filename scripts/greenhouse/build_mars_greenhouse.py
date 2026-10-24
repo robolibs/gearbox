@@ -348,7 +348,7 @@ RAIL_UNDER = HEIGHT - 0.16
 TROLLEY_Z = -0.07
 MAST_Z = -0.58
 TURRET_Z = -1.08
-ARM = (0.0, -0.26, -1.16)
+ARM = (0.0, -0.20, -1.16)
 
 
 def body(depth, name, at, mass, inertia, link=None, values=()):
@@ -441,12 +441,12 @@ def gantry():
     body(1, "turret", (0.2, 0, TURRET_Z), 3, (0.01, 0.01, 0.01), values=["float gearbox:value:range = 3.14159"])
     cylinder(2, "hub", (0, 0, 0), 0.07, 0.1, "housing")
     emit(1, "}")
-    reach = 0.6
+    reach = 0.65
     body(1, "arm", (0.2 + ARM[0], ARM[1], ARM[2]), 2.5, (0.04, 0.005, 0.04), values=[f"float gearbox:value:range = {-reach}"])
-    box(2, "beam", (0, 0, 0), (0.05, 0.42, 0.05), "profile")
-    box(2, "head", (0, -0.245, -0.01), (0.09, 0.07, 0.07), "housing")
-    box(2, "lens", (0, -0.245, -0.047), (0.03, 0.03, 0.006), "led", collide=False)
-    sensor(2, "camera_link", "camera", (0, -0.245, -0.06), (0, 90, 0), [
+    box(2, "beam", (0, 0, 0), (0.05, 0.36, 0.05), "profile")
+    box(2, "head", (0, -0.215, -0.01), (0.09, 0.07, 0.07), "housing")
+    box(2, "lens", (0, -0.215, -0.047), (0.03, 0.03, 0.006), "led", collide=False)
+    sensor(2, "camera_link", "camera", (0, -0.215, -0.06), (0, 90, 0), [
         "bool gearbox:sensor:recognition = true",
         "int gearbox:sensor:width = 160",
         "int gearbox:sensor:height = 120",
@@ -454,8 +454,8 @@ def gantry():
         "float gearbox:sensor:range_m = 4",
         "float gearbox:sensor:rate_hz = 2",
     ])
-    sensor(2, "light_link", "light", (0, -0.245, 0.03), (0, -90, 0), ["float gearbox:sensor:rate_hz = 2"])
-    sensor(2, "climate_link", "climate", (0, -0.2, 0.0), (0, 0, 0))
+    sensor(2, "light_link", "light", (0, -0.215, 0.03), (0, -90, 0), ["float gearbox:sensor:rate_hz = 2"])
+    sensor(2, "climate_link", "climate", (0, -0.17, 0.0), (0, 0, 0))
     emit(1, "}")
     emit(1, 'def Scope "Joints"')
     emit(1, "{")

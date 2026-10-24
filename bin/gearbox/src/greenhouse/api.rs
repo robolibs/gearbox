@@ -15,6 +15,8 @@ use crate::globe::{Site, transform_in_site};
 
 /// How close a machine must come to a service spot to mend what it serves, metres.
 const SERVICE_REACH_M: f32 = 1.2;
+/// How close a machine must come to a plant's middle to sow, harvest or lift it, metres.
+const PLANT_REACH_M: f32 = 0.3;
 
 fn number(v: f64) -> String {
     format!("{v:.4}")
@@ -165,6 +167,43 @@ fn machine_distance(
         .fold(f32::MAX, f32::min))
 }
 
+/// The middle of a plant, or of its empty place, in the scene.
+fn plant_middle(greenhouse: &Greenhouse, id: PlantId, globals: &Query<&GlobalTransform>) -> Option<Vec3> {
+    let place = &greenhouse.trays[id.tray];
+    let at = place.slot_at(id.slot);
+    let height = greenhouse.house.plant(id).map_or(0.0, |p| (p.species.height_m * p.size()) as f32);
+    Some(globals.get(place.entity).ok()?.transform_point(Vec3::new(at.x, at.y, height * 0.5)))
+}
+
+/// The places among `ids` the machine `by` names can reach, all of them without
+/// one; a single place out of reach is refused.
+fn within_reach(
+    greenhouse: &Greenhouse,
+    ids: Vec<PlantId>,
+    keys: &Props,
+    inventory: &ControllerInventory,
+    children: &Query<&Children>,
+    globals: &Query<&GlobalTransform>,
+) -> Result<Vec<PlantId>, Status> {
+    let Some(machine) = keys.get("by") else { return Ok(ids) };
+    let single = ids.len() == 1;
+    let mut near = Vec::new();
+    for id in ids {
+        let at = plant_middle(greenhouse, id, globals).ok_or_else(|| Status::err(code::ERROR, "the tray has no place"))?;
+        let away = machine_distance(&machine, at, inventory, children, globals)?;
+        if away <= PLANT_REACH_M {
+            near.push(id);
+        } else if single {
+            let name = greenhouse.plant_name(id);
+            return Err(Status::err(code::REFUSED, &format!("`{machine}` is {away:.2} m from {name}")));
+        }
+    }
+    if near.is_empty() {
+        return Err(Status::err(code::REFUSED, &format!("nothing within reach of `{machine}`")));
+    }
+    Ok(near)
+}
+
 fn act(
     greenhouse: &mut Greenhouse,
     action: &GreenhouseAction,
@@ -184,20 +223,26 @@ fn act(
                     .filter(|s| greenhouse.house.plant(PlantId { tray, slot: *s }).is_none_or(|p| !p.alive))
                     .collect(),
             };
-            for &slot in &slots {
-                let event = greenhouse.house.sow(PlantId { tray, slot }, species).map_err(refused)?;
+            let places = slots.into_iter().map(|slot| PlantId { tray, slot }).collect();
+            let places = within_reach(greenhouse, places, &keys, inventory, children, globals)?;
+            for &id in &places {
+                let event = greenhouse.house.sow(id, species).map_err(refused)?;
                 greenhouse.events.push(event);
             }
-            Ok(Status::ok_with(&Props::from_pairs(&[("sown", &slots.len().to_string())])))
+            Ok(Status::ok_with(&Props::from_pairs(&[("sown", &places.len().to_string())])))
         }
         op::HARVEST => {
             let ids: Vec<PlantId> = if keys.contains("plant") {
                 vec![plant_of(greenhouse, &keys)?]
             } else {
                 let tray = tray_of(greenhouse, &keys)?;
-                (0..greenhouse.house.trays[tray].slots.len()).map(|slot| PlantId { tray, slot }).collect()
+                (0..greenhouse.house.trays[tray].slots.len())
+                    .map(|slot| PlantId { tray, slot })
+                    .filter(|id| greenhouse.house.plant(*id).is_some_and(|p| p.alive))
+                    .collect()
             };
-            let single = ids.len() == 1;
+            let single = keys.contains("plant");
+            let ids = within_reach(greenhouse, ids, &keys, inventory, children, globals)?;
             let (mut count, mut kg) = (0, 0.0);
             for id in ids {
                 match greenhouse.house.harvest(id) {
@@ -216,6 +261,7 @@ fn act(
         }
         op::CLEAR => {
             let id = plant_of(greenhouse, &keys)?;
+            within_reach(greenhouse, vec![id], &keys, inventory, children, globals)?;
             greenhouse.house.clear(id).map_err(refused)?;
             Ok(Status::ok())
         }

@@ -38,11 +38,24 @@ enum Cmd {
         species: String,
         #[arg(long)]
         slot: Option<usize>,
+        /// Only where this machine reaches (within 0.3 m)
+        #[arg(long)]
+        by: Option<String>,
     },
     /// Take in one plant (TRAY/SLOT) or every ripe plant of a tray
-    Harvest { target: String },
+    Harvest {
+        target: String,
+        /// Only what this machine reaches (within 0.3 m)
+        #[arg(long)]
+        by: Option<String>,
+    },
     /// Lift whatever stands in one place, dead or alive
-    Clear { plant: String },
+    Clear {
+        plant: String,
+        /// Only if this machine reaches it (within 0.3 m)
+        #[arg(long)]
+        by: Option<String>,
+    },
     /// Wash the perchlorate out of a regolith tray
     Wash { tray: String },
     /// Work organic matter into a regolith tray
@@ -101,19 +114,19 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             rooms(ctx, &ctx.client()?.greenhouse_rooms()?);
             Ok(())
         }
-        Cmd::Sow { tray, species, slot } => {
+        Cmd::Sow { tray, species, slot, by } => {
             let slot = slot.map(|s| s.to_string());
             let mut keys = vec![("tray", tray.as_str()), ("species", species.as_str())];
             if let Some(slot) = &slot {
                 keys.push(("slot", slot));
             }
-            act(ctx, op::SOW, &keys, &tray)
+            act(ctx, op::SOW, &with_by(keys, &by), &tray)
         }
-        Cmd::Harvest { target } => {
+        Cmd::Harvest { target, by } => {
             let key = if target.contains('/') { "plant" } else { "tray" };
-            act(ctx, op::HARVEST, &[(key, &target)], &target)
+            act(ctx, op::HARVEST, &with_by(vec![(key, &target)], &by), &target)
         }
-        Cmd::Clear { plant } => act(ctx, op::CLEAR, &[("plant", &plant)], &plant),
+        Cmd::Clear { plant, by } => act(ctx, op::CLEAR, &with_by(vec![("plant", &plant)], &by), &plant),
         Cmd::Wash { tray } => act(ctx, op::WASH, &[("tray", &tray)], &tray),
         Cmd::Amend { tray, share } => act(ctx, op::AMEND, &[("tray", &tray), ("share", &share.to_string())], &tray),
         Cmd::Lamps { tray, spectrum, dimming } => {
@@ -156,6 +169,13 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             act(ctx, op::SETPOINT, &keys, &room)
         }
     }
+}
+
+fn with_by<'a>(mut keys: Vec<(&'a str, &'a str)>, by: &'a Option<String>) -> Vec<(&'a str, &'a str)> {
+    if let Some(by) = by {
+        keys.push(("by", by));
+    }
+    keys
 }
 
 fn act(ctx: &Ctx, which: u32, keys: &[(&str, &str)], id: &str) -> Result<()> {

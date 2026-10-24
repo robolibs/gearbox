@@ -212,8 +212,8 @@ def Xform "robot" (
     {
         float physics:mass = 2.5
         float3 physics:diagonalInertia = (0.04, 0.005, 0.04)
-        float gearbox:value:range = -0.6
-        double3 xformOp:translate = (0.2, -0.26, -1.16)
+        float gearbox:value:range = -0.65
+        double3 xformOp:translate = (0.2, -0.2, -1.16)
         uniform token[] xformOpOrder = ["xformOp:translate"]
         def Cube "beam" (
             prepend apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI"]
@@ -221,7 +221,7 @@ def Xform "robot" (
         {
             double size = 1
             double3 xformOp:translate = (0, 0, 0)
-            float3 xformOp:scale = (0.05, 0.42, 0.05)
+            float3 xformOp:scale = (0.05, 0.36, 0.05)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
             rel material:binding = </robot/Looks/profile>
         }
@@ -230,7 +230,7 @@ def Xform "robot" (
         )
         {
             double size = 1
-            double3 xformOp:translate = (0, -0.245, -0.01)
+            double3 xformOp:translate = (0, -0.215, -0.01)
             float3 xformOp:scale = (0.09, 0.07, 0.07)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
             rel material:binding = </robot/Looks/housing>
@@ -240,7 +240,7 @@ def Xform "robot" (
         )
         {
             double size = 1
-            double3 xformOp:translate = (0, -0.245, -0.047)
+            double3 xformOp:translate = (0, -0.215, -0.047)
             float3 xformOp:scale = (0.03, 0.03, 0.006)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
             rel material:binding = </robot/Looks/led>
@@ -255,7 +255,7 @@ def Xform "robot" (
             float gearbox:sensor:vfov_deg = 70
             float gearbox:sensor:range_m = 4
             float gearbox:sensor:rate_hz = 2
-            double3 xformOp:translate = (0, -0.245, -0.06)
+            double3 xformOp:translate = (0, -0.215, -0.06)
             float3 xformOp:rotateXYZ = (0, 90, 0)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         }
@@ -264,7 +264,7 @@ def Xform "robot" (
             token gearbox:link:role = "sensor"
             token gearbox:sensor:kind = "light"
             float gearbox:sensor:rate_hz = 2
-            double3 xformOp:translate = (0, -0.245, 0.03)
+            double3 xformOp:translate = (0, -0.215, 0.03)
             float3 xformOp:rotateXYZ = (0, -90, 0)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         }
@@ -272,7 +272,7 @@ def Xform "robot" (
         {
             token gearbox:link:role = "sensor"
             token gearbox:sensor:kind = "climate"
-            double3 xformOp:translate = (0, -0.2, 0)
+            double3 xformOp:translate = (0, -0.17, 0)
             float3 xformOp:rotateXYZ = (0, 0, 0)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         }
@@ -326,9 +326,9 @@ def Xform "robot" (
             rel physics:body0 = </robot/turret>
             rel physics:body1 = </robot/arm>
             uniform token physics:axis = "Y"
-            point3f physics:localPos0 = (0, -0.26, -0.08)
+            point3f physics:localPos0 = (0, -0.2, -0.08)
             point3f physics:localPos1 = (0, 0, 0)
-            float physics:lowerLimit = -0.6
+            float physics:lowerLimit = -0.65
             float physics:upperLimit = 0
             float gearbox:motor:maxForce = 200
             float gearbox:motor:maxVelocity = 0.2
