@@ -60,6 +60,7 @@ pub fn convert_colliders(
     articulation_roots: Query<(), With<UsdArticulationRoot>>,
     masses: Query<&super::markers::UsdMass>,
     meshes: Res<Assets<Mesh>>,
+    (transforms, sites): (Query<&Transform>, Query<&crate::globe::Site>),
 ) {
     for (entity, col, rb_opt, mesh3d, gt, children, child_of) in &colliders {
         // Body-relative scale: scenes with `metersPerUnit != 1` push
@@ -87,7 +88,14 @@ pub fn convert_colliders(
             .and_then(|e| globals.get(e).ok())
             .map(|b| b.compute_transform().scale)
             .unwrap_or(Vec3::ONE);
-        let mesh_world_scale = gt.map(|g| g.compute_transform().scale).unwrap_or(Vec3::ONE);
+        // A collider on no body stands alone in the world, where its site has it.
+        let alone = parent_entity
+            .is_none()
+            .then(|| crate::globe::transform_in_site(entity, &parents, &transforms, &sites).compute_transform());
+        let mesh_world_scale = alone
+            .map(|t| t.scale)
+            .or_else(|| gt.map(|g| g.compute_transform().scale))
+            .unwrap_or(Vec3::ONE);
         let local_scale = Vec3::new(
             mesh_world_scale.x / body_scale.x,
             mesh_world_scale.y / body_scale.y,
@@ -184,9 +192,17 @@ pub fn convert_colliders(
         // translation/rotation, plus the Y→authored-axis remap for primitive
         // cylinders/capsules so the backend's Y long-axis matches what the
         // mesh xform expects.
-        let mut desc = ColliderDesc::new(shape)
-            .pose(compute_local_pose(parent_entity, &globals, gt, &col.shape))
-            .entity(entity);
+        let pose = match alone {
+            Some(at) => {
+                let region = gearbox_globe::physics_offset(crate::globe::site_of(entity, &parents, &sites));
+                Pose {
+                    translation: vec3_to_d(at.translation) + DVec3::new(region.x, region.y, region.z),
+                    rotation: quat_to_d(at.rotation * axis_remap(&col.shape)),
+                }
+            }
+            None => compute_local_pose(parent_entity, &globals, gt, &col.shape),
+        };
+        let mut desc = ColliderDesc::new(shape).pose(pose).entity(entity);
         desc.parent = parent_handle;
         desc.enabled = col.enabled;
         // An authored body mass is the whole mass.
@@ -264,6 +280,16 @@ fn extract_mesh(mesh: &Mesh, scale: Vec3) -> Option<(Vec<DVec3>, Option<Vec<[u32
     Some((vertices, indices))
 }
 
+/// The turn from the backend's Y long axis to a cylinder's or capsule's authored one.
+fn axis_remap(shape: &UsdColliderShape) -> Quat {
+    match shape {
+        UsdColliderShape::Cylinder { axis, .. } | UsdColliderShape::Capsule { axis, .. } => {
+            Quat::from_rotation_arc(Vec3::Y, axis.normalize_or(Vec3::Z))
+        }
+        _ => Quat::IDENTITY,
+    }
+}
+
 fn compute_local_pose(
     parent_entity: Option<Entity>,
     globals: &Query<&GlobalTransform>,
@@ -292,13 +318,7 @@ fn compute_local_pose(
         local_delta.y / body_t.scale.y,
         local_delta.z / body_t.scale.z,
     );
-    let axis_remap = match shape {
-        UsdColliderShape::Cylinder { axis, .. } | UsdColliderShape::Capsule { axis, .. } => {
-            Quat::from_rotation_arc(Vec3::Y, axis.normalize_or(Vec3::Z))
-        }
-        _ => Quat::IDENTITY,
-    };
-    let local_rotation = inv_body_rot * mesh_t.rotation * axis_remap;
+    let local_rotation = inv_body_rot * mesh_t.rotation * axis_remap(shape);
     Pose {
         translation: vec3_to_d(local_translation),
         rotation: quat_to_d(local_rotation),
