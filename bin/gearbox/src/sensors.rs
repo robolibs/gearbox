@@ -16,6 +16,7 @@ use bevy::camera::primitives::Aabb;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::renderer::{RenderAdapterInfo, RenderDevice, RenderQueue};
+use bevy::tasks::{AsyncComputeTaskPool, Task};
 use gearbox_api::datapod::robot::Imu;
 use gearbox_api::datapod::{Acceleration, Quaternion, Velocity};
 use gearbox_api::{
@@ -31,7 +32,7 @@ use molla_sensors::{
     ScanMetadata, ScheduledSample, SensorScene, SensorSceneOptions, SensorSchedule,
     SensorScheduler, TiledCamera, TiledCameraConfig, UnsupportedGeometryPolicy,
 };
-use molla_sim::runtime::{ColliderGeometry, RigidScene};
+use molla_sim::runtime::{ColliderGeometry, RigidScene, SceneStamp};
 use molla_sim::{Model, State};
 use molla_storage::{Buffer, BufferUsage};
 use usd_bevy::UsdPrimRef;
@@ -173,11 +174,88 @@ pub struct MachineSensorRigs {
     rigs: HashMap<String, Rig>,
     /// Scene revision at which a machine's rig build last failed.
     failed: HashMap<String, u64>,
+    /// The sensor scene every rig samples.
+    scene: Option<SharedScene>,
+    /// The next scene, building off the frame.
+    building: Option<SceneBuild>,
+}
+
+/// A sensor scene of one physics model, over one order of bodies.
+pub struct SharedScene {
+    model: SceneStamp,
+    bodies: Vec<u64>,
+    scene: Arc<SensorScene>,
+}
+
+/// What recognition names in a scene: each shape's object and each object's label.
+#[derive(Default)]
+pub struct SceneObjects {
+    shapes: Vec<Option<u32>>,
+    labels: Vec<String>,
+}
+
+/// A newer model's scene building on a worker while the rigs sample the
+/// last one, with what each rig will recognise in it.
+struct SceneBuild {
+    model: SceneStamp,
+    bodies: Vec<u64>,
+    objects: HashMap<String, Arc<SceneObjects>>,
+    task: Task<Result<SensorScene, String>>,
+}
+
+/// The sensor scene of the physics world's model, built once per model
+/// however many machines sample it.
+fn shared_scene<'a>(
+    engine: &Engine,
+    cached: &'a mut Option<SharedScene>,
+    physics: &dyn PhysicsBackend,
+    model: &SceneStamp,
+    colors: &dyn Fn(Entity) -> Option<[f32; 3]>,
+) -> Result<&'a SharedScene, String> {
+    if !cached.as_ref().is_some_and(|shared| &shared.model == model) {
+        let (scene, bodies) = physics.molla(|rigid| sensor_scene(engine, rigid, colors).map(|scene| (scene, body_order(rigid))))?;
+        *cached = Some(SharedScene { model: model.clone(), bodies, scene: Arc::new(scene) });
+    }
+    Ok(cached.as_ref().expect("scene just built"))
+}
+
+/// Hands a finished scene build to every rig over the same bodies not
+/// already on the physics world's `model`.
+fn swap_built_scene(rigs: &mut MachineSensorRigs, model: &SceneStamp) {
+    let Some(build) = rigs.building.as_mut() else { return };
+    let Some(done) = bevy::tasks::block_on(bevy::tasks::poll_once(&mut build.task)) else { return };
+    let build = rigs.building.take().expect("build polled");
+    let scene = match done {
+        Ok(scene) => Arc::new(scene),
+        Err(error) => {
+            warn!("gearbox-sensors: {error}");
+            return;
+        }
+    };
+    report_unsupported(&scene);
+    for (id, rig) in rigs.rigs.iter_mut() {
+        if let Some(objects) = build.objects.get(id)
+            && rig.bodies == build.bodies
+            && rig.model.as_ref() != Some(model)
+        {
+            rig.scene = scene.clone();
+            rig.objects = objects.clone();
+            rig.model = Some(build.model.clone());
+        }
+    }
+    if rigs.scene.as_ref().is_none_or(|shared| &shared.model != model) {
+        rigs.scene = Some(SharedScene { model: build.model, bodies: build.bodies, scene });
+    }
 }
 
 impl MachineSensorRigs {
     pub fn has_rig(&self, machine_id: &str) -> bool {
         self.rigs.contains_key(machine_id)
+    }
+
+    /// The prim entities of every machine's sensor links.
+    pub fn sensor_entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.rigs.values().flat_map(|rig| rig.mounts.iter().filter_map(|m| m.resolved.entity))
     }
 
     /// Published samples per sensor link of a machine, for diagnostics.
@@ -260,8 +338,12 @@ impl Mount {
 
 pub struct Rig {
     revision: u64,
+    /// The compiled model the rig's scene was built from: poses and controls
+    /// it samples as they come; a new model over the same bodies hands it a
+    /// new scene, over other bodies builds the rig again.
+    model: Option<SceneStamp>,
     signature: Vec<ResolvedMount>,
-    scene: SensorScene,
+    scene: Arc<SensorScene>,
     imu_model: Model,
     state: State,
     scheduler: SensorScheduler,
@@ -277,9 +359,12 @@ pub struct Rig {
     generic: GenericSensors,
     /// Generic readings awaiting publication.
     ready: Vec<(usize, gearbox_api::Measurement)>,
-    /// Recognition object of each scene shape, and each object's label.
-    objects: Vec<Option<u32>>,
-    object_labels: Vec<String>,
+    /// What recognition names in the scene, the bodies the scene was built
+    /// over, and the machine's own bodies, which recognition leaves out.
+    objects: Arc<SceneObjects>,
+    bodies: Vec<u64>,
+    own: HashSet<u64>,
+    recognition: bool,
     pub stats: RigStats,
     last_report: f64,
 }
@@ -363,7 +448,8 @@ struct Pending {
 enum PendingKind {
     Imu { due: Vec<(usize, MQuat)> },
     Lidar { scans: Vec<PendingScan> },
-    Camera { mount: usize, sample: u64 },
+    /// `objects` names the shapes of the scene the frame was traced in.
+    Camera { mount: usize, sample: u64, objects: Arc<SceneObjects> },
 }
 
 struct PendingScan {
@@ -400,6 +486,26 @@ pub(crate) fn run_machine_sensors(
     let live: HashSet<&str> = inventory.machines.iter().map(|m| m.id.as_str()).collect();
     rigs.rigs.retain(|id, _| live.contains(id.as_str()));
     rigs.failed.retain(|id, _| live.contains(id.as_str()));
+    if rigs.rigs.is_empty() {
+        rigs.scene = None;
+        rigs.building = None;
+    }
+    let model = physics.molla(|scene| scene.model_stamp());
+    let bodies = physics.molla(body_order);
+    swap_built_scene(rigs, &model);
+    // `<machine>:<body prim>` for machine parts, the body prim otherwise.
+    let label = |entity: Entity| {
+        if let Ok(label) = sensor_labels.get(entity) {
+            return Some(label.0.clone());
+        }
+        let lineage = || std::iter::once(entity).chain(parents.iter_ancestors(entity));
+        let body = lineage().find(|e| physics.entity_to_body.contains_key(e)).unwrap_or(entity);
+        let path = prims.get(body).ok()?.1.path.to_string();
+        let machine = lineage().find_map(|e| {
+            inventory.machines.iter().find(|m| m.scene_root == Some(e)).map(|m| m.id.as_str())
+        });
+        Some(machine.map_or_else(|| path.clone(), |id| format!("{id}:{path}")))
+    };
     let stamp_ms = (time.elapsed_secs_f64() * 1000.0) as u32;
     let sim_time = physics.simulated_seconds;
     let touch = inventory.machines.iter().any(|m| {
@@ -472,8 +578,10 @@ pub(crate) fn run_machine_sensors(
                 continue;
             }
         };
+        // A rig over the same bodies samples its scene until a newer one is
+        // built off the frame.
         let stale = rigs.rigs.get(&machine.id).is_none_or(|rig| {
-            rig.revision != revision || mounts_changed(&rig.signature, &resolved)
+            mounts_changed(&rig.signature, &resolved) || rig.model.as_ref() != Some(&model) && rig.bodies != bodies
         });
         if stale {
             if rigs.failed.get(&machine.id) == Some(&revision) {
@@ -488,34 +596,17 @@ pub(crate) fn run_machine_sensors(
                 .filter_map(|prim| find_prim_entity(scene_root, prim, &prims, &parents))
                 .filter_map(|entity| physics.entity_to_body.get(&entity).copied())
                 .collect();
-            // `<machine>:<body prim>` for machine parts, the body prim otherwise.
-            let label = |entity: Entity| {
-                if let Ok(label) = sensor_labels.get(entity) {
-                    return Some(label.0.clone());
-                }
-                let lineage = || std::iter::once(entity).chain(parents.iter_ancestors(entity));
-                let body = lineage().find(|e| physics.entity_to_body.contains_key(e)).unwrap_or(entity);
-                let path = prims.get(body).ok()?.1.path.to_string();
-                let machine = lineage().find_map(|e| {
-                    inventory.machines.iter().find(|m| m.scene_root == Some(e)).map(|m| m.id.as_str())
-                });
-                Some(machine.map_or_else(|| path.clone(), |id| format!("{id}:{path}")))
-            };
-            match Rig::build(
-                engine,
-                &**physics,
-                resolved,
-                revision,
-                sim_time,
-                &|entity| visuals.color(entity),
-                &label,
-                &own,
-            ) {
-                Ok(rig) => {
+            let started = std::time::Instant::now();
+            let built = shared_scene(engine, &mut rigs.scene, &**physics, &model, &|entity| visuals.color(entity))
+                .and_then(|shared| Rig::build(engine, &**physics, resolved, revision, sim_time, shared, &label, &own));
+            match built {
+                Ok(mut rig) => {
+                    rig.model = Some(model.clone());
                     info!(
-                        "gearbox-sensors: `{}` samples {} sensor link(s) on scene revision {revision}",
+                        "gearbox-sensors: `{}` samples {} sensor link(s) on scene revision {revision}, built in {:.0} ms",
                         machine.id,
-                        rig.mounts.len()
+                        rig.mounts.len(),
+                        started.elapsed().as_secs_f64() * 1000.0
                     );
                     rigs.failed.remove(&machine.id);
                     rigs.rigs.insert(machine.id.clone(), rig);
@@ -584,6 +675,30 @@ pub(crate) fn run_machine_sensors(
             }
             rig.stats = RigStats::default();
             rig.last_report = now;
+        }
+    }
+    if rigs.building.is_none()
+        && let Some(engine) = rigs.engine.as_ref()
+    {
+        let behind: Vec<(String, Option<&HashSet<u64>>)> = rigs
+            .rigs
+            .iter()
+            .filter(|(_, rig)| rig.model.as_ref() != Some(&model) && rig.bodies == bodies)
+            .map(|(id, rig)| (id.clone(), rig.recognition.then_some(&rig.own)))
+            .collect();
+        if !behind.is_empty() {
+            let started = physics.molla(|rigid| {
+                let objects = behind
+                    .iter()
+                    .map(|(id, own)| (id.clone(), Arc::new(own.map_or_else(SceneObjects::default, |own| shape_objects(rigid, own, &label)))))
+                    .collect();
+                build_scene_off_frame(engine, rigid, shape_colors(rigid, &|entity| visuals.color(entity)))
+                    .map(|task| SceneBuild { model: model.clone(), bodies: bodies.clone(), objects, task })
+            });
+            match started {
+                Ok(build) => rigs.building = Some(build),
+                Err(error) => warn!("gearbox-sensors: {error}"),
+            }
         }
     }
     exchange_packets(rigs, &mut bus, &carriers, &**physics, sim_time, stamp_ms);
@@ -776,10 +891,11 @@ impl Rig {
         mounts: Vec<ResolvedMount>,
         revision: u64,
         sim_time: f64,
-        colors: &dyn Fn(Entity) -> Option<[f32; 3]>,
+        shared: &SharedScene,
         labels: &dyn Fn(Entity) -> Option<String>,
         own_bodies: &[BodyId],
     ) -> Result<Self, String> {
+        let scene = shared.scene.clone();
         let device = engine.device().ok_or("sensor engine has no device")?;
         let queue = engine.queue().ok_or("sensor engine has no queue")?;
         let handles = mounts
@@ -790,8 +906,7 @@ impl Rig {
                     .ok_or_else(|| format!("sensor link `{}`: unknown body", m.name))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let (scene, imu_model, mut state, bodies) =
-            physics.molla(|scene| snapshot_scene(engine, scene, &handles, colors))?;
+        let (imu_model, mut state, bodies) = physics.molla(|scene| snapshot_bodies(engine, scene, &handles))?;
         let own: HashSet<u64> = own_bodies
             .iter()
             .filter_map(|&b| physics.molla_body_handle(b))
@@ -799,10 +914,10 @@ impl Rig {
             .collect();
         let (mut joints, mut targets) = (HashMap::new(), Vec::new());
         let recognition = mounts.iter().any(|m| m.spec.kind == SensorKind::Camera && m.spec.recognition);
-        let (mut objects, mut object_labels) = (Vec::new(), Vec::new());
+        let mut objects = SceneObjects::default();
         physics.with_molla_scene(&mut |rigid| {
             if recognition {
-                (objects, object_labels) = shape_objects(rigid, &own, labels);
+                objects = shape_objects(rigid, &own, labels);
             }
             for (i, mount) in mounts.iter().enumerate() {
                 let Some(joint) = mount.joint else { continue };
@@ -827,17 +942,6 @@ impl Rig {
         state
             .upload_to_device(device, queue)
             .map_err(|e| format!("sensor state upload: {e}"))?;
-        if !scene.unsupported_shapes().is_empty() {
-            warn!(
-                "gearbox-sensors: {} collider shape(s) are invisible to sensors: {:?}",
-                scene.unsupported_shapes().len(),
-                scene
-                    .unsupported_shapes()
-                    .iter()
-                    .map(|s| s.kind)
-                    .collect::<HashSet<_>>()
-            );
-        }
 
         let signature = mounts.clone();
         let mounts: Vec<Mount> = mounts
@@ -939,6 +1043,7 @@ impl Rig {
         .map_err(|e| format!("sensor readback: {e}"))?;
         Ok(Self {
             revision,
+            model: None,
             signature,
             scene,
             imu_model,
@@ -955,8 +1060,10 @@ impl Rig {
             render_requests: Vec::new(),
             generic,
             ready: Vec::new(),
-            objects,
-            object_labels,
+            objects: Arc::new(objects),
+            bodies: shared.bodies.clone(),
+            own,
+            recognition,
             stats: RigStats::default(),
             last_report: 0.0,
         })
@@ -1206,7 +1313,7 @@ impl Rig {
                 Some(ticket) => self.pending.push(Pending {
                     ticket,
                     sim_time,
-                    kind: PendingKind::Camera { mount, sample },
+                    kind: PendingKind::Camera { mount, sample, objects: self.objects.clone() },
                 }),
                 None => self.stats.dropped += 1,
             }
@@ -1272,7 +1379,7 @@ impl Rig {
             };
             self.stats.readback_bytes += frame.byte_len() as u64;
             match pending.kind {
-                PendingKind::Camera { mount, sample } => {
+                PendingKind::Camera { mount, sample, objects } => {
                     let m = &mut self.mounts[mount];
                     let spec = m.resolved.spec;
                     let pixels = (spec.width * spec.height) as usize;
@@ -1328,17 +1435,16 @@ impl Rig {
                         );
                     }
                     if spec.recognition {
-                        let objects = &self.objects;
                         let seen = molla_sensors::recognize(
                             spec.width,
                             spec.height,
                             spec.vfov as f64,
                             &depths,
                             &shapes,
-                            &|shape| objects.get(shape as usize).copied().flatten().map(u64::from),
+                            &|shape| objects.shapes.get(shape as usize).copied().flatten().map(u64::from),
                             1,
                         );
-                        let mut reading = recognition(&name, link_index, pending.sim_time, sample, &seen, &self.object_labels);
+                        let mut reading = recognition(&name, link_index, pending.sim_time, sample, &seen, &objects.labels);
                         reading.stamp_ms = stamp_ms;
                         delivered &= sink(&name, SensorReading::Measurement(&reading));
                     }
@@ -1496,7 +1602,7 @@ fn shape_objects(
     scene: &RigidScene,
     own: &HashSet<u64>,
     label: &dyn Fn(Entity) -> Option<String>,
-) -> (Vec<Option<u32>>, Vec<String>) {
+) -> SceneObjects {
     let mut shapes = vec![None; scene.model().shape_count];
     let (mut ids, mut labels) = (HashMap::new(), Vec::<String>::new());
     for (handle, collider) in scene.colliders() {
@@ -1530,33 +1636,81 @@ fn shape_objects(
             *slot = format!("object{id}");
         }
     }
-    (shapes, labels)
+    SceneObjects { shapes, labels }
 }
 
 /// Geometry, the IMU's body model and a state copy, taken under the physics lock.
-fn snapshot_scene(
+/// The geometry and colours sensors trace in, from the physics model.
+fn sensor_scene(
+    engine: &Engine,
+    scene: &RigidScene,
+    colors: &dyn Fn(Entity) -> Option<[f32; 3]>,
+) -> Result<SensorScene, String> {
+    let mut sensor_scene = SensorScene::from_model(engine, scene.model(), scene_options()).map_err(|e| format!("sensor scene: {e}"))?;
+    sensor_scene
+        .set_shape_colors(engine, &shape_colors(scene, colors))
+        .map_err(|e| format!("sensor scene colours: {e}"))?;
+    report_unsupported(&sensor_scene);
+    Ok(sensor_scene)
+}
+
+fn scene_options() -> SensorSceneOptions {
+    SensorSceneOptions { unsupported: UnsupportedGeometryPolicy::ReportAndSkip, ..Default::default() }
+}
+
+fn report_unsupported(scene: &SensorScene) {
+    let unsupported = scene.unsupported_shapes();
+    if !unsupported.is_empty() {
+        let kinds: HashSet<_> = unsupported.iter().map(|s| s.kind).collect();
+        warn!("gearbox-sensors: {} collider shape(s) are invisible to sensors: {kinds:?}", unsupported.len());
+    }
+}
+
+/// Starts building the sensor scene of the physics world's model on a
+/// worker, from a copy of the shapes it traces, coloured as `colors` says.
+fn build_scene_off_frame(
+    engine: &Engine,
+    rigid: &RigidScene,
+    colors: Vec<MVec3>,
+) -> Result<Task<Result<SensorScene, String>>, String> {
+    let source = rigid.model();
+    let mut copy = Model::empty();
+    copy.body_count = source.body_count;
+    copy.shape_count = source.shape_count;
+    copy.shape_geometry = source.shape_geometry.clone();
+    copy.shape_body = Buffer::from_vec(source.shape_body.host().map_err(|e| e.to_string())?.to_vec(), BufferUsage::Storage);
+    copy.shape_transform = Buffer::from_vec(source.shape_transform.host().map_err(|e| e.to_string())?.to_vec(), BufferUsage::Storage);
+    copy.shape_color = Buffer::from_vec(colors, BufferUsage::Storage);
+    copy.meshes = source.meshes.clone();
+    copy.hulls = source.hulls.clone();
+    copy.heightfields = source.heightfields.clone();
+    let device = engine.device().ok_or("sensor engine has no device")?.clone();
+    let queue = engine.queue().ok_or("sensor engine has no queue")?.clone();
+    Ok(AsyncComputeTaskPool::get().spawn(async move {
+        let engine = Engine::from_device(device, queue, None);
+        SensorScene::from_model(&engine, &copy, scene_options()).map_err(|e| format!("sensor scene: {e}"))
+    }))
+}
+
+/// The physics bodies in index order: a rig samples a scene only over the
+/// bodies it was built with.
+fn body_order(rigid: &RigidScene) -> Vec<u64> {
+    let mut bodies: Vec<_> = rigid.bodies().filter_map(|(h, _)| rigid.body_index(h).map(|i| (i.index(), h.to_bits()))).collect();
+    bodies.sort_unstable();
+    bodies.into_iter().map(|(_, h)| h).collect()
+}
+
+/// A rig's own copy of the bodies: the IMU's model and the state it samples.
+fn snapshot_bodies(
     engine: &Engine,
     scene: &RigidScene,
     handles: &[molla_sim::runtime::BodyHandle],
-    colors: &dyn Fn(Entity) -> Option<[f32; 3]>,
-) -> Result<(SensorScene, Model, State, Vec<MollaBodyId>), String> {
+) -> Result<(Model, State, Vec<MollaBodyId>), String> {
     let bodies = handles
         .iter()
         .map(|&h| scene.body_index(h).ok_or("sensor body left the scene"))
         .collect::<Result<Vec<_>, _>>()?;
     let source = scene.model();
-    let mut sensor_scene = SensorScene::from_model(
-        engine,
-        source,
-        SensorSceneOptions {
-            unsupported: UnsupportedGeometryPolicy::ReportAndSkip,
-            ..Default::default()
-        },
-    )
-    .map_err(|e| format!("sensor scene: {e}"))?;
-    sensor_scene
-        .set_shape_colors(engine, &shape_colors(scene, colors))
-        .map_err(|e| format!("sensor scene colours: {e}"))?;
     let mut imu_model = Model::empty();
     imu_model.body_count = source.body_count;
     let host = |b: &Buffer<MVec3>| b.host().map(|h| h.to_vec());
@@ -1590,7 +1744,7 @@ fn snapshot_scene(
         .upload_to_device(device, queue)
         .map_err(|e| format!("imu model upload: {e}"))?;
     let state = scene.state().clone_host().map_err(|e| e.to_string())?;
-    Ok((sensor_scene, imu_model, state, bodies))
+    Ok((imu_model, state, bodies))
 }
 
 /// Copies the physics body poses and twists into the rig's own state.
@@ -1891,8 +2045,10 @@ mod tests {
         let mut revision = 0;
         world.with_molla_scene(&mut |scene| revision = scene.revision());
         let label = |entity| (entity == crate_entity).then(|| "crate".to_string());
-        let mut rig =
-            Rig::build(&engine, &*world.backend, mounts, revision, 0.0, &|_| None, &label, &[]).unwrap();
+        let mut shared = None;
+        let model = world.backend.molla(|scene| scene.model_stamp());
+        let shared = shared_scene(&engine, &mut shared, &*world.backend, &model, &|_| None).unwrap();
+        let mut rig = Rig::build(&engine, &*world.backend, mounts, revision, 0.0, shared, &label, &[]).unwrap();
         let mut imu = None;
         let mut lidar = None;
         let mut depth = None;
@@ -2031,5 +2187,97 @@ mod tests {
         assert!(points[0][0].is_nan());
         assert_eq!(scan.hits, 3, "{ranges:?}");
         assert!(rig.mounts.iter().all(|m| m.published >= 1));
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn a_rig_samples_its_scene_while_a_newer_one_builds_then_takes_it() {
+        AsyncComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let engine = Engine::new_gpu().expect("GPU adapter");
+        let mut world = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        let ground = world.insert_body(BodyDesc::fixed());
+        let slab = Shape::Cuboid { half_extents: DVec3::new(20.0, 0.5, 20.0) };
+        world.insert_collider(ColliderDesc::new(slab).parent(ground).translation(DVec3::new(0.0, -0.5, 0.0))).unwrap();
+        let carrier = world.insert_body(BodyDesc::fixed().pose(Pose::from_translation(DVec3::Y)));
+        let seer = SensorSpec {
+            kind: SensorKind::Camera,
+            rate_hz: 50.0,
+            columns: 8,
+            rows: 1,
+            hfov: std::f32::consts::TAU,
+            vfov: 60f32.to_radians(),
+            range_m: 20.0,
+            width: 32,
+            height: 24,
+            render: crate::links::CameraRender::Geometry,
+            color: false,
+            depth: false,
+            recognition: true,
+            variant: crate::links::SensorVariant::Default,
+            rays: 1,
+            aperture: 0.0,
+            min_range_m: 1.0,
+            channel: 0,
+        };
+        let mount = ResolvedMount {
+            link: 1,
+            name: "seer_link".into(),
+            spec: seer,
+            body: carrier,
+            entity: None,
+            joint: None,
+            local: MTransform::new(MVec3::ZERO, MQuat::from_rotation_x(-FRAC_PI_2)),
+        };
+        let plant = Entity::from_raw_u32(7).unwrap();
+        let label = |entity| (entity == plant).then(|| "plant:A/0".to_string());
+        let mut rigs = MachineSensorRigs::default();
+        let model = world.backend.molla(|scene| scene.model_stamp());
+        let shared = shared_scene(&engine, &mut rigs.scene, &*world.backend, &model, &|_| None).unwrap();
+        let mut rig = Rig::build(&engine, &*world.backend, vec![mount], 0, 0.0, shared, &label, &[]).unwrap();
+        rig.model = Some(model);
+        rigs.rigs.insert("bot".into(), rig);
+        let seen = |rigs: &mut MachineSensorRigs, world: &mut PhysicsWorld| {
+            let mut names = String::new();
+            for _ in 0..12 {
+                world.step();
+                let rig = rigs.rigs.get_mut("bot").unwrap();
+                rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default()).unwrap();
+                let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) };
+                engine.device().unwrap().poll(wait).unwrap();
+                rig.collect(0, &mut |_, reading| {
+                    if let SensorReading::Measurement(m) = reading {
+                        names = m.props().get("names").unwrap_or_default().to_string();
+                    }
+                    true
+                });
+            }
+            names
+        };
+        assert!(!seen(&mut rigs, &mut world).contains("plant"));
+
+        // A plant's hull standing on no body changes the model, not the bodies.
+        let hull = Shape::Cuboid { half_extents: DVec3::new(0.2, 0.3, 0.2) };
+        let plant_hull = ColliderDesc { enabled: false, ..ColliderDesc::new(hull).translation(DVec3::new(3.0, 1.0, 0.0)).entity(plant) };
+        world.insert_collider(plant_hull).unwrap();
+        let model = world.backend.molla(|scene| scene.model_stamp());
+        let bodies = world.backend.molla(body_order);
+        assert_eq!(bodies, rigs.rigs["bot"].bodies);
+        let build = world.backend.molla(|rigid| {
+            let objects = HashMap::from([("bot".to_string(), Arc::new(shape_objects(rigid, &HashSet::new(), &label)))]);
+            build_scene_off_frame(&engine, rigid, shape_colors(rigid, &|_| None))
+                .map(|task| SceneBuild { model: model.clone(), bodies, objects, task })
+        });
+        rigs.building = Some(build.unwrap());
+        assert!(!seen(&mut rigs, &mut world).contains("plant"), "the rig samples its old scene meanwhile");
+        for _ in 0..500 {
+            swap_built_scene(&mut rigs, &model);
+            if rigs.building.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(rigs.building.is_none(), "the scene builds");
+        assert_eq!(rigs.rigs["bot"].model.as_ref(), Some(&model));
+        assert!(seen(&mut rigs, &mut world).contains("plant:A/0"));
     }
 }
