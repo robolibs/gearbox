@@ -704,7 +704,7 @@ simulated-time rate (payloads in CONTROLLER_SPEC §9.7).
 
 - `gearbox:sensor:kind` (token): `imu`, `lidar`, `camera`, `range_finder`,
   `accelerometer`, `gyro`, `inertial_unit`, `compass`, `gps`, `distance`,
-  `light`, `position`, `radar`, `touch`, `receiver`, `emitter`. Any other
+  `light`, `position`, `radar`, `touch`, `receiver`, `emitter`, `climate`. Any other
   token is an error (rejects the machine). `range_finder` is a camera whose
   default render is `geometry` with depth only.
 - Without it, the link name's prefix decides: `lidar` or `laser` → lidar;
@@ -732,7 +732,7 @@ Numeric attributes may be any number type; "whole" means no fractional part.
 
 | Attribute | Kinds | Default | Range and meaning |
 |---|---|---|---|
-| `gearbox:sensor:rate_hz` | all | 100 (imu, accelerometer, gyro, inertial_unit, position, touch); 50 (receiver, emitter); 20 (compass, distance, radar); 10 (lidar, gps, light); 5 (camera) | Samples per simulated second, `(0, 10000]`. Receivers publish each packet as it arrives. |
+| `gearbox:sensor:rate_hz` | all | 100 (imu, accelerometer, gyro, inertial_unit, position, touch); 50 (receiver, emitter); 20 (compass, distance, radar); 10 (lidar, gps, light); 5 (camera); 1 (climate) | Samples per simulated second, `(0, 10000]`. Receivers publish each packet as it arrives. |
 | `gearbox:sensor:columns` | lidar | 360 | Azimuth columns, whole `1..=8192`. |
 | `gearbox:sensor:rows` | lidar | 16 | Zenith rows, whole `1..=512`; `columns × rows ≤ 1048576`. |
 | `gearbox:sensor:hfov_deg` | lidar | 360 | Horizontal field of view centred on +X, `(0, 360]`. A full circle does not repeat its first column. |

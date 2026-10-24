@@ -1,7 +1,3 @@
-------------------------------------------
-Project: gearbox-sim v0.0.6
-Display: wayland backend
-------------------------------------------
 # gearbox CLI
 
 Launch, inspect and drive the gearbox simulator
@@ -21,14 +17,16 @@ Find, inspect and stop instances; pick the default
 | Leaf | Does |
 |---|---|
 | `list` | Registry entries with liveness; the default is marked |
-| `info [ID]` | `/gearbox/info` of an instance |
+| `info [ID]` | `/gearbox/info` of an instance, camera included |
 | `use <ID>` | Make an instance the default for later commands |
 | `stop [OPTIONS] [ID]` | Ask an instance to shut down, then signal it |
 | `ping [OPTIONS] [ID]` | Round-trip time of `/gearbox/info` |
 | `wait [OPTIONS] [ID]` | Block until the instance answers |
 | `screenshot [OPTIONS] <OUT>` | Save a screenshot of the viewer window (panes included) to a PNG |
-| `camera [OPTIONS] <ACTION> [MACHINE]` | Move the viewer camera: `fly MACHINE` flies behind a machine like a double-click in the Agents pane, `follow MACHINE` pins the camera to it, `unfollow` releases it |
-| `ui [OPTIONS] [STEPS]...` | Drive the window with scripted input, one step per argument or per `;`-separated part: `move X Y`, `down X Y`, `up X Y`, `click X Y`, `scroll DX DY`, `text …`, `key NAME`, `wait MS` |
+| `camera [OPTIONS] <ACTION> [MACHINE] [DISTANCE_KM] [HEIGHT_M]` | Move the viewer camera: `fly MACHINE` flies behind a machine like a double-click in the Agents pane, `follow MACHINE` pins the camera to it, `unfollow` releases it, `goto LAT LON [HEIGHT_M]` jumps the view to that latitude and longitude, in degrees, standing HEIGHT_M above the ground there, `look [MACHINE]` sets the view to an exact `--bearing`, `--pitch` and `--distance` (around MACHINE when given, its bearing counted from behind the machine), and `where` says where the view is now |
+| `overlay [OPTIONS] <NAME> <STATE>` | Switch a viewport overlay as the View pane does: `tf` (link frames, names and parent links, which recordings keep), `colliders`, `grid` or `axes`, to `on`, `off` or `toggle` |
+| `record [OPTIONS] <ACTION> [OUT]` | Record the 3D viewport as shown, without the panes, to H.264 video: `start [OUT]` begins (OUT, or a file in the capture folder), `stop` ends it. While recording the clock steps a sixtieth of a second a frame, so the video plays smooth however slowly the window draws |
+| `ui [OPTIONS] [STEPS]...` | Drive the window with scripted input, one step per argument or per `;`-separated part: `move X Y`, `down X Y [BUTTON]`, `up X Y [BUTTON]`, `click X Y [BUTTON]`, `scroll DX DY`, `text …`, `key NAME`, `wait MS`. BUTTON is `primary` (the default), `middle` or `secondary` |
 | `logs [OPTIONS] [ID]` | Show the instance's log file |
 
 ## `gearbox spawn`
@@ -42,7 +40,7 @@ Put things into the scene
 | `world <PATH>` | Load a world USD |
 | `terrain <PATH>` | Load a terrain USD |
 | `marker --at <M> <M>... <ID>` | Place a marker |
-| `from <FILE>` | Apply a TOML manifest of spawns in order |
+| `from [OPTIONS] <FILE>` | Apply a TOML manifest of spawns in order |
 | `move [OPTIONS] <ID>` | Move a loaded object by re-issuing its load |
 
 ## `gearbox clear`
@@ -70,7 +68,9 @@ Clock, listing, poses, events
 | `pause` | Pause the clock |
 | `toggle` | Toggle the clock |
 | `step [N]` | Advance N physics frames while paused |
-| `speed <FACTOR>` | Time scale (not supported by the sim yet) |
+| `speed <FACTOR>` | World seconds per simulated second: the sun, the air and crops run this much faster than machines |
+| `skip <SPAN>` | Jump world time forward, e.g. 6h, 2d, 30sol (sol is the planet's solar day) |
+| `weather [SET]...` | Read the weather, or set keys: dust_tau=4 cloud_cover=0.5 wind_speed_mps=8 wind_heading_deg=90 wind_gustiness=0.3 haze_km=20 |
 | `list [OPTIONS]` | Objects in the scene |
 | `pose [OPTIONS] <ID>` | Pose of one object; live for a machine |
 | `events [OPTIONS]` | Tail scene events |
@@ -91,6 +91,26 @@ Choose the thing later commands act on
 | `prev` | Select the previous object in `scene list` order |
 | `none` | Clear the selection |
 
+## `gearbox greenhouse`
+
+Crops, rooms and faults of a greenhouse world
+
+| Leaf | Does |
+|---|---|
+| `plants [OPTIONS]` | Every plant with its stage, health and place |
+| `rooms` | Each room's air, nutrient tank and the power bus |
+| `sow [OPTIONS] <TRAY> <SPECIES>` | Sow a crop in a tray's empty places, or in one place |
+| `harvest [OPTIONS] <TARGET>` | Take in one plant (TRAY/SLOT) or every ripe plant of a tray |
+| `clear [OPTIONS] <PLANT>` | Lift whatever stands in one place, dead or alive |
+| `wash <TRAY>` | Wash the perchlorate out of a regolith tray |
+| `amend [OPTIONS] <TRAY>` | Work organic matter into a regolith tray |
+| `lamps [OPTIONS] <TRAY>` | Set the spectrum or output of a tray's lamps (`all` for every tray) |
+| `clean-tank <ROOM>` | Flush and refill a room's nutrient tank |
+| `clean-panels` | Brush the dust off the solar panels |
+| `fault <FAULT>` | Break something: power, reactor, fans:ROOM, hvac:ROOM, co2:ROOM, leak:ROOM, pump:ROOM, water_leak:ROOM or lamp:TRAY |
+| `repair [OPTIONS] <FAULT>` | Mend a fault, by a machine standing at its service spot if `--by` |
+| `setpoint <ROOM> <SET>...` | Change a room's climate targets: temperature, humidity, co2, pressure |
+
 ## `gearbox machine`
 
 Inspect and drive machines
@@ -99,8 +119,10 @@ Inspect and drive machines
 |---|---|
 | `list` | Machines with their controllers and holders |
 | `info [MACHINE]` | Everything a machine reports about itself |
+| `save [OPTIONS] <FILE>` | Save a paused standalone machine configuration, including applied/target tyre pressures |
 | `state [OPTIONS] [MACHINE]` | Stream the machine's state |
 | `move [OPTIONS] [MACHINE]` | Drive with a constant twist for a while, then stop |
+| `route [OPTIONS] <MACHINE> <LEGS>...` | Drive a route in one go: legs one after another with no stop between them, each `forward=M/S turn=RAD/S` held until `distance=M` or `angle=DEG` (heading turned either way). A leg without a turn steers along a line: the one the route starts on, or `offset=M` to its right, in the course the turns so far have set. `do=CONTROLLER:KEY=VAL[,…]` sends a controller command as the leg begins. A line is printed as each leg ends, and the machine brakes to a stand after the last |
 | `stop [OPTIONS] [MACHINE]` | Send a zero twist and release |
 | `drive [OPTIONS] [MACHINE]` | Drive from the keyboard: WASD or arrows, space stops, q quits |
 | `cmd [OPTIONS] <CONTROLLER> [KEY=VAL]...` | Generic controller command: KEY=VAL pairs, `value=` and `element=` are numeric |
@@ -108,15 +130,17 @@ Inspect and drive machines
 | `links [OPTIONS] [MACHINE]` | The link tree: names, roles, parents, static offsets |
 | `tf [OPTIONS] [MACHINE]` | Stream the machine's TF edges: parent-relative transforms, Z up |
 | `set-value [OPTIONS] <LINK> <NAME> <VALUE>` | Set a named value on a link: LINK NAME VALUE (e.g. boom position 0.8) |
+| `tyre-pressure [OPTIONS] <BAR>` | Set gauge-bar tyre pressure atomically and wait for accepted target readback |
 | `tools <COMMAND>` | Attachments: what hangs on a machine, attach and detach slaves |
 
-## `gearbox subscribe`
+## `gearbox peer`
 
-Stream any topic, host-level or under a machine
+Browse the live topic directory, or stream one of its topics
 
-```
-subscribe [OPTIONS] <TOPIC>
-```
+| Leaf | Does |
+|---|---|
+| `list [PREFIX]` | Topics the instance's directory currently knows about, optionally only those at or under PREFIX |
+| `sub [OPTIONS] <TOPIC>` | Stream a topic, decoded generically by schema — a prefix with no topic of its own (e.g. `/machines/kubota`) lists its children instead of erroring |
 
 ## `gearbox access`
 

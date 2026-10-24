@@ -342,7 +342,7 @@ def outside():
 # the rail, a mast telescopes down from it, and a turret at its foot swings a
 # reaching arm over either rack. The arm's head carries a camera that looks
 # down and names what it sees, a light sensor facing the lamps, and a climate
-# sensor. Its origin is the rail's underside at the rail's west end.
+# sensor. Its origin is the rail's underside at the rail's south end.
 RAIL_LEN = GROW_LEN - 0.3
 RAIL_UNDER = HEIGHT - 0.16
 TROLLEY_Z = -0.07

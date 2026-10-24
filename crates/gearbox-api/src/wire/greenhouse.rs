@@ -5,11 +5,13 @@ use super::common::Props;
 
 /// Actions on `/gearbox/greenhouse/act`; their keys ride in the props.
 pub mod greenhouse_op {
-    /// `tray`, `species`, and `slot` or none for every empty place.
+    /// `tray`, `species`, and `slot` or none for every empty place; with `by`, only
+    /// the places that machine reaches.
     pub const SOW: u32 = 0;
-    /// `plant` (`TRAY/SLOT`), or `tray` for every ripe plant in it.
+    /// `plant` (`TRAY/SLOT`), or `tray` for every ripe plant in it; with `by`,
+    /// only what that machine reaches.
     pub const HARVEST: u32 = 1;
-    /// `plant`: lift it, dead or alive.
+    /// `plant`: lift it, dead or alive; with `by`, only if that machine reaches it.
     pub const CLEAR: u32 = 2;
     /// `tray`: wash the perchlorate out of its regolith.
     pub const WASH: u32 = 3;

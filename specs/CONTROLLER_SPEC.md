@@ -45,7 +45,8 @@ Props of a machine-category `UsdLoad` (all strings):
 | `variant.<n>` | `prim\|set\|option` variant selections. |
 
 Physics pauses while a machine-category load aligns to the terrain and
-resumes afterwards unless paused on purpose. The `/gearbox/usd/load` reply
+resumes afterwards unless paused on purpose. A machine with a joint to the
+world (an empty `body0` or `body1`) is not moved. The `/gearbox/usd/load` reply
 only acknowledges the request; load failures and rejections arrive as
 `machine_rejected` events.
 
@@ -713,12 +714,13 @@ its own simulated-time rate.
 | `compass` | `[nx, ny, nz, heading]`: north in link axes, clockwise angle from north to +X |
 | `gps` | `[latitude°, longitude°, altitude m, east, north, up, speed, v_east, v_north, v_up]` (WGS84; east-north-up from the site origin) |
 | `distance` | `[distance m (infinite for none), value]` |
-| `light` | `[irradiance, direct, sky (W/m²), visible sources, value]` facing +X |
+| `light` | `[irradiance, direct, sky (W/m²), visible sources, value]` facing +X; sources are the sun and every point and spot light, at 93 lm/W, and the sky is 0 under a roof |
+| `climate` | `[temperature °C, relative humidity 0..1, CO2 ppm, O2 kPa, pressure kPa]` of the greenhouse room the link is in, else the planet's air (GREENHOUSE_SPEC §4) |
 | `position` | `[position (rad or m), velocity]` of the joint between the link's body and its parent link's body |
 | `radar` | per target `[distance, azimuth, elevation, radial speed, received power dBm]`, nearest first; dynamic bodies not of this machine are targets |
 | `touch` | `[touching 0/1, contacts, force N, fx, fy, fz]` on the link's body |
 | `receiver` | one packet `[channel, signal strength, dx, dy, dz]` (unit direction to the emitter); payload in `data`, emitter `<machine>/<link>` in props `from` |
-| `recognition` (camera with `recognition`) | per object `[id, pixels, left, top, right, bottom, x, y, z, sx, sy, sz]` in camera axes (−Z forward, +Y up); labels in props `names`, one per line |
+| `recognition` (camera with `recognition`) | per object `[id, pixels, left, top, right, bottom, x, y, z, sx, sy, sz]` in camera axes (−Z forward, +Y up); labels in props `names`, one per line (greenhouse plants as `plant:TRAY/SLOT`) |
 
 `emit` takes an `emit_request` with props `link` (an emitter link) and the
 payload in `data`. Requests naming no emitter link of the machine are

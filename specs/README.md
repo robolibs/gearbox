@@ -15,6 +15,7 @@ Dated notes, measurements and asset logs live in `../docs/`.
 | [TRACKED_DRIVE.md](TRACKED_DRIVE.md) | `builtin:tracked_cmd_vel` and the `gearbox:machine:tracks` JSON: track motors, carrier-link values, asset binding, rollers, FEM visuals, telemetry. |
 | [TYRE_PRESSURE.md](TYRE_PRESSURE.md) | Pressure tyres: the tyre asset contract, registration, `gearbox:value:tyre_*`, pressure controls, telemetry, axle identity, model limits, rubber rendering, saved configurations. |
 | [FEM_CONTACTS.md](FEM_CONTACTS.md) | The `fem_contacts` JSON inside a track definition for the experimental FEM track: shapes, fields, validation. |
+| [GREENHOUSE_SPEC.md](GREENHOUSE_SPEC.md) | Greenhouse worlds: the zone, tray, power and service USD attributes, the crop, air, water and power model, the greenhouse tool API and events, plant hulls, lamp light and the climate sensor, the rail robot, measured failure scenarios. |
 
 ## Profiles and evidence
 

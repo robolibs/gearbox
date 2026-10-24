@@ -25,7 +25,7 @@ Different instances can select different planets. Selection is fixed for each pr
 | Reference geometry | Existing WGS84 | 3389.5 km mean-radius sphere | 1737.4 km mean-radius sphere |
 | Gravity | Existing 9.81 m/s² | 3.711 m/s² | 1.62 m/s² |
 | Local surface | Existing fields | Rust-coloured regolith, dunes, rocks and craters | Grey regolith, ejecta, rocks and craters |
-| Sky | Existing weather | Dust-coloured thin atmosphere, no terrestrial clouds | Black, no atmospheric haze or clouds |
+| Sky | Existing weather | Scattered CO2 and dust (Bevy `Atmosphere`, Mars preset), dust optical depth `dust_tau`, no clouds | Black, no atmospheric haze or clouds |
 | Vegetation | Existing field layout | None | None |
 
 Terrain is procedural, not a surveyed reconstruction of Jezero or Apollo 11. Launch coordinates are reference locations. Planetary frames, streamed ground and collision heights use the same body. Imported machine USD scenes must not replace Mars/Moon gravity with their embedded Earth gravity.
@@ -45,6 +45,28 @@ Native evidence includes Mars/Moon ground and orbital views and short straight-l
 `oslo make test-planet-gravity` runs the actual physics world and USD scene-import systems in separate body-selected processes. After importing two gravity scenes, measured one-second accelerations are 9.81, 3.711 and 1.62 m/s² for Earth, Mars and Moon respectively. This is not a rover drop or suspension-calibration test.
 
 Physical references: [NASA Mars facts](https://science.nasa.gov/mars/facts/), [ESA Mars facts](https://www.esa.int/Science_Exploration/Space_Science/Mars_Express/Facts_about_Mars), [NASA Moon fact sheet](https://nssdc.gsfc.nasa.gov/planetary/factsheet/moonfact.html). Colours, procedural geology and lighting are visual approximations, not calibrated radiometry.
+
+## Mars time, sky and the pad
+
+- **Calendar.** The sun follows Mars24 (Allison and McEwen): solar longitude,
+  declination, equation of centre and heliocentric distance, on a 88 775.244 s
+  sol and a 668.5991-sol year. Sunlight is 586.2/1361 of Earth's (about
+  56 000 lux), scaled by the distance of the day.
+- **World clock.** The sun, the weather, crops and greenhouse air run on world
+  time, `rate` × the physics clock; machines run on the physics clock.
+  `gearbox scene speed 600` sets the rate (up to 10⁶), `gearbox scene skip
+  30sol` jumps ahead in slices of a twelfth of a day per frame, and `gearbox
+  scene status` shows the day and hour.
+- **Sky.** Bevy's raymarched `Atmosphere` with the Mars scattering medium
+  (Schneegans et al. 2024) over 120 km of air, lighting the scene through
+  `AtmosphereEnvironmentMapLight`. `dust_tau` (default 0.4, up to 12) thickens
+  the dust over the preset's 0.146: butterscotch by day, a
+  red-brown storm at 4. `gearbox scene weather dust_tau=4` sets it live.
+- **Pad.** Off Earth, home is level within 30 m and back to full relief at
+  60 m; no rocks stand on it, so an outpost world can be laid on it.
+- **Greenhouses.** `--world bin/gearbox/assets/world/mars_greenhouse.usda`
+  loads an EDEN ISS-like growth module on the pad; see
+  `specs/GREENHOUSE_SPEC.md`.
 
 ## Acceptance gates
 
