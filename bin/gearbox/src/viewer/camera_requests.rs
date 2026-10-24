@@ -95,6 +95,7 @@ fn serve_camera_requests(
             view.bearing_deg = look.bearing_deg.unwrap_or(view.bearing_deg);
             view.pitch_deg = look.pitch_deg.unwrap_or(view.pitch_deg);
             view.distance_m = look.distance_m.unwrap_or(view.distance_m);
+            view.at.altitude = look.above_m.unwrap_or(view.at.altitude);
             view.tidy();
         }
         _ => warn!(
@@ -112,7 +113,7 @@ fn glide_seconds(text: &str) -> Option<f32> {
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
 }
 
-/// The `bearing=`, `pitch=` and `distance=` values of a `look` request.
+/// The `bearing=`, `pitch=`, `distance=` and `above=` values of a `look` request.
 fn look_around(text: &str) -> LookAround {
     let mut look = LookAround::default();
     for (key, value) in text.split_whitespace().filter_map(|word| word.split_once('=')) {
@@ -123,6 +124,7 @@ fn look_around(text: &str) -> LookAround {
             "bearing" => look.bearing_deg = Some(value),
             "pitch" => look.pitch_deg = Some(value),
             "distance" => look.distance_m = Some(value),
+            "above" => look.above_m = Some(value),
             _ => {}
         }
     }

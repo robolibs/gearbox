@@ -93,6 +93,9 @@ enum Cmd {
         /// the next request, `unfollow` or a drag
         #[arg(long)]
         over: Option<f64>,
+        /// For look without MACHINE: metres above the ground the place looked at stands
+        #[arg(long)]
+        above: Option<f64>,
         #[arg(long)]
         id: Option<String>,
     },
@@ -183,6 +186,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             pitch,
             distance,
             over,
+            above,
             id,
         } => camera(
             ctx,
@@ -196,6 +200,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 ("pitch", pitch),
                 ("distance", distance),
                 ("over", over),
+                ("above", above),
             ],
         ),
     }
@@ -208,7 +213,7 @@ fn camera(
     machine: Option<&str>,
     distance_km: Option<f64>,
     height_m: Option<f64>,
-    look: [(&str, Option<f64>); 4],
+    look: [(&str, Option<f64>); 5],
 ) -> Result<()> {
     let ctx = with_target(ctx, id)?;
     if action == "where" {

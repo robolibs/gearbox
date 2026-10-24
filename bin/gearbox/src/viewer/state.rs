@@ -116,6 +116,8 @@ pub struct LookAround {
     pub bearing_deg: Option<f64>,
     pub pitch_deg: Option<f64>,
     pub distance_m: Option<f64>,
+    /// Height of the place looked at above the ground there.
+    pub above_m: Option<f64>,
 }
 
 impl FlyTarget {
