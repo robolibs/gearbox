@@ -2,6 +2,7 @@
 //! mounted USD scene with `LoadedAsset` marker. The marker also tags the
 //! root for the UI's pick-and-gizmo wiring.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -908,31 +909,91 @@ fn drain_machine_delete_queue(
     }
 }
 
-/// Report every loaded asset root for `/gearbox/scene/list`.
+fn scene_object(transform: &GlobalTransform, kind: u32, props: Props) -> SceneObject {
+    let t = transform.translation();
+    let (_, yaw, _) = transform.rotation().to_euler(EulerRot::YXZ);
+    SceneObject {
+        x: t.x,
+        y: t.y,
+        z: t.z,
+        yaw_deg: yaw.to_degrees(),
+        kind,
+        props: props.into_bytes(),
+    }
+}
+
+/// Where each machine that shares its stage with others stands: its body,
+/// else its own prim, by its index in the inventory.
+fn shared_machine_poses(
+    inventory: &ControllerInventory,
+    prims: &Query<(Entity, &usd_bevy::UsdPrimRef, &GlobalTransform)>,
+    parents: &Query<&ChildOf>,
+) -> HashMap<usize, GlobalTransform> {
+    let mut wanted: HashMap<&str, Vec<(usize, bool)>> = HashMap::new();
+    for (i, m) in inventory.machines.iter().enumerate() {
+        let Some(root) = m.scene_root else { continue };
+        if inventory.only(root).is_some() {
+            continue;
+        }
+        wanted
+            .entry(m.prim_path.as_str())
+            .or_default()
+            .push((i, false));
+        if let Some(body) = m.body.as_deref() {
+            wanted.entry(body).or_default().push((i, true));
+        }
+    }
+    let (mut bodies, mut own) = (HashMap::new(), HashMap::new());
+    if wanted.is_empty() {
+        return bodies;
+    }
+    for (entity, prim, transform) in prims.iter() {
+        for &(i, body) in wanted.get(prim.path.as_str()).into_iter().flatten() {
+            let root = inventory.machines[i]
+                .scene_root
+                .expect("wanted machines have a root");
+            if crate::controller::is_descendant_of(entity, root, parents) {
+                (if body { &mut bodies } else { &mut own }).insert(i, *transform);
+            }
+        }
+    }
+    for (i, transform) in own {
+        bodies.entry(i).or_insert(transform);
+    }
+    bodies
+}
+
+/// Report every loaded asset root for `/gearbox/scene/list`, and each
+/// machine of a stage that holds several.
 fn refresh_scene_objects(
     loaded: Query<(Entity, &LoadedAsset, &GlobalTransform)>,
     inventory: Res<ControllerInventory>,
     mut objects: ResMut<SceneObjects>,
     overrides: Query<&usd_bevy::instance::UsdInstanceOverrides>,
     attachments: Res<crate::attach::Attachments>,
+    prims: Query<(Entity, &usd_bevy::UsdPrimRef, &GlobalTransform)>,
+    parents: Query<&ChildOf>,
 ) {
+    let poses = shared_machine_poses(&inventory, &prims, &parents);
     let mut out = Vec::new();
     for (entity, asset, transform) in loaded.iter() {
-        let machine = inventory
+        let held: Vec<(usize, &crate::controller::MachineInstanceSpec)> = inventory
             .machines
             .iter()
-            .find(|m| m.scene_root == Some(entity));
-        let t = transform.translation();
-        let (_, yaw, _) = transform.rotation().to_euler(EulerRot::YXZ);
+            .enumerate()
+            .filter(|(_, m)| m.scene_root == Some(entity))
+            .collect();
         let mut props = Props::from_pairs(&[
             ("id", asset.label.as_str()),
             ("path", &asset.path.to_string_lossy()),
         ]);
-        let kind = match machine {
-            Some(m) => {
+        let kind = match held.as_slice() {
+            [(_, m)] => {
                 props.set("machine_id", &m.id);
-                if inventory.machines.iter().filter(|m| m.scene_root == Some(entity)).count() == 1
-                    && !attachments.0.iter().any(|a| a.master_id == m.id || a.slave_id == m.id)
+                if !attachments
+                    .0
+                    .iter()
+                    .any(|a| a.master_id == m.id || a.slave_id == m.id)
                     && let Ok(opinions) = overrides.get(entity)
                     && opinions.attributes.is_empty()
                 {
@@ -946,17 +1007,26 @@ fn refresh_scene_objects(
                 }
                 object_kind::MACHINE
             }
-            None if asset.label.to_ascii_lowercase().contains("terrain") => object_kind::TERRAIN,
-            None => object_kind::PROP,
+            [] if asset.label.to_ascii_lowercase().contains("terrain") => object_kind::TERRAIN,
+            [] => object_kind::PROP,
+            _ => object_kind::MACHINE,
         };
-        out.push(SceneObject {
-            x: t.x,
-            y: t.y,
-            z: t.z,
-            yaw_deg: yaw.to_degrees(),
-            kind,
-            props: props.into_bytes(),
-        });
+        out.push(scene_object(transform, kind, props));
+        if held.len() < 2 {
+            continue;
+        }
+        for (i, m) in &held {
+            let mut props = Props::from_pairs(&[
+                ("id", m.id.as_str()),
+                ("machine_id", m.id.as_str()),
+                ("stage", asset.label.as_str()),
+            ]);
+            if let Some(kind) = &m.kind {
+                props.set("kind", kind);
+            }
+            let at = poses.get(i).unwrap_or(transform);
+            out.push(scene_object(at, object_kind::MACHINE, props));
+        }
     }
     objects.machines = out;
 }
@@ -964,6 +1034,70 @@ fn refresh_scene_objects(
 #[cfg(test)]
 #[path = "load/alignment_tests.rs"]
 mod alignment_tests;
+
+#[cfg(test)]
+mod scene_list_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn each_machine_of_a_shared_stage_is_listed_where_it_stands() {
+        let mut world = World::new();
+        let (stage, bodies) = crate::controller::spawn_fleet(&mut world, &["Eve", "Percy"]);
+        let loaded = |label: &str| LoadedAsset {
+            path: format!("{label}.usda").into(),
+            label: label.into(),
+        };
+        world
+            .entity_mut(stage)
+            .insert((loaded("base"), GlobalTransform::IDENTITY));
+        for (x, body) in [3.0, 7.0].into_iter().zip(bodies) {
+            world
+                .entity_mut(body)
+                .insert(GlobalTransform::from_translation(Vec3::X * x));
+        }
+        let yard = world
+            .spawn((
+                loaded("yard"),
+                GlobalTransform::from_translation(Vec3::X * 20.0),
+            ))
+            .id();
+        let mut tractor = world.resource::<ControllerInventory>().machines[0].clone();
+        tractor.id = "tractor".into();
+        tractor.scene_root = Some(yard);
+        world
+            .resource_mut::<ControllerInventory>()
+            .machines
+            .push(tractor);
+        world.init_resource::<SceneObjects>();
+        world.init_resource::<crate::attach::Attachments>();
+        world.run_system_once(refresh_scene_objects).unwrap();
+        let mut listed: Vec<(String, Option<String>, f32)> = world
+            .resource::<SceneObjects>()
+            .machines
+            .iter()
+            .map(|o| {
+                (
+                    o.props().get("id").unwrap(),
+                    o.props().get("machine_id"),
+                    o.x,
+                )
+            })
+            .collect();
+        listed.sort_by(|a, b| a.0.cmp(&b.0));
+        let named =
+            |id: &str, machine: Option<&str>, x: f32| (id.into(), machine.map(Into::into), x);
+        assert_eq!(
+            listed,
+            [
+                named("base", None, 0.0),
+                named("eve", Some("eve"), 3.0),
+                named("percy", Some("percy"), 7.0),
+                named("yard", Some("tractor"), 20.0),
+            ]
+        );
+    }
+}
 
 #[cfg(test)]
 mod pressure_snapshot_tests {

@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use usd_bevy::UsdPrimRef;
 
-use crate::controller::ControllerInventory;
+use crate::controller::{ControllerInventory, MachineRef};
 use crate::viewer::state::{ChaseCameraFly, FlyTarget, FollowTarget, LookAround};
 use crate::viewer::systems::machine_body_entity;
 
@@ -44,23 +44,23 @@ fn serve_camera_requests(
     let _ = std::fs::remove_file(&request);
     let mut words = text.split_whitespace();
     let action = words.next().unwrap_or("");
-    let root = words.next().and_then(|id| {
+    let machine = words.next().and_then(|id| {
         inventory
             .machines
             .iter()
             .find(|m| m.id == id)
-            .and_then(|m| m.scene_root)
+            .and_then(MachineRef::of)
     });
     info!("gearbox-viewer: camera request `{}`", text.trim());
-    match (action, root) {
-        ("fly", Some(root)) => {
-            let body = machine_body_entity(root, &inventory, &prims, &parents);
-            fly.target = Some(FlyTarget::new(root, body, &view));
+    match (action, machine) {
+        ("fly", Some(machine)) => {
+            let body = machine_body_entity(&machine, &inventory, &prims, &parents);
+            fly.target = Some(FlyTarget::new(machine, body, &view));
         }
-        ("follow", Some(root)) => follow.set(Some(root)),
+        ("follow", Some(machine)) => follow.set(Some(machine)),
         ("unfollow", _) => {
             follow.set(None);
-            if fly.target.is_some_and(|target| target.hold) {
+            if fly.target.as_ref().is_some_and(|target| target.hold) {
                 fly.target = None;
             }
         }
@@ -81,12 +81,12 @@ fn serve_camera_requests(
         // view, around the machine when one is named, its bearing counted
         // from behind it. With `over`, the view glides there over S seconds
         // and holds it, tracking the machine, until something else moves it.
-        ("look", Some(root)) => {
-            let body = machine_body_entity(root, &inventory, &prims, &parents);
+        ("look", Some(machine)) => {
+            let body = machine_body_entity(&machine, &inventory, &prims, &parents);
             let look = look_around(&text);
             fly.target = Some(match glide_seconds(&text) {
-                Some(seconds) => FlyTarget::gliding(root, body, &view, look, seconds),
-                None => FlyTarget::looking(root, body, &view, look),
+                Some(seconds) => FlyTarget::gliding(machine, body, &view, look, seconds),
+                None => FlyTarget::looking(machine, body, &view, look),
             });
         }
         ("look", None) if text.split_whitespace().nth(1).is_none_or(|word| word.contains('=')) => {

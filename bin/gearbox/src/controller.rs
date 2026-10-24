@@ -64,6 +64,70 @@ impl ControllerInventory {
         }
         self.machines.extend(machines);
     }
+
+    /// The machine `machine` names.
+    pub fn find(&self, machine: &MachineRef) -> Option<&MachineInstanceSpec> {
+        self.machines.iter().find(|m| machine.is(m))
+    }
+
+    /// The machine of the stage at `root`, when it holds just one.
+    pub fn only(&self, root: Entity) -> Option<&MachineInstanceSpec> {
+        let mut held = self.machines.iter().filter(|m| m.scene_root == Some(root));
+        held.next().filter(|_| held.next().is_none())
+    }
+
+    /// The machine `entity` is part of: the one whose own prim holds it, else
+    /// the only machine of the stage it lies in.
+    pub(crate) fn holding(
+        &self,
+        entity: Entity,
+        prims: &Query<(Entity, &UsdPrimRef)>,
+        parents: &Query<&ChildOf>,
+    ) -> Option<&MachineInstanceSpec> {
+        let lineage: Vec<Entity> = std::iter::once(entity)
+            .chain(parents.iter_ancestors(entity))
+            .collect();
+        let at = lineage
+            .iter()
+            .position(|e| self.machines.iter().any(|m| m.scene_root == Some(*e)))?;
+        let root = lineage[at];
+        lineage[..=at]
+            .iter()
+            .filter_map(|e| prims.get(*e).ok())
+            .find_map(|(_, prim)| {
+                self.machines
+                    .iter()
+                    .find(|m| m.scene_root == Some(root) && m.prim_path == prim.path)
+            })
+            .or_else(|| self.only(root))
+    }
+}
+
+/// Tractors in one stage, each a prim `/Fleet/<name>` with its chassis prim
+/// under it and a lowercase id; the stage and the chassis entities.
+#[cfg(test)]
+pub(crate) fn spawn_fleet(world: &mut World, names: &[&str]) -> (Entity, Vec<Entity>) {
+    let stage = world.spawn_empty().id();
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tractor.usd");
+    let tractor = discover_machines_from_usd(&path).unwrap().remove(0);
+    let mut inventory = ControllerInventory::default();
+    let mut bodies = Vec::new();
+    for name in names {
+        let prim = format!("/Fleet/{name}");
+        let own = world.spawn((UsdPrimRef::new(&prim), ChildOf(stage))).id();
+        let body = world
+            .spawn((UsdPrimRef::new(format!("{prim}/body")), ChildOf(own)))
+            .id();
+        bodies.push(body);
+        let mut machine = tractor.clone();
+        machine.id = name.to_lowercase();
+        machine.body = Some(format!("{prim}/body"));
+        machine.prim_path = prim;
+        machine.scene_root = Some(stage);
+        inventory.machines.push(machine);
+    }
+    world.insert_resource(inventory);
+    (stage, bodies)
 }
 
 /// Internal command buffer keyed by discovered controller instance.
@@ -236,6 +300,27 @@ impl ControllerKey {
             machine_id: machine_id.into(),
             controller_instance: controller_instance.into(),
         }
+    }
+}
+
+/// One machine of a loaded stage, which may hold several: the stage's root
+/// entity and the machine's id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MachineRef {
+    pub scene_root: Entity,
+    pub machine_id: String,
+}
+
+impl MachineRef {
+    pub fn of(machine: &MachineInstanceSpec) -> Option<Self> {
+        Some(Self {
+            scene_root: machine.scene_root?,
+            machine_id: machine.id.clone(),
+        })
+    }
+
+    pub fn is(&self, machine: &MachineInstanceSpec) -> bool {
+        machine.scene_root == Some(self.scene_root) && machine.id == self.machine_id
     }
 }
 

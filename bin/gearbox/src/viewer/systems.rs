@@ -10,7 +10,9 @@ use mara::ui::modules::bevy::{BevyViewportInput, ChaseCamera};
 use usd_bevy::UsdPrimRef;
 use usd_bevy::instance::UsdInstances;
 
-use crate::controller::{ControllerInventory, ControllerKey, ControllerStates};
+use crate::controller::{
+    ControllerInventory, ControllerKey, ControllerStates, MachineInstanceSpec, MachineRef,
+};
 use crate::load::{LoadQueue, LoadedAsset};
 use crate::viewer::commands::{HostCommands, apply_host_commands};
 use crate::viewer::state::{
@@ -19,10 +21,52 @@ use crate::viewer::state::{
     UsdStageTime, VariantEntry,
 };
 
-/// Top-level entity selection (a LoadedAsset root). Separate from
-/// `SelectedPrim`, which targets prims inside the active stage.
+/// What a top-level selection picked: a whole loaded asset, or one machine
+/// of a stage that may hold several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selected {
+    Asset(Entity),
+    Machine(MachineRef),
+}
+
+impl Selected {
+    /// The LoadedAsset root it lies in.
+    pub fn root(&self) -> Entity {
+        match self {
+            Self::Asset(root) => *root,
+            Self::Machine(machine) => machine.scene_root,
+        }
+    }
+
+    /// The machine it names: the one picked, or an asset's only machine.
+    pub fn machine<'a>(
+        &self,
+        inventory: &'a ControllerInventory,
+    ) -> Option<&'a MachineInstanceSpec> {
+        match self {
+            Self::Machine(machine) => inventory.find(machine),
+            Self::Asset(root) => inventory.only(*root),
+        }
+    }
+}
+
+/// Top-level selection. Separate from `SelectedPrim`, which targets prims
+/// inside the active stage.
 #[derive(Resource, Default)]
-pub struct Selection(pub Option<Entity>);
+pub struct Selection(pub Option<Selected>);
+
+impl Selection {
+    pub fn root(&self) -> Option<Entity> {
+        self.0.as_ref().map(Selected::root)
+    }
+
+    pub fn machine<'a>(
+        &self,
+        inventory: &'a ControllerInventory,
+    ) -> Option<&'a MachineInstanceSpec> {
+        self.0.as_ref()?.machine(inventory)
+    }
+}
 
 /// The pose gizmo holds the pointer: the camera does not orbit and a click
 /// does not reselect.
@@ -225,6 +269,21 @@ pub(crate) fn find_loaded_ancestor(
     }
 }
 
+/// What picking `entity` in the stage at `root` selects: the machine it is
+/// part of, else the whole asset.
+pub(crate) fn picked(
+    entity: Entity,
+    root: Entity,
+    inventory: &ControllerInventory,
+    prims: &Query<(Entity, &UsdPrimRef)>,
+    parents: &Query<&ChildOf>,
+) -> Selected {
+    inventory
+        .holding(entity, prims, parents)
+        .and_then(MachineRef::of)
+        .map_or(Selected::Asset(root), Selected::Machine)
+}
+
 /// Project the local AABB to a world-space AABB by transforming all
 /// 8 corners through `gt`, then slab-test against the ray. Loose for
 /// rotated transforms but plenty accurate for click-to-select.
@@ -343,20 +402,20 @@ fn follow_target(
     mut view: ResMut<crate::viewer::camera::View>,
     transforms: Query<&Transform>,
 ) {
-    let Some(root) = follow.entity else {
+    let Some(machine) = follow.machine.clone() else {
         return;
     };
     if fly.remaining > 0.0
         || agent_fly.target.is_some()
         || commands.0.iter().any(|command| {
             matches!(command,
-                crate::viewer::commands::HostCommand::FlyToMachine(target) if *target == root)
+                crate::viewer::commands::HostCommand::FlyToMachine(target) if *target == machine)
         })
     {
         follow.anchor = None;
         return;
     }
-    let body = machine_body_entity(root, &inventory, &prims, &parents);
+    let body = machine_body_entity(&machine, &inventory, &prims, &parents);
     if !transforms.contains(body) {
         follow.set(None);
         return;
@@ -510,7 +569,7 @@ fn drain_despawn(
     }
     let world = world.into_inner();
     for root in queue.0.drain(..) {
-        if selection.0 == Some(root) {
+        if selection.root() == Some(root) {
             selection.0 = None;
         }
         if active.0 == Some(root) {
@@ -583,20 +642,24 @@ fn apply_fly_to(
     *view = crate::viewer::camera::View::between(&fly.from, &fly.to, eased, fly.turn);
 }
 
-/// The chassis prim entity of the machine rooted at `root`, or the root
-/// itself when the machine names no body.
+/// The chassis prim entity of `machine`, else its own prim's entity, else
+/// its stage's root.
 pub(crate) fn machine_body_entity(
-    root: Entity,
+    machine: &MachineRef,
     inventory: &ControllerInventory,
     prims: &Query<(Entity, &UsdPrimRef)>,
     parents: &Query<&ChildOf>,
 ) -> Entity {
+    let root = machine.scene_root;
+    let entity = |prim: &str| crate::controller::find_prim_entity(root, prim, prims, parents);
     inventory
-        .machines
-        .iter()
-        .find(|m| m.scene_root == Some(root))
-        .and_then(|m| m.body.as_deref())
-        .and_then(|body| crate::controller::find_prim_entity(root, body, prims, parents))
+        .find(machine)
+        .and_then(|m| {
+            m.body
+                .as_deref()
+                .and_then(entity)
+                .or_else(|| entity(&m.prim_path))
+        })
         .unwrap_or(root)
 }
 
@@ -604,23 +667,19 @@ pub(crate) fn machine_body_entity(
 /// there is one, else the chassis prim's forward axis (USD -Y) projected on
 /// the ground. 0 rad = +Z, +pi/2 = +X, like `heading_rad`.
 pub(crate) fn machine_heading(
-    root: Entity,
+    machine: &MachineRef,
     gt: &GlobalTransform,
     inventory: &ControllerInventory,
     states: &ControllerStates,
 ) -> f32 {
-    let published = inventory
-        .machines
-        .iter()
-        .find(|m| m.scene_root == Some(root))
-        .and_then(|m| {
-            m.controllers.iter().find_map(|c| {
-                states
-                    .states
-                    .get(&ControllerKey::new(root, &m.id, &c.instance))
-                    .map(|s| s.heading_rad as f32)
-            })
-        });
+    let published = inventory.find(machine).and_then(|m| {
+        m.controllers.iter().find_map(|c| {
+            states
+                .states
+                .get(&ControllerKey::new(machine.scene_root, &m.id, &c.instance))
+                .map(|s| s.heading_rad as f32)
+        })
+    });
     published.unwrap_or_else(|| {
         let fwd = gt.rotation() * Vec3::NEG_Y;
         fwd.x.atan2(fwd.z)
@@ -808,6 +867,8 @@ pub(crate) fn pick_on_click(
     cameras: Query<(&Camera, &GlobalTransform), With<ChaseCamera>>,
     loaded: Query<Entity, With<LoadedAsset>>,
     parents: Query<&ChildOf>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    inventory: Res<ControllerInventory>,
     aabbs: Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb, Option<&InheritedVisibility>)>,
     mut selection: ResMut<Selection>,
     mut active: ResMut<ActiveStage>,
@@ -831,25 +892,26 @@ pub(crate) fn pick_on_click(
     };
     let origin = ray.origin;
     let dir = *ray.direction;
-    let mut best: Option<(Entity, f32)> = None;
+    let mut best: Option<(Entity, Entity, f32)> = None;
     for (e, gt, aabb, visibility) in aabbs.iter() {
         if visibility.is_some_and(|v| !v.get()) { continue; }
         let Some(root) = find_loaded_ancestor(e, &parents, &loaded) else {
             continue;
         };
         if let Some(t) = ray_aabb_world(origin, dir, gt, aabb)
-            && best.is_none_or(|(_, bt)| t < bt)
+            && best.is_none_or(|(_, _, bt)| t < bt)
         {
-            best = Some((root, t));
+            best = Some((e, root, t));
         }
     }
-    if let Some((root, t)) = best {
-        hover.hit = Some(root);
+    if let Some((hit, root, t)) = best {
+        let pick = picked(hit, root, &inventory, &prims, &parents);
+        hover.hit = pick.machine(&inventory).and_then(MachineRef::of);
         if !input.primary_clicked {
             return;
         }
         info!("pick: hit LoadedAsset {root:?} at t={t:.3}");
-        selection.0 = Some(root);
+        selection.0 = Some(pick);
         active.0 = Some(root);
     }
 }
@@ -874,16 +936,14 @@ fn chase_camera_fly(
     locals: Query<&Transform>,
     mut view: ResMut<crate::viewer::camera::View>,
 ) {
-    let Some(mut target) = fly.target else {
+    let Some(mut target) = fly.target.take() else {
         return;
     };
     let dragged = input.drag_delta != [0.0, 0.0] || input.pan_delta != [0.0, 0.0];
     if dragged || input.scroll_delta.abs() > f32::EPSILON {
-        fly.target = None;
         return;
     }
     let Ok(gt) = transforms.get(target.body) else {
-        fly.target = None;
         return;
     };
     target.elapsed += time.delta_secs();
@@ -893,7 +953,8 @@ fn chase_camera_fly(
     // faces there.
     let here = crate::globe::transform_in_site(target.body, &parents, &locals, &grids);
     let at = sites.place_of(gt.translation());
-    let heading = machine_heading(target.root, &here, &inventory, &states) + std::f32::consts::PI;
+    let heading =
+        machine_heading(&target.machine, &here, &inventory, &states) + std::f32::consts::PI;
     let north = sites.current().frame.rotation
         * bevy::math::DVec3::new(heading.sin() as f64, 0.0, heading.cos() as f64);
     let local = gearbox_globe::Datum::at(at.latitude, at.longitude).rotation.inverse() * north;
@@ -931,7 +992,6 @@ fn chase_camera_fly(
 
     if t >= 1.0 {
         *view = settled;
-        fly.target = None;
     } else {
         fly.target = Some(target);
     }
@@ -1031,20 +1091,21 @@ fn mirror_api_selection(
         selection.0 = None;
         return;
     }
-    let root = inventory
+    let pick = inventory
         .machines
         .iter()
         .find(|m| m.id == state.id)
-        .and_then(|m| m.scene_root)
+        .and_then(MachineRef::of)
+        .map(Selected::Machine)
         .or_else(|| {
             loaded
                 .iter()
                 .find(|(_, asset)| asset.label == state.id)
-                .map(|(entity, _)| entity)
+                .map(|(entity, _)| Selected::Asset(entity))
         });
-    if let Some(root) = root {
-        selection.0 = Some(root);
-        active.0 = Some(root);
+    if let Some(pick) = pick {
+        active.0 = Some(pick.root());
+        selection.0 = Some(pick);
     }
 }
 
@@ -1101,6 +1162,82 @@ mod tests {
         let now = FollowAnchor { clearance: 0.8, ..last };
         carry_view(&mut view, &frame, &last, &now, 0.0);
         assert!((view.at.altitude - 0.8).abs() < 1.0e-9);
+    }
+
+    fn fleet(world: &mut World) -> (Entity, Vec<Entity>) {
+        crate::controller::spawn_fleet(world, &["Eve", "Percy"])
+    }
+
+    fn percy(stage: Entity) -> MachineRef {
+        MachineRef {
+            scene_root: stage,
+            machine_id: "percy".into(),
+        }
+    }
+
+    #[test]
+    fn the_second_machine_of_a_stage_is_flown_to_by_its_own_body() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let (stage, bodies) = fleet(&mut world);
+        let body = world
+            .run_system_once(
+                move |inventory: Res<ControllerInventory>,
+                      prims: Query<(Entity, &UsdPrimRef)>,
+                      parents: Query<&ChildOf>| {
+                    machine_body_entity(&percy(stage), &inventory, &prims, &parents)
+                },
+            )
+            .unwrap();
+        assert_eq!(body, bodies[1]);
+    }
+
+    #[test]
+    fn the_second_machine_of_a_stage_is_headed_by_its_own_state() {
+        let mut world = World::new();
+        let (stage, _) = fleet(&mut world);
+        let inventory = world.resource::<ControllerInventory>();
+        let instance = &inventory.machines[0].controllers[0].instance;
+        let mut states = ControllerStates::default();
+        for (heading_rad, id) in [(0.5, "eve"), (1.5, "percy")] {
+            states.states.insert(
+                ControllerKey::new(stage, id, instance),
+                crate::controller::ControllerState {
+                    heading_rad,
+                    ..Default::default()
+                },
+            );
+        }
+        let heading = machine_heading(
+            &percy(stage),
+            &GlobalTransform::IDENTITY,
+            inventory,
+            &states,
+        );
+        assert!((heading - 1.5).abs() < 1.0e-6, "heading {heading}");
+    }
+
+    #[test]
+    fn picking_a_part_selects_the_machine_it_belongs_to() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let (stage, bodies) = fleet(&mut world);
+        let [part, whole] = world
+            .run_system_once(
+                move |inventory: Res<ControllerInventory>,
+                      prims: Query<(Entity, &UsdPrimRef)>,
+                      parents: Query<&ChildOf>| {
+                    [bodies[1], stage].map(|hit| picked(hit, stage, &inventory, &prims, &parents))
+                },
+            )
+            .unwrap();
+        assert_eq!(part, Selected::Machine(percy(stage)));
+        assert_eq!(whole, Selected::Asset(stage));
+        assert!(
+            whole
+                .machine(world.resource::<ControllerInventory>())
+                .is_none()
+        );
     }
 
     #[test]

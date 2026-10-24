@@ -465,7 +465,8 @@ fn join_watched_site(
     transforms: Query<&Transform>,
     grids: Query<&Site>,
 ) {
-    let Some(watched) = fly.target.as_ref().map(|target| target.body).or(follow.entity) else {
+    let followed = follow.machine.as_ref().map(|machine| machine.scene_root);
+    let Some(watched) = fly.target.as_ref().map(|target| target.body).or(followed) else {
         return;
     };
     let to = site_of(watched, &parents, &grids);

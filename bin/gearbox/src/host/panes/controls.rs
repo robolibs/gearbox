@@ -13,7 +13,7 @@ use crate::viewer::state::FollowTarget;
 pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
     let invert = world.resource::<ControlSettings>().invert_look_y;
     let cinematic = world.resource::<ControlSettings>().cinematic_transitions;
-    let locked = world.resource::<FollowTarget>().entity.is_some();
+    let locked = world.resource::<FollowTarget>().machine.is_some();
     let pod = pid(P, "controller", 0);
     ctx.sync_toggles(pod, &[invert, cinematic]);
 

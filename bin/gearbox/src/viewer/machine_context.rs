@@ -8,15 +8,17 @@ use crate::{
     attach::{
         Attachments, LocalAttachmentAction, SNAP_ANGLE_RAD, SNAP_DISTANCE_M, body_link, would_loop,
     },
-    controller::{ControllerInventory, MachineAgentKeys, find_prim_entity, is_descendant_of},
+    controller::{
+        ControllerInventory, MachineAgentKeys, MachineRef, find_prim_entity, is_descendant_of,
+    },
     links::CouplingSide,
     physics::PhysicsWorld,
 };
 
 #[derive(Resource, Default)]
 pub(crate) struct MachineHover {
-    pub hit: Option<Entity>,
-    pub retained: Option<Entity>,
+    pub hit: Option<MachineRef>,
+    pub retained: Option<MachineRef>,
     pub captures_pointer: bool,
 }
 
@@ -32,7 +34,7 @@ pub(crate) struct CouplingAction {
 #[derive(Clone)]
 pub(crate) struct MachineCard {
     pub machine_id: String,
-    pub root: Entity,
+    pub machine: MachineRef,
     pub ground_center: Vec3,
     pub ground_right: Vec3,
     pub ground_down: Vec3,
@@ -162,7 +164,10 @@ fn publish_cards(
         let radius = ((max - min).xz().length() * 0.5 + 0.35).max(1.0);
         cards.0.push(MachineCard {
             machine_id: machine_id.clone(),
-            root: key.scene_root,
+            machine: MachineRef {
+                scene_root: key.scene_root,
+                machine_id: key.machine_id.clone(),
+            },
             ground_center: center + right * (radius + 0.55),
             ground_right: right.cross(Vec3::Y),
             ground_down: -right,
@@ -358,6 +363,7 @@ fn band_mesh(
 fn update_band(
     cards: Res<MachineCards>,
     selection: Res<Selection>,
+    inventory: Res<ControllerInventory>,
     hover: Res<MachineHover>,
     active: Res<gearbox_api::PhysicsActive>,
     mut ring: ResMut<SelectionRing>,
@@ -370,12 +376,14 @@ fn update_band(
         return;
     };
     let mut bands = Vec::new();
+    let picked = selection.machine(&inventory);
+    let hovered = hover.retained.as_ref().or(hover.hit.as_ref());
     for card in &cards.0 {
-        let selected = selection.0 == Some(card.root);
+        let selected = picked.is_some_and(|m| card.machine.is(m));
         if selected {
             ring.outer_radius = card.radius;
         }
-        if active.0 && (selected || hover.retained.or(hover.hit) == Some(card.root)) {
+        if active.0 && (selected || hovered == Some(&card.machine)) {
             bands.push((card.center, card.radius, selected));
         }
     }

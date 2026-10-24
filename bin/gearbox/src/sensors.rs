@@ -461,6 +461,27 @@ struct PendingScan {
     world: MTransform,
 }
 
+/// `<machine>:<body prim>` for machine parts, the body prim otherwise.
+fn part_label(
+    entity: Entity,
+    sensor_labels: &Query<&SensorLabel>,
+    parents: &Query<&ChildOf>,
+    prims: &Query<(Entity, &UsdPrimRef)>,
+    physics: &PhysicsWorld,
+    inventory: &ControllerInventory,
+) -> Option<String> {
+    if let Ok(label) = sensor_labels.get(entity) {
+        return Some(label.0.clone());
+    }
+    let body = std::iter::once(entity)
+        .chain(parents.iter_ancestors(entity))
+        .find(|e| physics.entity_to_body.contains_key(e))
+        .unwrap_or(entity);
+    let path = prims.get(body).ok()?.1.path.to_string();
+    let machine = inventory.holding(entity, prims, parents);
+    Some(machine.map_or_else(|| path.clone(), |m| format!("{}:{path}", m.id)))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_machine_sensors(
     mut rigs: ResMut<MachineSensorRigs>,
@@ -493,18 +514,15 @@ pub(crate) fn run_machine_sensors(
     let model = physics.molla(|scene| scene.model_stamp());
     let bodies = physics.molla(body_order);
     swap_built_scene(rigs, &model);
-    // `<machine>:<body prim>` for machine parts, the body prim otherwise.
     let label = |entity: Entity| {
-        if let Ok(label) = sensor_labels.get(entity) {
-            return Some(label.0.clone());
-        }
-        let lineage = || std::iter::once(entity).chain(parents.iter_ancestors(entity));
-        let body = lineage().find(|e| physics.entity_to_body.contains_key(e)).unwrap_or(entity);
-        let path = prims.get(body).ok()?.1.path.to_string();
-        let machine = lineage().find_map(|e| {
-            inventory.machines.iter().find(|m| m.scene_root == Some(e)).map(|m| m.id.as_str())
-        });
-        Some(machine.map_or_else(|| path.clone(), |id| format!("{id}:{path}")))
+        part_label(
+            entity,
+            &sensor_labels,
+            &parents,
+            &prims,
+            &physics,
+            &inventory,
+        )
     };
     let stamp_ms = (time.elapsed_secs_f64() * 1000.0) as u32;
     let sim_time = physics.simulated_seconds;
@@ -2279,5 +2297,31 @@ mod tests {
         assert!(rigs.building.is_none(), "the scene builds");
         assert_eq!(rigs.rigs["bot"].model.as_ref(), Some(&model));
         assert!(seen(&mut rigs, &mut world).contains("plant:A/0"));
+    }
+
+    #[test]
+    fn a_part_is_labelled_by_its_own_machine_in_a_shared_stage() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let (_, bodies) = crate::controller::spawn_fleet(&mut world, &["Eve", "Percy"]);
+        let mut physics = PhysicsWorld::default();
+        for &body in &bodies {
+            let handle = physics.insert_body(BodyDesc::dynamic());
+            physics.entity_to_body.insert(body, handle);
+        }
+        world.insert_resource(physics);
+        let part = world.spawn(ChildOf(bodies[1])).id();
+        let label = world
+            .run_system_once(
+                move |labels: Query<&SensorLabel>,
+                      parents: Query<&ChildOf>,
+                      prims: Query<(Entity, &UsdPrimRef)>,
+                      physics: Res<PhysicsWorld>,
+                      inventory: Res<ControllerInventory>| {
+                    part_label(part, &labels, &parents, &prims, &physics, &inventory)
+                },
+            )
+            .unwrap();
+        assert_eq!(label.as_deref(), Some("percy:/Fleet/Percy/body"));
     }
 }

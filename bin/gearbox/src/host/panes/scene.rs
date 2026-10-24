@@ -9,7 +9,7 @@ use mara_core::vocab::Id as MaraId;
 use std::collections::HashMap;
 
 use super::{PaneCtx, button_clicked, cid, pick_usd_file, pid, pod_response, short_path};
-use crate::controller::ControllerInventory;
+use crate::controller::{ControllerInventory, MachineRef};
 use crate::host::PANE_SCENE as P;
 use crate::load::LoadedAsset;
 use crate::viewer::commands::HostCommand;
@@ -20,17 +20,17 @@ const POSE_RANGE_M: f64 = 100_000.0;
 struct Object {
     entity: Entity,
     label: String,
-    machine: bool,
+    machines: Vec<MachineRef>,
     visible: bool,
 }
 
 /// Every loaded object, in the order the list shows them.
 fn objects(world: &mut World) -> Vec<Object> {
-    let machines: Vec<Entity> = world
+    let machines: Vec<MachineRef> = world
         .resource::<ControllerInventory>()
         .machines
         .iter()
-        .filter_map(|m| m.scene_root)
+        .filter_map(MachineRef::of)
         .collect();
     let mut q = world.query::<(Entity, &LoadedAsset, Option<&Visibility>)>();
     let mut objects: Vec<Object> = q
@@ -38,7 +38,11 @@ fn objects(world: &mut World) -> Vec<Object> {
         .map(|(entity, asset, vis)| Object {
             entity,
             label: asset.label.clone(),
-            machine: machines.contains(&entity),
+            machines: machines
+                .iter()
+                .filter(|m| m.scene_root == entity)
+                .cloned()
+                .collect(),
             visible: !matches!(vis, Some(Visibility::Hidden)),
         })
         .collect();
@@ -48,7 +52,7 @@ fn objects(world: &mut World) -> Vec<Object> {
 
 pub fn tab(world: &mut World, ctx: &PaneCtx) -> Tab {
     let accent = ctx.accent;
-    let selection = world.resource::<Selection>().0;
+    let selection = world.resource::<Selection>().root();
     let paused = !world.resource::<gearbox_api::PhysicsActive>().0;
     let objects = objects(world);
     let count = objects.len();
@@ -67,7 +71,7 @@ pub fn tab(world: &mut World, ctx: &PaneCtx) -> Tab {
         let trailing: Vec<String> = objects
             .iter()
             .map(|o| {
-                let kind = if o.machine { "machine" } else { "object" };
+                let kind = if o.machines.is_empty() { "object" } else { "machine" };
                 if o.visible { kind.to_string() } else { format!("{kind} · hidden") }
             })
             .collect();
@@ -158,7 +162,7 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
     let scene_id = cid(P, "scene");
     let selected_pod_idx = 2;
     let paused = !world.resource::<gearbox_api::PhysicsActive>().0;
-    let selection = world.resource::<Selection>().0;
+    let selection = world.resource::<Selection>().root();
     if button_clicked(responses, scene_id, 0, 0)
         && let Some(path) = pick_usd_file()
     {
@@ -173,10 +177,9 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
             ctx.send(HostCommand::SelectRoot(Some(object.entity)));
         }
         if let Some(object) = rows.body_double_clicked.and_then(|i| objects.get(i)) {
-            ctx.send(if object.machine {
-                HostCommand::FlyToMachine(object.entity)
-            } else {
-                HostCommand::FitPrim(object.entity)
+            ctx.send(match object.machines.as_slice() {
+                [only] => HostCommand::FlyToMachine(only.clone()),
+                _ => HostCommand::FitPrim(object.entity),
             });
         }
     }
@@ -202,8 +205,8 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, c
         let value = |i: usize, fallback: f32| {
             resp.drag_values.get(i).map(|d| d.value as f32).unwrap_or(fallback)
         };
-        ctx.send(HostCommand::PoseRoot {
-            root,
+        ctx.send(HostCommand::Pose {
+            entity: root,
             translation: Vec3::new(value(0, local.x), value(1, local.y), value(2, local.z)),
             // A new heading keeps whatever tilt the gizmo gave the object.
             rotation: {

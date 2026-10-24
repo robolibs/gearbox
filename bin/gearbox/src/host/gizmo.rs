@@ -1,7 +1,8 @@
 //! The pose gizmo: while physics is paused the selected object gets every
 //! translate handle and rotate ring of `transform-gizmo`, as the viewer had
 //! before the mara re-host, on the machine's body (or the object's origin);
-//! a drag moves and turns the whole object with `PoseRoot`.
+//! a drag moves and turns the whole object, or only the selected machine when
+//! others share its stage, with `Pose`.
 
 use bevy::prelude::*;
 use mara::ui::modules::bevy as mara_bevy;
@@ -79,14 +80,17 @@ fn is_under(world: &World, mut entity: Entity, root: Entity) -> bool {
     false
 }
 
-/// Where the handles sit: a machine's body, which physics moves away from
-/// the spawn point, else the object's own origin.
-fn pivot_of(world: &mut World, root: Entity) -> Option<Transform> {
+fn rigid(gt: &GlobalTransform) -> Transform {
+    let (_, rotation, translation) = gt.to_scale_rotation_translation();
+    Transform { translation, rotation, scale: Vec3::ONE }
+}
+
+/// Where the handles sit: the selected machine's body, which physics moves
+/// away from the spawn point, else the origin of what a drag carries.
+fn pivot_of(world: &mut World, root: Entity, carried: Entity) -> Option<Transform> {
     let body = world
-        .resource::<ControllerInventory>()
-        .machines
-        .iter()
-        .find(|m| m.scene_root == Some(root))
+        .resource::<Selection>()
+        .machine(world.resource::<ControllerInventory>())
         .and_then(|m| m.body.clone());
     if let Some(body) = body {
         let mut q = world.query::<(Entity, &UsdPrimRef, &GlobalTransform)>();
@@ -96,11 +100,58 @@ fn pivot_of(world: &mut World, root: Entity) -> Option<Transform> {
             .map(|(e, _, gt)| (e, *gt))
             .collect();
         if let Some((_, gt)) = found.into_iter().find(|(e, _)| is_under(world, *e, root)) {
-            let (_, rotation, translation) = gt.to_scale_rotation_translation();
-            return Some(Transform { translation, rotation, scale: Vec3::ONE });
+            return Some(rigid(&gt));
         }
     }
+    if carried != root {
+        return world.get::<GlobalTransform>(carried).map(rigid);
+    }
     world.get::<Transform>(root).map(|t| Transform { scale: Vec3::ONE, ..*t })
+}
+
+/// What a drag carries: the selected machine's own prim, with its parent's
+/// world pose, when other machines share its stage; else the whole object.
+/// `None` when that machine's prim is not in the scene.
+fn carried(world: &mut World, root: Entity) -> Option<(Entity, Option<GlobalTransform>)> {
+    let inventory = world.resource::<ControllerInventory>();
+    let Some(prim) = world
+        .resource::<Selection>()
+        .machine(inventory)
+        .filter(|_| inventory.only(root).is_none())
+        .map(|m| m.prim_path.clone())
+    else {
+        return Some((root, None));
+    };
+    let mut q = world.query::<(Entity, &UsdPrimRef)>();
+    let found: Vec<Entity> = q
+        .iter(world)
+        .filter(|(_, p)| p.path == prim)
+        .map(|(e, _)| e)
+        .collect();
+    let own = found.into_iter().find(|e| is_under(world, *e, root))?;
+    let parent = world.get::<ChildOf>(own)?.parent();
+    Some((own, Some(*world.get::<GlobalTransform>(parent)?)))
+}
+
+/// Where a drag that took the handles from `pivot` to `moved` puts `pose`,
+/// held in `frame` or, without one, in world space: turned about the pivot,
+/// then moved with it.
+fn dragged(
+    pose: Transform,
+    frame: Option<GlobalTransform>,
+    pivot: Transform,
+    moved: Transform,
+) -> Transform {
+    let held = frame.map_or(pose, |f| f.mul_transform(pose).compute_transform());
+    let turn = moved.rotation * pivot.rotation.inverse();
+    let carried = Transform {
+        translation: moved.translation + turn * (held.translation - pivot.translation),
+        rotation: (turn * held.rotation).normalize(),
+        scale: held.scale,
+    };
+    frame.map_or(carried, |f| {
+        GlobalTransform::from(carried).reparented_to(&f)
+    })
 }
 
 impl PoseGizmo {
@@ -122,17 +173,19 @@ impl PoseGizmo {
         if world.resource::<gearbox_api::PhysicsActive>().0 {
             return false;
         }
-        let Some(root) = world.resource::<Selection>().0 else {
+        let Some(root) = world.resource::<Selection>().root() else {
             return false;
         };
-        let Some(root_pose) = world
-            .get::<LoadedAsset>(root)
-            .and_then(|_| world.get::<Transform>(root))
-            .copied()
-        else {
+        if world.get::<LoadedAsset>(root).is_none() {
+            return false;
+        }
+        let Some((target, frame)) = carried(world, root) else {
             return false;
         };
-        let Some(pivot) = pivot_of(world, root) else {
+        let Some(pose) = world.get::<Transform>(target).copied() else {
+            return false;
+        };
+        let Some(pivot) = pivot_of(world, root, target) else {
             return false;
         };
         let camera = {
@@ -188,15 +241,15 @@ impl PoseGizmo {
             && let Some(new_pivot) = moved.first().map(from_gizmo)
             && new_pivot.translation.is_finite()
         {
-            // Carry the whole object by the pivot's change: turn about the
-            // pivot, then move with it.
-            let turn = new_pivot.rotation * pivot.rotation.inverse();
-            let translation = new_pivot.translation + turn * (root_pose.translation - pivot.translation);
-            let rotation = (turn * root_pose.rotation).normalize();
+            let placed = dragged(pose, frame, pivot, new_pivot);
             world
                 .resource_mut::<HostCommands>()
                 .0
-                .push(HostCommand::PoseRoot { root, translation, rotation });
+                .push(HostCommand::Pose {
+                    entity: target,
+                    translation: placed.translation,
+                    rotation: placed.rotation,
+                });
         }
         self.gizmo.is_focused()
     }
@@ -227,5 +280,79 @@ impl PoseGizmo {
         ))
         .with_clip_rect(rect)
         .add(egui::Shape::mesh(mesh));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controller::MachineRef;
+    use crate::viewer::systems::Selected;
+
+    fn selecting(world: &mut World, selected: Selected) {
+        world.insert_resource(Selection(Some(selected)));
+    }
+
+    fn machine(stage: Entity, id: &str) -> Selected {
+        Selected::Machine(MachineRef {
+            scene_root: stage,
+            machine_id: id.into(),
+        })
+    }
+
+    #[test]
+    fn a_drag_carries_only_the_selected_machine_of_a_shared_stage() {
+        let mut world = World::new();
+        let (stage, bodies) = crate::controller::spawn_fleet(&mut world, &["Eve", "Percy"]);
+        let frame = GlobalTransform::from_translation(Vec3::X * 4.0);
+        world.entity_mut(stage).insert(frame);
+        let percy = world.get::<ChildOf>(bodies[1]).unwrap().parent();
+        selecting(&mut world, machine(stage, "percy"));
+        assert_eq!(carried(&mut world, stage), Some((percy, Some(frame))));
+        selecting(&mut world, Selected::Asset(stage));
+        assert_eq!(carried(&mut world, stage), Some((stage, None)));
+    }
+
+    #[test]
+    fn a_drag_carries_a_lone_machine_with_its_whole_stage() {
+        let mut world = World::new();
+        let (stage, _) = crate::controller::spawn_fleet(&mut world, &["Solo"]);
+        world.entity_mut(stage).insert(GlobalTransform::IDENTITY);
+        selecting(&mut world, machine(stage, "solo"));
+        assert_eq!(carried(&mut world, stage), Some((stage, None)));
+    }
+
+    #[test]
+    fn a_dragged_prim_lands_where_the_handles_took_it() {
+        let frame = GlobalTransform::from(Transform {
+            translation: Vec3::new(10.0, 0.0, -2.0),
+            rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            scale: Vec3::ONE,
+        });
+        let pose = Transform::from_xyz(1.0, 2.0, 0.0);
+        let held = frame.mul_transform(pose).compute_transform();
+        let pivot = Transform::from_translation(held.translation + Vec3::Y);
+        let moved = Transform {
+            translation: pivot.translation + Vec3::Z * 5.0,
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            scale: Vec3::ONE,
+        };
+        let placed = frame
+            .mul_transform(dragged(pose, Some(frame), pivot, moved))
+            .compute_transform();
+        let expected = moved.translation + moved.rotation * (held.translation - pivot.translation);
+        assert!(placed.translation.distance(expected) < 1.0e-4, "{placed:?}");
+        for axis in [Vec3::X, Vec3::Y] {
+            let turned = moved.rotation * held.rotation * axis;
+            assert!(
+                (placed.rotation * axis).distance(turned) < 1.0e-4,
+                "{placed:?}"
+            );
+        }
+        let root = dragged(pose, None, pivot, moved);
+        assert_eq!(
+            root.translation,
+            moved.translation + moved.rotation * (pose.translation - pivot.translation)
+        );
     }
 }

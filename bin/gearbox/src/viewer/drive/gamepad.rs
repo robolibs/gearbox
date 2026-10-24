@@ -2,17 +2,33 @@ use bevy::prelude::*;
 use gearbox_controls::{Frame, Input, Layer, Router, cycle_index};
 
 use super::{DRIVE_TYPES, MachinePanel};
-use crate::controller::{CmdVel, ControllerInventory, ControllerKey, UiDrive};
+use crate::controller::{CmdVel, ControllerInventory, ControllerKey, MachineRef, UiDrive};
 use crate::viewer::commands::{HostCommand, HostCommands};
 use crate::viewer::state::{ActiveStage, ChaseCameraFly, FlyTo, FollowTarget};
-use crate::viewer::systems::Selection;
+use crate::viewer::systems::{Selected, Selection};
 
 #[derive(Resource, Default)]
 pub(super) struct GamepadState {
     router: Router,
     device: Option<Entity>,
-    selected: Option<Entity>,
+    selected: Option<MachineRef>,
     frame: Frame,
+}
+
+/// The machines the pad steps through, by id, each once.
+fn drive_order(inventory: &ControllerInventory) -> Vec<MachineRef> {
+    let mut machines: Vec<MachineRef> = inventory
+        .machines
+        .iter()
+        .filter_map(MachineRef::of)
+        .collect();
+    machines.sort_by(|a, b| {
+        a.machine_id
+            .cmp(&b.machine_id)
+            .then(a.scene_root.cmp(&b.scene_root))
+    });
+    machines.dedup();
+    machines
 }
 
 pub(super) fn route(
@@ -37,21 +53,9 @@ pub(super) fn route(
         state.router.require_release();
         state.device = device_id;
     }
-    let mut machines: Vec<_> = inventory
-        .machines
-        .iter()
-        .filter(|m| m.scene_root.is_some())
-        .collect();
-    machines.sort_by(|a, b| a.id.cmp(&b.id).then(a.scene_root.cmp(&b.scene_root)));
-    machines.dedup_by_key(|m| m.scene_root);
-    let mut root = match selection.0 {
-        Some(root) => machines
-            .iter()
-            .any(|m| m.scene_root == Some(root))
-            .then_some(root),
-        None => None,
-    };
-    if state.selected != root {
+    let machines = drive_order(&inventory);
+    let mut selected = selection.machine(&inventory).and_then(MachineRef::of);
+    if state.selected != selected {
         state.router.require_release();
     }
     if state.frame.drive_enabled && panel.gamepad.is_none() {
@@ -99,49 +103,52 @@ pub(super) fn route(
         }
     }
     if frame.select_step != 0 {
-        let current = machines.iter().position(|m| m.scene_root == root);
+        let current = machines.iter().position(|m| selected.as_ref() == Some(m));
         if let Some(index) = cycle_index(current, machines.len(), frame.select_step) {
-            root = machines[index].scene_root;
-            selection.0 = root;
-            active.0 = root;
-            if let Some(root) = root {
-                commands.0.push(HostCommand::FlyToMachine(root));
-                if follow.entity.is_some() {
-                    follow.set(Some(root));
-                }
+            let machine = machines[index].clone();
+            selected = Some(machine.clone());
+            active.0 = Some(machine.scene_root);
+            selection.0 = Some(Selected::Machine(machine.clone()));
+            if follow.machine.is_some() {
+                follow.set(Some(machine.clone()));
             }
+            commands.0.push(HostCommand::FlyToMachine(machine));
             frame.camera = Default::default();
             state.router.require_release();
         }
     }
     if frame.toggle_follow {
-        let target = if follow.entity.is_some() { None } else { root };
+        let target = if follow.machine.is_some() {
+            None
+        } else {
+            selected.clone()
+        };
         follow.set(target);
-        info!("gearbox-pad: follow={:?}", follow.entity);
+        info!("gearbox-pad: follow={:?}", follow.machine);
     }
-    if state.selected != root {
+    if state.selected != selected {
         for previous in panel.holding.drain() {
             ui.stop_once(&previous);
         }
         if let Some(previous) = panel.gamepad.take() {
             ui.stop_once(&previous);
         }
-        if follow.entity.is_some() {
-            follow.set(root);
+        if follow.machine.is_some() {
+            follow.set(selected.clone());
         }
-        info!("gearbox-pad: selected={root:?}");
+        info!("gearbox-pad: selected={selected:?}");
     }
-    state.selected = root;
-    let drive = machines
-        .iter()
-        .find(|machine| machine.scene_root == root)
+    state.selected = selected.clone();
+    let drive = selected
+        .as_ref()
+        .and_then(|machine| inventory.find(machine))
         .and_then(|machine| {
             let controller = machine
                 .controllers
                 .iter()
                 .find(|c| c.enabled && DRIVE_TYPES.contains(&c.controller_type.as_str()))?;
             Some((
-                ControllerKey::new(root?, &machine.id, &controller.instance),
+                ControllerKey::new(machine.scene_root?, &machine.id, &controller.instance),
                 controller.controller_type == DRIVE_TYPES[0],
             ))
         });
@@ -171,7 +178,7 @@ pub(super) fn route(
     let driving = frame.drive_enabled && drive.is_some();
     if panel.layer != frame.layer || panel.deadman_active != driving {
         info!(
-            "gearbox-pad: layer={:?} deadman={} selected={root:?}",
+            "gearbox-pad: layer={:?} deadman={} selected={selected:?}",
             frame.layer, driving
         );
     }
@@ -214,6 +221,41 @@ pub(super) fn camera(
         info!(
             "gearbox-pad camera: input={input:?} bearing={:.1} pitch={:.1} distance={:.1}",
             view.bearing_deg, view.pitch_deg, view.distance_m
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_pad_steps_through_every_machine_of_a_shared_stage() {
+        let mut world = World::new();
+        let (base, yard) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tractor.usd");
+        let tractor = crate::controller::discover_machines_from_usd(&path)
+            .unwrap()
+            .remove(0);
+        let machines = [("rover_b", base), ("tractor", yard), ("rover_a", base)]
+            .into_iter()
+            .map(|(id, root)| {
+                let mut machine = tractor.clone();
+                machine.id = id.into();
+                machine.scene_root = Some(root);
+                machine
+            })
+            .collect();
+        let order = drive_order(&ControllerInventory { machines });
+        let ids: Vec<&str> = order.iter().map(|m| m.machine_id.as_str()).collect();
+        assert_eq!(ids, ["rover_a", "rover_b", "tractor"]);
+        let next = cycle_index(Some(0), order.len(), 1).map(|i| &order[i]);
+        assert_eq!(
+            next,
+            Some(&MachineRef {
+                scene_root: base,
+                machine_id: "rover_b".into()
+            })
         );
     }
 }

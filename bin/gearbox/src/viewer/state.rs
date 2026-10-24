@@ -7,6 +7,8 @@
 
 use bevy::prelude::{Entity, Resource};
 
+use crate::controller::MachineRef;
+
 use std::path::PathBuf;
 
 /// The currently-focused loaded USD entity. Drives every panel that
@@ -87,9 +89,9 @@ pub struct FlyTo {
 /// Phase A pins the camera in place and turns it toward the machine; phase
 /// B pulls back to the apex, orbits to behind the machine and settles at
 /// `distance` with the elevation the user had.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FlyTarget {
-    pub root: Entity,
+    pub machine: MachineRef,
     pub body: Entity,
     pub duration: f32,
     pub elapsed: f32,
@@ -126,9 +128,9 @@ impl FlyTarget {
     pub const FINAL_DISTANCE: f64 = 18.0;
     pub const DURATION: f32 = 3.0;
 
-    pub fn new(root: Entity, body: Entity, view: &crate::viewer::camera::View) -> Self {
+    pub fn new(machine: MachineRef, body: Entity, view: &crate::viewer::camera::View) -> Self {
         Self {
-            root,
+            machine,
             body,
             duration: Self::DURATION,
             elapsed: 0.0,
@@ -141,18 +143,18 @@ impl FlyTarget {
     }
 
     /// Settles straight onto `look` around the machine, with no flight.
-    pub fn looking(root: Entity, body: Entity, view: &crate::viewer::camera::View, look: LookAround) -> Self {
+    pub fn looking(machine: MachineRef, body: Entity, view: &crate::viewer::camera::View, look: LookAround) -> Self {
         Self {
             duration: f32::EPSILON,
             look: Some(look),
-            ..Self::new(root, body, view)
+            ..Self::new(machine, body, view)
         }
     }
 
     /// Glides onto `look` around the machine over `seconds`, eased at both
     /// ends, and holds it there until something else moves the view.
     pub fn gliding(
-        root: Entity,
+        machine: MachineRef,
         body: Entity,
         view: &crate::viewer::camera::View,
         look: LookAround,
@@ -162,7 +164,7 @@ impl FlyTarget {
             duration: seconds.max(f32::EPSILON),
             look: Some(look),
             hold: true,
-            ..Self::new(root, body, view)
+            ..Self::new(machine, body, view)
         }
     }
 }
@@ -177,7 +179,7 @@ pub struct ChaseCameraFly {
 /// frame the view is carried by what the body did since the last one.
 #[derive(Resource, Default, Debug)]
 pub struct FollowTarget {
-    pub entity: Option<Entity>,
+    pub machine: Option<MachineRef>,
     /// The body's pose when the view was last carried.
     pub anchor: Option<FollowAnchor>,
 }
@@ -193,11 +195,11 @@ pub struct FollowAnchor {
 }
 
 impl FollowTarget {
-    pub fn set(&mut self, entity: Option<Entity>) {
-        if self.entity != entity {
+    pub fn set(&mut self, machine: Option<MachineRef>) {
+        if self.machine != machine {
             self.anchor = None;
         }
-        self.entity = entity;
+        self.machine = machine;
     }
 }
 

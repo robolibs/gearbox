@@ -12,27 +12,31 @@ use mara::ui::modules::bevy::ChaseCamera;
 use usd_bevy::UsdPrimRef;
 use usd_bevy::instance::UsdInstanceOverrides;
 
-use crate::controller::ControllerInventory;
+use crate::controller::{ControllerInventory, MachineRef};
 use crate::load::LoadedAsset;
 use crate::viewer::state::{
     ActiveStage, CameraBookmark, CameraBookmarks, ChaseCameraFly, FlyTarget, FlyTo, FollowTarget,
     LoadRequest, LoaderTuning, ReloadRequest, SelectedPrim,
 };
 use crate::viewer::systems::{
-    PendingDespawn, Selection, find_loaded_ancestor, fit_params_for_entity, start_fly_to,
+    PendingDespawn, Selected, Selection, find_loaded_ancestor, fit_params_for_entity, picked,
+    start_fly_to,
 };
 
 #[derive(Debug, Clone)]
 pub enum HostCommand {
     /// Select a loaded asset root (and make it the active stage).
     SelectRoot(Option<Entity>),
-    /// Select a prim; its owning root becomes the selection too.
+    /// Select one machine (and make its stage the active one).
+    SelectMachine(MachineRef),
+    /// Select a prim; its machine, else its owning root, becomes the
+    /// selection too.
     SelectPrim(Option<Entity>),
     FlyToPrim(Entity),
     FitPrim(Entity),
-    FlyToMachine(Entity),
+    FlyToMachine(MachineRef),
     /// Tie the view to a machine, or untie it.
-    Follow(Option<Entity>),
+    Follow(Option<MachineRef>),
     SetVisibility(Entity, bool),
     Despawn(Entity),
     Reload,
@@ -47,9 +51,10 @@ pub enum HostCommand {
         selection: String,
     },
     SetMaterialColor(AssetId<StandardMaterial>, [f32; 3]),
-    /// Move a paused asset's root: translation and rotation in world space.
-    PoseRoot {
-        root: Entity,
+    /// Move a paused asset's root, or one machine's own prim: translation and
+    /// rotation in its parent's frame.
+    Pose {
+        entity: Entity,
         translation: Vec3,
         rotation: Quat,
     },
@@ -110,17 +115,22 @@ pub(crate) fn apply_host_commands(
         match command {
             HostCommand::SelectRoot(root) => {
                 debug!("gearbox-viewer: select root {root:?}");
-                s.selection.0 = root;
+                s.selection.0 = root.map(Selected::Asset);
                 if root.is_some() {
                     s.active.0 = root;
                 }
+            }
+            HostCommand::SelectMachine(machine) => {
+                debug!("gearbox-viewer: select machine {machine:?}");
+                s.active.0 = Some(machine.scene_root);
+                s.selection.0 = Some(Selected::Machine(machine));
             }
             HostCommand::SelectPrim(prim) => {
                 s.selected.0 = prim;
                 if let Some(prim) = prim
                     && let Some(root) = find_loaded_ancestor(prim, &q.parents, &q.loaded)
                 {
-                    s.selection.0 = Some(root);
+                    s.selection.0 = Some(picked(prim, root, &s.inventory, &q.prims, &q.parents));
                     s.active.0 = Some(root);
                 }
             }
@@ -144,19 +154,19 @@ pub(crate) fn apply_host_commands(
                 let at = s.sites.place_of(focus);
                 start_fly_to(&mut s.fly, &s.view, at, distance as f64);
             }
-            HostCommand::FlyToMachine(root) => {
+            HostCommand::FlyToMachine(machine) => {
                 let body = crate::viewer::systems::machine_body_entity(
-                    root,
+                    &machine,
                     &s.inventory,
                     &q.prims,
                     &q.parents,
                 );
                 s.fly.remaining = 0.0;
-                if s.follow.entity.is_some() {
-                    s.follow.set(Some(root));
+                if s.follow.machine.is_some() {
+                    s.follow.set(Some(machine.clone()));
                 }
                 if s.controls.cinematic_transitions {
-                    s.machine_fly.target = Some(FlyTarget::new(root, body, &s.view));
+                    s.machine_fly.target = Some(FlyTarget::new(machine, body, &s.view));
                 } else {
                     s.machine_fly.target = None;
                     if let Ok(gt) = q.globals.get(body) {
@@ -164,9 +174,9 @@ pub(crate) fn apply_host_commands(
                     }
                 }
             }
-            HostCommand::Follow(root) => {
-                s.follow.set(root);
-                debug!("gearbox-viewer: follow -> {:?}", s.follow.entity);
+            HostCommand::Follow(machine) => {
+                s.follow.set(machine);
+                debug!("gearbox-viewer: follow -> {:?}", s.follow.machine);
             }
             HostCommand::SetVisibility(entity, visible) => {
                 if let Ok(mut v) = q.visibility.get_mut(entity) {
@@ -215,12 +225,12 @@ pub(crate) fn apply_host_commands(
                     mat.base_color = Color::linear_rgba(rgb[0], rgb[1], rgb[2], alpha);
                 }
             }
-            HostCommand::PoseRoot {
-                root,
+            HostCommand::Pose {
+                entity,
                 translation,
                 rotation,
             } => {
-                if let Ok(mut tr) = q.transforms.get_mut(root) {
+                if let Ok(mut tr) = q.transforms.get_mut(entity) {
                     tr.translation = translation;
                     tr.rotation = rotation;
                 }
