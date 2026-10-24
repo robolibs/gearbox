@@ -1,6 +1,7 @@
 //! The greenhouse over the tool API: its plants and rooms as they stand, the
 //! actions a crew or a robot takes on them, and what happens as scene events.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use gearbox_api::{
     GearboxBus, GreenhouseAction, PlantRecord, Props, RoomRecord, SceneEvent, Status, code, event_kind,
@@ -8,9 +9,10 @@ use gearbox_api::{
 };
 use gearbox_greenhouse::house::{Event as HouseEvent, Fault, Refusal};
 use gearbox_greenhouse::{Channels, PlantId, Stage, species};
+use usd_bevy::UsdPrimRef;
 
 use super::{Greenhouse, fault_name};
-use crate::controller::ControllerInventory;
+use crate::controller::{ControllerInventory, find_prim_entity};
 use crate::globe::{Site, transform_in_site};
 
 /// How close a machine must come to a service spot to mend what it serves, metres.
@@ -108,8 +110,8 @@ fn parse_fault(greenhouse: &Greenhouse, name: &str) -> Result<Fault, Status> {
     greenhouse.fault(kind, room, None).ok_or_else(unknown)
 }
 
-/// The service spot a fault is mended at, if the greenhouse has one for it.
-fn service_spot(greenhouse: &Greenhouse, fault: Fault) -> Option<Entity> {
+/// The service spots a fault is mended at.
+fn service_spots(greenhouse: &Greenhouse, fault: Fault) -> Vec<Entity> {
     let (kind, room) = match fault {
         Fault::PowerCut | Fault::Reactor => ("power", None),
         Fault::Fans(r) => ("fans", Some(r)),
@@ -118,13 +120,14 @@ fn service_spot(greenhouse: &Greenhouse, fault: Fault) -> Option<Entity> {
         Fault::Leak(r) => ("leak", Some(r)),
         Fault::Pump(r) => ("pump", Some(r)),
         Fault::WaterLeak(r) => ("water_leak", Some(r)),
-        Fault::Lamp(_) => return None,
+        Fault::Lamp(_) => return Vec::new(),
     };
     greenhouse
         .services
         .iter()
-        .find(|s| s.fault == kind && (room.is_none() || s.room.is_none() || s.room == room))
+        .filter(|s| s.fault == kind && (room.is_none() || s.room.is_none() || s.room == room))
         .map(|s| s.entity)
+        .collect()
 }
 
 fn tray_of(greenhouse: &Greenhouse, keys: &Props) -> Result<usize, Status> {
@@ -146,23 +149,30 @@ fn refused(why: Refusal) -> Status {
     Status::err(code::REFUSED, &why.to_string())
 }
 
-/// How far the nearest part of a machine is from a point, metres.
-fn machine_distance(
-    machine: &str,
-    to: Vec3,
-    inventory: &ControllerInventory,
-    children: &Query<&Children>,
-    globals: &Query<&GlobalTransform>,
-) -> Result<f32, Status> {
-    let root = inventory
-        .machines
-        .iter()
-        .find(|m| m.id == machine)
-        .and_then(|m| m.scene_root)
+/// Where machines and their parts stand, for `by` reach checks.
+#[derive(SystemParam)]
+pub struct Machines<'w, 's> {
+    inventory: Option<Res<'w, ControllerInventory>>,
+    prims: Query<'w, 's, (Entity, &'static UsdPrimRef)>,
+    parents: Query<'w, 's, &'static ChildOf>,
+    children: Query<'w, 's, &'static Children>,
+    globals: Query<'w, 's, &'static GlobalTransform>,
+}
+
+/// How far the nearest part under a machine's own prim is from a point, metres.
+fn machine_distance(machine: &str, to: Vec3, machines: &Machines) -> Result<f32, Status> {
+    let spec = machines
+        .inventory
+        .as_deref()
+        .and_then(|inventory| inventory.machines.iter().find(|m| m.id == machine))
         .ok_or_else(|| Status::err(code::NOT_FOUND, &format!("no machine `{machine}`")))?;
+    let root = spec
+        .scene_root
+        .and_then(|scene| find_prim_entity(scene, &spec.prim_path, &machines.prims, &machines.parents))
+        .ok_or_else(|| Status::err(code::NOT_FOUND, &format!("machine `{machine}` stands nowhere")))?;
     Ok(std::iter::once(root)
-        .chain(children.iter_descendants(root))
-        .filter_map(|e| globals.get(e).ok())
+        .chain(machines.children.iter_descendants(root))
+        .filter_map(|e| machines.globals.get(e).ok())
         .map(|g| g.translation().distance(to))
         .fold(f32::MAX, f32::min))
 }
@@ -181,16 +191,14 @@ fn within_reach(
     greenhouse: &Greenhouse,
     ids: Vec<PlantId>,
     keys: &Props,
-    inventory: &ControllerInventory,
-    children: &Query<&Children>,
-    globals: &Query<&GlobalTransform>,
+    machines: &Machines,
 ) -> Result<Vec<PlantId>, Status> {
     let Some(machine) = keys.get("by") else { return Ok(ids) };
     let single = ids.len() == 1;
     let mut near = Vec::new();
     for id in ids {
-        let at = plant_middle(greenhouse, id, globals).ok_or_else(|| Status::err(code::ERROR, "the tray has no place"))?;
-        let away = machine_distance(&machine, at, inventory, children, globals)?;
+        let at = plant_middle(greenhouse, id, &machines.globals).ok_or_else(|| Status::err(code::ERROR, "the tray has no place"))?;
+        let away = machine_distance(&machine, at, machines)?;
         if away <= PLANT_REACH_M {
             near.push(id);
         } else if single {
@@ -207,9 +215,7 @@ fn within_reach(
 fn act(
     greenhouse: &mut Greenhouse,
     action: &GreenhouseAction,
-    inventory: &ControllerInventory,
-    children: &Query<&Children>,
-    globals: &Query<&GlobalTransform>,
+    machines: &Machines,
 ) -> Result<Status, Status> {
     let keys = action.props();
     match action.op {
@@ -224,7 +230,7 @@ fn act(
                     .collect(),
             };
             let places = slots.into_iter().map(|slot| PlantId { tray, slot }).collect();
-            let places = within_reach(greenhouse, places, &keys, inventory, children, globals)?;
+            let places = within_reach(greenhouse, places, &keys, machines)?;
             for &id in &places {
                 let event = greenhouse.house.sow(id, species).map_err(refused)?;
                 greenhouse.events.push(event);
@@ -242,7 +248,7 @@ fn act(
                     .collect()
             };
             let single = keys.contains("plant");
-            let ids = within_reach(greenhouse, ids, &keys, inventory, children, globals)?;
+            let ids = within_reach(greenhouse, ids, &keys, machines)?;
             let (mut count, mut kg) = (0, 0.0);
             for id in ids {
                 match greenhouse.house.harvest(id) {
@@ -261,7 +267,7 @@ fn act(
         }
         op::CLEAR => {
             let id = plant_of(greenhouse, &keys)?;
-            within_reach(greenhouse, vec![id], &keys, inventory, children, globals)?;
+            within_reach(greenhouse, vec![id], &keys, machines)?;
             greenhouse.house.clear(id).map_err(refused)?;
             Ok(Status::ok())
         }
@@ -314,9 +320,15 @@ fn act(
                 return Err(Status::err(code::REFUSED, "not broken"));
             }
             if let Some(machine) = keys.get("by") {
-                let spot = service_spot(greenhouse, fault).ok_or_else(|| Status::err(code::REFUSED, "nothing to stand at for that fault"))?;
-                let at = globals.get(spot).map_err(|_| Status::err(code::ERROR, "service spot has no place"))?.translation();
-                let away = machine_distance(&machine, at, inventory, children, globals)?;
+                let spots = service_spots(greenhouse, fault);
+                if spots.is_empty() {
+                    return Err(Status::err(code::REFUSED, "nothing to stand at for that fault"));
+                }
+                let mut away = f32::MAX;
+                for spot in spots {
+                    let at = machines.globals.get(spot).map_err(|_| Status::err(code::ERROR, "service spot has no place"))?.translation();
+                    away = away.min(machine_distance(&machine, at, machines)?);
+                }
                 if away > SERVICE_REACH_M {
                     return Err(Status::err(code::REFUSED, &format!("`{machine}` is {away:.2} m from the service spot")));
                 }
@@ -372,16 +384,13 @@ fn scene_event(greenhouse: &Greenhouse, happened: &HouseEvent, at: Vec3) -> Scen
 }
 
 /// Answers the greenhouse topics and publishes what happened since last frame.
-#[allow(clippy::too_many_arguments)]
 pub fn serve_greenhouse_api(
     bus: Option<ResMut<GearboxBus>>,
     mut greenhouse: ResMut<Greenhouse>,
-    inventory: Option<Res<ControllerInventory>>,
     parents: Query<&ChildOf>,
     transforms: Query<&Transform>,
     sites: Query<&Site>,
-    children: Query<&Children>,
-    globals: Query<&GlobalTransform>,
+    machines: Machines,
 ) {
     let Some(mut bus) = bus else { return };
     if greenhouse.is_empty() {
@@ -406,10 +415,8 @@ pub fn serve_greenhouse_api(
             .collect()
     });
     bus.host.serve_greenhouse_rooms(|_| rooms(shown));
-    let empty = ControllerInventory::default();
-    let inventory = inventory.as_deref().unwrap_or(&empty);
     bus.host.serve_greenhouse_act(|action| {
-        act(&mut greenhouse, &action, inventory, &children, &globals).unwrap_or_else(|status| {
+        act(&mut greenhouse, &action, &machines).unwrap_or_else(|status| {
             warn!("greenhouse: {} refused: {}", op::name(action.op), status.message());
             status
         })
@@ -459,12 +466,92 @@ mod tests {
         world.insert_resource(std::mem::take(greenhouse));
         let action = GreenhouseAction::new(op, &Props::from_pairs(keys));
         let status = world
-            .run_system_once(move |mut g: ResMut<Greenhouse>, children: Query<&Children>, globals: Query<&GlobalTransform>| {
-                act(&mut g, &action, &ControllerInventory::default(), &children, &globals).unwrap_or_else(|s| s)
-            })
+            .run_system_once(move |mut g: ResMut<Greenhouse>, machines: Machines| act(&mut g, &action, &machines).unwrap_or_else(|s| s))
             .unwrap();
         *greenhouse = world.remove_resource().unwrap();
         status
+    }
+
+    /// Machines along X, each a prim with one part, all in one stage.
+    fn place_machines(world: &mut World, at: &[(&str, f32)]) {
+        let stage = world.spawn(GlobalTransform::IDENTITY).id();
+        let mut inventory = ControllerInventory::default();
+        for &(name, x) in at {
+            let prim = format!("/Fleet/{name}");
+            let root = world.spawn((UsdPrimRef::new(&prim), GlobalTransform::from_translation(Vec3::X * x), ChildOf(stage))).id();
+            world.spawn((GlobalTransform::from_translation(Vec3::new(x, 0.0, 0.1)), ChildOf(root)));
+            inventory.machines.push(crate::controller::MachineInstanceSpec {
+                tracks: Vec::new(),
+                devices: Vec::new(),
+                scene_root: Some(stage),
+                asset_label: "fleet".into(),
+                source_path: String::new(),
+                prim_path: prim,
+                id: name.into(),
+                kind: None,
+                interface_version: None,
+                id_policy: String::new(),
+                body: None,
+                sensors: Vec::new(),
+                powered_wheel_joints: Vec::new(),
+                passive_wheel_joints: Vec::new(),
+                steering_joints: Vec::new(),
+                brake_joints: Vec::new(),
+                suspension_joints: Vec::new(),
+                tool_joints: Vec::new(),
+                controllers: Vec::new(),
+                links: Default::default(),
+                grants: Vec::new(),
+                model: None,
+            });
+        }
+        world.insert_resource(inventory);
+    }
+
+    fn act_in(world: &mut World, op: u32, keys: &[(&str, &str)]) -> Status {
+        let action = GreenhouseAction::new(op, &Props::from_pairs(keys));
+        world.run_system_once(move |mut g: ResMut<Greenhouse>, machines: Machines| act(&mut g, &action, &machines).unwrap_or_else(|s| s)).unwrap()
+    }
+
+    #[test]
+    fn a_machine_reaches_with_its_own_parts_though_others_share_its_stage() {
+        let mut world = World::new();
+        place_machines(&mut world, &[("near", 0.1), ("far", 20.0)]);
+        let tray = world.spawn(GlobalTransform::IDENTITY).id();
+        let mut g = greenhouse();
+        g.trays.push(super::super::TrayPlace {
+            entity: tray,
+            path: "/bed".into(),
+            cols: 2,
+            rows: 2,
+            size: Vec2::new(0.6, 0.4),
+            lamp_height: 0.5,
+            lamp: None,
+            lamp_face: None,
+        });
+        world.insert_resource(g);
+        let mut sow = |by: &str| act_in(&mut world, op::SOW, &[("tray", "bed"), ("species", "lettuce"), ("by", by)]);
+        assert_eq!(sow("far").code, code::REFUSED, "the far machine reaches nothing, near as its stage-mate stands");
+        assert_eq!(sow("near").props().get("sown").as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn a_fault_is_mended_from_any_of_its_service_spots() {
+        let mut world = World::new();
+        place_machines(&mut world, &[("west", 0.1), ("east", 10.1), ("away", 5.0)]);
+        let mut g = greenhouse();
+        for x in [0.0, 10.0] {
+            let entity = world.spawn(GlobalTransform::from_translation(Vec3::X * x)).id();
+            g.services.push(super::super::ServicePoint { entity, name: format!("service_fans_{x}"), fault: "fans".into(), room: Some(0) });
+        }
+        world.insert_resource(g);
+        let mut mend = |by: &str| {
+            act_in(&mut world, op::FAULT, &[("fault", "fans:grow")]);
+            act_in(&mut world, op::REPAIR, &[("fault", "fans:grow"), ("by", by)]).code
+        };
+        assert_eq!(mend("away"), code::REFUSED);
+        assert_eq!(mend("west"), code::OK);
+        assert_eq!(mend("east"), code::OK, "the far spot serves as well as the first");
     }
 
     #[test]
