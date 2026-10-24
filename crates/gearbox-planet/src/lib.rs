@@ -20,9 +20,9 @@ use bevy::camera::visibility::VisibilitySystems;
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
 
-pub use config::PlanetConfig;
+pub use config::{Air, PlanetConfig};
 pub use debug::DebugSettings;
-pub use planet::{PlanetView, nearest_planet, planet_view, spawn_planet};
+pub use planet::{PlanetView, martian_air, nearest_planet, planet_view, set_dust, spawn_planet};
 
 use planet::bake::{TileBakePlugin, TileBakeQueue};
 use planet::material::{TerrainMaterial, WaterMaterial};

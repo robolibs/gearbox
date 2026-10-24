@@ -195,6 +195,12 @@ impl Client {
         self.call(topics::SCENE_CLOCK, &ClockCommand { op: clock_op::SPEED, value: rate, ..Default::default() })
     }
 
+    /// Set the weather keys `set` carries, and read every key back.
+    pub fn weather(&self, set: &Props) -> agentio::Result<Props> {
+        let answer: Weather = self.call(topics::WEATHER, &Weather::new(set))?;
+        Ok(answer.props())
+    }
+
     /// Jump world time forward by `seconds`.
     pub fn skip(&self, seconds: f64) -> agentio::Result<ClockState> {
         self.call(topics::SCENE_CLOCK, &ClockCommand { op: clock_op::SKIP, value: seconds, ..Default::default() })

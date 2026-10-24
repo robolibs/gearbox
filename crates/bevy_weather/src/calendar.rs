@@ -154,19 +154,15 @@ impl SolarCalendar {
         scale as f32
     }
 
-    /// Unit vector towards the sun; +Z is north and +X is east.
+    /// Unit vector towards the sun in a datum's frame: +X north, +Y up, +Z east.
     pub fn sun_direction(self) -> Vec3 {
         let declination = self.declination();
         let latitude = (self.latitude.clamp(-90.0, 90.0) as f64).to_radians();
         let hour_angle = ((self.hour.rem_euclid(24.0) - 12.0) * 15.0).to_radians();
-        Vec3::new(
-            (-declination.cos() * hour_angle.sin()) as f32,
-            (latitude.sin() * declination.sin()
-                + latitude.cos() * declination.cos() * hour_angle.cos()) as f32,
-            (latitude.cos() * declination.sin()
-                - latitude.sin() * declination.cos() * hour_angle.cos()) as f32,
-        )
-        .normalize()
+        let east = -declination.cos() * hour_angle.sin();
+        let up = latitude.sin() * declination.sin() + latitude.cos() * declination.cos() * hour_angle.cos();
+        let north = latitude.cos() * declination.sin() - latitude.sin() * declination.cos() * hour_angle.cos();
+        Vec3::new(north as f32, up as f32, east as f32).normalize()
     }
 
     pub fn date_label(self) -> String {
@@ -232,7 +228,7 @@ mod tests {
         assert!((368..=375).contains(&autumn), "Ls 180 on sol {autumn}");
         assert!((511..=518).contains(&winter), "Ls 270 on sol {winter}");
         let noon = mars(summer, 12.0, 0.0).sun_direction();
-        let tilt = noon.z.atan2(noon.y).to_degrees();
+        let tilt = noon.x.atan2(noon.y).to_degrees();
         assert!((tilt - 25.4).abs() < 0.5, "noon sun stands {tilt}° north at the solstice");
     }
 
@@ -256,6 +252,17 @@ mod tests {
         let mut earth = SolarCalendar::default();
         earth.advance(9.0 * 3600.0);
         assert_eq!((earth.day, earth.hour), (173, 0.0));
+    }
+
+    #[test]
+    fn the_sun_rises_in_the_east_and_crosses_the_south() {
+        // Northern latitudes: a datum's frame is x north, y up, z east.
+        for planet in [Planet::Earth, Planet::Mars] {
+            let calendar = |hour| SolarCalendar { planet, hour, day: 80, latitude: 45.0 };
+            assert!(calendar(7.0).sun_direction().z > 0.5, "{planet:?} morning sun stands east");
+            assert!(calendar(17.0).sun_direction().z < -0.5, "{planet:?} evening sun stands west");
+            assert!(calendar(12.0).sun_direction().x < -0.3, "{planet:?} noon sun stands south");
+        }
     }
 
     #[test]

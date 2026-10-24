@@ -40,6 +40,8 @@ enum Cmd {
     Speed { factor: f64 },
     /// Jump world time forward, e.g. 6h, 2d, 30sol (sol is the planet's solar day)
     Skip { span: String },
+    /// Read the weather, or set keys: dust_tau=4 cloud_cover=0.5 wind_speed_mps=8 wind_heading_deg=90 wind_gustiness=0.3 haze_km=20
+    Weather { set: Vec<String> },
     /// Objects in the scene
     List {
         /// machine, prop, marker, terrain
@@ -88,6 +90,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             let day_s = ctx.client()?.clock(clock_op::GET)?.day_s;
             clock(ctx, clock_op::SKIP, 0, world_span(&span, day_s)?)
         }
+        Cmd::Weather { set } => weather(ctx, &set),
         Cmd::List { kind } => list(ctx, kind),
         Cmd::Pose { id, watch } => pose(ctx, &id, watch),
         Cmd::Events { kind, count } => events(ctx, kind, count),
@@ -127,6 +130,32 @@ fn status(ctx: &Ctx) -> Result<()> {
                 ("objects", info.object_count.to_string()),
                 ("world", world.clone()),
             ]);
+        },
+    );
+    Ok(())
+}
+
+fn weather(ctx: &Ctx, set: &[String]) -> Result<()> {
+    let mut asked = gearbox_api::Props::new();
+    for pair in set {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(CliError::usage(format!("`{pair}` is not KEY=VALUE")));
+        };
+        if value.trim().parse::<f64>().map_or(true, |v| !v.is_finite()) {
+            return Err(CliError::usage(format!("`{key}` needs a number, not `{value}`")));
+        }
+        asked.set(key.trim(), value.trim());
+    }
+    let weather = ctx.client()?.weather(&asked)?;
+    ctx.emit(
+        || {
+            let pairs = weather.iter().into_iter().map(|(k, v)| (k, json!(v.parse::<f64>().unwrap_or(f64::NAN))));
+            serde_json::Value::Object(pairs.collect())
+        },
+        || {
+            let pairs = weather.iter();
+            let rows: Vec<(&str, String)> = pairs.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+            out::kv(&rows);
         },
     );
     Ok(())

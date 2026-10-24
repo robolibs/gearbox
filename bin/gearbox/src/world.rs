@@ -1437,6 +1437,7 @@ fn spawn_cdlod_planet(world: &mut World) {
         return;
     };
     let terrain_home = Vec4::from_array(world.resource::<crate::globe::Sites>().land.bake_home());
+    let dust_tau = world.get_resource::<bevy_weather::WeatherSettings>().map_or(0.4, |w| w.dust_tau);
     let grid = world.resource_mut::<Assets<Mesh>>().add(gearbox_planet::planet::mesh::build_grid_mesh());
     world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
         world.resource_scope(|world, mut buffers: Mut<Assets<bevy::render::storage::ShaderBuffer>>| {
@@ -1451,7 +1452,14 @@ fn spawn_cdlod_planet(world: &mut World) {
                             // the globe is never above the ground anywhere.
                             match gearbox_globe::Body::active() {
                                 gearbox_globe::Body::Earth => PlanetConfig::earth(gearbox_globe::INSCRIBED_RADIUS_M as f32),
-                                body => PlanetConfig { terrain_home, ..PlanetConfig::barren(body.radius_m() as f32, body as u32) },
+                                body => {
+                                    let barren = PlanetConfig::barren(body.radius_m() as f32, body as u32);
+                                    let atmosphere = barren.atmosphere.map(|air| match air {
+                                        gearbox_planet::Air::Martian { .. } => gearbox_planet::Air::Martian { dust_tau },
+                                        other => other,
+                                    });
+                                    PlanetConfig { terrain_home, atmosphere, ..barren }
+                                }
                             },
                             bevy::math::DVec3::ZERO,
                             &grid,

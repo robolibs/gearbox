@@ -51,6 +51,10 @@ pub struct WeatherSettings {
     pub wind_speed_mps: f32,
     /// How far the push drops between gusts: 0 steady, 1 gusty.
     pub wind_gustiness: f32,
+    /// Vertical optical depth of dust in the air, at visible wavelengths. A
+    /// clear Martian sky is 0.3 to 1, a regional storm 2 to 5, the 2018 global
+    /// storm reached 10.8. Only a [`SkyKind::Mars`] sky carries dust.
+    pub dust_tau: f32,
 }
 
 impl Default for WeatherSettings {
@@ -58,7 +62,8 @@ impl Default for WeatherSettings {
         let calendar = SolarCalendar::default();
         let mut sun_position = Vec3::new(-4.0, 7.0, 5.0);
         let elevation = sun_position.normalize().y.asin().to_degrees();
-        let azimuth = sun_position.x.atan2(sun_position.z).to_degrees();
+        // Compass azimuth, clockwise from north, in a datum's x-north z-east frame.
+        let azimuth = sun_position.z.atan2(sun_position.x).to_degrees();
         let angle = |name: &str, fallback: f32| {
             std::env::var(name)
                 .ok()
@@ -73,9 +78,9 @@ impl Default for WeatherSettings {
             .rem_euclid(360.0)
             .to_radians();
         sun_position = Vec3::new(
-            elevation.cos() * azimuth.sin(),
-            elevation.sin(),
             elevation.cos() * azimuth.cos(),
+            elevation.sin(),
+            elevation.cos() * azimuth.sin(),
         );
         let sun_override = ["GEARBOX_SUN_ELEVATION", "GEARBOX_SUN_AZIMUTH"]
             .iter()
@@ -122,6 +127,7 @@ impl Default for WeatherSettings {
             wind_heading_deg: 36.87,
             wind_speed_mps: 4.0,
             wind_gustiness: 0.7,
+            dust_tau: angle("GEARBOX_DUST_TAU", 0.4).clamp(0.0, 12.0),
         }
     }
 }
@@ -168,7 +174,9 @@ pub struct WeatherPlugin;
 pub enum SkyKind {
     #[default]
     Earth,
-    Dust,
+    /// Carbon dioxide and dust. The scene's Bevy `Atmosphere` draws this sky and
+    /// filters the sun through it; there are no clouds.
+    Mars,
     Airless,
 }
 

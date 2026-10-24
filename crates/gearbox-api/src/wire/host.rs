@@ -495,6 +495,26 @@ impl FieldsLayout {
     }
 }
 
+/// Weather as named values. Sent, it sets the keys it carries and leaves the
+/// rest; answered, it holds every key. Keys: `dust_tau`, `cloud_cover`,
+/// `wind_speed_mps`, `wind_heading_deg`, `wind_gustiness`, `haze_km`.
+#[datapod::datapod(name = "gearbox.weather.v1")]
+#[derive(Default)]
+pub struct Weather {
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl Weather {
+    pub fn new(props: &Props) -> Self {
+        Self { props: props.to_bytes() }
+    }
+
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
+    }
+}
+
 #[datapod::datapod(name = "gearbox.selection.v1")]
 #[derive(Default)]
 pub struct Selection {

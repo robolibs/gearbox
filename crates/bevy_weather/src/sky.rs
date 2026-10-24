@@ -8,10 +8,10 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{Exposure, Hdr};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::{
-    CascadeShadowConfigBuilder, DirectionalLightShadowMap, DirectionalLightTexture,
-    EnvironmentMapLight,
+    AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, DirectionalLightShadowMap,
+    DirectionalLightTexture, EnvironmentMapLight, SunDisk,
 };
-use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::pbr::{AtmosphereSettings, DistanceFog, FogFalloff};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
@@ -37,9 +37,12 @@ impl Plugin for SkyPlugin {
             wind_velocity: cloud_drift(settings),
             ..settings.clouds
         };
+        // A scattered sky is drawn by the scene's atmosphere, and carries no clouds.
+        if settings.sky_kind != super::SkyKind::Mars {
+            app.add_plugins(CloudsPlugin);
+        }
         app.insert_resource(clouds)
             .insert_resource(DirectionalLightShadowMap { size: 4096 })
-            .add_plugins(CloudsPlugin)
             .add_systems(Startup, spawn_daylight)
             .add_systems(
                 Update,
@@ -106,6 +109,7 @@ fn spawn_daylight(mut commands: Commands, settings: Res<WeatherSettings>) {
             shadow_maps_enabled: sun_shadows(),
             ..default()
         },
+        sun_disk(&settings),
         CascadeShadowConfigBuilder {
             num_cascades: 4,
             minimum_distance: 0.1,
@@ -125,8 +129,19 @@ fn spawn_daylight(mut commands: Commands, settings: Res<WeatherSettings>) {
             shadow_maps_enabled: false,
             ..default()
         },
+        SunDisk::OFF,
         RenderLayers::layer(crate::LEAN_LAYER),
     ));
+}
+
+/// The sun's disc as a scattered sky draws it: smaller from farther out, by
+/// the square root of the light it brings.
+fn sun_disk(settings: &WeatherSettings) -> SunDisk {
+    let mean = match settings.calendar.planet {
+        super::Planet::Mars => SunDisk::EARTH.angular_size / 1.523_679,
+        super::Planet::Earth | super::Planet::Moon => SunDisk::EARTH.angular_size,
+    };
+    SunDisk { angular_size: mean * settings.calendar.irradiance_scale().sqrt(), intensity: 1.0 }
 }
 
 fn synchronize_daylight(
@@ -138,6 +153,7 @@ fn synchronize_daylight(
             &mut Transform,
             &mut DirectionalLight,
             &mut OriginalIlluminance,
+            &mut SunDisk,
         ),
         With<Sun>,
     >,
@@ -145,10 +161,11 @@ fn synchronize_daylight(
         (
             &mut DistanceFog,
             &mut AmbientLight,
-            &mut EnvironmentMapLight,
+            Option<&mut EnvironmentMapLight>,
         ),
-        With<WeatherLook>,
+        (With<WeatherLook>, Without<AtmosphereEnvironmentMapLight>),
     >,
+    mut scattered: Query<(&mut DistanceFog, &mut AmbientLight), (With<WeatherLook>, With<AtmosphereEnvironmentMapLight>)>,
     added: Query<Entity, Added<WeatherLook>>,
     mut images: ResMut<Assets<Image>>,
     mut clear: ResMut<ClearColor>,
@@ -162,7 +179,8 @@ fn synchronize_daylight(
     if *sky_light != sky {
         *sky_light = sky;
     }
-    for (mut transform, mut light, mut original) in &mut sun {
+    for (mut transform, mut light, mut original, mut disk) in &mut sun {
+        *disk = sun_disk(&settings);
         // Its scale is the reach of the cloud shadow map it carries as a light
         // texture; only its rotation lights and shadows anything.
         *transform = Transform {
@@ -191,6 +209,13 @@ fn synchronize_daylight(
     clouds.clouds_ambient_color_top = daylight.cloud_top;
     clouds.clouds_ambient_color_bottom = daylight.cloud_bottom;
     clear.0 = daylight.fog;
+    // The atmosphere lights a scattered sky's views itself; only the haze and
+    // the fill below the horizon are the weather's.
+    for (mut fog, mut ambient) in &mut scattered {
+        fog.falloff = body_haze(&settings, settings.haze_visibility_km);
+        ambient.color = daylight.ambient;
+        ambient.brightness = 50.0 * daylight.fill_strength;
+    }
     if cameras.is_empty() {
         return;
     }
@@ -217,14 +242,16 @@ fn synchronize_daylight(
         intensity: settings.indirect_intensity * daylight.fill_strength * sky.diffuse_gain,
         ..default()
     };
-    for (mut fog, mut ambient, mut environment) in &mut cameras {
+    for (mut fog, mut ambient, environment) in &mut cameras {
         fog.color = daylight.fog;
         fog.falloff = body_haze(&settings, settings.haze_visibility_km);
         // Haze toward the sun takes its colour: the glow that gives a low sun depth.
         fog.directional_light_color = daylight.direct_color.with_alpha(0.45);
         ambient.color = daylight.ambient;
         ambient.brightness = 50.0 * daylight.fill_strength * sky.diffuse_gain;
-        *environment = map.clone();
+        if let Some(mut environment) = environment {
+            *environment = map.clone();
+        }
     }
 }
 
@@ -270,8 +297,8 @@ fn haze_falloff(visibility_km: f32) -> FogFalloff {
 fn body_haze(settings: &WeatherSettings, visibility_km: f32) -> FogFalloff {
     match settings.sky_kind {
         super::SkyKind::Earth => haze_falloff(visibility_km),
-        super::SkyKind::Dust => FogFalloff::Exponential { density: 3.912 / (visibility_km * 1000.0) },
-        super::SkyKind::Airless => FogFalloff::Exponential { density: 0.0 },
+        // The atmosphere's own aerial perspective hazes the land.
+        super::SkyKind::Mars | super::SkyKind::Airless => FogFalloff::Exponential { density: 0.0 },
     }
 }
 
@@ -318,8 +345,21 @@ pub fn camera_look(camera: &mut EntityCommands, settings: &WeatherSettings, lean
             brightness: 50.0,
             ..default()
         },
-        EnvironmentMapLight::default(),
     ));
+    if settings.sky_kind == super::SkyKind::Mars {
+        // Dusty air is marched per pixel: the precomputed sky goes wrong in a
+        // dense atmosphere (Schneegans et al. 2024) and tints the horizon teal.
+        // The aerial view still reaches as far as hills stand across the plain.
+        let settings = AtmosphereSettings {
+            aerial_view_lut_max_distance: 1.2e5,
+            rendering_method: bevy::pbr::AtmosphereMode::Raymarched,
+            sky_max_samples: 24,
+            ..default()
+        };
+        camera.insert((settings, AtmosphereEnvironmentMapLight::default()));
+    } else {
+        camera.insert(EnvironmentMapLight::default());
+    }
     if lean {
         camera.insert((Msaa::Off, RenderLayers::layer(crate::LEAN_LAYER)));
     } else {
@@ -443,7 +483,7 @@ fn thin_air_with_height(
     for (_, mut fog) in &mut cameras {
         fog.falloff = body_haze(&settings, settings.haze_visibility_km / haze);
     }
-    let scale_height = if settings.sky_kind == super::SkyKind::Dust { 11_100.0 } else { SKY_SCALE_HEIGHT_M };
+    let scale_height = if settings.sky_kind == super::SkyKind::Mars { 11_100.0 } else { SKY_SCALE_HEIGHT_M };
     let sky = (-height / scale_height).exp();
     let daylight = Daylight::from_settings(&settings);
     clouds.sky_zenith_color = daylight.zenith * sky;

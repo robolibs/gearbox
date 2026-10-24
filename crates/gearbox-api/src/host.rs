@@ -110,6 +110,7 @@ pub struct HostBus {
     machines: Registered<AnsServer<Env, Env>>,
     access_grant: Registered<ReqServer<Env, Env>>,
     fields_layout: Registered<ReqServer<Env, Env>>,
+    weather: Registered<ReqServer<Env, Env>>,
 }
 
 impl HostBus {
@@ -148,6 +149,7 @@ impl HostBus {
             machines: agent.que_server(topics::MACHINES_LIST)?,
             access_grant: agent.req_server(topics::ACCESS_GRANT)?,
             fields_layout: agent.req_server(topics::FIELDS_LAYOUT)?,
+            weather: agent.req_server(topics::WEATHER)?,
             agent,
             config,
             started: Instant::now(),
@@ -262,6 +264,10 @@ impl HostBus {
 
     pub fn serve_fields_layout(&mut self, f: impl FnMut(FieldsLayout) -> Status) -> usize {
         serve_req(&mut self.fields_layout, f)
+    }
+
+    pub fn serve_weather(&mut self, f: impl FnMut(Weather) -> Weather) -> usize {
+        serve_req(&mut self.weather, f)
     }
 
     pub fn serve_access_grant(&mut self, f: impl FnMut(GrantRequest) -> Status) -> usize {

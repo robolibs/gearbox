@@ -10,7 +10,7 @@ pub mod machine;
 pub use common::{Env, Ping, Props, SENT_AT, Status, code, decode, now_unix_ms, pack, unpack};
 pub use host::{
     ClearRequest, ClockCommand, ClockState, FieldsLayout, GrantRequest, HostInfo, ListQuery, MachineRef,
-    MarkerRef, MarkerSet, SceneEvent, SceneObject, Selection, UsdLoad, UsdRef, category,
+    MarkerRef, MarkerSet, SceneEvent, SceneObject, Selection, UsdLoad, UsdRef, Weather, category,
     clear_scope, clock_op, event_kind, load_flag, object_kind,
 };
 pub use machine::{

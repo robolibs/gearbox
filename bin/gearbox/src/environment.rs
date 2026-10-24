@@ -60,6 +60,73 @@ pub fn advance_world_clock(
     clock.seconds += step.seconds;
 }
 
+/// Dust in the weather thickens the Martian air the sky is scattered from:
+/// the medium is rescaled in place, which keeps its resolved phase function.
+pub fn sync_martian_dust(
+    settings: Res<WeatherSettings>,
+    mut planets: Query<(&mut gearbox_planet::PlanetConfig, &gearbox_planet::planet::quadtree::PlanetRenderer)>,
+    mut media: ResMut<Assets<bevy::light::atmosphere::ScatteringMedium>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (mut config, renderer) in &mut planets {
+        let Some(gearbox_planet::Air::Martian { dust_tau }) = config.atmosphere else { continue };
+        if (dust_tau - settings.dust_tau).abs() < 1e-4 {
+            continue;
+        }
+        if let Some((_, handle)) = &renderer.atmosphere
+            && let Some(mut medium) = media.get_mut(handle)
+        {
+            gearbox_planet::set_dust(&mut medium, dust_tau, settings.dust_tau);
+            config.atmosphere = Some(gearbox_planet::Air::Martian { dust_tau: settings.dust_tau });
+        }
+    }
+}
+
+/// Weather keys the API sent, set on the weather. Clouds belong to Earth's sky only.
+pub fn apply_weather_requests(
+    mut requests: MessageReader<gearbox_api::WeatherRequest>,
+    mut settings: ResMut<WeatherSettings>,
+) {
+    for request in requests.read() {
+        for (key, text) in request.0.iter() {
+            let Some(value) = text.parse::<f32>().ok().filter(|v| v.is_finite()) else {
+                warn!("weather: `{key}` = `{text}` is not a number");
+                continue;
+            };
+            match key.as_str() {
+                "dust_tau" => settings.dust_tau = value.clamp(0.0, 12.0),
+                "cloud_cover" if settings.sky_kind == bevy_weather::SkyKind::Earth => {
+                    settings.clouds.clouds_coverage = value.clamp(0.0, 1.0);
+                }
+                "cloud_cover" => warn!("weather: this sky carries no clouds"),
+                "wind_speed_mps" => settings.wind_speed_mps = value.clamp(0.0, 60.0),
+                "wind_heading_deg" => settings.wind_heading_deg = value.rem_euclid(360.0),
+                "wind_gustiness" => settings.wind_gustiness = value.clamp(0.0, 1.0),
+                "haze_km" => settings.haze_visibility_km = value.clamp(0.5, 200.0),
+                other => warn!("weather: unknown key `{other}`"),
+            }
+        }
+    }
+}
+
+/// The weather as the API reports it.
+pub fn report_weather(settings: Res<WeatherSettings>, mut report: ResMut<gearbox_api::WeatherReport>) {
+    if !settings.is_changed() && report.0.contains("dust_tau") {
+        return;
+    }
+    let value = |v: f32| format!("{v:.4}");
+    report.0 = gearbox_api::Props::from_pairs(&[
+        ("dust_tau", &value(settings.dust_tau)),
+        ("cloud_cover", &value(settings.clouds.clouds_coverage)),
+        ("wind_speed_mps", &value(settings.wind_speed_mps)),
+        ("wind_heading_deg", &value(settings.wind_heading_deg)),
+        ("wind_gustiness", &value(settings.wind_gustiness)),
+        ("haze_km", &value(settings.haze_visibility_km)),
+    ]);
+}
+
 /// The calendar follows world time, and the clock reports where it stands.
 pub fn advance_sun(
     step: Res<WorldStep>,
@@ -72,6 +139,10 @@ pub fn advance_sun(
     clock.hour = settings.calendar.hour;
     clock.day = settings.calendar.day as u32;
 }
+
+/// Mean sunlight above Mars's air: Earth's 130 klx at 586.2 / 1361 W/m²
+/// (NASA Mars fact sheet).
+pub const MARS_SUNLIGHT_LUX: f32 = 130_000.0 * 586.2 / 1361.0;
 
 fn weather_for(body: gearbox_globe::Body) -> WeatherSettings {
     let mut settings = WeatherSettings::default();
@@ -87,15 +158,16 @@ fn weather_for(body: gearbox_globe::Body) -> WeatherSettings {
     }
     if body == gearbox_globe::Body::Earth { return settings; }
     let moon = body == gearbox_globe::Body::Moon;
-    settings.sky_kind = if moon { bevy_weather::SkyKind::Airless } else { bevy_weather::SkyKind::Dust };
+    settings.sky_kind = if moon { bevy_weather::SkyKind::Airless } else { bevy_weather::SkyKind::Mars };
     settings.clouds.planet_radius = body.radius_m() as f32;
     settings.clouds.clouds_coverage = 0.0;
     settings.clouds.cloud_shadow_opacity = 0.0;
     settings.cloud_drift_mps = 0.0;
     settings.wind_speed_mps = if moon { 0.0 } else { 3.0 };
     settings.wind_gustiness = if moon { 0.0 } else { 0.25 };
-    settings.sun_color = if moon { Color::WHITE } else { Color::srgb(1.0, 0.94, 0.85) };
-    settings.illuminance = if moon { 127_000.0 } else { 58_000.0 };
+    // Sunlight above the air: Mars's air reddens and dims it on the way down.
+    settings.sun_color = Color::WHITE;
+    settings.illuminance = if moon { 127_000.0 } else { MARS_SUNLIGHT_LUX };
     settings.indirect_intensity = if moon { 450.0 } else { 2_200.0 };
     settings.haze_visibility_km = if moon { 1.0e9 } else { 18.0 };
     settings.fog_color = if moon { Color::BLACK } else { Color::srgb(0.74, 0.55, 0.40) };
@@ -125,7 +197,7 @@ mod planet_tests {
     #[test]
     fn planet_skies_and_surfaces_are_distinct_and_barren() {
         assert_eq!(weather_for(Body::Earth).sky_kind, bevy_weather::SkyKind::Earth);
-        assert_eq!(weather_for(Body::Mars).sky_kind, bevy_weather::SkyKind::Dust);
+        assert_eq!(weather_for(Body::Mars).sky_kind, bevy_weather::SkyKind::Mars);
         let moon = weather_for(Body::Moon);
         assert_eq!(moon.sky_kind, bevy_weather::SkyKind::Airless);
         assert_eq!(moon.wind_speed_mps, 0.0);

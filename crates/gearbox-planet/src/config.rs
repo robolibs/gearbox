@@ -26,11 +26,29 @@ pub struct PlanetConfig {
     pub noise_freq: f32,
     /// Rotation rate about the planet's local Y axis, rad/s.
     pub spin: f32,
-    /// Rayleigh scattering coefficients (m^-1, Earth-air values ~1e-5) of this
-    /// world's atmosphere, or None for an airless body. Blue skies come from
-    /// scattering that rises with frequency; swap the channels for alien skies.
-    pub atmosphere: Option<Vec3>,
+    /// What this world's air is, or None for an airless body.
+    pub atmosphere: Option<Air>,
 }
+
+/// The air over a world, as its sky scatters light.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Air {
+    /// Nitrogen and oxygen with Earth-air Rayleigh scattering, thinned to suit
+    /// the world's size (see [`PlanetConfig::atmosphere_density`]).
+    Earthlike,
+    /// Carbon dioxide and suspended dust at true scale (Schneegans et al.
+    /// 2024), the dust thickened to `dust_tau`, its vertical optical depth.
+    Martian { dust_tau: f32 },
+}
+
+/// Height of the Martian atmosphere the dust profile is laid over, metres.
+pub const MARS_AIR_HEIGHT_M: f32 = 120_000.0;
+/// Vertical optical depth of the dust in Bevy's Mars preset, at 550 nm: the
+/// dust profile integrates to 4771 m of ground-level density, times its
+/// extinction of 30.64e-6 per metre.
+pub const MARS_PRESET_DUST_TAU: f32 = 0.146;
+/// Bond albedo of the Martian surface (NASA fact sheet).
+pub const MARS_GROUND_ALBEDO: f32 = 0.25;
 
 impl Default for PlanetConfig {
     fn default() -> Self {
@@ -46,13 +64,10 @@ impl Default for PlanetConfig {
             seed: Vec3::ZERO,
             noise_freq: 3.0,
             spin: 0.0,
-            atmosphere: Some(EARTH_RAYLEIGH),
+            atmosphere: Some(Air::Earthlike),
         }
     }
 }
-
-/// Earth-air Rayleigh scattering, m^-1 (blue sky).
-pub const EARTH_RAYLEIGH: Vec3 = Vec3::new(5.802e-6, 13.558e-6, 33.100e-6);
 
 impl PlanetConfig {
     pub fn lod_range(&self, lod: u32) -> f32 {
@@ -115,15 +130,16 @@ impl PlanetConfig {
             seed: Vec3::new(7.0, -3.0, 11.0),
             noise_freq: 3.0,
             spin: 0.0,
-            atmosphere: Some(EARTH_RAYLEIGH),
+            atmosphere: Some(Air::Earthlike),
         }
     }
 
     /// Depth of the atmosphere shell above sea level: proportionally much
     /// thicker than Earth's (1.6% of R) so mountains stay inside it and the
-    /// sky band is visible at flying altitudes on 4-50 km worlds.
+    /// sky band is visible at flying altitudes on 4-50 km worlds. Martian air
+    /// keeps its true height, the one its dust profile is laid over.
     pub fn atmosphere_shell(&self) -> f32 {
-        if self.surface_kind == 1 { return 80_000.0; }
+        if matches!(self.atmosphere, Some(Air::Martian { .. })) { return MARS_AIR_HEIGHT_M; }
         (self.height_amp * 4.0).max(self.radius * 0.2)
     }
 
@@ -146,7 +162,7 @@ impl PlanetConfig {
             max_depth,
             lod0_range: leaf_size(radius, max_depth) * 8.0,
             height_amp: 16_000.0,
-            atmosphere: if surface_kind == 2 { None } else { Some(Vec3::new(18.0e-6, 10.0e-6, 5.0e-6)) },
+            atmosphere: (surface_kind == 1).then_some(Air::Martian { dust_tau: MARS_PRESET_DUST_TAU }),
             ..Self::earth(radius)
         }
     }

@@ -50,6 +50,7 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(MarkerSet, marker_set_json, marker_set_from),
         desc!(MarkerRef, marker_ref_json, marker_ref_from),
         desc!(FieldsLayout, fields_layout_json, fields_layout_from),
+        desc!(Weather, weather_json, weather_from),
         desc!(Selection, selection_json, selection_from),
         desc!(MachineRef, machine_ref_json, machine_ref_from),
         desc!(MachineInfo, machine_info_json, machine_info_from),
@@ -493,6 +494,14 @@ fn fields_layout_from(v: &Value) -> Result<FieldsLayout, String> {
         Some(layout) => Ok(FieldsLayout::new(&layout.to_string())),
         None => Ok(FieldsLayout::new("")),
     }
+}
+
+fn weather_json(w: &Weather) -> Value {
+    json!({ "props": props_json(&w.props) })
+}
+
+fn weather_from(v: &Value) -> Result<Weather, String> {
+    Ok(Weather { props: props_from(v, &[]) })
 }
 
 fn selection_json(s: &Selection) -> Value {

@@ -27,6 +27,14 @@ pub struct SimResetRequest {
 #[derive(Message, Default, Debug, Clone)]
 pub struct FieldsLayoutRequest(pub String);
 
+/// Weather keys to set, as the API sent them. The simulator owns the weather.
+#[derive(Message, Default, Debug, Clone)]
+pub struct WeatherRequest(pub Props);
+
+/// The weather as it stands, every key, kept by the simulator for the API to answer with.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct WeatherReport(pub Props);
+
 #[derive(Resource, Debug, Clone)]
 pub struct UsdAssetRoot(pub std::path::PathBuf);
 
@@ -150,6 +158,8 @@ impl Plugin for GearboxBusPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SimResetRequest>()
             .add_message::<FieldsLayoutRequest>()
+            .add_message::<WeatherRequest>()
+            .init_resource::<WeatherReport>()
             .init_resource::<SceneObjects>()
             .init_resource::<SelectionState>()
             .init_resource::<PhysicsStepBudget>()
@@ -192,6 +202,8 @@ fn serve_host_core(
     mut exit: MessageWriter<AppExit>,
     mut budget: ResMut<PhysicsStepBudget>,
     mut world_clock: ResMut<WorldClock>,
+    weather_report: Res<WeatherReport>,
+    mut weather: MessageWriter<WeatherRequest>,
 ) {
     if physics.0 {
         bus.physics_steps += 1;
@@ -321,6 +333,18 @@ fn serve_host_core(
         }
         layouts.write(FieldsLayoutRequest(json));
         Status::ok()
+    });
+
+    bus.host.serve_weather(|req| {
+        let asked = req.props();
+        let mut answer = weather_report.0.clone();
+        for (key, value) in asked.iter() {
+            answer.set(&key, &value);
+        }
+        if !asked.iter().is_empty() {
+            weather.write(WeatherRequest(asked));
+        }
+        Weather::new(&answer)
     });
 
     let mut granted = Vec::new();

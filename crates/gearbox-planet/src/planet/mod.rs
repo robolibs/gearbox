@@ -80,6 +80,52 @@ impl PlanetView {
     }
 }
 
+/// Mie phase function of Martian dust per colour channel, 1024 columns from
+/// back- to forward-scattering (see `textures/README.md`).
+const DUST_PHASE_KTX2: &[u8] = include_bytes!("../../textures/mars_mie_phase.ktx2");
+
+/// The dust phase as a curve. Bevy resolves a phase texture only when that
+/// image finishes loading, so a medium made after it would never resolve;
+/// decoded here, every medium gets it at once.
+fn dust_phase() -> bevy::light::atmosphere::PhaseFunction {
+    use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
+    use bevy::math::curve::{Interval, SampleAutoCurve};
+    let image = Image::from_buffer(
+        DUST_PHASE_KTX2,
+        ImageType::Extension("ktx2"),
+        CompressedImageFormats::NONE,
+        false,
+        ImageSampler::Default,
+        RenderAssetUsages::MAIN_WORLD,
+    )
+    .expect("embedded Mars dust phase decodes");
+    let samples: Vec<LinearRgba> = (0..image.texture_descriptor.size.width)
+        .map(|x| image.get_color_at_1d(x).expect("phase column").to_linear())
+        .collect();
+    let curve = SampleAutoCurve::new(Interval::new(-1.0, 1.0).expect("cos θ"), samples)
+        .expect("phase samples");
+    bevy::light::atmosphere::PhaseFunction::from_chromatic_curve(curve)
+}
+
+/// Martian air at true scale (Schneegans et al. 2024), its dust thickened
+/// from the preset's optical depth to `dust_tau`. Only the dust changes: the
+/// carbon dioxide is the same on a clear day and in a storm.
+pub fn martian_air(dust_tau: f32) -> ScatteringMedium {
+    let mut medium = ScatteringMedium::mars(256, 256, Handle::default());
+    medium.terms[1].phase = dust_phase();
+    set_dust(&mut medium, MARS_PRESET_DUST_TAU, dust_tau);
+    medium
+}
+
+/// Rescales a Martian medium's dust from optical depth `from` to `to`.
+pub fn set_dust(medium: &mut ScatteringMedium, from: f32, to: f32) {
+    let thicken = to.max(0.0) / from.max(1e-6);
+    if let Some(dust) = medium.terms.get_mut(1) {
+        dust.scattering *= thicken;
+        dust.absorption *= thicken;
+    }
+}
+
 /// Relates the camera to one planet, in that planet's local frame.
 pub fn planet_view(
     grid: &Grid,
@@ -219,17 +265,22 @@ pub fn spawn_planet(
     // symmetric atmosphere doesn't care about the planet's spin anyway.
     // Bevy picks whichever Atmosphere entity is nearest the camera, so one
     // per planet gives correct per-world skies for free.
-    let atmosphere = cfg.atmosphere.map(|rayleigh| {
+    let atmosphere = cfg.atmosphere.map(|air| {
         let shell = cfg.atmosphere_shell();
-        let mut medium = ScatteringMedium::earth(256, 256);
-        medium.terms[0].scattering = rayleigh;
-        let medium = media.add(medium.with_density_multiplier(cfg.atmosphere_density()));
+        let (medium, ground_albedo) = match air {
+            Air::Earthlike => (
+                ScatteringMedium::earth(256, 256).with_density_multiplier(cfg.atmosphere_density()),
+                0.3,
+            ),
+            Air::Martian { dust_tau } => (martian_air(dust_tau), MARS_GROUND_ALBEDO),
+        };
+        let medium = media.add(medium);
         let anchor = commands
             .spawn((
                 Atmosphere {
                     inner_radius: cfg.radius,
                     outer_radius: cfg.radius + shell,
-                    ground_albedo: Vec3::splat(0.3),
+                    ground_albedo: Vec3::splat(ground_albedo),
                     medium: medium.clone(),
                 },
                 cell,
@@ -309,4 +360,40 @@ pub fn spawn_planet(
         atmosphere,
     });
     planet
+}
+
+#[cfg(test)]
+mod martian_air_tests {
+    use super::*;
+
+    /// Bevy's Mars dust profile (`ScatteringMedium::mars`, Fig. 8 of
+    /// Schneegans et al.), over height in metres.
+    fn dust_density(h: f64) -> f64 {
+        0.75 * (1.0 - (h / 4_000.0).exp()).exp() + 0.25 * (1.0 - (h / 20_000.0).exp()).exp()
+    }
+
+    #[test]
+    fn the_preset_dust_has_the_optical_depth_it_is_scaled_from() {
+        let column: f64 = (0..120_000).map(|h| dust_density(h as f64 + 0.5)).sum();
+        let medium = ScatteringMedium::mars(16, 16, Handle::default());
+        let dust = &medium.terms[1];
+        let extinction = (dust.scattering.y + dust.absorption.y) as f64;
+        let tau = column * extinction;
+        assert!((tau - MARS_PRESET_DUST_TAU as f64).abs() < 0.002, "preset dust tau {tau}");
+    }
+
+    #[test]
+    fn thickening_the_dust_leaves_the_carbon_dioxide_alone() {
+        let preset = ScatteringMedium::mars(16, 16, Handle::default());
+        let storm = martian_air(4.0 * MARS_PRESET_DUST_TAU);
+        assert_eq!(storm.terms[0].scattering, preset.terms[0].scattering);
+        assert!((storm.terms[1].scattering - preset.terms[1].scattering * 4.0).length() < 1e-9);
+        assert!((storm.terms[1].absorption - preset.terms[1].absorption * 4.0).length() < 1e-9);
+        let (forward, back) = (storm.terms[1].phase.sample(1.0).unwrap(), storm.terms[1].phase.sample(-1.0).unwrap());
+        assert!(forward.green > 20.0 * back.green, "the forward peak is resolved");
+        assert!(forward.blue > forward.red, "blue scatters most strongly forward: the blue aureole of a Martian sunset");
+        let mut calm = storm;
+        set_dust(&mut calm, 4.0 * MARS_PRESET_DUST_TAU, MARS_PRESET_DUST_TAU);
+        assert!((calm.terms[1].scattering - preset.terms[1].scattering).length() < 1e-9);
+    }
 }

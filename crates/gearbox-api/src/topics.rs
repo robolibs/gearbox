@@ -15,6 +15,8 @@ pub const MACHINES_LIST: &str = "/gearbox/machines/list";
 pub const ACCESS_GRANT: &str = "/gearbox/access/grant";
 /// Req/res: lay the ground at home out anew, from a field layout's JSON.
 pub const FIELDS_LAYOUT: &str = "/gearbox/fields/layout";
+/// Req/res: set the weather keys a `Weather` carries; answers all of them.
+pub const WEATHER: &str = "/gearbox/weather";
 
 pub const MACHINE_INFO: &str = "info";
 pub const MACHINE_CLAIM: &str = "claim";

@@ -88,6 +88,9 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
                 environment::sync_cover_wind,
                 environment::sync_lens,
                 environment::sync_camera_lens,
+                (environment::apply_weather_requests, environment::report_weather, environment::sync_martian_dust)
+                    .chain()
+                    .before(environment::DaylightUpdate),
                 (environment::advance_world_clock, environment::advance_sun)
                     .chain()
                     .in_set(environment::WorldTime)
