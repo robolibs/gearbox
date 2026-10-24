@@ -1,0 +1,337 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "scripts/greenhouse/build_mars_greenhouse.py: the rail robot of the growth room"
+    }
+    defaultPrim = "robot"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+    upAxis = "Z"
+)
+
+# Generated: edit scripts/greenhouse/build_mars_greenhouse.py and run it again.
+# Spawn it on the rail: `gearbox spawn machine bin/gearbox/assets/world/greenhouse_gantry.usda --machine eve --at 12.51 2.74 0`.
+# Each joint takes a position 0..1 of its range: `gearbox machine set-value trolley position 0.5 --machine eve`.
+def Xform "robot" (
+    prepend apiSchemas = ["GearboxMachineAPI", "PhysicsArticulationRootAPI", "GearboxControllerAPI:travel", "GearboxControllerAPI:lift", "GearboxControllerAPI:turn", "GearboxControllerAPI:reach"]
+)
+{
+    token gearbox:machine:kind = "rail_robot"
+    rel gearbox:machine:body = </robot/rail>
+    token gearbox:controller:travel:type = "builtin:joint_position"
+    rel gearbox:controller:travel:target = </robot/Joints/travel>
+    token gearbox:controller:lift:type = "builtin:joint_position"
+    rel gearbox:controller:lift:target = </robot/Joints/lift>
+    token gearbox:controller:turn:type = "builtin:joint_position"
+    rel gearbox:controller:turn:target = </robot/Joints/turn>
+    token gearbox:controller:reach:type = "builtin:joint_position"
+    rel gearbox:controller:reach:target = </robot/Joints/reach>
+    def Scope "Looks"
+    {
+        def Material "profile"
+        {
+            token outputs:surface.connect = </robot/Looks/profile/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.81, 0.82)
+                float inputs:metallic = 1.0
+                float inputs:roughness = 0.35
+                token outputs:surface
+            }
+        }
+        def Material "housing"
+        {
+            token outputs:surface.connect = </robot/Looks/housing/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.08, 0.08, 0.09)
+                float inputs:metallic = 0.4
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+        def Material "led"
+        {
+            token outputs:surface.connect = </robot/Looks/led/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.95, 0.3, 0.65)
+                float inputs:metallic = 0.0
+                float inputs:roughness = 0.3
+                color3f inputs:emissiveColor = (0.95, 0.3, 0.65)
+                token outputs:surface
+            }
+        }
+        def Material "frame"
+        {
+            token outputs:surface.connect = </robot/Looks/frame/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.55, 0.56, 0.58)
+                float inputs:metallic = 1.0
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+        def Material "rail"
+        {
+            token outputs:surface.connect = </robot/Looks/rail/Surface.outputs:surface>
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.25, 0.26, 0.28)
+                float inputs:metallic = 0.9
+                float inputs:roughness = 0.3
+                token outputs:surface
+            }
+        }
+    }
+    def Xform "rail" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        token gearbox:link:name = "base_link"
+        token gearbox:link:role = "base"
+        float physics:mass = 40
+        float3 physics:diagonalInertia = (1, 100, 100)
+        double3 xformOp:translate = (2.7, 0, 0.02)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Xform "trolley" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        float physics:mass = 18
+        float3 physics:diagonalInertia = (0.12, 0.2, 0.25)
+        float gearbox:value:range = 5
+        double3 xformOp:translate = (0.2, 0, -0.07)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "carriage" (
+            prepend apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0, 0)
+            float3 xformOp:scale = (0.34, 0.24, 0.12)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Looks/housing>
+        }
+        def Cylinder "roller_ws" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token axis = "Y"
+            double radius = 0.025
+            double height = 0.03
+            double3 xformOp:translate = (-0.11, -0.075, 0.065)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </robot/Looks/frame>
+        }
+        def Cylinder "roller_wn" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token axis = "Y"
+            double radius = 0.025
+            double height = 0.03
+            double3 xformOp:translate = (-0.11, 0.075, 0.065)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </robot/Looks/frame>
+        }
+        def Cylinder "roller_es" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token axis = "Y"
+            double radius = 0.025
+            double height = 0.03
+            double3 xformOp:translate = (0.11, -0.075, 0.065)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </robot/Looks/frame>
+        }
+        def Cylinder "roller_en" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token axis = "Y"
+            double radius = 0.025
+            double height = 0.03
+            double3 xformOp:translate = (0.11, 0.075, 0.065)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </robot/Looks/frame>
+        }
+    }
+    def Xform "mast" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        float physics:mass = 9
+        float3 physics:diagonalInertia = (0.6, 0.6, 0.01)
+        float gearbox:value:range = -1.25
+        double3 xformOp:translate = (0.2, 0, -0.58)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "column" (
+            prepend apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0, 0)
+            float3 xformOp:scale = (0.07, 0.07, 0.9)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Looks/profile>
+        }
+    }
+    def Xform "turret" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        float physics:mass = 3
+        float3 physics:diagonalInertia = (0.01, 0.01, 0.01)
+        float gearbox:value:range = 3.14159
+        double3 xformOp:translate = (0.2, 0, -1.08)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cylinder "hub" (
+            prepend apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI"]
+        )
+        {
+            uniform token axis = "Z"
+            double radius = 0.07
+            double height = 0.1
+            double3 xformOp:translate = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            rel material:binding = </robot/Looks/housing>
+        }
+    }
+    def Xform "arm" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    )
+    {
+        float physics:mass = 2.5
+        float3 physics:diagonalInertia = (0.04, 0.005, 0.04)
+        float gearbox:value:range = -0.6
+        double3 xformOp:translate = (0.2, -0.26, -1.16)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Cube "beam" (
+            prepend apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, 0, 0)
+            float3 xformOp:scale = (0.05, 0.42, 0.05)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Looks/profile>
+        }
+        def Cube "head" (
+            prepend apiSchemas = ["MaterialBindingAPI", "PhysicsCollisionAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, -0.245, -0.01)
+            float3 xformOp:scale = (0.09, 0.07, 0.07)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Looks/housing>
+        }
+        def Cube "lens" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            double size = 1
+            double3 xformOp:translate = (0, -0.245, -0.047)
+            float3 xformOp:scale = (0.03, 0.03, 0.006)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            rel material:binding = </robot/Looks/led>
+        }
+        def Xform "camera_link" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            bool gearbox:sensor:recognition = true
+            int gearbox:sensor:width = 160
+            int gearbox:sensor:height = 120
+            float gearbox:sensor:vfov_deg = 70
+            float gearbox:sensor:range_m = 4
+            float gearbox:sensor:rate_hz = 2
+            double3 xformOp:translate = (0, -0.245, -0.06)
+            float3 xformOp:rotateXYZ = (0, 90, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        }
+        def Xform "light_link" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "light"
+            float gearbox:sensor:rate_hz = 2
+            double3 xformOp:translate = (0, -0.245, 0.03)
+            float3 xformOp:rotateXYZ = (0, -90, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        }
+        def Xform "climate_link" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "climate"
+            double3 xformOp:translate = (0, -0.2, 0)
+            float3 xformOp:rotateXYZ = (0, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        }
+    }
+    def Scope "Joints"
+    {
+        def PhysicsFixedJoint "anchor"
+        {
+            rel physics:body1 = </robot/rail>
+            point3f physics:localPos0 = (2.7, 0, 0.02)
+            point3f physics:localPos1 = (0, 0, 0)
+        }
+        def PhysicsPrismaticJoint "travel"
+        {
+            rel physics:body0 = </robot/rail>
+            rel physics:body1 = </robot/trolley>
+            uniform token physics:axis = "X"
+            point3f physics:localPos0 = (-2.5, 0, -0.09)
+            point3f physics:localPos1 = (0, 0, 0)
+            float physics:lowerLimit = 0
+            float physics:upperLimit = 5.0
+            float gearbox:motor:maxForce = 400
+            float gearbox:motor:maxVelocity = 0.3
+        }
+        def PhysicsPrismaticJoint "lift"
+        {
+            rel physics:body0 = </robot/trolley>
+            rel physics:body1 = </robot/mast>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (0, 0, -0.51)
+            point3f physics:localPos1 = (0, 0, 0)
+            float physics:lowerLimit = -1.25
+            float physics:upperLimit = 0
+            float gearbox:motor:maxForce = 600
+            float gearbox:motor:maxVelocity = 0.25
+        }
+        def PhysicsRevoluteJoint "turn"
+        {
+            rel physics:body0 = </robot/mast>
+            rel physics:body1 = </robot/turret>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (0, 0, -0.5)
+            point3f physics:localPos1 = (0, 0, 0)
+            float physics:lowerLimit = -5
+            float physics:upperLimit = 185
+            float gearbox:motor:maxForce = 60
+            float gearbox:motor:maxVelocity = 1.0
+        }
+        def PhysicsPrismaticJoint "reach"
+        {
+            rel physics:body0 = </robot/turret>
+            rel physics:body1 = </robot/arm>
+            uniform token physics:axis = "Y"
+            point3f physics:localPos0 = (0, -0.26, -0.08)
+            point3f physics:localPos1 = (0, 0, 0)
+            float physics:lowerLimit = -0.6
+            float physics:upperLimit = 0
+            float gearbox:motor:maxForce = 200
+            float gearbox:motor:maxVelocity = 0.2
+        }
+    }
+}

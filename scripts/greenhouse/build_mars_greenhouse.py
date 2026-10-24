@@ -20,6 +20,9 @@ specs/GREENHOUSE_SPEC.md. Run from the repository root (standard library only):
 from pathlib import Path
 
 OUT = Path("bin/gearbox/assets/world/mars_greenhouse.usda")
+GANTRY_OUT = Path("bin/gearbox/assets/world/greenhouse_gantry.usda")
+# Where materials are bound from: the prim holding the file's Looks scope.
+LOOKS = "/Greenhouse/Looks"
 
 # Module footprint: starts this far along +X from the pad's centre, so a
 # machine spawned at the centre stands clear of it.
@@ -87,7 +90,7 @@ def box(depth, name, centre, size, material, collide=True, rotate=None):
     emit(depth + 1, f"float3 xformOp:scale = {fmt(size)}")
     order.append('"xformOp:scale"')
     emit(depth + 1, f"uniform token[] xformOpOrder = [{', '.join(order)}]")
-    emit(depth + 1, f"rel material:binding = </Greenhouse/Looks/{material}>")
+    emit(depth + 1, f"rel material:binding = <{LOOKS}/{material}>")
     emit(depth, "}")
 
 
@@ -102,7 +105,7 @@ def cylinder(depth, name, centre, radius, height, material, collide=True, axis="
     emit(depth + 1, f"double height = {height}")
     emit(depth + 1, f"double3 xformOp:translate = {fmt(centre)}")
     emit(depth + 1, 'uniform token[] xformOpOrder = ["xformOp:translate"]')
-    emit(depth + 1, f"rel material:binding = </Greenhouse/Looks/{material}>")
+    emit(depth + 1, f"rel material:binding = <{LOOKS}/{material}>")
     emit(depth, "}")
 
 
@@ -120,13 +123,15 @@ def xform(depth, name, at, schemas=(), attrs=()):
     emit(depth + 1, 'uniform token[] xformOpOrder = ["xformOp:translate"]')
 
 
-def looks():
+def looks(names=None):
     emit(1, 'def Scope "Looks"')
     emit(1, "{")
     for name, (colour, metal, rough) in MATERIALS.items():
+        if names and name not in names:
+            continue
         emit(2, f'def Material "{name}"')
         emit(2, "{")
-        emit(3, f"token outputs:surface.connect = </Greenhouse/Looks/{name}/Surface.outputs:surface>")
+        emit(3, f"token outputs:surface.connect = <{LOOKS}/{name}/Surface.outputs:surface>")
         emit(3, 'def Shader "Surface"')
         emit(3, "{")
         emit(4, 'uniform token info:id = "UsdPreviewSurface"')
@@ -333,6 +338,138 @@ def outside():
     emit(1, "}")
 
 
+# The tending robot under the ceiling rail, after DLR's EVE: a trolley rides
+# the rail, a mast telescopes down from it, and a turret at its foot swings a
+# reaching arm over either rack. The arm's head carries a camera that looks
+# down and names what it sees, a light sensor facing the lamps, and a climate
+# sensor. Its origin is the rail's underside at the rail's west end.
+RAIL_LEN = GROW_LEN - 0.3
+RAIL_UNDER = HEIGHT - 0.16
+TROLLEY_Z = -0.07
+MAST_Z = -0.58
+TURRET_Z = -1.08
+ARM = (0.0, -0.26, -1.16)
+
+
+def body(depth, name, at, mass, inertia, link=None, values=()):
+    schemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"]
+    xform(depth, name, at, schemas, [
+        *([f'token gearbox:link:name = "{link}"', 'token gearbox:link:role = "base"'] if link else []),
+        f"float physics:mass = {mass}",
+        f"float3 physics:diagonalInertia = {fmt(inertia)}",
+        *values,
+    ])
+
+
+def sensor(depth, name, kind, at, rotate, attrs=()):
+    emit(depth, f'def Xform "{name}" (prepend apiSchemas = ["GearboxLinkAPI"])')
+    emit(depth, "{")
+    emit(depth + 1, 'token gearbox:link:role = "sensor"')
+    emit(depth + 1, f'token gearbox:sensor:kind = "{kind}"')
+    for attr in attrs:
+        emit(depth + 1, attr)
+    emit(depth + 1, f"double3 xformOp:translate = {fmt(at)}")
+    emit(depth + 1, f"float3 xformOp:rotateXYZ = {fmt(rotate)}")
+    emit(depth + 1, 'uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]')
+    emit(depth, "}")
+
+
+def joint(depth, kind, name, body0, body1, pos0, axis=None, limits=None, motor=None):
+    emit(depth, f'def Physics{kind}Joint "{name}"')
+    emit(depth, "{")
+    if body0:
+        emit(depth + 1, f"rel physics:body0 = </robot/{body0}>")
+    emit(depth + 1, f"rel physics:body1 = </robot/{body1}>")
+    if axis:
+        emit(depth + 1, f'uniform token physics:axis = "{axis}"')
+    emit(depth + 1, f"point3f physics:localPos0 = {fmt(pos0)}")
+    emit(depth + 1, "point3f physics:localPos1 = (0, 0, 0)")
+    if limits:
+        emit(depth + 1, f"float physics:lowerLimit = {limits[0]}")
+        emit(depth + 1, f"float physics:upperLimit = {limits[1]}")
+    if motor:
+        emit(depth + 1, f"float gearbox:motor:maxForce = {motor[0]}")
+        emit(depth + 1, f"float gearbox:motor:maxVelocity = {motor[1]}")
+    emit(depth, "}")
+
+
+def gantry():
+    global LOOKS
+    LOOKS = "/robot/Looks"
+    lines.clear()
+    emit(0, "#usda 1.0")
+    emit(0, "(")
+    emit(1, "customLayerData = {")
+    emit(2, 'string creator = "scripts/greenhouse/build_mars_greenhouse.py: the rail robot of the growth room"')
+    emit(1, "}")
+    emit(1, 'defaultPrim = "robot"')
+    emit(1, "metersPerUnit = 1")
+    emit(1, "kilogramsPerUnit = 1")
+    emit(1, 'upAxis = "Z"')
+    emit(0, ")")
+    emit(0, "")
+    emit(0, "# Generated: edit scripts/greenhouse/build_mars_greenhouse.py and run it again.")
+    rail_x = X0 + GROW_X0 + 0.15
+    emit(0, f"# Spawn it on the rail: `gearbox spawn machine bin/gearbox/assets/world/greenhouse_gantry.usda --machine eve --at {rail_x:g} {RAIL_UNDER:g} 0`.")
+    emit(0, "# Each joint takes a position 0..1 of its range: `gearbox machine set-value trolley position 0.5 --machine eve`.")
+    controllers = ("travel", "lift", "turn", "reach")
+    emit(0, 'def Xform "robot" (')
+    schemas = ["GearboxMachineAPI", "PhysicsArticulationRootAPI", *(f"GearboxControllerAPI:{c}" for c in controllers)]
+    emit(1, f"prepend apiSchemas = {schemas!r}".replace("'", '"'))
+    emit(0, ")")
+    emit(0, "{")
+    emit(1, 'token gearbox:machine:kind = "rail_robot"')
+    emit(1, "rel gearbox:machine:body = </robot/rail>")
+    for c in controllers:
+        emit(1, f'token gearbox:controller:{c}:type = "builtin:joint_position"')
+        emit(1, f"rel gearbox:controller:{c}:target = </robot/Joints/{c}>")
+    looks(["housing", "frame", "profile", "rail", "led"])
+    # The rail it hangs from is the greenhouse's own; this body only holds the joint.
+    body(1, "rail", (RAIL_LEN / 2, 0, 0.02), 40, (1, 100, 100), link="base_link")
+    emit(1, "}")
+    travel = RAIL_LEN - 0.4
+    body(1, "trolley", (0.2, 0, TROLLEY_Z), 18, (0.12, 0.2, 0.25), values=[f"float gearbox:value:range = {travel:g}"])
+    box(2, "carriage", (0, 0, 0), (0.34, 0.24, 0.12), "housing")
+    for x in (-0.11, 0.11):
+        for y in (-0.075, 0.075):
+            cylinder(2, f"roller_{'e' if x > 0 else 'w'}{'n' if y > 0 else 's'}", (x, y, 0.065), 0.025, 0.03, "frame", collide=False, axis="Y")
+    emit(1, "}")
+    lift = 1.25
+    body(1, "mast", (0.2, 0, MAST_Z), 9, (0.6, 0.6, 0.01), values=[f"float gearbox:value:range = {-lift}"])
+    box(2, "column", (0, 0, 0), (0.07, 0.07, 0.9), "profile")
+    emit(1, "}")
+    body(1, "turret", (0.2, 0, TURRET_Z), 3, (0.01, 0.01, 0.01), values=["float gearbox:value:range = 3.14159"])
+    cylinder(2, "hub", (0, 0, 0), 0.07, 0.1, "housing")
+    emit(1, "}")
+    reach = 0.6
+    body(1, "arm", (0.2 + ARM[0], ARM[1], ARM[2]), 2.5, (0.04, 0.005, 0.04), values=[f"float gearbox:value:range = {-reach}"])
+    box(2, "beam", (0, 0, 0), (0.05, 0.42, 0.05), "profile")
+    box(2, "head", (0, -0.245, -0.01), (0.09, 0.07, 0.07), "housing")
+    box(2, "lens", (0, -0.245, -0.047), (0.03, 0.03, 0.006), "led", collide=False)
+    sensor(2, "camera_link", "camera", (0, -0.245, -0.06), (0, 90, 0), [
+        "bool gearbox:sensor:recognition = true",
+        "int gearbox:sensor:width = 160",
+        "int gearbox:sensor:height = 120",
+        "float gearbox:sensor:vfov_deg = 70",
+        "float gearbox:sensor:range_m = 4",
+        "float gearbox:sensor:rate_hz = 2",
+    ])
+    sensor(2, "light_link", "light", (0, -0.245, 0.03), (0, -90, 0), ["float gearbox:sensor:rate_hz = 2"])
+    sensor(2, "climate_link", "climate", (0, -0.2, 0.0), (0, 0, 0))
+    emit(1, "}")
+    emit(1, 'def Scope "Joints"')
+    emit(1, "{")
+    joint(2, "Fixed", "anchor", None, "rail", (RAIL_LEN / 2, 0, 0.02))
+    joint(2, "Prismatic", "travel", "rail", "trolley", (0.2 - RAIL_LEN / 2, 0, TROLLEY_Z - 0.02), "X", (0, travel), (400, 0.3))
+    joint(2, "Prismatic", "lift", "trolley", "mast", (0, 0, MAST_Z - TROLLEY_Z), "Z", (-lift, 0), (600, 0.25))
+    joint(2, "Revolute", "turn", "mast", "turret", (0, 0, TURRET_Z - MAST_Z), "Z", (-5, 185), (60, 1.0))
+    joint(2, "Prismatic", "reach", "turret", "arm", (ARM[0], ARM[1], ARM[2] - TURRET_Z), "Y", (-reach, 0), (200, 0.2))
+    emit(1, "}")
+    emit(0, "}")
+    GANTRY_OUT.write_text("\n".join(lines) + "\n")
+    print(f"wrote {GANTRY_OUT}: {len(lines)} lines; spawn at {rail_x:g} {RAIL_UNDER:g} 0")
+
+
 def main():
     emit(0, "#usda 1.0")
     emit(0, "(")
@@ -361,3 +498,4 @@ def main():
 
 
 main()
+gantry()
