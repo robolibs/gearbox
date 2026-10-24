@@ -112,8 +112,8 @@ fn ridged(p: vec3<f32>, octaves: i32) -> f32 {
 
 // The prepared pad at home off Earth: level within PAD_FLAT_M, full relief by
 // PAD_RELIEF_M. The same as gearbox-globe's terrain, which a test holds it to.
-const PAD_FLAT_M: f32 = 30.0;
-const PAD_RELIEF_M: f32 = 60.0;
+const PAD_FLAT_M: f32 = 320.0;
+const PAD_RELIEF_M: f32 = 480.0;
 
 // Deterministic height in roughly [-1, 1] from a unit sphere direction.
 // IMPORTANT: octave counts are constant across all LODs — that is what makes
