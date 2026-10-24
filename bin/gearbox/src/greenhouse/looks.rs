@@ -208,8 +208,22 @@ impl PlantLook {
 #[derive(Resource, Default)]
 pub struct PlantEntities(HashMap<PlantId, (Entity, PlantLook)>);
 
+/// The meshes of a plant at its stage, in leaves of its tint and with its fruit.
+fn dress(plant: &mut ChildSpawnerCommands, looks: &CropLooks, species: &'static str, look: &PlantLook) {
+    let parts = &looks.meshes[&(species, look.stage)];
+    let leaves = looks.leaves[&(species, look.tint)].clone();
+    plant.spawn((Mesh3d(parts.leaves.clone()), MeshMaterial3d(leaves), NotShadowCaster));
+    if let Some(mesh) = &parts.parts {
+        plant.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(looks.parts.clone()), NotShadowCaster));
+    }
+    if let (Some(mesh), true) = (&parts.fruit, look.fruit) {
+        plant.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(looks.fruit.clone()), NotShadowCaster));
+    }
+}
+
 /// Plants stand in their trays as their stage, health and fruit say: a new
-/// look replaces the entity, a new size only rescales it.
+/// stage replaces the entity and its hull, a new tint or fruit dresses the
+/// same entity again, a new size only rescales it.
 pub fn sync_plants(
     mut commands: Commands,
     greenhouse: Res<Greenhouse>,
@@ -235,6 +249,18 @@ pub fn sync_plants(
                 }
                 continue;
             }
+            if was.stage == look.stage {
+                if let Ok(mut transform) = transforms.get_mut(*entity) {
+                    transform.scale = Vec3::splat(look.scale);
+                }
+                commands
+                    .entity(*entity)
+                    .despawn_related::<Children>()
+                    .insert(look)
+                    .with_children(|parts| dress(parts, &looks, plant.species.name, &look));
+                *was = look;
+                continue;
+            }
             commands.entity(*entity).despawn();
         }
         let place = &greenhouse.trays[id.tray];
@@ -244,20 +270,10 @@ pub fn sync_plants(
         let transform = Transform::from_xyz(at.x, at.y, 0.0)
             .with_rotation(Quat::from_rotation_x(FRAC_PI_2) * Quat::from_rotation_y(yaw))
             .with_scale(Vec3::splat(look.scale));
-        let parts = &looks.meshes[&(plant.species.name, look.stage)];
-        let leaves = looks.leaves[&(plant.species.name, look.tint)].clone();
         let name = format!("Plant[{}]", greenhouse.plant_name(id));
         let entity = commands
             .spawn((Name::new(name), transform, Visibility::Inherited, ChildOf(place.entity), look))
-            .with_children(|plant| {
-                plant.spawn((Mesh3d(parts.leaves.clone()), MeshMaterial3d(leaves), NotShadowCaster));
-                if let Some(mesh) = &parts.parts {
-                    plant.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(looks.parts.clone()), NotShadowCaster));
-                }
-                if let (Some(mesh), true) = (&parts.fruit, look.fruit) {
-                    plant.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(looks.fruit.clone()), NotShadowCaster));
-                }
-            })
+            .with_children(|parts| dress(parts, &looks, plant.species.name, &look))
             .id();
         shown.0.insert(id, (entity, look));
     }
