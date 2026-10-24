@@ -176,6 +176,37 @@ fn clear_usd_terrain_height_profile() {
 
 pub struct WorldPlugin;
 
+/// How far from a camera point and spot lights reach, metres: rooms, yards
+/// and headlights, not the planet.
+const CLUSTERED_REACH_M: f32 = 120.0;
+
+/// Point and spot lights are clustered only while there are some, and only
+/// out to [`CLUSTERED_REACH_M`]: the sun needs no clusters, and empty ones
+/// built out to the far plane cost some 18 ms a frame.
+fn cluster_while_lit(
+    lights: Query<(), Or<(With<PointLight>, With<SpotLight>)>>,
+    mut cameras: Query<&mut bevy::light::cluster::ClusterConfig, With<Camera3d>>,
+) {
+    use bevy::light::cluster::{ClusterConfig, ClusterFarZMode, ClusterZConfig};
+    let lit = !lights.is_empty();
+    for mut config in &mut cameras {
+        let clustered = !matches!(*config, ClusterConfig::None);
+        if clustered == lit {
+            continue;
+        }
+        *config = if lit {
+            ClusterConfig::FixedZ {
+                total: 2048,
+                z_slices: 16,
+                z_config: ClusterZConfig { first_slice_depth: 1.0, far_z_mode: ClusterFarZMode::Constant(CLUSTERED_REACH_M) },
+                dynamic_resizing: true,
+            }
+        } else {
+            ClusterConfig::None
+        };
+    }
+}
+
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StaticUsdPropBodies>()
@@ -193,6 +224,7 @@ impl Plugin for WorldPlugin {
             .add_systems(Update, freeze_settled_static_usd_prop_bodies)
             .add_systems(Update, publish_loaded_usd_poses)
             .add_systems(Update, harvest_bales_on_machine_contact)
+            .add_systems(Update, cluster_while_lit)
             .add_systems(Update, cleanup_terrain_collision_without_usd_terrain)
             .add_systems(Update, cleanup_static_usd_prop_bodies)
             .add_systems(
@@ -385,8 +417,8 @@ fn spawn_world(
         Name::new("Camera"),
         Camera3d::default(),
         bevy::render::view::NoIndirectDrawing,
-        // Sunlight only: no point or spot lights to cluster, and building
-        // the (empty) clusters cost ~18 ms a frame.
+        // Clustered only while point or spot lights stand in the scene
+        // (`cluster_while_lit`).
         bevy::light::cluster::ClusterConfig::None,
         camera_transform,
         Projection::Perspective(PerspectiveProjection {
