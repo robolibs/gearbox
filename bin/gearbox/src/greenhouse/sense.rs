@@ -11,28 +11,57 @@ use crate::globe::{Site, site_of, transform_in_site};
 use crate::physics::PhysicsWorld;
 use crate::physics::backend::{ColliderDesc, Pose, Shape};
 use crate::sensor_generic::{AirField, AirReading, AirZone};
-use crate::sensors::SensorLabel;
+use crate::sensors::{MachineSensorRigs, SensorLabel};
 
 /// A plant entity whose hull stands in the physics world.
 #[derive(Component)]
 pub struct PlantHull;
 
-/// Gives each new plant entity the hull of its prefab: a collider that
-/// touches nothing, which sensor rays still meet, labelled with the plant's
-/// name; a plant's next look brings its own hull.
+/// A tray's plants gain hulls once a machine's sensor comes this close,
+/// metres, and lose them past `HULL_LEAVE_M`.
+const HULL_REACH_M: f32 = 5.0;
+const HULL_LEAVE_M: f32 = 7.0;
+
+/// Which trays are in reach of a sensor now, from which were before.
+pub fn trays_in_reach(eyes: &[Vec3], trays: &[Option<Vec3>], before: &[bool]) -> Vec<bool> {
+    trays
+        .iter()
+        .enumerate()
+        .map(|(i, tray)| {
+            let Some(tray) = tray else { return false };
+            let reach = if before.get(i).copied().unwrap_or(false) { HULL_LEAVE_M } else { HULL_REACH_M };
+            eyes.iter().any(|eye| eye.distance(*tray) < reach)
+        })
+        .collect()
+}
+
+/// Gives the plants of trays a machine's sensors can reach the hull of their
+/// prefab: a collider that touches nothing, which sensor rays still meet,
+/// labelled with the plant's name. Plants out of reach carry none; a
+/// plant's next look brings its own hull.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_plant_hulls(
     mut commands: Commands,
     greenhouse: Res<Greenhouse>,
     looks: Option<Res<CropLooks>>,
+    rigs: Option<Res<MachineSensorRigs>>,
     mut physics: ResMut<PhysicsWorld>,
-    plants: Query<(Entity, &PlantLook), Without<PlantHull>>,
-    parents: Query<&ChildOf>,
-    transforms: Query<&Transform>,
-    sites: Query<&Site>,
+    mut reach: Local<Vec<bool>>,
+    plants: Query<(Entity, &PlantLook, Has<PlantHull>)>,
+    (parents, transforms, sites, globals): (Query<&ChildOf>, Query<&Transform>, Query<&Site>, Query<&GlobalTransform>),
 ) {
     let Some(looks) = looks else { return };
-    for (entity, look) in &plants {
+    let eyes: Vec<Vec3> = rigs.iter().flat_map(|r| r.sensor_entities()).filter_map(|e| globals.get(e).ok()).map(|g| g.translation()).collect();
+    let trays: Vec<Option<Vec3>> = greenhouse.trays.iter().map(|t| globals.get(t.entity).ok().map(|g| g.translation())).collect();
+    *reach = trays_in_reach(&eyes, &trays, &reach);
+    for (entity, look, hulled) in &plants {
+        let wanted = reach.get(look.id.tray).copied().unwrap_or(false);
+        if hulled && !wanted {
+            commands.entity(entity).remove::<(PlantHull, SensorLabel)>();
+        }
+        if hulled || !wanted {
+            continue;
+        }
         commands.entity(entity).insert(PlantHull);
         let Some(plant) = greenhouse.house.plant(look.id) else { continue };
         let Some(points) = looks.hull(plant.species.name, look.stage) else { continue };
@@ -56,7 +85,8 @@ fn physics_quat(q: DQuat) -> glam::DQuat {
     glam::DQuat::from_xyzw(q.x, q.y, q.z, q.w)
 }
 
-/// Takes the hulls of plant entities gone since last frame out of the physics world.
+/// Takes the hulls of plant entities gone, or gone out of reach, since last
+/// frame out of the physics world.
 pub fn drop_plant_hulls(mut gone: RemovedComponents<PlantHull>, mut physics: ResMut<PhysicsWorld>) {
     for entity in gone.read() {
         physics.remove_entity_collider(entity, false);
@@ -143,6 +173,21 @@ mod tests {
         app.update();
         let physics = app.world().resource::<PhysicsWorld>();
         assert!(physics.collider(hull).is_none() && !physics.entity_to_collider.contains_key(&plant));
+    }
+
+    #[test]
+    fn only_trays_a_sensor_reaches_carry_hulls_and_they_keep_them_a_little_longer() {
+        let trays = [Some(Vec3::new(3.0, 0.0, 0.0)), Some(Vec3::new(6.0, 0.0, 0.0)), Some(Vec3::new(20.0, 0.0, 0.0)), None];
+        let eye = [Vec3::ZERO];
+        let now = trays_in_reach(&eye, &trays, &[]);
+        assert_eq!(now, [true, false, false, false]);
+        // 9 m on, the first tray is 6 m behind: it keeps its hulls, though
+        // a tray that far would not gain them.
+        let on = [Vec3::new(9.0, 0.0, 0.0)];
+        assert_eq!(trays_in_reach(&on, &trays, &now), [true, true, false, false]);
+        assert_eq!(trays_in_reach(&on, &trays, &[]), [false, true, false, false]);
+        // Without a sensor nothing carries a hull.
+        assert_eq!(trays_in_reach(&[], &trays, &now), [false; 4]);
     }
 
     #[test]
