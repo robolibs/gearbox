@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Headless Blender preview of a Mars base module or spot; see preview.py.
 #   scripts/mars_base/preview.sh OUT module habitat.hab_tower '{"name": "Hab"}'
+#   scripts/mars_base/preview.sh OUT package machines/usd/perseverance_nasa.usdz
 #   scripts/mars_base/preview.sh OUT base X Y RADIUS [HEIGHT]
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 out="$(realpath -m "$1")"

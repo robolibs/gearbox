@@ -20,10 +20,29 @@ ISRU units with their tanks and an ice well, and a landing zone. The fleet
 file places six tending robots, two pressurised rovers and Perseverance.
 
 `scripts/mars_base/` builds everything in Blender (see `build.py`): each
-kind of structure goes to `assets/mars_base/modules/<kind>.usdc` with its
-textures in `assets/mars_base/textures/`, the robots go to
-`machines/usd/*.usdz`, and the world and fleet files place them. Edit the
-scripts and build again rather than the USD.
+kind of structure goes to `assets/mars_base/modules/<kind>.usdc`, a
+`component` model whose looks are baked with Mars wear (dust settled on
+what faces up and thrown up low, grime where the sky cannot reach) into
+textures of its own in `assets/mars_base/modules/textures/`; the robots go
+to `machines/usd/*.usdz`, and the world and fleet files place them. Rocks
+lie round the base: Poly Haven's CC0 scans (fetched once into
+`.work/mars_base/polyhaven`), boulders as modules with a convex hull to
+drive into, stones through one point instancer. Edit the scripts and build
+again rather than the USD; `scripts/mars_base/preview.sh OUT module
+<file>.<builder> '<kwargs>'` renders one module headless (or `OUT base X Y
+RADIUS` a spot of the whole base) to look at first.
+
+Pipes and cables run from tie-in to tie-in, never ending in open ground:
+the ISRU manifolds to the tank headers and to the boot seals of Hab2's
+utility cabinet, the ice well's water line into the second ISRU, each
+Kilopower's lead to a junction box and on to the power station's pit, the
+solar field's pit to the station's, and the station's tray to a pit by
+HubNorth. The tie-in points are named in the modules (`industry.ISRU_TIE`,
+`power.STATION_PITS`, `habitat.tower_feed`, ...) and `layout.py` runs each
+line between them clear of the roads, which form one network from the plaza
+to the yard, the works and both pads. `scripts/mars_base/clash.sh OUT.json`
+lists every two buildings whose meshes meet; collars, roads on the plaza
+and parts standing on a pad meet by design, anything else is a misfit.
 
 ## 1. USD schema
 

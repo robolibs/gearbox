@@ -17,9 +17,10 @@ def linear(srgb):
     return tuple(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in srgb)
 
 
-# Mars dust, tyre rubber and the wheels' anodised metal, picked in sRGB;
-# shader sockets take them linear.
-DUST = linear((0.80, 0.62, 0.47))
+# Tyre rubber and the wheels' anodised metal, picked in sRGB; shader sockets
+# take them linear. Mars dust, already linear, is a shade brighter than the
+# sim's Mars ground (gearbox-fields' `mars` tint, 0.24, 0.105, 0.047).
+DUST = (0.30, 0.135, 0.062)
 RUBBER = linear((0.055, 0.05, 0.048))
 GUNMETAL = linear((0.42, 0.43, 0.45))
 
@@ -32,6 +33,21 @@ def pixels(image, size):
     copy.pixels.foreach_get(px)
     bpy.data.images.remove(copy)
     return px.reshape(size, size, 4)
+
+
+def kept(image, path, size):
+    """A Non-Color image saved at no more than `size` texels to `path` as a
+    JPEG, loaded back from there."""
+    copy = image.copy()
+    if copy.size[0] > size:
+        copy.scale(size, size)
+    copy.filepath_raw = path
+    copy.file_format = "JPEG"
+    copy.save()
+    bpy.data.images.remove(copy)
+    loaded = bpy.data.images.load(path, check_existing=False)
+    loaded.colorspace_settings.name = "Non-Color"
+    return loaded
 
 
 def grey_image(name, values, path):
@@ -141,6 +157,20 @@ def masks(g, ground_z):
     return dust, ao.outputs["AO"], tread.outputs["Fac"], wheel.outputs["Fac"]
 
 
+def worn(g, colour, dust, ao):
+    """`colour` darkened where the sky cannot reach, then dusted over by `dust`."""
+    grime = g.math("ADD", 0.5, g.math("MULTIPLY", ao, 0.5))
+    shaded = g.node("ShaderNodeMix", _data_type="RGBA", _blend_type="MULTIPLY", Factor=1.0)
+    g.put(shaded.inputs[6], colour)
+    g.put(shaded.inputs[7], g.node("ShaderNodeCombineColor", Red=grime, Green=grime, Blue=grime).outputs[0])
+    return g.mix(shaded.outputs[2], DUST, dust)
+
+
+def dulled(g, rough, metal, dust):
+    """Roughness and metal under `dust`."""
+    return g.mix(rough, 0.95, dust, "FLOAT"), g.math("MULTIPLY", metal, g.math("SUBTRACT", 1.0, dust))
+
+
 def bake(obj, mat, ground_z, out_dir, name, size=4096, maps_size=2048):
     """Bakes the weathered colour, roughness and metal of `obj`'s `mat` into
     `out_dir`; returns a material that shows them over the model's normals."""
@@ -151,6 +181,7 @@ def bake(obj, mat, ground_z, out_dir, name, size=4096, maps_size=2048):
     normal = textures["Color"].image
     spec = next(n.image for n in nodes if n.type == "TEX_IMAGE" and n.image not in (colour, normal))
     os.makedirs(out_dir, exist_ok=True)
+    normal = kept(normal, os.path.join(out_dir, f"{name}_normal.jpg"), maps_size)
     rough0, metal0 = surface_maps(colour, spec, maps_size)
     rough0 = grey_image(f"{name}_rough0", rough0, os.path.join(out_dir, f"{name}_rough0.png"))
     metal0 = grey_image(f"{name}_metal0", metal0, os.path.join(out_dir, f"{name}_metal0.png"))
@@ -170,11 +201,7 @@ def bake(obj, mat, ground_z, out_dir, name, size=4096, maps_size=2048):
     g.put(anodised.inputs[6], col)
     g.put(anodised.inputs[7], GUNMETAL)
     rubbered = g.mix(anodised.outputs[2], RUBBER, g.math("MULTIPLY", tread, 0.92))
-    grime = g.math("ADD", 0.5, g.math("MULTIPLY", ao, 0.5))
-    shaded = g.node("ShaderNodeMix", _data_type="RGBA", _blend_type="MULTIPLY", Factor=1.0)
-    g.put(shaded.inputs[6], rubbered)
-    g.put(shaded.inputs[7], g.node("ShaderNodeCombineColor", Red=grime, Green=grime, Blue=grime).outputs[0])
-    albedo = g.mix(shaded.outputs[2], DUST, dust)
+    albedo = worn(g, rubbered, dust, ao)
     rough = g.math("MAXIMUM", g.mix(g.mix(r0, 0.86, tread, "FLOAT"), 0.96, dust, "FLOAT"), 0.0)
     metal = g.math("MULTIPLY", g.math("MULTIPLY", m0, g.math("SUBTRACT", 1.0, dust)), g.math("SUBTRACT", 1.0, tread))
     emit = g.node("ShaderNodeEmission", Strength=1.0)
@@ -263,12 +290,14 @@ def surface_area(objs):
     return sum(sum(p.area for p in o.data.polygons) * abs(o.matrix_world.to_3x3().determinant()) ** (2 / 3) for o in objs)
 
 
-def bake_module(objs, out_dir, name, ground_z=0.0, density=0.02, sizes=(512, 4096), samples=8):
+def bake_module(objs, out_dir, name, ground_z=0.0, density=0.03, sizes=(256, 2048), samples=8):
     """Bakes a building's looks with Mars wear into one atlas: the parts that
     are not lit or see-through take a `bake` UV packed together, their colour
     (dust and grime over each material's own texture), roughness, metal and
     normals are baked into it at about `density` metres a texel, and they are
-    joined into one object showing the bake. Returns that object, or None."""
+    joined into one object showing the bake. Materials marked `gearbox_ground`
+    are the land's own loose regolith and take grime but no dust. Returns that
+    object, or None."""
     parts = [o for o in objs if o.type == "MESH" and not keeps_own(o.active_material)]
     if not parts:
         return None
@@ -290,7 +319,8 @@ def bake_module(objs, out_dir, name, ground_z=0.0, density=0.02, sizes=(512, 409
 
     images = {}
     for key, srgb in (("colour", True), ("rough", False), ("metal", False), ("normal", False)):
-        image = bpy.data.images.new(f"{name}_{key}", size if key in ("colour", "normal") else size // 2, size if key in ("colour", "normal") else size // 2, alpha=False)
+        res = size if key == "colour" else size // 2
+        image = bpy.data.images.new(f"{name}_{key}", res, res, alpha=False)
         image.colorspace_settings.name = "sRGB" if srgb else "Non-Color"
         images[key] = image
     graphs = {}
@@ -303,16 +333,13 @@ def bake_module(objs, out_dir, name, ground_z=0.0, density=0.02, sizes=(512, 409
         g = Graph(work)
         st = g.node("ShaderNodeUVMap", _uv_map="st").outputs["UV"]
         dust, ao, tread, _ = masks(g, ground_z)
+        if mat.get("gearbox_ground"):
+            dust = 0.0
         col = source(g, mat, "Base Color", st)
         r0 = source(g, mat, "Roughness", st)
         m0 = source(g, mat, "Metallic", st)
-        shaded = g.node("ShaderNodeMix", _data_type="RGBA", _blend_type="MULTIPLY", Factor=1.0)
-        g.put(shaded.inputs[6], col)
-        grime = g.math("ADD", 0.5, g.math("MULTIPLY", ao, 0.5))
-        g.put(shaded.inputs[7], g.node("ShaderNodeCombineColor", Red=grime, Green=grime, Blue=grime).outputs[0])
-        albedo = g.mix(shaded.outputs[2], DUST, dust)
-        rough = g.mix(r0, 0.95, dust, "FLOAT")
-        metal = g.math("MULTIPLY", m0, g.math("SUBTRACT", 1.0, dust))
+        albedo = worn(g, col, dust, ao)
+        rough, metal = dulled(g, r0, m0, dust)
         emit = g.node("ShaderNodeEmission", Strength=1.0)
         target = g.node("ShaderNodeTexImage")
         bsdf = next(n for n in g.nodes if n.type == "BSDF_PRINCIPLED")
@@ -343,9 +370,9 @@ def bake_module(objs, out_dir, name, ground_z=0.0, density=0.02, sizes=(512, 409
             bpy.ops.object.bake(type="NORMAL", normal_space="TANGENT")
         else:
             bpy.ops.object.bake(type="EMIT")
-        image.filepath_raw = os.path.join(out_dir, f"{name}_{key}.{'png' if key == 'normal' else 'jpg'}")
-        image.file_format = "PNG" if key == "normal" else "JPEG"
-        scene.render.image_settings.quality = 88
+        image.filepath_raw = os.path.join(out_dir, f"{name}_{key}.jpg")
+        image.file_format = "JPEG"
+        scene.render.image_settings.quality = 90
         image.save()
     scene.render.engine = engine
 

@@ -15,6 +15,7 @@ import numpy as np
 from mathutils import Vector
 
 from kit import Building, linear_to_srgb, srgb_to_linear
+from weathering import kept
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STORE = os.path.join(HERE, "..", "..", ".work", "mars_base", "polyhaven")
@@ -74,20 +75,6 @@ def tinted(image, out, colour=BASALT, contrast=1.2):
     dst.file_format = "JPEG"
     dst.save()
     return dst
-
-
-def kept(image, path, size):
-    """The image saved at `size` texels to `path`, loaded back from there."""
-    copy = image.copy()
-    if copy.size[0] > size:
-        copy.scale(size, size)
-    copy.filepath_raw = path
-    copy.file_format = "JPEG"
-    copy.save()
-    bpy.data.images.remove(copy)
-    loaded = bpy.data.images.load(path, check_existing=False)
-    loaded.colorspace_settings.name = "Non-Color"
-    return loaded
 
 
 def look(scan, images, out_dir):

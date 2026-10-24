@@ -107,25 +107,6 @@ def stripes(a=(0.9, 0.55, 0.02), b=(0.02, 0.02, 0.02), count=4):
     return diff.astype(np.float32), None, (0.5 + 0.3 * wear).astype(np.float32)
 
 
-def tracks(seed=11):
-    """Compacted regolith across a track's width (u) and a width's length
-    along it (v): two treaded ruts, alpha fading out at the verges."""
-    u, v = grid()
-    grain = noise(cells=24, seed=seed)
-    ruts = np.zeros_like(u)
-    for centre in (0.3, 0.7):
-        d = np.abs(u - centre)
-        tread = 0.6 + 0.4 * ((v * 18.0 + np.abs(u - centre) * 6.0) % 1.0 < 0.5)
-        ruts = np.maximum(ruts, np.clip(1.0 - d / 0.07, 0.0, 1.0) * tread)
-    base = np.array([0.36, 0.19, 0.11], dtype=np.float32)
-    shade = (0.85 + 0.25 * grain - 0.25 * ruts)[..., None]
-    edge = np.minimum(u, 1.0 - u)
-    alpha = np.clip((edge - 0.04 - 0.08 * noise(cells=12, seed=seed + 1)) / 0.14, 0.0, 1.0) * 0.85
-    diff = np.concatenate([np.clip(base * shade, 0.0, 1.0), alpha[..., None]], axis=-1)
-    height = -ruts + 0.2 * grain
-    return diff.astype(np.float32), normals_from_height(height.astype(np.float32), 4.0), (0.8 + 0.1 * grain).astype(np.float32)
-
-
 def heat_tiles(seed=9):
     """Hexagonal heat-shield tiles, black with grey gaps."""
     u, v = grid()

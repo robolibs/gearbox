@@ -1,14 +1,15 @@
-"""Renders one module of the Mars base on its own, or a spot of the whole
-base, to look at before a build. Runs in Blender, headless:
+"""Renders one module of the Mars base on its own, a machine package, or a
+spot of the whole base, to look at before a build. Runs in Blender, headless:
 
     flatpak run --filesystem=$PWD org.blender.Blender -b --factory-startup \\
         --python scripts/mars_base/preview.py -- OUT module habitat.hab_tower '{"name": "Hab"}'
+    ... --python scripts/mars_base/preview.py -- OUT package machines/usd/perseverance_nasa.usdz
     ... --python scripts/mars_base/preview.py -- OUT base X Y RADIUS [HEIGHT]
 
-A module is built at the origin by `<file>.<builder>(looks, **kwargs)`; the
-base is built whole and looked at round the spot X, Y (base metres). Views
-go to OUT as PNGs with a `stats.json` of the geometry; textures the looks
-make go to OUT/textures, never into assets/.
+A module is built at the origin by `<file>.<builder>(looks, **kwargs)`, a
+package imported as it stands; the base is built whole and looked at round
+the spot X, Y (base metres). Views go to OUT as PNGs with a `stats.json` of
+the geometry; textures the looks make go to OUT/textures, never into assets/.
 """
 import json
 import math
@@ -44,8 +45,12 @@ def bounds(objs):
 
 
 def stage(size):
-    """Ground, sun, sky and a camera, as the sim lights Mars at mid-morning."""
+    """Ground, sun, sky and a camera, as the sim lights Mars at mid-morning;
+    the hidden physics stand-ins stay out of the picture."""
     scene = bpy.context.scene
+    for o in bpy.data.objects:
+        if o.get("gearbox_hidden"):
+            o.hide_render = True
     mesh = bpy.data.meshes.new("preview_ground")
     r = size
     mesh.from_pydata([(-r, -r, 0), (r, -r, 0), (r, r, 0), (-r, r, 0)], [], [(0, 1, 2, 3)])
@@ -103,7 +108,16 @@ def module(out, target, kwargs):
     looks = kit.Looks(TEXTURES, os.path.join(out, "textures"))
     fn = getattr(__import__(file), builder)
     fn(looks, **kwargs)
-    objs = visible_meshes()
+    return views(out, visible_meshes())
+
+
+def package(out, path):
+    bpy.ops.wm.usd_import(filepath=os.path.abspath(path))
+    return views(out, visible_meshes())
+
+
+def views(out, objs):
+    """Four views round `objs`, one close and low on their side, one from above."""
     lo, hi = bounds(objs)
     centre, radius = (lo + hi) / 2, max((hi - lo).length / 2, 1.0)
     cam = stage(radius * 20)
@@ -138,6 +152,8 @@ def main():
     clear()
     if mode == "module":
         report = module(out, args[2], json.loads(args[3]) if len(args) > 3 else {})
+    elif mode == "package":
+        report = package(out, args[2])
     else:
         x, y, radius = (float(v) for v in args[2:5])
         report = base(out, x, y, radius, float(args[5]) if len(args) > 5 else 4.0)
