@@ -497,6 +497,7 @@ fn sync_pending_machine_physics_to_scene_transforms(
     names: Query<&Name>,
     parents: Query<&ChildOf>,
     sites: Query<&crate::globe::Site>,
+    joints: Query<&crate::physics::markers::UsdPhysicsJoint>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
     for (root, mut root_transform, mut pending, name) in pending.iter_mut() {
@@ -548,7 +549,8 @@ fn sync_pending_machine_physics_to_scene_transforms(
         };
 
         let collider_entities = descendants
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|entity| {
                 physics
                     .entity_to_collider
@@ -576,7 +578,10 @@ fn sync_pending_machine_physics_to_scene_transforms(
         }
         let synced = poses.len();
         propagate_body_positions_to_colliders(physics.as_mut());
-        if let Some(delta_y) = terrain_contact_alignment_delta(&physics, &collider_entities, &names)
+        // A machine fixed to the world, like a rail robot, stays where it is put.
+        let anchored = descendants.iter().any(|e| joints.get(*e).is_ok_and(|j| j.joint_enabled && (j.body0.is_none() || j.body1.is_none())));
+        if !anchored
+            && let Some(delta_y) = terrain_contact_alignment_delta(&physics, &collider_entities, &names)
         {
             let shifted: Vec<_> = poses.iter().map(|&(handle, _)| {
                 let mut pose = physics.body(handle).expect("aligned body").position();
