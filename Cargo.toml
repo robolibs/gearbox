@@ -6,6 +6,7 @@ members = [
     "crates/gearbox-fields",
     "crates/gearbox-globe",
     "crates/gearbox-planet",
+    "crates/gearbox-greenhouse",
     "crates/bevy_weather",
     "crates/bevy_biomes",
     "crates/gearbox-cli",

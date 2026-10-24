@@ -1,0 +1,12 @@
+[package]
+name = "gearbox-greenhouse"
+description = "A plant growth chamber off Earth: NASA's Modified Energy Cascade crops, the air and water they share, lamps, power and faults."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "gearbox_greenhouse"
+path = "src/lib.rs"
+
+[dependencies]
