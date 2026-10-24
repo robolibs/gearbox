@@ -39,6 +39,7 @@ impl Client {
             .identity(identity)
             .bootstrap([host])
             .directory(DirectoryMode::FrontDoor(host))
+            .control_timeout(std::time::Duration::from_secs(30))
             .local_config(crate::host::shm_limits())
             .allow_peer(host)
             .build()?;
