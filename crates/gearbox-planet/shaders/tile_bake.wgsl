@@ -110,13 +110,18 @@ fn ridged(p: vec3<f32>, octaves: i32) -> f32 {
     return sum / norm;
 }
 
+// The prepared pad at home off Earth: level within PAD_FLAT_M, full relief by
+// PAD_RELIEF_M. The same as gearbox-globe's terrain, which a test holds it to.
+const PAD_FLAT_M: f32 = 30.0;
+const PAD_RELIEF_M: f32 = 60.0;
+
 // Deterministic height in roughly [-1, 1] from a unit sphere direction.
 // IMPORTANT: octave counts are constant across all LODs — that is what makes
 // tiles of different LODs agree at shared texels.
 fn terrain_height(dir: vec3<f32>, seed: vec3<f32>, freq: f32) -> f32 {
     if params.surface_kind == 0u { return 0.0; }
     let p = dir * params.radius;
-    let fade = smoothstep(6.0, 22.0, distance(p, params.terrain_home.xyz));
+    let fade = smoothstep(PAD_FLAT_M, PAD_RELIEF_M, distance(p, params.terrain_home.xyz));
     return (regolith_height(p, params.surface_kind) - params.terrain_home.w) * fade / params.height_amp;
 }
 

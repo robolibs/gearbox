@@ -212,7 +212,7 @@ fn stream(
         let origin = point.ecef_on(sites.land.body());
         for rock in gearbox_globe::rocks::near(sites.land.body(), point, DRAW_M) {
             let ground = rock.ground.ecef_on(sites.land.body());
-            if ground.distance(sites.home().frame.origin) < 8.0 {
+            if ground.distance(sites.home().frame.origin) < gearbox_globe::PAD_FLAT_M {
                 continue;
             }
             let key = (site, rock.key);

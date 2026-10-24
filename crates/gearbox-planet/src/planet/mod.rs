@@ -397,3 +397,17 @@ mod martian_air_tests {
         assert!((calm.terms[1].scattering - preset.terms[1].scattering).length() < 1e-9);
     }
 }
+
+#[cfg(test)]
+mod pad_tests {
+    /// The bake shader's pad is the one the CPU terrain flattens home with.
+    #[test]
+    fn the_globe_bakes_the_same_pad_the_ground_stands_on() {
+        let shader = include_str!("../../shaders/tile_bake.wgsl");
+        for (name, value) in [("PAD_FLAT_M", gearbox_globe::PAD_FLAT_M), ("PAD_RELIEF_M", gearbox_globe::PAD_RELIEF_M)] {
+            let line = format!("const {name}: f32 = {value:.1};");
+            assert!(shader.contains(&line), "tile_bake.wgsl lacks `{line}`");
+        }
+        assert!(shader.contains("smoothstep(PAD_FLAT_M, PAD_RELIEF_M,"));
+    }
+}

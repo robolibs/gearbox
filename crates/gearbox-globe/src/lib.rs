@@ -19,7 +19,7 @@ pub mod surface;
 use bevy::math::{DMat3, DQuat, DVec3};
 use concord::earth::{Wgs, to_ecf, to_wgs};
 
-pub use terrain::{RELIEF_M, Terrain};
+pub use terrain::{PAD_FLAT_M, PAD_RELIEF_M, RELIEF_M, Terrain};
 pub use body::Body;
 
 /// Radius of the sphere drawn for the planet and its sky.

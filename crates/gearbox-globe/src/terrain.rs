@@ -10,6 +10,11 @@ const RELIEF_FROM_M: f64 = 400.0;
 const RELIEF_FULL_M: f64 = 2_000.0;
 /// Peak-to-trough height of the broad relief away from the home field.
 pub const RELIEF_M: f32 = 160.0;
+/// Off Earth, home is a prepared pad an outpost stands on: level within this
+/// radius, metres. The globe's bake shader keeps the same pad.
+pub const PAD_FLAT_M: f64 = 30.0;
+/// The pad's edge is back to the land's full relief this far out.
+pub const PAD_RELIEF_M: f64 = 60.0;
 
 fn smooth(t: f64) -> f32 {
     let t = t.clamp(0.0, 1.0) as f32;
@@ -46,7 +51,8 @@ impl Terrain {
     pub fn height(&self, ground: DVec3) -> f32 {
         let from_home = (ground - self.home).length();
         if self.body != Body::Earth {
-            return (regolith::height(self.body, ground) - self.home_raw) * smooth((from_home - 6.0) / 16.0);
+            let pad = smooth((from_home - PAD_FLAT_M) / (PAD_RELIEF_M - PAD_FLAT_M));
+            return (regolith::height(self.body, ground) - self.home_raw) * pad;
         }
         let level = smooth((from_home - FLAT_RADIUS_M) / (GENTLE_RADIUS_M - FLAT_RADIUS_M));
         let relief = smooth((from_home - RELIEF_FROM_M) / (RELIEF_FULL_M - RELIEF_FROM_M))
@@ -119,6 +125,11 @@ mod tests {
             let land = Terrain::new(&home);
             assert!(land.local_height(&home, 0.0, 0.0).abs() < 1e-4);
             assert!(land.local_height(&home, 2.0, -2.0).abs() < 1e-4);
+            // The pad holds an outpost: level to its edge, and the land rises again past it.
+            let edge = PAD_FLAT_M * 0.7;
+            assert!(land.local_height(&home, edge, edge).abs() < 0.02, "{body:?} pad edge");
+            let beyond = (-400..=400).step_by(40).map(|x| land.local_height(&home, 300.0, x as f64).abs()).fold(0.0, f32::max);
+            assert!(beyond > 0.5, "{body:?} relief returns past the pad, {beyond} m");
             for distance in [20_000.0, body.radius_m() * 2.8] {
                 let remote = home.travelled(65.0, distance);
                 let point = remote.geodetic(DVec3::new(150.0, 0.0, 80.0));
