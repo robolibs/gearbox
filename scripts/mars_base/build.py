@@ -14,7 +14,9 @@
     bin/gearbox/assets/world/mars_base_fleet.usda  every robot placed
 
 Run in the open Blender (`exec(open(".../scripts/mars_base/build.py").read())`)
-or headless: `blender --background --python scripts/mars_base/build.py`.
+or headless: `blender --background --python scripts/mars_base/build.py`
+(after `--`, `--no-export` only builds the scene and `--no-machines` leaves
+the robot packages as they are).
 kit, buildings, habitat, power, industry, spaceport and props build the
 structures; layout places them; eden is the EDEN module's inside; robots
 writes the machines; preview.sh renders one module or spot headless.
@@ -31,7 +33,8 @@ HERE = os.path.join(ROOT, "scripts", "mars_base")
 sys.path.insert(0, HERE)
 # A Blender session keeps modules from earlier builds: drop them so every
 # build imports the scripts as they are now.
-for name in ("kit", "patterns", "buildings", "habitat", "power", "industry", "spaceport", "props", "usda", "eden", "robots", "vehicles", "layout"):
+for name in ("kit", "patterns", "buildings", "habitat", "power", "industry", "spaceport", "props", "usda", "eden", "mechanics", "robots", "vehicles",
+             "layout"):
     sys.modules.pop(name, None)
 import kit  # noqa: E402
 import usda  # noqa: E402
@@ -287,21 +290,16 @@ def gantries():
 
 
 def write_machines():
-    """Writes each robot's USDA and packs it as a usdz among the machines."""
+    """Writes each robot's machine layer and geometry and packs them as a usdz among the machines."""
     from pxr import Sdf, UsdUtils
     eden_rail, arch_rail, polar = gantries()
-    sources = {
-        "eden_gantry": robots.rail_gantry(eden_rail, "the rail robot of the EDEN growth room"),
-        "arch_gantry": robots.rail_gantry(arch_rail, "the ridge robot of an arch greenhouse"),
-        "dome_gantry": robots.polar_gantry(polar, "the polar gantry of a dome"),
-    }
     work = os.path.join(WORK, "machines")
     os.makedirs(work, exist_ok=True)
-    layers = {}
-    for name, text in sources.items():
-        layers[name] = os.path.join(work, f"{name}.usda")
-        with open(layers[name], "w") as f:
-            f.write(text)
+    layers = {
+        "eden_gantry": robots.build("eden_gantry", eden_rail, "the rail robot of the EDEN growth room", work),
+        "arch_gantry": robots.build("arch_gantry", arch_rail, "the ridge robot of an arch greenhouse", work),
+        "dome_gantry": robots.build("dome_gantry", polar, "the polar gantry of a dome", work),
+    }
     layers[vehicles.SEV.kind] = vehicles.build(vehicles.SEV, layout.NASA, MACHINES, work)
     for name, layer in layers.items():
         UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(layer), os.path.join(MACHINES, f"{name}.usdz"))
@@ -316,7 +314,7 @@ def write_fleet(path):
     return len(places)
 
 
-def main(export=True, weather=True):
+def main(export=True, weather=True, machines=True):
     reset()
     looks = kit.Looks(TEXTURES)
     base, built = layout.build(looks, strewn=True)
@@ -334,10 +332,11 @@ def main(export=True, weather=True):
                 done.add(b.kind)
         report["colliders"] = colliders
         report["rooms"], report["trays"], report["lights"] = world_layer(os.path.join(WORLD_DIR, "mars_base.usda"), built, base)
-        report["machines"] = write_machines()
+        if machines:
+            report["machines"] = write_machines()
         report["robots"] = write_fleet(os.path.join(WORLD_DIR, "mars_base_fleet.usda"))
     return report
 
 
 if __name__ == "__main__":
-    print(main("--no-export" not in sys.argv))
+    print(main("--no-export" not in sys.argv, machines="--no-machines" not in sys.argv))

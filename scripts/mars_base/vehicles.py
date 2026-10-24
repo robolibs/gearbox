@@ -172,6 +172,23 @@ def bindings(geom):
     return found
 
 
+def export_geom(collection, geom):
+    """Writes a collection's parts as the geometry layer `geom`: each part
+    a prim of /geom about its own origin, the materials under /geom/_materials."""
+    bpy.ops.wm.usd_export(
+        filepath=geom, check_existing=False, collection=collection.name, export_materials=True, generate_preview_surface=True,
+        export_textures_mode="NEW", overwrite_textures=True, relative_paths=True, root_prim_path="/geom", merge_parent_xform=True,
+        export_uvmaps=True, rename_uvmaps=True, export_normals=True, convert_scene_units="METERS", meters_per_unit=1.0,
+        export_lights=False, export_cameras=False, use_instancing=False,
+    )
+    from pxr import Usd, UsdGeom
+    stage = Usd.Stage.Open(geom)
+    stage.SetDefaultPrim(stage.GetPrimAtPath("/geom"))
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    stage.GetRootLayer().Save()
+
+
 def build(v, nasa_dir, out_dir, work_dir):
     """Writes `<kind>_geom.usdc` and `<kind>.usda` into `work_dir`; returns the machine layer's path."""
     before = set(bpy.data.objects)
@@ -191,19 +208,7 @@ def build(v, nasa_dir, out_dir, work_dir):
     bm.free()
     os.makedirs(work_dir, exist_ok=True)
     geom = os.path.join(work_dir, f"{v.kind}_geom.usdc")
-    bpy.ops.wm.usd_export(
-        filepath=geom, check_existing=False, collection=scene.name, export_materials=True, generate_preview_surface=True,
-        export_textures_mode="NEW", overwrite_textures=True, relative_paths=True, root_prim_path="/geom", merge_parent_xform=True,
-        export_uvmaps=True, rename_uvmaps=True, export_normals=True, convert_scene_units="METERS", meters_per_unit=1.0,
-        export_lights=False, export_cameras=False, use_instancing=False,
-    )
-    from pxr import Usd, UsdGeom
-    stage = Usd.Stage.Open(geom)
-    stage.SetDefaultPrim(stage.GetPrimAtPath("/geom"))
-    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
-    stage.GetRootLayer().Save()
-    del stage
+    export_geom(scene, geom)
     bound = bindings(geom)
     meshes = [obj.data for obj in [*scene.objects, *new] if obj.type == "MESH"]
     for obj in [*scene.objects, *new]:
