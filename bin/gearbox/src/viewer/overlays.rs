@@ -95,44 +95,40 @@ fn serve_overlay_requests(
 
 pub use bevy_weather::OriginalIlluminance;
 
-#[derive(Component, Debug, Copy, Clone)]
-pub struct OriginalLightIntensity(pub f32);
-
 fn capture_original_light_levels(
     mut cmds: Commands,
     dir: Query<
         (Entity, &DirectionalLight),
         (Added<DirectionalLight>, Without<OriginalIlluminance>),
     >,
-    pt: Query<(Entity, &PointLight), (Added<PointLight>, Without<OriginalLightIntensity>)>,
-    sp: Query<(Entity, &SpotLight), (Added<SpotLight>, Without<OriginalLightIntensity>)>,
 ) {
     for (e, l) in &dir {
         cmds.entity(e).insert(OriginalIlluminance(l.illuminance));
-    }
-    for (e, l) in &pt {
-        cmds.entity(e).insert(OriginalLightIntensity(l.intensity));
-    }
-    for (e, l) in &sp {
-        cmds.entity(e).insert(OriginalLightIntensity(l.intensity));
     }
 }
 
 fn apply_light_intensity_scale(
     toggles: Res<DisplayToggles>,
     mut dir: Query<(&mut DirectionalLight, &OriginalIlluminance)>,
-    mut pt: Query<(&mut PointLight, &OriginalLightIntensity)>,
-    mut sp: Query<(&mut SpotLight, &OriginalLightIntensity)>,
+    mut pt: Query<&mut PointLight>,
+    mut sp: Query<&mut SpotLight>,
+    mut applied: Local<Option<f32>>,
 ) {
     let s = toggles.light_intensity_scale;
     for (mut l, o) in &mut dir {
         l.illuminance = o.0 * s;
     }
-    for (mut l, o) in &mut pt {
-        l.intensity = o.0 * s;
+    // Point and spot lights take the scale by the ratio it moved by.
+    let s = s.max(0.01);
+    let was = applied.replace(s).unwrap_or(1.0);
+    if was == s {
+        return;
     }
-    for (mut l, o) in &mut sp {
-        l.intensity = o.0 * s;
+    for mut l in &mut pt {
+        l.intensity *= s / was;
+    }
+    for mut l in &mut sp {
+        l.intensity *= s / was;
     }
 }
 
