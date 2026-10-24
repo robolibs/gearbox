@@ -1,0 +1,127 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "scripts/mars_base/build.py: the robots that tend the base"
+    }
+    defaultPrim = "Fleet"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# Generated: spawn every robot of the base at once with
+# `gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base`.
+def Xform "Fleet"
+{
+    def Xform "Eve" (
+        prepend references = @../../../../machines/usd/eden_gantry.usdz@</robot>
+    )
+    {
+        double3 xformOp:translate = (20.51, 22, 2.74)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (23.21, 22, 2.76)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchABot" (
+        prepend references = @../../../../machines/usd/arch_gantry.usdz@</robot>
+    )
+    {
+        double3 xformOp:translate = (16, -62, 5)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (29, -62, 5.02)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchBBot" (
+        prepend references = @../../../../machines/usd/arch_gantry.usdz@</robot>
+    )
+    {
+        double3 xformOp:translate = (16, -77, 5)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (29, -77, 5.02)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchCBot" (
+        prepend references = @../../../../machines/usd/arch_gantry.usdz@</robot>
+    )
+    {
+        double3 xformOp:translate = (16, -92, 5)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (29, -92, 5.02)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "DomeABot" (
+        prepend references = @../../../../machines/usd/dome_gantry.usdz@</robot>
+    )
+    {
+        double3 xformOp:translate = (62, -20, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 140.1944)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (62, -20, 3.7)
+                quatf physics:localRot0 = (0.340425, 0, 0, 0.940272)
+            }
+        }
+    }
+    def Xform "DomeBBot" (
+        prepend references = @../../../../machines/usd/dome_gantry.usdz@</robot>
+    )
+    {
+        double3 xformOp:translate = (62, 20, 0)
+        float3 xformOp:rotateXYZ = (0, 0, -140.1944)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (62, 20, 3.7)
+                quatf physics:localRot0 = (0.340425, 0, 0, -0.940272)
+            }
+        }
+    }
+    def Xform "Rover1" (
+        prepend references = @../../../../machines/usd/sev_rover.usdz@</robot>
+    )
+    {
+        double3 xformOp:translate = (-16, -9, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 180.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "Rover2" (
+        prepend references = @../../../../machines/usd/sev_rover.usdz@</robot>
+    )
+    {
+        double3 xformOp:translate = (-22, 38, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}
