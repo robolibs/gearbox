@@ -74,7 +74,7 @@ fn rooms(greenhouse: &Greenhouse) -> Vec<RoomRecord> {
                 ("fans", state(room.fans_failed)),
                 ("hvac", state(room.hvac_failed)),
                 ("co2_feed", state(room.co2_failed)),
-                ("leak_per_s", &number(room.leak_per_s)),
+                ("leak_per_s", &format!("{:e}", room.leak_per_s)),
                 ("draw_w", &number(room.draw_w)),
                 ("supply_w", &number(power.supply_w)),
                 ("demand_w", &number(power.demand_w)),
