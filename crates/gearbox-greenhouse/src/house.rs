@@ -546,6 +546,22 @@ mod tests {
     }
 
     #[test]
+    fn a_fan_mended_within_days_leaves_mould_that_fades_without_killing() {
+        let mut house = chamber(30);
+        sow_all(&mut house, &LETTUCE);
+        run_days(&mut house, 12);
+        house.raise(Fault::Fans(0)).unwrap();
+        run_days(&mut house, 4);
+        let infected = house.plants().map(|(_, p)| p.mould).fold(0.0, f64::max);
+        assert!(infected > 0.25, "four still, wet days infect the crop: {infected}");
+        house.repair(Fault::Fans(0)).unwrap();
+        let events = run_days(&mut house, 15);
+        assert!(!events.iter().any(|e| matches!(e, Event::Died(_))), "a mended fan still killed the crop");
+        let mould = house.plants().map(|(_, p)| p.mould).fold(0.0, f64::max);
+        assert!(mould < infected, "mould {mould} against {infected}");
+    }
+
+    #[test]
     fn a_breach_drops_the_room_below_what_plants_survive_without_makeup_gas() {
         let mut house = chamber(2);
         house.rooms[0].makeup_failed = true;

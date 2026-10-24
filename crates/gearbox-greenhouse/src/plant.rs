@@ -316,7 +316,7 @@ impl Plant {
             + 0.08 * self.nutrient_stress.powi(2)
             + 1.0 * self.root_stress.powi(2)
             + 0.5 * cold_or_hot
-            + 0.6 * self.mould;
+            + 0.6 * self.mould.powi(2);
         let mended = if harm < 0.02 { 0.05 } else { 0.0 };
         self.health = (self.health - harm * days + mended * days).min(1.0);
         if self.health <= 0.0 || self.mould >= 1.0 {
