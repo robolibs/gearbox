@@ -3,6 +3,7 @@
 
 pub mod common;
 pub mod control;
+pub mod greenhouse;
 pub mod host;
 pub mod json;
 pub mod machine;
@@ -20,6 +21,7 @@ pub use machine::{
     LinkRecord, MachineInfo, MachineState, SessionInfo,
     SessionRef, TwistCmd,
 };
+pub use greenhouse::{GreenhouseAction, GreenhouseQuery, PlantRecord, RoomRecord, greenhouse_op};
 pub use control::{
     ControlRequest, ControlResponse, JointCommand, JointCommandAck, JointState, MachineDescription, Tf,
     command_status, control_op, joint_mode, names_from_bytes, names_to_bytes,

@@ -195,6 +195,22 @@ impl Client {
         self.call(topics::SCENE_CLOCK, &ClockCommand { op: clock_op::SPEED, value: rate, ..Default::default() })
     }
 
+    /// Greenhouse plants: every one, or those in `tray` of `species`, ripe ones only when `ripe`.
+    pub fn plants(&self, ripe: bool, filter: &Props) -> agentio::Result<Vec<PlantRecord>> {
+        let query = GreenhouseQuery { ripe: ripe as u32, props: filter.to_bytes(), ..Default::default() };
+        self.query(topics::GREENHOUSE_PLANTS, &query)
+    }
+
+    /// Every greenhouse room's air, with the power bus.
+    pub fn greenhouse_rooms(&self) -> agentio::Result<Vec<RoomRecord>> {
+        self.query(topics::GREENHOUSE_ROOMS, &Ping::default())
+    }
+
+    /// One greenhouse action (`greenhouse_op`) with its keys.
+    pub fn greenhouse(&self, op: u32, keys: &Props) -> agentio::Result<Status> {
+        self.call(topics::GREENHOUSE_ACT, &GreenhouseAction::new(op, keys))
+    }
+
     /// Set the weather keys `set` carries, and read every key back.
     pub fn weather(&self, set: &Props) -> agentio::Result<Props> {
         let answer: Weather = self.call(topics::WEATHER, &Weather::new(set))?;

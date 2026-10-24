@@ -8,6 +8,7 @@ use datapod::{Point, Pose, Quaternion};
 use serde_json::{Map, Value, json};
 
 use super::common::{Env, Ping, Props, Status, unpack};
+use super::greenhouse::*;
 use super::host::*;
 use super::machine::*;
 
@@ -51,6 +52,10 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(MarkerRef, marker_ref_json, marker_ref_from),
         desc!(FieldsLayout, fields_layout_json, fields_layout_from),
         desc!(Weather, weather_json, weather_from),
+        desc!(GreenhouseQuery, greenhouse_query_json, greenhouse_query_from),
+        desc!(PlantRecord, plant_record_json, plant_record_from),
+        desc!(RoomRecord, room_record_json, room_record_from),
+        desc!(GreenhouseAction, greenhouse_action_json, greenhouse_action_from),
         desc!(Selection, selection_json, selection_from),
         desc!(MachineRef, machine_ref_json, machine_ref_from),
         desc!(MachineInfo, machine_info_json, machine_info_from),
@@ -494,6 +499,70 @@ fn fields_layout_from(v: &Value) -> Result<FieldsLayout, String> {
         Some(layout) => Ok(FieldsLayout::new(&layout.to_string())),
         None => Ok(FieldsLayout::new("")),
     }
+}
+
+fn greenhouse_query_json(q: &GreenhouseQuery) -> Value {
+    json!({ "ripe": q.ripe != 0, "props": props_json(&q.props) })
+}
+
+fn greenhouse_query_from(v: &Value) -> Result<GreenhouseQuery, String> {
+    let ripe = v.get("ripe").and_then(Value::as_bool).unwrap_or(false) as u32;
+    Ok(GreenhouseQuery { ripe, props: props_from(v, &["ripe"]), ..Default::default() })
+}
+
+fn plant_record_json(p: &PlantRecord) -> Value {
+    json!({
+        "x": p.x, "y": p.y, "z": p.z, "maturity": p.maturity, "health": p.health,
+        "height_m": p.height_m, "alive": p.alive != 0, "ripe": p.ripe != 0,
+        "props": props_json(&p.props),
+    })
+}
+
+fn plant_record_from(v: &Value) -> Result<PlantRecord, String> {
+    let flag = |key: &str| v.get(key).and_then(Value::as_bool).unwrap_or(false) as u32;
+    Ok(PlantRecord {
+        x: num(v, "x") as f32,
+        y: num(v, "y") as f32,
+        z: num(v, "z") as f32,
+        maturity: num(v, "maturity") as f32,
+        health: num(v, "health") as f32,
+        height_m: num(v, "height_m") as f32,
+        alive: flag("alive"),
+        ripe: flag("ripe"),
+        props: props_from(v, &["x", "y", "z", "maturity", "health", "height_m", "alive", "ripe"]),
+    })
+}
+
+fn room_record_json(r: &RoomRecord) -> Value {
+    json!({
+        "temperature_c": r.temperature_c, "humidity": r.humidity, "co2_ppm": r.co2_ppm,
+        "o2_kpa": r.o2_kpa, "pressure_kpa": r.pressure_kpa, "lux": r.lux,
+        "props": props_json(&r.props),
+    })
+}
+
+fn room_record_from(v: &Value) -> Result<RoomRecord, String> {
+    Ok(RoomRecord {
+        temperature_c: num(v, "temperature_c") as f32,
+        humidity: num(v, "humidity") as f32,
+        co2_ppm: num(v, "co2_ppm") as f32,
+        o2_kpa: num(v, "o2_kpa") as f32,
+        pressure_kpa: num(v, "pressure_kpa") as f32,
+        lux: num(v, "lux") as f32,
+        props: props_from(v, &["temperature_c", "humidity", "co2_ppm", "o2_kpa", "pressure_kpa", "lux"]),
+    })
+}
+
+fn greenhouse_action_json(a: &GreenhouseAction) -> Value {
+    json!({ "op": a.op, "op_name": greenhouse_op::name(a.op), "props": props_json(&a.props) })
+}
+
+fn greenhouse_action_from(v: &Value) -> Result<GreenhouseAction, String> {
+    let op = match v.get("op") {
+        Some(Value::String(s)) => greenhouse_op::parse(s).ok_or_else(|| format!("unknown greenhouse op `{s}`"))?,
+        _ => uint(v, "op") as u32,
+    };
+    Ok(GreenhouseAction { op, props: props_from(v, &["op", "op_name"]), ..Default::default() })
 }
 
 fn weather_json(w: &Weather) -> Value {

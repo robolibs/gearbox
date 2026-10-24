@@ -17,6 +17,12 @@ pub const ACCESS_GRANT: &str = "/gearbox/access/grant";
 pub const FIELDS_LAYOUT: &str = "/gearbox/fields/layout";
 /// Req/res: set the weather keys a `Weather` carries; answers all of them.
 pub const WEATHER: &str = "/gearbox/weather";
+/// Que/ans: every greenhouse plant a `GreenhouseQuery` asks for, one `PlantRecord` each.
+pub const GREENHOUSE_PLANTS: &str = "/gearbox/greenhouse/plants";
+/// Que/ans: every greenhouse room's air, one `RoomRecord` each.
+pub const GREENHOUSE_ROOMS: &str = "/gearbox/greenhouse/rooms";
+/// Req/res: one `GreenhouseAction`, answered with a `Status`.
+pub const GREENHOUSE_ACT: &str = "/gearbox/greenhouse/act";
 
 pub const MACHINE_INFO: &str = "info";
 pub const MACHINE_CLAIM: &str = "claim";

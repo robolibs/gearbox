@@ -375,6 +375,9 @@ fn serve_once(
 
     host.serve_fields_layout(|_| Status::ok());
     host.serve_weather(|asked| asked);
+    host.serve_greenhouse_plants(|_| Vec::new());
+    host.serve_greenhouse_rooms(|_| Vec::new());
+    host.serve_greenhouse_act(|_| Status::err(code::USAGE, "no greenhouse"));
 
     let mut granted = Vec::new();
     host.serve_access_grant(|req| match agentio::did_key::did_key_to_endpoint(&req.did()) {

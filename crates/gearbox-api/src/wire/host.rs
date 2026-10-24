@@ -140,6 +140,10 @@ pub mod event_kind {
     pub const DETACHED: u32 = 6;
     /// A machine whose link tree failed validation; `reason` props say why.
     pub const MACHINE_REJECTED: u32 = 7;
+    /// Something in a greenhouse: `what` is sown, sprouted, staged, ripe,
+    /// died, harvested, faulted or repaired; `plant`, `stage`, `fault`,
+    /// `species` and `fresh_kg` say more.
+    pub const GREENHOUSE: u32 = 8;
 
     pub fn name(value: u32) -> &'static str {
         match value {
@@ -151,6 +155,7 @@ pub mod event_kind {
             ATTACHED => "attached",
             DETACHED => "detached",
             MACHINE_REJECTED => "machine_rejected",
+            GREENHOUSE => "greenhouse",
             _ => "unknown",
         }
     }

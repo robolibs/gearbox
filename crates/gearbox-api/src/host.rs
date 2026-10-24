@@ -111,6 +111,9 @@ pub struct HostBus {
     access_grant: Registered<ReqServer<Env, Env>>,
     fields_layout: Registered<ReqServer<Env, Env>>,
     weather: Registered<ReqServer<Env, Env>>,
+    greenhouse_plants: Registered<AnsServer<Env, Env>>,
+    greenhouse_rooms: Registered<AnsServer<Env, Env>>,
+    greenhouse_act: Registered<ReqServer<Env, Env>>,
 }
 
 impl HostBus {
@@ -150,6 +153,9 @@ impl HostBus {
             access_grant: agent.req_server(topics::ACCESS_GRANT)?,
             fields_layout: agent.req_server(topics::FIELDS_LAYOUT)?,
             weather: agent.req_server(topics::WEATHER)?,
+            greenhouse_plants: agent.que_server(topics::GREENHOUSE_PLANTS)?,
+            greenhouse_rooms: agent.que_server(topics::GREENHOUSE_ROOMS)?,
+            greenhouse_act: agent.req_server(topics::GREENHOUSE_ACT)?,
             agent,
             config,
             started: Instant::now(),
@@ -268,6 +274,18 @@ impl HostBus {
 
     pub fn serve_weather(&mut self, f: impl FnMut(Weather) -> Weather) -> usize {
         serve_req(&mut self.weather, f)
+    }
+
+    pub fn serve_greenhouse_plants(&mut self, f: impl FnMut(GreenhouseQuery) -> Vec<PlantRecord>) -> usize {
+        serve_que(&mut self.greenhouse_plants, f)
+    }
+
+    pub fn serve_greenhouse_rooms(&mut self, f: impl FnMut(Ping) -> Vec<RoomRecord>) -> usize {
+        serve_que(&mut self.greenhouse_rooms, f)
+    }
+
+    pub fn serve_greenhouse_act(&mut self, f: impl FnMut(GreenhouseAction) -> Status) -> usize {
+        serve_req(&mut self.greenhouse_act, f)
     }
 
     pub fn serve_access_grant(&mut self, f: impl FnMut(GrantRequest) -> Status) -> usize {

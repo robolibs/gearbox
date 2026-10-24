@@ -7,6 +7,7 @@
 //! `GearboxPowerAPI` for the bus, `GearboxServiceAPI` spots where equipment
 //! is mended. Every greenhouse found joins the one [`Greenhouse`] house.
 
+mod api;
 pub mod crops;
 mod looks;
 
@@ -34,7 +35,7 @@ impl Plugin for GreenhousePlugin {
             .add_systems(Startup, looks::build_looks)
             .add_systems(
                 Update,
-                (discover_greenhouses, step_greenhouse, looks::sync_plants, looks::sync_lamps, looks::expose_indoors)
+                (discover_greenhouses, step_greenhouse, api::serve_greenhouse_api, looks::sync_plants, looks::sync_lamps, looks::expose_indoors)
                     .chain()
                     .after(WorldTime),
             );

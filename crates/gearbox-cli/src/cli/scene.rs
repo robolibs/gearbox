@@ -57,7 +57,7 @@ enum Cmd {
     },
     /// Tail scene events
     Events {
-        /// loaded, pose, harvested, removed, machine_ready
+        /// loaded, pose, harvested, removed, machine_ready, attached, detached, machine_rejected, greenhouse
         #[arg(long)]
         kind: Option<String>,
         /// Stop after this many events
@@ -352,7 +352,7 @@ fn pose(ctx: &Ctx, id: &str, watch: bool) -> Result<()> {
 fn events(ctx: &Ctx, kind: Option<String>, count: Option<usize>) -> Result<()> {
     let filter = match &kind {
         Some(k) => Some(
-            (0..8u32)
+            (0..=event_kind::GREENHOUSE)
                 .find(|c| event_kind::name(*c) == k)
                 .ok_or_else(|| CliError::usage(format!("unknown event kind `{k}`")))?,
         ),

@@ -62,6 +62,8 @@ pub enum Command {
     Scene(cli::scene::Args),
     /// Choose the thing later commands act on
     Select(cli::select::Args),
+    /// Crops, rooms and faults of a greenhouse world
+    Greenhouse(cli::greenhouse::Args),
     /// Inspect and drive machines
     Machine(cli::machine::Args),
     /// Browse the live topic directory, or stream one of its topics
@@ -100,6 +102,7 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Clear(args) => cli::clear::run(&ctx, args),
         Command::Scene(args) => cli::scene::run(&ctx, args),
         Command::Select(args) => cli::select::run(&ctx, args),
+        Command::Greenhouse(args) => cli::greenhouse::run(&ctx, args),
         Command::Machine(args) => cli::machine::run(&ctx, args),
         Command::Peer(args) => cli::peer::run(&ctx, args),
         Command::Access(args) => cli::access::run(&ctx, args),
