@@ -77,6 +77,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(environment::planetary_fields())
         .add_plugins(terrain::TerrainPlugin)
         .add_plugins(crate::planet_rocks::PlanetRocksPlugin)
+        .add_plugins(crate::greenhouse::GreenhousePlugin)
         .configure_sets(
             Update,
             gearbox_fields::CoverUpdates.after(terrain::TerrainUpdates),

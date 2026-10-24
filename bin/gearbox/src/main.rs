@@ -23,6 +23,7 @@ mod devices;
 mod environment;
 mod biomes;
 mod globe;
+mod greenhouse;
 mod host;
 mod links;
 mod load;

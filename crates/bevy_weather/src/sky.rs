@@ -214,7 +214,8 @@ fn synchronize_daylight(
     for (mut fog, mut ambient) in &mut scattered {
         fog.falloff = body_haze(&settings, settings.haze_visibility_km);
         ambient.color = daylight.ambient;
-        ambient.brightness = 50.0 * daylight.fill_strength;
+        // The atmosphere lights the shade itself; this fill only keeps unlit corners from black.
+        ambient.brightness = 6.0 * daylight.fill_strength;
     }
     if cameras.is_empty() {
         return;

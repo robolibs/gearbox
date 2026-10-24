@@ -3844,6 +3844,7 @@ dependencies = [
  "gearbox-controls",
  "gearbox-fields",
  "gearbox-globe",
+ "gearbox-greenhouse",
  "gearbox-planet",
  "glam 0.30.10",
  "half",

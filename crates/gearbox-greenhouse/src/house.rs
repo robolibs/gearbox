@@ -81,6 +81,8 @@ pub struct Tray {
     pub medium: Medium,
     /// Places for plants, in the tray's own order.
     pub slots: Vec<Option<Plant>>,
+    /// Plants each place stands for: a clump of wheat is many plants grown as one.
+    pub per_slot: f64,
 }
 
 impl Tray {
@@ -251,15 +253,15 @@ impl House {
         let mut grown = vec![0.0; self.tanks.len()];
         for tray in 0..self.trays.len() {
             let Some(around) = self.surroundings(tray, hour) else { continue };
-            let (room, tank) = (self.trays[tray].room, self.trays[tray].tank);
+            let (room, tank, many) = (self.trays[tray].room, self.trays[tray].tank, self.trays[tray].per_slot);
             for slot in 0..self.trays[tray].slots.len() {
                 let Some(plant) = self.trays[tray].slots[slot].as_mut() else { continue };
                 let (stage, mass) = (plant.stage(), plant.biomass_g);
                 let breath = plant.grow(dt, &around);
                 let (now, id) = (plant.stage(), PlantId { tray, slot });
-                grown[tank] += (plant.biomass_g - mass).max(0.0);
-                drawn[tank] += breath.water_kg;
-                exchange[room] += breath;
+                grown[tank] += (plant.biomass_g - mass).max(0.0) * many;
+                drawn[tank] += breath.water_kg * many;
+                exchange[room] += Exchange { co2_mol: breath.co2_mol * many, o2_mol: breath.o2_mol * many, water_kg: breath.water_kg * many };
                 if now != stage {
                     events.push(match (stage, now) {
                         (_, Stage::Dead) => Event::Died(id),
@@ -308,6 +310,7 @@ impl House {
     /// grain crops, the fruit alone for fruiting ones, which grow on.
     pub fn harvest(&mut self, id: PlantId) -> Result<Event, Refusal> {
         let tray = self.trays.get_mut(id.tray).ok_or(Refusal::NoSuchTray)?;
+        let many = tray.per_slot;
         let slot = tray.slots.get_mut(id.slot).ok_or(Refusal::NoSuchPlace)?;
         let plant = slot.as_mut().filter(|p| p.alive).ok_or(Refusal::Empty)?;
         let fruit = plant.species.edible == Edible::Fruit;
@@ -315,7 +318,7 @@ impl House {
         if !ready {
             return Err(Refusal::NotRipe);
         }
-        let harvest = Harvest { species: plant.species, fresh_kg: plant.edible_fresh_kg(), dry_g: plant.edible_g };
+        let harvest = Harvest { species: plant.species, fresh_kg: plant.edible_fresh_kg() * many, dry_g: plant.edible_g * many };
         if fruit {
             plant.biomass_g -= plant.edible_g;
             plant.edible_g = 0.0;
@@ -431,6 +434,7 @@ mod tests {
                 area_m2: 0.24,
                 medium: Medium::Hydroponic,
                 slots: vec![None; Tray::slots_for(0.24, &LETTUCE)],
+                per_slot: 1.0,
             });
         }
         house
