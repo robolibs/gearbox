@@ -19,7 +19,7 @@ pub struct PlantHull;
 
 /// Gives each new plant entity the hull of its prefab: a collider that
 /// touches nothing, which sensor rays still meet, labelled with the plant's
-/// name. The hull goes with the entity, so a plant's next look brings its own.
+/// name; a plant's next look brings its own hull.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_plant_hulls(
     mut commands: Commands,
@@ -54,6 +54,13 @@ fn physics_vec(v: DVec3) -> glam::DVec3 {
 
 fn physics_quat(q: DQuat) -> glam::DQuat {
     glam::DQuat::from_xyzw(q.x, q.y, q.z, q.w)
+}
+
+/// Takes the hulls of plant entities gone since last frame out of the physics world.
+pub fn drop_plant_hulls(mut gone: RemovedComponents<PlantHull>, mut physics: ResMut<PhysicsWorld>) {
+    for entity in gone.read() {
+        physics.remove_entity_collider(entity, false);
+    }
 }
 
 /// The air outside on a planet at its local solar hour.
@@ -118,6 +125,24 @@ mod tests {
         assert_eq!(at(0.5, 3.0, 0.5), field.outside);
         assert_eq!(at(0.5, 1.0, 2.0), field.outside);
         assert_eq!(at(-1.9, 2.4, -1.4), room);
+    }
+
+    #[test]
+    fn a_plant_gone_takes_its_hull_out_of_the_physics_world() {
+        let mut app = App::new();
+        app.insert_resource(PhysicsWorld::with_backend(Box::new(crate::physics::MollaBackend::default())));
+        app.add_systems(Update, drop_plant_hulls);
+        let plant = app.world_mut().spawn(PlantHull).id();
+        let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
+        let ball = ColliderDesc { enabled: false, ..ColliderDesc::new(Shape::Ball { radius: 0.1 }).entity(plant) };
+        let hull = physics.insert_collider(ball).unwrap();
+        physics.entity_to_collider.insert(plant, hull);
+        app.update();
+        assert!(app.world().resource::<PhysicsWorld>().collider(hull).is_some());
+        app.world_mut().despawn(plant);
+        app.update();
+        let physics = app.world().resource::<PhysicsWorld>();
+        assert!(physics.collider(hull).is_none() && !physics.entity_to_collider.contains_key(&plant));
     }
 
     #[test]

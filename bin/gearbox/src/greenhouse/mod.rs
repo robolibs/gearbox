@@ -42,6 +42,7 @@ impl Plugin for GreenhousePlugin {
                     step_greenhouse,
                     api::serve_greenhouse_api,
                     looks::sync_plants,
+                    sense::drop_plant_hulls,
                     sense::sync_plant_hulls,
                     sense::fill_air_field,
                     looks::sync_lamps,
