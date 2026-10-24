@@ -58,6 +58,10 @@ impl Plugin for SensorsPlugin {
     }
 }
 
+/// The name recognition gives a collider's entity in place of its prim path.
+#[derive(Component, Clone, Debug)]
+pub struct SensorLabel(pub String);
+
 /// Albedo for colliders without a matching visual: terrain and entity-less
 /// ground, then everything else.
 const GROUND_COLOR: [f32; 3] = [0.36, 0.45, 0.24];
@@ -384,7 +388,7 @@ pub(crate) fn run_machine_sensors(
     queue: Option<Res<RenderQueue>>,
     adapter: Option<Res<RenderAdapterInfo>>,
     prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    (parents, sensor_labels, air): (Query<&ChildOf>, Query<&SensorLabel>, Option<Res<crate::sensor_generic::AirField>>),
     transforms: Query<&GlobalTransform>,
     visuals: VisualColors,
     mut renders: ResMut<crate::sensor_cameras::SensorRenderQueue>,
@@ -407,6 +411,8 @@ pub(crate) fn run_machine_sensors(
     let mut carriers = Vec::new();
     let environment = SensorEnvironment {
         light: daylight.light(),
+        lamps: daylight.lamps(),
+        air: air.as_deref().cloned().unwrap_or_default(),
         contacts: if touch {
             crate::sensor_generic::contact_forces(&**physics)
         } else {
@@ -484,6 +490,9 @@ pub(crate) fn run_machine_sensors(
                 .collect();
             // `<machine>:<body prim>` for machine parts, the body prim otherwise.
             let label = |entity: Entity| {
+                if let Ok(label) = sensor_labels.get(entity) {
+                    return Some(label.0.clone());
+                }
                 let lineage = || std::iter::once(entity).chain(parents.iter_ancestors(entity));
                 let body = lineage().find(|e| physics.entity_to_body.contains_key(e)).unwrap_or(entity);
                 let path = prims.get(body).ok()?.1.path.to_string();
@@ -1902,6 +1911,7 @@ mod tests {
                     up: MVec3::Y,
                 },
                 contacts: crate::sensor_generic::contact_forces(&*world.backend),
+                ..Default::default()
             };
             rig.sample(&engine, &*world.backend, world.simulated_seconds, &environment)
                 .unwrap();

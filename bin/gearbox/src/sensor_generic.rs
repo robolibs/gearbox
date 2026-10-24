@@ -41,15 +41,93 @@ pub fn is_generic(kind: SensorKind) -> bool {
             | SensorKind::Position
             | SensorKind::Radar
             | SensorKind::Touch
+            | SensorKind::Climate
     )
 }
 
 /// What the environment knows this frame.
 #[derive(Default)]
 pub struct SensorEnvironment {
+    /// The sun and sky.
     pub light: LightEnvironment,
+    /// Point and spot lights.
+    pub lamps: Vec<Lamp>,
+    pub air: AirField,
     /// Contact forces of the last physics step on Molla bodies.
     pub contacts: Vec<ContactForceSample>,
+}
+
+/// A point or spot light as light sensors see it: its place in the physics
+/// world, the way it points, its intensity (W/sr) and reach (m).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lamp {
+    pub position: MVec3,
+    pub forward: MVec3,
+    pub intensity: Real,
+    pub range: Real,
+    /// Cosines of a spot's inner and outer cone angles; none for a point light.
+    pub cone: Option<(Real, Real)>,
+}
+
+impl Lamp {
+    /// The point source it is to a sensor at `at`, faded by distance and cone
+    /// as Bevy fades it; none out of its reach.
+    pub fn seen_from(&self, at: MVec3) -> Option<molla_sensors::LightSource> {
+        let offset = at - self.position;
+        let distance = offset.length();
+        if distance >= self.range {
+            return None;
+        }
+        let reach = (1.0 - (distance / self.range).powi(4)).clamp(0.0, 1.0).powi(2);
+        let cone = self.cone.map_or(1.0, |(inner, outer)| {
+            let cos = offset.normalize_or_zero().dot(self.forward);
+            ((cos - outer) / (inner - outer).max(1e-4)).clamp(0.0, 1.0).powi(2)
+        });
+        let intensity = self.intensity * reach * cone;
+        (intensity > 0.0).then_some(molla_sensors::LightSource::Point { position: self.position, intensity })
+    }
+}
+
+/// What a climate sensor reads: `[°C, relative humidity 0..1, CO2 ppm, O2 kPa, kPa]`.
+pub type AirReading = [f64; 5];
+
+/// A room of air: physics coordinates carried into the room's frame, the box
+/// it fills there, and the air in it.
+#[derive(Clone, Debug)]
+pub struct AirZone {
+    pub to_local: bevy::math::DAffine3,
+    pub centre: bevy::math::DVec3,
+    pub half: bevy::math::DVec3,
+    pub air: AirReading,
+}
+
+/// The air everywhere: in the rooms that hold some, else outside.
+#[derive(bevy::prelude::Resource, Clone, Debug, Default)]
+pub struct AirField {
+    pub zones: Vec<AirZone>,
+    pub outside: AirReading,
+}
+
+impl AirField {
+    pub fn at(&self, p: MVec3) -> AirReading {
+        let p = bevy::math::DVec3::new(p.x, p.y, p.z);
+        self.zones
+            .iter()
+            .find(|zone| {
+                let local = zone.to_local.transform_point3(p) - zone.centre;
+                local.abs().cmple(zone.half).all()
+            })
+            .map_or(self.outside, |zone| zone.air)
+    }
+}
+
+/// How far up a light sensor looks for a roof between it and the sky (m).
+const SKY_REACH: Real = 200.0;
+
+/// Whether nothing stands between `at` and the sky.
+fn open_sky(rays: &mut RigidRays<'_>, at: MVec3, up: MVec3) -> Result<bool, String> {
+    let hits = molla_sensors::RayQuery::cast(rays, &[at + up * 1e-3], &[up], SKY_REACH).map_err(|e| e.to_string())?;
+    Ok(hits.first().is_none_or(|hit| hit.t >= SKY_REACH))
 }
 
 /// A measurement before its publish stamp.
@@ -207,9 +285,15 @@ impl GenericSensors {
                     out.push(make(s, kind::DISTANCE, vec![r.distance, r.value]));
                 }
                 SensorKind::Light => {
+                    let at = s.world.position;
+                    let mut light = environment.light.clone();
+                    light.sources.extend(environment.lamps.iter().filter_map(|lamp| lamp.seen_from(at)));
+                    if light.sky > 0.0 && !open_sky(&mut rays, at, light.up)? {
+                        light.sky = 0.0;
+                    }
                     let r = self
                         .light
-                        .update_with(&mut rays, &[s.world], &environment.light)
+                        .update_with(&mut rays, &[s.world], &light)
                         .map_err(|e| format!("light `{}`: {e}", s.name))?[0];
                     out.push(make(s, kind::LIGHT, vec![r.irradiance, r.direct, r.sky, r.visible as f64, r.value]));
                 }
@@ -261,6 +345,7 @@ impl GenericSensors {
                         ],
                     ));
                 }
+                SensorKind::Climate => out.push(make(s, kind::CLIMATE, environment.air.at(s.world.position).to_vec())),
                 SensorKind::Position => {
                     let Some(&joint) = self.joints.get(&s.mount) else { continue };
                     let r = joint_reading(rigid.model(), rigid.state(), joint)
@@ -371,9 +456,54 @@ pub struct Daylight<'w, 's> {
         ),
     >,
     sky: Option<bevy::prelude::Res<'w, bevy_weather::SkyLight>>,
+    lights: bevy::prelude::Query<
+        'w,
+        's,
+        (
+            bevy::prelude::Entity,
+            Option<&'static bevy::prelude::PointLight>,
+            Option<&'static bevy::prelude::SpotLight>,
+            Option<&'static bevy::prelude::InheritedVisibility>,
+        ),
+        bevy::prelude::Or<(bevy::prelude::With<bevy::prelude::PointLight>, bevy::prelude::With<bevy::prelude::SpotLight>)>,
+    >,
+    parents: bevy::prelude::Query<'w, 's, &'static bevy::prelude::ChildOf>,
+    transforms: bevy::prelude::Query<'w, 's, &'static bevy::prelude::Transform>,
+    sites: bevy::prelude::Query<'w, 's, &'static crate::globe::Site>,
 }
 
 impl Daylight<'_, '_> {
+    /// Every lit point and spot light, at its place in the physics world.
+    pub fn lamps(&self) -> Vec<Lamp> {
+        let mut lamps = Vec::new();
+        for (entity, point, spot, visible) in &self.lights {
+            if visible.is_some_and(|v| !v.get()) {
+                continue;
+            }
+            let (lumens, range, cone) = match (point, spot) {
+                (Some(p), _) => (p.intensity, p.range, None),
+                (_, Some(s)) => (s.intensity, s.range, Some((s.inner_angle.cos() as Real, s.outer_angle.cos() as Real))),
+                _ => continue,
+            };
+            if lumens <= 0.0 || range <= 0.0 {
+                continue;
+            }
+            let at = crate::globe::transform_in_site(entity, &self.parents, &self.transforms, &self.sites);
+            let site = crate::globe::site_of(entity, &self.parents, &self.sites);
+            let p = at.translation().as_dvec3() + gearbox_globe::physics_offset(site);
+            let forward = at.forward().as_vec3();
+            lamps.push(Lamp {
+                position: MVec3::new(p.x, p.y, p.z),
+                forward: MVec3::new(forward.x as Real, forward.y as Real, forward.z as Real),
+                // Bevy spreads a light's lumens over the whole sphere, spot or not.
+                intensity: lumens as Real / (4.0 * std::f64::consts::PI) / DAYLIGHT_LUMENS_PER_WATT,
+                range: range as Real,
+                cone,
+            });
+        }
+        lamps
+    }
+
     /// The brightest directional light as the sun, split by the weather's
     /// cloud cover (none at night).
     pub fn light(&self) -> LightEnvironment {
@@ -424,6 +554,30 @@ mod tests {
     fn site_frame_is_north_x_up_y_east_z() {
         let [east, north, up] = SITE_FRAME.enu();
         assert_eq!((east, north, up), (MVec3::Z, MVec3::X, MVec3::Y));
+    }
+
+    #[test]
+    fn a_spot_lights_only_its_cone_and_fades_to_its_range() {
+        let lamp = Lamp {
+            position: MVec3::new(0.0, 2.0, 0.0),
+            forward: -MVec3::Y,
+            intensity: 10.0,
+            range: 4.0,
+            cone: Some((0.3f64.cos(), 0.6f64.cos())),
+        };
+        let strength = |at: MVec3| match lamp.seen_from(at) {
+            Some(molla_sensors::LightSource::Point { intensity, .. }) => intensity,
+            _ => 0.0,
+        };
+        let below = strength(MVec3::new(0.0, 1.0, 0.0));
+        assert!(below > 9.9 && below <= 10.0);
+        assert!(strength(MVec3::new(0.0, -1.9, 0.0)) < below * 0.1);
+        assert_eq!(strength(MVec3::new(0.0, 3.0, 0.0)), 0.0);
+        assert_eq!(strength(MVec3::new(1.0, 1.9, 0.0)), 0.0);
+        let rim = strength(MVec3::new(0.45f64.tan(), 1.0, 0.0));
+        assert!(rim > 0.0 && rim < below);
+        let point = Lamp { cone: None, ..lamp };
+        assert!(point.seen_from(MVec3::new(0.0, 3.0, 0.0)).is_some());
     }
 
     #[test]

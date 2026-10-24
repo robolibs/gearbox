@@ -446,6 +446,9 @@ pub mod measurement_kind {
     /// element: airspeed in its frame (m/s), force and wind in world axes (N,
     /// m/s).
     pub const DRAG: u32 = 18;
+    /// `[temperature °C, relative humidity 0..1, CO2 ppm, O2 kPa, pressure
+    /// kPa]` of the air the link is in.
+    pub const CLIMATE: u32 = 19;
 
     /// Values per record.
     pub fn width(kind: u32) -> usize {
@@ -455,7 +458,7 @@ pub mod measurement_kind {
             COMPASS | PROPELLER => 4,
             GPS => 10,
             DISTANCE | POSITION | BELT => 2,
-            LIGHT | RADAR | RECEIVER | CONNECTOR => 5,
+            LIGHT | RADAR | RECEIVER | CONNECTOR | CLIMATE => 5,
             TOUCH => 6,
             RECOGNITION => 12,
             MOTOR => 8,
@@ -484,6 +487,7 @@ pub mod measurement_kind {
             CONNECTOR => "connector",
             COPTER => "copter",
             DRAG => "drag",
+            CLIMATE => "climate",
             _ => "unknown",
         }
     }

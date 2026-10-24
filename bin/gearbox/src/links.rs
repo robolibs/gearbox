@@ -166,9 +166,10 @@ pub enum SensorKind {
     Touch,
     Receiver,
     Emitter,
+    Climate,
 }
 
-const SENSOR_KINDS: [(&str, SensorKind); 15] = [
+const SENSOR_KINDS: [(&str, SensorKind); 16] = [
     ("imu", SensorKind::Imu),
     ("lidar", SensorKind::Lidar),
     ("camera", SensorKind::Camera),
@@ -184,6 +185,7 @@ const SENSOR_KINDS: [(&str, SensorKind); 15] = [
     ("touch", SensorKind::Touch),
     ("receiver", SensorKind::Receiver),
     ("emitter", SensorKind::Emitter),
+    ("climate", SensorKind::Climate),
 ];
 
 impl SensorKind {
@@ -1661,6 +1663,7 @@ fn read_sensor(
             SensorKind::Camera => 5.0,
             SensorKind::Compass | SensorKind::Distance | SensorKind::Radar => 20.0,
             SensorKind::Receiver | SensorKind::Emitter => 50.0,
+            SensorKind::Climate => 1.0,
         },
         columns: 360,
         rows: 16,

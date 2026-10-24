@@ -10,6 +10,7 @@
 mod api;
 pub mod crops;
 mod looks;
+mod sense;
 
 use std::collections::HashSet;
 
@@ -32,10 +33,20 @@ pub struct GreenhousePlugin;
 impl Plugin for GreenhousePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Greenhouse>()
+            .init_resource::<crate::sensor_generic::AirField>()
             .add_systems(Startup, looks::build_looks)
             .add_systems(
                 Update,
-                (discover_greenhouses, step_greenhouse, api::serve_greenhouse_api, looks::sync_plants, looks::sync_lamps, looks::expose_indoors)
+                (
+                    discover_greenhouses,
+                    step_greenhouse,
+                    api::serve_greenhouse_api,
+                    looks::sync_plants,
+                    sense::sync_plant_hulls,
+                    sense::fill_air_field,
+                    looks::sync_lamps,
+                    looks::expose_indoors,
+                )
                     .chain()
                     .after(WorldTime),
             );
@@ -387,14 +398,7 @@ fn step_greenhouse(
     }
     let calendar = weather.calendar;
     let elevation = weather.sun_position.normalize_or_zero().y.clamp(-1.0, 1.0).asin() as f64;
-    let (top, tau, outside) = match calendar.planet {
-        bevy_weather::Planet::Mars => (586.2, weather.dust_tau as f64, Outside::mars(calendar.hour)),
-        bevy_weather::Planet::Moon => {
-            let day = elevation > 0.0;
-            (1361.0, 0.0, Outside { temperature_c: if day { 100.0 } else { -170.0 }, pressure_kpa: 0.0 })
-        }
-        bevy_weather::Planet::Earth => (1361.0, 0.3 + 2.5 * weather.clouds.clouds_coverage as f64, Outside { temperature_c: 12.0, pressure_kpa: 101.3 }),
-    };
+    let (top, tau, outside) = outside(&weather);
     let solar = gearbox_greenhouse::power::surface_irradiance(top * calendar.irradiance_scale() as f64, elevation, tau);
     // The hour the step began at: the calendar has already moved on by it.
     let hour = (calendar.hour - step.seconds / (calendar.planet.solar_day_s() / 24.0)).rem_euclid(24.0) * greenhouse.house.cycle_hours / 24.0;
@@ -409,4 +413,19 @@ fn step_greenhouse(
         }
     }
     greenhouse.events.extend(events);
+}
+
+/// Sunlight at the top of the air (W/m²), how much the air dims it, and the
+/// air beyond the walls, on the planet the weather is on.
+pub fn outside(weather: &WeatherSettings) -> (f64, f64, Outside) {
+    let calendar = weather.calendar;
+    let elevation = weather.sun_position.normalize_or_zero().y.clamp(-1.0, 1.0).asin() as f64;
+    match calendar.planet {
+        bevy_weather::Planet::Mars => (586.2, weather.dust_tau as f64, Outside::mars(calendar.hour)),
+        bevy_weather::Planet::Moon => {
+            let day = elevation > 0.0;
+            (1361.0, 0.0, Outside { temperature_c: if day { 100.0 } else { -170.0 }, pressure_kpa: 0.0 })
+        }
+        bevy_weather::Planet::Earth => (1361.0, 0.3 + 2.5 * weather.clouds.clouds_coverage as f64, Outside { temperature_c: 12.0, pressure_kpa: 101.3 }),
+    }
 }

@@ -76,6 +76,8 @@ struct Meshes {
 #[derive(Resource)]
 pub struct CropLooks {
     meshes: HashMap<(&'static str, usize), Meshes>,
+    /// Points whose convex hull wraps each prefab.
+    hulls: HashMap<(&'static str, usize), Vec<Vec3>>,
     leaves: HashMap<(&'static str, Tint), Handle<StandardMaterial>>,
     parts: Handle<StandardMaterial>,
     fruit: Handle<StandardMaterial>,
@@ -91,6 +93,7 @@ pub fn build_looks(
 ) {
     let mut looks = CropLooks {
         meshes: HashMap::new(),
+        hulls: HashMap::new(),
         leaves: HashMap::new(),
         parts: materials.add(StandardMaterial { perceptual_roughness: 0.7, ..default() }),
         fruit: materials.add(StandardMaterial { perceptual_roughness: 0.22, reflectance: 0.6, ..default() }),
@@ -122,6 +125,7 @@ pub fn build_looks(
         }
         for stage in 0..STAGES {
             let prefab = crops::prefab(species, stage);
+            looks.hulls.insert((species.name, stage), hull_points(std::iter::once(&prefab.leaves).chain(prefab.parts.as_ref())));
             looks.meshes.insert(
                 (species.name, stage),
                 Meshes {
@@ -133,6 +137,38 @@ pub fn build_looks(
         }
     }
     commands.insert_resource(looks);
+}
+
+impl CropLooks {
+    /// Points whose convex hull wraps a crop's prefab at a stage, in its frame.
+    pub fn hull(&self, species: &'static str, stage: usize) -> Option<&[Vec3]> {
+        self.hulls.get(&(species, stage)).map(Vec::as_slice).filter(|points| points.len() >= 4)
+    }
+}
+
+/// Directions a hull is sampled along.
+const HULL_DIRECTIONS: usize = 96;
+
+/// The farthest vertex of the meshes along each of a spread of directions:
+/// few points, and their hull is close to the meshes' own.
+fn hull_points<'a>(meshes: impl Iterator<Item = &'a Mesh>) -> Vec<Vec3> {
+    let positions: Vec<Vec3> = meshes
+        .filter_map(|mesh| mesh.attribute(Mesh::ATTRIBUTE_POSITION)?.as_float3())
+        .flatten()
+        .map(|p| Vec3::from_array(*p))
+        .collect();
+    let mut points: Vec<Vec3> = Vec::new();
+    for i in 0..HULL_DIRECTIONS {
+        // A Fibonacci sphere: even directions without a pole cluster.
+        let y = 1.0 - 2.0 * (i as f32 + 0.5) / HULL_DIRECTIONS as f32;
+        let turn = i as f32 * 2.399_963;
+        let along = Vec3::new((1.0 - y * y).sqrt() * turn.cos(), y, (1.0 - y * y).sqrt() * turn.sin());
+        let Some(far) = positions.iter().copied().max_by(|a, b| a.dot(along).total_cmp(&b.dot(along))) else { break };
+        if !points.iter().any(|p| p.distance_squared(far) < 1e-8) {
+            points.push(far);
+        }
+    }
+    points
 }
 
 /// What a plant should look like now: its prefab, tint, whether it carries fruit, and its size.
