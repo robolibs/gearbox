@@ -60,12 +60,18 @@ pub fn writeback_transforms(
         let spin = Quat::from_scaled_axis(Vec3::new(turned.x as f32, turned.y as f32, turned.z as f32));
         let rotation = parent_world.compute_transform().rotation.inverse()
             * (spin * quat_from_d(pose.rotation));
-        if let Ok(mut transform) = transforms.p1().get_mut(entity) {
-            transform.translation = translation;
-            transform.rotation = rotation;
+        // A body at rest keeps its transform untouched, so nothing under it
+        // is propagated or extracted again.
+        if let Ok(mut transform) = transforms.p1().get_mut(entity)
+            && transform.set_if_neq(Transform { translation, rotation, scale: transform.scale })
+        {
             written.insert(entity);
         }
-        if written.contains(&entity) {
+        let fresh = world
+            .published_transforms
+            .get(&entity)
+            .is_none_or(|old| old.body != handle || old.pose != pose);
+        if written.contains(&entity) || fresh {
             let global = transform_in_site(entity, &parents, &transforms.p0(), &sites);
             world.published_transforms.insert(
                 entity,
@@ -311,5 +317,32 @@ mod tests {
                     > 0.99999
             );
         }
+    }
+
+    #[test]
+    fn a_body_at_rest_leaves_its_transform_unchanged_while_physics_runs() {
+        use crate::physics::backend::DVec3;
+        let mut app = App::new();
+        let body_entity = app.world_mut().spawn(Transform::IDENTITY).id();
+        let mut physics = PhysicsWorld::default();
+        let body = physics.insert_body(BodyDesc::fixed().entity(body_entity).pose(Pose::from_translation(DVec3::Y)));
+        physics.entity_to_body.insert(body_entity, body);
+        app.insert_resource(physics)
+            .insert_resource(super::super::PhysicsActive(true))
+            .add_systems(PostUpdate, writeback_transforms);
+        app.update();
+        assert!((app.world().get::<Transform>(body_entity).unwrap().translation - Vec3::Y).length() < 1e-6);
+        let mut state = SystemState::<Query<(), Changed<Transform>>>::new(app.world_mut());
+        let mut changed = |app: &mut App| state.get(app.world()).unwrap().iter().count();
+        changed(&mut app);
+        app.update();
+        assert_eq!(changed(&mut app), 0);
+        app.world_mut()
+            .resource_mut::<PhysicsWorld>()
+            .body_mut(body)
+            .unwrap()
+            .set_position(Pose::from_translation(DVec3::Y * 2.0), true);
+        app.update();
+        assert_eq!(changed(&mut app), 1);
     }
 }
