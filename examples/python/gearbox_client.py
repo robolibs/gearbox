@@ -670,18 +670,21 @@ class Gearbox:
         req = GreenhouseAction(op=GREENHOUSE_OP[op], props=pack_map({k: v for k, v in keys.items() if v is not None}))
         return self.call(self.addr, HOST["greenhouse"], req, Status)
 
-    def machine(self, namespace: str, timeout: float = 30.0) -> "Machine":
+    def machine(self, namespace: str, timeout: float = 30.0, listing: list[dict[str, str]] | None = None) -> "Machine":
+        """The machine `namespace`, looked up in `listing` (a `machines()` read
+        another client made) before asking the host."""
         if namespace in self._machines:
             return self._machines[namespace]
         deadline = time.time() + timeout
         while True:
-            for m in self.machines():
+            for m in listing if listing is not None else self.machines():
                 if m.get("machine_id") == namespace and m.get("addr"):
                     machine = Machine(self, namespace, m["addr"], m.get("did", ""))
                     self._machines[namespace] = machine
                     return machine
             if time.time() > deadline:
                 raise RuntimeError(f"machine `{namespace}` did not appear within {timeout:.0f}s")
+            listing = None
             time.sleep(0.2)
 
 

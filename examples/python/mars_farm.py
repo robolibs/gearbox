@@ -5,8 +5,9 @@ writes (`bin/gearbox/assets/world/mars_base_farm.json`):
   what is ripe within their reach and sow the places left empty, one place
   after another, and park when there is nothing to do; a harvester drives
   its lane to the table of each place before its arm reaches in;
-- the excavators dig regolith west of the soil plant and tip it into the
-  plant's bins, round after round;
+- the excavators leave their docks along the lane past the chargers, dig
+  regolith on their patch west of the soil plant and tip it into the
+  plant's bins, round after round, one of them in the yard at a time;
 - the washers brush the dust off the arches' and domes' glazing and off
   the solar rows, then brush the room (`clean_glazing`, by the washer) or
   the field (`clean_panels`) clean in the sim, and rest while dust settles.
@@ -15,20 +16,20 @@ writes (`bin/gearbox/assets/world/mars_base_farm.json`):
     gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base
     python examples/python/mars_farm.py [--robots base_fleet_eve,base_fleet_archapicker1]
 
-Every robot runs as its own task on one loop: a task says how long it
-waits before its next step, so many robots work at once over one client.
-A plant action names the robot (`by`), and the sim refuses it until a part
-of that robot is within reach, so a robot's work is real only once its head
-is there.
+Every robot runs as its own thread with its own client, so a robot that
+waits on the sim never holds up another. A task says how long, in the
+sim's seconds, it waits before its next step. A plant action names the
+robot (`by`), and the sim refuses it until a part of that robot is within
+reach, so a robot's work is real only once its head is there.
 """
 
 from __future__ import annotations
 
 import argparse
-import heapq
 import json
 import math
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -50,7 +51,7 @@ IDLE_S = 30.0
 FRESH_S = 20.0
 HOLD_MS = 120_000
 # How often a driving robot is steered, how long it may drive without
-# getting closer and how long it may turn on the spot, seconds.
+# getting closer and how long it may turn on the spot, sim seconds.
 STEER_S = 0.1
 STALL_S = 10.0
 TURN_S = 40.0
@@ -60,6 +61,10 @@ FAR = re.compile(r"is ([0-9.]+) m from")
 APART = 2.5
 # Where each robot works now: machine id -> (room, place east and north).
 WORKING: dict[str, tuple[str, list[float]]] = {}
+WORKING_LOCK = threading.Lock()
+# The soil plant's yard (the lane past the docks, the apron and the bins)
+# holds one excavator at a time.
+YARD = threading.Lock()
 
 
 def patient(call, *args, tries: int = 6, **kwargs):
@@ -73,16 +78,41 @@ def patient(call, *args, tries: int = 6, **kwargs):
             time.sleep(1.0)
 
 
+class Clock:
+    """The sim's clock, read by one thread for every robot."""
+
+    def __init__(self, instance: str | None):
+        self.gb = Gearbox(instance)
+        self.world_s = patient(self.gb.clock).world_s
+        threading.Thread(target=self._follow, daemon=True).start()
+
+    def _follow(self):
+        while True:
+            try:
+                self.world_s = self.gb.clock().world_s
+            except RuntimeError:
+                pass
+            time.sleep(0.05)
+
+    def wait(self, seconds: float):
+        """Waits `seconds` of the sim's time, however fast or slow it runs."""
+        until = self.world_s + seconds
+        while self.world_s < until:
+            time.sleep(0.02)
+
+
 _PLANTS: dict = {"at": -1.0e9, "plants": {}}
+_PLANTS_LOCK = threading.Lock()
 
 
 def plants(gb: Gearbox) -> dict[str, dict]:
     """Every plant by name, as the farm last read it: read again once
     `FRESH_S` of wall time have passed, so robots share one read."""
-    if time.time() - _PLANTS["at"] > FRESH_S:
-        _PLANTS["plants"] = {p["plant"]: p for p in patient(gb.plants)}
-        _PLANTS["at"] = time.time()
-    return _PLANTS["plants"]
+    with _PLANTS_LOCK:
+        if time.time() - _PLANTS["at"] > FRESH_S:
+            _PLANTS["plants"] = {p["plant"]: p for p in patient(gb.plants)}
+            _PLANTS["at"] = time.time()
+        return _PLANTS["plants"]
 
 
 def wrap(angle: float) -> float:
@@ -96,12 +126,13 @@ def clamp(v: float, limit: float) -> float:
 class Robot:
     """A claimed machine of the plan."""
 
-    def __init__(self, gb: Gearbox, machine: str, entry: dict, log):
+    def __init__(self, gb: Gearbox, machine: str, entry: dict, log, clock: Clock, listing: list[dict[str, str]]):
         self.gb = gb
         self.machine = machine
         self.entry = entry
         self.log = log
-        self.robot = patient(gb.machine, machine)
+        self.clock = clock
+        self.robot = patient(gb.machine, machine, listing=listing)
         patient(self.robot.claim, hold_ms=HOLD_MS, take=True, client="mars_farm")
 
     def set(self, link: str, name: str, value: float):
@@ -126,10 +157,13 @@ class Robot:
     def drive(self, to: list[float], heading: float | None = None, speed: float = 0.35, within: float = 0.03):
         """Drives to `to` (east, north). Along a lane `heading`, forward or
         back without turning off it; otherwise it turns to face the point and
-        drives up to it. Gives up once it stops getting closer."""
-        best, stalled = float("inf"), 0.0
+        drives up to it. Gives up once it drives `STALL_S` without getting
+        closer, or has turned on the spot for `TURN_S` in all."""
+        best, stalled, turning, last = float("inf"), 0.0, 0.0, self.clock.world_s
         while True:
             s = self.robot.state(wait=0.5)
+            now = self.clock.world_s
+            dt, last = now - last, now
             dx, dy = to[0] - s.x, to[1] - s.y
             if heading is None:
                 gap = math.hypot(dx, dy)
@@ -142,16 +176,23 @@ class Robot:
                 along = dx * math.cos(heading) + dy * math.sin(heading)
                 across = -dx * math.sin(heading) + dy * math.cos(heading)
                 gap = abs(along)
-                if gap < within:
+                off = wrap(heading - s.heading_rad)
+                if gap < within and abs(off) < 0.05:
                     break
-                v = clamp(0.8 * along, speed)
-                w = clamp(1.5 * wrap(heading - s.heading_rad) + 1.2 * across * math.copysign(1.0, v), 0.4)
+                if gap < within:
+                    # There, but turned off the lane: turns back onto it on the spot.
+                    v, w = 0.0, clamp(1.5 * off, 0.4)
+                else:
+                    v = clamp(0.8 * along, speed)
+                    w = clamp(1.5 * off + 1.2 * across * math.copysign(1.0, v), 0.4)
+            # Turning on the spot gets no closer and is no stall.
             if gap < best - 0.01:
                 best, stalled = gap, 0.0
-            elif stalled > STALL_S:
+            elif v != 0.0:
+                stalled += dt
+            turning += dt if v == 0.0 else 0.0
+            if stalled > STALL_S or turning > TURN_S:
                 break
-            # Turning on the spot gets no closer and is no stall.
-            stalled += STEER_S if v != 0.0 else 0.0
             self.twist(v, w)
             yield STEER_S
         self.twist(0.0, 0.0)
@@ -168,14 +209,24 @@ class Robot:
         self.twist(0.0, 0.0)
         yield SETTLE_S
 
+    def run(self):
+        raise NotImplementedError
+
+    def work(self):
+        """Runs the robot's task in this thread, waiting in the sim's time."""
+        for seconds in self.run():
+            self.clock.wait(seconds)
+
 
 class Tender(Robot):
     """A robot that tends plants by the plan's joint targets."""
 
-    def __init__(self, gb, machine, entry, log):
-        super().__init__(gb, machine, entry, log)
-        self.at = dict(entry["park"])
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.at = dict(self.entry["park"])
         self.stop = None
+        # The poses the head came down through to where it works now.
+        self.via: list[dict] = []
         self.done = 0
         # Places the sim refused, left alone for a few rounds.
         self.refused: dict[str, int] = {}
@@ -197,7 +248,15 @@ class Tender(Robot):
     def crowded(self, at: list[float]) -> bool:
         """Whether another robot of the room works within APART of a place."""
         room = self.entry["room"]
-        return any(m != self.machine and r == room and math.dist(at, there) < APART for m, (r, there) in WORKING.items())
+        with WORKING_LOCK:
+            return any(m != self.machine and r == room and math.dist(at, there) < APART for m, (r, there) in WORKING.items())
+
+    def working(self, at: list[float] | None):
+        with WORKING_LOCK:
+            if at is None:
+                WORKING.pop(self.machine, None)
+            else:
+                WORKING[self.machine] = (self.entry["room"], at)
 
     def beside(self, targets: dict) -> bool:
         """Whether the head can go straight to `targets` from where it works
@@ -208,6 +267,31 @@ class Tender(Robot):
         if "drive" in targets:
             return working and targets["drive"] == self.stop
         return working and all(abs((targets[k] - self.at[k]) * self.entry["joints"][k]["range"]) < BESIDE for k in moves["cross"])
+
+    def parked(self) -> bool:
+        return all(self.at[k] == self.entry["park"][k] for k in self.entry["moves"]["leave"])
+
+    def lift(self):
+        """Takes the head back up the way it came down."""
+        for via in reversed(self.via):
+            yield SLOW * self.move(self.entry["moves"]["reach"], via)
+        self.via = []
+
+    def lower(self, targets: dict):
+        """Brings the head down through a place's `via` poses, out of its
+        park by way of the ready pose."""
+        if "ready" in self.entry and self.parked():
+            yield SLOW * self.move(self.entry["moves"]["reach"], self.entry["ready"])
+        for via in targets.get("via", []):
+            yield SLOW * self.move(self.entry["moves"]["reach"], via)
+        self.via = targets.get("via", [])
+
+    def park(self):
+        """Back up the way the head came down, by way of the ready pose, to its park."""
+        yield from self.lift()
+        if "ready" in self.entry and not self.parked():
+            yield SLOW * self.move(self.entry["moves"]["reach"], self.entry["ready"])
+        yield SLOW * self.move(self.entry["moves"]["leave"], self.entry["park"])
 
     def cross(self, targets: dict):
         if "drive" in targets and targets["drive"] != self.stop:
@@ -263,8 +347,8 @@ class Tender(Robot):
         while True:
             jobs = self.jobs()
             if not jobs:
-                WORKING.pop(self.machine, None)
-                yield SLOW * self.move(moves["leave"], park)
+                self.working(None)
+                yield from self.park()
                 joints = [k for k in moves["cross"] if k != "drive"]
                 if joints:
                     yield self.move(joints, park)
@@ -274,12 +358,15 @@ class Tender(Robot):
                 targets = self.entry["places"][place]
                 if self.crowded(targets["at"]):
                     continue
-                WORKING[self.machine] = (self.entry["room"], targets["at"])
+                self.working(targets["at"])
                 if self.beside(targets):
+                    yield from self.lift()
+                    yield from self.lower(targets)
                     yield SLOW * self.move(moves["cross"] + moves["reach"], targets)
                 else:
-                    yield SLOW * self.move(moves["leave"], park)
+                    yield from self.park()
                     yield from self.cross(targets)
+                    yield from self.lower(targets)
                 status = yield from self.close_in(op, place, crop)
                 if not status.ok and FAR.search(status.message):
                     yield SLOW * self.move(moves["reach"], targets)
@@ -304,13 +391,30 @@ class Digger(Robot):
         self.set(links["drum_front"], "velocity", drum)
         self.set(links["drum_rear"], "velocity", -drum)
 
+    def go(self, *points, within: float = 0.15):
+        for point in points:
+            yield from self.drive(point, within=within)
+
+    def in_field(self) -> bool:
+        """Whether the robot stands past the lane's far end, on the dig ground."""
+        s = self.robot.state(wait=0.5)
+        (ax, ay), (bx, by) = self.entry["lane"]
+        return ((s.x - ax) * (bx - ax) + (s.y - ay) * (by - ay)) / ((bx - ax) ** 2 + (by - ay) ** 2) > 1.0
+
     def run(self):
         bays = self.entry["bays"]
+        apron, lane = self.entry["lane"]
+        self.arms("carry")
+        yield 4.0
+        if not self.in_field():
+            with YARD:
+                s = self.robot.state(wait=0.5)
+                docked = math.dist((s.x, s.y), self.entry["dock"]) < 1.0
+                self.log(f"{self.machine}: {'off the dock' if docked else 'out of the yard'} and along the lane")
+                yield from self.go(*([self.entry["leave"]] if docked else []), apron, lane)
         loads = 0
         while True:
-            self.arms("carry")
-            yield 4.0
-            yield from self.drive(self.entry["dig"])
+            yield from self.go(self.entry["dig"], within=0.3)
             # Drums down and turning, creeping forward across the patch.
             self.arms("dig", self.entry["drum"]["dig"])
             yield 4.0
@@ -320,19 +424,22 @@ class Digger(Robot):
             self.twist(0.0, 0.0)
             self.arms("carry")
             yield 4.0
+            self.log(f"{self.machine}: dug load {loads + 1}, waiting for the yard")
             bay = bays[loads % len(bays)]
-            yield from self.drive(bay["approach"])
             east, north = bay["stop"][0] - bay["approach"][0], bay["stop"][1] - bay["approach"][1]
-            yield from self.face(math.atan2(north, east))
-            yield from self.drive(bay["stop"], math.atan2(north, east), speed=0.15, within=0.05)
-            self.arms("dump")
-            self.set(self.entry["links"]["drum_front"], "velocity", self.entry["drum"]["dump"])
-            yield 8.0
-            loads += 1
-            self.log(f"{self.machine}: tipped load {loads} into bay {loads % len(bays) or len(bays)}")
-            self.arms("carry")
-            yield 3.0
-            yield from self.drive(bay["approach"], math.atan2(north, east), speed=0.2, within=0.1)
+            with YARD:
+                yield from self.go(lane, apron, bay["approach"])
+                yield from self.face(math.atan2(north, east))
+                yield from self.drive(bay["stop"], math.atan2(north, east), speed=0.15, within=0.05)
+                self.arms("dump")
+                self.set(self.entry["links"]["drum_front"], "velocity", self.entry["drum"]["dump"])
+                yield 8.0
+                loads += 1
+                self.log(f"{self.machine}: tipped load {loads} into bay {loads % len(bays) or len(bays)}")
+                self.arms("carry")
+                yield 3.0
+                yield from self.drive(bay["approach"], math.atan2(north, east), speed=0.2, within=0.1)
+                yield from self.go(apron, lane)
 
 
 class Washer(Robot):
@@ -407,28 +514,33 @@ def main():
     gb = Gearbox(args.instance)
     gb.wait_ready()
     patient(gb.play)
+    clock = Clock(args.instance)
+    # One read of the machines for every robot's own client.
+    listing = patient(gb.machines)
     start = time.time()
+    lock = threading.Lock()
 
     def log(text):
-        print(f"[{time.time() - start:7.1f}s] {text}", flush=True)
+        with lock:
+            print(f"[{time.time() - start:7.1f}s] {text}", flush=True)
 
-    # Tasks wait in the sim's own seconds, however fast or slow it runs.
-    def now() -> float:
-        clock = patient(gb.clock)
-        return clock.world_s / (clock.rate or 1.0)
-
-    tasks = []
-    for machine in wanted:
+    def work(machine: str):
         entry = plan[machine]
-        robot = KINDS[entry["kind"]](gb, machine, entry, log)
-        log(f"{machine}: {entry['kind']}" + (f", {len(entry['places'])} places in {entry['room']}" if "places" in entry else ""))
-        tasks.append((now(), machine, robot.run()))
-    heapq.heapify(tasks)
-    while tasks:
-        wake, machine, task = heapq.heappop(tasks)
-        while now() < wake:
-            time.sleep(0.02)
-        heapq.heappush(tasks, (now() + next(task), machine, task))
+        try:
+            robot = KINDS[entry["kind"]](Gearbox(args.instance), machine, entry, log, clock, listing)
+            log(f"{machine}: {entry['kind']}" + (f", {len(entry['places'])} places in {entry['room']}" if "places" in entry else ""))
+            robot.work()
+        except Exception as err:  # noqa: BLE001 - one robot's failure is logged, the others go on
+            log(f"{machine}: stopped: {err}")
+
+    threads = [threading.Thread(target=work, args=(machine,), daemon=True) for machine in wanted]
+    for thread in threads:
+        thread.start()
+    try:
+        while any(thread.is_alive() for thread in threads):
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
