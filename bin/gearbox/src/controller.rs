@@ -3765,9 +3765,24 @@ pub(crate) fn find_joint_body_pair(
     parents: &Query<&ChildOf>,
     physics: &crate::physics::PhysicsWorld,
 ) -> Option<(Entity, Entity, BodyId, BodyId)> {
-    let (_, _, joint) = joints.iter().find(|(entity, prim, _)| {
+    let cached = JOINT_ENTITIES
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&scene_root).and_then(|paths| paths.get(prim_path)).copied());
+    let hit = cached.and_then(|entity| joints.get(entity).ok()).filter(|(entity, prim, _)| {
         prim.path == prim_path && is_descendant_of(*entity, scene_root, parents)
-    })?;
+    });
+    let (entity, _, joint) = match hit {
+        Some(hit) => hit,
+        None => joints.iter().find(|(entity, prim, _)| {
+            prim.path == prim_path && is_descendant_of(*entity, scene_root, parents)
+        })?,
+    };
+    if cached != Some(entity)
+        && let Ok(mut cache) = JOINT_ENTITIES.lock()
+    {
+        cache.entry(scene_root).or_default().insert(prim_path.to_string(), entity);
+    }
     let body0_entity = joint.body0?;
     let body1_entity = joint.body1?;
     let body0 = physics.entity_to_body.get(&body0_entity).copied()?;
@@ -3775,18 +3790,39 @@ pub(crate) fn find_joint_body_pair(
     Some((body0_entity, body1_entity, body0, body1))
 }
 
+/// Entities `find_prim_entity` and `find_joint_body_pair` found, by scene
+/// root and prim path; a hit is trusted only while that entity still holds
+/// the prim under the root.
+type PrimEntities = std::sync::LazyLock<std::sync::Mutex<HashMap<Entity, HashMap<String, Entity>>>>;
+static PRIM_ENTITIES: PrimEntities = std::sync::LazyLock::new(Default::default);
+static JOINT_ENTITIES: PrimEntities = std::sync::LazyLock::new(Default::default);
+
 pub(crate) fn find_prim_entity(
     scene_root: Entity,
     prim_path: &str,
     prims: &Query<(Entity, &UsdPrimRef)>,
     parents: &Query<&ChildOf>,
 ) -> Option<Entity> {
-    prims
+    let cached = PRIM_ENTITIES
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&scene_root).and_then(|paths| paths.get(prim_path)).copied());
+    if let Some(entity) = cached
+        && prims.get(entity).is_ok_and(|(_, prim)| prim.path == prim_path)
+        && is_descendant_of(entity, scene_root, parents)
+    {
+        return Some(entity);
+    }
+    let found = prims
         .iter()
         .find(|(entity, prim)| {
             prim.path == prim_path && is_descendant_of(*entity, scene_root, parents)
         })
-        .map(|(entity, _)| entity)
+        .map(|(entity, _)| entity);
+    if let (Some(entity), Ok(mut cache)) = (found, PRIM_ENTITIES.lock()) {
+        cache.entry(scene_root).or_default().insert(prim_path.to_string(), entity);
+    }
+    found
 }
 
 pub(crate) fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&ChildOf>) -> bool {
