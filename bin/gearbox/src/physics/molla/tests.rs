@@ -30,6 +30,25 @@ fn dynamic() -> BodyDesc {
 }
 
 #[test]
+fn collider_batches_change_the_world_once_and_keep_the_table() {
+    let mut owned = MollaBackend::default();
+    let backend: &mut dyn PhysicsBackend = &mut owned;
+    let body = backend.insert_body(dynamic());
+    let ball = || ColliderDesc::new(Shape::Ball { radius: 0.1 });
+    let old = [backend.insert_collider(ball().parent(body)).unwrap(), backend.insert_collider(ball()).unwrap()];
+    let revision = backend.molla(|scene| scene.revision());
+    let new = backend.edit_colliders(vec![ball().parent(body), ball(), ball()], &old);
+    assert_eq!(backend.molla(|scene| scene.revision()), revision + 1);
+    assert!(old.iter().all(|id| backend.collider(*id).is_none()));
+    assert!(new.iter().all(|id| id.is_some_and(|id| backend.collider(id).is_some())));
+    assert_eq!(backend.colliders().len(), 3);
+    let bad = ColliderDesc::new(Shape::Ball { radius: -1.0 });
+    let mixed = backend.edit_colliders(vec![ball(), bad], &[new[2].unwrap()]);
+    assert!(mixed[0].is_some() && mixed[1].is_none());
+    assert_eq!(backend.colliders().len(), 3);
+}
+
+#[test]
 fn authored_sleep_and_explicit_wake_advance_the_real_backend() {
     let mut backend = MollaBackend::default();
     let mut desc = dynamic();

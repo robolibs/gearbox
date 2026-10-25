@@ -54,6 +54,7 @@ pub fn sync_plant_hulls(
     let eyes: Vec<Vec3> = rigs.iter().flat_map(|r| r.sensor_entities()).filter_map(|e| globals.get(e).ok()).map(|g| g.translation()).collect();
     let trays: Vec<Option<Vec3>> = greenhouse.trays.iter().map(|t| globals.get(t.entity).ok().map(|g| g.translation())).collect();
     *reach = trays_in_reach(&eyes, &trays, &reach);
+    let mut hulls = Vec::new();
     for (entity, look, hulled) in &plants {
         let wanted = reach.get(look.id.tray).copied().unwrap_or(false);
         if hulled && !wanted {
@@ -69,11 +70,18 @@ pub fn sync_plant_hulls(
         let offset = gearbox_globe::physics_offset(site_of(entity, &parents, &sites));
         let shape = Shape::ConvexHull { points: points.iter().map(|p| physics_vec((*p * at.scale).as_dvec3())).collect() };
         let pose = Pose { translation: physics_vec(at.translation.as_dvec3() + offset), rotation: physics_quat(at.rotation.as_dquat()) };
-        let desc = ColliderDesc { enabled: false, ..ColliderDesc::new(shape).pose(pose).entity(entity) };
-        if let Some(handle) = physics.insert_collider(desc) {
+        hulls.push((entity, ColliderDesc { enabled: false, ..ColliderDesc::new(shape).pose(pose).entity(entity) }));
+        commands.entity(entity).insert(SensorLabel(format!("plant:{}", greenhouse.plant_name(look.id))));
+    }
+    if hulls.is_empty() {
+        return;
+    }
+    // Every hull of the frame in one change of the physics world.
+    let (entities, descs): (Vec<_>, Vec<_>) = hulls.into_iter().unzip();
+    for (entity, handle) in entities.into_iter().zip(physics.edit_colliders(descs, &[])) {
+        if let Some(handle) = handle {
             physics.entity_to_collider.insert(entity, handle);
         }
-        commands.entity(entity).insert(SensorLabel(format!("plant:{}", greenhouse.plant_name(look.id))));
     }
 }
 
@@ -88,8 +96,9 @@ fn physics_quat(q: DQuat) -> glam::DQuat {
 /// Takes the hulls of plant entities gone, or gone out of reach, since last
 /// frame out of the physics world.
 pub fn drop_plant_hulls(mut gone: RemovedComponents<PlantHull>, mut physics: ResMut<PhysicsWorld>) {
-    for entity in gone.read() {
-        physics.remove_entity_collider(entity, false);
+    let ids: Vec<_> = gone.read().filter_map(|entity| physics.entity_to_collider.remove(&entity)).collect();
+    if !ids.is_empty() {
+        physics.edit_colliders(Vec::new(), &ids);
     }
 }
 

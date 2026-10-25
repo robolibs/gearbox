@@ -82,6 +82,37 @@ impl Default for MollaBackend {
     }
 }
 
+impl MollaBackend {
+    /// The runtime collider `desc` describes, or `None` for a shape that
+    /// cannot be built or a parent body that is gone.
+    fn molla_collider(&self, desc: ColliderDesc) -> Option<rt::ColliderDesc> {
+        let mut collider = rt::ColliderDesc::new(convert::geometry(desc.shape).ok()?);
+        collider.parent = match desc.parent {
+            Some(id) => Some(self.bodies.get(&id)?.handle),
+            None => None,
+        };
+        collider.pose = convert::transform(desc.pose);
+        collider.friction = desc.friction.unwrap_or(0.5);
+        collider.restitution = desc.restitution.unwrap_or(0.0);
+        collider.mass = sim::ColliderMass::Density(desc.density.unwrap_or(1.0));
+        collider.contact_material.friction_combine =
+            convert::combine(desc.friction_combine.unwrap_or(CombineRule::Average));
+        let groups = desc.groups.unwrap_or(CollisionGroups::ALL);
+        collider.memberships = groups.memberships;
+        collider.filter = groups.filter;
+        collider.user_tag = desc.entity.map_or(0, Entity::to_bits);
+        collider.enabled = desc.enabled;
+        Some(collider)
+    }
+
+    /// Takes a runtime collider into the backend's table under a new id.
+    fn adopt_collider(&mut self, handle: rt::ColliderHandle, entity: Option<Entity>) -> ColliderId {
+        let id = ColliderId(handle.to_bits());
+        self.colliders.insert(id, ColliderAccess { shared: self.shared.clone(), handle, entity });
+        id
+    }
+}
+
 impl PhysicsBackend for MollaBackend {
     fn configure_track(&mut self, desc: TrackForceDesc) -> Result<(), String> {
         self.configure_track_force(desc)
@@ -392,38 +423,59 @@ impl PhysicsBackend for MollaBackend {
     }
     fn sync_collider_positions(&mut self) {}
     fn insert_collider(&mut self, desc: ColliderDesc) -> Option<ColliderId> {
-        let mut collider = rt::ColliderDesc::new(convert::geometry(desc.shape).ok()?);
-        collider.parent = match desc.parent {
-            Some(id) => Some(self.bodies.get(&id)?.handle),
-            None => None,
-        };
-        collider.pose = convert::transform(desc.pose);
-        collider.friction = desc.friction.unwrap_or(0.5);
-        collider.restitution = desc.restitution.unwrap_or(0.0);
-        collider.mass = sim::ColliderMass::Density(desc.density.unwrap_or(1.0));
-        collider.contact_material.friction_combine =
-            convert::combine(desc.friction_combine.unwrap_or(CombineRule::Average));
-        let groups = desc.groups.unwrap_or(CollisionGroups::ALL);
-        collider.memberships = groups.memberships;
-        collider.filter = groups.filter;
-        collider.user_tag = desc.entity.map_or(0, Entity::to_bits);
-        collider.enabled = desc.enabled;
+        let entity = desc.entity;
+        let collider = self.molla_collider(desc)?;
         let parent = collider.parent;
         let mut world = self.shared.world();
         let handle = world.scene.insert_collider(collider).ok()?;
         if let Some(parent) = parent {
             apply(world.recompute_body_mass(parent));
         }
-        let id = ColliderId(handle.to_bits());
-        self.colliders.insert(
-            id,
-            ColliderAccess {
-                shared: self.shared.clone(),
-                handle,
-                entity: desc.entity,
-            },
-        );
-        Some(id)
+        drop(world);
+        Some(self.adopt_collider(handle, entity))
+    }
+    fn edit_colliders(&mut self, descs: Vec<ColliderDesc>, gone: &[ColliderId]) -> Vec<Option<ColliderId>> {
+        let mut out = vec![None; descs.len()];
+        let (mut slots, mut built) = (Vec::new(), Vec::new());
+        for (slot, desc) in descs.iter().enumerate() {
+            if let Some(collider) = self.molla_collider(desc.clone()) {
+                slots.push((slot, desc.entity));
+                built.push(collider);
+            }
+        }
+        let handles: Vec<_> = gone.iter().filter_map(|id| self.colliders.get(id).map(|c| c.handle)).collect();
+        let mut world = self.shared.world();
+        let mut parents: Vec<_> = handles
+            .iter()
+            .filter_map(|&h| world.scene.collider(h).and_then(|c| c.parent))
+            .chain(built.iter().filter_map(|c| c.parent))
+            .collect();
+        parents.sort_unstable();
+        parents.dedup();
+        let made = match world.scene.edit_colliders(built, &handles) {
+            Ok(made) => made,
+            // A change the runtime refuses fails alone, as one at a time.
+            Err(_) => {
+                drop(world);
+                for &id in gone {
+                    self.remove_collider(id, false);
+                }
+                return descs.into_iter().map(|desc| self.insert_collider(desc)).collect();
+            }
+        };
+        for parent in parents {
+            if world.scene.body(parent).is_some() {
+                apply(world.recompute_body_mass(parent));
+            }
+        }
+        drop(world);
+        for id in gone {
+            self.colliders.remove(id);
+        }
+        for ((slot, entity), handle) in slots.into_iter().zip(made) {
+            out[slot] = Some(self.adopt_collider(handle, entity));
+        }
+        out
     }
     fn remove_collider(&mut self, id: ColliderId, _wake: bool) {
         if let Some(collider) = self.colliders.get(&id) {
@@ -578,6 +630,13 @@ impl PhysicsBackend for MollaBackend {
     }
     fn joint_bodies(&self, id: JointId) -> Option<(BodyId, BodyId)> {
         self.joints.get(&id).map(|j| j.bodies)
+    }
+    fn joints_between(&self, a: BodyId, b: BodyId) -> Vec<JointId> {
+        self.joints
+            .iter()
+            .filter(|(_, j)| j.bodies == (a, b) || j.bodies == (b, a))
+            .map(|(&id, _)| id)
+            .collect()
     }
     fn joints(&self) -> Vec<JointId> {
         self.joints.keys().copied().collect()

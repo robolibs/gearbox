@@ -1170,6 +1170,14 @@ pub trait PhysicsBackend: Send + Sync {
     /// `None` when the shape cannot be built (degenerate mesh).
     fn insert_collider(&mut self, desc: ColliderDesc) -> Option<ColliderId>;
     fn remove_collider(&mut self, id: ColliderId, wake: bool);
+    /// Removes `gone` and inserts `descs` as one change of the world; the
+    /// new ids in the order given, `None` for a shape that cannot be built.
+    fn edit_colliders(&mut self, descs: Vec<ColliderDesc>, gone: &[ColliderId]) -> Vec<Option<ColliderId>> {
+        for &id in gone {
+            self.remove_collider(id, false);
+        }
+        descs.into_iter().map(|desc| self.insert_collider(desc)).collect()
+    }
     fn collider(&self, id: ColliderId) -> Option<&dyn Collider>;
     fn collider_mut(&mut self, id: ColliderId) -> Option<&mut dyn ColliderMut>;
     fn colliders(&self) -> Vec<ColliderId>;
