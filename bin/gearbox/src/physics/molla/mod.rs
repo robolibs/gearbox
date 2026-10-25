@@ -52,6 +52,11 @@ pub struct MollaBackend {
     breakable: BTreeSet<JointId>,
 }
 
+/// A body falls asleep after a second under 5 mm/s and 0.01 rad/s with
+/// nothing driving it, Box2D's tolerances.
+const SLEEP: molla_solvers::rigid_world::SleepSettings =
+    molla_solvers::rigid_world::SleepSettings { linear_speed: 5e-3, angular_speed: 1e-2, quiet_time: 1.0 };
+
 impl Default for MollaBackend {
     fn default() -> Self {
         let mut world = RigidWorld::new().expect("Molla world initialization");
@@ -61,8 +66,7 @@ impl Default for MollaBackend {
         world.solver.regularized_friction = true;
         world.solver.contact_impacts = false;
         world.solver.momentum_transport = false;
-        world.set_sleep_settings(Some(molla_solvers::rigid_world::SleepSettings::default()))
-            .expect("Molla sleep settings");
+        world.set_sleep_settings(Some(SLEEP)).expect("Molla sleep settings");
         Self {
             shared: Shared(Arc::new(Mutex::new(world))),
             bodies: BTreeMap::new(),
