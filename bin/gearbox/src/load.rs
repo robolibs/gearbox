@@ -646,6 +646,7 @@ fn terrain_contact_alignment_delta(
     } else {
         &tire_handles
     };
+    let own: std::collections::HashSet<_> = fallback_handles.iter().copied().collect();
 
     let mut min_clearance = f64::INFINITY;
     for handle in handles {
@@ -653,8 +654,7 @@ fn terrain_contact_alignment_delta(
             continue;
         };
         let aabb = collider.aabb();
-        let ground =
-            max_terrain_height_under_aabb(aabb.mins.x, aabb.maxs.x, aabb.mins.z, aabb.maxs.z);
+        let ground = max_ground_under_aabb(physics, &own, &aabb);
         let clearance = aabb.mins.y - ground;
         min_clearance = min_clearance.min(clearance);
     }
@@ -674,7 +674,16 @@ fn terrain_contact_alignment_delta(
     }
 }
 
-fn max_terrain_height_under_aabb(min_x: f64, max_x: f64, min_z: f64, max_z: f64) -> f64 {
+/// The highest ground under an AABB's middle and corners: the terrain, or
+/// the floor, pad or deck a ray down from just over the AABB's top meets
+/// first among the colliders not in `own`.
+fn max_ground_under_aabb(
+    physics: &crate::physics::PhysicsWorld,
+    own: &std::collections::HashSet<crate::physics::backend::ColliderId>,
+    aabb: &crate::physics::backend::Aabb,
+) -> f64 {
+    let (min_x, max_x, min_z, max_z) = (aabb.mins.x, aabb.maxs.x, aabb.mins.z, aabb.maxs.z);
+    let top = aabb.maxs.y + 0.05;
     let samples = [
         ((min_x + max_x) * 0.5, (min_z + max_z) * 0.5),
         (min_x, min_z),
@@ -684,7 +693,15 @@ fn max_terrain_height_under_aabb(min_x: f64, max_x: f64, min_z: f64, max_z: f64)
     ];
     samples
         .into_iter()
-        .map(|(x, z)| crate::globe::ground_height_at_physics(x, z))
+        .map(|(x, z)| {
+            let terrain = crate::globe::ground_height_at_physics(x, z);
+            let reach = top - terrain + 0.05;
+            let floor = (reach > 0.0)
+                .then(|| physics.cast_ray_filtered(DVec3::new(x, top, z), DVec3::NEG_Y, reach, &|id| !own.contains(&id)))
+                .flatten()
+                .map(|(_, distance)| top - distance);
+            floor.map_or(terrain, |floor| floor.max(terrain))
+        })
         .fold(f64::NEG_INFINITY, f64::max)
 }
 

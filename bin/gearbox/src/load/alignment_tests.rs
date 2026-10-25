@@ -175,3 +175,22 @@ fn missing_transforms_or_colliders_do_not_partially_align_a_machine() {
         );
     }
 }
+
+#[test]
+fn a_machine_over_a_floor_settles_onto_the_floor_not_the_terrain_under_it() {
+    let (mut app, root, _, ids, _) = fixture(false);
+    let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
+    physics
+        .insert_collider(
+            ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(5.0, 0.1, 5.0) })
+                .translation(DVec3::Y * 0.1),
+        )
+        .unwrap();
+    benchmark_align_machine(&mut app, root);
+    let physics = app.world().resource::<PhysicsWorld>();
+    for (id, y) in ids.into_iter().zip([1.23, 0.73, 0.73]) {
+        let at = physics.body(id).unwrap().translation().y;
+        assert!((at - y).abs() < 1e-6, "body={id:?}: y={at}, expected {y}");
+    }
+    assert!((app.world().get::<Transform>(root).unwrap().translation.y - 0.23).abs() < 1e-6);
+}
