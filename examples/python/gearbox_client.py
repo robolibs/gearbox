@@ -158,17 +158,25 @@ class HostInfo:
     props: bytes = b""
 
 
-@_pod("gearbox.clock_command.v1", "<II", ("op", "steps"))
+@_pod("gearbox.clock_command.v1", "<IId", ("op", "steps", "value"))
 class ClockCommand:
     op: int = 0
     steps: int = 0
+    value: float = 0.0
 
 
-@_pod("gearbox.clock_state.v1", "<QII", ("step", "paused", "_pad"))
+@_pod("gearbox.clock_state.v1", "<QIIdddddII", ("step", "paused", "_pad", "world_s", "rate", "day_s", "skip_s", "hour", "day", "_pad2"))
 class ClockState:
     step: int = 0
     paused: int = 0
     _pad: int = 0
+    world_s: float = 0.0
+    rate: float = 1.0
+    day_s: float = 0.0
+    skip_s: float = 0.0
+    hour: float = 0.0
+    day: int = 0
+    _pad2: int = 0
 
 
 @_pod("gearbox.clear_request.v1", "<II", ("scope", "pause_clock"))
@@ -348,7 +356,7 @@ class MachineState:
 
 
 CATEGORY = {"static": 0, "machine": 1, "robot": 1, "variant": 2, "world": 3, "terrain": 4}
-CLOCK_OP = {"get": 0, "pause": 1, "play": 2, "toggle": 3, "shutdown": 4}
+CLOCK_OP = {"get": 0, "pause": 1, "play": 2, "toggle": 3, "shutdown": 4, "step": 5, "speed": 6, "skip": 7}
 @_pod("gearbox.link_record.v1", "<" + "d" * 7 + "II", ("x", "y", "z", "qw", "qx", "qy", "qz", "index", "parent_index"), payload="props")
 class LinkRecord:
     x: float = 0.0
