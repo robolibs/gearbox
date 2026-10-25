@@ -511,10 +511,13 @@ pub fn step_physics(world: &mut World, mut stats: Local<(f64, u32, f64)>) {
     let now = world.get_resource::<Time>().map_or(0.0, |t| t.elapsed_secs_f64());
     if now >= stats.2 {
         if stats.1 > 0 {
+            let physics = world.resource::<PhysicsWorld>();
             info!(
-                "gearbox-physics: {:.2} ms per step, {} steps in the last 10 s",
+                "gearbox-physics: {:.2} ms per step, {} steps in the last 10 s, {} bodies, {} colliders",
                 1000.0 * stats.0 / stats.1 as f64,
-                stats.1
+                stats.1,
+                physics.backend.bodies().len(),
+                physics.backend.colliders().len()
             );
         }
         *stats = (0.0, 0, now + 10.0);
