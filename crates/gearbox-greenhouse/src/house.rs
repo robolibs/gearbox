@@ -10,7 +10,7 @@
 use crate::air::{Air, Climate, Outside, Upkeep, Working};
 use crate::lamp::{Channels, Lamp};
 use crate::plant::{Exchange, Plant, Stage, Surroundings};
-use crate::power::Power;
+use crate::power::{Power, settled};
 use crate::species::{Edible, Species};
 use crate::water::{Medium, Tank};
 
@@ -43,6 +43,8 @@ pub struct Room {
     pub leak_per_s: f64,
     /// Share of the daylight its glazing lets in to the crops, 0 for a closed room.
     pub glazing: f64,
+    /// Share of that daylight the dust on the glazing blocks, 0 to 1.
+    pub glazing_dust: f64,
     /// What the equipment drew over the last step, W.
     pub draw_w: f64,
     pub last: Upkeep,
@@ -61,6 +63,7 @@ impl Room {
             makeup_failed: false,
             leak_per_s: 0.0,
             glazing: 0.0,
+            glazing_dust: 0.0,
             draw_w: CONTROLS_W + climate.fan_w,
             last: Upkeep::default(),
         }
@@ -152,6 +155,7 @@ pub enum Refusal {
     Empty,
     NotRipe,
     NotRegolith,
+    NotGlazed,
 }
 
 impl std::fmt::Display for Refusal {
@@ -163,6 +167,7 @@ impl std::fmt::Display for Refusal {
             Self::Empty => "nothing grows there",
             Self::NotRipe => "not ripe yet",
             Self::NotRegolith => "the tray holds no regolith",
+            Self::NotGlazed => "the room has no glazing",
         })
     }
 }
@@ -208,10 +213,10 @@ impl House {
     }
 
     /// Photon flux on a tray now, and while lit, µmol/m²/s: its lamps', and
-    /// the daylight its room's glazing lets in.
+    /// the daylight its room's glazing lets in past the dust on it.
     pub fn tray_light(&self, tray: usize, hour: f64) -> (f64, f64) {
         let Some(t) = self.trays.get(tray) else { return (0.0, 0.0) };
-        let glazing = self.rooms.get(t.room).map_or(0.0, |r| r.glazing);
+        let glazing = self.rooms.get(t.room).map_or(0.0, |r| r.glazing * (1.0 - r.glazing_dust));
         let now: f64 = t.lamps.iter().map(|&l| self.lamps[l].ppfd(hour, self.cycle_hours, self.lamp_power)).sum();
         let lit: f64 = t.lamps.iter().map(|&l| self.lamps[l].lit_ppfd()).sum();
         (now + glazing * self.daylight_ppfd, lit + glazing * self.daylight_mean)
@@ -271,8 +276,19 @@ impl House {
             self.substep(dt, at, outside, solar_w_m2, &mut events);
             done += dt;
         }
-        self.power.settle_dust(seconds / (self.cycle_hours.max(1.0) * 3600.0));
+        let sols = seconds / (self.cycle_hours.max(1.0) * 3600.0);
+        self.power.settle_dust(sols);
+        for room in self.rooms.iter_mut().filter(|r| r.glazing > 0.0) {
+            room.glazing_dust = settled(room.glazing_dust, sols);
+        }
         events
+    }
+
+    /// Brushes the dust off a room's glazing.
+    pub fn clean_glazing(&mut self, room: usize) -> Result<(), Refusal> {
+        let room = self.rooms.get_mut(room).filter(|r| r.glazing > 0.0).ok_or(Refusal::NotGlazed)?;
+        room.glazing_dust = 0.0;
+        Ok(())
     }
 
     fn substep(&mut self, dt: f64, hour: f64, outside: &Outside, solar_w_m2: f64, events: &mut Vec<Event>) {
@@ -527,6 +543,24 @@ mod tests {
         let (glass, closed) = (grown(0.7), grown(0.0));
         assert!(glass > 5.0 && closed < 0.5, "under glass {glass} g, in a closed room {closed} g");
         assert!(House { cycle_hours: 24.0, ..House::default() }.sunlit(12.0) && !House { cycle_hours: 24.0, ..House::default() }.sunlit(2.0));
+    }
+
+    #[test]
+    fn dust_on_the_glazing_dims_the_daylight_until_it_is_brushed_off() {
+        let mut house = chamber(1);
+        house.lamps[0].ppfd_max = 0.0;
+        house.rooms.push(Room::new("closed", 30.0, Climate::growth_room()));
+        house.rooms[0].glazing = 0.7;
+        house.daylight_mean = 700.0;
+        let clean = house.tray_light(0, 12.0).1;
+        house.step(100.0 * 24.0 * 3600.0, 12.0, &Outside::mars(12.0), 0.0);
+        let dusty = house.tray_light(0, 12.0).1;
+        assert!((house.rooms[0].glazing_dust - 0.181).abs() < 0.002, "{}", house.rooms[0].glazing_dust);
+        assert_eq!(house.rooms[1].glazing_dust, 0.0, "a closed room gathers none");
+        assert!((dusty / clean - (1.0 - house.rooms[0].glazing_dust)).abs() < 1e-9, "{dusty} against {clean}");
+        assert_eq!(house.clean_glazing(1), Err(Refusal::NotGlazed));
+        house.clean_glazing(0).unwrap();
+        assert_eq!(house.tray_light(0, 12.0).1, clean);
     }
 
     #[test]

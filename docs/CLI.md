@@ -107,6 +107,7 @@ Crops, rooms and faults of a greenhouse world
 | `lamps [OPTIONS] <TRAY>` | Set the spectrum or output of a tray's lamps (`all` for every tray) |
 | `clean-tank <ROOM>` | Flush and refill a room's nutrient tank |
 | `clean-panels` | Brush the dust off the solar panels |
+| `clean-glazing [OPTIONS] <ROOM>` | Brush the dust off a room's glazing, by a machine at the room if `--by` |
 | `fault <FAULT>` | Break something: power, reactor, fans:ROOM, hvac:ROOM, co2:ROOM, leak:ROOM, pump:ROOM, water_leak:ROOM or lamp:TRAY |
 | `repair [OPTIONS] <FAULT>` | Mend a fault, by a machine standing at its service spot if `--by` |
 | `setpoint <ROOM> <SET>...` | Change a room's climate targets: temperature, humidity, co2, pressure |

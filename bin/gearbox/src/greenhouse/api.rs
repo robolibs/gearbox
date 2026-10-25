@@ -19,6 +19,8 @@ use crate::globe::{Site, transform_in_site};
 const SERVICE_REACH_M: f32 = 1.2;
 /// How close a machine must come to a plant's middle to sow, harvest or lift it, metres.
 const PLANT_REACH_M: f32 = 0.3;
+/// How close a machine must come to a room's box to clean its glazing, metres.
+const GLAZING_REACH_M: f32 = 1.5;
 
 fn number(v: f64) -> String {
     format!("{v:.4}")
@@ -82,6 +84,7 @@ fn rooms(greenhouse: &Greenhouse) -> Vec<RoomRecord> {
                 ("demand_w", &number(power.demand_w)),
                 ("battery_wh", &number(power.charge_wh)),
                 ("panel_dust", &number(power.panel_dust)),
+                ("glazing_dust", &number(room.glazing_dust)),
                 ("lamp_power", &number(house.lamp_power)),
                 ("faults", &faults.join(",")),
             ]);
@@ -159,8 +162,8 @@ pub struct Machines<'w, 's> {
     globals: Query<'w, 's, &'static GlobalTransform>,
 }
 
-/// How far the nearest part under a machine's own prim is from a point, metres.
-fn machine_distance(machine: &str, to: Vec3, machines: &Machines) -> Result<f32, Status> {
+/// Where every part under a machine's own prim stands in the scene.
+fn machine_parts(machine: &str, machines: &Machines) -> Result<Vec<Vec3>, Status> {
     let spec = machines
         .inventory
         .as_deref()
@@ -173,7 +176,24 @@ fn machine_distance(machine: &str, to: Vec3, machines: &Machines) -> Result<f32,
     Ok(std::iter::once(root)
         .chain(machines.children.iter_descendants(root))
         .filter_map(|e| machines.globals.get(e).ok())
-        .map(|g| g.translation().distance(to))
+        .map(|g| g.translation())
+        .collect())
+}
+
+/// How far the nearest part under a machine's own prim is from a point, metres.
+fn machine_distance(machine: &str, to: Vec3, machines: &Machines) -> Result<f32, Status> {
+    Ok(machine_parts(machine, machines)?.iter().map(|at| at.distance(to)).fold(f32::MAX, f32::min))
+}
+
+/// How far the nearest part of a machine is from a room's box of air, metres.
+fn room_distance(greenhouse: &Greenhouse, room: usize, machine: &str, machines: &Machines) -> Result<f32, Status> {
+    let place = greenhouse.rooms.iter().find(|p| p.room == room).ok_or_else(|| Status::err(code::ERROR, "the room stands nowhere"))?;
+    let frame = machines.globals.get(place.parent).map_err(|_| Status::err(code::ERROR, "the room stands nowhere"))?.affine().inverse();
+    let half = place.size * 0.5;
+    Ok(machine_parts(machine, machines)?
+        .into_iter()
+        .map(|at| (frame.transform_point3(at) - place.centre).abs() - half)
+        .map(|out| out.max(Vec3::ZERO).length())
         .fold(f32::MAX, f32::min))
 }
 
@@ -306,6 +326,17 @@ fn act(
         }
         op::CLEAN_PANELS => {
             greenhouse.house.power.panel_dust = 0.0;
+            Ok(Status::ok())
+        }
+        op::CLEAN_GLAZING => {
+            let room = room_of(greenhouse, &keys)?;
+            if let Some(machine) = keys.get("by") {
+                let away = room_distance(greenhouse, room, &machine, machines)?;
+                if away > GLAZING_REACH_M {
+                    return Err(Status::err(code::REFUSED, &format!("`{machine}` is {away:.2} m from the room")));
+                }
+            }
+            greenhouse.house.clean_glazing(room).map_err(refused)?;
             Ok(Status::ok())
         }
         op::FAULT => {
@@ -552,6 +583,34 @@ mod tests {
         assert_eq!(mend("away"), code::REFUSED);
         assert_eq!(mend("west"), code::OK);
         assert_eq!(mend("east"), code::OK, "the far spot serves as well as the first");
+    }
+
+    #[test]
+    fn glazing_is_cleaned_only_by_a_machine_at_the_room() {
+        let mut world = World::new();
+        place_machines(&mut world, &[("washer", 3.0), ("away", 20.0)]);
+        let mut g = greenhouse();
+        g.house.rooms[0].glazing = 0.5;
+        let parent = world.spawn(GlobalTransform::IDENTITY).id();
+        g.rooms.push(super::super::RoomPlace {
+            room: 0,
+            parent,
+            centre: Vec3::new(0.0, 0.0, 1.0),
+            size: Vec3::new(4.0, 4.0, 2.0),
+            work_lux: 0.0,
+            work_light: None,
+            lux: 0.0,
+            glazed: true,
+        });
+        world.insert_resource(g);
+        let clean = |world: &mut World, by: &str| {
+            world.resource_mut::<Greenhouse>().house.rooms[0].glazing_dust = 0.3;
+            let code = act_in(world, op::CLEAN_GLAZING, &[("room", "grow"), ("by", by)]).code;
+            (code, world.resource::<Greenhouse>().house.rooms[0].glazing_dust)
+        };
+        assert_eq!(clean(&mut world, "away"), (code::REFUSED, 0.3));
+        assert_eq!(clean(&mut world, "washer"), (code::OK, 0.0), "a metre outside the box is near enough");
+        assert_eq!(act_in(&mut world, op::CLEAN_GLAZING, &[("room", "service")]).code, code::REFUSED, "a room with no glazing");
     }
 
     #[test]

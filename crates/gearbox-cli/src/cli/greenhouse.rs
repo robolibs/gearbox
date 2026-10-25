@@ -79,6 +79,12 @@ enum Cmd {
     CleanTank { room: String },
     /// Brush the dust off the solar panels
     CleanPanels,
+    /// Brush the dust off a room's glazing, by a machine at the room if `--by`
+    CleanGlazing {
+        room: String,
+        #[arg(long)]
+        by: Option<String>,
+    },
     /// Break something: power, reactor, fans:ROOM, hvac:ROOM, co2:ROOM,
     /// leak:ROOM, pump:ROOM, water_leak:ROOM or lamp:TRAY
     Fault { fault: String },
@@ -145,6 +151,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         }
         Cmd::CleanTank { room } => act(ctx, op::CLEAN_TANK, &[("room", &room)], &room),
         Cmd::CleanPanels => act(ctx, op::CLEAN_PANELS, &[], ""),
+        Cmd::CleanGlazing { room, by } => act(ctx, op::CLEAN_GLAZING, &with_by(vec![("room", &room)], &by), &room),
         Cmd::Fault { fault } => act(ctx, op::FAULT, &[("fault", &fault)], &fault),
         Cmd::Repair { fault, by } => {
             let mut keys = vec![("fault", fault.as_str())];
@@ -273,7 +280,7 @@ fn rooms(ctx: &Ctx, list: &[RoomRecord]) {
                 out::kv(&[
                     ("room", get("room")),
                     ("air", format!("{:.1} °C, {:.0}% rh, {:.0} ppm CO2, {:.1} kPa O2, {:.1} kPa", r.temperature_c, r.humidity * 100.0, r.co2_ppm, r.o2_kpa, r.pressure_kpa)),
-                    ("light", format!("{:.0} lux", r.lux)),
+                    ("light", format!("{:.0} lux, glazing dust {:.2}", r.lux, num("glazing_dust"))),
                     ("tank", format!("{:.0} L, EC {:.2}, biofilm {:.2}, pump {}", num("tank_l"), num("ec"), num("biofilm"), get("pump"))),
                     ("equipment", format!("fans {}, hvac {}, co2 feed {}, leak {:.1e}/s", get("fans"), get("hvac"), get("co2_feed"), num("leak_per_s"))),
                     ("power", format!("{:.0} W in, {:.0} W out, battery {:.0} Wh, panel dust {:.2}, lamps at {:.0}%", num("supply_w"), num("demand_w"), num("battery_wh"), num("panel_dust"), num("lamp_power") * 100.0)),

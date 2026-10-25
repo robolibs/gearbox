@@ -30,6 +30,9 @@ pub mod greenhouse_op {
     pub const SETPOINT: u32 = 9;
     /// Clean the dust off the solar panels.
     pub const CLEAN_PANELS: u32 = 10;
+    /// `room`: clean the dust off its glazing; with `by`, a machine that must
+    /// stand at the room.
+    pub const CLEAN_GLAZING: u32 = 11;
 
     pub fn parse(name: &str) -> Option<u32> {
         Some(match name {
@@ -44,6 +47,7 @@ pub mod greenhouse_op {
             "repair" => REPAIR,
             "setpoint" => SETPOINT,
             "clean_panels" => CLEAN_PANELS,
+            "clean_glazing" => CLEAN_GLAZING,
             _ => return None,
         })
     }
@@ -61,6 +65,7 @@ pub mod greenhouse_op {
             REPAIR => "repair",
             SETPOINT => "setpoint",
             CLEAN_PANELS => "clean_panels",
+            CLEAN_GLAZING => "clean_glazing",
             _ => "unknown",
         }
     }

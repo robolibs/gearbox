@@ -398,6 +398,48 @@ class AttachmentRecord:
     props: bytes = b""
 
 
+@_pod("gearbox.greenhouse_query.v1", "<II", ("ripe", "_pad"), payload="props")
+class GreenhouseQuery:
+    ripe: int = 0
+    _pad: int = 0
+    props: bytes = b""
+
+
+@_pod("gearbox.plant.v1", "<ffffffII", ("x", "y", "z", "maturity", "health", "height_m", "alive", "ripe"), payload="props")
+class PlantRecord:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    maturity: float = 0.0
+    health: float = 0.0
+    height_m: float = 0.0
+    alive: int = 0
+    ripe: int = 0
+    props: bytes = b""
+
+
+@_pod("gearbox.greenhouse_room.v1", "<ffffff", ("temperature_c", "humidity", "co2_ppm", "o2_kpa", "pressure_kpa", "lux"), payload="props")
+class RoomRecord:
+    temperature_c: float = 0.0
+    humidity: float = 0.0
+    co2_ppm: float = 0.0
+    o2_kpa: float = 0.0
+    pressure_kpa: float = 0.0
+    lux: float = 0.0
+    props: bytes = b""
+
+
+@_pod("gearbox.greenhouse_action.v1", "<II", ("op", "_pad"), payload="props")
+class GreenhouseAction:
+    op: int = 0
+    _pad: int = 0
+    props: bytes = b""
+
+
+GREENHOUSE_OP = {
+    "sow": 0, "harvest": 1, "clear": 2, "wash": 3, "amend": 4, "lamps": 5, "clean_tank": 6,
+    "fault": 7, "repair": 8, "setpoint": 9, "clean_panels": 10, "clean_glazing": 11,
+}
 CLEAR_SCOPE = {"all": 0, "machines": 1, "props": 2, "markers": 3}
 OBJECT_KIND = {"any": 0, "machine": 1, "prop": 2, "marker": 3, "terrain": 4}
 EVENT_KIND = {
@@ -423,6 +465,9 @@ HOST = {
     "select": "/gearbox/select",
     "machines": "/gearbox/machines/list",
     "fields_layout": "/gearbox/fields/layout",
+    "plants": "/gearbox/greenhouse/plants",
+    "rooms": "/gearbox/greenhouse/rooms",
+    "greenhouse": "/gearbox/greenhouse/act",
 }
 
 
@@ -587,6 +632,35 @@ class Gearbox:
 
     def events(self) -> "EventStream":
         return EventStream(self.subscribe(self.addr, HOST["events"]))
+
+    # greenhouse
+
+    def plants(self, ripe: bool = False, tray: str | None = None, species: str | None = None) -> list[dict]:
+        """Every plant (or the ripe ones), each a dict of its record and props;
+        x, y, z are in the home frame (x north, y up, z east)."""
+        keys = {k: v for k, v in (("tray", tray), ("species", species)) if v}
+        out = []
+        for p in self.query(self.addr, HOST["plants"], GreenhouseQuery(ripe=int(ripe), props=pack_map(keys)), PlantRecord):
+            d = unpack_map(p.props)
+            d.update({"x": p.x, "y": p.y, "z": p.z, "maturity": p.maturity, "health": p.health,
+                      "height_m": p.height_m, "alive": bool(p.alive), "ripe": bool(p.ripe)})
+            out.append(d)
+        return out
+
+    def rooms(self) -> list[dict]:
+        out = []
+        for r in self.query(self.addr, HOST["rooms"], Ping(), RoomRecord):
+            d = unpack_map(r.props)
+            d.update({"temperature_c": r.temperature_c, "humidity": r.humidity, "co2_ppm": r.co2_ppm,
+                      "o2_kpa": r.o2_kpa, "pressure_kpa": r.pressure_kpa, "lux": r.lux})
+            out.append(d)
+        return out
+
+    def greenhouse(self, op: str, **keys) -> Status:
+        """A greenhouse action (`sow`, `harvest`, `clean_glazing`, ...), its keys as
+        keyword arguments: `gb.greenhouse("harvest", tray="TrayA3", by="base_fleet_archabot")`."""
+        req = GreenhouseAction(op=GREENHOUSE_OP[op], props=pack_map({k: v for k, v in keys.items() if v is not None}))
+        return self.call(self.addr, HOST["greenhouse"], req, Status)
 
     def machine(self, namespace: str, timeout: float = 30.0) -> "Machine":
         if namespace in self._machines:

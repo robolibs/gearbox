@@ -121,6 +121,8 @@ spot's origin.
   glazing, on top of its lamps. Crops develop by the daytime mean, which
   follows the weather over two days, and are lit for the sunlit half of the
   day; trays sown at load grow by the same light.
+- Dust settles on a glazed room's glazing as it does on the panels, and
+  blocks that share of its daylight until `clean_glazing` brushes it off.
 
 ## 3. Tool API
 
@@ -137,7 +139,8 @@ A plant record carries its place in its site's frame (x north, y up, z east),
 `sown_days`, `medium`. A room record carries `temperature_c`, `humidity`,
 `co2_ppm`, `o2_kpa`, `pressure_kpa`, `lux`, and props `room`, `tank_l`, `ec`,
 `biofilm`, `pump`, `fans`, `hvac`, `co2_feed`, `leak_per_s`, `draw_w`,
-`supply_w`, `demand_w`, `battery_wh`, `panel_dust`, `lamp_power`, `faults`.
+`supply_w`, `demand_w`, `battery_wh`, `panel_dust`, `glazing_dust`, `lamp_power`,
+`faults`.
 
 | Op | Keys | Refused when |
 |---|---|---|
@@ -148,6 +151,7 @@ A plant record carries its place in its site's frame (x north, y up, z east),
 | `lamps` | `tray` or `all`, `spectrum` (`growth`, `inspection`), `dimming` 0..1 | |
 | `clean_tank` | `room` | |
 | `clean_panels` | | |
+| `clean_glazing` | `room`, `by`? | the room has no glazing; `by` more than 1.5 m from the room's box |
 | `fault` | `fault`: `power`, `reactor`, `fans:ROOM`, `hvac:ROOM`, `co2:ROOM`, `leak:ROOM`, `pump:ROOM`, `water_leak:ROOM`, `lamp:TRAY` | already broken |
 | `repair` | `fault`, `by`? | not broken; `by` more than 1.2 m from the fault's service spot |
 | `setpoint` | `room`, any of `temperature` (0..40), `humidity` (0.2..1), `co2` (0..5000), `pressure` (5..110) | |
@@ -164,7 +168,7 @@ place, with props `what` (`sown`, `sprouted`, `staged`, `ripe`, `died`,
 
 The CLI wraps all of it: `gearbox greenhouse plants [--ripe] [--tray T]
 [--species S]`, `rooms`, `sow`, `harvest`, `clear`, `wash`, `amend`, `lamps`,
-`clean-tank`, `clean-panels`, `fault`, `repair`, `setpoint`.
+`clean-tank`, `clean-panels`, `clean-glazing`, `fault`, `repair`, `setpoint`.
 
 ## 4. Sensing
 

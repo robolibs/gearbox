@@ -22,6 +22,12 @@ pub fn surface_irradiance(top_w_m2: f64, sun_elevation_rad: f64, dust_tau: f64) 
 /// (Lorenz et al. 2021, from Mars landers).
 pub const PANEL_DUST_PER_SOL: f64 = 0.002;
 
+/// The share of light a dusty surface blocks after `sols` more of settling
+/// at the panels' rate.
+pub fn settled(dust: f64, sols: f64) -> f64 {
+    (1.0 - (1.0 - dust) * (1.0 - PANEL_DUST_PER_SOL).powf(sols)).min(1.0)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Power {
     /// A fission surface power unit, W (NASA's Kilopower gives 10 kWe).
@@ -90,7 +96,7 @@ impl Power {
 
     /// Dust settles on the panels over `sols`.
     pub fn settle_dust(&mut self, sols: f64) {
-        self.panel_dust = (1.0 - (1.0 - self.panel_dust) * (1.0 - PANEL_DUST_PER_SOL).powf(sols)).min(1.0);
+        self.panel_dust = settled(self.panel_dust, sols);
     }
 }
 
