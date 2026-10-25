@@ -7,6 +7,7 @@
 //! collected without blocking on later frames. The physics lock is held only
 //! for those host copies, never across GPU waits.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::sync::Arc;
@@ -92,11 +93,25 @@ pub struct VisualColors<'w, 's> {
     images: Res<'w, Assets<Image>>,
 }
 
+/// Subtree and material colours already averaged within one scene build.
+#[derive(Default)]
+struct ColorMemo {
+    subtrees: RefCell<HashMap<Entity, Option<[f32; 3]>>>,
+    materials: RefCell<HashMap<AssetId<StandardMaterial>, [f32; 3]>>,
+}
+
 impl VisualColors<'_, '_> {
-    pub fn color(&self, entity: Entity) -> Option<[f32; 3]> {
+    /// A colour lookup for one scene build, sharing every subtree and
+    /// material average between the colliders it colours.
+    pub fn memo(&self) -> impl Fn(Entity) -> Option<[f32; 3]> + '_ {
+        let memo = ColorMemo::default();
+        move |entity| self.color(entity, &memo)
+    }
+
+    fn color(&self, entity: Entity, memo: &ColorMemo) -> Option<[f32; 3]> {
         let mut root = entity;
         for _ in 0..VISUAL_SEARCH_LEVELS {
-            if let Some(color) = self.subtree_color(root) {
+            if let Some(color) = self.subtree_color(root, memo) {
                 return Some(color);
             }
             root = self.parents.get(root).ok()?.parent();
@@ -104,7 +119,11 @@ impl VisualColors<'_, '_> {
         None
     }
 
-    fn subtree_color(&self, root: Entity) -> Option<[f32; 3]> {
+    fn subtree_color(&self, root: Entity, memo: &ColorMemo) -> Option<[f32; 3]> {
+        let cached = memo.subtrees.borrow().get(&root).copied();
+        if let Some(color) = cached {
+            return color;
+        }
         let (mut sum, mut weight) = ([0.0f32; 3], 0.0f32);
         let mut stack = vec![root];
         let mut visited = 0;
@@ -115,13 +134,12 @@ impl VisualColors<'_, '_> {
             }
             if let Ok((material, aabb, visibility)) = self.meshes.get(entity)
                 && visibility != Some(&Visibility::Hidden)
-                && let Some(material) = self.materials.get(&material.0)
+                && let Some(color) = self.material_color(material.id(), memo)
             {
                 let w = aabb.map_or(1.0, |b| {
                     let h = b.half_extents;
                     (h.x * h.y + h.y * h.z + h.z * h.x).max(1e-6)
                 });
-                let color = self.material_color(material);
                 for i in 0..3 {
                     sum[i] += color[i] * w;
                 }
@@ -131,10 +149,17 @@ impl VisualColors<'_, '_> {
                 stack.extend(children.iter());
             }
         }
-        (weight > 0.0).then(|| sum.map(|s| s / weight))
+        let color = (weight > 0.0).then(|| sum.map(|s| s / weight));
+        memo.subtrees.borrow_mut().insert(root, color);
+        color
     }
 
-    fn material_color(&self, material: &StandardMaterial) -> [f32; 3] {
+    fn material_color(&self, id: AssetId<StandardMaterial>, memo: &ColorMemo) -> Option<[f32; 3]> {
+        let cached = memo.materials.borrow().get(&id).copied();
+        if cached.is_some() {
+            return cached;
+        }
+        let material = self.materials.get(id)?;
         let base = material.base_color.to_srgba();
         let texel = material
             .base_color_texture
@@ -142,7 +167,9 @@ impl VisualColors<'_, '_> {
             .and_then(|texture| self.images.get(texture))
             .and_then(mean_texel)
             .unwrap_or([1.0; 3]);
-        [base.red * texel[0], base.green * texel[1], base.blue * texel[2]]
+        let color = [base.red * texel[0], base.green * texel[1], base.blue * texel[2]];
+        memo.materials.borrow_mut().insert(id, color);
+        Some(color)
     }
 }
 
@@ -615,7 +642,7 @@ pub(crate) fn run_machine_sensors(
                 .filter_map(|entity| physics.entity_to_body.get(&entity).copied())
                 .collect();
             let started = std::time::Instant::now();
-            let built = shared_scene(engine, &mut rigs.scene, &**physics, &model, &|entity| visuals.color(entity))
+            let built = shared_scene(engine, &mut rigs.scene, &**physics, &model, &visuals.memo())
                 .and_then(|shared| Rig::build(engine, &**physics, resolved, revision, sim_time, shared, &label, &own));
             match built {
                 Ok(mut rig) => {
@@ -710,7 +737,7 @@ pub(crate) fn run_machine_sensors(
                     .iter()
                     .map(|(id, own)| (id.clone(), Arc::new(own.map_or_else(SceneObjects::default, |own| shape_objects(rigid, own, &label)))))
                     .collect();
-                build_scene_off_frame(engine, rigid, shape_colors(rigid, &|entity| visuals.color(entity)))
+                build_scene_off_frame(engine, rigid, shape_colors(rigid, &visuals.memo()))
                     .map(|task| SceneBuild { model: model.clone(), bodies: bodies.clone(), objects, task })
             });
             match started {
@@ -1882,6 +1909,33 @@ mod tests {
         });
         let rgb = |c: [f32; 3]| MVec3::new(c[0].into(), c[1].into(), c[2].into());
         assert_eq!(colors, [rgb([1.0, 0.0, 0.0]), rgb(NEUTRAL_COLOR), rgb(GROUND_COLOR)]);
+    }
+
+    #[test]
+    fn remembered_colours_stay_with_their_own_subtree() {
+        let mut world = World::new();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<Assets<Image>>();
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        let red = materials.add(StandardMaterial::from_color(Color::srgb(1.0, 0.0, 0.0)));
+        let blue = materials.add(StandardMaterial::from_color(Color::srgb(0.0, 0.0, 1.0)));
+        let tray = |world: &mut World, material: &Handle<StandardMaterial>| {
+            let tray = world.spawn(MeshMaterial3d(material.clone())).id();
+            let plants = [world.spawn_empty().id(), world.spawn_empty().id()];
+            world.entity_mut(tray).add_children(&plants);
+            plants
+        };
+        let [red_a, red_b] = tray(&mut world, &red);
+        let [blue_a, _] = tray(&mut world, &blue);
+        let mut state = bevy::ecs::system::SystemState::<VisualColors>::new(&mut world);
+        let visuals = state.get(&world).expect("visual colours are valid");
+        let color = visuals.memo();
+        let near = |c: Option<[f32; 3]>, want: [f32; 3]| {
+            c.is_some_and(|c| c.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5))
+        };
+        assert!(near(color(red_a), [1.0, 0.0, 0.0]), "{:?}", color(red_a));
+        assert!(near(color(blue_a), [0.0, 0.0, 1.0]), "{:?}", color(blue_a));
+        assert!(near(color(red_b), [1.0, 0.0, 0.0]), "{:?}", color(red_b));
     }
 
     /// A fixed sensor body 1 m over a ground slab with a wall 4.5 m ahead of
