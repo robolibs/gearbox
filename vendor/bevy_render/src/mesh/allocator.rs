@@ -225,6 +225,12 @@ impl FromWorld for MeshAllocator {
             .flags
             .contains(DownlevelFlags::BASE_VERTEX);
 
+        // A slab may not outgrow the largest buffer the device can create.
+        let max_buffer_size = world.resource::<RenderDevice>().limits().max_buffer_size;
+        let mut clamped = world.resource_mut::<MeshAllocatorSettings>();
+        clamped.max_slab_size = clamped.max_slab_size.min(max_buffer_size);
+        clamped.large_threshold = clamped.large_threshold.min(max_buffer_size);
+
         // Take the `extra_buffer_usages` from the mesh allocator settings into
         // account.
         let mesh_allocator_settings = world.resource::<MeshAllocatorSettings>();
