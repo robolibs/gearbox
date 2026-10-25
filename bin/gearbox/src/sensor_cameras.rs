@@ -63,9 +63,16 @@ pub struct SensorRenderQueue {
 #[derive(Resource, Default)]
 pub struct SensorCameras {
     cameras: HashMap<CameraKey, Entity>,
+    /// The newest sample each camera still owes, by the frame it was first owed.
+    waiting: HashMap<CameraKey, (u64, RenderJob)>,
+    frame: u64,
     pub stats: CameraStats,
     last_report: f64,
 }
+
+/// Most sensor cameras rendered in one frame: each is a whole view of the
+/// world, so a slow frame owing many samples spreads them over the next.
+const RENDERS_PER_FRAME: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CameraStats {
@@ -73,6 +80,8 @@ pub struct CameraStats {
     pub published: u64,
     pub undelivered: u64,
     pub readback_bytes: u64,
+    /// Samples a newer one replaced before they rendered.
+    pub superseded: u64,
 }
 
 /// A sensor link's render-to-texture camera.
@@ -193,7 +202,10 @@ fn drive_sensor_cameras(
         }
         keep
     });
-    for job in queue.jobs.drain(..) {
+    state.frame += 1;
+    let jobs = std::mem::take(&mut queue.jobs).into_iter().map(|job| (job.key.clone(), job));
+    let jobs = take_due(&mut state.waiting, jobs, &live, state.frame, RENDERS_PER_FRAME, &mut state.stats.superseded);
+    for job in jobs {
         let Some(parent) = job.entity else { continue };
         let existing = state.cameras.get(&job.key).copied();
         let reusable = existing.and_then(|entity| cameras.get_mut(entity).ok()).filter(
@@ -230,10 +242,11 @@ fn drive_sensor_cameras(
         let s = state.stats;
         if s.renders > 0 {
             info!(
-                "gearbox-sensors: bevy cameras: {} renders, {} published, {} undelivered, {:.1} KB read back per render in the last {:.0} s",
+                "gearbox-sensors: bevy cameras: {} renders, {} published, {} undelivered, {} superseded, {:.1} KB read back per render in the last {:.0} s",
                 s.renders,
                 s.published,
                 s.undelivered,
+                s.superseded,
                 s.readback_bytes as f64 / 1024.0 / s.renders as f64,
                 now - state.last_report
             );
@@ -241,6 +254,32 @@ fn drive_sensor_cameras(
         state.stats = CameraStats::default();
         state.last_report = now;
     }
+}
+
+/// Files this frame's `jobs` with the samples cameras still owe, one each,
+/// the newest, and hands back the `budget` owed longest; only `live` cameras
+/// owe any. Counts each sample a newer one replaced in `superseded`.
+fn take_due<T>(
+    waiting: &mut HashMap<CameraKey, (u64, T)>,
+    jobs: impl IntoIterator<Item = (CameraKey, T)>,
+    live: &HashSet<CameraKey>,
+    frame: u64,
+    budget: usize,
+    superseded: &mut u64,
+) -> Vec<T> {
+    for (key, job) in jobs {
+        let since = waiting.get(&key).map_or(frame, |(since, _)| *since);
+        if waiting.insert(key, (since, job)).is_some() {
+            *superseded += 1;
+        }
+    }
+    waiting.retain(|key, _| live.contains(key));
+    let mut due: Vec<_> = waiting.iter().map(|(key, (since, _))| (*since, key.clone())).collect();
+    due.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| (&a.1.bus_key, &a.1.link).cmp(&(&b.1.bus_key, &b.1.link))));
+    due.into_iter()
+        .take(budget)
+        .filter_map(|(_, key)| waiting.remove(&key).map(|(_, job)| job))
+        .collect()
 }
 
 /// The first sample of a freshly spawned camera, rendered once it exists.
@@ -364,6 +403,22 @@ mod tests {
         assert!(unpad_rows(&data[..200], width, height).is_none());
         let exact = vec![7u8; 64 * 4 * 2];
         assert_eq!(unpad_rows(&exact, 64, 2).unwrap(), exact);
+    }
+
+    #[test]
+    fn a_frame_renders_its_budget_of_owed_samples_oldest_first_newest_each() {
+        let key = |link: &str| CameraKey { bus_key: "rover".into(), link: link.into() };
+        let live: HashSet<_> = ["a", "b", "c"].map(key).into_iter().collect();
+        let (mut waiting, mut superseded) = (HashMap::new(), 0);
+        let first = take_due(&mut waiting, [(key("a"), 1), (key("b"), 1), (key("c"), 1)], &live, 1, 2, &mut superseded);
+        assert_eq!(first.len(), 2);
+        assert_eq!(waiting.len(), 1);
+        let owed = waiting.keys().next().unwrap().clone();
+        let next = take_due(&mut waiting, [(key("a"), 2), (key("b"), 2), (owed.clone(), 2)], &live, 2, 1, &mut superseded);
+        assert_eq!((next, superseded), (vec![2], 1));
+        assert!(!waiting.contains_key(&owed) && waiting.len() == 2);
+        let gone = take_due(&mut waiting, [(key("x"), 3)], &live, 3, 0, &mut superseded);
+        assert!(gone.is_empty() && !waiting.contains_key(&key("x")));
     }
 
     #[test]
