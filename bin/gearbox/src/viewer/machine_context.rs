@@ -8,9 +8,7 @@ use crate::{
     attach::{
         Attachments, LocalAttachmentAction, SNAP_ANGLE_RAD, SNAP_DISTANCE_M, body_link, would_loop,
     },
-    controller::{
-        ControllerInventory, MachineAgentKeys, MachineRef, find_prim_entity, is_descendant_of,
-    },
+    controller::{ControllerInventory, MachineAgentKeys, MachineRef, find_prim_entity},
     links::CouplingSide,
     physics::PhysicsWorld,
 };
@@ -73,6 +71,36 @@ impl Plugin for MachineContextPlugin {
     }
 }
 
+type MeshBounds = (
+    &'static GlobalTransform,
+    &'static bevy::camera::primitives::Aabb,
+    Option<&'static InheritedVisibility>,
+);
+
+/// World-space bounds of the visible meshes at and under `root`.
+fn subtree_bounds(
+    root: Entity,
+    children: &Query<&Children>,
+    meshes: &Query<MeshBounds, With<Mesh3d>>,
+) -> Option<(Vec3, Vec3)> {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let subtree = std::iter::once(root).chain(children.iter_descendants(root));
+    for (gt, aabb, visibility) in meshes.iter_many(subtree) {
+        if visibility.is_some_and(|v| !v.get()) {
+            continue;
+        }
+        let center = gt.transform_point(Vec3::from(aabb.center));
+        let matrix = gt.affine().matrix3;
+        let half = matrix.x_axis.abs() * aabb.half_extents.x
+            + matrix.y_axis.abs() * aabb.half_extents.y
+            + matrix.z_axis.abs() * aabb.half_extents.z;
+        min = min.min(center - Vec3::from(half));
+        max = max.max(center + Vec3::from(half));
+    }
+    min.is_finite().then_some((min, max))
+}
+
 fn publish_cards(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
@@ -81,16 +109,9 @@ fn publish_cards(
     physics: Res<PhysicsWorld>,
     prims: Query<(Entity, &UsdPrimRef)>,
     parents: Query<&ChildOf>,
+    children: Query<&Children>,
     transforms: Query<&GlobalTransform>,
-    meshes: Query<
-        (
-            Entity,
-            &GlobalTransform,
-            &bevy::camera::primitives::Aabb,
-            Option<&InheritedVisibility>,
-        ),
-        With<Mesh3d>,
-    >,
+    meshes: Query<MeshBounds, With<Mesh3d>>,
     mut cards: ResMut<MachineCards>,
 ) {
     cards.0.clear();
@@ -107,25 +128,9 @@ fn publish_cards(
         };
         let entity_of = |p: &str| find_prim_entity(key.scene_root, p, &prims, &parents);
         let machine_entity = entity_of(&machine.prim_path).unwrap_or(key.scene_root);
-        let mut min = Vec3::splat(f32::INFINITY);
-        let mut max = Vec3::splat(f32::NEG_INFINITY);
-        for (entity, gt, aabb, visibility) in &meshes {
-            if visibility.is_some_and(|v| !v.get())
-                || !is_descendant_of(entity, machine_entity, &parents)
-            {
-                continue;
-            }
-            let center = gt.transform_point(Vec3::from(aabb.center));
-            let matrix = gt.affine().matrix3;
-            let half = matrix.x_axis.abs() * aabb.half_extents.x
-                + matrix.y_axis.abs() * aabb.half_extents.y
-                + matrix.z_axis.abs() * aabb.half_extents.z;
-            min = min.min(center - Vec3::from(half));
-            max = max.max(center + Vec3::from(half));
-        }
-        if !min.is_finite() {
+        let Some((min, max)) = subtree_bounds(machine_entity, &children, &meshes) else {
             continue;
-        }
+        };
         let center = (min + max) * 0.5;
         let body = machine
             .body
@@ -409,5 +414,42 @@ fn update_band(
         transform.translation = Vec3::ZERO;
     } else if let (Some(now), Some(then)) = (bands.first(), built.first()) {
         transform.translation = Vec3::new(now.0.x - then.0.x, 0.0, now.0.z - then.0.z);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::camera::primitives::Aabb;
+    use bevy::ecs::system::SystemState;
+
+    fn mesh(world: &mut World, x: f32, visible: bool) -> Entity {
+        world
+            .spawn((
+                Mesh3d(Handle::default()),
+                GlobalTransform::from_translation(Vec3::new(x, 0.0, 0.0)),
+                Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0)),
+                if visible { InheritedVisibility::VISIBLE } else { InheritedVisibility::HIDDEN },
+            ))
+            .id()
+    }
+
+    #[test]
+    fn a_card_bounds_only_the_visible_meshes_under_its_machine() {
+        let mut world = World::new();
+        let machine = world.spawn_empty().id();
+        let part = mesh(&mut world, 0.0, true);
+        let wheel = mesh(&mut world, 4.0, true);
+        let hidden = mesh(&mut world, -50.0, false);
+        let neighbour = mesh(&mut world, 100.0, true);
+        world.entity_mut(machine).add_children(&[part, hidden]);
+        world.entity_mut(part).add_child(wheel);
+        let mut state =
+            SystemState::<(Query<&Children>, Query<MeshBounds, With<Mesh3d>>)>::new(&mut world);
+        let (children, meshes) = state.get(&world).expect("queries are valid");
+        let (min, max) = subtree_bounds(machine, &children, &meshes).expect("machine has meshes");
+        assert_eq!((min.x, max.x), (-1.0, 5.0));
+        let (min, max) = subtree_bounds(neighbour, &children, &meshes).expect("a mesh bounds itself");
+        assert_eq!((min.x, max.x), (99.0, 101.0));
     }
 }
