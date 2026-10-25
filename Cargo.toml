@@ -135,6 +135,8 @@ molla-vehicle            = { path = "../molla/crates/molla-vehicle" }
 [patch.crates-io]
 bevy_render = { path = "vendor/bevy_render" }
 bevy_asset = { path = "../../OUSD/bevy_openusd/vendor/bevy_asset" }
+# Vulkan uploads stage in host memory instead of a small BAR heap.
+gpu-allocator = { path = "vendor/gpu-allocator" }
 
 # Dependencies are optimised even in dev builds: unoptimised Bevy spends the
 # whole frame on the CPU. Our own crates stay at the dev defaults.
