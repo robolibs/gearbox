@@ -10,14 +10,19 @@ gearbox run --planet mars --world bin/gearbox/assets/world/mars_base.usda
 gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base
 ```
 
-The Mars base is sized to what a few cargo landers could bring. It grows
-food in three kinds of house: two 24 m glazed domes of terraced rings lit by
-the sun, three 30 m inflated arch greenhouses of tables under LED bars, and
-an EDEN ISS-like container module with its regolith bed. Around them stand
-a habitat cluster, an inflatable hab, a printed regolith tower, a rover
-hangar, solar arrays and four 10 kWe fission units, two container-sized
-ISRU units with their tanks and an ice well, and a landing zone. The fleet
-file places six tending robots, two pressurised rovers and Perseverance.
+The Mars base is a farm worked by robots, sized to what a few cargo landers
+could bring. It grows food in four kinds of house: two 24 m glazed domes of
+terraced rings lit by the sun, three 30 m inflated arch greenhouses of
+tables under LED bars, a printed-regolith vertical farm of 116 LED-lit trays
+seven levels high with a nursery, and an EDEN ISS-like container module
+with its regolith bed. A soil plant turns dug regolith into growing medium:
+it screens it, washes the perchlorate out, dewaters, dries and blends it
+with composted crop waste, and bags it. Around the farm stand a habitat
+cluster, an inflatable hab, a printed regolith tower, a rover hangar, solar
+arrays and four 10 kWe fission units, two container-sized ISRU units with
+their tanks and an ice well, and a landing zone. The fleet file places the
+robots that do the farm's work (§5), two pressurised rovers and
+Perseverance; `examples/python/mars_farm.py` sets them working.
 
 `scripts/mars_base/` builds everything in Blender (see `build.py`): each
 kind of structure goes to `assets/mars_base/modules/<kind>.usdc`, a
@@ -185,28 +190,53 @@ The CLI wraps all of it: `gearbox greenhouse plants [--ripe] [--tray T]
   planet's air (Mars: 95 % CO2, 0.17 % O2, 0.64 kPa, the sol's temperature
   swing).
 
-## 5. The tending robots
+## 5. The farm's robots
 
-Each house has a robot fixed to the world by a joint with an empty body,
-which terrain alignment leaves where it is placed. That joint's frame is in
-the stage's frame, not the robot's, so a file placing several robots sets
-each `Joints/anchor` `localPos0`/`localRot0` where its robot stands (the
-fleet file does). Every joint has a motor
-and a `builtin:joint_position` controller of its name, taking a position
-0..1 of its range: `gearbox machine set-value <joint> position 0.5 --machine
-<id>`. Every head carries `camera_link` (down, recognition), `light_link`
-(up) and `climate_link`.
+Robots on rails are fixed to the world by a joint with an empty body, which
+terrain alignment leaves where it is placed. That joint's frame is in the
+stage's frame, not the robot's, so a file placing several robots sets each
+`Joints/anchor` `localPos0`/`localRot0` where its robot stands (the fleet
+file does). Every moving joint has a motor and a controller of its name: a
+`builtin:joint_position` one takes a position 0..1 and drives its joint to
+position × the moved body's `gearbox:value:range` (negative for a joint
+working toward its lower limit), a `builtin:joint_velocity` one a speed.
+Both are set on the moved link: `gearbox machine set-value trolley position
+0.5 --machine base_fleet_eve`, `... set-value brush velocity 20`. Every
+tending head carries `camera_link` (down, recognition), `light_link` (up)
+and `climate_link`.
 
-| Robot | Machine | Joints |
+| Robot | Machine | Joints (moved link) |
 |---|---|---|
-| EDEN's rail robot, after DLR's EVE | `machines/usd/eden_gantry.usdz` | `travel` 5.0 m along the ceiling rail, `lift` 1.25 m down, `turn` 180° from one rack row to the other, `reach` 0.65 m over a rack |
-| An arch's ridge robot | `machines/usd/arch_gantry.usdz` | `travel` 25.6 m along the ridge rail, `lift` 0.65 m, `turn` 180°, `reach` 2.4 m: the turret sweeps the aisle under the lamps, the arm telescopes over either row of tables |
-| A dome's polar gantry | `machines/usd/dome_gantry.usdz` | `slew` 360° on the cistern, `travel` 5.6 m out along the boom over the three rings, `lift` 2.2 m down to the canopy; its outer leg runs on the floor rail |
+| EDEN's rail robot, after DLR's EVE | `eden_gantry.usdz` | `travel` (`trolley`) 5.0 m along the ceiling rail, `lift` (`mast`) 1.25 m down, `turn` (`turret`) 180° from one rack row to the other, `reach` (`arm`) 0.65 m over a rack |
+| An arch's ridge robot | `arch_gantry.usdz` | the same, at 25.6 m, 0.65 m, 180° and 2.4 m: the turret sweeps the aisle under the lamps, the arm telescopes over either row of tables |
+| A dome's polar gantry | `dome_gantry.usdz` | `slew` (`boom`) 360° on the cistern, `travel` (`carriage`) 5.6 m out along the boom over the three rings, `lift` (`mast`) 2.2 m down to the canopy; its outer leg runs on the floor rail |
+| The vertical farm's stacker crane, after twin-mast miniload cranes | `vertical_crane.usdz` | `travel` (`crane`) 21.9 m along the aisle on a floor rail under a top guide, `lift` (`carriage`) 3.91 m, `turn` (`turret`) 180° from one rack to the other, `reach` (`stage`) 0.72 m: one controller drives the telescope's two stages |
+| An arch's harvester: a skid-steer base with a lift column, a UR10e arm (Universal Robots' meshes, BSD-3-Clause) and a soft gripper, cutter and suction tool | `harvester.usdz` | `drive` (`builtin:diff_drive_cmd_vel`); `lift` (`lift_stage`) 0.40 m over two stages; `shoulder_pan` … `wrist_3` (`shoulder_link` … `wrist_3_link`), each turned at its parent to the low end of its working range, so position p is the UR angle lo + p·(hi − lo); `grip` (`jaw_left`). Its `by` reach is measured from `tool/tcp`, between the fingertips |
+| An arch's roof washer, after barrel-vault roof washers | `arch_washer.usdz` | `travel` (`portal`) 30.1 m from its dock past the EVA gable, `sweep` (`carriage`) 160° round the vault from curb to curb, `press` (`head`) 0.38 m in toward the cushions, `brush` velocity |
+| A dome's glazing washer, after rotating facade gantries | `dome_washer.usdz` | `slew` (`arch`) 360° on the ring girder round a crown bearing, `meridian` (`carriage`) from 82° to 9.5° elevation, `brush` velocity |
+| A solar row's washer, after Ecoppia's waterless robots | `panel_washer.usdz` | `travel` (`frame`) 21.1 m along the row on rails at its top and bottom edges, `brush` velocity; its own panel charges it |
+| The soil plant's excavator, after NASA's RASSOR 2.0 | `regolith_excavator.usdz` | `drive`; `arm_front`, `arm_rear` (position 0 stowed, 0.33 over a bin's lip, 0.40 carrying, 0.787 drums on the ground, 1 lifting the chassis onto them); `drum_front`, `drum_rear` velocity, digging at ±2.1 rad/s and emptying turned back |
 
-The fleet spawns them as `base_fleet_eve`, `base_fleet_arch{a,b,c}bot` and
-`base_fleet_dome{a,b}bot`. Retract an arm before travelling: one out over a
-rack catches its uprights. A `by` reach is measured from the parts under the
-named robot's own prim.
+The fleet spawns them as `base_fleet_eve`, `base_fleet_arch{a,b,c}bot`,
+`base_fleet_dome{a,b}bot`, `base_fleet_farmcrane`,
+`base_fleet_arch{a,b,c}picker{1,2}` (one each side of an arch's walkway, its
+arm toward its row of tables), `base_fleet_arch{a,b,c}washer`,
+`base_fleet_dome{a,b}washer`, `base_fleet_solarwasher{1..4}` and
+`base_fleet_digger{1,2,3}` (on their docks at the soil plant). Retract an
+arm before travelling: one out over a rack catches its uprights. A `by`
+reach is measured from the parts under the named robot's own prim.
+
+The build writes the farm's work plan next to the fleet,
+`bin/gearbox/assets/world/mars_base_farm.json` (`scripts/mars_base/plan.py`):
+for every robot that tends plants, the joint positions bringing its head
+over each plant place it reaches (a harvester's also where it stands in its
+lane), the order its joints move in and where it parks; for the washers
+their sweeps, for the excavators their dock, dig ground and bins.
+`examples/python/mars_farm.py` works the farm by it: each tending robot
+harvests what is ripe and sows what is empty, the washers sweep and then
+clean the glazing with `by`, the excavators dig and tip into the soil
+plant's bins. It waits on the sim's clock, so it keeps pace however fast the
+sim runs.
 
 The fleet's `base_fleet_rover1` and `rover2` are NASA's Space Exploration
 Vehicle (`machines/usd/sev_rover.usdz`), its full-detail mesh cut into the
