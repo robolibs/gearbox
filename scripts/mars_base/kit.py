@@ -377,10 +377,31 @@ def moved(bm, at=(0, 0, 0), yaw=0.0, pitch=0.0, roll=0.0, scale=None):
 # Objects
 
 
+def cells(bm, size=4.0):
+    """A mesh's faces gathered by the `size` m cell their middles fall in,
+    each cell's a mesh of its own; the mesh itself when it fits one cell."""
+    groups = {}
+    for face in bm.faces:
+        c = face.calc_center_median()
+        groups.setdefault((math.floor(c.x / size), math.floor(c.y / size), math.floor(c.z / size)), []).append(face)
+    if len(groups) <= 1:
+        return [bm]
+    out = []
+    for faces in groups.values():
+        part = bmesh.new()
+        made = {}
+        for face in faces:
+            part.faces.new([made.setdefault(v, part.verts.new(v.co)) for v in face.verts])
+        out.append(part)
+    bm.free()
+    return out
+
+
 class Building:
     """A collection of parts; `finish` joins the parts that share a material,
-    and joins the low-poly stand-ins given to `collider` into one hidden
-    mesh that the physics world meets in place of the looks."""
+    and turns the low-poly stand-ins given to `collider` into hidden meshes
+    that the physics world meets in place of the looks: one each, a large
+    one cut into cells so each piece's bounds stay close round it."""
 
     def __init__(self, name, parent=None, at=(0, 0, 0), yaw=0.0):
         self.name = name
@@ -426,14 +447,13 @@ class Building:
             obj = bpy.data.objects.new(f"{self.name}_{mat_name}", joined)
             self.collection.objects.link(obj)
             obj.parent = self.root
-        if self.colliders:
-            bm = bmesh.new()
-            for part in self.colliders:
-                merge(bm, part)
-            mesh = bpy.data.meshes.new(f"{self.name}_collider")
+        pieces = [piece for part in self.colliders for piece in cells(part)]
+        for k, bm in enumerate(pieces):
+            name = f"{self.name}_collider" + (f"{k:03d}" if len(pieces) > 1 else "")
+            mesh = bpy.data.meshes.new(name)
             bm.to_mesh(mesh)
             bm.free()
-            obj = bpy.data.objects.new(f"{self.name}_collider", mesh)
+            obj = bpy.data.objects.new(name, mesh)
             self.collection.objects.link(obj)
             obj.parent = self.root
             obj["gearbox_collide"] = True
