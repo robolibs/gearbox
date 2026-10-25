@@ -271,6 +271,26 @@ pub(crate) struct ControllerRuntimeState {
 #[derive(Resource, Debug, Default, Clone)]
 pub(crate) struct LastLinearSpeed(HashMap<ControllerKey, (f64, f64)>);
 
+/// Each machine's chassis as the frame last held the physics, by stage and
+/// machine id, and the steps that batch ran: what the state publisher reads.
+#[derive(Resource, Default)]
+pub(crate) struct ChassisReadings {
+    machines: HashMap<(Entity, String), ChassisReading>,
+    steps: u32,
+    step_hz: f64,
+}
+
+#[derive(Clone, Copy)]
+struct ChassisReading {
+    region: usize,
+    position: [f64; 3],
+    heading: f64,
+    roll: f64,
+    pitch: f64,
+    speed: f64,
+    yaw_rate: f64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ControllerState {
     /// The datum the position is in, by its region of the physics world.
@@ -357,6 +377,7 @@ impl Plugin for ControllerDiscoveryPlugin {
             .init_resource::<ControllerStates>()
             .init_resource::<ControllerRuntimeState>()
             .init_resource::<LastLinearSpeed>()
+            .init_resource::<ChassisReadings>()
             .init_resource::<MachineAgentKeys>()
             .init_resource::<RejectedMachines>()
             .init_resource::<UiDrive>()
@@ -417,9 +438,10 @@ impl Plugin for ControllerDiscoveryPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (publish_machine_controller_states, crate::joint_control::api::publish_state)
+                (read_chassis, crate::joint_control::api::publish_state)
                     .after(bevy::transform::TransformSystems::Propagate),
-            );
+            )
+            .add_systems(Last, publish_machine_controller_states);
     }
 }
 
@@ -4011,6 +4033,26 @@ mod tests {
     use crate::physics::backend::Pose;
 
     #[test]
+    fn each_machine_s_chassis_is_read_from_its_own_body() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let (stage, bodies) = spawn_fleet(&mut world, &["Eve", "Percy"]);
+        let mut physics = crate::physics::PhysicsWorld::default();
+        for (body, x) in bodies.iter().zip([3.0, 7.0]) {
+            let id = physics.insert_body(crate::physics::backend::BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(x, 0.0, 0.0))));
+            physics.entity_to_body.insert(*body, id);
+        }
+        physics.pending_steps = 4;
+        world.insert_resource(physics);
+        world.init_resource::<ChassisReadings>();
+        world.run_system_once(read_chassis).unwrap();
+        let readings = world.resource::<ChassisReadings>();
+        let x = |id: &str| readings.machines[&(stage, id.to_string())].position[0];
+        assert_eq!((x("eve"), x("percy")), (3.0, 7.0));
+        assert_eq!(readings.steps, 4);
+    }
+
+    #[test]
     fn discovers_tractor_drive_controller_metadata() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tractor.usd");
         let machines = discover_machines_from_usd(&path).expect("tractor.usd should scan");
@@ -4735,13 +4777,56 @@ const WORLD_GEO_DATUM: Geo = Geo {
 
 /// Publish each machine's state: from its drive controller when it has one,
 /// else straight from its body pose, so trailers report where they are.
+/// Read each machine's chassis for the state publisher before the physics
+/// leaves the frame.
+fn read_chassis(
+    inventory: Res<ControllerInventory>,
+    physics: Res<crate::physics::PhysicsWorld>,
+    index: Res<PrimIndex>,
+    mut readings: ResMut<ChassisReadings>,
+) {
+    readings.machines.clear();
+    readings.steps = physics.pending_steps;
+    readings.step_hz = physics.step_hz;
+    for machine in &inventory.machines {
+        let Some(scene_root) = machine.scene_root else { continue };
+        let Some(body_prim) =
+            machine.body.as_deref().or_else(|| machine.links.base().and_then(|b| b.body_prim.as_deref()))
+        else {
+            continue;
+        };
+        let Some(body) = index
+            .find(scene_root, body_prim)
+            .and_then(|entity| physics.entity_to_body.get(&entity))
+            .and_then(|h| physics.chassis(*h))
+        else {
+            continue;
+        };
+        let p = body.position().translation;
+        let (region, position) = crate::globe::site_local(p.x, p.y, p.z);
+        let (roll, pitch) = machine_roll_pitch_rad(&body);
+        let v = body.linvel();
+        readings.machines.insert(
+            (scene_root, machine.id.clone()),
+            ChassisReading {
+                region,
+                position,
+                heading: body_forward_vector(&body).map(|f| f.x.atan2(f.z)).unwrap_or(0.0),
+                roll,
+                pitch,
+                speed: (v.x * v.x + v.z * v.z).sqrt(),
+                yaw_rate: body.angvel().y,
+            },
+        );
+    }
+}
+
 fn publish_machine_controller_states(
     inventory: Res<ControllerInventory>,
     states: Res<ControllerStates>,
     keys: Res<MachineAgentKeys>,
     bus: Option<ResMut<GearboxBus>>,
-    physics: Res<crate::physics::PhysicsWorld>,
-    index: Res<PrimIndex>,
+    chassis: Res<ChassisReadings>,
     link_values: Res<crate::services::LinkValues>,
     service: Res<crate::services::ServiceCommands>,
     attachments: Res<crate::attach::Attachments>,
@@ -4826,42 +4911,10 @@ fn publish_machine_controller_states(
                 )
             }
             None => {
-                let Some(body_prim) = machine
-                    .body
-                    .as_deref()
-                    .or_else(|| machine.links.base().and_then(|b| b.body_prim.as_deref()))
-                else {
+                let Some(r) = chassis.machines.get(&(scene_root, machine.id.clone())) else {
                     continue;
                 };
-                let Some(entity) = index.find(scene_root, body_prim) else {
-                    continue;
-                };
-                let Some(body) = physics
-                    .entity_to_body
-                    .get(&entity)
-                    .and_then(|h| physics.chassis(*h))
-                else {
-                    continue;
-                };
-                let p = body.position().translation;
-                let (region, p) = crate::globe::site_local(p.x, p.y, p.z);
-                let p = DVec3::new(p[0], p[1], p[2]);
-                let heading = body_forward_vector(&body)
-                    .map(|f| f.x.atan2(f.z))
-                    .unwrap_or(0.0);
-                let (roll, pitch) = machine_roll_pitch_rad(&body);
-                let v = body.linvel();
-                let speed = (v.x * v.x + v.z * v.z).sqrt();
-                (
-                    region,
-                    [p.x, p.y, p.z],
-                    heading,
-                    roll,
-                    pitch,
-                    speed,
-                    body.angvel().y,
-                    Vec::new(),
-                )
+                (r.region, r.position, r.heading, r.roll, r.pitch, r.speed, r.yaw_rate, Vec::new())
             }
         };
 
@@ -4953,8 +5006,8 @@ fn publish_machine_controller_states(
         // (or, on the step frame right after, several steps' worth of
         // change) by an unrelated render `dt`. Lateral/vertical
         // acceleration aren't derived yet.
-        let forward_accel = if physics.pending_steps > 0 {
-            let step_dt = physics.pending_steps as f64 / physics.step_hz;
+        let forward_accel = if chassis.steps > 0 {
+            let step_dt = chassis.steps as f64 / chassis.step_hz;
             let accel = last_speed
                 .0
                 .get(&key)
