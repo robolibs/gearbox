@@ -89,6 +89,8 @@ pub struct AuthoredDrive {
 
 /// Default physics rate; `GEARBOX_PHYSICS_HZ` overrides it.
 const DEFAULT_STEP_HZ: f64 = 120.0;
+/// Default solver substeps per step, an even count; `GEARBOX_PHYSICS_SUBSTEPS` overrides it.
+const DEFAULT_SUBSTEPS: usize = 8;
 /// Most steps one frame may run; below that frame rate physics slows
 /// down instead of spiralling.
 const MAX_STEPS_PER_FRAME: u32 = 12;
@@ -120,15 +122,20 @@ impl PhysicsWorld {
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|hz| *hz >= 30.0)
             .unwrap_or(DEFAULT_STEP_HZ);
+        let substeps = std::env::var("GEARBOX_PHYSICS_SUBSTEPS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n >= 2 && n % 2 == 0)
+            .unwrap_or(DEFAULT_SUBSTEPS);
         // Soft constraint joints converge harder per tick; matters for
         // vehicles whose front-axle joints are not in reduced coordinates.
         backend.set_settings(SolverSettings {
             dt: 1.0 / step_hz,
             solver_iterations: 16,
-            internal_iterations: 4,
+            internal_iterations: substeps / 2,
         });
         backend.set_gravity(glam::DVec3::new(0.0, -gearbox_globe::Body::active().gravity_mps2(), 0.0));
-        info!("gearbox-physics: backend `{}` at {step_hz} Hz", backend.name());
+        info!("gearbox-physics: backend `{}` at {step_hz} Hz, {substeps} substeps a step", backend.name());
         Self {
             backend,
             entity_to_body: HashMap::new(),
@@ -512,11 +519,13 @@ pub fn step_physics(world: &mut World, mut stats: Local<(f64, u32, f64)>) {
     if now >= stats.2 {
         if stats.1 > 0 {
             let physics = world.resource::<PhysicsWorld>();
+            let bodies = physics.backend.bodies();
+            let asleep = bodies.iter().filter(|&&id| physics.body(id).is_some_and(|b| b.is_sleeping())).count();
             info!(
-                "gearbox-physics: {:.2} ms per step, {} steps in the last 10 s, {} bodies, {} colliders",
+                "gearbox-physics: {:.2} ms per step, {} steps in the last 10 s, {} bodies ({asleep} asleep), {} colliders",
                 1000.0 * stats.0 / stats.1 as f64,
                 stats.1,
-                physics.backend.bodies().len(),
+                bodies.len(),
                 physics.backend.colliders().len()
             );
         }
