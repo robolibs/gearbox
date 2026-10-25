@@ -185,7 +185,7 @@ const CLUSTERED_REACH_M: f32 = 120.0;
 /// built out to the far plane cost some 18 ms a frame.
 fn cluster_while_lit(
     lights: Query<(), Or<(With<PointLight>, With<SpotLight>)>>,
-    mut cameras: Query<&mut bevy::light::cluster::ClusterConfig, With<Camera3d>>,
+    mut cameras: Query<&mut bevy::light::cluster::ClusterConfig, (With<Camera3d>, Without<crate::sensor_cameras::SensorCamera>)>,
 ) {
     use bevy::light::cluster::{ClusterConfig, ClusterFarZMode, ClusterZConfig};
     let lit = !lights.is_empty();

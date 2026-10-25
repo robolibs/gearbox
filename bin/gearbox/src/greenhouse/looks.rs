@@ -294,6 +294,21 @@ pub struct GrowLamp {
 
 /// Share of a lamp's light that falls on its own tray rather than round it.
 const ON_TRAY: f32 = 0.6;
+/// How near a viewing camera a grow lamp's light shines, metres.
+const LAMP_LIGHT_REACH_M: f32 = 30.0;
+
+/// Shows the spot light of each grow lamp within [`LAMP_LIGHT_REACH_M`] of a
+/// viewing camera and hides the rest; a hidden light is no clustered light.
+pub fn light_near_lamps(
+    cameras: Query<&GlobalTransform, (With<Camera3d>, Without<crate::sensor_cameras::SensorCamera>)>,
+    mut lamps: Query<(&GlobalTransform, &mut Visibility), With<GrowLamp>>,
+) {
+    let eyes: Vec<Vec3> = cameras.iter().map(GlobalTransform::translation).collect();
+    for (at, mut visibility) in &mut lamps {
+        let near = eyes.iter().any(|eye| eye.distance(at.translation()) < LAMP_LIGHT_REACH_M);
+        visibility.set_if_neq(if near { Visibility::Inherited } else { Visibility::Hidden });
+    }
+}
 
 /// Mean illuminance over each room's surfaces from its lamps, lux: their
 /// lumens spread over the walls, floor and ceiling of its box.

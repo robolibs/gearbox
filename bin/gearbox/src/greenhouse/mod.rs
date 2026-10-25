@@ -46,6 +46,7 @@ impl Plugin for GreenhousePlugin {
                     sense::sync_plant_hulls,
                     sense::fill_air_field,
                     looks::sync_lamps,
+                    looks::light_near_lamps,
                     looks::expose_indoors,
                 )
                     .chain()

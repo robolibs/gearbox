@@ -138,6 +138,8 @@ fn spawn_camera(
         RenderTarget::Image(image.clone().into()),
         projection,
         camera_in_link(),
+        // A sensor image sees by the sun and the sky; no lamps clustered.
+        bevy::light::cluster::ClusterConfig::None,
         bevy_weather::WeatherOptOut,
         SensorCamera {
             key: job.key.clone(),
