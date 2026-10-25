@@ -112,6 +112,24 @@ usd_bevy        = { path = "../../OUSD/bevy_openusd/crates/usd_bevy" }
 openusd         = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openusd" }
 openusd-schemas = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openusd-schemas" }
 
+# Molla's broad phase taking mesh and hull bounds from a cached box comes
+# from the sibling checkout (branch perf/mesh-bounds) until it is pushed.
+[patch."https://github.com/bresilla/molla"]
+molla-actuators          = { path = "../molla/crates/molla-actuators" }
+molla-autograd           = { path = "../molla/crates/molla-autograd" }
+molla-compute            = { path = "../molla/crates/molla-compute" }
+molla-compute-primitives = { path = "../molla/crates/molla-compute-primitives" }
+molla-core               = { path = "../molla/crates/molla-core" }
+molla-geometry           = { path = "../molla/crates/molla-geometry" }
+molla-kernels            = { path = "../molla/crates/molla-kernels" }
+molla-math               = { path = "../molla/crates/molla-math" }
+molla-optim              = { path = "../molla/crates/molla-optim" }
+molla-sensors            = { path = "../molla/crates/molla-sensors" }
+molla-sim                = { path = "../molla/crates/molla-sim" }
+molla-solvers            = { path = "../molla/crates/molla-solvers" }
+molla-storage            = { path = "../molla/crates/molla-storage" }
+molla-vehicle            = { path = "../molla/crates/molla-vehicle" }
+
 # bevy_openusd's bevy_asset serialises loads of one source so an older
 # snapshot cannot land after a newer one; the patch has to cover the graph.
 [patch.crates-io]
