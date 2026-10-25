@@ -394,7 +394,7 @@ fn follow_target(
     fly: Res<FlyTo>,
     agent_fly: Res<ChaseCameraFly>,
     inventory: Res<ControllerInventory>,
-    prims: Query<(Entity, &UsdPrimRef)>,
+    index: Res<crate::prim_index::PrimIndex>,
     parents: Query<&ChildOf>,
     sites: Query<&crate::globe::Site>,
     toggles: Res<crate::viewer::overlays::DisplayToggles>,
@@ -415,7 +415,7 @@ fn follow_target(
         follow.anchor = None;
         return;
     }
-    let body = machine_body_entity(&machine, &inventory, &prims, &parents);
+    let body = machine_body_entity(&machine, &inventory, &index);
     if !transforms.contains(body) {
         follow.set(None);
         return;
@@ -647,11 +647,10 @@ fn apply_fly_to(
 pub(crate) fn machine_body_entity(
     machine: &MachineRef,
     inventory: &ControllerInventory,
-    prims: &Query<(Entity, &UsdPrimRef)>,
-    parents: &Query<&ChildOf>,
+    index: &crate::prim_index::PrimIndex,
 ) -> Entity {
     let root = machine.scene_root;
-    let entity = |prim: &str| crate::controller::find_prim_entity(root, prim, prims, parents);
+    let entity = |prim: &str| index.find(root, prim);
     inventory
         .find(machine)
         .and_then(|m| {
@@ -1177,18 +1176,10 @@ mod tests {
 
     #[test]
     fn the_second_machine_of_a_stage_is_flown_to_by_its_own_body() {
-        use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         let (stage, bodies) = fleet(&mut world);
-        let body = world
-            .run_system_once(
-                move |inventory: Res<ControllerInventory>,
-                      prims: Query<(Entity, &UsdPrimRef)>,
-                      parents: Query<&ChildOf>| {
-                    machine_body_entity(&percy(stage), &inventory, &prims, &parents)
-                },
-            )
-            .unwrap();
+        let index = world.resource::<crate::prim_index::PrimIndex>();
+        let body = machine_body_entity(&percy(stage), world.resource::<ControllerInventory>(), index);
         assert_eq!(body, bodies[1]);
     }
 

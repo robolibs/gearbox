@@ -276,7 +276,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         Pod::new(pid(P, "head", 0))
             .with_readout("machine", machine.id.clone())
             .with_readout("instance", std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into()))
-            .with_readout("physics", world.resource::<crate::physics::PhysicsWorld>().name())
+            .with_readout("physics", world.resource::<crate::physics::PhysicsBackendName>().0)
             .with_readout("kind", machine.kind.as_deref().unwrap_or("—"))
             .with_readout("controllers", machine.controllers.len().to_string())
             .with_readout("links", machine.links.links.len().to_string()),

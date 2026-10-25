@@ -8,17 +8,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::physics::PhysicsWorld;
+use crate::physics::{PhysicsWorld, TickResourcesExt};
 use bevy::prelude::*;
 use gearbox_api::GearboxBus;
 use crate::physics::backend::{BodyId, JointAxis, JointId};
-use usd_bevy::UsdPrimRef;
 
 use crate::attach::Attachments;
 use crate::controller::{
     CmdVel, ControllerInventory, ControllerKey, ControllerSpec, ControllerStates, MachineAgentKeys,
-    MachineInstanceSpec, body_forward_vector, find_prim_entity,
+    MachineInstanceSpec, body_forward_vector,
 };
+use crate::prim_index::PrimIndex;
 use crate::links::{CouplingSide, LinkSpec, LinkTree};
 
 pub const SERVICE_TYPES: [&str; 7] = [
@@ -61,7 +61,7 @@ impl MasterState {
 }
 
 /// Slave machine id → its master's state.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct MasterInputs(pub HashMap<String, MasterState>);
 
 /// Master machine id → the twist a granted slave request asks for.
@@ -69,12 +69,25 @@ pub struct MasterInputs(pub HashMap<String, MasterState>);
 pub struct TimRequests(pub HashMap<String, CmdVel>);
 
 /// Latest `/cmd` props per service controller, merged over time.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct ServiceCommands(pub HashMap<ControllerKey, HashMap<String, String>>);
 
 /// Live named values per link: (machine id, link name, value name) → value.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct LinkValues(pub HashMap<(String, String, String), f64>);
+
+impl crate::physics::Merge for LinkValues {
+    fn merge(&mut self, sent: &Self, back: Self) {
+        for (key, value) in &back.0 {
+            if sent.0.get(key) != Some(value) {
+                self.0.insert(key.clone(), *value);
+            }
+        }
+        for key in sent.0.keys().filter(|key| !back.0.contains_key(*key)) {
+            self.0.remove(key);
+        }
+    }
+}
 
 impl LinkValues {
     pub fn get(&self, machine: &str, link: &str, name: &str) -> Option<f64> {
@@ -112,7 +125,7 @@ impl LinkValues {
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 struct WarnedOnce(HashSet<String>);
 
 /// Machines whose authored link values have been copied into `LinkValues`.
@@ -141,6 +154,10 @@ impl Plugin for ServicesPlugin {
             .init_resource::<LinkValues>()
             .init_resource::<WarnedOnce>()
             .init_resource::<SeededLinkValues>()
+            .tick_reads::<ServiceCommands>()
+            .tick_reads::<MasterInputs>()
+            .tick_writes::<WarnedOnce>()
+            .tick_merges::<LinkValues>()
             .add_systems(
                 Update,
                 (
@@ -406,17 +423,10 @@ struct JointRef {
 fn resolve_joint(
     scene_root: Entity,
     prim_path: &str,
-    joints: &Query<(
-        Entity,
-        &UsdPrimRef,
-        &crate::physics::markers::UsdPhysicsJoint,
-    )>,
-    parents: &Query<&ChildOf>,
+    index: &PrimIndex,
     physics: &PhysicsWorld,
 ) -> Option<JointRef> {
-    let (entity, _, joint) = joints.iter().find(|(entity, prim, _)| {
-        prim.path == prim_path && crate::controller::is_descendant_of(*entity, scene_root, parents)
-    })?;
+    let (entity, joint) = index.find_joint(scene_root, prim_path)?;
     let id = physics.entity_to_joint.get(&entity).copied();
     let (body0, body1) = match id.and_then(|id| physics.joint_bodies(id)) {
         Some(bodies) => bodies,
@@ -591,13 +601,7 @@ fn apply_service_controllers(
     inputs: Res<MasterInputs>,
     active: Res<gearbox_api::PhysicsActive>,
     mut physics: ResMut<PhysicsWorld>,
-    joints: Query<(
-        Entity,
-        &UsdPrimRef,
-        &crate::physics::markers::UsdPhysicsJoint,
-    )>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<PrimIndex>,
     mut warned: ResMut<WarnedOnce>,
     clock: Res<crate::joint_control::runtime::ControlClock>,
     mut strokes: Local<HashMap<String, f64>>,
@@ -646,7 +650,7 @@ fn apply_service_controllers(
                 continue;
             }
             for prim in joint_prims {
-                let Some(j) = resolve_joint(scene_root, prim, &joints, &parents, &physics) else {
+                let Some(j) = resolve_joint(scene_root, prim, &index, &physics) else {
                     continue;
                 };
                 // Controller props, overlaid by the values of the link this
@@ -755,7 +759,7 @@ fn apply_service_controllers(
                         let angle = match num(props, "angle_rad") {
                             Some(a) => a,
                             None => auto_trailer_steer(
-                                machine, scene_root, &inputs, &physics, &prims, &parents,
+                                machine, scene_root, &inputs, &physics, &index,
                             )
                             .unwrap_or(0.0),
                         }
@@ -794,7 +798,7 @@ fn apply_service_controllers(
             .collect();
         if let Some(pto) = bound_pto.as_deref()
             && !controlled.contains(pto)
-            && let Some(j) = resolve_joint(scene_root, pto, &joints, &parents, &physics)
+            && let Some(j) = resolve_joint(scene_root, pto, &index, &physics)
         {
             actuate(&mut physics, &service_owner(&machine.id, "coupling"), &j, Actuation::Velocity { target: m.pto_rad_s(), max_force: PTO_MAX_TORQUE });
         }
@@ -803,7 +807,7 @@ fn apply_service_controllers(
                 continue;
             }
             let flow = m.valves.get(n).copied().unwrap_or(0.0);
-            if let Some(j) = resolve_joint(scene_root, valve_joint, &joints, &parents, &physics) {
+            if let Some(j) = resolve_joint(scene_root, valve_joint, &index, &physics) {
                 let act = Actuation::Velocity { target: flow * DEFAULT_VALVE_RATE, max_force: MOTOR_MAX_FORCE };
                 actuate(&mut physics, &service_owner(&machine.id, "coupling"), &j, act);
             }
@@ -818,15 +822,14 @@ fn auto_trailer_steer(
     scene_root: Entity,
     inputs: &MasterInputs,
     physics: &PhysicsWorld,
-    prims: &Query<(Entity, &UsdPrimRef)>,
-    parents: &Query<&ChildOf>,
+    index: &PrimIndex,
 ) -> Option<f64> {
     let master = inputs.0.get(&machine.id)?;
     let body_prim = machine
         .body
         .as_deref()
         .or_else(|| machine.links.base().and_then(|b| b.body_prim.as_deref()))?;
-    let entity = find_prim_entity(scene_root, body_prim, prims, parents)?;
+    let entity = index.find(scene_root, body_prim)?;
     let body = physics
         .entity_to_body
         .get(&entity)
@@ -1055,7 +1058,24 @@ mod hitch_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::Merge;
     use crate::physics::backend::{BodyDesc, ColliderDesc, DVec3, DeviceCommand, DeviceLimits, JointDesc, JointKind, MotorModel, Pose, Shape};
+
+    #[test]
+    fn link_values_keep_the_frame_s_edits_and_take_the_tick_s() {
+        let values = |pairs: &[(&str, f64)]| {
+            let mut values = LinkValues::default();
+            for (name, value) in pairs {
+                values.set("rover", "hitch", name, *value);
+            }
+            values
+        };
+        let sent = values(&[("lift", 1.0), ("tilt", 2.0), ("gone", 7.0)]);
+        let back = values(&[("lift", 1.0), ("tilt", 5.0), ("pto", 3.0)]);
+        let mut own = values(&[("lift", 9.0), ("tilt", 2.0), ("gone", 7.0), ("target", 4.0)]);
+        own.merge(&sent, back);
+        assert_eq!(own.0, values(&[("lift", 9.0), ("tilt", 5.0), ("pto", 3.0), ("target", 4.0)]).0);
+    }
 
     /// An arm on a revolute joint to a fixed post, in zero gravity.
     fn arm() -> (PhysicsWorld, JointRef, JointId) {

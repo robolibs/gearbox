@@ -34,6 +34,7 @@ pub mod reader;
 mod scene;
 #[cfg(test)]
 mod tracks;
+mod thread;
 mod world;
 mod writeback;
 
@@ -49,6 +50,8 @@ use markers::ModelMember;
 
 pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
+pub use thread::PhysicsThreadPlugin;
+pub(crate) use thread::{Merge, TickResourcesExt};
 pub use world::{AuthoredDrive, ControlTick, PhysicsWorld, step_physics};
 #[cfg(test)]
 pub use world::plan_physics_steps;
@@ -64,13 +67,17 @@ pub struct PhysicsPlugin;
 
 impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(crate::prim_index::PrimIndexPlugin);
         app.init_schedule(world::ControlTick);
         app.init_resource::<PhysicsWorld>()
             .init_resource::<PhysicsActive>()
             .init_resource::<ColliderDebugEnabled>()
             // After the clock moves: planned before it, a frame's steps would be the
             // last frame's time, and uneven frames would show as jerks.
-            .add_systems(First, world::plan_physics_steps.after(bevy::time::TimeSystems))
+            .add_systems(
+                First,
+                world::plan_physics_steps.after(bevy::time::TimeSystems).run_if(stepped_on_the_frame),
+            )
             .add_systems(
                 Update,
                 (
@@ -83,18 +90,22 @@ impl Plugin for PhysicsPlugin {
                     colliders::apply_collision_filters,
                     joints::convert_joints,
                     sync_bodies_to_transforms_on_resume,
-                    world::step_physics,
+                    world::step_physics.run_if(stepped_on_the_frame),
                     report_quarantined,
                 )
                     .chain(),
             )
             .add_systems(
                 PostUpdate,
-                writeback::writeback_transforms
-                    .in_set(PhysicsWriteback)
-                    .before(bevy::transform::TransformSystems::Propagate),
-            )
-            .add_systems(Last, debug::draw_collider_gizmos);
+                (
+                    writeback::writeback_transforms
+                        .in_set(PhysicsWriteback)
+                        .before(bevy::transform::TransformSystems::Propagate),
+                    debug::draw_collider_gizmos,
+                ),
+            );
+        let backend = app.world().resource::<PhysicsWorld>().name();
+        app.insert_resource(PhysicsBackendName(backend));
         app.add_systems(Update, fem::advance_islands.after(world::step_physics));
         app.add_systems(Startup, fem::render_health::install);
         if std::env::var_os("GEARBOX_TF_DEBUG").is_some() {
@@ -112,6 +123,15 @@ impl Plugin for PhysicsPlugin {
 fn physics_is_active(active: Res<PhysicsActive>) -> bool {
     active.0
 }
+
+/// The frame steps the physics itself unless the physics thread does.
+fn stepped_on_the_frame(thread: Option<Res<thread::PhysicsThread>>) -> bool {
+    thread.is_none()
+}
+
+/// The engine's name, readable while the physics thread holds the world.
+#[derive(Resource)]
+pub struct PhysicsBackendName(pub &'static str);
 
 /// Name the bodies the step quarantined, with the transform the projection
 /// gave their entities, so a NaN can be traced to its prim.

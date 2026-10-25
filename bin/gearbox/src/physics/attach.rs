@@ -326,11 +326,11 @@ pub fn resolve_pending_physics(
             .map(|p| p.path.clone())
             .unwrap_or_default();
         if let Ok(mut entity_mut) = world.get_entity_mut(*joint_entity)
-            && let Some(mut joint) = entity_mut.get_mut::<UsdPhysicsJoint>()
+            && let Some(joint) = entity_mut.get::<UsdPhysicsJoint>()
         {
-            joint.body0 = body0;
-            joint.body1 = body1;
-            entity_mut.insert(JointEndpoints { path, body0: mark(body0_path), body1: mark(body1_path), stage_root });
+            let joint = UsdPhysicsJoint { body0, body1, ..joint.clone() };
+            let endpoints = JointEndpoints { path, body0: mark(body0_path), body1: mark(body1_path), stage_root };
+            entity_mut.insert((joint, endpoints));
         }
     }
 
@@ -454,7 +454,7 @@ fn dof_is_rotational(d: UsdDof) -> bool {
 }
 
 pub fn attach_joint_softness(world: &mut World, entity: Entity, stage: &Stage, path: &str) {
-    let Some(mut joint) = world.get_mut::<UsdPhysicsJoint>(entity) else { return; };
+    let Some(mut joint) = world.get::<UsdPhysicsJoint>(entity).cloned() else { return; };
     let Ok(prim) = openusd::sdf::path(path) else { return; };
     let read = |name| crate::controller::read_float(stage, &prim, name).map(f64::from);
     let frequency = read("gearbox:joint:frequencyHz");
@@ -468,6 +468,7 @@ pub fn attach_joint_softness(world: &mut World, entity: Entity, stage: &Stage, p
     joint.rolling = read("gearbox:joint:rollingResistance")
         .zip(read("gearbox:joint:rollingRadius"))
         .filter(|(c, r)| c.is_finite() && r.is_finite() && *c > 0.0 && *r > 0.0);
+    world.entity_mut(entity).insert(joint);
 }
 
 /// A D6 axis limit in SI; an unauthored side is open.

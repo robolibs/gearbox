@@ -93,7 +93,7 @@ const DEFAULT_STEP_HZ: f64 = 120.0;
 const DEFAULT_SUBSTEPS: usize = 8;
 /// Most steps one frame may run; below that frame rate physics slows
 /// down instead of spiralling.
-const MAX_STEPS_PER_FRAME: u32 = 12;
+pub(super) const MAX_STEPS_PER_FRAME: u32 = 12;
 
 impl Default for PhysicsWorld {
     fn default() -> Self {
@@ -500,36 +500,55 @@ pub fn plan_physics_steps(
 
 /// Run the steps `plan_physics_steps` planned for this frame, each after
 /// its `ControlTick`, and log the cost per step every 10 s.
-pub fn step_physics(world: &mut World, mut stats: Local<(f64, u32, f64)>) {
+pub fn step_physics(world: &mut World, mut stats: Local<StepStats>) {
     if !world.get_resource::<PhysicsActive>().is_some_and(|a| a.0) {
         return;
     }
     let steps = world.resource::<PhysicsWorld>().pending_steps;
     let start = std::time::Instant::now();
     for _ in 0..steps {
-        let _ = world.try_run_schedule(ControlTick);
-        world.resource_mut::<PhysicsWorld>().step();
+        tick(world);
     }
     if std::mem::take(&mut world.resource_mut::<PhysicsWorld>().pause_after_steps) {
         world.resource_mut::<PhysicsActive>().0 = false;
     }
-    stats.0 += start.elapsed().as_secs_f64();
-    stats.1 += steps;
-    let now = world.get_resource::<Time>().map_or(0.0, |t| t.elapsed_secs_f64());
-    if now >= stats.2 {
-        if stats.1 > 0 {
-            let physics = world.resource::<PhysicsWorld>();
+    stats.record(start.elapsed().as_secs_f64(), steps, world.resource::<PhysicsWorld>());
+}
+
+/// One physics tick: the due controllers' `ControlTick`, then its step.
+pub(super) fn tick(world: &mut World) {
+    let _ = world.try_run_schedule(ControlTick);
+    world.resource_mut::<PhysicsWorld>().step();
+}
+
+/// Seconds spent stepping and steps run, logged every 10 s of real time.
+#[derive(Default)]
+pub struct StepStats {
+    seconds: f64,
+    steps: u32,
+    since: Option<std::time::Instant>,
+}
+
+impl StepStats {
+    pub(super) fn record(&mut self, seconds: f64, steps: u32, physics: &PhysicsWorld) {
+        self.seconds += seconds;
+        self.steps += steps;
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed().as_secs_f64() < 10.0 {
+            return;
+        }
+        if self.steps > 0 {
             let bodies = physics.backend.bodies();
             let asleep = bodies.iter().filter(|&&id| physics.body(id).is_some_and(|b| b.is_sleeping())).count();
             info!(
                 "gearbox-physics: {:.2} ms per step, {} steps in the last 10 s, {} bodies ({asleep} asleep), {} colliders",
-                1000.0 * stats.0 / stats.1 as f64,
-                stats.1,
+                1000.0 * self.seconds / self.steps as f64,
+                self.steps,
                 bodies.len(),
                 physics.backend.colliders().len()
             );
         }
-        *stats = (0.0, 0, now + 10.0);
+        *self = Self { since: Some(std::time::Instant::now()), ..default() };
     }
 }
 

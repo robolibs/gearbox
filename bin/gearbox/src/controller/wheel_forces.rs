@@ -339,6 +339,7 @@ mod tests {
     #[test]
     fn scene_wheels_feed_traction_and_tracks_from_tyre_output() {
         let mut app = App::new();
+        app.add_plugins(crate::prim_index::PrimIndexPlugin);
         let root = app.world_mut().spawn_empty().id();
         let chassis_entity = app
             .world_mut()

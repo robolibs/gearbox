@@ -4,7 +4,6 @@
 
 use bevy::prelude::*;
 
-use usd_bevy::UsdPrimRef;
 
 use crate::controller::{ControllerInventory, MachineRef};
 use crate::viewer::state::{ChaseCameraFly, FlyTarget, FollowTarget, LookAround};
@@ -28,8 +27,7 @@ fn serve_camera_requests(
     inventory: Res<ControllerInventory>,
     mut follow: ResMut<FollowTarget>,
     mut fly: ResMut<ChaseCameraFly>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<crate::prim_index::PrimIndex>,
     mut view: ResMut<crate::viewer::camera::View>,
     mut goto: ResMut<crate::globe::Goto>,
 ) {
@@ -54,7 +52,7 @@ fn serve_camera_requests(
     info!("gearbox-viewer: camera request `{}`", text.trim());
     match (action, machine) {
         ("fly", Some(machine)) => {
-            let body = machine_body_entity(&machine, &inventory, &prims, &parents);
+            let body = machine_body_entity(&machine, &inventory, &index);
             fly.target = Some(FlyTarget::new(machine, body, &view));
         }
         ("follow", Some(machine)) => follow.set(Some(machine)),
@@ -82,7 +80,7 @@ fn serve_camera_requests(
         // from behind it. With `over`, the view glides there over S seconds
         // and holds it, tracking the machine, until something else moves it.
         ("look", Some(machine)) => {
-            let body = machine_body_entity(&machine, &inventory, &prims, &parents);
+            let body = machine_body_entity(&machine, &inventory, &index);
             let look = look_around(&text);
             fly.target = Some(match glide_seconds(&text) {
                 Some(seconds) => FlyTarget::gliding(machine, body, &view, look, seconds),

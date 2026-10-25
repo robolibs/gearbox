@@ -82,6 +82,7 @@ pub(crate) struct CommandState<'w> {
     tuning: ResMut<'w, LoaderTuning>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
     inventory: Res<'w, ControllerInventory>,
+    index: Res<'w, crate::prim_index::PrimIndex>,
     controls: Res<'w, crate::viewer::drive::ControlSettings>,
     view: ResMut<'w, crate::viewer::camera::View>,
     sites: Res<'w, crate::globe::Sites>,
@@ -158,8 +159,7 @@ pub(crate) fn apply_host_commands(
                 let body = crate::viewer::systems::machine_body_entity(
                     &machine,
                     &s.inventory,
-                    &q.prims,
-                    &q.parents,
+                    &s.index,
                 );
                 s.fly.remaining = 0.0;
                 if s.follow.machine.is_some() {

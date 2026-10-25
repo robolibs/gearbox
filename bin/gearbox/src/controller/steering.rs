@@ -155,12 +155,7 @@ pub(super) fn solve(
     scene_root: Entity,
     controller: &ControllerSpec,
     machine: &MachineInstanceSpec,
-    joints: &Query<(
-        Entity,
-        &UsdPrimRef,
-        &crate::physics::markers::UsdPhysicsJoint,
-    )>,
-    parents: &Query<&ChildOf>,
+    index: &PrimIndex,
     physics: &crate::physics::PhysicsWorld,
     chassis: BodyId,
     cmd: CmdVel,
@@ -190,12 +185,8 @@ pub(super) fn solve(
         .chain(controller.steer_joints.iter())
         .chain(machine.steering_joints.iter())
     {
-        let pair = joint_pair(scene_root, path, joints, parents, physics)?;
-        let authored_drive = joints.iter().any(|(entity, prim, joint)| {
-            prim.path == *path
-                && is_descendant_of(entity, scene_root, parents)
-                && !joint.drives.is_empty()
-        });
+        let pair = joint_pair(scene_root, path, index, physics)?;
+        let authored_drive = index.find_joint(scene_root, path).is_some_and(|(_, joint)| !joint.drives.is_empty());
         if wheels
             .iter()
             .any(|wheel| rigid_body_pair_matches(wheel.pair, pair.0, pair.1))
@@ -230,7 +221,7 @@ pub(super) fn solve(
     if wheels.is_empty() {
         return None;
     }
-    let tires = tire_joint_pairs(scene_root, controller, machine, joints, parents, physics);
+    let tires = tire_joint_pairs(scene_root, controller, machine, index, physics);
     let mut fixed = Vec::new();
     for pair in &tires {
         let steered = wheels.iter().any(|wheel| {

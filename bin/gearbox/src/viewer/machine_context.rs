@@ -1,14 +1,13 @@
 //! Live machine cards, coupling candidates and terrain-following selection bands.
 
 use bevy::{asset::RenderAssetUsages, mesh::PrimitiveTopology, prelude::*};
-use usd_bevy::UsdPrimRef;
 
 use super::systems::{Selection, SelectionRing};
 use crate::{
     attach::{
         Attachments, LocalAttachmentAction, SNAP_ANGLE_RAD, SNAP_DISTANCE_M, body_link, would_loop,
     },
-    controller::{ControllerInventory, MachineAgentKeys, MachineRef, find_prim_entity},
+    controller::{ControllerInventory, MachineAgentKeys, MachineRef},
     links::CouplingSide,
     physics::PhysicsWorld,
 };
@@ -107,8 +106,7 @@ fn publish_cards(
     bus: Option<Res<gearbox_api::GearboxBus>>,
     attachments: Res<Attachments>,
     physics: Res<PhysicsWorld>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<crate::prim_index::PrimIndex>,
     children: Query<&Children>,
     transforms: Query<&GlobalTransform>,
     meshes: Query<MeshBounds, With<Mesh3d>>,
@@ -126,7 +124,7 @@ fn publish_cards(
         else {
             continue;
         };
-        let entity_of = |p: &str| find_prim_entity(key.scene_root, p, &prims, &parents);
+        let entity_of = |p: &str| index.find(key.scene_root, p);
         let machine_entity = entity_of(&machine.prim_path).unwrap_or(key.scene_root);
         let Some((min, max)) = subtree_bounds(machine_entity, &children, &meshes) else {
             continue;

@@ -5,11 +5,10 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
-use usd_bevy::UsdPrimRef;
 
-use crate::controller::{ControllerInventory, is_descendant_of};
+use crate::controller::ControllerInventory;
 use crate::physics::PhysicsWorld;
-use crate::physics::markers::UsdPhysicsJoint;
+use crate::prim_index::PrimIndex;
 
 /// Frames a machine waited for its joints, to report a stuck activation once.
 #[derive(Resource, Default)]
@@ -25,7 +24,7 @@ pub enum ControlSet {
 
 /// Which controllers run on the current physics tick, and the simulated
 /// time since each last ran: `updateRateHz` by a phase accumulator.
-#[derive(Resource, Default, Debug)]
+#[derive(Resource, Default, Debug, Clone)]
 pub struct ControlClock {
     pub tick: u64,
     pub tick_dt: f64,
@@ -83,9 +82,7 @@ pub fn bind_accepted_machines(
     inventory: Res<ControllerInventory>,
     mut physics: ResMut<PhysicsWorld>,
     mut waits: ResMut<BindingWaits>,
-    joints: Query<(Entity, &UsdPrimRef), With<UsdPhysicsJoint>>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<PrimIndex>,
     mut clock: Option<ResMut<ControlClock>>,
 ) {
     let mut live: HashSet<&str> = HashSet::new();
@@ -98,17 +95,17 @@ pub fn bind_accepted_machines(
         if physics.control.machines.get(&machine.id) == Some(&model.generation) {
             continue;
         }
-        let built: HashMap<String, crate::physics::backend::JointId> = joints
-            .iter()
-            .filter(|(entity, _)| is_descendant_of(*entity, root, &parents))
-            .filter_map(|(entity, prim)| physics.entity_to_joint.get(&entity).map(|id| (prim.path.clone(), *id)))
+        let built: HashMap<String, crate::physics::backend::JointId> = index
+            .joints()
+            .filter(|(entity, _, _)| index.is_descendant_of(*entity, root))
+            .filter_map(|(entity, path, _)| physics.entity_to_joint.get(&entity).map(|id| (path.to_string(), *id)))
             .collect();
         match physics.bind_machine(&machine.id, model, |path| built.get(path).copied()) {
             Ok(count) => {
                 waits.0.remove(&machine.id);
                 if let (Some(control), Some(body)) = (model.control_frame.as_ref(), model.control_body)
                     && let Some((_, offset)) = model.frame_in_body(control.frame)
-                    && let Some(entity) = crate::controller::find_prim_entity(root, &model.bodies[body].path, &prims, &parents)
+                    && let Some(entity) = index.find(root, &model.bodies[body].path)
                     && let Some(&handle) = physics.entity_to_body.get(&entity)
                 {
                     let q = offset.rotation;

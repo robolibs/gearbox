@@ -35,6 +35,7 @@ pub(crate) fn c19() {
     assert!(!machines[0].accepted(), "{:?}", machines[0].links.errors);
     assert!(!machines[0].devices.is_empty(), "the fixture has a motor device");
     let mut app = App::new();
+    app.add_plugins(crate::prim_index::PrimIndexPlugin);
     let root = app.world_mut().spawn_empty().id();
     machines[0].scene_root = Some(root);
     let sh = std::path::Path::new("/bin/sh").canonicalize().unwrap();

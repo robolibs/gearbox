@@ -131,15 +131,15 @@ pub(super) struct Bindings {
     applied: HashMap<ControllerKey, CmdVel>,
 }
 
-fn body_id(root: Entity, path: &str, prims: &Query<(Entity, &UsdPrimRef)>, parents: &Query<&ChildOf>, physics: &crate::physics::PhysicsWorld) -> Option<BodyId> {
-    physics.entity_to_body.get(&find_prim_entity(root, path, prims, parents)?).copied()
+fn body_id(root: Entity, path: &str, index: &PrimIndex, physics: &crate::physics::PhysicsWorld) -> Option<BodyId> {
+    physics.entity_to_body.get(&index.find(root, path)?).copied()
 }
 
 pub(super) fn apply(
     inventory: Res<ControllerInventory>, commands: Res<ControllerCommands>,
     active: Res<gearbox_api::PhysicsActive>,
     clock: Res<crate::joint_control::runtime::ControlClock>,
-    prims: Query<(Entity, &UsdPrimRef)>, parents: Query<&ChildOf>,
+    index: Res<PrimIndex>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut states: ResMut<ControllerStates>, mut values: ResMut<crate::services::LinkValues>,
     mut bindings: Local<Bindings>,
@@ -157,14 +157,14 @@ pub(super) fn apply(
                 if machine.tracks.len() != 2 { return Err("missing two authored track definitions".into()); }
                 let width = f64::from(controller.track_width.ok_or("missing trackWidth")?);
                 if !width.is_finite() || width <= 0.0 { return Err("invalid trackWidth".into()); }
-                let chassis = body_id(root, controller.body.as_ref().or(machine.body.as_ref()).ok_or("missing chassis")?, &prims, &parents, &physics).ok_or("chassis not loaded")?;
+                let chassis = body_id(root, controller.body.as_ref().or(machine.body.as_ref()).ok_or("missing chassis")?, &index, &physics).ok_or("chassis not loaded")?;
                 let mut cmd = commands.cmd_vel.get(&key).copied().unwrap_or_default();
                 if !cmd.linear_mps.is_finite() || !cmd.angular_rps.is_finite() { cmd = CmdVel::default(); }
                 cmd.angular_rps = cmd.angular_rps.clamp(-2.0, 2.0);
                 let dt = tick_dt as f32;
                 cmd = ramped(bindings.applied.get(&key).copied().unwrap_or_default(), cmd, dt);
                 bindings.applied.insert(key.clone(), cmd);
-                let grounded = machine.tracks.iter().all(|spec| body_id(root, &spec.sprocket, &prims, &parents, &physics)
+                let grounded = machine.tracks.iter().all(|spec| body_id(root, &spec.sprocket, &index, &physics)
                     .and_then(|id| physics.track_output(id)).is_some_and(|s| s.contacts > 0));
                 let trim = bindings.yaw_trim.entry(key.clone()).or_default();
                 if !grounded || cmd.angular_rps.abs() < 0.001 { *trim = 0.0; }
@@ -178,14 +178,14 @@ pub(super) fn apply(
                 let mut rotors = Vec::new();
                 let mut encoders = Vec::new();
                 for spec in &machine.tracks {
-                    let carrier = body_id(root, &spec.carrier, &prims, &parents, &physics).ok_or("track carrier not loaded")?;
-                    let sprocket = body_id(root, &spec.sprocket, &prims, &parents, &physics).ok_or("sprocket not loaded")?;
+                    let carrier = body_id(root, &spec.carrier, &index, &physics).ok_or("track carrier not loaded")?;
+                    let sprocket = body_id(root, &spec.sprocket, &index, &physics).ok_or("sprocket not loaded")?;
                     let joint = physics.joint_between(carrier, sprocket).ok_or("drive joint not loaded")?;
                     if physics.track_output(sprocket).is_none() {
                         let carrier_link = machine.links.get(&spec.link).ok_or("unknown track link")?;
                         let material = |name: &str, fallback| carrier_link.values.iter().find(|(k, _)| k == name).map_or(fallback, |(_, v)| *v);
                         let contact_colliders = spec.contacts.iter().map(|path| {
-                            let entity = find_prim_entity(root, path, &prims, &parents).ok_or("belt collider not loaded")?;
+                            let entity = index.find(root, path).ok_or("belt collider not loaded")?;
                             physics.entity_to_collider.get(&entity).copied().ok_or("belt collider not registered")
                         }).collect::<Result<Vec<_>, _>>()?;
                         let max_torque = physics.authored_drives.get(&joint).and_then(|d| d.max_force)
@@ -212,7 +212,7 @@ pub(super) fn apply(
                         ] { values.set(&machine.id, &spec.link, name, value); }
                         let rollers: Vec<(JointId, f64)> = machine.links.links.iter().filter(|link| link.parent.as_deref() == Some(&spec.link))
                             .filter_map(|link| {
-                                let body = body_id(root, link.body_prim.as_deref()?, &prims, &parents, &physics)?;
+                                let body = body_id(root, link.body_prim.as_deref()?, &index, &physics)?;
                                 if body == sprocket { return None; }
                                 let radius = link.values.iter().find(|(k, _)| k == "rolling_radius_m")?.1;
                                 (radius > 0.0).then_some((physics.joint_between(carrier, body)?, radius))
@@ -248,7 +248,7 @@ pub(super) fn apply(
                 }
                 Err(error) => {
                     for spec in &machine.tracks {
-                        if let Some(id) = body_id(root, &spec.sprocket, &prims, &parents, &physics) { physics.remove_track(id); }
+                        if let Some(id) = body_id(root, &spec.sprocket, &index, &physics) { physics.remove_track(id); }
                     }
                     if bindings.failures.get(&key) != Some(&error) { warn!("gearbox-control: {} tracks: {error}", machine.id); }
                     bindings.failures.insert(key.clone(), error);
@@ -274,16 +274,16 @@ pub(super) fn apply(
 
 pub(super) fn animate(
     inventory: Res<ControllerInventory>, physics: Res<crate::physics::PhysicsWorld>,
-    prims: Query<(Entity, &UsdPrimRef)>, parents: Query<&ChildOf>, mut transforms: Query<&mut Transform>,
+    index: Res<PrimIndex>, mut transforms: Query<&mut Transform>,
 ) {
     for machine in &inventory.machines {
         let Some(root) = machine.scene_root else { continue };
         for spec in &machine.tracks {
-            let Some(sprocket) = body_id(root, &spec.sprocket, &prims, &parents, &physics) else { continue };
+            let Some(sprocket) = body_id(root, &spec.sprocket, &index, &physics) else { continue };
             let Some(output) = physics.track_output(sprocket) else { continue };
             let length = perimeter(&spec.path) as f64;
             for (i, path) in spec.treads.iter().enumerate() {
-                let Some(entity) = find_prim_entity(root, path, &prims, &parents) else { continue };
+                let Some(entity) = index.find(root, path) else { continue };
                 if let Ok(mut transform) = transforms.get_mut(entity) {
                     let (position, rotation) = sample(&spec.path, output.travel + i as f64 * length / spec.treads.len() as f64);
                     transform.translation = position;

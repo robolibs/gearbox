@@ -245,15 +245,14 @@ pub fn body_poses(
     machine: &MachineInstanceSpec,
     model: &MachineDescription,
     physics: &PhysicsWorld,
-    prims: &Query<(Entity, &usd_bevy::UsdPrimRef)>,
-    parents: &Query<&ChildOf>,
+    index: &crate::prim_index::PrimIndex,
 ) -> Vec<Option<RigidTransform>> {
     let Some(root) = machine.scene_root else { return vec![None; model.bodies.len()] };
     model
         .bodies
         .iter()
         .map(|b| {
-            let entity = crate::controller::find_prim_entity(root, &b.path, prims, parents)?;
+            let entity = index.find(root, &b.path)?;
             let handle = physics.entity_to_body.get(&entity)?;
             Some(to_z_up(physics.body(*handle)?.position()))
         })
@@ -333,8 +332,7 @@ pub fn publish_state(
     keys: Res<MachineAgentKeys>,
     inventory: Res<ControllerInventory>,
     physics: Res<PhysicsWorld>,
-    prims: Query<(Entity, &usd_bevy::UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<crate::prim_index::PrimIndex>,
     mut sampled: Local<Sampled>,
 ) {
     let Some(mut bus) = bus else { return };
@@ -345,7 +343,7 @@ pub fn publish_state(
         let state = sample_joint_state(&machine.id, model, &physics, &mut sampled.last);
         agent.publish_joint_state(&state);
 
-        let bodies = body_poses(machine, model, &physics, &prims, &parents);
+        let bodies = body_poses(machine, model, &physics, &index);
         let edges = tf_edges(model, &bodies);
         let mut tf = Tf { generation: model.generation, tick, sim_time_s: physics.simulated_seconds, ..Default::default() };
         let (mut parent_names, mut child_names) = (Vec::new(), Vec::new());

@@ -4,11 +4,11 @@
 //! start.
 
 use bevy::prelude::*;
-use usd_bevy::UsdPrimRef;
 
 use super::overlays::DisplayToggles;
-use crate::controller::{ControllerInventory, MachineInstanceSpec, find_prim_entity};
+use crate::controller::{ControllerInventory, MachineInstanceSpec};
 use crate::links::LinkRole;
+use crate::prim_index::PrimIndex;
 
 /// TF lines draw over geometry: a frame inside a body is still visible.
 #[derive(Default, Reflect, GizmoConfigGroup)]
@@ -51,15 +51,15 @@ struct Frame<'a> {
 
 fn frames_of<'a>(
     machine: &'a MachineInstanceSpec,
-    prims: &Query<(Entity, &UsdPrimRef)>,
-    parents: &Query<&ChildOf>,
+    index: &PrimIndex,
     transforms: &Query<&GlobalTransform>,
 ) -> Vec<Frame<'a>> {
     let Some(scene_root) = machine.scene_root else {
         return Vec::new();
     };
     let world_of = |prim: &str| {
-        find_prim_entity(scene_root, prim, prims, parents)
+        index
+            .find(scene_root, prim)
             .and_then(|e| transforms.get(e).ok())
             .copied()
     };
@@ -105,8 +105,7 @@ fn axes_length(frame: &Frame<'_>) -> f32 {
 fn draw_tf_gizmos(
     toggles: Res<DisplayToggles>,
     inventory: Res<ControllerInventory>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<PrimIndex>,
     transforms: Query<&GlobalTransform>,
     mut gizmos: Gizmos<TfGizmos>,
 ) {
@@ -114,7 +113,7 @@ fn draw_tf_gizmos(
         return;
     }
     for machine in &inventory.machines {
-        for frame in frames_of(machine, &prims, &parents, &transforms)
+        for frame in frames_of(machine, &index, &transforms)
             .into_iter()
             .filter(|f| !toggles.tf_wheels_only || f.role == LinkRole::Wheel)
         {
@@ -144,8 +143,7 @@ pub struct TfLabel {
 fn publish_tf_labels(
     toggles: Res<DisplayToggles>,
     inventory: Res<ControllerInventory>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<PrimIndex>,
     transforms: Query<&GlobalTransform>,
     cameras: Query<(&Camera, &GlobalTransform)>,
     mut labels: ResMut<TfLabels>,
@@ -161,7 +159,7 @@ fn publish_tf_labels(
         return;
     };
     for machine in &inventory.machines {
-        for frame in frames_of(machine, &prims, &parents, &transforms)
+        for frame in frames_of(machine, &index, &transforms)
             .into_iter()
             .filter(|f| !toggles.tf_wheels_only || f.role == LinkRole::Wheel)
         {

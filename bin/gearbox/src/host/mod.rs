@@ -460,7 +460,7 @@ fn palette_action(id: &str, world: &mut World, outbox: &Outbox, shelf_state: &mu
 fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) {
     let rect: egui::Rect = viewport.into();
     let name = std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into());
-    let backend = world.resource::<crate::physics::PhysicsWorld>().name();
+    let backend = world.resource::<crate::physics::PhysicsBackendName>().0;
     let state = if world.resource::<gearbox_api::PhysicsActive>().0 { "PLAYING" } else { "PAUSED" };
     let rate = world
         .get_resource::<bevy::diagnostic::DiagnosticsStore>()

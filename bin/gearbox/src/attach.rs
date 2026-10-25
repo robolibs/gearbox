@@ -13,12 +13,12 @@ use peerbus::ReqReplyToken;
 use crate::physics::backend::{
     BodyId, DQuat, DVec3, JointAxes, JointAxis, JointDesc, JointId, JointKind, Pose,
 };
-use usd_bevy::UsdPrimRef;
 
 use crate::controller::{
-    ControllerInventory, MachineAgentKeys, MachineInstanceSpec, find_prim_entity, link_descs,
+    ControllerInventory, MachineAgentKeys, MachineInstanceSpec, link_descs,
 };
 use crate::links::{CouplingSide, LinkSpec, LinkTree};
+use crate::prim_index::PrimIndex;
 
 /// Without teleport the coupler must already be this close to the hitch.
 pub(crate) const SNAP_DISTANCE_M: f64 = 0.5;
@@ -115,7 +115,7 @@ fn select_hitch_variants(
     inventory: Res<ControllerInventory>,
     keys: Res<MachineAgentKeys>,
     attachments: Res<Attachments>,
-    prims: Query<(Entity, &'static UsdPrimRef)>,
+    index: Res<PrimIndex>,
     parents: Query<&'static ChildOf>,
     transforms: Query<&'static GlobalTransform>,
     instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
@@ -127,7 +127,7 @@ fn select_hitch_variants(
     let scene = Scene {
         inventory: &inventory,
         keys: &keys,
-        prims: &prims,
+        index: &index,
         parents: &parents,
         transforms: &transforms,
     };
@@ -242,7 +242,7 @@ pub(crate) fn pin(
 struct Scene<'w, 's> {
     inventory: &'w ControllerInventory,
     keys: &'w MachineAgentKeys,
-    prims: &'w Query<'w, 's, (Entity, &'static UsdPrimRef)>,
+    index: &'w PrimIndex,
     parents: &'w Query<'w, 's, &'static ChildOf>,
     transforms: &'w Query<'w, 's, &'static GlobalTransform>,
 }
@@ -257,7 +257,7 @@ impl Scene<'_, '_> {
     }
 
     fn entity(&self, machine: &MachineInstanceSpec, prim: &str) -> Option<Entity> {
-        find_prim_entity(machine.scene_root?, prim, self.prims, self.parents)
+        self.index.find(machine.scene_root?, prim)
     }
 
     fn frame(&self, machine: &MachineInstanceSpec, prim: &str) -> Option<Frame> {
@@ -1069,7 +1069,7 @@ pub(crate) fn serve_attachments(
 
     mut physics: ResMut<PhysicsWorld>,
     mut pending_static: ResMut<PendingStaticAttachments>,
-    prims: Query<(Entity, &'static UsdPrimRef)>,
+    index: Res<PrimIndex>,
     parents: Query<&'static ChildOf>,
     transforms: Query<&'static GlobalTransform>,
     instances: Option<NonSend<usd_bevy::instance::UsdInstances>>,
@@ -1080,7 +1080,7 @@ pub(crate) fn serve_attachments(
     let scene = Scene {
         inventory: &inventory,
         keys: &keys,
-        prims: &prims,
+        index: &index,
         parents: &parents,
         transforms: &transforms,
     };

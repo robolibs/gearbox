@@ -6,6 +6,9 @@ pub(crate) fn despawn(app: &mut App, root: Entity) {
 }
 
 pub(crate) fn project(app: &mut App, stage: &openusd::usd::Stage) -> Entity {
+    if !app.world().contains_resource::<crate::prim_index::PrimIndex>() {
+        crate::prim_index::PrimIndex::track(app.world_mut());
+    }
     let root = app.world_mut().spawn(Transform::IDENTITY).id();
     let prims = usd_bevy::live::project_stage_under(app.world_mut(), stage, root);
     let meta = attach::read_stage_meta(stage);

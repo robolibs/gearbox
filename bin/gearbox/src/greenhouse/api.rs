@@ -9,10 +9,10 @@ use gearbox_api::{
 };
 use gearbox_greenhouse::house::{Event as HouseEvent, Fault, Refusal};
 use gearbox_greenhouse::{Channels, PlantId, Stage, species};
-use usd_bevy::UsdPrimRef;
 
 use super::{Greenhouse, fault_name};
-use crate::controller::{ControllerInventory, find_prim_entity};
+use crate::controller::ControllerInventory;
+use crate::prim_index::PrimIndex;
 use crate::globe::{Site, transform_in_site};
 
 /// How close a machine must come to a service spot to mend what it serves, metres.
@@ -156,8 +156,7 @@ fn refused(why: Refusal) -> Status {
 #[derive(SystemParam)]
 pub struct Machines<'w, 's> {
     inventory: Option<Res<'w, ControllerInventory>>,
-    prims: Query<'w, 's, (Entity, &'static UsdPrimRef)>,
-    parents: Query<'w, 's, &'static ChildOf>,
+    index: Option<Res<'w, PrimIndex>>,
     children: Query<'w, 's, &'static Children>,
     globals: Query<'w, 's, &'static GlobalTransform>,
 }
@@ -171,7 +170,7 @@ fn machine_parts(machine: &str, machines: &Machines) -> Result<Vec<Vec3>, Status
         .ok_or_else(|| Status::err(code::NOT_FOUND, &format!("no machine `{machine}`")))?;
     let root = spec
         .scene_root
-        .and_then(|scene| find_prim_entity(scene, &spec.prim_path, &machines.prims, &machines.parents))
+        .and_then(|scene| machines.index.as_deref()?.find(scene, &spec.prim_path))
         .ok_or_else(|| Status::err(code::NOT_FOUND, &format!("machine `{machine}` stands nowhere")))?;
     Ok(std::iter::once(root)
         .chain(machines.children.iter_descendants(root))
@@ -469,6 +468,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use gearbox_greenhouse::species::LETTUCE;
     use gearbox_greenhouse::{Climate, House, Lamp, Medium, Room, Tank, Tray};
+    use usd_bevy::UsdPrimRef;
 
     use super::*;
 
@@ -505,6 +505,7 @@ mod tests {
 
     /// Machines along X, each a prim with one part, all in one stage.
     fn place_machines(world: &mut World, at: &[(&str, f32)]) {
+        PrimIndex::track(world);
         let stage = world.spawn(GlobalTransform::IDENTITY).id();
         let mut inventory = ControllerInventory::default();
         for &(name, x) in at {

@@ -38,7 +38,8 @@ use molla_sim::{Model, State};
 use molla_storage::{Buffer, BufferUsage};
 use usd_bevy::UsdPrimRef;
 
-use crate::controller::{ControllerInventory, MachineAgentKeys, find_prim_entity};
+use crate::controller::{ControllerInventory, MachineAgentKeys};
+use crate::prim_index::PrimIndex;
 use crate::links::{LinkSpec, LinkTree, SensorKind, SensorSpec};
 use crate::sensor_radio::RadioLink;
 use crate::sensor_generic::{
@@ -522,7 +523,12 @@ pub(crate) fn run_machine_sensors(
     queue: Option<Res<RenderQueue>>,
     adapter: Option<Res<RenderAdapterInfo>>,
     prims: Query<(Entity, &UsdPrimRef)>,
-    (parents, sensor_labels, air): (Query<&ChildOf>, Query<&SensorLabel>, Option<Res<crate::sensor_generic::AirField>>),
+    (parents, sensor_labels, air, prim_index): (
+        Query<&ChildOf>,
+        Query<&SensorLabel>,
+        Option<Res<crate::sensor_generic::AirField>>,
+        Res<PrimIndex>,
+    ),
     transforms: Query<&GlobalTransform>,
     visuals: VisualColors,
     mut renders: ResMut<crate::sensor_cameras::SensorRenderQueue>,
@@ -611,8 +617,7 @@ pub(crate) fn run_machine_sensors(
             &physics,
             &machine.links,
             scene_root,
-            &prims,
-            &parents,
+            &prim_index,
             &transforms,
         ) {
             Ok(resolved) => resolved,
@@ -638,7 +643,7 @@ pub(crate) fn run_machine_sensors(
                 .links
                 .iter()
                 .filter_map(|l| l.body_prim.as_deref())
-                .filter_map(|prim| find_prim_entity(scene_root, prim, &prims, &parents))
+                .filter_map(|prim| prim_index.find(scene_root, prim))
                 .filter_map(|entity| physics.entity_to_body.get(&entity).copied())
                 .collect();
             let started = std::time::Instant::now();
@@ -827,8 +832,7 @@ fn resolve_mounts(
     physics: &PhysicsWorld,
     links: &LinkTree,
     scene_root: Entity,
-    prims: &Query<(Entity, &UsdPrimRef)>,
-    parents: &Query<&ChildOf>,
+    prim_index: &PrimIndex,
     transforms: &Query<&GlobalTransform>,
 ) -> Result<Vec<ResolvedMount>, String> {
     let mut mounts = Vec::new();
@@ -838,9 +842,11 @@ fn resolve_mounts(
         };
         let body_prim = rigid_body_prim(links, link)
             .ok_or_else(|| format!("sensor link `{}` has no rigid-body ancestor", link.name))?;
-        let body_entity = find_prim_entity(scene_root, body_prim, prims, parents)
+        let body_entity = prim_index
+            .find(scene_root, body_prim)
             .ok_or_else(|| format!("sensor link `{}`: no entity for `{body_prim}`", link.name))?;
-        let sensor_entity = find_prim_entity(scene_root, &link.prim_path, prims, parents)
+        let sensor_entity = prim_index
+            .find(scene_root, &link.prim_path)
             .ok_or_else(|| format!("sensor link `{}` has no entity", link.name))?;
         let body = *physics
             .entity_to_body
@@ -864,7 +870,7 @@ fn resolve_mounts(
                 let body_link = links.links.iter().find(|l| l.body_prim.as_deref() == Some(body_prim))?;
                 let parent_link = links.get(body_link.parent.as_deref()?)?;
                 let parent_prim = rigid_body_prim(links, parent_link)?;
-                let parent_entity = find_prim_entity(scene_root, parent_prim, prims, parents)?;
+                let parent_entity = prim_index.find(scene_root, parent_prim)?;
                 let parent_body = *physics.entity_to_body.get(&parent_entity)?;
                 physics.joint_between(parent_body, body)
             })

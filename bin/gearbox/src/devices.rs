@@ -16,9 +16,9 @@ use bevy_weather::WeatherSettings;
 use gearbox_api::{ActuatorCommand, GearboxBus, Measurement, Props, measurement_kind as kind};
 use gearbox_fields::wind_map::Gusts;
 use openusd::sdf::{Path as SdfPath, Value};
-use usd_bevy::UsdPrimRef;
 
-use crate::controller::{ControllerInventory, MachineAgentKeys, find_prim_entity, read_attr, read_bool, read_float, read_token, type_name};
+use crate::controller::{ControllerInventory, MachineAgentKeys, read_attr, read_bool, read_float, read_token, type_name};
+use crate::prim_index::PrimIndex;
 use crate::physics::backend::JointAxis;
 use crate::physics::backend::{
     BeltDesc, ConnectorDesc, ConnectorKind, DVec3, DeviceCommand, DeviceId, DeviceLimits, DeviceSetting,
@@ -367,12 +367,12 @@ fn register(
     scene_root: Entity,
     propellers: &[DeviceId],
     physics: &mut PhysicsWorld,
-    prims: &Query<(Entity, &UsdPrimRef)>,
+    index: &PrimIndex,
     parents: &Query<&ChildOf>,
     children: &Query<&Children>,
     transforms: &Query<&GlobalTransform>,
 ) -> Result<Option<(Live, Entity)>, String> {
-    let Some(entity) = find_prim_entity(scene_root, &spec.prim, prims, parents) else {
+    let Some(entity) = index.find(scene_root, &spec.prim) else {
         return Ok(None);
     };
     let live = register_at(spec, entity, propellers, physics, parents, children, transforms)?;
@@ -583,7 +583,7 @@ pub(crate) fn drive_devices(
     keys: Res<MachineAgentKeys>,
     bus: Option<ResMut<GearboxBus>>,
     mut physics: ResMut<PhysicsWorld>,
-    prims: Query<(Entity, &UsdPrimRef)>,
+    index: Res<PrimIndex>,
     parents: Query<&ChildOf>,
     children: Query<&Children>,
     transforms: Query<&GlobalTransform>,
@@ -615,7 +615,7 @@ pub(crate) fn drive_devices(
                     _ => None,
                 })
                 .collect();
-            match register(spec, scene_root, &propellers, &mut physics, &prims, &parents, &children, &transforms) {
+            match register(spec, scene_root, &propellers, &mut physics, &index, &parents, &children, &transforms) {
                 Ok(Some((live, entity))) => registered.push(Registered { spec: spec.clone(), live, entity }),
                 Ok(None) => ready = false,
                 Err(error) => {
