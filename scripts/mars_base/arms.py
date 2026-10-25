@@ -102,6 +102,8 @@ class Arm:
 
 
 PI, HALF = math.pi, math.pi / 2
+# Joint acceleration (rad/s²) of every arm joint's speed ramp.
+ACCELERATION = 3.0
 
 UR10E = Arm(
     kind="ur10e",
@@ -395,6 +397,9 @@ def joints(u, d, arm, mount_body, mount, rest, prefix="", limits=None, root="/ro
         u.emit(d + 1, "bool physics:collisionEnabled = 0")
         u.emit(d + 1, f"float gearbox:motor:maxForce = {joint.effort:g}")
         u.emit(d + 1, f"float gearbox:motor:maxVelocity = {math.radians(joint.speed):.4f}")
+        # A P gain that slows from full speed within the ramp.
+        u.emit(d + 1, f"float gearbox:motor:acceleration = {ACCELERATION:g}")
+        u.emit(d + 1, f"float3 gearbox:motor:controlPID = ({ACCELERATION / math.radians(joint.speed):.4f}, 0, 0)")
         u.emit(d, "}")
         parent, offset = f"{prefix}{link.name}", Matrix.Identity(4)
 

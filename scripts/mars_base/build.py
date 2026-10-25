@@ -243,7 +243,8 @@ def farm_plan(path, built):
         elif file == "regolith_excavator.usdz":
             k = int(name[-1]) - 1
             bays = [(layout.WORKS.x + x, layout.WORKS.y + y) for x, y in industry.SOIL_BAYS]
-            others[machine] = plan.excavator(machine, at, tuple(layout.DIG[k]), bays)
+            lane = [(layout.WORKS.x + x, layout.WORKS.y + y) for x, y in industry.SOIL_LANE]
+            others[machine] = plan.excavator(machine, at, tuple(layout.DIG[k]), bays, lane)
     return plan.write(path, robots_, trays, others)
 
 

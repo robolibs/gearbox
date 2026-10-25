@@ -70,6 +70,8 @@ ARM = arms.UR10E
 ARM_RANGES = {"shoulder_pan": (-80.0, 260.0), "shoulder_lift": (-150.0, 30.0), "elbow": (-15.0, 165.0),
               "wrist_1": (-360.0, 0.0), "wrist_2": (-260.0, 80.0), "wrist_3": (-170.0, 170.0)}
 ARM_REST = (95.0, -25.0, 156.0, -211.0, -90.0, 5.0)
+# The arm's ready pose (degrees): upright over the deck, the tool clear above it.
+ARM_READY = (95.0, -90.0, 30.0, -120.0, -90.0, 5.0)
 
 
 @dataclass

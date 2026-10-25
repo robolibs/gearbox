@@ -1557,9 +1557,12 @@ def drill_rig(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, height=9.0):
 
 
 # The soil plant, in its own frame: the bays the excavators tip at, the
-# docks they charge at, and the flanged tie-in of its water line.
+# docks they charge at, the lane they take past the docks' pedestals (from
+# the apron before the docks to clear of the pedestals), and the flanged
+# tie-in of its water line.
 SOIL_BAYS = ((-5.45, -0.53), (-3.95, -0.53))
 SOIL_DOCKS = ((-6.4, 7.4), (-5.0, 7.4), (-3.6, 7.4))
+SOIL_LANE = ((-1.8, 4.8), (-1.8, 11.5))
 SOIL_WATER_TIE = Vector((0.0, -9.6, 0.0))
 _SOIL_Y = -1.575
 

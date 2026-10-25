@@ -169,12 +169,15 @@ def stacker_crane(c, machine, room, at, yaw, nursery_x, floor):
     return robot, solve
 
 
-def mobile_harvester(h, machine, room, origin, turn, side, stops, lane=1.35):
+def mobile_harvester(h, machine, room, origin, turn, side, stops, lane=1.35, hover=0.15, elbow=25.0, above=0.5):
     """A harvester (`harvester.Harvester`) working one row of an arch's tables
     from the aisle: it drives along its lane to the stop opposite a place's
-    table and its arm brings the tool down over the place, tilted toward the
-    aisle as little as it can be. `side` is the row's: +1 the +Y row of the
-    arch, -1 the other; `stops` the tables' middles along the arch.
+    table and its arm brings the tool down to `hover` m over the place,
+    tilted toward the aisle as little as it can be with the elbow bent at
+    least `elbow` degrees, by way of its ready pose (the entry's `ready`)
+    and the pose `above` m over the place (a place's `via`). `side` is the
+    row's: +1 the +Y row of the arch, -1 the other; `stops` the tables'
+    middles along the arch.
     A place's `drive` is where the robot stands, east and north as its
     odometry reads them."""
     import arms
@@ -190,7 +193,8 @@ def mobile_harvester(h, machine, room, origin, turn, side, stops, lane=1.35):
     local, carriage = hv.mount(h)
     heading = math.radians(90.0 * side)
     # It drives toward its -Y, so its odometry heading is its yaw in the base, plus the arch's.
-    robot.extra = {"heading": heading + turn}
+    ready = {n: round((q - lo) / (hi - lo), 4) for n, q, (lo, hi) in zip(names, hv.ARM_READY, spans)}
+    robot.extra = {"heading": heading + turn, "ready": ready}
 
     def solve(p):
         x, y, z = into(origin, turn, p)
@@ -199,18 +203,23 @@ def mobile_harvester(h, machine, room, origin, turn, side, stops, lane=1.35):
         stop = min(stops, key=lambda s: abs(s - x))
         place = Matrix.Translation((stop, side * lane, 0.12)) @ Matrix.Rotation(heading, 4, "Z")
         base = place @ Matrix.Translation(carriage) @ local
-        aim = Vector((x, y, z))
-        for tilt in (0, 10, 20, 30, 40, 50):
-            m = Matrix.Rotation(heading - math.pi / 2, 4, "Z") @ Matrix.Rotation(math.radians(tilt), 4, "X") @ Matrix.Rotation(math.pi, 4, "X")
-            m.translation = aim
-            q, e, ang = arms.solve(hv.ARM, base, m, [0, -40, 60, -110, -90, 0], tip=hv.tcp(h), limits=hv.ARM_RANGES, rest=hv.ARM_REST)
-            if e < 0.005 and ang < 0.5:
-                break
-        else:
+
+        def reach(lift):
+            """Joint positions putting the tool `lift` m over the place, or None."""
+            for tilt in (0, 10, 20, 30, 40, 50):
+                m = Matrix.Rotation(heading - math.pi / 2, 4, "Z") @ Matrix.Rotation(math.radians(tilt), 4, "X") @ Matrix.Rotation(math.pi, 4, "X")
+                m.translation = Vector((x, y, z + lift))
+                q, e, ang = arms.solve(hv.ARM, base, m, [0, -40, 60, -110, -90, 0], tip=hv.tcp(h), limits=hv.ARM_RANGES, rest=hv.ARM_REST)
+                if e < 0.005 and ang < 0.5 and abs(q[names.index("elbow")]) >= elbow:
+                    return {n: round((v - lo) / (hi - lo), 4) for n, v, (lo, hi) in zip(names, q, spans)}
+            return None
+
+        targets, over = reach(hover), reach(above)
+        if targets is None or over is None:
             return None
         bx, by, _ = out_of(origin, turn, (stop, side * lane, 0.0))
-        targets = {n: (v - lo) / (hi - lo) for n, v, (lo, hi) in zip(names, q, spans)}
         targets["drive"] = [round(-by, 4), round(bx, 4)]
+        targets["via"] = [over]
         return targets
     return robot, solve
 
@@ -220,14 +229,17 @@ def enu(p):
     return [round(-p[1], 3), round(p[0], 3)]
 
 
-def excavator(machine, dock, dig, bays, approach=3.0):
-    """A regolith excavator's round: from its dock out to its patch of the dig
-    ground, back to a tipping bay of the soil plant, driven into it from
-    `approach` metres out along the bay's -Y, and home. Points are base-frame;
-    the entry carries them as odometry reads them."""
+def excavator(machine, dock, dig, bays, lane, approach=3.0):
+    """A regolith excavator's round: off its dock ahead onto the apron, along
+    the `lane` (apron end, then dig end) past the docks out to its patch of
+    the dig ground, back along it to a tipping bay of the soil plant, driven
+    into it from `approach` metres out along the bay's -Y. Points are
+    base-frame; the entry carries them as odometry reads them."""
     return {
         "kind": "excavator",
         "dock": enu(dock),
+        "leave": enu((dock[0], lane[0][1], 0.0)),
+        "lane": [enu(p) for p in lane],
         "dig": enu(dig),
         "bays": [{"approach": enu((x, y + approach, 0.0)), "stop": enu((x, y, 0.0))} for x, y in bays],
         # Arm positions and drum speeds (rad/s): the front drum digs turning
