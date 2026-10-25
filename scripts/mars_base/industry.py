@@ -29,12 +29,13 @@ REPOSE = math.tan(math.radians(34.0))
 # flanges meet the module's. Runs leave the ISRU manifold along +X (three
 # lines centred on blue, or white and blue centred between them), bring well
 # water into the ISRU along +X, enter the tank farm along +Y, and leave the
-# ice well along +X.
+# ice well along +X, its branch to the soil plant along +Y.
 ISRU_TIE = Vector((4.7, -1.95, 0.0))
 ISRU_TIE_PAIR = Vector((4.7, -2.15, 0.0))
 WATER_TIE = Vector((-5.0, -1.6, 0.0))
 TANK_TIE = Vector((2.0, -6.4, 0.0))
 DRILL_TIE = Vector((8.0, 3.3, 0.0))
+DRILL_SOIL_TIE = Vector((7.15, 4.3, 0.0))
 JOINT = 0.003
 
 _PLANT = {}
@@ -1219,6 +1220,130 @@ def pipe_run(looks, name, path, parent=None, colours=("pipe_white", "pipe_yellow
     return b.finish()
 
 
+def pipe_bridge(looks, name, a, b, colours=("pipe_blue",), clearance=5.5, parent=None):
+    """Rack pipes carried over a road from a to b, ground points either side
+    of it where the pipes meet a run's flanges at rack height, in the order
+    of `colours` as pipe_run lays them: a braced tower on footings near each
+    end, a pony truss between their tops whose underside clears the road by
+    `clearance`, its cross beams carrying the pipes in U-bolts or shoes with
+    a grated walkway beside them on the run's right, height bars, signs and
+    obstruction lamps on its faces, a caged ladder up the far tower to the
+    walkway. The pipes rise up the near tower in bends, held by clamps on
+    brackets, cross, and come down the far tower."""
+    m = plant_mats(looks)
+    p0, p1 = Vector(a), Vector(b)
+    p0.z = p1.z = 0.0
+    b = Building(name, parent, (0, 0, 0), 0.0)
+    d = (p1 - p0).normalized()
+    n = Vector((-d.y, d.x, 0.0))
+    up = Vector((0, 0, 1))
+    yaw = math.atan2(d.y, d.x)
+    count = len(colours)
+    offs = [GAP * (i - (count - 1) / 2) for i in range(count)]
+    walk, chord, depth = 0.75, 0.16, 1.3
+    lo_n, hi_n = min(offs) - 0.3 - walk, max(offs) + 0.3
+    mid_n = (lo_n + hi_n) / 2
+    zc = clearance + chord / 2
+    zb = clearance + chord + 0.14
+    set_back, tower = 0.95, 0.6
+    t0, t1 = p0 + d * set_back, p1 - d * set_back
+    s0 = t0 - d * tower
+    span = ((t1 + d * tower) - s0).length
+    P = lambda base, u, v, z: base + d * u + n * v + up * z
+    rmax = max(PIPES[c][0] for c in colours)
+
+    # The towers: posts on footings, girts, bracing (the outer face open low for the pipes), bearing plates.
+    steel, feet, rods = bmesh.new(), bmesh.new(), bmesh.new()
+    levels = [0.3 + (clearance - 0.38) * k / 3 for k in range(4)]
+    for t, out in ((t0, -1.0), (t1, 1.0)):
+        for u in (-tower, tower):
+            for v in (lo_n, hi_n):
+                c = P(t, u, v, 0.0)
+                merge(steel, member(c + up * 0.25, c + up * clearance, ibeam(0.16, 0.16, 0.012), up=d))
+                merge(feet, moved(box((0.55, 0.55, 0.35), (0, 0, 0.1)), tuple(c), yaw))
+                merge(steel, moved(box((0.3, 0.3, 0.02), (0, 0, clearance + 0.01)), tuple(c), yaw))
+        for z in levels[1:]:
+            for v in (lo_n, hi_n):
+                merge(steel, member(P(t, -tower, v, z), P(t, tower, v, z), channel(0.05, 0.12, 0.006, v < mid_n)))
+            for u in (-tower, tower):
+                merge(steel, member(P(t, u, lo_n, z), P(t, u, hi_n, z), channel(0.05, 0.12, 0.006)))
+        for za, zz in zip(levels, levels[1:]):
+            for v in (lo_n, hi_n):
+                merge(rods, rod(P(t, -tower, v, za), P(t, tower, v, zz), 0.018, 6))
+                merge(rods, rod(P(t, tower, v, za), P(t, -tower, v, zz), 0.018, 6))
+            for u in (-tower, tower):
+                if u * out > 0 and za < levels[1]:
+                    continue
+                merge(rods, rod(P(t, u, lo_n, za), P(t, u, hi_n, zz), 0.018, 6))
+                merge(rods, rod(P(t, u, hi_n, za), P(t, u, lo_n, zz), 0.018, 6))
+        for z in levels[1:3]:
+            u_c = out * (tower - 0.25 - rmax - 0.08)
+            merge(steel, member(P(t, u_c, lo_n, z), P(t, u_c, hi_n, z), channel(0.05, 0.1, 0.006)))
+        b.collider(moved(box((2 * tower + 0.3, hi_n - lo_n + 0.3, clearance), (0, mid_n, clearance / 2)), tuple(t), yaw))
+
+    # The span: a pony truss each side, cross beams with knee and plan bracing.
+    panels = max(2, round(span / 1.6))
+    xs = [span * k / panels for k in range(panels + 1)]
+    for v in (lo_n, hi_n):
+        merge(steel, member(P(s0, 0, v, zc), P(s0, span, v, zc), channel(0.07, chord, 0.008, v < mid_n)))
+        merge(steel, member(P(s0, 0, v, zc + depth), P(s0, span, v, zc + depth), rect(0.07, 0.07)))
+        for x in xs:
+            merge(steel, member(P(s0, x, v, zc + chord / 2), P(s0, x, v, zc + depth - 0.035), rect(0.06, 0.06)))
+        for k in range(panels):
+            lo, hi = (xs[k], xs[k + 1]) if k % 2 == 0 else (xs[k + 1], xs[k])
+            merge(steel, member(P(s0, lo, v, zc + chord / 2), P(s0, hi, v, zc + depth - 0.035), rect(0.05, 0.05)))
+    for k, x in enumerate(xs):
+        merge(steel, member(P(s0, x, lo_n - 0.3, zb - 0.07), P(s0, x, hi_n + 0.3, zb - 0.07), ibeam(0.1, 0.14, 0.008)))
+        for v, s in ((lo_n, -1.0), (hi_n, 1.0)):
+            merge(rods, rod(P(s0, x, v + s * 0.28, zb), P(s0, x, v, zb + 0.5), 0.016, 6))
+        if k < panels:
+            merge(rods, rod(P(s0, x, lo_n, zc + 0.09), P(s0, xs[k + 1], hi_n, zc + 0.09), 0.014, 6))
+            merge(rods, rod(P(s0, x, hi_n, zc + 0.09), P(s0, xs[k + 1], lo_n, zc + 0.09), 0.014, 6))
+    b.put(steel, m["galv"])
+    b.put(rods, m["galv"])
+    b.put(feet, m["footing"], smooth=False)
+    b.put(moved(box((span, walk - 0.05, 0.04), (span / 2, 0, 0)), tuple(P(s0, 0, lo_n + walk / 2, zb + 0.02)), yaw), m["grate"], smooth=False)
+    rail = bmesh.new()
+    merge(rail, moved(box((span, 0.006, 0.12), (span / 2, 0, 0.06)), tuple(P(s0, 0, lo_n + walk, zb)), yaw))
+    for x in xs:
+        merge(rail, rod(P(s0, x, lo_n + walk + 0.03, zb + 0.12), P(s0, x, lo_n + walk + 0.03, zb + 1.08), 0.02, 6))
+    for z in (zb + 0.55, zb + 1.08):
+        merge(rail, tube([P(s0, 0, lo_n + walk + 0.03, z), P(s0, span, lo_n + walk + 0.03, z)], 0.02, 6))
+    merge(rail, tube([P(s0, 0, lo_n + 0.04, zb + 0.55), P(s0, span, lo_n + 0.04, zb + 0.55)], 0.02, 6))
+    b.put(rail, m["paint_yellow"])
+    bars = bmesh.new()
+    for v, s in ((hi_n, 1.0), (lo_n, -1.0)):
+        merge(bars, moved(box((0.6 * span, 0.006, chord), (0.5 * span, 0, 0)), tuple(P(s0, 0, v + s * 0.04, zc)), yaw))
+    b.put(bars, m["hazard"], smooth=False)
+    xm = span / 2 if panels % 2 else span / 2 + span / panels / 2
+    for v, s in ((hi_n, 1.0), (lo_n, -1.0)):
+        sign(b, m, P(s0, xm, v + s * 0.045, zc + 0.45), math.atan2(s * n.y, s * n.x), 0.5, 0.36, 0)
+        b.put(sphere(0.06, tuple(P(s0, xm, v, zc + depth + 0.1)), 10, 5), m["red"])
+        b.put(moved(ring(0.05, 0.0, 0.0, 0.06, 10), tuple(P(s0, xm, v, zc + depth + 0.035))), m["paint_dark"])
+    ladder(b, m, P(t1, tower + 0.06, lo_n + walk / 2, 0.0), yaw, zb, over=1.05)
+    b.collider(moved(box((span, hi_n - lo_n + 0.2, depth + chord + 0.1), (span / 2, mid_n, clearance + (depth + chord + 0.1) / 2)), tuple(s0), yaw))
+
+    # The pipes: up the near tower, across, down the far one, clamped on the towers.
+    runs, clamps = [], bmesh.new()
+    lead = set_back - tower + 0.25
+    for i, colour in enumerate(colours):
+        r, h = PIPES[colour]
+        zr, zp = BEAM + h + r, zb + h + r
+        q0, q1 = p0 + n * offs[i], p1 + n * offs[i]
+        pts = [q0 + up * zr, q0 + d * lead + up * zr, q0 + d * lead + up * zp, q1 - d * lead + up * zp, q1 - d * lead + up * zr, q1 + up * zr]
+        line = fillet(pts, [0.0, 0.4, 0.6, 0.6, 0.4, 0.0])
+        x0w, x1w = lead + 0.8, (p1 - p0).length - lead - 0.8
+        supports = [(P(s0, x, offs[i], zp), d) for x in xs if x0w < (set_back - tower) + x < x1w]
+        runs.append((colour, line, supports))
+        for q, s in ((q0 + d * lead, 1.0), (q1 - d * lead, -1.0)):
+            for z in levels[1:3]:
+                merge(clamps, moved(ring(r + 0.018, r - 0.002, -0.025, 0.025, 14), tuple(q + up * z)))
+                merge(clamps, member(q + up * z + d * s * (r + 0.01), q + up * z + d * s * (r + 0.08), rect(0.04, 0.03)))
+    b.put(clamps, m["galv"])
+    rack_pipes(b, m, runs, ("flange", "flange"))
+    return b.finish()
+
+
 def drill_rig(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, height=9.0):
     """An ice well, after Honeybee's RedWater: coiled tubing drilled through
     the overburden into buried ice and left in the hole to bring the melt
@@ -1226,7 +1351,8 @@ def drill_rig(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, height=9.0):
     tank and the heater umbilical's reel; a lattice tower over the well
     holds the injector head and its gooseneck, with a crown sheave and a
     caged ladder; spare augers lie racked beside it, and a heat-traced water
-    line runs out to its flanged tie-in (DRILL_TIE)."""
+    line runs out to its flanged tie-in (DRILL_TIE), a valved branch off it
+    to a second flange for the soil plant (DRILL_SOIL_TIE)."""
     m = plant_mats(looks)
     b = Building(name, parent, at, yaw)
     deck = 0.6
@@ -1393,7 +1519,8 @@ def drill_rig(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, height=9.0):
     b.put(flights, m["paint_grey"])
 
     # The water line, heat traced, on stands out to its flange at the tie-in;
-    # the power feed in from a pull pit.
+    # off a tee before it the branch to the soil plant, its valve, marker,
+    # post and flange (DRILL_SOIL_TIE); the power feed in from a pull pit.
     r = PIPES["pipe_blue"][0]
     zw = BEAM + r
     line = [Vector(v) for v in ((0.55, 1.1, deck + 0.42), (0.9, 1.95, deck + 0.42), (1.4, DRILL_TIE.y, zw), (DRILL_TIE.x - 0.01, DRILL_TIE.y, zw))]
@@ -1401,7 +1528,22 @@ def drill_rig(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, height=9.0):
     b.put(tube(fillet([v - Vector((0, 0, r + 0.012)) for v in line], 0.4), 0.012, 5), m["heater"])
     stands(b, m, fillet(line, 0.4), r, 2.0, 0.4)
     b.put(collar(Vector((DRILL_TIE.x, DRILL_TIE.y, zw)), (1, 0, 0), r), m["steel"])
-    valve(b, m, (DRILL_TIE.x - 0.8, DRILL_TIE.y, zw), (1, 0, 0), r)
+    valve(b, m, (DRILL_TIE.x - 0.38, DRILL_TIE.y, zw), (1, 0, 0), r)
+    tee_at = Vector((DRILL_SOIL_TIE.x, DRILL_TIE.y, zw))
+    branch = [tee_at, Vector((DRILL_SOIL_TIE.x, DRILL_SOIL_TIE.y - JOINT, zw))]
+    b.put(tube(branch, r, 14), m["pipe_blue"])
+    b.put(tube([v - Vector((0, 0, r + 0.012)) for v in branch], 0.012, 5), m["heater"])
+    b.put(aim(ring(r + 0.022, r - 0.005, -0.11, 0.11, 16), tee_at, (1, 0, 0)), m["pipe_blue"])
+    b.put(aim(ring(r + 0.022, r - 0.005, 0.0, r + 0.08, 16), tee_at, (0, 1, 0)), m["pipe_blue"])
+    valve(b, m, (tee_at.x, tee_at.y + 0.48, zw), (0, 1, 0), r, stem=(0, 0, 1))
+    b.put(marker(Vector((tee_at.x, tee_at.y + 0.235, zw)), Vector((0, 1, 0)), r, 0.1), m["label"], smooth=False)
+    b.put(collar(Vector((DRILL_SOIL_TIE.x, DRILL_SOIL_TIE.y, zw)), (0, 1, 0), r), m["steel"])
+    post = Vector((DRILL_SOIL_TIE.x, DRILL_SOIL_TIE.y - 0.16, 0.0))
+    b.put(member(post + Vector((0, 0, 0.02)), post + Vector((0, 0, zw - r - 0.01)), rect(0.06, 0.06)), m["galv"], smooth=False)
+    b.put(box((0.2, 0.2, 0.02), tuple(post + Vector((0, 0, 0.01)))), m["galv"], smooth=False)
+    b.put(box((0.14, 0.12, 0.02), tuple(post + Vector((0, 0, zw - r - 0.01)))), m["galv"], smooth=False)
+    b.put(ubolt(post + Vector((0, 0, zw)), (0, 1, 0), r), m["galv"])
+    sign(b, m, post + Vector((0.032, 0, 0.5)), 0.0, 0.18, 0.13, 2)
     b.put(tube(fillet([(hx - 1.1, hy - 0.6, deck + 0.4), (-1.4, -1.85, deck - 0.1), (-1.4, -2.6, 0.05)], 0.4), 0.04, 8), m["cable"])
     b.put(box((0.7, 0.7, 0.24), (-1.4, -2.75, 0.07)), m["footing"], smooth=False)
     b.put(box((0.6, 0.6, 0.02), (-1.4, -2.75, 0.2), tile=1.0), m["tread"], smooth=False)
@@ -1414,239 +1556,1032 @@ def drill_rig(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, height=9.0):
     return b.finish()
 
 
-def regolith_works(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, seed=3):
-    """Regolith the excavators dig and how it reaches the plant: spoil heaps
-    at their angle of repose, a ramp up to a grizzly-topped hopper, a
-    vibrating feeder onto a troughed belt conveyor under hoods, a vibrating
-    screen on a tower, its fines screwed up into the oven and its oversize
-    dropped on a reject pile, the oven's gas into a receiver and its spent
-    regolith bagged. Its road comes in from +X along y = 2."""
-    m = plant_mats(looks)
-    b = Building(name, parent, at, yaw)
-    rng = random.Random(seed)
+# The soil plant, in its own frame: the bays the excavators tip at, the
+# docks they charge at, and the flanged tie-in of its water line.
+SOIL_BAYS = ((-5.45, -0.53), (-3.95, -0.53))
+SOIL_DOCKS = ((-6.4, 7.4), (-5.0, 7.4), (-3.6, 7.4))
+SOIL_WATER_TIE = Vector((0.0, -9.6, 0.0))
+_SOIL_Y = -1.575
 
-    # Heaps: dumps at the angle of repose, rounded, noisy, and the ramp to the hopper.
+
+def _slab(points, d0, d1, axis="X"):
+    """A plate from d0 to d1 along `axis` over an outline of points across
+    it: (y, z) points across X, (x, z) points across Y."""
+    bm = bmesh.new()
+    place = (lambda u, v, d: (d, u, v)) if axis == "X" else (lambda u, v, d: (u, d, v))
+    lo = [bm.verts.new(place(u, v, d0)) for u, v in points]
+    hi = [bm.verts.new(place(u, v, d1)) for u, v in points]
+    for i in range(len(points)):
+        j = (i + 1) % len(points)
+        bm.faces.new([lo[i], lo[j], hi[j], hi[i]])
+    caps = [bm.faces.new(hi), bm.faces.new(lo[::-1])]
+    if len(points) > 4:
+        bmesh.ops.triangulate(bm, faces=caps, quad_method="BEAUTY", ngon_method="EAR_CLIP")
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    project_uv(bm, 1.0)
+    return bm
+
+
+def _gear_motor(b, m, at, axis, size=0.12, length=0.3, skin="paint_grey"):
+    """A gear motor whose output shaft leaves `at` along `axis`: the shaft,
+    the gearbox behind it, the finned motor, its fan cowl and terminal box."""
+    at, axis = Vector(at), Vector(axis).normalized()
+    s = size
+    b.put(aim(ring(0.22 * s, 0.0, 0.0, 0.4 * s, 10), at, axis), m["steel"])
+    b.put(aim(box((1.5 * s, 1.5 * s, 1.2 * s), (0, 0, -0.6 * s), tile=0.5, bevel=0.06 * s), at, axis), m["paint_dark"], smooth=False)
+    body = ring(0.55 * s, 0.0, -1.2 * s - length, -1.2 * s, 18)
+    for k in range(12):
+        merge(body, moved(box((0.12 * s, 0.03 * s, length * 0.9), (0.58 * s, 0, -1.2 * s - length / 2)), (0, 0, 0), TAU * k / 12))
+    b.put(aim(body, at, axis), m[skin])
+    b.put(aim(ring(0.6 * s, 0.5 * s, -1.25 * s - length - 0.25 * s, -1.2 * s - length, 18), at, axis), m["paint_dark"])
+    b.put(aim(box((0.6 * s, 0.5 * s, 0.4 * s), (0.75 * s, 0, -1.2 * s - 0.35 * length), bevel=0.04 * s), at, axis), m[skin], smooth=False)
+
+
+def _screw(b, m, a, c, r=0.11, skin="paint_grey", post=True):
+    """An enclosed screw conveyor from its inlet at a to its outlet at c:
+    the tube in flanged lengths, the inlet spout over a, the outlet spout
+    under c, its gear motor on the end plate past c, a post under it."""
+    a, c = Vector(a), Vector(c)
+    d = (c - a).normalized()
+    s0, s1 = a - d * 0.15, c + d * 0.15
+    b.put(tube([s0, s1], r, 16), m[skin])
+    run = (s1 - s0).length
+    flanges = bmesh.new()
+    n = max(1, int(run / 1.4))
+    for k in range(n + 1):
+        merge(flanges, aim(ring(r + 0.03, r - 0.005, -0.012, 0.012, 16), s0 + d * (run * k / n), d))
+    b.put(flanges, m["steel"])
+    b.put(box((2 * r, 2 * r, 0.24), (a.x, a.y, a.z + r + 0.1), tile=0.5), m[skin], smooth=False)
+    b.put(box((1.8 * r, 1.8 * r, 0.2), (c.x, c.y, c.z - r - 0.08), tile=0.5), m[skin], smooth=False)
+    b.put(aim(ring(r + 0.035, 0.0, -0.01, 0.01, 16), s1, d), m["steel"])
+    _gear_motor(b, m, s1 + d * 0.01, -d, 0.75 * r, 2.4 * r, skin)
+    if post:
+        p = a.lerp(c, 0.45)
+        b.put(member((p.x, p.y, 0.02), (p.x, p.y, p.z - r - 0.02), rect(0.08, 0.08)), m["galv"], smooth=False)
+        b.put(box((0.24, 0.24, 0.02), (p.x, p.y, 0.01)), m["galv"], smooth=False)
+        b.put(aim(ring(r + 0.012, r - 0.004, -0.04, 0.04, 16), p, d), m["galv"])
+
+
+def _pump(b, m, at, yaw):
+    """A slurry pump on its skid, its volute toward +X of `yaw`: base frame,
+    motor and fan cowl, coupling guard, bearing frame, volute. Returns its
+    suction (along +X) and discharge (up) points."""
+    at = Vector(at)
+    turn = Matrix.Rotation(yaw, 3, "Z")
+    pt = lambda x, y, z: at + turn @ Vector((x, y, z))
+    h = 0.33
+    along = lambda bm: moved(moved(bm, (0, 0, h), 0.0, math.pi / 2), tuple(at), yaw)
+    b.put(moved(box((1.1, 0.42, 0.1), (0, 0, 0.05), tile=1.0), tuple(at), yaw), m["galv"], smooth=False)
+    b.put(moved(box((1.3, 0.6, 0.06), (0, 0, -0.02)), tuple(at), yaw), m["footing"], smooth=False)
+    motor = ring(0.13, 0.0, -0.52, -0.1, 18)
+    for k in range(10):
+        merge(motor, moved(box((0.018, 0.02, 0.4), (0.14, 0, -0.31)), (0, 0, 0), TAU * k / 10))
+    b.put(along(motor), m["paint_grey"])
+    b.put(along(ring(0.14, 0.12, -0.62, -0.52, 18)), m["paint_dark"])
+    b.put(moved(box((0.14, 0.12, 0.1), (-0.3, 0, h + 0.18), bevel=0.01), tuple(at), yaw), m["paint_grey"], smooth=False)
+    b.put(moved(box((0.2, 0.22, 0.2), (0.0, 0, h), bevel=0.01), tuple(at), yaw), m["paint_yellow"], smooth=False)
+    b.put(along(ring(0.08, 0.0, 0.1, 0.2, 14)), m["paint_dark"])
+    b.put(along(ring(0.21, 0.0, 0.2, 0.36, 22)), m["paint_dark"])
+    b.put(moved(box((0.12, 0.04, 0.12), (0.28, 0, 0.11)), tuple(at), yaw), m["galv"], smooth=False)
+    for x in (-0.42, -0.2):
+        b.put(moved(box((0.08, 0.3, 0.1), (x, 0, 0.15)), tuple(at), yaw), m["galv"], smooth=False)
+    suction, discharge = pt(0.5, 0, h), pt(0.28, 0, 0.72)
+    b.put(aim(ring(0.06, 0.0, 0.0, 0.14, 12), pt(0.36, 0, h), turn @ Vector((1, 0, 0))), m["paint_dark"])
+    b.put(flange(pt(0.49, 0, h), turn @ Vector((1, 0, 0)), 0.06), m["steel"])
+    b.put(moved(ring(0.05, 0.0, 0.5, 0.71, 12), tuple(pt(0.28, 0, 0))), m["paint_dark"])
+    b.put(flange(discharge - Vector((0, 0, 0.01)), (0, 0, 1), 0.05), m["steel"])
+    b.collider(moved(box((1.1, 0.45, 0.66), (0, 0, 0.33)), tuple(at), yaw))
+    return suction, discharge
+
+
+def _top(at, r, h, lift, rho):
+    """The height of a vessel's upper head at `rho` from its axis (see `heads`)."""
+    head = r / 2
+    return at.z + lift + h - head + head * math.sqrt(max(0.0, 1.0 - (rho / r) ** 2))
+
+
+def _nozzle(b, m, at, r, up=0.14):
+    """A flanged nozzle standing up from `at`."""
+    at = Vector(at)
+    b.put(moved(ring(r, 0.0, -0.05, up, 12), tuple(at)), m["steel"])
+    b.put(moved(ring(r * 1.8 + 0.02, 0.0, up, up + 0.03, 14), tuple(at)), m["steel"])
+
+
+def _leach_tank(b, m, at, r=0.8, h=2.0, lift=0.5, manway=(0, 1, 0)):
+    """An insulated wash tank on its legs: the agitator's gear motor on its
+    flanged nozzle on top, the feed, water, vent and level nozzles, a
+    manway and its davit on the side, the bottom outlet. Returns the feed
+    and water nozzles' tops and the outlet."""
+    at = Vector(at)
+    vessel(b, m, at, r, h, "alu", lift=lift, legs=4)
+    top = at.z + lift + h
+    c = Vector((at.x, at.y, 0))
+    b.put(moved(ring(0.18, 0.0, top - 0.05, top + 0.1, 20), tuple(c)), m["steel"])
+    b.put(moved(ring(0.25, 0.0, top + 0.1, top + 0.14, 24), tuple(c)), m["steel"])
+    for k in range(8):
+        a = TAU * (k + 0.5) / 8
+        b.put(moved(ring(0.012, 0.0, top + 0.14, top + 0.16, 6), (at.x + 0.21 * math.cos(a), at.y + 0.21 * math.sin(a), 0)), m["steel"])
+    _gear_motor(b, m, (at.x, at.y, top + 0.15), (0, 0, -1), 0.15, 0.34)
+    out = {}
+    rho = 0.5
+    for key, a in (("feed", 135), ("water", 45), ("vent", 225), ("level", 315)):
+        a = math.radians(a)
+        p = Vector((at.x + rho * math.cos(a), at.y + rho * math.sin(a), _top(at, r, h, lift, rho)))
+        _nozzle(b, m, p, 0.07 if key in ("feed", "water") else 0.045)
+        out[key] = p + Vector((0, 0, 0.17))
+    vent = out["vent"]
+    b.put(pipe([vent, vent + Vector((0, 0, 0.35)), vent + Vector((0.25, 0, 0.35)), vent + Vector((0.25, 0, 0.2))], 0.04, 0.08), m["steel"])
+    b.put(moved(ring(0.07, 0.0, -0.12, 0.0, 12), tuple(vent + Vector((0.25, 0, 0.2)))), m["paint_grey"])
+    lvl = out["level"]
+    b.put(moved(ring(0.03, 0.0, 0.0, 0.25, 10), tuple(lvl)), m["steel"])
+    b.put(box((0.12, 0.1, 0.12), tuple(lvl + Vector((0, 0, 0.3))), bevel=0.01), m["paint_grey"], smooth=False)
+    d = Vector(manway).normalized()
+    zm = at.z + lift + 0.75
+    mc = Vector((at.x, at.y, zm)) + d * r
+    b.put(aim(ring(0.23, 0.0, -0.06, 0.12, 20), mc, d), m["steel"])
+    b.put(aim(ring(0.3, 0.0, 0.12, 0.16, 22), mc, d), m["steel"])
+    for k in range(12):
+        a = TAU * k / 12
+        side = d.cross(Vector((0, 0, 1))).normalized()
+        q = mc + d * 0.165 + side * (0.26 * math.cos(a)) + Vector((0, 0, 0.26 * math.sin(a)))
+        b.put(aim(ring(0.014, 0.0, 0.0, 0.02, 6), q, d), m["steel"])
+    side = d.cross(Vector((0, 0, 1))).normalized()
+    hinge = mc + side * 0.34
+    b.put(tube([hinge + Vector((0, 0, -0.25)), hinge + Vector((0, 0, 0.35)), hinge + d * 0.25 + Vector((0, 0, 0.45)), mc + d * 0.25 + Vector((0, 0, 0.45)),
+                mc + d * 0.25 + Vector((0, 0, 0.3))], 0.018, 6), m["paint_yellow"])
+    bottom = at.z + lift
+    b.put(moved(ring(0.08, 0.0, bottom - 0.2, bottom + 0.02, 12), (at.x, at.y, 0)), m["steel"])
+    b.put(flange(Vector((at.x, at.y, bottom - 0.18)), (0, 0, 1), 0.08), m["steel"])
+    out["outlet"] = Vector((at.x, at.y, bottom - 0.2))
+    b.collider(moved(lathe([(0.0, 0.0), (r + 0.05, 0.0), (r + 0.05, lift + h), (0.0, lift + h + 0.8)], 8, 2.0), tuple(c)))
+    return out
+
+
+def _thickener(b, m, at, r=1.35):
+    """The thickener the washed slurry settles in: six legs on footings, the
+    cone to its underflow nozzle, the clad wall with its stiffening rings,
+    the overflow launder round its rim and its outlet, the roof, the bridge
+    across it with the rake drive at the centre, the feed well's nozzle, a
+    caged ladder to the bridge. Returns the feed, overflow and underflow points."""
+    at = Vector(at)
+    x, y = at.x, at.y
+    z_apex, z_cone, z_wall, z_roof = 0.75, 1.7, 3.0, 3.36
+    b.put(moved(lathe([(0.0, z_apex), (0.14, z_apex), (r, z_cone), (r, z_wall), (r * 0.25, z_roof - 0.02), (0.0, z_roof)], 40, 2.0), (x, y, 0)), m["alu"])
+    seams = bmesh.new()
+    for z in (z_cone, 2.2, 2.6):
+        merge(seams, moved(ring(r + 0.015, r - 0.01, z - 0.025, z + 0.025, 40), (x, y, 0)))
+    b.put(seams, m["steel"])
+    launder = moved(ring(r + 0.2, r, 2.72, 2.76, 40), (x, y, 0))
+    merge(launder, moved(ring(r + 0.2, r + 0.185, 2.76, 2.95, 40), (x, y, 0)))
+    b.put(launder, m["paint_grey"])
+    legs, feet = bmesh.new(), bmesh.new()
+    for k in range(6):
+        a = TAU * k / 6
+        p = Vector((x + 0.92 * r * math.cos(a), y + 0.92 * r * math.sin(a), 0))
+        merge(legs, member(p + Vector((0, 0, 0.25)), p + Vector((0, 0, z_cone + 0.05)), ibeam(0.14, 0.14, 0.012), up=(math.cos(a), math.sin(a), 0)))
+        merge(feet, box((0.5, 0.5, 0.3), tuple(p + Vector((0, 0, 0.1)))))
+        q = Vector((x + 0.45 * r * math.cos(a), y + 0.45 * r * math.sin(a), 0))
+        merge(legs, rod(p + Vector((0, 0, 0.9)), q + Vector((0, 0, z_apex + (z_cone - z_apex) * (0.45 * r - 0.14) / (r - 0.14))), 0.025, 6))
+    b.put(legs, m["galv"])
+    b.put(feet, m["footing"], smooth=False)
+    b.put(moved(ring(0.09, 0.0, z_apex - 0.25, z_apex + 0.02, 12), (x, y, 0)), m["steel"])
+    b.put(flange(Vector((x, y, z_apex - 0.22)), (0, 0, 1), 0.09), m["steel"])
+    bridge = bmesh.new()
+    for s in (-1, 1):
+        merge(bridge, member((x - r - 0.25, y + s * 0.32, z_roof + 0.05), (x + r + 0.25, y + s * 0.32, z_roof + 0.05), channel(0.07, 0.2, 0.008, s < 0)))
+    for k in range(-3, 4):
+        merge(bridge, member((x + k * r / 3, y - 0.32, z_roof + 0.1), (x + k * r / 3, y + 0.32, z_roof + 0.1), angle(0.05, 0.006)))
+    for sx in (-1, 1):
+        for s in (-1, 1):
+            merge(bridge, member((x + sx * (r - 0.05), y + s * 0.32, z_wall - 0.02), (x + sx * (r - 0.05), y + s * 0.32, z_roof - 0.05), rect(0.08, 0.08)))
+    b.put(bridge, m["galv"])
+    b.put(box((2 * r + 0.5, 0.62, 0.03), (x, y, z_roof + 0.16), tile=1.0), m["grate"], smooth=False)
+    railing(b, m, [(x - r - 0.25, y + 0.33, z_roof + 0.17), (x + r + 0.25, y + 0.33, z_roof + 0.17)], 1.0, 0.9)
+    railing(b, m, [(x - r - 0.25, y - 0.33, z_roof + 0.17), (x - 0.5, y - 0.33, z_roof + 0.17)], 1.0, 0.9)
+    railing(b, m, [(x + 0.5, y - 0.33, z_roof + 0.17), (x + r + 0.25, y - 0.33, z_roof + 0.17)], 1.0, 0.9)
+    b.put(box((0.6, 0.6, 0.34), (x, y, z_roof + 0.34), tile=0.5, bevel=0.02), m["paint_dark"], smooth=False)
+    b.put(moved(ring(0.24, 0.0, z_roof + 0.5, z_roof + 0.62, 20), (x, y, 0)), m["paint_dark"])
+    _gear_motor(b, m, (x + 0.3, y - 0.12, z_roof + 0.34), (-1, 0, 0), 0.12, 0.3)
+    feed = Vector((x - 0.3, y + 0.62, _top_cone(r, z_wall, z_roof, math.hypot(0.3, 0.62))))
+    _nozzle(b, m, feed, 0.08, 0.12)
+    out = Vector((x + r + 0.2, y, 2.85))
+    b.put(aim(ring(0.07, 0.0, 0.0, 0.2, 12), out, (1, 0, 0)), m["paint_grey"])
+    ladder(b, m, (x, y - r - 0.55, 0.0), -math.pi / 2, z_roof + 0.17)
+    y0, y1 = y - r - 0.5, y - 0.33
+    b.put(box((0.6, y1 - y0, 0.03), (x, (y0 + y1) / 2, z_roof + 0.16), tile=1.0), m["grate"], smooth=False)
+    for s in (-1, 1):
+        b.put(member((x + s * 0.32, y0 + 0.12, 0.02), (x + s * 0.32, y0 + 0.12, z_roof + 0.14), rect(0.07, 0.07)), m["galv"], smooth=False)
+        b.put(box((0.2, 0.2, 0.02), (x + s * 0.32, y0 + 0.12, 0.01)), m["galv"], smooth=False)
+        b.put(member((x + s * 0.3, y0, z_roof + 0.12), (x + s * 0.3, y1, z_roof + 0.12), channel(0.04, 0.08, 0.005, s < 0)), m["galv"])
+        railing(b, m, [(x + s * 0.32, y0 + 0.5, z_roof + 0.17), (x + s * 0.32, y1, z_roof + 0.17)], 1.0, 0.7)
+    b.collider(moved(lathe([(0.0, 0.0), (r + 0.22, 0.0), (r + 0.22, z_wall), (0.0, z_roof + 0.7)], 8, 2.0), (x, y, 0)))
+    return feed + Vector((0, 0, 0.15)), out + Vector((0.2, 0, 0)), Vector((x, y, z_apex - 0.25))
+
+
+def _top_cone(r, z_wall, z_roof, rho):
+    """The height of the thickener's roof at `rho` from its axis."""
+    return z_wall + (z_roof - 0.02 - z_wall) * (r - rho) / (r - 0.25 * r) if rho > 0.25 * r else z_roof
+
+
+def _dryer(b, m, x0, x1, y, z0, z1, r=0.45):
+    """A rotary drum dryer from its discharge end at x0 to its feed end at
+    x1, falling toward x0: the clad drum and its bands, two riding rings on
+    trunnion rollers in their bearings on skids over plinths, the girth
+    gear in its guard and the pinion's gear motor, the stationary feed and
+    discharge breechings with their seals, the air heater. Returns the feed
+    inlet, the vapour outlet and the discharge outlet."""
+    a, c = Vector((x0, y, z0)), Vector((x1, y, z1))
+    d = (c - a).normalized()
+    L = (c - a).length
+    b.put(aim(ring(r, r - 0.012, 0.0, L, 40), a, d), m["alu"])
+    bands = bmesh.new()
+    for k in range(1, int(L / 0.5)):
+        merge(bands, aim(ring(r + 0.008, r - 0.01, -0.012, 0.012, 40), a + d * (0.5 * k), d))
+    b.put(bands, m["steel"])
+    plinths, skids, steel = bmesh.new(), bmesh.new(), bmesh.new()
+    for t in (0.2, 0.8):
+        p = a + d * (L * t)
+        merge(steel, aim(ring(r + 0.07, r + 0.005, -0.07, 0.07, 48), p, d))
+        for s in (-1, 1):
+            q = p + Vector((0, s * (r + 0.07 + 0.11) * math.sin(math.radians(32)), -(r + 0.07 + 0.11) * math.cos(math.radians(32))))
+            merge(steel, aim(ring(0.11, 0.0, -0.09, 0.09, 24), q, d))
+            merge(steel, aim(ring(0.03, 0.0, -0.22, 0.22, 10), q, d))
+            for e in (-1, 1):
+                merge(skids, box((0.12, 0.14, q.z - 0.3), (q.x + e * 0.17, q.y, (q.z + 0.3) / 2), tile=0.5))
+        merge(skids, box((0.6, 2 * r + 0.5, 0.12), (p.x, y, 0.36), tile=0.5))
+        merge(plinths, box((0.8, 2 * r + 0.7, 0.32), (p.x, y, 0.14)))
+    g = a + d * (L * 0.62)
+    merge(steel, aim(ring(r + 0.11, r + 0.005, -0.04, 0.04, 64), g, d))
+    for k in range(64):
+        ang = TAU * k / 64
+        merge(steel, aim(box((0.03, 0.02, 0.08), ((r + 0.12) * math.cos(ang), (r + 0.12) * math.sin(ang), 0)), g, d))
+    b.put(steel, m["steel"])
+    b.put(skids, m["paint_dark"], smooth=False)
+    b.put(plinths, m["footing"], smooth=False)
+    guard = aim(lathe([(r + 0.16, -0.09), (r + 0.2, -0.09), (r + 0.2, 0.09), (r + 0.16, 0.09)], 24, 1.0, math.pi * 0.9, math.pi * 1.05), g, d)
+    b.put(guard, m["paint_yellow"])
+    pin = g + Vector((0, -(r + 0.2), -0.05))
+    b.put(aim(ring(0.07, 0.0, -0.06, 0.06, 16), pin, d), m["steel"])
+    _gear_motor(b, m, pin + d * 0.1, -d, 0.14, 0.36)
+    b.put(box((0.9, 0.4, 0.1), (pin.x + 0.35, pin.y - 0.05, 0.4), tile=0.5), m["paint_dark"], smooth=False)
+    b.put(box((1.1, 0.6, 0.3), (pin.x + 0.35, pin.y - 0.05, 0.15)), m["footing"], smooth=False)
+    b.put(member((pin.x + 0.35, pin.y - 0.05, 0.45), (pin.x + 0.35, pin.y - 0.05, pin.z - 0.18), rect(0.2, 0.2)), m["paint_dark"], smooth=False)
+    breech = bmesh.new()
+    merge(breech, box((0.6, 2 * r + 0.3, 1.4), (x1 + 0.3, y, z1 + 0.15), tile=0.8, bevel=0.02))
+    merge(breech, box((0.6, 2 * r + 0.3, 1.5), (x0 - 0.3, y, z0 - 0.05), tile=0.8, bevel=0.02))
+    b.put(breech, m["paint_grey"], smooth=False)
+    seals = bmesh.new()
+    for p, e in ((a, -1), (c, 1)):
+        merge(seals, aim(ring(r + 0.05, r - 0.02, -0.05, 0.05, 40), p + d * (e * 0.02), d))
+    b.put(seals, m["rubber"])
+    feed = Vector((x1 + 0.2, y, z1 + 0.85))
+    b.put(box((0.36, 0.36, 0.2), tuple(feed), tile=0.5), m["paint_grey"], smooth=False)
+    vapour = Vector((x1 + 0.48, y - 0.38, z1 + 0.85))
+    b.put(moved(ring(0.13, 0.0, 0.0, 0.18, 16), tuple(vapour)), m["paint_grey"])
+    heater = Vector((x0 - 0.3, y - r - 0.5, z0 + 0.2))
+    b.put(box((0.55, 0.5, 0.8), tuple(heater), tile=0.5, bevel=0.02), m["paint_white"], smooth=False)
+    b.put(moved(box((0.04, 0.4, 0.5), (0, 0, 0)), tuple(heater + Vector((0, -0.25, 0.05))), math.pi / 2), m["louvre"], smooth=False)
+    b.put(tube([heater + Vector((0, 0.25, 0.1)), heater + Vector((0, 0.42, 0.1))], 0.1, 12), m["paint_grey"])
+    b.put(tube(fillet([heater + Vector((0.2, -0.1, -0.4)), heater + Vector((0.2, -0.1, -0.6)), heater + Vector((0.2, -0.6, -0.78)), heater + Vector((0.2, -1.0, -0.78))], 0.15), 0.03, 8), m["cable"])
+    b.put(box((0.12, 0.08, 0.1), tuple(heater + Vector((0.32, 0.0, 0.2)))), m["andon"], smooth=False)
+    b.collider(moved(box((L + 1.2, 2 * r + 0.6, 2 * r + 0.3), ((L + 1.2) / 2 - 0.6, 0, 0)), tuple(a), 0.0, -math.atan2(z1 - z0, x1 - x0)))
+    b.collider(box((x1 - x0, 2 * r + 0.7, 0.55), ((x0 + x1) / 2, y, 0.27)))
+    return feed + Vector((0, 0, 0.1)), vapour + Vector((0, 0, 0.18)), Vector((x0 - 0.6, y, z0 - 0.35))
+
+
+def _elevator(b, m, at, height, spout):
+    """A bucket elevator: the boot and its take-ups, twin casing legs in
+    flanged lengths with inspection doors, the head with its hood, the head
+    shaft's gear motor and backstop, a discharge spout toward `spout`, the
+    lattice mast it is tied to with a caged ladder and the head platform."""
+    at = Vector(at)
+    x, y = at.x, at.y
+    boot, top = 0.85, height - 0.95
+    b.put(box((0.6, 0.9, boot), (x, y, boot / 2), tile=0.5, bevel=0.01), m["paint_orange"], smooth=False)
+    for s in (-1, 1):
+        b.put(rod((x + 0.32, y + s * 0.3, 0.45), (x + 0.5, y + s * 0.3, 0.45), 0.02, 8), m["steel"])
+        b.put(box((0.12, 0.08, 0.08), (x + 0.32, y + s * 0.3, 0.45)), m["paint_dark"], smooth=False)
+    legs, flanges, doors = bmesh.new(), bmesh.new(), bmesh.new()
+    for s in (-1, 1):
+        merge(legs, member((x, y + s * 0.2, boot), (x, y + s * 0.2, top), rect(0.24, 0.3)))
+        for k in range(int((top - boot) / 1.5) + 1):
+            z = boot + k * 1.5
+            merge(flanges, box((0.36, 0.3, 0.025), (x, y + s * 0.2, z)))
+        merge(doors, box((0.012, 0.18, 0.3), (x + 0.15, y + s * 0.2, boot + 0.6)))
+        merge(doors, box((0.012, 0.18, 0.3), (x + 0.15, y + s * 0.2, top - 0.7)))
+    b.put(legs, m["paint_orange"], smooth=False)
+    b.put(flanges, m["paint_orange"], smooth=False)
+    b.put(doors, m["paint_dark"], smooth=False)
+    b.put(box((0.7, 1.0, 0.95), (x, y, top + 0.475), tile=0.5, bevel=0.01), m["paint_orange"], smooth=False)
+    b.put(moved(vault(-0.35, 0.35, 0.5, 0.0, 16, 0.5, 0.45), (x, y, top + 0.95)), m["paint_orange"])
+    for s in (-1, 1):
+        b.put(aim(ring(0.08, 0.0, -0.04, 0.04, 16), Vector((x + s * 0.39, y, top + 0.6)), (1, 0, 0)), m["paint_dark"])
+    _gear_motor(b, m, (x + 0.43, y, top + 0.6), (-1, 0, 0), 0.14, 0.34)
+    b.put(box((0.12, 0.16, 0.16), (x - 0.45, y, top + 0.6), bevel=0.01), m["paint_dark"], smooth=False)
+    spout = Vector(spout)
+    s0 = Vector((x, y + 0.45, top + 0.35))
+    b.put(sweep([(0.0, -0.16), (0.0, 0.16), (0.22, 0.16), (0.22, -0.16)], [s0, spout], 1.0), m["paint_orange"], smooth=False)
+    mast = bmesh.new()
+    mx, w = x - 0.75, 0.5
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            merge(mast, member((mx + sx * w / 2, y + sy * w / 2, 0.25), (mx + sx * w / 2, y + sy * w / 2, top), angle(0.06, 0.006)))
+    for k in range(int(top / 1.2)):
+        z0, z1 = 0.3 + k * 1.2, 0.3 + (k + 1) * 1.2
+        for sy in (-1, 1):
+            merge(mast, rod((mx - w / 2, y + sy * w / 2, z0), (mx + w / 2, y + sy * w / 2, min(z1, top)), 0.012, 4))
+        merge(mast, member((mx - w / 2, y - w / 2, z1), (mx - w / 2, y + w / 2, z1), angle(0.04, 0.005)))
+        merge(mast, member((mx - w / 2, y - 0.2, z1), (x - 0.15, y - 0.2, z1), angle(0.05, 0.005)))
+    b.put(mast, m["galv"])
+    b.put(box((0.8, 0.8, 0.3), (mx, y, 0.12)), m["footing"], smooth=False)
+    ladder(b, m, (mx - w / 2 - 0.05, y, 0.0), math.pi, top - 0.05, over=1.1)
+    b.put(box((0.9, 1.1, 0.03), (mx - 0.05, y, top - 0.02), tile=1.0), m["grate"], smooth=False)
+    railing(b, m, [(mx - 0.5, y + 0.55, top), (mx - 0.5, y - 0.55, top)], 1.0, 0.6)
+    b.collider(box((0.75, 1.05, height), (x, y, height / 2)))
+    b.collider(box((w + 0.1, w + 0.1, top), (mx, y, top / 2)))
+
+
+def _mixer_bagger(b, m, at):
+    """The blender over the bagging station: a framed stand, the paddle
+    mixer's trough on top with its lid, inlets and vent filter, the drive,
+    the discharge gate and spout with the bag's inflatable collar, the hanger
+    holding a bulk bag by its loops on the scale, a control panel. Returns
+    the two inlets and where the bag stands."""
+    at = Vector(at)
+    x, y = at.x, at.y
+    hx, hy, deck = 1.1, 0.7, 2.5
+    frame = bmesh.new()
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            merge(frame, member((x + sx * hx, y + sy * hy, 0.0), (x + sx * hx, y + sy * hy, deck), rect(0.12, 0.12)))
+            merge(frame, box((0.28, 0.28, 0.02), (x + sx * hx, y + sy * hy, 0.01)))
+        merge(frame, member((x + sx * hx, y - hy, deck - 0.08), (x + sx * hx, y + hy, deck - 0.08), rect(0.16, 0.1)))
+        merge(frame, rod((x + sx * hx, y - hy, 0.2), (x + sx * hx, y + hy, deck - 0.3), 0.018, 6))
+    for sy in (-1, 1):
+        merge(frame, member((x - hx, y + sy * hy, deck - 0.08), (x + hx, y + sy * hy, deck - 0.08), rect(0.16, 0.1)))
+        merge(frame, member((x - hx, y + sy * hy, 1.95), (x + hx, y + sy * hy, 1.95), rect(0.1, 0.08)))
+    for sx in (-1, 1):
+        merge(frame, member((x + sx * 0.42, y - hy, 1.95), (x + sx * 0.42, y + hy, 1.95), rect(0.08, 0.06)))
+    b.put(frame, m["paint_yellow"], smooth=False)
+    hooks = bmesh.new()
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            merge(hooks, rod((x + sx * 0.42, y + sy * 0.43, 1.9), (x + sx * 0.42, y + sy * 0.43, 1.75), 0.012, 6))
+            merge(hooks, moved(torus(0.03, 0.008, 8, 4, math.pi * 1.3), (x + sx * 0.42, y + sy * 0.43, 1.73), 0.0, math.pi / 2))
+    b.put(hooks, m["steel"])
+    trough = moved(lathe([(0.42, -0.95), (0.42, 0.95)], 24, 1.0, math.pi, -math.pi / 2), (0, 0, 0), 0.0, math.pi / 2)
+    for s in (-1, 1):
+        merge(trough, box((1.9, 0.012, 0.42), (0, s * 0.42, 0.21)))
+        merge(trough, _trough_end(0.42, s * 0.95))
+    b.put(moved(trough, (x, y, deck + 0.42)), m["paint_white"])
+    b.put(box((1.96, 0.9, 0.03), (x, y, deck + 0.86), tile=1.0), m["paint_white"], smooth=False)
+    b.put(box((2.0, 0.94, 0.03), (x, y, deck + 0.42 + 0.42), tile=1.0), m["steel"], smooth=False)
+    inlets = (Vector((x + 0.5, y - 0.2, deck + 0.88)), Vector((x - 0.25, y + 0.25, deck + 0.88)))
+    for p in inlets:
+        b.put(moved(ring(0.13, 0.0, 0.0, 0.16, 16), tuple(p)), m["steel"])
+        b.put(moved(ring(0.18, 0.0, 0.16, 0.19, 16), tuple(p)), m["steel"])
+    vent = Vector((x - 0.7, y - 0.2, deck + 0.88))
+    b.put(moved(ring(0.14, 0.0, 0.0, 0.4, 18), tuple(vent)), m["paint_grey"])
+    b.put(moved(ring(0.16, 0.0, 0.4, 0.45, 18), tuple(vent)), m["paint_dark"])
+    _gear_motor(b, m, (x - 1.0, y, deck + 0.42), (1, 0, 0), 0.16, 0.4)
+    b.put(box((0.5, 0.4, 0.06), (x - 1.25, y, deck + 0.02), tile=0.5), m["paint_dark"], smooth=False)
+    for sy in (-1, 1):
+        b.put(member((x - 1.45, y + sy * 0.18, deck + 0.0), (x - hx, y + sy * 0.18, deck - 0.4), rect(0.06, 0.06)), m["paint_yellow"], smooth=False)
+    b.put(box((0.3, 0.3, 0.2), (x, y, deck - 0.05), tile=0.5), m["paint_grey"], smooth=False)
+    b.put(box((0.2, 0.08, 0.08), (x + 0.25, y, deck - 0.05), bevel=0.01), m["paint_dark"], smooth=False)
+    b.put(moved(ring(0.15, 0.0, 1.95, deck - 0.15, 18), (x, y, 0)), m["stainless"])
+    b.put(moved(torus(0.17, 0.035, 20, 8), (x, y, 1.98)), m["rubber"])
+    b.put(box((1.3, 1.3, 0.1), (x, y, 0.05), tile=1.0), m["tread"], smooth=False)
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            b.put(box((0.1, 0.1, 0.06), (x + sx * 0.55, y + sy * 0.55, 0.03)), m["paint_dark"], smooth=False)
+    bag(b, m, (x, y, 0.1), 0.0, 0.85)
+    panel = Vector((x - hx - 0.25, y - hy - 0.1, 0.0))
+    b.put(member(panel, panel + Vector((0, 0, 1.2)), rect(0.08, 0.08)), m["galv"], smooth=False)
+    b.put(box((0.12, 0.4, 0.5), tuple(panel + Vector((0, 0, 1.35))), bevel=0.01), m["paint_grey"], smooth=False)
+    b.put(box((0.02, 0.06, 0.06), tuple(panel + Vector((-0.07, 0.1, 1.45)))), m["paint_red"], smooth=False)
+    b.put(box((0.02, 0.06, 0.04), tuple(panel + Vector((-0.07, -0.08, 1.45)))), m["andon"], smooth=False)
+    b.put(box((0.02, 0.3, 0.2), tuple(panel + Vector((-0.07, 0.0, 1.28)))), m["vision"], smooth=False)
+    b.collider(box((2 * hx + 0.2, 2 * hy + 0.2, deck + 1.0), (x, y, (deck + 1.0) / 2)))
+    return inlets
+
+
+def _trough_end(r, x):
+    """An end plate of the mixer's trough in the plane X = x: the lower half disc and the square above it."""
+    rim = [(r * math.cos(math.pi + math.pi * k / 16), r * math.sin(math.pi + math.pi * k / 16)) for k in range(17)]
+    return _slab(rim + [(r, r), (-r, r)], x - 0.006, x + 0.006)
+
+
+def _hood_end(r, x, z0, squash):
+    """An end plate of a vault hood in the plane X = x: a half disc, round side up."""
+    return _slab([(-r * math.cos(math.pi * k / 14), z0 + squash * r * math.sin(math.pi * k / 14)) for k in range(15)], x - 0.004, x + 0.004)
+
+
+def _composter(b, m, x, y0, y1, r=0.75, zc=1.15):
+    """An in-vessel rotary drum composter along Y, its discharge at y0 and
+    feed at y1: the insulated drum in bands, riding rings on trunnion
+    rollers over plinths, the chain drive's sprocket ring, guard and gear
+    motor, hatches and temperature probes, the discharge hood with its
+    outlet and exhaust, the feed hood with the shredder and its hopper on
+    top. Returns the outlet and the exhaust."""
+    a, c = Vector((x, y0, zc)), Vector((x, y1, zc))
+    d = Vector((0, 1, 0))
+    L = y1 - y0
+    b.put(aim(ring(r, r - 0.012, 0.0, L, 40), a, d), m["paint_white"])
+    bands = bmesh.new()
+    for k in range(1, int(L / 0.7)):
+        merge(bands, aim(ring(r + 0.008, r - 0.01, -0.015, 0.015, 40), a + d * (0.7 * k), d))
+    b.put(bands, m["paint_grey"])
+    steel, skids, plinths = bmesh.new(), bmesh.new(), bmesh.new()
+    for t in (0.2, 0.8):
+        p = a + d * (L * t)
+        merge(steel, aim(ring(r + 0.08, r + 0.005, -0.08, 0.08, 48), p, d))
+        for s in (-1, 1):
+            q = p + Vector((s * (r + 0.08 + 0.12) * math.sin(math.radians(32)), 0, -(r + 0.08 + 0.12) * math.cos(math.radians(32))))
+            merge(steel, aim(ring(0.12, 0.0, -0.1, 0.1, 24), q, d))
+            merge(steel, aim(ring(0.03, 0.0, -0.24, 0.24, 10), q, d))
+            for e in (-1, 1):
+                merge(skids, box((0.14, 0.12, q.z - 0.3), (q.x, q.y + e * 0.18, (q.z + 0.3) / 2), tile=0.5))
+        merge(skids, box((2 * r + 0.5, 0.6, 0.12), (x, p.y, 0.36), tile=0.5))
+        merge(plinths, box((2 * r + 0.7, 0.8, 0.32), (x, p.y, 0.14)))
+    g = a + d * (L * 0.5)
+    merge(steel, aim(ring(r + 0.1, r + 0.005, -0.03, 0.03, 64), g, d))
+    for k in range(48):
+        ang = TAU * k / 48
+        merge(steel, aim(box((0.02, 0.02, 0.07), ((r + 0.11) * math.cos(ang), (r + 0.11) * math.sin(ang), 0)), g, d))
+    b.put(steel, m["steel"])
+    b.put(skids, m["paint_dark"], smooth=False)
+    b.put(plinths, m["footing"], smooth=False)
+    motor = g + Vector((r + 0.35, 0, -0.55))
+    b.put(box((0.6, 0.5, 0.1), (motor.x, motor.y, 0.4), tile=0.5), m["paint_dark"], smooth=False)
+    _gear_motor(b, m, motor + Vector((0, -0.12, 0)), (0, 1, 0), 0.14, 0.34)
+    b.put(member((motor.x, motor.y, 0.45), (motor.x, motor.y, motor.z - 0.12), rect(0.18, 0.18)), m["paint_dark"], smooth=False)
+    b.put(box((0.3, 0.3, 0.75), (x + r + 0.2, g.y, 0.85)), m["paint_yellow"], smooth=False)
+    for k, t in enumerate((0.35, 0.65)):
+        p = a + d * (L * t)
+        b.put(box((0.5, 0.4, 0.05), (p.x, p.y, p.z + r + 0.01), tile=0.5), m["paint_grey"], smooth=False)
+        for s in (-1, 1):
+            b.put(rod((p.x + s * 0.2, p.y - 0.15, p.z + r + 0.04), (p.x + s * 0.2, p.y + 0.15, p.z + r + 0.04), 0.01, 6), m["steel"])
+        q = a + d * (L * (t + 0.08))
+        b.put(rod((q.x - 0.4, q.y, q.z + 0.62), (q.x - 0.55, q.y, q.z + 0.72), 0.012, 6), m["steel"])
+        b.put(box((0.06, 0.05, 0.05), (q.x - 0.57, q.y, q.z + 0.74)), m["paint_dark"], smooth=False)
+    hood = bmesh.new()
+    merge(hood, box((2 * r + 0.3, 0.55, 2 * r + 0.4), (x, y0 - 0.25, zc), tile=0.8, bevel=0.02))
+    merge(hood, box((2 * r + 0.3, 0.6, 2 * r + 0.6), (x, y1 + 0.28, zc + 0.1), tile=0.8, bevel=0.02))
+    b.put(hood, m["paint_grey"], smooth=False)
+    seals = bmesh.new()
+    for p, e in ((a, -1), (c, 1)):
+        merge(seals, aim(ring(r + 0.05, r - 0.02, -0.05, 0.05, 40), p + d * (e * 0.02), d))
+    b.put(seals, m["rubber"])
+    outlet = Vector((x, y0 - 0.3, zc - r - 0.3))
+    b.put(box((0.36, 0.36, 0.25), (outlet.x, outlet.y, outlet.z + 0.1), tile=0.5), m["paint_grey"], smooth=False)
+    sh = Vector((x, y1 + 0.28, zc + r + 0.65))
+    b.put(box((0.9, 0.55, 0.5), (sh.x, sh.y, sh.z), tile=0.5, bevel=0.02), m["paint_orange"], smooth=False)
+    b.put(moved(lathe([(0.25, 0.0), (0.55, 0.45), (0.58, 0.45), (0.58, 0.5)], 4, 1.0, start=math.pi / 4), (sh.x, sh.y, sh.z + 0.25)), m["paint_orange"], smooth=False)
+    _gear_motor(b, m, (sh.x + 0.45, sh.y, sh.z), (-1, 0, 0), 0.13, 0.3)
+    exhaust = Vector((x - 0.45, y0 - 0.25, zc + r + 0.2))
+    b.put(moved(ring(0.12, 0.0, 0.0, 0.2, 16), tuple(exhaust)), m["paint_grey"])
+    b.collider(box((2 * r + 0.8, L + 1.2, 2 * r + 0.5), (x, (y0 + y1) / 2 + 0.02, (2 * r + 0.5) / 2)))
+    b.collider(box((1.2, 1.2, 0.8), (sh.x, sh.y, sh.z + 0.15)))
+    return outlet, exhaust + Vector((0, 0, 0.2))
+
+
+def _dock(b, m, at):
+    """A charging dock for an excavator: a sintered pad with a chamfered
+    edge, the wireless charging coil under the robot's belly, a pedestal
+    behind with its status lamp and conduit, wheel guides."""
+    at = Vector(at)
+    x, y = at.x, at.y
+    pad = [(x - 0.65, 0.0), (x + 0.65, 0.0), (x + 0.6, 0.025), (x - 0.6, 0.025)]
+    b.put(_slab(pad, y - 1.15, y + 1.15, "Y"), m["footing"], smooth=False)
+    b.put(box((0.56, 0.56, 0.012), (x, y, 0.031), tile=0.5), m["paint_dark"], smooth=False)
+    b.put(box((0.6, 0.04, 0.004), (x, y - 0.3, 0.027)), m["paint_yellow"], smooth=False)
+    b.put(box((0.6, 0.04, 0.004), (x, y + 0.3, 0.027)), m["paint_yellow"], smooth=False)
+    for s in (-1, 1):
+        b.put(box((0.05, 1.6, 0.05), (x + s * 0.47, y, 0.05)), m["paint_yellow"], smooth=False)
+    p = Vector((x, y + 1.35, 0.0))
+    b.put(box((0.32, 0.26, 0.9), tuple(p + Vector((0, 0, 0.47))), bevel=0.02), m["paint_white"], smooth=False)
+    b.put(box((0.36, 0.3, 0.04), tuple(p + Vector((0, 0, 0.94)))), m["paint_grey"], smooth=False)
+    b.put(box((0.12, 0.02, 0.05), tuple(p + Vector((0, -0.135, 0.78)))), m["andon"], smooth=False)
+    b.put(box((0.24, 0.02, 0.16), tuple(p + Vector((0, -0.135, 0.55)))), m["vision"], smooth=False)
+    b.put(box((0.38, 0.34, 0.08), tuple(p + Vector((0, 0, 0.04)))), m["footing"], smooth=False)
+    b.put(tube(fillet([p + Vector((0, 0.13, 0.15)), p + Vector((0, 0.3, 0.05)), p + Vector((0, 0.5, 0.05))], 0.1), 0.025, 8), m["cable"])
+    b.put(tube([Vector((x, y + 0.28, 0.03)), Vector((x, y + 1.2, 0.03))], 0.012, 6), m["cable"])
+    b.collider(_slab(pad, y - 1.15, y + 1.15, "Y"))
+    b.collider(box((0.38, 0.34, 0.98), tuple(p + Vector((0, 0, 0.49)))))
+
+
+def _heaps(b, m, rng):
+    """Stockpiles of dug regolith west of the plant at their angle of
+    repose, rounded and scooped where the drums bit; clasts strewn on them.
+    Each is a `stockpile` place: its centre, peak height and toe radius."""
     cones = []
-    for k in range(3):
-        qx, qy = rng.uniform(-11.5, -6.5), (-5.5 + 5.5 * k) + rng.uniform(-1.0, 1.0)
-        for _ in range(rng.randint(2, 3)):
-            cones.append((qx + rng.uniform(-2.0, 2.0), qy + rng.uniform(-1.4, 1.4), rng.uniform(2.0, 3.2) * REPOSE))
+    for (qx, qy), count in (((-12.4, -5.6), 3), ((-12.6, 5.4), 2)):
+        for _ in range(count):
+            cones.append((qx + rng.uniform(-1.1, 1.1), qy + rng.uniform(-1.0, 1.0), rng.uniform(1.0, 1.4)))
     phase = Vector((rng.uniform(0, 100), rng.uniform(0, 100), 0.0))
-    ramp_y, ramp_x0, ramp_x1, ramp_h = -2.5, -5.5, 0.25, 1.5
 
     def height(x, y):
         h = -1.0
         for px, py, peak in cones:
             d = math.hypot(x - px, y - py)
             h = smax(h, peak - REPOSE * (math.sqrt(d * d + 0.5) - math.sqrt(0.5)), 0.6)
-        if x <= ramp_x1:
-            rise = ramp_h * min(max((x - ramp_x0) / (ramp_x1 - ramp_x0), 0.0), 1.0)
-            h = smax(h, rise - REPOSE * max(0.0, abs(y - ramp_y) - 1.5) - (0.0 if x > ramp_x0 else REPOSE * (ramp_x0 - x)), 0.4)
         grain = noise.fractal(Vector((x * 0.45, y * 0.45, 0.0)) + phase, 1.0, 2.0, 4)
         lumps = noise.fractal(Vector((x * 1.6, y * 1.6, 2.0)) + phase, 0.8, 2.0, 3)
-        scoops = 1.0 - abs(noise.noise(Vector((x * 0.9, y * 0.9, 5.0)) + phase))
-        return h + (0.22 * grain + 0.07 * lumps + 0.1 * scoops * scoops) * min(1.0, max(h, 0.0) / 0.6)
+        scoops = 1.0 - abs(noise.noise(Vector((x * 2.2, y * 2.2, 5.0)) + phase))
+        return h + (0.18 * grain + 0.06 * lumps + 0.07 * scoops * scoops) * min(1.0, max(h, 0.0) / 0.6)
 
     step = 0.25
-    rows = [[(x, y, height(x, y)) for x in [-15.0 + step * i for i in range(64)]] for y in [-9.6 + step * j for j in range(78)]]
+    rows = [[(x, y, height(x, y)) for x in [-16.5 + step * i for i in range(42)]] for y in [-9.6 + step * j for j in range(78)]]
     b.put(grid(rows, tile=2.0), m["spoil"])
     rocks = bmesh.new()
-    for _ in range(46):
-        x, y = rng.uniform(-14.5, 0.0), rng.uniform(-9.0, 9.0)
-        merge(rocks, clast(rng, (x, y, max(height(x, y), 0.0)), rng.uniform(0.08, 0.32)))
+    for _ in range(40):
+        x, y = rng.uniform(-16.0, -7.5), rng.uniform(-9.2, 9.2)
+        merge(rocks, clast(rng, (x, y, max(height(x, y), 0.0)), rng.uniform(0.06, 0.24)))
     b.put(rocks, m["basalt"])
     for px, py, peak in cones:
         b.collider(moved(cone(peak / REPOSE * 0.8, 0.4, peak * 0.9, segments=8), (px, py, -0.05)))
-    b.collider(moved(box((ramp_x1 - ramp_x0, 3.0, 0.3), (0, 0, 0)), ((ramp_x0 + ramp_x1) / 2, ramp_y, ramp_h / 2), 0.0, -math.atan(ramp_h / (ramp_x1 - ramp_x0))))
+        b.places.append(("stockpile", {"at": (px, py, 0.0), "peak": peak, "toe": peak / REPOSE}))
 
-    # Retaining wall of interlocking blocks at the ramp's head, a wheel stop on it.
-    blocks = bmesh.new()
-    for row in range(3):
-        for k in range(4 - row % 2):
-            y = ramp_y - 1.65 + (k + 0.5 * (row % 2)) * 1.1 + 0.55
-            merge(blocks, box((0.32, 1.06, 0.53), (ramp_x1 + 0.16, y, 0.27 + row * 0.55), bevel=0.02))
-    b.put(blocks, m["footing"], smooth=False)
-    b.put(box((0.25, 3.0, 0.2), (ramp_x1 - 0.15, ramp_y, ramp_h + 0.1)), m["hazard"], smooth=False)
-    b.collider(box((0.32, 3.3, 1.65), (ramp_x1 + 0.16, ramp_y, 0.825)))
 
-    # Hopper with a grizzly on four braced legs, a vibrating feeder under it.
-    hx, hy, top, out = 1.6, ramp_y, 1.75, 0.95
-    b.put(moved(lathe([(0.354, out), (1.556, top), (1.6, top), (1.6, top + 0.12)], 4, 1.0, start=math.pi / 4), (hx, hy, 0)), m["paint_orange"], smooth=False)
-    ribs = bmesh.new()
-    for t in (0.35, 0.7):
-        z = out + (top - out) * t
-        rr = 0.354 + (1.556 - 0.354) * t + 0.03
-        merge(ribs, moved(lathe([(rr, z - 0.03), (rr + 0.02, z - 0.03), (rr + 0.02, z + 0.03), (rr, z + 0.03)], 4, 1.0, start=math.pi / 4), (hx, hy, 0)))
-    merge(ribs, moved(ring(0.3, 0.27, out - 0.15, out + 0.02, 4), (hx, hy, 0), math.pi / 4))
-    b.put(ribs, m["paint_orange"], smooth=False)
-    frame = bmesh.new()
-    for sx in (-1, 1):
-        for sy in (-1, 1):
-            merge(frame, member((hx + sx * 1.05, hy + sy * 1.05, 0.25), (hx + sx * 1.05, hy + sy * 1.05, top + 0.12), ibeam(0.12, 0.12, 0.01), up=(1, 0, 0)))
-        merge(frame, member((hx + sx * 1.1, hy - 1.1, top + 0.15), (hx + sx * 1.1, hy + 1.1, top + 0.15), angle(0.08, 0.008)))
-        merge(frame, member((hx - 1.1, hy + sx * 1.1, top + 0.15), (hx + 1.1, hy + sx * 1.1, top + 0.15), angle(0.08, 0.008)))
-        merge(frame, rod((hx + sx * 1.05, hy - 1.05, 0.3), (hx + sx * 1.05, hy + 1.05, top - 0.2), 0.02, 6))
-        merge(frame, rod((hx + sx * 1.05, hy + 1.05, 0.3), (hx + sx * 1.05, hy - 1.05, top - 0.2), 0.02, 6))
-    for k in range(9):
-        y = hy - 1.0 + 2.0 * k / 8
-        merge(frame, rod((hx - 1.1, y, top + 0.2), (hx + 1.1, y, top + 0.2), 0.03, 6))
-    b.put(frame, m["galv"])
-    feet = bmesh.new()
-    for sx in (-1, 1):
-        for sy in (-1, 1):
-            merge(feet, box((0.45, 0.45, 0.3), (hx + sx * 1.05, hy + sy * 1.05, 0.1)))
-    b.put(feet, m["footing"], smooth=False)
-    feeder = box((1.3, 0.5, 0.02), (0, 0, 0))
+def _receiving(b, m):
+    """The bin the excavators tip into, two bays wide: its lip and the
+    wheel stops before it, slopes into the drag conveyor's open run, the
+    back wall with its stiffeners, the dust hood and its curtain of rubber
+    flaps, side skirts, vibrators, bay posts and signs; under it the drag
+    conveyor's flights and chain, its tail and take-ups. Returns the dump
+    places."""
+    x0, x1, lip, back, top = -6.3, -3.1, -1.0, -2.15, 0.32
+    yc, half, floor = _SOIL_Y, 0.13, 0.17
+    cx = (x0 + x1) / 2
+    plates = bmesh.new()
+    merge(plates, _slab([(lip, top), (lip, top - 0.012), (yc + half, floor - 0.012), (yc + half, floor)], x0, x1))
+    merge(plates, _slab([(back, top), (back, top - 0.012), (yc - half, floor - 0.012), (yc - half, floor)], x0, x1))
+    merge(plates, box((x1 - x0, 0.012, top), (cx, lip - 0.006, top / 2), tile=1.0))
+    merge(plates, box((x1 - x0, 0.012, 0.95), (cx, back - 0.006, 0.475), tile=1.0))
+    skirt = [(back - 0.012, 0.0), (lip, 0.0), (lip, top + 0.06), (-1.8, 0.66), (-1.8, 1.12), (back - 0.012, 0.95)]
+    for xs in (x0 - 0.012, x1):
+        merge(plates, _slab(skirt, xs, xs + 0.012))
+    merge(plates, _slab([(back - 0.012, 0.95), (-1.8, 1.12), (-1.8, 1.132), (back - 0.012, 0.962)], x0 - 0.012, x1 + 0.012))
+    b.put(plates, m["paint_grey"], smooth=False)
+    stiff = bmesh.new()
+    for k in range(5):
+        x = x0 + 0.2 + k * (x1 - x0 - 0.4) / 4
+        merge(stiff, box((0.08, 0.05, 0.93), (x, back - 0.037, 0.485), tile=0.5))
+    merge(stiff, member((x0, back - 0.05, 0.95), (x1, back - 0.05, 0.95), angle(0.06, 0.006)))
+    merge(stiff, member((x0, -1.8, 1.1), (x1, -1.8, 1.1), angle(0.05, 0.006)))
+    b.put(stiff, m["paint_grey"])
+    b.put(box((x1 - x0 + 0.02, 0.05, 0.03), (cx, lip - 0.02, top + 0.015)), m["hazard"], smooth=False)
+    flaps = bmesh.new()
+    x = x0 + 0.02
+    while x + 0.24 < x1:
+        merge(flaps, moved(box((0.24, 0.006, 0.5), (0, 0, -0.25)), (x + 0.12, -1.795, 1.11), 0.0, 0.0, _sway(x)))
+        x += 0.25
+    b.put(flaps, m["rubber"], smooth=False)
+    for x in (x0 + 0.6, x1 - 0.6):
+        b.put(box((0.18, 0.12, 0.16), (x, back - 0.08, 0.45), bevel=0.01), m["paint_dark"], smooth=False)
+        b.put(aim(ring(0.06, 0.0, 0.0, 0.18, 14), Vector((x + 0.09, back - 0.08, 0.45)), (1, 0, 0)), m["paint_dark"])
+        b.put(tube(fillet([(x, back - 0.15, 0.4), (x, back - 0.3, 0.2), (x, back - 0.3, 0.04)], 0.1), 0.012, 6), m["cable"])
+    trough = bmesh.new()
+    merge(trough, box((x1 - x0, 0.36, 0.01), (cx, yc, 0.005), tile=1.0))
     for s in (-1, 1):
-        merge(feeder, box((1.3, 0.02, 0.16), (0, s * 0.25, 0.08)))
-    merge(feeder, moved(ring(0.09, 0.0, 0.0, 0.25, 12), (0.1, 0.27, 0.0), 0.0, 0.0, -math.pi / 2))
-    b.put(moved(feeder, (hx + 0.55, hy, out - 0.2), 0.0, 0.08), m["paint_dark"], smooth=False)
-    springs = bmesh.new()
-    for x in (hx + 0.05, hx + 1.05):
-        for s in (-1, 1):
-            merge(springs, tube([(x + 0.04 * math.cos(t), hy + s * 0.25 + 0.04 * math.sin(t), 0.45 + 0.012 * t) for t in [i * 0.6 for i in range(26)]], 0.008, 4))
-            merge(springs, member((x, hy + s * 0.25, 0.0), (x, hy + s * 0.25, 0.45), rect(0.06, 0.06)))
-    b.put(springs, m["steel"])
-    b.collider(box((2.3, 2.3, top + 0.2), (hx, hy, (top + 0.2) / 2)))
-
-    # The belt conveyor, built level along +X then tilted up to the screen.
-    tail, head = Vector((2.75, ramp_y, 0.62)), Vector((10.5, ramp_y, 3.6))
-    span = (head - tail).length
-    tilt = math.atan2(head.z - tail.z, head.x - tail.x)
-    dirn, up = (head - tail).normalized(), Vector((-math.sin(tilt), 0.0, math.cos(tilt)))
-
-    def lay(bm):
-        return moved(bm, tuple(tail), 0.0, -tilt)
-
-    steel, rollers, belt = bmesh.new(), bmesh.new(), bmesh.new()
+        merge(trough, box((x1 - x0, 0.01, 0.17), (cx, yc + s * 0.175, 0.085), tile=1.0))
+    b.put(trough, m["paint_orange"], smooth=False)
+    chain = bmesh.new()
+    x = x0 + 0.12
+    while x < x1:
+        merge(chain, box((0.02, 0.3, 0.045), (x, yc, 0.035)))
+        x += 0.25
     for s in (-1, 1):
-        merge(steel, member((-0.2, s * 0.42, -0.2), (span + 0.2, s * 0.42, -0.2), channel(0.05, 0.16, 0.006, s < 0)))
-    ux = 0.6
-    while ux < span - 0.4:
-        merge(rollers, rod((ux, -0.12, -0.055), (ux, 0.12, -0.055), 0.045, 10))
-        for s in (-1, 1):
-            a0 = Vector((ux, s * 0.135, -0.05))
-            merge(rollers, rod(a0, a0 + Vector((0, s * 0.2 * math.cos(0.52), 0.2 * math.sin(0.52))), 0.045, 10))
-            merge(steel, rod((ux, s * 0.38, -0.13), (ux, s * 0.38, 0.06), 0.012, 4))
-        merge(steel, member((ux, -0.42, -0.14), (ux, 0.42, -0.14), angle(0.05, 0.005)))
-        ux += 1.0
-    ux = 1.2
-    while ux < span - 0.4:
-        merge(rollers, rod((ux, -0.34, -0.33), (ux, 0.34, -0.33), 0.04, 10))
-        for s in (-1, 1):
-            merge(steel, box((0.06, 0.01, 0.16), (ux, s * 0.4, -0.28)))
-        ux += 2.4
-    trough = [(-0.312, 0.105), (-0.13, 0.0), (0.13, 0.0), (0.312, 0.105), (0.312, 0.095), (0.13, -0.01), (-0.13, -0.01), (-0.312, 0.095)]
-    merge(belt, sweep([(z, -y) for y, z in trough], [(0.0, 0, 0), (span, 0, 0)], 1.0))
-    merge(belt, box((span, 0.6, 0.01), (span / 2, 0, -0.285)))
-    for x in (0.0, span):
-        merge(belt, moved(ring(0.145, 0.0, -0.33, 0.33, 16), (x, 0, -0.145), 0.0, 0.0, math.pi / 2))
-    load = [(y, 0.012 + 0.07 * max(0.0, 1.0 - (y / 0.22) ** 2) ** 0.5) for y in [-0.22 + 0.44 * k / 8 for k in range(9)]]
-    b.put(lay(sweep([(z, -y) for y, z in load], [(0.3, 0, 0), (span - 0.2, 0, 0)], 1.0)), m["spoil"])
-    covers = bmesh.new()
-    x = 0.9
-    while x + 1.2 < span - 0.5:
-        merge(covers, vault(x, x + 1.17, 0.44, -0.04, 12, 0.6))
-        x += 1.2
-    b.put(lay(covers), m["corrugated"])
-    walk = box((span - 0.8, 0.6, 0.03), (span / 2, -0.75, -0.25), tile=1.0)
-    b.put(lay(walk), m["grate"], smooth=False)
-    rails = bmesh.new()
-    xs = [0.5 + k * 1.2 for k in range(int((span - 1.0) / 1.2) + 1)]
-    for x in xs:
-        merge(rails, rod((x, -1.04, -0.25), (x, -1.04, 0.75), 0.022, 6))
-        merge(rails, member((x, -0.42, -0.26), (x, -1.06, -0.26), angle(0.05, 0.005)))
-    for z in (0.75, 0.25):
-        merge(rails, tube([(xs[0], -1.04, z), (xs[-1], -1.04, z)], 0.022, 6))
-    b.put(lay(rails), m["paint_yellow"])
-    drive = box((0.35, 0.3, 0.35), (span, 0.6, -0.15), bevel=0.02)
-    merge(drive, moved(ring(0.13, 0.0, 0.0, 0.45, 14), (span - 0.1, 0.62, -0.15), 0.0, -math.pi / 2))
-    merge(drive, box((0.75, 0.9, 0.55), (span + 0.15, 0, -0.05), bevel=0.02))
-    b.put(lay(drive), m["paint_orange"], smooth=False)
-    b.put(lay(steel), m["galv"])
-    b.put(lay(rollers), m["paint_dark"])
-    b.put(lay(belt), m["hose"])
-    trestles, footings = bmesh.new(), bmesh.new()
-    for u in (2.6, 5.4):
-        p = tail + dirn * u + up * (-0.28)
-        for s in (-1, 1):
-            merge(trestles, member((p.x, p.y + s * 0.45, 0.25), (p.x, p.y + s * 0.45, p.z), ibeam(0.1, 0.1, 0.008), up=(1, 0, 0)))
-            merge(footings, box((0.4, 0.4, 0.3), (p.x, p.y + s * 0.45, 0.1)))
-        merge(trestles, member((p.x, p.y - 0.45, p.z - 0.05), (p.x, p.y + 0.45, p.z - 0.05), channel(0.05, 0.1, 0.006)))
-        merge(trestles, rod((p.x, p.y - 0.45, 0.35), (p.x, p.y + 0.45, p.z - 0.15), 0.018, 6))
-        merge(trestles, rod((p.x, p.y + 0.45, 0.35), (p.x, p.y - 0.45, p.z - 0.15), 0.018, 6))
+        merge(chain, rod((x0, yc + s * 0.09, 0.03), (x1, yc + s * 0.09, 0.03), 0.012, 6))
+    b.put(chain, m["steel"])
+    b.put(box((x1 - x0 - 0.1, 0.32, 0.02), (cx, yc, 0.05), tile=1.0), m["spoil"], smooth=False)
+    tail = bmesh.new()
+    merge(tail, box((0.6, 0.36, 0.17), (x0 - 0.3, yc, 0.085), tile=0.5))
+    merge(tail, box((0.012, 0.4, 0.2), (x0 - 0.6, yc, 0.1)))
+    b.put(tail, m["paint_orange"], smooth=False)
+    for s in (-1, 1):
+        b.put(aim(ring(0.05, 0.0, -0.04, 0.04, 14), Vector((x0 - 0.35, yc + s * 0.2, 0.085)), (0, 1, 0)), m["paint_dark"])
+        b.put(rod((x0 - 0.35, yc + s * 0.22, 0.085), (x0 - 0.75, yc + s * 0.22, 0.085), 0.015, 6), m["steel"])
+        b.put(_nut(Vector((x0 - 0.6, yc + s * 0.22, 0.085))), m["steel"])
+    places = []
+    for k, (bx, by) in enumerate(SOIL_BAYS):
+        b.put(box((0.9, 0.038, 0.12), (bx, lip + 0.019, 0.06), tile=0.5), m["paint_yellow"], smooth=False)
+        b.put(box((0.86, 0.012, 0.08), (bx, lip + 0.044, 0.065)), m["rubber"], smooth=False)
+        for dx in (-0.3, 0.0, 0.3):
+            b.put(aim(ring(0.01, 0.0, 0.0, 0.006, 6), Vector((bx + dx, lip + 0.05, 0.065)), (0, 1, 0)), m["steel"])
+        sign(b, m, (bx, back, 0.72), math.pi / 2, 0.36, 0.26, 2)
+        b.collider(box((0.9, 0.05, 0.12), (bx, lip + 0.025, 0.06)))
+        places.append(("dump", {"at": (bx, by, 0.0), "yaw": 0.0, "bay": k + 1, "arm": "front", "position": 0.33, "drum": "drum_front",
+                                "lip": (bx, lip, top)}))
+    for x in (x0 - 0.05, (SOIL_BAYS[0][0] + SOIL_BAYS[1][0]) / 2, x1 + 0.05):
+        b.put(moved(ring(0.035, 0.0, 0.0, 0.85, 10), (x, -0.45, 0)), m["paint_yellow"])
+        for z in (0.6, 0.72):
+            b.put(moved(ring(0.037, 0.0, z, z + 0.05, 10), (x, -0.45, 0)), m["paint_dark"])
+        b.put(moved(ring(0.07, 0.0, 0.0, 0.03, 10), (x, -0.45, 0)), m["paint_dark"])
+    b.collider(box((x1 - x0 + 0.03, lip - back + 0.012, top), (cx, (lip + back) / 2, top / 2)))
+    b.collider(box((x1 - x0 + 0.03, 0.45, 1.13), (cx, back + 0.15, 0.565)))
+    b.collider(box((0.62, 0.4, 0.2), (x0 - 0.3, yc, 0.1)))
+    return places
+
+
+def _sway(x):
+    """A curtain flap's small sway, fixed by where it hangs."""
+    return 0.06 * math.sin(x * 7.3) + 0.03 * math.sin(x * 19.1)
+
+
+def _nut(at):
+    """A hex nut about an axis along X at `at`."""
+    return aim(lathe([(0.0, -0.015), (0.03, -0.015), (0.03, 0.015), (0.0, 0.015)], 6, 0.2), at, (1, 0, 0))
+
+
+def _drag_conveyor(b, m, x_tail, z_top, x_head, slope=40.0):
+    """The drag conveyor's closed casing from the bin, bending up at `slope`
+    degrees and over to its head at x_head: flanged lengths, inspection
+    doors, the head with its sprocket bearings and gear motor and the
+    discharge spout, trestles on footings. Returns the spout's foot."""
+    yc, zc, hh = _SOIL_Y, 0.085, 0.085
+    bend1 = Vector((-2.6, yc, zc))
+    bend2 = Vector((bend1.x + (z_top - zc) / math.tan(math.radians(slope)), yc, z_top))
+    head = Vector((x_head, yc, z_top))
+    path = fillet([Vector((x_tail, yc, zc)), bend1, bend2, head - Vector((0.3, 0, 0))], [0.0, 0.9, 0.9, 0.0])
+    b.put(sweep(rect(2 * hh, 0.36), path, 1.0), m["paint_orange"], smooth=False)
+    cum = lengths(path)
+    fl, doors = bmesh.new(), bmesh.new()
+    s = 0.6
+    while s < cum[-1] - 0.3:
+        p, t = point_at(path, cum, s)
+        n = Vector((-t.z, 0.0, t.x))
+        merge(fl, member(p - t * 0.012, p + t * 0.012, rect(2 * hh + 0.05, 0.41), up=n))
+        s += 1.25
+    s = 1.2
+    while s < cum[-1] - 0.6:
+        p, t = point_at(path, cum, s)
+        n = Vector((-t.z, 0.0, t.x))
+        q = p + Vector((0, 0.186, 0))
+        merge(doors, member(q - t * 0.15, q + t * 0.15, rect(0.12, 0.012), up=n))
+        merge(doors, member(q + Vector((0, 0.01, 0)) - t * 0.04, q + Vector((0, 0.01, 0)) + t * 0.04, rect(0.02, 0.02), up=n))
+        s += 2.0
+    b.put(fl, m["paint_orange"], smooth=False)
+    b.put(doors, m["paint_dark"], smooth=False)
+    b.put(box((0.6, 0.5, 0.55), (head.x, yc, head.z + 0.05), tile=0.5, bevel=0.01), m["paint_orange"], smooth=False)
+    for sgn in (-1, 1):
+        b.put(aim(ring(0.07, 0.0, -0.04, 0.04, 16), Vector((head.x + 0.05, yc + sgn * 0.27, head.z)), (0, 1, 0)), m["paint_dark"])
+    _gear_motor(b, m, (head.x + 0.05, yc + 0.31, head.z), (0, -1, 0), 0.14, 0.34)
+    spout = Vector((head.x + 0.05, yc, head.z - 0.22))
+    b.put(box((0.3, 0.3, 0.3), (spout.x, yc, spout.z - 0.15), tile=0.5), m["paint_orange"], smooth=False)
+    trestles, feet = bmesh.new(), bmesh.new()
+    for u in (0.35, 0.72):
+        p = bend1.lerp(bend2, u) - Vector((0, 0, hh + 0.02))
+        for sgn in (-1, 1):
+            merge(trestles, member((p.x, yc + sgn * 0.3, 0.25), (p.x, yc + sgn * 0.3, p.z), ibeam(0.1, 0.1, 0.008), up=(1, 0, 0)))
+            merge(feet, box((0.4, 0.4, 0.3), (p.x, yc + sgn * 0.3, 0.1)))
+        merge(trestles, member((p.x, yc - 0.35, p.z - 0.04), (p.x, yc + 0.35, p.z - 0.04), channel(0.05, 0.08, 0.006)))
+        merge(trestles, rod((p.x, yc - 0.3, 0.35), (p.x, yc + 0.3, p.z - 0.1), 0.016, 6))
+    for x in (bend2.x - 0.1,):
+        for sgn in (-1, 1):
+            merge(trestles, member((x, yc + sgn * 0.3, 0.25), (x, yc + sgn * 0.3, z_top - hh - 0.02), ibeam(0.12, 0.12, 0.01), up=(1, 0, 0)))
+            merge(feet, box((0.45, 0.45, 0.3), (x, yc + sgn * 0.3, 0.1)))
+        merge(trestles, member((x, yc - 0.36, z_top - hh - 0.06), (x, yc + 0.36, z_top - hh - 0.06), channel(0.05, 0.08, 0.006)))
+        for z0, z1 in ((0.4, 1.8), (1.8, z_top - 0.3)):
+            merge(trestles, rod((x, yc - 0.3, z0), (x, yc + 0.3, z1), 0.016, 6))
     b.put(trestles, m["galv"])
-    b.put(footings, m["footing"], smooth=False)
-    b.collider(moved(box((span, 1.2, 0.6), (span / 2, -0.2, -0.1)), tuple(tail), 0.0, -tilt))
+    b.put(feet, m["footing"], smooth=False)
+    for a, c in ((Vector((-3.1, yc, zc)), bend1), (bend1, bend2), (bend2, head)):
+        d = c - a
+        b.collider(moved(box((d.length + 0.2, 0.42, 0.24), (d.length / 2, 0, 0)), tuple(a), 0.0, -math.atan2(d.z, d.x)))
+    return spout - Vector((0, 0, 0.3))
 
-    # The screen tower: columns, deck, a vibrating screen on springs, fines bin, ladder.
-    tx0, tx1, ty0, ty1, tz = 10.2, 12.6, ramp_y - 1.1, ramp_y + 1.1, 3.0
+
+def _screen_tower(b, m, spout):
+    """The screen tower: columns, beams and bracing on footings, the deck
+    with its walkway, railing and caged ladder, a vibrating double-deck
+    screen on springs under its dust hood fed at its high end from
+    `spout`, the fines hopper under the deck and its rotary valve, the
+    oversize chute to the reject skip, and the skip with its rocks. Returns
+    the fines outlet."""
+    tx0, tx1, ty0, ty1, tz = 1.9, 4.6, -2.8, -0.35, 2.3
+    yc = _SOIL_Y
     tower, feet = bmesh.new(), bmesh.new()
     for x in (tx0, tx1):
         for y in (ty0, ty1):
             merge(tower, member((x, y, 0.25), (x, y, tz), ibeam(0.15, 0.15, 0.012), up=(1, 0, 0)))
             merge(feet, box((0.5, 0.5, 0.3), (x, y, 0.1)))
-    for z in (1.5, tz):
+    for z in (1.05, tz):
         for y in (ty0, ty1):
             merge(tower, member((tx0, y, z - 0.08), (tx1, y, z - 0.08), channel(0.06, 0.16, 0.008)))
         for x in (tx0, tx1):
             merge(tower, member((x, ty0, z - 0.08), (x, ty1, z - 0.08), channel(0.06, 0.16, 0.008)))
-    for z0, z1 in ((0.3, 1.42), (1.58, tz - 0.16)):
+    for z0, z1 in ((0.3, 0.97), (1.13, tz - 0.16)):
         merge(tower, rod((tx0, ty1, z0), (tx1, ty1, z1), 0.02, 6))
         merge(tower, rod((tx1, ty1, z0), (tx0, ty1, z1), 0.02, 6))
+        merge(tower, rod((tx0, ty0, z0), (tx0, ty1, z1), 0.02, 6))
     b.put(tower, m["galv"])
     b.put(feet, m["footing"], smooth=False)
-    walk = box((tx1 - tx0, 0.55, 0.04), ((tx0 + tx1) / 2, ty1 - 0.28, tz + 0.02), tile=1.0)
-    merge(walk, box((0.5, ty1 - ty0, 0.04), (tx1 - 0.25, ramp_y, tz + 0.02), tile=1.0))
+    walk = box((tx1 - tx0, 0.5, 0.04), ((tx0 + tx1) / 2, ty1 - 0.25, tz + 0.02), tile=1.0)
+    merge(walk, box((tx1 - tx0, 0.45, 0.04), ((tx0 + tx1) / 2, ty0 + 0.225, tz + 0.02), tile=1.0))
+    merge(walk, box((0.5, ty1 - ty0, 0.04), (tx1 - 0.25, (ty0 + ty1) / 2, tz + 0.02), tile=1.0))
+    merge(walk, box((0.45, ty1 - ty0, 0.04), (tx0 + 0.225, (ty0 + ty1) / 2, tz + 0.02), tile=1.0))
     b.put(walk, m["grate"], smooth=False)
-    railing(b, m, [(tx0, ty1, tz + 0.04), (tx1, ty1, tz + 0.04), (tx1, ramp_y - 0.2, tz + 0.04)], 1.0, 0.8)
-    railing(b, m, [(tx1, ramp_y - 0.8, tz + 0.04), (tx1, ty0, tz + 0.04), (tx1 - 0.5, ty0, tz + 0.04)], 1.0, 0.8)
-    ladder(b, m, (tx1 + 0.15, ramp_y - 0.5, 0.0), 0.0, tz)
+    railing(b, m, [(tx0, ty1, tz + 0.04), (3.7, ty1, tz + 0.04)], 1.0, 0.8)
+    railing(b, m, [(4.25, ty1, tz + 0.04), (tx1, ty1, tz + 0.04), (tx1, ty0, tz + 0.04), (tx0, ty0, tz + 0.04), (tx0, yc - 0.4, tz + 0.04)], 1.0, 0.8)
+    ladder(b, m, (3.98, ty1 + 0.15, 0.0), math.pi / 2, tz)
+    sx, sp = 3.6, math.radians(12)
     screen = bmesh.new()
     for s in (-1, 1):
         merge(screen, box((1.9, 0.03, 0.45), (0, s * 0.5, 0.2)))
     merge(screen, box((1.9, 1.0, 0.02), (0, 0, 0.05)))
+    merge(screen, box((1.9, 1.0, 0.02), (0, 0, 0.22)))
     merge(screen, box((0.03, 1.0, 0.45), (-0.95, 0, 0.2)))
     for s in (-1, 1):
         merge(screen, moved(ring(0.12, 0.0, 0.0, 0.3, 12), (0.1, s * 0.52, 0.25), 0.0, 0.0, -s * math.pi / 2))
-    b.put(moved(screen, (11.3, ramp_y, tz + 0.38), 0.0, math.radians(12)), m["paint_orange"], smooth=False)
-    b.put(moved(box((1.85, 0.96, 0.02), (0, 0, 0.12), tile=0.5), (11.3, ramp_y, tz + 0.38), 0.0, math.radians(12)), m["grate"], smooth=False)
+    b.put(moved(screen, (sx, yc, tz + 0.38), 0.0, sp), m["paint_orange"], smooth=False)
+    b.put(moved(box((1.85, 0.96, 0.02), (0, 0, 0.32), tile=0.5), (sx, yc, tz + 0.38), 0.0, sp), m["grate"], smooth=False)
+    b.put(moved(vault(-0.98, 0.98, 0.56, 0.47, 14, 0.6, 0.45), (sx, yc, tz + 0.38), 0.0, sp), m["corrugated"])
+    for s in (-1, 1):
+        b.put(moved(_hood_end(0.56, s * 0.98, 0.47, 0.45), (sx, yc, tz + 0.38), 0.0, sp), m["corrugated"], smooth=False)
+    for s in (-1, 1):
+        b.put(moved(box((1.9, 0.004, 0.25), (0, s * 0.55, 0.35)), (sx, yc, tz + 0.38), 0.0, sp), m["rubber"], smooth=False)
     coils = bmesh.new()
-    for x in (10.55, 12.0):
+    for x in (sx - 0.75, sx + 0.7):
         for s in (-1, 1):
-            zs = tz + 0.04 + (0.24 if x < 11.0 else 0.0)
-            merge(coils, tube([(x + 0.05 * math.cos(t), ramp_y + s * 0.45 + 0.05 * math.sin(t), zs + 0.012 * t) for t in [i * 0.6 for i in range(22)]], 0.01, 4))
+            zs = tz + 0.04 + (0.2 if x < sx else 0.0)
+            merge(coils, tube([(x + 0.05 * math.cos(t), yc + s * 0.45 + 0.05 * math.sin(t), zs + 0.012 * t) for t in [i * 0.6 for i in range(20 if x < sx else 12)]], 0.01, 4))
     b.put(coils, m["steel"])
-    b.put(moved(lathe([(0.28, 1.55), (1.41, tz - 0.12), (1.45, tz - 0.12)], 4, 1.0, start=math.pi / 4), (11.3, ramp_y, 0)), m["paint_orange"], smooth=False)
-    chute = sweep([(0.0, -0.3), (0.0, 0.3), (0.25, 0.3), (0.25, 0.27), (0.02, 0.27), (0.02, -0.27), (0.25, -0.27), (0.25, -0.3)], [(12.25, ramp_y, tz + 0.2), (13.4, ramp_y, 1.6)], 1.0)
+    b.put(box((0.42, 0.42, 0.03), (spout.x, yc, spout.z + 0.015), tile=0.5), m["paint_orange"], smooth=False)
+    b.put(moved(lathe([(0.18, 0.95), (1.0, tz - 0.12), (1.04, tz - 0.12)], 4, 1.0, start=math.pi / 4), (sx, yc, 0)), m["paint_orange"], smooth=False)
+    valve_at = Vector((sx, yc, 0.83))
+    b.put(aim(ring(0.14, 0.0, -0.16, 0.16, 18), valve_at, (1, 0, 0)), m["paint_dark"])
+    b.put(box((0.26, 0.26, 0.06), (sx, yc, 0.95)), m["paint_dark"], smooth=False)
+    _gear_motor(b, m, valve_at + Vector((0.17, 0, 0)), (-1, 0, 0), 0.09, 0.2)
+    chute = sweep([(0.0, -0.3), (0.0, 0.3), (0.25, 0.3), (0.25, 0.27), (0.02, 0.27), (0.02, -0.27), (0.25, -0.27), (0.25, -0.3)],
+                  [(sx + 0.95, yc, tz + 0.15), (5.35, yc, 1.05)], 1.0)
     b.put(chute, m["paint_orange"], smooth=False)
-    pile = [[(x, y, 0.85 - REPOSE * math.hypot(x - 13.9, y - ramp_y) + 0.06 * noise.noise(Vector((x * 2.0, y * 2.0, 3.0)))) for x in [12.4 + 0.25 * i for i in range(14)]] for y in [ramp_y - 1.6 + 0.25 * j for j in range(14)]]
-    b.put(grid(pile, tile=2.0), m["spoil"])
-    b.collider(box((tx1 - tx0 + 0.3, ty1 - ty0 + 0.3, tz + 0.8), ((tx0 + tx1) / 2, ramp_y, (tz + 0.8) / 2)))
-    b.collider(moved(cone(1.3, 0.3, 0.8, segments=8), (13.9, ramp_y, 0)))
+    skip = Vector((5.6, yc, 0.0))
+    b.put(_slab([(skip.x - 0.55, 0.06), (skip.x + 0.55, 0.06), (skip.x + 0.72, 0.78), (skip.x - 0.72, 0.78)], skip.y - 0.5, skip.y + 0.5, "Y"),
+          m["paint_yellow"], smooth=False)
+    for s in (-1, 1):
+        b.put(box((0.3, 0.06, 0.18), (skip.x + s * 0.5, skip.y, 0.68)), m["paint_dark"], smooth=False)
+        b.put(aim(ring(0.05, 0.0, -0.06, 0.06, 12), Vector((skip.x, skip.y + s * 0.53, 0.55)), (0, 1, 0)), m["paint_dark"])
+    b.put(box((1.3, 1.1, 0.06), (skip.x, skip.y, 0.03)), m["paint_dark"], smooth=False)
+    rng = random.Random(9)
+    rocks = bmesh.new()
+    for _ in range(18):
+        merge(rocks, clast(rng, (skip.x + rng.uniform(-0.5, 0.5), skip.y + rng.uniform(-0.35, 0.35), 0.8 + rng.uniform(-0.02, 0.08)), rng.uniform(0.05, 0.12)))
+    b.put(rocks, m["basalt"])
+    heap = [[(x, y, 0.76 + 0.1 * max(0.0, 1.0 - math.hypot(x - skip.x, (y - skip.y) * 1.3) / 0.7)) for x in [skip.x - 0.7 + 0.1 * i for i in range(15)]]
+            for y in [skip.y - 0.48 + 0.08 * j for j in range(13)]]
+    b.put(grid(heap, floor=0.7, tile=1.0, sink=0.7), m["spoil"])
+    sign(b, m, (tx1 + 0.08, ty1 - 0.4, 1.7), 0.0, 0.4, 0.3, 0)
+    b.collider(box((tx1 - tx0 + 0.3, ty1 - ty0 + 0.3, tz + 1.2), ((tx0 + tx1) / 2, (ty0 + ty1) / 2, (tz + 1.2) / 2)))
+    b.collider(box((1.5, 1.1, 0.8), (skip.x, skip.y, 0.4)))
+    return Vector((sx, yc, 0.55))
 
-    # The oven: fines screwed up into it, power, gas to a receiver, spent regolith bagged.
-    ox, oy, lift, oh = 11.3, -6.1, 1.4, 2.2
-    vessel(b, m, (ox, oy, 0), 0.8, oh, "alu", lift=lift, legs=4)
-    screw_a, screw_b = Vector((ox, ramp_y, 1.3)), Vector((ox, oy + 0.35, lift + oh + 0.45))
-    b.put(tube([screw_a, screw_b], 0.13, 14), m["paint_grey"])
-    b.put(moved(ring(0.15, 0.0, 0.0, 0.4, 14), tuple(screw_b)), m["paint_dark"])
-    b.put(tube([screw_b - Vector((0, 0.05, 0.0)), Vector((ox, oy, lift + oh + 0.2))], 0.09, 10), m["paint_grey"])
-    mid = screw_a.lerp(screw_b, 0.5)
-    b.put(member((mid.x, mid.y, 0.0), (mid.x, mid.y, mid.z - 0.14), rect(0.08, 0.08)), m["galv"], smooth=False)
-    rx, ry = ox + 2.4, oy + 0.7
-    vessel(b, m, (rx, ry, 0), 0.4, 1.4, "jacket", lift=0.5, legs=3)
-    b.put(pipe([(ox + 0.3, oy, lift + oh + 0.1), (ox + 0.3, oy, 4.0), (ox + 0.3, ry, 4.0), (rx, ry, 4.0), (rx, ry, 2.05)], 0.05, 0.25), m["jacket"])
-    valve(b, m, (rx, ry, 3.0), (0, 0, -1), 0.05, stem=(1, 0, 0))
-    gauge(b, m, (rx, ry, 3.5), (1, 0, 0), (1, 0, 0))
-    cabinet(b, m, (ox - 1.9, oy, 0.0), 0.0, (0.6, 1.2, 1.6), doors=2)
-    b.put(tube(fillet([(ox - 1.6, oy - 0.2, 0.3), (ox - 1.2, oy - 0.2, 0.05), (ox - 0.85, oy - 0.2, 0.05), (ox - 0.8, oy - 0.2, lift + 0.6)], 0.25), 0.04, 8), m["cable"])
-    b.put(tube(fillet([(ox - 1.6, oy + 0.2, 0.3), (ox - 1.2, oy + 0.2, 0.05), (ox - 0.85, oy + 0.2, 0.05), (ox - 0.8, oy + 0.2, lift + 0.9)], 0.25), 0.04, 8), m["cable"])
-    b.put(tube([(ox, oy, lift + 0.05), (ox, oy, lift - 0.15), (ox + 1.2, oy - 0.9, 1.15)], 0.1, 10), m["paint_grey"])
-    bag(b, m, (ox + 1.25, oy - 0.95, 0), 0.2, 0.7)
-    for x, y, turn in ((ox + 2.5, oy - 0.95, 0.05), (ox + 2.5, oy - 2.15, -0.08), (8.4, -1.45, 0.1), (9.55, -1.45, -0.05)):
-        bag(b, m, (x, y, 0), turn)
-    b.collider(moved(lathe([(0.0, 0.0), (0.85, 0.0), (0.85, lift + oh), (0.0, lift + oh)], 8, 2.0), (ox, oy, 0)))
-    b.collider(box((2.4, 2.4, 1.0), (ox + 1.9, oy - 1.55, 0.5)))
-    light_mast(b, m, (8.2, -5.2, 0), 7.0, 2, 2.75)
+
+def _screw_press(b, m, a, c):
+    """A dewatering screw press rising from its feed at a to its cake
+    discharge at c: the wedge-wire screen drum between flanged heads, the
+    feed box, the drive on the upper head, the cake chute, the filtrate pan
+    under the screen and its drain, on two A-frames. Returns the cake's fall
+    point and the drain."""
+    a, c = Vector(a), Vector(c)
+    d = (c - a).normalized()
+    b.put(tube([a, c], 0.17, 24), m["louvre"])
+    for p in (a, c):
+        b.put(aim(ring(0.22, 0.0, -0.06, 0.06, 24), p, d), m["paint_grey"])
+    for k in range(1, 4):
+        b.put(aim(ring(0.18, 0.16, -0.015, 0.015, 24), a.lerp(c, k / 4), d), m["steel"])
+    b.put(box((0.34, 0.34, 0.3), (a.x - 0.05, a.y, a.z + 0.25), tile=0.5), m["paint_grey"], smooth=False)
+    _gear_motor(b, m, c + d * 0.07, -d, 0.16, 0.36)
+    cake = c + Vector((0.12, 0, -0.25))
+    b.put(box((0.3, 0.3, 0.2), (cake.x, cake.y, cake.z + 0.05), tile=0.5), m["paint_grey"], smooth=False)
+    length = (c - a).length
+    pan = moved(box((length, 0.5, 0.12), (length / 2, 0, -0.26)), tuple(a), 0.0, -math.atan2(c.z - a.z, c.x - a.x))
+    b.put(pan, m["stainless"], smooth=False)
+    drain = a + Vector((0.02, 0, -0.4))
+    b.put(moved(ring(0.04, 0.0, -0.1, 0.1, 10), tuple(drain)), m["steel"])
+    frames = bmesh.new()
+    for t in (0.15, 0.85):
+        p = a.lerp(c, t) - Vector((0, 0, 0.32))
+        for s in (-1, 1):
+            merge(frames, member((p.x - 0.25, p.y + s * 0.3, 0.02), (p.x, p.y + s * 0.3, p.z), rect(0.07, 0.07)))
+            merge(frames, member((p.x + 0.25, p.y + s * 0.3, 0.02), (p.x, p.y + s * 0.3, p.z), rect(0.07, 0.07)))
+            merge(frames, box((0.7, 0.12, 0.02), (p.x, p.y + s * 0.3, 0.01)))
+        merge(frames, member((p.x, p.y - 0.32, p.z), (p.x, p.y + 0.32, p.z), rect(0.08, 0.08)))
+    b.put(frames, m["galv"], smooth=False)
+    b.collider(moved(box((length + 0.4, 0.7, 0.8), (length / 2, 0, -0.1)), tuple(a), 0.0, -math.atan2(c.z - a.z, c.x - a.x)))
+    return cake - Vector((0, 0, 0.05)), drain - Vector((0, 0, 0.1))
+
+
+def _biomass(b, m, at):
+    """The crops' inedible biomass waiting for the composter: open bins of
+    chopped stalks and haulm, a bale or two."""
+    at = Vector(at)
+    for k, (dx, dy) in enumerate(((0.0, 0.0), (0.0, 1.0), (-1.2, 0.5))):
+        p = at + Vector((dx, dy, 0))
+        walls = bmesh.new()
+        for s in (-1, 1):
+            merge(walls, box((1.0, 0.02, 0.6), (p.x, p.y + s * 0.39, 0.3)))
+            merge(walls, box((0.02, 0.8, 0.6), (p.x + s * 0.49, p.y, 0.3)))
+        merge(walls, box((1.0, 0.8, 0.02), (p.x, p.y, 0.01)))
+        b.put(walls, m["paint_grey"], smooth=False)
+        fill = [[(x, y, 0.5 + 0.12 * max(0.0, 1.0 - math.hypot(x - p.x, (y - p.y) * 1.25) / 0.55) + 0.03 * noise.noise(Vector((x * 9.0, y * 9.0, k))))
+                 for x in [p.x - 0.48 + 0.08 * i for i in range(13)]] for y in [p.y - 0.37 + 0.074 * j for j in range(11)]]
+        b.put(grid(fill, floor=0.4, tile=0.6, sink=0.4), m["strap"])
+        b.collider(box((1.0, 0.8, 0.62), (p.x, p.y, 0.31)))
+    for k in range(2):
+        p = at + Vector((-1.2, -0.5, 0.45 * k))
+        b.put(box((0.9, 0.5, 0.45), (p.x, p.y - 0.15, p.z + 0.225), tile=0.4, bevel=0.03), m["strap"], smooth=False)
+        for x in (-0.25, 0.25):
+            b.put(box((0.03, 0.52, 0.47), (p.x + x, p.y - 0.15, p.z + 0.225)), m["cable"], smooth=False)
+    b.collider(box((0.9, 0.5, 0.9), (at.x - 1.2, at.y - 0.65, 0.45)))
+
+
+def regolith_works(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, seed=3):
+    """The farm's soil plant, where dug regolith becomes growing medium for
+    the greenhouses' regolith beds. West, the stockpiles the excavators dig,
+    the receiving bin they tip into at two bays, and their three charging
+    docks. A drag conveyor carries the regolith up to a double-deck screen
+    in its tower; the oversize drops into a skip, the fines are screwed into
+    the first of three agitated wash tanks where water leaches the
+    perchlorate out, pumped tank to tank and on to a thickener. Its brine
+    overflows through the perchlorate-reducing bioreactor back to the water
+    tank the wash draws on, topped up from the base's water line. A screw
+    press dewaters the thickened slurry into a rotary dryer, its vapour
+    condensed back to the tank; a bucket elevator lifts the dry regolith into
+    the paddle mixer, where compost from the drum composter, fed with the
+    crops' inedible biomass, is blended in, and fills bulk bags at the
+    bagging station under it; the bags wait for the road. The wet steps run
+    in closed, insulated vessels and lines. Its road comes in from +X along
+    y = 2.
+
+    Places: `dump` at each bay, where an excavator facing the bin (yaw 0)
+    raises its front arm to `position` and turns `drum_front` back to tip
+    over the lip; `dock` at each charging dock, where the excavators start;
+    `stockpile` at each heap they dig; `pickup` where the filled bags wait;
+    `tie` the water line's flange; and the floodlights."""
+    m = plant_mats(looks)
+    b = Building(name, parent, at, yaw)
+    rng = random.Random(seed)
+    slurry, water = 0.055, PIPES["pipe_blue"][0]
+
+    _heaps(b, m, rng)
+    b.places.extend(_receiving(b, m))
+    spout = _drag_conveyor(b, m, -3.1, 4.0, 2.8)
+    fines = _screen_tower(b, m, spout)
+
+    # The wash: three tanks, their pumps north of them, the walkway and stair south.
+    xs = (1.4, 3.6, 5.8)
+    tanks = [_leach_tank(b, m, (x, -6.0, 0), manway=(0, -1, 0)) for x in xs]
+    pumps = [_pump(b, m, (x + 1.1, -4.55, 0), math.pi) for x in xs]
+    _screw(b, m, fines, tanks[0]["feed"] + Vector((0, 0, 0.11 + 0.19)))
+    feed, overflow, underflow = _thickener(b, m, (9.2, -6.5, 0), 1.35)
+    lines = []
+    for k, (x, tank, (suction, discharge)) in enumerate(zip(xs, tanks, pumps)):
+        out = tank["outlet"]
+        lines.append([out, Vector((x, -6.0, 0.2)), Vector((x, -4.55, 0.2)), Vector((suction.x - 0.2, -4.55, 0.2)), Vector((suction.x - 0.2, -4.55, suction.z)), suction])
+        valve(b, m, (x, -5.2, 0.2), (0, 1, 0), slurry)
+        if k + 1 < len(xs):
+            to = tanks[k + 1]["feed"]
+            lines.append([discharge, Vector((discharge.x, discharge.y, 3.15)), Vector((to.x, discharge.y, 3.15)), Vector((to.x, to.y, 3.15)), to])
+        else:
+            lines.append([discharge, Vector((discharge.x, discharge.y, 3.7)), Vector((feed.x, discharge.y, 3.7)), Vector((feed.x, feed.y, 3.7)), feed])
+        valve(b, m, (discharge.x, discharge.y, 1.1), (0, 0, 1), slurry, stem=(0, 1, 0))
+    walk_z, wy0, wy1 = 2.45, -7.75, -6.95
+    deck = box((xs[-1] - xs[0] + 1.9, wy1 - wy0, 0.04), ((xs[0] + xs[-1]) / 2, (wy0 + wy1) / 2, walk_z - 0.02), tile=1.0)
+    b.put(deck, m["grate"], smooth=False)
+    frame = bmesh.new()
+    x0w, x1w = xs[0] - 0.95, xs[-1] + 0.95
+    for y in (wy0, wy1):
+        merge(frame, member((x0w, y, walk_z - 0.12), (x1w, y, walk_z - 0.12), channel(0.05, 0.16, 0.006, y > wy0)))
+    k = 0
+    while x0w + k * 1.6 <= x1w + 0.01:
+        x = x0w + k * 1.6
+        merge(frame, member((x, wy0, walk_z - 0.12), (x, wy1, walk_z - 0.12), angle(0.06, 0.006)))
+        merge(frame, member((x, wy0 + 0.05, 0.02), (x, wy0 + 0.05, walk_z - 0.2), rect(0.08, 0.08)))
+        merge(frame, box((0.25, 0.25, 0.02), (x, wy0 + 0.05, 0.01)))
+        k += 1
+    for x in xs:
+        merge(frame, member((x, wy1, walk_z - 0.12), (x, -6.0 - 0.74, walk_z - 0.12), rect(0.08, 0.06)))
+    b.put(frame, m["galv"], smooth=False)
+    railing(b, m, [(x0w + 1.0, wy0, walk_z), (x1w, wy0, walk_z), (x1w, wy1, walk_z)], 1.0, 1.6)
+    stairs(b, m, (x0w - 3.36, (wy0 + wy1) / 2, 0.0), 0.0, walk_z, 0.8)
+    for x in xs:
+        b.put(box((0.6, 0.35, 0.04), (x, wy1 + 0.175, walk_z - 0.02)), m["grate"], smooth=False)
+    b.collider(box((x1w - x0w, wy1 - wy0, 0.1), ((x0w + x1w) / 2, (wy0 + wy1) / 2, walk_z - 0.05)))
+    b.collider(moved(box((3.6, 0.85, 0.2), (1.8, 0, 0)), (x0w - 3.36, (wy0 + wy1) / 2, 0.0), 0.0, -math.atan2(walk_z, 3.36)))
+
+    # The water: its tank, the wash pump, the bioreactor and its dosing, the condensate.
+    wx, wy, wlen, wr = 10.9, -7.05, 3.4, 0.62
+    drum(b, m, (wx, wy, 0), 0.0, wlen, wr, "paint_white", lift=0.4, seams=0.8)
+    b.collider(moved(box((wlen, 2 * wr, 2 * wr + 0.4), (wlen / 2, 0, wr + 0.2)), (wx, wy, 0)))
+    sign(b, m, (wx + 1.7, wy + wr + 0.004, 1.05), math.pi / 2, 0.3, 0.2, 2)
+    w_suc, w_dis = _pump(b, m, (12.6, -5.75, 0), -math.pi / 2)
+    lines.append([Vector((12.6, wy, 0.39)), Vector((12.6, wy, 0.2)), Vector((12.6, -6.6, 0.2)), Vector((12.6, -6.6, w_suc.z)), w_suc])
+    to = tanks[-1]["water"]
+    wash = [w_dis, Vector((w_dis.x, w_dis.y, 2.9)), Vector((w_dis.x, -4.85, 2.9)), Vector((to.x, -4.85, 2.9)), Vector((to.x, to.y, 2.9)), to]
+    lines.append([overflow, Vector((11.3, overflow.y, overflow.z)), Vector((11.3, overflow.y, 3.3)), Vector((11.3, -8.45, 3.3)), Vector((12.7, -8.45, 3.3)),
+                  Vector((12.7, -8.45, 3.06))])
+    bx, by = 13.0, -8.75
+    vessel(b, m, (bx, by, 0), 0.5, 2.6, "paint_white", lift=0.4, legs=4)
+    _nozzle(b, m, Vector((12.7, -8.45, _top(Vector((bx, by, 0)), 0.5, 2.6, 0.4, math.hypot(0.3, 0.3)))), 0.05)
+    lines.append([Vector((bx, by + 0.52, 1.0)), Vector((bx, wy - wr - 0.01, 1.0))])
+    valve(b, m, (bx, (by + wy - wr) / 2 + 0.05, 1.0), (0, 1, 0), slurry)
+    b.collider(moved(lathe([(0.0, 0.0), (0.55, 0.0), (0.55, 3.0), (0.0, 3.2)], 8, 2.0), (bx, by, 0)))
+    vessel(b, m, (11.9, -8.9, 0), 0.28, 1.0, "paint_grey", lift=0.3, legs=3)
+    b.put(pipe([(12.18, -8.9, 0.9), (12.35, -8.85, 0.9), (12.52, -8.8, 1.5)], 0.02, 0.08), m["steel"])
+    b.collider(moved(lathe([(0.0, 0.0), (0.3, 0.0), (0.3, 1.3), (0.0, 1.4)], 6, 2.0), (11.9, -8.9, 0)))
+
+    # The dewatering, drying and the condenser.
+    cake, drain = _screw_press(b, m, (10.95, -4.3, 0.95), (12.95, -4.3, 2.35))
+    u_suc, u_dis = _pump(b, m, (10.55, -5.35, 0), math.pi)
+    lines.append([underflow, Vector((underflow.x, underflow.y, u_suc.z)), Vector((underflow.x, u_suc.y, u_suc.z)), u_suc])
+    lines.append([u_dis, Vector((u_dis.x, u_dis.y, 1.25)), Vector((u_dis.x, -4.3, 1.25)), Vector((10.8, -4.3, 1.25))])
+    sump = Vector((11.65, -5.2, 0.0))
+    b.put(box((0.7, 0.7, 0.3), (sump.x, sump.y, 0.13), tile=0.5), m["paint_grey"], smooth=False)
+    b.put(box((0.74, 0.74, 0.03), (sump.x, sump.y, 0.295)), m["tread"], smooth=False)
+    b.put(moved(ring(0.1, 0.0, 0.31, 0.62, 16), (sump.x + 0.15, sump.y, 0)), m["paint_grey"])
+    b.put(moved(ring(0.11, 0.09, 0.62, 0.7, 16), (sump.x + 0.15, sump.y, 0)), m["paint_dark"])
+    b.collider(box((0.74, 0.74, 0.7), (sump.x, sump.y, 0.35)))
+    lines.append([drain, Vector((drain.x, -5.05, drain.z)), Vector((sump.x - 0.2, -5.05, drain.z)), Vector((sump.x - 0.2, -5.05, 0.32))])
+    lines.append([Vector((sump.x - 0.15, sump.y - 0.15, 0.32)), Vector((sump.x - 0.15, sump.y - 0.15, 3.3)), Vector((11.3, sump.y - 0.15, 3.3)),
+                  Vector((11.3, overflow.y + 0.06, 3.3))])
+    dfeed, vapour, dout = _dryer(b, m, 8.55, 12.85, -2.5, 1.0, 1.2)
+    _screw(b, m, cake - Vector((0.02, 0, 0.33)), dfeed + Vector((0, 0, 0.11 + 0.18)), 0.11, post=False)
+    b.put(member((13.05, -3.3, 0.02), (13.05, -3.3, 1.88), rect(0.08, 0.08)), m["galv"], smooth=False)
+    b.put(box((0.24, 0.24, 0.02), (13.05, -3.3, 0.01)), m["galv"], smooth=False)
+    cooler(b, m, (14.2, -4.0, 0), -math.pi / 2, (2.0, 0.9, 1.2), fans=2)
+    b.collider(box((0.95, 2.1, 1.4), (14.2, -4.0, 0.7)))
+    duct = [vapour, Vector((vapour.x, vapour.y, 2.45)), Vector((14.2, vapour.y, 2.45)), Vector((14.2, vapour.y, 0.95)), Vector((14.2, -3.0, 0.8))]
+    b.put(pipe(duct, 0.12, 0.3), m["pipe_white"])
+    stands(b, m, fillet(duct, 0.3), 0.12, 2.0, 0.4)
+    lines.append([Vector((14.05, -5.25, 0.25)), Vector((14.05, -5.6, 0.25)), Vector((14.05, -5.6, 1.95)), Vector((14.05, wy, 1.95)), Vector((14.05, wy, 1.66))])
+
+    # Dry regolith up to the mixer; compost into it; the bags.
+    _elevator(b, m, (7.45, -2.5, 0), 6.9, Vector((7.3, 0.9, 3.57)))
+    b.put(box((0.24, 0.42, 0.3), tuple(dout - Vector((0.1, 0, 0))), tile=0.5), m["paint_grey"], smooth=False)
+    inlets = _mixer_bagger(b, m, (6.8, 1.1, 0))
+    outlet, exhaust = _composter(b, m, 6.6, 5.6, 8.6, 0.75, 1.45)
+    _screw(b, m, outlet - Vector((0, 0, 0.25)), inlets[1] + Vector((0, 0, 0.19 + 0.11 + 0.18)), 0.11)
+    _screw(b, m, (3.9, 8.88, 0.5), Vector((6.35, 8.88, 1.45 + 0.75 + 0.65 + 0.5 + 0.11 + 0.18)), 0.1)
+    b.put(moved(lathe([(0.2, 0.5), (0.5, 0.95), (0.53, 0.95), (0.53, 1.0)], 4, 1.0, start=math.pi / 4), (3.9, 8.88, 0)), m["paint_orange"], smooth=False)
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            b.put(member((3.9 + sx * 0.3, 8.88 + sy * 0.3, 0.02), (3.9 + sx * 0.33, 8.88 + sy * 0.33, 0.8), rect(0.05, 0.05)), m["galv"], smooth=False)
+    b.collider(box((1.1, 1.1, 1.0), (3.9, 8.88, 0.5)))
+    _biomass(b, m, (2.4, 8.4, 0))
+    bio = Vector((4.4, 6.4, 0))
+    b.put(box((1.8, 1.3, 0.85), (bio.x, bio.y, 0.425), tile=1.0, bevel=0.02), m["bund"], smooth=False)
+    b.put(box((1.7, 1.2, 0.04), (bio.x, bio.y, 0.85), tile=0.6), m["bags"], smooth=False)
+    blades, guard = fan(0.25, 0.12)
+    b.put(moved(blades, (bio.x + 0.55, bio.y - 0.3, 0.87)), m["paint_dark"])
+    b.put(moved(guard, (bio.x + 0.55, bio.y - 0.3, 0.87)), m["steel"])
+    b.put(pipe([exhaust, Vector((exhaust.x, exhaust.y, 2.9)), Vector((bio.x, exhaust.y, 2.9)), Vector((bio.x, bio.y - 0.4, 2.9)), Vector((bio.x, bio.y - 0.4, 0.9))], 0.11, 0.3),
+          m["paint_grey"])
+    b.collider(box((1.8, 1.3, 0.9), (bio.x, bio.y, 0.45)))
+    bags = []
+    for k, (x, y, turn) in enumerate(((3.3, 1.45, 0.05), (4.5, 1.4, -0.04), (3.25, 2.65, 0.0), (4.55, 2.6, 0.07), (5.1, 3.85, -0.1))):
+        bag(b, m, (x, y, 0), turn, 1.0 if k < 4 else 0.9)
+        sign(b, m, Vector((x, y, 0)) + Matrix.Rotation(turn, 3, "Z") @ Vector((0.512, 0.0, 0.62)), turn, 0.3, 0.22, 2)
+        b.collider(moved(box((1.1, 1.1, 1.05), (0, 0, 0.525)), (x, y, 0), turn))
+        bags.append((x, y, 0.0))
+    b.places.append(("pickup", {"at": (3.9, 2.0, 0.0), "bags": bags}))
+
+    # Every slurry and water line, insulated and heat traced, on its stands.
+    for path in lines:
+        line = [Vector(p) for p in path]
+        b.put(pipe(line, slurry, 0.12), m["pipe_white"])
+        stands(b, m, fillet(line, 0.12), slurry, 2.2, 0.6)
+    b.put(pipe(wash, slurry, 0.2), m["pipe_blue"])
+    stands(b, m, fillet(wash, 0.2), slurry, 2.2, 0.6)
+    valve(b, m, (w_dis.x, w_dis.y, 1.4), (0, 0, 1), slurry, stem=(1, 0, 0))
+    gauge(b, m, (w_dis.x, w_dis.y, 1.8), (1, 0, 0), (1, 0, 0))
+
+    # The water line in from its flanged tie-in, heat traced.
+    zw = BEAM + water
+    tie = SOIL_WATER_TIE + Vector((0, 0, zw))
+    inlet = [tie + Vector((0, 0.01, 0)), Vector((tie.x, -9.1, zw)), Vector((11.4, -9.1, zw)), Vector((11.4, wy - wr - 0.02, zw))]
+    b.put(pipe(inlet, water, 0.4), m["pipe_blue"])
+    b.put(tube(fillet([v - Vector((0, 0, water + 0.012)) for v in inlet], 0.4), 0.012, 5), m["heater"])
+    stands(b, m, fillet(inlet, 0.4), water, 2.5, 0.4)
+    b.put(collar(tie, (0, -1, 0), water), m["steel"])
+    valve(b, m, (tie.x, -9.25, zw), (0, 1, 0), water)
+    gauge(b, m, (2.0, -9.1, zw + water), (0, 0, 1), (0, 1, 0))
+    b.put(marker(Vector((5.0, -9.1, zw)), Vector((1, 0, 0)), water), m["label"], smooth=False)
+    b.places.append(("tie", {"name": "water", "at": tuple(tie), "axis": (0.0, -1.0, 0.0), "material": "pipe_blue"}))
+
+    # Power: the motor control centre and its pull pit; the docks' charger.
+    cabinet(b, m, (14.7, -8.6, 0.0), math.pi, (0.6, 1.6, 2.0), doors=2, cell=0)
+    b.put(tube(fillet([(14.7, -9.2, 0.3), (14.7, -9.35, 0.05), (14.7, -9.6, 0.05)], 0.1), 0.04, 8), m["cable"])
+    b.collider(box((0.7, 1.7, 2.2), (14.7, -8.6, 1.1)))
+    for (x, y) in SOIL_DOCKS:
+        _dock(b, m, (x, y, 0))
+        b.places.append(("dock", {"at": (x, y, 0.025), "yaw": 0.0}))
+    cabinet(b, m, (-8.3, 8.75, 0.0), 0.0, (0.6, 1.4, 1.6), doors=2, cell=0)
+    b.collider(box((0.7, 1.5, 1.8), (-8.3, 8.75, 0.9)))
+    b.put(tube([Vector((-8.0, 8.75, 0.05)), Vector((-7.6, 9.25, 0.05)), Vector((SOIL_DOCKS[-1][0], 9.25, 0.05))], 0.03, 8), m["cable"])
+
+    light_mast(b, m, (-8.6, 0.0, 0), 7.0, 2, 0.0)
+    light_mast(b, m, (-1.6, -8.2, 0), 7.0, 2, math.radians(45))
+    light_mast(b, m, (9.8, 7.4, 0), 7.0, 2, -math.pi / 2)
     return b.finish()

@@ -3,6 +3,7 @@ fission units after NASA's Kilopower behind a regolith berm, joined by a
 ladder cable tray and armoured cables laid on the ground."""
 import math
 import random
+from types import SimpleNamespace
 
 import bmesh
 import numpy as np
@@ -100,18 +101,56 @@ def _cables(line, specs, floor=0.0):
     return bm
 
 
+def _table():
+    """A table's module, its width along the row and height up the slope,
+    and the height of the table's centre line."""
+    return 1.1, 2.2, 1.6
+
+
+def panel_washer_track(panels, tilt):
+    """Where a solar row's washer runs, in the row's frame (its centre line
+    on X = 0): the slope and the centre line's height; the rails' offset
+    |s| up and down the slope from it and their tops' height t over the
+    slope plane; where the washer's middle stands docked past the row's +Y
+    end and at the row's far end, how far its bumpers reach along the row,
+    the stops' faces; the table's half depth, its length and its glass's t."""
+    w, h, zc = _table()
+    depth, length = 2 * h + 0.03, panels * (w + 0.04)
+    dock, end, bumper = length / 2 + 0.7, -length / 2 + 0.12, 0.36
+    return SimpleNamespace(tilt=math.radians(tilt), zc=zc, s=depth / 2 + 0.075, top=0.035, dock=dock, end=end, bumper=bumper,
+                           stops=(end - bumper - 0.15, dock + bumper + 0.15), half=depth / 2, length=length, glass=0.02)
+
+
+def _wedge(points, y0, y1):
+    """A convex prism along Y from y0 to y1 over a counter-clockwise (x, z) outline."""
+    bm = bmesh.new()
+    lo = [bm.verts.new((x, y0, z)) for x, z in points]
+    hi = [bm.verts.new((x, y1, z)) for x, z in points]
+    n = len(points)
+    for i in range(n):
+        j = (i + 1) % n
+        bm.faces.new((lo[i], lo[j], hi[j], hi[i]))
+    bm.faces.new(lo[::-1])
+    bm.faces.new(hi)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return bm
+
+
 def solar_field(looks, name, rows=10, panels=36, pitch=9.0, tilt=22.0, at=(0, 0, 0), yaw=0.0, parent=None):
     """Rows of fixed-tilt tables facing -X (the equator from the base), each
     two dusty modules high in portrait on purlins and rafters over front and
     rear posts on ballast footings, clamped, string-wired to a combiner box
-    at the row's end, the combiners feeding a covered cable trench."""
+    at the row's end, the combiners feeding a covered cable trench. Along
+    each row's top and bottom edges run its washer's rails, out past the
+    row's +Y end to the washer's dock: two posts carrying the rails' ends,
+    a comb the brush flicks its dust off on, a latch, buffered stops."""
     m = power_mats(looks)
     b = Building(name, parent, at, yaw)
-    w, h = 1.1, 2.2
+    w, h, zc = _table()
+    track = panel_washer_track(panels, tilt)
     slope = math.radians(tilt)
     depth = 2 * h + 0.03
     length = panels * (w + 0.04)
-    zc = 1.6
     us, nrm = Vector((math.cos(slope), 0, math.sin(slope))), Vector((-math.sin(slope), 0, math.cos(slope)))
     area = 0.0
     # Module frame: x along the row, y up the slope, which rises toward +X.
@@ -146,7 +185,7 @@ def solar_field(looks, name, rows=10, panels=36, pitch=9.0, tilt=22.0, at=(0, 0,
             merge(steel, member(at_slope(s, -0.075, -length / 2 - 0.15), at_slope(s, -0.075, length / 2 + 0.15), channel(0.05, 0.1, 0.004), up=nrm))
             for k in range(panels + 1):
                 y = -length / 2 + k * (w + 0.04)
-                merge(clamps, moved(box((0.05, 0.04, 0.025), (0, 0, 0)), tuple(at_slope(s, 0.035, y)), 0.0, slope))
+                merge(clamps, moved(box((0.05, 0.04, 0.025), (0, 0, 0)), tuple(at_slope(s, 0.035, y)), 0.0, -slope))
         for f in range(frames + 1):
             y = -length / 2 + 0.3 + (length - 0.6) * f / frames
             merge(steel, member(at_slope(-depth / 2 + 0.1, -0.19, y), at_slope(depth / 2 - 0.1, -0.19, y), channel(0.06, 0.12, 0.005), up=nrm))
@@ -156,6 +195,35 @@ def solar_field(looks, name, rows=10, panels=36, pitch=9.0, tilt=22.0, at=(0, 0,
                 merge(feet, box((0.45, 0.45, 0.35), (top.x, y, 0.12)))
             rear = at_slope(0.36 * depth, -0.25, y)
             merge(steel, rod((rear.x, y, 0.45), at_slope(-0.05, -0.25, y), 0.025, 6))
+        # The washer's dock past the row's +Y end: two posts and a rafter
+        # like the table's, the comb on brackets off the rafter.
+        yp = track.dock + 0.3
+        for s in (-0.36 * depth, 0.36 * depth):
+            top = at_slope(s, -0.25, yp)
+            merge(steel, member((top.x, yp, 0.3), top, channel(0.06, 0.12, 0.005, True), up=(1, 0, 0)))
+            merge(feet, box((0.45, 0.45, 0.35), (top.x, yp, 0.12)))
+        merge(steel, member(at_slope(-depth / 2 + 0.1, -0.19, yp), at_slope(depth / 2 - 0.1, -0.19, yp), channel(0.06, 0.12, 0.005), up=nrm))
+        rails, rubber = bmesh.new(), bmesh.new()
+        for sc in (-1.6, 0.0, 1.6):
+            merge(rails, member(at_slope(sc, -0.13, yp - 0.03), at_slope(sc, -0.03, track.dock + 0.03), rect(0.04, 0.006), up=us))
+        merge(rails, member(at_slope(-depth / 2 + 0.02, -0.01, track.dock), at_slope(depth / 2 - 0.02, -0.01, track.dock), rect(0.05, 0.04), up=nrm))
+        merge(rubber, member(at_slope(-depth / 2 + 0.02, 0.022, track.dock), at_slope(depth / 2 - 0.02, 0.022, track.dock), rect(0.014, 0.008), up=nrm))
+        # The rails: aluminium box sections clear of the glass's edges on
+        # brackets off each rafter's ends and the dock's, stops at both ends.
+        y0, y1 = track.stops[0] - 0.1, track.stops[1] + 0.1
+        rafters = [-length / 2 + 0.3 + (length - 0.6) * f / frames for f in range(frames + 1)] + [yp]
+        for e in (-1, 1):
+            se = e * track.s
+            merge(rails, member(at_slope(se, track.top - 0.025, y0), at_slope(se, track.top - 0.025, y1), rect(0.05, 0.06), up=nrm))
+            for y in rafters:
+                merge(rails, member(at_slope(e * (depth / 2 - 0.1), -0.16, y), at_slope(se, -0.015, y), rect(0.05, 0.008), up=(0, 1, 0)))
+            for ys, d in ((track.stops[0], -1), (track.stops[1], 1)):
+                merge(rails, moved(box((0.07, 0.08, 0.3), (0, 0, 0)), tuple(at_slope(se, track.top + 0.15, ys + d * 0.04)), 0.0, -slope))
+                merge(rubber, member(at_slope(se, 0.22, ys), at_slope(se, 0.22, ys - d * 0.12), rect(0.06, 0.06), up=nrm))
+            if e > 0:
+                merge(rails, moved(box((0.03, 0.08, 0.05), (0, 0, 0)), tuple(at_slope(se - 0.045, track.top - 0.01, track.dock)), 0.0, -slope))
+        b.put(rails, m["alu"], smooth=False)
+        b.put(rubber, m["rubber"], smooth=False)
         b.put(steel, m["galv"])
         b.put(feet, m["footing"], smooth=False)
         b.put(clamps, m["alu"], smooth=False)
@@ -181,13 +249,16 @@ def solar_field(looks, name, rows=10, panels=36, pitch=9.0, tilt=22.0, at=(0, 0,
         merge(lids, box((0.97, 0.48, 0.02), (x0 + k + 0.5, trench_y, 0.12), tile=1.0))
     b.put(lids, m["tread"], smooth=False)
     pull_pit(b, m, pit)
-    sx, sy = -1.5, length / 2 + 1.0
+    sx, sy = -3.6, length / 2 + 1.0
     b.put(member((sx, sy, 0.0), (sx, sy, 1.9), rect(0.06, 0.06)), m["galv"], smooth=False)
     b.put(moved(box((0.04, 0.4, 0.3), (0, 0, 0)), (sx - 0.1, sy, 1.8), 0.0, slope + math.pi / 2), m["solar_dusty"], smooth=False)
     b.put(moved(lathe([(0.0, 0.0), (0.07, 0.0), (0.07, 0.04), (0.04, 0.06), (0.0, 0.08)], 12, 1.0), (sx, sy, 1.95)), m["paint_white"])
     b.places.append(("solar", {"area": area}))
+    # What stops a rover: the wedge under each table's glass, clear of its washer.
     for r in range(rows):
-        b.collider(box((depth * math.cos(slope), length, 2.2), (r * pitch, 0, 1.1)))
+        c = Vector((r * pitch, 0, zc))
+        lo, hi = c + us * (-depth / 2) - nrm * 0.06, c + us * (depth / 2) - nrm * 0.06
+        b.collider(_wedge([(lo.x + 0.4, 0.0), (hi.x - 0.25, 0.0), (hi.x, hi.z), (lo.x, lo.z)], -length / 2 - 0.15, length / 2 + 0.15))
     return b.finish()
 
 

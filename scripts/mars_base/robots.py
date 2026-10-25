@@ -111,6 +111,7 @@ def head_sensors(u, d, at_):
     x, y, z = at_
     sensor(u, d, "camera_link", "camera", (x, y, z - 0.05), (0, 90, 0), [
         "bool gearbox:sensor:recognition = true",
+        'token gearbox:sensor:render = "geometry"',
         "int gearbox:sensor:width = 160",
         "int gearbox:sensor:height = 120",
         "float gearbox:sensor:vfov_deg = 70",

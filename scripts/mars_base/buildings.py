@@ -5,6 +5,7 @@ returns a finished `Building`. `building.places` lists what the gearbox layer
 adds inside it: rooms, trays, service spots and lights, in building space.
 """
 import math
+from types import SimpleNamespace
 
 import bmesh
 import numpy as np
@@ -23,6 +24,31 @@ def gantry_rail(radius):
     """Radius of a dome's floor rail, where its polar gantry's outer leg
     runs: inside the vestibule's mouth."""
     return radius - 2.0
+
+
+def arch_curb(width):
+    """Height of an arch greenhouse's curbs, where its vault springs."""
+    return max(0.9, ARCH_HANGERS + 0.41 - width / 2)
+
+
+def arch_washer_track(width, length):
+    """The roof washer's track beside an arch greenhouse `width` wide and
+    `length` long: |y| of its two crane rails, their heads' height and half
+    width, where they run along X, where the washer docks past the EVA
+    gable; and the vault it cleans: the cushions' crest, the clamp caps'
+    and the straps' reach over the arch radius."""
+    r = width / 2
+    return SimpleNamespace(y=r + 1.5, head=0.4, half=0.0275, x0=0.3, x1=length + 2.8, dock=length + 1.6, crest=0.28, caps=0.22, strap=0.031)
+
+
+def dome_washer_ring(radius):
+    """The dome washer's ring girder, standing clear over the portal: the
+    rail's radius, its head's height and half width, the girder's radial
+    span and underside; the crown pedestal's bearing seat height; and the
+    dome it serves: its sphere's centre height and the portal's top."""
+    spring = 2.9
+    return SimpleNamespace(r=radius + 1.05, head=4.06, half=0.0275, inner=radius + 0.8, outer=radius + 1.3, under=3.78, seat=spring + radius + 0.47,
+                           spring=spring, portal=3.75)
 
 
 def _film():
@@ -215,6 +241,37 @@ def _uv(bm, tile):
     bm.normal_update()
     project_uv(bm, tile)
     return bm
+
+
+def _arc_sweep(profile, x, radius, arc, z0, tile=1.0):
+    """A closed (out, along) outline swept round an arch about the X axis at
+    height z0, in the plane X = x: `out` from `radius` outward, `along` along
+    X; capped, faces out."""
+    bm = bmesh.new()
+    rings = [[bm.verts.new((x + v, -(radius + u) * math.cos(a), z0 + (radius + u) * math.sin(a))) for u, v in profile] for a in arc]
+    n = len(profile)
+    for k in range(len(arc) - 1):
+        for i in range(n):
+            j = (i + 1) % n
+            bm.faces.new((rings[k][i], rings[k][j], rings[k + 1][j], rings[k + 1][i]))
+    for ring in (rings[0], rings[-1]):
+        bm.faces.new(ring)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return _uv(bm, tile)
+
+
+def _welded(bm):
+    """A closed solid of revolution with its seams welded and faces turned out."""
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=1e-6)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return bm
+
+
+def _crane_rail():
+    """A crane rail's section, 0.1 tall on a 0.15 foot under a 0.055 head,
+    as (up, across) points."""
+    half = [(0.0, 0.075), (0.015, 0.075), (0.02, 0.0125), (0.058, 0.0125), (0.062, 0.0275), (0.096, 0.0275), (0.1, 0.0235)]
+    return half + [(u, -v) for u, v in reversed(half)]
 
 
 def _sector(profile, a0, a1, segments, tile=2.0, swap=False):
@@ -531,7 +588,8 @@ def geodesic_dome(looks, name, radius=12.0, wall=1.4, at=(0, 0, 0), yaw=0.0, par
     m = mats(looks)
     b = Building(name, parent, at, yaw)
     b.places = []
-    spring = 2.9
+    ring = dome_washer_ring(radius)
+    spring = ring.spring
     beam = (spring - 0.345, spring - 0.045)
     centre = Vector((0.0, 0.0, spring))
     ico = bmesh.new()
@@ -588,7 +646,7 @@ def geodesic_dome(looks, name, radius=12.0, wall=1.4, at=(0, 0, 0), yaw=0.0, par
     # Knee wall, printed in courses, the floor slab, and the entrance portal.
     b.put(lathe([(radius + 0.9, -0.1), (radius + 0.5, beam[0]), (radius - 0.4, beam[0]), (radius - 0.4, 0.3)], 160, 0.8, swap=True), m["concrete"], sharp=50)
     b.put(lathe([(radius - 0.39, 0.0), (radius - 0.39, 0.35), (0.0, 0.35)], 128, 3.0), m["floor"], sharp=50)
-    b.put(box((0.8, 4.0, 3.75), (radius + 0.55, 0, 1.875), tile=2.0, bevel=0.04), m["cast"], smooth=False)
+    b.put(box((0.8, 4.0, ring.portal), (radius + 0.55, 0, ring.portal / 2), tile=2.0, bevel=0.04), m["cast"], smooth=False)
     lamps = bmesh.new()
     for s in (-1, 1):
         merge(lamps, box((0.16, 0.4, 0.12), (radius + 1.03, s * 1.75, 3.55)))
@@ -644,49 +702,75 @@ def geodesic_dome(looks, name, radius=12.0, wall=1.4, at=(0, 0, 0), yaw=0.0, par
     b.put(pipes, m["pipe_white"])
     b.put(conduits, m["cable"])
     b.put(_uv(stands, 0.5), m["galv"])
-    # A glazing cleaning gantry: a lattice arch from a bogie on a rail round
-    # the wall top to a slewing bearing on the crown, with a brush carriage.
-    track = radius + 0.32
-    b.put(lathe([(track + 0.06, beam[0] + 0.01), (track + 0.06, beam[0] + 0.1), (track - 0.06, beam[0] + 0.1), (track - 0.06, beam[0] + 0.01)],
-                160, 1.0, TAU - 0.6, 0.3), m["steel"], sharp=40)
-    g = -2.0
-    out, across = Vector((math.cos(g), math.sin(g), 0.0)), Vector((-math.sin(g), math.cos(g), 0.0))
-
-    def meridian(r, e):
-        return centre + (out * math.cos(e) + Vector((0, 0, math.sin(e)))) * r
-
-    elev = [math.radians(1.5 + 86.0 * i / 24) for i in range(25)]
-    truss = bmesh.new()
-    for o in (-0.25, 0.25):
-        for r in (radius + 0.4, radius + 0.75):
-            merge(truss, tube([meridian(r, e) + across * o for e in elev], 0.035, 6))
-    for k, e in enumerate(elev):
-        merge(truss, rod(meridian(radius + 0.75, e) - across * 0.25, meridian(radius + 0.75, e) + across * 0.25, 0.018, 4))
-        for o in (-0.25, 0.25):
-            merge(truss, rod(meridian(radius + 0.4, e) + across * o, meridian(radius + 0.75, e) + across * o, 0.018, 4))
-            if k + 1 < len(elev):
-                merge(truss, rod(meridian(radius + 0.4, e) + across * o, meridian(radius + 0.75, elev[k + 1]) + across * o, 0.015, 4))
-    crown = centre + Vector((0, 0, radius + 0.42))
-    for r in (radius + 0.4, radius + 0.75):
-        for o in (-0.25, 0.25):
-            merge(truss, rod(meridian(r, elev[-1]) + across * o, crown + out * 0.25 + across * o, 0.025, 6))
-    b.put(truss, m["white_frame"])
-    gear = bmesh.new()
-    _drum(gear, crown, (0, 0, 1), 0.32, 0.26, 16)
-    _drum(gear, crown - Vector((0, 0, 0.2)), (0, 0, 1), 0.18, 0.16, 12)
-    _bar(gear, out * (radius + 0.15) + Vector((0, 0, beam[0] + 0.38)), out * (radius + 1.0) + Vector((0, 0, beam[0] + 0.38)), 0.8, 0.56)
-    _bar(gear, out * (radius + 0.6) - across * 0.7 + Vector((0, 0, beam[0] + 0.4)), out * (radius + 0.6) - across * 0.4 + Vector((0, 0, beam[0] + 0.4)), 0.3, 0.26)
-    for o in (-0.3, 0.3):
-        _drum(gear, out * track + across * o + Vector((0, 0, beam[0] + 0.17)), across, 0.08, 0.06, 10)
-    carriage = meridian(radius + 0.4, math.radians(32))
-    _bar(gear, carriage - across * 0.35, carriage + across * 0.35, 0.3, 0.4, out)
-    b.put(_uv(gear, 0.5), m["dark"])
-    brush = bmesh.new()
-    tip = meridian(radius + 0.13, math.radians(32))
-    merge(brush, tube([tip - across * 1.3, tip + across * 1.3], 0.05, 8))
-    for o in (-0.8, 0.8):
-        merge(brush, rod(carriage + across * (o * 0.3), tip + across * o, 0.02, 6))
-    b.put(brush, m["cable"])
+    # The dome washer's ring girder, clear over the portal: a box ring under
+    # a crane rail, stiffened, its enclosed conductor rail on the outer web,
+    # on raking brackets from the wall top and bearing pads on the portal.
+    lo, hi, rin, rout = ring.under, ring.head - 0.1, ring.inner, ring.outer
+    b.put(_welded(lathe([(rin, lo), (rout, lo), (rout, hi), (rin, hi), (rin, lo)], 192, 1.0)), m["hull_grey"], sharp=40)
+    rail_pts = [(ring.r + v, hi + u) for u, v in _crane_rail()]
+    b.put(_welded(lathe(rail_pts + rail_pts[:1], 192, 0.5)), m["steel"], sharp=40)
+    zc, rc = lo + 0.08, rout + 0.035
+    housing = [(rc - 0.015, zc - 0.025), (rc + 0.015, zc - 0.025), (rc + 0.015, zc - 0.007), (rc + 0.004, zc - 0.007), (rc + 0.004, zc + 0.007),
+               (rc + 0.015, zc + 0.007), (rc + 0.015, zc + 0.025), (rc - 0.015, zc + 0.025)]
+    b.put(_welded(lathe(housing + housing[:1], 192, 0.5)), m["hull_grey"], sharp=40)
+    plates, clips, struts = bmesh.new(), bmesh.new(), bmesh.new()
+    for i in range(120):
+        a = TAU * (i + 0.5) / 120
+        for rr in (rin - 0.006, rout + 0.006):
+            merge(plates, moved(box((0.012, 0.06, hi - lo), (rr, 0, (lo + hi) / 2)), (0, 0, 0), a))
+        for s in (-1, 1):
+            merge(clips, moved(box((0.04, 0.07, 0.02), (ring.r + s * 0.085, 0, hi + 0.01)), (0, 0, 0), a))
+        if i % 4 == 0:
+            for s in (-1, 1):
+                merge(clips, moved(box((0.045, 0.03, 0.012), (rc - 0.008, 0, zc + s * 0.031)), (0, 0, 0), a))
+    for k in range(1, 24):
+        a = TAU * k / 24
+        radial, side = Vector((math.cos(a), math.sin(a), 0.0)), Vector((-math.sin(a), math.cos(a), 0.0))
+        foot, heel = radial * (radius + 0.35) + Vector((0, 0, beam[0] + 0.02)), radial * (radius + 0.56) + Vector((0, 0, 2.22))
+        _bar(struts, foot, radial * (rin + 0.07) + Vector((0, 0, lo)), 0.1, 0.1, side)
+        _bar(struts, heel, radial * (rout - 0.07) + Vector((0, 0, lo)), 0.08, 0.08, side)
+        merge(plates, moved(box((0.3, 0.26, 0.02), (radius + 0.35, 0, beam[0] + 0.01)), (0, 0, 0), a))
+        merge(plates, moved(moved(box((0.02, 0.24, 0.24), (0, 0, 0)), (radius + 0.56, 0, 2.22), 0.0, -0.15), (0, 0, 0), a))
+        for rr in (rin + 0.07, rout - 0.07):
+            merge(plates, moved(box((0.18, 0.18, 0.015), (rr, 0, lo - 0.0075)), (0, 0, 0), a))
+    for s in (-1, 1):
+        merge(plates, box((0.15, 0.3, 0.03), (rin + 0.075, s * 1.2, lo - 0.015)))
+    b.put(_uv(plates, 0.5), m["steel"], sharp=40)
+    b.put(_uv(clips, 0.5), m["dark"], smooth=False)
+    b.put(_uv(struts, 0.5), m["frame"], sharp=40)
+    # Its feed: a box under the girder by the first bracket, its cable down
+    # the strut through the wall top.
+    a = TAU / 24 + 0.02
+    radial = Vector((math.cos(a), math.sin(a), 0.0))
+    b.put(moved(box((0.08, 0.2, 0.26), (rc, 0, lo - 0.22), tile=0.5, bevel=0.01), (0, 0, 0), a), m["hull_grey"], smooth=False)
+    b.put(moved(cone(0.012, 0.012, zc - 0.025 - (lo - 0.09), (rc, 0, lo - 0.09), 6), (0, 0, 0), a), m["cable"])
+    b.put(tube([radial * rc + Vector((0, 0, lo - 0.35)), radial * rc + Vector((0, 0, lo - 0.5)), radial * (radius + 0.6) + Vector((0, 0, 2.7)),
+                radial * (radius + 0.45) + Vector((0, 0, beam[0]))], 0.018, 6), m["cable"])
+    # The washer's dock over the portal: a storm-lock socket on the girder's
+    # outer edge and the home flag its bogie's switch reads.
+    dock = box((0.12, 0.16, 0.06), (rout - 0.07, 0.0, hi + 0.03), tile=0.5)
+    merge(dock, box((0.12, 0.01, 0.1), (rin + 0.06, 0.3, hi + 0.05)))
+    b.put(dock, m["yellow"], smooth=False)
+    b.put(cone(0.025, 0.025, 0.002, (rout - 0.07, 0.0, hi + 0.06), 12), m["dark"])
+    # The crown pedestal the washer's arch slews on: a base flange on the
+    # crown's hub with feet on its five glazing bars, a gusseted tube, the
+    # bearing seat and its bolt circle.
+    seat, base = ring.seat, spring + radius + 0.1
+    ped = cone(0.3, 0.3, 0.03, (0, 0, base), 24)
+    merge(ped, cone(0.15, 0.15, seat - base - 0.06, (0, 0, base + 0.03), 24))
+    merge(ped, cone(0.32, 0.32, 0.03, (0, 0, seat - 0.03), 32))
+    for k in range(6):
+        merge(ped, moved(box((0.13, 0.012, 0.18), (0.215, 0, base + 0.12)), (0, 0, 0), TAU * k / 6))
+    for d in dirs:
+        if 0.98 < d.z < 0.999:
+            a = math.atan2(d.y, d.x)
+            merge(ped, moved(box((0.14, 0.08, 0.06), (0.36, 0, base - 0.03)), (0, 0, 0), a))
+    b.put(ped, m["steel"], sharp=40)
+    bolts = bmesh.new()
+    for k in range(16):
+        a = TAU * (k + 0.5) / 16
+        merge(bolts, cone(0.014, 0.014, 0.012, (0.2 * math.cos(a), 0.2 * math.sin(a), seat), 6))
+    b.put(bolts, m["dark"], smooth=False)
     # Inside: the polar gantry's floor rail with clips and painted margins.
     rail = gantry_rail(radius)
     b.put(lathe([(rail + 0.16, 0.35), (rail + 0.16, 0.365), (rail + 0.03, 0.365), (rail + 0.03, 0.395), (rail + 0.05, 0.4), (rail + 0.05, 0.42),
@@ -860,12 +944,15 @@ def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0),
     panels, glazing, exhaust louvres and air-handler ducts; a rigid lock at
     -X meets the corridor flange to flange and one at +X is the EVA exit.
     Inside, two rows of ebb-and-flow tables under lamp rails, and a ridge
-    girder over the ridge robot's rail."""
+    girder over the ridge robot's rail. Outside, the roof washer's crane
+    rails on cast plinths either side, its stops and its charging dock past
+    the EVA gable; the blowers stand at the corridor gable."""
     m = mats(looks)
     b = Building(name, parent, at, yaw)
     b.places = []
     r = width / 2
-    curb = max(0.9, ARCH_HANGERS + 0.41 - r)
+    curb = arch_curb(width)
+    track = arch_washer_track(width, length)
     bays = int(round(length / bay))
     bay = length / bays
     seg = 32
@@ -878,8 +965,8 @@ def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0),
     ribs, clamps, plates = bmesh.new(), bmesh.new(), bmesh.new()
     for k in range(bays + 1):
         x = k * bay
-        merge(ribs, sweep(ibeam(0.2, 0.34, 0.035), [on(x, a, r) for a in arc], 1.0))
-        merge(clamps, sweep(rect(0.05, 0.16), [on(x, a, r + 0.195) for a in arc], 1.0))
+        merge(ribs, _arc_sweep(ibeam(0.2, 0.34, 0.035), x, r, arc, curb))
+        merge(clamps, _arc_sweep(rect(0.05, 0.16), x, r + 0.195, arc, curb))
         for s in (-1, 1):
             merge(plates, box((0.34, 0.5, 0.04), (x, s * r, curb + 0.02)))
             for gx in (-0.07, 0.07):
@@ -891,7 +978,7 @@ def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0),
     b.put(clamps, m["alu"], sharp=30)
     b.put(plates, m["steel"], sharp=30)
     # Cushions: the outer foil bulging out between arches, the inner one in.
-    for amp in (0.28, -0.12):
+    for amp in (track.crest, -0.12):
         skin = bmesh.new()
         uv = skin.loops.layers.uv.new("st")
         steps = 10
@@ -910,7 +997,7 @@ def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0),
     straps, anchors = bmesh.new(), bmesh.new()
     for j in range(bays):
         xm = (j + 0.5) * bay
-        crest = [on(xm, a, r + 0.28 * max(math.sin(a), 0.0) ** 0.5 + 0.025) for a in arc]
+        crest = [on(xm, a, r + track.crest * max(math.sin(a), 0.0) ** 0.5 + 0.025) for a in arc]
         ends = [[Vector((xm, s * (r + 0.75), 0.12)), Vector((xm, s * (r + 0.34), 0.55)), Vector((xm, s * (r + 0.34), curb + 0.03)), Vector((xm, s * (r + 0.2), curb + 0.16))] for s in (-1, 1)]
         merge(straps, sweep(rect(0.012, 0.1), ends[0] + crest[1:-1] + ends[1][::-1], 1.0))
         for s in (-1, 1):
@@ -932,7 +1019,8 @@ def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0),
     merge(frame, sweep(ibeam(0.16, ridge_top - ARCH_HANGERS, 0.02), [(0.0, 0, (ridge_top + ARCH_HANGERS) / 2), (length, 0, (ridge_top + ARCH_HANGERS) / 2)], 1.0))
     b.put(frame, m["white_frame"], sharp=30)
     # The curbs: clamp sill, skirt, inflation header with a hose to each
-    # cushion, louvred vents, and a blower each side.
+    # cushion, louvred vents; a blower each side at the corridor gable,
+    # its duct over the curb's end into the header.
     vents, backing = bmesh.new(), bmesh.new()
     for s in (-1, 1):
         b.put(box((length + 0.6, 0.5, curb + 0.35), (length / 2, s * (r + 0.05), (curb - 0.35) / 2), tile=2.0, bevel=0.03), m["cast"], smooth=False)
@@ -953,11 +1041,50 @@ def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0),
             merge(backing, box((0.68, 0.012, 0.4), (k * bay, s * (r + 0.3), curb * 0.5)))
             for i in range(4):
                 merge(vents, box((0.68, 0.06, 0.012), (k * bay, y + s * 0.01, curb * 0.5 - 0.15 + 0.1 * i), rot=Matrix.Rotation(-s * 0.7, 4, "X")))
-        unit(b, m, (length / 2, s * (r + 1.2), 0), 0.0, (1.2, 0.8, 0.8), 1)
-        b.put(tube([(length / 2 - 0.45, s * (r + 0.95), 0.8), (length / 2 - 0.45, s * (r + 0.95), curb + 0.08), (length / 2 - 0.45, s * (r + 0.24), curb + 0.08)], 0.06, 8), m["pipe_white"])
+        unit(b, m, (-1.1, s * (r + 0.85), 0), 0.0 if s > 0 else math.pi, (1.2, 0.8, 0.8), 1)
+        b.collider(box((1.2, 0.8, 0.8), (-1.1, s * (r + 0.85), 0.4)))
+        b.put(tube([(-0.6, s * (r + 0.85), 0.55), (-0.15, s * (r + 0.85), 0.55), (-0.15, s * (r + 0.85), curb + 0.2), (0.35, s * (r + 0.85), curb + 0.2),
+                    (0.35, s * (r + 0.2), curb + 0.2), (0.35, s * (r + 0.2), curb + 0.1)], 0.05, 8), m["pipe_white"])
     b.put(vents, m["frame"], smooth=False)
     b.put(backing, m["dark"], smooth=False)
     b.put(box((length, width, 0.12), (length / 2, 0, 0.06), tile=2.0), m["floor"], smooth=False)
+    # The roof washer's track: a crane rail clipped to a cast plinth either
+    # side, buffered stops at its ends, limit cams before them.
+    x0, x1, head = track.x0, track.x1, track.head
+    steel, clips, buffers = bmesh.new(), bmesh.new(), bmesh.new()
+    for s in (-1, 1):
+        y = s * track.y
+        b.put(box((x1 - x0 + 0.6, 0.4, 0.4), ((x0 + x1) / 2, y, 0.1), tile=1.0, bevel=0.02), m["cast"], smooth=False)
+        b.collider(box((x1 - x0 + 0.6, 0.4, 0.4), ((x0 + x1) / 2, y, 0.1)))
+        merge(steel, sweep(_crane_rail(), [(x0, y, head - 0.1), (x1, y, head - 0.1)], 0.5))
+        for k in range(int((x1 - x0) / 0.6) + 1):
+            for side in (-1, 1):
+                merge(clips, box((0.08, 0.05, 0.02), (x0 + 0.1 + 0.6 * k, y + side * 0.085, head - 0.09)))
+                merge(clips, cone(0.012, 0.012, 0.03, (x0 + 0.1 + 0.6 * k, y + side * 0.1, head - 0.1), 6))
+        for xs, d in ((x0 - 0.075, 1), (x1 + 0.075, -1)):
+            merge(steel, box((0.25, 0.32, 0.36), (xs, y, head + 0.08)))
+            merge(steel, box((0.02, 0.2, 0.2), (xs + d * 0.135, y, 0.55)))
+            merge(buffers, moved(cone(0.07, 0.06, 0.22, (0, 0, 0), 12), (xs + d * 0.145, y, 0.55), 0.0, d * math.pi / 2))
+            merge(clips, box((0.3, 0.04, 0.05), (xs + d * 0.655, y + s * 0.17, head - 0.075)))
+    b.put(_uv(steel, 0.5), m["steel"], sharp=40)
+    b.put(_uv(clips, 0.5), m["dark"], smooth=False)
+    b.put(buffers, m["rubber"])
+    # Its dock past the EVA gable: a charging bar on insulators inside the
+    # +Y rail with a status lamp, its feed run from the lock's side.
+    xd, yd = track.dock, track.y - 0.45
+    dock, bar = bmesh.new(), bmesh.new()
+    for xp in (xd - 0.15, xd + 0.5):
+        merge(dock, box((0.1, 0.1, 0.62), (xp, yd, 0.31)))
+        merge(dock, box((0.2, 0.2, 0.02), (xp, yd, 0.01)))
+        merge(dock, box((0.06, 0.08, 0.06), (xp, yd + 0.09, 0.56)))
+    merge(bar, box((0.75, 0.02, 0.06), (xd + 0.175, yd + 0.14, 0.56)))
+    b.put(dock, m["steel"], smooth=False)
+    b.put(bar, m["stainless"], smooth=False)
+    b.put(box((0.18, 0.12, 0.26), (xd + 0.5, yd - 0.11, 0.42), tile=0.5, bevel=0.01), m["hull_grey"], smooth=False)
+    b.put(cone(0.03, 0.03, 0.08, (xd + 0.5, yd, 0.62), 12), m["green"])
+    feed = [(xd + 0.5, yd - 0.11, 0.29), (xd + 0.5, yd - 0.11, 0.03), (length + 3.0, yd - 0.11, 0.03), (length + 3.0, 1.46, 0.03), (length + 3.0, 1.46, 0.5)]
+    b.put(tube(feed, 0.02, 6), m["cable"])
+    b.put(box((0.14, 0.08, 0.18), (length + 3.0, 1.44, 0.6), tile=0.5), m["hull_grey"], smooth=False)
     # End walls: curb and bulkhead round the lock, mullions and transoms,
     # insulated panels low and glazing high, exhaust louvres, the air
     # handler's duct, the inner hatch and the lock itself.

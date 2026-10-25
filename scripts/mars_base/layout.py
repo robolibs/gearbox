@@ -23,6 +23,7 @@ import industry
 import power
 import props
 import spaceport
+import vertical
 from buildings import gantry_rail, light_mast, mats
 from kit import Building, disc, lathe
 
@@ -36,12 +37,17 @@ DOME_REACH = DOME_R + 7.2
 DOMES = [("DomeA", Vector((62.0, -20.0, 0.0))), ("DomeB", Vector((62.0, 20.0, 0.0)))]
 ARCH_LEN = 30.0
 ARCHES = [(f"Arch{c}", Vector((14.0, -62.0 - 15.0 * k, 0.0))) for k, c in enumerate("ABC")]
+# The vertical farm closes the arch spine, its lock in line with the arches'.
+FARM = Vector((14.0, -108.0, 0.0))
+# How far either side of an arch's middle its harvesters drive.
+HARVEST_LANE = 1.35
 JUNCTION_R = 2.0
 EDEN = Vector((14.0, 22.0, 0.0))
 INFLATABLE = Vector((-34.0, 26.0, 0.0))
 HANGAR = Vector((-46.0, -8.0, 0.0))
 PRINTED = NODE + 53.0 * Vector((math.cos(math.radians(240)), math.sin(math.radians(240)), 0))
 SOLAR = Vector((-10.0, 86.0, 0.0))
+SOLAR_ROWS, SOLAR_PANELS, SOLAR_PITCH, SOLAR_TILT = 4, 18, 8.0, 22.0
 STATION = Vector((22.0, 60.0, 0.0))
 REACTORS = [Vector((-58.0, 196.0, 0.0)), Vector((-44.0, 204.0, 0.0)), Vector((-30.0, 204.0, 0.0)), Vector((-16.0, 196.0, 0.0))]
 # The industrial yard: the process side east of the yard road (ISRU, tanks,
@@ -51,6 +57,8 @@ TANKS = Vector((-96.8, -13.0, 0.0))
 TANKS_YAW = math.pi
 DRILL = Vector((-123.2, -4.9, 0.0))
 WORKS = Vector((-112.0, 30.0, 0.0))
+# Where the excavators dig, west of the soil plant: a patch each.
+DIG = [WORKS + Vector((-6.0 + 4.0 * k, 22.0, 0.0)) for k in range(3)]
 PAD_SHIP = Vector((-220.0, -160.0, 0.0))
 PAD_LANDER = Vector((-150.0, -232.0, 0.0))
 MAST = Vector((-24.0, 62.0, 0.0))
@@ -94,6 +102,12 @@ PIPES_TANKS = [tuple(_ISRU_TIE), (_TANK_TIE.x, _ISRU_TIE.y, 0.0), tuple(_TANK_TI
 PIPES_BASE = [tuple(placed(ISRU[0], 0.0, industry.ISRU_TIE_PAIR)), (-74.0, -2.15, 0.0), (-62.0, -16.0, 0.0), (-48.0, -36.0, 0.0),
               tuple(HAB_FEED + HAB_FEED_OUT * 4.0), tuple(HAB_FEED)]
 PIPES_WELL = [tuple(placed(DRILL, 0.0, industry.DRILL_TIE)), tuple(placed(ISRU[1], 0.0, industry.WATER_TIE))]
+# The soil plant's water: a branch off the ice well's line, carried over
+# Road 1 on a pipe bridge, then on the rack to the plant's tie-in.
+_SOIL_FROM = placed(DRILL, 0.0, industry.DRILL_SOIL_TIE)
+_SOIL_TO = placed(WORKS, 0.0, industry.SOIL_WATER_TIE)
+BRIDGE_SOIL = [tuple(_SOIL_FROM), (_SOIL_FROM.x, 14.4, 0.0)]
+PIPES_SOIL = [BRIDGE_SOIL[1], (_SOIL_FROM.x, 17.2, 0.0), (_SOIL_TO.x, 17.2, 0.0), tuple(_SOIL_TO)]
 REACTOR_JOINT = Vector((-37.0, 189.0, 0.0))
 _PIT_GAP = power.PIT / 2 + 0.06
 _REACTOR_PIT = STATION + power.STATION_PITS["reactor"]
@@ -102,10 +116,17 @@ REACTOR_CABLE = [tuple(REACTOR_JOINT), (-37.0, 186.0, 0.0), (-13.0, 186.5, 0.0),
 REACTOR_FEEDS = [[tuple(at + power.KILOPOWER_LEAD), tuple(at + power.KILOPOWER_LEAD + Vector((0.0, -0.8, 0.0))),
                   tuple(REACTOR_JOINT + Vector((0.3 * k - 0.45, power.JUNCTION[0] + 0.15 + (1.3 if k in (1, 2) else 1.0), 0.0))),
                   tuple(REACTOR_JOINT + Vector((0.3 * k - 0.45, power.JUNCTION[0] + 0.15, 0.0)))] for k, at in enumerate(REACTORS)]
-_SOLAR_PIT = SOLAR + power.solar_pit(4, 18, 8.0)
+_SOLAR_PIT = SOLAR + power.solar_pit(SOLAR_ROWS, SOLAR_PANELS, SOLAR_PITCH)
 _STATION_SOLAR = STATION + power.STATION_PITS["solar"]
 SOLAR_CABLE = [(_SOLAR_PIT.x, _SOLAR_PIT.y - _PIT_GAP, 0.0), (_SOLAR_PIT.x, _SOLAR_PIT.y - 1.6, 0.0), (_STATION_SOLAR.x, 70.0, 0.0),
                (_STATION_SOLAR.x, _STATION_SOLAR.y + _PIT_GAP, 0.0)]
+# The vertical farm's feed: from a pull pit by the spine's last junction,
+# where the corridors' power comes out, along the gap between the farm and
+# ArchC's washer track into the gland of the farm's feed cabinet.
+_FARM_GLAND, _FARM_OUT = vertical.power_tie(FARM, 0.0)
+FARM_PIT = Vector((3.2, -102.2, 0.0))
+FARM_CABLE = [(FARM_PIT.x + _PIT_GAP, FARM_PIT.y, 0.0), (9.0, -100.2, 0.0), (_FARM_GLAND.x - 3.0, -100.2, 0.0),
+              tuple(_FARM_GLAND + _FARM_OUT * 0.9), tuple(_FARM_GLAND)]
 _TRAY_PIT = STATION + power.STATION_PITS["tray"]
 POWER_TRAY = [(_TRAY_PIT.x, _TRAY_PIT.y - power.PIT / 2 - 0.75, 0.0), (16.0, 30.0, 0.0), (10.5, 25.0, 0.0), (10.5, 17.0, 0.0), (16.0, 12.0, 0.0), (31.0, 8.5, 0.0)]
 CONTAINERS = [
@@ -169,19 +190,23 @@ def build(looks, strewn=False):
         add(kind(buildings.geodesic_dome(looks, name, DOME_R, 1.4, tuple(at), toward(at, NODE_N), base), "geodesic_dome"))
         add(link(looks, base, f"Link{name}", doors[name], NODE_N, 0.1, 5.0, 1.3, 1.6))
 
-    # Arch farm off a spine of corridors and junction drums.
-    stops = [SPINE_TOP] + [Vector((SPINE_TOP.x, at.y, 0.0)) for _, at in ARCHES]
+    # Arch farm and the vertical farm off a spine of corridors and junction drums.
+    bays = ARCHES + [("VerticalFarm", FARM)]
+    stops = [SPINE_TOP] + [Vector((SPINE_TOP.x, at.y, 0.0)) for _, at in bays]
     add(link(looks, base, "Spine", NODE, SPINE_TOP, 5.0, JUNCTION_R, 1.3, 2.5))
-    # The spine runs toward -Y; each arch's door lies toward +X of its junction.
+    # The spine runs toward -Y; each bay's lock lies toward +X of its junction.
     back, on, out_ = math.pi / 2, -math.pi / 2, 0.0
     add(kind(habitat.junction(looks, "SpineBend", tuple(SPINE_TOP), base, (toward(SPINE_TOP, NODE), on)), "junction_bend"))
-    for k, ((name, at), stop) in enumerate(zip(ARCHES, stops[1:])):
-        last = k == len(ARCHES) - 1
+    for k, ((name, at), stop) in enumerate(zip(bays, stops[1:])):
+        last = k == len(bays) - 1
         door = (out_, 1.4, 1.2)
         ports = (back, door) if last else (back, on, door)
         add(kind(habitat.junction(looks, f"Junction{name}", tuple(stop), base, ports), "junction_end" if last else "junction_tee"))
         add(link(looks, base, f"Spine{name}", stops[k], stop, JUNCTION_R, JUNCTION_R, 1.3, 2.5))
-        add(kind(buildings.arch_greenhouse(looks, name, ARCH_LEN, 10.0, 3.0, tuple(at), 0.0, base), "arch_greenhouse"))
+        if name == "VerticalFarm":
+            add(vertical.vertical_farm(looks, name, tuple(at), 0.0, base))
+        else:
+            add(kind(buildings.arch_greenhouse(looks, name, ARCH_LEN, 10.0, 3.0, tuple(at), 0.0, base), "arch_greenhouse"))
         add(link(looks, base, f"Link{name}", stop, Vector((at.x - 3.2, at.y, 0.0)), JUNCTION_R, 0.0, 1.2, 1.4))
 
     # Round the plaza: the EDEN module, the inflatable hab, the hangar, a printed tower.
@@ -192,7 +217,7 @@ def build(looks, strewn=False):
     add(link(looks, base, "LinkPrinted", NODE, PRINTED, 5.0, 5.4, 1.2, 1.4))
 
     # Power.
-    add(power.solar_field(looks, "Solar", 4, 18, 8.0, 22.0, tuple(SOLAR), 0.0, base))
+    add(power.solar_field(looks, "Solar", SOLAR_ROWS, SOLAR_PANELS, SOLAR_PITCH, SOLAR_TILT, tuple(SOLAR), 0.0, base))
     add(power.power_station(looks, "PowerStation", tuple(STATION), 0.0, base))
     for k, at in enumerate(REACTORS):
         add(kind(power.kilopower(looks, f"Fission{k + 1}", tuple(at), 0.0, base), "kilopower"))
@@ -202,6 +227,10 @@ def build(looks, strewn=False):
         add(power.ground_cable(looks, f"ReactorFeed{k + 1}", feed, base))
     add(power.ground_cable(looks, "SolarCable", SOLAR_CABLE, base))
     add(power.cable_tray(looks, "PowerTray", POWER_TRAY, 1.4, base))
+    pit = Building("FarmPit", base)
+    power.pull_pit(pit, power.power_mats(looks), tuple(FARM_PIT))
+    add(pit.finish())
+    add(power.ground_cable(looks, "FarmCable", FARM_CABLE, base))
 
     # ISRU.
     for k, at in enumerate(ISRU):
@@ -212,6 +241,8 @@ def build(looks, strewn=False):
     add(industry.pipe_run(looks, "PipesTanks", PIPES_TANKS, base, ("pipe_white", "pipe_blue", "pipe_yellow"), ("flange", "flange")))
     add(industry.pipe_run(looks, "PipesBase", PIPES_BASE, base, ("pipe_white", "pipe_blue"), ("flange", "seal")))
     add(industry.pipe_run(looks, "PipesWell", PIPES_WELL, base, ("pipe_blue",), ("flange", "flange")))
+    add(industry.pipe_bridge(looks, "PipeBridgeSoil", BRIDGE_SOIL[0], BRIDGE_SOIL[1], ("pipe_blue",), 5.5, base))
+    add(industry.pipe_run(looks, "PipesSoil", PIPES_SOIL, base, ("pipe_blue",), ("flange", "flange")))
 
     # The landing zone.
     add(spaceport.landing_pad(looks, "PadShip", 32.0, tuple(PAD_SHIP), base))
@@ -269,14 +300,16 @@ def strew(base, out, looks):
     lie kept on the base as a `rocks` place, clear of buildings, roads,
     pipes, cables and the yard's cargo."""
     import rocks
-    linear = ("Road", "Pipes", "ReactorCable", "ReactorFeed", "SolarCable", "PowerTray", "Yard")
+    linear = ("Road", "Pipes", "ReactorCable", "ReactorFeed", "SolarCable", "PowerTray", "FarmCable", "Yard")
     keep_out = [f for b in out if not b.name.startswith(linear) and (f := footprint(b, 3.0))]
     for at, _, _ in CONTAINERS:
         keep_out.append((at[0] - 5, at[1] - 5, at[0] + 5, at[1] + 5))
     for x, y in ((6.0, 30.0), (-19.5, -13.0), (-82.0, 14.0), (-80.0, 20.0), (26.0, 48.0), (34.4, 72.0)):
         keep_out.append((x - 5, y - 5, x + 5, y + 5))
+    keep_out.append((DIG[0].x - 6, DIG[0].y - 6, DIG[-1].x + 6, DIG[-1].y + 6))
     lines = [(path, (7.0 if k < 3 else 5.5) / 2 + 1.5) for k, path in enumerate(ROADS)]
-    lines += [(path, 2.0) for path in (PIPES_TANKS, PIPES_BASE, PIPES_WELL, REACTOR_CABLE, SOLAR_CABLE, POWER_TRAY, *REACTOR_FEEDS)]
+    lines += [(path, 2.0) for path in (PIPES_TANKS, PIPES_BASE, PIPES_WELL, PIPES_SOIL, BRIDGE_SOIL, REACTOR_CABLE, SOLAR_CABLE, POWER_TRAY,
+                                       FARM_CABLE, *REACTOR_FEEDS)]
     sizes = {}
     for scan in rocks.SCANS:
         b, _, size = rocks.rock(scan, base, looks.out)
@@ -295,6 +328,26 @@ def fleet_places(eden_rail, arch_rail, dome_anchor):
         places.append((f"{name}Bot", "arch_gantry.usdz", tuple(at + Vector((2.0, 0.0, 5.0))), 0.0, arch_rail))
     for name, at in DOMES:
         places.append((f"{name}Bot", "dome_gantry.usdz", tuple(at), toward(at, NODE_N), dome_anchor))
+    # Two harvesters an arch, one each side of the walkway, parked at the
+    # corridor's gable facing up the vault, each arm toward its row.
+    for name, at in ARCHES:
+        for k, side in ((1, 1), (2, -1)):
+            places.append((f"{name}Picker{k}", "harvester.usdz", tuple(at + Vector((1.0, side * HARVEST_LANE, 0.12))), side * math.pi / 2, None))
+    import crane
+    places.append(("FarmCrane", "vertical_crane.usdz", vertical.crane_place(FARM, 0.0)[0], 0.0, crane.anchor()))
+    # The cleaning robots, on the tracks and docks of what they clean: each
+    # held where its machine frame is its module's (a row's for the panels).
+    import washers
+    for name, at in ARCHES:
+        places.append((f"{name}Washer", "arch_washer.usdz", tuple(at), 0.0, washers.arch_anchor(washers.arch(ARCH_LEN))))
+    for name, at in DOMES:
+        places.append((f"{name}Washer", "dome_washer.usdz", tuple(at), toward(at, NODE_N), washers.dome_anchor(washers.dome(DOME_R))))
+    for k in range(SOLAR_ROWS):
+        places.append((f"SolarWasher{k + 1}", "panel_washer.usdz", tuple(SOLAR + Vector((SOLAR_PITCH * k, 0.0, 0.0))), 0.0,
+                       washers.panel_anchor(washers.panel(SOLAR_PANELS, SOLAR_TILT))))
+    # The soil plant's excavators on their charging docks, facing the bins.
+    for k, (x, y) in enumerate(industry.SOIL_DOCKS):
+        places.append((f"Digger{k + 1}", "regolith_excavator.usdz", (WORKS.x + x, WORKS.y + y, 0.03), 0.0, None))
     # The rovers drive toward their -Y: a yaw of pi/2 points one north.
     places.append(("Rover1", "sev_rover.usdz", (-16.0, -9.0, 0.0), math.pi, None))
     places.append(("Rover2", "sev_rover.usdz", (-22.0, 38.0, 0.0), math.pi / 2, None))

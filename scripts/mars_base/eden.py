@@ -84,20 +84,37 @@ def rack(u, d, name, x, y_inner, levels, side):
     return floor, spacing, yc
 
 
+def racks():
+    """Each rack: (name, x, inner edge y, levels, side)."""
+    rack_len = GROW_LEN / 4
+    for s, side in (("S", -1), ("N", 1)):
+        for r, (levels, *_) in enumerate(RACKS):
+            yield f"Rack{s}{r}", GROW_X0 + rack_len * (r + 0.5), side * AISLE / 2, levels, side
+
+
+def trays():
+    """The growth room's trays in the module's frame, as dicts like `build.trays_of`'s."""
+    floor = 0.1 + SUBFLOOR
+    for name, x, y_inner, levels, side in racks():
+        s, r = name[4], int(name[5])
+        _, crop, slots, ppfd, hours, sown = RACKS[r]
+        spacing = (RACK_H - 0.15) / levels
+        yc = y_inner + side * RACK_D / 2
+        for level in range(levels):
+            top = floor + 0.15 + level * spacing + TRAY[2] - 0.005
+            for t, dx in enumerate((-0.33, 0.33)):
+                yield {"name": f"Tray{s}{r}{level}{'ab'[t]}", "at": (x + dx, yc, top), "yaw": 0.0, "size": TRAY[:2], "slots": slots,
+                       "species": crop, "ppfd": ppfd, "hours": hours, "lamp": min(spacing - 0.16, 1.0), "lit": True,
+                       "days": sown[(level * 2 + t) % len(sown)] + (3 if s == "N" else 0), "room": "grow"}
+
+
 def growth_room(u, d):
     zone(u, d, "GrowthRoom", "grow", (0, 0, 0), 0.0, GROW_LEN * GROW_W * (HEIGHT - 0.1 - SUBFLOOR - WALL),
          (GROW_X0 + GROW_LEN / 2, 0, (0.1 + SUBFLOOR + HEIGHT - WALL) / 2), (GROW_LEN, GROW_W, HEIGHT - WALL - 0.1 - SUBFLOOR))
-    rack_len = GROW_LEN / 4
-    for s, side in (("S", -1), ("N", 1)):
-        for r, (levels, crop, slots, ppfd, hours, sown) in enumerate(RACKS):
-            x = GROW_X0 + rack_len * (r + 0.5)
-            floor, spacing, yc = rack(u, d + 1, f"Rack{s}{r}", x, side * AISLE / 2, levels, side)
-            for level in range(levels):
-                top = floor + 0.15 + level * spacing + TRAY[2] - 0.005
-                lamp = min(spacing - 0.16, 1.0)
-                for t, dx in enumerate((-0.33, 0.33)):
-                    days = sown[(level * 2 + t) % len(sown)] + (3 if s == "N" else 0)
-                    tray(u, d + 1, f"Tray{s}{r}{level}{'ab'[t]}", (x + dx, yc, top), crop, slots, "grow", ppfd, hours, lamp, days, TRAY)
+    for name, x, y_inner, levels, side in racks():
+        rack(u, d + 1, name, x, y_inner, levels, side)
+    for t in trays():
+        tray(u, d + 1, t["name"], t["at"], t["species"], t["slots"], "grow", t["ppfd"], t["hours"], t["lamp"], t["days"], TRAY)
     end(u, d)
 
 

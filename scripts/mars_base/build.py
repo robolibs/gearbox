@@ -12,6 +12,9 @@
                                            placed, and the greenhouse rooms,
                                            trays, lamps, power and services
     bin/gearbox/assets/world/mars_base_fleet.usda  every robot placed
+    bin/gearbox/assets/world/mars_base_farm.json   the work plan: each tending
+                                           robot's joint targets for every
+                                           plant place it reaches (plan.py)
 
 Run in the open Blender (`exec(open(".../scripts/mars_base/build.py").read())`)
 or headless: `blender --background --python scripts/mars_base/build.py`
@@ -34,13 +37,20 @@ sys.path.insert(0, HERE)
 # A Blender session keeps modules from earlier builds: drop them so every
 # build imports the scripts as they are now.
 for name in ("kit", "patterns", "buildings", "habitat", "power", "industry", "spaceport", "props", "usda", "eden", "mechanics", "robots", "vehicles",
-             "layout"):
+             "arms", "harvester", "vertical", "crane", "excavator", "washers", "layout", "plan"):
     sys.modules.pop(name, None)
 import kit  # noqa: E402
 import usda  # noqa: E402
 import eden  # noqa: E402
+import plan  # noqa: E402
 import robots  # noqa: E402
+import crane  # noqa: E402
+import excavator  # noqa: E402
+import harvester  # noqa: E402
+import industry  # noqa: E402
+import vertical  # noqa: E402
 import vehicles  # noqa: E402
+import washers  # noqa: E402
 import weathering  # noqa: E402
 import layout  # noqa: E402
 
@@ -60,6 +70,7 @@ CROPS = {
     "ArchA": [("lettuce", (4, 3), 300, 16, 2)],
     "ArchB": [("tomato", (3, 2), 600, 12, 5)],
     "ArchC": [("wheat", (4, 3), 600, 20, 4)],
+    "VerticalFarm": [("lettuce", (6, 2), 250, 16, 2), ("lettuce", (10, 3), 150, 18, 1)],
 }
 GROWN_DAYS = {"lettuce": 40, "tomato": 110, "potato": 120, "wheat": 85}
 
@@ -181,6 +192,61 @@ def rocks_layer(u, placed):
     u.emit(1, "}")
 
 
+def trays_of(b):
+    """A greenhouse building's trays, each a dict of its place in the
+    building, its crop and how long ago it was sown, and where the building
+    stands (`origin`, `turn`) in the base."""
+    crops = CROPS.get(b.name)
+    room = next((p for kind, p in b.places if kind == "room"), None)
+    if crops is None or room is None:
+        return []
+    at, yaw = world_of(b)
+    out = []
+    for kind, p in b.places:
+        if kind != "tray":
+            continue
+        species, slots, ppfd, hours, apart = crops[min(p.get("ring", 0), len(crops) - 1)]
+        out.append({"name": f"{b.name}_{len(out):03d}", "at": p["at"], "yaw": p["yaw"], "size": p["size"], "slots": slots, "species": species,
+                    "ppfd": ppfd, "hours": hours, "lamp": p.get("lamp", 0.6), "lit": "lamp" in p, "days": (len(out) * apart) % GROWN_DAYS[species],
+                    "room": room["name"], "origin": tuple(at), "turn": yaw})
+    return out
+
+
+def farm_plan(path, built):
+    """Writes the work plan of the robots that tend plants (see plan.py)."""
+    trays = [t for b in built for t in trays_of(b)] + [dict(t, origin=tuple(layout.EDEN), turn=0.0) for t in eden.trays()]
+    eden_rail, arch_rail, polar = gantries()
+    robots_ = []
+    arches = dict(layout.ARCHES)
+    others = {}
+    for name, file, at, yaw, _ in layout.fleet_places(robots.rail_anchor(eden_rail), robots.rail_anchor(arch_rail), robots.polar_anchor(polar)):
+        machine = f"base_fleet_{name.lower()}"
+        if file == "eden_gantry.usdz":
+            robots_.append(plan.rail_gantry(eden_rail, machine, "grow", at, yaw))
+        elif file == "arch_gantry.usdz":
+            robots_.append(plan.rail_gantry(arch_rail, machine, name[:-3].lower(), at, yaw))
+        elif file == "dome_gantry.usdz":
+            robots_.append(plan.polar_gantry(polar, machine, name[:-3].lower(), at, yaw))
+        elif file == "vertical_crane.usdz":
+            robots_.append(plan.stacker_crane(crane.CRANE, machine, "verticalfarm", at, yaw, 6.5 - vertical.CRANE_X0, vertical.FLOOR))
+        elif file == "harvester.usdz":
+            arch = name[:5]
+            stops = sorted({t["at"][0] for t in trays if t["room"] == arch.lower()})
+            side = 1 if name.endswith("1") else -1
+            robots_.append(plan.mobile_harvester(harvester.HARVESTER, machine, arch.lower(), tuple(arches[arch]), 0.0, side, stops, layout.HARVEST_LANE))
+        elif file == "arch_washer.usdz":
+            others[machine] = plan.arch_washer(washers.arch(layout.ARCH_LEN), washers.arch_press, name[:5].lower())
+        elif file == "dome_washer.usdz":
+            others[machine] = plan.dome_washer(name[:5].lower())
+        elif file == "panel_washer.usdz":
+            others[machine] = plan.panel_washer(washers.panel(layout.SOLAR_PANELS, layout.SOLAR_TILT).span)
+        elif file == "regolith_excavator.usdz":
+            k = int(name[-1]) - 1
+            bays = [(layout.WORKS.x + x, layout.WORKS.y + y) for x, y in industry.SOIL_BAYS]
+            others[machine] = plan.excavator(machine, at, tuple(layout.DIG[k]), bays)
+    return plan.write(path, robots_, trays, others)
+
+
 def world_layer(path, built, base=None):
     """The world file: every module placed, the rocks strewn round them, and
     the greenhouse gearbox runs."""
@@ -227,27 +293,23 @@ def world_layer(path, built, base=None):
                 station = to_base @ Vector(p["at"])
             elif kind == "light":
                 lights.append((to_base @ Vector(p["at"]), p["kind"], yaw + p.get("yaw", 0.0)))
-        crops = CROPS.get(b.name)
-        if room is None or crops is None:
+        if room is None or b.name not in CROPS:
             continue
         rooms += 1
         name = room["name"]
         usda.zone(u, 2, b.name, name, tuple(at), math.degrees(yaw), room["volume"], room["centre"], room["size"],
                   tank=room["volume"] * 2.0, glazing=room.get("glazing", 0.0))
-        count, spots = 0, {}
+        for t in trays_of(b):
+            usda.tray(u, 3, t["name"], t["at"], t["species"], t["slots"], name, t["ppfd"], t["hours"], t["lamp"], t["days"], (*t["size"], 0.08),
+                      yaw_deg=math.degrees(t["yaw"]), lamp=t["lit"])
+            trays += 1
+        spots = {}
         for kind, p in b.places:
-            if kind == "tray":
-                species, slots, ppfd, hours, apart = crops[min(p.get("ring", 0), len(crops) - 1)]
-                days = (count * apart) % GROWN_DAYS[species]
-                usda.tray(u, 3, f"{b.name}_{count:03d}", p["at"], species, slots, name, ppfd, hours, p.get("lamp", 0.6), days, (*p["size"], 0.08),
-                          yaw_deg=math.degrees(p["yaw"]), lamp="lamp" in p)
-                count += 1
-            elif kind == "service":
+            if kind == "service":
                 # A second spot for the same fault, like an arch's far air handler, is numbered.
                 seen = spots.get(p["fault"], 0)
                 spots[p["fault"]] = seen + 1
                 usda.service(u, 3, f"service_{p['fault']}" + (f"_{seen}" if seen else ""), p["at"], p["fault"], name)
-        trays += count
         usda.end(u, 2)
     if station is not None:
         usda.xform(u, 2, "Power", tuple(station), ["GearboxPowerAPI"], [
@@ -301,6 +363,10 @@ def write_machines():
         "dome_gantry": robots.build("dome_gantry", polar, "the polar gantry of a dome", work),
     }
     layers[vehicles.SEV.kind] = vehicles.build(vehicles.SEV, layout.NASA, MACHINES, work)
+    layers.update(crane.build(work))
+    layers.update(harvester.build(work))
+    layers.update(excavator.build(work))
+    layers.update(washers.build(work, layout.ARCH_LEN, layout.DOME_R, layout.SOLAR_PANELS, layout.SOLAR_TILT))
     for name, layer in layers.items():
         UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(layer), os.path.join(MACHINES, f"{name}.usdz"))
     return list(layers)
@@ -335,6 +401,7 @@ def main(export=True, weather=True, machines=True):
         if machines:
             report["machines"] = write_machines()
         report["robots"] = write_fleet(os.path.join(WORLD_DIR, "mars_base_fleet.usda"))
+        report["plan"] = farm_plan(os.path.join(WORLD_DIR, "mars_base_farm.json"), built)
     return report
 
 
