@@ -270,11 +270,11 @@ mod tests {
         ] {
             assert_eq!(values.get("machine", "wheel", name), Some(expected), "{name}");
         }
-        assert!(values.of_machine("other").is_empty());
+        assert!(values.of_machine("other").next().is_none());
         wheel_readout(&mut values, "machine", "wheel", WheelForceOutput {
             pressure: Some(PressureTyreOutput::default()), ..Default::default()
         });
-        assert!(values.of_link("machine", "wheel").values().all(|v| *v == 0.0));
+        assert!(values.of_link("machine", "wheel").all(|(_, v)| v == 0.0));
     }
 
     #[test]

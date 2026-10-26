@@ -6,7 +6,7 @@
 //! and a controller that drives a joint reads the values of the link that
 //! joint moves.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::physics::{PhysicsWorld, TickResourcesExt};
 use bevy::prelude::*;
@@ -72,9 +72,10 @@ pub struct TimRequests(pub HashMap<String, CmdVel>);
 #[derive(Resource, Default, Clone)]
 pub struct ServiceCommands(pub HashMap<ControllerKey, HashMap<String, String>>);
 
-/// Live named values per link: (machine id, link name, value name) → value.
+/// Live named values per link: (machine id, link name, value name) → value,
+/// in order, so one machine's or one link's values are a range.
 #[derive(Resource, Default, Clone)]
-pub struct LinkValues(pub HashMap<(String, String, String), f64>);
+pub struct LinkValues(pub BTreeMap<(String, String, String), f64>);
 
 impl crate::physics::Merge for LinkValues {
     fn merge(&mut self, sent: &Self, back: Self) {
@@ -104,24 +105,19 @@ impl LinkValues {
     }
 
     /// Every value of one link, by name.
-    pub fn of_link(&self, machine: &str, link: &str) -> HashMap<String, f64> {
+    pub fn of_link<'a>(&'a self, machine: &'a str, link: &'a str) -> impl Iterator<Item = (&'a str, f64)> + 'a {
         self.0
-            .iter()
-            .filter(|((m, l, _), _)| m == machine && l == link)
-            .map(|((_, _, n), v)| (n.clone(), *v))
-            .collect()
+            .range((machine.to_string(), link.to_string(), String::new())..)
+            .take_while(move |((m, l, _), _)| m == machine && l == link)
+            .map(|((_, _, n), v)| (n.as_str(), *v))
     }
 
-    /// Every value of one machine, sorted by link then name.
-    pub fn of_machine(&self, machine: &str) -> Vec<(String, String, f64)> {
-        let mut out: Vec<(String, String, f64)> = self
-            .0
-            .iter()
-            .filter(|((m, _, _), _)| m == machine)
-            .map(|((_, l, n), v)| (l.clone(), n.clone(), *v))
-            .collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        out
+    /// Every value of one machine, by link then name.
+    pub fn of_machine<'a>(&'a self, machine: &'a str) -> impl Iterator<Item = (&'a str, &'a str, f64)> + 'a {
+        self.0
+            .range((machine.to_string(), String::new(), String::new())..)
+            .take_while(move |((m, _, _), _)| m == machine)
+            .map(|((_, l, n), v)| (l.as_str(), n.as_str(), *v))
     }
 }
 
@@ -659,7 +655,7 @@ fn apply_service_controllers(
                     service.0.get(&key).cloned().unwrap_or_default();
                 if let Some(link) = moved_link(&machine.links, prim) {
                     for (name, value) in values.of_link(&machine.id, &link.name) {
-                        props.insert(name, value.to_string());
+                        props.insert(name.to_string(), value.to_string());
                     }
                 }
                 if let Some(position) = grouped_position(machine, controller, &values) {
@@ -1075,6 +1071,22 @@ mod tests {
         let mut own = values(&[("lift", 9.0), ("tilt", 2.0), ("gone", 7.0), ("target", 4.0)]);
         own.merge(&sent, back);
         assert_eq!(own.0, values(&[("lift", 9.0), ("tilt", 5.0), ("pto", 3.0), ("target", 4.0)]).0);
+    }
+
+    #[test]
+    fn a_link_s_values_leave_out_links_and_machines_named_after_it() {
+        let mut values = LinkValues::default();
+        for (machine, link, name, value) in
+            [("rover", "arm", "lift", 1.0), ("rover", "arm2", "lift", 2.0), ("rover2", "arm", "lift", 3.0), ("rover", "arm", "", 4.0)]
+        {
+            values.set(machine, link, name, value);
+        }
+        assert_eq!(values.of_link("rover", "arm").collect::<Vec<_>>(), vec![("", 4.0), ("lift", 1.0)]);
+        assert_eq!(
+            values.of_machine("rover").collect::<Vec<_>>(),
+            vec![("arm", "", 4.0), ("arm", "lift", 1.0), ("arm2", "lift", 2.0)]
+        );
+        assert_eq!(values.of_link("rover", "ar").count(), 0);
     }
 
     /// An arm on a revolute joint to a fixed post, in zero gravity.
