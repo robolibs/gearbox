@@ -3,8 +3,10 @@
 //! steps them in real time while the frame extracts, renders, presents and
 //! takes input; before the next `Update` they come back. The frame waits on
 //! no more than the step in progress, so a step slower than real time slows
-//! the simulation, not the frame. A frame's batch runs at most
-//! `MAX_STEPS_PER_FRAME` steps, as the frame's own stepping does.
+//! the simulation, not the frame, and a slow frame does not slow the
+//! simulation: between steps the thread answers the API's drive commands and
+//! clock reads and publishes the machines' states. A step budget runs at most
+//! `MAX_STEPS_PER_FRAME` steps a frame, as the frame's own stepping does.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -135,8 +137,22 @@ impl Plugin for PhysicsThreadPlugin {
         schedule.set_executor(SingleThreadedExecutor::new());
         let mut tick = World::new();
         tick.add_schedule(schedule);
+        tick.insert_resource(OnPhysicsThread);
         world.insert_resource(PhysicsThread::spawn(tick));
     }
+}
+
+/// Marks the thread's world: what runs there runs between steps.
+#[derive(Resource)]
+pub(crate) struct OnPhysicsThread;
+
+pub(crate) fn on_the_thread(marker: Option<Res<OnPhysicsThread>>) -> bool {
+    marker.is_some()
+}
+
+/// The physics stays with the frame: no thread, or a paused clock kept it.
+pub(crate) fn physics_on_the_frame(thread: Option<Res<PhysicsThread>>) -> bool {
+    thread.is_none_or(|thread| thread.in_flight.is_none())
 }
 
 /// How many steps a batch runs.
@@ -144,8 +160,8 @@ impl Plugin for PhysicsThreadPlugin {
 enum Plan {
     /// Exactly this many, before the frame takes the world back: a step budget.
     Exact(u32),
-    /// As many as real time owes since `origin`, up to a frame's worth; the
-    /// frame takes the world back after the step in progress.
+    /// As many as real time owes since `origin`; the frame takes the world
+    /// back after the step in progress.
     RealTime { origin: Instant, hz: f64 },
 }
 
@@ -153,9 +169,7 @@ impl Plan {
     fn due(&self, steps: u32) -> bool {
         match *self {
             Plan::Exact(n) => steps < n,
-            Plan::RealTime { origin, hz } => {
-                steps < MAX_STEPS_PER_FRAME && (steps + 1) as f64 <= origin.elapsed().as_secs_f64() * hz
-            }
+            Plan::RealTime { origin, hz } => (steps + 1) as f64 <= origin.elapsed().as_secs_f64() * hz,
         }
     }
 }
@@ -296,10 +310,7 @@ fn join(world: &mut World) {
         let mut physics = world.resource_mut::<PhysicsWorld>();
         physics.pending_steps = steps;
         if let Plan::RealTime { origin, hz } = plan {
-            // Past a frame's worth of steps the time left over is dropped.
-            let behind = origin.elapsed().as_secs_f64() - steps as f64 / hz;
-            let limit = if steps >= MAX_STEPS_PER_FRAME { 1.0 / hz } else { MAX_DEBT_S };
-            let behind = behind.clamp(0.0, limit);
+            let behind = (origin.elapsed().as_secs_f64() - steps as f64 / hz).clamp(0.0, MAX_DEBT_S);
             thread.origin = Instant::now() - Duration::from_secs_f64(behind);
             physics.accumulator = behind.min(1.0 / hz);
         }
@@ -428,14 +439,16 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_frame_runs_a_frame_s_worth_of_steps_and_drops_the_rest() {
+    fn a_slow_frame_does_not_hold_the_physics_back() {
         let (mut app, _) = app();
         for _ in 0..2 {
             app.update();
             std::thread::sleep(Duration::from_millis(400));
             app.world_mut().run_schedule(PhysicsJoin);
         }
-        assert_eq!(app.world().resource::<PhysicsWorld>().ticks, 2 * MAX_STEPS_PER_FRAME as u64);
+        let physics = app.world().resource::<PhysicsWorld>();
+        let owed = 0.8 * physics.step_hz;
+        assert!(physics.ticks as f64 >= 0.8 * owed && physics.ticks as f64 <= owed + 1.0, "{} ticks", physics.ticks);
     }
 
     #[test]

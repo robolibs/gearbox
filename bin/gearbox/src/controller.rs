@@ -271,13 +271,26 @@ pub(crate) struct ControllerRuntimeState {
 #[derive(Resource, Debug, Default, Clone)]
 pub(crate) struct LastLinearSpeed(HashMap<ControllerKey, (f64, f64)>);
 
-/// Each machine's chassis as the frame last held the physics, by stage and
-/// machine id, and the steps that batch ran: what the state publisher reads.
-#[derive(Resource, Default)]
+/// Each machine's chassis at the last read, by stage and machine id, and the
+/// steps run since the read before: what the state publisher reads.
+#[derive(Resource, Default, Clone)]
 pub(crate) struct ChassisReadings {
     machines: HashMap<(Entity, String), ChassisReading>,
-    steps: u32,
+    steps: u64,
     step_hz: f64,
+    /// Physics ticks at the last read.
+    ticks: u64,
+}
+
+/// How often, in simulated time, the physics thread publishes the machines' states.
+const STATE_HZ: f64 = 30.0;
+
+/// The halves of the API the physics thread serves between steps: the clock
+/// and each machine agent's lane, by namespace.
+#[derive(Resource, Default, Clone)]
+pub(crate) struct ApiLanes {
+    clock: Option<std::sync::Arc<gearbox_api::ClockLane>>,
+    machines: HashMap<String, std::sync::Arc<gearbox_api::MachineLane>>,
 }
 
 #[derive(Clone, Copy)]
@@ -384,13 +397,21 @@ impl Plugin for ControllerDiscoveryPlugin {
             .init_resource::<crate::joint_control::runtime::BindingWaits>()
             .init_resource::<crate::joint_control::runtime::ControlClock>()
             .init_resource::<crate::joint_control::api::DirectLeases>()
+            .init_resource::<ApiLanes>()
             .tick_reads::<ControllerInventory>()
             .tick_reads::<ControllerCommands>()
             .tick_reads::<UiDrive>()
             .tick_reads::<MachineAgentKeys>()
+            .tick_reads::<ApiLanes>()
+            .tick_reads::<crate::services::TimRequests>()
+            .tick_reads::<crate::attach::Attachments>()
+            .tick_reads::<gearbox_api::WorldClock>()
+            .tick_reads::<crate::environment::WorldStep>()
             .tick_writes::<crate::joint_control::runtime::ControlClock>()
             .tick_writes::<ControllerRuntimeState>()
             .tick_writes::<ControllerStates>()
+            .tick_writes::<ChassisReadings>()
+            .tick_writes::<LastLinearSpeed>()
             .configure_sets(
                 crate::physics::ControlTick,
                 (
@@ -408,6 +429,10 @@ impl Plugin for ControllerDiscoveryPlugin {
                     (apply_builtin_ackermann_cmd_vel, apply_builtin_diff_drive_cmd_vel, tracked::apply)
                         .chain()
                         .in_set(crate::joint_control::runtime::ControlSet::Controllers),
+                    (serve_lanes, (read_chassis, publish_machine_controller_states).chain().run_if(state_due))
+                        .chain()
+                        .before(crate::joint_control::runtime::ControlSet::Clock)
+                        .run_if(crate::physics::on_the_thread),
                 ),
             )
             .add_systems(Update, rediscover_swapped_machines.before(prepare_machine_physics))
@@ -438,10 +463,14 @@ impl Plugin for ControllerDiscoveryPlugin {
             )
             .add_systems(
                 PostUpdate,
-                (read_chassis, crate::joint_control::api::publish_state)
-                    .after(bevy::transform::TransformSystems::Propagate),
+                crate::joint_control::api::publish_state.after(bevy::transform::TransformSystems::Propagate),
             )
-            .add_systems(Last, publish_machine_controller_states);
+            .add_systems(
+                Last,
+                (read_chassis, publish_machine_controller_states)
+                    .chain()
+                    .run_if(crate::physics::physics_on_the_frame),
+            );
     }
 }
 
@@ -4042,14 +4071,64 @@ mod tests {
             let id = physics.insert_body(crate::physics::backend::BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(x, 0.0, 0.0))));
             physics.entity_to_body.insert(*body, id);
         }
-        physics.pending_steps = 4;
+        physics.ticks = 4;
         world.insert_resource(physics);
         world.init_resource::<ChassisReadings>();
+        world.run_system_once(read_chassis).unwrap();
+        world.resource_mut::<crate::physics::PhysicsWorld>().ticks = 7;
         world.run_system_once(read_chassis).unwrap();
         let readings = world.resource::<ChassisReadings>();
         let x = |id: &str| readings.machines[&(stage, id.to_string())].position[0];
         assert_eq!((x("eve"), x("percy")), (3.0, 7.0));
-        assert_eq!(readings.steps, 4);
+        assert_eq!(readings.steps, 3);
+    }
+
+    #[test]
+    fn between_steps_the_api_s_twists_drive_and_its_clock_reads_run_on() {
+        use bevy::ecs::system::RunSystemOnce;
+        let host = gearbox_api::HostBus::new(gearbox_api::HostConfig::new("test-serve-lanes", "test").ephemeral())
+            .expect("host");
+        let mut config = MachineConfig::new("test-serve-lanes", "rover").with_minimal_links();
+        config.ephemeral = true;
+        let agent = MachineAgent::new(config, host.endpoint_id()).expect("agent");
+        let key = ControllerKey::new(Entity::from_raw_u32(1).unwrap(), "rover", "drive");
+        let mut world = World::new();
+        world.insert_resource(ApiLanes {
+            clock: Some(host.clock_lane().clone()),
+            machines: HashMap::from([("rover".to_string(), agent.lane().clone())]),
+        });
+        world.insert_resource(MachineAgentKeys(HashMap::from([("rover".to_string(), key.clone())])));
+        world.init_resource::<UiDrive>();
+        world.init_resource::<ControllerCommands>();
+        let mut physics = crate::physics::PhysicsWorld::default();
+        physics.simulated_seconds = 1.5;
+        world.insert_resource(physics);
+        world.insert_resource(gearbox_api::WorldClock { seconds: 100.0, rate: 2.0, ..default() });
+        world.insert_resource(crate::environment::WorldStep { seconds: 0.0, simulated_s: 0.5 });
+
+        let (endpoint, did) = (host.endpoint_id(), agent.did());
+        let caller = std::thread::spawn(move || {
+            let c = gearbox_api::Client::connect_id(endpoint, gearbox_api::IdentitySource::Random, "serve-lanes")
+                .expect("client");
+            let mut rover = c.machine_by_did("rover", &did).expect("rover");
+            let session = rover.claim(60_000, false).expect("claim").session;
+            assert!(rover.cmd_vel(session, 0.7, 0.2).expect("cmd_vel").is_ok());
+            c.clock(gearbox_api::clock_op::GET).expect("clock").world_s
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !caller.is_finished() && std::time::Instant::now() < deadline {
+            world.run_system_once(serve_lanes).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(caller.join().expect("caller"), 102.0);
+        let cmd = world.resource::<ControllerCommands>().cmd_vel[&key];
+        assert_eq!((cmd.linear_mps, cmd.angular_rps), (0.7, 0.2));
+
+        let ui = CmdVel { linear_mps: -0.3, angular_rps: 0.0 };
+        world.resource_mut::<UiDrive>().commands.insert(key.clone(), ui);
+        world.resource_mut::<ControllerCommands>().cmd_vel.insert(key.clone(), ui);
+        world.run_system_once(serve_lanes).unwrap();
+        assert_eq!(world.resource::<ControllerCommands>().cmd_vel[&key].linear_mps, -0.3);
     }
 
     #[test]
@@ -4609,8 +4688,26 @@ fn sync_machine_agents(
     bus: Option<ResMut<GearboxBus>>,
     mut keys: ResMut<MachineAgentKeys>,
     mut rejected: ResMut<RejectedMachines>,
+    mut lanes: ResMut<ApiLanes>,
 ) {
     let Some(mut bus) = bus else { return };
+    sync_agents(&inventory, &mut bus, &mut keys, &mut rejected);
+    let current = lanes.machines.len() == bus.machines.len()
+        && bus.machines.iter().all(|(id, agent)| {
+            lanes.machines.get(id).is_some_and(|lane| std::sync::Arc::ptr_eq(lane, agent.lane()))
+        });
+    if !current || lanes.clock.is_none() {
+        lanes.clock = Some(bus.host.clock_lane().clone());
+        lanes.machines = bus.machines.iter().map(|(id, agent)| (id.clone(), agent.lane().clone())).collect();
+    }
+}
+
+fn sync_agents(
+    inventory: &ControllerInventory,
+    bus: &mut GearboxBus,
+    keys: &mut MachineAgentKeys,
+    rejected: &mut RejectedMachines,
+) {
     let mut wanted: HashMap<String, (ControllerKey, MachineConfig)> = HashMap::new();
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {
@@ -4737,20 +4834,51 @@ fn apply_machine_agent_commands(
         if key.controller_instance.is_empty() {
             continue;
         }
-        let twist = agent.twist();
-        let mut cmd = CmdVel {
-            linear_mps: twist.linear.vx as f32,
-            angular_rps: yaw_rate_of(&twist),
-        };
-        // A quiet session lets a granted slave request drive the master.
-        if cmd.linear_mps.abs() < 1e-6
-            && cmd.angular_rps.abs() < 1e-6
-            && let Some(requested) = tim.0.get(&key.machine_id)
-        {
-            cmd = *requested;
-        }
-        commands.cmd_vel.insert(key.clone(), cmd);
+        commands.cmd_vel.insert(key.clone(), agent_command(&agent.twist(), key, &tim));
     }
+}
+
+/// The command an agent's twist asks of its machine. A quiet session lets a
+/// granted slave request drive the master.
+fn agent_command(twist: &Twist, key: &ControllerKey, tim: &crate::services::TimRequests) -> CmdVel {
+    let cmd = CmdVel { linear_mps: twist.linear.vx as f32, angular_rps: yaw_rate_of(twist) };
+    match tim.0.get(&key.machine_id) {
+        Some(requested) if cmd.linear_mps.abs() < 1e-6 && cmd.angular_rps.abs() < 1e-6 => *requested,
+        _ => cmd,
+    }
+}
+
+/// Between steps on the physics thread: answer clock reads at the time
+/// reached, and drive each machine by its lane's twist unless the UI drives it.
+#[allow(clippy::too_many_arguments)]
+fn serve_lanes(
+    lanes: Res<ApiLanes>,
+    keys: Res<MachineAgentKeys>,
+    tim: Option<Res<crate::services::TimRequests>>,
+    ui: Res<UiDrive>,
+    physics: Res<crate::physics::PhysicsWorld>,
+    clock: Option<Res<gearbox_api::WorldClock>>,
+    step: Option<Res<crate::environment::WorldStep>>,
+    mut commands: ResMut<ControllerCommands>,
+) {
+    if let (Some(lane), Some(clock), Some(step)) = (&lanes.clock, clock, step) {
+        lane.answer_reads(crate::environment::world_seconds_at(&clock, &step, physics.simulated_seconds));
+    }
+    let none = crate::services::TimRequests::default();
+    let tim = tim.as_deref().unwrap_or(&none);
+    for (machine_id, lane) in &lanes.machines {
+        lane.serve();
+        let Some(key) = keys.0.get(machine_id) else { continue };
+        if key.controller_instance.is_empty() || ui.commands.contains_key(key) || ui.inhibited.contains(key) {
+            continue;
+        }
+        commands.cmd_vel.insert(key.clone(), agent_command(&lane.twist(), key, tim));
+    }
+}
+
+/// The physics thread publishes the machines' states `STATE_HZ` times a simulated second.
+fn state_due(physics: Res<crate::physics::PhysicsWorld>) -> bool {
+    physics.ticks % (physics.step_hz / STATE_HZ).round().max(1.0) as u64 == 0
 }
 
 /// Public cmd_vel follows ROS convention: yaw is angular z. Accept angular
@@ -4775,10 +4903,7 @@ const WORLD_GEO_DATUM: Geo = Geo {
     altitude: 0.0,
 };
 
-/// Publish each machine's state: from its drive controller when it has one,
-/// else straight from its body pose, so trailers report where they are.
-/// Read each machine's chassis for the state publisher before the physics
-/// leaves the frame.
+/// Read each machine's chassis for the state publisher.
 fn read_chassis(
     inventory: Res<ControllerInventory>,
     physics: Res<crate::physics::PhysicsWorld>,
@@ -4786,7 +4911,8 @@ fn read_chassis(
     mut readings: ResMut<ChassisReadings>,
 ) {
     readings.machines.clear();
-    readings.steps = physics.pending_steps;
+    readings.steps = physics.ticks.saturating_sub(readings.ticks);
+    readings.ticks = physics.ticks;
     readings.step_hz = physics.step_hz;
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else { continue };
@@ -4821,18 +4947,20 @@ fn read_chassis(
     }
 }
 
+/// Publish each machine's state: from its drive controller when it has one,
+/// else straight from its body pose, so trailers report where they are.
+#[allow(clippy::too_many_arguments)]
 fn publish_machine_controller_states(
     inventory: Res<ControllerInventory>,
     states: Res<ControllerStates>,
     keys: Res<MachineAgentKeys>,
-    bus: Option<ResMut<GearboxBus>>,
+    lanes: Res<ApiLanes>,
     chassis: Res<ChassisReadings>,
     link_values: Res<crate::services::LinkValues>,
     service: Res<crate::services::ServiceCommands>,
     attachments: Res<crate::attach::Attachments>,
     mut last_speed: ResMut<LastLinearSpeed>,
 ) {
-    let Some(mut bus) = bus else { return };
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {
             continue;
@@ -4845,21 +4973,21 @@ fn publish_machine_controller_states(
         else {
             continue;
         };
-        let Some(agent) = bus.machines.get_mut(&machine_id) else {
+        let Some(agent) = lanes.machines.get(&machine_id) else {
             continue;
         };
-        let mut props = Props::from_pairs(&[("machine_id", machine.id.as_str())]);
+        let mut props: Vec<(String, String)> = vec![("machine_id".into(), machine.id.clone())];
         if let Some(master) = agent.attached_to() {
-            props.set("attached_to", master);
+            props.push(("attached_to".into(), master));
         }
-        let tools: Vec<&str> = agent.tools().iter().map(|t| t.slave.as_str()).collect();
+        let tools = agent.slaves();
         if !tools.is_empty() {
-            props.set("tools", &tools.join(","));
+            props.push(("tools".into(), tools.join(",")));
         }
         // Process data of this machine and the commanded state of every
         // attached slave's service controllers (TOOLS_SPEC §5.1, §7.4).
         for (link, key, value) in link_values.of_machine(&machine.id) {
-            props.set(&format!("link.{link}.{key}"), &format!("{value}"));
+            props.push((format!("link.{link}.{key}"), format!("{value}")));
         }
         for a in attachments.0.iter().filter(|a| a.master_id == machine_id) {
             let Some(slave_key) = keys.0.get(&a.slave_id) else {
@@ -4870,16 +4998,8 @@ fn publish_machine_controller_states(
                 {
                     continue;
                 }
-                let mut sorted: Vec<(&String, &String)> = values.iter().collect();
-                sorted.sort();
-                for (k, v) in sorted {
-                    props.set(
-                        &format!(
-                            "tool.{}.controller.{}.{k}",
-                            a.slave_id, key.controller_instance
-                        ),
-                        v,
-                    );
+                for (k, v) in values {
+                    props.push((format!("tool.{}.controller.{}.{k}", a.slave_id, key.controller_instance), v.clone()));
                 }
             }
         }
@@ -4898,7 +5018,7 @@ fn publish_machine_controller_states(
         let (region, position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
         {
             Some((controller, state)) => {
-                props.set("controller", &controller.instance);
+                props.push(("controller".into(), controller.instance.clone()));
                 (
                     state.region,
                     state.position_m,
@@ -4945,12 +5065,14 @@ fn publish_machine_controller_states(
         };
         let ros_point = Point::new(position[2], position[0], position[1]);
         if let Some(place) = &place {
-            props.set("lat", &format!("{:.9}", place.geodetic.latitude));
-            props.set("lon", &format!("{:.9}", place.geodetic.longitude));
-            props.set("alt", &format!("{:.3}", place.geodetic.altitude));
-            props.set("ecef", &format!("{:.3} {:.3} {:.3}", place.ecef.x, place.ecef.y, place.ecef.z));
             let anchor = own.unwrap_or(place.datum);
-            props.set("datum", &format!("{:.9} {:.9}", anchor.latitude, anchor.longitude));
+            props.extend([
+                ("lat".into(), format!("{:.9}", place.geodetic.latitude)),
+                ("lon".into(), format!("{:.9}", place.geodetic.longitude)),
+                ("alt".into(), format!("{:.3}", place.geodetic.altitude)),
+                ("ecef".into(), format!("{:.3} {:.3} {:.3}", place.ecef.x, place.ecef.y, place.ecef.z)),
+                ("datum".into(), format!("{:.9} {:.9}", anchor.latitude, anchor.longitude)),
+            ]);
         }
         let half = heading * 0.5;
         let ros_rotation = Quaternion::new(half.cos(), 0.0, 0.0, half.sin());
@@ -4966,7 +5088,7 @@ fn publish_machine_controller_states(
             roll_rad: roll,
             pitch_rad: pitch,
             session: 0,
-            props: props.into_bytes(),
+            props: Props::from_entries(props).into_bytes(),
         };
         agent.publish_state(wire);
 

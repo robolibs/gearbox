@@ -104,11 +104,29 @@ impl Props {
     }
 
     pub fn from_pairs(pairs: &[(&str, &str)]) -> Self {
-        let mut props = Self::new();
-        for (k, v) in pairs {
-            props.set(k, v);
+        Self::from_entries(pairs.iter().copied())
+    }
+
+    /// The map of `entries`, encoded in one pass; of two with one key the later wins.
+    pub fn from_entries<K: AsRef<str>, V: AsRef<str>>(entries: impl IntoIterator<Item = (K, V)>) -> Self {
+        let mut sorted: Vec<(K, V)> = entries.into_iter().collect();
+        sorted.reverse();
+        sorted.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+        sorted.dedup_by(|later, kept| later.0.as_ref() == kept.0.as_ref());
+        let blob: usize = sorted.iter().map(|(k, v)| k.as_ref().len() + v.as_ref().len()).sum();
+        let mut table = Vec::with_capacity(4 + sorted.len() * std::mem::size_of::<datapod::MapEntry>());
+        let mut bytes = Vec::with_capacity(blob);
+        table.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
+        for (k, v) in &sorted {
+            let (k, v) = (k.as_ref().as_bytes(), v.as_ref().as_bytes());
+            for field in [bytes.len(), k.len(), bytes.len() + k.len(), v.len()] {
+                table.extend_from_slice(&(field as u32).to_le_bytes());
+            }
+            bytes.extend_from_slice(k);
+            bytes.extend_from_slice(v);
         }
-        props
+        table.extend_from_slice(&bytes);
+        Self(Map { data: table })
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
@@ -182,4 +200,22 @@ where
     T::Header: datapod::LeWireHeader,
 {
     Env::new(type_hash, wire.to_vec()).to_datapod::<T>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn props_from_entries_encode_as_inserting_them_one_by_one_does() {
+        let entries = [("tools", "a,b"), ("machine_id", "eve"), ("link.arm.position", "0.25"), ("tools", "c"), ("", "")];
+        let mut inserted = Map::new();
+        for (k, v) in entries {
+            inserted.insert_str(k, v);
+        }
+        let props = Props::from_entries(entries);
+        assert_eq!(props.to_bytes(), inserted.data);
+        assert_eq!(props.get("tools").as_deref(), Some("c"));
+        assert_eq!(Props::from_bytes(&props.to_bytes()).iter().len(), 4);
+    }
 }

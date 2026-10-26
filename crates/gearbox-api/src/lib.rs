@@ -21,9 +21,9 @@ pub use agentio;
 pub use agentio::IdentitySource;
 pub use client::{Client, MachineClient, next_sample};
 pub use datapod;
-pub use host::{HostBus, HostConfig, MAX_PAYLOAD_BYTES};
+pub use host::{ClockLane, HostBus, HostConfig, MAX_PAYLOAD_BYTES};
 pub use machine::{
-    ControllerDesc, LinkDesc, MachineAgent, MachineConfig, ToolDesc, link_records_for,
+    ControllerDesc, LinkDesc, MachineAgent, MachineConfig, MachineLane, ToolDesc, link_records_for,
 };
 pub use peerbus;
 pub use view::{ViewPlace, set_home_place, set_view_place, view_place};

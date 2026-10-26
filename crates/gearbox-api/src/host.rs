@@ -3,11 +3,12 @@
 //! can answer from its own queries.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
 use datapod::{DataPod, DataPodDecode, DataPodValidate, LeWireHeader};
-use peerbus::{AnsServer, EndpointId, Publisher, ReqServer};
+use peerbus::{AnsServer, EndpointId, Publisher, ReqReplyToken, ReqServer};
 
 use crate::registry::{self, RegistryEntry};
 use crate::topics;
@@ -97,7 +98,7 @@ pub struct HostBus {
     started: Instant,
     started_unix_ms: u64,
     info: Registered<ReqServer<Env, Env>>,
-    clock: Registered<ReqServer<Env, Env>>,
+    clock: Arc<ClockLane>,
     clock_state: Registered<Publisher<Env>>,
     clear: Registered<ReqServer<Env, Env>>,
     list: Registered<AnsServer<Env, Env>>,
@@ -139,7 +140,11 @@ impl HostBus {
 
         let bus = Self {
             info: agent.req_server(topics::HOST_INFO)?,
-            clock: agent.req_server(topics::SCENE_CLOCK)?,
+            clock: Arc::new(ClockLane(Mutex::new(ClockDesk {
+                server: agent.req_server(topics::SCENE_CLOCK)?,
+                base: ClockState::default(),
+                left: Vec::new(),
+            }))),
             clock_state: agent.publish(topics::SCENE_CLOCK_STATE)?,
             clear: agent.req_server(topics::SCENE_CLEAR)?,
             list: agent.que_server(topics::SCENE_LIST)?,
@@ -218,8 +223,15 @@ impl HostBus {
         serve_req(&mut self.info, f)
     }
 
-    pub fn serve_clock(&mut self, f: impl FnMut(ClockCommand) -> ClockState) -> usize {
-        serve_req(&mut self.clock, f)
+    /// Answer the commands the physics thread left and every new one, and
+    /// remember `now` as the clock the thread answers reads from.
+    pub fn serve_clock(&mut self, now: ClockState, f: impl FnMut(ClockCommand) -> ClockState) -> usize {
+        self.clock.serve(now, f)
+    }
+
+    /// The clock topic, shared with the physics thread.
+    pub fn clock_lane(&self) -> &Arc<ClockLane> {
+        &self.clock
     }
 
     pub fn serve_clear(&mut self, f: impl FnMut(ClearRequest) -> Status) -> usize {
@@ -300,6 +312,63 @@ impl HostBus {
 
     pub fn publish_clock(&mut self, state: &ClockState) {
         let _ = self.clock_state.send(&pack(state));
+    }
+}
+
+/// The clock topic. Between physics steps the thread answers reads with the
+/// time it has reached and leaves every other command for the frame.
+pub struct ClockLane(Mutex<ClockDesk>);
+
+struct ClockDesk {
+    server: Registered<ReqServer<Env, Env>>,
+    /// The clock as the frame last served it.
+    base: ClockState,
+    /// Commands the thread left for the frame.
+    left: Vec<(ClockCommand, ReqReplyToken)>,
+}
+
+impl ClockLane {
+    fn lock(&self) -> MutexGuard<'_, ClockDesk> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Answer every read with the running clock at `world_s`; keep the rest.
+    pub fn answer_reads(&self, world_s: f64) {
+        let mut desk = self.lock();
+        let desk = &mut *desk;
+        while let Ok(Some(pending)) = desk.server.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<ClockCommand>(sample.header().type_hash, sample.payload()) {
+                Ok(cmd) if cmd.op == clock_op::GET => {
+                    let state = ClockState { world_s, paused: 0, ..desk.base.clone() };
+                    let _ = desk.server.respond_pending(token, &pack(&state));
+                }
+                Ok(cmd) => desk.left.push((cmd, token)),
+                Err(err) => eprintln!("gearbox-api: undecodable request dropped: {err}"),
+            }
+        }
+    }
+
+    fn serve(&self, now: ClockState, mut f: impl FnMut(ClockCommand) -> ClockState) -> usize {
+        let mut desk = self.lock();
+        let desk = &mut *desk;
+        desk.base = now;
+        let mut served = 0;
+        let mut answer = |server: &mut ReqServer<Env, Env>, base: &mut ClockState, cmd, token| {
+            *base = f(cmd);
+            served += server.respond_pending(token, &pack(base)).is_ok() as usize;
+        };
+        for (cmd, token) in std::mem::take(&mut desk.left) {
+            answer(&mut desk.server, &mut desk.base, cmd, token);
+        }
+        while let Ok(Some(pending)) = desk.server.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<ClockCommand>(sample.header().type_hash, sample.payload()) {
+                Ok(cmd) => answer(&mut desk.server, &mut desk.base, cmd, token),
+                Err(err) => eprintln!("gearbox-api: undecodable request dropped: {err}"),
+            }
+        }
+        served
     }
 }
 

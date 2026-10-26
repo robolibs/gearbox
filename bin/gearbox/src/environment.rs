@@ -38,10 +38,12 @@ const SKIP_SLICES_PER_DAY: f64 = 12.0;
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorldTime;
 
-/// World seconds this frame moved on by.
+/// World seconds this frame moved on by, and the physics time the world
+/// clock stands at.
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct WorldStep {
     pub seconds: f64,
+    pub simulated_s: f64,
 }
 
 /// World time runs `rate` times the physics clock, plus a slice of any skip.
@@ -49,15 +51,19 @@ pub fn advance_world_clock(
     physics: Res<crate::physics::PhysicsWorld>,
     mut clock: ResMut<gearbox_api::WorldClock>,
     mut step: ResMut<WorldStep>,
-    mut last: Local<Option<f64>>,
 ) {
     let simulated = physics.simulated_seconds;
-    let ran = last.map_or(0.0, |was| (simulated - was).max(0.0));
-    *last = Some(simulated);
+    let ran = (simulated - step.simulated_s).max(0.0);
+    step.simulated_s = simulated;
     let slice = clock.skip.min(clock.day_s / SKIP_SLICES_PER_DAY);
     clock.skip -= slice;
     step.seconds = ran * clock.rate + slice;
     clock.seconds += step.seconds;
+}
+
+/// World time once the physics clock has reached `simulated_s`.
+pub fn world_seconds_at(clock: &gearbox_api::WorldClock, step: &WorldStep, simulated_s: f64) -> f64 {
+    clock.seconds + (simulated_s - step.simulated_s).max(0.0) * clock.rate
 }
 
 /// Dust in the weather thickens the Martian air the sky is scattered from:

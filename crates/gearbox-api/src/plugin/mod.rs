@@ -245,7 +245,7 @@ fn serve_host_core(
     let mut active = physics.0;
     let mut shutdown = bus.shutdown;
     let mut step_budget = budget.0;
-    bus.host.serve_clock(|cmd| {
+    bus.host.serve_clock(world_clock.state(steps, !active), |cmd| {
         match cmd.op {
             clock_op::PAUSE => {
                 active = false;

@@ -51,7 +51,7 @@ use markers::ModelMember;
 pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
 pub use thread::PhysicsThreadPlugin;
-pub(crate) use thread::{Merge, TickResourcesExt};
+pub(crate) use thread::{Merge, TickResourcesExt, on_the_thread, physics_on_the_frame};
 pub use world::{AuthoredDrive, ControlTick, PhysicsWorld, step_physics};
 #[cfg(test)]
 pub use world::plan_physics_steps;

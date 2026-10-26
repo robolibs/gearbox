@@ -173,7 +173,7 @@ impl FakeMachine {
             session: 0,
             props: Props::from_pairs(&[("controller", "drive")]).into_bytes(),
         };
-        self.agent.publish_state(state);
+        self.agent.lane().publish_state(state);
     }
 }
 
@@ -250,7 +250,7 @@ fn serve_once(
             .into_bytes(),
     });
     let mut paused = s.paused;
-    host.serve_clock(|cmd| {
+    host.serve_clock(ClockState { paused: paused as u32, rate: 1.0, day_s: 86_400.0, ..Default::default() }, |cmd| {
         match cmd.op {
             clock_op::PAUSE => paused = true,
             clock_op::PLAY => paused = false,

@@ -2,6 +2,7 @@
 //! control and telemetry topics for that machine under its own identity.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
@@ -132,30 +133,176 @@ pub struct Session {
 const AUTO_RELEASE: Duration = Duration::from_secs(60);
 const DEFAULT_HOLD: Duration = Duration::from_millis(500);
 
+/// The half of a machine agent that keeps pace with the physics: the session,
+/// the twist it sets, and the telemetry streams. The physics thread serves it
+/// between steps and the frame's `poll` serves it too.
+pub struct MachineLane(Mutex<Lane>);
+
+struct Lane {
+    claim: Registered<ReqServer<Env, Env>>,
+    release: Registered<ReqServer<Env, Env>>,
+    cmd_vel: Registered<ReqServer<Env, Env>>,
+    state_pub: Registered<Publisher<Env>>,
+    odom_pub: Registered<Publisher<Env>>,
+    encoders_pub: Registered<Publisher<Env>>,
+    imu_pub: Registered<Publisher<Env>>,
+    gnss_pub: Registered<Publisher<Env>>,
+    turn_radius_pub: Registered<Publisher<Env>>,
+    session: Option<Session>,
+    next_session: u64,
+    twist: Twist,
+    /// Set while this machine hangs on another machine's hitch.
+    attached_to: Option<String>,
+    /// Slaves hanging on this machine, depth-first.
+    slaves: Vec<String>,
+}
+
+impl MachineLane {
+    fn lock(&self) -> MutexGuard<'_, Lane> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Answer claims, twists and releases, and apply the silence rules.
+    pub fn serve(&self) {
+        let mut lane = self.lock();
+        let lane = &mut *lane;
+        let now = Instant::now();
+        let attached_to = &lane.attached_to;
+        let session = &mut lane.session;
+        let next_session = &mut lane.next_session;
+        serve_req(&mut lane.claim, |req: ClaimRequest| {
+            if let Some(master) = attached_to {
+                return ClaimResponse {
+                    session: 0,
+                    code: code::REFUSED,
+                    _pad: 0,
+                    props: Props::from_pairs(&[
+                        ("attached_to", master.as_str()),
+                        ("message", "machine is attached; command it through its master"),
+                    ])
+                    .into_bytes(),
+                };
+            }
+            if let Some(held) = &*session
+                && req.take == 0
+                && now.duration_since(held.last_cmd) < AUTO_RELEASE
+            {
+                return ClaimResponse::busy(&held.holder);
+            }
+            let id = *next_session;
+            *next_session += 1;
+            let hold = if req.hold_ms == 0 { DEFAULT_HOLD } else { Duration::from_millis(req.hold_ms as u64) };
+            *session = Some(Session { id, holder: req.client(), since: now, last_cmd: now, hold });
+            ClaimResponse::granted(id)
+        });
+
+        let twist = &mut lane.twist;
+        serve_req(&mut lane.cmd_vel, |req: TwistCmd| {
+            if let Some(master) = attached_to {
+                return Status::with(
+                    code::REFUSED,
+                    &[
+                        ("attached_to", master.as_str()),
+                        ("message", "machine is attached; command it through its master"),
+                    ],
+                );
+            }
+            match &mut *session {
+                Some(held) if held.id == req.session => {
+                    held.last_cmd = now;
+                    *twist = req.twist;
+                    Status::ok()
+                }
+                Some(held) => Status::with(code::BUSY, &[("holder", &held.holder), ("message", "machine is held")]),
+                None if req.session == 0 => {
+                    *twist = req.twist;
+                    Status::ok()
+                }
+                None => Status::err(code::REFUSED, "no such session; claim first"),
+            }
+        });
+
+        serve_req(&mut lane.release, |req: SessionRef| match &*session {
+            Some(held) if held.id == req.session || req.session == 0 => {
+                *session = None;
+                *twist = Twist::zero();
+                Status::ok()
+            }
+            Some(_) => Status::err(code::REFUSED, "session id does not match holder"),
+            None => Status::ok(),
+        });
+
+        if let Some(held) = &*session {
+            let idle = now.duration_since(held.last_cmd);
+            if idle > AUTO_RELEASE {
+                *session = None;
+                *twist = Twist::zero();
+            } else if idle > held.hold {
+                *twist = Twist::zero();
+            }
+        }
+    }
+
+    /// The twist the sim should apply right now. Zero once the holder has
+    /// been silent longer than its hold time.
+    pub fn twist(&self) -> Twist {
+        self.lock().twist
+    }
+
+    pub fn session(&self) -> Option<Session> {
+        self.lock().session.clone()
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.lock().session.as_ref().map(|s| s.id).unwrap_or(0)
+    }
+
+    pub fn attached_to(&self) -> Option<String> {
+        self.lock().attached_to.clone()
+    }
+
+    pub fn slaves(&self) -> Vec<String> {
+        self.lock().slaves.clone()
+    }
+
+    pub fn publish_state(&self, mut state: MachineState) {
+        let mut lane = self.lock();
+        state.session = lane.session.as_ref().map(|s| s.id).unwrap_or(0);
+        let _ = lane.odom_pub.send(&pack(&state.odom));
+        let _ = lane.state_pub.send(&pack(&state));
+    }
+
+    pub fn publish_encoders(&self, encoders: &WheelEncoders) {
+        let _ = self.lock().encoders_pub.send(&pack(encoders));
+    }
+
+    pub fn publish_imu(&self, imu: &Imu) {
+        let _ = self.lock().imu_pub.send(&pack(imu));
+    }
+
+    pub fn publish_gnss(&self, gnss: &Gnss) {
+        let _ = self.lock().gnss_pub.send(&pack(gnss));
+    }
+
+    pub fn publish_turn_radius(&self, turn_radius: &TurnRadius) {
+        let _ = self.lock().turn_radius_pub.send(&pack(turn_radius));
+    }
+}
+
 pub struct MachineAgent {
     pub agent: Agent,
     pub config: MachineConfig,
     info: Registered<ReqServer<Env, Env>>,
-    claim: Registered<ReqServer<Env, Env>>,
-    release: Registered<ReqServer<Env, Env>>,
     session_q: Registered<ReqServer<Env, Env>>,
-    cmd_vel: Registered<ReqServer<Env, Env>>,
     cmd: Registered<ReqServer<Env, Env>>,
-    state_pub: Registered<Publisher<Env>>,
-    odom_pub: Registered<Publisher<Env>>,
+    lane: Arc<MachineLane>,
     links: Registered<AnsServer<Env, Env>>,
     tf_pub: Registered<Publisher<Env>>,
-    encoders_pub: Registered<Publisher<Env>>,
-    imu_pub: Registered<Publisher<Env>>,
     /// Simulated sensor streams by link name, registered on first publish.
     sensor_pubs: HashMap<String, Registered<Publisher<Env>>>,
-    gnss_pub: Registered<Publisher<Env>>,
-    turn_radius_pub: Registered<Publisher<Env>>,
     attach: Registered<ReqServer<Env, Env>>,
     detach: Registered<ReqServer<Env, Env>>,
     tools_q: Registered<AnsServer<Env, Env>>,
-    /// Set while this machine hangs on another machine's hitch.
-    attached_to: Option<String>,
     /// Slaves hanging on this machine, depth-first, and their re-parented
     /// links appended to `/links`.
     tools: Vec<ToolDesc>,
@@ -163,9 +310,6 @@ pub struct MachineAgent {
     /// Attach and detach requests waiting for the sim to act and answer.
     pub pending_attach: Vec<(AttachRequest, ReqReplyToken)>,
     pub pending_detach: Vec<(DetachRequest, ReqReplyToken)>,
-    session: Option<Session>,
-    next_session: u64,
-    twist: Twist,
     /// Controller commands received since the last drain.
     pub commands: Vec<ControllerCommand>,
     emit: Registered<ReqServer<Env, Env>>,
@@ -226,33 +370,36 @@ impl MachineAgent {
             pending_joint_commands: Vec::new(),
             pending_control: Vec::new(),
             info: agent.req_server(&t(topics::MACHINE_INFO))?,
-            claim: agent.req_server(&t(topics::MACHINE_CLAIM))?,
-            release: agent.req_server(&t(topics::MACHINE_RELEASE))?,
             session_q: agent.req_server(&t(topics::MACHINE_SESSION))?,
-            cmd_vel: agent.req_server(&t(topics::MACHINE_CMD_VEL))?,
             cmd: agent.req_server(&t(topics::MACHINE_CMD))?,
-            state_pub: agent.publish(&t(topics::MACHINE_STATE))?,
-            odom_pub: agent.publish(&t(topics::MACHINE_ODOM))?,
+            lane: Arc::new(MachineLane(Mutex::new(Lane {
+                claim: agent.req_server(&t(topics::MACHINE_CLAIM))?,
+                release: agent.req_server(&t(topics::MACHINE_RELEASE))?,
+                cmd_vel: agent.req_server(&t(topics::MACHINE_CMD_VEL))?,
+                state_pub: agent.publish(&t(topics::MACHINE_STATE))?,
+                odom_pub: agent.publish(&t(topics::MACHINE_ODOM))?,
+                encoders_pub: agent.publish(&t(topics::MACHINE_ENCODERS))?,
+                imu_pub: agent.publish(&t(topics::MACHINE_IMU))?,
+                gnss_pub: agent.publish(&t(topics::MACHINE_GNSS))?,
+                turn_radius_pub: agent.publish(&t(topics::MACHINE_TURN_RADIUS))?,
+                session: None,
+                next_session: 1,
+                twist: Twist::zero(),
+                attached_to: None,
+                slaves: Vec::new(),
+            }))),
             links: agent.que_server(&t(topics::MACHINE_LINKS))?,
             tf_pub: agent.publish(&t(topics::MACHINE_TF))?,
-            encoders_pub: agent.publish(&t(topics::MACHINE_ENCODERS))?,
-            imu_pub: agent.publish(&t(topics::MACHINE_IMU))?,
             sensor_pubs: HashMap::new(),
-            gnss_pub: agent.publish(&t(topics::MACHINE_GNSS))?,
-            turn_radius_pub: agent.publish(&t(topics::MACHINE_TURN_RADIUS))?,
             attach: agent.req_server(&t(topics::MACHINE_TOOLS_ATTACH))?,
             detach: agent.req_server(&t(topics::MACHINE_TOOLS_DETACH))?,
             tools_q: agent.que_server(&t(topics::MACHINE_TOOLS))?,
-            attached_to: None,
             tools: Vec::new(),
             tool_links: Vec::new(),
             pending_attach: Vec::new(),
             pending_detach: Vec::new(),
             agent,
             config,
-            session: None,
-            next_session: 1,
-            twist: Twist::zero(),
             commands: Vec::new(),
             emit: agent_emit,
             emits: Vec::new(),
@@ -286,38 +433,40 @@ impl MachineAgent {
         machine_info(
             &self.agent,
             &self.config,
-            self.attached_to.as_deref(),
+            self.lane.attached_to().as_deref(),
             &self.tools,
-            self.session.is_some(),
+            self.lane.session_id() != 0,
         )
     }
 
-    pub fn session(&self) -> Option<&Session> {
-        self.session.as_ref()
+    /// The session, twist and telemetry half, shared with the physics thread.
+    pub fn lane(&self) -> &Arc<MachineLane> {
+        &self.lane
+    }
+
+    pub fn session(&self) -> Option<Session> {
+        self.lane.session()
     }
 
     pub fn session_id(&self) -> u64 {
-        self.session.as_ref().map(|s| s.id).unwrap_or(0)
+        self.lane.session_id()
     }
 
     /// The twist the sim should apply right now. Zero once the holder has
     /// been silent longer than its hold time.
     pub fn twist(&self) -> Twist {
-        self.twist
+        self.lane.twist()
     }
 
     /// Answer every pending request and apply silence rules.
     pub fn poll(&mut self) {
+        self.lane.serve();
         // Built only for a request that asks for them.
-        let (agent, config, attached, tool_descs, held) = (
-            &self.agent,
-            &self.config,
-            self.attached_to.as_deref(),
-            &self.tools,
-            self.session.is_some(),
-        );
+        let attached = self.lane.attached_to();
+        let session = self.lane.session();
+        let (agent, config, tool_descs) = (&self.agent, &self.config, &self.tools);
         serve_req(&mut self.info, |_: Ping| {
-            machine_info(agent, config, attached, tool_descs, held)
+            machine_info(agent, config, attached.as_deref(), tool_descs, session.is_some())
         });
         let tool_links = &self.tool_links;
         serve_que(&mut self.links, |_: Ping| {
@@ -386,93 +535,7 @@ impl MachineAgent {
                 }
             }
         }
-        let attached_to = self.attached_to.clone();
-
         let now = Instant::now();
-        let mut session = self.session.take();
-        let mut next_session = self.next_session;
-        serve_req(&mut self.claim, |req: ClaimRequest| {
-            if let Some(master) = &attached_to {
-                return ClaimResponse {
-                    session: 0,
-                    code: code::REFUSED,
-                    _pad: 0,
-                    props: Props::from_pairs(&[
-                        ("attached_to", master.as_str()),
-                        (
-                            "message",
-                            "machine is attached; command it through its master",
-                        ),
-                    ])
-                    .into_bytes(),
-                };
-            }
-            if let Some(held) = &session
-                && req.take == 0
-                && now.duration_since(held.last_cmd) < AUTO_RELEASE
-            {
-                return ClaimResponse::busy(&held.holder);
-            }
-            let id = next_session;
-            next_session += 1;
-            let hold = if req.hold_ms == 0 {
-                DEFAULT_HOLD
-            } else {
-                Duration::from_millis(req.hold_ms as u64)
-            };
-            session = Some(Session {
-                id,
-                holder: req.client(),
-                since: now,
-                last_cmd: now,
-                hold,
-            });
-            ClaimResponse::granted(id)
-        });
-        self.next_session = next_session;
-
-        let mut twist = self.twist;
-        serve_req(&mut self.cmd_vel, |req: TwistCmd| {
-            if let Some(master) = &attached_to {
-                return Status::with(
-                    code::REFUSED,
-                    &[
-                        ("attached_to", master.as_str()),
-                        (
-                            "message",
-                            "machine is attached; command it through its master",
-                        ),
-                    ],
-                );
-            }
-            match &mut session {
-                Some(held) if held.id == req.session => {
-                    held.last_cmd = now;
-                    twist = req.twist;
-                    Status::ok()
-                }
-                Some(held) => Status::with(
-                    code::BUSY,
-                    &[("holder", &held.holder), ("message", "machine is held")],
-                ),
-                None if req.session == 0 => {
-                    twist = req.twist;
-                    Status::ok()
-                }
-                None => Status::err(code::REFUSED, "no such session; claim first"),
-            }
-        });
-
-        serve_req(&mut self.release, |req: SessionRef| match &session {
-            Some(held) if held.id == req.session || req.session == 0 => {
-                session = None;
-                twist = Twist::zero();
-                Status::ok()
-            }
-            Some(_) => Status::err(code::REFUSED, "session id does not match holder"),
-            None => Status::ok(),
-        });
-
         let mut commands = std::mem::take(&mut self.commands);
         serve_req(&mut self.cmd, |req: ControllerCommand| {
             match &session {
@@ -509,16 +572,6 @@ impl MachineAgent {
         });
         self.actuations = actuations;
 
-        if let Some(held) = &session {
-            let idle = now.duration_since(held.last_cmd);
-            if idle > AUTO_RELEASE {
-                session = None;
-                twist = Twist::zero();
-            } else if idle > held.hold {
-                twist = Twist::zero();
-            }
-        }
-
         let info = SessionInfo {
             session: session.as_ref().map(|s| s.id).unwrap_or(0),
             age_ms: session
@@ -538,20 +591,19 @@ impl MachineAgent {
             .into_bytes(),
         };
         serve_req(&mut self.session_q, |_: Ping| info.clone_for_response());
-
-        self.session = session;
-        self.twist = twist;
     }
 
-    pub fn attached_to(&self) -> Option<&str> {
-        self.attached_to.as_deref()
+    pub fn attached_to(&self) -> Option<String> {
+        self.lane.attached_to()
     }
 
     pub fn set_attached_to(&mut self, master: Option<String>) {
-        self.attached_to = master;
-        if self.attached_to.is_some() {
-            self.clear_session();
+        let mut lane = self.lane.lock();
+        if master.is_some() {
+            lane.session = None;
+            lane.twist = Twist::zero();
         }
+        lane.attached_to = master;
     }
 
     pub fn tools(&self) -> &[ToolDesc] {
@@ -561,6 +613,7 @@ impl MachineAgent {
     /// Replace the composite below this machine: its attachments and the
     /// slaves' links re-parented under the hitch links.
     pub fn set_tools(&mut self, tools: Vec<ToolDesc>, tool_links: Vec<LinkDesc>) {
+        self.lane.lock().slaves = tools.iter().map(|t| t.slave.clone()).collect();
         self.tools = tools;
         self.tool_links = tool_links;
     }
@@ -587,20 +640,6 @@ impl MachineAgent {
 
     pub fn respond_detach(&mut self, token: ReqReplyToken, status: &Status) {
         let _ = self.detach.respond_pending(token, &pack(status));
-    }
-
-    pub fn publish_state(&mut self, mut state: MachineState) {
-        state.session = self.session_id();
-        let _ = self.odom_pub.send(&pack(&state.odom));
-        let _ = self.state_pub.send(&pack(&state));
-    }
-
-    pub fn publish_encoders(&mut self, encoders: &WheelEncoders) {
-        let _ = self.encoders_pub.send(&pack(encoders));
-    }
-
-    pub fn publish_imu(&mut self, imu: &Imu) {
-        let _ = self.imu_pub.send(&pack(imu));
     }
 
     fn sensor_pub(&mut self, link: &str) -> Option<&mut Registered<Publisher<Env>>> {
@@ -659,17 +698,10 @@ impl MachineAgent {
         links
     }
 
-    pub fn publish_gnss(&mut self, gnss: &Gnss) {
-        let _ = self.gnss_pub.send(&pack(gnss));
-    }
-
-    pub fn publish_turn_radius(&mut self, turn_radius: &TurnRadius) {
-        let _ = self.turn_radius_pub.send(&pack(turn_radius));
-    }
-
     pub fn clear_session(&mut self) {
-        self.session = None;
-        self.twist = Twist::zero();
+        let mut lane = self.lane.lock();
+        lane.session = None;
+        lane.twist = Twist::zero();
     }
 }
 

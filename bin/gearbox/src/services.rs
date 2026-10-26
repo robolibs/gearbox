@@ -65,7 +65,7 @@ impl MasterState {
 pub struct MasterInputs(pub HashMap<String, MasterState>);
 
 /// Master machine id → the twist a granted slave request asks for.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct TimRequests(pub HashMap<String, CmdVel>);
 
 /// Latest `/cmd` props per service controller, merged over time.

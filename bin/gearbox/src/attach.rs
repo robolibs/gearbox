@@ -79,7 +79,7 @@ pub struct Attachment {
     pub stand: Option<String>,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct Attachments(pub Vec<Attachment>);
 
 /// An attachment authored in a world layer, waiting for both machines to
