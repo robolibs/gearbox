@@ -314,20 +314,26 @@ struct JointFriction {
 
 /// The ground's solved normal load on a body (N): its contacts whose normal
 /// points up.
-fn ground_load(backend: &dyn PhysicsBackend, body: BodyId) -> f64 {
+fn ground_load(backend: &dyn PhysicsBackend, body: BodyId, impulses: &HashMap<ColliderId, f64>) -> f64 {
     let Some(colliders) = backend.body(body).map(|b| b.colliders()) else {
         return 0.0;
     };
-    let mut impulse = 0.0;
-    for collider in colliders {
-        for manifold in backend.contacts_with(collider).into_iter().filter(|m| m.active) {
-            let normal = manifold.normal * if manifold.collider1 == collider { -1.0 } else { 1.0 };
-            if normal.y > 0.1 {
-                impulse += manifold.points.iter().filter(|p| p.solved).map(|p| p.impulse.max(0.0) * normal.y).sum::<f64>();
+    let impulse: f64 = colliders.into_iter().filter_map(|collider| impulses.get(&collider)).sum();
+    impulse / backend.settings().dt.max(1e-6)
+}
+
+/// The upward impulse on each collider in the last step's contacts.
+fn ground_impulses(backend: &dyn PhysicsBackend) -> HashMap<ColliderId, f64> {
+    let mut impulses = HashMap::new();
+    for manifold in backend.contacts().into_iter().filter(|m| m.active) {
+        let pushed: f64 = manifold.points.iter().filter(|p| p.solved).map(|p| p.impulse.max(0.0)).sum();
+        for (collider, up) in [(manifold.collider1, -manifold.normal.y), (manifold.collider2, manifold.normal.y)] {
+            if up > 0.1 {
+                *impulses.entry(collider).or_default() += pushed * up;
             }
         }
     }
-    impulse / backend.settings().dt.max(1e-6)
+    impulses
 }
 
 /// How far a sticking joint gives before it slides (rad or m).
@@ -420,6 +426,7 @@ impl PhysicsWorld {
     fn apply_joint_frictions(&mut self) {
         let (backend, drives, grips) = (&mut self.backend, &self.authored_drives, &self.soil_grips);
         let committed = &self.control.committed;
+        let mut impulses = None;
         self.joint_frictions.retain(|id, friction| {
             let (Some(position), Some((_, part))) =
                 (backend.joint(*id).map(|j| j.motor_position(friction.axis)), backend.joint_bodies(*id))
@@ -442,7 +449,10 @@ impl PhysicsWorld {
                 return true;
             }
             let torque = friction.torque
-                + friction.rolling.map_or(0.0, |(coefficient, radius)| coefficient * ground_load(&**backend, part) * radius);
+                + friction.rolling.map_or(0.0, |(coefficient, radius)| {
+                    let impulses = impulses.get_or_insert_with(|| ground_impulses(&**backend));
+                    coefficient * ground_load(&**backend, part, impulses) * radius
+                });
             let anchor = friction.anchor.get_or_insert(position);
             *anchor = position + (*anchor - position).clamp(-FRICTION_STICK, FRICTION_STICK);
             if torque <= 0.0 {
@@ -600,7 +610,9 @@ mod tests {
             world.step();
         }
         let weight = world.body(ball).unwrap().mass() * 9.81;
-        let load = ground_load(&*world.backend, ball);
+        let impulses = ground_impulses(&*world.backend);
+        let load = ground_load(&*world.backend, ball, &impulses);
         assert!((load - weight).abs() < 0.05 * weight, "load {load} weight {weight}");
+        assert_eq!(ground_load(&*world.backend, ground, &impulses), 0.0);
     }
 }
