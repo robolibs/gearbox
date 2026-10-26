@@ -323,6 +323,32 @@ fn contacts_expose_impulses_material_and_per_step_pair_filter() {
 }
 
 #[test]
+fn contacts_are_read_once_a_step_and_follow_teleports() {
+    let mut backend = MollaBackend::default();
+    let ground = backend.insert_body(BodyDesc::fixed());
+    backend
+        .insert_collider(ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(5.0, 0.5, 5.0) }).parent(ground))
+        .unwrap();
+    let ball = backend.insert_body(dynamic().pose(Pose::from_translation(DVec3::Y * 1.0)));
+    let shape = backend
+        .insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.5 }).parent(ball).density(0.0))
+        .unwrap();
+    for _ in 0..60 {
+        backend.step(&|_, _| false);
+    }
+    let first = backend.manifolds();
+    assert!(!first.is_empty());
+    assert!(Arc::ptr_eq(&first, &backend.manifolds()));
+    assert_eq!(backend.contacts_with(shape).len(), first.len());
+    backend.step(&|_, _| false);
+    let second = backend.manifolds();
+    assert!(!Arc::ptr_eq(&first, &second) && !second.is_empty());
+    backend.body_mut(ball).unwrap().set_translation(DVec3::Y * 9.0, true);
+    assert!(backend.contacts_with(shape).is_empty());
+    assert!(backend.contacts().is_empty());
+}
+
+#[test]
 fn nonroot_fixed_transitions_and_removals_preserve_stable_ids() {
     let mut backend = MollaBackend::default();
     backend.set_gravity(DVec3::ZERO);

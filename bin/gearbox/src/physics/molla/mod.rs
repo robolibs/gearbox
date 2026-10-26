@@ -11,7 +11,7 @@ mod wheel;
 mod track;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bevy::prelude::Entity;
 use molla_math::{SpatialVector, Transform};
@@ -50,6 +50,14 @@ pub struct MollaBackend {
     next_device: u64,
     /// Joints with break limits that have not broken yet.
     breakable: BTreeSet<JointId>,
+    contacts: Mutex<Option<ContactCache>>,
+}
+
+/// The world's contact manifolds, for the scene and step they were read at.
+struct ContactCache {
+    scene: rt::SceneStamp,
+    steps: u64,
+    manifolds: Arc<Vec<ContactManifold>>,
 }
 
 /// A body falls asleep after a second under 5 mm/s and 0.01 rad/s with
@@ -77,6 +85,7 @@ impl Default for MollaBackend {
             devices: BTreeMap::new(),
             next_device: 0,
             breakable: BTreeSet::new(),
+            contacts: Mutex::new(None),
             settings: SolverSettings {
                 dt: 1.0 / 120.0,
                 solver_iterations: 16,
@@ -326,6 +335,7 @@ impl PhysicsBackend for MollaBackend {
     }
     fn step(&mut self, excluded: PairExcluded<'_>) {
         self.wheel_step_dt = self.settings.dt;
+        *self.contacts.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
         let result = self.shared.world().step_filtered(self.settings.dt, |a, b| {
             a.zip(b)
                 .is_some_and(|(a, b)| excluded(BodyId(a.to_bits()), BodyId(b.to_bits())))
@@ -663,33 +673,53 @@ impl PhysicsBackend for MollaBackend {
             .map(|h| (ColliderId(h.collider.to_bits()), h.distance))
     }
     fn contacts_with(&self, collider: ColliderId) -> Vec<ContactManifold> {
-        self.contacts()
-            .into_iter()
+        self.manifolds()
+            .iter()
             .filter(|c| c.collider1 == collider || c.collider2 == collider)
+            .cloned()
             .collect()
     }
     fn contacts(&self) -> Vec<ContactManifold> {
-        self.shared
-            .world()
-            .contact_pairs()
-            .into_iter()
-            .flat_map(|pair| {
-                let collider1 = ColliderId(pair.colliders[0].to_bits());
-                let collider2 = ColliderId(pair.colliders[1].to_bits());
-                pair.points.into_iter().map(move |p| ContactManifold {
-                    collider1,
-                    collider2,
-                    normal: p.normal,
-                    active: p.acted,
-                    points: vec![ContactPoint {
-                        impulse: p.normal_impulse,
-                        friction: if p.acted { p.friction } else { 0.0 },
-                        solved: p.acted,
-                        point: p.point,
-                        dist: -p.penetration,
-                    }],
+        self.manifolds().as_ref().clone()
+    }
+}
+
+impl MollaBackend {
+    /// The world's contacts, read from molla once per scene and step.
+    fn manifolds(&self) -> Arc<Vec<ContactManifold>> {
+        let world = self.shared.world();
+        let (scene, steps) = (world.scene.stamp(), world.completed_steps());
+        let mut cache = self.contacts.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(cached) = cache.as_ref()
+            && cached.scene == scene
+            && cached.steps == steps
+        {
+            return cached.manifolds.clone();
+        }
+        let manifolds: Arc<Vec<_>> = Arc::new(
+            world
+                .contact_pairs()
+                .into_iter()
+                .flat_map(|pair| {
+                    let collider1 = ColliderId(pair.colliders[0].to_bits());
+                    let collider2 = ColliderId(pair.colliders[1].to_bits());
+                    pair.points.into_iter().map(move |p| ContactManifold {
+                        collider1,
+                        collider2,
+                        normal: p.normal,
+                        active: p.acted,
+                        points: vec![ContactPoint {
+                            impulse: p.normal_impulse,
+                            friction: if p.acted { p.friction } else { 0.0 },
+                            solved: p.acted,
+                            point: p.point,
+                            dist: -p.penetration,
+                        }],
+                    })
                 })
-            })
-            .collect()
+                .collect(),
+        );
+        *cache = Some(ContactCache { scene, steps, manifolds: manifolds.clone() });
+        manifolds
     }
 }
