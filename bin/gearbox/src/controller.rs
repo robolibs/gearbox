@@ -7,6 +7,7 @@
 //! builtin controllers bind authored wheel/steer joint relationships to Molla
 //! joint motors.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::{Child, Command};
@@ -4084,6 +4085,24 @@ mod tests {
     }
 
     #[test]
+    fn link_props_reformat_only_changed_values_and_follow_the_links() {
+        let mut cache = LinkProps::default();
+        let pairs = |props: &[LinkProp]| -> Vec<(String, String)> {
+            props.iter().map(|p| (p.prop.clone(), p.value.clone())).collect()
+        };
+        let first = cache.update("eve", [("arm", "a", 1.0), ("arm", "b", 2.5)].into_iter());
+        assert_eq!(pairs(first), [("link.arm.a".into(), "1".into()), ("link.arm.b".into(), "2.5".into())]);
+        let kept = (first[0].value.as_ptr(), first[1].prop.as_ptr());
+        let second = cache.update("eve", [("arm", "a", 1.0), ("arm", "b", -0.5)].into_iter());
+        assert_eq!(pairs(second)[1], ("link.arm.b".into(), "-0.5".into()));
+        assert_eq!((second[0].value.as_ptr(), second[1].prop.as_ptr()), kept);
+        let added = cache.update("eve", [("arm", "a", 1.0), ("arm", "aa", 3.0), ("arm", "b", -0.5)].into_iter());
+        assert_eq!(added.iter().map(|p| p.prop.as_str()).collect::<Vec<_>>(), ["link.arm.a", "link.arm.aa", "link.arm.b"]);
+        assert_eq!(pairs(cache.update("eve", [("arm", "a", 1.0)].into_iter())).len(), 1);
+        assert!(cache.update("percy", std::iter::empty()).is_empty());
+    }
+
+    #[test]
     fn between_steps_the_api_s_twists_drive_and_its_clock_reads_run_on() {
         use bevy::ecs::system::RunSystemOnce;
         let host = gearbox_api::HostBus::new(gearbox_api::HostConfig::new("test-serve-lanes", "test").ephemeral())
@@ -4947,6 +4966,54 @@ fn read_chassis(
     }
 }
 
+/// One link value's state prop, formatted when its value last changed.
+struct LinkProp {
+    link: String,
+    key: String,
+    prop: String,
+    bits: u64,
+    value: String,
+}
+
+/// Each machine's link-value props as last published.
+#[derive(Default)]
+struct LinkProps(HashMap<String, Vec<LinkProp>>);
+
+impl LinkProps {
+    /// The machine's props for `values`, formatting only what changed.
+    fn update<'a>(&mut self, machine: &str, values: impl Iterator<Item = (&'a str, &'a str, f64)>) -> &[LinkProp] {
+        if !self.0.contains_key(machine) {
+            self.0.insert(machine.to_owned(), Vec::new());
+        }
+        let props = self.0.get_mut(machine).unwrap();
+        let mut count = 0;
+        for (link, key, value) in values {
+            let bits = value.to_bits();
+            match props.get_mut(count) {
+                Some(prop) if prop.link == link && prop.key == key => {
+                    if prop.bits != bits {
+                        prop.bits = bits;
+                        prop.value = format!("{value}");
+                    }
+                }
+                _ => {
+                    props.truncate(count);
+                    props.push(LinkProp {
+                        link: link.to_owned(),
+                        key: key.to_owned(),
+                        prop: format!("link.{link}.{key}"),
+                        bits,
+                        value: format!("{value}"),
+                    });
+                }
+            }
+            count += 1;
+        }
+        props.truncate(count);
+        props
+    }
+}
+
 /// Publish each machine's state: from its drive controller when it has one,
 /// else straight from its body pose, so trailers report where they are.
 #[allow(clippy::too_many_arguments)]
@@ -4960,6 +5027,7 @@ fn publish_machine_controller_states(
     service: Res<crate::services::ServiceCommands>,
     attachments: Res<crate::attach::Attachments>,
     mut last_speed: ResMut<LastLinearSpeed>,
+    mut link_props: Local<LinkProps>,
 ) {
     for machine in &inventory.machines {
         let Some(scene_root) = machine.scene_root else {
@@ -4976,18 +5044,18 @@ fn publish_machine_controller_states(
         let Some(agent) = lanes.machines.get(&machine_id) else {
             continue;
         };
-        let mut props: Vec<(String, String)> = vec![("machine_id".into(), machine.id.clone())];
+        let mut props: Vec<(Cow<str>, Cow<str>)> = vec![("machine_id".into(), machine.id.as_str().into())];
         if let Some(master) = agent.attached_to() {
-            props.push(("attached_to".into(), master));
+            props.push(("attached_to".into(), master.into()));
         }
         let tools = agent.slaves();
         if !tools.is_empty() {
-            props.push(("tools".into(), tools.join(",")));
+            props.push(("tools".into(), tools.join(",").into()));
         }
         // Process data of this machine and the commanded state of every
         // attached slave's service controllers (TOOLS_SPEC §5.1, §7.4).
-        for (link, key, value) in link_values.of_machine(&machine.id) {
-            props.push((format!("link.{link}.{key}"), format!("{value}")));
+        for prop in link_props.update(&machine.id, link_values.of_machine(&machine.id)) {
+            props.push((prop.prop.as_str().into(), prop.value.as_str().into()));
         }
         for a in attachments.0.iter().filter(|a| a.master_id == machine_id) {
             let Some(slave_key) = keys.0.get(&a.slave_id) else {
@@ -4999,7 +5067,10 @@ fn publish_machine_controller_states(
                     continue;
                 }
                 for (k, v) in values {
-                    props.push((format!("tool.{}.controller.{}.{k}", a.slave_id, key.controller_instance), v.clone()));
+                    props.push((
+                        format!("tool.{}.controller.{}.{k}", a.slave_id, key.controller_instance).into(),
+                        v.as_str().into(),
+                    ));
                 }
             }
         }
@@ -5018,7 +5089,7 @@ fn publish_machine_controller_states(
         let (region, position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
         {
             Some((controller, state)) => {
-                props.push(("controller".into(), controller.instance.clone()));
+                props.push(("controller".into(), controller.instance.as_str().into()));
                 (
                     state.region,
                     state.position_m,
@@ -5067,11 +5138,11 @@ fn publish_machine_controller_states(
         if let Some(place) = &place {
             let anchor = own.unwrap_or(place.datum);
             props.extend([
-                ("lat".into(), format!("{:.9}", place.geodetic.latitude)),
-                ("lon".into(), format!("{:.9}", place.geodetic.longitude)),
-                ("alt".into(), format!("{:.3}", place.geodetic.altitude)),
-                ("ecef".into(), format!("{:.3} {:.3} {:.3}", place.ecef.x, place.ecef.y, place.ecef.z)),
-                ("datum".into(), format!("{:.9} {:.9}", anchor.latitude, anchor.longitude)),
+                ("lat".into(), format!("{:.9}", place.geodetic.latitude).into()),
+                ("lon".into(), format!("{:.9}", place.geodetic.longitude).into()),
+                ("alt".into(), format!("{:.3}", place.geodetic.altitude).into()),
+                ("ecef".into(), format!("{:.3} {:.3} {:.3}", place.ecef.x, place.ecef.y, place.ecef.z).into()),
+                ("datum".into(), format!("{:.9} {:.9}", anchor.latitude, anchor.longitude).into()),
             ]);
         }
         let half = heading * 0.5;
