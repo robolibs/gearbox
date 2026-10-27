@@ -145,14 +145,14 @@ fn publish_tf_labels(
     inventory: Res<ControllerInventory>,
     index: Res<PrimIndex>,
     transforms: Query<&GlobalTransform>,
-    cameras: Query<(&Camera, &GlobalTransform)>,
+    cameras: Query<(&Camera, &GlobalTransform), With<mara::ui::modules::bevy::ChaseCamera>>,
     mut labels: ResMut<TfLabels>,
 ) {
     labels.0.clear();
     if !toggles.show_tf_names {
         return;
     }
-    let Some((camera, cam_tr)) = cameras.iter().find(|(c, _)| c.is_active) else {
+    let Ok((camera, cam_tr)) = cameras.single() else {
         return;
     };
     let Some(size) = camera.logical_viewport_size() else {

@@ -213,7 +213,7 @@ fn pan(
     input: Res<BevyViewportInput>,
     keys: Res<ButtonInput<KeyCode>>,
     mut view: ResMut<View>,
-    cameras: Query<(&Projection, &Camera)>,
+    cameras: Query<(&Projection, &Camera), With<ChaseCamera>>,
 ) {
     let delta = Vec2::from(input.pan_delta);
     if delta == Vec2::ZERO {
@@ -437,5 +437,20 @@ mod tests {
         view.at.longitude = 370.0;
         view.tidy();
         assert!((-180.0..=180.0).contains(&view.at.longitude));
+    }
+
+    #[test]
+    fn a_middle_drag_pans_with_sensor_cameras_in_the_world() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<View>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.insert_resource(BevyViewportInput { pan_delta: [0.0, 40.0], ..Default::default() });
+        world.spawn((ChaseCamera::default(), Camera::default(), Projection::default()));
+        world.spawn((Camera::default(), Projection::default()));
+        let from = world.resource::<View>().at;
+        world.run_system_once(pan).unwrap();
+        let to = world.resource::<View>().at;
+        assert!(to.latitude != from.latitude || to.longitude != from.longitude, "the view did not move");
     }
 }
