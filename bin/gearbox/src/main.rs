@@ -31,6 +31,7 @@ mod joint_control;
 mod machine_model;
 mod physics;
 mod prim_index;
+mod propagation;
 mod physics_debug;
 mod planet_rocks;
 mod sensor_cameras;

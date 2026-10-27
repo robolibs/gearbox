@@ -22,7 +22,7 @@ pub struct GlobePlugin;
 
 impl Plugin for GlobePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(BigSpaceDefaultPlugins)
+        app.add_plugins((BigSpaceDefaultPlugins, crate::propagation::DirtyPropagationPlugin))
             .init_resource::<Goto>()
             .add_systems(PreStartup, spawn_globe)
             .add_systems(PreUpdate, adopt_loaded_roots)
