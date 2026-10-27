@@ -341,7 +341,7 @@ fn native_acceleration_drive_follows_the_degree_convention() {
     expect("damping_per_rad", c_velocity);
 }
 
-/// A real weed unit (default `machines/usd/weedunit.usdz`, or
+/// A real weed unit (default `assets/machines/usd/weedunit.usdz`, or
 /// GEARBOX_TIP_ASSET): each tool_z joint is driven through a direct lease,
 /// and every ball_tip and tool_tip site rides its tool body at its own
 /// offset, published through the TF edges.
@@ -350,7 +350,7 @@ fn native_acceleration_drive_follows_the_degree_convention() {
 fn real_weedunit_tips_follow_their_tool_bodies() {
     let path = std::env::var("GEARBOX_TIP_ASSET")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../machines/usd/weedunit.usdz"));
+        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/machines/usd/weedunit.usdz"));
     let source = usd_bevy::UsdSource::from_file(&path).expect("tip asset");
     let stage = source.open_stage().expect("tip stage");
     let model = crate::machine_model::compile(&stage, &CompileOptions::default()).machines.first().cloned().expect("machine");

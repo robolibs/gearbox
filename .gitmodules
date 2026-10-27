@@ -1,5 +1,5 @@
 [submodule "machines"]
-	path = machines
+	path = assets/machines
 	url = git@github.com:bresilla/machines.git
 	branch = develop
 [submodule "molla"]

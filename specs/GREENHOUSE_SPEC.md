@@ -29,7 +29,7 @@ kind of structure goes to `assets/mars_base/modules/<kind>.usdc`, a
 `component` model whose looks are baked with Mars wear (dust settled on
 what faces up and thrown up low, grime where the sky cannot reach) into
 textures of its own in `assets/mars_base/modules/textures/`; the robots go
-to `machines/usd/*.usdz`, and the world and fleet files place them. Rocks
+to `assets/machines/usd/*.usdz`, and the world and fleet files place them. Rocks
 lie round the base: Poly Haven's CC0 scans (fetched once into
 `.work/mars_base/polyhaven`), boulders as modules with a convex hull to
 drive into, stones through one point instancer. Edit the scripts and build
@@ -239,7 +239,7 @@ plant's bins. It waits on the sim's clock, so it keeps pace however fast the
 sim runs.
 
 The fleet's `base_fleet_rover1` and `rover2` are NASA's Space Exploration
-Vehicle (`machines/usd/sev_rover.usdz`), its full-detail mesh cut into the
+Vehicle (`assets/machines/usd/sev_rover.usdz`), its full-detail mesh cut into the
 chassis and six wheel modules. Each module is an arm sprung on the chassis
 (`arm_*`, ±12°), an upright steering on it (`steer_*`, ±60°) and a pair of
 twin wheels (`spin_*`). A six-wheel ackermann `cmd_vel` controller turns the
@@ -250,7 +250,7 @@ thrown up by the wheels, grime where the sky cannot reach, rubber treads,
 and roughness and metal read from NASA's colour and specular maps. It has
 a front camera, a roof LiDAR and an IMU.
 
-`base_fleet_percy` is NASA's Perseverance (`machines/usd/perseverance_nasa.usdz`),
+`base_fleet_percy` is NASA's Perseverance (`assets/machines/usd/perseverance_nasa.usdz`),
 working the ground south-east of the base: the base stands in Jezero crater.
 
 ## 6. Scenarios

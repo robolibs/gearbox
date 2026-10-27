@@ -10,8 +10,8 @@ The repository launch recipe forwards the selection:
 
 ```sh
 oslo make run
-oslo make run --args='--planet mars --load machines/usd/perseverance_nasa.usdz'
-oslo make run --args='--planet moon --load machines/usd/perseverance_nasa.usdz'
+oslo make run --args='--planet mars --load assets/machines/usd/perseverance_nasa.usdz'
+oslo make run --args='--planet moon --load assets/machines/usd/perseverance_nasa.usdz'
 ```
 
 Use `--args='...'` with the equals sign: Oslo treats a separate dash-prefixed value as another flag. Paths are resolved from the Gearbox working directory; the machine packages are in the `machines` submodule.

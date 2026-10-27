@@ -1,5 +1,5 @@
 """Mars wear on a machine package's own looks, in its .blend (see
-machines/scripts/README.md). The dust and sky reach of `weathering.masks`,
+assets/machines/scripts/README.md). The dust and sky reach of `weathering.masks`,
 over the model standing on its wheels, go into
 
     each colour texture its materials read, baked again in its UV layout,
@@ -14,9 +14,9 @@ see-through materials stay clean. The clean textures and specs stay in the
 .blend and every run starts from them. Headless, then exported as ever:
 
     flatpak run --filesystem=$PWD org.blender.Blender -b --factory-startup \\
-        machines/blender/perseverance_nasa.blend --python scripts/mars_base/weather_machine.py
-    oslo make blender-export --blend=$PWD/machines/blender/perseverance_nasa.blend \\
-        --package=$PWD/machines/usd/perseverance_nasa.usdz
+        assets/machines/blender/perseverance_nasa.blend --python scripts/mars_base/weather_machine.py
+    oslo make blender-export --blend=$PWD/assets/machines/blender/perseverance_nasa.blend \\
+        --package=$PWD/assets/machines/usd/perseverance_nasa.usdz
 """
 import os
 import sys
@@ -29,7 +29,7 @@ from pxr import Gf, Sdf
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(ROOT, "machines", "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "assets", "machines", "scripts"))
 
 import weathering  # noqa: E402
 from gearbox_usd import spec as S  # noqa: E402

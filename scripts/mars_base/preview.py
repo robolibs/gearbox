@@ -3,7 +3,7 @@ spot of the whole base, to look at before a build. Runs in Blender, headless:
 
     flatpak run --filesystem=$PWD org.blender.Blender -b --factory-startup \\
         --python scripts/mars_base/preview.py -- OUT module habitat.hab_tower '{"name": "Hab"}'
-    ... --python scripts/mars_base/preview.py -- OUT package machines/usd/perseverance_nasa.usdz
+    ... --python scripts/mars_base/preview.py -- OUT package assets/machines/usd/perseverance_nasa.usdz
     ... --python scripts/mars_base/preview.py -- OUT base X Y RADIUS [HEIGHT]
 
 A module is built at the origin by `<file>.<builder>(looks, **kwargs)`, a

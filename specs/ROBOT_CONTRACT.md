@@ -224,7 +224,7 @@ Supported joint types and their status are in §13.
   a frame riding that body; without it the base frame is the control frame
   (`profile_default`), so the machine drives along its chassis +X. An asset
   whose chassis faces −Y declares a frame on the chassis turned −90° about Z;
-  every package under `machines/usd` and every built-in asset does. A
+  every package under `assets/machines/usd` and every built-in asset does. A
   `standard` machine has none, as it has no drive controller. Steering,
   body-local commands, heading and controller state use it. Native-verified:
   `the_declared_control_frame_sets_the_drive_direction` (a cart with a turned
@@ -401,12 +401,12 @@ Machine topics under `/machines/<id>/`:
 
 ## 12. Machine packages
 
-- Each package under `machines/usd` is one stored, 64-byte aligned USDZ whose
+- Each package under `assets/machines/usd` is one stored, 64-byte aligned USDZ whose
   first entry is its only root layer, `<name>.usda` or `<name>.usdc`, holding
   the whole machine: bodies, joints, the declared control frame, command
   interfaces and unique names. Its other entries are its textures.
-- Each package is exported from `machines/blender/<name>.blend` by one tool,
-  `machines/scripts/gearbox_usd` (a Blender 5.2 extension and command line):
+- Each package is exported from `assets/machines/blender/<name>.blend` by one tool,
+  `assets/machines/scripts/gearbox_usd` (a Blender 5.2 extension and command line):
   `oslo make blender-export --blend=…` writes it, `oslo make blender-import
   --package=…` reads a package into a `.blend`. There is no overlay layer and
   no later conversion step. `oslo make test-blender-export` checks that every
@@ -422,7 +422,7 @@ Machine topics under `/machines/<id>/`:
   verified on the Husky by `test-blender-roundtrip` (a body, a driven
   revolute joint with command interfaces and a tool site authored through
   the add-on, accepted and exported).
-- `oslo make audit-machine-assets --asset-root=machines/usd` accepts every
+- `oslo make audit-machine-assets --asset-root=assets/machines/usd` accepts every
   machine of the 24 packages under the `gearbox` profile, and the Kubota,
   Knoche and weed unit scenarios of `test-real-machines` run on them.
 
@@ -467,9 +467,9 @@ three rows are harness results (§14).
 | `oslo make test-isaac-contract` | the above, then each schedule in headless Isaac Sim, compared |
 | `oslo make test-real-machines` | Kubota tractor lifting the Knoche harrow, Kubota driving under pressure changes, weed unit ball_tip and tool_tip following their tool bodies; `--tractor`, `--implement`, `--weedunit` pick other packages |
 | `oslo make audit-machine-assets --asset-root=DIR` | every package under DIR compiles and every machine is accepted |
-| `oslo make test-blender-export [--machine=NAME]` | every `machines/blender` file exports to exactly its committed package |
+| `oslo make test-blender-export [--machine=NAME]` | every `assets/machines/blender` file exports to exactly its committed package |
 | `oslo make test-blender-roundtrip [--machine=NAME]` | every package through Blender and back, and edits made in Blender reaching the export |
-| `oslo make verify-robot-contract` | machine contract, joint control, control lifecycle, hitch and services, the Isaac contract with native conformance, the asset audit of `machines/usd`, real machines; prints which passed |
+| `oslo make verify-robot-contract` | machine contract, joint control, control lifecycle, hitch and services, the Isaac contract with native conformance, the asset audit of `assets/machines/usd`, real machines; prints which passed |
 
 - **Isaac runs** go through the Nix launcher (`isaacsim --no-window --no-ros-env
   --exec scripts/robot_contract/isaac_probe.py`), one Kit child per schedule

@@ -241,9 +241,9 @@ make.recipe{
 -- bodies. Fails when the machines submodule is missing.
 local function real_machines(a)
   local pwd = oslo.sys.pwd()
-  local tractor = a.tractor or (pwd .. "/machines/usd/kubota_tractor.usdz")
-  local implement = a.implement or (pwd .. "/machines/usd/knoche_disc_harrow.usdz")
-  local weedunit = a.weedunit or (pwd .. "/machines/usd/weedunit.usdz")
+  local tractor = a.tractor or (pwd .. "/assets/machines/usd/kubota_tractor.usdz")
+  local implement = a.implement or (pwd .. "/assets/machines/usd/knoche_disc_harrow.usdz")
+  local weedunit = a.weedunit or (pwd .. "/assets/machines/usd/weedunit.usdz")
   for _, asset in ipairs({ tractor, implement, weedunit }) do
     assert(oslo.fs.read(asset) ~= nil, "machines submodule asset is missing: " .. asset)
   end
@@ -261,16 +261,16 @@ end
 make.recipe{
   name = "test-real-machines",
   desc = "real tractor, implement and weed unit through the joint command contract (needs the machines submodule)",
-  params = { { "--tractor", desc = "tractor package (default machines/usd/kubota_tractor.usdz)" },
-             { "--implement", desc = "implement package (default machines/usd/knoche_disc_harrow.usdz)" },
-             { "--weedunit", desc = "weed unit package (default machines/usd/weedunit.usdz)" } },
+  params = { { "--tractor", desc = "tractor package (default assets/machines/usd/kubota_tractor.usdz)" },
+             { "--implement", desc = "implement package (default assets/machines/usd/knoche_disc_harrow.usdz)" },
+             { "--weedunit", desc = "weed unit package (default assets/machines/usd/weedunit.usdz)" } },
   run = function(a) real_machines(a) end,
 }
 
 make.recipe{
   name = "audit-machine-assets",
   desc = "read-only audit of every machine package under --asset-root (JSON report, nonzero when any machine is rejected)",
-  params = { { "--asset-root", desc = "directory of USD packages, e.g. machines/usd" },
+  params = { { "--asset-root", desc = "directory of USD packages, e.g. assets/machines/usd" },
              { "--out", desc = "report path (default target/robot-contract/audit-<time>.json)" } },
   run = function(a)
     local root = a["asset-root"] or a.asset_root
@@ -422,7 +422,7 @@ make.recipe{
       { "isaac contract (with native conformance)", function() isaac_contract(contract_run_dir("verify")) end },
       { "asset audit", function()
         sh.cargo("run", "-q", "-p", "gearbox-sim", "--bin", "gearbox", "--", "audit-machines", "--asset-root",
-          pwd .. "/machines/usd", "--out", pwd .. "/target/robot-contract/audit-verify.json") end },
+          pwd .. "/assets/machines/usd", "--out", pwd .. "/target/robot-contract/audit-verify.json") end },
       { "real machines", function() real_machines({}) end },
     }
     local failed = {}
@@ -439,12 +439,12 @@ make.recipe{
   end,
 }
 
--- Machine packages to and from Blender (machines/scripts/gearbox_usd), in the Blender flatpak.
+-- Machine packages to and from Blender (assets/machines/scripts/gearbox_usd), in the Blender flatpak.
 local function blender(log, blend, ...)
   local pwd = oslo.sys.pwd()
   local words = { "flatpak", "run", "--filesystem=" .. pwd, "--talk-name=org.freedesktop.Flatpak", "org.blender.Blender", "--background" }
   words[#words + 1] = blend or "--factory-startup"
-  for _, w in ipairs({ "--python", pwd .. "/machines/scripts/gearbox_usd/cli.py", "--", ... }) do words[#words + 1] = w end
+  for _, w in ipairs({ "--python", pwd .. "/assets/machines/scripts/gearbox_usd/cli.py", "--", ... }) do words[#words + 1] = w end
   local quoted = {}
   for i, w in ipairs(words) do quoted[i] = ("%q"):format(w) end
   local r = oslo.run{ "sh", "-c", table.concat(quoted, " ") .. (" > %q 2>&1"):format(log) }
@@ -457,7 +457,7 @@ end
 local function machine_names(a)
   if a.machine then return { a.machine } end
   local names = {}
-  local listed = oslo.run{ "sh", "-c", "ls machines/usd/*.usdz", capture = true }
+  local listed = oslo.run{ "sh", "-c", "ls assets/machines/usd/*.usdz", capture = true }
   for path in (listed.out or ""):gmatch("[^\n]+") do names[#names + 1] = path:match("([^/]+)%.usdz$") end
   return names
 end
@@ -481,11 +481,11 @@ end
 
 make.recipe{
   name = "blender-import",
-  desc = "load a machine package into a .blend: --package=PATH [--blend=PATH, default machines/blender/<name>.blend]",
+  desc = "load a machine package into a .blend: --package=PATH [--blend=PATH, default assets/machines/blender/<name>.blend]",
   params = { { "--package", desc = "machine package (.usdz)" }, { "--blend", desc = ".blend to write" } },
   run = function(a)
     assert(type(a.package) == "string", "--package=PATH is required")
-    local blend = a.blend or ("machines/blender/" .. a.package:match("([^/]+)%.usdz$") .. ".blend")
+    local blend = a.blend or ("assets/machines/blender/" .. a.package:match("([^/]+)%.usdz$") .. ".blend")
     assert(oslo.run{ "mkdir", "-p", "target/blender" }.ok)
     assert(blender("target/blender/import.log", nil, "import", a.package, blend), "blender-import failed; see target/blender/import.log")
   end,
@@ -493,11 +493,11 @@ make.recipe{
 
 make.recipe{
   name = "blender-export",
-  desc = "write a .blend's machine as a package: --blend=PATH [--package=PATH, default machines/usd/<name>.usdz]",
+  desc = "write a .blend's machine as a package: --blend=PATH [--package=PATH, default assets/machines/usd/<name>.usdz]",
   params = { { "--blend", desc = ".blend to export" }, { "--package", desc = "machine package (.usdz) to write" } },
   run = function(a)
     assert(type(a.blend) == "string", "--blend=PATH is required")
-    local out = a.package or ("machines/usd/" .. a.blend:match("([^/]+)%.blend$") .. ".usdz")
+    local out = a.package or ("assets/machines/usd/" .. a.blend:match("([^/]+)%.blend$") .. ".usdz")
     assert(oslo.run{ "mkdir", "-p", "target/blender" }.ok)
     assert(blender("target/blender/export.log", a.blend, "export", out), "blender-export failed; see target/blender/export.log")
   end,
@@ -513,13 +513,13 @@ make.recipe{
     assert(oslo.run{ "mkdir", "-p", dir }.ok)
     local failed = {}
     for _, name in ipairs(machine_names(a)) do
-      local package = oslo.sys.pwd() .. "/machines/usd/" .. name .. ".usdz"
+      local package = oslo.sys.pwd() .. "/assets/machines/usd/" .. name .. ".usdz"
       local ok = blender(dir .. "/" .. name .. ".log", nil, "roundtrip", package, dir)
       ok = ok and same_model(package, dir .. "/" .. name .. ".usdz", dir)
       print(("blender roundtrip: %-26s %s"):format(name, ok and "pass" or "FAIL"))
       if not ok then failed[#failed + 1] = name end
     end
-    local husky = oslo.sys.pwd() .. "/machines/usd/clearpath_husky.usdz"
+    local husky = oslo.sys.pwd() .. "/assets/machines/usd/clearpath_husky.usdz"
     local edited = dir .. "/clearpath_husky.edited.usdz"
     local accepted = [[
 import json, sys
@@ -531,7 +531,7 @@ sys.exit(0 if all(m["accepted"] for m in json.load(open(sys.argv[1]))["machines"
     print(("blender roundtrip: %-26s %s"):format("edits in Blender", ok and "pass" or "FAIL"))
     if not ok then failed[#failed + 1] = "edits" end
     sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
-    local addon = blender(dir .. "/addon.log", nil, "addon-check", oslo.sys.pwd() .. "/machines/blender/clearpath_husky.blend", dir .. "/clearpath_husky.addon.usdz")
+    local addon = blender(dir .. "/addon.log", nil, "addon-check", oslo.sys.pwd() .. "/assets/machines/blender/clearpath_husky.blend", dir .. "/clearpath_husky.addon.usdz")
     print(("blender roundtrip: %-26s %s"):format("add-on with Gearbox check", addon and "pass" or "FAIL"))
     if not addon then failed[#failed + 1] = "add-on" end
     assert(#failed == 0, "blender roundtrip failed: " .. table.concat(failed, ", "))
@@ -540,7 +540,7 @@ sys.exit(0 if all(m["accepted"] for m in json.load(open(sys.argv[1]))["machines"
 
 make.recipe{
   name = "test-blender-export",
-  desc = "export every machines/blender .blend (or --machine=NAME) and check it equals its committed package",
+  desc = "export every assets/machines/blender .blend (or --machine=NAME) and check it equals its committed package",
   params = { { "--machine", desc = "one machine name, e.g. kubota_tractor" } },
   run = function(a)
     sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
@@ -549,7 +549,7 @@ make.recipe{
     assert(oslo.run{ "mkdir", "-p", dir }.ok)
     local failed = {}
     for _, name in ipairs(machine_names(a)) do
-      local blend, package, out = pwd .. "/machines/blender/" .. name .. ".blend", pwd .. "/machines/usd/" .. name .. ".usdz", dir .. "/" .. name .. ".usdz"
+      local blend, package, out = pwd .. "/assets/machines/blender/" .. name .. ".blend", pwd .. "/assets/machines/usd/" .. name .. ".usdz", dir .. "/" .. name .. ".usdz"
       local ok = oslo.fs.read(blend) ~= nil and blender(dir .. "/" .. name .. ".log", blend, "export", out)
       ok = ok and blender(dir .. "/" .. name .. ".compare.log", nil, "compare", package, out) and same_model(package, out, dir)
       print(("blender export: %-26s %s"):format(name, ok and "pass" or "FAIL"))

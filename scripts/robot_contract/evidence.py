@@ -86,7 +86,7 @@ def main():
         "source": {
             "commit": git("rev-parse", "HEAD"),
             "dirty_paths": len((git("status", "--porcelain") or "").splitlines()),
-            "machines_submodule": git("-C", "machines", "rev-parse", "HEAD"),
+            "machines_submodule": git("-C", "assets/machines", "rev-parse", "HEAD"),
             "cargo_lock_sha256": sha256("Cargo.lock"),
         },
         "executables": {

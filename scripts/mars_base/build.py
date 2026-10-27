@@ -7,7 +7,7 @@
                                            wear (weathering.bake_module)
     assets/mars_base/textures/             Poly Haven CC0 sets, baked and
                                            procedural maps, NASA's images
-    machines/usd/<robot>.usdz              the robots that tend the crops
+    assets/machines/usd/<robot>.usdz       the robots that tend the crops
     bin/gearbox/assets/world/mars_base.usda        the world: every module
                                            placed, and the greenhouse rooms,
                                            trays, lamps, power and services
@@ -59,7 +59,7 @@ MODULES = os.path.join(ASSETS, "modules")
 MODULE_TEXTURES = os.path.join(MODULES, "textures")
 TEXTURES = os.path.join(ASSETS, "textures")
 WORLD_DIR = os.path.join(ROOT, "bin", "gearbox", "assets", "world")
-MACHINES = os.path.join(ROOT, "machines", "usd")
+MACHINES = os.path.join(ROOT, "assets", "machines", "usd")
 WORK = os.path.join(ROOT, ".work", "mars_base")
 LOOKS = "/MarsBase/Looks"
 
