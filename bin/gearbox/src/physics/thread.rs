@@ -1,12 +1,14 @@
 //! Physics on its own thread. After `PostUpdate`, the frame's last physics
 //! reader, the world and the control tick's state cross to the thread, which
 //! steps them in real time while the frame extracts, renders, presents and
-//! takes input; before the next `Update` they come back. The frame waits on
-//! no more than the step in progress, so a step slower than real time slows
-//! the simulation, not the frame, and a slow frame does not slow the
-//! simulation: between steps the thread answers the API's drive commands and
-//! clock reads and publishes the machines' states. A step budget runs at most
-//! `MAX_STEPS_PER_FRAME` steps a frame, as the frame's own stepping does.
+//! takes input; before the next `Update` they come back. Taking them back, the
+//! frame waits for the steps real time still owes while a step costs at most
+//! `MAX_PHYSICS_SHARE` of its own period, so a frame that holds the physics
+//! long still leaves it in real time, and a step slower than that slows the
+//! simulation, not the frame: between steps the thread answers the API's drive
+//! commands and clock reads and publishes the machines' states. A step budget
+//! runs at most `MAX_STEPS_PER_FRAME` steps a frame, as the frame's own
+//! stepping does.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -26,6 +28,10 @@ use super::world::{ControlTick, MAX_STEPS_PER_FRAME, PhysicsWorld, StepStats, ti
 /// Most real time physics may fall behind; past it the simulation slows down
 /// instead of catching up in a burst.
 const MAX_DEBT_S: f64 = 0.25;
+
+/// Largest share of a step's period the step may cost for the frame to wait
+/// on the steps real time owes when it takes the world back.
+const MAX_PHYSICS_SHARE: f64 = 0.5;
 
 #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
 struct PhysicsJoin;
@@ -263,15 +269,25 @@ impl Waits {
 }
 
 fn run(inbox: Receiver<Batch>, outbox: SyncSender<Ran>, stop: Arc<AtomicBool>) {
+    let mut last = 0.0;
     while let Ok(Batch { mut world, plan }) = inbox.recv() {
-        let (mut steps, mut seconds) = (0u32, 0.0);
+        let (mut steps, mut seconds, mut caught_up) = (0u32, 0.0, 0u32);
         loop {
             let stopping = stop.load(Ordering::Acquire);
-            if plan.due(steps) && !(stopping && matches!(plan, Plan::RealTime { .. })) {
+            let owed = plan.due(steps)
+                && match plan {
+                    Plan::Exact(_) => true,
+                    Plan::RealTime { hz, .. } => {
+                        !stopping || (last * hz <= MAX_PHYSICS_SHARE && caught_up < MAX_STEPS_PER_FRAME)
+                    }
+                };
+            if owed {
                 let started = Instant::now();
                 tick(&mut world);
-                seconds += started.elapsed().as_secs_f64();
+                last = started.elapsed().as_secs_f64();
+                seconds += last;
                 steps += 1;
+                caught_up += stopping as u32;
                 continue;
             }
             if stopping || matches!(plan, Plan::Exact(_)) {
@@ -449,6 +465,21 @@ mod tests {
         let physics = app.world().resource::<PhysicsWorld>();
         let owed = 0.8 * physics.step_hz;
         assert!(physics.ticks as f64 >= 0.8 * owed && physics.ticks as f64 <= owed + 1.0, "{} ticks", physics.ticks);
+    }
+
+    #[test]
+    fn a_frame_that_holds_the_physics_still_leaves_it_in_real_time() {
+        let (mut app, _) = app();
+        app.add_systems(Update, || std::thread::sleep(Duration::from_millis(30)));
+        let started = Instant::now();
+        for _ in 0..20 {
+            app.update();
+        }
+        app.world_mut().run_schedule(PhysicsJoin);
+        let elapsed = started.elapsed().as_secs_f64();
+        let physics = app.world().resource::<PhysicsWorld>();
+        let simulated = physics.simulated_seconds;
+        assert!(simulated > 0.8 * elapsed - 2.0 / physics.step_hz, "{simulated} s simulated in {elapsed} s");
     }
 
     #[test]
