@@ -69,7 +69,7 @@ Physical references: [NASA Mars facts](https://science.nasa.gov/mars/facts/), [E
   a base that grows its food, its structures referenced from
   `assets/mars_base/modules/`; `gearbox spawn machine
   bin/gearbox/assets/world/mars_base_fleet.usda --machine base` brings its
-  tending robots and rovers. See `specs/GREENHOUSE_SPEC.md`.
+  tending robots and rovers. See `docs/specs/GREENHOUSE_SPEC.md`.
 
 ## Acceptance gates
 

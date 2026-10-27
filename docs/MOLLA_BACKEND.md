@@ -618,7 +618,7 @@ Molla; otherwise Rapier selects incompatible hash-set drain calls.
 ## Simulated sensors on sensor links (2026-09-25)
 
 `bin/gearbox/src/sensors.rs` samples authored `role = "sensor"` links
-(`specs/CONTROLLER_SPEC.md` §7.6) with Molla's GPU sensors and streams them on
+(`docs/specs/CONTROLLER_SPEC.md` §7.6) with Molla's GPU sensors and streams them on
 `/machines/<id>/sensors/<link>`: `datapod.imu.v1` for `imu` links, chunked
 `gearbox.lidar_scan.v1` sweeps for `lidar` links and row-banded
 `gearbox.camera_frame.v1` color/depth frames for `camera` links. The exact
@@ -832,7 +832,7 @@ shadows. Neither is applied.
 ### Generic sensor links: the Webots set (2026-09-25)
 
 Every device in the Webots sensor guide now has a sensor-link kind
-(`specs/CONTROLLER_SPEC.md` §7.6):
+(`docs/specs/CONTROLLER_SPEC.md` §7.6):
 - accelerometer, gyro, inertial unit, compass and GPS;
 - distance (laser, infra-red or sonar), light, position and radar;
 - range finder, touch (bumper, force or force-3d), receiver and emitter;
@@ -914,7 +914,7 @@ inside Molla's rigid step (`molla_solvers::devices`, pinned at `030b965`):
 - connectors.
 
 The emitter came with the radio work. Gearbox only authors, commands and
-reads them (`specs/CONTROLLER_SPEC.md` §7.7).
+reads them (`docs/specs/CONTROLLER_SPEC.md` §7.7).
 
 Molla core:
 - **Brakes:** `Control::joint_damping` is solved backward-Euler together

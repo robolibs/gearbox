@@ -1,8 +1,8 @@
 # gearbox — state of play
 
 > Historical design notes, superseded by
-> [specs/MACHINE_SPEC.md](../specs/MACHINE_SPEC.md) and
-> [specs/CONTROLLER_SPEC.md](../specs/CONTROLLER_SPEC.md). The tool API is
+> [docs/specs/MACHINE_SPEC.md](specs/MACHINE_SPEC.md) and
+> [docs/specs/CONTROLLER_SPEC.md](specs/CONTROLLER_SPEC.md). The tool API is
 > peerbus + agentio in `crates/gearbox-api` (topic names in
 > `crates/gearbox-api/src/topics.rs`, datapod wire types), not zenoh. There
 > is no aeronet sim ↔ renderer link, and the crate table and zenoh topic

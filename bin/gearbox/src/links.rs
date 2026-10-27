@@ -1,5 +1,5 @@
 //! Link trees and couplings discovered from a machine's USD prims
-//! (`specs/CONTROLLER_SPEC.md` §7, `specs/TOOLS_SPEC.md` §2).
+//! (`docs/specs/CONTROLLER_SPEC.md` §7, `docs/specs/TOOLS_SPEC.md` §2).
 //!
 //! A machine that authors no `GearboxLinkAPI` gets a tree derived from its
 //! rigid bodies and joints, with a warning. One authored mark switches the

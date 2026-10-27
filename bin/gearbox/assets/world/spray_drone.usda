@@ -9,7 +9,7 @@
 )
 
 # A 25 kg agricultural quadcopter that flies on four propeller devices and a
-# copter device (`specs/CONTROLLER_SPEC.md` §7.7). Spawn it as a machine
+# copter device (`docs/specs/CONTROLLER_SPEC.md` §7.7). Spawn it as a machine
 # (`gearbox spawn machine world/spray_drone.usda --machine drone`) and fly it:
 #   gearbox machine move drone --up 1.5 --for 4s          # take off
 #   gearbox machine move drone --forward 3 --for 5s       # fly forward

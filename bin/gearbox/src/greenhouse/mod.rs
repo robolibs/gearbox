@@ -2,7 +2,7 @@
 //! grown on world time by `gearbox_greenhouse`, drawn as crop prefabs under
 //! their trays' lamps.
 //!
-//! A world USD declares the greenhouse with four API schemas (specs/GREENHOUSE_SPEC.md):
+//! A world USD declares the greenhouse with four API schemas (docs/specs/GREENHOUSE_SPEC.md):
 //! `GearboxZoneAPI` rooms, `GearboxTrayAPI` trays with the lamp over each,
 //! `GearboxPowerAPI` for the bus, `GearboxServiceAPI` spots where equipment
 //! is mended. Every greenhouse found joins the one [`Greenhouse`] house.

@@ -1,4 +1,4 @@
-//! Service controllers (`specs/TOOLS_SPEC.md` §6.2, §7.2, §7.4) and the
+//! Service controllers (`docs/specs/TOOLS_SPEC.md` §6.2, §7.2, §7.4) and the
 //! exchange between a master and its slaves: the master's state reaches
 //! every slave controller as inputs, a slave's granted requests act on the
 //! master, and bound PTO and valve joints on the slave follow the master's

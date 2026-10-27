@@ -1,11 +1,11 @@
 # Asset notes
 
 Dated notes about specific external machine assets and manual runs. They are
-not part of any contract; the contracts are in `specs/`.
+not part of any contract; the contracts are in `docs/specs/`.
 
 ## Oxbo harvester drivetrain (2026-09-14)
 
-Moved from `specs/DRIVETRAIN.md`.
+Moved from `docs/specs/DRIVETRAIN.md`.
 
 `~/data/code/OUSD/machines/usd/oxbo_harvester.usdz` authors all six roll
 joints as powered, no passive wheels, a 35,000 N·m per-wheel ceiling and a
@@ -35,7 +35,7 @@ not something shaft control solves.
 
 ## Oxbo harvester steering (2026-09-14)
 
-Moved from `specs/STEERING.md`.
+Moved from `docs/specs/STEERING.md`.
 
 `/home/bresilla/data/code/OUSD/machines/usd/oxbo_harvester.usdz` has front,
 middle and rear axle Y positions −2.5, −0.9 and 2.36 m. The fixed middle axle

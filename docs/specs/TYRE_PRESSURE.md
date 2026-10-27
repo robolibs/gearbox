@@ -2,7 +2,7 @@
 
 Procedural field layouts can author `default_friction` and per-region `friction`
 for footprint sampling. Missing values retain collider friction; no coefficients
-are inferred from visual profile names. See the [field friction contract](../crates/gearbox-fields/README.md#physical-friction)
+are inferred from visual profile names. See the [field friction contract](../../crates/gearbox-fields/README.md#physical-friction)
 for schema, interpolation, update semantics and current terrain/backend limits.
 
 ## Required machine asset contract

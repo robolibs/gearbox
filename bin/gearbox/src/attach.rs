@@ -1,4 +1,4 @@
-//! Runtime attachments (`specs/TOOLS_SPEC.md`): a slave's coupler hangs on
+//! Runtime attachments (`docs/specs/TOOLS_SPEC.md`): a slave's coupler hangs on
 //! a master's hitch through a Molla joint shaped by the coupling type. The
 //! master's agent answers the requests, the slave's agent refuses commands
 //! while attached, and the master's `/links` grows the slave's tree.
