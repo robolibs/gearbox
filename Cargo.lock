@@ -132,7 +132,7 @@ dependencies = [
 [[package]]
 name = "agentio"
 version = "0.1.0"
-source = "git+https://github.com/robolibs/agentio?rev=a0e520195cb7415f267f005fb79c9b153c7ba19e#a0e520195cb7415f267f005fb79c9b153c7ba19e"
+source = "git+https://github.com/robolibs/agentio?rev=d5ca8b5ce1b051c4528e8f47181bd0b9a754c0ca#d5ca8b5ce1b051c4528e8f47181bd0b9a754c0ca"
 dependencies = [
  "authbox",
  "datapod",
@@ -732,6 +732,7 @@ dependencies = [
 [[package]]
 name = "bevy_asset"
 version = "0.19.1"
+source = "git+https://github.com/bresilla/bevy_openusd?rev=a1916f19458a31c70df815502f0ea319e0fadc2d#a1916f19458a31c70df815502f0ea319e0fadc2d"
 dependencies = [
  "async-broadcast",
  "async-channel",
@@ -6761,6 +6762,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 [[package]]
 name = "openusd"
 version = "0.7.0"
+source = "git+https://github.com/bresilla/bevy_openusd?rev=a1916f19458a31c70df815502f0ea319e0fadc2d#a1916f19458a31c70df815502f0ea319e0fadc2d"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -6778,6 +6780,7 @@ dependencies = [
 [[package]]
 name = "openusd-build"
 version = "0.7.0"
+source = "git+https://github.com/bresilla/bevy_openusd?rev=a1916f19458a31c70df815502f0ea319e0fadc2d#a1916f19458a31c70df815502f0ea319e0fadc2d"
 dependencies = [
  "openusd",
  "prettyplease",
@@ -6790,6 +6793,7 @@ dependencies = [
 [[package]]
 name = "openusd-schemas"
 version = "0.7.0"
+source = "git+https://github.com/bresilla/bevy_openusd?rev=a1916f19458a31c70df815502f0ea319e0fadc2d#a1916f19458a31c70df815502f0ea319e0fadc2d"
 dependencies = [
  "derive_more",
  "openusd",
@@ -7047,6 +7051,7 @@ dependencies = [
 [[package]]
 name = "peerbus"
 version = "0.4.2"
+source = "git+https://github.com/robolibs/peerbus?rev=f3562d62e81d467e9707d29341181f2ecd3f7dac#f3562d62e81d467e9707d29341181f2ecd3f7dac"
 dependencies = [
  "authbox",
  "blake3",
@@ -9784,6 +9789,7 @@ checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 [[package]]
 name = "usd_bevy"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_openusd?rev=a1916f19458a31c70df815502f0ea319e0fadc2d#a1916f19458a31c70df815502f0ea319e0fadc2d"
 dependencies = [
  "anyhow",
  "bevy",
@@ -9805,6 +9811,7 @@ dependencies = [
 [[package]]
 name = "usd_macro"
 version = "0.0.1"
+source = "git+https://github.com/bresilla/bevy_openusd?rev=a1916f19458a31c70df815502f0ea319e0fadc2d#a1916f19458a31c70df815502f0ea319e0fadc2d"
 dependencies = [
  "openusd",
  "proc-macro2 1.0.107",

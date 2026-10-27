@@ -80,8 +80,8 @@ bevy = { version = "0.19", default-features = false, features = [
 # persistent identity, `did:key`, and the signed topic directory. The
 # peerbus rev is the one agentio pins; using its head alone splits
 # authbox into two versions.
-peerbus = { git = "https://github.com/robolibs/peerbus", rev = "eb44b44a26ad1f323dca78d25d6095a44927c3bd" }
-agentio = { git = "https://github.com/robolibs/agentio", rev = "a0e520195cb7415f267f005fb79c9b153c7ba19e" }
+peerbus = { git = "https://github.com/robolibs/peerbus", rev = "f3562d62e81d467e9707d29341181f2ecd3f7dac" }
+agentio = { git = "https://github.com/robolibs/agentio", rev = "d5ca8b5ce1b051c4528e8f47181bd0b9a754c0ca" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
@@ -95,30 +95,18 @@ mara            = { git = "https://github.com/bresilla/mara", rev = "5d50aeb6240
 egui            = { version = "0.34", default-features = false }
 tracing         = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# bevy_openusd v0.3.0: the live stage editor. openusd is the copy vendored
-# and patched inside that repository, so both sides speak the same `Stage`.
-usd_bevy        = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.3.0" }
-openusd         = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.3.0" }
-openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", tag = "v0.3.0", features = ["geom", "shade", "physics"] }
-
-# Local peerbus carries the per-handle request-id seed fix; every crate in
-# the graph (agentio included) must see the same peerbus, so patch the
-# git source rather than depend on the path directly.
-[patch."https://github.com/robolibs/peerbus"]
-peerbus = { path = "../peerbus" }
-
-# bevy_openusd work in progress (physics markers, incremental projection,
-# variant options) comes from the sibling checkout until it is tagged.
-[patch."https://github.com/bresilla/bevy_openusd"]
-usd_bevy        = { path = "../../OUSD/bevy_openusd/crates/usd_bevy" }
-openusd         = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openusd" }
-openusd-schemas = { path = "../../OUSD/bevy_openusd/vendor/openusd/crates/openusd-schemas" }
+# bevy_openusd (develop: v0.3.0 plus texture wraps and mip chains): the live
+# stage editor. openusd is the copy vendored and patched inside that
+# repository, so both sides speak the same `Stage`.
+usd_bevy        = { git = "https://github.com/bresilla/bevy_openusd", rev = "a1916f19458a31c70df815502f0ea319e0fadc2d" }
+openusd         = { git = "https://github.com/bresilla/bevy_openusd", rev = "a1916f19458a31c70df815502f0ea319e0fadc2d" }
+openusd-schemas = { git = "https://github.com/bresilla/bevy_openusd", rev = "a1916f19458a31c70df815502f0ea319e0fadc2d", features = ["geom", "shade", "physics"] }
 
 # bevy_openusd's bevy_asset serialises loads of one source so an older
 # snapshot cannot land after a newer one; the patch has to cover the graph.
 [patch.crates-io]
 bevy_render = { path = "vendor/bevy_render" }
-bevy_asset = { path = "../../OUSD/bevy_openusd/vendor/bevy_asset" }
+bevy_asset = { git = "https://github.com/bresilla/bevy_openusd", rev = "a1916f19458a31c70df815502f0ea319e0fadc2d" }
 # Vulkan uploads stage in host memory instead of a small BAR heap.
 gpu-allocator = { path = "vendor/gpu-allocator" }
 
