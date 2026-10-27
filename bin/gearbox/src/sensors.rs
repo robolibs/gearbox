@@ -1159,8 +1159,8 @@ impl Rig {
     }
 
     /// Issues every sample due at `sim_time` without waiting on the GPU
-    /// (generic ray sensors cast synchronously). A camera link samples only
-    /// while `wanted` says someone asks for its frames.
+    /// (generic ray sensors cast synchronously). A link samples only while
+    /// `wanted` says someone asks for its readings; radio links always do.
     pub fn sample(
         &mut self,
         engine: &Engine,
@@ -1177,7 +1177,7 @@ impl Rig {
         let mounts = &self.mounts;
         due.retain(|s| {
             let mount = &mounts[s.sensor_id as usize].resolved;
-            mount.spec.kind != SensorKind::Camera || wanted(&mount.name)
+            matches!(mount.spec.kind, SensorKind::Receiver | SensorKind::Emitter) || wanted(&mount.name)
         });
         if due.is_empty() {
             return Ok(());
@@ -1210,6 +1210,15 @@ impl Rig {
                 .iter()
                 .map(|&i| self.mounts[i].resolved.spec.rate_hz)
                 .fold(f32::MIN, f32::max);
+            let slowest_due = imu_due
+                .iter()
+                .map(|&(i, _)| self.mounts[i].resolved.spec.rate_hz)
+                .fold(f32::MAX, f32::min);
+            // An IMU that skipped samples re-primes instead of differencing across the gap.
+            if self.last_imu_time.is_some_and(|t| sim_time - t > 2.0 / slowest_due as f64) {
+                imu.reset();
+                self.last_imu_time = None;
+            }
             let dt = self
                 .last_imu_time
                 .map(|t| sim_time - t)
@@ -2274,37 +2283,35 @@ mod tests {
         assert_eq!(scan.hits, 3, "{ranges:?}");
         assert!(rig.mounts.iter().all(|m| m.published >= 1));
 
-        // Nobody asks for the cameras: they stop, everything else carries on.
+        // Links sample only while someone asks for them.
         rig.take_render_requests();
-        let (mut asked, mut cameras, mut others) = (Vec::new(), 0, 0);
-        for _ in 0..12 {
-            world.step();
-            let mut wanted = |link: &str| {
-                asked.push(link.to_string());
-                false
-            };
-            rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut wanted)
-                .unwrap();
-            engine
-                .device()
-                .unwrap()
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: Some(Duration::from_secs(5)),
-                })
-                .unwrap();
-            rig.collect(0, &mut |link, _| {
-                match link {
-                    "camera_link" | "seer_link" => cameras += 1,
-                    _ => others += 1,
-                }
-                true
-            });
-        }
-        assert!(!asked.is_empty() && asked.iter().all(|l| l == "camera_link" || l == "seer_link"), "{asked:?}");
-        assert_eq!(cameras, 0, "a camera nobody asks for sends no frames");
+        let run = |world: &mut PhysicsWorld, rig: &mut Rig, wanted: &dyn Fn(&str) -> bool| {
+            let (mut asked, mut got) = (Vec::new(), Vec::new());
+            for _ in 0..12 {
+                world.step();
+                let mut ask = |link: &str| {
+                    asked.push(link.to_string());
+                    wanted(link)
+                };
+                rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut ask)
+                    .unwrap();
+                let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) };
+                engine.device().unwrap().poll(wait).unwrap();
+                rig.collect(0, &mut |link, _| {
+                    got.push(link.to_string());
+                    true
+                });
+            }
+            (asked, got)
+        };
+        let (asked, got) = run(&mut world, &mut rig, &|_| false);
+        assert!(got.is_empty(), "nobody asked, yet {got:?} sent");
+        assert!(["imu_link", "lidar_link", "camera_link"].iter().all(|l| asked.iter().any(|a| a == l)), "{asked:?}");
         assert!(rig.take_render_requests().is_empty());
-        assert!(others > 0, "the other sensors keep sampling");
+        let (asked, got) = run(&mut world, &mut rig, &|link| link == "imu_link");
+        let imu_asks = asked.iter().filter(|l| *l == "imu_link").count();
+        assert!(imu_asks >= 2 && got.iter().all(|l| l == "imu_link"), "{got:?}");
+        assert_eq!(got.len(), imu_asks - 1, "after a gap the IMU primes before it reads");
     }
 
     #[test]
