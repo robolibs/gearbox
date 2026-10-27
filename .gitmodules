@@ -2,3 +2,7 @@
 	path = machines
 	url = git@github.com:bresilla/machines.git
 	branch = develop
+[submodule "molla"]
+	path = vendor/molla
+	url = git@github.com:bresilla/molla.git
+	branch = develop

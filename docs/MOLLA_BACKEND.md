@@ -610,8 +610,8 @@ existing issues in `gearbox-api`, `gearbox-fields` and vendored clouds; the
 `/tmp/gearbox-pressure-controls-clippy.log`.
 No lint suppressions or unrelated source fixes were added to hide those failures.
 
-Local path dependencies currently expect Molla at `../../OUSD/molla` relative
-to the Gearbox worktree root. No dependency versions were refreshed. Rapier's
+Molla is the `vendor/molla` submodule (branch `develop`); `gearbox-sim` depends on
+its crates by path. No dependency versions were refreshed. Rapier's
 `enhanced-determinism` feature must match the shared Parry feature enabled by
 Molla; otherwise Rapier selects incompatible hash-set drain calls.
 
@@ -624,10 +624,8 @@ Molla; otherwise Rapier selects incompatible hash-set drain calls.
 `gearbox.camera_frame.v1` color/depth frames for `camera` links. The exact
 `odom`/`imu` controller telemetry is unchanged and stays on its own topics.
 
-- The Molla crates now resolve through a `[patch."https://github.com/bresilla/molla"]`
-  section to the sibling checkout (`../../OUSD/molla`), which adds
-  `molla-sensors`, `molla-compute` and `molla-storage`; the git `rev` pins are
-  retained for when that tree is pushed.
+- The Molla crates come from the `vendor/molla` submodule by path, which adds
+  `molla-sensors`, `molla-compute` and `molla-storage`.
 - The sensors adopt Bevy's render device through `molla_compute::Engine::from_device`;
   Bevy 0.19.1 and Molla share wgpu 29.0.4, so no second device or copy exists.
   The FEM islands already use the same device this way.
