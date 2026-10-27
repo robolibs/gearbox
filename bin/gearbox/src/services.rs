@@ -201,6 +201,33 @@ fn flag(props: &HashMap<String, String>, key: &str) -> Option<bool> {
         .map(|v| matches!(v.as_str(), "1" | "true" | "on" | "yes"))
 }
 
+/// A joint's controller props: the controller's own, overlaid by the values
+/// of the link the joint moves, and its group leader's position over both.
+struct Props<'a> {
+    service: Option<&'a HashMap<String, String>>,
+    link: Vec<(&'a str, f64)>,
+    position: Option<f64>,
+}
+
+impl Props<'_> {
+    fn overlay(&self, key: &str) -> Option<f64> {
+        self.position
+            .filter(|_| key == "position")
+            .or_else(|| self.link.iter().find(|(name, _)| *name == key).map(|(_, value)| *value))
+    }
+
+    fn num(&self, key: &str) -> Option<f64> {
+        self.overlay(key).or_else(|| num(self.service?, key))
+    }
+
+    fn flag(&self, key: &str) -> Option<bool> {
+        match self.overlay(key) {
+            Some(value) => Some(value == 1.0),
+            None => flag(self.service?, key),
+        }
+    }
+}
+
 /// Values authored on the links become the live values once per machine.
 fn seed_link_values(
     inventory: Res<ControllerInventory>,
@@ -627,11 +654,11 @@ fn apply_service_controllers(
             {
                 continue;
             }
-            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
-            let owner = service_owner(&machine.id, &controller.instance);
             let Some(dt) = clock.due(&machine.id, &controller.instance) else {
                 continue;
             };
+            let key = ControllerKey::new(scene_root, &machine.id, &controller.instance);
+            let owner = service_owner(&machine.id, &controller.instance);
             let joint_prims = controller_joints(machine, controller);
             if joint_prims.is_empty() {
                 if warned
@@ -651,27 +678,23 @@ fn apply_service_controllers(
                 };
                 // Controller props, overlaid by the values of the link this
                 // joint moves, so a link addressed from the tree moves.
-                let mut props: HashMap<String, String> =
-                    service.0.get(&key).cloned().unwrap_or_default();
-                if let Some(link) = moved_link(&machine.links, prim) {
-                    for (name, value) in values.of_link(&machine.id, &link.name) {
-                        props.insert(name.to_string(), value.to_string());
-                    }
+                let link = moved_link(&machine.links, prim);
+                let position = grouped_position(machine, controller, &values);
+                if let (Some(position), Some(link)) = (position, link) {
+                    values.set(&machine.id, &link.name, "position", position);
                 }
-                if let Some(position) = grouped_position(machine, controller, &values) {
-                    props.insert("position".to_string(), position.to_string());
-                    if let Some(link) = moved_link(&machine.links, prim) {
-                        values.set(&machine.id, &link.name, "position", position);
-                    }
-                }
-                let props = &props;
+                let props = &Props {
+                    service: service.0.get(&key),
+                    link: link.map(|link| values.of_link(&machine.id, &link.name).collect()).unwrap_or_default(),
+                    position,
+                };
                 let ok = match controller.controller_type.as_str() {
                     "builtin:joint_position" | "builtin:hitch" => {
-                        let position = num(props, "position")
-                            .or_else(|| num(props, "value"))
+                        let position = props.num("position")
+                            .or_else(|| props.num("value"))
                             .unwrap_or(0.0)
                             .clamp(0.0, 1.0);
-                        let range = num(props, "range").unwrap_or(1.0);
+                        let range = props.num("range").unwrap_or(1.0);
                         let hitch = controller.controller_type == "builtin:hitch";
                         let now = joint_between(&physics, &j)
                             .and_then(|id| physics.joint(id))
@@ -679,7 +702,7 @@ fn apply_service_controllers(
                         // A hitch moves over its stroke at its pace, from
                         // where its arms are when first asked.
                         let position = if hitch {
-                            let rate = num(props, "rate").unwrap_or(1.0 / HITCH_STROKE_S).abs();
+                            let rate = props.num("rate").unwrap_or(1.0 / HITCH_STROKE_S).abs();
                             let stroke = strokes
                                 .entry(format!("{}/{}/{prim}", machine.id, controller.instance))
                                 .or_insert_with(|| {
@@ -696,7 +719,7 @@ fn apply_service_controllers(
                         // position it hangs free and the implement's weight
                         // rests on the ground; only below it does it hold.
                         let floating = hitch
-                            && flag(props, "float").unwrap_or(false)
+                            && props.flag("float").unwrap_or(false)
                             && now.is_some_and(|now| (now - target) * range.signum() > 0.0);
                         let act = if floating {
                             Actuation::Float
@@ -707,7 +730,7 @@ fn apply_service_controllers(
                     }
                     "builtin:joint_velocity" => {
                         let bound = bound_pto.as_deref() == Some(prim);
-                        let vel = match (num(props, "velocity"), bound, master) {
+                        let vel = match (props.num("velocity"), bound, master) {
                             (Some(v), _, _) => v,
                             (None, true, Some(m)) => m.pto_rad_s(),
                             _ => 0.0,
@@ -716,10 +739,10 @@ fn apply_service_controllers(
                         actuate(&mut physics, &owner, &j, act)
                     }
                     "builtin:pto" => {
-                        let rpm = num(props, "rpm")
+                        let rpm = props.num("rpm")
                             .unwrap_or(DEFAULT_PTO_RPM)
                             .clamp(0.0, MAX_PTO_RPM);
-                        let engaged = flag(props, "engaged").unwrap_or(false);
+                        let engaged = props.flag("engaged").unwrap_or(false);
                         let vel = if engaged {
                             rpm * std::f64::consts::TAU / 60.0
                         } else {
@@ -728,11 +751,11 @@ fn apply_service_controllers(
                         actuate(&mut physics, &owner, &j, Actuation::Velocity { target: vel, max_force: PTO_MAX_TORQUE })
                     }
                     "builtin:hydraulic_valve" => {
-                        let flow = num(props, "flow")
-                            .or_else(|| num(props, "value"))
+                        let flow = props.num("flow")
+                            .or_else(|| props.num("value"))
                             .unwrap_or(0.0)
                             .clamp(-1.0, 1.0);
-                        let rate = num(props, "rate").unwrap_or(DEFAULT_VALVE_RATE);
+                        let rate = props.num("rate").unwrap_or(DEFAULT_VALVE_RATE);
                         let act = Actuation::Velocity { target: flow * rate, max_force: MOTOR_MAX_FORCE };
                         actuate(&mut physics, &owner, &j, act)
                     }
@@ -740,8 +763,8 @@ fn apply_service_controllers(
                         // Uncoupled and uncommanded, a trailer holds itself
                         // like a parking brake; hitched, it rolls free.
                         let parked = if master.is_none() { 1.0 } else { 0.0 };
-                        let level = num(props, "level")
-                            .or_else(|| num(props, "value"))
+                        let level = props.num("level")
+                            .or_else(|| props.num("value"))
                             .unwrap_or(parked)
                             .clamp(0.0, 1.0);
                         actuate(&mut physics, &owner, &j, Actuation::Brake(level))
@@ -752,7 +775,7 @@ fn apply_service_controllers(
                             .map(|d| d as f64)
                             .unwrap_or(DEFAULT_TRAILER_STEER_DEG)
                             .to_radians();
-                        let angle = match num(props, "angle_rad") {
+                        let angle = match props.num("angle_rad") {
                             Some(a) => a,
                             None => auto_trailer_steer(
                                 machine, scene_root, &inputs, &physics, &index,
@@ -1233,6 +1256,33 @@ mod tests {
         let output = world.motor_output(joint).unwrap();
         assert_eq!(output.command, DeviceCommand::Position(0.3));
         assert!((output.position - 0.3).abs() < 1e-2, "{output:?}");
+    }
+
+    #[test]
+    fn props_read_as_the_controller_props_overlaid_with_link_values_and_position() {
+        let service: HashMap<String, String> =
+            [("position", "0.25"), ("value", "0.7"), ("engaged", "on"), ("flow", "x"), ("float", "yes")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        let link = vec![("position", 0.5), ("range", -0.0), ("engaged", 1.0), ("float", 0.0), ("level", f64::NAN), ("rpm", 1e-300)];
+        let keys = ["position", "value", "range", "engaged", "float", "flow", "level", "rpm", "rate"];
+        for position in [None, Some(1.0), Some(0.3)] {
+            let mut overlaid = service.clone();
+            for (name, value) in &link {
+                overlaid.insert(name.to_string(), value.to_string());
+            }
+            if let Some(position) = position {
+                overlaid.insert("position".to_string(), position.to_string());
+            }
+            let props = Props { service: Some(&service), link: link.clone(), position };
+            for key in keys {
+                assert_eq!(props.num(key).map(f64::to_bits), num(&overlaid, key).map(f64::to_bits), "{key} at {position:?}");
+                assert_eq!(props.flag(key), flag(&overlaid, key), "{key} at {position:?}");
+            }
+        }
+        let bare = Props { service: None, link: Vec::new(), position: None };
+        assert_eq!((bare.num("position"), bare.flag("engaged")), (None, None));
     }
 
     #[test]
