@@ -42,7 +42,7 @@ from gearbox_client import Gearbox
 from gearbox_client import Machine as GearboxMachine
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TERRAIN_USD = "world/peafield.usd"
 DEFAULT_OXBO_USD = "bin/gearbox/assets/oxbo.usd"
 DEFAULT_LINES_USD = REPO_ROOT / "bin/gearbox/assets/world/maptrax_field.usd"

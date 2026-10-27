@@ -560,7 +560,7 @@ The simulator hosts one agentio agent (peerbus transport) for the scene and
 one per machine. Every message is a `DatapodMsg` envelope around a datapod
 named `gearbox.<type>.v1` (or `datapod.<type>.v1` for the shared robot
 types). Rust definitions: `crates/gearbox-api/src/wire`; Python mirror:
-`examples/python/gearbox_client.py`; CLI: `gearbox` (`docs/CLI.md`,
+`scripts/control/gearbox_client.py`; CLI: `gearbox` (`docs/CLI.md`,
 `gearbox api topics`). A running host writes
 `$XDG_RUNTIME_DIR/gearbox/<name>.json` with its `did:key`, endpoint address
 and pid.

@@ -63,5 +63,5 @@ kinematic machine per machine load and reports bale poses and harvests:
 
 ```bash
 cargo run -p gearbox-api --no-default-features --example fake_host -- fake
-python examples/python/bale_run_multi.py 2 10 60
+python scripts/control/bale_run_multi.py 2 10 60
 ```

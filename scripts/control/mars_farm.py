@@ -14,7 +14,7 @@ writes (`bin/gearbox/assets/world/mars_base_farm.json`):
 
     gearbox run --planet mars --world bin/gearbox/assets/world/mars_base.usda
     gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base
-    python examples/python/mars_farm.py [--robots base_fleet_eve,base_fleet_archapicker1]
+    python scripts/control/mars_farm.py [--robots base_fleet_eve,base_fleet_archapicker1]
 
 Every robot runs as its own thread with its own client, so a robot that
 waits on the sim never holds up another. A task says how long, in the

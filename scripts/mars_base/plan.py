@@ -4,7 +4,7 @@ the order its joints move in. A joint's target is a position 0..1, which
 its `builtin:joint_position` controller drives to position × the moved
 body's `gearbox:value:range` (negative for a joint that works toward its
 lower limit) from the joint's zero. The build
-writes the plan next to the fleet; `examples/python/mars_farm.py` works the
+writes the plan next to the fleet; `scripts/control/mars_farm.py` works the
 farm by it.
 
 Kinematics of each kind of robot, given its sizes and where the fleet

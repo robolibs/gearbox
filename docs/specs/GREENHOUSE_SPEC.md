@@ -22,7 +22,7 @@ cluster, an inflatable hab, a printed regolith tower, a rover hangar, solar
 arrays and four 10 kWe fission units, two container-sized ISRU units with
 their tanks and an ice well, and a landing zone. The fleet file places the
 robots that do the farm's work (§5), two pressurised rovers and
-Perseverance; `examples/python/mars_farm.py` sets them working.
+Perseverance; `scripts/control/mars_farm.py` sets them working.
 
 `scripts/mars_base/` builds everything in Blender (see `build.py`): each
 kind of structure goes to `assets/mars_base/modules/<kind>.usdc`, a
@@ -232,7 +232,7 @@ for every robot that tends plants, the joint positions bringing its head
 over each plant place it reaches (a harvester's also where it stands in its
 lane), the order its joints move in and where it parks; for the washers
 their sweeps, for the excavators their dock, dig ground and bins.
-`examples/python/mars_farm.py` works the farm by it: each tending robot
+`scripts/control/mars_farm.py` works the farm by it: each tending robot
 harvests what is ripe and sows what is empty, the washers sweep and then
 clean the glazing with `by`, the excavators dig and tip into the soil
 plant's bins. It waits on the sim's clock, so it keeps pace however fast the
