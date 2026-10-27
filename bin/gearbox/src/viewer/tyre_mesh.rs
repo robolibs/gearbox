@@ -25,7 +25,7 @@ impl Plugin for TyreMeshPlugin {
             bevy::asset::embedded_asset!(app, "tyre_gpu.wgsl");
             app.add_plugins(bevy::pbr::MaterialPlugin::<TyreMaterial>::default());
         }
-        app.init_resource::<TyreMeshes>().add_systems(
+        app.init_resource::<TyreMeshes>().init_resource::<TyreScan>().add_systems(
             PostUpdate,
             update_tyre_meshes
                 .after(bevy::transform::TransformSystems::Propagate)
@@ -37,6 +37,46 @@ impl Plugin for TyreMeshPlugin {
 
 #[derive(Resource, Default)]
 struct TyreMeshes(HashMap<Entity, RubberMesh>);
+
+/// Rubber visuals by the wheel body each hangs under, kept between frames.
+#[derive(Resource, Default)]
+struct TyreScan {
+    candidates: HashMap<Entity, BodyId>,
+    /// `entity_to_body.len()` at the last whole-scene scan.
+    bodies: Option<usize>,
+    rescans: u32,
+}
+
+type Hierarchy<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static ChildOf>,
+        Option<&'static UsdPrimRef>,
+        Option<&'static Name>,
+        Option<&'static GlobalTransform>,
+    ),
+>;
+
+/// The wheel body a visual's rubber belongs to: its nearest body ancestor,
+/// when a rubber-named prim lies between them and no rigid-named one does.
+fn rubber_body(entity: Entity, physics: &PhysicsWorld, hierarchy: &Hierarchy) -> Option<BodyId> {
+    let mut current = entity;
+    let mut is_rubber = false;
+    loop {
+        if let Some(body) = physics.entity_to_body.get(&current) {
+            return is_rubber.then_some(*body);
+        }
+        let Ok((parent, prim, name, _)) = hierarchy.get(current) else {
+            return None;
+        };
+        if prim.is_some_and(|p| rigid_name(&p.path)) || name.is_some_and(|n| rigid_name(n.as_str())) {
+            return None;
+        }
+        is_rubber |= prim.is_some_and(|p| rubber_name(&p.path)) || name.is_some_and(|n| rubber_name(n.as_str()));
+        current = parent?.parent();
+    }
+}
 
 struct RubberMesh {
     source: Handle<Mesh>,
@@ -90,12 +130,9 @@ fn update_tyre_meshes(
     mut meshes: ResMut<Assets<Mesh>>,
     mut rubber: ResMut<TyreMeshes>,
     mut visuals: Query<(Entity, &mut Mesh3d, &GlobalTransform)>,
-    hierarchy: Query<(
-        Option<&ChildOf>,
-        Option<&UsdPrimRef>,
-        Option<&Name>,
-        Option<&GlobalTransform>,
-    )>,
+    hierarchy: Hierarchy,
+    reparented: Query<(), Changed<ChildOf>>,
+    mut scan: ResMut<TyreScan>,
     mut trace_at: Local<Option<std::time::Instant>>,
     materials: Option<Res<Assets<StandardMaterial>>>,
     mut gpu_materials: Option<ResMut<Assets<TyreMaterial>>>,
@@ -156,42 +193,33 @@ fn update_tyre_meshes(
         }
         true
     });
-    let mut ancestor_bodies = HashMap::<Entity, Option<BodyId>>::new();
-    let mut ancestry = Vec::new();
-    for (entity, mut mesh, global) in &mut visuals {
-        if rubber.0.contains_key(&entity) || retired.contains(&entity) {
-            continue;
-        }
-        let mut current = entity;
-        let candidate = loop {
-            if let Some(body) = ancestor_bodies.get(&current) { break *body; }
-            ancestry.push(current);
-            if let Some(body) = physics.entity_to_body.get(&current) { break Some(*body); }
-            let Ok((Some(parent), _, _, _)) = hierarchy.get(current) else { break None };
-            current = parent.parent();
-        };
-        for ancestor in ancestry.drain(..) { ancestor_bodies.insert(ancestor, candidate); }
-        if !candidate.is_some_and(|body| samples.contains_key(&body)) { continue; }
-        let mut current = entity;
-        let mut is_rubber = false;
-        let body = loop {
-            if let Some(body) = physics.entity_to_body.get(&current) {
-                break Some(*body);
-            }
-            let Ok((parent, prim, name, _)) = hierarchy.get(current) else {
-                break None;
-            };
-            if prim.is_some_and(|p| rigid_name(&p.path))
-                || name.is_some_and(|n| rigid_name(n.as_str()))
+    // The whole scene is classified again only when bodies or parents change.
+    let scan = &mut *scan;
+    if scan.bodies != Some(physics.entity_to_body.len()) || !reparented.is_empty() {
+        scan.candidates = visuals
+            .iter()
+            .filter_map(|(entity, _, _)| Some((entity, rubber_body(entity, &physics, &hierarchy)?)))
+            .collect();
+        scan.bodies = Some(physics.entity_to_body.len());
+        scan.rescans += 1;
+    } else {
+        for (entity, mesh, _) in &mut visuals {
+            if mesh.is_added()
+                && let Some(body) = rubber_body(entity, &physics, &hierarchy)
             {
-                break None;
+                scan.candidates.insert(entity, body);
             }
-            is_rubber |= prim.is_some_and(|p| rubber_name(&p.path))
-                || name.is_some_and(|n| rubber_name(n.as_str()));
-            let Some(parent) = parent else { break None };
-            current = parent.parent();
-        };
-        let Some(body) = body.filter(|_| is_rubber) else {
+        }
+    }
+    let due: Vec<(Entity, BodyId)> = scan
+        .candidates
+        .iter()
+        .filter(|(entity, body)| !rubber.0.contains_key(*entity) && !retired.contains(*entity) && samples.contains_key(*body))
+        .map(|(entity, body)| (*entity, *body))
+        .collect();
+    for (entity, body) in due {
+        let Ok((_, mut mesh, global)) = visuals.get_mut(entity) else {
+            scan.candidates.remove(&entity);
             continue;
         };
         let Some((sample, frame)) = samples.get(&body).copied() else {
@@ -336,7 +364,7 @@ fn update_tyre_meshes(
     {
         *trace_at = Some(std::time::Instant::now());
         let gpu_count = rubber.0.values().filter(|entry| entry.gpu.is_some()).count();
-        info!("tyre-mesh timing: gpu_meshes={gpu_count} cpu_meshes={} total_ms={} deform_ms={} normals_ms={} tangents_ms={}", rubber.0.len() - gpu_count, started.elapsed().as_secs_f64() * 1000.0, timings[0] * 1000.0, timings[1] * 1000.0, timings[2] * 1000.0);
+        info!("tyre-mesh timing: gpu_meshes={gpu_count} cpu_meshes={} candidates={} rescans={} total_ms={} deform_ms={} normals_ms={} tangents_ms={}", rubber.0.len() - gpu_count, scan.candidates.len(), scan.rescans, started.elapsed().as_secs_f64() * 1000.0, timings[0] * 1000.0, timings[1] * 1000.0, timings[2] * 1000.0);
         for (entity, entry) in &rubber.0 {
             if entry.gpu.is_some() { continue; }
             let Ok((_, _, global)) = visuals.get(*entity) else { continue };
@@ -717,5 +745,54 @@ mod tests {
         ] {
             assert!(!rubber_name(name));
         }
+    }
+
+    #[test]
+    fn steady_frames_find_new_tyres_without_rescanning_the_scene() {
+        let mut backend = MollaBackend::default();
+        let pose = Pose::from_translation(DVec3::Y * 0.8);
+        let bearing = backend.insert_body(BodyDesc::fixed().pose(pose));
+        let mut wheel_desc = BodyDesc::dynamic().pose(pose);
+        wheel_desc.additional_mass = Some(MassProps { local_com: DVec3::ZERO, mass: 100.0, inertia: Inertia::Principal(DVec3::ONE) });
+        let wheel = backend.insert_body(wheel_desc);
+        let joint = backend.insert_joint(bearing, wheel, JointDesc::new(JointKind::Revolute { axis: DVec3::Z }, Pose::IDENTITY, Pose::IDENTITY));
+        let ground = backend
+            .insert_collider(ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(10.0, 0.1, 10.0) }).translation(-DVec3::Y * 0.1))
+            .unwrap();
+        backend.register_wheel_ground(ground, None).unwrap();
+        backend
+            .configure_wheel(WheelForceDesc {
+                body: wheel, joint, local_hub: DVec3::ZERO, forward: DVec3::X,
+                radius: 1.0, supported_mass: 100.0, tyre: Some(PressureTyreDesc::reference(0.4)),
+            })
+            .unwrap();
+        backend.step(&|_, _| false);
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>().add_plugins(TyreMeshPlugin);
+        let at = GlobalTransform::from_translation(Vec3::Y * 0.8);
+        let body = app.world_mut().spawn(at).id();
+        let mut physics = PhysicsWorld::with_backend(Box::new(backend));
+        physics.entity_to_body.insert(body, wheel);
+        app.insert_resource(physics);
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0, -1.0, 0.2], [0.1, -0.98, 0.2], [0.0, -0.5, 0.2]]);
+        let source = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+        let building = app.world_mut().spawn(GlobalTransform::IDENTITY).id();
+        for _ in 0..50 {
+            app.world_mut().spawn((Mesh3d(source.clone()), Name::new("wall"), ChildOf(building), GlobalTransform::IDENTITY));
+        }
+        let first = app.world_mut().spawn((Mesh3d(source.clone()), Name::new("radial_tyre"), ChildOf(body), at)).id();
+        let later = app.world_mut().spawn((Name::new("radial_tyre_001"), ChildOf(body), at)).id();
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(app.world().resource::<TyreMeshes>().0.contains_key(&first));
+        app.world_mut().entity_mut(later).insert(Mesh3d(source.clone()));
+        for _ in 0..3 {
+            app.update();
+        }
+        let tracked = &app.world().resource::<TyreMeshes>().0;
+        assert!(tracked.contains_key(&first) && tracked.contains_key(&later) && tracked.len() == 2);
+        assert_eq!(app.world().resource::<TyreScan>().rescans, 1, "steady frames rescanned the scene");
     }
 }
