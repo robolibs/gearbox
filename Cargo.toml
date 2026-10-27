@@ -91,7 +91,7 @@ libc = "0.2"
 
 gearbox-api     = { path = "crates/gearbox-api", default-features = false }
 gearbox-cli     = { path = "crates/gearbox-cli" }
-mara            = { git = "https://github.com/bresilla/mara", rev = "5d50aeb6240286e72bc828d1789a51b31b8dd61d", package = "mara", default-features = false, features = ["window", "bevy"] }
+mara            = { git = "https://github.com/bresilla/mara", rev = "7ddc9af30b626f245234db5282f1e67fdd70e51f", package = "mara", default-features = false, features = ["window", "bevy"] }
 egui            = { version = "0.34", default-features = false }
 tracing         = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

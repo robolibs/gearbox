@@ -126,13 +126,15 @@ impl WindowApp for GearboxApp {
             Some(init) => (init.cli_paths, init.log),
             None => (Vec::new(), LoaderLog::default()),
         };
-        let wireframe_supported = ctx.__internal_render_state().is_some_and(|state| {
+        let gpu = ctx.gpu();
+        let wireframe_supported = gpu.is_some_and(|gpu| {
             use bevy::render::settings::WgpuFeatures;
-            state.device.limits().max_immediate_size >= 16
-                && state.device.features().contains(WgpuFeatures::POLYGON_MODE_LINE | WgpuFeatures::IMMEDIATES)
+            let device = &gpu.__internal_raw().device;
+            device.limits().max_immediate_size >= 16
+                && device.features().contains(WgpuFeatures::POLYGON_MODE_LINE | WgpuFeatures::IMMEDIATES)
         });
         let mut view = mara_bevy::MaraBevyViewport::with_render_state_plugins_and_content(
-            ctx.__internal_render_state(),
+            gpu,
             crate::app::configure_plugins,
             move |app: &mut App| crate::app::configure(app, cli_paths.clone(), wireframe_supported),
         );
