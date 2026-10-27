@@ -183,7 +183,7 @@ impl Arbiter {
         let before = self.dofs.len();
         self.dofs.retain(|k, _| k.machine != machine);
         if before != self.dofs.len() {
-            self.trace.push(self.tick, TraceEvent::Invalidated { machine: machine.to_string() });
+            self.trace.push(self.tick, || TraceEvent::Invalidated { machine: machine.to_string() });
         }
     }
 
@@ -197,7 +197,7 @@ impl Arbiter {
             state.last_sequence.clear();
             state.lease = state.spec.default_owner.clone().map(|owner| Lease { owner, epoch: 0 });
         }
-        self.trace.push(self.tick, TraceEvent::Invalidated { machine: machine.to_string() });
+        self.trace.push(self.tick, || TraceEvent::Invalidated { machine: machine.to_string() });
     }
 
     /// A direct override of `dofs`: every DOF must exist, allow the
@@ -226,7 +226,7 @@ impl Arbiter {
             state.command = Some(Accepted { setpoint: Setpoint::Hold, expiry: Expiry::Never, requested_cap: None });
             state.captured = None;
         }
-        self.trace.push(self.tick, TraceEvent::Acquired { owner: owner.to_string(), epoch, dofs: dofs.iter().map(ToString::to_string).collect() });
+        self.trace.push(self.tick, || TraceEvent::Acquired { owner: owner.to_string(), epoch, dofs: dofs.iter().map(ToString::to_string).collect() });
         Ok(Grant { owner, epoch, dofs: dofs.to_vec() })
     }
 
@@ -245,7 +245,7 @@ impl Arbiter {
             state.captured = None;
             state.last_sequence.remove(&grant.owner);
         }
-        self.trace.push(self.tick, TraceEvent::Released { owner: grant.owner.to_string(), epoch: grant.epoch, resumed: resume });
+        self.trace.push(self.tick, || TraceEvent::Released { owner: grant.owner.to_string(), epoch: grant.epoch, resumed: resume });
     }
 
     /// Validate a batch whole, then accept every command or none.
@@ -265,12 +265,17 @@ impl Arbiter {
                         state.captured = None;
                     }
                     state.command = Some(Accepted { setpoint: *setpoint, expiry: expiry.clone(), requested_cap: batch.requested_cap });
-                    state.last_sequence.insert(batch.owner.clone(), batch.sequence);
+                    match state.last_sequence.get_mut(&batch.owner) {
+                        Some(last) => *last = batch.sequence,
+                        None => {
+                            state.last_sequence.insert(batch.owner.clone(), batch.sequence);
+                        }
+                    }
                 }
-                self.trace.push(self.tick, TraceEvent::Accepted { owner: batch.owner.to_string(), sequence: batch.sequence, dofs: batch.commands.len() });
+                self.trace.push(self.tick, || TraceEvent::Accepted { owner: batch.owner.to_string(), sequence: batch.sequence, dofs: batch.commands.len() });
             }
             Err(reason) => {
-                self.trace.push(self.tick, TraceEvent::Rejected { owner: batch.owner.to_string(), sequence: batch.sequence, reason: reason.to_string() });
+                self.trace.push(self.tick, || TraceEvent::Rejected { owner: batch.owner.to_string(), sequence: batch.sequence, reason: reason.to_string() });
             }
         }
         result
@@ -280,7 +285,7 @@ impl Arbiter {
         let mut seen = BTreeSet::new();
         let external = batch.owner.class == OwnerClass::Direct;
         for (key, setpoint) in &batch.commands {
-            if !seen.insert(key) {
+            if batch.commands.len() > 1 && !seen.insert(key) {
                 return Err(Rejection::DuplicateDof { dof: key.to_string() });
             }
             let Some(state) = self.dofs.get(key) else {
@@ -350,7 +355,7 @@ impl Arbiter {
             }
         }
         for dof in lapsed {
-            self.trace.push(tick, TraceEvent::Expired { dof });
+            self.trace.push(tick, || TraceEvent::Expired { dof });
         }
     }
 
@@ -366,7 +371,7 @@ impl Arbiter {
             }
             state.suspended.retain(|l| &l.owner != owner);
         }
-        self.trace.push(self.tick, TraceEvent::Revoked { owner: owner.to_string() });
+        self.trace.push(self.tick, || TraceEvent::Revoked { owner: owner.to_string() });
     }
 
     /// The DOFs `owner` holds drop to their safe setpoint and keep their
@@ -382,7 +387,7 @@ impl Arbiter {
                 state.captured = None;
             }
         }
-        self.trace.push(self.tick, TraceEvent::Revoked { owner: format!("{owner} (quiesced)") });
+        self.trace.push(self.tick, || TraceEvent::Revoked { owner: format!("{owner} (quiesced)") });
     }
 
     /// One physics tick: lapse expired commands, capture holds from the
@@ -433,7 +438,7 @@ impl Arbiter {
         }
         let tick = self.tick;
         for (key, state) in &out {
-            self.trace.push(tick, TraceEvent::Effective { dof: key.to_string(), state: *state });
+            self.trace.push(tick, || TraceEvent::Effective { dof: key.to_string(), state: *state });
         }
         out
     }

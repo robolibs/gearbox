@@ -29,7 +29,7 @@ pub struct Trace {
 
 impl Default for Trace {
     fn default() -> Self {
-        Self { events: VecDeque::new(), capacity: 65536, enabled: true }
+        Self { events: VecDeque::new(), capacity: 65536, enabled: false }
     }
 }
 
@@ -46,14 +46,15 @@ fn effective(state: &ActuatorState) -> Value {
 }
 
 impl Trace {
-    pub fn push(&mut self, tick: u64, event: TraceEvent) {
+    /// Records the event `event` builds, built only while enabled.
+    pub fn push(&mut self, tick: u64, event: impl FnOnce() -> TraceEvent) {
         if !self.enabled {
             return;
         }
         if self.events.len() == self.capacity {
             self.events.pop_front();
         }
-        self.events.push_back((tick, event));
+        self.events.push_back((tick, event()));
     }
 
     pub fn events(&self) -> impl Iterator<Item = &(u64, TraceEvent)> {

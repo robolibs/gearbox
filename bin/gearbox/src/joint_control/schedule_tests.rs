@@ -50,6 +50,7 @@ fn app(rate_hz: f64, physics_hz: f64) -> App {
     settings.dt = 1.0 / physics_hz;
     world.set_settings(settings);
     world.set_gravity(DVec3::ZERO);
+    world.control.arbiter.trace.enabled = true;
     let post = world.insert_body(BodyDesc::fixed());
     let mut arm = BodyDesc::dynamic();
     arm.additional_mass = Some(MassProps { mass: 1.0, local_com: DVec3::ZERO, inertia: Inertia::Principal(DVec3::splat(1.0)) });

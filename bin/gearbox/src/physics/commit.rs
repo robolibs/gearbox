@@ -250,9 +250,17 @@ impl PhysicsWorld {
                 key
             }
         };
-        let sequence = self.control.sequences.entry(owner.clone()).or_default();
-        *sequence += 1;
-        let batch = Batch { owner: owner.clone(), epoch: 0, sequence: *sequence, commands: vec![(key, setpoint)], validity: Validity::Latched, requested_cap: cap };
+        let sequence = match self.control.sequences.get_mut(owner) {
+            Some(sequence) => {
+                *sequence += 1;
+                *sequence
+            }
+            None => {
+                self.control.sequences.insert(owner.clone(), 1);
+                1
+            }
+        };
+        let batch = Batch { owner: owner.clone(), epoch: 0, sequence, commands: vec![(key, setpoint)], validity: Validity::Latched, requested_cap: cap };
         self.control.arbiter.submit(batch, Instant::now())
     }
 
