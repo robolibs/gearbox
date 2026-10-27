@@ -651,6 +651,13 @@ impl MachineAgent {
         self.sensor_pubs.get_mut(link)
     }
 
+    /// Whether anyone subscribes to the named sensor link's topic right now.
+    /// Registers the topic, so a subscriber can find it before its first frame.
+    pub fn sensor_subscribed(&mut self, link: &str) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.subscriber_count() > 0)
+    }
+
     /// A simulated IMU reading of the named sensor link (`datapod.imu.v1`);
     /// `false` when the link's publisher could not be registered or the
     /// send was refused.

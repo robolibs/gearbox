@@ -132,7 +132,7 @@ dependencies = [
 [[package]]
 name = "agentio"
 version = "0.1.0"
-source = "git+https://github.com/robolibs/agentio?rev=d5ca8b5ce1b051c4528e8f47181bd0b9a754c0ca#d5ca8b5ce1b051c4528e8f47181bd0b9a754c0ca"
+source = "git+https://github.com/robolibs/agentio?rev=6f0f50113dc3d43fd92d47f6b1c28d1ae79e5b61#6f0f50113dc3d43fd92d47f6b1c28d1ae79e5b61"
 dependencies = [
  "authbox",
  "datapod",
@@ -7116,7 +7116,7 @@ dependencies = [
 [[package]]
 name = "peerbus"
 version = "0.4.2"
-source = "git+https://github.com/robolibs/peerbus?rev=f3562d62e81d467e9707d29341181f2ecd3f7dac#f3562d62e81d467e9707d29341181f2ecd3f7dac"
+source = "git+https://github.com/robolibs/peerbus?rev=afbb18c166cb83a82e8c04805b363303d962418f#afbb18c166cb83a82e8c04805b363303d962418f"
 dependencies = [
  "authbox",
  "blake3",

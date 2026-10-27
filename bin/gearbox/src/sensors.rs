@@ -672,7 +672,8 @@ pub(crate) fn run_machine_sensors(
         carriers.push((machine.id.clone(), machine_id.clone()));
         if active.0 {
             let started = std::time::Instant::now();
-            if let Err(error) = rig.sample(engine, &**physics, sim_time, &environment) {
+            let mut wanted = |link: &str| agent.sensor_subscribed(link);
+            if let Err(error) = rig.sample(engine, &**physics, sim_time, &environment, &mut wanted) {
                 warn!("gearbox-sensors: `{}` sample failed: {error}", machine.id);
             }
             rig.stats.sample_seconds += started.elapsed().as_secs_f64();
@@ -1158,19 +1159,26 @@ impl Rig {
     }
 
     /// Issues every sample due at `sim_time` without waiting on the GPU
-    /// (generic ray sensors cast synchronously).
+    /// (generic ray sensors cast synchronously). A camera link samples only
+    /// while `wanted` says someone asks for its frames.
     pub fn sample(
         &mut self,
         engine: &Engine,
         physics: &dyn PhysicsBackend,
         sim_time: f64,
         environment: &SensorEnvironment,
+        wanted: &mut dyn FnMut(&str) -> bool,
     ) -> Result<(), String> {
-        let due: Vec<ScheduledSample> = self
+        let mut due: Vec<ScheduledSample> = self
             .scheduler
             .advance(Duration::from_secs_f64(sim_time))
             .map_err(|e| e.to_string())?
             .to_vec();
+        let mounts = &self.mounts;
+        due.retain(|s| {
+            let mount = &mounts[s.sensor_id as usize].resolved;
+            mount.spec.kind != SensorKind::Camera || wanted(&mount.name)
+        });
         if due.is_empty() {
             return Ok(());
         }
@@ -2147,7 +2155,7 @@ mod tests {
                 contacts: crate::sensor_generic::contact_forces(&*world.backend),
                 ..Default::default()
             };
-            rig.sample(&engine, &*world.backend, world.simulated_seconds, &environment)
+            rig.sample(&engine, &*world.backend, world.simulated_seconds, &environment, &mut |_| true)
                 .unwrap();
             engine
                 .device()
@@ -2265,6 +2273,38 @@ mod tests {
         assert!(points[0][0].is_nan());
         assert_eq!(scan.hits, 3, "{ranges:?}");
         assert!(rig.mounts.iter().all(|m| m.published >= 1));
+
+        // Nobody asks for the cameras: they stop, everything else carries on.
+        rig.take_render_requests();
+        let (mut asked, mut cameras, mut others) = (Vec::new(), 0, 0);
+        for _ in 0..12 {
+            world.step();
+            let mut wanted = |link: &str| {
+                asked.push(link.to_string());
+                false
+            };
+            rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut wanted)
+                .unwrap();
+            engine
+                .device()
+                .unwrap()
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(Duration::from_secs(5)),
+                })
+                .unwrap();
+            rig.collect(0, &mut |link, _| {
+                match link {
+                    "camera_link" | "seer_link" => cameras += 1,
+                    _ => others += 1,
+                }
+                true
+            });
+        }
+        assert!(!asked.is_empty() && asked.iter().all(|l| l == "camera_link" || l == "seer_link"), "{asked:?}");
+        assert_eq!(cameras, 0, "a camera nobody asks for sends no frames");
+        assert!(rig.take_render_requests().is_empty());
+        assert!(others > 0, "the other sensors keep sampling");
     }
 
     #[test]
@@ -2319,7 +2359,7 @@ mod tests {
             for _ in 0..12 {
                 world.step();
                 let rig = rigs.rigs.get_mut("bot").unwrap();
-                rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default()).unwrap();
+                rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut |_| true).unwrap();
                 let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) };
                 engine.device().unwrap().poll(wait).unwrap();
                 rig.collect(0, &mut |_, reading| {
