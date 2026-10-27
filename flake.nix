@@ -86,7 +86,6 @@
             pkgs.clang
             pkgs.mold
             pkgs.pkg-config
-            pkgs.rust-cbindgen
             pkgs.trunk
             pkgs.maturin
             (pkgs.python3.withPackages (ps: with ps; [

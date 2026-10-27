@@ -54,16 +54,6 @@ local function need(tool, why)
   assert(oslo.run{ "sh", "-c", "command -v " .. tool, capture = true }.ok, why)
 end
 
--- name = ... from bin/gearbox/Cargo.toml, the one place every tool here reads it from.
-local function project_name()
-  local content = oslo.fs.read("bin/gearbox/Cargo.toml") or ""
-  local name = content:match('\nname%s*=%s*"([^"]+)"') or content:match('^name%s*=%s*"([^"]+)"')
-  assert(name, "package name not found in bin/gearbox/Cargo.toml")
-  return name
-end
-
-local NAME = project_name()
-
 local function forwarded_args(a)
   assert(a.args == nil or type(a.args) == "string",
     "use --args='--planet mars --load /path/to/rover.usdz' (with = before dash-prefixed arguments)")
@@ -570,24 +560,6 @@ make.recipe{ name = "fmt-file", desc = "format one Rust source file",
 
 make.recipe{ name = "clean", desc = "remove Cargo build artifacts",
              run = function() sh.cargo("clean") end }
-
-make.recipe{ name = "bind", desc = "generate both C and Python bindings",
-             deps = { "bind-c", "bind-py" } }
-
-make.recipe{
-  name = "bind-c",
-  desc = "generate the C header",
-  run = function()
-    sh.cargo("build", "--lib")
-    sh.cbindgen("--config", "cbindgen.toml", "--crate", NAME, "--output", "include/" .. NAME .. ".h")
-  end,
-}
-
-make.recipe{
-  name = "bind-py",
-  desc = "generate the Python bindings",
-  run = function() sh.maturin("build", "--features", "python") end,
-}
 
 make.recipe{
   name = "docs",

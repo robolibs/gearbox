@@ -9,13 +9,7 @@ license.workspace = true
 name = "gearbox"
 path = "src/main.rs"
 
-[lib]
-name = "gearbox"
-path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
-
 [features]
-python = ["dep:pyo3"]
 profile = ["bevy/trace", "bevy/debug", "dep:tracing-chrome"]
 
 [dependencies]
@@ -75,10 +69,6 @@ anyhow = "1"
 # Native file picker for the "📂 Load USD…" button.
 rfd = "0.15"
 png = "0.18"
-pyo3 = { version = "0.23", optional = true, features = [
-    "abi3-py39",
-    "extension-module",
-] }
 
 [dev-dependencies]
 pollster = "0.4"
