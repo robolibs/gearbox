@@ -212,12 +212,11 @@ fn orbit(
 fn pan(
     input: Res<BevyViewportInput>,
     keys: Res<ButtonInput<KeyCode>>,
-    context: Res<crate::viewer::machine_context::MachineHover>,
     mut view: ResMut<View>,
     cameras: Query<(&Projection, &Camera)>,
 ) {
     let delta = Vec2::from(input.pan_delta);
-    if context.captures_pointer || delta == Vec2::ZERO {
+    if delta == Vec2::ZERO {
         return;
     }
     let Ok((lens, camera)) = cameras.single() else {
