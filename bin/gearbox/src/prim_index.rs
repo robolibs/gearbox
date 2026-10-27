@@ -3,7 +3,7 @@
 //! a controller tick runs the same in a world that holds no prim entities.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use bevy::ecs::lifecycle::{Discard, Insert};
 use bevy::prelude::*;
@@ -21,20 +21,63 @@ struct Tables {
     entities: HashMap<String, Vec<Entity>>,
     parents: HashMap<Entity, Entity>,
     joints: HashMap<Entity, UsdPhysicsJoint>,
+    found: Found,
+}
+
+/// Answers by stage root and path, until the tables next change.
+#[derive(Default)]
+struct Found(Mutex<HashMap<Entity, HashMap<Box<str>, Answer>>>);
+
+impl Clone for Found {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// The first prim at a path under a root, and the first of them that is a joint.
+#[derive(Clone, Copy)]
+struct Answer {
+    prim: Option<Entity>,
+    joint: Option<Entity>,
 }
 
 impl PrimIndex {
     /// The entity of the prim at `path` in the stage under `root`.
     pub fn find(&self, root: Entity, path: &str) -> Option<Entity> {
-        self.0.entities.get(path)?.iter().copied().find(|entity| self.is_descendant_of(*entity, root))
+        self.answer(root, path).prim
     }
 
     /// The joint prim at `path` in the stage under `root`, with its marker.
     pub fn find_joint(&self, root: Entity, path: &str) -> Option<(Entity, &UsdPhysicsJoint)> {
-        self.0.entities.get(path)?.iter().find_map(|entity| {
-            let joint = self.0.joints.get(entity)?;
-            self.is_descendant_of(*entity, root).then_some((*entity, joint))
-        })
+        let entity = self.answer(root, path).joint?;
+        Some((entity, self.0.joints.get(&entity)?))
+    }
+
+    fn answer(&self, root: Entity, path: &str) -> Answer {
+        let mut found = self.0.found.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(answer) = found.get(&root).and_then(|paths| paths.get(path)) {
+            return *answer;
+        }
+        let mut answer = Answer { prim: None, joint: None };
+        for &entity in self.0.entities.get(path).into_iter().flatten() {
+            if !self.is_descendant_of(entity, root) {
+                continue;
+            }
+            answer.prim.get_or_insert(entity);
+            if self.0.joints.contains_key(&entity) {
+                answer.joint = Some(entity);
+                break;
+            }
+        }
+        found.entry(root).or_default().insert(path.into(), answer);
+        answer
+    }
+
+    /// The tables to change, answers forgotten.
+    fn tables(&mut self) -> &mut Tables {
+        let tables = Arc::make_mut(&mut self.0);
+        tables.found.0.get_mut().unwrap_or_else(PoisonError::into_inner).clear();
+        tables
     }
 
     /// Every joint prim: its entity, path and marker.
@@ -83,7 +126,7 @@ fn index_prim(insert: On<Insert, UsdPrimRef>, prims: Query<(&UsdPrimRef, Option<
     let Ok((prim, parent)) = prims.get(insert.entity) else {
         return;
     };
-    let tables = Arc::make_mut(&mut index.0);
+    let tables = index.tables();
     tables.paths.insert(insert.entity, prim.path.clone());
     tables.entities.entry(prim.path.clone()).or_default().push(insert.entity);
     if let Some(parent) = parent {
@@ -92,7 +135,7 @@ fn index_prim(insert: On<Insert, UsdPrimRef>, prims: Query<(&UsdPrimRef, Option<
 }
 
 fn forget_prim(discard: On<Discard, UsdPrimRef>, mut index: ResMut<PrimIndex>) {
-    let tables = Arc::make_mut(&mut index.0);
+    let tables = index.tables();
     tables.parents.remove(&discard.entity);
     let Some(path) = tables.paths.remove(&discard.entity) else {
         return;
@@ -107,24 +150,24 @@ fn forget_prim(discard: On<Discard, UsdPrimRef>, mut index: ResMut<PrimIndex>) {
 
 fn index_parent(insert: On<Insert, ChildOf>, prims: Query<&ChildOf, With<UsdPrimRef>>, mut index: ResMut<PrimIndex>) {
     if let Ok(parent) = prims.get(insert.entity) {
-        Arc::make_mut(&mut index.0).parents.insert(insert.entity, parent.parent());
+        index.tables().parents.insert(insert.entity, parent.parent());
     }
 }
 
 fn forget_parent(discard: On<Discard, ChildOf>, prims: Query<(), With<UsdPrimRef>>, mut index: ResMut<PrimIndex>) {
     if prims.contains(discard.entity) {
-        Arc::make_mut(&mut index.0).parents.remove(&discard.entity);
+        index.tables().parents.remove(&discard.entity);
     }
 }
 
 fn index_joint(insert: On<Insert, UsdPhysicsJoint>, joints: Query<&UsdPhysicsJoint>, mut index: ResMut<PrimIndex>) {
     if let Ok(joint) = joints.get(insert.entity) {
-        Arc::make_mut(&mut index.0).joints.insert(insert.entity, joint.clone());
+        index.tables().joints.insert(insert.entity, joint.clone());
     }
 }
 
 fn forget_joint(discard: On<Discard, UsdPhysicsJoint>, mut index: ResMut<PrimIndex>) {
-    Arc::make_mut(&mut index.0).joints.remove(&discard.entity);
+    index.tables().joints.remove(&discard.entity);
 }
 
 #[cfg(test)]
@@ -167,6 +210,27 @@ mod tests {
         assert_eq!(index.find(a, "/Arm/Pin"), Some(unjointed));
         assert!(index.find_joint(a, "/Arm/Pin").is_none());
         assert_eq!(index.joints().count(), 0);
+    }
+
+    #[test]
+    fn answers_follow_prims_that_arrive_move_and_leave_after_a_lookup() {
+        let mut app = app();
+        let world = app.world_mut();
+        let (a, b) = (world.spawn_empty().id(), world.spawn_empty().id());
+        assert_eq!(world.resource::<PrimIndex>().find(a, "/Arm/Link"), None);
+        assert!(world.resource::<PrimIndex>().find_joint(a, "/Arm/Joint").is_none());
+        let link = world.spawn((UsdPrimRef::new("/Arm/Link"), ChildOf(a))).id();
+        let joint = world.spawn((UsdPrimRef::new("/Arm/Joint"), ChildOf(a), UsdPhysicsJoint::default())).id();
+        let index = world.resource::<PrimIndex>();
+        assert_eq!(index.find(a, "/Arm/Link"), Some(link));
+        assert_eq!(index.find_joint(a, "/Arm/Joint").map(|(entity, _)| entity), Some(joint));
+        world.entity_mut(link).insert(ChildOf(b));
+        world.despawn(joint);
+        let index = world.resource::<PrimIndex>();
+        assert_eq!(index.find(a, "/Arm/Link"), None);
+        assert_eq!(index.find(b, "/Arm/Link"), Some(link));
+        assert_eq!(index.find(a, "/Arm/Joint"), None);
+        assert!(index.find_joint(a, "/Arm/Joint").is_none());
     }
 
     #[test]
