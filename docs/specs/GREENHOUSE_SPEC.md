@@ -84,8 +84,10 @@ first, so trays and service spots can name them. Attributes default as listed.
 | `gearbox:zone:glazing` | float | 0 | Share of daylight the room's glazing lets in to its crops; a glazed room is lit by the sky for cameras too. |
 | `gearbox:zone:processing` | float | 0 | Grain and dry seed the room's processing line threshes and mills a sol, kg. |
 
-Heating and cooling (6 kW each), dehumidifying, CO2 feed, makeup gas, fans,
-wall conductance (22 W/K) and heat capacity (6 MJ/K) are fixed per room.
+A room's heating and cooling (6 kW each), dehumidifying (0.72 kg/h), CO2 feed
+and makeup gas are EDEN ISS's growth room kit scaled by the room's tray area
+over its 12.5 m², never below it. Fans (300 W), wall conductance (22 W/K) and
+heat capacity (6 MJ/K) are fixed per room.
 
 ### 1.2 Trays (`GearboxTrayAPI`)
 

@@ -370,6 +370,13 @@ fn discover_greenhouses(world: &mut World) {
                     .collect(),
             });
         }
+        // Each room's climate kit serves the trays it holds.
+        let mut greenhouse = world.resource_mut::<Greenhouse>();
+        let house = &mut greenhouse.house;
+        for room in first_room..house.rooms.len() {
+            let area: f64 = house.trays.iter().filter(|t| t.room == room).map(|t| t.area_m2).sum();
+            house.rooms[room].climate = house.rooms[room].climate.serving(area);
+        }
         let greenhouse = world.resource::<Greenhouse>();
         let lamps = greenhouse.trays.iter().filter(|t| t.lamp.is_some()).count();
         info!(

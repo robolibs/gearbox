@@ -75,7 +75,25 @@ impl Climate {
             heat_capacity_j_k: 6.0e6,
         }
     }
+
+    /// This kit grown to serve `area_m2` of crops: the heat pump, the
+    /// dehumidifier, the CO2 feed and the make-up gas scale with the canopy
+    /// over the growth room's [`GROWTH_ROOM_AREA_M2`], never below its own.
+    pub fn serving(self, area_m2: f64) -> Self {
+        let k = (area_m2 / GROWTH_ROOM_AREA_M2).max(1.0);
+        Self {
+            heating_w: self.heating_w * k,
+            cooling_w: self.cooling_w * k,
+            dehumidify_kg_s: self.dehumidify_kg_s * k,
+            co2_feed_mol_s: self.co2_feed_mol_s * k,
+            makeup_mol_s: self.makeup_mol_s * k,
+            ..self
+        }
+    }
 }
+
+/// Crops the growth room's kit serves, m²: EDEN ISS's cultivation area (Zabel et al. 2017).
+pub const GROWTH_ROOM_AREA_M2: f64 = 12.5;
 
 /// What is beyond the walls.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -315,5 +333,22 @@ mod tests {
             wet.step(3600.0, &climate, Working { dehumidifier: false, ..Working::ALL }, 0.0, 0.0, 0.5, 800.0, &Outside::mars(12.0));
         }
         assert!(wet.humidity > 0.95, "without the dehumidifier RH {}", wet.humidity);
+    }
+
+    #[test]
+    fn a_hall_of_crops_needs_a_kit_sized_to_its_canopy() {
+        // Forty growth rooms' worth of canopy transpiring into one hall.
+        let area = 40.0 * GROWTH_ROOM_AREA_M2;
+        let climate = Climate::growth_room();
+        let mut small = Air::settled(1500.0, &climate);
+        let sized = climate.serving(area);
+        let mut served = Air::settled(1500.0, &sized);
+        for _ in 0..24 {
+            small.step(3600.0, &climate, Working::ALL, 0.0, 0.0, 20.0, 800.0, &Outside::mars(12.0));
+            served.step(3600.0, &sized, Working::ALL, 0.0, 0.0, 20.0, 800.0, &Outside::mars(12.0));
+        }
+        assert!(small.humidity > 0.95, "the growth room's kit leaves RH {}", small.humidity);
+        assert!(served.humidity <= climate.humidity + 0.01, "the sized kit leaves RH {}", served.humidity);
+        assert_eq!(climate.serving(1.0), climate, "a room smaller than the growth room keeps its kit");
     }
 }
