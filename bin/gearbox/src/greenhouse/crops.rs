@@ -84,6 +84,14 @@ pub struct Prefab {
     pub radius: f32,
 }
 
+/// How finely a prefab is built: close up, or for plants seen from afar,
+/// their leaves, stems and fruit on coarse grids with the same outline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Detail {
+    Near,
+    Far,
+}
+
 /// Geometry being built.
 #[derive(Default)]
 struct Shape {
@@ -91,9 +99,14 @@ struct Shape {
     uvs: Vec<[f32; 2]>,
     colours: Vec<[f32; 4]>,
     indices: Vec<u32>,
+    coarse: bool,
 }
 
 impl Shape {
+    fn of(detail: Detail) -> Self {
+        Self { coarse: detail == Detail::Far, ..default() }
+    }
+
     fn is_empty(&self) -> bool {
         self.indices.is_empty()
     }
@@ -125,7 +138,7 @@ impl Shape {
     #[allow(clippy::too_many_arguments)]
     fn leaf(&mut self, base: Vec3, forward: Vec3, up: Vec3, length: f32, width: f32, cup: f32, droop: f32, ruffle: f32, cell: u32, flip: bool) {
         // A leaflet a few centimetres long bends as smoothly on a coarser grid.
-        let (across, along) = if length < 0.09 { (3, 5) } else { (5, 9) };
+        let (across, along) = if self.coarse { (2, 3) } else if length < 0.09 { (3, 5) } else { (5, 9) };
         let forward = forward.normalize();
         let side = forward.cross(up).normalize_or(Vec3::X);
         let normal = side.cross(forward).normalize();
@@ -145,7 +158,11 @@ impl Shape {
 
     /// A tube along `path` of radius `radius`, tapering to `tip` of it, in `colour`.
     fn stem(&mut self, path: &[Vec3], radius: f32, tip: f32, colour: [f32; 4]) {
-        let sides = 6;
+        // Seen from afar, stalks a few millimetres thick are not seen at all.
+        if self.coarse && radius < 0.002 {
+            return;
+        }
+        let sides = if self.coarse { 3 } else { 6 };
         let start = self.positions.len() as u32;
         for (k, &p) in path.iter().enumerate() {
             let along = if k + 1 < path.len() { path[k + 1] - p } else { p - path[k - 1] };
@@ -176,7 +193,8 @@ impl Shape {
         let axis = axis.normalize_or(Vec3::Y);
         let side = axis.any_orthonormal_vector();
         let other = axis.cross(side);
-        self.grid(9, 7, |u, v| {
+        let (around, up) = if self.coarse { (4, 3) } else { (9, 7) };
+        self.grid(around, up, |u, v| {
             let (lon, lat) = (u * std::f32::consts::TAU, (v - 0.5) * std::f32::consts::PI);
             let p = centre + axis * (r.y * lat.sin()) + (side * lon.cos() * r.x + other * lon.sin() * r.z) * lat.cos();
             ([p.x, p.y, p.z], [0.0, 0.0], colour)
@@ -209,20 +227,20 @@ fn jitter(seed: u32, n: u32) -> f32 {
 const STEM_GREEN: [f32; 4] = [0.30, 0.48, 0.16, 1.0];
 
 /// The prefab of `species` at `stage` (0 just up, `STAGES - 1` ripe).
-pub fn prefab(species: &Species, stage: usize) -> Prefab {
+pub fn prefab(species: &Species, stage: usize, detail: Detail) -> Prefab {
     let s = stage.min(STAGES - 1) as f32 / (STAGES - 1) as f32;
     let aspect = atlas(species).aspect;
     match species.form {
-        Form::Rosette => rosette(species, s, aspect),
-        Form::Vine => tomato(species, s, aspect),
-        Form::Bush => potato(species, s, aspect),
-        Form::Grass => grass(species, s, aspect),
-        Form::Legume => legume(species, s, aspect),
-        Form::Creeper => creeper(species, s, aspect),
-        Form::Root => root(species, s, aspect),
-        Form::Allium => allium(species, s, aspect),
-        Form::Shrub => shrub(species, s, aspect),
-        Form::Crown => crown(species, s, aspect),
+        Form::Rosette => rosette(species, s, aspect, detail),
+        Form::Vine => tomato(species, s, aspect, detail),
+        Form::Bush => potato(species, s, aspect, detail),
+        Form::Grass => grass(species, s, aspect, detail),
+        Form::Legume => legume(species, s, aspect, detail),
+        Form::Creeper => creeper(species, s, aspect, detail),
+        Form::Root => root(species, s, aspect, detail),
+        Form::Allium => allium(species, s, aspect, detail),
+        Form::Shrub => shrub(species, s, aspect, detail),
+        Form::Crown => crown(species, s, aspect, detail),
     }
 }
 
@@ -303,10 +321,10 @@ fn head(species: &Species) -> Head {
 /// another, each set a golden angle round from the last, the young ones small
 /// and upright in the heart, the old ones broad and spread; on a stalk where
 /// the crop has one.
-fn rosette(species: &Species, s: f32, aspect: f32) -> Prefab {
+fn rosette(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
     let h = head(species);
     let count = (3.0 + h.leaves * s).round() as u32;
-    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    let (mut leaves, mut parts) = (Shape::of(detail), Shape::of(detail));
     let span = h.reach.0 + h.reach.1 * s;
     for i in 0..count {
         let age = (count - i) as f32;
@@ -363,7 +381,7 @@ fn trifoliate(leaves: &mut Shape, parts: &mut Shape, base: Vec3, forward: Vec3, 
 /// Radish, carrot and beet: a few plants to a place, each a small rosette of
 /// stalked leaves over its swollen root, the root's shoulder showing at the
 /// surface once it fills out.
-fn root(species: &Species, s: f32, aspect: f32) -> Prefab {
+fn root(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
     let (plants, gap, shoulder, colour, most, flip) = match species.name {
         "carrot" => (6, 0.035, 0.011, [0.93, 0.45, 0.10, 1.0], 9.0, true),
         "red_beet" => (2, 0.07, 0.028, [0.38, 0.04, 0.12, 1.0], 8.0, false),
@@ -372,7 +390,7 @@ fn root(species: &Species, s: f32, aspect: f32) -> Prefab {
     let start = setting(species);
     let swell = ((s - start) / (1.0 - start)).clamp(0.0, 1.0);
     let tall = 0.03 + (species.height_m as f32 * 0.95 - 0.03) * s;
-    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    let (mut leaves, mut parts) = (Shape::of(detail), Shape::of(detail));
     let stalk_colour = if species.name == "red_beet" { [0.55, 0.08, 0.16, 1.0] } else { STEM_GREEN };
     for p in 0..plants {
         let (row, col) = ((p / 3) as f32, (p % 3) as f32);
@@ -409,9 +427,9 @@ fn root(species: &Species, s: f32, aspect: f32) -> Prefab {
 
 /// Green onions: a bunch of slender white shanks, each with a few hollow
 /// leaves standing up and leaning out at the tips.
-fn allium(species: &Species, s: f32, _aspect: f32) -> Prefab {
+fn allium(species: &Species, s: f32, _aspect: f32, detail: Detail) -> Prefab {
     let tall = 0.04 + (species.height_m as f32 * 1.1 - 0.04) * s;
-    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    let (mut leaves, mut parts) = (Shape::of(detail), Shape::of(detail));
     for b in 0..6 {
         let a = b as f32 * GOLDEN_ANGLE;
         let base = Vec3::new(a.cos(), 0.0, a.sin()) * 0.014 * (b > 0) as u8 as f32;
@@ -431,9 +449,9 @@ fn allium(species: &Species, s: f32, _aspect: f32) -> Prefab {
 /// A chile pepper (APH's 'Española Improved'): a stem that forks into a few
 /// branches with simple leaves on short stalks, small white flowers, then
 /// single pods hanging under the leaves, green and then red.
-fn shrub(species: &Species, s: f32, aspect: f32) -> Prefab {
+fn shrub(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
     let height = 0.06 + (species.height_m as f32 - 0.06) * s;
-    let (mut leaves, mut parts, mut fruit) = (Shape::default(), Shape::default(), Shape::default());
+    let (mut leaves, mut parts, mut fruit) = (Shape::of(detail), Shape::of(detail), Shape::of(detail));
     let fork = Vec3::Y * height * 0.3;
     parts.stem(&[Vec3::ZERO, fork], 0.003 + 0.003 * s, 0.8, STEM_GREEN);
     for k in 0..2 {
@@ -473,8 +491,8 @@ fn shrub(species: &Species, s: f32, aspect: f32) -> Prefab {
 /// A day-neutral strawberry: a crown of trifoliate leaves on long arching
 /// stalks, white flowers, then trusses hanging out past the leaves with
 /// berries going from green to white to red.
-fn crown(species: &Species, s: f32, aspect: f32) -> Prefab {
-    let (mut leaves, mut parts, mut fruit) = (Shape::default(), Shape::default(), Shape::default());
+fn crown(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
+    let (mut leaves, mut parts, mut fruit) = (Shape::of(detail), Shape::of(detail), Shape::of(detail));
     parts.blob(Vec3::Y * 0.008, Vec3::Y, Vec3::new(0.012, 0.01, 0.012), [0.36, 0.30, 0.16, 1.0]);
     let count = 5 + (11.0 * s) as u32;
     for i in 0..count {
@@ -515,9 +533,9 @@ fn crown(species: &Species, s: f32, aspect: f32) -> Prefab {
 /// trifoliate leaf at every node (pea's leaflets in pairs), flowers mid-season,
 /// then pods: short and clustered on soybean, long on beans and peas, none to
 /// see on peanut, whose pods grow underground.
-fn legume(species: &Species, s: f32, aspect: f32) -> Prefab {
+fn legume(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
     let height = 0.05 + (species.height_m as f32 - 0.05) * s;
-    let (mut leaves, mut parts, mut fruit) = (Shape::default(), Shape::default(), Shape::default());
+    let (mut leaves, mut parts, mut fruit) = (Shape::of(detail), Shape::of(detail), Shape::of(detail));
     let (pod, pod_r, per_node, flower) = match species.name {
         "soybean" => (0.035, 0.0055, 3, [0.62, 0.42, 0.80, 1.0]),
         "dry_bean" => (0.08, 0.0055, 2, [0.95, 0.94, 0.90, 1.0]),
@@ -582,8 +600,8 @@ const PI_HALF: f32 = std::f32::consts::FRAC_PI_2;
 
 /// Sweet potato: vines trailing out over the bed from the crown, with a
 /// heart-shaped leaf standing up on a long stalk at every node.
-fn creeper(species: &Species, s: f32, aspect: f32) -> Prefab {
-    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+fn creeper(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
+    let (mut leaves, mut parts) = (Shape::of(detail), Shape::of(detail));
     let vines = 3 + (s * 4.0) as u32;
     let reach = 0.05 + 0.21 * s;
     let tall = species.height_m as f32 * 0.45 * s;
@@ -637,9 +655,9 @@ fn compound(leaves: &mut Shape, parts: &mut Shape, base: Vec3, forward: Vec3, le
 /// A dwarf tomato (like ISS Veggie's 'Red Robin'): a short stem with a
 /// compound leaf every few centimetres, crowded and arching, and once fruit
 /// sets, trusses that go from green to red as they ripen.
-fn tomato(species: &Species, s: f32, aspect: f32) -> Prefab {
+fn tomato(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
     let height = 0.06 + (species.height_m as f32 - 0.06) * s;
-    let (mut leaves, mut parts, mut fruit) = (Shape::default(), Shape::default(), Shape::default());
+    let (mut leaves, mut parts, mut fruit) = (Shape::of(detail), Shape::of(detail), Shape::of(detail));
     let nodes = (3.0 + height / 0.03).round() as u32;
     let stem: Vec<Vec3> = (0..=nodes).map(|k| {
         let t = k as f32 / nodes as f32;
@@ -682,9 +700,9 @@ fn tomato(species: &Species, s: f32, aspect: f32) -> Prefab {
 
 /// A potato plant: a few leaning stems crowded with compound leaves into a
 /// low bush, white flowers mid-season while tubers form below.
-fn potato(species: &Species, s: f32, aspect: f32) -> Prefab {
+fn potato(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
     let height = 0.05 + (species.height_m as f32 - 0.05) * s;
-    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    let (mut leaves, mut parts) = (Shape::of(detail), Shape::of(detail));
     let stems = 3 + (s * 2.5) as u32;
     let flowering = (0.45..0.8).contains(&s);
     for st in 0..stems {
@@ -725,10 +743,10 @@ fn potato(species: &Species, s: f32, aspect: f32) -> Prefab {
 /// Wheat and rice: tillers of arching blades, each stem ending in an ear
 /// (wheat) or a drooping panicle (rice) once it heads, green going gold as
 /// the grain ripens.
-fn grass(species: &Species, s: f32, aspect: f32) -> Prefab {
+fn grass(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
     let rice = species.name == "rice";
     let height = 0.06 + (species.height_m as f32 - 0.06) * s;
-    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    let (mut leaves, mut parts) = (Shape::of(detail), Shape::of(detail));
     let tillers = if rice { 3 + (s * 6.0) as u32 } else { 2 + (s * 4.0) as u32 };
     let heading = ((species.edible_days / species.harvest_days) as f32 * 0.85).min(0.9);
     let gold = ((s - heading) / (1.0 - heading)).clamp(0.0, 1.0);
@@ -790,8 +808,8 @@ mod tests {
     #[test]
     fn every_crop_grows_from_a_sprout_to_its_mature_size() {
         for species in ALL {
-            let young = prefab(species, 0);
-            let ripe = prefab(species, STAGES - 1);
+            let young = prefab(species, 0, Detail::Near);
+            let ripe = prefab(species, STAGES - 1, Detail::Near);
             let (lo, hi) = bounds(&ripe.leaves);
             let (ylo, yhi) = bounds(&young.leaves);
             assert!((hi - lo).max_element() > 2.0 * (yhi - ylo).max_element(), "{} grows", species.name);
@@ -803,12 +821,28 @@ mod tests {
     }
 
     #[test]
+    fn a_far_plant_keeps_its_outline_on_a_fraction_of_the_triangles() {
+        let triangles = |p: &Prefab| {
+            [Some(&p.leaves), p.parts.as_ref(), p.fruit.as_ref()].into_iter().flatten().map(|m| m.indices().unwrap().len() / 3).sum::<usize>()
+        };
+        for species in ALL {
+            let (near, far) = (prefab(species, STAGES - 1, Detail::Near), prefab(species, STAGES - 1, Detail::Far));
+            // A cheap plant need not lose much more.
+            let (f, n) = (triangles(&far), triangles(&near));
+            assert!(f * 3 <= n || f < 500, "{}: {f} far, {n} near", species.name);
+            let (lo, hi) = bounds(&near.leaves);
+            let (flo, fhi) = bounds(&far.leaves);
+            assert!((fhi - flo - (hi - lo)).abs().max_element() < 0.15 * (hi - lo).max_element(), "{} keeps its size", species.name);
+        }
+    }
+
+    #[test]
     fn a_lettuce_adds_a_leaf_a_day_and_tomatoes_set_fruit_late() {
-        let leaves = |stage| prefab(&gearbox_greenhouse::species::LETTUCE, stage).leaves.indices().unwrap().len();
+        let leaves = |stage| prefab(&gearbox_greenhouse::species::LETTUCE, stage, Detail::Near).leaves.indices().unwrap().len();
         assert!(leaves(STAGES - 1) > 8 * leaves(0));
         let tomato = &gearbox_greenhouse::species::TOMATO;
-        assert!(prefab(tomato, 1).fruit.is_none());
-        assert!(prefab(tomato, STAGES - 1).fruit.is_some());
+        assert!(prefab(tomato, 1, Detail::Near).fruit.is_none());
+        assert!(prefab(tomato, STAGES - 1, Detail::Near).fruit.is_some());
     }
 
     #[test]
@@ -875,7 +909,7 @@ mod export {
             );
             std::fs::write(dir.join(format!("{}.mtl", species.name)), mtl).unwrap();
             for stage in [1, STAGES / 2, STAGES - 1] {
-                let prefab = prefab(species, stage);
+                let prefab = prefab(species, stage, Detail::Near);
                 let mut out = format!("mtllib {}.mtl\n", species.name);
                 let mut base = 0;
                 obj(&mut out, &prefab.leaves, "leaves", &mut base);

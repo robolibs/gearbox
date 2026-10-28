@@ -515,15 +515,29 @@ pub fn serve_greenhouse_api(
             .collect()
     });
     bus.host.serve_greenhouse_rooms(|_| rooms(shown));
-    bus.host.serve_greenhouse_act(|action| {
-        act(&mut greenhouse, &action, &machines).unwrap_or_else(|status| {
+    bus.host.serve_greenhouse_act(|action| match act(&mut greenhouse, &action, &machines) {
+        Ok(status) => {
+            greenhouse.revision += 1;
+            status
+        }
+        Err(status) => {
             warn!("greenhouse: {} refused: {}", op::name(action.op), status.message());
             status
-        })
+        }
     });
+    if !greenhouse.events.is_empty() {
+        greenhouse.revision += 1;
+    }
     for happened in std::mem::take(&mut greenhouse.events) {
         let at = match &happened {
-            HouseEvent::Sown(id) | HouseEvent::Sprouted(id) | HouseEvent::Staged(id, _) | HouseEvent::Died(id) | HouseEvent::Harvested(id, _) => {
+            HouseEvent::Sown(id)
+            | HouseEvent::Sprouted(id)
+            | HouseEvent::Staged(id, _)
+            | HouseEvent::Died(id)
+            | HouseEvent::Harvested(id, _)
+            | HouseEvent::Pollinated(id)
+            | HouseEvent::Lifted(id)
+            | HouseEvent::Placed(id) => {
                 place(&greenhouse, *id)
             }
             _ => Vec3::ZERO,
@@ -629,7 +643,7 @@ mod tests {
             size: Vec2::new(0.6, 0.4),
             lamp_height: 0.5,
             lamp: None,
-            lamp_face: None,
+            lamp_faces: Vec::new(),
         });
         world.insert_resource(g);
         let mut sow = |by: &str| act_in(&mut world, op::SOW, &[("tray", "bed"), ("species", "lettuce"), ("by", by)]);
@@ -653,7 +667,7 @@ mod tests {
             size: Vec2::new(0.6, 0.4),
             lamp_height: 0.5,
             lamp: None,
-            lamp_face: None,
+            lamp_faces: Vec::new(),
         });
         g.house.trays[0].slots[0] = Some(Plant { emerged: true, age_days: 5.0, ..Plant::sown(&LETTUCE) });
         g.house.trays[0].slots[1] = Some(Plant { emerged: true, age_days: 4.0, ..Plant::sown(&LETTUCE) });

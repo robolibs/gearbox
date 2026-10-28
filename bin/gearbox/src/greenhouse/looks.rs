@@ -7,11 +7,12 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::VisibilityRange;
 use bevy::light::{GeneratedEnvironmentMapLight, NotShadowCaster};
 use bevy::prelude::*;
 use gearbox_greenhouse::{Edible, Plant, PlantId, Species};
 
-use super::crops::{self, STAGES};
+use super::crops::{self, Detail, STAGES};
 use super::{Greenhouse, scatter};
 
 /// How a plant's health shows on its leaves.
@@ -73,7 +74,7 @@ struct Meshes {
 /// Every crop's prefab meshes by stage, and materials by health.
 #[derive(Resource)]
 pub struct CropLooks {
-    meshes: HashMap<(&'static str, usize), Meshes>,
+    meshes: HashMap<(&'static str, usize, Detail), Meshes>,
     /// Points whose convex hull wraps each prefab.
     hulls: HashMap<(&'static str, usize), Vec<Vec3>>,
     leaves: HashMap<(&'static str, Tint), Handle<StandardMaterial>>,
@@ -98,17 +99,25 @@ pub fn build_looks(
         lamp_on: HashMap::new(),
         lamp_off: materials.add(StandardMaterial { base_color: Color::srgb(0.85, 0.85, 0.88), perceptual_roughness: 0.3, ..default() }),
     };
+    // Crops that share an atlas share its image.
+    let mut atlases: HashMap<*const u8, Handle<Image>> = HashMap::new();
     for species in gearbox_greenhouse::species::ALL {
-        let atlas = Image::from_buffer(
-            crops::atlas(species).png,
-            ImageType::Extension("png"),
-            CompressedImageFormats::NONE,
-            true,
-            ImageSampler::linear(),
-            RenderAssetUsages::RENDER_WORLD,
-        )
-        .expect("crop leaf atlas decodes");
-        let atlas = images.add(atlas);
+        let png = crops::atlas(species).png;
+        let atlas = atlases
+            .entry(png.as_ptr())
+            .or_insert_with(|| {
+                let image = Image::from_buffer(
+                    png,
+                    ImageType::Extension("png"),
+                    CompressedImageFormats::NONE,
+                    true,
+                    ImageSampler::linear(),
+                    RenderAssetUsages::RENDER_WORLD,
+                )
+                .expect("crop leaf atlas decodes");
+                images.add(image)
+            })
+            .clone();
         for tint in Tint::ALL {
             let material = StandardMaterial {
                 base_color: tint.colour(species),
@@ -122,16 +131,20 @@ pub fn build_looks(
             looks.leaves.insert((species.name, tint), materials.add(material));
         }
         for stage in 0..STAGES {
-            let prefab = crops::prefab(species, stage);
-            looks.hulls.insert((species.name, stage), hull_points(std::iter::once(&prefab.leaves).chain(prefab.parts.as_ref())));
-            looks.meshes.insert(
-                (species.name, stage),
-                Meshes {
-                    leaves: meshes.add(prefab.leaves),
-                    parts: prefab.parts.map(|m| meshes.add(m)),
-                    fruit: prefab.fruit.map(|m| meshes.add(m)),
-                },
-            );
+            for detail in [Detail::Near, Detail::Far] {
+                let prefab = crops::prefab(species, stage, detail);
+                if detail == Detail::Near {
+                    looks.hulls.insert((species.name, stage), hull_points(std::iter::once(&prefab.leaves).chain(prefab.parts.as_ref())));
+                }
+                looks.meshes.insert(
+                    (species.name, stage, detail),
+                    Meshes {
+                        leaves: meshes.add(prefab.leaves),
+                        parts: prefab.parts.map(|m| meshes.add(m)),
+                        fruit: prefab.fruit.map(|m| meshes.add(m)),
+                    },
+                );
+            }
         }
     }
     commands.insert_resource(looks);
@@ -206,16 +219,30 @@ impl PlantLook {
 #[derive(Resource, Default)]
 pub struct PlantEntities(HashMap<PlantId, (Entity, PlantLook)>);
 
-/// The meshes of a plant at its stage, in leaves of its tint and with its fruit.
+/// Frames between passes over the plants when nothing came, went or changed stage.
+const SYNC_EVERY: u32 = 10;
+
+/// How far from a camera a plant swaps its detailed meshes for coarse ones,
+/// and how far it is drawn at all, metres; each swap fades over a metre.
+const NEAR_M: f32 = 5.0;
+const FAR_M: f32 = 90.0;
+
+/// The meshes of a plant at its stage, in leaves of its tint and with its
+/// fruit: the detailed ones close by, the coarse ones beyond.
 fn dress(plant: &mut ChildSpawnerCommands, looks: &CropLooks, species: &'static str, look: &PlantLook) {
-    let parts = &looks.meshes[&(species, look.stage)];
     let leaves = looks.leaves[&(species, look.tint)].clone();
-    plant.spawn((Mesh3d(parts.leaves.clone()), MeshMaterial3d(leaves), NotShadowCaster));
-    if let Some(mesh) = &parts.parts {
-        plant.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(looks.parts.clone()), NotShadowCaster));
-    }
-    if let (Some(mesh), true) = (&parts.fruit, look.fruit) {
-        plant.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(looks.fruit.clone()), NotShadowCaster));
+    for (detail, range) in [
+        (Detail::Near, VisibilityRange { start_margin: 0.0..0.0, end_margin: NEAR_M..NEAR_M + 1.0, use_aabb: false }),
+        (Detail::Far, VisibilityRange { start_margin: NEAR_M..NEAR_M + 1.0, end_margin: FAR_M..FAR_M + 1.0, use_aabb: false }),
+    ] {
+        let parts = &looks.meshes[&(species, look.stage, detail)];
+        plant.spawn((Mesh3d(parts.leaves.clone()), MeshMaterial3d(leaves.clone()), NotShadowCaster, range.clone()));
+        if let Some(mesh) = &parts.parts {
+            plant.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(looks.parts.clone()), NotShadowCaster, range.clone()));
+        }
+        if let (Some(mesh), true) = (&parts.fruit, look.fruit) {
+            plant.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(looks.fruit.clone()), NotShadowCaster, range));
+        }
     }
 }
 
@@ -228,11 +255,20 @@ pub fn sync_plants(
     looks: Option<Res<CropLooks>>,
     mut shown: Local<PlantEntities>,
     mut transforms: Query<&mut Transform>,
+    mut pass: Local<(u64, u32)>,
 ) {
     let Some(looks) = looks else { return };
     if greenhouse.is_empty() {
         return;
     }
+    // A pass over every plant when something came, went or changed stage;
+    // growth in size alone is caught up every SYNC_EVERY frames.
+    let (revision, frames) = &mut *pass;
+    *frames += 1;
+    if *revision == greenhouse.revision && *frames < SYNC_EVERY && !shown.0.is_empty() {
+        return;
+    }
+    (*revision, *frames) = (greenhouse.revision, 0);
     let mut seen = std::collections::HashSet::new();
     for (id, plant) in greenhouse.house.plants() {
         let Some(look) = PlantLook::of(id, plant) else { continue };
@@ -453,27 +489,27 @@ pub fn sync_lamps(
             spot.intensity = intensity;
             spot.color = colour;
         }
-        if let Some(face) = greenhouse.trays[tray].lamp_face
-            && let Ok(mut material) = faces.get_mut(face)
-        {
-            let wanted = if ppfd > 0.0 {
-                let key = [(r * 1000.0) as u16, (g * 1000.0) as u16, (b * 1000.0) as u16];
-                looks
-                    .lamp_on
-                    .entry(key)
-                    .or_insert_with(|| {
-                        materials.add(StandardMaterial {
-                            base_color: Color::linear_rgb(r, g, b),
-                            emissive: LinearRgba::rgb(r, g, b) * 450.0,
-                            ..default()
-                        })
+        let wanted = if ppfd > 0.0 {
+            let key = [(r * 1000.0) as u16, (g * 1000.0) as u16, (b * 1000.0) as u16];
+            looks
+                .lamp_on
+                .entry(key)
+                .or_insert_with(|| {
+                    materials.add(StandardMaterial {
+                        base_color: Color::linear_rgb(r, g, b),
+                        emissive: LinearRgba::rgb(r, g, b) * 450.0,
+                        ..default()
                     })
-                    .clone()
-            } else {
-                looks.lamp_off.clone()
-            };
-            if material.0 != wanted {
-                material.0 = wanted;
+                })
+                .clone()
+        } else {
+            looks.lamp_off.clone()
+        };
+        for &face in &greenhouse.trays[tray].lamp_faces {
+            if let Ok(mut material) = faces.get_mut(face)
+                && material.0 != wanted
+            {
+                material.0 = wanted.clone();
             }
         }
     }

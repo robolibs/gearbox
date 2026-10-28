@@ -67,7 +67,8 @@ pub struct TrayPlace {
     /// How far the lamp hangs above the tray, metres, and its prim entities.
     pub lamp_height: f32,
     pub lamp: Option<Entity>,
-    pub lamp_face: Option<Entity>,
+    /// The lit faces of its LED bars.
+    pub lamp_faces: Vec<Entity>,
 }
 
 impl TrayPlace {
@@ -119,6 +120,8 @@ pub struct Greenhouse {
     /// Plants lifted to be set elsewhere, by who holds them: a machine's id,
     /// or the bench a crew member uses.
     pub carried: HashMap<String, Plant>,
+    /// Moves on whenever plants come, go or change by an action or a step.
+    pub revision: u64,
     scanned: HashSet<Entity>,
 }
 
@@ -232,7 +235,8 @@ fn discover_greenhouses(world: &mut World) {
         world.resource_mut::<Greenhouse>().scanned.insert(root);
         let Some(stage) = instances.stage(root) else { continue };
         let prims: Vec<(String, Entity)> = instances.prims(root).map(|(p, e)| (p.to_string(), e)).collect();
-        let entity_of = |path: &str| prims.iter().find(|(p, _)| p == path).map(|(_, e)| *e);
+        let by_path: HashMap<&str, Entity> = prims.iter().map(|(p, e)| (p.as_str(), *e)).collect();
+        let entity_of = |path: &str| by_path.get(path).copied();
         let mut found = Vec::new();
         for (path, entity) in &prims {
             let Ok(sdf) = SdfPath::new(path) else { continue };
@@ -318,7 +322,10 @@ fn discover_greenhouses(world: &mut World) {
             let size = float2(stage, sdf, "gearbox:tray:size").unwrap_or(Vec2::new(0.6, 0.4));
             let (cols, rows) = int2(stage, sdf, "gearbox:tray:slots").unwrap_or((2, 1));
             let medium = match read_token(stage, sdf, "gearbox:tray:medium").as_deref() {
-                Some("regolith") => Medium::Regolith { perchlorate: float("gearbox:tray:perchlorate").unwrap_or(0.5), organic: 0.0 },
+                Some("regolith") => Medium::Regolith {
+                    perchlorate: float("gearbox:tray:perchlorate").unwrap_or(0.5),
+                    organic: float("gearbox:tray:organic").unwrap_or(0.0),
+                },
                 _ => Medium::Hydroponic,
             };
             let name = path.rsplit('/').next().unwrap_or_default().to_string();
@@ -352,7 +359,10 @@ fn discover_greenhouses(world: &mut World) {
                 size,
                 lamp_height: float("gearbox:tray:lampHeight").unwrap_or(0.5) as f32,
                 lamp: entity_of(&format!("{path}/lamp")),
-                lamp_face: entity_of(&format!("{path}/lamp/face")),
+                lamp_faces: std::iter::once(entity_of(&format!("{path}/lamp/face")))
+                    .chain((1..16).map(|k| entity_of(&format!("{path}/lamp/face{k}"))))
+                    .flatten()
+                    .collect(),
             });
         }
         let greenhouse = world.resource::<Greenhouse>();
