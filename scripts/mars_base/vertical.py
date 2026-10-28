@@ -253,6 +253,8 @@ def _mats(looks):
         "epoxy": g("epoxy_floor", (0.55, 0.57, 0.56), 0.45, 0.0, "hangar_concrete_floor", contrast=0.35),
         "worktop": g("worktop", (0.78, 0.79, 0.80), 0.3, 1.0, maps=finish((0.78, 0.79, 0.80), 0.3, 74, brush=0.06, grime=0.03)),
     })
+    for k in ("perforated", "rack", "epoxy", "worktop"):
+        m[k]["gearbox_indoor"] = True
     return m
 
 

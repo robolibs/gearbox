@@ -296,7 +296,8 @@ def bake_module(objs, out_dir, name, ground_z=0.0, density=0.03, sizes=(256, 204
     (dust and grime over each material's own texture), roughness, metal and
     normals are baked into it at about `density` metres a texel, and they are
     joined into one object showing the bake. Materials marked `gearbox_ground`
-    are the land's own loose regolith and take grime but no dust. Returns that
+    (the land's own loose regolith) or `gearbox_indoor` (what only clean rooms
+    indoors are made of) take grime but no dust. Returns that
     object, or None."""
     parts = [o for o in objs if o.type == "MESH" and not keeps_own(o.active_material)]
     if not parts:
@@ -333,7 +334,8 @@ def bake_module(objs, out_dir, name, ground_z=0.0, density=0.03, sizes=(256, 204
         g = Graph(work)
         st = g.node("ShaderNodeUVMap", _uv_map="st").outputs["UV"]
         dust, ao, tread, _ = masks(g, ground_z)
-        if mat.get("gearbox_ground"):
+        # Loose regolith and the materials of clean rooms indoors take grime but no dust.
+        if mat.get("gearbox_ground") or mat.get("gearbox_indoor"):
             dust = 0.0
         col = source(g, mat, "Base Color", st)
         r0 = source(g, mat, "Roughness", st)

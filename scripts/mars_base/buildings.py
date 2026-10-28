@@ -200,6 +200,8 @@ def mats(looks):
         "cast": g("cast_regolith", (0.47, 0.36, 0.28), 0.9, 0.0, "rough_concrete", contrast=0.9),
     }
     m["regolith"]["gearbox_ground"] = True
+    for k in ("tray", "gutter", "gutter_black", "slab", "media", "drip"):
+        m[k]["gearbox_indoor"] = True
     _MATS.update(looks=looks, set=m)
     return m
 
