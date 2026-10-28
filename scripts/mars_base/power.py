@@ -25,6 +25,9 @@ KILOPOWER_LEAD = Vector((0.5, -4.04, 0.0))
 STATION_PITS = {"reactor": Vector((-4.0, 7.75, 0.0)), "solar": Vector((-6.6, 7.75, 0.0)), "tray": Vector((-6.0, -7.75, 0.0))}
 PIT = 0.9
 JUNCTION = (0.5, 0.8, 0.6)
+# What each of the base's fission units makes, kWe: NASA's Fission Surface
+# Power class, enough with the arrays to light the farm.
+FISSION_KWE = 40.0
 
 
 def solar_pit(rows, panels, pitch):
@@ -518,13 +521,15 @@ def _stirling():
     return body, lathe(profile, 16, 1.0)
 
 
-def kilopower(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
-    """A 10 kWe fission unit after NASA's Kilopower, on the deck of the
-    lander that brought it: a uranium-molybdenum core in its beryllium-oxide
+def kilopower(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, kwe=10.0):
+    """A fission unit of `kwe` after NASA's Kilopower (10 kWe) and its
+    Fission Surface Power class (40 kWe), on the deck of the lander that
+    brought it: a uranium-molybdenum core in its beryllium-oxide
     reflector under MLI, a lithium-hydride and tungsten shadow shield above
     it, sodium heat pipes up the shield to four opposed pairs of Stirling
     converters, and an umbrella of carbon radiator panels with titanium heat
-    pipes on a truss mast; its power lead runs down off the deck to end on
+    pipes on a truss mast, as wide again for each fourfold of the power it
+    rejects the heat of; its power lead runs down off the deck to end on
     the ground short of KILOPOWER_LEAD."""
     m = power_mats(looks)
     b = Building(name, parent, at, yaw)
@@ -586,7 +591,10 @@ def kilopower(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
     b.put(pipes, m["jacket"])
 
     # The radiator umbrella: carbon panels, titanium heat pipes, rings, spokes and the mast.
-    r0, z0, r1, z1, count = 0.95, 3.4, 3.0, 6.0, 12
+    grow = math.sqrt(kwe / 10.0)
+    r0, z0, r1 = 0.95, 3.4, 3.0 * grow
+    z1, count = 6.0 + 0.8 * (r1 - 3.0), round(12 * grow)
+    mast = z1 + 0.4
     gap = math.radians(1.2)
     slabs, ribs = bmesh.new(), bmesh.new()
     lift = Vector((-(z1 - z0), r1 - r0)).normalized()
@@ -603,17 +611,17 @@ def kilopower(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
     b.put(ribs, m["alu"])
     struct = tube([(r1 * math.cos(a), r1 * math.sin(a), z1) for a in [TAU * i / 24 for i in range(25)]], 0.035, 8)
     merge(struct, tube([(r0 * math.cos(a), r0 * math.sin(a), z0) for a in [TAU * i / 24 for i in range(25)]], 0.05, 8))
-    merge(struct, truss((0, 0, 2.78), (0, 0, 6.4), 0.22, 0.22, 7, 0.025, 0.012))
+    merge(struct, truss((0, 0, 2.78), (0, 0, mast), 0.22 * grow, 0.22 * grow, round(7 * grow), 0.025, 0.012))
     for k in range(count):
         a = TAU * (k + 0.5) / count
         u = Vector((math.cos(a), math.sin(a), 0.0))
-        merge(struct, rod((0, 0, 6.35), u * r1 + Vector((0, 0, z1)), 0.015, 6))
+        merge(struct, rod((0, 0, mast - 0.05), u * r1 + Vector((0, 0, z1)), 0.015 * grow, 6))
         merge(struct, rod((0, 0, 4.1), u * 2.0 + Vector((0, 0, z0 + (2.0 - r0) / (r1 - r0) * (z1 - z0) - 0.05)), 0.018, 6))
     for p in cold:
         q = Vector((p.x, p.y, 0.0)).normalized() * r0 + Vector((0, 0, z0))
         merge(struct, tube(fillet([p + Vector((0, 0, 0.12)), Vector((p.x, p.y, zc + 0.28)), q], 0.1), 0.02, 6))
     b.put(struct, m["jacket"])
-    b.put(sphere(0.12, (0, 0, 6.52), 10, 5), m["red"])
+    b.put(sphere(0.12, (0, 0, mast + 0.12), 10, 5), m["red"])
 
     # The power cable off the deck, and radiation signs.
     jb = Vector((0.0, -1.22, top))
