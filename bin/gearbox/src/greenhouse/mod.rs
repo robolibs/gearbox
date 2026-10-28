@@ -33,6 +33,7 @@ pub struct GreenhousePlugin;
 impl Plugin for GreenhousePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Greenhouse>()
+            .init_resource::<RoomTally>()
             .init_resource::<crate::sensor_generic::AirField>()
             .add_systems(Startup, looks::build_looks)
             .add_systems(
@@ -48,6 +49,7 @@ impl Plugin for GreenhousePlugin {
                     looks::sync_lamps,
                     looks::light_near_lamps,
                     looks::expose_indoors,
+                    tally_rooms,
                 )
                     .chain()
                     .after(WorldTime),
@@ -468,4 +470,37 @@ pub fn outside(weather: &WeatherSettings) -> (f64, f64, Outside) {
         }
         bevy_weather::Planet::Earth => (1361.0, 0.3 + 2.5 * weather.clouds.clouds_coverage as f64, Outside { temperature_c: 12.0, pressure_kpa: 101.3 }),
     }
+}
+
+/// Each room's plants, counted every [`TALLY_EVERY`] frames for the Farm
+/// pane: how many grow, how many are ripe, and how many of each crop.
+#[derive(Resource, Default)]
+pub struct RoomTally(pub Vec<RoomCount>);
+
+#[derive(Clone, Default)]
+pub struct RoomCount {
+    pub growing: usize,
+    pub ripe: usize,
+    pub crops: std::collections::BTreeMap<&'static str, usize>,
+}
+
+const TALLY_EVERY: u32 = 30;
+
+fn tally_rooms(greenhouse: Res<Greenhouse>, mut tally: ResMut<RoomTally>, mut frames: Local<u32>) {
+    *frames += 1;
+    if *frames < TALLY_EVERY && tally.0.len() == greenhouse.house.rooms.len() {
+        return;
+    }
+    *frames = 0;
+    let house = &greenhouse.house;
+    let mut rooms = vec![RoomCount::default(); house.rooms.len()];
+    for (id, plant) in house.plants() {
+        let room = &mut rooms[house.trays[id.tray].room];
+        if plant.alive {
+            room.growing += 1;
+            *room.crops.entry(plant.species.name).or_default() += 1;
+        }
+        room.ripe += (plant.stage() == gearbox_greenhouse::Stage::Ripe) as usize;
+    }
+    tally.0 = rooms;
 }

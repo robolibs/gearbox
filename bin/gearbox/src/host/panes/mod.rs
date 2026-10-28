@@ -6,6 +6,7 @@
 pub mod capture;
 pub mod controls;
 pub mod environment;
+pub mod farm;
 pub mod machine;
 pub mod scene;
 pub mod shortcuts;

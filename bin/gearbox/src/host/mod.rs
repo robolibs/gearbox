@@ -49,6 +49,7 @@ pub const PANE_SCENE: &str = "gearbox_pane_scene";
 pub const PANE_VIEW: &str = "gearbox_pane_view";
 pub const PANE_LOG: &str = "gearbox_pane_log";
 pub const PANE_ENVIRONMENT: &str = "gearbox_pane_environment";
+pub const PANE_FARM: &str = "gearbox_pane_farm";
 pub const PANE_CAPTURE: &str = "gearbox_pane_capture";
 pub const PANE_SHORTCUTS: &str = "gearbox_pane_shortcuts";
 
@@ -245,7 +246,7 @@ impl WindowApp for GearboxApp {
         };
 
         // Three docked Shelves: Left is one tabbed container swapping
-        // between Scene/View/Environment/Capture/Controls, Right is the
+        // between Scene/View/Environment/Farm/Capture/Controls, Right is the
         // Machine pane, Bottom is Shortcuts.
         let left = ShelfContainer::tabbed(
             MaraId::new(SHELF_LEFT),
@@ -255,6 +256,7 @@ impl WindowApp for GearboxApp {
                 panes::scene::tab(world, &ctx),
                 panes::view::tab(world, &ctx),
                 panes::environment::tab(world, &ctx),
+                panes::farm::tab(world, &ctx),
                 panes::capture::tab(world, &ctx),
                 panes::controls::tab(world, &ctx),
             ],
