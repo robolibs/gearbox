@@ -29,6 +29,13 @@ pub fn tab(world: &World, _ctx: &PaneCtx) -> Tab {
         .with_readout("grain to mill", format!("{:.1} kg, {:.0} kg a sol milled", store.raw_kg(), store.processing_kg))
         .with_readout("spoiled", format!("{:.1} kg", store.spoiled_kg))
         .with_readout("biomass to recover", format!("{:.1} kg dry", store.biomass_kg));
+    let mut carts: Vec<String> = greenhouse
+        .carried
+        .iter()
+        .filter_map(|(holder, plants)| Some(format!("{} {}", holder.strip_prefix("cart:")?.replace('_', " "), plants.len())))
+        .collect();
+    carts.sort();
+    food = food.with_readout("seedling carts", if carts.is_empty() { "none loaded".to_string() } else { carts.join(", ") });
     let mut held: Vec<_> = store.produce.iter().map(|(s, kg)| (s.name, *kg, kg * s.nutrition.kcal)).collect();
     held.sort_by(|a, b| b.2.total_cmp(&a.2));
     for (name, kg, kcal) in held.into_iter().take(STORE_ROWS) {
