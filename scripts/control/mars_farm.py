@@ -9,6 +9,10 @@ writes (`bin/gearbox/assets/world/mars_base_farm.json`):
 - where a robot's room has a nursery (the vertical farm's), it sows the
   nursery and sets its seedlings out in the empty grow places, lifting
   each and placing it, for the crops the nursery raises;
+- the farm hall's nursery robot tends nothing but its plug trays: it loads
+  their ready seedlings onto a cart per crop (`cart:tomato`, ...), clears
+  any left too long, and the robots of other rooms set seedlings out from
+  those carts into their empty places before they sow seed;
 - the excavators leave their docks along the lane past the chargers, dig
   regolith on their patch west of the soil plant and tip it into the
   plant's bins, round after round, one of them in the yard at a time;
@@ -57,6 +61,11 @@ FRESH_S = 20.0
 POLLEN_LOW = 0.4
 # Days a nursery seedling grows before it is set out in a grow tray.
 TRANSPLANT_DAYS = 12.0
+# Days after which a seedling no cart took is pot-bound and cleared.
+SHIP_DAYS = 28.0
+# Crops a robot tending only a nursery (the farm hall's) sends out by cart,
+# filled from the plan in `main`.
+CARTED: set[str] = set()
 HOLD_MS = 120_000
 # How often a driving robot is steered, how long it may drive without
 # getting closer and how long it may turn on the spot, sim seconds.
@@ -241,6 +250,9 @@ class Tender(Robot):
         # Places the sim refused, left alone for a few rounds.
         self.refused: dict[str, int] = {}
         self.round = 0
+        # The rounds a crop's seedling cart was last found full or empty.
+        self.cart_full: dict[str, int] = {}
+        self.cart_empty: dict[str, int] = {}
 
     def move(self, joints: list[str], targets: dict) -> float:
         """Sends `joints` to their targets; how long they take to get there."""
@@ -319,6 +331,8 @@ class Tender(Robot):
         nursery = set(self.entry.get("nursery", ()))
         trays = self.entry["trays"]
         raised = {trays[t] for t in nursery if t in trays}
+        # A robot that tends only a nursery sends its seedlings out by cart.
+        shipping = bool(trays) and nursery >= set(trays)
         standing = {name: p for name, p in plants(self.gb).items() if name in places}
         ready: dict[str, list[str]] = {}
         for name, p in standing.items():
@@ -341,8 +355,19 @@ class Tender(Robot):
                 jobs.append(("pollinate", place, plant["species"]))
             elif plant is not None and not plant["alive"]:
                 jobs.append(("clear", place, plant["species"]))
+            elif shipping and plant is not None and place in ready.get(plant["species"], ()):
+                # A seedling nobody took in time is pot-bound: lifted out for the heap.
+                crop = plant["species"]
+                if float(plant.get("sown_days", 0)) > SHIP_DAYS:
+                    jobs.append(("clear", place, crop))
+                elif self.round - self.cart_full.get(crop, -10) >= 4:
+                    jobs.append(("load", place, crop))
             elif plant is None and (tray in nursery or trays[tray] not in raised):
-                jobs.append(("sow", place, trays[tray]))
+                crop = trays[tray]
+                if tray not in nursery and crop in CARTED and self.round - self.cart_empty.get(crop, -10) >= 4:
+                    jobs.append(("unload", place, crop))
+                else:
+                    jobs.append(("sow", place, crop))
             elif plant is None and ready.get(trays[tray]) and not self.holding:
                 jobs.append(("lift", ready[trays[tray]].pop(), trays[tray]))
                 jobs.append(("place", place, trays[tray]))
@@ -350,8 +375,13 @@ class Tender(Robot):
 
     def act(self, op: str, place: str, crop: str):
         tray, slot = place.split("/")
-        keys = {"plant": place} if op != "sow" else {"tray": tray, "slot": slot, "species": crop}
-        return patient(self.gb.greenhouse, op, by=self.machine, **keys)
+        if op == "sow":
+            return patient(self.gb.greenhouse, op, by=self.machine, tray=tray, slot=slot, species=crop)
+        if op == "load":
+            return patient(self.gb.greenhouse, "lift", by=self.machine, plant=place, into=f"cart:{crop}")
+        if op == "unload":
+            return patient(self.gb.greenhouse, "place", by=self.machine, plant=place, **{"from": f"cart:{crop}"})
+        return patient(self.gb.greenhouse, op, by=self.machine, plant=place)
 
     def close_in(self, op: str, place: str, crop: str):
         """Asks the sim until the robot is there: a refusal says how far it
@@ -403,7 +433,11 @@ class Tender(Robot):
                 done = ", ".join(f"{k} {v}" for k, v in status.props.items() if k != "message")
                 self.log(f"{self.machine}: {op} {place} ({crop}): {'done ' + done if status.ok else status.message}")
                 self.done += status.ok
-                if not status.ok:
+                if not status.ok and op == "load" and "full" in status.message:
+                    self.cart_full[crop] = self.round
+                elif not status.ok and op == "unload" and "holds no plant" in status.message:
+                    self.cart_empty[crop] = self.round
+                elif not status.ok:
                     self.refused[place] = self.round
                 elif op == "lift":
                     self.holding = crop
@@ -535,6 +569,16 @@ KINDS = {"rail_gantry": Tender, "polar_gantry": Tender, "stacker_crane": Tender,
          "arch_washer": Washer, "dome_washer": Washer, "panel_washer": Washer}
 
 
+def carted(plan: dict) -> set[str]:
+    """The crops raised by robots that tend nothing but a nursery."""
+    out = set()
+    for entry in plan.values():
+        nursery, trays = set(entry.get("nursery", ())), entry.get("trays", {})
+        if trays and nursery >= set(trays):
+            out |= {trays[t] for t in nursery}
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--plan", default=str(PLAN))
@@ -543,6 +587,7 @@ def main():
     args = ap.parse_args()
 
     plan = json.loads(Path(args.plan).read_text())["machines"]
+    CARTED.update(carted(plan))
     wanted = args.robots.split(",") if args.robots else list(plan)
     gb = Gearbox(args.instance)
     gb.wait_ready()
