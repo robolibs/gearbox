@@ -108,6 +108,22 @@ def Xform "Fleet"
             }
         }
     }
+    def Xform "HallBot" (
+        prepend references = @../../../../assets/machines/usd/hall_gantry.usdz@
+    )
+    {
+        double3 xformOp:translate = (33.6, -124.4, 3.22)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (36.6, -124.4, 3.24)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
     def Xform "ArchAPicker1" (
         prepend references = @../../../../assets/machines/usd/harvester.usdz@
     )
