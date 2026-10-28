@@ -10,19 +10,34 @@ gearbox run --planet mars --world bin/gearbox/assets/world/mars_base.usda
 gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base
 ```
 
-The Mars base is a farm worked by robots, sized to what a few cargo landers
-could bring. It grows food in four kinds of house: two 24 m glazed domes of
-terraced rings lit by the sun, three 30 m inflated arch greenhouses of
-tables under LED bars, a printed-regolith vertical farm of 116 LED-lit trays
-seven levels high with a nursery, and an EDEN ISS-like container module
-with its regolith bed. A soil plant turns dug regolith into growing medium:
-it screens it, washes the perchlorate out, dewaters, dries and blends it
-with composted crop waste, and bags it. Around the farm stand a habitat
-cluster, an inflatable hab, a printed regolith tower, a rover hangar, solar
-arrays and four 10 kWe fission units, two container-sized ISRU units with
-their tanks and an ice well, and a landing zone. The fleet file places the
-robots that do the farm's work (§5), two pressurised rovers and
-Perseverance; `scripts/control/mars_farm.py` sets them working.
+The Mars base is a farm worked by robots that feeds a crew of 12, sized to
+what a few cargo landers could bring and laid out as the analogs and
+studies do (EDEN ISS, Lunar Palace 1, BIOS-3, the DLR lunar greenhouse;
+`plans/002-mars-farm-research.md`). It grows its food in four kinds of house:
+- two 24 m glazed domes of terraced regolith beds, lit by the sun with LEDs
+  making up the rest, for roots and tubers;
+- three 30 m inflated arch greenhouses with benches wall to wall under LED
+  bars: NFT gutters of the BPC's staples (ArchA), table-top gutters of fruit
+  and strawberries (ArchB), deep troughs of wheat, rice and beans (ArchC);
+- a printed-regolith vertical farm of salad crops on seven levels, its
+  nursery starting transplants;
+- an EDEN ISS-like container module with its regolith bed.
+
+The farm hall closes the corridor spine past them, a printed vault for the
+crew. It holds post-harvest washing, sorting and packing, a cold store, the
+processing line that threshes and mills the grain, a seed vault and
+propagation nursery, and resource recovery: a shredder, a solid-state
+fermenter, a mushroom room and mealworm racks. Outside it stand a nutrient
+and water plant and a spirulina photobioreactor house. A soil plant turns
+dug regolith into growing medium: it screens it, washes the perchlorate out,
+dewaters, dries and blends it with composted crop waste, and bags it.
+
+Around the farm stand a habitat cluster, an inflatable hab, a printed
+regolith tower, a rover hangar, solar arrays and four 40 kWe fission surface
+power units, two container-sized ISRU units with their tanks and an ice
+well, and a landing zone. The fleet file places the robots that do the
+farm's work (§5), two pressurised rovers and Perseverance;
+`scripts/control/mars_farm.py` sets them working.
 
 `scripts/mars_base/` builds everything in Blender (see `build.py`): each
 kind of structure goes to `assets/mars_base/modules/<kind>.usdc`, a
