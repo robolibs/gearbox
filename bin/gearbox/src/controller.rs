@@ -3733,20 +3733,6 @@ pub(crate) fn find_joint_body_pair(
     Some((body0_entity, body1_entity, body0, body1))
 }
 
-pub(crate) fn is_descendant_of(entity: Entity, root: Entity, parents: &Query<&ChildOf>) -> bool {
-    let mut current = entity;
-    for _ in 0..64 {
-        if current == root {
-            return true;
-        }
-        let Ok(parent) = parents.get(current) else {
-            return false;
-        };
-        current = parent.parent();
-    }
-    false
-}
-
 pub(crate) fn discover_controllers(
     stage: &openusd::usd::Stage,
     prim: &SdfPath,

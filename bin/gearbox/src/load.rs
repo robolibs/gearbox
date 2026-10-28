@@ -943,41 +943,21 @@ fn scene_object(transform: &GlobalTransform, kind: u32, props: Props) -> SceneOb
 /// else its own prim, by its index in the inventory.
 fn shared_machine_poses(
     inventory: &ControllerInventory,
-    prims: &Query<(Entity, &usd_bevy::UsdPrimRef, &GlobalTransform)>,
-    parents: &Query<&ChildOf>,
+    index: &crate::prim_index::PrimIndex,
+    transforms: &Query<&GlobalTransform>,
 ) -> HashMap<usize, GlobalTransform> {
-    let mut wanted: HashMap<&str, Vec<(usize, bool)>> = HashMap::new();
+    let mut poses = HashMap::new();
     for (i, m) in inventory.machines.iter().enumerate() {
         let Some(root) = m.scene_root else { continue };
         if inventory.only(root).is_some() {
             continue;
         }
-        wanted
-            .entry(m.prim_path.as_str())
-            .or_default()
-            .push((i, false));
-        if let Some(body) = m.body.as_deref() {
-            wanted.entry(body).or_default().push((i, true));
+        let pose = |path: &str| index.find(root, path).and_then(|e| transforms.get(e).ok()).copied();
+        if let Some(at) = m.body.as_deref().and_then(pose).or_else(|| pose(&m.prim_path)) {
+            poses.insert(i, at);
         }
     }
-    let (mut bodies, mut own) = (HashMap::new(), HashMap::new());
-    if wanted.is_empty() {
-        return bodies;
-    }
-    for (entity, prim, transform) in prims.iter() {
-        for &(i, body) in wanted.get(prim.path.as_str()).into_iter().flatten() {
-            let root = inventory.machines[i]
-                .scene_root
-                .expect("wanted machines have a root");
-            if crate::controller::is_descendant_of(entity, root, parents) {
-                (if body { &mut bodies } else { &mut own }).insert(i, *transform);
-            }
-        }
-    }
-    for (i, transform) in own {
-        bodies.entry(i).or_insert(transform);
-    }
-    bodies
+    poses
 }
 
 /// Report every loaded asset root for `/gearbox/scene/list`, and each
@@ -988,10 +968,10 @@ fn refresh_scene_objects(
     mut objects: ResMut<SceneObjects>,
     overrides: Query<&usd_bevy::instance::UsdInstanceOverrides>,
     attachments: Res<crate::attach::Attachments>,
-    prims: Query<(Entity, &usd_bevy::UsdPrimRef, &GlobalTransform)>,
-    parents: Query<&ChildOf>,
+    index: Res<crate::prim_index::PrimIndex>,
+    transforms: Query<&GlobalTransform>,
 ) {
-    let poses = shared_machine_poses(&inventory, &prims, &parents);
+    let poses = shared_machine_poses(&inventory, &index, &transforms);
     let mut out = Vec::new();
     for (entity, asset, transform) in loaded.iter() {
         let held: Vec<(usize, &crate::controller::MachineInstanceSpec)> = inventory
@@ -1068,11 +1048,14 @@ mod scene_list_tests {
         world
             .entity_mut(stage)
             .insert((loaded("base"), GlobalTransform::IDENTITY));
-        for (x, body) in [3.0, 7.0].into_iter().zip(bodies) {
-            world
-                .entity_mut(body)
-                .insert(GlobalTransform::from_translation(Vec3::X * x));
-        }
+        world
+            .entity_mut(bodies[0])
+            .insert(GlobalTransform::from_translation(Vec3::X * 3.0));
+        let percy = world.get::<ChildOf>(bodies[1]).unwrap().parent();
+        world
+            .entity_mut(percy)
+            .insert(GlobalTransform::from_translation(Vec3::X * 7.0));
+        world.resource_mut::<ControllerInventory>().machines[1].body = None;
         let yard = world
             .spawn((
                 loaded("yard"),
