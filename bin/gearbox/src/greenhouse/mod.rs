@@ -120,8 +120,9 @@ pub struct Greenhouse {
     /// What happened since the API last took it.
     pub events: Vec<HouseEvent>,
     /// Plants lifted to be set elsewhere, by who holds them: a machine's id,
-    /// or the bench a crew member uses.
-    pub carried: HashMap<String, Plant>,
+    /// the bench a crew member uses, or a cart of plug trays that the crew or
+    /// a courier wheels between rooms (`cart:NAME`).
+    pub carried: HashMap<String, Vec<Plant>>,
     /// Moves on whenever plants come, go or change by an action or a step.
     pub revision: u64,
     scanned: HashSet<Entity>,

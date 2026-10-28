@@ -169,8 +169,8 @@ fruiting crop), `ripening_kg`, `flowering`, `pollen`, `cuts`, `biomass_g`,
 | `harvest` | `plant` or `tray`, `by`? | a named plant is empty or not ripe, or out of reach |
 | `clear` | `plant`, `by`? | the place is empty, or out of reach |
 | `pollinate` | `plant` or `tray`, `by`? | a named plant is not in flower, or out of reach |
-| `lift` | `plant`, `by`? | the place is empty or its plant past vegetative; `by` already holds one |
-| `place` | `plant` (an empty place), `by`? | the place is taken; `by` holds nothing |
+| `lift` | `plant`, `by`?, `into`? | the place is empty or its plant past vegetative; the holder is full |
+| `place` | `plant` (an empty place), `by`?, `from`? | the place is taken; the holder holds nothing |
 | `wash`, `amend` | `tray`, `share` (0.15) for amend | the tray is not regolith |
 | `lamps` | `tray` or `all`, `spectrum` (`growth`, `inspection`), `dimming` 0..1 | |
 | `clean_tank` | `room` | |
@@ -191,7 +191,10 @@ heap; the crew eats what keeps least first. A fruiting crop gives its ripe fruit
 on until it is spent: tomato and strawberry set only some of their flowers
 unless they are pollinated every few days. A cut-and-come-again crop (chard,
 kale, green onion) gives two cuttings and is lifted whole at the third. A plant
-lifted with `lift` rides in the gripper of `by`, or on the bench, until `place`.
+lifted with `lift` rides in the gripper of `by`, or on the bench, until `place`;
+with `into` it goes onto a cart (`cart:NAME`, up to 24 seedlings, a plug tray
+the crew or a courier wheels between rooms), and `place --from` the cart sets
+it out wherever `by` reaches: how the farm hall's nursery supplies the arches.
 
 Everything that happens is a scene event of kind `greenhouse` at the plant's
 place, with props `what` (`sown`, `sprouted`, `staged`, `ripe`, `died`,

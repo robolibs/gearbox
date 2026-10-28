@@ -68,12 +68,18 @@ enum Cmd {
         plant: String,
         #[arg(long)]
         by: Option<String>,
+        /// A cart (`cart:NAME`) to load it onto instead, up to 24 seedlings
+        #[arg(long)]
+        into: Option<String>,
     },
-    /// Set the lifted seedling in an empty place (TRAY/SLOT)
+    /// Set a lifted seedling in an empty place (TRAY/SLOT)
     Place {
         plant: String,
         #[arg(long)]
         by: Option<String>,
+        /// The cart (`cart:NAME`) to take it from
+        #[arg(long)]
+        from: Option<String>,
     },
     /// Wash the perchlorate out of a regolith tray
     Wash { tray: String },
@@ -156,8 +162,20 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             let key = if target.contains('/') { "plant" } else { "tray" };
             act(ctx, op::POLLINATE, &with_by(vec![(key, &target)], &by), &target)
         }
-        Cmd::Lift { plant, by } => act(ctx, op::LIFT, &with_by(vec![("plant", &plant)], &by), &plant),
-        Cmd::Place { plant, by } => act(ctx, op::PLACE, &with_by(vec![("plant", &plant)], &by), &plant),
+        Cmd::Lift { plant, by, into } => {
+            let mut keys = vec![("plant", plant.as_str())];
+            if let Some(into) = &into {
+                keys.push(("into", into));
+            }
+            act(ctx, op::LIFT, &with_by(keys, &by), &plant)
+        }
+        Cmd::Place { plant, by, from } => {
+            let mut keys = vec![("plant", plant.as_str())];
+            if let Some(from) = &from {
+                keys.push(("from", from));
+            }
+            act(ctx, op::PLACE, &with_by(keys, &by), &plant)
+        }
         Cmd::Wash { tray } => act(ctx, op::WASH, &[("tray", &tray)], &tray),
         Cmd::Amend { tray, share } => act(ctx, op::AMEND, &[("tray", &tray), ("share", &share.to_string())], &tray),
         Cmd::Lamps { tray, spectrum, dimming } => {

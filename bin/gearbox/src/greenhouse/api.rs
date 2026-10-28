@@ -23,6 +23,18 @@ const PLANT_REACH_M: f32 = 0.3;
 const GLAZING_REACH_M: f32 = 1.5;
 /// Who holds a plant lifted with no machine named: the crew's potting bench.
 const BENCH: &str = "bench";
+/// Seedlings a cart takes: a plug tray of them. A machine or the bench holds one.
+const CART_PLANTS: usize = 24;
+
+/// Who a lift puts the plant in, or a place takes it from: the holder `key`
+/// names (a cart, `cart:NAME`), else the machine `by`, else the bench.
+fn holder_of(keys: &Props, key: &str) -> String {
+    keys.get(key).or_else(|| keys.get("by")).unwrap_or_else(|| BENCH.to_string())
+}
+
+fn capacity(holder: &str) -> usize {
+    if holder.starts_with("cart:") { CART_PLANTS } else { 1 }
+}
 
 fn number(v: f64) -> String {
     format!("{v:.4}")
@@ -330,31 +342,33 @@ fn act(
         }
         op::LIFT => {
             let id = plant_of(greenhouse, &keys)?;
-            let holder = keys.get("by").unwrap_or_else(|| BENCH.to_string());
-            if greenhouse.carried.contains_key(&holder) {
-                return Err(Status::err(code::REFUSED, &format!("`{holder}` already holds a plant")));
+            let holder = holder_of(&keys, "into");
+            let held = greenhouse.carried.get(&holder).map_or(0, Vec::len);
+            if held >= capacity(&holder) {
+                return Err(Status::err(code::REFUSED, &format!("`{holder}` is full")));
             }
             within_reach(greenhouse, vec![id], &keys, machines)?;
             let (plant, event) = greenhouse.house.lift(id).map_err(refused)?;
-            greenhouse.carried.insert(holder, plant);
+            greenhouse.carried.entry(holder).or_default().push(plant);
             greenhouse.events.push(event);
-            Ok(Status::ok())
+            Ok(Status::ok_with(&Props::from_pairs(&[("held", &(held + 1).to_string())])))
         }
         op::PLACE => {
             let id = plant_of(greenhouse, &keys)?;
-            let holder = keys.get("by").unwrap_or_else(|| BENCH.to_string());
-            if !greenhouse.carried.contains_key(&holder) {
+            let holder = holder_of(&keys, "from");
+            if greenhouse.carried.get(&holder).is_none_or(Vec::is_empty) {
                 return Err(Status::err(code::REFUSED, &format!("`{holder}` holds no plant")));
             }
             within_reach(greenhouse, vec![id], &keys, machines)?;
-            let plant = greenhouse.carried.remove(&holder).expect("checked above");
+            let plant = greenhouse.carried.get_mut(&holder).and_then(Vec::pop).expect("checked above");
             match greenhouse.house.place(id, plant.clone()) {
                 Ok(event) => {
+                    greenhouse.carried.retain(|_, held| !held.is_empty());
                     greenhouse.events.push(event);
                     Ok(Status::ok())
                 }
                 Err(why) => {
-                    greenhouse.carried.insert(holder, plant);
+                    greenhouse.carried.entry(holder).or_default().push(plant);
                     Err(refused(why))
                 }
             }
@@ -689,6 +703,39 @@ mod tests {
         assert!(g.house.trays[0].slots[0].is_none() && g.carried.is_empty());
         assert_eq!(g.house.trays[0].slots[3].as_ref().map(|p| p.age_days), Some(5.0), "the seedling moved, its age kept");
         assert_eq!(g.house.trays[0].slots[2].as_ref().map(|p| p.pollen), Some(1.0));
+    }
+
+    #[test]
+    fn a_cart_takes_a_tray_of_seedlings_from_one_room_to_another() {
+        use gearbox_greenhouse::Plant;
+        let mut world = World::new();
+        place_machines(&mut world, &[("near", 0.1), ("far", 20.0)]);
+        let tray = world.spawn(GlobalTransform::IDENTITY).id();
+        let mut g = greenhouse();
+        g.trays.push(super::super::TrayPlace {
+            entity: tray,
+            path: "/bed".into(),
+            cols: 2,
+            rows: 2,
+            size: Vec2::new(0.6, 0.4),
+            lamp_height: 0.5,
+            lamp: None,
+            lamp_faces: Vec::new(),
+        });
+        for slot in 0..3 {
+            g.house.trays[0].slots[slot] = Some(Plant { emerged: true, age_days: 6.0 + slot as f64, ..Plant::sown(&LETTUCE) });
+        }
+        world.insert_resource(g);
+        let mut act = |o: u32, keys: &[(&str, &str)]| act_in(&mut world, o, keys);
+        // One machine loads two seedlings onto the cart, though it holds one itself at a time.
+        assert_eq!(act(op::LIFT, &[("plant", "bed/0"), ("by", "near"), ("into", "cart:lettuce")]).code, code::OK);
+        let loaded = act(op::LIFT, &[("plant", "bed/1"), ("by", "near"), ("into", "cart:lettuce")]);
+        assert_eq!(loaded.props().get("held").as_deref(), Some("2"));
+        assert_eq!(act(op::PLACE, &[("plant", "bed/3"), ("by", "near"), ("from", "cart:kale")]).code, code::REFUSED, "an empty cart");
+        assert_eq!(act(op::PLACE, &[("plant", "bed/3"), ("by", "near"), ("from", "cart:lettuce")]).code, code::OK);
+        let g = world.resource::<Greenhouse>();
+        assert_eq!(g.carried["cart:lettuce"].len(), 1, "one seedling left on the cart");
+        assert_eq!(g.house.trays[0].slots[3].as_ref().map(|p| p.age_days), Some(7.0), "the last one loaded came off first");
     }
 
     #[test]

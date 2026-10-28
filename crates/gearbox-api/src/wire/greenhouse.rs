@@ -36,11 +36,13 @@ pub mod greenhouse_op {
     /// `plant`, or `tray` for every plant in flower in it: buzz or brush their
     /// open flowers; with `by`, only what that machine reaches.
     pub const POLLINATE: u32 = 12;
-    /// `plant`: lift a young plant out of its place; with `by`, into that
-    /// machine's gripper, which holds one at a time, if it reaches the plant.
+    /// `plant`: lift a young plant out of its place, if `by` (when given)
+    /// reaches it; into `into` (a cart, `cart:NAME`, of up to 24), else into
+    /// the gripper of `by`, else onto the bench, each of which holds one.
     pub const LIFT: u32 = 13;
-    /// `plant` (`TRAY/SLOT`, an empty place): set the lifted plant in it; with
-    /// `by`, the one that machine holds, if it reaches the place.
+    /// `plant` (`TRAY/SLOT`, an empty place): set a lifted plant in it, if `by`
+    /// (when given) reaches it; taken from `from` (a cart), else from what `by`
+    /// holds, else from the bench.
     pub const PLACE: u32 = 14;
 
     pub fn parse(name: &str) -> Option<u32> {
