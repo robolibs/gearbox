@@ -238,7 +238,8 @@ and `climate_link`.
 | Robot | Machine | Joints (moved link) |
 |---|---|---|
 | EDEN's rail robot, after DLR's EVE | `eden_gantry.usdz` | `travel` (`trolley`) 5.0 m along the ceiling rail, `lift` (`mast`) 1.25 m down, `turn` (`turret`) 180° from one rack row to the other, `reach` (`arm`) 0.65 m over a rack |
-| An arch's ridge robot | `arch_gantry.usdz` | the same, at 25.6 m, 0.65 m, 180° and 2.4 m: the turret sweeps the aisle under the lamps, the arm telescopes over either row of tables |
+| An arch's ridge robot | `arch_gantry.usdz` | the same, at 25.6 m, 0.65 m, 180° and 4.2 m: the turret sweeps the aisle under the LED bars, the arm telescopes over the inner and outer bench of either side |
+| The farm hall's nursery robot, like EDEN's | `hall_gantry.usdz` | the same along the nursery rack, its mast dropping to each of the rack's three levels and its arm reaching 1.2 m in between a tray and its LED bars |
 | A dome's polar gantry | `dome_gantry.usdz` | `slew` (`boom`) 360° on the cistern, `travel` (`carriage`) 5.6 m out along the boom over the three rings, `lift` (`mast`) 2.2 m down to the canopy; its outer leg runs on the floor rail |
 | The vertical farm's stacker crane, after twin-mast miniload cranes | `vertical_crane.usdz` | `travel` (`crane`) 21.9 m along the aisle on a floor rail under a top guide, `lift` (`carriage`) 3.91 m, `turn` (`turret`) 180° from one rack to the other, `reach` (`stage`) 0.72 m: one controller drives the telescope's two stages |
 | An arch's harvester: a skid-steer base with a lift column, a UR10e arm (Universal Robots' meshes, BSD-3-Clause) and a soft gripper, cutter and suction tool | `harvester.usdz` | `drive` (`builtin:diff_drive_cmd_vel`); `lift` (`lift_stage`) 0.40 m over two stages; `shoulder_pan` … `wrist_3` (`shoulder_link` … `wrist_3_link`), each turned at its parent to the low end of its working range, so position p is the UR angle lo + p·(hi − lo); `grip` (`jaw_left`). Its `by` reach is measured from `tool/tcp`, between the fingertips |
@@ -248,9 +249,9 @@ and `climate_link`.
 | The soil plant's excavator, after NASA's RASSOR 2.0 | `regolith_excavator.usdz` | `drive`; `arm_front`, `arm_rear` (position 0 stowed, 0.33 over a bin's lip, 0.40 carrying, 0.787 drums on the ground, 1 lifting the chassis onto them); `drum_front`, `drum_rear` velocity, digging at ±2.1 rad/s and emptying turned back |
 
 The fleet spawns them as `base_fleet_eve`, `base_fleet_arch{a,b,c}bot`,
-`base_fleet_dome{a,b}bot`, `base_fleet_farmcrane`,
+`base_fleet_dome{a,b}bot`, `base_fleet_farmcrane`, `base_fleet_hallbot`,
 `base_fleet_arch{a,b,c}picker{1,2}` (one each side of an arch's walkway, its
-arm toward its row of tables), `base_fleet_arch{a,b,c}washer`,
+arm toward its inner bench), `base_fleet_arch{a,b,c}washer`,
 `base_fleet_dome{a,b}washer`, `base_fleet_solarwasher{1..4}` and
 `base_fleet_digger{1,2,3}` (on their docks at the soil plant). Retract an
 arm before travelling: one out over a rack catches its uprights. A `by`
@@ -263,7 +264,11 @@ over each plant place it reaches (a harvester's also where it stands in its
 lane), the order its joints move in and where it parks; for the washers
 their sweeps, for the excavators their dock, dig ground and bins.
 `scripts/control/mars_farm.py` works the farm by it: each tending robot
-harvests what is ripe and sows what is empty, the washers sweep and then
+harvests what is ripe or spent, buzzes flowering fruit crops whose flowers
+have gone unpollinated, and fills what is empty: from its room's nursery
+where it has one, from the farm hall's seedling carts for the crops the hall
+raises, else with seed. The hall's nursery robot only sows its plug trays and
+loads their seedlings onto the carts. The washers sweep and then
 clean the glazing with `by`, the excavators dig and tip into the soil
 plant's bins. It waits on the sim's clock, so it keeps pace however fast the
 sim runs.
