@@ -1020,7 +1020,7 @@ impl PressureTyreDesc {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PressureTyreOutput {
     pub hub: DVec3,
     pub forward: DVec3,
@@ -1040,7 +1040,7 @@ pub struct PressureTyreOutput {
     pub rolling_moment: DVec3,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TyreGroundPlane {
     pub point: DVec3,
     pub normal: DVec3,
@@ -1056,7 +1056,7 @@ pub struct TerrainFrictionGrid {
 }
 
 /// Last-step mean tyre loads and normal-impulse-weighted contact/slip readout.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WheelForceOutput {
     pub in_contact: bool,
     /// A sleeping tyre's retained reaction, not a newly applied wrench.

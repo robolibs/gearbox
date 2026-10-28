@@ -58,6 +58,8 @@ fn reference_rubber_radius(
 #[derive(Default)]
 pub(super) struct Registrations {
     wheels: HashMap<BodyId, Registration>,
+    /// The output each wheel's readout last wrote.
+    readouts: HashMap<BodyId, WheelForceOutput>,
     axles: HashMap<String, (Vec<(BodyId, Option<u16>)>, HashMap<BodyId, u16>)>,
     invalid_axles: HashSet<String>,
 }
@@ -168,7 +170,8 @@ fn tyre_properties(link: Option<&crate::links::LinkSpec>, width: f64) -> Pressur
     tyre
 }
 
-fn pressure_readout(
+/// The tyre's pressures, which the API, the panes and loading also write.
+fn pressure_settings(
     values: &mut crate::services::LinkValues,
     machine: &str,
     link: &str,
@@ -182,6 +185,19 @@ fn pressure_readout(
         ),
         ("tyre_min_pressure_bar", tyre.min_pressure_pa / 100_000.0),
         ("tyre_max_pressure_bar", tyre.max_pressure_pa / 100_000.0),
+    ] {
+        values.set(machine, link, name, value);
+    }
+}
+
+fn pressure_readout(
+    values: &mut crate::services::LinkValues,
+    machine: &str,
+    link: &str,
+    tyre: PressureTyreOutput,
+) {
+    pressure_settings(values, machine, link, tyre);
+    for (name, value) in [
         ("tyre_loaded_radius_m", tyre.loaded_radius),
         ("tyre_deflection_m", tyre.deflection),
         ("tyre_patch_length_m", tyre.patch_length),
@@ -591,8 +607,7 @@ mod tests {
 pub(super) fn sync_machine_wheel_forces(
     inventory: Res<ControllerInventory>,
     runtime: Res<ControllerRuntimeState>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<crate::prim_index::PrimIndex>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut values: ResMut<crate::services::LinkValues>,
     mut registered: Local<Registrations>,
@@ -604,11 +619,25 @@ pub(super) fn sync_machine_wheel_forces(
         .wheels
         .retain(|body, _| physics.contains_body(*body));
     registered
+        .readouts
+        .retain(|body, _| physics.contains_body(*body));
+    registered
         .axles
         .retain(|machine, _| inventory.machines.iter().any(|m| &m.id == machine));
     registered
         .invalid_axles
         .retain(|machine| inventory.machines.iter().any(|m| &m.id == machine));
+    // Each body's first hinge joint, free about its axle only.
+    let hinge = JointAxes::ALL.without(JointAxis::AngX);
+    let mut axle_joints = HashMap::new();
+    for id in physics.joints() {
+        if physics.joint(id).is_some_and(|j| j.locked_axes() == hinge)
+            && let Some((a, b)) = physics.joint_bodies(id)
+        {
+            axle_joints.entry(a).or_insert(id);
+            axle_joints.entry(b).or_insert(id);
+        }
+    }
     for machine in &inventory.machines {
         if !machine.tracks.is_empty() { continue; }
         let Some(root) = machine.scene_root else {
@@ -617,19 +646,11 @@ pub(super) fn sync_machine_wheel_forces(
         let Some(wheels) = runtime.machine_wheels.get(&machine.id) else {
             continue;
         };
-        let body_paths: HashMap<_, _> = physics.entity_to_body.iter()
-            .filter_map(|(entity, body)| {
-                let (_, prim) = prims.get(*entity).ok()?;
-                is_descendant_of(*entity, root, &parents).then_some((prim.path.as_str(), *body))
-            }).collect();
+        let body_of = |path: &str| index.find(root, path).and_then(|entity| physics.entity_to_body.get(&entity).copied());
         let wheel_links: HashMap<_, _> = machine.links.links.iter().rev()
-            .filter_map(|link| Some((*body_paths.get(link.body_prim.as_deref()?)?, link)))
+            .filter_map(|link| Some((body_of(link.body_prim.as_deref()?)?, link)))
             .collect();
-        let Some(chassis) = machine
-            .body
-            .as_deref()
-            .and_then(|path| body_paths.get(path).copied())
-        else {
+        let Some(chassis) = machine.body.as_deref().and_then(body_of) else {
             continue;
         };
         let Some(forward) = physics.chassis(chassis).and_then(|b| body_forward_vector(&b)) else {
@@ -706,15 +727,7 @@ pub(super) fn sync_machine_wheel_forces(
             let Some((axle, width, collider_radius)) = body_tyre_geometry(&physics, wheel) else {
                 continue;
             };
-            let joint = physics.joints().into_iter().find(|id| {
-                physics
-                    .joint_bodies(*id)
-                    .is_some_and(|(a, b)| a == wheel || b == wheel)
-                    && physics
-                        .joint(*id)
-                        .is_some_and(|j| j.locked_axes() == JointAxes::ALL.without(JointAxis::AngX))
-            });
-            let Some(joint) = joint else { continue };
+            let Some(joint) = axle_joints.get(&wheel).copied() else { continue };
             let Some(body) = physics.body(wheel) else {
                 continue;
             };
@@ -795,9 +808,13 @@ pub(super) fn sync_machine_wheel_forces(
                 machine.id
             );
         }
+        // Telemetry is written when the output changes; the pressures every frame.
         for (wheel, link) in readouts {
-            if let Some(output) = physics.wheel_output(wheel) {
+            let Some(output) = physics.wheel_output(wheel) else { continue };
+            if registered.readouts.insert(wheel, output) != Some(output) {
                 wheel_readout(&mut values, &machine.id, &link, output);
+            } else if let Some(tyre) = output.pressure {
+                pressure_settings(&mut values, &machine.id, &link, tyre);
             }
         }
     }
