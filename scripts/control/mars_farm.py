@@ -2,9 +2,13 @@
 writes (`bin/gearbox/assets/world/mars_base_farm.json`):
 
 - the gantries, the vertical farm's crane and the arch harvesters take in
-  what is ripe within their reach and sow the places left empty, one place
-  after another, and park when there is nothing to do; a harvester drives
-  its lane to the table of each place before its arm reaches in;
+  what is ripe or spent within their reach, buzz flowering fruit crops
+  whose flowers have gone unpollinated, and sow the places left empty, one
+  place after another, and park when there is nothing to do; a harvester
+  drives its lane to the bench of each place before its arm reaches in;
+- where a robot's room has a nursery (the vertical farm's), it sows the
+  nursery and sets its seedlings out in the empty grow places, lifting
+  each and placing it, for the crops the nursery raises;
 - the excavators leave their docks along the lane past the chargers, dig
   regolith on their patch west of the soil plant and tip it into the
   plant's bins, round after round, one of them in the yard at a time;
@@ -51,6 +55,8 @@ IDLE_S = 30.0
 FRESH_S = 20.0
 # Below this share of its open flowers pollinated, a flowering plant is buzzed again.
 POLLEN_LOW = 0.4
+# Days a nursery seedling grows before it is set out in a grow tray.
+TRANSPLANT_DAYS = 12.0
 HOLD_MS = 120_000
 # How often a driving robot is steered, how long it may drive without
 # getting closer and how long it may turn on the spot, sim seconds.
@@ -135,6 +141,8 @@ class Robot:
         self.log = log
         self.clock = clock
         self.robot = patient(gb.machine, machine, listing=listing)
+        # The crop of the seedling it carries between a `lift` and a `place`.
+        self.holding = None
         patient(self.robot.claim, hold_ms=HOLD_MS, take=True, client="mars_farm")
 
     def set(self, link: str, name: str, value: float):
@@ -304,23 +312,40 @@ class Tender(Robot):
             yield self.move(joints, targets)
 
     def jobs(self) -> list[tuple[str, str, str]]:
-        """What to do now, in the plan's order: (op, place, crop)."""
+        """What to do now, in the plan's order: (op, place, crop). Where its
+        room has a nursery, an empty grow place takes a seedling lifted from
+        it (`lift` then `place`) rather than seed, for the crops it raises."""
         places = self.entry["places"]
+        nursery = set(self.entry.get("nursery", ()))
+        trays = self.entry["trays"]
+        raised = {trays[t] for t in nursery if t in trays}
         standing = {name: p for name, p in plants(self.gb).items() if name in places}
+        ready: dict[str, list[str]] = {}
+        for name, p in standing.items():
+            if name.split("/")[0] in nursery and p["alive"] and p.get("stage") in ("seedling", "vegetative") \
+                    and float(p.get("sown_days", 0)) >= TRANSPLANT_DAYS:
+                ready.setdefault(p["species"], []).append(name)
         jobs = []
         self.round += 1
         for place in places:
             if self.round - self.refused.get(place, -10) < 4:
                 continue
+            tray = place.split("/")[0]
             plant = standing.get(place)
+            if self.holding and plant is None and tray not in nursery and trays[tray] == self.holding:
+                jobs.append(("place", place, self.holding))
+                continue
             if plant is not None and (plant["ripe"] or plant.get("stage") == "spent"):
                 jobs.append(("harvest", place, plant["species"]))
             elif plant is not None and plant.get("flowering") == "1" and float(plant.get("pollen", 1)) < POLLEN_LOW:
                 jobs.append(("pollinate", place, plant["species"]))
             elif plant is not None and not plant["alive"]:
                 jobs.append(("clear", place, plant["species"]))
-            elif plant is None:
-                jobs.append(("sow", place, self.entry["trays"][place.split("/")[0]]))
+            elif plant is None and (tray in nursery or trays[tray] not in raised):
+                jobs.append(("sow", place, trays[tray]))
+            elif plant is None and ready.get(trays[tray]) and not self.holding:
+                jobs.append(("lift", ready[trays[tray]].pop(), trays[tray]))
+                jobs.append(("place", place, trays[tray]))
         return jobs
 
     def act(self, op: str, place: str, crop: str):
@@ -380,6 +405,10 @@ class Tender(Robot):
                 self.done += status.ok
                 if not status.ok:
                     self.refused[place] = self.round
+                elif op == "lift":
+                    self.holding = crop
+                elif op == "place":
+                    self.holding = None
             # A round whose places were all taken by neighbours waits a little.
             yield SETTLE_S
 
