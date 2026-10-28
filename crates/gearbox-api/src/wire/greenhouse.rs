@@ -33,6 +33,15 @@ pub mod greenhouse_op {
     /// `room`: clean the dust off its glazing; with `by`, a machine that must
     /// stand at the room.
     pub const CLEAN_GLAZING: u32 = 11;
+    /// `plant`, or `tray` for every plant in flower in it: buzz or brush their
+    /// open flowers; with `by`, only what that machine reaches.
+    pub const POLLINATE: u32 = 12;
+    /// `plant`: lift a young plant out of its place; with `by`, into that
+    /// machine's gripper, which holds one at a time, if it reaches the plant.
+    pub const LIFT: u32 = 13;
+    /// `plant` (`TRAY/SLOT`, an empty place): set the lifted plant in it; with
+    /// `by`, the one that machine holds, if it reaches the place.
+    pub const PLACE: u32 = 14;
 
     pub fn parse(name: &str) -> Option<u32> {
         Some(match name {
@@ -48,6 +57,9 @@ pub mod greenhouse_op {
             "setpoint" => SETPOINT,
             "clean_panels" => CLEAN_PANELS,
             "clean_glazing" => CLEAN_GLAZING,
+            "pollinate" => POLLINATE,
+            "lift" => LIFT,
+            "place" => PLACE,
             _ => return None,
         })
     }
@@ -66,6 +78,9 @@ pub mod greenhouse_op {
             SETPOINT => "setpoint",
             CLEAN_PANELS => "clean_panels",
             CLEAN_GLAZING => "clean_glazing",
+            POLLINATE => "pollinate",
+            LIFT => "lift",
+            PLACE => "place",
             _ => "unknown",
         }
     }

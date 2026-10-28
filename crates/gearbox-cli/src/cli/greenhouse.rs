@@ -56,6 +56,25 @@ enum Cmd {
         #[arg(long)]
         by: Option<String>,
     },
+    /// Buzz or brush the open flowers of one plant (TRAY/SLOT) or a whole tray
+    Pollinate {
+        target: String,
+        /// Only what this machine reaches (within 0.3 m)
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// Lift a seedling (TRAY/SLOT) out of its place, into a machine's gripper if `--by`
+    Lift {
+        plant: String,
+        #[arg(long)]
+        by: Option<String>,
+    },
+    /// Set the lifted seedling in an empty place (TRAY/SLOT)
+    Place {
+        plant: String,
+        #[arg(long)]
+        by: Option<String>,
+    },
     /// Wash the perchlorate out of a regolith tray
     Wash { tray: String },
     /// Work organic matter into a regolith tray
@@ -133,6 +152,12 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             act(ctx, op::HARVEST, &with_by(vec![(key, &target)], &by), &target)
         }
         Cmd::Clear { plant, by } => act(ctx, op::CLEAR, &with_by(vec![("plant", &plant)], &by), &plant),
+        Cmd::Pollinate { target, by } => {
+            let key = if target.contains('/') { "plant" } else { "tray" };
+            act(ctx, op::POLLINATE, &with_by(vec![(key, &target)], &by), &target)
+        }
+        Cmd::Lift { plant, by } => act(ctx, op::LIFT, &with_by(vec![("plant", &plant)], &by), &plant),
+        Cmd::Place { plant, by } => act(ctx, op::PLACE, &with_by(vec![("plant", &plant)], &by), &plant),
         Cmd::Wash { tray } => act(ctx, op::WASH, &[("tray", &tray)], &tray),
         Cmd::Amend { tray, share } => act(ctx, op::AMEND, &[("tray", &tray), ("share", &share.to_string())], &tray),
         Cmd::Lamps { tray, spectrum, dimming } => {

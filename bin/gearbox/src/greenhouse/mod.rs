@@ -12,12 +12,12 @@ pub mod crops;
 mod looks;
 mod sense;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use gearbox_greenhouse::air::Climate;
 use gearbox_greenhouse::house::{Event as HouseEvent, Fault};
-use gearbox_greenhouse::{House, Lamp, Medium, Outside, PlantId, Room, Species, Surroundings, Tank, Tray};
+use gearbox_greenhouse::{House, Lamp, Medium, Outside, Plant, PlantId, Room, Species, Surroundings, Tank, Tray};
 use openusd::sdf::{Path as SdfPath, Value};
 use usd_bevy::instance::UsdInstances;
 use usd_bevy::{UsdSceneRoot, UsdSceneState};
@@ -116,6 +116,9 @@ pub struct Greenhouse {
     pub rooms: Vec<RoomPlace>,
     /// What happened since the API last took it.
     pub events: Vec<HouseEvent>,
+    /// Plants lifted to be set elsewhere, by who holds them: a machine's id,
+    /// or the bench a crew member uses.
+    pub carried: HashMap<String, Plant>,
     scanned: HashSet<Entity>,
 }
 
@@ -287,6 +290,8 @@ fn discover_greenhouses(world: &mut World) {
                 power.solar_m2 = float("gearbox:power:solarArea").unwrap_or(power.solar_m2);
                 power.battery_wh = float("gearbox:power:battery").unwrap_or(power.battery_wh);
                 power.charge_wh = power.battery_wh * 0.75;
+                // The crew the farm feeds stands on the same prim as the bus.
+                greenhouse.house.store.crew = float("gearbox:house:crew").map_or(0, |c| c.max(0.0).round() as u32);
             }
         }
         for (path, sdf, entity) in &found {
@@ -400,6 +405,10 @@ fn pre_grow(house: &mut House, tray: usize, species: &'static Species, days: f64
         let hours = (age * 24.0).round() as usize;
         let plant = house.trays[tray].slots[slot].as_mut().expect("just sown");
         for h in 0..hours {
+            // Grown at load as if tended: its flowers buzzed every day.
+            if h % 24 == 0 && plant.flowering() {
+                plant.pollinate();
+            }
             let lit = day[((h as f64).rem_euclid(cycle) as usize).min(day.len() - 1)];
             let here = Surroundings { ppf: if lit { around.lit_ppf } else { 0.0 }, ..around };
             plant.grow(3600.0, &here);

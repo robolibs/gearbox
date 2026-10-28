@@ -21,6 +21,8 @@ const SERVICE_REACH_M: f32 = 1.2;
 const PLANT_REACH_M: f32 = 0.3;
 /// How close a machine must come to a room's box to clean its glazing, metres.
 const GLAZING_REACH_M: f32 = 1.5;
+/// Who holds a plant lifted with no machine named: the crew's potting bench.
+const BENCH: &str = "bench";
 
 fn number(v: f64) -> String {
     format!("{v:.4}")
@@ -35,6 +37,10 @@ fn record(greenhouse: &Greenhouse, id: PlantId, at: Vec3) -> Option<PlantRecord>
         ("species", plant.species.name),
         ("stage", plant.stage().name()),
         ("edible_kg", &number(plant.edible_fresh_kg() * tray.per_slot)),
+        ("ripening_kg", &number(plant.species.fresh_kg(plant.green_g) * tray.per_slot)),
+        ("flowering", if plant.flowering() { "1" } else { "0" }),
+        ("pollen", &number(plant.pollen)),
+        ("cuts", &plant.cuts.to_string()),
         ("biomass_g", &number(plant.biomass_g * tray.per_slot)),
         ("water_stress", &number(plant.water_stress)),
         ("nutrient_stress", &number(plant.nutrient_stress)),
@@ -87,6 +93,12 @@ fn rooms(greenhouse: &Greenhouse) -> Vec<RoomRecord> {
                 ("glazing_dust", &number(room.glazing_dust)),
                 ("lamp_power", &number(house.lamp_power)),
                 ("faults", &faults.join(",")),
+                ("crew", &house.store.crew.to_string()),
+                ("store_kg", &number(house.store.kg())),
+                ("store_kcal", &number(house.store.kcal())),
+                ("store_sols", &number(house.store.sols())),
+                ("biomass_kg", &number(house.store.biomass_kg)),
+                ("closure", &number(house.store.closure())),
             ]);
             RoomRecord {
                 temperature_c: room.air.temperature_c as f32,
@@ -290,6 +302,61 @@ fn act(
             greenhouse.house.clear(id).map_err(refused)?;
             Ok(Status::ok())
         }
+        op::POLLINATE => {
+            let single = keys.contains("plant");
+            let ids: Vec<PlantId> = if single {
+                vec![plant_of(greenhouse, &keys)?]
+            } else {
+                let tray = tray_of(greenhouse, &keys)?;
+                (0..greenhouse.house.trays[tray].slots.len())
+                    .map(|slot| PlantId { tray, slot })
+                    .filter(|id| greenhouse.house.plant(*id).is_some_and(|p| p.flowering()))
+                    .collect()
+            };
+            let mut count = 0;
+            for id in within_reach(greenhouse, ids, &keys, machines)? {
+                match greenhouse.house.pollinate(id) {
+                    Ok(event) => {
+                        greenhouse.events.push(event);
+                        count += 1;
+                    }
+                    Err(why) if single => return Err(refused(why)),
+                    Err(_) => {}
+                }
+            }
+            Ok(Status::ok_with(&Props::from_pairs(&[("pollinated", &count.to_string())])))
+        }
+        op::LIFT => {
+            let id = plant_of(greenhouse, &keys)?;
+            let holder = keys.get("by").unwrap_or_else(|| BENCH.to_string());
+            if greenhouse.carried.contains_key(&holder) {
+                return Err(Status::err(code::REFUSED, &format!("`{holder}` already holds a plant")));
+            }
+            within_reach(greenhouse, vec![id], &keys, machines)?;
+            let (plant, event) = greenhouse.house.lift(id).map_err(refused)?;
+            greenhouse.carried.insert(holder, plant);
+            greenhouse.events.push(event);
+            Ok(Status::ok())
+        }
+        op::PLACE => {
+            let id = plant_of(greenhouse, &keys)?;
+            let holder = keys.get("by").unwrap_or_else(|| BENCH.to_string());
+            if !greenhouse.carried.contains_key(&holder) {
+                return Err(Status::err(code::REFUSED, &format!("`{holder}` holds no plant")));
+            }
+            within_reach(greenhouse, vec![id], &keys, machines)?;
+            let plant = greenhouse.carried.remove(&holder).expect("checked above");
+            match greenhouse.house.place(id, plant.clone()) {
+                Ok(event) => {
+                    greenhouse.events.push(event);
+                    Ok(Status::ok())
+                }
+                Err(why) => {
+                    greenhouse.carried.insert(holder, plant);
+                    Err(refused(why))
+                }
+            }
+        }
         op::WASH => {
             let tray = tray_of(greenhouse, &keys)?;
             greenhouse.house.wash(tray).map_err(refused)?;
@@ -395,6 +462,9 @@ fn scene_event(greenhouse: &Greenhouse, happened: &HouseEvent, at: Vec3) -> Scen
         HouseEvent::Staged(id, _) => ("staged", Some(*id)),
         HouseEvent::Died(id) => ("died", Some(*id)),
         HouseEvent::Harvested(id, _) => ("harvested", Some(*id)),
+        HouseEvent::Pollinated(id) => ("pollinated", Some(*id)),
+        HouseEvent::Lifted(id) => ("lifted", Some(*id)),
+        HouseEvent::Placed(id) => ("placed", Some(*id)),
         HouseEvent::Faulted(_) => ("faulted", None),
         HouseEvent::Repaired(_) => ("repaired", None),
     };
@@ -565,6 +635,44 @@ mod tests {
         let mut sow = |by: &str| act_in(&mut world, op::SOW, &[("tray", "bed"), ("species", "lettuce"), ("by", by)]);
         assert_eq!(sow("far").code, code::REFUSED, "the far machine reaches nothing, near as its stage-mate stands");
         assert_eq!(sow("near").props().get("sown").as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn a_machine_carries_a_seedling_to_a_place_it_reaches_and_buzzes_flowers() {
+        use gearbox_greenhouse::Plant;
+        use gearbox_greenhouse::species::TOMATO;
+        let mut world = World::new();
+        place_machines(&mut world, &[("near", 0.1), ("far", 20.0)]);
+        let tray = world.spawn(GlobalTransform::IDENTITY).id();
+        let mut g = greenhouse();
+        g.trays.push(super::super::TrayPlace {
+            entity: tray,
+            path: "/bed".into(),
+            cols: 2,
+            rows: 2,
+            size: Vec2::new(0.6, 0.4),
+            lamp_height: 0.5,
+            lamp: None,
+            lamp_face: None,
+        });
+        g.house.trays[0].slots[0] = Some(Plant { emerged: true, age_days: 5.0, ..Plant::sown(&LETTUCE) });
+        g.house.trays[0].slots[1] = Some(Plant { emerged: true, age_days: 4.0, ..Plant::sown(&LETTUCE) });
+        g.house.trays[0].slots[2] = Some(Plant { emerged: true, age_days: 45.0, ..Plant::sown(&TOMATO) });
+        world.insert_resource(g);
+        let mut act = |o: u32, plant: &str, by: &str| act_in(&mut world, o, &[("plant", plant), ("by", by)]);
+        assert_eq!(act(op::LIFT, "bed/0", "far").code, code::REFUSED, "out of reach");
+        assert_eq!(act(op::PLACE, "bed/3", "near").code, code::REFUSED, "it holds nothing yet");
+        assert_eq!(act(op::LIFT, "bed/0", "near").code, code::OK);
+        assert_eq!(act(op::LIFT, "bed/1", "near").code, code::REFUSED, "one plant at a time");
+        assert_eq!(act(op::LIFT, "bed/2", "far").code, code::REFUSED, "a fruiting tomato is too far grown to move");
+        assert_eq!(act(op::PLACE, "bed/3", "far").code, code::REFUSED, "the far machine holds nothing");
+        assert_eq!(act(op::PLACE, "bed/3", "near").code, code::OK);
+        assert_eq!(act(op::POLLINATE, "bed/2", "near").code, code::OK);
+        assert_eq!(act(op::POLLINATE, "bed/3", "near").code, code::REFUSED, "lettuce has no flowers to buzz");
+        let g = world.resource::<Greenhouse>();
+        assert!(g.house.trays[0].slots[0].is_none() && g.carried.is_empty());
+        assert_eq!(g.house.trays[0].slots[3].as_ref().map(|p| p.age_days), Some(5.0), "the seedling moved, its age kept");
+        assert_eq!(g.house.trays[0].slots[2].as_ref().map(|p| p.pollen), Some(1.0));
     }
 
     #[test]

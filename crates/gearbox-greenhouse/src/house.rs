@@ -134,8 +134,79 @@ pub enum Event {
     Staged(PlantId, Stage),
     Died(PlantId),
     Harvested(PlantId, Harvest),
+    Pollinated(PlantId),
+    Lifted(PlantId),
+    Placed(PlantId),
     Faulted(Fault),
     Repaired(Fault),
+}
+
+/// Food energy a crew member eats a sol, kcal (BVAD: about 3000 for an
+/// active crew member).
+pub const CREW_KCAL: f64 = 3000.0;
+
+/// What the farm has taken in and whom it feeds: fresh produce by crop, the
+/// inedible biomass waiting for resource recovery, and the crew eating from it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Store {
+    /// Fresh produce held, kg, by crop.
+    pub produce: Vec<(&'static Species, f64)>,
+    /// Inedible biomass taken off with harvests and clearings, kg dry.
+    pub biomass_kg: f64,
+    pub crew: u32,
+    /// Food energy eaten from the store and needed since the house started, kcal.
+    pub eaten_kcal: f64,
+    pub needed_kcal: f64,
+}
+
+impl Store {
+    pub fn add(&mut self, species: &'static Species, kg: f64) {
+        match self.produce.iter_mut().find(|(s, _)| std::ptr::eq(*s, species)) {
+            Some((_, held)) => *held += kg,
+            None => self.produce.push((species, kg)),
+        }
+    }
+
+    /// Produce held, kg.
+    pub fn kg(&self) -> f64 {
+        self.produce.iter().map(|(_, kg)| kg).sum()
+    }
+
+    /// Food energy held, kcal.
+    pub fn kcal(&self) -> f64 {
+        self.produce.iter().map(|(s, kg)| kg * s.nutrition.kcal).sum()
+    }
+
+    /// Sols the store feeds the crew.
+    pub fn sols(&self) -> f64 {
+        if self.crew == 0 { 0.0 } else { self.kcal() / (self.crew as f64 * CREW_KCAL) }
+    }
+
+    /// Share of the crew's food energy the farm has given since it started.
+    pub fn closure(&self) -> f64 {
+        if self.needed_kcal > 0.0 { self.eaten_kcal / self.needed_kcal } else { 0.0 }
+    }
+
+    /// Feeds the crew for `sols`, eating what keeps least first: greens, then
+    /// fruit, then roots and tubers, then grain.
+    pub fn feed(&mut self, sols: f64) {
+        let mut want = self.crew as f64 * CREW_KCAL * sols;
+        self.needed_kcal += want;
+        let keeps = |s: &Species| match s.edible {
+            Edible::Shoot => 0,
+            Edible::Fruit => 1,
+            Edible::Tuber => 2,
+            Edible::Grain => 3,
+        };
+        self.produce.sort_by_key(|(s, _)| keeps(s));
+        for (species, kg) in &mut self.produce {
+            let eaten = (want / species.nutrition.kcal).min(*kg);
+            *kg -= eaten;
+            want -= eaten * species.nutrition.kcal;
+            self.eaten_kcal += eaten * species.nutrition.kcal;
+        }
+        self.produce.retain(|(_, kg)| *kg > 1e-9);
+    }
 }
 
 /// What a harvest took in.
@@ -156,6 +227,8 @@ pub enum Refusal {
     NotRipe,
     NotRegolith,
     NotGlazed,
+    NotFlowering,
+    TooOld,
 }
 
 impl std::fmt::Display for Refusal {
@@ -168,6 +241,8 @@ impl std::fmt::Display for Refusal {
             Self::NotRipe => "not ripe yet",
             Self::NotRegolith => "the tray holds no regolith",
             Self::NotGlazed => "the room has no glazing",
+            Self::NotFlowering => "it is not in flower",
+            Self::TooOld => "it is too far grown to move",
         })
     }
 }
@@ -180,6 +255,7 @@ pub struct House {
     pub tanks: Vec<Tank>,
     pub power: Power,
     pub faults: Vec<Fault>,
+    pub store: Store,
     /// Length of the lamps' day, hours: the planet's solar day.
     pub cycle_hours: f64,
     /// Share of the lamps' demand the bus met over the last step.
@@ -278,6 +354,7 @@ impl House {
         }
         let sols = seconds / (self.cycle_hours.max(1.0) * 3600.0);
         self.power.settle_dust(sols);
+        self.store.feed(sols);
         for room in self.rooms.iter_mut().filter(|r| r.glazing > 0.0) {
             room.glazing_dust = settled(room.glazing_dust, sols);
         }
@@ -347,42 +424,88 @@ impl House {
 
     /// Sows `species` in one place of a tray.
     pub fn sow(&mut self, id: PlantId, species: &'static Species) -> Result<Event, Refusal> {
-        let tray = self.trays.get_mut(id.tray).ok_or(Refusal::NoSuchTray)?;
-        let slot = tray.slots.get_mut(id.slot).ok_or(Refusal::NoSuchPlace)?;
+        let many = self.trays.get(id.tray).ok_or(Refusal::NoSuchTray)?.per_slot;
+        let slot = self.slot(id)?;
         if slot.as_ref().is_some_and(|p| p.alive) {
             return Err(Refusal::Occupied);
         }
-        *slot = Some(Plant::sown(species));
+        // A dead plant still standing there goes to the recovery heap.
+        let dead_g = slot.replace(Plant::sown(species)).map_or(0.0, |p| p.biomass_g);
+        self.store.biomass_kg += dead_g * many / 1000.0;
         Ok(Event::Sown(id))
     }
 
-    /// Takes in what a plant has made: the whole plant for leaf, tuber and
-    /// grain crops, the fruit alone for fruiting ones, which grow on.
-    pub fn harvest(&mut self, id: PlantId) -> Result<Event, Refusal> {
+    fn slot(&mut self, id: PlantId) -> Result<&mut Option<Plant>, Refusal> {
         let tray = self.trays.get_mut(id.tray).ok_or(Refusal::NoSuchTray)?;
-        let many = tray.per_slot;
-        let slot = tray.slots.get_mut(id.slot).ok_or(Refusal::NoSuchPlace)?;
+        tray.slots.get_mut(id.slot).ok_or(Refusal::NoSuchPlace)
+    }
+
+    /// Takes in what a plant has made into the store: the ripe fruit of a
+    /// fruiting crop, which bears on until it is spent; the outer leaves of a
+    /// cut-and-come-again crop until its last cutting; otherwise the whole
+    /// plant, its inedible part to the biomass waiting for recovery.
+    pub fn harvest(&mut self, id: PlantId) -> Result<Event, Refusal> {
+        let many = self.trays.get(id.tray).ok_or(Refusal::NoSuchTray)?.per_slot;
+        let slot = self.slot(id)?;
         let plant = slot.as_mut().filter(|p| p.alive).ok_or(Refusal::Empty)?;
-        let fruit = plant.species.edible == Edible::Fruit;
-        let ready = plant.stage() == Stage::Ripe || (fruit && plant.stage() == Stage::Forming && plant.edible_g > 0.0);
-        if !ready {
+        let stage = plant.stage();
+        if !matches!(stage, Stage::Ripe | Stage::Spent) {
             return Err(Refusal::NotRipe);
         }
-        let harvest = Harvest { species: plant.species, fresh_kg: plant.edible_fresh_kg() * many, dry_g: plant.edible_g * many };
-        if fruit {
-            plant.biomass_g -= plant.edible_g;
+        let species = plant.species;
+        let (taken_g, whole) = if plant.fruiting() && stage == Stage::Ripe {
+            let ripe = plant.edible_g;
+            plant.biomass_g -= ripe;
             plant.edible_g = 0.0;
+            (ripe, false)
+        } else if let Some(cut) = plant.cut() {
+            (cut, false)
         } else {
-            *slot = None;
-        }
+            (plant.edible_g, true)
+        };
+        let rest_g = if whole { slot.take().map_or(0.0, |p| p.biomass_g - taken_g) } else { 0.0 };
+        let harvest = Harvest { species, fresh_kg: species.fresh_kg(taken_g) * many, dry_g: taken_g * many };
+        self.store.add(species, harvest.fresh_kg);
+        self.store.biomass_kg += rest_g.max(0.0) * many / 1000.0;
         Ok(Event::Harvested(id, harvest))
     }
 
-    /// Lifts whatever is in a place, dead or alive.
+    /// Lifts whatever is in a place, dead or alive, its biomass to the recovery heap.
     pub fn clear(&mut self, id: PlantId) -> Result<(), Refusal> {
-        let tray = self.trays.get_mut(id.tray).ok_or(Refusal::NoSuchTray)?;
-        let slot = tray.slots.get_mut(id.slot).ok_or(Refusal::NoSuchPlace)?;
-        slot.take().map(|_| ()).ok_or(Refusal::Empty)
+        let many = self.trays.get(id.tray).ok_or(Refusal::NoSuchTray)?.per_slot;
+        let plant = self.slot(id)?.take().ok_or(Refusal::Empty)?;
+        self.store.biomass_kg += plant.biomass_g * many / 1000.0;
+        Ok(())
+    }
+
+    /// Pollinates a flowering plant's open flowers.
+    pub fn pollinate(&mut self, id: PlantId) -> Result<Event, Refusal> {
+        let plant = self.slot(id)?.as_mut().filter(|p| p.alive).ok_or(Refusal::Empty)?;
+        if !plant.flowering() {
+            return Err(Refusal::NotFlowering);
+        }
+        plant.pollinate();
+        Ok(Event::Pollinated(id))
+    }
+
+    /// Lifts a young plant out of its place to be set in another.
+    pub fn lift(&mut self, id: PlantId) -> Result<(Plant, Event), Refusal> {
+        let slot = self.slot(id)?;
+        let plant = slot.as_ref().ok_or(Refusal::Empty)?;
+        if !plant.transplantable() {
+            return Err(Refusal::TooOld);
+        }
+        Ok((slot.take().expect("checked above"), Event::Lifted(id)))
+    }
+
+    /// Sets a lifted plant in an empty place.
+    pub fn place(&mut self, id: PlantId, plant: Plant) -> Result<Event, Refusal> {
+        let slot = self.slot(id)?;
+        if slot.is_some() {
+            return Err(Refusal::Occupied);
+        }
+        *slot = Some(plant);
+        Ok(Event::Placed(id))
     }
 
     /// Washes the perchlorate out of a regolith tray, with the water it costs from its tank.
@@ -467,7 +590,7 @@ impl House {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::species::{LETTUCE, POTATO, TOMATO};
+    use crate::species::{KALE, LETTUCE, POTATO, TOMATO, WHEAT};
 
     /// A room with one tank and `trays` lettuce trays of 0.24 m², each under one lamp.
     fn chamber(trays: usize) -> House {
@@ -582,24 +705,124 @@ mod tests {
         assert!(house.tray_light(0, 13.0).0 > 0.0);
     }
 
-    #[test]
-    fn fruit_comes_off_a_tomato_that_keeps_growing() {
+    /// Two tomatoes in a chamber at the crop's temperature.
+    fn tomatoes() -> House {
         let mut house = chamber(1);
+        house.rooms[0].climate.temperature_c = TOMATO.light_c;
         house.lamps[0].ppfd_max = 625.0;
         house.lamps[0].lit_hours = 12.0;
         house.trays[0].slots = vec![None; 2];
         sow_all(&mut house, &TOMATO);
+        house
+    }
+
+    /// Tends the tomatoes for `days`: the tank cleaned monthly, the plants in
+    /// `buzzed` pollinated daily, the first one picked whenever it has ripe fruit.
+    fn tend_days(house: &mut House, days: usize, buzzed: &[usize], picked: &mut f64) {
+        for day in 0..days {
+            if day % 30 == 29 {
+                house.tanks[0].clean();
+            }
+            for &slot in buzzed {
+                let _ = house.pollinate(PlantId { tray: 0, slot });
+            }
+            if let Ok(Event::Harvested(_, h)) = house.harvest(PlantId { tray: 0, slot: 0 }) {
+                *picked += h.fresh_kg;
+            }
+            run_days(house, 1);
+        }
+    }
+
+    #[test]
+    fn a_buzzed_tomato_bears_again_and_again_until_it_is_spent() {
+        let mut house = tomatoes();
         let id = PlantId { tray: 0, slot: 0 };
         assert_eq!(house.harvest(id), Err(Refusal::NotRipe));
-        run_days(&mut house, 35);
-        house.tanks[0].clean();
-        run_days(&mut house, 35);
-        let state = house.plant(id).cloned();
-        let Ok(Event::Harvested(_, picked)) = house.harvest(id) else { panic!("tomato harvest: {:?} {:?}", house.harvest(id), state.map(|p| (p.stage(), p.age_days, p.edible_g, p.health, p.alive))) };
-        assert!(picked.fresh_kg > 0.2, "{picked:?}");
-        let plant = house.plant(id).expect("the vine stays");
-        assert_eq!(plant.edible_g, 0.0);
-        assert!(plant.alive);
+        let mut picked = 0.0;
+        tend_days(&mut house, 100, &[0, 1], &mut picked);
+        let first = picked;
+        assert!(first > 0.2, "{first} kg by day 100");
+        let plant = house.plant(id).expect("the vine stays after picking");
+        assert!(plant.alive && plant.edible_g < plant.pick_g(), "only ripe fruit left the vine");
+        tend_days(&mut house, 60, &[0, 1], &mut picked);
+        assert!(picked > first + 0.2, "it bore on: {first} then {picked} kg");
+        // Past bearing it is spent, and taking it in lifts it whole.
+        tend_days(&mut house, 120, &[0, 1], &mut picked);
+        assert_eq!(house.plant(id).map(Plant::stage), None, "the spent vine was taken in");
+        assert!(house.store.biomass_kg > 0.05, "its vine went to recovery: {} kg", house.store.biomass_kg);
+        assert!(house.store.kg() > 0.0);
+    }
+
+    #[test]
+    fn an_unbuzzed_tomato_sets_a_fraction_of_the_fruit() {
+        let mut house = tomatoes();
+        for day in 0..90 {
+            let _ = house.pollinate(PlantId { tray: 0, slot: 0 });
+            if day % 30 == 29 {
+                house.tanks[0].clean();
+            }
+            run_days(&mut house, 1);
+        }
+        let fruit = |slot| house.plant(PlantId { tray: 0, slot }).map_or(0.0, |p| p.edible_g + p.green_g);
+        let share = fruit(1) / fruit(0);
+        assert!((0.2..0.55).contains(&share), "unbuzzed fruit {share:.2} of buzzed");
+    }
+
+    #[test]
+    fn kale_is_cut_and_comes_again_before_it_is_lifted() {
+        let mut house = chamber(1);
+        house.trays[0].slots = vec![None; 1];
+        sow_all(&mut house, &KALE);
+        let id = PlantId { tray: 0, slot: 0 };
+        let mut cuts = Vec::new();
+        for _ in 0..200 {
+            run_days(&mut house, 1);
+            if let Ok(Event::Harvested(_, h)) = house.harvest(id) {
+                cuts.push((h.fresh_kg, house.plant(id).is_some()));
+                if house.plant(id).is_none() {
+                    break;
+                }
+            }
+            if house.tanks[0].biofilm > 0.5 {
+                house.tanks[0].clean();
+            }
+        }
+        let kept: Vec<bool> = cuts.iter().map(|c| c.1).collect();
+        assert_eq!(kept, [true, true, false], "two cuttings, then lifted: {cuts:?}");
+        assert!(cuts.iter().all(|c| c.0 > 0.02), "{cuts:?}");
+        assert!(house.store.biomass_kg > 0.0);
+    }
+
+    #[test]
+    fn a_seedling_moves_to_its_place_but_a_grown_plant_does_not() {
+        let mut house = chamber(2);
+        house.sow(PlantId { tray: 0, slot: 0 }, &LETTUCE).unwrap();
+        run_days(&mut house, 8);
+        let (from, to) = (PlantId { tray: 0, slot: 0 }, PlantId { tray: 1, slot: 3 });
+        let age = house.plant(from).unwrap().age_days;
+        let (plant, lifted) = house.lift(from).unwrap();
+        assert_eq!(lifted, Event::Lifted(from));
+        assert!(house.plant(from).is_none());
+        assert_eq!(house.place(to, plant), Ok(Event::Placed(to)));
+        assert_eq!(house.plant(to).unwrap().age_days, age);
+        run_days(&mut house, 24);
+        assert_eq!(house.lift(to).err(), Some(Refusal::TooOld));
+        assert_eq!(house.lift(from).err(), Some(Refusal::Empty));
+    }
+
+    #[test]
+    fn the_crew_eats_greens_first_and_the_store_runs_down() {
+        let mut store = Store { crew: 2, ..Store::default() };
+        store.add(&LETTUCE, 1.0);
+        store.add(&WHEAT, 2.0);
+        store.feed(1.0);
+        assert!(store.produce.iter().all(|(s, _)| s.name == "wheat"), "the lettuce went first");
+        let wheat = 2.0 - (2.0 * CREW_KCAL - LETTUCE.nutrition.kcal) / WHEAT.nutrition.kcal;
+        assert!((store.kg() - wheat).abs() < 1e-9);
+        assert!((store.closure() - 1.0).abs() < 1e-9);
+        store.feed(1.0);
+        assert_eq!(store.kg(), 0.0);
+        assert!(store.closure() < 0.6, "a second sol it fed short: {}", store.closure());
     }
 
     #[test]

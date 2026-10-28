@@ -130,6 +130,16 @@ pub struct Species {
     pub form: Form,
     pub edible: Edible,
     pub nutrition: Nutrition,
+    /// Share of a fruiting crop's flowers that set fruit with no help: tomato
+    /// in still greenhouse air needs buzzing, strawberry pollen moved, pepper
+    /// and beans mostly set their own; 1 for crops not eaten as fruit.
+    pub self_set: f64,
+    /// Days a set fruit takes to ripen, and days a fruiting crop bears past its
+    /// harvest age before it is spent; 0 for crops taken whole.
+    pub ripen_days: f64,
+    pub bearing_days: f64,
+    /// A leaf crop cut and come again: its outer leaves are taken and it grows on.
+    pub regrows: bool,
 }
 
 impl Species {
@@ -142,6 +152,11 @@ impl Species {
     /// productivity over the growing period, over the harvest index, per plant.
     pub fn nominal_biomass_g(&self) -> f64 {
         self.edible_rate * self.growing_days / self.harvest_index / self.density
+    }
+
+    /// Fresh mass of `dry_g` of the edible part, kg.
+    pub fn fresh_kg(&self, dry_g: f64) -> f64 {
+        dry_g / (1.0 - self.edible_water) / 1000.0
     }
 
     /// Ground one plant takes at its fitted density, m².
@@ -214,6 +229,10 @@ pub const LETTUCE: Species = Species {
     form: Form::Rosette,
     edible: Edible::Shoot,
     nutrition: Nutrition { kcal: 150.0, protein_g: 13.6, fat_g: 1.5 },
+    self_set: 1.0,
+    ripen_days: 0.0,
+    bearing_days: 0.0,
+    regrows: false,
 };
 
 pub const TOMATO: Species = Species {
@@ -261,6 +280,10 @@ pub const TOMATO: Species = Species {
     form: Form::Vine,
     edible: Edible::Fruit,
     nutrition: Nutrition { kcal: 180.0, protein_g: 8.8, fat_g: 2.0 },
+    self_set: 0.3,
+    ripen_days: 40.0,
+    bearing_days: 90.0,
+    regrows: false,
 };
 
 pub const POTATO: Species = Species {
@@ -308,6 +331,10 @@ pub const POTATO: Species = Species {
     form: Form::Bush,
     edible: Edible::Tuber,
     nutrition: Nutrition { kcal: 770.0, protein_g: 20.5, fat_g: 0.9 },
+    self_set: 1.0,
+    ripen_days: 0.0,
+    bearing_days: 0.0,
+    regrows: false,
 };
 
 pub const WHEAT: Species = Species {
@@ -355,6 +382,10 @@ pub const WHEAT: Species = Species {
     form: Form::Grass,
     edible: Edible::Grain,
     nutrition: Nutrition { kcal: 3290.0, protein_g: 154.0, fat_g: 19.2 },
+    self_set: 1.0,
+    ripen_days: 0.0,
+    bearing_days: 0.0,
+    regrows: false,
 };
 
 pub const SOYBEAN: Species = Species {
@@ -402,6 +433,10 @@ pub const SOYBEAN: Species = Species {
     form: Form::Legume,
     edible: Edible::Grain,
     nutrition: Nutrition { kcal: 4460.0, protein_g: 365.0, fat_g: 199.0 },
+    self_set: 1.0,
+    ripen_days: 0.0,
+    bearing_days: 0.0,
+    regrows: false,
 };
 
 pub const DRY_BEAN: Species = Species {
@@ -449,6 +484,10 @@ pub const DRY_BEAN: Species = Species {
     form: Form::Legume,
     edible: Edible::Grain,
     nutrition: Nutrition { kcal: 3330.0, protein_g: 236.0, fat_g: 8.0 },
+    self_set: 1.0,
+    ripen_days: 0.0,
+    bearing_days: 0.0,
+    regrows: false,
 };
 
 pub const PEANUT: Species = Species {
@@ -490,6 +529,10 @@ pub const PEANUT: Species = Species {
     form: Form::Legume,
     edible: Edible::Tuber,
     nutrition: Nutrition { kcal: 5670.0, protein_g: 258.0, fat_g: 492.0 },
+    self_set: 1.0,
+    ripen_days: 0.0,
+    bearing_days: 0.0,
+    regrows: false,
 };
 
 pub const RICE: Species = Species {
@@ -537,6 +580,10 @@ pub const RICE: Species = Species {
     form: Form::Grass,
     edible: Edible::Grain,
     nutrition: Nutrition { kcal: 3700.0, protein_g: 79.0, fat_g: 29.0 },
+    self_set: 1.0,
+    ripen_days: 0.0,
+    bearing_days: 0.0,
+    regrows: false,
 };
 
 pub const SWEET_POTATO: Species = Species {
@@ -584,6 +631,10 @@ pub const SWEET_POTATO: Species = Species {
     form: Form::Creeper,
     edible: Edible::Tuber,
     nutrition: Nutrition { kcal: 860.0, protein_g: 15.7, fat_g: 0.5 },
+    self_set: 1.0,
+    ripen_days: 0.0,
+    bearing_days: 0.0,
+    regrows: false,
 };
 
 // The crops below have no MEC fit. Each borrows the fits of a close MEC
@@ -623,6 +674,7 @@ pub const CHARD: Species = Species {
     growing_days: 45.0,
     ppf_limit: 800.0,
     nutrition: Nutrition { kcal: 190.0, protein_g: 18.0, fat_g: 2.0 },
+    regrows: true,
     ..LETTUCE
 };
 
@@ -640,6 +692,7 @@ pub const KALE: Species = Species {
     growing_days: 50.0,
     ppf_limit: 900.0,
     nutrition: Nutrition { kcal: 490.0, protein_g: 42.8, fat_g: 9.3 },
+    regrows: true,
     ..LETTUCE
 };
 
@@ -677,6 +730,7 @@ pub const GREEN_ONION: Species = Species {
     ppf_limit: 900.0,
     form: Form::Allium,
     nutrition: Nutrition { kcal: 320.0, protein_g: 18.3, fat_g: 1.9 },
+    regrows: true,
     ..LETTUCE
 };
 
@@ -760,6 +814,8 @@ pub const PEPPER: Species = Species {
     edible_water: 0.93,
     nutrition: Nutrition { kcal: 400.0, protein_g: 18.7, fat_g: 4.4 },
     form: Form::Shrub,
+    self_set: 0.8,
+    bearing_days: 60.0,
     ..TOMATO
 };
 
@@ -783,6 +839,9 @@ pub const STRAWBERRY: Species = Species {
     growing_days: 100.0,
     form: Form::Crown,
     nutrition: Nutrition { kcal: 320.0, protein_g: 6.7, fat_g: 3.0 },
+    self_set: 0.4,
+    ripen_days: 30.0,
+    bearing_days: 120.0,
     ..TOMATO
 };
 
@@ -812,7 +871,7 @@ pub const SNAP_BEAN: Species = Species {
     density: 12.0,
     light_c: 28.0,
     dark_c: 24.0,
-    edible_share: 0.60,
+    edible_share: 0.66,
     edible_days: 35.0,
     senescence_days: Some(60.0),
     mature_days: 85.0,
@@ -822,6 +881,8 @@ pub const SNAP_BEAN: Species = Species {
     growing_days: 85.0,
     edible: Edible::Fruit,
     nutrition: Nutrition { kcal: 310.0, protein_g: 18.3, fat_g: 2.2 },
+    ripen_days: 10.0,
+    bearing_days: 20.0,
     ..DRY_BEAN
 };
 

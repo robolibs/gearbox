@@ -16,7 +16,7 @@ pub mod species;
 pub mod water;
 
 pub use air::{Air, Climate, Outside};
-pub use house::{Event, Fault, House, PlantId, Room, Tray};
+pub use house::{Event, Fault, House, PlantId, Room, Store, Tray};
 pub use lamp::{Channels, Lamp};
 pub use plant::{Exchange, Plant, Stage, Surroundings};
 pub use power::Power;

@@ -49,6 +49,8 @@ BESIDE = 0.5
 IDLE_S = 30.0
 # How old a read of the plants may be before a robot reads them again, s.
 FRESH_S = 20.0
+# Below this share of its open flowers pollinated, a flowering plant is buzzed again.
+POLLEN_LOW = 0.4
 HOLD_MS = 120_000
 # How often a driving robot is steered, how long it may drive without
 # getting closer and how long it may turn on the spot, sim seconds.
@@ -311,8 +313,10 @@ class Tender(Robot):
             if self.round - self.refused.get(place, -10) < 4:
                 continue
             plant = standing.get(place)
-            if plant is not None and plant["ripe"]:
+            if plant is not None and (plant["ripe"] or plant.get("stage") == "spent"):
                 jobs.append(("harvest", place, plant["species"]))
+            elif plant is not None and plant.get("flowering") == "1" and float(plant.get("pollen", 1)) < POLLEN_LOW:
+                jobs.append(("pollinate", place, plant["species"]))
             elif plant is not None and not plant["alive"]:
                 jobs.append(("clear", place, plant["species"]))
             elif plant is None:

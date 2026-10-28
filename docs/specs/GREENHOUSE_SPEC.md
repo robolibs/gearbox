@@ -95,6 +95,8 @@ glass may have no lamp prim and a `ppfd` of 0: it grows by daylight alone.
 `gearbox:power:reactor` (10000 W), `solarArea` (40 m², 28 % efficient) and
 `battery` (40000 Wh) on any prim set the bus. Life support is met before the
 lamps; with too little power the lamps dim first.
+`gearbox:house:crew` on the same prim is the crew the farm feeds, 3000 kcal
+each a sol.
 
 ### 1.4 Service spots (`GearboxServiceAPI`)
 
@@ -149,19 +151,25 @@ spot's origin.
 
 A plant record carries its place in its site's frame (x north, y up, z east),
 `maturity`, `health`, `height_m`, `alive`, `ripe`, and props `plant`
-(`TRAY/SLOT`), `tray`, `species`, `stage`, `edible_kg`, `biomass_g`,
+(`TRAY/SLOT`), `tray`, `species`, `stage`, `edible_kg` (ripe fruit for a
+fruiting crop), `ripening_kg`, `flowering`, `pollen`, `cuts`, `biomass_g`,
 `water_stress`, `nutrient_stress`, `root_stress`, `mould`, `tip_burn`,
 `sown_days`, `medium`. A room record carries `temperature_c`, `humidity`,
 `co2_ppm`, `o2_kpa`, `pressure_kpa`, `lux`, and props `room`, `tank_l`, `ec`,
 `biofilm`, `pump`, `fans`, `hvac`, `co2_feed`, `leak_per_s`, `draw_w`,
 `supply_w`, `demand_w`, `battery_wh`, `panel_dust`, `glazing_dust`, `lamp_power`,
-`faults`.
+`faults`, and the house's store: `crew`, `store_kg`, `store_kcal`, `store_sols`
+(sols of food held), `biomass_kg` (inedible biomass waiting for recovery) and
+`closure` (share of the crew's food energy the farm has given).
 
 | Op | Keys | Refused when |
 |---|---|---|
 | `sow` | `tray`, `species`, `slot`?, `by`? | a place is taken; nothing in reach of `by` |
 | `harvest` | `plant` or `tray`, `by`? | a named plant is empty or not ripe, or out of reach |
 | `clear` | `plant`, `by`? | the place is empty, or out of reach |
+| `pollinate` | `plant` or `tray`, `by`? | a named plant is not in flower, or out of reach |
+| `lift` | `plant`, `by`? | the place is empty or its plant past vegetative; `by` already holds one |
+| `place` | `plant` (an empty place), `by`? | the place is taken; `by` holds nothing |
 | `wash`, `amend` | `tray`, `share` (0.15) for amend | the tray is not regolith |
 | `lamps` | `tray` or `all`, `spectrum` (`growth`, `inspection`), `dimming` 0..1 | |
 | `clean_tank` | `room` | |
@@ -174,15 +182,20 @@ A plant record carries its place in its site's frame (x north, y up, z east),
 With `by`, a plant action works only where some part of that machine is
 within 0.3 m of the plant's middle (half its height above the tray). A
 harvest of a tray takes the ripe plants in reach and answers `harvested` and
-`fresh_kg`; fruiting crops keep growing after their fruit is taken.
+`fresh_kg`. Harvests go to the store, and the inedible part of a plant taken
+whole goes to the biomass heap. A fruiting crop gives its ripe fruit and bears
+on until it is spent: tomato and strawberry set only some of their flowers
+unless they are pollinated every few days. A cut-and-come-again crop (chard,
+kale, green onion) gives two cuttings and is lifted whole at the third. A plant
+lifted with `lift` rides in the gripper of `by`, or on the bench, until `place`.
 
 Everything that happens is a scene event of kind `greenhouse` at the plant's
 place, with props `what` (`sown`, `sprouted`, `staged`, `ripe`, `died`,
-`harvested`, `faulted`, `repaired`), the plant name as `id`, `species`, and
+`harvested`, `pollinated`, `lifted`, `placed`, `faulted`, `repaired`), the plant name as `id`, `species`, and
 `stage`, `fresh_kg` or `fault` where they apply.
 
 The CLI wraps all of it: `gearbox greenhouse plants [--ripe] [--tray T]
-[--species S]`, `rooms`, `sow`, `harvest`, `clear`, `wash`, `amend`, `lamps`,
+[--species S]`, `rooms`, `sow`, `harvest`, `clear`, `pollinate`, `lift`, `place`, `wash`, `amend`, `lamps`,
 `clean-tank`, `clean-panels`, `clean-glazing`, `fault`, `repair`, `setpoint`.
 
 ## 4. Sensing

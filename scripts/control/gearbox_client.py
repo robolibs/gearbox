@@ -447,6 +447,7 @@ class GreenhouseAction:
 GREENHOUSE_OP = {
     "sow": 0, "harvest": 1, "clear": 2, "wash": 3, "amend": 4, "lamps": 5, "clean_tank": 6,
     "fault": 7, "repair": 8, "setpoint": 9, "clean_panels": 10, "clean_glazing": 11,
+    "pollinate": 12, "lift": 13, "place": 14,
 }
 CLEAR_SCOPE = {"all": 0, "machines": 1, "props": 2, "markers": 3}
 OBJECT_KIND = {"any": 0, "machine": 1, "prop": 2, "marker": 3, "terrain": 4}

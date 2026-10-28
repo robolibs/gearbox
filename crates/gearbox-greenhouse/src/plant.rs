@@ -18,6 +18,15 @@ const WATER_G: f64 = 18.015;
 const SEEDLING_SHARE: f64 = 0.002;
 /// Days a seed may sit in a medium it cannot sprout in before it is lost.
 const GERMINATION_DAYS: f64 = 10.0;
+/// Days the flowers a visit pollinated stay most of the open ones: new ones
+/// keep opening, so a fruiting crop needs visiting every few days.
+const POLLEN_DAYS: f64 = 3.0;
+/// Ripe fruit, as a share of a nominal plant's edible mass, worth a picking.
+const PICK_SHARE: f64 = 0.08;
+/// Share of a cut-and-come-again crop's leaves a cutting takes, and the
+/// cuttings it gives before it is lifted whole.
+const CUT_SHARE: f64 = 0.7;
+const CUTS: u32 = 3;
 /// Perchlorate in the medium, weight %, above which seeds do not sprout (Oze et al. 2021).
 pub const PERCHLORATE_LIMIT: f64 = 0.1;
 
@@ -99,8 +108,10 @@ pub enum Stage {
     Vegetative,
     /// Forming what is eaten: fruit, tubers, grain.
     Forming,
-    /// Ready to harvest.
+    /// Ready to harvest: whole, or with ripe fruit to pick.
     Ripe,
+    /// A fruiting crop past bearing, to be cleared.
+    Spent,
     Dead,
 }
 
@@ -112,6 +123,7 @@ impl Stage {
             Self::Vegetative => "vegetative",
             Self::Forming => "forming",
             Self::Ripe => "ripe",
+            Self::Spent => "spent",
             Self::Dead => "dead",
         }
     }
@@ -129,6 +141,12 @@ pub struct Plant {
     /// Dry biomass and its edible part, g.
     pub biomass_g: f64,
     pub edible_g: f64,
+    /// Fruit set and still ripening, g dry: it goes to `edible_g` as it ripens.
+    pub green_g: f64,
+    /// Share of the open flowers pollinated, 0 to 1; it fades as new ones open.
+    pub pollen: f64,
+    /// Times a cut-and-come-again crop has been cut.
+    pub cuts: u32,
     /// 0 dead to 1 sound.
     pub health: f64,
     /// Recent shortage of water, nutrients and air, each 0 to 1: wilting, yellowing, suffocating roots.
@@ -152,6 +170,9 @@ impl Plant {
             emerged: false,
             biomass_g: species.nominal_biomass_g() * SEEDLING_SHARE,
             edible_g: 0.0,
+            green_g: 0.0,
+            pollen: 0.0,
+            cuts: 0,
             health: 1.0,
             water_stress: 0.0,
             nutrient_stress: 0.0,
@@ -168,6 +189,10 @@ impl Plant {
             Stage::Dead
         } else if !self.emerged {
             Stage::Seed
+        } else if self.fruiting() && self.age_days >= s.harvest_days + s.bearing_days {
+            Stage::Spent
+        } else if self.fruiting() && self.age_days >= s.edible_days {
+            if self.edible_g >= self.pick_g() { Stage::Ripe } else { Stage::Forming }
         } else if self.age_days >= s.harvest_days {
             Stage::Ripe
         } else if s.edible != Edible::Shoot && self.age_days >= s.edible_days {
@@ -177,6 +202,56 @@ impl Plant {
         } else {
             Stage::Seedling
         }
+    }
+
+    /// Eaten as fruit picked off a plant that grows on.
+    pub fn fruiting(&self) -> bool {
+        self.species.edible == Edible::Fruit
+    }
+
+    /// Ripe fruit worth a picking, g dry.
+    pub fn pick_g(&self) -> f64 {
+        let s = self.species;
+        PICK_SHARE * s.edible_rate * s.growing_days / s.density
+    }
+
+    /// In flower: a fruiting crop from a week before its fruit starts to
+    /// form until it is spent.
+    pub fn flowering(&self) -> bool {
+        let s = self.species;
+        self.fruiting() && self.alive && self.age_days >= s.edible_days - 7.0 && self.age_days < s.harvest_days + s.bearing_days
+    }
+
+    /// Share of its flowers that set fruit now.
+    pub fn fruit_set(&self) -> f64 {
+        let own = self.species.self_set;
+        own + (1.0 - own) * self.pollen
+    }
+
+    /// Pollinates the flowers open now, by buzzing, air or brush.
+    pub fn pollinate(&mut self) {
+        self.pollen = 1.0;
+    }
+
+    /// Young enough to move to another place: up and not yet forming.
+    pub fn transplantable(&self) -> bool {
+        self.alive && self.emerged && self.stage() <= Stage::Vegetative
+    }
+
+    /// Cuts a cut-and-come-again crop's outer leaves, and says how much of
+    /// its edible part, g dry, was taken; `None` once it has given its last
+    /// cutting and must be lifted whole.
+    pub fn cut(&mut self) -> Option<f64> {
+        if !self.species.regrows || self.cuts + 1 >= CUTS {
+            return None;
+        }
+        let taken = self.edible_g * CUT_SHARE;
+        self.edible_g -= taken;
+        self.biomass_g -= taken;
+        self.cuts += 1;
+        // It grows back from the heart, as a plant some way short of harvest.
+        self.age_days = self.age_days.min(self.species.harvest_days) * 0.6;
+        Some(taken)
     }
 
     /// Share of its life gone, 0 sown to 1 at harvest.
@@ -191,7 +266,7 @@ impl Plant {
 
     /// Fresh mass of the edible part, kg.
     pub fn edible_fresh_kg(&self) -> f64 {
-        self.edible_g / (1.0 - self.species.edible_water) / 1000.0
+        self.species.fresh_kg(self.edible_g)
     }
 
     /// Leaf area index of the plant's own patch: from the share of light it absorbs.
@@ -278,11 +353,30 @@ impl Plant {
         let carbon_mol = net * 1e-6 * seconds * share;
         let grown_g = carbon_mol * CARBON_G / s.carbon_fraction;
         let floor = s.nominal_biomass_g() * SEEDLING_SHARE;
+        let before = self.biomass_g;
         self.biomass_g = (self.biomass_g + grown_g).max(floor);
+        if self.biomass_g < before {
+            // What it breathes away comes out of every part alike.
+            let kept = self.biomass_g / before;
+            self.edible_g *= kept;
+            self.green_g *= kept;
+        }
         if grown_g > 0.0 && self.age_days >= s.edible_days {
-            self.edible_g += grown_g * s.edible_share;
+            if self.fruiting() {
+                // Only flowers that set make fruit; the rest of the share stays leaf and stem.
+                self.green_g += grown_g * s.edible_share * self.fruit_set();
+            } else {
+                self.edible_g += grown_g * s.edible_share;
+            }
+        }
+        if self.fruiting() {
+            let ripened = self.green_g * (1.0 - (-days / s.ripen_days.max(1.0)).exp());
+            self.green_g -= ripened;
+            self.edible_g += ripened;
+            self.pollen *= (-days / POLLEN_DAYS).exp();
         }
         self.edible_g = self.edible_g.min(self.biomass_g);
+        self.green_g = self.green_g.min(self.biomass_g - self.edible_g);
 
         let water_kg = transpiration(s, net.max(0.0), around) * seconds * share * WATER_G / 1000.0;
         Exchange {
@@ -368,13 +462,18 @@ mod tests {
     use super::*;
     use crate::species::{ALL, LETTUCE, POTATO};
 
-    /// Grows one plant hour by hour at nominal conditions until harvest.
+    /// Grows one plant hour by hour at nominal conditions until harvest: a
+    /// fruiting crop to its harvest age, pollinated daily as a robot tends it.
     fn grown(species: &'static Species, ppf: f64) -> (Plant, Exchange) {
         let mut plant = Plant::sown(species);
         let mut total = Exchange::default();
         let around = Surroundings::nominal(species, ppf);
         let mut hour = 0.0;
-        while plant.alive && plant.stage() != Stage::Ripe && hour < 24.0 * 400.0 {
+        let done = |p: &Plant| if p.fruiting() { p.age_days >= species.harvest_days } else { p.stage() == Stage::Ripe };
+        while plant.alive && !done(&plant) && hour < 24.0 * 400.0 {
+            if plant.flowering() && hour % 24.0 == 0.0 {
+                plant.pollinate();
+            }
             let lit = (hour % 24.0) < species.photoperiod_h;
             let here = Surroundings { ppf: if lit { ppf } else { 0.0 }, ..around };
             total += plant.grow(3600.0, &here);
@@ -398,7 +497,7 @@ mod tests {
             .into_iter()
             .filter_map(|species| {
                 let (plant, _) = grown(species, nominal_flux(species));
-                let edible_per_m2 = plant.edible_g * species.density;
+                let edible_per_m2 = (plant.edible_g + plant.green_g) * species.density;
                 let expected = species.edible_rate * species.growing_days;
                 let ratio = edible_per_m2 / expected;
                 let band = if TABLES_DISAGREE.contains(&species.name) { 0.5..2.0 } else { 0.7..1.4 };
