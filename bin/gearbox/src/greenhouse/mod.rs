@@ -437,28 +437,39 @@ fn pre_grow(house: &mut House, tray: usize, species: &'static Species, days: f64
     }
 }
 
+/// World seconds the house gathers before it steps through them.
+const STEP_EVERY_S: f64 = 1.0;
+
 /// The house runs on world time: the outside of the planet it stands on and
 /// the sunlight on its panels come from the weather.
 fn step_greenhouse(
     step: Res<WorldStep>,
     weather: Res<WeatherSettings>,
     mut greenhouse: ResMut<Greenhouse>,
+    mut pending: Local<f64>,
 ) {
     if step.seconds <= 0.0 || greenhouse.is_empty() {
         return;
     }
+    // Growth and air move far slower than frames: the house waits for
+    // STEP_EVERY_S of world time and steps through it at once.
+    *pending += step.seconds;
+    if *pending < STEP_EVERY_S {
+        return;
+    }
+    let seconds = std::mem::take(&mut *pending);
     let calendar = weather.calendar;
     let elevation = weather.sun_position.normalize_or_zero().y.clamp(-1.0, 1.0).asin() as f64;
     let (top, tau, outside) = outside(&weather);
     let solar = gearbox_greenhouse::power::surface_irradiance(top * calendar.irradiance_scale() as f64, elevation, tau);
     // The hour the step began at: the calendar has already moved on by it.
-    let hour = (calendar.hour - step.seconds / (calendar.planet.solar_day_s() / 24.0)).rem_euclid(24.0) * greenhouse.house.cycle_hours / 24.0;
-    let events = greenhouse.house.step(step.seconds, hour, &outside, solar);
+    let hour = (calendar.hour - seconds / (calendar.planet.solar_day_s() / 24.0)).rem_euclid(24.0) * greenhouse.house.cycle_hours / 24.0;
+    let events = greenhouse.house.step(seconds, hour, &outside, solar);
     for event in &events {
         match event {
             HouseEvent::Died(id) => info!("greenhouse: {} died", greenhouse.plant_name(*id)),
             HouseEvent::Staged(id, stage) if *stage == gearbox_greenhouse::Stage::Ripe => {
-                info!("greenhouse: {} is ripe", greenhouse.plant_name(*id));
+                debug!("greenhouse: {} is ripe", greenhouse.plant_name(*id));
             }
             _ => {}
         }
