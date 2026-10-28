@@ -26,6 +26,8 @@ pub fn tab(world: &World, _ctx: &PaneCtx) -> Tab {
         .with_readout("food from the farm", format!("{:.0} % of the crew's energy", store.closure() * 100.0))
         .with_readout("food held", format!("{:.0} kcal, {:.1} sols", store.kcal(), store.sols()))
         .with_readout("produce", format!("{:.1} kg", store.kg()))
+        .with_readout("grain to mill", format!("{:.1} kg, {:.0} kg a sol milled", store.raw_kg(), store.processing_kg))
+        .with_readout("spoiled", format!("{:.1} kg", store.spoiled_kg))
         .with_readout("biomass to recover", format!("{:.1} kg dry", store.biomass_kg));
     let mut held: Vec<_> = store.produce.iter().map(|(s, kg)| (s.name, *kg, kg * s.nutrition.kcal)).collect();
     held.sort_by(|a, b| b.2.total_cmp(&a.2));

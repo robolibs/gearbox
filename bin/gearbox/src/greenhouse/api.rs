@@ -95,6 +95,8 @@ fn rooms(greenhouse: &Greenhouse) -> Vec<RoomRecord> {
                 ("faults", &faults.join(",")),
                 ("crew", &house.store.crew.to_string()),
                 ("store_kg", &number(house.store.kg())),
+                ("raw_kg", &number(house.store.raw_kg())),
+                ("spoiled_kg", &number(house.store.spoiled_kg)),
                 ("store_kcal", &number(house.store.kcal())),
                 ("store_sols", &number(house.store.sols())),
                 ("biomass_kg", &number(house.store.biomass_kg)),

@@ -274,6 +274,8 @@ fn discover_greenhouses(world: &mut World) {
                 let house = &mut greenhouse.house;
                 let glazing = float("gearbox:zone:glazing").unwrap_or(0.0).clamp(0.0, 1.0);
                 house.rooms.push(Room { glazing, ..Room::new(&name, volume, climate) });
+                // A room that holds a processing line adds its capacity to the store's.
+                house.store.processing_kg += float("gearbox:zone:processing").unwrap_or(0.0).max(0.0);
                 house.tanks.push(Tank::new(&name, float("gearbox:zone:tank").unwrap_or(300.0), float("gearbox:zone:ec").unwrap_or(2.5)));
                 room_names.push(name.clone());
                 let room = greenhouse.house.rooms.len() - 1;

@@ -67,6 +67,7 @@ first, so trays and service spots can name them. Attributes default as listed.
 | `gearbox:zone:centre`, `size` | float3 | centre of a cube of the volume | The box of air in the prim's frame (Z up); climate sensors inside it read the room. |
 | `gearbox:zone:workLight` | float | 0 | White work light on the floor, lux. |
 | `gearbox:zone:glazing` | float | 0 | Share of daylight the room's glazing lets in to its crops; a glazed room is lit by the sky for cameras too. |
+| `gearbox:zone:processing` | float | 0 | Grain and dry seed the room's processing line threshes and mills a sol, kg. |
 
 Heating and cooling (6 kW each), dehumidifying, CO2 feed, makeup gas, fans,
 wall conductance (22 W/K) and heat capacity (6 MJ/K) are fixed per room.
@@ -159,7 +160,7 @@ fruiting crop), `ripening_kg`, `flowering`, `pollen`, `cuts`, `biomass_g`,
 `biofilm`, `pump`, `fans`, `hvac`, `co2_feed`, `leak_per_s`, `draw_w`,
 `supply_w`, `demand_w`, `battery_wh`, `panel_dust`, `glazing_dust`, `lamp_power`,
 `faults`, and the house's store: `crew`, `store_kg`, `store_kcal`, `store_sols`
-(sols of food held), `biomass_kg` (inedible biomass waiting for recovery) and
+(sols of food held), `raw_kg` (grain waiting to be milled), `spoiled_kg`, `biomass_kg` (inedible biomass waiting for recovery) and
 `closure` (share of the crew's food energy the farm has given).
 
 | Op | Keys | Refused when |
@@ -183,7 +184,10 @@ With `by`, a plant action works only where some part of that machine is
 within 0.3 m of the plant's middle (half its height above the tray). A
 harvest of a tray takes the ripe plants in reach and answers `harvested` and
 `fresh_kg`. Harvests go to the store, and the inedible part of a plant taken
-whole goes to the biomass heap. A fruiting crop gives its ripe fruit and bears
+whole goes to the biomass heap. Grain and dry seed wait in the store until a
+room's processing line has threshed and milled them; fresh food spoils in cold
+store (greens about 5 % a sol, fruit 3 %, roots and tubers 0.5 %) into the
+heap; the crew eats what keeps least first. A fruiting crop gives its ripe fruit and bears
 on until it is spent: tomato and strawberry set only some of their flowers
 unless they are pollinated every few days. A cut-and-come-again crop (chard,
 kale, green onion) gives two cuttings and is lifted whole at the third. A plant

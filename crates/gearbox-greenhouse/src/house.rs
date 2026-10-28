@@ -145,25 +145,86 @@ pub enum Event {
 /// active crew member).
 pub const CREW_KCAL: f64 = 3000.0;
 
-/// What the farm has taken in and whom it feeds: fresh produce by crop, the
-/// inedible biomass waiting for resource recovery, and the crew eating from it.
+/// What the farm has taken in and whom it feeds: food ready to eat by crop,
+/// grain and dry seed waiting to be threshed and milled, the inedible biomass
+/// waiting for resource recovery, and the crew eating from it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Store {
-    /// Fresh produce held, kg, by crop.
+    /// Food held ready to eat, kg, by crop: produce washed and packed, grain milled.
     pub produce: Vec<(&'static Species, f64)>,
-    /// Inedible biomass taken off with harvests and clearings, kg dry.
+    /// Grain and dry seed as harvested, kg, waiting for the processing line.
+    pub raw: Vec<(&'static Species, f64)>,
+    /// What the processing line threshes and mills a sol, kg; none without one.
+    pub processing_kg: f64,
+    /// Inedible biomass taken off with harvests and clearings, and food
+    /// spoiled, kg dry.
     pub biomass_kg: f64,
+    /// Fresh food lost to spoiling since the house started, kg.
+    pub spoiled_kg: f64,
     pub crew: u32,
     /// Food energy eaten from the store and needed since the house started, kcal.
     pub eaten_kcal: f64,
     pub needed_kcal: f64,
 }
 
+/// Share of a crop's fresh food lost a sol in cold store at 2 to 4 °C:
+/// greens keep about two weeks, fruit three, cured roots and tubers months.
+fn spoiling(species: &Species) -> f64 {
+    match species.edible {
+        Edible::Shoot => 0.05,
+        Edible::Fruit => 0.03,
+        Edible::Tuber => 0.005,
+        Edible::Grain => 0.0,
+    }
+}
+
+fn put(stock: &mut Vec<(&'static Species, f64)>, species: &'static Species, kg: f64) {
+    match stock.iter_mut().find(|(s, _)| std::ptr::eq(*s, species)) {
+        Some((_, held)) => *held += kg,
+        None => stock.push((species, kg)),
+    }
+}
+
 impl Store {
+    /// Takes in a harvest: grain and dry seed to wait for processing, the
+    /// rest ready to eat.
     pub fn add(&mut self, species: &'static Species, kg: f64) {
-        match self.produce.iter_mut().find(|(s, _)| std::ptr::eq(*s, species)) {
-            Some((_, held)) => *held += kg,
-            None => self.produce.push((species, kg)),
+        let stock = if species.edible == Edible::Grain { &mut self.raw } else { &mut self.produce };
+        put(stock, species, kg);
+    }
+
+    /// Grain and seed waiting for processing, kg.
+    pub fn raw_kg(&self) -> f64 {
+        self.raw.iter().map(|(_, kg)| kg).sum()
+    }
+
+    /// The store over `sols`: the processing line works through the grain,
+    /// fresh food spoils, and the crew eats.
+    pub fn step(&mut self, sols: f64) {
+        self.mill(sols);
+        self.spoil(sols);
+        self.feed(sols);
+    }
+
+    /// Threshes and mills up to the line's capacity over `sols`, first come first.
+    pub fn mill(&mut self, sols: f64) {
+        let mut left = self.processing_kg * sols;
+        for (species, kg) in &mut self.raw {
+            let done = left.min(*kg);
+            *kg -= done;
+            left -= done;
+            put(&mut self.produce, species, done);
+        }
+        self.raw.retain(|(_, kg)| *kg > 1e-9);
+    }
+
+    /// Fresh food lost over `sols`; what spoils goes to the recovery heap.
+    pub fn spoil(&mut self, sols: f64) {
+        for (species, kg) in &mut self.produce {
+            let lost = *kg * (1.0 - (-spoiling(species) * sols).exp());
+            *kg -= lost;
+            self.spoiled_kg += lost;
+            self.biomass_kg += lost * (1.0 - species.edible_water);
         }
     }
 
@@ -354,7 +415,7 @@ impl House {
         }
         let sols = seconds / (self.cycle_hours.max(1.0) * 3600.0);
         self.power.settle_dust(sols);
-        self.store.feed(sols);
+        self.store.step(sols);
         for room in self.rooms.iter_mut().filter(|r| r.glazing > 0.0) {
             room.glazing_dust = settled(room.glazing_dust, sols);
         }
@@ -812,9 +873,10 @@ mod tests {
 
     #[test]
     fn the_crew_eats_greens_first_and_the_store_runs_down() {
-        let mut store = Store { crew: 2, ..Store::default() };
+        let mut store = Store { crew: 2, processing_kg: 5.0, ..Store::default() };
         store.add(&LETTUCE, 1.0);
         store.add(&WHEAT, 2.0);
+        store.mill(1.0);
         store.feed(1.0);
         assert!(store.produce.iter().all(|(s, _)| s.name == "wheat"), "the lettuce went first");
         let wheat = 2.0 - (2.0 * CREW_KCAL - LETTUCE.nutrition.kcal) / WHEAT.nutrition.kcal;
@@ -823,6 +885,34 @@ mod tests {
         store.feed(1.0);
         assert_eq!(store.kg(), 0.0);
         assert!(store.closure() < 0.6, "a second sol it fed short: {}", store.closure());
+    }
+
+    #[test]
+    fn grain_feeds_no_one_until_the_line_mills_it() {
+        let unmilled = |processing_kg| {
+            let mut store = Store { crew: 1, processing_kg, ..Store::default() };
+            store.add(&WHEAT, 10.0);
+            store.step(1.0);
+            store
+        };
+        let idle = unmilled(0.0);
+        assert_eq!((idle.raw_kg(), idle.closure()), (10.0, 0.0), "no line, no bread");
+        let milling = unmilled(2.0);
+        assert!((milling.raw_kg() - 8.0).abs() < 1e-9, "the line took its 2 kg a sol");
+        assert!((milling.closure() - 1.0).abs() < 1e-9, "2 kg of wheat is a day's food");
+    }
+
+    #[test]
+    fn fresh_greens_spoil_into_the_recovery_heap_and_grain_keeps() {
+        let mut store = Store::default();
+        store.add(&LETTUCE, 10.0);
+        store.produce.push((&WHEAT, 10.0));
+        store.step(10.0);
+        let held = |name: &str| store.produce.iter().find(|(s, _)| s.name == name).map_or(0.0, |(_, kg)| *kg);
+        assert!((held("lettuce") - 10.0 * (-0.5f64).exp()).abs() < 1e-9, "greens lose a twentieth a sol");
+        assert_eq!(held("wheat"), 10.0);
+        let dry = store.spoiled_kg * (1.0 - LETTUCE.edible_water);
+        assert!(store.spoiled_kg > 3.5 && (store.biomass_kg - dry).abs() < 1e-9, "{store:?}");
     }
 
     #[test]
