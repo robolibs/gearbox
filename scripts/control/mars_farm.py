@@ -55,6 +55,14 @@ SLOW = 2.0
 # down at its work.
 BESIDE = 0.5
 IDLE_S = 30.0
+# Sim seconds a robot works down one round's jobs before it looks again.
+ROUND_S = 120.0
+# The order a round's jobs are done in: food first, seed last.
+PRIORITY = {"harvest": 0, "clear": 1, "pollinate": 2, "load": 3, "lift": 3, "place": 3, "unload": 4, "sow": 5}
+# Wall seconds before a robot that met an error takes up its task again.
+RESTART_S = 15.0
+# What a busy host answers with while a request may still go through.
+BUSY = ("timed out", "lagged", "too many subscribers")
 # How old a read of the plants may be before a robot reads them again, s.
 FRESH_S = 20.0
 # Below this share of its open flowers pollinated, a flowering plant is buzzed again.
@@ -85,14 +93,14 @@ YARD = threading.Lock()
 
 
 def patient(call, *args, tries: int = 6, **kwargs):
-    """Calls the sim again when a busy host lets a request time out."""
+    """Calls the sim again when a busy host lets a request time out or turns it away."""
     for attempt in range(tries):
         try:
             return call(*args, **kwargs)
         except RuntimeError as err:
-            if "timed out" not in str(err) or attempt == tries - 1:
+            if not any(busy in str(err) for busy in BUSY) or attempt == tries - 1:
                 raise
-            time.sleep(1.0)
+            time.sleep(1.0 + attempt)
 
 
 class Clock:
@@ -371,6 +379,8 @@ class Tender(Robot):
             elif plant is None and ready.get(trays[tray]) and not self.holding:
                 jobs.append(("lift", ready[trays[tray]].pop(), trays[tray]))
                 jobs.append(("place", place, trays[tray]))
+        # Stable: a lift stays just before its place.
+        jobs.sort(key=lambda job: PRIORITY[job[0]])
         return jobs
 
     def act(self, op: str, place: str, crop: str):
@@ -413,9 +423,16 @@ class Tender(Robot):
                     yield self.move(joints, park)
                 yield IDLE_S
                 continue
+            begun = self.clock.world_s
             for op, place, crop in jobs:
+                if self.clock.world_s - begun > ROUND_S and op != "place":
+                    break
                 targets = self.entry["places"][place]
                 if self.crowded(targets["at"]):
+                    continue
+                # A cart found empty or full this round, or a seedling not lifted, is not tried again.
+                if op == "unload" and self.cart_empty.get(crop) == self.round or op == "load" and self.cart_full.get(crop) == self.round \
+                        or op == "place" and not self.holding:
                     continue
                 self.working(targets["at"])
                 if self.beside(targets):
@@ -426,6 +443,7 @@ class Tender(Robot):
                     yield from self.park()
                     yield from self.cross(targets)
                     yield from self.lower(targets)
+                    yield SLOW * self.move(moves["reach"], targets)
                 status = yield from self.close_in(op, place, crop)
                 if not status.ok and FAR.search(status.message):
                     yield SLOW * self.move(moves["reach"], targets)
@@ -604,12 +622,15 @@ def main():
 
     def work(machine: str):
         entry = plan[machine]
-        try:
-            robot = KINDS[entry["kind"]](Gearbox(args.instance), machine, entry, log, clock, listing)
-            log(f"{machine}: {entry['kind']}" + (f", {len(entry['places'])} places in {entry['room']}" if "places" in entry else ""))
-            robot.work()
-        except Exception as err:  # noqa: BLE001 - one robot's failure is logged, the others go on
-            log(f"{machine}: stopped: {err}")
+        client = Gearbox(args.instance)
+        while True:
+            try:
+                robot = KINDS[entry["kind"]](client, machine, entry, log, clock, listing)
+                log(f"{machine}: {entry['kind']}" + (f", {len(entry['places'])} places in {entry['room']}" if "places" in entry else ""))
+                robot.work()
+            except Exception as err:  # noqa: BLE001 - one robot's failure is logged, the others go on
+                log(f"{machine}: stopped: {err}; again in {RESTART_S:.0f} s")
+                time.sleep(RESTART_S)
 
     threads = [threading.Thread(target=work, args=(machine,), daemon=True) for machine in wanted]
     for thread in threads:
