@@ -457,14 +457,17 @@ mod tests {
     #[test]
     fn a_slow_frame_does_not_hold_the_physics_back() {
         let (mut app, _) = app();
+        let started = Instant::now();
         for _ in 0..2 {
             app.update();
             std::thread::sleep(Duration::from_millis(400));
             app.world_mut().run_schedule(PhysicsJoin);
         }
+        let elapsed = started.elapsed().as_secs_f64();
         let physics = app.world().resource::<PhysicsWorld>();
         let owed = 0.8 * physics.step_hz;
-        assert!(physics.ticks as f64 >= 0.8 * owed && physics.ticks as f64 <= owed + 1.0, "{} ticks", physics.ticks);
+        let ticks = physics.ticks as f64;
+        assert!(ticks >= 0.8 * owed && ticks <= elapsed * physics.step_hz + 1.0, "{ticks} ticks in {elapsed} s");
     }
 
     #[test]
