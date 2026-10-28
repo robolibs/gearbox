@@ -2,11 +2,12 @@
 the spawn plaza at the origin.
 
 The base is sized to what a few cargo landers could bring: every module
-fits a 9 m fairing or packs flat and inflates; power is four 10 kWe fission
-units and a field of roll-out arrays; ISRU is container-sized.
+fits a 9 m fairing or packs flat and inflates; power is four 40 kWe fission
+surface power units and a field of roll-out arrays; ISRU is container-sized.
 
     north  two glazed domes off a second hub
-    east   the arch farm: three inflated vaults off a spine of corridors
+    east   the farm: three inflated arch vaults, the vertical farm and the
+           farm hall off a spine of corridors
     centre the habitat cluster: a hub and three towers, the EDEN module
     west   solar arrays, the power station, fission units behind a berm
     south  ISRU: two process units, their tanks, an ice well, dug regolith
@@ -18,6 +19,7 @@ import os
 from mathutils import Vector
 
 import buildings
+import farm_hall
 import habitat
 import industry
 import power
@@ -37,8 +39,13 @@ DOME_REACH = DOME_R + 7.2
 DOMES = [("DomeA", Vector((62.0, -20.0, 0.0))), ("DomeB", Vector((62.0, 20.0, 0.0)))]
 ARCH_LEN = 30.0
 ARCHES = [(f"Arch{c}", Vector((14.0, -62.0 - 15.0 * k, 0.0))) for k, c in enumerate("ABC")]
-# The vertical farm closes the arch spine, its lock in line with the arches'.
+# What each arch grows on: salad in NFT gutters, fruit in table-top gutters,
+# grain and pulses in deep troughs (buildings._bench).
+ARCH_SYSTEMS = {"ArchA": "nft", "ArchB": "fruit", "ArchC": "trough"}
+# The vertical farm follows the arches on the spine, its lock in line with theirs.
 FARM = Vector((14.0, -108.0, 0.0))
+# The farm hall closes the spine past it.
+HALL = Vector((14.0, -126.0, 0.0))
 # How far either side of an arch's middle its harvesters drive.
 HARVEST_LANE = 1.35
 JUNCTION_R = 2.0
@@ -127,6 +134,12 @@ _FARM_GLAND, _FARM_OUT = vertical.power_tie(FARM, 0.0)
 FARM_PIT = Vector((3.2, -102.2, 0.0))
 FARM_CABLE = [(FARM_PIT.x + _PIT_GAP, FARM_PIT.y, 0.0), (9.0, -100.2, 0.0), (_FARM_GLAND.x - 3.0, -100.2, 0.0),
               tuple(_FARM_GLAND + _FARM_OUT * 0.9), tuple(_FARM_GLAND)]
+# The farm hall's feed: from a pull pit by the spine's end, between the
+# vertical farm's radiator wing and the hall's algae house, to its cabinet.
+_HALL_GLAND, _HALL_OUT = vertical.power_tie(HALL, 0.0)
+HALL_PIT = Vector((3.2, -120.0, 0.0))
+HALL_CABLE = [(HALL_PIT.x + _PIT_GAP, HALL_PIT.y, 0.0), (6.0, -115.3, 0.0), (_HALL_GLAND.x, -115.3, 0.0),
+              tuple(_HALL_GLAND + _HALL_OUT * 0.9), tuple(_HALL_GLAND)]
 _TRAY_PIT = STATION + power.STATION_PITS["tray"]
 POWER_TRAY = [(_TRAY_PIT.x, _TRAY_PIT.y - power.PIT / 2 - 0.75, 0.0), (16.0, 30.0, 0.0), (10.5, 25.0, 0.0), (10.5, 17.0, 0.0), (16.0, 12.0, 0.0), (31.0, 8.5, 0.0)]
 CONTAINERS = [
@@ -191,7 +204,7 @@ def build(looks, strewn=False):
         add(link(looks, base, f"Link{name}", doors[name], NODE_N, 0.1, 5.0, 1.3, 1.6))
 
     # Arch farm and the vertical farm off a spine of corridors and junction drums.
-    bays = ARCHES + [("VerticalFarm", FARM)]
+    bays = ARCHES + [("VerticalFarm", FARM), ("FarmHall", HALL)]
     stops = [SPINE_TOP] + [Vector((SPINE_TOP.x, at.y, 0.0)) for _, at in bays]
     add(link(looks, base, "Spine", NODE, SPINE_TOP, 5.0, JUNCTION_R, 1.3, 2.5))
     # The spine runs toward -Y; each bay's lock lies toward +X of its junction.
@@ -205,8 +218,11 @@ def build(looks, strewn=False):
         add(link(looks, base, f"Spine{name}", stops[k], stop, JUNCTION_R, JUNCTION_R, 1.3, 2.5))
         if name == "VerticalFarm":
             add(vertical.vertical_farm(looks, name, tuple(at), 0.0, base))
+        elif name == "FarmHall":
+            add(farm_hall.farm_hall(looks, name, tuple(at), 0.0, base))
         else:
-            add(kind(buildings.arch_greenhouse(looks, name, ARCH_LEN, 10.0, 3.0, tuple(at), 0.0, base), "arch_greenhouse"))
+            system = ARCH_SYSTEMS[name]
+            add(kind(buildings.arch_greenhouse(looks, name, ARCH_LEN, 10.0, 3.0, tuple(at), 0.0, base, system), f"arch_{system}"))
         add(link(looks, base, f"Link{name}", stop, Vector((at.x - 3.2, at.y, 0.0)), JUNCTION_R, 0.0, 1.2, 1.4))
 
     # Round the plaza: the EDEN module, the inflatable hab, the hangar, a printed tower.
@@ -220,7 +236,7 @@ def build(looks, strewn=False):
     add(power.solar_field(looks, "Solar", SOLAR_ROWS, SOLAR_PANELS, SOLAR_PITCH, SOLAR_TILT, tuple(SOLAR), 0.0, base))
     add(power.power_station(looks, "PowerStation", tuple(STATION), 0.0, base))
     for k, at in enumerate(REACTORS):
-        add(kind(power.kilopower(looks, f"Fission{k + 1}", tuple(at), 0.0, base), "kilopower"))
+        add(kind(power.kilopower(looks, f"Fission{k + 1}", tuple(at), 0.0, base, power.FISSION_KWE), f"fission_{power.FISSION_KWE:.0f}kwe"))
     add(power.berm(looks, "ReactorBerm", (-37.0, 200.0, 0.0), 34.0, math.radians(-160), math.radians(-20), 3.0, base))
     add(power.ground_cable(looks, "ReactorCable", REACTOR_CABLE, base, joint=True))
     for k, feed in enumerate(REACTOR_FEEDS):
@@ -231,6 +247,10 @@ def build(looks, strewn=False):
     power.pull_pit(pit, power.power_mats(looks), tuple(FARM_PIT))
     add(pit.finish())
     add(power.ground_cable(looks, "FarmCable", FARM_CABLE, base))
+    pit = Building("HallPit", base)
+    power.pull_pit(pit, power.power_mats(looks), tuple(HALL_PIT))
+    add(pit.finish())
+    add(power.ground_cable(looks, "HallCable", HALL_CABLE, base))
 
     # ISRU.
     for k, at in enumerate(ISRU):
@@ -300,7 +320,7 @@ def strew(base, out, looks):
     lie kept on the base as a `rocks` place, clear of buildings, roads,
     pipes, cables and the yard's cargo."""
     import rocks
-    linear = ("Road", "Pipes", "ReactorCable", "ReactorFeed", "SolarCable", "PowerTray", "FarmCable", "Yard")
+    linear = ("Road", "Pipes", "ReactorCable", "ReactorFeed", "SolarCable", "PowerTray", "FarmCable", "HallCable", "Yard")
     keep_out = [f for b in out if not b.name.startswith(linear) and (f := footprint(b, 3.0))]
     for at, _, _ in CONTAINERS:
         keep_out.append((at[0] - 5, at[1] - 5, at[0] + 5, at[1] + 5))
@@ -309,7 +329,7 @@ def strew(base, out, looks):
     keep_out.append((DIG[0].x - 6, DIG[0].y - 6, DIG[-1].x + 6, DIG[-1].y + 6))
     lines = [(path, (7.0 if k < 3 else 5.5) / 2 + 1.5) for k, path in enumerate(ROADS)]
     lines += [(path, 2.0) for path in (PIPES_TANKS, PIPES_BASE, PIPES_WELL, PIPES_SOIL, BRIDGE_SOIL, REACTOR_CABLE, SOLAR_CABLE, POWER_TRAY,
-                                       FARM_CABLE, *REACTOR_FEEDS)]
+                                       FARM_CABLE, HALL_CABLE, *REACTOR_FEEDS)]
     sizes = {}
     for scan in rocks.SCANS:
         b, _, size = rocks.rock(scan, base, looks.out)
@@ -328,6 +348,10 @@ def fleet_places(eden_rail, arch_rail, dome_anchor):
         places.append((f"{name}Bot", "arch_gantry.usdz", tuple(at + Vector((2.0, 0.0, 5.0))), 0.0, arch_rail))
     for name, at in DOMES:
         places.append((f"{name}Bot", "dome_gantry.usdz", tuple(at), toward(at, NODE_N), dome_anchor))
+    # The farm hall's nursery robot on its rail along the rack.
+    import robots
+    rail = Vector((farm_hall.RAIL_X0, farm_hall.RAIL_Y, farm_hall.RAIL_UNDER))
+    places.append(("HallBot", "hall_gantry.usdz", tuple(HALL + rail), 0.0, robots.rail_anchor(farm_hall.nursery_rail())))
     # Two harvesters an arch, one each side of the walkway, parked at the
     # corridor's gable facing up the vault, each arm toward its row.
     for name, at in ARCHES:

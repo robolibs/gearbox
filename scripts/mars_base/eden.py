@@ -9,6 +9,7 @@ holds two 600 x 400 mm trays under their own LED panels.
 Everything is in the module's frame: the porch door at x = 0, x along the
 module, z up from its floor slab.
 """
+import crops
 from usda import cube, cylinder, end, service, tray, xform, zone
 
 LENGTH = 12.19
@@ -27,12 +28,15 @@ RACK_H = 2.25
 TRAY = (0.6, 0.4, 0.08)
 DOOR_W = 1.0
 
-# Each side's racks, from the door: (levels, crop, plants across x down, ppfd, hours, sown days ago)
+# Each side's racks, from the door: (levels, crop on the north and south
+# side, sown days ago), after EDEN ISS's 2018 season: fruit on the tall
+# rack, then strawberries and chard, salad on the four-level rack, radish
+# and pak choi; the crops' light and spacing from `crops`.
 RACKS = [
-    (1, "tomato", (2, 1), 600, 12, (64, 40)),
-    (2, "potato", (2, 1), 600, 12, (70, 20, 95, 5)),
-    (4, "lettuce", (3, 2), 300, 16, (27, 20, 13, 6, 24, 17, 10, 2)),
-    (2, "wheat", (4, 3), 600, 20, (50, 30, 14, 2)),
+    (1, ("tomato", "pepper"), (64, 40)),
+    (2, ("strawberry", "chard"), (70, 20, 95, 5)),
+    (4, ("lettuce", "spinach"), (27, 20, 13, 6, 24, 17, 10, 2)),
+    (2, ("radish", "pak_choi"), (20, 12, 6, 2)),
 ]
 
 # Where the rail robot's rail runs: its underside, from its porch end.
@@ -97,7 +101,10 @@ def trays():
     floor = 0.1 + SUBFLOOR
     for name, x, y_inner, levels, side in racks():
         s, r = name[4], int(name[5])
-        _, crop, slots, ppfd, hours, sown = RACKS[r]
+        _, both, sown = RACKS[r]
+        crop = both[s != "N"]
+        ppfd, hours = crops.LIGHT[crop]
+        slots = crops.slots(crop, TRAY[:2])
         spacing = (RACK_H - 0.15) / levels
         yc = y_inner + side * RACK_D / 2
         for level in range(levels):

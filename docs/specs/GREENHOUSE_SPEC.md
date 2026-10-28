@@ -255,7 +255,7 @@ and `climate_link`.
 | Robot | Machine | Joints (moved link) |
 |---|---|---|
 | EDEN's rail robot, after DLR's EVE | `eden_gantry.usdz` | `travel` (`trolley`) 5.0 m along the ceiling rail, `lift` (`mast`) 1.25 m down, `turn` (`turret`) 180° from one rack row to the other, `reach` (`arm`) 0.65 m over a rack |
-| An arch's ridge robot | `arch_gantry.usdz` | the same, at 25.6 m, 0.65 m, 180° and 4.2 m: the turret sweeps the aisle under the LED bars, the arm telescopes over the inner and outer bench of either side |
+| An arch's ridge robot | `arch_gantry.usdz` | the same, at 25.6 m, 0.65 m, 180° and 4.5 m: the turret sweeps the aisle under the LED bars, the arm telescopes over the inner and outer bench of either side |
 | The farm hall's nursery robot, like EDEN's | `hall_gantry.usdz` | the same along the nursery rack, its mast dropping to each of the rack's three levels and its arm reaching 1.2 m in between a tray and its LED bars |
 | A dome's polar gantry | `dome_gantry.usdz` | `slew` (`boom`) 360° on the cistern, `travel` (`carriage`) 5.6 m out along the boom over the three rings, `lift` (`mast`) 2.2 m down to the canopy; its outer leg runs on the floor rail |
 | The vertical farm's stacker crane, after twin-mast miniload cranes | `vertical_crane.usdz` | `travel` (`crane`) 21.9 m along the aisle on a floor rail under a top guide, `lift` (`carriage`) 3.91 m, `turn` (`turret`) 180° from one rack to the other, `reach` (`stage`) 0.72 m: one controller drives the telescope's two stages |

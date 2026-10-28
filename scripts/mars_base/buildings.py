@@ -18,6 +18,63 @@ _MATS = {}
 
 # Top of the arch ridge robot's rail hangers: robots.arch_rail placed 5 m up.
 ARCH_HANGERS = 5.89
+# An arch's benches: (distance of the middle from the aisle's, width) for
+# the inner bench the pickers work and the outer one along the wall; a tray
+# a section of each, its crop at ARCH_TRAY_Z and its LED bars ARCH_LAMP over it.
+ARCH_BENCHES = ((2.5, 1.3), (3.95, 1.0))
+ARCH_SECTION = 1.3
+ARCH_TRAY_Z = 0.96
+ARCH_LAMP = 1.05
+
+
+def _bench(b, m, system, x0, x1, y, w):
+    """One bench from x0 to x1 about `y`, `w` wide, its crop standing at
+    ARCH_TRAY_Z: legs and rails, and on them
+        nft     white NFT gutters 0.1 m wide every 0.2 m, fed from a manifold
+                at x0 and draining to a return trough at x1 (salad crops)
+        fruit   two table-top gutters of coir slabs with drip lines, on
+                brackets (strawberry, tomato, pepper, beans)
+        trough  one deep trough of growing media wall to wall (grain, pulses)"""
+    legs, rails = bmesh.new(), bmesh.new()
+    length, mid = x1 - x0, (x0 + x1) / 2
+    top = ARCH_TRAY_Z - (0.06 if system == "nft" else 0.18 if system == "fruit" else 0.26)
+    posts = max(2, int(length / 1.3) + 1)
+    for k in range(posts):
+        x = x0 + 0.1 + (length - 0.2) * k / (posts - 1)
+        for dy in (-w / 2 + 0.06, w / 2 - 0.06):
+            merge(legs, box((0.05, 0.05, top - 0.12), (x, y + dy, (top + 0.12) / 2)))
+            merge(legs, box((0.12, 0.12, 0.02), (x, y + dy, 0.13)))
+        merge(legs, box((0.04, w - 0.08, 0.04), (x, y, 0.4)))
+        merge(legs, box((0.06, w, 0.05), (x, y, top - 0.025)))
+    for dy in (-w / 2 + 0.06, w / 2 - 0.06):
+        merge(rails, box((length, 0.04, 0.05), (mid, y + dy, top - 0.025)))
+        merge(rails, box((length, 0.03, 0.03), (mid, y + dy, 0.4)))
+    b.put(legs, m["steel"], smooth=False)
+    b.put(rails, m["frame"], smooth=False)
+    if system == "nft":
+        gutters, caps = bmesh.new(), bmesh.new()
+        count = max(2, round(w / 0.2))
+        for k in range(count):
+            gy = y - w / 2 + (k + 0.5) * w / count
+            merge(gutters, box((length - 0.3, 0.1, 0.055), (mid, gy, top + 0.028), tile=1.0))
+            for x in (x0 + 0.18, x1 - 0.12):
+                merge(caps, box((0.02, 0.105, 0.06), (x, gy, top + 0.03)))
+        b.put(gutters, m["gutter"], smooth=False)
+        b.put(caps, m["gutter"], smooth=False)
+        b.put(tube([(x0 + 0.1, y - w / 2 + 0.05, top + 0.09), (x0 + 0.1, y + w / 2 - 0.05, top + 0.09)], 0.022, 8), m["pipe_white"])
+        b.put(box((0.14, w, 0.12), (x1 - 0.04, y, top - 0.02), tile=1.0), m["gutter"], smooth=False)
+    elif system == "fruit":
+        gutters, slabs, drips = bmesh.new(), bmesh.new(), bmesh.new()
+        for gy in (y - w / 4, y + w / 4):
+            merge(gutters, box((length - 0.1, 0.26, 0.16), (mid, gy, top + 0.08), tile=1.0))
+            merge(slabs, box((length - 0.2, 0.2, 0.02), (mid, gy, top + 0.155)))
+            merge(drips, tube([(x0 + 0.1, gy, top + 0.175), (x1 - 0.1, gy, top + 0.175)], 0.006, 5))
+        b.put(gutters, m["gutter_black"], smooth=False)
+        b.put(slabs, m["slab"], smooth=False)
+        b.put(drips, m["drip"])
+    else:
+        b.put(box((length - 0.06, w - 0.04, 0.24), (mid, y, top + 0.12), tile=1.0), m["gutter"], smooth=False)
+        b.put(box((length - 0.14, w - 0.12, 0.02), (mid, y, ARCH_TRAY_Z - 0.01)), m["media"], smooth=False)
 
 
 def gantry_rail(radius):
@@ -128,6 +185,11 @@ def mats(looks):
         "pipe_blue": g("pipe_water", (0.15, 0.35, 0.65), 0.55, 0.0),
         "cable": g("cable", (0.04, 0.04, 0.04), 0.7, 0.0),
         "tray": g("tray", (0.12, 0.12, 0.13), 0.6, 0.0),
+        "gutter": g("nft_gutter", (0.88, 0.88, 0.85), 0.45, 0.0),
+        "gutter_black": g("substrate_gutter", (0.05, 0.05, 0.055), 0.6, 0.0),
+        "slab": g("coir_slab", (0.32, 0.20, 0.12), 0.95, 0.0, "rough_concrete", contrast=0.8),
+        "media": g("growing_media", (0.20, 0.14, 0.10), 0.95, 0.0, "rough_concrete", contrast=1.2),
+        "drip": g("drip_line", (0.03, 0.03, 0.03), 0.7, 0.0),
         "alu": g("aluminium", (0.74, 0.75, 0.76), 0.38, 0.9),
         "galv": g("galv_steel", (0.62, 0.63, 0.62), 0.5, 0.85),
         "gasket": g("epdm", (0.045, 0.045, 0.045), 0.8, 0.0),
@@ -818,7 +880,7 @@ def geodesic_dome(looks, name, radius=12.0, wall=1.4, at=(0, 0, 0), yaw=0.0, par
         arc = [a0 + 0.03 + (span - 0.06) * i / 96 for i in range(97)]
         b.put(tube([((r1 + 0.04) * math.cos(a), (r1 + 0.04) * math.sin(a), header) for a in arc], 0.025, 6), m["pipe_blue"])
         rc = (r0 + r1) / 2
-        count = int(TAU * rc / 1.9)
+        count = int(TAU * rc / 1.65)
         for i in range(count):
             a = TAU * (i + 0.5) / count
             if abs(((a + math.pi) % TAU) - math.pi) < 0.22:
@@ -845,7 +907,7 @@ def geodesic_dome(looks, name, radius=12.0, wall=1.4, at=(0, 0, 0), yaw=0.0, par
     b.places.append(("room", {"name": name.lower(), "centre": (0, 0, (spring + radius) / 2), "size": (radius * 1.7, radius * 1.7, spring + radius),
                               "volume": 2.0 / 3.0 * math.pi * radius ** 3 + math.pi * radius ** 2 * spring, "glazing": 0.72}))
     for x, y, z, a, k in trays:
-        b.places.append(("tray", {"at": (x, y, z), "yaw": a, "size": (1.6, width - 0.25), "ring": k}))
+        b.places.append(("tray", {"at": (x, y, z), "yaw": a, "size": (1.6, width - 0.12), "ring": k}))
     chiller = Vector((math.cos(0.9), math.sin(0.9), 0)) * (radius + 3.6)
     b.places.append(("service", {"fault": "fans", "at": (chiller.x, chiller.y, 1.2)}))
     # The cistern: banded tank, the gantry's mounting ring, a ladder, its bund and pumps.
@@ -936,17 +998,17 @@ def geodesic_dome(looks, name, radius=12.0, wall=1.4, at=(0, 0, 0), yaw=0.0, par
     return b.finish()
 
 
-def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0), yaw=0.0, parent=None):
+def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0), yaw=0.0, parent=None, system="nft"):
     """An inflated vault along +X: painted I-beam arches carrying two-layer
     ETFE cushions under clamp caps, held by Kevlar restraint straps to
     ground anchors, on a concrete curb with a clamp sill, skirt, inflation
     header, blowers and louvred vents. Framed end walls carry insulated
     panels, glazing, exhaust louvres and air-handler ducts; a rigid lock at
     -X meets the corridor flange to flange and one at +X is the EVA exit.
-    Inside, two rows of ebb-and-flow tables under lamp rails, and a ridge
-    girder over the ridge robot's rail. Outside, the roof washer's crane
-    rails on cast plinths either side, its stops and its charging dock past
-    the EVA gable; the blowers stand at the corridor gable."""
+    Inside, two benches down each side of the `system` (see `_bench`) under
+    LED bars, and a ridge girder over the ridge robot's rail. Outside, the
+    roof washer's crane rails on cast plinths either side, its stops and its
+    charging dock past the EVA gable; the blowers stand at the corridor gable."""
     m = mats(looks)
     b = Building(name, parent, at, yaw)
     b.places = []
@@ -1140,41 +1202,30 @@ def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0),
             end = _lock(b, m, (x + 0.1, 0, 0), 0.0, 3.1, 2.8, 0.05, 3.0)
             door(b, m, (x + 0.1 + end + 0.08, 0, 0.12), 0.0, 1.3, 2.3)
             b.put(box((0.7, 1.7, 0.06), (x + 0.1 + end + 0.45, 0, 0.03), tile=1.0), m["grate"], smooth=False)
-    # Tables down both sides; the gearbox layer adds trays and lamps on them.
-    table_len = 1.3
-    tables = int((length - 3.0) / (table_len + 0.25))
-    span = tables * (table_len + 0.25) - 0.25
-    x_first = (length - span) / 2 + table_len / 2
-    legs, rims, lamp_rods = bmesh.new(), bmesh.new(), bmesh.new()
+    # Two benches down each side, wall to wall, cut into sections a tray
+    # each: the inner one worked from the aisle by the pickers, the outer one
+    # along the wall by the ridge robot. The gearbox layer adds the trays,
+    # their LED bars and their crops on them.
+    sections = int((length - 4.4) / ARCH_SECTION)
+    span = sections * ARCH_SECTION
+    x_first = (length - span) / 2 + ARCH_SECTION / 2
+    x_last = x_first + (sections - 1) * ARCH_SECTION
+    lamp_rods = bmesh.new()
     for s in (-1, 1):
-        y = s * (r * 0.5)
-        for t in range(tables):
-            x = x_first + t * (table_len + 0.25)
-            for lx in (-0.55, 0.55):
-                for ly in (-0.6, 0.6):
-                    merge(legs, box((0.05, 0.05, 0.82), (x + lx, y + ly, 0.53)))
-                    merge(legs, box((0.1, 0.1, 0.02), (x + lx, y + ly, 0.13)))
-                merge(legs, box((0.04, 1.2, 0.04), (x + lx, y, 0.35)))
-            for ly in (-0.6, 0.6):
-                merge(legs, box((1.1, 0.04, 0.04), (x, y + ly, 0.35)))
-            merge(legs, rod((x - 0.45, y - 0.3, 0.72), (x - 0.45, y - 0.3, 0.93), 0.012, 6))
-            merge(legs, rod((x + 0.45, y + 0.2, 0.93), (x + 0.45, y + 0.2, 0.6), 0.02, 6))
-            b.put(box((table_len, 1.35, 0.06), (x, y, 0.96), tile=1.0), m["frame"], smooth=False)
-            for dy in (-0.66, 0.66):
-                merge(rims, box((table_len, 0.03, 0.05), (x, y + dy, 1.005)))
-            for dx in (-0.635, 0.635):
-                merge(rims, box((0.03, 1.35, 0.05), (x + dx, y, 1.005)))
-            b.places.append(("tray", {"at": (x, y, 0.99), "yaw": 0.0, "size": (table_len - 0.1, 1.25), "lamp": 1.05}))
-            merge(lamp_rods, rod((x, y, 2.04 + 0.05), (x, y, 5.16), 0.012, 6))
-        x_last = x_first + (tables - 1) * (table_len + 0.25)
-        b.put(tube([(x_first - 0.7, y - 0.3, 0.72), (x_last + 0.6, y - 0.3, 0.72)], 0.03, 8), m["pipe_blue"])
-        b.put(tube([(x_first - 0.7, y + 0.2, 0.6), (x_last + 0.6, y + 0.2, 0.6)], 0.04, 8), m["pipe_white"])
-        b.put(box((x_last - x_first + 1.4, 0.06, 0.08), ((x_first + x_last) / 2, y, 5.2)), m["alu"], smooth=False)
-        for k in range(bays + 1):
-            if x_first - 0.7 <= k * bay <= x_last + 0.7:
-                merge(lamp_rods, rod((k * bay, y, 5.24), (k * bay, y, arch_z(y)), 0.012, 6))
-    b.put(legs, m["steel"], smooth=False)
-    b.put(rims, m["frame"], smooth=False)
+        for bench, (yc, w) in enumerate(ARCH_BENCHES):
+            y = s * yc
+            _bench(b, m, system, x_first - ARCH_SECTION / 2, x_last + ARCH_SECTION / 2, y, w)
+            for t in range(sections):
+                x = x_first + t * ARCH_SECTION
+                gutters = max(2, round(w / 0.2)) if system == "nft" else None
+                b.places.append(("tray", {"at": (x, y, ARCH_TRAY_Z), "yaw": 0.0, "size": (ARCH_SECTION - 0.06, w - 0.1), "lamp": ARCH_LAMP,
+                                          "ring": bench, "side": s, "bench": True, "gutters": gutters}))
+                lamp_z = ARCH_TRAY_Z + ARCH_LAMP + 0.05
+                for dx in (-0.45, 0.45):
+                    merge(lamp_rods, rod((x + dx, y, lamp_z), (x + dx, y, arch_z(y) - 0.05), 0.008, 5))
+        # Feed and return mains along the inner bench, under its top.
+        b.put(tube([(x_first - 0.9, s * 1.95, 0.55), (x_last + 0.7, s * 1.95, 0.55)], 0.03, 8), m["pipe_blue"])
+        b.put(tube([(x_first - 0.9, s * 2.0, 0.4), (x_last + 0.7, s * 2.0, 0.4)], 0.04, 8), m["pipe_white"])
     b.put(lamp_rods, m["steel"])
     b.put(box((length - 2.0, 1.4, 0.04), (length / 2, 0, 0.14), tile=1.0), m["grate"], smooth=False)
     # Circulation fans hung from the arches, and a fertigation skid by the inner hatch.
@@ -1188,14 +1239,15 @@ def arch_greenhouse(looks, name, length=48.0, width=10.0, bay=3.0, at=(0, 0, 0),
     b.put(box((0.6, 1.0, 1.6), (0.5, -4.2, 0.92), tile=1.0, bevel=0.01), m["hull"], smooth=False)
     for y in (-4.4, -3.85):
         b.put(cone(0.24, 0.24, 1.0, (1.25, y, 0.12), 16), m["pipe_white"], sharp=40)
-    b.put(tube([(1.25, -3.85, 0.4), (1.6, -3.85, 0.4), (1.6, -2.8, 0.72), (x_first - 0.7, -2.8, 0.72)], 0.03, 8), m["pipe_blue"])
+    b.put(tube([(1.25, -3.85, 0.4), (1.6, -3.85, 0.4), (1.6, -1.95, 0.55), (x_first - 0.9, -1.95, 0.55)], 0.03, 8), m["pipe_blue"])
     b.places.append(("room", {"name": name.lower(), "centre": (length / 2, 0, (curb + r) / 2), "size": (length, width, curb + r),
                               "volume": length * (math.pi * r * r / 2 + width * curb), "glazing": 0.5}))
     # What stops a rover: the vault, curbs, floor, gables and the rows of tables.
     b.collider(vault(0.0, length, r, curb, 8, 4.0))
     for s in (-1, 1):
         b.collider(box((length + 0.6, 0.5, curb + 0.35), (length / 2, s * (r + 0.05), (curb - 0.35) / 2)))
-        b.collider(box((span, 1.35, 0.99), (length / 2, s * r * 0.5, 0.495)))
+        for yc, w in ARCH_BENCHES:
+            b.collider(box((span, w, ARCH_TRAY_Z - 0.03), (length / 2, s * yc, (ARCH_TRAY_Z - 0.03) / 2)))
     b.collider(box((length, width, 0.12), (length / 2, 0, 0.06)))
     for x, facing in ((0.0, -1.0), (length, 1.0)):
         b.collider(half_disc(r, x, curb, facing, 8, 2.0))

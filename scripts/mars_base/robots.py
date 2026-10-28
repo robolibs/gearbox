@@ -174,9 +174,10 @@ EDEN_RAIL = Rail(rail_len=5.4, mast_len=0.9, mast_z=-0.58, turret_z=-1.08, lift=
 
 def arch_rail(length):
     """The ridge robot of an arch greenhouse `length` long: its rail 5 m up,
-    starting 2 m in from the door, the turret clear under the lamps."""
+    starting 2 m in from the door, the turret clear under the lamps, its arm
+    reaching the outer benches along the walls."""
     return Rail(rail_len=length - 4.0, mast_len=3.1, mast_z=-1.65, turret_z=-3.15, lift=0.65, arm=(0.0, -0.35, -3.23), beam=0.9, head=-0.5,
-                reach=2.4, draw_rail=True, hangers=0.75, scale=1.4)
+                reach=4.5, draw_rail=True, hangers=0.75, scale=1.4)
 
 
 def rail_gantry(r, note, name, bound):

@@ -36,10 +36,11 @@ HERE = os.path.join(ROOT, "scripts", "mars_base")
 sys.path.insert(0, HERE)
 # A Blender session keeps modules from earlier builds: drop them so every
 # build imports the scripts as they are now.
-for name in ("kit", "patterns", "buildings", "habitat", "power", "industry", "spaceport", "props", "usda", "eden", "mechanics", "robots", "vehicles",
-             "arms", "harvester", "vertical", "crane", "excavator", "washers", "layout", "plan"):
+for name in ("kit", "crops", "patterns", "buildings", "habitat", "power", "industry", "spaceport", "props", "usda", "eden", "mechanics", "robots", "vehicles",
+             "arms", "harvester", "vertical", "farm_hall", "crane", "excavator", "washers", "layout", "plan"):
     sys.modules.pop(name, None)
 import kit  # noqa: E402
+import crops  # noqa: E402
 import usda  # noqa: E402
 import eden  # noqa: E402
 import plan  # noqa: E402
@@ -53,6 +54,8 @@ import vehicles  # noqa: E402
 import washers  # noqa: E402
 import weathering  # noqa: E402
 import layout  # noqa: E402
+import farm_hall  # noqa: E402
+import power  # noqa: E402
 
 ASSETS = os.path.join(ROOT, "assets", "mars_base")
 MODULES = os.path.join(ASSETS, "modules")
@@ -63,16 +66,36 @@ MACHINES = os.path.join(ROOT, "assets", "machines", "usd")
 WORK = os.path.join(ROOT, ".work", "mars_base")
 LOOKS = "/MarsBase/Looks"
 
-# What each greenhouse grows, ring by ring or row by row: (species, slots, ppfd, hours, days apart).
+# What each greenhouse grows, ring by ring or bench by bench: the crops its
+# trays take in turn, three trays to a crop. The farm feeds a crew of 12;
+# its area goes mostly to staples, as the BVAD and BIOS-3 diets do.
+#   ArchA   NFT gutters, the BPC's staples: potato, sweet potato, peanut, soy
+#   ArchB   table-top gutters: the fruit, strawberries along the wall
+#   ArchC   deep troughs: wheat, rice and dry beans
+#   domes   terraces of washed regolith and compost: roots and tubers by
+#           daylight, LEDs making up the rest
+#   VerticalFarm  salad on its racks; its nursery starts transplants
+#   FarmHall      the propagation nursery: seedlings of the transplanted crops
 CROPS = {
-    "DomeA": [("wheat", (4, 3), 0, 20, 9), ("potato", (3, 2), 0, 12, 11), ("wheat", (4, 3), 0, 20, 9)],
-    "DomeB": [("lettuce", (4, 3), 0, 16, 3), ("tomato", (3, 2), 0, 12, 8), ("potato", (3, 2), 0, 12, 11)],
-    "ArchA": [("lettuce", (4, 3), 300, 16, 2)],
-    "ArchB": [("tomato", (3, 2), 600, 12, 5)],
-    "ArchC": [("wheat", (4, 3), 600, 20, 4)],
-    "VerticalFarm": [("lettuce", (6, 2), 250, 16, 2), ("lettuce", (10, 3), 150, 18, 1)],
+    "ArchA": [["potato", "sweet_potato", "soybean", "peanut"], ["sweet_potato", "soybean", "potato"]],
+    "ArchB": [["tomato", "pepper", "snap_bean", "pea"], ["strawberry", "pepper", "strawberry", "tomato"]],
+    "ArchC": [["wheat", "rice", "wheat", "dry_bean"], ["wheat", "rice", "soybean"]],
+    "DomeA": [["radish", "carrot", "red_beet", "green_onion"], ["potato", "sweet_potato", "peanut"], ["wheat", "potato", "wheat"]],
+    "DomeB": [["carrot", "green_onion", "radish", "red_beet"], ["sweet_potato", "potato", "dry_bean"], ["wheat", "sweet_potato", "wheat"]],
+    "VerticalFarm": [["lettuce", "spinach", "pak_choi", "kale", "chard", "lettuce"], ["lettuce", "spinach", "pak_choi", "kale"]],
+    "FarmHall": [["tomato", "pepper", "strawberry", "sweet_potato", "lettuce", "kale"]],
 }
-GROWN_DAYS = {"lettuce": 40, "tomato": 110, "potato": 120, "wheat": 85}
+CREW = 12
+# Light the domes' LEDs add to the daylight, µmol/m²/s, through the crop's photoperiod.
+DOME_LEDS = 200
+# What the domes' washed regolith beds were amended with: compost, a share of the bed.
+DOME_ORGANIC = 0.15
+# How many trays in a row take one crop before the next.
+BLOCK = 3
+# Seedlings in the vertical farm's nursery stand in plug trays this far apart, m.
+NURSERY_PITCH = 0.1
+# Days a nursery's seedlings grow before they are set out.
+NURSERY_DAYS = 14
 
 
 def reset():
@@ -192,23 +215,48 @@ def rocks_layer(u, placed):
     u.emit(1, "}")
 
 
+def nursery(b, p):
+    """Whether a tray place is a nursery's: the farm hall's or the vertical farm's."""
+    return p.get("nursery", False) or (b.name == "VerticalFarm" and p.get("ring") == 1)
+
+
 def trays_of(b):
     """A greenhouse building's trays, each a dict of its place in the
     building, its crop and how long ago it was sown, and where the building
     stands (`origin`, `turn`) in the base."""
-    crops = CROPS.get(b.name)
+    rings = CROPS.get(b.name)
     room = next((p for kind, p in b.places if kind == "room"), None)
-    if crops is None or room is None:
+    if rings is None or room is None:
         return []
     at, yaw = world_of(b)
+    glazed = room.get("glazing", 0.0) > 0.0
+    placed = [p for kind, p in b.places if kind == "tray"]
+    # Which crop each tray takes: blocks of BLOCK along its ring, in turn.
+    seen, picks = {}, []
+    for p in placed:
+        ring = min(p.get("ring", 0), len(rings) - 1)
+        k = seen.get(ring, 0)
+        seen[ring] = k + 1
+        picks.append(rings[ring][(k // BLOCK) % len(rings[ring])])
+    count = {s: picks.count(s) for s in picks}
+    turn = {}
     out = []
-    for kind, p in b.places:
-        if kind != "tray":
-            continue
-        species, slots, ppfd, hours, apart = crops[min(p.get("ring", 0), len(crops) - 1)]
-        out.append({"name": f"{b.name}_{len(out):03d}", "at": p["at"], "yaw": p["yaw"], "size": p["size"], "slots": slots, "species": species,
-                    "ppfd": ppfd, "hours": hours, "lamp": p.get("lamp", 0.6), "lit": "lamp" in p, "days": (len(out) * apart) % GROWN_DAYS[species],
-                    "room": room["name"], "origin": tuple(at), "turn": yaw})
+    for p, species in zip(placed, picks):
+        # Sown in turn, one tray of a crop every share of its cycle, so the
+        # room holds every age of it and harvests come steadily.
+        k = turn.get(species, 0)
+        turn[species] = k + 1
+        # A nursery holds seedlings only: sown within the fortnight before they are set out.
+        days = round((NURSERY_DAYS if nursery(b, p) else crops.CYCLE[species]) * k / count[species])
+        ppfd, hours = crops.LIGHT[species]
+        if glazed:
+            ppfd = DOME_LEDS
+        slots = crops.slots(species, p["size"], p.get("gutters"), NURSERY_PITCH if nursery(b, p) else None)
+        out.append({"name": f"{b.name}_{len(out):03d}", "at": p["at"], "yaw": p["yaw"], "size": p["size"], "slots": slots,
+                    "species": species, "ppfd": ppfd, "hours": hours,
+                    "lamp": p.get("lamp", 0.6), "lit": "lamp" in p, "days": days, "room": room["name"], "origin": tuple(at), "turn": yaw,
+                    "medium": "regolith" if glazed else "hydroponic", "basin": None if glazed or p.get("bench") else "tray",
+                    "nursery": nursery(b, p)})
     return out
 
 
@@ -227,6 +275,8 @@ def farm_plan(path, built):
             robots_.append(plan.rail_gantry(arch_rail, machine, name[:-3].lower(), at, yaw))
         elif file == "dome_gantry.usdz":
             robots_.append(plan.polar_gantry(polar, machine, name[:-3].lower(), at, yaw))
+        elif file == "hall_gantry.usdz":
+            robots_.append(plan.rail_gantry(farm_hall.nursery_rail(), machine, "farmhall", at, yaw))
         elif file == "vertical_crane.usdz":
             robots_.append(plan.stacker_crane(crane.CRANE, machine, "verticalfarm", at, yaw, 6.5 - vertical.CRANE_X0, vertical.FLOOR))
         elif file == "harvester.usdz":
@@ -299,10 +349,10 @@ def world_layer(path, built, base=None):
         rooms += 1
         name = room["name"]
         usda.zone(u, 2, b.name, name, tuple(at), math.degrees(yaw), room["volume"], room["centre"], room["size"],
-                  tank=room["volume"] * 2.0, glazing=room.get("glazing", 0.0))
+                  tank=room["volume"] * 2.0, work=room.get("work", 0), glazing=room.get("glazing", 0.0), processing=room.get("processing", 0.0))
         for t in trays_of(b):
             usda.tray(u, 3, t["name"], t["at"], t["species"], t["slots"], name, t["ppfd"], t["hours"], t["lamp"], t["days"], (*t["size"], 0.08),
-                      yaw_deg=math.degrees(t["yaw"]), lamp=t["lit"])
+                      t["medium"], 0.0, math.degrees(t["yaw"]), t["lit"], t["basin"], DOME_ORGANIC)
             trays += 1
         spots = {}
         for kind, p in b.places:
@@ -314,9 +364,10 @@ def world_layer(path, built, base=None):
         usda.end(u, 2)
     if station is not None:
         usda.xform(u, 2, "Power", tuple(station), ["GearboxPowerAPI"], [
-            f"float gearbox:power:reactor = {10000 * len(layout.REACTORS)}",
+            f"float gearbox:power:reactor = {power.FISSION_KWE * 1000 * len(layout.REACTORS):.0f}",
             f"float gearbox:power:solarArea = {solar:.0f}",
             "float gearbox:power:battery = 400000",
+            f"int gearbox:house:crew = {CREW}",
         ])
         usda.end(u, 2)
         usda.service(u, 2, "power_panel", tuple(station), "power", "")
@@ -362,6 +413,7 @@ def write_machines():
         "eden_gantry": robots.build("eden_gantry", eden_rail, "the rail robot of the EDEN growth room", work),
         "arch_gantry": robots.build("arch_gantry", arch_rail, "the ridge robot of an arch greenhouse", work),
         "dome_gantry": robots.build("dome_gantry", polar, "the polar gantry of a dome", work),
+        "hall_gantry": robots.build("hall_gantry", farm_hall.nursery_rail(), "the nursery robot of the farm hall", work),
     }
     layers[vehicles.SEV.kind] = vehicles.build(vehicles.SEV, layout.NASA, MACHINES, work)
     layers.update(crane.build(work))

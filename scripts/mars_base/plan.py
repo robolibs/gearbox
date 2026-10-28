@@ -53,6 +53,8 @@ class Robot:
     places: dict = field(default_factory=dict)
     # The crop of each tray it reaches.
     trays: dict = field(default_factory=dict)
+    # The nursery trays among them, where seedlings start before they are set out.
+    nursery: set = field(default_factory=set)
     # Anything else its kind needs, like a harvester's lane heading.
     extra: dict = field(default_factory=dict)
 
@@ -66,6 +68,7 @@ class Robot:
             "park": self.park,
             "places": self.places,
             "trays": self.trays,
+            "nursery": sorted(self.nursery),
         }
 
 
@@ -118,7 +121,11 @@ def rail_gantry(r, machine, room, at, yaw):
             "reach": reach.at(near - abs(y)),
             "lift": lift.at(z - r.arm[2] + 0.01),
         }
-        return None if None in targets.values() else targets
+        if None in targets.values():
+            return None
+        # Down to the place's level in the aisle, the arm in, before it reaches out under the shelf over it.
+        targets["via"] = [{"lift": round(targets["lift"], 4), "reach": 0.0}]
+        return targets
     return robot, solve
 
 
@@ -195,12 +202,27 @@ def mobile_harvester(h, machine, room, origin, turn, side, stops, lane=1.35, hov
     # It drives toward its -Y, so its odometry heading is its yaw in the base, plus the arch's.
     ready = {n: round((q - lo) / (hi - lo), 4) for n, q, (lo, hi) in zip(names, hv.ARM_READY, spans)}
     robot.extra = {"heading": heading + turn, "ready": ready}
+    # The arm's poses by a place's offset from its stop: every table is laid out alike.
+    solved = {}
 
     def solve(p):
         x, y, z = into(origin, turn, p)
         if y * side <= 0:
             return None
         stop = min(stops, key=lambda s: abs(s - x))
+        key = (round(x - stop, 3), round(y, 3), round(z, 3))
+        if key not in solved:
+            solved[key] = poses(x, y, z, stop)
+        if solved[key] is None:
+            return None
+        targets, over = dict(solved[key][0]), solved[key][1]
+        bx, by, _ = out_of(origin, turn, (stop, side * lane, 0.0))
+        targets["drive"] = [round(-by, 4), round(bx, 4)]
+        targets["via"] = [over]
+        return targets
+
+    def poses(x, y, z, stop):
+        """The arm's pose at the place and over it from `stop`, or None."""
         place = Matrix.Translation((stop, side * lane, 0.12)) @ Matrix.Rotation(heading, 4, "Z")
         base = place @ Matrix.Translation(carriage) @ local
 
@@ -215,12 +237,7 @@ def mobile_harvester(h, machine, room, origin, turn, side, stops, lane=1.35, hov
             return None
 
         targets, over = reach(hover), reach(above)
-        if targets is None or over is None:
-            return None
-        bx, by, _ = out_of(origin, turn, (stop, side * lane, 0.0))
-        targets["drive"] = [round(-by, 4), round(bx, 4)]
-        targets["via"] = [over]
-        return targets
+        return None if targets is None or over is None else (targets, over)
     return robot, solve
 
 
@@ -311,6 +328,8 @@ def plan(robots, trays, others=()):
                     robot.places[name] = {k: v if isinstance(v, list) else round(v, 4) for k, v in targets.items()}
                     robot.places[name]["at"] = enu(p)
                     robot.trays[tray["name"]] = tray["species"]
+                    if tray.get("nursery"):
+                        robot.nursery.add(tray["name"])
     machines = {robot.machine: robot.entry() for robot, _ in robots}
     machines.update(others)
     return {"machines": machines}

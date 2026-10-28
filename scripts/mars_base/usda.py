@@ -101,8 +101,10 @@ def materials(u, depth, table):
 
 
 def tray(u, depth, name, at, species, slots, zone, ppfd, hours, lamp_height, sown_days, size, medium="hydroponic", perchlorate=0.0,
-         yaw_deg=0.0, lamp=True, basin="tray"):
-    """A `GearboxTrayAPI` tray: its basin, and the lamp over it unless it grows by daylight."""
+         yaw_deg=0.0, lamp=True, basin="tray", organic=0.0):
+    """A `GearboxTrayAPI` tray: its basin (none where the bench under it draws
+    its own gutters), and the lamp over it unless it grows by daylight: LED
+    bars about 0.3 m apart along the tray, the crop seen between them."""
     attrs = [
         f'token gearbox:tray:species = "{species}"',
         f"int2 gearbox:tray:slots = ({slots[0]}, {slots[1]})",
@@ -116,18 +118,28 @@ def tray(u, depth, name, at, species, slots, zone, ppfd, hours, lamp_height, sow
     ]
     if medium == "regolith":
         attrs.append(f"float gearbox:tray:perchlorate = {perchlorate}")
+        attrs.append(f"float gearbox:tray:organic = {organic}")
     xform(u, depth, name, at, ["GearboxTrayAPI"], attrs, yaw_deg)
     # The table or terrace under a basin stands in the physics world for it.
-    cube(u, depth + 1, "basin", (0, 0, -size[2] / 2), size, "regolith" if medium == "regolith" else basin, collide=False)
+    if basin:
+        cube(u, depth + 1, "basin", (0, 0, -size[2] / 2), size, "regolith" if medium == "regolith" else basin, collide=False)
     if lamp:
         xform(u, depth + 1, "lamp", (0, 0, lamp_height))
-        cube(u, depth + 2, "housing", (0, 0, 0.02), (size[0] + 0.02, size[1] + 0.02, 0.04), "housing", collide=False)
-        cube(u, depth + 2, "face", (0, 0, -0.002), (size[0] - 0.04, size[1] - 0.04, 0.004), "led", collide=False)
+        bars = max(2, round(size[1] / 0.3))
+        pitch = size[1] / bars
+        for k in range(bars):
+            y = (k + 0.5) * pitch - size[1] / 2
+            cube(u, depth + 2, f"housing{k}" if k else "housing", (0, y, 0.02), (size[0], 0.06, 0.035), "housing", collide=False)
+            cube(u, depth + 2, f"face{k}" if k else "face", (0, y, -0.0005), (size[0] - 0.04, 0.045, 0.004), "led", collide=False)
+        # The rails the bars hang from, across their ends.
+        for x in (-size[0] / 2 + 0.03, size[0] / 2 - 0.03):
+            cube(u, depth + 2, f"rail{'ab'[x > 0]}", (x, 0, 0.045), (0.03, size[1], 0.02), "housing", collide=False)
         end(u, depth + 1)
     end(u, depth)
 
 
-def zone(u, depth, name, room, at, yaw_deg, volume, centre, size, setpoints=(21, 0.75, 1000, 101.3), tank=400, ec=2.5, work=0, glazing=0.0):
+def zone(u, depth, name, room, at, yaw_deg, volume, centre, size, setpoints=(21, 0.75, 1000, 101.3), tank=400, ec=2.5, work=0, glazing=0.0,
+         processing=0.0):
     t, rh, co2, p = setpoints
     attrs = [
         f'token gearbox:zone:name = "{room}"',
@@ -144,6 +156,8 @@ def zone(u, depth, name, room, at, yaw_deg, volume, centre, size, setpoints=(21,
     ]
     if glazing:
         attrs.append(f"float gearbox:zone:glazing = {glazing}")
+    if processing:
+        attrs.append(f"float gearbox:zone:processing = {processing}")
     xform(u, depth, name, at, ["GearboxZoneAPI"], attrs, yaw_deg)
 
 
