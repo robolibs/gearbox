@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import queue
 import re
 import threading
 import time
@@ -128,14 +129,27 @@ class Clock:
 
 _PLANTS: dict = {"at": -1.0e9, "plants": {}}
 _PLANTS_LOCK = threading.Lock()
+# The host serves each topic to at most 16 clients (gearbox-api's
+# `shm_limits`): robots ask it through these few, lent one at a time.
+HOST_CLIENTS = 8
+HOSTS: queue.Queue = queue.Queue()
 
 
-def plants(gb: Gearbox) -> dict[str, dict]:
+def ask(name: str, *args, **kwargs):
+    """Calls the host's `name` through a free shared client."""
+    gb = HOSTS.get()
+    try:
+        return patient(getattr(gb, name), *args, **kwargs)
+    finally:
+        HOSTS.put(gb)
+
+
+def plants() -> dict[str, dict]:
     """Every plant by name, as the farm last read it: read again once
     `FRESH_S` of wall time have passed, so robots share one read."""
     with _PLANTS_LOCK:
         if time.time() - _PLANTS["at"] > FRESH_S:
-            _PLANTS["plants"] = {p["plant"]: p for p in patient(gb.plants)}
+            _PLANTS["plants"] = {p["plant"]: p for p in ask("plants")}
             _PLANTS["at"] = time.time()
         return _PLANTS["plants"]
 
@@ -341,7 +355,7 @@ class Tender(Robot):
         raised = {trays[t] for t in nursery if t in trays}
         # A robot that tends only a nursery sends its seedlings out by cart.
         shipping = bool(trays) and nursery >= set(trays)
-        standing = {name: p for name, p in plants(self.gb).items() if name in places}
+        standing = {name: p for name, p in plants().items() if name in places}
         ready: dict[str, list[str]] = {}
         for name, p in standing.items():
             if name.split("/")[0] in nursery and p["alive"] and p.get("stage") in ("seedling", "vegetative") \
@@ -386,12 +400,12 @@ class Tender(Robot):
     def act(self, op: str, place: str, crop: str):
         tray, slot = place.split("/")
         if op == "sow":
-            return patient(self.gb.greenhouse, op, by=self.machine, tray=tray, slot=slot, species=crop)
+            return ask("greenhouse", op, by=self.machine, tray=tray, slot=slot, species=crop)
         if op == "load":
-            return patient(self.gb.greenhouse, "lift", by=self.machine, plant=place, into=f"cart:{crop}")
+            return ask("greenhouse", "lift", by=self.machine, plant=place, into=f"cart:{crop}")
         if op == "unload":
-            return patient(self.gb.greenhouse, "place", by=self.machine, plant=place, **{"from": f"cart:{crop}"})
-        return patient(self.gb.greenhouse, op, by=self.machine, plant=place)
+            return ask("greenhouse", "place", by=self.machine, plant=place, **{"from": f"cart:{crop}"})
+        return ask("greenhouse", op, by=self.machine, plant=place)
 
     def close_in(self, op: str, place: str, crop: str):
         """Asks the sim until the robot is there: a refusal says how far it
@@ -544,7 +558,7 @@ class Washer(Robot):
         self.set(self.entry["links"]["brush"], "velocity", self.entry["brush"] if on else 0.0)
 
     def clean(self, op: str, **keys):
-        status = patient(self.gb.greenhouse, op, **keys)
+        status = ask("greenhouse", op, **keys)
         self.log(f"{self.machine}: {op} {keys.get('room', '')}: {'done' if status.ok else status.message}")
 
     def run(self):
@@ -611,6 +625,8 @@ def main():
     gb.wait_ready()
     patient(gb.play)
     clock = Clock(args.instance)
+    for _ in range(HOST_CLIENTS):
+        HOSTS.put(Gearbox(args.instance))
     # One read of the machines for every robot's own client.
     listing = patient(gb.machines)
     start = time.time()
