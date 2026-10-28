@@ -9,7 +9,7 @@ use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
 use bevy::asset::RenderAssetUsages;
 use bevy::light::{GeneratedEnvironmentMapLight, NotShadowCaster};
 use bevy::prelude::*;
-use gearbox_greenhouse::{Edible, Form, Plant, PlantId, Species};
+use gearbox_greenhouse::{Edible, Plant, PlantId, Species};
 
 use super::crops::{self, STAGES};
 use super::{Greenhouse, scatter};
@@ -32,7 +32,10 @@ impl Tint {
     const ALL: [Self; 5] = [Self::Sound, Self::Pale, Self::Yellow, Self::Mouldy, Self::Dead];
 
     fn of(plant: &Plant) -> Self {
-        let ripening = matches!(plant.species.edible, Edible::Tuber | Edible::Grain) && plant.maturity() > 0.88;
+        // Crops that die back as they ripen yellow in their last days.
+        let ripening = plant.species.senescence_days.is_some()
+            && matches!(plant.species.edible, Edible::Tuber | Edible::Grain)
+            && plant.maturity() > 0.88;
         if !plant.alive {
             Self::Dead
         } else if plant.mould > 0.35 {
@@ -49,12 +52,7 @@ impl Tint {
     /// What it multiplies a leaf photo by. The photographed leaves are a
     /// late-summer green; each crop's sound tint brings them to its own.
     fn colour(self, species: &Species) -> Color {
-        let sound = match species.form {
-            Form::Rosette => Vec3::new(0.78, 1.08, 0.62),
-            Form::Vine => Vec3::new(0.86, 1.0, 0.80),
-            Form::Bush => Vec3::new(0.84, 0.96, 0.78),
-            Form::Grass => Vec3::new(0.86, 1.02, 0.66),
-        };
+        let sound = crops::sound_tint(species);
         let v = match self {
             Self::Sound => sound,
             Self::Pale => sound.lerp(Vec3::new(1.15, 1.10, 0.55), 0.45),
@@ -102,7 +100,7 @@ pub fn build_looks(
     };
     for species in gearbox_greenhouse::species::ALL {
         let atlas = Image::from_buffer(
-            crops::atlas(species),
+            crops::atlas(species).png,
             ImageType::Extension("png"),
             CompressedImageFormats::NONE,
             true,

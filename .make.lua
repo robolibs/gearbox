@@ -165,6 +165,8 @@ make.recipe{ name = "test-sim", desc = "run the simulator's tests matching --fil
                assert(type(a.filter) == "string", "--filter=NAME is required")
                sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", a.filter)
              end }
+make.recipe{ name = "test-greenhouse", desc = "test the greenhouse model: crops, rooms, power and water",
+             run = function() sh.cargo("test", "-p", "gearbox-greenhouse") end }
 make.recipe{ name = "test-hitch", desc = "test grouped hitch control and joint compliance",
              run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "services::") end }
 make.recipe{ name = "test-tracked-machine", desc = "test the imported GEARBOX_TRACK_ASSET through native tracked control",

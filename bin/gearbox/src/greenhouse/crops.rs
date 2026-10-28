@@ -19,23 +19,56 @@ pub const STAGES: usize = 8;
 const CELLS: u32 = 4;
 const GOLDEN_ANGLE: f32 = 2.399_963;
 
-/// The leaf atlas of a crop, as PNG bytes.
-pub fn atlas(species: &Species) -> &'static [u8] {
-    match species.form {
-        Form::Rosette => include_bytes!("../../assets/crops/lettuce_leaves.png"),
-        Form::Vine => include_bytes!("../../assets/crops/tomato_leaves.png"),
-        Form::Bush => include_bytes!("../../assets/crops/potato_leaves.png"),
-        Form::Grass => include_bytes!("../../assets/crops/wheat_leaves.png"),
+/// A leaf atlas: its PNG, and the width over height of one cell, so a leaf
+/// card keeps its photo's proportions.
+pub struct Atlas {
+    pub png: &'static [u8],
+    pub aspect: f32,
+}
+
+macro_rules! atlas {
+    ($file:literal, $w:literal, $h:literal) => {
+        Atlas { png: include_bytes!(concat!("../../assets/crops/", $file, "_leaves.png")), aspect: $w as f32 / $h as f32 }
+    };
+}
+
+/// The leaf atlas a crop's leaves are cut from.
+pub fn atlas(species: &Species) -> Atlas {
+    match species.name {
+        "tomato" => atlas!("tomato", 160, 288),
+        "potato" => atlas!("potato", 192, 288),
+        "wheat" | "rice" | "green_onion" => atlas!("wheat", 48, 512),
+        "spinach" | "chard" | "pak_choi" | "red_beet" => atlas!("spinach", 160, 288),
+        "kale" => atlas!("kale", 256, 288),
+        "radish" => atlas!("radish", 80, 288),
+        "carrot" => atlas!("carrot", 112, 288),
+        "pepper" => atlas!("pepper", 128, 288),
+        "strawberry" => atlas!("strawberry", 160, 288),
+        "soybean" | "dry_bean" | "snap_bean" | "pea" | "peanut" => atlas!("bean", 160, 288),
+        "sweet_potato" => atlas!("sweet_potato", 224, 288),
+        _ => atlas!("lettuce", 256, 288),
     }
 }
 
-/// Width over height of one atlas cell: a leaf card keeps its photo's proportions.
-fn cell_aspect(form: Form) -> f32 {
-    match form {
-        Form::Rosette => 256.0 / 288.0,
-        Form::Vine => 160.0 / 288.0,
-        Form::Bush => 192.0 / 288.0,
-        Form::Grass => 48.0 / 512.0,
+/// What a sound plant's leaf photo is multiplied by: the photographed leaves
+/// are their own greens, each brought to its crop's.
+pub fn sound_tint(species: &Species) -> Vec3 {
+    match species.name {
+        "lettuce" => Vec3::new(0.78, 1.08, 0.62),
+        "tomato" => Vec3::new(0.86, 1.0, 0.80),
+        "potato" => Vec3::new(0.84, 0.96, 0.78),
+        "wheat" | "rice" => Vec3::new(0.86, 1.02, 0.66),
+        "spinach" | "chard" => Vec3::new(0.50, 0.78, 0.40),
+        "pak_choi" => Vec3::new(0.74, 0.98, 0.62),
+        "kale" => Vec3::new(0.70, 0.86, 0.82),
+        "radish" => Vec3::new(0.68, 0.92, 0.52),
+        "red_beet" => Vec3::new(0.56, 0.74, 0.44),
+        "carrot" => Vec3::new(1.0, 1.08, 0.80),
+        "green_onion" => Vec3::new(0.66, 0.96, 0.66),
+        "soybean" | "peanut" => Vec3::new(0.52, 0.76, 0.40),
+        "dry_bean" | "snap_bean" => Vec3::new(0.60, 0.84, 0.48),
+        "pea" => Vec3::new(0.58, 0.84, 0.62),
+        _ => Vec3::new(0.88, 1.04, 0.82),
     }
 }
 
@@ -178,22 +211,103 @@ const STEM_GREEN: [f32; 4] = [0.30, 0.48, 0.16, 1.0];
 /// The prefab of `species` at `stage` (0 just up, `STAGES - 1` ripe).
 pub fn prefab(species: &Species, stage: usize) -> Prefab {
     let s = stage.min(STAGES - 1) as f32 / (STAGES - 1) as f32;
-    let aspect = cell_aspect(species.form);
+    let aspect = atlas(species).aspect;
     match species.form {
-        Form::Rosette => lettuce(s, aspect),
+        Form::Rosette => rosette(species, s, aspect),
         Form::Vine => tomato(species, s, aspect),
         Form::Bush => potato(species, s, aspect),
-        Form::Grass => wheat(species, s, aspect),
+        Form::Grass => grass(species, s, aspect),
+        Form::Legume => legume(species, s, aspect),
+        Form::Creeper => creeper(species, s, aspect),
+        Form::Root => root(species, s, aspect),
+        Form::Allium => allium(species, s, aspect),
+        Form::Shrub => shrub(species, s, aspect),
+        Form::Crown => crown(species, s, aspect),
     }
 }
 
-/// A head of lettuce: one leaf a day from three to thirty-four, each set a
-/// golden angle round from the last, the young ones small and upright in the
-/// heart, the old ones broad and spread.
-fn lettuce(s: f32, aspect: f32) -> Prefab {
-    let count = (3.0 + 31.0 * s).round() as u32;
-    let mut leaves = Shape::default();
-    let span = 0.035 + 0.10 * s;
+/// Share of a crop's life, from 0 to 1, by which its edible part has begun to form.
+fn setting(species: &Species) -> f32 {
+    ((species.edible_days / species.harvest_days) as f32).min(0.95)
+}
+
+/// How a head of leaves is shaped.
+struct Head {
+    /// Leaves it adds over its life, and its reach at the start and added by harvest, m.
+    leaves: f32,
+    reach: (f32, f32),
+    /// How steeply the outer and inner leaves rise, how much they cup, and their ruffle.
+    rise: (f32, f32),
+    cup: (f32, f32),
+    ruffle: f32,
+    /// The photo turned round, so its broad end lies outward.
+    flip: bool,
+    /// Share of a leaf that is bare stalk, and the stalk's colour and radius.
+    stalk: f32,
+    stalk_colour: [f32; 4],
+    stalk_radius: f32,
+}
+
+fn head(species: &Species) -> Head {
+    let lettuce = Head {
+        leaves: 31.0,
+        reach: (0.035, 0.10),
+        rise: (0.18, 1.15),
+        cup: (1.1, 1.4),
+        ruffle: 0.06,
+        flip: true,
+        stalk: 0.0,
+        stalk_colour: STEM_GREEN,
+        stalk_radius: 0.0,
+    };
+    match species.name {
+        "spinach" => Head { leaves: 14.0, reach: (0.03, 0.09), rise: (0.35, 0.9), cup: (0.5, 0.6), ruffle: 0.02, flip: false, stalk: 0.35, stalk_radius: 0.0018, ..lettuce },
+        "chard" => Head {
+            leaves: 12.0,
+            reach: (0.04, 0.20),
+            rise: (0.95, 0.45),
+            cup: (0.35, 0.4),
+            ruffle: 0.04,
+            flip: false,
+            stalk: 0.45,
+            stalk_colour: [0.72, 0.10, 0.12, 1.0],
+            stalk_radius: 0.004,
+        },
+        "pak_choi" => Head {
+            leaves: 12.0,
+            reach: (0.03, 0.10),
+            rise: (0.9, 0.45),
+            cup: (0.9, 0.6),
+            ruffle: 0.0,
+            flip: false,
+            stalk: 0.45,
+            stalk_colour: [0.86, 0.92, 0.80, 1.0],
+            stalk_radius: 0.0055,
+        },
+        "kale" => Head {
+            leaves: 12.0,
+            reach: (0.04, 0.20),
+            rise: (0.95, 0.45),
+            cup: (0.25, 0.3),
+            ruffle: 0.10,
+            flip: false,
+            stalk: 0.35,
+            stalk_colour: [0.45, 0.25, 0.42, 1.0],
+            stalk_radius: 0.003,
+        },
+        _ => lettuce,
+    }
+}
+
+/// A head of leaves (lettuce, spinach, chard, pak choi, kale): one leaf after
+/// another, each set a golden angle round from the last, the young ones small
+/// and upright in the heart, the old ones broad and spread; on a stalk where
+/// the crop has one.
+fn rosette(species: &Species, s: f32, aspect: f32) -> Prefab {
+    let h = head(species);
+    let count = (3.0 + h.leaves * s).round() as u32;
+    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    let span = h.reach.0 + h.reach.1 * s;
     for i in 0..count {
         let age = (count - i) as f32;
         // 0 for the oldest, outermost leaf, 1 for the youngest in the heart.
@@ -202,15 +316,299 @@ fn lettuce(s: f32, aspect: f32) -> Prefab {
         let length = span * grown * (1.0 - 0.35 * youth) * (1.0 + 0.08 * jitter(7, i));
         let azimuth = i as f32 * GOLDEN_ANGLE + 0.15 * jitter(3, i);
         // Outer leaves lie out over the tray; the heart stands and closes.
-        let rise = 0.18 + 1.15 * youth.powf(1.4);
+        let rise = h.rise.0 + h.rise.1 * youth.powf(1.4);
         let forward = Vec3::new(azimuth.cos() * rise.cos(), rise.sin(), azimuth.sin() * rise.cos());
-        let out = Vec3::new(azimuth.cos(), 0.0, azimuth.sin()) * 0.006 * (1.0 - youth);
-        let width = length * aspect * (1.25 - 0.3 * youth);
-        let cup = 1.1 + 1.4 * youth;
+        let mut base = Vec3::new(azimuth.cos(), 0.0, azimuth.sin()) * 0.006 * (1.0 - youth) + Vec3::Y * 0.012 * youth;
+        if h.stalk > 0.0 {
+            let end = base + forward * (length * h.stalk);
+            parts.stem(&[base, (base + end) / 2.0 + Vec3::Y * length * 0.03, end], h.stalk_radius * (0.5 + 0.5 * s), 0.7, h.stalk_colour);
+            base = end;
+        }
+        let blade = length * (1.0 - h.stalk);
+        let width = blade * aspect * (1.25 - 0.3 * youth);
+        let cup = h.cup.0 + h.cup.1 * youth;
         let droop = 0.35 * (1.0 - youth) * grown;
-        leaves.leaf(out + Vec3::Y * 0.012 * youth, forward, Vec3::Y, length, width, cup, droop, 0.06, i % CELLS, true);
+        leaves.leaf(base, forward, Vec3::Y, blade, width, cup, droop, h.ruffle, i % CELLS, h.flip);
     }
-    Prefab { leaves: leaves.into_mesh().expect("a lettuce has leaves"), parts: None, fruit: None, height: 0.05 + 0.13 * s, radius: span }
+    let height = (0.05 + 0.13 * s).max(span * h.rise.0.sin() + 0.02);
+    Prefab { leaves: leaves.into_mesh().expect("a head has leaves"), parts: parts.into_mesh(), fruit: None, height, radius: span }
+}
+
+/// A leaf on its own stalk from `base`: the stalk along `forward` for
+/// `stalk` metres in `colour`, the blade standing on along `blade`.
+#[allow(clippy::too_many_arguments)]
+fn stalked(leaves: &mut Shape, parts: &mut Shape, base: Vec3, forward: Vec3, blade: Vec3, stalk: f32, length: f32, width: f32, cell: u32, colour: [f32; 4]) {
+    let forward = forward.normalize();
+    let end = base + forward * stalk;
+    parts.stem(&[base, (base + end) / 2.0 + Vec3::Y * stalk * 0.08, end], 0.0014, 0.7, colour);
+    leaves.leaf(end, blade, Vec3::Y, length, width, 0.45, 0.3, 0.0, cell, false);
+}
+
+/// A trifoliate leaf: a stalk from `base` along `forward`, and three
+/// leaflets at its end, the middle one longest.
+#[allow(clippy::too_many_arguments)]
+fn trifoliate(leaves: &mut Shape, parts: &mut Shape, base: Vec3, forward: Vec3, stalk: f32, leaflet: f32, aspect: f32, seed: u32) {
+    let forward = forward.normalize();
+    let side = forward.cross(Vec3::Y).normalize_or(Vec3::X);
+    let end = base + forward * stalk + Vec3::Y * stalk * 0.05;
+    parts.stem(&[base, base + forward * (stalk * 0.55) + Vec3::Y * (stalk * 0.12), end], 0.0014, 0.6, STEM_GREEN);
+    let ahead = (forward + Vec3::Y * 0.15).normalize();
+    leaves.leaf(end, ahead, Vec3::Y, leaflet * 1.1, leaflet * 1.1 * aspect, 0.4, 0.3, 0.0, seed % CELLS, false);
+    for flank in [-1.0f32, 1.0] {
+        let out = (side * flank + forward * 0.35).normalize();
+        leaves.leaf(end, out, Vec3::Y, leaflet * 0.9, leaflet * 0.9 * aspect, 0.4, 0.3, 0.0, (seed + 1 + (flank > 0.0) as u32) % CELLS, false);
+    }
+}
+
+/// Radish, carrot and beet: a few plants to a place, each a small rosette of
+/// stalked leaves over its swollen root, the root's shoulder showing at the
+/// surface once it fills out.
+fn root(species: &Species, s: f32, aspect: f32) -> Prefab {
+    let (plants, gap, shoulder, colour, most, flip) = match species.name {
+        "carrot" => (6, 0.035, 0.011, [0.93, 0.45, 0.10, 1.0], 9.0, true),
+        "red_beet" => (2, 0.07, 0.028, [0.38, 0.04, 0.12, 1.0], 8.0, false),
+        _ => (4, 0.045, 0.016, [0.82, 0.10, 0.18, 1.0], 6.0, false),
+    };
+    let start = setting(species);
+    let swell = ((s - start) / (1.0 - start)).clamp(0.0, 1.0);
+    let tall = 0.03 + (species.height_m as f32 * 0.95 - 0.03) * s;
+    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    let stalk_colour = if species.name == "red_beet" { [0.55, 0.08, 0.16, 1.0] } else { STEM_GREEN };
+    for p in 0..plants {
+        let (row, col) = ((p / 3) as f32, (p % 3) as f32);
+        let at = match plants {
+            2 => Vec3::new((p as f32 - 0.5) * gap, 0.0, 0.0),
+            4 => Vec3::new(((p % 2) as f32 - 0.5) * gap, 0.0, ((p / 2) as f32 - 0.5) * gap),
+            _ => Vec3::new((col - 1.0) * gap, 0.0, (row - 0.5) * gap),
+        } + Vec3::new(jitter(p, 1), 0.0, jitter(p, 2)) * gap * 0.15;
+        let count = 2 + (most * s) as u32;
+        for i in 0..count {
+            let azimuth = i as f32 * GOLDEN_ANGLE + p as f32;
+            let youth = i as f32 / count as f32;
+            let rise = 0.95 + 0.4 * youth;
+            let forward = Vec3::new(azimuth.cos() * rise.cos(), rise.sin(), azimuth.sin() * rise.cos());
+            let length = tall * (1.0 - 0.3 * youth) * (1.0 + 0.1 * jitter(p * 31, i));
+            let stalk = length * 0.35;
+            let end = at + forward * stalk;
+            parts.stem(&[at, end], 0.0012, 0.7, stalk_colour);
+            let blade = length - stalk;
+            leaves.leaf(end, forward, Vec3::Y, blade, blade * aspect * 1.1, 0.5, 0.25, 0.02, (p + i) % CELLS, flip);
+        }
+        if swell > 0.0 {
+            let r = shoulder * (0.25 + 0.75 * swell);
+            let (up, squash) = match species.name {
+                "carrot" => (0.2, 0.7),
+                "red_beet" => (0.4, 0.95),
+                _ => (0.25, 0.9),
+            };
+            parts.blob(at + Vec3::Y * (r * up), Vec3::Y, Vec3::new(r, r * squash, r), colour);
+        }
+    }
+    Prefab { leaves: leaves.into_mesh().expect("a root crop has leaves"), parts: parts.into_mesh(), fruit: None, height: tall, radius: gap + 0.5 * tall }
+}
+
+/// Green onions: a bunch of slender white shanks, each with a few hollow
+/// leaves standing up and leaning out at the tips.
+fn allium(species: &Species, s: f32, _aspect: f32) -> Prefab {
+    let tall = 0.04 + (species.height_m as f32 * 1.1 - 0.04) * s;
+    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    for b in 0..6 {
+        let a = b as f32 * GOLDEN_ANGLE;
+        let base = Vec3::new(a.cos(), 0.0, a.sin()) * 0.014 * (b > 0) as u8 as f32;
+        let shank = base + Vec3::new(a.cos() * 0.004, tall * 0.22, a.sin() * 0.004);
+        parts.stem(&[base, shank], 0.0035 + 0.002 * s, 0.85, [0.92, 0.94, 0.86, 1.0]);
+        for l in 0..(2 + (s * 2.5) as u32) {
+            let turn = a + l as f32 * 2.1;
+            let forward = Vec3::new(turn.cos() * 0.14, 1.0, turn.sin() * 0.14);
+            let length = tall * 0.8 * (1.0 - 0.15 * l as f32) * (1.0 + 0.08 * jitter(b, l));
+            // A blade curled hard about its midrib reads as a hollow leaf.
+            leaves.leaf(shank, forward, Vec3::Y, length, 0.006 + 0.004 * s, 3.5, 0.35, 0.0, (b + l) % CELLS, false);
+        }
+    }
+    Prefab { leaves: leaves.into_mesh().expect("onions have leaves"), parts: parts.into_mesh(), fruit: None, height: tall, radius: 0.03 + 0.08 * s }
+}
+
+/// A chile pepper (APH's 'Española Improved'): a stem that forks into a few
+/// branches with simple leaves on short stalks, small white flowers, then
+/// single pods hanging under the leaves, green and then red.
+fn shrub(species: &Species, s: f32, aspect: f32) -> Prefab {
+    let height = 0.06 + (species.height_m as f32 - 0.06) * s;
+    let (mut leaves, mut parts, mut fruit) = (Shape::default(), Shape::default(), Shape::default());
+    let fork = Vec3::Y * height * 0.3;
+    parts.stem(&[Vec3::ZERO, fork], 0.003 + 0.003 * s, 0.8, STEM_GREEN);
+    for k in 0..2 {
+        let azimuth = k as f32 * 2.4;
+        let out = Vec3::new(azimuth.cos(), 0.3, azimuth.sin());
+        let length = 0.035 + 0.05 * s;
+        stalked(&mut leaves, &mut parts, fork * (0.5 + 0.4 * k as f32), out, out, 0.012, length, length * aspect, k, STEM_GREEN);
+    }
+    let start = setting(species);
+    let ripe = ((s - start) / (1.0 - start)).clamp(0.0, 1.0);
+    let branches = 3 + (s * 2.0) as u32;
+    for b in 0..branches {
+        let lean = b as f32 * GOLDEN_ANGLE;
+        let top = fork + Vec3::new(lean.cos() * 0.3 * height, height * 0.7, lean.sin() * 0.3 * height);
+        let path: Vec<Vec3> = (0..7).map(|k| fork.lerp(top, k as f32 / 6.0) + Vec3::Y * 0.01 * (k as f32 * 0.6).sin()).collect();
+        parts.stem(&path, 0.0022 + 0.002 * s, 0.6, STEM_GREEN);
+        for k in 1..7 {
+            let azimuth = lean + k as f32 * GOLDEN_ANGLE;
+            let out = Vec3::new(azimuth.cos(), 0.35, azimuth.sin());
+            let length = (0.035 + 0.06 * s) * (1.1 - 0.1 * k as f32);
+            stalked(&mut leaves, &mut parts, path[k], out, out, 0.012, length, length * aspect, (b + k as u32) % CELLS, STEM_GREEN);
+            if (start - 0.15..start + 0.2).contains(&s) && k % 2 == 1 {
+                parts.blob(path[k] + Vec3::new(-azimuth.cos() * 0.012, -0.004, -azimuth.sin() * 0.012), Vec3::Y, Vec3::new(0.005, 0.003, 0.005), [0.95, 0.95, 0.92, 1.0]);
+            }
+            if s >= start && k % 2 == 0 {
+                let long = 0.012 + 0.04 * ripe;
+                let hang = path[k] + Vec3::new(-azimuth.cos() * 0.01, -0.006 - long * 0.5, -azimuth.sin() * 0.01);
+                let colour = [0.22 + 0.62 * ripe, 0.42 - 0.34 * ripe, 0.08, 1.0];
+                parts.stem(&[path[k], hang + Vec3::Y * long * 0.5], 0.0012, 0.9, STEM_GREEN);
+                fruit.blob(hang, Vec3::new(0.15 * azimuth.cos(), 1.0, 0.15 * azimuth.sin()), Vec3::new(0.0065, long * 0.5, 0.0065), colour);
+            }
+        }
+    }
+    Prefab { leaves: leaves.into_mesh().expect("a pepper has leaves"), parts: parts.into_mesh(), fruit: fruit.into_mesh(), height, radius: 0.05 + 0.12 * s }
+}
+
+/// A day-neutral strawberry: a crown of trifoliate leaves on long arching
+/// stalks, white flowers, then trusses hanging out past the leaves with
+/// berries going from green to white to red.
+fn crown(species: &Species, s: f32, aspect: f32) -> Prefab {
+    let (mut leaves, mut parts, mut fruit) = (Shape::default(), Shape::default(), Shape::default());
+    parts.blob(Vec3::Y * 0.008, Vec3::Y, Vec3::new(0.012, 0.01, 0.012), [0.36, 0.30, 0.16, 1.0]);
+    let count = 5 + (11.0 * s) as u32;
+    for i in 0..count {
+        let azimuth = i as f32 * GOLDEN_ANGLE;
+        let youth = i as f32 / count as f32;
+        let rise = 0.75 + 0.5 * youth;
+        let forward = Vec3::new(azimuth.cos() * rise.cos(), rise.sin(), azimuth.sin() * rise.cos());
+        let stalk = (0.04 + 0.11 * s) * (1.0 - 0.3 * youth);
+        trifoliate(&mut leaves, &mut parts, Vec3::Y * 0.01, forward, stalk, 0.025 + 0.03 * s, aspect, i);
+    }
+    let start = setting(species);
+    let ripe = ((s - start) / (1.0 - start)).clamp(0.0, 1.0);
+    if s > start - 0.2 {
+        for t in 0..3 {
+            let azimuth = t as f32 * 2.1 + 0.4;
+            let out = Vec3::new(azimuth.cos(), 0.0, azimuth.sin());
+            let reach = 0.09 + 0.06 * s;
+            let top = Vec3::Y * 0.06 + out * reach * 0.6;
+            let tip = out * reach + Vec3::Y * 0.035;
+            parts.stem(&[Vec3::Y * 0.01, top, tip], 0.0013, 0.7, STEM_GREEN);
+            for b in 0..3 {
+                let at = tip + Vec3::new(jitter(t, b), -0.6, jitter(b, t)) * 0.012 * b as f32;
+                if s < start {
+                    parts.blob(at, Vec3::Y, Vec3::new(0.008, 0.003, 0.008), [0.96, 0.96, 0.92, 1.0]);
+                } else {
+                    let r = 0.006 + 0.008 * ripe;
+                    let colour = if ripe < 0.5 { [0.55 + 0.8 * ripe, 0.70, 0.40 + 0.4 * ripe, 1.0] } else { [0.95, 0.70 - 1.2 * (ripe - 0.5), 0.60 - 1.0 * (ripe - 0.5), 1.0] };
+                    fruit.blob(at - Vec3::Y * r, Vec3::Y, Vec3::new(r, r * 1.3, r), colour);
+                    parts.blob(at, Vec3::Y, Vec3::new(r * 0.8, 0.002, r * 0.8), STEM_GREEN);
+                }
+            }
+        }
+    }
+    Prefab { leaves: leaves.into_mesh().expect("a strawberry has leaves"), parts: parts.into_mesh(), fruit: fruit.into_mesh(), height: 0.06 + 0.18 * s, radius: 0.06 + 0.12 * s }
+}
+
+/// Soybean, beans, pea and peanut: a stem with a couple of branches and a
+/// trifoliate leaf at every node (pea's leaflets in pairs), flowers mid-season,
+/// then pods: short and clustered on soybean, long on beans and peas, none to
+/// see on peanut, whose pods grow underground.
+fn legume(species: &Species, s: f32, aspect: f32) -> Prefab {
+    let height = 0.05 + (species.height_m as f32 - 0.05) * s;
+    let (mut leaves, mut parts, mut fruit) = (Shape::default(), Shape::default(), Shape::default());
+    let (pod, pod_r, per_node, flower) = match species.name {
+        "soybean" => (0.035, 0.0055, 3, [0.62, 0.42, 0.80, 1.0]),
+        "dry_bean" => (0.08, 0.0055, 2, [0.95, 0.94, 0.90, 1.0]),
+        "snap_bean" => (0.11, 0.0048, 2, [0.95, 0.94, 0.90, 1.0]),
+        "pea" => (0.065, 0.0065, 2, [0.96, 0.96, 0.98, 1.0]),
+        _ => (0.0, 0.0, 0, [0.98, 0.82, 0.18, 1.0]),
+    };
+    let start = setting(species);
+    let ripe = ((s - start) / (1.0 - start)).clamp(0.0, 1.0);
+    // Dry pods go from green to straw; snap beans are picked green.
+    let pod_colour = if species.edible == gearbox_greenhouse::Edible::Fruit {
+        [0.32, 0.56, 0.18, 1.0]
+    } else {
+        [0.34 + 0.42 * ripe, 0.54 + 0.08 * ripe, 0.18 + 0.20 * ripe, 1.0]
+    };
+    // Peanut spreads low from many branches; the rest stand up from one stem.
+    let low = species.name == "peanut";
+    let stems = if low { 2 + (s * 4.0) as u32 } else { 1 + (s * 2.0) as u32 };
+    for st in 0..stems {
+        let lean = st as f32 * GOLDEN_ANGLE + 0.3;
+        let splay = if low { 0.6 } else if st == 0 { 0.05 } else { 0.35 };
+        let tall = height * if low { 0.6 } else if st == 0 { 1.0 } else { 0.8 };
+        let path: Vec<Vec3> = (0..6)
+            .map(|k| {
+                let t = k as f32 / 5.0;
+                Vec3::new(lean.cos() * splay * tall * t, tall * t, lean.sin() * splay * tall * t)
+            })
+            .collect();
+        parts.stem(&path, 0.0022 + 0.0025 * s, 0.6, STEM_GREEN);
+        let nodes = 2 + (s * 4.0) as u32;
+        for k in 0..nodes {
+            let t = 0.25 + 0.75 * k as f32 / nodes as f32;
+            let at = path[((t * 5.0).round() as usize).min(5)];
+            let azimuth = lean + k as f32 * 2.6;
+            let out = Vec3::new(azimuth.cos(), 0.45, azimuth.sin());
+            let size = (0.025 + 0.03 * s) * (1.1 - 0.3 * t);
+            if species.name == "pea" {
+                compound(&mut leaves, &mut parts, at, out, size * 2.2, size * 0.7, aspect, 2, st * 5 + k);
+            } else {
+                trifoliate(&mut leaves, &mut parts, at, out, 0.03 + 0.04 * s, size, aspect, st * 5 + k);
+            }
+            let flowering = (start - 0.2..start + 0.1).contains(&s);
+            if flowering && k % 2 == 0 {
+                parts.blob(at + Vec3::new(-azimuth.cos(), 0.2, -azimuth.sin()) * 0.01, Vec3::Y, Vec3::new(0.004, 0.003, 0.004), flower);
+            }
+            if s >= start && pod > 0.0 && t < 0.9 {
+                for p in 0..per_node {
+                    let a = azimuth + PI_HALF + p as f32 * 0.7;
+                    let hang = at + Vec3::new(a.cos() * 0.01, -0.004, a.sin() * 0.01);
+                    let long = pod * (0.4 + 0.6 * ripe.max(0.3));
+                    let axis = Vec3::new(a.cos() * 0.35, -1.0, a.sin() * 0.35);
+                    let target = if species.edible == gearbox_greenhouse::Edible::Fruit { &mut fruit } else { &mut parts };
+                    target.blob(hang + axis.normalize() * long * 0.5, axis, Vec3::new(pod_r, long * 0.5, pod_r * 0.6), pod_colour);
+                }
+            }
+        }
+    }
+    Prefab { leaves: leaves.into_mesh().expect("a legume has leaves"), parts: parts.into_mesh(), fruit: fruit.into_mesh(), height, radius: 0.06 + 0.16 * s }
+}
+
+const PI_HALF: f32 = std::f32::consts::FRAC_PI_2;
+
+/// Sweet potato: vines trailing out over the bed from the crown, with a
+/// heart-shaped leaf standing up on a long stalk at every node.
+fn creeper(species: &Species, s: f32, aspect: f32) -> Prefab {
+    let (mut leaves, mut parts) = (Shape::default(), Shape::default());
+    let vines = 3 + (s * 4.0) as u32;
+    let reach = 0.05 + 0.21 * s;
+    let tall = species.height_m as f32 * 0.45 * s;
+    for v in 0..vines {
+        let azimuth = v as f32 * GOLDEN_ANGLE;
+        let out = Vec3::new(azimuth.cos(), 0.0, azimuth.sin());
+        let long = reach * (0.8 + 0.2 * jitter(v, 3).abs());
+        let path: Vec<Vec3> = (0..6).map(|k| {
+            let t = k as f32 / 5.0;
+            out * long * t + Vec3::Y * (0.02 + 0.03 * (t * std::f32::consts::PI).sin())
+        }).collect();
+        parts.stem(&path, 0.0025, 0.6, [0.42, 0.40, 0.18, 1.0]);
+        let nodes = 2 + (s * 4.0) as u32;
+        for k in 0..nodes {
+            let t = (k + 1) as f32 / (nodes + 1) as f32;
+            let at = path[((t * 5.0).round() as usize).min(5)];
+            let side = out.cross(Vec3::Y) * if k % 2 == 0 { 1.0 } else { -1.0 };
+            let up = (Vec3::Y + side * 0.25 + out * 0.2).normalize();
+            let length = (0.035 + 0.045 * s) * (1.0 + 0.1 * jitter(v, k));
+            let stalk = 0.03 + tall * 0.6 * (1.0 - 0.4 * t);
+            let blade = (out * 0.6 + side * 0.3 + Vec3::Y * 0.35).normalize();
+            stalked(&mut leaves, &mut parts, at, up, blade, stalk, length, length * aspect, (v + k) % CELLS, STEM_GREEN);
+        }
+    }
+    Prefab { leaves: leaves.into_mesh().expect("a sweet potato has leaves"), parts: parts.into_mesh(), fruit: None, height: 0.05 + tall, radius: reach }
 }
 
 /// A compound leaf: a rachis from `base` along `forward`, arching over under
@@ -324,12 +722,14 @@ fn potato(species: &Species, s: f32, aspect: f32) -> Prefab {
     Prefab { leaves: leaves.into_mesh().expect("a potato has leaves"), parts: parts.into_mesh(), fruit: None, height, radius: 0.08 + 0.2 * s }
 }
 
-/// Wheat: tillers of arching blades, each stem ending in an ear once it heads,
-/// green going gold as the grain ripens.
-fn wheat(species: &Species, s: f32, aspect: f32) -> Prefab {
+/// Wheat and rice: tillers of arching blades, each stem ending in an ear
+/// (wheat) or a drooping panicle (rice) once it heads, green going gold as
+/// the grain ripens.
+fn grass(species: &Species, s: f32, aspect: f32) -> Prefab {
+    let rice = species.name == "rice";
     let height = 0.06 + (species.height_m as f32 - 0.06) * s;
     let (mut leaves, mut parts) = (Shape::default(), Shape::default());
-    let tillers = 2 + (s * 4.0) as u32;
+    let tillers = if rice { 3 + (s * 6.0) as u32 } else { 2 + (s * 4.0) as u32 };
     let heading = ((species.edible_days / species.harvest_days) as f32 * 0.85).min(0.9);
     let gold = ((s - heading) / (1.0 - heading)).clamp(0.0, 1.0);
     let straw = [0.30 + 0.48 * gold, 0.48 + 0.20 * gold, 0.16 + 0.12 * gold, 1.0];
@@ -346,7 +746,22 @@ fn wheat(species: &Species, s: f32, aspect: f32) -> Prefab {
             let out = Vec3::new(a.cos() * 0.4, 1.0, a.sin() * 0.4);
             leaves.leaf(at, out, Vec3::Y, length, length * aspect * 0.5, 0.35, 0.95, 0.0, (t + b) % CELLS, false);
         }
-        if s >= heading {
+        if s >= heading && rice {
+            // A panicle arches over from the top, its spikelets on short branches hanging off it.
+            let out = Vec3::new(lean.cos(), 0.0, lean.sin());
+            let arch: Vec<Vec3> = (0..6).map(|k| {
+                let t = k as f32 / 5.0;
+                top + Vec3::Y * (0.06 * t * (1.0 - 0.9 * t)) + out * (0.07 * t) - Vec3::Y * (0.05 * t * t * gold.max(0.4))
+            }).collect();
+            parts.stem(&arch, 0.0012, 0.6, straw);
+            for (k, at) in arch.iter().enumerate().skip(1) {
+                for b in 0..3 {
+                    let a = lean + b as f32 * 2.1 + k as f32;
+                    let grain = *at + Vec3::new(a.cos() * 0.006, -0.006 - 0.004 * b as f32, a.sin() * 0.006);
+                    parts.blob(grain, Vec3::new(a.cos(), -1.0, a.sin()), Vec3::new(0.0018, 0.0042, 0.0016), straw);
+                }
+            }
+        } else if s >= heading {
             for k in 0..9 {
                 let at = top + Vec3::Y * (0.008 * k as f32);
                 for flank in [-1.0f32, 1.0] {
@@ -356,7 +771,7 @@ fn wheat(species: &Species, s: f32, aspect: f32) -> Prefab {
             }
         }
     }
-    Prefab { leaves: leaves.into_mesh().expect("wheat has leaves"), parts: parts.into_mesh(), fruit: None, height, radius: 0.04 + 0.08 * s }
+    Prefab { leaves: leaves.into_mesh().expect("a grass has leaves"), parts: parts.into_mesh(), fruit: None, height, radius: 0.04 + 0.08 * s }
 }
 
 #[cfg(test)]
@@ -400,8 +815,9 @@ mod tests {
     fn every_atlas_decodes_with_its_cells() {
         use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
         for species in ALL {
+            let atlas = atlas(species);
             let image = Image::from_buffer(
-                atlas(species),
+                atlas.png,
                 ImageType::Extension("png"),
                 CompressedImageFormats::NONE,
                 true,
@@ -410,7 +826,7 @@ mod tests {
             )
             .expect("png");
             let cell = image.width() / CELLS;
-            assert!((cell as f32 / image.height() as f32 - cell_aspect(species.form)).abs() < 0.01);
+            assert!((cell as f32 / image.height() as f32 - atlas.aspect).abs() < 0.01);
             // Some texels are cut away and some kept: the leaves' outlines.
             let alphas: Vec<f32> = (0..image.width()).step_by(7).map(|x| image.get_color_at(x, image.height() / 2).unwrap().alpha()).collect();
             assert!(alphas.iter().any(|a| *a < 0.1) && alphas.iter().any(|a| *a > 0.9), "{}", species.name);
@@ -452,7 +868,7 @@ mod export {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/crops/prefabs");
         std::fs::create_dir_all(&dir).unwrap();
         for species in ALL {
-            std::fs::write(dir.join(format!("{}_leaves.png", species.name)), atlas(species)).unwrap();
+            std::fs::write(dir.join(format!("{}_leaves.png", species.name)), atlas(species).png).unwrap();
             let mtl = format!(
                 "newmtl leaves\nmap_Kd {0}_leaves.png\nmap_d {0}_leaves.png\nnewmtl parts\nKd 1 1 1\nnewmtl fruit\nKd 1 1 1\n",
                 species.name

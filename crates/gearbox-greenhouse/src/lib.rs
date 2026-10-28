@@ -20,5 +20,5 @@ pub use house::{Event, Fault, House, PlantId, Room, Tray};
 pub use lamp::{Channels, Lamp};
 pub use plant::{Exchange, Plant, Stage, Surroundings};
 pub use power::Power;
-pub use species::{Edible, Form, Species};
+pub use species::{Edible, Form, Nutrition, Species};
 pub use water::{Medium, Tank};

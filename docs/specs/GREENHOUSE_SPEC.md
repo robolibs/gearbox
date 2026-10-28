@@ -75,7 +75,7 @@ wall conductance (22 W/K) and heat capacity (6 MJ/K) are fixed per room.
 
 | Attribute | Type | Default | Meaning |
 |---|---|---|---|
-| `gearbox:tray:species` | token | required | `lettuce`, `tomato`, `potato` or `wheat`. |
+| `gearbox:tray:species` | token | required | A crop name from §2: `lettuce`, `wheat`, `sweet_potato`, `red_beet` and so on. |
 | `gearbox:tray:zone` | token | first room | The room it stands in; its tank waters it. |
 | `gearbox:tray:size` | float2 | (0.6, 0.4) | Growing area, m, in the prim's X and Y. |
 | `gearbox:tray:slots` | int2 | (2, 1) | Plant places in columns and rows; each place holds `area × density / places` plants. |
@@ -109,6 +109,16 @@ spot's origin.
   quantum yield and carbon use in light, CO2 and temperature; transpiration
   from the vapour deficit at total pressure; edible share after the edible
   onset. Stages are seed, seedling, vegetative, forming, ripe, dead.
+- 21 crops. The nine MEC crops carry BVAD's own fits: lettuce, tomato,
+  potato, wheat, soybean, dry bean, peanut, rice and sweet potato. The
+  others borrow a relative's fits, scaled to yield their BVAD productivity:
+  spinach, chard, kale, pak choi, green onion, radish, carrot, red beet,
+  pepper, strawberry, pea and snap bean. Each crop has a food value per
+  kilogram (kcal, protein, fat).
+  - Crops grown on the ISS keep their cultivar: 'Red Russian' kale, 'Extra
+    Dwarf' pak choi, 'Cherry Belle' radish and 'Española Improved' chile.
+  - Each crop is drawn as one of ten forms: rosette, root, allium, vine,
+    shrub, crown, bush, creeper, legume and grass.
 - Each room is a ledger of moles of N2, O2, CO2 and water with heat: crops
   exchange gas and water with it, HVAC, dehumidifier, CO2 feed and makeup gas
   hold the setpoints, walls lose heat to the outside air, a breach leaks.
