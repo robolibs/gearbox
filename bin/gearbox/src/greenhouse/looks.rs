@@ -33,10 +33,12 @@ impl Tint {
     const ALL: [Self; 5] = [Self::Sound, Self::Pale, Self::Yellow, Self::Mouldy, Self::Dead];
 
     fn of(plant: &Plant) -> Self {
-        // Crops that die back as they ripen yellow in their last days.
-        let ripening = plant.species.senescence_days.is_some()
+        // Crops that die back as they ripen yellow in their last days, and fruit
+        // crops once spent.
+        let ripening = (plant.species.senescence_days.is_some()
             && matches!(plant.species.edible, Edible::Tuber | Edible::Grain)
-            && plant.maturity() > 0.88;
+            && plant.maturity() > 0.88)
+            || plant.stage() == gearbox_greenhouse::Stage::Spent;
         if !plant.alive {
             Self::Dead
         } else if plant.mould > 0.35 {
