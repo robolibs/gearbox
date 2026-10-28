@@ -406,9 +406,9 @@ fn pre_grow(house: &mut House, tray: usize, species: &'static Species, days: f64
     let cycle = house.cycle_hours;
     let glazed = house.rooms[house.trays[tray].room].glazing > 0.0;
     // Which hours of the day are lit, by the lamps or by the sun under glass.
-    let day: Vec<bool> = (0..cycle.ceil().max(1.0) as usize)
-        .map(|h| house.lamps[lamp].scheduled(h as f64, cycle) || (glazed && house.sunlit(h as f64)))
-        .collect();
+    let lit_hours = (0..cycle.ceil().max(1.0) as usize)
+        .filter(|&h| house.lamps[lamp].scheduled(h as f64, cycle) || (glazed && house.sunlit(h as f64)))
+        .count() as f64;
     for slot in 0..slots {
         let id = PlantId { tray, slot };
         if house.sow(id, species).is_err() {
@@ -417,16 +417,22 @@ fn pre_grow(house: &mut House, tray: usize, species: &'static Species, days: f64
         let age = (days * (0.92 + 0.16 * scatter(tray, slot, 3) as f64)).max(0.0);
         let Some(mut around) = house.surroundings(tray, 12.0) else { continue };
         around.water = 1.0;
-        let hours = (age * 24.0).round() as usize;
+        let lit = Surroundings { ppf: around.lit_ppf, ..around };
+        let dark = Surroundings { ppf: 0.0, ..around };
         let plant = house.trays[tray].slots[slot].as_mut().expect("just sown");
-        for h in 0..hours {
-            // Grown at load as if tended: its flowers buzzed every day.
-            if h % 24 == 0 && plant.flowering() {
+        // A sol at a time, its lit hours in one step and its dark in another:
+        // what the plant gains and breathes over a sol is the same.
+        let mut left = age * 24.0;
+        while left > 0.0 {
+            // Grown at load as if tended: its flowers buzzed every sol.
+            if plant.flowering() {
                 plant.pollinate();
             }
-            let lit = day[((h as f64).rem_euclid(cycle) as usize).min(day.len() - 1)];
-            let here = Surroundings { ppf: if lit { around.lit_ppf } else { 0.0 }, ..around };
-            plant.grow(3600.0, &here);
+            let sol = left.min(cycle);
+            let lit_h = lit_hours.min(sol);
+            plant.grow(lit_h * 3600.0, &lit);
+            plant.grow((sol - lit_h) * 3600.0, &dark);
+            left -= sol;
         }
     }
 }

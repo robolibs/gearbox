@@ -319,13 +319,15 @@ impl Plant {
         self.sown_days += days;
         let warmth = s.temperature_factor(around.temperature_c);
         if !self.emerged {
+            // A seed that sprouts grows on through the rest of the step.
             let sprouts = around.perchlorate < PERCHLORATE_LIMIT && around.water > 0.3 && warmth > 0.0;
-            if sprouts {
-                self.emerged = true;
-            } else if self.sown_days > GERMINATION_DAYS {
-                self.die();
+            if !sprouts {
+                if self.sown_days > GERMINATION_DAYS {
+                    self.die();
+                }
+                return Exchange::default();
             }
-            return Exchange::default();
+            self.emerged = true;
         }
 
         self.stress(days, around);
@@ -506,6 +508,23 @@ mod tests {
             })
             .collect();
         assert!(off.is_empty(), "{off:#?}");
+    }
+
+    #[test]
+    fn a_day_grown_in_two_steps_grows_as_one_grown_hour_by_hour() {
+        let around = Surroundings::nominal(&LETTUCE, 300.0);
+        let (lit, dark) = (Surroundings { ppf: 300.0, ..around }, Surroundings { ppf: 0.0, ..around });
+        let (mut hourly, mut daily) = (Plant::sown(&LETTUCE), Plant::sown(&LETTUCE));
+        for _ in 0..20 {
+            for hour in 0..24 {
+                hourly.grow(3600.0, if hour < 16 { &lit } else { &dark });
+            }
+            daily.grow(16.0 * 3600.0, &lit);
+            daily.grow(8.0 * 3600.0, &dark);
+        }
+        let ratio = daily.biomass_g / hourly.biomass_g;
+        assert!((0.9..1.1).contains(&ratio), "{} g a day at a time, {} g by the hour", daily.biomass_g, hourly.biomass_g);
+        assert!((daily.age_days - hourly.age_days).abs() < 0.01);
     }
 
     #[test]
