@@ -102,6 +102,9 @@ Crops, rooms and faults of a greenhouse world
 | `sow [OPTIONS] <TRAY> <SPECIES>` | Sow a crop in a tray's empty places, or in one place |
 | `harvest [OPTIONS] <TARGET>` | Take in one plant (TRAY/SLOT) or every ripe plant of a tray |
 | `clear [OPTIONS] <PLANT>` | Lift whatever stands in one place, dead or alive |
+| `pollinate [OPTIONS] <TARGET>` | Buzz or brush the open flowers of one plant (TRAY/SLOT) or a whole tray |
+| `lift [OPTIONS] <PLANT>` | Lift a seedling (TRAY/SLOT) out of its place, into a machine's gripper if `--by` |
+| `place [OPTIONS] <PLANT>` | Set a lifted seedling in an empty place (TRAY/SLOT) |
 | `wash <TRAY>` | Wash the perchlorate out of a regolith tray |
 | `amend [OPTIONS] <TRAY>` | Work organic matter into a regolith tray |
 | `lamps [OPTIONS] <TRAY>` | Set the spectrum or output of a tray's lamps (`all` for every tray) |
