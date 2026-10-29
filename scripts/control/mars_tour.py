@@ -61,21 +61,20 @@ def tour() -> list[dict]:
 
     beat(0, place(5, -20, 0, 230, 34, 270))
     beat(8, place(5, -30, 0, 295, 26, 190), "A Mars base for a crew of twelve, Jezero crater")
-    # Harvest, the arches from C back to A. Each move takes about four
-    # seconds and one more for every twelve metres it covers, at most
-    # twelve; a short move or a hold turns the view by no more than about
-    # forty degrees, so nothing swings past faster than a slow pan.
-    beat(9.5, machine("archcpicker2", 300, 40, 4.5, compass=True))
-    beat(7, machine("archcpicker2", 330, 34, 4.0, compass=True), "Harvest: wheat and pulses in deep troughs")
-    beat(5.5, machine("archbpicker1", 330, 40, 4.0, compass=True))
-    beat(7, machine("archbpicker1", 300, 36, 4.0, compass=True), "A UR10e on a mobile base picks tomatoes and peppers")
-    # Up over the washers' bridges between the arches, not past them.
+    # Harvest, the arches from C back to A, seen down through their roofs:
+    # the eye never goes into a building, and stays 12 m up or more over
+    # the arches, clear of the washers' girders (7.6 m). Each move takes
+    # about four seconds and one more for every twelve metres it covers, at
+    # most twelve; a short move or a hold turns the view by no more than
+    # about forty degrees, so nothing swings past faster than a slow pan.
+    beat(9.5, machine("archcpicker2", 300, 70, 13.0, compass=True))
+    beat(7, machine("archcpicker2", 330, 66, 13.0, compass=True), "Harvest: wheat and pulses in deep troughs")
+    beat(5.5, machine("archbpicker1", 330, 70, 13.0, compass=True))
+    beat(7, machine("archbpicker1", 300, 66, 13.0, compass=True), "A UR10e on a mobile base picks tomatoes and peppers")
     beat(6, place(29, -69.5, 6, 300, 50, 22), "Washers brush the dust off the arch glazing")
-    beat(6, place(31, -62, 2.0, 345, 12, 8))
-    beat(6, place(33, -62, 2.0, 0, 14, 7), "Salad in channels down an arch, a ridge gantry over them")
-    # Out through the arch's west side, then glass and panels.
+    beat(6, place(31, -62, 5, 345, 55, 13))
+    beat(6, place(33, -62, 5, 0, 50, 13), "Salad in channels down an arch, a ridge gantry over them")
     # West of dome A on the way to B, clear of its lattice.
-    beat(5, place(30, -45, 6.0, 300, 20, 8))
     beat(10.5, place(62, 20, 4, 250, 45, 34))
     beat(6, place(62, 20, 4, 220, 32, 26), "The dome washer sweeps the geodesic glass")
     beat(11.5, machine("solarwasher2", 300, 25, 10.0, compass=True))
