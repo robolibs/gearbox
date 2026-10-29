@@ -21,6 +21,7 @@ use bevy::app::MainScheduleOrder;
 use bevy::ecs::component::Mutable;
 use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
 use bevy::prelude::*;
+use bevy::time::TimeUpdateStrategy;
 
 use super::PhysicsActive;
 use super::world::{ControlTick, MAX_STEPS_PER_FRAME, PhysicsWorld, StepStats, tick};
@@ -338,6 +339,17 @@ fn join(world: &mut World) {
     world.insert_resource(thread);
 }
 
+/// The steps a frame takes while the app's clock is stepped by hand, as a
+/// recording steps it: exactly the frame's worth, so world time keeps to
+/// the frames however long they take to render.
+fn hand_stepped(world: &World) -> Option<u32> {
+    let TimeUpdateStrategy::ManualDuration(frame) = world.get_resource::<TimeUpdateStrategy>()? else {
+        return None;
+    };
+    let hz = world.resource::<PhysicsWorld>().step_hz;
+    Some(((frame.as_secs_f64() * hz).round() as u32).max(1))
+}
+
 /// Hand the physics to the thread after the frame's last reader. A paused
 /// clock keeps it on the frame.
 fn launch(world: &mut World) {
@@ -356,13 +368,17 @@ fn launch(world: &mut World) {
         budget.0 = (left > steps).then_some(left - steps);
         Some((steps, budget.0.is_none()))
     });
-    let plan = match budget {
-        Some((steps, last)) => {
+    let plan = match (budget, hand_stepped(world)) {
+        (Some((steps, last)), _) => {
             world.resource_mut::<PhysicsWorld>().pause_after_steps = last;
             thread.origin = Instant::now();
             Plan::Exact(steps)
         }
-        None => Plan::RealTime { origin: thread.origin, hz: world.resource::<PhysicsWorld>().step_hz },
+        (None, Some(steps)) => {
+            thread.origin = Instant::now();
+            Plan::Exact(steps)
+        }
+        (None, None) => Plan::RealTime { origin: thread.origin, hz: world.resource::<PhysicsWorld>().step_hz },
     };
     let mut tick = thread.idle.take().expect("physics thread world");
     let resources = world.remove_resource::<TickResources>().unwrap_or_default();
@@ -492,6 +508,19 @@ mod tests {
         run(&mut app, 4);
         assert_eq!(app.world().resource::<PhysicsWorld>().ticks, 5);
         assert!(!app.world().resource::<PhysicsActive>().0);
+    }
+
+    #[test]
+    fn a_clock_stepped_by_hand_steps_the_physics_a_frame_s_worth_a_frame() {
+        let (mut app, _) = app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(1.0 / 60.0)));
+        let per_frame = (app.world().resource::<PhysicsWorld>().step_hz / 60.0).round() as u64;
+        for _ in 0..6 {
+            app.update();
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        app.world_mut().run_schedule(PhysicsJoin);
+        assert_eq!(app.world().resource::<PhysicsWorld>().ticks, 6 * per_frame, "slow frames lost or gained steps");
     }
 
     #[test]
