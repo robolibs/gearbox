@@ -60,38 +60,42 @@ def tour() -> list[dict]:
         beats.append({"over": over, "look": look, "caption": caption})
 
     beat(0, place(5, -20, 0, 230, 34, 270))
-    beat(9, place(5, -30, 0, 295, 26, 190), "A Mars base for a crew of twelve, Jezero crater")
-    # Harvest: the dome, then the arches from C back to A. Each move keeps
-    # the eye on the far side of where it is heading, so what it looks at
-    # leaves a building's glass and comes in through the next before it does.
-    beat(6, machine("domeabot", 290, 40, 9.0, compass=True))
-    beat(7, machine("domeabot", 320, 34, 8.0, compass=True), "Harvest: a polar gantry over the dome's soil beds")
-    beat(7.5, machine("archcpicker2", 300, 40, 4.5, compass=True))
-    beat(8, machine("archcpicker2", 110, 34, 4.0, compass=True), "Wheat and pulses in deep troughs")
-    beat(4.5, machine("archbpicker1", 110, 40, 4.0, compass=True))
-    beat(8, machine("archbpicker1", 80, 36, 4.0, compass=True), "A UR10e on a mobile base picks tomatoes and peppers")
-    beat(5, place(31, -62, 2.0, 165, 12, 8))
-    beat(7, place(36, -62, 2.0, 150, 14, 7), "Salad in channels down an arch, a ridge gantry over them")
+    beat(8, place(5, -30, 0, 295, 26, 190), "A Mars base for a crew of twelve, Jezero crater")
+    # Harvest, the arches from C back to A. Each move takes about four
+    # seconds and one more for every twelve metres it covers, at most
+    # twelve; a short move or a hold turns the view by no more than about
+    # forty degrees, so nothing swings past faster than a slow pan.
+    beat(9.5, machine("archcpicker2", 300, 40, 4.5, compass=True))
+    beat(7, machine("archcpicker2", 330, 34, 4.0, compass=True), "Harvest: wheat and pulses in deep troughs")
+    beat(5.5, machine("archbpicker1", 330, 40, 4.0, compass=True))
+    beat(7, machine("archbpicker1", 300, 36, 4.0, compass=True), "A UR10e on a mobile base picks tomatoes and peppers")
+    # Up over the washers' bridges between the arches, not past them.
+    beat(6, place(29, -69.5, 6, 300, 50, 22), "Washers brush the dust off the arch glazing")
+    beat(6, place(31, -62, 2.0, 345, 12, 8))
+    beat(6, place(33, -62, 2.0, 0, 14, 7), "Salad in channels down an arch, a ridge gantry over them")
     # Out through the arch's west side, then glass and panels.
-    beat(4, place(33, -51, 1.5, 110, 18, 5))
-    beat(6.5, place(62, 20, 4, 120, 38, 30))
-    beat(8, place(62, 20, 4, 170, 32, 26), "The dome washer sweeps the geodesic glass")
-    beat(6, machine("solarwasher2", 120, 25, 10.0))
-    beat(7, machine("solarwasher2", 60, 30, 9.0), "Panel washers keep the arrays clean")
+    # West of dome A on the way to B, clear of its lattice.
+    beat(5, place(30, -45, 6.0, 300, 20, 8))
+    beat(10.5, place(62, 20, 4, 250, 45, 34))
+    beat(6, place(62, 20, 4, 220, 32, 26), "The dome washer sweeps the geodesic glass")
+    beat(11.5, machine("solarwasher2", 300, 25, 10.0, compass=True))
+    beat(6, machine("solarwasher2", 260, 30, 9.0, compass=True), "Panel washers keep the arrays clean")
     # Soil.
-    beat(6, machine("digger3", 340, 32, 7.0, compass=True))
-    beat(9, machine("digger3", 15, 28, 6.0, compass=True), "Excavators dig regolith for the soil works")
-    beat(4, machine("digger2", 300, 24, 5.5, compass=True))
-    beat(7, machine("digger2", 250, 22, 5.0, compass=True), "Loads tipped into the soil bays")
-    beat(5, place(-99, 0, 1, 300, 28, 32))
-    beat(8, place(-120, -5, 2, 245, 20, 26), "Water from the ice well; oxygen and methane from the air")
+    beat(12, machine("digger3", 340, 24, 6.0, compass=True))
+    beat(7, machine("digger3", 15, 20, 5.0, compass=True), "Excavators dig regolith for the soil works")
+    beat(4.5, machine("digger2", 10, 24, 5.5, compass=True))
+    beat(6, machine("digger2", 340, 22, 5.0, compass=True), "Loads tipped into the soil bays")
+    # Up over the soil works rather than through them.
+    beat(5.5, place(-112, 30, 2, 340, 45, 40))
+    beat(7, place(-99, 0, 1, 300, 28, 32))
+    beat(6, place(-120, -5, 2, 245, 20, 26), "Water from the ice well; oxygen and methane from the air")
     # The habitat, the pad, and the base from above.
-    beat(6, place(-39.5, -91.5, 6, 200, 16, 32))
-    beat(7, place(-39.5, -91.5, 6, 245, 20, 29), "MARSHA, a habitat printed from regolith")
-    beat(7, place(-205, -150, 5, 230, 20, 70))
-    beat(8, place(-215, -155, 5, 285, 16, 55), "The Starship pad, fuelled from the base")
-    beat(7, place(-10, -42, 0, 250, 30, 90))
-    beat(10, place(10, -30, 0, 300, 42, 360))
+    beat(12, place(-39.5, -91.5, 6, 200, 16, 32))
+    beat(6, place(-39.5, -91.5, 6, 250, 20, 29), "MARSHA, a habitat printed from regolith")
+    beat(12, place(-205, -150, 5, 230, 20, 70))
+    beat(6, place(-215, -155, 5, 285, 16, 55), "The Starship pad, fuelled from the base")
+    beat(12, place(-10, -42, 0, 250, 30, 90))
+    beat(9, place(10, -30, 0, 300, 42, 360))
     return beats
 
 
