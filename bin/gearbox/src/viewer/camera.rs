@@ -55,8 +55,17 @@ const PAN_FLOOR_M: f64 = 0.01;
 /// How high a long move lifts the eye over its middle, a share of the ground
 /// it covers beyond the eye's own distance, and how far back it draws the eye
 /// for each metre it lifts it.
-const CRANE_LIFT: f64 = 0.5;
-const CRANE_BACK: f64 = 0.35;
+const CRANE_LIFT: f64 = 0.2;
+const CRANE_BACK: f64 = 1.0;
+/// How far the eye's own moves lag the place it looks at over a long move.
+const CRANE_TRAIL: f64 = 0.3;
+
+/// The easing of every scripted move, `t` of its time to the share of its
+/// way: at rest at both ends, with no jolt as it sets off or stops.
+pub fn ease(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+}
 
 /// Where the view is. The one piece of camera state; everything else is
 /// derived from it every frame.
@@ -148,15 +157,15 @@ impl View {
     /// the more the further that goes: its distance, bearing and pitch lag
     /// the place looked at, which leaves and arrives first. A move short
     /// against the eye's distance just pans; a longer one lifts the eye once
-    /// under way, mostly straight up, looking down more steeply, and lowers
-    /// it as it arrives.
+    /// under way and draws it back as far as it lifts it, so it looks down
+    /// no more than halfway to straight down, and lowers it as it arrives.
     pub fn over(from: &Self, to: &Self, t: f64) -> Self {
         let t = t.clamp(0.0, 1.0);
         let travel = Geodetic::new(from.at.latitude, from.at.longitude, 0.0)
             .ecef()
             .distance(Geodetic::new(to.at.latitude, to.at.longitude, 0.0).ecef());
         let reach = from.distance_m.max(to.distance_m);
-        let trail = t.powf(1.0 + travel / (travel + from.distance_m.min(to.distance_m)));
+        let trail = t.powf(1.0 + CRANE_TRAIL * travel / (travel + from.distance_m.min(to.distance_m)));
         let mut view = Self { at: Self::between(from, to, t, true).at, ..Self::between(from, to, trail, true) };
         let lift = CRANE_LIFT * (travel - reach).max(0.0) * (std::f64::consts::PI * trail).sin();
         let pitch = view.pitch_deg.to_radians();
@@ -215,7 +224,66 @@ pub struct MoveView;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<View>()
-            .add_systems(Update, (orbit, pan, zoom, fly).chain().in_set(MoveView));
+            .add_systems(Update, (orbit, pan, zoom, fly).chain().in_set(MoveView))
+            .add_systems(PostUpdate, clear_glass_near_eye.after(TransformSystems::Propagate));
+    }
+}
+
+/// Glass is a blended material no more opaque than this, or one whose
+/// opacity is drawn from its texture, as a foil's is.
+const GLASS_ALPHA: f32 = 0.35;
+/// Within the first distance of a pane, or inside its bounds, the eye sees
+/// none of that glass; beyond the second, all of it.
+const GLASS_CLEAR_M: f32 = 1.5;
+const GLASS_SHOWN_M: f32 = 6.0;
+
+/// Fades every glass material out as the eye nears or enters a pane of it,
+/// and back as the eye leaves.
+fn clear_glass_near_eye(
+    eye: Query<&GlobalTransform, With<ChaseCamera>>,
+    panes: Query<(&MeshMaterial3d<StandardMaterial>, &GlobalTransform, &bevy::camera::primitives::Aabb)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut glass: Local<std::collections::HashMap<AssetId<StandardMaterial>, Option<f32>>>,
+) {
+    let Ok(eye) = eye.single() else {
+        return;
+    };
+    let eye = eye.translation();
+    let mut nearest = std::collections::HashMap::<AssetId<StandardMaterial>, f32>::new();
+    for (material, at, bounds) in &panes {
+        let id = material.id();
+        let alpha = match glass.get(&id) {
+            Some(alpha) => *alpha,
+            None => {
+                let Some(m) = materials.get(id) else {
+                    continue;
+                };
+                let see_through = m.base_color.alpha() <= GLASS_ALPHA || m.base_color_texture.is_some();
+                let alpha = (m.alpha_mode == AlphaMode::Blend && see_through).then_some(m.base_color.alpha());
+                glass.insert(id, alpha);
+                alpha
+            }
+        };
+        if alpha.is_none() {
+            continue;
+        }
+        let local = at.affine().inverse().transform_point3(eye);
+        let outside = (Vec3::from(local) - Vec3::from(bounds.center)).abs() - Vec3::from(bounds.half_extents);
+        let away = outside.max(Vec3::ZERO).length();
+        nearest.entry(id).and_modify(|d| *d = d.min(away)).or_insert(away);
+    }
+    for (id, alpha) in glass.iter() {
+        let Some(alpha) = alpha else {
+            continue;
+        };
+        let away = nearest.get(id).copied().unwrap_or(f32::INFINITY);
+        let t = ((away - GLASS_CLEAR_M) / (GLASS_SHOWN_M - GLASS_CLEAR_M)).clamp(0.0, 1.0);
+        let want = alpha * t * t * (3.0 - 2.0 * t);
+        if materials.get(*id).is_some_and(|m| (m.base_color.alpha() - want).abs() > 1e-3)
+            && let Some(mut m) = materials.get_mut(*id)
+        {
+            m.base_color.set_alpha(want);
+        }
     }
 }
 
@@ -388,6 +456,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn glass_clears_round_an_eye_inside_it_and_comes_back_as_the_eye_leaves() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>()
+            .add_systems(Update, clear_glass_near_eye);
+        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+        let glass = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.7, 0.8, 0.8, 0.15),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        });
+        let foil = materials.add(StandardMaterial {
+            base_color_texture: Some(Handle::default()),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        });
+        let algae = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.1, 0.4, 0.1, 0.85),
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        });
+        let steel = materials.add(StandardMaterial::from_color(Color::srgb(0.5, 0.5, 0.5)));
+        let arch = bevy::camera::primitives::Aabb::from_min_max(Vec3::new(-5.0, 0.0, -15.0), Vec3::new(5.0, 6.0, 15.0));
+        for material in [&glass, &foil, &algae, &steel] {
+            app.world_mut().spawn((MeshMaterial3d(material.clone()), GlobalTransform::default(), arch));
+        }
+        let eye = app.world_mut().spawn((ChaseCamera::default(), GlobalTransform::from_translation(Vec3::new(0.0, 3.0, 0.0)))).id();
+        let alpha = |app: &App, material: &Handle<StandardMaterial>| {
+            app.world().resource::<Assets<StandardMaterial>>().get(material).unwrap().base_color.alpha()
+        };
+        app.update();
+        assert!(alpha(&app, &glass) < 1e-3, "glass round the eye still shown: {}", alpha(&app, &glass));
+        assert!(alpha(&app, &foil) < 1e-3, "foil round the eye still shown: {}", alpha(&app, &foil));
+        assert_eq!(alpha(&app, &steel), 1.0, "faded steel");
+        assert_eq!(alpha(&app, &algae), 0.85, "faded a cloudy culture");
+        app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(8.5, 3.0, 0.0)));
+        app.update();
+        let partway = alpha(&app, &glass);
+        assert!(partway > 0.01 && partway < 0.14, "no fade 3.5 m out: {partway}");
+        app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(40.0, 3.0, 0.0)));
+        app.update();
+        assert!((alpha(&app, &glass) - 0.15).abs() < 1e-3, "glass not back: {}", alpha(&app, &glass));
+    }
+
+    #[test]
     fn walking_a_kilometre_north_moves_a_kilometre_north() {
         let mut view = View::default();
         let from = view.at;
@@ -428,15 +541,13 @@ mod tests {
         let (start, end, middle) = (View::over(&from, &far, 0.0), View::over(&from, &far, 1.0), View::over(&from, &far, 0.5));
         assert!((start.eye_height_m() - from.eye_height_m()).abs() < 1e-6, "left from somewhere else");
         assert!((end.eye_height_m() - far.eye_height_m()).abs() < 1e-6, "arrived somewhere else");
-        assert!(middle.eye_height_m() > 10.0 * from.eye_height_m(), "stayed low: {:.1} m", middle.eye_height_m());
-        assert!(middle.pitch_deg > from.pitch_deg + 15.0, "looked no further down: {:.1}", middle.pitch_deg);
-        let aside = |v: &View| v.distance_m * v.pitch_deg.to_radians().cos();
-        let (rise, back) = (middle.eye_height_m() - from.eye_height_m(), aside(&middle) - aside(&from));
-        assert!(back < 0.5 * rise, "drew back {back:.1} m for {rise:.1} m up");
+        assert!(middle.eye_height_m() > 5.0 * from.eye_height_m(), "stayed low: {:.1} m", middle.eye_height_m());
+        assert!(middle.pitch_deg > from.pitch_deg + 10.0, "looked no further down: {:.1}", middle.pitch_deg);
+        assert!(middle.pitch_deg < 45.0, "looked straight down on the way: {:.1}", middle.pitch_deg);
         let heights: Vec<f64> = (0..=20).map(|k| View::over(&from, &far, f64::from(k) / 20.0).eye_height_m()).collect();
         let peak = heights.iter().cloned().fold(0.0, f64::max);
-        assert!(heights[3] < 0.2 * peak, "rose before setting off: {:.1} of {:.1} m", heights[3], peak);
-        assert!(heights[17] > 0.5 * peak, "came down before arriving: {:.1} of {:.1} m", heights[17], peak);
+        assert!(heights[3] < 0.85 * heights[17], "rose as soon as it set off: {:.1} against {:.1} m", heights[3], heights[17]);
+        assert!(heights[0] < 0.2 * peak && heights[20] < 0.2 * peak, "never came down");
         let mut outward = far;
         outward.distance_m = 200.0;
         let early = View::over(&from, &outward, 0.2);

@@ -116,6 +116,9 @@ pub struct FlyTarget {
     /// spring so its bounce, starts and stops reach the shot as smooth moves,
     /// the bearing from behind it kept from the shot's start.
     pub anchor: Option<Steadied>,
+    /// How fast the anchor sets off, degrees and metres a second: the pace
+    /// of the held shot before this one.
+    pub drift: [f64; 3],
     /// The view a glide set out from, as offsets from the anchor, so it is
     /// carried along with the machine while the glide leaves it.
     pub offset: Option<crate::viewer::camera::View>,
@@ -154,8 +157,21 @@ impl FlyTarget {
             look: None,
             hold: false,
             anchor: None,
+            drift: [0.0; 3],
             offset: None,
         }
+    }
+
+    /// Takes over a held shot's anchor: the same machine's as it stands, so
+    /// the new shot follows it on unbroken; another machine's pace only.
+    pub fn following(mut self, before: Option<&FlyTarget>) -> Self {
+        if let Some(anchor) = before.and_then(|b| b.anchor.filter(|_| b.hold)) {
+            self.drift = anchor.rate;
+            if before.is_some_and(|b| b.machine == self.machine) {
+                self.anchor = Some(anchor);
+            }
+        }
+        self
     }
 
     /// Settles straight onto `look` around the machine, with no flight.

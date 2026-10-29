@@ -1023,23 +1023,30 @@ fn hold_shot(
     dt: f64,
     view: &mut crate::viewer::camera::View,
 ) {
-    let held = match target.anchor {
+    // Where the anchor stood a frame ago: the view the shot sets out from
+    // is tied to that, so the shot moves on its first frame as the one
+    // before it was moving.
+    let drift = target.drift;
+    let (before, held) = match target.anchor {
         Some(s) => {
             let (lat, lat_v) = spring(s.at.latitude, s.rate[0], at.latitude, HOLD_FOLLOW, dt);
             let (lon, lon_v) = spring(s.at.longitude, s.rate[1], at.longitude, HOLD_FOLLOW, dt);
             let (alt, alt_v) = spring(s.at.altitude, s.rate[2], at.altitude, HOLD_FOLLOW, dt);
-            Steadied { at: gearbox_globe::Geodetic::new(lat, lon, alt), rate: [lat_v, lon_v, alt_v], behind: s.behind }
+            (s.at, Steadied { at: gearbox_globe::Geodetic::new(lat, lon, alt), rate: [lat_v, lon_v, alt_v], behind: s.behind })
         }
-        None => Steadied { at, rate: [0.0; 3], behind },
+        None => (
+            gearbox_globe::Geodetic::new(at.latitude - drift[0] * dt, at.longitude - drift[1] * dt, at.altitude - drift[2] * dt),
+            Steadied { at, rate: drift, behind },
+        ),
     };
     target.anchor = Some(held);
     let (at, behind) = (held.at, held.behind);
     let from = target.from;
     let offset = *target.offset.get_or_insert(crate::viewer::camera::View {
         at: gearbox_globe::Geodetic::new(
-            from.at.latitude - at.latitude,
-            from.at.longitude - at.longitude,
-            from.at.altitude - at.altitude,
+            from.at.latitude - before.latitude,
+            from.at.longitude - before.longitude,
+            from.at.altitude - before.altitude,
         ),
         bearing_deg: from.bearing_deg - behind,
         ..from
@@ -1061,7 +1068,7 @@ fn hold_shot(
         distance_m: look.distance_m.unwrap_or(FlyTarget::FINAL_DISTANCE),
     };
     shot.tidy();
-    let eased = f64::from(t * t * (3.0 - 2.0 * t));
+    let eased = crate::viewer::camera::ease(f64::from(t));
     *view = crate::viewer::camera::View::over(&start, &shot, eased);
 }
 
@@ -1143,6 +1150,33 @@ mod tests {
         }
         let (b, bv) = spring(0.0, 0.0, 1.0, HOLD_FOLLOW, 1.0);
         assert!((a - b).abs() < 1e-9 && (av - bv).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_new_shot_of_a_held_machine_follows_it_on_unbroken() {
+        let view = crate::viewer::camera::View::default();
+        let look = crate::viewer::state::LookAround::default();
+        let shot = |machine: MachineRef| FlyTarget::gliding(machine, Entity::PLACEHOLDER, &view, look, 3.0);
+        let mut held = shot(percy(Entity::PLACEHOLDER));
+        held.anchor = Some(Steadied { at: view.at, rate: [1.0e-6, 2.0e-6, 0.1], behind: 30.0 });
+        let same = shot(percy(Entity::PLACEHOLDER)).following(Some(&held));
+        let carried = same.anchor.expect("dropped the machine's anchor");
+        assert_eq!((carried.rate, carried.behind), ([1.0e-6, 2.0e-6, 0.1], 30.0));
+        let eve = MachineRef { scene_root: Entity::PLACEHOLDER, machine_id: "eve".into() };
+        let mut other = shot(eve).following(Some(&held));
+        assert!(other.anchor.is_none(), "took another machine's place");
+        assert_eq!(other.drift, [1.0e-6, 2.0e-6, 0.1], "set off at rest");
+        let mut moved = view;
+        hold_shot(&mut other, view.at, 0.0, 0.0, 1.0 / 60.0, &mut moved);
+        let rate = other.anchor.unwrap().rate;
+        assert!((rate[2] - 0.1).abs() < 0.01, "lost the pace it came in at: {rate:?}");
+        let climbed = (moved.at.altitude - view.at.altitude) * 60.0;
+        assert!((climbed - 0.1).abs() < 0.01, "stood still its first frame, climbing {climbed} m/s");
+        let mut again = shot(percy(Entity::PLACEHOLDER)).following(Some(&held));
+        let mut stepped = view;
+        hold_shot(&mut again, view.at, 0.0, 0.0, 1.0 / 60.0, &mut stepped);
+        assert!(stepped.at.altitude > view.at.altitude, "the same machine's shot stood still its first frame");
+        assert_eq!(shot(percy(Entity::PLACEHOLDER)).following(None).drift, [0.0; 3]);
     }
 
     fn anchor(at: DVec3, yaw: f64) -> FollowAnchor {
