@@ -184,7 +184,7 @@ fn glide_seconds(text: &str) -> Option<f32> {
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
 }
 
-/// The `bearing=`, `pitch=`, `distance=` and `above=` values of a `look` request.
+/// The `bearing=`, `pitch=`, `distance=`, `above=`, `lat=`, `lon=` and `compass=` values of a `look` request.
 fn look_around(text: &str) -> LookAround {
     let mut look = LookAround::default();
     for (key, value) in text.split_whitespace().filter_map(|word| word.split_once('=')) {
@@ -198,6 +198,7 @@ fn look_around(text: &str) -> LookAround {
             "above" => look.above_m = Some(value),
             "lat" => look.latitude = Some(value),
             "lon" => look.longitude = Some(value),
+            "compass" => look.compass = value != 0.0,
             _ => {}
         }
     }

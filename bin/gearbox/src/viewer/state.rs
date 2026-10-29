@@ -85,14 +85,14 @@ pub struct FlyTo {
     pub turn: bool,
 }
 
-/// A tracked machine as a held view follows it: its place and the bearing
-/// from behind it, and how fast each is changing (degrees and metres a second).
+/// A tracked machine as a held view follows it: its place and how fast that
+/// is changing (degrees and metres a second), and the bearing from behind it
+/// when the shot began.
 #[derive(Clone, Copy, Debug)]
 pub struct Steadied {
     pub at: gearbox_globe::Geodetic,
     pub rate: [f64; 3],
     pub behind: f64,
-    pub turn: f64,
 }
 
 /// Scripted "fly to behind the machine" move, started from the agent tree.
@@ -112,9 +112,9 @@ pub struct FlyTarget {
     /// Glide straight onto `look` and hold it there, tracking the machine,
     /// instead of flying in and letting go: a camera rig for scripted shots.
     pub hold: bool,
-    /// The machine as a held view tracks it — where it is and the bearing
-    /// from behind it — followed on a damped spring, so its bounce, its
-    /// starts and stops and its turns reach the shot as smooth moves.
+    /// The machine as a held view tracks it, its place followed on a damped
+    /// spring so its bounce, starts and stops reach the shot as smooth moves,
+    /// the bearing from behind it kept from the shot's start.
     pub anchor: Option<Steadied>,
     /// The view a glide set out from, as offsets from the anchor, so it is
     /// carried along with the machine while the glide leaves it.
@@ -133,6 +133,9 @@ pub struct LookAround {
     /// Latitude and longitude of the place looked at, for a view of a place.
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// Around a machine: the bearing is a compass bearing from the machine
+    /// out to the eye, not counted from behind it.
+    pub compass: bool,
 }
 
 impl FlyTarget {

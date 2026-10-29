@@ -957,7 +957,8 @@ fn chase_camera_fly(
     let north = sites.current().frame.rotation
         * bevy::math::DVec3::new(heading.sin() as f64, 0.0, heading.cos() as f64);
     let local = gearbox_globe::Datum::at(at.latitude, at.longitude).rotation.inverse() * north;
-    let behind = local.z.atan2(local.x).to_degrees();
+    // A compass look counts its bearing from north, whichever way the machine faces.
+    let behind = if target.look.is_some_and(|look| look.compass) { 0.0 } else { local.z.atan2(local.x).to_degrees() };
 
     if target.hold {
         hold_shot(&mut target, at, behind, t, time.delta_secs_f64(), &mut view);
@@ -996,11 +997,9 @@ fn chase_camera_fly(
     }
 }
 
-/// How briskly a held shot follows its machine, radians a second of a
-/// critically damped spring: where the machine is, and which way it faces,
-/// the turn slower so a machine swinging round does not swing the shot.
+/// How briskly a held shot follows where its machine is, radians a second of
+/// a critically damped spring.
 const HOLD_FOLLOW: f64 = 2.5;
-const HOLD_TURN: f64 = 1.0;
 
 /// One step of a critically damped spring toward `goal` over `dt`, solved
 /// exactly: the new value and rate.
@@ -1011,10 +1010,11 @@ fn spring(x: f64, v: f64, goal: f64, omega: f64, dt: f64) -> (f64, f64) {
     (goal + (d + j * dt) * e, (v - omega * j * dt) * e)
 }
 
-/// A held shot: the machine's place and the bearing from behind it, followed
-/// on a spring, carry both the view the glide set out from and the one it
-/// settles on, and the view eases from one to the other over the glide, then
-/// stays.
+/// A held shot: the machine's place, followed on a spring, and the bearing
+/// from behind it as it stood when the shot began carry both the view the
+/// glide set out from and the one it settles on; the view eases from one to
+/// the other over the glide, then stays. A machine turning or backing up
+/// does not swing the shot round with it.
 fn hold_shot(
     target: &mut FlyTarget,
     at: gearbox_globe::Geodetic,
@@ -1028,11 +1028,9 @@ fn hold_shot(
             let (lat, lat_v) = spring(s.at.latitude, s.rate[0], at.latitude, HOLD_FOLLOW, dt);
             let (lon, lon_v) = spring(s.at.longitude, s.rate[1], at.longitude, HOLD_FOLLOW, dt);
             let (alt, alt_v) = spring(s.at.altitude, s.rate[2], at.altitude, HOLD_FOLLOW, dt);
-            let goal = s.behind + ((behind - s.behind + 540.0).rem_euclid(360.0) - 180.0);
-            let (turned, turn) = spring(s.behind, s.turn, goal, HOLD_TURN, dt);
-            Steadied { at: gearbox_globe::Geodetic::new(lat, lon, alt), rate: [lat_v, lon_v, alt_v], behind: turned, turn }
+            Steadied { at: gearbox_globe::Geodetic::new(lat, lon, alt), rate: [lat_v, lon_v, alt_v], behind: s.behind }
         }
-        None => Steadied { at, rate: [0.0; 3], behind, turn: 0.0 },
+        None => Steadied { at, rate: [0.0; 3], behind },
     };
     target.anchor = Some(held);
     let (at, behind) = (held.at, held.behind);

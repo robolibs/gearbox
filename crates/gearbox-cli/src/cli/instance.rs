@@ -79,8 +79,8 @@ enum Cmd {
         #[arg(allow_negative_numbers = true)]
         height_m: Option<f64>,
         /// For look: degrees clockwise, seen from above, from behind MACHINE
-        /// (90 is its left side) or, without one, the compass bearing from the
-        /// place looked at out to the eye
+        /// as it stood when the look began (90 is its left side) or, without
+        /// one, the compass bearing from the place looked at out to the eye
         #[arg(long, allow_negative_numbers = true)]
         bearing: Option<f64>,
         /// For look: degrees above the horizon, 2 to 88
@@ -103,6 +103,10 @@ enum Cmd {
         /// For look without MACHINE: the longitude of the place looked at, in degrees
         #[arg(long, allow_negative_numbers = true)]
         lon: Option<f64>,
+        /// For look around MACHINE: count --bearing as a compass bearing from
+        /// the machine out to the eye, whichever way the machine faces
+        #[arg(long)]
+        compass: bool,
         #[arg(long)]
         id: Option<String>,
     },
@@ -196,6 +200,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             above,
             lat,
             lon,
+            compass,
             id,
         } => camera(
             ctx,
@@ -212,6 +217,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 ("above", above),
                 ("lat", lat),
                 ("lon", lon),
+                ("compass", compass.then_some(1.0)),
             ],
         ),
     }
@@ -224,7 +230,7 @@ fn camera(
     machine: Option<&str>,
     distance_km: Option<f64>,
     height_m: Option<f64>,
-    look: [(&str, Option<f64>); 7],
+    look: [(&str, Option<f64>); 8],
 ) -> Result<()> {
     let ctx = with_target(ctx, id)?;
     if action == "where" {
