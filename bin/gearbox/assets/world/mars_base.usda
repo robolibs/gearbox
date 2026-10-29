@@ -48560,7 +48560,7 @@ def Xform "MarsBase" (kind = "assembly")
             float inputs:radius = 0.1
             color3f inputs:color = (1, 0.95, 0.88)
             float inputs:shaping:cone:angle = 85.0
-            double3 xformOp:translate = (-36.6527, -85.9052, 3)
+            double3 xformOp:translate = (-36.6527, -85.9052, 3.04)
             float3 xformOp:rotateXYZ = (0, -0, 0)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         }
@@ -48572,7 +48572,7 @@ def Xform "MarsBase" (kind = "assembly")
             float inputs:radius = 0.1
             color3f inputs:color = (1, 0.95, 0.88)
             float inputs:shaping:cone:angle = 85.0
-            double3 xformOp:translate = (-38.1443, -89.0379, 3)
+            double3 xformOp:translate = (-38.1443, -89.0379, 3.04)
             float3 xformOp:rotateXYZ = (0, -0, 0)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         }
@@ -48584,7 +48584,7 @@ def Xform "MarsBase" (kind = "assembly")
             float inputs:radius = 0.1
             color3f inputs:color = (1, 0.95, 0.88)
             float inputs:shaping:cone:angle = 85.0
-            double3 xformOp:translate = (-34.6871, -88.744, 3)
+            double3 xformOp:translate = (-34.6871, -88.744, 3.04)
             float3 xformOp:rotateXYZ = (0, -0, 0)
             uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
         }

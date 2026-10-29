@@ -416,8 +416,9 @@ def commons(b, m, f):
 # MARSHA
 
 
-# MARSHA's levels: their floors' heights, the skyroom's the last.
-MARSHA_LEVELS = (0.3, 3.6, 7.0, 10.4)
+# MARSHA's levels: their floors' heights, the skyroom's the last; the ground
+# floor stands clear of the printed footing's top, at 0.3.
+MARSHA_LEVELS = (0.34, 3.6, 7.0, 10.4)
 MARSHA_WELL = (-1.25, 1.25, -1.25, 1.25)
 
 
