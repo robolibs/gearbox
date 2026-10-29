@@ -63,7 +63,8 @@ enum Cmd {
     /// that latitude and longitude, in degrees, standing HEIGHT_M above the
     /// ground there, `look [MACHINE]` sets the view to an exact `--bearing`,
     /// `--pitch` and `--distance` (around MACHINE when given, its bearing
-    /// counted from behind the machine), and `where` says where the view is now
+    /// counted from behind the machine, else round `--lat` and `--lon`),
+    /// gliding there with `--over`, and `where` says where the view is now
     Camera {
         /// fly | follow | unfollow | goto | look | where
         action: String,
@@ -88,14 +89,20 @@ enum Cmd {
         /// For look: metres from the eye to what it looks at
         #[arg(long)]
         distance: Option<f64>,
-        /// For look around MACHINE: glide there over this many seconds of sim
-        /// time, eased at both ends, and stay on the machine as it moves until
-        /// the next request, `unfollow` or a drag
+        /// For look: glide there over this many seconds of sim time, eased at
+        /// both ends; around MACHINE the view then stays on the machine as it
+        /// moves until the next request, `unfollow` or a drag
         #[arg(long)]
         over: Option<f64>,
         /// For look without MACHINE: metres above the ground the place looked at stands
         #[arg(long)]
         above: Option<f64>,
+        /// For look without MACHINE: the latitude of the place looked at, in degrees
+        #[arg(long, allow_negative_numbers = true)]
+        lat: Option<f64>,
+        /// For look without MACHINE: the longitude of the place looked at, in degrees
+        #[arg(long, allow_negative_numbers = true)]
+        lon: Option<f64>,
         #[arg(long)]
         id: Option<String>,
     },
@@ -187,6 +194,8 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             distance,
             over,
             above,
+            lat,
+            lon,
             id,
         } => camera(
             ctx,
@@ -201,6 +210,8 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 ("distance", distance),
                 ("over", over),
                 ("above", above),
+                ("lat", lat),
+                ("lon", lon),
             ],
         ),
     }
@@ -213,7 +224,7 @@ fn camera(
     machine: Option<&str>,
     distance_km: Option<f64>,
     height_m: Option<f64>,
-    look: [(&str, Option<f64>); 5],
+    look: [(&str, Option<f64>); 7],
 ) -> Result<()> {
     let ctx = with_target(ctx, id)?;
     if action == "where" {

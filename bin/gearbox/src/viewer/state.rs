@@ -120,6 +120,9 @@ pub struct LookAround {
     pub distance_m: Option<f64>,
     /// Height of the place looked at above the ground there.
     pub above_m: Option<f64>,
+    /// Latitude and longitude of the place looked at, for a view of a place.
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
 }
 
 impl FlyTarget {
