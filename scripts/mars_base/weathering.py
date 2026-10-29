@@ -265,8 +265,8 @@ def baked_look(name, colour, rough, metal, normal, uv=None):
 
 
 def keeps_own(mat):
-    """Lit and see-through materials stay as they are, unbaked."""
-    if mat is None or not mat.use_nodes:
+    """Lit, see-through and indoor-only (`gearbox_indoor`) materials stay as they are, unbaked."""
+    if mat is None or not mat.use_nodes or mat.get("gearbox_indoor"):
         return True
     bsdf = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
     if bsdf is None:
@@ -292,12 +292,11 @@ def surface_area(objs):
 
 def bake_module(objs, out_dir, name, ground_z=0.0, density=0.03, sizes=(256, 2048), samples=8):
     """Bakes a building's looks with Mars wear into one atlas: the parts that
-    are not lit or see-through take a `bake` UV packed together, their colour
+    are not lit, see-through or indoor take a `bake` UV packed together, their colour
     (dust and grime over each material's own texture), roughness, metal and
     normals are baked into it at about `density` metres a texel, and they are
     joined into one object showing the bake. Materials marked `gearbox_ground`
-    (the land's own loose regolith) or `gearbox_indoor` (what only clean rooms
-    indoors are made of) take grime but no dust. Returns that
+    (the land's own loose regolith) take grime but no dust. Returns that
     object, or None."""
     parts = [o for o in objs if o.type == "MESH" and not keeps_own(o.active_material)]
     if not parts:
@@ -334,8 +333,8 @@ def bake_module(objs, out_dir, name, ground_z=0.0, density=0.03, sizes=(256, 204
         g = Graph(work)
         st = g.node("ShaderNodeUVMap", _uv_map="st").outputs["UV"]
         dust, ao, tread, _ = masks(g, ground_z)
-        # Loose regolith and the materials of clean rooms indoors take grime but no dust.
-        if mat.get("gearbox_ground") or mat.get("gearbox_indoor"):
+        # Loose regolith takes grime but no dust.
+        if mat.get("gearbox_ground"):
             dust = 0.0
         col = source(g, mat, "Base Color", st)
         r0 = source(g, mat, "Roughness", st)

@@ -469,6 +469,18 @@ def corridor(looks, name, a, c, radius=1.4, parent=None, z=None):
         _put(b, box((0.1, 0.1, 0.03), (x, 0, r + 0.21)), m["amber"], axis, smooth=False)
     for x in sorted(set(frames[::2] + frames[-1:])):
         _saddle(b, m, x, r, mid)
+    # Inside: a walkway over the utility run, handrails on both flanks, an LED strip along the crown, one light.
+    import interiors
+    c = interiors.mats(looks)
+    zw = mid - r * 0.68
+    ww = 2.0 * math.sqrt(r * r - (r * 0.68) ** 2) - 0.08
+    b.put(box((x1 - x0, ww, 0.04), ((x0 + x1) / 2, 0, zw - 0.02), tile=0.6), c["deck"], smooth=False)
+    inner = bmesh.new()
+    for s in (-1, 1):
+        merge(inner, rod((x0 + 0.2, s * (r - 0.18), mid + 0.1), (x1 - 0.2, s * (r - 0.18), mid + 0.1), 0.02, 6))
+    b.put(inner, c["rail"], smooth=False)
+    b.put(box((x1 - x0 - 0.4, 0.12, 0.02), ((x0 + x1) / 2, 0, mid + r - 0.05)), c["panel_lamp"], smooth=False)
+    b.places.append(("light", {"at": (length / 2, 0.0, mid + r - 0.25), "kind": "cabin"}))
     b.collider(moved(lathe([(radius * 1.03, 0.0), (radius * 1.03, length)], 12, 4.0), (0, 0, mid), 0, math.pi / 2))
     b.collider(box((length, radius * 1.7, mid - radius), (length / 2, 0, (mid - radius) / 2)))
     return b.finish()
@@ -506,7 +518,7 @@ def _cupola(b, m, z, rb=1.5, rt=0.85, h=0.75):
     b.put(rail, m["yellow"])
 
 
-def hub_node(looks, name, radius=3.8, at=(0, 0, 0), parent=None, ports=(0.0,)):
+def hub_node(looks, name, radius=3.8, at=(0, 0, 0), parent=None, ports=(0.0,), fit=None):
     """The node corridors meet: an MMOD-clad drum on levelling jacks over a
     sintered pad, a berthing port toward each corridor, an ISS-style cupola
     on a blanketed roof, a guard rail, a caged ladder, antennas, lamps and a
@@ -568,6 +580,9 @@ def hub_node(looks, name, radius=3.8, at=(0, 0, 0), parent=None, ports=(0.0,)):
     b.put(brackets, m["steel"], smooth=False)
     b.places.append(("room", {"name": name.lower(), "centre": (0, 0, z0 + h / 2), "size": (radius * 1.4, radius * 1.4, h), "volume": math.pi * radius ** 2 * h, "glazing": 0.0}))
     b.collider(lathe([(radius + 1.6, 0.0), (radius + 1.6, 0.2), (radius, 0.2), (radius, top), (1.75, top + 0.6), (1.5, top + 1.65), (0.0, top + 1.75)], 16, 4.0))
+    if fit:
+        import interiors
+        fit(b, interiors.mats(looks), {"radius": radius, "z0": z0, "top": top, "ports": ports})
     return b.finish()
 
 
@@ -732,14 +747,16 @@ def _hatch_angle(ports):
     return max((TAU * k / 24 for k in range(24)), key=lambda a: _clear(a, ports))
 
 
-def hab_tower(looks, name, radius=4.5, height=8.0, at=(0, 0, 0), yaw=0.0, parent=None, ports=(math.pi,), decks=2):
+def hab_tower(looks, name, radius=4.5, height=8.0, at=(0, 0, 0), yaw=0.0, parent=None, ports=(math.pi,), decks=2, fit=None):
     """A vertical habitat on six lander legs, after NASA's surface hab
     concepts: an MMOD-clad pressure shell with ring frames over a louvred
     equipment bay, a quilted blanket dome, round windows with shutters on
     swing arms, a berthing port toward each corridor, an EVA hatch over
     a railed platform and stairs, a caged ladder up the shell and over the
     dome to a railed roof deck with a high-gain dish, antennas and lamps, a
-    cable trunk, and a ground radiator wing piped to the shell."""
+    cable trunk, and a ground radiator wing piped to the shell. `fit` fits
+    it out inside, given the building, the cabin materials and the shell's
+    frame (see `fitouts.tower`)."""
     m = _mats(looks)
     b = Building(name, parent, at, yaw)
     zb, z0 = 0.95, 1.8
@@ -776,6 +793,7 @@ def hab_tower(looks, name, radius=4.5, height=8.0, at=(0, 0, 0), yaw=0.0, parent
         _berth(b, m, (0, 0, zp), p, radius, radius + 1.1)
     # Windows round each deck, shutters mostly open.
     k = 0
+    windows = []
     for deck in range(decks):
         z = z0 + deck * height / decks + 1.5
         for i in range(6):
@@ -783,6 +801,7 @@ def hab_tower(looks, name, radius=4.5, height=8.0, at=(0, 0, 0), yaw=0.0, parent
             if _clear(a, [climb]) < 0.3 or (deck == 0 and _clear(a, ports) < 0.62):
                 continue
             _porthole(b, m, _turn(a, radius, 0, z), a, 0.3, 0.0 if k % 4 == 3 else 1.9)
+            windows.append((deck, a, z))
             k += 1
     # EVA hatch over a grated platform, with stairs down and a ladder up.
     _hatch(b, m, _turn(hatch, radius, 0, z0 + 0.05), hatch, 1.0, 1.6)
@@ -885,6 +904,9 @@ def hab_tower(looks, name, radius=4.5, height=8.0, at=(0, 0, 0), yaw=0.0, parent
     for i in range(6):
         a = hatch + math.pi / 6 + i * math.pi / 3
         b.collider(box((0.9, 0.9, 0.3), _turn(a, radius + 1.15, 0, 0.15)))
+    if fit:
+        import interiors
+        fit(b, interiors.mats(looks), {"radius": radius, "z0": z0, "height": height, "decks": decks, "hatch": hatch, "ports": list(ports), "windows": windows})
     return b.finish()
 
 
@@ -896,7 +918,7 @@ def _lobed(radius, height, lobes, a, lat, lift=0.0):
     return Vector((r * math.cos(a), r * math.sin(a), 0.5 + height * math.sin(lat) ** 0.85)) + n * lift, n
 
 
-def inflatable_hab(looks, name, radius=7.5, height=4.6, at=(0, 0, 0), yaw=0.0, parent=None, lobes=18):
+def inflatable_hab(looks, name, radius=7.5, height=4.6, at=(0, 0, 0), yaw=0.0, parent=None, lobes=18, fit=None):
     """A soft-goods hab, as in The Martian: a lobed dome of quilted beta
     cloth under a restraint layer of meridian straps and hoop bands, a rigid
     crown with vent valves, a clamp ring on a sintered footing with the straps
@@ -997,6 +1019,9 @@ def inflatable_hab(looks, name, radius=7.5, height=4.6, at=(0, 0, 0), yaw=0.0, p
         b.collider(moved(lathe([(0.0, 0.0), (1.3, 0.0), (1.3, 3.5), (0.0, 3.5)], 12, 2.0), tuple(Vector((math.cos(a), math.sin(a), 0)) * (radius - 1.0) + Vector((0, 0, 1.6))), a, math.pi / 2))
     b.places.append(("room", {"name": name.lower(), "centre": (0, 0, 2.5), "size": (radius * 1.4, radius * 1.4, height), "volume": 2.0 / 3.0 * math.pi * radius ** 2 * height, "glazing": 0.0}))
     b.collider(lathe([(radius + 0.4, 0.0), (radius + 0.4, 0.55)] + [(radius * math.cos(t), 0.5 + height * math.sin(t) ** 0.85) for t in [math.pi / 2 * i / 5 for i in range(1, 5)]] + [(0.0, 0.5 + height)], 16, 4.0))
+    if fit:
+        import interiors
+        fit(b, interiors.mats(looks), {"radius": radius, "height": height, "locks": locks, "floor": 0.6})
     return b.finish()
 
 
@@ -1033,7 +1058,7 @@ def _shell(rows, segments, holes, depth, tile):
     return bm, backs
 
 
-def printed_tower(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, parent=None):
+def printed_tower(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, parent=None, fit=None):
     """A habitat printed from regolith, after AI SpaceFactory's MARSHA: an
     upright egg of print layers on a printed footing, a spiral of slot
     windows in deep reveals, a glazed skylight at its tip, an entry airlock
@@ -1085,6 +1110,21 @@ def printed_tower(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, p
     b.put(rod(tip + Vector((0.15, 0, 0.1)), tip + Vector((0.15, 0, 1.3)), 0.015, 4), m["steel"])
     b.put(sphere(0.09, tuple(tip + Vector((0, 0, 1.88))), 10, 5), m["red"])
     b.put(_pad(radius * 0.8, radius * 1.25, 0.3, 72), m["sinter"], sharp=40)
+    # Tethers from a printed collar at mid height down to ground anchors past the footing, clear of the doors.
+    tethers, anchors = bmesh.new(), bmesh.new()
+    zt = height * 0.42
+    rt = next(r_ for r_, z_ in rows if z_ >= zt) + 0.02
+    for k in range(8):
+        a = TAU * (k + 0.5) / 8
+        if _clear(a, (0.0, math.pi)) < 0.5:
+            continue
+        top_ = Vector(_turn(a, rt, 0, zt))
+        foot = Vector(_turn(a, radius * 1.25 + 2.6, 0, 0.1))
+        merge(tethers, rod(top_, foot, 0.025, 6))
+        merge(anchors, moved(box((0.5, 0.5, 0.3), (0, 0, 0.15), bevel=0.03), tuple(foot), a))
+        merge(anchors, moved(box((0.3, 0.3, 0.2), (0, 0, 0)), tuple(top_), a))
+    b.put(tethers, m["webbing"], smooth=False)
+    b.put(anchors, m["steel"], smooth=False)
     # Entry airlock: a printed buttress round a steel collar whose ring meets the corridor at 5.4 m.
     face = radius + 0.4
     outline = []
@@ -1097,7 +1137,7 @@ def printed_tower(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, p
     b.put(box((0.2, 0.4, 0.14), (face - 0.18, 0, 3.15), bevel=0.02), m["dark"], smooth=False)
     b.put(box((0.02, 0.34, 0.06), (face - 0.07, 0, 3.12)), m["lamp"], smooth=False)
     # Porch: a thick printed arch over the door at -X.
-    x0, x1 = -(radius * 0.92 + 1.9), -(radius * 0.92 - 0.4)
+    x0, x1 = -(radius * 0.92 + 1.9), -(radius * 0.92 + 0.15)
     arch = [math.pi * i / 16 for i in range(17)]
     outer = [(-2.2 * math.cos(t), 0.3 + 2.95 * math.sin(t)) for t in arch]
     inner = [(-1.75 * math.cos(t), 0.3 + 2.6 * math.sin(t)) for t in arch]
@@ -1111,6 +1151,39 @@ def printed_tower(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, p
     b.collider(lathe(rows[::5] + [(0.0, height + 0.8)], 16, 4.0))
     b.collider(box((face - radius + 0.6, 3.6, 3.2), ((face + radius - 1.4) / 2, 0, 1.6)))
     b.collider(box((x1 - x0, 4.4, 3.25), ((x0 + x1) / 2, 0, 1.62)))
+    if fit:
+        import interiors
+        fit(b, interiors.mats(looks), {"rows": rows, "thick": 0.35, "radius": radius, "height": height})
+    return b.finish()
+
+
+def print_rover(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
+    """The rover that printed MARSHA, parked by it (AI SpaceFactory: a
+    stationary print rover with a vertically telescoping arm): a tracked
+    chassis, a turntable, a three-stage mast with its print boom and
+    nozzle, a feed hopper behind and the auger tube up to the head."""
+    from industry import plant_mats
+    m = _mats(looks)
+    p = plant_mats(looks)
+    b = Building(name, parent, at, yaw)
+    for s in (-1, 1):
+        b.put(box((2.6, 0.5, 0.62), (0, s * 1.0, 0.36), bevel=0.04), p["paint_dark"], smooth=False)
+        for x in (-1.3, 1.3):
+            b.put(moved(lathe([(0.0, -0.25), (0.31, -0.25), (0.31, 0.25), (0.0, 0.25)], 16, 0.5), (x, s * 1.0, 0.36), roll=math.pi / 2), p["paint_dark"], smooth=False)
+        b.put(box((3.0, 0.52, 0.04), (0, s * 1.0, 0.04)), m["rubber"], smooth=False)
+    b.put(box((2.6, 1.6, 0.45), (0, 0, 0.85), bevel=0.04), p["paint_yellow"], smooth=False)
+    b.put(lathe([(0.0, 1.07), (0.75, 1.07), (0.75, 1.25), (0.0, 1.25)], 32, 1.0), m["steel"], smooth=False)
+    for k, (w, z0, z1) in enumerate(((0.6, 1.25, 4.2), (0.46, 4.0, 6.8), (0.34, 6.6, 9.2))):
+        b.put(box((w, w, z1 - z0), (0, 0, (z0 + z1) / 2), tile=1.0), p["paint_yellow"] if k % 2 == 0 else p["paint_orange"], smooth=False)
+    b.put(box((4.2, 0.3, 0.35), (1.9, 0, 9.0), tile=1.0), p["paint_orange"], smooth=False)
+    b.put(box((0.4, 0.4, 0.5), (3.8, 0, 8.6), bevel=0.02), p["paint_dark"], smooth=False)
+    b.put(cone(0.08, 0.02, 0.3, (3.8, 0, 8.05), 12), m["steel"], smooth=False)
+    hopper = lathe([(0.12, 1.05), (0.65, 1.8), (0.66, 1.9), (0.6, 1.9), (0.0, 1.9)], 16, 0.5)
+    b.put(moved(hopper, (-1.0, 0, 0)), m["steel"], smooth=False)
+    b.put(tube([Vector((-1.0, 0.0, 1.1)), Vector((-0.4, 0.0, 1.3)), Vector((-0.35, 0.0, 8.8)), Vector((0.0, 0.0, 9.3)), Vector((3.6, 0.15, 9.25)), Vector((3.8, 0.0, 8.9))], 0.06, 10), p["hose"])
+    b.put(box((0.5, 0.4, 0.5), (0.9, 0.6, 1.33), bevel=0.02), p["paint_white"], smooth=False)
+    b.collider(box((3.0, 2.6, 1.3), (0, 0, 0.65)))
+    b.collider(box((0.7, 0.7, 8.0), (0, 0, 5.2)))
     return b.finish()
 
 
@@ -1120,7 +1193,7 @@ def _mound(radius, squash, cover, spread, a):
     return (-(radius + cover + spread * (1.0 - s) ** 2) * math.cos(a), (radius * squash + cover) * s)
 
 
-def hangar(looks, name, length=22.0, radius=7.0, at=(0, 0, 0), yaw=0.0, parent=None):
+def hangar(looks, name, length=22.0, radius=7.0, at=(0, 0, 0), yaw=0.0, parent=None, fit=None):
     """A rover hangar under regolith: a corrugated steel vault on box ribs,
     buried in a heaped regolith berm between printed portal walls; at +X a
     steel portal round a raised roller door, at -X a bulkhead with a
@@ -1281,6 +1354,9 @@ def hangar(looks, name, length=22.0, radius=7.0, at=(0, 0, 0), yaw=0.0, parent=N
     b.collider(_panel(lo_section, rear - 0.01, rear, 4.0))
     b.collider(box((2.4, 2.4, 2.8), (rear - 1.2, 0, 1.4)))
     b.collider(box((front, radius * 1.9, 0.15), (front / 2, 0, 0.075)))
+    if fit:
+        import interiors
+        fit(b, interiors.mats(looks), {"length": length, "radius": radius, "crown": crown, "dw": dw, "front": length})
     return b.finish()
 
 

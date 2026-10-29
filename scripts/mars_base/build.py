@@ -375,7 +375,8 @@ def world_layer(path, built, base=None):
     u.emit(1, 'def Scope "Lights"')
     u.emit(1, "{")
     for k, (p, kind, yaw) in enumerate(lights):
-        lumens, cone_deg, colour = {"flood": (24.0, 55.0, (1.0, 0.95, 0.86)), "door": (3.0, 70.0, (1.0, 0.92, 0.8)), "bay": (9.0, 75.0, (1.0, 0.96, 0.9))}[kind]
+        lumens, cone_deg, colour = {"flood": (24.0, 55.0, (1.0, 0.95, 0.86)), "door": (3.0, 70.0, (1.0, 0.92, 0.8)), "bay": (9.0, 75.0, (1.0, 0.96, 0.9)),
+                                   "cabin": (4.0, 85.0, (1.0, 0.95, 0.88))}[kind]
         aim = Vector((math.cos(yaw), math.sin(yaw), -0.7)) if kind == "flood" else Vector((0, 0, -1.0))
         euler = aim.normalized().to_track_quat("-Z", "Z").to_euler("XYZ")
         u.emit(2, f'def SphereLight "{kind}{k:02d}" (')

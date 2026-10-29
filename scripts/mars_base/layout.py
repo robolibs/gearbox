@@ -12,7 +12,14 @@ surface power units and a field of roll-out arrays; ISRU is container-sized.
     west   solar arrays, the power station, fission units behind a berm
     south  ISRU: two process units, their tanks, an ice well, dug regolith
     far SE the landing zone: a Starship pad and a crew lander pad
+
+Twelve crew live in it (fitouts.py): the towers' lower decks hold the EVA
+suitlock and life support, the labs, and the medical bay; their upper decks
+eight crew quarters and the command centre; MARSHA houses four more over its
+garage, kitchen and skyroom; the inflatable dome is the commons; the
+hangar is the rover garage and workshop.
 """
+import functools
 import math
 import os
 
@@ -20,6 +27,7 @@ from mathutils import Vector
 
 import buildings
 import farm_hall
+import fitouts
 import habitat
 import industry
 import power
@@ -32,6 +40,8 @@ from kit import Building, disc, lathe
 NODE = Vector((-10.0, -42.0, 0.0))
 NODE_N = Vector((38.0, 0.0, 0.0))
 TOWERS = [NODE + 19.0 * Vector((math.cos(math.radians(a)), math.sin(math.radians(a)), 0)) for a in (110, 200, 280)]
+# What each tower's lower deck does (fitouts.tower): EVA, science, care and control.
+TOWER_PROGRAMS = ("eva", "science", "care")
 HAB_FEED, HAB_FEED_OUT = habitat.tower_feed(TOWERS[1], math.atan2(*(NODE - TOWERS[1]).yx), 4.5, (0.0,))
 SPINE_TOP = NODE + 12.0 * Vector((math.cos(math.radians(330)), math.sin(math.radians(330)), 0))
 DOME_R = 12.0
@@ -116,6 +126,10 @@ _SOIL_TO = placed(WORKS, 0.0, industry.SOIL_WATER_TIE)
 BRIDGE_SOIL = [tuple(_SOIL_FROM), (_SOIL_FROM.x, 14.4, 0.0)]
 PIPES_SOIL = [BRIDGE_SOIL[1], (_SOIL_FROM.x, 17.2, 0.0), (_SOIL_TO.x, 17.2, 0.0), tuple(_SOIL_TO)]
 REACTOR_JOINT = Vector((-37.0, 189.0, 0.0))
+# The middle of the fission field, the reactors' controller pallets beside their cable, and the row's heading.
+REACTOR_FIELD = (-37.0, 200.0, 0.0)
+SWITCHYARD = Vector((17.8, 160.2, 0.0))
+SWITCHYARD_YAW = math.atan2(-0.124, -0.992)
 _PIT_GAP = power.PIT / 2 + 0.06
 _REACTOR_PIT = STATION + power.STATION_PITS["reactor"]
 REACTOR_CABLE = [tuple(REACTOR_JOINT), (-37.0, 186.0, 0.0), (-13.0, 186.5, 0.0), (-9.0, 197.0, 0.0), (8.0, 198.0, 0.0), (20.0, 102.0, 0.0), (19.6, 72.0, 0.0),
@@ -190,12 +204,13 @@ def build(looks, strewn=False):
 
     # Habitat cluster: a hub, three towers, and the second hub of the domes.
     hub_ports = [toward(NODE, NODE_N), toward(NODE, SPINE_TOP), (toward(NODE, PRINTED), 1.4, 1.2)] + [toward(NODE, t) for t in TOWERS]
-    add(habitat.hub_node(looks, "Hub", 3.8, tuple(NODE), base, hub_ports))
+    add(habitat.hub_node(looks, "Hub", 3.8, tuple(NODE), base, hub_ports, fit=fitouts.hub))
     for k, t in enumerate(TOWERS):
-        add(kind(habitat.hab_tower(looks, f"Hab{k + 1}", 4.5, 8.0, tuple(t), toward(t, NODE), base, ports=(0.0,)), "hab_tower"))
+        program = TOWER_PROGRAMS[k]
+        add(kind(habitat.hab_tower(looks, f"Hab{k + 1}", 4.5, 8.0, tuple(t), toward(t, NODE), base, ports=(0.0,), fit=functools.partial(fitouts.tower, program=program)), f"hab_tower_{program}"))
         add(link(looks, base, f"Link{k + 1}", NODE, t, 5.0, 5.6, 1.3, 2.5))
     doors = {name: at + Vector((math.cos(toward(at, NODE_N)), math.sin(toward(at, NODE_N)), 0)) * DOME_REACH for name, at in DOMES}
-    add(habitat.hub_node(looks, "HubNorth", 3.8, tuple(NODE_N), base, [toward(NODE_N, NODE)] + [(toward(NODE_N, d), 1.6, 1.3) for d in doors.values()]))
+    add(habitat.hub_node(looks, "HubNorth", 3.8, tuple(NODE_N), base, [toward(NODE_N, NODE)] + [(toward(NODE_N, d), 1.6, 1.3) for d in doors.values()], fit=fitouts.hub))
     add(link(looks, base, "LinkNorth", NODE, NODE_N, 5.0, 5.0, 1.3, 2.5))
 
     # The domes.
@@ -227,9 +242,10 @@ def build(looks, strewn=False):
 
     # Round the plaza: the EDEN module, the inflatable hab, the hangar, a printed tower.
     add(habitat.eden_skin(looks, "EdenSkin", 12.19, 2.44, 2.90, 1.0, tuple(EDEN), 0.0, base))
-    add(habitat.inflatable_hab(looks, "Hab", 7.5, 4.6, tuple(INFLATABLE), toward(INFLATABLE, Vector((0, 0, 0))), base))
-    add(habitat.hangar(looks, "Hangar", 22.0, 7.0, tuple(HANGAR), 0.0, base))
-    add(habitat.printed_tower(looks, "Printed", 5.0, 15.0, tuple(PRINTED), toward(PRINTED, NODE), base))
+    add(habitat.inflatable_hab(looks, "Hab", 7.5, 4.6, tuple(INFLATABLE), toward(INFLATABLE, Vector((0, 0, 0))), base, fit=fitouts.commons))
+    add(habitat.hangar(looks, "Hangar", 22.0, 7.0, tuple(HANGAR), 0.0, base, fit=fitouts.hangar))
+    add(habitat.printed_tower(looks, "Printed", 5.0, 15.0, tuple(PRINTED), toward(PRINTED, NODE), base, fit=fitouts.marsha))
+    add(habitat.print_rover(looks, "PrintRover", tuple(placed(PRINTED, toward(PRINTED, NODE), Vector((1.0, 11.5, 0.0)))), toward(PRINTED, NODE) - math.pi / 2, base))
     add(link(looks, base, "LinkPrinted", NODE, PRINTED, 5.0, 5.4, 1.2, 1.4))
 
     # Power.
@@ -237,10 +253,12 @@ def build(looks, strewn=False):
     add(power.power_station(looks, "PowerStation", tuple(STATION), 0.0, base))
     for k, at in enumerate(REACTORS):
         add(kind(power.kilopower(looks, f"Fission{k + 1}", tuple(at), 0.0, base, power.FISSION_KWE), f"fission_{power.FISSION_KWE:.0f}kwe"))
-    add(power.berm(looks, "ReactorBerm", (-37.0, 200.0, 0.0), 34.0, math.radians(-160), math.radians(-20), 3.0, base))
+    add(power.berm(looks, "ReactorBerm", REACTOR_FIELD, 34.0, math.radians(-160), math.radians(-20), 3.0, base))
     add(power.ground_cable(looks, "ReactorCable", REACTOR_CABLE, base, joint=True))
     for k, feed in enumerate(REACTOR_FEEDS):
         add(power.ground_cable(looks, f"ReactorFeed{k + 1}", feed, base))
+    add(power.switchyard(looks, "Switchyard", tuple(SWITCHYARD), SWITCHYARD_YAW, base, len(REACTORS)))
+    add(power.keep_out(looks, "ReactorKeepOut", REACTOR_FIELD, 48.0, math.radians(-175), math.radians(-5), 12.0, base))
     add(power.ground_cable(looks, "SolarCable", SOLAR_CABLE, base))
     add(power.cable_tray(looks, "PowerTray", POWER_TRAY, 1.4, base))
     pit = Building("FarmPit", base)
@@ -269,6 +287,9 @@ def build(looks, strewn=False):
     add(spaceport.starship(looks, "Starship", tuple(PAD_SHIP), 0.4, base))
     add(spaceport.landing_pad(looks, "PadLander", 24.0, tuple(PAD_LANDER), base, 8))
     add(spaceport.crew_lander(looks, "Lander", tuple(PAD_LANDER), 0.8, base))
+    # Propellant, power and a beacon for each vehicle, down its pad's second lane.
+    add(spaceport.pad_services(looks, "ShipServices", tuple(PAD_SHIP), math.tau / 10, base, 32.0, 4.55, 3.6))
+    add(spaceport.pad_services(looks, "LanderServices", tuple(PAD_LANDER), math.tau / 8, base, 24.0, 3.25, 2.3))
 
     # Comms and science.
     add(props.lattice_mast(looks, "CommsMast", tuple(MAST), 14.0, base))
