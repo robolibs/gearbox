@@ -234,8 +234,8 @@ impl Plugin for CameraPlugin {
 const GLASS_ALPHA: f32 = 0.35;
 /// Within the first distance of a pane, or inside its bounds, the eye sees
 /// none of that glass; beyond the second, all of it.
-const GLASS_CLEAR_M: f32 = 1.5;
-const GLASS_SHOWN_M: f32 = 6.0;
+const GLASS_CLEAR_M: f32 = 9.0;
+const GLASS_SHOWN_M: f32 = 15.0;
 
 /// Fades every glass material out as the eye nears or enters a pane of it,
 /// and back as the eye leaves.
@@ -491,10 +491,13 @@ mod tests {
         assert!(alpha(&app, &foil) < 1e-3, "foil round the eye still shown: {}", alpha(&app, &foil));
         assert_eq!(alpha(&app, &steel), 1.0, "faded steel");
         assert_eq!(alpha(&app, &algae), 0.85, "faded a cloudy culture");
-        app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(8.5, 3.0, 0.0)));
+        app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(13.0, 3.0, 0.0)));
+        app.update();
+        assert!(alpha(&app, &glass) < 1e-3, "glass 8 m out still shown: {}", alpha(&app, &glass));
+        app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(17.0, 3.0, 0.0)));
         app.update();
         let partway = alpha(&app, &glass);
-        assert!(partway > 0.01 && partway < 0.14, "no fade 3.5 m out: {partway}");
+        assert!(partway > 0.01 && partway < 0.14, "no fade 12 m out: {partway}");
         app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(40.0, 3.0, 0.0)));
         app.update();
         assert!((alpha(&app, &glass) - 0.15).abs() < 1e-3, "glass not back: {}", alpha(&app, &glass));
