@@ -683,3 +683,54 @@ def berm(looks, name, centre, radius, start, end, height=2.6, parent=None):
     arc = [(radius * math.cos(a), radius * math.sin(a), 0.0) for a in [start + (end - start) * i / 40 for i in range(41)]]
     b.collider(sweep([(y, x) for x, y in profile], arc[::5], 1.2))
     return b.finish()
+
+
+def switchyard(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, units=4, pitch=5.0):
+    """The fission units' controller pallets in a row along +Y (NASA's 40
+    kWe FSP: controller and power electronics on their own pallet away from
+    the reactor, behind its shadow shield): each a skid with its electronics
+    cabinet and Li-ion battery, an upright two-sided radiator for the
+    controller's heat, and a Ka-band low-gain antenna on a short mast."""
+    m = power_mats(looks)
+    b = Building(name, parent, at, yaw)
+    for k in range(units):
+        y = (k - (units - 1) / 2) * pitch
+        b.put(box((3.5, 3.2, 0.25), (0, y, 0.125), tile=1.0), m["galv"], smooth=False)
+        cabinet(b, m, (-0.8, y - 0.6, 0.25), 0.0, (1.2, 0.9, 1.6), "paint_white", 2, k)
+        b.put(box((1.0, 0.8, 0.7), (0.9, y - 0.8, 0.6), bevel=0.03), m["paint_grey"], smooth=False)
+        b.put(box((0.02, 0.5, 0.06), (1.41, y - 0.8, 0.85)), m["andon"], smooth=False)
+        # The radiator: an upright panel edge-on to the reactors, on two posts.
+        b.put(box((0.06, 2.8, 2.4), (0.4, y + 0.9, 2.15), tile=1.0), m["radiator"], smooth=False)
+        for dy in (-1.3, 1.3):
+            b.put(box((0.1, 0.1, 2.2), (0.4, y + 0.9 + dy, 1.35)), m["steel"], smooth=False)
+        b.put(tube([Vector((-0.2, y - 0.2, 1.0)), Vector((0.2, y + 0.2, 1.1)), Vector((0.4, y + 0.6, 1.2))], 0.04, 8), m["pipe_white"])
+        b.put(rod((1.4, y + 1.3, 0.25), (1.4, y + 1.3, 3.0), 0.04, 8), m["steel"])
+        b.put(sphere(0.12, (1.4, y + 1.3, 3.05), 10, 6), m["paint_white"])
+        b.collider(box((3.5, 3.2, 2.4), (0, y, 1.2)))
+    return b.finish()
+
+
+def keep_out(looks, name, centre, radius, start, end, every=12.0, parent=None):
+    """Radiation keep-out posts on an arc round `centre` from angle `start`
+    to `end`: each a yellow post with a trefoil sign facing out, where
+    robots, not crew, go on."""
+    m = power_mats(looks)
+    b = Building(name, parent, centre, 0.0)
+    count = max(2, int(radius * abs(end - start) / every) + 1)
+    posts, boards, marks = bmesh.new(), bmesh.new(), bmesh.new()
+    for k in range(count):
+        a = start + (end - start) * k / (count - 1)
+        c, s = math.cos(a), math.sin(a)
+        p = Vector((radius * c, radius * s, 0.0))
+        merge(posts, rod(p, p + Vector((0, 0, 1.8)), 0.04, 6))
+        merge(boards, moved(box((0.02, 0.6, 0.6), (0.05, 0, 1.55)), tuple(p), a))
+        on_sign = Matrix.Translation(p) @ Matrix.Rotation(a, 4, "Z")
+        hub = lathe([(0.0, 0.0), (0.06, 0.0), (0.06, 0.004), (0.0, 0.004)], 12, 0.2)
+        merge(marks, moved(moved(hub, pitch=math.pi / 2), (0.064, 0, 1.55)), on_sign)
+        for j in range(3):
+            blade = lathe([(0.08, 0.0), (0.22, 0.0), (0.22, 0.004), (0.08, 0.004)], 6, 0.2, angle=math.pi / 3, start=math.pi / 2 + j * TAU / 3 - math.pi / 6)
+            merge(marks, moved(moved(blade, pitch=math.pi / 2), (0.064, 0, 1.55)), on_sign)
+    b.put(posts, m["paint_yellow"], smooth=False)
+    b.put(boards, m["paint_yellow"], smooth=False)
+    b.put(marks, m["carbon"], smooth=False)
+    return b.finish()

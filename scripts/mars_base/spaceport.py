@@ -817,3 +817,73 @@ def crew_lander(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
         foot = Vector((math.cos(a), math.sin(a), 0)) * 5.4
         b.collider(box((0.8, 0.8, 2.4), (foot.x, foot.y, 1.2)))
     return b.finish()
+
+
+def pad_services(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, pad_radius=32.0, skirt=4.6, plate_z=1.2, walls=10):
+    """What a vehicle on its pad is served by, along the blast-wall lane at
+    `yaw` (plans/003-mars-base-research.md §8.4): an armoured umbilical vault
+    beside the skirt with two propellant hoses (LOX, methane) up to a
+    quick-disconnect plate; covered service trenches out to the pad's edge;
+    in the lane, a valve skid with its purge bottles and control cabinet, a
+    power terminal and a cable cart whose cable runs to the vehicle; a nav
+    beacon with a radar corner reflector; marker posts over the buried
+    lines toward the tank farm."""
+    import industry
+    m = industry.plant_mats(looks)
+    p = _pad_mats(looks)
+    b = Building(name, parent, at, yaw)
+    x_v = skirt + 1.4
+    # The umbilical vault: a low armoured box, its lid swung open, hoses up to the plate on the skirt.
+    b.put(box((1.3, 1.0, 0.4), (x_v, 0, 0.2), bevel=0.03), m["paint_dark"], smooth=False)
+    b.put(moved(box((1.3, 0.06, 1.0), (0, 0, 0.5)), (x_v, 0.5, 0.4), 0.0, 0.0, -1.2), m["tread"], smooth=False)
+    for dy, key in ((-0.22, "jacket"), (0.22, "paint_orange")):
+        b.put(tube([Vector((x_v - 0.2, dy, 0.35)), Vector((x_v - 0.6, dy, 0.9)), Vector((skirt + 0.35, dy * 0.8, plate_z - 0.1)), Vector((skirt + 0.08, dy * 0.6, plate_z))], 0.07, 12), m[key])
+    b.put(box((0.12, 0.8, 0.5), (skirt + 0.02, 0, plate_z), bevel=0.02), m["steel"], smooth=False)
+    # Covered trenches from the vault out to the pad's edge.
+    covers = bmesh.new()
+    x = x_v + 0.8
+    while x < pad_radius - 0.6:
+        merge(covers, box((1.18, 0.9, 0.04), (x + 0.6, 0, 0.02)))
+        x += 1.2
+    b.put(covers, m["tread"], smooth=False)
+    # The valve skid, purge bottles and the control cabinet in the lane.
+    xs = pad_radius + 3.0
+    b.put(box((2.6, 1.6, 0.12), (xs, 0, 0.06)), m["galv"], smooth=False)
+    for dy, key in ((-0.4, "jacket"), (0.4, "paint_orange")):
+        b.put(rod((xs - 1.2, dy, 0.4), (xs + 1.2, dy, 0.4), 0.09, 14), m[key])
+        b.put(rod((xs + 1.2, dy, 0.4), (xs + 1.2, dy, -0.3), 0.09, 14), m[key])
+        industry.valve(b, m, (xs - 0.2, dy, 0.4), (1, 0, 0), 0.09)
+        industry.gauge(b, m, (xs + 0.5, dy, 0.55), (0, 0, 1), (0, -1 if dy < 0 else 1, 0))
+    industry.bottles(b, m, (xs - 0.2, -1.6, 0.0), 0.0, 6)
+    industry.cabinet(b, m, (xs + 0.4, 1.4, 0.0), math.pi, (0.8, 0.5, 1.6), "paint_grey", 1, 2)
+    # The power terminal and its cable cart; the cable laid over the trench covers to the vehicle.
+    term = (xs - 1.6, 2.6, 0.0)
+    b.put(box((0.6, 0.6, 1.4), (term[0], term[1], 0.7), bevel=0.03), m["paint_yellow"], smooth=False)
+    b.put(box((0.02, 0.4, 0.3), (term[0] - 0.31, term[1], 1.05)), m["vision"], smooth=False)
+    cart = (xs - 3.2, 1.6, 0.0)
+    b.put(box((1.4, 1.0, 0.12), (cart[0], cart[1], 0.5)), m["paint_dark"], smooth=False)
+    for dx in (-0.55, 0.55):
+        for dy in (-0.45, 0.45):
+            b.put(moved(lathe([(0.0, -0.08), (0.3, -0.08), (0.3, 0.08), (0.0, 0.08)], 16, 0.5), (cart[0] + dx, cart[1] + dy, 0.3), roll=math.pi / 2), m["hose"], smooth=False)
+    b.put(moved(lathe([(0.0, -0.35), (0.6, -0.35), (0.6, -0.3), (0.25, -0.3), (0.25, 0.3), (0.6, 0.3), (0.6, 0.35), (0.0, 0.35)], 24, 0.5), (cart[0], cart[1], 1.15), roll=math.pi / 2), m["paint_yellow"], smooth=False)
+    b.put(moved(lathe([(0.25, -0.3), (0.42, -0.3), (0.42, 0.3), (0.25, 0.3)], 24, 0.5), (cart[0], cart[1], 1.15), roll=math.pi / 2), m["cable"], smooth=False)
+    b.put(tube([Vector((cart[0], cart[1], 0.75)), Vector((cart[0] - 0.5, 0.6, 0.05)), Vector((x_v + 1.0, 0.6, 0.05)), Vector((skirt + 0.3, 0.6, 0.05)), Vector((skirt + 0.05, 0.6, plate_z - 0.4))], 0.03, 8), m["cable"])
+    # The nav beacon: a mast with a strobe and a trihedral corner reflector.
+    nb = Vector((pad_radius + 4.5, -3.2, 0.0))
+    b.put(rod(nb, nb + Vector((0, 0, 6.0)), 0.06, 10), m["galv"])
+    b.put(box((0.5, 0.5, 0.3), tuple(nb + Vector((0, 0, 0.15)))), m["footing"], smooth=False)
+    corner = bmesh.new()
+    for rot in ((0, 0, 0), (math.pi / 2, 0, 0), (0, -math.pi / 2, 0)):
+        merge(corner, moved(box((0.6, 0.6, 0.01), (0.3, 0.3, 0.0)), (0, 0, 0), rot[2], rot[1], rot[0]))
+    b.put(moved(corner, tuple(nb + Vector((0.05, 0.05, 5.2))), math.pi / 4), m["alu"], smooth=False)
+    b.put(sphere(0.1, tuple(nb + Vector((0, 0, 6.1))), 10, 5), p["white_light"])
+    # Marker posts over the buried lines, out toward the tank farm.
+    posts = bmesh.new()
+    for k in range(6):
+        x = pad_radius + 14.0 + 8.0 * k
+        merge(posts, rod((x, 0, 0), (x, 0, 1.2), 0.03, 6))
+        merge(posts, box((0.12, 0.02, 0.2), (x, 0, 1.1)))
+    b.put(posts, m["paint_yellow"], smooth=False)
+    b.collider(box((2.6, 1.6, 1.0), (xs, 0, 0.5)))
+    b.collider(box((1.4, 1.0, 1.4), (cart[0], cart[1], 0.7)))
+    return b.finish()
