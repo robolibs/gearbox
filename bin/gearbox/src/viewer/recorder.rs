@@ -3,7 +3,7 @@
 //! on an overlay render layer the camera drops while capturing, all but the
 //! TF tree, which is shown on purpose. Stills save an OpenEXR of the HDR
 //! image tonemapping read beside the PNG; recordings stream the frame as it
-//! is shown, tonemapped, to H.264.
+//! is shown, tonemapped, to H.264, with the camera's path beside it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -68,7 +68,8 @@ impl Plugin for RecorderPlugin {
                     drive_recorder,
                 )
                     .chain(),
-            );
+            )
+            .add_systems(PostUpdate, track_camera.after(TransformSystems::Propagate));
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             // After tonemapping, whose source is the finished HDR image: a copy
             // taken any earlier races the lens effects, unordered against it,
@@ -178,6 +179,8 @@ enum Mode {
         rendered: u64,
         /// Once stopped: updates since a frame last came in, and the frames by then.
         stopping: Option<(u32, u64)>,
+        /// The camera's path, written beside the video.
+        track: Option<std::io::BufWriter<std::fs::File>>,
     },
 }
 
@@ -315,7 +318,8 @@ fn drive_recorder(
                             1.0 / f64::from(FRAME_RATE),
                         ));
                         info!("gearbox-capture: recording {}", path.display());
-                        next = Some(Mode::Recording { encoder, path, size, reader, frames: 0, rendered: 1, stopping: None });
+                        let track = std::fs::File::create(path.with_extension("camera.csv")).ok().map(std::io::BufWriter::new);
+                        next = Some(Mode::Recording { encoder, path, size, reader, frames: 0, rendered: 1, stopping: None, track });
                     }
                     Err(error) => warn!("gearbox-capture: cannot start ffmpeg: {error}"),
                 }
@@ -383,6 +387,18 @@ fn drive_recorder(
         encoder.finish();
         info!("gearbox-capture: finishing {}", path.display());
         recorder.last = Some(path);
+    }
+}
+
+/// While recording, the camera's place and facing in its site each frame, as
+/// `frame,x,y,z,fx,fy,fz` lines beside the video.
+fn track_camera(mut recorder: ResMut<Recorder>, cameras: Query<&Transform, With<ChaseCamera>>) {
+    let Ok(eye) = cameras.single() else {
+        return;
+    };
+    if let Mode::Recording { track: Some(track), rendered, stopping: None, .. } = &mut recorder.mode {
+        let (at, facing) = (eye.translation, eye.forward());
+        let _ = writeln!(track, "{rendered},{},{},{},{},{},{}", at.x, at.y, at.z, facing.x, facing.y, facing.z);
     }
 }
 
