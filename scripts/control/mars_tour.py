@@ -41,10 +41,11 @@ def place(x: float, y: float, above: float, bearing: float, pitch: float, distan
     return args + (["--over", f"{over}"] if over else [])
 
 
-def machine(name: str, bearing: float, pitch: float, distance: float, over: float = 0.3) -> list[str]:
-    """A camera look round a fleet machine, following it as it moves."""
+def machine(name: str, bearing: float, pitch: float, distance: float, over: float = 0.3, compass: bool = False) -> list[str]:
+    """A camera look round a fleet machine, following it as it moves; its
+    bearing from behind the machine, or with `compass` from north."""
     return ["look", f"base_fleet_{name}", "--bearing", f"{bearing % 360:.1f}", "--pitch", f"{pitch}",
-            "--distance", f"{distance}", "--over", f"{over}"]
+            "--distance", f"{distance}", "--over", f"{over}"] + (["--compass"] if compass else [])
 
 
 def inside(x: float, y: float, z: float, facing: float, pitch: float, turn: float, seconds: float) -> tuple[list[str], list]:
@@ -66,9 +67,9 @@ def shots() -> list[dict]:
          place(5, -20, 0, 230, 34, 270), [(0.2, place(5, -30, 0, 295, 26, 190, 13.6))])
     # Harvest.
     shot("arch_b", 13, "Harvest: a UR10e on a mobile base picks tomatoes and peppers",
-         machine("archbpicker1", 140, 22, 5.5), [(0.5, machine("archbpicker1", 220, 26, 5.0, 12.0))])
+         machine("archbpicker1", 90, 40, 4.0, compass=True), [(0.5, machine("archbpicker1", 60, 36, 4.0, 12.0, compass=True))])
     shot("arch_c", 11, "Wheat and pulses in deep troughs",
-         machine("archcpicker2", 0, 22, 6.0), [(0.5, machine("archcpicker2", -40, 26, 5.5, 10.0))])
+         machine("archcpicker2", 270, 40, 4.5, compass=True), [(0.5, machine("archcpicker2", 300, 36, 4.5, 10.0, compass=True))])
     shot("arch_a", 10, "Salad in channels down the arch, a ridge gantry over them",
          place(31, -62, 2.0, 180, 12, 9), [(0.2, place(36, -62, 2.0, 175, 14, 8, 9.6))])
     shot("vertical", 10, "The vertical farm's stacker crane",
@@ -86,7 +87,7 @@ def shots() -> list[dict]:
          machine("solarwasher2", 120, 25, 10.0), [(0.5, machine("solarwasher2", 60, 30, 9.0, 9.0))])
     # Soil.
     shot("digger", 16, "Excavators dig regolith for the soil works",
-         machine("digger1", 160, 25, 9.0), [(0.5, machine("digger1", 230, 22, 8.0, 15.0))])
+         machine("digger3", 150, 32, 9.0), [(0.5, machine("digger3", 190, 30, 8.5, 15.0))])
     shot("digger2", 10, "Loads tipped into the soil bays",
          machine("digger2", 30, 22, 7.0), [(0.5, machine("digger2", -20, 20, 6.5, 9.0))])
     shot("isru", 12, "Water from the ice well; oxygen and methane from the air",
