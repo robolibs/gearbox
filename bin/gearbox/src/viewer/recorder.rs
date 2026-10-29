@@ -131,6 +131,7 @@ impl Recorder {
         match &self.mode {
             Mode::Idle => "ready".to_string(),
             Mode::Still { .. } => "taking screenshot".to_string(),
+            Mode::Recording { stopping: Some(_), .. } => "finishing".to_string(),
             Mode::Recording { frames, .. } => {
                 format!("recording {:.1} s", *frames as f64 / f64::from(FRAME_RATE))
             }
@@ -171,9 +172,18 @@ enum Mode {
         path: PathBuf,
         size: UVec2,
         reader: Entity,
+        /// Frames written, and frames read back for: the GPU hands frames
+        /// back later than it renders them, offscreen many frames later.
         frames: u64,
+        rendered: u64,
+        /// Once stopped: updates since a frame last came in, and the frames by then.
+        stopping: Option<(u32, u64)>,
     },
 }
+
+/// Updates a stopped recording waits with no frame arriving before it closes
+/// the video without the rest.
+const STRAGGLER_UPDATES: u32 = 120;
 
 /// The image a capturing camera copies its frame into, and whether that is
 /// the frame as shown — tonemapped — rather than the HDR image beneath it.
@@ -305,7 +315,7 @@ fn drive_recorder(
                             1.0 / f64::from(FRAME_RATE),
                         ));
                         info!("gearbox-capture: recording {}", path.display());
-                        next = Some(Mode::Recording { encoder, path, size, reader, frames: 0 });
+                        next = Some(Mode::Recording { encoder, path, size, reader, frames: 0, rendered: 1, stopping: None });
                     }
                     Err(error) => warn!("gearbox-capture: cannot start ffmpeg: {error}"),
                 }
@@ -346,13 +356,26 @@ fn drive_recorder(
                 ));
             }
         }
-        Mode::Recording { reader, .. } => {
-            if std::mem::take(&mut recorder.stop_requested) {
-                end_capture(&mut commands, view, *reader);
+        Mode::Recording { reader, frames, rendered, stopping, .. } => match stopping {
+            None if std::mem::take(&mut recorder.stop_requested) => {
+                // No more read back; the reader stays for the frames still coming.
+                commands.entity(*reader).remove::<Readback>();
+                release_camera(&mut commands, view);
                 *clock = TimeUpdateStrategy::Automatic;
-                next = Some(Mode::Idle);
+                *stopping = Some((0, *frames));
             }
-        }
+            None => *rendered += 1,
+            Some((idle, seen)) => {
+                (*idle, *seen) = if *frames > *seen { (0, *frames) } else { (*idle + 1, *seen) };
+                if *frames >= *rendered || *idle >= STRAGGLER_UPDATES {
+                    if *frames < *rendered {
+                        warn!("gearbox-capture: {} of {} frames never came back", *rendered - *frames, *rendered);
+                    }
+                    commands.entity(*reader).despawn();
+                    next = Some(Mode::Idle);
+                }
+            }
+        },
     }
     if let Some(next) = next
         && let Mode::Recording { encoder, path, .. } = std::mem::replace(&mut recorder.mode, next)
@@ -388,11 +411,16 @@ fn begin_capture(
 }
 
 fn end_capture(commands: &mut Commands, view: Entity, reader: Entity) {
+    release_camera(commands, view);
+    commands.entity(reader).despawn();
+}
+
+/// The camera back to its own target and the overlays it shows.
+fn release_camera(commands: &mut Commands, view: Entity) {
     commands
         .entity(view)
         .remove::<CaptureInto>()
         .insert(RenderLayers::from_layers(&VIEWED));
-    commands.entity(reader).despawn();
 }
 
 fn receive_frame(frame: On<ReadbackComplete>, mut recorder: ResMut<Recorder>) {
