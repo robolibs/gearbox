@@ -85,6 +85,16 @@ pub struct FlyTo {
     pub turn: bool,
 }
 
+/// A tracked machine as a held view follows it: its place and the bearing
+/// from behind it, and how fast each is changing (degrees and metres a second).
+#[derive(Clone, Copy, Debug)]
+pub struct Steadied {
+    pub at: gearbox_globe::Geodetic,
+    pub rate: [f64; 3],
+    pub behind: f64,
+    pub turn: f64,
+}
+
 /// Scripted "fly to behind the machine" move, started from the agent tree.
 /// Phase A pins the camera in place and turns it toward the machine; phase
 /// B pulls back to the apex, orbits to behind the machine and settles at
@@ -103,9 +113,9 @@ pub struct FlyTarget {
     /// instead of flying in and letting go: a camera rig for scripted shots.
     pub hold: bool,
     /// The machine as a held view tracks it — where it is and the bearing
-    /// from behind it — steadied, so its bounce over the ground stays out of
-    /// the shot.
-    pub anchor: Option<(gearbox_globe::Geodetic, f64)>,
+    /// from behind it — followed on a damped spring, so its bounce, its
+    /// starts and stops and its turns reach the shot as smooth moves.
+    pub anchor: Option<Steadied>,
     /// The view a glide set out from, as offsets from the anchor, so it is
     /// carried along with the machine while the glide leaves it.
     pub offset: Option<crate::viewer::camera::View>,

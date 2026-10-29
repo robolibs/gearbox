@@ -17,7 +17,7 @@ use crate::load::{LoadQueue, LoadedAsset};
 use crate::viewer::commands::{HostCommands, apply_host_commands};
 use crate::viewer::state::{
     ActiveStage, ActiveVariants, CameraBookmarks, CameraMount, ChaseCameraFly, FlyTarget, FlyTo,
-    FollowAnchor, FollowTarget, LoadRequest, LoaderTuning, ReloadRequest, SelectedPrim, StageInfo,
+    FollowAnchor, FollowTarget, LoadRequest, LoaderTuning, ReloadRequest, SelectedPrim, StageInfo, Steadied,
     UsdStageTime, VariantEntry,
 };
 
@@ -996,13 +996,25 @@ fn chase_camera_fly(
     }
 }
 
-/// How long the machine a held shot tracks takes to be followed, seconds:
-/// long enough to ride out its bounce, short enough to keep it framed.
-const HOLD_STEADY_S: f64 = 0.3;
+/// How briskly a held shot follows its machine, radians a second of a
+/// critically damped spring: where the machine is, and which way it faces,
+/// the turn slower so a machine swinging round does not swing the shot.
+const HOLD_FOLLOW: f64 = 2.5;
+const HOLD_TURN: f64 = 1.0;
 
-/// A held shot: the machine's place and the bearing from behind it, steadied,
-/// carry both the view the glide set out from and the one it settles on, and
-/// the view eases from one to the other over the glide, then stays.
+/// One step of a critically damped spring toward `goal` over `dt`, solved
+/// exactly: the new value and rate.
+fn spring(x: f64, v: f64, goal: f64, omega: f64, dt: f64) -> (f64, f64) {
+    let d = x - goal;
+    let j = v + omega * d;
+    let e = (-omega * dt).exp();
+    (goal + (d + j * dt) * e, (v - omega * j * dt) * e)
+}
+
+/// A held shot: the machine's place and the bearing from behind it, followed
+/// on a spring, carry both the view the glide set out from and the one it
+/// settles on, and the view eases from one to the other over the glide, then
+/// stays.
 fn hold_shot(
     target: &mut FlyTarget,
     at: gearbox_globe::Geodetic,
@@ -1011,19 +1023,19 @@ fn hold_shot(
     dt: f64,
     view: &mut crate::viewer::camera::View,
 ) {
-    let steady = 1.0 - (-dt / HOLD_STEADY_S).exp();
-    let (at, behind) = match target.anchor {
-        Some((held, held_behind)) => (
-            gearbox_globe::Geodetic::new(
-                held.latitude + (at.latitude - held.latitude) * steady,
-                held.longitude + (at.longitude - held.longitude) * steady,
-                held.altitude + (at.altitude - held.altitude) * steady,
-            ),
-            held_behind + ((behind - held_behind + 540.0).rem_euclid(360.0) - 180.0) * steady,
-        ),
-        None => (at, behind),
+    let held = match target.anchor {
+        Some(s) => {
+            let (lat, lat_v) = spring(s.at.latitude, s.rate[0], at.latitude, HOLD_FOLLOW, dt);
+            let (lon, lon_v) = spring(s.at.longitude, s.rate[1], at.longitude, HOLD_FOLLOW, dt);
+            let (alt, alt_v) = spring(s.at.altitude, s.rate[2], at.altitude, HOLD_FOLLOW, dt);
+            let goal = s.behind + ((behind - s.behind + 540.0).rem_euclid(360.0) - 180.0);
+            let (turned, turn) = spring(s.behind, s.turn, goal, HOLD_TURN, dt);
+            Steadied { at: gearbox_globe::Geodetic::new(lat, lon, alt), rate: [lat_v, lon_v, alt_v], behind: turned, turn }
+        }
+        None => Steadied { at, rate: [0.0; 3], behind, turn: 0.0 },
     };
-    target.anchor = Some((at, behind));
+    target.anchor = Some(held);
+    let (at, behind) = (held.at, held.behind);
     let from = target.from;
     let offset = *target.offset.get_or_insert(crate::viewer::camera::View {
         at: gearbox_globe::Geodetic::new(
@@ -1113,6 +1125,27 @@ mod tests {
     use super::*;
     use bevy::math::DVec3;
     use gearbox_globe::{Datum, Geodetic};
+
+    #[test]
+    fn a_held_shot_follows_on_a_spring_that_never_overshoots_or_jolts() {
+        let (mut x, mut v) = (0.0, 0.0);
+        let mut biggest = 0.0f64;
+        for _ in 0..600 {
+            let (nx, nv) = spring(x, v, 1.0, HOLD_FOLLOW, 1.0 / 60.0);
+            biggest = biggest.max((nx - x).abs());
+            assert!(nx <= 1.0 + 1e-12, "overshot to {nx}");
+            (x, v) = (nx, nv);
+        }
+        assert!((x - 1.0).abs() < 1e-3, "settled at {x}");
+        assert!(biggest < 0.02, "moved {biggest} of the way in one frame");
+        // One step of a second lands where sixty frames of it do.
+        let (mut a, mut av) = (0.0, 0.0);
+        for _ in 0..60 {
+            (a, av) = spring(a, av, 1.0, HOLD_FOLLOW, 1.0 / 60.0);
+        }
+        let (b, bv) = spring(0.0, 0.0, 1.0, HOLD_FOLLOW, 1.0);
+        assert!((a - b).abs() < 1e-9 && (av - bv).abs() < 1e-9);
+    }
 
     fn anchor(at: DVec3, yaw: f64) -> FollowAnchor {
         FollowAnchor { site: 0, at, clearance: 0.5, yaw }
