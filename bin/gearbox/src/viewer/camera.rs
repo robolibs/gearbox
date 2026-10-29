@@ -52,6 +52,11 @@ const FLY_BOOST: f64 = 5.0;
 /// The crawl a pan keeps when the view is drawn right up against what it
 /// orbits, so a drag still answers there.
 const PAN_FLOOR_M: f64 = 0.01;
+/// How high a long move lifts the eye over its middle, a share of the ground
+/// it covers beyond the eye's own distance, and how far back it draws the eye
+/// for each metre it lifts it.
+const CRANE_LIFT: f64 = 0.5;
+const CRANE_BACK: f64 = 0.35;
 
 /// Where the view is. The one piece of camera state; everything else is
 /// derived from it every frame.
@@ -134,6 +139,31 @@ impl View {
             distance_m: from.distance_m.max(CLOSEST_M)
                 * (to.distance_m.max(CLOSEST_M) / from.distance_m.max(CLOSEST_M)).powf(t),
         };
+        view.tidy();
+        view
+    }
+
+    /// A view on its way from one to another the way a camera crane carries
+    /// it, `t` of the way (already eased). The eye trails what it looks at,
+    /// the more the further that goes: its distance, bearing and pitch lag
+    /// the place looked at, which leaves and arrives first. A move short
+    /// against the eye's distance just pans; a longer one lifts the eye once
+    /// under way, mostly straight up, looking down more steeply, and lowers
+    /// it as it arrives.
+    pub fn over(from: &Self, to: &Self, t: f64) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let travel = Geodetic::new(from.at.latitude, from.at.longitude, 0.0)
+            .ecef()
+            .distance(Geodetic::new(to.at.latitude, to.at.longitude, 0.0).ecef());
+        let reach = from.distance_m.max(to.distance_m);
+        let trail = t.powf(1.0 + travel / (travel + from.distance_m.min(to.distance_m)));
+        let mut view = Self { at: Self::between(from, to, t, true).at, ..Self::between(from, to, trail, true) };
+        let lift = CRANE_LIFT * (travel - reach).max(0.0) * (std::f64::consts::PI * trail).sin();
+        let pitch = view.pitch_deg.to_radians();
+        let out = view.distance_m * pitch.cos() + CRANE_BACK * lift;
+        let up = view.distance_m * pitch.sin() + lift;
+        view.distance_m = out.hypot(up);
+        view.pitch_deg = up.atan2(out).to_degrees();
         view.tidy();
         view
     }
@@ -344,7 +374,7 @@ pub fn place(
     // Depth precision falls with the square of distance over the near plane, so
     // the near plane backs off as the view does; nothing is ever that close to
     // an eye that far out.
-    let near = (distance / 200.0).clamp(0.05, 100_000.0) as f32;
+    let near = (distance / 10.0).clamp(0.05, 100_000.0) as f32;
     if let Projection::Perspective(lens) = projection.as_mut()
         && (lens.near - near).abs() > near * 0.05
     {
@@ -379,6 +409,39 @@ mod tests {
         view.walk(270.0, 5_000.0);
         assert!((view.at.latitude - from.latitude).abs() < 1.0e-4);
         assert!((view.at.longitude - from.longitude).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn a_long_move_is_craned_over_behind_what_it_looks_at_and_a_short_one_just_pans() {
+        let mut from = View::default();
+        from.pitch_deg = 30.0;
+        from.distance_m = 6.0;
+        let mut near = from;
+        near.walk(90.0, 4.0);
+        let mut far = from;
+        far.walk(90.0, 120.0);
+        for t in [0.0, 0.3, 0.5, 0.8, 1.0] {
+            let (panned, plain) = (View::over(&from, &near, t), View::between(&from, &near, t, true));
+            assert!((panned.distance_m - plain.distance_m).abs() < 1e-9, "a short move lifted at {t}");
+            assert!((panned.pitch_deg - plain.pitch_deg).abs() < 1e-9, "a short move tilted at {t}");
+        }
+        let (start, end, middle) = (View::over(&from, &far, 0.0), View::over(&from, &far, 1.0), View::over(&from, &far, 0.5));
+        assert!((start.eye_height_m() - from.eye_height_m()).abs() < 1e-6, "left from somewhere else");
+        assert!((end.eye_height_m() - far.eye_height_m()).abs() < 1e-6, "arrived somewhere else");
+        assert!(middle.eye_height_m() > 10.0 * from.eye_height_m(), "stayed low: {:.1} m", middle.eye_height_m());
+        assert!(middle.pitch_deg > from.pitch_deg + 15.0, "looked no further down: {:.1}", middle.pitch_deg);
+        let aside = |v: &View| v.distance_m * v.pitch_deg.to_radians().cos();
+        let (rise, back) = (middle.eye_height_m() - from.eye_height_m(), aside(&middle) - aside(&from));
+        assert!(back < 0.5 * rise, "drew back {back:.1} m for {rise:.1} m up");
+        let heights: Vec<f64> = (0..=20).map(|k| View::over(&from, &far, f64::from(k) / 20.0).eye_height_m()).collect();
+        let peak = heights.iter().cloned().fold(0.0, f64::max);
+        assert!(heights[3] < 0.2 * peak, "rose before setting off: {:.1} of {:.1} m", heights[3], peak);
+        assert!(heights[17] > 0.5 * peak, "came down before arriving: {:.1} of {:.1} m", heights[17], peak);
+        let mut outward = far;
+        outward.distance_m = 200.0;
+        let early = View::over(&from, &outward, 0.2);
+        let plain = View::between(&from, &outward, 0.2, true);
+        assert!(early.distance_m < plain.distance_m, "drew back ahead of what it looks at");
     }
 
     #[test]

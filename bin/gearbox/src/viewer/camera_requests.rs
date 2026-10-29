@@ -35,34 +35,20 @@ struct Glide {
     elapsed: f32,
 }
 
-/// Where a glide has the view after `eased` of the way (0 to 1): bearing the
-/// short way round, distance by ratio so a zoom keeps its pace.
-fn glided(from: &View, to: &View, eased: f64) -> View {
-    let lerp = |a: f64, b: f64| a + (b - a) * eased;
-    let mut view = *to;
-    view.at.latitude = lerp(from.at.latitude, to.at.latitude);
-    view.at.longitude = lerp(from.at.longitude, to.at.longitude);
-    view.at.altitude = lerp(from.at.altitude, to.at.altitude);
-    view.bearing_deg = from.bearing_deg + ((to.bearing_deg - from.bearing_deg + 540.0).rem_euclid(360.0) - 180.0) * eased;
-    view.pitch_deg = lerp(from.pitch_deg, to.pitch_deg);
-    view.distance_m = from.distance_m * (to.distance_m / from.distance_m.max(1e-3)).powf(eased);
-    view.tidy();
-    view
-}
-
 /// Carries the view along a place glide by the frame's sim time, eased at
-/// both ends; anything else moving the view ends it.
+/// both ends and craned over a long move; anything else moving the view
+/// ends it.
 fn glide_view(time: Res<Time>, mut glide: ResMut<PlaceGlide>, mut view: ResMut<View>) {
     let Some(g) = glide.0.as_mut() else {
         return;
     };
-    let last = glided(&g.from, &g.to, smoothstep(g.elapsed / g.seconds));
+    let last = View::over(&g.from, &g.to, smoothstep(g.elapsed / g.seconds));
     if g.elapsed > 0.0 && !same_view(&view, &last) {
         glide.0 = None;
         return;
     }
     g.elapsed = (g.elapsed + time.delta_secs()).min(g.seconds);
-    *view = glided(&g.from, &g.to, smoothstep(g.elapsed / g.seconds));
+    *view = View::over(&g.from, &g.to, smoothstep(g.elapsed / g.seconds));
     if g.elapsed >= g.seconds {
         glide.0 = None;
     }
@@ -219,13 +205,12 @@ mod tests {
         to.bearing_deg = -170.0;
         to.pitch_deg = 60.0;
         to.distance_m = 1000.0;
-        to.at.latitude += 0.001;
-        let half = glided(&from, &to, 0.5);
+        let half = View::over(&from, &to, 0.5);
         assert!((half.bearing_deg.abs() - 180.0).abs() < 1e-9, "turned the long way: {}", half.bearing_deg);
         assert!((half.distance_m - 100.0).abs() < 1e-6, "zoomed by difference: {}", half.distance_m);
         assert!((half.pitch_deg - 40.0).abs() < 1e-9);
-        assert!(same_view(&glided(&from, &to, 1.0), &to), "ends off its target");
-        assert!(same_view(&glided(&from, &to, 0.0), &from), "starts off where it was");
+        assert!(same_view(&View::over(&from, &to, 1.0), &to), "ends off its target");
+        assert!(same_view(&View::over(&from, &to, 0.0), &from), "starts off where it was");
         assert_eq!(smoothstep(0.5), 0.5);
         assert_eq!(smoothstep(3.0), 1.0);
     }

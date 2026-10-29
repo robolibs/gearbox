@@ -1062,7 +1062,7 @@ fn hold_shot(
     };
     shot.tidy();
     let eased = f64::from(t * t * (3.0 - 2.0 * t));
-    *view = crate::viewer::camera::View::between(&start, &shot, eased, true);
+    *view = crate::viewer::camera::View::over(&start, &shot, eased);
 }
 
 /// Start a short fly of the chase camera to `focus` at `distance`.
