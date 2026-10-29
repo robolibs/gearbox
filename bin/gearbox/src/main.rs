@@ -24,6 +24,7 @@ mod environment;
 mod biomes;
 mod globe;
 mod greenhouse;
+mod headless;
 mod host;
 mod links;
 mod load;
@@ -93,7 +94,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     install_panic_logger();
     tracing::info!(target: "gearbox", "gearbox-sim starting — full log at {}", log_file().display());
     tracing::info!("planet: {} radius={} m gravity={} m/s²", planet.name(), planet.radius_m(), planet.gravity_mps2());
-    host::run(cli_paths, log)
+    match headless::size() {
+        Some(size) => headless::run(cli_paths, size?),
+        None => host::run(cli_paths, log),
+    }
 }
 
 fn launch_planet(args: Vec<String>) -> Result<(gearbox_globe::Body, Vec<String>), String> {

@@ -45,6 +45,9 @@ pub struct Args {
     /// Daemonize and print the registry entry as JSON
     #[arg(long)]
     detach: bool,
+    /// Render offscreen at WIDTHxHEIGHT with no window, display or compositor
+    #[arg(long, value_name = "WxH")]
+    headless: Option<String>,
     /// Path to the sim binary (else GEARBOX_SIM, config `sim`, this same binary)
     #[arg(long, value_name = "PATH")]
     sim: Option<PathBuf>,
@@ -100,6 +103,9 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
     }
     if args.relay {
         cmd.env("GEARBOX_RELAY", "1");
+    }
+    if let Some(size) = &args.headless {
+        cmd.env("GEARBOX_HEADLESS", size);
     }
     let log_path = if args.detach {
         let dir = paths::logs_dir();
