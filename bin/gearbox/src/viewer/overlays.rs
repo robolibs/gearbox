@@ -31,9 +31,10 @@ impl Plugin for OverlaysPlugin {
     }
 }
 
-/// `gearbox instance overlay NAME on|off|toggle` drops `NAME STATE` in
-/// `<registry dir>/<name>.overlay`; this switches that overlay as the View
-/// pane does. NAME is `tf`, `colliders`, `grid` or `axes`.
+/// `gearbox instance overlay NAME on|off|toggle [MACHINE…]` drops `NAME
+/// STATE [MACHINE…]` in `<registry dir>/<name>.overlay`; this switches that
+/// overlay as the View pane does. NAME is `tf`, `colliders`, `grid` or
+/// `axes`; `tf on` with machines draws only theirs.
 fn serve_overlay_requests(
     time: Res<Time>,
     mut poll: Local<Option<Timer>>,
@@ -85,7 +86,11 @@ fn serve_overlay_requests(
                 toggles.show_tf_frames,
                 toggles.show_tf_names,
                 toggles.show_tf_links,
-            ) = (on, on, on)
+            ) = (on, on, on);
+            // Switched off, the tree fades out over the machines it was on.
+            if on {
+                toggles.tf_machines = words.map(str::to_string).collect();
+            }
         }
         "colliders" => toggles.show_colliders = on,
         "grid" => toggles.show_world_grid = on,
@@ -181,6 +186,8 @@ pub struct DisplayToggles {
     pub show_tf_names: bool,
     pub show_tf_links: bool,
     pub tf_wheels_only: bool,
+    /// The machines whose TF tree is drawn, by id; every machine when empty.
+    pub tf_machines: Vec<String>,
 }
 
 impl Default for DisplayToggles {
@@ -202,6 +209,7 @@ impl Default for DisplayToggles {
             show_tf_links: tf_env("links"),
             tf_wheels_only: std::env::var("GEARBOX_TF_OVERLAY")
                 .is_ok_and(|v| v.split(',').any(|t| t.trim() == "wheels")),
+            tf_machines: Vec::new(),
         }
     }
 }

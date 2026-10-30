@@ -40,6 +40,8 @@ const BASE_AXES_M: f32 = 0.6;
 const MIN_AXES_M: f32 = 0.12;
 const MAX_AXES_M: f32 = 0.5;
 const AXES_PER_SPACING: f32 = 0.3;
+/// Seconds the TF tree takes to fade in or out.
+const TF_FADE_S: f32 = 0.6;
 
 /// Every link of a machine with its world transform and its parent's.
 struct Frame<'a> {
@@ -102,28 +104,57 @@ fn axes_length(frame: &Frame<'_>) -> f32 {
     }
 }
 
+/// The machines the TF tree is drawn on.
+fn drawn<'a>(
+    inventory: &'a ControllerInventory,
+    toggles: &'a DisplayToggles,
+) -> impl Iterator<Item = &'a MachineInstanceSpec> {
+    inventory
+        .machines
+        .iter()
+        .filter(|m| toggles.tf_machines.is_empty() || toggles.tf_machines.contains(&m.id))
+}
+
+/// A frame's X, Y and Z axes as red, green and blue arrows.
+fn axes(gizmos: &mut Gizmos<TfGizmos>, at: &GlobalTransform, length: f32, alpha: f32) {
+    use bevy::color::palettes::basic::{BLUE, GREEN, RED};
+    let iso = at.to_isometry();
+    let start = iso.translation.into();
+    for (axis, color) in [(Vec3::X, RED), (Vec3::Y, GREEN), (Vec3::Z, BLUE)] {
+        gizmos.arrow(start, iso.transform_point(axis * length).into(), Color::from(color).with_alpha(alpha));
+    }
+}
+
 fn draw_tf_gizmos(
+    time: Res<Time>,
     toggles: Res<DisplayToggles>,
     inventory: Res<ControllerInventory>,
     index: Res<PrimIndex>,
     transforms: Query<&GlobalTransform>,
     mut gizmos: Gizmos<TfGizmos>,
+    mut shown: Local<(f32, bool, bool)>,
 ) {
-    if !toggles.show_tf_frames && !toggles.show_tf_links {
+    let on = toggles.show_tf_frames || toggles.show_tf_links;
+    if on {
+        (shown.1, shown.2) = (toggles.show_tf_frames, toggles.show_tf_links);
+    }
+    let step = time.delta_secs() / TF_FADE_S;
+    shown.0 = if on { (shown.0 + step).min(1.0) } else { (shown.0 - step).max(0.0) };
+    let (fade, frames, links) = *shown;
+    if fade <= 0.0 {
         return;
     }
-    for machine in &inventory.machines {
+    let alpha = fade * fade * (3.0 - 2.0 * fade);
+    for machine in drawn(&inventory, &toggles) {
         for frame in frames_of(machine, &index, &transforms)
             .into_iter()
             .filter(|f| !toggles.tf_wheels_only || f.role == LinkRole::Wheel)
         {
-            if toggles.show_tf_frames {
-                gizmos.axes(frame.transform.to_isometry(), axes_length(&frame));
+            if frames {
+                axes(&mut gizmos, &frame.transform, axes_length(&frame), alpha);
             }
-            if toggles.show_tf_links
-                && let Some(parent) = frame.parent
-            {
-                gizmos.arrow(frame.transform.translation(), parent, LINK_COLOR);
+            if links && let Some(parent) = frame.parent {
+                gizmos.arrow(frame.transform.translation(), parent, LINK_COLOR.with_alpha(alpha));
             }
         }
     }
@@ -158,7 +189,7 @@ fn publish_tf_labels(
     let Some(size) = camera.logical_viewport_size() else {
         return;
     };
-    for machine in &inventory.machines {
+    for machine in drawn(&inventory, &toggles) {
         for frame in frames_of(machine, &index, &transforms)
             .into_iter()
             .filter(|f| !toggles.tf_wheels_only || f.role == LinkRole::Wheel)
@@ -171,5 +202,47 @@ fn publish_tf_labels(
                 at: [screen.x / size.x, screen.y / size.y],
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn machine(id: &str) -> MachineInstanceSpec {
+        MachineInstanceSpec {
+            tracks: Vec::new(),
+            devices: Vec::new(),
+            scene_root: None,
+            asset_label: "fleet".into(),
+            source_path: String::new(),
+            prim_path: format!("/Fleet/{id}"),
+            id: id.into(),
+            kind: None,
+            interface_version: None,
+            id_policy: String::new(),
+            body: None,
+            sensors: Vec::new(),
+            powered_wheel_joints: Vec::new(),
+            passive_wheel_joints: Vec::new(),
+            steering_joints: Vec::new(),
+            brake_joints: Vec::new(),
+            suspension_joints: Vec::new(),
+            tool_joints: Vec::new(),
+            controllers: Vec::new(),
+            links: Default::default(),
+            grants: Vec::new(),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn the_tree_is_drawn_on_the_machines_named_or_on_all_when_none_are() {
+        let inventory = ControllerInventory { machines: ["picker", "washer", "digger"].map(machine).to_vec() };
+        let mut toggles = DisplayToggles::default();
+        let ids = |toggles: &DisplayToggles| drawn(&inventory, toggles).map(|m| m.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&toggles), ["picker", "washer", "digger"]);
+        toggles.tf_machines = vec!["digger".into(), "picker".into()];
+        assert_eq!(ids(&toggles), ["picker", "digger"]);
     }
 }
