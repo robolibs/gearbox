@@ -220,12 +220,16 @@ def duration(path: Path) -> float | None:
 
 def film(keys: list[dict], path: Path, clock: Gearbox) -> list[tuple[float, str]]:
     """Records the path in one take: the first view set before the recording
-    starts, the whole path sent once it has, the TF tree switched as each
-    view that changes it is reached. Gives back the captions with the video
-    time each view is reached at."""
+    starts, the whole path sent once it has, with the TF tree's switches the
+    sim makes as it reaches each view that changes it. Gives back the
+    captions with the video time each view is reached at, and writes them
+    beside the take as soon as they are known."""
     path.unlink(missing_ok=True)
     plan = path.with_suffix(".path")
-    plan.write_text("".join(f"{k['at']:.2f} {k['view']}\n" for k in keys))
+    views = [f"{k['at']:.2f} {k['view']}\n" for k in keys]
+    switches = [f"{k['at']:.2f} tf " + (" ".join(["on", *(f"base_fleet_{m}" for m in k["tf"])]) if k["tf"] else "off") + "\n"
+                for k in keys if k["tf"] is not None]
+    plan.write_text("".join(views + switches))
     overlay([])
     camera(*as_args(keys[0]["view"]))
     time.sleep(2.0)
@@ -235,13 +239,21 @@ def film(keys: list[dict], path: Path, clock: Gearbox) -> list[tuple[float, str]
     # The sim takes camera requests four times a second.
     began = clock.clock().world_s - t0 + 0.125
     captions = [(round(began + k["at"], 2), k["caption"]) for k in keys if k["caption"]]
-    switches = [(began + k["at"], k["tf"]) for k in keys if k["tf"] is not None]
+    path.with_suffix(".json").write_text(json.dumps(captions))
     end = began + keys[-1]["at"] + 1.0
-    while (t := clock.clock().world_s - t0) < end:
-        while switches and t >= switches[0][0]:
-            overlay(switches.pop(0)[1])
+
+    def now() -> float:
+        """Seconds since the recording began, waiting out a sim slow to answer."""
+        for _ in range(30):
+            try:
+                return clock.clock().world_s - t0
+            except RuntimeError:
+                time.sleep(1.0)
+        raise RuntimeError("the sim's clock no longer answers")
+
+    while (t := now()) < end:
         print(f"\r{t:6.1f} of {end:.0f} s", end="", flush=True)
-        time.sleep(0.1)
+        time.sleep(0.5)
     print(flush=True)
     record("stop")
     overlay([])
