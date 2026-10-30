@@ -224,66 +224,8 @@ pub struct MoveView;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<View>()
-            .add_systems(Update, (orbit, pan, zoom, fly).chain().in_set(MoveView))
-            .add_systems(PostUpdate, clear_glass_near_eye.after(TransformSystems::Propagate));
-    }
-}
-
-/// Glass is a blended material no more opaque than this, or one whose
-/// opacity is drawn from its texture, as a foil's is.
-const GLASS_ALPHA: f32 = 0.35;
-/// Within the first distance of a pane, or inside its bounds, the eye sees
-/// none of that glass; beyond the second, all of it.
-const GLASS_CLEAR_M: f32 = 9.0;
-const GLASS_SHOWN_M: f32 = 15.0;
-
-/// Fades every glass material out as the eye nears or enters a pane of it,
-/// and back as the eye leaves.
-fn clear_glass_near_eye(
-    eye: Query<&GlobalTransform, With<ChaseCamera>>,
-    panes: Query<(&MeshMaterial3d<StandardMaterial>, &GlobalTransform, &bevy::camera::primitives::Aabb)>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut glass: Local<std::collections::HashMap<AssetId<StandardMaterial>, Option<f32>>>,
-) {
-    let Ok(eye) = eye.single() else {
-        return;
-    };
-    let eye = eye.translation();
-    let mut nearest = std::collections::HashMap::<AssetId<StandardMaterial>, f32>::new();
-    for (material, at, bounds) in &panes {
-        let id = material.id();
-        let alpha = match glass.get(&id) {
-            Some(alpha) => *alpha,
-            None => {
-                let Some(m) = materials.get(id) else {
-                    continue;
-                };
-                let see_through = m.base_color.alpha() <= GLASS_ALPHA || m.base_color_texture.is_some();
-                let alpha = (m.alpha_mode == AlphaMode::Blend && see_through).then_some(m.base_color.alpha());
-                glass.insert(id, alpha);
-                alpha
-            }
-        };
-        if alpha.is_none() {
-            continue;
-        }
-        let local = at.affine().inverse().transform_point3(eye);
-        let outside = (Vec3::from(local) - Vec3::from(bounds.center)).abs() - Vec3::from(bounds.half_extents);
-        let away = outside.max(Vec3::ZERO).length();
-        nearest.entry(id).and_modify(|d| *d = d.min(away)).or_insert(away);
-    }
-    for (id, alpha) in glass.iter() {
-        let Some(alpha) = alpha else {
-            continue;
-        };
-        let away = nearest.get(id).copied().unwrap_or(f32::INFINITY);
-        let t = ((away - GLASS_CLEAR_M) / (GLASS_SHOWN_M - GLASS_CLEAR_M)).clamp(0.0, 1.0);
-        let want = alpha * t * t * (3.0 - 2.0 * t);
-        if materials.get(*id).is_some_and(|m| (m.base_color.alpha() - want).abs() > 1e-3)
-            && let Some(mut m) = materials.get_mut(*id)
-        {
-            m.base_color.set_alpha(want);
-        }
+            .add_plugins(super::glass::GlassPlugin)
+            .add_systems(Update, (orbit, pan, zoom, fly).chain().in_set(MoveView));
     }
 }
 
@@ -442,7 +384,7 @@ pub fn place(
     // Depth precision falls with the square of distance over the near plane, so
     // the near plane backs off as the view does; nothing is ever that close to
     // an eye that far out.
-    let near = (distance / 10.0).clamp(0.05, 100_000.0) as f32;
+    let near = (distance / 40.0).clamp(0.05, 100_000.0) as f32;
     if let Projection::Perspective(lens) = projection.as_mut()
         && (lens.near - near).abs() > near * 0.05
     {
@@ -454,54 +396,6 @@ pub fn place(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn glass_clears_round_an_eye_inside_it_and_comes_back_as_the_eye_leaves() {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
-            .init_asset::<StandardMaterial>()
-            .add_systems(Update, clear_glass_near_eye);
-        let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
-        let glass = materials.add(StandardMaterial {
-            base_color: Color::srgba(0.7, 0.8, 0.8, 0.15),
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        });
-        let foil = materials.add(StandardMaterial {
-            base_color_texture: Some(Handle::default()),
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        });
-        let algae = materials.add(StandardMaterial {
-            base_color: Color::srgba(0.1, 0.4, 0.1, 0.85),
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        });
-        let steel = materials.add(StandardMaterial::from_color(Color::srgb(0.5, 0.5, 0.5)));
-        let arch = bevy::camera::primitives::Aabb::from_min_max(Vec3::new(-5.0, 0.0, -15.0), Vec3::new(5.0, 6.0, 15.0));
-        for material in [&glass, &foil, &algae, &steel] {
-            app.world_mut().spawn((MeshMaterial3d(material.clone()), GlobalTransform::default(), arch));
-        }
-        let eye = app.world_mut().spawn((ChaseCamera::default(), GlobalTransform::from_translation(Vec3::new(0.0, 3.0, 0.0)))).id();
-        let alpha = |app: &App, material: &Handle<StandardMaterial>| {
-            app.world().resource::<Assets<StandardMaterial>>().get(material).unwrap().base_color.alpha()
-        };
-        app.update();
-        assert!(alpha(&app, &glass) < 1e-3, "glass round the eye still shown: {}", alpha(&app, &glass));
-        assert!(alpha(&app, &foil) < 1e-3, "foil round the eye still shown: {}", alpha(&app, &foil));
-        assert_eq!(alpha(&app, &steel), 1.0, "faded steel");
-        assert_eq!(alpha(&app, &algae), 0.85, "faded a cloudy culture");
-        app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(13.0, 3.0, 0.0)));
-        app.update();
-        assert!(alpha(&app, &glass) < 1e-3, "glass 8 m out still shown: {}", alpha(&app, &glass));
-        app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(17.0, 3.0, 0.0)));
-        app.update();
-        let partway = alpha(&app, &glass);
-        assert!(partway > 0.01 && partway < 0.14, "no fade 12 m out: {partway}");
-        app.world_mut().entity_mut(eye).insert(GlobalTransform::from_translation(Vec3::new(40.0, 3.0, 0.0)));
-        app.update();
-        assert!((alpha(&app, &glass) - 0.15).abs() < 1e-3, "glass not back: {}", alpha(&app, &glass));
-    }
 
     #[test]
     fn walking_a_kilometre_north_moves_a_kilometre_north() {

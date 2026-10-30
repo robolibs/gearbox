@@ -7,6 +7,7 @@ pub(crate) mod camera;
 pub mod camera_requests;
 pub mod commands;
 pub mod drive;
+mod glass;
 pub mod log;
 pub mod machine_context;
 pub mod overlays;
