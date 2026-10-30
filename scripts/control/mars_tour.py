@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """A filmed tour of the Mars base in one take: the camera flies one smooth
-path from robot to robot, never stopping on the way, recorded with a
-blending shutter as one video, then captioned and cut down to a preview.
+path from robot to robot, into the greenhouses and out again, never stopping
+on the way, recorded with a blending shutter as one video, then captioned
+and cut down to a preview.
 
 Run it against a sim with the base, its fleet and the farm runner working,
 headless or not:
 
     gearbox run --headless 1920x1080 --planet mars --world bin/gearbox/assets/world/mars_base.usda
     gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base
+    python3 scripts/control/mars_farm.py --digging base_fleet_digger3 \\
+        --leave base_fleet_archbbot,base_fleet_domebbot,base_fleet_domebwasher
     python3 scripts/control/mars_tour.py --out .work/movie
 
-While it records, the sim's clock steps a sixtieth of a second a frame of
-video, so the path's seconds below are seconds of video however fast the
-GPU renders.
+The robots left standing are the ones whose reach crosses the camera's way
+through arch B and dome B. While it records, the sim's clock steps a
+sixtieth of a second a frame of video, so the path's seconds below are
+seconds of video however fast the GPU renders.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -33,69 +38,146 @@ LAT0, LON0, M_PER_DEG = 18.4447, 77.4508, 59158.0
 SHUTTER = 2
 CAPTION_S = 4.5
 FONT = subprocess.run(["fc-match", "-f", "%{file}", "DejaVu Sans"], capture_output=True, text=True).stdout.strip()
+# Arch B's axis, its north gable and the height of the gable pane's middle.
+ARCH_B_Y, GABLE_X, PANE_Z = -77.0, 44.0, 3.95
+# Dome B's glass facets the camera flies in and out by, and their height.
+DOME_IN, DOME_OUT, FACET_Z = (54.95, 10.69), (53.78, 28.29), 5.49
+# A picker's lane, off the arch's axis, and how near the parked ridge robot it may be held.
+PICKERS = {"archbpicker1": 1.35, "archbpicker2": -1.35}
+HOLD_FROM_X = 21.0
 
 
 def place(x: float, y: float, above: float, bearing: float, pitch: float, distance: float) -> str:
     """A view of the base-frame point (x north, y west) `above` m over the ground."""
     lat = LAT0 + x / M_PER_DEG
     lon = LON0 - y / (M_PER_DEG * math.cos(math.radians(LAT0)))
-    return (f"look lat={lat:.7f} lon={lon:.7f} above={above} bearing={bearing % 360:.1f} "
+    return (f"look lat={lat:.7f} lon={lon:.7f} above={above:.2f} bearing={bearing % 360:.1f} "
             f"pitch={pitch} distance={distance}")
 
 
-def machine(name: str, bearing: float, pitch: float, distance: float) -> str:
-    """A view round a fleet machine, following it as it moves, its bearing a compass bearing."""
-    return f"look base_fleet_{name} bearing={bearing % 360:.1f} pitch={pitch} distance={distance} compass=1"
+def seen_from(x: float, y: float, z: float, bearing: float, pitch: float, distance: float) -> str:
+    """A view whose eye stands at (x, y) z m up, its target `distance` away
+    the other way from `bearing`, `pitch` below it."""
+    b, p = math.radians(bearing), math.radians(pitch)
+    flat = distance * math.cos(p)
+    return place(x - flat * math.cos(b), y + flat * math.sin(b), z - distance * math.sin(p), bearing, pitch, distance)
 
 
-def tour() -> list[dict]:
+def machine(name: str, bearing: float, pitch: float, distance: float, link: str | None = None, above: float = 0.0) -> str:
+    """A view round a fleet machine (or one of its links), following it as
+    it moves, its bearing a compass bearing."""
+    tail = f" link={link}" if link else ""
+    return f"look base_fleet_{name}{tail} above={above} bearing={bearing % 360:.1f} pitch={pitch} distance={distance} compass=1"
+
+
+def pickers() -> dict[str, float]:
+    """How far north each of arch B's pickers stands."""
+    out = {}
+    for name in PICKERS:
+        state = subprocess.run([GB, "--timeout", "20", "machine", "state", f"base_fleet_{name}"], capture_output=True, text=True).stdout
+        pos = re.search(r"pos \(([-+0-9.]+), ([-+0-9.]+)", state)
+        if pos:
+            out[name] = float(pos.group(2))
+    return out
+
+
+def tour(north: dict[str, float]) -> list[dict]:
     """The take as the views the path passes, each at its second, the
-    caption shown from there, if any. Two views of a robot a few seconds
-    apart hold it while the camera drifts round it; a view up high between
-    far apart robots carries the camera over the base. The eye never goes
-    into a building or near one: over the arches it stays 12 m up or more,
-    clear of the washers' girders (7.6 m)."""
+    caption shown from there, and the machines whose TF tree is drawn from
+    there (none: off). Inside arch B the eye keeps to the walkway's middle,
+    passes the pickers there, turns round in place past the one held and
+    leaves by the pane it came in by; through dome B it flies a straight
+    chord from one glass facet to another, clear of the cistern."""
     keys = []
+    t = 0.0
 
-    def key(at, view, caption=None):
-        keys.append({"at": at, "view": view, "caption": caption})
+    def key(dt, view, caption=None, tf=None):
+        nonlocal t
+        t += dt
+        keys.append({"at": round(t, 2), "view": view, "caption": caption, "tf": tf})
 
     key(0, place(5, -20, 0, 230, 34, 270))
     key(8, place(5, -30, 0, 295, 26, 190), "A Mars base for a crew of twelve, Jezero crater")
-    # Harvest, the arches from C back to A, seen down through their roofs.
-    key(17.5, machine("archcpicker2", 300, 70, 13.0), "Harvest: wheat and pulses in deep troughs")
-    key(24.5, machine("archcpicker2", 330, 66, 13.0))
-    key(30, machine("archbpicker1", 330, 70, 13.0), "A UR10e on a mobile base picks tomatoes and peppers")
-    key(37, machine("archbpicker1", 300, 66, 13.0))
-    key(43, place(29, -69.5, 6, 300, 50, 22), "Washers brush the dust off the arch glazing")
-    key(49, place(31, -62, 5, 345, 55, 13))
-    key(55, place(33, -62, 5, 0, 50, 13), "Salad in channels down an arch, a ridge gantry over them")
-    # Glass and panels, between the domes and well up.
-    key(62, place(45, -30, 8, 290, 45, 40))
-    key(68, place(62, 20, 4, 250, 45, 34), "The dome washer sweeps the geodesic glass")
-    key(74, place(62, 20, 4, 220, 32, 26))
-    key(80, place(30, 55, 4, 240, 45, 50))
-    key(86, machine("solarwasher2", 300, 28, 11.0), "Panel washers keep the arrays clean")
-    key(92, machine("solarwasher2", 260, 30, 10.0))
-    # Soil.
-    key(99, place(-58, 63, 4, 330, 45, 50))
-    key(106, machine("digger3", 340, 26, 7.0), "Excavators dig regolith for the soil works")
-    key(113, machine("digger3", 15, 22, 6.0))
-    key(118, machine("digger2", 10, 24, 6.0), "Loads tipped into the soil bays")
-    key(124, machine("digger2", 340, 22, 6.0))
-    key(130, place(-112, 30, 2, 340, 45, 40))
-    key(137, place(-99, 0, 1, 300, 28, 32), "Water from the ice well; oxygen and methane from the air")
-    key(143, place(-120, -5, 2, 245, 20, 26))
-    # The habitat, the pad, and the base from above.
-    key(150, place(-80, -48, 5, 220, 40, 55))
-    key(157, place(-39.5, -91.5, 6, 200, 16, 32), "MARSHA, a habitat printed from regolith")
-    key(163, place(-39.5, -91.5, 6, 250, 20, 29))
-    key(170, place(-120, -120, 5, 240, 35, 70))
-    key(177, place(-205, -150, 5, 230, 20, 70), "The Starship pad, fuelled from the base")
-    key(183, place(-215, -155, 5, 285, 16, 55))
-    key(191, place(-110, -100, 0, 265, 35, 150))
-    key(198, place(-10, -42, 0, 250, 30, 90))
-    key(207, place(10, -30, 0, 300, 42, 360))
+    # Down to arch B's north gable and in through its pane, along the walkway.
+    key(9, place(40, ARCH_B_Y, 2, 10, 28, 45))
+    key(7, seen_from(GABLE_X + 10, ARCH_B_Y, PANE_Z, 0, 10, 6))
+    key(5, seen_from(GABLE_X, ARCH_B_Y, PANE_Z, 0, 10, 6))
+    key(3, seen_from(GABLE_X - 5.5, ARCH_B_Y, 3.2, 0, 12, 6), "Inside the arches: tomatoes and peppers on table-top gutters",
+        ["archbpicker1", "archbpicker2", "archbbot"])
+    key(4, seen_from(GABLE_X - 11, ARCH_B_Y, 2.1, 0, 14, 5))
+    # Past the pickers to the one furthest along, round in place, and held on it.
+    held = max(north, key=north.get) if north else "archbpicker1"
+    lane = PICKERS[held]
+    at = max(north.get(held, 30.0), HOLD_FROM_X)
+    turn_x = at - 2.4
+    key(max(4.0, (GABLE_X - 11 - turn_x) / 1.3), seen_from(turn_x, ARCH_B_Y, 1.75, 0, 16, 3))
+    face = 150 if lane > 0 else 210
+    for k, b in enumerate((45, 100, 150)):
+        key(3.6, seen_from(turn_x, ARCH_B_Y, 1.75, b if lane > 0 else -b, 18, 2.8),
+            "Robot arms on mobile bases pick the ripe fruit; every joint is tracked" if k == 2 else None)
+    key(4, machine(held, face, 20, 2.7, above=0.7))
+    key(5, machine(held, face + (15 if lane > 0 else -15), 22, 2.9, above=0.7))
+    # Back up the walkway and out by the pane.
+    key(5, seen_from(at + 3, ARCH_B_Y, 1.9, 180, 12, 5))
+    key(max(4.0, (GABLE_X - 5.5 - at - 3) / 1.6), seen_from(GABLE_X - 5.5, ARCH_B_Y, 3.3, 180, 10, 6))
+    key(3, seen_from(GABLE_X, ARCH_B_Y, PANE_Z, 180, 10, 6), None, [])
+    key(4, seen_from(GABLE_X + 6, ARCH_B_Y, PANE_Z + 1.5, 165, 14, 7))
+    # Up over the arches, round past dome A on the skyline, to their washers,
+    # then the dome washer, and on high and wide of dome A, whose washer arch
+    # stands round it somewhere.
+    key(5, place(62, -20, 6, 100, 8, 58))
+    key(5, place(48, -84, 5, 95, 34, 20))
+    key(6, machine("archbwasher", 70, 32, 22, "portal", 3), "Washers brush the dust off the arch roofs", ["archbwasher"])
+    key(7, machine("archbwasher", 95, 30, 20, "portal", 3))
+    key(9, machine("domeawasher", 200, 32, 30, "carriage"), "The dome washer sweeps the geodesic glass", ["domeawasher"])
+    key(7, machine("domeawasher", 225, 28, 28, "carriage"))
+    key(6, seen_from(46, -4, 19, 140, 32, 16), None, [])
+    # Into dome B by one glass facet and out by another.
+    chord = math.dist(DOME_IN, DOME_OUT)
+    u = ((DOME_OUT[0] - DOME_IN[0]) / chord, (DOME_OUT[1] - DOME_IN[1]) / chord)
+    back = math.degrees(math.atan2(u[1], -u[0])) % 360
+
+    def on_chord(s, pitch=10):
+        return seen_from(DOME_IN[0] + s * u[0], DOME_IN[1] + s * u[1], FACET_Z, back, pitch, 6)
+
+    key(6, seen_from(54, 0, 9, back + 10, 16, 8))
+    key(5, on_chord(-8))
+    key(4, on_chord(0))
+    key(2.5, on_chord(3), "Inside a dome: printed regolith terraces round a water cistern", ["domebbot"])
+    key(4, on_chord(chord / 2, 26))
+    key(4, on_chord(chord - 3))
+    key(2.5, on_chord(chord))
+    key(3, on_chord(chord + 6), None, [])
+    # Over to the solar field's panel washers, met from the east between two rows.
+    key(8, place(30, 58, 3, 100, 34, 36))
+    key(8, machine("solarwasher2", 115, 28, 9, "frame"), "Panel washers keep the arrays clean", ["solarwasher2"])
+    key(6, machine("solarwasher2", 130, 30, 10, "frame"))
+    # The soil works and its diggers.
+    key(8, place(-58, 63, 4, 330, 45, 50), None, [])
+    key(10, machine("digger3", 340, 24, 7, "base_link"), "RASSOR excavators dig regolith with counter-rotating drums", ["digger3"])
+    key(7, machine("digger3", 15, 22, 6, "base_link"))
+    key(7, place(-112, 30, 2, 340, 45, 40), "Loads tipped into the soil bays", [])
+    key(7, place(-99, 0, 1, 300, 28, 32), "Water from the ice well; oxygen and methane from the air")
+    key(6, place(-120, -5, 2, 245, 20, 26))
+    # MARSHA, and its printer laying the first courses of a new one.
+    key(7, place(-80, -48, 5, 220, 40, 55))
+    key(7, place(-39.5, -91.5, 6, 200, 16, 32), "MARSHA, a habitat printed from regolith")
+    key(6, seen_from(-30, -75, 16, 160, 30, 20))
+    key(6, place(-17, -99, 2, 320, 24, 26), "Its printer has begun the next: basalt fibre and bioplastic, a course at a time",
+        ["printer"])
+    key(6, machine("printer", 330, 22, 6.5, "head", 0.3))
+    key(6, machine("printer", 300, 26, 7, "head", 0.3))
+    # Up and away from the printer's boom, high over MARSHA, to the launch
+    # site: Ariane 6 on its table, Honda's rocket on the hopper pad.
+    key(6, seen_from(-2, -90, 18, 210, 35, 24), None, [])
+    key(8, place(-120, -120, 12, 240, 30, 80))
+    key(8, place(-220, -160, 28, 230, 12, 98), "Ariane 6 on its launch table")
+    key(6, place(-220, -160, 26, 270, 10, 88))
+    key(8, place(-150, -232, 11, 250, 12, 48), "Honda's reusable rocket, scaled up as the base's hopper")
+    key(6, place(-150, -232, 9, 300, 10, 40))
+    key(9, place(-110, -100, 0, 265, 35, 150))
+    key(7, place(-10, -42, 0, 250, 30, 90))
+    key(9, place(10, -30, 0, 300, 42, 360))
     return keys
 
 
@@ -107,6 +189,12 @@ def record(*args: str) -> None:
     subprocess.run([GB, "--timeout", "15", "instance", "record", *args], check=True, capture_output=True)
 
 
+def overlay(machines: list[str]) -> None:
+    """The TF tree drawn on these machines, or switched off."""
+    state = ["on", *(f"base_fleet_{m}" for m in machines)] if machines else ["off"]
+    subprocess.run([GB, "--timeout", "15", "instance", "overlay", "tf", *state], check=True, capture_output=True)
+
+
 def as_args(view: str) -> list[str]:
     """A path view as `instance camera` arguments."""
     words = view.split()
@@ -114,6 +202,8 @@ def as_args(view: str) -> list[str]:
     for word in words[1:]:
         if "=" in word:
             name, value = word.split("=", 1)
+            if name == "link":
+                continue
             args += ["--compass"] if name == "compass" else [f"--{name}", value]
     return args
 
@@ -130,11 +220,13 @@ def duration(path: Path) -> float | None:
 
 def film(keys: list[dict], path: Path, clock: Gearbox) -> list[tuple[float, str]]:
     """Records the path in one take: the first view set before the recording
-    starts, the whole path sent once it has. Gives back the captions with
-    the video time each view is reached at."""
+    starts, the whole path sent once it has, the TF tree switched as each
+    view that changes it is reached. Gives back the captions with the video
+    time each view is reached at."""
     path.unlink(missing_ok=True)
     plan = path.with_suffix(".path")
     plan.write_text("".join(f"{k['at']:.2f} {k['view']}\n" for k in keys))
+    overlay([])
     camera(*as_args(keys[0]["view"]))
     time.sleep(2.0)
     record("start", "--shutter", str(SHUTTER), str(path))
@@ -143,12 +235,16 @@ def film(keys: list[dict], path: Path, clock: Gearbox) -> list[tuple[float, str]
     # The sim takes camera requests four times a second.
     began = clock.clock().world_s - t0 + 0.125
     captions = [(round(began + k["at"], 2), k["caption"]) for k in keys if k["caption"]]
+    switches = [(began + k["at"], k["tf"]) for k in keys if k["tf"] is not None]
     end = began + keys[-1]["at"] + 1.0
     while (t := clock.clock().world_s - t0) < end:
+        while switches and t >= switches[0][0]:
+            overlay(switches.pop(0)[1])
         print(f"\r{t:6.1f} of {end:.0f} s", end="", flush=True)
-        time.sleep(0.5)
+        time.sleep(0.1)
     print(flush=True)
     record("stop")
+    overlay([])
     for _ in range(600):
         if duration(path):
             return captions
@@ -198,10 +294,15 @@ def main():
     ap.add_argument("--out", default=str(ROOT / ".work" / "movie"))
     ap.add_argument("--keys", help="FIRST:LAST views to fly alone, as a trial, from the view before FIRST")
     ap.add_argument("--caption-only", action="store_true", help="caption the take already filmed")
+    ap.add_argument("--print", action="store_true", help="print the path and quit")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    keys = tour()
+    keys = tour(pickers())
+    if args.print:
+        for k in keys:
+            print(f"{k['at']:7.2f} {k['view']}" + (f"  # {k['caption']}" if k["caption"] else "") + (f"  tf={k['tf']}" if k["tf"] is not None else ""))
+        return
     if args.keys:
         first, last = (int(k) for k in args.keys.split(":"))
         trial_keys = keys[max(first - 1, 0):last + 1]
