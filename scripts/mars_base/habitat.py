@@ -1173,10 +1173,26 @@ WEBS = 30
 
 def top_course(radius=5.0, height=15.0):
     """Where the printer's nozzle rides on a begun MARSHA built `radius`
-    round and `height` tall: a hair over the middle of its outer skin's top
-    course, as (radius, z) from the shell's axis."""
-    z = PLINTH + COURSES * COURSE
+    round and `height` tall: a hair over the middle of its outer skin's
+    course it is laying, the one over the top course, as (radius, z) from
+    the shell's axis."""
+    z = PLINTH + (COURSES + 1) * COURSE
     return marsha_radius(radius, z / height) - SKIN / 2, z + 0.012
+
+
+def laying_bead(radius=5.0, height=15.0, trail=math.radians(100), steps=24):
+    """The course the printer is laying on a begun MARSHA's outer skin: the
+    fresh bead from the nozzle, at angle 0 about the shell's axis, back
+    `trail` round, rounded over like the top course it lies on."""
+    h = COURSE
+    zc = PLINTH + h * (COURSES + 0.5)
+    mid, half = marsha_radius(radius, zc / height) - SKIN / 2, SKIN / 2 + 0.012
+
+    def outline(a):
+        arc = [(mid + half * math.cos(math.radians(t)), zc + 0.5 * h * math.sin(math.radians(t))) for t in (25, 55, 90, 125, 155)]
+        return [(mid + half, zc - 0.5 * h), (mid + half, zc)] + arc + [(mid - half, zc), (mid - half, zc - 0.5 * h)]
+
+    return _swept(outline, [-trail * (1 - i / steps) for i in range(steps + 1)], 1.0)
 
 
 def _bead_grain(colour, seed, rough=0.88, gloss=0.0):

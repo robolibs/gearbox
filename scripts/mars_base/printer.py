@@ -16,7 +16,8 @@ shell's axis that carries the print head round the wall course by course.
                the slewing drive, the turntable's drive and lamps at the
                tip, the feed line and the cable along the top chords
     pendant    `turn`: the turntable under the boom's tip, turning about
-               the shell's axis, and the bracket holding the arm's shoulder
+               the shell's axis, the bracket holding the arm's shoulder,
+               and the fresh course the nozzle lays, round behind it
     upper_arm  `shoulder` 0..75 degrees down from level
     forearm    `elbow` 0..-140 degrees, unfolding from under the upper arm
     head       `wrist` 0..100 degrees, keeping the print head plumb: the
@@ -46,6 +47,7 @@ import bpy
 import numpy as np
 from mathutils import Matrix, Vector
 
+import habitat
 import kit
 import mechanics as mk
 import patterns
@@ -177,6 +179,7 @@ def materials(looks):
     m["glass"] = looks.get("printer_sight", (0.05, 0.06, 0.07), 0.08, 0.0)
     m["led"] = looks.get("printer_led", (1.0, 0.97, 0.9), 0.3, 0.0, emit=((1.0, 0.97, 0.9), 6.0))
     m["amber"] = looks.get("printer_amber", (1.0, 0.55, 0.1), 0.3, 0.0, emit=((1.0, 0.55, 0.1), 8.0))
+    m["bead"] = looks.get("fresh_bead", (0.38, 0.29, 0.23), 0.62, 0.0, maps=habitat._bead_grain((0.38, 0.29, 0.23), 55, 0.62, 0.2))
     return m
 
 
@@ -518,6 +521,8 @@ def pendant_part(p=PRINTER):
     part.add("feed", line([(0.15, -0.25, -0.32), (0.6, -0.33, -0.42), (0.95, -0.44, -0.6), (sx, -0.44, sz + 0.06)], 0.026), m)
     for x in (0.3, 0.9):
         part.add("black", box((0.06, 0.1, 0.06), (x, -0.27, -0.36 - 0.07 * x), tile=0.1), m)
+    # The course the nozzle is laying, back round the wall behind it.
+    part.add("bead", habitat.laying_bead(), m @ Matrix.Translation((0, 0, -p.turn_z)))
     return part
 
 

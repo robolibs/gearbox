@@ -251,8 +251,8 @@ def build(looks, strewn=False):
     add(habitat.inflatable_hab(looks, "Hab", 7.5, 4.6, tuple(INFLATABLE), toward(INFLATABLE, Vector((0, 0, 0))), base, fit=fitouts.commons))
     add(habitat.hangar(looks, "Hangar", 22.0, 7.0, tuple(HANGAR), 0.0, base, fit=fitouts.hangar))
     add(habitat.printed_tower(looks, "Printed", MARSHA_R, MARSHA_H, tuple(PRINTED), toward(PRINTED, NODE), base, fit=fitouts.marsha))
-    ports = ((toward(HOUSE, NODE) - HOUSE_YAW, 1.3), (toward(HOUSE, PRINTED) - HOUSE_YAW, 0.65))
-    add(habitat.print_site(looks, "PrintSite", MARSHA_R, MARSHA_H, tuple(HOUSE), HOUSE_YAW, base, ports))
+    # The new house's first metre, printed closed.
+    add(habitat.print_site(looks, "PrintSite", MARSHA_R, MARSHA_H, tuple(HOUSE), HOUSE_YAW, base, ()))
     add(link(looks, base, "LinkPrinted", NODE, PRINTED, 5.0, 5.4, 1.2, 1.4))
 
     # Power.
