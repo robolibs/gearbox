@@ -514,12 +514,14 @@ class Digger(Robot):
         loads = 0
         while True:
             yield from self.go(self.entry["dig"], within=0.3)
-            # Drums down and turning, creeping forward across the patch.
+            # Drums down and turning, creeping forward across the patch and
+            # back; a digger kept digging only digs.
             self.arms("dig", self.entry["drum"]["dig"])
             yield 4.0
-            for _ in range(int(8.0 / STEER_S)):
-                self.twist(0.12, 0.0)
-                yield STEER_S
+            for creep in [0.1, -0.1] * (1000 if self.machine in DIGGING else 1):
+                for _ in range(int(DIG_S / 2 / STEER_S)):
+                    self.twist(creep, 0.0)
+                    yield STEER_S
             self.twist(0.0, 0.0)
             self.arms("carry")
             yield 4.0
@@ -542,10 +544,10 @@ class Digger(Robot):
 
 
 class Washer(Robot):
-    """A cleaning robot sweeping its glazing or its row of panels, then
-    resting till the dust has settled again."""
+    """A cleaning robot sweeping its glazing or its row of panels, round
+    and round with a short rest at its dock."""
 
-    REST_S = 1800.0
+    REST_S = 20.0
 
     def joint(self, name: str, position: float, at: dict) -> float:
         """Sends a joint to `position`; how long it takes to get there."""
@@ -597,8 +599,48 @@ class Washer(Robot):
             yield self.REST_S
 
 
+class Printer(Robot):
+    """The regolith printer at the house it is printing: it lifts its mast
+    clear of the wall, swings the boom over the shell and sets the arm's
+    reach for the top course, lets the nozzle down onto it, then starts the
+    extruder's screw and laps the wall with the pendant, round and round."""
+
+    KEEP_S = 30.0
+
+    def joint(self, name: str, position: float, at: dict) -> float:
+        """Sends a joint to `position`; how long it takes to get there."""
+        self.set(self.entry["links"][name], "position", position)
+        took = abs(position - at.get(name, 0.0)) * self.entry["full_s"][name]
+        at[name] = position
+        return SLOW * took + SETTLE_S
+
+    def spin(self, on: bool):
+        """Turns the pendant and the extruder's screw, or stops them."""
+        links = self.entry["links"]
+        self.set(links["screw"], "velocity", self.entry["screw"] if on else 0.0)
+        self.set(links["turn"], "velocity", self.entry["turn"] if on else 0.0)
+
+    def run(self):
+        pose = self.entry["print"]
+        at: dict[str, float] = {}
+        self.spin(False)
+        yield max(self.joint("lift", self.entry["over"]["lift"], at), self.joint("slew", pose["slew"], at))
+        yield max(self.joint(name, pose[name], at) for name in ("shoulder", "elbow", "wrist"))
+        yield self.joint("lift", pose["lift"], at)
+        self.spin(True)
+        self.log(f"{self.machine}: printing the top course, a lap of the wall every {2 * math.pi / self.entry['turn']:.0f} s")
+        while True:
+            yield self.KEEP_S
+            self.spin(True)
+
+
+# Seconds a digger digs a load, half going forward and half back.
+DIG_S = 40.0
+# Diggers that dig and never haul.
+DIGGING: set[str] = set()
+
 KINDS = {"rail_gantry": Tender, "polar_gantry": Tender, "stacker_crane": Tender, "mobile_harvester": Tender, "excavator": Digger,
-         "arch_washer": Washer, "dome_washer": Washer, "panel_washer": Washer}
+         "arch_washer": Washer, "dome_washer": Washer, "panel_washer": Washer, "regolith_printer": Printer}
 
 
 def carted(plan: dict) -> set[str]:
@@ -616,11 +658,15 @@ def main():
     ap.add_argument("--plan", default=str(PLAN))
     ap.add_argument("--robots", help="comma-separated machine ids; every robot in the plan by default")
     ap.add_argument("--instance")
+    ap.add_argument("--digging", default="", help="comma-separated diggers that dig and never haul")
+    ap.add_argument("--leave", default="", help="comma-separated machine ids left standing where they are")
     args = ap.parse_args()
 
+    DIGGING.update(d for d in args.digging.split(",") if d)
     plan = json.loads(Path(args.plan).read_text())["machines"]
     CARTED.update(carted(plan))
-    wanted = args.robots.split(",") if args.robots else list(plan)
+    leave = set(args.leave.split(","))
+    wanted = [m for m in (args.robots.split(",") if args.robots else list(plan)) if m not in leave]
     gb = Gearbox(args.instance)
     gb.wait_ready()
     patient(gb.play)
