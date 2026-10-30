@@ -65,9 +65,10 @@ enum Cmd {
     /// `--pitch` and `--distance` (around MACHINE when given, its bearing
     /// counted from behind the machine, else round `--lat` and `--lon`),
     /// gliding there with `--over`, `path FILE` flies one smooth path through
-    /// the views FILE lists, one `SECONDS look [MACHINE] key=value…` a line,
-    /// the view reaching each at its second without stopping on the way, and
-    /// `where` says where the view is now
+    /// the views FILE lists, one `SECONDS look [MACHINE] key=value…` a line
+    /// (`link=LINK` follows that link of MACHINE, `above=` lifts what is
+    /// looked at), the view reaching each at its second without stopping on
+    /// the way, and `where` says where the view is now
     Camera {
         /// fly | follow | unfollow | goto | look | where
         action: String,
@@ -114,13 +115,15 @@ enum Cmd {
         id: Option<String>,
     },
     /// Switch a viewport overlay as the View pane does: `tf` (link frames,
-    /// names and parent links, which recordings keep), `colliders`, `grid`
-    /// or `axes`, to `on`, `off` or `toggle`
+    /// names and parent links, which recordings keep, fading in and out),
+    /// `colliders`, `grid` or `axes`, to `on`, `off` or `toggle`
     Overlay {
         /// tf | colliders | grid | axes
         name: String,
         /// on | off | toggle
         state: String,
+        /// With `tf on`, the machines whose frames are drawn (all if none)
+        machines: Vec<String>,
         #[arg(long)]
         id: Option<String>,
         /// Seconds to wait for the instance to take the request
@@ -194,9 +197,10 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Overlay {
             name,
             state,
+            machines,
             id,
             timeout,
-        } => overlay(ctx, id, &name, &state, timeout),
+        } => overlay(ctx, id, &name, &state, &machines, timeout),
         Cmd::Ui { steps, id } => ui(ctx, id, &steps),
         Cmd::Camera {
             action,
@@ -668,7 +672,7 @@ fn screenshot(
     Ok(())
 }
 
-fn overlay(ctx: &Ctx, id: Option<String>, name: &str, state: &str, timeout: f64) -> Result<()> {
+fn overlay(ctx: &Ctx, id: Option<String>, name: &str, state: &str, machines: &[String], timeout: f64) -> Result<()> {
     if !matches!(name, "tf" | "colliders" | "grid" | "axes") {
         return Err(CliError::error(
             "overlay must be tf, colliders, grid or axes",
@@ -677,7 +681,11 @@ fn overlay(ctx: &Ctx, id: Option<String>, name: &str, state: &str, timeout: f64)
     if !matches!(state, "on" | "off" | "toggle") {
         return Err(CliError::error("overlay state must be on, off or toggle"));
     }
-    send_request(ctx, id, "overlay", &format!("{name} {state}"), timeout)
+    if !machines.is_empty() && (name, state) != ("tf", "on") {
+        return Err(CliError::error("only `tf on` takes machines"));
+    }
+    let line = std::iter::once(format!("{name} {state}")).chain(machines.iter().cloned()).collect::<Vec<_>>().join(" ");
+    send_request(ctx, id, "overlay", &line, timeout)
 }
 
 fn record(
