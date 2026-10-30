@@ -68,7 +68,9 @@ enum Cmd {
     /// the views FILE lists, one `SECONDS look [MACHINE] key=value…` a line
     /// (`link=LINK` follows that link of MACHINE, `above=` lifts what is
     /// looked at), the view reaching each at its second without stopping on
-    /// the way, and `where` says where the view is now
+    /// the way, and `SECONDS tf on MACHINE…` or `SECONDS tf off` lines
+    /// switching the TF overlay on the way, and `where` says where the view
+    /// is now
     Camera {
         /// fly | follow | unfollow | goto | look | where
         action: String,

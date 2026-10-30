@@ -30,7 +30,15 @@ struct CameraPath(Option<Path>);
 
 struct Path {
     keys: Vec<Key>,
+    /// The TF tree switches still to come, soonest first.
+    switches: Vec<Switch>,
     elapsed: f64,
+}
+
+/// The TF tree switched on over these machines, or off, `at` seconds in.
+struct Switch {
+    at: f64,
+    machines: Option<Vec<String>>,
 }
 
 /// A view the path passes `at` seconds in.
@@ -86,12 +94,23 @@ fn fly_path(
     sites: Res<crate::globe::Sites>,
     transforms: Query<&GlobalTransform>,
     mut view: ResMut<View>,
+    mut toggles: Option<ResMut<crate::viewer::overlays::DisplayToggles>>,
 ) {
     let Some(p) = path.0.as_mut() else {
         return;
     };
     let dt = time.delta_secs_f64();
     p.elapsed += dt;
+    while p.switches.first().is_some_and(|s| s.at <= p.elapsed) {
+        let switch = p.switches.remove(0);
+        if let Some(toggles) = toggles.as_mut() {
+            let on = switch.machines.is_some();
+            (toggles.show_tf_frames, toggles.show_tf_names, toggles.show_tf_links) = (on, on, on);
+            if let Some(machines) = switch.machines {
+                toggles.tf_machines = machines;
+            }
+        }
+    }
     let views: Vec<View> = p.keys.iter_mut().map(|k| k.aim.view(dt, &sites, &transforms)).collect();
     let times: Vec<f64> = p.keys.iter().map(|k| k.at).collect();
     *view = along(&times, &views, p.elapsed);
@@ -151,14 +170,15 @@ fn along(times: &[f64], views: &[View], t: f64) -> View {
 }
 
 /// The keys of a path file: one `SECONDS look [MACHINE [link=LINK]]
-/// key=value…` a line, a place's missing terms taken from the key before it.
+/// key=value…` a line, a place's missing terms taken from the key before it;
+/// and its TF switches, `SECONDS tf on MACHINE…` or `SECONDS tf off`.
 fn path_keys(
     text: &str,
     view: &View,
     inventory: &ControllerInventory,
     index: &crate::prim_index::PrimIndex,
-) -> Vec<Key> {
-    let mut keys = Vec::new();
+) -> (Vec<Key>, Vec<Switch>) {
+    let (mut keys, mut switches) = (Vec::new(), Vec::new());
     let mut last = *view;
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         let Some((at, look_line)) = line.split_once(char::is_whitespace) else {
@@ -168,6 +188,12 @@ fn path_keys(
             warn!("gearbox-viewer: path line `{line}` has no seconds");
             continue;
         };
+        let mut words = look_line.split_whitespace();
+        if words.next() == Some("tf") {
+            let machines = (words.next() == Some("on")).then(|| words.map(str::to_string).collect());
+            switches.push(Switch { at, machines });
+            continue;
+        }
         let look = look_around(look_line);
         let named = look_line.split_whitespace().nth(1).filter(|word| !word.contains('='));
         let aim = match named {
@@ -201,7 +227,8 @@ fn path_keys(
         keys.push(Key { at, aim });
     }
     keys.sort_by(|a, b| a.at.total_cmp(&b.at));
-    keys
+    switches.sort_by(|a, b| a.at.total_cmp(&b.at));
+    (keys, switches)
 }
 
 #[derive(Resource)]
@@ -341,13 +368,13 @@ fn serve_camera_requests(
             let file = text.split_whitespace().nth(1).unwrap_or("");
             match std::fs::read_to_string(file) {
                 Ok(lines) => {
-                    let keys = path_keys(&lines, &view, &inventory, &index);
+                    let (keys, switches) = path_keys(&lines, &view, &inventory, &index);
                     if keys.is_empty() {
                         warn!("gearbox-viewer: camera path {file} lists no views");
                     } else {
                         fly.target = None;
                         follow.set(None);
-                        path.0 = Some(Path { keys, elapsed: 0.0 });
+                        path.0 = Some(Path { keys, switches, elapsed: 0.0 });
                     }
                 }
                 Err(error) => warn!("gearbox-viewer: cannot read camera path {file}: {error}"),
@@ -410,6 +437,15 @@ fn look_around(text: &str) -> LookAround {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_path_file_switches_the_tf_tree_on_named_machines_and_off_in_time() {
+        let text = "0 look bearing=10 pitch=30 distance=10\n9 tf off\n2 tf on picker washer\n5 look bearing=40\n";
+        let (keys, switches) = path_keys(text, &View::default(), &ControllerInventory::default(), &crate::prim_index::PrimIndex::default());
+        assert_eq!(keys.len(), 2, "tf lines are no views");
+        let got: Vec<_> = switches.iter().map(|s| (s.at, s.machines.clone())).collect();
+        assert_eq!(got, [(2.0, Some(vec!["picker".to_string(), "washer".to_string()])), (9.0, None)]);
+    }
 
     fn path_views() -> (Vec<f64>, Vec<View>) {
         let mut a = View::default();
