@@ -64,7 +64,10 @@ enum Cmd {
     /// ground there, `look [MACHINE]` sets the view to an exact `--bearing`,
     /// `--pitch` and `--distance` (around MACHINE when given, its bearing
     /// counted from behind the machine, else round `--lat` and `--lon`),
-    /// gliding there with `--over`, and `where` says where the view is now
+    /// gliding there with `--over`, `path FILE` flies one smooth path through
+    /// the views FILE lists, one `SECONDS look [MACHINE] key=value…` a line,
+    /// the view reaching each at its second without stopping on the way, and
+    /// `where` says where the view is now
     Camera {
         /// fly | follow | unfollow | goto | look | where
         action: String,
@@ -127,12 +130,18 @@ enum Cmd {
     /// Record the 3D viewport as shown, without the panes, to H.264 video:
     /// `start [OUT]` begins (OUT, or a file in the capture folder), `stop`
     /// ends it. While recording the clock steps a sixtieth of a second a
-    /// frame, so the video plays smooth however slowly the window draws
+    /// frame, so the video plays smooth however slowly the window draws;
+    /// the camera's path is written beside it as OUT.camera.csv
     Record {
         /// start | stop
         action: String,
         /// Where `start` writes the video (.mp4)
         out: Option<String>,
+        /// Frames to render for each frame of video, 1 to 8, blended into
+        /// it as an open shutter blurs what moves; the clock steps that
+        /// much finer
+        #[arg(long, default_value_t = 1)]
+        shutter: u32,
         #[arg(long)]
         id: Option<String>,
         /// Seconds to wait for the instance to take the request
@@ -178,9 +187,10 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Record {
             action,
             out,
+            shutter,
             id,
             timeout,
-        } => record(ctx, id, &action, out.as_deref(), timeout),
+        } => record(ctx, id, &action, out.as_deref(), shutter, timeout),
         Cmd::Overlay {
             name,
             state,
@@ -268,12 +278,14 @@ fn camera(
             }
             line
         }
+        ("path", Some(file)) => format!("path {}", std::path::absolute(file)?.display()),
         ("fly", None) | ("follow", None) => {
             return Err(CliError::error(format!("`{action}` needs a machine id")));
         }
+        ("path", None) => return Err(CliError::error("`path` needs a file of `SECONDS look …` lines")),
         _ => {
             return Err(CliError::error(
-                "camera action must be fly, follow, unfollow, goto, look or where",
+                "camera action must be fly, follow, unfollow, goto, look, path or where",
             ));
         }
     };
@@ -673,11 +685,13 @@ fn record(
     id: Option<String>,
     action: &str,
     out: Option<&str>,
+    shutter: u32,
     timeout: f64,
 ) -> Result<()> {
+    let shutter = if shutter > 1 { format!(" shutter={shutter}") } else { String::new() };
     let line = match (action, out) {
-        ("start", Some(out)) => format!("start {}", std::path::absolute(out)?.display()),
-        ("start", None) => "start".to_string(),
+        ("start", Some(out)) => format!("start{shutter} {}", std::path::absolute(out)?.display()),
+        ("start", None) => format!("start{shutter}"),
         ("stop", None) => "stop".to_string(),
         ("stop", Some(_)) => return Err(CliError::error("`stop` takes no path")),
         _ => return Err(CliError::error("record action must be start or stop")),
