@@ -999,11 +999,11 @@ fn chase_camera_fly(
 
 /// How briskly a held shot follows where its machine is, radians a second of
 /// a critically damped spring.
-const HOLD_FOLLOW: f64 = 2.5;
+pub(crate) const HOLD_FOLLOW: f64 = 2.5;
 
 /// One step of a critically damped spring toward `goal` over `dt`, solved
 /// exactly: the new value and rate.
-fn spring(x: f64, v: f64, goal: f64, omega: f64, dt: f64) -> (f64, f64) {
+pub(crate) fn spring(x: f64, v: f64, goal: f64, omega: f64, dt: f64) -> (f64, f64) {
     let d = x - goal;
     let j = v + omega * d;
     let e = (-omega * dt).exp();
