@@ -53,7 +53,8 @@ impl Aim {
             Aim::Place(view) => *view,
             Aim::Machine { body, look, held } => {
                 if let Ok(gt) = transforms.get(*body) {
-                    let at = sites.place_of(gt.translation());
+                    let mut at = sites.place_of(gt.translation());
+                    at.altitude += look.above_m.unwrap_or(0.0);
                     *held = Some(match *held {
                         Some(s) => {
                             let (lat, lat_v) = spring(s.at.latitude, s.rate[0], at.latitude, HOLD_FOLLOW, dt);
@@ -149,8 +150,8 @@ fn along(times: &[f64], views: &[View], t: f64) -> View {
     })
 }
 
-/// The keys of a path file: one `SECONDS look [MACHINE] key=value…` a line,
-/// a place's missing terms taken from the key before it.
+/// The keys of a path file: one `SECONDS look [MACHINE [link=LINK]]
+/// key=value…` a line, a place's missing terms taken from the key before it.
 fn path_keys(
     text: &str,
     view: &View,
@@ -171,11 +172,18 @@ fn path_keys(
         let named = look_line.split_whitespace().nth(1).filter(|word| !word.contains('='));
         let aim = match named {
             Some(id) => {
-                let Some(machine) = inventory.machines.iter().find(|m| m.id == id).and_then(MachineRef::of) else {
+                let spec = inventory.machines.iter().find(|m| m.id == id);
+                let Some(machine) = spec.and_then(MachineRef::of) else {
                     warn!("gearbox-viewer: path names no machine `{id}`");
                     continue;
                 };
-                Aim::Machine { body: machine_body_entity(&machine, inventory, index), look, held: None }
+                // `link=NAME` follows that link of the machine, not its base.
+                let link = look_line.split_whitespace().find_map(|w| w.strip_prefix("link="));
+                let body = link
+                    .and_then(|name| spec?.links.get(name))
+                    .and_then(|link| index.find(machine.scene_root, &link.prim_path))
+                    .unwrap_or_else(|| machine_body_entity(&machine, inventory, index));
+                Aim::Machine { body, look, held: None }
             }
             None => {
                 let mut to = last;
