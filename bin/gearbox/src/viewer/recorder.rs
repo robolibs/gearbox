@@ -95,6 +95,9 @@ pub struct Recorder {
     folder: Option<PathBuf>,
     /// Where the next recording goes instead of the capture folder.
     out: Option<PathBuf>,
+    /// Frames the next recording renders for each frame of video, blended
+    /// into it as a camera's open shutter blurs what moves.
+    shutter: u32,
 }
 
 impl Default for Recorder {
@@ -107,6 +110,7 @@ impl Default for Recorder {
             last: None,
             folder: load_folder(),
             out: None,
+            shutter: 1,
         }
     }
 }
@@ -133,8 +137,8 @@ impl Recorder {
             Mode::Idle => "ready".to_string(),
             Mode::Still { .. } => "taking screenshot".to_string(),
             Mode::Recording { stopping: Some(_), .. } => "finishing".to_string(),
-            Mode::Recording { frames, .. } => {
-                format!("recording {:.1} s", *frames as f64 / f64::from(FRAME_RATE))
+            Mode::Recording { frames, shutter, .. } => {
+                format!("recording {:.1} s", *frames as f64 / f64::from(FRAME_RATE * shutter))
             }
         }
     }
@@ -181,6 +185,8 @@ enum Mode {
         stopping: Option<(u32, u64)>,
         /// The camera's path, written beside the video.
         track: Option<std::io::BufWriter<std::fs::File>>,
+        /// Frames rendered for each frame of video.
+        shutter: u32,
     },
 }
 
@@ -242,9 +248,11 @@ fn serve_record_requests(
         return;
     };
     let _ = std::fs::remove_file(&request);
-    let (action, out) = text.trim().split_once(' ').unwrap_or((text.trim(), ""));
+    let (action, rest) = text.trim().split_once(' ').unwrap_or((text.trim(), ""));
+    let (shutter, out) = shutter_and_out(rest);
     match action {
         "start" if !recorder.is_recording() => {
+            recorder.shutter = shutter;
             recorder.out = (!out.trim().is_empty()).then(|| PathBuf::from(out.trim()));
             recorder.start_requested = true;
         }
@@ -253,6 +261,18 @@ fn serve_record_requests(
             "gearbox-capture: record request `{}` not taken",
             text.trim()
         ),
+    }
+}
+
+/// The `[shutter=N] [OUT]` after `start`: frames to blend into each frame of
+/// video, one to eight, and where the video goes.
+fn shutter_and_out(rest: &str) -> (u32, &str) {
+    match rest.strip_prefix("shutter=") {
+        Some(rest) => {
+            let (n, out) = rest.split_once(' ').unwrap_or((rest, ""));
+            (n.parse::<u32>().unwrap_or(1).clamp(1, 8), out)
+        }
+        None => (1, rest),
     }
 }
 
@@ -281,11 +301,11 @@ fn drive_recorder(
                 if let Some(dir) = path.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
-                let mut args = raw_input(size);
+                let shutter = std::mem::replace(&mut recorder.shutter, 1);
+                let mut args = raw_input(size, FRAME_RATE * shutter);
+                args.extend(["-vf".to_string(), sdr_filter(shutter)]);
                 args.extend(
                     [
-                        "-vf",
-                        SDR_FILTER,
                         "-c:v",
                         "h264_nvenc",
                         "-profile:v",
@@ -315,11 +335,11 @@ fn drive_recorder(
                     Ok(encoder) => {
                         let reader = begin_capture(&mut commands, &mut images, view, size, true);
                         *clock = TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
-                            1.0 / f64::from(FRAME_RATE),
+                            1.0 / f64::from(FRAME_RATE * shutter),
                         ));
-                        info!("gearbox-capture: recording {}", path.display());
+                        info!("gearbox-capture: recording {}, {shutter} frames a frame", path.display());
                         let track = std::fs::File::create(path.with_extension("camera.csv")).ok().map(std::io::BufWriter::new);
-                        next = Some(Mode::Recording { encoder, path, size, reader, frames: 0, rendered: 1, stopping: None, track });
+                        next = Some(Mode::Recording { encoder, path, size, reader, frames: 0, rendered: 1, stopping: None, track, shutter });
                     }
                     Err(error) => warn!("gearbox-capture: cannot start ffmpeg: {error}"),
                 }
@@ -447,7 +467,7 @@ fn receive_frame(frame: On<ReadbackComplete>, mut recorder: ResMut<Recorder>) {
         }
         Mode::Still { stem, size, saved, .. } if !*saved => {
             let path = stem.with_extension("exr");
-            let mut args = raw_input(*size);
+            let mut args = raw_input(*size, FRAME_RATE);
             args.extend(
                 [
                     "-vf", "format=gbrpf32le", "-c:v", "exr", "-format", "half",
@@ -509,13 +529,26 @@ fn unpad(data: &[u8], size: UVec2) -> Vec<u8> {
     packed
 }
 
-fn raw_input(size: UVec2) -> Vec<String> {
+fn raw_input(size: UVec2, rate: u32) -> Vec<String> {
     let mut args: Vec<String> = ["-f", "rawvideo", "-pix_fmt", "rgbaf16le", "-s"]
         .map(String::from)
         .to_vec();
     args.push(format!("{}x{}", size.x, size.y));
-    args.extend(["-framerate", "60", "-i", "-"].map(String::from));
+    args.extend(["-framerate".to_string(), rate.to_string(), "-i".to_string(), "-".to_string()]);
     args
+}
+
+/// [`SDR_FILTER`], with each `shutter` frames rendered averaged, in linear
+/// light, into one frame of video.
+fn sdr_filter(shutter: u32) -> String {
+    match shutter {
+        1 => SDR_FILTER.to_string(),
+        n => SDR_FILTER.replacen(
+            "format=gbrpf32le,",
+            &format!("format=gbrpf32le,tmix=frames={n},fps={FRAME_RATE},"),
+            1,
+        ),
+    }
 }
 
 /// `<folder>/gearbox-<local time>.<ext>`, the folder defaulting to
@@ -603,4 +636,20 @@ impl Encoder {
 
     /// Closing the queue ends the stream; ffmpeg finalises on its own.
     fn finish(self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shutter_blends_its_frames_in_linear_light_into_each_frame_of_video() {
+        assert_eq!(shutter_and_out("shutter=2 /tmp/a b.mp4"), (2, "/tmp/a b.mp4"));
+        assert_eq!(shutter_and_out("/tmp/a.mp4"), (1, "/tmp/a.mp4"));
+        assert_eq!(shutter_and_out("shutter=99"), (8, ""));
+        assert_eq!(sdr_filter(1), SDR_FILTER);
+        let blended = sdr_filter(2);
+        let (mix, scale) = (blended.find("tmix=frames=2,fps=60").expect("not blended"), blended.find("zscale").unwrap());
+        assert!(blended.find("format=gbrpf32le").unwrap() < mix && mix < scale, "blended outside linear light: {blended}");
+    }
 }

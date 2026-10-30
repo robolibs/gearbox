@@ -204,6 +204,8 @@ pub(crate) struct PhysicsThread {
     launched: Instant,
     /// Where real time stands against the steps run: the last step's due time.
     origin: Instant,
+    /// The part of a step a hand-stepped clock owes, carried to its next frame.
+    owed: f64,
     stats: StepStats,
     waits: Waits,
 }
@@ -227,6 +229,7 @@ impl PhysicsThread {
             in_flight: None,
             launched: Instant::now(),
             origin: Instant::now(),
+            owed: 0.0,
             stats: StepStats::default(),
             waits: Waits::default(),
         }
@@ -339,15 +342,15 @@ fn join(world: &mut World) {
     world.insert_resource(thread);
 }
 
-/// The steps a frame takes while the app's clock is stepped by hand, as a
-/// recording steps it: exactly the frame's worth, so world time keeps to
-/// the frames however long they take to render.
-fn hand_stepped(world: &World) -> Option<u32> {
+/// The steps a frame owes while the app's clock is stepped by hand, as a
+/// recording steps it: the frame's worth, which may be a part of a step when
+/// the frames are finer than the steps, so world time keeps to the frames
+/// however long they take to render.
+fn hand_stepped(world: &World) -> Option<f64> {
     let TimeUpdateStrategy::ManualDuration(frame) = world.get_resource::<TimeUpdateStrategy>()? else {
         return None;
     };
-    let hz = world.resource::<PhysicsWorld>().step_hz;
-    Some(((frame.as_secs_f64() * hz).round() as u32).max(1))
+    Some(frame.as_secs_f64() * world.resource::<PhysicsWorld>().step_hz)
 }
 
 /// Hand the physics to the thread after the frame's last reader. A paused
@@ -374,9 +377,12 @@ fn launch(world: &mut World) {
             thread.origin = Instant::now();
             Plan::Exact(steps)
         }
-        (None, Some(steps)) => {
+        (None, Some(owed)) => {
             thread.origin = Instant::now();
-            Plan::Exact(steps)
+            thread.owed += owed;
+            let steps = (thread.owed + 1e-9).floor();
+            thread.owed -= steps;
+            Plan::Exact(steps as u32)
         }
         (None, None) => Plan::RealTime { origin: thread.origin, hz: world.resource::<PhysicsWorld>().step_hz },
     };
@@ -521,6 +527,18 @@ mod tests {
         }
         app.world_mut().run_schedule(PhysicsJoin);
         assert_eq!(app.world().resource::<PhysicsWorld>().ticks, 6 * per_frame, "slow frames lost or gained steps");
+    }
+
+    #[test]
+    fn frames_finer_than_the_steps_step_the_physics_at_the_clock_s_pace() {
+        let (mut app, _) = app();
+        let hz = app.world().resource::<PhysicsWorld>().step_hz;
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(1.0 / (3.0 * hz))));
+        for _ in 0..30 {
+            app.update();
+        }
+        app.world_mut().run_schedule(PhysicsJoin);
+        assert_eq!(app.world().resource::<PhysicsWorld>().ticks, 10, "a third of a step a frame ran other than a step in three");
     }
 
     #[test]
