@@ -462,30 +462,35 @@ fn shrub(species: &Species, s: f32, aspect: f32, detail: Detail) -> Prefab {
     }
     let start = setting(species);
     let ripe = ((s - start) / (1.0 - start)).clamp(0.0, 1.0);
-    let branches = 3 + (s * 2.0) as u32;
+    let branches = 4 + (s * 4.0) as u32;
     for b in 0..branches {
         let lean = b as f32 * GOLDEN_ANGLE;
-        let top = fork + Vec3::new(lean.cos() * 0.3 * height, height * 0.7, lean.sin() * 0.3 * height);
+        let spread = 0.3 + 0.2 * (b % 3) as f32;
+        let top = fork + Vec3::new(lean.cos() * spread * height, height * (0.55 + 0.15 * (b % 2) as f32), lean.sin() * spread * height);
         let path: Vec<Vec3> = (0..7).map(|k| fork.lerp(top, k as f32 / 6.0) + Vec3::Y * 0.01 * (k as f32 * 0.6).sin()).collect();
         parts.stem(&path, 0.0022 + 0.002 * s, 0.6, STEM_GREEN);
         for k in 1..7 {
+            // A pair of leaves at every node, the upper ones smaller.
+            for pair in 0..2 {
+                let azimuth = lean + k as f32 * GOLDEN_ANGLE + pair as f32 * 2.6;
+                let out = Vec3::new(azimuth.cos(), 0.3 + 0.15 * pair as f32, azimuth.sin());
+                let length = (0.04 + 0.08 * s) * (1.15 - 0.1 * k as f32) * (1.0 - 0.2 * pair as f32);
+                stalked(&mut leaves, &mut parts, path[k], out, out, 0.014, length, length * aspect, (b + k as u32 + pair) % CELLS, STEM_GREEN);
+            }
             let azimuth = lean + k as f32 * GOLDEN_ANGLE;
-            let out = Vec3::new(azimuth.cos(), 0.35, azimuth.sin());
-            let length = (0.035 + 0.06 * s) * (1.1 - 0.1 * k as f32);
-            stalked(&mut leaves, &mut parts, path[k], out, out, 0.012, length, length * aspect, (b + k as u32) % CELLS, STEM_GREEN);
             if (start - 0.15..start + 0.2).contains(&s) && k % 2 == 1 {
                 parts.blob(path[k] + Vec3::new(-azimuth.cos() * 0.012, -0.004, -azimuth.sin() * 0.012), Vec3::Y, Vec3::new(0.005, 0.003, 0.005), [0.95, 0.95, 0.92, 1.0]);
             }
-            if s >= start && k % 2 == 0 {
-                let long = 0.012 + 0.04 * ripe;
-                let hang = path[k] + Vec3::new(-azimuth.cos() * 0.01, -0.006 - long * 0.5, -azimuth.sin() * 0.01);
-                let colour = [0.22 + 0.62 * ripe, 0.42 - 0.34 * ripe, 0.08, 1.0];
-                parts.stem(&[path[k], hang + Vec3::Y * long * 0.5], 0.0012, 0.9, STEM_GREEN);
-                fruit.blob(hang, Vec3::new(0.15 * azimuth.cos(), 1.0, 0.15 * azimuth.sin()), Vec3::new(0.0065, long * 0.5, 0.0065), colour);
+            if s >= start && k % 2 == 0 && k < 6 {
+                let long = 0.02 + 0.055 * ripe;
+                let hang = path[k] + Vec3::new(-azimuth.cos() * 0.014, -0.008 - long * 0.5, -azimuth.sin() * 0.014);
+                let colour = [0.16 + 0.66 * ripe, 0.36 - 0.31 * ripe, 0.06, 1.0];
+                parts.stem(&[path[k], hang + Vec3::Y * long * 0.5], 0.0018, 0.9, STEM_GREEN);
+                fruit.blob(hang, Vec3::new(0.15 * azimuth.cos(), 1.0, 0.15 * azimuth.sin()), Vec3::new(0.011, long * 0.5, 0.011), colour);
             }
         }
     }
-    Prefab { leaves: leaves.into_mesh().expect("a pepper has leaves"), parts: parts.into_mesh(), fruit: fruit.into_mesh(), height, radius: 0.05 + 0.12 * s }
+    Prefab { leaves: leaves.into_mesh().expect("a pepper has leaves"), parts: parts.into_mesh(), fruit: fruit.into_mesh(), height, radius: 0.06 + 0.16 * s }
 }
 
 /// A day-neutral strawberry: a crown of trifoliate leaves on long arching

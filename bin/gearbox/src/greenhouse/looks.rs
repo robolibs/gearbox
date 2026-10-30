@@ -97,7 +97,7 @@ pub fn build_looks(
         hulls: HashMap::new(),
         leaves: HashMap::new(),
         parts: materials.add(StandardMaterial { perceptual_roughness: 0.7, ..default() }),
-        fruit: materials.add(StandardMaterial { perceptual_roughness: 0.4, reflectance: 0.35, ..default() }),
+        fruit: materials.add(StandardMaterial { perceptual_roughness: 0.22, reflectance: 0.3, ..default() }),
         lamp_on: HashMap::new(),
         lamp_off: materials.add(StandardMaterial { base_color: Color::srgb(0.85, 0.85, 0.88), perceptual_roughness: 0.3, ..default() }),
     };
