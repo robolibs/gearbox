@@ -380,4 +380,20 @@ def Xform "Fleet"
         float3 xformOp:rotateXYZ = (0, 0, 140.0000)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
+    def Xform "Printer" (
+        prepend references = @../../../../assets/machines/usd/regolith_printer.usdz@
+    )
+    {
+        double3 xformOp:translate = (-17, -104.5, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (-17, -104.5, 1.2)
+                quatf physics:localRot0 = (0.707107, 0, 0, 0.707107)
+            }
+        }
+    }
 }

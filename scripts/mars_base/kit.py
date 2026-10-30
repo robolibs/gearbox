@@ -300,6 +300,20 @@ def tube(path, radius, segments=12, tile=1.0, caps=True):
     return sweep(circle(radius, segments), path, tile, caps=caps)
 
 
+def spline(points, step=0.1):
+    """A Catmull-Rom curve through `points`, as points about `step` apart."""
+    pts = [Vector(p) for p in points]
+    ends = [pts[0] * 2 - pts[1]] + pts + [pts[-1] * 2 - pts[-2]]
+    out = [pts[0]]
+    for i in range(1, len(ends) - 2):
+        p0, p1, p2, p3 = ends[i - 1], ends[i], ends[i + 1], ends[i + 2]
+        n = max(1, math.ceil((p2 - p1).length / step))
+        for k in range(1, n + 1):
+            t = k / n
+            out.append(0.5 * (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (3 * p1 - p0 - 3 * p2 + p3) * t ** 3))
+    return out
+
+
 def rod(a, b, radius, segments=8):
     return tube([Vector(a), Vector(b)], radius, segments)
 

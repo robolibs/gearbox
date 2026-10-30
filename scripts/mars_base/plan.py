@@ -315,6 +315,52 @@ def panel_washer(length):
     }
 
 
+def printer(p, nozzle_r, nozzle_z, approach=1.0, lap_s=90.0):
+    """The regolith printer (`printer.Printer`) at the house it prints: the
+    arm's pose, elbow up and the head plumb, putting the nozzle `nozzle_r`
+    from the shell's axis and `nozzle_z` up over the wall's top course, the
+    mast as low as lets the arm reach; `over`, the mast `approach` m higher
+    to swing the arm out over the wall before the nozzle comes down onto it.
+    The pendant laps the wall in `lap_s` seconds."""
+    lift = Joint("lift", "mast", 2 * p.stage, 0.24)
+    slew = Joint("slew", "boom", math.radians(p.slew_deg), 0.05)
+    shoulder = Joint("shoulder", "upper_arm", math.radians(p.shoulder_deg), 0.15)
+    elbow = Joint("elbow", "forearm", math.radians(p.elbow_deg), 0.15)
+    wrist = Joint("wrist", "head", math.radians(p.wrist_deg), 0.2)
+    wr, wz = nozzle_r, nozzle_z + p.head
+
+    def arm(height):
+        """The arm's positions reaching the wrist over the nozzle from the mast `height` up, or None."""
+        sr, sz = p.shoulder[0], p.turn_z + height + p.shoulder[1]
+        dr, dz = wr - sr, wz - sz
+        d = math.hypot(dr, dz)
+        cos_a = (p.upper ** 2 + d * d - p.fore ** 2) / (2 * p.upper * d)
+        if not -1.0 <= cos_a <= 1.0:
+            return None
+        down = math.atan2(-dz, dr) - math.acos(cos_a)
+        er, ez = sr + p.upper * math.cos(down), sz - p.upper * math.sin(down)
+        bend = math.atan2(ez - wz, wr - er) - down
+        q = {"shoulder": down, "elbow": bend - math.radians(p.fold)}
+        q["wrist"] = -(q["shoulder"] + q["elbow"])
+        out = {"shoulder": shoulder.at(q["shoulder"]), "elbow": elbow.at(q["elbow"]), "wrist": wrist.at(q["wrist"])}
+        return None if None in out.values() else out
+
+    height = next((h for h in (2 * p.stage * k / 400 for k in range(401)) if arm(h)), None)
+    if height is None:
+        raise ValueError(f"the printer's arm reaches no nozzle at {nozzle_r:.2f} m out, {nozzle_z:.2f} m up")
+    return {
+        "kind": "regolith_printer",
+        "links": {"lift": "mast", "slew": "boom", "turn": "pendant", "shoulder": "upper_arm", "elbow": "forearm", "wrist": "head", "screw": "screw"},
+        "print": {"lift": round(lift.at(height), 4), "slew": 0.0, **{k: round(v, 4) for k, v in arm(height).items()}},
+        "over": {"lift": round(lift.at(height + approach), 4)},
+        # Seconds over a whole range, from each joint's top speed.
+        "full_s": {j.name: round(abs(j.range) / j.speed, 1) for j in (lift, slew, shoulder, elbow, wrist)},
+        "turn": round(2 * math.pi / lap_s, 4),
+        "screw": 3.0,
+        "nozzle": [round(nozzle_r, 3), round(nozzle_z, 3)],
+    }
+
+
 def plan(robots, trays, others=()):
     """Fills each robot's places with every tray place of its room it reaches;
     `robots` are `(Robot, solve)` pairs."""

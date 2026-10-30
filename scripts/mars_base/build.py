@@ -37,7 +37,7 @@ sys.path.insert(0, HERE)
 # A Blender session keeps modules from earlier builds: drop them so every
 # build imports the scripts as they are now.
 for name in ("kit", "crops", "patterns", "buildings", "habitat", "power", "industry", "spaceport", "props", "usda", "eden", "mechanics", "robots", "vehicles",
-             "arms", "harvester", "vertical", "farm_hall", "crane", "excavator", "washers", "layout", "plan"):
+             "arms", "harvester", "vertical", "farm_hall", "crane", "excavator", "washers", "printer", "layout", "plan"):
     sys.modules.pop(name, None)
 import kit  # noqa: E402
 import crops  # noqa: E402
@@ -47,8 +47,10 @@ import plan  # noqa: E402
 import robots  # noqa: E402
 import crane  # noqa: E402
 import excavator  # noqa: E402
+import habitat  # noqa: E402
 import harvester  # noqa: E402
 import industry  # noqa: E402
+import printer  # noqa: E402
 import vertical  # noqa: E402
 import vehicles  # noqa: E402
 import washers  # noqa: E402
@@ -308,6 +310,8 @@ def farm_plan(path, built):
             bays = [(layout.WORKS.x + x, layout.WORKS.y + y) for x, y in industry.SOIL_BAYS]
             lane = [(layout.WORKS.x + x, layout.WORKS.y + y) for x, y in industry.SOIL_LANE]
             others[machine] = plan.excavator(machine, at, tuple(layout.DIG[k]), bays, lane)
+        elif file == f"{printer.NAME}.usdz":
+            others[machine] = plan.printer(printer.PRINTER, *habitat.top_course(layout.MARSHA_R, layout.MARSHA_H))
     return plan.write(path, robots_, trays, others)
 
 
@@ -434,6 +438,7 @@ def write_machines():
     layers.update(harvester.build(work))
     layers.update(excavator.build(work))
     layers.update(washers.build(work, layout.ARCH_LEN, layout.DOME_R, layout.SOLAR_PANELS, layout.SOLAR_TILT))
+    layers.update(printer.build(work))
     for name, layer in layers.items():
         UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(layer), os.path.join(MACHINES, f"{name}.usdz"))
     return list(layers)

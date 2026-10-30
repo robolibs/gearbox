@@ -11,13 +11,15 @@ surface power units and a field of roll-out arrays; ISRU is container-sized.
     centre the habitat cluster: a hub and three towers, the EDEN module
     west   solar arrays, the power station, fission units behind a berm
     south  ISRU: two process units, their tanks, an ice well, dug regolith
-    far SE the landing zone: a Starship pad and a crew lander pad
+    far SE the launch zone: an Ariane 6 on its launch table and Honda's
+           reusable rocket on the hopper pad
 
 Twelve crew live in it (fitouts.py): the towers' lower decks hold the EVA
 suitlock and life support, the labs, and the medical bay; their upper decks
 eight crew quarters and the command centre; MARSHA houses four more over its
 garage, kitchen and skyroom; the inflatable dome is the commons; the
-hangar is the rover garage and workshop.
+hangar is the rover garage and workshop. Beside MARSHA, the rover that
+printed it has begun a second (printer.py).
 """
 import functools
 import math
@@ -63,6 +65,10 @@ EDEN = Vector((14.0, 22.0, 0.0))
 INFLATABLE = Vector((-34.0, 26.0, 0.0))
 HANGAR = Vector((-46.0, -8.0, 0.0))
 PRINTED = NODE + 53.0 * Vector((math.cos(math.radians(240)), math.sin(math.radians(240)), 0))
+MARSHA_R, MARSHA_H = 5.0, 15.0
+# The second MARSHA, just begun; its printer stands off it toward its -X, here east.
+HOUSE = Vector((-17.0, -96.0, 0.0))
+HOUSE_YAW = math.pi / 2
 SOLAR = Vector((-10.0, 86.0, 0.0))
 SOLAR_ROWS, SOLAR_PANELS, SOLAR_PITCH, SOLAR_TILT = 4, 18, 8.0, 22.0
 STATION = Vector((22.0, 60.0, 0.0))
@@ -82,8 +88,8 @@ MAST = Vector((-24.0, 62.0, 0.0))
 DISH = Vector((48.0, 120.0, 0.0))
 NASA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".work", "mars_base", "nasa")
 
-# Roads: 1 the main road from the plaza down the yard; 2 on to the Starship
-# pad, ending on its apron in the 72 degree lane; 3 off it to the lander
+# Roads: 1 the main road from the plaza down the yard; 2 on to the Ariane
+# pad, ending on its apron in the 72 degree lane; 3 off it to the hopper
 # pad's 90 degree lane; 4 the ice well, 5 the regolith works, 9 the tanks;
 # from the plaza, 6 the power station, 7 HubNorth, 8 the inflatable hab.
 # Road 2 bends gently and 3 and 9 leave it between its marker poles.
@@ -240,12 +246,13 @@ def build(looks, strewn=False):
             add(kind(buildings.arch_greenhouse(looks, name, ARCH_LEN, 10.0, 3.0, tuple(at), 0.0, base, system), f"arch_{system}"))
         add(link(looks, base, f"Link{name}", stop, Vector((at.x - 3.2, at.y, 0.0)), JUNCTION_R, 0.0, 1.2, 1.4))
 
-    # Round the plaza: the EDEN module, the inflatable hab, the hangar, a printed tower.
+    # Round the plaza: the EDEN module, the inflatable hab, the hangar, a printed tower and the one begun beside it.
     add(habitat.eden_skin(looks, "EdenSkin", 12.19, 2.44, 2.90, 1.0, tuple(EDEN), 0.0, base))
     add(habitat.inflatable_hab(looks, "Hab", 7.5, 4.6, tuple(INFLATABLE), toward(INFLATABLE, Vector((0, 0, 0))), base, fit=fitouts.commons))
     add(habitat.hangar(looks, "Hangar", 22.0, 7.0, tuple(HANGAR), 0.0, base, fit=fitouts.hangar))
-    add(habitat.printed_tower(looks, "Printed", 5.0, 15.0, tuple(PRINTED), toward(PRINTED, NODE), base, fit=fitouts.marsha))
-    add(habitat.print_rover(looks, "PrintRover", tuple(placed(PRINTED, toward(PRINTED, NODE), Vector((1.0, 11.5, 0.0)))), toward(PRINTED, NODE) - math.pi / 2, base))
+    add(habitat.printed_tower(looks, "Printed", MARSHA_R, MARSHA_H, tuple(PRINTED), toward(PRINTED, NODE), base, fit=fitouts.marsha))
+    ports = ((toward(HOUSE, NODE) - HOUSE_YAW, 1.3), (toward(HOUSE, PRINTED) - HOUSE_YAW, 0.65))
+    add(habitat.print_site(looks, "PrintSite", MARSHA_R, MARSHA_H, tuple(HOUSE), HOUSE_YAW, base, ports))
     add(link(looks, base, "LinkPrinted", NODE, PRINTED, 5.0, 5.4, 1.2, 1.4))
 
     # Power.
@@ -282,14 +289,16 @@ def build(looks, strewn=False):
     add(industry.pipe_bridge(looks, "PipeBridgeSoil", BRIDGE_SOIL[0], BRIDGE_SOIL[1], ("pipe_blue",), 5.5, base))
     add(industry.pipe_run(looks, "PipesSoil", PIPES_SOIL, base, ("pipe_blue",), ("flange", "flange")))
 
-    # The landing zone.
+    # The landing zone: an Ariane 6 on its launch table, the Honda hopper on
+    # the second pad, each facing its services down the pad's second lane.
     add(spaceport.landing_pad(looks, "PadShip", 32.0, tuple(PAD_SHIP), base))
-    add(spaceport.starship(looks, "Starship", tuple(PAD_SHIP), 0.4, base))
+    add(spaceport.launch_mount(looks, "LaunchMount", tuple(PAD_SHIP), math.tau / 10, base))
+    add(spaceport.ariane6(looks, "Ariane6", tuple(PAD_SHIP), math.tau / 10, base))
     add(spaceport.landing_pad(looks, "PadLander", 24.0, tuple(PAD_LANDER), base, 8))
-    add(spaceport.crew_lander(looks, "Lander", tuple(PAD_LANDER), 0.8, base))
-    # Propellant, power and a beacon for each vehicle, down its pad's second lane.
-    add(spaceport.pad_services(looks, "ShipServices", tuple(PAD_SHIP), math.tau / 10, base, 32.0, 4.55, 3.6))
-    add(spaceport.pad_services(looks, "LanderServices", tuple(PAD_LANDER), math.tau / 8, base, 24.0, 3.25, 2.3))
+    add(spaceport.honda_hopper(looks, "HondaHopper", tuple(PAD_LANDER), math.tau / 8, base))
+    # Propellant, power and a beacon for each vehicle: the Ariane's to its table's edge.
+    add(spaceport.pad_services(looks, "ShipServices", tuple(PAD_SHIP), math.tau / 10, base, 32.0, spaceport.TABLE_HALF, 4.2))
+    add(spaceport.pad_services(looks, "LanderServices", tuple(PAD_LANDER), math.tau / 8, base, 24.0, spaceport.HOP_R, 3.4))
 
     # Comms and science.
     add(props.lattice_mast(looks, "CommsMast", tuple(MAST), 14.0, base))
@@ -398,6 +407,10 @@ def fleet_places(eden_rail, arch_rail, dome_anchor):
     places.append(("Rover2", "sev_rover.usdz", (-22.0, 38.0, 0.0), math.pi / 2, None))
     # The base stands in Jezero crater, where Perseverance works the delta.
     places.append(("Percy", "perseverance_nasa.usdz", (-44.0, -128.0, 0.0), math.radians(140), None))
+    # MARSHA's printer at the house it has begun, held where it stands.
+    import printer
+    stand = HOUSE - printer.PRINTER.reach * Vector((math.cos(HOUSE_YAW), math.sin(HOUSE_YAW), 0.0))
+    places.append(("Printer", f"{printer.NAME}.usdz", tuple(stand), HOUSE_YAW, printer.anchor()))
     return places
 
 

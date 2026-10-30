@@ -10,11 +10,11 @@ import math
 
 import bmesh
 import numpy as np
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 import patterns
 from buildings import door, light_mast, mats, railing, stairs, unit
-from kit import (TAU, Building, box, cone, lathe, merge, moved, prism, project_uv, rect, rod, sphere, sweep, truss, tube, vault)
+from kit import (TAU, Building, box, cone, lathe, merge, moved, prism, project_uv, rect, rod, sphere, spline, srgb_to_linear, sweep, truss, tube, vault)
 
 FLANGE = 0.26
 RING = 0.14
@@ -1058,6 +1058,11 @@ def _shell(rows, segments, holes, depth, tile):
     return bm, backs
 
 
+def marsha_radius(radius, t):
+    """The outer face's radius of a MARSHA shell built `radius` round, a share `t` of its height up."""
+    return radius * (0.92 + 0.18 * math.sin(math.pi * min(t * 1.6, 1.0))) * (1.0 - 0.55 * t ** 2.2)
+
+
 def printed_tower(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, parent=None, fit=None):
     """A habitat printed from regolith, after AI SpaceFactory's MARSHA: an
     upright egg of print layers on a printed footing, a spiral of slot
@@ -1070,7 +1075,7 @@ def printed_tower(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, p
     rows = []
     for k in range(n + 1):
         t = k / n
-        rows.append((radius * (0.92 + 0.18 * math.sin(math.pi * min(t * 1.6, 1.0))) * (1.0 - 0.55 * t ** 2.2) * (1.0 + 0.002 * (-1) ** k), height * t))
+        rows.append((marsha_radius(radius, t) * (1.0 + 0.002 * (-1) ** k), height * t))
     holes = []
     for k in range(12):
         t = 0.12 + 0.68 * k / 12
@@ -1157,33 +1162,276 @@ def printed_tower(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, p
     return b.finish()
 
 
-def print_rover(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
-    """The rover that printed MARSHA, parked by it (AI SpaceFactory: a
-    stationary print rover with a vertically telescoping arm): a tracked
-    chassis, a turntable, a three-stage mast with its print boom and
-    nozzle, a feed hopper behind and the auger tube up to the head."""
+# A MARSHA just begun: its wall printed course by course on its plinth.
+PLINTH = 0.3
+COURSE = 1.0 / 12.0
+COURSES = 12
+SKIN = 0.075
+WALL = 0.35
+WEBS = 30
+
+
+def top_course(radius=5.0, height=15.0):
+    """Where the printer's nozzle rides on a begun MARSHA built `radius`
+    round and `height` tall: a hair over the middle of its outer skin's top
+    course, as (radius, z) from the shell's axis."""
+    z = PLINTH + COURSES * COURSE
+    return marsha_radius(radius, z / height) - SKIN / 2, z + 0.012
+
+
+def _bead_grain(colour, seed, rough=0.88, gloss=0.0):
+    """Maps of extruded regolith in its binder: the mix's grain, dark flecks
+    of basalt fibre and a faint mottle, a roughness that follows the grain."""
+    def make():
+        grain = patterns.noise(cells=160, seed=seed, octaves=3)
+        mottle = patterns.noise(cells=6, seed=seed + 1, octaves=3)
+        fleck = (patterns.noise(cells=96, seed=seed + 2, octaves=1) > 0.8).astype(np.float32)
+        shade = 0.8 + 0.25 * grain + 0.12 * (mottle - 0.5) - 0.3 * fleck
+        diff = np.clip(srgb_to_linear(np.array(colour, dtype=np.float32)) * shade[..., None], 0.0, 1.0)
+        r = np.clip(rough - gloss * mottle + 0.08 * (grain - 0.5), 0.05, 1.0)
+        return diff.astype(np.float32), patterns.normals_from_height((0.6 * grain - 0.3 * fleck).astype(np.float32), 6.0), r.astype(np.float32)
+    return make
+
+
+def _swept(outline, angles, tile=1.0):
+    """A closed outline of (radius, z) points, a function of the angle round,
+    carried about Z through `angles`: a ring when they close the circle,
+    else an arc with its ends capped."""
+    bm = bmesh.new()
+    uv = bm.loops.layers.uv.new("st")
+    closed = abs(angles[-1] - angles[0] - TAU) < 1e-6
+    turns = angles[:-1] if closed else angles
+    first = outline(angles[0])
+    n, reach = len(first), max(r for r, _ in first)
+    along = [0.0]
+    for (r0, z0), (r1, z1) in zip(first, first[1:] + first[:1]):
+        along.append(along[-1] + math.hypot(r1 - r0, z1 - z0))
+    rings = [[bm.verts.new((r * math.cos(a), r * math.sin(a), z)) for r, z in outline(a)] for a in turns]
+    for k in range(len(rings) if closed else len(rings) - 1):
+        lo, hi = rings[k], rings[(k + 1) % len(rings)]
+        for i in range(n):
+            j = (i + 1) % n
+            face = bm.faces.new((lo[i], lo[j], hi[j], hi[i]))
+            for loop, (p, q) in zip(face.loops, ((i, k), (i + 1, k), (i + 1, k + 1), (i, k + 1))):
+                loop[uv].uv = (reach * angles[q] / tile, along[p] / tile)
+    if not closed:
+        caps = [bm.faces.new(rings[0]), bm.faces.new(rings[-1][::-1])]
+        for face in caps:
+            for loop in face.loops:
+                loop[uv].uv = (loop.vert.co.x / tile, loop.vert.co.z / tile)
+        bmesh.ops.triangulate(bm, faces=caps)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return bm
+
+
+def _skin(radius, height, off, w, swell, drift, k):
+    """The outline, a function of the angle round, of course `k` of a printed
+    skin `w` thick whose outer face stands `off` inside the shell's: its bead
+    bulging `swell` out of both faces and wandering `drift(a)` in and out,
+    the top course's bead rounded over."""
+    h = COURSE
+    face = lambda z: marsha_radius(radius, z / height) - off
+
+    def bead(s, side, a):
+        z = PLINTH + h * (k + s)
+        b = swell * (2.0 * math.sin(math.pi * s) ** 0.7 - 1.0)
+        return (face(z) - (0.0 if side > 0 else w) + side * b + drift(a), z)
+
+    def course(a):
+        return [bead(s, 1, a) for s in (0.0, 0.25, 0.5, 0.75, 1.0)] + [bead(s, -1, a) for s in (1.0, 0.75, 0.5, 0.25, 0.0)]
+
+    def top(a):
+        zc = PLINTH + h * (k + 0.5)
+        mid, half = face(zc) - w / 2 + drift(a), w / 2 + swell
+        arc = [(mid + half * math.cos(math.radians(t)), zc + 0.5 * h * math.sin(math.radians(t))) for t in (25, 55, 90, 125, 155)]
+        return [bead(0.0, 1, a), bead(0.25, 1, a)] + arc + [bead(0.25, -1, a), bead(0.0, -1, a)]
+
+    return top if k == COURSES - 1 else course
+
+
+def _web(radius, height, a, z0, z1, t=0.045):
+    """A radial web `t` thick at angle `a` between a printed wall's skins, from z0 up to z1."""
+    bm = bmesh.new()
+    d, side = Vector((math.cos(a), math.sin(a), 0.0)), Vector((-math.sin(a), math.cos(a), 0.0))
+    levels = max(1, round((z1 - z0) / (COURSE / 2)))
+    rows = []
+    for j in range(levels + 1):
+        z = z0 + (z1 - z0) * j / levels
+        r = marsha_radius(radius, z / height)
+        rows.append([bm.verts.new(d * (r - o) + side * s * t / 2 + Vector((0, 0, z)))
+                     for o, s in ((SKIN - 0.012, -1), (SKIN - 0.012, 1), (WALL - SKIN + 0.012, 1), (WALL - SKIN + 0.012, -1))])
+    for lo, hi in zip(rows, rows[1:]):
+        for i in range(4):
+            bm.faces.new((lo[i], lo[(i + 1) % 4], hi[(i + 1) % 4], hi[i]))
+    bm.faces.new(rows[0])
+    bm.faces.new(rows[-1][::-1])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    project_uv(bm, 1.0)
+    return bm
+
+
+def _printed_wall(b, beads, fresh, radius, height, ports, seed):
+    """A MARSHA wall printed COURSES courses up from its plinth: outer and
+    inner skins of beads joined by WEBS radial webs, left open over each
+    (angle, half width) port and closed by a web at each end there; each
+    course in one of the `beads` tones, the top course `fresh`; and its
+    collider."""
+    rng = np.random.default_rng(seed)
+    swells = rng.uniform(0.7, 1.3, (2, COURSES)) * 0.012
+    phases = rng.random((2, COURSES, 2)) * TAU
+    tones = rng.integers(0, len(beads), COURSES)
+    base = marsha_radius(radius, PLINTH / height)
+    z1, zt = PLINTH + COURSES * COURSE, PLINTH + (COURSES - 1) * COURSE
+    rt = marsha_radius(radius, z1 / height)
+    lower, top = [bmesh.new() for _ in beads], bmesh.new()
+    for start, span in _arcs([(a, half / base) for a, half in ports]):
+        angles = [start + span * i / math.ceil(span / math.radians(2.0)) for i in range(math.ceil(span / math.radians(2.0)) + 1)]
+        for j, off in enumerate((0.0, WALL - SKIN)):
+            for k in range(COURSES):
+                drift = lambda a, j=j, k=k: 0.0035 * math.sin(3 * a + phases[j, k, 0]) + 0.0015 * math.sin(7 * a + phases[j, k, 1])
+                merge(top if k == COURSES - 1 else lower[tones[k]], _swept(_skin(radius, height, off, SKIN, swells[j, k], drift, k), angles))
+        webs = [TAU * k / WEBS for k in range(WEBS)]
+        if span < TAU - 1e-6:
+            webs = [a for a in webs if 0.12 / base < (a - start) % TAU < span - 0.12 / base] + [start + 0.03 / base, start + span - 0.03 / base]
+        for a in webs:
+            merge(lower[0], _web(radius, height, a, PLINTH, zt))
+            merge(top, _web(radius, height, a, zt, zt + 0.8 * COURSE))
+        coarse = [start + span * i / math.ceil(span / 0.2) for i in range(math.ceil(span / 0.2) + 1)]
+        b.collider(_swept(lambda a: [(base + 0.01, PLINTH), (rt + 0.01, z1), (rt - WALL - 0.01, z1), (base - WALL - 0.01, PLINTH)], coarse))
+    for bm, mat in zip(lower, beads):
+        b.put(bm, mat, sharp=55)
+    b.put(top, fresh, sharp=55)
+
+
+def _plinth(b, m, apothem):
+    """The octagonal plinth a printed shell rises from, a flat toward -X,
+    held down at each corner by a ground clamp: a base plate, a gusseted
+    post and a jaw over the plinth's edge, anchor rods through jaw and plate
+    with their nuts and washers; and its collider."""
+    rc = apothem / math.cos(math.pi / 8)
+    b.put(lathe([(0.0, -0.12), (rc, -0.12), (rc, PLINTH - 0.04), (rc - 0.05, PLINTH), (0.0, PLINTH)], 8, 2.0, TAU, math.pi / 8), m["sinter"], sharp=30)
+    b.collider(lathe([(0.0, -0.12), (rc, -0.12), (rc, PLINTH), (0.0, PLINTH)], 8, 2.0, TAU, math.pi / 8))
+    clamps, nuts = bmesh.new(), bmesh.new()
+    swap = Matrix(((1, 0, 0, 0), (0, 0, 1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
+    for k in range(8):
+        a = math.pi / 8 + k * math.pi / 4
+        at = (rc * math.cos(a), rc * math.sin(a), 0.0)
+        part = box((0.36, 0.3, 0.03), (0.2, 0, 0.015), tile=0.5)
+        merge(part, box((0.08, 0.2, PLINTH + 0.05), (0.06, 0, (PLINTH + 0.05) / 2), tile=0.5))
+        merge(part, box((0.28, 0.18, 0.04), (-0.06, 0, PLINTH + 0.03), tile=0.5, bevel=0.005))
+        for y in (-0.07, 0.07):
+            gusset = prism([(0.1, 0.03), (0.34, 0.03), (0.1, PLINTH - 0.02)], -0.006, 0.006, 0.5)
+            gusset.transform(swap)
+            bmesh.ops.recalc_face_normals(gusset, faces=gusset.faces[:])
+            merge(part, gusset, Matrix.Translation((0, y, 0)))
+        merge(clamps, moved(part, at, a))
+        bolts = bmesh.new()
+        for x, y, z0, z1 in ((-0.11, 0.0, PLINTH + 0.05, PLINTH + 0.13), (0.31, -0.1, 0.03, 0.11), (0.31, 0.1, 0.03, 0.11)):
+            merge(bolts, cone(0.016, 0.016, z1 - z0, (x, y, z0), 8))
+            merge(bolts, lathe([(0.0, z0), (0.04, z0), (0.04, z0 + 0.005), (0.0, z0 + 0.005)], 12, 0.2))
+            merge(bolts, lathe([(0.0, z0 + 0.005), (0.032, z0 + 0.005), (0.032, z0 + 0.032), (0.0, z0 + 0.032)], 6, 0.2))
+        merge(nuts, moved(bolts, at, a))
+    b.put(clamps, m["frame"], smooth=False)
+    b.put(nuts, m["steel"], smooth=False)
+
+
+def _raked(r0, r1, pitch=0.2, depth=0.03):
+    """The (radius, z) section of regolith raked into ridges `pitch` apart
+    from r0 out to r1, its edges feathered into the ground, outermost first."""
+    pts = [(r0 - 0.2, -0.02)]
+    steps = 4 * round((r1 - r0) / pitch)
+    for i in range(steps + 1):
+        pts.append((r0 + pitch * i / 4, 0.012 + depth * (0.5 - 0.5 * math.cos(math.pi * i / 2))))
+    pts.append((r1 + 0.3, -0.02))
+    return pts[::-1]
+
+
+def _print_kit(b, p, rover, inlets):
+    """The printer's ground kit behind it, the rover's mast at `rover` along
+    X: the pellet dryer, a grey cabinet under a white hopper with its vacuum
+    loader, sight glass and orange regeneration blower; the power cabinet
+    with its louvres and beacon; two white silos of pellets piped to the
+    loader; a spare coil of hose; and the feed hose, air hose and power
+    cable laid along the ground to the chassis's `inlets` (machine frame)."""
+    from industry import cabinet, louvres, torus, vessel
+    x0 = rover - 4.3
+    cabinet(b, p, (x0, 4.2, 0.0), 0.0, (0.8, 1.1, 1.25), "paint_grey", doors=2, cell=2)
+    top = 1.39
+    stand = bmesh.new()
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            merge(stand, rod((x0 + sx * 0.26, 4.2 + sy * 0.3, top), (x0 + sx * 0.3, 4.2 + sy * 0.34, top + 0.3), 0.025, 6))
+    merge(stand, box((0.16, 0.16, 0.12), (x0, 4.2, top + 0.08)))
+    b.put(stand, p["galv"], smooth=False)
+    hopper = [(0.0, top + 0.12), (0.07, top + 0.12), (0.42, top + 0.5), (0.42, top + 1.2), (0.44, top + 1.22), (0.44, top + 1.25), (0.0, top + 1.27)]
+    b.put(moved(lathe(hopper, 32, 1.0), (x0, 4.2, 0.0)), p["paint_white"], sharp=35)
+    b.put(moved(box((0.006, 0.07, 0.4), (0.42, 0.0, top + 0.85)), (x0, 4.2, 0.0), math.radians(-30)), p["vision"], smooth=False)
+    loader = lathe([(0.0, top + 1.27), (0.16, top + 1.27), (0.16, top + 1.55), (0.19, top + 1.56), (0.19, top + 1.63), (0.0, top + 1.65)], 20, 0.5)
+    b.put(moved(loader, (x0, 4.2, 0.0)), p["paint_grey"], sharp=35)
+    blower = moved(lathe([(0.0, -0.09), (0.22, -0.09), (0.22, 0.09), (0.0, 0.09)], 24, 0.5), (x0 - 0.05, 5.08, 0.55), roll=math.pi / 2)
+    merge(blower, box((0.18, 0.14, 0.18), (x0 + 0.2, 5.08, 0.72)))
+    b.put(blower, p["paint_orange"], smooth=False)
+    b.put(moved(lathe([(0.0, 0.0), (0.09, 0.0), (0.09, 0.26), (0.0, 0.26)], 14, 0.5), (x0 - 0.05, 5.17, 0.55), roll=-math.pi / 2), p["paint_dark"], smooth=False)
+    b.put(tube(spline([(x0 + 0.16, 5.08, 0.6), (x0 + 0.2, 5.0, 1.3), (x0 + 0.1, 4.8, 2.0), (x0 + 0.02, 4.63, 2.2)], 0.05), 0.05, 10), p["hose"])
+    b.collider(box((0.86, 1.16, top + 1.65), (x0, 4.2, (top + 1.65) / 2)))
+    cabinet(b, p, (x0 - 0.1, 6.2, 0.0), 0.0, (0.7, 1.0, 1.65), "paint_grey", doors=1, cell=0)
+    louvres(b, p, (x0 - 0.1, 6.7, 1.0), math.pi / 2, 0.5, 0.6)
+    b.put(moved(lathe([(0.0, 1.79), (0.06, 1.79), (0.06, 1.85), (0.05, 1.95), (0.0, 1.96)], 12, 0.2), (x0 - 0.1, 6.2, 0.0)), p["andon"])
+    b.collider(box((0.76, 1.06, 1.95), (x0 - 0.1, 6.2, 0.975)))
+    lines = bmesh.new()
+    for y in (3.5, 5.9):
+        s = (x0 - 2.8, y)
+        vessel(b, p, (s[0], s[1], 0.0), 0.75, 2.8, "paint_white", lift=0.9, legs=4)
+        b.collider(box((1.6, 1.6, 3.9), (s[0], s[1], 1.95)))
+        merge(lines, rod((s[0], s[1], 0.92), (s[0], s[1], 0.56), 0.05, 10))
+        side = 1 if y > 5 else -1
+        path = [(s[0], s[1], 0.52), (s[0] + 0.5, s[1] - side * 0.3, 0.05), (x0 - 1.0, 4.2 + side * 0.5, 0.05), (x0 - 0.56, 4.2 + side * 0.25, 0.6),
+                (x0 - 0.5, 4.2 + side * 0.12, 2.4), (x0 - 0.15, 4.2 + side * 0.06, top + 1.58), (x0 - 0.02, 4.2, top + 1.58)]
+        b.put(tube(spline(path, 0.06), 0.04, 10), p["hose"])
+    b.put(lines, p["steel"], smooth=False)
+    coil = bmesh.new()
+    for k in range(3):
+        merge(coil, moved(torus(0.42 - 0.02 * k, 0.035, 28, 8), (x0 + 0.6, 1.9, 0.035 + 0.068 * k)))
+    b.put(coil, p["pipe_blue"])
+    # The lines from the kit to the inlet panel at the chassis's back.
+    ix = {key: Vector((rover + x, y, z)) for key, (x, y, z) in inlets.items()}
+    for key, start, mid, r, mat in (("feed", (x0 + 0.42, 3.9, 0.45), (x0 + 1.05, 2.6), 0.035, "pipe_blue"),
+                                    ("air", (x0 + 0.42, 4.45, 0.35), (x0 + 1.12, 2.9), 0.03, "hose"),
+                                    ("power", (x0 + 0.26, 5.85, 0.06), (x0 + 1.18, 3.2), 0.025, "cable")):
+        end = ix[key]
+        path = [start, (start[0] + 0.3, start[1] - 0.12, r + 0.005), (mid[0], mid[1], r + 0.005), (mid[0] + 0.05, end.y + 0.7, r + 0.005),
+                (end.x - 0.9, end.y + 0.12, r + 0.005), (end.x - 0.42, end.y, r + 0.01), (end.x - 0.36, end.y, 0.8), (end.x - 0.15, end.y, end.z), tuple(end)]
+        b.put(tube(spline(path, 0.06), r, 10), p[mat])
+
+
+def print_site(looks, name, radius=5.0, height=15.0, at=(0, 0, 0), yaw=0.0, parent=None, ports=((0.0, 1.3), (math.pi / 2, 0.65))):
+    """A MARSHA just begun beside the rover printing it, its mast standing
+    `printer.PRINTER.reach` off along -X: an octagonal plinth held down at
+    its corners by ground clamps on anchor rods; the wall's first metre,
+    outer and inner skins of printed beads joined by radial webs, open where
+    each (angle, half width) port of the airlock and the door is to be, its
+    top course fresh and dark; the ground raked in concentric arcs round it,
+    broken where the rover stands and at the ports; and the printer's
+    ground kit behind the rover."""
+    import printer
     from industry import plant_mats
     m = _mats(looks)
     p = plant_mats(looks)
     b = Building(name, parent, at, yaw)
-    for s in (-1, 1):
-        b.put(box((2.6, 0.5, 0.62), (0, s * 1.0, 0.36), bevel=0.04), p["paint_dark"], smooth=False)
-        for x in (-1.3, 1.3):
-            b.put(moved(lathe([(0.0, -0.25), (0.31, -0.25), (0.31, 0.25), (0.0, 0.25)], 16, 0.5), (x, s * 1.0, 0.36), roll=math.pi / 2), p["paint_dark"], smooth=False)
-        b.put(box((3.0, 0.52, 0.04), (0, s * 1.0, 0.04)), m["rubber"], smooth=False)
-    b.put(box((2.6, 1.6, 0.45), (0, 0, 0.85), bevel=0.04), p["paint_yellow"], smooth=False)
-    b.put(lathe([(0.0, 1.07), (0.75, 1.07), (0.75, 1.25), (0.0, 1.25)], 32, 1.0), m["steel"], smooth=False)
-    for k, (w, z0, z1) in enumerate(((0.6, 1.25, 4.2), (0.46, 4.0, 6.8), (0.34, 6.6, 9.2))):
-        b.put(box((w, w, z1 - z0), (0, 0, (z0 + z1) / 2), tile=1.0), p["paint_yellow"] if k % 2 == 0 else p["paint_orange"], smooth=False)
-    b.put(box((4.2, 0.3, 0.35), (1.9, 0, 9.0), tile=1.0), p["paint_orange"], smooth=False)
-    b.put(box((0.4, 0.4, 0.5), (3.8, 0, 8.6), bevel=0.02), p["paint_dark"], smooth=False)
-    b.put(cone(0.08, 0.02, 0.3, (3.8, 0, 8.05), 12), m["steel"], smooth=False)
-    hopper = lathe([(0.12, 1.05), (0.65, 1.8), (0.66, 1.9), (0.6, 1.9), (0.0, 1.9)], 16, 0.5)
-    b.put(moved(hopper, (-1.0, 0, 0)), m["steel"], smooth=False)
-    b.put(tube([Vector((-1.0, 0.0, 1.1)), Vector((-0.4, 0.0, 1.3)), Vector((-0.35, 0.0, 8.8)), Vector((0.0, 0.0, 9.3)), Vector((3.6, 0.15, 9.25)), Vector((3.8, 0.0, 8.9))], 0.06, 10), p["hose"])
-    b.put(box((0.5, 0.4, 0.5), (0.9, 0.6, 1.33), bevel=0.02), p["paint_white"], smooth=False)
-    b.collider(box((3.0, 2.6, 1.3), (0, 0, 0.65)))
-    b.collider(box((0.7, 0.7, 8.0), (0, 0, 5.2)))
+    beads = []
+    for key, f in (("a", 0.93), ("b", 1.0), ("c", 1.06)):
+        colour = tuple(c * f for c in (0.60, 0.48, 0.38))
+        beads.append(looks.get(f"printed_bead_{key}", colour, 0.88, 0.0, maps=_bead_grain(colour, 51 + len(beads))))
+    fresh = looks.get("fresh_bead", (0.38, 0.29, 0.23), 0.62, 0.0, maps=_bead_grain((0.38, 0.29, 0.23), 55, 0.62, 0.2))
+    raked = looks.get("raked_regolith", (0.47, 0.32, 0.22), 0.95, 0.0, "rough_concrete", contrast=0.7)
+    raked["gearbox_ground"] = True
+    _printed_wall(b, beads, fresh, radius, height, ports, 7)
+    _plinth(b, m, radius * 1.05)
+    profile = _raked(radius * 1.05 / math.cos(math.pi / 8) + 0.55, radius * 2.15)
+    for start, span in _arcs([(math.pi, 0.75)] + [(a, 0.15) for a, _ in ports]):
+        b.put(lathe(profile, max(2, math.ceil(span / math.radians(1.5))), 1.0, span, start), raked, sharp=60)
+    rover = printer.PRINTER
+    _print_kit(b, p, -rover.reach, printer.INLETS)
     return b.finish()
 
 

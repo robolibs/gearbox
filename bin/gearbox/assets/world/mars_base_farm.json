@@ -282527,6 +282527,41 @@
     "drum_front": "drum_front",
     "drum_rear": "drum_rear"
    }
+  },
+  "base_fleet_printer": {
+   "kind": "regolith_printer",
+   "links": {
+    "lift": "mast",
+    "slew": "boom",
+    "turn": "pendant",
+    "shoulder": "upper_arm",
+    "elbow": "forearm",
+    "wrist": "head",
+    "screw": "screw"
+   },
+   "print": {
+    "lift": 0.0,
+    "slew": 0.0,
+    "shoulder": 0.3913,
+    "elbow": 0.7813,
+    "wrist": 0.8003
+   },
+   "over": {
+    "lift": 0.0893
+   },
+   "full_s": {
+    "lift": 46.7,
+    "slew": 62.8,
+    "shoulder": 8.7,
+    "elbow": 16.3,
+    "wrist": 8.7
+   },
+   "turn": 0.0698,
+   "screw": 3.0,
+   "nozzle": [
+    4.93,
+    1.312
+   ]
   }
  }
 }
