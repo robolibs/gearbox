@@ -43,8 +43,10 @@ CAPTION_S = 4.5
 FONT = subprocess.run(["fc-match", "-f", "%{file}", "DejaVu Sans"], capture_output=True, text=True).stdout.strip()
 # Arch B's axis, its north gable and the height of the gable pane's middle.
 ARCH_B_Y, GABLE_X, PANE_Z = -77.0, 44.0, 3.95
-# Dome B's glass facets the camera flies in and out by, and their height.
-DOME_IN, DOME_OUT, FACET_Z = (54.95, 10.69), (53.78, 28.29), 5.49
+# Dome B's middle, and the glass facets the camera flies in and out by:
+# each facet's middle (x, y, z), compass azimuth out and tilt up, degrees.
+DOME_B = (62.0, 20.0)
+FACET_IN, FACET_OUT = (51.12, 15.53, 5.03, 157.7, 10.3), (51.66, 25.44, 5.45, 207.8, 12.3)
 # A picker's lane, off the arch's axis, and how near the parked ridge robot it may be held.
 PICKERS = {"archbpicker1": 1.35, "archbpicker2": -1.35}
 HOLD_FROM_X = 25.0
@@ -135,22 +137,30 @@ def tour(north: dict[str, float]) -> list[dict]:
     key(9, machine("domeawasher", 200, 32, 30, "carriage"), "The dome washer sweeps the geodesic glass", ["domeawasher"])
     key(7, machine("domeawasher", 225, 28, 28, "carriage"))
     key(6, seen_from(46, -4, 19, 140, 32, 16), None, [])
-    # Into dome B by one glass facet and out by another.
-    chord = math.dist(DOME_IN, DOME_OUT)
-    u = ((DOME_OUT[0] - DOME_IN[0]) / chord, (DOME_OUT[1] - DOME_IN[1]) / chord)
-    back = math.degrees(math.atan2(u[1], -u[0])) % 360
+    # Into dome B square through one glass facet, round the cistern's south
+    # side and out square through another, looking 3 m ahead.
+    def off_facet(facet, s, bearing, pitch):
+        """A view whose eye is `s` m out from a facet's middle along its normal."""
+        x, y, z, az, tilt = facet
+        a, t = math.radians(az), math.radians(tilt)
+        return seen_from(x + s * math.cos(t) * math.cos(a), y - s * math.cos(t) * math.sin(a), z + s * math.sin(t), bearing, pitch, 3)
 
-    def on_chord(s, pitch=10):
-        return seen_from(DOME_IN[0] + s * u[0], DOME_IN[1] + s * u[1], FACET_Z, back, pitch, 6)
+    def round_cistern(r, az, z, bearing, pitch):
+        """A view whose eye is `r` m from dome B's middle at compass azimuth `az`."""
+        a = math.radians(az)
+        return seen_from(DOME_B[0] + r * math.cos(a), DOME_B[1] - r * math.sin(a), z, bearing, pitch, 3)
 
-    key(6, seen_from(54, 0, 9, back + 10, 16, 8))
-    key(5, on_chord(-8))
-    key(4, on_chord(0))
-    key(2.5, on_chord(3), "Inside a dome: printed regolith terraces round a water cistern", ["domebbot"])
-    key(4, on_chord(chord / 2, 26))
-    key(4, on_chord(chord - 3))
-    key(2.5, on_chord(chord))
-    key(3, on_chord(chord + 6), None, [])
+    inward, outward = FACET_IN[3], FACET_OUT[3] - 180
+    key(7, off_facet(FACET_IN, 12, inward, FACET_IN[4]))
+    key(6, off_facet(FACET_IN, 1.2, inward, FACET_IN[4]))
+    key(2, off_facet(FACET_IN, -1.2, inward, FACET_IN[4]), "Inside a dome: printed regolith terraces round a water cistern", ["domebbot"])
+    key(1.5, off_facet(FACET_IN, -2.5, inward, 12))
+    for k, (r, az, bearing, pitch) in enumerate(((7.8, 160.5, 140, 16), (6.4, 170, 115, 20), (6.0, 182.75, 90, 22), (6.4, 195.5, 65, 18), (7.8, 205, 45, 10))):
+        key(2.1 if k in (0, 4) else 2.4, round_cistern(r, az, 4.6, bearing, pitch))
+    key(1.5, off_facet(FACET_OUT, -2.5, outward, 3))
+    key(1.2, off_facet(FACET_OUT, -1.2, outward, 3))
+    key(2, off_facet(FACET_OUT, 1.2, outward, 3))
+    key(3.5, off_facet(FACET_OUT, 5, outward, 3), None, [])
     # Over to the solar field's panel washers, met from the east between two rows.
     key(8, place(30, 58, 3, 100, 34, 36))
     key(8, machine("solarwasher2", 115, 28, 9, "frame"), "Panel washers keep the arrays clean", ["solarwasher2"])
