@@ -10,13 +10,16 @@ headless or not:
     gearbox run --headless 1920x1080 --planet mars --world bin/gearbox/assets/world/mars_base.usda
     gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base
     python3 scripts/control/mars_farm.py --digging base_fleet_digger3 \\
-        --leave base_fleet_archbbot,base_fleet_domebbot,base_fleet_domebwasher
+        --sway base_fleet_archbbot:trolley=0:0.12,mast=0:0.8,arm=0:0.5 \\
+        --sway base_fleet_domebbot:carriage=0.1:0.9,mast=0:0.6 \\
+        --sway base_fleet_domebwasher:arch=0.5:0.7,carriage=0.1:0.9
     python3 scripts/control/mars_tour.py --out .work/movie
 
-The robots left standing are the ones whose reach crosses the camera's way
-through arch B and dome B. While it records, the sim's clock steps a
-sixtieth of a second a frame of video, so the path's seconds below are
-seconds of video however fast the GPU renders.
+The robots swayed are the ones whose reach would cross the camera's way
+through arch B and dome B: each works the part of its room the camera
+keeps out of. While it records, the sim's clock steps a sixtieth of a
+second a frame of video, so the path's seconds below are seconds of video
+however fast the GPU renders.
 """
 from __future__ import annotations
 
@@ -44,7 +47,7 @@ ARCH_B_Y, GABLE_X, PANE_Z = -77.0, 44.0, 3.95
 DOME_IN, DOME_OUT, FACET_Z = (54.95, 10.69), (53.78, 28.29), 5.49
 # A picker's lane, off the arch's axis, and how near the parked ridge robot it may be held.
 PICKERS = {"archbpicker1": 1.35, "archbpicker2": -1.35}
-HOLD_FROM_X = 21.0
+HOLD_FROM_X = 25.0
 
 
 def place(x: float, y: float, above: float, bearing: float, pitch: float, distance: float) -> str:
@@ -154,8 +157,8 @@ def tour(north: dict[str, float]) -> list[dict]:
     key(6, machine("solarwasher2", 130, 30, 10, "frame"))
     # The soil works and its diggers.
     key(8, place(-58, 63, 4, 330, 45, 50), None, [])
-    key(10, machine("digger3", 340, 24, 7, "base_link"), "RASSOR excavators dig regolith with counter-rotating drums", ["digger3"])
-    key(7, machine("digger3", 15, 22, 6, "base_link"))
+    key(10, machine("digger3", 340, 22, 3.6, "base_link", 0.3), "RASSOR excavators dig regolith with counter-rotating drums", ["digger3"])
+    key(7, machine("digger3", 20, 20, 3.4, "base_link", 0.3))
     key(7, place(-112, 30, 2, 340, 45, 40), "Loads tipped into the soil bays", [])
     key(7, place(-99, 0, 1, 300, 28, 32), "Water from the ice well; oxygen and methane from the air")
     key(6, place(-120, -5, 2, 245, 20, 26))
