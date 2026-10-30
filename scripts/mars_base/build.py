@@ -109,6 +109,13 @@ def relative(path, start):
     return os.path.relpath(path, start).replace(os.sep, "/")
 
 
+def constant_alpha(mat):
+    """A material's alpha when it is a constant below 1, else None."""
+    bsdf = mat and mat.use_nodes and next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    alpha = bsdf.inputs["Alpha"] if bsdf else None
+    return alpha.default_value if alpha is not None and not alpha.is_linked and alpha.default_value < 1.0 else None
+
+
 def export_module(building, path, weather=True):
     """Writes one building's collection about its own origin as a component
     model, its shells marked to collide; with `weather` its looks are first
@@ -133,8 +140,14 @@ def export_module(building, path, weather=True):
         )
     finally:
         root.location, root.rotation_euler = at, turn
-    from pxr import Kind, Sdf, Usd, UsdGeom, UsdPhysics
+    from pxr import Kind, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
     stage = Usd.Stage.Open(path)
+    # Blender writes an opacity of 1 for a constant alpha: each surface takes its material's.
+    for p in stage.Traverse():
+        if p.IsA(UsdShade.Shader) and p.GetParent().GetParent().GetName() == "_materials":
+            alpha = constant_alpha(bpy.data.materials.get(p.GetParent().GetName()))
+            if alpha is not None:
+                UsdShade.Shader(p).CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(alpha)
     top = stage.GetPrimAtPath(prim)
     stage.SetDefaultPrim(top)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
