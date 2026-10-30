@@ -634,10 +634,42 @@ class Printer(Robot):
             self.spin(True)
 
 
+class Sway(Robot):
+    """A robot kept to one side of where a camera flies: each of its links
+    swung back and forth between two positions, its brush turning if it has
+    one, in place of its work."""
+
+    SWING_S = 24.0
+
+    def run(self):
+        links = self.entry.get("links", {})
+        if "brush" in links:
+            self.set(links["brush"], "velocity", self.entry.get("brush", 15.0))
+        far = True
+        while True:
+            for link, (near, away) in SWAYS[self.machine].items():
+                self.set(link, "position", away if far else near)
+            far = not far
+            yield self.SWING_S
+
+
 # Seconds a digger digs a load, half going forward and half back.
 DIG_S = 40.0
 # Diggers that dig and never haul.
 DIGGING: set[str] = set()
+# Robots swayed, each link between two positions.
+SWAYS: dict[str, dict[str, tuple[float, float]]] = {}
+
+
+def sway(spec: str) -> tuple[str, dict[str, tuple[float, float]]]:
+    """`MACHINE:LINK=LO:HI,LINK=LO:HI` as the machine and its links' swings."""
+    machine, links = spec.split(":", 1)
+    swings = {}
+    for item in links.split(","):
+        link, span = item.split("=")
+        lo, hi = span.split(":")
+        swings[link] = (float(lo), float(hi))
+    return machine, swings
 
 KINDS = {"rail_gantry": Tender, "polar_gantry": Tender, "stacker_crane": Tender, "mobile_harvester": Tender, "excavator": Digger,
          "arch_washer": Washer, "dome_washer": Washer, "panel_washer": Washer, "regolith_printer": Printer}
@@ -660,9 +692,11 @@ def main():
     ap.add_argument("--instance")
     ap.add_argument("--digging", default="", help="comma-separated diggers that dig and never haul")
     ap.add_argument("--leave", default="", help="comma-separated machine ids left standing where they are")
+    ap.add_argument("--sway", action="append", default=[], help="MACHINE:LINK=LO:HI,… swung between those positions in place of its work")
     args = ap.parse_args()
 
     DIGGING.update(d for d in args.digging.split(",") if d)
+    SWAYS.update(sway(spec) for spec in args.sway)
     plan = json.loads(Path(args.plan).read_text())["machines"]
     CARTED.update(carted(plan))
     leave = set(args.leave.split(","))
@@ -687,7 +721,7 @@ def main():
         client = Gearbox(args.instance)
         while True:
             try:
-                robot = KINDS[entry["kind"]](client, machine, entry, log, clock, listing)
+                robot = (Sway if machine in SWAYS else KINDS[entry["kind"]])(client, machine, entry, log, clock, listing)
                 log(f"{machine}: {entry['kind']}" + (f", {len(entry['places'])} places in {entry['room']}" if "places" in entry else ""))
                 robot.work()
             except Exception as err:  # noqa: BLE001 - one robot's failure is logged, the others go on
