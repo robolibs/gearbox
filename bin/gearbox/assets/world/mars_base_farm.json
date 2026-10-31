@@ -282561,7 +282561,18 @@
    "nozzle": [
     4.95,
     1.395
-   ]
+   ],
+   "laid": [
+    "course0",
+    "course1",
+    "course2",
+    "course3",
+    "course4",
+    "course5",
+    "course6",
+    "course7"
+   ],
+   "course_lift": 0.00744
   }
  }
 }

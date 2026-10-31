@@ -88,6 +88,9 @@ class Printer:
 
 
 PRINTER = Printer()
+# Courses the printer lays in a session, each set in place as a lap of the
+# wall ends: rings standing hidden in the wall under them until then.
+LAID = 8
 # The couplings of the inlet panel the ground kit's lines end at.
 INLETS = {"feed": (-1.45, -0.3, 1.18), "air": (-1.45, 0.0, 1.18), "power": (-1.45, 0.3, 1.18)}
 HEX, BELLY, DECK = 1.5, 0.95, 1.45
@@ -193,7 +196,13 @@ def origins(p=PRINTER):
     f = math.radians(p.fold)
     w = e + Vector((p.fore * math.cos(f), 0.0, -p.fore * math.sin(f)))
     return {"chassis": Vector((0, 0, 1.2)), "mast": Vector((0, 0, 0.85)), "mast_top": Vector((0, 0, 1.0)), "boom": Vector((0, 0, p.turn_z)),
-            "pendant": Vector((p.reach, 0, p.turn_z)), "upper_arm": s, "forearm": e, "head": w, "screw": w + Vector((0, 0, -0.48))}
+            "pendant": Vector((p.reach, 0, p.turn_z)), "upper_arm": s, "forearm": e, "head": w, "screw": w + Vector((0, 0, -0.48)),
+            **{f"course{k}": Vector((p.reach, 0, 0)) for k in range(LAID)}}
+
+
+def sink(k):
+    """How far laid course `k` stands sunk in the wall until it is set in place."""
+    return (k + 3) * habitat.COURSE
 
 
 def pose(q, p=PRINTER):
@@ -655,9 +664,17 @@ def screw_part(p=PRINTER):
     return part
 
 
+def course_part(k, p=PRINTER):
+    """Laid course `k`, sunk in the wall it will crown, each one thinner
+    than the last so a course rising through those set before stays hidden."""
+    o = origins(p)[f"course{k}"]
+    return Part(f"course{k}", o).add("bead", habitat.laid_course(k, inset=0.006 + 0.0005 * k), Matrix.Translation(o - Z * sink(k)))
+
+
 def parts(p=PRINTER):
     """The printer's bodies as Parts, in its frame at rest."""
-    return [chassis_part(p), mast_part(p), mast_top_part(p), boom_part(p), pendant_part(p), upper_arm_part(p), forearm_part(p), head_part(p), screw_part(p)]
+    return [chassis_part(p), mast_part(p), mast_top_part(p), boom_part(p), pendant_part(p), upper_arm_part(p), forearm_part(p), head_part(p), screw_part(p),
+            *(course_part(k, p) for k in range(LAID))]
 
 
 # The machine layer
@@ -711,12 +728,13 @@ def link_body(u, d, name, at_, mass, inertia, com=(0, 0, 0), values=(), link=Non
 
 def machine(p, note, name, bound):
     """The printer's machine: chassis (held to the world), the mast's two
-    stages, boom, pendant, upper arm, forearm, head and screw."""
+    stages, boom, pendant, upper arm, forearm, head and screw, and the
+    courses it lays, each raised into place by its `lay` joint."""
     o = origins(p)
     u = Usda("/robot/Looks")
     controllers = (("lift", "joint_position", ("lift", "lift_top")), ("slew", "joint_position", ("slew",)), ("turn", "joint_velocity", ("turn",)),
                    ("shoulder", "joint_position", ("shoulder",)), ("elbow", "joint_position", ("elbow",)), ("wrist", "joint_position", ("wrist",)),
-                   ("screw", "joint_velocity", ("screw",)))
+                   ("screw", "joint_velocity", ("screw",)), *((f"lay{k}", "joint_position", (f"lay{k}",)) for k in range(LAID)))
     open_machine(u, controllers, note, name)
     rel = lambda body_, v: tuple(Vector(v) - o[body_])
     span = lambda deg: f"float gearbox:value:range = {math.radians(deg):.5f}"
@@ -773,10 +791,15 @@ def machine(p, note, name, bound):
     link_body(u, 1, "screw", o["screw"], 12, (0.6, 0.6, 0.03), (0, 0, -0.4))
     visual(u, 2, name, "screw", bound)
     end(u, 1)
+    for k in range(LAID):
+        link_body(u, 1, f"course{k}", o[f"course{k}"], 60, (500, 500, 1000), values=[f"float gearbox:value:range = {sink(k):.5f}"])
+        visual(u, 2, name, f"course{k}", bound)
+        end(u, 1)
     u.emit(1, 'def Scope "Joints"')
     u.emit(1, "{")
     joint(u, 2, "Fixed", "anchor", None, "chassis", anchor(p))
-    for name_, parent, child, kind, axis, limits, motor in JOINTS:
+    lays = tuple((f"lay{k}", "chassis", f"course{k}", "Prismatic", "Z", (0, sink(k)), (4000, 0.05)) for k in range(LAID))
+    for name_, parent, child, kind, axis, limits, motor in JOINTS + lays:
         joint(u, 2, kind, name_, parent, child, rel(parent, o[child]), axis, limits, motor)
     u.emit(1, "}")
     u.emit(0, "}")

@@ -603,7 +603,8 @@ class Printer(Robot):
     """The regolith printer at the house it is printing: it lifts its mast
     clear of the wall, swings the boom over the shell and sets the arm's
     reach for the top course, lets the nozzle down onto it, then starts the
-    extruder's screw and laps the wall with the pendant, round and round."""
+    extruder's screw and laps the wall with the pendant, round and round,
+    each lap's course set in place and the nozzle a course higher after it."""
 
     KEEP_S = 30.0
 
@@ -628,7 +629,18 @@ class Printer(Robot):
         yield max(self.joint(name, pose[name], at) for name in ("shoulder", "elbow", "wrist"))
         yield self.joint("lift", pose["lift"], at)
         self.spin(True)
-        self.log(f"{self.machine}: printing the top course, a lap of the wall every {2 * math.pi / self.entry['turn']:.0f} s")
+        lap, lift = 2 * math.pi / self.entry["turn"], pose["lift"]
+        self.log(f"{self.machine}: printing the top course, a lap of the wall every {lap:.0f} s")
+        for k, course in enumerate(self.entry.get("laid", [])):
+            for _ in range(int(lap // self.KEEP_S)):
+                yield self.KEEP_S
+                self.spin(True)
+            yield lap % self.KEEP_S
+            # The course just closed sets in place, and the nozzle climbs onto it.
+            self.set(course, "position", 1.0)
+            lift += self.entry["course_lift"]
+            self.set(self.entry["links"]["lift"], "position", lift)
+            self.log(f"{self.machine}: course {k + 1} laid")
         while True:
             yield self.KEEP_S
             self.spin(True)

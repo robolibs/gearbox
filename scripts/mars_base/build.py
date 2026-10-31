@@ -311,7 +311,7 @@ def farm_plan(path, built):
             lane = [(layout.WORKS.x + x, layout.WORKS.y + y) for x, y in industry.SOIL_LANE]
             others[machine] = plan.excavator(machine, at, tuple(layout.DIG[k]), bays, lane)
         elif file == f"{printer.NAME}.usdz":
-            others[machine] = plan.printer(printer.PRINTER, *habitat.top_course(layout.MARSHA_R, layout.MARSHA_H))
+            others[machine] = plan.printer(printer.PRINTER, *habitat.top_course(layout.MARSHA_R, layout.MARSHA_H), printer.LAID, habitat.COURSE)
     return plan.write(path, robots_, trays, others)
 
 

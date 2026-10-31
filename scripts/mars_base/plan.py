@@ -315,13 +315,14 @@ def panel_washer(length):
     }
 
 
-def printer(p, nozzle_r, nozzle_z, approach=1.0, lap_s=90.0):
+def printer(p, nozzle_r, nozzle_z, laid=0, course=0.0, approach=1.0, lap_s=90.0):
     """The regolith printer (`printer.Printer`) at the house it prints: the
     arm's pose, elbow up and the head plumb, putting the nozzle `nozzle_r`
     from the shell's axis and `nozzle_z` up over the wall's top course, the
     mast as low as lets the arm reach; `over`, the mast `approach` m higher
     to swing the arm out over the wall before the nozzle comes down onto it.
-    The pendant laps the wall in `lap_s` seconds."""
+    The pendant laps the wall in `lap_s` seconds; after each lap one of its
+    `laid` courses sets in place and the mast climbs a `course` m higher."""
     lift = Joint("lift", "mast", 2 * p.stage, 0.24)
     slew = Joint("slew", "boom", math.radians(p.slew_deg), 0.05)
     shoulder = Joint("shoulder", "upper_arm", math.radians(p.shoulder_deg), 0.15)
@@ -358,6 +359,8 @@ def printer(p, nozzle_r, nozzle_z, approach=1.0, lap_s=90.0):
         "turn": round(2 * math.pi / lap_s, 4),
         "screw": 3.0,
         "nozzle": [round(nozzle_r, 3), round(nozzle_z, 3)],
+        "laid": [f"course{k}" for k in range(laid)],
+        "course_lift": round(lift.at(height + course) - lift.at(height), 5),
     }
 
 

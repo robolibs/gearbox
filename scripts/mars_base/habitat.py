@@ -1180,6 +1180,17 @@ def top_course(radius=5.0, height=15.0):
     return marsha_radius(radius, z / height) - SKIN / 2, z + 0.012
 
 
+def laid_course(k, radius=5.0, height=15.0, inset=0.006):
+    """The `k`th course the printer lays over a begun MARSHA's top course,
+    in place: its outer and inner skins as rings about the shell's axis,
+    each `inset` thinner on both faces than the courses under it."""
+    bm = bmesh.new()
+    angles = [TAU * i / 180 for i in range(181)]
+    for off in (0.0, WALL - SKIN):
+        merge(bm, _swept(_skin(radius, height, off + inset, SKIN - 2 * inset, 0.0, lambda a: 0.0, COURSES + k), angles))
+    return bm
+
+
 def laying_bead(radius=5.0, height=15.0, trail=math.radians(100), steps=24):
     """The course the printer is laying on a begun MARSHA's outer skin: the
     fresh bead from the nozzle, at angle 0 about the shell's axis, back
