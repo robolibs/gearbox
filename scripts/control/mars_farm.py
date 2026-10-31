@@ -638,7 +638,8 @@ class Printer(Robot):
                 if self.clock.world_s - spun > self.KEEP_S:
                     self.spin(True)
                     spun = self.clock.world_s
-            PRINT_CUE.unlink(missing_ok=True)
+            if self.clock.world_s >= cued():
+                PRINT_CUE.unlink(missing_ok=True)
             # The course just closed sets in place, and the nozzle climbs onto it.
             self.set(course, "position", 1.0)
             lift += self.entry["course_lift"]
