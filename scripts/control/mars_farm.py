@@ -632,10 +632,13 @@ class Printer(Robot):
         lap, lift = 2 * math.pi / self.entry["turn"], pose["lift"]
         self.log(f"{self.machine}: printing the top course, a lap of the wall every {lap:.0f} s")
         for k, course in enumerate(self.entry.get("laid", [])):
-            for _ in range(int(lap // self.KEEP_S)):
-                yield self.KEEP_S
-                self.spin(True)
-            yield lap % self.KEEP_S
+            due, spun = self.clock.world_s + lap, self.clock.world_s
+            while self.clock.world_s < min(due, cued()):
+                yield 1.0
+                if self.clock.world_s - spun > self.KEEP_S:
+                    self.spin(True)
+                    spun = self.clock.world_s
+            PRINT_CUE.unlink(missing_ok=True)
             # The course just closed sets in place, and the nozzle climbs onto it.
             self.set(course, "position", 1.0)
             lift += self.entry["course_lift"]
@@ -703,6 +706,19 @@ class Sampler(Robot):
                 for link, value in pose.items():
                     self.set(link, "position", value)
                 yield hold
+
+
+# A sim time at which the printer sets its course in place early, so a
+# camera sees it happen (written by mars_tour.py).
+PRINT_CUE = Path(__file__).resolve().parents[2] / ".work" / "movie" / "printer.cue"
+
+
+def cued() -> float:
+    """The sim second the printer is cued to set its course at, if any."""
+    try:
+        return float(PRINT_CUE.read_text())
+    except (OSError, ValueError):
+        return math.inf
 
 
 # Seconds a digger digs a load, half going forward and half back.

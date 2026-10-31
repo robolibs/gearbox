@@ -50,6 +50,10 @@ FACET_IN, FACET_OUT = (51.12, 15.53, 5.03, 157.7, 10.3), (51.66, 25.44, 5.45, 20
 # A picker's lane, off the arch's axis, and how near the parked ridge robot it may be held.
 PICKERS = {"archbpicker1": 1.35, "archbpicker2": -1.35}
 HOLD_FROM_X = 25.0
+# Where the farm runner reads the sim second to set the printer's next course
+# in place at, and how far into the printer's close-up that is.
+PRINT_CUE = ROOT / ".work" / "movie" / "printer.cue"
+CUE_IN_S = 4.0
 
 
 def place(x: float, y: float, above: float, bearing: float, pitch: float, distance: float) -> str:
@@ -260,6 +264,9 @@ def film(keys: list[dict], path: Path, clock: Gearbox) -> list[tuple[float, str]
     began = clock.clock().world_s - t0 + 0.125
     captions = [(round(began + k["at"], 2), k["caption"]) for k in keys if k["caption"]]
     path.with_suffix(".json").write_text(json.dumps(captions))
+    printing = next((k["at"] for k in keys if "printer link=head" in k["view"]), None)
+    if printing is not None:
+        PRINT_CUE.write_text(f"{t0 + began + printing + CUE_IN_S:.2f}")
     end = began + keys[-1]["at"] + 1.0
 
     def now() -> float:
