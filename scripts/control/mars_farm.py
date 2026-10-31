@@ -674,14 +674,14 @@ class Patrol(Robot):
 
 class Sampler(Robot):
     """Perseverance at a sampling site: its mast up and looking at the
-    ground before it, the arm reaching out low over it, the corer turned
-    down onto it and lifted, the arm raised clear, again and again."""
+    ground before it, the arm reaching down to it, the corer pressed onto
+    it and lifted, the arm raised clear, again and again."""
 
     MAST = {"mast_deploy": 0.0, "mast_tilt": -0.45, "mast_pan": 0.15}
-    POSES = (({"arm_elbow": 0.7, "arm_wrist": 0.3, "arm_turret": 0.0}, 7.0),
-             ({"arm_elbow": 1.0, "arm_wrist": 0.8, "arm_turret": 0.4}, 14.0),
-             ({"arm_elbow": 0.6, "arm_wrist": 0.3}, 5.0),
-             ({"arm_elbow": -1.0, "arm_wrist": -0.5, "arm_turret": 0.0}, 9.0))
+    POSES = (({"arm_shoulder_pitch": 0.25, "arm_elbow": 0.8, "arm_wrist": 0.4, "arm_turret": 0.0}, 7.0),
+             ({"arm_shoulder_pitch": 0.45, "arm_elbow": 1.0, "arm_wrist": 0.8, "arm_turret": 0.4}, 14.0),
+             ({"arm_shoulder_pitch": 0.25, "arm_elbow": 0.8, "arm_wrist": 0.4}, 5.0),
+             ({"arm_shoulder_pitch": -0.3, "arm_elbow": -1.0, "arm_wrist": -0.5, "arm_turret": 0.0}, 9.0))
 
     def run(self):
         for link, value in self.MAST.items():
