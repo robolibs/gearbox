@@ -165,7 +165,10 @@ def tour(north: dict[str, float]) -> list[dict]:
     key(8, place(30, 58, 3, 100, 34, 36))
     key(8, machine("solarwasher2", 115, 28, 9, "frame"), "Panel washers keep the arrays clean", ["solarwasher2"])
     key(6, machine("solarwasher2", 130, 30, 10, "frame"))
-    # The soil works and its diggers.
+    # The crews' rovers driving their loops beside the hab, then the soil
+    # works and its diggers.
+    key(8, place(-42, 50, 1, 250, 32, 50), "Pressurised rovers carry the crews out to the field", ["rover1", "rover2"])
+    key(6, machine("rover1", 200, 38, 16, "base_link", 1.0))
     key(8, place(-58, 63, 4, 330, 45, 50), None, [])
     key(10, machine("digger3", 340, 22, 3.6, "base_link", 0.3), "RASSOR excavators dig regolith with counter-rotating drums", ["digger3"])
     key(7, machine("digger3", 20, 20, 3.4, "base_link", 0.3))
@@ -186,11 +189,15 @@ def tour(north: dict[str, float]) -> list[dict]:
     key(8, place(-120, -120, 12, 240, 30, 80))
     key(8, place(-220, -160, 28, 230, 12, 98), "Ariane 6 on its launch table")
     key(6, place(-220, -160, 26, 270, 10, 88))
-    key(8, place(-150, -232, 11, 250, 12, 48), "Honda's reusable rocket, scaled up as the base's hopper")
-    key(6, place(-150, -232, 9, 300, 10, 40))
-    key(9, place(-110, -100, 0, 265, 35, 150))
-    key(7, place(-10, -42, 0, 250, 30, 90))
-    key(9, place(10, -30, 0, 300, 42, 360))
+    key(8, place(-150, -232, 19, 250, 12, 85), "Honda's reusable rocket, scaled up as the base's hopper")
+    key(6, place(-150, -232, 16, 300, 10, 72))
+    # Out over the crater floor to Perseverance, far from the base, and in
+    # on it as it takes a sample.
+    key(6, place(-260, -290, 35, 332, 20, 140))
+    key(7, place(-560, -450, 5, 332, 14, 120))
+    key(6, machine("percy", 320, 18, 30, "base_link", 0.8), "Far out on the crater floor, Perseverance takes a core", ["percy"])
+    key(6, machine("percy", 270, 20, 10, "base_link", 0.8))
+    key(5, machine("percy", 235, 22, 6, "base_link", 0.8))
     return keys
 
 
