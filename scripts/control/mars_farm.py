@@ -653,12 +653,62 @@ class Sway(Robot):
             yield self.SWING_S
 
 
+class Patrol(Robot):
+    """A rover driving a loop of waypoints round and round, steering for
+    the next one and never stopping, as a car-steered rover must."""
+
+    SPEED = 1.6
+    REACHED_M = 4.0
+
+    def run(self):
+        route, k = PATROLS[self.machine], 0
+        while True:
+            s = self.robot.state(wait=0.5)
+            dx, dy = route[k][0] - s.x, route[k][1] - s.y
+            if math.hypot(dx, dy) < self.REACHED_M:
+                k = (k + 1) % len(route)
+                continue
+            self.twist(self.SPEED, clamp(1.2 * wrap(math.atan2(dy, dx) - s.heading_rad), 0.35))
+            yield STEER_S
+
+
+class Sampler(Robot):
+    """Perseverance at a sampling site: its mast up and looking at the
+    ground before it, the arm reaching out low over it, the corer turned
+    down onto it and lifted, the arm raised clear, again and again."""
+
+    MAST = {"mast_deploy": 0.0, "mast_tilt": -0.45, "mast_pan": 0.15}
+    POSES = (({"arm_elbow": 0.7, "arm_wrist": 0.3, "arm_turret": 0.0}, 7.0),
+             ({"arm_elbow": 1.0, "arm_wrist": 0.8, "arm_turret": 0.4}, 14.0),
+             ({"arm_elbow": 0.6, "arm_wrist": 0.3}, 5.0),
+             ({"arm_elbow": -1.0, "arm_wrist": -0.5, "arm_turret": 0.0}, 9.0))
+
+    def run(self):
+        for link, value in self.MAST.items():
+            self.set(link, "position", value)
+        while True:
+            for pose, hold in self.POSES:
+                for link, value in pose.items():
+                    self.set(link, "position", value)
+                yield hold
+
+
 # Seconds a digger digs a load, half going forward and half back.
 DIG_S = 40.0
 # Diggers that dig and never haul.
 DIGGING: set[str] = set()
 # Robots swayed, each link between two positions.
 SWAYS: dict[str, dict[str, tuple[float, float]]] = {}
+# Rovers on patrol, each round its loop of (east, north) waypoints.
+PATROLS: dict[str, list[tuple[float, float]]] = {}
+# Rovers taking samples.
+SAMPLING: set[str] = set()
+
+
+def patrol(spec: str) -> tuple[str, list[tuple[float, float]]]:
+    """`MACHINE:E,N;E,N;…` as the machine and its loop of waypoints."""
+    machine, points = spec.split(":", 1)
+    return machine, [tuple(float(v) for v in point.split(",")) for point in points.split(";")]
 
 
 def sway(spec: str) -> tuple[str, dict[str, tuple[float, float]]]:
@@ -672,7 +722,7 @@ def sway(spec: str) -> tuple[str, dict[str, tuple[float, float]]]:
     return machine, swings
 
 KINDS = {"rail_gantry": Tender, "polar_gantry": Tender, "stacker_crane": Tender, "mobile_harvester": Tender, "excavator": Digger,
-         "arch_washer": Washer, "dome_washer": Washer, "panel_washer": Washer, "regolith_printer": Printer}
+         "arch_washer": Washer, "dome_washer": Washer, "panel_washer": Washer, "regolith_printer": Printer, "patrol": Patrol, "sampling": Sampler}
 
 
 def carted(plan: dict) -> set[str]:
@@ -693,12 +743,18 @@ def main():
     ap.add_argument("--digging", default="", help="comma-separated diggers that dig and never haul")
     ap.add_argument("--leave", default="", help="comma-separated machine ids left standing where they are")
     ap.add_argument("--sway", action="append", default=[], help="MACHINE:LINK=LO:HI,… swung between those positions in place of its work")
+    ap.add_argument("--patrol", action="append", default=[], help="MACHINE:E,N;E,N;… a rover driven round that loop of waypoints")
+    ap.add_argument("--sampling", default="", help="comma-separated rovers taking samples where they stand")
     args = ap.parse_args()
 
     DIGGING.update(d for d in args.digging.split(",") if d)
     SWAYS.update(sway(spec) for spec in args.sway)
+    PATROLS.update(patrol(spec) for spec in args.patrol)
+    SAMPLING.update(s for s in args.sampling.split(",") if s)
     plan = json.loads(Path(args.plan).read_text())["machines"]
     CARTED.update(carted(plan))
+    # Rovers outside the plan are driven on their own.
+    plan.update({m: {"kind": "patrol"} for m in PATROLS} | {m: {"kind": "sampling"} for m in SAMPLING})
     leave = set(args.leave.split(","))
     wanted = [m for m in (args.robots.split(",") if args.robots else list(plan)) if m not in leave]
     gb = Gearbox(args.instance)
