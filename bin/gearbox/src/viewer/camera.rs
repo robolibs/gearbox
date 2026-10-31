@@ -59,6 +59,10 @@ const CRANE_LIFT: f64 = 0.2;
 const CRANE_BACK: f64 = 1.0;
 /// How far the eye's own moves lag the place it looks at over a long move.
 const CRANE_TRAIL: f64 = 0.3;
+/// Seconds the ground under the view takes to catch up with the terrain
+/// passing under it; a change bigger than the snap is a jump, taken at once.
+const GROUND_EASE_S: f64 = 0.4;
+const GROUND_SNAP_M: f64 = 50.0;
 
 /// The easing of every scripted move, `t` of its time to the share of its
 /// way: at rest at both ends, with no jolt as it sets off or stops.
@@ -337,10 +341,12 @@ fn fly(
 /// Turns [`View`] into the rig the renderer reads. The only writer of
 /// `ChaseCamera`, and the only place a site is ever mentioned.
 pub fn place(
+    time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     sites: Res<Sites>,
     mut view: ResMut<View>,
     mut cameras: Query<(&mut ChaseCamera, &mut Transform, &mut Projection)>,
+    mut eased: Local<Option<f64>>,
 ) {
     view.tidy();
     let Ok((mut cam, mut transform, mut projection)) = cameras.single_mut() else {
@@ -351,7 +357,16 @@ pub fn place(
     // Where the view is looking, in the flat frame of the site holding it.
     let local = frame.from_ecef(here.origin);
     let (x, z) = (local.x as f32, local.z as f32);
-    let ground = sites.height(sites.current, x, z) as f64;
+    // The ground under what is looked at, eased: a view sweeping over dunes
+    // rides a smooth line over them, a still one settles on the ground itself.
+    let under = sites.height(sites.current, x, z) as f64;
+    let ground = match *eased {
+        Some(was) if (under - was).abs() < GROUND_SNAP_M => {
+            was + (under - was) * (1.0 - (-time.delta_secs_f64() / GROUND_EASE_S).exp())
+        }
+        _ => under,
+    };
+    *eased = Some(ground);
 
     // The eye's direction is carried through ECEF, so it means the same thing
     // whichever datum happens to be current.

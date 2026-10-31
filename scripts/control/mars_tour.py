@@ -194,8 +194,8 @@ def tour(north: dict[str, float]) -> list[dict]:
     # Out over the crater floor to Perseverance, far from the base, and in
     # on it as it takes a sample.
     key(6, place(-260, -290, 35, 332, 20, 140))
-    key(7, place(-560, -450, 5, 332, 14, 120))
-    key(6, machine("percy", 320, 18, 30, "base_link", 0.8), "Far out on the crater floor, Perseverance takes a core", ["percy"])
+    key(7, place(-560, -450, 25, 332, 22, 130))
+    key(6, machine("percy", 320, 30, 32, "base_link", 0.8), "Far out on the crater floor, Perseverance takes a core", ["percy"])
     key(6, machine("percy", 270, 20, 10, "base_link", 0.8))
     key(5, machine("percy", 235, 22, 6, "base_link", 0.8))
     return keys
