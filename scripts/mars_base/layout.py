@@ -84,6 +84,8 @@ WORKS = Vector((-112.0, 30.0, 0.0))
 DIG = [WORKS + Vector((-6.0 + 4.0 * k, 22.0, 0.0)) for k in range(3)]
 PAD_SHIP = Vector((-220.0, -160.0, 0.0))
 PAD_LANDER = Vector((-150.0, -232.0, 0.0))
+# Where Perseverance takes its samples, far out on the crater floor.
+PERCY = Vector((-750.0, -550.0, 0.0))
 MAST = Vector((-24.0, 62.0, 0.0))
 DISH = Vector((48.0, 120.0, 0.0))
 NASA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".work", "mars_base", "nasa")
@@ -298,7 +300,7 @@ def build(looks, strewn=False):
     add(spaceport.honda_hopper(looks, "HondaHopper", tuple(PAD_LANDER), math.tau / 8, base))
     # Propellant, power and a beacon for each vehicle: the Ariane's to its table's edge.
     add(spaceport.pad_services(looks, "ShipServices", tuple(PAD_SHIP), math.tau / 10, base, 32.0, spaceport.TABLE_HALF, 4.2))
-    add(spaceport.pad_services(looks, "LanderServices", tuple(PAD_LANDER), math.tau / 8, base, 24.0, spaceport.HOP_R, 3.4))
+    add(spaceport.pad_services(looks, "LanderServices", tuple(PAD_LANDER), math.tau / 8, base, 24.0, spaceport.HOP_R * spaceport.HOP_SCALE, 3.4 * spaceport.HOP_SCALE))
 
     # Comms and science.
     add(props.lattice_mast(looks, "CommsMast", tuple(MAST), 14.0, base))
@@ -405,8 +407,8 @@ def fleet_places(eden_rail, arch_rail, dome_anchor):
     # The rovers drive toward their -Y: a yaw of pi/2 points one north.
     places.append(("Rover1", "sev_rover.usdz", (-16.0, -9.0, 0.0), math.pi, None))
     places.append(("Rover2", "sev_rover.usdz", (-22.0, 38.0, 0.0), math.pi / 2, None))
-    # The base stands in Jezero crater, where Perseverance works the delta.
-    places.append(("Percy", "perseverance_nasa.usdz", (-44.0, -128.0, 0.0), math.radians(140), None))
+    # The base stands in Jezero crater, where Perseverance works the delta far out from it.
+    places.append(("Percy", "perseverance_nasa.usdz", tuple(PERCY), math.radians(140), None))
     # MARSHA's printer at the house it has begun, held where it stands.
     import printer
     stand = HOUSE - printer.PRINTER.reach * Vector((math.cos(HOUSE_YAW), math.sin(HOUSE_YAW), 0.0))

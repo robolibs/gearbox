@@ -29,6 +29,8 @@ MAST_X, MAST_HALF, MAST_TOP = -15.0, 3.5, 50.0
 # The hopper, Honda's test rocket at four times its size: body radius, its
 # skirt's fang tips and edge, the nose's foot and tip, its feet off the axis.
 HOP_R, HOP_FANG, HOP_SKIRT, HOP_NOSE, HOP_TIP, HOP_FOOT = 1.7, 1.5, 3.0, 22.2, 25.2, 4.6
+# How many times Honda's rocket, built at four times its size, is grown again: seven in all.
+HOP_SCALE = 1.75
 
 
 # Surface maps
@@ -905,7 +907,7 @@ def launch_mount(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
 
 
 def honda_hopper(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
-    """Honda's reusable test rocket at four times its size, the base's
+    """Honda's reusable test rocket at seven times its size, the base's
     hopper, on its legs with a gap between two of them toward +X: a white
     body under an ogive nose, four octagonal grid fins stowed in flat
     pockets under it with LiDARs and a GPS antenna beside them, black carbon
@@ -1023,7 +1025,13 @@ def honda_hopper(looks, name, at=(0, 0, 0), yaw=0.0, parent=None):
     for a in fins:
         foot = Vector((math.cos(a), math.sin(a), 0)) * HOP_FOOT
         b.collider(box((1.2, 1.2, 0.5), (foot.x, foot.y, PAD_TOP + 0.25)))
-    return b.finish()
+    b.finish()
+    # The whole vehicle grown HOP_SCALE times about the pad's top.
+    grow = Matrix.Translation((0, 0, PAD_TOP)) @ Matrix.Scale(HOP_SCALE, 4) @ Matrix.Translation((0, 0, -PAD_TOP))
+    for o in b.collection.objects:
+        if o is not b.root:
+            o.matrix_basis = grow @ o.matrix_basis
+    return b
 
 
 def pad_services(looks, name, at=(0, 0, 0), yaw=0.0, parent=None, pad_radius=32.0, skirt=4.6, plate_z=1.2, walls=10):

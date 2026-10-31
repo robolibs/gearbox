@@ -376,7 +376,7 @@ def Xform "Fleet"
         prepend references = @../../../../assets/machines/usd/perseverance_nasa.usdz@
     )
     {
-        double3 xformOp:translate = (-44, -128, 0)
+        double3 xformOp:translate = (-750, -550, 0)
         float3 xformOp:rotateXYZ = (0, 0, 140.0000)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
