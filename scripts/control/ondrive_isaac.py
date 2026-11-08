@@ -274,6 +274,7 @@ async def main():
         limit = ref.lap_len / (0.5 * 0.8 * m.vmax) + 15.0
         t0 = timeline.get_current_time()
         last_tick, errs, clear, status, flips, last_w = t0, [], float("inf"), "timeout", 0, 0.0
+        log = []
         lost_since = None
         while True:
             await app.next_update_async()
@@ -299,9 +300,11 @@ async def main():
                 obs.append((ix, iy, ivx, ivy, 0.6))
                 mv["at"] = [ix + ivx * dt, iy + ivy * dt, iyaw]
                 place(len(statics) + k, ix, iy, 0.6)
+            now_clear = float("inf")
             for i, o in enumerate(obs):
                 world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
-                clear = min(clear, box_clearance(x, y, yaw, m.length, m.width, o[0], o[1], o[4]))
+                now_clear = min(now_clear, box_clearance(x, y, yaw, m.length, m.width, o[0], o[1], o[4]))
+            clear = min(clear, now_clear)
             state = ondrive.RobotState(pose=((x, y, float(p[2])), yaw), velocity=(v_fwd, float(ang[2]), 0.0), allow_move=True)
             cmd = t.tick(state, dt, world)
             v, w = (cmd.linear_velocity, cmd.angular_velocity) if cmd.valid else (0.0, 0.0)
@@ -312,6 +315,9 @@ async def main():
                 last_w = w
             err = ref.error(x, y)
             errs.append(err)
+            log.append([round(now - t0, 2), round(x - ox, 3), round(y - oy, 3), round(wrap(yaw - oyaw), 3), round(v_fwd, 3),
+                        round(float(ang[2]), 3), round(v, 3), round(w, 3), round(err, 3),
+                        None if now_clear == float("inf") else round(now_clear, 3), cmd.status_message])
             back = np.array([math.cos(yaw), math.sin(yaw), 0.0])
             ViewportManager.set_camera_view(camera, eye=(p - 4.0 * back + np.array([0, 0, 2.5])).tolist(),
                                             target=(p + 1.5 * back + np.array([0, 0, 0.2])).tolist())
@@ -328,7 +334,7 @@ async def main():
         row = {"controller": kind, "scenario": sname, "status": status, "time": round(elapsed, 1),
                "cte_rms": round(rms, 3), "cte_max": round(max(errs, default=0.0), 3),
                "min_clearance": None if clear == float("inf") else round(clear, 3),
-               "flips_per_min": round(flips / max(elapsed / 60.0, 1e-9), 1)}
+               "flips_per_min": round(flips / max(elapsed / 60.0, 1e-9), 1), "log": log}
         results.append(row)
         say(f"isaac husky {kind:18} {sname:10} {status:12} {row['time']:6.1f} rms {row['cte_rms']:5.2f} "
             f"max {row['cte_max']:5.2f} clear {row['min_clearance']} flips {row['flips_per_min']}")

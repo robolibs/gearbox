@@ -28,6 +28,7 @@ from ondrive_lab import (  # noqa: E402
 )
 
 DELAY = 0.2
+YAW_GAIN = 1.0
 
 
 class Plant:
@@ -51,7 +52,7 @@ class Plant:
             self.steer += max(-rate, min(rate, want - self.steer))
             self.w = self.v * math.tan(self.steer) / self.m.wheelbase
         else:
-            self.w = max(-self.m.wmax, min(self.m.wmax, w_cmd))
+            self.w = YAW_GAIN * max(-self.m.wmax, min(self.m.wmax, w_cmd))
         self.yaw = wrap(self.yaw + self.w * dt)
         self.x += self.v * math.cos(self.yaw) * dt
         self.y += self.v * math.sin(self.yaw) * dt
@@ -142,7 +143,10 @@ def main():
     ap.add_argument("scenario")
     ap.add_argument("-v", "--verbose", action="count", default=0)
     ap.add_argument("--params", default="{}", help="controller parameters as JSON")
+    ap.add_argument("--yaw-gain", type=float, default=1.0, help="share of the commanded turn a skid-steer delivers")
     a = ap.parse_args()
+    global YAW_GAIN
+    YAW_GAIN = a.yaw_gain
     kinds = CONTROLLERS if a.controller == "all" else a.controller.split(",")
     for sname in a.scenario.split(","):
         for kind in kinds:
