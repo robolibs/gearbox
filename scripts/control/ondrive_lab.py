@@ -635,9 +635,9 @@ def main():
             clear = "" if r["min_clearance"] is None else f"{r['min_clearance']:.2f}"
             print(f"{r['machine']:8} {kind:18} {sname:16} {r['status'][:12]:12} {r['time']:6.1f} {r['cte_rms']:6.2f} "
                   f"{r['cte_max']:6.2f} {r['final_pos']:6.2f} {yaw:>5} {clear:>6} {r['flips_per_min']:5.1f}", flush=True)
-    if a.out:
-        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(a.out).write_text(json.dumps(results))
+            if a.out:
+                Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+                Path(a.out).write_text(json.dumps(results))
 
 
 if __name__ == "__main__":
