@@ -144,6 +144,12 @@ pub mod event_kind {
     /// died, harvested, faulted or repaired; `plant`, `stage`, `fault`,
     /// `species` and `fresh_kg` say more.
     pub const GREENHOUSE: u32 = 8;
+    /// An answer from a draw interaction: props `ns` and `id` name the
+    /// entity, `what` is `step`, `point`, `pose`, `pose_update`,
+    /// `mouse_down`, `mouse_up`, `button_click` or `menu_select`; x, y, z
+    /// in the entity's frame and props `yaw`, `qw`, `qx`, `qy`, `qz`,
+    /// `menu` say more.
+    pub const DRAW: u32 = 9;
 
     pub fn name(value: u32) -> &'static str {
         match value {
@@ -156,6 +162,7 @@ pub mod event_kind {
             DETACHED => "detached",
             MACHINE_REJECTED => "machine_rejected",
             GREENHOUSE => "greenhouse",
+            DRAW => "draw",
             _ => "unknown",
         }
     }

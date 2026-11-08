@@ -1,5 +1,6 @@
 //! Bevy plugins: the host bus as a resource, polled every frame.
 
+pub mod draw;
 pub mod loader;
 pub mod marker;
 
@@ -11,6 +12,7 @@ use crate::host::{HostBus, HostConfig};
 use crate::machine::MachineAgent;
 use crate::wire::*;
 
+pub use draw::{DrawClock, DrawServicePlugin, DrawStoreRes, DrawSystems};
 pub use loader::{MachineDeleteQueue, MachineLoadQueue, PendingLoadedUsd, UsdLoaderPlugin};
 pub use marker::UsdMarkerPlugin;
 

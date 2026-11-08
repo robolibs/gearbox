@@ -77,6 +77,49 @@ Clock, listing, poses, events
 | `reset` | Clear, then reload the world and every recorded manifest |
 | `tree` | One tf-style tree of the scene: machines with their links, props and markers as leaves |
 
+## `gearbox draw`
+
+Retained debug draws in the viewer (lines, points, shapes, polygons, grids, clouds, detections, sensors, field and chart widgets, interactions), kept per NS and ID until deleted, cleared or out of --lifetime sim seconds; Z-up coordinates in --frame `world` (home: x east, y north, z up, the axes machine states report in), `MACHINE/odom` (where the machine's reported pose is measured from) or `MACHINE/LINK` (following the link); widths and radii > 0 are metres, < 0 pixels. In world and odom frames z is height above the terrain (`--no-drape` makes it the frame's own). Widgets made of several entities live under `NS/ID`, so `clear NS/ID` removes them whole. Options go before `--`; points after it may start with a minus sign.
+
+Every leaf that draws takes `--color` (hex, rviz names on Okabe-Ito, or a role: plan, prediction, lookahead, goal, obstacle, danger, history, sensor), `--width`, `--lifetime`, `--pose X Y Z [YAW]`, `--style`, the effects `--glow --pulse --flow --spacing --beam --fade --urgency`, `--values` with `--colormap` (turbo, viridis, rdylgn, costmap, map, raw, okabe, rainbow, grey) and `--range VMIN VMAX`.
+
+| Leaf | Does |
+|---|---|
+| `lines [OPTIONS] <NS> <ID> <X,Y[,Z]>...` | Polylines through X,Y[,Z] points; `/` starts another strip; `--arrow-tip` ends each in an arrowhead |
+| `points [OPTIONS] <NS> <ID> <X,Y[,Z]>...` | Spheres (or flat discs, square splats) at X,Y[,Z] points |
+| `arrows [OPTIONS] <NS> <ID> <X,Y[,Z]> <X,Y[,Z]>...` | Arrows from TAIL to TIP, X,Y[,Z] each, in pairs |
+| `shapes [OPTIONS] <NS> <ID> <X,Y[,Z[,YAW]]>...` | box, ellipsoid, cylinder, cone, capsule, ellipse, rect, frustum (HFOV,VFOV,RANGE) or sector (RADIUS,ANGLE,INNER) at X,Y[,Z[,YAW]] |
+| `text [OPTIONS] --text <TEXT> <NS> <ID> <X,Y[,Z]>...` | Text centred at X,Y[,Z] points |
+| `axes [OPTIONS] <NS> <ID>` | An RGB axis triad at the entity pose |
+| `polygon [OPTIONS] <NS> <ID> <X,Y[,Z]>...` | Polygons with holes (`/` before each hole, `//` between polygons) as a ground decal; `--mode outline\|fill\|both`, `--z-offset`, `--unique` |
+| `frame [OPTIONS] <NS> <ID>` | A TF-style frame at `--pose`: glowing triad, name plate, dashed line to `--parent` |
+| `pose-array [OPTIONS] <NS> <ID> <X,Y[,Z[,YAW]]>...` | Poses as `--glyph chevron\|arrow\|axes` |
+| `waypoints [OPTIONS] <NS> <ID> <X,Y[,Z]>...` | Numbered waypoints: `--current` a beacon, the rest holo pillars, a flowing route |
+| `covariance [OPTIONS] --cov <V,...> <NS> <ID>` | 2×2 draped rings, 3×3 shield ellipsoids, 6×6 plus a yaw wedge, at `--mean`, `--sigmas` |
+| `ruler [OPTIONS] <NS> <ID> <A> <B>` | A ruler with ticks every `--spacing`, end caps and its length |
+| `update [OPTIONS] <NS> <ID>` | Change a live entity's header only: `--pose --color --width --style --glow --urgency --lifetime` |
+| `grid [OPTIONS] --cols <N> --rows <N> <NS> <ID>` | A heat map of `--cells` (`--encoding u8\|u16\|f32`, `--unknown`, `--spacing` contours) from `--pose` |
+| `grid-patch <NS> <ID> <X> <Y> <W> <H> <CELLS>` | Replace a rectangle of a live grid |
+| `detection3d [OPTIONS] <NS> <ID> <DET>...` | X,Y,Z,YAW,SX,SY,SZ,CLASS,SCORE[,TRACK[,VX,VY]]; `--threshold`, `--only-edge` |
+| `detection2d [OPTIONS] <NS> <ID> <BOX>...` | CX,CY,W,H,CLASS,SCORE pixels on the image plane of a camera at `--pose` |
+| `cloud [OPTIONS] <NS> <ID> [X,Y[,Z]]...` | Splats coloured by `--values` or `--axis`, `--size`, `--quant` |
+| `scan [OPTIONS] --ranges <R,...> --angle-min <A> --increment <A> <NS> <ID>` | Hits as splats over a sweeping fan |
+| `sweep`, `range-cone`, `frustum` | A field of view on the ground, a range sensor's cone with `--reading`, a camera frustum |
+| `particles [OPTIONS] <NS> <ID> <X,Y[,Z[,YAW[,W]]]>...` | Additive flat chevrons sized by weight |
+| `field`, `headland`, `swaths`, `turns`, `ab-line`, `coverage`, `implement`, `zone` | Field robotics widgets |
+| `wrench [OPTIONS] --force <X,Y,Z> <NS> <ID>`, `contact <NS> <ID> <POINT> <NORMAL>` | Force arrows, torque arcs, contact orbs |
+| `ghost [OPTIONS] --machine <M> <NS> <ID> <POSE>...` | See-through copies of a machine |
+| `panel [OPTIONS] --kind <K> <NS> <ID>` | sparkline, bars, gauge, chip, table or legend (`--extend N` feeds a sparkline) |
+| `badge <NS> <ID> <MACHINE> <TEXT>` | A status pill over a machine |
+| `graph`, `mesh`, `voxels`, `compass`, `scale-bar`, `callout`, `angle` | Graphs, OBJ/STL meshes, voxels and annotations |
+| `step [CAPTION]` | Wait for the Next button in the viewer |
+| `pick [--pose]` | Wait for a point (or a pose: press and drag) picked on the ground |
+| `handle [OPTIONS] <NS> <ID>` | A 6-DoF handle at `--pose`; prints its feedback |
+| `tf <MACHINE> [--off]` | Switch the TF tree overlay for a machine |
+| `delete <NS> <ID>` | Remove one entity |
+| `clear [PREFIX]` | Remove PREFIX and every path below it; all draws without one |
+| `list [PREFIX]` | The live entities under PREFIX |
+
 ## `gearbox select`
 
 Choose the thing later commands act on

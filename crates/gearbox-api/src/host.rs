@@ -107,6 +107,7 @@ pub struct HostBus {
     usd_delete: Registered<ReqServer<Env, Env>>,
     marker_set: Registered<ReqServer<Env, Env>>,
     marker_delete: Registered<ReqServer<Env, Env>>,
+    draw: Arc<DrawLane>,
     select: Registered<ReqServer<Env, Env>>,
     machines: Registered<AnsServer<Env, Env>>,
     access_grant: Registered<ReqServer<Env, Env>>,
@@ -153,6 +154,10 @@ impl HostBus {
             usd_delete: agent.req_server(topics::USD_DELETE)?,
             marker_set: agent.req_server(topics::MARKER_SET)?,
             marker_delete: agent.req_server(topics::MARKER_DELETE)?,
+            draw: Arc::new(DrawLane(Mutex::new(DrawDesk {
+                server: agent.req_server(topics::DRAW)?,
+                list: agent.que_server(topics::DRAW_LIST)?,
+            }))),
             select: agent.req_server(topics::SELECT)?,
             machines: agent.que_server(topics::MACHINES_LIST)?,
             access_grant: agent.req_server(topics::ACCESS_GRANT)?,
@@ -272,6 +277,21 @@ impl HostBus {
         serve_req(&mut self.marker_delete, f)
     }
 
+    /// Answer every pending draw message with `f` and every listing with
+    /// `list` (the query's `ns` is the path to list under).
+    pub fn serve_draws(
+        &mut self,
+        f: impl FnMut(DrawEntity) -> Status,
+        list: impl FnMut(DrawEntity) -> Vec<DrawEntity>,
+    ) -> usize {
+        self.draw.serve(f, list)
+    }
+
+    /// The draw topics, to be served from a thread of their own.
+    pub fn draw_lane(&self) -> &Arc<DrawLane> {
+        &self.draw
+    }
+
     pub fn serve_select(&mut self, f: impl FnMut(Selection) -> Selection) -> usize {
         serve_req(&mut self.select, f)
     }
@@ -369,6 +389,26 @@ impl ClockLane {
             }
         }
         served
+    }
+}
+
+/// The draw topics, served from a thread of their own apart from the frame.
+pub struct DrawLane(Mutex<DrawDesk>);
+
+struct DrawDesk {
+    server: Registered<ReqServer<Env, Env>>,
+    list: Registered<AnsServer<Env, Env>>,
+}
+
+impl DrawLane {
+    /// Answer every pending draw message with `f` and listing with `list`.
+    pub fn serve(
+        &self,
+        f: impl FnMut(DrawEntity) -> Status,
+        list: impl FnMut(DrawEntity) -> Vec<DrawEntity>,
+    ) -> usize {
+        let mut desk = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        serve_req(&mut desk.server, f) + serve_que(&mut desk.list, list)
     }
 }
 

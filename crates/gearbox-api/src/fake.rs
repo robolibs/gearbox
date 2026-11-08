@@ -18,6 +18,7 @@ use crate::wire::*;
 pub struct FakeScene {
     pub objects: Vec<SceneObject>,
     pub markers: Vec<(String, [f32; 3])>,
+    pub draws: crate::draw::DrawStore,
     pub paused: bool,
     pub selection: Option<(u32, String)>,
     pub cleared: usize,
@@ -268,11 +269,26 @@ fn serve_once(
 
     let mut objects = std::mem::take(&mut s.objects);
     let mut cleared = s.cleared;
-    host.serve_clear(|_| {
+    let mut draws = std::mem::take(&mut s.draws);
+    host.serve_clear(|req| {
         objects.clear();
+        if matches!(req.scope, clear_scope::ALL | clear_scope::MARKERS) {
+            draws.clear("");
+        }
         cleared += 1;
         Status::ok()
     });
+    let now = uptime as f64 / 1000.0;
+    draws.expire(now);
+    let draws = std::cell::RefCell::new(draws);
+    host.serve_draws(
+        |msg| match draws.borrow_mut().apply(msg, now) {
+            Ok(touched) => Status::ok_with(&crate::draw::touched_props(touched)),
+            Err(err) => Status::err(code::USAGE, &err),
+        },
+        |query| draws.borrow().summaries(&query.ns()),
+    );
+    s.draws = draws.into_inner();
     s.cleared = cleared;
     host.serve_list(|q| {
         objects

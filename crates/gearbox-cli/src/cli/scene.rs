@@ -352,7 +352,7 @@ fn pose(ctx: &Ctx, id: &str, watch: bool) -> Result<()> {
 fn events(ctx: &Ctx, kind: Option<String>, count: Option<usize>) -> Result<()> {
     let filter = match &kind {
         Some(k) => Some(
-            (0..=event_kind::GREENHOUSE)
+            (0..=event_kind::DRAW)
                 .find(|c| event_kind::name(*c) == k)
                 .ok_or_else(|| CliError::usage(format!("unknown event kind `{k}`")))?,
         ),

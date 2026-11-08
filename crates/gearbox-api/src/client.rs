@@ -297,6 +297,38 @@ impl Client {
         self.call_host(topics::MARKER_DELETE, &MarkerRef::new(id))
     }
 
+    /// Send one draw message as it is.
+    pub fn draw_raw(&self, msg: &DrawEntity) -> agentio::Result<Status> {
+        self.call_host(topics::DRAW, msg)
+    }
+
+    /// Send a draw entity, in chunks when it is too big for one message;
+    /// answers the first failure or the last chunk's status.
+    pub fn draw(&self, entity: &DrawEntity) -> agentio::Result<Status> {
+        let mut status = Status::ok();
+        for chunk in entity.chunks(DRAW_CHUNK_BYTES) {
+            status = self.draw_raw(&chunk)?;
+            if !status.is_ok() {
+                break;
+            }
+        }
+        Ok(status)
+    }
+
+    pub fn draw_delete(&self, ns: &str, id: &str) -> agentio::Result<Status> {
+        self.draw_raw(&DrawEntity::delete(ns, id))
+    }
+
+    /// Remove the draws at `prefix` and below; `""` removes all.
+    pub fn draw_clear(&self, prefix: &str) -> agentio::Result<Status> {
+        self.draw_raw(&DrawEntity::clear(prefix))
+    }
+
+    /// The live draws at `prefix` and below, header and props only.
+    pub fn draw_list(&self, prefix: &str) -> agentio::Result<Vec<DrawEntity>> {
+        self.query_host(topics::DRAW_LIST, &DrawEntity::clear(prefix))
+    }
+
     pub fn select(&self, req: &Selection) -> agentio::Result<Selection> {
         self.call_host(topics::SELECT, req)
     }

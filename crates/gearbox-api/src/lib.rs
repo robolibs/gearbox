@@ -6,6 +6,7 @@
 //! The `bevy` feature adds the plugins that wire the host into the app.
 
 pub mod client;
+pub mod draw;
 pub mod fake;
 pub mod host;
 pub mod machine;
@@ -21,7 +22,7 @@ pub use agentio;
 pub use agentio::IdentitySource;
 pub use client::{Client, MachineClient, next_sample};
 pub use datapod;
-pub use host::{ClockLane, HostBus, HostConfig, MAX_PAYLOAD_BYTES};
+pub use host::{ClockLane, DrawLane, HostBus, HostConfig, MAX_PAYLOAD_BYTES};
 pub use machine::{
     ControllerDesc, LinkDesc, MachineAgent, MachineConfig, MachineLane, ToolDesc, link_records_for,
 };
@@ -32,6 +33,7 @@ pub mod tyres;
 
 #[cfg(feature = "bevy")]
 pub use plugin::{
-    FieldsLayoutRequest, GearboxBus, GearboxBusPlugin, MachineDeleteQueue, MachineLoadQueue, PhysicsActive, PhysicsStepBudget, SceneObjects,
-    SelectionState, SimResetRequest, UsdAssetRoot, UsdLoaderPlugin, UsdMarkerPlugin, WeatherReport, WeatherRequest, WorldClock,
+    DrawClock, DrawServicePlugin, DrawStoreRes, DrawSystems, FieldsLayoutRequest, GearboxBus, GearboxBusPlugin, MachineDeleteQueue,
+    MachineLoadQueue, PhysicsActive, PhysicsStepBudget, SceneObjects, SelectionState, SimResetRequest, UsdAssetRoot, UsdLoaderPlugin,
+    UsdMarkerPlugin, WeatherReport, WeatherRequest, WorldClock,
 };

@@ -8,6 +8,7 @@ use datapod::{Point, Pose, Quaternion};
 use serde_json::{Map, Value, json};
 
 use super::common::{Env, Ping, Props, Status, unpack};
+use super::draw::{self, DrawEntity, draw_flag, draw_kind, draw_op, draw_style, line_mode, point_style, shape_kind};
 use super::greenhouse::*;
 use super::host::*;
 use super::machine::*;
@@ -79,6 +80,7 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(AttachRequest, attach_request_json, attach_request_from),
         desc!(DetachRequest, detach_request_json, detach_request_from),
         desc!(AttachmentRecord, attachment_json, attachment_from),
+        desc!(DrawEntity, draw_entity_json, draw_entity_from),
     ]
 }
 
@@ -1036,6 +1038,133 @@ fn attachment_from(v: &Value) -> Result<AttachmentRecord, String> {
         depth: uint(v, "depth") as u32,
         props: props_from(v, &["controlled", "depth"]),
     })
+}
+
+fn hex_color(c: u32) -> Value {
+    let [r, g, b, a] = c.to_le_bytes();
+    json!(format!("#{r:02x}{g:02x}{b:02x}{a:02x}"))
+}
+
+fn draw_entity_json(e: &DrawEntity) -> Value {
+    json!({
+        "op": draw_op::name(e.op), "kind": draw_kind::name(e.kind), "sub": e.sub, "flags": e.flags,
+        "seq": e.seq, "chunk_offset": e.chunk_offset, "last": e.last, "lifetime_s": e.lifetime_s,
+        "pose": [e.px, e.py, e.pz, e.qw, e.qx, e.qy, e.qz], "scale": [e.sx, e.sy, e.sz], "width": e.width,
+        "style": draw_style::name(e.style), "glow": e.glow, "pulse_hz": e.pulse_hz, "flow_speed": e.flow_speed,
+        "dash": e.dash, "beam_height": e.beam_height, "fade": e.fade, "urgency": e.urgency,
+        "color": hex_color(e.color), "color2": hex_color(e.color2),
+        "points": e.point_list(), "colors": e.colors.iter().map(|c| hex_color(*c)).collect::<Vec<_>>(),
+        "radii": e.radii, "offsets": e.offsets,
+        "instances": e.instances.chunks_exact(draw::INSTANCE_FLOATS).collect::<Vec<_>>(),
+        "values": e.values, "rings": e.rings, "qpoints": e.qpoints, "ranges": e.ranges, "cells": e.cells,
+        "colormap": draw::colormap::name(e.colormap), "vmin": e.vmin, "vmax": e.vmax, "quant": e.quant,
+        "labels": e.label_list(), "props": props_json(&e.props),
+    })
+}
+
+const DRAW_KEYS: [&str; 37] = [
+    "op", "kind", "sub", "flags", "fill", "seq", "chunk_offset", "last", "lifetime_s", "pose", "scale", "width", "color",
+    "color2", "points", "colors", "radii", "offsets", "instances", "labels", "style", "glow", "pulse_hz", "flow_speed",
+    "dash", "beam_height", "fade", "urgency", "values", "rings", "qpoints", "ranges", "cells", "colormap", "vmin", "vmax",
+    "quant",
+];
+
+fn draw_entity_from(v: &Value) -> Result<DrawEntity, String> {
+    let name_or = |key: &str, parse: fn(&str) -> Option<u32>| -> Result<u32, String> {
+        match v.get(key) {
+            Some(Value::String(s)) => parse(s).ok_or_else(|| format!("unknown {key} `{s}`")),
+            _ => Ok(uint(v, key) as u32),
+        }
+    };
+    let color = |key: &str| -> Result<u32, String> {
+        match v.get(key) {
+            Some(Value::String(s)) => draw::parse_color(s).ok_or_else(|| format!("bad colour `{s}`")),
+            _ => Ok(uint(v, key) as u32),
+        }
+    };
+    let floats = |key: &str| -> Vec<f32> {
+        v.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).map(|x| x as f32).collect()).unwrap_or_default()
+    };
+    let rows = |key: &str, width: usize| -> Vec<f32> {
+        let mut out = Vec::new();
+        for row in v.get(key).and_then(Value::as_array).into_iter().flatten() {
+            let r: Vec<f32> = row.as_array().map(|a| a.iter().filter_map(Value::as_f64).map(|x| x as f32).collect()).unwrap_or_default();
+            out.extend((0..width).map(|i| r.get(i).copied().unwrap_or(if width == draw::INSTANCE_FLOATS && i == 3 { 1.0 } else { 0.0 })));
+        }
+        out
+    };
+    let kind = name_or("kind", draw_kind::parse)?;
+    let mut e = DrawEntity::new(kind, "", "");
+    e.op = name_or("op", draw_op::parse)?;
+    e.sub = match v.get("sub") {
+        Some(Value::String(s)) => match kind {
+            draw_kind::LINES => line_mode::parse(s),
+            draw_kind::POINTS => point_style::parse(s),
+            draw_kind::GRID => draw::grid_encoding::parse(s),
+            draw_kind::PANEL => draw::panel_kind::parse(s),
+            draw_kind::INTERACT => draw::interact_kind::parse(s),
+            _ => shape_kind::parse(s),
+        }
+        .ok_or_else(|| format!("unknown sub `{s}`"))?,
+        _ => uint(v, "sub") as u32,
+    };
+    e.flags = uint(v, "flags") as u32;
+    if let Some(fill) = v.get("fill").and_then(Value::as_str) {
+        e = e.with_fill(draw_flag::fill_parse(fill).ok_or_else(|| format!("unknown fill `{fill}`"))?);
+    }
+    e.seq = uint(v, "seq") as u32;
+    e.chunk_offset = uint(v, "chunk_offset") as u32;
+    e.last = if v.get("last").is_some() { uint(v, "last") as u32 } else { 1 };
+    e.lifetime_s = num(v, "lifetime_s");
+    let pose: Vec<f64> = v.get("pose").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+    match pose.as_slice() {
+        [x, y, z] => e = e.with_pose([*x, *y, *z], [1.0, 0.0, 0.0, 0.0]),
+        [x, y, z, yaw] => e = e.with_pose([*x, *y, *z], [(0.5 * yaw).cos(), 0.0, 0.0, (0.5 * yaw).sin()]),
+        [x, y, z, w, qx, qy, qz, ..] => e = e.with_pose([*x, *y, *z], [*w, *qx, *qy, *qz]),
+        _ => {}
+    }
+    if let [sx, sy, sz] = floats("scale").as_slice() {
+        e = e.with_scale([*sx, *sy, *sz]);
+    }
+    e.width = num(v, "width") as f32;
+    e.style = name_or("style", draw_style::parse)?;
+    e.glow = num(v, "glow") as f32;
+    e.pulse_hz = num(v, "pulse_hz") as f32;
+    e.flow_speed = num(v, "flow_speed") as f32;
+    e.dash = num(v, "dash") as f32;
+    e.beam_height = num(v, "beam_height") as f32;
+    e.fade = num(v, "fade") as f32;
+    e.urgency = num(v, "urgency") as f32;
+    e.color = color("color")?;
+    e.color2 = color("color2")?;
+    e.points = rows("points", 3);
+    e.colors = match v.get("colors").and_then(Value::as_array) {
+        Some(a) => a
+            .iter()
+            .map(|c| match c {
+                Value::String(s) => draw::parse_color(s).ok_or_else(|| format!("bad colour `{s}`")),
+                _ => Ok(c.as_u64().unwrap_or(0) as u32),
+            })
+            .collect::<Result<_, _>>()?,
+        None => Vec::new(),
+    };
+    e.radii = floats("radii");
+    e.offsets = floats("offsets").into_iter().map(|o| o as u32).collect();
+    e.instances = rows("instances", draw::INSTANCE_FLOATS);
+    e.values = floats("values");
+    e.rings = floats("rings").into_iter().map(|o| o as u32).collect();
+    e.qpoints = floats("qpoints").into_iter().map(|o| o as i16).collect();
+    e.ranges = floats("ranges").into_iter().map(|o| o as u16).collect();
+    e.cells = floats("cells").into_iter().map(|o| o as u8).collect();
+    e.colormap = name_or("colormap", draw::colormap::parse)?;
+    e.vmin = num(v, "vmin") as f32;
+    e.vmax = num(v, "vmax") as f32;
+    e.quant = num(v, "quant") as f32;
+    let labels: Vec<String> =
+        v.get("labels").and_then(Value::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    e = e.with_labels(&labels);
+    e.props = props_from(v, &DRAW_KEYS);
+    Ok(e)
 }
 
 #[cfg(test)]

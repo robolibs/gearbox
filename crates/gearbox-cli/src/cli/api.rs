@@ -44,7 +44,7 @@ enum Cmd {
 }
 
 /// (topic suffix or absolute, exchange, request type, response type)
-const HOST_TOPICS: [(&str, &str, &str, &str); 13] = [
+const HOST_TOPICS: [(&str, &str, &str, &str); 15] = [
     (
         topics::HOST_INFO,
         "req/res",
@@ -111,6 +111,8 @@ const HOST_TOPICS: [(&str, &str, &str, &str); 13] = [
         "gearbox.marker_ref.v1",
         "gearbox.status.v1",
     ),
+    (topics::DRAW, "req/res", "gearbox.draw.v1", "gearbox.status.v1"),
+    (topics::DRAW_LIST, "que/ans", "gearbox.draw.v1", "gearbox.draw.v1"),
     (
         topics::SELECT,
         "req/res",

@@ -188,6 +188,8 @@ pub struct DisplayToggles {
     pub tf_wheels_only: bool,
     /// The machines whose TF tree is drawn, by id; every machine when empty.
     pub tf_machines: Vec<String>,
+    /// Debug draws clients sent over `/gearbox/draw`.
+    pub show_draws: bool,
 }
 
 impl Default for DisplayToggles {
@@ -210,6 +212,7 @@ impl Default for DisplayToggles {
             tf_wheels_only: std::env::var("GEARBOX_TF_OVERLAY")
                 .is_ok_and(|v| v.split(',').any(|t| t.trim() == "wheels")),
             tf_machines: Vec::new(),
+            show_draws: true,
         }
     }
 }

@@ -4,6 +4,7 @@
 //! query-shaped through `HostCommands`.
 
 pub mod capture;
+mod draw_overlay;
 pub mod gizmo;
 pub mod keys;
 mod machine_context;
@@ -106,6 +107,7 @@ pub struct GearboxApp {
     keys: keys::KeyBridge,
     capture: capture::WindowCapture,
     gizmo: gizmo::PoseGizmo,
+    draw_interact: draw_overlay::DrawInteract,
     machine_context: machine_context::MachineContext,
     shelf_state: mara_core::ShelfState,
     window_geometry: window_geometry::WindowGeometry,
@@ -149,6 +151,7 @@ impl WindowApp for GearboxApp {
             keys: keys::KeyBridge::default(),
             capture: capture::WindowCapture::default(),
             gizmo: gizmo::PoseGizmo::default(),
+            draw_interact: draw_overlay::DrawInteract::default(),
             machine_context: machine_context::MachineContext::default(),
             shelf_state: {
                 let mut state = mara_core::ShelfState::default();
@@ -206,6 +209,7 @@ impl WindowApp for GearboxApp {
             keys,
             capture,
             gizmo,
+            draw_interact,
             machine_context,
             shelf_state,
             window_geometry: _,
@@ -225,6 +229,7 @@ impl WindowApp for GearboxApp {
             } else {
                 world.resource_mut::<crate::viewer::systems::GizmoGrab>().0 = false;
             }
+            draw_interact.interact(&egui, world);
         }
 
         let viewport = {
@@ -318,6 +323,9 @@ impl WindowApp for GearboxApp {
 
         paint_instance_label(&egui, viewport, world);
         paint_tf_labels(&egui, viewport, world);
+        paint_draw_labels(&egui, viewport, world);
+        draw_overlay::paint_draw_panels(&egui, viewport, world);
+        draw_interact.paint(&egui, viewport, world);
         gizmo.paint(&egui, viewport);
         machine_context.show(&egui, viewport.into(), world);
         world.resource_mut::<HostCommands>().0.extend(outbox.drain());
@@ -409,6 +417,7 @@ const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { id: "toggle_axes", label: "Toggle: World axes", hint: Some("X") },
     PaletteItem { id: "toggle_wireframe", label: "Toggle: Wireframe", hint: None },
     PaletteItem { id: "toggle_tf", label: "Toggle: TF tree (frames, names, links)", hint: None },
+    PaletteItem { id: "toggle_draws", label: "Toggle: Debug draws", hint: None },
     PaletteItem { id: "toggle_physics", label: "Physics: Play / pause", hint: None },
     PaletteItem { id: "reload_stage", label: "Scene: Reload", hint: Some("R") },
     PaletteItem { id: "browse_usd", label: "Scene: Load USD…", hint: None },
@@ -446,6 +455,10 @@ fn palette_action(id: &str, world: &mut World, outbox: &Outbox, shelf_state: &mu
             t.show_tf_names = on;
             t.show_tf_links = on;
         }
+        "toggle_draws" => {
+            let mut t = world.resource_mut::<DisplayToggles>();
+            t.show_draws = !t.show_draws;
+        }
         "toggle_physics" => {
             let on = world.resource::<gearbox_api::PhysicsActive>().0;
             outbox.push(HostCommand::SetPhysics(!on));
@@ -476,6 +489,46 @@ fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, 
     let position = egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top() + 12.0);
     painter.rect_filled(egui::Rect::from_min_size(position, galley.size()).expand(5.0), 4.0, egui::Color32::from_black_alpha(190));
     painter.galley(position, galley, egui::Color32::WHITE);
+}
+
+/// Debug draw text and labels over the viewport, where the Bevy side
+/// projected them.
+fn paint_draw_labels(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) {
+    let Some(labels) = world.get_resource::<crate::draw::DrawLabels>() else {
+        return;
+    };
+    if labels.0.is_empty() {
+        return;
+    }
+    let rect: egui::Rect = viewport.into();
+    let painter = egui
+        .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("gearbox_draw_labels")))
+        .with_clip_rect(rect);
+    for label in &labels.0 {
+        let rgba = |c: [u8; 4]| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as f32 * label.opacity) as u8);
+        let at = rect.min + egui::vec2(label.at[0] * rect.width(), label.at[1] * rect.height());
+        let galley = painter.layout_no_wrap(label.text.clone(), egui::FontId::proportional(label.size_px), rgba(label.color));
+        let pad = egui::vec2(0.5, 0.22) * label.size_px;
+        let bar = 2.0;
+        let pos = if label.centred {
+            at - galley.size() * 0.5
+        } else {
+            at + egui::vec2(pad.x + bar + 14.0, -galley.size().y - pad.y - 14.0)
+        };
+        let plate = egui::Rect::from_min_size(pos, galley.size()).expand2(pad);
+        let plate = egui::Rect::from_min_max(plate.min - egui::vec2(bar, 0.0), plate.max);
+        if !label.centred {
+            let corner = egui::pos2(plate.min.x, plate.max.y);
+            painter.line_segment([at, corner], egui::Stroke::new(1.2, rgba(label.accent)));
+            painter.circle_filled(at, 2.2, rgba(label.accent));
+        }
+        if label.background[3] > 0 {
+            painter.rect_filled(plate, 0.28 * label.size_px, rgba(label.background));
+            let accent = egui::Rect::from_min_max(plate.min, egui::pos2(plate.min.x + bar, plate.max.y)).shrink2(egui::vec2(0.0, 0.18 * label.size_px));
+            painter.rect_filled(accent, 1.0, rgba(label.accent));
+        }
+        painter.galley(pos, galley, rgba(label.color));
+    }
 }
 
 /// TF link names over the viewport, where the Bevy side projected them.

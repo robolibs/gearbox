@@ -3,6 +3,9 @@
 
 pub mod common;
 pub mod control;
+pub mod draw;
+pub mod draw_geom;
+pub mod draw_widgets;
 pub mod greenhouse;
 pub mod host;
 pub mod json;
@@ -20,6 +23,11 @@ pub use machine::{
     LidarScan, Measurement, measurement_kind,
     LinkRecord, MachineInfo, MachineState, SessionInfo,
     SessionRef, TwistCmd,
+};
+pub use draw::{
+    DRAW_CHUNK_BYTES, DrawEntity, DrawFrame, GridCells, Instance, color as draw_color, colormap, draw_flag, draw_kind,
+    draw_op, draw_style, grid_encoding, interact_kind, line_mode, panel_kind, point_style, scale as draw_scale,
+    shape_kind,
 };
 pub use greenhouse::{GreenhouseAction, GreenhouseQuery, PlantRecord, RoomRecord, greenhouse_op};
 pub use control::{

@@ -3,6 +3,7 @@
 pub mod access;
 pub mod api;
 pub mod clear;
+pub mod draw;
 pub mod env;
 pub mod extension;
 pub mod greenhouse;

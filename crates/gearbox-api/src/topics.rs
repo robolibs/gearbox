@@ -10,6 +10,10 @@ pub const USD_LOAD: &str = "/gearbox/usd/load";
 pub const USD_DELETE: &str = "/gearbox/usd/delete";
 pub const MARKER_SET: &str = "/gearbox/marker/set";
 pub const MARKER_DELETE: &str = "/gearbox/marker/delete";
+/// Req/res: one retained debug draw message (`DrawEntity`), answered with a `Status`.
+pub const DRAW: &str = "/gearbox/draw";
+/// Que/ans: the live draw entities under a path, header-only `DrawEntity` each.
+pub const DRAW_LIST: &str = "/gearbox/draw/list";
 pub const SELECT: &str = "/gearbox/select";
 pub const MACHINES_LIST: &str = "/gearbox/machines/list";
 pub const ACCESS_GRANT: &str = "/gearbox/access/grant";

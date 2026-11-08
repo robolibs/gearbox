@@ -20,6 +20,7 @@ mod app;
 mod attach;
 mod controller;
 mod devices;
+mod draw;
 mod environment;
 mod biomes;
 mod globe;
