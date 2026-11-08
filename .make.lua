@@ -454,6 +454,19 @@ local function machine_names(a)
   return names
 end
 
+-- Packages with a Blender source; the others are not built in Blender and are skipped.
+local function blend_names(a, label)
+  local names = {}
+  for _, name in ipairs(machine_names(a)) do
+    if #oslo.fs.glob(oslo.sys.pwd() .. "/assets/machines/blender/" .. name .. ".blend") > 0 then
+      names[#names + 1] = name
+    else
+      print(("%s: %-26s skip (no .blend)"):format(label, name))
+    end
+  end
+  return names
+end
+
 -- Same compiled machines in two packages, by `gearbox describe-machines`.
 local function same_model(a, b, dir)
   local described = {}
@@ -497,14 +510,14 @@ make.recipe{
 
 make.recipe{
   name = "test-blender-roundtrip",
-  desc = "every package (or --machine=NAME) through Blender and back: same specs, files and compiled machines",
+  desc = "every package with a .blend (or --machine=NAME) through Blender and back: same specs, files and compiled machines",
   params = { { "--machine", desc = "one package name, e.g. kubota_tractor" } },
   run = function(a)
     sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
     local dir = oslo.sys.pwd() .. "/target/blender/roundtrip"
     assert(oslo.run{ "mkdir", "-p", dir }.ok)
     local failed = {}
-    for _, name in ipairs(machine_names(a)) do
+    for _, name in ipairs(blend_names(a, "blender roundtrip")) do
       local package = oslo.sys.pwd() .. "/assets/machines/usd/" .. name .. ".usdz"
       local ok = blender(dir .. "/" .. name .. ".log", nil, "roundtrip", package, dir)
       ok = ok and same_model(package, dir .. "/" .. name .. ".usdz", dir)
@@ -532,7 +545,7 @@ sys.exit(0 if all(m["accepted"] for m in json.load(open(sys.argv[1]))["machines"
 
 make.recipe{
   name = "test-blender-export",
-  desc = "export every assets/machines/blender .blend (or --machine=NAME) and check it equals its committed package",
+  desc = "export every assets/machines/blender .blend (or --machine=NAME) and check it equals its committed package; packages without one are skipped",
   params = { { "--machine", desc = "one machine name, e.g. kubota_tractor" } },
   run = function(a)
     sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
@@ -540,9 +553,9 @@ make.recipe{
     local dir = pwd .. "/target/blender/export"
     assert(oslo.run{ "mkdir", "-p", dir }.ok)
     local failed = {}
-    for _, name in ipairs(machine_names(a)) do
+    for _, name in ipairs(blend_names(a, "blender export")) do
       local blend, package, out = pwd .. "/assets/machines/blender/" .. name .. ".blend", pwd .. "/assets/machines/usd/" .. name .. ".usdz", dir .. "/" .. name .. ".usdz"
-      local ok = oslo.fs.read(blend) ~= nil and blender(dir .. "/" .. name .. ".log", blend, "export", out)
+      local ok = blender(dir .. "/" .. name .. ".log", blend, "export", out)
       ok = ok and blender(dir .. "/" .. name .. ".compare.log", nil, "compare", package, out) and same_model(package, out, dir)
       print(("blender export: %-26s %s"):format(name, ok and "pass" or "FAIL"))
       if not ok then failed[#failed + 1] = name end
