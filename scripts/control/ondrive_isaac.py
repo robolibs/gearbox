@@ -11,6 +11,10 @@ Runs inside Kit:
                   (default: the path followers on s_curve, the avoiders on head_on)
     ONDRIVE_OUT   results JSON (default: target/lab/isaac_husky.json)
     HUSKY_USD     machine package (default: assets/machines/usd/clearpath_husky.usdz)
+    ONDRIVE_STAY  set to keep Isaac open after the runs (default: quit)
+    ONDRIVE_WHEELS  sphere: one-point sphere contacts in place of the tyres'
+                  convex hulls; mesh: as packaged (default: sphere)
+    ONDRIVE_FRONT_MU  friction of the front sphere contacts (default: 0.3)
 """
 
 import asyncio
@@ -35,6 +39,9 @@ from ondrive_lab import (  # noqa: E402
 
 USD = os.environ.get("HUSKY_USD", os.path.join(GEARBOX, "assets/machines/usd/clearpath_husky.usdz"))
 OUT = os.environ.get("ONDRIVE_OUT", os.path.join(GEARBOX, "target/lab/isaac_husky.json"))
+WHEELS = os.environ.get("ONDRIVE_WHEELS", "sphere")
+FRONT_MU = float(os.environ.get("ONDRIVE_FRONT_MU", "0.3"))
+FRONT_MATERIAL = "/World/frontContact"
 DEFAULT_RUNS = ",".join(
     [f"{k}:s_curve" for k in ("pure_pursuit", "regulated_pursuit", "stanley", "lqr", "kanayama", "mpc", "ilqr",
                                "mppi", "mca", "soc", "teb", "dwa")]
@@ -66,6 +73,42 @@ def heading(q_wxyz):
     w, x, y, z = (float(c) for c in q_wxyz)
     forward = Gf.Rotation(Gf.Quatd(w, Gf.Vec3d(x, y, z))).TransformDir(Gf.Vec3d(0, -1, 0))
     return math.atan2(forward[1], forward[0])
+
+
+def sphere_wheels(stage, husky):
+    """Swaps each tyre's convex-hull collider for a sphere of the wheel's
+    radius at the tyre's centre, the rear ones with the tyre's physics
+    material and the front ones with `FRONT_MU`, and raises the
+    articulation's solver iterations."""
+    from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, UsdShade
+
+    cache = UsdGeom.BBoxCache(0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.guide])
+    front = UsdShade.Material.Define(stage, FRONT_MATERIAL)
+    front_physics = UsdPhysics.MaterialAPI.Apply(front.GetPrim())
+    front_physics.CreateStaticFrictionAttr(FRONT_MU)
+    front_physics.CreateDynamicFrictionAttr(FRONT_MU)
+    front_physics.CreateRestitutionAttr(0.0)
+    PhysxSchema.PhysxMaterialAPI.Apply(front.GetPrim()).CreateFrictionCombineModeAttr("min")
+    for prim in Usd.PrimRange(husky):
+        if prim.GetName() != "tire_collider" or not prim.HasAPI(UsdPhysics.CollisionAPI):
+            continue
+        wheel = prim.GetParent()
+        centre = cache.ComputeRelativeBound(prim, wheel).ComputeAlignedRange().GetMidpoint()
+        UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(False)
+        sphere = UsdGeom.Sphere.Define(stage, wheel.GetPath().AppendChild("contact_sphere"))
+        sphere.CreateRadiusAttr(WHEEL_RADIUS)
+        sphere.AddTranslateOp().Set(Gf.Vec3d(*centre))
+        sphere.CreatePurposeAttr(UsdGeom.Tokens.guide)
+        UsdPhysics.CollisionAPI.Apply(sphere.GetPrim())
+        binding = UsdShade.MaterialBindingAPI(prim).GetDirectBindingRel("physics").GetTargets()
+        if "front" in wheel.GetName():
+            UsdShade.MaterialBindingAPI.Apply(sphere.GetPrim()).Bind(front, UsdShade.Tokens.weakerThanDescendants, "physics")
+        elif binding:
+            material = UsdShade.Material(stage.GetPrimAtPath(binding[0]))
+            UsdShade.MaterialBindingAPI.Apply(sphere.GetPrim()).Bind(material, UsdShade.Tokens.weakerThanDescendants, "physics")
+    articulation = PhysxSchema.PhysxArticulationAPI.Apply(husky)
+    articulation.CreateSolverPositionIterationCountAttr(32)
+    articulation.CreateSolverVelocityIterationCountAttr(4)
 
 
 def build_world(stage):
@@ -111,6 +154,8 @@ def build_world(stage):
     spawn = UsdGeom.Xform.Define(stage, SPAWN)
     husky = stage.DefinePrim(ROOT, "Xform")
     husky.GetReferences().AddReference(USD)
+    if WHEELS == "sphere":
+        sphere_wheels(stage, husky)
     purposes = [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.guide]
     low = UsdGeom.BBoxCache(0, purposes).ComputeWorldBound(husky).ComputeAlignedRange().GetMin()[2]
     spawn.AddTranslateOp().Set(Gf.Vec3d(0, 0, 0.01 - low))
@@ -298,6 +343,10 @@ async def guarded():
         await main()
     except Exception:
         say("error:\n" + traceback.format_exc())
+    if os.environ.get("ONDRIVE_STAY", "") == "":
+        import omni.kit.app
+
+        omni.kit.app.get_app().post_quit()
 
 
 asyncio.ensure_future(guarded())
