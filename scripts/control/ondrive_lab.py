@@ -265,6 +265,7 @@ class Scene:
 
     NS = "lab"
     FRAME = "robot/odom"
+    BODY = "robot/base_link"
 
     def __init__(self, gb: Gearbox, m: Machine, label: str):
         self.d = gb.draw
@@ -315,11 +316,13 @@ class Scene:
             d.shapes("lab/obstacle", f"moving_{i}_prediction", "ellipse", centers, sizes=sizes, fill="both",
                      frame=f, lifetime=1.0, urgency=urgency)
         if self.ticks % 12 == 0:
-            d.text("lab/robot", "status", [(st.x, st.y, m.length + 1.0)],
-                   text=f"{self.label}   v {cmd.linear_velocity:+.2f}  ω {cmd.angular_velocity:+.2f}", frame=f, lifetime=2.0)
+            d.text("lab/robot", "status", [(0.0, 0.0, m.length + 1.0)],
+                   text=f"{self.label}   v {cmd.linear_velocity:+.2f}  ω {cmd.angular_velocity:+.2f}", frame=self.BODY,
+                   lifetime=2.0)
 
     def finish(self, st, status: str):
-        self.d.text("lab/robot", "status", [(st.x, st.y, self.m.length + 1.0)], text=f"{self.label}: {status}", frame=self.FRAME)
+        self.d.text("lab/robot", "status", [(0.0, 0.0, self.m.length + 1.0)], text=f"{self.label}: {status}",
+                    frame=self.BODY)
         self.d.flush(2.0)
 
 
