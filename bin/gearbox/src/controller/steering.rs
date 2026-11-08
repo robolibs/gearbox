@@ -150,6 +150,37 @@ fn joint_data(
     Some((physics.joint(id)?, parent))
 }
 
+/// The tightest lock among the machine's steering joints, radians, from their
+/// limits; `None` when none of them has one.
+pub(super) fn joint_lock(
+    scene_root: Entity,
+    controller: &ControllerSpec,
+    machine: &MachineInstanceSpec,
+    index: &PrimIndex,
+    physics: &crate::physics::PhysicsWorld,
+) -> Option<f64> {
+    controller
+        .steer_left_joint
+        .iter()
+        .chain(controller.steer_right_joint.iter())
+        .chain(controller.steer_joints.iter())
+        .chain(machine.steering_joints.iter())
+        .filter_map(|path| joint_pair(scene_root, path, index, physics))
+        .filter_map(|pair| joint_data(physics, pair))
+        .filter_map(|(data, _)| data.limits(JointAxis::AngX))
+        .map(|[lower, upper]| lower.abs().min(upper.abs()))
+        .filter(|lock| *lock > 1e-3)
+        .reduce(f64::min)
+}
+
+/// The centre steering angle at which the inner wheel of an Ackermann axle
+/// reaches `lock`.
+pub(super) fn ackermann_centre_lock(lock: f64, wheel_base_m: f64, track_width_m: f64) -> f64 {
+    let length = wheel_base_m.abs().max(0.01);
+    let tan = lock.tan();
+    (length * tan / (length + 0.5 * track_width_m.abs() * tan)).atan()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn solve(
     scene_root: Entity,
@@ -322,6 +353,17 @@ mod tests {
                 -turn.speed(2.0, DVec3::new(1.2, y, 0.0))
             );
         }
+    }
+
+    #[test]
+    fn the_centre_lock_puts_the_inner_wheel_on_its_stop() {
+        let lock = 35.0_f64.to_radians();
+        let centre = ackermann_centre_lock(lock, 2.0, 1.6);
+        assert!(centre < lock);
+        let (inner, outer) = super::super::ackermann_steering_angles(centre, 2.0, 1.6, 35.0);
+        assert!((inner - lock).abs() < 1e-6);
+        assert!(outer < centre);
+        assert!((ackermann_centre_lock(lock, 2.0, 0.0) - lock).abs() < 1e-9);
     }
 
     #[test]

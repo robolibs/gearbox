@@ -1120,6 +1120,8 @@ fn apply_builtin_ackermann_cmd_vel(
                 .or(controller.track_width)
                 .unwrap_or(1.5675);
             let max_steer_deg = controller.max_steer_deg.unwrap_or(45.0);
+            let max_steer_deg = steering::joint_lock(scene_root, controller, machine, &index, &physics)
+                .map_or(max_steer_deg, |lock| max_steer_deg.min(lock.to_degrees() as f32));
             let steering_input = ui_drive.steering.get(&key).copied()
                 .filter(|_| ui_drive.commands.contains_key(&key));
             let steer_wanted = steering_input
@@ -1147,18 +1149,29 @@ fn apply_builtin_ackermann_cmd_vel(
             let sweep_s = STEER_SWEEP_S
                 * (1.0 + softness * (STEER_SOFT_FACTOR - 1.0))
                 * (1.0 + (1.0 - rolling) * (STEER_STILL_FACTOR - 1.0));
-            let steer_target_rad = {
-                let full = (max_steer_deg as f64).to_radians().max(1e-3);
-                let step = full / sweep_s * dt as f64;
-                let held = steer_held.entry(key.clone()).or_insert(0.0);
-                let wanted = steer_wanted.clamp(-full, full);
-                *held += (wanted - *held).clamp(-step, step);
-                *held
-            };
             let geometry = controller
                 .steering_geometry
                 .as_deref()
                 .unwrap_or("ackermann");
+            let steer_target_rad = {
+                let full = (max_steer_deg as f64).to_radians().max(1e-3);
+                let reach = if geometry == "ackermann" {
+                    steering::ackermann_centre_lock(full, wheel_base_m as f64, track_width_m as f64)
+                } else {
+                    full
+                };
+                let step = full / sweep_s * dt as f64;
+                let held = steer_held.entry(key.clone()).or_insert(0.0);
+                let wanted = steer_wanted.clamp(-reach, reach);
+                *held += (wanted - *held).clamp(-step, step);
+                // The slewed yaw command stays within what the steering reaches.
+                if steering_input.is_none() && let Some(applied) = runtime.applied_cmd_vel.get_mut(&key) {
+                    let speed = applied.linear_mps.abs().max(STOPPED_STEERING_REFERENCE_SPEED_MPS) as f64;
+                    let yaw_reach = (speed * reach.tan() / (wheel_base_m as f64).max(0.01)) as f32;
+                    applied.angular_rps = applied.angular_rps.clamp(-yaw_reach, yaw_reach);
+                }
+                *held
+            };
             // The geometry solver is given the steering as it *stands*, not as
             // it was asked for, or it would swing the wheels to full lock while
             // the fallback above was still winding them round.
@@ -1699,14 +1712,18 @@ fn slew(current: f32, target: f32, max_delta: f32) -> f32 {
     current + delta
 }
 
+/// Speed below which a yaw command steers as if the machine rolled at it:
+/// standing still, a turn request puts the steering over to lock.
+const STOPPED_STEERING_REFERENCE_SPEED_MPS: f32 = 0.05;
+
+/// The centre steering angle that turns at `angular_rps` while rolling at
+/// `linear_mps`: the geometric `atan(L · ω / v)`, clamped to the lock.
 fn steering_target_radians(
     linear_mps: f32,
     angular_rps: f32,
     wheel_base_m: f32,
     max_steer_deg: f32,
 ) -> f64 {
-    const STOPPED_STEERING_REFERENCE_SPEED_MPS: f32 = 0.8;
-
     if angular_rps.abs() < 1e-3 {
         return 0.0;
     }
@@ -4411,6 +4428,12 @@ def Xform "Leatherback" (
         let reverse = steering_target_radians(-2.0, 1.0, 2.4, 45.0);
         assert!(reverse < 0.0);
         assert_eq!(reverse, -steering_target_radians(2.0, 1.0, 2.4, 45.0));
+        for v in [0.3_f32, 0.6, 1.5] {
+            let curvature = 0.2_f32.tan() / 2.4;
+            let slow = steering_target_radians(v, v * curvature, 2.4, 45.0);
+            assert!((slow - 0.2).abs() < 1e-5, "{v} m/s steers {slow:.4} rad for a 0.2 rad curve");
+        }
+        assert!((steering_target_radians(0.0, 0.5, 2.4, 45.0) - 45_f64.to_radians()).abs() < 1e-6);
     }
 
     #[test]
