@@ -695,6 +695,25 @@ pub struct Built {
     pub splat: bool,
 }
 
+/// Share of every drawing's opacity kept: `GEARBOX_DRAW_OPACITY`, 0..1,
+/// default 1.
+fn opacity() -> f32 {
+    static OPACITY: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *OPACITY.get_or_init(|| {
+        std::env::var("GEARBOX_DRAW_OPACITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .map_or(1.0, |v| v.clamp(0.0, 1.0))
+    })
+}
+
+/// `c` with its alpha scaled by [`opacity`].
+fn faded(mut c: [u8; 4]) -> [u8; 4] {
+    c[3] = (c[3] as f32 * opacity()).round() as u8;
+    c
+}
+
 /// Reads an entity's per-item values with the entity defaults behind them.
 struct Look<'a> {
     e: &'a DrawEntity,
@@ -726,7 +745,7 @@ impl<'a> Look<'a> {
 
     fn color(&self, i: usize) -> [u8; 4] {
         match self.e.colors.get(i) {
-            Some(c) if *c != 0 => unpack_rgba(*c),
+            Some(c) if *c != 0 => faded(unpack_rgba(*c)),
             _ if !self.values.is_empty() => {
                 let v = if self.values.len() == 1 { self.values[0] } else { self.values.get(i).copied().unwrap_or(0.0) };
                 let mut c = colormap_rgba(self.e.colormap, v, self.range.0, self.range.1);
@@ -1078,11 +1097,11 @@ pub fn build(e: &DrawEntity, ns: &str, id: &str) -> Built {
 pub fn build_on(e: &DrawEntity, ns: &str, id: &str, ground: Ground) -> Built {
     let style = resolve_style(e, ns, id);
     let fx = Fx::of(e, style);
-    let base = if e.color != 0 {
+    let base = faded(if e.color != 0 {
         unpack_rgba(e.color)
     } else {
         role_color(style).unwrap_or_else(|| unpack_rgba(default_color(ns, id)))
-    };
+    });
     let radius = if e.width != 0.0 && e.width.is_finite() { 0.5 * e.width } else { default_radius(e.kind, style) };
     let look = Look::new(e, base, radius);
     let phase0 = path_phase(ns, id);
@@ -1444,7 +1463,7 @@ pub fn build_on(e: &DrawEntity, ns: &str, id: &str, ground: Ground) -> Built {
                     let size = Vec3::new(pick(0, e.sx), pick(1, e.sy), pick(2, e.sz));
                     out.fill.look = [surface_look, fx.glow, fx.pulse_hz, phase0 + item_phase(i)];
                     out.fill.look2 = [fx.urgency, 1.0, fx.spacing, fx.fade];
-                    let color = if e.color == 0 && e.colors.is_empty() && style == draw_style::PLAIN { [190, 196, 204, 255] } else { look.color(i) };
+                    let color = if e.color == 0 && e.colors.is_empty() && style == draw_style::PLAIN { faded([190, 196, 204, 255]) } else { look.color(i) };
                     out.fill.place(&unit, inst, size, color);
                     label(&mut out, i, Vec3::from_array(inst.position), color);
                 }

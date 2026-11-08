@@ -81,6 +81,8 @@ Clock, listing, poses, events
 
 gearbox draw: retained drawings in the viewer (lines, points, shapes, polygons, grids, clouds, detections, sensors, field and chart widgets, interactions), kept per NS and ID until deleted, cleared or out of --lifetime sim seconds; Z-up coordinates in --frame `world` (home: x east, y north, z up, the axes machine states report in), `MACHINE/odom` (where the machine's reported pose is measured from) or `MACHINE/LINK` (following the link); widths and radii > 0 are metres, < 0 pixels. In world and odom frames z is height above the terrain (`--no-drape` makes it the frame's own). Widgets made of several entities live under `NS/ID`, so `clear NS/ID` removes them whole. Options go before `--`; points after it may start with a minus sign.
 
+`GEARBOX_DRAW_OPACITY` (0 to 1, default 1), set where the viewer is launched, scales the opacity of every drawing: `GEARBOX_DRAW_OPACITY=0.5 gearbox run`.
+
 Every leaf that draws takes `--color` (hex, rviz names on Okabe-Ito, or a role: plan, prediction, lookahead, goal, obstacle, danger, history, sensor), `--width`, `--lifetime`, `--pose X Y Z [YAW]`, `--style`, the effects `--glow --pulse --flow --spacing --beam --fade --urgency`, `--values` with `--colormap` (turbo, viridis, rdylgn, costmap, map, raw, okabe, rainbow, grey) and `--range VMIN VMAX`.
 
 | Leaf | Does |
