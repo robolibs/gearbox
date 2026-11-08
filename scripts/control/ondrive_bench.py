@@ -81,6 +81,7 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
     plant = Plant(m)
     limit = sc.time_limit or (ref.lap_len * (sc.laps or 1.0) / (0.5 * 0.8 * m.vmax) + 15.0)
     errs, flips, last_w, status, time_s = [], 0, 0.0, "timeout", 0.0
+    dws, prev_w = [], 0.0
     lost = max(3.0, 2.0 * m.length)
     movers = [{"spec": mv, "at": list(mv["start"]), "going": mv.get("meet") is None} for mv in sc.movers]
     clear = float("inf")
@@ -99,23 +100,29 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
         world = ondrive.World()
         for i, o in enumerate(obs):
             world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
-        for o in obs:
-            clear = min(clear, box_clearance(plant.x, plant.y, plant.yaw, m.length, m.width, o[0], o[1], o[4]))
+        now_clear = min((box_clearance(plant.x, plant.y, plant.yaw, m.length, m.width, o[0], o[1], o[4]) for o in obs),
+                        default=float("inf"))
+        clear = min(clear, now_clear)
         state = ondrive.RobotState(pose=((plant.x, plant.y, 0.0), plant.yaw), velocity=(plant.v, plant.w, 0.0),
                                    allow_move=True, allow_reverse=sc.reverse)
         cmd = t.tick(state, TICK, world)
         v, w = (cmd.linear_velocity, cmd.angular_velocity) if cmd.valid else (0.0, 0.0)
         plant.step(v, w, TICK)
         time_s += TICK
+        dws.append(w - prev_w)
+        prev_w = w
         err = ref.error(plant.x, plant.y)
         errs.append(err)
         if abs(w) > 0.2 * m.wmax and last_w * w < 0:
             flips += 1
         if abs(w) > 0.2 * m.wmax:
             last_w = w
-        if verbose and len(errs) % 20 == 0:
-            print(f"  t={time_s:5.1f} x={plant.x:6.2f} y={plant.y:+6.2f} err={err:5.2f} v={v:+.2f} w={w:+.2f} "
-                  f"steer={plant.steer:+.2f} {cmd.status_message}")
+        if verbose and len(errs) % (5 if verbose > 1 else 20) == 0:
+            aim = t.current_target() or (float("nan"), float("nan"), 0.0)
+            movers_at = " ".join(f"({mv['at'][0]:.1f},{mv['at'][1]:+.1f})" for mv in movers)
+            print(f"  t={time_s:5.1f} x={plant.x:6.2f} y={plant.y:+6.2f} yaw={plant.yaw:+.2f} err={err:5.2f} v={v:+.2f} "
+                  f"w={w:+.2f} steer={plant.steer:+.2f} c={now_clear:5.2f} aim=({aim[0]:.1f},{aim[1]:+.1f}) {movers_at} "
+                  f"{cmd.status_message}")
         if t.is_path_completed() or (sc.goal and t.is_goal_reached()):
             status = "completed"
             break
@@ -124,7 +131,8 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
             break
     rms = math.sqrt(sum(e * e for e in errs) / max(1, len(errs)))
     return {"kind": kind, "status": status, "time": time_s, "rms": rms, "max": max(errs, default=0.0),
-            "flips": flips / max(time_s / 60.0, 1e-9), "clear": clear}
+            "flips": flips / max(time_s / 60.0, 1e-9), "clear": clear,
+            "jitter": math.sqrt(sum(d * d for d in dws) / max(1, len(dws)))}
 
 
 def main():
@@ -132,7 +140,7 @@ def main():
     ap.add_argument("machine")
     ap.add_argument("controller")
     ap.add_argument("scenario")
-    ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("-v", "--verbose", action="count", default=0)
     ap.add_argument("--params", default="{}", help="controller parameters as JSON")
     a = ap.parse_args()
     kinds = CONTROLLERS if a.controller == "all" else a.controller.split(",")
@@ -140,7 +148,7 @@ def main():
         for kind in kinds:
             r = run(a.machine, kind, sname, a.verbose, json.loads(a.params))
             print(f"{a.machine:8} {kind:18} {sname:12} {r['status'][:14]:14} {r['time']:6.1f} {r['rms']:6.2f} "
-                  f"{r['max']:6.2f} {r['flips']:5.1f} {r['clear']:6.2f}", flush=True)
+                  f"{r['max']:6.2f} {r['flips']:5.1f} {r['clear']:6.2f} {r['jitter']:5.3f}", flush=True)
 
 
 if __name__ == "__main__":
