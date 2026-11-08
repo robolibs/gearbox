@@ -415,6 +415,18 @@ Machine topics under `/machines/<id>/`:
   `.blend` → package for every package and that edits made in Blender
   (moves, renames, deletions, added meshes and materials, vertex edits) reach
   the export.
+- Wheel physics is exported in UsdPhysics terms only. Every `Cylinder`
+  collider is written as a 48-segment cylinder `Mesh` with
+  `PhysicsMeshCollisionAPI` `convexHull` at the same path, which Gearbox
+  builds as the exact cylinder (MACHINE_SPEC §5). A wheel (a body with such a
+  collider and a revolute joint) gets `PhysicsFilteredPairsAPI` against every
+  body that carries it beyond its parent in the joint tree, rooted at
+  `gearbox:machine:body`. Both are idempotent: a converted package exports
+  unchanged. Gearbox needs neither (one articulation's colliders never touch,
+  `physics/colliders.rs`); Isaac 6.2 sinks wheels on exact cylinders and
+  collides a steered wheel with its chassis without them, observed on the
+  Husky and the Kubota (2026-11-08). Packages without a `.blend` are not
+  covered.
 - In Blender the same add-on checks a machine with this compiler: CHECK runs
   `gearbox describe-machines` on the export and shows its diagnostics, DOFs
   and owners; the TF overlay draws its reporting tree (§7) on the objects;

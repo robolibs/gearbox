@@ -268,6 +268,14 @@ body at or above it.
 | `convexHull`, `boundingSphere`, `boundingCube` | convex hull | convex hull |
 | `convexDecomposition` | convex decomposition (needs an indexed mesh) | convex decomposition |
 
+- A `convexHull` mesh whose points are two equal rings, at least 12 points
+  each, centred on one local axis is built as that exact cylinder: the axis,
+  the ring radius and the distance between the rings. The machine exporter
+  writes every `Cylinder` collider this way (ROBOT_CONTRACT §12).
+  Native-verified: `a_cylinder_hull_gives_its_axis_radius_and_half_height`,
+  `other_hulls_are_not_cylinders`,
+  `a_cylinder_shaped_hull_mesh_builds_an_exact_cylinder_along_its_axis`.
+
 - `physics:collisionEnabled = false` builds the collider without collisions;
   it adds no mass to its body either.
 - Defaults: friction 0.5, restitution 0, friction combine Average.
@@ -403,7 +411,8 @@ Machines with `gearbox:machine:tracks` skip everything below (§11).
 
 Once per machine, every wheel body gets CCD, and each of its colliders gets
 friction raised to at least 1.1 with combine rule Min and restitution 0.
-`Cylinder` colliders get a rounded edge (5 % of the radius). These settings
+Cylinder colliders (a `Cylinder` prim or a cylinder-shaped hull, §5) get a
+rounded edge (5 % of the radius). These settings
 apply to contacts with colliders that are not registered ground (props,
 other machines, the machine's own obstacles).
 
@@ -413,7 +422,7 @@ Every frame, per wheel:
 
 - The wheel body needs at least one collider. The **largest** collider (by
   local bounding box) gives the tyre geometry: its centre is the hub; a
-  `Cylinder` gives the axle (its own axis), the width (its height) and the
+  cylinder (§5) gives the axle (its own axis), the width (its height) and the
   radius; any other shape gives the thinnest axis of its local box as axle
   and width, and its largest half-extent as radius.
 - A joint touching the wheel body must leave exactly the rotation about its
