@@ -1,4 +1,4 @@
-//! Retained debug draws in the viewer. Every entity the host keeps
+//! gearbox draw in the viewer: retained drawings. Every entity the host keeps
 //! ([`gearbox_api::DrawStoreRes`]) gets a root placed in its frame, with a
 //! stroke mesh and a fill mesh under it, rebuilt when the entity changes.
 //! Labels are projected to the viewport for the host to paint.

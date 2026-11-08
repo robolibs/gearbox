@@ -15,7 +15,7 @@ agent for scene work, and to each machine's own agent for control:
 |------|-------------------|
 | host info, clock, clear, scene list, events | `/gearbox/...` (host agent) |
 | load / delete USDs, markers | `/gearbox/usd/*`, `/gearbox/marker/*` (host agent) |
-| debug draws (`gb.draw`) | `/gearbox/draw`, `/gearbox/draw/list` (host agent) |
+| gearbox draw (`gb.draw`) | `/gearbox/draw`, `/gearbox/draw/list` (host agent) |
 | machine list with each machine's did and address | `/gearbox/machines/list` (host agent) |
 | claim, cmd_vel, release, session, info | `/machines/<ns>/...` (that machine's agent) |
 | state, odom | `/machines/<ns>/state`, `/machines/<ns>/odom` (that machine's agent) |
@@ -28,12 +28,13 @@ A machine is driven by whoever holds its session: `claim()` first, then
 zeroes the command; a minute of silence releases the machine, and a client
 whose session lapsed claims again on its next `cmd_vel`.
 
-## Debug draws
+## gearbox draw
 
-`gb.draw` keeps shapes in the viewer per `(ns, id)` until they are deleted,
-cleared, or their `lifetime` (sim seconds, 0 keeps them) runs out; sending an
-entity again replaces it. Big entities are split into chunks and swapped in
-whole once the last one lands. The `gearbox draw` CLI sends the same.
+gearbox draw is the viewer's drawing API. `gb.draw` keeps shapes per
+`(ns, id)` until they are deleted, cleared, or their `lifetime` (sim seconds,
+0 keeps them) runs out; sending an entity again replaces it. Big entities are
+split into chunks and swapped in whole once the last one lands. The
+`gearbox draw` CLI sends the same.
 
 | frame | coordinates |
 |-------|-------------|
