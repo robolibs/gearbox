@@ -32,6 +32,8 @@ TICK = 0.05
 AREA_FILE = REPO / "target" / "lab" / "area.txt"
 # Areas the runs cycle through: four rows of twelve on flat ground.
 AREAS = 48
+# Share of the nominal speed a run is allowed to average, for soil slip.
+SLIP_ALLOWANCE = 0.25
 
 
 @dataclass
@@ -440,7 +442,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     goal_pose = (ox + sc.goal[0], oy + sc.goal[1], sc.goal[2]) if sc.goal else (end_pt[0], end_pt[1], math.atan2(pts[-1][1] - pts[-2][1], pts[-1][0] - pts[-2][0]))
     scene.setup(densify(pts, 0.2), goal_pose, statics, v_nom)
     length = ref.lap_len * (sc.laps or 1.0)
-    limit = sc.time_limit or (length / (0.5 * v_nom) + 15.0)
+    limit = sc.time_limit or (length / (SLIP_ALLOWANCE * v_nom) + 15.0)
     lost_after, lost_since = max(3.0, 2.0 * m.length), None
     log = []
     t0 = time.time()
