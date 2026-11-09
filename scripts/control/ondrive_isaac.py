@@ -262,7 +262,7 @@ async def main():
             path.add_waypoint_xy(x, y, yaw=math.atan2(ny - py, nx - px))
         path.smoothen(0.2)
         ref = Reference(densify(pts, 0.1), sc.closed)
-        t = tracker_for(kind, m, sc, {})
+        t = tracker_for(kind, m, sc, json.loads(os.environ.get("ONDRIVE_PARAMS", "{}")))
         t.set_path(path)
         statics = [(*here(x, y), r) for x, y, r in sc.static]
         movers = []
