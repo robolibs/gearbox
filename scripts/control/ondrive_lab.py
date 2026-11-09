@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -34,6 +35,8 @@ AREA_FILE = REPO / "target" / "lab" / "area.txt"
 AREAS = 48
 # Share of the nominal speed a run is allowed to average, for soil slip.
 SLIP_ALLOWANCE = 0.25
+# Runs between viewer restarts when ONDRIVE_LAB_KITTY is set.
+RESTART_EVERY = 15
 
 
 @dataclass
@@ -224,6 +227,34 @@ class Lab:
         self.instance = instance
         self.origin = (0.0, 0.0)
         self.markers: list[str] = []
+        self.runs = 0
+
+    def fresh(self):
+        """Every `RESTART_EVERY` runs, restart the viewer in the kitty window at
+        `ONDRIVE_LAB_KITTY` with `ONDRIVE_LAB_LAUNCH`, and reconnect. Nothing
+        when unset."""
+        self.runs += 1
+        kitty = os.environ.get("ONDRIVE_LAB_KITTY")
+        if not kitty or self.runs % RESTART_EVERY:
+            return
+        launch = os.environ.get("ONDRIVE_LAB_LAUNCH", f"target/debug/gearbox run --name {self.instance} --ephemeral")
+        send = lambda text: subprocess.run(["kitty", "@", "--to", kitty, "send-text", "--match", "id:1", text],  # noqa: E731
+                                           capture_output=True, timeout=20)
+        print(f"  restarting {self.instance} after {self.runs - 1} runs", flush=True)
+        send("\x03")
+        listed = lambda: self.instance in subprocess.run(  # noqa: E731
+            [str(REPO / "target" / "debug" / "gearbox"), "instance", "list"], capture_output=True, text=True, timeout=20).stdout
+        deadline = time.time() + 60
+        while listed() and time.time() < deadline:
+            time.sleep(1.0)
+        send(launch + "\n")
+        deadline = time.time() + 180
+        while not listed():
+            if time.time() > deadline:
+                raise RuntimeError(f"{self.instance} did not come back")
+            time.sleep(2.0)
+        time.sleep(10.0)
+        self.gb = Gearbox(self.instance)
 
     def spawn(self, ns: str, m: Machine, x: float, y: float, yaw: float):
         """Spawn at (x, y) of the robot frame. A machine reports its pose from
@@ -401,6 +432,7 @@ def send(machine, v: float, w: float):
 def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: bool) -> dict:
     m = MACHINES[mname]
     sc = scenario(sname, m.scale)
+    lab.fresh()
     lab.origin = next_area()
     lab.clear()
     robot = lab.spawn("robot", m, 0.0, 0.0, 0.0)
@@ -537,6 +569,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
 
 def characterize(lab: Lab, mname: str, steps_out: str = ""):
     m = MACHINES[mname]
+    lab.fresh()
     lab.origin = next_area()
     lab.clear()
     mach = lab.spawn("robot", m, 0.0, 0.0, 0.0)
