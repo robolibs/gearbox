@@ -429,6 +429,20 @@ def send(machine, v: float, w: float):
         print(f"  command dropped: {e}", flush=True)
 
 
+class SimClock:
+    """Seconds of simulated world time, the last reading held when a call fails."""
+
+    def __init__(self, gb):
+        self.gb, self.last = gb, gb.clock().world_s
+
+    def __call__(self) -> float:
+        try:
+            self.last = self.gb.clock().world_s
+        except RuntimeError:
+            pass
+        return self.last
+
+
 def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: bool) -> dict:
     m = MACHINES[mname]
     sc = scenario(sname, m.scale)
@@ -477,13 +491,18 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     limit = sc.time_limit or (length / (SLIP_ALLOWANCE * v_nom) + 15.0)
     lost_after, lost_since = max(3.0, 2.0 * m.length), None
     log = []
-    t0 = time.time()
+    try:
+        clock = SimClock(lab.gb)
+    except RuntimeError:
+        clock = time.time
+    t0 = clock()
     last = t0
     min_clear = float("inf")
     flips, last_w = 0, 0.0
     status = "timeout"
     while True:
-        now = time.time()
+        wall = time.time()
+        now = clock()
         if now - t0 > limit:
             break
         st = robot.state()
@@ -539,7 +558,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         if lost_since is not None and now - lost_since > 3.0:
             status = f"lost: {err:.1f} m off the path"
             break
-        time.sleep(max(0.0, TICK - (time.time() - now)))
+        time.sleep(max(0.0, TICK - (time.time() - wall)))
     for _ in range(10):
         send(robot, 0.0, 0.0)
         for mv in movers:
