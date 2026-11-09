@@ -502,7 +502,16 @@ fn clear_controller_state_on_reset(
     states.states.clear();
     keys.0.clear();
     if let Some(mut bus) = bus {
-        bus.machines.clear();
+        // Each agent's close blocks on its endpoint; close them side by side.
+        let started = std::time::Instant::now();
+        let agents: Vec<_> = bus.machines.drain().map(|(_, agent)| agent).collect();
+        let count = agents.len();
+        std::thread::scope(|scope| {
+            for agent in agents {
+                scope.spawn(move || drop(agent));
+            }
+        });
+        info!("gearbox-control: closed {count} machine agent(s) in {:.2} s", started.elapsed().as_secs_f64());
     }
     info!("gearbox-control: cleared controller inventory/state");
 }
