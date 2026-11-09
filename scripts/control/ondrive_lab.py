@@ -47,6 +47,16 @@ STUCK_S = 20.0
 STUCK_DISTANCE = 0.5
 # Runs between viewer restarts when ONDRIVE_LAB_KITTY is set.
 RESTART_EVERY = 15
+# Gearbox coasts on a command below COAST_MPS and COAST_RPS while the machine
+# rolls faster than PARKED_MPS; a stop is sent as BRAKE_MPS in the direction
+# of travel, which the drive holds, until the machine is slow enough to park.
+COAST_MPS = 0.05
+COAST_RPS = 0.02
+PARKED_MPS = 0.25
+BRAKE_MPS = 0.06
+# Clearance, metres, below which the robot touches an obstacle and the run
+# stops.
+CONTACT_M = 0.0
 
 
 @dataclass
@@ -441,6 +451,13 @@ def send(machine, v: float, w: float):
         print(f"  command dropped: {e}", flush=True)
 
 
+def drive(machine, v: float, w: float, vx: float):
+    """`send` with a stop braking the machine instead of coasting it."""
+    if abs(v) < COAST_MPS and abs(w) < COAST_RPS and abs(vx) > PARKED_MPS:
+        v = math.copysign(BRAKE_MPS, vx)
+    send(machine, v, w)
+
+
 class SimClock:
     """Seconds of simulated world time, the last reading held when a call fails."""
 
@@ -556,7 +573,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         last = now
         cmd = t.tick(state, dt, world)
         v, w = (cmd.linear_velocity, cmd.angular_velocity) if cmd.valid else (0.0, 0.0)
-        send(robot, v, w)
+        drive(robot, v, w, st.vx)
         if abs(w) > 0.2 * m.wmax and last_w * w < 0:
             flips += 1
         if abs(w) > 0.2 * m.wmax:
@@ -567,10 +584,16 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
                     round(now_clear, 3) if near else None,
                     [round(near[0] - ox, 2), round(near[1] - oy, 2)] if near else None])
         if verbose and len(log) % 20 == 0:
-            print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} w={w:+.2f} clear={min_clear:5.2f} {cmd.status_message}")
+            print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} vx={st.vx:+.2f} w={w:+.2f} "
+                  f"near={now_clear:5.2f} min={min_clear:5.2f} {cmd.status_message}", flush=True)
         scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], now_clear)
         if not cmd.valid and "completed" not in cmd.status_message.lower():
             status = f"invalid: {cmd.status_message}"
+        if now_clear < CONTACT_M:
+            status = f"contact: {now_clear:.2f} m at t={now - t0:.1f}"
+            print(f"  CONTACT {now_clear:.2f} m at t={now - t0:.1f} with obstacle at "
+                  f"({near[0] - ox:.1f}, {near[1] - oy:.1f})", flush=True)
+            break
         if t.is_path_completed() or (sc.goal and t.is_goal_reached()):
             status = "completed"
             break
@@ -582,12 +605,18 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
             status = "stuck: terrain at the spawn"
             break
         time.sleep(max(0.0, TICK - (time.time() - wall)))
-    for _ in range(10):
-        send(robot, 0.0, 0.0)
+    for _ in range(60):
+        st = robot.state() or st
+        drive(robot, 0.0, 0.0, st.vx)
         for mv in movers:
             send(mv["machine"], 0.0, 0.0)
+        if abs(st.vx) <= PARKED_MPS:
+            break
         time.sleep(0.05)
-    st = robot.state()
+    for _ in range(5):
+        send(robot, 0.0, 0.0)
+        time.sleep(0.05)
+    st = robot.state() or st
     scene.finish(st, status)
     errs = [r[8] for r in log]
     travelled = sum(math.hypot(a[1] - b[1], a[2] - b[2]) for a, b in zip(log, log[1:]))
@@ -683,6 +712,34 @@ def fit_steering(results_file: str, wheelbase: float):
     return out
 
 
+def stop_test(lab: Lab, mname: str):
+    """Distance a machine rolls after a bare zero command and after `drive`'s stop."""
+    m = MACHINES[mname]
+    lab.fresh()
+    lab.origin = next_area()
+    lab.clear()
+    mach = lab.spawn("robot", m, 0.0, 0.0, 0.0)
+    clock = SimClock(lab.gb)
+
+    def hold(v, secs, braking=False):
+        t0, s = clock(), mach.state()
+        x0, y0 = s.x, s.y
+        while clock() - t0 < secs:
+            s = mach.state() or s
+            drive(mach, v, 0.0, s.vx) if braking else send(mach, v, 0.0)
+            time.sleep(TICK)
+        return math.hypot(s.x - x0, s.y - y0), s.vx
+
+    out = {"machine": mname}
+    for mode in ("zero", "brake"):
+        hold(0.0, 2.0, braking=True)
+        _, v = hold(0.8 * m.vmax, 8.0)
+        dist, v_end = hold(0.0, 8.0, braking=mode == "brake")
+        out[mode] = {"from_mps": round(v, 2), "rolled_m": round(dist, 2), "end_mps": round(v_end, 2)}
+    print(json.dumps(out), flush=True)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--instance", default="lab")
@@ -693,6 +750,8 @@ def main():
     ft = sub.add_parser("fit", help="fit an Ackermann machine's steering from a `run --out` file")
     ft.add_argument("machine")
     ft.add_argument("results")
+    sp = sub.add_parser("stop", help="distance rolled after a zero command and after a braking stop")
+    sp.add_argument("machine")
     rn = sub.add_parser("run")
     rn.add_argument("machine")
     rn.add_argument("controller")
@@ -707,6 +766,9 @@ def main():
     lab = Lab(a.instance)
     if a.cmd == "characterize":
         characterize(lab, a.machine, a.out)
+        return
+    if a.cmd == "stop":
+        stop_test(lab, a.machine)
         return
     kinds = CONTROLLERS if a.controller == "all" else a.controller.split(",")
     names = SCENARIOS if a.scenario == "all" else a.scenario.split(",")
