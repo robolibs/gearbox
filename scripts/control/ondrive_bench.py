@@ -54,8 +54,9 @@ class Plant:
         else:
             self.w = YAW_GAIN * max(-self.m.wmax, min(self.m.wmax, w_cmd))
         self.yaw = wrap(self.yaw + self.w * dt)
-        self.x += self.v * math.cos(self.yaw) * dt
-        self.y += self.v * math.sin(self.yaw) * dt
+        a = self.m.rear_offset if self.m.steering == "ackermann" else 0.0
+        self.x += (self.v * math.cos(self.yaw) - a * self.w * math.sin(self.yaw)) * dt
+        self.y += (self.v * math.sin(self.yaw) + a * self.w * math.cos(self.yaw)) * dt
 
 
 def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = None) -> dict:
