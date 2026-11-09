@@ -502,18 +502,31 @@ fn clear_controller_state_on_reset(
     states.states.clear();
     keys.0.clear();
     if let Some(mut bus) = bus {
-        // Each agent's close blocks on its endpoint; close them side by side.
         let started = std::time::Instant::now();
         let agents: Vec<_> = bus.machines.drain().map(|(_, agent)| agent).collect();
         let count = agents.len();
-        std::thread::scope(|scope| {
-            for agent in agents {
-                scope.spawn(move || drop(agent));
-            }
-        });
+        retire_agents(&bus, agents);
         info!("gearbox-control: closed {count} machine agent(s) in {:.2} s", started.elapsed().as_secs_f64());
     }
     info!("gearbox-control: cleared controller inventory/state");
+}
+
+/// Drops `agents` side by side, first removing the topic records they host
+/// from the host's directory, so the same machine ids register again at
+/// once instead of meeting the stale records until their lease runs out.
+fn retire_agents(bus: &GearboxBus, agents: Vec<MachineAgent>) {
+    let directory = bus.host.agent.directory();
+    let owners: HashSet<_> = agents.iter().map(|agent| agent.agent.endpoint_id()).collect();
+    for entry in directory.all_entries() {
+        if owners.contains(&entry.endpoint_id()) {
+            directory.remove(entry.topic(), entry.exchange());
+        }
+    }
+    std::thread::scope(|scope| {
+        for agent in agents {
+            scope.spawn(move || drop(agent));
+        }
+    });
 }
 
 /// Namespace of each live machine agent → the controller it drives.
@@ -4826,7 +4839,9 @@ fn sync_agents(
         .cloned()
         .collect();
     for machine_id in stale {
-        bus.machines.remove(&machine_id);
+        if let Some(agent) = bus.machines.remove(&machine_id) {
+            retire_agents(&bus, vec![agent]);
+        }
         keys.0.remove(&machine_id);
         info!("gearbox-control: machine agent `{machine_id}` withdrawn");
     }
