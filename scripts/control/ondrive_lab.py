@@ -35,6 +35,14 @@ AREA_FILE = REPO / "target" / "lab" / "area.txt"
 AREAS = 48
 # Share of the nominal speed a run is allowed to average, for soil slip.
 SLIP_ALLOWANCE = 0.25
+# Areas tried before a run starts anyway, and the heading, radians, a
+# freshly spawned machine must settle within.
+SPAWN_TRIES = 3
+SPAWN_YAW_TOLERANCE = 0.05
+# Sim seconds after which a robot still within STUCK_DISTANCE metres of its
+# spawn counts as stuck in the terrain there.
+STUCK_S = 20.0
+STUCK_DISTANCE = 0.5
 # Runs between viewer restarts when ONDRIVE_LAB_KITTY is set.
 RESTART_EVERY = 15
 
@@ -447,11 +455,15 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     m = MACHINES[mname]
     sc = scenario(sname, m.scale)
     lab.fresh()
-    lab.origin = next_area()
-    lab.clear()
-    robot = lab.spawn("robot", m, 0.0, 0.0, 0.0)
+    for _ in range(SPAWN_TRIES):
+        lab.origin = next_area()
+        lab.clear()
+        robot = lab.spawn("robot", m, 0.0, 0.0, 0.0)
+        s0 = robot.state(wait=1.0)
+        if s0 is not None and abs(wrap(s0.heading_rad)) < SPAWN_YAW_TOLERANCE:
+            break
+        print(f"  spawn at {lab.origin} settled at yaw {s0.heading_rad if s0 else float('nan'):+.2f}, next area", flush=True)
     lab.camera("robot", 14.0 * m.scale)
-    s0 = robot.state(wait=1.0)
     ox, oy = s0.x, s0.y
     scene = Scene(lab.gb, m, f"{kind} · {sname}")
 
@@ -562,6 +574,9 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         if lost_since is not None and now - lost_since > 3.0:
             status = f"lost: {err:.1f} m off the path"
             break
+        if now - t0 > STUCK_S and math.hypot(st.x - ox, st.y - oy) < STUCK_DISTANCE:
+            status = "stuck: terrain at the spawn"
+            break
         time.sleep(max(0.0, TICK - (time.time() - wall)))
     for _ in range(10):
         send(robot, 0.0, 0.0)
@@ -578,7 +593,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     if sc.closed:
         status = "completed" if travelled >= ref.lap_len * sc.laps * 0.95 else status
     result = {
-        "machine": mname, "controller": kind, "scenario": sname, "status": status,
+        "machine": mname, "controller": kind, "scenario": sname, "status": status, "area": list(lab.origin),
         "time": round(log[-1][0] if log else 0.0, 2), "travelled": round(travelled, 2),
         "cte_rms": round(math.sqrt(sum(e * e for e in errs) / max(1, len(errs))), 3),
         "cte_max": round(max(errs) if errs else 0.0, 3),
