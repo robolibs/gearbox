@@ -31,8 +31,10 @@ import ondrive  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 TICK = 0.05
 AREA_FILE = REPO / "target" / "lab" / "area.txt"
-# Areas the runs cycle through: four rows of twelve on flat ground.
-AREAS = 48
+# Areas the runs cycle through: twelve along each of the flat rows, north
+# metres (the row at 240 is on a slope).
+AREA_ROWS = (60.0, 150.0, 330.0)
+AREAS = 12 * len(AREA_ROWS)
 # Share of the nominal speed a run is allowed to average, for soil slip.
 SLIP_ALLOWANCE = 0.25
 # Areas tried before a run starts anyway, and the heading, radians, a
@@ -226,7 +228,7 @@ def next_area() -> tuple[float, float]:
     AREA_FILE.parent.mkdir(parents=True, exist_ok=True)
     k = (int(AREA_FILE.read_text()) if AREA_FILE.exists() else 0) % AREAS
     AREA_FILE.write_text(str(k + 1))
-    return 60.0 + 70.0 * (k % 12), 60.0 + 90.0 * (k // 12)
+    return 60.0 + 70.0 * (k % 12), AREA_ROWS[k // 12]
 
 
 class Lab:
