@@ -41,6 +41,10 @@ SLIP_ALLOWANCE = 0.25
 # freshly spawned machine must settle within.
 SPAWN_TRIES = 3
 SPAWN_YAW_TOLERANCE = 0.05
+# Loads of a machine tried, and wall-clock seconds waited on each, before a
+# spawn fails.
+LOAD_TRIES = 3
+LOAD_WAIT_S = 60.0
 # Sim seconds after which a robot still within STUCK_DISTANCE metres of its
 # spawn counts as stuck in the terrain there.
 STUCK_S = 20.0
@@ -280,16 +284,22 @@ class Lab:
         """Spawn at (x, y) of the robot frame. A machine reports its pose from
         its own spawn point, axes x east and y north."""
         north, east = self.origin[0] + y, self.origin[1] + x
-        self.gb.load_machine(ns, str(REPO / m.usd), x=north, z=east, yaw_deg=math.degrees(yaw))
-        deadline = time.time() + 180
-        while True:
-            try:
-                mach = self.gb.machine(ns, timeout=30)
+        mach = None
+        for attempt in range(LOAD_TRIES):
+            self.gb.load_machine(ns, str(REPO / m.usd), x=north, z=east, yaw_deg=math.degrees(yaw))
+            deadline = time.time() + LOAD_WAIT_S
+            while mach is None:
+                try:
+                    mach = self.gb.machine(ns, timeout=30)
+                except RuntimeError:
+                    if time.time() > deadline:
+                        break
+                    time.sleep(2.0)
+            if mach is not None:
                 break
-            except RuntimeError:
-                if time.time() > deadline:
-                    raise
-                time.sleep(2.0)
+            print(f"  {ns} did not appear, loading it again ({attempt + 1}/{LOAD_TRIES})", flush=True)
+        if mach is None:
+            raise RuntimeError(f"machine `{ns}` did not appear after {LOAD_TRIES} loads")
         mach.claim(hold_ms=800, client="ondrive_lab")
         t0 = time.time()
         while time.time() - t0 < 30:
