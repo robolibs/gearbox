@@ -89,8 +89,8 @@ MACHINES: dict[str, Machine] = {
                       width=0.75, length=0.98, wheelbase=0.65, max_steer=0.46, steer_rate=0.3, scale=1.5,
                       rear_offset=0.28),
     "kubota": Machine("assets/machines/usd/kubota_tractor.usdz", "ackermann", vmax=2.0, wmax=0.7, accel=0.6,
-                      width=1.9, length=3.6, wheelbase=2.0, max_steer=0.45, steer_rate=0.3, scale=3.0,
-                      body_offset=1.37),
+                      width=2.3, length=5.1, wheelbase=2.0, max_steer=0.45, steer_rate=0.3, scale=3.0,
+                      body_offset=1.35),
     "agxeed": Machine("assets/machines/usd/agxeed_agbot.usdz", "skid_steer", vmax=1.5, wmax=1.0, accel=0.6,
                       width=3.0, length=4.5, track=2.5, scale=3.0),
 }
