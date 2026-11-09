@@ -529,8 +529,10 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
             obs_now.append((mx0 + ist.x, my0 + ist.y, ivx, ivy, 0.6))
         for i, o in enumerate(obs_now):
             world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
-        for o in obs_now:
-            min_clear = min(min_clear, box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4], m.body_offset))
+        clears = [box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4], m.body_offset) for o in obs_now]
+        now_clear = min(clears, default=float("inf"))
+        near = obs_now[clears.index(now_clear)] if clears else None
+        min_clear = min(min_clear, now_clear)
 
         state = ondrive.RobotState(pose=((st.x, st.y, st.z), st.heading_rad), velocity=(st.vx, st.wz, st.vy),
                                    allow_move=True, allow_reverse=sc.reverse)
@@ -545,10 +547,12 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
             last_w = w
         err = ref.error(st.x, st.y)
         log.append([round(now - t0, 3), round(st.x - ox, 3), round(st.y - oy, 3), round(st.heading_rad, 3),
-                    round(st.vx, 3), round(st.wz, 3), round(v, 3), round(w, 3), round(err, 3), cmd.valid])
+                    round(st.vx, 3), round(st.wz, 3), round(v, 3), round(w, 3), round(err, 3), cmd.valid,
+                    round(now_clear, 3) if near else None,
+                    [round(near[0] - ox, 2), round(near[1] - oy, 2)] if near else None])
         if verbose and len(log) % 20 == 0:
             print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} w={w:+.2f} clear={min_clear:5.2f} {cmd.status_message}")
-        scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], min((box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4], m.body_offset) for o in obs_now), default=float("inf")))
+        scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], now_clear)
         if not cmd.valid and "completed" not in cmd.status_message.lower():
             status = f"invalid: {cmd.status_message}"
         if t.is_path_completed() or (sc.goal and t.is_goal_reached()):
