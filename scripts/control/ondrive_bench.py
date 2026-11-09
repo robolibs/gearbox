@@ -45,7 +45,7 @@ class Plant:
         dv = max(-self.m.accel * dt, min(self.m.accel * dt, v_cmd - self.v))
         self.v += dv
         if self.m.steering == "ackermann":
-            ref = max(abs(self.v), 0.05)
+            ref = self.v if abs(self.v) > 0.05 else math.copysign(0.05, v_cmd if abs(v_cmd) > 1e-6 else 1.0)
             want = math.atan(w_cmd * self.m.wheelbase / ref) if abs(w_cmd) > 1e-3 else 0.0
             want = max(-self.m.max_steer, min(self.m.max_steer, want))
             rate = (self.m.steer_rate or 10.0) * dt
