@@ -41,10 +41,8 @@ SLIP_ALLOWANCE = 0.25
 # freshly spawned machine must settle within.
 SPAWN_TRIES = 3
 SPAWN_YAW_TOLERANCE = 0.05
-# Loads of a machine tried, and wall-clock seconds waited on each, before a
-# spawn fails.
-LOAD_TRIES = 3
-LOAD_WAIT_S = 60.0
+# Wall-clock seconds a loaded machine is waited on before its spawn fails.
+LOAD_WAIT_S = 240.0
 # Sim seconds after which a robot still within STUCK_DISTANCE metres of its
 # spawn counts as stuck in the terrain there.
 STUCK_S = 20.0
@@ -245,6 +243,10 @@ def next_area() -> tuple[float, float]:
     return 60.0 + 70.0 * (k % 12), AREA_ROWS[k // 12]
 
 
+class SpawnFailed(RuntimeError):
+    """A machine loaded into the viewer that never came up."""
+
+
 class Lab:
     def __init__(self, instance: str):
         self.gb = Gearbox(instance)
@@ -253,13 +255,14 @@ class Lab:
         self.markers: list[str] = []
         self.runs = 0
 
-    def fresh(self):
-        """Every `RESTART_EVERY` runs, restart the viewer in the kitty window at
-        `ONDRIVE_LAB_KITTY` with `ONDRIVE_LAB_LAUNCH`, and reconnect. Nothing
-        when unset."""
-        self.runs += 1
+    def fresh(self, force: bool = False):
+        """Every `RESTART_EVERY` runs, or now when `force`, restart the viewer
+        in the kitty window at `ONDRIVE_LAB_KITTY` with `ONDRIVE_LAB_LAUNCH`,
+        and reconnect. Nothing when unset."""
+        if not force:
+            self.runs += 1
         kitty = os.environ.get("ONDRIVE_LAB_KITTY")
-        if not kitty or self.runs % RESTART_EVERY:
+        if not kitty or (not force and self.runs % RESTART_EVERY):
             return
         launch = os.environ.get("ONDRIVE_LAB_LAUNCH", f"target/debug/gearbox run --name {self.instance} --ephemeral")
         send = lambda text: subprocess.run(["kitty", "@", "--to", kitty, "send-text", "--match", "id:1", text],  # noqa: E731
@@ -284,22 +287,16 @@ class Lab:
         """Spawn at (x, y) of the robot frame. A machine reports its pose from
         its own spawn point, axes x east and y north."""
         north, east = self.origin[0] + y, self.origin[1] + x
-        mach = None
-        for attempt in range(LOAD_TRIES):
-            self.gb.load_machine(ns, str(REPO / m.usd), x=north, z=east, yaw_deg=math.degrees(yaw))
-            deadline = time.time() + LOAD_WAIT_S
-            while mach is None:
-                try:
-                    mach = self.gb.machine(ns, timeout=30)
-                except RuntimeError:
-                    if time.time() > deadline:
-                        break
-                    time.sleep(2.0)
-            if mach is not None:
+        self.gb.load_machine(ns, str(REPO / m.usd), x=north, z=east, yaw_deg=math.degrees(yaw))
+        deadline = time.time() + LOAD_WAIT_S
+        while True:
+            try:
+                mach = self.gb.machine(ns, timeout=30)
                 break
-            print(f"  {ns} did not appear, loading it again ({attempt + 1}/{LOAD_TRIES})", flush=True)
-        if mach is None:
-            raise RuntimeError(f"machine `{ns}` did not appear after {LOAD_TRIES} loads")
+            except RuntimeError:
+                if time.time() > deadline:
+                    raise SpawnFailed(f"machine `{ns}` did not appear within {LOAD_WAIT_S:.0f}s") from None
+                time.sleep(2.0)
         mach.claim(hold_ms=800, client="ondrive_lab")
         t0 = time.time()
         while time.time() - t0 < 30:
@@ -788,7 +785,12 @@ def main():
         for kind in kinds:
             if sname in OBSTACLE_SCENARIOS and kind not in OBSTACLE_AWARE and a.controller == "all":
                 continue
-            r = run_one(lab, a.machine, kind, sname, json.loads(a.params), a.verbose)
+            try:
+                r = run_one(lab, a.machine, kind, sname, json.loads(a.params), a.verbose)
+            except SpawnFailed as e:
+                print(f"  {e}; restarting {lab.instance} and running it again", flush=True)
+                lab.fresh(force=True)
+                r = run_one(lab, a.machine, kind, sname, json.loads(a.params), a.verbose)
             results.append(r)
             yaw = "" if r["final_yaw"] is None else f"{r['final_yaw']:.2f}"
             clear = "" if r["min_clearance"] is None else f"{r['min_clearance']:.2f}"
