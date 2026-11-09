@@ -101,7 +101,7 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
         world = ondrive.World()
         for i, o in enumerate(obs):
             world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
-        now_clear = min((box_clearance(plant.x, plant.y, plant.yaw, m.length, m.width, o[0], o[1], o[4]) for o in obs),
+        now_clear = min((box_clearance(plant.x, plant.y, plant.yaw, m.length, m.width, o[0], o[1], o[4], m.body_offset) for o in obs),
                         default=float("inf"))
         clear = min(clear, now_clear)
         state = ondrive.RobotState(pose=((plant.x, plant.y, 0.0), plant.yaw), velocity=(plant.v, plant.w, 0.0),

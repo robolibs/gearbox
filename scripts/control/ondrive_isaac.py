@@ -303,7 +303,7 @@ async def main():
             now_clear = float("inf")
             for i, o in enumerate(obs):
                 world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
-                now_clear = min(now_clear, box_clearance(x, y, yaw, m.length, m.width, o[0], o[1], o[4]))
+                now_clear = min(now_clear, box_clearance(x, y, yaw, m.length, m.width, o[0], o[1], o[4], m.body_offset))
             clear = min(clear, now_clear)
             state = ondrive.RobotState(pose=((x, y, float(p[2])), yaw), velocity=(v_fwd, float(ang[2]), 0.0), allow_move=True)
             cmd = t.tick(state, dt, world)

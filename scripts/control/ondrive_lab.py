@@ -48,6 +48,8 @@ class Machine:
     track: float = 0.0
     steer_rate: float = 0.0
     rear_offset: float = 0.0
+    # Metres the middle of the body lies ahead of the reported pose.
+    body_offset: float = 0.0
     scale: float = 1.0
 
 
@@ -57,7 +59,8 @@ MACHINES: dict[str, Machine] = {
     "hunter": Machine("assets/machines/usd/agilex_hunter.usdz", "ackermann", vmax=1.5, wmax=1.5, accel=1.0,
                       width=0.75, length=0.98, wheelbase=0.65, max_steer=0.46, steer_rate=0.3, scale=1.5),
     "kubota": Machine("assets/machines/usd/kubota_tractor.usdz", "ackermann", vmax=2.0, wmax=0.7, accel=0.6,
-                      width=1.9, length=3.6, wheelbase=2.0, max_steer=0.45, steer_rate=0.3, scale=3.0),
+                      width=1.9, length=3.6, wheelbase=2.0, max_steer=0.45, steer_rate=0.3, scale=3.0,
+                      body_offset=1.37),
     "agxeed": Machine("assets/machines/usd/agxeed_agbot.usdz", "skid_steer", vmax=1.5, wmax=1.0, accel=0.6,
                       width=3.0, length=4.5, track=2.5, scale=3.0),
 }
@@ -162,10 +165,11 @@ def densify(points, step):
     return out
 
 
-def box_clearance(px, py, yaw, length, width, ox, oy, r):
-    """Distance from a circle (ox, oy, r) to a robot box centred at (px, py)."""
+def box_clearance(px, py, yaw, length, width, ox, oy, r, offset=0.0):
+    """Distance from a circle (ox, oy, r) to a robot box centred `offset`
+    ahead of (px, py)."""
     c, s = math.cos(yaw), math.sin(yaw)
-    dx, dy = ox - px, oy - py
+    dx, dy = ox - (px + offset * c), oy - (py + offset * s)
     bx, by = c * dx + s * dy, -s * dx + c * dy
     qx, qy = max(abs(bx) - length / 2, 0.0), max(abs(by) - width / 2, 0.0)
     return math.hypot(qx, qy) - r
@@ -344,8 +348,8 @@ def constraints(m: Machine, reverse: bool):
     c.rear_wheelbase = m.rear_offset
     c.robot_width = m.width
     c.robot_length = m.length
-    c.set_footprint(points=[(m.length / 2, m.width / 2), (-m.length / 2, m.width / 2),
-                            (-m.length / 2, -m.width / 2), (m.length / 2, -m.width / 2)])
+    front, back = m.body_offset + m.length / 2, m.body_offset - m.length / 2
+    c.set_footprint(points=[(front, m.width / 2), (back, m.width / 2), (back, -m.width / 2), (front, -m.width / 2)])
     return c
 
 
@@ -472,7 +476,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         for i, o in enumerate(obs_now):
             world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
         for o in obs_now:
-            min_clear = min(min_clear, box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4]))
+            min_clear = min(min_clear, box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4], m.body_offset))
 
         state = ondrive.RobotState(pose=((st.x, st.y, st.z), st.heading_rad), velocity=(st.vx, st.wz, st.vy),
                                    allow_move=True, allow_reverse=sc.reverse)
@@ -490,7 +494,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
                     round(st.vx, 3), round(st.wz, 3), round(v, 3), round(w, 3), round(err, 3), cmd.valid])
         if verbose and len(log) % 20 == 0:
             print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} w={w:+.2f} clear={min_clear:5.2f} {cmd.status_message}")
-        scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], min((box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4]) for o in obs_now), default=float("inf")))
+        scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], min((box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4], m.body_offset) for o in obs_now), default=float("inf")))
         if not cmd.valid and "completed" not in cmd.status_message.lower():
             status = f"invalid: {cmd.status_message}"
         if t.is_path_completed() or (sc.goal and t.is_goal_reached()):
