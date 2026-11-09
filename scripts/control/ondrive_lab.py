@@ -30,6 +30,8 @@ import ondrive  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 TICK = 0.05
 AREA_FILE = REPO / "target" / "lab" / "area.txt"
+# Areas the runs cycle through: four rows of twelve on flat ground.
+AREAS = 48
 
 
 @dataclass
@@ -204,7 +206,7 @@ class Reference:
 
 def next_area() -> tuple[float, float]:
     AREA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    k = int(AREA_FILE.read_text()) if AREA_FILE.exists() else 0
+    k = (int(AREA_FILE.read_text()) if AREA_FILE.exists() else 0) % AREAS
     AREA_FILE.write_text(str(k + 1))
     return 60.0 + 70.0 * (k % 12), 60.0 + 90.0 * (k // 12)
 
