@@ -178,6 +178,8 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             entry.name, entry.did, entry.pid
         );
     }
+    // Ctrl-C reaches the sim as well; wait while it shuts down cleanly.
+    let _ = super::install_ctrlc();
     let status = child.wait()?;
     registry::remove(&args.name);
     match status.code() {

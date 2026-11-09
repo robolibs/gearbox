@@ -241,6 +241,11 @@ impl WindowApp for GearboxApp {
         let Some(world) = view.world_mut() else {
             return;
         };
+        // An AppExit (Ctrl-C, SIGTERM, `instance stop`) closes the window,
+        // so the Bevy app drops and its peerbus segments unlink.
+        if world.get_resource::<Messages<AppExit>>().is_some_and(|exit| !exit.is_empty()) {
+            egui.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let physics_on = world.resource::<gearbox_api::PhysicsActive>().0;
         let outbox = Outbox::default();
         let ctx = PaneCtx {

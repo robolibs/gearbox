@@ -15,6 +15,7 @@ use crate::{
 };
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
+/// Ctrl-C, SIGTERM and SIGHUP end the app with an AppExit, a second one at once.
 pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
     // big_space propagates transforms in the stock plugin's place.
     group
@@ -24,6 +25,7 @@ pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
             ..default()
         })
         .disable::<TransformPlugin>()
+        .enable::<bevy::app::TerminalCtrlCHandlerPlugin>()
 }
 
 pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bool) {
