@@ -604,7 +604,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         if t.is_path_completed() or (sc.goal and t.is_goal_reached()):
             status = "completed"
             break
-        lost_since = (lost_since or now) if err > lost_after else None
+        lost_since = (lost_since or now) if err > lost_after and not sc.goal else None
         if lost_since is not None and now - lost_since > 3.0:
             status = f"lost: {err:.1f} m off the path"
             break

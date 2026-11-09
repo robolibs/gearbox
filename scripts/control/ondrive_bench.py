@@ -135,7 +135,7 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
         if t.is_path_completed() or (sc.goal and t.is_goal_reached()):
             status = "completed"
             break
-        if err > lost:
+        if err > lost and not sc.goal:
             status = f"lost {err:.1f} m"
             break
     rms = math.sqrt(sum(e * e for e in errs) / max(1, len(errs)))
