@@ -82,7 +82,7 @@ MACHINES: dict[str, Machine] = {
 CONTROLLERS = [
     "pid", "carrot", "pose_regulator", "apf", "dwa", "pose_reach",
     "pure_pursuit", "regulated_pursuit", "vector_pursuit", "stanley", "lqr", "kanayama", "flc", "ilc",
-    "mpc", "ilqr", "mppi", "mca", "soc", "teb",
+    "mpc", "ilqr", "mppi", "mca", "soc", "teb", "slip_adaptive",
 ]
 OBSTACLE_AWARE = ["mca", "soc", "dwa", "teb", "regulated_pursuit", "apf", "mppi"]
 
@@ -407,6 +407,8 @@ def tracker_for(kind: str, m: Machine, sc: Scenario, params: dict):
     t.init(constraints(m, sc.reverse))
     t.set_seed(7)
     t.set_debug("full")
+    if os.environ.get("ONDRIVE_SAFETY") and hasattr(t, "set_safety"):
+        t.set_safety(json.loads(os.environ["ONDRIVE_SAFETY"]))
     if kind == "flc":
         params = {"base_velocity": 0.8 * m.vmax, **params}
     if params:

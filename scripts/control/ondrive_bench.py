@@ -29,6 +29,10 @@ from ondrive_lab import (  # noqa: E402
 
 DELAY = 0.2
 YAW_GAIN = 1.0
+# Sideslip angles, radians: the rear (or only) axle's drift and the steered
+# axle's, as on a slope or low-grip soil.
+SLIP_REAR = 0.0
+SLIP_FRONT = 0.0
 
 
 class Plant:
@@ -37,6 +41,7 @@ class Plant:
     def __init__(self, m, x=0.0, y=0.0, yaw=0.0):
         self.m = m
         self.x, self.y, self.yaw, self.v, self.w, self.steer = x, y, yaw, 0.0, 0.0, 0.0
+        self.vy = 0.0
         self.queue = [(0.0, 0.0)] * max(1, round(DELAY / TICK))
 
     def step(self, v_cmd, w_cmd, dt):
@@ -50,13 +55,15 @@ class Plant:
             want = max(-self.m.max_steer, min(self.m.max_steer, want))
             rate = (self.m.steer_rate or 10.0) * dt
             self.steer += max(-rate, min(rate, want - self.steer))
-            self.w = self.v * math.tan(self.steer) / self.m.wheelbase
+            slid = math.tan(self.steer + SLIP_FRONT) - math.tan(SLIP_REAR)
+            self.w = self.v * math.cos(SLIP_REAR) * slid / self.m.wheelbase
         else:
             self.w = YAW_GAIN * max(-self.m.wmax, min(self.m.wmax, w_cmd))
         self.yaw = wrap(self.yaw + self.w * dt)
         a = self.m.rear_offset if self.m.steering == "ackermann" else 0.0
-        self.x += (self.v * math.cos(self.yaw) - a * self.w * math.sin(self.yaw)) * dt
-        self.y += (self.v * math.sin(self.yaw) + a * self.w * math.cos(self.yaw)) * dt
+        self.vy = a * self.w + self.v * math.tan(SLIP_REAR)
+        self.x += (self.v * math.cos(self.yaw) - self.vy * math.sin(self.yaw)) * dt
+        self.y += (self.v * math.sin(self.yaw) + self.vy * math.cos(self.yaw)) * dt
 
 
 def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = None) -> dict:
@@ -105,7 +112,7 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
         now_clear = min((box_clearance(plant.x, plant.y, plant.yaw, m.length, m.width, o[0], o[1], o[4], m.body_offset) for o in obs),
                         default=float("inf"))
         clear = min(clear, now_clear)
-        state = ondrive.RobotState(pose=((plant.x, plant.y, 0.0), plant.yaw), velocity=(plant.v, plant.w, 0.0),
+        state = ondrive.RobotState(pose=((plant.x, plant.y, 0.0), plant.yaw), velocity=(plant.v, plant.w, plant.vy),
                                    allow_move=True, allow_reverse=sc.reverse)
         cmd = t.tick(state, TICK, world)
         v, w = (cmd.linear_velocity, cmd.angular_velocity) if cmd.valid else (0.0, 0.0)
@@ -145,9 +152,12 @@ def main():
     ap.add_argument("-v", "--verbose", action="count", default=0)
     ap.add_argument("--params", default="{}", help="controller parameters as JSON")
     ap.add_argument("--yaw-gain", type=float, default=1.0, help="share of the commanded turn a skid-steer delivers")
+    ap.add_argument("--slip-rear", type=float, default=0.0, help="sideslip angle of the rear axle, radians")
+    ap.add_argument("--slip-front", type=float, default=0.0, help="sideslip angle of the steered axle, radians")
     a = ap.parse_args()
-    global YAW_GAIN
+    global YAW_GAIN, SLIP_REAR, SLIP_FRONT
     YAW_GAIN = a.yaw_gain
+    SLIP_REAR, SLIP_FRONT = a.slip_rear, a.slip_front
     kinds = CONTROLLERS if a.controller == "all" else a.controller.split(",")
     for sname in a.scenario.split(","):
         for kind in kinds:
