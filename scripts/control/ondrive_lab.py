@@ -586,6 +586,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     farthest, driven, last_xy = 0.0, 0.0, (ox, oy)
     flips, last_w = 0, 0.0
     status = "timeout"
+    stalled = 0.0
     while True:
         wall = time.time()
         now = clock()
@@ -646,6 +647,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], now_clear)
         marks.append(("scene", time.time()))
         slow = [(name, at - before) for (_, before), (name, at) in zip([("start", wall)] + marks, marks) if at - before > SLOW_CALL_S]
+        stalled += sum(s for _, s in slow)
         if slow:
             print(f"  slow loop at t={now - t0:.1f}: " + ", ".join(f"{name} {s:.1f} s" for name, s in slow), flush=True)
         if not cmd.valid and "completed" not in cmd.status_message.lower():
@@ -700,6 +702,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         "final_pos": round(final_pos, 3), "final_yaw": round(final_yaw, 3) if final_yaw is not None else None,
         "min_clearance": round(min_clear, 3) if min_clear != float("inf") else None,
         "flips_per_min": round(flips / max(1e-3, (log[-1][0] if log else 1.0) / 60.0), 1),
+        "stalled_s": round(stalled, 1),
         "params": params, "log": log,
     }
     return result
@@ -840,7 +843,7 @@ def main():
     kinds = CONTROLLERS if a.controller == "all" else a.controller.split(",")
     names = SCENARIOS if a.scenario == "all" else a.scenario.split(",")
     results = []
-    print(f"{'machine':8} {'controller':18} {'scenario':16} {'status':12} {'time':>6} {'rms':>6} {'max':>6} {'final':>6} {'yaw':>5} {'clear':>6} {'flips':>5}")
+    print(f"{'machine':8} {'controller':18} {'scenario':16} {'status':12} {'time':>6} {'rms':>6} {'max':>6} {'final':>6} {'yaw':>5} {'clear':>6} {'flips':>5} {'stall':>5}")
     for sname in names:
         for kind in kinds:
             if sname in OBSTACLE_SCENARIOS and kind not in OBSTACLE_AWARE and a.controller == "all":
@@ -855,7 +858,7 @@ def main():
             yaw = "" if r["final_yaw"] is None else f"{r['final_yaw']:.2f}"
             clear = "" if r["min_clearance"] is None else f"{r['min_clearance']:.2f}"
             print(f"{r['machine']:8} {kind:18} {sname:16} {r['status'][:12]:12} {r['time']:6.1f} {r['cte_rms']:6.2f} "
-                  f"{r['cte_max']:6.2f} {r['final_pos']:6.2f} {yaw:>5} {clear:>6} {r['flips_per_min']:5.1f}", flush=True)
+                  f"{r['cte_max']:6.2f} {r['final_pos']:6.2f} {yaw:>5} {clear:>6} {r['flips_per_min']:5.1f} {r['stalled_s']:5.1f}", flush=True)
             if a.out:
                 Path(a.out).parent.mkdir(parents=True, exist_ok=True)
                 Path(a.out).write_text(json.dumps(results))
