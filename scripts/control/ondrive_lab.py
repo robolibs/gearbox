@@ -47,7 +47,7 @@ SPAWN_TRIES = 3
 SPAWN_YAW_TOLERANCE = 0.05
 # Wall-clock seconds a loaded machine is waited on before its spawn fails.
 LOAD_WAIT_S = 240.0
-# Sim seconds after which a robot still within STUCK_DISTANCE metres of its
+# Sim seconds after which a robot that never got STUCK_DISTANCE metres from its
 # spawn counts as stuck in the terrain there.
 STUCK_S = 20.0
 STUCK_DISTANCE = 0.5
@@ -575,6 +575,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     t0 = clock()
     last = t0
     min_clear = float("inf")
+    farthest, driven, last_xy = 0.0, 0.0, (ox, oy)
     flips, last_w = 0, 0.0
     status = "timeout"
     while True:
@@ -653,7 +654,13 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         if lost_since is not None and now - lost_since > 3.0:
             status = f"lost: {err:.1f} m off the path"
             break
-        if now - t0 > STUCK_S and math.hypot(st.x - ox, st.y - oy) < STUCK_DISTANCE:
+        farthest = max(farthest, math.hypot(st.x - ox, st.y - oy))
+        driven += math.hypot(st.x - last_xy[0], st.y - last_xy[1])
+        last_xy = (st.x, st.y)
+        if sc.closed and driven >= length:
+            status = "completed"
+            break
+        if now - t0 > STUCK_S and farthest < STUCK_DISTANCE:
             status = "stuck: terrain at the spawn"
             break
         time.sleep(max(0.0, TICK - (time.time() - wall)))
