@@ -30,6 +30,8 @@ import ondrive  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 TICK = 0.05
+# Seconds a part of one control-loop pass may take before the run reports it.
+SLOW_CALL_S = 1.0
 AREA_FILE = REPO / "target" / "lab" / "area.txt"
 # Areas the runs cycle through: twelve along each of the flat rows, north
 # metres (the row at 240 is on a slope).
@@ -545,6 +547,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         now = clock()
         if now - t0 > limit:
             break
+        marks = [("clock", time.time())]
         st = robot.state()
         if st is None:
             time.sleep(TICK)
@@ -567,6 +570,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
             ivx = ist.vx * math.cos(ist.heading_rad)
             ivy = ist.vx * math.sin(ist.heading_rad)
             obs_now.append((mx0 + ist.x, my0 + ist.y, ivx, ivy, 0.6))
+        marks.append(("movers", time.time()))
         for i, o in enumerate(obs_now):
             world.add_obstacle(i, o[4], [predicted(o)], dt=PRED_DT)
         clears = [box_clearance(st.x, st.y, st.heading_rad, m.length, m.width, o[0], o[1], o[4], m.body_offset) for o in obs_now]
@@ -579,8 +583,10 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         dt = max(1e-3, now - last)
         last = now
         cmd = t.tick(state, dt, world)
+        marks.append(("tick", time.time()))
         v, w = (cmd.linear_velocity, cmd.angular_velocity) if cmd.valid else (0.0, 0.0)
         drive(robot, v, w, st.vx)
+        marks.append(("drive", time.time()))
         if abs(w) > 0.2 * m.wmax and last_w * w < 0:
             flips += 1
         if abs(w) > 0.2 * m.wmax:
@@ -594,6 +600,10 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
             print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} vx={st.vx:+.2f} w={w:+.2f} "
                   f"near={now_clear:5.2f} min={min_clear:5.2f} {cmd.status_message}", flush=True)
         scene.tick(st, t, cmd, [o for o in obs_now if o[2] or o[3]], now_clear)
+        marks.append(("scene", time.time()))
+        slow = [(name, at - before) for (_, before), (name, at) in zip([("start", wall)] + marks, marks) if at - before > SLOW_CALL_S]
+        if slow:
+            print(f"  slow loop at t={now - t0:.1f}: " + ", ".join(f"{name} {s:.1f} s" for name, s in slow), flush=True)
         if not cmd.valid and "completed" not in cmd.status_message.lower():
             status = f"invalid: {cmd.status_message}"
         if now_clear < CONTACT_M:
