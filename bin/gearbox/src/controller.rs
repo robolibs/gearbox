@@ -1121,7 +1121,7 @@ fn apply_builtin_ackermann_cmd_vel(
                         heading_rad: body_heading,
                         roll_rad,
                         pitch_rad,
-                        linear_speed_mps: body.linvel().length(),
+                        linear_speed_mps: speed_along(body.linvel(), body_heading),
                         yaw_rate_rps: body.angvel().y,
                         // Filled in below, once wheel_targets exists.
                         wheel_encoders: Vec::new(),
@@ -1442,7 +1442,7 @@ fn apply_builtin_diff_drive_cmd_vel(
                         heading_rad: machine_heading_rad(&body),
                         roll_rad,
                         pitch_rad,
-                        linear_speed_mps: body.linvel().length(),
+                        linear_speed_mps: speed_along(body.linvel(), machine_heading_rad(&body)),
                         yaw_rate_rps: body.angvel().y,
                         wheel_encoders: Vec::new(),
                     });
@@ -1492,7 +1492,7 @@ fn apply_builtin_diff_drive_cmd_vel(
                         heading_rad: machine_heading_rad(&crate::physics::chassis::ChassisBody::new(&*body, turn)),
                         roll_rad,
                         pitch_rad,
-                        linear_speed_mps: body.linvel().length(),
+                        linear_speed_mps: speed_along(body.linvel(), machine_heading_rad(&crate::physics::chassis::ChassisBody::new(&*body, turn))),
                         yaw_rate_rps: body.angvel().y,
                         // Differential-drive path: no wheel_targets computed
                         // here, so no measured encoder readings yet either.
@@ -1716,6 +1716,12 @@ pub(crate) fn body_forward_vector(body: &dyn Body) -> Option<DVec3> {
     let mut forward = body.rotation() * DVec3::new(0.0, -1.0, 0.0);
     forward.y = 0.0;
     (forward.length_squared() > 1e-9).then(|| forward.normalize())
+}
+
+/// Ground speed of `linvel` along the heading `heading_rad` (0 facing +z,
+/// rising towards +x): positive forward, negative in reverse.
+pub(crate) fn speed_along(linvel: DVec3, heading_rad: f64) -> f64 {
+    linvel.x * heading_rad.sin() + linvel.z * heading_rad.cos()
 }
 
 fn sanitize_cmd_vel(cmd: CmdVel) -> CmdVel {

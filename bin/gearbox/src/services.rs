@@ -1025,7 +1025,7 @@ fn feed_master_inputs(
         if let Some(key) = keys.0.get(&a.master_id)
             && let Some(s) = states.states.get(key)
         {
-            state.ground_speed_mps = s.linear_speed_mps;
+            state.ground_speed_mps = s.linear_speed_mps.abs();
             state.heading_rad = s.heading_rad;
             state.roll_rad = s.roll_rad;
             state.pitch_rad = s.pitch_rad;
