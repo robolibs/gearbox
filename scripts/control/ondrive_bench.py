@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".python-packages")
 
 import ondrive  # noqa: E402
 from ondrive_lab import (  # noqa: E402
-    CONTROLLERS, MACHINES, PRED_DT, TICK, Reference, box_clearance, densify, predicted, scenario, tracker_for, wrap,
+    CONTROLLERS, MACHINES, PRED_DT, TICK, Reference, box_clearance, densify, predicted, scenario, start_heading, tracker_for,
+    wrap,
 )
 
 DELAY = 0.2
@@ -87,7 +88,7 @@ def run(mname: str, kind: str, sname: str, verbose: bool, params: dict | None = 
         t.set_goal(ondrive.Goal(target_pose=((gx, gy, 0.0), gyaw), tolerance_position=0.25 * m.scale, tolerance_orientation=0.25))
     else:
         t.set_path(path)
-    plant = Plant(m)
+    plant = Plant(m, yaw=start_heading(sc))
     limit = sc.time_limit or (ref.lap_len * (sc.laps or 1.0) / (0.5 * 0.8 * m.vmax) + 15.0)
     errs, flips, last_w, status, time_s = [], 0, 0.0, "timeout", 0.0
     dws, prev_w = [], 0.0

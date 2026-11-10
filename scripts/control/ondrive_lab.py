@@ -189,6 +189,13 @@ def wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
 
 
+def start_heading(sc: Scenario) -> float:
+    """Heading the machine starts `sc` with: along its first segment, facing back on a reversing start."""
+    (x0, y0), (x1, y1) = sc.points[0], sc.points[1]
+    back = math.pi if sc.speeds and sc.speeds[0] < 0 else 0.0
+    return wrap(math.atan2(y1 - y0, x1 - x0) + back)
+
+
 def densify(points, step):
     out = [points[0]]
     for (ax, ay), (bx, by) in zip(points, points[1:]):
@@ -520,12 +527,13 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
     m = MACHINES[mname]
     sc = scenario(sname, m.scale)
     lab.fresh()
+    yaw0 = start_heading(sc)
     for _ in range(SPAWN_TRIES):
         lab.origin = next_area()
         lab.clear()
-        robot = lab.spawn("robot", m, 0.0, 0.0, 0.0)
+        robot = lab.spawn("robot", m, 0.0, 0.0, yaw0)
         s0 = robot.state(wait=1.0)
-        if s0 is not None and abs(wrap(s0.heading_rad)) < SPAWN_YAW_TOLERANCE:
+        if s0 is not None and abs(wrap(s0.heading_rad - yaw0)) < SPAWN_YAW_TOLERANCE:
             break
         print(f"  spawn at {lab.origin} settled at yaw {s0.heading_rad if s0 else float('nan'):+.2f}, next area", flush=True)
     lab.camera("robot", 14.0 * m.scale)
