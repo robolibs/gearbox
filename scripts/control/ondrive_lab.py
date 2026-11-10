@@ -51,8 +51,8 @@ LOAD_WAIT_S = 240.0
 # spawn counts as stuck in the terrain there.
 STUCK_S = 20.0
 STUCK_DISTANCE = 0.5
-# Runs between viewer restarts when ONDRIVE_LAB_KITTY is set.
-RESTART_EVERY = 15
+# Runs between viewer restarts when ONDRIVE_LAB_KITTY or ONDRIVE_LAB_DETACH is set.
+RESTART_EVERY = 6
 # Gearbox coasts on a command below COAST_MPS and COAST_RPS while the machine
 # rolls faster than PARKED_MPS; a stop is sent as BRAKE_MPS in the direction
 # of travel, which the drive holds, until the machine is slow enough to park.
