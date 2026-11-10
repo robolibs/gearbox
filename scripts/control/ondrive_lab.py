@@ -324,9 +324,9 @@ class Lab:
                     raise SpawnFailed(f"machine `{ns}` did not appear within {LOAD_WAIT_S:.0f}s") from None
                 time.sleep(2.0)
         mach.claim(hold_ms=800, client="ondrive_lab")
-        t0 = time.time()
+        t0, s = time.time(), None
         while time.time() - t0 < 30:
-            mach.cmd_vel(0.0, 0.0)
+            drive(mach, 0.0, 0.0, s.vx if s is not None else 0.0)
             s = mach.state(wait=0.5)
             if s is not None and abs(s.vx) < 0.02 and time.time() - t0 > 2.0:
                 break
