@@ -100,9 +100,9 @@ MACHINES: dict[str, Machine] = {
 CONTROLLERS = [
     "pid", "carrot", "pose_regulator", "apf", "dwa", "pose_reach",
     "pure_pursuit", "regulated_pursuit", "vector_pursuit", "stanley", "lqr", "kanayama", "flc", "ilc",
-    "mpc", "ilqr", "mppi", "mca", "soc", "teb", "slip_adaptive",
+    "mpc", "ilqr", "mppi", "mca", "soc", "teb", "slip_adaptive", "velocity_obstacle",
 ]
-OBSTACLE_AWARE = ["mca", "soc", "dwa", "teb", "regulated_pursuit", "apf", "mppi"]
+OBSTACLE_AWARE = ["mca", "soc", "dwa", "teb", "regulated_pursuit", "apf", "mppi", "velocity_obstacle"]
 
 
 # ─── scenarios ───────────────────────────────────────────────────────
