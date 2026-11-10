@@ -224,13 +224,14 @@ class Reference:
         self.closed = closed
         self.travel = 0.0
 
-    def error(self, x, y):
+    def error(self, x, y, reach=3.0):
         """Distance to the nearest segment around the progress mark, which
-        only moves forward: reversing out of a cusp scores against the leg
-        leaving it, not the one it came in on."""
+        only moves forward and looks `reach` metres on: reversing out of a
+        cusp scores against the leg leaving it, not the one it came in on."""
         n = len(self.pts) - 1
+        ahead = max(30, math.ceil(reach * n / max(self.lap_len, 1e-9)))
         best = (float("inf"), 0)
-        for k in range(-3, 30):
+        for k in range(-3, ahead):
             i = self.seg + k
             if self.closed:
                 i %= n
@@ -636,7 +637,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
             flips += 1
         if abs(w) > 0.2 * m.wmax:
             last_w = w
-        err = ref.error(st.x, st.y)
+        err = ref.error(st.x, st.y, max(3.0, 1.5 * m.vmax * dt))
         log.append([round(now - t0, 3), round(st.x - ox, 3), round(st.y - oy, 3), round(st.heading_rad, 3),
                     round(st.vx, 3), round(st.wz, 3), round(v, 3), round(w, 3), round(err, 3), cmd.valid,
                     round(now_clear, 3) if near else None,
