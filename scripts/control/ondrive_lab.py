@@ -260,11 +260,16 @@ class Lab:
     def fresh(self, force: bool = False):
         """Every `RESTART_EVERY` runs, or now when `force`, restart the viewer
         in the kitty window at `ONDRIVE_LAB_KITTY` with `ONDRIVE_LAB_LAUNCH`,
-        and reconnect. Nothing when unset."""
+        or, with `ONDRIVE_LAB_DETACH`, stop it and run that shell command,
+        and reconnect. Nothing when neither is set."""
         if not force:
             self.runs += 1
         kitty = os.environ.get("ONDRIVE_LAB_KITTY")
-        if not kitty or (not force and self.runs % RESTART_EVERY):
+        detach = os.environ.get("ONDRIVE_LAB_DETACH")
+        if (not kitty and not detach) or (not force and self.runs % RESTART_EVERY):
+            return
+        if not kitty:
+            self.relaunch(detach)
             return
         launch = os.environ.get("ONDRIVE_LAB_LAUNCH", f"target/debug/gearbox run --name {self.instance} --ephemeral")
         send = lambda text: subprocess.run(["kitty", "@", "--to", kitty, "send-text", "--match", "id:1", text],  # noqa: E731
@@ -277,6 +282,23 @@ class Lab:
         while listed() and time.time() < deadline:
             time.sleep(1.0)
         send(launch + "\n")
+        deadline = time.time() + 180
+        while not listed():
+            if time.time() > deadline:
+                raise RuntimeError(f"{self.instance} did not come back")
+            time.sleep(2.0)
+        time.sleep(10.0)
+        self.gb = Gearbox(self.instance)
+
+    def relaunch(self, launch: str):
+        """Stop the viewer through `gearbox instance stop`, start it again with
+        the shell command `launch` (one that detaches), and reconnect."""
+        gearbox = str(REPO / "target" / "debug" / "gearbox")
+        print(f"  restarting {self.instance} after {self.runs - 1} runs", flush=True)
+        subprocess.run([gearbox, "instance", "stop", self.instance, "--force"], capture_output=True, timeout=60)
+        subprocess.run(launch, shell=True, cwd=REPO, capture_output=True, timeout=240)
+        listed = lambda: self.instance in subprocess.run(  # noqa: E731
+            [gearbox, "instance", "list"], capture_output=True, text=True, timeout=20).stdout
         deadline = time.time() + 180
         while not listed():
             if time.time() > deadline:
