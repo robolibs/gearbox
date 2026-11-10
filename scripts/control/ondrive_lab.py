@@ -218,8 +218,11 @@ class Reference:
         self.travel = 0.0
 
     def error(self, x, y):
+        """Distance to the nearest segment around the progress mark, which
+        only moves forward: reversing out of a cusp scores against the leg
+        leaving it, not the one it came in on."""
         n = len(self.pts) - 1
-        best = (float("inf"), self.seg)
+        best = (float("inf"), 0)
         for k in range(-3, 30):
             i = self.seg + k
             if self.closed:
@@ -232,8 +235,10 @@ class Reference:
             t = 0.0 if ll < 1e-12 else max(0.0, min(1.0, ((x - ax) * vx + (y - ay) * vy) / ll))
             d = math.hypot(ax + t * vx - x, ay + t * vy - y)
             if d < best[0] - 1e-9:
-                best = (d, i)
-        self.seg = best[1]
+                best = (d, k)
+        self.seg += max(best[1], 0)
+        if self.closed:
+            self.seg %= n
         return best[0]
 
 
