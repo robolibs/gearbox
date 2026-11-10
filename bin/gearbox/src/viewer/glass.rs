@@ -50,27 +50,38 @@ fn is_glass(m: &StandardMaterial) -> bool {
 }
 
 /// Moves every glass surface onto the material that fades by the eye, each
-/// glass material made once; a surface whose material has not loaded yet
-/// is tried again the next frame.
+/// glass material made once while some surface still wears it; a surface
+/// whose material has not loaded yet is tried again the next frame. Only
+/// ids are remembered, so a glass material, and the textures it holds,
+/// goes once the last surface wearing it is despawned.
 fn fade_glass_by_the_eye(
     mut commands: Commands,
     added: Query<(Entity, &MeshMaterial3d<StandardMaterial>), Added<MeshMaterial3d<StandardMaterial>>>,
     mut waiting: Local<Vec<(Entity, Handle<StandardMaterial>)>>,
-    mut made: Local<HashMap<AssetId<StandardMaterial>, Option<Handle<GlassMaterial>>>>,
+    mut made: Local<HashMap<AssetId<StandardMaterial>, Option<AssetId<GlassMaterial>>>>,
     standard: Res<Assets<StandardMaterial>>,
     mut glass: ResMut<Assets<GlassMaterial>>,
 ) {
+    made.retain(|source, fading| match fading {
+        Some(id) => glass.contains(*id),
+        None => standard.contains(*source),
+    });
     waiting.extend(added.iter().map(|(entity, material)| (entity, material.0.clone())));
     waiting.retain(|(entity, material)| {
-        let fading = match made.get(&material.id()) {
-            Some(fading) => fading.clone(),
+        let reused = match made.get(&material.id()) {
+            Some(None) => Some(None),
+            Some(Some(id)) => glass.get_strong_handle(*id).map(Some),
+            None => None,
+        };
+        let fading = match reused {
+            Some(fading) => fading,
             None => {
                 let Some(m) = standard.get(material) else {
                     return true;
                 };
                 let band = Vec4::new(CLEAR_M, SHOWN_M, 0.0, 0.0);
                 let fading = is_glass(m).then(|| glass.add(GlassMaterial { base: m.clone(), extension: NearFade { band } }));
-                made.insert(material.id(), fading.clone());
+                made.insert(material.id(), fading.as_ref().map(|h| h.id()));
                 fading
             }
         };
