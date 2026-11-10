@@ -1539,6 +1539,10 @@ class Draw:
         """Wait until every queued draw is sent; False on timeout."""
         return self._sender.flush(timeout) if self._sender else True
 
+    def backlog(self) -> int:
+        """Draws queued and not yet sent."""
+        return len(self._sender.queue) if self._sender else 0
+
     def _deliver(self, key, messages: list, coalesce: bool, wait: bool | None) -> Status | None:
         if wait if wait is not None else self.wait:
             status = Status()

@@ -32,6 +32,8 @@ REPO = Path(__file__).resolve().parents[2]
 TICK = 0.05
 # Seconds a part of one control-loop pass may take before the run reports it.
 SLOW_CALL_S = 1.0
+# Draws queued past which the scene skips a frame; ONDRIVE_LAB_DRAW=0 draws none.
+SCENE_BACKLOG = 32
 AREA_FILE = REPO / "target" / "lab" / "area.txt"
 # Areas the runs cycle through: twelve along each of the flat rows, north
 # metres (the row at 240 is on a slope).
@@ -361,12 +363,16 @@ class Scene:
     def __init__(self, gb: Gearbox, m: Machine, label: str):
         self.d = gb.draw
         self.d.wait = False
-        self.d.clear(self.NS)
+        self.enabled = os.environ.get("ONDRIVE_LAB_DRAW", "1") != "0"
+        if self.enabled:
+            self.d.clear(self.NS)
         self.m = m
         self.label = label
         self.ticks = 0
 
     def setup(self, path_pts, goal, statics, v_nom):
+        if not self.enabled:
+            return
         d, f, m = self.d, self.FRAME, self.m
         d.lines("lab/robot", "path", [(x, y, 0.05) for x, y in path_pts], frame=f, flow_speed=v_nom,
                 width=0.25 * max(1.0, m.scale ** 0.5))
@@ -377,7 +383,7 @@ class Scene:
 
     def tick(self, st, tracker, cmd, moving, clearance):
         self.ticks += 1
-        if self.ticks % 4:
+        if not self.enabled or self.ticks % 4 or self.d.backlog() > SCENE_BACKLOG:
             return
         d, f, m = self.d, self.FRAME, self.m
         d.extend("lab/robot", "trace", [(st.x, st.y, 0.02)], max_points=4000, frame=f)
@@ -412,6 +418,8 @@ class Scene:
                    lifetime=2.0)
 
     def finish(self, st, status: str):
+        if not self.enabled:
+            return
         self.d.text("lab/robot", "status", [(0.0, 0.0, self.m.length + 1.0)], text=f"{self.label}: {status}",
                     frame=self.BODY)
         self.d.flush(2.0)
