@@ -641,7 +641,7 @@ def run_one(lab: Lab, mname: str, kind: str, sname: str, params: dict, verbose: 
         log.append([round(now - t0, 3), round(st.x - ox, 3), round(st.y - oy, 3), round(st.heading_rad, 3),
                     round(st.vx, 3), round(st.wz, 3), round(v, 3), round(w, 3), round(err, 3), cmd.valid,
                     round(now_clear, 3) if near else None,
-                    [round(near[0] - ox, 2), round(near[1] - oy, 2)] if near else None])
+                    [round(near[0] - ox, 2), round(near[1] - oy, 2)] if near else None, round(st.vy, 3)])
         if verbose and len(log) % 20 == 0:
             print(f"  t={now - t0:5.1f} err={err:5.2f} v={v:+.2f} vx={st.vx:+.2f} w={w:+.2f} "
                   f"near={now_clear:5.2f} min={min_clear:5.2f} {cmd.status_message}", flush=True)
