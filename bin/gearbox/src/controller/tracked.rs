@@ -236,6 +236,7 @@ pub(super) fn apply(
                 states.states.insert(key.clone(), ControllerState {
                     region, position_m, heading_rad: machine_heading_rad(&body), roll_rad, pitch_rad,
                     linear_speed_mps: body_forward_vector(&body).map_or(0.0, |f| body.linvel().dot(f)),
+                    lateral_speed_mps: super::speed_across(body.velocity_at_point(body.translation()), machine_heading_rad(&body)),
                     yaw_rate_rps: body.angvel().y, wheel_encoders: encoders,
                 });
                 Ok(rotors)

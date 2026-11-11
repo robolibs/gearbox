@@ -314,6 +314,9 @@ pub struct ControllerState {
     pub roll_rad: f64,
     pub pitch_rad: f64,
     pub linear_speed_mps: f64,
+    /// Ground speed across the heading at the reported position, positive
+    /// to the left.
+    pub lateral_speed_mps: f64,
     pub yaw_rate_rps: f64,
     /// One `(angle_rad, velocity_rad_s)` pair per driven wheel, indexed the
     /// same as `wheel_targets` was when they were measured.
@@ -1122,6 +1125,7 @@ fn apply_builtin_ackermann_cmd_vel(
                         roll_rad,
                         pitch_rad,
                         linear_speed_mps: speed_along(body.linvel(), body_heading),
+                        lateral_speed_mps: speed_across(body.velocity_at_point(body.translation()), body_heading),
                         yaw_rate_rps: body.angvel().y,
                         // Filled in below, once wheel_targets exists.
                         wheel_encoders: Vec::new(),
@@ -1443,6 +1447,7 @@ fn apply_builtin_diff_drive_cmd_vel(
                         roll_rad,
                         pitch_rad,
                         linear_speed_mps: speed_along(body.linvel(), machine_heading_rad(&body)),
+                        lateral_speed_mps: speed_across(body.velocity_at_point(body.translation()), machine_heading_rad(&body)),
                         yaw_rate_rps: body.angvel().y,
                         wheel_encoders: Vec::new(),
                     });
@@ -1493,6 +1498,7 @@ fn apply_builtin_diff_drive_cmd_vel(
                         roll_rad,
                         pitch_rad,
                         linear_speed_mps: speed_along(body.linvel(), machine_heading_rad(&crate::physics::chassis::ChassisBody::new(&*body, turn))),
+                        lateral_speed_mps: speed_across(body.velocity_at_point(body.translation()), machine_heading_rad(&crate::physics::chassis::ChassisBody::new(&*body, turn))),
                         yaw_rate_rps: body.angvel().y,
                         // Differential-drive path: no wheel_targets computed
                         // here, so no measured encoder readings yet either.
@@ -1722,6 +1728,12 @@ pub(crate) fn body_forward_vector(body: &dyn Body) -> Option<DVec3> {
 /// rising towards +x): positive forward, negative in reverse.
 pub(crate) fn speed_along(linvel: DVec3, heading_rad: f64) -> f64 {
     linvel.x * heading_rad.sin() + linvel.z * heading_rad.cos()
+}
+
+/// Ground speed of `linvel` across the heading `heading_rad`, positive to
+/// the left of it.
+pub(crate) fn speed_across(linvel: DVec3, heading_rad: f64) -> f64 {
+    linvel.x * heading_rad.cos() - linvel.z * heading_rad.sin()
 }
 
 fn sanitize_cmd_vel(cmd: CmdVel) -> CmdVel {
@@ -5125,7 +5137,7 @@ fn publish_machine_controller_states(
             })
             .and_then(|c| states.states.get(&key).map(|s| (c, s.clone())));
 
-        let (region, position, heading, roll, pitch, speed, yaw_rate, wheel_encoders) = match from_controller
+        let (region, position, heading, roll, pitch, speed, lateral, yaw_rate, wheel_encoders) = match from_controller
         {
             Some((controller, state)) => {
                 props.push(("controller".into(), controller.instance.as_str().into()));
@@ -5136,6 +5148,7 @@ fn publish_machine_controller_states(
                     state.roll_rad,
                     state.pitch_rad,
                     state.linear_speed_mps,
+                    state.lateral_speed_mps,
                     state.yaw_rate_rps,
                     state.wheel_encoders,
                 )
@@ -5144,7 +5157,7 @@ fn publish_machine_controller_states(
                 let Some(r) = chassis.machines.get(&(scene_root, machine.id.clone())) else {
                     continue;
                 };
-                (r.region, r.position, r.heading, r.roll, r.pitch, r.speed, r.yaw_rate, Vec::new())
+                (r.region, r.position, r.heading, r.roll, r.pitch, r.speed, 0.0, r.yaw_rate, Vec::new())
             }
         };
 
@@ -5192,7 +5205,7 @@ fn publish_machine_controller_states(
                     point: ros_point,
                     rotation: ros_rotation,
                 },
-                twist: Twist::from_components(speed, 0.0, 0.0, 0.0, 0.0, yaw_rate),
+                twist: Twist::from_components(speed, lateral, 0.0, 0.0, 0.0, yaw_rate),
             },
             heading_rad: heading,
             roll_rad: roll,
