@@ -464,7 +464,7 @@ def tracker_for(kind: str, m: Machine, sc: Scenario, params: dict):
     cfg = ondrive.ControllerConfig.default_()
     cfg.output_units = "physical"
     cfg.allow_reverse = sc.reverse
-    cfg.lookahead_distance = max(0.8, 1.2 * m.length)
+    cfg.lookahead_distance = max(0.8, 0.5 * m.length)
     cfg.goal_tolerance = 0.25 * max(1.0, m.scale)
     cfg.angular_tolerance = 0.25 if sc.goal else math.pi
     t.set_config(cfg)
