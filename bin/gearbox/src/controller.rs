@@ -1736,11 +1736,12 @@ pub(crate) fn speed_across(linvel: DVec3, heading_rad: f64) -> f64 {
     linvel.x * heading_rad.cos() - linvel.z * heading_rad.sin()
 }
 
+/// The command with a near-zero speed zeroed, and a near-zero turn zeroed
+/// only while standing: moving, every turn is steered.
 fn sanitize_cmd_vel(cmd: CmdVel) -> CmdVel {
-    CmdVel {
-        linear_mps: deadband(cmd.linear_mps, 0.03).clamp(-16.0, 16.0),
-        angular_rps: deadband(cmd.angular_rps, 0.02).clamp(-4.8, 4.8),
-    }
+    let linear_mps = deadband(cmd.linear_mps, 0.03);
+    let angular_rps = if linear_mps == 0.0 { deadband(cmd.angular_rps, 0.02) } else { cmd.angular_rps };
+    CmdVel { linear_mps: linear_mps.clamp(-16.0, 16.0), angular_rps: angular_rps.clamp(-4.8, 4.8) }
 }
 
 fn deadband(value: f32, threshold: f32) -> f32 {
@@ -4529,6 +4530,14 @@ def Xform "Leatherback" (
             })
             .angular_rps,
             0.0
+        );
+        assert_eq!(
+            sanitize_cmd_vel(CmdVel {
+                linear_mps: 1.0,
+                angular_rps: 0.01
+            })
+            .angular_rps,
+            0.01
         );
         assert_eq!(
             sanitize_cmd_vel(CmdVel {
