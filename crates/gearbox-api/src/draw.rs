@@ -10,6 +10,27 @@ use crate::wire::draw::*;
 /// `ns` and `id` of an entity.
 pub type DrawKey = (String, String);
 
+pub(crate) fn namespace_range<'a, T>(
+    items: &'a BTreeMap<DrawKey, T>,
+    namespace: &'a str,
+    after: Option<&DrawKey>,
+) -> impl Iterator<Item = (&'a DrawKey, &'a T)> {
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+    let start = |namespace: String| {
+        let lower = (namespace, String::new());
+        after
+            .filter(|after| **after >= lower)
+            .map_or_else(|| Included(lower), |after| Excluded(after.clone()))
+    };
+    let exact = items
+        .range((start(namespace.to_owned()), Unbounded))
+        .take_while(move |((name, _), _)| namespace.is_empty() || name == namespace);
+    let descendants = items
+        .range((start(format!("{namespace}/")), Unbounded))
+        .take_while(move |((name, _), _)| !namespace.is_empty() && ns_within(name, namespace));
+    exact.chain(descendants)
+}
+
 /// A live entity as the viewer reads it.
 #[derive(Debug, Clone)]
 pub struct DrawItem {
@@ -18,6 +39,8 @@ pub struct DrawItem {
     pub expires_s: Option<f64>,
     /// Bumped on every change to the entity.
     pub revision: u64,
+    /// Revision at creation or replacement; retained across updates and patches.
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -68,17 +91,36 @@ impl DrawStore {
         self.items.is_empty()
     }
 
+    /// Number of incomplete chunked uploads.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub(crate) fn has_pending(&self, ns: &str, id: &str) -> bool {
+        self.pending
+            .contains_key(&(ns.trim_matches('/').into(), id.into()))
+    }
+
     /// Bumped on every change to any entity.
     pub fn revision(&self) -> u64 {
         self.revision
     }
 
     pub fn get(&self, ns: &str, id: &str) -> Option<&DrawItem> {
-        self.items.get(&(ns.trim_matches('/').to_string(), id.to_string()))
+        self.items
+            .get(&(ns.trim_matches('/').to_string(), id.to_string()))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&DrawKey, &DrawItem)> {
         self.items.iter()
+    }
+
+    pub(crate) fn iter_namespace_after<'a>(
+        &'a self,
+        namespace: &'a str,
+        after: Option<&DrawKey>,
+    ) -> impl Iterator<Item = (&'a DrawKey, &'a DrawItem)> {
+        namespace_range(&self.items, namespace, after)
     }
 
     /// Apply one message at sim second `now_s`; answers how many entities it
@@ -108,7 +150,7 @@ impl DrawStore {
         }
     }
 
-    /// Takes the header groups `msg` names onto the live entity.
+    /// Takes the header groups or scalar fields `msg` names onto the live entity.
     fn update(&mut self, key: &DrawKey, msg: &DrawEntity, now_s: f64) -> Result<usize, String> {
         let Some(item) = self.items.get_mut(key) else {
             return Err(format!("no draw {}/{} to update", key.0, key.1));
@@ -118,13 +160,17 @@ impl DrawStore {
         let takes = |g: &str| groups.is_empty() || groups.split(',').any(|s| s.trim() == g);
         let e = &mut item.entity;
         if takes("pose") {
-            (e.px, e.py, e.pz, e.qw, e.qx, e.qy, e.qz) = (msg.px, msg.py, msg.pz, msg.qw, msg.qx, msg.qy, msg.qz);
+            (e.px, e.py, e.pz, e.qw, e.qx, e.qy, e.qz) =
+                (msg.px, msg.py, msg.pz, msg.qw, msg.qx, msg.qy, msg.qz);
         }
         if takes("scale") {
             (e.sx, e.sy, e.sz) = (msg.sx, msg.sy, msg.sz);
         }
-        if takes("color") {
-            (e.color, e.color2) = (msg.color, msg.color2);
+        if takes("color") || takes("tint") {
+            e.color = msg.color;
+        }
+        if takes("color") || takes("color2") {
+            e.color2 = msg.color2;
         }
         if takes("width") {
             e.width = msg.width;
@@ -132,15 +178,30 @@ impl DrawStore {
         if takes("style") {
             e.style = msg.style;
         }
-        if takes("effects") {
-            (e.glow, e.pulse_hz, e.flow_speed, e.dash, e.beam_height, e.fade, e.urgency) =
-                (msg.glow, msg.pulse_hz, msg.flow_speed, msg.dash, msg.beam_height, msg.fade, msg.urgency);
+        for (name, field, value) in [
+            ("glow", &mut e.glow, msg.glow),
+            ("pulse_hz", &mut e.pulse_hz, msg.pulse_hz),
+            ("flow_speed", &mut e.flow_speed, msg.flow_speed),
+            ("dash", &mut e.dash, msg.dash),
+            ("beam_height", &mut e.beam_height, msg.beam_height),
+            ("fade", &mut e.fade, msg.fade),
+            ("urgency", &mut e.urgency, msg.urgency),
+        ] {
+            if takes("effects") || takes(name) {
+                *field = value;
+            }
         }
         if takes("flags") {
             e.flags = msg.flags;
         }
-        if takes("colormap") {
-            (e.colormap, e.vmin, e.vmax) = (msg.colormap, msg.vmin, msg.vmax);
+        if takes("colormap") || takes("palette") {
+            e.colormap = msg.colormap;
+        }
+        if takes("colormap") || takes("vmin") {
+            e.vmin = msg.vmin;
+        }
+        if takes("colormap") || takes("vmax") {
+            e.vmax = msg.vmax;
         }
         if takes("lifetime") {
             e.lifetime_s = msg.lifetime_s;
@@ -164,7 +225,11 @@ impl DrawStore {
             return Err(format!("no draw {}/{} to patch", key.0, key.1));
         };
         if item.entity.kind != msg.kind && msg.kind != 0 {
-            return Err(format!("a {} patch for a {}", draw_kind::name(msg.kind), draw_kind::name(item.entity.kind)));
+            return Err(format!(
+                "a {} patch for a {}",
+                draw_kind::name(msg.kind),
+                draw_kind::name(item.entity.kind)
+            ));
         }
         if item.entity.kind == draw_kind::GRID {
             patch_grid(&mut item.entity, msg)?;
@@ -194,9 +259,11 @@ impl DrawStore {
 
     /// Drop entities whose lifetime ran out and stale chunked sends.
     pub fn expire(&mut self, now_s: f64) -> usize {
-        self.pending.retain(|_, p| now_s - p.started_s < PENDING_TIMEOUT_S && now_s >= p.started_s);
+        self.pending
+            .retain(|_, p| now_s - p.started_s < PENDING_TIMEOUT_S && now_s >= p.started_s);
         let before = self.items.len();
-        self.items.retain(|_, item| item.expires_s.is_none_or(|t| now_s < t));
+        self.items
+            .retain(|_, item| item.expires_s.is_none_or(|t| now_s < t));
         let removed = before - self.items.len();
         if removed > 0 {
             self.bump();
@@ -227,7 +294,9 @@ impl DrawStore {
                     ranges: Vec::new(),
                     cells: Vec::new(),
                     labels: Vec::new(),
-                    props: props.with("cells", &e.cell_count().to_string()).into_bytes(),
+                    props: props
+                        .with("cells", &e.cell_count().to_string())
+                        .into_bytes(),
                     ..e.clone()
                 }
             })
@@ -246,36 +315,70 @@ impl DrawStore {
         entity.chunk_offset = 0;
         let expires_s = (entity.lifetime_s > 0.0).then(|| now_s + entity.lifetime_s);
         let revision = self.bump();
-        self.items.insert(key, DrawItem { entity, expires_s, revision });
+        self.items.insert(
+            key,
+            DrawItem {
+                entity,
+                expires_s,
+                revision,
+                generation: revision,
+            },
+        );
     }
 
     fn append(&mut self, key: DrawKey, msg: DrawEntity, now_s: f64) -> Result<usize, String> {
         if msg.chunk_offset == 0 {
-            self.pending.insert(key.clone(), Pending { seq: msg.seq, entity: msg.clone(), started_s: now_s });
+            self.pending.insert(
+                key.clone(),
+                Pending {
+                    seq: msg.seq,
+                    entity: msg.clone(),
+                    started_s: now_s,
+                },
+            );
         } else {
             let Some(pending) = self.pending.get_mut(&key) else {
-                return Err(format!("chunk at {} of seq {} has no start", msg.chunk_offset, msg.seq));
+                return Err(format!(
+                    "chunk at {} of seq {} has no start",
+                    msg.chunk_offset, msg.seq
+                ));
             };
             if pending.seq != msg.seq || pending.entity.item_count() != msg.chunk_offset as usize {
                 let expected = pending.entity.item_count();
                 self.pending.remove(&key);
-                return Err(format!("chunk at {} of seq {} out of order (expected {expected})", msg.chunk_offset, msg.seq));
+                return Err(format!(
+                    "chunk at {} of seq {} out of order (expected {expected})",
+                    msg.chunk_offset, msg.seq
+                ));
             }
             append_items(&mut pending.entity, &msg, false);
         }
         if msg.last != 0
             && let Some(done) = self.pending.remove(&key)
         {
-            let whole = DrawEntity { op: draw_op::UPSERT, ..done.entity };
-            whole.validate().map_err(|err| format!("assembled draw {}/{}: {err}", key.0, key.1))?;
+            let whole = DrawEntity {
+                op: draw_op::UPSERT,
+                ..done.entity
+            };
+            whole
+                .validate()
+                .map_err(|err| format!("assembled draw {}/{}: {err}", key.0, key.1))?;
             self.store(key, whole, now_s);
         }
         Ok(1)
     }
 
     fn extend(&mut self, key: DrawKey, msg: DrawEntity, now_s: f64) {
-        let max = msg.props().get("max_items").or_else(|| msg.props().get("max_points")).and_then(|v| v.parse::<usize>().ok());
-        let Some(item) = self.items.get_mut(&key).filter(|item| item.entity.kind == msg.kind) else {
+        let max = msg
+            .props()
+            .get("max_items")
+            .or_else(|| msg.props().get("max_points"))
+            .and_then(|v| v.parse::<usize>().ok());
+        let Some(item) = self
+            .items
+            .get_mut(&key)
+            .filter(|item| item.entity.kind == msg.kind)
+        else {
             let mut entity = msg;
             if let Some(max) = max {
                 trim_front(&mut entity, max);
@@ -325,7 +428,11 @@ fn append_items(dst: &mut DrawEntity, src: &DrawEntity, continue_strip: bool) {
     let continue_strip = continue_strip || cont.as_deref() == Some("ring");
     let base = dst.point_count() as u32;
     let dst_strips = dst.strip_ranges();
-    let mut starts: Vec<u32> = if strips { dst_strips.iter().map(|r| r.start as u32).collect() } else { Vec::new() };
+    let mut starts: Vec<u32> = if strips {
+        dst_strips.iter().map(|r| r.start as u32).collect()
+    } else {
+        Vec::new()
+    };
     let (dst_units, src_units) = (dst.unit_count(), src.unit_count());
     let (dst_labels, src_labels) = (dst.label_list(), src.label_list());
     let dst_label_units = dst.label_unit_count();
@@ -334,7 +441,11 @@ fn append_items(dst: &mut DrawEntity, src: &DrawEntity, continue_strip: bool) {
         if dst.rings.is_empty() && !dst_strips.is_empty() {
             dst.rings = vec![dst_strips.len() as u32];
         }
-        let mut src_rings = if src.rings.is_empty() && src.point_count() > 0 { vec![src.strip_ranges().len() as u32] } else { src.rings.clone() };
+        let mut src_rings = if src.rings.is_empty() && src.point_count() > 0 {
+            vec![src.strip_ranges().len() as u32]
+        } else {
+            src.rings.clone()
+        };
         if let (Some(c), Some(first)) = (cont.as_deref(), src_rings.first().copied())
             && let Some(last) = dst.rings.last_mut()
         {
@@ -360,7 +471,10 @@ fn append_items(dst: &mut DrawEntity, src: &DrawEntity, continue_strip: bool) {
     dst.instances.extend_from_slice(&src.instances);
 
     if strips {
-        let src_starts = src.strip_ranges().into_iter().map(|r| r.start as u32 + base);
+        let src_starts = src
+            .strip_ranges()
+            .into_iter()
+            .map(|r| r.start as u32 + base);
         let skip = (continue_strip && base > 0) as usize;
         starts.extend(src_starts.skip(skip));
         dst.offsets = if starts.len() > 1 { starts } else { Vec::new() };
@@ -386,7 +500,11 @@ fn patch_items(e: &mut DrawEntity, msg: &DrawEntity) -> Result<(), String> {
         return Err(format!("a patch at {at} past the {n} items"));
     }
     let units = e.unit_count();
-    let unit_at = if e.kind == draw_kind::ARROWS && e.instances.is_empty() { at / 2 } else { at };
+    let unit_at = if e.kind == draw_kind::ARROWS && e.instances.is_empty() {
+        at / 2
+    } else {
+        at
+    };
     let msg_units = msg.unit_count();
     if e.instanced() {
         splice(&mut e.instances, &msg.instances, at * INSTANCE_FLOATS);
@@ -396,10 +514,42 @@ fn patch_items(e: &mut DrawEntity, msg: &DrawEntity) -> Result<(), String> {
         splice(&mut e.ranges, &msg.ranges, at);
     }
     let grown = e.unit_count().max(units);
-    patch_units(&mut e.colors, units, grown, &msg.colors, unit_at, msg_units, 0);
-    patch_units(&mut e.radii, units, grown, &msg.radii, unit_at, msg_units, 0.0);
-    patch_units(&mut e.values, units, grown, &msg.values, unit_at, msg_units, 0.0);
-    patch_units(&mut e.cells, units, grown, &msg.cells, unit_at, msg_units, 0);
+    patch_units(
+        &mut e.colors,
+        units,
+        grown,
+        &msg.colors,
+        unit_at,
+        msg_units,
+        0,
+    );
+    patch_units(
+        &mut e.radii,
+        units,
+        grown,
+        &msg.radii,
+        unit_at,
+        msg_units,
+        0.0,
+    );
+    patch_units(
+        &mut e.values,
+        units,
+        grown,
+        &msg.values,
+        unit_at,
+        msg_units,
+        0.0,
+    );
+    patch_units(
+        &mut e.cells,
+        units,
+        grown,
+        &msg.cells,
+        unit_at,
+        msg_units,
+        0,
+    );
     let labels = msg.label_list();
     if !labels.is_empty() {
         let mut all = e.label_list();
@@ -428,7 +578,15 @@ fn splice<T: Copy>(dst: &mut Vec<T>, src: &[T], at: usize) {
 
 /// Per-unit values `src` over `dst` from unit `at`, spreading a single
 /// value of either side over its units first.
-fn patch_units<T: Copy>(dst: &mut Vec<T>, units: usize, grown: usize, src: &[T], at: usize, src_units: usize, fill: T) {
+fn patch_units<T: Copy>(
+    dst: &mut Vec<T>,
+    units: usize,
+    grown: usize,
+    src: &[T],
+    at: usize,
+    src_units: usize,
+    fill: T,
+) {
     if src.is_empty() {
         if dst.len() == units && grown > units {
             let last = dst.last().copied().unwrap_or(fill);
@@ -440,7 +598,11 @@ fn patch_units<T: Copy>(dst: &mut Vec<T>, units: usize, grown: usize, src: &[T],
         let one = dst.first().copied().unwrap_or(fill);
         *dst = vec![one; units];
     }
-    let spread: Vec<T> = if src.len() == src_units { src.to_vec() } else { vec![src[0]; src_units] };
+    let spread: Vec<T> = if src.len() == src_units {
+        src.to_vec()
+    } else {
+        vec![src[0]; src_units]
+    };
     splice(dst, &spread, at);
     if dst.len() < grown {
         let last = *dst.last().unwrap();
@@ -461,13 +623,20 @@ fn patch_grid(e: &mut DrawEntity, msg: &DrawEntity) -> Result<(), String> {
             (grid_encoding::U16, u) => (u.unwrap_or(65535.0) as u16).to_le_bytes().to_vec(),
             (_, u) => vec![u.unwrap_or(255.0) as u8],
         };
-        e.cells = blank.iter().copied().cycle().take(cols * rows * size).collect();
+        e.cells = blank
+            .iter()
+            .copied()
+            .cycle()
+            .take(cols * rows * size)
+            .collect();
     }
     let mut read = 0usize;
     for r in msg.offsets.chunks_exact(4) {
         let (x, y, w, h) = (r[0] as usize, r[1] as usize, r[2] as usize, r[3] as usize);
         if x + w > cols || y + h > rows {
-            return Err(format!("patch {w}×{h} at {x},{y} runs off the {cols}×{rows} grid"));
+            return Err(format!(
+                "patch {w}×{h} at {x},{y} runs off the {cols}×{rows} grid"
+            ));
         }
         for row in 0..h {
             let dst = ((y + row) * cols + x) * size;
@@ -501,7 +670,11 @@ fn trim_front(e: &mut DrawEntity, max: usize) {
         return;
     }
     let drop = (n - max.max(step)).div_ceil(step) * step;
-    let unit_drop = if step == 2 && e.kind == draw_kind::ARROWS { drop / 2 } else { drop };
+    let unit_drop = if step == 2 && e.kind == draw_kind::ARROWS {
+        drop / 2
+    } else {
+        drop
+    };
     let labels = e.label_list();
     let strips_before = e.strip_ranges();
     if instanced {
@@ -526,16 +699,33 @@ fn trim_front(e: &mut DrawEntity, max: usize) {
         e.cells.drain(..unit_drop);
     }
     if e.kind == draw_kind::LINES && e.sub != line_mode::LIST {
-        let kept: Vec<usize> = (0..strips_before.len()).filter(|i| strips_before[*i].end > drop).collect();
-        let starts: Vec<u32> = kept.iter().map(|i| strips_before[*i].start.saturating_sub(drop) as u32).collect();
+        let kept: Vec<usize> = (0..strips_before.len())
+            .filter(|i| strips_before[*i].end > drop)
+            .collect();
+        let starts: Vec<u32> = kept
+            .iter()
+            .map(|i| strips_before[*i].start.saturating_sub(drop) as u32)
+            .collect();
         e.offsets = if starts.len() > 1 { starts } else { Vec::new() };
         if !labels.is_empty() {
-            let kept_labels: Vec<String> = kept.iter().map(|i| labels.get(*i).cloned().unwrap_or_default()).collect();
+            let kept_labels: Vec<String> = kept
+                .iter()
+                .map(|i| labels.get(*i).cloned().unwrap_or_default())
+                .collect();
             e.labels = kept_labels.join("\n").into_bytes();
         }
     } else if !labels.is_empty() {
-        let label_drop = if e.kind == draw_kind::TRIANGLES { drop / 3 } else { unit_drop };
-        e.labels = labels.into_iter().skip(label_drop).collect::<Vec<_>>().join("\n").into_bytes();
+        let label_drop = if e.kind == draw_kind::TRIANGLES {
+            drop / 3
+        } else {
+            unit_drop
+        };
+        e.labels = labels
+            .into_iter()
+            .skip(label_drop)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes();
     }
 }
 

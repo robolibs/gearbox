@@ -37,6 +37,7 @@ mod propagation;
 mod physics_debug;
 mod planet_rocks;
 mod sensor_cameras;
+mod sensor_capture;
 mod sensor_generic;
 mod sensor_radio;
 mod sensors;

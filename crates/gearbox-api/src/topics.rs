@@ -14,6 +14,14 @@ pub const MARKER_DELETE: &str = "/gearbox/marker/delete";
 pub const DRAW: &str = "/gearbox/draw";
 /// Que/ans: the live draw entities under a path, header-only `DrawEntity` each.
 pub const DRAW_LIST: &str = "/gearbox/draw/list";
+/// Req/res: typed spatial data capabilities and instance epoch.
+pub const DRAW_DATA_CAPABILITIES: &str = "/gearbox/draw/data/capabilities";
+/// Req/res: bounded spatial data transactions and lifecycle operations.
+pub const DRAW_DATA: &str = "/gearbox/draw/data";
+/// Req/res: paginated spatial and legacy drawing summaries.
+pub const DRAW_DATA_LIST: &str = "/gearbox/draw/data/list";
+/// Req/res: retained and per-view generation status.
+pub const DRAW_DATA_STATUS: &str = "/gearbox/draw/data/status";
 pub const SELECT: &str = "/gearbox/select";
 pub const MACHINES_LIST: &str = "/gearbox/machines/list";
 pub const ACCESS_GRANT: &str = "/gearbox/access/grant";

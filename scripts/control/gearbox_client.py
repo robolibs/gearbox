@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 
 # The peerbus, datapod and ondrive wheels live in the repo's
@@ -910,7 +911,7 @@ SHAPE = {"box": 0, "cube": 0, "ellipsoid": 1, "sphere": 1, "cylinder": 2, "cone"
 FILL = {"solid": 0, "fill": 0, "filler": 0, "wire": 1, "outline": 1, "both": 2}
 GRID_ENCODING = {"u8": 0, "u16": 1, "f32": 2}
 PANEL = {"sparkline": 0, "bars": 1, "gauge": 2, "chip": 3, "table": 4, "legend": 5}
-INTERACT = {"step": 0, "pick_point": 1, "pick_pose": 2, "handle": 3}
+INTERACT = {"step": 0, "pick_point": 1, "pick_pose": 2, "handle": 3, "pick_data": 4}
 COLORMAP = {name: i for i, name in enumerate((
     "none", "turbo", "viridis", "rdylgn", "costmap", "map", "raw", "okabe", "rainbow", "grey"))}
 DRAW_FLAG = {"on_top": 1 << 2, "labels": 1 << 3, "flat_caps": 1 << 4, "dashed": 1 << 5,
@@ -918,7 +919,11 @@ DRAW_FLAG = {"on_top": 1 << 2, "labels": 1 << 3, "flat_caps": 1 << 4, "dashed": 
              "arrow_tip": 1 << 11}
 DRAW_STYLE = {name: i for i, name in enumerate((
     "auto", "plain", "ribbon_flow", "tube_pulse", "hairline", "light_wall", "beacon", "holo", "shield", "alert", "orb",
-    "decal", "arrow_glow", "point_glow", "label", "heat", "splat", "sweep", "ghost", "ruler"))}
+    "decal", "arrow_glow", "point_glow", "label", "heat", "splat", "sweep", "ghost", "ruler", "field"))}
+TERRAIN_GLYPHS = ("square", "cross", "triangle", "diamond")
+_WORLD_MAX_POINTS = 65_536
+_WORLD_MAX_STATIONS = 4_096
+_F32_MAX = 3.4028234663852886e38
 # Role colours (Okabe-Ito): what AUTO styles draw in when no colour is given.
 ROLE = {"plan": "#56B4E9", "prediction": "#009E73", "lookahead": "#E69F00", "goal": "#F0E442",
         "obstacle": "#CC79A7", "danger": "#D55E00", "history": "#FFFFFF59", "sensor": "#0072B2"}
@@ -1013,6 +1018,11 @@ def _flat_points(points) -> list[float]:
     return out
 
 
+def _faded(color, opacity: float) -> int:
+    tint = rgba(color)
+    return rgba(tint, (tint >> 24) / 255.0 * max(0.0, min(1.0, opacity))) or 1
+
+
 range_ = range
 
 
@@ -1042,6 +1052,99 @@ def _rotate(q, v):
 def _apply(origin, q, v):
     r = _rotate(q, v)
     return tuple(float(origin[i]) + r[i] for i in range(3))
+
+
+def _world_f32(value):
+    value = float(value)
+    if math.isfinite(value) and abs(value) <= _F32_MAX:
+        return struct.unpack("<f", struct.pack("<f", value))[0]
+    return math.copysign(math.inf, value) if math.isfinite(value) else value
+
+
+def _world_point(point):
+    if isinstance(point, (str, bytes)):
+        raise TypeError("world points must be numeric coordinate sequences")
+    point = tuple(point)
+    if len(point) not in (2, 3):
+        raise ValueError("world points need X,Y or X,Y,Z")
+    return tuple(_world_f32(v) for v in point) + (0.0,) * (3 - len(point))
+
+
+def _world_finite(point):
+    return all(math.isfinite(v) and abs(v) <= _F32_MAX for v in point)
+
+
+def _world_positive(value):
+    return math.isfinite(value) and 0.0 < value <= _F32_MAX
+
+
+def _world_segment(points, a, b):
+    a, b = tuple(_world_f32(v) for v in a), tuple(_world_f32(v) for v in b)
+    if _world_finite(a) and _world_finite(b) and a != b:
+        points.extend((a, b))
+
+
+def _world_open_outline(points, polygon):
+    for a, b in zip(polygon, (*polygon[1:], polygon[0])):
+        lerp = lambda t: tuple(a[j] * (1 - t) + b[j] * t for j in range(3))
+        _world_segment(points, lerp(0.12), lerp(0.88))
+
+
+BRACKET_FRACTION = 0.18
+STRUCTURE_RULE_PX = 1.0
+STRUCTURE_CORNER_GAIN = 1.75
+
+
+def _world_corner_outline(points, polygon):
+    for i, p in enumerate(polygon):
+        for q in (polygon[i - 1], polygon[(i + 1) % len(polygon)]):
+            _world_segment(points, p, tuple(p[j] + BRACKET_FRACTION * (q[j] - p[j]) for j in range(3)))
+
+
+def _world_box_brackets(size):
+    points = []
+    if all(_world_positive(v) for v in size):
+        for corner in range(8):
+            p = tuple(size[i] * (0.5 if corner & (1 << i) else -0.5) for i in range(3))
+            for axis in range(3):
+                q = list(p)
+                q[axis] -= math.copysign(size[axis] * BRACKET_FRACTION, p[axis])
+                _world_segment(points, p, tuple(q))
+    return points
+
+
+def _world_station_mark(points, centre, tangent, size):
+    xy = math.hypot(tangent[0], tangent[1])
+    side = (-tangent[1] / xy, tangent[0] / xy, 0.0) if xy > 1e-9 else (1.0, 0.0, 0.0)
+    at = lambda across, along: tuple(centre[i] + size * (across * side[i] + along * tangent[i]) for i in range(3))
+    _world_segment(points, at(-0.5, 0.0), at(0.5, 0.0))
+    _world_segment(points, at(-0.3, -0.25), at(0.0, 0.25))
+    _world_segment(points, at(0.0, 0.25), at(0.3, -0.25))
+
+
+def _world_pose(pose):
+    if isinstance(pose, (str, bytes)):
+        raise TypeError("pose must be a numeric coordinate sequence")
+    pose = tuple(float(v) for v in pose)
+    if len(pose) not in (2, 3, 4, 7):
+        raise ValueError("pose needs X,Y[,Z], X,Y,Z,YAW or X,Y,Z,QW,QX,QY,QZ")
+    if not all(math.isfinite(v) for v in pose):
+        return None
+    position = pose[:3] if len(pose) >= 3 else (*pose, 0.0)
+    q = _quat(pose)
+    scale = max(abs(v) for v in q)
+    q = tuple(v / scale for v in q) if scale else (1.0, 0.0, 0.0, 0.0)
+    norm = math.sqrt(sum(v * v for v in q))
+    return (*position, *(v / norm for v in q))
+
+
+def _world_size(size):
+    if isinstance(size, (str, bytes)):
+        raise TypeError("size must be three numeric full extents")
+    size = tuple(_world_f32(v) for v in size)
+    if len(size) != 3:
+        raise ValueError("size needs three full extents X,Y,Z")
+    return size
 
 
 def _ellipse(c, rx, ry, angle, n):
@@ -1122,7 +1225,7 @@ def class_color(cls: str, overrides: dict | None = None) -> int:
     if overrides:
         for k, v in overrides.items():
             if k.lower() == cls.lower():
-                return rgba(v)
+                return rgba(v) or 1
     name = _CLASS_COLORS.get(cls.lower())
     if name:
         return rgba(name)
@@ -1499,6 +1602,9 @@ class Draw:
                        color=(1.0, 0.3, 0.3, 0.25), lifetime=0.5)
         gb.draw.clear("lab")
 
+    Every kind accepts `blur` in 0..1: zero keeps the transmitted background
+    clear; one applies full frost. Omission preserves the existing finish.
+    Text, geometry, data and glow remain independent of this background filter.
     Every kind takes a `style` and its effect parameters `glow`, `pulse_hz`,
     `flow_speed`, `spacing`, `beam_height`, `fade` and `urgency` (None or 0
     the style's default, < 0 off). "auto" (the default) picks the style by
@@ -1565,11 +1671,13 @@ class Draw:
     def _spec(kind: int, ns: str, id: str, *, frame: str = "world", pose=None, color=None, alpha=None,
               color2=None, width=None, lifetime: float = 0.0, on_top: bool = False, snapshot: bool = False,
               labels=None, sub: int = 0, flags: int = 0, scale=(1.0, 1.0, 1.0), wait: bool | None = None,
-              style: str = "auto", glow: float | None = None, pulse_hz: float | None = None,
+              style: str = "auto", glow: float | None = None, blur: float | None = None, pulse_hz: float | None = None,
               flow_speed: float | None = None, spacing: float | None = None, beam_height: float | None = None,
               fade: float | None = None, urgency: float | None = None, flat: bool = False,
               additive: bool = False, drape: bool | None = None, colormap=None, vmin: float = 0.0,
-              vmax: float = 0.0, arrow_tip: bool = False, props: dict | None = None) -> _Spec:
+              vmax: float = 0.0, arrow_tip: bool = False, props: dict | None = None,
+              label_category: str | None = None, label_detail: str | None = None,
+              label_icon: str | None = None, label_selected: bool | None = None) -> _Spec:
         pose = tuple(pose) if pose is not None else (0.0, 0.0, 0.0)
         w, qx, qy, qz = _quat(pose)
         flags |= (DRAW_FLAG["on_top"] if on_top else 0) | (DRAW_FLAG["snapshot"] if snapshot else 0)
@@ -1588,11 +1696,22 @@ class Draw:
                      dash=effect(spacing), beam_height=effect(beam_height), fade=effect(fade), urgency=effect(urgency),
                      vmin=float(vmin), vmax=float(vmax), quant=0.0, colormap=cmap,
                      sub=sub, flags=flags, style=DRAW_STYLE[style] if isinstance(style, str) else int(style),
-                     color=rgba(color, alpha) if color is not None else 0,
-                     color2=rgba(color2) if color2 is not None else 0)
+                     color=(rgba(color, alpha) or 1) if color is not None else 0,
+                     color2=(rgba(color2) or 1) if color2 is not None else 0)
         spec.props["frame"] = frame
         if props:
             spec.props.update({k: v for k, v in props.items() if v is not None})
+        if blur is not None:
+            if not math.isfinite(float(blur)) or not 0 <= float(blur) <= 1:
+                raise ValueError("blur must be a finite number in 0..1")
+            spec.props["blur"] = float(blur)
+        for key, value in (("label_category", label_category), ("label_detail", label_detail)):
+            if value is not None:
+                spec.props[key] = str(value)
+        if label_icon in ("robot", "sensor", "destination", "measurement", "obstacle", "frame"):
+            spec.props["label_icon"] = label_icon
+        if label_selected is not None:
+            spec.props["label_selected"] = str(bool(label_selected)).lower()
         spec.labels = [str(s) for s in labels] if labels else []
         spec.wait = wait
         return spec
@@ -1600,7 +1719,7 @@ class Draw:
     @staticmethod
     def _per_item(spec: _Spec, colors=None, radii=None, alpha=None, values=None):
         if colors is not None:
-            spec.colors = [rgba(c, alpha) for c in colors]
+            spec.colors = [(rgba(c, alpha) or 1) if c is not None else 0 for c in colors]
         if radii is not None:
             spec.radii = [float(r) for r in radii]
         if values is not None:
@@ -1687,7 +1806,7 @@ class Draw:
         return self.send(spec)
 
     def shapes(self, ns: str, id: str, shape: str = "box", centers=None, *, sizes=None, half_sizes=None,
-               size=(1.0, 1.0, 1.0), yaws=None, poses=None, fill: str = "solid", outline=None, colors=None,
+               size=None, yaws=None, poses=None, fill: str = "solid", outline=None, colors=None,
                values=None, shaded: bool = False, **common) -> Status:
         """Instanced `shape`s (box, ellipsoid, cylinder, cone, capsule, ellipse)
         at `centers` (turned by `yaws`) or `poses`. `sizes` are full extents
@@ -1696,6 +1815,8 @@ class Draw:
         alpha honoured, edged in `outline` or the colour made opaque)."""
         if half_sizes is not None:
             sizes = [tuple(2.0 * v for v in (s if not isinstance(s, (int, float)) else (s, s, s))) for s in half_sizes]
+        if size is None:
+            size = (1.0, 1.0, 0.0 if SHAPE[shape] == SHAPE["sector"] else 1.0)
         if isinstance(size, (int, float)):
             size = (size, size, size)
         spec = self._spec(_SHAPES, ns, id, sub=SHAPE[shape], flags=FILL[fill] | (DRAW_FLAG["shaded"] if shaded else 0),
@@ -1712,11 +1833,12 @@ class Draw:
         self._per_item(spec, colors, None, common.get("alpha"))
         return self.send(spec)
 
-    def text(self, ns: str, id: str, positions, texts=None, *, text: str | None = None, size: float = 14.0,
+    def text(self, ns: str, id: str, positions, texts=None, *, text: str | None = None, size: float = 16.0,
              size_m: float | None = None, background=None, colors=None, **common) -> Status:
         """Text centred at `positions`: one of `texts` each, or `text` at all.
-        `size` in pixels, or `size_m` metres tall; `background` behind it."""
-        common["width"] = float(size_m) if size_m else -abs(float(size))
+        `size` in pixels, or `size_m` metres tall; `background` behind it.
+        Optional label_category/detail/icon/selected supply annotation metadata."""
+        common.setdefault("width", float(size_m) if size_m else -abs(float(size)))
         common.setdefault("color2", background)
         spec = self._spec(_TEXT, ns, id, **common)
         spec.points = _flat_points(positions)
@@ -1769,12 +1891,14 @@ class Draw:
     # ── header changes and patches ──
 
     def update(self, ns: str, id: str, *, pose=None, scale=None, color=None, alpha=None, color2=None,
-               width=None, style=None, glow=None, pulse_hz=None, flow_speed=None, spacing=None, beam_height=None,
+               width=None, style=None, glow=None, blur=None, pulse_hz=None, flow_speed=None, spacing=None, beam_height=None,
                fade=None, urgency=None, flags=None, colormap=None, vmin=None, vmax=None, lifetime=None,
                wait: bool | None = None, **props) -> Status | None:
         """Change the live entity's header only, keeping its points: what is
         given here (pose, colour, width, style, effects, colormap,
-        lifetime) and props; cheap for moving a big entity."""
+        lifetime) and props. Unspecified fields are preserved; alpha requires color."""
+        if alpha is not None and color is None:
+            raise ValueError("update alpha requires color")
         groups = []
         header = {}
         if pose is not None:
@@ -1787,9 +1911,12 @@ class Draw:
             s = (scale,) * 3 if isinstance(scale, (int, float)) else tuple(scale)
             header.update(sx=float(s[0]), sy=float(s[1]), sz=float(s[2]))
             groups.append("scale")
-        if color is not None or color2 is not None:
-            header.update(color=rgba(color, alpha) if color is not None else 0, color2=rgba(color2) if color2 is not None else 0)
-            groups.append("color")
+        if color is not None:
+            header["color"] = rgba(color, alpha) or 1
+            groups.append("tint")
+        if color2 is not None:
+            header["color2"] = rgba(color2) or 1
+            groups.append("color2")
         if width is not None:
             header["width"] = float(width)
             groups.append("width")
@@ -1798,22 +1925,30 @@ class Draw:
             groups.append("style")
         effects = dict(glow=glow, pulse_hz=pulse_hz, flow_speed=flow_speed, dash=spacing, beam_height=beam_height,
                        fade=fade, urgency=urgency)
-        if any(v is not None for v in effects.values()):
-            header.update({k: float(v or 0.0) for k, v in effects.items()})
-            groups.append("effects")
+        for key, value in effects.items():
+            if value is not None:
+                header[key] = float(value)
+                groups.append(key)
         if flags is not None:
             header["flags"] = int(flags)
             groups.append("flags")
-        if colormap is not None or vmin is not None or vmax is not None:
-            header.update(colormap=COLORMAP[colormap] if isinstance(colormap, str) else int(colormap or 0),
-                          vmin=float(vmin or 0.0), vmax=float(vmax or 0.0))
-            groups.append("colormap")
+        if colormap is not None:
+            header["colormap"] = COLORMAP[colormap] if isinstance(colormap, str) else int(colormap)
+            groups.append("palette")
+        for key, value in (("vmin", vmin), ("vmax", vmax)):
+            if value is not None:
+                header[key] = float(value)
+                groups.append(key)
         if lifetime is not None:
             header["lifetime_s"] = float(lifetime)
             groups.append("lifetime")
         spec = _Spec(0, ns, id, **header)
         spec.props.update({k: v for k, v in props.items() if v is not None})
-        spec.props["set"] = ",".join(groups)
+        if blur is not None:
+            if not math.isfinite(float(blur)) or not 0 <= float(blur) <= 1:
+                raise ValueError("blur must be a finite number in 0..1")
+            spec.props["blur"] = float(blur)
+        spec.props["set"] = ",".join(groups) or "props"
         return self._deliver((ns, id, "update"), [spec.message(op=DRAW_OP["update"])], True, wait)
 
     def patch(self, ns: str, id: str, offset: int, *, kind: str = "points", points=None, colors=None, radii=None,
@@ -1884,21 +2019,21 @@ class Draw:
 
     def frame(self, ns: str, name: str, pose=(0.0, 0.0, 0.0), *, parent=None, length: float = 0.5,
               label: str | None = None, frame: str = "world", **common) -> None:
-        """An RViz TF frame: a glowing triad (x vermillion, y bluish green,
-        z blue) at `pose`, its name on a plate, a dashed hairline to the
-        `parent` position."""
+        """A frame triad (x vermillion, y bluish green, z blue), its name,
+        and a dashed hairline to the `parent` position."""
         root = f"{ns}/{name}"
         common.setdefault("lifetime", 0.0)
-        self.axes(root, "axes", None, length=length, pose=pose, style="arrow_glow", width=0.05 * length, frame=frame,
-                  **common)
+        options = {"frame": frame, **common}
+        self.axes(root, "axes", None, length=length, **{"pose": pose, "style": "arrow_glow", "width": 0.05 * length, **options})
         at = tuple(pose[:3]) if len(pose) >= 3 else (pose[0], pose[1], 0.0)
-        self.points(root, "name", [at], radius=-2.5, color="white", style="point_glow", labels=[label or name],
-                    frame=frame,**common)
+        self.text(root, "name", [at], text=name if label is None else label,
+                  **{"color": "white", **options, "props": {"label_icon": "frame", **options.get("props", {})}})
         if parent is not None:
-            self.lines(root, "parent", [at, tuple(parent)], color="white", alpha=0.55, width=-1.2, dash=0.15,
-                       dashed=True, style="plain", frame=frame,**common)
+            parent_color = _faded(rgba(common.get("color", "white"), common.get("alpha")), 0.55)
+            self.lines(root, "parent", [at, tuple(parent)], **{"width": -1.2,
+                       "dash": 0.15, "dashed": True, "style": "plain", **options, "color": parent_color, "alpha": None})
         else:
-            self.delete(root, "parent")
+            self._world_send(self._world_clear(root, ["parent"], options))
 
     def pose_array(self, ns: str, id: str, poses, *, glyph: str = "chevron", length: float = 0.5, **common) -> Status | None:
         """Poses (x, y, z[, yaw] or a quaternion) as flat chevrons, arrows or
@@ -1909,25 +2044,49 @@ class Draw:
         if glyph == "chevron":
             common.setdefault("flat", True)
             common.setdefault("additive", True)
-        return self.arrows(ns, id, poses=poses, length=length, chevron=glyph == "chevron", **common)
+        poses = list(poses)
+        return self.arrows(ns, id, poses=poses, length=length, lengths=[length] * len(poses), chevron=glyph == "chevron", **common)
 
-    def waypoints(self, ns: str, id: str, points, *, current: int = 0, frame: str = "world", **common) -> None:
-        """Numbered waypoints: the `current` one a beacon, the ones ahead holo
-        pillars, the ones done at 35 %, joined by a flowing ribbon."""
+    def waypoints(self, ns: str, id: str, points, *, current: int = 0, color=None, frame: str = "world", **common) -> None:
+        """Numbered route stations and selected corner brackets, joined by a ribbon.
+        `color` tints future stations; completed/current retain semantic RGB
+        and share its opacity. `current` selects one marker."""
         root = f"{ns}/{id}"
-        pts = [tuple(p) + (0.0,) * (3 - len(p)) for p in points]
+        pts = [_world_point(p) for p in points]
+        tint = rgba("plan" if color is None else color, common.pop("alpha", None)) or 1
+        opacity = (tint >> 24) / 255.0
+        selected = _faded("goal", opacity)
+        options = {"frame": frame, **common}
+        if not pts:
+            self._world_send(self._world_clear(root, ("route", "pillars", "stations", "current", "selection"), options))
+            return
         labels = [str(i + 1) for i in range(len(pts))]
-        colors = [rgba("white", 0.35) if i < current else rgba("plan") for i in range(len(pts))]
-        self.lines(root, "route", pts, style="ribbon_flow", width=0.22, frame=frame, colors=colors, **common)
-        pillar_colors = [rgba("clear") if i == current else c for i, c in enumerate(colors)]
-        self.shapes(root, "pillars", "cylinder", [(x, y, z + 0.6) for x, y, z in pts], size=(0.45, 0.45, 1.2),
-                    style="holo", colors=pillar_colors, beam_height=1.5, frame=frame,
-                    labels=["" if i == current else l for i, l in enumerate(labels)], **common)
+        colors = [_faded("white", 0.35 * opacity) if i < current else tint for i in range(len(pts))]
+        self.lines(root, "route", pts, colors=colors, **{"style": "ribbon_flow", "width": 0.22, **options})
+        pillar_colors = [1 if i == current else c for i, c in enumerate(colors)]
+        self.points(root, "pillars", pts, disc=True, colors=pillar_colors,
+                    **{"style": "plain", "width": -4.0, "labels": ["" if i == current else l for i, l in enumerate(labels)], **options})
+        stations, station_colors = [], []
+        for i, p in enumerate(pts):
+            a, b = (p, pts[i + 1]) if i + 1 < len(pts) else (pts[max(0, i - 1)], p)
+            delta = tuple(b[j] - a[j] for j in range(3))
+            length = math.sqrt(sum(v * v for v in delta))
+            tangent = tuple(v / length for v in delta) if length > 1e-9 else (1.0, 0.0, 0.0)
+            start = len(stations)
+            _world_station_mark(stations, p, tangent, _world_f32(0.45))
+            station_colors.extend([selected if i == current else colors[i]] * (len(stations) - start))
+        self.lines(root, "stations", stations, segments=True, colors=station_colors,
+                   **{"style": "plain", "width": -1.25, "color": tint, **options})
         if 0 <= current < len(pts):
-            self.points(root, "current", [pts[current]], style="beacon", color="goal", beam_height=6.0,
-                        labels=[labels[current]], frame=frame, **common)
+            self.points(root, "current", [pts[current]], disc=True,
+                        **{"style": "plain", "color": selected, "width": -6.0, "labels": [labels[current]], **options,
+                           "props": {"label_selected": "true", "label_icon": "destination", **options.get("props", {})}})
+            p, corners = pts[current], []
+            polygon = [(p[0] + x, p[1] + y, p[2]) for x, y in ((-.32, -.32), (.32, -.32), (.32, .32), (-.32, .32))]
+            _world_corner_outline(corners, polygon)
+            self._world_send([self._world_lines(root, "selection", corners, selected, options, -STRUCTURE_RULE_PX * STRUCTURE_CORNER_GAIN)])
         else:
-            self.delete(root, "current")
+            self._world_send(self._world_clear(root, ("current", "selection"), options))
 
     def covariance(self, ns: str, id: str, mean, cov, *, sigmas=(1.0, 2.0, 3.0), color="cyan", frame: str = "world",
                    **common) -> None:
@@ -1937,6 +2096,7 @@ class Draw:
         plus a yaw wedge."""
         root = f"{ns}/{id}"
         flat = [float(v) for row in cov for v in (row if isinstance(row, (list, tuple)) else [row])]
+        color = rgba(color, common.pop("alpha", None)) or 1
         c = (float(mean[0]), float(mean[1]), float(mean[2]) if len(mean) > 2 else 0.0)
         fades = [1.0, 0.6, 0.35, 0.2]
         if len(flat) in (3, 4):
@@ -1946,7 +2106,7 @@ class Draw:
             for k, s in enumerate(sigmas):
                 ring = _ellipse(c, s * a, s * b, ang, 72)
                 strips.append(ring)
-                colors += [rgba(color, fades[min(k, 3)])] * len(ring)
+                colors += [_faded(color, fades[min(k, 3)])] * len(ring)
             self.lines(root, "rings", strips=strips, loop=True, style="decal", colors=colors, width=0.04, frame=frame,
                        **common)
             self.points(root, "mean", [c], color=color, radius=-2.0, style="point_glow", frame=frame, **common)
@@ -1961,17 +2121,20 @@ class Draw:
         poses = [c + tuple(q)] * len(sigmas)
         sizes = [(2 * s * sd[0], 2 * s * sd[1], 2 * s * sd[2]) for s in sigmas]
         self.shapes(root, "ellipsoid", "ellipsoid", poses=poses, sizes=sizes, style="shield", frame=frame,
-                    colors=[rgba(color, fades[min(k, 3)]) for k in range(len(sigmas))], **common)
+                    colors=[_faded(color, fades[min(k, 3)]) for k in range(len(sigmas))], **common)
         if n == 6:
             yaw_sd = math.sqrt(max(flat[35], 0.0))
-            yaw = mean[3] if len(mean) == 4 else 0.0
+            qw, qx, qy, qz = _quat(mean)
+            yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
             reach = max(2 * sd[0], 0.6) * 1.6
             self.shapes(root, "yaw", "sector", poses=[c + (yaw,)] * len(sigmas),
                         sizes=[(reach, min(2 * s * yaw_sd, 2 * math.pi), 0.0) for s in sigmas], style="sweep",
-                        pulse_hz=-1, colors=[rgba("orange", fades[min(k, 3)]) for k in range(len(sigmas))],
+                        pulse_hz=-1, colors=[_faded("orange", fades[min(k, 3)] * (color >> 24) / 255.0) for k in range(len(sigmas))],
                         frame=frame, **common)
         else:
             self.delete(root, "yaw")
+        self.delete(root, "rings")
+        self.delete(root, "mean")
 
     def ruler(self, ns: str, id: str, a, b, *, spacing: float = 0.0, **common) -> Status | None:
         """A ruler from `a` to `b`: ticks every `spacing` (0 picks a round
@@ -1988,11 +2151,12 @@ class Draw:
         z[, yaw] or a quaternion), `size`, `class`, `score`, optional
         `track`, `velocity` and `trail` (past centres). Class-coloured
         hologram boxes as bright as their score (`only_edge` for edges),
-        "class 0.92 #17" tags, velocity arrows, fading track trails; boxes
+        identity and score/track labels, velocity arrows, fading track trails; boxes
         under `threshold` are dimmed."""
         root = f"{ns}/{id}"
         poses, sizes, colors, tags, texts, tag_colors = [], [], [], [], [], []
         arrows_from, arrows_to, arrow_colors, trails, trail_colors = [], [], [], [], []
+        options = {"frame": frame, **common}
         for d in detections:
             pose = tuple(d["pose"])
             size = tuple(d.get("size", (1.0, 1.0, 1.0)))
@@ -2002,17 +2166,15 @@ class Draw:
             alpha = 0.35 + 0.65 * min(max(score, 0.0), 1.0) if strong else 0.22
             poses.append(pose)
             sizes.append(size)
-            colors.append(rgba(base, alpha))
+            colors.append(_faded(base, alpha))
             q = _quat(pose) if len(pose) != 3 else (1.0, 0.0, 0.0, 0.0)
             top = _apply(pose[:3], q, (0.0, 0.0, 0.5 * size[2]))
             tags.append(top)
-            text = cls or "object"
-            if show_score:
-                text += f" {score:.2f}"
+            detail = f"score {score:.2f}" if show_score else ""
             if d.get("track") is not None:
-                text += f" #{d['track']}"
-            texts.append(text)
-            tag_colors.append(rgba(base, 1.0 if strong else 0.5))
+                detail += (" / " if detail else "") + f"track #{d['track']}"
+            texts.append(json.dumps([cls or "object", detail], ensure_ascii=False, separators=(',', ':')))
+            tag_colors.append(_faded(base, 1.0 if strong else 0.5))
             v = d.get("velocity")
             if v is not None and sum(x * x for x in v) > 1e-6:
                 arrows_from.append(pose[:3])
@@ -2022,24 +2184,27 @@ class Draw:
             if len(trail) >= 2:
                 trails.append(trail)
                 trail_colors += [rgba(base)] * len(trail)
-        if only_edge:
-            self.shapes(root, "boxes", "box", poses=poses, sizes=sizes, colors=colors, fill="wire", style="plain",
-                        additive=True, width=line_width, frame=frame,**common)
-        else:
-            self.shapes(root, "boxes", "box", poses=poses, sizes=sizes, colors=colors, style="holo", beam_height=-1,
-                        width=line_width, frame=frame,**common)
-        self.points(root, "tags", tags, colors=tag_colors, radius=-1.5, style="point_glow", labels=texts, frame=frame,
-                    **common)
+        if not poses:
+            self._world_send(self._world_clear(root, ("boxes", "tags", "brackets", "velocity", "trails"), options))
+            return
+        box_options = {"fill": "wire", "style": "plain"} if only_edge else {"style": "holo", "beam_height": -1}
+        box_props = {"corner_frame": "true", **options.get("props", {})} if only_edge else options.get("props", {})
+        self.shapes(root, "boxes", "box", poses=poses, sizes=sizes, colors=colors,
+                    **{**box_options, "width": line_width, **options, "props": box_props})
+        self.text(root, "tags", tags, texts, text="", colors=tag_colors,
+                  **{**options, "props": {"label_icon": "sensor", "label_parts": "identity-detail-json",
+                                         "label_neutral_identity": "true", **options.get("props", {})}})
+        self._world_send(self._world_clear(root, ["brackets"], options))
         if arrows_from:
-            self.arrows(root, "velocity", arrows_from, tips=arrows_to, colors=arrow_colors, style="arrow_glow",
-                        frame=frame,**common)
+            self.arrows(root, "velocity", arrows_from, tips=arrows_to, colors=arrow_colors,
+                        **{"style": "arrow_glow", **options})
         else:
-            self.delete(root, "velocity")
+            self._world_send(self._world_clear(root, ["velocity"], options))
         if trails:
-            self.lines(root, "trails", strips=trails, colors=trail_colors, width=-2.0, fade=0.02, style="plain",
-                       frame=frame,**common)
+            self.lines(root, "trails", strips=trails, colors=trail_colors,
+                       **{"width": -2.0, "fade": 0.02, "style": "plain", **options})
         else:
-            self.delete(root, "trails")
+            self._world_send(self._world_clear(root, ["trails"], options))
 
     def detection2d(self, ns: str, id: str, camera_pose, boxes, *, hfov: float, vfov: float, image=(640, 480),
                     classes=None, scores=None, keypoints=None, skeleton=None, depth: float = 2.0,
@@ -2069,20 +2234,25 @@ class Draw:
                 wedge += [pose[:3], corners[i], corners[(i + 1) % 4]]
             wedge_colors += [rgba(base, 0.07)] * 12
             tags.append(corners[0])
-            texts.append(f"{cls or 'object'} {scores[k]:.2f}" if scores and k < len(scores) else (cls or "object"))
+            detail = f"score {scores[k]:.2f}" if scores and k < len(scores) else ""
+            texts.append(json.dumps([cls or "object", detail], ensure_ascii=False, separators=(',', ':')))
             tag_colors.append(rgba(base))
-        self.lines(root, "boxes", strips=rects, loop=True, colors=rect_colors, width=-2.0, style="plain", additive=True,
-                   frame=frame,**common)
-        self.triangles(root, "wedges", wedge, colors=wedge_colors, frame=frame,**common)
-        self.points(root, "tags", tags, colors=tag_colors, radius=-1.0, labels=texts, frame=frame,**common)
+        options = {"frame": frame, **common}
+        self.lines(root, "boxes", strips=rects, loop=True, colors=rect_colors,
+                   **{"width": -STRUCTURE_RULE_PX, "style": "plain", **options,
+                      "props": {"corner_frame": "true", **options.get("props", {})}})
+        self.triangles(root, "wedges", wedge, colors=wedge_colors, **options)
+        self.text(root, "tags", tags, texts, text="", colors=tag_colors,
+                  **{**options, "props": {"label_icon": "sensor", "label_parts": "identity-detail-json",
+                                         "label_neutral_identity": "true", **options.get("props", {})}})
         if keypoints:
             pts = [plane(u, v) for u, v in keypoints]
-            self.points(root, "keypoints", pts, radius=-3.0, color="yellow", style="point_glow", frame=frame,
-                        **common)
+            self.points(root, "keypoints", pts, radius=-3.0,
+                        **{"color": "yellow", "style": "point_glow", "frame": frame, **common})
             if skeleton:
                 segs = [p for a, b in skeleton for p in (pts[a], pts[b])]
-                self.lines(root, "skeleton", segs, segments=True, color="yellow", width=-1.5, frame=frame,
-                           **common)
+                self.lines(root, "skeleton", segs, segments=True,
+                           **{"color": "yellow", "width": -1.5, "frame": frame, **common})
 
     # ── sensors ──
 
@@ -2125,6 +2295,7 @@ class Draw:
         """A planar scan: its hits as splats (sent as u16 millimetres, 6144
         beams a chunk) over a faint sweeping fan."""
         root = f"{ns}/{id}"
+        color = rgba(color, common.pop("alpha", None)) or 1
         mm = [NO_RETURN if not (r == r) or r < 0 or r == float("inf") else min(int(round(r * 1000)), NO_RETURN - 1)
               for r in ranges]
         reach = range_max or max((r for r in ranges if r == r and r != float("inf")), default=1.0)
@@ -2137,7 +2308,7 @@ class Draw:
             span = min(abs(angle_increment) * max(len(ranges) - 1, 0), 2 * math.pi)
             mid = angle_min + 0.5 * angle_increment * max(len(ranges) - 1, 0)
             self.shapes(root, "fan", "sector", poses=[(0.0, 0.0, 0.0, mid)], sizes=[(reach, span, 0.0)], pose=pose,
-                        style="sweep", color=color, alpha=0.45, spacing=reach / 4, frame=frame,**common)
+                        style="sweep", color=_faded(color, 0.45), spacing=reach / 4, frame=frame,**common)
         else:
             self.delete(root, "fan")
 
@@ -2154,12 +2325,12 @@ class Draw:
         """A range sensor's cone: a sweep wedge with the reading as a bright arc."""
         root = f"{ns}/{id}"
         self.shapes(root, "cone", "sector", poses=[(0.0, 0.0, 0.0)], sizes=[(max_range, fov, min_range)], pose=pose,
-                    style="sweep", color="sensor", frame=frame,**common)
+                    **{"style": "sweep", "color": "sensor", "frame": frame, **common})
         if range is not None and min_range <= range <= max_range:
             arc = [(range * math.cos(a), range * math.sin(a), 0.0)
                    for a in (-fov / 2 + fov * k / 24 for k in range_(25))]
-            self.lines(root, "reading", arc, pose=pose, color="orange", style="tube_pulse", width=0.03, fade=-1,
-                       frame=frame,**common)
+            self.lines(root, "reading", arc, pose=pose,
+                       **{"color": "orange", "style": "tube_pulse", "width": 0.03, "fade": -1, "frame": frame, **common})
         else:
             self.delete(root, "reading")
 
@@ -2183,19 +2354,21 @@ class Draw:
         as bright as its weight."""
         n = len(poses)
         weights = list(weights) if weights is not None else [1.0] * n
-        top = max(weights) if weights else 1.0
-        top = top if top > 0 else 1.0
-        lengths = [min_length + (max_length - min_length) * w / top for w in weights]
-        colors = [rgba(color, 0.25 + 0.75 * w / top) for w in weights]
+        top = max(max(weights, default=0.0), 1e-9)
+        weights = [min(max(weights[i] / top, 0.0), 1.0) if i < len(weights) else 1.0 for i in range(n)]
+        tint = rgba(color, common.pop("alpha", None)) or 1
+        lengths = [min_length + (max_length - min_length) * w for w in weights]
+        colors = [_faded(tint, 0.25 + 0.75 * w) for w in weights]
         if glyph == "axes":
             spec = self._spec(_AXES, ns, id, **common)
             spec.instances = _instances(poses, [(l, l, l) for l in lengths])
+            self._per_item(spec, colors=colors)
             return self.send(spec)
         common.setdefault("style", "arrow_glow")
         if glyph == "chevron":
             common.setdefault("flat", True)
             common.setdefault("additive", True)
-            common.setdefault("glow", 0.7)
+            common.setdefault("width", 0.02)
         return self.arrows(ns, id, poses=poses, lengths=lengths, colors=colors, chevron=glyph == "chevron", **common)
 
     def wrench(self, ns: str, id: str, pose, force, torque=(0.0, 0.0, 0.0), *, scale: float = 0.1,
@@ -2204,6 +2377,7 @@ class Draw:
         arc with an arrowhead about its axis (yellow); `scale` metres per
         newton."""
         root = f"{ns}/{id}"
+        common.pop("color", None)
         self.arrows(root, "force", [(0.0, 0.0, 0.0)], tips=[tuple(f * scale for f in force)], pose=pose, color="red",
                     style="arrow_glow", width=0.03, frame=frame,**common)
         mag = math.sqrt(sum(t * t for t in torque))
@@ -2227,9 +2401,9 @@ class Draw:
         root = f"{ns}/{id}"
         n = _normalize(tuple(normal))
         length = max(abs(force) * scale, 0.15)
-        self.points(root, "point", [point], style="orb", color="orange", radius=0.08, frame=frame,**common)
-        self.arrows(root, "normal", [point], vectors=[tuple(c * length for c in n)], style="arrow_glow", color="orange",
-                    width=0.02, frame=frame,**common)
+        self.points(root, "point", [point], radius=0.08, **{"style": "orb", "color": "orange", "frame": frame, **common})
+        self.arrows(root, "normal", [point], vectors=[tuple(c * length for c in n)],
+                    **{"style": "arrow_glow", "color": "orange", "width": 0.02, "frame": frame, **common})
 
     # ── field robotics ──
 
@@ -2248,29 +2422,30 @@ class Draw:
         common.setdefault("color", "orange")
         return self.polygon(ns, id, [outer, inner], **common)
 
-    def swaths(self, ns: str, id: str, swaths, *, width: float = 3.0, done: int = 0, frame: str = "world",
+    def swaths(self, ns: str, id: str, swaths, *, width: float = 3.0, done: int = 0, color=None, frame: str = "world",
                **common) -> None:
         """Swaths (point lists) `width` wide (the coverage width), chevrons
         in the driving direction; the first `done` fade to history."""
         root = f"{ns}/{id}"
+        tint = rgba("plan" if color is None else color, common.pop("alpha", None)) or 1
         spacing = max(width * 1.5, 0.8)
         todo, old = list(swaths[done:]), list(swaths[:done])
         if todo:
-            self.lines(root, "todo", strips=todo, style="ribbon_flow", color="plan", width=width, flow_speed=1.2,
-                       spacing=spacing, frame=frame, **common)
+            self.lines(root, "todo", strips=todo, **{"style": "ribbon_flow", "color": tint, "width": width,
+                       "flow_speed": 1.2, "spacing": spacing, "frame": frame, **common})
         else:
             self.delete(root, "todo")
         if old:
-            self.lines(root, "done", strips=old, style="ribbon_flow", color="history", width=width, flow_speed=-1,
-                       spacing=spacing, frame=frame, **common)
+            self.lines(root, "done", strips=old, **{"style": "ribbon_flow", "color": _faded("history", (tint >> 24) / 255.0),
+                       "width": width, "flow_speed": -1, "spacing": spacing, "frame": frame, **common})
         else:
             self.delete(root, "done")
 
     def turns(self, ns: str, id: str, paths, *, width: float = 3.0, **common) -> Status | None:
         """Headland turns: narrower dashed ribbons."""
         spacing = max(width * 1.5, 0.8)
-        return self.lines(ns, id, strips=paths, style="ribbon_flow", color="cyan", width=0.5 * max(width, 0.2),
-                          dashed=True, flow_speed=1.0, spacing=spacing, **common)
+        return self.lines(ns, id, strips=paths, **{"style": "ribbon_flow", "color": "cyan", "width": 0.5 * max(width, 0.2),
+                          "dashed": True, "flow_speed": 1.0, "spacing": spacing, **common})
 
     def ab_line(self, ns: str, id: str, a, b, *, extend: float = 50.0, frame: str = "world", **common) -> None:
         """An AB line through `a` and `b` run on `extend` metres both ways,
@@ -2280,10 +2455,11 @@ class Draw:
         d = _normalize(tuple(q - p for p, q in zip(a3, b3)))
         start = tuple(p - c * extend for p, c in zip(a3, d))
         end = tuple(p + c * extend for p, c in zip(b3, d))
-        self.lines(root, "line", [start, a3, b3, end], style="plain", color="yellow", alpha=0.85, width=-2.0, dash=2.0,
-                   dashed=True, flat_caps=True, frame=frame, **common)
-        self.points(root, "ends", [a3, b3], color="yellow", radius=-3.0, style="point_glow", labels=["A", "B"],
-                    frame=frame, **common)
+        tint = rgba(common.pop("color", "yellow"), common.pop("alpha", None)) or 1
+        self.lines(root, "line", [start, a3, b3, end], **{"style": "plain", "color": _faded(tint, 0.85), "width": -2.0,
+                   "dash": 2.0, "dashed": True, "flat_caps": True, "frame": frame, **common})
+        self.points(root, "ends", [a3, b3], **{"color": tint, "radius": -3.0, "style": "point_glow", "labels": ["A", "B"],
+                    "frame": frame, **common})
 
     def coverage(self, ns: str, id: str, counts, cols: int, rows: int, *, cell: float = 0.5, origin=(0.0, 0.0, 0.0),
                  max_passes: int = 4, **common) -> Status | None:
@@ -2316,31 +2492,35 @@ class Draw:
     def odometry(self, ns: str, id: str, pose, *, velocity=(0.0, 0.0, 0.0), cov=None, frame: str = "world",
                  **common) -> None:
         """Odometry: a chevron at the pose, its velocity (body frame) as an
-        arrow, the covariance under it."""
+        arrow, the covariance under it. None or empty covariance removes its components."""
         root = f"{ns}/{id}"
         pose = tuple(pose)
-        self.pose_array(root, "pose", [pose], length=0.8, color="plan", frame=frame, **common)
+        self.pose_array(root, "pose", [pose], length=0.8, **{"color": "plan", "frame": frame, **common})
         q = _quat(pose) if len(pose) != 3 else (1.0, 0.0, 0.0, 0.0)
         v = _apply((0.0, 0.0, 0.0), q, tuple(velocity))
         if sum(x * x for x in v) > 1e-6:
-            self.arrows(root, "twist", [pose[:3]], vectors=[v], style="arrow_glow", color="prediction", frame=frame,
-                        **common)
+            self.arrows(root, "twist", [pose[:3]], vectors=[v], **{"style": "arrow_glow", "color": "prediction", "frame": frame,
+                        **common})
         else:
             self.delete(root, "twist")
-        if cov is not None:
-            self.covariance(root, "cov", pose, cov, sigmas=(1.0, 2.0), color="plan", frame=frame, **common)
+        cov = tuple(cov) if cov is not None else ()
+        if cov:
+            self.covariance(root, "cov", pose, cov, sigmas=(1.0, 2.0), **{"color": "plan", "frame": frame, **common})
+        else:
+            for component in ("rings", "mean", "ellipsoid", "yaw"):
+                self.delete(f"{root}/cov", component, wait=common.get("wait"))
 
     def band(self, ns: str, id: str, points, sigma, **common) -> Status | None:
         """A path as a pulsing tube as wide as `sigma` at each point."""
         common.setdefault("style", "tube_pulse")
-        common.setdefault("color", "prediction")
-        common.setdefault("alpha", 0.6)
+        common["color"] = _faded(rgba(common.get("color", "prediction"), common.pop("alpha", None)), 0.6)
         return self.lines(ns, id, points, radii=sigma, fade=-1, **common)
 
     def rollouts(self, ns: str, id: str, strips, costs=None, collisions=None, *, stride: int = 1, **common) -> None:
         """Sampled rollouts as hairlines tinted by cost (low green, high
         vermillion; nav2 MPPI keeps every `stride`-th), colliding ones magenta."""
         root = f"{ns}/{id}"
+        common.pop("color", None)
         free, free_cost, hit = [], [], []
         for k in range_(0, len(strips), max(stride, 1)):
             if collisions and k < len(collisions) and collisions[k]:
@@ -2388,10 +2568,11 @@ class Draw:
               **common) -> None:
         """A graph (RRT, PRM): nodes as glowing points, edges as hairlines."""
         root = f"{ns}/{id}"
+        color = rgba(color, common.pop("alpha", None)) or 1
         segs = [p for a, b in edges for p in (nodes[a], nodes[b])]
         self.points(root, "nodes", nodes, style="point_glow", color=color, radius=-2.0, labels=labels, frame=frame,
                     **common)
-        self.lines(root, "edges", segs, segments=True, style="hairline", color=color, alpha=0.35, width=-1.2,
+        self.lines(root, "edges", segs, segments=True, style="hairline", color=_faded(color, 0.35), width=-1.2,
                    frame=frame,**common)
 
     def voxels(self, ns: str, id: str, centers, *, size: float = 0.1, values=None, colormap="turbo",
@@ -2399,7 +2580,8 @@ class Draw:
         """A voxel grid: a box per centre `size` across, coloured by `values`."""
         if holo:
             common.setdefault("beam_height", -1)
-        return self.shapes(ns, id, "box", centers, size=size, values=values, colormap=colormap if values else None,
+        centers = list(centers)
+        return self.shapes(ns, id, "box", centers, sizes=[(size, size, size)] * len(centers), values=values, colormap=colormap if values else None,
                            style="holo" if holo else "plain", shaded=not holo, **common)
 
     def mesh(self, ns: str, id: str, asset: str | None = None, *, vertices=None, faces=None, poses=None,
@@ -2414,7 +2596,7 @@ class Draw:
             spec.instances = _instances(poses, [(scale,) * 3] * len(poses))
         return self.send(spec)
 
-    def ghost(self, ns: str, id: str, machine: str, poses, *, joints=None, values=None, color="cyan",
+    def ghost(self, ns: str, id: str, machine: str, poses, *, joints=None, values=None, color="cyan", colors=None,
               fade: float = 0.15, **common) -> Status | None:
         """See-through copies of `machine` at `poses` (MoveIt trail); `joints`
         names with a list of `values` per pose."""
@@ -2422,42 +2604,46 @@ class Draw:
         spec = self._spec(_GHOST, ns, id, color=color, fade=fade, props={"machine": machine,
                           "joints": ",".join(joints) if joints else None}, **common)
         spec.instances = _instances(poses, [(1.0, 1.0, 1.0)] * len(poses))
+        self._per_item(spec, colors=colors, alpha=common.get("alpha"))
         if joints and values:
             spec.values = [float(v) for row in values for v in row]
         return self.send(spec)
 
-    def ghost_trail(self, ns: str, id: str, machine: str, poses, *, step: int = 1, joints=None, values=None,
+    def ghost_trail(self, ns: str, id: str, machine: str, poses, *, step: int = 1, joints=None, values=None, colors=None,
                     **common) -> Status | None:
         """Every `step`-th state of a trajectory as a ghost, fading to the past."""
         idx = list(range_(0, len(poses), max(step, 1)))
         if poses and idx[-1] != len(poses) - 1:
             idx.append(len(poses) - 1)
         return self.ghost(ns, id, machine, [poses[i] for i in idx], joints=joints,
-                          values=[values[i] for i in idx] if values else None, **common)
+                          values=[values[i] for i in idx] if values else None,
+                          colors=[colors[i] if i < len(colors) else None for i in idx] if colors is not None else None, **common)
 
     # ── charts and annotations ──
 
     def panel(self, ns: str, id: str, anchor, kind: str = "table", *, values=None, labels=None, title: str = "",
               unit: str = "", lo: float | None = None, hi: float | None = None, text: str | None = None,
-              rows=None, color=None, frame: str = "world", **common) -> Status | None:
+              rows=None, color=None, colors=None, frame: str = "world", **common) -> Status | None:
         """An in-world chart at `anchor`: sparkline (`values`, fed with
         `extend(kind="panel")`), bars (`values`, `labels`), gauge (one
         value between `lo` and `hi`), chip (`text`) or table (`rows` as
         (key, value) pairs)."""
         props = {"title": title or None, "unit": unit or None, "min": lo, "max": hi, "text": text,
                  "rows": "\n".join(f"{k}={v}" for k, v in rows) if rows else None}
+        props.update(common.pop("props", None) or {})
         spec = self._spec(_PANEL, ns, id, pose=tuple(anchor), sub=PANEL[kind], color=color, frame=frame, props=props,
                           **common)
         spec.values = [float(v) for v in values] if values is not None else []
         spec.labels = [str(s) for s in labels] if labels else []
+        self._per_item(spec, colors=colors, alpha=common.get("alpha"))
         spec.header["flags"] &= ~DRAW_FLAG["labels"]
         return self.send(spec)
 
     def sparkline(self, ns: str, id: str, anchor, value: float, *, max_points: int = 120, title: str = "",
                   unit: str = "", **common) -> Status | None:
         """Adds `value` to a sparkline at `anchor` (rerun Scalars)."""
-        spec = self._spec(_PANEL, ns, id, pose=tuple(anchor), sub=PANEL["sparkline"],
-                          props={"title": title or None, "unit": unit or None, "max_points": int(max_points)}, **common)
+        props = {"title": title or None, "unit": unit or None, "max_points": int(max_points), **(common.pop("props", None) or {})}
+        spec = self._spec(_PANEL, ns, id, pose=tuple(anchor), sub=PANEL["sparkline"], props=props, **common)
         spec.values = [float(value)]
         return self._deliver((ns, id), [spec.message(op=DRAW_OP["extend"])], False, spec.wait)
 
@@ -2471,9 +2657,10 @@ class Draw:
 
     def badge(self, ns: str, id: str, machine: str, text: str, *, color="plan", height: float = 2.0,
               **common) -> Status | None:
-        """A status pill `height` metres over `machine`'s base link."""
+        """An annotation `height` metres over `machine`'s base link."""
+        props = {"text": text, "badge": 1, **(common.pop("props", None) or {})}
         spec = self._spec(_PANEL, ns, id, pose=(0.0, 0.0, height), sub=PANEL["chip"], color=color, frame=machine,
-                          props={"text": text, "badge": 1}, **common)
+                          props=props, **common)
         return self.send(spec)
 
     def table(self, ns: str, id: str, anchor, rows, *, title: str = "", **kw):
@@ -2486,27 +2673,30 @@ class Draw:
 
     def legend(self, ns: str, id: str, colormap: str, vmin: float, vmax: float, *, title: str = "", unit: str = "",
                **common) -> Status | None:
-        """A colormap legend in the corner of the view."""
-        spec = self._spec(_PANEL, ns, id, sub=PANEL["legend"], colormap=colormap, vmin=vmin, vmax=vmax, drape=False,
-                          props={"title": title or None, "unit": unit or None}, **common)
+        """A screen legend, or world-anchored with props={"world_anchor": "true"} and pose."""
+        props = {"title": title or None, "unit": unit or None, **(common.pop("props", None) or {})}
+        spec = self._spec(_PANEL, ns, id, sub=PANEL["legend"], colormap=colormap, vmin=vmin, vmax=vmax,
+                          props=props, **{"drape": False, **common})
         return self.send(spec)
 
-    def compass(self, ns: str, id: str, at=(0.0, 0.0, 0.0), *, size: float = 4.0, frame: str = "world",
+    def compass(self, ns: str, id: str, at=(0.0, 0.0, 0.0), *, size: float = 4.0, color="white", frame: str = "world",
                 **common) -> None:
         """A compass rose `size` metres across, north in goal yellow."""
         root = f"{ns}/{id}"
+        tint = rgba(color, common.pop("alpha", None)) or 1
+        north = _faded("goal", (tint >> 24) / 255.0)
         x, y, z = tuple(at) + (0.0,) * (3 - len(at))
         r = 0.5 * size
-        self.lines(root, "ring", _ellipse((x, y, z), r, r, 0.0, 72), loop=True, style="decal", color="white",
+        self.lines(root, "ring", _ellipse((x, y, z), r, r, 0.0, 72), loop=True, style="decal", color=tint,
                    width=0.03, frame=frame, **common)
         spokes, colors, tips = [], [], []
         for k, (dx, dy) in enumerate(((0, 1), (1, 0), (0, -1), (-1, 0))):
             inner = 0.0 if k == 0 else 0.25 * r
             spokes.append([(x + dx * inner, y + dy * inner, z), (x + dx * r * 1.15, y + dy * r * 1.15, z)])
-            colors += [rgba("goal" if k == 0 else "white")] * 2
+            colors += [north if k == 0 else tint] * 2
             tips.append((x + dx * r * 1.45, y + dy * r * 1.45, z + 0.05))
         self.lines(root, "spokes", strips=spokes, style="decal", colors=colors, width=0.05, frame=frame, **common)
-        self.text(root, "letters", tips, ["N", "E", "S", "W"], colors=["goal", "white", "white", "white"], size=15,
+        self.text(root, "letters", tips, ["N", "E", "S", "W"], colors=[north, tint, tint, tint], size=15,
                   frame=frame, **common)
 
     def scale_bar(self, ns: str, id: str, at, length: float, **common) -> Status | None:
@@ -2519,28 +2709,172 @@ class Draw:
         """A callout: `text` at `anchor + offset` on a leader line."""
         root = f"{ns}/{id}"
         a = tuple(anchor) + (0.0,) * (3 - len(anchor))
+        color = rgba(color, common.pop("alpha", None)) or 1
         at = tuple(p + o for p, o in zip(a, offset))
-        self.lines(root, "leader", [a, at], color=color, width=-1.5, style="plain", frame=frame,**common)
-        self.points(root, "anchor", [a], color=color, radius=-2.0, style="point_glow", frame=frame,**common)
-        spec = self._spec(_TEXT, root, "text", color="white", width=-14.0, frame=frame,
-                          props={"text": text, "accent": rgba(color)}, **common)
+        options = {"frame": frame, **common}
+        self.lines(root, "leader", [a, at], **{"color": color, "width": -1.5, "style": "plain", **options})
+        marker = []
+        _world_open_outline(marker, [(a[0] + x, a[1] + y, a[2]) for x, y in ((0, .12), (.12, 0), (0, -.12), (-.12, 0))])
+        self._world_send([self._world_lines(root, "anchor", marker, color, options)])
+        spec = self._spec(_TEXT, root, "text", **{"color": _faded("white", (color >> 24) / 255.0), "width": -16.0, **options,
+                          "props": {"text": text, "accent": rgba(color), **options.get("props", {})}})
         spec.points = list(at)
         self.send(spec)
+
+    def _world_send(self, children) -> Status | None:
+        status = None
+        for spec, op in children:
+            status = self.send(spec, op)
+            if status is not None and not status.ok:
+                break
+        return status
+
+    def _world_clear(self, root, ids, common):
+        options = {k: v for k, v in common.items() if k != "pose"}
+        return [(self._spec(0, root, id, **options), DRAW_OP["delete"]) for id in ids]
+
+    def _world_lines(self, root, id, points, color, common, width=-1.25):
+        if not points:
+            return self._world_clear(root, [id], common)[0]
+        tint = rgba(color, common.get("alpha")) or 1
+        options = {"style": "plain", "width": width, **common, "color": tint, "sub": LINE_MODE["list"]}
+        spec = self._spec(_LINES, root, id, **options)
+        spec.points = _flat_points(points)
+        return spec, DRAW_OP["upsert"]
+
+    def _world_label(self, root, at, label, color, common):
+        if not label or not _world_finite(at):
+            return self._world_clear(root, ["label"], common)[0]
+        options = {"style": "auto", "width": -16.0, **common, "color": rgba(color, common.get("alpha")) or 1}
+        options["props"] = {**common.get("props", {}), "text": str(label), "drape_anchor": "true"}
+        spec = self._spec(_TEXT, root, "label", **options)
+        spec.points = [_world_f32(v) for v in at]
+        return spec, DRAW_OP["upsert"]
+
+    def terrain_marks(self, ns: str, id: str, points, *, glyph: str = "square", size: float = 0.4,
+                      color="plan", **common) -> Status | None:
+        """Batched world XY glyphs, full span `size` metres; meaning and color are caller-supplied.
+        Processes at most 65,536 samples; skips nonfinite points and clears invalid-size marks."""
+        if glyph not in TERRAIN_GLYPHS:
+            raise ValueError(f"unknown terrain glyph {glyph!r}; choose {', '.join(TERRAIN_GLYPHS)}")
+        root, vertices = f"{ns.rstrip('/')}/{id}", []
+        size = _world_f32(size)
+        if _world_positive(size):
+            h = size * 0.5
+            polygon = {"square": ((-h, -h), (h, -h), (h, h), (-h, h)),
+                       "triangle": ((0.0, h), (-h, -h), (h, -h)),
+                       "diamond": ((0.0, h), (-h, 0.0), (0.0, -h), (h, 0.0))}.get(glyph, ())
+            for value in islice(points, _WORLD_MAX_POINTS):
+                p = _world_point(value)
+                if not _world_finite(p):
+                    continue
+                at = lambda xy: (p[0] + xy[0], p[1] + xy[1], p[2])
+                if glyph == "cross":
+                    _world_segment(vertices, at((-h, -h)), at((h, h)))
+                    _world_segment(vertices, at((-h, h)), at((h, -h)))
+                else:
+                    for a, b in zip(polygon, (*polygon[1:], polygon[0])):
+                        _world_segment(vertices, at(a), at(b))
+        return self._world_send([self._world_lines(root, "marks", vertices, color, common)])
+
+    def route_stations(self, ns: str, id: str, points, *, spacing: float = 1.0, size: float = 0.3,
+                       color="plan", **common) -> Status | None:
+        """A 3D route with equal arc-length transverse bars and forward chevrons.
+        Nonfinite points break the route; at most 65,536 inputs and 4,096 stations are used."""
+        root, route, marks = f"{ns.rstrip('/')}/{id}", [], []
+        spacing, size = _world_f32(spacing), _world_f32(size)
+        previous, remaining, count = None, 0.0, 0
+        for value in islice(points, _WORLD_MAX_POINTS):
+            b = _world_point(value)
+            a, previous = previous, b
+            if a is None:
+                continue
+            if not _world_finite(a) or not _world_finite(b):
+                remaining = 0.0
+                continue
+            _world_segment(route, a, b)
+            delta = tuple(b[i] - a[i] for i in range(3))
+            length = math.sqrt(sum(v * v for v in delta))
+            if length <= 1e-9 or not _world_positive(spacing) or not _world_positive(size) or count >= _WORLD_MAX_STATIONS:
+                continue
+            tangent = tuple(v / length for v in delta)
+            while remaining <= length and count < _WORLD_MAX_STATIONS:
+                centre = tuple(a[i] + remaining * tangent[i] for i in range(3))
+                _world_station_mark(marks, centre, tangent, size)
+                remaining += spacing
+                count += 1
+            remaining -= length
+        return self._world_send([self._world_lines(root, "route", route, color, common, -1.0),
+                                 self._world_lines(root, "stations", marks, color, common)])
+
+    def destination(self, ns: str, id: str, pose=(0.0, 0.0, 0.0), *, radius: float = 1.0,
+                    label: str = "", color="plan", **common) -> Status | None:
+        """A broken XY ring and upright open XZ diamond at a world/link pose; radius is metres."""
+        root, pose, radius = f"{ns.rstrip('/')}/{id}", _world_pose(pose), _world_f32(radius)
+        if pose is None or not _world_positive(radius) or not _world_finite((2.5 * radius,)):
+            return self._world_send(self._world_clear(root, ("rings", "marker", "leader", "label"), common))
+        options = {**common, "pose": pose, "props": {**common.get("props", {}), "drape_pose_height": "true"}}
+        anchored = {**options, "props": {**options["props"], "drape_anchor": "true"}}
+        rings, marker = [], []
+        for quadrant in range(4):
+            for i in range(12):
+                def point(k):
+                    angle = quadrant * math.pi * 0.5 + 0.14 + k / 12 * (math.pi * 0.5 - 0.28)
+                    return (radius * math.cos(angle), radius * math.sin(angle), 0.0)
+                _world_segment(rings, point(i), point(i + 1))
+        h = radius * 0.5
+        diamond = ((0.0, 0.0, 2 * radius + h), (h, 0.0, 2 * radius),
+                   (0.0, 0.0, 2 * radius - h), (-h, 0.0, 2 * radius))
+        _world_open_outline(marker, diamond)
+        leader = [(0.0, 0.0, 0.0), (0.0, 0.0, 1.35 * radius)]
+        if label:
+            _world_segment(leader, (0.58 * radius, 0.0, 2 * radius), (0.7 * radius, 0.0, 2 * radius))
+        return self._world_send([self._world_lines(root, "rings", rings, color, options),
+                                 self._world_lines(root, "marker", marker, color, anchored),
+                                 self._world_lines(root, "leader", leader, color, anchored),
+                                 self._world_label(root, (0.75 * radius, 0.0, 2 * radius), label, color, anchored)])
+
+    def clearance_box(self, ns: str, id: str, pose=(0.0, 0.0, 0.0), *, size=(1.0, 1.0, 1.0),
+                      color="plan", label: str = "", **common) -> Status | None:
+        """Corner brackets at a pose with full XYZ extents; no collision/safety inference."""
+        root, pose, size = f"{ns.rstrip('/')}/{id}", _world_pose(pose), _world_size(size)
+        if pose is None or not all(_world_positive(v) for v in size):
+            return self._world_send(self._world_clear(root, ("brackets", "label"), common))
+        options = {**common, "pose": pose, "props": {**common.get("props", {}), "drape_anchor": "true", "drape_pose_height": "true"}}
+        points = _world_box_brackets(size)
+        return self._world_send([self._world_lines(root, "brackets", points, color, options, -STRUCTURE_RULE_PX * STRUCTURE_CORNER_GAIN),
+                                 self._world_label(root, (0.0, 0.0, size[2] * 0.5), label, color, options)])
+
+    def field_volume(self, ns: str, id: str, pose=(0.0, 0.0, 0.0), *, size=(1.0, 1.0, 1.0),
+                     spacing: float = 0.5, color="plan", **common) -> Status | None:
+        """A normally depth-tested FIELD box with full XYZ extents and major-grid pitch in metres."""
+        root, pose, size = f"{ns.rstrip('/')}/{id}", _world_pose(pose), _world_size(size)
+        spacing = _world_f32(spacing)
+        if pose is None or not all(_world_positive(v) for v in (*size, spacing)):
+            return self._world_send(self._world_clear(root, ("volume",), common))
+        options = {"style": "field", **common, "pose": pose, "spacing": spacing,
+                   "color": rgba(color, common.get("alpha")) or 1, "sub": SHAPE["box"]}
+        options["props"] = {**common.get("props", {}), "drape_pose_height": "true"}
+        spec = self._spec(_SHAPES, root, "volume", **options)
+        spec.header["flags"] |= DRAW_FLAG["dashed"]
+        spec.instances = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, *size]
+        return self._world_send([(spec, DRAW_OP["upsert"])])
 
     def angle(self, ns: str, id: str, centre, start: float, end: float, *, radius: float = 1.0,
               frame: str = "world", **common) -> None:
         """An angle at `centre` from heading `start` to `end` (radians): a
         faint wedge, its rays and the angle in degrees."""
         root = f"{ns}/{id}"
+        tint = rgba(common.pop("color", "yellow"), common.pop("alpha", None)) or 1
         c = tuple(centre) + (0.0,) * (3 - len(centre))
         span, mid = end - start, start + 0.5 * (end - start)
         self.shapes(root, "wedge", "sector", poses=[c + (mid,)], sizes=[(radius, abs(span), 0.0)], style="sweep",
-                    color="yellow", alpha=0.6, pulse_hz=-1, frame=frame, **common)
+                    color=_faded(tint, 0.6), pulse_hz=-1, frame=frame, **common)
         arc = [(c[0] + radius * math.cos(a), c[1] + radius * math.sin(a), c[2])
                for a in (start + span * k / 32 for k in range_(33))]
-        self.lines(root, "rays", [c] + arc + [c], style="decal", color="yellow", width=0.025, frame=frame, **common)
+        self.lines(root, "rays", [c] + arc + [c], style="decal", color=tint, width=0.025, frame=frame, **common)
         self.text(root, "degrees", [(c[0] + 1.25 * radius * math.cos(mid), c[1] + 1.25 * radius * math.sin(mid), c[2] + 0.05)],
-                  text=f"{math.degrees(span):.1f}°", color="yellow", frame=frame, **common)
+                  text=f"{math.degrees(span):.1f}°", color=tint, frame=frame, **common)
 
     def tf_tree(self, machine: str, on: bool = True) -> Status | None:
         """Switch the viewer's TF tree overlay on for `machine` (nothing more

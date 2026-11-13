@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args as ClapArgs, Subcommand};
 use gearbox_api::wire::draw::parse_color;
-use gearbox_api::wire::draw_widgets::{self as w, Detection3d, DetectionStyle, Glyph, Place, Pose, Zone};
+use gearbox_api::wire::draw_widgets::{self as w, Detection3d, DetectionStyle, Glyph, Place, Pose, TerrainGlyph, Zone};
 use gearbox_api::{
     DrawEntity, GridCells, Instance, SceneEvent, colormap, draw_flag, draw_kind, draw_style, event_kind, interact_kind,
     line_mode, next_sample, panel_kind, point_style, shape_kind,
@@ -37,7 +37,7 @@ struct Common {
     /// Frame: world, MACHINE/odom, MACHINE/LINK or MACHINE (its base link)
     #[arg(long, default_value = "world")]
     frame: String,
-    /// Colour: #rgb, #rrggbb, #rrggbbaa or a name (rviz names on Okabe-Ito, or a role: plan, goal, sensor, ...)
+    /// Colour: #rgb, #rrggbb, #rrggbbaa or a name. Axis RGB, class/status palettes and scalar maps retain their meanings.
     #[arg(long)]
     color: Option<String>,
     /// Line, outline or point width: > 0 metres, < 0 pixels
@@ -58,12 +58,33 @@ struct Common {
     /// One label per item (strip, point, arrow, shape, polygon), repeated
     #[arg(long = "label")]
     labels: Vec<String>,
-    /// Look: auto, plain, ribbon_flow, tube_pulse, hairline, light_wall, beacon, holo, shield, alert, orb, decal, arrow_glow, point_glow, label, heat, splat, sweep, ghost, ruler
+    /// Caller-supplied annotation category
+    #[arg(long)]
+    label_category: Option<String>,
+    /// Caller-supplied annotation detail or metric
+    #[arg(long)]
+    label_detail: Option<String>,
+    /// Annotation icon; no operational state is inferred
+    #[arg(long, value_parser = ["robot", "sensor", "destination", "measurement", "obstacle", "frame"])]
+    label_icon: Option<String>,
+    /// Select annotation styling; --label-selected=false clears it
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    label_selected: Option<bool>,
+    /// Panel backing and foreground contrast
+    #[arg(long, value_parser = ["dark", "light"])]
+    panel_theme: Option<String>,
+    /// Glass finish: caller color, white + color, or black + color
+    #[arg(long, value_parser = ["color", "white", "black"])]
+    panel_finish: Option<String>,
+    /// Look: auto, plain, ribbon_flow, tube_pulse, hairline, light_wall, beacon, holo, shield, alert, orb, decal, arrow_glow, point_glow, label, heat, splat, sweep, ghost, ruler, field
     #[arg(long, default_value = "auto")]
     style: String,
     /// Brightness of the style's light (1 usual); the effects below take the style's default when left out and switch off below 0
     #[arg(long, allow_negative_numbers = true)]
     glow: Option<f32>,
+    /// Frost strength from 0 (clear) to 1 (full), independent of glow
+    #[arg(long)]
+    blur: Option<f32>,
     /// Rate of pulses, ripples and breathing, Hz
     #[arg(long, allow_negative_numbers = true)]
     pulse: Option<f32>,
@@ -100,6 +121,129 @@ struct Common {
     /// Value at the colormap's start and end (equal: the data's own range; reversed runs it backwards)
     #[arg(long, num_args = 2, value_names = ["VMIN", "VMAX"], allow_negative_numbers = true)]
     range: Option<Vec<f32>>,
+}
+
+#[derive(ClapArgs, Debug)]
+struct UpdateOptions {
+    /// Frost strength from 0 (clear) to 1 (full)
+    #[arg(long)]
+    blur: Option<f32>,
+    #[arg(long, num_args = 3..=4, value_names = ["X", "Y", "Z", "YAW"], allow_negative_numbers = true)]
+    pose: Option<Vec<f64>>,
+    #[arg(long, num_args = 3, value_names = ["X", "Y", "Z"], allow_negative_numbers = true)]
+    scale: Option<Vec<f32>>,
+    #[arg(long)]
+    color: Option<String>,
+    #[arg(long, alias = "outline")]
+    color2: Option<String>,
+    #[arg(long, allow_negative_numbers = true)]
+    width: Option<f32>,
+    #[arg(long)]
+    style: Option<String>,
+    #[arg(long, allow_negative_numbers = true)]
+    glow: Option<f32>,
+    #[arg(long, allow_negative_numbers = true)]
+    pulse: Option<f32>,
+    #[arg(long, allow_negative_numbers = true)]
+    flow: Option<f32>,
+    #[arg(long, allow_negative_numbers = true)]
+    spacing: Option<f32>,
+    #[arg(long, allow_negative_numbers = true)]
+    beam: Option<f32>,
+    #[arg(long, allow_negative_numbers = true)]
+    fade: Option<f32>,
+    #[arg(long, allow_negative_numbers = true)]
+    urgency: Option<f32>,
+    /// Replace the complete flags bitmask
+    #[arg(long)]
+    flags: Option<u32>,
+    #[arg(long)]
+    colormap: Option<String>,
+    #[arg(long, allow_negative_numbers = true)]
+    vmin: Option<f32>,
+    #[arg(long, allow_negative_numbers = true)]
+    vmax: Option<f32>,
+    #[arg(long)]
+    lifetime: Option<f64>,
+    #[arg(long, value_parser = ["color", "white", "black"])]
+    panel_finish: Option<String>,
+    #[arg(long, value_parser = ["dark", "light"])]
+    panel_theme: Option<String>,
+    /// Merge metadata; repeat for each KEY=VALUE (ns, id and set are reserved)
+    #[arg(long = "prop", value_name = "KEY=VALUE")]
+    props: Vec<String>,
+}
+
+impl UpdateOptions {
+    fn entity(&self, ns: &str, id: &str) -> Result<DrawEntity> {
+        let mut e = DrawEntity::update(ns, id);
+        if let Some(blur) = self.blur { e = e.with_blur(blur); }
+        let mut fields = Vec::new();
+        if let Some(p) = &self.pose {
+            e = e.at_yaw([p[0], p[1], p[2]], p.get(3).copied().unwrap_or(0.0));
+            fields.push("pose");
+        }
+        if let Some(s) = &self.scale {
+            (e.sx, e.sy, e.sz) = (s[0], s[1], s[2]);
+            fields.push("scale");
+        }
+        for (name, field, value) in [("tint", &mut e.color, &self.color), ("color2", &mut e.color2, &self.color2)] {
+            if value.is_some() {
+                *field = color(value)?;
+                fields.push(name);
+            }
+        }
+        if let Some(s) = &self.style {
+            e.style = draw_style::parse(s).ok_or_else(|| CliError::usage(format!("unknown style `{s}`")))?;
+            fields.push("style");
+        }
+        for (name, field, value) in [
+            ("width", &mut e.width, self.width),
+            ("glow", &mut e.glow, self.glow),
+            ("pulse_hz", &mut e.pulse_hz, self.pulse),
+            ("flow_speed", &mut e.flow_speed, self.flow),
+            ("dash", &mut e.dash, self.spacing),
+            ("beam_height", &mut e.beam_height, self.beam),
+            ("fade", &mut e.fade, self.fade),
+            ("urgency", &mut e.urgency, self.urgency),
+            ("vmin", &mut e.vmin, self.vmin),
+            ("vmax", &mut e.vmax, self.vmax),
+        ] {
+            if let Some(value) = value {
+                *field = value;
+                fields.push(name);
+            }
+        }
+        if let Some(flags) = self.flags {
+            e.flags = flags;
+            fields.push("flags");
+        }
+        if let Some(map) = &self.colormap {
+            e.colormap = colormap::parse(map).ok_or_else(|| CliError::usage(format!("unknown colormap `{map}`")))?;
+            fields.push("palette");
+        }
+        if let Some(lifetime) = self.lifetime {
+            e.lifetime_s = lifetime;
+            fields.push("lifetime");
+        }
+        for prop in &self.props {
+            let (key, value) = prop.split_once('=').ok_or_else(|| CliError::usage("--prop expects KEY=VALUE"))?;
+            if key.trim().is_empty() || matches!(key, "ns" | "id" | "set") {
+                return Err(CliError::usage(format!("reserved or empty update property `{key}`")));
+            }
+            e = e.with_prop(key, value);
+        }
+        for (key, value) in [("panel_finish", &self.panel_finish), ("panel_theme", &self.panel_theme)] {
+            if let Some(value) = value { e = e.with_prop(key, value); }
+        }
+        if fields.is_empty() {
+            if self.props.is_empty() && self.panel_finish.is_none() && self.panel_theme.is_none() && self.blur.is_none() {
+                return Err(CliError::usage("update requires at least one field or --prop KEY=VALUE"));
+            }
+            fields.push("props");
+        }
+        Ok(e.updating(&fields))
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -178,7 +322,7 @@ enum Cmd {
         #[arg(long)]
         text: String,
         /// Pixels tall
-        #[arg(long, default_value_t = 14.0)]
+        #[arg(long, default_value_t = 16.0)]
         size: f32,
     },
     /// An RGB axis triad at the entity pose
@@ -228,7 +372,7 @@ enum Cmd {
         #[arg(long, default_value_t = 0.5)]
         length: f32,
     },
-    /// Numbered waypoints: current a beacon, the rest holo pillars, joined by a flowing ribbon
+    /// Numbered route stations and selected corner brackets joined by a ribbon
     Waypoints {
         #[command(flatten)]
         common: Common,
@@ -265,20 +409,8 @@ enum Cmd {
     Update {
         ns: String,
         id: String,
-        #[arg(long, num_args = 3..=4, value_names = ["X", "Y", "Z", "YAW"], allow_negative_numbers = true)]
-        pose: Option<Vec<f64>>,
-        #[arg(long)]
-        color: Option<String>,
-        #[arg(long, allow_negative_numbers = true)]
-        width: Option<f32>,
-        #[arg(long)]
-        style: Option<String>,
-        #[arg(long, allow_negative_numbers = true)]
-        glow: Option<f32>,
-        #[arg(long)]
-        lifetime: Option<f64>,
-        #[arg(long)]
-        urgency: Option<f32>,
+        #[command(flatten)]
+        changes: UpdateOptions,
     },
     /// A grid of cells as a heat map: COLS×ROWS cells from the pose (lower-left corner)
     Grid {
@@ -637,6 +769,61 @@ enum Cmd {
         #[arg(long)]
         holo: bool,
     },
+    /// Batched world-space sample glyphs; the caller supplies their meaning
+    TerrainMarks {
+        #[command(flatten)]
+        common: Common,
+        #[arg(required = true, num_args = 1.., value_name = "X,Y[,Z]")]
+        points: Vec<String>,
+        /// square, cross, triangle or diamond
+        #[arg(long, default_value = "square")]
+        glyph: String,
+        /// Full glyph size in metres
+        #[arg(long, default_value_t = 0.4)]
+        size: f32,
+    },
+    /// Equal 3D arc-length marks along a supplied world-space route
+    RouteStations {
+        #[command(flatten)]
+        common: Common,
+        #[arg(required = true, num_args = 1.., value_name = "X,Y[,Z]")]
+        points: Vec<String>,
+        /// Distance between stations, metres; separate from effect --spacing
+        #[arg(long, default_value_t = 1.0)]
+        interval: f32,
+        /// Station glyph size, metres
+        #[arg(long, default_value_t = 0.3)]
+        size: f32,
+    },
+    /// Broken ground rings and an upright diamond at --pose
+    Destination {
+        #[command(flatten)]
+        common: Common,
+        #[arg(long, default_value_t = 1.0)]
+        radius: f32,
+        #[arg(long, default_value = "")]
+        text: String,
+    },
+    /// World-space corner brackets for supplied extents at --pose
+    ClearanceBox {
+        #[command(flatten)]
+        common: Common,
+        /// Full extents X,Y,Z, metres; not a collision/safety classification
+        #[arg(long, default_value = "1,1,1")]
+        size: String,
+        #[arg(long, default_value = "")]
+        text: String,
+    },
+    /// Transparent segmented field volume at --pose, with no screen HUD
+    FieldVolume {
+        #[command(flatten)]
+        common: Common,
+        #[arg(long, default_value = "1,1,1")]
+        size: String,
+        /// Rectangular grid spacing, metres
+        #[arg(long, default_value_t = 0.5)]
+        grid_spacing: f32,
+    },
     /// A compass rose at X,Y[,Z]
     Compass {
         #[command(flatten)]
@@ -689,6 +876,11 @@ enum Cmd {
     Clear { prefix: Option<String> },
     /// The live entities under PREFIX
     List { prefix: Option<String> },
+    /// Typed spatial datasets: list, status, layers, slices and field queries
+    Data {
+        #[command(subcommand)]
+        cmd: super::draw_data::DataCmd,
+    },
 }
 
 fn numbers(text: &str) -> Result<Vec<f32>> {
@@ -744,7 +936,7 @@ fn groups(args: &[String]) -> Result<Vec<Vec<Vec<[f32; 3]>>>> {
 fn color(text: &Option<String>) -> Result<u32> {
     match text {
         None => Ok(0),
-        Some(t) => parse_color(t).ok_or_else(|| CliError::usage(format!("bad colour `{t}`"))),
+        Some(t) => parse_color(t).map(|c| c.max(1)).ok_or_else(|| CliError::usage(format!("bad colour `{t}`"))),
     }
 }
 
@@ -760,8 +952,21 @@ fn entity_pose(c: &Common) -> Pose {
 }
 
 /// Common's look laid onto a widget's entity: colour, width, style, effects.
+fn annotation(mut e: DrawEntity, c: &Common) -> DrawEntity {
+    for (key, value) in [("label_category", &c.label_category), ("label_detail", &c.label_detail), ("label_icon", &c.label_icon)] {
+        if let Some(value) = value { e = e.with_prop(key, value); }
+    }
+    if let Some(selected) = c.label_selected {
+        e = e.with_prop("label_selected", if selected { "true" } else { "false" });
+    }
+    if let Some(theme) = &c.panel_theme { e = e.with_prop("panel_theme", theme); }
+    if let Some(finish) = &c.panel_finish { e = e.with_prop("panel_finish", finish); }
+    e
+}
+
 fn restyle(e: DrawEntity, c: &Common) -> Result<DrawEntity> {
     let mut e = e;
+    if let Some(blur) = c.blur { e = e.with_blur(blur); }
     if c.color.is_some() && !matches!(e.op, gearbox_api::draw_op::DELETE) {
         e = e.with_color(color(&c.color)?);
     }
@@ -771,7 +976,7 @@ fn restyle(e: DrawEntity, c: &Common) -> Result<DrawEntity> {
     if c.style != "auto" {
         e = e.with_style(draw_style::parse(&c.style).ok_or_else(|| CliError::usage(format!("unknown style `{}`", c.style)))?);
     }
-    for (v, slot) in [(c.glow, &mut e.glow), (c.pulse, &mut e.pulse_hz), (c.beam, &mut e.beam_height), (c.fade, &mut e.fade), (c.urgency, &mut e.urgency)] {
+    for (v, slot) in [(c.glow, &mut e.glow), (c.pulse, &mut e.pulse_hz), (c.flow, &mut e.flow_speed), (c.beam, &mut e.beam_height), (c.fade, &mut e.fade), (c.urgency, &mut e.urgency)] {
         if let Some(v) = v {
             *slot = v;
         }
@@ -782,7 +987,12 @@ fn restyle(e: DrawEntity, c: &Common) -> Result<DrawEntity> {
     if c.on_top {
         e = e.with_flags(draw_flag::ON_TOP);
     }
-    Ok(e)
+    if e.op != gearbox_api::draw_op::DELETE {
+        for (enabled, flag) in [(c.snapshot, draw_flag::SNAPSHOT), (c.flat, draw_flag::FLAT), (c.additive, draw_flag::ADDITIVE)] {
+            if enabled { e = e.with_flags(flag); }
+        }
+    }
+    Ok(annotation(e, c))
 }
 
 fn entity(kind: u32, c: &Common) -> Result<DrawEntity> {
@@ -791,6 +1001,7 @@ fn entity(kind: u32, c: &Common) -> Result<DrawEntity> {
         .with_color(color(&c.color)?)
         .with_width(c.width.unwrap_or(0.0))
         .with_lifetime(c.lifetime);
+    if let Some(blur) = c.blur { e = e.with_blur(blur); }
     if let Some(pose) = &c.pose {
         let half = 0.5 * pose.get(3).copied().unwrap_or(0.0);
         e = e.with_pose([pose[0], pose[1], pose[2]], [half.cos(), 0.0, 0.0, half.sin()]);
@@ -831,7 +1042,12 @@ fn entity(kind: u32, c: &Common) -> Result<DrawEntity> {
     if let Some(r) = &c.range {
         (e.vmin, e.vmax) = (r[0], r[1]);
     }
-    Ok(e)
+    Ok(annotation(e, c))
+}
+
+fn shape_entity(c: &Common, shape: u32) -> Result<DrawEntity> {
+    Ok(entity(draw_kind::SHAPES, c)?.with_sub(shape)
+        .with_scale([1.0, 1.0, if shape == shape_kind::SECTOR { 0.0 } else { 1.0 }]))
 }
 
 fn send(ctx: &Ctx, e: DrawEntity) -> Result<()> {
@@ -845,16 +1061,56 @@ fn send(ctx: &Ctx, e: DrawEntity) -> Result<()> {
 
 /// A widget's entities, styled by `c`, sent in order.
 fn send_all(ctx: &Ctx, c: &Common, what: &str, entities: Vec<DrawEntity>) -> Result<()> {
+    let entities = entities.into_iter().map(|e| restyle(e, c)).collect::<Result<Vec<_>>>()?;
+    send_prepared(ctx, c, what, entities)
+}
+
+fn send_prepared(ctx: &Ctx, c: &Common, what: &str, entities: Vec<DrawEntity>) -> Result<()> {
     let client = ctx.client()?;
     let mut parts = Vec::new();
     for e in entities {
-        let e = restyle(e, c)?;
         parts.push(format!("{}/{}", e.ns(), e.id()));
         check(client.draw(&e)?, &format!("draw {}/{}", e.ns(), e.id()))?;
     }
     let root = format!("{}/{}", c.ns, c.id);
     ctx.done(&root, &format!("drew {what} {root} ({} entities)", parts.len()), || json!({ "widget": what, "root": root, "parts": parts }));
     Ok(())
+}
+
+fn world_color(c: &Common) -> Result<u32> {
+    if c.color.is_some() { color(&c.color) } else { Ok(gearbox_api::draw_color::PLAN) }
+}
+
+fn waypoint_entities(c: &Common, points: &[[f32; 3]], current: usize) -> Result<Vec<DrawEntity>> {
+    Ok(w::waypoints_colored(&place(c), &c.ns, &c.id, points, current, world_color(c)?))
+}
+
+fn world_size(text: &str) -> Result<[f32; 3]> {
+    match numbers(text)?.as_slice() {
+        [x, y, z] => Ok([*x, *y, *z]),
+        _ => Err(CliError::usage(format!("`{text}` is not three full extents X,Y,Z"))),
+    }
+}
+
+fn terrain_glyph(name: &str) -> Result<TerrainGlyph> {
+    TerrainGlyph::parse(name).ok_or_else(|| CliError::usage(format!("unknown terrain glyph `{name}`")))
+}
+
+fn world_entities(c: &Common, entities: Vec<DrawEntity>) -> Result<Vec<DrawEntity>> {
+    let style = Common { color: None, ..c.clone() };
+    entities.into_iter().map(|mut e| {
+        if e.op != gearbox_api::draw_op::DELETE {
+            if c.pose.is_some() {
+                let pose = entity_pose(c);
+                e = e.with_pose(pose.position, pose.rotation);
+            }
+        }
+        restyle(e, &style)
+    }).collect()
+}
+
+fn send_world(ctx: &Ctx, c: &Common, what: &str, entities: Vec<DrawEntity>) -> Result<()> {
+    send_prepared(ctx, c, what, world_entities(c, entities)?)
 }
 
 /// The next draw event for `ns`/`id` saying one of `whats`.
@@ -952,8 +1208,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                     Ok(at.yawed(v.get(3).copied().unwrap_or(0.0)))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let e = entity(draw_kind::SHAPES, &common)?
-                .with_sub(sub)
+            let e = shape_entity(&common, sub)?
                 .with_fill(fill)
                 .with_instances(&instances)
                 .with_color2(color(&outline)?);
@@ -961,7 +1216,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         }
         Cmd::Text { common, points, text, size } => {
             let pts = points_of(&points)?;
-            let mut e = entity(draw_kind::TEXT, &common)?.with_points(&pts).with_prop("text", &text).with_width(-size.abs());
+            let mut e = entity(draw_kind::TEXT, &common)?.with_points(&pts).with_prop("text", &text).with_width(common.width.unwrap_or(-size.abs()));
             e.flags &= !draw_flag::LABELS;
             send(ctx, e)
         }
@@ -987,9 +1242,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         Cmd::Frame { common, parent, length } => {
             let parent = parent.as_deref().map(point).transpose()?;
             let label = common.labels.first().cloned();
-            let mut c = common.clone();
-            c.color = None;
-            send_all(ctx, &c, "frame", w::frame(&place(&common), &common.ns, &common.id, entity_pose(&common), parent, length, label.as_deref()))
+            send_all(ctx, &common, "frame", w::frame(&place(&common), &common.ns, &common.id, entity_pose(&common), parent, length, label.as_deref()))
         }
         Cmd::PoseArray { common, poses, glyph, length } => {
             let glyph = Glyph::parse(&glyph).ok_or_else(|| CliError::usage(format!("unknown glyph `{glyph}`")))?;
@@ -999,7 +1252,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         }
         Cmd::Waypoints { common, points, current } => {
             let pts = points_of(&points)?;
-            send_all(ctx, &Common { color: None, ..common.clone() }, "waypoints", w::waypoints(&place(&common), &common.ns, &common.id, &pts, current))
+            send_all(ctx, &Common { color: None, ..common.clone() }, "waypoints", waypoint_entities(&common, &pts, current)?)
         }
         Cmd::Covariance { common, mean, cov, sigmas } => {
             let cov: Vec<f64> = numbers(&cov)?.into_iter().map(|v| v as f64).collect();
@@ -1012,34 +1265,10 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             let e = w::ruler(&place(&common), &common.ns, &common.id, point(&a)?, point(&b)?, common.spacing.unwrap_or(0.0));
             send(ctx, restyle(e, &common)?)
         }
-        Cmd::Update { ns, id, pose, color: c, width, style, glow, lifetime, urgency } => {
-            let mut e = DrawEntity::update(&ns, &id);
-            let mut groups = Vec::new();
-            if let Some(p) = pose {
-                e = e.at_yaw([p[0], p[1], p[2]], p.get(3).copied().unwrap_or(0.0));
-                groups.push("pose");
-            }
-            if c.is_some() {
-                e = e.with_color(color(&c)?);
-                groups.push("color");
-            }
-            if let Some(wd) = width {
-                e = e.with_width(wd);
-                groups.push("width");
-            }
-            if let Some(s) = style {
-                e = e.with_style(draw_style::parse(&s).ok_or_else(|| CliError::usage(format!("unknown style `{s}`")))?);
-                groups.push("style");
-            }
-            if glow.is_some() || urgency.is_some() {
-                e = e.with_glow(glow.unwrap_or(0.0)).with_urgency(urgency.unwrap_or(0.0));
-                groups.push("effects");
-            }
-            if let Some(l) = lifetime {
-                e = e.with_lifetime(l);
-                groups.push("lifetime");
-            }
-            check(ctx.client()?.draw_raw(&e.updating(&groups))?, &format!("update draw {ns}/{id}"))?;
+        Cmd::Update { ns, id, changes } => {
+            let e = changes.entity(&ns, &id)?;
+            let groups = e.props().get("set").unwrap_or_default().split(',').map(str::to_owned).collect::<Vec<_>>();
+            check(ctx.client()?.draw_raw(&e)?, &format!("update draw {ns}/{id}"))?;
             ctx.done(&id, &format!("updated {ns}/{id} ({})", groups.join(", ")), || json!({ "ns": ns, "id": id, "set": groups }));
             Ok(())
         }
@@ -1148,8 +1377,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             send_all(ctx, &common, "scan", w::scan(&place(&common), &common.ns, &common.id, entity_pose(&common), &ranges, angle_min, increment, range_max))
         }
         Cmd::Sweep { common, radius, angle, inner } => {
-            let e = entity(draw_kind::SHAPES, &common)?
-                .with_sub(shape_kind::SECTOR)
+            let e = shape_entity(&common, shape_kind::SECTOR)?
                 .with_instances(&[Instance::at([0.0; 3], [radius, angle, inner])])
                 .with_style(if common.style == "auto" { draw_style::SWEEP } else { draw_style::parse(&common.style).unwrap_or(draw_style::SWEEP) });
             send(ctx, e)
@@ -1172,7 +1400,8 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 weights.push(v.get(4).copied().unwrap_or(1.0));
             }
             let glyph = Glyph::parse(&glyph).ok_or_else(|| CliError::usage(format!("unknown glyph `{glyph}`")))?;
-            let e = w::particles(&place(&common), &common.ns, &common.id, &poses, &weights, min, max, glyph);
+            let tint = if common.color.is_some() { color(&common.color)? } else { gearbox_api::draw_color::CYAN };
+            let e = w::particles_colored(&place(&common), &common.ns, &common.id, &poses, &weights, min, max, glyph, tint);
             send(ctx, restyle(e, &Common { color: None, ..common.clone() })?)
         }
         Cmd::Field { common, points } => {
@@ -1191,7 +1420,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
         }
         Cmd::Swaths { common, points, swath_width, done } => {
             let lines = groups(&points)?.into_iter().next().unwrap_or_default();
-            send_all(ctx, &Common { color: None, ..common.clone() }, "swaths", w::swaths(&place(&common), &common.ns, &common.id, &lines, swath_width, done))
+            send_all(ctx, &Common { color: None, ..common.clone() }, "swaths", w::swaths_colored(&place(&common), &common.ns, &common.id, &lines, swath_width, done, world_color(&common)?))
         }
         Cmd::Turns { common, points, swath_width } => {
             let paths = groups(&points)?.into_iter().next().unwrap_or_default();
@@ -1258,7 +1487,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 e.op = gearbox_api::draw_op::EXTEND;
                 e = e.with_prop("max_points", &keep.to_string());
             }
-            send(ctx, e)
+            send(ctx, restyle(e, &common)?)
         }
         Cmd::Badge { ns, id, machine, text, color: c, height } => {
             send(ctx, w::badge(&ns, &id, &machine, &text, color(&Some(c))?, height))
@@ -1330,8 +1559,30 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             let map = common.colormap.as_deref().and_then(colormap::parse).unwrap_or(colormap::TURBO);
             send(ctx, restyle(w::voxels(&place(&common), &common.ns, &common.id, &centres, size, &values, map, holo), &common)?)
         }
+        Cmd::TerrainMarks { common, points, glyph, size } => {
+            let glyph = terrain_glyph(&glyph)?;
+            let parts = w::terrain_marks(&place(&common), &common.ns, &common.id, &points_of(&points)?, glyph, size, world_color(&common)?);
+            send_world(ctx, &common, "terrain-marks", parts)
+        }
+        Cmd::RouteStations { common, points, interval, size } => {
+            let parts = w::route_stations(&place(&common), &common.ns, &common.id, &points_of(&points)?, interval, size, world_color(&common)?);
+            send_world(ctx, &common, "route-stations", parts)
+        }
+        Cmd::Destination { common, radius, text } => {
+            let parts = w::destination(&place(&common), &common.ns, &common.id, entity_pose(&common), radius, &text, world_color(&common)?);
+            send_world(ctx, &common, "destination", parts)
+        }
+        Cmd::ClearanceBox { common, size, text } => {
+            let parts = w::clearance_box(&place(&common), &common.ns, &common.id, entity_pose(&common), world_size(&size)?, world_color(&common)?, &text);
+            send_world(ctx, &common, "clearance-box", parts)
+        }
+        Cmd::FieldVolume { common, size, grid_spacing } => {
+            let parts = w::field_volume(&place(&common), &common.ns, &common.id, entity_pose(&common), world_size(&size)?, grid_spacing, world_color(&common)?);
+            send_world(ctx, &common, "field-volume", parts)
+        }
         Cmd::Compass { common, at, size } => {
-            send_all(ctx, &Common { color: None, ..common.clone() }, "compass", w::compass(&place(&common), &common.ns, &common.id, point(&at)?, size))
+            let tint = if common.color.is_some() { color(&common.color)? } else { gearbox_api::draw_color::WHITE };
+            send_all(ctx, &Common { color: None, ..common.clone() }, "compass", w::compass_colored(&place(&common), &common.ns, &common.id, point(&at)?, size, tint))
         }
         Cmd::ScaleBar { common, at, length } => {
             send(ctx, restyle(w::scale_bar(&place(&common), &common.ns, &common.id, point(&at)?, length), &common)?)
@@ -1341,7 +1592,8 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             send_all(ctx, &Common { color: None, ..common.clone() }, "callout", parts)
         }
         Cmd::Angle { common, centre, from, to, radius } => {
-            send_all(ctx, &Common { color: None, ..common.clone() }, "angle", w::angle(&place(&common), &common.ns, &common.id, point(&centre)?, from, to, radius))
+            let tint = if common.color.is_some() { color(&common.color)? } else { gearbox_api::draw_color::YELLOW };
+            send_all(ctx, &Common { color: None, ..common.clone() }, "angle", w::angle_colored(&place(&common), &common.ns, &common.id, point(&centre)?, from, to, radius, tint))
         }
         Cmd::Tf { machine, off } => {
             let client = ctx.client()?;
@@ -1364,6 +1616,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             ctx.done(&touched, &format!("cleared {what}: {touched} entities"), || json!({ "prefix": prefix, "removed": touched }));
             Ok(())
         }
+        Cmd::Data { cmd } => return super::draw_data::run(ctx, cmd),
         Cmd::List { prefix } => {
             let listed = ctx.client()?.draw_list(&prefix.unwrap_or_default())?;
             if ctx.json {
@@ -1377,6 +1630,7 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                             "points": p.get("points").unwrap_or_default(),
                             "instances": p.get("instances").unwrap_or_default(),
                             "style": draw_style::name(e.style),
+                            "blur": e.prop_f32("blur"),
                             "lifetime_s": e.lifetime_s,
                         })
                     })
@@ -1408,6 +1662,364 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
                 }
             }
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    #[derive(Parser, Debug)]
+    struct DrawCli {
+        #[command(flatten)]
+        draw: Args,
+    }
+
+    const WORLD_CASES: [&[&str]; 5] = [
+        &["terrain-marks", "contract", "terrain", "1,2,3"],
+        &["route-stations", "contract", "route", "0,0,0;2,0,0"],
+        &["destination", "contract", "destination"],
+        &["clearance-box", "contract", "clearance"],
+        &["field-volume", "contract", "field"],
+    ];
+
+    fn parse(args: &[&str]) -> std::result::Result<Cmd, clap::Error> {
+        DrawCli::try_parse_from(std::iter::once("draw-test").chain(args.iter().copied())).map(|cli| cli.draw.cmd)
+    }
+
+    #[test]
+    fn sector_builders_default_to_zero_inner_extent_only() {
+        let Cmd::Sweep { common, .. } = parse(&["sweep", "n", "s"]).unwrap() else { panic!() };
+        assert_eq!(shape_entity(&common, shape_kind::SECTOR).unwrap().sz, 0.0);
+        assert_eq!(shape_entity(&common, shape_kind::BOX).unwrap().sz, 1.0);
+    }
+
+    #[test]
+    fn blur_creation_and_metadata_update_keep_explicit_zero() {
+        let Cmd::Sweep { common, .. } = parse(&["sweep", "n", "s", "--blur", "0.5"]).unwrap() else { panic!() };
+        assert_eq!(entity(draw_kind::SHAPES, &common).unwrap().prop_f32("blur"), Some(0.5));
+        let Cmd::Update { ns, id, changes } = parse(&["update", "n", "s", "--blur", "0"]).unwrap() else { panic!() };
+        let update = changes.entity(&ns, &id).unwrap();
+        assert_eq!(update.prop_f32("blur"), Some(0.0));
+        assert_eq!(update.props().get("set").as_deref(), Some("props"));
+    }
+
+    fn build(cmd: Cmd) -> Result<(Common, Vec<DrawEntity>)> {
+        let (common, entities) = match cmd {
+            Cmd::TerrainMarks { common, points, glyph, size } => {
+                let glyph = terrain_glyph(&glyph)?;
+                let entities = w::terrain_marks(&place(&common), &common.ns, &common.id, &points_of(&points)?, glyph, size, world_color(&common)?);
+                (common, entities)
+            }
+            Cmd::RouteStations { common, points, interval, size } => {
+                let entities = w::route_stations(&place(&common), &common.ns, &common.id, &points_of(&points)?, interval, size, world_color(&common)?);
+                (common, entities)
+            }
+            Cmd::Destination { common, radius, text } => {
+                let entities = w::destination(&place(&common), &common.ns, &common.id, entity_pose(&common), radius, &text, world_color(&common)?);
+                (common, entities)
+            }
+            Cmd::ClearanceBox { common, size, text } => {
+                let entities = w::clearance_box(&place(&common), &common.ns, &common.id, entity_pose(&common), world_size(&size)?, world_color(&common)?, &text);
+                (common, entities)
+            }
+            Cmd::FieldVolume { common, size, grid_spacing } => {
+                let entities = w::field_volume(&place(&common), &common.ns, &common.id, entity_pose(&common), world_size(&size)?, grid_spacing, world_color(&common)?);
+                (common, entities)
+            }
+            _ => panic!("expected a world drawing command"),
+        };
+        let entities = world_entities(&common, entities)?;
+        Ok((common, entities))
+    }
+
+    fn prepare(args: &[&str]) -> Vec<DrawEntity> {
+        build(parse(args).expect("valid CLI syntax")).expect("valid world geometry").1
+    }
+
+    fn update(args: &[&str]) -> Result<DrawEntity> {
+        let args: Vec<_> = ["update", "n", "id"].into_iter().chain(args.iter().copied()).collect();
+        let Cmd::Update { ns, id, changes } = parse(&args).unwrap() else { unreachable!() };
+        changes.entity(&ns, &id)
+    }
+
+    #[test]
+    fn updates_select_only_the_supplied_field() {
+        for (option, mask) in [
+            ("glow", "glow"), ("pulse", "pulse_hz"), ("flow", "flow_speed"),
+            ("spacing", "dash"), ("beam", "beam_height"), ("fade", "fade"),
+            ("urgency", "urgency"), ("vmin", "vmin"), ("vmax", "vmax"),
+            ("flags", "flags"), ("width", "width"), ("lifetime", "lifetime"),
+        ] {
+            let e = update(&[&format!("--{option}"), "0"]).unwrap();
+            assert_eq!(e.props().get("set").as_deref(), Some(mask), "option {option}");
+        }
+        let e = update(&["--glow", "-1", "--flow", "2.5", "--pulse", "3"]).unwrap();
+        assert_eq!(e.props().get("set").as_deref(), Some("glow,pulse_hz,flow_speed"));
+        assert_eq!((e.glow, e.flow_speed, e.pulse_hz), (-1.0, 2.5, 3.0));
+        let e = update(&["--colormap", "viridis"]).unwrap();
+        assert_eq!(e.props().get("set").as_deref(), Some("palette"));
+        assert_eq!(e.colormap, colormap::VIRIDIS);
+        let e = update(&["--color", "#00000000", "--color2", "#ff000080"]).unwrap();
+        assert_eq!(e.props().get("set").as_deref(), Some("tint,color2"));
+        assert_eq!((e.color, e.color2), (1, 0x800000ff));
+    }
+
+    #[test]
+    fn update_metadata_does_not_reset_headers_and_rejects_empty_or_reserved_input() {
+        let e = update(&["--panel-finish", "white", "--panel-theme", "light", "--prop", "label_detail=42=answer"]).unwrap();
+        assert_eq!(e.props().get("set").as_deref(), Some("props"));
+        assert_eq!(e.props().get("panel_finish").as_deref(), Some("white"));
+        assert_eq!(e.props().get("panel_theme").as_deref(), Some("light"));
+        assert_eq!(e.props().get("label_detail").as_deref(), Some("42=answer"));
+        for args in [&[][..], &["--prop", "set="], &["--prop", "ns=bad"], &["--prop", "id=bad"], &["--prop", "=bad"], &["--prop", "missing-value"]] {
+            assert!(update(args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn clap_definition_and_five_world_defaults_are_valid() {
+        DrawCli::command().debug_assert();
+        let child_ids: [&[&str]; 5] = [
+            &["marks"], &["route", "stations"], &["rings", "marker", "leader", "label"],
+            &["brackets", "label"], &["volume"],
+        ];
+        for (args, ids) in WORLD_CASES.into_iter().zip(child_ids) {
+            let (common, entities) = build(parse(args).unwrap()).unwrap();
+            assert_eq!(common.frame, "world");
+            assert_eq!(common.lifetime, 0.0);
+            assert_eq!(common.style, "auto");
+            assert!(common.glow.is_none());
+            assert_eq!(entities.iter().map(|e| e.id()).collect::<Vec<_>>(), ids);
+            for e in entities.iter().filter(|e| e.op != gearbox_api::draw_op::DELETE) {
+                assert_eq!(e.ns(), format!("{}/{}", common.ns, common.id));
+                assert_eq!(e.color, gearbox_api::draw_color::PLAN);
+                assert_ne!(e.flags & draw_flag::DRAPE, 0);
+                assert_eq!(e.flags & (draw_flag::ON_TOP | draw_flag::ADDITIVE), 0);
+                if e.kind == draw_kind::LINES {
+                    assert_eq!(e.style, draw_style::PLAIN);
+                    assert_eq!(e.glow, 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn world_common_flags_and_negative_controls_reach_entities() {
+        let options = [
+            "--frame", "robot/link", "--lifetime", "7", "--pose", "-10", "-20", "-30", "-0.5",
+            "--width", "-2.5", "--glow", "-1", "--pulse", "-2", "--flow", "-3", "--spacing", "-4",
+            "--beam", "-5", "--fade", "0.25", "--urgency", "0.4", "--snapshot", "--flat", "--additive",
+            "--on-top", "--no-drape", "--style", "plain", "--color", "#00000000",
+        ];
+        for case in WORLD_CASES {
+            let mut args = case.to_vec();
+            args.extend(options);
+            let entities = prepare(&args);
+            let flags = draw_flag::SNAPSHOT | draw_flag::FLAT | draw_flag::ADDITIVE | draw_flag::ON_TOP;
+            let live: Vec<_> = entities.iter().filter(|e| e.op != gearbox_api::draw_op::DELETE).collect();
+            assert!(!live.is_empty());
+            for e in live {
+                assert_eq!(e.props().get("frame").as_deref(), Some("robot/link"));
+                assert_eq!(e.lifetime_s, 7.0);
+                assert_eq!([e.px, e.py, e.pz], [-10.0, -20.0, -30.0]);
+                assert!((e.qw - (-0.25_f64).cos()).abs() < 1e-12);
+                assert!((e.qz - (-0.25_f64).sin()).abs() < 1e-12);
+                assert_eq!([e.qx, e.qy], [0.0, 0.0]);
+                assert_eq!(e.width, -2.5);
+                assert_eq!([e.glow, e.pulse_hz, e.flow_speed, e.dash, e.beam_height], [-1.0, -2.0, -3.0, -4.0, -5.0]);
+                assert_eq!([e.fade, e.urgency], [0.25, 0.4]);
+                assert_eq!(e.flags & flags, flags);
+                assert_eq!(e.flags & draw_flag::DRAPE, 0);
+                assert_eq!(e.style, draw_style::PLAIN);
+                assert_eq!(e.color, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn existing_composites_keep_explicit_effects_and_flags() {
+        let Cmd::Waypoints { common, .. } = parse(&["waypoints", "n", "route", "0,0,0;2,0,0", "--glow", "-1", "--pulse", "-2",
+            "--flow", "-3", "--width", "-2.5", "--snapshot", "--flat", "--additive", "--on-top"]).unwrap() else {
+            panic!("waypoints command");
+        };
+        let entities = w::waypoints(&place(&common), "n", "route", &[[0.0; 3], [2.0, 0.0, 0.0]], 0);
+        for e in entities {
+            let e = restyle(e, &common).unwrap();
+            assert_eq!([e.glow, e.pulse_hz, e.flow_speed, e.width], [-1.0, -2.0, -3.0, -2.5]);
+            let mask = draw_flag::SNAPSHOT | draw_flag::FLAT | draw_flag::ADDITIVE | draw_flag::ON_TOP;
+            assert_eq!(e.flags & mask, mask);
+        }
+    }
+
+    #[test]
+    fn waypoint_cli_color_reaches_generated_items_without_replacing_state_colors() {
+        for (argument, expected) in [("magenta", gearbox_api::draw_color::MAGENTA), ("#00000000", 1), ("#00ff0080", 0x8000_ff00)] {
+            let Cmd::Waypoints { common, points, current } = parse(&["waypoints", "n", "route", "0,0,0;2,0,0;4,0,0",
+                "--current", "1", "--color", argument]).unwrap() else { panic!("waypoints command"); };
+            let entities = waypoint_entities(&common, &points_of(&points).unwrap(), current).unwrap();
+            assert_eq!(entities[0].colors[2], expected);
+            assert_eq!(entities[3].color & 0x00ff_ffff, gearbox_api::draw_color::GOAL & 0x00ff_ffff);
+            assert_eq!(entities[3].color >> 24, expected >> 24);
+        }
+        let Cmd::Waypoints { common, points, current } = parse(&["waypoints", "n", "route", "0,0,0;2,0,0"]).unwrap() else {
+            panic!("waypoints command");
+        };
+        assert_eq!(waypoint_entities(&common, &points_of(&points).unwrap(), current).unwrap()[0].colors,
+            [gearbox_api::draw_color::PLAN; 2]);
+    }
+
+    #[test]
+    fn common_tint_preserves_explicit_item_colors_and_scalar_maps() {
+        for argument in ["magenta", "#00000000", "#00ff0080"] {
+            let Cmd::Destination { common, .. } = parse(&["destination", "n", "fixture", "--color", argument]).unwrap() else {
+                panic!("destination command");
+            };
+            let expected = color(&common.color).unwrap();
+            for kind in [draw_kind::LINES, draw_kind::POINTS, draw_kind::ARROWS, draw_kind::SHAPES, draw_kind::TEXT,
+                draw_kind::GHOST, draw_kind::PANEL, draw_kind::GRID, draw_kind::AXES] {
+                let e = DrawEntity::new(kind, "n", "fixture").with_colors(&[gearbox_api::draw_color::GREEN])
+                    .with_values(&[0.25]).with_colormap(colormap::VIRIDIS, 0.0, 1.0);
+                let e = restyle(e, &common).unwrap();
+                assert_eq!(e.color, expected);
+                assert_eq!(e.colors, [gearbox_api::draw_color::GREEN]);
+                assert_eq!((e.colormap, e.vmin, e.vmax), (colormap::VIRIDIS, 0.0, 1.0));
+                assert_eq!(e.values, [0.25]);
+            }
+        }
+        assert_eq!(color(&None).unwrap(), 0);
+    }
+
+    #[test]
+    fn panel_theme_and_glow_reach_the_entity_without_changing_values() {
+        for (theme, finish) in ["dark", "light"].into_iter().flat_map(|theme| ["color", "white", "black"].map(|finish| (theme, finish))) {
+            let Cmd::Panel { common, .. } = parse(&["panel", "n", "chart", "--panel-theme", theme, "--panel-finish", finish, "--glow=-1"]).unwrap() else {
+                panic!("panel command");
+            };
+            let e = restyle(DrawEntity::panel("n", "chart", panel_kind::BARS, &[0.25, 0.75])
+                .with_colors(&[gearbox_api::draw_color::GREEN, gearbox_api::draw_color::MAGENTA]), &common).unwrap();
+            assert_eq!(e.props().get("panel_theme").as_deref(), Some(theme));
+            assert_eq!(e.props().get("panel_finish").as_deref(), Some(finish));
+            assert_eq!(e.glow, -1.0);
+            assert_eq!(e.values, [0.25, 0.75]);
+            assert_eq!(e.colors, [gearbox_api::draw_color::GREEN, gearbox_api::draw_color::MAGENTA]);
+        }
+        assert!(parse(&["panel", "n", "chart", "--panel-theme", "unknown"]).is_err());
+        assert!(parse(&["panel", "n", "chart", "--panel-finish", "unknown"]).is_err());
+    }
+
+    #[test]
+    fn annotation_metadata_reaches_primitives_and_composites() {
+        let Cmd::Destination { common, .. } = parse(&["destination", "n", "dock", "--label-category", "INSPECTION",
+            "--label-detail", "0.4 m", "--label-icon", "measurement", "--label-selected"]).unwrap() else {
+            panic!("destination command");
+        };
+        let primitive = entity(draw_kind::TEXT, &common).unwrap();
+        let composite = restyle(DrawEntity::text("n", "label", &[[0.0; 3]], "Supplied"), &common).unwrap();
+        for e in [primitive, composite] {
+            for (key, value) in [("label_category", "INSPECTION"), ("label_detail", "0.4 m"),
+                ("label_icon", "measurement"), ("label_selected", "true")] {
+                assert_eq!(e.props().get(key).as_deref(), Some(value));
+            }
+        }
+        let Cmd::Destination { common, .. } = parse(&["destination", "n", "dock", "--label-selected=false"]).unwrap() else {
+            panic!("destination command");
+        };
+        assert_eq!(common.label_selected, Some(false));
+        assert!(parse(&["destination", "n", "dock", "--label-icon", "inferred-safe"]).is_err());
+    }
+
+    #[test]
+    fn world_frames_and_three_component_pose_keep_drape_contract() {
+        for (frame, draped) in [("world", true), ("robot/odom", true), ("robot/link", false)] {
+            for case in WORLD_CASES {
+                let mut args = case.to_vec();
+                args.extend(["--frame", frame, "--pose", "-1", "-2", "-3"]);
+                for e in prepare(&args).iter().filter(|e| e.op != gearbox_api::draw_op::DELETE) {
+                    assert_eq!(e.flags & draw_flag::DRAPE != 0, draped);
+                    assert_eq!([e.px, e.py, e.pz], [-1.0, -2.0, -3.0]);
+                    assert_eq!([e.qw, e.qx, e.qy, e.qz], [1.0, 0.0, 0.0, 0.0]);
+                }
+                args.push("--no-drape");
+                assert!(prepare(&args).iter().all(|e| e.flags & draw_flag::DRAPE == 0));
+            }
+        }
+    }
+
+    #[test]
+    fn route_interval_and_field_grid_spacing_are_not_effect_spacing() {
+        let route = prepare(&["route-stations", "n", "r", "0,0,0;0,0,3;4,0,3", "--interval", "2", "--size", "0.4", "--spacing", "0.75"]);
+        assert_eq!(route[0].point_count(), 4);
+        assert_eq!(route[1].point_count(), 24);
+        let centres: Vec<_> = route[1].point_list().chunks_exact(6).map(|p| std::array::from_fn::<_, 3, _>(|i| (p[0][i] + p[1][i]) * 0.5)).collect();
+        assert_eq!(centres, [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0], [1.0, 0.0, 3.0], [3.0, 0.0, 3.0]]);
+        assert!(route.iter().all(|e| e.dash == 0.75));
+        let args = ["field-volume", "n", "f", "--size", "2,4,6", "--grid-spacing", "0.5"];
+        let field = prepare(&args);
+        assert_eq!(field[0].style, draw_style::FIELD);
+        assert_eq!(field[0].dash, 0.5);
+        assert_ne!(field[0].flags & draw_flag::DASHED, 0);
+        assert_eq!(field[0].instance_list()[0].size, [2.0, 4.0, 6.0]);
+        let mut overridden = args.to_vec();
+        overridden.extend(["--spacing", "0.75"]);
+        assert_eq!(prepare(&overridden)[0].dash, 0.75);
+    }
+
+    #[test]
+    fn terrain_glyphs_and_negative_points_parse_without_option_collisions() {
+        for (glyph, points) in [("square", 16), ("cross", 8), ("triangle", 12), ("diamond", 16)] {
+            let entities = prepare(&["terrain-marks", "n", "t", "--glyph", glyph, "--size", "2", "--", "-1,-2,-3;2,3,4"]);
+            assert_eq!(entities[0].point_count(), points);
+            assert!(entities[0].point_list().iter().any(|p| p[2] == -3.0));
+        }
+    }
+
+    #[test]
+    fn world_labels_and_explicit_zero_glow_are_forwarded() {
+        for name in ["destination", "clearance-box"] {
+            let entities = prepare(&[name, "n", "a", "--text", "Dock", "--glow", "0"]);
+            let label = entities.iter().find(|e| e.id() == "label").unwrap();
+            assert_ne!(label.op, gearbox_api::draw_op::DELETE);
+            assert_eq!(label.props().get("text").as_deref(), Some("Dock"));
+            assert!(entities.iter().all(|e| e.glow == 0.0));
+        }
+        for case in WORLD_CASES {
+            let mut args = case.to_vec();
+            args.extend(["--style", "field", "--glow", "0"]);
+            assert!(prepare(&args).iter().all(|e| e.style == draw_style::FIELD && e.glow == 0.0));
+        }
+    }
+
+    #[test]
+    fn invalid_world_values_fail_pure_dispatch_validation() {
+        for glyph in ["Square", "safe", ""] {
+            let cmd = parse(&["terrain-marks", "n", "a", "0,0,0", "--glyph", glyph]).unwrap();
+            let error = build(cmd).err().expect("unknown glyph rejected before sending");
+            assert_eq!(error.code, crate::error::EXIT_USAGE);
+            assert!(error.message.contains("unknown terrain glyph"));
+        }
+        for args in [
+            &["clearance-box", "n", "a", "--size", "1,2"][..],
+            &["field-volume", "n", "a", "--size", "bad"][..],
+            &["destination", "n", "a", "--style", "invalid"][..],
+            &["destination", "n", "a", "--color", "invalid"][..],
+        ] {
+            assert_eq!(build(parse(args).unwrap()).err().unwrap().code, crate::error::EXIT_USAGE);
+        }
+    }
+
+    #[test]
+    fn missing_duplicate_and_malformed_arguments_are_clap_errors() {
+        for args in [
+            &["terrain-marks", "n", "a"][..],
+            &["route-stations", "n", "a", "0,0,0", "--interval", "1", "--interval", "2"][..],
+            &["field-volume", "n", "a", "--grid-spacing", "bad"][..],
+            &["destination", "n", "a", "--pose", "1", "2"][..],
+            &["clearance-box", "n", "a", "--glow", "bad"][..],
+        ] {
+            assert!(parse(args).is_err(), "accepted invalid arguments: {args:?}");
         }
     }
 }

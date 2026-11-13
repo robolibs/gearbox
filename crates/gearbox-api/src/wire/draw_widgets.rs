@@ -8,6 +8,14 @@ use std::f32::consts::{PI, TAU};
 use super::draw::*;
 use super::draw_geom::{covariance_axes, covariance_ellipse, pinhole_fov, quat_from_axes};
 
+mod world;
+pub use world::{TerrainGlyph, clearance_box, destination, field_volume, route_stations, terrain_marks};
+
+/// Fraction of an edge occupied by each structural corner bracket.
+pub const BRACKET_FRACTION: f32 = 0.18;
+pub const STRUCTURE_RULE_PX: f32 = 1.0;
+pub const STRUCTURE_CORNER_GAIN: f32 = 1.75;
+
 /// Where a widget's entities live: frame, lifetime and whether z is height
 /// above the terrain (world and odom frames only).
 #[derive(Debug, Clone)]
@@ -122,8 +130,8 @@ fn arc(c: [f32; 3], r: f32, from: f32, to: f32, n: usize) -> Vec<[f32; 3]> {
         .collect()
 }
 
-/// An RViz-TF-style frame: a glowing triad (x vermillion, y bluish green, z
-/// blue), its name on a plate, and a dashed hairline to `parent`.
+/// A frame triad (x vermillion, y bluish green, z blue), its name,
+/// and a dashed hairline to `parent`.
 pub fn frame(place: &Place, ns: &str, name: &str, pose: Pose, parent: Option<[f32; 3]>, length: f32, label: Option<&str>) -> Vec<DrawEntity> {
     let root = path(ns, name);
     let at = pose.f32();
@@ -134,11 +142,10 @@ pub fn frame(place: &Place, ns: &str, name: &str, pose: Pose, parent: Option<[f3
             .with_pose(pose.position, pose.rotation)
             .with_width(0.05 * length),
         place
-            .put(DrawEntity::points(&root, "name", &[at]))
+            .put(DrawEntity::text(&root, "name", &[at], label.unwrap_or(name)))
             .with_color(color::WHITE)
-            .with_width(-5.0)
-            .with_style(draw_style::POINT_GLOW)
-            .labelled(&[label.unwrap_or(name)]),
+            .with_width(-16.0)
+            .with_prop("label_icon", "frame"),
     ];
     match parent {
         Some(p) => out.push(
@@ -191,36 +198,69 @@ pub fn pose_array(place: &Place, ns: &str, id: &str, poses: &[Pose], glyph: Glyp
     place.put(e)
 }
 
-/// Numbered waypoints: the current one a beacon, the ones ahead holo
-/// pillars, the ones done at 35 %, joined by a flowing ribbon.
+/// Numbered route stations, selected corner brackets, and a connecting ribbon.
+/// Completed stations retain 35 % opacity; the current index selects one marker.
 pub fn waypoints(place: &Place, ns: &str, id: &str, points: &[[f32; 3]], current: usize) -> Vec<DrawEntity> {
+    waypoints_colored(place, ns, id, points, current, color::PLAN)
+}
+
+/// Route tint; completed/current stations retain their semantic RGB and share the tint's opacity.
+pub fn waypoints_colored(place: &Place, ns: &str, id: &str, points: &[[f32; 3]], current: usize, tint: u32) -> Vec<DrawEntity> {
     let root = path(ns, id);
+    if points.is_empty() {
+        return ["route", "pillars", "stations", "current", "selection"].iter()
+            .map(|id| place.put(DrawEntity::delete(&root, id))).collect();
+    }
     let labels: Vec<String> = (1..=points.len()).map(|i| i.to_string()).collect();
-    let plan = color::PLAN;
+    let plan = tint.max(1);
+    let opacity = (tint >> 24) as f32 / 255.0;
+    let selected = faded(color::GOAL, opacity);
     let colors: Vec<u32> =
-        (0..points.len()).map(|i| if i < current { color::with_alpha(color::WHITE, 0.35) } else { plan }).collect();
-    let pillars: Vec<Instance> = points.iter().map(|p| Instance::at([p[0], p[1], p[2] + 0.6], [0.45, 0.45, 1.2])).collect();
-    let pillar_colors: Vec<u32> = colors.iter().enumerate().map(|(i, c)| if i == current { color::CLEAR } else { *c }).collect();
+        (0..points.len()).map(|i| if i < current { faded(color::WHITE, 0.35 * opacity) } else { plan }).collect();
+    let pillar_colors: Vec<u32> = colors.iter().enumerate().map(|(i, c)| if i == current { 1 } else { *c }).collect();
     let pillar_labels: Vec<String> = labels.iter().enumerate().map(|(i, l)| if i == current { String::new() } else { l.clone() }).collect();
+    let mut stations = Vec::with_capacity(points.len() * 6);
+    let mut station_colors = Vec::with_capacity(points.len() * 6);
+    for (i, p) in points.iter().enumerate() {
+        let (a, b) = if i + 1 < points.len() { (*p, points[i + 1]) } else { (points[i.saturating_sub(1)], *p) };
+        let delta = std::array::from_fn::<_, 3, _>(|axis| b[axis] as f64 - a[axis] as f64);
+        let length = delta.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let tangent = if length > 1e-9 { delta.map(|v| v / length) } else { [1.0, 0.0, 0.0] };
+        let start = stations.len();
+        world::station_mark(&mut stations, p.map(|v| v as f64), tangent, 0.45);
+        station_colors.extend(std::iter::repeat_n(if i == current { selected } else { colors[i] }, stations.len() - start));
+    }
     let mut out = vec![
         place.put(DrawEntity::lines(&root, "route", points)).with_style(draw_style::RIBBON_FLOW).with_colors(&colors).with_width(0.22),
         place
-            .put(DrawEntity::shapes(&root, "pillars", shape_kind::CYLINDER, &pillars))
-            .with_style(draw_style::HOLO)
+            .put(DrawEntity::points(&root, "pillars", points))
+            .with_sub(point_style::DISC)
+            .with_style(draw_style::PLAIN)
+            .with_width(-4.0)
             .with_colors(&pillar_colors)
-            .with_beam(1.5)
             .labelled(&pillar_labels),
+        world::segments(place, &root, "stations", &stations, plan, -1.25).with_colors(&station_colors),
     ];
     match points.get(current) {
-        Some(p) => out.push(
-            place
+        Some(p) => {
+            out.push(place
                 .put(DrawEntity::points(&root, "current", &[*p]))
-                .with_style(draw_style::BEACON)
-                .with_color(color::GOAL)
-                .with_beam(6.0)
-                .labelled(&[labels[current].clone()]),
-        ),
-        None => out.push(DrawEntity::delete(&root, "current")),
+                .with_sub(point_style::DISC)
+                .with_style(draw_style::PLAIN)
+                .with_width(-6.0)
+                .with_color(selected)
+                .labelled(&[labels[current].clone()])
+                .with_prop("label_selected", "true").with_prop("label_icon", "destination"));
+            let mut corners = Vec::with_capacity(16);
+            let polygon = [[-0.32, -0.32], [0.32, -0.32], [0.32, 0.32], [-0.32, 0.32]]
+                .map(|xy| [p[0] + xy[0], p[1] + xy[1], p[2]]);
+            world::corner_outline(&mut corners, &polygon);
+            out.push(world::segments(place, &root, "selection", &corners, selected, -STRUCTURE_RULE_PX * STRUCTURE_CORNER_GAIN));
+        }
+        None => {
+            out.push(place.put(DrawEntity::delete(&root, "current")));
+            out.push(place.put(DrawEntity::delete(&root, "selection")));
+        }
     }
     out
 }
@@ -228,6 +268,10 @@ pub fn waypoints(place: &Place, ns: &str, id: &str, points: &[[f32; 3]], current
 /// Opacity of the ring at sigma rank `k` (0 the innermost).
 fn sigma_alpha(k: usize) -> f32 {
     [1.0, 0.6, 0.35, 0.2].get(k).copied().unwrap_or(0.15)
+}
+
+fn faded(tint: u32, opacity: f32) -> u32 {
+    color::with_alpha(tint, (tint >> 24) as f32 / 255.0 * opacity).max(1)
 }
 
 /// A covariance: 2×2 (row-major, 4 values) as nested draped rings, 3×3 (9)
@@ -246,7 +290,7 @@ pub fn covariance(place: &Place, ns: &str, id: &str, pose: Pose, cov: &[f64], si
             let rings: Vec<Vec<[f32; 3]>> =
                 sigmas.iter().map(|k| circle(c, k * a as f32, k * b as f32, angle as f32, 72)).collect();
             let colors: Vec<u32> =
-                rings.iter().enumerate().flat_map(|(k, r)| std::iter::repeat_n(color::with_alpha(tint, sigma_alpha(k)), r.len())).collect();
+                rings.iter().enumerate().flat_map(|(k, r)| std::iter::repeat_n(faded(tint, sigma_alpha(k)), r.len())).collect();
             out.push(
                 place
                     .put(DrawEntity::strips(&root, "rings", &rings))
@@ -257,6 +301,7 @@ pub fn covariance(place: &Place, ns: &str, id: &str, pose: Pose, cov: &[f64], si
             );
             out.push(place.put(DrawEntity::points(&root, "mean", &[c])).with_color(tint).with_width(-4.0).with_style(draw_style::POINT_GLOW));
             out.push(DrawEntity::delete(&root, "ellipsoid"));
+            out.push(DrawEntity::delete(&root, "yaw"));
         }
         9 | 36 => {
             let m = |r: usize, k: usize| if cov.len() == 9 { cov[3 * r + k] } else { cov[6 * r + k] };
@@ -268,7 +313,7 @@ pub fn covariance(place: &Place, ns: &str, id: &str, pose: Pose, cov: &[f64], si
                     Instance::at(c, [2.0 * k * sd[0] as f32, 2.0 * k * sd[1] as f32, 2.0 * k * sd[2] as f32]).turned(q.map(|v| v as f32))
                 })
                 .collect();
-            let colors: Vec<u32> = (0..instances.len()).map(|k| color::with_alpha(tint, sigma_alpha(k))).collect();
+            let colors: Vec<u32> = (0..instances.len()).map(|k| faded(tint, sigma_alpha(k))).collect();
             out.push(
                 place
                     .put(DrawEntity::shapes(&root, "ellipsoid", shape_kind::ELLIPSOID, &instances))
@@ -283,7 +328,7 @@ pub fn covariance(place: &Place, ns: &str, id: &str, pose: Pose, cov: &[f64], si
                     .iter()
                     .map(|k| Instance::at(c, [reach, (2.0 * k * yaw_sd).min(TAU), 0.0]).yawed(yaw))
                     .collect();
-                let colors: Vec<u32> = (0..wedges.len()).map(|k| color::with_alpha(color::ORANGE, sigma_alpha(k))).collect();
+                let colors: Vec<u32> = (0..wedges.len()).map(|k| faded(color::ORANGE, sigma_alpha(k) * (tint >> 24) as f32 / 255.0)).collect();
                 out.push(
                     place
                         .put(DrawEntity::shapes(&root, "yaw", shape_kind::SECTOR, &wedges))
@@ -294,6 +339,8 @@ pub fn covariance(place: &Place, ns: &str, id: &str, pose: Pose, cov: &[f64], si
             } else {
                 out.push(DrawEntity::delete(&root, "yaw"));
             }
+            out.push(DrawEntity::delete(&root, "rings"));
+            out.push(DrawEntity::delete(&root, "mean"));
         }
         n => return Err(format!("a covariance is 2×2, 3×3 or 6×6, not {n} values")),
     }
@@ -341,7 +388,7 @@ impl Default for DetectionStyle {
 /// The plugin's class colours on the Okabe-Ito palette.
 pub fn class_color(class: &str, overrides: &[(String, u32)]) -> u32 {
     if let Some((_, c)) = overrides.iter().find(|(k, _)| k.eq_ignore_ascii_case(class)) {
-        return *c;
+        return (*c).max(1);
     }
     match class.to_ascii_lowercase().as_str() {
         "car" | "vehicle" => color::ORANGE,
@@ -355,11 +402,19 @@ pub fn class_color(class: &str, overrides: &[(String, u32)]) -> u32 {
     }
 }
 
+fn identity_detail(identity: &str, detail: &str) -> String {
+    serde_json::to_string(&[identity, detail]).expect("string pair serializes")
+}
+
 /// 3-D detections: class-coloured hologram boxes (edges only when asked)
-/// with faces as bright as their score, a "class 0.92 #17" tag above each,
+/// with faces as bright as their score, identity and score/track labels,
 /// velocity arrows and short fading track trails.
 pub fn detections_3d(place: &Place, ns: &str, id: &str, dets: &[Detection3d], style: &DetectionStyle) -> Vec<DrawEntity> {
     let root = path(ns, id);
+    if dets.is_empty() {
+        return ["boxes", "tags", "brackets", "velocity", "trails"].iter()
+            .map(|id| place.put(DrawEntity::delete(&root, id))).collect();
+    }
     let mut boxes = Vec::new();
     let mut colors = Vec::new();
     let mut tags = Vec::new();
@@ -374,18 +429,20 @@ pub fn detections_3d(place: &Place, ns: &str, id: &str, dets: &[Detection3d], st
         let strong = d.score >= style.threshold;
         let alpha = if strong { 0.35 + 0.65 * d.score.clamp(0.0, 1.0) } else { 0.22 };
         boxes.push(d.pose.instance(d.size));
-        colors.push(color::with_alpha(base, alpha));
+        colors.push(faded(base, alpha));
         let top = d.pose.apply([0.0, 0.0, 0.5 * d.size[2]]);
         tags.push(top);
-        let mut text = if d.class.is_empty() { "object".to_string() } else { d.class.clone() };
+        let identity = if d.class.is_empty() { "object" } else { &d.class };
+        let mut detail = String::new();
         if style.show_score {
-            text.push_str(&format!(" {:.2}", d.score));
+            detail.push_str(&format!("score {:.2}", d.score));
         }
         if let Some(t) = d.track {
-            text.push_str(&format!(" #{t}"));
+            if !detail.is_empty() { detail.push_str(" / "); }
+            detail.push_str(&format!("track #{t}"));
         }
-        tag_text.push(text);
-        tag_colors.push(color::with_alpha(base, if strong { 1.0 } else { 0.5 }));
+        tag_text.push(identity_detail(identity, &detail));
+        tag_colors.push(faded(base, if strong { 1.0 } else { 0.5 }));
         if let Some(v) = d.velocity.filter(|v| v.iter().map(|c| c * c).sum::<f32>() > 1e-6) {
             let c = d.pose.f32();
             arrows.push((c, [c[0] + v[0], c[1] + v[1], c[2] + v[2]]));
@@ -398,26 +455,27 @@ pub fn detections_3d(place: &Place, ns: &str, id: &str, dets: &[Detection3d], st
     }
     let shapes = DrawEntity::shapes(&root, "boxes", shape_kind::BOX, &boxes).with_colors(&colors);
     let shapes = if style.only_edge {
-        shapes.with_fill(draw_flag::FILL_WIRE).with_style(draw_style::PLAIN).with_flags(draw_flag::ADDITIVE).with_width(style.line_width)
+        shapes.with_fill(draw_flag::FILL_WIRE).with_style(draw_style::PLAIN).with_width(style.line_width).with_prop("corner_frame", "true")
     } else {
         shapes.with_style(draw_style::HOLO).with_beam(-1.0).with_width(style.line_width)
     };
     let mut out = vec![
         place.put(shapes),
         place
-            .put(DrawEntity::points(&root, "tags", &tags))
+            .put(DrawEntity::text(&root, "tags", &tags, ""))
             .with_colors(&tag_colors)
-            .with_width(-3.0)
-            .with_style(draw_style::POINT_GLOW)
-            .labelled(&tag_text),
+            .with_width(-16.0)
+            .with_labels(&tag_text).with_prop("label_icon", "sensor")
+            .with_prop("label_parts", "identity-detail-json").with_prop("label_neutral_identity", "true"),
+        place.put(DrawEntity::delete(&root, "brackets")),
     ];
     out.push(if arrows.is_empty() {
-        DrawEntity::delete(&root, "velocity")
+        place.put(DrawEntity::delete(&root, "velocity"))
     } else {
         place.put(DrawEntity::arrows(&root, "velocity", &arrows)).with_colors(&arrow_colors).with_style(draw_style::ARROW_GLOW)
     });
     out.push(if trails.is_empty() {
-        DrawEntity::delete(&root, "trails")
+        place.put(DrawEntity::delete(&root, "trails"))
     } else {
         place
             .put(DrawEntity::strips(&root, "trails", &trails))
@@ -438,7 +496,7 @@ pub fn cloud(place: &Place, ns: &str, id: &str, points: &[[f32; 3]], values: &[f
     } else {
         DrawEntity::points(ns, id, points)
     };
-    let e = e.with_style(draw_style::SPLAT).with_width(if size != 0.0 { 2.0 * size } else { -3.0 });
+    let e = e.with_sub(super::draw::point_style::DISC).with_style(draw_style::SPLAT).with_width(if size != 0.0 { 2.0 * size } else { -3.0 });
     let e = if values.is_empty() {
         e
     } else if quant > 0.0 {
@@ -515,6 +573,12 @@ pub fn camera_fov(fx: f64, fy: f64, width: f64, height: f64) -> (f32, f32) {
 /// A particle cloud as additive flat chevrons, each between `min` and `max`
 /// long by its weight (nav2 ParticleCloud).
 pub fn particles(place: &Place, ns: &str, id: &str, poses: &[Pose], weights: &[f32], min: f32, max: f32, glyph: Glyph) -> DrawEntity {
+    particles_colored(place, ns, id, poses, weights, min, max, glyph, color::CYAN)
+}
+
+/// Particle tint multiplied by weight opacity; axes keep their axis RGB convention.
+#[allow(clippy::too_many_arguments)]
+pub fn particles_colored(place: &Place, ns: &str, id: &str, poses: &[Pose], weights: &[f32], min: f32, max: f32, glyph: Glyph, tint: u32) -> DrawEntity {
     let top = weights.iter().copied().fold(0.0f32, f32::max).max(1e-9);
     let instances: Vec<Instance> = poses
         .iter()
@@ -526,7 +590,7 @@ pub fn particles(place: &Place, ns: &str, id: &str, poses: &[Pose], weights: &[f
         })
         .collect();
     let colors: Vec<u32> = (0..poses.len())
-        .map(|i| color::with_alpha(color::CYAN, 0.25 + 0.75 * weights.get(i).copied().unwrap_or(top) / top))
+        .map(|i| faded(tint, 0.25 + 0.75 * (weights.get(i).copied().unwrap_or(top) / top).clamp(0.0, 1.0)))
         .collect();
     let e = match glyph {
         Glyph::Axes => DrawEntity::new(draw_kind::AXES, ns, id).with_instances(&instances),
@@ -535,8 +599,7 @@ pub fn particles(place: &Place, ns: &str, id: &str, poses: &[Pose], weights: &[f
             .with_sub(ARROW_CHEVRON)
             .with_instances(&instances)
             .with_style(draw_style::ARROW_GLOW)
-            .with_flags(draw_flag::FLAT | draw_flag::ADDITIVE)
-            .with_glow(0.7),
+            .with_flags(draw_flag::FLAT | draw_flag::ADDITIVE),
     };
     place.put(e.with_colors(&colors).with_width(if glyph == Glyph::Chevron { 0.02 } else { 0.0 }))
 }
@@ -568,6 +631,11 @@ pub fn headland(place: &Place, ns: &str, id: &str, outer: &[[f32; 3]], inner: &[
 /// Swaths `width` wide (the implement's coverage width) with chevrons in
 /// the driving direction; the first `done` fade to the history colour.
 pub fn swaths(place: &Place, ns: &str, id: &str, lines: &[Vec<[f32; 3]>], width: f32, done: usize) -> Vec<DrawEntity> {
+    swaths_colored(place, ns, id, lines, width, done, color::PLAN)
+}
+
+/// Future swath tint; completed swaths retain history RGB and share the tint's opacity.
+pub fn swaths_colored(place: &Place, ns: &str, id: &str, lines: &[Vec<[f32; 3]>], width: f32, done: usize, tint: u32) -> Vec<DrawEntity> {
     let root = path(ns, id);
     let (old, todo) = lines.split_at(done.min(lines.len()));
     let part = |name: &str, strips: &[Vec<[f32; 3]>], c: u32, flow: f32| {
@@ -582,7 +650,7 @@ pub fn swaths(place: &Place, ns: &str, id: &str, lines: &[Vec<[f32; 3]>], width:
                 .with_flow(flow, (width * 1.5).max(0.8))
         }
     };
-    vec![part("todo", todo, color::PLAN, 1.2), part("done", old, color::HISTORY, -1.0)]
+    vec![part("todo", todo, tint.max(1), 1.2), part("done", old, faded(color::HISTORY, (tint >> 24) as f32 / 255.0), -1.0)]
 }
 
 /// Headland turns: narrower dashed ribbons.
@@ -807,6 +875,7 @@ pub fn table(place: &Place, ns: &str, id: &str, anchor: [f32; 3], rows: &[(Strin
 /// A colormap legend in screen space: the ramp from `vmin` to `vmax`.
 pub fn legend(ns: &str, id: &str, map: u32, vmin: f32, vmax: f32, title: &str, unit: &str) -> DrawEntity {
     DrawEntity::panel(ns, id, panel_kind::LEGEND, &[])
+        .in_frame("world")
         .with_colormap(map, vmin, vmax)
         .with_prop("title", title)
         .with_prop("unit", unit)
@@ -824,6 +893,11 @@ pub fn badge(ns: &str, id: &str, machine: &str, text: &str, tint: u32, height: f
 
 /// A compass rose `size` metres across at `at`, north in goal yellow.
 pub fn compass(place: &Place, ns: &str, id: &str, at: [f32; 3], size: f32) -> Vec<DrawEntity> {
+    compass_colored(place, ns, id, at, size, color::WHITE)
+}
+
+/// Compass tint; north retains goal RGB and shares the tint's opacity.
+pub fn compass_colored(place: &Place, ns: &str, id: &str, at: [f32; 3], size: f32, tint: u32) -> Vec<DrawEntity> {
     let root = path(ns, id);
     let r = 0.5 * size;
     let ring = circle(at, r, r, 0.0, 72);
@@ -834,13 +908,15 @@ pub fn compass(place: &Place, ns: &str, id: &str, at: [f32; 3], size: f32) -> Ve
         spokes.push(vec![[at[0] + dir[0] * inner, at[1] + dir[1] * inner, at[2]], [at[0] + dir[0] * r * 1.15, at[1] + dir[1] * r * 1.15, at[2]]]);
         tips.push([at[0] + dir[0] * r * 1.45, at[1] + dir[1] * r * 1.45, at[2] + 0.05]);
     }
-    let spoke_colors: Vec<u32> = (0..4).flat_map(|k| std::iter::repeat_n(if k == 0 { color::GOAL } else { color::WHITE }, 2)).collect();
-    let text_colors = [color::GOAL, color::WHITE, color::WHITE, color::WHITE];
+    let north = faded(color::GOAL, (tint >> 24) as f32 / 255.0);
+    let tint = tint.max(1);
+    let spoke_colors: Vec<u32> = (0..4).flat_map(|k| std::iter::repeat_n(if k == 0 { north } else { tint }, 2)).collect();
+    let text_colors = [north, tint, tint, tint];
     vec![
-        place.put(DrawEntity::lines(&root, "ring", &ring)).with_sub(line_mode::LOOP).with_style(draw_style::DECAL).with_color(color::WHITE).with_width(0.03),
+        place.put(DrawEntity::lines(&root, "ring", &ring)).with_sub(line_mode::LOOP).with_style(draw_style::DECAL).with_color(tint).with_width(0.03),
         place.put(DrawEntity::strips(&root, "spokes", &spokes)).with_style(draw_style::DECAL).with_colors(&spoke_colors).with_width(0.05),
         place
-            .put(DrawEntity::text(&root, "letters", &tips, ""))
+            .put(DrawEntity::new(draw_kind::TEXT, &root, "letters").with_points(&tips))
             .with_labels(&["N", "E", "S", "W"])
             .with_colors(&text_colors)
             .with_width(-15.0),
@@ -857,16 +933,26 @@ pub fn callout(place: &Place, ns: &str, id: &str, anchor: [f32; 3], offset: [f32
     let root = path(ns, id);
     let tint = if tint == 0 { color::PLAN } else { tint };
     let at = [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]];
+    let mut marker = Vec::with_capacity(8);
+    let diamond = [[0.0, 0.12], [0.12, 0.0], [0.0, -0.12], [-0.12, 0.0]]
+        .map(|xy| [anchor[0] + xy[0], anchor[1] + xy[1], anchor[2]]);
+    world::open_outline(&mut marker, &diamond);
     vec![
         place.put(DrawEntity::lines(&root, "leader", &[anchor, at])).with_color(tint).with_width(-1.5).with_style(draw_style::PLAIN),
-        place.put(DrawEntity::points(&root, "anchor", &[anchor])).with_color(tint).with_width(-4.0).with_style(draw_style::POINT_GLOW),
-        place.put(DrawEntity::text(&root, "text", &[at], text)).with_color(color::WHITE).with_color2(0).with_prop("accent", &format!("{tint}")),
+        world::segments(place, &root, "anchor", &marker, tint, -1.25),
+        place.put(DrawEntity::text(&root, "text", &[at], text)).with_width(-16.0).with_color(faded(color::WHITE, (tint >> 24) as f32 / 255.0)).with_color2(0).with_prop("accent", &format!("{tint}")),
     ]
 }
 
 /// An angle at `centre` from direction `from` to `to` (radians about z):
 /// a faint wedge, its two rays and the angle in degrees.
 pub fn angle(place: &Place, ns: &str, id: &str, centre: [f32; 3], from: f32, to: f32, radius: f32) -> Vec<DrawEntity> {
+    angle_colored(place, ns, id, centre, from, to, radius, color::YELLOW)
+}
+
+/// An angle with caller-supplied geometry and label tint.
+#[allow(clippy::too_many_arguments)]
+pub fn angle_colored(place: &Place, ns: &str, id: &str, centre: [f32; 3], from: f32, to: f32, radius: f32, tint: u32) -> Vec<DrawEntity> {
     let root = path(ns, id);
     let span = to - from;
     let mid = from + 0.5 * span;
@@ -879,10 +965,11 @@ pub fn angle(place: &Place, ns: &str, id: &str, centre: [f32; 3], from: f32, to:
         place
             .put(DrawEntity::shapes(&root, "wedge", shape_kind::SECTOR, &[Instance::at(centre, [r, span.abs(), 0.0]).yawed(mid)]))
             .with_style(draw_style::SWEEP)
-            .with_color(color::with_alpha(color::YELLOW, 0.6))
+            .with_color(faded(tint, 0.6))
             .with_pulse(-1.0),
-        place.put(DrawEntity::lines(&root, "rays", &rays)).with_style(draw_style::DECAL).with_color(color::YELLOW).with_width(0.025),
-        place.put(DrawEntity::text(&root, "degrees", &[text_at], &format!("{:.1}°", span.to_degrees()))).with_color(color::YELLOW),
+        place.put(DrawEntity::lines(&root, "rays", &rays)).with_style(draw_style::DECAL).with_color(tint.max(1)).with_width(0.025),
+        place.put(DrawEntity::text(&root, "degrees", &[text_at], &format!("{:.1}°", span.to_degrees())))
+            .with_color(tint.max(1)).with_width(-16.0),
     ]
 }
 
@@ -903,7 +990,7 @@ pub fn voxels(place: &Place, ns: &str, id: &str, centres: &[[f32; 3]], size: f32
 }
 
 /// Odometry: a chevron at the pose, the velocity as an arrow, the position
-/// covariance (2×2 or 6×6) under it.
+/// covariance (2×2, 3×3 or 6×6) under it. Empty covariance removes its four retained components.
 pub fn odometry(place: &Place, ns: &str, id: &str, pose: Pose, velocity: [f32; 3], cov: &[f64]) -> Vec<DrawEntity> {
     let root = path(ns, id);
     let c = pose.f32();
@@ -917,9 +1004,10 @@ pub fn odometry(place: &Place, ns: &str, id: &str, pose: Pose, velocity: [f32; 3
     } else {
         DrawEntity::delete(&root, "twist")
     });
-    if !cov.is_empty()
-        && let Ok(parts) = covariance(place, &root, "cov", pose, cov, &[1.0, 2.0], color::PLAN)
-    {
+    if cov.is_empty() {
+        let cov_root = path(&root, "cov");
+        out.extend(["rings", "mean", "ellipsoid", "yaw"].map(|id| DrawEntity::delete(&cov_root, id)));
+    } else if let Ok(parts) = covariance(place, &root, "cov", pose, cov, &[1.0, 2.0], color::PLAN) {
         out.extend(parts);
     }
     out
@@ -1046,16 +1134,16 @@ pub fn detections_2d(
         }
         wedge_colors.extend(std::iter::repeat_n(color::with_alpha(c, 0.07), 12));
         tags.push(corners[0]);
-        tag_text.push(match scores.get(k) {
-            Some(s) => format!("{} {:.2}", if class.is_empty() { "object" } else { &class }, s),
-            None => class.clone(),
-        });
+        let detail = scores.get(k).map(|s| format!("score {s:.2}")).unwrap_or_default();
+        tag_text.push(identity_detail(if class.is_empty() { "object" } else { &class }, &detail));
         tag_colors.push(c);
     }
     vec![
-        place.put(DrawEntity::strips(&root, "boxes", &rects)).with_sub(line_mode::LOOP).with_colors(&rect_colors).with_width(-2.0).with_style(draw_style::PLAIN).with_flags(draw_flag::ADDITIVE),
+        place.put(DrawEntity::strips(&root, "boxes", &rects)).with_sub(line_mode::LOOP).with_colors(&rect_colors)
+            .with_width(-STRUCTURE_RULE_PX).with_style(draw_style::PLAIN).with_prop("corner_frame", "true"),
         place.put(DrawEntity::triangles(&root, "wedges", &wedge)).with_colors(&wedge_colors),
-        place.put(DrawEntity::points(&root, "tags", &tags)).with_colors(&tag_colors).with_width(-2.0).labelled(&tag_text),
+        place.put(DrawEntity::text(&root, "tags", &tags, "")).with_colors(&tag_colors).with_width(-16.0).with_labels(&tag_text)
+            .with_prop("label_icon", "sensor").with_prop("label_parts", "identity-detail-json").with_prop("label_neutral_identity", "true"),
     ]
 }
 

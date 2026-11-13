@@ -18,7 +18,8 @@ use crate::wire::*;
 pub struct FakeScene {
     pub objects: Vec<SceneObject>,
     pub markers: Vec<(String, [f32; 3])>,
-    pub draws: crate::draw::DrawStore,
+    /// Cloned scenes share this drawing backend.
+    pub draws: crate::draw_data::DrawingBackend,
     pub paused: bool,
     pub selection: Option<(u32, String)>,
     pub cleared: usize,
@@ -57,6 +58,11 @@ impl FakeHost {
             });
         }
         let scene = Arc::new(Mutex::new(FakeScene::default()));
+        let mut storage = crate::draw_data::StreamingStore::with_backend(
+            host.draw_data_lane().epoch(),
+            scene.lock().unwrap().draws.clone(),
+        )
+        .map_err(|error| agentio::Error::Configuration(error.to_string()))?;
         let stop = Arc::new(AtomicBool::new(false));
         let instance = instance.to_string();
         let thread = {
@@ -64,7 +70,22 @@ impl FakeHost {
             let stop = stop.clone();
             std::thread::spawn(move || {
                 let mut last_state = Instant::now();
+                let mut last_clock = Instant::now();
+                let started = Instant::now();
+                let mut simulation_s = 0.0;
                 while !stop.load(Ordering::Relaxed) {
+                    let paused = scene.lock().map(|scene| scene.paused).unwrap_or(true);
+                    if !paused {
+                        simulation_s += last_clock.elapsed().as_secs_f64();
+                    }
+                    last_clock = Instant::now();
+                    if let Err(error) = storage.advance_simulation(simulation_s) {
+                        eprintln!("gearbox-api: spatial clock: {error}");
+                    }
+                    let now_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                    if let Err(error) = host.draw_data_lane().serve_store(&mut storage, now_ms) {
+                        eprintln!("gearbox-api: spatial data service: {error}");
+                    }
                     let spawn = serve_once(&mut host, &scene, &mut agents);
                     for machine_id in spawn {
                         if agents.iter().any(|m| m.agent.machine_id() == machine_id) {
@@ -251,25 +272,34 @@ fn serve_once(
             .into_bytes(),
     });
     let mut paused = s.paused;
-    host.serve_clock(ClockState { paused: paused as u32, rate: 1.0, day_s: 86_400.0, ..Default::default() }, |cmd| {
-        match cmd.op {
-            clock_op::PAUSE => paused = true,
-            clock_op::PLAY => paused = false,
-            clock_op::TOGGLE => paused = !paused,
-            _ => {}
-        }
+    host.serve_clock(
         ClockState {
             paused: paused as u32,
             rate: 1.0,
             day_s: 86_400.0,
             ..Default::default()
-        }
-    });
+        },
+        |cmd| {
+            match cmd.op {
+                clock_op::PAUSE => paused = true,
+                clock_op::PLAY => paused = false,
+                clock_op::TOGGLE => paused = !paused,
+                _ => {}
+            }
+            ClockState {
+                paused: paused as u32,
+                rate: 1.0,
+                day_s: 86_400.0,
+                ..Default::default()
+            }
+        },
+    );
     s.paused = paused;
 
     let mut objects = std::mem::take(&mut s.objects);
     let mut cleared = s.cleared;
-    let mut draws = std::mem::take(&mut s.draws);
+    let backend = s.draws.clone();
+    let mut draws = backend.lock();
     host.serve_clear(|req| {
         objects.clear();
         if matches!(req.scope, clear_scope::ALL | clear_scope::MARKERS) {
@@ -288,7 +318,7 @@ fn serve_once(
         },
         |query| draws.borrow().summaries(&query.ns()),
     );
-    s.draws = draws.into_inner();
+    drop(draws);
     s.cleared = cleared;
     host.serve_list(|q| {
         objects
@@ -396,13 +426,15 @@ fn serve_once(
     host.serve_greenhouse_act(|_| Status::err(code::USAGE, "no greenhouse"));
 
     let mut granted = Vec::new();
-    host.serve_access_grant(|req| match agentio::did_key::did_key_to_endpoint(&req.did()) {
-        Ok(peer) => {
-            granted.push(peer);
-            Status::ok()
-        }
-        Err(err) => Status::err(code::USAGE, &format!("bad did: {err}")),
-    });
+    host.serve_access_grant(
+        |req| match agentio::did_key::did_key_to_endpoint(&req.did()) {
+            Ok(peer) => {
+                granted.push(peer);
+                Status::ok()
+            }
+            Err(err) => Status::err(code::USAGE, &format!("bad did: {err}")),
+        },
+    );
     for peer in granted {
         let _ = host.agent.allow_peer(peer);
         for m in agents.iter() {

@@ -1,0 +1,264 @@
+{
+  "schema": "gearbox.draw.fixture.occupancy.v1",
+  "leaf_resolution_m": 1.0,
+  "max_depth": 4,
+  "root_span_m": 16.0,
+  "leaves": [
+    {
+      "tile": [
+        -1,
+        0,
+        0
+      ],
+      "depth": 0,
+      "morton": 0,
+      "min": [
+        -16.0,
+        0.0,
+        0.0
+      ],
+      "size_m": 16.0,
+      "probability": 0.9
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 2,
+      "morton": 0,
+      "min": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "size_m": 4.0,
+      "probability": 0.1
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 2,
+      "morton": 1,
+      "min": [
+        4.0,
+        0.0,
+        0.0
+      ],
+      "size_m": 4.0,
+      "probability": 0.9
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 2,
+      "morton": 2,
+      "min": [
+        0.0,
+        4.0,
+        0.0
+      ],
+      "size_m": 4.0,
+      "probability": 0.1
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 2,
+      "morton": 3,
+      "min": [
+        4.0,
+        4.0,
+        0.0
+      ],
+      "size_m": 4.0,
+      "probability": 0.9
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 2,
+      "morton": 4,
+      "min": [
+        0.0,
+        0.0,
+        4.0
+      ],
+      "size_m": 4.0,
+      "probability": 0.1
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 2,
+      "morton": 5,
+      "min": [
+        4.0,
+        0.0,
+        4.0
+      ],
+      "size_m": 4.0,
+      "probability": 0.9
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 2,
+      "morton": 6,
+      "min": [
+        0.0,
+        4.0,
+        4.0
+      ],
+      "size_m": 4.0,
+      "probability": 0.1
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 2,
+      "morton": 7,
+      "min": [
+        4.0,
+        4.0,
+        4.0
+      ],
+      "size_m": 4.0,
+      "probability": 0.9
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 1,
+      "morton": 1,
+      "min": [
+        8.0,
+        0.0,
+        0.0
+      ],
+      "size_m": 8.0,
+      "probability": 0.1
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 1,
+      "morton": 2,
+      "min": [
+        0.0,
+        8.0,
+        0.0
+      ],
+      "size_m": 8.0,
+      "probability": null
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 1,
+      "morton": 3,
+      "min": [
+        8.0,
+        8.0,
+        0.0
+      ],
+      "size_m": 8.0,
+      "probability": 0.5
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 1,
+      "morton": 4,
+      "min": [
+        0.0,
+        0.0,
+        8.0
+      ],
+      "size_m": 8.0,
+      "probability": 0.9
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 1,
+      "morton": 5,
+      "min": [
+        8.0,
+        0.0,
+        8.0
+      ],
+      "size_m": 8.0,
+      "probability": 0.9
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 1,
+      "morton": 6,
+      "min": [
+        0.0,
+        8.0,
+        8.0
+      ],
+      "size_m": 8.0,
+      "probability": 0.9
+    },
+    {
+      "tile": [
+        0,
+        0,
+        0
+      ],
+      "depth": 1,
+      "morton": 7,
+      "min": [
+        8.0,
+        8.0,
+        8.0
+      ],
+      "size_m": 8.0,
+      "probability": 0.9
+    }
+  ]
+}

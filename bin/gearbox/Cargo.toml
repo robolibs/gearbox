@@ -10,6 +10,7 @@ name = "gearbox"
 path = "src/main.rs"
 
 [features]
+draw-probes = []
 profile = ["bevy/trace", "bevy/debug", "dep:tracing-chrome"]
 
 [dependencies]
@@ -74,5 +75,6 @@ png = "0.18"
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }
+egui-wgpu = { version = "0.37", default-features = false }
 pollster = "0.4"
 molla-kernels = { path = "../../vendor/molla/crates/molla-kernels" }

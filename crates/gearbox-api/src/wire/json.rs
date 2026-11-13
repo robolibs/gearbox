@@ -13,6 +13,8 @@ use super::greenhouse::*;
 use super::host::*;
 use super::machine::*;
 
+mod draw_data;
+
 pub struct TypeDesc {
     pub name: &'static str,
     pub type_hash: u64,
@@ -81,6 +83,8 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(DetachRequest, detach_request_json, detach_request_from),
         desc!(AttachmentRecord, attachment_json, attachment_from),
         desc!(DrawEntity, draw_entity_json, draw_entity_from),
+        draw_data::request_desc(),
+        draw_data::reply_desc(),
     ]
 }
 

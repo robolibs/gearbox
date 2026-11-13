@@ -357,6 +357,20 @@ fn publish_frames(sites: &Sites) {
     }
 }
 
+#[cfg(test)]
+pub fn set_site_frames(frames: Vec<Datum>) {
+    if let Ok(mut current) = FRAMES.write() {
+        *current = frames;
+    }
+}
+
+/// The datum of the site a physics position stands in, and the place in it.
+pub fn physics_site(position: DVec3) -> Option<(Datum, DVec3)> {
+    let (site, local) = site_local(position.x, position.y, position.z);
+    let frame = FRAMES.read().ok()?.get(site).copied()?;
+    Some((frame, DVec3::from_array(local)))
+}
+
 /// Height of the ground under a place in the physics world, in its own site's
 /// frame: the drawn ground where the view is, the land itself anywhere else.
 pub fn ground_height_at_physics(x: f64, z: f64) -> f64 {

@@ -80,6 +80,68 @@ fn frames_colours_and_paths_parse() {
 }
 
 #[test]
+fn non_finite_draw_headers_and_radii_never_mutate_retained_state() {
+    let original = DrawEntity::lines("valid", "retained", &[[0.0; 3], [2.0, 0.0, 0.0]]).with_lifetime(5.0);
+    let mut store = DrawStore::default();
+    store.apply(original.clone(), 0.0).unwrap();
+    let revision = store.revision();
+    for op in [draw_op::UPSERT, draw_op::APPEND, draw_op::UPDATE, draw_op::PATCH, draw_op::EXTEND] {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for field in 0..8 {
+                let mut e = original.clone();
+                e.op = op;
+                *[&mut e.px, &mut e.py, &mut e.pz, &mut e.qw, &mut e.qx, &mut e.qy, &mut e.qz, &mut e.lifetime_s][field] = invalid;
+                assert!(store.apply(e, 2.0).is_err(), "op {op}, header {field}");
+            }
+            for field in 0..3 {
+                let mut e = original.clone();
+                e.op = op;
+                *[&mut e.sx, &mut e.sy, &mut e.sz][field] = invalid as f32;
+                assert!(store.apply(e, 2.0).is_err(), "op {op}, scale {field}");
+            }
+            let mut e = original.clone().with_radii(&[invalid as f32]);
+            e.op = op;
+            assert!(store.apply(e, 2.0).is_err(), "op {op}, radius");
+            assert!(original.clone().with_lifetime(invalid).validate().is_err());
+        }
+    }
+    let retained = store.get("valid", "retained").unwrap();
+    assert_eq!(retained.entity, original);
+    assert_eq!(retained.expires_s, Some(5.0));
+    assert_eq!((store.revision(), retained.revision, retained.generation), (revision, revision, revision));
+}
+
+#[test]
+fn finite_draw_sentinels_and_missing_grid_samples_remain_valid() {
+    for value in [-2.0, 0.0, 2.0] {
+        let e = DrawEntity::points("valid", "points", &[[0.0; 3]]).with_radii(&[value])
+            .with_scale([value; 3]).with_width(value).with_glow(value)
+            .with_pulse(value).with_flow(value, value).with_beam(value).with_fade(value);
+        assert!(e.validate().is_ok());
+    }
+    assert_eq!(DrawEntity::update("valid", "points").with_lifetime(-1.0).lifetime_s, 0.0);
+    let grid = DrawEntity::grid("valid", "unknown", 3, 1, 0.5, GridCells::F32(vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY]));
+    assert!(grid.validate().is_ok());
+    assert!(DrawEntity::scan("valid", "scan", &[f32::NAN, f32::INFINITY, -1.0, 3.0], 0.0, 0.1).validate().is_ok());
+}
+
+#[test]
+fn panel_finishes_round_trip_without_recoloring_or_changing_samples() {
+    for kind in 0..=panel_kind::LEGEND {
+        for finish in ["color", "white", "black"] {
+            let entity = DrawEntity::panel("glass", "sample", kind, &[0.25, 0.75])
+                .with_color(rgba(207, 114, 168, 128)).with_colors(&[draw_color::GREEN, draw_color::MAGENTA])
+                .with_colormap(colormap::VIRIDIS, -2.0, 4.0)
+                .with_prop("panel_finish", finish).with_prop("panel_theme", "light");
+            let env = pack(&entity);
+            let back: DrawEntity = unpack(env.type_hash(), env.wire()).unwrap();
+            assert_eq!(back, entity);
+            back.validate().unwrap();
+        }
+    }
+}
+
+#[test]
 fn invalid_entities_are_refused() {
     let mut store = DrawStore::default();
     let no_id = DrawEntity::lines("a", "", &[[0.0; 3], [1.0; 3]]);
@@ -393,6 +455,113 @@ fn update_changes_the_header_and_keeps_the_points() {
 }
 
 #[test]
+fn blur_roundtrips_and_updates_without_changing_geometry_or_light() {
+    let original = DrawEntity::lines("glass", "trail", &[[0.0; 3], [1.0, 0.0, 0.0]])
+        .with_blur(0.6).with_glow(0.4).with_color(draw_color::ORANGE).with_width(0.03);
+    let encoded = pack(&original);
+    let copied: DrawEntity = unpack(encoded.type_hash(), encoded.wire()).unwrap();
+    assert_eq!(copied.prop_f32("blur"), Some(0.6));
+    let mut store = DrawStore::default();
+    store.apply(original.clone(), 0.0).unwrap();
+    store.apply(DrawEntity::update("glass", "trail").with_blur(0.0).updating(&["props"]), 1.0).unwrap();
+    let live = &store.get("glass", "trail").unwrap().entity;
+    assert_eq!(live.prop_f32("blur"), Some(0.0));
+    assert_eq!((&live.points, live.color, live.width, live.glow), (&original.points, original.color, original.width, original.glow));
+    for value in [f32::NAN, f32::INFINITY, -0.1, 1.1] {
+        assert!(store.apply(DrawEntity::update("glass", "trail").with_blur(value).updating(&["props"]), 2.0).is_err());
+    }
+    assert_eq!(store.get("glass", "trail").unwrap().entity.prop_f32("blur"), Some(0.0));
+}
+
+#[test]
+fn scalar_updates_preserve_every_unspecified_header_and_section() {
+    let base = DrawEntity::lines("lab", "energy", &[[0.0, 0.0, 0.0], [2.0, 3.0, 1.0]])
+        .at_yaw([4.0, 5.0, 6.0], 0.5).with_scale([1.0, 2.0, 3.0])
+        .with_color(rgba(70, 180, 220, 180)).with_color2(rgba(220, 80, 20, 200))
+        .with_style(draw_style::LIGHT_WALL).with_width(0.25)
+        .with_glow(0.6).with_pulse(0.8).with_flow(1.2, 2.0).with_beam(3.0)
+        .with_fade(0.2).with_urgency(0.4).with_colormap(colormap::TURBO, -2.0, 10.0)
+        .with_flags(draw_flag::FLAT | draw_flag::ON_TOP).with_lifetime(60.0)
+        .with_labels(&["retained"]).with_prop("panel_finish", "black");
+    let cases: &[(&str, fn(&mut DrawEntity))] = &[
+        ("tint", |e| e.color = 0), ("color2", |e| e.color2 = 0),
+        ("glow", |e| e.glow = 0.0), ("pulse_hz", |e| e.pulse_hz = 0.0),
+        ("flow_speed", |e| e.flow_speed = 0.0), ("dash", |e| e.dash = 0.0),
+        ("beam_height", |e| e.beam_height = 0.0), ("fade", |e| e.fade = 0.0),
+        ("urgency", |e| e.urgency = 0.0), ("palette", |e| e.colormap = 0),
+        ("vmin", |e| e.vmin = 0.0), ("vmax", |e| e.vmax = 0.0),
+        ("props", |_| {}),
+    ];
+    for (mask, change) in cases {
+        let mut store = DrawStore::default();
+        store.apply(base.clone(), 0.0).unwrap();
+        let msg = DrawEntity::update("lab", "energy").updating(&[mask]);
+        store.apply(msg, 1.0).unwrap();
+        let mut expected = base.clone();
+        change(&mut expected);
+        let live = &store.get("lab", "energy").unwrap().entity;
+        assert_eq!(pack(live).wire(), pack(&expected).wire(), "selector {mask}");
+    }
+    let mut store = DrawStore::default();
+    store.apply(base.clone(), 0.0).unwrap();
+    store.apply(DrawEntity::update("lab", "energy").with_glow(-1.0)
+        .with_prop("panel_finish", "white").updating(&["glow", "props"]), 1.0).unwrap();
+    let expected = base.with_glow(-1.0).with_prop("panel_finish", "white");
+    assert_eq!(pack(&store.get("lab", "energy").unwrap().entity).wire(), pack(&expected).wire());
+}
+
+#[test]
+fn retained_generation_changes_only_when_the_entity_is_replaced() {
+    let mut store = DrawStore::default();
+    let source = DrawEntity::lines("t", "s", &[[0.0; 3], [1.0; 3]]).with_flags(draw_flag::SNAPSHOT);
+    store.apply(source.clone(), 0.0).unwrap();
+    let generation = store.get("t", "s").unwrap().generation;
+    let mut extend = DrawEntity::lines("t", "s", &[[2.0; 3]]);
+    extend.op = draw_op::EXTEND;
+    for operation in [DrawEntity::update("t", "s").with_glow(0.3).updating(&["glow"]),
+        DrawEntity::patch(draw_kind::LINES, "t", "s", 0).with_points(&[[0.5; 3]]), extend] {
+        store.apply(operation, 1.0).unwrap();
+        let item = store.get("t", "s").unwrap();
+        assert_eq!(item.generation, generation);
+        assert!(item.revision > generation);
+    }
+    store.apply(source, 2.0).unwrap();
+    let replaced = store.get("t", "s").unwrap();
+    assert!(replaced.generation > generation);
+    assert_eq!(replaced.generation, replaced.revision);
+    let generation = replaced.generation;
+    let replacement = DrawEntity::points("t", "s", &vec![[0.0; 3]; 3000]);
+    let chunks = replacement.chunks(DRAW_CHUNK_BYTES);
+    for (i, chunk) in chunks.iter().enumerate() {
+        store.apply(chunk.clone(), 3.0).unwrap();
+        assert_eq!(store.get("t", "s").unwrap().generation == generation, i + 1 < chunks.len());
+    }
+}
+
+#[test]
+fn legacy_update_groups_and_empty_mask_still_replace_their_whole_group() {
+    for mask in [Some("color"), Some("effects"), Some("colormap"), Some(""), None] {
+        let mut store = DrawStore::default();
+        let base = DrawEntity::points("lab", "p", &[[1.0, 2.0, 3.0]])
+            .with_color(11).with_color2(22).with_glow(0.5).with_pulse(2.0)
+            .with_flow(3.0, 4.0).with_beam(5.0).with_fade(0.6).with_urgency(0.7)
+            .with_colormap(colormap::VIRIDIS, -10.0, 20.0);
+        store.apply(base, 0.0).unwrap();
+        let mut msg = DrawEntity::update("lab", "p");
+        if let Some(mask) = mask { msg = msg.with_prop("set", mask); }
+        store.apply(msg, 1.0).unwrap();
+        let live = &store.get("lab", "p").unwrap().entity;
+        let all = mask.is_none() || mask == Some("");
+        assert_eq!((live.color, live.color2), if all || mask == Some("color") { (0, 0) } else { (11, 22) });
+        assert_eq!([live.glow, live.pulse_hz, live.flow_speed, live.dash, live.beam_height, live.fade, live.urgency],
+            if all || mask == Some("effects") { [0.0; 7] } else { [0.5, 2.0, 3.0, 4.0, 5.0, 0.6, 0.7] });
+        assert_eq!((live.colormap, live.vmin, live.vmax),
+            if all || mask == Some("colormap") { (0, 0.0, 0.0) } else { (colormap::VIRIDIS, -10.0, 20.0) });
+        assert_eq!(live.point_at(0), [1.0, 2.0, 3.0]);
+    }
+}
+
+#[test]
 fn patch_replaces_a_range_and_grows_the_end() {
     let mut store = DrawStore::default();
     let pts: Vec<[f32; 3]> = (0..10).map(|i| [i as f32, 0.0, 0.0]).collect();
@@ -504,8 +673,9 @@ fn widgets_compose_entities_under_their_own_path() {
     assert_eq!(parts[0].kind, draw_kind::AXES);
     assert_eq!(parts[0].style, draw_style::ARROW_GLOW);
     let wp = w::waypoints(&place, "lab", "route", &[[0.0; 3], [5.0, 0.0, 0.0], [5.0, 5.0, 0.0]], 1);
-    assert_eq!(wp.len(), 3);
-    assert_eq!(wp[2].style, draw_style::BEACON);
+    assert_eq!(wp.len(), 5);
+    assert_eq!(wp[3].style, draw_style::PLAIN);
+    assert_eq!(wp[3].props().get("label_selected").as_deref(), Some("true"));
     assert!(wp.iter().all(|e| e.flags & draw_flag::DRAPE != 0), "odom frames drape");
     let cov = w::covariance(&place, "lab", "cov", Pose::at(1.0, 1.0, 0.0), &[1.0, 0.2, 0.2, 0.5], &[1.0, 2.0], 0).unwrap();
     assert_eq!(cov[0].strip_ranges().len(), 2);
@@ -524,9 +694,175 @@ fn widgets_compose_entities_under_their_own_path() {
         trail: vec![[0.0; 3], [1.0, 0.0, 0.0]],
     }];
     let det = w::detections_3d(&place, "lab", "dets", &dets, &w::DetectionStyle::default());
-    assert_eq!(det[1].label_list(), ["car 0.92 #17"]);
+    assert_eq!(serde_json::from_str::<[String; 2]>(&det[1].label_list()[0]).unwrap(), ["car", "score 0.92 / track #17"]);
     assert_eq!(det[0].colors[0] & 0x00ff_ffff, draw_color::ORANGE & 0x00ff_ffff);
     assert!(det.iter().all(|e| e.validate().is_ok()));
+}
+
+#[test]
+fn covariance_dimension_changes_remove_obsolete_components() {
+    let mut store = DrawStore::default();
+    let mut six = vec![0.0; 36];
+    (six[0], six[7], six[14], six[35]) = (0.25, 1.0, 0.5, 0.09);
+    let two = vec![0.25, 0.0, 0.0, 1.0];
+    let three = vec![0.25, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5];
+    for (cov, expected) in [(&six, vec!["ellipsoid", "yaw"]), (&two, vec!["mean", "rings"]),
+        (&three, vec!["ellipsoid"]), (&two, vec!["mean", "rings"]), (&six, vec!["ellipsoid", "yaw"])] {
+        for entity in w::covariance(&Place::default(), "n", "cov", Pose::default(), cov, &[1.0, 2.0], 0).unwrap() {
+            store.apply(entity, 0.0).unwrap();
+        }
+        let mut ids: Vec<_> = store.iter().map(|(_, item)| item.entity.id()).collect();
+        ids.sort();
+        assert_eq!(ids, expected);
+    }
+}
+
+#[test]
+fn odometry_without_covariance_removes_only_its_covariance_parts() {
+    let mut store = DrawStore::default();
+    for ns in ["n/odom/cov", "n/odom/cov/nested", "n/odometry/cov"] {
+        store.apply(DrawEntity::points(ns, "custom", &[[0.0; 3]]), 0.0).unwrap();
+    }
+    let mut six = vec![0.0; 36];
+    (six[0], six[7], six[14], six[35]) = (0.25, 1.0, 0.5, 0.09);
+    for cov in [&[0.25, 0.0, 0.0, 1.0][..], &six, &[0.25, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5]] {
+        for values in [cov, &[]] {
+            for entity in w::odometry(&Place::default(), "n", "odom", Pose::default(), [1.0, 0.0, 0.0], values) {
+                store.apply(entity, 0.0).unwrap();
+            }
+            let mut parts: Vec<_> = store.iter().filter(|(_, e)| e.entity.ns() == "n/odom/cov")
+                .map(|(_, e)| e.entity.id()).collect();
+            parts.sort();
+            if values.is_empty() { assert_eq!(parts, ["custom"]); }
+            else { assert!(parts.len() > 1); }
+            assert_eq!(store.iter().filter(|(_, e)| e.entity.id() == "custom").count(), 3);
+            assert_eq!(store.iter().filter(|(_, e)| e.entity.ns() == "n/odom").count(), 2);
+        }
+    }
+}
+
+#[test]
+fn station_and_bracket_composites_share_geometry_and_lifecycle() {
+    let place = Place::frame("robot/link").lifetime(7.0);
+    let positions = [[0.0; 3], [3.0, 0.0, 0.0]];
+    let waypoint = w::waypoints(&place, "n", "route", &positions, 1);
+    let station = w::route_stations(&place, "n", "reference", &positions, 3.0, 0.45, draw_color::PLAN);
+    assert_eq!(waypoint[2].points, station[1].points);
+    assert_eq!(waypoint[1].kind, draw_kind::POINTS);
+    assert_eq!(waypoint[1].colors[1], 1);
+    assert_eq!(waypoint[3].label_list(), ["2"]);
+    assert_eq!(waypoint[4].point_count(), 16);
+    let pose = Pose::yawed(3.0, 4.0, 5.0, 0.3);
+    let size = [2.0, 4.0, 6.0];
+    let detection = w::Detection3d {
+        pose, size, class: "fixture".into(), score: 0.82, track: Some(17), velocity: None, trail: Vec::new(),
+    };
+    let detections = w::detections_3d(&place, "n", "detections", &[detection], &w::DetectionStyle::default());
+    assert_eq!(detections[0].instance_list()[0].size, size);
+    assert_eq!(detections[2].op, draw_op::DELETE);
+    assert_eq!(detections[1].kind, draw_kind::TEXT);
+    assert_eq!(serde_json::from_str::<[String; 2]>(&detections[1].label_list()[0]).unwrap(), ["fixture", "score 0.82 / track #17"]);
+    assert_eq!(detections[1].props().get("label_parts").as_deref(), Some("identity-detail-json"));
+    assert_eq!(detections[1].props().get("label_neutral_identity").as_deref(), Some("true"));
+    assert_eq!(detections[1].width, -16.0);
+    let mut store = DrawStore::default();
+    for e in waypoint.into_iter().chain(detections) {
+        assert_eq!(e.props().get("frame").as_deref(), Some("robot/link"));
+        assert_eq!(e.lifetime_s, 7.0);
+        assert_eq!(e.glow, 0.0);
+        assert_eq!(e.flags & draw_flag::ON_TOP, 0);
+        store.apply(e, 0.0).unwrap();
+    }
+    for e in w::waypoints(&place, "n", "route", &[], 0).into_iter()
+        .chain(w::detections_3d(&place, "n", "detections", &[], &w::DetectionStyle::default())) {
+        assert_eq!(e.op, draw_op::DELETE);
+        store.apply(e, 1.0).unwrap();
+    }
+    assert!(store.is_empty());
+    let absent = w::waypoints(&place, "n", "route", &positions, 5);
+    assert!(absent[3..].iter().all(|e| e.op == draw_op::DELETE));
+}
+
+#[test]
+fn structural_helpers_share_corner_weight_without_changing_data() {
+    let place = Place::frame("robot/link").lifetime(7.0);
+    let pose = Pose::yawed(3.0, 4.0, 5.0, 0.3);
+    let clearance = w::clearance_box(&place, "n", "bounds", pose, [2.0, 4.0, 6.0], 0x8050c080, "Supplied extent");
+    assert_eq!(clearance[0].width, -w::STRUCTURE_CORNER_GAIN);
+    assert_eq!(clearance[0].point_count(), 48);
+    assert_eq!(clearance[0].color, 0x8050c080);
+    let route = w::waypoints(&place, "n", "route", &[[0.0; 3], [3.0, 0.0, 0.0]], 1);
+    assert_eq!(route[4].width, clearance[0].width);
+    assert_eq!(route[2].width, -1.25);
+    let detection = w::detections_3d(&place, "n", "det", &[w::Detection3d {
+        pose, size: [2.0, 4.0, 6.0], class: "car".into(), score: 0.82, track: Some(17), velocity: None, trail: Vec::new(),
+    }], &w::DetectionStyle { only_edge: true, line_width: -3.0, ..Default::default() });
+    assert_eq!(detection[0].width, -3.0);
+    assert_eq!(detection[0].style, draw_style::PLAIN);
+    assert_eq!(detection[0].flags & draw_flag::FILL_MASK, draw_flag::FILL_WIRE);
+    assert_eq!(detection[0].props().get("corner_frame").as_deref(), Some("true"));
+    assert_eq!(detection[0].instance_list()[0].size, [2.0, 4.0, 6.0]);
+    let image = w::detections_2d(&place, "n", "image", Pose::default(), 1.0, 0.8, [640.0, 480.0],
+        &[[320.0, 240.0, 100.0, 80.0]], &["car".into()], &[0.82], 2.0);
+    assert_eq!(image[0].props().get("corner_frame").as_deref(), Some("true"));
+    assert_eq!(image[0].width, -1.0);
+    assert_eq!(image[0].point_count(), 4);
+    let points = image[0].point_list();
+    let y = 2.0 * 0.5_f32.tan() * 100.0 / 640.0;
+    let z = 2.0 * 0.4_f32.tan() * 80.0 / 480.0;
+    for (actual, expected) in points.iter().zip([[2.0, y, z], [2.0, -y, z], [2.0, -y, -z], [2.0, y, -z]]) {
+        assert!(actual.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+    assert_eq!(image[0].colors, vec![w::class_color("car", &[]); 4]);
+    assert_eq!(image[1].point_count(), 12);
+    for entity in clearance.iter().chain(route.iter()).chain(detection.iter()).chain(image.iter()) {
+        assert_eq!(entity.frame(), DrawFrame::Link("robot".into(), "link".into()));
+        assert_eq!(entity.lifetime_s, 7.0);
+        entity.validate().unwrap();
+    }
+}
+
+#[test]
+fn callout_and_frame_labels_use_world_anchors_without_art_glow() {
+    let place = Place::default().no_drape();
+    let callout = w::callout(&place, "n", "callout", [1.0, 2.0, 3.0], [0.0, 0.0, 1.0], "Supplied", draw_color::MAGENTA);
+    assert_eq!(callout[0].point_list(), [[1.0, 2.0, 3.0], [1.0, 2.0, 4.0]]);
+    assert_eq!(callout[1].kind, draw_kind::LINES);
+    assert_eq!(callout[1].sub, line_mode::LIST);
+    assert_eq!(callout[1].point_count(), 8);
+    assert_eq!(callout[2].width, -16.0);
+    let frame = w::frame(&place, "n", "frame", Pose::default(), None, 0.5, Some("Supplied frame"));
+    assert_eq!(frame[1].kind, draw_kind::TEXT);
+    assert_eq!(frame[1].props().get("label_icon").as_deref(), Some("frame"));
+    for e in callout.iter().chain(frame.iter()) {
+        assert_eq!(e.glow, 0.0);
+        e.validate().unwrap();
+    }
+}
+
+#[test]
+fn detection_identity_detail_survives_label_chunking() {
+    let classes = ["fixture\nupper", "value\u{1f}with separator", "quote \" and \\ slash", "点検センサー"];
+    let dets: Vec<_> = (0..100).map(|i| w::Detection3d {
+        pose: Pose::at(i as f64, 0.0, 0.0), size: [1.0; 3], class: classes[i % classes.len()].into(),
+        score: 0.5, track: None, velocity: None, trail: Vec::new(),
+    }).collect();
+    let items = w::detections_3d(&Place::default().no_drape(), "n", "detections", &dets, &w::DetectionStyle::default());
+    let tags = &items[1];
+    let chunks = tags.chunks(512);
+    assert!(chunks.len() > 1);
+    let mut store = DrawStore::default();
+    for chunk in chunks {
+        chunk.validate().unwrap();
+        assert_eq!(chunk.props().get("label_parts").as_deref(), Some("identity-detail-json"));
+        store.apply(chunk, 0.0).unwrap();
+    }
+    let restored = &store.get("n/detections", "tags").unwrap().entity;
+    let labels = restored.label_list();
+    assert_eq!(labels.len(), dets.len());
+    for (i, label) in labels.iter().enumerate() {
+        assert_eq!(serde_json::from_str::<[String; 2]>(label).unwrap(), [classes[i % classes.len()], "score 0.50"]);
+    }
 }
 
 #[test]
@@ -549,4 +885,59 @@ fn the_fake_host_keeps_draws_and_clears_them_with_markers() {
     assert_eq!(c.draw_list("").expect("list").len(), 1);
     assert!(c.clear(clear_scope::MARKERS).expect("clear markers").is_ok());
     assert!(c.draw_list("").expect("list").is_empty());
+}
+
+#[test]
+fn generated_color_overrides_keep_semantic_rgb_and_multiply_opacity() {
+    let p = Place::default().no_drape();
+    let points = [[0.0; 3], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]];
+    let poses = [Pose::default(), Pose::at(2.0, 0.0, 0.0)];
+    for tint in [draw_color::MAGENTA, draw_color::with_alpha(draw_color::GREEN, 0.5), 0] {
+        let routes = w::waypoints_colored(&p, "n", "route", &points, 1, tint);
+        assert_eq!(routes[0].colors[2], tint.max(1));
+        assert_eq!(routes[0].colors[0] & 0x00ff_ffff, draw_color::WHITE & 0x00ff_ffff);
+        assert_eq!(routes[3].color & 0x00ff_ffff, draw_color::GOAL & 0x00ff_ffff);
+        let swaths = w::swaths_colored(&p, "n", "swaths", &[points.to_vec(), points.to_vec()], 3.0, 1, tint);
+        assert_eq!(swaths[0].color, tint.max(1));
+        assert_eq!(swaths[1].color & 0x00ff_ffff, draw_color::HISTORY & 0x00ff_ffff);
+        let compass = w::compass_colored(&p, "n", "compass", [0.0; 3], 4.0, tint);
+        assert_eq!(compass[2].colors[1..], [tint.max(1); 3]);
+        assert_eq!(compass[2].colors[0] & 0x00ff_ffff, draw_color::GOAL & 0x00ff_ffff);
+        let particles = w::particles_colored(&p, "n", "particles", &poses, &[0.2, 1.0], 0.1, 0.5, w::Glyph::Arrow, tint);
+        let angle = w::angle_colored(&p, "n", "angle", [0.0; 3], 0.0, 1.0, 1.0, tint);
+        for e in routes.iter().chain(&swaths).chain(&compass).chain(std::iter::once(&particles)).chain(&angle) {
+            e.validate().unwrap();
+            for c in if e.colors.is_empty() { std::slice::from_ref(&e.color) } else { &e.colors } {
+                if *c != 0 { assert!(c >> 24 <= tint >> 24); }
+            }
+        }
+        assert!(particles.colors.iter().all(|c| c & 0x00ff_ffff == tint.max(1) & 0x00ff_ffff));
+        let covariance = w::covariance(&p, "n", "covariance", Pose::default(), &[1.0, 0.0, 0.0, 1.0], &[1.0, 2.0], tint.max(1)).unwrap();
+        assert!(covariance[0].colors.iter().all(|c| c >> 24 <= tint >> 24));
+        let callout = w::callout(&p, "n", "callout", [0.0; 3], [0.0, 0.0, 1.0], "Supplied", tint.max(1));
+        assert_eq!(callout[2].color >> 24, tint >> 24);
+        assert_eq!(callout[2].color & 0x00ff_ffff, 0x00ff_ffff);
+    }
+    assert_eq!(w::waypoints(&p, "n", "route", &points, 1)[0].colors,
+        [draw_color::with_alpha(draw_color::WHITE, 0.35), draw_color::PLAN, draw_color::PLAN]);
+    assert_eq!(w::swaths(&p, "n", "swaths", &[points.to_vec()], 3.0, 0)[0].color, draw_color::PLAN);
+}
+
+#[test]
+fn data_and_caller_item_palettes_remain_authoritative() {
+    let p = Place::default();
+    let bars = w::panel(&p, "n", "bars", [0.0; 3], panel_kind::BARS, &[0.2, 0.8], &[], "Fixture")
+        .with_colors(&[draw_color::GREEN, draw_color::ORANGE]).with_color(draw_color::MAGENTA);
+    assert_eq!(bars.colors, [draw_color::GREEN, draw_color::ORANGE]);
+    assert_eq!(bars.values, [0.2, 0.8]);
+    let cloud = w::cloud(&p, "n", "cloud", &[[0.0; 3], [1.0, 0.0, 0.0]], &[0.1, 0.9], colormap::VIRIDIS, -1.5, 0.0)
+        .with_color(draw_color::MAGENTA);
+    assert_eq!(cloud.colormap, colormap::VIRIDIS);
+    assert_eq!(cloud.values, [0.1, 0.9]);
+    let det = w::Detection3d { pose: Pose::default(), size: [1.0; 3], class: "fixture".into(), score: 0.5,
+        track: None, velocity: None, trail: Vec::new() };
+    let style = w::DetectionStyle { class_colors: vec![("fixture".into(), 0)], ..Default::default() };
+    let dets = w::detections_3d(&p, "n", "detections", &[det], &style);
+    assert_eq!(dets[0].colors, [1]);
+    assert_eq!(dets[1].colors, [1]);
 }

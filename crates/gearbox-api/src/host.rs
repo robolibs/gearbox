@@ -14,6 +14,9 @@ use crate::registry::{self, RegistryEntry};
 use crate::topics;
 use crate::wire::*;
 
+mod draw_data;
+pub use draw_data::{DataLane, DATA_POLL_PER_ROUTE};
+
 #[derive(Debug, Clone)]
 pub struct HostConfig {
     pub instance: String,
@@ -108,6 +111,7 @@ pub struct HostBus {
     marker_set: Registered<ReqServer<Env, Env>>,
     marker_delete: Registered<ReqServer<Env, Env>>,
     draw: Arc<DrawLane>,
+    draw_data: Arc<DataLane>,
     select: Registered<ReqServer<Env, Env>>,
     machines: Registered<AnsServer<Env, Env>>,
     access_grant: Registered<ReqServer<Env, Env>>,
@@ -159,6 +163,7 @@ impl HostBus {
                 list: agent.que_server(topics::DRAW_LIST)?,
             }))),
             select: agent.req_server(topics::SELECT)?,
+            draw_data: Arc::new(DataLane::new(&agent)?),
             machines: agent.que_server(topics::MACHINES_LIST)?,
             access_grant: agent.req_server(topics::ACCESS_GRANT)?,
             fields_layout: agent.req_server(topics::FIELDS_LAYOUT)?,
@@ -290,6 +295,10 @@ impl HostBus {
     /// The draw topics, to be served from a thread of their own.
     pub fn draw_lane(&self) -> &Arc<DrawLane> {
         &self.draw
+    }
+
+    pub fn draw_data_lane(&self) -> &Arc<DataLane> {
+        &self.draw_data
     }
 
     pub fn serve_select(&mut self, f: impl FnMut(Selection) -> Selection) -> usize {

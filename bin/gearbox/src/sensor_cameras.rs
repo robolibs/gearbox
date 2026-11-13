@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use bevy::camera::RenderTarget;
+use bevy::camera::{CameraUpdateSystems, RenderTarget};
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
@@ -28,7 +28,9 @@ impl Plugin for SensorCamerasPlugin {
                 PostUpdate,
                 (drive_sensor_cameras, arm_spawned_cameras)
                     .chain()
-                    .after(crate::sensors::run_machine_sensors),
+                    .after(crate::sensors::run_machine_sensors)
+                    .before(CameraUpdateSystems)
+                    .before(bevy::light::SimulationLightSystems::UpdateDirectionalLightCascades),
             );
     }
 }
@@ -390,6 +392,34 @@ fn publish_readback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_activation_precedes_camera_and_shadow_preparation() {
+        #[derive(Resource, Default)]
+        struct Seen(Vec<bool>);
+        fn observe(cameras: Query<&Camera, With<SensorCamera>>, mut seen: ResMut<Seen>) {
+            seen.0.push(cameras.single().unwrap().is_active);
+        }
+        let mut app = App::new();
+        app.init_resource::<Time>().init_resource::<Assets<Image>>().init_resource::<Seen>()
+            .add_systems(PostUpdate, observe.in_set(CameraUpdateSystems))
+            .add_plugins(SensorCamerasPlugin);
+        let key = CameraKey { bus_key: "rig".into(), link: "camera".into() };
+        let parent = app.world_mut().spawn_empty().id();
+        let spec = SensorSpec { kind: crate::links::SensorKind::Camera, rate_hz: 2.0,
+            columns: 1, rows: 1, hfov: 1.0, vfov: 1.0, range_m: 20.0, width: 160, height: 120,
+            render: CameraRender::Full, color: true, depth: false, recognition: false,
+            variant: crate::links::SensorVariant::Default, rays: 1, aperture: 0.0, min_range_m: 0.0, channel: -1 };
+        let entity = app.world_mut().spawn((Camera { is_active: false, ..default() },
+            SensorCamera { key: key.clone(), link_index: 0, spec,
+                image: Handle::default(), parent, pending: VecDeque::new(), armed: false },
+            Pending { sample: 1, sim_time: 0.0, stamp_ms: 0 })).id();
+        app.world_mut().resource_mut::<SensorRenderQueue>().live.insert(key.clone());
+        app.world_mut().resource_mut::<SensorCameras>().cameras.insert(key, entity);
+        for _ in 0..3 { app.update(); }
+        assert_eq!(app.world().resource::<Seen>().0, [false, true, false]);
+        assert_eq!(app.world().resource::<SensorCameras>().stats.renders, 1);
+    }
 
     #[test]
     fn readback_rows_drop_their_alignment_padding() {

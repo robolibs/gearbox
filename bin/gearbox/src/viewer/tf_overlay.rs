@@ -9,6 +9,7 @@ use super::overlays::DisplayToggles;
 use crate::controller::{ControllerInventory, MachineInstanceSpec};
 use crate::links::LinkRole;
 use crate::prim_index::PrimIndex;
+use crate::draw::visual;
 
 /// TF lines draw over geometry: a frame inside a body is still visible.
 #[derive(Default, Reflect, GizmoConfigGroup)]
@@ -32,10 +33,10 @@ impl Plugin for TfOverlayPlugin {
 fn configure_tf_gizmos(mut store: ResMut<GizmoConfigStore>) {
     let (config, _) = store.config_mut::<TfGizmos>();
     config.depth_bias = -1.0;
-    config.line.width = 2.5;
+    config.line.width = 1.5 * visual::RULE_PX;
 }
 
-const LINK_COLOR: Color = Color::srgb(1.0, 0.85, 0.1);
+const LINK_COLOR: Color = Color::srgb_u8(visual::SECONDARY[0], visual::SECONDARY[1], visual::SECONDARY[2]);
 const BASE_AXES_M: f32 = 0.6;
 const MIN_AXES_M: f32 = 0.12;
 const MAX_AXES_M: f32 = 0.5;
@@ -117,11 +118,10 @@ fn drawn<'a>(
 
 /// A frame's X, Y and Z axes as red, green and blue arrows.
 fn axes(gizmos: &mut Gizmos<TfGizmos>, at: &GlobalTransform, length: f32, alpha: f32) {
-    use bevy::color::palettes::basic::{BLUE, GREEN, RED};
     let iso = at.to_isometry();
     let start = iso.translation.into();
-    for (axis, color) in [(Vec3::X, RED), (Vec3::Y, GREEN), (Vec3::Z, BLUE)] {
-        gizmos.arrow(start, iso.transform_point(axis * length).into(), Color::from(color).with_alpha(alpha));
+    for (axis, [r, g, b, _]) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().zip(visual::AXIS_COLORS) {
+        gizmos.arrow(start, iso.transform_point(axis * length).into(), Color::srgba_u8(r, g, b, (alpha * 255.0) as u8));
     }
 }
 
@@ -169,6 +169,7 @@ pub struct TfLabels(pub Vec<TfLabel>);
 pub struct TfLabel {
     pub name: String,
     pub at: [f32; 2],
+    pub opacity: f32,
 }
 
 fn publish_tf_labels(
@@ -189,17 +190,22 @@ fn publish_tf_labels(
     let Some(size) = camera.logical_viewport_size() else {
         return;
     };
+    let view_from_world = cam_tr.affine().inverse();
     for machine in drawn(&inventory, &toggles) {
         for frame in frames_of(machine, &index, &transforms)
             .into_iter()
             .filter(|f| !toggles.tf_wheels_only || f.role == LinkRole::Wheel)
         {
-            let Ok(screen) = camera.world_to_viewport(cam_tr, frame.transform.translation()) else {
+            let position = frame.transform.translation();
+            let opacity = visual::label_opacity(-view_from_world.transform_point3(position).z, None);
+            if opacity <= 0.0 { continue; }
+            let Ok(screen) = camera.world_to_viewport(cam_tr, position) else {
                 continue;
             };
             labels.0.push(TfLabel {
                 name: frame.name.to_string(),
                 at: [screen.x / size.x, screen.y / size.y],
+                opacity,
             });
         }
     }
