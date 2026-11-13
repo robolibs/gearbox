@@ -4,6 +4,7 @@
 pub mod common;
 pub mod control;
 pub mod draw;
+pub mod draw_data;
 pub mod draw_geom;
 pub mod draw_widgets;
 pub mod greenhouse;

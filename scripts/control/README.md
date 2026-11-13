@@ -28,6 +28,20 @@ A machine is driven by whoever holds its session: `claim()` first, then
 zeroes the command; a minute of silence releases the machine, and a client
 whose session lapsed claims again on its next `cmd_vel`.
 
+## Live route-following example
+
+`oslo make preview-draw-mission` opens a dedicated simulator with a physical
+Husky following an oval through velocity commands and measured odometry.
+Blue is the planned route, amber is the translucent energized rear wall, and green
+is a projection of the current command, not a sensor measurement. Panels show
+measured speed, distance, completed laps and distance to the nearest route sample.
+The bounded trail fades behind the robot without stacking complete laps.
+
+`oslo make preview-draw-mission --args=stop` stops only this demo.
+`oslo make test-draw-mission` checks its controller and drawing payloads.
+Run these commands inside the development shell, or prefix them with
+`nix develop --offline --command`.
+
 ## gearbox draw
 
 gearbox draw is the viewer's drawing API. `gb.draw` keeps shapes per
@@ -70,6 +84,15 @@ Effects `glow`, `pulse_hz`, `flow_speed`, `spacing`, `beam_height`, `fade`
 and `urgency` take the style's default when left out (or 0) and switch off
 below 0; `flat=True` lays lines and points on the frame's XY plane and
 `additive=True` adds them as light.
+
+Every drawing also accepts `blur=0..1`, independently of color, opacity and
+glow: `0` is clear, `0.5` is partial frost and `1` is full frost. Omission
+preserves the existing finish (world drawings clear, panels frosted). The
+transmitted background softens; text, outlines and data stay sharp. Unbacked
+text and opaque pixels have no background to blur. Use
+`d.update("lab", "glass", blur=0)` to change it without replacing geometry.
+Rust uses `.with_blur(value)`; CLI create/update uses `--blur VALUE`.
+See [shared blur contract](../../docs/DRAW_BLUR_CONTRACT.md).
 
 ```python
 d = gb.draw

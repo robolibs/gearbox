@@ -21,7 +21,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use gearbox_api::datapod::robot::Imu;
 use gearbox_api::datapod::{Acceleration, Quaternion, Velocity};
 use gearbox_api::{
-    CAMERA_COLOR, CAMERA_DEPTH, CameraFrame, GearboxBus, LIDAR_CHUNK_PULSES, LidarScan, Props,
+    CAMERA_COLOR, CAMERA_DEPTH, CameraFrame, GearboxBus, LidarScan, Props,
     measurement_kind,
 };
 use molla_compute::{AdapterInfo, Engine};
@@ -56,7 +56,11 @@ impl Plugin for SensorsPlugin {
             .add_plugins(crate::sensor_cameras::SensorCamerasPlugin)
             .add_systems(
                 PostUpdate,
-                run_machine_sensors.after(bevy::transform::TransformSystems::Propagate),
+                (
+                    crate::sensor_capture::bump_scene_epoch_on_reset,
+                    run_machine_sensors.after(bevy::transform::TransformSystems::Propagate),
+                )
+                    .chain(),
             );
     }
 }
@@ -345,6 +349,8 @@ struct Mount {
     body: MollaBodyId,
     published: u64,
     undelivered: u64,
+    /// Whether a sweep's capture metadata was refused, so the warning shows once.
+    capture_refused: bool,
 }
 
 impl Mount {
@@ -366,6 +372,8 @@ impl Mount {
 
 pub struct Rig {
     revision: u64,
+    /// The machine id LiDAR capture metadata names; none is attached while empty.
+    pub machine: String,
     /// The compiled model the rig's scene was built from: poses and controls
     /// it samples as they come; a new model over the same bodies hands it a
     /// new scene, over other bodies builds the rig again.
@@ -487,6 +495,7 @@ struct PendingScan {
     ray_count: usize,
     meta: ScanMetadata,
     world: MTransform,
+    capture: Option<crate::sensor_capture::CapturePose>,
 }
 
 /// `<machine>:<body prim>` for machine parts, the body prim otherwise.
@@ -652,6 +661,7 @@ pub(crate) fn run_machine_sensors(
             match built {
                 Ok(mut rig) => {
                     rig.model = Some(model.clone());
+                    rig.machine = machine.id.clone();
                     info!(
                         "gearbox-sensors: `{}` samples {} sensor link(s) on scene revision {revision}, built in {:.0} ms",
                         machine.id,
@@ -1005,6 +1015,7 @@ impl Rig {
                 body,
                 published: 0,
                 undelivered: 0,
+                capture_refused: false,
             })
             .collect();
         let schedules: Vec<SensorSchedule> = mounts
@@ -1095,6 +1106,7 @@ impl Rig {
         .map_err(|e| format!("sensor readback: {e}"))?;
         Ok(Self {
             revision,
+            machine: String::new(),
             model: None,
             signature,
             scene,
@@ -1303,6 +1315,7 @@ impl Rig {
                         LidarPattern::Terrestrial(meta) => meta,
                         LidarPattern::Aerial(_) => unreachable!("terrestrial scans only"),
                     },
+                    capture: crate::sensor_capture::CapturePose::dispatched(&world),
                     world,
                 })
                 .collect();
@@ -1597,9 +1610,21 @@ impl Rig {
                         }
                         let mount = &mut self.mounts[scan.mount];
                         let spec = mount.resolved.spec;
+                        let capture = scan
+                            .capture
+                            .as_ref()
+                            .filter(|_| !self.machine.is_empty())
+                            .map(|c| c.native(&self.machine, &mount.name, pending.sim_time, scan.sample));
+                        let (props, capacity, refused) =
+                            crate::sensor_capture::chunk_props(&mount.name, capture.as_ref());
+                        if let Some(error) = refused
+                            && !std::mem::replace(&mut mount.capture_refused, true)
+                        {
+                            warn!("gearbox-sensors: `{}` LiDAR capture pose left out: {error}", mount.name);
+                        }
                         let mut delivered = true;
-                        for (chunk, chunk_ranges) in ranges.chunks(LIDAR_CHUNK_PULSES).enumerate() {
-                            let offset = chunk * LIDAR_CHUNK_PULSES;
+                        for (chunk, chunk_ranges) in ranges.chunks(capacity).enumerate() {
+                            let offset = chunk * capacity;
                             let chunk_points = &local[offset..offset + chunk_ranges.len()];
                             let mut wire = LidarScan {
                                 sim_time_s: pending.sim_time,
@@ -1618,8 +1643,7 @@ impl Rig {
                                 sample: scan.sample as u32,
                                 ranges: chunk_ranges.to_vec(),
                                 points: Vec::new(),
-                                props: Props::from_pairs(&[("name", mount.name.as_str())])
-                                    .into_bytes(),
+                                props: props.clone(),
                             };
                             wire.set_points(chunk_points);
                             delivered &= sink(&mount.name, SensorReading::Lidar(&wire));
@@ -2404,6 +2428,112 @@ mod tests {
         assert!(rigs.building.is_none(), "the scene builds");
         assert_eq!(rigs.rigs["bot"].model.as_ref(), Some(&model));
         assert!(seen(&mut rigs, &mut world).contains("plant:A/0"));
+    }
+
+    /// Moves the robot between dispatch and readback at a far, rotated site:
+    /// points placed by their capture stay on the wall, the current pose does not.
+    #[test]
+    fn a_delayed_sweep_lands_where_it_was_captured_not_where_the_robot_is_now() {
+        use crate::physics::backend::DQuat;
+        use bevy::math::{DQuat as BQuat, DVec3 as BVec3};
+        let engine = Engine::new_gpu().expect("GPU adapter");
+        let home = gearbox_globe::Datum::at(52.370216, 4.895168);
+        let far = gearbox_globe::Datum::at(-33.8688, 151.2093);
+        crate::globe::set_site_frames(vec![home, far]);
+        let offset = DVec3::X * gearbox_globe::physics_offset(1).x;
+        let mut world = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        let wall = world.insert_body(BodyDesc::fixed());
+        let face = Shape::Cuboid { half_extents: DVec3::new(0.5, 3.0, 8.0) };
+        world.insert_collider(ColliderDesc::new(face).parent(wall).translation(offset + DVec3::new(5.0, 1.0, 0.0))).unwrap();
+        let start = Pose { translation: offset + DVec3::new(0.0, 1.0, 0.0), rotation: DQuat::from_rotation_y(0.4) };
+        let carrier = world.insert_body(BodyDesc::fixed().pose(start));
+        let spec = SensorSpec {
+            kind: SensorKind::Lidar,
+            rate_hz: 50.0,
+            columns: 64,
+            rows: 1,
+            hfov: std::f32::consts::TAU,
+            vfov: 0.0,
+            range_m: 20.0,
+            width: 1,
+            height: 1,
+            render: crate::links::CameraRender::Geometry,
+            color: false,
+            depth: false,
+            recognition: false,
+            variant: crate::links::SensorVariant::Default,
+            rays: 1,
+            aperture: 0.0,
+            min_range_m: 0.1,
+            channel: 0,
+        };
+        let mount = ResolvedMount {
+            link: 1,
+            name: "roof_lidar".into(),
+            spec,
+            body: carrier,
+            entity: None,
+            joint: None,
+            local: MTransform::new(MVec3::new(0.2, 0.3, 0.0), MQuat::from_rotation_x(-FRAC_PI_2)),
+        };
+        let mut shared = None;
+        let model = world.backend.molla(|scene| scene.model_stamp());
+        let shared = shared_scene(&engine, &mut shared, &*world.backend, &model, &|_| None).unwrap();
+        let mut rig = Rig::build(&engine, &*world.backend, vec![mount], 0, 0.0, shared, &|_| None, &[]).unwrap();
+        rig.machine = "rover".into();
+        let mut sweeps = Vec::new();
+        for _ in 0..12 {
+            world.step();
+            rig.sample(&engine, &*world.backend, world.simulated_seconds, &SensorEnvironment::default(), &mut |_| true)
+                .unwrap();
+            if rig.pending.is_empty() {
+                continue;
+            }
+            let moved = Pose { translation: offset + DVec3::new(-2.0, 1.0, 1.5), rotation: DQuat::from_rotation_y(1.3) };
+            world.backend.body_mut(carrier).unwrap().set_position(moved, true);
+            let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(5)) };
+            engine.device().unwrap().poll(wait).unwrap();
+            rig.collect(0, &mut |_, reading| {
+                if let SensorReading::Lidar(scan) = reading {
+                    sweeps.push(scan.clone());
+                }
+                true
+            });
+            break;
+        }
+        assert!(!sweeps.is_empty(), "a sweep was dispatched and read back");
+        let now = world.backend.body(carrier).unwrap().position();
+        let (mut on_wall, mut misplaced, mut worst) = (0, 0, 0.0f64);
+        for scan in &sweeps {
+            let capture = scan.native_capture().unwrap().expect("capture metadata");
+            assert_eq!(capture.machine, "rover");
+            assert_eq!(capture.transform.stamp.scene_epoch, crate::sensor_capture::scene_epoch());
+            let [w, x, y, z] = capture.transform.datum.as_ref().unwrap().axes_to_ecef_wxyz;
+            let axes = BQuat::from_xyzw(x, y, z, w);
+            let origin = BVec3::from_array(capture.transform.datum.as_ref().unwrap().origin_ecef_m);
+            let pose = &capture.transform.pose;
+            let [w, x, y, z] = pose.rotation_wxyz;
+            let rotation = BQuat::from_xyzw(x, y, z, w);
+            for (i, range) in scan.ranges.iter().enumerate() {
+                if !range.is_finite() {
+                    continue;
+                }
+                let p = [0, 1, 2].map(|k| scan.points[3 * i + k] as f64);
+                let ecef = origin + axes * (rotation * BVec3::from_array(p) + BVec3::from_array(pose.translation_m));
+                let site = far.from_ecef(ecef);
+                worst = worst.max((site.x - 4.5).abs());
+                on_wall += 1;
+                let link = DVec3::new(0.2, 0.3, 0.0) + DQuat::from_rotation_x(-FRAC_PI_2) * DVec3::from_array(p);
+                let guessed = now.translation + now.rotation * link - offset;
+                if (guessed.x - 4.5).abs() > 0.5 {
+                    misplaced += 1;
+                }
+            }
+        }
+        println!("delayed sweep: {on_wall} hits, worst wall error {worst:.4} m, {misplaced} misplaced by the current pose");
+        assert!(worst < 1e-3, "captured hits left the wall face by {worst} m");
+        assert!(on_wall >= 8, "the wall faces a quarter of the ring: {on_wall} hits");
+        assert!(misplaced > on_wall / 2, "the current pose would misplace the sweep");
     }
 
     #[test]

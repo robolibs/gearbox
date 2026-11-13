@@ -4,10 +4,11 @@
 // added with no alpha.
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world, mesh_normal_local_to_world}
 #import bevy_pbr::mesh_view_bindings::{view, globals}
-#import gearbox::draw_common::{srgb_to_linear, display_to_scene}
+#import gearbox::draw_frost::background_frost
+#import gearbox::draw_common::{srgb_to_linear, display_to_scene, technical_line, detail_visibility, energy_packet, energy_coat, energy_glass, energy_glass_shade, ground_clip}
 
 struct SurfaceParams {
-    // x: 1 to shade.
+    // Shading flag, frost strength, unused, unused.
     flags: vec4<f32>,
 };
 
@@ -22,13 +23,12 @@ const LOOK_SHIELD: u32 = 4u;
 const LOOK_ALERT: u32 = 5u;
 const LOOK_DECAL: u32 = 6u;
 const LOOK_BEAM: u32 = 7u;
-const LOOK_FOOTPRINT: u32 = 8u;
 const LOOK_SWEEP: u32 = 9u;
 const LOOK_GHOST: u32 = 10u;
 const LOOK_PLANE: u32 = 11u;
 const LOOK_ZONE: u32 = 12u;
+const LOOK_FIELD: u32 = 13u;
 const TAU: f32 = 6.2831853;
-const VERMILLION: vec3<f32> = vec3(0.67, 0.11, 0.0);
 
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
@@ -36,11 +36,11 @@ struct Vertex {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     // Unit-shape coordinates, or (arc length, height share) on walls and
-    // beams, or (distance from the edge) on decals; w: 2 on box faces.
+    // beams, or edge distance on decals; FIELD: local metres and face axis.
     @location(3) local: vec4<f32>,
     // look, glow, pulse Hz, phase
     @location(4) fx: vec4<f32>,
-    // urgency, size m, length or spacing m, fade
+    // urgency, size m, spacing m, fade; FIELD: full XYZ size, panel spacing.
     @location(5) fx2: vec4<f32>,
 };
 
@@ -59,14 +59,12 @@ fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
     let world = mesh_position_local_to_world(get_world_from_local(v.instance_index), vec4(v.position, 1.0));
     let look = u32(v.fx.x + 0.5);
-    var at_eye = view.view_from_world * world;
-    if look == LOOK_RING || look == LOOK_FOOTPRINT || look == LOOK_DECAL || look == LOOK_ALERT || look == LOOK_ZONE
-        || (look == LOOK_SWEEP && v.local.w > 0.5) {
-        // Ground looks move up to 0.3 m towards the eye along their ray.
-        let d = length(at_eye.xyz);
-        at_eye = vec4(at_eye.xyz * (1.0 - min(0.3, 0.1 * d) / max(d, 1e-4)), 1.0);
-    }
+    let at_eye = view.view_from_world * world;
     out.position = view.clip_from_view * at_eye;
+    if look == LOOK_RING || look == LOOK_DECAL || look == LOOK_ALERT || look == LOOK_ZONE
+        || (look == LOOK_SWEEP && v.local.w > 0.5) {
+        out.position = ground_clip(at_eye, view.clip_from_view);
+    }
     out.world_position = world.xyz;
     out.world_normal = mesh_normal_local_to_world(v.normal, v.instance_index);
     out.color = vec4(display_to_scene(srgb_to_linear(v.color.rgb), lut_texture, lut_sampler), v.color.a);
@@ -76,36 +74,35 @@ fn vertex(v: Vertex) -> VertexOutput {
     return out;
 }
 
-// Coverage of a distance field `d` whose screen rate is `w`.
-fn cover(d: f32, w: f32) -> f32 {
-    return clamp(0.5 - d / max(w, 1e-6), 0.0, 1.0);
-}
-
-// A band of `duty` per period of `x`, edges smoothed over `w`.
+// Pixel-filtered periodic bands, retaining their average when minified.
 fn band(x: f32, duty: f32, w: f32) -> f32 {
-    let f = fract(x);
     let s = max(w, 1e-4);
-    return smoothstep(0.0, s, f) * (1.0 - smoothstep(duty - s, duty, f));
+    let lo = x - 0.5 * s;
+    let hi = x + 0.5 * s;
+    let a = floor(lo) * duty + min(fract(lo), duty);
+    let b = floor(hi) * duty + min(fract(hi), duty);
+    return clamp((b - a) / s, 0.0, 1.0);
 }
 
-// Distance to the nearest edge of a hexagon tiling of cell size 1.
-fn hex_edge(p: vec2<f32>) -> f32 {
-    let r = vec2(1.0, 1.7320508);
-    let h = r * 0.5;
-    let a = (p - r * floor(p / r)) - h;
-    let b = (p - h - r * floor((p - h) / r)) - h;
-    let g = select(b, a, dot(a, a) < dot(b, b));
-    let q = abs(g);
-    return 0.5 - max(dot(q, normalize(vec2(1.0, 1.7320508))), q.x);
+fn soft_line(distance: f32, radius: f32, footprint: f32) -> f32 {
+    return technical_line(distance, radius, footprint);
 }
 
-@fragment
-fn fragment(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+fn pulse_line(phase: f32, radius: f32, footprint: f32) -> f32 {
+    let distance = abs(fract(phase + 0.5) - 0.5);
+    return soft_line(distance, radius, footprint) * detail_visibility(footprint);
+}
+
+fn energy_wake(phase: f32, footprint: f32, hz: f32) -> f32 {
+    let behind = fract(-phase);
+    return exp(-behind * 18.0) * smoothstep(0.0, 0.014, behind) * detail_visibility(footprint) * select(0.0, 1.0, hz > 0.0);
+}
+
+fn surface(in: VertexOutput, front: bool) -> vec4<f32> {
     let look = u32(in.fx.x + 0.5);
     let glow = in.fx.y;
     let hz = in.fx.z;
     let time = globals.time + in.fx.w;
-    let urgency = in.fx2.x;
     let size = max(in.fx2.y, 1e-3);
     var n = normalize(in.world_normal);
     if !front {
@@ -114,6 +111,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let to_eye = normalize(view.world_position - in.world_position);
     let ndv = abs(dot(n, to_eye));
     let base = in.color.rgb;
+    let outlined = in.local.w >= 8.0;
+    let local_kind = in.local.w - select(0.0, 8.0, outlined);
 
     // Distance fields used by the looks, with their screen rates.
     let p = in.local.xy * 2.0 * size;
@@ -123,143 +122,181 @@ fn fragment(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let middle = m.x + m.y + m.z - max(max(m.x, m.y), m.z) - min(min(m.x, m.y), m.z);
     let edge_d = (0.5 - middle) * size;
     let edge_w = fwidth(edge_d);
-    let stripe_x = (in.local.x + in.local.y + in.local.z) * size / max(in.fx2.z, 1e-3) - time * 0.8;
-    let stripe_w = fwidth(stripe_x);
-    let hex = in.local.xy * 9.0;
-    let hex_w = fwidth(hex);
-    let hex_line = 1.0 - smoothstep(0.0, max(hex_w.x, hex_w.y) * 1.5 + 0.02, hex_edge(hex));
-
-    var over = vec3(0.0);
-    var over_a = 0.0;
-    var light = vec3(0.0);
+    let polygon = local_kind > 2.5;
+    let stripe_position = select((in.local.x + in.local.y + in.local.z) * size, in.local.y + in.local.z, polygon);
+    let shade = energy_glass_shade(n, ndv);
+    let rim = pow(clamp(1.0 - ndv, 0.0, 1.0), 5.0);
 
     if look == LOOK_WALL {
-        // A wall of light: bright foot and crest, a body fading upward,
-        // fading out towards the line's start.
         let v = clamp(in.local.y, 0.0, 1.0);
-        let height = in.fx2.y;
-        let body = 0.6 * (1.0 - v) * (1.0 - v);
-        let crest = exp(-pow((1.0 - v) * height / 0.012, 2.0));
-        let foot = 0.8 * exp(-v * height / 0.025);
-        let age = mix(in.fx2.w, 1.0, clamp(in.local.x / max(in.fx2.z, 1e-3), 0.0, 1.0));
-        light = base * glow * (body + crest + foot) * age * in.color.a;
+        let along = in.local.x;
+        let across_w = fwidth(v * size);
+        let foot = soft_line(v * size, 0.008, across_w);
+        let crest = soft_line((1.0 - v) * size, 0.006, across_w);
+        let lane_a = soft_line((v - 0.32) * size, 0.003, across_w);
+        let lane_b = soft_line((v - 0.68) * size, 0.002, across_w);
+        let phase_a = along / 3.8 - time * hz;
+        let phase_b = along / 5.6 - time * hz + 0.37;
+        let packet_a = energy_packet(phase_a, 0.08, fwidth(phase_a), hz);
+        let packet_b = energy_packet(phase_b, 0.06, fwidth(phase_b), hz);
+        let activity = lane_a * packet_a + 0.6 * lane_b * packet_b;
+        let wake = lane_a * energy_wake(phase_a, fwidth(phase_a), hz)
+            + 0.5 * lane_b * energy_wake(phase_b, fwidth(phase_b), hz);
+        let polish = exp(-pow((v - 0.70) * 5.0, 2.0)) * (0.25 + 0.75 * rim);
+        let age = mix(in.fx2.w, 1.0, smoothstep(0.0, 1.0, along / max(in.fx2.z, 1e-3)));
+        let structure = max(foot, 0.75 * crest);
+        let coverage = 0.20 + 0.12 * polish + 0.22 * structure + 0.08 * activity;
+        let depth_tint = base * (0.65 + 0.35 * smoothstep(0.0, 0.8, v));
+        return energy_coat(depth_tint, in.color.a * age, shade, coverage, 0.12 * rim,
+            max(structure, 0.12 * polish), activity, wake, glow);
     } else if look == LOOK_RING {
-        // A ring with rotating ticks and ripples running out.
-        let ring_r = size * 0.8;
-        var a = cover(abs(r - ring_r) - 0.035, r_w) + 0.6 * exp(-abs(r - ring_r) * 8.0);
+        let radial = r / size;
+        let edge_fade = 1.0 - smoothstep(0.86, 1.0, radial);
+        let core = soft_line(r - size * 0.73, 0.014, r_w);
+        let turn = atan2(p.y, p.x) / TAU;
+        let ticks_x = turn * 16.0;
+        let ticks = pulse_line(ticks_x, 0.06, fwidth(ticks_x)) * soft_line(r - size * 0.85, size * 0.04, r_w);
+        let inner = band(turn * 4.0 + 0.04, 0.14, fwidth(turn * 4.0)) * soft_line(r - size * 0.54, 0.009, r_w);
+        let structure = max(core, max(0.65 * ticks, 0.55 * inner));
+        var ripples = 0.0;
         for (var k = 0; k < 3; k = k + 1) {
             let f = fract(time * hz + f32(k) / 3.0);
-            a = a + 0.7 * cover(abs(r - f * size) - 0.025, r_w) * (1.0 - f) * (1.0 - f);
+            let envelope = smoothstep(0.0, 0.12, f) * pow(1.0 - f, 2.0);
+            ripples += soft_line(r - f * size, 0.016, r_w) * envelope * select(0.0, 1.0, hz > 0.0);
         }
-        let turn = atan2(p.y, p.x) / TAU;
-        a = a + 0.8 * step(fract(turn * 12.0 + time * 0.05), 0.4) * cover(abs(r - size * 0.93) - 0.04, r_w);
-        a = a + 0.25 * exp(-r * r / (0.08 * size * size));
-        light = base * glow * a * (1.0 - smoothstep(0.97, 1.0, r / size)) * in.color.a;
+        let activity = max(energy_packet(turn - time * hz, 0.045, fwidth(turn), hz) * core, ripples);
+        let coverage = 0.48 * structure + 0.16 * activity;
+        return energy_coat(base, in.color.a * edge_fade, 0.8, coverage, 0.0, structure, activity, 0.0, glow);
     } else if look == LOOK_BEAM {
-        // An open column of light: soft at its sides, fading with height,
-        // bands rising through it, a hot foot.
         let h = clamp(in.local.y, 0.0, 1.0);
-        let fall = (1.0 - h) * (1.0 - h);
-        let bands = exp(-pow((fract(h * 4.0 - time * 0.6) - 0.5) * 5.0, 2.0));
-        let foot = exp(-h * 25.0) * 2.0;
-        let pulse = 1.0 + 0.3 * sin(TAU * hz * time);
-        let a = (fall * ndv * ndv * (0.35 + 0.6 * bands) + foot * ndv) * pulse;
-        light = mix(base, vec3(1.0), 0.25) * glow * a * in.color.a;
-    } else if look == LOOK_HOLO {
-        // Glowing edges (boxes) or rim, faint faces, a scanline sweeping up.
-        let fill = 0.06;
+        let fall = exp(-h * 2.1) * (1.0 - smoothstep(0.82, 1.0, h));
+        let rise = h * 3.0 - time * hz;
+        let rise_w = fwidth(rise);
+        let front = energy_packet(rise, 0.045, rise_w, hz);
+        let wake = energy_wake(rise, rise_w, hz);
+        let lanes_x = in.local.x * 8.0 + 0.04 * sin(h * 7.0);
+        let lanes = pulse_line(lanes_x, 0.035, fwidth(lanes_x));
+        let stations = pulse_line(h * 4.0, 0.018, fwidth(h * 4.0));
+        let structure = max(0.6 * lanes, 0.22 * stations) * fall;
+        let profile = 0.25 + 0.75 * pow(ndv, 2.2);
+        let foot = exp(-h * 32.0) * ndv;
+        let activity = front * (0.6 + 0.4 * lanes) * fall * profile;
+        let coverage = 0.12 * fall * profile + 0.32 * structure + 0.16 * activity + 0.04 * wake * fall * profile;
+        return energy_coat(base, in.color.a, shade, coverage, 0.0, max(structure, 0.65 * foot), activity, wake * fall * profile, glow);
+    } else if look == LOOK_HOLO || look == LOOK_GHOST {
         let height_share = clamp(in.local.z + 0.5, 0.0, 1.0);
-        let scan = exp(-pow((fract(time * hz) - height_share) * 18.0, 2.0)) * 0.5;
+        let scan_x = height_share - time * hz;
+        let scan_w = fwidth(scan_x);
+        let scan = energy_packet(scan_x, 0.022, scan_w, hz);
+        let wake = energy_wake(scan_x, scan_w, hz);
+        let lattice_x = height_share * 4.0;
+        let lattice = pulse_line(lattice_x, 0.009, fwidth(lattice_x));
         var edges: f32;
-        if in.local.w > 1.5 {
-            edges = 1.4 * cover(edge_d - 0.015, edge_w) + 0.5 * exp(-max(edge_d, 0.0) / 0.05);
+        if local_kind > 1.5 {
+            edges = select(soft_line(edge_d, 0.009, edge_w), 0.0, outlined);
         } else {
-            edges = 1.2 * pow(1.0 - ndv, 2.5);
+            let meridians = max(soft_line(in.local.x, 0.003, fwidth(in.local.x)), soft_line(in.local.y, 0.003, fwidth(in.local.y)));
+            edges = max(0.60 * rim, select(0.35 * meridians, 0.0, outlined));
         }
-        light = base * glow * (fill + edges + scan) * in.color.a;
+        let structure = max(edges, 0.35 * lattice);
+        let activity = scan * (0.35 + 0.65 * structure);
+        return energy_glass(base, in.color.a, shade, rim, structure, activity, wake, glow);
+    } else if look == LOOK_FIELD {
+        let extent = max(in.fx2.xyz, vec3(1e-4));
+        let uv = select(select(in.local.yz, in.local.xz, local_kind > 0.5), in.local.xy, local_kind > 1.5);
+        let face_size = select(select(extent.yz, extent.xz, local_kind > 0.5), extent.xy, local_kind > 1.5);
+        let pitch = max(in.fx2.w, 1e-3);
+        let grid = uv / pitch;
+        let grid_w = fwidth(grid);
+        let distance = abs(fract(grid + 0.5) - 0.5) * pitch;
+        let detail = 1.0 - smoothstep(vec2(0.2), vec2(0.65), grid_w);
+        let major = max(soft_line(distance.x, 0.006, grid_w.x * pitch) * detail.x,
+            soft_line(distance.y, 0.006, grid_w.y * pitch) * detail.y);
+        let edge = max(face_size * 0.5 - abs(uv), vec2(0.0));
+        let edge_width = fwidth(uv);
+        let edge_lines = vec2(soft_line(edge.x, 0.009, edge_width.x), soft_line(edge.y, 0.009, edge_width.y));
+        let perimeter = select(max(edge_lines.x, edge_lines.y), 0.0, outlined);
+        let corner_span = min(0.18, 0.22 * min(face_size.x, face_size.y));
+        let corner_gate = 1.0 - smoothstep(vec2(corner_span * 0.65), vec2(corner_span), edge);
+        let corners = select(max(edge_lines.x * corner_gate.y, edge_lines.y * corner_gate.x), 0.0, outlined);
+        let scan_x = dot(in.local.xyz / extent, vec3(0.2, 0.15, 0.65)) + 0.5 - time * hz;
+        let scan = energy_packet(scan_x, 0.025, fwidth(scan_x), hz);
+        let structure = max(corners, max(0.35 * major, 0.55 * perimeter));
+        let activity = scan * max(major, perimeter);
+        return energy_glass(base, in.color.a, shade, rim, structure, activity, 0.0, glow);
     } else if look == LOOK_SHIELD {
-        // Fresnel rim, faint fill and weave, ripples quickening and turning
-        // vermillion with urgency.
         if !front {
             discard;
         }
-        let rim = pow(1.0 - ndv, 3.0);
         let v = in.local.z + 0.5;
-        let rip = exp(-pow((fract(v * 1.5 - time * hz) - 0.5) * 16.0, 2.0));
-        let tint = mix(base, VERMILLION, clamp(urgency, 0.0, 1.0));
-        let a = 0.03 + 1.2 * rim + rip * (0.12 + 0.45 * urgency) + 0.04 * hex_line;
-        light = tint * glow * a * in.color.a;
-    } else if look == LOOK_FOOTPRINT {
-        // A thin ring where the shield meets the ground.
-        let edge = abs(r - size * 0.97);
-        let tint = mix(base, VERMILLION, clamp(urgency, 0.0, 1.0));
-        light = tint * glow * (cover(edge - 0.02, r_w) + 0.5 * exp(-edge * 10.0)) * 0.8 * in.color.a;
+        let rise = v * 1.5 - time * hz;
+        let rise_w = fwidth(rise);
+        let rip = energy_packet(rise, 0.035, rise_w, hz);
+        let wake = energy_wake(rise, rise_w, hz);
+        let sections = pulse_line(in.local.z * 4.0, 0.012, fwidth(in.local.z * 4.0));
+        let meridian = select(max(soft_line(in.local.x, 0.004, fwidth(in.local.x)), soft_line(in.local.y, 0.004, fwidth(in.local.y))), 0.0, outlined);
+        let boundary = select(soft_line(edge_d, 0.009, edge_w), 0.0, outlined);
+        let structure = select(max(0.65 * sections, 0.5 * meridian), max(boundary, 0.3 * sections), local_kind > 1.5);
+        let activity = rip * (0.25 + 0.75 * structure);
+        return energy_glass(base, in.color.a, shade, rim, structure, activity, wake, glow);
     } else if look == LOOK_ALERT {
-        // Hazard stripes flashing on and off.
-        let f = fract(stripe_x);
-        let stripe = smoothstep(0.0, stripe_w * 1.5, f) * (1.0 - smoothstep(0.5 - stripe_w * 1.5, 0.5, f));
-        let flash = 0.55 + 0.45 * step(0.5, fract(time * hz));
-        over = mix(vec3(0.02), base, stripe);
-        over_a = 0.85 * in.color.a;
-        light = base * glow * 0.3 * stripe * flash * in.color.a;
-    } else if look == LOOK_DECAL {
-        // Fill fading inward from the outline.
-        let d = max(in.local.x, 0.0);
-        let a = 0.15 * (1.0 - smoothstep(0.0, 0.3, d)) + 0.025;
-        light = base * glow * a * in.color.a;
-    } else if look == LOOK_ZONE {
-        // A zone: an inner glow along its edges, a light interior and a
-        // faint static diagonal hatch.
+        let static_x = stripe_position / max(in.fx2.z, 1e-3);
+        let stripe = band(static_x, 0.45, fwidth(static_x));
+        let packet_x = static_x * 0.25 - time * hz;
+        let activity = energy_packet(packet_x, 0.055, fwidth(packet_x), hz);
+        let frame = select(1.0, 0.0, outlined || (polygon && local_kind > 3.5));
+        let boundary = frame * select(soft_line(edge_d, 0.012, edge_w), soft_line(in.local.x, 0.018, fwidth(in.local.x)), polygon);
+        let coverage = 0.24 + 0.32 * boundary + 0.16 * activity * max(stripe, boundary);
+        return energy_coat(base * mix(0.16, 1.0, stripe), in.color.a, shade, coverage, 0.0,
+            max(0.25 * stripe, boundary), activity * max(stripe, boundary), 0.0, glow);
+    } else if look == LOOK_DECAL || look == LOOK_ZONE {
         let d = max(in.local.x, 0.0);
         let x = (in.local.y + in.local.z) / 0.7;
-        let hatch = band(x, 0.16, fwidth(x) * 1.5) * smoothstep(0.08, 0.35, d);
-        let a = 0.32 * exp(-d / 0.09) + 0.12 * (1.0 - smoothstep(0.0, 0.4, d)) + 0.05 + 0.07 * hatch;
-        light = base * glow * a * in.color.a;
+        let hatch = pulse_line(x, 0.018, fwidth(x)) * (1.0 - smoothstep(0.12, 0.25, d));
+        let edge = select(soft_line(d, 0.014, fwidth(d)), 0.0, outlined || local_kind > 3.5);
+        let structure = max(edge, select(0.0, 0.24 * hatch, look == LOOK_ZONE));
+        let phase = x * 0.25 - time * hz;
+        let activity = energy_packet(phase, 0.04, fwidth(phase), hz) * structure;
+        return energy_glass(base, in.color.a, 0.75, 0.0, structure, activity, 0.0, glow);
     } else if look == LOOK_SWEEP {
-        // A sensor's reach: falling fill, bright rim and sides, range rings
-        // and a radar line sweeping across with a fading trail (flat), or a
-        // scan plane running out along the frustum (w = 0).
-        let r = clamp(in.local.x, 0.0, 1.0);
+        let radial = clamp(in.local.x, 0.0, 1.0);
         let across = in.local.y;
-        let reach = size * r;
+        let reach = size * radial;
         let ring_gap = select(size / 4.0, in.fx2.z, in.fx2.z > 1e-3);
-        let rings = band(reach / ring_gap + 0.5, 0.06, fwidth(reach / ring_gap) * 1.5) * step(0.02, r) * (1.0 - step(0.985, r));
-        let outer = 1.0 - smoothstep(0.0, max(fwidth(r) * 2.0, 1e-4), abs(1.0 - r) - 0.006);
+        let ring_x = reach / ring_gap;
+        let rings = pulse_line(ring_x, 0.012, fwidth(ring_x)) * smoothstep(0.02, 0.08, radial);
+        if local_kind < 0.5 {
+            let phase = radial - time * hz;
+            let activity = energy_packet(phase, 0.018, fwidth(phase), hz);
+            let wake = energy_wake(phase, fwidth(phase), hz);
+            return energy_glass(base, in.color.a * 0.45, shade, 0.0, 0.35 * rings, activity, wake, glow);
+        }
+        let outer = soft_line((1.0 - radial) * size, 0.035, fwidth(reach));
         let side_d = (1.0 - abs(across)) * max(in.local.z, 1e-3) * reach;
-        let side = 1.0 - smoothstep(0.0, max(fwidth(side_d) * 1.5, 1e-4), side_d - 0.02);
+        let side = soft_line(side_d, 0.025, fwidth(side_d));
+        let feather = smoothstep(0.0, 0.035, radial) * (1.0 - smoothstep(0.88, 1.0, radial));
+        let side_feather = 1.0 - smoothstep(0.88, 1.0, abs(across));
         var sweep = 0.0;
         if hz > 0.0 {
-            if in.local.w > 0.5 {
-                let at = fract(time * hz) * 2.0 - 1.0;
-                let behind = at - across;
-                sweep = select(0.0, exp(-behind * 6.0), behind >= 0.0) * smoothstep(0.0, 0.15, r);
-            } else {
-                let at = fract(time * hz);
-                sweep = exp(-pow((r - at) * 24.0, 2.0));
-            }
+            let phase = across * 0.5 + 0.5 - time * hz;
+            sweep = energy_packet(phase, 0.012, fwidth(phase), hz) + 0.45 * energy_wake(phase, fwidth(phase), hz);
         }
-        let fill = 0.07 * pow(1.0 - r, 0.6) + 0.02;
-        let a = fill + 0.9 * max(outer, side * step(abs(across), 0.999) * 0.8) + 0.35 * rings + 0.45 * sweep;
-        light = base * glow * a * in.color.a;
+        let bounds = select(0.5 * outer + 0.4 * side * step(abs(across), 0.999), 0.0, outlined);
+        let structure = max(bounds, 0.26 * rings * feather);
+        let activity = sweep * side_feather * feather;
+        let coverage = 0.12 * side_feather * feather + 0.32 * structure + 0.16 * activity;
+        return energy_coat(base, in.color.a, 0.75, coverage, 0.0, structure, activity, 0.0, glow);
     } else if look == LOOK_PLANE {
-        // An image plane: a faint fill, corner brackets and thirds.
         let uv = in.local.xy;
         let to_edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
         let e = fwidth(to_edge) * 1.5;
-        let border = 1.0 - smoothstep(0.004, 0.004 + e, to_edge);
-        let corner = step(max(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)), 0.12) * (1.0 - smoothstep(0.012, 0.012 + e, to_edge));
-        let thirds_x = abs(fract(uv.x * 3.0 + 0.5) - 0.5) / 3.0;
-        let thirds_y = abs(fract(uv.y * 3.0 + 0.5) - 0.5) / 3.0;
-        let thirds = (1.0 - smoothstep(0.0015, 0.0015 + fwidth(uv.x), thirds_x)) + (1.0 - smoothstep(0.0015, 0.0015 + fwidth(uv.y), thirds_y));
-        let a = 0.035 + 0.35 * border + 1.1 * corner + 0.08 * min(thirds, 1.0);
-        light = base * glow * a * in.color.a;
-    } else if look == LOOK_GHOST {
-        // A ghost: fresnel rim, faint fill, slow bands rising through it.
-        let rim = pow(1.0 - ndv, 2.5);
-        let h = in.local.z;
-        let bands = band(h * 2.5 - time * hz, 0.12, fwidth(h * 2.5) * 1.5);
-        let a = 0.05 + 1.0 * rim + 0.08 * bands;
-        light = base * glow * a * in.color.a;
+        let border = soft_line(to_edge, 0.003, e);
+        let corner_distance = max(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+        let corner = (1.0 - smoothstep(0.10, 0.15, corner_distance)) * soft_line(to_edge, 0.01, e);
+        let structure = select(max(corner, 0.55 * border), 0.0, outlined);
+        let phase = (uv.x + uv.y) * 0.5 - time * hz;
+        let activity = energy_packet(phase, 0.04, fwidth(phase), hz) * structure;
+        return energy_glass(base, in.color.a, 0.75, 0.0, structure, activity, 0.0, glow);
     } else {
         var shade = 1.0;
         if params.flags.x > 0.5 {
@@ -267,12 +304,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
             let sky = n.y * 0.5 + 0.5;
             shade = 0.38 + 0.47 * key + 0.15 * sky + 0.12 * pow(key, 32.0);
         }
-        over = base * shade;
-        over_a = in.color.a;
+        return vec4(base * shade * in.color.a, in.color.a);
     }
+}
 
-    if over_a <= 0.002 && dot(light, light) <= 1e-7 {
-        discard;
-    }
-    return vec4(over * over_a + light, over_a);
+@fragment
+fn fragment(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return background_frost(surface(in, front), in.position.xy, params.flags.y);
 }

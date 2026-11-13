@@ -15,9 +15,15 @@ datapod.workspace = true
 peerbus.workspace = true
 agentio.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+crc32fast = "1.5.2"
+blake3 = "1.8.7"
+getrandom = "0.3.4"
 postcard = { version = "1.0", default-features = false, features = ["use-std"] }
 
 bevy = { workspace = true, optional = true }
 usd_bevy = { workspace = true, optional = true }
+
+[dev-dependencies]
+concord.workspace = true
 

@@ -1,0 +1,52 @@
+#usda 1.0
+(
+    defaultPrim = "rig"
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+
+def Xform "rig" (prepend apiSchemas = ["GearboxMachineAPI"])
+{
+    rel gearbox:machine:body = </rig/body>
+    def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "GearboxLinkAPI"])
+    {
+        token gearbox:link:role = "base"
+        bool physics:kinematicEnabled = true
+        float physics:mass = 100
+        float3 physics:diagonalInertia = (10, 10, 10)
+        double3 xformOp:translate = (0, 0, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Xform "camera_link" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            token gearbox:sensor:render = "optimized"
+            token gearbox:sensor:channels = "color"
+            float gearbox:sensor:rate_hz = 2
+            int gearbox:sensor:width = 160
+            int gearbox:sensor:height = 120
+            float gearbox:sensor:vfov_deg = 60
+            float gearbox:sensor:range_m = 20
+        }
+        def Xform "full_camera_link" (prepend apiSchemas = ["GearboxLinkAPI"])
+        {
+            token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            token gearbox:sensor:render = "full"
+            token gearbox:sensor:channels = "color"
+            float gearbox:sensor:rate_hz = 2
+            int gearbox:sensor:width = 160
+            int gearbox:sensor:height = 120
+            float gearbox:sensor:vfov_deg = 60
+            float gearbox:sensor:range_m = 20
+        }
+        def Cube "target" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            double size = 1
+            double3 xformOp:translate = (6, 0, 0)
+            float3 xformOp:scale = (0.1, 12, 10)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            color3f[] primvars:displayColor = [(0.30, 0.35, 0.40)]
+        }
+    }
+}

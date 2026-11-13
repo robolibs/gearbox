@@ -1,14 +1,14 @@
-// Heat maps: a grid's cells from a texture, crisp cell edges softened over
-// one pixel, contour lines from the smooth value, the hottest cells adding
-// light. Colour leaves premultiplied in the colour asked for once tonemapped.
+// Static heat maps with filtered cells, contours and screen-width registration edges.
 #import bevy_pbr::mesh_functions::{get_world_from_local, mesh_position_local_to_world}
 #import bevy_pbr::mesh_view_bindings::view
-#import gearbox::draw_common::{srgb_to_linear, display_to_scene}
+#import gearbox::draw_frost::background_frost
+#import gearbox::draw_common::{srgb_to_linear, display_to_scene, technical_line, detail_visibility, ink_highlight, ground_clip, RULE_PX, CORNER_PX}
 
 struct HeatParams {
+    frost: vec4<f32>,
     // Texture columns and rows, contour spacing (share of the map), glow.
     grid: vec4<f32>,
-    // Fill opacity, hot threshold, hot glow, unused.
+    // Fill opacity, hot threshold, hot glow, categorical palette flag.
     look: vec4<f32>,
 };
 
@@ -35,11 +35,7 @@ struct VertexOutput {
 fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
     let world = mesh_position_local_to_world(get_world_from_local(v.instance_index), vec4(v.position, 1.0));
-    // Moved up to 0.3 m towards the eye along its ray, above short grass.
-    var at_eye = view.view_from_world * world;
-    let d = length(at_eye.xyz);
-    at_eye = vec4(at_eye.xyz * (1.0 - min(0.3, 0.1 * d) / max(d, 1e-4)), 1.0);
-    out.position = view.clip_from_view * at_eye;
+    out.position = ground_clip(view.view_from_world * world, view.clip_from_view);
     out.uv = v.uv;
     return out;
 }
@@ -51,20 +47,38 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let w = max(fwidth(pix), vec2(1e-5));
     let snapped = (floor(pix) + 0.5 + clamp((fract(pix) - 0.5) / w, vec2(-0.5), vec2(0.5))) / size;
     let c = textureSample(cell_texture, cell_sampler, snapped);
-    let t = textureSample(value_texture, value_sampler, in.uv).r;
+    let value = textureSample(value_texture, value_sampler, in.uv).rg;
+    let t = value.r / max(value.g, 1e-5);
+    let known_edge = (1.0 - smoothstep(0.4, 1.6, abs(value.g - 0.5) / max(fwidth(value.g), 1e-5)))
+        * step(0.001, value.g) * (1.0 - step(0.999, value.g));
     if c.a < 0.004 {
         discard;
     }
     let col = display_to_scene(srgb_to_linear(c.rgb / c.a), lut_texture, lut_sampler);
     let alpha = c.a * params.look.x;
-    var light = vec3(0.0);
+    let local_edge = min(fract(pix), 1.0 - fract(pix)) / w;
+    let cells = (1.0 - smoothstep(0.2, 0.9, min(local_edge.x, local_edge.y)))
+        * (1.0 - smoothstep(0.08, 0.22, max(w.x, w.y)));
+    let outer_edge = min(pix, size - pix) / w;
+    let frame = technical_line(min(outer_edge.x, outer_edge.y), 0.5 * RULE_PX, 1.0);
+    let major_x = pix / 5.0;
+    let major_w = fwidth(major_x);
+    let major_distance = abs(fract(major_x + 0.5) - 0.5);
+    let major = max(technical_line(major_distance.x, 0.006, major_w.x), technical_line(major_distance.y, 0.006, major_w.y))
+        * detail_visibility(max(major_w.x, major_w.y));
+    let corner = frame * (1.0 - smoothstep(CORNER_PX, 2.0 * CORNER_PX, max(outer_edge.x, outer_edge.y)));
+    let structure = max(0.08 * cells, max(0.12 * major, max(0.28 * frame, 0.20 * known_edge)));
+    var contour = 0.0;
     if params.grid.z > 0.0 {
         let x = t / params.grid.z;
         let fw = max(fwidth(x), 1e-4);
-        let line = 1.0 - smoothstep(0.0, fw * 1.5, abs(fract(x + 0.5) - 0.5) - fw * 0.3);
-        light = light + mix(col, vec3(1.0), 0.5) * 0.55 * line * c.a;
+        let line = technical_line(abs(fract(x + 0.5) - 0.5), 0.012, fw);
+        let resolved = (1.0 - smoothstep(0.2, 0.5, fw)) * step(0.999, value.g);
+        contour = line * resolved;
     }
     let hot = smoothstep(params.look.y - 0.03, params.look.y + 0.03, t);
-    light = light + col * params.look.z * hot * c.a * params.grid.w;
-    return vec4(col * alpha + light, alpha);
+    let body = col * (1.0 - structure - 0.16 * contour);
+    let light = ink_highlight(col) * (0.06 * frame + 0.08 * corner + params.look.z * hot * (1.0 - params.look.w))
+        * c.a * params.grid.w;
+    return background_frost(vec4(body * alpha + light, alpha), in.position.xy, params.frost.x);
 }

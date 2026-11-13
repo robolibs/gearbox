@@ -5,6 +5,10 @@
 
 pub mod capture;
 mod draw_overlay;
+mod draw_labels;
+mod draw_layout;
+mod draw_annotations;
+mod draw_frost;
 pub mod gizmo;
 pub mod keys;
 mod machine_context;
@@ -31,7 +35,6 @@ use crate::viewer::commands::{HostCommand, HostCommands};
 use crate::viewer::log::LoaderLog;
 use crate::viewer::overlays::DisplayToggles;
 use crate::viewer::state::ReloadRequest;
-use crate::viewer::tf_overlay::TfLabels;
 use panes::{Outbox, PaneCtx};
 
 pub const RIBBON_LEFT: &str = "gearbox_left";
@@ -108,6 +111,7 @@ pub struct GearboxApp {
     capture: capture::WindowCapture,
     gizmo: gizmo::PoseGizmo,
     draw_interact: draw_overlay::DrawInteract,
+    draw_frost: draw_frost::DrawFrost,
     machine_context: machine_context::MachineContext,
     shelf_state: mara_core::ShelfState,
     window_geometry: window_geometry::WindowGeometry,
@@ -152,6 +156,7 @@ impl WindowApp for GearboxApp {
             capture: capture::WindowCapture::default(),
             gizmo: gizmo::PoseGizmo::default(),
             draw_interact: draw_overlay::DrawInteract::default(),
+            draw_frost: draw_frost::DrawFrost::default(),
             machine_context: machine_context::MachineContext::default(),
             shelf_state: {
                 let mut state = mara_core::ShelfState::default();
@@ -210,6 +215,7 @@ impl WindowApp for GearboxApp {
             capture,
             gizmo,
             draw_interact,
+            draw_frost,
             machine_context,
             shelf_state,
             window_geometry: _,
@@ -241,6 +247,7 @@ impl WindowApp for GearboxApp {
         let Some(world) = view.world_mut() else {
             return;
         };
+        draw_frost.update(&egui, host.gpu(), viewport.into(), world, draw_interact.needs_frost());
         let physics_on = world.resource::<gearbox_api::PhysicsActive>().0;
         let outbox = Outbox::default();
         let ctx = PaneCtx {
@@ -321,10 +328,8 @@ impl WindowApp for GearboxApp {
             palette.open = false;
         }
 
-        paint_instance_label(&egui, viewport, world);
-        paint_tf_labels(&egui, viewport, world);
-        paint_draw_labels(&egui, viewport, world);
-        draw_overlay::paint_draw_panels(&egui, viewport, world);
+        let instance_label = paint_instance_label(&egui, viewport, world);
+        draw_annotations::queue(&egui, viewport.into(), world, &[instance_label]);
         draw_interact.paint(&egui, viewport, world);
         gizmo.paint(&egui, viewport);
         machine_context.show(&egui, viewport.into(), world);
@@ -474,7 +479,7 @@ fn palette_action(id: &str, world: &mut World, outbox: &Outbox, shelf_state: &mu
     }
 }
 
-fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) {
+fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) -> egui::Rect {
     let rect: egui::Rect = viewport.into();
     let name = std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into());
     let backend = world.resource::<crate::physics::PhysicsBackendName>().0;
@@ -487,77 +492,46 @@ fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, 
     let painter = egui.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("gearbox_instance_label")));
     let galley = painter.layout_no_wrap(format!("{name}  |  {backend}  |  {state}  |  {rate}"), egui::FontId::proportional(15.0), egui::Color32::WHITE);
     let position = egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top() + 12.0);
-    painter.rect_filled(egui::Rect::from_min_size(position, galley.size()).expand(5.0), 4.0, egui::Color32::from_black_alpha(190));
+    let bounds = egui::Rect::from_min_size(position, galley.size()).expand(5.0);
+    painter.rect_filled(bounds, 4.0, egui::Color32::from_black_alpha(190));
     painter.galley(position, galley, egui::Color32::WHITE);
+    bounds
 }
 
-/// Debug draw text and labels over the viewport, where the Bevy side
-/// projected them.
-fn paint_draw_labels(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) {
-    let Some(labels) = world.get_resource::<crate::draw::DrawLabels>() else {
-        return;
-    };
-    if labels.0.is_empty() {
-        return;
-    }
-    let rect: egui::Rect = viewport.into();
-    let painter = egui
-        .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("gearbox_draw_labels")))
-        .with_clip_rect(rect);
-    for label in &labels.0 {
-        let rgba = |c: [u8; 4]| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], (c[3] as f32 * label.opacity) as u8);
-        let at = rect.min + egui::vec2(label.at[0] * rect.width(), label.at[1] * rect.height());
-        let galley = painter.layout_no_wrap(label.text.clone(), egui::FontId::proportional(label.size_px), rgba(label.color));
-        let pad = egui::vec2(0.5, 0.22) * label.size_px;
-        let bar = 2.0;
-        let pos = if label.centred {
-            at - galley.size() * 0.5
-        } else {
-            at + egui::vec2(pad.x + bar + 14.0, -galley.size().y - pad.y - 14.0)
-        };
-        let plate = egui::Rect::from_min_size(pos, galley.size()).expand2(pad);
-        let plate = egui::Rect::from_min_max(plate.min - egui::vec2(bar, 0.0), plate.max);
-        if !label.centred {
-            let corner = egui::pos2(plate.min.x, plate.max.y);
-            painter.line_segment([at, corner], egui::Stroke::new(1.2, rgba(label.accent)));
-            painter.circle_filled(at, 2.2, rgba(label.accent));
-        }
-        if label.background[3] > 0 {
-            painter.rect_filled(plate, 0.28 * label.size_px, rgba(label.background));
-            let accent = egui::Rect::from_min_max(plate.min, egui::pos2(plate.min.x + bar, plate.max.y)).shrink2(egui::vec2(0.0, 0.18 * label.size_px));
-            painter.rect_filled(accent, 1.0, rgba(label.accent));
-        }
-        painter.galley(pos, galley, rgba(label.color));
-    }
-}
+#[cfg(test)]
+mod draw_annotation_tests {
+    use super::*;
 
-/// TF link names over the viewport, where the Bevy side projected them.
-fn paint_tf_labels(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) {
-    let Some(labels) = world.get_resource::<TfLabels>() else {
-        return;
-    };
-    if labels.0.is_empty() {
-        return;
-    }
-    let rect: egui::Rect = viewport.into();
-    let painter = egui
-        .layer_painter(egui::LayerId::new(
-            egui::Order::Background,
-            egui::Id::new("gearbox_tf_names"),
-        ))
-        .with_clip_rect(rect);
-    let font = egui::FontId::proportional(12.0);
-    let fg = egui::Color32::from_rgb(255, 235, 140);
-    let bg = egui::Color32::from_black_alpha(150);
-    for label in &labels.0 {
-        let pos = rect.min
-            + egui::vec2(
-                label.at[0] * rect.width() + 6.0,
-                label.at[1] * rect.height() - 6.0,
-            );
-        let galley = painter.layout_no_wrap(label.name.clone(), font.clone(), fg);
-        let bounds = egui::Rect::from_min_size(pos, galley.size()).expand(2.0);
-        painter.rect_filled(bounds, 2.0, bg);
-        painter.galley(pos, galley, fg);
+    #[test]
+    fn panels_avoid_actual_ribbon_buttons() {
+        let ctx = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 500.0));
+        let mut world = World::default();
+        world.insert_resource(crate::draw::DrawPanels(vec![crate::draw::DrawPanel {
+            key: ("chrome".into(), "panel".into()), at: Some([0.2, 0.8]), opacity: 1.0,
+            chart: crate::draw::PanelChart { kind: gearbox_api::panel_kind::TABLE,
+                title: "Inspection".into(), color: [200, 100, 150, 255],
+                rows: vec![("Sample".into(), "027".into()); 8], ..Default::default() },
+        }]));
+        let mut buttons = Vec::new();
+        let output = ctx.run_ui(egui::RawInput { screen_rect: Some(viewport), ..Default::default() }, |ui| {
+            let host = MaraHostCtx::ui_only(ui.ctx(), None);
+            host.publish_full_shelf_layout();
+            host.show_ribbon_rail(RibbonRail::view_left(RIBBON_LEFT, "gearbox.ribbons")
+                .action_in(mara_core::ribbon::RibbonCluster::Middle, ACTION_PLAY, "play", "Play", ribbon_action(ACTION_PLAY))
+                .action_in(mara_core::ribbon::RibbonCluster::Middle, ACTION_CLEAR, "broom", "Clear", ribbon_action(ACTION_CLEAR)), active_accent());
+            for id in [ACTION_PLAY, ACTION_CLEAR] {
+                let response = ui.ctx().read_response(MaraId::new(("mara_ribbon_btn_hit", id)).into()).unwrap();
+                buttons.push(response.rect);
+            }
+            draw_annotations::queue(ui.ctx(), viewport, &world, &[]);
+        });
+        let panels: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Mesh(mesh) if mesh.vertices.len() == 7 && mesh.indices.len() == 18 =>
+                Some(egui::Rect::from_points(&mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>())),
+            _ => None,
+        }).collect();
+        assert_eq!(panels.len(), 1);
+        assert!(buttons.iter().all(|button| !panels[0].intersects(*button)), "panel {:?}, buttons {buttons:?}", panels[0]);
     }
 }

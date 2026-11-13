@@ -12,20 +12,20 @@ use bevy_ecs::{
     system::{Res, ResMut},
     world::{FromWorld, World},
 };
-use wgpu::{BufferUsages, DownlevelFlags, COPY_BUFFER_ALIGNMENT};
+use wgpu::{BufferUsages, COPY_BUFFER_ALIGNMENT, DownlevelFlags};
 
 #[cfg(feature = "morph")]
 use bevy_mesh::morph::MorphAttributes;
 
 use crate::{
+    GpuResourceAppExt, Render, RenderApp, RenderSystems,
     mesh::{Mesh, MeshVertexBufferLayouts, RenderMesh},
-    render_asset::{prepare_assets, ExtractedAssets},
+    render_asset::{ExtractedAssets, prepare_assets},
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
     slab_allocator::{
         Slab, SlabAllocationBufferSlice, SlabAllocator, SlabAllocatorSettings, SlabId, SlabItem,
         SlabItemLayout,
     },
-    GpuResourceAppExt, Render, RenderApp, RenderSystems,
 };
 
 /// A plugin that manages GPU memory for mesh data.
@@ -428,6 +428,9 @@ impl MeshAllocator {
 
         // Copy new mesh data in.
         for (mesh_id, mesh) in &extracted_meshes.extracted {
+            if mesh.get_vertex_buffer_size() == 0 {
+                continue;
+            }
             self.copy_mesh_vertex_data(mesh_id, mesh, render_device, render_queue);
             self.copy_mesh_index_data(mesh_id, mesh, render_device, render_queue);
             #[cfg(feature = "morph")]
@@ -606,10 +609,85 @@ impl ElementClass {
 mod tests {
     use super::*;
     use crate::test_utils::create_dummy_device;
-    use bevy_asset::{uuid::Uuid, RenderAssetUsages};
+    use bevy_asset::{RenderAssetUsages, uuid::Uuid};
     use bevy_math::bounding::Aabb3d;
     use bevy_mesh::PrimitiveTopology;
     use glam::Vec3;
+
+    #[derive(Clone)]
+    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn empty_mesh_transitions_skip_copy_without_hiding_real_missing_allocations() {
+        let (device, queue) = create_dummy_device();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = logs.clone();
+        let subscriber = bevy_log::tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(bevy_log::Level::ERROR)
+            .with_writer(move || LogBuffer(output.clone()))
+            .finish();
+        bevy_log::tracing::subscriber::with_default(subscriber, || {
+            for packed in [true, false] {
+                let mut allocator = mesh_allocator(packed);
+                let settings = MeshAllocatorSettings::default();
+                let mut layouts = MeshVertexBufferLayouts::default();
+                let id = mesh_id(31);
+                allocator.copy_mesh_vertex_data(&id, &test_mesh(), &device, &queue);
+                assert!(String::from_utf8_lossy(&logs.lock().unwrap()).contains("unallocated key"));
+                logs.lock().unwrap().clear();
+                let neighbor = mesh_id(32);
+                allocator.allocate_meshes(
+                    &settings,
+                    &extracted_mesh(neighbor, full_mesh()),
+                    &mut layouts,
+                    &device,
+                    &queue,
+                );
+                for mode in [0, 1, 2, 3, 0, 3, 1] {
+                    let mesh = if mode == 3 {
+                        full_mesh()
+                    } else {
+                        let mut mesh = Mesh::new(
+                            PrimitiveTopology::TriangleList,
+                            RenderAssetUsages::default(),
+                        );
+                        if mode == 1 {
+                            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
+                        }
+                        if mode == 2 {
+                            mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
+                        }
+                        mesh
+                    };
+                    let extracted = modified_mesh(id, mesh);
+                    allocator.free_meshes(&extracted);
+                    allocator.allocate_meshes(&settings, &extracted, &mut layouts, &device, &queue);
+                    assert_eq!(allocator.mesh_vertex_slice(&id).is_some(), mode == 3);
+                    assert_eq!(allocator.mesh_index_slice(&id).is_some(), mode == 3);
+                    assert!(allocator.mesh_vertex_slice(&neighbor).is_some());
+                    assert!(allocator.mesh_index_slice(&neighbor).is_some());
+                    let messages = logs.lock().unwrap();
+                    assert!(
+                        messages.is_empty(),
+                        "unexpected allocator error: {}",
+                        String::from_utf8_lossy(&messages)
+                    );
+                }
+            }
+        });
+    }
 
     fn test_mesh() -> Mesh {
         let mut mesh = Mesh::new(

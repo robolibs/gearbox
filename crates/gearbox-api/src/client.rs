@@ -13,6 +13,13 @@ use peerbus::{EndpointId, ReqClient, Subscriber};
 use crate::topics::{self, machine_topic};
 use crate::wire::*;
 
+mod draw_data;
+pub use draw_data::{
+    DEFAULT_DATA_TIMEOUT, DataAdmission, DataCancelOutcome, DataPipelineConfig,
+    DataPipelineError, DataPipelineStats, DataRequestCancellation, DataRequestTicket, DrawDataClient, DrawDataError,
+    DrawDataPipeline, DataUpload, DataUploadCleanup, DataUploadError, DataUploadPage, DrawDataWriter, WaitVisibleError,
+};
+
 pub struct Client {
     pub agent: Agent,
     /// `None` for a [`Client::bare`] agent, which never bootstraps to any

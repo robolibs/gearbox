@@ -29,7 +29,10 @@ pub mod draw_op {
     /// effects, flags, colormap, lifetime) and merge its props, keeping its
     /// sections; props `set` lists the header groups to take (`pose`,
     /// `scale`, `color`, `width`, `style`, `effects`, `flags`, `colormap`,
-    /// `lifetime`), all of them when absent.
+    /// `lifetime`), all of them when absent or empty. Scalar selectors are
+    /// `tint` (primary colour), `color2`, `glow`, `pulse_hz`, `flow_speed`,
+    /// `dash`, `beam_height`, `fade`, `urgency`, `palette` (colormap ID),
+    /// `vmin` and `vmax`. `props` alone merges metadata without changing headers.
     pub const UPDATE: u32 = 5;
     /// Replace items `chunk_offset..chunk_offset + n` of the live entity
     /// with the message's `n`, growing it at the end; a grid takes the
@@ -292,8 +295,14 @@ pub mod interact_kind {
     /// `button_click`. Props `controls` limits it: `move`, `rotate`,
     /// `move_plane`, `move_axis`, `rotate_axis` (default all).
     pub const HANDLE: u32 = 3;
+    /// The next click on drawn spatial data sends `data` with the nearest
+    /// visible sample or octree cell under it (key, epoch, revision, scan and
+    /// source ID or leaf key, LOD state, attributes, x, y, z in the entity's
+    /// frame), `no_data` when it covers none, or `stale`; then removes the
+    /// entity. Props `prefix` limits it to namespaces under that prefix.
+    pub const PICK_DATA: u32 = 4;
 
-    const NAMES: [&str; 4] = ["step", "pick_point", "pick_pose", "handle"];
+    const NAMES: [&str; 5] = ["step", "pick_point", "pick_pose", "handle", "pick_data"];
 
     pub fn name(value: u32) -> &'static str {
         NAMES.get(value as usize).copied().unwrap_or("unknown")
@@ -303,6 +312,7 @@ pub mod interact_kind {
         NAMES.iter().position(|n| *n == name).map(|i| i as u32).or(match name {
             "point" | "pick" => Some(PICK_POINT),
             "pose" => Some(PICK_POSE),
+            "data" => Some(PICK_DATA),
             "gizmo" | "marker" => Some(HANDLE),
             _ => None,
         })
@@ -327,6 +337,8 @@ pub mod draw_flag {
     /// Dashed lines, `dash` metres a period, moving at `flow_speed`.
     pub const DASHED: u32 = 1 << 5;
     /// Keep the frame's pose at arrival instead of following it.
+    /// Updates, extensions and patches retain that frame; a replacement,
+    /// frame change or enabling this flag captures it again.
     pub const SNAPSHOT: u32 = 1 << 6;
     /// Shade lines as tubes and solids with a headlight.
     pub const SHADED: u32 = 1 << 7;
@@ -378,12 +390,12 @@ pub mod draw_style {
     /// Glowing edges, faint faces and a scanline, with a short beam.
     /// Waypoint boxes.
     pub const HOLO: u32 = 7;
-    /// A fresnel-rimmed dome or ellipsoid with ripples whose rate and colour
-    /// follow `urgency`. Obstacle predictions.
+    /// A luminous dome or ellipsoid with a fine energy weave and ripples at
+    /// `pulse_hz`, in the supplied colour. Obstacle predictions.
     pub const SHIELD: u32 = 8;
     /// Scrolling hazard stripes, pulsing, drawn on top. Collision warnings.
     pub const ALERT: u32 = 9;
-    /// A white-hot orb with a pulsing halo. Lookahead points.
+    /// A luminous orb with a pulsing core and bounded halo. Lookahead points.
     pub const ORB: u32 = 10;
     /// An outline on the ground with a fill fading inward. Footprints.
     pub const DECAL: u32 = 11;
@@ -391,10 +403,10 @@ pub mod draw_style {
     pub const ARROW_GLOW: u32 = 12;
     /// Spheres with a soft halo.
     pub const POINT_GLOW: u32 = 13;
-    /// Text on a dark plate with an accent bar.
+    /// World text with optional annotation hierarchy, frame and accent.
     pub const LABEL: u32 = 14;
-    /// A colormap laid on the ground: soft cell edges, contour lines every
-    /// `dash` (when set), the hottest cells glowing. Costmaps and heatmaps.
+    /// A colormap laid on the ground with optional scalar contours every
+    /// `dash`. Costmaps and heatmaps.
     pub const HEAT: u32 = 15;
     /// Flat round splats with no halo, in pixels or metres. Clouds, scans.
     pub const SPLAT: u32 = 16;
@@ -408,10 +420,15 @@ pub mod draw_style {
     /// A thin tube with ticks every `dash`, end caps and its length written
     /// at the middle. Measuring.
     pub const RULER: u32 = 19;
+    /// A transparent rectangular field grid on boxes and rectangles, with
+    /// major panels every `dash` metres and a slow local scan at `pulse_hz`.
+    /// Negative glow disables emission; negative pulse disables the scan.
+    /// Other geometry uses plain style.
+    pub const FIELD: u32 = 20;
 
-    const NAMES: [&str; 20] = [
+    const NAMES: [&str; 21] = [
         "auto", "plain", "ribbon_flow", "tube_pulse", "hairline", "light_wall", "beacon", "holo", "shield", "alert", "orb",
-        "decal", "arrow_glow", "point_glow", "label", "heat", "splat", "sweep", "ghost", "ruler",
+        "decal", "arrow_glow", "point_glow", "label", "heat", "splat", "sweep", "ghost", "ruler", "field",
     ];
 
     pub fn name(value: u32) -> &'static str {
@@ -440,6 +457,31 @@ pub mod draw_style {
             other => other,
         };
         NAMES.iter().position(|n| *n == alias).map(|i| i as u32)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn field_appends_without_renumbering_existing_styles() {
+            let ids = [AUTO, PLAIN, RIBBON_FLOW, TUBE_PULSE, HAIRLINE, LIGHT_WALL, BEACON, HOLO, SHIELD, ALERT, ORB,
+                DECAL, ARROW_GLOW, POINT_GLOW, LABEL, HEAT, SPLAT, SWEEP, GHOST, RULER, FIELD];
+            for (index, id) in ids.into_iter().enumerate() {
+                assert_eq!(id, index as u32);
+                assert_eq!(parse(name(id)), Some(id));
+            }
+        }
+
+        #[test]
+        fn field_name_parses_without_changing_existing_aliases() {
+            assert_eq!(name(FIELD), "field");
+            assert_eq!(parse(" FIELD "), Some(20));
+            assert_eq!(parse("tron"), Some(LIGHT_WALL));
+            assert_eq!(parse("hologram"), Some(HOLO));
+            assert_eq!(parse("radar"), Some(SWEEP));
+            assert_eq!(parse("unknown-field"), None);
+        }
     }
 }
 
@@ -824,7 +866,7 @@ pub struct DrawEntity {
     pub beam_height: f32,
     /// Opacity the style fades lines to at their faded end, 0..1.
     pub fade: f32,
-    /// How pressing it is, 0..1: shields ripple faster and turn vermillion.
+    /// Urgency metadata, 0..1; does not replace the supplied colour.
     pub urgency: f32,
     /// Values `vmin..vmax` span a ramp [`colormap`]; equal ones take the
     /// data's own range, `vmin` above `vmax` runs the ramp backwards.
@@ -967,6 +1009,7 @@ impl DrawEntity {
 
     pub fn shapes(ns: &str, id: &str, shape: u32, instances: &[Instance]) -> Self {
         Self::new(draw_kind::SHAPES, ns, id).with_sub(shape).with_instances(instances)
+            .with_scale([1.0, 1.0, if shape == shape_kind::SECTOR { 0.0 } else { 1.0 }])
     }
 
     pub fn triangles(ns: &str, id: &str, vertices: &[[f32; 3]]) -> Self {
@@ -1064,7 +1107,8 @@ impl DrawEntity {
         Self { op: draw_op::UPDATE, ..Self::new(0, ns, id) }
     }
 
-    /// Takes only the header `groups` (see [`draw_op::UPDATE`]).
+    /// Takes only the named header groups or scalars (see [`draw_op::UPDATE`]).
+    /// An empty list replaces all headers; `["props"]` changes only metadata.
     pub fn updating(self, groups: &[&str]) -> Self {
         self.with_prop("set", &groups.join(","))
     }
@@ -1113,6 +1157,11 @@ impl DrawEntity {
     pub fn with_color2(mut self, color: u32) -> Self {
         self.color2 = color;
         self
+    }
+
+    /// Frost strength, 0..1, applied to the transmitted background.
+    pub fn with_blur(self, strength: f32) -> Self {
+        self.with_prop("blur", &strength.to_string())
     }
 
     pub fn with_colors(mut self, colors: &[u32]) -> Self {
@@ -1247,7 +1296,7 @@ impl DrawEntity {
     }
 
     pub fn with_lifetime(mut self, seconds: f64) -> Self {
-        self.lifetime_s = seconds.max(0.0);
+        self.lifetime_s = if seconds.is_finite() { seconds.max(0.0) } else { seconds };
         self
     }
 
@@ -1445,6 +1494,12 @@ impl DrawEntity {
 
     /// Checks the sections agree with each other and the kind.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(raw) = self.props().get("blur") {
+            let value = raw.parse::<f32>().map_err(|_| "blur must be a finite number in 0..1")?;
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err("blur must be a finite number in 0..1".into());
+            }
+        }
         let header_only = matches!(self.op, draw_op::DELETE | draw_op::CLEAR | draw_op::UPDATE);
         if self.op > draw_op::PATCH {
             return Err(format!("unknown draw op {}", self.op));
@@ -1504,8 +1559,17 @@ impl DrawEntity {
                 return Err(format!("rings count {total} rings for {strips}"));
             }
         }
-        if self.points.iter().chain(self.instances.iter()).chain(self.values.iter()).any(|v| !v.is_finite()) {
-            return Err("non-finite coordinate or value".into());
+        if self.points.iter().chain(self.instances.iter()).chain(self.values.iter()).chain(self.radii.iter()).any(|v| !v.is_finite()) {
+            return Err("non-finite coordinate, radius or value".into());
+        }
+        if [self.px, self.py, self.pz, self.qw, self.qx, self.qy, self.qz].iter().any(|v| !v.is_finite()) {
+            return Err("non-finite pose".into());
+        }
+        if [self.sx, self.sy, self.sz].iter().any(|v| !v.is_finite()) {
+            return Err("non-finite scale".into());
+        }
+        if !self.lifetime_s.is_finite() {
+            return Err("non-finite lifetime".into());
         }
         let effects = [
             self.width,

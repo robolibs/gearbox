@@ -2,9 +2,72 @@
 // colour the AgX view transform shows as a wanted display colour.
 #define_import_path gearbox::draw_common
 
+// Depth-only lift above short grass; xy and perspective interpolation stay fixed.
+fn ground_clip(at_eye: vec4<f32>, projection: mat4x4<f32>) -> vec4<f32> {
+    let clip = projection * at_eye;
+    let distance = max(length(at_eye.xyz), 1e-4);
+    let pull = min(0.3, 0.1 * distance);
+    var lifted = vec4(at_eye.xyz * (1.0 - pull / distance), 1.0);
+    if projection[3][3] == 1.0 { lifted = at_eye + vec4(0.0, 0.0, pull, 0.0); }
+    let depth = projection * lifted;
+    if abs(depth.w) < 1e-6 { return clip; }
+    return vec4(clip.xy, depth.z / depth.w * clip.w, clip.w);
+}
+
 // Brightest scene value for neutral and for fully saturated colours.
 const SCENE_MAX_NEUTRAL: f32 = 4.0;
 const SCENE_MAX_SATURATED: f32 = 1.6;
+const RULE_PX: f32 = 1.0;
+const CORNER_PX: f32 = 6.0;
+const STRUCTURE_CORNER_GAIN: f32 = 1.75;
+const BRACKET_FRACTION: f32 = 0.18;
+const HALO_MAX_PX: f32 = 4.0;
+const HALO_BASE_PX: f32 = 3.6;
+const HALO_RADIUS_GAIN: f32 = 0.08;
+const HALO_RADIUS_CAP: f32 = 10.0;
+const HALO_GAIN: f32 = 0.42;
+
+fn detail_visibility(footprint: f32) -> f32 {
+    return 1.0 - smoothstep(0.22, 0.65, abs(footprint));
+}
+
+fn technical_line(distance: f32, width: f32, footprint: f32) -> f32 {
+    let aa = max(abs(footprint), 1e-5);
+    return 1.0 - smoothstep(max(width - 0.5 * aa, 0.0), width + 0.5 * aa, abs(distance));
+}
+
+fn ink_highlight(base: vec3<f32>) -> vec3<f32> {
+    return base * 1.08;
+}
+
+fn energy_glass_shade(normal: vec3<f32>, facing: f32) -> f32 {
+    return 0.45 + 0.35 * max(dot(normal, normalize(vec3(0.35, 0.8, 0.55))), 0.0) + 0.20 * facing;
+}
+
+fn energy_coat(base: vec3<f32>, opacity: f32, shade: f32, coverage: f32, rim: f32, structure: f32, activity: f32, wake: f32, glow: f32) -> vec4<f32> {
+    let detail = clamp(structure, 0.0, 1.0);
+    let hot = ink_highlight(base);
+    let alpha = clamp(coverage, 0.0, 1.0) * opacity;
+    let body = mix(base * shade, hot, clamp(max(0.55 * detail, activity), 0.0, 1.0));
+    let light = (base * (0.025 * clamp(coverage / 0.16, 0.0, 1.0) + 0.08 * wake)
+        + hot * (0.55 * detail + 0.55 * rim + 0.60 * activity)) * max(glow, 0.0) * opacity;
+    return vec4(body * alpha + light, alpha);
+}
+
+fn energy_glass(base: vec3<f32>, opacity: f32, shade: f32, rim: f32, structure: f32, activity: f32, wake: f32, glow: f32) -> vec4<f32> {
+    let coverage = 0.16 + 0.32 * clamp(structure, 0.0, 1.0) + 0.08 * rim + 0.16 * activity + 0.04 * wake;
+    return energy_coat(base, opacity, shade, coverage, rim, structure, activity, wake, glow);
+}
+
+fn energy_packet(phase: f32, width: f32, footprint: f32, hz: f32) -> f32 {
+    let distance = abs(fract(phase + 0.5) - 0.5);
+    return technical_line(distance, width, footprint) * detail_visibility(footprint) * select(0.0, 1.0, hz > 0.0);
+}
+
+fn compact_halo_px(radius: f32, glow: f32) -> f32 {
+    let reach = (HALO_BASE_PX + HALO_RADIUS_GAIN * clamp(radius, 0.0, HALO_RADIUS_CAP)) * sqrt(max(glow, 0.0));
+    return select(0.0, min(HALO_MAX_PX, reach), glow > 0.0);
+}
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let lo = c / 12.92;
