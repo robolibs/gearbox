@@ -17,7 +17,7 @@ const NODES: MeshVertexAttribute =
     MeshVertexAttribute::new("FemTriangleNodes", 0x46454d01, VertexFormat::Uint32x3);
 const NEIGHBOR_UVS: MeshVertexAttribute =
     MeshVertexAttribute::new("FemNeighborUvs", 0x46454d02, VertexFormat::Float32x4);
-const SHADER: &str = "embedded://gearbox/physics/fem/surface.wgsl";
+const SHADER: &str = "embedded://gearbox/physics/fem/surface.wesl";
 
 #[cfg(test)]
 #[path = "surface_test.rs"]
@@ -68,7 +68,7 @@ pub(crate) struct FemSurfacePlugin;
 
 impl Plugin for FemSurfacePlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "surface.wgsl");
+        bevy::shader::load_shader_library!(app, "surface.wesl");
         app.add_plugins(MaterialPlugin::<FemMaterial>::default());
         app.add_plugins(rigid::RigidSurfacePlugin);
         app.add_systems(

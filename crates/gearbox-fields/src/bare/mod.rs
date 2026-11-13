@@ -92,7 +92,7 @@ pub fn way_litter(density: f32) -> VegetationLayer {
 
 fn way_lying(template: fn() -> Mesh, density: f32) -> VegetationLayer {
     VegetationLayer {
-        shader: "embedded://gearbox_fields/bare/shaders/vegetation.wgsl",
+        shader: "embedded://gearbox_fields/bare/shaders/vegetation.wesl",
         template,
         density,
         fade_start: 5.0,
@@ -103,7 +103,7 @@ fn way_lying(template: fn() -> Mesh, density: f32) -> VegetationLayer {
         way_only: true,
         worked_only: false,
         blade: None,
-        sieve: Some("embedded://gearbox_fields/bare/shaders/grit_sieve.wgsl"),
+        sieve: Some("embedded://gearbox_fields/bare/shaders/grit_sieve.wesl"),
         albedo: None,
         lod_band: [0.0, f32::MAX],
     }
@@ -200,7 +200,7 @@ fn standing(
     stone: fn() -> Mesh,
 ) -> Vec<VegetationLayer> {
     use super::clumps;
-    let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wgsl";
+    let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wesl";
     let mut layers = vec![
         VegetationLayer {
             shader,
@@ -431,7 +431,7 @@ pub struct BareGround {
 
 impl MaterialExtension for BareExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_fields/bare/shaders/material.wgsl".into()
+        "embedded://gearbox_fields/bare/shaders/material.wesl".into()
     }
 }
 
@@ -459,10 +459,10 @@ impl Plugin for BarePlugin {
         if !app.is_plugin_added::<gearbox_globe::surface::PlanetSurfaceShaderPlugin>() {
             app.add_plugins(gearbox_globe::surface::PlanetSurfaceShaderPlugin);
         }
-        bevy::asset::embedded_asset!(app, "shaders/cover.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/grit_sieve.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/cover.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/vegetation.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/grit_sieve.wesl");
         app.add_plugins(MaterialPlugin::<BareMaterial>::default());
         app.init_resource::<PlanetSurfaceFrame>()
             .add_systems(PostUpdate, carry_planet_frame.in_set(PlanetSurfaceUpdates));

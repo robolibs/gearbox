@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::viewer::screenshot::take_request;
@@ -15,22 +16,14 @@ const CALLBACK_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Default)]
 pub struct WindowCapture {
     last_poll: Option<Instant>,
-    pending: Option<(PathBuf, egui::UserData, Instant)>,
+    pending: Option<(PathBuf, mpsc::Receiver<Arc<egui::ColorImage>>, Instant)>,
 }
 
 impl WindowCapture {
     pub fn update(&mut self, egui: &egui::Context) {
         let now = Instant::now();
-        if let Some((path, token, requested)) = &self.pending {
-            let image = egui.input(|input| {
-                input.events.iter().find_map(|event| match event {
-                    egui::Event::Screenshot {
-                        user_data, image, ..
-                    } if user_data == token => Some(image.clone()),
-                    _ => None,
-                })
-            });
-            if let Some(image) = image {
+        if let Some((path, receiver, requested)) = &self.pending {
+            if let Ok(image) = receiver.try_recv() {
                 match write_png(path, &image) {
                     Ok(()) => tracing::info!(
                         target: "gearbox",
@@ -58,9 +51,13 @@ impl WindowCapture {
         }
         self.last_poll = Some(now);
         if let Some(path) = take_request("shot") {
-            let token = egui::UserData::new(path.clone());
-            egui.send_viewport_cmd(egui::ViewportCommand::Screenshot(token.clone()));
-            self.pending = Some((path, token, now));
+            let (sender, receiver) = mpsc::channel();
+            let ctx = egui.clone();
+            egui.request_screenshot(move |image| {
+                let _ = sender.send(image);
+                ctx.request_repaint();
+            });
+            self.pending = Some((path, receiver, now));
         }
     }
 }
@@ -72,7 +69,8 @@ fn write_png(path: &Path, image: &egui::ColorImage) -> Result<(), Box<dyn std::e
     }
     let mut bytes = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut bytes, u32::try_from(width)?, u32::try_from(height)?);
+        let mut encoder =
+            png::Encoder::new(&mut bytes, u32::try_from(width)?, u32::try_from(height)?);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let pixels: Vec<u8> = image
@@ -85,4 +83,61 @@ fn write_png(path: &Path, image: &egui::ColorImage) -> Result<(), Box<dyn std::e
     let mut file = std::fs::File::create(path)?;
     file.write_all(&bytes)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("gearbox-capture-{}-{name}.png", std::process::id()))
+    }
+
+    #[test]
+    fn callback_image_is_written_and_pending_request_cleared() {
+        let path = output("callback");
+        let (sender, receiver) = mpsc::channel();
+        let callback = egui::ScreenshotCallback::new(move |image| {
+            sender.send(image).unwrap();
+        });
+        callback.complete(Arc::new(egui::ColorImage::filled(
+            [2, 3],
+            egui::Color32::RED,
+        )));
+        let mut capture = WindowCapture {
+            pending: Some((path.clone(), receiver, Instant::now())),
+            ..Default::default()
+        };
+        capture.update(&egui::Context::default());
+        assert!(capture.pending.is_none());
+        let bytes = std::fs::read(&path).unwrap();
+        let reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (2, 3));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn timed_out_callback_cannot_complete_a_later_request() {
+        let (sender, receiver) = mpsc::channel();
+        let mut capture = WindowCapture {
+            pending: Some((
+                output("timeout"),
+                receiver,
+                Instant::now() - CALLBACK_TIMEOUT,
+            )),
+            ..Default::default()
+        };
+        capture.update(&egui::Context::default());
+        assert!(capture.pending.is_none());
+        assert!(
+            sender
+                .send(Arc::new(egui::ColorImage::filled(
+                    [1, 1],
+                    egui::Color32::RED
+                )))
+                .is_err()
+        );
+    }
 }

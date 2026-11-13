@@ -68,6 +68,7 @@ pub struct ToolContact {
 /// Tool contacts collected during one frame, stamped into the work maps by
 /// the render world.
 #[derive(Resource, ExtractResource, Clone, Default)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct ToolContacts {
     pub contacts: Vec<ToolContact>,
 }
@@ -205,7 +206,7 @@ const RELIEF_FAR_QUADS: u32 = 10;
 /// shape by the shader where the work map says the ground was worked.
 pub(crate) fn relief_layers() -> Vec<VegetationLayer> {
     let layer = |template: fn() -> Mesh, band: [f32; 2]| VegetationLayer {
-        shader: "embedded://gearbox_fields/tillage/shaders/worked_soil.wgsl",
+        shader: "embedded://gearbox_fields/tillage/shaders/worked_soil.wesl",
         template,
         // One patch a square metre, every one of them inside the band: the
         // soil is a surface, and a thinned surface has holes in it.
@@ -265,8 +266,8 @@ pub(crate) struct TillagePlugin;
 
 impl Plugin for TillagePlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/work.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/worked_soil.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/work.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/worked_soil.wesl");
     }
 }
 

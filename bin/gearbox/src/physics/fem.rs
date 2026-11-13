@@ -97,7 +97,7 @@ impl FemGpuIsland {
     ) -> molla_core::Result<Self> {
         let substep = config.max_substep;
         let gpu_device = Arc::new(device.wgpu_device().clone());
-        let gpu_queue = Arc::new((**queue.0).clone());
+        let gpu_queue = Arc::new(wgpu::Queue::clone(&queue));
         let system = if contact_blocks {
             FemRigidGpuSystem::new_surface_sampled_with_contact_blocks_on_device(
                 gpu_device, gpu_queue, scene, config, joints, None,
@@ -116,7 +116,7 @@ impl FemGpuIsland {
             substep,
             failure: None,
             device: device.wgpu_device().clone(),
-            queue: (**queue.0).clone(),
+            queue: wgpu::Queue::clone(&queue),
             diagnostics,
             minimum_j: None,
         })
@@ -241,7 +241,6 @@ mod tests {
     }
 
     pub(super) fn gpu_island() -> (RenderDevice, RenderQueue, FemGpuIsland) {
-        use bevy::render::renderer::WgpuWrapper;
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
         eprintln!("FEM test adapter: {:?}", adapter.get_info());
@@ -256,7 +255,7 @@ mod tests {
         );
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).unwrap();
         let device = RenderDevice::from(device);
-        let queue = RenderQueue(Arc::new(WgpuWrapper::new(queue)));
+        let queue = RenderQueue::new(queue);
         let h = 1.0 / 4096.0;
         let island = FemGpuIsland::new(
             &device,
@@ -413,7 +412,7 @@ mod tests {
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
         rx.recv().unwrap().unwrap();
-        let bytes = output.slice(..).get_mapped_range();
+        let bytes = output.slice(..).get_mapped_range().expect("mapped GPU buffer range");
         assert_eq!(&bytes[..4], &[0; 4]);
         let x = f32::from_le_bytes(bytes[16..20].try_into().unwrap());
         assert!(x.is_finite() && x > 0.0001, "node did not advance: {x}");

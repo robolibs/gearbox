@@ -19,7 +19,7 @@ use gearbox_api::{DrawEntity, colormap, grid_encoding};
 
 use super::mesh::Ground;
 
-const HEAT_SHADER: &str = "embedded://gearbox/draw/draw_heat.wgsl";
+const HEAT_SHADER: &str = "embedded://gearbox/draw/draw_heat.wesl";
 /// Largest texture side; bigger grids are sampled down to it.
 const MAX_SIDE: usize = 4096;
 /// Most vertices along one side of a heat mesh.

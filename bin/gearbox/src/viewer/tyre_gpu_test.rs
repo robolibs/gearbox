@@ -50,7 +50,7 @@ fn gpu_envelope_matches_cpu_pressure_and_ground_sweep() {
     }
     let source = format!(
         "{}\n{}",
-        include_str!("tyre_deform.wgsl"),
+        include_str!("tyre_deform.wesl"),
         r#"
 @group(0) @binding(0) var<storage, read> cases: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> result: array<vec4<f32>>;
@@ -121,7 +121,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     rx.recv().unwrap().unwrap();
-    let mapped = readback.slice(..).get_mapped_range();
+    let mapped = readback.slice(..).get_mapped_range().expect("mapped GPU buffer range");
     let actual: &[[f32; 4]] = bytemuck::cast_slice(&mapped);
     let mut maximum = 0.0_f64;
     for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {

@@ -18,7 +18,8 @@ use bevy::prelude::*;
 use gearbox_greenhouse::air::Climate;
 use gearbox_greenhouse::house::{Event as HouseEvent, Fault};
 use gearbox_greenhouse::{House, Lamp, Medium, Outside, Plant, PlantId, Room, Species, Surroundings, Tank, Tray};
-use openusd::sdf::{Path as SdfPath, Value};
+use openusd::sdf::Path as SdfPath;
+use openusd::vt::Value;
 use usd_bevy::instance::UsdInstances;
 use usd_bevy::{UsdSceneRoot, UsdSceneState};
 

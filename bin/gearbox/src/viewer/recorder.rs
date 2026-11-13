@@ -197,6 +197,7 @@ const STRAGGLER_UPDATES: u32 = 120;
 /// The image a capturing camera copies its frame into, and whether that is
 /// the frame as shown — tonemapped — rather than the HDR image beneath it.
 #[derive(Component, ExtractComponent, Clone)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct CaptureInto(pub Handle<Image>, pub bool);
 
 fn show_overlays(mut commands: Commands, cameras: Query<Entity, Added<ChaseCamera>>) {

@@ -638,7 +638,8 @@ pub fn select_and_sync(
             }
         }
         if let Some(mut buf) = buffers.get_mut(&*node_buffer) {
-            buf.set_data(gpu_nodes.as_slice());
+            buf.clear();
+            buf.extend_from_slice(gpu_nodes.as_slice());
         }
         // Touch the material assets only when the debug flags change; per-frame
         // camera/time data comes from the built-in view/globals bindings.

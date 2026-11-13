@@ -139,6 +139,8 @@ make.recipe{
 make.recipe{ name = "test", desc = "run all tests",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
+make.recipe{ name = "test-shaders", desc = "compile custom WESL shader variants and validate the generated WGSL",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--test", "shaders", "--", "--nocapture") end }
 make.recipe{ name = "test-launch-args", desc = "check Oslo launch argument forwarding without starting a simulator",
              run = function() sh.bash("scripts/test-launch-args.sh") end }
 make.recipe{ name = "test-planets", desc = "test planetary frames and terrain",
@@ -153,6 +155,8 @@ make.recipe{ name = "test-planets", desc = "test planetary frames and terrain",
              end }
 make.recipe{ name = "test-planet-gpu", desc = "compare production globe shader heights with local terrain on Vulkan",
              run = function() gpu("cargo", "test", "-p", "gearbox-planet", "--test", "regolith_gpu", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-tyre-gpu", desc = "compare GPU tyre deformation with the CPU envelope",
+             run = function() gpu("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", "gpu_envelope_matches_cpu_pressure_and_ground_sweep", "--", "--ignored", "--nocapture") end }
 make.recipe{ name = "test-planet-geometry", desc = "check global and local planetary geometry",
              run = function() sh.cargo("test", "-p", "gearbox-globe") end }
 make.recipe{ name = "test-render-pages", desc = "test sparse GPU buffer page boundaries",

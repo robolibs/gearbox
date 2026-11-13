@@ -21,8 +21,8 @@ impl Plugin for TyreMeshPlugin {
         if app.get_sub_app(bevy::render::RenderApp).is_some()
             && std::env::var("GEARBOX_TYRE_RENDER").as_deref() != Ok("cpu")
         {
-            bevy::asset::embedded_asset!(app, "tyre_deform.wgsl");
-            bevy::asset::embedded_asset!(app, "tyre_gpu.wgsl");
+            bevy::shader::load_shader_library!(app, "tyre_deform.wesl");
+            bevy::shader::load_shader_library!(app, "tyre_gpu.wesl");
             app.add_plugins(bevy::pbr::MaterialPlugin::<TyreMaterial>::default());
         }
         app.init_resource::<TyreMeshes>().init_resource::<TyreScan>().add_systems(
@@ -185,7 +185,7 @@ fn update_tyre_meshes(
                 }
             }
             if mesh.0 == entry.private { mesh.0 = entry.source.clone(); }
-            if let Some(bounds) = meshes.get(&mesh.0).and_then(Mesh::compute_aabb) {
+            if let Some(bounds) = meshes.get(&mesh.0).and_then(Mesh::get_aabb) {
                 commands.entity(*entity).insert(bounds);
             }
             retired.insert(*entity);
@@ -247,7 +247,7 @@ fn update_tyre_meshes(
         let gpu = standard.get(entity).ok().and_then(|material| {
             if source.contains_attribute(Mesh::ATTRIBUTE_JOINT_INDEX) || source.morph_targets().is_some() { return None; }
             let base = materials.as_ref()?.get(&material.0)?.clone();
-            let bounds = source.compute_aabb()?;
+            let bounds = source.get_aabb()?;
             let pressure = sample.pressure?;
             let envelope = LoadedTireEnvelope { radius, bead_radius, width: pressure.width, loaded_radius: pressure.loaded_radius };
             let ground = pressure.ground.map(|g| (pressure.hub - g.point).dot(g.normal));
@@ -354,7 +354,7 @@ fn update_tyre_meshes(
             let _ = mesh.generate_tangents();
         }
         timings[2] += tangents_at.elapsed().as_secs_f64();
-        if let Some(bounds) = mesh.compute_aabb() {
+        if let Some(bounds) = mesh.get_aabb() {
             commands.entity(*entity).insert(bounds);
         }
         entry.last_frame = Some((to_frame, envelope, ground_distance));

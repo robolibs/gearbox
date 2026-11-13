@@ -3,7 +3,8 @@
 //! part plus scale with shear and reflection detection.
 
 use bevy::math::{DMat3, DMat4, DQuat, DVec3};
-use openusd::sdf::{Path as SdfPath, Value};
+use openusd::sdf::Path as SdfPath;
+use openusd::vt::Value;
 use openusd::usd::Stage;
 
 use super::model::RigidTransform;

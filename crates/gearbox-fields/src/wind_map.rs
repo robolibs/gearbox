@@ -112,7 +112,7 @@ impl Gusts {
     /// Wind velocity (m/s, x and z) at ground spot `xz` and `time`, for the
     /// shaders' packed `wind` (downwind x, downwind z, speed, gustiness):
     /// full speed inside a gust, `1 − gustiness` of it between, its heading
-    /// turned by the slow field. Mirrors `wind_at` in `shaders/wind.wgsl`.
+    /// turned by the slow field. Mirrors `wind_at` in `shaders/wind.wesl`.
     pub fn at(&self, xz: [f32; 2], time: f32, wind: [f32; 4]) -> [f32; 2] {
         let [dx, dz, speed, gustiness] = wind;
         let travel = time * speed.max(0.5);

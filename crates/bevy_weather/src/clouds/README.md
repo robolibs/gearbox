@@ -1,7 +1,7 @@
 # Bevy volumetric clouds — local runtime
 
 Runtime and shaders from [evroon/bevy-volumetric-clouds](https://github.com/evroon/bevy-volumetric-clouds),
-adapted to Gearbox's Bevy 0.19 embedded viewport. See [UPSTREAM.md](UPSTREAM.md) for the source
+adapted to Gearbox's Bevy 0.20 embedded viewport. See [UPSTREAM.md](UPSTREAM.md) for the source
 commit and local changes, and [LICENSE](LICENSE) for the original MIT copyright.
 
 This is the actual upstream cloud-density, noise-generation, volumetric raymarching,

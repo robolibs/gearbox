@@ -51,7 +51,7 @@ struct ConcreteExtension {
 
 impl MaterialExtension for ConcreteExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_fields/concrete/shaders/material.wgsl".into()
+        "embedded://gearbox_fields/concrete/shaders/material.wesl".into()
     }
 }
 
@@ -61,9 +61,9 @@ pub(super) struct ConcretePlugin {
 
 impl Plugin for ConcretePlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/yard.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/yard.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/vegetation.wesl");
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_worn_001_diff.jpg");
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_worn_001_nor_gl.jpg");
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_worn_001_arm.jpg");
@@ -71,7 +71,7 @@ impl Plugin for ConcretePlugin {
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_02_nor_gl.jpg");
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_02_arm.jpg");
         app.add_plugins(MaterialPlugin::<ConcreteMaterial>::default());
-        let shader = "embedded://gearbox_fields/concrete/shaders/vegetation.wgsl";
+        let shader = "embedded://gearbox_fields/concrete/shaders/vegetation.wesl";
         let density = self.weed_density;
         app.world_mut()
             .resource_mut::<FieldProfiles>()

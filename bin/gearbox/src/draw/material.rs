@@ -32,8 +32,8 @@ pub const ATTR_NEXT: MeshVertexAttribute = MeshVertexAttribute::new("DrawNext", 
 /// Surfaces: urgency, size, length or spacing, fade.
 pub const ATTR_SURFACE_FX2: MeshVertexAttribute = MeshVertexAttribute::new("DrawSurfaceFx2", 0x6b1d_4e0e, VertexFormat::Float32x4);
 
-const STROKE_SHADER: &str = "embedded://gearbox/draw/draw_stroke.wgsl";
-const SURFACE_SHADER: &str = "embedded://gearbox/draw/draw_surface.wgsl";
+const STROKE_SHADER: &str = "embedded://gearbox/draw/draw_stroke.wesl";
+const SURFACE_SHADER: &str = "embedded://gearbox/draw/draw_surface.wesl";
 /// Sort bias that puts on-top draws after everything else blended.
 const ON_TOP_BIAS: f32 = 1.0e7;
 /// Sort bias that blends strokes after fills at the same distance.

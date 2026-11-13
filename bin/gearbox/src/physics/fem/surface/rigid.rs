@@ -56,7 +56,7 @@ pub(crate) struct RigidExtension {
 
 impl MaterialExtension for RigidExtension {
     fn vertex_shader() -> ShaderRef {
-        "embedded://gearbox/physics/fem/surface/rigid.wgsl".into()
+        "embedded://gearbox/physics/fem/surface/rigid.wesl".into()
     }
     fn prepass_vertex_shader() -> ShaderRef {
         Self::vertex_shader()
@@ -70,7 +70,7 @@ pub(super) struct RigidSurfacePlugin;
 
 impl Plugin for RigidSurfacePlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "rigid.wgsl");
+        bevy::shader::load_shader_library!(app, "rigid.wesl");
         app.add_plugins(MaterialPlugin::<RigidMaterial>::default());
     }
 }

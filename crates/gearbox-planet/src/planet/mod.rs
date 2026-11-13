@@ -89,7 +89,7 @@ const DUST_PHASE_KTX2: &[u8] = include_bytes!("../../textures/mars_mie_phase.ktx
 /// decoded here, every medium gets it at once.
 fn dust_phase() -> bevy::light::atmosphere::PhaseFunction {
     use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
-    use bevy::math::curve::{Interval, SampleAutoCurve};
+    use bevy::curve::{Interval, SampleAutoCurve};
     let image = Image::from_buffer(
         DUST_PHASE_KTX2,
         ImageType::Extension("ktx2"),
@@ -193,7 +193,7 @@ pub fn spawn_planet(
     let atlas = images.add(atlas);
 
     let node_buffer = buffers.add(ShaderBuffer::from(
-        vec![TerrainNodeGpu::default(); MAX_VISIBLE].as_slice(),
+        vec![TerrainNodeGpu::default(); MAX_VISIBLE],
     ));
 
     let material = materials.add(TerrainMaterial {
@@ -310,7 +310,7 @@ pub fn spawn_planet(
                     .spawn((
                         Mesh3d(grid.clone()),
                         MeshMaterial3d(material.clone()),
-                        MeshTag(slot as u32),
+                        MeshTag::new(slot as u32),
                         Transform::IDENTITY,
                         Visibility::Hidden,
                         bevy::camera::visibility::NoFrustumCulling,
@@ -329,7 +329,7 @@ pub fn spawn_planet(
                     .spawn((
                         Mesh3d(grid.clone()),
                         MeshMaterial3d(water_material.clone()),
-                        MeshTag(slot as u32),
+                        MeshTag::new(slot as u32),
                         Transform::IDENTITY,
                         // The ground is one flat surface at sea level, so a sea
                         // drawn at that level is a sphere laid exactly over the

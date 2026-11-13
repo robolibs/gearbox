@@ -17,13 +17,13 @@ pub trait StageExt {
 /// The composed `default` value of an attribute, only when some layer
 /// authored one: schema fallbacks (zero quaternions, infinite centres of
 /// mass) are not opinions the physics readers can use.
-pub fn authored_value(stage: &Stage, prim: &sdf::Path, name: &str) -> Option<sdf::Value> {
+pub fn authored_value(stage: &Stage, prim: &sdf::Path, name: &str) -> Option<openusd::vt::Value> {
     let prim = stage.prim(prim.clone()).ok()?;
     let attr = prim.attribute(name);
     match attr.resolve_info().ok()?.source() {
         openusd::usd::ResolveInfoSource::Default
         | openusd::usd::ResolveInfoSource::TimeSamples
-        | openusd::usd::ResolveInfoSource::ValueClips => attr.get::<sdf::Value>().ok().flatten(),
+        | openusd::usd::ResolveInfoSource::ValueClips => attr.get::<openusd::vt::Value>().ok().flatten(),
         _ => None,
     }
 }

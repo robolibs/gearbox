@@ -607,7 +607,7 @@ impl FieldBounds {
 
 /// How far a field's edge may stray from the line it was authored on, and so
 /// how much ground each field must be given *past* that line. The shaders hold
-/// the same number as `EDGE_STRAY_M` in `bare/shaders/cover.wgsl` and cut the
+/// the same number as `EDGE_STRAY_M` in `bare/shaders/cover.wesl` and cut the
 /// ground on the strayed edge; this is what makes sure there is ground there to
 /// cut. Short of it, a field ends before its own edge does and the terrain
 /// shows through; the margin is deliberately the larger of the two.
@@ -1170,7 +1170,7 @@ impl Hollows {
 
 /// Where stone begins to come up through the fines: the point a way stops
 /// being a soft track and becomes a made road. Held here as well as in
-/// `bare/shaders/cover.wgsl`, because the hollow is cut on the CPU and the
+/// `bare/shaders/cover.wesl`, because the hollow is cut on the CPU and the
 /// colour on the GPU and the two must agree on which a way is;
 /// `shader_contract` refuses to let the two drift apart.
 pub const WAY_METALLED: f32 = 0.55;

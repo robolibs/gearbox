@@ -2,7 +2,7 @@
 //! quantity the compiler normalizes. L is metres per stage unit, M kilograms
 //! per stage mass unit; angles are authored in degrees.
 
-use openusd::sdf::Value;
+use openusd::vt::Value;
 use openusd::usd::Stage;
 
 use super::diagnostics::{Code, Diagnostic};

@@ -1,5 +1,5 @@
 use bevy::{
-    asset::{AssetPath, embedded_asset, embedded_path},
+    asset::{AssetPath, embedded_path},
     prelude::*,
     reflect::TypePath,
     render::render_resource::AsBindGroup,
@@ -34,7 +34,7 @@ impl Material for CloudsMaterial {
 
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Path(
-            AssetPath::from_path_buf(embedded_path!("shaders/clouds.wgsl")).with_source("embedded"),
+            AssetPath::from_path_buf(embedded_path!("shaders/clouds.wesl")).with_source("embedded"),
         )
     }
 }
@@ -43,9 +43,9 @@ pub(crate) struct CloudsShaderPlugin;
 
 impl Plugin for CloudsShaderPlugin {
     fn build(&self, app: &mut App) {
-        load_shader_library!(app, "shaders/common.wgsl");
-        embedded_asset!(app, "shaders/clouds.wgsl");
-        embedded_asset!(app, "shaders/clouds_compute.wgsl");
+        load_shader_library!(app, "shaders/common.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/clouds.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/clouds_compute.wesl");
         app.add_plugins(MaterialPlugin::<CloudsMaterial>::default());
     }
 }

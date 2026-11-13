@@ -32,7 +32,7 @@ impl egui::Plugin for Replay {
         "gearbox-ui-replay"
     }
 
-    fn input_hook(&mut self, input: &mut RawInput) {
+    fn input_hook(&mut self, _ctx: &egui::Context, input: &mut RawInput) {
         let now = Instant::now();
         if self.queue.is_empty()
             && self
@@ -98,6 +98,7 @@ fn parse(script: &str) -> Result<VecDeque<Step>, String> {
                 steps.push_back(Step::Event(button(x, y, which, false)));
             }
             "scroll" => steps.push_back(Step::Event(Event::MouseWheel {
+                source: egui::MouseWheelSource::Unknown,
                 unit: egui::MouseWheelUnit::Point,
                 phase: egui::TouchPhase::Move,
                 delta: egui::vec2(point(0)?, point(1)?),

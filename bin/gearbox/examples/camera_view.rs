@@ -239,7 +239,7 @@ impl WindowApp for CameraView {
     #[allow(deprecated)]
     fn update(&mut self, host: &mut MaraHostCtx<'_>) {
         let ctx = host.__internal_egui();
-        egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.root_ui(|root| egui::CentralPanel::default().show(root, |ui| {
             ui.add_space(36.0);
             ui.horizontal(|ui| {
                 ui.heading(format!("machine `{}`", self.machine));
@@ -310,7 +310,7 @@ impl WindowApp for CameraView {
                 }
             });
             ui.label(format!("received {total:.1} MB/s in total"));
-        });
+        }));
         if let Some((dir, last)) = &mut self.snapshots
             && last.elapsed() >= SNAPSHOT_PERIOD
         {

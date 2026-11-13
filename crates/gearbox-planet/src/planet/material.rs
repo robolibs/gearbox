@@ -14,9 +14,9 @@ pub type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainExtension>;
 
 /// The shaders travel inside the binary, as every other gearbox shader does,
 /// so a run needs no assets folder beside it.
-pub const TERRAIN_SHADER_PATH: &str = "embedded://gearbox_planet/../shaders/terrain.wgsl";
+pub const TERRAIN_SHADER_PATH: &str = "embedded://gearbox_planet/../shaders/terrain.wesl";
 
-/// Debug flag bits (mirrored in terrain.wgsl).
+/// Debug flag bits (mirrored in terrain.wesl).
 pub const DEBUG_GRID: u32 = 1;
 pub const DEBUG_LOD_TINT: u32 = 2;
 pub const DEBUG_MORPH_HEAT: u32 = 4;
@@ -60,8 +60,9 @@ impl TerrainCoverage {
 }
 
 /// 32-byte per-node record, one slot per pool entity. Mirrors `TerrainNode`
-/// in terrain.wgsl (std430).
-#[derive(Clone, Copy, Debug, Default, ShaderType)]
+/// in terrain.wesl (std430).
+#[derive(Clone, Copy, Debug, Default, ShaderType, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct TerrainNodeGpu {
     /// Face-uv of the node's min corner, in [-1,1].
     pub origin: Vec2,
@@ -105,7 +106,7 @@ impl MaterialExtension for TerrainExtension {
 /// StandardMaterial (alpha_mode: Blend, cull_mode: None).
 pub type WaterMaterial = ExtendedMaterial<StandardMaterial, WaterExtension>;
 
-pub const WATER_SHADER_PATH: &str = "embedded://gearbox_planet/../shaders/water.wgsl";
+pub const WATER_SHADER_PATH: &str = "embedded://gearbox_planet/../shaders/water.wesl";
 
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct WaterExtension {

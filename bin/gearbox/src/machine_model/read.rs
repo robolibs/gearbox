@@ -2,7 +2,7 @@
 //! is authored, so callers attach the schema fallback with its provenance.
 
 use bevy::math::{DQuat, DVec3};
-use openusd::sdf::Value;
+use openusd::vt::Value;
 
 use super::scene::Scene;
 

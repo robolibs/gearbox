@@ -65,8 +65,8 @@ fn variants(stage: &openusd::usd::Stage, root: &str) -> Value {
     if names.is_empty() {
         return Value::Null;
     }
-    let selections: BTreeMap<String, String> = sets.get_all_variant_selections().unwrap_or_default().into_iter().collect();
-    let options: BTreeMap<String, Vec<String>> = names.iter().map(|n| (n.clone(), sets.variant_names(n).unwrap_or_default())).collect();
+    let selections: BTreeMap<String, String> = sets.selections().unwrap_or_default().into_iter().collect();
+    let options: BTreeMap<String, Vec<String>> = names.iter().map(|n| (n.clone(), sets.get(n).names().unwrap_or_default())).collect();
     json!({ "options": options, "selected": selections })
 }
 

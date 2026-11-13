@@ -85,7 +85,7 @@ fn subtree_bounds(
     let mut min = Vec3::splat(f32::INFINITY);
     let mut max = Vec3::splat(f32::NEG_INFINITY);
     let subtree = std::iter::once(root).chain(children.iter_descendants(root));
-    for (gt, aabb, visibility) in meshes.iter_many(subtree) {
+    for (gt, aabb, visibility) in meshes.iter_many(subtree).flatten() {
         if visibility.is_some_and(|v| !v.get()) {
             continue;
         }

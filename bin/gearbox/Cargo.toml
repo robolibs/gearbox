@@ -55,7 +55,7 @@ molla-vehicle = { path = "../../vendor/molla/crates/molla-vehicle" }
 molla-compute = { path = "../../vendor/molla/crates/molla-compute", default-features = false, features = ["gpu"] }
 molla-sensors = { path = "../../vendor/molla/crates/molla-sensors", default-features = false, features = ["gpu"] }
 molla-storage = { path = "../../vendor/molla/crates/molla-storage", default-features = false, features = ["gpu"] }
-wgpu = { version = "29", default-features = false, features = ["vulkan", "wgsl"] }
+wgpu = { version = "30", default-features = false, features = ["vulkan", "wgsl"] }
 bytemuck = "1"
 glam = "0.30"
 egui.workspace = true
@@ -73,5 +73,6 @@ rfd = "0.15"
 png = "0.18"
 
 [dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
 pollster = "0.4"
 molla-kernels = { path = "../../vendor/molla/crates/molla-kernels" }

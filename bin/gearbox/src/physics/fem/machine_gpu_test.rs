@@ -23,7 +23,7 @@ pub(super) fn read_bytes(
         .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
     gpu.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     rx.recv().unwrap().unwrap();
-    staging.slice(..).get_mapped_range().to_vec()
+    staging.slice(..).get_mapped_range().expect("mapped GPU buffer range").to_vec()
 }
 
 pub(super) fn read_floats<const N: usize>(

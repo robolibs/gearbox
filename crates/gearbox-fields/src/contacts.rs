@@ -140,6 +140,7 @@ pub const TRAIL_HOLD_S: f32 = 35.0;
 
 /// Every wheel's recent line, ready for the covers.
 #[derive(Resource, ExtractResource, Clone)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct WheelTrails {
     pub points: Vec<TrailPoint>,
     /// The tyre printing them, as `TyreTread::packed`.
@@ -155,6 +156,7 @@ impl Default for WheelTrails {
 /// Wheel contacts collected by the controllers during one frame, stamped
 /// into the trample map by the render world.
 #[derive(Resource, ExtractResource, Clone, Default)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct WheelContacts {
     pub contacts: Vec<WheelContact>,
     /// `Time::elapsed_secs_wrapped` this frame, the clock the stamps carry.
@@ -164,7 +166,7 @@ pub struct WheelContacts {
 /// Wheel contacts are stamped into a wrapped-time clock with this period;
 /// it has to match `Time`'s wrap period. It is also the ceiling on how long any
 /// mark can be read for: past it a stamp wraps and an old mark reads as a fresh
-/// one. `SCAR_SECONDS` in `shaders/interaction.wgsl`, the slow clock a wheel's
+/// one. `SCAR_SECONDS` in `shaders/interaction.wesl`, the slow clock a wheel's
 /// bare scar greens over on, is held under this with room to spare for that
 /// reason — a scar wanting longer than an hour needs a map of its own, not a
 /// larger number here.
@@ -410,12 +412,12 @@ fn a_line_is_dropped_by_age_and_not_by_how_far_it_has_since_driven() {
 /// machine had some wheels drawn from the line and some from the raster.
 #[test]
 fn the_shader_holds_exactly_as_many_points_as_are_sent_to_it() {
-    let source = include_str!("bare/shaders/cover.wgsl");
+    let source = include_str!("bare/shaders/cover.wesl");
     let declared = source
         .split_once("points: array<vec4<f32>,")
         .and_then(|(_, rest)| rest.split_once('>'))
         .map(|(size, _)| size.trim().to_owned())
-        .expect("cover.wgsl declares the driven line's points");
+        .expect("cover.wesl declares the driven line's points");
     assert_eq!(
         declared.parse::<usize>().ok(),
         Some(TRAIL_POINTS),

@@ -65,7 +65,7 @@ struct MeadowEdges {
 
 impl MaterialExtension for MeadowExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_fields/grassland/shaders/material.wgsl".into()
+        "embedded://gearbox_fields/grassland/shaders/material.wesl".into()
     }
 }
 
@@ -89,16 +89,16 @@ fn carry_trail(
 
 impl Plugin for GrasslandPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/palette.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/blade_cull.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/blade_draw.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/palette.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/vegetation.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/blade_cull.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/blade_draw.wesl");
         bevy::asset::embedded_asset!(app, "textures/grass_albedo.jpg");
         bevy::asset::embedded_asset!(app, "textures/soil_albedo.jpg");
         app.add_plugins(MaterialPlugin::<MeadowMaterial>::default());
         app.add_systems(Update, carry_trail);
-        let shader = "embedded://gearbox_fields/grassland/shaders/vegetation.wgsl";
+        let shader = "embedded://gearbox_fields/grassland/shaders/vegetation.wesl";
         let density = self.density;
         let share = density / 6000.0;
         // Near and mid meshes fold two blades from each root.
@@ -306,8 +306,8 @@ fn create_ground(
 
 /// The meadow's blades, sown on the GPU; every detail level draws from them.
 static GRASS_BLADES: BladeKind = BladeKind {
-    cull: "embedded://gearbox_fields/grassland/shaders/blade_cull.wgsl",
-    draw: "embedded://gearbox_fields/grassland/shaders/blade_draw.wgsl",
+    cull: "embedded://gearbox_fields/grassland/shaders/blade_cull.wesl",
+    draw: "embedded://gearbox_fields/grassland/shaders/blade_draw.wesl",
     template: blade_strip,
     stride: 16,
     capacity: 1_500_000,

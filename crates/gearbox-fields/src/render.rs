@@ -71,11 +71,11 @@ pub struct VegetationChunk {
     pub variants: Vec<Range<u32>>,
 }
 
-impl SyncComponent for VegetationChunk {
+impl SyncComponent<bevy::render::RenderApp> for VegetationChunk {
     type Target = Self;
 }
 
-impl ExtractComponent for VegetationChunk {
+impl ExtractComponent<bevy::render::RenderApp> for VegetationChunk {
     type QueryData = &'static VegetationChunk;
     type QueryFilter = ();
     type Out = Self;
@@ -89,11 +89,11 @@ impl ExtractComponent for VegetationChunk {
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct NoVegetation;
 
-impl SyncComponent for NoVegetation {
+impl SyncComponent<bevy::render::RenderApp> for NoVegetation {
     type Target = Self;
 }
 
-impl ExtractComponent for NoVegetation {
+impl ExtractComponent<bevy::render::RenderApp> for NoVegetation {
     type QueryData = &'static NoVegetation;
     type QueryFilter = ();
     type Out = Self;
@@ -121,6 +121,7 @@ pub struct FieldGpu {
 }
 
 #[derive(Resource, ExtractResource, Clone, Default)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct RenderFields(pub HashMap<Entity, FieldGpu>, pub RetiredFields);
 
 /// The fields of the ground that was just replaced, kept a moment so the new

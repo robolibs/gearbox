@@ -17,7 +17,7 @@ fn authored_ceol_rigid_servo_feedback_is_stable() {
         .unwrap();
     let (render_device, render_queue, _) = tests::gpu_island();
     let device = Arc::new(render_device.wgpu_device().clone());
-    let queue = Arc::new((**render_queue.0).clone());
+    let queue = Arc::new(wgpu::Queue::clone(&render_queue));
     let mut outcomes = Vec::new();
     let mut stable_reference = Vec::new();
     let directory = std::env::var_os("GEARBOX_FEM_CAPTURE_DIR")

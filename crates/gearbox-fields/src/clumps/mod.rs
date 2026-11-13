@@ -7,13 +7,13 @@ use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use std::ops::Range;
 
-const SHADER: &str = "embedded://gearbox_fields/clumps/shaders/clumps.wgsl";
+const SHADER: &str = "embedded://gearbox_fields/clumps/shaders/clumps.wesl";
 
 pub struct ClumpsPlugin;
 
 impl Plugin for ClumpsPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/clumps.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/clumps.wesl");
         bevy::asset::embedded_asset!(app, "textures/grass_bermuda_01.png");
         bevy::asset::embedded_asset!(app, "textures/grass_medium_01.png");
         bevy::asset::embedded_asset!(app, "textures/shrub_sorrel_01.png");

@@ -21,7 +21,8 @@ use gearbox_api::{
     ControllerDesc, GearboxBus, MachineAgent, MachineConfig, MachineState, Props, SceneEvent,
     clear_scope, event_kind,
 };
-use openusd::sdf::{Path as SdfPath, Value};
+use openusd::sdf::Path as SdfPath;
+use openusd::vt::Value;
 
 use crate::physics::backend::{
     Body, BodyId, CombineRule, DVec3, Joint, JointAxis, Shape, ShapeView,

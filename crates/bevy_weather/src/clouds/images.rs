@@ -19,7 +19,7 @@ pub(crate) fn cloud_image(size: Extent3d, dimension: TextureDimension) -> Image 
 // The shadow map is the sun's light texture, and it is tiled — but setting an
 // address mode on it would do nothing. Bevy reads a light texture through one
 // shared sampler and wraps the coordinate itself, `decal_uv - floor(decal_uv)`
-// in `pbr_lighting.wgsl`, so this image's own sampler is never consulted for
+// in `pbr_lighting.wesl`, so this image's own sampler is never consulted for
 // it. Whatever hides the repeat has to be in what the map contains, which is
 // the rim fade in `ground_shadow`.
 

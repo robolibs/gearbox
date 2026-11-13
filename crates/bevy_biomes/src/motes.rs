@@ -6,7 +6,6 @@
 //! edge, pollen thins away with the meadow, and none of it is placed by hand.
 //! Nothing is remembered between frames: a mote's whole life is its index.
 
-use bevy::asset::embedded_asset;
 use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
@@ -103,11 +102,11 @@ pub struct MoteMaterial {
 
 impl Material for MoteMaterial {
     fn vertex_shader() -> ShaderRef {
-        "embedded://bevy_biomes/shaders/motes.wgsl".into()
+        "embedded://bevy_biomes/shaders/motes.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://bevy_biomes/shaders/motes.wgsl".into()
+        "embedded://bevy_biomes/shaders/motes.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -135,8 +134,8 @@ pub struct MotesPlugin;
 
 impl Plugin for MotesPlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "shaders/land.wgsl");
-        embedded_asset!(app, "shaders/motes.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/land.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/motes.wesl");
         app.add_plugins(MaterialPlugin::<MoteMaterial>::default())
             .add_systems(Update, (spawn_mote_fields, carry_mote_fields).chain());
     }

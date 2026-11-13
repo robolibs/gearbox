@@ -122,7 +122,7 @@ impl Plugin for PrimIndexPlugin {
     }
 }
 
-fn index_prim(insert: On<Insert, UsdPrimRef>, prims: Query<(&UsdPrimRef, Option<&ChildOf>)>, mut index: ResMut<PrimIndex>) {
+fn index_prim(insert: On<Insert<UsdPrimRef>>, prims: Query<(&UsdPrimRef, Option<&ChildOf>)>, mut index: ResMut<PrimIndex>) {
     let Ok((prim, parent)) = prims.get(insert.entity) else {
         return;
     };
@@ -134,7 +134,7 @@ fn index_prim(insert: On<Insert, UsdPrimRef>, prims: Query<(&UsdPrimRef, Option<
     }
 }
 
-fn forget_prim(discard: On<Discard, UsdPrimRef>, mut index: ResMut<PrimIndex>) {
+fn forget_prim(discard: On<Discard<UsdPrimRef>>, mut index: ResMut<PrimIndex>) {
     let tables = index.tables();
     tables.parents.remove(&discard.entity);
     let Some(path) = tables.paths.remove(&discard.entity) else {
@@ -148,25 +148,25 @@ fn forget_prim(discard: On<Discard, UsdPrimRef>, mut index: ResMut<PrimIndex>) {
     }
 }
 
-fn index_parent(insert: On<Insert, ChildOf>, prims: Query<&ChildOf, With<UsdPrimRef>>, mut index: ResMut<PrimIndex>) {
+fn index_parent(insert: On<Insert<ChildOf>>, prims: Query<&ChildOf, With<UsdPrimRef>>, mut index: ResMut<PrimIndex>) {
     if let Ok(parent) = prims.get(insert.entity) {
         index.tables().parents.insert(insert.entity, parent.parent());
     }
 }
 
-fn forget_parent(discard: On<Discard, ChildOf>, prims: Query<(), With<UsdPrimRef>>, mut index: ResMut<PrimIndex>) {
+fn forget_parent(discard: On<Discard<ChildOf>>, prims: Query<(), With<UsdPrimRef>>, mut index: ResMut<PrimIndex>) {
     if prims.contains(discard.entity) {
         index.tables().parents.remove(&discard.entity);
     }
 }
 
-fn index_joint(insert: On<Insert, UsdPhysicsJoint>, joints: Query<&UsdPhysicsJoint>, mut index: ResMut<PrimIndex>) {
+fn index_joint(insert: On<Insert<UsdPhysicsJoint>>, joints: Query<&UsdPhysicsJoint>, mut index: ResMut<PrimIndex>) {
     if let Ok(joint) = joints.get(insert.entity) {
         index.tables().joints.insert(insert.entity, joint.clone());
     }
 }
 
-fn forget_joint(discard: On<Discard, UsdPhysicsJoint>, mut index: ResMut<PrimIndex>) {
+fn forget_joint(discard: On<Discard<UsdPhysicsJoint>>, mut index: ResMut<PrimIndex>) {
     index.tables().joints.remove(&discard.entity);
 }
 

@@ -12,7 +12,7 @@ use bevy::ecs::hierarchy::Children;
 use bevy::ecs::world::World;
 use bevy::math::{Quat, Vec3};
 use bevy::mesh::Mesh3d;
-use openusd::sdf::Value;
+use openusd::vt::Value;
 use openusd::usd::Stage;
 use usd_bevy::route::physics as up;
 

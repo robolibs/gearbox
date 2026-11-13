@@ -226,7 +226,7 @@ mod tests {
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
         rx.recv().unwrap().unwrap();
-        let data = staging.slice(..).get_mapped_range();
+        let data = staging.slice(..).get_mapped_range().expect("mapped GPU buffer range");
         let result = [
             f32::from_le_bytes(data[..4].try_into().unwrap()),
             f32::from_le_bytes(data[16..20].try_into().unwrap()),

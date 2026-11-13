@@ -1,6 +1,6 @@
-const GLOBE: &str = include_str!("../shaders/terrain.wgsl");
-const LOCAL: &str = include_str!("../../gearbox-fields/src/bare/shaders/material.wgsl");
-const WATER: &str = include_str!("../shaders/water.wgsl");
+const GLOBE: &str = include_str!("../shaders/terrain.wesl");
+const LOCAL: &str = include_str!("../../gearbox-fields/src/bare/shaders/material.wesl");
+const WATER: &str = include_str!("../shaders/water.wesl");
 
 #[test]
 fn barren_globes_resolve_local_height_cells_without_changing_earth() {
@@ -30,7 +30,7 @@ fn globe_surfaces_filter_heights_and_morph_in_world_space() {
 #[test]
 fn planetary_join_uses_shared_geology_without_altitude_discard() {
     for shader in [GLOBE, LOCAL] {
-        assert!(shader.contains("#import gearbox_globe::surface::planet_albedo"));
+        assert!(shader.contains("import gearbox_globe::surface::planet_albedo;"));
         assert!(!shader.contains("fn geology_noise("));
         assert!(!shader.contains("planet_local_fraction"));
         assert!(!shader.contains("planet_screen_noise"));

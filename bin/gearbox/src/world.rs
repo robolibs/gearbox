@@ -416,6 +416,7 @@ fn spawn_world(
     let mut camera = commands.spawn((
         Name::new("Camera"),
         Camera3d::default(),
+        bevy::pbr::ScreenSpaceTransmission::default(),
         bevy::render::view::NoIndirectDrawing,
         // Clustered only while point or spot lights stand in the scene
         // (`cluster_while_lit`).

@@ -15,7 +15,8 @@ use bevy::prelude::*;
 use bevy_weather::WeatherSettings;
 use gearbox_api::{ActuatorCommand, GearboxBus, Measurement, Props, measurement_kind as kind};
 use gearbox_fields::wind_map::Gusts;
-use openusd::sdf::{Path as SdfPath, Value};
+use openusd::sdf::Path as SdfPath;
+use openusd::vt::Value;
 
 use crate::controller::{ControllerInventory, MachineAgentKeys, read_attr, read_bool, read_float, read_token, type_name};
 use crate::prim_index::PrimIndex;

@@ -81,7 +81,7 @@ unsafe fn walk(parent: &GlobalTransform, tree: &Tree, links: &Links, entity: Ent
         *global = parent.mul_transform(*transform);
     }
     let Some(children) = children else { return };
-    for (child, child_of) in links.iter_many(children) {
+    for (child, child_of) in links.iter_many(children).flatten() {
         assert_eq!(child_of.parent(), entity, "malformed hierarchy below {entity}");
         // SAFETY: each child has this entity as its only parent.
         unsafe { walk(global.as_ref(), tree, links, child, changed || child_of.is_changed()) };

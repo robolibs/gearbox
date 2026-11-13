@@ -224,7 +224,7 @@ fn capture_active_stage_info(
             info.rigid_body_count += 1;
         }
         if let Ok(prim) = stage.prim(path.clone())
-            && let Ok(sets) = prim.variant_sets().get_all_variant_selections()
+            && let Ok(sets) = prim.variant_sets().selections()
         {
             for (name, selection) in sets {
                 let options = usd_bevy::read::variants::variant_options(stage, path, &name);

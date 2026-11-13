@@ -2,10 +2,10 @@
 //! world runs one compute dispatch per tile, writing FBM heights into a layer
 //! of the `texture_2d_array` atlas.
 //!
-//! Bevy 0.19: pipelines init in `RenderStartup`, the render graph is an ECS
+//! Pipelines init in `RenderStartup`, the render graph is an ECS
 //! schedule (`RenderGraph`) whose systems take `RenderContext` as a param, and
 //! per-dispatch params use a `DynamicUniformBuffer` with dynamic offsets
-//! (wgpu 29 "immediates"/push constants are off by default).
+//! (wgpu "immediates"/push constants are off by default).
 
 use bevy::prelude::*;
 use bevy::render::{
@@ -48,6 +48,7 @@ pub struct TileBakeRequest {
 /// frame, drained (main side) in `First` of the next frame. Each request is
 /// tagged with the destination atlas, so several planets can bake in one frame.
 #[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct TileBakeQueue {
     pub requests: Vec<(AssetId<Image>, TileBakeRequest)>,
 }

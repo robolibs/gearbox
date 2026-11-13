@@ -32,7 +32,7 @@ fn rigid_prediction_momentum(remove_stops: bool, remove_drives: bool) {
     let (app, spec, layout) = machine_gpu_test::asset();
     let (render_device, render_queue, _) = tests::gpu_island();
     let device = Arc::new(render_device.wgpu_device().clone());
-    let queue = Arc::new((**render_queue.0).clone());
+    let queue = Arc::new(wgpu::Queue::clone(&render_queue));
     let mut outcomes = Vec::new();
     for effort in [0.0, 100.0] {
         for gpu in [false, true] {

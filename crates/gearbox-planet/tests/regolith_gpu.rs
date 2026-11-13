@@ -84,7 +84,7 @@ fn probe(@builtin(global_invocation_id) id: vec3<u32>) {
         readback.slice(..).map_async(wgpu::MapMode::Read, move |result| send.send(result).unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         recv.recv().unwrap().unwrap();
-        let bytes = readback.slice(..).get_mapped_range();
+        let bytes = readback.slice(..).get_mapped_range().expect("mapped GPU buffer range");
         let measured: &[f32] = bytemuck::cast_slice(&bytes);
         let mut worst = 0.0f32;
         for (i, (&actual, p)) in measured.iter().zip(&positions).enumerate() {
@@ -111,11 +111,11 @@ fn production_height_filter_interpolates_r32float_without_filtering_features() {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     assert_ne!(adapter.get_info().device_type, wgpu::DeviceType::Cpu);
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-    let shader = include_str!("../shaders/terrain.wgsl");
+    let shader = include_str!("../shaders/terrain.wesl");
     let start = shader.find("fn sample_height(").unwrap();
     let end = start + shader[start..].find("\n}").unwrap() + 2;
     let helper = &shader[start..end];
-    assert!(include_str!("../shaders/water.wgsl").contains(helper));
+    assert!(include_str!("../shaders/water.wesl").contains(helper));
     let source = format!(r#"
 const TILE_TEXELS: f32 = 132.0;
 const BORDER: f32 = 1.0;
@@ -182,7 +182,7 @@ fn probe(@builtin(global_invocation_id) id: vec3<u32>) {{
     readback.slice(..).map_async(wgpu::MapMode::Read, move |r| send.send(r).unwrap());
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     recv.recv().unwrap().unwrap();
-    let mapped = readback.slice(..).get_mapped_range();
+    let mapped = readback.slice(..).get_mapped_range().expect("mapped GPU buffer range");
     let measured: &[f32] = bytemuck::cast_slice(&mapped);
     for (p, actual) in points.iter().zip(measured) {
         let x = (p[0]+1.0).clamp(0.0,131.0); let y = (p[1]+1.0).clamp(0.0,131.0);

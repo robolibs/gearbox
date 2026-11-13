@@ -45,11 +45,11 @@ impl Plugin for DrawPlugin {
         if app.get_sub_app(bevy::render::RenderApp).is_none() {
             return;
         }
-        bevy::shader::load_shader_library!(app, "draw_common.wgsl");
-        bevy::asset::embedded_asset!(app, "draw_stroke.wgsl");
-        bevy::asset::embedded_asset!(app, "draw_surface.wgsl");
-        bevy::asset::embedded_asset!(app, "draw_heat.wgsl");
-        bevy::asset::embedded_asset!(app, "draw_ghost.wgsl");
+        bevy::shader::load_shader_library!(app, "draw_common.wesl");
+        bevy::shader::load_shader_library!(app, "draw_stroke.wesl");
+        bevy::shader::load_shader_library!(app, "draw_surface.wesl");
+        bevy::shader::load_shader_library!(app, "draw_heat.wesl");
+        bevy::shader::load_shader_library!(app, "draw_ghost.wesl");
         app.add_plugins((
             MaterialPlugin::<StrokeMaterial>::default(),
             MaterialPlugin::<SurfaceMaterial>::default(),

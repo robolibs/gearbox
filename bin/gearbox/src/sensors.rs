@@ -601,12 +601,12 @@ pub(crate) fn run_machine_sensors(
                 continue;
             };
             let info = adapter.as_deref().map(|info| {
-                let raw: &wgpu::AdapterInfo = &info.0;
+                let raw: &wgpu::AdapterInfo = &info;
                 AdapterInfo::from_wgpu(raw.clone())
             });
             rigs.engine = Some(Engine::from_device(
                 Arc::new(device.wgpu_device().clone()),
-                Arc::new((**queue.0).clone()),
+                Arc::new(wgpu::Queue::clone(&queue)),
                 info,
             ));
         }

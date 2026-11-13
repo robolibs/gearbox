@@ -63,7 +63,7 @@ impl Diagnostics {
             }
             _ => {}
         }
-        let mapped = self.staging.slice(..).get_mapped_range();
+        let mapped = self.staging.slice(..).get_mapped_range().expect("mapped GPU buffer range");
         let words = std::array::from_fn(|i| {
             u32::from_le_bytes(mapped[4 * i..4 * i + 4].try_into().unwrap())
         });

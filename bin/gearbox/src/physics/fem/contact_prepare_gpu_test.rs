@@ -22,7 +22,7 @@ fn authored_ceol_contact_preparation_completes_without_prediction() {
     let (app, spec, layout, contacts) = machine_gpu_test::checked_wheel_contacts();
     let (render_device, render_queue, _) = tests::gpu_island();
     let device = render_device.wgpu_device();
-    let queue = &**render_queue.0;
+    let queue = &*render_queue;
     let mut rigid = rigid_machine::FemRigidMachine::prepare(app.world(), &layout).unwrap();
     let mut belts =
         track_mesh::FemTrackMeshes::prepare(app.world(), &spec, &layout, &rigid).unwrap();
@@ -251,7 +251,7 @@ fn prepare(
     inputs: &[(&str, &wgpu::Buffer)],
 ) {
     let device = render_device.wgpu_device();
-    let queue = &**render_queue.0;
+    let queue = &*render_queue;
     let dofs = inputs[8].1.size() / 4;
     let particles = inputs[0].1.size() / 16;
     let bodies = inputs[4].1.size() / 32;

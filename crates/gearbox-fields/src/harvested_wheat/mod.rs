@@ -100,7 +100,7 @@ impl WornStubble {
 
 impl MaterialExtension for AntiRepeatTerrainExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_fields/harvested_wheat/shaders/material.wgsl".into()
+        "embedded://gearbox_fields/harvested_wheat/shaders/material.wesl".into()
     }
 }
 
@@ -228,9 +228,9 @@ fn carry_trail(
 
 impl Plugin for HarvestedWheatPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/patches.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/patches.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/vegetation.wesl");
         bevy::asset::embedded_asset!(app, "textures/soil_albedo.jpg");
         bevy::asset::embedded_asset!(app, "textures/soil_height.jpg");
         bevy::asset::embedded_asset!(app, "textures/detail_albedo.jpg");
@@ -257,7 +257,7 @@ impl Plugin for HarvestedWheatPlugin {
                 },
                 // Stalks at three levels of detail, one root population.
                 layers: vec![VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: stalk_near,
                     density: stalks,
                     fade_start: 5.0,
@@ -272,7 +272,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: STALK_NEAR_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: stalk_mid,
                     density: stalks,
                     fade_start: 5.0,
@@ -287,7 +287,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: STALK_MID_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: stalk_far,
                     density: stalks,
                     fade_start: 5.0,
@@ -302,7 +302,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: STALK_FAR_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: straw_template,
                     density: if density > 0.0 { 500.0 } else { 0.0 },
                     fade_start: 8.0,
@@ -317,7 +317,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: leaf_template,
                     density: if density > 0.0 { 60.0 } else { 0.0 },
                     fade_start: 16.0,
@@ -332,7 +332,7 @@ impl Plugin for HarvestedWheatPlugin {
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: super::canopy::template,
                     density: (density / 6000.0) * 80.0,
                     fade_start: 12.0,

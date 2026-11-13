@@ -4,7 +4,7 @@
 //! terrain that is simulated.
 //!
 //! The renderer is [terra](https://github.com/ahmadaliadeel/terra) — a
-//! GPU-driven, crack-free CDLOD cube-sphere planet for Bevy 0.19 — carried in
+//! GPU-driven, crack-free CDLOD cube-sphere planet for Bevy 0.20 — carried in
 //! here as a library and pointed at one Earth-sized world in the site grid
 //! gearbox already keeps. What changed from upstream: it spawns no solar
 //! system of its own (gearbox says where its planet goes), its shaders are
@@ -36,9 +36,9 @@ impl Plugin for PlanetPlugin {
         if !app.is_plugin_added::<gearbox_globe::surface::PlanetSurfaceShaderPlugin>() {
             app.add_plugins(gearbox_globe::surface::PlanetSurfaceShaderPlugin);
         }
-        embedded_asset!(app, "../shaders/terrain.wgsl");
+        bevy::shader::load_shader_library!(app, "../shaders/terrain.wesl");
         embedded_asset!(app, "../shaders/tile_bake.wgsl");
-        embedded_asset!(app, "../shaders/water.wgsl");
+        bevy::shader::load_shader_library!(app, "../shaders/water.wesl");
         app.add_plugins((
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<WaterMaterial>::default(),

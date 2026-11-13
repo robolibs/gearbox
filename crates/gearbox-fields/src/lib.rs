@@ -81,10 +81,10 @@ fn density_from_env(key: &str) -> f32 {
 
 impl Plugin for FieldsPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/interaction.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/surface_detail.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/wind.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/canopy.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/interaction.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/surface_detail.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/wind.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/canopy.wesl");
         app.insert_resource(self.layout.clone())
             .init_resource::<profile::FieldProfiles>()
             .init_resource::<render::RenderFields>()

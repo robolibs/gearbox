@@ -7,6 +7,7 @@ use bevy::{
 };
 
 #[derive(Clone, Resource, ExtractResource, Reflect, ShaderType)]
+#[extract_app(bevy::render::RenderApp)]
 #[reflect(Resource, Default)]
 pub(crate) struct CloudsUniform {
     pub clouds_base_scale: f32,
@@ -98,6 +99,7 @@ pub(crate) struct CloudsUniformBuffer {
 }
 
 #[derive(Resource, Clone, ExtractResource, AsBindGroup)]
+#[extract_app(bevy::render::RenderApp)]
 pub(crate) struct CloudsImage {
     #[storage_texture(0, image_format = Rgba16Float, access = ReadWrite)]
     pub cloud_render_image: Handle<Image>,

@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::usd_ext::StageExt;
 use bevy::math::{DMat4, DQuat, DVec3, EulerRot};
-use openusd::sdf::{Path as SdfPath, Value};
+use openusd::sdf::Path as SdfPath;
+use openusd::vt::Value;
 
 use crate::controller::{
     read_attr, read_bool, read_float, read_rel_first, read_rel_targets, read_token,

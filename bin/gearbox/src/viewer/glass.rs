@@ -28,7 +28,7 @@ pub(crate) struct NearFade {
 
 impl MaterialExtension for NearFade {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox/viewer/glass.wgsl".into()
+        "embedded://gearbox/viewer/glass.wesl".into()
     }
 }
 
@@ -37,7 +37,7 @@ pub(crate) struct GlassPlugin;
 impl Plugin for GlassPlugin {
     fn build(&self, app: &mut App) {
         if app.get_sub_app(bevy::render::RenderApp).is_some() {
-            bevy::asset::embedded_asset!(app, "glass.wgsl");
+            bevy::shader::load_shader_library!(app, "glass.wesl");
             app.add_plugins(MaterialPlugin::<GlassMaterial>::default())
                 .add_systems(PostUpdate, fade_glass_by_the_eye);
         }

@@ -14,7 +14,7 @@ use gearbox_api::Instance;
 
 use super::DrawVisuals;
 
-const GHOST_SHADER: &str = "embedded://gearbox/draw/draw_ghost.wgsl";
+const GHOST_SHADER: &str = "embedded://gearbox/draw/draw_ghost.wesl";
 
 #[derive(Clone, Copy, Debug, ShaderType)]
 pub struct GhostParams {

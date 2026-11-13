@@ -69,11 +69,11 @@ pub enum BladePass {
     LitAfterDepth,
 }
 
-impl SyncComponent for BladeDraw {
+impl SyncComponent<bevy::render::RenderApp> for BladeDraw {
     type Target = Self;
 }
 
-impl ExtractComponent for BladeDraw {
+impl ExtractComponent<bevy::render::RenderApp> for BladeDraw {
     type QueryData = &'static BladeDraw;
     type QueryFilter = ();
     type Out = Self;

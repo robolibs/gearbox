@@ -138,6 +138,7 @@ fn spawn_camera(
     let mut camera = commands.spawn((
         Name::new(format!("sensor camera {}", job.key.link)),
         Camera3d::default(),
+        bevy::pbr::ScreenSpaceTransmission::default(),
         Camera {
             is_active: false,
             order,
