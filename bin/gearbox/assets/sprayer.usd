@@ -16,6 +16,7 @@ def Xform "robot" (
 )
 {
     rel gearbox:machine:body = </robot/chassis>
+    rel gearbox:machine:controlFrame = </robot/chassis/control_frame>
     token gearbox:machine:idPolicy = "prim_path"
     token gearbox:machine:interfaceVersion = "0.1"
     token gearbox:machine:kind = "sprayer"
@@ -118,6 +119,11 @@ def Xform "robot" (
         prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI", "PhysicsFilteredPairsAPI", "GearboxLinkAPI"]
     )
     {
+        def Xform "control_frame"
+        {
+            quatd xformOp:orient = (0.7071067811865476, 0, 0, -0.7071067811865476)
+            uniform token[] xformOpOrder = ["xformOp:orient"]
+        }
         token gearbox:link:name = "base_link"
         token gearbox:link:role = "base"
         float physics:mass = 450

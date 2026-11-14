@@ -3,8 +3,11 @@
 pub mod access;
 pub mod api;
 pub mod clear;
+pub mod draw;
+pub mod draw_data;
 pub mod env;
 pub mod extension;
+pub mod greenhouse;
 pub mod instance;
 pub mod machine;
 pub mod peer;

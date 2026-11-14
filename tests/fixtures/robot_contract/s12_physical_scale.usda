@@ -1,0 +1,66 @@
+#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "World"
+{
+    def Xform "Uniform" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+        }
+        def Xform "big" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+        {
+            float physics:mass = 1
+            point3f physics:centerOfMass = (0.1, 0, 0)
+            double3 xformOp:translate = (1, 0, 0)
+            float3 xformOp:scale = (2, 2, 2)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+
+            def Cube "stretched_mesh"
+            {
+                float3 xformOp:scale = (1, 5, 1)
+                uniform token[] xformOpOrder = ["xformOp:scale"]
+            }
+        }
+        def PhysicsRevoluteJoint "hinge"
+        {
+            rel physics:body0 = </World/Uniform/base>
+            rel physics:body1 = </World/Uniform/big>
+            point3f physics:localPos0 = (0.5, 0, 0)
+            point3f physics:localPos1 = (-0.25, 0, 0)
+        }
+    }
+
+    def Xform "Stretched" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 5, 0)
+            float3 xformOp:scale = (1, 2, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+    }
+
+    def Xform "Sheared" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0.5, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+        }
+    }
+
+    def Xform "Mirrored" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "body" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 15, 0)
+            float3 xformOp:scale = (1, 1, -1)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+    }
+}

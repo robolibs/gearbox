@@ -1,6 +1,8 @@
 //! A machine agent: one agentio `Agent` per simulated machine, hosting the
 //! control and telemetry topics for that machine under its own identity.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
@@ -8,7 +10,7 @@ use datapod::robot::{Gnss, Imu, Twist, TurnRadius, WheelEncoders};
 use peerbus::{AnsServer, EndpointId, Publisher, ReqReplyToken, ReqServer};
 
 use crate::host::{serve_que, serve_req};
-use crate::topics::{self, machine_topic};
+use crate::topics::{self, machine_sensor_topic, machine_topic};
 use crate::wire::*;
 
 #[derive(Debug, Clone, Default)]
@@ -131,29 +133,176 @@ pub struct Session {
 const AUTO_RELEASE: Duration = Duration::from_secs(60);
 const DEFAULT_HOLD: Duration = Duration::from_millis(500);
 
-pub struct MachineAgent {
-    pub agent: Agent,
-    pub config: MachineConfig,
-    info: Registered<ReqServer<Env, Env>>,
+/// The half of a machine agent that keeps pace with the physics: the session,
+/// the twist it sets, and the telemetry streams. The physics thread serves it
+/// between steps and the frame's `poll` serves it too.
+pub struct MachineLane(Mutex<Lane>);
+
+struct Lane {
     claim: Registered<ReqServer<Env, Env>>,
     release: Registered<ReqServer<Env, Env>>,
-    session_q: Registered<ReqServer<Env, Env>>,
     cmd_vel: Registered<ReqServer<Env, Env>>,
-    cmd: Registered<ReqServer<Env, Env>>,
     state_pub: Registered<Publisher<Env>>,
     odom_pub: Registered<Publisher<Env>>,
-    links: Registered<AnsServer<Env, Env>>,
-    tf_pub: Registered<Publisher<Env>>,
-    tf_enabled: bool,
     encoders_pub: Registered<Publisher<Env>>,
     imu_pub: Registered<Publisher<Env>>,
     gnss_pub: Registered<Publisher<Env>>,
     turn_radius_pub: Registered<Publisher<Env>>,
+    session: Option<Session>,
+    next_session: u64,
+    twist: Twist,
+    /// Set while this machine hangs on another machine's hitch.
+    attached_to: Option<String>,
+    /// Slaves hanging on this machine, depth-first.
+    slaves: Vec<String>,
+}
+
+impl MachineLane {
+    fn lock(&self) -> MutexGuard<'_, Lane> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Answer claims, twists and releases, and apply the silence rules.
+    pub fn serve(&self) {
+        let mut lane = self.lock();
+        let lane = &mut *lane;
+        let now = Instant::now();
+        let attached_to = &lane.attached_to;
+        let session = &mut lane.session;
+        let next_session = &mut lane.next_session;
+        serve_req(&mut lane.claim, |req: ClaimRequest| {
+            if let Some(master) = attached_to {
+                return ClaimResponse {
+                    session: 0,
+                    code: code::REFUSED,
+                    _pad: 0,
+                    props: Props::from_pairs(&[
+                        ("attached_to", master.as_str()),
+                        ("message", "machine is attached; command it through its master"),
+                    ])
+                    .into_bytes(),
+                };
+            }
+            if let Some(held) = &*session
+                && req.take == 0
+                && now.duration_since(held.last_cmd) < AUTO_RELEASE
+            {
+                return ClaimResponse::busy(&held.holder);
+            }
+            let id = *next_session;
+            *next_session += 1;
+            let hold = if req.hold_ms == 0 { DEFAULT_HOLD } else { Duration::from_millis(req.hold_ms as u64) };
+            *session = Some(Session { id, holder: req.client(), since: now, last_cmd: now, hold });
+            ClaimResponse::granted(id)
+        });
+
+        let twist = &mut lane.twist;
+        serve_req(&mut lane.cmd_vel, |req: TwistCmd| {
+            if let Some(master) = attached_to {
+                return Status::with(
+                    code::REFUSED,
+                    &[
+                        ("attached_to", master.as_str()),
+                        ("message", "machine is attached; command it through its master"),
+                    ],
+                );
+            }
+            match &mut *session {
+                Some(held) if held.id == req.session => {
+                    held.last_cmd = now;
+                    *twist = req.twist;
+                    Status::ok()
+                }
+                Some(held) => Status::with(code::BUSY, &[("holder", &held.holder), ("message", "machine is held")]),
+                None if req.session == 0 => {
+                    *twist = req.twist;
+                    Status::ok()
+                }
+                None => Status::err(code::REFUSED, "no such session; claim first"),
+            }
+        });
+
+        serve_req(&mut lane.release, |req: SessionRef| match &*session {
+            Some(held) if held.id == req.session || req.session == 0 => {
+                *session = None;
+                *twist = Twist::zero();
+                Status::ok()
+            }
+            Some(_) => Status::err(code::REFUSED, "session id does not match holder"),
+            None => Status::ok(),
+        });
+
+        if let Some(held) = &*session {
+            let idle = now.duration_since(held.last_cmd);
+            if idle > AUTO_RELEASE {
+                *session = None;
+                *twist = Twist::zero();
+            } else if idle > held.hold {
+                *twist = Twist::zero();
+            }
+        }
+    }
+
+    /// The twist the sim should apply right now. Zero once the holder has
+    /// been silent longer than its hold time.
+    pub fn twist(&self) -> Twist {
+        self.lock().twist
+    }
+
+    pub fn session(&self) -> Option<Session> {
+        self.lock().session.clone()
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.lock().session.as_ref().map(|s| s.id).unwrap_or(0)
+    }
+
+    pub fn attached_to(&self) -> Option<String> {
+        self.lock().attached_to.clone()
+    }
+
+    pub fn slaves(&self) -> Vec<String> {
+        self.lock().slaves.clone()
+    }
+
+    pub fn publish_state(&self, mut state: MachineState) {
+        let mut lane = self.lock();
+        state.session = lane.session.as_ref().map(|s| s.id).unwrap_or(0);
+        let _ = lane.odom_pub.send(&pack(&state.odom));
+        let _ = lane.state_pub.send(&pack(&state));
+    }
+
+    pub fn publish_encoders(&self, encoders: &WheelEncoders) {
+        let _ = self.lock().encoders_pub.send(&pack(encoders));
+    }
+
+    pub fn publish_imu(&self, imu: &Imu) {
+        let _ = self.lock().imu_pub.send(&pack(imu));
+    }
+
+    pub fn publish_gnss(&self, gnss: &Gnss) {
+        let _ = self.lock().gnss_pub.send(&pack(gnss));
+    }
+
+    pub fn publish_turn_radius(&self, turn_radius: &TurnRadius) {
+        let _ = self.lock().turn_radius_pub.send(&pack(turn_radius));
+    }
+}
+
+pub struct MachineAgent {
+    pub agent: Agent,
+    pub config: MachineConfig,
+    info: Registered<ReqServer<Env, Env>>,
+    session_q: Registered<ReqServer<Env, Env>>,
+    cmd: Registered<ReqServer<Env, Env>>,
+    lane: Arc<MachineLane>,
+    links: Registered<AnsServer<Env, Env>>,
+    tf_pub: Registered<Publisher<Env>>,
+    /// Simulated sensor streams by link name, registered on first publish.
+    sensor_pubs: HashMap<String, Registered<Publisher<Env>>>,
     attach: Registered<ReqServer<Env, Env>>,
     detach: Registered<ReqServer<Env, Env>>,
     tools_q: Registered<AnsServer<Env, Env>>,
-    /// Set while this machine hangs on another machine's hitch.
-    attached_to: Option<String>,
     /// Slaves hanging on this machine, depth-first, and their re-parented
     /// links appended to `/links`.
     tools: Vec<ToolDesc>,
@@ -161,11 +310,26 @@ pub struct MachineAgent {
     /// Attach and detach requests waiting for the sim to act and answer.
     pub pending_attach: Vec<(AttachRequest, ReqReplyToken)>,
     pub pending_detach: Vec<(DetachRequest, ReqReplyToken)>,
-    session: Option<Session>,
-    next_session: u64,
-    twist: Twist,
     /// Controller commands received since the last drain.
     pub commands: Vec<ControllerCommand>,
+    emit: Registered<ReqServer<Env, Env>>,
+    /// Emitter packets received since the last drain.
+    pub emits: Vec<EmitRequest>,
+    actuate: Registered<ReqServer<Env, Env>>,
+    /// Actuator commands received since the last drain.
+    pub actuations: Vec<ActuatorCommand>,
+    /// Actuator streams by device name, registered on first publish.
+    actuator_pubs: HashMap<String, Registered<Publisher<Env>>>,
+    describe: Registered<ReqServer<Env, Env>>,
+    joint_command: Registered<ReqServer<Env, Env>>,
+    control: Registered<ReqServer<Env, Env>>,
+    joint_state_pub: Registered<Publisher<Env>>,
+    /// The manifest `description` answers with.
+    pub description: MachineDescription,
+    /// Joint command batches waiting for the sim to validate and answer.
+    pub pending_joint_commands: Vec<(JointCommand, ReqReplyToken)>,
+    /// Lease requests waiting for the sim to grant, refuse or release.
+    pub pending_control: Vec<(ControlRequest, ReqReplyToken)>,
 }
 
 impl MachineAgent {
@@ -191,36 +355,57 @@ impl MachineAgent {
         let agent = builder.build()?;
         let machine_id = config.machine_id.clone();
         let t = |leaf: &str| machine_topic(&machine_id, leaf);
+        let agent_emit = agent.req_server(&t(topics::MACHINE_EMIT))?;
+        let agent_actuate = agent.req_server(&t(topics::MACHINE_ACTUATE))?;
+        let describe = agent.req_server(&t(topics::MACHINE_DESCRIPTION))?;
+        let joint_command = agent.req_server(&t(topics::MACHINE_JOINT_COMMAND))?;
+        let control = agent.req_server(&t(topics::MACHINE_CONTROL))?;
+        let joint_state_pub = agent.publish(&t(topics::MACHINE_JOINT_STATE))?;
         Ok(Self {
+            describe,
+            joint_command,
+            control,
+            joint_state_pub,
+            description: MachineDescription::default(),
+            pending_joint_commands: Vec::new(),
+            pending_control: Vec::new(),
             info: agent.req_server(&t(topics::MACHINE_INFO))?,
-            claim: agent.req_server(&t(topics::MACHINE_CLAIM))?,
-            release: agent.req_server(&t(topics::MACHINE_RELEASE))?,
             session_q: agent.req_server(&t(topics::MACHINE_SESSION))?,
-            cmd_vel: agent.req_server(&t(topics::MACHINE_CMD_VEL))?,
             cmd: agent.req_server(&t(topics::MACHINE_CMD))?,
-            state_pub: agent.publish(&t(topics::MACHINE_STATE))?,
-            odom_pub: agent.publish(&t(topics::MACHINE_ODOM))?,
+            lane: Arc::new(MachineLane(Mutex::new(Lane {
+                claim: agent.req_server(&t(topics::MACHINE_CLAIM))?,
+                release: agent.req_server(&t(topics::MACHINE_RELEASE))?,
+                cmd_vel: agent.req_server(&t(topics::MACHINE_CMD_VEL))?,
+                state_pub: agent.publish(&t(topics::MACHINE_STATE))?,
+                odom_pub: agent.publish(&t(topics::MACHINE_ODOM))?,
+                encoders_pub: agent.publish(&t(topics::MACHINE_ENCODERS))?,
+                imu_pub: agent.publish(&t(topics::MACHINE_IMU))?,
+                gnss_pub: agent.publish(&t(topics::MACHINE_GNSS))?,
+                turn_radius_pub: agent.publish(&t(topics::MACHINE_TURN_RADIUS))?,
+                session: None,
+                next_session: 1,
+                twist: Twist::zero(),
+                attached_to: None,
+                slaves: Vec::new(),
+            }))),
             links: agent.que_server(&t(topics::MACHINE_LINKS))?,
             tf_pub: agent.publish(&t(topics::MACHINE_TF))?,
-            tf_enabled: false,
-            encoders_pub: agent.publish(&t(topics::MACHINE_ENCODERS))?,
-            imu_pub: agent.publish(&t(topics::MACHINE_IMU))?,
-            gnss_pub: agent.publish(&t(topics::MACHINE_GNSS))?,
-            turn_radius_pub: agent.publish(&t(topics::MACHINE_TURN_RADIUS))?,
+            sensor_pubs: HashMap::new(),
             attach: agent.req_server(&t(topics::MACHINE_TOOLS_ATTACH))?,
             detach: agent.req_server(&t(topics::MACHINE_TOOLS_DETACH))?,
             tools_q: agent.que_server(&t(topics::MACHINE_TOOLS))?,
-            attached_to: None,
             tools: Vec::new(),
             tool_links: Vec::new(),
             pending_attach: Vec::new(),
             pending_detach: Vec::new(),
             agent,
             config,
-            session: None,
-            next_session: 1,
-            twist: Twist::zero(),
             commands: Vec::new(),
+            emit: agent_emit,
+            emits: Vec::new(),
+            actuate: agent_actuate,
+            actuations: Vec::new(),
+            actuator_pubs: HashMap::new(),
         })
     }
 
@@ -245,77 +430,50 @@ impl MachineAgent {
     }
 
     pub fn info(&self) -> MachineInfo {
-        let mut props = Props::from_pairs(&[
-            ("machine_id", self.config.machine_id.as_str()),
-            ("kind", self.config.kind.as_str()),
-            ("did", &self.did()),
-            ("addr", &self.addr_hex()),
-            ("link_count", &self.config.links.len().to_string()),
-            ("links_derived", &self.config.links_derived.to_string()),
-            ("attached_to", self.attached_to.as_deref().unwrap_or("")),
-            (
-                "tools",
-                &self
-                    .tools
-                    .iter()
-                    .map(|t| t.slave.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ),
-            (
-                "base_link",
-                self.config
-                    .links
-                    .iter()
-                    .find(|l| l.role == "base")
-                    .map(|l| l.prim.as_str())
-                    .unwrap_or(""),
-            ),
-        ]);
-        for (n, c) in self.config.controllers.iter().enumerate() {
-            props.set(&format!("controller.{n}.instance"), &c.instance);
-            props.set(&format!("controller.{n}.type"), &c.controller_type);
-            if let Some(cmd) = &c.command_interface {
-                props.set(&format!("controller.{n}.command_interface"), cmd);
-            }
-            props.set(
-                &format!("controller.{n}.state_interfaces"),
-                &c.state_interfaces.join(","),
-            );
-        }
-        MachineInfo {
-            controller_count: self.config.controllers.len() as u32,
-            held: self.session.is_some() as u32,
-            props: props.into_bytes(),
-        }
+        machine_info(
+            &self.agent,
+            &self.config,
+            self.lane.attached_to().as_deref(),
+            &self.tools,
+            self.lane.session_id() != 0,
+        )
     }
 
-    pub fn session(&self) -> Option<&Session> {
-        self.session.as_ref()
+    /// The session, twist and telemetry half, shared with the physics thread.
+    pub fn lane(&self) -> &Arc<MachineLane> {
+        &self.lane
+    }
+
+    pub fn session(&self) -> Option<Session> {
+        self.lane.session()
     }
 
     pub fn session_id(&self) -> u64 {
-        self.session.as_ref().map(|s| s.id).unwrap_or(0)
+        self.lane.session_id()
     }
 
     /// The twist the sim should apply right now. Zero once the holder has
     /// been silent longer than its hold time.
     pub fn twist(&self) -> Twist {
-        self.twist
+        self.lane.twist()
     }
 
     /// Answer every pending request and apply silence rules.
     pub fn poll(&mut self) {
-        let info = self.info();
-        serve_req(&mut self.info, |_: Ping| info.clone_for_response());
-        let all_links: Vec<LinkDesc> = self
-            .config
-            .links
-            .iter()
-            .chain(self.tool_links.iter())
-            .cloned()
-            .collect();
-        serve_que(&mut self.links, |_: Ping| link_records_for(&all_links));
+        self.lane.serve();
+        // Built only for a request that asks for them.
+        let attached = self.lane.attached_to();
+        let session = self.lane.session();
+        let (agent, config, tool_descs) = (&self.agent, &self.config, &self.tools);
+        serve_req(&mut self.info, |_: Ping| {
+            machine_info(agent, config, attached.as_deref(), tool_descs, session.is_some())
+        });
+        let tool_links = &self.tool_links;
+        serve_que(&mut self.links, |_: Ping| {
+            let all_links: Vec<LinkDesc> =
+                config.links.iter().chain(tool_links.iter()).cloned().collect();
+            link_records_for(&all_links)
+        });
         let master = self.config.machine_id.clone();
         let tools = &self.tools;
         serve_que(&mut self.tools_q, |_: Ping| {
@@ -343,101 +501,43 @@ impl MachineAgent {
                 }
             }
         }
-        let attached_to = self.attached_to.clone();
-
+        let description = &self.description;
+        serve_req(&mut self.describe, |_: Ping| MachineDescription {
+            generation: description.generation,
+            manifest: description.manifest.clone(),
+        });
+        while let Ok(Some(pending)) = self.joint_command.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<JointCommand>(sample.header().type_hash, sample.payload()) {
+                Ok(req) => self.pending_joint_commands.push((req, token)),
+                Err(err) => {
+                    let ack = JointCommandAck {
+                        status: command_status::REJECTED,
+                        code: code::USAGE,
+                        message: err.to_string().into_bytes(),
+                        ..Default::default()
+                    };
+                    let _ = self.joint_command.respond_pending(token, &pack(&ack));
+                }
+            }
+        }
+        while let Ok(Some(pending)) = self.control.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<ControlRequest>(sample.header().type_hash, sample.payload()) {
+                Ok(req) => self.pending_control.push((req, token)),
+                Err(err) => {
+                    let response = ControlResponse {
+                        code: code::USAGE,
+                        props: Props::from_pairs(&[("message", err.to_string().as_str())]).into_bytes(),
+                        ..Default::default()
+                    };
+                    let _ = self.control.respond_pending(token, &pack(&response));
+                }
+            }
+        }
         let now = Instant::now();
-        let mut session = self.session.take();
-        let mut next_session = self.next_session;
-        serve_req(&mut self.claim, |req: ClaimRequest| {
-            if let Some(master) = &attached_to {
-                return ClaimResponse {
-                    session: 0,
-                    code: code::REFUSED,
-                    _pad: 0,
-                    props: Props::from_pairs(&[
-                        ("attached_to", master.as_str()),
-                        (
-                            "message",
-                            "machine is attached; command it through its master",
-                        ),
-                    ])
-                    .into_bytes(),
-                };
-            }
-            if let Some(held) = &session
-                && req.take == 0
-                && now.duration_since(held.last_cmd) < AUTO_RELEASE
-            {
-                return ClaimResponse::busy(&held.holder);
-            }
-            let id = next_session;
-            next_session += 1;
-            let hold = if req.hold_ms == 0 {
-                DEFAULT_HOLD
-            } else {
-                Duration::from_millis(req.hold_ms as u64)
-            };
-            session = Some(Session {
-                id,
-                holder: req.client(),
-                since: now,
-                last_cmd: now,
-                hold,
-            });
-            ClaimResponse::granted(id)
-        });
-        self.next_session = next_session;
-
-        let mut twist = self.twist;
-        serve_req(&mut self.cmd_vel, |req: TwistCmd| {
-            if let Some(master) = &attached_to {
-                return Status::with(
-                    code::REFUSED,
-                    &[
-                        ("attached_to", master.as_str()),
-                        (
-                            "message",
-                            "machine is attached; command it through its master",
-                        ),
-                    ],
-                );
-            }
-            match &mut session {
-                Some(held) if held.id == req.session => {
-                    held.last_cmd = now;
-                    twist = req.twist;
-                    Status::ok()
-                }
-                Some(held) => Status::with(
-                    code::BUSY,
-                    &[("holder", &held.holder), ("message", "machine is held")],
-                ),
-                None if req.session == 0 => {
-                    twist = req.twist;
-                    Status::ok()
-                }
-                None => Status::err(code::REFUSED, "no such session; claim first"),
-            }
-        });
-
-        serve_req(&mut self.release, |req: SessionRef| match &session {
-            Some(held) if held.id == req.session || req.session == 0 => {
-                session = None;
-                twist = Twist::zero();
-                Status::ok()
-            }
-            Some(_) => Status::err(code::REFUSED, "session id does not match holder"),
-            None => Status::ok(),
-        });
-
         let mut commands = std::mem::take(&mut self.commands);
-        let mut tf_enabled = self.tf_enabled;
         serve_req(&mut self.cmd, |req: ControllerCommand| {
-            // Switching the tf stream is a read-only concern; no session needed.
-            if let Some(flag) = req.props().get("tf") {
-                tf_enabled = matches!(flag.as_str(), "on" | "1" | "true");
-                return Status::ok();
-            }
             match &session {
                 Some(held) if held.id == req.session => {
                     commands.push(req);
@@ -451,17 +551,26 @@ impl MachineAgent {
             }
         });
         self.commands = commands;
-        self.tf_enabled = tf_enabled;
 
-        if let Some(held) = &session {
-            let idle = now.duration_since(held.last_cmd);
-            if idle > AUTO_RELEASE {
-                session = None;
-                twist = Twist::zero();
-            } else if idle > held.hold {
-                twist = Twist::zero();
+        let mut emits = std::mem::take(&mut self.emits);
+        serve_req(&mut self.emit, |req: EmitRequest| {
+            if req.link().is_empty() {
+                return Status::err(code::REFUSED, "emit request names no link");
             }
-        }
+            emits.push(req);
+            Status::ok()
+        });
+        self.emits = emits;
+
+        let mut actuations = std::mem::take(&mut self.actuations);
+        serve_req(&mut self.actuate, |req: ActuatorCommand| {
+            if req.device().is_empty() {
+                return Status::err(code::REFUSED, "actuator command names no device");
+            }
+            actuations.push(req);
+            Status::ok()
+        });
+        self.actuations = actuations;
 
         let info = SessionInfo {
             session: session.as_ref().map(|s| s.id).unwrap_or(0),
@@ -482,28 +591,19 @@ impl MachineAgent {
             .into_bytes(),
         };
         serve_req(&mut self.session_q, |_: Ping| info.clone_for_response());
-
-        self.session = session;
-        self.twist = twist;
     }
 
-    pub fn tf_enabled(&self) -> bool {
-        self.tf_enabled
-    }
-
-    pub fn publish_link_pose(&mut self, pose: &LinkPose) {
-        let _ = self.tf_pub.send(&pack(pose));
-    }
-
-    pub fn attached_to(&self) -> Option<&str> {
-        self.attached_to.as_deref()
+    pub fn attached_to(&self) -> Option<String> {
+        self.lane.attached_to()
     }
 
     pub fn set_attached_to(&mut self, master: Option<String>) {
-        self.attached_to = master;
-        if self.attached_to.is_some() {
-            self.clear_session();
+        let mut lane = self.lane.lock();
+        if master.is_some() {
+            lane.session = None;
+            lane.twist = Twist::zero();
         }
+        lane.attached_to = master;
     }
 
     pub fn tools(&self) -> &[ToolDesc] {
@@ -513,8 +613,25 @@ impl MachineAgent {
     /// Replace the composite below this machine: its attachments and the
     /// slaves' links re-parented under the hitch links.
     pub fn set_tools(&mut self, tools: Vec<ToolDesc>, tool_links: Vec<LinkDesc>) {
+        self.lane.lock().slaves = tools.iter().map(|t| t.slave.clone()).collect();
         self.tools = tools;
         self.tool_links = tool_links;
+    }
+
+    pub fn respond_joint_command(&mut self, token: ReqReplyToken, ack: &JointCommandAck) {
+        let _ = self.joint_command.respond_pending(token, &pack(ack));
+    }
+
+    pub fn respond_control(&mut self, token: ReqReplyToken, response: &ControlResponse) {
+        let _ = self.control.respond_pending(token, &pack(response));
+    }
+
+    pub fn publish_joint_state(&mut self, state: &JointState) {
+        let _ = self.joint_state_pub.send(&pack(state));
+    }
+
+    pub fn publish_tf(&mut self, tf: &Tf) {
+        let _ = self.tf_pub.send(&pack(tf));
     }
 
     pub fn respond_attach(&mut self, token: ReqReplyToken, status: &Status) {
@@ -525,46 +642,78 @@ impl MachineAgent {
         let _ = self.detach.respond_pending(token, &pack(status));
     }
 
-    pub fn publish_state(&mut self, mut state: MachineState) {
-        state.session = self.session_id();
-        let _ = self.odom_pub.send(&pack(&state.odom));
-        let _ = self.state_pub.send(&pack(&state));
+    fn sensor_pub(&mut self, link: &str) -> Option<&mut Registered<Publisher<Env>>> {
+        if !self.sensor_pubs.contains_key(link) {
+            let topic = machine_sensor_topic(&self.config.machine_id, link);
+            let publisher = self.agent.publish(&topic).ok()?;
+            self.sensor_pubs.insert(link.to_string(), publisher);
+        }
+        self.sensor_pubs.get_mut(link)
     }
 
-    pub fn publish_encoders(&mut self, encoders: &WheelEncoders) {
-        let _ = self.encoders_pub.send(&pack(encoders));
+    /// Whether anyone subscribes to the named sensor link's topic right now.
+    /// Registers the topic, so a subscriber can find it before its first frame.
+    pub fn sensor_subscribed(&mut self, link: &str) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.subscriber_count() > 0)
     }
 
-    pub fn publish_imu(&mut self, imu: &Imu) {
-        let _ = self.imu_pub.send(&pack(imu));
+    /// A simulated IMU reading of the named sensor link (`datapod.imu.v1`);
+    /// `false` when the link's publisher could not be registered or the
+    /// send was refused.
+    pub fn publish_sensor_imu(&mut self, link: &str, imu: &Imu) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(imu)).is_ok())
     }
 
-    pub fn publish_gnss(&mut self, gnss: &Gnss) {
-        let _ = self.gnss_pub.send(&pack(gnss));
+    /// One chunk of a simulated LiDAR sweep of the named sensor link.
+    pub fn publish_sensor_lidar(&mut self, link: &str, scan: &LidarScan) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(scan)).is_ok())
     }
 
-    pub fn publish_turn_radius(&mut self, turn_radius: &TurnRadius) {
-        let _ = self.turn_radius_pub.send(&pack(turn_radius));
+    /// One row band of a simulated camera frame of the named sensor link.
+    pub fn publish_sensor_camera(&mut self, link: &str, frame: &CameraFrame) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(frame)).is_ok())
+    }
+
+    /// One reading of a generic sensor link.
+    pub fn publish_sensor_measurement(&mut self, link: &str, reading: &Measurement) -> bool {
+        self.sensor_pub(link)
+            .is_some_and(|publisher| publisher.send(&pack(reading)).is_ok())
+    }
+
+    /// One reading of an actuator device on `actuators/<device>`.
+    pub fn publish_actuator_measurement(&mut self, device: &str, reading: &Measurement) -> bool {
+        if !self.actuator_pubs.contains_key(device) {
+            let topic = topics::machine_actuator_topic(&self.config.machine_id, device);
+            let Ok(publisher) = self.agent.publish(&topic) else {
+                return false;
+            };
+            self.actuator_pubs.insert(device.to_string(), publisher);
+        }
+        self.actuator_pubs
+            .get_mut(device)
+            .is_some_and(|publisher| publisher.send(&pack(reading)).is_ok())
+    }
+
+    /// Links whose sensor stream has been registered so far.
+    pub fn sensor_links(&self) -> Vec<String> {
+        let mut links: Vec<String> = self.sensor_pubs.keys().cloned().collect();
+        links.sort();
+        links
     }
 
     pub fn clear_session(&mut self) {
-        self.session = None;
-        self.twist = Twist::zero();
+        let mut lane = self.lane.lock();
+        lane.session = None;
+        lane.twist = Twist::zero();
     }
 }
 
 trait CloneForResponse {
     fn clone_for_response(&self) -> Self;
-}
-
-impl CloneForResponse for MachineInfo {
-    fn clone_for_response(&self) -> Self {
-        Self {
-            controller_count: self.controller_count,
-            held: self.held,
-            props: self.props.clone(),
-        }
-    }
 }
 
 impl CloneForResponse for SessionInfo {
@@ -612,6 +761,57 @@ impl ToolDesc {
 }
 
 /// Records for a link list, parents resolved by name within the list.
+fn machine_info(
+    agent: &Agent,
+    config: &MachineConfig,
+    attached_to: Option<&str>,
+    tools: &[ToolDesc],
+    held: bool,
+) -> MachineInfo {
+    let mut props = Props::from_pairs(&[
+        ("machine_id", config.machine_id.as_str()),
+        ("kind", config.kind.as_str()),
+        ("did", &agent.did_key().unwrap_or_default()),
+        ("addr", &crate::registry::endpoint_addr_hex(&agent.endpoint_addr())),
+        ("link_count", &config.links.len().to_string()),
+        ("links_derived", &config.links_derived.to_string()),
+        ("attached_to", attached_to.unwrap_or("")),
+        (
+            "tools",
+            &tools
+                .iter()
+                .map(|t| t.slave.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        (
+            "base_link",
+            config
+                .links
+                .iter()
+                .find(|l| l.role == "base")
+                .map(|l| l.prim.as_str())
+                .unwrap_or(""),
+        ),
+    ]);
+    for (n, c) in config.controllers.iter().enumerate() {
+        props.set(&format!("controller.{n}.instance"), &c.instance);
+        props.set(&format!("controller.{n}.type"), &c.controller_type);
+        if let Some(cmd) = &c.command_interface {
+            props.set(&format!("controller.{n}.command_interface"), cmd);
+        }
+        props.set(
+            &format!("controller.{n}.state_interfaces"),
+            &c.state_interfaces.join(","),
+        );
+    }
+    MachineInfo {
+        controller_count: config.controllers.len() as u32,
+        held: held as u32,
+        props: props.into_bytes(),
+    }
+}
+
 pub fn link_records_for(links: &[LinkDesc]) -> Vec<LinkRecord> {
     let index_of = |name: &str| {
         links

@@ -44,11 +44,14 @@ struct ConcreteExtension {
     moss_normal: Handle<Image>,
     #[texture(110)]
     moss_arm: Handle<Image>,
+    /// Radians the slab grid is turned about the vertical, in x.
+    #[uniform(111)]
+    yard_turn: Vec4,
 }
 
 impl MaterialExtension for ConcreteExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_fields/concrete/shaders/material.wgsl".into()
+        "embedded://gearbox_fields/concrete/shaders/material.wesl".into()
     }
 }
 
@@ -58,9 +61,9 @@ pub(super) struct ConcretePlugin {
 
 impl Plugin for ConcretePlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/yard.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/yard.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/vegetation.wesl");
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_worn_001_diff.jpg");
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_worn_001_nor_gl.jpg");
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_worn_001_arm.jpg");
@@ -68,7 +71,7 @@ impl Plugin for ConcretePlugin {
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_02_nor_gl.jpg");
         bevy::asset::embedded_asset!(app, "textures/concrete_floor_02_arm.jpg");
         app.add_plugins(MaterialPlugin::<ConcreteMaterial>::default());
-        let shader = "embedded://gearbox_fields/concrete/shaders/vegetation.wgsl";
+        let shader = "embedded://gearbox_fields/concrete/shaders/vegetation.wesl";
         let density = self.weed_density;
         app.world_mut()
             .resource_mut::<FieldProfiles>()
@@ -92,6 +95,11 @@ impl Plugin for ConcretePlugin {
                         fade_end: 60.0,
                         inverse_square_thinning: false,
                         follow_grass: 0.0,
+                        cutout: false,
+                        way_only: false,
+                        worked_only: false,
+                        blade: None,
+                        sieve: None,
                         albedo: None,
                         lod_band: [0.0, 16.0],
                     },
@@ -103,6 +111,11 @@ impl Plugin for ConcretePlugin {
                         fade_end: 60.0,
                         inverse_square_thinning: false,
                         follow_grass: 0.0,
+                        cutout: false,
+                        way_only: false,
+                        worked_only: false,
+                        blade: None,
+                        sieve: None,
                         albedo: None,
                         lod_band: [16.0, 60.0],
                     },
@@ -110,6 +123,7 @@ impl Plugin for ConcretePlugin {
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 0.0,
+                workable: false,
                 surface_tint: Vec4::new(0.118, 0.118, 0.112, 1.0),
             });
     }
@@ -172,7 +186,8 @@ fn create_ground(
     trample: Handle<Image>,
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
-    _placed: crate::profile::Placed,
+    placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = ConcreteExtension {
@@ -186,6 +201,7 @@ fn create_ground(
         moss_albedo: load_scan(assets, "concrete_floor_02_diff", true),
         moss_normal: load_scan(assets, "concrete_floor_02_nor_gl", false),
         moss_arm: load_scan(assets, "concrete_floor_02_arm", false),
+        yard_turn: Vec4::new(placed.yaw, 0.0, 0.0, 0.0),
     };
     let material = world
         .resource_mut::<Assets<ConcreteMaterial>>()

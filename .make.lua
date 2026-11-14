@@ -1,7 +1,7 @@
 -- gearbox's build, as recipes. This replaced the Makefile; there is no other.
 --
 --   make            the recipes, with what each of them says it does
---   make build      everything in the workspace (debug)
+--   make build      everything in the workspace (release)
 --   make run        the simulator, through the CLI
 --   make test       the suite
 --
@@ -54,30 +54,23 @@ local function need(tool, why)
   assert(oslo.run{ "sh", "-c", "command -v " .. tool, capture = true }.ok, why)
 end
 
--- name = ... from bin/gearbox/Cargo.toml, the one place every tool here reads it from.
-local function project_name()
-  local content = oslo.fs.read("bin/gearbox/Cargo.toml") or ""
-  local name = content:match('\nname%s*=%s*"([^"]+)"') or content:match('^name%s*=%s*"([^"]+)"')
-  assert(name, "package name not found in bin/gearbox/Cargo.toml")
-  return name
+local function forwarded_args(a)
+  assert(a.args == nil or type(a.args) == "string",
+    "use --args='--planet mars --load /path/to/rover.usdz' (with = before dash-prefixed arguments)")
+  return a.args or ""
 end
 
-local NAME = project_name()
-
+-- One build, and it is the one `run`, `sim` and `cli` launch. There used to be
+-- a second recipe for the release binary, which meant `make build` could leave
+-- the binary on PATH untouched and hours old while everything looked rebuilt.
 make.recipe{
   name = "build",
-  desc = "everything in the workspace (debug) — every crate, lib and bin",
-  run = function() sh.cargo("build") end,
+  desc = "everything in the workspace (release) — every crate, lib and bin",
+  run = function() sh.cargo("build", "--release") end,
 }
 make.alias("b", "build")
-
-make.recipe{
-  name = "build-release-bin",
-  desc = "the merged gearbox binary (release)",
-  run = function()
-    sh.cargo("build", "--release", "-p", "gearbox-sim", "--bin", "gearbox")
-  end,
-}
+make.recipe{ name = "build-dev", desc = "debug simulator and command-line client",
+             run = function() sh.cargo("build", "-p", "gearbox-sim", "-p", "gearbox-cli") end }
 
 -- Debug sim with per-system Chrome tracing; run it with GEARBOX_TRACE=file.json.
 make.recipe{
@@ -101,14 +94,23 @@ make.recipe{
 make.recipe{ name = "compile", desc = "clean, then build", deps = { "clean", "build" } }
 make.alias("c", "compile")
 
+-- Vulkan comes from the system driver on NixOS (/run/opengl-driver), elsewhere from nixGL.
+local SYSTEM_VULKAN = #oslo.fs.glob("/run/opengl-driver/lib/*") > 0
+local VULKAN = SYSTEM_VULKAN and "" or "nixVulkan "
+
+local function gpu(cmd, ...)
+  if SYSTEM_VULKAN then return sh[cmd](...) end
+  return sh.nixVulkan(cmd, ...)
+end
+
 make.recipe{
   name = "run",
-  desc = "launch the simulator through the CLI (fresh Wayland detection, nixVulkan wrapper)",
-  params = { { "--args", desc = "passed through to `gearbox run`, e.g. a USD scene path" } },
+  desc = "launch the simulator through the CLI (fresh Wayland detection; nixVulkan off NixOS)",
+  params = { { "--args", desc = "gearbox run arguments; use --args='--planet mars ...'" } },
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/debug/gearbox run %s"):format(a.args or "")))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend %starget/release/gearbox run %s"):format(VULKAN, forwarded_args(a))))
   end,
 }
 make.alias("r", "run")
@@ -120,7 +122,7 @@ make.recipe{
   deps = { "build" },
   run = function(a)
     sh.sh("-c", fresh_display_env(
-      ("env WINIT_UNIX_BACKEND=$_gb_backend nixVulkan target/debug/gearbox launch %s"):format(a.args or "")))
+      ("env WINIT_UNIX_BACKEND=$_gb_backend %starget/release/gearbox launch %s"):format(VULKAN, forwarded_args(a))))
   end,
 }
 
@@ -130,40 +132,948 @@ make.recipe{
   params = { { "--args", desc = "arguments passed through to the CLI" } },
   deps = { "build" },
   run = function(a)
-    sh.sh("-c", ("target/debug/gearbox %s"):format(a.args or ""))
+    sh.sh("-c", ("target/release/gearbox %s"):format(forwarded_args(a)))
   end,
 }
 
 make.recipe{ name = "test", desc = "run all tests",
              run = function() sh.cargo("test", "--all-targets") end }
 make.alias("t", "test")
+make.recipe{ name = "test-shaders", desc = "compile custom WESL shader variants and validate the generated WGSL",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--test", "shaders", "--", "--nocapture") end }
+make.recipe{ name = "test-draw", desc = "test retained drawing contracts and renderer geometry",
+             run = function()
+               sh.bash("-n", "scripts/capture-draw.sh")
+               sh.bash("-n", "scripts/capture-draw-variants.sh")
+               sh.bash("-n", "scripts/preview-draw.sh")
+               sh.bash("-n", "scripts/focus-draw.sh")
+               sh.bash("-n", "scripts/test-draw-live.sh")
+               sh.bash("-n", "scripts/capture-draw-frames.sh")
+               sh.bash("-n", "scripts/capture-draw-sensors.sh")
+               sh.bash("-n", "scripts/capture-draw-grid.sh")
+               sh.bash("-n", "scripts/capture-draw-strokes.sh")
+               sh.bash("-n", "scripts/capture-draw-ghosts.sh")
+               sh.bash("-n", "scripts/capture-draw-frost-window.sh")
+               sh.bash("-n", "scripts/capture-draw-layout.sh")
+               sh.bash("-n", "scripts/capture-draw-drape.sh")
+               sh.bash("-n", "scripts/capture-draw-normals.sh")
+               sh.bash("-n", "scripts/draw-contact-sheets.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--test", "draw")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--lib", "wire::draw")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--lib", "plugin::draw")
+               sh.cargo("test", "--release", "-p", "gearbox-cli", "draw::")
+               sh.python3("-m", "unittest", "discover", "-s", "tests", "-p", "test_draw_world.py", "-v")
+               sh.python3("-m", "unittest", "discover", "-s", "tests", "-p", "test_draw_drape_images.py", "-v")
+               sh.python3("-m", "unittest", "discover", "-s", "tests", "-p", "test_draw_normals_images.py", "-v")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--example", "draw_gallery")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "host::draw")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "viewer::tf_overlay::tests")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "sensor_cameras::tests")
+             end }
+make.recipe{ name = "test-draw-expiry", desc = "test plugin scheduling of pending uploads and simulation lifetimes",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--lib", "plugin::draw") end }
+make.recipe{ name = "test-draw-data-fixtures", desc = "test deterministic cloud and occupancy fixtures",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_fixtures") end }
+make.recipe{ name = "test-draw-data", desc = "test typed spatial contracts, negotiation, host compatibility and fixtures",
+             deps = { "test-draw-data-json", "test-draw-data-wire" },
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data", "--test", "draw_data_descriptor", "--test", "draw_data_pages", "--test", "draw_data_envelope", "--test", "draw_data_operations", "--test", "draw_data_capabilities", "--test", "draw_data_host", "--test", "draw_data_identity", "--test", "draw_data_capture", "--test", "draw_data_status", "--test", "draw_octree", "--test", "draw_data_fixtures", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-data-host", desc = "test the native data service and legacy host compatibility without a GPU",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_host", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-stream", desc = "test bounded pages, generations, transactions and shared registry queries",
+             deps = { "test-draw-pipeline", "test-draw-writer", "test-draw-concurrency" },
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_stream", "--test", "draw_data_generation", "--test", "draw_data_transactions") end }
+make.recipe{ name = "test-draw-providers", desc = "test verified bounded local page reload, CPU ownership, cancellation and eviction",
+             run = function() sh.cargo("test", "--offline", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_providers", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-pipeline", desc = "test bounded client admission, request barriers, cancellation and completion ownership",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_pipeline", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-concurrency", desc = "test typed validation, publication cancellation and bounded listing outside the shared viewer lock",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--lib", "draw_data::concurrency_tests", "--", "--test-threads=1") end }
+make.recipe{ name = "measure-draw-data-capacity", desc = "measure real retained uploads with sequential and bounded pipelined SHM requests",
+             params = { { "--args", desc = "fake|INSTANCE [POINTS] [REPETITIONS]" } },
+             run = function(a) sh.sh("-c", "cargo run --release -p gearbox-api --no-default-features --example draw_data_capacity -- " .. forwarded_args(a)) end }
+make.recipe{ name = "test-draw-writer", desc = "test bounded typed transaction ownership, cleanup and retained acknowledgement",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_writer", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-data-json", desc = "test lossless data-envelope JSON and CLI schema inference",
+             run = function()
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_json")
+               sh.cargo("test", "--release", "-p", "gearbox-cli", "--lib", "cli::api::draw_data_tests")
+             end }
+make.recipe{ name = "build-draw-data-probe", desc = "build the native retained-data lifecycle and capacity probes",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_data_probe", "--example", "draw_data_capacity") end }
+make.recipe{ name = "test-draw-data-wire", desc = "verify frozen Rust and CLI wire fixtures",
+             run = function()
+               sh.sh("-c", "cd crates/gearbox-api/tests/fixtures/draw_data && sha256sum --check SHA256SUMS")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_wire")
+             end }
+make.recipe{ name = "update-draw-data-wire", desc = "explicitly regenerate frozen wire fixtures for review",
+             run = function()
+               sh.sh("-c", [[set -eu
+dir=crates/gearbox-api/tests/fixtures/draw_data
+mkdir -p "$dir"
+tmp=$(mktemp "$dir/wire-v1.json.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+cargo run --release -p gearbox-api --no-default-features --example draw_data_wire_fixtures > "$tmp"
+mv "$tmp" "$dir/wire-v1.json"
+cd "$dir"
+sha256sum wire-v1.json > SHA256SUMS
+]])
+             end }
+make.recipe{ name = "draw-data-fixtures", desc = "write deterministic cloud and occupancy fixture manifests",
+             params = { { "--args", desc = "OUTPUT_DIR [POINT_COUNT]" } },
+             run = function(a)
+               sh.sh("-c", "cargo run --release -p gearbox-api --no-default-features --example draw_data_fixtures -- " .. forwarded_args(a))
+             end }
+make.recipe{ name = "draw-gallery", desc = "populate a dedicated viewer with the VFX drawing catalogue",
+             params = { { "--args", desc = "INSTANCE [SCENE|all] [MACHINE]; scenes listed in scripts/capture-draw.sh" } },
+             run = function(a)
+               sh.sh("-c", "cargo run --release -p gearbox-api --no-default-features --example draw_gallery -- " .. forwarded_args(a))
+             end }
+make.recipe{ name = "build-draw-gallery", desc = "build the drawing catalogue client",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_gallery") end }
+make.recipe{ name = "test-draw-data-preview", desc = "test the explicitly legacy-rendered spatial data preview",
+             run = function()
+               sh.bash("-n", "scripts/preview-draw.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_gallery")
+             end }
+make.recipe{ name = "test-draw-parity", desc = "compare Rust and Python world drawing geometry and headers",
+             deps = { "build-draw-gallery" },
+             run = function() sh.python3("tests/compare_draw_world.py") end }
+make.recipe{ name = "test-draw-frost", desc = "verify live backdrop blur and transmitted scene colors on the GPU",
+             run = function() gpu("cargo", "test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "host::draw_frost::tests::gpu_", "--", "--ignored", "--test-threads=1") end }
+make.recipe{ name = "test-draw-cloud", desc = "test compact cloud records, validity, scientific selectors and charged ownership",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-cloud-hierarchy", desc = "verify deterministic source-preserving spatial pages, bounded construction and cancellation",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::hierarchy::", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-cloud-lod", desc = "verify global cloud selection budgets, projection, hysteresis and ready cuts",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::lod::", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-cloud-quality", desc = "verify curved paged-survey coverage under the unchanged point and scratch caps",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::lod::quality_tests::", "--", "--test-threads=1", "--nocapture") end }
+make.recipe{ name = "test-draw-cloud-selection", desc = "verify materialized per-view cloud draws and selection ownership",
+             run = function()
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_multiview_probe", "selection::", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::data::render::selection::", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-draw-cloud-selection-native", desc = "prove actual indexed draws, color reuse, replacement and pressured clear in two GPU views",
+             deps = { "build-draw-multiview" },
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh target/draw-vfx/cloud-gpu-selection/native selection"))
+             end }
+make.recipe{ name = "test-draw-cloud-lod-fixtures", desc = "verify large-cloud paging fixtures and selected ordinal admission",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_multiview_probe", "cloud_lod::", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::data::render::selection::", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-draw-cloud-lod-native", desc = "verify 100k/1M/5M clouds with unchanged point/byte caps, two views and camera motion",
+             deps = { "build-draw-multiview" },
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh target/draw-vfx/cloud-lod/native cloud-lod"))
+             end }
+make.recipe{ name = "test-draw-cloud-residency-fixtures", desc = "verify source banks larger than GPU capacity and selection demand ownership",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.python3("tests/draw_cloud_residency_images.py", "--self-test")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_multiview_probe", "residency::", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::data::render::selection::", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-draw-cloud-residency-native", desc = "prove exact source-bank eviction and reload beyond GPU capacity in two native views",
+             deps = { "build-draw-multiview" },
+             run = function() sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh target/draw-vfx/cloud-source-residency/native residency")) end }
+make.recipe{ name = "test-draw-extraction", desc = "verify charged extraction batches, deferred ownership, pressure and recovery",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::data::extract::", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-receipts", desc = "verify completed-frame receipt ownership, empty datasets and exact view transitions",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::data::receipts::tests::", "--", "--test-threads=1", "--nocapture") end }
+make.recipe{ name = "test-draw-legacy-points", desc = "test compact legacy point records and generic-renderer input parity",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-legacy-points.sh")
+               sh.python3("tests/draw_legacy_point_images.py", "--self-test")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::legacy::", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "compact_point_inputs_match_expanded_stroke_records", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-draw-legacy-points-native", desc = "compare twenty-one compact/generic point styles, transparent ordering and clear",
+             deps = { "build", "build-draw-gallery" },
+             params = { { "--args", desc = "[OUTPUT_DIR]" } },
+             run = function(a) sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-legacy-points.sh " .. forwarded_args(a))) end }
+make.recipe{ name = "verify-draw-legacy-point-images", desc = "verify compact/generic native point captures",
+             run = function() sh.python3("tests/draw_legacy_point_images.py", "target/draw-vfx/cloud-legacy/native") end }
+make.recipe{ name = "build-draw-probes", desc = "build the opt-in native drawing renderer probes",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-sim", "--features", "draw-probes") end }
+make.recipe{ name = "test-draw-upload-fairness", desc = "verify early typed/legacy progress under concurrent large cloud uploads",
+             deps = { "build-draw-multiview" },
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh target/draw-vfx/cloud-fair-uploads/native upload-fairness"))
+             end }
+make.recipe{ name = "test-draw-upload-scheduler", desc = "verify bounded shared upload turns and recreation-order fairness",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::data::upload", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-upload-fixtures", desc = "verify native upload stress fixtures and bounded recovery policy",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_multiview_probe", "upload_fairness::", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-headless-frames", desc = "verify bounded headless GPU frame ordering and viewport dimensions",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "headless::", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-upload-recovery", desc = "verify upload-window multiview, CPU denial and million-point recovery with one feature build",
+             deps = { "build-draw-multiview", "build-draw-gallery", "build-draw-cloud-preview", "build-draw-cloud-scale" },
+             run = function()
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-multiview.sh"))
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh target/draw-vfx/cloud-upload-churn/cpu-native cpu-lifecycle"))
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh target/draw-vfx/cloud-upload-churn/legacy-native legacy-admission"))
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-cloud-scale.sh"))
+             end }
+make.recipe{ name = "test-draw-auxiliary", desc = "verify native frost allocation, quota denial, recovery, resize and release",
+             deps = { "build-draw-multiview" },
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh"))
+             end }
+make.recipe{ name = "test-draw-auxiliary-fixtures", desc = "check native frost accounting fixtures, dimensions and image oracle",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.python3("tests/draw_auxiliary_images.py", "--test")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_multiview_probe")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::frost::", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-draw-cpu-lifecycle", desc = "verify native namespace clear and deletion during CPU snapshot admission failure",
+             deps = { "build-draw-multiview" },
+             params = { { "--args", desc = "[OUTPUT_DIR]" } },
+             run = function(a)
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               local output = forwarded_args(a)
+               if output == "" then output = "target/draw-vfx/cloud-cpu-lifecycle/native" end
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh " .. output .. " cpu-lifecycle"))
+             end }
+make.recipe{ name = "test-draw-cpu-lifecycle-fixtures", desc = "check retirement, CPU pressure injection and two-view deletion image assertions",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.python3("tests/draw_cpu_lifecycle_images.py", "--test")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_identity", "--test", "draw_data_render", "--test", "draw_data_diagnostics", "--example", "draw_multiview_probe")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::data::", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-draw-legacy-lifecycle-fixtures", desc = "check compact legacy lifecycle fixtures, accounting oracle and launcher",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-legacy-lifecycle.sh")
+               sh.python3("tests/draw_legacy_lifecycle_images.py", "--test")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_legacy_lifecycle")
+             end }
+make.recipe{ name = "test-draw-legacy-admission", desc = "verify compact legacy CPU denial preserves drawings and retries without generic fallback",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::lifecycle_tests::compact_", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-legacy-admission-native", desc = "verify two-view legacy preservation, retry and deletion under full CPU pressure",
+             deps = { "build-draw-multiview" },
+             params = { { "--args", desc = "[OUTPUT_DIR]" } },
+             run = function(a)
+               sh.bash("-n", "scripts/probe-draw-auxiliary.sh")
+               sh.python3("tests/draw_cpu_lifecycle_images.py", "--test")
+               local output = forwarded_args(a)
+               if output == "" then output = "target/draw-vfx/cloud-legacy-admission/native" end
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-auxiliary.sh " .. output .. " legacy-admission"))
+             end }
+make.recipe{ name = "test-draw-legacy-lifecycle", desc = "verify native legacy mutations, fallback transitions, TTL and compact allocation release",
+             deps = { "build-draw-probes" },
+             run = function()
+               sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_legacy_lifecycle")
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-legacy-lifecycle.sh"))
+             end }
+make.recipe{ name = "verify-draw-legacy-lifecycle-images", desc = "verify native legacy lifecycle and dual-view frame captures",
+             run = function() sh.python3("tests/draw_legacy_lifecycle_images.py", "target/draw-vfx/cloud-legacy-integration/lifecycle") end }
+make.recipe{ name = "build-draw-multiview", desc = "build the opt-in native multiview renderer proof and its typed writer",
+             deps = { "build-draw-probes" },
+             run = function()
+               sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_multiview_probe")
+             end }
+make.recipe{ name = "test-draw-multiview-fixtures", desc = "test cloud contracts and opt-in view registration with native probe integration enabled",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-multiview.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--features", "draw-probes", "--bin", "gearbox", "draw::data::", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "verify-draw-multiview-images", desc = "verify complete generations through readiness and GPU quota stalls in twenty native readbacks",
+             run = function() sh.python3("tests/draw_multiview_images.py", "target/draw-vfx/cloud-multiview/native") end }
+make.recipe{ name = "probe-draw-multiview", desc = "prove independent completed native views with a stalled replacement page",
+             deps = { "build-draw-multiview", "build-draw-gallery", "build-draw-cloud-preview" },
+             run = function() sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-multiview.sh")) end }
+make.recipe{ name = "test-draw-render-status", desc = "test shared GPU charges, exact renderer failures and retained status compatibility",
+             run = function() sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_render", "--test", "draw_data_diagnostics", "--test", "draw_data_transactions", "--", "--test-threads=1") end }
+make.recipe{ name = "test-draw-visibility", desc = "test exact-view completion, supersession, bounded history and callback invalidation",
+             run = function()
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_data_visibility", "--test", "draw_data_render", "--test", "draw_data_status", "--test", "draw_data_transactions", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--lib", "client::draw_data::visibility::", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "build-draw-render-status-probe", desc = "build the native renderer resource and failure probe",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_render_status_probe") end }
+make.recipe{ name = "probe-draw-render-status", desc = "check renderer failures, recovery and deferred GPU release in the owned preview",
+             deps = { "build-draw-render-status-probe" },
+             run = function() sh.bash("scripts/probe-draw-render-status.sh") end }
+make.recipe{ name = "test-draw-cloud-gpu", desc = "verify production cloud colors, clipping, compact offsets and million-sample GPU allocations",
+             run = function() gpu("cargo", "test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::gpu_tests::", "--", "--ignored", "--test-threads=1", "--nocapture") end }
+make.recipe{ name = "test-draw-cloud-projection", desc = "verify production radius units, projection, finite extremes and coverage on GPU",
+             run = function() gpu("cargo", "test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::gpu_tests::projection::", "--", "--ignored", "--test-threads=1", "--nocapture") end }
+make.recipe{ name = "capture-draw-frost-window", desc = "capture the three glass finishes across native Hyprland window resizes",
+             deps = { "build" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; requires a running Hyprland compositor" } },
+             run = function(a) sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/capture-draw-frost-window.sh " .. forwarded_args(a))) end }
+make.recipe{ name = "capture-draw-layout", desc = "capture side-by-side world panels in narrow native windows",
+             deps = { "build" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; GEARBOX_CAPTURE_BIN selects a comparison binary" } },
+             run = function(a) sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/capture-draw-layout.sh " .. forwarded_args(a))) end }
+make.recipe{ name = "test-draw-live", desc = "verify retained lifecycle and Rust and CLI updates in a running viewer",
+             deps = { "build", "build-draw-gallery", "build-draw-data-probe" },
+             params = { { "--args", desc = "new|INSTANCE; new starts and stops an isolated headless viewer" } },
+             run = function(a)
+               local instance = forwarded_args(a)
+               assert(instance:match("^[%w_-]+$"), "provide exactly one instance name")
+               sh.bash("scripts/test-draw-live.sh", instance)
+             end }
+make.recipe{ name = "capture-draw-frames", desc = "capture world, odom, live-link and snapshot drawing transitions",
+             params = { { "--args", desc = "new|INSTANCE [OUTPUT_DIR]; new runs an isolated headless probe" } },
+             run = function(a) sh.sh("-c", "bash scripts/capture-draw-frames.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "test-draw-sensors", desc = "verify viewer drawings are excluded from real camera sensor frames",
+             deps = { "build", "build-draw-gallery", "build-draw-cloud-sensors" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; launches and stops an isolated headless viewer" } },
+             run = function(a) sh.sh("-c", "bash scripts/capture-draw-sensors.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "build-draw-cloud-sensors", desc = "build the typed-cloud native sensor exclusion probe",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_cloud_sensors") end }
+make.recipe{ name = "test-draw-cloud-sensor-fixtures", desc = "test typed sensor fixtures, image oracle and launcher syntax",
+             run = function()
+               sh.bash("-n", "scripts/capture-draw-sensors.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_cloud_sensors")
+               sh.sh("-c", "PYTHONPATH=../../.python-packages python3 tests/draw_cloud_sensor_images.py --test")
+             end }
+make.recipe{ name = "build-draw-cloud-frames", desc = "build the typed-cloud native frame transition probe",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_cloud_frames") end }
+make.recipe{ name = "test-draw-cloud-frame-fixtures", desc = "test typed frame fixtures, image oracle and launcher syntax",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-cloud-frames.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_cloud_frames")
+               sh.sh("-c", "PYTHONPATH=../../.python-packages python3 tests/draw_cloud_frame_images.py --test")
+             end }
+make.recipe{ name = "test-draw-cloud-frames", desc = "verify native world, odom, live-link and captured cloud placement with GPU record reuse",
+             deps = { "build-draw-probes", "build-draw-cloud-frames" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; launches and stops an isolated headless probe" } },
+             run = function(a) sh.sh("-c", "bash scripts/probe-draw-cloud-frames.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "test-draw-grid", desc = "compare terrain-grid updates with fresh geometry in an isolated viewer",
+             deps = { "build", "build-draw-gallery" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; GEARBOX_CAPTURE_BIN selects a comparison binary" } },
+             run = function(a) sh.sh("-c", "bash scripts/capture-draw-grid.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "test-draw-strokes", desc = "compare coarse and subdivided strokes across near-plane and distant views",
+             deps = { "build", "build-draw-gallery" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; GEARBOX_CAPTURE_BIN selects a comparison binary" } },
+             run = function(a) sh.sh("-c", "bash scripts/capture-draw-strokes.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "test-draw-ghosts", desc = "verify retained ghosts across real source-machine load, removal and reload",
+             deps = { "build" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; GEARBOX_CAPTURE_BIN selects a comparison binary" } },
+             run = function(a) sh.sh("-c", "bash scripts/capture-draw-ghosts.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "test-draw-drape", desc = "compare implicit and explicit origin instances over native terrain",
+             deps = { "build", "build-draw-gallery" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; GEARBOX_CAPTURE_BIN selects a comparison binary" } },
+             run = function(a) sh.sh("-c", "bash scripts/capture-draw-drape.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "test-draw-normals", desc = "compare OBJ normals and concave faces with native reference triangles",
+             deps = { "build", "build-draw-gallery" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; GEARBOX_CAPTURE_BIN selects a comparison binary" } },
+             run = function(a) sh.sh("-c", "bash scripts/capture-draw-normals.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "capture-draw", desc = "capture the drawing catalogue in a dedicated viewer",
+             deps = { "build", "build-draw-gallery" },
+             params = { { "--args", desc = "[OUTPUT_DIR] [window|headless] [SCENES]; GEARBOX_CAPTURE_FOCI optionally limits exhibition targets" } },
+             run = function(a)
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/capture-draw.sh " .. forwarded_args(a)))
+             end }
+make.recipe{ name = "capture-draw-variants", desc = "capture drawing controls, view angles and timed dense scenes",
+             deps = { "build", "build-draw-gallery" },
+             params = { { "--args", desc = "[OUTPUT_DIR]; GEARBOX_CAPTURE_BIN optionally selects a comparison binary" } },
+             run = function(a)
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/capture-draw-variants.sh " .. forwarded_args(a)))
+             end }
+make.recipe{ name = "draw-contact-sheets", desc = "tile captured catalogue bays for visual inspection",
+             params = { { "--args", desc = "CAPTURE_DIR [window|viewport]" } },
+             run = function(a) sh.sh("-c", "bash scripts/draw-contact-sheets.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "preview-draw", desc = "rebuild and refresh a persistent drawing preview",
+             deps = { "build", "build-draw-gallery" },
+             params = { { "--args", desc = "[SCENE] [VIEW] [RECORD_SECONDS]; VIEW: keep/near/far/grazing/overview, exhibition section or B001 bay ID" } },
+             run = function(a)
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/preview-draw.sh " .. forwarded_args(a)))
+             end }
+make.recipe{ name = "build-draw-cloud-preview", desc = "build the public typed cloud-basics writer",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_cloud_basics") end }
+make.recipe{ name = "build-draw-cloud-scale", desc = "build the public million-sample survey writer",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_cloud_scale") end }
+make.recipe{ name = "test-draw-octree", desc = "test octree keys, subtree-scoped topology validation, display states, aggregates and bounded unknown",
+             run = function()
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_octree", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--lib", "draw_data::generation::occupancy_tests", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::octree", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-draw-adapters", desc = "test native LiDAR capture export and sweep assembly",
+             run = function()
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_lidar", "--test", "draw_data_capture")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "sensor_capture", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "sensors::tests::a_delayed_sweep", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "bench-draw-data", desc = "Release A scale bench: PROFILE OUTPUT (reference or low-memory); uncapped headless, warmup + measured windows, results.json and ACCEPTANCE.md",
+             deps = { "build-draw-probes" },
+             params = { { "--args", desc = "PROFILE OUTPUT, e.g. 'reference target/draw-vfx/3d-data/scale'" } },
+             run = function(a)
+               for _, example in ipairs({ "draw_bench", "draw_cloud_scale", "draw_gallery" }) do
+                 sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", example)
+               end
+               sh.sh("-c", VULKAN .. "bash scripts/bench-draw-data.sh " .. forwarded_args(a))
+             end }
+make.recipe{ name = "test-draw-surfaces", desc = "test surfel and mesh-block wire, storage, records, normal arrows, clipping and picking",
+             run = function()
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_surfaces")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::surface", "--", "--test-threads=1")
+             end }
+make.recipe{ name = "test-draw-fields", desc = "test sparse volumes and layered elevation: wire, storage, field queries, slices, layers, rolling windows, CLI and the native labs",
+             deps = { "build", "build-draw-distance-field-lab", "build-draw-terrain-layers" },
+             params = { { "--args", desc = "OUTPUT directory (default target/draw-vfx/3d-data/fields-<run>)" } },
+             run = function(a)
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--test", "draw_volumes", "--test", "draw_elevation")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::volume", "--", "--test-threads=1")
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::elevation", "--", "--test-threads=1")
+               sh.sh("-c", VULKAN .. "bash scripts/test-draw-fields.sh " .. forwarded_args(a))
+             end }
+make.recipe{ name = "build-draw-distance-field-lab", desc = "build the distance-field lab writer",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_distance_field_lab") end }
+make.recipe{ name = "build-draw-terrain-layers", desc = "build the terrain-layers lab writer",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_terrain_layers") end }
+make.recipe{ name = "preview-draw-terrain", desc = "show the terrain-layers lab (one surface coloured by elevation, slope, traversability and uncertainty; a pond hole; a rolling robot window) in the owned preview",
+             deps = { "build-draw-terrain-layers" },
+             params = { { "--args", desc = "seconds the robot drives (default 20)" } },
+             run = function(a) sh.sh("-c", "target/release/examples/draw_terrain_layers \"$(cat target/draw-vfx/live-preview/instance.txt)\" " .. forwarded_args(a)) end }
+make.recipe{ name = "preview-draw-fields", desc = "show the distance-field lab (TSDF sign and weight, supplied isosurface, ESDF clearance, oblique band, unknown checker) in the owned preview",
+             deps = { "build-draw-distance-field-lab" },
+             params = { { "--args", desc = "`sweep SECONDS` moves the oblique slice by presentation updates" } },
+             run = function(a) sh.sh("-c", "target/release/examples/draw_distance_field_lab \"$(cat target/draw-vfx/live-preview/instance.txt)\" " .. forwarded_args(a)) end }
+make.recipe{ name = "build-draw-surface-lab", desc = "build the surface lab writer",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_surface_lab") end }
+make.recipe{ name = "preview-draw-surfaces", desc = "show the surface lab (raw points, supplied surfels, supplied mesh on four fixtures) in the owned preview",
+             deps = { "build-draw-surface-lab" },
+             run = function() sh.sh("-c", "target/release/examples/draw_surface_lab \"$(cat target/draw-vfx/live-preview/instance.txt)\"") end }
+make.recipe{ name = "build-draw-pick-probe", desc = "build the native data picking probe",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_pick_probe") end }
+make.recipe{ name = "test-draw-data-native", desc = "native data picking: click, drag, cancel, sizes, clip inversion, near/far, occluded, unknown leaf, stale camera, namespace isolation, ground pick",
+             deps = { "build", "build-draw-pick-probe" },
+             params = { { "--args", desc = "OUTPUT directory (default target/draw-vfx/data-native)" } },
+             run = function(a)
+               sh.cargo("test", "--release", "-p", "gearbox-sim", "--bin", "gearbox", "draw::data::pick", "--", "--test-threads=1")
+               sh.sh("-c", VULKAN .. "bash scripts/test-draw-data-native.sh " .. forwarded_args(a))
+             end }
+make.recipe{ name = "build-draw-robot-scan", desc = "build the capture-time robot LiDAR scan writer",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_robot_scan") end }
+make.recipe{ name = "preview-draw-robot-scan", desc = "drive a LiDAR robot past parked machines in the owned preview; accumulate capture-time sweeps beside a supplied occupancy map",
+             deps = { "build-draw-robot-scan" },
+             params = { { "--args", desc = "seconds to drive (default 30)" } },
+             run = function(a) sh.sh("-c", "target/release/examples/draw_robot_scan \"$(cat target/draw-vfx/live-preview/instance.txt)\" target/release/gearbox " .. forwarded_args(a)) end }
+make.recipe{ name = "build-draw-octree-lab", desc = "build the typed occupancy octree lab writer",
+             run = function() sh.cargo("build", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_octree_lab") end }
+make.recipe{ name = "preview-draw-octree", desc = "show the octree lab (wall, free corridor, unknown gap, live split, palettes, aggregates) in the owned preview",
+             deps = { "build-draw-octree-lab" },
+             run = function() sh.sh("-c", "target/release/examples/draw_octree_lab \"$(cat target/draw-vfx/live-preview/instance.txt)\"") end }
+make.recipe{ name = "test-draw-cloud-scale", desc = "test deterministic million-point pages and scale launcher syntax",
+             run = function()
+               sh.bash("-n", "scripts/probe-draw-cloud-scale.sh")
+               sh.bash("-n", "scripts/preview-draw.sh")
+               sh.bash("-n", "scripts/capture-draw-data-views.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_cloud_scale")
+             end }
+make.recipe{ name = "probe-draw-cloud-scale", desc = "verify million-point GPU sizes, style reuse, single-page deltas and clear/reload",
+             deps = { "build-draw-probes", "build-draw-cloud-scale", "build-draw-gallery" },
+             run = function() sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/probe-draw-cloud-scale.sh")) end }
+make.recipe{ name = "preview-draw-cloud-scale", desc = "rebuild and show the million-point source-color survey in the normal viewer",
+             deps = { "build", "build-draw-cloud-scale", "build-draw-gallery" },
+             run = function() sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/preview-draw.sh cloud-scale overview")) end }
+make.recipe{ name = "preview-draw-cloud-lod", desc = "rebuild and show five million source samples with bounded camera-adaptive detail",
+             deps = { "build", "build-draw-cloud-scale", "build-draw-gallery" },
+             run = function() sh.sh("-c", fresh_display_env("GEARBOX_CLOUD_POINTS=5000000 " .. VULKAN .. "bash scripts/preview-draw.sh cloud-scale overview")) end }
+make.recipe{ name = "preview-draw-overview", desc = "open the representation overview: 5M survey, cloud variants, octree, surface, field and terrain labs side by side",
+             deps = { "build", "build-draw-cloud-scale", "build-draw-gallery", "build-draw-cloud-preview", "build-draw-octree-lab",
+                      "build-draw-surface-lab", "build-draw-distance-field-lab", "build-draw-terrain-layers", "build-draw-robot-scan" },
+             params = { { "--args", desc = "`robot` also drives the capture-time LiDAR robot" } },
+             run = function(a)
+               local robot = forwarded_args(a) == "robot" and "ROBOT=1 " or ""
+               sh.sh("-c", fresh_display_env(robot .. VULKAN .. "bash scripts/show-representation-overview.sh"))
+             end }
+make.recipe{ name = "capture-draw-overview", desc = "full-window and viewport captures of every overview bay by day and night, checked against the running binary and its log",
+             params = { { "--args", desc = "OUTPUT directory (default target/draw-vfx/3d-data/overview)" } },
+             run = function(a) sh.sh("-c", "bash scripts/capture-draw-overview.sh " .. forwarded_args(a)) end }
+make.recipe{ name = "test-draw-cloud-preview", desc = "validate typed cloud-basics payloads and preview launch syntax",
+             run = function()
+               sh.bash("-n", "scripts/preview-draw.sh")
+               sh.bash("-n", "scripts/capture-draw-data-views.sh")
+               sh.bash("-n", "scripts/probe-draw-render-status.sh")
+               sh.cargo("test", "--release", "-p", "gearbox-api", "--no-default-features", "--example", "draw_cloud_basics")
+             end }
+make.recipe{ name = "preview-draw-data", desc = "rebuild and show typed cloud-basics in the owned live preview",
+             deps = { "build", "build-draw-gallery", "build-draw-cloud-preview" },
+             params = { { "--args", desc = "cloud-basics [overview|near|grazing|keep]" } },
+             run = function(a) sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/preview-draw.sh " .. (a.args or "cloud-basics overview"))) end }
+make.recipe{ name = "capture-draw-data-views", desc = "capture typed cloud near, grazing and overview views from the current owned preview",
+             params = { { "--args", desc = "[OUTPUT_DIR]; requires make preview-draw-data first" } },
+             run = function(a) sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/capture-draw-data-views.sh " .. forwarded_args(a))) end }
+make.recipe{ name = "preview-draw-cloud-clip", desc = "rebuild and show source-frame partial, full and height-slice cloud clipping",
+             deps = { "build", "build-draw-gallery", "build-draw-cloud-preview" },
+             run = function() sh.sh("-c", fresh_display_env("GEARBOX_CLOUD_CLIP=1 " .. VULKAN .. "bash scripts/preview-draw.sh cloud-basics overview")) end }
+make.recipe{ name = "preview-draw-cloud-palettes", desc = "rebuild and show raw COSTMAP, MAP, RAW and OKABE point-cloud palettes",
+             deps = { "build", "build-draw-gallery", "build-draw-cloud-preview" },
+             run = function() sh.sh("-c", fresh_display_env("GEARBOX_CLOUD_PALETTES=1 " .. VULKAN .. "bash scripts/preview-draw.sh cloud-basics near")) end }
+make.recipe{ name = "preview-draw-cloud-clocks", desc = "rebuild and compare source-age colors across independent sensor clocks",
+             deps = { "build", "build-draw-gallery", "build-draw-cloud-preview" },
+             run = function() sh.sh("-c", fresh_display_env("GEARBOX_CLOUD_CLOCKS=1 " .. VULKAN .. "bash scripts/preview-draw.sh cloud-basics near")) end }
+make.recipe{ name = "preview-draw-cloud-precision", desc = "rebuild and show exact age windows, large integer cycles and future half ties",
+             deps = { "build", "build-draw-gallery", "build-draw-cloud-preview" },
+             run = function() sh.sh("-c", fresh_display_env("GEARBOX_CLOUD_PRECISION=1 " .. VULKAN .. "bash scripts/preview-draw.sh cloud-basics overview")) end }
+make.recipe{ name = "preview-draw-mission", desc = "open a real Husky route-following drawing demo",
+             deps = { "build" },
+             params = { { "--args", desc = "start|stop (default start)" } },
+             run = function(a)
+               sh.sh("-c", fresh_display_env(VULKAN .. "bash scripts/preview-draw-mission.sh " .. forwarded_args(a)))
+             end }
+make.recipe{ name = "test-draw-mission", desc = "test route control and telemetry-driven mission drawings",
+             run = function()
+               sh.bash("-n", "scripts/preview-draw-mission.sh")
+               sh.python3("-m", "unittest", "discover", "-s", "tests", "-p", "test_draw_mission.py", "-v")
+             end }
+make.recipe{ name = "test-launch-args", desc = "check Oslo launch argument forwarding without starting a simulator",
+             run = function() sh.bash("scripts/test-launch-args.sh") end }
+make.recipe{ name = "test-planets", desc = "test planetary frames and terrain",
+             run = function()
+               sh.cargo("test", "-p", "gearbox-globe")
+               sh.cargo("test", "-p", "bevy_weather")
+               sh.cargo("test", "-p", "gearbox-fields", "--lib")
+               sh.cargo("test", "-p", "gearbox-cli", "planet_tests")
+               sh.cargo("test", "-p", "gearbox-planet", "--lib")
+               sh.cargo("test", "-p", "gearbox-planet", "--test", "surface_handoff")
+               sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "planet_tests")
+             end }
+make.recipe{ name = "test-planet-gpu", desc = "compare production globe shader heights with local terrain on Vulkan",
+             run = function() gpu("cargo", "test", "-p", "gearbox-planet", "--test", "regolith_gpu", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-tyre-gpu", desc = "compare GPU tyre deformation with the CPU envelope",
+             run = function() gpu("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", "gpu_envelope_matches_cpu_pressure_and_ground_sweep", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-planet-geometry", desc = "check global and local planetary geometry",
+             run = function() sh.cargo("test", "-p", "gearbox-globe") end }
+make.recipe{ name = "test-render-pages", desc = "test sparse GPU buffer page boundaries",
+             run = function() sh.cargo("test", "-p", "bevy_render", "planet_sparse_page_tests") end }
+make.recipe{ name = "test-render-mesh-allocator", desc = "verify mesh allocation, empty transitions and missing-allocation diagnostics",
+             run = function() sh.cargo("test", "--release", "-p", "bevy_render", "--lib", "mesh::allocator::tests::", "--", "--test-threads=1") end }
+make.recipe{ name = "test-planet-gravity", desc = "measure native gravity after imported USD scenes on each planet",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "planet_gravity_all_bodies", "--", "--nocapture") end }
+make.recipe{ name = "test-sim", desc = "run the simulator's tests matching --filter=NAME",
+             params = { { "--filter", desc = "test name filter" } },
+             run = function(a)
+               assert(type(a.filter) == "string", "--filter=NAME is required")
+               sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", a.filter)
+             end }
+make.recipe{ name = "test-greenhouse", desc = "test the greenhouse model: crops, rooms, power and water",
+             run = function() sh.cargo("test", "-p", "gearbox-greenhouse") end }
+make.recipe{ name = "test-hitch", desc = "test grouped hitch control and joint compliance",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "services::") end }
+make.recipe{ name = "test-tracked-machine", desc = "test the imported GEARBOX_TRACK_ASSET through native tracked control",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "real_tracked_machine", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-fem", desc = "test native FEM scheduling",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "physics::fem") end }
+make.recipe{ name = "test-fem-machine", desc = "validate FEM binding against GEARBOX_TRACK_ASSET",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "ceol_fem_machine_binding", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-fem-visuals", desc = "validate CPU-prepared GPU visual bindings against GEARBOX_TRACK_ASSET",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "ceol_fem_visual_binding", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "export-fem-mass", desc = "export GEARBOX_TRACK_ASSET nodal properties to GEARBOX_FEM_MASS_EXPORT",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "export_ceol_fem_mass_properties", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "export-fem-energy", desc = "export CPU FEM inertia reference to GEARBOX_FEM_ENERGY_EXPORT",
+             run = function() sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "export_ceol_fem_energy_reference", "--", "--ignored", "--nocapture") end }
+make.recipe{ name = "test-fem-gpu", desc = "test native FEM on a GPU with GEARBOX_TRACK_ASSET",
+             params = { { "--filter", desc = "test name filter (default: physics::fem)" } },
+             run = function(a) gpu("cargo", "test", "-p", "gearbox-sim", "--bin", "gearbox", a.filter or "physics::fem", "--", "--ignored", "--nocapture", "--test-threads=1") end }
+
+-- Robot structure and control contract (plans/001). Each gate prints cargo's output, fails on a
+-- failing run, and fails a run that selected fewer tests than its inventory names.
+local function contract_tests(label, args, required)
+  local cmd = { "cargo", "test" }
+  for _, a in ipairs(args) do cmd[#cmd + 1] = a end
+  cmd.capture = true
+  cmd.capture_err = true
+  local r = oslo.run(cmd)
+  io.write(r.err or "", r.out or "")
+  assert(r.ok, label .. ": cargo test failed")
+  local passed = 0
+  for n in (r.out or ""):gmatch("test result: ok%. (%d+) passed") do passed = passed + tonumber(n) end
+  assert(passed > 0, label .. ": no test selected")
+  for _, name in ipairs(required) do
+    assert((r.out or ""):find(name .. " ... ok", 1, true), label .. ": required test did not pass: " .. name)
+  end
+  print(("%s: %d tests passed"):format(label, passed))
+end
+
+local function machine_contract_gate()
+  contract_tests("machine contract", { "-p", "gearbox-sim", "--bin", "gearbox", "machine_model::" },
+    { "machine_model::tests::structure_fixture_inventory_is_complete_and_passes",
+      "machine_model::tests::capability_evidence_names_real_tests" })
+end
+
+local function joint_control_gate()
+  contract_tests("joint control", { "-p", "gearbox-sim", "--bin", "gearbox", "--", "joint_control::", "physics::commit_tests::" },
+    { "joint_control::tests::command_inventory_passes", "joint_control::schedule_tests::schedule_inventory_passes",
+      "physics::commit_tests::physics_command_inventory_passes" })
+end
+
+make.recipe{
+  name = "test-machine-contract",
+  desc = "structural compiler fixtures S01-S23 and the manifest (plans/001)",
+  run = machine_contract_gate,
+}
+
+make.recipe{
+  name = "test-joint-control",
+  desc = "ownership, units, limits, targets and scheduler of the joint command contract (plans/001)",
+  run = joint_control_gate,
+}
+
+-- The real Kubota, Knoche and weed unit packages through the shared command path: hitch lift
+-- and lower, driving under pressure changes, ball_tip and tool_tip riding the moving tool
+-- bodies. Fails when the machines submodule is missing.
+local function real_machines(a)
+  local pwd = oslo.sys.pwd()
+  local tractor = a.tractor or (pwd .. "/assets/machines/usd/kubota_tractor.usdz")
+  local implement = a.implement or (pwd .. "/assets/machines/usd/knoche_disc_harrow.usdz")
+  local weedunit = a.weedunit or (pwd .. "/assets/machines/usd/weedunit.usdz")
+  for _, asset in ipairs({ tractor, implement, weedunit }) do
+    assert(oslo.fs.read(asset) ~= nil, "machines submodule asset is missing: " .. asset)
+  end
+  oslo.env.set("GEARBOX_BENCH_ASSET", tractor)
+  oslo.env.set("GEARBOX_BENCH_TRAILER", implement)
+  oslo.env.set("GEARBOX_TIP_ASSET", weedunit)
+  contract_tests("real machines", { "-p", "gearbox-sim", "--bin", "gearbox", "--",
+    "imported_tractor_lifts_and_lowers_a_mounted_implement", "imported_kubota_pressure_benchmark",
+    "real_weedunit_tips_follow_their_tool_bodies", "--ignored", "--test-threads=1" },
+    { "controller::benchmark::hitching::imported_tractor_lifts_and_lowers_a_mounted_implement",
+      "controller::benchmark::imported_kubota_pressure_benchmark",
+      "joint_control::conformance::real_weedunit_tips_follow_their_tool_bodies" })
+end
+
+make.recipe{
+  name = "test-real-machines",
+  desc = "real tractor, implement and weed unit through the joint command contract (needs the machines submodule)",
+  params = { { "--tractor", desc = "tractor package (default assets/machines/usd/kubota_tractor.usdz)" },
+             { "--implement", desc = "implement package (default assets/machines/usd/knoche_disc_harrow.usdz)" },
+             { "--weedunit", desc = "weed unit package (default assets/machines/usd/weedunit.usdz)" } },
+  run = function(a) real_machines(a) end,
+}
+
+make.recipe{
+  name = "audit-machine-assets",
+  desc = "read-only audit of every machine package under --asset-root (JSON report, nonzero when any machine is rejected)",
+  params = { { "--asset-root", desc = "directory of USD packages, e.g. assets/machines/usd" },
+             { "--out", desc = "report path (default target/robot-contract/audit-<time>.json)" } },
+  run = function(a)
+    local root = a["asset-root"] or a.asset_root
+    assert(type(root) == "string" and root ~= "", "--asset-root=DIR is required")
+    local out = a.out or ("target/robot-contract/audit-%s.json"):format(os.date("%Y%m%d-%H%M%S"))
+    sh.cargo("run", "-q", "-p", "gearbox-sim", "--bin", "gearbox", "--", "audit-machines",
+             "--asset-root", root, "--out", out)
+  end,
+}
+
+make.recipe{
+  name = "describe-machines",
+  desc = "print the compiled robot manifest of one USD file: --file=PATH [--args='--world']",
+  params = { { "--file", desc = "USD file" }, { "--args", desc = "--world or --entry PRIM" } },
+  run = function(a)
+    assert(type(a.file) == "string", "--file=PATH is required")
+    local extra = {}
+    for word in forwarded_args(a):gmatch("%S+") do extra[#extra + 1] = word end
+    sh.cargo("run", "-q", "-p", "gearbox-sim", "--bin", "gearbox", "--", "describe-machines", a.file, table.unpack(extra))
+  end,
+}
+
+make.recipe{
+  name = "write-robot-goldens",
+  desc = "rewrite the golden robot manifests on purpose; review the diff before keeping it",
+  run = function()
+    oslo.env.set("GEARBOX_WRITE_GOLDEN", "1")
+    sh.cargo("test", "-p", "gearbox-sim", "--bin", "gearbox", "write_golden_manifests", "--", "--ignored")
+  end,
+}
+
+local function control_lifecycle_gate()
+  contract_tests("control lifecycle (sim)", { "-p", "gearbox-sim", "--bin", "gearbox", "--",
+    "joint_control::lifecycle_tests::", "joint_control::tests::c07", "joint_control::tests::c16",
+    "joint_control::tests::c17", "joint_control::tests::c18", "physics::commit_tests::c18",
+    "physics::bodies::tests::a_rejected" },
+    { "joint_control::lifecycle_tests::lifecycle_inventory_passes",
+      "joint_control::lifecycle_tests::c21_leases_follow_the_session_and_a_reset_clears_them",
+      "joint_control::tests::c16_live_expiry_and_tick_replay_keep_their_clocks",
+      "joint_control::tests::c17_a_stale_generation_is_rejected",
+      "joint_control::tests::c18_reset_touches_one_robot",
+      "physics::commit_tests::c18_a_reset_dof_returns_to_its_load_time_actuator",
+      "physics::bodies::tests::a_rejected_machine_body_is_a_fixed_preview" })
+  contract_tests("control lifecycle (wire)", { "-p", "gearbox-api", "--test", "wire_control" },
+    { "control_messages_round_trip" })
+end
+
+make.recipe{
+  name = "test-control-lifecycle",
+  desc = "command lifecycle, authority, expiry, generations, reset and the control wire messages (plans/001)",
+  run = control_lifecycle_gate,
+}
+
+-- Conformance runs (plans/001) write their evidence under target/robot-contract/<run>/.
+local function contract_run_dir(kind)
+  local dir = ("%s/target/robot-contract/%s-%s"):format(oslo.sys.pwd(), kind, os.date("%Y%m%d-%H%M%S"))
+  assert(oslo.run{ "mkdir", "-p", dir }.ok, "cannot create " .. dir)
+  return dir
+end
+
+local function native_conformance(dir)
+  oslo.env.set("GEARBOX_CONFORMANCE_OUT", dir .. "/native")
+  contract_tests("control conformance", { "-p", "gearbox-sim", "--bin", "gearbox", "--",
+    "joint_control::conformance::", "controller::e03_mapping_test::", "controller::control_frame_test::",
+    "joint_control::lifecycle_tests::tf_sites_follow_their_moving_bodies", "physics::joints::tests::a_world" },
+    { "joint_control::conformance::native_conformance_arm_schedule",
+      "joint_control::conformance::native_acceleration_drive_follows_the_degree_convention",
+      "joint_control::conformance::native_conformance_arm_lifecycle",
+      "controller::e03_mapping_test::e03_native_mapping_cases",
+      "controller::control_frame_test::the_declared_control_frame_sets_the_drive_direction",
+      "joint_control::lifecycle_tests::tf_sites_follow_their_moving_bodies" })
+  print("control conformance: native evidence in " .. dir .. "/native")
+end
+
+make.recipe{
+  name = "test-control-conformance",
+  desc = "native conformance harnesses: arm schedule, drive units, drive mapping, control frame, TF sites (plans/001)",
+  run = function() native_conformance(contract_run_dir("native")) end,
+}
+
+-- Isaac Sim through the Nix launcher: each schedule runs in its own headless Kit child under a
+-- wall-clock limit, then is compared with the native run. A missing launcher fails the gate.
+local ISAAC_ROOT = "/pkg/isaacsim/6.2.0"
+local ISAAC_SCHEDULES = { "e02_arm", "e02_lifecycle", "e01_accel", "e03_mapping" }
+
+local function isaac_contract(dir)
+  local found = oslo.run{ "sh", "-c", "command -v isaacsim", capture = true }
+  assert(found.ok and found.out ~= "", "isaac contract NOT RUN: no isaacsim launcher on PATH")
+  local launcher = found.out:gsub("%s+$", "")
+  local version = oslo.fs.read(ISAAC_ROOT .. "/VERSION")
+  assert(version, "isaac contract NOT RUN: " .. ISAAC_ROOT .. "/VERSION is missing")
+  print(("isaac contract: launcher %s, Isaac %s"):format(launcher, (version:gsub("%s+$", ""))))
+  local others = oslo.run{ "sh", "-c", "pgrep -fc '[k]it.*isaacsim' || true", capture = true }
+  print("isaac contract: Kit processes already running (left alone): " .. (others.out or "?"):gsub("%s+$", ""))
+  native_conformance(dir)
+  local pwd = oslo.sys.pwd()
+  for _, name in ipairs(ISAAC_SCHEDULES) do
+    local out = dir .. "/isaac/" .. name
+    local schedule = pwd .. "/tests/fixtures/robot_contract/schedules/" .. name .. ".json"
+    assert(oslo.run{ "mkdir", "-p", out }.ok)
+    -- One Kit child per attempt; its exit status lands beside its log. Only a Kit that
+    -- never started the probe is tried again, once, and the first attempt's log is kept.
+    local function launch(log)
+      return oslo.run{ "sh", "-c", ("PROBE_SCHEDULE=%q PROBE_OUT=%q PROBE_TIMEOUT=240 timeout --kill-after=15 300 "
+        .. "%q --no-window --no-ros-env --exec %q > %q 2>&1; echo $? > %q.exit"):format(schedule, out, launcher,
+        pwd .. "/scripts/robot_contract/isaac_probe.py", log, log) }
+    end
+    launch(out .. "/kit.log")
+    if not oslo.fs.read(out .. "/status.json") then
+      local exit = (oslo.fs.read(out .. "/kit.log.exit") or "?"):gsub("%s+$", "")
+      assert(oslo.run{ "mv", out .. "/kit.log", out .. "/kit-startup-failure.log" }.ok)
+      assert(oslo.run{ "mv", out .. "/kit.log.exit", out .. "/kit-startup-failure.log.exit" }.ok)
+      print(("isaac contract: Kit exited %s before running the probe for %s; trying once more (log kept as kit-startup-failure.log)"):format(exit, name))
+      launch(out .. "/kit.log")
+    end
+    local exit = (oslo.fs.read(out .. "/kit.log.exit") or "?"):gsub("%s+$", "")
+    local probe = { ok = exit == "0" }
+    local status = oslo.fs.read(out .. "/status.json")
+    assert(status, ("isaac contract: Kit exited %s and ran no probe for %s (startup failure or --exec syntax); see %s/kit.log"):format(exit, name, out))
+    assert(probe.ok, ("isaac contract: probe %s did not complete: %s"):format(name, status))
+    local compared = oslo.run{ "python3", pwd .. "/scripts/robot_contract/compare.py", "--schedule", schedule,
+      "--native", dir .. "/native/" .. name, "--isaac", out, "--out", dir .. "/compare-" .. name .. ".json" }
+    assert(compared.ok, "isaac contract: " .. name .. " differs; see " .. dir .. "/compare-" .. name .. ".json")
+  end
+  local evidence = { "python3", pwd .. "/scripts/robot_contract/evidence.py", "--run", dir, "--launcher", launcher,
+    "--isaac-root", ISAAC_ROOT, "--schedules" }
+  for _, name in ipairs(ISAAC_SCHEDULES) do evidence[#evidence + 1] = name end
+  assert(oslo.run(evidence).ok, "isaac contract: run manifest reports a failure")
+  print("isaac contract: E01, E02, lifecycle, E03 and drive units pass; evidence in " .. dir)
+end
+
+make.recipe{
+  name = "test-isaac-contract",
+  desc = "same fixtures and schedules in native Gearbox and headless Isaac Sim, compared (plans/001)",
+  run = function() isaac_contract(contract_run_dir("isaac")) end,
+}
+
+make.recipe{
+  name = "verify-robot-contract",
+  desc = "every robot-contract gate in turn; reports which passed and fails if any did not (plans/001)",
+  run = function()
+    local pwd = oslo.sys.pwd()
+    local gates = {
+      { "machine contract", machine_contract_gate },
+      { "joint control", joint_control_gate },
+      { "control lifecycle", control_lifecycle_gate },
+      { "hitch and services", function()
+        contract_tests("hitch", { "-p", "gearbox-sim", "--bin", "gearbox", "services::" }, {}) end },
+      { "isaac contract (with native conformance)", function() isaac_contract(contract_run_dir("verify")) end },
+      { "asset audit", function()
+        sh.cargo("run", "-q", "-p", "gearbox-sim", "--bin", "gearbox", "--", "audit-machines", "--asset-root",
+          pwd .. "/assets/machines/usd", "--out", pwd .. "/target/robot-contract/audit-verify.json") end },
+      { "real machines", function() real_machines({}) end },
+    }
+    local failed = {}
+    for _, gate in ipairs(gates) do
+      local ok, err = pcall(gate[2])
+      gate.ok, gate.err = ok, err
+      if not ok then failed[#failed + 1] = gate[1] end
+    end
+    print("\nrobot contract gates:")
+    for _, gate in ipairs(gates) do
+      print(("  %-42s %s%s"):format(gate[1], gate.ok and "pass" or "FAIL", gate.ok and "" or ("  " .. tostring(gate.err))))
+    end
+    assert(#failed == 0, "robot contract: failed gates: " .. table.concat(failed, ", "))
+  end,
+}
+
+-- Machine packages to and from Blender (assets/machines/scripts/gearbox_usd), in the Blender flatpak.
+local function blender(log, blend, ...)
+  local pwd = oslo.sys.pwd()
+  local words = { "flatpak", "run", "--filesystem=" .. pwd, "--talk-name=org.freedesktop.Flatpak", "org.blender.Blender", "--background" }
+  words[#words + 1] = blend or "--factory-startup"
+  for _, w in ipairs({ "--python", pwd .. "/assets/machines/scripts/gearbox_usd/cli.py", "--", ... }) do words[#words + 1] = w end
+  local quoted = {}
+  for i, w in ipairs(words) do quoted[i] = ("%q"):format(w) end
+  local r = oslo.run{ "sh", "-c", table.concat(quoted, " ") .. (" > %q 2>&1"):format(log) }
+  for line in (oslo.fs.read(log) or ""):gmatch("[^\n]+") do
+    if line:find("gearbox_usd:", 1, true) or line:find("Error", 1, true) then print(line) end
+  end
+  return r.ok
+end
+
+local function machine_names(a)
+  if a.machine then return { a.machine } end
+  local names = {}
+  local listed = oslo.run{ "sh", "-c", "ls assets/machines/usd/*.usdz", capture = true }
+  for path in (listed.out or ""):gmatch("[^\n]+") do names[#names + 1] = path:match("([^/]+)%.usdz$") end
+  return names
+end
+
+-- Packages with a Blender source; the others are not built in Blender and are skipped.
+local function blend_names(a, label)
+  local names = {}
+  for _, name in ipairs(machine_names(a)) do
+    if #oslo.fs.glob(oslo.sys.pwd() .. "/assets/machines/blender/" .. name .. ".blend") > 0 then
+      names[#names + 1] = name
+    else
+      print(("%s: %-26s skip (no .blend)"):format(label, name))
+    end
+  end
+  return names
+end
+
+-- Same compiled machines in two packages, by `gearbox describe-machines`.
+local function same_model(a, b, dir)
+  local described = {}
+  for i, file in ipairs({ a, b }) do
+    described[i] = ("%s/%s.%d.json"):format(dir, file:match("([^/]+)%.usdz$"), i)
+    oslo.run{ "sh", "-c", ("target/debug/gearbox describe-machines %q > %q 2>/dev/null || true"):format(file, described[i]) }
+  end
+  local check = [[
+import json, sys
+a, b = (json.load(open(p))["machines"] for p in sys.argv[1:3])
+for m in a + b:
+    m.pop("load_instance", None)
+sys.exit(0 if a == b and a else 1)
+]]
+  return oslo.run{ "python3", "-I", "-c", check, described[1], described[2] }.ok
+end
+
+make.recipe{
+  name = "blender-import",
+  desc = "load a machine package into a .blend: --package=PATH [--blend=PATH, default assets/machines/blender/<name>.blend]",
+  params = { { "--package", desc = "machine package (.usdz)" }, { "--blend", desc = ".blend to write" } },
+  run = function(a)
+    assert(type(a.package) == "string", "--package=PATH is required")
+    local blend = a.blend or ("assets/machines/blender/" .. a.package:match("([^/]+)%.usdz$") .. ".blend")
+    assert(oslo.run{ "mkdir", "-p", "target/blender" }.ok)
+    assert(blender("target/blender/import.log", nil, "import", a.package, blend), "blender-import failed; see target/blender/import.log")
+  end,
+}
+
+make.recipe{
+  name = "blender-export",
+  desc = "write a .blend's machine as a package: --blend=PATH [--package=PATH, default assets/machines/usd/<name>.usdz]",
+  params = { { "--blend", desc = ".blend to export" }, { "--package", desc = "machine package (.usdz) to write" } },
+  run = function(a)
+    assert(type(a.blend) == "string", "--blend=PATH is required")
+    local out = a.package or ("assets/machines/usd/" .. a.blend:match("([^/]+)%.blend$") .. ".usdz")
+    assert(oslo.run{ "mkdir", "-p", "target/blender" }.ok)
+    assert(blender("target/blender/export.log", a.blend, "export", out), "blender-export failed; see target/blender/export.log")
+  end,
+}
+
+make.recipe{
+  name = "test-blender-roundtrip",
+  desc = "every package with a .blend (or --machine=NAME) through Blender and back: same specs, files and compiled machines",
+  params = { { "--machine", desc = "one package name, e.g. kubota_tractor" } },
+  run = function(a)
+    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
+    local dir = oslo.sys.pwd() .. "/target/blender/roundtrip"
+    assert(oslo.run{ "mkdir", "-p", dir }.ok)
+    local failed = {}
+    for _, name in ipairs(blend_names(a, "blender roundtrip")) do
+      local package = oslo.sys.pwd() .. "/assets/machines/usd/" .. name .. ".usdz"
+      local ok = blender(dir .. "/" .. name .. ".log", nil, "roundtrip", package, dir)
+      ok = ok and same_model(package, dir .. "/" .. name .. ".usdz", dir)
+      print(("blender roundtrip: %-26s %s"):format(name, ok and "pass" or "FAIL"))
+      if not ok then failed[#failed + 1] = name end
+    end
+    local husky = oslo.sys.pwd() .. "/assets/machines/usd/clearpath_husky.usdz"
+    local edited = dir .. "/clearpath_husky.edited.usdz"
+    local accepted = [[
+import json, sys
+sys.exit(0 if all(m["accepted"] for m in json.load(open(sys.argv[1]))["machines"]) else 1)
+]]
+    local ok = blender(dir .. "/edits.log", nil, "edits", husky, edited)
+    oslo.run{ "sh", "-c", ("target/debug/gearbox describe-machines %q > %q 2>/dev/null || true"):format(edited, edited .. ".json") }
+    ok = ok and oslo.run{ "python3", "-I", "-c", accepted, edited .. ".json" }.ok
+    print(("blender roundtrip: %-26s %s"):format("edits in Blender", ok and "pass" or "FAIL"))
+    if not ok then failed[#failed + 1] = "edits" end
+    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
+    local addon = blender(dir .. "/addon.log", nil, "addon-check", oslo.sys.pwd() .. "/assets/machines/blender/clearpath_husky.blend", dir .. "/clearpath_husky.addon.usdz")
+    print(("blender roundtrip: %-26s %s"):format("add-on with Gearbox check", addon and "pass" or "FAIL"))
+    if not addon then failed[#failed + 1] = "add-on" end
+    assert(#failed == 0, "blender roundtrip failed: " .. table.concat(failed, ", "))
+  end,
+}
+
+make.recipe{
+  name = "test-blender-export",
+  desc = "export every assets/machines/blender .blend (or --machine=NAME) and check it equals its committed package; packages without one are skipped",
+  params = { { "--machine", desc = "one machine name, e.g. kubota_tractor" } },
+  run = function(a)
+    sh.cargo("build", "-p", "gearbox-sim", "--bin", "gearbox")
+    local pwd = oslo.sys.pwd()
+    local dir = pwd .. "/target/blender/export"
+    assert(oslo.run{ "mkdir", "-p", dir }.ok)
+    local failed = {}
+    for _, name in ipairs(blend_names(a, "blender export")) do
+      local blend, package, out = pwd .. "/assets/machines/blender/" .. name .. ".blend", pwd .. "/assets/machines/usd/" .. name .. ".usdz", dir .. "/" .. name .. ".usdz"
+      local ok = blender(dir .. "/" .. name .. ".log", blend, "export", out)
+      ok = ok and blender(dir .. "/" .. name .. ".compare.log", nil, "compare", package, out) and same_model(package, out, dir)
+      print(("blender export: %-26s %s"):format(name, ok and "pass" or "FAIL"))
+      if not ok then failed[#failed + 1] = name end
+    end
+    assert(#failed == 0, "blender export differs from the package: " .. table.concat(failed, ", "))
+  end,
+}
 
 make.recipe{ name = "check", desc = "cargo check on all targets",
              run = function() sh.cargo("check", "--all-targets") end }
 
 make.recipe{ name = "fmt", desc = "format the workspace",
              run = function() sh.cargo("fmt", "--all") end }
+make.recipe{ name = "fmt-file", desc = "format one Rust source file",
+             params = { { "--file", desc = "Rust source path" } },
+             run = function(a) assert(a.file, "--file is required"); sh.rustfmt("--edition", "2024", a.file) end }
 
 make.recipe{ name = "clean", desc = "remove Cargo build artifacts",
              run = function() sh.cargo("clean") end }
-
-make.recipe{ name = "bind", desc = "generate both C and Python bindings",
-             deps = { "bind-c", "bind-py" } }
-
-make.recipe{
-  name = "bind-c",
-  desc = "generate the C header",
-  run = function()
-    sh.cargo("build", "--lib")
-    sh.cbindgen("--config", "cbindgen.toml", "--crate", NAME, "--output", "include/" .. NAME .. ".h")
-  end,
-}
-
-make.recipe{
-  name = "bind-py",
-  desc = "generate the Python bindings",
-  run = function() sh.maturin("build", "--features", "python") end,
-}
 
 make.recipe{
   name = "docs",

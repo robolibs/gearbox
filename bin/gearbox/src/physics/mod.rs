@@ -8,27 +8,33 @@
 //! and writes poses back into `Transform`s. Values are SI; quaternions are
 //! Bevy order; `lower > upper` on a limit locks the DOF.
 //!
-//! The engine itself sits behind `backend::PhysicsBackend`; `rapier` is the
-//! reference implementation; `molla` provides CPU Featherstone dynamics.
+//! Molla is the engine: `molla` implements `backend::PhysicsBackend`, the
+//! interface the rest of gearbox steps and reads it through.
 
-mod attach;
+pub(crate) mod attach;
 #[cfg(test)]
 pub(crate) mod benchmark;
 pub mod backend;
 mod bodies;
+pub mod chassis;
 mod colliders;
+#[cfg(test)]
+mod commit_tests;
+pub(crate) mod commit;
 mod convert;
 mod debug;
+mod drive_motor;
+pub(crate) mod fem;
 mod joints;
 pub mod markers;
-mod molla;
+pub(crate) mod molla;
 #[cfg(test)]
 pub(crate) use molla::MollaBackend;
-mod rapier;
-#[cfg(test)]
-pub(crate) use rapier::RapierBackend;
 pub mod reader;
 mod scene;
+#[cfg(test)]
+mod tracks;
+mod thread;
 mod world;
 mod writeback;
 
@@ -40,10 +46,16 @@ use usd_bevy::instance::UsdInstances;
 use usd_bevy::{UsdSceneInstance, UsdSceneRoot, UsdSceneState};
 
 use convert::{quat_from_d, vec3_from_d};
+use markers::ModelMember;
 
 pub use debug::ColliderDebugEnabled;
 pub use gearbox_api::PhysicsActive;
-pub use world::{PhysicsWorld, step_physics};
+pub use thread::PhysicsThreadPlugin;
+pub(crate) use thread::{Merge, TickResourcesExt, on_the_thread, physics_on_the_frame};
+pub use world::{AuthoredDrive, ControlTick, PhysicsWorld, step_physics};
+#[cfg(test)]
+pub use world::plan_physics_steps;
+pub(crate) use world::HitchHold;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PhysicsWriteback;
@@ -55,12 +67,17 @@ pub struct PhysicsPlugin;
 
 impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(crate::prim_index::PrimIndexPlugin);
+        app.init_schedule(world::ControlTick);
         app.init_resource::<PhysicsWorld>()
             .init_resource::<PhysicsActive>()
             .init_resource::<ColliderDebugEnabled>()
             // After the clock moves: planned before it, a frame's steps would be the
             // last frame's time, and uneven frames would show as jerks.
-            .add_systems(First, world::plan_physics_steps.after(bevy::time::TimeSystems))
+            .add_systems(
+                First,
+                world::plan_physics_steps.after(bevy::time::TimeSystems).run_if(stepped_on_the_frame),
+            )
             .add_systems(
                 Update,
                 (
@@ -73,18 +90,24 @@ impl Plugin for PhysicsPlugin {
                     colliders::apply_collision_filters,
                     joints::convert_joints,
                     sync_bodies_to_transforms_on_resume,
-                    world::step_physics,
+                    world::step_physics.run_if(stepped_on_the_frame),
                     report_quarantined,
                 )
                     .chain(),
             )
             .add_systems(
                 PostUpdate,
-                writeback::writeback_transforms
-                    .in_set(PhysicsWriteback)
-                    .before(bevy::transform::TransformSystems::Propagate),
-            )
-            .add_systems(Last, debug::draw_collider_gizmos);
+                (
+                    writeback::writeback_transforms
+                        .in_set(PhysicsWriteback)
+                        .before(bevy::transform::TransformSystems::Propagate),
+                    debug::draw_collider_gizmos,
+                ),
+            );
+        let backend = app.world().resource::<PhysicsWorld>().name();
+        app.insert_resource(PhysicsBackendName(backend));
+        app.add_systems(Update, fem::advance_islands.after(world::step_physics));
+        app.add_systems(Startup, fem::render_health::install);
         if std::env::var_os("GEARBOX_TF_DEBUG").is_some() {
             app.add_systems(
                 PostUpdate,
@@ -100,6 +123,15 @@ impl Plugin for PhysicsPlugin {
 fn physics_is_active(active: Res<PhysicsActive>) -> bool {
     active.0
 }
+
+/// The frame steps the physics itself unless the physics thread does.
+fn stepped_on_the_frame(thread: Option<Res<thread::PhysicsThread>>) -> bool {
+    thread.is_none()
+}
+
+/// The engine's name, readable while the physics thread holds the world.
+#[derive(Resource)]
+pub struct PhysicsBackendName(pub &'static str);
 
 /// Name the bodies the step quarantined, with the transform the projection
 /// gave their entities, so a NaN can be traced to its prim.
@@ -168,17 +200,75 @@ fn attach_projected_stages(world: &mut World) {
                     .insert(Name::new(name.to_string()));
             }
             attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
+            attach::attach_joint_softness(world, *entity, stage, path);
             world.entity_mut(*entity).insert(PhysicsScanned);
         }
         attach::resolve_pending_physics(world, &pending, &by_path);
         attach::populate_articulation_joints(world, &pending.articulation_roots);
-        world.entity_mut(root).insert(PhysicsAttached);
+        let model = compile_loaded_model(world, stage, root);
+        mark_model_members(world, &model, &by_path);
+        world.entity_mut(root).insert((PhysicsAttached, LoadedModel(model)));
         info!(
             "gearbox-physics: attached markers to {} prim(s) of {root:?}",
             prims.len()
         );
     }
     world.insert_non_send(instances);
+}
+
+/// The compiled machines of a loaded stage; activation, discovery and the
+/// API endpoints read this one result.
+#[derive(Component, Clone)]
+pub struct LoadedModel(pub std::sync::Arc<crate::machine_model::CompileResult>);
+
+/// Generation counter shared by every compiled load.
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn compile_loaded_model(world: &World, stage: &openusd::usd::Stage, root: Entity) -> std::sync::Arc<crate::machine_model::CompileResult> {
+    let options = crate::machine_model::CompileOptions {
+        selection: crate::machine_model::Selection::Asset { entry: None },
+        load_instance: format!("{root}"),
+        generation: next_generation(),
+        meters_per_unit_override: std::env::var("BEVY_OPENUSD_METERS_PER_UNIT").ok().and_then(|s| s.parse().ok()),
+        physics_rate_hz: world.get_resource::<PhysicsWorld>().map_or(120.0, |w| w.step_hz),
+    };
+    let result = crate::machine_model::compile(stage, &options);
+    for machine in &result.machines {
+        for d in machine.errors() {
+            warn!("gearbox-model: {} rejected: {d}", machine.root);
+        }
+    }
+    std::sync::Arc::new(result)
+}
+
+/// Tag every body and joint entity with the machine that owns it, so body,
+/// collider and joint insertion follow its validation.
+fn mark_model_members(world: &mut World, model: &crate::machine_model::CompileResult, by_path: &HashMap<String, Entity>) {
+    for machine in &model.machines {
+        let rejected = !machine.accepted();
+        for body in &machine.bodies {
+            if let Some(&entity) = by_path.get(&body.path) {
+                world.entity_mut(entity).insert(ModelMember {
+                    machine_root: machine.root.clone(),
+                    rejected,
+                    damping: Some((body.linear_damping.value, body.angular_damping.value)),
+                });
+            }
+        }
+        for joint in &machine.joints {
+            if let Some(&entity) = by_path.get(&joint.path) {
+                world.entity_mut(entity).insert(ModelMember {
+                    machine_root: machine.root.clone(),
+                    rejected,
+                    damping: None,
+                });
+            }
+        }
+    }
 }
 
 /// A prim entity whose physics markers were read; prims a variant swap adds
@@ -235,6 +325,9 @@ fn refresh_swapped_stages(world: &mut World) {
             .filter(|(path, entity)| path != "/" && world.get::<PhysicsScanned>(*entity).is_none())
             .cloned()
             .collect();
+        let model = compile_loaded_model(world, stage, root);
+        mark_model_members(world, &model, &prims.iter().cloned().collect());
+        world.entity_mut(root).insert(LoadedModel(model));
         if fresh.is_empty() {
             continue;
         }
@@ -251,6 +344,7 @@ fn refresh_swapped_stages(world: &mut World) {
                     .insert(Name::new(name.to_string()));
             }
             attach::attach_physics_to_entity(world, *entity, &mut pending, &meta);
+            attach::attach_joint_softness(world, *entity, stage, path);
             world.entity_mut(*entity).insert(PhysicsScanned);
         }
         attach::resolve_pending_physics(world, &pending, &by_path);
@@ -269,7 +363,7 @@ fn refresh_swapped_stages(world: &mut World) {
     world.insert_non_send(instances);
 }
 
-/// Removes the rapier bodies and colliders of entities that no longer
+/// Removes the bodies and colliders of entities that no longer
 /// exist; a removed body takes its joints with it.
 fn drop_dead_physics(world: &mut World) {
     let (bodies, colliders): (Vec<Entity>, Vec<Entity>) = {

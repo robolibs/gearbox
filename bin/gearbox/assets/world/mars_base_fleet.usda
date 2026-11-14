@@ -1,0 +1,399 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "scripts/mars_base/build.py: the robots that tend the base"
+    }
+    defaultPrim = "Fleet"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# Generated: spawn every robot of the base at once with
+# `gearbox spawn machine bin/gearbox/assets/world/mars_base_fleet.usda --machine base`.
+def Xform "Fleet"
+{
+    def Xform "Eve" (
+        prepend references = @../../../../assets/machines/usd/eden_gantry.usdz@
+    )
+    {
+        double3 xformOp:translate = (20.51, 22, 2.74)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (23.21, 22, 2.76)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchABot" (
+        prepend references = @../../../../assets/machines/usd/arch_gantry.usdz@
+    )
+    {
+        double3 xformOp:translate = (16, -62, 5)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (29, -62, 5.02)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchBBot" (
+        prepend references = @../../../../assets/machines/usd/arch_gantry.usdz@
+    )
+    {
+        double3 xformOp:translate = (16, -77, 5)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (29, -77, 5.02)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchCBot" (
+        prepend references = @../../../../assets/machines/usd/arch_gantry.usdz@
+    )
+    {
+        double3 xformOp:translate = (16, -92, 5)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (29, -92, 5.02)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "DomeABot" (
+        prepend references = @../../../../assets/machines/usd/dome_gantry.usdz@
+    )
+    {
+        double3 xformOp:translate = (62, -20, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 140.1944)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (62, -20, 3.7)
+                quatf physics:localRot0 = (0.340425, 0, 0, 0.940272)
+            }
+        }
+    }
+    def Xform "DomeBBot" (
+        prepend references = @../../../../assets/machines/usd/dome_gantry.usdz@
+    )
+    {
+        double3 xformOp:translate = (62, 20, 0)
+        float3 xformOp:rotateXYZ = (0, 0, -140.1944)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (62, 20, 3.7)
+                quatf physics:localRot0 = (0.340425, 0, 0, -0.940272)
+            }
+        }
+    }
+    def Xform "HallBot" (
+        prepend references = @../../../../assets/machines/usd/hall_gantry.usdz@
+    )
+    {
+        double3 xformOp:translate = (33.6, -124.4, 3.22)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (36.6, -124.4, 3.24)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchAPicker1" (
+        prepend references = @../../../../assets/machines/usd/harvester.usdz@
+    )
+    {
+        double3 xformOp:translate = (15, -60.65, 0.12)
+        float3 xformOp:rotateXYZ = (0, 0, 90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "ArchAPicker2" (
+        prepend references = @../../../../assets/machines/usd/harvester.usdz@
+    )
+    {
+        double3 xformOp:translate = (15, -63.35, 0.12)
+        float3 xformOp:rotateXYZ = (0, 0, -90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "ArchBPicker1" (
+        prepend references = @../../../../assets/machines/usd/harvester.usdz@
+    )
+    {
+        double3 xformOp:translate = (15, -75.65, 0.12)
+        float3 xformOp:rotateXYZ = (0, 0, 90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "ArchBPicker2" (
+        prepend references = @../../../../assets/machines/usd/harvester.usdz@
+    )
+    {
+        double3 xformOp:translate = (15, -78.35, 0.12)
+        float3 xformOp:rotateXYZ = (0, 0, -90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "ArchCPicker1" (
+        prepend references = @../../../../assets/machines/usd/harvester.usdz@
+    )
+    {
+        double3 xformOp:translate = (15, -90.65, 0.12)
+        float3 xformOp:rotateXYZ = (0, 0, 90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "ArchCPicker2" (
+        prepend references = @../../../../assets/machines/usd/harvester.usdz@
+    )
+    {
+        double3 xformOp:translate = (15, -93.35, 0.12)
+        float3 xformOp:rotateXYZ = (0, 0, -90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "FarmCrane" (
+        prepend references = @../../../../assets/machines/usd/vertical_crane.usdz@
+    )
+    {
+        double3 xformOp:translate = (18.2, -108, 0.12)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (29.15, -108, 0.17)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchAWasher" (
+        prepend references = @../../../../assets/machines/usd/arch_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (14, -62, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (45.6, -55.5, 0.4)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchBWasher" (
+        prepend references = @../../../../assets/machines/usd/arch_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (14, -77, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (45.6, -70.5, 0.4)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "ArchCWasher" (
+        prepend references = @../../../../assets/machines/usd/arch_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (14, -92, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (45.6, -85.5, 0.4)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "DomeAWasher" (
+        prepend references = @../../../../assets/machines/usd/dome_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (62, -20, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 140.1944)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (62, -20, 15.37)
+                quatf physics:localRot0 = (0.340425, 0, 0, 0.940272)
+            }
+        }
+    }
+    def Xform "DomeBWasher" (
+        prepend references = @../../../../assets/machines/usd/dome_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (62, 20, 0)
+        float3 xformOp:rotateXYZ = (0, 0, -140.1944)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (62, 20, 15.37)
+                quatf physics:localRot0 = (0.340425, 0, 0, -0.940272)
+            }
+        }
+    }
+    def Xform "SolarWasher1" (
+        prepend references = @../../../../assets/machines/usd/panel_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (-10, 86, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (-10, 96.96, 1.6)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "SolarWasher2" (
+        prepend references = @../../../../assets/machines/usd/panel_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (-2, 86, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (-2, 96.96, 1.6)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "SolarWasher3" (
+        prepend references = @../../../../assets/machines/usd/panel_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (6, 86, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (6, 96.96, 1.6)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "SolarWasher4" (
+        prepend references = @../../../../assets/machines/usd/panel_washer.usdz@
+    )
+    {
+        double3 xformOp:translate = (14, 86, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (14, 96.96, 1.6)
+                quatf physics:localRot0 = (1.000000, 0, 0, 0.000000)
+            }
+        }
+    }
+    def Xform "Digger1" (
+        prepend references = @../../../../assets/machines/usd/regolith_excavator.usdz@
+    )
+    {
+        double3 xformOp:translate = (-118.4, 37.4, 0.03)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "Digger2" (
+        prepend references = @../../../../assets/machines/usd/regolith_excavator.usdz@
+    )
+    {
+        double3 xformOp:translate = (-117, 37.4, 0.03)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "Digger3" (
+        prepend references = @../../../../assets/machines/usd/regolith_excavator.usdz@
+    )
+    {
+        double3 xformOp:translate = (-115.6, 37.4, 0.03)
+        float3 xformOp:rotateXYZ = (0, 0, 0.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "Rover1" (
+        prepend references = @../../../../assets/machines/usd/sev_rover.usdz@
+    )
+    {
+        double3 xformOp:translate = (-16, -9, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 180.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "Rover2" (
+        prepend references = @../../../../assets/machines/usd/sev_rover.usdz@
+    )
+    {
+        double3 xformOp:translate = (-22, 38, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "Percy" (
+        prepend references = @../../../../assets/machines/usd/perseverance_nasa.usdz@
+    )
+    {
+        double3 xformOp:translate = (-750, -550, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 140.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+    def Xform "Printer" (
+        prepend references = @../../../../assets/machines/usd/regolith_printer.usdz@
+    )
+    {
+        double3 xformOp:translate = (-17, -104.5, 0)
+        float3 xformOp:rotateXYZ = (0, 0, 90.0000)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+        over "Joints"
+        {
+            over "anchor"
+            {
+                point3f physics:localPos0 = (-17, -104.5, 1.2)
+                quatf physics:localRot0 = (0.707107, 0, 0, 0.707107)
+            }
+        }
+    }
+}

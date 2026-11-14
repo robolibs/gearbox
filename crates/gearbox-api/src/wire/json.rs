@@ -8,8 +8,12 @@ use datapod::{Point, Pose, Quaternion};
 use serde_json::{Map, Value, json};
 
 use super::common::{Env, Ping, Props, Status, unpack};
+use super::draw::{self, DrawEntity, draw_flag, draw_kind, draw_op, draw_style, line_mode, point_style, shape_kind};
+use super::greenhouse::*;
 use super::host::*;
 use super::machine::*;
+
+mod draw_data;
 
 pub struct TypeDesc {
     pub name: &'static str,
@@ -49,6 +53,12 @@ pub fn types() -> Vec<TypeDesc> {
         desc!(UsdRef, usd_ref_json, usd_ref_from),
         desc!(MarkerSet, marker_set_json, marker_set_from),
         desc!(MarkerRef, marker_ref_json, marker_ref_from),
+        desc!(FieldsLayout, fields_layout_json, fields_layout_from),
+        desc!(Weather, weather_json, weather_from),
+        desc!(GreenhouseQuery, greenhouse_query_json, greenhouse_query_from),
+        desc!(PlantRecord, plant_record_json, plant_record_from),
+        desc!(RoomRecord, room_record_json, room_record_from),
+        desc!(GreenhouseAction, greenhouse_action_json, greenhouse_action_from),
         desc!(Selection, selection_json, selection_from),
         desc!(MachineRef, machine_ref_json, machine_ref_from),
         desc!(MachineInfo, machine_info_json, machine_info_from),
@@ -64,10 +74,17 @@ pub fn types() -> Vec<TypeDesc> {
         ),
         desc!(MachineState, machine_state_json, machine_state_from),
         desc!(LinkRecord, link_record_json, link_record_from),
-        desc!(LinkPose, link_pose_json, link_pose_from),
+        desc!(LidarScan, lidar_scan_json, lidar_scan_from),
+        desc!(CameraFrame, camera_frame_json, camera_frame_from),
+        desc!(Measurement, measurement_json, measurement_from),
+        desc!(EmitRequest, emit_request_json, emit_request_from),
+        desc!(ActuatorCommand, actuator_command_json, actuator_command_from),
         desc!(AttachRequest, attach_request_json, attach_request_from),
         desc!(DetachRequest, detach_request_json, detach_request_from),
         desc!(AttachmentRecord, attachment_json, attachment_from),
+        desc!(DrawEntity, draw_entity_json, draw_entity_from),
+        draw_data::request_desc(),
+        draw_data::reply_desc(),
     ]
 }
 
@@ -299,7 +316,7 @@ fn host_info_from(v: &Value) -> Result<HostInfo, String> {
 }
 
 fn clock_command_json(c: &ClockCommand) -> Value {
-    json!({ "op": c.op, "op_name": clock_op::name(c.op), "steps": c.steps })
+    json!({ "op": c.op, "op_name": clock_op::name(c.op), "steps": c.steps, "value": c.value })
 }
 
 fn clock_command_from(v: &Value) -> Result<ClockCommand, String> {
@@ -312,18 +329,28 @@ fn clock_command_from(v: &Value) -> Result<ClockCommand, String> {
     Ok(ClockCommand {
         op,
         steps: uint(v, "steps") as u32,
+        value: num(v, "value"),
     })
 }
 
 fn clock_state_json(c: &ClockState) -> Value {
-    json!({ "step": c.step, "paused": c.paused != 0 })
+    json!({
+        "step": c.step, "paused": c.paused != 0, "world_s": c.world_s, "rate": c.rate,
+        "day_s": c.day_s, "skip_s": c.skip_s, "hour": c.hour, "day": c.day,
+    })
 }
 
 fn clock_state_from(v: &Value) -> Result<ClockState, String> {
     Ok(ClockState {
         step: uint(v, "step"),
         paused: uint(v, "paused") as u32,
-        _pad: 0,
+        world_s: num(v, "world_s"),
+        rate: num(v, "rate"),
+        day_s: num(v, "day_s"),
+        skip_s: num(v, "skip_s"),
+        hour: num(v, "hour"),
+        day: uint(v, "day") as u32,
+        ..Default::default()
     })
 }
 
@@ -465,6 +492,91 @@ fn marker_ref_from(v: &Value) -> Result<MarkerRef, String> {
     Ok(MarkerRef {
         props: props_from(v, &[]),
     })
+}
+
+fn fields_layout_json(f: &FieldsLayout) -> Value {
+    let text = f.json();
+    json!({ "layout": serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)) })
+}
+
+fn fields_layout_from(v: &Value) -> Result<FieldsLayout, String> {
+    match v.get("layout") {
+        Some(Value::String(text)) => Ok(FieldsLayout::new(text)),
+        Some(layout) => Ok(FieldsLayout::new(&layout.to_string())),
+        None => Ok(FieldsLayout::new("")),
+    }
+}
+
+fn greenhouse_query_json(q: &GreenhouseQuery) -> Value {
+    json!({ "ripe": q.ripe != 0, "props": props_json(&q.props) })
+}
+
+fn greenhouse_query_from(v: &Value) -> Result<GreenhouseQuery, String> {
+    let ripe = v.get("ripe").and_then(Value::as_bool).unwrap_or(false) as u32;
+    Ok(GreenhouseQuery { ripe, props: props_from(v, &["ripe"]), ..Default::default() })
+}
+
+fn plant_record_json(p: &PlantRecord) -> Value {
+    json!({
+        "x": p.x, "y": p.y, "z": p.z, "maturity": p.maturity, "health": p.health,
+        "height_m": p.height_m, "alive": p.alive != 0, "ripe": p.ripe != 0,
+        "props": props_json(&p.props),
+    })
+}
+
+fn plant_record_from(v: &Value) -> Result<PlantRecord, String> {
+    let flag = |key: &str| v.get(key).and_then(Value::as_bool).unwrap_or(false) as u32;
+    Ok(PlantRecord {
+        x: num(v, "x") as f32,
+        y: num(v, "y") as f32,
+        z: num(v, "z") as f32,
+        maturity: num(v, "maturity") as f32,
+        health: num(v, "health") as f32,
+        height_m: num(v, "height_m") as f32,
+        alive: flag("alive"),
+        ripe: flag("ripe"),
+        props: props_from(v, &["x", "y", "z", "maturity", "health", "height_m", "alive", "ripe"]),
+    })
+}
+
+fn room_record_json(r: &RoomRecord) -> Value {
+    json!({
+        "temperature_c": r.temperature_c, "humidity": r.humidity, "co2_ppm": r.co2_ppm,
+        "o2_kpa": r.o2_kpa, "pressure_kpa": r.pressure_kpa, "lux": r.lux,
+        "props": props_json(&r.props),
+    })
+}
+
+fn room_record_from(v: &Value) -> Result<RoomRecord, String> {
+    Ok(RoomRecord {
+        temperature_c: num(v, "temperature_c") as f32,
+        humidity: num(v, "humidity") as f32,
+        co2_ppm: num(v, "co2_ppm") as f32,
+        o2_kpa: num(v, "o2_kpa") as f32,
+        pressure_kpa: num(v, "pressure_kpa") as f32,
+        lux: num(v, "lux") as f32,
+        props: props_from(v, &["temperature_c", "humidity", "co2_ppm", "o2_kpa", "pressure_kpa", "lux"]),
+    })
+}
+
+fn greenhouse_action_json(a: &GreenhouseAction) -> Value {
+    json!({ "op": a.op, "op_name": greenhouse_op::name(a.op), "props": props_json(&a.props) })
+}
+
+fn greenhouse_action_from(v: &Value) -> Result<GreenhouseAction, String> {
+    let op = match v.get("op") {
+        Some(Value::String(s)) => greenhouse_op::parse(s).ok_or_else(|| format!("unknown greenhouse op `{s}`"))?,
+        _ => uint(v, "op") as u32,
+    };
+    Ok(GreenhouseAction { op, props: props_from(v, &["op", "op_name"]), ..Default::default() })
+}
+
+fn weather_json(w: &Weather) -> Value {
+    json!({ "props": props_json(&w.props) })
+}
+
+fn weather_from(v: &Value) -> Result<Weather, String> {
+    Ok(Weather { props: props_from(v, &[]) })
 }
 
 fn selection_json(s: &Selection) -> Value {
@@ -643,27 +755,256 @@ fn link_record_from(v: &Value) -> Result<LinkRecord, String> {
     })
 }
 
-fn link_pose_json(l: &LinkPose) -> Value {
+fn lidar_scan_json(s: &LidarScan) -> Value {
+    let ranges: Vec<Value> = s
+        .ranges
+        .iter()
+        .map(|r| {
+            if r.is_finite() {
+                json!(*r as f64)
+            } else {
+                Value::Null
+            }
+        })
+        .collect();
+    let points: Vec<Value> = s
+        .points()
+        .iter()
+        .filter(|p| p.iter().all(|c| c.is_finite()))
+        .map(|p| json!([p[0] as f64, p[1] as f64, p[2] as f64]))
+        .collect();
     json!({
-        "index": l.index, "stamp_ms": l.stamp_ms,
-        "pose": { "x": l.x, "y": l.y, "z": l.z, "qw": l.qw, "qx": l.qx, "qy": l.qy, "qz": l.qz },
-        "props": props_json(&l.props),
+        "link_index": s.link_index, "rows": s.rows, "cols": s.cols,
+        "pulse_offset": s.pulse_offset, "pulse_count": s.pulse_count, "hits": s.hits,
+        "stamp_ms": s.stamp_ms, "sample": s.sample, "sim_time_s": s.sim_time_s,
+        "theta": [s.theta_min, s.theta_max], "phi": [s.phi_min, s.phi_max],
+        "max_range_m": s.max_range_m,
+        "ranges": ranges, "points": points,
+        "props": props_json(&s.props),
     })
 }
 
-fn link_pose_from(v: &Value) -> Result<LinkPose, String> {
-    let p = v.get("pose").cloned().unwrap_or(Value::Null);
-    Ok(LinkPose {
-        x: num(&p, "x"),
-        y: num(&p, "y"),
-        z: num(&p, "z"),
-        qw: p.get("qw").and_then(Value::as_f64).unwrap_or(1.0),
-        qx: num(&p, "qx"),
-        qy: num(&p, "qy"),
-        qz: num(&p, "qz"),
-        index: uint(v, "index") as u32,
+fn lidar_scan_from(v: &Value) -> Result<LidarScan, String> {
+    let pair = |key: &str| {
+        let a = v.get(key).and_then(Value::as_array);
+        let at = |i: usize| {
+            a.and_then(|a| a.get(i))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+        };
+        (at(0), at(1))
+    };
+    let (theta_min, theta_max) = pair("theta");
+    let (phi_min, phi_max) = pair("phi");
+    let mut scan = LidarScan {
+        sim_time_s: num(v, "sim_time_s"),
+        theta_min,
+        theta_max,
+        phi_min,
+        phi_max,
+        max_range_m: num(v, "max_range_m"),
+        link_index: uint(v, "link_index") as u32,
+        rows: uint(v, "rows") as u32,
+        cols: uint(v, "cols") as u32,
+        pulse_offset: uint(v, "pulse_offset") as u32,
+        pulse_count: uint(v, "pulse_count") as u32,
+        hits: uint(v, "hits") as u32,
         stamp_ms: uint(v, "stamp_ms") as u32,
-        props: props_from(v, &["index", "stamp_ms", "pose"]),
+        sample: uint(v, "sample") as u32,
+        ranges: Vec::new(),
+        points: Vec::new(),
+        props: props_from(
+            v,
+            &[
+                "link_index",
+                "rows",
+                "cols",
+                "pulse_offset",
+                "pulse_count",
+                "hits",
+                "stamp_ms",
+                "sample",
+                "sim_time_s",
+                "theta",
+                "phi",
+                "max_range_m",
+                "ranges",
+                "points",
+            ],
+        ),
+    };
+    let ranges: Vec<f32> = v
+        .get("ranges")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|r| r.as_f64().map_or(f32::INFINITY, |r| r as f32))
+                .collect()
+        })
+        .unwrap_or_default();
+    scan.ranges = ranges;
+    let points: Vec<[f32; 3]> = v
+        .get("points")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    let c = |i: usize| {
+                        p.get(i)
+                            .and_then(Value::as_f64)
+                            .map_or(f32::NAN, |c| c as f32)
+                    };
+                    [c(0), c(1), c(2)]
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    scan.set_points(&points);
+    Ok(scan)
+}
+
+/// Non-finite values (e.g. an infinite distance for no echo) become null.
+fn finite_or_null(value: f64) -> Value {
+    if value.is_finite() {
+        json!(value)
+    } else {
+        Value::Null
+    }
+}
+
+fn measurement_json(m: &Measurement) -> Value {
+    let records: Vec<Value> = m
+        .records()
+        .map(|r| Value::Array(r.iter().copied().map(finite_or_null).collect()))
+        .collect();
+    json!({
+        "kind": measurement_kind::name(m.kind), "kind_id": m.kind,
+        "link_index": m.link_index, "stamp_ms": m.stamp_ms, "sample": m.sample,
+        "sim_time_s": m.sim_time_s, "count": m.count, "records": records,
+        "data": String::from_utf8_lossy(&m.data), "data_len": m.data.len(),
+        "props": props_json(&m.props),
+    })
+}
+
+fn measurement_from(v: &Value) -> Result<Measurement, String> {
+    let records = v.get("records").and_then(Value::as_array);
+    let values: Vec<f64> = records
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        .flatten()
+        .map(|x| x.as_f64().unwrap_or(f64::INFINITY))
+        .collect();
+    Ok(Measurement {
+        sim_time_s: num(v, "sim_time_s"),
+        link_index: uint(v, "link_index") as u32,
+        kind: uint(v, "kind_id") as u32,
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        sample: uint(v, "sample") as u32,
+        count: records.map_or(0, Vec::len) as u32,
+        _pad: 0,
+        values,
+        data: v
+            .get("data")
+            .and_then(Value::as_str)
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default(),
+        props: props_from(
+            v,
+            &[
+                "kind", "kind_id", "link_index", "stamp_ms", "sample", "sim_time_s", "count",
+                "records", "data", "data_len",
+            ],
+        ),
+    })
+}
+
+fn actuator_command_json(c: &ActuatorCommand) -> Value {
+    json!({ "stamp_ms": c.stamp_ms, "props": props_json(&c.props) })
+}
+
+fn actuator_command_from(v: &Value) -> Result<ActuatorCommand, String> {
+    Ok(ActuatorCommand {
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        _pad: 0,
+        props: props_from(v, &["stamp_ms"]),
+    })
+}
+
+fn emit_request_json(e: &EmitRequest) -> Value {
+    json!({
+        "stamp_ms": e.stamp_ms,
+        "data": String::from_utf8_lossy(&e.data),
+        "props": props_json(&e.props),
+    })
+}
+
+fn emit_request_from(v: &Value) -> Result<EmitRequest, String> {
+    Ok(EmitRequest {
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        _pad: 0,
+        data: v
+            .get("data")
+            .and_then(Value::as_str)
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default(),
+        props: props_from(v, &["stamp_ms", "data"]),
+    })
+}
+
+fn camera_frame_json(f: &CameraFrame) -> Value {
+    let mut out = json!({
+        "link_index": f.link_index, "width": f.width, "height": f.height,
+        "row_offset": f.row_offset, "rows": f.rows, "channel": f.channel,
+        "stamp_ms": f.stamp_ms, "sample": f.sample, "sim_time_s": f.sim_time_s,
+        "fov_y_rad": f.fov_y_rad, "max_range_m": f.max_range_m,
+        "data_len": f.data.len(),
+        "props": props_json(&f.props),
+    });
+    if f.channel == CAMERA_DEPTH {
+        let depths = f.depths();
+        let finite: Vec<f32> = depths.iter().copied().filter(|d| d.is_finite()).collect();
+        out["depth"] = json!({
+            "finite": finite.len(),
+            "min": finite.iter().copied().fold(f32::INFINITY, f32::min),
+            "max": finite.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        });
+    }
+    out
+}
+
+fn camera_frame_from(v: &Value) -> Result<CameraFrame, String> {
+    Ok(CameraFrame {
+        sim_time_s: num(v, "sim_time_s"),
+        fov_y_rad: num(v, "fov_y_rad"),
+        max_range_m: num(v, "max_range_m"),
+        link_index: uint(v, "link_index") as u32,
+        width: uint(v, "width") as u32,
+        height: uint(v, "height") as u32,
+        row_offset: uint(v, "row_offset") as u32,
+        rows: uint(v, "rows") as u32,
+        channel: uint(v, "channel") as u32,
+        stamp_ms: uint(v, "stamp_ms") as u32,
+        sample: uint(v, "sample") as u32,
+        data: Vec::new(),
+        props: props_from(
+            v,
+            &[
+                "link_index",
+                "width",
+                "height",
+                "row_offset",
+                "rows",
+                "channel",
+                "stamp_ms",
+                "sample",
+                "sim_time_s",
+                "fov_y_rad",
+                "max_range_m",
+                "data_len",
+                "depth",
+            ],
+        ),
     })
 }
 
@@ -701,4 +1042,182 @@ fn attachment_from(v: &Value) -> Result<AttachmentRecord, String> {
         depth: uint(v, "depth") as u32,
         props: props_from(v, &["controlled", "depth"]),
     })
+}
+
+fn hex_color(c: u32) -> Value {
+    let [r, g, b, a] = c.to_le_bytes();
+    json!(format!("#{r:02x}{g:02x}{b:02x}{a:02x}"))
+}
+
+fn draw_entity_json(e: &DrawEntity) -> Value {
+    json!({
+        "op": draw_op::name(e.op), "kind": draw_kind::name(e.kind), "sub": e.sub, "flags": e.flags,
+        "seq": e.seq, "chunk_offset": e.chunk_offset, "last": e.last, "lifetime_s": e.lifetime_s,
+        "pose": [e.px, e.py, e.pz, e.qw, e.qx, e.qy, e.qz], "scale": [e.sx, e.sy, e.sz], "width": e.width,
+        "style": draw_style::name(e.style), "glow": e.glow, "pulse_hz": e.pulse_hz, "flow_speed": e.flow_speed,
+        "dash": e.dash, "beam_height": e.beam_height, "fade": e.fade, "urgency": e.urgency,
+        "color": hex_color(e.color), "color2": hex_color(e.color2),
+        "points": e.point_list(), "colors": e.colors.iter().map(|c| hex_color(*c)).collect::<Vec<_>>(),
+        "radii": e.radii, "offsets": e.offsets,
+        "instances": e.instances.chunks_exact(draw::INSTANCE_FLOATS).collect::<Vec<_>>(),
+        "values": e.values, "rings": e.rings, "qpoints": e.qpoints, "ranges": e.ranges, "cells": e.cells,
+        "colormap": draw::colormap::name(e.colormap), "vmin": e.vmin, "vmax": e.vmax, "quant": e.quant,
+        "labels": e.label_list(), "props": props_json(&e.props),
+    })
+}
+
+const DRAW_KEYS: [&str; 37] = [
+    "op", "kind", "sub", "flags", "fill", "seq", "chunk_offset", "last", "lifetime_s", "pose", "scale", "width", "color",
+    "color2", "points", "colors", "radii", "offsets", "instances", "labels", "style", "glow", "pulse_hz", "flow_speed",
+    "dash", "beam_height", "fade", "urgency", "values", "rings", "qpoints", "ranges", "cells", "colormap", "vmin", "vmax",
+    "quant",
+];
+
+fn draw_entity_from(v: &Value) -> Result<DrawEntity, String> {
+    let name_or = |key: &str, parse: fn(&str) -> Option<u32>| -> Result<u32, String> {
+        match v.get(key) {
+            Some(Value::String(s)) => parse(s).ok_or_else(|| format!("unknown {key} `{s}`")),
+            _ => Ok(uint(v, key) as u32),
+        }
+    };
+    let color = |key: &str| -> Result<u32, String> {
+        match v.get(key) {
+            Some(Value::String(s)) => draw::parse_color(s).ok_or_else(|| format!("bad colour `{s}`")),
+            _ => Ok(uint(v, key) as u32),
+        }
+    };
+    let floats = |key: &str| -> Vec<f32> {
+        v.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).map(|x| x as f32).collect()).unwrap_or_default()
+    };
+    let rows = |key: &str, width: usize| -> Vec<f32> {
+        let mut out = Vec::new();
+        for row in v.get(key).and_then(Value::as_array).into_iter().flatten() {
+            let r: Vec<f32> = row.as_array().map(|a| a.iter().filter_map(Value::as_f64).map(|x| x as f32).collect()).unwrap_or_default();
+            out.extend((0..width).map(|i| r.get(i).copied().unwrap_or(if width == draw::INSTANCE_FLOATS && i == 3 { 1.0 } else { 0.0 })));
+        }
+        out
+    };
+    let kind = name_or("kind", draw_kind::parse)?;
+    let mut e = DrawEntity::new(kind, "", "");
+    e.op = name_or("op", draw_op::parse)?;
+    e.sub = match v.get("sub") {
+        Some(Value::String(s)) => match kind {
+            draw_kind::LINES => line_mode::parse(s),
+            draw_kind::POINTS => point_style::parse(s),
+            draw_kind::GRID => draw::grid_encoding::parse(s),
+            draw_kind::PANEL => draw::panel_kind::parse(s),
+            draw_kind::INTERACT => draw::interact_kind::parse(s),
+            _ => shape_kind::parse(s),
+        }
+        .ok_or_else(|| format!("unknown sub `{s}`"))?,
+        _ => uint(v, "sub") as u32,
+    };
+    e.flags = uint(v, "flags") as u32;
+    if let Some(fill) = v.get("fill").and_then(Value::as_str) {
+        e = e.with_fill(draw_flag::fill_parse(fill).ok_or_else(|| format!("unknown fill `{fill}`"))?);
+    }
+    e.seq = uint(v, "seq") as u32;
+    e.chunk_offset = uint(v, "chunk_offset") as u32;
+    e.last = if v.get("last").is_some() { uint(v, "last") as u32 } else { 1 };
+    e.lifetime_s = num(v, "lifetime_s");
+    let pose: Vec<f64> = v.get("pose").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+    match pose.as_slice() {
+        [x, y, z] => e = e.with_pose([*x, *y, *z], [1.0, 0.0, 0.0, 0.0]),
+        [x, y, z, yaw] => e = e.with_pose([*x, *y, *z], [(0.5 * yaw).cos(), 0.0, 0.0, (0.5 * yaw).sin()]),
+        [x, y, z, w, qx, qy, qz, ..] => e = e.with_pose([*x, *y, *z], [*w, *qx, *qy, *qz]),
+        _ => {}
+    }
+    if let [sx, sy, sz] = floats("scale").as_slice() {
+        e = e.with_scale([*sx, *sy, *sz]);
+    }
+    e.width = num(v, "width") as f32;
+    e.style = name_or("style", draw_style::parse)?;
+    e.glow = num(v, "glow") as f32;
+    e.pulse_hz = num(v, "pulse_hz") as f32;
+    e.flow_speed = num(v, "flow_speed") as f32;
+    e.dash = num(v, "dash") as f32;
+    e.beam_height = num(v, "beam_height") as f32;
+    e.fade = num(v, "fade") as f32;
+    e.urgency = num(v, "urgency") as f32;
+    e.color = color("color")?;
+    e.color2 = color("color2")?;
+    e.points = rows("points", 3);
+    e.colors = match v.get("colors").and_then(Value::as_array) {
+        Some(a) => a
+            .iter()
+            .map(|c| match c {
+                Value::String(s) => draw::parse_color(s).ok_or_else(|| format!("bad colour `{s}`")),
+                _ => Ok(c.as_u64().unwrap_or(0) as u32),
+            })
+            .collect::<Result<_, _>>()?,
+        None => Vec::new(),
+    };
+    e.radii = floats("radii");
+    e.offsets = floats("offsets").into_iter().map(|o| o as u32).collect();
+    e.instances = rows("instances", draw::INSTANCE_FLOATS);
+    e.values = floats("values");
+    e.rings = floats("rings").into_iter().map(|o| o as u32).collect();
+    e.qpoints = floats("qpoints").into_iter().map(|o| o as i16).collect();
+    e.ranges = floats("ranges").into_iter().map(|o| o as u16).collect();
+    e.cells = floats("cells").into_iter().map(|o| o as u8).collect();
+    e.colormap = name_or("colormap", draw::colormap::parse)?;
+    e.vmin = num(v, "vmin") as f32;
+    e.vmax = num(v, "vmax") as f32;
+    e.quant = num(v, "quant") as f32;
+    let labels: Vec<String> =
+        v.get("labels").and_then(Value::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    e = e.with_labels(&labels);
+    e.props = props_from(v, &DRAW_KEYS);
+    Ok(e)
+}
+
+#[cfg(test)]
+mod lidar_scan_tests {
+    use super::*;
+    use crate::wire::pack;
+
+    fn scan() -> LidarScan {
+        let mut scan = LidarScan {
+            sim_time_s: 1.25,
+            theta_min: 1.4,
+            theta_max: 1.7,
+            phi_min: -3.0,
+            phi_max: 3.0,
+            max_range_m: 60.0,
+            link_index: 2,
+            rows: 1,
+            cols: 3,
+            pulse_offset: 0,
+            pulse_count: 3,
+            hits: 2,
+            stamp_ms: 77,
+            sample: 9,
+            ranges: vec![4.5, f32::INFINITY, 2.0],
+            points: Vec::new(),
+            props: Props::from_pairs(&[("name", "lidar_link")]).into_bytes(),
+        };
+        scan.set_points(&[[4.5, 0.0, 0.0], [f32::NAN; 3], [0.0, 2.0, 0.0]]);
+        scan
+    }
+
+    #[test]
+    fn lidar_scan_survives_wire_and_json() {
+        let scan = scan();
+        let wire: LidarScan = pack(&scan).to_datapod().unwrap();
+        assert_eq!(wire.ranges, scan.ranges);
+        assert_eq!(wire.points()[0], [4.5, 0.0, 0.0]);
+        assert!(wire.points()[1][0].is_nan());
+        assert_eq!(wire.name(), "lidar_link");
+        assert_eq!((wire.rows, wire.cols, wire.hits, wire.sample), (1, 3, 2, 9));
+
+        let json = lidar_scan_json(&scan);
+        assert_eq!(json["ranges"][1], Value::Null);
+        assert_eq!(json["points"].as_array().unwrap().len(), 2);
+        let back = lidar_scan_from(&json).unwrap();
+        assert_eq!(back.ranges[0], 4.5);
+        assert!(back.ranges[1].is_infinite());
+        assert_eq!(back.max_range_m, 60.0);
+        assert_eq!((back.link_index, back.stamp_ms), (2, 77));
+        assert_eq!(back.name(), "lidar_link");
+    }
 }

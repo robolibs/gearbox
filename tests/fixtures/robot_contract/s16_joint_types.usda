@@ -1,0 +1,160 @@
+#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def Xform "World"
+{
+    def Xform "Zoo" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "hub" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+        }
+        def Xform "rev" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "pri" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (-1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "fix" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "ball" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, -1, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "rope" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 0, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "six" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 0, -1)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsRevoluteJoint "j_rev"
+        {
+            rel physics:body0 = </World/Zoo/hub>
+            rel physics:body1 = </World/Zoo/rev>
+            point3f physics:localPos0 = (1, 0, 0)
+        }
+        def PhysicsPrismaticJoint "j_pri"
+        {
+            rel physics:body0 = </World/Zoo/hub>
+            rel physics:body1 = </World/Zoo/pri>
+            point3f physics:localPos0 = (-1, 0, 0)
+        }
+        def PhysicsFixedJoint "j_fix"
+        {
+            rel physics:body0 = </World/Zoo/hub>
+            rel physics:body1 = </World/Zoo/fix>
+            point3f physics:localPos0 = (0, 1, 0)
+        }
+        def PhysicsSphericalJoint "j_ball"
+        {
+            rel physics:body0 = </World/Zoo/hub>
+            rel physics:body1 = </World/Zoo/ball>
+            point3f physics:localPos0 = (0, -1, 0)
+            float physics:coneAngle0Limit = 30
+            float physics:coneAngle1Limit = 20
+        }
+        def PhysicsDistanceJoint "j_rope"
+        {
+            rel physics:body0 = </World/Zoo/hub>
+            rel physics:body1 = </World/Zoo/rope>
+            float physics:minDistance = 0.5
+            float physics:maxDistance = 1.5
+        }
+        def PhysicsJoint "j_six" (
+            prepend apiSchemas = ["PhysicsLimitAPI:transX", "PhysicsLimitAPI:transY", "PhysicsLimitAPI:transZ", "PhysicsLimitAPI:rotX", "PhysicsLimitAPI:rotY", "PhysicsDriveAPI:rotZ"]
+        )
+        {
+            rel physics:body0 = </World/Zoo/hub>
+            rel physics:body1 = </World/Zoo/six>
+            point3f physics:localPos0 = (0, 0, -1)
+            float limit:transX:physics:low = 1
+            float limit:transX:physics:high = -1
+            float limit:transY:physics:low = 1
+            float limit:transY:physics:high = -1
+            float limit:transZ:physics:low = 1
+            float limit:transZ:physics:high = -1
+            float limit:rotX:physics:low = 1
+            float limit:rotX:physics:high = -1
+            float limit:rotY:physics:low = -20
+            float limit:rotY:physics:high = 20
+            float drive:rotZ:physics:damping = 5
+            uniform token[] gearbox:joint:rotZ:commandInterfaces = ["velocity", "effort"]
+        }
+        def PhysicsSphericalJoint "j_ball_cmd"
+        {
+            rel physics:body0 = </World/Zoo/ball>
+            rel physics:body1 = </World/Zoo/rope>
+            bool physics:jointEnabled = 0
+        }
+    }
+
+    def Xform "BadCmd" (prepend apiSchemas = ["PhysicsArticulationRootAPI"])
+    {
+        def Xform "a" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 5, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "b" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 6, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "c" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 7, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsDistanceJoint "rope"
+        {
+            rel physics:body0 = </World/BadCmd/a>
+            rel physics:body1 = </World/BadCmd/b>
+            float physics:maxDistance = 1.5
+            uniform token[] gearbox:joint:distance:commandInterfaces = ["position"]
+        }
+        def PhysicsRevoluteJoint "undriven"
+        {
+            rel physics:body0 = </World/BadCmd/b>
+            rel physics:body1 = </World/BadCmd/c>
+            uniform token[] gearbox:joint:angular:commandInterfaces = ["position", "effort"]
+        }
+        def Xform "d" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 8, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def Xform "e" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+        {
+            double3 xformOp:translate = (0, 9, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+        def PhysicsSphericalJoint "ball"
+        {
+            rel physics:body0 = </World/BadCmd/c>
+            rel physics:body1 = </World/BadCmd/d>
+            uniform token[] gearbox:joint:angular:commandInterfaces = ["effort"]
+        }
+        def PhysicsRevoluteJoint "moded" (prepend apiSchemas = ["PhysicsDriveAPI:angular"])
+        {
+            rel physics:body0 = </World/BadCmd/d>
+            rel physics:body1 = </World/BadCmd/e>
+            float drive:angular:physics:stiffness = 10
+            token gearbox:joint:angular:defaultMode = "position"
+        }
+    }
+}

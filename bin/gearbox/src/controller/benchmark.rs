@@ -1,7 +1,7 @@
 //! Imported-machine CPU benchmark without rendering, network agents or wall-clock stepping.
 
 use super::*;
-use crate::physics::{MollaBackend, PhysicsWorld, RapierBackend};
+use crate::physics::PhysicsWorld;
 use crate::physics::backend::{ColliderDesc, ColliderId, DQuat, Pose, Shape};
 use std::time::{Duration, Instant};
 
@@ -23,11 +23,15 @@ mod tyre_load;
 #[path = "benchmark/machine_lifecycle.rs"]
 mod machine_lifecycle;
 
+#[path = "benchmark/hitching.rs"]
+mod hitching;
+
 #[derive(Clone, Copy, PartialEq)]
 enum FixtureKind {
     Kubota,
     Krampe,
     Oxbo,
+    Knoche,
 }
 
 #[derive(Clone)]
@@ -51,25 +55,23 @@ struct Fixture {
 
 impl Fixture {
     fn load(path: &Path) -> Self {
-        Self::load_backend(path, true)
-    }
-
-    fn load_backend(path: &Path, molla: bool) -> Self {
         let source = usd_bevy::UsdSource::from_file(path).expect("read benchmark asset");
         let stage = source.open_stage().expect("open benchmark stage");
-        let kind = match path.file_name().unwrap().to_str().unwrap() {
-            "kubota_tractor.usdz" => FixtureKind::Kubota,
-            "krampe_trailer.usdz" => FixtureKind::Krampe,
-            "oxbo_harvester.usdz" => FixtureKind::Oxbo,
-            _ => panic!("benchmark requires the real Kubota, Krampe or Oxbo asset"),
+        let name = path.file_name().unwrap().to_str().unwrap();
+        let kind = match () {
+            _ if name.starts_with("kubota_tractor") => FixtureKind::Kubota,
+            _ if name.starts_with("krampe_trailer") => FixtureKind::Krampe,
+            _ if name.starts_with("oxbo_harvester") => FixtureKind::Oxbo,
+            _ if name.starts_with("knoche_disc_harrow") => FixtureKind::Knoche,
+            _ => panic!("benchmark requires the real Kubota, Krampe, Oxbo or Knoche asset"),
         };
-        Self::from_stage(&stage, molla, kind, 1)
+        Self::from_stage(&stage, kind, 1)
     }
 
-    fn from_stage(stage: &openusd::usd::Stage, molla: bool, kind: FixtureKind, count: usize) -> Self {
+    fn from_stage(stage: &openusd::usd::Stage, kind: FixtureKind, count: usize) -> Self {
         let kubota = kind == FixtureKind::Kubota;
-        let body_count = match kind { FixtureKind::Kubota => 26, FixtureKind::Krampe => 15, FixtureKind::Oxbo => 40 };
-        let wheel_count = if kind == FixtureKind::Oxbo { 6 } else { 4 };
+        let body_count = match kind { FixtureKind::Kubota => 29, FixtureKind::Krampe => 15, FixtureKind::Oxbo => 40, FixtureKind::Knoche => 55 };
+        let wheel_count = match kind { FixtureKind::Oxbo => 6, FixtureKind::Knoche => 0, _ => 4 };
         let mut machines = discover_machines_from_stage(stage).unwrap();
         machines.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(machines.len(), count);
@@ -86,10 +88,8 @@ impl Fixture {
             usd_bevy::UsdPlugin,
         ));
         app.init_asset::<Mesh>().init_asset::<StandardMaterial>().init_asset::<Image>();
-        app.insert_resource(PhysicsWorld::with_backend(if molla {
-            Box::new(MollaBackend::default())
-        } else { Box::new(RapierBackend::default()) }));
-        if molla && let Some(value) = std::env::var_os("GEARBOX_BENCH_MOLLA_INTERNAL_ITERATIONS") {
+        app.insert_resource(PhysicsWorld::default());
+        if let Some(value) = std::env::var_os("GEARBOX_BENCH_MOLLA_INTERNAL_ITERATIONS") {
             let iterations: usize = value.to_str().unwrap().parse().expect("invalid benchmark iterations");
             assert!((1..=64).contains(&iterations));
             let mut physics = app.world_mut().resource_mut::<PhysicsWorld>();
@@ -123,11 +123,13 @@ impl Fixture {
                 }
             }
         }
+        app.init_resource::<crate::joint_control::runtime::ControlClock>().init_resource::<crate::joint_control::runtime::BindingWaits>();
         let mut controllers = bevy::ecs::schedule::Schedule::default();
         controllers.add_systems((
-            guard_chassis_inertia,
             prepare_machine_physics,
+            crate::joint_control::runtime::bind_accepted_machines,
             wheel_forces::sync_machine_wheel_forces,
+            crate::joint_control::runtime::advance_control_clock,
             apply_builtin_ackermann_cmd_vel,
             apply_builtin_diff_drive_cmd_vel,
             record_wheel_tracks,
@@ -147,14 +149,16 @@ impl Fixture {
             let chassis = physics.entity_to_body[&chassis_entity];
             let mass: f64 = bodies.iter().map(|id| physics.body(*id).unwrap().mass()).sum();
             if kubota {
-                let expected_mass = if molla { 4916.010223 } else { 4913.449268 };
-                assert!((mass - expected_mass).abs() < 0.001, "imported mass {mass}");
+                assert!((mass - 6311.0).abs() < 0.001, "imported mass {mass}");
+            } else if kind == FixtureKind::Knoche {
+                assert!((2750.0..2760.0).contains(&mass), "imported harrow mass {mass}");
             } else if kind == FixtureKind::Krampe {
                 assert!((6500.0..7000.0).contains(&mass), "imported trailer mass {mass}");
             } else {
                 assert!((20_000.0..21_000.0).contains(&mass), "imported harvester mass {mass}");
             }
-            let clearance = wheels.iter().flat_map(|id| physics.body(*id).unwrap().colliders())
+            let support = if wheels.is_empty() { &bodies } else { &wheels };
+            let clearance = support.iter().flat_map(|id| physics.body(*id).unwrap().colliders())
                 .map(|id| physics.collider(id).unwrap().aabb().mins.y).fold(f64::INFINITY, f64::min);
             let aligned: Vec<_> = bodies.iter().map(|&body| {
                 let mut pose = physics.body(body).unwrap().position();
@@ -174,9 +178,10 @@ impl Fixture {
             physics.bodies().len(), physics.joints().len(), physics.colliders().len(), count * wheel_count, physics.settings());
         assert_eq!(physics.bodies().len(), count * body_count);
         let (joint_count, collider_count) = match kind {
-            FixtureKind::Kubota => (31, 17),
+            FixtureKind::Kubota => (34, 17),
             FixtureKind::Krampe => (14, 18),
             FixtureKind::Oxbo => (46, 13),
+            FixtureKind::Knoche => (54, 51),
         };
         assert_eq!(physics.joints().len(), count * joint_count);
         assert_eq!(physics.colliders().len(), count * collider_count + 1);
@@ -266,7 +271,7 @@ impl Fixture {
         for (actual, expected) in radii.iter().zip([0.691259358, 0.691259358, 0.888205080, 0.888205080]) {
             assert!((actual - expected).abs() < 1e-5, "reference rubber radius {actual} != {expected}");
         }
-        assert!((load - 4916.0 * 9.81).abs() < 500.0, "unsupported total machine load {load}");
+        assert!((load - 6312.6 * 9.81).abs() < 500.0, "unsupported total machine load {load}");
         eprintln!("state: pressure={bar} driving={driving} speed={speed:.6} load={load:.3} deflections_m={deflections:?} position={:?}", chassis.translation());
         deflections.iter().sum::<f64>() / deflections.len() as f64
     }
@@ -316,8 +321,8 @@ impl Fixture {
             potential += body.mass() * 9.81 * body.center_of_mass().y;
         }
         let body = physics.body(self.chassis).unwrap();
-        eprintln!("support trace step={step} backend={} kinetic={energy:.9} potential={potential:.9} chassis_y={:.9} velocity={:?} angular={:?}",
-            physics.name(), body.translation().y, body.linvel(), body.angvel());
+        eprintln!("support trace step={step} kinetic={energy:.9} potential={potential:.9} chassis_y={:.9} velocity={:?} angular={:?}",
+            body.translation().y, body.linvel(), body.angvel());
         for manifold in physics.contacts().into_iter().filter(|m| m.active) {
             let parents = [manifold.collider1, manifold.collider2]
                 .map(|id| physics.collider(id).unwrap().parent());
@@ -361,11 +366,11 @@ fn imported_kubota_pressure_benchmark() {
 }
 
 #[test]
-#[ignore = "requires GEARBOX_BENCH_ASSET pointing to real kubota_tractor.usdz; paired CPU timing"]
-fn imported_kubota_backend_timing() {
+#[ignore = "requires GEARBOX_BENCH_ASSET pointing to real kubota_tractor.usdz; CPU timing"]
+fn imported_kubota_timing() {
     let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
-    for (run, molla) in [false, true, true, false].into_iter().enumerate() {
-        let mut fixture = Fixture::load_backend(Path::new(&asset), molla);
+    for run in 0..2 {
+        let mut fixture = Fixture::load(Path::new(&asset));
         for driving in [false, true] {
             fixture.drive(if driving { 2.0 } else { 0.0 }, if driving { 0.12 } else { 0.0 });
             for _ in 0..600 { fixture.tick(); }
@@ -374,13 +379,13 @@ fn imported_kubota_backend_timing() {
             samples.sort_by(f64::total_cmp);
             let physics = fixture.app.world().resource::<PhysicsWorld>();
             let speed = physics.body(fixture.chassis).unwrap().linvel().length();
-            if driving { assert!((speed - 2.0).abs() < 0.2, "{} driving speed={speed}", physics.name()); }
-            else { assert!(speed < 0.05, "{} parked speed={speed}", physics.name()); }
+            if driving { assert!((speed - 2.0).abs() < 0.2, "driving speed={speed}"); }
+            else { assert!(speed < 0.05, "parked speed={speed}"); }
             let bodies = physics.bodies();
             let sleeping = bodies.iter().filter(|id| physics.body(**id).unwrap().is_sleeping()).count();
-            eprintln!("paired backend timing run={run} backend={} driving={driving} speed={speed:.6} sleeping={sleeping}/{} median={:.6} p95={:.6} p99={:.6} max={:.6} ms/step; samples={} hz=120 renderer=none controller=outside-timing settings={:?}",
-                physics.name(), bodies.len(), samples[600], samples[1140], samples[1188], samples[1199], samples.len(), physics.settings());
-            if molla { fixture.verify(1.8, driving); }
+            eprintln!("timing run={run} driving={driving} speed={speed:.6} sleeping={sleeping}/{} median={:.6} p95={:.6} p99={:.6} max={:.6} ms/step; samples={} hz=120 renderer=none controller=outside-timing settings={:?}",
+                bodies.len(), samples[600], samples[1140], samples[1188], samples[1199], samples.len(), physics.settings());
+            fixture.verify(1.8, driving);
         }
     }
 }
@@ -415,20 +420,17 @@ fn imported_kubota_explicit_sleep() {
 }
 
 #[test]
-#[ignore = "requires GEARBOX_BENCH_ASSET; paired long-parked backend timing"]
-fn imported_kubota_parked_backend_timing() {
+#[ignore = "requires GEARBOX_BENCH_ASSET; long-parked timing"]
+fn imported_kubota_parked_timing() {
     let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
-    for run in 0..4 {
-        let molla = matches!(run, 1 | 2);
-        let mut fixture = Fixture::load_backend(Path::new(&asset), molla);
+    for run in 0..2 {
+        let mut fixture = Fixture::load(Path::new(&asset));
         fixture.drive(0.0, 0.0);
         for _ in 0..7200 { fixture.tick(); }
         let mut samples = Vec::new();
         for _ in 0..1200 {
             samples.push(fixture.tick().as_secs_f64() * 1000.0);
-            if molla {
-                assert!(fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
-            }
+            assert!(fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().is_sleeping());
         }
         samples.sort_by(f64::total_cmp);
         let physics = fixture.app.world().resource::<PhysicsWorld>();
@@ -436,10 +438,10 @@ fn imported_kubota_parked_backend_timing() {
         let sleeping = bodies.iter().filter(|id| physics.body(**id).unwrap().is_sleeping()).count();
         let speed = physics.body(fixture.chassis).unwrap().linvel().length();
         assert!(speed < 0.05);
-        if molla { assert_eq!(sleeping, bodies.len()); }
-        eprintln!("parked backend timing run={run} backend={} sleeping={sleeping}/{} speed={speed:.9} median={:.6} p95={:.6} p99={:.6} max={:.6} ms/step; warmup=7200 samples=1200 hz=120 renderer=none controller=outside-timing",
-            physics.name(), bodies.len(), samples[600], samples[1140], samples[1188], samples[1199]);
-        if molla { fixture.verify(1.8, false); }
+        assert_eq!(sleeping, bodies.len());
+        eprintln!("parked timing run={run} sleeping={sleeping}/{} speed={speed:.9} median={:.6} p95={:.6} p99={:.6} max={:.6} ms/step; warmup=7200 samples=1200 hz=120 renderer=none controller=outside-timing",
+            bodies.len(), samples[600], samples[1140], samples[1188], samples[1199]);
+        fixture.verify(1.8, false);
     }
 }
 
@@ -519,7 +521,7 @@ fn imported_kubota_slope_parking() {
                         assert!(pressure.ground.unwrap().normal.dot(normal) > 1.0 - 1e-10);
                         load += output.normal_force;
                     }
-                    assert!((load - 4916.0 * 9.81 * normal.y).abs() < 500.0, "slope support {load}");
+                    assert!((load - 6312.6 * 9.81 * normal.y).abs() < 500.0, "slope support {load}");
                 }
             }
             let physics = fixture.app.world().resource::<PhysicsWorld>();
@@ -551,7 +553,7 @@ fn imported_kubota_straight_turn_and_track_contacts() {
     let mut straight_footprints = Vec::new();
     for pressure in [None, Some(0.5), Some(1.8), Some(4.0)] {
         for (command, turn) in [0.0_f32, 0.4, -0.4].into_iter().enumerate() {
-            let mut fixture = Fixture::load_backend(Path::new(&asset), pressure.is_some());
+            let mut fixture = Fixture::load(Path::new(&asset));
             if let Some(bar) = pressure { fixture.pressure(bar); }
             for _ in 0..600 { fixture.tick(); }
             let physics = fixture.app.world().resource::<PhysicsWorld>();
@@ -583,13 +585,13 @@ fn imported_kubota_straight_turn_and_track_contacts() {
             let displacement = body.translation() - start;
             let speed = body.linvel().length();
             let patch_mean = footprints.iter().sum::<f32>() / footprints.len().max(1) as f32;
-            eprintln!("4s drive: backend={} pressure={pressure:?} command=(2,{turn}) heading_delta={delta:.9} displacement={displacement:?} speed={speed:.9} track_samples={samples} mean_patch_length={patch_mean}", physics.name());
+            eprintln!("4s drive: pressure={pressure:?} command=(2,{turn}) heading_delta={delta:.9} displacement={displacement:?} speed={speed:.9} track_samples={samples} mean_patch_length={patch_mean}");
             if pressure.is_none() {
                 reference_headings[command] = delta;
                 reference_speeds[command] = speed;
             } else {
-                assert!((delta - reference_headings[command]).abs() < 0.1, "turn diverged from same-scene Rapier");
-                assert!((speed - reference_speeds[command]).abs() < 0.1, "speed diverged from same-scene Rapier");
+                assert!((delta - reference_headings[command]).abs() < 0.1, "turn diverged from the authored-pressure run");
+                assert!((speed - reference_speeds[command]).abs() < 0.1, "speed diverged from the authored-pressure run");
                 if turn == 0.0 { straight_footprints.push(patch_mean); }
             }
             assert!((speed - 2.0).abs() < 0.2, "drive speed {speed}");
@@ -607,13 +609,45 @@ fn imported_kubota_straight_turn_and_track_contacts() {
 }
 
 #[test]
+#[ignore = "requires GEARBOX_BENCH_TRAILER pointing to a krampe_trailer.usdz or knoche_disc_harrow.usdz"]
+fn imported_machine_parked_with_devices_stays_put() {
+    let asset = std::env::var_os("GEARBOX_BENCH_TRAILER").expect("set GEARBOX_BENCH_TRAILER");
+    let mut fixture = Fixture::load(Path::new(&asset));
+    let mut devices = crate::devices::benchmark_schedule(&mut fixture.app);
+    let mut tick = |fixture: &mut Fixture| {
+        devices.run(fixture.app.world_mut());
+        fixture.tick();
+    };
+    // Settle onto the tyres and the stand first.
+    for _ in 0..360 {
+        tick(&mut fixture);
+    }
+    let machine = fixture.machine.id.clone();
+    let registered = fixture.app.world().resource::<crate::devices::MachineDevices>().count(&machine);
+    let start = fixture.app.world().resource::<PhysicsWorld>().body(fixture.chassis).unwrap().translation();
+    for step in 1..=7200 {
+        tick(&mut fixture);
+        if step % 600 == 0 {
+            let physics = fixture.app.world().resource::<PhysicsWorld>();
+            let body = physics.body(fixture.chassis).unwrap();
+            eprintln!("t={:.0}s drift={:.4} m speed={:.4} devices={registered}",
+                step as f64 / 120.0, (body.translation() - start).length(), body.linvel().length());
+        }
+    }
+    let physics = fixture.app.world().resource::<PhysicsWorld>();
+    let body = physics.body(fixture.chassis).unwrap();
+    assert!((body.translation() - start).length() < 0.05, "parked machine drove off: {:?}", body.translation() - start);
+    assert!(body.linvel().length() < 0.01, "parked machine moving: {}", body.linvel().length());
+}
+
+#[test]
 #[ignore = "requires GEARBOX_BENCH_TRAILER pointing to real krampe_trailer.usdz"]
 fn imported_krampe_parking_support() {
     let asset = std::env::var_os("GEARBOX_BENCH_TRAILER").expect("set GEARBOX_BENCH_TRAILER");
     let trace = std::env::var_os("GEARBOX_BENCH_TRACE_SUPPORT").is_some();
     let mut outcomes = Vec::new();
     for pressure in [None, Some(0.5), Some(1.8), Some(4.0)] {
-        let mut fixture = Fixture::load_backend(Path::new(&asset), pressure.is_some());
+        let mut fixture = Fixture::load(Path::new(&asset));
         if let Some(bar) = pressure { fixture.pressure(bar); }
         for step in 0..1800 {
             fixture.tick();
@@ -622,7 +656,7 @@ fn imported_krampe_parking_support() {
         let physics = fixture.app.world().resource::<PhysicsWorld>();
         let body = physics.body(fixture.chassis).unwrap();
         let (roll, pitch) = machine_roll_pitch_rad(body);
-        eprintln!("parked trailer: backend={} pressure={pressure:?} roll={roll} pitch={pitch} speed={} velocity={:?} angular={:?} position={:?}", physics.name(), body.linvel().length(), body.linvel(), body.angvel(), body.translation());
+        eprintln!("parked trailer: pressure={pressure:?} roll={roll} pitch={pitch} speed={} velocity={:?} angular={:?} position={:?}", body.linvel().length(), body.linvel(), body.angvel(), body.translation());
         for wheel in &fixture.wheels {
             let output = physics.wheel_output(*wheel);
             eprintln!("wheel {wheel:?}: position={:?} normal_force={:?} pressure={:?}", physics.body(*wheel).unwrap().translation(), output.map(|out| out.normal_force), output.and_then(|out| out.pressure).map(|p| (p.pressure_pa, p.deflection)));
@@ -785,4 +819,44 @@ fn imported_kubota_solver_trace() {
     }
     drop(flush);
     fixture.verify(1.8, true);
+}
+
+#[test]
+#[ignore = "requires GEARBOX_BENCH_TRAILER pointing to knoche_disc_harrow.usdz"]
+fn imported_harrow_discs_and_rollers_roll_when_pulled() {
+    let asset = std::env::var_os("GEARBOX_BENCH_TRAILER").expect("set GEARBOX_BENCH_TRAILER");
+    let mut fixture = Fixture::load(Path::new(&asset));
+    for _ in 0..240 {
+        fixture.tick();
+    }
+    // Pulled forward at 2 m/s by the hitch, as a tractor would.
+    for _ in 0..360 {
+        let mut physics = fixture.app.world_mut().resource_mut::<PhysicsWorld>();
+        let chassis = physics.body_mut(fixture.chassis).unwrap();
+        let v = chassis.linvel();
+        chassis.set_linvel(DVec3::new(0.0, v.y, 2.0), true);
+        fixture.tick();
+    }
+    let physics = fixture.app.world().resource::<PhysicsWorld>();
+    let (mut discs, mut rollers) = (Vec::new(), Vec::new());
+    for id in physics.joints() {
+        // The discs welded to their gang's first disc do not turn on their own.
+        if physics.joint(id).unwrap().locked_axes() == crate::physics::backend::JointAxes::ALL {
+            continue;
+        }
+        let (carrier, spinner) = physics.joint_bodies(id).unwrap();
+        let spinning = physics.body(spinner).unwrap();
+        let axle = spinning.rotation() * physics.joint(id).unwrap().frame2().rotation * DVec3::X;
+        let spin = (spinning.angvel() - physics.body(carrier).unwrap().angvel()).dot(axle).abs();
+        match spinning.mass() {
+            m if m < 20.0 => discs.push(spin),
+            m if (240.0..260.0).contains(&m) => rollers.push(spin),
+            _ => {}
+        }
+    }
+    assert_eq!((discs.len(), rollers.len()), (8, 2));
+    // Rolling at 2 m/s: 2 / 0.27 rad/s for a roller spinning up under light load,
+    // 2 / 0.285 for a disc gang rolling on its discs' rims.
+    assert!(rollers.iter().all(|w| *w > 0.7 * 2.0 / 0.27 && *w < 2.0 / 0.27 + 0.5), "rollers {rollers:?}");
+    assert!(discs.iter().all(|w| (5.5..7.5).contains(w)), "disc gangs {discs:?}");
 }

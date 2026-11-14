@@ -1,7 +1,7 @@
 //! What the shared cover rules require of the shaders that read them, checked
 //! rather than remembered.
 //!
-//! `bare/shaders/cover.wgsl` exists because the grounds either side of a join
+//! `bare/shaders/cover.wesl` exists because the grounds either side of a join
 //! have to agree pixel for pixel, and held as separate copies they drift: a
 //! sway noise that differed between two of them once put the ruts of the ground
 //! and the ruts of the grass in different places, and two copies of the edge
@@ -17,14 +17,14 @@ fn shaders_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
-/// Every `.wgsl` under the crate, as (path from `src`, contents).
+/// Every `.wesl` under the crate, as (path from `src`, contents).
 fn shaders() -> Vec<(String, String)> {
     fn walk(at: &Path, root: &Path, into: &mut Vec<(String, String)>) {
         for entry in std::fs::read_dir(at).expect("read shader directory") {
             let path = entry.expect("read shader entry").path();
             if path.is_dir() {
                 walk(&path, root, into);
-            } else if path.extension().is_some_and(|it| it == "wgsl") {
+            } else if path.extension().is_some_and(|it| it == "wesl") {
                 let name = path.strip_prefix(root).expect("under src").display().to_string();
                 into.push((name, std::fs::read_to_string(&path).expect("read shader")));
             }
@@ -38,7 +38,7 @@ fn shaders() -> Vec<(String, String)> {
     found
 }
 
-const COVER: &str = "bare/shaders/cover.wgsl";
+const COVER: &str = "bare/shaders/cover.wesl";
 
 /// The rules whose whole purpose is that separate shaders answer alike: where a
 /// way has worn, where two covers meet, which of two surfaces takes a pixel,
@@ -72,11 +72,11 @@ fn declared(source: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// The names a file imports out of `cover.wgsl`.
+/// The names a file imports out of `cover.wesl`.
 fn imported_from_cover(source: &str) -> BTreeSet<String> {
     source
         .lines()
-        .filter(|line| line.contains("cover.wgsl\"::"))
+        .filter(|line| line.contains("gearbox_fields::bare::shaders::cover::"))
         .filter_map(|line| line.split_once('{'))
         .filter_map(|(_, rest)| rest.split_once('}'))
         .flat_map(|(names, _)| names.split(',').map(|it| it.trim().to_owned()))
@@ -89,7 +89,7 @@ fn imported_from_cover(source: &str) -> BTreeSet<String> {
 fn calls(source: &str, name: &str) -> bool {
     source
         .lines()
-        .filter(|line| !line.contains("cover.wgsl\"::"))
+        .filter(|line| !line.contains("gearbox_fields::bare::shaders::cover::"))
         .filter(|line| !line.trim_start().starts_with("//"))
         .any(|line| {
             line.match_indices(&format!("{name}(")).any(|(at, _)| {
@@ -101,31 +101,27 @@ fn calls(source: &str, name: &str) -> bool {
         })
 }
 
-/// Declaring an import path makes the `embedded://` import resolve to nothing,
-/// the importing shader silently draws nothing, and **no diagnostic appears at
-/// any log level**. The working shared files in this crate declare none; that
-/// is the whole convention, and it is one line to keep.
+/// Shared WESL modules use their embedded asset paths without legacy directives.
 #[test]
 fn no_shared_shader_declares_an_import_path() {
     for (name, source) in shaders() {
         assert!(
             !source.contains("#define_import_path"),
-            "{name} declares an import path; every `embedded://` import of it \
-             then resolves to nothing, silently"
+            "{name} contains a legacy import-path directive"
         );
     }
 }
 
-/// A rule used from `cover.wgsl` must be imported from it. Copying the function
+/// A rule used from `cover.wesl` must be imported from it. Copying the function
 /// in instead is what the shared file exists to prevent, and a missing import
 /// fails silently rather than loudly.
 #[test]
 fn every_cover_rule_is_imported_where_it_is_used() {
     let all = shaders();
-    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
+    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wesl").1;
     let rules = declared(cover);
     for shared in MUST_AGREE {
-        assert!(rules.contains(shared), "cover.wgsl no longer declares `{shared}`");
+        assert!(rules.contains(shared), "cover.wesl no longer declares `{shared}`");
     }
     for (name, source) in all.iter().filter(|(name, _)| name != COVER) {
         let imported = imported_from_cover(source);
@@ -133,7 +129,7 @@ fn every_cover_rule_is_imported_where_it_is_used() {
             if calls(source, rule) {
                 assert!(
                     imported.contains(rule),
-                    "{name} calls `{rule}` without importing it from cover.wgsl; \
+                    "{name} calls `{rule}` without importing it from cover.wesl; \
                      either import it or it is a second copy, which drifts"
                 );
             }
@@ -174,37 +170,31 @@ fn body_of(source: &str, name: &str) -> Option<String> {
 #[test]
 fn the_hash_every_shader_carries_is_the_same_hash() {
     let all = shaders();
-    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
+    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wesl").1;
     for helper in MAY_BE_CARRIED {
-        let theirs = body_of(cover, helper).expect("cover.wgsl declares the hash");
+        let theirs = body_of(cover, helper).expect("cover.wesl declares the hash");
         let mut carried = 0;
         for (name, source) in all.iter().filter(|(name, _)| name != COVER) {
             let Some(own) = body_of(source, helper) else { continue };
             carried += 1;
-            assert_eq!(own, theirs, "{name} carries a different `{helper}` from cover.wgsl");
+            assert_eq!(own, theirs, "{name} carries a different `{helper}` from cover.wesl");
         }
         assert!(carried > 0, "nothing carries `{helper}` any more; drop it from MAY_BE_CARRIED");
     }
 }
 
-/// Naming the same rule twice in one import list is not a harmless repetition:
-/// naga_oil rejects the whole file with "Ambiguous import path for item", and
-/// since a cover whose shader will not build simply leaves the plain terrain
-/// showing through, the field looks untextured rather than broken. The bare
-/// ground imported `lattice` twice for long enough that every ploughed, dirt and
-/// sand field rendered as flat terrain, with the reason only in the log.
+/// Each shared cover symbol appears at most once in an import list.
 #[test]
 fn no_shader_imports_the_same_rule_twice() {
     for (name, source) in shaders() {
-        for line in source.lines().filter(|line| line.contains("cover.wgsl\"::")) {
+        for line in source.lines().filter(|line| line.contains("gearbox_fields::bare::shaders::cover::")) {
             let Some((_, rest)) = line.split_once('{') else { continue };
             let Some((names, _)) = rest.split_once('}') else { continue };
             let mut seen = BTreeSet::new();
             for wanted in names.split(',').map(str::trim).filter(|it| !it.is_empty()) {
                 assert!(
                     seen.insert(wanted.to_owned()),
-                    "{name} imports `{wanted}` twice from cover.wgsl; naga_oil calls that \
-                     ambiguous and drops the whole shader"
+                    "{name} imports `{wanted}` twice from cover.wesl"
                 );
             }
         }
@@ -220,8 +210,8 @@ fn no_shader_imports_the_same_rule_twice() {
 #[test]
 fn the_tyre_bars_meet_at_the_centre_of_the_rut() {
     let all = shaders();
-    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
-    let body = body_of(cover, "tyre_bars").expect("cover.wgsl presses a tyre's bars");
+    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wesl").1;
+    let body = body_of(cover, "tyre_bars").expect("cover.wesl presses a tyre's bars");
     let phase = body
         .split("let phase = ")
         .nth(1)
@@ -255,18 +245,18 @@ fn every_cover_that_prints_a_tyre_bar_tilts_its_normal_by_it() {
     }
 }
 
-/// An import naming something `cover.wgsl` does not declare resolves to
+/// An import naming something `cover.wesl` does not declare resolves to
 /// nothing, with the same silence.
 #[test]
 fn nothing_imports_a_cover_rule_that_is_not_there() {
     let all = shaders();
-    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
+    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wesl").1;
     let rules = declared(cover);
     for (name, source) in all.iter().filter(|(name, _)| name != COVER) {
         for wanted in imported_from_cover(source) {
             assert!(
                 rules.contains(&wanted),
-                "{name} imports `{wanted}` from cover.wgsl, which does not declare it"
+                "{name} imports `{wanted}` from cover.wesl, which does not declare it"
             );
         }
     }
@@ -278,11 +268,11 @@ fn nothing_imports_a_cover_rule_that_is_not_there() {
 #[test]
 fn the_cpu_and_the_shader_agree_where_a_road_begins() {
     let all = shaders();
-    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
+    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wesl").1;
     let line = cover
         .lines()
         .find(|line| line.trim_start().starts_with("const WAY_METALLED"))
-        .expect("cover.wgsl declares WAY_METALLED");
+        .expect("cover.wesl declares WAY_METALLED");
     let value: f32 = line
         .rsplit_once('=')
         .and_then(|(_, rest)| rest.trim().trim_end_matches(';').parse().ok())
@@ -290,7 +280,7 @@ fn the_cpu_and_the_shader_agree_where_a_road_begins() {
     assert_eq!(
         value,
         crate::layout::WAY_METALLED,
-        "cover.wgsl says a road begins at {value}, the hollow says {}",
+        "cover.wesl says a road begins at {value}, the hollow says {}",
         crate::layout::WAY_METALLED
     );
 }
@@ -302,9 +292,9 @@ fn the_cpu_and_the_shader_agree_where_a_road_begins() {
 #[test]
 fn the_wear_stages_are_named_in_one_place() {
     let all = shaders();
-    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wgsl").1;
+    let cover = &all.iter().find(|(name, _)| name == COVER).expect("cover.wesl").1;
     for stage in ["WAY_BRUISED", "WAY_METALLED"] {
-        assert!(cover.contains(&format!("const {stage}")), "cover.wgsl lost `{stage}`");
+        assert!(cover.contains(&format!("const {stage}")), "cover.wesl lost `{stage}`");
         for (name, source) in all.iter().filter(|(name, _)| name != COVER) {
             if source.contains(stage) {
                 assert!(

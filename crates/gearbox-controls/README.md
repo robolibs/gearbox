@@ -2,7 +2,7 @@
 
 Dependency-free operator-input routing. This crate owns layers, dead zones,
 dead-man arming and navigation intents. It does not know about Bevy, USD,
-Rapier, machine identities or camera entities.
+physics, machine identities or camera entities.
 
 `bin/gearbox/src/viewer/drive/` adapts Bevy gamepad samples to this crate and
 applies the resulting intents through Gearbox's existing control/camera paths.

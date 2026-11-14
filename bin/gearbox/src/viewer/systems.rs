@@ -6,23 +6,67 @@
 
 use bevy::ecs::hierarchy::Children;
 use bevy::prelude::*;
-use mara::ui::modules::bevy::{BevyViewportInput, ChaseCamera, apply_rig};
+use mara::ui::modules::bevy::{BevyViewportInput, ChaseCamera};
 use usd_bevy::UsdPrimRef;
 use usd_bevy::instance::UsdInstances;
 
-use crate::controller::{ControllerInventory, ControllerKey, ControllerStates};
+use crate::controller::{
+    ControllerInventory, ControllerKey, ControllerStates, MachineInstanceSpec, MachineRef,
+};
 use crate::load::{LoadQueue, LoadedAsset};
 use crate::viewer::commands::{HostCommands, apply_host_commands};
 use crate::viewer::state::{
     ActiveStage, ActiveVariants, CameraBookmarks, CameraMount, ChaseCameraFly, FlyTarget, FlyTo,
-    FollowTarget, LoadRequest, LoaderTuning, ReloadRequest, SelectedPrim, StageInfo,
+    FollowAnchor, FollowTarget, LoadRequest, LoaderTuning, ReloadRequest, SelectedPrim, StageInfo, Steadied,
     UsdStageTime, VariantEntry,
 };
 
-/// Top-level entity selection (a LoadedAsset root). Separate from
-/// `SelectedPrim`, which targets prims inside the active stage.
+/// What a top-level selection picked: a whole loaded asset, or one machine
+/// of a stage that may hold several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Selected {
+    Asset(Entity),
+    Machine(MachineRef),
+}
+
+impl Selected {
+    /// The LoadedAsset root it lies in.
+    pub fn root(&self) -> Entity {
+        match self {
+            Self::Asset(root) => *root,
+            Self::Machine(machine) => machine.scene_root,
+        }
+    }
+
+    /// The machine it names: the one picked, or an asset's only machine.
+    pub fn machine<'a>(
+        &self,
+        inventory: &'a ControllerInventory,
+    ) -> Option<&'a MachineInstanceSpec> {
+        match self {
+            Self::Machine(machine) => inventory.find(machine),
+            Self::Asset(root) => inventory.only(*root),
+        }
+    }
+}
+
+/// Top-level selection. Separate from `SelectedPrim`, which targets prims
+/// inside the active stage.
 #[derive(Resource, Default)]
-pub struct Selection(pub Option<Entity>);
+pub struct Selection(pub Option<Selected>);
+
+impl Selection {
+    pub fn root(&self) -> Option<Entity> {
+        self.0.as_ref().map(Selected::root)
+    }
+
+    pub fn machine<'a>(
+        &self,
+        inventory: &'a ControllerInventory,
+    ) -> Option<&'a MachineInstanceSpec> {
+        self.0.as_ref()?.machine(inventory)
+    }
+}
 
 /// The pose gizmo holds the pointer: the camera does not orbit and a click
 /// does not reselect.
@@ -42,7 +86,7 @@ impl Default for SelectionRing {
     }
 }
 
-/// LoadedAsset roots to despawn with their rapier bodies; drained each frame.
+/// LoadedAsset roots to despawn with their physics bodies; drained each frame.
 #[derive(Resource, Default)]
 pub struct PendingDespawn(pub Vec<Entity>);
 
@@ -74,8 +118,7 @@ impl Plugin for ViewerSystemsPlugin {
                 PostUpdate,
                 follow_target
                     .after(crate::physics::PhysicsWriteback)
-                    .after(crate::world::chase_camera_floor)
-                    .before(bevy::transform::TransformSystems::Propagate),
+                    .before(crate::viewer::camera::place),
             )
             .add_systems(
                 Update,
@@ -181,7 +224,7 @@ fn capture_active_stage_info(
             info.rigid_body_count += 1;
         }
         if let Ok(prim) = stage.prim(path.clone())
-            && let Ok(sets) = prim.variant_sets().get_all_variant_selections()
+            && let Ok(sets) = prim.variant_sets().selections()
         {
             for (name, selection) in sets {
                 let options = usd_bevy::read::variants::variant_options(stage, path, &name);
@@ -224,6 +267,21 @@ pub(crate) fn find_loaded_ancestor(
             Err(_) => return None,
         }
     }
+}
+
+/// What picking `entity` in the stage at `root` selects: the machine it is
+/// part of, else the whole asset.
+pub(crate) fn picked(
+    entity: Entity,
+    root: Entity,
+    inventory: &ControllerInventory,
+    prims: &Query<(Entity, &UsdPrimRef)>,
+    parents: &Query<&ChildOf>,
+) -> Selected {
+    inventory
+        .holding(entity, prims, parents)
+        .and_then(MachineRef::of)
+        .map_or(Selected::Asset(root), Selected::Machine)
 }
 
 /// Project the local AABB to a world-space AABB by transforming all
@@ -325,61 +383,101 @@ pub(crate) fn asset_bounds(
     Some(((wmin + wmax) * 0.5, (wmax - wmin).length() * 0.5))
 }
 
-/// Pin the camera focus to the current body position without overriding
-/// zoom, and slew the orbit yaw toward "behind the machine" as it turns —
-/// otherwise `chase_camera_fly`'s one-shot yaw alignment (on double-click)
-/// is the only place yaw ever tracks heading, and it freezes the moment
-/// that cinematic ends, so a machine that turns afterward drifts out from
-/// in front of the camera instead of staying chased.
+/// Carries the view with a followed machine as if bolted to it: whatever the
+/// body moved and turned since the last frame, the view moves and turns with
+/// it, so the angle it is seen from holds while orbit, zoom and pan still
+/// change it. Tying on moves nothing; a flight in progress owns the view and
+/// the tie picks up from wherever it lands.
 fn follow_target(
     mut follow: ResMut<FollowTarget>,
     commands: Res<HostCommands>,
     fly: Res<FlyTo>,
     agent_fly: Res<ChaseCameraFly>,
-    time: Res<Time>,
     inventory: Res<ControllerInventory>,
-    states: Res<ControllerStates>,
-    prims: Query<(Entity, &UsdPrimRef)>,
+    index: Res<crate::prim_index::PrimIndex>,
     parents: Query<&ChildOf>,
     sites: Query<&crate::globe::Site>,
     toggles: Res<crate::viewer::overlays::DisplayToggles>,
-    mut camera: ParamSet<(Query<&Transform>, Query<(&mut ChaseCamera, &mut Transform)>)>,
+    places: Res<crate::globe::Sites>,
+    mut view: ResMut<crate::viewer::camera::View>,
+    transforms: Query<&Transform>,
 ) {
-    let Some(root) = follow.entity else {
+    let Some(machine) = follow.machine.clone() else {
         return;
     };
     if fly.remaining > 0.0
         || agent_fly.target.is_some()
         || commands.0.iter().any(|command| {
             matches!(command,
-                crate::viewer::commands::HostCommand::FlyToMachine(target) if *target == root)
+                crate::viewer::commands::HostCommand::FlyToMachine(target) if *target == machine)
         })
     {
+        follow.anchor = None;
         return;
     }
-    let body = machine_body_entity(root, &inventory, &prims, &parents);
-    // The pose in the machine's own datum, which the view shares while it follows.
-    if !camera.p0().contains(body) {
+    let body = machine_body_entity(&machine, &inventory, &index);
+    if !transforms.contains(body) {
         follow.set(None);
         return;
     }
-    let gt = crate::globe::transform_in_site(body, &parents, &camera.p0(), &sites);
-    let current = gt.translation();
-    let target_yaw = machine_heading(root, &gt, &inventory, &states) + std::f32::consts::PI;
-    // Frame-rate independent exponential smoothing, same shape as the fly's
-    // smoothstep-lerp but running every frame instead of over a fixed span.
-    const CATCH_UP_RATE: f32 = 2.5;
-    let s = 1.0 - (-CATCH_UP_RATE * time.delta_secs()).exp();
-    // Either the view is carried around behind the machine, or it holds the
-    // angle it was on and only travels with it.
-    let swing = toggles.follow_from_behind;
-    for (mut cam, mut tr) in &mut camera.p1() {
-        cam.focus = current;
-        if swing {
-            cam.yaw = lerp_angle(cam.yaw, target_yaw, s);
-        }
-        apply_rig(&cam, &mut tr);
+    let site = crate::globe::site_of(body, &parents, &sites);
+    let Some(frame) = places.list.get(site).map(|entry| entry.frame) else {
+        return;
+    };
+    let pose = crate::globe::transform_in_site(body, &parents, &transforms, &sites);
+    let here = pose.translation();
+    let now = FollowAnchor {
+        site,
+        at: here.as_dvec3(),
+        clearance: (here.y - places.height(site, here.x, here.z)) as f64,
+        yaw: yaw_about_up(pose.rotation()),
+    };
+    let Some(last) = follow.anchor.replace(now) else {
+        return;
+    };
+    if last.site != now.site {
+        return;
     }
+    let turn = match toggles.follow_turns {
+        true => (now.yaw - last.yaw + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI,
+        false => 0.0,
+    };
+    carry_view(&mut view, &frame, &last, &now, turn);
+}
+
+/// Moves the view's focus as if it were rigidly attached to a body that went
+/// from `last` to `now` and turned by `turn` radians about up, in the body's
+/// site frame, and turns the bearing with it.
+fn carry_view(
+    view: &mut crate::viewer::camera::View,
+    frame: &gearbox_globe::Datum,
+    last: &FollowAnchor,
+    now: &FollowAnchor,
+    turn: f64,
+) {
+    let focus = frame.from_ecef(
+        gearbox_globe::Geodetic::new(view.at.latitude, view.at.longitude, 0.0).ecef(),
+    );
+    let (dx, dz) = (focus.x - last.at.x, focus.z - last.at.z);
+    let (sin, cos) = turn.sin_cos();
+    let moved = bevy::math::DVec3::new(
+        now.at.x + dx * cos + dz * sin,
+        focus.y,
+        now.at.z + dz * cos - dx * sin,
+    );
+    let place = frame.geodetic(moved);
+    view.at.latitude = place.latitude;
+    view.at.longitude = place.longitude;
+    view.at.altitude = (view.at.altitude + now.clearance - last.clearance).max(0.0);
+    // Yaw grows from east toward north, a bearing from north toward east.
+    view.bearing_deg -= turn.to_degrees();
+}
+
+/// Rotation about the vertical, from the twist part of `rotation`: the angle
+/// +Z has turned toward +X, like `machine_heading`.
+fn yaw_about_up(rotation: Quat) -> f64 {
+    2.0 * (rotation.y as f64).atan2(rotation.w as f64)
 }
 
 /// On the ON→OFF edge of `PhysicsActive`, rebase each LoadedAsset's
@@ -471,7 +569,7 @@ fn drain_despawn(
     }
     let world = world.into_inner();
     for root in queue.0.drain(..) {
-        if selection.0 == Some(root) {
+        if selection.root() == Some(root) {
             selection.0 = None;
         }
         if active.0 == Some(root) {
@@ -498,7 +596,7 @@ fn apply_load_request(mut req: ResMut<LoadRequest>, mut queue: ResMut<LoadQueue>
     queue.0.push(path);
 }
 
-/// Hot-reload: despawn the active LoadedAsset (with rapier cleanup)
+/// Hot-reload: despawn the active LoadedAsset (with physics cleanup)
 /// and re-push its path through `LoadQueue` so the loader pipeline
 /// re-runs and remounts a fresh entity.
 fn apply_reload_request(
@@ -528,14 +626,11 @@ fn apply_reload_request(
 fn apply_fly_to(
     time: Res<Time>,
     mut fly: ResMut<FlyTo>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    mut view: ResMut<crate::viewer::camera::View>,
 ) {
     if fly.remaining <= 0.0 {
         return;
     }
-    let Ok((mut cam, mut transform)) = cameras.single_mut() else {
-        return;
-    };
     let dt = time.delta_secs().min(1.0 / 30.0);
     fly.remaining = (fly.remaining - dt).max(0.0);
     let progress = if fly.duration > 0.0 {
@@ -543,37 +638,27 @@ fn apply_fly_to(
     } else {
         1.0
     };
-    let eased = 1.0 - ((1.0 - progress) * core::f32::consts::FRAC_PI_2).cos();
-
-    cam.focus = fly.start_focus.lerp(fly.target_focus, eased);
-    cam.distance = fly
-        .start_distance
-        .lerp(fly.target_distance, eased)
-        .max(cam.min_distance);
-
-    if let (Some(sy), Some(ty)) = (fly.start_yaw, fly.target_yaw) {
-        cam.yaw = lerp_angle(sy, ty, eased);
-    }
-    if let (Some(se), Some(te)) = (fly.start_elevation, fly.target_elevation) {
-        cam.elevation = se + (te - se) * eased;
-    }
-    apply_rig(&cam, &mut transform);
+    let eased = (1.0 - ((1.0 - progress) * core::f32::consts::FRAC_PI_2).cos()) as f64;
+    *view = crate::viewer::camera::View::between(&fly.from, &fly.to, eased, fly.turn);
 }
 
-/// The chassis prim entity of the machine rooted at `root`, or the root
-/// itself when the machine names no body.
+/// The chassis prim entity of `machine`, else its own prim's entity, else
+/// its stage's root.
 pub(crate) fn machine_body_entity(
-    root: Entity,
+    machine: &MachineRef,
     inventory: &ControllerInventory,
-    prims: &Query<(Entity, &UsdPrimRef)>,
-    parents: &Query<&ChildOf>,
+    index: &crate::prim_index::PrimIndex,
 ) -> Entity {
+    let root = machine.scene_root;
+    let entity = |prim: &str| index.find(root, prim);
     inventory
-        .machines
-        .iter()
-        .find(|m| m.scene_root == Some(root))
-        .and_then(|m| m.body.as_deref())
-        .and_then(|body| crate::controller::find_prim_entity(root, body, prims, parents))
+        .find(machine)
+        .and_then(|m| {
+            m.body
+                .as_deref()
+                .and_then(entity)
+                .or_else(|| entity(&m.prim_path))
+        })
         .unwrap_or(root)
 }
 
@@ -581,23 +666,19 @@ pub(crate) fn machine_body_entity(
 /// there is one, else the chassis prim's forward axis (USD -Y) projected on
 /// the ground. 0 rad = +Z, +pi/2 = +X, like `heading_rad`.
 pub(crate) fn machine_heading(
-    root: Entity,
+    machine: &MachineRef,
     gt: &GlobalTransform,
     inventory: &ControllerInventory,
     states: &ControllerStates,
 ) -> f32 {
-    let published = inventory
-        .machines
-        .iter()
-        .find(|m| m.scene_root == Some(root))
-        .and_then(|m| {
-            m.controllers.iter().find_map(|c| {
-                states
-                    .states
-                    .get(&ControllerKey::new(root, &m.id, &c.instance))
-                    .map(|s| s.heading_rad as f32)
-            })
-        });
+    let published = inventory.find(machine).and_then(|m| {
+        m.controllers.iter().find_map(|c| {
+            states
+                .states
+                .get(&ControllerKey::new(machine.scene_root, &m.id, &c.instance))
+                .map(|s| s.heading_rad as f32)
+        })
+    });
     published.unwrap_or_else(|| {
         let fwd = gt.rotation() * Vec3::NEG_Y;
         fwd.x.atan2(fwd.z)
@@ -785,6 +866,8 @@ pub(crate) fn pick_on_click(
     cameras: Query<(&Camera, &GlobalTransform), With<ChaseCamera>>,
     loaded: Query<Entity, With<LoadedAsset>>,
     parents: Query<&ChildOf>,
+    prims: Query<(Entity, &UsdPrimRef)>,
+    inventory: Res<ControllerInventory>,
     aabbs: Query<(Entity, &GlobalTransform, &bevy::camera::primitives::Aabb, Option<&InheritedVisibility>)>,
     mut selection: ResMut<Selection>,
     mut active: ResMut<ActiveStage>,
@@ -808,135 +891,199 @@ pub(crate) fn pick_on_click(
     };
     let origin = ray.origin;
     let dir = *ray.direction;
-    let mut best: Option<(Entity, f32)> = None;
+    let mut best: Option<(Entity, Entity, f32)> = None;
     for (e, gt, aabb, visibility) in aabbs.iter() {
         if visibility.is_some_and(|v| !v.get()) { continue; }
         let Some(root) = find_loaded_ancestor(e, &parents, &loaded) else {
             continue;
         };
         if let Some(t) = ray_aabb_world(origin, dir, gt, aabb)
-            && best.is_none_or(|(_, bt)| t < bt)
+            && best.is_none_or(|(_, _, bt)| t < bt)
         {
-            best = Some((root, t));
+            best = Some((e, root, t));
         }
     }
-    if let Some((root, t)) = best {
-        hover.hit = Some(root);
+    if let Some((hit, root, t)) = best {
+        let pick = picked(hit, root, &inventory, &prims, &parents);
+        hover.hit = pick.machine(&inventory).and_then(MachineRef::of);
         if !input.primary_clicked {
             return;
         }
         info!("pick: hit LoadedAsset {root:?} at t={t:.3}");
-        selection.0 = Some(root);
+        selection.0 = Some(pick);
         active.0 = Some(root);
     }
 }
 
 // ─── Fly behind a machine (agent tree double-click) ────────────────
 
-/// Two phases over `FlyTarget::duration`: A (0–30 %) keeps the camera where
-/// it is and turns it toward the machine; B pulls back to the apex, arcs the
-/// yaw to behind the machine and comes in to the final distance while the
-/// elevation eases back to what the user had. Any camera input cancels it.
+/// Two phases over `FlyTarget::duration`: A (0–30 %) carries the view over to
+/// the machine on the bearing it already had, B swings round to behind the
+/// machine and settles in from the apex. The machine is read afresh every
+/// frame, so one that drives off is still arrived at. Any camera input cancels
+/// the move.
 fn chase_camera_fly(
     time: Res<Time>,
     input: Res<BevyViewportInput>,
     mut fly: ResMut<ChaseCameraFly>,
     inventory: Res<ControllerInventory>,
     states: Res<ControllerStates>,
+    sites: Res<crate::globe::Sites>,
+    parents: Query<&ChildOf>,
+    grids: Query<&crate::globe::Site>,
     transforms: Query<&GlobalTransform>,
-    mut cameras: Query<(&mut ChaseCamera, &mut Transform)>,
+    locals: Query<&Transform>,
+    mut view: ResMut<crate::viewer::camera::View>,
 ) {
-    let Some(mut target) = fly.target else {
+    let Some(mut target) = fly.target.take() else {
         return;
     };
     let dragged = input.drag_delta != [0.0, 0.0] || input.pan_delta != [0.0, 0.0];
     if dragged || input.scroll_delta.abs() > f32::EPSILON {
-        fly.target = None;
         return;
     }
     let Ok(gt) = transforms.get(target.body) else {
-        fly.target = None;
         return;
     };
-    let Ok((mut cam, mut tr)) = cameras.single_mut() else {
-        return;
-    };
-
     target.elapsed += time.delta_secs();
     let t = (target.elapsed / target.duration).clamp(0.0, 1.0);
 
-    let target_focus = gt.translation();
-    let target_cam_yaw =
-        machine_heading(target.root, gt, &inventory, &states) + std::f32::consts::PI;
+    // Where the machine is now, as a place on the planet, and which way it
+    // faces there.
+    let here = crate::globe::transform_in_site(target.body, &parents, &locals, &grids);
+    let at = sites.place_of(gt.translation());
+    let heading =
+        machine_heading(&target.machine, &here, &inventory, &states) + std::f32::consts::PI;
+    let north = sites.current().frame.rotation
+        * bevy::math::DVec3::new(heading.sin() as f64, 0.0, heading.cos() as f64);
+    let local = gearbox_globe::Datum::at(at.latitude, at.longitude).rotation.inverse() * north;
+    // A compass look counts its bearing from north, whichever way the machine faces.
+    let behind = if target.look.is_some_and(|look| look.compass) { 0.0 } else { local.z.atan2(local.x).to_degrees() };
 
-    // Slide the start references with the machine so a driving target does
-    // not shift the geometry under the interpolation.
-    if let Some(last) = target.last_target_pos {
-        let delta = target_focus - last;
-        target.start_focus += delta;
-        target.start_cam_world += delta;
+    if target.hold {
+        hold_shot(&mut target, at, behind, t, time.delta_secs_f64(), &mut view);
+        fly.target = Some(target);
+        return;
     }
-    target.last_target_pos = Some(target_focus);
 
-    let phase_a_end = FlyTarget::PHASE_A_END;
-    if t < phase_a_end {
-        let s = smoothstep((t / phase_a_end).clamp(0.0, 1.0));
-        let focus = target.start_focus.lerp(target_focus, s);
-        let off = target.start_cam_world - focus;
-        let dist = off.length().max(0.1);
-        cam.focus = focus;
-        cam.distance = dist;
-        cam.yaw = off.x.atan2(off.z);
-        cam.elevation = (off.y / dist).clamp(-1.0, 1.0).asin();
+    // Standing over the machine on the bearing the view came in on, pulled
+    // back to the apex; then the same place seen from behind, close in, or
+    // from where a `look` request asked.
+    let over = crate::viewer::camera::View {
+        at,
+        distance_m: FlyTarget::APEX_DISTANCE,
+        ..target.from
+    };
+    let look = target.look.unwrap_or_default();
+    let mut settled = crate::viewer::camera::View {
+        bearing_deg: behind + look.bearing_deg.unwrap_or(0.0),
+        pitch_deg: look.pitch_deg.unwrap_or(over.pitch_deg),
+        distance_m: look.distance_m.unwrap_or(FlyTarget::FINAL_DISTANCE),
+        ..over
+    };
+    settled.tidy();
+    *view = if t < FlyTarget::PHASE_A_END {
+        let a = (t / FlyTarget::PHASE_A_END).clamp(0.0, 1.0) as f64;
+        crate::viewer::camera::View::between(&target.from, &over, a, false)
     } else {
-        let tb = ((t - phase_a_end) / (1.0 - phase_a_end)).clamp(0.0, 1.0);
-        let off = target.start_cam_world - target_focus;
-        let dist_b_start = off.length().max(0.1);
-        let yaw_b_start = off.x.atan2(off.z);
-        let elev_b_start = (off.y / dist_b_start).clamp(-1.0, 1.0).asin();
-
-        let distance = if tb < 0.5 {
-            let s = smoothstep(sub_progress(tb, 0.0, 0.5));
-            dist_b_start + (target.apex_distance - dist_b_start) * s
-        } else {
-            let s = smoothstep(sub_progress(tb, 0.5, 1.0));
-            target.apex_distance + (target.distance - target.apex_distance) * s
-        };
-        let yaw = lerp_angle(
-            yaw_b_start,
-            target_cam_yaw,
-            smoothstep(sub_progress(tb, 0.0, 0.85)),
-        );
-        let elevation = elev_b_start + (target.start_elevation - elev_b_start) * smoothstep(tb);
-
-        cam.focus = target_focus;
-        cam.yaw = yaw;
-        cam.distance = distance;
-        cam.elevation = elevation;
-    }
+        let b = ((t - FlyTarget::PHASE_A_END) / (1.0 - FlyTarget::PHASE_A_END)).clamp(0.0, 1.0);
+        crate::viewer::camera::View::between(&over, &settled, b as f64, true)
+    };
 
     if t >= 1.0 {
-        cam.focus = target_focus;
-        cam.yaw = target_cam_yaw;
-        cam.distance = target.distance;
-        cam.elevation = target.start_elevation;
-        fly.target = None;
+        *view = settled;
     } else {
         fly.target = Some(target);
     }
-    apply_rig(&cam, &mut tr);
+}
+
+/// How briskly a held shot follows where its machine is, radians a second of
+/// a critically damped spring.
+pub(crate) const HOLD_FOLLOW: f64 = 2.5;
+
+/// One step of a critically damped spring toward `goal` over `dt`, solved
+/// exactly: the new value and rate.
+pub(crate) fn spring(x: f64, v: f64, goal: f64, omega: f64, dt: f64) -> (f64, f64) {
+    let d = x - goal;
+    let j = v + omega * d;
+    let e = (-omega * dt).exp();
+    (goal + (d + j * dt) * e, (v - omega * j * dt) * e)
+}
+
+/// A held shot: the machine's place, followed on a spring, and the bearing
+/// from behind it as it stood when the shot began carry both the view the
+/// glide set out from and the one it settles on; the view eases from one to
+/// the other over the glide, then stays. A machine turning or backing up
+/// does not swing the shot round with it.
+fn hold_shot(
+    target: &mut FlyTarget,
+    at: gearbox_globe::Geodetic,
+    behind: f64,
+    t: f32,
+    dt: f64,
+    view: &mut crate::viewer::camera::View,
+) {
+    // Where the anchor stood a frame ago: the view the shot sets out from
+    // is tied to that, so the shot moves on its first frame as the one
+    // before it was moving.
+    let drift = target.drift;
+    let (before, held) = match target.anchor {
+        Some(s) => {
+            let (lat, lat_v) = spring(s.at.latitude, s.rate[0], at.latitude, HOLD_FOLLOW, dt);
+            let (lon, lon_v) = spring(s.at.longitude, s.rate[1], at.longitude, HOLD_FOLLOW, dt);
+            let (alt, alt_v) = spring(s.at.altitude, s.rate[2], at.altitude, HOLD_FOLLOW, dt);
+            (s.at, Steadied { at: gearbox_globe::Geodetic::new(lat, lon, alt), rate: [lat_v, lon_v, alt_v], behind: s.behind })
+        }
+        None => (
+            gearbox_globe::Geodetic::new(at.latitude - drift[0] * dt, at.longitude - drift[1] * dt, at.altitude - drift[2] * dt),
+            Steadied { at, rate: drift, behind },
+        ),
+    };
+    target.anchor = Some(held);
+    let (at, behind) = (held.at, held.behind);
+    let from = target.from;
+    let offset = *target.offset.get_or_insert(crate::viewer::camera::View {
+        at: gearbox_globe::Geodetic::new(
+            from.at.latitude - before.latitude,
+            from.at.longitude - before.longitude,
+            from.at.altitude - before.altitude,
+        ),
+        bearing_deg: from.bearing_deg - behind,
+        ..from
+    });
+    let start = crate::viewer::camera::View {
+        at: gearbox_globe::Geodetic::new(
+            at.latitude + offset.at.latitude,
+            at.longitude + offset.at.longitude,
+            at.altitude + offset.at.altitude,
+        ),
+        bearing_deg: behind + offset.bearing_deg,
+        ..offset
+    };
+    let look = target.look.unwrap_or_default();
+    let mut shot = crate::viewer::camera::View {
+        at,
+        bearing_deg: behind + look.bearing_deg.unwrap_or(0.0),
+        pitch_deg: look.pitch_deg.unwrap_or(offset.pitch_deg),
+        distance_m: look.distance_m.unwrap_or(FlyTarget::FINAL_DISTANCE),
+    };
+    shot.tidy();
+    let eased = crate::viewer::camera::ease(f64::from(t));
+    *view = crate::viewer::camera::View::over(&start, &shot, eased);
 }
 
 /// Start a short fly of the chase camera to `focus` at `distance`.
-pub(crate) fn start_fly_to(fly: &mut FlyTo, cam: &ChaseCamera, focus: Vec3, distance: f32) {
-    fly.start_focus = cam.focus;
-    fly.start_distance = cam.distance;
-    fly.target_focus = focus;
-    fly.target_distance = distance;
-    fly.start_yaw = None;
-    fly.target_yaw = None;
-    fly.start_elevation = None;
-    fly.target_elevation = None;
+/// Starts a short move of the view to a place on the planet, keeping the
+/// bearing and pitch it already had.
+pub(crate) fn start_fly_to(
+    fly: &mut FlyTo,
+    view: &crate::viewer::camera::View,
+    at: gearbox_globe::Geodetic,
+    distance: f64,
+) {
+    fly.from = *view;
+    fly.to = crate::viewer::camera::View { at, distance_m: distance, ..*view };
+    fly.turn = false;
     fly.duration = 0.4;
     fly.remaining = 0.4;
 }
@@ -960,19 +1107,203 @@ fn mirror_api_selection(
         selection.0 = None;
         return;
     }
-    let root = inventory
+    let pick = inventory
         .machines
         .iter()
         .find(|m| m.id == state.id)
-        .and_then(|m| m.scene_root)
+        .and_then(MachineRef::of)
+        .map(Selected::Machine)
         .or_else(|| {
             loaded
                 .iter()
                 .find(|(_, asset)| asset.label == state.id)
-                .map(|(entity, _)| entity)
+                .map(|(entity, _)| Selected::Asset(entity))
         });
-    if let Some(root) = root {
-        selection.0 = Some(root);
-        active.0 = Some(root);
+    if let Some(pick) = pick {
+        active.0 = Some(pick.root());
+        selection.0 = Some(pick);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::DVec3;
+    use gearbox_globe::{Datum, Geodetic};
+
+    #[test]
+    fn a_held_shot_follows_on_a_spring_that_never_overshoots_or_jolts() {
+        let (mut x, mut v) = (0.0, 0.0);
+        let mut biggest = 0.0f64;
+        for _ in 0..600 {
+            let (nx, nv) = spring(x, v, 1.0, HOLD_FOLLOW, 1.0 / 60.0);
+            biggest = biggest.max((nx - x).abs());
+            assert!(nx <= 1.0 + 1e-12, "overshot to {nx}");
+            (x, v) = (nx, nv);
+        }
+        assert!((x - 1.0).abs() < 1e-3, "settled at {x}");
+        assert!(biggest < 0.02, "moved {biggest} of the way in one frame");
+        // One step of a second lands where sixty frames of it do.
+        let (mut a, mut av) = (0.0, 0.0);
+        for _ in 0..60 {
+            (a, av) = spring(a, av, 1.0, HOLD_FOLLOW, 1.0 / 60.0);
+        }
+        let (b, bv) = spring(0.0, 0.0, 1.0, HOLD_FOLLOW, 1.0);
+        assert!((a - b).abs() < 1e-9 && (av - bv).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_new_shot_of_a_held_machine_follows_it_on_unbroken() {
+        let view = crate::viewer::camera::View::default();
+        let look = crate::viewer::state::LookAround::default();
+        let shot = |machine: MachineRef| FlyTarget::gliding(machine, Entity::PLACEHOLDER, &view, look, 3.0);
+        let mut held = shot(percy(Entity::PLACEHOLDER));
+        held.anchor = Some(Steadied { at: view.at, rate: [1.0e-6, 2.0e-6, 0.1], behind: 30.0 });
+        let same = shot(percy(Entity::PLACEHOLDER)).following(Some(&held));
+        let carried = same.anchor.expect("dropped the machine's anchor");
+        assert_eq!((carried.rate, carried.behind), ([1.0e-6, 2.0e-6, 0.1], 30.0));
+        let eve = MachineRef { scene_root: Entity::PLACEHOLDER, machine_id: "eve".into() };
+        let mut other = shot(eve).following(Some(&held));
+        assert!(other.anchor.is_none(), "took another machine's place");
+        assert_eq!(other.drift, [1.0e-6, 2.0e-6, 0.1], "set off at rest");
+        let mut moved = view;
+        hold_shot(&mut other, view.at, 0.0, 0.0, 1.0 / 60.0, &mut moved);
+        let rate = other.anchor.unwrap().rate;
+        assert!((rate[2] - 0.1).abs() < 0.01, "lost the pace it came in at: {rate:?}");
+        let climbed = (moved.at.altitude - view.at.altitude) * 60.0;
+        assert!((climbed - 0.1).abs() < 0.01, "stood still its first frame, climbing {climbed} m/s");
+        let mut again = shot(percy(Entity::PLACEHOLDER)).following(Some(&held));
+        let mut stepped = view;
+        hold_shot(&mut again, view.at, 0.0, 0.0, 1.0 / 60.0, &mut stepped);
+        assert!(stepped.at.altitude > view.at.altitude, "the same machine's shot stood still its first frame");
+        assert_eq!(shot(percy(Entity::PLACEHOLDER)).following(None).drift, [0.0; 3]);
+    }
+
+    fn anchor(at: DVec3, yaw: f64) -> FollowAnchor {
+        FollowAnchor { site: 0, at, clearance: 0.5, yaw }
+    }
+
+    fn view_over(frame: &Datum, local: DVec3, bearing_deg: f64) -> crate::viewer::camera::View {
+        let place = frame.geodetic(local);
+        crate::viewer::camera::View {
+            at: Geodetic::new(place.latitude, place.longitude, 0.5),
+            bearing_deg,
+            ..Default::default()
+        }
+    }
+
+    fn focus_of(frame: &Datum, view: &crate::viewer::camera::View) -> DVec3 {
+        frame.local(Geodetic::new(view.at.latitude, view.at.longitude, 0.0))
+    }
+
+    #[test]
+    fn a_tied_view_travels_with_the_machine() {
+        let frame = Datum::at(52.37, 4.895);
+        let mut view = view_over(&frame, DVec3::ZERO, 30.0);
+        carry_view(&mut view, &frame, &anchor(DVec3::ZERO, 0.0), &anchor(DVec3::new(10.0, 0.0, 0.0), 0.0), 0.0);
+        let focus = focus_of(&frame, &view);
+        assert!((focus.x - 10.0).abs() < 1.0e-3 && focus.z.abs() < 1.0e-3, "focus at {focus:?}");
+        assert!((view.bearing_deg - 30.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn a_tied_view_turns_with_the_machine() {
+        let frame = Datum::at(52.37, 4.895);
+        // Looking at a spot five metres east of the machine, from the south.
+        let mut view = view_over(&frame, DVec3::new(0.0, 0.0, 5.0), 180.0);
+        let turn = std::f64::consts::FRAC_PI_2;
+        carry_view(&mut view, &frame, &anchor(DVec3::ZERO, 0.0), &anchor(DVec3::ZERO, turn), turn);
+        let focus = focus_of(&frame, &view);
+        assert!((focus.x - 5.0).abs() < 1.0e-3 && focus.z.abs() < 1.0e-3, "focus at {focus:?}");
+        assert!((view.bearing_deg - 90.0).abs() < 1.0e-9, "bearing {}", view.bearing_deg);
+    }
+
+    #[test]
+    fn a_tied_view_keeps_its_height_over_the_machine() {
+        let frame = Datum::at(52.37, 4.895);
+        let mut view = view_over(&frame, DVec3::ZERO, 0.0);
+        let last = anchor(DVec3::ZERO, 0.0);
+        let now = FollowAnchor { clearance: 0.8, ..last };
+        carry_view(&mut view, &frame, &last, &now, 0.0);
+        assert!((view.at.altitude - 0.8).abs() < 1.0e-9);
+    }
+
+    fn fleet(world: &mut World) -> (Entity, Vec<Entity>) {
+        crate::controller::spawn_fleet(world, &["Eve", "Percy"])
+    }
+
+    fn percy(stage: Entity) -> MachineRef {
+        MachineRef {
+            scene_root: stage,
+            machine_id: "percy".into(),
+        }
+    }
+
+    #[test]
+    fn the_second_machine_of_a_stage_is_flown_to_by_its_own_body() {
+        let mut world = World::new();
+        let (stage, bodies) = fleet(&mut world);
+        let index = world.resource::<crate::prim_index::PrimIndex>();
+        let body = machine_body_entity(&percy(stage), world.resource::<ControllerInventory>(), index);
+        assert_eq!(body, bodies[1]);
+    }
+
+    #[test]
+    fn the_second_machine_of_a_stage_is_headed_by_its_own_state() {
+        let mut world = World::new();
+        let (stage, _) = fleet(&mut world);
+        let inventory = world.resource::<ControllerInventory>();
+        let instance = &inventory.machines[0].controllers[0].instance;
+        let mut states = ControllerStates::default();
+        for (heading_rad, id) in [(0.5, "eve"), (1.5, "percy")] {
+            states.states.insert(
+                ControllerKey::new(stage, id, instance),
+                crate::controller::ControllerState {
+                    heading_rad,
+                    ..Default::default()
+                },
+            );
+        }
+        let heading = machine_heading(
+            &percy(stage),
+            &GlobalTransform::IDENTITY,
+            inventory,
+            &states,
+        );
+        assert!((heading - 1.5).abs() < 1.0e-6, "heading {heading}");
+    }
+
+    #[test]
+    fn picking_a_part_selects_the_machine_it_belongs_to() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let (stage, bodies) = fleet(&mut world);
+        let [part, whole] = world
+            .run_system_once(
+                move |inventory: Res<ControllerInventory>,
+                      prims: Query<(Entity, &UsdPrimRef)>,
+                      parents: Query<&ChildOf>| {
+                    [bodies[1], stage].map(|hit| picked(hit, stage, &inventory, &prims, &parents))
+                },
+            )
+            .unwrap();
+        assert_eq!(part, Selected::Machine(percy(stage)));
+        assert_eq!(whole, Selected::Asset(stage));
+        assert!(
+            whole
+                .machine(world.resource::<ControllerInventory>())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn yaw_reads_through_an_up_axis_fix() {
+        let fix = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        for yaw in [-2.5_f32, -0.3, 0.0, 0.7, 3.0] {
+            let got = yaw_about_up(Quat::from_rotation_y(yaw) * fix);
+            let off = (got - yaw as f64 + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                - std::f64::consts::PI;
+            assert!(off.abs() < 1.0e-5, "yaw {yaw} read as {got}");
+        }
     }
 }

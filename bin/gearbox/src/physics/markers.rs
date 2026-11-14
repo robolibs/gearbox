@@ -1,10 +1,8 @@
-//! Backend-neutral UsdPhysics marker components.
+//! UsdPhysics marker components.
 //!
 //! The projection layer translates `usd_schema::physics::*` data into
-//! these components, one per affected prim entity. Adapter crates
-//! (`bevy_openusd_rapier`, future `bevy_openusd_avian`) read them and
-//! insert their engine's components in turn — `bevy_openusd` itself
-//! never depends on a physics engine.
+//! these components, one per affected prim entity. The physics module
+//! reads them and builds the Molla bodies, colliders and joints.
 //!
 //! ## Conventions
 //! - **Units**: SI throughout (m, kg, m/s, rad/s, N, N·m). The
@@ -70,9 +68,7 @@ pub struct UsdRigidBody {
 
 /// `PhysicsMassAPI`. Kept separate from `UsdRigidBody` because USD allows
 /// `MassAPI` on plain colliders to seed the parent body's mass via
-/// aggregation. Adapters that prefer the body-only model can ignore mass
-/// authored on non-body prims; adapters that aggregate (matches PhysX /
-/// Rapier behaviour) walk descendants and sum.
+/// aggregation, as PhysX does.
 #[derive(Component, Reflect, Debug, Clone, Default)]
 #[reflect(Component, Default)]
 pub struct UsdMass {
@@ -168,9 +164,8 @@ pub struct UsdPhysicsMaterial {
 // ── ArticulationRoot ────────────────────────────────────────────────────
 
 /// `PhysicsArticulationRootAPI` marker. No attributes; presence is the
-/// signal. The Rapier adapter realises this as a `MultibodyJoint`
-/// subtree (reduced-coordinate solve); the future Avian adapter
-/// degrades to chained constraints with a warning.
+/// signal. Molla solves every joint tree in reduced coordinates; the
+/// colliders under one root never touch each other.
 ///
 /// `joints` is populated by the projection post-pass with every
 /// `UsdPhysicsJoint` entity in this articulation's subtree (filtered by
@@ -277,8 +272,16 @@ pub struct UsdPhysicsJoint {
     /// the two attached bodies).
     pub collision_enabled: bool,
     pub exclude_from_articulation: bool,
+    pub softness: Option<(f64, f64)>,
     pub break_force: Option<f32>,
     pub break_torque: Option<f32>,
+    /// `gearbox:joint:frictionTorque`: Coulomb friction on the free axis
+    /// (N·m or N), the torque the joint holds before it turns.
+    pub friction: Option<f64>,
+    /// `gearbox:joint:rollingResistance` and `gearbox:joint:rollingRadius`
+    /// (m): friction that grows with the ground load on the part the joint
+    /// turns, `coefficient × load × radius`.
+    pub rolling: Option<(f64, f64)>,
     /// Built-in single-DOF limits (revolute / prismatic). Revolute is
     /// rad, prismatic is m. `None` when unauthored or unlimited.
     pub built_in_limit: Option<(f32, f32)>,
@@ -295,7 +298,7 @@ pub struct UsdPhysicsJoint {
 /// `PhysicsCollisionGroup` prim. `members` and `filtered` are resolved
 /// to entity references at projection time. `members` is the raw
 /// `collection:colliders:includes` list — full UsdCollectionAPI rule
-/// evaluation is a v2 follow-up.
+/// evaluation is not implemented.
 #[derive(Component, Reflect, Debug, Clone, Default)]
 #[reflect(Component, Default)]
 pub struct UsdCollisionGroup {
@@ -314,4 +317,48 @@ pub struct UsdCollisionGroup {
 pub struct UsdCollisionFilter {
     #[entities]
     pub filtered: Vec<Entity>,
+}
+
+/// What a joint's `physics:body0`/`body1` relationship reached.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EndpointMark {
+    /// Nothing authored: the world.
+    Absent,
+    /// The prim entity the target names.
+    Resolved(Entity),
+    /// An authored target with no prim in the projection.
+    Unresolved(String),
+}
+
+/// A joint's endpoints as authored, kept apart from its body entities so a
+/// missing target is never mistaken for the world.
+#[derive(Component, Debug, Clone)]
+pub struct JointEndpoints {
+    pub path: String,
+    pub body0: EndpointMark,
+    pub body1: EndpointMark,
+    /// The stage's `/` entity: its frame is the stage's world frame.
+    pub stage_root: Option<Entity>,
+}
+
+/// The compiled machine a body or joint belongs to.
+#[derive(Component, Debug, Clone)]
+pub struct ModelMember {
+    pub machine_root: String,
+    /// The machine failed validation: it stays as a non-simulating preview.
+    pub rejected: bool,
+    /// Body velocity damping (linear, angular) in 1/s; `None` on joints.
+    pub damping: Option<(f64, f64)>,
+}
+
+/// The fixed body a world-anchored joint holds on to.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WorldAnchorBody {
+    pub joint: Entity,
+}
+
+/// A joint that will never be built: an invalid endpoint or a rejected machine.
+#[derive(Component, Debug, Clone)]
+pub struct JointNotBuilt {
+    pub reason: String,
 }

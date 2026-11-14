@@ -44,7 +44,7 @@ enum Cmd {
 }
 
 /// (topic suffix or absolute, exchange, request type, response type)
-const HOST_TOPICS: [(&str, &str, &str, &str); 12] = [
+const HOST_TOPICS: [(&str, &str, &str, &str); 19] = [
     (
         topics::HOST_INFO,
         "req/res",
@@ -67,6 +67,12 @@ const HOST_TOPICS: [(&str, &str, &str, &str); 12] = [
         topics::SCENE_CLEAR,
         "req/res",
         "gearbox.clear_request.v1",
+        "gearbox.status.v1",
+    ),
+    (
+        topics::FIELDS_LAYOUT,
+        "req/res",
+        "gearbox.fields_layout.v1",
         "gearbox.status.v1",
     ),
     (
@@ -106,6 +112,42 @@ const HOST_TOPICS: [(&str, &str, &str, &str); 12] = [
         "gearbox.status.v1",
     ),
     (
+        topics::DRAW,
+        "req/res",
+        "gearbox.draw.v1",
+        "gearbox.status.v1",
+    ),
+    (
+        topics::DRAW_LIST,
+        "que/ans",
+        "gearbox.draw.v1",
+        "gearbox.draw.v1",
+    ),
+    (
+        topics::DRAW_DATA_CAPABILITIES,
+        "req/res",
+        "gearbox.draw.data.request.v1",
+        "gearbox.draw.data.reply.v1",
+    ),
+    (
+        topics::DRAW_DATA,
+        "req/res",
+        "gearbox.draw.data.request.v1",
+        "gearbox.draw.data.reply.v1",
+    ),
+    (
+        topics::DRAW_DATA_LIST,
+        "req/res",
+        "gearbox.draw.data.request.v1",
+        "gearbox.draw.data.reply.v1",
+    ),
+    (
+        topics::DRAW_DATA_STATUS,
+        "req/res",
+        "gearbox.draw.data.request.v1",
+        "gearbox.draw.data.reply.v1",
+    ),
+    (
         topics::SELECT,
         "req/res",
         "gearbox.selection.v1",
@@ -119,7 +161,7 @@ const HOST_TOPICS: [(&str, &str, &str, &str); 12] = [
     ),
 ];
 
-const MACHINE_TOPICS: [(&str, &str, &str, &str); 8] = [
+const MACHINE_TOPICS: [(&str, &str, &str, &str); 15] = [
     (
         topics::MACHINE_INFO,
         "req/res",
@@ -163,6 +205,43 @@ const MACHINE_TOPICS: [(&str, &str, &str, &str); 8] = [
         "",
     ),
     (topics::MACHINE_ODOM, "pub/sub", "datapod.odom.v1", ""),
+    ("sensors/<imu link>", "pub/sub", "datapod.imu.v1", ""),
+    (
+        "sensors/<lidar link>",
+        "pub/sub",
+        "gearbox.lidar_scan.v1",
+        "",
+    ),
+    (
+        "sensors/<camera link>",
+        "pub/sub",
+        "gearbox.camera_frame.v1",
+        "",
+    ),
+    (
+        "sensors/<other sensor link>",
+        "pub/sub",
+        "gearbox.measurement.v1",
+        "",
+    ),
+    (
+        topics::MACHINE_EMIT,
+        "req/res",
+        "gearbox.emit_request.v1",
+        "gearbox.status.v1",
+    ),
+    (
+        topics::MACHINE_ACTUATE,
+        "req/res",
+        "gearbox.actuator_command.v1",
+        "gearbox.status.v1",
+    ),
+    (
+        "actuators/<device>",
+        "pub/sub",
+        "gearbox.measurement.v1",
+        "",
+    ),
 ];
 
 /// The request type a topic takes, for host and machine topics alike.
@@ -175,6 +254,43 @@ fn request_type_for(topic: &str) -> Option<&'static str> {
         return MACHINE_TOPICS.iter().find(|t| t.0 == leaf).map(|t| t.2);
     }
     None
+}
+
+#[cfg(test)]
+mod draw_data_tests {
+    use super::*;
+    use gearbox_api::wire::draw_data::{DataRequest, data_op};
+
+    #[test]
+    fn all_companion_topics_infer_the_separate_checked_data_request() {
+        for topic in [
+            topics::DRAW_DATA_CAPABILITIES,
+            topics::DRAW_DATA,
+            topics::DRAW_DATA_LIST,
+            topics::DRAW_DATA_STATUS,
+        ] {
+            assert_eq!(
+                request_type_for(topic),
+                Some("gearbox.draw.data.request.v1")
+            );
+        }
+        assert_eq!(request_type_for(topics::DRAW), Some("gearbox.draw.v1"));
+        let env = build_request(topics::DRAW_DATA_CAPABILITIES, Some("{}"), None).unwrap();
+        let request = DataRequest::unpack_checked(env.type_hash(), env.wire()).unwrap();
+        assert_eq!(request.operation, data_op::CAPABILITIES);
+        assert_eq!(request.host_epoch, 0);
+    }
+
+    #[test]
+    fn malformed_data_cli_bodies_fail_before_transport() {
+        for body in [
+            r#"{"operation":14,"host_epoch":1,"metadata_json":"{}"}"#,
+            r#"{"unexpected":1}"#,
+            r#"{"operation":6,"payload_hex":"0xzz"}"#,
+        ] {
+            assert!(build_request(topics::DRAW_DATA, Some(body), None).is_err());
+        }
+    }
 }
 
 pub fn run(ctx: &Ctx, args: Args) -> Result<()> {

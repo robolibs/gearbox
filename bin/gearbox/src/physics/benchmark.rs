@@ -6,6 +6,9 @@ pub(crate) fn despawn(app: &mut App, root: Entity) {
 }
 
 pub(crate) fn project(app: &mut App, stage: &openusd::usd::Stage) -> Entity {
+    if !app.world().contains_resource::<crate::prim_index::PrimIndex>() {
+        crate::prim_index::PrimIndex::track(app.world_mut());
+    }
     let root = app.world_mut().spawn(Transform::IDENTITY).id();
     let prims = usd_bevy::live::project_stage_under(app.world_mut(), stage, root);
     let meta = attach::read_stage_meta(stage);
@@ -16,11 +19,15 @@ pub(crate) fn project(app: &mut App, stage: &openusd::usd::Stage) -> Entity {
         if path != "/" {
             app.world_mut().entity_mut(entity).insert(Name::new(path.to_string()));
             attach::attach_physics_to_entity(app.world_mut(), entity, &mut pending, &meta);
+            attach::attach_joint_softness(app.world_mut(), entity, stage, path);
         }
     }
     let paths = prims.iter().map(|(path, entity)| (path.to_string(), entity)).collect();
     attach::resolve_pending_physics(app.world_mut(), &pending, &paths);
     attach::populate_articulation_joints(app.world_mut(), &pending.articulation_roots);
+    let model = compile_loaded_model(app.world(), stage, root);
+    mark_model_members(app.world_mut(), &model, &paths);
+    app.world_mut().entity_mut(root).insert(LoadedModel(model));
     app.update();
     let mut convert = bevy::ecs::schedule::Schedule::default();
     convert.add_systems((

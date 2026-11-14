@@ -1,5 +1,5 @@
 use crate::physics::PhysicsWorld;
-use crate::physics::backend::{BodyId, DVec3};
+use crate::physics::backend::{Body, BodyId, DVec3};
 
 pub(super) struct WheelSupport {
     pub normal: DVec3,
@@ -13,7 +13,7 @@ pub(super) fn wheel_support(
     wheel: BodyId,
 ) -> WheelSupport {
     let up = physics
-        .body(chassis)
+        .chassis(chassis)
         .map(|body| body.rotation() * DVec3::Z)
         .unwrap_or(DVec3::Y);
     let mut support = DVec3::ZERO;

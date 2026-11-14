@@ -30,6 +30,25 @@ fn dynamic() -> BodyDesc {
 }
 
 #[test]
+fn collider_batches_change_the_world_once_and_keep_the_table() {
+    let mut owned = MollaBackend::default();
+    let backend: &mut dyn PhysicsBackend = &mut owned;
+    let body = backend.insert_body(dynamic());
+    let ball = || ColliderDesc::new(Shape::Ball { radius: 0.1 });
+    let old = [backend.insert_collider(ball().parent(body)).unwrap(), backend.insert_collider(ball()).unwrap()];
+    let revision = backend.molla(|scene| scene.revision());
+    let new = backend.edit_colliders(vec![ball().parent(body), ball(), ball()], &old);
+    assert_eq!(backend.molla(|scene| scene.revision()), revision + 1);
+    assert!(old.iter().all(|id| backend.collider(*id).is_none()));
+    assert!(new.iter().all(|id| id.is_some_and(|id| backend.collider(id).is_some())));
+    assert_eq!(backend.colliders().len(), 3);
+    let bad = ColliderDesc::new(Shape::Ball { radius: -1.0 });
+    let mixed = backend.edit_colliders(vec![ball(), bad], &[new[2].unwrap()]);
+    assert!(mixed[0].is_some() && mixed[1].is_none());
+    assert_eq!(backend.colliders().len(), 3);
+}
+
+#[test]
 fn authored_sleep_and_explicit_wake_advance_the_real_backend() {
     let mut backend = MollaBackend::default();
     let mut desc = dynamic();
@@ -54,21 +73,9 @@ fn authored_sleep_and_explicit_wake_advance_the_real_backend() {
 }
 
 #[test]
-fn weak_and_strong_wakes_match_rapier_sleep_eligibility() {
-    let backends: [Box<dyn PhysicsBackend>; 2] = [
-        Box::new(MollaBackend::default()),
-        Box::new(crate::physics::rapier::RapierBackend::default()),
-    ];
-    for mut backend in backends {
-        check_wake_strength(&mut *backend, false);
-    }
+fn weak_and_strong_wakes_set_sleep_eligibility() {
+    check_wake_strength(&mut MollaBackend::default(), false);
     check_wake_strength(&mut MollaBackend::default(), true);
-}
-
-#[test]
-#[ignore = "Rapier 0.32 panics when explicitly sleeping a mixed-wake active island"]
-fn rapier_explicit_sleep_mixed_wake_regression() {
-    check_wake_strength(&mut crate::physics::rapier::RapierBackend::default(), true);
 }
 
 fn check_wake_strength(backend: &mut dyn PhysicsBackend, explicit: bool) {
@@ -192,39 +199,36 @@ fn backend_is_send_sync_and_preserves_body_mass_and_tags() {
 }
 
 #[test]
-fn both_joint_requests_run_actual_reduced_motors_with_caps() {
-    for reduced in [false, true] {
-        let mut backend = MollaBackend::default();
-        backend.set_gravity(DVec3::ZERO);
-        let fixed = backend.insert_body(BodyDesc::fixed());
-        let moving = backend.insert_body(dynamic());
-        let mut desc = JointDesc::new(
-            JointKind::Revolute { axis: DVec3::Z },
-            Pose::IDENTITY,
-            Pose::IDENTITY,
-        );
-        desc.reduced = reduced;
-        let joint = backend.insert_joint(fixed, moving, desc);
-        let motor = backend.joint_mut(joint, true).unwrap();
-        motor.set_motor_model(JointAxis::AngX, MotorModel::Force);
-        motor.set_motor_velocity(JointAxis::AngX, 5.0, 4.0);
-        motor.set_motor_max_force(JointAxis::AngX, 2.0);
-        for _ in 0..120 {
-            backend.step(&|_, _| false);
-        }
-        assert!(backend.joint_is_reduced(joint));
-        near(backend.body(moving).unwrap().angvel(), DVec3::Z);
-        assert!(backend.body(moving).unwrap().rotation().z > 0.0);
-        assert_eq!(
-            backend
-                .joint(joint)
-                .unwrap()
-                .motor(JointAxis::AngX)
-                .unwrap()
-                .max_force,
-            2.0
-        );
+fn joints_run_reduced_motors_with_caps() {
+    let mut backend = MollaBackend::default();
+    backend.set_gravity(DVec3::ZERO);
+    let fixed = backend.insert_body(BodyDesc::fixed());
+    let moving = backend.insert_body(dynamic());
+    let desc = JointDesc::new(
+        JointKind::Revolute { axis: DVec3::Z },
+        Pose::IDENTITY,
+        Pose::IDENTITY,
+    );
+    let joint = backend.insert_joint(fixed, moving, desc);
+    let motor = backend.joint_mut(joint, true).unwrap();
+    motor.set_motor_model(JointAxis::AngX, MotorModel::Force);
+    motor.set_motor_velocity(JointAxis::AngX, 5.0, 4.0);
+    motor.set_motor_max_force(JointAxis::AngX, 2.0);
+    for _ in 0..120 {
+        backend.step(&|_, _| false);
     }
+    assert!(backend.joint_is_reduced(joint));
+    near(backend.body(moving).unwrap().angvel(), DVec3::Z);
+    assert!(backend.body(moving).unwrap().rotation().z > 0.0);
+    assert_eq!(
+        backend
+            .joint(joint)
+            .unwrap()
+            .motor(JointAxis::AngX)
+            .unwrap()
+            .max_force,
+        2.0
+    );
 }
 
 #[test]
@@ -316,6 +320,32 @@ fn contacts_expose_impulses_material_and_per_step_pair_filter() {
         assert!(p.dist <= 0.0);
     }
     assert!(backend.body(moving).unwrap().linvel().y > 0.0);
+}
+
+#[test]
+fn contacts_are_read_once_a_step_and_follow_teleports() {
+    let mut backend = MollaBackend::default();
+    let ground = backend.insert_body(BodyDesc::fixed());
+    backend
+        .insert_collider(ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(5.0, 0.5, 5.0) }).parent(ground))
+        .unwrap();
+    let ball = backend.insert_body(dynamic().pose(Pose::from_translation(DVec3::Y * 1.0)));
+    let shape = backend
+        .insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.5 }).parent(ball).density(0.0))
+        .unwrap();
+    for _ in 0..60 {
+        backend.step(&|_, _| false);
+    }
+    let first = backend.manifolds();
+    assert!(!first.is_empty());
+    assert!(Arc::ptr_eq(&first, &backend.manifolds()));
+    assert_eq!(backend.contacts_with(shape).len(), first.len());
+    backend.step(&|_, _| false);
+    let second = backend.manifolds();
+    assert!(!Arc::ptr_eq(&first, &second) && !second.is_empty());
+    backend.body_mut(ball).unwrap().set_translation(DVec3::Y * 9.0, true);
+    assert!(backend.contacts_with(shape).is_empty());
+    assert!(backend.contacts().is_empty());
 }
 
 #[test]
@@ -445,7 +475,7 @@ fn physics_world_hitch_capture_uses_live_softness() {
     );
     desc.softness = Some((8.0, 1.0));
     let j = world.insert_joint(fixed, moving, desc);
-    world.capture_hitch(j, Pose::IDENTITY);
+    world.capture_hitch(j, Pose::IDENTITY, crate::physics::HitchHold::Rigid);
     for _ in 0..240 {
         let before = world.body(moving).unwrap().position().translation;
         world.step();
@@ -786,4 +816,96 @@ fn inflation_lifts_supported_body_and_keeps_final_envelope_on_ground() {
     for _ in 0..steps { backend.step(&|_, _| false); }
     assert!((backend.body(chassis).unwrap().translation().y - low).abs() < 1e-5);
     assert!(backend.quarantined_bodies().is_empty());
+}
+
+/// A ball whose collider is disabled falls through the ground it would
+/// otherwise rest on.
+#[test]
+fn a_disabled_collider_does_not_collide() {
+    let rest = |enabled: bool| {
+        let mut backend = MollaBackend::default();
+        backend
+            .insert_collider(ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(5.0, 0.5, 5.0) }).translation(-DVec3::Y * 0.5))
+            .unwrap();
+        let ball = backend.insert_body(dynamic().pose(Pose::from_translation(DVec3::Y * 0.5)));
+        let mut collider = ColliderDesc::new(Shape::Ball { radius: 0.5 }).parent(ball);
+        collider.enabled = enabled;
+        backend.insert_collider(collider).unwrap();
+        for _ in 0..120 {
+            backend.step(&|_, _| false);
+        }
+        backend.body(ball).unwrap().position().translation.y
+    };
+    assert!(rest(true) > 0.4, "{}", rest(true));
+    assert!(rest(false) < -1.0, "{}", rest(false));
+}
+
+/// A 1 kg point-like bob hanging `length` below a fixed anchor.
+fn bob(backend: &mut MollaBackend, length: f64, angvel: DVec3) -> (BodyId, BodyId) {
+    let anchor = backend.insert_body(BodyDesc::fixed());
+    let mut desc = BodyDesc::dynamic().pose(Pose::from_translation(-DVec3::Y * length));
+    desc.angvel = angvel;
+    desc.additional_mass = Some(MassProps {
+        mass: 1.0,
+        local_com: DVec3::ZERO,
+        inertia: Inertia::Principal(DVec3::splat(0.01)),
+    });
+    (anchor, backend.insert_body(desc))
+}
+
+/// A pendulum pushed to swing 0.6 rad stays inside a 0.3 rad cone.
+#[test]
+fn a_cone_limit_holds_a_ball_joint_inside_its_cone() {
+    let swing = |cone: Option<f64>| {
+        let mut backend = MollaBackend::default();
+        let (anchor, bob) = bob(&mut backend, 1.0, DVec3::Z * 2.0);
+        let mut desc = JointDesc::new(JointKind::Spherical { axis: DVec3::Y }, Pose::IDENTITY, Pose::from_translation(DVec3::Y));
+        desc.cone_limits = [cone, cone];
+        backend.insert_joint(anchor, bob, desc);
+        let mut widest = 0.0_f64;
+        for _ in 0..240 {
+            backend.step(&|_, _| false);
+            widest = widest.max(backend.body(bob).unwrap().position().rotation.angle_between(DQuat::IDENTITY));
+        }
+        widest
+    };
+    assert!(swing(None) > 0.5, "{}", swing(None));
+    assert!(swing(Some(0.3)) < 0.33, "{}", swing(Some(0.3)));
+}
+
+/// A body dropped on a 1 m distance joint is caught at 1 m.
+#[test]
+fn a_distance_joint_catches_a_falling_body_at_its_max() {
+    let fall = |max: Option<f64>| {
+        let mut backend = MollaBackend::default();
+        let (anchor, bob) = bob(&mut backend, 0.5, DVec3::ZERO);
+        let mut desc = JointDesc::new(JointKind::Distance, Pose::IDENTITY, Pose::IDENTITY);
+        desc.distance_limits = [None, max];
+        backend.insert_joint(anchor, bob, desc);
+        for _ in 0..240 {
+            backend.step(&|_, _| false);
+        }
+        -backend.body(bob).unwrap().position().translation.y
+    };
+    assert!(fall(None) > 5.0, "{}", fall(None));
+    assert!((fall(Some(1.0)) - 1.0).abs() < 0.02, "{}", fall(Some(1.0)));
+}
+
+/// A 1 kg bob on a fixed joint breaks free under a 5 N limit and hangs
+/// on under a 50 N one.
+#[test]
+fn a_joint_breaks_past_its_break_force() {
+    let drop = |force: f64| {
+        let mut backend = MollaBackend::default();
+        let (anchor, bob) = bob(&mut backend, 1.0, DVec3::ZERO);
+        let mut desc = JointDesc::new(JointKind::Fixed, Pose::IDENTITY, Pose::from_translation(DVec3::Y));
+        desc.break_limits = [Some(force), None];
+        backend.insert_joint(anchor, bob, desc);
+        for _ in 0..120 {
+            backend.step(&|_, _| false);
+        }
+        -1.0 - backend.body(bob).unwrap().position().translation.y
+    };
+    assert!(drop(5.0) > 1.0, "{}", drop(5.0));
+    assert!(drop(50.0).abs() < 0.01, "{}", drop(50.0));
 }

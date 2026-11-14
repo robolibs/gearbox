@@ -1,0 +1,80 @@
+#usda 1.0
+(
+    defaultPrim = "arm"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def PhysicsScene "physicsScene"
+{
+    vector3f physics:gravityDirection = (0, 0, -1)
+    float physics:gravityMagnitude = 0
+}
+
+def Xform "arm" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+)
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 5
+        float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        double3 xformOp:translate = (0, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Xform "upper" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 2
+        float3 physics:diagonalInertia = (0.02, 0.2, 0.2)
+        double3 xformOp:translate = (0.5, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Xform "carriage" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 1
+        float3 physics:diagonalInertia = (0.01, 0.01, 0.01)
+        double3 xformOp:translate = (1.1, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Xform "tool_tip"
+        {
+            double3 xformOp:translate = (0.1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+    def Scope "joints"
+    {
+        def PhysicsFixedJoint "anchor"
+        {
+            rel physics:body1 = </arm/base>
+            point3f physics:localPos0 = (0, 0, 0.5)
+        }
+        def PhysicsRevoluteJoint "shoulder" (prepend apiSchemas = ["PhysicsDriveAPI:angular"])
+        {
+            rel physics:body0 = </arm/base>
+            rel physics:body1 = </arm/upper>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (-0.5, 0, 0)
+            token drive:angular:physics:type = "force"
+            float drive:angular:physics:stiffness = 1.7453292519943295
+            float drive:angular:physics:damping = 0.3490658503988659
+            float drive:angular:physics:maxForce = 50
+        }
+        def PhysicsPrismaticJoint "slide" (prepend apiSchemas = ["PhysicsDriveAPI:linear"])
+        {
+            rel physics:body0 = </arm/upper>
+            rel physics:body1 = </arm/carriage>
+            uniform token physics:axis = "X"
+            point3f physics:localPos0 = (0.5, 0, 0)
+            point3f physics:localPos1 = (-0.1, 0, 0)
+            float physics:lowerLimit = -0.3
+            float physics:upperLimit = 0.4
+            token drive:linear:physics:type = "force"
+            float drive:linear:physics:stiffness = 400
+            float drive:linear:physics:damping = 40
+            float drive:linear:physics:maxForce = 100
+        }
+    }
+}

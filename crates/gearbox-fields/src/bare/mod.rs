@@ -92,13 +92,18 @@ pub fn way_litter(density: f32) -> VegetationLayer {
 
 fn way_lying(template: fn() -> Mesh, density: f32) -> VegetationLayer {
     VegetationLayer {
-        shader: "embedded://gearbox_fields/bare/shaders/vegetation.wgsl",
+        shader: "embedded://gearbox_fields/bare/shaders/vegetation.wesl",
         template,
         density,
         fade_start: 5.0,
         fade_end: 38.0,
         inverse_square_thinning: true,
         follow_grass: 0.0,
+        cutout: false,
+        way_only: true,
+        worked_only: false,
+        blade: None,
+        sieve: Some("embedded://gearbox_fields/bare/shaders/grit_sieve.wesl"),
         albedo: None,
         lod_band: [0.0, f32::MAX],
     }
@@ -195,7 +200,7 @@ fn standing(
     stone: fn() -> Mesh,
 ) -> Vec<VegetationLayer> {
     use super::clumps;
-    let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wgsl";
+    let shader = "embedded://gearbox_fields/bare/shaders/vegetation.wesl";
     let mut layers = vec![
         VegetationLayer {
             shader,
@@ -205,6 +210,11 @@ fn standing(
             fade_end: 42.0,
             inverse_square_thinning: true,
             follow_grass: 0.0,
+            cutout: false,
+            way_only: false,
+            worked_only: false,
+            blade: None,
+            sieve: None,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         },
@@ -219,6 +229,11 @@ fn standing(
             fade_end: 26.0,
             inverse_square_thinning: true,
             follow_grass: 0.0,
+            cutout: false,
+            way_only: false,
+            worked_only: false,
+            blade: None,
+            sieve: None,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         },
@@ -232,6 +247,11 @@ fn standing(
             fade_end: 34.0,
             inverse_square_thinning: true,
             follow_grass: 0.0,
+            cutout: true,
+            way_only: false,
+            worked_only: false,
+            blade: None,
+            sieve: None,
             albedo: None,
             lod_band: [0.0, f32::MAX],
         });
@@ -284,6 +304,25 @@ pub const WAY_SOIL: Vec4 = Vec4::new(0.108, 0.068, 0.038, 1.0);
 
 type BareMaterial = ExtendedMaterial<StandardMaterial, BareExtension>;
 
+#[derive(Resource, Default)]
+pub struct PlanetSurfaceFrame(pub Mat4);
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlanetSurfaceUpdates;
+
+fn carry_planet_frame(
+    frame: Res<PlanetSurfaceFrame>,
+    mut materials: ResMut<Assets<BareMaterial>>,
+) {
+    let changed: Vec<_> = materials.iter().filter_map(|(id, material)| {
+        let ground = &material.extension.ground;
+        (ground.planet.x != 0.0 && ground.world_to_planet != frame.0).then_some(id)
+    }).collect();
+    for id in changed {
+        materials.get_mut(id).unwrap().extension.ground.world_to_planet = frame.0;
+    }
+}
+
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 struct BareExtension {
     #[texture(105, sample_type = "u_int")]
@@ -311,6 +350,11 @@ pub struct DrivenTrail {
     /// Each point: where the wheel's middle was, metres of line before it, and
     /// half the tyre's width — negative where a run begins.
     pub points: [Vec4; crate::contacts::TRAIL_POINTS],
+    /// How hard the tyre bore on the ground at each of those points, in
+    /// kilopascals, four to a column. Packed rather than given a column each
+    /// because a uniform pads a lone float out to four, and this is a long
+    /// array.
+    pub hard: [Vec4; crate::contacts::TRAIL_POINTS],
 }
 
 impl Default for DrivenTrail {
@@ -319,6 +363,7 @@ impl Default for DrivenTrail {
             bar: crate::layout::TyreTread::default().packed(),
             count: Vec4::ZERO,
             points: [Vec4::ZERO; crate::contacts::TRAIL_POINTS],
+            hard: [Vec4::ZERO; crate::contacts::TRAIL_POINTS],
         }
     }
 }
@@ -328,6 +373,10 @@ impl DrivenTrail {
         let mut out = Self { bar: trails.bar, ..Default::default() };
         for (slot, point) in out.points.iter_mut().zip(&trails.points) {
             *slot = Vec4::new(point.at.x, point.at.y, point.along, point.half_width);
+        }
+        for (slot, point) in trails.points.iter().take(crate::contacts::TRAIL_POINTS).enumerate() {
+            out.hard[slot].x = point.ground_kpa;
+            out.hard[slot].y = point.fade;
         }
         out.count.x = trails.points.len().min(crate::contacts::TRAIL_POINTS) as f32;
         out
@@ -339,6 +388,9 @@ impl DrivenTrail {
 /// here and filled in by `ground` from the field's `Placed`.
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, Default)]
 pub struct BareGround {
+    /// Surface kind in x: zero terrestrial, one Mars, two Moon.
+    pub planet: Vec4,
+    pub world_to_planet: Mat4,
     /// Multiplies the soil's own colour.
     pub tint: Vec4,
     /// Metres across the clods, how deep they sit, how much the wind has
@@ -379,7 +431,7 @@ pub struct BareGround {
 
 impl MaterialExtension for BareExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_fields/bare/shaders/material.wgsl".into()
+        "embedded://gearbox_fields/bare/shaders/material.wesl".into()
     }
 }
 
@@ -404,10 +456,16 @@ pub(super) struct BarePlugin;
 
 impl Plugin for BarePlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/cover.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
+        if !app.is_plugin_added::<gearbox_globe::surface::PlanetSurfaceShaderPlugin>() {
+            app.add_plugins(gearbox_globe::surface::PlanetSurfaceShaderPlugin);
+        }
+        bevy::shader::load_shader_library!(app, "shaders/cover.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/vegetation.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/grit_sieve.wesl");
         app.add_plugins(MaterialPlugin::<BareMaterial>::default());
+        app.init_resource::<PlanetSurfaceFrame>()
+            .add_systems(PostUpdate, carry_planet_frame.in_set(PlanetSurfaceUpdates));
         app.add_systems(Update, carry_trail_to_grounds);
         // A worn track recovers slowly and marks deeply; sand holds a wheel
         // mark just as long but hardly darkens where it has been pressed.
@@ -427,6 +485,7 @@ impl Plugin for BarePlugin {
             ground: ploughed_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
+            workable: false,
         });
         profiles.register(FieldProfile {
             name: "dirt",
@@ -436,6 +495,7 @@ impl Plugin for BarePlugin {
             ground: dirt_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
+            workable: false,
         });
         for (name, ground, worn) in [
             ("green-lane", green_lane as GroundFactory, 0.3),
@@ -450,6 +510,7 @@ impl Plugin for BarePlugin {
                 ground,
                 tread: crate::runtime::plain_tread(worn),
                 soft_border: 0.8,
+                workable: false,
             });
         }
         profiles.register(FieldProfile {
@@ -460,8 +521,38 @@ impl Plugin for BarePlugin {
             ground: sand_ground,
             tread: Vec4::ZERO,
             soft_border: 0.8,
+            workable: false,
         });
+        for (name, tint, factory) in [
+            ("mars", Vec4::new(0.24, 0.105, 0.047, 1.0), mars_ground as GroundFactory),
+            ("moon", Vec4::new(0.115, 0.112, 0.108, 1.0), moon_ground as GroundFactory),
+        ] {
+            profiles.register(FieldProfile {
+                name, surface_tint: tint,
+                wheel_response: WheelResponse { recovery_seconds: 1_800.0, darkening: 0.18, ..response },
+                layers: standing(32.0, 0.0, 0.0, 0.0, blown_clod, pebble),
+                ground: factory, tread: Vec4::ZERO, soft_border: 0.0, workable: false,
+            });
+        }
     }
+}
+
+fn mars_ground(world: &mut World, tracks: Handle<Image>, wheels: WheelMapParams,
+    geometry: SurfaceGeometry, placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
+    ground(world, tracks, wheels, geometry, placed, BareGround {
+        planet: Vec4::X,
+        tint: Vec4::new(0.24, 0.105, 0.047, 1.0),
+        grain: Vec4::new(0.08, 0.18, 0.0, 0.35), grass: Vec4::ZERO, ..default()
+    }, 0.95)
+}
+
+fn moon_ground(world: &mut World, tracks: Handle<Image>, wheels: WheelMapParams,
+    geometry: SurfaceGeometry, placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
+    ground(world, tracks, wheels, geometry, placed, BareGround {
+        planet: Vec4::new(2.0, 0.0, 0.0, 0.0),
+        tint: Vec4::new(0.115, 0.112, 0.108, 1.0),
+        grain: Vec4::new(0.045, 0.14, 0.0, 0.3), grass: Vec4::ZERO, ..default()
+    }, 1.0)
 }
 
 /// Turned earth: dark, coarse and clodded, with the plough's own combing.
@@ -471,6 +562,7 @@ fn ploughed_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,
@@ -499,6 +591,7 @@ fn dirt_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,
@@ -522,19 +615,19 @@ fn dirt_ground(
 /// dial: a green lane barely marked, two bare ruts with grass still holding
 /// between them, or a road worn bare from side to side.
 fn green_lane(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
     // The layout may name a wear of its own; this is only the default.
     track(w, t, p, g, placed, placed.wear.unwrap_or(0.3))
 }
 
 fn worn_track(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
     // The layout may name a wear of its own; this is only the default.
     track(w, t, p, g, placed, placed.wear.unwrap_or(0.6))
 }
 
 fn bare_road(w: &mut World, t: Handle<Image>, p: WheelMapParams, g: SurfaceGeometry,
-    placed: crate::profile::Placed) -> Arc<dyn GroundSurface> {
+    placed: crate::profile::Placed, _work: Handle<Image>) -> Arc<dyn GroundSurface> {
     // The layout may name a wear of its own; this is only the default.
     track(w, t, p, g, placed, placed.wear.unwrap_or(1.0))
 }
@@ -573,6 +666,7 @@ fn sand_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     ground(
         world,
@@ -641,6 +735,7 @@ fn ground(
         .resource_mut::<Assets<BareMaterial>>()
         .add(ExtendedMaterial {
             base: StandardMaterial {
+                fog_enabled: bare.planet.x == 0.0,
                 perceptual_roughness: roughness,
                 metallic: 0.0,
                 ..default()

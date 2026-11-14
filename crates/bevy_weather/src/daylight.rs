@@ -37,6 +37,27 @@ impl Daylight {
             .unwrap_or(Vec3::new(-4.0, 7.0, 5.0).normalize());
         let direction = settings.planet_from_site.inverse() * direction;
         let elevation = direction.y.clamp(-1.0, 1.0).asin().to_degrees();
+        if settings.sky_kind != super::SkyKind::Earth {
+            let airless = settings.sky_kind == super::SkyKind::Airless;
+            let lit = smooth(-0.27, 0.27, elevation);
+            let twilight = if airless { lit } else { smooth(-9.0, 12.0, elevation) };
+            let zenith = if airless { Vec3::ZERO } else { Vec3::new(0.32, 0.18, 0.105) * twilight };
+            let horizon = if airless { Vec3::ZERO } else { Vec3::new(0.72, 0.43, 0.24) * twilight };
+            let color = |v: Vec3| Color::linear_rgb(v.x, v.y, v.z);
+            return Self {
+                direction,
+                direct_color: settings.sun_color,
+                direct_strength: lit,
+                fill_strength: lit,
+                sun_radiance: (settings.sun_color.to_linear().to_vec4().truncate() * (1.4 * lit)).extend(1.0),
+                zenith: zenith.extend(if airless { 0.0 } else { 1.0 }), horizon: horizon.extend(1.0),
+                cloud_top: Vec4::ZERO, cloud_bottom: Vec4::ZERO,
+                fog: color(horizon),
+                ambient: if airless { Color::BLACK } else { Color::srgb(0.85, 0.64, 0.47) },
+                indirect_top: color(zenith), indirect_mid: color(horizon),
+                indirect_bottom: if airless { Color::linear_rgb(0.06, 0.06, 0.06) } else { Color::linear_rgb(0.20, 0.09, 0.04) },
+            };
+        }
         let reference = Vec3::new(-4.0, 7.0, 5.0).normalize().y.asin().to_degrees();
         let path = (air_mass(elevation) - air_mass(reference)).max(0.0);
         let transmission = Vec3::new(
@@ -100,6 +121,25 @@ impl Daylight {
                 Vec3::new(0.20, 0.24, 0.15),
                 Vec3::new(0.20, 0.16, 0.10),
             )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn airless_sky_stays_black_at_every_solar_elevation() {
+        let mut settings = WeatherSettings::default();
+        settings.sky_kind = crate::SkyKind::Airless;
+        for elevation in [-0.4_f32, 0.0, 0.4, 1.2] {
+            settings.sun_position = Vec3::new(elevation.cos(), elevation.sin(), 0.0);
+            let daylight = Daylight::from_settings(&settings);
+            assert_eq!(daylight.zenith.truncate(), Vec3::ZERO);
+            assert_eq!(daylight.zenith.w, 0.0);
+            assert_eq!(daylight.horizon.truncate(), Vec3::ZERO);
+            assert_eq!(daylight.fog.to_linear(), Color::BLACK.to_linear());
         }
     }
 }

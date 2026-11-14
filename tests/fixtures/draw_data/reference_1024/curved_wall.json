@@ -1,0 +1,63 @@
+{
+  "schema": "gearbox.draw.fixture.cloud.v1",
+  "shape": "curved_wall",
+  "seed": 1592598566,
+  "count": 1024,
+  "valid_count": 1024,
+  "units": "m",
+  "frame": "world_z_up",
+  "checksum_fnv1a64": "4dd79277f24503fd",
+  "queries": [
+    {
+      "id": 0,
+      "xyz": [
+        -8.0,
+        4.0,
+        0.0
+      ],
+      "rgba": [
+        230,
+        80,
+        40,
+        255
+      ],
+      "intensity": 0.0,
+      "class_id": 0,
+      "valid": true
+    },
+    {
+      "id": 512,
+      "xyz": [
+        -8.0,
+        4.0,
+        0.125
+      ],
+      "rgba": [
+        230,
+        80,
+        40,
+        255
+      ],
+      "intensity": 0.0,
+      "class_id": 0,
+      "valid": true
+    },
+    {
+      "id": 1023,
+      "xyz": [
+        7.9375,
+        3.9377441,
+        0.1875
+      ],
+      "rgba": [
+        210,
+        180,
+        50,
+        255
+      ],
+      "intensity": 1.0,
+      "class_id": 3,
+      "valid": true
+    }
+  ]
+}

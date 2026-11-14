@@ -9,7 +9,8 @@ use molla_vehicle::real_tire::LoadedTireEnvelope;
 
 pub(super) type TyreMaterial = ExtendedMaterial<StandardMaterial, TyreExtension>;
 
-#[derive(Clone, Copy, Debug, Reflect, ShaderType, PartialEq)]
+#[derive(Clone, Copy, Debug, Reflect, ShaderType, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub(super) struct TyreFrame {
     to_contact: Mat4,
     from_contact: Mat4,
@@ -61,7 +62,8 @@ impl TyreFrame {
     }
 }
 
-#[derive(Clone, Copy, Debug, Reflect, ShaderType, PartialEq)]
+#[derive(Clone, Copy, Debug, Reflect, ShaderType, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub(super) struct TyreUniform {
     current: TyreFrame,
     previous: TyreFrame,
@@ -75,7 +77,7 @@ pub(super) struct TyreExtension {
 
 impl MaterialExtension for TyreExtension {
     fn vertex_shader() -> ShaderRef {
-        "embedded://gearbox/viewer/tyre_gpu.wgsl".into()
+        "embedded://gearbox/viewer/tyre_gpu.wesl".into()
     }
     fn prepass_vertex_shader() -> ShaderRef {
         Self::vertex_shader()
@@ -106,7 +108,7 @@ impl GpuRubber {
             current: frame,
             previous: frame,
         };
-        let buffer = buffers.add(ShaderBuffer::from(state));
+        let buffer = buffers.add(ShaderBuffer::from(vec![state]));
         let material = materials.add(TyreMaterial {
             base,
             extension: TyreExtension {
@@ -130,7 +132,8 @@ impl GpuRubber {
         };
         if next != old {
             if let Some(mut buffer) = buffers.get_mut(&self.buffer) {
-                buffer.set_data(next);
+                buffer.clear();
+                buffer.extend_from_slice(&[next]);
                 self.state = next;
             }
         }
@@ -175,7 +178,7 @@ mod tests {
         );
         let material = gpu.material.clone();
         let buffer = gpu.buffer.clone();
-        let before = buffers.get(&buffer).unwrap().data.clone();
+        let before = buffers.get(&buffer).unwrap().cast_slice::<u8>().unwrap().to_vec();
         gpu.update(high, &mut buffers);
         assert_eq!(
             gpu.state,
@@ -184,7 +187,7 @@ mod tests {
                 previous: low
             }
         );
-        assert_ne!(before, buffers.get(&buffer).unwrap().data);
+        assert_ne!(before, buffers.get(&buffer).unwrap().cast_slice::<u8>().unwrap());
         gpu.update(high, &mut buffers);
         assert_eq!(
             gpu.state,
@@ -193,14 +196,14 @@ mod tests {
                 previous: high
             }
         );
-        let settled = buffers.get(&buffer).unwrap().data.clone();
+        let settled = buffers.get(&buffer).unwrap().cast_slice::<u8>().unwrap().to_vec();
         gpu.update(high, &mut buffers);
-        assert_eq!(settled, buffers.get(&buffer).unwrap().data);
+        assert_eq!(settled, buffers.get(&buffer).unwrap().cast_slice::<u8>().unwrap());
         assert_eq!(gpu.material, material);
         assert_eq!(gpu.buffer, buffer);
         assert_eq!(materials.get(&material).unwrap().extension.state, buffer);
         assert_eq!((materials.len(), buffers.len()), (1, 1));
-        assert_eq!(settled.unwrap().len(), 320);
+        assert_eq!(settled.len(), 320);
     }
 
     #[test]

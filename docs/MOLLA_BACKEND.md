@@ -1,8 +1,10 @@
 # Molla backend integration
 
-`GEARBOX_PHYSICS=molla` selects the CPU Featherstone backend. The default
-remains Rapier. Both implementations share Gearbox's existing body, collider,
-joint and world traits; the Molla adapter is in `bin/gearbox/src/physics/molla`.
+Molla is Gearbox's only physics engine. Its adapter is in
+`bin/gearbox/src/physics/molla`, behind Gearbox's body, collider, joint and
+world traits. The Rapier backend was removed on 2026-09-25; the dated sections
+below keep their Rapier comparisons and `GEARBOX_PHYSICS` settings as they were
+measured.
 
 ## Paired performance baseline (2026-09-20)
 
@@ -84,15 +86,15 @@ still require their own gates. Sequential Kubota timing medians remain about
   combine rules and per-contact impulse readout map through the existing trait.
 - Internal state quarantine is exposed through backend body IDs and forwarded
   to `PhysicsWorld`'s entity report after each step.
-- All Molla joints are reduced-coordinate joints, including requests that would
-  select Rapier constraint joints. `joint_is_reduced` reports this truthfully.
+- Tree joints are reduced-coordinate; authored `excludeFromArticulation` edges
+  are compliant loop joints (below). `joint_is_reduced` reports which.
 - Soft joints lower to D6 spring freedoms while retaining their logical kind,
   authored frames and semantic motor axes. Runtime frame edits preserve live
   body kinematics and change the spring rest frame. Hitch capture's 8-to-30 Hz
   updates drive real Featherstone forces rather than retaining rigid locks.
 - `internal_iterations` maps to twice that many Featherstone substeps, bounded
-  to 2–128. Featherstone's direct articulated solve does not use Rapier's outer
-  iteration count. Requested settings remain readable.
+  to 2–128. Featherstone's direct articulated solve has no outer iteration
+  count. Requested settings remain readable.
 - Scene wheel metadata registers stable wheel and spin-joint handles with the
   articulated tyre-force layer. Rolling direction follows the bearing/knuckle,
   not the spinning wheel; opposing authored axles receive opposing signed motor
@@ -103,7 +105,7 @@ still require their own gates. Sequential Kubota timing medians remain about
   current scene builders supply their existing scalar ground/material friction.
 - Traction budgets consume mean tyre normal/friction loads. Wheel stamping uses
   tyre contact points and contact state, while link values expose tyre slip,
-  slip angle and normal force. Rapier keeps its contact-based path.
+  slip angle and normal force.
 
 ## Not yet accepted
 
@@ -142,7 +144,7 @@ hardening before final acceptance.
 ## Pressure-dependent tyres
 
 The Molla wheel path now enables the core pressure brush model for discovered
-machine wheels. Rapier keeps its existing contact path. Width and unloaded
+machine wheels. Width and unloaded
 radius come from wheel collider geometry; these optional link values override
 the uncalibrated reference configuration:
 
@@ -608,7 +610,424 @@ existing issues in `gearbox-api`, `gearbox-fields` and vendored clouds; the
 `/tmp/gearbox-pressure-controls-clippy.log`.
 No lint suppressions or unrelated source fixes were added to hide those failures.
 
-Local path dependencies currently expect Molla at `../../OUSD/molla` relative
-to the Gearbox worktree root. No dependency versions were refreshed. Rapier's
+Molla is the `vendor/molla` submodule (branch `develop`); `gearbox-sim` depends on
+its crates by path. No dependency versions were refreshed. Rapier's
 `enhanced-determinism` feature must match the shared Parry feature enabled by
 Molla; otherwise Rapier selects incompatible hash-set drain calls.
+
+## Simulated sensors on sensor links (2026-09-25)
+
+`bin/gearbox/src/sensors.rs` samples authored `role = "sensor"` links
+(`docs/specs/CONTROLLER_SPEC.md` §7.6) with Molla's GPU sensors and streams them on
+`/machines/<id>/sensors/<link>`: `datapod.imu.v1` for `imu` links, chunked
+`gearbox.lidar_scan.v1` sweeps for `lidar` links and row-banded
+`gearbox.camera_frame.v1` color/depth frames for `camera` links. The exact
+`odom`/`imu` controller telemetry is unchanged and stays on its own topics.
+
+- The Molla crates come from the `vendor/molla` submodule by path, which adds
+  `molla-sensors`, `molla-compute` and `molla-storage`.
+- The sensors adopt Bevy's render device through `molla_compute::Engine::from_device`;
+  Bevy 0.19.1 and Molla share wgpu 29.0.4, so no second device or copy exists.
+  The FEM islands already use the same device this way.
+- `PhysicsBackend::with_molla_scene`/`molla_body_handle` expose the Molla runtime
+  scene; the rig snapshots collider geometry once per scene revision
+  (`SensorScene`, convex hulls and round cylinders included) and copies body
+  poses/twists at each sample under the physics lock, never across a GPU wait.
+  Results are collected through a readback ring on later frames, so no frame
+  blocks on the GPU. Rigs rebuild on scene revision or mount changes and drop
+  with their machine; a paused clock issues no samples.
+- Sensor rates run on `PhysicsWorld::simulated_seconds`, not render frames.
+- The machine agent's shared-memory config now allows 24 publishers; every
+  message must fit `MAX_PAYLOAD_BYTES` (16 KiB), so LiDAR sweeps are split into
+  `LIDAR_CHUNK_PULSES` (900) pulse chunks sharing one `sample`.
+- `bin/gearbox/assets/world/sensor_yard.usda` is the tractor with an
+  `imu_link` (100 Hz) and a 360×16 roof `lidar_link` (10 Hz, 60 m).
+
+Verification, RTX 4080/Vulkan, release build, Molla backend at 120 Hz:
+
+- `nixVulkan cargo test -p gearbox-sim --bin gearbox imu_and_lidar -- --ignored`:
+  the headless GPU fixture (fixed carrier over a slab with a 10 m wall 4.5 m
+  ahead) reads 9.81 m/s² along the link +Z, zero gyro, ROS-remapped
+  orientation, and ranges `[inf, inf, inf, 6.364, 4.5, 6.364, inf, inf]`
+  with three hits. `links::tests::sensor_links_parse_kinds_defaults_and_ranges`,
+  `sensors::tests::*` and `wire::json::lidar_scan_tests` cover parsing, frames
+  and the wire type.
+- Live `sensors-gate` instance with `sensor_yard.usda` spawned as `sy`:
+  `peer sub /machines/sy/sensors/imu_link` parked reads
+  `az 9.80, ax 0.30, ay -0.12` (meadow tilt) and zero gyro; during
+  `machine move sy --forward 2 --turn 0.3 --for 5s` it reads
+  `gyro.vz 0.25–0.38 rad/s`, `ax 1.0–1.4 m/s²` while accelerating and
+  `ay 0.3–1.0 m/s²` centripetal, matching the commanded left turn and the
+  `odom` yaw rate. `peer sub /machines/sy/sensors/lidar_link -n 8` delivers a
+  full sweep as seven chunks of one `sample`: the eight upward rows miss, the
+  lower rows hit terrain and the tractor's own body from 0.48 m to 59.9 m.
+- Pausing the clock froze both streams (the same LiDAR `sample` 1819 for
+  4 s); `scene play` resumed them (1918); `clear machines` dropped the rig
+  without diagnostics. Frame rate stayed 8–12 fps with and without the
+  machine, so the sensors are not the render bottleneck; physics steps stayed
+  0.15–0.44 ms.
+- Screenshot after the drive: `/tmp/claude-1000/.../scratchpad/logs/sensor_yard.png`
+  (copied to `/tmp/gearbox-sensor-yard.png`).
+
+Camera links (`gearbox:sensor:kind = "camera"`, 160×120 at 5 Hz in the yard)
+stream row-banded color and depth frames; the live centre rows read the
+terrain at 13–80 m and the bottom rows the hood at 4.5–6 m. A second tractor
+spawned 20.3 m from `sy` shows in the LiDAR horizon rows at 18.7–19.3 m over
+a 36° sector and, after `machine move other --forward 2 --for 4s`, at
+22.9–25 m about 27 columns further round, consistent with its 8 m move
+(`/tmp/gearbox-sensor-sweep-{before,after}.json`,
+`/tmp/gearbox-sensor-yard-two.png`). The simulator log reports each rig every
+ten seconds: with IMU, LiDAR and camera together, 0.3–0.7 ms sample + 0.1–0.4 ms
+collect per sample, 1 KB uploaded and 139–191 KB read back per sample, 150
+frames per 10 s and zero dropped samples at 15 fps.
+
+Not covered: the first launch of this checkout ran on `llvmpipe` because
+`NVIDIA_VERSION` was unset when the dev shell was entered (see `.env.lua`);
+set it before `nix develop`. SDF colliders stay invisible to sensors; sensor
+noise models remain future work (`PLAN_SENSORS.md`).
+
+### Camera colours, the live viewer and multi-camera cost (2026-09-25)
+
+Camera links trace the Molla collision scene, not Bevy's visual meshes. Every
+shape used to shade as white, so frames were grey Lambert silhouettes. Rig
+builds now call `SensorScene::set_shape_colors` with one albedo per collider:
+
+- the size-weighted mean `StandardMaterial` colour of the visible meshes under
+  the collider entity, or under its nearest ancestor that has any (up to three
+  levels), times the mean texel of CPU-resident RGBA8 base-colour textures;
+- `GROUND_COLOR` for heightfields and entity-less colliders;
+- `NEUTRAL_COLOR` otherwise.
+
+The log line `collider colours: N from visuals, M ground, K neutral` reports
+the split. `sensors::tests::collider_colours_follow_visuals_with_ground_and_neutral_fallbacks`
+covers the mapping. This does **not** make camera links representative of the
+rendered scene: terrain textures, grass and meshes without colliders never
+reach the collision scene. That is now the `geometry` render mode; see below.
+
+`bin/gearbox/examples/camera_view.rs` subscribes to camera links and shows the
+colour (or depth) of each stream with its delivered rate and bandwidth. Run it
+as `camera_view <machine> [link ...]`. It connects as the named identity
+`gearbox-camera-view`: `camera_view --did` prints the did for `gearbox run
+--allow <did>`. Misses (alpha 0) draw as sky, and `CAMERA_VIEW_SNAPSHOTS=<dir>`
+writes each stream's latest colour frame as a PNG every three seconds.
+`world/tractor_cameras.usda` mounts six 640×480, 15 Hz cameras (front, rear,
+left, right, front-down, rear-down) on the tractor.
+
+Measured on RTX 4080 (release, default meadow world, 32-second windows, fps
+from `LogDiagnosticsPlugin`):
+
+| Setup | Sim fps | Rig cost per rendered frame | Readback per frame | Dropped camera frames |
+|---|---|---|---|---|
+| No machine | ~12 (noisy, 6–50) | – | – | – |
+| Tractor, no cameras | 11.9–12.2 | – | – | – |
+| One camera | 11.3–12.3 | 0.7 ms sample + 6.3 ms collect | 2.4 MB | 0 |
+| One camera, viewer subscribed | 10.8–11.0 | 0.3 ms + 2.8 ms | 2.4 MB | 0 |
+| Six cameras | 6.8–11.8 | 2.9 ms + 16.3 ms | 12.6 MB | 76–120 per 10 s |
+| Six cameras, viewer subscribed | 6.8–8.3 | 1.3 ms + 10.6–12.1 ms | 12.7–13.4 MB | 39–77 per 10 s |
+
+Before any machine is loaded, Bevy's own rendering already keeps the board at
+100% and about 12 fps, so the cameras' GPU trace is small by comparison. Host
+work dominates: map, `f64` conversion, row-band chunking and publishing. Samples
+are taken at most once per rendered frame, so a 15 Hz camera delivers about
+12 Hz here. Dropped frames are readback-ring backpressure. 1280×720 links were
+rejected: link parsing caps width and height at 1024.
+
+### Bevy-rendered camera links (2026-09-25)
+
+`gearbox:sensor:render` picks where a camera link's colour comes from. The
+default is `optimized`; `full` and `geometry` are the alternatives.
+`gearbox:sensor:channels` picks `color`, `depth` or `color_depth`.
+
+`bin/gearbox/src/sensor_cameras.rs` gives each `optimized`/`full` link a
+render-to-texture `Camera3d`:
+
+- **Placement:** a child of the link prim, looking along +X with +Z up, with
+  the link's vertical FOV and range as far plane.
+- **When it renders:** it stays inactive until the link's rig issues a sample.
+  That frame it renders once and a `Readback` copies its RGBA8 image back.
+- **What it publishes:** row padding is stripped and the colour goes out
+  through the same row-band chunker as Molla frames. Colour carries the
+  sample number and simulated time of the rig's sample, so it pairs with the
+  Molla depth.
+- **Depth-only trace:** the Molla trace then runs only for depth, and not at
+  all for `channels = "color"`.
+- **Order:** sensor cameras order before the viewer (`order ≤ -1000`).
+- **Always off by default:** each frame starts with every sensor camera
+  inactive, because mara switches every camera on before each update.
+
+What each mode draws:
+
+- **Both modes:** the weather's exposure, AgX tonemapping, haze, ambient and
+  environment light, following the daylight via `bevy_weather::camera_look`
+  and `WeatherLook`.
+- **`optimized` omits:** bloom, MSAA and vegetation (`gearbox_fields::NoVegetation`).
+- **`full` adds:** Bloom and 4× MSAA, and draws vegetation.
+- **Neither draws:** the cloud skybox, which now sits on
+  `bevy_weather::SKY_LAYER` because it is rendered from the viewer's own cloud
+  image. Sensor cameras clear to a flat sky colour instead.
+- **Shadows:** both pay the sun's four shadow cascades; a camera cannot opt
+  out without losing the sun.
+
+Making a second `Camera3d` safe required changes to several systems:
+
+- **Opting out of the weather:** `bevy_weather::configure_cameras` skips
+  cameras with `WeatherOptOut`.
+- **Following the viewer:** terrain and biome lookups exclude `SensorCamera`.
+  Vegetation streaming and motes follow the highest-order camera instead of an
+  arbitrary or single one.
+- **Already safe:** planet tile selection and the globe require `CellCoord`,
+  so only the viewer drives them.
+- **Keeping the sky:** the recorder's layer sets include `SKY_LAYER`, so the
+  viewer and its recordings keep the sky.
+
+Measured on RTX 4080, release, default meadow world, six 640×480 links at a
+requested 15 Hz, no subscriber. Without a machine the sim renders about 11 fps.
+
+| Links | Sim fps | Delivered colour |
+|---|---|---|
+| 6 × `geometry` | 10.6–11.0 | ~10 Hz each; 15–17 ms host collect per frame, 12.8 MB read back, ~70 drops per 10 s |
+| 1 × `optimized` | 10.2–10.6 | ~10 Hz; 1.2 MB read back per render, no drops |
+| 6 × `optimized` | 7.8–8.3 | ~8 Hz each; all renders published |
+| 6 × `full` | ~1.9 | ~4 Hz each |
+
+Samples are taken at most once per rendered frame, so delivered rates are
+capped by the sim frame rate. In `full` mode vegetation streams only around
+the viewer camera, so it thins out beyond the viewer's range in sensor images.
+
+One run with six `optimized` links hit NVIDIA Xid 32 (invalid push buffer)
+about 36 s in, after a click in the window, and the device was lost. It did
+not reproduce across the four-mode measurement that followed; the cause is
+unknown.
+
+### Where the camera cost goes (profiled 2026-09-25)
+
+Profiling switches:
+- `GEARBOX_RENDER_DIAGNOSTICS=1` adds Bevy's per-pass render diagnostics to the 10 s log.
+- `MARA_GPU_TIMESTAMPS=1` makes mara request timestamp queries so those passes get GPU times.
+- `GEARBOX_TRACE` in the `profile` build writes a Chrome trace.
+- `GEARBOX_NO_SUN_SHADOWS=1` switches sun shadow maps off, for profiling only.
+
+Findings on the RTX 4080, release, default meadow, tractor with camera links:
+
+- **GPU-bound.** In the Chrome trace the main thread is busy only 56 → 85 ms per
+  second of wall time (no cameras → six optimized), and the render thread's
+  `Core3d` 22 → 40 ms per second, while frames take 80–160 ms.
+- **Grass dominates the base cost.** The viewer's transparent pass, which draws
+  the vegetation, takes most of each frame's GPU time. This is why the sim sits
+  near 12 fps before any camera exists.
+- **Sensor cameras pay per view, not per pixel.** Six optimized cameras at
+  160×120 cost as much as at 640×480 (8.5–9.3 against 9.0–9.4 fps, from 12.2).
+- **Sun shadows are that per-view cost.** Bevy builds the sun's four 4096²
+  cascades, out to 800 m, for every active camera, whatever its range. With sun
+  shadows off, six 160×120 cameras hold 11.7–11.9 fps against 12.7 with none,
+  and deliver 714 rather than about 550 renders per 10 s.
+
+Bevy 0.19 has no per-camera opt-out for directional shadows. A light's
+`RenderLayers` also filter which entities cast into its maps, so hiding the sun
+from sensor cameras would stop the world casting shadows. Removing the cost
+needs a small Bevy change (a per-camera "no directional shadows" marker in
+`bevy_light` cascades and `bevy_pbr` light preparation) or globally cheaper
+shadows. Neither is applied.
+
+### Generic sensor links: the Webots set (2026-09-25)
+
+Every device in the Webots sensor guide now has a sensor-link kind
+(`docs/specs/CONTROLLER_SPEC.md` §7.6):
+- accelerometer, gyro, inertial unit, compass and GPS;
+- distance (laser, infra-red or sonar), light, position and radar;
+- range finder, touch (bumper, force or force-3d), receiver and emitter;
+- camera recognition.
+
+Molla (`molla-sensors`, pinned at `61ff952`) computes every reading. Gearbox
+supplies only what the environment knows:
+- the site frame (north +X, up +Y, east +Z);
+- each site's datum on the planet, for GPS;
+- the sun and sky of the weather, for light;
+- this step's contact forces, for touch;
+- the emitted packets, for radio.
+
+Readings stream as `gearbox.measurement.v1`. Controllers send packets as
+`gearbox.emit_request.v1` on `/machines/<id>/emit`.
+
+- `bin/gearbox/src/sensor_generic.rs` samples the generic kinds.
+  - Distance, light and radar rays are cast on the CPU (`RigidRays`) against
+    the live rigid scene. The first live run cast them with Molla's synchronous
+    GPU raycaster. That made the first rig of each frame wait for the renderer's
+    queued work: 77–128 ms per sample against 1.3 ms for the next rig, at
+    7–9 fps. On the CPU the same rigs take 2.8 and 0.4 ms, at 12–13 fps.
+  - Light uses the weather's own split. The beam is the clear-sky sun dimmed by
+    `SkyLight::mean_direct`. Sky light is `0.25 × beam × sin(elevation) ×
+    diffuse_gain`, a fifth of the global light under a clear sky.
+- `bin/gearbox/src/sensor_radio.rs` puts every machine's receivers and emitters
+  on one Molla `RadioMedium`. Infra-red line of sight uses the backend's new
+  `cast_ray_filtered`, which skips both end bodies. Rapier and Molla implement
+  it.
+- Recognition adds a shape-index channel to the camera trace. Objects are rigid
+  bodies other than the machine's own. Labels are `<machine>:<body prim>`.
+- `contact_forces` resolves collider bodies before taking the Molla scene lock.
+  Doing it under the lock deadlocked the first GPU test.
+
+Verification, RTX 4080, release, Molla backend at 120 Hz:
+- `sensors::tests::imu_and_lidar_sample_the_molla_scene` (`oslo make
+  test-fem-gpu --filter=imu_and_lidar`) now also covers accelerometer, gyro,
+  inertial unit, compass, distance, light, radar, touch, position and
+  recognition. It checks each against the fixture's geometry.
+- Unit tests cover:
+  - `sensor_generic::tests`: GPS against the site datum, the daylight split,
+    recognition records;
+  - `sensor_radio::tests`: radio versus infra-red behind a wall, and range;
+  - `links::tests::generic_sensor_links_parse_their_attributes`;
+  - the `wire_json` measurement round trip.
+- Live, `world/sensor_suite.usda` spawned as `ss`, with a second copy 20 m
+  ahead:
+  - **At rest:** the inertial unit's roll 0.01787 and pitch −0.00787 give
+    gravity `(0.0772, 0.1753, 9.808)` in the link frame, equal to the
+    accelerometer. Yaw 89.55° matches odom's 89.5° and the compass heading of
+    0.45°. GPS sits 0.5 m behind odom, as authored, with zero speed.
+  - **Radar:** sees the other tractor's rear wheels at 16.0 and 16.8 m and its
+    chassis at 17.9 m. While driving at 1.5 m/s it reads −1.43 to −1.51 m/s
+    radial speed, down to 2.4 m.
+  - **Recognition:** lists `ss2:/World/Tractor_01/chassis` and both rear
+    wheels at about 17 m.
+  - **Radio:** a packet from `ss2`'s emitter reaches `ss` at strength 0.00289
+    (18.6 m) from straight ahead, and `ss2`'s own receiver at 0.8 m.
+  - **Bumper:** driven into the other machine 0.9 m off-centre, the chassis
+    bumper reads 16 contacts and 10.5 kN pushing back along −X. Head-on, the
+    two tractors' wheels meet first: the rear tyres stick out 0.3 m past the
+    hull, so the bumper stays clear.
+  - **Position:** the rear-wheel sensor follows the wheel angle, 25.9 rad
+    after a 17.6 m roll.
+
+Tyre–ground forces come from the tyre model, not contact manifolds. A touch
+sensor on a wheel therefore reports only collisions with other bodies. A
+sensor mounted inside its own body's collider sees that collider first. The
+radar in the first draft of the suite sat on the hull's front face and saw
+nothing.
+
+### Actuator devices: the Webots set (2026-09-25)
+
+The Webots actuators, less pen, LED, display, speaker and muscle, now run
+inside Molla's rigid step (`molla_solvers::devices`, pinned at `030b965`):
+- motors (rotational and linear) and brakes on revolute and prismatic joints;
+- propellers;
+- belts, as conveyors or tank tracks;
+- connectors.
+
+The emitter came with the radio work. Gearbox only authors, commands and
+reads them (`docs/specs/CONTROLLER_SPEC.md` §7.7).
+
+Molla core:
+- **Brakes:** `Control::joint_damping` is solved backward-Euler together
+  with the drive on its DOF.
+- **Effort readback:** `FeatherstoneSolver::joint_efforts()` gives every DOF's
+  drive and brake effort, averaged over the step. That is motor torque
+  feedback.
+- **Loop reactions:** `loop_forces` returns each loop joint's reaction on its
+  child. Connectors break on it.
+- **Belts:** `ColliderDesc::surface_velocity` makes penalty friction drag
+  contacts along a running surface.
+- **Motors:** a velocity drive under Webots' P-controller, or a direct effort.
+- **Propellers:** thrust and reaction torque added each substep.
+- **Connectors:** link through compliant fixed loop joints.
+- **Tests:** `molla-solvers --test devices`; each device checked against an
+  analytic answer.
+
+Gearbox:
+- **Backend trait:** `PhysicsBackend` gains an engine-agnostic device API.
+  Its defaults are "unsupported", so Rapier is untouched. `MollaBackend`
+  maps it in `physics/molla/device.rs`.
+- **Joints:** `PhysicsWorld::entity_to_joint` resolves authored joint prims.
+- **`devices.rs`:**
+  - discovers devices with the machine;
+  - registers them once their bodies, joints and colliders exist;
+  - applies `/actuate` commands before the physics steps;
+  - publishes `actuators/<device>` after.
+
+Verification, RTX 4080, release, `world/device_yard.usda` spawned twice as
+`lead` and `tow`:
+- Both machines register all 7 devices.
+- **PTO motor:**
+  - Velocity 30 rad/s runs at 29.98 rad/s on 0.30 N·m.
+  - Position 200 rad from 594 rad turns at exactly −5 rad/s, the commanded
+    speed.
+  - 20 N·m of torque spins the free stub up without bound (1143 rad/s),
+    Webots' documented force-control behaviour.
+- **Propeller:** ω 60 rad/s gives thrust 1800 N (0.5·60²) and a reaction
+  torque of 36 N·m (0.01·60²).
+- **Roof belt:** 1.5 m/s, with its travel integrating.
+- **Rear-wheel brakes:** 5000 N·m·s/rad while driving hold the wheels to
+  −0.004 rad/s. Released brakes report zero damping.
+- **Connectors:**
+  - `tow`'s latched, auto-locking nose docks with `lead`'s passive tail at
+    spawn. Both report the peer by name.
+  - Driving `lead` loads the link to a steady 11.1 kN tensile: `tow` is parked
+    on its own wheel motors, so it holds.
+  - `unlock` releases the link while the peer is still present. `lead` then
+    drives 3 m away and presence clears.
+  - Re-latching links again as the tractors come back within tolerance.
+- Full `oslo make test` passes. The only Molla failure,
+  `joint_control::scalar_equality_limits_resist_effort_and_preserve_authored_motor`,
+  fails identically on the previous pin.
+
+Found on the way:
+- A 1 kg box on Molla's default penalty contact chatters. Its four contact
+  points' explicit damping gives `c·dt/m ≈ 4` at the 1/960 s substep, so the
+  conveyor test uses a 50 kg crate.
+- The ackermann controller did not reverse `lead` on `--forward=-1`. That is
+  unrelated to the devices and not investigated.
+
+### Copters, wind and drag (2026-09-25)
+
+Molla `850bd41` adds a multirotor controller and air to the rigid world's
+devices (Molla book, *Rigid-world devices*):
+- `devices.copters` flies a body on its propellers:
+  - a velocity loop with a disturbance observer;
+  - a geometric attitude loop on SO(3);
+  - a least-norm mixer over the rotors' thrust and torque columns.
+- `devices.aero` holds the wind, a per-body wind, and quadratic drag
+  elements. Propellers take their speed of advance from airspeed.
+
+The device is called `copter`, not `heli` or `flight`: it needs fixed-pitch
+rotors that can make any torque. Planes and rockets would be devices of
+their own.
+
+Gearbox:
+- **Backend trait:** `insert_copter`, `command_copter`, `copter_output`,
+  `insert_drag`, `drag_output`, `set_wind` and `set_body_wind`.
+- **`devices.rs`:**
+  - discovers `gearbox:copter:*` and `gearbox:drag:*`;
+  - registers copters after the machine's propellers;
+  - maps a claimed `/cmd_vel` session to the copter's velocity command.
+- **`blow_wind`:**
+  - Each frame it sets the environment's steady wind.
+  - At every drag body it sets the gusting wind, from
+    `gearbox_fields::wind_map::Gusts`: a CPU copy of the vegetation's
+    `wind_at` over the same baked gust map, at simulated time.
+- **Asset:** `world/spray_drone.usda` is a 25 kg quad with a copter device
+  and `CdA` (0.4, 0.4, 0.8) m².
+
+The wind stays on the CPU. It costs a few flops per body per substep, and a
+GPU round trip each substep would wait behind rendering as the sensor
+raycasts did.
+
+Verification, RTX 4080, release, drone spawned alone:
+- **Calm (before drag):**
+  - Takeoff at 1.5 m/s, then hover on 246 N with the rotors at ±150 rad/s
+    (61 N each, diagonals counter-rotating).
+  - Forward at 3 m/s pitches 0.016 rad nose down.
+  - Yaw at 0.54 rad/s.
+- **Default weather (4 m/s at 36.87°, gustiness 0.7):**
+  - The drag device read 0.9–4.1 m/s gusts over 20 s, from 29° to 58°
+    (the slow turn field allows ±26°).
+  - At 4 m/s airspeed the drag was 3.1 N, and the copter pitched 0.012 rad
+    into it: `atan(3.1/245)` is 0.0128.
+  - The hover velocity stayed within 0.016 m/s. The drone drifted 4 cm in
+    20 s of gusts.
+- **Through the wind:**
+  - 5 s forward at 3 m/s covered 14.3 m, with 0.24 m cross-track.
+  - 4 s right at 2 m/s covered 7.6 m.
+- **Tests:**
+  - `devices::tests` covers copter and drag discovery, and a drag body in
+    the world wind next to one in its own.
+  - `wind_map::tests` checks the gust range: between `1 − gustiness` and
+    full speed, never more than 90° off downwind.

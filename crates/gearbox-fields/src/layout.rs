@@ -478,6 +478,7 @@ mod tests {
             _: crate::profile::WheelMapParams,
             _: crate::profile::SurfaceGeometry,
             _: crate::profile::Placed,
+            _: bevy::prelude::Handle<bevy::prelude::Image>,
         ) -> std::sync::Arc<dyn crate::profile::GroundSurface> {
             std::sync::Arc::new(NoGround)
         }
@@ -496,6 +497,7 @@ mod tests {
             tread: Vec4::ZERO,
             surface_tint: Vec4::ONE,
             soft_border: 1.0,
+            workable: false,
         });
         let refuses = |json: &str| {
             serde_json::from_str::<FieldLayout>(json)
@@ -521,12 +523,22 @@ mod tests {
             refuses(&with(r#"{"name":"a","width":0,"wear":0.5,"points":[[0,0],[9,0]]}"#))
                 .contains("0 m wide")
         );
-        // JSON cannot write NaN, but it can write a number too big to hold,
-        // which arrives as an infinity and would sink the terrain to nothing.
-        assert!(
-            refuses(&with(r#"{"name":"a","width":6,"wear":0.5,"points":[[1e40,0],[9,0]]}"#))
-                .contains("not a number")
-        );
+        let overflow = with(r#"{"name":"a","width":6,"wear":0.5,"points":[[1e40,0],[9,0]]}"#);
+        match serde_json::from_str::<FieldLayout>(&overflow) {
+            Ok(layout) => assert!(layout
+                .validate(&profiles, FieldBounds { min: Vec2::splat(-400.0), max: Vec2::splat(400.0) })
+                .unwrap_err()
+                .contains("not a number")),
+            Err(error) => assert!(error.to_string().contains("number out of range")),
+        }
+        for nonfinite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut layout: FieldLayout = serde_json::from_str(sound).unwrap();
+            layout.ways[0].points[0][0] = nonfinite;
+            assert!(layout
+                .validate(&profiles, FieldBounds { min: Vec2::splat(-400.0), max: Vec2::splat(400.0) })
+                .unwrap_err()
+                .contains("not a number"));
+        }
         assert!(
             refuses(&with(r#"{"name":"a","width":6,"wear":4,"points":[[0,0],[9,0]]}"#))
                 .contains("not nought to one")
@@ -595,7 +607,7 @@ impl FieldBounds {
 
 /// How far a field's edge may stray from the line it was authored on, and so
 /// how much ground each field must be given *past* that line. The shaders hold
-/// the same number as `EDGE_STRAY_M` in `bare/shaders/cover.wgsl` and cut the
+/// the same number as `EDGE_STRAY_M` in `bare/shaders/cover.wesl` and cut the
 /// ground on the strayed edge; this is what makes sure there is ground there to
 /// cut. Short of it, a field ends before its own edge does and the terrain
 /// shows through; the margin is deliberately the larger of the two.
@@ -968,6 +980,11 @@ pub struct FieldSpec {
     /// Dimensionless ground friction; absent values inherit the layout default.
     #[serde(default)]
     pub friction: Option<f64>,
+    /// Degrees the field's pattern — a concrete yard's slab grid — is turned
+    /// about the vertical, counter-clockwise seen from above, as a load's
+    /// `yaw_deg`.
+    #[serde(default)]
+    pub yaw: f32,
 }
 
 impl FieldSpec {
@@ -1153,7 +1170,7 @@ impl Hollows {
 
 /// Where stone begins to come up through the fines: the point a way stops
 /// being a soft track and becomes a made road. Held here as well as in
-/// `bare/shaders/cover.wgsl`, because the hollow is cut on the CPU and the
+/// `bare/shaders/cover.wesl`, because the hollow is cut on the CPU and the
 /// colour on the GPU and the two must agree on which a way is;
 /// `shader_contract` refuses to let the two drift apart.
 pub const WAY_METALLED: f32 = 0.55;
@@ -1387,6 +1404,7 @@ impl FieldLayout {
             way_width: None,
             tyre: None,
             friction: self.default_friction,
+            yaw: 0.0,
         }
     }
 }

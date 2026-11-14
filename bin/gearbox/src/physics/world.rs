@@ -1,7 +1,7 @@
-//! `PhysicsWorld` — the one resource that owns the simulation. It holds a
-//! [`PhysicsBackend`] behind a box and the bookkeeping that is gearbox's
-//! own whatever engine runs: which entity is which body, which body pairs
-//! must not touch, the fixed-step clock, hitch captures.
+//! `PhysicsWorld` — the one resource that owns the simulation. It holds the
+//! Molla world behind [`PhysicsBackend`] and gearbox's own bookkeeping:
+//! which entity is which body, which body pairs must not touch, the
+//! fixed-step clock, hitch captures.
 //!
 //! It derefs to the backend, so `physics.body(id)` reads straight through.
 //! **f64 throughout;** conversion happens at the Bevy boundary
@@ -12,9 +12,12 @@ use std::ops::{Deref, DerefMut};
 
 use bevy::prelude::*;
 
-use super::backend::{BodyId, ColliderId, JointId, PhysicsBackend, Pose, SolverSettings};
+use super::backend::{
+    BodyId, ColliderId, DeviceCommand, DeviceLimits, DeviceSetting, JointAxis, JointId, MotorModel, MotorOutput,
+    PhysicsBackend, Pose, SolverSettings,
+};
+use super::drive_motor::DriveMotor;
 use super::molla::MollaBackend;
-use super::rapier::RapierBackend;
 
 /// All physics state for the loaded scene. Exactly one of these in the world.
 #[derive(Resource)]
@@ -26,11 +29,33 @@ pub struct PhysicsWorld {
     pub(super) published_transforms: HashMap<Entity, super::writeback::PublishedTransform>,
     /// Bevy entity → collider.
     pub entity_to_collider: HashMap<Entity, ColliderId>,
+    /// USD joint prim entity → joint.
+    pub entity_to_joint: HashMap<Entity, JointId>,
+    /// Joint → its USD joint prim entity: the exact identity commands bind to.
+    pub joint_entities: HashMap<JointId, Entity>,
+    /// World-anchored joint entity → the fixed anchor entity and body it holds on to.
+    pub anchor_bodies: HashMap<Entity, (Entity, BodyId)>,
+    /// Control body → the turn from its axes to the drive controllers' chassis axes.
+    pub chassis_turns: HashMap<BodyId, glam::DQuat>,
+    /// USD joint → its authored `PhysicsDriveAPI`, kept while controllers
+    /// rewrite the joint's motor every step.
+    pub authored_drives: HashMap<JointId, AuthoredDrive>,
+    /// D6 joint axis → its authored drive.
+    pub authored_axis_drives: HashMap<(JointId, JointAxis), AuthoredDrive>,
+    /// Motor devices that move their joint's authored drive.
+    pub(super) drive_motors: HashMap<JointId, DriveMotor>,
+    /// Exact DOF bindings, owners and the per-tick commit.
+    pub control: super::commit::Control,
     /// Body pairs whose contacts are dropped (`PhysicsFilteredPairsAPI`),
     /// stored in both orders.
     pub filtered_pairs: HashSet<(BodyId, BodyId)>,
     pub attachment_filtered_pairs: HashSet<(BodyId, BodyId)>,
     hitch_captures: HashMap<JointId, HitchCapture>,
+    joint_frictions: HashMap<JointId, JointFriction>,
+    /// Rolling joints the soil turns: the rate the ground going by would turn
+    /// them at (rad/s) and the most torque the soil's grip puts on them. A
+    /// disc cutting the ground is dragged round by the soil it cuts.
+    pub(crate) soil_grips: HashMap<JointId, (f64, f64)>,
     /// Entities whose bodies the last step disabled for non-finite state.
     pub quarantined: Vec<Entity>,
     /// Fixed physics rate; the frame's real time is spent in steps of it.
@@ -40,41 +65,40 @@ pub struct PhysicsWorld {
     /// Steps this frame runs, planned in `First` so controllers can scale
     /// per-frame impulses by the time they cover.
     pub pending_steps: u32,
+    /// Simulated seconds advanced by every step so far; never rewinds.
+    pub simulated_seconds: f64,
+    /// A step budget ran out this frame: pause once its steps ran.
+    pub pause_after_steps: bool,
+    /// Physics ticks run so far.
+    pub ticks: u64,
+}
+
+/// The drive a USD joint authors on its free axis, in SI units: stiffness per
+/// radian or metre, damping per radian or metre per second, force or torque.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AuthoredDrive {
+    pub stiffness: f64,
+    pub damping: f64,
+    pub max_force: Option<f64>,
+    /// `drive:type` is `force`; otherwise the gains scale with inertia.
+    pub force: bool,
+    /// The authored targets, radians or metres and per second.
+    pub target_position: Option<f64>,
+    pub target_velocity: Option<f64>,
 }
 
 /// Default physics rate; `GEARBOX_PHYSICS_HZ` overrides it.
 const DEFAULT_STEP_HZ: f64 = 120.0;
+/// Default solver substeps per step, an even count; `GEARBOX_PHYSICS_SUBSTEPS` overrides it.
+const DEFAULT_SUBSTEPS: usize = 8;
 /// Most steps one frame may run; below that frame rate physics slows
 /// down instead of spiralling.
-const MAX_STEPS_PER_FRAME: u32 = 12;
+pub(super) const MAX_STEPS_PER_FRAME: u32 = 12;
 
 impl Default for PhysicsWorld {
     fn default() -> Self {
-        Self::with_backend(backend_by_name(std::env::var("GEARBOX_PHYSICS").ok().as_deref()))
+        Self::with_backend(Box::new(MollaBackend::default()))
     }
-}
-
-/// The engine `GEARBOX_PHYSICS` names; a second backend gets an arm here.
-/// Molla runs the machines: it is the one that carries pressure tyres, wheel
-/// forces and authored joint loops. Rapier stays reachable by name, because
-/// the paired benchmarks measure one against the other.
-fn backend_by_name(name: Option<&str>) -> Box<dyn PhysicsBackend> {
-    match name {
-        None | Some("molla") => Box::new(MollaBackend::default()),
-        Some("rapier") => Box::new(RapierBackend::default()),
-        Some(other) => {
-            warn!("gearbox-physics: no backend `{other}`; running on molla");
-            Box::new(MollaBackend::default())
-        }
-    }
-}
-
-#[test]
-fn named_backends_select_the_requested_engine() {
-    assert_eq!(backend_by_name(Some("molla")).name(), "molla");
-    assert_eq!(backend_by_name(Some("rapier")).name(), "rapier");
-    assert_eq!(backend_by_name(None).name(), "molla");
-    assert_eq!(backend_by_name(Some("nonesuch")).name(), "molla");
 }
 
 impl Deref for PhysicsWorld {
@@ -98,27 +122,45 @@ impl PhysicsWorld {
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|hz| *hz >= 30.0)
             .unwrap_or(DEFAULT_STEP_HZ);
+        let substeps = std::env::var("GEARBOX_PHYSICS_SUBSTEPS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n >= 2 && n % 2 == 0)
+            .unwrap_or(DEFAULT_SUBSTEPS);
         // Soft constraint joints converge harder per tick; matters for
         // vehicles whose front-axle joints are not in reduced coordinates.
         backend.set_settings(SolverSettings {
             dt: 1.0 / step_hz,
             solver_iterations: 16,
-            internal_iterations: 4,
+            internal_iterations: substeps / 2,
         });
-        backend.set_gravity(glam::DVec3::new(0.0, -9.81, 0.0));
-        info!("gearbox-physics: backend `{}` at {step_hz} Hz", backend.name());
+        backend.set_gravity(glam::DVec3::new(0.0, -gearbox_globe::Body::active().gravity_mps2(), 0.0));
+        info!("gearbox-physics: backend `{}` at {step_hz} Hz, {substeps} substeps a step", backend.name());
         Self {
             backend,
             entity_to_body: HashMap::new(),
             published_transforms: HashMap::new(),
             entity_to_collider: HashMap::new(),
+            entity_to_joint: HashMap::new(),
+            joint_entities: HashMap::new(),
+            anchor_bodies: HashMap::new(),
+            chassis_turns: HashMap::new(),
+            authored_drives: HashMap::new(),
+            authored_axis_drives: HashMap::new(),
+            drive_motors: HashMap::new(),
+            control: Default::default(),
             filtered_pairs: HashSet::new(),
             attachment_filtered_pairs: HashSet::new(),
             hitch_captures: HashMap::new(),
+            joint_frictions: HashMap::new(),
+            soil_grips: HashMap::new(),
             quarantined: Vec::new(),
             step_hz,
             accumulator: 0.0,
             pending_steps: 0,
+            simulated_seconds: 0.0,
+            pause_after_steps: false,
+            ticks: 0,
         }
     }
 
@@ -131,14 +173,75 @@ impl PhysicsWorld {
     pub fn step(&mut self) {
         self.quarantine_non_finite();
         self.advance_hitch_captures();
+        self.commit_actuators();
+        self.apply_joint_frictions();
         let (authored, attached) = (&self.filtered_pairs, &self.attachment_filtered_pairs);
         self.backend
             .step(&|a, b| authored.contains(&(a, b)) || attached.contains(&(a, b)));
+        self.observe_drive_motors();
+        self.simulated_seconds += self.dt();
+        self.ticks += 1;
         for body in self.backend.quarantined_bodies() {
             if let Some(entity) = self.backend.body(body).and_then(|body| body.entity()) {
                 if !self.quarantined.contains(&entity) {
                     self.quarantined.push(entity);
                 }
+            }
+        }
+    }
+
+    /// Puts a motor device on `joint`. On a joint with an authored drive the
+    /// motor moves that drive; elsewhere it is the backend's own.
+    pub fn insert_motor(&mut self, joint: JointId, limits: DeviceLimits, max_force: f64) -> Result<(), String> {
+        let coordinate = self.backend.joint(joint).and_then(|j| {
+            [JointAxis::AngX, JointAxis::LinX].into_iter().find_map(|axis| j.motor_position(axis).map(|q| (axis, q)))
+        });
+        match (self.authored_drives.get(&joint), coordinate) {
+            (Some(drive), Some((axis, position))) => {
+                let motor = DriveMotor::new(axis, *drive, limits, max_force, position)?;
+                self.drive_motors.insert(joint, motor);
+                Ok(())
+            }
+            _ => self.backend.insert_motor(joint, limits, max_force),
+        }
+    }
+
+    pub fn remove_motor(&mut self, joint: JointId) {
+        if self.drive_motors.remove(&joint).is_none() {
+            self.backend.remove_motor(joint);
+        }
+    }
+
+    pub fn has_motor(&self, joint: JointId) -> bool {
+        self.drive_motors.contains_key(&joint) || self.backend.has_motor(joint)
+    }
+
+    pub fn command_motor(&mut self, joint: JointId, command: DeviceCommand) -> Result<(), String> {
+        match self.drive_motors.get_mut(&joint) {
+            Some(motor) => motor.command(command),
+            None => self.backend.command_motor(joint, command),
+        }
+    }
+
+    pub fn configure_motor(&mut self, joint: JointId, setting: DeviceSetting) -> Result<(), String> {
+        match self.drive_motors.get_mut(&joint) {
+            Some(motor) => motor.configure(setting),
+            None => self.backend.configure_motor(joint, setting),
+        }
+    }
+
+    pub fn motor_output(&self, joint: JointId) -> Option<MotorOutput> {
+        match self.drive_motors.get(&joint) {
+            Some(motor) => Some(motor.output(self.backend.motor_output(joint))),
+            None => self.backend.motor_output(joint),
+        }
+    }
+
+    fn observe_drive_motors(&mut self) {
+        let dt = self.dt();
+        for (id, motor) in &mut self.drive_motors {
+            if let Some(position) = self.backend.joint(*id).and_then(|j| j.motor_position(motor.axis)) {
+                motor.observe(position, dt);
             }
         }
     }
@@ -188,16 +291,69 @@ impl PhysicsWorld {
     }
 }
 
+/// A captured hitch joint starts this soft, so nothing jumps.
+const CAPTURE_HZ: f64 = 8.0;
+
 struct HitchCapture {
     start: Pose,
     target: Pose,
     elapsed: f64,
     duration: f64,
+    hold: HitchHold,
+}
+
+/// Coulomb friction on a joint's free axis: a capped hold at an anchor that
+/// follows the joint once it slides past it. The cap is a fixed torque plus,
+/// for a rolling part, `coefficient × ground load × radius`.
+struct JointFriction {
+    axis: JointAxis,
+    torque: f64,
+    rolling: Option<(f64, f64)>,
+    anchor: Option<f64>,
+}
+
+/// The ground's solved normal load on a body (N): its contacts whose normal
+/// points up.
+fn ground_load(backend: &dyn PhysicsBackend, body: BodyId, impulses: &HashMap<ColliderId, f64>) -> f64 {
+    let Some(colliders) = backend.body(body).map(|b| b.colliders()) else {
+        return 0.0;
+    };
+    let impulse: f64 = colliders.into_iter().filter_map(|collider| impulses.get(&collider)).sum();
+    impulse / backend.settings().dt.max(1e-6)
+}
+
+/// The upward impulse on each collider in the last step's contacts.
+fn ground_impulses(backend: &dyn PhysicsBackend) -> HashMap<ColliderId, f64> {
+    let mut impulses = HashMap::new();
+    for manifold in backend.contacts().into_iter().filter(|m| m.active) {
+        let pushed: f64 = manifold.points.iter().filter(|p| p.solved).map(|p| p.impulse.max(0.0)).sum();
+        for (collider, up) in [(manifold.collider1, -manifold.normal.y), (manifold.collider2, manifold.normal.y)] {
+            if up > 0.1 {
+                *impulses.entry(collider).or_default() += pushed * up;
+            }
+        }
+    }
+    impulses
+}
+
+/// How far a sticking joint gives before it slides (rad or m).
+const FRICTION_STICK: f64 = 0.01;
+/// Slip rate at which a joint meets its full friction (rad/s or m/s).
+const FRICTION_RATE: f64 = 0.05;
+
+/// How a captured joint holds once its frames meet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum HitchHold {
+    /// Exactly, without compliance: a tree joint.
+    Rigid,
+    /// Compliant at this natural frequency (Hz): a loop joint, which
+    /// cannot be rigid.
+    Soft(f64),
 }
 
 impl PhysicsWorld {
     /// Move a hitch's second local frame to its authored anchor at fixed-step speed.
-    pub(crate) fn capture_hitch(&mut self, joint: JointId, target: Pose) {
+    pub(crate) fn capture_hitch(&mut self, joint: JointId, target: Pose, hold: HitchHold) {
         let Some(start) = self.backend.joint(joint).map(|j| j.frame2()) else {
             return;
         };
@@ -206,7 +362,7 @@ impl PhysicsWorld {
         let duration = (1.5 * (distance / 0.2).max(angle / 0.2)).max(0.5);
         self.hitch_captures.insert(
             joint,
-            HitchCapture { start, target, elapsed: 0.0, duration },
+            HitchCapture { start, target, elapsed: 0.0, duration, hold },
         );
     }
 
@@ -230,7 +386,11 @@ impl PhysicsWorld {
                     .lerp(capture.target.translation, s),
                 rotation: capture.start.rotation.slerp(capture.target.rotation, s),
             });
-            joint.set_softness(8.0 + 22.0 * s, 1.0);
+            match (capture.hold, t < 1.0) {
+                (HitchHold::Rigid, false) => joint.set_rigid(),
+                (HitchHold::Rigid, true) => joint.set_softness(CAPTURE_HZ + (30.0 - CAPTURE_HZ) * s, 1.0),
+                (HitchHold::Soft(hz), _) => joint.set_softness(CAPTURE_HZ + (hz - CAPTURE_HZ) * s, 1.0),
+            }
             for body in [bodies.0, bodies.1] {
                 if let Some(body) = backend.body_mut(body) {
                     body.wake_up(true);
@@ -239,19 +399,103 @@ impl PhysicsWorld {
             t < 1.0
         });
     }
+
+    /// Hold a joint's free axis against up to `torque` of load, plus
+    /// `rolling` (coefficient, radius m) times the ground load on the part it
+    /// turns, then let it turn against that: the drag of a bearing and the soil.
+    pub(crate) fn add_joint_friction(&mut self, joint: JointId, axis: JointAxis, torque: f64, rolling: Option<(f64, f64)>) {
+        self.joint_frictions.insert(joint, JointFriction { axis, torque, rolling, anchor: None });
+    }
+
+    /// The rolling joint that turns `part`, if it has one.
+    pub(crate) fn rolling_joint(&self, part: BodyId) -> Option<(JointId, JointAxis)> {
+        self.joint_frictions
+            .iter()
+            .find(|(id, friction)| {
+                friction.rolling.is_some()
+                    && self
+                        .backend
+                        .joint_bodies(**id)
+                        .is_some_and(|(_, turned)| turned == part)
+            })
+            .map(|(id, friction)| (*id, friction.axis))
+    }
+
+    /// A joint a motor device or an authored drive turns is left to it; one
+    /// the soil grips turns with the ground, as far as the grip holds.
+    fn apply_joint_frictions(&mut self) {
+        let (backend, drives, grips) = (&mut self.backend, &self.authored_drives, &self.soil_grips);
+        let committed = &self.control.committed;
+        let mut impulses = None;
+        self.joint_frictions.retain(|id, friction| {
+            let (Some(position), Some((_, part))) =
+                (backend.joint(*id).map(|j| j.motor_position(friction.axis)), backend.joint_bodies(*id))
+            else {
+                return false;
+            };
+            if backend.has_motor(*id) || drives.contains_key(id) || committed.contains_key(&(*id, friction.axis)) {
+                return true;
+            }
+            let Some(position) = position else {
+                return true;
+            };
+            if let Some(&(rate, grip)) = grips.get(id) {
+                friction.anchor = Some(position);
+                if let Some(joint) = backend.joint_mut(*id, false) {
+                    joint.set_motor_model(friction.axis, MotorModel::Force);
+                    joint.set_motor_velocity(friction.axis, rate, grip / FRICTION_RATE);
+                    joint.set_motor_max_force(friction.axis, grip);
+                }
+                return true;
+            }
+            let torque = friction.torque
+                + friction.rolling.map_or(0.0, |(coefficient, radius)| {
+                    let impulses = impulses.get_or_insert_with(|| ground_impulses(&**backend));
+                    coefficient * ground_load(&**backend, part, impulses) * radius
+                });
+            let anchor = friction.anchor.get_or_insert(position);
+            *anchor = position + (*anchor - position).clamp(-FRICTION_STICK, FRICTION_STICK);
+            if torque <= 0.0 {
+                *anchor = position;
+            }
+            if let Some(joint) = backend.joint_mut(*id, false) {
+                joint.set_motor_model(friction.axis, MotorModel::Force);
+                joint.set_motor_position(friction.axis, *anchor, torque / FRICTION_STICK, torque / FRICTION_RATE);
+                joint.set_motor_max_force(friction.axis, torque);
+            }
+            true
+        });
+    }
 }
 
 pub use gearbox_api::PhysicsActive;
 
-/// Turn the frame's real time into a whole number of fixed steps.
+/// Run once per physics tick, just before its step: due controllers and
+/// services produce the setpoints of exactly that tick.
+#[derive(bevy::ecs::schedule::ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ControlTick;
+
+/// Turn the frame's real time into a whole number of fixed steps; a step
+/// budget runs exactly its ticks and then pauses.
 pub fn plan_physics_steps(
     time: Res<Time>,
     active: Res<PhysicsActive>,
+    budget: Option<ResMut<gearbox_api::PhysicsStepBudget>>,
     mut world: ResMut<PhysicsWorld>,
 ) {
     if !active.0 {
         world.accumulator = 0.0;
         world.pending_steps = 0;
+        return;
+    }
+    if let Some(mut budget) = budget
+        && let Some(left) = budget.0
+    {
+        let steps = left.min(MAX_STEPS_PER_FRAME);
+        budget.0 = (left > steps).then_some(left - steps);
+        world.pause_after_steps = budget.0.is_none();
+        world.accumulator = 0.0;
+        world.pending_steps = steps;
         return;
     }
     let dt = 1.0 / world.step_hz;
@@ -264,32 +508,111 @@ pub fn plan_physics_steps(
     world.pending_steps = steps;
 }
 
-/// Run the steps `plan_physics_steps` planned for this frame, and log the
-/// cost per step every 10 s.
-pub fn step_physics(
-    active: Res<PhysicsActive>,
-    time: Res<Time>,
-    mut world: ResMut<PhysicsWorld>,
-    mut stats: Local<(f64, u32, f64)>,
-) {
-    if !active.0 {
+/// Run the steps `plan_physics_steps` planned for this frame, each after
+/// its `ControlTick`, and log the cost per step every 10 s.
+pub fn step_physics(world: &mut World, mut stats: Local<StepStats>) {
+    if !world.get_resource::<PhysicsActive>().is_some_and(|a| a.0) {
         return;
     }
+    let steps = world.resource::<PhysicsWorld>().pending_steps;
     let start = std::time::Instant::now();
-    for _ in 0..world.pending_steps {
-        world.step();
+    for _ in 0..steps {
+        tick(world);
     }
-    stats.0 += start.elapsed().as_secs_f64();
-    stats.1 += world.pending_steps;
-    let now = time.elapsed_secs_f64();
-    if now >= stats.2 {
-        if stats.1 > 0 {
+    if std::mem::take(&mut world.resource_mut::<PhysicsWorld>().pause_after_steps) {
+        world.resource_mut::<PhysicsActive>().0 = false;
+    }
+    stats.record(start.elapsed().as_secs_f64(), steps, world.resource::<PhysicsWorld>());
+}
+
+/// One physics tick: the due controllers' `ControlTick`, then its step.
+pub(super) fn tick(world: &mut World) {
+    let _ = world.try_run_schedule(ControlTick);
+    world.resource_mut::<PhysicsWorld>().step();
+}
+
+/// Seconds spent stepping and steps run, logged every 10 s of real time.
+#[derive(Default)]
+pub struct StepStats {
+    seconds: f64,
+    steps: u32,
+    since: Option<std::time::Instant>,
+}
+
+impl StepStats {
+    pub(super) fn record(&mut self, seconds: f64, steps: u32, physics: &PhysicsWorld) {
+        self.seconds += seconds;
+        self.steps += steps;
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed().as_secs_f64() < 10.0 {
+            return;
+        }
+        if self.steps > 0 {
+            let bodies = physics.backend.bodies();
+            let asleep = bodies.iter().filter(|&&id| physics.body(id).is_some_and(|b| b.is_sleeping())).count();
             info!(
-                "gearbox-physics: {:.2} ms per step, {} steps in the last 10 s",
-                1000.0 * stats.0 / stats.1 as f64,
-                stats.1
+                "gearbox-physics: {:.2} ms per step, {} steps in the last 10 s, {} bodies ({asleep} asleep), {} colliders",
+                1000.0 * self.seconds / self.steps as f64,
+                self.steps,
+                bodies.len(),
+                physics.backend.colliders().len()
             );
         }
-        *stats = (0.0, 0, now + 10.0);
+        *self = Self { since: Some(std::time::Instant::now()), ..default() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::backend::{BodyDesc, ColliderDesc, JointDesc, JointKind, Shape};
+    use glam::DVec3;
+
+    /// A 4.2 kg arm 1 m out on a horizontal hinge: 41 N·m of gravity.
+    fn arm(friction: f64) -> (PhysicsWorld, JointId) {
+        let mut world = PhysicsWorld::default();
+        let mut body = |desc: BodyDesc, at: DVec3| {
+            let id = world.insert_body(desc.pose(Pose::from_translation(at)));
+            world.insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.1 }).density(1000.0).parent(id)).unwrap();
+            id
+        };
+        let (post, arm) = (body(BodyDesc::fixed(), DVec3::ZERO), body(BodyDesc::dynamic(), DVec3::X));
+        let hinge = JointDesc::new(JointKind::Revolute { axis: DVec3::Z }, Pose::IDENTITY, Pose::from_translation(DVec3::NEG_X));
+        let joint = world.backend.insert_joint(post, arm, hinge);
+        world.add_joint_friction(joint, JointAxis::AngX, friction, None);
+        (world, joint)
+    }
+
+    fn swing(friction: f64) -> f64 {
+        let (mut world, joint) = arm(friction);
+        for _ in 0..240 {
+            world.step();
+        }
+        world.joint(joint).unwrap().motor_position(JointAxis::AngX).unwrap().abs()
+    }
+
+    #[test]
+    fn joint_friction_holds_below_its_torque_and_slides_above() {
+        assert!(swing(60.0) < 0.02, "{}", swing(60.0));
+        assert!(swing(20.0) > 0.3, "{}", swing(20.0));
+    }
+
+    /// The ground load a rolling part's friction scales with is its weight
+    /// when it rests on the ground.
+    #[test]
+    fn a_resting_ball_carries_its_weight_on_the_ground() {
+        let mut world = PhysicsWorld::default();
+        let ground = world.insert_body(BodyDesc::fixed());
+        world.insert_collider(ColliderDesc::new(Shape::Cuboid { half_extents: DVec3::new(5.0, 0.5, 5.0) }).parent(ground)).unwrap();
+        let ball = world.insert_body(BodyDesc::dynamic().pose(Pose::from_translation(DVec3::new(0.0, 0.8, 0.0))));
+        world.insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.3 }).density(1000.0).parent(ball)).unwrap();
+        for _ in 0..240 {
+            world.step();
+        }
+        let weight = world.body(ball).unwrap().mass() * 9.81;
+        let impulses = ground_impulses(&*world.backend);
+        let load = ground_load(&*world.backend, ball, &impulses);
+        assert!((load - weight).abs() < 0.05 * weight, "load {load} weight {weight}");
+        assert_eq!(ground_load(&*world.backend, ground, &impulses), 0.0);
     }
 }

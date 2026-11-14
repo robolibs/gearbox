@@ -1,5 +1,6 @@
 //! Bevy plugins: the host bus as a resource, polled every frame.
 
+pub mod draw;
 pub mod loader;
 pub mod marker;
 
@@ -11,6 +12,7 @@ use crate::host::{HostBus, HostConfig};
 use crate::machine::MachineAgent;
 use crate::wire::*;
 
+pub use draw::{DrawClock, DrawServicePlugin, DrawStoreRes, DrawSystems};
 pub use loader::{MachineDeleteQueue, MachineLoadQueue, PendingLoadedUsd, UsdLoaderPlugin};
 pub use marker::UsdMarkerPlugin;
 
@@ -22,6 +24,19 @@ pub struct SimResetRequest {
     pub scope: u32,
 }
 
+/// A new field layout for the ground at home, as its JSON. Written by the API,
+/// read by the simulator, which owns the fields.
+#[derive(Message, Default, Debug, Clone)]
+pub struct FieldsLayoutRequest(pub String);
+
+/// Weather keys to set, as the API sent them. The simulator owns the weather.
+#[derive(Message, Default, Debug, Clone)]
+pub struct WeatherRequest(pub Props);
+
+/// The weather as it stands, every key, kept by the simulator for the API to answer with.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct WeatherReport(pub Props);
+
 #[derive(Resource, Debug, Clone)]
 pub struct UsdAssetRoot(pub std::path::PathBuf);
 
@@ -29,6 +44,52 @@ pub struct UsdAssetRoot(pub std::path::PathBuf);
 /// and `/gearbox/scene/clock` flip. Starts paused.
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct PhysicsActive(pub bool);
+
+/// Physics ticks still to run before the clock pauses again: a `STEP` clock
+/// command counts simulation ticks, not rendered frames.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct PhysicsStepBudget(pub Option<u32>);
+
+/// World time. The sun, the air and whatever grows keep it, running `rate`
+/// world seconds to each simulated second, while machines keep the physics
+/// clock. A skip jumps it forward a slice a frame. The simulator advances it
+/// and keeps the calendar fields; the clock topic reports it.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct WorldClock {
+    /// World seconds since the instance started.
+    pub seconds: f64,
+    pub rate: f64,
+    /// World seconds still to jump.
+    pub skip: f64,
+    /// The planet's solar day, seconds.
+    pub day_s: f64,
+    /// Local solar hour at home.
+    pub hour: f64,
+    /// Day (sol) of the year at home.
+    pub day: u32,
+}
+
+impl Default for WorldClock {
+    fn default() -> Self {
+        Self { seconds: 0.0, rate: 1.0, skip: 0.0, day_s: 86_400.0, hour: 12.0, day: 1 }
+    }
+}
+
+impl WorldClock {
+    fn state(&self, step: u64, paused: bool) -> ClockState {
+        ClockState {
+            step,
+            paused: paused as u32,
+            world_s: self.seconds,
+            rate: self.rate,
+            day_s: self.day_s,
+            skip_s: self.skip,
+            hour: self.hour,
+            day: self.day,
+            ..default()
+        }
+    }
+}
 
 /// Objects the host reports on `/gearbox/scene/list`. Each owner refreshes
 /// its own list: the binary for loaded assets, the loader plugin for props,
@@ -71,8 +132,6 @@ pub struct GearboxBus {
     pub host: HostBus,
     pub machines: HashMap<String, MachineAgent>,
     pub physics_steps: u64,
-    /// Frames left to run before a `step` request pauses the clock again.
-    step_budget: u32,
     shutdown: bool,
     last_clock: Option<ClockState>,
 }
@@ -100,8 +159,13 @@ pub struct GearboxBusPlugin {
 impl Plugin for GearboxBusPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SimResetRequest>()
+            .add_message::<FieldsLayoutRequest>()
+            .add_message::<WeatherRequest>()
+            .init_resource::<WeatherReport>()
             .init_resource::<SceneObjects>()
-            .init_resource::<SelectionState>();
+            .init_resource::<SelectionState>()
+            .init_resource::<PhysicsStepBudget>()
+            .init_resource::<WorldClock>();
         match HostBus::new(self.config.clone()) {
             Ok(host) => {
                 info!("{}", host.banner());
@@ -109,7 +173,6 @@ impl Plugin for GearboxBusPlugin {
                     host,
                     machines: HashMap::new(),
                     physics_steps: 0,
-                    step_budget: 0,
                     shutdown: false,
                     last_clock: None,
                 });
@@ -137,18 +200,17 @@ fn serve_host_core(
     objects: Res<SceneObjects>,
     mut selection: ResMut<SelectionState>,
     mut reset: MessageWriter<SimResetRequest>,
+    mut layouts: MessageWriter<FieldsLayoutRequest>,
     mut exit: MessageWriter<AppExit>,
+    mut budget: ResMut<PhysicsStepBudget>,
+    mut world_clock: ResMut<WorldClock>,
+    weather_report: Res<WeatherReport>,
+    mut weather: MessageWriter<WeatherRequest>,
 ) {
     if physics.0 {
         bus.physics_steps += 1;
     }
     let bus = bus.as_mut();
-    if bus.step_budget > 0 {
-        bus.step_budget -= 1;
-        if bus.step_budget == 0 {
-            physics.0 = false;
-        }
-    }
     let uptime = bus.host.uptime_ms();
     let paused = !physics.0;
     let steps = bus.physics_steps;
@@ -170,6 +232,8 @@ fn serve_host_core(
         ("allowed", &allowed),
         ("allow_any", &allow_any),
         ("log", bus.host.config.log.as_deref().unwrap_or("")),
+        ("camera", &crate::view::view_place_prop()),
+        ("home", &crate::view::home_place_prop()),
     ]);
     bus.host.serve_info(|_| HostInfo {
         uptime_ms: uptime,
@@ -182,30 +246,30 @@ fn serve_host_core(
 
     let mut active = physics.0;
     let mut shutdown = bus.shutdown;
-    let mut step_budget = bus.step_budget;
-    bus.host.serve_clock(|cmd| {
+    let mut step_budget = budget.0;
+    bus.host.serve_clock(world_clock.state(steps, !active), |cmd| {
         match cmd.op {
             clock_op::PAUSE => {
                 active = false;
-                step_budget = 0;
+                step_budget = None;
             }
             clock_op::PLAY => {
                 active = true;
-                step_budget = 0;
+                step_budget = None;
             }
             clock_op::TOGGLE => active = !active,
             clock_op::SHUTDOWN => shutdown = true,
             clock_op::STEP => {
                 active = true;
-                step_budget = cmd.steps.max(1);
+                step_budget = Some(cmd.steps.max(1));
             }
+            clock_op::SPEED if cmd.value.is_finite() => {
+                world_clock.rate = cmd.value.clamp(0.0, clock_op::MAX_RATE);
+            }
+            clock_op::SKIP if cmd.value.is_finite() => world_clock.skip += cmd.value.max(0.0),
             _ => {}
         }
-        ClockState {
-            step: steps,
-            paused: (!active) as u32,
-            _pad: 0,
-        }
+        world_clock.state(steps, !active)
     });
     bus.host.serve_clear(|req| {
         reset.write(SimResetRequest {
@@ -221,7 +285,7 @@ fn serve_host_core(
         exit.write(AppExit::Success);
     }
     bus.shutdown = shutdown;
-    bus.step_budget = step_budget;
+    budget.0 = step_budget;
     if active != physics.0 {
         physics.0 = active;
     }
@@ -264,6 +328,27 @@ fn serve_host_core(
             .collect()
     });
 
+    bus.host.serve_fields_layout(|req| {
+        let json = req.json();
+        if json.trim().is_empty() {
+            return Status::err(code::USAGE, "empty field layout");
+        }
+        layouts.write(FieldsLayoutRequest(json));
+        Status::ok()
+    });
+
+    bus.host.serve_weather(|req| {
+        let asked = req.props();
+        let mut answer = weather_report.0.clone();
+        for (key, value) in asked.iter() {
+            answer.set(&key, &value);
+        }
+        if !asked.iter().is_empty() {
+            weather.write(WeatherRequest(asked));
+        }
+        Weather::new(&answer)
+    });
+
     let mut granted = Vec::new();
     bus.host.serve_access_grant(|req| {
         let did = req.did();
@@ -292,16 +377,12 @@ fn poll_machine_agents(mut bus: ResMut<GearboxBus>) {
     }
 }
 
-fn publish_clock(mut bus: ResMut<GearboxBus>, physics: Res<PhysicsActive>) {
-    let state = ClockState {
-        step: bus.physics_steps,
-        paused: (!physics.0) as u32,
-        _pad: 0,
-    };
+fn publish_clock(mut bus: ResMut<GearboxBus>, physics: Res<PhysicsActive>, world_clock: Res<WorldClock>) {
+    let state = world_clock.state(bus.physics_steps, !physics.0);
     let changed = bus
         .last_clock
         .as_ref()
-        .map(|last| last.paused != state.paused)
+        .map(|last| last.paused != state.paused || last.rate != state.rate || (last.skip_s > 0.0) != (state.skip_s > 0.0))
         .unwrap_or(true);
     if changed {
         bus.host.publish_clock(&state);

@@ -1,0 +1,76 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "gearbox sensor yard: the tractor with an IMU and a roof LiDAR"
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# The tractor with three authored sensor links under its base link. Load it as
+# a machine-category USD (`gearbox spawn machine world/sensor_yard.usda
+# --ns sy --no-wait`); the sensors stream on
+# `/machines/<id>/sensors/{imu_link,camera_link,lidar_link}`
+# once the Molla physics backend is running.
+#
+# This chassis drives along its -Y, so both links yaw by -90 degrees to give
+# them REP-103 axes: +X forward, +Y left, +Z up.
+def Xform "World"
+{
+    def Xform "Tractor_01" (
+        prepend references = @../tractor.usd@</robot>
+    )
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        over "chassis"
+        {
+            def Xform "imu_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "imu"
+                float gearbox:sensor:rate_hz = 100
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, 0.3, 1.2)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "camera_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "camera"
+                float gearbox:sensor:rate_hz = 5
+                int gearbox:sensor:width = 160
+                int gearbox:sensor:height = 120
+                float gearbox:sensor:vfov_deg = 60
+                float gearbox:sensor:range_m = 80
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, -1.2, 2.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "lidar_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "lidar"
+                float gearbox:sensor:rate_hz = 10
+                int gearbox:sensor:columns = 360
+                int gearbox:sensor:rows = 16
+                float gearbox:sensor:hfov_deg = 360
+                float gearbox:sensor:vfov_deg = 30
+                float gearbox:sensor:range_m = 60
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, -0.4, 3.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+        }
+    }
+}

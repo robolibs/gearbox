@@ -193,7 +193,7 @@ impl FromWorld for CloudsPipeline {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
         let texture_bind_group_layout = CloudsImage::bind_group_layout_descriptor(render_device);
-        let shader = load_embedded_asset!(world, "shaders/clouds_compute.wgsl");
+        let shader = load_embedded_asset!(world, "shaders/clouds_compute.wesl");
         let pipeline_cache = world.resource::<PipelineCache>();
 
         let entries = BindGroupLayoutEntries::sequential(
@@ -215,6 +215,7 @@ impl FromWorld for CloudsPipeline {
             shader: shader.clone(),
             shader_defs: vec![],
             entry_point: Some(Cow::from("init")),
+            constants: Default::default(),
         });
         let update_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             zero_initialize_workgroup_memory: false,
@@ -227,6 +228,7 @@ impl FromWorld for CloudsPipeline {
             shader: shader.clone(),
             shader_defs: vec![],
             entry_point: Some(Cow::from("update")),
+            constants: Default::default(),
         });
         let ground_shadow_pipeline =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -240,6 +242,7 @@ impl FromWorld for CloudsPipeline {
                 shader,
                 shader_defs: vec![],
                 entry_point: Some(Cow::from("ground_shadow")),
+                constants: Default::default(),
             });
 
         CloudsPipeline {

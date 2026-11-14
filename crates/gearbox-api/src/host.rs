@@ -3,15 +3,19 @@
 //! can answer from its own queries.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use agentio::{Agent, DirectoryMode, IdentitySource, Registered};
 use datapod::{DataPod, DataPodDecode, DataPodValidate, LeWireHeader};
-use peerbus::{AnsServer, EndpointId, Publisher, ReqServer};
+use peerbus::{AnsServer, EndpointId, Publisher, ReqReplyToken, ReqServer};
 
 use crate::registry::{self, RegistryEntry};
 use crate::topics;
 use crate::wire::*;
+
+mod draw_data;
+pub use draw_data::{DataLane, DATA_POLL_PER_ROUTE};
 
 #[derive(Debug, Clone)]
 pub struct HostConfig {
@@ -97,7 +101,7 @@ pub struct HostBus {
     started: Instant,
     started_unix_ms: u64,
     info: Registered<ReqServer<Env, Env>>,
-    clock: Registered<ReqServer<Env, Env>>,
+    clock: Arc<ClockLane>,
     clock_state: Registered<Publisher<Env>>,
     clear: Registered<ReqServer<Env, Env>>,
     list: Registered<AnsServer<Env, Env>>,
@@ -106,9 +110,16 @@ pub struct HostBus {
     usd_delete: Registered<ReqServer<Env, Env>>,
     marker_set: Registered<ReqServer<Env, Env>>,
     marker_delete: Registered<ReqServer<Env, Env>>,
+    draw: Arc<DrawLane>,
+    draw_data: Arc<DataLane>,
     select: Registered<ReqServer<Env, Env>>,
     machines: Registered<AnsServer<Env, Env>>,
     access_grant: Registered<ReqServer<Env, Env>>,
+    fields_layout: Registered<ReqServer<Env, Env>>,
+    weather: Registered<ReqServer<Env, Env>>,
+    greenhouse_plants: Registered<AnsServer<Env, Env>>,
+    greenhouse_rooms: Registered<AnsServer<Env, Env>>,
+    greenhouse_act: Registered<ReqServer<Env, Env>>,
 }
 
 impl HostBus {
@@ -134,7 +145,11 @@ impl HostBus {
 
         let bus = Self {
             info: agent.req_server(topics::HOST_INFO)?,
-            clock: agent.req_server(topics::SCENE_CLOCK)?,
+            clock: Arc::new(ClockLane(Mutex::new(ClockDesk {
+                server: agent.req_server(topics::SCENE_CLOCK)?,
+                base: ClockState::default(),
+                left: Vec::new(),
+            }))),
             clock_state: agent.publish(topics::SCENE_CLOCK_STATE)?,
             clear: agent.req_server(topics::SCENE_CLEAR)?,
             list: agent.que_server(topics::SCENE_LIST)?,
@@ -143,9 +158,19 @@ impl HostBus {
             usd_delete: agent.req_server(topics::USD_DELETE)?,
             marker_set: agent.req_server(topics::MARKER_SET)?,
             marker_delete: agent.req_server(topics::MARKER_DELETE)?,
+            draw: Arc::new(DrawLane(Mutex::new(DrawDesk {
+                server: agent.req_server(topics::DRAW)?,
+                list: agent.que_server(topics::DRAW_LIST)?,
+            }))),
             select: agent.req_server(topics::SELECT)?,
+            draw_data: Arc::new(DataLane::new(&agent)?),
             machines: agent.que_server(topics::MACHINES_LIST)?,
             access_grant: agent.req_server(topics::ACCESS_GRANT)?,
+            fields_layout: agent.req_server(topics::FIELDS_LAYOUT)?,
+            weather: agent.req_server(topics::WEATHER)?,
+            greenhouse_plants: agent.que_server(topics::GREENHOUSE_PLANTS)?,
+            greenhouse_rooms: agent.que_server(topics::GREENHOUSE_ROOMS)?,
+            greenhouse_act: agent.req_server(topics::GREENHOUSE_ACT)?,
             agent,
             config,
             started: Instant::now(),
@@ -208,8 +233,15 @@ impl HostBus {
         serve_req(&mut self.info, f)
     }
 
-    pub fn serve_clock(&mut self, f: impl FnMut(ClockCommand) -> ClockState) -> usize {
-        serve_req(&mut self.clock, f)
+    /// Answer the commands the physics thread left and every new one, and
+    /// remember `now` as the clock the thread answers reads from.
+    pub fn serve_clock(&mut self, now: ClockState, f: impl FnMut(ClockCommand) -> ClockState) -> usize {
+        self.clock.serve(now, f)
+    }
+
+    /// The clock topic, shared with the physics thread.
+    pub fn clock_lane(&self) -> &Arc<ClockLane> {
+        &self.clock
     }
 
     pub fn serve_clear(&mut self, f: impl FnMut(ClearRequest) -> Status) -> usize {
@@ -250,12 +282,51 @@ impl HostBus {
         serve_req(&mut self.marker_delete, f)
     }
 
+    /// Answer every pending draw message with `f` and every listing with
+    /// `list` (the query's `ns` is the path to list under).
+    pub fn serve_draws(
+        &mut self,
+        f: impl FnMut(DrawEntity) -> Status,
+        list: impl FnMut(DrawEntity) -> Vec<DrawEntity>,
+    ) -> usize {
+        self.draw.serve(f, list)
+    }
+
+    /// The draw topics, to be served from a thread of their own.
+    pub fn draw_lane(&self) -> &Arc<DrawLane> {
+        &self.draw
+    }
+
+    pub fn draw_data_lane(&self) -> &Arc<DataLane> {
+        &self.draw_data
+    }
+
     pub fn serve_select(&mut self, f: impl FnMut(Selection) -> Selection) -> usize {
         serve_req(&mut self.select, f)
     }
 
     pub fn serve_machines(&mut self, f: impl FnMut(Ping) -> Vec<MachineRef>) -> usize {
         serve_que(&mut self.machines, f)
+    }
+
+    pub fn serve_fields_layout(&mut self, f: impl FnMut(FieldsLayout) -> Status) -> usize {
+        serve_req(&mut self.fields_layout, f)
+    }
+
+    pub fn serve_weather(&mut self, f: impl FnMut(Weather) -> Weather) -> usize {
+        serve_req(&mut self.weather, f)
+    }
+
+    pub fn serve_greenhouse_plants(&mut self, f: impl FnMut(GreenhouseQuery) -> Vec<PlantRecord>) -> usize {
+        serve_que(&mut self.greenhouse_plants, f)
+    }
+
+    pub fn serve_greenhouse_rooms(&mut self, f: impl FnMut(Ping) -> Vec<RoomRecord>) -> usize {
+        serve_que(&mut self.greenhouse_rooms, f)
+    }
+
+    pub fn serve_greenhouse_act(&mut self, f: impl FnMut(GreenhouseAction) -> Status) -> usize {
+        serve_req(&mut self.greenhouse_act, f)
     }
 
     pub fn serve_access_grant(&mut self, f: impl FnMut(GrantRequest) -> Status) -> usize {
@@ -273,6 +344,83 @@ impl HostBus {
     }
 }
 
+/// The clock topic. Between physics steps the thread answers reads with the
+/// time it has reached and leaves every other command for the frame.
+pub struct ClockLane(Mutex<ClockDesk>);
+
+struct ClockDesk {
+    server: Registered<ReqServer<Env, Env>>,
+    /// The clock as the frame last served it.
+    base: ClockState,
+    /// Commands the thread left for the frame.
+    left: Vec<(ClockCommand, ReqReplyToken)>,
+}
+
+impl ClockLane {
+    fn lock(&self) -> MutexGuard<'_, ClockDesk> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Answer every read with the running clock at `world_s`; keep the rest.
+    pub fn answer_reads(&self, world_s: f64) {
+        let mut desk = self.lock();
+        let desk = &mut *desk;
+        while let Ok(Some(pending)) = desk.server.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<ClockCommand>(sample.header().type_hash, sample.payload()) {
+                Ok(cmd) if cmd.op == clock_op::GET => {
+                    let state = ClockState { world_s, paused: 0, ..desk.base.clone() };
+                    let _ = desk.server.respond_pending(token, &pack(&state));
+                }
+                Ok(cmd) => desk.left.push((cmd, token)),
+                Err(err) => eprintln!("gearbox-api: undecodable request dropped: {err}"),
+            }
+        }
+    }
+
+    fn serve(&self, now: ClockState, mut f: impl FnMut(ClockCommand) -> ClockState) -> usize {
+        let mut desk = self.lock();
+        let desk = &mut *desk;
+        desk.base = now;
+        let mut served = 0;
+        let mut answer = |server: &mut ReqServer<Env, Env>, base: &mut ClockState, cmd, token| {
+            *base = f(cmd);
+            served += server.respond_pending(token, &pack(base)).is_ok() as usize;
+        };
+        for (cmd, token) in std::mem::take(&mut desk.left) {
+            answer(&mut desk.server, &mut desk.base, cmd, token);
+        }
+        while let Ok(Some(pending)) = desk.server.take_message() {
+            let (sample, token) = pending.into_parts();
+            match unpack::<ClockCommand>(sample.header().type_hash, sample.payload()) {
+                Ok(cmd) => answer(&mut desk.server, &mut desk.base, cmd, token),
+                Err(err) => eprintln!("gearbox-api: undecodable request dropped: {err}"),
+            }
+        }
+        served
+    }
+}
+
+/// The draw topics, served from a thread of their own apart from the frame.
+pub struct DrawLane(Mutex<DrawDesk>);
+
+struct DrawDesk {
+    server: Registered<ReqServer<Env, Env>>,
+    list: Registered<AnsServer<Env, Env>>,
+}
+
+impl DrawLane {
+    /// Answer every pending draw message with `f` and listing with `list`.
+    pub fn serve(
+        &self,
+        f: impl FnMut(DrawEntity) -> Status,
+        list: impl FnMut(DrawEntity) -> Vec<DrawEntity>,
+    ) -> usize {
+        let mut desk = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        serve_req(&mut desk.server, f) + serve_que(&mut desk.list, list)
+    }
+}
+
 impl Drop for HostBus {
     fn drop(&mut self) {
         if self.config.write_registry {
@@ -283,16 +431,22 @@ impl Drop for HostBus {
 
 /// Shared-memory limits for every gearbox agent: many local clients and
 /// watchers per topic, small messages, and a ring deep enough to absorb a
-/// burst (a field of props settling at once) while a script sleeps.
+/// burst (a field of props settling at once) while a script sleeps. A
+/// machine agent registers seven telemetry publishers plus one per
+/// simulated sensor link.
 pub fn shm_limits() -> agentio::LocalConfig {
     agentio::LocalConfig {
-        max_publishers: 8,
+        max_publishers: 24,
         max_subscribers: 16,
         subscriber_buffer: 512,
         history_depth: 1,
-        max_payload_bytes: 16 * 1024,
+        max_payload_bytes: MAX_PAYLOAD_BYTES,
     }
 }
+
+/// Largest wire payload any gearbox topic carries; a message this large
+/// occupies one shared-memory slot.
+pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
 
 /// Drain every pending request on a req/res server, answering each with
 /// the closure. Undecodable requests are dropped.

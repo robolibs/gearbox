@@ -50,6 +50,9 @@ enum Cmd {
         #[arg(long)]
         inline: bool,
     },
+    /// Unlink the shared-memory segments in /dev/shm whose creating
+    /// process is dead; needs no instance
+    Sweep,
 }
 
 pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
@@ -61,7 +64,20 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             count,
             inline,
         } => sub(ctx, &topic, did.as_deref(), count, inline),
+        Cmd::Sweep => {
+            sweep(ctx);
+            Ok(())
+        }
     }
+}
+
+fn sweep(ctx: &Ctx) {
+    let swept = peerbus::local::sweep_dead_segments();
+    ctx.done(
+        &swept.to_string(),
+        &format!("unlinked {swept} shared-memory segment(s) of dead processes"),
+        || json!({ "swept": swept }),
+    );
 }
 
 fn list(ctx: &Ctx, prefix: Option<&str>) -> Result<()> {

@@ -1,0 +1,202 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "gearbox sensor suite: the tractor with one link of every sensor kind"
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# The tractor carrying every sensor kind Gearbox simulates. Spawn it twice
+# (`gearbox spawn machine world/sensor_suite.usda --ns ss --no-wait`, then
+# `--ns ss2 --x 12`) so the radar, recognition camera and receivers have
+# another machine to see and hear; readings stream on
+# `/machines/<id>/sensors/<link>`.
+#
+# This chassis drives along its -Y, so forward links yaw by -90 degrees to
+# give them REP-103 axes: +X forward, +Y left, +Z up.
+def Xform "World"
+{
+    def Xform "Tractor_01" (
+        prepend references = @../tractor.usd@</robot>
+    )
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        over "chassis"
+        {
+            def Xform "accelerometer_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "accelerometer"
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, 0.3, 1.2)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "gyro_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "gyro"
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, 0.3, 1.2)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "inertial_unit_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "inertial_unit"
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, 0.3, 1.2)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "compass_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "compass"
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, 0.3, 1.2)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "gps_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "gps"
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, 0.5, 3.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "sonar_front" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "distance"
+                token gearbox:sensor:type = "sonar"
+                float gearbox:sensor:rays = 5
+                float gearbox:sensor:aperture_deg = 30
+                float gearbox:sensor:range_m = 8
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, -2.2, 1.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "light_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "light"
+                float3 xformOp:rotateXYZ = (0, -90, 0)
+                double3 xformOp:translate = (0, 0, 3.1)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "radar_front" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "radar"
+                float gearbox:sensor:hfov_deg = 90
+                float gearbox:sensor:vfov_deg = 20
+                float gearbox:sensor:range_m = 60
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, -2.25, 1.0)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "range_finder_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "range_finder"
+                int gearbox:sensor:width = 64
+                int gearbox:sensor:height = 48
+                float gearbox:sensor:range_m = 40
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0.3, -1.2, 2.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "recognition_cam" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "camera"
+                token gearbox:sensor:render = "geometry"
+                bool gearbox:sensor:recognition = true
+                int gearbox:sensor:width = 96
+                int gearbox:sensor:height = 72
+                float gearbox:sensor:range_m = 80
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (-0.3, -1.2, 2.4)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "emitter_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "emitter"
+                float gearbox:sensor:channel = 1
+                float gearbox:sensor:range_m = 200
+                double3 xformOp:translate = (0.4, 0.8, 3.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+
+            def Xform "receiver_link" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "receiver"
+                float gearbox:sensor:channel = 1
+                double3 xformOp:translate = (-0.4, 0.8, 3.0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+
+            def Xform "bumper_front" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "touch"
+                token gearbox:sensor:type = "force3d"
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, -2.1, 0.85)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+        }
+
+        over "wheel_back_left"
+        {
+            def Xform "wheel_position" (
+                prepend apiSchemas = ["GearboxLinkAPI"]
+            )
+            {
+                token gearbox:link:role = "sensor"
+                token gearbox:sensor:kind = "position"
+            }
+        }
+    }
+}

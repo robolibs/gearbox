@@ -5,8 +5,10 @@
 //! `SelectedPrim` for prim-tree clicks vs. gearbox's existing
 //! top-level entity selection.
 
-use bevy::prelude::{Entity, Resource, Vec3};
-use mara::ui::modules::bevy::ChaseCamera;
+use bevy::prelude::{Entity, Resource};
+
+use crate::controller::MachineRef;
+
 use std::path::PathBuf;
 
 /// The currently-focused loaded USD entity. Drives every panel that
@@ -75,61 +77,126 @@ pub struct SelectedPrim(pub Option<Entity>);
 /// In-flight camera tween. Identical semantics to the viewer.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct FlyTo {
-    pub target_focus: Vec3,
-    pub target_distance: f32,
+    pub from: crate::viewer::camera::View,
+    pub to: crate::viewer::camera::View,
     pub remaining: f32,
     pub duration: f32,
-    pub start_focus: Vec3,
-    pub start_distance: f32,
-    pub start_yaw: Option<f32>,
-    pub target_yaw: Option<f32>,
-    pub start_elevation: Option<f32>,
-    pub target_elevation: Option<f32>,
+    /// Whether the move swings the view round as well as carrying it.
+    pub turn: bool,
+}
+
+/// A tracked machine as a held view follows it: its place and how fast that
+/// is changing (degrees and metres a second), and the bearing from behind it
+/// when the shot began.
+#[derive(Clone, Copy, Debug)]
+pub struct Steadied {
+    pub at: gearbox_globe::Geodetic,
+    pub rate: [f64; 3],
+    pub behind: f64,
 }
 
 /// Scripted "fly to behind the machine" move, started from the agent tree.
 /// Phase A pins the camera in place and turns it toward the machine; phase
 /// B pulls back to the apex, orbits to behind the machine and settles at
 /// `distance` with the elevation the user had.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FlyTarget {
-    pub root: Entity,
+    pub machine: MachineRef,
     pub body: Entity,
-    pub distance: f32,
     pub duration: f32,
     pub elapsed: f32,
-    pub start_focus: Vec3,
-    pub start_cam_world: Vec3,
-    pub start_elevation: f32,
-    pub apex_distance: f32,
-    pub last_target_pos: Option<Vec3>,
+    /// The view the move set out from.
+    pub from: crate::viewer::camera::View,
+    /// Where to settle instead of the default view from behind.
+    pub look: Option<LookAround>,
+    /// Glide straight onto `look` and hold it there, tracking the machine,
+    /// instead of flying in and letting go: a camera rig for scripted shots.
+    pub hold: bool,
+    /// The machine as a held view tracks it, its place followed on a damped
+    /// spring so its bounce, starts and stops reach the shot as smooth moves,
+    /// the bearing from behind it kept from the shot's start.
+    pub anchor: Option<Steadied>,
+    /// How fast the anchor sets off, degrees and metres a second: the pace
+    /// of the held shot before this one.
+    pub drift: [f64; 3],
+    /// The view a glide set out from, as offsets from the anchor, so it is
+    /// carried along with the machine while the glide leaves it.
+    pub offset: Option<crate::viewer::camera::View>,
+}
+
+/// A view around a machine: degrees clockwise from behind it seen from above,
+/// pitch and distance, each left as the default when `None`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LookAround {
+    pub bearing_deg: Option<f64>,
+    pub pitch_deg: Option<f64>,
+    pub distance_m: Option<f64>,
+    /// Height of the place looked at above the ground there.
+    pub above_m: Option<f64>,
+    /// Latitude and longitude of the place looked at, for a view of a place.
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    /// Around a machine: the bearing is a compass bearing from the machine
+    /// out to the eye, not counted from behind it.
+    pub compass: bool,
 }
 
 impl FlyTarget {
-    pub const APEX_DISTANCE: f32 = 45.0;
+    pub const APEX_DISTANCE: f64 = 45.0;
     pub const PHASE_A_END: f32 = 0.30;
-    pub const FINAL_DISTANCE: f32 = 18.0;
+    pub const FINAL_DISTANCE: f64 = 18.0;
     pub const DURATION: f32 = 3.0;
 
-    pub fn new(root: Entity, body: Entity, cam: &ChaseCamera) -> Self {
-        let horizontal = cam.distance * cam.elevation.cos();
-        let vertical = cam.distance * cam.elevation.sin();
-        let offset = Vec3::new(
-            horizontal * cam.yaw.sin(),
-            vertical,
-            horizontal * cam.yaw.cos(),
-        );
+    pub fn new(machine: MachineRef, body: Entity, view: &crate::viewer::camera::View) -> Self {
         Self {
-            root,
+            machine,
             body,
-            distance: Self::FINAL_DISTANCE,
             duration: Self::DURATION,
             elapsed: 0.0,
-            start_focus: cam.focus,
-            start_cam_world: cam.focus + offset,
-            start_elevation: cam.elevation,
-            apex_distance: Self::APEX_DISTANCE,
-            last_target_pos: None,
+            from: *view,
+            look: None,
+            hold: false,
+            anchor: None,
+            drift: [0.0; 3],
+            offset: None,
+        }
+    }
+
+    /// Takes over a held shot's anchor: the same machine's as it stands, so
+    /// the new shot follows it on unbroken; another machine's pace only.
+    pub fn following(mut self, before: Option<&FlyTarget>) -> Self {
+        if let Some(anchor) = before.and_then(|b| b.anchor.filter(|_| b.hold)) {
+            self.drift = anchor.rate;
+            if before.is_some_and(|b| b.machine == self.machine) {
+                self.anchor = Some(anchor);
+            }
+        }
+        self
+    }
+
+    /// Settles straight onto `look` around the machine, with no flight.
+    pub fn looking(machine: MachineRef, body: Entity, view: &crate::viewer::camera::View, look: LookAround) -> Self {
+        Self {
+            duration: f32::EPSILON,
+            look: Some(look),
+            ..Self::new(machine, body, view)
+        }
+    }
+
+    /// Glides onto `look` around the machine over `seconds`, eased at both
+    /// ends, and holds it there until something else moves the view.
+    pub fn gliding(
+        machine: MachineRef,
+        body: Entity,
+        view: &crate::viewer::camera::View,
+        look: LookAround,
+        seconds: f32,
+    ) -> Self {
+        Self {
+            duration: seconds.max(f32::EPSILON),
+            look: Some(look),
+            hold: true,
+            ..Self::new(machine, body, view)
         }
     }
 }
@@ -140,23 +207,31 @@ pub struct ChaseCameraFly {
     pub target: Option<FlyTarget>,
 }
 
-/// Camera focus locked to a machine body, independent of its drive source.
+/// The view tied to a machine body, independent of its drive source: each
+/// frame the view is carried by what the body did since the last one.
 #[derive(Resource, Default, Debug)]
 pub struct FollowTarget {
-    pub entity: Option<Entity>,
+    pub machine: Option<MachineRef>,
+    /// The body's pose when the view was last carried.
+    pub anchor: Option<FollowAnchor>,
+}
+
+/// A body pose in its own site's frame: position and yaw about up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FollowAnchor {
+    pub site: usize,
+    pub at: bevy::math::DVec3,
+    /// Metres above the ground under the body.
+    pub clearance: f64,
+    pub yaw: f64,
 }
 
 impl FollowTarget {
-    pub fn set(&mut self, entity: Option<Entity>) {
-        self.entity = entity;
-    }
-
-    pub fn toggle(&mut self, entity: Entity) {
-        if self.entity == Some(entity) {
-            self.set(None);
-        } else {
-            self.set(Some(entity));
+    pub fn set(&mut self, machine: Option<MachineRef>) {
+        if self.machine != machine {
+            self.anchor = None;
         }
+        self.machine = machine;
     }
 }
 
@@ -170,10 +245,9 @@ pub struct CameraBookmarks {
 #[derive(Debug, Clone)]
 pub struct CameraBookmark {
     pub name: String,
-    pub focus: Vec3,
-    pub distance: f32,
-    pub yaw: f32,
-    pub elevation: f32,
+    /// A bookmark is a place on the planet, so it still finds its way home
+    /// after the ground under it has been re-anchored.
+    pub view: crate::viewer::camera::View,
 }
 
 /// Camera mount mode. Mounted-USD-camera support is currently a stub

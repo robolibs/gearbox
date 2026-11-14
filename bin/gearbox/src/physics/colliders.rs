@@ -11,6 +11,9 @@
 //!
 //! `UsdGeomCylinder.axis` defaults to Z while backend cylinders run along
 //! Y; `compute_local_pose` folds the Y→authored-axis rotation into the pose.
+//!
+//! A `convexHull` mesh whose points are two equal rings centred on one local
+//! axis is built as that exact cylinder (`hull_cylinder`).
 
 use super::backend::{ColliderDesc, ColliderId, CollisionGroups, Pose, Shape};
 use super::markers::{
@@ -37,6 +40,8 @@ pub(crate) struct AppliedPhysicsMaterial {
 
 #[cfg(test)]
 mod material_tests;
+#[cfg(test)]
+mod hull_tests;
 
 pub fn convert_colliders(
     mut commands: Commands,
@@ -58,7 +63,9 @@ pub fn convert_colliders(
     globals: Query<&GlobalTransform>,
     parents: Query<&ChildOf>,
     articulation_roots: Query<(), With<UsdArticulationRoot>>,
+    masses: Query<&super::markers::UsdMass>,
     meshes: Res<Assets<Mesh>>,
+    (transforms, sites): (Query<&Transform>, Query<&crate::globe::Site>),
 ) {
     for (entity, col, rb_opt, mesh3d, gt, children, child_of) in &colliders {
         // Body-relative scale: scenes with `metersPerUnit != 1` push
@@ -71,7 +78,7 @@ pub fn convert_colliders(
             Some(body_entity) => {
                 let Some(handle) = world.entity_to_body.get(&body_entity).copied() else {
                     // This collider belongs to a rigid body, but the body
-                    // adapter has not inserted the Rapier body yet. Do not
+                    // adapter has not inserted the Molla body yet. Do not
                     // attach it as a standalone world collider; that leaves
                     // the dynamic body collider-less and it falls through the
                     // terrain. Try again next frame while `ColliderAttached`
@@ -86,7 +93,14 @@ pub fn convert_colliders(
             .and_then(|e| globals.get(e).ok())
             .map(|b| b.compute_transform().scale)
             .unwrap_or(Vec3::ONE);
-        let mesh_world_scale = gt.map(|g| g.compute_transform().scale).unwrap_or(Vec3::ONE);
+        // A collider on no body stands alone in the world, where its site has it.
+        let alone = parent_entity
+            .is_none()
+            .then(|| crate::globe::transform_in_site(entity, &parents, &transforms, &sites).compute_transform());
+        let mesh_world_scale = alone
+            .map(|t| t.scale)
+            .or_else(|| gt.map(|g| g.compute_transform().scale))
+            .unwrap_or(Vec3::ONE);
         let local_scale = Vec3::new(
             mesh_world_scale.x / body_scale.x,
             mesh_world_scale.y / body_scale.y,
@@ -102,6 +116,7 @@ pub fn convert_colliders(
         // etc.) — those are world-space dimensions.
         let entity_scale = mesh_world_scale;
         let is_dynamic = rb_opt.is_some_and(|b| b.enabled && !b.kinematic);
+        let mut remap = axis_remap(&col.shape);
 
         let shape = match &col.shape {
             // Primitive dimensions follow the prim's scale relative to its body;
@@ -171,11 +186,19 @@ pub fn convert_colliders(
                 let Some((vertices, indices)) = extract_mesh(mesh, local_scale) else {
                     continue;
                 };
-                let Some(shape) = mesh_shape(vertices, indices, col.approximation, is_dynamic)
-                else {
-                    continue;
-                };
-                shape
+                let cylinder = matches!(col.approximation, Some(UsdCollisionApprox::ConvexHull))
+                    .then(|| hull_cylinder(&vertices))
+                    .flatten();
+                if let Some((axis, radius, half_height)) = cylinder {
+                    remap = Quat::from_rotation_arc(Vec3::Y, axis);
+                    Shape::Cylinder { half_height, radius }
+                } else {
+                    let Some(shape) = mesh_shape(vertices, indices, col.approximation, is_dynamic)
+                    else {
+                        continue;
+                    };
+                    shape
+                }
             }
         };
 
@@ -183,10 +206,23 @@ pub fn convert_colliders(
         // translation/rotation, plus the Y→authored-axis remap for primitive
         // cylinders/capsules so the backend's Y long-axis matches what the
         // mesh xform expects.
-        let mut desc = ColliderDesc::new(shape)
-            .pose(compute_local_pose(parent_entity, &globals, gt, &col.shape))
-            .entity(entity);
+        let pose = match alone {
+            Some(at) => {
+                let region = gearbox_globe::physics_offset(crate::globe::site_of(entity, &parents, &sites));
+                Pose {
+                    translation: vec3_to_d(at.translation) + DVec3::new(region.x, region.y, region.z),
+                    rotation: quat_to_d(at.rotation * remap),
+                }
+            }
+            None => compute_local_pose(parent_entity, &globals, gt, remap),
+        };
+        let mut desc = ColliderDesc::new(shape).pose(pose).entity(entity);
         desc.parent = parent_handle;
+        desc.enabled = col.enabled;
+        // An authored body mass is the whole mass.
+        if parent_entity.and_then(|e| masses.get(e).ok()).is_some_and(|m| m.mass.is_some()) {
+            desc.density = Some(0.0);
+        }
         // Colliders of one articulation never touch each other.
         desc.groups = find_articulation_root_ancestor(
             entity,
@@ -258,11 +294,56 @@ fn extract_mesh(mesh: &Mesh, scale: Vec3) -> Option<(Vec<DVec3>, Option<Vec<[u32
     Some((vertices, indices))
 }
 
+/// The turn from the backend's Y long axis to a cylinder's or capsule's authored one.
+fn axis_remap(shape: &UsdColliderShape) -> Quat {
+    match shape {
+        UsdColliderShape::Cylinder { axis, .. } | UsdColliderShape::Capsule { axis, .. } => {
+            Quat::from_rotation_arc(Vec3::Y, axis.normalize_or(Vec3::Z))
+        }
+        _ => Quat::IDENTITY,
+    }
+}
+
+/// Axis, radius and half-height of a hull whose points are two equal rings
+/// centred on one local axis: the hull of a cylinder, at least 12 points a ring.
+pub(crate) fn hull_cylinder(points: &[DVec3]) -> Option<(Vec3, f64, f64)> {
+    const MIN_RING: usize = 12;
+    if points.len() < 2 * MIN_RING {
+        return None;
+    }
+    let size = points.iter().map(|p| p.abs().max_element()).fold(0.0, f64::max);
+    let tol = 1e-4 * size;
+    let centre = points.iter().copied().sum::<DVec3>() / points.len() as f64;
+    if size <= 0.0 || centre.abs().max_element() > tol {
+        return None;
+    }
+    let radial = |p: &DVec3, axis: usize| match axis {
+        0 => p.y.hypot(p.z),
+        1 => p.x.hypot(p.z),
+        _ => p.x.hypot(p.y),
+    };
+    for (axis, unit) in [(0, Vec3::X), (1, Vec3::Y), (2, Vec3::Z)] {
+        let half = points.iter().map(|p| p[axis].abs()).fold(0.0, f64::max);
+        let radius = points.iter().map(|p| radial(p, axis)).fold(0.0, f64::max);
+        if half <= tol || radius <= tol {
+            continue;
+        }
+        let on_rings = points
+            .iter()
+            .all(|p| (p[axis].abs() - half).abs() <= tol && (radial(p, axis) - radius).abs() <= tol);
+        let top = points.iter().filter(|p| p[axis] > 0.0).count();
+        if on_rings && top >= MIN_RING && points.len() - top >= MIN_RING {
+            return Some((unit, radius, half));
+        }
+    }
+    None
+}
+
 fn compute_local_pose(
     parent_entity: Option<Entity>,
     globals: &Query<&GlobalTransform>,
     gt: Option<&GlobalTransform>,
-    shape: &UsdColliderShape,
+    remap: Quat,
 ) -> Pose {
     let (Some(parent_e), Some(mesh_gt)) = (parent_entity, gt) else {
         return Pose {
@@ -286,13 +367,7 @@ fn compute_local_pose(
         local_delta.y / body_t.scale.y,
         local_delta.z / body_t.scale.z,
     );
-    let axis_remap = match shape {
-        UsdColliderShape::Cylinder { axis, .. } | UsdColliderShape::Capsule { axis, .. } => {
-            Quat::from_rotation_arc(Vec3::Y, axis.normalize_or(Vec3::Z))
-        }
-        _ => Quat::IDENTITY,
-    };
-    let local_rotation = inv_body_rot * mesh_t.rotation * axis_remap;
+    let local_rotation = inv_body_rot * mesh_t.rotation * remap;
     Pose {
         translation: vec3_to_d(local_translation),
         rotation: quat_to_d(local_rotation),

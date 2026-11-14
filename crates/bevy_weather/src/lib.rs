@@ -7,13 +7,28 @@ pub mod clouds;
 mod daylight;
 mod sky;
 
-pub use calendar::SolarCalendar;
+pub use calendar::{Planet, SolarCalendar};
+pub use sky::{WeatherOptOut, camera_look};
+
+/// Render layer of the cloud skybox planes. They are drawn from the clouds
+/// camera's own cloud image, so only that camera should include this layer.
+pub const SKY_LAYER: usize = 2;
+
+/// Render layer of lean views (sensor cameras): a shadowless twin of the sun
+/// lights them, so the sun's shadow cascades are drawn for the main views
+/// only. Every mesh that authors no layers of its own is drawn on it too.
+pub const LEAN_LAYER: usize = 3;
 
 use bevy::prelude::*;
 use clouds::config::CloudsConfig;
 
+/// Smallest turn of the sun, about a twentieth of its own width, that
+/// rebuilds the daylight.
+const SUN_STEP_RAD: f32 = 3.5e-4;
+
 #[derive(Resource, Clone)]
 pub struct WeatherSettings {
+    pub sky_kind: SkyKind,
     pub calendar: SolarCalendar,
     pub sun_override: bool,
     pub sun_position: Vec3,
@@ -36,6 +51,10 @@ pub struct WeatherSettings {
     pub wind_speed_mps: f32,
     /// How far the push drops between gusts: 0 steady, 1 gusty.
     pub wind_gustiness: f32,
+    /// Vertical optical depth of dust in the air, at visible wavelengths. A
+    /// clear Martian sky is 0.3 to 1, a regional storm 2 to 5, the 2018 global
+    /// storm reached 10.8. Only a [`SkyKind::Mars`] sky carries dust.
+    pub dust_tau: f32,
 }
 
 impl Default for WeatherSettings {
@@ -43,7 +62,8 @@ impl Default for WeatherSettings {
         let calendar = SolarCalendar::default();
         let mut sun_position = Vec3::new(-4.0, 7.0, 5.0);
         let elevation = sun_position.normalize().y.asin().to_degrees();
-        let azimuth = sun_position.x.atan2(sun_position.z).to_degrees();
+        // Compass azimuth, clockwise from north, in a datum's x-north z-east frame.
+        let azimuth = sun_position.z.atan2(sun_position.x).to_degrees();
         let angle = |name: &str, fallback: f32| {
             std::env::var(name)
                 .ok()
@@ -58,9 +78,9 @@ impl Default for WeatherSettings {
             .rem_euclid(360.0)
             .to_radians();
         sun_position = Vec3::new(
-            elevation.cos() * azimuth.sin(),
-            elevation.sin(),
             elevation.cos() * azimuth.cos(),
+            elevation.sin(),
+            elevation.cos() * azimuth.sin(),
         );
         let sun_override = ["GEARBOX_SUN_ELEVATION", "GEARBOX_SUN_AZIMUTH"]
             .iter()
@@ -74,6 +94,7 @@ impl Default for WeatherSettings {
             sun_position = calendar.sun_direction();
         }
         Self {
+            sky_kind: SkyKind::Earth,
             calendar,
             sun_override,
             sun_position,
@@ -83,7 +104,12 @@ impl Default for WeatherSettings {
             exposure_ev100: 13.5,
             bloom_intensity: 0.035,
             fog_color: Color::srgb(0.55, 0.70, 0.86),
-            haze_visibility_km: angle("GEARBOX_HAZE_KM", 6.0).clamp(0.5, 80.0),
+            // Six kilometres is a humid, hazy day, and it washed every acre
+            // past the near field into flat sky-blue long before the horizon —
+            // the ground kept its texture only as far as the next farm. Clear
+            // air is the ordinary case for looking at land, and it is what the
+            // distant backdrop's own colour was measured against.
+            haze_visibility_km: angle("GEARBOX_HAZE_KM", 45.0).clamp(0.5, 200.0),
             clouds: CloudsConfig {
                 clouds_raymarch_steps_count: 96,
                 clouds_coverage: angle("GEARBOX_CLOUD_COVER", 0.55).clamp(0.0, 1.0),
@@ -101,6 +127,7 @@ impl Default for WeatherSettings {
             wind_heading_deg: 36.87,
             wind_speed_mps: 4.0,
             wind_gustiness: 0.7,
+            dust_tau: angle("GEARBOX_DUST_TAU", 0.4).clamp(0.0, 12.0),
         }
     }
 }
@@ -109,6 +136,22 @@ impl WeatherSettings {
     pub fn apply_calendar(&mut self) {
         self.sun_override = false;
         self.sun_position = self.calendar.sun_direction();
+    }
+
+    /// Moves the calendar on by `seconds` of world time. The sun follows it
+    /// unless a startup override holds it still, and only once it has moved
+    /// far enough to show, so the daylight is not rebuilt every frame.
+    pub fn advance_clock(&mut self, seconds: f64) -> bool {
+        self.calendar.advance(seconds);
+        if self.sun_override {
+            return false;
+        }
+        let sun = self.calendar.sun_direction();
+        let moved = sun.angle_between(self.sun_position.normalize_or_zero()) > SUN_STEP_RAD;
+        if moved {
+            self.sun_position = sun;
+        }
+        moved
     }
 
     /// The wind as the vegetation shaders read it: downwind x and z, speed in
@@ -126,6 +169,16 @@ impl WeatherSettings {
 }
 
 pub struct WeatherPlugin;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SkyKind {
+    #[default]
+    Earth,
+    /// Carbon dioxide and dust. The scene's Bevy `Atmosphere` draws this sky and
+    /// filters the sun through it; there are no clouds.
+    Mars,
+    Airless,
+}
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DaylightUpdate;

@@ -10,9 +10,31 @@ pub const USD_LOAD: &str = "/gearbox/usd/load";
 pub const USD_DELETE: &str = "/gearbox/usd/delete";
 pub const MARKER_SET: &str = "/gearbox/marker/set";
 pub const MARKER_DELETE: &str = "/gearbox/marker/delete";
+/// Req/res: one retained debug draw message (`DrawEntity`), answered with a `Status`.
+pub const DRAW: &str = "/gearbox/draw";
+/// Que/ans: the live draw entities under a path, header-only `DrawEntity` each.
+pub const DRAW_LIST: &str = "/gearbox/draw/list";
+/// Req/res: typed spatial data capabilities and instance epoch.
+pub const DRAW_DATA_CAPABILITIES: &str = "/gearbox/draw/data/capabilities";
+/// Req/res: bounded spatial data transactions and lifecycle operations.
+pub const DRAW_DATA: &str = "/gearbox/draw/data";
+/// Req/res: paginated spatial and legacy drawing summaries.
+pub const DRAW_DATA_LIST: &str = "/gearbox/draw/data/list";
+/// Req/res: retained and per-view generation status.
+pub const DRAW_DATA_STATUS: &str = "/gearbox/draw/data/status";
 pub const SELECT: &str = "/gearbox/select";
 pub const MACHINES_LIST: &str = "/gearbox/machines/list";
 pub const ACCESS_GRANT: &str = "/gearbox/access/grant";
+/// Req/res: lay the ground at home out anew, from a field layout's JSON.
+pub const FIELDS_LAYOUT: &str = "/gearbox/fields/layout";
+/// Req/res: set the weather keys a `Weather` carries; answers all of them.
+pub const WEATHER: &str = "/gearbox/weather";
+/// Que/ans: every greenhouse plant a `GreenhouseQuery` asks for, one `PlantRecord` each.
+pub const GREENHOUSE_PLANTS: &str = "/gearbox/greenhouse/plants";
+/// Que/ans: every greenhouse room's air, one `RoomRecord` each.
+pub const GREENHOUSE_ROOMS: &str = "/gearbox/greenhouse/rooms";
+/// Req/res: one `GreenhouseAction`, answered with a `Status`.
+pub const GREENHOUSE_ACT: &str = "/gearbox/greenhouse/act";
 
 pub const MACHINE_INFO: &str = "info";
 pub const MACHINE_CLAIM: &str = "claim";
@@ -23,6 +45,7 @@ pub const MACHINE_CMD: &str = "cmd";
 pub const MACHINE_STATE: &str = "state";
 pub const MACHINE_ODOM: &str = "odom";
 pub const MACHINE_LINKS: &str = "links";
+/// Stream: parent-relative frame transforms in a right-handed Z-up world (`Tf`).
 pub const MACHINE_TF: &str = "tf";
 pub const MACHINE_ENCODERS: &str = "encoders";
 pub const MACHINE_IMU: &str = "imu";
@@ -31,9 +54,35 @@ pub const MACHINE_TURN_RADIUS: &str = "turn_radius";
 pub const MACHINE_TOOLS: &str = "tools";
 pub const MACHINE_TOOLS_ATTACH: &str = "tools/attach";
 pub const MACHINE_TOOLS_DETACH: &str = "tools/detach";
+/// Prefix of the per-link simulated sensor streams, `sensors/<link>`.
+pub const MACHINE_SENSORS: &str = "sensors";
+/// Req/res: a packet for one of the machine's emitter sensor links.
+pub const MACHINE_EMIT: &str = "emit";
+/// Req/res: a command for one of the machine's actuator devices.
+pub const MACHINE_ACTUATE: &str = "actuate";
+/// Prefix of the per-device actuator streams, `actuators/<device>`.
+pub const MACHINE_ACTUATORS: &str = "actuators";
+/// Req/res: the machine generation's manifest (`MachineDescription`).
+pub const MACHINE_DESCRIPTION: &str = "description";
+/// Req/res: a joint command batch under a direct lease (`JointCommand`).
+pub const MACHINE_JOINT_COMMAND: &str = "joint_command";
+/// Req/res: acquire, release or reset direct leases over DOFs (`ControlRequest`).
+pub const MACHINE_CONTROL: &str = "control";
+/// Stream: measured and commanded joint state, once per rendered frame after its physics steps.
+pub const MACHINE_JOINT_STATE: &str = "joint_state";
 
 /// Topics hosted by a machine's own agent, unique per machine so the
 /// host directory holds one owner per topic.
 pub fn machine_topic(machine_id: &str, leaf: &str) -> String {
     format!("/machines/{machine_id}/{leaf}")
+}
+
+/// Stream of one authored sensor link: `/machines/<machine_id>/sensors/<link>`.
+pub fn machine_sensor_topic(machine_id: &str, link: &str) -> String {
+    format!("/machines/{machine_id}/{MACHINE_SENSORS}/{link}")
+}
+
+/// Stream of one actuator device: `/machines/<machine_id>/actuators/<device>`.
+pub fn machine_actuator_topic(machine_id: &str, device: &str) -> String {
+    format!("/machines/{machine_id}/{MACHINE_ACTUATORS}/{device}")
 }

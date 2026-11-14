@@ -1,0 +1,109 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "gearbox device yard: the tractor with every actuator device"
+    }
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+# The tractor with one of every actuator device the physics steps: a PTO
+# motor, brakes on the rear wheels, a pusher propeller, a roof conveyor belt
+# and two connectors. Spawn two (`--at 0 0` and `--at 0 -4.3`, both facing
+# east): the second one's latched, auto-locking nose docks with the first's
+# passive tail and tows along. Command devices on `/machines/<id>/actuate`
+# (`device=<name>` plus settings); readings stream on
+# `/machines/<id>/actuators/<device>`.
+#
+# The chassis drives along its -Y, so forward-facing devices yaw by -90
+# degrees and rear-facing ones by +90 to point their +X.
+def Xform "World"
+{
+    def Xform "Tractor_01" (
+        prepend references = @../tractor.usd@</robot>
+    )
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        over "chassis"
+        {
+            def Xform "fan"
+            {
+                double2 gearbox:propeller:thrustConstants = (0.5, 0.05)
+                double2 gearbox:propeller:torqueConstants = (0.01, 0)
+                float gearbox:propeller:maxVelocity = 80
+                float gearbox:propeller:acceleration = 40
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, 1.3, 3.2)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Cube "roof_belt" (
+                prepend apiSchemas = ["PhysicsCollisionAPI"]
+            )
+            {
+                double size = 1
+                float3 gearbox:belt:direction = (0, 1, 0)
+                float gearbox:belt:maxVelocity = 2
+                float gearbox:belt:acceleration = 1
+                float3 xformOp:scale = (1.4, 1.3, 0.1)
+                double3 xformOp:translate = (0, 0.5, 2.95)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+            }
+
+            def Xform "nose"
+            {
+                token gearbox:connector:model = "drawbar"
+                token gearbox:connector:type = "active"
+                bool gearbox:connector:autoLock = true
+                bool gearbox:connector:isLocked = true
+                bool gearbox:connector:snap = false
+                float gearbox:connector:distanceTolerance = 0.8
+                float gearbox:connector:axisTolerance = 0.5
+                float gearbox:connector:rotationTolerance = 0.5
+                float gearbox:connector:numberOfRotations = 1
+                float gearbox:connector:tensileStrength = 60000
+                float gearbox:connector:shearStrength = 60000
+                float3 xformOp:rotateXYZ = (0, 0, -90)
+                double3 xformOp:translate = (0, -2.3, 1.2)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+
+            def Xform "tail"
+            {
+                token gearbox:connector:model = "drawbar"
+                token gearbox:connector:type = "passive"
+                bool gearbox:connector:snap = false
+                float gearbox:connector:distanceTolerance = 0.8
+                float gearbox:connector:axisTolerance = 0.5
+                float gearbox:connector:rotationTolerance = 0.5
+                float gearbox:connector:numberOfRotations = 1
+                float3 xformOp:rotateXYZ = (0, 0, 90)
+                double3 xformOp:translate = (0, 2.0, 1.2)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+            }
+        }
+
+        over "Joints"
+        {
+            over "pto_shaft"
+            {
+                float gearbox:motor:maxForce = 150
+                float gearbox:motor:maxVelocity = 60
+                float gearbox:motor:acceleration = 30
+            }
+
+            over "rev_back_left"
+            {
+                float gearbox:brake:damping = 0
+            }
+
+            over "rev_back_right"
+            {
+                float gearbox:brake:damping = 0
+            }
+        }
+    }
+}

@@ -1,0 +1,1078 @@
+//! Actuator devices of machines, after Webots: motors and brakes on joints,
+//! propellers, belts (conveyors, tank tracks) and connectors, plus copters
+//! (a multirotor flown on its propellers) and aerodynamic drag in the
+//! weather's gusting wind.
+//!
+//! The physics backend steps every device inside its step. Gearbox reads
+//! them from the machine's USD, registers them once the physics objects
+//! exist, applies the commands controllers send to
+//! `/machines/<id>/actuate`, and publishes each device's reading on
+//! `/machines/<id>/actuators/<device>`.
+
+use std::collections::{HashMap, HashSet};
+
+use bevy::prelude::*;
+use bevy_weather::WeatherSettings;
+use gearbox_api::{ActuatorCommand, GearboxBus, Measurement, Props, measurement_kind as kind};
+use gearbox_fields::wind_map::Gusts;
+use openusd::sdf::Path as SdfPath;
+use openusd::vt::Value;
+
+use crate::controller::{ControllerInventory, MachineAgentKeys, read_attr, read_bool, read_float, read_token, type_name};
+use crate::prim_index::PrimIndex;
+use crate::physics::backend::JointAxis;
+use crate::physics::backend::{
+    BeltDesc, ConnectorDesc, ConnectorKind, DVec3, DeviceCommand, DeviceId, DeviceLimits, DeviceSetting,
+    BodyId, CopterCommand, CopterDesc, CopterLimits, DragDesc, JointId, Pose, PropellerDesc,
+};
+use crate::physics::PhysicsWorld;
+use crate::usd_ext::StageExt;
+
+pub struct DevicesPlugin;
+
+impl Plugin for DevicesPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<MachineDevices>()
+            .init_resource::<RotorSpin>()
+            .add_systems(Update, drive_devices.before(crate::physics::step_physics))
+            .add_systems(Update, blow_wind.after(drive_devices).before(crate::physics::step_physics))
+            .add_systems(PostUpdate, publish_devices)
+            .add_systems(PostUpdate, spin_rotors.before(bevy::transform::TransformSystems::Propagate));
+    }
+}
+
+/// Device registration and commands for the headless imported-machine
+/// benchmarks.
+#[cfg(test)]
+pub(crate) fn benchmark_schedule(app: &mut App) -> bevy::ecs::schedule::Schedule {
+    app.init_resource::<MachineDevices>();
+    let mut schedule = bevy::ecs::schedule::Schedule::default();
+    schedule.add_systems(drive_devices);
+    schedule
+}
+
+#[cfg(test)]
+impl MachineDevices {
+    /// Devices registered for `machine`.
+    pub(crate) fn count(&self, machine: &str) -> usize {
+        self.machines.get(machine).map_or(0, Vec::len)
+    }
+}
+
+// ── Authoring ──────────────────────────────────────────────────────────────
+
+/// What a device prim authors.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DeviceKind {
+    /// A joint's motor and/or brake: the motor's limits and available force,
+    /// the brake's initial damping.
+    Joint {
+        motor: Option<(DeviceLimits, f64)>,
+        brake: Option<f64>,
+    },
+    Propeller {
+        thrust: [f64; 2],
+        torque: [f64; 2],
+        limits: DeviceLimits,
+        max_torque: f64,
+    },
+    /// Running direction in the prim's frame.
+    Belt { direction: [f64; 3], limits: DeviceLimits },
+    /// `desc.body` and `desc.frame` are filled at registration; `locked`
+    /// latches it from the start.
+    Connector { desc: ConnectorDesc, locked: bool },
+    /// Flies the machine's propellers on the prim's body; the prim's frame
+    /// is +X forward, +Z up.
+    Copter { limits: CopterLimits },
+    /// Drag on the prim's body: `CdA` (m²) along the prim's axes, whose
+    /// origin is the centre of pressure, in air of `density`.
+    Drag { area: [f64; 3], density: f64 },
+}
+
+/// An authored device of a machine.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceSpec {
+    pub name: String,
+    pub prim: String,
+    pub kind: DeviceKind,
+}
+
+fn floats(stage: &openusd::usd::Stage, prim: &SdfPath, name: &str) -> Option<Vec<f64>> {
+    Some(match read_attr(stage, prim, name)? {
+        Value::Vec2f(v) => vec![v.x as f64, v.y as f64],
+        Value::Vec2d(v) => vec![v.x, v.y],
+        Value::Vec3f(v) => vec![v.x as f64, v.y as f64, v.z as f64],
+        Value::Vec3d(v) => vec![v.x, v.y, v.z],
+        Value::FloatVec(v) => v.iter().map(|&x| x as f64).collect(),
+        Value::DoubleVec(v) => v,
+        _ => return None,
+    })
+}
+
+/// Speed limit, acceleration, PID and soft position limits under `ns`.
+fn limits(stage: &openusd::usd::Stage, prim: &SdfPath, ns: &str, default_speed: f64) -> DeviceLimits {
+    let float = |name: &str| read_float(stage, prim, &format!("gearbox:{ns}:{name}")).map(f64::from);
+    let pid = floats(stage, prim, &format!("gearbox:{ns}:controlPID"))
+        .filter(|v| v.len() == 3)
+        .map_or([10.0, 0.0, 0.0], |v| [v[0], v[1], v[2]]);
+    let position_limits = match (float("minPosition"), float("maxPosition")) {
+        (Some(lo), Some(hi)) if lo < hi => Some([lo, hi]),
+        _ => None,
+    };
+    DeviceLimits {
+        max_velocity: float("maxVelocity").unwrap_or(default_speed).abs(),
+        acceleration: float("acceleration").filter(|a| *a > 0.0),
+        pid,
+        position_limits,
+    }
+}
+
+/// Sea-level air (kg/m³).
+const AIR_DENSITY: f64 = 1.225;
+
+fn has_namespace(names: &[String], ns: &str) -> bool {
+    let prefix = format!("gearbox:{ns}:");
+    names.iter().any(|n| n.starts_with(&prefix))
+}
+
+/// Every device authored under `machine`, or the errors that stop one.
+pub fn discover(
+    stage: &openusd::usd::Stage,
+    machine: &SdfPath,
+    prims: &[SdfPath],
+) -> (Vec<DeviceSpec>, Vec<String>) {
+    let (mut devices, mut errors) = (Vec::new(), Vec::new());
+    let root = format!("{}/", machine.as_str());
+    for prim in prims.iter().filter(|p| p.as_str().starts_with(&root)) {
+        let names = stage.prim_properties(prim).unwrap_or_default();
+        if !names.iter().any(|n| n.starts_with("gearbox:")) {
+            continue;
+        }
+        let name = read_token(stage, prim, "gearbox:device:name")
+            .unwrap_or_else(|| prim.as_str().rsplit('/').next().unwrap_or_default().to_string());
+        let float = |key: &str| read_float(stage, prim, key).map(f64::from);
+        let is_joint = type_name(stage, prim).is_some_and(|t| t.starts_with("Physics") && t.ends_with("Joint"));
+        let (motor, brake) = (has_namespace(&names, "motor"), has_namespace(&names, "brake"));
+        let kind = if motor || brake {
+            if !is_joint {
+                errors.push(format!("{}: motors and brakes go on a physics joint", prim.as_str()));
+                continue;
+            }
+            DeviceKind::Joint {
+                motor: motor.then(|| {
+                    (limits(stage, prim, "motor", 10.0), float("gearbox:motor:maxForce").unwrap_or(10.0).abs())
+                }),
+                brake: brake.then(|| float("gearbox:brake:damping").unwrap_or(0.0).max(0.0)),
+            }
+        } else if has_namespace(&names, "propeller") {
+            let pair = |key: &str| {
+                floats(stage, prim, key).filter(|v| v.len() == 2).map(|v| [v[0], v[1]])
+            };
+            let Some(thrust) = pair("gearbox:propeller:thrustConstants") else {
+                errors.push(format!("{}: a propeller needs gearbox:propeller:thrustConstants", prim.as_str()));
+                continue;
+            };
+            DeviceKind::Propeller {
+                thrust,
+                torque: pair("gearbox:propeller:torqueConstants").unwrap_or([0.0, 0.0]),
+                limits: limits(stage, prim, "propeller", 100.0),
+                max_torque: float("gearbox:propeller:maxTorque").map_or(f64::INFINITY, f64::abs),
+            }
+        } else if has_namespace(&names, "belt") {
+            let direction = floats(stage, prim, "gearbox:belt:direction")
+                .filter(|v| v.len() == 3)
+                .map_or([1.0, 0.0, 0.0], |v| [v[0], v[1], v[2]]);
+            DeviceKind::Belt { direction, limits: limits(stage, prim, "belt", 10.0) }
+        } else if has_namespace(&names, "connector") {
+            let flag = |key: &str, default: bool| read_bool(stage, prim, &format!("gearbox:connector:{key}")).unwrap_or(default);
+            let value = |key: &str| float(&format!("gearbox:connector:{key}"));
+            let strength = |key: &str| value(key).filter(|s| *s >= 0.0);
+            let base = ConnectorDesc::default();
+            let kind = match read_token(stage, prim, "gearbox:connector:type").as_deref() {
+                None | Some("symmetric") => ConnectorKind::Symmetric,
+                Some("active") => ConnectorKind::Active,
+                Some("passive") => ConnectorKind::Passive,
+                Some(other) => {
+                    errors.push(format!("{}: connector type `{other}` is not symmetric, active or passive", prim.as_str()));
+                    continue;
+                }
+            };
+            DeviceKind::Connector {
+                desc: ConnectorDesc {
+                    model: read_token(stage, prim, "gearbox:connector:model").unwrap_or_default(),
+                    kind,
+                    auto_lock: flag("autoLock", base.auto_lock),
+                    unilateral_lock: flag("unilateralLock", base.unilateral_lock),
+                    unilateral_unlock: flag("unilateralUnlock", base.unilateral_unlock),
+                    distance_tolerance: value("distanceTolerance").unwrap_or(base.distance_tolerance),
+                    axis_tolerance: value("axisTolerance").unwrap_or(base.axis_tolerance),
+                    rotation_tolerance: value("rotationTolerance").unwrap_or(base.rotation_tolerance),
+                    rotations: value("numberOfRotations").map_or(base.rotations, |n| n.max(0.0) as u32),
+                    snap: flag("snap", base.snap),
+                    tensile_strength: strength("tensileStrength"),
+                    shear_strength: strength("shearStrength"),
+                    stiffness: value("stiffness").filter(|s| *s > 0.0).unwrap_or(base.stiffness),
+                    ..base
+                },
+                locked: flag("isLocked", false),
+            }
+        } else if has_namespace(&names, "copter") {
+            let value = |key: &str| float(&format!("gearbox:copter:{key}")).filter(|v| *v > 0.0);
+            let base = CopterLimits::default();
+            DeviceKind::Copter {
+                limits: CopterLimits {
+                    max_tilt: value("maxTiltDeg").map_or(base.max_tilt, f64::to_radians),
+                    max_speed: value("maxSpeed").unwrap_or(base.max_speed),
+                    max_climb: value("maxClimb").unwrap_or(base.max_climb),
+                    max_yaw_rate: value("maxYawRate").unwrap_or(base.max_yaw_rate),
+                    velocity_gain: value("velocityGain").unwrap_or(base.velocity_gain),
+                    disturbance_time: value("disturbanceTime").unwrap_or(base.disturbance_time),
+                    attitude_frequency: value("attitudeFrequency").unwrap_or(base.attitude_frequency),
+                    yaw_gain: value("yawGain").unwrap_or(base.yaw_gain),
+                },
+            }
+        } else if has_namespace(&names, "drag") {
+            let Some(area) = floats(stage, prim, "gearbox:drag:area").filter(|v| v.len() == 3 && v.iter().all(|a| *a >= 0.0))
+            else {
+                errors.push(format!("{}: drag needs a non-negative float3 gearbox:drag:area", prim.as_str()));
+                continue;
+            };
+            DeviceKind::Drag {
+                area: [area[0], area[1], area[2]],
+                density: float("gearbox:drag:density").filter(|d| *d > 0.0).unwrap_or(AIR_DENSITY),
+            }
+        } else {
+            continue;
+        };
+        if devices.iter().any(|d: &DeviceSpec| d.name == name) {
+            errors.push(format!("{}: device name `{name}` is taken", prim.as_str()));
+            continue;
+        }
+        devices.push(DeviceSpec { name, prim: prim.as_str().to_string(), kind });
+    }
+    (devices, errors)
+}
+
+/// Controllers that own the wheel and steering joints they drive.
+const DRIVE_TYPES: [&str; 3] = ["builtin:ackermann_cmd_vel", "builtin:diff_drive_cmd_vel", "builtin:tracked_cmd_vel"];
+
+/// A motor device commands its joint's drive every step, so one on a joint
+/// the drive controller or the suspension owns would silently take it over.
+pub fn ownership_errors(machine: &crate::controller::MachineInstanceSpec) -> Vec<String> {
+    let mut owned: HashMap<&str, &str> =
+        machine.suspension_joints.iter().map(|j| (j.as_str(), "the suspension")).collect();
+    for drive in machine
+        .controllers
+        .iter()
+        .filter(|c| c.enabled && DRIVE_TYPES.contains(&c.controller_type.as_str()))
+    {
+        let singles = [
+            &drive.steer_left_joint,
+            &drive.steer_right_joint,
+            &drive.front_left_wheel_joint,
+            &drive.front_right_wheel_joint,
+            &drive.rear_left_wheel_joint,
+            &drive.rear_right_wheel_joint,
+        ];
+        let joints = machine
+            .powered_wheel_joints
+            .iter()
+            .chain(&machine.passive_wheel_joints)
+            .chain(&machine.steering_joints)
+            .chain(&drive.drive_wheel_joints)
+            .chain(&drive.passive_wheel_joints)
+            .chain(&drive.wheel_joints)
+            .chain(&drive.steer_joints)
+            .chain(singles.into_iter().flatten());
+        for joint in joints {
+            owned.entry(joint.as_str()).or_insert("the drive controller");
+        }
+    }
+    machine
+        .devices
+        .iter()
+        .filter(|d| matches!(d.kind, DeviceKind::Joint { motor: Some(_), .. }))
+        .filter_map(|d| {
+            owned
+                .get(d.prim.as_str())
+                .map(|owner| format!("{}: motor device `{}` would take this joint from {owner}", d.prim, d.name))
+        })
+        .collect()
+}
+
+// ── Runtime ────────────────────────────────────────────────────────────────
+
+/// A registered device and the backend object behind it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Live {
+    Joint(JointId),
+    Propeller(DeviceId),
+    Belt(DeviceId),
+    Connector(DeviceId),
+    Copter(DeviceId),
+    Drag { id: DeviceId, body: BodyId },
+}
+
+struct Registered {
+    spec: DeviceSpec,
+    live: Live,
+    /// The device prim's entity; propellers spin it.
+    entity: Entity,
+}
+
+/// Devices registered per machine id.
+#[derive(Resource, Default)]
+pub struct MachineDevices {
+    machines: HashMap<String, Vec<Registered>>,
+    failed: HashMap<String, String>,
+    /// Machines whose copter followed a `/cmd_vel` session.
+    flown: HashSet<String>,
+}
+
+impl MachineDevices {
+    /// `<machine>/<device>` of a connector's backend id.
+    fn connector_name(&self, id: DeviceId) -> Option<String> {
+        self.machines.iter().find_map(|(machine, devices)| {
+            devices
+                .iter()
+                .find(|d| d.live == Live::Connector(id))
+                .map(|d| format!("{machine}/{}", d.spec.name))
+        })
+    }
+}
+
+/// The nearest entity at or above `entity` that carries a physics body.
+fn body_entity(entity: Entity, physics: &PhysicsWorld, parents: &Query<&ChildOf>) -> Option<Entity> {
+    std::iter::once(entity)
+        .chain(parents.iter_ancestors(entity))
+        .find(|e| physics.entity_to_body.contains_key(e))
+}
+
+/// `child`'s pose in `parent`'s frame, in physics axes.
+fn relative_pose(parent: &GlobalTransform, child: &GlobalTransform) -> Option<Pose> {
+    let local = parent.affine().inverse() * child.affine();
+    let (_, r, t) = local.to_scale_rotation_translation();
+    (r.is_finite() && t.is_finite()).then(|| {
+        Pose::new(
+            DVec3::new(t.x as f64, t.y as f64, t.z as f64),
+            glam::DQuat::from_xyzw(r.x as f64, r.y as f64, r.z as f64, r.w as f64).normalize(),
+        )
+    })
+}
+
+/// Registers one device with the backend; `Ok(None)` until its physics
+/// objects exist. A copter flies `propellers`.
+#[allow(clippy::too_many_arguments)]
+fn register(
+    spec: &DeviceSpec,
+    scene_root: Entity,
+    propellers: &[DeviceId],
+    physics: &mut PhysicsWorld,
+    index: &PrimIndex,
+    parents: &Query<&ChildOf>,
+    children: &Query<&Children>,
+    transforms: &Query<&GlobalTransform>,
+) -> Result<Option<(Live, Entity)>, String> {
+    let Some(entity) = index.find(scene_root, &spec.prim) else {
+        return Ok(None);
+    };
+    let live = register_at(spec, entity, propellers, physics, parents, children, transforms)?;
+    Ok(live.map(|live| (live, entity)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_at(
+    spec: &DeviceSpec,
+    entity: Entity,
+    propellers: &[DeviceId],
+    physics: &mut PhysicsWorld,
+    parents: &Query<&ChildOf>,
+    children: &Query<&Children>,
+    transforms: &Query<&GlobalTransform>,
+) -> Result<Option<Live>, String> {
+    let placed = |physics: &PhysicsWorld| -> Option<(crate::physics::backend::BodyId, Pose)> {
+        let body = body_entity(entity, physics, parents)?;
+        let frame = relative_pose(transforms.get(body).ok()?, transforms.get(entity).ok()?)?;
+        Some((*physics.entity_to_body.get(&body)?, frame))
+    };
+    match &spec.kind {
+        DeviceKind::Joint { motor, brake } => {
+            let Some(&joint) = physics.entity_to_joint.get(&entity) else {
+                return Ok(None);
+            };
+            if let Some((limits, max_force)) = motor {
+                physics.insert_motor(joint, *limits, *max_force)?;
+            }
+            if let Some(damping) = brake {
+                physics.set_joint_brake(joint, *damping)?;
+            }
+            Ok(Some(Live::Joint(joint)))
+        }
+        DeviceKind::Propeller { thrust, torque, limits, max_torque } => {
+            let Some((body, frame)) = placed(physics) else { return Ok(None) };
+            let id = physics.insert_propeller(PropellerDesc {
+                body,
+                frame,
+                thrust: *thrust,
+                torque: *torque,
+                limits: *limits,
+                max_torque: *max_torque,
+            })?;
+            Ok(Some(Live::Propeller(id)))
+        }
+        DeviceKind::Belt { direction, limits } => {
+            let colliders: Vec<(Entity, _)> = std::iter::once(entity)
+                .chain(children.iter_descendants(entity))
+                .filter_map(|e| physics.entity_to_collider.get(&e).map(|&c| (e, c)))
+                .collect();
+            let Some(&(first, _)) = colliders.first() else { return Ok(None) };
+            let (Ok(prim_gt), Ok(collider_gt)) = (transforms.get(entity), transforms.get(first)) else {
+                return Ok(None);
+            };
+            let in_prim = Vec3::new(direction[0] as f32, direction[1] as f32, direction[2] as f32);
+            let d = collider_gt.rotation().inverse() * (prim_gt.rotation() * in_prim);
+            let id = physics.insert_belt(BeltDesc {
+                colliders: colliders.into_iter().map(|(_, c)| c).collect(),
+                direction: DVec3::new(d.x as f64, d.y as f64, d.z as f64),
+                limits: *limits,
+            })?;
+            Ok(Some(Live::Belt(id)))
+        }
+        DeviceKind::Connector { desc, locked } => {
+            let Some((body, frame)) = placed(physics) else { return Ok(None) };
+            let id = physics.insert_connector(ConnectorDesc { body: Some(body), frame, ..desc.clone() })?;
+            if *locked {
+                physics.lock_connector(id, true)?;
+            }
+            Ok(Some(Live::Connector(id)))
+        }
+        DeviceKind::Copter { limits } => {
+            let Some((body, frame)) = placed(physics) else { return Ok(None) };
+            let id = physics.insert_copter(CopterDesc {
+                body,
+                frame,
+                propellers: propellers.to_vec(),
+                limits: *limits,
+            })?;
+            Ok(Some(Live::Copter(id)))
+        }
+        DeviceKind::Drag { area, density } => {
+            let Some((body, frame)) = placed(physics) else { return Ok(None) };
+            let area = DVec3::from_array(*area);
+            let id = physics.insert_drag(DragDesc { body, frame, area, density: *density })?;
+            Ok(Some(Live::Drag { id, body }))
+        }
+    }
+}
+
+fn number(props: &Props, key: &str) -> Option<f64> {
+    props.get(key).and_then(|v| v.trim().parse::<f64>().ok())
+}
+
+/// The motor device `name` of `machine` as a DOF owner.
+pub(crate) fn device_owner(machine: &str, name: &str) -> crate::joint_control::OwnerId {
+    crate::joint_control::OwnerId::new(crate::joint_control::OwnerClass::Device, machine, &format!("device:{name}"))
+}
+
+/// Applies one command to a registered device. A joint device's command and
+/// force cap go through its DOF's owner: rejected when a service owns it.
+fn apply(physics: &mut PhysicsWorld, machine: &str, device: &Registered, command: &ActuatorCommand) -> Result<(), String> {
+    let props = command.props();
+    let has = |key: &str| props.get(key).is_some();
+    let flag = |key: &str| props.get(key).map(|v| matches!(v.trim(), "1" | "true" | "on" | "yes"));
+    match device.live {
+        Live::Joint(joint) => {
+            if let Some(damping) = number(&props, "brake") {
+                physics.set_joint_brake(joint, damping)?;
+            }
+            let settings = [
+                number(&props, "speed").map(DeviceSetting::Speed),
+                has("acceleration").then(|| {
+                    DeviceSetting::Acceleration(number(&props, "acceleration").filter(|a| *a > 0.0))
+                }),
+                props.get("pid").and_then(|v| {
+                    let gains: Vec<f64> = v.split(',').filter_map(|g| g.trim().parse().ok()).collect();
+                    (gains.len() == 3).then(|| DeviceSetting::Pid([gains[0], gains[1], gains[2]]))
+                }),
+            ];
+            for setting in settings.into_iter().flatten() {
+                physics.configure_motor(joint, setting)?;
+            }
+            let owner = device_owner(machine, &device.spec.name);
+            let axis = physics.motor_axis(joint).unwrap_or(JointAxis::AngX);
+            let cap = number(&props, "max_force").or(number(&props, "max_torque"));
+            let setpoint = number(&props, "position")
+                .map(|q| crate::joint_control::Setpoint::Position { q, qdot: None })
+                .or(number(&props, "velocity").map(|qdot| crate::joint_control::Setpoint::Velocity { qdot }))
+                .or(number(&props, "force").or(number(&props, "torque")).map(|force| crate::joint_control::Setpoint::Effort { force }))
+                .or_else(|| cap.and_then(|_| physics.requested_setpoint(joint, axis)));
+            if let Some(setpoint) = setpoint {
+                physics.submit(&owner, joint, axis, setpoint, cap).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        Live::Propeller(id) => {
+            let omega = number(&props, "velocity").or(number(&props, "speed")).ok_or("propellers take a velocity")?;
+            physics.set_propeller_speed(id, omega)
+        }
+        Live::Belt(id) => {
+            if let Some(speed) = number(&props, "speed") {
+                physics.configure_belt(id, DeviceSetting::Speed(speed))?;
+            }
+            if has("acceleration") {
+                physics.configure_belt(id, DeviceSetting::Acceleration(number(&props, "acceleration").filter(|a| *a > 0.0)))?;
+            }
+            let command = number(&props, "position")
+                .map(DeviceCommand::Position)
+                .or(number(&props, "velocity").map(DeviceCommand::Velocity));
+            if let Some(command) = command {
+                physics.command_belt(id, command)?;
+            }
+            Ok(())
+        }
+        Live::Connector(id) => {
+            let lock = flag("lock").or(flag("unlock").map(|u| !u)).ok_or("connectors take lock or unlock")?;
+            physics.lock_connector(id, lock)
+        }
+        Live::Copter(id) => {
+            let get = |key: &str| number(&props, key).unwrap_or(0.0);
+            let attitude = ["roll", "pitch", "climb"].iter().any(|k| has(k));
+            let tilt = || CopterCommand::Attitude {
+                roll: get("roll"),
+                pitch: get("pitch"),
+                yaw_rate: get("yaw_rate"),
+                climb: get("climb"),
+            };
+            let velocity = || CopterCommand::Velocity {
+                forward: get("forward"),
+                left: get("left"),
+                up: get("up"),
+                yaw_rate: get("yaw_rate"),
+            };
+            let command = match props.get("mode").as_deref().map(str::trim) {
+                Some("off") => CopterCommand::Off,
+                Some("attitude") => tilt(),
+                Some("velocity") | Some("hover") => velocity(),
+                None if attitude => tilt(),
+                None => velocity(),
+                Some(other) => return Err(format!("copter mode `{other}` is not off, hover, velocity or attitude")),
+            };
+            physics.command_copter(id, command)
+        }
+        Live::Drag { .. } => Err("drag takes no commands; the weather sets the wind".into()),
+    }
+}
+
+/// Removes a registered device from the backend.
+fn unregister(physics: &mut PhysicsWorld, live: Live) {
+    match live {
+        Live::Joint(joint) => physics.remove_motor(joint),
+        Live::Propeller(id) | Live::Belt(id) | Live::Connector(id) | Live::Copter(id) => physics.remove_device(id),
+        Live::Drag { id, body } => {
+            physics.remove_device(id);
+            physics.set_body_wind(body, None);
+        }
+    }
+}
+
+/// Registers the devices of loaded machines, drops those of removed ones,
+/// and applies this frame's actuator commands before the physics steps.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drive_devices(
+    mut registry: ResMut<MachineDevices>,
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    bus: Option<ResMut<GearboxBus>>,
+    mut physics: ResMut<PhysicsWorld>,
+    index: Res<PrimIndex>,
+    parents: Query<&ChildOf>,
+    children: Query<&Children>,
+    transforms: Query<&GlobalTransform>,
+) {
+    let registry = &mut *registry;
+    let live: Vec<&str> = inventory.machines.iter().filter(|m| m.accepted()).map(|m| m.id.as_str()).collect();
+    let gone: Vec<String> = registry.machines.keys().filter(|id| !live.contains(&id.as_str())).cloned().collect();
+    for id in gone {
+        registry.flown.remove(&id);
+        for device in registry.machines.remove(&id).unwrap_or_default() {
+            unregister(&mut physics, device.live);
+        }
+    }
+    for machine in &inventory.machines {
+        if !machine.accepted() || machine.devices.is_empty() || registry.machines.contains_key(&machine.id) {
+            continue;
+        }
+        let Some(scene_root) = machine.scene_root else { continue };
+        let mut registered: Vec<Registered> = Vec::new();
+        let mut ready = true;
+        // Copters go last: they fly the propellers registered before them.
+        let (copters, others): (Vec<_>, Vec<_>) =
+            machine.devices.iter().partition(|d| matches!(d.kind, DeviceKind::Copter { .. }));
+        for spec in others.into_iter().chain(copters) {
+            let propellers: Vec<DeviceId> = registered
+                .iter()
+                .filter_map(|d| match d.live {
+                    Live::Propeller(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            match register(spec, scene_root, &propellers, &mut physics, &index, &parents, &children, &transforms) {
+                Ok(Some((live, entity))) => registered.push(Registered { spec: spec.clone(), live, entity }),
+                Ok(None) => ready = false,
+                Err(error) => {
+                    if registry.failed.insert(format!("{}/{}", machine.id, spec.name), error.clone()).is_none() {
+                        warn!("gearbox-devices: `{}` device `{}`: {error}", machine.id, spec.name);
+                    }
+                }
+            }
+        }
+        if ready {
+            info!("gearbox-devices: `{}` runs {} device(s)", machine.id, registered.len());
+            registry.machines.insert(machine.id.clone(), registered);
+        } else {
+            for device in registered {
+                unregister(&mut physics, device.live);
+            }
+        }
+    }
+    let Some(mut bus) = bus else { return };
+    for machine in &inventory.machines {
+        let Some(agent) = bus_key(&keys, machine).and_then(|key| bus.machines.get_mut(&key)) else {
+            continue;
+        };
+        let commands = std::mem::take(&mut agent.actuations);
+        let devices = registry.machines.get(&machine.id).map_or(&[][..], Vec::as_slice);
+        for command in commands {
+            let name = command.device();
+            let Some(device) = devices.iter().find(|d| d.spec.name == name) else {
+                warn!("gearbox-devices: `{}` has no device `{name}`", machine.id);
+                continue;
+            };
+            if let Err(error) = apply(&mut physics, &machine.id, device, &command) {
+                warn!("gearbox-devices: `{}` device `{name}`: {error}", machine.id);
+            }
+        }
+        // A claimed `/cmd_vel` session flies the machine; letting go hovers.
+        let Some(copter) = devices.iter().find_map(|d| match d.live {
+            Live::Copter(id) => Some(id),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let command = if agent.session_id() != 0 {
+            let t = agent.twist();
+            registry.flown.insert(machine.id.clone());
+            Some(CopterCommand::Velocity {
+                forward: t.linear.vx,
+                left: t.linear.vy,
+                up: t.linear.vz,
+                yaw_rate: t.angular.vz,
+            })
+        } else if registry.flown.remove(&machine.id) {
+            Some(CopterCommand::Velocity { forward: 0.0, left: 0.0, up: 0.0, yaw_rate: 0.0 })
+        } else {
+            None
+        };
+        if let Some(command) = command
+            && let Err(error) = physics.command_copter(copter, command)
+        {
+            warn!("gearbox-devices: `{}` copter: {error}", machine.id);
+        }
+    }
+}
+
+/// The weather's wind as physics feels it: steady everywhere, and gusting
+/// at each body with drag, read from the vegetation's gust map where the
+/// body is.
+fn blow_wind(
+    registry: Res<MachineDevices>,
+    weather: Option<Res<WeatherSettings>>,
+    mut physics: ResMut<PhysicsWorld>,
+    mut gusts: Local<Option<Gusts>>,
+) {
+    let wind = weather.map_or([1.0, 0.0, 0.0, 0.0], |w| w.wind_vector().to_array());
+    let [dx, dz, speed, _] = wind.map(f64::from);
+    physics.set_wind(DVec3::new(dx * speed, 0.0, dz * speed));
+    let bodies: HashSet<BodyId> = registry
+        .machines
+        .values()
+        .flatten()
+        .filter_map(|d| match d.live {
+            Live::Drag { body, .. } => Some(body),
+            _ => None,
+        })
+        .collect();
+    if bodies.is_empty() {
+        return;
+    }
+    let gusts = gusts.get_or_insert_with(Gusts::default);
+    let time = physics.simulated_seconds as f32;
+    for body in bodies {
+        let Some(at) = physics.body(body).map(|b| b.translation()) else { continue };
+        let [x, z] = gusts.at([at.x as f32, at.z as f32], time, wind);
+        physics.set_body_wind(body, Some(DVec3::new(x as f64, 0.0, z as f64)));
+    }
+}
+
+/// Visual spin of each propeller prim, capped so frames do not alias it.
+#[derive(Resource, Default)]
+struct RotorSpin {
+    base: HashMap<Entity, Quat>,
+    angle: HashMap<Entity, f32>,
+}
+
+/// Largest visual rotor speed (rad/s): faster spins alias at frame rate.
+const MAX_VISUAL_SPIN: f32 = 25.0;
+
+/// Turns each propeller prim about its shaft (+X) with its rotor speed.
+fn spin_rotors(
+    registry: Res<MachineDevices>,
+    physics: Res<PhysicsWorld>,
+    time: Res<Time>,
+    mut spin: ResMut<RotorSpin>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let dt = time.delta_secs();
+    for device in registry.machines.values().flatten() {
+        let Live::Propeller(id) = device.live else { continue };
+        let Some(output) = physics.propeller_output(id) else { continue };
+        let Ok(mut transform) = transforms.get_mut(device.entity) else { continue };
+        let base = *spin.base.entry(device.entity).or_insert(transform.rotation);
+        let rate = (output.omega as f32).clamp(-MAX_VISUAL_SPIN, MAX_VISUAL_SPIN);
+        let angle = spin.angle.entry(device.entity).or_insert(0.0);
+        *angle = (*angle + rate * dt) % std::f32::consts::TAU;
+        transform.rotation = base * Quat::from_rotation_x(*angle);
+    }
+}
+
+/// The bus key of a loaded machine's agent.
+fn bus_key(keys: &MachineAgentKeys, machine: &crate::controller::MachineInstanceSpec) -> Option<String> {
+    let scene_root = machine.scene_root?;
+    keys.0
+        .iter()
+        .find(|(_, k)| k.scene_root == scene_root && k.machine_id == machine.id)
+        .map(|(key, _)| key.clone())
+}
+
+/// Publishes every registered device's reading after the physics steps.
+fn publish_devices(
+    registry: Res<MachineDevices>,
+    inventory: Res<ControllerInventory>,
+    keys: Res<MachineAgentKeys>,
+    bus: Option<ResMut<GearboxBus>>,
+    physics: Res<PhysicsWorld>,
+    time: Res<Time>,
+) {
+    let Some(mut bus) = bus else { return };
+    let stamp_ms = (time.elapsed_secs_f64() * 1000.0) as u32;
+    for machine in &inventory.machines {
+        let Some(devices) = registry.machines.get(&machine.id) else { continue };
+        let Some(agent) = bus_key(&keys, machine).and_then(|key| bus.machines.get_mut(&key)) else {
+            continue;
+        };
+        for device in devices {
+            let Some((measurement_kind, values, peer)) = reading(&physics, device, &registry) else {
+                continue;
+            };
+            let mut pairs = vec![("name", device.spec.name.as_str())];
+            if let Some(peer) = &peer {
+                pairs.push(("peer", peer.as_str()));
+            }
+            let measurement = Measurement {
+                sim_time_s: physics.simulated_seconds,
+                kind: measurement_kind,
+                stamp_ms,
+                count: 1,
+                values,
+                props: Props::from_pairs(&pairs).into_bytes(),
+                ..Default::default()
+            };
+            agent.publish_actuator_measurement(&device.spec.name, &measurement);
+        }
+    }
+}
+
+/// A device's measurement kind, record and peer name.
+fn reading(physics: &PhysicsWorld, device: &Registered, registry: &MachineDevices) -> Option<(u32, Vec<f64>, Option<String>)> {
+    Some(match device.live {
+        Live::Joint(joint) => {
+            let m = physics.motor_output(joint)?;
+            let (mode, target) = match m.command {
+                DeviceCommand::Position(p) => (0.0, p),
+                DeviceCommand::Velocity(v) => (1.0, v),
+                DeviceCommand::Force(f) => (2.0, f),
+            };
+            let values = vec![m.position, m.velocity, m.commanded_velocity, m.force, m.brake_damping, m.brake_force, mode, target];
+            (kind::MOTOR, values, None)
+        }
+        Live::Propeller(id) => {
+            let p = physics.propeller_output(id)?;
+            (kind::PROPELLER, vec![p.omega, p.thrust, p.torque, p.advance], None)
+        }
+        Live::Belt(id) => {
+            let b = physics.belt_output(id)?;
+            (kind::BELT, vec![b.position, b.velocity], None)
+        }
+        Live::Connector(id) => {
+            let c = physics.connector_output(id)?;
+            let peer = c.linked.or(c.presence).and_then(|p| registry.connector_name(p));
+            let bit = |b: bool| f64::from(u8::from(b));
+            let values = vec![bit(c.presence.is_some()), bit(c.locked), bit(c.linked.is_some()), c.tensile, c.shear];
+            (kind::CONNECTOR, values, peer)
+        }
+        Live::Copter(id) => {
+            let f = physics.copter_output(id)?;
+            let mode = match f.command {
+                CopterCommand::Off => 0.0,
+                CopterCommand::Velocity { .. } => 1.0,
+                CopterCommand::Attitude { .. } => 2.0,
+            };
+            let [forward, left, up] = f.velocity;
+            let values = vec![f.roll, f.pitch, forward, left, up, f.yaw_rate, f.thrust, f64::from(u8::from(f.saturated)), mode];
+            (kind::COPTER, values, None)
+        }
+        Live::Drag { id, .. } => {
+            let d = physics.drag_output(id)?;
+            let values = [d.airspeed, d.force, d.wind].iter().flat_map(|v| v.to_array()).collect();
+            (kind::DRAG, values, None)
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::physics::backend::{BodyDesc, ColliderDesc, JointDesc, JointKind, Shape};
+    use crate::physics::molla::MollaBackend;
+
+    const MACHINE: &str = r#"#usda 1.0
+(
+    defaultPrim = "robot"
+    upAxis = "Z"
+)
+
+def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI"])
+{
+    token gearbox:machine:kind = "test"
+    rel gearbox:machine:body = </robot/chassis>
+    def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI"])
+    {
+        def Xform "fan"
+        {
+            double2 gearbox:propeller:thrustConstants = (0.2, 0.01)
+            double2 gearbox:propeller:torqueConstants = (0.02, 0)
+            float gearbox:propeller:maxVelocity = 150
+        }
+        def Cube "roof" (prepend apiSchemas = ["PhysicsCollisionAPI"])
+        {
+            float3 gearbox:belt:direction = (0, 1, 0)
+            float gearbox:belt:acceleration = 2
+        }
+        def Xform "nose"
+        {
+            token gearbox:connector:model = "hitch"
+            token gearbox:connector:type = "active"
+            bool gearbox:connector:autoLock = true
+            bool gearbox:connector:isLocked = true
+            float gearbox:connector:tensileStrength = 5000
+            float gearbox:connector:numberOfRotations = 1
+        }
+        def Xform "copter"
+        {
+            float gearbox:copter:maxTiltDeg = 30
+            float gearbox:copter:disturbanceTime = 0.25
+        }
+        def Xform "drag"
+        {
+            float3 gearbox:drag:area = (0.5, 0.25, 1)
+        }
+    }
+    def Xform "boom" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
+    def Xform "stick" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
+    def Scope "Joints"
+    {
+        def PhysicsRevoluteJoint "boom_lift"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/boom>
+            float gearbox:motor:maxForce = 5000
+            float gearbox:motor:maxVelocity = 0.5
+            float3 gearbox:motor:controlPID = (4, 0.25, 0)
+            float gearbox:motor:minPosition = -0.25
+            float gearbox:motor:maxPosition = 1.25
+            float gearbox:brake:damping = 300
+        }
+        def PhysicsRevoluteJoint "hinge"
+        {
+            rel physics:body0 = </robot/boom>
+            rel physics:body1 = </robot/stick>
+            float gearbox:brake:damping = 0
+        }
+    }
+}
+"#;
+
+    #[test]
+    fn devices_are_discovered_from_their_attributes() {
+        let path = std::env::temp_dir().join(format!("gearbox-devices-{}.usda", std::process::id()));
+        std::fs::write(&path, MACHINE).unwrap();
+        let machines = crate::controller::discover_machines_from_usd(&path).expect("scan");
+        let _ = std::fs::remove_file(&path);
+        let machine = machines.into_iter().next().expect("one machine");
+        assert!(machine.links.errors.is_empty(), "{:?}", machine.links.errors);
+        let by = |name: &str| machine.devices.iter().find(|d| d.name == name).unwrap_or_else(|| panic!("{name}")).kind.clone();
+        let DeviceKind::Joint { motor: Some((limits, max_force)), brake: Some(brake) } = by("boom_lift") else {
+            panic!("{:?}", by("boom_lift"));
+        };
+        assert_eq!((max_force, brake, limits.max_velocity), (5000.0, 300.0, 0.5));
+        assert_eq!((limits.pid, limits.position_limits), ([4.0, 0.25, 0.0], Some([-0.25, 1.25])));
+        assert!(matches!(by("hinge"), DeviceKind::Joint { motor: None, brake: Some(0.0) }));
+        let DeviceKind::Propeller { thrust, torque, limits, .. } = by("fan") else { panic!() };
+        assert_eq!((thrust, torque, limits.max_velocity), ([0.2, 0.01], [0.02, 0.0], 150.0));
+        let DeviceKind::Belt { direction, limits } = by("roof") else { panic!() };
+        assert_eq!((direction, limits.acceleration), ([0.0, 1.0, 0.0], Some(2.0)));
+        let DeviceKind::Connector { desc, locked } = by("nose") else { panic!() };
+        assert!(locked && desc.auto_lock && desc.kind == ConnectorKind::Active);
+        assert_eq!((desc.model.as_str(), desc.tensile_strength, desc.rotations), ("hitch", Some(5000.0), 1));
+        let DeviceKind::Copter { limits } = by("copter") else { panic!() };
+        assert!((limits.max_tilt - 30f64.to_radians()).abs() < 1e-6, "{limits:?}");
+        assert_eq!((limits.disturbance_time, limits.max_speed), (0.25, CopterLimits::default().max_speed));
+        assert_eq!(by("drag"), DeviceKind::Drag { area: [0.5, 0.25, 1.0], density: AIR_DENSITY });
+        assert_eq!(machine.devices.len(), 7);
+    }
+
+    #[test]
+    fn a_motor_on_a_drive_or_suspension_joint_rejects_the_machine() {
+        let usda = r#"#usda 1.0
+(
+    defaultPrim = "robot"
+    upAxis = "Z"
+    metersPerUnit = 1
+)
+
+def Xform "robot" (prepend apiSchemas = ["GearboxMachineAPI", "GearboxControllerAPI:drive"])
+{
+    token gearbox:machine:kind = "test"
+    rel gearbox:machine:body = </robot/chassis>
+    rel gearbox:machine:role:poweredWheelJoints = [</robot/Joints/roll>]
+    rel gearbox:machine:role:suspensionJoints = [</robot/Joints/strut>]
+    token gearbox:controller:drive:type = "builtin:diff_drive_cmd_vel"
+    def Xform "chassis" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
+    def Xform "carrier" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
+    def Xform "wheel" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {}
+    def Scope "Joints"
+    {
+        def PhysicsPrismaticJoint "strut"
+        {
+            rel physics:body0 = </robot/chassis>
+            rel physics:body1 = </robot/carrier>
+            float gearbox:motor:maxForce = 100
+        }
+        def PhysicsRevoluteJoint "roll"
+        {
+            rel physics:body0 = </robot/carrier>
+            rel physics:body1 = </robot/wheel>
+            float gearbox:motor:maxForce = 100
+        }
+    }
+}
+"#;
+        let path = std::env::temp_dir().join(format!("gearbox-owned-{}.usda", std::process::id()));
+        std::fs::write(&path, usda).unwrap();
+        let machines = crate::controller::discover_machines_from_usd(&path).expect("scan");
+        let _ = std::fs::remove_file(&path);
+        let machine = &machines[0];
+        let owned: Vec<&String> = machine.links.errors.iter().filter(|e| e.contains("would take this joint")).collect();
+        assert_eq!(owned.len(), 2, "{:?}", machine.links.errors);
+        assert!(owned.iter().any(|e| e.contains("strut") && e.contains("the suspension")));
+        assert!(owned.iter().any(|e| e.contains("roll") && e.contains("the drive controller")));
+    }
+
+    fn body(world: &mut PhysicsWorld, desc: BodyDesc, at: DVec3) -> crate::physics::backend::BodyId {
+        let body = world.insert_body(desc.pose(Pose::from_translation(at)));
+        world
+            .insert_collider(ColliderDesc::new(Shape::Ball { radius: 0.1 }).density(1000.0).parent(body))
+            .unwrap();
+        body
+    }
+
+    #[test]
+    fn the_molla_backend_steps_motors_propellers_and_connectors() {
+        let mut world = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        world.set_gravity(DVec3::ZERO);
+        let post = body(&mut world, BodyDesc::fixed(), DVec3::new(0.0, 5.0, 0.0));
+        let arm = body(&mut world, BodyDesc::dynamic(), DVec3::new(1.0, 5.0, 0.0));
+        let joint = world.backend.insert_joint(
+            post,
+            arm,
+            JointDesc::new(JointKind::Revolute { axis: DVec3::Y }, Pose::IDENTITY, Pose::from_translation(DVec3::NEG_X)),
+        );
+        let limits = DeviceLimits { max_velocity: 1.0, ..Default::default() };
+        world.insert_motor(joint, limits, 500.0).unwrap();
+        world.command_motor(joint, DeviceCommand::Position(0.4)).unwrap();
+
+        let drone = body(&mut world, BodyDesc::dynamic(), DVec3::new(0.0, 5.0, 10.0));
+        let fan = world
+            .insert_propeller(PropellerDesc {
+                body: drone,
+                frame: Pose::IDENTITY,
+                thrust: [0.01, 0.0],
+                torque: [0.0, 0.0],
+                limits: DeviceLimits::default(),
+                max_torque: 10.0,
+            })
+            .unwrap();
+        world.set_propeller_speed(fan, 10.0).unwrap();
+
+        // The dock faces +Z from the post; the plug on the pod faces back.
+        let turn = |angle: f64| glam::DQuat::from_rotation_y(angle);
+        let dock = world
+            .insert_connector(ConnectorDesc {
+                body: Some(post),
+                frame: Pose::new(DVec3::Z * 0.5, turn(-std::f64::consts::FRAC_PI_2)),
+                ..Default::default()
+            })
+            .unwrap();
+        let pod = body(&mut world, BodyDesc::dynamic(), DVec3::new(0.0, 5.0, 0.505));
+        let plug = world
+            .insert_connector(ConnectorDesc {
+                body: Some(pod),
+                frame: Pose::new(DVec3::ZERO, turn(std::f64::consts::FRAC_PI_2)),
+                ..Default::default()
+            })
+            .unwrap();
+        world.lock_connector(dock, true).unwrap();
+        for _ in 0..240 {
+            world.step();
+        }
+        let motor = world.motor_output(joint).unwrap();
+        assert!((motor.position - 0.4).abs() < 1e-3, "{motor:?}");
+        let prop = world.propeller_output(fan).unwrap();
+        assert!((prop.thrust - 1.0).abs() < 1e-9, "{prop:?}");
+        assert!(world.body(drone).unwrap().linvel().x > 0.0);
+        let docked = world.connector_output(dock).unwrap();
+        assert_eq!((docked.linked, world.connector_output(plug).unwrap().linked), (Some(plug), Some(dock)));
+    }
+
+    #[test]
+    fn the_molla_backend_blows_drag_bodies_along_in_their_own_wind() {
+        let mut world = PhysicsWorld::with_backend(Box::new(MollaBackend::default()));
+        world.set_gravity(DVec3::ZERO);
+        let (still, blown) = (
+            body(&mut world, BodyDesc::dynamic(), DVec3::ZERO),
+            body(&mut world, BodyDesc::dynamic(), DVec3::X * 5.0),
+        );
+        let desc = DragDesc { body: still, frame: Pose::IDENTITY, area: DVec3::splat(0.2), density: AIR_DENSITY };
+        let calm = world.insert_drag(desc).unwrap();
+        let gusty = world.insert_drag(DragDesc { body: blown, ..desc }).unwrap();
+        world.set_wind(DVec3::Z * 3.0);
+        world.set_body_wind(blown, Some(DVec3::NEG_X * 6.0));
+        world.step();
+        let (a, b) = (world.drag_output(calm).unwrap(), world.drag_output(gusty).unwrap());
+        assert_eq!((a.wind, b.wind), (DVec3::Z * 3.0, DVec3::NEG_X * 6.0));
+        assert!(a.force.z > 0.0 && b.force.x < 0.0, "{a:?} {b:?}");
+        let push = |w: f64| 0.5 * AIR_DENSITY * 0.2 * w * w;
+        assert!((a.force.z - push(3.0)).abs() < 0.02 * push(3.0), "{a:?}");
+        assert!((b.force.x + push(6.0)).abs() < 0.02 * push(6.0), "{b:?}");
+    }
+}

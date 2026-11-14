@@ -8,6 +8,7 @@ use bevy::{
 };
 
 #[derive(Component)]
+#[require(bevy::camera::visibility::RenderLayers = bevy::camera::visibility::RenderLayers::layer(crate::SKY_LAYER))]
 pub(crate) struct SkyboxPlane {
     pub orig_translation: Vec3,
 }

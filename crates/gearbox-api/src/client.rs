@@ -1,6 +1,8 @@
 //! Typed client for a running host and its machines. Used by tests, the
 //! CLI, and anything else written in Rust.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use agentio::{Agent, DirectoryMode, IdentitySource};
@@ -11,11 +13,21 @@ use peerbus::{EndpointId, ReqClient, Subscriber};
 use crate::topics::{self, machine_topic};
 use crate::wire::*;
 
+mod draw_data;
+pub use draw_data::{
+    DEFAULT_DATA_TIMEOUT, DataAdmission, DataCancelOutcome, DataPipelineConfig,
+    DataPipelineError, DataPipelineStats, DataRequestCancellation, DataRequestTicket, DrawDataClient, DrawDataError,
+    DrawDataPipeline, DataUpload, DataUploadCleanup, DataUploadError, DataUploadPage, DrawDataWriter, WaitVisibleError,
+};
+
 pub struct Client {
     pub agent: Agent,
     /// `None` for a [`Client::bare`] agent, which never bootstraps to any
     /// host and only ever dials peers directly by id.
     pub host: Option<EndpointId>,
+    /// Each machine's own endpoint by id, from the host's machine list,
+    /// read the first time a machine is addressed.
+    machine_peers: Mutex<Option<HashMap<String, EndpointId>>>,
 }
 
 impl Client {
@@ -39,12 +51,14 @@ impl Client {
             .identity(identity)
             .bootstrap([host])
             .directory(DirectoryMode::FrontDoor(host))
+            .control_timeout(std::time::Duration::from_secs(30))
             .local_config(crate::host::shm_limits())
             .allow_peer(host)
             .build()?;
         Ok(Self {
             agent,
             host: Some(host),
+            machine_peers: Mutex::new(None),
         })
     }
 
@@ -58,7 +72,7 @@ impl Client {
             .identity(identity)
             .local_config(crate::host::shm_limits())
             .build()?;
-        Ok(Self { agent, host: None })
+        Ok(Self { agent, host: None, machine_peers: Mutex::new(None) })
     }
 
     pub fn did(&self) -> String {
@@ -94,6 +108,42 @@ impl Client {
 
     fn subscribe(&self, topic: &str) -> agentio::Result<Subscriber<Env>> {
         resolve_retry(|| self.agent.subscribe::<Env>(topic))
+    }
+
+    // The host's own topics, dialled on the host itself: no topic need be
+    // resolved through its directory to reach the one who serves it.
+
+    fn call_host<Req, Res>(&self, topic: &str, req: &Req) -> agentio::Result<Res>
+    where
+        Req: DataPod + DataPodValidate + 'static,
+        Req::Header: LeWireHeader,
+        Res: DataPodDecode + DataPodValidate + 'static,
+        Res::Header: LeWireHeader,
+    {
+        match self.host {
+            Some(host) => self.call_direct(host, topic, req),
+            None => self.call(topic, req),
+        }
+    }
+
+    fn query_host<Que, Ans>(&self, topic: &str, que: &Que) -> agentio::Result<Vec<Ans>>
+    where
+        Que: DataPod + DataPodValidate + 'static,
+        Que::Header: LeWireHeader,
+        Ans: DataPodDecode + DataPodValidate + 'static,
+        Ans::Header: LeWireHeader,
+    {
+        match self.host {
+            Some(host) => self.query_direct(host, topic, que),
+            None => self.query(topic, que),
+        }
+    }
+
+    fn subscribe_host(&self, topic: &str) -> agentio::Result<Subscriber<Env>> {
+        match self.host {
+            Some(host) => self.subscribe_direct(host, topic),
+            None => self.subscribe(topic),
+        }
     }
 
     /// Dial `peer` directly and call, skipping directory resolution — works
@@ -183,15 +233,47 @@ impl Client {
     }
 
     pub fn info(&self) -> agentio::Result<HostInfo> {
-        self.call(topics::HOST_INFO, &Ping::default())
+        self.call_host(topics::HOST_INFO, &Ping::default())
     }
 
     pub fn clock(&self, op: u32) -> agentio::Result<ClockState> {
-        self.call(topics::SCENE_CLOCK, &ClockCommand { op, steps: 0 })
+        self.call_host(topics::SCENE_CLOCK, &ClockCommand { op, ..Default::default() })
+    }
+
+    /// World seconds per simulated second.
+    pub fn speed(&self, rate: f64) -> agentio::Result<ClockState> {
+        self.call_host(topics::SCENE_CLOCK, &ClockCommand { op: clock_op::SPEED, value: rate, ..Default::default() })
+    }
+
+    /// Greenhouse plants: every one, or those in `tray` of `species`, ripe ones only when `ripe`.
+    pub fn plants(&self, ripe: bool, filter: &Props) -> agentio::Result<Vec<PlantRecord>> {
+        let query = GreenhouseQuery { ripe: ripe as u32, props: filter.to_bytes(), ..Default::default() };
+        self.query_host(topics::GREENHOUSE_PLANTS, &query)
+    }
+
+    /// Every greenhouse room's air, with the power bus.
+    pub fn greenhouse_rooms(&self) -> agentio::Result<Vec<RoomRecord>> {
+        self.query_host(topics::GREENHOUSE_ROOMS, &Ping::default())
+    }
+
+    /// One greenhouse action (`greenhouse_op`) with its keys.
+    pub fn greenhouse(&self, op: u32, keys: &Props) -> agentio::Result<Status> {
+        self.call_host(topics::GREENHOUSE_ACT, &GreenhouseAction::new(op, keys))
+    }
+
+    /// Set the weather keys `set` carries, and read every key back.
+    pub fn weather(&self, set: &Props) -> agentio::Result<Props> {
+        let answer: Weather = self.call_host(topics::WEATHER, &Weather::new(set))?;
+        Ok(answer.props())
+    }
+
+    /// Jump world time forward by `seconds`.
+    pub fn skip(&self, seconds: f64) -> agentio::Result<ClockState> {
+        self.call_host(topics::SCENE_CLOCK, &ClockCommand { op: clock_op::SKIP, value: seconds, ..Default::default() })
     }
 
     pub fn clear(&self, scope: u32) -> agentio::Result<Status> {
-        self.call(
+        self.call_host(
             topics::SCENE_CLEAR,
             &ClearRequest {
                 scope,
@@ -201,58 +283,102 @@ impl Client {
     }
 
     pub fn list(&self, kind: u32) -> agentio::Result<Vec<SceneObject>> {
-        self.query(topics::SCENE_LIST, &ListQuery { kind })
+        self.query_host(topics::SCENE_LIST, &ListQuery { kind })
     }
 
     pub fn load(&self, req: &UsdLoad) -> agentio::Result<Status> {
         let stamped = req.clone().with_prop(SENT_AT, &now_unix_ms().to_string());
-        self.call(topics::USD_LOAD, &stamped)
+        self.call_host(topics::USD_LOAD, &stamped)
     }
 
     pub fn delete(&self, id: &str) -> agentio::Result<Status> {
         let req = UsdRef::new(id).with_prop(SENT_AT, &now_unix_ms().to_string());
-        self.call(topics::USD_DELETE, &req)
+        self.call_host(topics::USD_DELETE, &req)
     }
 
     pub fn marker_set(&self, id: &str, x: f32, y: f32, z: f32) -> agentio::Result<Status> {
-        self.call(topics::MARKER_SET, &MarkerSet::new(id, x, y, z))
+        self.call_host(topics::MARKER_SET, &MarkerSet::new(id, x, y, z))
     }
 
     pub fn marker_delete(&self, id: &str) -> agentio::Result<Status> {
-        self.call(topics::MARKER_DELETE, &MarkerRef::new(id))
+        self.call_host(topics::MARKER_DELETE, &MarkerRef::new(id))
+    }
+
+    /// Send one draw message as it is.
+    pub fn draw_raw(&self, msg: &DrawEntity) -> agentio::Result<Status> {
+        self.call_host(topics::DRAW, msg)
+    }
+
+    /// Send a draw entity, in chunks when it is too big for one message;
+    /// answers the first failure or the last chunk's status.
+    pub fn draw(&self, entity: &DrawEntity) -> agentio::Result<Status> {
+        let mut status = Status::ok();
+        for chunk in entity.chunks(DRAW_CHUNK_BYTES) {
+            status = self.draw_raw(&chunk)?;
+            if !status.is_ok() {
+                break;
+            }
+        }
+        Ok(status)
+    }
+
+    pub fn draw_delete(&self, ns: &str, id: &str) -> agentio::Result<Status> {
+        self.draw_raw(&DrawEntity::delete(ns, id))
+    }
+
+    /// Remove the draws at `prefix` and below; `""` removes all.
+    pub fn draw_clear(&self, prefix: &str) -> agentio::Result<Status> {
+        self.draw_raw(&DrawEntity::clear(prefix))
+    }
+
+    /// The live draws at `prefix` and below, header and props only.
+    pub fn draw_list(&self, prefix: &str) -> agentio::Result<Vec<DrawEntity>> {
+        self.query_host(topics::DRAW_LIST, &DrawEntity::clear(prefix))
     }
 
     pub fn select(&self, req: &Selection) -> agentio::Result<Selection> {
-        self.call(topics::SELECT, req)
+        self.call_host(topics::SELECT, req)
     }
 
     pub fn machines(&self) -> agentio::Result<Vec<MachineRef>> {
-        self.query(topics::MACHINES_LIST, &Ping::default())
+        self.query_host(topics::MACHINES_LIST, &Ping::default())
     }
 
     /// Allow `did` on the live instance now, on the host and every machine
     /// it already owns — not just on its next launch.
     pub fn grant(&self, did: &str) -> agentio::Result<Status> {
-        self.call(topics::ACCESS_GRANT, &GrantRequest::new(did))
+        self.call_host(topics::ACCESS_GRANT, &GrantRequest::new(did))
     }
 
     pub fn events(&self) -> agentio::Result<Subscriber<Env>> {
-        self.subscribe(topics::SCENE_EVENTS)
+        self.subscribe_host(topics::SCENE_EVENTS)
     }
 
     pub fn clock_state(&self) -> agentio::Result<Subscriber<Env>> {
-        self.subscribe(topics::SCENE_CLOCK_STATE)
+        self.subscribe_host(topics::SCENE_CLOCK_STATE)
     }
 
-    /// Address a machine by id, resolved through the connected host's
-    /// directory — needs the host to be up and reachable.
+    /// Address a machine by id: dialled on its own endpoint, which the host's
+    /// machine list names, or resolved through the host's directory when the
+    /// list lacks it. Resolving every machine topic through the directory
+    /// waits on the host's control plane, which a big fleet keeps busy.
     pub fn machine(&self, machine_id: &str) -> MachineClient<'_> {
         MachineClient {
             client: self,
             machine_id: machine_id.to_string(),
-            direct_peer: None,
+            direct_peer: self.machine_peer(machine_id),
             cmd_vel: None,
         }
+    }
+
+    fn machine_peer(&self, machine_id: &str) -> Option<EndpointId> {
+        let mut peers = self.machine_peers.lock().unwrap_or_else(PoisonError::into_inner);
+        if peers.is_none() {
+            let listed = self.machines().ok()?;
+            let own = |r: &MachineRef| Some((r.machine_id(), agentio::did_key::did_key_to_endpoint(&r.did()).ok()?));
+            *peers = Some(listed.iter().filter_map(own).collect());
+        }
+        peers.as_ref()?.get(machine_id).copied()
     }
 
     /// Address a machine by id, dialing its own `did` directly — skips the
@@ -356,6 +482,11 @@ impl MachineClient<'_> {
         forward_mps: f64,
         yaw_rps: f64,
     ) -> agentio::Result<Status> {
+        self.cmd_twist(&TwistCmd::new(session, forward_mps, yaw_rps))
+    }
+
+    /// A full twist command (forward, left, up, yaw rate).
+    pub fn cmd_twist(&mut self, command: &TwistCmd) -> agentio::Result<Status> {
         if self.cmd_vel.is_none() {
             let topic = self.topic(topics::MACHINE_CMD_VEL);
             self.cmd_vel = Some(match self.direct_peer {
@@ -364,7 +495,7 @@ impl MachineClient<'_> {
             });
         }
         let client = self.cmd_vel.as_mut().expect("cached above");
-        call_with(client, &TwistCmd::new(session, forward_mps, yaw_rps))
+        call_with(client, command)
     }
 
     pub fn command(&self, cmd: &ControllerCommand) -> agentio::Result<Status> {
@@ -377,19 +508,6 @@ impl MachineClient<'_> {
 
     pub fn odom(&self) -> agentio::Result<Subscriber<Env>> {
         self.subscribe(&self.topic(topics::MACHINE_ODOM))
-    }
-
-    /// Link poses, once `set_tf(true)` has switched the stream on.
-    pub fn tf(&self) -> agentio::Result<Subscriber<Env>> {
-        self.subscribe(&self.topic(topics::MACHINE_TF))
-    }
-
-    pub fn set_tf(&self, on: bool) -> agentio::Result<Status> {
-        let cmd = ControllerCommand {
-            props: Props::from_pairs(&[("tf", if on { "on" } else { "off" })]).into_bytes(),
-            ..Default::default()
-        };
-        self.command(&cmd)
     }
 
     /// Hang `slave` on one of this machine's hitches.
@@ -412,6 +530,49 @@ impl MachineClient<'_> {
     /// The link tree, base_link first.
     pub fn links(&self) -> agentio::Result<Vec<LinkRecord>> {
         self.query(&self.topic(topics::MACHINE_LINKS), &Ping::default())
+    }
+
+    /// The machine generation's manifest: DOF names, units, interfaces.
+    pub fn description(&self) -> agentio::Result<MachineDescription> {
+        self.call(&self.topic(topics::MACHINE_DESCRIPTION), &Ping::default())
+    }
+
+    /// A direct lease over `dofs` under a claimed `session`.
+    pub fn acquire_lease(&self, session: u64, generation: u64, dofs: &[&str]) -> agentio::Result<ControlResponse> {
+        let req = ControlRequest {
+            session,
+            generation,
+            op: control_op::ACQUIRE,
+            names: names_to_bytes(dofs),
+            ..Default::default()
+        };
+        self.call(&self.topic(topics::MACHINE_CONTROL), &req)
+    }
+
+    /// End the lease of `epoch`; `resume` gives the DOFs back to their owner.
+    pub fn release_lease(&self, session: u64, generation: u64, epoch: u64, resume: bool) -> agentio::Result<ControlResponse> {
+        let req = ControlRequest { session, generation, epoch, op: control_op::RELEASE, resume: resume as u32, ..Default::default() };
+        self.call(&self.topic(topics::MACHINE_CONTROL), &req)
+    }
+
+    /// Reset the machine's control: every lease and command cleared, each
+    /// DOF back to its default owner and load-time actuator.
+    pub fn reset_control(&self, session: u64, generation: u64) -> agentio::Result<ControlResponse> {
+        let req = ControlRequest { session, generation, op: control_op::RESET, ..Default::default() };
+        self.call(&self.topic(topics::MACHINE_CONTROL), &req)
+    }
+
+    pub fn joint_command(&self, command: &JointCommand) -> agentio::Result<JointCommandAck> {
+        self.call(&self.topic(topics::MACHINE_JOINT_COMMAND), command)
+    }
+
+    pub fn joint_state(&self) -> agentio::Result<Subscriber<Env>> {
+        self.subscribe(&self.topic(topics::MACHINE_JOINT_STATE))
+    }
+
+    /// Parent-relative transforms of the reporting tree (`Tf`).
+    pub fn tf(&self) -> agentio::Result<Subscriber<Env>> {
+        self.subscribe(&self.topic(topics::MACHINE_TF))
     }
 
     pub fn next_odom(

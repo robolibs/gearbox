@@ -4,6 +4,11 @@
 //! query-shaped through `HostCommands`.
 
 pub mod capture;
+mod draw_overlay;
+mod draw_labels;
+mod draw_layout;
+mod draw_annotations;
+mod draw_frost;
 pub mod gizmo;
 pub mod keys;
 mod machine_context;
@@ -30,7 +35,6 @@ use crate::viewer::commands::{HostCommand, HostCommands};
 use crate::viewer::log::LoaderLog;
 use crate::viewer::overlays::DisplayToggles;
 use crate::viewer::state::ReloadRequest;
-use crate::viewer::tf_overlay::TfLabels;
 use panes::{Outbox, PaneCtx};
 
 pub const RIBBON_LEFT: &str = "gearbox_left";
@@ -49,6 +53,7 @@ pub const PANE_SCENE: &str = "gearbox_pane_scene";
 pub const PANE_VIEW: &str = "gearbox_pane_view";
 pub const PANE_LOG: &str = "gearbox_pane_log";
 pub const PANE_ENVIRONMENT: &str = "gearbox_pane_environment";
+pub const PANE_FARM: &str = "gearbox_pane_farm";
 pub const PANE_CAPTURE: &str = "gearbox_pane_capture";
 pub const PANE_SHORTCUTS: &str = "gearbox_pane_shortcuts";
 
@@ -105,12 +110,22 @@ pub struct GearboxApp {
     keys: keys::KeyBridge,
     capture: capture::WindowCapture,
     gizmo: gizmo::PoseGizmo,
+    draw_interact: draw_overlay::DrawInteract,
+    draw_frost: draw_frost::DrawFrost,
     machine_context: machine_context::MachineContext,
     shelf_state: mara_core::ShelfState,
     window_geometry: window_geometry::WindowGeometry,
 }
 
 impl WindowApp for GearboxApp {
+    fn configure_gpu_limits(supported: &wgpu::Limits, requested: &mut wgpu::Limits) {
+        if let Err(error) = molla_solvers::fem_rigid_gpu::request_fem_device_limits(requested, supported) {
+            tracing::warn!("FEM unavailable on this adapter: {error}");
+        } else if let Err(error) = molla_solvers::fem_rigid_gpu::request_material_contact_patch_device_limits(requested, supported) {
+            tracing::warn!("Coupled FEM patches unavailable on this adapter: {error}");
+        }
+    }
+
     fn new(ctx: CreationContext<'_>) -> Self {
         replay::install(ctx.__internal_egui_ctx());
         let init = INIT.lock().unwrap().take();
@@ -118,13 +133,15 @@ impl WindowApp for GearboxApp {
             Some(init) => (init.cli_paths, init.log),
             None => (Vec::new(), LoaderLog::default()),
         };
-        let wireframe_supported = ctx.__internal_render_state().is_some_and(|state| {
+        let gpu = ctx.gpu();
+        let wireframe_supported = gpu.is_some_and(|gpu| {
             use bevy::render::settings::WgpuFeatures;
-            state.device.limits().max_immediate_size >= 16
-                && state.device.features().contains(WgpuFeatures::POLYGON_MODE_LINE | WgpuFeatures::IMMEDIATES)
+            let device = &gpu.__internal_raw().device;
+            device.limits().max_immediate_size >= 16
+                && device.features().contains(WgpuFeatures::POLYGON_MODE_LINE | WgpuFeatures::IMMEDIATES)
         });
         let mut view = mara_bevy::MaraBevyViewport::with_render_state_plugins_and_content(
-            ctx.__internal_render_state(),
+            gpu,
             crate::app::configure_plugins,
             move |app: &mut App| crate::app::configure(app, cli_paths.clone(), wireframe_supported),
         );
@@ -138,6 +155,8 @@ impl WindowApp for GearboxApp {
             keys: keys::KeyBridge::default(),
             capture: capture::WindowCapture::default(),
             gizmo: gizmo::PoseGizmo::default(),
+            draw_interact: draw_overlay::DrawInteract::default(),
+            draw_frost: draw_frost::DrawFrost::default(),
             machine_context: machine_context::MachineContext::default(),
             shelf_state: {
                 let mut state = mara_core::ShelfState::default();
@@ -195,6 +214,8 @@ impl WindowApp for GearboxApp {
             keys,
             capture,
             gizmo,
+            draw_interact,
+            draw_frost,
             machine_context,
             shelf_state,
             window_geometry: _,
@@ -214,6 +235,7 @@ impl WindowApp for GearboxApp {
             } else {
                 world.resource_mut::<crate::viewer::systems::GizmoGrab>().0 = false;
             }
+            draw_interact.interact(&egui, world);
         }
 
         let viewport = {
@@ -225,6 +247,12 @@ impl WindowApp for GearboxApp {
         let Some(world) = view.world_mut() else {
             return;
         };
+        // An AppExit (Ctrl-C, SIGTERM, `instance stop`) closes the window,
+        // so the Bevy app drops and its peerbus segments unlink.
+        if world.get_resource::<Messages<AppExit>>().is_some_and(|exit| !exit.is_empty()) {
+            egui.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        draw_frost.update(&egui, host.gpu(), viewport.into(), world, draw_interact.needs_frost());
         let physics_on = world.resource::<gearbox_api::PhysicsActive>().0;
         let outbox = Outbox::default();
         let ctx = PaneCtx {
@@ -235,7 +263,7 @@ impl WindowApp for GearboxApp {
         };
 
         // Three docked Shelves: Left is one tabbed container swapping
-        // between Scene/View/Environment/Capture/Controls, Right is the
+        // between Scene/View/Environment/Farm/Capture/Controls, Right is the
         // Machine pane, Bottom is Shortcuts.
         let left = ShelfContainer::tabbed(
             MaraId::new(SHELF_LEFT),
@@ -245,6 +273,7 @@ impl WindowApp for GearboxApp {
                 panes::scene::tab(world, &ctx),
                 panes::view::tab(world, &ctx),
                 panes::environment::tab(world, &ctx),
+                panes::farm::tab(world, &ctx),
                 panes::capture::tab(world, &ctx),
                 panes::controls::tab(world, &ctx),
             ],
@@ -304,8 +333,9 @@ impl WindowApp for GearboxApp {
             palette.open = false;
         }
 
-        paint_instance_label(&egui, viewport, world);
-        paint_tf_labels(&egui, viewport, world);
+        let instance_label = paint_instance_label(&egui, viewport, world);
+        draw_annotations::queue(&egui, viewport.into(), world, &[instance_label]);
+        draw_interact.paint(&egui, viewport, world);
         gizmo.paint(&egui, viewport);
         machine_context.show(&egui, viewport.into(), world);
         world.resource_mut::<HostCommands>().0.extend(outbox.drain());
@@ -397,6 +427,7 @@ const PALETTE_ITEMS: &[PaletteItem] = &[
     PaletteItem { id: "toggle_axes", label: "Toggle: World axes", hint: Some("X") },
     PaletteItem { id: "toggle_wireframe", label: "Toggle: Wireframe", hint: None },
     PaletteItem { id: "toggle_tf", label: "Toggle: TF tree (frames, names, links)", hint: None },
+    PaletteItem { id: "toggle_draws", label: "Toggle: Debug draws", hint: None },
     PaletteItem { id: "toggle_physics", label: "Physics: Play / pause", hint: None },
     PaletteItem { id: "reload_stage", label: "Scene: Reload", hint: Some("R") },
     PaletteItem { id: "browse_usd", label: "Scene: Load USD…", hint: None },
@@ -434,6 +465,10 @@ fn palette_action(id: &str, world: &mut World, outbox: &Outbox, shelf_state: &mu
             t.show_tf_names = on;
             t.show_tf_links = on;
         }
+        "toggle_draws" => {
+            let mut t = world.resource_mut::<DisplayToggles>();
+            t.show_draws = !t.show_draws;
+        }
         "toggle_physics" => {
             let on = world.resource::<gearbox_api::PhysicsActive>().0;
             outbox.push(HostCommand::SetPhysics(!on));
@@ -449,45 +484,67 @@ fn palette_action(id: &str, world: &mut World, outbox: &Outbox, shelf_state: &mu
     }
 }
 
-fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) {
+fn paint_instance_label(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) -> egui::Rect {
     let rect: egui::Rect = viewport.into();
     let name = std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into());
-    let backend = world.resource::<crate::physics::PhysicsWorld>().name();
+    let backend = world.resource::<crate::physics::PhysicsBackendName>().0;
     let state = if world.resource::<gearbox_api::PhysicsActive>().0 { "PLAYING" } else { "PAUSED" };
+    let rate = world
+        .get_resource::<bevy::diagnostic::DiagnosticsStore>()
+        .and_then(|store| store.get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS))
+        .and_then(|fps| fps.smoothed())
+        .map_or_else(|| "-- fps".to_owned(), |fps| format!("{fps:.0} fps  {:.1} ms", 1000.0 / fps.max(1e-3)));
     let painter = egui.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("gearbox_instance_label")));
-    let galley = painter.layout_no_wrap(format!("{name}  |  {backend}  |  {state}"), egui::FontId::proportional(15.0), egui::Color32::WHITE);
+    let galley = painter.layout_no_wrap(format!("{name}  |  {backend}  |  {state}  |  {rate}"), egui::FontId::proportional(15.0), egui::Color32::WHITE);
     let position = egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top() + 12.0);
-    painter.rect_filled(egui::Rect::from_min_size(position, galley.size()).expand(5.0), 4.0, egui::Color32::from_black_alpha(190));
+    let bounds = egui::Rect::from_min_size(position, galley.size()).expand(5.0);
+    painter.rect_filled(bounds, 4.0, egui::Color32::from_black_alpha(190));
     painter.galley(position, galley, egui::Color32::WHITE);
+    bounds
 }
 
-/// TF link names over the viewport, where the Bevy side projected them.
-fn paint_tf_labels(egui: &egui::Context, viewport: mara_core::vocab::Rect, world: &World) {
-    let Some(labels) = world.get_resource::<TfLabels>() else {
-        return;
-    };
-    if labels.0.is_empty() {
-        return;
-    }
-    let rect: egui::Rect = viewport.into();
-    let painter = egui
-        .layer_painter(egui::LayerId::new(
-            egui::Order::Background,
-            egui::Id::new("gearbox_tf_names"),
-        ))
-        .with_clip_rect(rect);
-    let font = egui::FontId::proportional(12.0);
-    let fg = egui::Color32::from_rgb(255, 235, 140);
-    let bg = egui::Color32::from_black_alpha(150);
-    for label in &labels.0 {
-        let pos = rect.min
-            + egui::vec2(
-                label.at[0] * rect.width() + 6.0,
-                label.at[1] * rect.height() - 6.0,
-            );
-        let galley = painter.layout_no_wrap(label.name.clone(), font.clone(), fg);
-        let bounds = egui::Rect::from_min_size(pos, galley.size()).expand(2.0);
-        painter.rect_filled(bounds, 2.0, bg);
-        painter.galley(pos, galley, fg);
+/// `run_ui` for tests without a renderer: the frame's font-atlas uploads are dropped.
+#[cfg(test)]
+pub(crate) fn run_ui_clean(ctx: &egui::Context, input: egui::RawInput, ui: impl FnMut(&mut egui::Ui)) -> egui::FullOutput {
+    let mut output = ctx.run_ui(input, ui);
+    output.textures_delta.clear();
+    output
+}
+
+#[cfg(test)]
+mod draw_annotation_tests {
+    use super::*;
+
+    #[test]
+    fn panels_avoid_actual_ribbon_buttons() {
+        let ctx = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 500.0));
+        let mut world = World::default();
+        world.insert_resource(crate::draw::DrawPanels(vec![crate::draw::DrawPanel {
+            key: ("chrome".into(), "panel".into()), at: Some([0.2, 0.8]), opacity: 1.0,
+            chart: crate::draw::PanelChart { kind: gearbox_api::panel_kind::TABLE,
+                title: "Inspection".into(), color: [200, 100, 150, 255],
+                rows: vec![("Sample".into(), "027".into()); 8], ..Default::default() },
+        }]));
+        let mut buttons = Vec::new();
+        let output = crate::host::run_ui_clean(&ctx, egui::RawInput { screen_rect: Some(viewport), ..Default::default() }, |ui| {
+            let host = MaraHostCtx::ui_only(ui.ctx(), None);
+            host.publish_full_shelf_layout();
+            host.show_ribbon_rail(RibbonRail::view_left(RIBBON_LEFT, "gearbox.ribbons")
+                .action_in(mara_core::ribbon::RibbonCluster::Middle, ACTION_PLAY, "play", "Play", ribbon_action(ACTION_PLAY))
+                .action_in(mara_core::ribbon::RibbonCluster::Middle, ACTION_CLEAR, "broom", "Clear", ribbon_action(ACTION_CLEAR)), active_accent());
+            for id in [ACTION_PLAY, ACTION_CLEAR] {
+                let response = ui.ctx().read_response(MaraId::new(("mara_ribbon_btn_hit", id)).into()).unwrap();
+                buttons.push(response.rect);
+            }
+            draw_annotations::queue(ui.ctx(), viewport, &world, &[]);
+        });
+        let panels: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Mesh(mesh) if mesh.vertices.len() == 7 && mesh.indices.len() == 18 =>
+                Some(egui::Rect::from_points(&mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>())),
+            _ => None,
+        }).collect();
+        assert_eq!(panels.len(), 1);
+        assert!(buttons.iter().all(|button| !panels[0].intersects(*button)), "panel {:?}, buttons {buttons:?}", panels[0]);
     }
 }

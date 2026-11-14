@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod shader_contract;
 
+mod blades;
 mod canopy;
 mod clumps;
 mod bare;
@@ -17,16 +18,21 @@ mod layout;
 mod profile;
 mod render;
 mod runtime;
+mod sieve;
 mod textures;
+pub mod tillage;
 pub mod wind_map;
 
 pub use contacts::{WheelContact, WheelContacts};
+pub use bare::{PlanetSurfaceFrame, PlanetSurfaceUpdates};
+pub use tillage::{ToolContact, ToolContacts, ToolKind};
 pub use heights::HeightGrid;
 pub use host::{
     CoverBackdrop, CoverHeights, CoverSurfaceMesh, CoverTerrain, CoverTerrainRoots, CoverWind,
     HeightSource,
 };
 pub use layout::{FieldBounds, FieldLayout, Hollows};
+pub use render::NoVegetation;
 pub use runtime::{CoverPending, heightmap_image};
 pub use profile::{
     FieldProfile, FieldProfiles, GroundSurface, MaterialSurface, SurfaceGeometry,
@@ -75,10 +81,10 @@ fn density_from_env(key: &str) -> f32 {
 
 impl Plugin for FieldsPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/interaction.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/surface_detail.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/wind.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/canopy.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/interaction.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/surface_detail.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/wind.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/canopy.wesl");
         app.insert_resource(self.layout.clone())
             .init_resource::<profile::FieldProfiles>()
             .init_resource::<render::RenderFields>()
@@ -89,8 +95,11 @@ impl Plugin for FieldsPlugin {
             .init_resource::<contacts::TrailKeeper>()
             .init_resource::<CoverWind>()
             .init_resource::<CoverTerrainRoots>()
+            .init_resource::<tillage::ToolContacts>()
+            .init_resource::<tillage::WorkedCells>()
             .add_plugins(ExtractResourcePlugin::<contacts::WheelContacts>::default())
-            .add_systems(First, contacts::begin_wheel_contacts)
+            .add_plugins(ExtractResourcePlugin::<tillage::ToolContacts>::default())
+            .add_systems(First, (contacts::begin_wheel_contacts, tillage::begin_tool_contacts))
             .add_systems(bevy::prelude::PostUpdate, contacts::keep_wheel_trails)
             .add_systems(Update, (textures::prepare_textures, render::sync_wind))
             .add_plugins((
@@ -99,7 +108,10 @@ impl Plugin for FieldsPlugin {
                 bare::BarePlugin,
                 harvested_wheat::HarvestedWheatPlugin { density: self.stubble_density },
                 concrete::ConcretePlugin { weed_density: self.concrete_weed_density },
+                tillage::TillagePlugin,
                 render::VegetationPlugin,
+                blades::BladePlugin,
+                sieve::SievePlugin,
             ))
             .add_systems(
                 Update,
@@ -109,7 +121,8 @@ impl Plugin for FieldsPlugin {
             )
             .add_systems(
                 PostUpdate,
-                runtime::stream_vegetation
+                (tillage::keep_worked_cells, runtime::stream_vegetation)
+                    .chain()
                     .after(bevy::transform::TransformSystems::Propagate)
                     .after(bevy::camera::visibility::VisibilitySystems::UpdateFrusta)
                     .before(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate),

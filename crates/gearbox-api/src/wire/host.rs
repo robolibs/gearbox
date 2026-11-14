@@ -39,6 +39,13 @@ pub mod clock_op {
     pub const SHUTDOWN: u32 = 4;
     /// Run `steps` physics frames, then pause again.
     pub const STEP: u32 = 5;
+    /// World seconds per simulated second: `value`. The sun, the air and
+    /// whatever grows keep world time; machines keep the physics clock.
+    pub const SPEED: u32 = 6;
+    /// Jump world time forward by `value` seconds.
+    pub const SKIP: u32 = 7;
+    /// Fastest world time may run against simulated time: a Mars year a minute.
+    pub const MAX_RATE: f64 = 1.0e6;
 
     pub fn name(value: u32) -> &'static str {
         match value {
@@ -47,6 +54,8 @@ pub mod clock_op {
             TOGGLE => "toggle",
             SHUTDOWN => "shutdown",
             STEP => "step",
+            SPEED => "speed",
+            SKIP => "skip",
             _ => "get",
         }
     }
@@ -59,6 +68,8 @@ pub mod clock_op {
             "toggle" => Some(TOGGLE),
             "shutdown" | "stop" => Some(SHUTDOWN),
             "step" => Some(STEP),
+            "speed" => Some(SPEED),
+            "skip" => Some(SKIP),
             _ => None,
         }
     }
@@ -129,6 +140,16 @@ pub mod event_kind {
     pub const DETACHED: u32 = 6;
     /// A machine whose link tree failed validation; `reason` props say why.
     pub const MACHINE_REJECTED: u32 = 7;
+    /// Something in a greenhouse: `what` is sown, sprouted, staged, ripe,
+    /// died, harvested, faulted or repaired; `plant`, `stage`, `fault`,
+    /// `species` and `fresh_kg` say more.
+    pub const GREENHOUSE: u32 = 8;
+    /// An answer from a draw interaction: props `ns` and `id` name the
+    /// entity, `what` is `step`, `point`, `pose`, `pose_update`,
+    /// `mouse_down`, `mouse_up`, `button_click` or `menu_select`; x, y, z
+    /// in the entity's frame and props `yaw`, `qw`, `qx`, `qy`, `qz`,
+    /// `menu` say more.
+    pub const DRAW: u32 = 9;
 
     pub fn name(value: u32) -> &'static str {
         match value {
@@ -140,6 +161,8 @@ pub mod event_kind {
             ATTACHED => "attached",
             DETACHED => "detached",
             MACHINE_REJECTED => "machine_rejected",
+            GREENHOUSE => "greenhouse",
+            DRAW => "draw",
             _ => "unknown",
         }
     }
@@ -173,6 +196,8 @@ impl HostInfo {
 pub struct ClockCommand {
     pub op: u32,
     pub steps: u32,
+    /// Rate for `SPEED`, seconds for `SKIP`.
+    pub value: f64,
 }
 
 #[datapod::datapod(name = "gearbox.clock_state.v1")]
@@ -181,6 +206,19 @@ pub struct ClockState {
     pub step: u64,
     pub paused: u32,
     pub _pad: u32,
+    /// World seconds since the instance started.
+    pub world_s: f64,
+    /// World seconds per simulated second.
+    pub rate: f64,
+    /// Length of the planet's solar day, seconds.
+    pub day_s: f64,
+    /// World seconds a skip still has to jump.
+    pub skip_s: f64,
+    /// Local solar hour at home, 0 to 24.
+    pub hour: f64,
+    /// Day (sol) of the year at home, from 1.
+    pub day: u32,
+    pub _pad2: u32,
 }
 
 #[datapod::datapod(name = "gearbox.clear_request.v1")]
@@ -447,6 +485,45 @@ impl MarkerRef {
 
     pub fn id(&self) -> String {
         Props::from_bytes(&self.props).get("id").unwrap_or_default()
+    }
+}
+
+/// A field layout for the ground at home, as the JSON a `GEARBOX_FIELD_LAYOUT`
+/// file holds.
+#[datapod::datapod(name = "gearbox.fields_layout.v1")]
+#[derive(Default)]
+pub struct FieldsLayout {
+    #[dp(bytes)]
+    pub layout: Vec<u8>,
+}
+
+impl FieldsLayout {
+    pub fn new(json: &str) -> Self {
+        Self { layout: json.as_bytes().to_vec() }
+    }
+
+    pub fn json(&self) -> String {
+        String::from_utf8_lossy(&self.layout).into_owned()
+    }
+}
+
+/// Weather as named values. Sent, it sets the keys it carries and leaves the
+/// rest; answered, it holds every key. Keys: `dust_tau`, `cloud_cover`,
+/// `wind_speed_mps`, `wind_heading_deg`, `wind_gustiness`, `haze_km`.
+#[datapod::datapod(name = "gearbox.weather.v1")]
+#[derive(Default)]
+pub struct Weather {
+    #[dp(bytes)]
+    pub props: Vec<u8>,
+}
+
+impl Weather {
+    pub fn new(props: &Props) -> Self {
+        Self { props: props.to_bytes() }
+    }
+
+    pub fn props(&self) -> Props {
+        Props::from_bytes(&self.props)
     }
 }
 

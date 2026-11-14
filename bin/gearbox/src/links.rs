@@ -1,5 +1,5 @@
 //! Link trees and couplings discovered from a machine's USD prims
-//! (`specs/CONTROLLER_SPEC.md` §7, `specs/TOOLS_SPEC.md` §2).
+//! (`docs/specs/CONTROLLER_SPEC.md` §7, `docs/specs/TOOLS_SPEC.md` §2).
 //!
 //! A machine that authors no `GearboxLinkAPI` gets a tree derived from its
 //! rigid bodies and joints, with a warning. One authored mark switches the
@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::usd_ext::StageExt;
 use bevy::math::{DMat4, DQuat, DVec3, EulerRot};
-use openusd::sdf::{Path as SdfPath, Value};
+use openusd::sdf::Path as SdfPath;
+use openusd::vt::Value;
 
 use crate::controller::{
     read_attr, read_bool, read_float, read_rel_first, read_rel_targets, read_token,
@@ -98,6 +99,20 @@ pub struct CouplingSpec {
     /// Coupler side: slave joints bound to the master's hydraulic valves, in
     /// valve order.
     pub valve_joints: Vec<String>,
+    /// The top-link pin: on a hitch, the free end of the machine's top link;
+    /// on a coupler, the implement's upper hitch point.
+    pub top_link: Option<String>,
+    /// Hitch side: the machine's variant this hitch selects by reach.
+    pub variant: Option<CouplingVariant>,
+}
+
+/// A hitch's look by reach: `near` while a coupler of its type is within
+/// reach or attached, `far` otherwise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CouplingVariant {
+    pub set: String,
+    pub near: String,
+    pub far: String,
 }
 
 pub const COUPLING_TYPES: [&str; 12] = [
@@ -129,7 +144,190 @@ pub struct LinkSpec {
     pub element: Option<ElementInfo>,
     /// Named values authored on the link (`gearbox:value:<Name>`).
     pub values: Vec<(String, f64)>,
+    /// Simulated sensor on a `role = "sensor"` link (`gearbox:sensor:*`).
+    pub sensor: Option<SensorSpec>,
 }
+
+/// The simulated sensor on a link: the Webots sensor set. `range_finder`
+/// parses to [`SensorKind::Camera`] with Molla-traced depth only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorKind {
+    Imu,
+    Lidar,
+    Camera,
+    Accelerometer,
+    Gyro,
+    InertialUnit,
+    Compass,
+    Gps,
+    Distance,
+    Light,
+    Position,
+    Radar,
+    Touch,
+    Receiver,
+    Emitter,
+    Climate,
+}
+
+const SENSOR_KINDS: [(&str, SensorKind); 16] = [
+    ("imu", SensorKind::Imu),
+    ("lidar", SensorKind::Lidar),
+    ("camera", SensorKind::Camera),
+    ("accelerometer", SensorKind::Accelerometer),
+    ("gyro", SensorKind::Gyro),
+    ("inertial_unit", SensorKind::InertialUnit),
+    ("compass", SensorKind::Compass),
+    ("gps", SensorKind::Gps),
+    ("distance", SensorKind::Distance),
+    ("light", SensorKind::Light),
+    ("position", SensorKind::Position),
+    ("radar", SensorKind::Radar),
+    ("touch", SensorKind::Touch),
+    ("receiver", SensorKind::Receiver),
+    ("emitter", SensorKind::Emitter),
+    ("climate", SensorKind::Climate),
+];
+
+impl SensorKind {
+    pub fn parse(token: &str) -> Option<Self> {
+        let token = if token == "range_finder" { "camera" } else { token };
+        SENSOR_KINDS.iter().find(|(name, _)| *name == token).map(|(_, kind)| *kind)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        SENSOR_KINDS.iter().find(|(_, kind)| *kind == self).map_or("", |(name, _)| name)
+    }
+
+    /// Kinds read from the IMU batch.
+    pub fn uses_imu(self) -> bool {
+        matches!(self, Self::Imu | Self::Accelerometer | Self::Gyro)
+    }
+
+    /// The kind a sensor link's name implies when no kind is authored.
+    fn from_link_name(name: &str) -> Option<Self> {
+        if name.starts_with("lidar") || name.starts_with("laser") {
+            return Some(Self::Lidar);
+        }
+        if name.starts_with("cam_") || name.starts_with("range_finder") {
+            return Some(Self::Camera);
+        }
+        if name.starts_with("gnss") {
+            return Some(Self::Gps);
+        }
+        SENSOR_KINDS
+            .iter()
+            .find(|(prefix, _)| name.starts_with(prefix))
+            .map(|(_, kind)| *kind)
+    }
+}
+
+/// `gearbox:sensor:type`: how a distance sensor, touch sensor or radio
+/// link works (Webots `type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SensorVariant {
+    #[default]
+    Default,
+    Laser,
+    InfraRed,
+    Sonar,
+    Bumper,
+    Force,
+    Force3d,
+    Radio,
+    Infrared,
+    Serial,
+}
+
+impl SensorVariant {
+    fn parse(kind: SensorKind, token: &str) -> Option<Self> {
+        Some(match (kind, token) {
+            (SensorKind::Distance, "laser") => Self::Laser,
+            (SensorKind::Distance, "infra_red" | "infrared") => Self::InfraRed,
+            (SensorKind::Distance, "sonar") => Self::Sonar,
+            (SensorKind::Touch, "bumper") => Self::Bumper,
+            (SensorKind::Touch, "force") => Self::Force,
+            (SensorKind::Touch, "force3d" | "force_3d" | "force-3d") => Self::Force3d,
+            (SensorKind::Receiver | SensorKind::Emitter, "radio") => Self::Radio,
+            (SensorKind::Receiver | SensorKind::Emitter, "infrared" | "infra_red") => {
+                Self::Infrared
+            }
+            (SensorKind::Receiver | SensorKind::Emitter, "serial") => Self::Serial,
+            _ => return None,
+        })
+    }
+}
+
+/// A simulated sensor sampled by the Molla GPU sensors on the link's frame:
+/// IMU readings are in the link frame; LiDAR sweeps look along the link's
+/// +X with +Z as zenith and azimuth turning towards +Y.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SensorSpec {
+    pub kind: SensorKind,
+    /// Samples per simulated second.
+    pub rate_hz: f32,
+    /// LiDAR azimuth columns and zenith rows.
+    pub columns: u32,
+    pub rows: u32,
+    /// LiDAR horizontal and vertical field of view (rad), centred on +X.
+    pub hfov: f32,
+    pub vfov: f32,
+    /// LiDAR and camera maximum range (m).
+    pub range_m: f32,
+    /// Camera image size in pixels.
+    pub width: u32,
+    pub height: u32,
+    /// How a camera link produces its colour image.
+    pub render: CameraRender,
+    /// Camera channels to publish.
+    pub color: bool,
+    pub depth: bool,
+    /// Camera recognition: objects in view with image boxes and positions.
+    pub recognition: bool,
+    /// Distance, touch and radio sub-type.
+    pub variant: SensorVariant,
+    /// Distance-sensor rays and full cone aperture (rad); also the infra-red
+    /// radio cone.
+    pub rays: u32,
+    pub aperture: f32,
+    /// Radar minimum range (m).
+    pub min_range_m: f32,
+    /// Radio channel; -1 hears every channel.
+    pub channel: i32,
+}
+
+/// Source of a camera link's colour image (`gearbox:sensor:render`). Depth
+/// always comes from the Molla trace of the collision scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraRender {
+    /// Molla ray trace of the collision shapes with flat per-shape albedo.
+    Geometry,
+    /// Bevy render of the visual scene without grass, weather, shadows or
+    /// post-processing.
+    Optimized,
+    /// Bevy render through the same pipeline as the viewer window.
+    Full,
+}
+
+impl CameraRender {
+    pub fn parse(token: &str) -> Option<Self> {
+        Some(match token {
+            "geometry" => Self::Geometry,
+            "optimized" | "optimised" => Self::Optimized,
+            "full" => Self::Full,
+            _ => return None,
+        })
+    }
+
+    /// Whether Bevy renders the colour channel.
+    pub fn is_bevy(self) -> bool {
+        self != Self::Geometry
+    }
+}
+
+pub const MAX_LIDAR_PULSES: u32 = 1 << 20;
+/// Largest camera image side in pixels.
+pub const MAX_CAMERA_SIDE: u32 = 4096;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LinkTree {
@@ -189,7 +387,7 @@ pub fn discover_link_tree(
     let mut couplings: Vec<String> = Vec::new();
     let mut elements: Vec<String> = Vec::new();
     let mut joints: Vec<JointRecord> = Vec::new();
-    let mut prismatic: Vec<String> = Vec::new();
+    let mut sprung: Vec<String> = Vec::new();
     for prim in &inside {
         let schemas = stage.api_schemas(prim).unwrap_or_default();
         let path = prim.as_str().to_string();
@@ -213,8 +411,8 @@ pub fn discover_link_tree(
             elements.push(path.clone());
         }
         let ty = type_name(stage, prim).unwrap_or_default();
-        if ty == "PhysicsPrismaticJoint" {
-            prismatic.push(path.clone());
+        if ty == "PhysicsPrismaticJoint" || ty == "PhysicsRevoluteJoint" {
+            sprung.push(path.clone());
         }
         if ty.starts_with("Physics") && ty.ends_with("Joint") {
             joints.push(JointRecord {
@@ -234,13 +432,14 @@ pub fn discover_link_tree(
         ..Default::default()
     };
 
-    // Suspension joints are springs the runtime leaves alone; only a
-    // prismatic joint can be one.
+    // Suspension joints are springs and pivots the runtime leaves alone: a
+    // prismatic strut or a revolute axle or bogie.
     for joint in read_rel_targets(stage, machine_prim, "gearbox:machine:role:suspensionJoints") {
         let joint = rebase_asset_root_target(root, &joint);
-        if !prismatic.contains(&joint) {
-            tree.warnings
-                .push(format!("suspension joint {joint} is not a PhysicsPrismaticJoint"));
+        if !sprung.contains(&joint) {
+            tree.warnings.push(format!(
+                "suspension joint {joint} is not a PhysicsPrismaticJoint or PhysicsRevoluteJoint"
+            ));
         }
     }
 
@@ -339,6 +538,9 @@ pub fn discover_link_tree(
             .contains(prim)
             .then(|| read_coupling(stage, &sdf, root, &mut tree.errors))
             .flatten();
+        let sensor = (role == LinkRole::Sensor)
+            .then(|| read_sensor(stage, &sdf, &name, &mut tree.warnings, &mut tree.errors))
+            .flatten();
         links.push(LinkSpec {
             name,
             prim_path: prim.clone(),
@@ -350,6 +552,7 @@ pub fn discover_link_tree(
             coupling,
             element: read_element(stage, &sdf, &mut tree.errors),
             values: read_values(stage, &sdf),
+            sensor,
         });
     }
 
@@ -425,7 +628,8 @@ pub fn discover_link_tree(
         if !j.excluded {
             *child_joint_count.entry(i1).or_default() += 1;
         }
-        if links[i1].parent.is_none() && links[i1].role != LinkRole::Base {
+        // A loop-closure joint stays physical but never parents a link.
+        if !j.excluded && links[i1].parent.is_none() && links[i1].role != LinkRole::Base {
             links[i1].parent = Some(links[i0].name.clone());
             links[i1].joint_prim = Some(j.prim.clone());
         }
@@ -579,6 +783,22 @@ fn read_coupling(
         Some(Value::Uint(v)) => Some(v.min(4) as u8),
         _ => None,
     };
+    let variant = match (
+        read_token(stage, prim, "gearbox:coupling:variantSet"),
+        read_token(stage, prim, "gearbox:coupling:variantNear"),
+        read_token(stage, prim, "gearbox:coupling:variantFar"),
+    ) {
+        (Some(set), Some(near), Some(far)) if side == CouplingSide::Hitch => {
+            Some(CouplingVariant { set, near, far })
+        }
+        (None, None, None) => None,
+        _ => {
+            errors.push(format!(
+                "{path}: a hitch's variant needs gearbox:coupling:variantSet, variantNear and variantFar"
+            ));
+            return None;
+        }
+    };
     Some(CouplingSpec {
         name: read_token(stage, prim, "gearbox:coupling:name")
             .unwrap_or_else(|| sanitize_link_name(leaf(path))),
@@ -600,6 +820,9 @@ fn read_coupling(
         .into_iter()
         .map(|t| rebase_asset_root_target(root, &t))
         .collect(),
+        top_link: read_rel_first(stage, prim, "gearbox:coupling:topLink")
+            .map(|t| rebase_asset_root_target(root, &t)),
+        variant,
     })
 }
 
@@ -652,27 +875,20 @@ fn nearest_ancestor_link(
     None
 }
 
-/// Composed local transform of `descendant` in `ancestor`'s frame.
+/// The rigid transform of `child` in `parent`'s frame from both composed
+/// world matrices, whether or not one is the other's namespace ancestor;
+/// pivots, `!resetXformStack!` and every op type count, scale is dropped.
 pub(crate) fn local_offset_between(
     stage: &openusd::usd::Stage,
-    ancestor: &str,
-    descendant: &str,
+    parent: &str,
+    child: &str,
 ) -> StaticOffset {
-    let Some(rel) = descendant.strip_prefix(ancestor) else {
-        return StaticOffset::default();
-    };
-    let mut m = DMat4::IDENTITY;
-    let mut cur = ancestor.to_string();
-    for part in rel.split('/').filter(|s| !s.is_empty()) {
-        cur = format!("{cur}/{part}");
-        if let Ok(p) = openusd::sdf::path(&cur) {
-            m *= prim_local_matrix(stage, &p);
-        }
-    }
-    let (_, rotation, translation) = m.to_scale_rotation_translation();
+    use crate::machine_model::xform::{decompose, world_matrix};
+    let rigid = |path: &str| decompose(&world_matrix(stage, path).0).rigid;
+    let relative = rigid(parent).inverse().mul(&rigid(child));
     StaticOffset {
-        translation,
-        rotation: rotation.normalize(),
+        translation: relative.translation,
+        rotation: relative.rotation.normalize(),
     }
 }
 
@@ -822,6 +1038,187 @@ def Xform "robot" (
     }
 
     #[test]
+    fn sensor_links_parse_kinds_defaults_and_ranges() {
+        let imu = discover(&machine_with(CHASSIS_AND_WHEEL, WHEEL_JOINT));
+        let spec = imu
+            .get("imu")
+            .unwrap()
+            .sensor
+            .expect("imu inferred from its name");
+        assert_eq!(spec.kind, SensorKind::Imu);
+        assert_eq!(spec.rate_hz, 100.0);
+
+        let lidar = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "lidar"
+            float gearbox:sensor:rate_hz = 20
+            int gearbox:sensor:columns = 180
+            int gearbox:sensor:rows = 1
+            float gearbox:sensor:hfov_deg = 270
+            float gearbox:sensor:vfov_deg = 0
+            float gearbox:sensor:range_m = 25"#,
+        );
+        let tree = discover(&machine_with(&lidar, WHEEL_JOINT));
+        assert!(tree.is_valid(), "{:?}", tree.errors);
+        let spec = tree.get("imu").unwrap().sensor.unwrap();
+        assert_eq!(spec.kind, SensorKind::Lidar);
+        assert_eq!(
+            (spec.rate_hz, spec.columns, spec.rows, spec.range_m),
+            (20.0, 180, 1, 25.0)
+        );
+        assert!((spec.hfov - 270f32.to_radians()).abs() < 1e-6);
+        assert_eq!(spec.vfov, 0.0);
+
+        let camera = CHASSIS_AND_WHEEL.replace(r#"def Xform "imu""#, r#"def Xform "camera_link""#);
+        let tree = discover(&machine_with(&camera, WHEEL_JOINT));
+        assert!(tree.is_valid(), "{:?}", tree.errors);
+        let spec = tree.get("camera_link").unwrap().sensor.unwrap();
+        assert_eq!(
+            (spec.kind, spec.rate_hz, spec.width, spec.height),
+            (SensorKind::Camera, 5.0, 128, 96)
+        );
+        assert!((spec.vfov - 60f32.to_radians()).abs() < 1e-6);
+        assert_eq!(
+            (spec.render, spec.color, spec.depth),
+            (CameraRender::Optimized, true, true)
+        );
+
+        for (render, channels, expected) in [
+            ("geometry", "depth", (CameraRender::Geometry, false, true)),
+            ("full", "color", (CameraRender::Full, true, false)),
+            ("optimized", "color_depth", (CameraRender::Optimized, true, true)),
+        ] {
+            let camera = CHASSIS_AND_WHEEL.replace(
+                r#"token gearbox:link:role = "sensor""#,
+                &format!(
+                    r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            int gearbox:sensor:width = 4096
+            token gearbox:sensor:render = "{render}"
+            token gearbox:sensor:channels = "{channels}""#
+                ),
+            );
+            let tree = discover(&machine_with(&camera, WHEEL_JOINT));
+            assert!(tree.is_valid(), "{:?}", tree.errors);
+            let spec = tree.get("imu").unwrap().sensor.unwrap();
+            assert_eq!((spec.render, spec.color, spec.depth), expected);
+            assert_eq!(spec.width, MAX_CAMERA_SIDE);
+        }
+        let bad = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "camera"
+            int gearbox:sensor:height = 4097
+            token gearbox:sensor:render = "raytraced"
+            token gearbox:sensor:channels = "infrared""#,
+        );
+        let tree = discover(&machine_with(&bad, WHEEL_JOINT));
+        for what in ["height", "render", "channels"] {
+            assert!(
+                tree.errors.iter().any(|e| e.contains(&format!("gearbox:sensor:{what}"))),
+                "{what}: {:?}",
+                tree.errors
+            );
+        }
+
+        let gps = CHASSIS_AND_WHEEL.replace(r#"def Xform "imu""#, r#"def Xform "gnss_link""#);
+        let tree = discover(&machine_with(&gps, WHEEL_JOINT));
+        assert_eq!(tree.get("gnss_link").unwrap().sensor.map(|s| s.kind), Some(SensorKind::Gps));
+
+        let camera = CHASSIS_AND_WHEEL.replace(r#"def Xform "imu""#, r#"def Xform "antenna_link""#);
+        let tree = discover(&machine_with(&camera, WHEEL_JOINT));
+        assert!(tree.is_valid(), "{:?}", tree.errors);
+        assert!(tree.get("antenna_link").unwrap().sensor.is_none());
+        assert!(
+            tree.warnings
+                .iter()
+                .any(|w| w.contains("gearbox:sensor:kind"))
+        );
+
+        let bad = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "lidar"
+            int gearbox:sensor:rows = 4
+            float gearbox:sensor:vfov_deg = 0
+            float gearbox:sensor:rate_hz = -1"#,
+        );
+        let tree = discover(&machine_with(&bad, WHEEL_JOINT));
+        assert!(
+            tree.errors.iter().any(|e| e.contains("rate_hz")),
+            "{:?}",
+            tree.errors
+        );
+        assert!(
+            tree.errors.iter().any(|e| e.contains("vfov_deg")),
+            "{:?}",
+            tree.errors
+        );
+
+        let unknown = CHASSIS_AND_WHEEL.replace(
+            r#"token gearbox:link:role = "sensor""#,
+            r#"token gearbox:link:role = "sensor"
+            token gearbox:sensor:kind = "sextant""#,
+        );
+        let tree = discover(&machine_with(&unknown, WHEEL_JOINT));
+        assert!(
+            tree.errors.iter().any(|e| e.contains("sextant")),
+            "{:?}",
+            tree.errors
+        );
+    }
+
+    #[test]
+    fn generic_sensor_links_parse_their_attributes() {
+        let with = |attributes: &str| {
+            let usda = CHASSIS_AND_WHEEL.replace(
+                r#"token gearbox:link:role = "sensor""#,
+                &format!("token gearbox:link:role = \"sensor\"\n            {attributes}"),
+            );
+            let tree = discover(&machine_with(&usda, WHEEL_JOINT));
+            assert!(tree.is_valid(), "{attributes}: {:?}", tree.errors);
+            tree.get("imu").unwrap().sensor.unwrap()
+        };
+        let sonar = with(
+            r#"token gearbox:sensor:kind = "distance"
+            token gearbox:sensor:type = "sonar"
+            float gearbox:sensor:rays = 5
+            float gearbox:sensor:aperture_deg = 30
+            float gearbox:sensor:range_m = 4"#,
+        );
+        assert_eq!((sonar.kind, sonar.variant, sonar.rays, sonar.range_m), (SensorKind::Distance, SensorVariant::Sonar, 5, 4.0));
+        assert!((sonar.aperture - 30f32.to_radians()).abs() < 1e-6);
+        let radar = with(
+            r#"token gearbox:sensor:kind = "radar"
+            float gearbox:sensor:hfov_deg = 60
+            float gearbox:sensor:vfov_deg = 12
+            float gearbox:sensor:min_range_m = 2"#,
+        );
+        assert_eq!((radar.kind, radar.min_range_m, radar.range_m), (SensorKind::Radar, 2.0, 50.0));
+        assert!((radar.hfov - 60f32.to_radians()).abs() < 1e-6);
+        let receiver = with(
+            r#"token gearbox:sensor:kind = "receiver"
+            token gearbox:sensor:type = "infrared"
+            float gearbox:sensor:channel = -1"#,
+        );
+        assert_eq!((receiver.variant, receiver.channel), (SensorVariant::Infrared, -1));
+        assert!(receiver.range_m.is_infinite());
+        let touch = with(
+            r#"token gearbox:sensor:kind = "touch"
+            token gearbox:sensor:type = "force3d""#,
+        );
+        assert_eq!((touch.variant, touch.rate_hz), (SensorVariant::Force3d, 100.0));
+        let recognition = with(
+            r#"token gearbox:sensor:kind = "camera"
+            bool gearbox:sensor:recognition = true"#,
+        );
+        assert!(recognition.recognition);
+        let finder = with(r#"token gearbox:sensor:kind = "range_finder""#);
+        assert_eq!((finder.kind, finder.color, finder.depth), (SensorKind::Camera, false, true));
+    }
+
+    #[test]
     fn strict_tree_with_sensor_offset() {
         let tree = discover(&machine_with(CHASSIS_AND_WHEEL, WHEEL_JOINT));
         assert!(tree.is_valid(), "{:?}", tree.errors);
@@ -959,6 +1356,38 @@ def Xform "robot" (
                 .any(|e| e.contains("/robot/hitch") && e.contains("not connected"))
         );
         assert!(tree.errors.iter().any(|e| e.contains("rope")));
+    }
+
+    #[test]
+    fn a_three_point_hitch_names_its_variant_by_reach_and_its_top_link() {
+        let links = format!(
+            r#"{CHASSIS_AND_WHEEL}
+    def Xform "rear_three_point" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"])
+    {{
+        token gearbox:link:role = "tool"
+        token gearbox:coupling:side = "hitch"
+        token gearbox:coupling:type = "three_point_mounted"
+        token gearbox:coupling:variantSet = "hitchRear"
+        token gearbox:coupling:variantNear = "linked"
+        token gearbox:coupling:variantFar = "bare"
+        rel gearbox:coupling:topLink = </robot/chassis/top_link_end>
+    }}
+    def Xform "half" (prepend apiSchemas = ["GearboxLinkAPI", "GearboxCouplingAPI"])
+    {{
+        token gearbox:coupling:side = "hitch"
+        token gearbox:coupling:type = "drawbar"
+        token gearbox:coupling:variantSet = "hitchRear"
+    }}
+"#
+        );
+        let tree = discover(&machine_with(&links, WHEEL_JOINT));
+        let (_, hitch) = tree.couplings().find(|(_, c)| c.name == "rear_three_point").unwrap();
+        assert_eq!(
+            hitch.variant,
+            Some(CouplingVariant { set: "hitchRear".into(), near: "linked".into(), far: "bare".into() })
+        );
+        assert_eq!(hitch.top_link.as_deref(), Some("/robot/chassis/top_link_end"));
+        assert!(tree.errors.iter().any(|e| e.contains("/robot/half") && e.contains("variantNear")));
     }
 
     #[test]
@@ -1187,6 +1616,277 @@ fn read_element(
         number,
         designator,
     })
+}
+
+/// The `gearbox:sensor:*` attributes of a sensor link. An unrecognised kind
+/// is an error; a link whose name implies no kind is a warning and is not
+/// simulated. Out-of-range values are errors rather than clamped.
+fn read_sensor(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    name: &str,
+    warnings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+) -> Option<SensorSpec> {
+    let kind = match read_token(stage, prim, "gearbox:sensor:kind") {
+        Some(token) => match SensorKind::parse(&token) {
+            Some(kind) => kind,
+            None => {
+                errors.push(format!(
+                    "{prim}: unknown gearbox:sensor:kind `{token}` (imu, lidar)"
+                ));
+                return None;
+            }
+        },
+        None => match SensorKind::from_link_name(name) {
+            Some(kind) => kind,
+            None => {
+                warnings.push(format!(
+                    "{prim}: sensor link `{name}` names no supported sensor; author gearbox:sensor:kind (imu, lidar) to simulate it"
+                ));
+                return None;
+            }
+        },
+    };
+    let range_finder = read_token(stage, prim, "gearbox:sensor:kind")
+        .map_or(name.starts_with("range_finder"), |token| token == "range_finder");
+    let radio = matches!(kind, SensorKind::Receiver | SensorKind::Emitter);
+    let mut spec = SensorSpec {
+        kind,
+        rate_hz: match kind {
+            SensorKind::Imu
+            | SensorKind::Accelerometer
+            | SensorKind::Gyro
+            | SensorKind::InertialUnit
+            | SensorKind::Position
+            | SensorKind::Touch => 100.0,
+            SensorKind::Lidar | SensorKind::Gps | SensorKind::Light => 10.0,
+            SensorKind::Camera => 5.0,
+            SensorKind::Compass | SensorKind::Distance | SensorKind::Radar => 20.0,
+            SensorKind::Receiver | SensorKind::Emitter => 50.0,
+            SensorKind::Climate => 1.0,
+        },
+        columns: 360,
+        rows: 16,
+        hfov: match kind {
+            SensorKind::Radar => 45f32.to_radians(),
+            _ => std::f32::consts::TAU,
+        },
+        vfov: match kind {
+            SensorKind::Camera => 60f32.to_radians(),
+            SensorKind::Radar => 10f32.to_radians(),
+            _ => 30f32.to_radians(),
+        },
+        range_m: match kind {
+            SensorKind::Distance => 10.0,
+            SensorKind::Radar => 50.0,
+            _ if radio => f32::INFINITY,
+            _ => 100.0,
+        },
+        width: 128,
+        height: 96,
+        render: if range_finder {
+            CameraRender::Geometry
+        } else {
+            CameraRender::Optimized
+        },
+        color: !range_finder,
+        depth: true,
+        recognition: false,
+        variant: match kind {
+            SensorKind::Distance => SensorVariant::Laser,
+            SensorKind::Touch => SensorVariant::Bumper,
+            _ if radio => SensorVariant::Radio,
+            _ => SensorVariant::Default,
+        },
+        rays: 1,
+        aperture: if radio { 90f32.to_radians() } else { 0.0 },
+        min_range_m: 1.0,
+        channel: 0,
+    };
+    fn bad(errors: &mut Vec<String>, prim: &SdfPath, what: &str, value: f32) {
+        errors.push(format!(
+            "{prim}: gearbox:sensor:{what} = {value} is out of range"
+        ));
+    }
+    if let Some(rate) = read_float(stage, prim, "gearbox:sensor:rate_hz") {
+        if rate.is_finite() && rate > 0.0 && rate <= 10_000.0 {
+            spec.rate_hz = rate;
+        } else {
+            bad(errors, prim, "rate_hz", rate);
+        }
+    }
+    if kind == SensorKind::Lidar {
+        if let Some(columns) = read_float(stage, prim, "gearbox:sensor:columns") {
+            if columns >= 1.0 && columns <= 8192.0 && columns.fract() == 0.0 {
+                spec.columns = columns as u32;
+            } else {
+                bad(errors, prim, "columns", columns);
+            }
+        }
+        if let Some(rows) = read_float(stage, prim, "gearbox:sensor:rows") {
+            if rows >= 1.0 && rows <= 512.0 && rows.fract() == 0.0 {
+                spec.rows = rows as u32;
+            } else {
+                bad(errors, prim, "rows", rows);
+            }
+        }
+        if let Some(hfov) = read_float(stage, prim, "gearbox:sensor:hfov_deg") {
+            if hfov > 0.0 && hfov <= 360.0 {
+                spec.hfov = hfov.to_radians();
+            } else {
+                bad(errors, prim, "hfov_deg", hfov);
+            }
+        }
+        if let Some(vfov) = read_float(stage, prim, "gearbox:sensor:vfov_deg") {
+            if vfov >= 0.0 && vfov < 180.0 && (vfov > 0.0 || spec.rows == 1) {
+                spec.vfov = vfov.to_radians();
+            } else {
+                bad(errors, prim, "vfov_deg", vfov);
+            }
+        }
+        if let Some(range) = read_float(stage, prim, "gearbox:sensor:range_m") {
+            if range.is_finite() && range > 0.0 {
+                spec.range_m = range;
+            } else {
+                bad(errors, prim, "range_m", range);
+            }
+        }
+        if spec.rows > 1 && spec.vfov <= 0.0 {
+            bad(errors, prim, "vfov_deg", 0.0);
+        }
+        if spec.columns.saturating_mul(spec.rows) > MAX_LIDAR_PULSES {
+            errors.push(format!(
+                "{prim}: gearbox:sensor columns × rows exceeds {MAX_LIDAR_PULSES} pulses"
+            ));
+        }
+    }
+    if kind == SensorKind::Camera {
+        for (what, field) in [("width", &mut spec.width), ("height", &mut spec.height)] {
+            if let Some(value) = read_float(stage, prim, &format!("gearbox:sensor:{what}")) {
+                if (1.0..=MAX_CAMERA_SIDE as f32).contains(&value) && value.fract() == 0.0 {
+                    *field = value as u32;
+                } else {
+                    bad(errors, prim, what, value);
+                }
+            }
+        }
+        if let Some(vfov) = read_float(stage, prim, "gearbox:sensor:vfov_deg") {
+            if vfov > 0.0 && vfov < 180.0 {
+                spec.vfov = vfov.to_radians();
+            } else {
+                bad(errors, prim, "vfov_deg", vfov);
+            }
+        }
+        if let Some(range) = read_float(stage, prim, "gearbox:sensor:range_m") {
+            if range.is_finite() && range > 0.0 {
+                spec.range_m = range;
+            } else {
+                bad(errors, prim, "range_m", range);
+            }
+        }
+        if let Some(token) = read_token(stage, prim, "gearbox:sensor:render") {
+            match CameraRender::parse(&token) {
+                Some(render) => spec.render = render,
+                None => errors.push(format!(
+                    "{prim}: gearbox:sensor:render = `{token}` is not geometry, optimized or full"
+                )),
+            }
+        }
+        if let Some(token) = read_token(stage, prim, "gearbox:sensor:channels") {
+            match token.as_str() {
+                "color" | "colour" => (spec.color, spec.depth) = (true, false),
+                "depth" => (spec.color, spec.depth) = (false, true),
+                "color_depth" | "colour_depth" => (spec.color, spec.depth) = (true, true),
+                _ => errors.push(format!(
+                    "{prim}: gearbox:sensor:channels = `{token}` is not color, depth or color_depth"
+                )),
+            }
+        }
+        if let Some(recognition) = read_bool(stage, prim, "gearbox:sensor:recognition") {
+            spec.recognition = recognition;
+        }
+    }
+    read_generic_sensor(stage, prim, &mut spec, errors);
+    Some(spec)
+}
+
+/// Attributes of the generic sensor kinds: sub-type, rays and aperture,
+/// ranges, radar field of view and radio channel.
+fn read_generic_sensor(
+    stage: &openusd::usd::Stage,
+    prim: &SdfPath,
+    spec: &mut SensorSpec,
+    errors: &mut Vec<String>,
+) {
+    let kind = spec.kind;
+    let bad = |errors: &mut Vec<String>, what: &str, value: f32| {
+        errors.push(format!("{prim}: gearbox:sensor:{what} = {value} is out of range"));
+    };
+    if let Some(token) = read_token(stage, prim, "gearbox:sensor:type") {
+        match SensorVariant::parse(kind, &token) {
+            Some(variant) => spec.variant = variant,
+            None => errors.push(format!(
+                "{prim}: gearbox:sensor:type = `{token}` does not apply to a {} link",
+                kind.as_str()
+            )),
+        }
+    }
+    let radio = matches!(kind, SensorKind::Receiver | SensorKind::Emitter);
+    if matches!(kind, SensorKind::Distance | SensorKind::Radar) || radio {
+        if let Some(range) = read_float(stage, prim, "gearbox:sensor:range_m") {
+            if range > 0.0 && (range.is_finite() || radio) {
+                spec.range_m = range;
+            } else if radio && range < 0.0 {
+                spec.range_m = f32::INFINITY;
+            } else {
+                bad(errors, "range_m", range);
+            }
+        }
+    }
+    if kind == SensorKind::Distance
+        && let Some(rays) = read_float(stage, prim, "gearbox:sensor:rays")
+    {
+        if (1.0..=64.0).contains(&rays) && rays.fract() == 0.0 {
+            spec.rays = rays as u32;
+        } else {
+            bad(errors, "rays", rays);
+        }
+    }
+    if (kind == SensorKind::Distance || radio)
+        && let Some(aperture) = read_float(stage, prim, "gearbox:sensor:aperture_deg")
+    {
+        if (0.0..=360.0).contains(&aperture) {
+            spec.aperture = aperture.to_radians();
+        } else {
+            bad(errors, "aperture_deg", aperture);
+        }
+    }
+    if kind == SensorKind::Radar {
+        for (what, field) in [("hfov_deg", &mut spec.hfov), ("vfov_deg", &mut spec.vfov)] {
+            if let Some(value) = read_float(stage, prim, &format!("gearbox:sensor:{what}")) {
+                if value > 0.0 && value <= 360.0 {
+                    *field = value.to_radians();
+                } else {
+                    bad(errors, what, value);
+                }
+            }
+        }
+        if let Some(min) = read_float(stage, prim, "gearbox:sensor:min_range_m") {
+            if min >= 0.0 && min < spec.range_m {
+                spec.min_range_m = min;
+            } else {
+                bad(errors, "min_range_m", min);
+            }
+        }
+    }
+    if radio && let Some(channel) = read_float(stage, prim, "gearbox:sensor:channel") {
+        if channel >= -1.0 && channel.fract() == 0.0 && channel <= i32::MAX as f32 {
+            spec.channel = channel as i32;
+        } else {
+            bad(errors, "channel", channel);
+        }
+    }
 }
 
 /// Every `gearbox:value:*` attribute on a prim, sorted by name.

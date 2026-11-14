@@ -10,11 +10,12 @@ use bevy::prelude::*;
 use mara::ui::modules::bevy::BevyViewportInput;
 
 use crate::{
-    attach, controller, environment, load, physics, physics_debug, services, terrain, viewer,
-    world,
+    attach, controller, environment, load, physics, physics_debug, sensors, services, terrain,
+    viewer, world,
 };
 
 /// USD files are addressed by absolute path, so the asset root is `/`.
+/// Ctrl-C, SIGTERM and SIGHUP end the app with an AppExit, a second one at once.
 pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
     // big_space propagates transforms in the stock plugin's place.
     group
@@ -24,6 +25,7 @@ pub fn configure_plugins(group: PluginGroupBuilder) -> PluginGroupBuilder {
             ..default()
         })
         .disable::<TransformPlugin>()
+        .enable::<bevy::app::TerminalCtrlCHandlerPlugin>()
 }
 
 pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bool) {
@@ -34,6 +36,11 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         app.init_resource::<bevy::pbr::wireframe::WireframeConfig>();
         warn!("wireframe unavailable: shared GPU device lacks line mode or 16-byte immediates");
     }
+    // Per-pass CPU and GPU render times in the same log, for profiling
+    // (GPU times need MARA_GPU_TIMESTAMPS=1 as well).
+    if std::env::var_os("GEARBOX_RENDER_DIAGNOSTICS").is_some() {
+        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+    }
     app.init_resource::<BevyViewportInput>()
         // Frame time and fps land in the log every ten seconds.
         .add_plugins((
@@ -43,7 +50,7 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
                 ..default()
             },
         ))
-        // USD pipeline (live stage projection) + gearbox's rapier world.
+        // USD pipeline (live stage projection) + gearbox's Molla world.
         .add_plugins(usd_bevy::UsdPlugin)
         .add_plugins(usd_bevy::asset::UsdAssetPlugin)
         // Accumulates open / override / validation / projection time per
@@ -51,6 +58,8 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .init_resource::<usd_bevy::asset::UsdSceneTimings>()
         .insert_resource(projection_budget_from_env())
         .add_plugins(physics::PhysicsPlugin)
+        .add_plugins(physics::PhysicsThreadPlugin)
+        .add_plugins(physics::fem::surface::FemSurfacePlugin)
         .insert_resource(gearbox_api::PhysicsActive(false))
         // Tool API: one host agent per process, one agent per machine.
         .add_plugins(gearbox_api::GearboxBusPlugin {
@@ -59,14 +68,21 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .insert_resource(gearbox_api::UsdAssetRoot(load::default_asset_root()))
         .add_plugins(gearbox_api::UsdLoaderPlugin)
         .add_plugins(gearbox_api::UsdMarkerPlugin)
+        .add_plugins(gearbox_api::DrawServicePlugin)
+        .add_plugins(crate::draw::DrawPlugin)
         // Simulator surface: planet world, machines, links, services.
         .add_plugins(crate::globe::GlobePlugin)
+        .add_plugins(gearbox_planet::PlanetPlugin)
         .add_plugins(world::WorldPlugin)
+        .insert_resource(environment::planetary_weather())
+        .insert_resource(environment::world_clock())
+        .init_resource::<environment::WorldStep>()
         .add_plugins(environment::WeatherPlugin)
-        .add_plugins(crate::biomes::WorldBiomesPlugin)
         .init_resource::<environment::ViewerLens>()
-        .add_plugins(gearbox_fields::FieldsPlugin::default())
+        .add_plugins(environment::planetary_fields())
         .add_plugins(terrain::TerrainPlugin)
+        .add_plugins(crate::planet_rocks::PlanetRocksPlugin)
+        .add_plugins(crate::greenhouse::GreenhousePlugin)
         .configure_sets(
             Update,
             gearbox_fields::CoverUpdates.after(terrain::TerrainUpdates),
@@ -78,12 +94,22 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
                 environment::sync_cover_wind,
                 environment::sync_lens,
                 environment::sync_camera_lens,
+                (environment::apply_weather_requests, environment::report_weather, environment::sync_martian_dust)
+                    .chain()
+                    .before(environment::DaylightUpdate),
+                (environment::advance_world_clock, environment::advance_sun)
+                    .chain()
+                    .in_set(environment::WorldTime)
+                    .after(physics::step_physics)
+                    .before(environment::DaylightUpdate),
             ),
         )
         .add_systems(Startup, (log_render_adapter, use_cpu_light_clustering))
         .add_plugins(controller::ControllerDiscoveryPlugin)
         .add_plugins(attach::AttachPlugin)
         .add_plugins(services::ServicesPlugin)
+        .add_plugins(sensors::SensorsPlugin)
+        .add_plugins(crate::devices::DevicesPlugin)
         .add_plugins(physics_debug::PhysicsDebugPlugin)
         .add_plugins(load::LoadPlugin { cli_paths })
         // Viewer state the mara panes read and drive.
@@ -95,6 +121,9 @@ pub fn configure(app: &mut App, cli_paths: Vec<PathBuf>, wireframe_supported: bo
         .add_plugins(viewer::recorder::RecorderPlugin)
         .add_plugins(viewer::overlays::OverlaysPlugin)
         .add_plugins(viewer::physics_overlay::PhysicsOverlayPlugin);
+    if gearbox_globe::Body::active() == gearbox_globe::Body::Earth {
+        app.add_plugins(crate::biomes::WorldBiomesPlugin);
+    }
 }
 
 /// How much of a frame the loader may spend projecting prims:

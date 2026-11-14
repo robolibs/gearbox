@@ -16,6 +16,13 @@ pub(crate) fn cloud_image(size: Extent3d, dimension: TextureDimension) -> Image 
     filled_image(size, dimension, &[0, 0, 0, 0, 0, 0, 0, 0x3c])
 }
 
+// The shadow map is the sun's light texture, and it is tiled — but setting an
+// address mode on it would do nothing. Bevy reads a light texture through one
+// shared sampler and wraps the coordinate itself, `decal_uv - floor(decal_uv)`
+// in `pbr_lighting.wesl`, so this image's own sampler is never consulted for
+// it. Whatever hides the repeat has to be in what the map contains, which is
+// the rim fade in `ground_shadow`.
+
 // `texel` is one RGBA pixel of half floats; 0x3c00 is 1.0.
 fn filled_image(size: Extent3d, dimension: TextureDimension, texel: &[u8; 8]) -> Image {
     let mut image = Image::new_fill(

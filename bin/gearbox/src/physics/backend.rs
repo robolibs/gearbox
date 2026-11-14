@@ -1,10 +1,9 @@
 //! The physics engine, as gearbox sees it.
 //!
-//! Everything outside `physics::rapier` talks to the simulation through
+//! Everything outside `physics::molla` talks to Molla through
 //! [`PhysicsBackend`] and the small accessor traits [`Body`], [`Collider`]
-//! and [`Joint`]. Values are SI, f64, glam; handles are opaque ids the
-//! backend hands out. A second engine is one more `impl PhysicsBackend`
-//! handed to `PhysicsWorld::with_backend`.
+//! and [`Joint`]. Values are SI, f64, glam; handles are opaque ids Molla
+//! hands out.
 
 use bevy::prelude::Entity;
 pub use glam::{DMat3, DQuat, DVec3};
@@ -290,6 +289,8 @@ pub struct ColliderDesc {
     pub density: Option<f64>,
     pub groups: Option<CollisionGroups>,
     pub entity: Option<Entity>,
+    /// Whether it collides at all; a disabled collider adds no mass either.
+    pub enabled: bool,
 }
 
 impl ColliderDesc {
@@ -304,6 +305,7 @@ impl ColliderDesc {
             density: None,
             groups: None,
             entity: None,
+            enabled: true,
         }
     }
 
@@ -457,7 +459,13 @@ pub enum JointKind {
         axis: DVec3,
     },
     Fixed,
-    Spherical,
+    /// Free rotation; a cone limit opens around `axis` of the first frame.
+    Spherical {
+        axis: DVec3,
+    },
+    /// Keeps the two anchors within `distance_limits`; outside the
+    /// reduced-coordinate tree.
+    Distance,
     /// Exactly the `locked` axes are held; the joint's X is frame X.
     Generic {
         locked: JointAxes,
@@ -477,11 +485,15 @@ pub struct JointDesc {
     pub softness: Option<(f64, f64)>,
     /// Whether the two jointed bodies still collide with each other.
     pub contacts_enabled: bool,
-    /// Ask for a reduced-coordinate joint; the backend falls back to a
-    /// constraint joint where it cannot (loop closures, no such solver).
-    pub reduced: bool,
     /// Close an articulation loop without adding a reduced-coordinate edge.
     pub loop_closure: bool,
+    /// Spherical swing half-angles (rad) toward the next two axes after
+    /// the cone axis; `None` swings freely.
+    pub cone_limits: [Option<f64>; 2],
+    /// Distance joint bounds between the anchors (m).
+    pub distance_limits: [Option<f64>; 2],
+    /// Force (N) and torque (N·m) that break the joint.
+    pub break_limits: [Option<f64>; 2],
 }
 
 impl JointDesc {
@@ -494,8 +506,10 @@ impl JointDesc {
             motors: Vec::new(),
             softness: None,
             contacts_enabled: false,
-            reduced: false,
             loop_closure: false,
+            cone_limits: [None; 2],
+            distance_limits: [None; 2],
+            break_limits: [None; 2],
         }
     }
 }
@@ -674,7 +688,14 @@ pub trait JointMut: Joint {
         damping: f64,
     );
     fn set_motor_max_force(&mut self, axis: JointAxis, max_force: f64);
+    /// A generalized force on the axis's coordinate, clamped to `max_force`;
+    /// no target position or velocity.
+    fn set_motor_effort(&mut self, axis: JointAxis, effort: f64, max_force: f64);
+    /// The motor off: no actuator effort on the axis.
+    fn clear_motor(&mut self, axis: JointAxis);
     fn set_softness(&mut self, natural_frequency: f64, damping_ratio: f64);
+    /// Drops the joint's compliance: its locked axes hold exactly.
+    fn set_rigid(&mut self);
     fn set_contacts_enabled(&mut self, enabled: bool);
 }
 
@@ -688,6 +709,275 @@ pub struct SolverSettings {
 
 /// Decides which body pairs the step must not let touch.
 pub type PairExcluded<'a> = &'a (dyn Fn(BodyId, BodyId) -> bool + Send + Sync);
+
+#[derive(Clone, Debug)]
+pub struct TrackForceDesc {
+    pub carrier: BodyId,
+    pub sprocket: BodyId,
+    pub joint: JointId,
+    pub contact_colliders: Vec<ColliderId>,
+    pub local_axle: DVec3,
+    pub local_forward: DVec3,
+    pub pitch_radius: f64,
+    pub longitudinal_friction: f64,
+    pub lateral_friction: f64,
+    pub slip_damping: f64,
+    pub max_torque: f64,
+    pub max_power: f64,
+    pub speed_gain: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TrackForceOutput {
+    pub angular_velocity: f64,
+    pub travel: f64,
+    pub motor_torque: f64,
+    pub longitudinal_force: f64,
+    pub normal_load: f64,
+    pub contacts: usize,
+}
+
+// ── Actuator devices ────────────────────────────────────────────────────
+
+/// A propeller, belt or connector the backend steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeviceId(pub u64);
+
+/// What a motor or belt is told to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DeviceCommand {
+    /// Reach a position (rad or m).
+    Position(f64),
+    /// Run at a velocity (rad/s or m/s).
+    Velocity(f64),
+    /// Apply a force or torque (N or N·m).
+    Force(f64),
+}
+
+/// Speed limit, acceleration, PID gains on the position error and soft
+/// position limits of a motor controller.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeviceLimits {
+    pub max_velocity: f64,
+    pub acceleration: Option<f64>,
+    pub pid: [f64; 3],
+    pub position_limits: Option<[f64; 2]>,
+}
+
+impl Default for DeviceLimits {
+    fn default() -> Self {
+        Self {
+            max_velocity: 10.0,
+            acceleration: None,
+            pid: [10.0, 0.0, 0.0],
+            position_limits: None,
+        }
+    }
+}
+
+/// A motor or belt setting besides its command.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DeviceSetting {
+    /// Speed position control runs at.
+    Speed(f64),
+    Acceleration(Option<f64>),
+    Pid([f64; 3]),
+    /// Force or torque available to a motor.
+    MaxForce(f64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotorOutput {
+    pub position: f64,
+    pub velocity: f64,
+    pub command: DeviceCommand,
+    pub commanded_velocity: f64,
+    /// Force or torque the motor applied over the last step.
+    pub force: f64,
+    pub brake_damping: f64,
+    pub brake_force: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PropellerDesc {
+    pub body: BodyId,
+    /// Shaft frame in the body frame: +X the shaft, origin the centre of thrust.
+    pub frame: Pose,
+    /// `[t1, t2]` of `T = t1·|ω|·ω − t2·|ω|·V`.
+    pub thrust: [f64; 2],
+    /// `[q1, q2]` of `Q = q1·|ω|·ω − q2·|ω|·V`; the body takes `−Q`.
+    pub torque: [f64; 2],
+    pub limits: DeviceLimits,
+    pub max_torque: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PropellerOutput {
+    pub omega: f64,
+    pub thrust: f64,
+    pub torque: f64,
+    pub advance: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BeltDesc {
+    /// Colliders forming the running surface.
+    pub colliders: Vec<ColliderId>,
+    /// Running direction in each collider's frame.
+    pub direction: DVec3,
+    pub limits: DeviceLimits,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BeltOutput {
+    pub position: f64,
+    pub velocity: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ConnectorKind {
+    #[default]
+    Symmetric,
+    Active,
+    Passive,
+}
+
+/// A docking face (Webots `Connector`); `body` `None` fixes it to the world.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectorDesc {
+    pub body: Option<BodyId>,
+    /// Docking frame in the body frame (world for none); +X out of the face.
+    pub frame: Pose,
+    pub model: String,
+    pub kind: ConnectorKind,
+    pub auto_lock: bool,
+    pub unilateral_lock: bool,
+    pub unilateral_unlock: bool,
+    pub distance_tolerance: f64,
+    pub axis_tolerance: f64,
+    pub rotation_tolerance: f64,
+    pub rotations: u32,
+    pub snap: bool,
+    pub tensile_strength: Option<f64>,
+    pub shear_strength: Option<f64>,
+    /// Natural frequency (Hz) of the link.
+    pub stiffness: f64,
+}
+
+impl Default for ConnectorDesc {
+    fn default() -> Self {
+        Self {
+            body: None,
+            frame: Pose::IDENTITY,
+            model: String::new(),
+            kind: ConnectorKind::Symmetric,
+            auto_lock: false,
+            unilateral_lock: true,
+            unilateral_unlock: true,
+            distance_tolerance: 0.01,
+            axis_tolerance: 0.2,
+            rotation_tolerance: 0.2,
+            rotations: 4,
+            snap: true,
+            tensile_strength: None,
+            shear_strength: None,
+            stiffness: 30.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ConnectorOutput {
+    pub presence: Option<DeviceId>,
+    pub locked: bool,
+    pub linked: Option<DeviceId>,
+    pub tensile: f64,
+    pub shear: f64,
+}
+
+/// What a copter (multirotor) controller holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CopterCommand {
+    /// Rotors stopped.
+    Off,
+    /// Heading-frame velocity (forward, left, up; m/s) and yaw rate (rad/s).
+    Velocity { forward: f64, left: f64, up: f64, yaw_rate: f64 },
+    /// Roll (right side down), pitch (nose down), yaw rate and climb rate.
+    Attitude { roll: f64, pitch: f64, yaw_rate: f64, climb: f64 },
+}
+
+/// Limits and loop gains of a copter controller.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CopterLimits {
+    pub max_tilt: f64,
+    pub max_speed: f64,
+    pub max_climb: f64,
+    pub max_yaw_rate: f64,
+    pub velocity_gain: f64,
+    /// Time constant (s) of the wind and payload disturbance observer.
+    pub disturbance_time: f64,
+    pub attitude_frequency: f64,
+    pub yaw_gain: f64,
+}
+
+impl Default for CopterLimits {
+    fn default() -> Self {
+        Self {
+            max_tilt: 0.5,
+            max_speed: 10.0,
+            max_climb: 3.0,
+            max_yaw_rate: 1.5,
+            velocity_gain: 1.5,
+            disturbance_time: 0.5,
+            attitude_frequency: 6.0,
+            yaw_gain: 4.0,
+        }
+    }
+}
+
+/// A copter controller flying `body` on `propellers`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CopterDesc {
+    pub body: BodyId,
+    /// Flight frame in the body frame: +X forward, +Y left, +Z up.
+    pub frame: Pose,
+    pub propellers: Vec<DeviceId>,
+    pub limits: CopterLimits,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CopterOutput {
+    pub command: CopterCommand,
+    pub roll: f64,
+    pub pitch: f64,
+    /// Heading-frame velocity: forward, left, up.
+    pub velocity: [f64; 3],
+    pub yaw_rate: f64,
+    pub thrust: f64,
+    pub saturated: bool,
+}
+
+/// Aerodynamic drag on a body: `CdA` along each axis of a frame whose origin
+/// is the centre of pressure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DragDesc {
+    pub body: BodyId,
+    pub frame: Pose,
+    /// Drag coefficient times area along the frame's X, Y and Z (m²).
+    pub area: DVec3,
+    /// Air density (kg/m³).
+    pub density: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DragOutput {
+    /// Airspeed of the centre of pressure in the drag frame (m/s).
+    pub airspeed: DVec3,
+    /// Drag force in world axes (N), averaged over the last step.
+    pub force: DVec3,
+    /// Wind at the body (m/s, world).
+    pub wind: DVec3,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct WheelForceDesc {
@@ -730,7 +1020,7 @@ impl PressureTyreDesc {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PressureTyreOutput {
     pub hub: DVec3,
     pub forward: DVec3,
@@ -750,7 +1040,7 @@ pub struct PressureTyreOutput {
     pub rolling_moment: DVec3,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TyreGroundPlane {
     pub point: DVec3,
     pub normal: DVec3,
@@ -766,7 +1056,7 @@ pub struct TerrainFrictionGrid {
 }
 
 /// Last-step mean tyre loads and normal-impulse-weighted contact/slip readout.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WheelForceOutput {
     pub in_contact: bool,
     /// A sleeping tyre's retained reaction, not a newly applied wrench.
@@ -784,33 +1074,67 @@ pub struct WheelForceOutput {
     pub pressure: Option<PressureTyreOutput>,
 }
 
-/// A rigid-body engine gearbox can run on.
+/// Molla, as gearbox drives it.
 pub trait PhysicsBackend: Send + Sync {
     /// Short name, for logs.
     fn name(&self) -> &'static str;
 
-    fn uses_wheel_forces(&self) -> bool {
-        false
-    }
-    fn configure_wheel(&mut self, _desc: WheelForceDesc) -> Result<(), String> {
-        Err("wheel force elements are not supported".into())
-    }
+    /// Runs `f` on the Molla runtime scene, holding its lock only for the
+    /// call.
+    fn with_molla_scene(&self, f: &mut dyn FnMut(&molla_sim::runtime::RigidScene));
+    /// Molla handle of a body, for lookups inside `with_molla_scene`.
+    fn molla_body_handle(&self, body: BodyId) -> Option<molla_sim::runtime::BodyHandle>;
+
+    fn configure_track(&mut self, desc: TrackForceDesc) -> Result<(), String>;
+    fn set_track_speed(&mut self, sprocket: BodyId, speed: f64) -> Result<(), String>;
+    fn track_output(&self, sprocket: BodyId) -> Option<TrackForceOutput>;
+    fn remove_track(&mut self, sprocket: BodyId);
+
+    /// A motor on a revolute or prismatic joint, holding its position.
+    fn insert_motor(&mut self, joint: JointId, limits: DeviceLimits, max_force: f64) -> Result<(), String>;
+    fn remove_motor(&mut self, joint: JointId);
+    /// Whether a motor device drives `joint`.
+    fn has_motor(&self, joint: JointId) -> bool;
+    fn command_motor(&mut self, joint: JointId, command: DeviceCommand) -> Result<(), String>;
+    fn configure_motor(&mut self, joint: JointId, setting: DeviceSetting) -> Result<(), String>;
+    /// Brake damping on a revolute or prismatic joint; zero releases it.
+    fn set_joint_brake(&mut self, joint: JointId, damping: f64) -> Result<(), String>;
+    /// The motor or brake of `joint` over the last step.
+    fn motor_output(&self, joint: JointId) -> Option<MotorOutput>;
+    fn insert_propeller(&mut self, desc: PropellerDesc) -> Result<DeviceId, String>;
+    fn set_propeller_speed(&mut self, id: DeviceId, omega: f64) -> Result<(), String>;
+    fn propeller_output(&self, id: DeviceId) -> Option<PropellerOutput>;
+    fn insert_belt(&mut self, desc: BeltDesc) -> Result<DeviceId, String>;
+    fn command_belt(&mut self, id: DeviceId, command: DeviceCommand) -> Result<(), String>;
+    fn configure_belt(&mut self, id: DeviceId, setting: DeviceSetting) -> Result<(), String>;
+    fn belt_output(&self, id: DeviceId) -> Option<BeltOutput>;
+    fn insert_connector(&mut self, desc: ConnectorDesc) -> Result<DeviceId, String>;
+    /// Latches or unlatches a connector.
+    fn lock_connector(&mut self, id: DeviceId, lock: bool) -> Result<(), String>;
+    fn connector_output(&self, id: DeviceId) -> Option<ConnectorOutput>;
+    /// A copter (multirotor) controller over propellers already inserted.
+    fn insert_copter(&mut self, desc: CopterDesc) -> Result<DeviceId, String>;
+    fn command_copter(&mut self, id: DeviceId, command: CopterCommand) -> Result<(), String>;
+    fn copter_output(&self, id: DeviceId) -> Option<CopterOutput>;
+    /// Aerodynamic drag on a body.
+    fn insert_drag(&mut self, desc: DragDesc) -> Result<DeviceId, String>;
+    fn drag_output(&self, id: DeviceId) -> Option<DragOutput>;
+    /// The wind everywhere (m/s, world).
+    fn set_wind(&mut self, wind: DVec3);
+    /// The wind one body flies in; `None` returns it to the world's.
+    fn set_body_wind(&mut self, body: BodyId, wind: Option<DVec3>);
+    /// Removes a propeller, belt, connector, copter or drag element.
+    fn remove_device(&mut self, id: DeviceId);
+
+    fn configure_wheel(&mut self, desc: WheelForceDesc) -> Result<(), String>;
     fn register_wheel_ground(
         &mut self,
-        _collider: ColliderId,
-        _friction: Option<TerrainFrictionGrid>,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-    fn wheel_output(&self, _body: BodyId) -> Option<WheelForceOutput> {
-        None
-    }
-    fn set_wheel_pressures(&mut self, _targets: &[(BodyId, f64)]) -> Result<(), String> {
-        Err("pressure-dependent tyres are not supported".into())
-    }
-    fn wheel_drive_sign(&self, _joint: JointId) -> f64 {
-        1.0
-    }
+        collider: ColliderId,
+        friction: Option<TerrainFrictionGrid>,
+    ) -> Result<(), String>;
+    fn wheel_output(&self, body: BodyId) -> Option<WheelForceOutput>;
+    fn set_wheel_pressures(&mut self, targets: &[(BodyId, f64)]) -> Result<(), String>;
+    fn wheel_drive_sign(&self, joint: JointId) -> f64;
 
     fn gravity(&self) -> DVec3;
     fn set_gravity(&mut self, gravity: DVec3);
@@ -820,9 +1144,7 @@ pub trait PhysicsBackend: Send + Sync {
     fn step(&mut self, excluded: PairExcluded<'_>);
 
     /// Bodies isolated internally during the latest step attempt.
-    fn quarantined_bodies(&self) -> Vec<BodyId> {
-        Vec::new()
-    }
+    fn quarantined_bodies(&self) -> Vec<BodyId>;
 
     fn insert_body(&mut self, desc: BodyDesc) -> BodyId;
     /// Takes the body's colliders and joints with it.
@@ -835,29 +1157,7 @@ pub trait PhysicsBackend: Send + Sync {
         &mut self,
         poses: &[(BodyId, Pose)],
         reset_velocity: bool,
-    ) -> Result<(), String> {
-        let mut seen = std::collections::HashSet::new();
-        for (body, pose) in poses {
-            if !seen.insert(*body) || !self.contains_body(*body) {
-                return Err("unknown or duplicate body in pose batch".into());
-            }
-            if !pose.translation.is_finite()
-                || !pose.rotation.is_finite()
-                || (pose.rotation.length_squared() - 1.0).abs() > 1e-6
-            {
-                return Err("pose must be finite with a unit quaternion".into());
-            }
-        }
-        for &(body, pose) in poses {
-            let body = self.body_mut(body).expect("validated body");
-            body.set_position(pose, true);
-            if reset_velocity {
-                body.set_linvel(DVec3::ZERO, true);
-                body.set_angvel(DVec3::ZERO, true);
-            }
-        }
-        Ok(())
-    }
+    ) -> Result<(), String>;
     fn contains_body(&self, id: BodyId) -> bool {
         self.body(id).is_some()
     }
@@ -870,6 +1170,14 @@ pub trait PhysicsBackend: Send + Sync {
     /// `None` when the shape cannot be built (degenerate mesh).
     fn insert_collider(&mut self, desc: ColliderDesc) -> Option<ColliderId>;
     fn remove_collider(&mut self, id: ColliderId, wake: bool);
+    /// Removes `gone` and inserts `descs` as one change of the world; the
+    /// new ids in the order given, `None` for a shape that cannot be built.
+    fn edit_colliders(&mut self, descs: Vec<ColliderDesc>, gone: &[ColliderId]) -> Vec<Option<ColliderId>> {
+        for &id in gone {
+            self.remove_collider(id, false);
+        }
+        descs.into_iter().map(|desc| self.insert_collider(desc)).collect()
+    }
     fn collider(&self, id: ColliderId) -> Option<&dyn Collider>;
     fn collider_mut(&mut self, id: ColliderId) -> Option<&mut dyn ColliderMut>;
     fn colliders(&self) -> Vec<ColliderId>;
@@ -909,10 +1217,30 @@ pub trait PhysicsBackend: Send + Sync {
         origin: DVec3,
         direction: DVec3,
         max_distance: f64,
+    ) -> Option<(ColliderId, f64)> {
+        self.cast_ray_filtered(origin, direction, max_distance, &|_| true)
+    }
+
+    /// [`Self::cast_ray`] against the colliders `include` accepts.
+    fn cast_ray_filtered(
+        &self,
+        origin: DVec3,
+        direction: DVec3,
+        max_distance: f64,
+        include: &dyn Fn(ColliderId) -> bool,
     ) -> Option<(ColliderId, f64)>;
 
     /// Manifolds of the last step that involve `collider`.
     fn contacts_with(&self, collider: ColliderId) -> Vec<ContactManifold>;
     /// Every manifold of the last step.
     fn contacts(&self) -> Vec<ContactManifold>;
+}
+
+impl<'a> dyn PhysicsBackend + 'a {
+    /// `f` on the Molla runtime scene, under its lock.
+    pub fn molla<R>(&self, f: impl FnOnce(&molla_sim::runtime::RigidScene) -> R) -> R {
+        let (mut f, mut out) = (Some(f), None);
+        self.with_molla_scene(&mut |scene| out = f.take().map(|f| f(scene)));
+        out.expect("with_molla_scene runs its closure once")
+    }
 }

@@ -1,8 +1,8 @@
 //! Grassland profile: material, vegetation templates, palette, and wheel response.
 
 use super::profile::{
-    FieldProfile, FieldProfiles, GroundSurface, MaterialSurface, VegetationLayer, WheelMapParams,
-    WheelResponse,
+    BladeKind, BladeLayer, FieldProfile, FieldProfiles, GroundSurface, MaterialSurface,
+    VegetationLayer, WheelMapParams, WheelResponse,
 };
 use super::profile::{SurfaceGeometry, SurfaceGeometryParams};
 use bevy::asset::RenderAssetUsages;
@@ -65,7 +65,7 @@ struct MeadowEdges {
 
 impl MaterialExtension for MeadowExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_fields/grassland/shaders/material.wgsl".into()
+        "embedded://gearbox_fields/grassland/shaders/material.wesl".into()
     }
 }
 
@@ -89,14 +89,16 @@ fn carry_trail(
 
 impl Plugin for GrasslandPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/palette.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/palette.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/vegetation.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/blade_cull.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/blade_draw.wesl");
         bevy::asset::embedded_asset!(app, "textures/grass_albedo.jpg");
         bevy::asset::embedded_asset!(app, "textures/soil_albedo.jpg");
         app.add_plugins(MaterialPlugin::<MeadowMaterial>::default());
         app.add_systems(Update, carry_trail);
-        let shader = "embedded://gearbox_fields/grassland/shaders/vegetation.wgsl";
+        let shader = "embedded://gearbox_fields/grassland/shaders/vegetation.wesl";
         let density = self.density;
         let share = density / 6000.0;
         // Near and mid meshes fold two blades from each root.
@@ -127,6 +129,11 @@ impl Plugin for GrasslandPlugin {
                         fade_end: 128.0,
                         inverse_square_thinning: true,
                         follow_grass: 0.0,
+                        cutout: false,
+                        way_only: false,
+                        worked_only: false,
+                        blade: Some(BladeLayer { kind: &GRASS_BLADES, twins: 2, segments: 4 }),
+                        sieve: None,
                         albedo: None,
                         lod_band: GOT_NEAR_BAND,
                     },
@@ -138,6 +145,11 @@ impl Plugin for GrasslandPlugin {
                         fade_end: 128.0,
                         inverse_square_thinning: true,
                         follow_grass: 0.0,
+                        cutout: false,
+                        way_only: false,
+                        worked_only: false,
+                        blade: Some(BladeLayer { kind: &GRASS_BLADES, twins: 2, segments: 2 }),
+                        sieve: None,
                         albedo: None,
                         lod_band: GOT_MID_BAND,
                     },
@@ -149,6 +161,11 @@ impl Plugin for GrasslandPlugin {
                         fade_end: 128.0,
                         inverse_square_thinning: true,
                         follow_grass: 0.0,
+                        cutout: false,
+                        way_only: false,
+                        worked_only: false,
+                        blade: Some(BladeLayer { kind: &GRASS_BLADES, twins: 1, segments: 1 }),
+                        sieve: None,
                         albedo: None,
                         lod_band: GOT_FAR_BAND,
                     },
@@ -160,6 +177,11 @@ impl Plugin for GrasslandPlugin {
                         fade_end: 144.0,
                         inverse_square_thinning: true,
                         follow_grass: 0.0,
+                        cutout: false,
+                        way_only: false,
+                        worked_only: false,
+                        blade: None,
+                        sieve: None,
                         albedo: None,
                         lod_band: [0.0, f32::MAX],
                     },
@@ -171,6 +193,11 @@ impl Plugin for GrasslandPlugin {
                         fade_end: 45.0,
                         inverse_square_thinning: true,
                         follow_grass: 0.0,
+                        cutout: false,
+                        way_only: false,
+                        worked_only: false,
+                        blade: None,
+                        sieve: None,
                         albedo: None,
                         lod_band: [0.0, f32::MAX],
                     },
@@ -182,6 +209,11 @@ impl Plugin for GrasslandPlugin {
                         fade_end: super::canopy::FADE_END_M,
                         inverse_square_thinning: true,
                         follow_grass: 0.0,
+                        cutout: true,
+                        way_only: false,
+                        worked_only: false,
+                        blade: None,
+                        sieve: None,
                         albedo: None,
                         lod_band: [0.0, f32::MAX],
                     },
@@ -203,6 +235,7 @@ impl Plugin for GrasslandPlugin {
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 1.3,
+                workable: false,
                 surface_tint: Vec4::new(0.055, 0.082, 0.030, 1.0),
             });
     }
@@ -214,6 +247,7 @@ fn create_ground(
     trample_params: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    _work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let grass_albedo = assets
@@ -268,6 +302,20 @@ fn create_ground(
             },
         });
     Arc::new(MaterialSurface(material))
+}
+
+/// The meadow's blades, sown on the GPU; every detail level draws from them.
+static GRASS_BLADES: BladeKind = BladeKind {
+    cull: "embedded://gearbox_fields/grassland/shaders/blade_cull.wesl",
+    draw: "embedded://gearbox_fields/grassland/shaders/blade_draw.wesl",
+    template: blade_strip,
+    stride: 16,
+    capacity: 1_500_000,
+};
+
+/// One blade at the finest detail; coarser records collapse its rows.
+fn blade_strip() -> Mesh {
+    got_template(4, 1, [0.0, 0.0])
 }
 
 /// Distance bands of the three blade meshes (metres from the camera).

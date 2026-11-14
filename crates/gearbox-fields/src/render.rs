@@ -51,6 +51,14 @@ pub struct VegetationChunk {
     /// Share of this layer allowed outside the ground's grass patches; nought
     /// scatters it by its own reckoning instead.
     pub follow_grass: f32,
+    /// Drawn by the cut-out pipeline (alpha-to-coverage, may discard).
+    pub cutout: bool,
+    /// Camera distance band this layer draws in.
+    pub band: Vec2,
+    /// Sown into blade records by a compute pass rather than drawn per chunk.
+    pub blade: Option<crate::profile::BladeLayer>,
+    /// Compute shader that sieves this chunk's candidates before its draw.
+    pub sieve: Option<Handle<Shader>>,
     /// The wear of this field's surface, as `BareGround::tread`.
     pub tread: Vec4,
     /// How far this field's plants carry past its own edge, in metres.
@@ -63,17 +71,35 @@ pub struct VegetationChunk {
     pub variants: Vec<Range<u32>>,
 }
 
-impl SyncComponent for VegetationChunk {
+impl SyncComponent<bevy::render::RenderApp> for VegetationChunk {
     type Target = Self;
 }
 
-impl ExtractComponent for VegetationChunk {
+impl ExtractComponent<bevy::render::RenderApp> for VegetationChunk {
     type QueryData = &'static VegetationChunk;
     type QueryFilter = ();
     type Out = Self;
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self> {
         Some(item.clone())
+    }
+}
+
+/// Keeps vegetation out of a camera's view, e.g. a lean sensor camera.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct NoVegetation;
+
+impl SyncComponent<bevy::render::RenderApp> for NoVegetation {
+    type Target = Self;
+}
+
+impl ExtractComponent<bevy::render::RenderApp> for NoVegetation {
+    type QueryData = &'static NoVegetation;
+    type QueryFilter = ();
+    type Out = Self;
+
+    fn extract_component(_: QueryItem<'_, '_, Self::QueryData>) -> Option<Self> {
+        Some(NoVegetation)
     }
 }
 
@@ -84,6 +110,10 @@ impl ExtractComponent for VegetationChunk {
 pub struct FieldGpu {
     pub heightmap: Handle<Image>,
     pub trample: Handle<Image>,
+    /// Where tools have worked the ground (RG16Uint), on the wheel map's grid.
+    pub work: Handle<Image>,
+    /// Whether a tool can work this field; others share an empty work map.
+    pub workable: bool,
     pub params: VegetationParams,
     pub footprint_length: f32,
     /// The wheel map carries tread coordinates in two more channels.
@@ -91,6 +121,7 @@ pub struct FieldGpu {
 }
 
 #[derive(Resource, ExtractResource, Clone, Default)]
+#[extract_app(bevy::render::RenderApp)]
 pub struct RenderFields(pub HashMap<Entity, FieldGpu>, pub RetiredFields);
 
 /// The fields of the ground that was just replaced, kept a moment so the new
@@ -136,6 +167,8 @@ pub struct VegetationParams {
     pub way: Mat4,
     pub way_more: Mat4,
     pub way_shape: Vec4,
+    /// Radians the field's pattern is turned about the vertical.
+    pub yaw: f32,
 }
 
 /// Carries the environment's wind to every field's vegetation uniforms,
@@ -159,6 +192,7 @@ impl Plugin for VegetationPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             ExtractComponentPlugin::<VegetationChunk>::default(),
+            ExtractComponentPlugin::<NoVegetation>::default(),
             ExtractResourcePlugin::<RenderFields>::default(),
         ));
         app.sub_app_mut(RenderApp)
@@ -174,7 +208,7 @@ impl Plugin for VegetationPlugin {
                 (
                     queue_vegetation.in_set(RenderSystems::QueueMeshes),
                     prepare_vegetation_uniforms.in_set(RenderSystems::PrepareResources),
-                    (carry_wheel_tracks, stamp_wheel_contacts)
+                    (carry_wheel_tracks, stamp_wheel_contacts, stamp_tool_contacts)
                         .chain()
                         .in_set(RenderSystems::PrepareResources),
                     prepare_vegetation_bind_group.in_set(RenderSystems::PrepareBindGroups),
@@ -182,6 +216,9 @@ impl Plugin for VegetationPlugin {
             );
     }
 }
+
+/// Transparent3d sort offset placing vegetation before every blended item.
+pub(crate) const OPAQUE_FIRST: f32 = -1.0e6;
 
 #[allow(clippy::too_many_arguments)]
 fn queue_vegetation(
@@ -192,7 +229,7 @@ fn queue_vegetation(
     meshes: Res<RenderAssets<RenderMesh>>,
     chunks: Query<(Entity, &MainEntity, &VegetationChunk)>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
-    views: Query<&ExtractedView>,
+    views: Query<&ExtractedView, Without<NoVegetation>>,
     view_key_cache: Res<ViewKeyCache>,
     fields: Res<RenderFields>,
     mut warned: Local<bool>,
@@ -208,8 +245,9 @@ fn queue_vegetation(
         let Some(&view_key) = view_key_cache.get(&view.retained_view_entity) else {
             continue;
         };
+        let view_from_world = view.world_from_view.affine().inverse();
         for (entity, main_entity, draw) in &chunks {
-            if !fields.0.contains_key(&draw.field_id) || draw.instances == 0 {
+            if !fields.0.contains_key(&draw.field_id) || draw.instances == 0 || draw.blade.is_some() {
                 continue;
             }
             let Some(mesh) = meshes.get(draw.mesh.id()) else {
@@ -223,7 +261,7 @@ fn queue_vegetation(
             let pipeline = match pipelines.specialize(
                 &pipeline_cache,
                 &vegetation_pipeline,
-                (key, draw.shader.clone()),
+                (key, draw.shader.clone(), draw.cutout, draw.sieve.is_some()),
                 &mesh.layout,
             ) {
                 Ok(pipeline) => pipeline,
@@ -238,10 +276,13 @@ fn queue_vegetation(
 
             let half = draw.size * 0.5;
             let mesh_center = Vec3::new(draw.corner.x + half, 0.0, draw.corner.y + half);
+            // Sort key `OPAQUE_FIRST - view z`: every chunk ahead of the blended
+            // items, nearest chunk first.
+            let view_z = view_from_world.transform_point3(mesh_center).z;
             phase.add_retained(Transparent3d {
                 sorting_info: TransparentSortingInfo3d::Sorted {
                     mesh_center,
-                    depth_bias: 0.0,
+                    depth_bias: OPAQUE_FIRST - 2.0 * view_z,
                 },
                 entity: (entity, *main_entity),
                 pipeline,
@@ -260,7 +301,7 @@ fn queue_vegetation(
 /// grows or the fields are rebuilt. Rewriting every chunk each frame cost
 /// ~25-35 ms in uploads.
 #[derive(Resource, Default)]
-struct VegetationUniforms {
+pub(crate) struct VegetationUniforms {
     buffer: Option<Buffer>,
     capacity: u32,
     next: u32,
@@ -269,7 +310,7 @@ struct VegetationUniforms {
 }
 
 #[derive(Component)]
-struct VegetationOffset(u32);
+pub(crate) struct VegetationOffset(pub(crate) u32);
 
 fn chunk_params(draw: &VegetationChunk, field: &FieldGpu) -> VegetationParams {
     let (way, way_more, way_shape) = draw.way.packed();
@@ -386,15 +427,15 @@ fn prepare_vegetation_uniforms(
 /// Field bindings per field and albedo, and the empty group bound where the
 /// mesh pipeline expects per-mesh data the vegetation shaders never read.
 #[derive(Resource)]
-struct FieldBindGroups {
-    fields: HashMap<(Entity, Option<AssetId<Image>>), BindGroup>,
-    empty: BindGroup,
+pub(crate) struct FieldBindGroups {
+    pub(crate) fields: HashMap<(Entity, Option<AssetId<Image>>), BindGroup>,
+    pub(crate) empty: BindGroup,
 }
 
 /// Field bindings rebuilt against the current dynamic uniform buffer, one per
 /// field and albedo in use.
 #[allow(clippy::too_many_arguments)]
-fn prepare_vegetation_bind_group(
+pub(crate) fn prepare_vegetation_bind_group(
     mut commands: Commands,
     fields: Res<RenderFields>,
     chunks: Query<&VegetationChunk>,
@@ -425,9 +466,12 @@ fn prepare_vegetation_bind_group(
                 Some(id) => images.get(id),
                 None => Some(&fallback.d2),
             };
-            let (Some(image), Some(trample), Some(albedo)) =
-                (images.get(&field.heightmap), images.get(&field.trample), albedo)
-            else {
+            let (Some(image), Some(trample), Some(work), Some(albedo)) = (
+                images.get(&field.heightmap),
+                images.get(&field.trample),
+                images.get(&field.work),
+                albedo,
+            ) else {
                 continue;
             };
             let group = render_device.create_bind_group(
@@ -442,6 +486,7 @@ fn prepare_vegetation_bind_group(
                     &albedo.sampler,
                     &pipeline.wind_map,
                     &pipeline.wind_sampler,
+                    &work.texture_view,
                 )),
             );
             groups.insert(key, group);
@@ -466,25 +511,14 @@ fn stamp_wheel_contacts(
     images: Res<RenderAssets<GpuImage>>,
     render_queue: Res<RenderQueue>,
     mut stamped: Local<bevy::platform::collections::HashSet<Entity>>,
-    // What tread each texel already carries. A tractor's front and rear tyres
-    // are different tyres running on lines of their own, and through a turn
-    // they stop following one another, so each side's band becomes two passes
-    // contesting the same texels — and the print wavers along the seam where
-    // one gives way to the other. Only the widest tyre lays a tread; the others
-    // write back whatever is already there, so a wheel crossing an older mark
-    // leaves it exactly as it found it. Writing *nothing* there is what rubbed
-    // marks out before, and is why this is kept rather than skipped.
-    mut laid: Local<bevy::platform::collections::HashMap<(Entity, i32, i32), [u16; 2]>>,
 ) {
     stamped.retain(|entity| fields.0.contains_key(entity));
-    laid.retain(|(entity, _, _), _| fields.0.contains_key(entity));
     let Some(contacts) = contacts else {
         return;
     };
     if contacts.contacts.is_empty() {
         return;
     }
-    let widest = contacts.contacts.iter().fold(0.0f32, |most, c| most.max(c.width));
     for (&entity, field) in &fields.0 {
         let Some(trample) = images.get(&field.trample) else {
             continue;
@@ -549,7 +583,6 @@ fn stamp_wheel_contacts(
                         // narrow wheel told to lay no tread erased them at every
                         // crossing. A wheel passing over an older mark lays its
                         // own over the top, which is what happens on the ground.
-                        let lays_tread = contact.width >= widest * 0.9;
                         let tread = field.tread.then(|| {
                             // How far along the track, measured from the wheel
                             // itself: the machine's rolled distance plus this
@@ -565,21 +598,12 @@ fn stamp_wheel_contacts(
                             // whole tread sideways by several lug pitches,
                             // along the ruled line where one stamp gives way to
                             // the next. Rolled distance has no lever arm at all.
-                            if !lays_tread {
-                                // Whatever this texel already carries, put back
-                                // unchanged. Nothing there yet is nothing to
-                                // keep, and empty is then the truth rather than
-                                // an erasure.
-                                return laid.get(&(entity, x, z)).copied().unwrap_or([0u16, 0u16]);
-                            }
                             let from_machine = Vec2::new(x as f32, z as f32)
                                 - (contact.anchor - field.params.wheels.origin) * tpm;
-                            let fresh = tread_texel(
+                            tread_texel(
                                 contact.travelled + from_machine.dot(roll) / tpm,
                                 (Vec2::new(x as f32, z as f32) - line).dot(axle) / tpm,
-                                half_width / tpm);
-                            laid.insert((entity, x, z), fresh);
-                            fresh
+                                half_width / tpm)
                         });
                         stamp.into_iter().chain(tread.into_iter().flatten())
                     })
@@ -616,17 +640,87 @@ fn stamp_wheel_contacts(
     }
 }
 
+/// Writes the patches tools are working into the work maps of the fields
+/// that can be worked. A worked texel keeps the newest pass over it: the
+/// tool, the way it went, and where across its width the texel lay, so the
+/// ridges a pass leaves run unbroken down it. Each map is mirrored here, so a
+/// frame's patches go up as one rectangle however many parts made them.
+fn stamp_tool_contacts(
+    fields: Res<RenderFields>,
+    contacts: Option<Res<super::tillage::ToolContacts>>,
+    images: Res<RenderAssets<GpuImage>>,
+    render_queue: Res<RenderQueue>,
+    mut mirrors: Local<HashMap<AssetId<Image>, Vec<[u16; 4]>>>,
+) {
+    mirrors.retain(|id, _| fields.0.values().any(|field| field.work.id() == *id));
+    let Some(contacts) = contacts else {
+        return;
+    };
+    if contacts.contacts.is_empty() {
+        return;
+    }
+    for field in fields.0.values().filter(|field| field.workable) {
+        let Some(work) = images.get(&field.work) else {
+            continue;
+        };
+        let wheels = field.params.wheels;
+        let map = super::tillage::WorkMap {
+            origin: wheels.origin,
+            texels_per_metre: wheels.texels_per_metre,
+            size: IVec2::new(wheels.width as i32, wheels.height as i32),
+        };
+        let width = map.size.x;
+        if !contacts.contacts.iter().any(|contact| map.reach(contact).is_some()) {
+            continue;
+        }
+        let texels = mirrors
+            .entry(field.work.id())
+            .or_insert_with(|| vec![[0; 4]; (map.size.x * map.size.y) as usize]);
+        let (mut dirty_low, mut dirty_high) = (IVec2::MAX, IVec2::MIN);
+        for contact in &contacts.contacts {
+            if let Some((low, high)) = map.stamp(texels, contact) {
+                dirty_low = dirty_low.min(low);
+                dirty_high = dirty_high.max(high);
+            }
+        }
+        if dirty_low.cmpgt(dirty_high).any() {
+            continue;
+        }
+        let size = dirty_high - dirty_low + IVec2::ONE;
+        let data: Vec<[u16; 4]> = (dirty_low.y..=dirty_high.y)
+            .flat_map(|z| {
+                let row = (z * width) as usize;
+                texels[row + dirty_low.x as usize..=row + dirty_high.x as usize].iter().copied()
+            })
+            .collect();
+        let mut target = work.texture.as_image_copy();
+        target.origin = Origin3d { x: dirty_low.x as u32, y: dirty_low.y as u32, z: 0 };
+        render_queue.write_texture(
+            target,
+            bytemuck::cast_slice(&data),
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.x as u32 * 8),
+                rows_per_image: Some(size.y as u32),
+            },
+            Extent3d { width: size.x as u32, height: size.y as u32, depth_or_array_layers: 1 },
+        );
+    }
+}
+
 #[derive(Resource)]
-struct VegetationPipeline {
+pub(crate) struct VegetationPipeline {
     mesh_pipeline: MeshPipeline,
-    field_layout: BindGroupLayoutDescriptor,
-    empty_layout: BindGroupLayoutDescriptor,
+    pub(crate) field_layout: BindGroupLayoutDescriptor,
+    pub(crate) empty_layout: BindGroupLayoutDescriptor,
+    /// A sieved chunk's surviving candidates, at the chunk's own offset.
+    pub(crate) sieve_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     wind_map: TextureView,
     wind_sampler: Sampler,
 }
 
-fn init_vegetation_pipeline(
+pub(crate) fn init_vegetation_pipeline(
     mut commands: Commands,
     mesh_pipeline: Res<MeshPipeline>,
     render_device: Res<RenderDevice>,
@@ -635,7 +729,7 @@ fn init_vegetation_pipeline(
     let field_layout = BindGroupLayoutDescriptor::new(
         "vegetation field layout",
         &BindGroupLayoutEntries::sequential(
-            ShaderStages::VERTEX_FRAGMENT,
+            ShaderStages::VERTEX_FRAGMENT | ShaderStages::COMPUTE,
             (
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 sampler(SamplerBindingType::NonFiltering),
@@ -645,6 +739,8 @@ fn init_vegetation_pipeline(
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
+                // Where tools have worked the ground, at binding 8.
+                texture_2d(TextureSampleType::Uint),
             ),
         ),
     );
@@ -689,36 +785,60 @@ fn init_vegetation_pipeline(
         mesh_pipeline: mesh_pipeline.clone(),
         field_layout,
         empty_layout: BindGroupLayoutDescriptor::new("vegetation empty layout", &[]),
+        sieve_layout: BindGroupLayoutDescriptor::new(
+            "vegetation sieve layout",
+            &BindGroupLayoutEntries::single(
+                ShaderStages::VERTEX,
+                binding_types::storage_buffer_read_only_sized(true, None),
+            ),
+        ),
         sampler,
         wind_map,
         wind_sampler,
     });
 }
 
+/// Light through leaves from behind: Bevy's diffuse transmission, or with
+/// `GEARBOX_GRASS_BACKLIGHT=cheap` one view-dependent lobe instead.
+pub(crate) fn back_light_defs(defs: &mut Vec<bevy::shader::ShaderDefVal>) {
+    if std::env::var("GEARBOX_GRASS_BACKLIGHT").is_ok_and(|value| value == "cheap") {
+        defs.push("GRASS_CHEAP_BACKLIGHT".into());
+    } else {
+        defs.push("STANDARD_MATERIAL_DIFFUSE_TRANSMISSION".into());
+        defs.push("STANDARD_MATERIAL_DIFFUSE_OR_SPECULAR_TRANSMISSION".into());
+    }
+}
+
 impl SpecializedMeshPipeline for VegetationPipeline {
-    type Key = (MeshPipelineKey, Handle<Shader>);
+    /// Mesh key, shader, whether the layer is cut out, and whether sieved.
+    type Key = (MeshPipelineKey, Handle<Shader>, bool, bool);
 
     fn specialize(
         &self,
-        key: Self::Key,
+        (mesh_key, shader, cutout, sieved): Self::Key,
         layout: &MeshVertexBufferLayoutRef,
     ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
-        let mut descriptor = self.mesh_pipeline.specialize(key.0, layout)?;
-        descriptor.vertex.shader = key.1.clone();
+        let mut descriptor = self.mesh_pipeline.specialize(mesh_key, layout)?;
+        descriptor.vertex.shader = shader.clone();
         let fragment = descriptor.fragment.as_mut().unwrap();
-        fragment.shader = key.1;
-        fragment
-            .shader_defs
-            .push("STANDARD_MATERIAL_DIFFUSE_TRANSMISSION".into());
-        fragment
-            .shader_defs
-            .push("STANDARD_MATERIAL_DIFFUSE_OR_SPECULAR_TRANSMISSION".into());
+        fragment.shader = shader;
+        back_light_defs(&mut fragment.shader_defs);
+        if cutout {
+            descriptor.vertex.shader_defs.push("VEGETATION_CUTOUT".into());
+            fragment.shader_defs.push("VEGETATION_CUTOUT".into());
+        }
+        if std::env::var_os("GEARBOX_VEG_FLAT").is_some() {
+            fragment.shader_defs.push("VEGETATION_FLAT".into());
+        }
+        if sieved {
+            descriptor.vertex.shader_defs.push("VEGETATION_SIEVED".into());
+        }
         if let Some(mesh_group) = descriptor.layout.get_mut(2) {
-            *mesh_group = self.empty_layout.clone();
+            *mesh_group = if sieved { self.sieve_layout.clone() } else { self.empty_layout.clone() };
         }
         descriptor.layout.push(self.field_layout.clone());
         descriptor.primitive.cull_mode = None;
-        descriptor.multisample.alpha_to_coverage_enabled = descriptor.multisample.count > 1;
+        descriptor.multisample.alpha_to_coverage_enabled = cutout && descriptor.multisample.count > 1;
         Ok(descriptor)
     }
 }
@@ -727,12 +847,43 @@ type DrawVegetation = (
     SetItemPipeline,
     SetMeshViewBindGroup<0>,
     SetMeshViewBindingArrayBindGroup<1>,
-    SetEmptyBindGroup<2>,
+    SetSieveBindGroup<2>,
     SetFieldBindGroup<3>,
     DrawBlades,
 );
 
-struct SetEmptyBindGroup<const I: usize>;
+/// A sieved chunk's survivors at its own offset, or the empty group.
+struct SetSieveBindGroup<const I: usize>;
+
+impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetSieveBindGroup<I> {
+    type Param = (Option<SRes<FieldBindGroups>>, SRes<super::sieve::SieveViews>);
+    type ViewQuery = Entity;
+    type ItemQuery = Read<VegetationChunk>;
+
+    #[inline]
+    fn render<'w>(
+        item: &P,
+        view: Entity,
+        draw: Option<&'w VegetationChunk>,
+        (groups, sieves): SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let (Some(groups), Some(draw)) = (groups, draw) else {
+            return RenderCommandResult::Skip;
+        };
+        if draw.sieve.is_none() {
+            pass.set_bind_group(I, &groups.into_inner().empty, &[]);
+            return RenderCommandResult::Success;
+        }
+        let Some((group, slot)) = sieves.into_inner().slot(view, item.entity()) else {
+            return RenderCommandResult::Skip;
+        };
+        pass.set_bind_group(I, group, &[slot.region]);
+        RenderCommandResult::Success
+    }
+}
+
+pub(crate) struct SetEmptyBindGroup<const I: usize>;
 
 impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetEmptyBindGroup<I> {
     type Param = Option<SRes<FieldBindGroups>>;
@@ -785,16 +936,20 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetFieldBindGroup<I> {
 struct DrawBlades;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
-    type Param = (SRes<RenderAssets<RenderMesh>>, SRes<MeshAllocator>);
-    type ViewQuery = ();
+    type Param = (
+        SRes<RenderAssets<RenderMesh>>,
+        SRes<MeshAllocator>,
+        SRes<super::sieve::SieveViews>,
+    );
+    type ViewQuery = Entity;
     type ItemQuery = Read<VegetationChunk>;
 
     #[inline]
     fn render<'w>(
-        _item: &P,
-        _view: (),
+        item: &P,
+        view: Entity,
         draw: Option<&'w VegetationChunk>,
-        (meshes, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
+        (meshes, mesh_allocator, sieves): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let mesh_allocator = mesh_allocator.into_inner();
@@ -819,6 +974,13 @@ impl<P: PhaseItem> RenderCommand<P> for DrawBlades {
                 };
                 pass.set_index_buffer(index_slice.buffer.slice(..), *index_format);
                 let start = index_slice.range.start;
+                if draw.sieve.is_some() {
+                    let Some(args) = sieves.into_inner().args(view, item.entity()) else {
+                        return RenderCommandResult::Skip;
+                    };
+                    pass.draw_indexed_indirect(args.0, args.1);
+                    return RenderCommandResult::Success;
+                }
                 if draw.variants.is_empty() {
                     pass.draw_indexed(
                         start..(start + count),

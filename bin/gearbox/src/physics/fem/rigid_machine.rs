@@ -1,0 +1,412 @@
+use super::machine::FemMachineLayout;
+use crate::physics::markers::{
+    UsdDof, UsdDriveType, UsdJointKind, UsdMass, UsdPhysicsJoint, UsdRigidBody,
+};
+use bevy::prelude::{Entity, GlobalTransform, World};
+use molla_core::{BodyId, Error, JointId, Result, WorldId};
+use molla_math::{Mat3, Quat, Transform, Vec3};
+use molla_sim::{BodyParams, Control, JointTargetMode, Model, ModelBuilder, State, eval_fk};
+use molla_solvers::fem_rigid_gpu::SoftRigidBallJoint;
+use std::collections::HashMap;
+
+pub(crate) struct LoopConstraint {
+    pub entity: Entity,
+    pub parent: BodyId,
+    pub child: BodyId,
+    pub joint: UsdPhysicsJoint,
+}
+
+/// Authored rest articulation and retained loop constraints, before GPU ownership transfer.
+pub(crate) struct FemRigidMachine {
+    pub model: Model,
+    pub state: State,
+    pub control: Control,
+    pub bodies: HashMap<Entity, BodyId>,
+    pub joints: HashMap<Entity, JointId>,
+    pub loops: Vec<LoopConstraint>,
+    pub origin: Vec3,
+    mass_partitioned: bool,
+}
+
+fn invalid(message: &str) -> Error {
+    Error::Build(format!("FEM machine: {message}"))
+}
+fn vector(v: bevy::prelude::Vec3) -> Vec3 {
+    Vec3::new(v.x as f64, v.y as f64, v.z as f64)
+}
+fn rotation(q: bevy::prelude::Quat) -> Result<Quat> {
+    if !q.is_finite() || (q.length_squared() - 1.0).abs() > 1e-4 {
+        return Err(invalid("non-unit or nonfinite rotation"));
+    }
+    Ok(Quat::from_xyzw(q.x as f64, q.y as f64, q.z as f64, q.w as f64).normalize())
+}
+fn pose(world: &World, entity: Entity) -> Result<Transform> {
+    let global = world
+        .get::<GlobalTransform>(entity)
+        .ok_or_else(|| invalid("missing body transform"))?;
+    let (scale, q, p) = global.to_scale_rotation_translation();
+    if !scale.is_finite()
+        || (scale - bevy::prelude::Vec3::ONE).abs().max_element() > 1e-5
+        || !p.is_finite()
+    {
+        return Err(invalid("body transform is scaled or nonfinite"));
+    }
+    Ok(Transform {
+        position: vector(p),
+        rotation: rotation(q)?,
+    })
+}
+fn frames(joint: &UsdPhysicsJoint) -> Result<(Transform, Transform)> {
+    if !joint.local_pos0.is_finite() || !joint.local_pos1.is_finite() {
+        return Err(invalid("nonfinite joint anchor"));
+    }
+    Ok((
+        Transform {
+            position: vector(joint.local_pos0),
+            rotation: rotation(joint.local_rot0)?,
+        },
+        Transform {
+            position: vector(joint.local_pos1),
+            rotation: rotation(joint.local_rot1)?,
+        },
+    ))
+}
+
+fn drive_axis(joint: &UsdPhysicsJoint, dof: UsdDof) -> bool {
+    use bevy::prelude::Vec3 as Axis;
+    match (joint.kind, dof) {
+        (UsdJointKind::Revolute, UsdDof::Angular) | (UsdJointKind::Prismatic, UsdDof::Linear) => {
+            true
+        }
+        (UsdJointKind::Revolute, UsdDof::RotX) | (UsdJointKind::Prismatic, UsdDof::TransX) => {
+            joint.axis == Axis::X
+        }
+        (UsdJointKind::Revolute, UsdDof::RotY) | (UsdJointKind::Prismatic, UsdDof::TransY) => {
+            joint.axis == Axis::Y
+        }
+        (UsdJointKind::Revolute, UsdDof::RotZ) | (UsdJointKind::Prismatic, UsdDof::TransZ) => {
+            joint.axis == Axis::Z
+        }
+        _ => false,
+    }
+}
+
+impl FemRigidMachine {
+    pub(crate) fn partition_belt_mass(
+        &mut self,
+        belts: &super::track_mesh::FemTrackMeshes,
+    ) -> Result<()> {
+        if self.mass_partitioned
+            || self.model.body_mass.device_buffer().is_some()
+            || self.state.joint_qd.host()?.iter().any(|v| *v != 0.0)
+        {
+            return Err(invalid(
+                "mass partition requires an unpartitioned host model",
+            ));
+        }
+        let point_inertia = |mass: f64, point: Vec3| {
+            (Mat3::IDENTITY * point.length_squared()
+                - Mat3::from_cols(point * point.x, point * point.y, point * point.z))
+                * mass
+        };
+        let positive = |matrix: Mat3| {
+            matrix.is_finite()
+                && matrix.x_axis.x > 0.0
+                && matrix.x_axis.x * matrix.y_axis.y - matrix.y_axis.x * matrix.x_axis.y > 0.0
+                && matrix.determinant() > 0.0
+        };
+        let mut updates = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut nodes = std::collections::HashSet::new();
+        for track in &belts.tracks {
+            let body = *self
+                .bodies
+                .get(&track.carrier)
+                .ok_or_else(|| invalid("foreign belt carrier"))?;
+            if !seen.insert(body.index()) {
+                return Err(invalid("duplicate belt mass partition"));
+            }
+            let index = body.index();
+            let old_mass = self.model.body_mass.host()?[index];
+            let old_com = self.model.body_com.host()?[index];
+            let mut first = old_com * old_mass;
+            let mut inertia =
+                self.model.body_inertia.host()?[index] + point_inertia(old_mass, old_com);
+            let mut mass = old_mass;
+            let inverse = self.state.body_q.host()?[index].inverse();
+            for &node in &track.nodes {
+                if !nodes.insert(node) {
+                    return Err(invalid("duplicate belt mass node"));
+                }
+                let m = *belts
+                    .model
+                    .particle_mass
+                    .host()?
+                    .get(node as usize)
+                    .ok_or_else(|| invalid("invalid belt mass node"))?;
+                let p = inverse.transform_point(
+                    *belts
+                        .state
+                        .particle_q
+                        .host()?
+                        .get(node as usize)
+                        .ok_or_else(|| invalid("invalid belt position node"))?,
+                );
+                if !m.is_finite() || m <= 0.0 || !p.is_finite() {
+                    return Err(invalid("invalid belt mass distribution"));
+                }
+                mass -= m;
+                first -= p * m;
+                inertia -= point_inertia(m, p);
+            }
+            if !mass.is_finite() || mass <= 0.0 {
+                return Err(invalid("belt exceeds authored carrier mass"));
+            }
+            let com = first / mass;
+            inertia -= point_inertia(mass, com);
+            let covariance =
+                Mat3::IDENTITY * (inertia.x_axis.x + inertia.y_axis.y + inertia.z_axis.z) * 0.5
+                    - inertia;
+            if !com.is_finite() || !positive(inertia) || !positive(covariance) {
+                return Err(invalid(&format!(
+                    "belt exceeds authored carrier inertia budget: body={index}, mass={mass}, com={com:?}, inertia={:?}, covariance={:?}",
+                    inertia.to_cols_array(),
+                    covariance.to_cols_array()
+                )));
+            }
+            updates.push((index, mass, com, inertia));
+        }
+        if nodes.len() != belts.model.particle_count {
+            return Err(invalid("unassigned belt mass node"));
+        }
+        for (body, mass, com, inertia) in updates {
+            self.model.body_mass.host_mut()?[body] = mass;
+            self.model.body_inv_mass.host_mut()?[body] = 1.0 / mass;
+            self.model.body_com.host_mut()?[body] = com;
+            self.model.body_inertia.host_mut()?[body] = inertia;
+            self.model.body_inv_inertia.host_mut()?[body] = inertia.inverse();
+        }
+        self.mass_partitioned = true;
+        Ok(())
+    }
+
+    pub(crate) fn ball_joints(&self) -> Result<Vec<SoftRigidBallJoint>> {
+        let count =
+            u32::try_from(self.model.body_count).map_err(|_| invalid("too many loop bodies"))?;
+        self.loops
+            .iter()
+            .map(|closure| {
+                let joint = SoftRigidBallJoint {
+                    body_a: u32::try_from(closure.parent.index())
+                        .map_err(|_| invalid("invalid loop parent"))?,
+                    body_b: u32::try_from(closure.child.index())
+                        .map_err(|_| invalid("invalid loop child"))?,
+                    anchor_a: closure.joint.local_pos0.to_array(),
+                    anchor_b: closure.joint.local_pos1.to_array(),
+                };
+                joint.row(count)?;
+                Ok(joint)
+            })
+            .collect()
+    }
+
+    pub(crate) fn prepare(world: &World, layout: &FemMachineLayout) -> Result<Self> {
+        let origin = pose(world, layout.chassis)?.position;
+        let mut builder = ModelBuilder::new();
+        builder.begin_articulation();
+        builder.set_world_gravity(WorldId(0), -Vec3::Y * gearbox_globe::Body::active().gravity_mps2());
+        let mut bodies = HashMap::new();
+        let mut reference = Vec::new();
+        for &entity in &layout.bodies {
+            let body = world
+                .get::<UsdRigidBody>(entity)
+                .ok_or_else(|| invalid("body disappeared"))?;
+            if !body.enabled
+                || body.kinematic
+                || body.velocity != bevy::prelude::Vec3::ZERO
+                || body.angular_velocity != bevy::prelude::Vec3::ZERO
+            {
+                return Err(invalid(
+                    "preparation requires enabled dynamic bodies at rest",
+                ));
+            }
+            let mass = world
+                .get::<UsdMass>(entity)
+                .ok_or_else(|| invalid("missing authored mass properties"))?;
+            let m = mass
+                .mass
+                .ok_or_else(|| invalid("missing explicit body mass"))?;
+            let diagonal = mass
+                .diagonal_inertia
+                .ok_or_else(|| invalid("missing explicit body inertia"))?;
+            let com = mass
+                .center_of_mass
+                .ok_or_else(|| invalid("missing explicit body COM"))?;
+            if !m.is_finite()
+                || m <= 0.0
+                || !diagonal.is_finite()
+                || diagonal.min_element() <= 0.0
+                || !com.is_finite()
+            {
+                return Err(invalid("invalid mass, inertia or COM"));
+            }
+            let axes = Mat3::from_quat(rotation(mass.principal_axes.unwrap_or_default())?);
+            let mut initial = pose(world, entity)?;
+            initial.position -= origin;
+            let id = builder.add_body(
+                BodyParams::new()
+                    .with_mass(m as f64)
+                    .with_inertia(axes * Mat3::from_diagonal(vector(diagonal)) * axes.transpose())
+                    .with_com(vector(com))
+                    .with_pose(initial),
+            );
+            bodies.insert(entity, id);
+            reference.push((id, initial));
+        }
+        let chassis = bodies[&layout.chassis];
+        builder.add_joint_free(BodyId::NONE, chassis, reference[0].1, Transform::IDENTITY)?;
+        let mut joints = HashMap::new();
+        let mut drives = Vec::new();
+        for &entity in &layout.tree_joints {
+            let joint = world
+                .get::<UsdPhysicsJoint>(entity)
+                .ok_or_else(|| invalid("joint disappeared"))?;
+            if !joint.joint_enabled
+                || joint.exclude_from_articulation
+                || !joint.limits.is_empty()
+                || joint.cone_limit.is_some()
+                || joint.distance_limit.is_some()
+                || [joint.break_force, joint.break_torque]
+                    .into_iter()
+                    .flatten()
+                    .any(|v| v.is_nan() || v < f32::MAX)
+            {
+                return Err(invalid(
+                    "unsupported joint limits, breakability or tree membership",
+                ));
+            }
+            let parent = *bodies
+                .get(&joint.body0.ok_or_else(|| invalid("missing parent"))?)
+                .ok_or_else(|| invalid("foreign parent"))?;
+            let child = *bodies
+                .get(&joint.body1.ok_or_else(|| invalid("missing child"))?)
+                .ok_or_else(|| invalid("foreign child"))?;
+            let (a, b) = frames(joint)?;
+            let id = match joint.kind {
+                UsdJointKind::Fixed => builder.add_joint_fixed(parent, child, a, b)?,
+                UsdJointKind::Revolute => {
+                    builder.add_joint_revolute(parent, child, a, b, vector(joint.axis))?
+                }
+                UsdJointKind::Prismatic => {
+                    builder.add_joint_prismatic(parent, child, a, b, vector(joint.axis))?
+                }
+                UsdJointKind::Spherical => builder.add_joint_ball(parent, child, a, b)?,
+                _ => return Err(invalid("unsupported tree joint type")),
+            };
+            let scalar = matches!(joint.kind, UsdJointKind::Revolute | UsdJointKind::Prismatic);
+            if let Some((lower, upper)) = joint.built_in_limit {
+                if !scalar || lower.is_nan() || upper.is_nan() || lower > upper {
+                    return Err(invalid("invalid scalar joint bounds"));
+                }
+                builder.set_joint_limits(id, &[lower as f64], &[upper as f64])?;
+            }
+            if joint.drives.len() > 1 || (!scalar && !joint.drives.is_empty()) {
+                return Err(invalid("unsupported multi-axis drive"));
+            }
+            if let Some(drive) = joint.drives.first() {
+                if !drive_axis(joint, drive.dof)
+                    || drive.drive_type != UsdDriveType::Force
+                    || !drive.stiffness.is_finite()
+                    || drive.stiffness < 0.0
+                    || !drive.damping.is_finite()
+                    || drive.damping < 0.0
+                    || drive.max_force.is_some_and(|v| v.is_nan() || v < 0.0)
+                    || [drive.target_position, drive.target_velocity]
+                        .into_iter()
+                        .flatten()
+                        .any(|v| !v.is_finite())
+                {
+                    return Err(invalid("unsupported or invalid drive"));
+                }
+                drives.push((id, drive.clone()));
+            }
+            joints.insert(entity, id);
+        }
+        let model = builder.build()?;
+        let mut state = model.state()?;
+        eval_fk(&model, &mut state)?;
+        for (body, expected) in reference {
+            let actual = state.body_q.host()?[body.index()];
+            if (actual.position - expected.position).length() > 1e-4
+                || actual.rotation.dot(expected.rotation).abs() < 1.0 - 1e-8
+            {
+                return Err(invalid(
+                    "joint frames do not reproduce the authored rest pose",
+                ));
+            }
+        }
+        let mut control = model.control();
+        for (id, drive) in drives {
+            let dof = model.joint_dof_offset.host()?[id.index()] as usize;
+            control.joint_target_mode.host_mut()?[dof] = JointTargetMode::PositionVelocity as u32;
+            control.joint_target_pos.host_mut()?[dof] = drive.target_position.unwrap_or(0.0) as f64;
+            control.joint_target_vel.host_mut()?[dof] = drive.target_velocity.unwrap_or(0.0) as f64;
+            control.joint_target_kp.host_mut()?[dof] = drive.stiffness as f64;
+            control.joint_target_kd.host_mut()?[dof] = drive.damping as f64;
+            control.joint_motor_max_force.host_mut()?[dof] =
+                drive.max_force.map_or(f64::INFINITY, |f| f as f64);
+        }
+        let mut loops = Vec::new();
+        for &entity in &layout.loop_joints {
+            let joint = world
+                .get::<UsdPhysicsJoint>(entity)
+                .ok_or_else(|| invalid("loop joint disappeared"))?
+                .clone();
+            if joint.kind != UsdJointKind::Spherical
+                || !joint.exclude_from_articulation
+                || !joint.joint_enabled
+                || !joint.drives.is_empty()
+                || !joint.limits.is_empty()
+                || joint.cone_limit.is_some()
+                || joint.distance_limit.is_some()
+                || [joint.break_force, joint.break_torque]
+                    .into_iter()
+                    .flatten()
+                    .any(|v| v.is_nan() || v < f32::MAX)
+            {
+                return Err(invalid("unsupported loop joint"));
+            }
+            let parent = *bodies
+                .get(&joint.body0.ok_or_else(|| invalid("missing loop parent"))?)
+                .ok_or_else(|| invalid("foreign loop parent"))?;
+            let child = *bodies
+                .get(&joint.body1.ok_or_else(|| invalid("missing loop child"))?)
+                .ok_or_else(|| invalid("foreign loop child"))?;
+            let (a, b) = frames(&joint)?;
+            let poses = state.body_q.host()?;
+            let error = poses[parent.index()].transform_point(a.position)
+                - poses[child.index()].transform_point(b.position);
+            if error.length() > 1e-4 {
+                return Err(invalid(
+                    "loop anchors do not meet in the authored rest pose",
+                ));
+            }
+            loops.push(LoopConstraint {
+                entity,
+                parent,
+                child,
+                joint,
+            });
+        }
+        Ok(Self {
+            model,
+            state,
+            control,
+            bodies,
+            joints,
+            loops,
+            origin,
+            mass_partitioned: false,
+        })
+    }
+}

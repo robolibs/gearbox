@@ -60,8 +60,12 @@ pub enum Command {
     Clear(cli::clear::Args),
     /// Clock, listing, poses, events
     Scene(cli::scene::Args),
+    /// Retained debug draws in the viewer (lines, points, shapes, polygons, grids, clouds, detections, sensors, field and chart widgets, interactions), kept per NS and ID until deleted, cleared or out of --lifetime sim seconds; Z-up coordinates in --frame `world` (home: x east, y north, z up, the axes machine states report in), `MACHINE/odom` (where the machine's reported pose is measured from) or `MACHINE/LINK` (following the link); widths and radii > 0 are metres, < 0 pixels
+    Draw(cli::draw::Args),
     /// Choose the thing later commands act on
     Select(cli::select::Args),
+    /// Crops, rooms and faults of a greenhouse world
+    Greenhouse(cli::greenhouse::Args),
     /// Inspect and drive machines
     Machine(cli::machine::Args),
     /// Browse the live topic directory, or stream one of its topics
@@ -99,7 +103,9 @@ fn dispatch(cli: Cli) -> Result<()> {
         Command::Spawn(args) => cli::spawn::run(&ctx, args),
         Command::Clear(args) => cli::clear::run(&ctx, args),
         Command::Scene(args) => cli::scene::run(&ctx, args),
+        Command::Draw(args) => cli::draw::run(&ctx, args),
         Command::Select(args) => cli::select::run(&ctx, args),
+        Command::Greenhouse(args) => cli::greenhouse::run(&ctx, args),
         Command::Machine(args) => cli::machine::run(&ctx, args),
         Command::Peer(args) => cli::peer::run(&ctx, args),
         Command::Access(args) => cli::access::run(&ctx, args),

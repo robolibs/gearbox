@@ -1,8 +1,8 @@
-//! Gizmo-based collider debug renderer — replaces `RapierDebugRenderPlugin`.
+//! Gizmo-based collider debug renderer.
 //! Iterates `PhysicsWorld.colliders` and draws each shape's
 //! wireframe via `bevy::gizmos`. Driven by `ColliderDebugEnabled`.
 
-use bevy::math::primitives::{Cuboid, Cylinder, Sphere};
+use bevy::shape::{Cuboid, Cylinder, Sphere};
 use bevy::prelude::*;
 use super::backend::ShapeView;
 

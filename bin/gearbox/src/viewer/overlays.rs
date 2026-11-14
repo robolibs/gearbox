@@ -26,14 +26,79 @@ impl Plugin for OverlaysPlugin {
                     sync_collider_debug_visibility,
                 )
                     .chain(),
-            );
+            )
+            .add_systems(Update, serve_overlay_requests.before(compute_extent));
+    }
+}
+
+/// `gearbox instance overlay NAME on|off|toggle [MACHINE…]` drops `NAME
+/// STATE [MACHINE…]` in `<registry dir>/<name>.overlay`; this switches that
+/// overlay as the View pane does. NAME is `tf`, `colliders`, `grid` or
+/// `axes`; `tf on` with machines draws only theirs.
+fn serve_overlay_requests(
+    time: Res<Time>,
+    mut poll: Local<Option<Timer>>,
+    mut toggles: ResMut<DisplayToggles>,
+) {
+    let poll = poll.get_or_insert_with(|| Timer::from_seconds(0.25, TimerMode::Repeating));
+    if !poll.tick(time.delta()).just_finished() {
+        return;
+    }
+    let request = crate::viewer::screenshot::request_path("overlay");
+    let Ok(text) = std::fs::read_to_string(&request) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&request);
+    let mut words = text.split_whitespace();
+    let (Some(name), Some(state)) = (words.next(), words.next()) else {
+        warn!(
+            "gearbox-viewer: overlay request `{}` not understood",
+            text.trim()
+        );
+        return;
+    };
+    let current = match name {
+        "tf" => toggles.show_tf_frames || toggles.show_tf_links,
+        "colliders" => toggles.show_colliders,
+        "grid" => toggles.show_world_grid,
+        "axes" => toggles.show_world_axes,
+        _ => {
+            warn!("gearbox-viewer: no overlay `{name}`");
+            return;
+        }
+    };
+    let on = match state {
+        "on" => true,
+        "off" => false,
+        "toggle" => !current,
+        _ => {
+            warn!("gearbox-viewer: overlay `{name}` cannot be `{state}`");
+            return;
+        }
+    };
+    info!(
+        "gearbox-viewer: overlay {name} {}",
+        if on { "on" } else { "off" }
+    );
+    match name {
+        "tf" => {
+            (
+                toggles.show_tf_frames,
+                toggles.show_tf_names,
+                toggles.show_tf_links,
+            ) = (on, on, on);
+            // Switched off, the tree fades out over the machines it was on.
+            if on {
+                toggles.tf_machines = words.map(str::to_string).collect();
+            }
+        }
+        "colliders" => toggles.show_colliders = on,
+        "grid" => toggles.show_world_grid = on,
+        _ => toggles.show_world_axes = on,
     }
 }
 
 pub use bevy_weather::OriginalIlluminance;
-
-#[derive(Component, Debug, Copy, Clone)]
-pub struct OriginalLightIntensity(pub f32);
 
 fn capture_original_light_levels(
     mut cmds: Commands,
@@ -41,35 +106,34 @@ fn capture_original_light_levels(
         (Entity, &DirectionalLight),
         (Added<DirectionalLight>, Without<OriginalIlluminance>),
     >,
-    pt: Query<(Entity, &PointLight), (Added<PointLight>, Without<OriginalLightIntensity>)>,
-    sp: Query<(Entity, &SpotLight), (Added<SpotLight>, Without<OriginalLightIntensity>)>,
 ) {
     for (e, l) in &dir {
         cmds.entity(e).insert(OriginalIlluminance(l.illuminance));
-    }
-    for (e, l) in &pt {
-        cmds.entity(e).insert(OriginalLightIntensity(l.intensity));
-    }
-    for (e, l) in &sp {
-        cmds.entity(e).insert(OriginalLightIntensity(l.intensity));
     }
 }
 
 fn apply_light_intensity_scale(
     toggles: Res<DisplayToggles>,
     mut dir: Query<(&mut DirectionalLight, &OriginalIlluminance)>,
-    mut pt: Query<(&mut PointLight, &OriginalLightIntensity)>,
-    mut sp: Query<(&mut SpotLight, &OriginalLightIntensity)>,
+    mut pt: Query<&mut PointLight>,
+    mut sp: Query<&mut SpotLight>,
+    mut applied: Local<Option<f32>>,
 ) {
     let s = toggles.light_intensity_scale;
     for (mut l, o) in &mut dir {
         l.illuminance = o.0 * s;
     }
-    for (mut l, o) in &mut pt {
-        l.intensity = o.0 * s;
+    // Point and spot lights take the scale by the ratio it moved by.
+    let s = s.max(0.01);
+    let was = applied.replace(s).unwrap_or(1.0);
+    if was == s {
+        return;
     }
-    for (mut l, o) in &mut sp {
-        l.intensity = o.0 * s;
+    for mut l in &mut pt {
+        l.intensity *= s / was;
+    }
+    for mut l in &mut sp {
+        l.intensity *= s / was;
     }
 }
 
@@ -114,14 +178,18 @@ pub struct DisplayToggles {
     pub show_colliders: bool,
     /// Lifts the camera's 5 km zoom ceiling, out to where the whole planet fits.
     pub unlimited_zoom: bool,
-    /// Following a machine swings the view around behind it. Off, the view
-    /// keeps whatever angle it was on and only travels with the machine.
-    pub follow_from_behind: bool,
+    /// A followed machine's turns turn the view with it. Off, the view keeps
+    /// its compass bearing and only travels with the machine.
+    pub follow_turns: bool,
     pub light_intensity_scale: f32,
     pub show_tf_frames: bool,
     pub show_tf_names: bool,
     pub show_tf_links: bool,
     pub tf_wheels_only: bool,
+    /// The machines whose TF tree is drawn, by id; every machine when empty.
+    pub tf_machines: Vec<String>,
+    /// Debug draws clients sent over `/gearbox/draw`.
+    pub show_draws: bool,
 }
 
 impl Default for DisplayToggles {
@@ -136,13 +204,15 @@ impl Default for DisplayToggles {
             wireframe: false,
             show_colliders: false,
             unlimited_zoom: std::env::var("GEARBOX_UNLIMITED_ZOOM").is_ok_and(|v| v == "1"),
-            follow_from_behind: true,
+            follow_turns: true,
             light_intensity_scale: 1.0,
             show_tf_frames: tf_env("frames"),
             show_tf_names: tf_env("names"),
             show_tf_links: tf_env("links"),
             tf_wheels_only: std::env::var("GEARBOX_TF_OVERLAY")
                 .is_ok_and(|v| v.split(',').any(|t| t.trim() == "wheels")),
+            tf_machines: Vec::new(),
+            show_draws: true,
         }
     }
 }

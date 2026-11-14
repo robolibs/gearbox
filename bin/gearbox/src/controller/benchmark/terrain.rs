@@ -8,7 +8,7 @@ fn imported_kubota_meadow_trace() {
 
     let asset = std::env::var_os("GEARBOX_BENCH_ASSET").expect("set GEARBOX_BENCH_ASSET");
     let path = std::env::var_os("GEARBOX_TRACE").expect("set GEARBOX_TRACE");
-    let mut fixture = Fixture::load_backend(Path::new(&asset), true);
+    let mut fixture = Fixture::load(Path::new(&asset));
     let meadow = crate::terrain::benchmark_meadow_collider();
     {
         let mut physics = fixture.app.world_mut().resource_mut::<PhysicsWorld>();
@@ -67,10 +67,10 @@ fn meadow_timing(field_friction: bool) {
     else {
         panic!("viewer terrain must be a heightfield");
     };
-    assert_eq!((*rows, *cols, heights.len()), (801, 801, 801 * 801));
-    assert_eq!(*scale, DVec3::new(800.0, 1.0, 800.0));
+    assert_eq!((*rows, *cols, heights.len()), (1201, 1201, 1201 * 1201));
+    assert_eq!(*scale, DVec3::new(1200.0, 1.0, 1200.0));
     let field_grid = if field_friction {
-        let grid = gearbox_fields::HeightGrid::sample(800.0, 1.0, |_, _| 0.0);
+        let grid = gearbox_fields::HeightGrid::sample(1200.0, 1.0, |_, _| 0.0);
         let mut layout = gearbox_fields::FieldLayout::default();
         layout.default_friction = meadow.friction;
         Some(crate::physics::backend::TerrainFrictionGrid {
@@ -79,15 +79,15 @@ fn meadow_timing(field_friction: bool) {
             values: layout.friction_samples(&grid, meadow.friction.unwrap()).unwrap().unwrap(),
         })
     } else { None };
-    for (run, molla) in [false, true, true, false].into_iter().enumerate() {
-        let mut fixture = Fixture::load_backend(Path::new(&asset), molla);
+    for run in 0..2 {
+        let mut fixture = Fixture::load(Path::new(&asset));
         {
             let mut physics = fixture.app.world_mut().resource_mut::<PhysicsWorld>();
             let ground = physics.collider_mut(fixture.ground).unwrap();
             ground.set_shape(meadow.shape.clone());
             ground.set_position(meadow.pose);
             ground.set_friction(meadow.friction.unwrap());
-            if molla && let Some(grid) = &field_grid {
+            if let Some(grid) = &field_grid {
                 physics.register_wheel_ground(fixture.ground, Some(grid.clone())).unwrap();
             }
         }
@@ -112,8 +112,7 @@ fn meadow_timing(field_friction: bool) {
                 } else {
                     speed < 0.05
                 },
-                "{} driving={driving} speed={speed}",
-                physics.name()
+                "driving={driving} speed={speed}"
             );
             let position = body.position().translation;
             assert!(
@@ -121,17 +120,13 @@ fn meadow_timing(field_friction: bool) {
                 "fixture left the meadow's flat spawn region: {position:?}"
             );
             eprintln!(
-                "meadow timing run={run} backend={} driving={driving} speed={speed:.9} median={:.6} p95={:.6} p99={:.6} max={:.6} ms/step; samples=1200 hz=120 terrain=801x801 controller=outside-timing position={position:?} field_friction={}",
-                physics.name(),
+                "meadow timing run={run} driving={driving} speed={speed:.9} median={:.6} p95={:.6} p99={:.6} max={:.6} ms/step; samples=1200 hz=120 terrain=1201x1201 controller=outside-timing position={position:?} field_friction={field_friction}",
                 samples[600],
                 samples[1140],
                 samples[1188],
                 samples[1199],
-                molla && field_friction,
             );
-            if molla {
-                fixture.verify(1.8, driving);
-            }
+            fixture.verify(1.8, driving);
         }
     }
 }

@@ -12,7 +12,7 @@ use bevy::ecs::hierarchy::Children;
 use bevy::ecs::world::World;
 use bevy::math::{Quat, Vec3};
 use bevy::mesh::Mesh3d;
-use openusd::sdf::Value;
+use openusd::vt::Value;
 use openusd::usd::Stage;
 use usd_bevy::route::physics as up;
 
@@ -29,6 +29,19 @@ pub struct StageMeta {
     /// Rotation that takes USD-native vectors into Bevy world space
     /// (identity for Y-up stages; -π/2 about X for Z-up).
     pub basis_rotation: Quat,
+}
+
+impl StageMeta {
+    /// The machine model's unit factors, so the runtime converts with the
+    /// same formulas the manifest reports.
+    pub fn units(&self) -> crate::machine_model::StageUnits {
+        use crate::machine_model::{StageUnits, UpAxis, Valued};
+        StageUnits {
+            meters_per_unit: Valued::authored(self.meters_per_unit as f64),
+            kilograms_per_unit: Valued::authored(self.kilograms_per_unit as f64),
+            up_axis: Valued::authored(if self.basis_rotation == Quat::IDENTITY { UpAxis::Y } else { UpAxis::Z }),
+        }
+    }
 }
 
 impl Default for StageMeta {
@@ -237,23 +250,27 @@ pub fn attach_physics_to_entity(
             "distance" => UsdJointKind::Distance,
             _ => UsdJointKind::Generic,
         };
-        let built_in_limit = match (kind, joint.lower, joint.upper) {
-            (UsdJointKind::Revolute, Some(lo), Some(hi)) => {
-                Some((lo.to_radians(), hi.to_radians()))
+        let units = meta.units();
+        let side = |v: Option<f32>, open: f32, rotational: bool| match v {
+            Some(v) if v.is_finite() => units.coordinate(rotational, v as f64) as f32,
+            _ => open,
+        };
+        let built_in_limit = match kind {
+            UsdJointKind::Revolute | UsdJointKind::Prismatic if joint.lower.is_some() || joint.upper.is_some() => {
+                let rotational = kind == UsdJointKind::Revolute;
+                Some((side(joint.lower, f32::NEG_INFINITY, rotational), side(joint.upper, f32::INFINITY, rotational)))
             }
-            (UsdJointKind::Prismatic, Some(lo), Some(hi)) => {
-                Some((lo * meta.meters_per_unit, hi * meta.meters_per_unit))
-            }
             _ => None,
         };
-        let cone_limit = match (joint.cone_angle0, joint.cone_angle1) {
-            (Some(a), Some(b)) => Some((a.to_radians(), b.to_radians())),
-            _ => None,
-        };
-        let distance_limit = match (joint.min_distance, joint.max_distance) {
-            (Some(lo), Some(hi)) => Some((lo * meta.meters_per_unit, hi * meta.meters_per_unit)),
-            _ => None,
-        };
+        // A side left unauthored keeps USD's -1: no limit there.
+        let open = |side: Option<f32>, scale: f32| side.map_or(-1.0, |v| if v < 0.0 { v } else { v * scale });
+        let cone_limit = (joint.cone_angle0.is_some() || joint.cone_angle1.is_some()).then(|| {
+            let radians = std::f32::consts::PI / 180.0;
+            (open(joint.cone_angle0, radians), open(joint.cone_angle1, radians))
+        });
+        let distance_limit = (joint.min_distance.is_some() || joint.max_distance.is_some()).then(|| {
+            (open(joint.min_distance, meta.meters_per_unit), open(joint.max_distance, meta.meters_per_unit))
+        });
         let limits = world
             .get::<up::UsdLimits>(entity)
             .map(|l| l.0.iter().map(|l| convert_limit(l, meta)).collect())
@@ -274,8 +291,11 @@ pub fn attach_physics_to_entity(
             joint_enabled: joint.enabled,
             collision_enabled: joint.collision_enabled,
             exclude_from_articulation: joint.exclude_from_articulation,
-            break_force: joint.break_force,
-            break_torque: joint.break_torque,
+            softness: None,
+            friction: None,
+            rolling: None,
+            break_force: joint.break_force.map(|f| units.effort(false, f as f64) as f32),
+            break_torque: joint.break_torque.map(|t| units.effort(true, t as f64) as f32),
             built_in_limit,
             cone_limit,
             distance_limit,
@@ -293,14 +313,24 @@ pub fn resolve_pending_physics(
     pending: &PendingPhysics,
     prim_paths: &HashMap<String, Entity>,
 ) {
+    let mark = |path: &Option<String>| match path {
+        None => EndpointMark::Absent,
+        Some(p) => prim_paths.get(p).map_or_else(|| EndpointMark::Unresolved(p.clone()), |e| EndpointMark::Resolved(*e)),
+    };
+    let stage_root = prim_paths.get("/").copied();
     for (joint_entity, body0_path, body1_path) in &pending.joints {
         let body0 = body0_path.as_ref().and_then(|p| prim_paths.get(p).copied());
         let body1 = body1_path.as_ref().and_then(|p| prim_paths.get(p).copied());
+        let path = world
+            .get::<usd_bevy::UsdPrimRef>(*joint_entity)
+            .map(|p| p.path.clone())
+            .unwrap_or_default();
         if let Ok(mut entity_mut) = world.get_entity_mut(*joint_entity)
-            && let Some(mut joint) = entity_mut.get_mut::<UsdPhysicsJoint>()
+            && let Some(joint) = entity_mut.get::<UsdPhysicsJoint>()
         {
-            joint.body0 = body0;
-            joint.body1 = body1;
+            let joint = UsdPhysicsJoint { body0, body1, ..joint.clone() };
+            let endpoints = JointEndpoints { path, body0: mark(body0_path), body1: mark(body1_path), stage_root };
+            entity_mut.insert((joint, endpoints));
         }
     }
 
@@ -423,40 +453,59 @@ fn dof_is_rotational(d: UsdDof) -> bool {
     )
 }
 
-fn convert_limit(l: &up::UsdLimit, meta: &StageMeta) -> UsdJointLimit {
-    let dof = dof(&l.dof).unwrap_or_default();
-    let (low, high) = (l.low.unwrap_or(0.0), l.high.unwrap_or(0.0));
-    let (low, high) = if dof_is_rotational(dof) {
-        (low.to_radians(), high.to_radians())
-    } else {
-        (low * meta.meters_per_unit, high * meta.meters_per_unit)
-    };
-    UsdJointLimit { dof, low, high }
+pub fn attach_joint_softness(world: &mut World, entity: Entity, stage: &Stage, path: &str) {
+    let Some(mut joint) = world.get::<UsdPhysicsJoint>(entity).cloned() else { return; };
+    let Ok(prim) = openusd::sdf::path(path) else { return; };
+    let read = |name| crate::controller::read_float(stage, &prim, name).map(f64::from);
+    let frequency = read("gearbox:joint:frequencyHz");
+    let ratio = read("gearbox:joint:dampingRatio").unwrap_or(1.0);
+    if let Some(frequency) = frequency.filter(|v| v.is_finite() && *v > 0.0)
+        && ratio.is_finite() && ratio >= 0.0
+    {
+        joint.softness = Some((frequency, ratio));
+    }
+    joint.friction = read("gearbox:joint:frictionTorque").filter(|v| v.is_finite() && *v > 0.0);
+    joint.rolling = read("gearbox:joint:rollingResistance")
+        .zip(read("gearbox:joint:rollingRadius"))
+        .filter(|(c, r)| c.is_finite() && r.is_finite() && *c > 0.0 && *r > 0.0);
+    world.entity_mut(entity).insert(joint);
 }
 
+/// A D6 axis limit in SI; an unauthored side is open.
+fn convert_limit(l: &up::UsdLimit, meta: &StageMeta) -> UsdJointLimit {
+    let dof = dof(&l.dof).unwrap_or_default();
+    let units = meta.units();
+    let rotational = dof_is_rotational(dof);
+    let side = |v: Option<f32>, open: f32| match v {
+        Some(v) if v.is_finite() => units.coordinate(rotational, v as f64) as f32,
+        Some(v) => v,
+        None => open,
+    };
+    UsdJointLimit { dof, low: side(l.low, f32::NEG_INFINITY), high: side(l.high, f32::INFINITY) }
+}
+
+/// A drive in SI through the machine model's dimensional conversions: gains
+/// by drive type and DOF, an infinite `maxForce` as no cap.
 fn convert_drive(d: &up::UsdDrive, meta: &StageMeta) -> UsdJointDrive {
     let dof = dof(&d.dof).unwrap_or_default();
     let rot = dof_is_rotational(dof);
-    let pos_scale = if rot {
-        PI / 180.0
-    } else {
-        meta.meters_per_unit
+    let units = meta.units();
+    let drive_type = match d.drive_type.as_deref() {
+        Some("acceleration") => crate::machine_model::DriveType::Acceleration,
+        _ => crate::machine_model::DriveType::Force,
     };
-    let dyn_scale = if rot {
-        180.0 / PI
-    } else {
-        1.0 / meta.meters_per_unit
-    };
+    let gain = |v: Option<f32>| units.drive_gain(rot, drive_type, v.unwrap_or(0.0) as f64) as f32;
+    let coordinate = |v: f32| units.coordinate(rot, v as f64) as f32;
     UsdJointDrive {
         dof,
-        drive_type: match d.drive_type.as_deref() {
-            Some("acceleration") => UsdDriveType::Acceleration,
-            _ => UsdDriveType::Force,
+        drive_type: match drive_type {
+            crate::machine_model::DriveType::Acceleration => UsdDriveType::Acceleration,
+            crate::machine_model::DriveType::Force => UsdDriveType::Force,
         },
-        target_position: d.target_position.map(|v| v * pos_scale),
-        target_velocity: d.target_velocity.map(|v| v * pos_scale),
-        damping: d.damping.unwrap_or(0.0) * dyn_scale,
-        stiffness: d.stiffness.unwrap_or(0.0) * dyn_scale,
-        max_force: d.max_force,
+        target_position: d.target_position.map(coordinate),
+        target_velocity: d.target_velocity.map(coordinate),
+        damping: gain(d.damping),
+        stiffness: gain(d.stiffness),
+        max_force: d.max_force.filter(|f| f.is_finite()).map(|f| units.effort(rot, f as f64) as f32),
     }
 }

@@ -32,7 +32,7 @@ impl egui::Plugin for Replay {
         "gearbox-ui-replay"
     }
 
-    fn input_hook(&mut self, input: &mut RawInput) {
+    fn input_hook(&mut self, _ctx: &egui::Context, input: &mut RawInput) {
         let now = Instant::now();
         if self.queue.is_empty()
             && self
@@ -86,14 +86,19 @@ fn parse(script: &str) -> Result<VecDeque<Step>, String> {
         };
         match action {
             "move" => steps.push_back(Step::Event(Event::PointerMoved(egui::pos2(point(0)?, point(1)?)))),
-            "down" | "up" => steps.push_back(Step::Event(button(point(0)?, point(1)?, action == "down"))),
+            "down" | "up" => {
+                let which = which_button(args.get(2).copied()).ok_or_else(error)?;
+                steps.push_back(Step::Event(button(point(0)?, point(1)?, which, action == "down")));
+            }
             "click" => {
                 let (x, y) = (point(0)?, point(1)?);
+                let which = which_button(args.get(2).copied()).ok_or_else(error)?;
                 steps.push_back(Step::Event(Event::PointerMoved(egui::pos2(x, y))));
-                steps.push_back(Step::Event(button(x, y, true)));
-                steps.push_back(Step::Event(button(x, y, false)));
+                steps.push_back(Step::Event(button(x, y, which, true)));
+                steps.push_back(Step::Event(button(x, y, which, false)));
             }
             "scroll" => steps.push_back(Step::Event(Event::MouseWheel {
+                source: egui::MouseWheelSource::Unknown,
                 unit: egui::MouseWheelUnit::Point,
                 phase: egui::TouchPhase::Move,
                 delta: egui::vec2(point(0)?, point(1)?),
@@ -127,12 +132,24 @@ fn parse(script: &str) -> Result<VecDeque<Step>, String> {
     Ok(steps)
 }
 
-fn button(x: f32, y: f32, pressed: bool) -> Event {
+fn button(x: f32, y: f32, button: PointerButton, pressed: bool) -> Event {
     Event::PointerButton {
         pos: egui::pos2(x, y),
-        button: PointerButton::Primary,
+        button,
         pressed,
         modifiers: Modifiers::NONE,
+    }
+}
+
+/// Which button a `down`/`up`/`click` step names, the primary when it names
+/// none. Panning and orbiting are different buttons, so a script that cannot
+/// say which one it presses cannot test either of them.
+fn which_button(name: Option<&str>) -> Option<PointerButton> {
+    match name {
+        None | Some("primary") | Some("left") => Some(PointerButton::Primary),
+        Some("middle") => Some(PointerButton::Middle),
+        Some("secondary") | Some("right") => Some(PointerButton::Secondary),
+        Some(_) => None,
     }
 }
 

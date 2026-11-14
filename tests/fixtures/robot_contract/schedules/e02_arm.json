@@ -1,0 +1,28 @@
+{
+  "fixture": "e01_arm.usda",
+  "overlay": "e01_arm_gearbox.usda",
+  "root": "/arm",
+  "tool": "/arm/carriage/tool_tip",
+  "physics_hz": 120,
+  "ticks": 600,
+  "commands": [
+    { "tick": 0, "dof": "shoulder", "mode": "position", "value": 0.5 },
+    { "tick": 0, "dof": "slide", "mode": "position", "value": 0.1 },
+    { "tick": 120, "dof": "shoulder", "mode": "velocity", "value": 0.5 },
+    { "tick": 240, "dof": "shoulder", "mode": "effort", "value": 2.0 },
+    { "tick": 240, "dof": "slide", "mode": "effort", "value": -0.5 },
+    { "tick": 360, "dof": "shoulder", "mode": "hold" },
+    { "tick": 360, "dof": "slide", "mode": "hold" },
+    { "tick": 480, "dof": "shoulder", "mode": "free" }
+  ],
+  "tolerances": {
+    "structure_length_m": 1e-6,
+    "structure_angle_rad": 1e-6,
+    "structure_scalar_relative": 1e-5,
+    "target_absolute": 1e-9,
+    "position_settle_rad_or_m": 0.02,
+    "velocity_relative": 0.05,
+    "effort_acceleration_relative": 0.1,
+    "hold_drift_rad_or_m": 0.01
+  }
+}

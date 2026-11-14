@@ -1,6 +1,5 @@
-//! Boundary conversions between Bevy's f32 glam types and Rapier's
-//! f64 glam types. `rapier3d-f64` exposes its math as `glam::DVec3` /
-//! `glam::DQuat`, so this is just an f32 ↔ f64 cast.
+//! Boundary conversions between Bevy's f32 glam types and the physics'
+//! f64 `glam::DVec3` / `glam::DQuat`: just an f32 ↔ f64 cast.
 
 use bevy::math::{Quat, Vec3};
 use glam::{DQuat, DVec3};

@@ -13,15 +13,14 @@ pub(super) struct ParkingBrakes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::backend::{BodyDesc, JointDesc, JointKind};
-    use crate::physics::{MollaBackend, PhysicsWorld, RapierBackend};
+    use crate::physics::backend::{BodyDesc, Inertia, JointDesc, JointKind, MassProps, Pose};
+    use crate::physics::PhysicsWorld;
 
-    fn fixture(molla: bool) -> (PhysicsWorld, JointVelocityTarget, JointId) {
-        let mut physics = PhysicsWorld::with_backend(if molla {
-            Box::new(MollaBackend::default())
-        } else {
-            Box::new(RapierBackend::default())
-        });
+    /// A wheel on a revolute joint to a fixed parent. With `looped` the
+    /// wheel already hangs from the parent through a hub, so the wheel joint
+    /// is a loop closure and has no joint coordinate.
+    fn fixture(looped: bool) -> (PhysicsWorld, JointVelocityTarget, JointId) {
+        let mut physics = PhysicsWorld::default();
         physics.set_gravity(DVec3::ZERO);
         let parent = physics.insert_body(BodyDesc::fixed());
         let mut desc = BodyDesc::dynamic();
@@ -30,16 +29,16 @@ mod tests {
             local_com: DVec3::ZERO,
             inertia: Inertia::Principal(DVec3::splat(2.0)),
         });
-        let wheel = physics.insert_body(desc);
-        let joint = physics.insert_joint(
-            parent,
-            wheel,
-            JointDesc::new(
-                JointKind::Revolute { axis: DVec3::Z },
-                Pose::IDENTITY,
-                Pose::IDENTITY,
-            ),
-        );
+        let wheel = physics.insert_body(desc.clone());
+        let spin = || JointDesc::new(JointKind::Revolute { axis: DVec3::Z }, Pose::IDENTITY, Pose::IDENTITY);
+        if looped {
+            let hub = physics.insert_body(desc);
+            physics.insert_joint(parent, hub, spin());
+            physics.insert_joint(hub, wheel, spin());
+        }
+        let mut wheel_joint = spin();
+        wheel_joint.loop_closure = looped;
+        let joint = physics.insert_joint(parent, wheel, wheel_joint);
         (
             physics,
             JointVelocityTarget {
@@ -60,14 +59,14 @@ mod tests {
         parked: bool,
     ) {
         let holds = brakes.prepare(physics, &[target], parked);
-        apply_joint_motors_with_holds(physics, &[target], &[], None, &holds);
+        apply_joint_motors_with_holds(physics, &controller_owner("parking", "drive"), &[target], &[], None, &holds);
         physics.step();
         assert!(physics.quarantined.is_empty());
     }
 
     #[test]
     fn hold_captures_unwrapped_angle_resists_load_and_releases() {
-        let (mut physics, mut target, joint) = fixture(true);
+        let (mut physics, mut target, joint) = fixture(false);
         let mut brakes = ParkingBrakes::default();
         for _ in 0..360 {
             tick(&mut physics, &mut brakes, target, false);
@@ -138,7 +137,7 @@ mod tests {
 
     #[test]
     fn overload_slips_with_bounded_reference_instead_of_locking() {
-        let (mut physics, mut target, joint) = fixture(true);
+        let (mut physics, mut target, joint) = fixture(false);
         let mut brakes = ParkingBrakes::default();
         target.velocity = 0.0;
         physics
@@ -173,7 +172,7 @@ mod tests {
 
     #[test]
     fn unavailable_coordinate_keeps_existing_velocity_brake() {
-        let (mut physics, mut target, joint) = fixture(false);
+        let (mut physics, mut target, joint) = fixture(true);
         let mut brakes = ParkingBrakes::default();
         target.velocity = 0.0;
         tick(&mut physics, &mut brakes, target, true);
@@ -189,7 +188,7 @@ mod tests {
 
     #[test]
     fn unchanged_hold_does_not_wake_and_releasing_it_resumes_rotation() {
-        let (mut physics, mut target, joint) = fixture(true);
+        let (mut physics, mut target, joint) = fixture(false);
         let mut brakes = ParkingBrakes::default();
         target.velocity = 0.0;
         tick(&mut physics, &mut brakes, target, true);
@@ -223,7 +222,7 @@ impl ParkingBrakes {
         parked: bool,
     ) {
         let holds = self.prepare(physics, targets, parked);
-        apply_holds(physics, &holds);
+        apply_holds(physics, &controller_owner("parking", "drive"), &holds);
     }
 
     /// Capture bounded position commands for eligible wheel joints.
@@ -277,16 +276,17 @@ pub(super) struct HoldTarget {
     max_torque: f64,
 }
 
-pub(super) fn apply_holds(physics: &mut crate::physics::PhysicsWorld, holds: &[HoldTarget]) -> bool {
+pub(super) fn apply_holds(physics: &mut crate::physics::PhysicsWorld, owner: &crate::joint_control::OwnerId, holds: &[HoldTarget]) -> bool {
     let mut applied = false;
     for hold in holds {
-        if let Some(joint) = physics.joint_mut(hold.joint, false) {
-            joint.set_motor_model(JointAxis::AngX, MotorModel::Force);
-            joint.set_motor_position(JointAxis::AngX, hold.position,
-                hold.max_torque / HOLD_COMPLIANCE_RAD, hold.max_torque / HOLD_DAMPING_SPEED_RAD_S);
-            joint.set_motor_max_force(JointAxis::AngX, hold.max_torque);
-            applied = true;
-        }
+        let setpoint = crate::joint_control::Setpoint::Servo {
+            q: Some(hold.position),
+            qdot: 0.0,
+            stiffness: hold.max_torque / HOLD_COMPLIANCE_RAD,
+            damping: hold.max_torque / HOLD_DAMPING_SPEED_RAD_S,
+            drive: crate::machine_model::DriveType::Force,
+        };
+        applied |= physics.submit(owner, hold.joint, JointAxis::AngX, setpoint, Some(hold.max_torque)).is_ok();
     }
     applied
 }

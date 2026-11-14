@@ -45,6 +45,9 @@ struct AntiRepeatTerrainExtension {
     worn: WornStubble,
     #[uniform(114)]
     trail: crate::bare::DrivenTrail,
+    /// Where a tool has worked this stubble into soil, as `tillage` stamps it.
+    #[texture(115, sample_type = "u_int")]
+    work: Handle<Image>,
 }
 
 /// A way worn across the stubble. The same six numbers the meadow carries: what
@@ -97,7 +100,7 @@ impl WornStubble {
 
 impl MaterialExtension for AntiRepeatTerrainExtension {
     fn fragment_shader() -> ShaderRef {
-        "embedded://gearbox_fields/harvested_wheat/shaders/material.wgsl".into()
+        "embedded://gearbox_fields/harvested_wheat/shaders/material.wesl".into()
     }
 }
 
@@ -188,6 +191,7 @@ fn apply_anti_repeat_material_to_usd_terrain(
                             // A stubble authored in USD belongs to no field, so
                             // no way crosses it: a zero tread wears nothing.
                             worn: WornStubble::default(),
+                            work: inactive.clone(),
                         },
                     })
                 })
@@ -224,9 +228,9 @@ fn carry_trail(
 
 impl Plugin for HarvestedWheatPlugin {
     fn build(&self, app: &mut App) {
-        bevy::asset::embedded_asset!(app, "shaders/patches.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/material.wgsl");
-        bevy::asset::embedded_asset!(app, "shaders/vegetation.wgsl");
+        bevy::shader::load_shader_library!(app, "shaders/patches.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/material.wesl");
+        bevy::shader::load_shader_library!(app, "shaders/vegetation.wesl");
         bevy::asset::embedded_asset!(app, "textures/soil_albedo.jpg");
         bevy::asset::embedded_asset!(app, "textures/soil_height.jpg");
         bevy::asset::embedded_asset!(app, "textures/detail_albedo.jpg");
@@ -253,63 +257,93 @@ impl Plugin for HarvestedWheatPlugin {
                 },
                 // Stalks at three levels of detail, one root population.
                 layers: vec![VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: stalk_near,
                     density: stalks,
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
                     follow_grass: 0.0,
+                    cutout: false,
+                    way_only: false,
+                    worked_only: false,
+                    blade: None,
+                    sieve: None,
                     albedo: None,
                     lod_band: STALK_NEAR_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: stalk_mid,
                     density: stalks,
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
                     follow_grass: 0.0,
+                    cutout: false,
+                    way_only: false,
+                    worked_only: false,
+                    blade: None,
+                    sieve: None,
                     albedo: None,
                     lod_band: STALK_MID_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: stalk_far,
                     density: stalks,
                     fade_start: 5.0,
                     fade_end: 32.0,
                     inverse_square_thinning: true,
                     follow_grass: 0.0,
+                    cutout: false,
+                    way_only: false,
+                    worked_only: false,
+                    blade: None,
+                    sieve: None,
                     albedo: None,
                     lod_band: STALK_FAR_BAND,
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: straw_template,
                     density: if density > 0.0 { 500.0 } else { 0.0 },
                     fade_start: 8.0,
                     fade_end: 48.0,
                     inverse_square_thinning: true,
                     follow_grass: 0.0,
+                    cutout: false,
+                    way_only: false,
+                    worked_only: false,
+                    blade: None,
+                    sieve: None,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: leaf_template,
                     density: if density > 0.0 { 60.0 } else { 0.0 },
                     fade_start: 16.0,
                     fade_end: 80.0,
                     inverse_square_thinning: true,
                     follow_grass: 0.0,
+                    cutout: false,
+                    way_only: false,
+                    worked_only: false,
+                    blade: None,
+                    sieve: None,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, VegetationLayer {
-                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wgsl",
+                    shader: "embedded://gearbox_fields/harvested_wheat/shaders/vegetation.wesl",
                     template: super::canopy::template,
                     density: (density / 6000.0) * 80.0,
                     fade_start: 12.0,
                     fade_end: super::canopy::FADE_END_M,
                     inverse_square_thinning: true,
                     follow_grass: 0.0,
+                    cutout: true,
+                    way_only: false,
+                    worked_only: false,
+                    blade: None,
+                    sieve: None,
                     albedo: None,
                     lod_band: [0.0, f32::MAX],
                 }, super::clumps::sorrel(share * 15.0, 32.0),
@@ -320,10 +354,14 @@ impl Plugin for HarvestedWheatPlugin {
                 super::clumps::nettle(share * 0.35, 30.0),
                 // Chippings where a track crosses the stubble.
                 super::bare::way_grit(5200.0),
-                super::bare::way_litter(2600.0)],
+                super::bare::way_litter(2600.0)]
+                    .into_iter()
+                    .chain(super::tillage::relief_layers())
+                    .collect(),
                 ground: create_ground,
                 tread: Vec4::ZERO,
                 soft_border: 0.7,
+                workable: true,
                 surface_tint: Vec4::new(0.145, 0.120, 0.062, 1.0),
             });
     }
@@ -335,6 +373,7 @@ fn create_ground(
     wheels: WheelMapParams,
     geometry: SurfaceGeometry,
     placed: crate::profile::Placed,
+    work: Handle<Image>,
 ) -> Arc<dyn GroundSurface> {
     let assets = world.resource::<AssetServer>();
     let extension = AntiRepeatTerrainExtension {
@@ -357,6 +396,7 @@ fn create_ground(
         heightmap: Some(geometry.heightmap),
         geometry: geometry.params,
         worn: WornStubble::of(&placed),
+        work,
     };
     let material = world
         .resource_mut::<Assets<AntiRepeatTerrainMaterial>>()

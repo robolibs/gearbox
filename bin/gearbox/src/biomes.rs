@@ -55,7 +55,7 @@ fn carry_the_air(
     mut ambient: ResMut<AmbientWind>,
     mut budget: ResMut<MoteBudget>,
     mut images: ResMut<Assets<Image>>,
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<&GlobalTransform, (With<Camera3d>, Without<crate::sensor_cameras::SensorCamera>)>,
 ) {
     if ambient.gust_map.is_none() {
         ambient.gust_map = Some(images.add(gust_map()));

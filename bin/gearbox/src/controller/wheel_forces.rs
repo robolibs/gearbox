@@ -58,6 +58,8 @@ fn reference_rubber_radius(
 #[derive(Default)]
 pub(super) struct Registrations {
     wheels: HashMap<BodyId, Registration>,
+    /// The output each wheel's readout last wrote.
+    readouts: HashMap<BodyId, WheelForceOutput>,
     axles: HashMap<String, (Vec<(BodyId, Option<u16>)>, HashMap<BodyId, u16>)>,
     invalid_axles: HashSet<String>,
 }
@@ -168,7 +170,8 @@ fn tyre_properties(link: Option<&crate::links::LinkSpec>, width: f64) -> Pressur
     tyre
 }
 
-fn pressure_readout(
+/// The tyre's pressures, which the API, the panes and loading also write.
+fn pressure_settings(
     values: &mut crate::services::LinkValues,
     machine: &str,
     link: &str,
@@ -182,6 +185,19 @@ fn pressure_readout(
         ),
         ("tyre_min_pressure_bar", tyre.min_pressure_pa / 100_000.0),
         ("tyre_max_pressure_bar", tyre.max_pressure_pa / 100_000.0),
+    ] {
+        values.set(machine, link, name, value);
+    }
+}
+
+fn pressure_readout(
+    values: &mut crate::services::LinkValues,
+    machine: &str,
+    link: &str,
+    tyre: PressureTyreOutput,
+) {
+    pressure_settings(values, machine, link, tyre);
+    for (name, value) in [
         ("tyre_loaded_radius_m", tyre.loaded_radius),
         ("tyre_deflection_m", tyre.deflection),
         ("tyre_patch_length_m", tyre.patch_length),
@@ -231,7 +247,7 @@ fn wheel_readout(
 mod tests {
     use super::*;
     use crate::physics::backend::{
-        BodyDesc, ColliderDesc, DQuat, Inertia, JointDesc, JointKind, MassProps,
+        BodyDesc, ColliderDesc, DQuat, Inertia, JointDesc, JointKind, MassProps, Pose,
     };
 
     #[test]
@@ -270,11 +286,11 @@ mod tests {
         ] {
             assert_eq!(values.get("machine", "wheel", name), Some(expected), "{name}");
         }
-        assert!(values.of_machine("other").is_empty());
+        assert!(values.of_machine("other").next().is_none());
         wheel_readout(&mut values, "machine", "wheel", WheelForceOutput {
             pressure: Some(PressureTyreOutput::default()), ..Default::default()
         });
-        assert!(values.of_link("machine", "wheel").values().all(|v| *v == 0.0));
+        assert!(values.of_link("machine", "wheel").all(|(_, v)| v == 0.0));
     }
 
     #[test]
@@ -339,6 +355,7 @@ mod tests {
     #[test]
     fn scene_wheels_feed_traction_and_tracks_from_tyre_output() {
         let mut app = App::new();
+        app.add_plugins(crate::prim_index::PrimIndexPlugin);
         let root = app.world_mut().spawn_empty().id();
         let chassis_entity = app
             .world_mut()
@@ -350,7 +367,6 @@ mod tests {
             .id();
         let mut physics = crate::physics::PhysicsWorld::default();
         physics.set_gravity(DVec3::ZERO);
-        let force_backend = physics.uses_wheel_forces();
         let rotation = DQuat::from_mat3(&glam::DMat3::from_cols(-DVec3::Z, -DVec3::X, DVec3::Y));
         let mut desc = BodyDesc::dynamic().pose(Pose::new(DVec3::Y * 3.49, rotation));
         desc.additional_mass = Some(MassProps {
@@ -415,10 +431,13 @@ mod tests {
                 coupling: None,
                 element: None,
                 values: Vec::new(),
+                sensor: None,
             }],
             ..Default::default()
         };
         let machine = MachineInstanceSpec {
+            tracks: Vec::new(),
+            devices: Vec::new(),
             scene_root: Some(root),
             asset_label: "test".into(),
             source_path: String::new(),
@@ -427,10 +446,7 @@ mod tests {
             kind: None,
             interface_version: None,
             id_policy: String::new(),
-            up_axis: None,
             body: Some("/machine/chassis".into()),
-            visuals: Vec::new(),
-            colliders: Vec::new(),
             sensors: Vec::new(),
             powered_wheel_joints: Vec::new(),
             passive_wheel_joints: Vec::new(),
@@ -441,6 +457,7 @@ mod tests {
             controllers: Vec::new(),
             links,
             grants: Vec::new(),
+            model: None,
         };
         let mut runtime = ControllerRuntimeState::default();
         runtime
@@ -479,123 +496,118 @@ mod tests {
             );
         app.update();
         let physics = app.world().resource::<crate::physics::PhysicsWorld>();
-        if force_backend {
-            assert_eq!(
-                app.world().resource::<crate::services::LinkValues>().get(
-                    "test",
-                    "wheel",
-                    "tyre_axle"
-                ),
-                Some(1.0)
-            );
-            let output = physics.wheel_output(wheel).unwrap();
-            assert!(output.in_contact && output.normal_force > 0.0);
-            assert!(physics.contacts_with(ground).is_empty());
-            let support = crate::controller::traction::wheel_support(physics, chassis, wheel);
-            assert!((support.grip_force_n - output.grip_force).abs() < 1e-8);
-            assert!((support.normal - output.normal).length() < 1e-8);
-            let tracks = app.world().resource::<gearbox_fields::WheelContacts>();
-            assert_eq!(tracks.contacts.len(), 1);
-            assert!(tracks.contacts[0].position.y > 2.9);
-            let pressure = output.pressure.unwrap();
-            assert!((pressure.radius - 0.55).abs() < 1e-6);
-            assert_eq!(
-                tracks.contacts[0].length,
-                Some(pressure.patch_length as f32)
-            );
-            assert_eq!(tracks.contacts[0].width, pressure.patch_width as f32);
-            assert_eq!(
-                app.world().resource::<crate::services::LinkValues>().get(
-                    "test",
-                    "wheel",
-                    "normal_force"
-                ),
-                Some(output.normal_force)
-            );
-            let initial_pressure = pressure.pressure_pa;
-            app.world_mut().resource_mut::<Assets<Mesh>>().get_mut(&rubber).unwrap()
-                .insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0, -0.4, 0.0]; 3]);
-            app.world_mut()
-                .resource_mut::<gearbox_api::PhysicsActive>()
-                .0 = false;
-            app.world_mut()
-                .resource_mut::<crate::services::LinkValues>()
-                .set("test", "wheel", "tyre_target_pressure_bar", 2.2);
-            app.update();
-            let paused = app
-                .world()
+        assert_eq!(
+            app.world().resource::<crate::services::LinkValues>().get(
+                "test",
+                "wheel",
+                "tyre_axle"
+            ),
+            Some(1.0)
+        );
+        let output = physics.wheel_output(wheel).unwrap();
+        assert!(output.in_contact && output.normal_force > 0.0);
+        assert!(physics.contacts_with(ground).is_empty());
+        let support = crate::controller::traction::wheel_support(physics, chassis, wheel);
+        assert!((support.grip_force_n - output.grip_force).abs() < 1e-8);
+        assert!((support.normal - output.normal).length() < 1e-8);
+        let tracks = app.world().resource::<gearbox_fields::WheelContacts>();
+        assert_eq!(tracks.contacts.len(), 1);
+        assert!(tracks.contacts[0].position.y > 2.9);
+        let pressure = output.pressure.unwrap();
+        assert!((pressure.radius - 0.55).abs() < 1e-6);
+        assert_eq!(
+            tracks.contacts[0].length,
+            Some(pressure.patch_length as f32)
+        );
+        assert_eq!(tracks.contacts[0].width, pressure.patch_width as f32);
+        assert_eq!(
+            app.world().resource::<crate::services::LinkValues>().get(
+                "test",
+                "wheel",
+                "normal_force"
+            ),
+            Some(output.normal_force)
+        );
+        let initial_pressure = pressure.pressure_pa;
+        app.world_mut().resource_mut::<Assets<Mesh>>().get_mut(&rubber).unwrap()
+            .insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0, -0.4, 0.0]; 3]);
+        app.world_mut()
+            .resource_mut::<gearbox_api::PhysicsActive>()
+            .0 = false;
+        app.world_mut()
+            .resource_mut::<crate::services::LinkValues>()
+            .set("test", "wheel", "tyre_target_pressure_bar", 2.2);
+        app.update();
+        let paused = app
+            .world()
+            .resource::<crate::physics::PhysicsWorld>()
+            .wheel_output(wheel)
+            .unwrap();
+        assert_eq!(paused.normal_force, output.normal_force);
+        assert_eq!(paused.pressure.unwrap().pressure_pa, initial_pressure);
+        assert_eq!(paused.pressure.unwrap().radius, pressure.radius);
+        assert!((paused.pressure.unwrap().target_pressure_pa - 220_000.0).abs() < 1e-8);
+        let values = app.world().resource::<crate::services::LinkValues>();
+        for (name, expected) in [
+            ("tyre_force_world_x_n", paused.force.x),
+            ("tyre_force_world_y_n", paused.force.y),
+            ("tyre_force_world_z_n", paused.force.z),
+            ("tyre_normal_load_n", paused.normal_force),
+            ("tyre_slip_ratio", paused.slip_ratio),
+            ("tyre_slip_angle_rad", paused.slip_angle),
+            ("tyre_rolling_moment_nm", paused.pressure.unwrap().rolling_moment.length()),
+        ] {
+            assert_eq!(values.get("test", "wheel", name), Some(expected), "{name}");
+        }
+        app.world_mut()
+            .resource_mut::<crate::services::LinkValues>()
+            .set("test", "wheel", "tyre_target_pressure_bar", f64::NAN);
+        app.update();
+        assert_eq!(
+            app.world().resource::<crate::services::LinkValues>().get(
+                "test",
+                "wheel",
+                "tyre_target_pressure_bar"
+            ),
+            Some(2.2)
+        );
+        app.world_mut()
+            .resource_mut::<gearbox_api::PhysicsActive>()
+            .0 = true;
+        app.update();
+        assert!(
+            app.world()
                 .resource::<crate::physics::PhysicsWorld>()
                 .wheel_output(wheel)
-                .unwrap();
-            assert_eq!(paused.normal_force, output.normal_force);
-            assert_eq!(paused.pressure.unwrap().pressure_pa, initial_pressure);
-            assert_eq!(paused.pressure.unwrap().radius, pressure.radius);
-            assert!((paused.pressure.unwrap().target_pressure_pa - 220_000.0).abs() < 1e-8);
-            let values = app.world().resource::<crate::services::LinkValues>();
-            for (name, expected) in [
-                ("tyre_force_world_x_n", paused.force.x),
-                ("tyre_force_world_y_n", paused.force.y),
-                ("tyre_force_world_z_n", paused.force.z),
-                ("tyre_normal_load_n", paused.normal_force),
-                ("tyre_slip_ratio", paused.slip_ratio),
-                ("tyre_slip_angle_rad", paused.slip_angle),
-                ("tyre_rolling_moment_nm", paused.pressure.unwrap().rolling_moment.length()),
-            ] {
-                assert_eq!(values.get("test", "wheel", name), Some(expected), "{name}");
-            }
-            app.world_mut()
-                .resource_mut::<crate::services::LinkValues>()
-                .set("test", "wheel", "tyre_target_pressure_bar", f64::NAN);
-            app.update();
-            assert_eq!(
-                app.world().resource::<crate::services::LinkValues>().get(
-                    "test",
-                    "wheel",
-                    "tyre_target_pressure_bar"
-                ),
-                Some(2.2)
-            );
-            app.world_mut()
-                .resource_mut::<gearbox_api::PhysicsActive>()
-                .0 = true;
-            app.update();
-            assert!(
-                app.world()
-                    .resource::<crate::physics::PhysicsWorld>()
-                    .wheel_output(wheel)
-                    .unwrap()
-                    .pressure
-                    .unwrap()
-                    .pressure_pa
-                    > initial_pressure
-            );
-            app.world_mut()
-                .resource_mut::<crate::physics::PhysicsWorld>()
-                .collider_mut(ground)
                 .unwrap()
-                .set_enabled(false);
-            app.world_mut()
-                .resource_mut::<gearbox_fields::WheelContacts>()
+                .pressure
+                .unwrap()
+                .pressure_pa
+                > initial_pressure
+        );
+        app.world_mut()
+            .resource_mut::<crate::physics::PhysicsWorld>()
+            .collider_mut(ground)
+            .unwrap()
+            .set_enabled(false);
+        app.world_mut()
+            .resource_mut::<gearbox_fields::WheelContacts>()
+            .contacts
+            .clear();
+        app.update();
+        assert!(
+            app.world()
+                .resource::<gearbox_fields::WheelContacts>()
                 .contacts
-                .clear();
-            app.update();
-            assert!(
-                app.world()
-                    .resource::<gearbox_fields::WheelContacts>()
-                    .contacts
-                    .is_empty()
-            );
-        } else {
-            assert!(physics.wheel_output(wheel).is_none());
-        }
+                .is_empty()
+        );
     }
 }
 
 pub(super) fn sync_machine_wheel_forces(
     inventory: Res<ControllerInventory>,
     runtime: Res<ControllerRuntimeState>,
-    prims: Query<(Entity, &UsdPrimRef)>,
-    parents: Query<&ChildOf>,
+    index: Res<crate::prim_index::PrimIndex>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
     mut values: ResMut<crate::services::LinkValues>,
     mut registered: Local<Registrations>,
@@ -603,11 +615,11 @@ pub(super) fn sync_machine_wheel_forces(
     visuals: Query<(Entity, &Mesh3d)>,
     hierarchy: TyreHierarchy,
 ) {
-    if !physics.uses_wheel_forces() {
-        return;
-    }
     registered
         .wheels
+        .retain(|body, _| physics.contains_body(*body));
+    registered
+        .readouts
         .retain(|body, _| physics.contains_body(*body));
     registered
         .axles
@@ -615,29 +627,33 @@ pub(super) fn sync_machine_wheel_forces(
     registered
         .invalid_axles
         .retain(|machine| inventory.machines.iter().any(|m| &m.id == machine));
+    // Each body's first hinge joint, free about its axle only.
+    let hinge = JointAxes::ALL.without(JointAxis::AngX);
+    let mut axle_joints = HashMap::new();
+    for id in physics.joints() {
+        if physics.joint(id).is_some_and(|j| j.locked_axes() == hinge)
+            && let Some((a, b)) = physics.joint_bodies(id)
+        {
+            axle_joints.entry(a).or_insert(id);
+            axle_joints.entry(b).or_insert(id);
+        }
+    }
     for machine in &inventory.machines {
+        if !machine.tracks.is_empty() { continue; }
         let Some(root) = machine.scene_root else {
             continue;
         };
         let Some(wheels) = runtime.machine_wheels.get(&machine.id) else {
             continue;
         };
-        let body_paths: HashMap<_, _> = physics.entity_to_body.iter()
-            .filter_map(|(entity, body)| {
-                let (_, prim) = prims.get(*entity).ok()?;
-                is_descendant_of(*entity, root, &parents).then_some((prim.path.as_str(), *body))
-            }).collect();
+        let body_of = |path: &str| index.find(root, path).and_then(|entity| physics.entity_to_body.get(&entity).copied());
         let wheel_links: HashMap<_, _> = machine.links.links.iter().rev()
-            .filter_map(|link| Some((*body_paths.get(link.body_prim.as_deref()?)?, link)))
+            .filter_map(|link| Some((body_of(link.body_prim.as_deref()?)?, link)))
             .collect();
-        let Some(chassis) = machine
-            .body
-            .as_deref()
-            .and_then(|path| body_paths.get(path).copied())
-        else {
+        let Some(chassis) = machine.body.as_deref().and_then(body_of) else {
             continue;
         };
-        let Some(forward) = physics.body(chassis).and_then(body_forward_vector) else {
+        let Some(forward) = physics.chassis(chassis).and_then(|b| body_forward_vector(&b)) else {
             continue;
         };
         let mut axle_geometry = Vec::new();
@@ -711,15 +727,7 @@ pub(super) fn sync_machine_wheel_forces(
             let Some((axle, width, collider_radius)) = body_tyre_geometry(&physics, wheel) else {
                 continue;
             };
-            let joint = physics.joints().into_iter().find(|id| {
-                physics
-                    .joint_bodies(*id)
-                    .is_some_and(|(a, b)| a == wheel || b == wheel)
-                    && physics
-                        .joint(*id)
-                        .is_some_and(|j| j.locked_axes() == JointAxes::ALL.without(JointAxis::AngX))
-            });
-            let Some(joint) = joint else { continue };
+            let Some(joint) = axle_joints.get(&wheel).copied() else { continue };
             let Some(body) = physics.body(wheel) else {
                 continue;
             };
@@ -800,9 +808,13 @@ pub(super) fn sync_machine_wheel_forces(
                 machine.id
             );
         }
+        // Telemetry is written when the output changes; the pressures every frame.
         for (wheel, link) in readouts {
-            if let Some(output) = physics.wheel_output(wheel) {
+            let Some(output) = physics.wheel_output(wheel) else { continue };
+            if registered.readouts.insert(wheel, output) != Some(output) {
                 wheel_readout(&mut values, &machine.id, &link, output);
+            } else if let Some(tyre) = output.pressure {
+                pressure_settings(&mut values, &machine.id, &link, tyre);
             }
         }
     }
@@ -867,7 +879,7 @@ pub(super) fn apply_motion_resistance(
     active: Res<gearbox_api::PhysicsActive>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
-    if !active.0 || !physics.uses_wheel_forces() {
+    if !active.0 {
         return;
     }
     // Given as an impulse over the physics this frame will run, because a
@@ -924,7 +936,7 @@ pub(super) fn apply_motion_resistance(
         if !(drag > 0.0) || !drag.is_finite() {
             continue;
         }
-        let Some(body) = physics.body(chassis) else {
+        let Some(body) = physics.chassis(chassis) else {
             continue;
         };
         // Only the travel over the ground is resisted, and it fades out with

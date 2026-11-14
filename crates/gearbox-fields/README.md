@@ -261,7 +261,7 @@ line.
 
 Layout and `EnvironmentSettings` are startup configuration, not live-editable settings.
 
-### Physical friction in the Molla worktree
+### Physical friction
 
 Layouts may set a dimensionless `default_friction`, and each field may override it
 with `friction`. Missing field values inherit `default_friction`; if that is also
@@ -298,8 +298,7 @@ the last valid map. Changing region bounds/profiles requires terrain reload;
 there is no layout-file watcher. Removing the override restores collider friction.
 
 This publication currently covers procedural terrain only. The material-only USD
-adapter and flat-ground preset do not publish field regions, and the Rapier path
-still uses its original collider friction. This is not soil deformation or a
+adapter and flat-ground preset do not publish field regions. This is not soil deformation or a
 calibrated pressure-dependent surface model.
 
 ## Add a package
@@ -345,7 +344,7 @@ Rectangular maps allocate in proportion to field area, rather than a full terrai
 
 ## Existing USD workflow
 
-`examples/python/bale_run_multi.py` loads `assets/world/terrain.usd`. The harvested-wheat package
+`scripts/control/bale_run_multi.py` loads `assets/world/terrain.usd`. The harvested-wheat package
 preserves its previous material override, authored tint, and cut-hay rows. Loading USD terrain
 retires procedural field entities and their renderer resources with the procedural terrain.
 The legacy USD adapter is material-only: mixed layouts, generated stalks, and field wheel maps

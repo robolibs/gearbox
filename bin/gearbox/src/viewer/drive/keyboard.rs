@@ -13,18 +13,14 @@ pub(super) fn route(
     mut panel: ResMut<MachinePanel>,
     mut ui: ResMut<UiDrive>,
 ) {
-    let root = focus.0.then_some(selection.0).flatten();
-    let target = root.and_then(|root| {
-        let machine = inventory
-            .machines
-            .iter()
-            .find(|m| m.scene_root == Some(root))?;
+    let machine = focus.0.then(|| selection.machine(&inventory)).flatten();
+    let target = machine.and_then(|machine| {
         let controller = machine
             .controllers
             .iter()
             .find(|c| c.enabled && DRIVE_TYPES.contains(&c.controller_type.as_str()))?;
         Some((
-            ControllerKey::new(root, &machine.id, &controller.instance),
+            ControllerKey::new(machine.scene_root?, &machine.id, &controller.instance),
             controller.controller_type == DRIVE_TYPES[0],
         ))
     });
@@ -76,14 +72,25 @@ pub(super) fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controller::{ControllerCommands, ControllerRuntimeState, apply_ui_drive};
+    use crate::controller::{
+        ControllerCommands, ControllerRuntimeState, MachineRef, apply_ui_drive,
+    };
+    use crate::viewer::systems::Selected;
 
     fn fixture() -> (App, [ControllerKey; 2]) {
+        stages(false)
+    }
+
+    /// Two tractors, each in a stage of its own or both in one.
+    fn stages(shared: bool) -> (App, [ControllerKey; 2]) {
         let mut app = App::new();
-        let roots = [
-            app.world_mut().spawn_empty().id(),
-            app.world_mut().spawn_empty().id(),
-        ];
+        let first = app.world_mut().spawn_empty().id();
+        let second = if shared {
+            first
+        } else {
+            app.world_mut().spawn_empty().id()
+        };
+        let roots = [first, second];
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tractor.usd");
         let machine = crate::controller::discover_machines_from_usd(&path)
             .unwrap()
@@ -101,7 +108,7 @@ mod tests {
         let keys = std::array::from_fn(|i| ControllerKey::new(roots[i], &machines[i].id, "drive"));
         app.init_resource::<ButtonInput<KeyCode>>()
             .insert_resource(HostInputFocus(true))
-            .insert_resource(Selection(Some(roots[0])))
+            .insert_resource(Selection(Some(Selected::Asset(roots[0]))))
             .insert_resource(ControllerInventory { machines })
             .init_resource::<MachinePanel>()
             .init_resource::<UiDrive>()
@@ -187,7 +194,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .release_all();
-        app.world_mut().resource_mut::<Selection>().0 = Some(keys[1].scene_root);
+        app.world_mut().resource_mut::<Selection>().0 = Some(Selected::Asset(keys[1].scene_root));
         assert_eq!(frame(&mut app, &keys[0]), (0.0, 0.0));
         assert_eq!(frame(&mut app, &keys[1]), (2.0, 0.4));
         assert_eq!(frame(&mut app, &keys[0]), (2.0, 0.4));
@@ -221,6 +228,32 @@ mod tests {
             .resource_mut::<ButtonInput<KeyCode>>()
             .release_all();
         assert_eq!(frame(&mut app, &keys[0]), (1.5, -0.2));
+    }
+
+    #[test]
+    fn keys_drive_the_selected_machine_of_a_shared_stage() {
+        let (mut app, keys) = stages(true);
+        app.world_mut().resource_mut::<Selection>().0 = Some(Selected::Machine(MachineRef {
+            scene_root: keys[1].scene_root,
+            machine_id: keys[1].machine_id.clone(),
+        }));
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        assert_eq!(frame(&mut app, &keys[1]), (4.0, 0.0));
+        assert_eq!(frame(&mut app, &keys[0]), (2.0, 0.4));
+        assert!(app.world().resource::<MachinePanel>().keyboard_on(&keys[1]));
+    }
+
+    #[test]
+    fn a_whole_shared_stage_selected_drives_none_of_its_machines() {
+        let (mut app, keys) = stages(true);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        assert_eq!(frame(&mut app, &keys[0]), (2.0, 0.4));
+        assert_eq!(frame(&mut app, &keys[1]), (2.0, 0.4));
+        assert!(app.world().resource::<MachinePanel>().keyboard.is_none());
     }
 
     #[test]

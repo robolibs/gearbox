@@ -7,7 +7,7 @@
     # that arg, which breaks nixGL until upstream catches up. Bump
     # together with nixgl when its corresponding fix lands.
     nixpkgs.url = "github:NixOS/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa";
-    rust-overlay.url = "github:oxalica/rust-overlay?rev=cb368fd55ced25a1fa12414b9e984cdfb1681d18";
+    rust-overlay.url = "github:oxalica/rust-overlay?rev=b70538330f20adc9665afa2976471eb5b85ebd1f";
     flake-utils.url = "github:numtide/flake-utils";
     nixgl.url = "github:nix-community/nixGL";
   };
@@ -79,14 +79,13 @@
       {
         devShells.default = pkgs.mkShell {
           packages = [
-            (pkgs.rust-bin.stable.latest.default.override {
+            (pkgs.rust-bin.stable."1.98.1".default.override {
               extensions = [ "rust-src" "rustfmt" "clippy" ];
               targets = [ "wasm32-unknown-unknown" ];
             })
             pkgs.clang
             pkgs.mold
             pkgs.pkg-config
-            pkgs.rust-cbindgen
             pkgs.trunk
             pkgs.maturin
             (pkgs.python3.withPackages (ps: with ps; [

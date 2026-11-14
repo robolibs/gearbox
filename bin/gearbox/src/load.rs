@@ -2,6 +2,7 @@
 //! mounted USD scene with `LoadedAsset` marker. The marker also tags the
 //! root for the UI's pick-and-gizmo wiring.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -335,6 +336,7 @@ fn spawn_when_loaded(
     mut values: ResMut<crate::services::LinkValues>,
     mut seeded: ResMut<crate::services::SeededLinkValues>,
     mut rejected: ResMut<RejectedLoads>,
+    models: Query<&crate::physics::LoadedModel>,
 ) {
     for entry in inflight.0.iter_mut() {
         if entry.spawned {
@@ -364,11 +366,16 @@ fn spawn_when_loaded(
         }
         let discovery_started = std::time::Instant::now();
         // The projected stage is already open; scanning it beats parsing
-        // the file again.
+        // the file again. Physics attach compiles its machine model first.
         let projected = instances.as_deref().and_then(|i| i.stage(scene_root));
-        let scanned = match projected {
-            Some(stage) => crate::controller::discover_machines_from_stage(stage),
-            None => discover_machines_from_usd(&entry.path),
+        let model = models.get(scene_root).ok();
+        if projected.is_some() && model.is_none() {
+            continue;
+        }
+        let scanned = match (projected, model) {
+            (Some(stage), Some(model)) => crate::controller::discover_machines_with_model(stage, &model.0),
+            (Some(stage), None) => crate::controller::discover_machines_from_stage(stage),
+            (None, _) => discover_machines_from_usd(&entry.path),
         };
         let mut discovered_machines = match scanned {
             Ok(machines) => Some(machines),
@@ -491,6 +498,7 @@ fn sync_pending_machine_physics_to_scene_transforms(
     names: Query<&Name>,
     parents: Query<&ChildOf>,
     sites: Query<&crate::globe::Site>,
+    joints: Query<&crate::physics::markers::UsdPhysicsJoint>,
     mut physics: ResMut<crate::physics::PhysicsWorld>,
 ) {
     for (root, mut root_transform, mut pending, name) in pending.iter_mut() {
@@ -542,7 +550,8 @@ fn sync_pending_machine_physics_to_scene_transforms(
         };
 
         let collider_entities = descendants
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|entity| {
                 physics
                     .entity_to_collider
@@ -570,7 +579,10 @@ fn sync_pending_machine_physics_to_scene_transforms(
         }
         let synced = poses.len();
         propagate_body_positions_to_colliders(physics.as_mut());
-        if let Some(delta_y) = terrain_contact_alignment_delta(&physics, &collider_entities, &names)
+        // A machine fixed to the world, like a rail robot, stays where it is put.
+        let anchored = descendants.iter().any(|e| joints.get(*e).is_ok_and(|j| j.joint_enabled && (j.body0.is_none() || j.body1.is_none())));
+        if !anchored
+            && let Some(delta_y) = terrain_contact_alignment_delta(&physics, &collider_entities, &names)
         {
             let shifted: Vec<_> = poses.iter().map(|&(handle, _)| {
                 let mut pose = physics.body(handle).expect("aligned body").position();
@@ -634,6 +646,7 @@ fn terrain_contact_alignment_delta(
     } else {
         &tire_handles
     };
+    let own: std::collections::HashSet<_> = fallback_handles.iter().copied().collect();
 
     let mut min_clearance = f64::INFINITY;
     for handle in handles {
@@ -641,8 +654,7 @@ fn terrain_contact_alignment_delta(
             continue;
         };
         let aabb = collider.aabb();
-        let ground =
-            max_terrain_height_under_aabb(aabb.mins.x, aabb.maxs.x, aabb.mins.z, aabb.maxs.z);
+        let ground = max_ground_under_aabb(physics, &own, &aabb);
         let clearance = aabb.mins.y - ground;
         min_clearance = min_clearance.min(clearance);
     }
@@ -662,7 +674,16 @@ fn terrain_contact_alignment_delta(
     }
 }
 
-fn max_terrain_height_under_aabb(min_x: f64, max_x: f64, min_z: f64, max_z: f64) -> f64 {
+/// The highest ground under an AABB's middle and corners: the terrain, or
+/// the floor, pad or deck a ray down from just over the AABB's top meets
+/// first among the colliders not in `own`.
+fn max_ground_under_aabb(
+    physics: &crate::physics::PhysicsWorld,
+    own: &std::collections::HashSet<crate::physics::backend::ColliderId>,
+    aabb: &crate::physics::backend::Aabb,
+) -> f64 {
+    let (min_x, max_x, min_z, max_z) = (aabb.mins.x, aabb.maxs.x, aabb.mins.z, aabb.maxs.z);
+    let top = aabb.maxs.y + 0.05;
     let samples = [
         ((min_x + max_x) * 0.5, (min_z + max_z) * 0.5),
         (min_x, min_z),
@@ -672,7 +693,15 @@ fn max_terrain_height_under_aabb(min_x: f64, max_x: f64, min_z: f64, max_z: f64)
     ];
     samples
         .into_iter()
-        .map(|(x, z)| crate::globe::ground_height_at_physics(x, z))
+        .map(|(x, z)| {
+            let terrain = crate::globe::ground_height_at_physics(x, z);
+            let reach = top - terrain + 0.05;
+            let floor = (reach > 0.0)
+                .then(|| physics.cast_ray_filtered(DVec3::new(x, top, z), DVec3::NEG_Y, reach, &|id| !own.contains(&id)))
+                .flatten()
+                .map(|(_, distance)| top - distance);
+            floor.map_or(terrain, |floor| floor.max(terrain))
+        })
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
@@ -750,7 +779,6 @@ fn drain_machine_load_queue(
     mut sites: ResMut<crate::globe::Sites>,
     inventory: Res<ControllerInventory>,
     loaded: Query<&LoadedAsset>,
-    physics: Res<crate::physics::PhysicsWorld>,
     mut pending: Query<&mut MachinePhysicsSyncPending>,
     mut bus: Option<ResMut<GearboxBus>>,
 ) {
@@ -784,9 +812,6 @@ fn drain_machine_load_queue(
         }
         if !tyres.is_empty() && req.machine_id().is_none_or(|id| id.trim().is_empty()) {
             reject("pressure snapshot requires an explicit machine id"); continue;
-        }
-        if !tyres.is_empty() && !physics.uses_wheel_forces() {
-            reject("this backend does not support pressure snapshots"); continue;
         }
         if !tyres.is_empty() && (inventory.machines.iter().any(|m| Some(m.id.clone()) == req.machine_id())
             || inflight.0.iter().any(|e| e.machine_id == req.machine_id() && (!e.spawned || loaded.get(e.root).is_ok())))
@@ -901,33 +926,71 @@ fn drain_machine_delete_queue(
     }
 }
 
-/// Report every loaded asset root for `/gearbox/scene/list`.
+fn scene_object(transform: &GlobalTransform, kind: u32, props: Props) -> SceneObject {
+    let t = transform.translation();
+    let (_, yaw, _) = transform.rotation().to_euler(EulerRot::YXZ);
+    SceneObject {
+        x: t.x,
+        y: t.y,
+        z: t.z,
+        yaw_deg: yaw.to_degrees(),
+        kind,
+        props: props.into_bytes(),
+    }
+}
+
+/// Where each machine that shares its stage with others stands: its body,
+/// else its own prim, by its index in the inventory.
+fn shared_machine_poses(
+    inventory: &ControllerInventory,
+    index: &crate::prim_index::PrimIndex,
+    transforms: &Query<&GlobalTransform>,
+) -> HashMap<usize, GlobalTransform> {
+    let mut poses = HashMap::new();
+    for (i, m) in inventory.machines.iter().enumerate() {
+        let Some(root) = m.scene_root else { continue };
+        if inventory.only(root).is_some() {
+            continue;
+        }
+        let pose = |path: &str| index.find(root, path).and_then(|e| transforms.get(e).ok()).copied();
+        if let Some(at) = m.body.as_deref().and_then(pose).or_else(|| pose(&m.prim_path)) {
+            poses.insert(i, at);
+        }
+    }
+    poses
+}
+
+/// Report every loaded asset root for `/gearbox/scene/list`, and each
+/// machine of a stage that holds several.
 fn refresh_scene_objects(
     loaded: Query<(Entity, &LoadedAsset, &GlobalTransform)>,
     inventory: Res<ControllerInventory>,
     mut objects: ResMut<SceneObjects>,
     overrides: Query<&usd_bevy::instance::UsdInstanceOverrides>,
     attachments: Res<crate::attach::Attachments>,
-    physics: Res<crate::physics::PhysicsWorld>,
+    index: Res<crate::prim_index::PrimIndex>,
+    transforms: Query<&GlobalTransform>,
 ) {
+    let poses = shared_machine_poses(&inventory, &index, &transforms);
     let mut out = Vec::new();
     for (entity, asset, transform) in loaded.iter() {
-        let machine = inventory
+        let held: Vec<(usize, &crate::controller::MachineInstanceSpec)> = inventory
             .machines
             .iter()
-            .find(|m| m.scene_root == Some(entity));
-        let t = transform.translation();
-        let (_, yaw, _) = transform.rotation().to_euler(EulerRot::YXZ);
+            .enumerate()
+            .filter(|(_, m)| m.scene_root == Some(entity))
+            .collect();
         let mut props = Props::from_pairs(&[
             ("id", asset.label.as_str()),
             ("path", &asset.path.to_string_lossy()),
         ]);
-        let kind = match machine {
-            Some(m) => {
+        let kind = match held.as_slice() {
+            [(_, m)] => {
                 props.set("machine_id", &m.id);
-                if physics.uses_wheel_forces()
-                    && inventory.machines.iter().filter(|m| m.scene_root == Some(entity)).count() == 1
-                    && !attachments.0.iter().any(|a| a.master_id == m.id || a.slave_id == m.id)
+                if !attachments
+                    .0
+                    .iter()
+                    .any(|a| a.master_id == m.id || a.slave_id == m.id)
                     && let Ok(opinions) = overrides.get(entity)
                     && opinions.attributes.is_empty()
                 {
@@ -941,17 +1004,26 @@ fn refresh_scene_objects(
                 }
                 object_kind::MACHINE
             }
-            None if asset.label.to_ascii_lowercase().contains("terrain") => object_kind::TERRAIN,
-            None => object_kind::PROP,
+            [] if asset.label.to_ascii_lowercase().contains("terrain") => object_kind::TERRAIN,
+            [] => object_kind::PROP,
+            _ => object_kind::MACHINE,
         };
-        out.push(SceneObject {
-            x: t.x,
-            y: t.y,
-            z: t.z,
-            yaw_deg: yaw.to_degrees(),
-            kind,
-            props: props.into_bytes(),
-        });
+        out.push(scene_object(transform, kind, props));
+        if held.len() < 2 {
+            continue;
+        }
+        for (i, m) in &held {
+            let mut props = Props::from_pairs(&[
+                ("id", m.id.as_str()),
+                ("machine_id", m.id.as_str()),
+                ("stage", asset.label.as_str()),
+            ]);
+            if let Some(kind) = &m.kind {
+                props.set("kind", kind);
+            }
+            let at = poses.get(i).unwrap_or(transform);
+            out.push(scene_object(at, object_kind::MACHINE, props));
+        }
     }
     objects.machines = out;
 }
@@ -959,6 +1031,73 @@ fn refresh_scene_objects(
 #[cfg(test)]
 #[path = "load/alignment_tests.rs"]
 mod alignment_tests;
+
+#[cfg(test)]
+mod scene_list_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    #[test]
+    fn each_machine_of_a_shared_stage_is_listed_where_it_stands() {
+        let mut world = World::new();
+        let (stage, bodies) = crate::controller::spawn_fleet(&mut world, &["Eve", "Percy"]);
+        let loaded = |label: &str| LoadedAsset {
+            path: format!("{label}.usda").into(),
+            label: label.into(),
+        };
+        world
+            .entity_mut(stage)
+            .insert((loaded("base"), GlobalTransform::IDENTITY));
+        world
+            .entity_mut(bodies[0])
+            .insert(GlobalTransform::from_translation(Vec3::X * 3.0));
+        let percy = world.get::<ChildOf>(bodies[1]).unwrap().parent();
+        world
+            .entity_mut(percy)
+            .insert(GlobalTransform::from_translation(Vec3::X * 7.0));
+        world.resource_mut::<ControllerInventory>().machines[1].body = None;
+        let yard = world
+            .spawn((
+                loaded("yard"),
+                GlobalTransform::from_translation(Vec3::X * 20.0),
+            ))
+            .id();
+        let mut tractor = world.resource::<ControllerInventory>().machines[0].clone();
+        tractor.id = "tractor".into();
+        tractor.scene_root = Some(yard);
+        world
+            .resource_mut::<ControllerInventory>()
+            .machines
+            .push(tractor);
+        world.init_resource::<SceneObjects>();
+        world.init_resource::<crate::attach::Attachments>();
+        world.run_system_once(refresh_scene_objects).unwrap();
+        let mut listed: Vec<(String, Option<String>, f32)> = world
+            .resource::<SceneObjects>()
+            .machines
+            .iter()
+            .map(|o| {
+                (
+                    o.props().get("id").unwrap(),
+                    o.props().get("machine_id"),
+                    o.x,
+                )
+            })
+            .collect();
+        listed.sort_by(|a, b| a.0.cmp(&b.0));
+        let named =
+            |id: &str, machine: Option<&str>, x: f32| (id.into(), machine.map(Into::into), x);
+        assert_eq!(
+            listed,
+            [
+                named("base", None, 0.0),
+                named("eve", Some("eve"), 3.0),
+                named("percy", Some("percy"), 7.0),
+                named("yard", Some("tractor"), 20.0),
+            ]
+        );
+    }
+}
 
 #[cfg(test)]
 mod pressure_snapshot_tests {

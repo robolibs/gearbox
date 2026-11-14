@@ -62,9 +62,9 @@ pub fn tab(world: &World, ctx: &PaneCtx) -> Tab {
         )
         .with_readout("date", calendar.date_label())
         .with_slider(
-            "Day of year",
+            if calendar.planet == bevy_weather::Planet::Mars { "Sol of year" } else { "Day of year" },
             calendar.day as f64,
-            1.0..=365.0,
+            1.0..=calendar.planet.year_days() as f64,
             0,
             "",
             ctx.accent,
@@ -218,8 +218,11 @@ pub fn apply(responses: &HashMap<MaraId, Vec<PodResponse>>, world: &mut World, _
         let mut settings = world.resource_mut::<WeatherSettings>();
         for (index, slider) in resp.sliders.iter().enumerate().filter(|(_, s)| s.changed) {
             match index {
-                0 => settings.calendar.hour = (slider.value as f32).clamp(0.0, 24.0),
-                1 => settings.calendar.day = slider.value.round().clamp(1.0, 365.0) as u16,
+                0 => settings.calendar.hour = slider.value.clamp(0.0, 24.0),
+                1 => {
+                    let year = settings.calendar.planet.year_days() as f64;
+                    settings.calendar.day = slider.value.round().clamp(1.0, year) as u16;
+                }
                 2 => settings.calendar.latitude = (slider.value as f32).clamp(-90.0, 90.0),
                 _ => {}
             }

@@ -1,0 +1,22 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+    subLayers = [@./s14_sublayer.usda@]
+)
+
+def Xform "World"
+{
+    def Xform "R1" (prepend references = @./s14_robot.usda@</robot>)
+    {
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Xform "R2" (prepend references = @./s14_robot.usda@</robot>)
+    {
+        double3 xformOp:translate = (0, 4, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

@@ -23,7 +23,7 @@ use crate::viewer::commands::HostCommand;
 use crate::viewer::state::FollowTarget;
 use crate::controller::{
     CmdVel, ControllerInventory, ControllerKey, ControllerSpec, ControllerStates,
-    MachineInstanceSpec, UiDrive,
+    MachineInstanceSpec, MachineRef, UiDrive,
 };
 use crate::host::PANE_MACHINE as P;
 use crate::links::LinkSpec;
@@ -111,20 +111,15 @@ fn machine_variants(world: &World, root: Entity, prim: &str) -> Vec<(String, Str
 }
 
 fn picked_machine(world: &World) -> Option<MachineInstanceSpec> {
-    let picked = world
-        .resource::<Selection>()
-        .0?;
     world
-        .resource::<ControllerInventory>()
-        .machines
-        .iter()
-        .find(|m| m.scene_root == Some(picked))
+        .resource::<Selection>()
+        .machine(world.resource::<ControllerInventory>())
         .cloned()
 }
 
 /// The machine rows at the top of the pane and each row's drive keys.
 struct MachineList {
-    rows: Vec<(Entity, Vec<ControllerKey>)>,
+    rows: Vec<(MachineRef, Vec<ControllerKey>)>,
 }
 
 fn drive_keys(root: Entity, machine: &MachineInstanceSpec) -> Vec<ControllerKey> {
@@ -140,16 +135,17 @@ fn drive_keys(root: Entity, machine: &MachineInstanceSpec) -> Vec<ControllerKey>
 fn machine_list_pod(world: &World, ctx: &PaneCtx) -> (Pod, MachineList) {
     let inventory = world.resource::<ControllerInventory>();
     let panel = world.resource::<MachinePanel>();
-    let selection = world.resource::<Selection>().0;
-    let follow = world.resource::<FollowTarget>().entity;
-    let mut machines: Vec<(Entity, &MachineInstanceSpec)> = inventory
+    let selection = world.resource::<Selection>().machine(inventory).and_then(MachineRef::of);
+    let follow = world.resource::<FollowTarget>().machine.clone();
+    let mut machines: Vec<(MachineRef, &MachineInstanceSpec)> = inventory
         .machines
         .iter()
-        .filter_map(|m| m.scene_root.map(|root| (root, m)))
+        .filter_map(|m| MachineRef::of(m).map(|r| (r, m)))
         .collect();
     machines.sort_by(|a, b| a.1.id.cmp(&b.1.id));
-    let index_of =
-        |entity: Option<Entity>| entity.and_then(|e| machines.iter().position(|(root, _)| *root == e));
+    let index_of = |picked: Option<MachineRef>| {
+        picked.and_then(|p| machines.iter().position(|(machine, _)| *machine == p))
+    };
     let list_pod = pid(P, "list", 0);
     ctx.sync_list_memory(list_pod, index_of(selection), index_of(follow));
     let pod = if machines.is_empty() {
@@ -160,8 +156,8 @@ fn machine_list_pod(world: &World, ctx: &PaneCtx) -> (Pod, MachineList) {
         let labels: Vec<String> = machines.iter().map(|(_, m)| m.id.clone()).collect();
         let trailing: Vec<String> = machines
             .iter()
-            .map(|(root, m)| {
-                let drives = drive_keys(*root, m);
+            .map(|(machine, m)| {
+                let drives = drive_keys(machine.scene_root, m);
                 let holder = if drives.iter().any(|k| panel.gamepad_on(k)) {
                     " · gamepad"
                 } else if drives.iter().any(|k| panel.holds(k)) {
@@ -175,7 +171,10 @@ fn machine_list_pod(world: &World, ctx: &PaneCtx) -> (Pod, MachineList) {
         Pod::new(list_pod).with_hybrid_select_list(labels, Some(trailing), ctx.accent)
     };
     let list = MachineList {
-        rows: machines.iter().map(|(root, m)| (*root, drive_keys(*root, m))).collect(),
+        rows: machines
+            .iter()
+            .map(|(machine, m)| (machine.clone(), drive_keys(machine.scene_root, m)))
+            .collect(),
     };
     (pod, list)
 }
@@ -191,20 +190,19 @@ fn handle_machine_list(
         return;
     };
     if let Some(i) = rows.body_clicked
-        && let Some((root, _)) = list.rows.get(i)
+        && let Some((machine, _)) = list.rows.get(i)
     {
-        ctx.send(HostCommand::SelectRoot(Some(*root)));
+        ctx.send(HostCommand::SelectMachine(machine.clone()));
     }
     if let Some(i) = rows.body_double_clicked
-        && let Some((root, _)) = list.rows.get(i)
+        && let Some((machine, _)) = list.rows.get(i)
     {
-        ctx.send(HostCommand::SelectRoot(Some(*root)));
-        ctx.send(HostCommand::FlyToMachine(*root));
+        ctx.send(HostCommand::SelectMachine(machine.clone()));
+        ctx.send(HostCommand::FlyToMachine(machine.clone()));
     }
-    if let Some(i) = rows.radio_clicked
-        && let Some((root, _)) = list.rows.get(i)
-    {
-        ctx.send(HostCommand::ToggleFollow(*root));
+    if rows.radio_clicked.is_some() {
+        let pinned = rows.pinned.and_then(|i| list.rows.get(i)).map(|(machine, _)| machine.clone());
+        ctx.send(HostCommand::Follow(pinned));
     }
 }
 
@@ -278,7 +276,7 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         Pod::new(pid(P, "head", 0))
             .with_readout("machine", machine.id.clone())
             .with_readout("instance", std::env::var("GEARBOX_NAME").unwrap_or_else(|_| "gearbox".into()))
-            .with_readout("physics", world.resource::<crate::physics::PhysicsWorld>().name())
+            .with_readout("physics", world.resource::<crate::physics::PhysicsBackendName>().0)
             .with_readout("kind", machine.kind.as_deref().unwrap_or("—"))
             .with_readout("controllers", machine.controllers.len().to_string())
             .with_readout("links", machine.links.links.len().to_string()),
@@ -300,6 +298,10 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
         let mut pads = world.query::<&Gamepad>();
         pads.iter(world).next().is_some()
     };
+    let joint_units: HashMap<String, &str> = world.query::<(&usd_bevy::UsdPrimRef, &crate::physics::markers::UsdPhysicsJoint)>()
+        .iter(world).map(|(prim, joint)| (prim.path.clone(),
+            if matches!(joint.kind, crate::physics::markers::UsdJointKind::Prismatic) { "m" } else { "rad" }))
+        .collect();
     let states = world.resource::<ControllerStates>();
     let values = world.resource::<LinkValues>();
     let ui_drive = world.resource::<UiDrive>();
@@ -416,7 +418,9 @@ pub fn container(world: &mut World, ctx: &PaneCtx) -> ShelfContainer<'static> {
                     let position = link_value(values, &machine, link, "position").unwrap_or(0.0);
                     pod = named(pod, controller, link);
                     if let Some(r) = link_value(values, &machine, link, "range") {
-                        pod = pod.with_readout("range", format!("{r:.3} rad"));
+                        let unit = controller_joints(&machine, controller).first()
+                            .and_then(|p| joint_units.get(*p)).copied().unwrap_or("");
+                        pod = pod.with_readout("range", format!("{r:.3} {unit}"));
                     }
                     pod = pod.with_slider("position", clamp(position, 0.0, 1.0), 0.0..=1.0, 2, "", accent);
                 }

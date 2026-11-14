@@ -1,0 +1,22 @@
+{
+  "fixture": "e01_accel.usda",
+  "root": "/pendulum",
+  "physics_hz": 120,
+  "ticks": 480,
+  "commands": [
+    { "tick": 0, "dof": "hinge", "mode": "position", "value": 0.2 },
+    { "tick": 300, "dof": "hinge", "mode": "velocity", "value": 0.5 }
+  ],
+  "measure": {
+    "stiffness_window": [0, 300],
+    "damping_window": [300, 480]
+  },
+  "expected": {
+    "rule": "angular acceleration-drive gains are authored per degree: SI = authored x 180/pi",
+    "stiffness_per_rad": 57.29577951308232,
+    "damping_per_rad": 2.864788975654116
+  },
+  "tolerances": {
+    "gain_relative": 0.05
+  }
+}

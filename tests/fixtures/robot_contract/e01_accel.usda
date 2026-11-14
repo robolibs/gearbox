@@ -1,0 +1,52 @@
+#usda 1.0
+(
+    defaultPrim = "pendulum"
+    upAxis = "Z"
+    metersPerUnit = 1
+    kilogramsPerUnit = 1
+)
+
+def PhysicsScene "physicsScene"
+{
+    vector3f physics:gravityDirection = (0, 0, -1)
+    float physics:gravityMagnitude = 0
+}
+
+def Xform "pendulum" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+)
+{
+    def Xform "base" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 5
+        float3 physics:diagonalInertia = (0.1, 0.1, 0.1)
+        double3 xformOp:translate = (0, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Xform "arm" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"])
+    {
+        float physics:mass = 2
+        float3 physics:diagonalInertia = (0.02, 0.2, 0.2)
+        double3 xformOp:translate = (0.5, 0, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def Scope "joints"
+    {
+        def PhysicsFixedJoint "anchor"
+        {
+            rel physics:body1 = </pendulum/base>
+            point3f physics:localPos0 = (0, 0, 0.5)
+        }
+        def PhysicsRevoluteJoint "hinge" (prepend apiSchemas = ["PhysicsDriveAPI:angular"])
+        {
+            rel physics:body0 = </pendulum/base>
+            rel physics:body1 = </pendulum/arm>
+            uniform token physics:axis = "Z"
+            point3f physics:localPos0 = (0, 0, 0)
+            point3f physics:localPos1 = (-0.5, 0, 0)
+            token drive:angular:physics:type = "acceleration"
+            float drive:angular:physics:stiffness = 1
+            float drive:angular:physics:damping = 0.05
+        }
+    }
+}

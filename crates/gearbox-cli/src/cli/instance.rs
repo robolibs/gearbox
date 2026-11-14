@@ -21,7 +21,7 @@ pub struct Args {
 enum Cmd {
     /// Registry entries with liveness; the default is marked
     List,
-    /// `/gearbox/info` of an instance
+    /// `/gearbox/info` of an instance, camera included
     Info { id: Option<String> },
     /// Make an instance the default for later commands
     Use { id: String },
@@ -59,23 +59,104 @@ enum Cmd {
     },
     /// Move the viewer camera: `fly MACHINE` flies behind a machine like a
     /// double-click in the Agents pane, `follow MACHINE` pins the camera to
-    /// it, `unfollow` releases it, `goto LAT LON` takes the view to that
-    /// latitude and longitude, in degrees
+    /// it, `unfollow` releases it, `goto LAT LON [HEIGHT_M]` jumps the view to
+    /// that latitude and longitude, in degrees, standing HEIGHT_M above the
+    /// ground there, `look [MACHINE]` sets the view to an exact `--bearing`,
+    /// `--pitch` and `--distance` (around MACHINE when given, its bearing
+    /// counted from behind the machine, else round `--lat` and `--lon`),
+    /// gliding there with `--over`, `path FILE` flies one smooth path through
+    /// the views FILE lists, one `SECONDS look [MACHINE] key=value…` a line
+    /// (`link=LINK` follows that link of MACHINE, `above=` lifts what is
+    /// looked at), the view reaching each at its second without stopping on
+    /// the way, and `SECONDS tf on MACHINE…` or `SECONDS tf off` lines
+    /// switching the TF overlay on the way, and `where` says where the view
+    /// is now
     Camera {
-        /// fly | follow | unfollow | goto
+        /// fly | follow | unfollow | goto | look | where
         action: String,
-        /// Machine id (`gearbox:machine:id`) for fly and follow; the latitude for goto
+        /// Machine id (`gearbox:machine:id`) for fly, follow and look; the latitude for goto
         #[arg(allow_negative_numbers = true)]
         machine: Option<String>,
         /// Longitude in degrees, for goto
         #[arg(allow_negative_numbers = true)]
         distance_km: Option<f64>,
+        /// Metres above the ground to stand once there, for goto; left out, the
+        /// view keeps the height it had
+        #[arg(allow_negative_numbers = true)]
+        height_m: Option<f64>,
+        /// For look: degrees clockwise, seen from above, from behind MACHINE
+        /// as it stood when the look began (90 is its left side) or, without
+        /// one, the compass bearing from the place looked at out to the eye
+        #[arg(long, allow_negative_numbers = true)]
+        bearing: Option<f64>,
+        /// For look: degrees above the horizon, 2 to 88
+        #[arg(long, allow_negative_numbers = true)]
+        pitch: Option<f64>,
+        /// For look: metres from the eye to what it looks at
+        #[arg(long)]
+        distance: Option<f64>,
+        /// For look: glide there over this many seconds of sim time, eased at
+        /// both ends; around MACHINE the view then stays on the machine as it
+        /// moves until the next request, `unfollow` or a drag
+        #[arg(long)]
+        over: Option<f64>,
+        /// For look without MACHINE: metres above the ground the place looked at stands
+        #[arg(long)]
+        above: Option<f64>,
+        /// For look without MACHINE: the latitude of the place looked at, in degrees
+        #[arg(long, allow_negative_numbers = true)]
+        lat: Option<f64>,
+        /// For look without MACHINE: the longitude of the place looked at, in degrees
+        #[arg(long, allow_negative_numbers = true)]
+        lon: Option<f64>,
+        /// For look around MACHINE: count --bearing as a compass bearing from
+        /// the machine out to the eye, whichever way the machine faces
+        #[arg(long)]
+        compass: bool,
         #[arg(long)]
         id: Option<String>,
     },
+    /// Switch a viewport overlay as the View pane does: `tf` (link frames,
+    /// names and parent links, which recordings keep, fading in and out),
+    /// `colliders`, `grid` or `axes`, to `on`, `off` or `toggle`
+    Overlay {
+        /// tf | colliders | grid | axes
+        name: String,
+        /// on | off | toggle
+        state: String,
+        /// With `tf on`, the machines whose frames are drawn (all if none)
+        machines: Vec<String>,
+        #[arg(long)]
+        id: Option<String>,
+        /// Seconds to wait for the instance to take the request
+        #[arg(long, default_value_t = 10.0)]
+        timeout: f64,
+    },
+    /// Record the 3D viewport as shown, without the panes, to H.264 video:
+    /// `start [OUT]` begins (OUT, or a file in the capture folder), `stop`
+    /// ends it. While recording the clock steps a sixtieth of a second a
+    /// frame, so the video plays smooth however slowly the window draws;
+    /// the camera's path is written beside it as OUT.camera.csv
+    Record {
+        /// start | stop
+        action: String,
+        /// Where `start` writes the video (.mp4)
+        out: Option<String>,
+        /// Frames to render for each frame of video, 1 to 8, blended into
+        /// it as an open shutter blurs what moves; the clock steps that
+        /// much finer
+        #[arg(long, default_value_t = 1)]
+        shutter: u32,
+        #[arg(long)]
+        id: Option<String>,
+        /// Seconds to wait for the instance to take the request
+        #[arg(long, default_value_t = 10.0)]
+        timeout: f64,
+    },
     /// Drive the window with scripted input, one step per argument or per
-    /// `;`-separated part: `move X Y`, `down X Y`, `up X Y`, `click X Y`,
-    /// `scroll DX DY`, `text …`, `key NAME`, `wait MS`
+    /// `;`-separated part: `move X Y`, `down X Y [BUTTON]`, `up X Y [BUTTON]`,
+    /// `click X Y [BUTTON]`, `scroll DX DY`, `text …`, `key NAME`, `wait MS`.
+    /// BUTTON is `primary` (the default), `middle` or `secondary`.
     Ui {
         steps: Vec<String>,
         #[arg(long)]
@@ -108,13 +189,53 @@ pub fn run(ctx: &Ctx, args: Args) -> Result<()> {
             viewport,
             timeout,
         } => screenshot(ctx, id, &out, viewport, timeout),
+        Cmd::Record {
+            action,
+            out,
+            shutter,
+            id,
+            timeout,
+        } => record(ctx, id, &action, out.as_deref(), shutter, timeout),
+        Cmd::Overlay {
+            name,
+            state,
+            machines,
+            id,
+            timeout,
+        } => overlay(ctx, id, &name, &state, &machines, timeout),
         Cmd::Ui { steps, id } => ui(ctx, id, &steps),
         Cmd::Camera {
             action,
             machine,
             distance_km,
+            height_m,
+            bearing,
+            pitch,
+            distance,
+            over,
+            above,
+            lat,
+            lon,
+            compass,
             id,
-        } => camera(ctx, id, &action, machine.as_deref(), distance_km),
+        } => camera(
+            ctx,
+            id,
+            &action,
+            machine.as_deref(),
+            distance_km,
+            height_m,
+            [
+                ("bearing", bearing),
+                ("pitch", pitch),
+                ("distance", distance),
+                ("over", over),
+                ("above", above),
+                ("lat", lat),
+                ("lon", lon),
+                ("compass", compass.then_some(1.0)),
+            ],
+        ),
     }
 }
 
@@ -124,8 +245,13 @@ fn camera(
     action: &str,
     machine: Option<&str>,
     distance_km: Option<f64>,
+    height_m: Option<f64>,
+    look: [(&str, Option<f64>); 8],
 ) -> Result<()> {
     let ctx = with_target(ctx, id)?;
+    if action == "where" {
+        return camera_where(&ctx);
+    }
     let target = ctx.target()?.clone();
     if target.pid == 0 {
         return Err(CliError::error(
@@ -135,20 +261,37 @@ fn camera(
     let line = match (action, machine) {
         ("fly", Some(m)) | ("follow", Some(m)) => format!("{action} {m}"),
         ("unfollow", _) => "unfollow".to_string(),
-        ("goto", Some(bearing)) => {
-            let bearing: f64 = bearing
+        ("goto", Some(latitude)) => {
+            let latitude: f64 = latitude
                 .parse()
                 .map_err(|_| CliError::error("`goto` needs a latitude and a longitude in degrees"))?;
-            let distance = distance_km
+            let longitude = distance_km
                 .ok_or_else(|| CliError::error("`goto` needs a latitude and a longitude in degrees"))?;
-            format!("goto {bearing} {distance}")
+            match height_m {
+                Some(height) => format!("goto {latitude} {longitude} {height}"),
+                None => format!("goto {latitude} {longitude}"),
+            }
         }
+        ("look", machine) => {
+            let mut line = String::from("look");
+            if let Some(m) = machine {
+                line.push_str(&format!(" {m}"));
+            }
+            for (key, value) in look {
+                if let Some(value) = value {
+                    line.push_str(&format!(" {key}={value}"));
+                }
+            }
+            line
+        }
+        ("path", Some(file)) => format!("path {}", std::path::absolute(file)?.display()),
         ("fly", None) | ("follow", None) => {
             return Err(CliError::error(format!("`{action}` needs a machine id")));
         }
+        ("path", None) => return Err(CliError::error("`path` needs a file of `SECONDS look …` lines")),
         _ => {
             return Err(CliError::error(
-                "camera action must be fly, follow, unfollow or goto",
+                "camera action must be fly, follow, unfollow, goto, look, path or where",
             ));
         }
     };
@@ -158,6 +301,40 @@ fn camera(
         &line,
         &format!("camera request `{line}` sent to `{}`", target.name),
         || json!({ "instance": target.name, "request": line }),
+    );
+    Ok(())
+}
+
+/// Where the view stands, as the running instance last said in `/gearbox/info`.
+fn camera_where(ctx: &Ctx) -> Result<()> {
+    let target = ctx.target()?.clone();
+    let info = ctx.client()?.info()?;
+    let place = gearbox_api::view::parse_view_place(&info.props().get("camera").unwrap_or_default())
+        .ok_or_else(|| {
+            CliError::error(format!(
+                "instance `{}` has not said where its view is yet",
+                target.name
+            ))
+        })?;
+    ctx.emit(
+        || {
+            json!({
+                "instance": target.name,
+                "latitude": place.latitude,
+                "longitude": place.longitude,
+                "height_m": place.height_m,
+                "distance_m": place.distance_m,
+            })
+        },
+        || {
+            out::kv(&[
+                ("instance", target.name.clone()),
+                ("latitude", format!("{:.6}", place.latitude)),
+                ("longitude", format!("{:.6}", place.longitude)),
+                ("height", format!("{:.1} m above ground", place.height_m)),
+                ("distance", format!("{:.1} m", place.distance_m)),
+            ]);
+        },
     );
     Ok(())
 }
@@ -493,6 +670,72 @@ fn screenshot(
         &out.to_string_lossy(),
         &format!("saved screenshot of `{}` to {}", target.name, out.display()),
         || json!({ "instance": target.name, "path": out.to_string_lossy() }),
+    );
+    Ok(())
+}
+
+fn overlay(ctx: &Ctx, id: Option<String>, name: &str, state: &str, machines: &[String], timeout: f64) -> Result<()> {
+    if !matches!(name, "tf" | "colliders" | "grid" | "axes") {
+        return Err(CliError::error(
+            "overlay must be tf, colliders, grid or axes",
+        ));
+    }
+    if !matches!(state, "on" | "off" | "toggle") {
+        return Err(CliError::error("overlay state must be on, off or toggle"));
+    }
+    if !machines.is_empty() && (name, state) != ("tf", "on") {
+        return Err(CliError::error("only `tf on` takes machines"));
+    }
+    let line = std::iter::once(format!("{name} {state}")).chain(machines.iter().cloned()).collect::<Vec<_>>().join(" ");
+    send_request(ctx, id, "overlay", &line, timeout)
+}
+
+fn record(
+    ctx: &Ctx,
+    id: Option<String>,
+    action: &str,
+    out: Option<&str>,
+    shutter: u32,
+    timeout: f64,
+) -> Result<()> {
+    let shutter = if shutter > 1 { format!(" shutter={shutter}") } else { String::new() };
+    let line = match (action, out) {
+        ("start", Some(out)) => format!("start{shutter} {}", std::path::absolute(out)?.display()),
+        ("start", None) => format!("start{shutter}"),
+        ("stop", None) => "stop".to_string(),
+        ("stop", Some(_)) => return Err(CliError::error("`stop` takes no path")),
+        _ => return Err(CliError::error("record action must be start or stop")),
+    };
+    send_request(ctx, id, "record", &line, timeout)
+}
+
+/// Drops `line` in `<registry dir>/<name>.<kind>` and waits for the instance
+/// to take it.
+fn send_request(ctx: &Ctx, id: Option<String>, kind: &str, line: &str, timeout: f64) -> Result<()> {
+    let ctx = with_target(ctx, id)?;
+    let target = ctx.target()?.clone();
+    if target.pid == 0 {
+        return Err(CliError::error(format!(
+            "instance addressed by did only; {kind} needs a registry entry"
+        )));
+    }
+    let request = registry::registry_dir().join(format!("{}.{kind}", target.name));
+    std::fs::write(&request, line.as_bytes())?;
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout);
+    while request.exists() {
+        if Instant::now() >= deadline {
+            let _ = std::fs::remove_file(&request);
+            return Err(CliError::timeout(format!(
+                "instance `{}` did not take `{line}` within {timeout}s",
+                target.name
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ctx.done(
+        line,
+        &format!("{kind} request `{line}` taken by `{}`", target.name),
+        || json!({ "instance": target.name, "request": line }),
     );
     Ok(())
 }

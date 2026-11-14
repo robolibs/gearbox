@@ -3,6 +3,7 @@
 use super::ground_card::GroundCard;
 use crate::{
     attach::LocalAttachments,
+    controller::{ControllerInventory, MachineRef},
     viewer::machine_context::{CouplingAction, MachineCards, MachineHover},
 };
 use bevy::prelude::*;
@@ -10,7 +11,7 @@ use mara::ui::modules::bevy::ChaseCamera;
 
 #[derive(Default)]
 pub(super) struct MachineContext {
-    root: Option<Entity>,
+    machine: Option<MachineRef>,
     last_hover: f64,
     card: Option<GroundCard>,
     hit: Option<[egui::Pos2; 4]>,
@@ -153,29 +154,39 @@ impl MachineContext {
         let cards = &world.resource::<MachineCards>().0;
         let hit = hover
             .hit
-            .filter(|root| cards.iter().any(|c| c.root == *root));
+            .clone()
+            .filter(|machine| cards.iter().any(|c| c.machine == *machine));
         if !hover.captures_pointer
-            && let Some(root) = hit
+            && let Some(machine) = hit
         {
-            self.root = Some(root);
+            self.machine = Some(machine);
             self.last_hover = now;
         } else if hover.captures_pointer {
             self.last_hover = now;
         }
         if now - self.last_hover > 0.7 {
-            self.root = None;
+            self.machine = None;
         }
-        let selected = world.resource::<crate::viewer::systems::Selection>().0;
+        let selected = world
+            .resource::<crate::viewer::systems::Selection>()
+            .machine(world.resource::<ControllerInventory>())
+            .and_then(MachineRef::of);
         let card = cards
             .iter()
-            .find(|c| Some(c.root) == self.root.or(selected))
+            .find(|c| Some(&c.machine) == self.machine.as_ref().or(selected.as_ref()))
             .cloned();
-        world.resource_mut::<MachineHover>().retained = card.as_ref().map(|c| c.root);
+        world.resource_mut::<MachineHover>().retained = card.as_ref().map(|c| c.machine.clone());
         self.hit = None;
         self.buttons.clear();
         if let Some(card) = card {
             let plate = self.card.get_or_insert_with(|| GroundCard::new(world));
-            let corners = plate.show(ctx, world, &card, &card.machine_id, selected == Some(card.root));
+            let corners = plate.show(
+                ctx,
+                world,
+                &card,
+                &card.machine_id,
+                selected.as_ref() == Some(&card.machine),
+            );
             let mut camera =
                 world.query_filtered::<(&Camera, &GlobalTransform), With<ChaseCamera>>();
             if let Ok((camera, gt)) = camera.single(world)

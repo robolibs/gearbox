@@ -3,13 +3,15 @@
 mod body;
 mod collider;
 mod convert;
+mod device;
 mod joint;
 #[cfg(test)]
 mod tests;
 mod wheel;
+mod track;
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bevy::prelude::Entity;
 use molla_math::{SpatialVector, Transform};
@@ -44,13 +46,35 @@ pub struct MollaBackend {
     settings: SolverSettings,
     wheels: BTreeMap<BodyId, (JointId, f64)>,
     wheel_step_dt: f64,
+    devices: BTreeMap<DeviceId, device::MollaDevice>,
+    next_device: u64,
+    /// Joints with break limits that have not broken yet.
+    breakable: BTreeSet<JointId>,
+    contacts: Mutex<Option<ContactCache>>,
 }
+
+/// The world's contact manifolds, for the scene and step they were read at.
+struct ContactCache {
+    scene: rt::SceneStamp,
+    steps: u64,
+    manifolds: Arc<Vec<ContactManifold>>,
+}
+
+/// A body falls asleep after a second under 5 mm/s and 0.01 rad/s with
+/// nothing driving it, Box2D's tolerances.
+const SLEEP: molla_solvers::rigid_world::SleepSettings =
+    molla_solvers::rigid_world::SleepSettings { linear_speed: 5e-3, angular_speed: 1e-2, quiet_time: 1.0 };
 
 impl Default for MollaBackend {
     fn default() -> Self {
         let mut world = RigidWorld::new().expect("Molla world initialization");
-        world.set_sleep_settings(Some(molla_solvers::rigid_world::SleepSettings::default()))
-            .expect("Molla sleep settings");
+        // Contacts stay penalty forces with regularized friction, with no
+        // impact arrest at onset, and corrected rates are not re-solved for
+        // world momentum.
+        world.solver.regularized_friction = true;
+        world.solver.contact_impacts = false;
+        world.solver.momentum_transport = false;
+        world.set_sleep_settings(Some(SLEEP)).expect("Molla sleep settings");
         Self {
             shared: Shared(Arc::new(Mutex::new(world))),
             bodies: BTreeMap::new(),
@@ -58,6 +82,10 @@ impl Default for MollaBackend {
             joints: BTreeMap::new(),
             wheels: BTreeMap::new(),
             wheel_step_dt: 1.0 / 120.0,
+            devices: BTreeMap::new(),
+            next_device: 0,
+            breakable: BTreeSet::new(),
+            contacts: Mutex::new(None),
             settings: SolverSettings {
                 dt: 1.0 / 120.0,
                 solver_iterations: 16,
@@ -67,9 +95,137 @@ impl Default for MollaBackend {
     }
 }
 
+impl MollaBackend {
+    /// The runtime collider `desc` describes, or `None` for a shape that
+    /// cannot be built or a parent body that is gone.
+    fn molla_collider(&self, desc: ColliderDesc) -> Option<rt::ColliderDesc> {
+        let mut collider = rt::ColliderDesc::new(convert::geometry(desc.shape).ok()?);
+        collider.parent = match desc.parent {
+            Some(id) => Some(self.bodies.get(&id)?.handle),
+            None => None,
+        };
+        collider.pose = convert::transform(desc.pose);
+        collider.friction = desc.friction.unwrap_or(0.5);
+        collider.restitution = desc.restitution.unwrap_or(0.0);
+        collider.mass = sim::ColliderMass::Density(desc.density.unwrap_or(1.0));
+        collider.contact_material.friction_combine =
+            convert::combine(desc.friction_combine.unwrap_or(CombineRule::Average));
+        let groups = desc.groups.unwrap_or(CollisionGroups::ALL);
+        collider.memberships = groups.memberships;
+        collider.filter = groups.filter;
+        collider.user_tag = desc.entity.map_or(0, Entity::to_bits);
+        collider.enabled = desc.enabled;
+        Some(collider)
+    }
+
+    /// Takes a runtime collider into the backend's table under a new id.
+    fn adopt_collider(&mut self, handle: rt::ColliderHandle, entity: Option<Entity>) -> ColliderId {
+        let id = ColliderId(handle.to_bits());
+        self.colliders.insert(id, ColliderAccess { shared: self.shared.clone(), handle, entity });
+        id
+    }
+}
+
 impl PhysicsBackend for MollaBackend {
-    fn uses_wheel_forces(&self) -> bool {
-        true
+    fn configure_track(&mut self, desc: TrackForceDesc) -> Result<(), String> {
+        self.configure_track_force(desc)
+    }
+
+    fn set_track_speed(&mut self, sprocket: BodyId, speed: f64) -> Result<(), String> {
+        let handle = self.bodies.get(&sprocket).ok_or("unknown track sprocket")?.handle;
+        self.shared.world().tracks.set_speed(handle, speed).map_err(|e| e.to_string())
+    }
+
+    fn track_output(&self, sprocket: BodyId) -> Option<TrackForceOutput> {
+        let handle = self.bodies.get(&sprocket)?.handle;
+        let world = self.shared.world();
+        let s = world.tracks.sample(&world.scene, handle)?;
+        Some(TrackForceOutput {
+            angular_velocity: s.angular_velocity, travel: s.travel, motor_torque: s.motor_torque,
+            longitudinal_force: s.longitudinal_force, normal_load: s.normal_load, contacts: s.contacts,
+        })
+    }
+
+    fn remove_track(&mut self, sprocket: BodyId) {
+        if let Some(body) = self.bodies.get(&sprocket) {
+            self.shared.world().tracks.remove(body.handle);
+        }
+    }
+
+    fn insert_motor(&mut self, joint: JointId, limits: DeviceLimits, max_force: f64) -> Result<(), String> {
+        self.device_insert_motor(joint, limits, max_force)
+    }
+    fn remove_motor(&mut self, joint: JointId) {
+        self.device_remove_motor(joint);
+    }
+    fn has_motor(&self, joint: JointId) -> bool {
+        self.device_has_motor(joint)
+    }
+    fn command_motor(&mut self, joint: JointId, command: DeviceCommand) -> Result<(), String> {
+        self.device_command_motor(joint, command)
+    }
+    fn configure_motor(&mut self, joint: JointId, setting: DeviceSetting) -> Result<(), String> {
+        self.device_configure_motor(joint, setting)
+    }
+    fn set_joint_brake(&mut self, joint: JointId, damping: f64) -> Result<(), String> {
+        self.device_set_brake(joint, damping)
+    }
+    fn motor_output(&self, joint: JointId) -> Option<MotorOutput> {
+        self.device_motor_output(joint)
+    }
+    fn insert_propeller(&mut self, desc: PropellerDesc) -> Result<DeviceId, String> {
+        self.device_insert_propeller(desc)
+    }
+    fn set_propeller_speed(&mut self, id: DeviceId, omega: f64) -> Result<(), String> {
+        self.device_set_propeller_speed(id, omega)
+    }
+    fn propeller_output(&self, id: DeviceId) -> Option<PropellerOutput> {
+        self.device_propeller_output(id)
+    }
+    fn insert_belt(&mut self, desc: BeltDesc) -> Result<DeviceId, String> {
+        self.device_insert_belt(desc)
+    }
+    fn command_belt(&mut self, id: DeviceId, command: DeviceCommand) -> Result<(), String> {
+        self.device_command_belt(id, command)
+    }
+    fn configure_belt(&mut self, id: DeviceId, setting: DeviceSetting) -> Result<(), String> {
+        self.device_configure_belt(id, setting)
+    }
+    fn belt_output(&self, id: DeviceId) -> Option<BeltOutput> {
+        self.device_belt_output(id)
+    }
+    fn insert_connector(&mut self, desc: ConnectorDesc) -> Result<DeviceId, String> {
+        self.device_insert_connector(desc)
+    }
+    fn lock_connector(&mut self, id: DeviceId, lock: bool) -> Result<(), String> {
+        self.device_lock_connector(id, lock)
+    }
+    fn connector_output(&self, id: DeviceId) -> Option<ConnectorOutput> {
+        self.device_connector_output(id)
+    }
+    fn insert_copter(&mut self, desc: CopterDesc) -> Result<DeviceId, String> {
+        self.device_insert_copter(desc)
+    }
+    fn command_copter(&mut self, id: DeviceId, command: CopterCommand) -> Result<(), String> {
+        self.device_command_copter(id, command)
+    }
+    fn copter_output(&self, id: DeviceId) -> Option<CopterOutput> {
+        self.device_copter_output(id)
+    }
+    fn insert_drag(&mut self, desc: DragDesc) -> Result<DeviceId, String> {
+        self.device_insert_drag(desc)
+    }
+    fn drag_output(&self, id: DeviceId) -> Option<DragOutput> {
+        self.device_drag_output(id)
+    }
+    fn set_wind(&mut self, wind: DVec3) {
+        self.device_set_wind(wind);
+    }
+    fn set_body_wind(&mut self, body: BodyId, wind: Option<DVec3>) {
+        self.device_set_body_wind(body, wind);
+    }
+    fn remove_device(&mut self, id: DeviceId) {
+        self.device_remove(id);
     }
 
     fn configure_wheel(&mut self, desc: WheelForceDesc) -> Result<(), String> {
@@ -154,6 +310,12 @@ impl PhysicsBackend for MollaBackend {
     fn name(&self) -> &'static str {
         "molla"
     }
+    fn with_molla_scene(&self, f: &mut dyn FnMut(&rt::RigidScene)) {
+        f(&self.shared.world().scene);
+    }
+    fn molla_body_handle(&self, body: BodyId) -> Option<rt::BodyHandle> {
+        self.bodies.get(&body).map(|body| body.handle)
+    }
     fn gravity(&self) -> DVec3 {
         self.shared.world().scene.gravity()
     }
@@ -173,12 +335,24 @@ impl PhysicsBackend for MollaBackend {
     }
     fn step(&mut self, excluded: PairExcluded<'_>) {
         self.wheel_step_dt = self.settings.dt;
+        *self.contacts.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
         let result = self.shared.world().step_filtered(self.settings.dt, |a, b| {
             a.zip(b)
                 .is_some_and(|(a, b)| excluded(BodyId(a.to_bits()), BodyId(b.to_bits())))
         });
         if let Err(error) = result {
             bevy::log::error!("molla: step rejected: {error}");
+        }
+        if !self.breakable.is_empty() {
+            let world = self.shared.world();
+            let joints = &self.joints;
+            self.breakable.retain(|id| {
+                let broken = joints.get(id).is_some_and(|j| world.scene.joint_broken(j.handle).unwrap_or(false));
+                if broken {
+                    bevy::log::warn!("molla: joint {id:?} broke past its break limits");
+                }
+                !broken
+            });
         }
     }
     fn insert_body(&mut self, desc: BodyDesc) -> BodyId {
@@ -263,37 +437,59 @@ impl PhysicsBackend for MollaBackend {
     }
     fn sync_collider_positions(&mut self) {}
     fn insert_collider(&mut self, desc: ColliderDesc) -> Option<ColliderId> {
-        let mut collider = rt::ColliderDesc::new(convert::geometry(desc.shape).ok()?);
-        collider.parent = match desc.parent {
-            Some(id) => Some(self.bodies.get(&id)?.handle),
-            None => None,
-        };
-        collider.pose = convert::transform(desc.pose);
-        collider.friction = desc.friction.unwrap_or(0.5);
-        collider.restitution = desc.restitution.unwrap_or(0.0);
-        collider.mass = sim::ColliderMass::Density(desc.density.unwrap_or(1.0));
-        collider.contact_material.friction_combine =
-            convert::combine(desc.friction_combine.unwrap_or(CombineRule::Average));
-        let groups = desc.groups.unwrap_or(CollisionGroups::ALL);
-        collider.memberships = groups.memberships;
-        collider.filter = groups.filter;
-        collider.user_tag = desc.entity.map_or(0, Entity::to_bits);
+        let entity = desc.entity;
+        let collider = self.molla_collider(desc)?;
         let parent = collider.parent;
         let mut world = self.shared.world();
         let handle = world.scene.insert_collider(collider).ok()?;
         if let Some(parent) = parent {
             apply(world.recompute_body_mass(parent));
         }
-        let id = ColliderId(handle.to_bits());
-        self.colliders.insert(
-            id,
-            ColliderAccess {
-                shared: self.shared.clone(),
-                handle,
-                entity: desc.entity,
-            },
-        );
-        Some(id)
+        drop(world);
+        Some(self.adopt_collider(handle, entity))
+    }
+    fn edit_colliders(&mut self, descs: Vec<ColliderDesc>, gone: &[ColliderId]) -> Vec<Option<ColliderId>> {
+        let mut out = vec![None; descs.len()];
+        let (mut slots, mut built) = (Vec::new(), Vec::new());
+        for (slot, desc) in descs.iter().enumerate() {
+            if let Some(collider) = self.molla_collider(desc.clone()) {
+                slots.push((slot, desc.entity));
+                built.push(collider);
+            }
+        }
+        let handles: Vec<_> = gone.iter().filter_map(|id| self.colliders.get(id).map(|c| c.handle)).collect();
+        let mut world = self.shared.world();
+        let mut parents: Vec<_> = handles
+            .iter()
+            .filter_map(|&h| world.scene.collider(h).and_then(|c| c.parent))
+            .chain(built.iter().filter_map(|c| c.parent))
+            .collect();
+        parents.sort_unstable();
+        parents.dedup();
+        let made = match world.scene.edit_colliders(built, &handles) {
+            Ok(made) => made,
+            // A change the runtime refuses fails alone, as one at a time.
+            Err(_) => {
+                drop(world);
+                for &id in gone {
+                    self.remove_collider(id, false);
+                }
+                return descs.into_iter().map(|desc| self.insert_collider(desc)).collect();
+            }
+        };
+        for parent in parents {
+            if world.scene.body(parent).is_some() {
+                apply(world.recompute_body_mass(parent));
+            }
+        }
+        drop(world);
+        for id in gone {
+            self.colliders.remove(id);
+        }
+        for ((slot, entity), handle) in slots.into_iter().zip(made) {
+            out[slot] = Some(self.adopt_collider(handle, entity));
+        }
+        out
     }
     fn remove_collider(&mut self, id: ColliderId, _wake: bool) {
         if let Some(collider) = self.colliders.get(&id) {
@@ -327,7 +523,8 @@ impl PhysicsBackend for MollaBackend {
             JointKind::Revolute { axis } => (sim::JointType::Revolute, axis),
             JointKind::Prismatic { axis } => (sim::JointType::Prismatic, axis),
             JointKind::Fixed => (sim::JointType::Fixed, DVec3::X),
-            JointKind::Spherical => (sim::JointType::Ball, DVec3::X),
+            JointKind::Spherical { axis } => (sim::JointType::Ball, axis),
+            JointKind::Distance => (sim::JointType::Distance, DVec3::X),
             JointKind::Generic { .. } => (sim::JointType::D6, DVec3::X),
         };
         let handle = {
@@ -340,7 +537,8 @@ impl PhysicsBackend for MollaBackend {
                 frame_parent: convert::transform(desc.frame1),
                 frame_child: convert::transform(desc.frame2),
             };
-            let handle = if desc.loop_closure {
+            // A distance joint is always outside the tree and has no compliance.
+            let handle = if desc.loop_closure && desc.kind != JointKind::Distance {
                 let (natural_frequency, damping_ratio) = desc.softness.unwrap_or((30.0, 1.0));
                 world.scene.insert_loop_joint(
                     runtime,
@@ -367,8 +565,23 @@ impl PhysicsBackend for MollaBackend {
                     contacts_enabled: desc.contacts_enabled,
                 },
             ));
+            let [angle0, angle1] = desc.cone_limits;
+            if angle0.or(angle1).is_some() {
+                apply(world.scene.set_cone_limits(handle, jc::SphericalConeLimits { angle0, angle1 }));
+            }
+            let [min, max] = desc.distance_limits;
+            if desc.kind == JointKind::Distance {
+                apply(world.scene.set_distance_limits(handle, jc::DistanceLimits { min, max }));
+            }
+            let [force, torque] = desc.break_limits;
+            if force.or(torque).is_some() {
+                apply(world.scene.set_joint_break_limits(handle, jc::JointBreakLimits { force, torque }));
+            }
             handle
         };
+        if desc.break_limits.iter().any(Option::is_some) {
+            self.breakable.insert(JointId(handle.to_bits()));
+        }
         let id = JointId(handle.to_bits());
         let mut joint = JointAccess {
             shared: self.shared.clone(),
@@ -413,6 +626,7 @@ impl PhysicsBackend for MollaBackend {
                 return;
             }
             self.joints.remove(&id);
+            self.breakable.remove(&id);
             self.wheels.retain(|body, (joint, _)| {
                 if *joint == id { world.wheels.remove(self.bodies[body].handle); }
                 *joint != id
@@ -431,53 +645,81 @@ impl PhysicsBackend for MollaBackend {
     fn joint_bodies(&self, id: JointId) -> Option<(BodyId, BodyId)> {
         self.joints.get(&id).map(|j| j.bodies)
     }
+    fn joints_between(&self, a: BodyId, b: BodyId) -> Vec<JointId> {
+        self.joints
+            .iter()
+            .filter(|(_, j)| j.bodies == (a, b) || j.bodies == (b, a))
+            .map(|(&id, _)| id)
+            .collect()
+    }
     fn joints(&self) -> Vec<JointId> {
         self.joints.keys().copied().collect()
     }
     fn joint_is_reduced(&self, id: JointId) -> bool {
         self.joints.contains_key(&id)
     }
-    fn cast_ray(
+    fn cast_ray_filtered(
         &self,
         origin: DVec3,
         direction: DVec3,
         max_distance: f64,
+        include: &dyn Fn(ColliderId) -> bool,
     ) -> Option<(ColliderId, f64)> {
         self.shared
             .world()
-            .cast_ray(origin, direction, max_distance)
+            .cast_ray_filtered(origin, direction, max_distance, |h| include(ColliderId(h.to_bits())))
             .ok()
             .flatten()
             .map(|h| (ColliderId(h.collider.to_bits()), h.distance))
     }
     fn contacts_with(&self, collider: ColliderId) -> Vec<ContactManifold> {
-        self.contacts()
-            .into_iter()
+        self.manifolds()
+            .iter()
             .filter(|c| c.collider1 == collider || c.collider2 == collider)
+            .cloned()
             .collect()
     }
     fn contacts(&self) -> Vec<ContactManifold> {
-        self.shared
-            .world()
-            .contact_pairs()
-            .into_iter()
-            .flat_map(|pair| {
-                let collider1 = ColliderId(pair.colliders[0].to_bits());
-                let collider2 = ColliderId(pair.colliders[1].to_bits());
-                pair.points.into_iter().map(move |p| ContactManifold {
-                    collider1,
-                    collider2,
-                    normal: p.normal,
-                    active: p.acted,
-                    points: vec![ContactPoint {
-                        impulse: p.normal_impulse,
-                        friction: if p.acted { p.friction } else { 0.0 },
-                        solved: p.acted,
-                        point: p.point,
-                        dist: -p.penetration,
-                    }],
+        self.manifolds().as_ref().clone()
+    }
+}
+
+impl MollaBackend {
+    /// The world's contacts, read from molla once per scene and step.
+    fn manifolds(&self) -> Arc<Vec<ContactManifold>> {
+        let world = self.shared.world();
+        let (scene, steps) = (world.scene.stamp(), world.completed_steps());
+        let mut cache = self.contacts.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(cached) = cache.as_ref()
+            && cached.scene == scene
+            && cached.steps == steps
+        {
+            return cached.manifolds.clone();
+        }
+        let manifolds: Arc<Vec<_>> = Arc::new(
+            world
+                .contact_pairs()
+                .into_iter()
+                .flat_map(|pair| {
+                    let collider1 = ColliderId(pair.colliders[0].to_bits());
+                    let collider2 = ColliderId(pair.colliders[1].to_bits());
+                    pair.points.into_iter().map(move |p| ContactManifold {
+                        collider1,
+                        collider2,
+                        normal: p.normal,
+                        active: p.acted,
+                        points: vec![ContactPoint {
+                            impulse: p.normal_impulse,
+                            friction: if p.acted { p.friction } else { 0.0 },
+                            solved: p.acted,
+                            point: p.point,
+                            dist: -p.penetration,
+                        }],
+                    })
                 })
-            })
-            .collect()
+                .collect(),
+        );
+        *cache = Some(ContactCache { scene, steps, manifolds: manifolds.clone() });
+        manifolds
     }
 }
